@@ -1,16 +1,13 @@
 package core
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
-func TestWorkspaceChatVerifiedFileAndAudioBecomeTextInputs(t *testing.T) {
-	service := &WorkspaceChatService{engine: &Engine{i18n: NewI18n(LangEnglish)}}
+func TestWorkspaceChatVerifiedAttachmentsRemainOpaqueMediaInputs(t *testing.T) {
+	service := &WorkspaceChatService{i18n: NewI18n(LangEnglish)}
 	inputs, err := service.validateNativeInputs([]NativeUserInput{
-		{Type: "file", LocalPath: "/workspace/report.pdf"},
-		{Type: "audio", LocalPath: "/workspace/voice.amr"},
-		{Type: "image", LocalPath: "/workspace/image.png"},
+		{Type: "file", Data: []byte("report"), FileName: "report.pdf"},
+		{Type: "audio", Data: []byte("voice"), FileName: "voice.amr"},
+		{Type: "image", Data: []byte("image"), FileName: "image.png"},
 	}, true)
 	if err != nil {
 		t.Fatalf("validateNativeInputs() error = %v", err)
@@ -18,25 +15,23 @@ func TestWorkspaceChatVerifiedFileAndAudioBecomeTextInputs(t *testing.T) {
 	if len(inputs) != 3 {
 		t.Fatalf("validateNativeInputs() length = %d, want 3", len(inputs))
 	}
-	for index, path := range []string{"/workspace/report.pdf", "/workspace/voice.amr"} {
-		if inputs[index].Type != "text" || !strings.Contains(inputs[index].Text, path) {
-			t.Fatalf("converted input %d = %#v, want verified text reference to %s", index, inputs[index], path)
+	for index, inputType := range []string{"file", "audio", "image"} {
+		if inputs[index].Type != inputType || len(inputs[index].Data) == 0 || inputs[index].LocalPath != "" || inputs[index].AttachmentRef != "" {
+			t.Fatalf("verified input %d = %#v", index, inputs[index])
 		}
-		if inputs[index].LocalPath != "" {
-			t.Fatalf("converted input %d leaked LocalPath = %q", index, inputs[index].LocalPath)
-		}
-	}
-	if inputs[2].Type != "image" || inputs[2].LocalPath != "/workspace/image.png" {
-		t.Fatalf("image input = %#v, want verified local image", inputs[2])
 	}
 }
 
 func TestWorkspaceChatBrowserCannotSubmitAttachmentPaths(t *testing.T) {
-	service := &WorkspaceChatService{engine: &Engine{i18n: NewI18n(LangEnglish)}}
+	service := &WorkspaceChatService{i18n: NewI18n(LangEnglish)}
 	for _, inputType := range []string{"audio", "file", "image"} {
-		_, err := service.validateNativeInputs([]NativeUserInput{{Type: inputType, LocalPath: "/server/private"}}, false)
-		if err == nil {
-			t.Fatalf("validateNativeInputs(%q) accepted an untrusted server path", inputType)
+		for _, input := range []NativeUserInput{
+			{Type: inputType, LocalPath: "/server/private"},
+			{Type: inputType, AttachmentRef: "att_forged"},
+		} {
+			if _, err := service.validateNativeInputs([]NativeUserInput{input}, false); err == nil {
+				t.Fatalf("validateNativeInputs(%q) accepted untrusted media %#v", inputType, input)
+			}
 		}
 	}
 }

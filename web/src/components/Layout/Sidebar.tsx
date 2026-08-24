@@ -11,6 +11,7 @@ import {
   ChevronRight,
   Plug,
   Puzzle,
+  ServerCog,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
@@ -24,6 +25,7 @@ const navItems = [
   { key: 'platformSessions', path: '/platform-sessions', icon: MessagesSquare },
   { key: 'cron', path: '/cron', icon: Clock },
   { key: 'system', path: '/system', icon: Settings },
+  { key: 'operations', path: '/operations', icon: ServerCog },
 ];
 
 export default function Sidebar() {

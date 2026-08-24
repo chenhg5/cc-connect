@@ -336,25 +336,17 @@ brew install cc-connect
 # 也可以从 https://github.com/chenhg5/cc-connect/releases 直接下载二进制
 ```
 
-### 4️⃣ 启动 cc-connect 并打开 Web UI
+### 4️⃣ 在 Linux 服务器安装 control
 
 ```bash
-cc-connect             # 启动服务；首次运行会自动生成 ~/.cc-connect/config.toml
+sudo ./deploy/bootstrap.sh --release-dir /path/to/v0.1.0-release
 ```
 
-首次启动时，cc-connect 会打印类似：
+bootstrap 只监听 `127.0.0.1:9820`，输出一次性设置 Token 和 SSH 端口转发命令。设置管理员后，在 1Panel/OpenResty 配置 HTTPS 反代。
 
-```
-Web admin:  http://localhost:9820
-```
+### 5️⃣ 配对 macOS Runtime
 
-在浏览器里打开该地址。如果 `9820` 已被占用，可以传 `--web-port 9821` 或在 `config.toml` 里设置 `web_port`。
-
-> **注意：** `cc-connect web` *只* 打开浏览器和配置界面，并**不会**启动服务本身。仍需要在另一个终端里跑 `cc-connect`。
-
-### 5️⃣ 在 Web UI 里配置平台 Bot Token
-
-在 Web UI 里新建一个项目，然后添加至少一个平台（飞书 / Telegram / Discord / Slack / 钉钉 / 企业微信 / QQ / LINE / 微信 ilink），把该平台开发者后台的 Bot Token 粘贴进去。保存后 cc-connect 会热加载。
+在初始化向导生成十分钟有效的配对码，按页面命令安装 `cc-connect-runtime`。Runtime 通过出站 TLS 长连接读取本机 Codex App 项目，无需 VPN 或内网穿透。随后可选填企业微信 WebSocket 凭据并启动业务进程。
 
 至此完成 — 给你的 Bot 发条消息，cc-connect 就会把它转给本地的 Agent。
 
@@ -406,9 +398,9 @@ make build
 
 ### ⚙️ 配置
 
-> **💡 推荐使用 Web UI 配置** — 安装完成后，运行 `cc-connect web` 配置 Web 管理后台并在浏览器中打开。可以可视化创建项目、添加平台、管理服务商、直接和 Agent 聊天，无需手动编辑 TOML 文件。**注意：** `cc-connect web` 仅用于配置和打开浏览器，并不会启动 cc-connect 服务本身，你仍需单独运行 `cc-connect` 来启动。
+> **推荐使用控制面初始化向导** — Linux 上的 `cc-connect-control` 统一提供管理员认证、Runtime 配对、业务配置、日志、更新和回滚。业务进程不公开 TCP，也不再使用 management token。
 
-Web 主聊天可以直接使用只读 Codex App 项目和原生 Codex 会话。在 `[workspace_chat]` 中指定使用 `app_server` 的 Codex 模板项目后，`/chat` 会从 SQLite 精确恢复选择；“新建”先创建无名称草稿，首个 Turn 才物化，并在物化后提供原生设置、结构化交互、完整分页历史、深链和 WebRTC 语音。平台 `session_key` 会话是“平台会话”下的独立产品域。详见[统一工作区对话](docs/workspace-chat.zh-CN.md)。
+Web 主聊天按设备展示只读 Codex App 项目和原生会话。`/chat` 从 SQLite 精确恢复选择；“新建”先创建无名称草稿，首个 Turn 才物化，并在物化后提供原生设置、结构化交互、完整分页历史、深链和 WebRTC 语音。详见[部署指南](docs/deployment.zh-CN.md)和[统一工作区对话](docs/workspace-chat.zh-CN.md)。
 
 如果你更喜欢手动配置：
 

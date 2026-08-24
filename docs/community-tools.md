@@ -6,7 +6,7 @@ These tools are not official cc-connect components unless explicitly stated. Ple
 
 ## CC-Tray
 
-A lightweight Windows tray controller for an already configured `cc-connect daemon` running inside WSL.
+A lightweight Windows tray controller for older standalone cc-connect installations inside WSL. It does not manage the current control/server/Runtime deployment contract.
 
 - Repository: https://github.com/STAR-REIN/CC-Tray
 - Platform: Windows + WSL

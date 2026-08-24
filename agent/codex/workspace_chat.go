@@ -132,6 +132,23 @@ func (a *Agent) ResolveWorkspace(ctx context.Context, ref string) (core.Workspac
 	return core.Workspace{}, fmt.Errorf("codex: unknown workspace reference: %w", core.ErrWorkspaceNotFound)
 }
 
+func (a *Agent) ValidateWorkspaceAccess(ctx context.Context, workspace core.Workspace) error {
+	_, _, err := a.validateNativeWorkspace(ctx, workspace)
+	return err
+}
+
+func (a *Agent) ValidateNativeThreadAccess(ctx context.Context, workspace core.Workspace, thread core.NativeThread) error {
+	_, cwd, err := a.validateNativeWorkspace(ctx, workspace)
+	if err != nil {
+		return err
+	}
+	threadCwd, err := canonicalNativePath(thread.Cwd)
+	if err != nil || threadCwd != cwd || strings.TrimSpace(thread.ID) == "" {
+		return fmt.Errorf("codex: native thread does not belong to workspace")
+	}
+	return nil
+}
+
 func (a *Agent) appServerControl(ctx context.Context) (*appServerSession, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

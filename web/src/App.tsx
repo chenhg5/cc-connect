@@ -12,9 +12,13 @@ import CronList from '@/pages/Cron/CronList';
 import SystemConfig from '@/pages/System/Config';
 import ProviderList from '@/pages/Providers/ProviderList';
 import SkillList from '@/pages/Skills/SkillList';
+import Operations from '@/pages/Operations';
+import SetupWizard from '@/pages/SetupWizard';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const phase = useAuthStore((s) => s.phase);
+  if (phase === 'loading') return <div className="h-screen grid place-items-center text-sm text-gray-500">Loading...</div>;
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }
@@ -26,6 +30,7 @@ export default function App() {
     <Routes>
       <Route path="/login" element={isAuthenticated ? <Navigate to="/" replace /> : <Login />} />
       <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+		<Route path="setup" element={<SetupWizard />} />
         <Route index element={<Dashboard />} />
         <Route path="projects" element={<ProjectList />} />
         <Route path="projects/:name" element={<ProjectDetail />} />
@@ -38,6 +43,7 @@ export default function App() {
         <Route path="platform-sessions/:name" element={<ChatView />} />
         <Route path="cron" element={<CronList />} />
         <Route path="system" element={<SystemConfig />} />
+        <Route path="operations" element={<Operations />} />
       </Route>
     </Routes>
   );

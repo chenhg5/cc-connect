@@ -18,8 +18,7 @@ import (
 const workspaceChatMenuPageSize = 8
 
 var (
-	errWorkspaceChatAttachmentSaveFailed = errors.New("workspace chat: failed to save verified platform attachments")
-	errWorkspaceChatEmptyMessage         = errors.New("workspace chat: platform message contains no supported input")
+	errWorkspaceChatEmptyMessage = errors.New("workspace chat: platform message contains no supported input")
 )
 
 // WorkspaceChatTransportSource 由明确接入统一工作区聊天的平台实现。
@@ -38,18 +37,22 @@ func (s *WorkspaceChatService) HandleIncoming(platform Platform, message *Messag
 	if !ok || !s.TransportEnabled(source.WorkspaceChatTransport()) {
 		return false
 	}
-	s.engine.i18n.DetectAndSet(message.Content)
+	s.i18n.DetectAndSet(message.Content)
 	if message.Scope == ConversationScopeGroup {
-		s.replyWorkspaceChat(platform, message, s.engine.i18n.T(MsgWorkspaceChatGroupUnsupported))
+		s.replyWorkspaceChat(platform, message, s.i18n.T(MsgWorkspaceChatGroupUnsupported))
 		return true
 	}
 	if strings.TrimSpace(message.UserID) == "" {
-		s.replyWorkspaceChat(platform, message, s.engine.i18n.T(MsgWorkspaceChatUserIDMissing))
+		s.replyWorkspaceChat(platform, message, s.i18n.T(MsgWorkspaceChatUserIDMissing))
 		return true
 	}
 	clientID := "wecom:user:" + strings.TrimSpace(message.UserID)
 	command, argument := splitWorkspaceChatCommand(message.Content)
 	switch command {
+	case "/devices":
+		s.handleWorkspaceDevicesCommand(platform, message, clientID, argument)
+	case "/device":
+		s.handleWorkspaceDeviceCommand(platform, message, clientID, argument)
 	case "/projects":
 		s.handleWorkspaceProjectsCommand(platform, message, clientID, argument)
 	case "/project":
@@ -85,9 +88,63 @@ func (s *WorkspaceChatService) HandleIncoming(platform Platform, message *Messag
 	case "":
 		s.handleWorkspaceOrdinaryMessage(platform, message, clientID)
 	default:
-		s.replyWorkspaceChat(platform, message, s.engine.i18n.T(MsgWorkspaceChatUsage))
+		s.replyWorkspaceChat(platform, message, s.i18n.T(MsgWorkspaceChatUsage))
 	}
 	return true
+}
+
+func (s *WorkspaceChatService) handleWorkspaceDevicesCommand(p Platform, msg *Message, clientID, argument string) {
+	page, err := parseWorkspaceChatPositiveInt(argument, 1)
+	if err != nil {
+		s.replyWorkspaceChatError(p, msg, err)
+		return
+	}
+	text, err := s.renderDeviceMenu(context.Background(), clientID, page)
+	if err != nil {
+		s.replyWorkspaceChatError(p, msg, err)
+		return
+	}
+	s.replyWorkspaceChat(p, msg, text)
+}
+
+func (s *WorkspaceChatService) handleWorkspaceDeviceCommand(p Platform, msg *Message, clientID, argument string) {
+	index, err := parseWorkspaceChatPositiveInt(argument, 0)
+	if err != nil || index == 0 {
+		s.replyWorkspaceChatError(p, msg, errWorkspacePositiveNumber)
+		return
+	}
+	deviceID, err := s.MenuItem(context.Background(), clientID, "devices", index)
+	if err != nil {
+		s.replyWorkspaceChatError(p, msg, err)
+		return
+	}
+	devices, err := s.listWorkspaceDevices(context.Background())
+	if err != nil {
+		s.replyWorkspaceChatError(p, msg, err)
+		return
+	}
+	var selected *WorkspaceDevice
+	for i := range devices {
+		if devices[i].ID == deviceID && !devices[i].Revoked {
+			selected = &devices[i]
+			break
+		}
+	}
+	if selected == nil {
+		s.replyWorkspaceChatError(p, msg, errWorkspaceMenuItemNotFound)
+		return
+	}
+	if err := s.SaveMenu(context.Background(), clientID, "selected_device", []string{deviceID}); err != nil {
+		s.replyWorkspaceChatError(p, msg, err)
+		return
+	}
+	if err := s.repo.DeleteSelection(context.Background(), clientID); err != nil {
+		s.replyWorkspaceChatError(p, msg, err)
+		return
+	}
+	_ = s.SaveMenu(context.Background(), clientID, "projects", nil)
+	_ = s.SaveMenu(context.Background(), clientID, "threads", nil)
+	s.replyWorkspaceChat(p, msg, s.i18n.Tf(MsgWorkspaceChatDeviceSelected, selected.Name))
 }
 
 func (s *WorkspaceChatService) handleWorkspaceProjectsCommand(p Platform, msg *Message, clientID, argument string) {
@@ -121,9 +178,9 @@ func (s *WorkspaceChatService) handleWorkspaceProjectCommand(p Platform, msg *Me
 		return
 	}
 	if selection.Conversation.Kind == ConversationKindDraft {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatProjectSelectedDraft))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatProjectSelectedDraft))
 	} else {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatProjectSelectedThread))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatProjectSelectedThread))
 	}
 }
 
@@ -154,7 +211,7 @@ func (s *WorkspaceChatService) handleWorkspaceSwitchCommand(p Platform, msg *Mes
 	}
 	selection, err := s.Selection(context.Background(), clientID)
 	if err != nil || selection == nil {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatNoSelection))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatNoSelection))
 		return
 	}
 	if _, err := s.SelectConversation(context.Background(), clientID, selection.WorkspaceRef, ConversationRef{Kind: ConversationKindThread, ID: threadID}); err != nil {
@@ -166,34 +223,34 @@ func (s *WorkspaceChatService) handleWorkspaceSwitchCommand(p Platform, msg *Mes
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	s.replyWorkspaceChat(p, msg, s.engine.i18n.Tf(MsgWorkspaceChatThreadSelected, s.threadDisplayName(snapshot.Thread)))
+	s.replyWorkspaceChat(p, msg, s.i18n.Tf(MsgWorkspaceChatThreadSelected, s.threadDisplayName(snapshot.Thread)))
 }
 
 func (s *WorkspaceChatService) handleWorkspaceNewCommand(p Platform, msg *Message, clientID, argument string) {
 	if strings.TrimSpace(argument) != "" {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatNewArguments))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatNewArguments))
 		return
 	}
 	selection, err := s.Selection(context.Background(), clientID)
 	if err != nil || selection == nil {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatNoSelection))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatNoSelection))
 		return
 	}
 	if _, err := s.CreateDraft(context.Background(), clientID, selection.WorkspaceRef); err != nil {
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatDraftCreated))
+	s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatDraftCreated))
 }
 
 func (s *WorkspaceChatService) handleWorkspaceLinkCommand(p Platform, msg *Message, clientID string) {
 	selection, err := s.Selection(context.Background(), clientID)
 	if err != nil || selection == nil {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatNeedConversation))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatNeedConversation))
 		return
 	}
 	if selection.Conversation.Kind == ConversationKindDraft {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatLinkAfterFirstTurn))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatLinkAfterFirstTurn))
 		return
 	}
 	snapshot, err := s.ReadThread(context.Background(), selection.WorkspaceRef, selection.Conversation.ID)
@@ -207,7 +264,7 @@ func (s *WorkspaceChatService) handleWorkspaceLinkCommand(p Platform, msg *Messa
 func (s *WorkspaceChatService) handleWorkspaceCurrentCommand(p Platform, msg *Message, clientID string) {
 	selection, err := s.Selection(context.Background(), clientID)
 	if err != nil || selection == nil {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatCurrentNoProject))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatCurrentNoProject))
 		return
 	}
 	workspace, err := s.resolveWorkspace(context.Background(), selection.WorkspaceRef)
@@ -217,7 +274,7 @@ func (s *WorkspaceChatService) handleWorkspaceCurrentCommand(p Platform, msg *Me
 	}
 	name := workspaceDisplayName(workspace)
 	if selection.Conversation.Kind == ConversationKindDraft {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.Tf(MsgWorkspaceChatCurrentDraft, name, selection.Conversation.ID))
+		s.replyWorkspaceChat(p, msg, s.i18n.Tf(MsgWorkspaceChatCurrentDraft, name, selection.Conversation.ID))
 		return
 	}
 	snapshot, err := s.ReadThread(context.Background(), selection.WorkspaceRef, selection.Conversation.ID)
@@ -225,9 +282,9 @@ func (s *WorkspaceChatService) handleWorkspaceCurrentCommand(p Platform, msg *Me
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	status := s.engine.i18n.T(MsgWorkspaceChatStatusIdle)
+	status := s.i18n.T(MsgWorkspaceChatStatusIdle)
 	if snapshot.ActiveTurn != nil {
-		status = s.engine.i18n.Tf(MsgWorkspaceChatStatusRunning, snapshot.ActiveTurn.ID)
+		status = s.i18n.Tf(MsgWorkspaceChatStatusRunning, snapshot.ActiveTurn.ID)
 	}
 	mode := "default"
 	effort := snapshot.Settings.Effort
@@ -239,7 +296,7 @@ func (s *WorkspaceChatService) handleWorkspaceCurrentCommand(p Platform, msg *Me
 			effort = strings.TrimSpace(*collaboration.Settings.ReasoningEffort)
 		}
 	}
-	s.replyWorkspaceChat(p, msg, s.engine.i18n.Tf(MsgWorkspaceChatCurrent, name, s.threadDisplayName(snapshot.Thread), status, snapshot.Settings.Model, mode, effort))
+	s.replyWorkspaceChat(p, msg, s.i18n.Tf(MsgWorkspaceChatCurrent, name, s.threadDisplayName(snapshot.Thread), status, snapshot.Settings.Model, mode, effort))
 }
 
 func (s *WorkspaceChatService) handleWorkspaceHistoryCommand(p Platform, msg *Message, clientID, argument string) {
@@ -289,7 +346,7 @@ func (s *WorkspaceChatService) handleWorkspaceHistoryCommand(p Platform, msg *Me
 		}
 	}
 	if len(blocks) == 0 {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatHistoryEmpty))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatHistoryEmpty))
 		return
 	}
 	s.replyWorkspaceChat(p, msg, strings.Join(blocks, "\n\n"))
@@ -301,7 +358,7 @@ func (s *WorkspaceChatService) handleWorkspaceUsageCommand(p Platform, msg *Mess
 		return
 	}
 	if len(snapshot.Usage) == 0 || string(snapshot.Usage) == "null" {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatUsageUnavailable))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatUsageUnavailable))
 		return
 	}
 	var pretty bytes.Buffer
@@ -318,19 +375,19 @@ func (s *WorkspaceChatService) handleWorkspaceCancelCommand(p Platform, msg *Mes
 		return
 	}
 	if snapshot.ActiveTurn == nil {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatTurnNotRunning))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatTurnNotRunning))
 		return
 	}
 	if err := s.InterruptTurn(context.Background(), selection.WorkspaceRef, snapshot.Thread.ID, snapshot.ActiveTurn.ID); err != nil {
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatCancelled))
+	s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatCancelled))
 }
 
 func (s *WorkspaceChatService) handleWorkspaceSteerCommand(p Platform, msg *Message, clientID, argument string) {
 	if strings.TrimSpace(argument) == "" && len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Audio == nil {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatSteerUsage))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatSteerUsage))
 		return
 	}
 	selection, snapshot, ok := s.selectedThread(p, msg, clientID)
@@ -338,10 +395,10 @@ func (s *WorkspaceChatService) handleWorkspaceSteerCommand(p Platform, msg *Mess
 		return
 	}
 	if snapshot.ActiveTurn == nil {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatSteerNoTurn))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatSteerNoTurn))
 		return
 	}
-	inputs, err := nativeInputsFromPlatformMessage(snapshot.Thread.Cwd, msg, argument)
+	inputs, err := nativeInputsFromPlatformMessage(msg, argument)
 	if err != nil {
 		s.replyWorkspaceChatError(p, msg, err)
 		return
@@ -351,7 +408,7 @@ func (s *WorkspaceChatService) handleWorkspaceSteerCommand(p Platform, msg *Mess
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatSteerSubmitted))
+	s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatSteerSubmitted))
 }
 
 func (s *WorkspaceChatService) handleWorkspaceRequestsCommand(p Platform, msg *Message, clientID string) {
@@ -360,7 +417,7 @@ func (s *WorkspaceChatService) handleWorkspaceRequestsCommand(p Platform, msg *M
 		return
 	}
 	if len(snapshot.PendingInteractions) == 0 {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatRequestsEmpty))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatRequestsEmpty))
 		return
 	}
 	ids := make([]string, 0, len(snapshot.PendingInteractions))
@@ -369,7 +426,7 @@ func (s *WorkspaceChatService) handleWorkspaceRequestsCommand(p Platform, msg *M
 		ids = append(ids, request.ID)
 		decisions := workspaceChatInteractionDecisions(request)
 		if decisions != "" {
-			decisions = s.engine.i18n.Tf(MsgWorkspaceChatRequestDecisions, decisions)
+			decisions = s.i18n.Tf(MsgWorkspaceChatRequestDecisions, decisions)
 		}
 		lines = append(lines, fmt.Sprintf("%d. %s%s%s", i+1, request.Kind, decisions, workspaceChatInteractionDetail(request)))
 	}
@@ -377,14 +434,14 @@ func (s *WorkspaceChatService) handleWorkspaceRequestsCommand(p Platform, msg *M
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	s.replyWorkspaceChat(p, msg, s.engine.i18n.Tf(MsgWorkspaceChatRequests, strings.Join(lines, "\n")))
+	s.replyWorkspaceChat(p, msg, s.i18n.Tf(MsgWorkspaceChatRequests, strings.Join(lines, "\n")))
 	_ = selection
 }
 
 func (s *WorkspaceChatService) handleWorkspaceRespondCommand(p Platform, msg *Message, clientID, argument string) {
 	parts := strings.SplitN(strings.TrimSpace(argument), " ", 2)
 	if len(parts) != 2 {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatRespondUsage))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatRespondUsage))
 		return
 	}
 	index, err := strconv.Atoi(parts[0])
@@ -422,13 +479,13 @@ func (s *WorkspaceChatService) handleWorkspaceRespondCommand(p Platform, msg *Me
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatRequestSubmitted))
+	s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatRequestSubmitted))
 }
 
 func (s *WorkspaceChatService) handleWorkspaceAnswerCommand(p Platform, msg *Message, clientID, argument string) {
 	parts := strings.SplitN(strings.TrimSpace(argument), " ", 2)
 	if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatAnswerUsage))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatAnswerUsage))
 		return
 	}
 	index, err := strconv.Atoi(parts[0])
@@ -453,11 +510,11 @@ func (s *WorkspaceChatService) handleWorkspaceAnswerCommand(p Platform, msg *Mes
 		}
 	}
 	if interaction == nil || interaction.Kind != "item/tool/requestUserInput" {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatAnswerWrongKind))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatAnswerWrongKind))
 		return
 	}
 	if len(workspaceChatQuestionIDs(interaction.Payload)) == 0 {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatAnswerMissingQuestion))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatAnswerMissingQuestion))
 		return
 	}
 	response, err := workspaceChatAnswerResponse(*interaction, parts[1])
@@ -469,7 +526,7 @@ func (s *WorkspaceChatService) handleWorkspaceAnswerCommand(p Platform, msg *Mes
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatAnswerSubmitted))
+	s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatAnswerSubmitted))
 }
 
 func (s *WorkspaceChatService) handleWorkspaceSettingsListCommand(p Platform, msg *Message, clientID, category, argument string) {
@@ -493,7 +550,7 @@ func (s *WorkspaceChatService) handleWorkspaceSettingsListCommand(p Platform, ms
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	lines := []string{s.engine.i18n.Tf(MsgWorkspaceChatSettingsTitle, category, page)}
+	lines := []string{s.i18n.Tf(MsgWorkspaceChatSettingsTitle, category, page)}
 	for i, label := range labels[start:end] {
 		lines = append(lines, fmt.Sprintf("%d. %s", i+1, label))
 	}
@@ -504,7 +561,7 @@ func (s *WorkspaceChatService) handleWorkspaceSettingsListCommand(p Platform, ms
 	case "summaries":
 		singular = "summary"
 	}
-	lines = append(lines, s.engine.i18n.Tf(MsgWorkspaceChatSettingsHint, singular))
+	lines = append(lines, s.i18n.Tf(MsgWorkspaceChatSettingsHint, singular))
 	s.replyWorkspaceChat(p, msg, strings.Join(lines, "\n"))
 }
 
@@ -552,7 +609,7 @@ func (s *WorkspaceChatService) handleWorkspaceSettingSelectCommand(p Platform, m
 	case "summary":
 		patch.Summary = &value
 	default:
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatSettingUnsupported))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatSettingUnsupported))
 		return
 	}
 	if current.draft != nil {
@@ -562,7 +619,7 @@ func (s *WorkspaceChatService) handleWorkspaceSettingSelectCommand(p Platform, m
 			return
 		}
 		revision := "draft-" + strconv.FormatInt(draft.UpdatedAt.UnixMilli(), 10)
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.Tf(MsgWorkspaceChatSettingApplied, revision))
+		s.replyWorkspaceChat(p, msg, s.i18n.Tf(MsgWorkspaceChatSettingApplied, revision))
 		return
 	}
 	settings, err := s.UpdateSettings(context.Background(), current.selection.WorkspaceRef, current.threadID, patch)
@@ -570,7 +627,7 @@ func (s *WorkspaceChatService) handleWorkspaceSettingSelectCommand(p Platform, m
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	s.replyWorkspaceChat(p, msg, s.engine.i18n.Tf(MsgWorkspaceChatSettingApplied, settings.Revision))
+	s.replyWorkspaceChat(p, msg, s.i18n.Tf(MsgWorkspaceChatSettingApplied, settings.Revision))
 }
 
 type workspaceChatSelectedSettings struct {
@@ -584,7 +641,7 @@ type workspaceChatSelectedSettings struct {
 func (s *WorkspaceChatService) selectedWorkspaceSettings(p Platform, msg *Message, clientID string) (workspaceChatSelectedSettings, bool) {
 	selection, err := s.Selection(context.Background(), clientID)
 	if err != nil || selection == nil {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatNeedConversation))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatNeedConversation))
 		return workspaceChatSelectedSettings{}, false
 	}
 	catalog, err := s.RuntimeCatalog(context.Background(), selection.WorkspaceRef)
@@ -611,7 +668,7 @@ func (s *WorkspaceChatService) selectedWorkspaceSettings(p Platform, msg *Messag
 		current.threadID = snapshot.Thread.ID
 		current.settings = snapshot.Settings
 	default:
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatNeedConversation))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatNeedConversation))
 		return workspaceChatSelectedSettings{}, false
 	}
 	return current, true
@@ -740,17 +797,12 @@ func (s *WorkspaceChatService) handleWorkspaceOrdinaryMessage(p Platform, msg *M
 		return
 	}
 	if selection == nil {
-		text, listErr := s.renderWorkspaceMenu(context.Background(), clientID, 1)
+		text, listErr := s.renderDeviceMenu(context.Background(), clientID, 1)
 		if listErr != nil {
 			s.replyWorkspaceChatError(p, msg, listErr)
 			return
 		}
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.Tf(MsgWorkspaceChatBindProjectFirst, text))
-		return
-	}
-	workspace, err := s.resolveWorkspace(context.Background(), selection.WorkspaceRef)
-	if err != nil {
-		s.replyWorkspaceChatError(p, msg, err)
+		s.replyWorkspaceChat(p, msg, s.i18n.Tf(MsgWorkspaceChatBindDeviceFirst, text))
 		return
 	}
 	if selection.Conversation.Kind == ConversationKindThread {
@@ -760,11 +812,11 @@ func (s *WorkspaceChatService) handleWorkspaceOrdinaryMessage(p Platform, msg *M
 			return
 		}
 		if snapshot.ActiveTurn != nil {
-			s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatTurnRunning))
+			s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatTurnRunning))
 			return
 		}
 	}
-	inputs, err := nativeInputsFromPlatformMessage(workspace.RootPath, msg, msg.Content)
+	inputs, err := nativeInputsFromPlatformMessage(msg, msg.Content)
 	if err != nil {
 		s.replyWorkspaceChatError(p, msg, err)
 		return
@@ -775,17 +827,17 @@ func (s *WorkspaceChatService) handleWorkspaceOrdinaryMessage(p Platform, msg *M
 		s.replyWorkspaceChatError(p, msg, err)
 		return
 	}
-	s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatTurnSubmitted))
+	s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatTurnSubmitted))
 }
 
 func (s *WorkspaceChatService) selectedThread(p Platform, msg *Message, clientID string) (*WorkspaceChatSelection, NativeConversationSnapshot, bool) {
 	selection, err := s.Selection(context.Background(), clientID)
 	if err != nil || selection == nil {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatNeedConversation))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatNeedConversation))
 		return nil, NativeConversationSnapshot{}, false
 	}
 	if selection.Conversation.Kind != ConversationKindThread {
-		s.replyWorkspaceChat(p, msg, s.engine.i18n.T(MsgWorkspaceChatDraftUnavailable))
+		s.replyWorkspaceChat(p, msg, s.i18n.T(MsgWorkspaceChatDraftUnavailable))
 		return nil, NativeConversationSnapshot{}, false
 	}
 	snapshot, err := s.ReadThread(context.Background(), selection.WorkspaceRef, selection.Conversation.ID)
@@ -823,38 +875,112 @@ func (s *WorkspaceChatService) MenuItem(ctx context.Context, clientID, kind stri
 }
 
 func (s *WorkspaceChatService) renderWorkspaceMenu(ctx context.Context, clientID string, page int) (string, error) {
+	deviceID, err := s.selectedWorkspaceDevice(ctx, clientID)
+	if err != nil {
+		return "", err
+	}
+	if deviceID == "" {
+		return s.i18n.T(MsgWorkspaceChatSelectDeviceFirst), nil
+	}
 	workspaces, err := s.ListWorkspaces(ctx)
 	if err != nil {
 		return "", err
 	}
+	filtered := workspaces[:0]
+	for _, workspace := range workspaces {
+		if workspace.DeviceID == deviceID {
+			filtered = append(filtered, workspace)
+		}
+	}
+	workspaces = filtered
 	start, end, err := workspaceMenuPage(len(workspaces), page)
 	if err != nil {
 		return "", err
 	}
 	ids := make([]string, 0, end-start)
-	lines := []string{s.engine.i18n.Tf(MsgWorkspaceChatProjectsTitle, page)}
+	lines := []string{s.i18n.Tf(MsgWorkspaceChatProjectsTitle, page)}
 	if len(workspaces) == 0 {
-		lines = append(lines, s.engine.i18n.T(MsgWorkspaceChatProjectsEmpty))
+		lines = append(lines, s.i18n.T(MsgWorkspaceChatProjectsEmpty))
 	}
 	for i, workspace := range workspaces[start:end] {
 		ids = append(ids, workspace.Ref)
 		line := fmt.Sprintf("%d. %s", i+1, workspaceDisplayName(workspace))
 		if !workspace.Available {
-			line += s.engine.i18n.Tf(MsgWorkspaceChatUnavailableReason, workspace.Error)
+			line += s.i18n.Tf(MsgWorkspaceChatUnavailableReason, workspace.Error)
 		}
 		lines = append(lines, line)
 	}
 	if err := s.SaveMenu(ctx, clientID, "projects", ids); err != nil {
 		return "", err
 	}
-	lines = append(lines, s.engine.i18n.T(MsgWorkspaceChatProjectsHint))
+	lines = append(lines, s.i18n.T(MsgWorkspaceChatProjectsHint))
 	return strings.Join(lines, "\n"), nil
+}
+
+func (s *WorkspaceChatService) renderDeviceMenu(ctx context.Context, clientID string, page int) (string, error) {
+	devices, err := s.listWorkspaceDevices(ctx)
+	if err != nil {
+		return "", err
+	}
+	start, end, err := workspaceMenuPage(len(devices), page)
+	if err != nil {
+		return "", err
+	}
+	ids := make([]string, 0, end-start)
+	lines := []string{s.i18n.Tf(MsgWorkspaceChatDevicesTitle, page)}
+	if len(devices) == 0 {
+		lines = append(lines, s.i18n.T(MsgWorkspaceChatDevicesEmpty))
+	}
+	for index, device := range devices[start:end] {
+		ids = append(ids, device.ID)
+		state := s.i18n.T(MsgWorkspaceChatDeviceOffline)
+		if device.Online {
+			state = s.i18n.T(MsgWorkspaceChatDeviceOnline)
+		}
+		lines = append(lines, fmt.Sprintf("%d. %s (%s)", index+1, device.Name, state))
+	}
+	if err := s.SaveMenu(ctx, clientID, "devices", ids); err != nil {
+		return "", err
+	}
+	lines = append(lines, s.i18n.T(MsgWorkspaceChatDevicesHint))
+	return strings.Join(lines, "\n"), nil
+}
+
+func (s *WorkspaceChatService) selectedWorkspaceDevice(ctx context.Context, clientID string) (string, error) {
+	snapshot, err := s.repo.GetMenu(ctx, clientID, "selected_device")
+	if err != nil || snapshot == nil || len(snapshot.ItemIDs) != 1 {
+		return "", err
+	}
+	return strings.TrimSpace(snapshot.ItemIDs[0]), nil
+}
+
+func (s *WorkspaceChatService) listWorkspaceDevices(ctx context.Context) ([]WorkspaceDevice, error) {
+	if s.devices != nil {
+		return s.devices.ListWorkspaceDevices(ctx)
+	}
+	workspaces, err := s.ListWorkspaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	devices := make([]WorkspaceDevice, 0)
+	for _, workspace := range workspaces {
+		if workspace.DeviceID == "" {
+			continue
+		}
+		if _, exists := seen[workspace.DeviceID]; exists {
+			continue
+		}
+		seen[workspace.DeviceID] = struct{}{}
+		devices = append(devices, WorkspaceDevice{ID: workspace.DeviceID, Name: workspace.DeviceName, Online: workspace.Online})
+	}
+	return devices, nil
 }
 
 func (s *WorkspaceChatService) renderThreadMenu(ctx context.Context, clientID string, page int) (string, error) {
 	selection, err := s.Selection(ctx, clientID)
 	if err != nil || selection == nil {
-		return s.engine.i18n.T(MsgWorkspaceChatNoSelection), err
+		return s.i18n.T(MsgWorkspaceChatNoSelection), err
 	}
 	var cursor string
 	var result NativeThreadPage
@@ -871,10 +997,10 @@ func (s *WorkspaceChatService) renderThreadMenu(ctx context.Context, clientID st
 		}
 	}
 	if len(result.Data) == 0 {
-		return s.engine.i18n.T(MsgWorkspaceChatThreadsEmpty), nil
+		return s.i18n.T(MsgWorkspaceChatThreadsEmpty), nil
 	}
 	ids := make([]string, 0, len(result.Data))
-	lines := []string{s.engine.i18n.Tf(MsgWorkspaceChatThreadsTitle, page)}
+	lines := []string{s.i18n.Tf(MsgWorkspaceChatThreadsTitle, page)}
 	for i, thread := range result.Data {
 		ids = append(ids, thread.ID)
 		lines = append(lines, fmt.Sprintf("%d. %s", i+1, s.threadDisplayName(thread)))
@@ -882,7 +1008,7 @@ func (s *WorkspaceChatService) renderThreadMenu(ctx context.Context, clientID st
 	if err := s.SaveMenu(ctx, clientID, "threads", ids); err != nil {
 		return "", err
 	}
-	lines = append(lines, s.engine.i18n.T(MsgWorkspaceChatThreadsHint))
+	lines = append(lines, s.i18n.T(MsgWorkspaceChatThreadsHint))
 	return strings.Join(lines, "\n"), nil
 }
 
@@ -951,7 +1077,7 @@ func (s *WorkspaceChatService) threadDisplayName(thread NativeThread) string {
 			return truncateWorkspaceChatText(value, 64)
 		}
 	}
-	return s.engine.i18n.T(MsgUntitled)
+	return s.i18n.T(MsgUntitled)
 }
 
 func truncateWorkspaceChatText(value string, maxRunes int) string {
@@ -962,39 +1088,30 @@ func truncateWorkspaceChatText(value string, maxRunes int) string {
 	return string(runes[:maxRunes]) + "..."
 }
 
-func nativeInputsFromPlatformMessage(workspaceRoot string, message *Message, text string) ([]NativeUserInput, error) {
+func nativeInputsFromPlatformMessage(message *Message, text string) ([]NativeUserInput, error) {
 	inputs := make([]NativeUserInput, 0, 1+len(message.Images)+len(message.Files))
 	content := strings.TrimSpace(strings.Join([]string{message.ExtraContent, text}, "\n"))
 	if content != "" {
 		inputs = append(inputs, NativeUserInput{Type: "text", Text: content})
 	}
-	files := make([]FileAttachment, 0, len(message.Images)+len(message.Files)+1)
 	for _, image := range message.Images {
-		files = append(files, FileAttachment(image))
+		inputs = append(inputs, NativeUserInput{
+			Type: "image", Data: append([]byte(nil), image.Data...), MimeType: image.MimeType, FileName: image.FileName,
+		})
 	}
-	files = append(files, message.Files...)
+	for _, file := range message.Files {
+		inputs = append(inputs, NativeUserInput{
+			Type: "file", Data: append([]byte(nil), file.Data...), MimeType: file.MimeType, FileName: file.FileName,
+		})
+	}
 	if message.Audio != nil {
 		name := "audio"
 		if message.Audio.Format != "" {
 			name += "." + message.Audio.Format
 		}
-		files = append(files, FileAttachment{MimeType: message.Audio.MimeType, Data: message.Audio.Data, FileName: name})
-	}
-	paths := SaveFilesToDisk(workspaceRoot, workspaceMessageRequestID(message), files)
-	if len(paths) != len(files) {
-		return nil, errWorkspaceChatAttachmentSaveFailed
-	}
-	index := 0
-	for _, image := range message.Images {
-		inputs = append(inputs, NativeUserInput{Type: "image", LocalPath: paths[index], MimeType: image.MimeType, FileName: image.FileName})
-		index++
-	}
-	for _, file := range message.Files {
-		inputs = append(inputs, NativeUserInput{Type: "file", LocalPath: paths[index], MimeType: file.MimeType, FileName: file.FileName})
-		index++
-	}
-	if message.Audio != nil {
-		inputs = append(inputs, NativeUserInput{Type: "audio", LocalPath: paths[index], MimeType: message.Audio.MimeType, FileName: filepath.Base(paths[index])})
+		inputs = append(inputs, NativeUserInput{
+			Type: "audio", Data: append([]byte(nil), message.Audio.Data...), MimeType: message.Audio.MimeType, FileName: name,
+		})
 	}
 	if len(inputs) == 0 {
 		return nil, errWorkspaceChatEmptyMessage
@@ -1017,10 +1134,10 @@ func (s *WorkspaceChatService) nativeHistoryItem(raw json.RawMessage) (string, s
 	role := strings.ToLower(asString(value["role"]))
 	typeName := strings.ToLower(asString(value["type"]))
 	if role == "user" || strings.Contains(typeName, "usermessage") {
-		return s.engine.i18n.T(MsgWorkspaceChatRoleUser), flattenText(value["content"])
+		return s.i18n.T(MsgWorkspaceChatRoleUser), flattenText(value["content"])
 	}
 	if text := findAssistantText(value); text != "" {
-		return s.engine.i18n.T(MsgWorkspaceChatRoleAssistant), text
+		return s.i18n.T(MsgWorkspaceChatRoleAssistant), text
 	}
 	return "", ""
 }
@@ -1181,18 +1298,16 @@ func (s *WorkspaceChatService) replyWorkspaceChat(platform Platform, message *Me
 func (s *WorkspaceChatService) replyWorkspaceChatError(platform Platform, message *Message, err error) {
 	switch {
 	case errors.Is(err, errWorkspaceMenuInvalidIndex):
-		s.replyWorkspaceChat(platform, message, s.engine.i18n.T(MsgWorkspaceChatInvalidIndex))
+		s.replyWorkspaceChat(platform, message, s.i18n.T(MsgWorkspaceChatInvalidIndex))
 	case errors.Is(err, errWorkspacePositiveNumber):
-		s.replyWorkspaceChat(platform, message, s.engine.i18n.T(MsgWorkspaceChatInvalidNumber))
+		s.replyWorkspaceChat(platform, message, s.i18n.T(MsgWorkspaceChatInvalidNumber))
 	case errors.Is(err, errWorkspacePageOutOfRange):
-		s.replyWorkspaceChat(platform, message, s.engine.i18n.T(MsgWorkspaceChatPageOutOfRange))
+		s.replyWorkspaceChat(platform, message, s.i18n.T(MsgWorkspaceChatPageOutOfRange))
 	case errors.Is(err, errWorkspaceMenuItemNotFound):
-		s.replyWorkspaceChat(platform, message, s.engine.i18n.T(MsgWorkspaceChatMenuExpired))
-	case errors.Is(err, errWorkspaceChatAttachmentSaveFailed):
-		s.replyWorkspaceChat(platform, message, s.engine.i18n.T(MsgWorkspaceChatAttachmentSaveFailed))
+		s.replyWorkspaceChat(platform, message, s.i18n.T(MsgWorkspaceChatMenuExpired))
 	case errors.Is(err, errWorkspaceChatEmptyMessage):
-		s.replyWorkspaceChat(platform, message, s.engine.i18n.T(MsgWorkspaceChatEmptyMessage))
+		s.replyWorkspaceChat(platform, message, s.i18n.T(MsgWorkspaceChatEmptyMessage))
 	default:
-		s.replyWorkspaceChat(platform, message, s.engine.i18n.Tf(MsgError, err))
+		s.replyWorkspaceChat(platform, message, s.i18n.Tf(MsgError, err))
 	}
 }

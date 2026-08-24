@@ -56,7 +56,19 @@ func TestWorkspaceChatI18n_WeComCommandsUseSelectedLanguage(t *testing.T) {
 	fixture := newWorkspaceChatTestFixture(t)
 	platform := newWorkspaceChatI18nPlatform()
 
-	fixture.service.engine.i18n.SetLang(LangSpanish)
+	fixture.service.i18n.SetLang(LangSpanish)
+	if !fixture.service.HandleIncoming(platform, &Message{
+		Scope: ConversationScopeDirect, UserID: "user-1", Content: "/devices",
+	}) {
+		t.Fatal("workspace chat did not consume /devices")
+	}
+	_ = platform.nextReply(t)
+	if !fixture.service.HandleIncoming(platform, &Message{
+		Scope: ConversationScopeDirect, UserID: "user-1", Content: "/device 1",
+	}) {
+		t.Fatal("workspace chat did not consume /device")
+	}
+	_ = platform.nextReply(t)
 	if !fixture.service.HandleIncoming(platform, &Message{
 		Scope: ConversationScopeDirect, UserID: "user-1", Content: "/projects",
 	}) {
@@ -71,7 +83,7 @@ func TestWorkspaceChatI18n_WeComCommandsUseSelectedLanguage(t *testing.T) {
 		t.Fatalf("Spanish /projects reply contains hard-coded Chinese: %q", projects)
 	}
 
-	fixture.service.engine.i18n.SetLang(LangJapanese)
+	fixture.service.i18n.SetLang(LangJapanese)
 	if !fixture.service.HandleIncoming(platform, &Message{
 		Scope: ConversationScopeDirect, UserID: "user-1", Content: "/new named",
 	}) {
@@ -85,7 +97,7 @@ func TestWorkspaceChatI18n_WeComCommandsUseSelectedLanguage(t *testing.T) {
 func TestWorkspaceChatI18n_InteractionDeliveryUsesSelectedLanguage(t *testing.T) {
 	fixture := newWorkspaceChatTestFixture(t)
 	platform := newWorkspaceChatI18nPlatform()
-	fixture.service.engine.i18n.SetLang(LangSpanish)
+	fixture.service.i18n.SetLang(LangSpanish)
 
 	conversation := ConversationRef{Kind: ConversationKindThread, ID: fixture.threadA}
 	actor := fixture.service.actor(fixture.workspaceA, conversation)

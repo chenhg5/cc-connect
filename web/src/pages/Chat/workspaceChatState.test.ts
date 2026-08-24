@@ -8,7 +8,6 @@ import {
 const snapshot: NativeConversationSnapshot = {
   thread: {
     id: 'thread-1',
-    cwd: '/project',
     created_at: '2026-08-23T00:00:00Z',
     updated_at: '2026-08-23T00:00:00Z',
   },
@@ -68,10 +67,32 @@ describe('workspaceChatStreamReducer', () => {
 			itemsByTurn: { 'turn-old': [{ turn_id: 'turn-old', item: { id: 'item-old', type: 'agentMessage', text: 'old' } }] },
 			startedEpoch: 'epoch-1', startedSequence: 0,
 		});
-		expect(state.snapshot?.active_turn?.id).toBe('turn-live');
-		expect(state.liveItems['item-live'].text).toBe('still live');
-		expect(state.itemsByTurn['turn-old']).toHaveLength(1);
-	});
+    expect(state.snapshot?.active_turn?.id).toBe('turn-live');
+    expect(state.liveItems['item-live'].text).toBe('still live');
+    expect(state.itemsByTurn['turn-old']).toHaveLength(1);
+    expect(state.needsHistoryRefresh).toBe(true);
+  });
+
+  it('历史请求期间完成的 Turn 会保留二次权威刷新标记', () => {
+    let state = stateWithHistory({
+      ...snapshot,
+      active_turn: { id: 'turn-live', started_at: '2026-08-23T00:00:01Z' },
+    });
+    state = workspaceChatStreamReducer(state, { type: 'history_refreshed' });
+    state = workspaceChatStreamReducer(state, {
+      type: 'server_event',
+      event: event(1, 'native_event', {
+        method: 'turn/completed', turn_id: 'turn-live', payload: {}, occurred_at: '2026-08-23T00:00:02Z',
+      }),
+    });
+    state = workspaceChatStreamReducer(state, {
+      type: 'history_loaded', snapshot, turns: [{ id: 'turn-old', status: 'completed' }], itemsByTurn: {},
+      startedEpoch: 'epoch-1', startedSequence: 0,
+    });
+
+    expect(state.snapshot?.active_turn).toBeNull();
+    expect(state.needsHistoryRefresh).toBe(true);
+  });
 
   it('接受初始 subscribed 后同 sequence 的权威 snapshot', () => {
     const subscribed = workspaceChatStreamReducer(initialWorkspaceChatStreamState, {

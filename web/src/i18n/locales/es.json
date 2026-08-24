@@ -9,7 +9,8 @@
     "cron": "Tareas programadas",
     "bridge": "Puente",
     "skills": "Habilidades",
-    "system": "Sistema"
+    "system": "Sistema",
+    "operations": "Operaciones"
   },
   "dashboard": {
     "title": "Panel",
@@ -193,7 +194,9 @@
     "optional": "opcional",
     "confirmDelete": "¿Seguro que desea eliminar esto?",
     "close": "Cerrar",
-    "saving": "Guardando…"
+    "saving": "Guardando…",
+    "copy": "Copiar",
+    "theme": "Tema"
   },
   "setup": {
     "addPlatform": "Añadir plataforma",
@@ -497,6 +500,15 @@
     "free": "Gratis",
     "freemium": "Freemium",
     "paid": "De pago"
+  },
+  "control": {
+    "firstSetup": "Inicializar el plano de control", "setupSubtitle": "Crea la única cuenta de administrador", "loginSubtitle": "Inicia sesión en el plano de control de cc-connect",
+    "setupToken": "Token de configuración de un solo uso", "adminPassword": "Contraseña de administrador", "confirmPassword": "Confirmar contraseña", "passwordMismatch": "Las contraseñas no coinciden", "createAdmin": "Crear administrador",
+    "operations": "Operaciones", "operationsSubtitle": "Gestiona dispositivos Runtime, versiones, registros y el servicio", "devices": "Dispositivos macOS Runtime", "pairDevice": "Emparejar dispositivo", "pairExpires": "Caduca a las {{time}}", "online": "En línea", "offline": "Sin conexión", "revoke": "Revocar", "renameDevice": "Renombrar dispositivo", "deviceLogs": "Registros de conexión", "noDevices": "No hay dispositivos emparejados",
+    "service": "Servicio de negocio", "currentRelease": "Versión actual", "update": "Comprobar y actualizar", "rollback": "Revertir", "restart": "Reiniciar", "running": "En ejecución", "stopped": "Detenido", "noLogs": "Sin registros", "deployRuns": "Ejecuciones de despliegue",
+    "setupWizard": "Configuración del despliegue", "setupWizardSubtitle": "Conecta el acceso público, macOS Runtime y el servicio", "publicURL": "URL HTTPS pública", "openrestyConfig": "Proxy inverso de 1Panel / OpenResty",
+    "runtimePairing": "Vincular macOS Runtime", "createPairingCode": "Crear código de vinculación", "runtimeReady": "Runtime en línea con {{count}} raíces de proyecto", "runtimeWaiting": "Esperando un Runtime con un proyecto Codex válido", "codexValidation": "Validar Codex y el catálogo de proyectos",
+    "wecomOptional": "WeCom WebSocket (opcional)", "enableWeCom": "Activar el chat de WeCom", "wecomBotID": "ID del bot de WeCom", "wecomBotSecret": "Secreto del bot de WeCom", "wecomAllowFrom": "Usuarios permitidos (opcional)", "startService": "Generar configuración e iniciar"
   },
   "theme": {
     "light": "Claro",

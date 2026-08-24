@@ -38,7 +38,7 @@ func (a *deadlineAwareModelAgent) sawDeadline() bool {
 }
 
 // testManagementServer creates a ManagementServer with a test engine and returns an httptest.Server.
-func testManagementServer(t *testing.T, token string) (*ManagementServer, *httptest.Server, *Engine) {
+func testManagementServer(t *testing.T) (*ManagementServer, *httptest.Server, *Engine) {
 	t.Helper()
 
 	agent := &stubAgent{}
@@ -46,7 +46,7 @@ func testManagementServer(t *testing.T, token string) (*ManagementServer, *httpt
 	e := NewEngine("test-project", agent, nil, "", LangEnglish)
 	e.sessions = sm
 
-	mgmt := NewManagementServer(0, token, nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("test-project", e)
 
 	mux := http.NewServeMux()
@@ -79,12 +79,9 @@ type mgmtResponse struct {
 	Error string          `json:"error,omitempty"`
 }
 
-func mgmtGet(t *testing.T, url, token string) mgmtResponse {
+func mgmtGet(t *testing.T, url string) mgmtResponse {
 	t.Helper()
 	req, _ := http.NewRequest("GET", url, nil)
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
@@ -97,7 +94,7 @@ func mgmtGet(t *testing.T, url, token string) mgmtResponse {
 	return r
 }
 
-func mgmtPost(t *testing.T, url, token string, body any) mgmtResponse {
+func mgmtPost(t *testing.T, url string, body any) mgmtResponse {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
@@ -107,9 +104,6 @@ func mgmtPost(t *testing.T, url, token string, body any) mgmtResponse {
 	}
 	req, _ := http.NewRequest("POST", url, &buf)
 	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
@@ -142,7 +136,7 @@ func mgmtPostHandler(t *testing.T, handler http.HandlerFunc, path string, body a
 	return r, w.Code
 }
 
-func mgmtPatch(t *testing.T, url, token string, body any) mgmtResponse {
+func mgmtPatch(t *testing.T, url string, body any) mgmtResponse {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
@@ -152,9 +146,6 @@ func mgmtPatch(t *testing.T, url, token string, body any) mgmtResponse {
 	}
 	req, _ := http.NewRequest("PATCH", url, &buf)
 	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("PATCH %s: %v", url, err)
@@ -167,12 +158,9 @@ func mgmtPatch(t *testing.T, url, token string, body any) mgmtResponse {
 	return r
 }
 
-func mgmtDelete(t *testing.T, url, token string) mgmtResponse {
+func mgmtDelete(t *testing.T, url string) mgmtResponse {
 	t.Helper()
 	req, _ := http.NewRequest("DELETE", url, nil)
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("DELETE %s: %v", url, err)
@@ -185,50 +173,19 @@ func mgmtDelete(t *testing.T, url, token string) mgmtResponse {
 	return r
 }
 
-func TestMgmt_AuthRequired(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "secret-token")
+func TestMgmt_PrivateSocketTrustsControlAuthentication(t *testing.T) {
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/status", "")
-	if r.OK {
-		t.Fatal("expected auth failure without token")
-	}
-	if !strings.Contains(r.Error, "unauthorized") {
-		t.Fatalf("expected unauthorized error, got: %s", r.Error)
-	}
-
-	r = mgmtGet(t, ts.URL+"/api/v1/status", "wrong-token")
-	if r.OK {
-		t.Fatal("expected auth failure with wrong token")
-	}
-
-	r = mgmtGet(t, ts.URL+"/api/v1/status", "secret-token")
-	if !r.OK {
-		t.Fatalf("expected success with correct token, got error: %s", r.Error)
-	}
-}
-
-func TestMgmt_AuthQueryParam(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "qp-token")
-
-	r := mgmtGet(t, ts.URL+"/api/v1/status?token=qp-token", "")
-	if !r.OK {
-		t.Fatalf("expected success with query param token, got: %s", r.Error)
-	}
-}
-
-func TestMgmt_NoAuthRequired(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "")
-
-	r := mgmtGet(t, ts.URL+"/api/v1/status", "")
+	r := mgmtGet(t, ts.URL+"/api/v1/status")
 	if !r.OK {
 		t.Fatalf("expected success without token when no token configured, got: %s", r.Error)
 	}
 }
 
 func TestMgmt_Status(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/status", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/status")
 	if !r.OK {
 		t.Fatalf("status failed: %s", r.Error)
 	}
@@ -243,10 +200,10 @@ func TestMgmt_Status(t *testing.T) {
 }
 
 func TestMgmt_StatusIncludesBridgeToken(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", nil))
 
-	r := mgmtGet(t, ts.URL+"/api/v1/status", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/status")
 	if !r.OK {
 		t.Fatalf("status failed: %s", r.Error)
 	}
@@ -271,9 +228,9 @@ func TestMgmt_StatusIncludesBridgeToken(t *testing.T) {
 }
 
 func TestMgmt_Projects(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects")
 	if !r.OK {
 		t.Fatalf("projects failed: %s", r.Error)
 	}
@@ -293,9 +250,9 @@ func TestMgmt_Projects(t *testing.T) {
 }
 
 func TestMgmt_ProjectDetail(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project")
 	if !r.OK {
 		t.Fatalf("project detail failed: %s", r.Error)
 	}
@@ -308,16 +265,16 @@ func TestMgmt_ProjectDetail(t *testing.T) {
 		t.Fatalf("expected test-project, got %v", data["name"])
 	}
 
-	r = mgmtGet(t, ts.URL+"/api/v1/projects/nonexistent", "tok")
+	r = mgmtGet(t, ts.URL+"/api/v1/projects/nonexistent")
 	if r.OK {
 		t.Fatal("expected 404 for nonexistent project")
 	}
 }
 
 func TestMgmt_ProjectPatch(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", map[string]any{
 		"language": "zh",
 	})
 	if !r.OK {
@@ -326,17 +283,17 @@ func TestMgmt_ProjectPatch(t *testing.T) {
 }
 
 func TestMgmt_Sessions(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	_, ts, e := testManagementServer(t)
 
 	e.sessions.GetOrCreateActive("user1")
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions")
 	if !r.OK {
 		t.Fatalf("sessions list failed: %s", r.Error)
 	}
 
 	// Create a session via API
-	r = mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok", map[string]string{
+	r = mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions", map[string]string{
 		"session_key": "user2",
 		"name":        "work",
 	})
@@ -346,13 +303,13 @@ func TestMgmt_Sessions(t *testing.T) {
 }
 
 func TestMgmt_SessionDetail(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	_, ts, e := testManagementServer(t)
 
 	s := e.sessions.GetOrCreateActive("user1")
 	s.AddHistory("user", "hello")
 	s.AddHistory("assistant", "hi there")
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/"+s.ID, "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/"+s.ID)
 	if !r.OK {
 		t.Fatalf("session detail failed: %s", r.Error)
 	}
@@ -374,7 +331,7 @@ func TestMgmt_SessionDetail(t *testing.T) {
 // Run with -race to detect the data race; with the production fix
 // the test stays clean.
 func TestMgmt_SessionsConcurrentNameWriteAndList(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	_, ts, e := testManagementServer(t)
 
 	// Pre-create the session so both handlers operate on the same instance.
 	e.sessions.GetOrCreateActive("user1")
@@ -391,7 +348,7 @@ func TestMgmt_SessionsConcurrentNameWriteAndList(t *testing.T) {
 			if i%2 == 0 {
 				name = "b"
 			}
-			_ = mgmtPost(t, postURL, "tok", map[string]string{
+			_ = mgmtPost(t, postURL, map[string]string{
 				"session_key": "user1",
 				"name":        name,
 			})
@@ -401,31 +358,31 @@ func TestMgmt_SessionsConcurrentNameWriteAndList(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = mgmtGet(t, listURL, "tok")
+			_ = mgmtGet(t, listURL)
 		}()
 	}
 	wg.Wait()
 }
 
 func TestMgmt_SessionDelete(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	_, ts, e := testManagementServer(t)
 
 	s := e.sessions.GetOrCreateActive("user1")
 	sid := s.ID
 
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project/sessions/"+sid, "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project/sessions/"+sid)
 	if !r.OK {
 		t.Fatalf("delete session failed: %s", r.Error)
 	}
 
-	r = mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/"+sid, "tok")
+	r = mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/"+sid)
 	if r.OK {
 		t.Fatal("expected 404 after deletion")
 	}
 }
 
 func TestMgmt_Config(t *testing.T) {
-	srv, ts, _ := testManagementServer(t, "tok")
+	srv, ts, _ := testManagementServer(t)
 
 	// Write a temp TOML file and point the server at it
 	tmp := t.TempDir()
@@ -436,7 +393,6 @@ func TestMgmt_Config(t *testing.T) {
 	srv.SetConfigFilePath(cfgPath)
 
 	req, _ := http.NewRequest("GET", ts.URL+"/api/v1/config", nil)
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -452,7 +408,7 @@ func TestMgmt_Config(t *testing.T) {
 }
 
 func TestMgmt_Reload(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	_, ts, e := testManagementServer(t)
 
 	reloaded := false
 	e.configReloadFunc = func() (*ConfigReloadResult, error) {
@@ -460,7 +416,7 @@ func TestMgmt_Reload(t *testing.T) {
 		return &ConfigReloadResult{}, nil
 	}
 
-	r := mgmtPost(t, ts.URL+"/api/v1/reload", "tok", nil)
+	r := mgmtPost(t, ts.URL+"/api/v1/reload", nil)
 	if !r.OK {
 		t.Fatalf("reload failed: %s", r.Error)
 	}
@@ -470,18 +426,18 @@ func TestMgmt_Reload(t *testing.T) {
 }
 
 func TestMgmt_BridgeAdapters(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/bridge/adapters", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/bridge/adapters")
 	if !r.OK {
 		t.Fatalf("bridge adapters failed: %s", r.Error)
 	}
 }
 
 func TestMgmt_HeartbeatNotConfigured(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/heartbeat", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/heartbeat")
 	if r.OK {
 		var data map[string]any
 		if err := json.Unmarshal(r.Data, &data); err != nil {
@@ -492,11 +448,11 @@ func TestMgmt_HeartbeatNotConfigured(t *testing.T) {
 }
 
 func TestMgmt_HeartbeatWithScheduler(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	hs := NewHeartbeatScheduler("")
 	mgmt.SetHeartbeatScheduler(hs)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/heartbeat", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/heartbeat")
 	if !r.OK {
 		t.Fatalf("heartbeat status failed: %s", r.Error)
 	}
@@ -511,16 +467,16 @@ func TestMgmt_HeartbeatWithScheduler(t *testing.T) {
 }
 
 func TestMgmt_CronNilScheduler(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/cron", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/cron")
 	if r.OK {
 		t.Fatal("expected error when cron scheduler is nil")
 	}
 }
 
 func TestMgmt_CronWithScheduler(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -530,13 +486,13 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 	mgmt.SetCronScheduler(cs)
 
 	// List (empty)
-	r := mgmtGet(t, ts.URL+"/api/v1/cron", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/cron")
 	if !r.OK {
 		t.Fatalf("cron list failed: %s", r.Error)
 	}
 
 	// Add
-	r = mgmtPost(t, ts.URL+"/api/v1/cron", "tok", map[string]any{
+	r = mgmtPost(t, ts.URL+"/api/v1/cron", map[string]any{
 		"project":     "test-project",
 		"session_key": "user1",
 		"cron_expr":   "0 9 * * *",
@@ -556,26 +512,26 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 	}
 
 	// List (should have 1)
-	r = mgmtGet(t, ts.URL+"/api/v1/cron", "tok")
+	r = mgmtGet(t, ts.URL+"/api/v1/cron")
 	if !r.OK {
 		t.Fatalf("cron list failed: %s", r.Error)
 	}
 
 	// Delete
-	r = mgmtDelete(t, ts.URL+"/api/v1/cron/"+job.ID, "tok")
+	r = mgmtDelete(t, ts.URL+"/api/v1/cron/"+job.ID)
 	if !r.OK {
 		t.Fatalf("cron delete failed: %s", r.Error)
 	}
 
 	// Delete nonexistent
-	r = mgmtDelete(t, ts.URL+"/api/v1/cron/nonexistent", "tok")
+	r = mgmtDelete(t, ts.URL+"/api/v1/cron/nonexistent")
 	if r.OK {
 		t.Fatal("expected 404 for nonexistent cron job")
 	}
 }
 
 func TestMgmt_CronExecByID(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -606,7 +562,7 @@ func TestMgmt_CronExecByID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec", "tok", map[string]any{})
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec", map[string]any{})
 	if !r.OK {
 		t.Fatalf("cron exec failed: %s", r.Error)
 	}
@@ -648,7 +604,7 @@ func TestMgmt_CronExecByID(t *testing.T) {
 	}
 
 	e.agent = &resultAgent{session: newResultAgentSession("triggered from management alias")}
-	alias := mgmtPost(t, ts.URL+"/api/v1/cron/"+aliasJob.ID+"/run", "tok", map[string]any{})
+	alias := mgmtPost(t, ts.URL+"/api/v1/cron/"+aliasJob.ID+"/run", map[string]any{})
 	if !alias.OK {
 		t.Fatalf("cron run compatibility alias failed: %s", alias.Error)
 	}
@@ -664,7 +620,7 @@ func TestMgmt_CronExecByID(t *testing.T) {
 }
 
 func TestMgmt_CronExecByID_RejectsExtraPathSegments(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -686,7 +642,7 @@ func TestMgmt_CronExecByID_RejectsExtraPathSegments(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec/extra", "tok", map[string]any{})
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec/extra", map[string]any{})
 	if r.OK {
 		t.Fatal("expected extra cron path segment to be rejected")
 	}
@@ -696,7 +652,7 @@ func TestMgmt_CronExecByID_RejectsExtraPathSegments(t *testing.T) {
 }
 
 func TestMgmt_CronExecByID_ProjectMissingIsBadRequest(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -718,7 +674,7 @@ func TestMgmt_CronExecByID_ProjectMissingIsBadRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec", "tok", map[string]any{})
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec", map[string]any{})
 	if r.OK {
 		t.Fatal("expected exec to fail when project is missing")
 	}
@@ -730,8 +686,8 @@ func TestMgmt_CronExecByID_ProjectMissingIsBadRequest(t *testing.T) {
 	}
 }
 
-func TestMgmt_CORS(t *testing.T) {
-	mgmt := NewManagementServer(0, "", []string{"http://localhost:3000"})
+func TestMgmt_PrivateHandlerDoesNotExposeCORS(t *testing.T) {
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
 
 	mux := http.NewServeMux()
@@ -747,16 +703,16 @@ func TestMgmt_CORS(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("expected 204 for OPTIONS, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected private API method rejection, got %d", resp.StatusCode)
 	}
-	if resp.Header.Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
-		t.Fatalf("expected CORS origin header, got %q", resp.Header.Get("Access-Control-Allow-Origin"))
+	if value := resp.Header.Get("Access-Control-Allow-Origin"); value != "" {
+		t.Fatalf("private API unexpectedly exposed CORS origin %q", value)
 	}
 }
 
-func TestMgmt_BridgeWebSocketPathProxiesToBridgeServer(t *testing.T) {
-	mgmt := NewManagementServer(0, "", []string{"*"})
+func TestMgmt_PrivateHandlerDoesNotExposeBridgeWebSocketPath(t *testing.T) {
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
 	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", []string{"*"}))
 
@@ -764,53 +720,21 @@ func TestMgmt_BridgeWebSocketPathProxiesToBridgeServer(t *testing.T) {
 	ts := httptest.NewServer(mgmt.buildHandler(mux))
 	defer ts.Close()
 
-	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws?token=bridge-secret", nil)
-	req.Header.Set("Connection", "Upgrade")
-	req.Header.Set("Upgrade", "websocket")
-	req.Header.Set("Sec-WebSocket-Version", "13")
-	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.Get(ts.URL + "/bridge/ws")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusSwitchingProtocols {
-		t.Fatalf("expected websocket upgrade, got %d", resp.StatusCode)
-	}
-}
-
-func TestMgmt_BridgeWebSocketPathWorksWhenBridgeServerSetAfterHandlerBuild(t *testing.T) {
-	mgmt := NewManagementServer(0, "", []string{"*"})
-	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
-
-	mux := http.NewServeMux()
-	ts := httptest.NewServer(mgmt.buildHandler(mux))
-	defer ts.Close()
-
-	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", []string{"*"}))
-
-	req, _ := http.NewRequest("GET", ts.URL+"/bridge/ws?token=bridge-secret", nil)
-	req.Header.Set("Connection", "Upgrade")
-	req.Header.Set("Upgrade", "websocket")
-	req.Header.Set("Sec-WebSocket-Version", "13")
-	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusSwitchingProtocols {
-		t.Fatalf("expected websocket upgrade after late bridge setup, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected bridge websocket to remain outside private management API, got %d", resp.StatusCode)
 	}
 }
 
 func TestMgmt_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/status", nil)
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -843,14 +767,14 @@ func TestMgmt_ProjectModel_UsesSwitchModelWithActiveProvider(t *testing.T) {
 		return nil
 	})
 
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("test-project", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", "tok", map[string]string{"model": "gpt-4.1"})
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", map[string]string{"model": "gpt-4.1"})
 	if !r.OK {
 		t.Fatalf("update model failed: %s", r.Error)
 	}
@@ -889,14 +813,14 @@ func TestMgmt_ProjectModel_SavesModelWithoutActiveProvider(t *testing.T) {
 		return nil
 	})
 
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("test-project", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", "tok", map[string]string{"model": "gpt-4.1"})
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", map[string]string{"model": "gpt-4.1"})
 	if !r.OK {
 		t.Fatalf("update model failed: %s", r.Error)
 	}
@@ -928,14 +852,14 @@ func TestMgmt_ProjectModel_ReturnsErrorWhenModelSaveFails(t *testing.T) {
 		return errors.New("disk full")
 	})
 
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("test-project", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", "tok", map[string]string{"model": "gpt-4.1"})
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/model", map[string]string{"model": "gpt-4.1"})
 	if r.OK {
 		t.Fatal("update model unexpectedly succeeded")
 	}
@@ -951,14 +875,14 @@ func TestMgmt_ProjectModels_UsesTimeoutContext(t *testing.T) {
 	agent := &deadlineAwareModelAgent{}
 	e := NewEngine("test-project", agent, nil, "", LangEnglish)
 
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("test-project", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/models", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/models")
 	if !r.OK {
 		t.Fatalf("project models failed: %s", r.Error)
 	}
@@ -977,7 +901,7 @@ func TestMgmt_RemoveGlobalProvider_PurgesFromEngines(t *testing.T) {
 	}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
 
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 
 	removed := ""
@@ -992,7 +916,6 @@ func TestMgmt_RemoveGlobalProvider_PurgesFromEngines(t *testing.T) {
 	defer ts.Close()
 
 	req, _ := http.NewRequest("DELETE", ts.URL+"/api/v1/providers/prov-a", nil)
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("DELETE: %v", err)
@@ -1059,7 +982,7 @@ func TestResolveGlobalProviderForAgent(t *testing.T) {
 }
 
 func TestMgmt_AddPlatformToNewProject_DoesNotRequireEngine(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 
 	var savedProject, savedPlatType string
 	mgmt.SetAddPlatformToProject(func(proj, platType string, opts map[string]any, workDir, agentType string) error {
@@ -1069,7 +992,7 @@ func TestMgmt_AddPlatformToNewProject_DoesNotRequireEngine(t *testing.T) {
 	})
 
 	// "brand-new-project" has no engine registered — this must NOT return 404.
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/brand-new-project/add-platform", "tok", map[string]any{
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/brand-new-project/add-platform", map[string]any{
 		"type":    "dingtalk",
 		"options": map[string]any{"client_id": "abc", "client_secret": "def"},
 	})
@@ -1085,7 +1008,7 @@ func TestMgmt_AddPlatformToNewProject_DoesNotRequireEngine(t *testing.T) {
 }
 
 func TestMgmt_AddPlatformToNewProject_RejectsMissingWorkDir(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 
 	called := false
 	mgmt.SetAddPlatformToProject(func(proj, platType string, opts map[string]any, workDir, agentType string) error {
@@ -1094,7 +1017,7 @@ func TestMgmt_AddPlatformToNewProject_RejectsMissingWorkDir(t *testing.T) {
 	})
 
 	missing := filepath.Join(t.TempDir(), "missing")
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/brand-new-project/add-platform", "tok", map[string]any{
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/brand-new-project/add-platform", map[string]any{
 		"type":     "dingtalk",
 		"options":  map[string]any{"client_id": "abc", "client_secret": "def"},
 		"work_dir": missing,
@@ -1114,7 +1037,7 @@ func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 
 	t.Run("feishu", func(t *testing.T) {
-		mgmt := NewManagementServer(0, "", nil)
+		mgmt := NewManagementServer()
 		called := false
 		mgmt.SetSetupFeishuSave(func(req FeishuSetupSaveRequest) error {
 			called = true
@@ -1139,7 +1062,7 @@ func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
 	})
 
 	t.Run("weixin", func(t *testing.T) {
-		mgmt := NewManagementServer(0, "", nil)
+		mgmt := NewManagementServer()
 		called := false
 		mgmt.SetSetupWeixinSave(func(req WeixinSetupSaveRequest) error {
 			called = true
@@ -1191,9 +1114,9 @@ func TestValidateProjectWorkDir(t *testing.T) {
 }
 
 func TestMgmt_OtherRoutesStillRequireEngine(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/nonexistent/sessions", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/nonexistent/sessions")
 	if r.OK {
 		t.Fatal("expected 404 for sessions on nonexistent project")
 	}
@@ -1202,7 +1125,7 @@ func TestMgmt_OtherRoutesStillRequireEngine(t *testing.T) {
 	}
 }
 
-func mgmtPut(t *testing.T, url, token string, body any) mgmtResponse {
+func mgmtPut(t *testing.T, url string, body any) mgmtResponse {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
@@ -1212,9 +1135,6 @@ func mgmtPut(t *testing.T, url, token string, body any) mgmtResponse {
 	}
 	req, _ := http.NewRequest("PUT", url, &buf)
 	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("PUT %s: %v", url, err)
@@ -1230,9 +1150,9 @@ func mgmtPut(t *testing.T, url, token string, body any) mgmtResponse {
 // ── Restart ──
 
 func TestMgmt_Restart(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtPost(t, ts.URL+"/api/v1/restart", "tok", nil)
+	r := mgmtPost(t, ts.URL+"/api/v1/restart", nil)
 	if !r.OK {
 		t.Fatalf("restart failed: %s", r.Error)
 	}
@@ -1244,8 +1164,8 @@ func TestMgmt_Restart(t *testing.T) {
 }
 
 func TestMgmt_Restart_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/restart", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/restart")
 	if r.OK {
 		t.Fatal("expected GET on restart to fail")
 	}
@@ -1254,9 +1174,9 @@ func TestMgmt_Restart_MethodNotAllowed(t *testing.T) {
 // ── Agents ──
 
 func TestMgmt_Agents(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/agents", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/agents")
 	if !r.OK {
 		t.Fatalf("agents failed: %s", r.Error)
 	}
@@ -1270,8 +1190,8 @@ func TestMgmt_Agents(t *testing.T) {
 }
 
 func TestMgmt_Agents_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPost(t, ts.URL+"/api/v1/agents", "tok", nil)
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPost(t, ts.URL+"/api/v1/agents", nil)
 	if r.OK {
 		t.Fatal("expected POST on agents to fail")
 	}
@@ -1280,12 +1200,12 @@ func TestMgmt_Agents_MethodNotAllowed(t *testing.T) {
 // ── Global Settings ──
 
 func TestMgmt_GlobalSettings_Get(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetGetGlobalSettings(func() map[string]any {
 		return map[string]any{"language": "zh", "auto_start": true}
 	})
 
-	r := mgmtGet(t, ts.URL+"/api/v1/settings", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/settings")
 	if !r.OK {
 		t.Fatalf("get settings failed: %s", r.Error)
 	}
@@ -1299,15 +1219,15 @@ func TestMgmt_GlobalSettings_Get(t *testing.T) {
 }
 
 func TestMgmt_GlobalSettings_GetNotAvailable(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/settings", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/settings")
 	if r.OK {
 		t.Fatal("expected error when getGlobalSettings is nil")
 	}
 }
 
 func TestMgmt_GlobalSettings_Patch(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 
 	saved := map[string]any{}
 	mgmt.SetGetGlobalSettings(func() map[string]any { return saved })
@@ -1318,7 +1238,7 @@ func TestMgmt_GlobalSettings_Patch(t *testing.T) {
 		return nil
 	})
 
-	r := mgmtPatch(t, ts.URL+"/api/v1/settings", "tok", map[string]any{"language": "ja"})
+	r := mgmtPatch(t, ts.URL+"/api/v1/settings", map[string]any{"language": "ja"})
 	if !r.OK {
 		t.Fatalf("patch settings failed: %s", r.Error)
 	}
@@ -1328,11 +1248,11 @@ func TestMgmt_GlobalSettings_Patch(t *testing.T) {
 }
 
 func TestMgmt_GlobalSettings_PatchSaveError(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetSaveGlobalSettings(func(updates map[string]any) error {
 		return errors.New("write failed")
 	})
-	r := mgmtPatch(t, ts.URL+"/api/v1/settings", "tok", map[string]any{"x": 1})
+	r := mgmtPatch(t, ts.URL+"/api/v1/settings", map[string]any{"x": 1})
 	if r.OK {
 		t.Fatal("expected save error")
 	}
@@ -1344,8 +1264,8 @@ func TestMgmt_GlobalSettings_PatchSaveError(t *testing.T) {
 // ── Project Send ──
 
 func TestMgmt_ProjectSend_EmptyMessage(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/send", "tok", map[string]string{
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/send", map[string]string{
 		"session_key": "user1",
 		"message":     "",
 	})
@@ -1358,8 +1278,8 @@ func TestMgmt_ProjectSend_EmptyMessage(t *testing.T) {
 }
 
 func TestMgmt_ProjectSend_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/send", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/send")
 	if r.OK {
 		t.Fatal("expected GET on send to fail")
 	}
@@ -1368,8 +1288,8 @@ func TestMgmt_ProjectSend_MethodNotAllowed(t *testing.T) {
 // ── Project Providers ──
 
 func TestMgmt_ProjectProviders_NoProviderSwitcher(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/providers", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/providers")
 	if r.OK {
 		t.Fatal("expected error when agent doesn't support ProviderSwitcher")
 	}
@@ -1385,7 +1305,7 @@ func TestMgmt_ProjectProviders_ListAndAdd(t *testing.T) {
 	}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
 
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
@@ -1393,7 +1313,7 @@ func TestMgmt_ProjectProviders_ListAndAdd(t *testing.T) {
 	defer ts.Close()
 
 	// GET list
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/proj/providers", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/proj/providers")
 	if !r.OK {
 		t.Fatalf("list providers failed: %s", r.Error)
 	}
@@ -1412,7 +1332,7 @@ func TestMgmt_ProjectProviders_ListAndAdd(t *testing.T) {
 	}
 
 	// POST add
-	r = mgmtPost(t, ts.URL+"/api/v1/projects/proj/providers", "tok", map[string]string{
+	r = mgmtPost(t, ts.URL+"/api/v1/projects/proj/providers", map[string]string{
 		"name":     "anthropic",
 		"api_key":  "sk-test",
 		"base_url": "https://api.anthropic.com",
@@ -1430,14 +1350,14 @@ func TestMgmt_ProjectProviders_AddMissingName(t *testing.T) {
 		providers: []ProviderConfig{{Name: "openai"}},
 	}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/proj/providers", "tok", map[string]string{"api_key": "sk"})
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/proj/providers", map[string]string{"api_key": "sk"})
 	if r.OK {
 		t.Fatal("expected error for missing name")
 	}
@@ -1452,14 +1372,14 @@ func TestMgmt_ProjectProviders_Activate(t *testing.T) {
 		active: "openai",
 	}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/proj/providers/claude/activate", "tok", nil)
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/proj/providers/claude/activate", nil)
 	if !r.OK {
 		t.Fatalf("activate failed: %s", r.Error)
 	}
@@ -1473,14 +1393,14 @@ func TestMgmt_ProjectProviders_ActivateNotFound(t *testing.T) {
 		providers: []ProviderConfig{{Name: "openai"}},
 	}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/proj/providers/nope/activate", "tok", nil)
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/proj/providers/nope/activate", nil)
 	if r.OK {
 		t.Fatal("expected 404 for nonexistent provider")
 	}
@@ -1495,14 +1415,14 @@ func TestMgmt_ProjectProviders_DeleteActive(t *testing.T) {
 		active: "openai",
 	}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/proj/providers/openai", "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/proj/providers/openai")
 	if r.OK {
 		t.Fatal("expected error when deleting active provider")
 	}
@@ -1520,14 +1440,14 @@ func TestMgmt_ProjectProviders_DeleteInactive(t *testing.T) {
 		active: "openai",
 	}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/proj/providers/claude", "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/proj/providers/claude")
 	if !r.OK {
 		t.Fatalf("delete failed: %s", r.Error)
 	}
@@ -1541,14 +1461,14 @@ func TestMgmt_ProjectProviders_DeleteInactive(t *testing.T) {
 func TestMgmt_ProjectProviderRefs_GetEmpty(t *testing.T) {
 	agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "openai"}}}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/proj/provider-refs", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/proj/provider-refs")
 	if !r.OK {
 		t.Fatalf("get provider-refs failed: %s", r.Error)
 	}
@@ -1566,14 +1486,14 @@ func TestMgmt_ProjectProviderRefs_GetEmpty(t *testing.T) {
 func TestMgmt_ProjectProviderRefs_PutNotConfigured(t *testing.T) {
 	agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "openai"}}}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtPut(t, ts.URL+"/api/v1/projects/proj/provider-refs", "tok", map[string]any{
+	r := mgmtPut(t, ts.URL+"/api/v1/projects/proj/provider-refs", map[string]any{
 		"provider_refs": []string{"shared-1"},
 	})
 	if r.OK {
@@ -1584,18 +1504,17 @@ func TestMgmt_ProjectProviderRefs_PutNotConfigured(t *testing.T) {
 // ── Project Users ──
 
 func TestMgmt_ProjectUsers_Get(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/users", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/users")
 	if !r.OK {
 		t.Fatalf("get users failed: %s", r.Error)
 	}
 }
 
 func TestMgmt_ProjectUsers_PatchInvalidJSON(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 	req, _ := http.NewRequest("PATCH", ts.URL+"/api/v1/projects/test-project/users", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1612,8 +1531,8 @@ func TestMgmt_ProjectUsers_PatchInvalidJSON(t *testing.T) {
 // ── Project Delete ──
 
 func TestMgmt_ProjectDelete_NotConfigured(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project")
 	if r.OK {
 		t.Fatal("expected error when removeProject is nil")
 	}
@@ -1625,8 +1544,8 @@ func TestMgmt_ProjectDelete_NotConfigured(t *testing.T) {
 // ── Global Providers ──
 
 func TestMgmt_GlobalProviders_GetEmpty(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/providers", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/providers")
 	if !r.OK {
 		t.Fatalf("get global providers failed: %s", r.Error)
 	}
@@ -1642,44 +1561,44 @@ func TestMgmt_GlobalProviders_GetEmpty(t *testing.T) {
 }
 
 func TestMgmt_GlobalProviders_GetWithFunc(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetListGlobalProviders(func() ([]GlobalProviderInfo, error) {
 		return []GlobalProviderInfo{{Name: "shared-relay"}}, nil
 	})
 
-	r := mgmtGet(t, ts.URL+"/api/v1/providers", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/providers")
 	if !r.OK {
 		t.Fatalf("get providers failed: %s", r.Error)
 	}
 }
 
 func TestMgmt_GlobalProviders_PostNotConfigured(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPost(t, ts.URL+"/api/v1/providers", "tok", map[string]string{"name": "new"})
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPost(t, ts.URL+"/api/v1/providers", map[string]string{"name": "new"})
 	if r.OK {
 		t.Fatal("expected error when addGlobalProvider is nil")
 	}
 }
 
 func TestMgmt_GlobalProviders_PostMissingName(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetAddGlobalProvider(func(info GlobalProviderInfo) error { return nil })
 
-	r := mgmtPost(t, ts.URL+"/api/v1/providers", "tok", map[string]string{"api_key": "sk"})
+	r := mgmtPost(t, ts.URL+"/api/v1/providers", map[string]string{"api_key": "sk"})
 	if r.OK {
 		t.Fatal("expected error for missing name")
 	}
 }
 
 func TestMgmt_GlobalProviders_PostSuccess(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	var added string
 	mgmt.SetAddGlobalProvider(func(info GlobalProviderInfo) error {
 		added = info.Name
 		return nil
 	})
 
-	r := mgmtPost(t, ts.URL+"/api/v1/providers", "tok", map[string]string{"name": "new-relay"})
+	r := mgmtPost(t, ts.URL+"/api/v1/providers", map[string]string{"name": "new-relay"})
 	if !r.OK {
 		t.Fatalf("add global provider failed: %s", r.Error)
 	}
@@ -1689,34 +1608,34 @@ func TestMgmt_GlobalProviders_PostSuccess(t *testing.T) {
 }
 
 func TestMgmt_GlobalProviders_PostDuplicate(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetAddGlobalProvider(func(info GlobalProviderInfo) error {
 		return errors.New("already exists: " + info.Name)
 	})
 
-	r := mgmtPost(t, ts.URL+"/api/v1/providers", "tok", map[string]string{"name": "dup"})
+	r := mgmtPost(t, ts.URL+"/api/v1/providers", map[string]string{"name": "dup"})
 	if r.OK {
 		t.Fatal("expected conflict error")
 	}
 }
 
 func TestMgmt_GlobalProviders_UpdateNotConfigured(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPut(t, ts.URL+"/api/v1/providers/some-provider", "tok", map[string]string{"name": "some-provider"})
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPut(t, ts.URL+"/api/v1/providers/some-provider", map[string]string{"name": "some-provider"})
 	if r.OK {
 		t.Fatal("expected error when updateGlobalProvider is nil")
 	}
 }
 
 func TestMgmt_GlobalProviders_UpdateSuccess(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	var updated string
 	mgmt.SetUpdateGlobalProvider(func(name string, info GlobalProviderInfo) error {
 		updated = name
 		return nil
 	})
 
-	r := mgmtPut(t, ts.URL+"/api/v1/providers/relay-1", "tok", map[string]string{"model": "gpt-5"})
+	r := mgmtPut(t, ts.URL+"/api/v1/providers/relay-1", map[string]string{"model": "gpt-5"})
 	if !r.OK {
 		t.Fatalf("update global provider failed: %s", r.Error)
 	}
@@ -1726,12 +1645,12 @@ func TestMgmt_GlobalProviders_UpdateSuccess(t *testing.T) {
 }
 
 func TestMgmt_GlobalProviders_DeleteNotFound(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetRemoveGlobalProvider(func(name string) error {
 		return errors.New("not found: " + name)
 	})
 
-	r := mgmtDelete(t, ts.URL+"/api/v1/providers/nope", "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/providers/nope")
 	if r.OK {
 		t.Fatal("expected 404")
 	}
@@ -1740,32 +1659,32 @@ func TestMgmt_GlobalProviders_DeleteNotFound(t *testing.T) {
 // ── Provider Presets ──
 
 func TestMgmt_ProviderPresets_NilFunc(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/providers/presets", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/providers/presets")
 	if !r.OK {
 		t.Fatalf("presets failed: %s", r.Error)
 	}
 }
 
 func TestMgmt_ProviderPresets_WithFunc(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetFetchPresets(func() (*ProviderPresetsResponse, error) {
 		return &ProviderPresetsResponse{Version: 2}, nil
 	})
 
-	r := mgmtGet(t, ts.URL+"/api/v1/providers/presets", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/providers/presets")
 	if !r.OK {
 		t.Fatalf("presets failed: %s", r.Error)
 	}
 }
 
 func TestMgmt_ProviderPresets_Error(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetFetchPresets(func() (*ProviderPresetsResponse, error) {
 		return nil, errors.New("network error")
 	})
 
-	r := mgmtGet(t, ts.URL+"/api/v1/providers/presets", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/providers/presets")
 	if r.OK {
 		t.Fatal("expected error")
 	}
@@ -1774,9 +1693,9 @@ func TestMgmt_ProviderPresets_Error(t *testing.T) {
 // ── Skills ──
 
 func TestMgmt_Skills(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/skills", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/skills")
 	if !r.OK {
 		t.Fatalf("skills failed: %s", r.Error)
 	}
@@ -1792,38 +1711,38 @@ func TestMgmt_Skills(t *testing.T) {
 }
 
 func TestMgmt_Skills_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPost(t, ts.URL+"/api/v1/skills", "tok", nil)
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPost(t, ts.URL+"/api/v1/skills", nil)
 	if r.OK {
 		t.Fatal("expected POST on skills to fail")
 	}
 }
 
 func TestMgmt_SkillPresets_NilFunc(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/skills/presets", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/skills/presets")
 	if !r.OK {
 		t.Fatalf("skill presets failed: %s", r.Error)
 	}
 }
 
 func TestMgmt_SkillPresets_WithFunc(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetFetchSkillPresets(func() (*SkillPresetsResponse, error) {
 		return &SkillPresetsResponse{Version: 1}, nil
 	})
-	r := mgmtGet(t, ts.URL+"/api/v1/skills/presets", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/skills/presets")
 	if !r.OK {
 		t.Fatalf("skill presets failed: %s", r.Error)
 	}
 }
 
 func TestMgmt_SkillPresets_Error(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetFetchSkillPresets(func() (*SkillPresetsResponse, error) {
 		return nil, errors.New("fetch failed")
 	})
-	r := mgmtGet(t, ts.URL+"/api/v1/skills/presets", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/skills/presets")
 	if r.OK {
 		t.Fatal("expected error")
 	}
@@ -1832,7 +1751,7 @@ func TestMgmt_SkillPresets_Error(t *testing.T) {
 // ── Cron PATCH (update job) ──
 
 func TestMgmt_CronPatch(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -1842,7 +1761,7 @@ func TestMgmt_CronPatch(t *testing.T) {
 	mgmt.SetCronScheduler(cs)
 
 	// Add a job
-	r := mgmtPost(t, ts.URL+"/api/v1/cron", "tok", map[string]any{
+	r := mgmtPost(t, ts.URL+"/api/v1/cron", map[string]any{
 		"project":     "test-project",
 		"session_key": "test:chan:user",
 		"cron_expr":   "0 9 * * *",
@@ -1855,7 +1774,7 @@ func TestMgmt_CronPatch(t *testing.T) {
 	json.Unmarshal(r.Data, &job)
 
 	// Patch it
-	r = mgmtPatch(t, ts.URL+"/api/v1/cron/"+job.ID, "tok", map[string]any{
+	r = mgmtPatch(t, ts.URL+"/api/v1/cron/"+job.ID, map[string]any{
 		"enabled": false,
 	})
 	if !r.OK {
@@ -1870,7 +1789,7 @@ func TestMgmt_CronPatch(t *testing.T) {
 }
 
 func TestMgmt_CronPatch_NonexistentJob(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -1879,7 +1798,7 @@ func TestMgmt_CronPatch_NonexistentJob(t *testing.T) {
 	cs.RegisterEngine("test-project", e)
 	mgmt.SetCronScheduler(cs)
 
-	r := mgmtPatch(t, ts.URL+"/api/v1/cron/nonexistent", "tok", map[string]any{"enabled": false})
+	r := mgmtPatch(t, ts.URL+"/api/v1/cron/nonexistent", map[string]any{"enabled": false})
 	if r.OK {
 		t.Fatal("expected error for nonexistent cron job")
 	}
@@ -1888,8 +1807,8 @@ func TestMgmt_CronPatch_NonexistentJob(t *testing.T) {
 // ── Project routes: unknown sub-path ──
 
 func TestMgmt_ProjectRoutes_UnknownSubpath(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/unknown-route", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/unknown-route")
 	if r.OK {
 		t.Fatal("expected 404 for unknown sub-path")
 	}
@@ -1898,8 +1817,8 @@ func TestMgmt_ProjectRoutes_UnknownSubpath(t *testing.T) {
 // ── Session create missing session_key ──
 
 func TestMgmt_SessionCreate_MissingKey(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok", map[string]string{
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions", map[string]string{
 		"name": "work",
 	})
 	if r.OK {
@@ -1910,11 +1829,11 @@ func TestMgmt_SessionCreate_MissingKey(t *testing.T) {
 // ── Reload failure ──
 
 func TestMgmt_Reload_Failure(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	_, ts, e := testManagementServer(t)
 	e.configReloadFunc = func() (*ConfigReloadResult, error) {
 		return nil, errors.New("parse error")
 	}
-	r := mgmtPost(t, ts.URL+"/api/v1/reload", "tok", nil)
+	r := mgmtPost(t, ts.URL+"/api/v1/reload", nil)
 	if r.OK {
 		t.Fatal("expected reload failure")
 	}
@@ -1926,14 +1845,13 @@ func TestMgmt_Reload_Failure(t *testing.T) {
 // ── Config PUT (save) ──
 
 func TestMgmt_Config_Save(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
 	tmp := t.TempDir()
 	cfgPath := tmp + "/config.toml"
 	os.WriteFile(cfgPath, []byte("[display]\ntitle = \"old\"\n"), 0644)
 
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/config", strings.NewReader("# new config\n"))
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -1948,8 +1866,8 @@ func TestMgmt_Config_Save(t *testing.T) {
 // ── CC-Switch providers ──
 
 func TestMgmt_CCSwitchProviders_NotConfigured(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/providers/cc-switch", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/providers/cc-switch")
 	if !r.OK {
 		t.Fatalf("cc-switch get failed: %s", r.Error)
 	}
@@ -1967,12 +1885,12 @@ func TestMgmt_CCSwitchProviders_NotConfigured(t *testing.T) {
 // ── Restart edge cases ──
 
 func TestMgmt_Restart_AlreadyInProgress(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
 	// Fill the buffered channel (cap=1) so the next restart is rejected.
 	RestartCh <- RestartRequest{}
 
-	r := mgmtPost(t, ts.URL+"/api/v1/restart", "tok", nil)
+	r := mgmtPost(t, ts.URL+"/api/v1/restart", nil)
 	if r.OK {
 		t.Fatal("expected conflict when restart channel is full")
 	}
@@ -1985,9 +1903,9 @@ func TestMgmt_Restart_AlreadyInProgress(t *testing.T) {
 }
 
 func TestMgmt_Restart_WithSessionKey(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtPost(t, ts.URL+"/api/v1/restart", "tok", map[string]string{
+	r := mgmtPost(t, ts.URL+"/api/v1/restart", map[string]string{
 		"session_key": "user1",
 		"platform":    "feishu",
 	})
@@ -2003,8 +1921,8 @@ func TestMgmt_Restart_WithSessionKey(t *testing.T) {
 // ── Config edge cases ──
 
 func TestMgmt_Config_NoPathSet(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/config", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/config")
 	if r.OK {
 		t.Fatal("expected error when configFilePath is empty")
 	}
@@ -2014,18 +1932,18 @@ func TestMgmt_Config_NoPathSet(t *testing.T) {
 }
 
 func TestMgmt_Config_FileNotFound(t *testing.T) {
-	srv, ts, _ := testManagementServer(t, "tok")
+	srv, ts, _ := testManagementServer(t)
 	srv.SetConfigFilePath("/nonexistent/path/config.toml")
 
-	r := mgmtGet(t, ts.URL+"/api/v1/config", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/config")
 	if r.OK {
 		t.Fatal("expected error for missing config file")
 	}
 }
 
 func TestMgmt_Config_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPost(t, ts.URL+"/api/v1/config", "tok", nil)
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPost(t, ts.URL+"/api/v1/config", nil)
 	if r.OK {
 		t.Fatal("expected POST on config to fail")
 	}
@@ -2034,11 +1952,10 @@ func TestMgmt_Config_MethodNotAllowed(t *testing.T) {
 // ── Settings edge cases ──
 
 func TestMgmt_GlobalSettings_PatchInvalidJSON(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetSaveGlobalSettings(func(updates map[string]any) error { return nil })
 
 	req, _ := http.NewRequest("PATCH", ts.URL+"/api/v1/settings", strings.NewReader("{bad json"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2056,16 +1973,16 @@ func TestMgmt_GlobalSettings_PatchInvalidJSON(t *testing.T) {
 }
 
 func TestMgmt_GlobalSettings_PatchNotConfigured(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPatch(t, ts.URL+"/api/v1/settings", "tok", map[string]any{"x": 1})
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPatch(t, ts.URL+"/api/v1/settings", map[string]any{"x": 1})
 	if r.OK {
 		t.Fatal("expected error when saveGlobalSettings is nil")
 	}
 }
 
 func TestMgmt_GlobalSettings_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtDelete(t, ts.URL+"/api/v1/settings", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtDelete(t, ts.URL+"/api/v1/settings")
 	if r.OK {
 		t.Fatal("expected DELETE on settings to fail")
 	}
@@ -2074,9 +1991,8 @@ func TestMgmt_GlobalSettings_MethodNotAllowed(t *testing.T) {
 // ── Send edge cases ──
 
 func TestMgmt_ProjectSend_InvalidJSON(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/projects/test-project/send", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2091,8 +2007,8 @@ func TestMgmt_ProjectSend_InvalidJSON(t *testing.T) {
 }
 
 func TestMgmt_ProjectSend_NonexistentProject(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/nonexistent/send", "tok", map[string]string{
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/nonexistent/send", map[string]string{
 		"message": "hello",
 	})
 	if r.OK {
@@ -2103,9 +2019,8 @@ func TestMgmt_ProjectSend_NonexistentProject(t *testing.T) {
 // ── Project Detail PATCH edge cases ──
 
 func TestMgmt_ProjectPatch_InvalidJSON(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 	req, _ := http.NewRequest("PATCH", ts.URL+"/api/v1/projects/test-project", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2120,9 +2035,9 @@ func TestMgmt_ProjectPatch_InvalidJSON(t *testing.T) {
 }
 
 func TestMgmt_ProjectPatch_UnknownAgentType(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 	agentType := "totally-unknown-agent"
-	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", map[string]any{
 		"agent_type": agentType,
 	})
 	if r.OK {
@@ -2134,7 +2049,7 @@ func TestMgmt_ProjectPatch_UnknownAgentType(t *testing.T) {
 }
 
 func TestMgmt_ProjectPatch_RejectsMissingWorkDirBeforeMutation(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	agent := &stubWorkDirAgent{workDir: "/existing"}
 	e.agent = agent
 
@@ -2145,7 +2060,7 @@ func TestMgmt_ProjectPatch_RejectsMissingWorkDirBeforeMutation(t *testing.T) {
 	})
 
 	missing := filepath.Join(t.TempDir(), "missing")
-	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", map[string]any{
 		"work_dir": missing,
 	})
 	if r.OK {
@@ -2163,8 +2078,8 @@ func TestMgmt_ProjectPatch_RejectsMissingWorkDirBeforeMutation(t *testing.T) {
 }
 
 func TestMgmt_ProjectPatch_DisabledCommands(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
-	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+	_, ts, e := testManagementServer(t)
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", map[string]any{
 		"disabled_commands": []string{"new", "delete"},
 	})
 	if !r.OK {
@@ -2178,8 +2093,8 @@ func TestMgmt_ProjectPatch_DisabledCommands(t *testing.T) {
 }
 
 func TestMgmt_ProjectPatch_AdminFrom(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
-	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+	_, ts, e := testManagementServer(t)
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", map[string]any{
 		"admin_from": "user123",
 	})
 	if !r.OK {
@@ -2194,9 +2109,9 @@ func TestMgmt_ProjectPatch_AdminFrom(t *testing.T) {
 }
 
 func TestMgmt_ProjectPatch_Language(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	_, ts, e := testManagementServer(t)
 	for _, lang := range []string{"zh", "ja", "es", "zh-TW", "en"} {
-		r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+		r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", map[string]any{
 			"language": lang,
 		})
 		if !r.OK {
@@ -2209,8 +2124,8 @@ func TestMgmt_ProjectPatch_Language(t *testing.T) {
 }
 
 func TestMgmt_ProjectDetail_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project", "tok", nil)
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project", nil)
 	if r.OK {
 		t.Fatal("expected POST on project detail to fail")
 	}
@@ -2219,13 +2134,13 @@ func TestMgmt_ProjectDetail_MethodNotAllowed(t *testing.T) {
 // ── Project Delete edge cases ──
 
 func TestMgmt_ProjectDelete_Success(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	var removed string
 	mgmt.SetRemoveProject(func(name string) error {
 		removed = name
 		return nil
 	})
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project", "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project")
 	if !r.OK {
 		t.Fatalf("delete project failed: %s", r.Error)
 	}
@@ -2240,11 +2155,11 @@ func TestMgmt_ProjectDelete_Success(t *testing.T) {
 }
 
 func TestMgmt_ProjectDelete_Error(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetRemoveProject(func(name string) error {
 		return errors.New("cannot remove last project")
 	})
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project", "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project")
 	if r.OK {
 		t.Fatal("expected error from removeProject")
 	}
@@ -2256,12 +2171,12 @@ func TestMgmt_ProjectDelete_Error(t *testing.T) {
 // ── Session switch edge cases ──
 
 func TestMgmt_SessionSwitch_Success(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	_, ts, e := testManagementServer(t)
 
 	s1 := e.sessions.GetOrCreateActive("user1")
 	s2 := e.sessions.NewSession("user1", "second session")
 
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions/switch", "tok", map[string]string{
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions/switch", map[string]string{
 		"session_key": "user1",
 		"session_id":  s2.ID,
 	})
@@ -2275,9 +2190,9 @@ func TestMgmt_SessionSwitch_Success(t *testing.T) {
 }
 
 func TestMgmt_SessionSwitch_MissingFields(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions/switch", "tok", map[string]string{
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions/switch", map[string]string{
 		"session_key": "user1",
 	})
 	if r.OK {
@@ -2289,10 +2204,10 @@ func TestMgmt_SessionSwitch_MissingFields(t *testing.T) {
 }
 
 func TestMgmt_SessionSwitch_InvalidSessionID(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	_, ts, e := testManagementServer(t)
 	e.sessions.GetOrCreateActive("user1")
 
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions/switch", "tok", map[string]string{
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions/switch", map[string]string{
 		"session_key": "user1",
 		"session_id":  "nonexistent-id",
 	})
@@ -2302,17 +2217,16 @@ func TestMgmt_SessionSwitch_InvalidSessionID(t *testing.T) {
 }
 
 func TestMgmt_SessionSwitch_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/switch", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/switch")
 	if r.OK {
 		t.Fatal("expected GET on session switch to fail")
 	}
 }
 
 func TestMgmt_SessionSwitch_InvalidJSON(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/projects/test-project/sessions/switch", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2329,34 +2243,33 @@ func TestMgmt_SessionSwitch_InvalidJSON(t *testing.T) {
 // ── Session detail edge cases ──
 
 func TestMgmt_SessionDetail_NotFound(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/nonexistent-id", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions/nonexistent-id")
 	if r.OK {
 		t.Fatal("expected 404 for nonexistent session")
 	}
 }
 
 func TestMgmt_SessionDetail_DeleteNotFound(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project/sessions/nonexistent-id", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project/sessions/nonexistent-id")
 	if r.OK {
 		t.Fatal("expected 404 for deleting nonexistent session")
 	}
 }
 
 func TestMgmt_SessionDetail_MethodNotAllowed(t *testing.T) {
-	_, ts, e := testManagementServer(t, "tok")
+	_, ts, e := testManagementServer(t)
 	s := e.sessions.GetOrCreateActive("user1")
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions/"+s.ID, "tok", nil)
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/sessions/"+s.ID, nil)
 	if r.OK {
 		t.Fatal("expected POST on session detail to fail")
 	}
 }
 
 func TestMgmt_SessionCreate_InvalidJSON(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
+	_, ts, _ := testManagementServer(t)
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/projects/test-project/sessions", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2371,8 +2284,8 @@ func TestMgmt_SessionCreate_InvalidJSON(t *testing.T) {
 }
 
 func TestMgmt_Sessions_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project/sessions")
 	if r.OK {
 		t.Fatal("expected DELETE on sessions list to fail")
 	}
@@ -2383,7 +2296,7 @@ func TestMgmt_Sessions_MethodNotAllowed(t *testing.T) {
 func TestMgmt_ProjectProviders_PostInvalidJSON(t *testing.T) {
 	agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "a"}}}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
@@ -2391,7 +2304,6 @@ func TestMgmt_ProjectProviders_PostInvalidJSON(t *testing.T) {
 	defer ts.Close()
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/projects/proj/providers", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2411,14 +2323,14 @@ func TestMgmt_ProjectProviders_DeleteNotFound(t *testing.T) {
 		active:    "openai",
 	}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/proj/providers/nonexistent", "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/proj/providers/nonexistent")
 	if r.OK {
 		t.Fatal("expected 404 for nonexistent provider")
 	}
@@ -2427,14 +2339,14 @@ func TestMgmt_ProjectProviders_DeleteNotFound(t *testing.T) {
 func TestMgmt_ProjectProviders_MethodNotAllowed(t *testing.T) {
 	agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "a"}}}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtPut(t, ts.URL+"/api/v1/projects/proj/providers", "tok", nil)
+	r := mgmtPut(t, ts.URL+"/api/v1/projects/proj/providers", nil)
 	if r.OK {
 		t.Fatal("expected PUT on providers list to fail")
 	}
@@ -2445,7 +2357,7 @@ func TestMgmt_ProjectProviders_MethodNotAllowed(t *testing.T) {
 func TestMgmt_ProjectProviderRefs_PutInvalidJSON(t *testing.T) {
 	agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "a"}}}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mgmt.SetSaveProviderRefs(func(proj string, refs []string) error { return nil })
 	mux := http.NewServeMux()
@@ -2454,7 +2366,6 @@ func TestMgmt_ProjectProviderRefs_PutInvalidJSON(t *testing.T) {
 	defer ts.Close()
 
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/projects/proj/provider-refs", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2471,7 +2382,7 @@ func TestMgmt_ProjectProviderRefs_PutInvalidJSON(t *testing.T) {
 func TestMgmt_ProjectProviderRefs_PutSaveError(t *testing.T) {
 	agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "a"}}}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mgmt.SetSaveProviderRefs(func(proj string, refs []string) error {
 		return errors.New("disk full")
@@ -2481,7 +2392,7 @@ func TestMgmt_ProjectProviderRefs_PutSaveError(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtPut(t, ts.URL+"/api/v1/projects/proj/provider-refs", "tok", map[string]any{
+	r := mgmtPut(t, ts.URL+"/api/v1/projects/proj/provider-refs", map[string]any{
 		"provider_refs": []string{"shared"},
 	})
 	if r.OK {
@@ -2495,7 +2406,7 @@ func TestMgmt_ProjectProviderRefs_PutSaveError(t *testing.T) {
 func TestMgmt_ProjectProviderRefs_PutSuccess(t *testing.T) {
 	agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "a"}}}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	var savedRefs []string
 	mgmt.SetSaveProviderRefs(func(proj string, refs []string) error {
@@ -2507,7 +2418,7 @@ func TestMgmt_ProjectProviderRefs_PutSuccess(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtPut(t, ts.URL+"/api/v1/projects/proj/provider-refs", "tok", map[string]any{
+	r := mgmtPut(t, ts.URL+"/api/v1/projects/proj/provider-refs", map[string]any{
 		"provider_refs": []string{"shared-1", "shared-2"},
 	})
 	if !r.OK {
@@ -2521,14 +2432,14 @@ func TestMgmt_ProjectProviderRefs_PutSuccess(t *testing.T) {
 func TestMgmt_ProjectProviderRefs_MethodNotAllowed(t *testing.T) {
 	agent := &stubProviderAgent{providers: []ProviderConfig{{Name: "a"}}}
 	e := NewEngine("proj", agent, nil, "", LangEnglish)
-	mgmt := NewManagementServer(0, "tok", nil)
+	mgmt := NewManagementServer()
 	mgmt.RegisterEngine("proj", e)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/proj/provider-refs", "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/proj/provider-refs")
 	if r.OK {
 		t.Fatal("expected DELETE on provider-refs to fail")
 	}
@@ -2537,8 +2448,8 @@ func TestMgmt_ProjectProviderRefs_MethodNotAllowed(t *testing.T) {
 // ── Users edge cases ──
 
 func TestMgmt_ProjectUsers_PatchValid(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project/users", "tok", map[string]any{
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project/users", map[string]any{
 		"default_role": "member",
 		"roles": map[string]any{
 			"member": map[string]any{
@@ -2555,8 +2466,8 @@ func TestMgmt_ProjectUsers_PatchValid(t *testing.T) {
 }
 
 func TestMgmt_ProjectUsers_PatchInvalidRoleConfig(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project/users", "tok", map[string]any{
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project/users", map[string]any{
 		"default_role": "nonexistent",
 		"roles": map[string]any{
 			"admin": map[string]any{
@@ -2573,8 +2484,8 @@ func TestMgmt_ProjectUsers_PatchInvalidRoleConfig(t *testing.T) {
 }
 
 func TestMgmt_ProjectUsers_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project/users", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtDelete(t, ts.URL+"/api/v1/projects/test-project/users")
 	if r.OK {
 		t.Fatal("expected DELETE on users to fail")
 	}
@@ -2583,11 +2494,11 @@ func TestMgmt_ProjectUsers_MethodNotAllowed(t *testing.T) {
 // ── Global Providers edge cases ──
 
 func TestMgmt_GlobalProviders_GetError(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetListGlobalProviders(func() ([]GlobalProviderInfo, error) {
 		return nil, errors.New("db connection lost")
 	})
-	r := mgmtGet(t, ts.URL+"/api/v1/providers", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/providers")
 	if r.OK {
 		t.Fatal("expected error from list")
 	}
@@ -2597,11 +2508,10 @@ func TestMgmt_GlobalProviders_GetError(t *testing.T) {
 }
 
 func TestMgmt_GlobalProviders_PostInvalidJSON(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetAddGlobalProvider(func(info GlobalProviderInfo) error { return nil })
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/providers", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2616,30 +2526,29 @@ func TestMgmt_GlobalProviders_PostInvalidJSON(t *testing.T) {
 }
 
 func TestMgmt_GlobalProviders_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtDelete(t, ts.URL+"/api/v1/providers", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtDelete(t, ts.URL+"/api/v1/providers")
 	if r.OK {
 		t.Fatal("expected DELETE on /providers to fail")
 	}
 }
 
 func TestMgmt_GlobalProviders_UpdateNotFound(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetUpdateGlobalProvider(func(name string, info GlobalProviderInfo) error {
 		return errors.New("not found: " + name)
 	})
-	r := mgmtPut(t, ts.URL+"/api/v1/providers/nope", "tok", map[string]string{"model": "x"})
+	r := mgmtPut(t, ts.URL+"/api/v1/providers/nope", map[string]string{"model": "x"})
 	if r.OK {
 		t.Fatal("expected 404")
 	}
 }
 
 func TestMgmt_GlobalProviders_UpdateInvalidJSON(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetUpdateGlobalProvider(func(name string, info GlobalProviderInfo) error { return nil })
 
 	req, _ := http.NewRequest("PUT", ts.URL+"/api/v1/providers/test", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2654,21 +2563,21 @@ func TestMgmt_GlobalProviders_UpdateInvalidJSON(t *testing.T) {
 }
 
 func TestMgmt_GlobalProviders_DeleteNotConfigured(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtDelete(t, ts.URL+"/api/v1/providers/anything", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtDelete(t, ts.URL+"/api/v1/providers/anything")
 	if r.OK {
 		t.Fatal("expected error when removeGlobalProvider is nil")
 	}
 }
 
 func TestMgmt_GlobalProviders_DeleteSuccess(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	var deleted string
 	mgmt.SetRemoveGlobalProvider(func(name string) error {
 		deleted = name
 		return nil
 	})
-	r := mgmtDelete(t, ts.URL+"/api/v1/providers/relay-old", "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/providers/relay-old")
 	if !r.OK {
 		t.Fatalf("delete global provider failed: %s", r.Error)
 	}
@@ -2678,10 +2587,10 @@ func TestMgmt_GlobalProviders_DeleteSuccess(t *testing.T) {
 }
 
 func TestMgmt_GlobalProviders_RouteMethodNotAllowed(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetUpdateGlobalProvider(func(name string, info GlobalProviderInfo) error { return nil })
 
-	r := mgmtPost(t, ts.URL+"/api/v1/providers/test-prov", "tok", nil)
+	r := mgmtPost(t, ts.URL+"/api/v1/providers/test-prov", nil)
 	if r.OK {
 		t.Fatal("expected POST on /providers/{name} to fail")
 	}
@@ -2690,13 +2599,13 @@ func TestMgmt_GlobalProviders_RouteMethodNotAllowed(t *testing.T) {
 // ── Heartbeat edge cases ──
 
 func TestMgmt_Heartbeat_PauseResumeRun(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	hs := NewHeartbeatScheduler("")
 	mgmt.SetHeartbeatScheduler(hs)
 
 	// pause/resume/run on unconfigured project → 404
 	for _, action := range []string{"pause", "resume", "run"} {
-		r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/heartbeat/"+action, "tok", nil)
+		r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/heartbeat/"+action, nil)
 		if r.OK {
 			t.Fatalf("expected 404 for heartbeat %s on unconfigured project", action)
 		}
@@ -2704,11 +2613,11 @@ func TestMgmt_Heartbeat_PauseResumeRun(t *testing.T) {
 }
 
 func TestMgmt_Heartbeat_IntervalTooSmall(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	hs := NewHeartbeatScheduler("")
 	mgmt.SetHeartbeatScheduler(hs)
 
-	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/heartbeat/interval", "tok",
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/heartbeat/interval",
 		map[string]any{"minutes": 0})
 	if r.OK {
 		t.Fatal("expected error for minutes < 1")
@@ -2719,12 +2628,11 @@ func TestMgmt_Heartbeat_IntervalTooSmall(t *testing.T) {
 }
 
 func TestMgmt_Heartbeat_IntervalInvalidJSON(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	hs := NewHeartbeatScheduler("")
 	mgmt.SetHeartbeatScheduler(hs)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/projects/test-project/heartbeat/interval", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2739,22 +2647,22 @@ func TestMgmt_Heartbeat_IntervalInvalidJSON(t *testing.T) {
 }
 
 func TestMgmt_Heartbeat_UnknownAction(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	hs := NewHeartbeatScheduler("")
 	mgmt.SetHeartbeatScheduler(hs)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/heartbeat/unknown", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/heartbeat/unknown")
 	if r.OK {
 		t.Fatal("expected 404 for unknown heartbeat action")
 	}
 }
 
 func TestMgmt_Heartbeat_MethodNotAllowed(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	hs := NewHeartbeatScheduler("")
 	mgmt.SetHeartbeatScheduler(hs)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/heartbeat/pause", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/heartbeat/pause")
 	if r.OK {
 		t.Fatal("expected GET on pause to fail")
 	}
@@ -2763,13 +2671,13 @@ func TestMgmt_Heartbeat_MethodNotAllowed(t *testing.T) {
 // ── Cron edge cases ──
 
 func TestMgmt_Cron_PostMissingCronExpr(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, _ := NewCronStore(t.TempDir())
 	cs := NewCronScheduler(store)
 	cs.RegisterEngine("test-project", e)
 	mgmt.SetCronScheduler(cs)
 
-	r := mgmtPost(t, ts.URL+"/api/v1/cron", "tok", map[string]any{
+	r := mgmtPost(t, ts.URL+"/api/v1/cron", map[string]any{
 		"project": "test-project",
 		"prompt":  "hello",
 	})
@@ -2782,13 +2690,13 @@ func TestMgmt_Cron_PostMissingCronExpr(t *testing.T) {
 }
 
 func TestMgmt_Cron_PostMissingPromptAndExec(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, _ := NewCronStore(t.TempDir())
 	cs := NewCronScheduler(store)
 	cs.RegisterEngine("test-project", e)
 	mgmt.SetCronScheduler(cs)
 
-	r := mgmtPost(t, ts.URL+"/api/v1/cron", "tok", map[string]any{
+	r := mgmtPost(t, ts.URL+"/api/v1/cron", map[string]any{
 		"project":   "test-project",
 		"cron_expr": "0 9 * * *",
 	})
@@ -2798,13 +2706,13 @@ func TestMgmt_Cron_PostMissingPromptAndExec(t *testing.T) {
 }
 
 func TestMgmt_Cron_PostPromptAndExecMutuallyExclusive(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, _ := NewCronStore(t.TempDir())
 	cs := NewCronScheduler(store)
 	cs.RegisterEngine("test-project", e)
 	mgmt.SetCronScheduler(cs)
 
-	r := mgmtPost(t, ts.URL+"/api/v1/cron", "tok", map[string]any{
+	r := mgmtPost(t, ts.URL+"/api/v1/cron", map[string]any{
 		"project":   "test-project",
 		"cron_expr": "0 9 * * *",
 		"prompt":    "hello",
@@ -2819,14 +2727,13 @@ func TestMgmt_Cron_PostPromptAndExecMutuallyExclusive(t *testing.T) {
 }
 
 func TestMgmt_Cron_PostInvalidJSON(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, _ := NewCronStore(t.TempDir())
 	cs := NewCronScheduler(store)
 	cs.RegisterEngine("test-project", e)
 	mgmt.SetCronScheduler(cs)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/api/v1/cron", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2841,40 +2748,39 @@ func TestMgmt_Cron_PostInvalidJSON(t *testing.T) {
 }
 
 func TestMgmt_Cron_MethodNotAllowed(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, _ := NewCronStore(t.TempDir())
 	cs := NewCronScheduler(store)
 	cs.RegisterEngine("test-project", e)
 	mgmt.SetCronScheduler(cs)
 
-	r := mgmtDelete(t, ts.URL+"/api/v1/cron", "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/cron")
 	if r.OK {
 		t.Fatal("expected DELETE on /cron to fail")
 	}
 }
 
 func TestMgmt_CronByID_MethodNotAllowed(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, _ := NewCronStore(t.TempDir())
 	cs := NewCronScheduler(store)
 	cs.RegisterEngine("test-project", e)
 	mgmt.SetCronScheduler(cs)
 
-	r := mgmtGet(t, ts.URL+"/api/v1/cron/some-id", "tok")
+	r := mgmtGet(t, ts.URL+"/api/v1/cron/some-id")
 	if r.OK {
 		t.Fatal("expected GET on /cron/{id} to fail")
 	}
 }
 
 func TestMgmt_CronPatch_InvalidJSON(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, _ := NewCronStore(t.TempDir())
 	cs := NewCronScheduler(store)
 	cs.RegisterEngine("test-project", e)
 	mgmt.SetCronScheduler(cs)
 
 	req, _ := http.NewRequest("PATCH", ts.URL+"/api/v1/cron/some-id", strings.NewReader("{bad"))
-	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -2889,13 +2795,13 @@ func TestMgmt_CronPatch_InvalidJSON(t *testing.T) {
 }
 
 func TestMgmt_CronByID_EmptyID(t *testing.T) {
-	mgmt, ts, e := testManagementServer(t, "tok")
+	mgmt, ts, e := testManagementServer(t)
 	store, _ := NewCronStore(t.TempDir())
 	cs := NewCronScheduler(store)
 	cs.RegisterEngine("test-project", e)
 	mgmt.SetCronScheduler(cs)
 
-	r := mgmtDelete(t, ts.URL+"/api/v1/cron/", "tok")
+	r := mgmtDelete(t, ts.URL+"/api/v1/cron/")
 	if r.OK {
 		t.Fatal("expected error for empty cron id")
 	}
@@ -2904,8 +2810,8 @@ func TestMgmt_CronByID_EmptyID(t *testing.T) {
 // ── Project routes: empty project name ──
 
 func TestMgmt_ProjectRoutes_EmptyProjectName(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/projects/", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/")
 	// /projects/ with empty trailing slash is dispatched to handleProjectRoutes
 	// which returns "project name required" error.
 	if r.OK {
@@ -2916,16 +2822,16 @@ func TestMgmt_ProjectRoutes_EmptyProjectName(t *testing.T) {
 // ── Reload edge cases ──
 
 func TestMgmt_Reload_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtGet(t, ts.URL+"/api/v1/reload", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtGet(t, ts.URL+"/api/v1/reload")
 	if r.OK {
 		t.Fatal("expected GET on reload to fail")
 	}
 }
 
 func TestMgmt_Reload_NoReloadFunc(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPost(t, ts.URL+"/api/v1/reload", "tok", nil)
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPost(t, ts.URL+"/api/v1/reload", nil)
 	if !r.OK {
 		t.Fatalf("reload with nil reloadFunc should succeed: %s", r.Error)
 	}
@@ -2934,8 +2840,8 @@ func TestMgmt_Reload_NoReloadFunc(t *testing.T) {
 // ── CC-Switch edge cases ──
 
 func TestMgmt_CCSwitchProviders_PostNotConfigured(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtPost(t, ts.URL+"/api/v1/providers/cc-switch", "tok", map[string]any{
+	_, ts, _ := testManagementServer(t)
+	r := mgmtPost(t, ts.URL+"/api/v1/providers/cc-switch", map[string]any{
 		"names": []string{"relay-1"},
 	})
 	if r.OK {
@@ -2944,13 +2850,13 @@ func TestMgmt_CCSwitchProviders_PostNotConfigured(t *testing.T) {
 }
 
 func TestMgmt_CCSwitchProviders_PostMissingNames(t *testing.T) {
-	mgmt, ts, _ := testManagementServer(t, "tok")
+	mgmt, ts, _ := testManagementServer(t)
 	mgmt.SetListCCSwitchProviders(func() ([]CCSwitchProviderInfo, error) {
 		return nil, nil
 	})
 	mgmt.SetAddGlobalProvider(func(info GlobalProviderInfo) error { return nil })
 
-	r := mgmtPost(t, ts.URL+"/api/v1/providers/cc-switch", "tok", map[string]any{
+	r := mgmtPost(t, ts.URL+"/api/v1/providers/cc-switch", map[string]any{
 		"names": []string{},
 	})
 	if r.OK {
@@ -2962,8 +2868,8 @@ func TestMgmt_CCSwitchProviders_PostMissingNames(t *testing.T) {
 }
 
 func TestMgmt_CCSwitchProviders_MethodNotAllowed(t *testing.T) {
-	_, ts, _ := testManagementServer(t, "tok")
-	r := mgmtDelete(t, ts.URL+"/api/v1/providers/cc-switch", "tok")
+	_, ts, _ := testManagementServer(t)
+	r := mgmtDelete(t, ts.URL+"/api/v1/providers/cc-switch")
 	if r.OK {
 		t.Fatal("expected DELETE on cc-switch to fail")
 	}
@@ -2978,7 +2884,7 @@ func TestMgmt_CCSwitchProviders_MethodNotAllowed(t *testing.T) {
 // pointer dereference`. handleSetupWeixinBegin already validated this same
 // field; this test pins the symmetric handling here.
 func TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL(t *testing.T) {
-	mgmt := NewManagementServer(0, "", nil)
+	mgmt := NewManagementServer()
 
 	for _, bad := range []string{"://", "://malformed", "%zz"} {
 		body := map[string]any{

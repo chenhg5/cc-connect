@@ -756,6 +756,7 @@ func TestAvailableModels_BackgroundRefreshUpdatesDiskCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	a := agent.(*Agent)
 	switcher, ok := agent.(core.ModelSwitcher)
 	if !ok {
 		t.Fatalf("New() agent does not implement core.ModelSwitcher")
@@ -770,6 +771,7 @@ func TestAvailableModels_BackgroundRefreshUpdatesDiskCache(t *testing.T) {
 		t.Fatalf("os.WriteFile(%q) error = %v", gatePath, err)
 	}
 
+	a.refreshWg.Wait()
 	waitForModelsInPersistentCache(t, cachePath, []string{"fresh/model", "second/model"})
 
 	got = switcher.AvailableModels(context.Background())

@@ -9,7 +9,8 @@
     "cron": "排程工作",
     "bridge": "橋接",
     "skills": "技能",
-    "system": "系統"
+    "system": "系統",
+    "operations": "維運中心"
   },
   "dashboard": {
     "title": "總覽",
@@ -193,7 +194,9 @@
     "optional": "選填",
     "confirmDelete": "確定要刪除嗎？",
     "close": "關閉",
-    "saving": "儲存中…"
+    "saving": "儲存中…",
+    "copy": "複製",
+    "theme": "主題"
   },
   "setup": {
     "addPlatform": "新增平台",
@@ -497,6 +500,15 @@
     "free": "免費",
     "freemium": "免費增值",
     "paid": "付費"
+  },
+  "control": {
+    "firstSetup": "初始化控制面", "setupSubtitle": "建立唯一的管理員帳戶", "loginSubtitle": "登入 cc-connect 控制面",
+    "setupToken": "一次性設定 Token", "adminPassword": "管理員密碼", "confirmPassword": "確認密碼", "passwordMismatch": "兩次輸入的密碼不一致", "createAdmin": "建立管理員",
+    "operations": "維運中心", "operationsSubtitle": "管理 Runtime 裝置、發布、日誌與業務程序", "devices": "macOS Runtime 裝置", "pairDevice": "配對裝置", "pairExpires": "有效至 {{time}}", "online": "在線", "offline": "離線", "revoke": "撤銷", "renameDevice": "重新命名裝置", "deviceLogs": "連線日誌", "noDevices": "尚未配對裝置",
+    "service": "業務程序", "currentRelease": "目前版本", "update": "檢查並更新", "rollback": "回滾", "restart": "重新啟動", "running": "執行中", "stopped": "已停止", "noLogs": "暫無服務日誌", "deployRuns": "部署執行記錄",
+    "setupWizard": "初始化部署", "setupWizardSubtitle": "連接公開入口、macOS Runtime 與業務程序", "publicURL": "公開 HTTPS 位址", "openrestyConfig": "1Panel / OpenResty 反向代理設定",
+    "runtimePairing": "配對 macOS Runtime", "createPairingCode": "產生配對碼", "runtimeReady": "Runtime 在線，已發現 {{count}} 個專案目錄", "runtimeWaiting": "等待 Runtime 在線並回報有效 Codex 專案", "codexValidation": "驗證 Codex 與專案目錄",
+    "wecomOptional": "企業微信 WebSocket（選用）", "enableWeCom": "啟用企業微信工作區聊天", "wecomBotID": "企業微信 Bot ID", "wecomBotSecret": "企業微信 Bot Secret", "wecomAllowFrom": "允許的使用者 ID（選用）", "startService": "產生設定並啟動"
   },
   "theme": {
     "light": "淺色",

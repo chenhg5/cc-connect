@@ -72,19 +72,22 @@ const (
 // Workspace 是目录源签发的只读根目录。Ref 是客户端唯一可以提交的目录标识。
 type Workspace struct {
 	Ref         string `json:"ref"`
+	DeviceID    string `json:"device_id"`
+	DeviceName  string `json:"device_name"`
 	ProjectID   string `json:"project_id"`
 	ProjectName string `json:"project_name"`
 	RootIndex   int    `json:"root_index"`
 	RootName    string `json:"root_name"`
-	RootPath    string `json:"root_path"`
+	RootPath    string `json:"-"`
 	Available   bool   `json:"available"`
+	Online      bool   `json:"online"`
 	Error       string `json:"error,omitempty"`
 	Order       int    `json:"order"`
 }
 
 type NativeThread struct {
 	ID        string          `json:"id"`
-	Cwd       string          `json:"cwd"`
+	Cwd       string          `json:"-"`
 	Name      string          `json:"name,omitempty"`
 	Preview   string          `json:"preview,omitempty"`
 	Status    json.RawMessage `json:"status,omitempty"`
@@ -105,6 +108,24 @@ type NativeTurn struct {
 type WorkspaceCatalogProvider interface {
 	ListWorkspaces(ctx context.Context) ([]Workspace, error)
 	ResolveWorkspace(ctx context.Context, ref string) (Workspace, error)
+}
+
+type WorkspaceDevice struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Online  bool   `json:"online"`
+	Revoked bool   `json:"revoked"`
+}
+
+type WorkspaceDeviceCatalogProvider interface {
+	ListWorkspaceDevices(ctx context.Context) ([]WorkspaceDevice, error)
+}
+
+// WorkspaceAccessValidator 在目录状态的权威设备上重新验证目录和 thread 归属。
+// Linux control/server 不得用本机文件系统推断 macOS Runtime 的目录状态。
+type WorkspaceAccessValidator interface {
+	ValidateWorkspaceAccess(ctx context.Context, workspace Workspace) error
+	ValidateNativeThreadAccess(ctx context.Context, workspace Workspace, thread NativeThread) error
 }
 
 type ConversationKind string
@@ -382,12 +403,16 @@ type NativeConversationSnapshot struct {
 type NativeUserInput struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
-	// 以下字段只允许服务端从已验证的平台附件构造，JSON 客户端无法赋值。
+	// AttachmentRef 只在 control 与已认证 Runtime 之间传输。公开客户端即使
+	// 伪造该字段，也会被 WorkspaceChatService 的非可信输入校验拒绝。
+	AttachmentRef string `json:"attachment_ref,omitempty"`
+	MimeType      string `json:"mime_type,omitempty"`
+	FileName      string `json:"file_name,omitempty"`
+	Detail        string `json:"detail,omitempty"`
+	// 以下字段只存在于对应进程内，不能跨 JSON 边界传输。
 	URL       string `json:"-"`
-	Detail    string `json:"-"`
 	LocalPath string `json:"-"`
-	MimeType  string `json:"-"`
-	FileName  string `json:"-"`
+	Data      []byte `json:"-"`
 }
 
 type NativeTurnStartRequest struct {

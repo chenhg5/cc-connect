@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+const DefaultLogMaxSize = 10 * 1024 * 1024
+
 // ParseLogSize converts a human-friendly byte size string (e.g. "10MB",
 // "512K", "1G", or a raw byte count) into a byte count. Suffixes are
 // case-insensitive and may be followed by optional whitespace. Both the SI

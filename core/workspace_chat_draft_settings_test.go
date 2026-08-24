@@ -115,7 +115,7 @@ func TestWorkspaceChatDraftSettingsManagementRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	management := NewManagementServer(0, "", nil)
+	management := NewManagementServer()
 	management.SetWorkspaceChat(fixture.service)
 	body := []byte(`{"mode":"plan","plan_effort":"high"}`)
 	path := "/api/v1/chat/workspaces/" + fixture.workspaceA.Ref + "/drafts/" + draft.ID + "/settings"

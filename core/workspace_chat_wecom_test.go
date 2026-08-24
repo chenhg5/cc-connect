@@ -94,8 +94,8 @@ func newWorkspaceChatWeComFixture(t *testing.T) *workspaceChatTestFixture {
 	}
 	fixture.agent.mu.Unlock()
 	repository := newWorkspaceChatMemoryRepository()
-	engine := NewEngine("workspace-template", &workspaceChatWeComNativeAgent{workspaceChatNativeTestAgent: fixture.agent}, nil, "", LangEnglish)
-	service, err := NewWorkspaceChatService(engine, repository, []string{"web", "wecom"})
+	agent := &workspaceChatWeComNativeAgent{workspaceChatNativeTestAgent: fixture.agent}
+	service, err := NewWorkspaceChatService(WorkspaceChatDependencies{Catalog: agent, Validator: agent, Backend: agent, Settings: agent, Turns: agent, Realtime: agent, I18n: NewI18n(LangEnglish)}, repository, []string{"web", "wecom"})
 	if err != nil {
 		t.Fatalf("NewWorkspaceChatService() error = %v", err)
 	}
@@ -125,8 +125,15 @@ func TestWorkspaceChatWeComProjectAndThreadMenusRevalidateSelections(t *testing.
 	platform := newWorkspaceChatWeComTestPlatform()
 
 	first := sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "hello"})
-	if !strings.Contains(first, "Bind a project first") || !strings.Contains(first, "Project A") || !strings.Contains(first, "Project B") {
+	if !strings.Contains(first, "Select a Runtime device") || !strings.Contains(first, "Mac A") {
 		t.Fatalf("unbound ordinary-message reply = %q", first)
+	}
+	if reply := sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/device 1"}); !strings.Contains(reply, "device selected") {
+		t.Fatalf("/device reply = %q", reply)
+	}
+	projects := sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/projects"})
+	if !strings.Contains(projects, "Project A") || !strings.Contains(projects, "Project B") {
+		t.Fatalf("/projects reply = %q", projects)
 	}
 	sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/project 2"})
 	threadsA := sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/threads"})
@@ -144,6 +151,39 @@ func TestWorkspaceChatWeComProjectAndThreadMenusRevalidateSelections(t *testing.
 	}
 	if switched := sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/switch 1"}); !strings.Contains(switched, "thread selected") {
 		t.Fatalf("validated /switch reply = %q", switched)
+	}
+}
+
+func TestWorkspaceChatWeComDeviceSelectionScopesProjectsAndClearsOldConversation(t *testing.T) {
+	fixture := newWorkspaceChatWeComFixture(t)
+	platform := newWorkspaceChatWeComTestPlatform()
+	fixture.agent.mu.Lock()
+	fixture.agent.workspaces[0].DeviceID, fixture.agent.workspaces[0].DeviceName, fixture.agent.workspaces[0].Online = "device-a", "Mac A", true
+	fixture.agent.workspaces[1].DeviceID, fixture.agent.workspaces[1].DeviceName, fixture.agent.workspaces[1].Online = "device-b", "Mac B", true
+	fixture.agent.workspaces[0].Order = 1
+	fixture.agent.workspaces[1].Order = 2
+	fixture.agent.mu.Unlock()
+
+	devices := sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/devices"})
+	if !strings.Contains(devices, "Mac A") || !strings.Contains(devices, "Mac B") {
+		t.Fatalf("/devices reply = %q", devices)
+	}
+	sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/device 1"})
+	projects := sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/projects"})
+	if !strings.Contains(projects, "Project A") || strings.Contains(projects, "Project B") {
+		t.Fatalf("device A /projects reply = %q", projects)
+	}
+	sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/project 1"})
+
+	sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/devices"})
+	sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/device 2"})
+	selection, err := fixture.service.Selection(context.Background(), "wecom:user:user-1")
+	if err != nil || selection != nil {
+		t.Fatalf("selection after device switch = %#v, %v", selection, err)
+	}
+	projects = sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/projects"})
+	if strings.Contains(projects, "Project A") || !strings.Contains(projects, "Project B") {
+		t.Fatalf("device B /projects reply = %q", projects)
 	}
 }
 
@@ -249,8 +289,13 @@ func TestWorkspaceChatWeComDraftSettingsPersistAndMaterialize(t *testing.T) {
 		t.Fatalf("materialized turn calls = %#v", turnCalls)
 	}
 	if turnCalls[0].Request.Input[0].Type != "text" || turnCalls[0].Request.Input[1].Type != "image" ||
-		turnCalls[0].Request.Input[2].Type != "text" || turnCalls[0].Request.Input[3].Type != "text" {
+		turnCalls[0].Request.Input[2].Type != "file" || turnCalls[0].Request.Input[3].Type != "audio" {
 		t.Fatalf("verified WeCom inputs = %#v", turnCalls[0].Request.Input)
+	}
+	for index := 1; index < len(turnCalls[0].Request.Input); index++ {
+		if len(turnCalls[0].Request.Input[index].Data) == 0 || turnCalls[0].Request.Input[index].LocalPath != "" {
+			t.Fatalf("WeCom attachment %d was not kept as in-memory verified data: %#v", index, turnCalls[0].Request.Input[index])
+		}
 	}
 	link := sendWorkspaceChatWeCom(t, fixture.service, platform, Message{Content: "/link"})
 	if link != "codex://threads/"+selection.Conversation.ID {
@@ -313,7 +358,7 @@ func TestWorkspaceChatWeComUsageSteerCancelAndActiveTurnSemantics(t *testing.T) 
 	steerCalls := append([]workspaceChatSteerCall(nil), fixture.agent.steerCalls...)
 	startCalls := len(fixture.agent.startTurnCalls)
 	fixture.agent.mu.Unlock()
-	if len(steerCalls) != 1 || steerCalls[0].ExpectedTurnID != "turn-active" || len(steerCalls[0].Input) != 2 || steerCalls[0].Input[1].Type != "text" {
+	if len(steerCalls) != 1 || steerCalls[0].ExpectedTurnID != "turn-active" || len(steerCalls[0].Input) != 2 || steerCalls[0].Input[1].Type != "file" || len(steerCalls[0].Input[1].Data) == 0 {
 		t.Fatalf("steer calls = %#v", steerCalls)
 	}
 	ordinary := sendWorkspaceChatWeCom(t, fixture.service, platform, Message{MessageID: "ordinary-active", Content: "do not steer implicitly"})
@@ -503,8 +548,7 @@ func TestWorkspaceChatWeComHistoryReadsEveryItemPage(t *testing.T) {
 		},
 	}
 	repository := newWorkspaceChatMemoryRepository()
-	engine := NewEngine("workspace-template", agent, nil, "", LangEnglish)
-	service, err := NewWorkspaceChatService(engine, repository, []string{"wecom"})
+	service, err := NewWorkspaceChatService(WorkspaceChatDependencies{Catalog: agent, Validator: agent, Backend: agent, Settings: agent, Turns: agent, Realtime: agent, I18n: NewI18n(LangEnglish)}, repository, []string{"wecom"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,6 +24,9 @@ const (
 	initializationLockFileName = "workspace_chat.db.lock"
 )
 
+// SchemaVersion 写入 Release manifest，供 control 在切换版本前做兼容性检查。
+const SchemaVersion = currentSchemaVersion
+
 var openMu sync.Mutex
 
 type Repository struct{ db *sql.DB }

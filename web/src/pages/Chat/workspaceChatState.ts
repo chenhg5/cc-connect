@@ -246,7 +246,7 @@ export function workspaceChatStreamReducer(
       liveItems,
       optimisticInputs: (liveAdvanced || snapshot.active_turn) ? state.optimisticInputs : [],
       needsResync: false,
-      needsHistoryRefresh: false,
+      needsHistoryRefresh: liveAdvanced,
       error: undefined,
     };
   }

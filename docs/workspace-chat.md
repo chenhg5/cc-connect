@@ -7,34 +7,22 @@ This project is at `v0.1.0`. Workspace chat has one current REST contract, one W
 ## Configuration
 
 ```toml
-[management]
-enabled = true
-port = 9820
-token = "your-management-token"
-
 [workspace_chat]
 enabled = true
-template_project = "codex-template"
 transports = ["web", "wecom"]
 
-[[projects]]
-name = "codex-template"
-work_dir = "/path/to/a/default/project"
-
-[projects.agent]
-type = "codex"
-
-[projects.agent.options]
-backend = "app_server"
+[workspace_chat.wecom]
+bot_id = "your-bot-id"
+bot_secret = "your-bot-secret"
 ```
 
-The template must exist, use the Codex Agent, and set `backend = "app_server"`. At least one of `web` and `wecom` is required; `web` also requires the Management API. Invalid configuration fails startup explicitly. The template Agent owns one long-lived App Server connection shared by every workspace and starts it with the single supported `stdio://` transport; `app_server_url` and WebSocket transport aliases are rejected. Its configured `work_dir` is not a client-selectable root.
+The control setup wizard generates this configuration atomically. At least one of `web` and `wecom` is required; WeCom requires its WebSocket Bot credentials. The Linux server does not run a local Codex Agent or read a server-side `CODEX_HOME`.
 
-At initialization cc-connect enables the App Server experimental API and probes native settings, collaboration modes, paginated history, and realtime separately. An unavailable capability is returned with its reason. cc-connect never switches to a removed RPC or event protocol.
+Each paired macOS Runtime reads its local Codex App state and owns one App Server connection. Runtime enables the experimental API and probes native settings, collaboration modes, paginated history, and realtime separately. An unavailable capability is returned with its reason; no removed RPC or event protocol is used.
 
 ## Projects and conversations
 
-The project rail is read-only. Its order, projects, and roots come from a valid `CODEX_HOME/.codex-global-state.json`. A multi-root project expands into separate workspace rows. Missing or invalid roots remain visible with their real error and cannot be selected.
+The project rail is grouped by device and is read-only. Each Runtime supplies order, projects, and roots from its valid local `CODEX_HOME/.codex-global-state.json`. Offline devices and invalid roots remain visible with their real reason and cannot be operated.
 
 Clients submit only an opaque, server-issued `workspaceRef`. Every operation resolves that reference again and verifies that the native thread belongs to the canonical root. Browser JSON cannot supply `cwd`, server paths, sandbox roots, developer instructions, or unverified local attachment paths.
 

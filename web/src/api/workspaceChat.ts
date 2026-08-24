@@ -9,19 +9,20 @@ export interface ConversationRef {
 
 export interface Workspace {
   ref: string;
+  device_id: string;
+  device_name: string;
   project_id: string;
   project_name: string;
   root_index: number;
   root_name: string;
-  root_path: string;
   available: boolean;
+  online: boolean;
   error?: string;
   order: number;
 }
 
 export interface NativeThread {
   id: string;
-  cwd: string;
   name?: string;
   preview?: string;
   status?: unknown;
@@ -439,10 +440,7 @@ export const putWorkspaceChatSelection = (workspaceRef: string, conversation: Co
 
 export function workspaceChatWebSocketURL(): string {
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = new URL(`${scheme}//${window.location.host}/api/v1/chat/ws`);
-  const token = api.getToken();
-  if (token) url.searchParams.set('token', token);
-  return url.toString();
+  return new URL(`${scheme}//${window.location.host}/api/v1/chat/ws`).toString();
 }
 
 export function conversationPath(workspaceRef: string, conversation: ConversationRef): string {

@@ -293,17 +293,30 @@ type workspaceChatWSSubscribeRequest struct {
 	AfterSequence *uint64 `json:"after_sequence,omitempty"`
 }
 
+type workspaceChatPublicInput struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func nativeTextInputs(input []workspaceChatPublicInput) []NativeUserInput {
+	result := make([]NativeUserInput, 0, len(input))
+	for _, item := range input {
+		result = append(result, NativeUserInput{Type: item.Type, Text: item.Text})
+	}
+	return result
+}
+
 type workspaceChatWSTurnStartRequest struct {
 	workspaceChatWSRequestBase
-	Input    []NativeUserInput         `json:"input"`
-	Payload  json.RawMessage           `json:"payload,omitempty"`
-	Settings NativeThreadSettingsPatch `json:"-"`
+	Input    []workspaceChatPublicInput `json:"input"`
+	Payload  json.RawMessage            `json:"payload,omitempty"`
+	Settings NativeThreadSettingsPatch  `json:"-"`
 }
 
 type workspaceChatWSTurnSteerRequest struct {
 	workspaceChatWSRequestBase
-	Input          []NativeUserInput `json:"input"`
-	ExpectedTurnID string            `json:"expected_turn_id"`
+	Input          []workspaceChatPublicInput `json:"input"`
+	ExpectedTurnID string                     `json:"expected_turn_id"`
 }
 
 type workspaceChatWSTurnInterruptRequest struct {
@@ -518,25 +531,9 @@ func (m *ManagementServer) handleWorkspaceChatWS(w http.ResponseWriter, r *http.
 		mgmtError(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	upgrader := websocket.Upgrader{CheckOrigin: func(req *http.Request) bool {
-		origin := req.Header.Get("Origin")
-		if origin == "" {
-			return true
-		}
-		parsed, err := url.Parse(origin)
-		if err != nil {
-			return false
-		}
-		if strings.EqualFold(parsed.Host, req.Host) {
-			return true
-		}
-		for _, allowed := range m.corsOrigins {
-			if allowed == "*" || allowed == origin {
-				return true
-			}
-		}
-		return false
-	}}
+	// 该 handler 只监听 control 可访问的私有 Unix Socket；浏览器 Origin 与
+	// CSRF 已由 control 在代理升级前校验。
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -682,11 +679,11 @@ func (m *ManagementServer) handleWorkspaceChatWS(w http.ResponseWriter, r *http.
 				}
 			}(next)
 		case workspaceChatWSTurnStartRequest:
-			if _, err := service.StartTurn(r.Context(), workspaceWebClientID, request.RequestID, request.WorkspaceRef, request.Conversation, request.Input, request.Settings); err != nil {
+			if _, err := service.StartTurn(r.Context(), workspaceWebClientID, request.RequestID, request.WorkspaceRef, request.Conversation, nativeTextInputs(request.Input), request.Settings); err != nil {
 				writeRequestError(request.workspaceChatWSRequestBase, err.Error())
 			}
 		case workspaceChatWSTurnSteerRequest:
-			if _, err := service.SteerTurn(r.Context(), workspaceWebClientID, request.RequestID, request.WorkspaceRef, request.Conversation.ID, request.ExpectedTurnID, request.Input); err != nil {
+			if _, err := service.SteerTurn(r.Context(), workspaceWebClientID, request.RequestID, request.WorkspaceRef, request.Conversation.ID, request.ExpectedTurnID, nativeTextInputs(request.Input)); err != nil {
 				writeRequestError(request.workspaceChatWSRequestBase, err.Error())
 			}
 		case workspaceChatWSTurnInterruptRequest:

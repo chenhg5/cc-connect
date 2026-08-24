@@ -53,12 +53,14 @@ vi.mock('@/hooks/useWorkspaceRealtime', () => ({
 
 const workspace = {
   ref: 'workspace-1',
+  device_id: 'device-1',
+  device_name: 'Mac One',
   project_id: 'project-1',
   project_name: 'Project One',
   root_index: 0,
   root_name: 'Project One',
-  root_path: '/project-one',
   available: true,
+  online: true,
   order: 0,
 };
 
@@ -85,7 +87,7 @@ function deferred<T>() {
 function threadSnapshot(threadID: string, messageSettings: Record<string, unknown> = {}) {
   return {
     thread: {
-      id: threadID, cwd: '/project-one', name: threadID,
+      id: threadID, name: threadID,
       created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z',
     },
     settings: { revision: 'r1', model: 'gpt-5.6', effort: 'medium', ...messageSettings },
@@ -326,11 +328,11 @@ describe('WorkspaceChat', () => {
 
   it('活动 Turn 只发送显式 steer 和带准确 ID 的 interrupt', async () => {
     mocks.listWorkspaceThreads.mockResolvedValue({ data: [{
-      id: 'thread-1', cwd: '/project-one', name: 'Thread One',
+      id: 'thread-1', name: 'Thread One',
       created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z',
     }] });
     mocks.readWorkspaceThread.mockResolvedValue({
-      thread: { id: 'thread-1', cwd: '/project-one', name: 'Thread One', created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z' },
+      thread: { id: 'thread-1', name: 'Thread One', created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z' },
       settings: { revision: 'r1', model: 'gpt-5.6', effort: 'medium' },
       status: { type: 'active' }, usage: { tokenUsage: { total: { totalTokens: 12 } } },
       active_turn: { id: 'turn-active', started_at: '2026-08-23T00:00:00Z' },
@@ -385,7 +387,7 @@ describe('WorkspaceChat', () => {
     const workspaceTwo = {
       ...workspace,
       ref: 'workspace-2', project_id: 'project-2', project_name: 'Project Two',
-      root_name: 'Project Two', root_path: '/project-two',
+      root_name: 'Project Two',
     };
     const currentThread = { ...threadSnapshot('thread-2').thread, name: 'Workspace Two Thread' };
     const staleThread = { ...threadSnapshot('thread-1').thread, name: 'Stale Workspace One Thread' };
@@ -431,8 +433,8 @@ describe('WorkspaceChat', () => {
 
   it('复制非当前 thread 时只使用服务端签发的 deep_link', async () => {
     const threads = [
-      { id: 'thread-1', cwd: '/project-one', name: 'Thread One', status: { type: 'active' }, created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z' },
-      { id: 'thread-2', cwd: '/project-one', name: 'Thread Two', status: { type: 'idle' }, created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:01Z' },
+      { id: 'thread-1', name: 'Thread One', status: { type: 'active' }, created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z' },
+      { id: 'thread-2', name: 'Thread Two', status: { type: 'idle' }, created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:01Z' },
     ];
     mocks.listWorkspaceThreads.mockResolvedValue({ data: threads });
     mocks.readWorkspaceThread.mockImplementation(async (_workspaceRef: string, threadID: string) => ({
@@ -458,8 +460,8 @@ describe('WorkspaceChat', () => {
 
   it('读取非当前 thread 深链失败时显示服务端真实错误', async () => {
     const threads = [
-      { id: 'thread-1', cwd: '/project-one', name: 'Thread One', created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z' },
-      { id: 'thread-2', cwd: '/project-one', name: 'Thread Two', created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:01Z' },
+      { id: 'thread-1', name: 'Thread One', created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z' },
+      { id: 'thread-2', name: 'Thread Two', created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:01Z' },
     ];
     mocks.listWorkspaceThreads.mockResolvedValue({ data: threads });
     mocks.readWorkspaceThread

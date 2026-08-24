@@ -12,7 +12,8 @@ useAuthStore.getState().init();
 useThemeStore.getState().init();
 
 api.setOnUnauthorized(() => {
-  useAuthStore.getState().logout();
+  api.clearSession();
+  useAuthStore.setState({ phase: 'unauthenticated', isAuthenticated: false });
 });
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

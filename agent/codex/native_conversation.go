@@ -1826,11 +1826,14 @@ func nativeUserInputs(inputs []core.NativeUserInput) ([]map[string]any, error) {
 	for index, input := range inputs {
 		switch strings.TrimSpace(input.Type) {
 		case "text":
-			if input.LocalPath != "" || input.URL != "" {
+			if input.LocalPath != "" || input.URL != "" || input.AttachmentRef != "" || len(input.Data) != 0 {
 				return nil, fmt.Errorf("codex: text input %d contains attachment fields", index)
 			}
 			mapped = append(mapped, map[string]any{"type": "text", "text": input.Text, "text_elements": []any{}})
 		case "image":
+			if input.AttachmentRef != "" || len(input.Data) != 0 {
+				return nil, fmt.Errorf("codex: image input %d contains an unresolved attachment reference", index)
+			}
 			detail := strings.TrimSpace(input.Detail)
 			if detail != "" && detail != "auto" && detail != "low" && detail != "high" && detail != "original" {
 				return nil, fmt.Errorf("codex: image input %d has invalid detail %q", index, detail)

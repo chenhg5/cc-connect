@@ -104,14 +104,19 @@ level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
 ```toml
 [workspace_chat]
 enabled = true
-template_project = "codex-template"
 transports = ["web", "wecom"]
+
+[workspace_chat.wecom]
+bot_id = "your-bot-id"
+bot_secret = "your-bot-secret"
 ```
 
 可用命令：
 
 | 命令 | 作用 |
 |------|------|
+| `/devices [页码]` | 查看配对的 macOS Runtime 并保存本次编号列表 |
+| `/device N` | 选择设备；后续项目和会话命令限定在该设备 |
 | `/projects [页码]` | 查看 Codex App 项目并保存本次编号列表 |
 | `/project N` | 按最近一次 `/projects` 快照选择项目；恢复最近 thread，无 thread 时创建草稿 |
 | `/threads [页码]` | 查看当前项目的原生会话 |

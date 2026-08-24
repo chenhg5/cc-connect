@@ -43,38 +43,6 @@ func TestRotatingWriter(t *testing.T) {
 	t.Logf("main: %d bytes, backup exists", info.Size())
 }
 
-func TestMetaSaveLoad(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	dir := t.TempDir()
-	os.Setenv("HOME", dir)
-	defer os.Setenv("HOME", origHome)
-
-	m := &Meta{
-		LogFile:       "/tmp/test.log",
-		LogMaxSize:    1024,
-		LogMaxBackups: 3,
-		WorkDir:       "/tmp",
-		BinaryPath:    "/usr/local/bin/cc-connect",
-		InstalledAt:  NowISO(),
-	}
-
-	if err := SaveMeta(m); err != nil {
-		t.Fatalf("SaveMeta: %v", err)
-	}
-
-	loaded, err := LoadMeta()
-	if err != nil {
-		t.Fatalf("LoadMeta: %v", err)
-	}
-
-	if loaded.LogFile != m.LogFile {
-		t.Errorf("LogFile mismatch: %s != %s", loaded.LogFile, m.LogFile)
-	}
-	if loaded.WorkDir != m.WorkDir {
-		t.Errorf("WorkDir mismatch: %s != %s", loaded.WorkDir, m.WorkDir)
-	}
-}
-
 // TestRotatingWriter_BackupRotation exercises the chain: writing past
 // maxSize N times should produce .log.1 .. .log.N, and the oldest
 // (N+1th write) should be discarded.

@@ -466,15 +466,17 @@ const (
 	MsgUpgradeSuccess     MsgKey = "upgrade_success"
 	MsgUpgradeDevBuild    MsgKey = "upgrade_dev_build"
 
-	MsgWebNotSupported MsgKey = "web_not_supported"
-	MsgWebNotEnabled   MsgKey = "web_not_enabled"
-	MsgWebSetupSuccess MsgKey = "web_setup_success"
-	MsgWebNeedRestart  MsgKey = "web_need_restart"
-	MsgWebStatus       MsgKey = "web_status"
-
 	MsgWorkspaceChatGroupUnsupported      MsgKey = "workspace_chat_group_unsupported"
 	MsgWorkspaceChatUserIDMissing         MsgKey = "workspace_chat_user_id_missing"
 	MsgWorkspaceChatUsage                 MsgKey = "workspace_chat_usage"
+	MsgWorkspaceChatDevicesTitle          MsgKey = "workspace_chat_devices_title"
+	MsgWorkspaceChatDevicesEmpty          MsgKey = "workspace_chat_devices_empty"
+	MsgWorkspaceChatDevicesHint           MsgKey = "workspace_chat_devices_hint"
+	MsgWorkspaceChatDeviceSelected        MsgKey = "workspace_chat_device_selected"
+	MsgWorkspaceChatDeviceOnline          MsgKey = "workspace_chat_device_online"
+	MsgWorkspaceChatDeviceOffline         MsgKey = "workspace_chat_device_offline"
+	MsgWorkspaceChatBindDeviceFirst       MsgKey = "workspace_chat_bind_device_first"
+	MsgWorkspaceChatSelectDeviceFirst     MsgKey = "workspace_chat_select_device_first"
 	MsgWorkspaceChatProjectsTitle         MsgKey = "workspace_chat_projects_title"
 	MsgWorkspaceChatProjectsEmpty         MsgKey = "workspace_chat_projects_empty"
 	MsgWorkspaceChatProjectsHint          MsgKey = "workspace_chat_projects_hint"
@@ -526,9 +528,7 @@ const (
 	MsgWorkspaceChatInvalidNumber         MsgKey = "workspace_chat_invalid_number"
 	MsgWorkspaceChatPageOutOfRange        MsgKey = "workspace_chat_page_out_of_range"
 	MsgWorkspaceChatMenuExpired           MsgKey = "workspace_chat_menu_expired"
-	MsgWorkspaceChatAttachmentSaveFailed  MsgKey = "workspace_chat_attachment_save_failed"
 	MsgWorkspaceChatEmptyMessage          MsgKey = "workspace_chat_empty_message"
-	MsgWorkspaceChatVerifiedAttachment    MsgKey = "workspace_chat_verified_attachment"
 	MsgWorkspaceChatInteractionDelivery   MsgKey = "workspace_chat_interaction_delivery"
 
 	MsgAliasEmpty      MsgKey = "alias_empty"
@@ -727,6 +727,30 @@ var messages = map[MsgKey]map[Language]string{
 	MsgWorkspaceChatProjectSelectedDraft: {
 		LangEnglish: "Project selected and a draft was created. The first message will create the Codex thread.", LangChinese: "已选择项目并新建草稿。发送首条消息后会创建 Codex 会话。", LangTraditionalChinese: "已選擇專案並建立草稿。傳送第一則訊息後會建立 Codex 會話。", LangJapanese: "プロジェクトを選択して下書きを作成しました。最初のメッセージ送信時に Codex スレッドを作成します。", LangSpanish: "Se seleccionó el proyecto y se creó un borrador. El primer mensaje creará la conversación de Codex.",
 	},
+	MsgWorkspaceChatDevicesTitle: {
+		LangEnglish: "macOS Runtime devices (page %d)", LangChinese: "macOS Runtime 设备（第 %d 页）", LangTraditionalChinese: "macOS Runtime 裝置（第 %d 頁）", LangJapanese: "macOS Runtime デバイス（%d ページ）", LangSpanish: "Dispositivos macOS Runtime (página %d)",
+	},
+	MsgWorkspaceChatDevicesEmpty: {
+		LangEnglish: "No Runtime device is paired.", LangChinese: "尚未配对 Runtime 设备。", LangTraditionalChinese: "尚未配對 Runtime 裝置。", LangJapanese: "Runtime デバイスがペアリングされていません。", LangSpanish: "No hay dispositivos Runtime vinculados.",
+	},
+	MsgWorkspaceChatDevicesHint: {
+		LangEnglish: "Use /device N to select a device on this page.", LangChinese: "使用 /device N 选择本页设备。", LangTraditionalChinese: "使用 /device N 選擇本頁裝置。", LangJapanese: "/device N でこのページのデバイスを選択します。", LangSpanish: "Usa /device N para seleccionar un dispositivo de esta página.",
+	},
+	MsgWorkspaceChatDeviceSelected: {
+		LangEnglish: "Runtime device selected: %s. Use /projects to list its projects.", LangChinese: "已选择 Runtime 设备：%s。使用 /projects 查看该设备项目。", LangTraditionalChinese: "已選擇 Runtime 裝置：%s。使用 /projects 查看該裝置專案。", LangJapanese: "Runtime デバイスを選択しました: %s。/projects でプロジェクトを表示します。", LangSpanish: "Dispositivo Runtime seleccionado: %s. Usa /projects para ver sus proyectos.",
+	},
+	MsgWorkspaceChatDeviceOnline: {
+		LangEnglish: "online", LangChinese: "在线", LangTraditionalChinese: "在線", LangJapanese: "オンライン", LangSpanish: "en línea",
+	},
+	MsgWorkspaceChatDeviceOffline: {
+		LangEnglish: "offline", LangChinese: "离线", LangTraditionalChinese: "離線", LangJapanese: "オフライン", LangSpanish: "sin conexión",
+	},
+	MsgWorkspaceChatBindDeviceFirst: {
+		LangEnglish: "Select a Runtime device before sending a message.\n%s", LangChinese: "发送消息前请先选择 Runtime 设备。\n%s", LangTraditionalChinese: "傳送訊息前請先選擇 Runtime 裝置。\n%s", LangJapanese: "メッセージ送信前に Runtime デバイスを選択してください。\n%s", LangSpanish: "Selecciona un dispositivo Runtime antes de enviar mensajes.\n%s",
+	},
+	MsgWorkspaceChatSelectDeviceFirst: {
+		LangEnglish: "Select a device first with /devices and /device N.", LangChinese: "请先使用 /devices 和 /device N 选择设备。", LangTraditionalChinese: "請先使用 /devices 和 /device N 選擇裝置。", LangJapanese: "まず /devices と /device N でデバイスを選択してください。", LangSpanish: "Primero selecciona un dispositivo con /devices y /device N.",
+	},
 	MsgWorkspaceChatProjectSelectedThread: {
 		LangEnglish: "Project selected and its most recent Codex thread was restored.", LangChinese: "已选择项目并恢复最近 Codex 会话。", LangTraditionalChinese: "已選擇專案並恢復最近的 Codex 會話。", LangJapanese: "プロジェクトを選択し、直近の Codex スレッドを復元しました。", LangSpanish: "Se seleccionó el proyecto y se restauró su conversación de Codex más reciente.",
 	},
@@ -803,11 +827,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "Cancellation of the current turn was requested.", LangChinese: "已请求取消当前 Turn。", LangTraditionalChinese: "已請求取消目前 Turn。", LangJapanese: "現在のターンのキャンセルを要求しました。", LangSpanish: "Se solicitó cancelar el turno actual.",
 	},
 	MsgWorkspaceChatUsage: {
-		LangEnglish:            "Unknown workspace command. Commands: /projects, /project, /threads, /switch, /new, /link, /current, /history, /usage, /steer, /cancel, /requests, /respond, /answer, and the model/settings commands.",
-		LangChinese:            "未知工作区命令。可用命令：/projects、/project、/threads、/switch、/new、/link、/current、/history、/usage、/steer、/cancel、/requests、/respond、/answer，以及模型和设置命令。",
-		LangTraditionalChinese: "未知工作區命令。可用命令：/projects、/project、/threads、/switch、/new、/link、/current、/history、/usage、/steer、/cancel、/requests、/respond、/answer，以及模型與設定命令。",
-		LangJapanese:           "不明なワークスペースコマンドです。利用可能: /projects、/project、/threads、/switch、/new、/link、/current、/history、/usage、/steer、/cancel、/requests、/respond、/answer、およびモデル・設定コマンド。",
-		LangSpanish:            "Comando de espacio de trabajo desconocido. Disponibles: /projects, /project, /threads, /switch, /new, /link, /current, /history, /usage, /steer, /cancel, /requests, /respond, /answer y los comandos de modelo y configuración.",
+		LangEnglish:            "Unknown workspace command. Commands: /devices, /device, /projects, /project, /threads, /switch, /new, /link, /current, /history, /usage, /steer, /cancel, /requests, /respond, /answer, and the model/settings commands.",
+		LangChinese:            "未知工作区命令。可用命令：/devices、/device、/projects、/project、/threads、/switch、/new、/link、/current、/history、/usage、/steer、/cancel、/requests、/respond、/answer，以及模型和设置命令。",
+		LangTraditionalChinese: "未知工作區命令。可用命令：/devices、/device、/projects、/project、/threads、/switch、/new、/link、/current、/history、/usage、/steer、/cancel、/requests、/respond、/answer，以及模型與設定命令。",
+		LangJapanese:           "不明なワークスペースコマンドです。利用可能: /devices、/device、/projects、/project、/threads、/switch、/new、/link、/current、/history、/usage、/steer、/cancel、/requests、/respond、/answer、およびモデル・設定コマンド。",
+		LangSpanish:            "Comando desconocido. Disponibles: /devices, /device, /projects, /project, /threads, /switch, /new, /link, /current, /history, /usage, /steer, /cancel, /requests, /respond, /answer y los comandos de configuración.",
 	},
 	MsgWorkspaceChatSteerUsage: {
 		LangEnglish: "Usage: /steer additional content", LangChinese: "用法：/steer 要补充的内容", LangTraditionalChinese: "用法：/steer 要補充的內容", LangJapanese: "使用法: /steer 追加内容", LangSpanish: "Uso: /steer contenido adicional",
@@ -875,14 +899,8 @@ var messages = map[MsgKey]map[Language]string{
 	MsgWorkspaceChatUnavailableReason: {
 		LangEnglish: " (unavailable: %s)", LangChinese: "（不可用：%s）", LangTraditionalChinese: "（不可用：%s）", LangJapanese: "（利用不可: %s）", LangSpanish: " (no disponible: %s)",
 	},
-	MsgWorkspaceChatAttachmentSaveFailed: {
-		LangEnglish: "Not all WeCom attachments could be saved safely.", LangChinese: "未能安全保存全部企业微信附件。", LangTraditionalChinese: "未能安全儲存全部企業微信附件。", LangJapanese: "すべての WeCom 添付ファイルを安全に保存できませんでした。", LangSpanish: "No se pudieron guardar de forma segura todos los archivos adjuntos de WeCom.",
-	},
 	MsgWorkspaceChatEmptyMessage: {
 		LangEnglish: "The message has no text or attachment to submit.", LangChinese: "消息没有可提交的文本或附件。", LangTraditionalChinese: "訊息沒有可提交的文字或附件。", LangJapanese: "送信できるテキストまたは添付ファイルがありません。", LangSpanish: "El mensaje no contiene texto ni archivos adjuntos para enviar.",
-	},
-	MsgWorkspaceChatVerifiedAttachment: {
-		LangEnglish: "A verified attachment is available at this local path: %s", LangChinese: "已验证附件位于本地路径：%s", LangTraditionalChinese: "已驗證附件位於本機路徑：%s", LangJapanese: "検証済みの添付ファイルは次のローカルパスにあります: %s", LangSpanish: "Hay un archivo adjunto verificado en esta ruta local: %s",
 	},
 	MsgWorkspaceChatInteractionDelivery: {
 		LangEnglish: "Codex requires input (%s)\nRequest ID: %s\nUse /requests to inspect it, then reply with /respond or /answer.", LangChinese: "Codex 请求处理（%s）\n请求编号：%s\n请使用 /requests 查看，并用 /respond 或 /answer 回复。", LangTraditionalChinese: "Codex 請求處理（%s）\n請求編號：%s\n請使用 /requests 查看，並用 /respond 或 /answer 回覆。", LangJapanese: "Codex が入力を求めています（%s）\nリクエスト ID: %s\n/requests で確認し、/respond または /answer で応答してください。", LangSpanish: "Codex requiere una respuesta (%s)\nID de solicitud: %s\nUsa /requests para revisarla y responde con /respond o /answer.",
@@ -3285,51 +3303,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 當前為開發版本，無法檢查更新。請從源碼構建或安裝正式發佈版本。",
 		LangJapanese:           "⚠️ 開発ビルドのため、バージョン確認ができません。ソースからビルドするか、リリース版をインストールしてください。",
 		LangSpanish:            "⚠️ Compilación de desarrollo — la verificación de versión no está disponible. Compile desde el código fuente o instale una versión publicada.",
-	},
-	MsgWebNotSupported: {
-		LangEnglish:            "⚠️ Web admin is not available in this build. Rebuild without the `no_web` tag to enable it.",
-		LangChinese:            "⚠️ 当前版本未包含 Web 管理后台。请去掉 `no_web` 标签重新编译以启用。",
-		LangTraditionalChinese: "⚠️ 目前版本未包含 Web 管理後台。請移除 `no_web` 標籤重新編譯以啟用。",
-		LangJapanese:           "⚠️ このビルドにはWeb管理画面が含まれていません。`no_web` タグなしで再ビルドしてください。",
-		LangSpanish:            "⚠️ La administración web no está incluida en esta compilación. Recompile sin la etiqueta `no_web`.",
-	},
-	MsgWebNotEnabled: {
-		LangEnglish:            "ℹ️ Web admin is not enabled.\n\nUse `/web setup` to configure and enable it.",
-		LangChinese:            "ℹ️ Web 管理后台未启用。\n\n使用 `/web setup` 配置并启用。",
-		LangTraditionalChinese: "ℹ️ Web 管理後台未啟用。\n\n使用 `/web setup` 設定並啟用。",
-		LangJapanese:           "ℹ️ Web管理画面は有効になっていません。\n\n`/web setup` で設定して有効にしてください。",
-		LangSpanish:            "ℹ️ La administración web no está habilitada.\n\nUsa `/web setup` para configurarla.",
-	},
-	MsgWebSetupSuccess: {
-		LangEnglish: "✅ Web admin configured!\n\n" +
-			"🌐 URL: %s\n🔑 Token: `%s`\n\n" +
-			"Open the URL in your browser and use the token to log in.",
-		LangChinese: "✅ Web 管理后台配置完成！\n\n" +
-			"🌐 地址：%s\n🔑 令牌：`%s`\n\n" +
-			"在浏览器打开地址，使用令牌登录。",
-		LangTraditionalChinese: "✅ Web 管理後台設定完成！\n\n" +
-			"🌐 網址：%s\n🔑 權杖：`%s`\n\n" +
-			"在瀏覽器開啟網址，使用權杖登入。",
-		LangJapanese: "✅ Web管理画面の設定が完了しました！\n\n" +
-			"🌐 URL: %s\n🔑 トークン: `%s`\n\n" +
-			"ブラウザでURLを開き、トークンでログインしてください。",
-		LangSpanish: "✅ Administración web configurada!\n\n" +
-			"🌐 URL: %s\n🔑 Token: `%s`\n\n" +
-			"Abre la URL en tu navegador y usa el token para iniciar sesión.",
-	},
-	MsgWebNeedRestart: {
-		LangEnglish:            "🔄 Restart the service with `/restart` to activate the web admin.",
-		LangChinese:            "🔄 请使用 `/restart` 重启服务以激活 Web 管理后台。",
-		LangTraditionalChinese: "🔄 請使用 `/restart` 重新啟動服務以啟動 Web 管理後台。",
-		LangJapanese:           "🔄 `/restart` でサービスを再起動して、Web管理画面を有効にしてください。",
-		LangSpanish:            "🔄 Reinicia el servicio con `/restart` para activar la administración web.",
-	},
-	MsgWebStatus: {
-		LangEnglish:            "🌐 **Web Admin**\n\nURL: %s",
-		LangChinese:            "🌐 **Web 管理后台**\n\n地址：%s",
-		LangTraditionalChinese: "🌐 **Web 管理後台**\n\n網址：%s",
-		LangJapanese:           "🌐 **Web管理画面**\n\nURL: %s",
-		LangSpanish:            "🌐 **Administración Web**\n\nURL: %s",
 	},
 	MsgAliasEmpty: {
 		LangEnglish:            "No aliases configured. Use `/alias add <trigger> <command>` to create one.",

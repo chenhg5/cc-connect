@@ -7,34 +7,22 @@
 ## 配置
 
 ```toml
-[management]
-enabled = true
-port = 9820
-token = "your-management-token"
-
 [workspace_chat]
 enabled = true
-template_project = "codex-template"
 transports = ["web", "wecom"]
 
-[[projects]]
-name = "codex-template"
-work_dir = "/path/to/a/default/project"
-
-[projects.agent]
-type = "codex"
-
-[projects.agent.options]
-backend = "app_server"
+[workspace_chat.wecom]
+bot_id = "your-bot-id"
+bot_secret = "your-bot-secret"
 ```
 
-`template_project` 必须存在，Agent 必须为 Codex，backend 必须为 `app_server`。`transports` 至少包含 `web` 或 `wecom`；包含 `web` 时必须启用管理服务。配置不满足条件时 cc-connect 会明确启动失败。模板 Agent 持有一个供全部工作区共用的长驻 App Server 连接，并且只使用 `stdio://` 传输；`app_server_url` 和 WebSocket 传输别名会被拒绝。模板的 `work_dir` 不是客户端可选择的目录。
+该配置由 control 初始化向导原子生成。`transports` 至少包含 `web` 或 `wecom`；启用企业微信时必须填写 WebSocket Bot 凭据。服务器不运行本地 Codex Agent，也不读取服务器 `CODEX_HOME`。
 
-初始化时 cc-connect 启用 App Server experimental API，并分别探测原生设置、协作模式、分页历史和 realtime。能力不可用时返回真实原因，不切换到已删除的 RPC 或事件协议。
+每台配对的 macOS Runtime 读取本机 Codex App 状态并持有一个 App Server 连接。初始化时 Runtime 启用 experimental API，并分别探测原生设置、协作模式、分页历史和 realtime。能力不可用时返回真实原因，不切换到已删除的 RPC 或事件协议。
 
 ## 项目与会话
 
-项目侧栏只读展示有效 `CODEX_HOME/.codex-global-state.json` 中的顺序、项目和根目录。多根项目会展开成多个工作区；目录不存在或无效时保留真实错误并禁用选择。
+项目侧栏按设备分组，只读展示各 Runtime 有效 `CODEX_HOME/.codex-global-state.json` 中的顺序、项目和根目录。多根项目会展开成多个工作区；设备离线或目录无效时保留真实原因并禁用操作。
 
 客户端只能提交服务端签发的不透明 `workspaceRef`。每次操作都会重新解析该引用，并校验原生 thread 的规范 cwd 属于所选根目录。浏览器 JSON 不能提交 `cwd`、服务器路径、sandbox roots、developer instructions 或未经验证的本地附件路径。
 

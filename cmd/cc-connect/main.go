@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +23,7 @@ import (
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
+	"github.com/chenhg5/cc-connect/remotenative"
 	"github.com/chenhg5/cc-connect/storage/workspacechat"
 	// Agent and platform imports are in separate plugin_*.go files
 	// controlled by build tags. See Makefile for selective compilation.
@@ -207,13 +210,7 @@ var topLevelCommandHandlers = map[string]func([]string){
 	"config-example": func(_ []string) {
 		fmt.Print(ccconnect.ConfigExampleTOML)
 	},
-	"config": runConfig,
-	"update": func(_ []string) {
-		runUpdate()
-	},
-	"check-update": func(_ []string) {
-		checkUpdate()
-	},
+	"config":    runConfig,
 	"provider":  runProviderCommand,
 	"send":      runSend,
 	"cron":      runCron,
@@ -222,13 +219,11 @@ var topLevelCommandHandlers = map[string]func([]string){
 	"relay":     runRelay,
 	"sessions":  runSessions,
 	"agent-sid": runAgentSID,
-	"daemon":    runDaemon,
 	"feishu":    runFeishu,
 	"tuitui":    runTuiTui,
 	"weixin":    runWeixin,
 	"yuanbao":   runYuanbao,
 	"doctor":    runDoctor,
-	"web":       runWeb,
 }
 
 func main() {
@@ -239,7 +234,6 @@ func main() {
 		return
 	}
 
-	checkUpdateAsync()
 	// When started as a daemon (CC_LOG_FILE set), redirect logs to a rotating file.
 	// Log file setup happens before flag.Parse() so the rotating writer is in
 	// place before any slog output. To still honour --log-max-size, we
@@ -338,7 +332,8 @@ func main() {
 	config.ConfigPath = configPath
 	slog.Info("config loaded", "path", configPath)
 
-	if len(cfg.Projects) == 0 {
+	workspaceChatEnabled := cfg.WorkspaceChat.Enabled != nil && *cfg.WorkspaceChat.Enabled
+	if len(cfg.Projects) == 0 && !workspaceChatEnabled {
 		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
 		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
 		fmt.Fprintln(os.Stderr, "  cc-connect init")
@@ -357,7 +352,6 @@ func main() {
 	}
 
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
-	enginesByName := make(map[string]*core.Engine, len(cfg.Projects))
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
 
 	for _, proj := range cfg.Projects {
@@ -942,37 +936,20 @@ func main() {
 			return reloadConfig(configPath, capturedProjName, capturedEngine)
 		})
 
-		// Wire /web command callbacks
-		engine.SetWebSetupFunc(func() (int, string, bool, error) {
-			mgmtToken := core.GenerateToken(16)
-			bridgeToken := core.GenerateToken(16)
-			result, err := config.EnableWebAdmin(mgmtToken, bridgeToken)
-			if err != nil {
-				return 0, "", false, err
-			}
-			return result.ManagementPort, result.ManagementToken, !result.AlreadyEnabled, nil
-		})
-		engine.SetWebStatusFunc(func() string {
-			if cfg.Management.Enabled == nil || !*cfg.Management.Enabled {
-				return ""
-			}
-			port := cfg.Management.Port
-			if port == 0 {
-				port = 9820
-			}
-			return fmt.Sprintf("http://localhost:%d", port)
-		})
-
 		engines = append(engines, engine)
-		enginesByName[proj.Name] = engine
 		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
 	}
 
 	var workspaceChatService *core.WorkspaceChatService
-	if cfg.WorkspaceChat.Enabled != nil && *cfg.WorkspaceChat.Enabled {
-		templateEngine := enginesByName[cfg.WorkspaceChat.TemplateProject]
-		if templateEngine == nil {
-			slog.Error("workspace chat template engine is unavailable", "project", cfg.WorkspaceChat.TemplateProject)
+	var workspaceChatPlatforms []core.Platform
+	if workspaceChatEnabled {
+		runtimeSocket := strings.TrimSpace(rootOpts.runtimeSocket)
+		if runtimeSocket == "" {
+			runtimeSocket = strings.TrimSpace(os.Getenv("CC_RUNTIME_SOCKET"))
+		}
+		backend, err := remotenative.New(runtimeSocket)
+		if err != nil {
+			slog.Error("workspace chat remote runtime unavailable", "error", err)
 			os.Exit(1)
 		}
 		repository, err := workspacechat.Open(cfg.DataDir)
@@ -980,7 +957,10 @@ func main() {
 			slog.Error("workspace chat persistence unavailable", "error", err)
 			os.Exit(1)
 		}
-		workspaceChatService, err = core.NewWorkspaceChatService(templateEngine, repository, cfg.WorkspaceChat.Transports)
+		workspaceChatService, err = core.NewWorkspaceChatService(core.WorkspaceChatDependencies{
+			Catalog: backend, Validator: backend, Backend: backend, Settings: backend, Turns: backend, Realtime: backend,
+			I18n: core.NewI18n(configuredLanguage(cfg.Language)),
+		}, repository, cfg.WorkspaceChat.Transports)
 		if err != nil {
 			_ = repository.Close()
 			slog.Error("workspace chat startup failed", "error", err)
@@ -988,6 +968,29 @@ func main() {
 		}
 		for _, engine := range engines {
 			engine.SetMessageInterceptor(workspaceChatService.HandleIncoming)
+		}
+		if workspaceChatService.TransportEnabled("wecom") {
+			platform, err := core.CreatePlatform("wecom", map[string]any{
+				"mode": "websocket", "bot_id": cfg.WorkspaceChat.WeCom.BotID,
+				"bot_secret": cfg.WorkspaceChat.WeCom.BotSecret, "allow_from": cfg.WorkspaceChat.WeCom.AllowFrom,
+				"cc_data_dir": cfg.DataDir,
+			})
+			if err != nil {
+				slog.Error("workspace chat wecom transport creation failed", "error", err)
+				os.Exit(1)
+			}
+			if preflight, ok := platform.(core.MessagePreflightConfigurer); ok {
+				preflight.SetMessagePreflight(workspaceChatService.HandleIncoming)
+			}
+			if err := platform.Start(func(source core.Platform, message *core.Message) {
+				if !workspaceChatService.HandleIncoming(source, message) {
+					slog.Error("workspace chat rejected message from its dedicated transport", "transport", source.Name())
+				}
+			}); err != nil {
+				slog.Error("workspace chat wecom transport startup failed", "error", err)
+				os.Exit(1)
+			}
+			workspaceChatPlatforms = append(workspaceChatPlatforms, platform)
 		}
 	}
 
@@ -1116,14 +1119,15 @@ func main() {
 		webhookSrv.Start()
 	}
 
-	// Start management API server if enabled
+	// 业务 HTTP 只在 control 指定的私有 Unix Socket 上提供。
 	var mgmtSrv *core.ManagementServer
-	if cfg.Management.Enabled != nil && *cfg.Management.Enabled {
-		port := cfg.Management.Port
-		if port <= 0 {
-			port = 9820
-		}
-		mgmtSrv = core.NewManagementServer(port, cfg.Management.Token, cfg.Management.CORSOrigins)
+	var mgmtListener net.Listener
+	serverSocket := strings.TrimSpace(rootOpts.serverSocket)
+	if serverSocket == "" {
+		serverSocket = strings.TrimSpace(os.Getenv("CC_SERVER_SOCKET"))
+	}
+	if serverSocket != "" {
+		mgmtSrv = core.NewManagementServer()
 		for i, e := range engines {
 			mgmtSrv.RegisterEngine(cfg.Projects[i].Name, e)
 		}
@@ -1281,7 +1285,16 @@ func main() {
 			core.SetPresetsURL(cfg.ProviderPresetsURL)
 		}
 		mgmtSrv.SetListCCSwitchProviders(listCCSwitchProvidersForWeb)
-		mgmtSrv.Start()
+		mgmtListener, err = listenPrivateUnixSocket(serverSocket)
+		if err != nil {
+			slog.Error("private business socket unavailable", "error", err)
+			os.Exit(1)
+		}
+		go func() {
+			if err := mgmtSrv.Serve(mgmtListener); err != nil {
+				slog.Error("private business server stopped", "error", err)
+			}
+		}()
 	}
 
 	// Start internal API server for CLI send
@@ -1357,6 +1370,15 @@ func main() {
 	if mgmtSrv != nil {
 		mgmtSrv.Stop()
 	}
+	if mgmtListener != nil {
+		_ = mgmtListener.Close()
+		_ = os.Remove(serverSocket)
+	}
+	for _, platform := range workspaceChatPlatforms {
+		if err := platform.Stop(); err != nil {
+			slog.Error("workspace chat transport shutdown failed", "transport", platform.Name(), "error", err)
+		}
+	}
 	if workspaceChatService != nil {
 		if err := workspaceChatService.Close(); err != nil {
 			slog.Error("workspace chat shutdown failed", "error", err)
@@ -1392,23 +1414,8 @@ func main() {
 		if err := core.SaveRestartNotify(cfg.DataDir, *restartReq); err != nil {
 			slog.Error("restart: save notify failed", "error", err)
 		}
-		execPath, err := os.Executable()
-		if err != nil {
-			slog.Error("restart: cannot determine executable path", "error", err)
-			os.Exit(1)
-		}
-		// After self-update, os.Executable() may return the .old path on Linux.
-		// Strip the .old suffix to restart from the updated binary.
-		if strings.HasSuffix(execPath, ".old") {
-			newPath := strings.TrimSuffix(execPath, ".old")
-			if _, err := os.Stat(newPath); err == nil {
-				execPath = newPath
-			}
-		}
-		slog.Info("restarting...", "path", execPath, "args", os.Args)
-		if err := restartProcess(execPath); err != nil {
-			slog.Error("restart: failed", "error", err)
-			os.Exit(1)
+		if err := requestControlledRestart(rootOpts.runtimeSocket); err != nil {
+			slog.Error("restart: control request failed", "error", err)
 		}
 	}
 
@@ -1435,6 +1442,8 @@ type rootCLIOptions struct {
 	logMaxSize     string
 	logMaxBackups  int
 	showVersion    bool
+	runtimeSocket  string
+	serverSocket   string
 	args           []string
 }
 
@@ -1450,6 +1459,8 @@ func parseRootCLIOptions(args []string) (rootCLIOptions, error) {
 	logMaxSize := fs.String("log-max-size", "", "max bytes for the rotating log file (e.g. 10MB, 512K, 10485760); overrides CC_LOG_MAX_SIZE env var (default: 10MB)")
 	logMaxBackups := fs.Int("log-max-backups", 0, "number of rotated log files to retain (.log.1 .. .log.N); overrides CC_LOG_MAX_BACKUPS env var (default: 3)")
 	showVersion := fs.Bool("version", false, "print version and exit")
+	runtimeSocket := fs.String("runtime-socket", "", "private control Runtime Unix socket")
+	serverSocket := fs.String("server-socket", "", "private business HTTP Unix socket")
 
 	if err := fs.Parse(args); err != nil {
 		return rootCLIOptions{}, err
@@ -1463,6 +1474,8 @@ func parseRootCLIOptions(args []string) (rootCLIOptions, error) {
 		logMaxSize:     *logMaxSize,
 		logMaxBackups:  *logMaxBackups,
 		showVersion:    *showVersion,
+		runtimeSocket:  *runtimeSocket,
+		serverSocket:   *serverSocket,
 		args:           fs.Args(),
 	}, nil
 }
@@ -1472,6 +1485,52 @@ func validateNoExtraTopLevelArgs(args []string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown top-level command: %s", args[0])
+}
+
+func configuredLanguage(value string) core.Language {
+	switch value {
+	case "zh", "chinese":
+		return core.LangChinese
+	case "zh-TW", "zh_TW", "zhtw":
+		return core.LangTraditionalChinese
+	case "ja", "japanese":
+		return core.LangJapanese
+	case "es", "spanish":
+		return core.LangSpanish
+	case "en", "english":
+		return core.LangEnglish
+	default:
+		return core.LangAuto
+	}
+}
+
+func listenPrivateUnixSocket(path string) (net.Listener, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("private socket path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, fmt.Errorf("create private socket directory: %w", err)
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("private socket path exists and is not a socket: %s", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("remove stale private socket: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect private socket: %w", err)
+	}
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("listen private socket: %w", err)
+	}
+	if err := os.Chmod(path, 0o660); err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("protect private socket: %w", err)
+	}
+	return listener, nil
 }
 
 // sessionStorePath builds a unique filename from project name + work_dir.
@@ -1632,15 +1691,12 @@ func printUsage() {
 		v = "dev"
 	}
 
-	// 检查是否有新版本可用并显示提示
-	updateHint := getUpdateHintIfAvailable()
-
 	fmt.Fprintf(os.Stderr, `
                                               _
   ___ ___        ___ ___  _ __  _ __   ___  ___| |_
  / __/ __|_____ / __/ _ \| '_ \| '_ \ / _ \/ __| __|
 | (_| (_|_____|  (_| (_) | | | | | | |  __/ (__| |_
- \___\__|      \___\___/|_| |_|_| |_|\___|\___|\__|  %s%s
+ \___\__|      \___\___/|_| |_|_| |_|\___|\___|\__|  %s
 
   Bridge your messaging platforms to local AI coding agents.
   Supports: Claude Code, Codex, Cursor, Gemini CLI, Qoder CLI, OpenCode
@@ -1660,15 +1716,6 @@ Flags:
   --help             Show this help message
 
 Commands:
-  daemon             Manage cc-connect as a background service (systemd/launchd/schtasks)
-    install          Install and start the daemon service
-    uninstall        Remove the daemon service
-    start            Start the daemon
-    stop             Stop the daemon
-    restart          Restart the daemon
-    status           Show daemon status
-    logs             View daemon logs (-f to follow, -n N for last N lines)
-
   send               Send a message to an active session via internal API
                      (-m <text> | --stdin, -p <project>, -s <session>)
 
@@ -1714,25 +1761,47 @@ Commands:
     format           Format the config file (alias: fmt)
     path             Print the resolved config file path
 
-  update             Check for updates and upgrade the binary (--pre for beta)
-  check-update       Check if a newer version is available
   config-example     (deprecated: use 'config example' instead)
 
 Examples:
   cc-connect                          Start with default config
   cc-connect --config /path/to.toml   Start with a specific config file
-  cc-connect daemon install           Install as a system service
-  cc-connect daemon logs -f           Follow daemon logs
   cc-connect send -m "hello"          Send a message to the active session
   cc-connect cron list                List all scheduled tasks
   cc-connect feishu setup             Setup Feishu/Lark bot credentials
   cc-connect weixin setup             Setup Weixin (ilink) with QR or --token
   cc-connect yuanbao setup            Setup Yuanbao bot with --token app_key:app_secret
-  cc-connect update                   Update to the latest version
   cc-connect config format            Format the config file
   cc-connect config example > c.toml  Save example config to a file
 
-`, v, updateHint)
+`, v)
+}
+
+func requestControlledRestart(runtimeSocket string) error {
+	runtimeSocket = strings.TrimSpace(runtimeSocket)
+	if runtimeSocket == "" {
+		runtimeSocket = strings.TrimSpace(os.Getenv("CC_RUNTIME_SOCKET"))
+	}
+	if runtimeSocket == "" {
+		return errors.New("control Runtime Unix socket is required")
+	}
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", runtimeSocket)
+	}}
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	request, err := http.NewRequest(http.MethodPost, "http://cc-connect-control/control/v1/service/restart", nil)
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("control restart status %s", response.Status)
+	}
+	return nil
 }
 
 func setupLogger(level string, w io.Writer) {

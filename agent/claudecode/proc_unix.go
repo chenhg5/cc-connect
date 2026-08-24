@@ -33,12 +33,17 @@ func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	if err := syscall.Kill(-cmd.Process.Pid, sig); err != nil &&
-		!errors.Is(err, os.ErrProcessDone) &&
-		!errors.Is(err, syscall.ESRCH) {
-		return err
+	err := syscall.Kill(-cmd.Process.Pid, sig)
+	if err == nil || errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+		return nil
 	}
-	return nil
+	// macOS can return EPERM for a stale negative PGID after Wait has reaped
+	// the direct child. Only classify that case as idempotent after the
+	// os.Process state independently confirms the child is already done.
+	if errors.Is(err, syscall.EPERM) && errors.Is(cmd.Process.Signal(syscall.Signal(0)), os.ErrProcessDone) {
+		return nil
+	}
+	return err
 }
 
 // forceKillCmd SIGKILLs the entire process group rooted at cmd. Use this

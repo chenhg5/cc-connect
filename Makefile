@@ -1,6 +1,8 @@
 APP        := cc-connect
 MODULE     := github.com/chenhg5/cc-connect
 CMD        := ./cmd/cc-connect
+CONTROL_CMD := ./cmd/cc-connect-control
+RUNTIME_CMD := ./cmd/cc-connect-runtime
 DIST       := dist
 
 VERSION := v0.1.0
@@ -11,14 +13,6 @@ LDFLAGS := -s -w \
   -X main.version=$(VERSION) \
   -X main.commit=$(COMMIT) \
   -X main.buildTime=$(BUILD_TIME)
-
-PLATFORMS := \
-  linux/amd64 \
-  linux/arm64 \
-  darwin/amd64 \
-  darwin/arm64 \
-  windows/amd64 \
-  windows/arm64
 
 # ---------------------------------------------------------------------------
 # Selective compilation via build tags.
@@ -33,8 +27,6 @@ PLATFORMS := \
 #   make build EXCLUDE=discord,dingtalk,qq,qqbot,line
 # ---------------------------------------------------------------------------
 
-ALL_AGENTS    := acp antigravity claudecode codex copilot cursor devin gemini iflow kimi opencode pi qoder tmux
-ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max matrix webex wps-agentspace tuitui
 ALL_AGENTS    := acp antigravity claudecode codex copilot cursor devin gemini iflow kimi opencode pi qoder reasonix tmux
 ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max matrix webex cloud_web tuitui googlechat
 ALL_EXTRAS    := web
@@ -67,14 +59,23 @@ endif
 _BUILD_TAGS := $(strip $(_EXCLUDE_TAGS) goolm)
 _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 
-.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-performance pre-test lint release release-all web
+.PHONY: build build-control build-server build-runtime run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-performance pre-test lint release-all web
 
 web:
-	@if [ ! -d web/node_modules ]; then cd web && npm install; fi
-	cd web && npm run build
+	pnpm --dir web install --frozen-lockfile
+	pnpm --dir web build
 
 build: web
 	go build $(_TAGS_FLAG) -ldflags "$(LDFLAGS)" -o $(APP) $(CMD)
+
+build-control: web
+	go build -ldflags "$(LDFLAGS)" -o cc-connect-control $(CONTROL_CMD)
+
+build-server: web
+	go build $(_TAGS_FLAG) -ldflags "$(LDFLAGS)" -o cc-connect-server $(CMD)
+
+build-runtime:
+	go build -ldflags "-s -w -X main.version=$(VERSION)" -o cc-connect-runtime $(RUNTIME_CMD)
 
 build-noweb:
 	go build $(_TAGS_FLAG) -tags 'no_web' -ldflags "$(LDFLAGS)" -o $(APP) $(CMD)
@@ -84,6 +85,7 @@ run: build
 
 clean:
 	rm -f $(APP)
+	rm -f cc-connect-control cc-connect-server cc-connect-runtime
 	rm -rf $(DIST)
 
 # ---------------------------------------------------------------------------
@@ -146,39 +148,6 @@ test:
 lint:
 	golangci-lint run ./...
 
-release-all: web clean
-	@mkdir -p $(DIST)
-	@$(foreach platform,$(PLATFORMS), \
-		$(eval GOOS   := $(word 1,$(subst /, ,$(platform)))) \
-		$(eval GOARCH := $(word 2,$(subst /, ,$(platform)))) \
-		$(eval EXT    := $(if $(filter windows,$(GOOS)),.exe,)) \
-		$(eval OUT    := $(DIST)/$(APP)-$(VERSION)-$(GOOS)-$(GOARCH)$(EXT)) \
-		echo "Building $(OUT)" && \
-		GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 \
-			go build $(_TAGS_FLAG) -ldflags "$(LDFLAGS)" -o $(OUT) $(CMD) && \
-	) true
-	@echo "Packaging archives..."
-	@cd $(DIST) && for f in $(APP)-*; do \
-		case "$$f" in \
-			*.tar.gz|*.zip) continue ;; \
-			*.exe) zip "$${f%.exe}.zip" "$$f" ;; \
-			*)     tar czf "$$f.tar.gz" "$$f" ;; \
-		esac; \
-	done
-	@cd $(DIST) && sha256sum * > checksums.txt
-	@echo "Done. Binaries and archives in $(DIST)/"
-
-release:
-	@if [ -z "$(TARGET)" ]; then \
-		echo "Usage: make release TARGET=linux/amd64"; \
-		echo "Available: $(PLATFORMS)"; \
-		exit 1; \
-	fi
-	@mkdir -p $(DIST)
-	$(eval GOOS   := $(word 1,$(subst /, ,$(TARGET))))
-	$(eval GOARCH := $(word 2,$(subst /, ,$(TARGET))))
-	$(eval EXT    := $(if $(filter windows,$(GOOS)),.exe,))
-	$(eval OUT    := $(DIST)/$(APP)-$(VERSION)-$(GOOS)-$(GOARCH)$(EXT))
-	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 \
-		go build $(_TAGS_FLAG) -ldflags "$(LDFLAGS)" -o $(OUT) $(CMD)
-	@echo "Built: $(OUT)"
+release-all:
+	@echo "Signed multi-platform releases are created only by .github/workflows/release.yml from a v* tag."
+	@exit 1

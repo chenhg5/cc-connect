@@ -942,19 +942,9 @@ cc-connect relay send --to gemini "What do you think about this architecture?"
 
 ---
 
-## Daemon Mode
+## Control service
 
-Run as background service.
-
-```bash
-cc-connect daemon install --config ~/.cc-connect/config.toml
-cc-connect daemon start
-cc-connect daemon stop
-cc-connect daemon restart
-cc-connect daemon status
-cc-connect daemon logs [-f]
-cc-connect daemon uninstall
-```
+The Web product uses one systemd-managed `cc-connect-control`, which supervises the private server process. See [Deployment](deployment.md) for installation, logs, updates, and rollback.
 
 ---
 
@@ -991,57 +981,13 @@ type = "claudecode"
 
 ---
 
-## Web Admin Dashboard (Beta)
+## Web control plane
 
-> **Status: Beta.** This feature is available since v1.2.2-beta.5. The UI and API may change in future releases.
+The Web UI is embedded in `cc-connect-control`. A one-time token creates the administrator; subsequent requests use a secure Cookie, CSRF, and same-origin checks. The business process exposes no public TCP listener or management token. See [Deployment](deployment.md).
 
-A full-featured management UI embedded in the binary — project CRUD, session management, cron job editor, global settings, chat interface, and i18n support.
+### Control API
 
-### Quick Setup (Chat Command)
-
-The easiest way to enable web admin:
-
-```
-/web setup
-```
-
-This automatically enables both the **Management API** and the **Bridge** in `config.toml`, generates tokens, and prints the access URL. You may need to run `/restart` for changes to take effect.
-
-After setup, open the URL shown (default `http://localhost:9820`) and log in with the token.
-
-### Check Status
-
-```
-/web           # or /web status — show current web admin URL and status
-```
-
-### Manual Configuration
-
-Add the following to `config.toml`:
-
-```toml
-[management]
-enabled = true
-port = 9820                     # Management UI & API listen port
-token = "your-secret-token"     # Login token; /web setup generates one automatically
-cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS headers
-```
-
-Then restart cc-connect.
-
-### Build Options
-
-Web assets are compiled into the binary by default. To exclude them (saves ~1MB):
-
-```bash
-make build-noweb
-# or
-go build -tags 'no_web' ./cmd/cc-connect
-```
-
-When built with `no_web`, the `/web` command will report that web admin is not available.
-
-### Management API
+The API and Web UI share the control HTTPS origin under `/api/v1`. See the sole current [Control API](management-api.md) contract.
 
 The Management API is served on the same port as the UI. Base URL: `http://<host>:<port>/api/v1`
 
@@ -1069,10 +1015,6 @@ Full API reference: [management-api.md](./management-api.md)
 > **Status: Beta.** This feature is available since v1.2.2-beta.5. The protocol may change in future releases.
 
 The Bridge exposes a WebSocket + REST server so external adapters (custom UIs, bots, scripts) can interact with cc-connect sessions — send messages, receive events, manage sessions.
-
-### Enable via Chat
-
-The `/web setup` command enables Bridge automatically alongside the Management API.
 
 ### Manual Configuration
 
@@ -1125,7 +1067,7 @@ Full protocol reference: [bridge-protocol.md](./bridge-protocol.md)
 
 | Service | Default Port | Config Block |
 |---------|-------------|--------------|
-| Management (Web UI + API) | 9820 | `[management]` |
+| control (Web UI + API, loopback only) | 9820 | systemd/bootstrap |
 | Bridge (WebSocket + REST) | 9810 | `[bridge]` |
 
 ---

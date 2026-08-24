@@ -37,6 +37,20 @@
 - 旧 Engine 与工作区 Native 会话应共用同一个事件泵 runner 来仲裁 channel 关闭、context 取消、已取出事件的 handoff 和退出清理；审批等不可重放事件只在 runner 的 handoff 回调中收口，避免两个消费者各自复制有差异的 select 循环。
 - Codex `thread/read` 与 `thread/resume` 的 thread/cwd 归属失败都必须包装 `ErrNativeThreadNotFound`。Core 只依赖该通用终态回收 provisional actor；普通字符串错误会让跨目录 actor 永久重试订阅。
 - 测试中的空主 SessionManager 路径必须连同派生工作区存储一起保持禁用。否则相对路径会在包目录生成 `test_ws_*.json`，产物本身也是后台生命周期未收口的诊断信号。
+- 远程 Runtime 的 `connection_generation` 不能只在 control 内存递增；control 重启后必须从 `control.db` 的最后 checkpoint 继续，否则新连接会复用旧代际。每个连接还需要独立 context 和任务等待，断线后旧 RPC 响应与旧原生订阅不得进入新连接。
+- Runtime 原生订阅的取消函数和事件泵必须由同一个登记项拥有。旧订阅退出时只删除自身登记，不能按 workspace/thread key 无条件删除后来建立的新订阅；连接释放需要先取消再等待事件泵退出。
+- 设备撤销不能只写数据库标记。Broker 必须在同一操作中摘除并关闭活动 WebSocket、释放附件并记录审计事件，否则已认证连接会在“离线”显示后继续工作。
+- Runtime 版本激活在本机写入 `pending-activation.json` 后才切换 `current`，并且只有候选 control 的 `runtime/update/confirm` 能清除看门狗；未确认、启动失败或超时都恢复上一槽。control 的不可取消部署阶段从停止 server 的提交点开始，提交前必须最后检查取消。
+- bootstrap 与 Runtime installer 应用真实脚本夹具验证幂等、权限和部分状态。已有 Runtime 身份必须在任何下载或槽切换前校验 server URL；不同控制面必须在产生本地修改前失败。
+
+## 远程控制面与 Runtime 的 v0.1.0 验证
+
+- 2026-08-24 在 `e492ec49` 基线和 `codex/control-runtime-v0.1.0` 工作树上完成控制面重构验证。Web `pnpm test` 为 9 个文件、51 个测试通过，`pnpm build` 通过；只保留既有 500 kB chunk 提示。
+- Go 使用仓库声明的 `GOTOOLCHAIN=go1.25.1` 和最多 2 workers。控制面、Runtime、远程后端、Release、Core/Codex/SQLite/配置/企业微信聚焦测试通过；`go build -p=2 ./...`、`go vet -p=2 ./...`、`go mod tidy -diff`、`go mod verify` 和 `CI=1 go test -p=2 -parallel=2 ./...` 均通过。
+- 受影响包 race 通过：`./core ./agent/codex ./storage/workspacechat ./config ./platform/wecom ./controlstore ./controlplane ./runtimeclient ./runtimeidentity ./runtimeprotocol ./remotenative ./releaseinstall`。`golangci-lint v2.11.4` 使用 Go 1.25.1 运行，结果为 `0 issues`。
+- macOS 已 `Wait` 的旧进程组可能对负 PGID 返回 `EPERM`；只有直接子进程的 `os.Process` 同时确认 `os.ErrProcessDone` 时才能将其视为幂等终态。对应 Claude Code 回归连续 20 次通过。
+- OpenCode 后台模型刷新先原子写磁盘、再提交内存状态。测试必须等待已有的 `refreshWg`，不能把“磁盘已变化”当作 goroutine 已完成；对应回归连续 20 次通过。
+- 严格仓库基础审计再次为 `0 error / 0 warning / 0 exception`，`bash -n deploy/bootstrap.sh deploy/install-runtime.sh` 和 `git diff --check` 通过。生产代码中没有旧 management token、`template_project`、旧 daemon/Web 命令、旧工作区事件或服务器本地 Codex 后端；`thread/read(includeTurns=false)` 仍只用于 metadata/cwd 校验。
 
 ## 当前限制与候选优化
 
@@ -52,4 +66,4 @@
 
 ## 最后验证
 
-2026-08-24，基线 `bd0000ba` 加 `feat/codex-native-conversations-v2` 当前工作树；本地适用门禁已完成。首次 PR CI 的 Linux inode 复用假失败已在测试层修正并完成聚焦复验；修复后的 PR head 和 squash 后 `main` 的 GitHub CI 仍须按各自 SHA 独立核验。
+2026-08-24，基线 `e492ec49` 加 `codex/control-runtime-v0.1.0` 当前工作树；本地适用门禁已完成。未启动 Docker、浏览器自动化或真实服务器；没有真实企业微信凭据，因此线上企业微信 WebSocket 与附件投递仍需部署后验证。

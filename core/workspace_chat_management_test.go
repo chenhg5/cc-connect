@@ -125,7 +125,7 @@ func TestDecodeWorkspaceChatWSRequestRejectsNestedUnknownFieldsAndInvalidCursor(
 
 func TestWorkspaceChatManagementRESTUsesOnlyNativeConversationResources(t *testing.T) {
 	fixture := newWorkspaceChatTestFixture(t)
-	management := NewManagementServer(0, "", nil)
+	management := NewManagementServer()
 	management.SetWorkspaceChat(fixture.service)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/chat/workspaces", management.wrap(management.handleWorkspaceChatWorkspaces))
@@ -272,7 +272,7 @@ func TestWorkspaceChatManagementRESTUsesOnlyNativeConversationResources(t *testi
 
 func TestWorkspaceChatWebSocketRejectsUnknownProtocolShapes(t *testing.T) {
 	fixture := newWorkspaceChatTestFixture(t)
-	management := NewManagementServer(0, "", nil)
+	management := NewManagementServer()
 	management.SetWorkspaceChat(fixture.service)
 	server := httptest.NewServer(http.HandlerFunc(management.handleWorkspaceChatWS))
 	defer server.Close()
@@ -329,7 +329,7 @@ func TestWorkspaceChatWebSocketRejectsUnknownProtocolShapes(t *testing.T) {
 
 func TestWorkspaceChatWebSocketOperationErrorsUseActorSequence(t *testing.T) {
 	fixture := newWorkspaceChatTestFixture(t)
-	management := NewManagementServer(0, "", nil)
+	management := NewManagementServer()
 	management.SetWorkspaceChat(fixture.service)
 	server := httptest.NewServer(http.HandlerFunc(management.handleWorkspaceChatWS))
 	defer server.Close()
@@ -402,7 +402,7 @@ func TestWorkspaceChatWebSocketOwnsOnlyOneRealtimeConversation(t *testing.T) {
 	fixture.agent.generations[threadC] = 1
 	fixture.agent.mu.Unlock()
 
-	management := NewManagementServer(0, "", nil)
+	management := NewManagementServer()
 	management.SetWorkspaceChat(fixture.service)
 	server := httptest.NewServer(http.HandlerFunc(management.handleWorkspaceChatWS))
 	defer server.Close()
@@ -468,7 +468,7 @@ func TestWorkspaceChatWebSocketOwnsOnlyOneRealtimeConversation(t *testing.T) {
 
 func TestWorkspaceChatWebSocketCanRestartRealtimeAfterNativeClose(t *testing.T) {
 	fixture := newWorkspaceChatTestFixture(t)
-	management := NewManagementServer(0, "", nil)
+	management := NewManagementServer()
 	management.SetWorkspaceChat(fixture.service)
 	server := httptest.NewServer(http.HandlerFunc(management.handleWorkspaceChatWS))
 	defer server.Close()

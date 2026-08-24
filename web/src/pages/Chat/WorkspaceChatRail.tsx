@@ -36,13 +36,19 @@ function threadLabel(thread: NativeThread): string {
   return thread.name || thread.preview || thread.id.slice(0, 12);
 }
 
+function toggleSet(current: Set<string>, key: string): Set<string> {
+  const next = new Set(current);
+  if (next.has(key)) next.delete(key); else next.add(key);
+  return next;
+}
+
 function WorkspaceButton({ workspace, active, onClick, rootOnly = false }: { workspace: Workspace; active: boolean; onClick: () => void; rootOnly?: boolean }) {
   return (
     <button
       type="button"
       disabled={!workspace.available}
       onClick={onClick}
-      title={workspace.available ? workspace.root_path : workspace.error}
+      title={workspace.available ? workspace.root_name : workspace.error}
       className={cn(
         'mb-1 flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-2 text-left transition-colors',
         active ? 'bg-accent/12 text-accent' : 'hover:bg-gray-100 dark:hover:bg-white/[0.06]',
@@ -52,7 +58,7 @@ function WorkspaceButton({ workspace, active, onClick, rootOnly = false }: { wor
       {rootOnly ? <Code2 size={15} className="mt-0.5 shrink-0" /> : <Folder size={15} className="mt-0.5 shrink-0 text-amber-500" />}
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium">{rootOnly ? workspace.root_name : workspace.project_name}</span>
-        <span className="block truncate text-[10px] text-gray-400">{workspace.available ? workspace.root_path : workspace.error}</span>
+        <span className="block truncate text-[10px] text-gray-400">{workspace.available ? workspace.root_name : workspace.error}</span>
       </span>
     </button>
   );
@@ -62,13 +68,23 @@ export function WorkspaceChatRail(props: Props) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const groupedWorkspaces = useMemo(() => {
-    const groups = new Map<string, Workspace[]>();
-    props.workspaces.forEach((workspace) => groups.set(workspace.project_id, [...(groups.get(workspace.project_id) || []), workspace]));
-    return [...groups.values()];
+    const devices = new Map<string, { id: string; name: string; online: boolean; projects: Map<string, Workspace[]> }>();
+    props.workspaces.forEach((workspace) => {
+      const device = devices.get(workspace.device_id) || { id: workspace.device_id, name: workspace.device_name, online: workspace.online, projects: new Map<string, Workspace[]>() };
+      device.online ||= workspace.online;
+      device.projects.set(workspace.project_id, [...(device.projects.get(workspace.project_id) || []), workspace]);
+      devices.set(workspace.device_id, device);
+    });
+    return [...devices.values()];
   }, [props.workspaces]);
 
   useEffect(() => {
-    setExpanded(new Set(groupedWorkspaces.map((roots) => roots[0]?.project_id).filter(Boolean)));
+    const keys: string[] = [];
+    groupedWorkspaces.forEach((device) => {
+      keys.push(`device:${device.id}`);
+      device.projects.forEach((_roots, projectID) => keys.push(`${device.id}:${projectID}`));
+    });
+    setExpanded(new Set(keys));
   }, [groupedWorkspaces]);
 
   return (
@@ -83,25 +99,27 @@ export function WorkspaceChatRail(props: Props) {
         </div>
 
         <nav className="min-h-0 flex-1 overflow-y-auto p-2">
-          {groupedWorkspaces.map((roots) => {
-            const project = roots[0];
-            if (!project) return null;
-            const isExpanded = expanded.has(project.project_id);
-            if (roots.length === 1) {
-              return <WorkspaceButton key={project.ref} workspace={project} active={project.ref === props.workspaceRef} onClick={() => props.onWorkspace(project)} />;
-            }
-            return (
-              <div key={project.project_id} className="mb-1">
-                <button type="button" onClick={() => setExpanded((current) => {
-                  const next = new Set(current);
-                  if (next.has(project.project_id)) next.delete(project.project_id); else next.add(project.project_id);
-                  return next;
-                })} className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left text-sm font-medium hover:bg-gray-100 dark:hover:bg-white/[0.06]">
-                  {isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}<Folder size={15} className="shrink-0 text-amber-500" /><span className="truncate">{project.project_name}</span>
-                </button>
-                {isExpanded && <div className="ml-5 border-l border-gray-200 pl-1 dark:border-white/[0.1]">{roots.map((workspace) => <WorkspaceButton key={workspace.ref} workspace={workspace} active={workspace.ref === props.workspaceRef} onClick={() => props.onWorkspace(workspace)} rootOnly />)}</div>}
-              </div>
-            );
+          {groupedWorkspaces.map((device) => {
+            const deviceKey = `device:${device.id}`;
+            const deviceExpanded = expanded.has(deviceKey);
+            return <div key={device.id} className="mb-2">
+              <button type="button" onClick={() => setExpanded((current) => toggleSet(current, deviceKey))} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-xs font-semibold uppercase text-gray-500 hover:bg-gray-100 dark:hover:bg-white/[0.06]">
+                {deviceExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<Code2 size={14} /><span className="truncate">{device.name}</span><span className={`ml-auto h-2 w-2 rounded-full ${device.online ? 'bg-green-500' : 'bg-gray-400'}`} />
+              </button>
+              {deviceExpanded && <div className="ml-2 border-l border-gray-200 pl-1 dark:border-white/[0.1]">{[...device.projects.entries()].map(([projectID, roots]) => {
+                const project = roots[0];
+                if (!project) return null;
+                const projectKey = `${device.id}:${projectID}`;
+                if (roots.length === 1) return <WorkspaceButton key={project.ref} workspace={project} active={project.ref === props.workspaceRef} onClick={() => props.onWorkspace(project)} />;
+                const projectExpanded = expanded.has(projectKey);
+                return <div key={projectKey} className="mb-1">
+                  <button type="button" onClick={() => setExpanded((current) => toggleSet(current, projectKey))} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-white/[0.06]">
+                    {projectExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<Folder size={14} className="text-amber-500" /><span className="truncate">{project.project_name}</span>
+                  </button>
+                  {projectExpanded && <div className="ml-5">{roots.map((workspace) => <WorkspaceButton key={workspace.ref} workspace={workspace} active={workspace.ref === props.workspaceRef} onClick={() => props.onWorkspace(workspace)} rootOnly />)}</div>}
+                </div>;
+              })}</div>}
+            </div>;
           })}
           {!props.loading && props.workspaces.length === 0 && <p className="p-4 text-sm text-gray-400">{t('workspaceChat.noWorkspaces')}</p>}
 

@@ -5,9 +5,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  release:
-    types: [published]
-
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -30,6 +27,8 @@ jobs:
 
       - name: Build web assets
         working-directory: web
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         run: |
           pnpm install --frozen-lockfile
           pnpm build
@@ -41,6 +40,9 @@ jobs:
           cache: true
 
       - name: Lint code
+        env:
+          GOPROXY: https://goproxy.cn
+          GOSUMDB: sum.golang.org
         run: |
           set -euo pipefail
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
@@ -67,6 +69,9 @@ jobs:
           fi
 
       - name: Lint GitHub workflows
+        env:
+          GOPROXY: https://goproxy.cn
+          GOSUMDB: sum.golang.org
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.8
           "$(go env GOPATH)/bin/actionlint" -color
@@ -92,6 +97,8 @@ jobs:
 
       - name: Build web assets
         working-directory: web
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
         run: |
           pnpm install --frozen-lockfile
           pnpm build

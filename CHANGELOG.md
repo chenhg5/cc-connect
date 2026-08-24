@@ -292,13 +292,13 @@ First stable release of the 1.3 series. 555 commits since v1.2.1 with major new 
 
 ### Highlights
 
-- **Web Admin UI** — Full management dashboard embedded in the binary via `go:embed`. Project CRUD, session monitoring, cron editor, provider management, chat interface, and i18n (en/zh/zh-TW/ja/es). Use `cc-connect web` to open directly in the browser with auto-login.
+- **Legacy Web Admin UI** — This release introduced an embedded dashboard. The legacy direct-open CLI and token login described at the time are no longer part of the current control-plane contract.
 - **Lifecycle Event Hooks** — New `[[hooks]]` config to trigger shell commands or HTTP webhooks on 7 event types: `message.received`, `message.sent`, `session.started`, `session.ended`, `cron.triggered`, `permission.requested`, `error`. Async by default, fail-open, non-blocking.
 - **Skill Management** — New `/skills` page in the web UI with local skill browser (per-project, per-agent) and recommended skill presets fetched from remote.
 - **Global Provider Management** — Add, edit, delete providers in the web UI; import from cc-switch config; per-agent-type provider presets with featured/star badges.
 
 ### New Features
-- `cc-connect web` CLI command: auto-configure web admin, open browser with token-based login
+- Legacy direct-open Web CLI with token login (removed; current releases use `cc-connect-control` setup and administrator sessions)
 - Feishu: auto-resolve `@name` mentions to clickable at-tags (`resolve_mentions` config)
 - Feishu: multi-level reply chain recognition; done-emoji reaction after streaming
 - Feishu: configurable progress display styles (compact/card)
@@ -731,7 +731,7 @@ This is the first stable release of cc-connect 1.2.0, consolidating all beta cha
 - **`/config` Command**: View and modify runtime configuration (e.g. `thinking_max_len`, `tool_max_len`) from chat, with persistent save to `config.toml`
 - **`/doctor` Command**: Run system diagnostics covering agent authentication, platform connectivity, system resources, dependencies, and network latency; fully i18n-supported
 - **Discord Slash Commands**: Register native Discord Application Commands so typing `/` shows an autocomplete menu; supports per-guild instant registration via `guild_id` config
-- **Daemon Mode**: Run cc-connect as a background service (`cc-connect daemon install/start/stop/status/logs`); supports systemd (Linux) and launchd (macOS)
+- **Legacy Daemon Mode**: Earlier releases exposed direct service-management commands. Current releases use the bootstrap-managed control service and macOS Runtime installer instead.
 - **Qoder CLI Agent**: Full support for the Qoder coding agent with streaming JSON, mode switching, and model selection
 - **Telegram Proxy**: Support HTTP/SOCKS5 proxy for Telegram bot API connections
 - **WeChat Work Proxy Auth**: Add `proxy_username` / `proxy_password` for authenticated forward proxies

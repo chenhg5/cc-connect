@@ -390,28 +390,13 @@ level = "info" # debug, info, warn, error
 # path = "/bridge/ws"                 # URL path (default: "/bridge/ws") / URL 路径
 
 # =============================================================================
-# Management API (External Management Tools)
-# 管理 API（外部管理工具）
-# =============================================================================
-# HTTP REST API for external apps (web dashboards, TUI, GUI, Mac tray apps).
-# 为外部应用（Web 管理面板、TUI、GUI、Mac 托盘应用）提供 HTTP REST API。
-# See docs/management-api.md for the full API specification.
-# 完整 API 规范请参阅 docs/management-api.md。
-#
-# [management]
-# enabled = true
-# port = 9820                           # HTTP listen port (default: 9820) / 监听端口
-# token = "your-mgmt-secret"            # Auth token (required) / 认证密钥（必填）
-# cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
-
-# =============================================================================
 # Unified Workspace Chat / 统一工作区对话
 # =============================================================================
-# Uses Codex App projects and native Codex threads in the Web dashboard and
-# WeCom direct messages. template_project must reference a Codex project whose
-# agent backend is app_server. The Web transport also requires management.enabled.
-# Web 管理后台和企业微信单聊共用 Codex App 项目与原生会话。template_project
-# 必须指向 backend=app_server 的 Codex 项目；启用 web 还必须开启 management。
+# cc-connect-control normally generates this section atomically. Paired macOS
+# Runtime devices supply Codex App projects and native threads; Linux never
+# reads a local CODEX_HOME or starts a local Codex App Server.
+# 此区段通常由 cc-connect-control 原子生成。配对的 macOS Runtime 提供 Codex
+# App 项目和原生会话；Linux 不读取本地 CODEX_HOME，也不启动本地 App Server。
 # The project rail is read-only. New creates an unnamed SQLite draft; the first
 # Turn materializes its native thread. Web realtime uses WebRTC; WeCom supports
 # text, images, audio and files but not realtime voice.
@@ -420,13 +405,11 @@ level = "info" # debug, info, warn, error
 #
 # [workspace_chat]
 # enabled = true
-# template_project = "codex-template"
 # transports = ["web", "wecom"]
 #
-# The referenced project's work_dir is only a template value. Clients submit an
-# opaque workspaceRef; the server resolves and revalidates the Codex App root.
-# 模板项目的 work_dir 仅作为模板值。客户端只提交不透明 workspaceRef，服务端
-# 解析并重新校验对应的 Codex App 根目录。
+# [workspace_chat.wecom]
+# bot_id = "your-bot-id"
+# bot_secret = "your-bot-secret"
 # data_dir/workspace_chat.db has one current PRAGMA user_version. A healthy
 # version mismatch removes exactly the db, -wal and -shm files and recreates it;
 # unreadable or corrupt databases fail startup and are preserved. No old state
@@ -434,17 +417,6 @@ level = "info" # debug, info, warn, error
 # data_dir/workspace_chat.db 只接受当前 PRAGMA user_version。健康数据库版本
 # 不匹配时精确删除 db、-wal、-shm 后重建；无法读取或损坏时保留文件并启动失败。
 # 不迁移旧协调状态，CODEX_HOME 中的 Codex 原生 thread 不受影响。
-#
-# [[projects]]
-# name = "codex-template"
-# work_dir = "/path/to/a/default/project"
-# [projects.agent]
-# type = "codex"
-# [projects.agent.options]
-# backend = "app_server"
-# [[projects.platforms]]
-# type = "wecom"
-# [projects.platforms.options]
 # mode = "websocket"
 # bot_id = "your-bot-id"
 # bot_secret = "your-bot-secret"
@@ -587,17 +559,6 @@ level = "info" # debug, info, warn, error
 # base_url = ""              # optional: default "https://api.xiaomimimo.com/v1" / 留空使用默认地址
 #                            # Token Plan 国内地址：https://token-plan-cn.xiaomimimo.com/v1
 # model    = "mimo-v2.5-tts" # "mimo-v2.5-tts" | "mimo-v2.5-tts-voicedesign" | "mimo-v2.5-tts-voiceclone"
-
-# =============================================================================
-# Daemon Mode / 守护进程模式
-# =============================================================================
-# Run cc-connect as a background service (systemd user / launchd LaunchAgent).
-# 将 cc-connect 作为后台服务运行（systemd 用户服务 / launchd LaunchAgent）。
-#
-# CLI: cc-connect daemon install|uninstall|start|stop|restart|status|logs
-# Install: --log-file PATH, --log-max-size N (MB), --work-dir DIR, --force
-# Logs: -f/--follow, -n N, --log-file PATH
-# 配置均通过 CLI 参数，无需在此文件中设置。
 
 # =============================================================================
 # Custom Skills (Slash Commands) / 自定义命令

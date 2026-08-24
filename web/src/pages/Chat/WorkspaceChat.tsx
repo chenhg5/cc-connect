@@ -315,6 +315,7 @@ export default function WorkspaceChat() {
 
   useEffect(() => {
     if ((!stream.needsHistoryRefresh && !stream.needsResync) || conversation?.kind !== 'thread') return;
+    dispatch({ type: 'history_refreshed' });
     refreshThread().catch((cause) => setError(errorMessage(cause)));
   }, [conversation?.kind, refreshThread, stream.needsHistoryRefresh, stream.needsResync]);
 
@@ -533,7 +534,7 @@ export default function WorkspaceChat() {
           <button type="button" className="rounded-md p-1.5 hover:bg-gray-100 md:hidden dark:hover:bg-white/[0.08]" onClick={() => setProjectPanelOpen(true)} aria-label={t('workspaceChat.openWorkspaces')}><Menu size={18} /></button>
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold">{activeWorkspace ? `${activeWorkspace.project_name}${activeWorkspace.root_name !== activeWorkspace.project_name ? ` / ${activeWorkspace.root_name}` : ''}` : t('workspaceChat.chooseWorkspace')}</div>
-            {activeWorkspace && <div className="truncate text-[11px] text-gray-400">{conversation?.kind === 'draft' ? t('workspaceChat.newDraft') : selectedThread?.name || selectedThread?.preview || activeWorkspace.root_path}</div>}
+            {activeWorkspace && <div className="truncate text-[11px] text-gray-400">{conversation?.kind === 'draft' ? t('workspaceChat.newDraft') : selectedThread?.name || selectedThread?.preview || `${activeWorkspace.device_name} / ${activeWorkspace.root_name}`}</div>}
           </div>
           {currentStatus && <Badge variant={statusVariant(currentStatus)} className="hidden sm:inline-flex">{currentStatus}</Badge>}
           {tokenCount !== null && <Badge variant="outline" className="hidden sm:inline-flex">{t('workspaceChat.tokens', { count: tokenCount.toLocaleString() })}</Badge>}

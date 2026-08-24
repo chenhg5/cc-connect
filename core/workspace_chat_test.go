@@ -438,6 +438,24 @@ type workspaceChatNativeTestAgent struct {
 	settingsRevision       int
 }
 
+func (a *workspaceChatNativeTestAgent) ValidateWorkspaceAccess(ctx context.Context, workspace Workspace) error {
+	resolved, err := a.ResolveWorkspace(ctx, workspace.Ref)
+	if err != nil {
+		return err
+	}
+	if !resolved.Available || !sameWorkspacePath(resolved.RootPath, workspace.RootPath) {
+		return fmt.Errorf("test workspace is unavailable")
+	}
+	return nil
+}
+
+func (a *workspaceChatNativeTestAgent) ValidateNativeThreadAccess(_ context.Context, workspace Workspace, thread NativeThread) error {
+	if strings.TrimSpace(thread.ID) == "" || !sameWorkspacePath(thread.Cwd, workspace.RootPath) {
+		return fmt.Errorf("test thread does not belong to workspace")
+	}
+	return nil
+}
+
 type workspaceChatStartTurnCall struct {
 	WorkspaceRef string
 	ThreadID     string
@@ -854,11 +872,11 @@ type workspaceChatTestFixture struct {
 func newWorkspaceChatTestFixture(t *testing.T) *workspaceChatTestFixture {
 	t.Helper()
 	workspaceA := Workspace{
-		Ref: "workspace-a", ProjectID: "project-a", ProjectName: "Project A", RootName: "Root A",
+		Ref: "workspace-a", DeviceID: "device-a", DeviceName: "Mac A", ProjectID: "project-a", ProjectName: "Project A", RootName: "Root A",
 		RootPath: t.TempDir(), Available: true, Order: 2,
 	}
 	workspaceB := Workspace{
-		Ref: "workspace-b", ProjectID: "project-b", ProjectName: "Project B", RootName: "Root B",
+		Ref: "workspace-b", DeviceID: "device-a", DeviceName: "Mac A", ProjectID: "project-b", ProjectName: "Project B", RootName: "Root B",
 		RootPath: t.TempDir(), Available: true, Order: 1,
 	}
 	now := time.Now()
@@ -917,8 +935,7 @@ func newWorkspaceChatTestFixture(t *testing.T) *workspaceChatTestFixture {
 		},
 	}
 	repository := newWorkspaceChatMemoryRepository()
-	engine := NewEngine("workspace-template", agent, nil, "", LangEnglish)
-	service, err := NewWorkspaceChatService(engine, repository, []string{"web", "wecom"})
+	service, err := NewWorkspaceChatService(workspaceChatTestDependencies(agent), repository, []string{"web", "wecom"})
 	if err != nil {
 		t.Fatalf("NewWorkspaceChatService() error = %v", err)
 	}
@@ -931,6 +948,10 @@ func newWorkspaceChatTestFixture(t *testing.T) *workspaceChatTestFixture {
 		service: service, repository: repository, agent: agent,
 		workspaceA: workspaceA, workspaceB: workspaceB, threadA: threadA, threadB: threadB,
 	}
+}
+
+func workspaceChatTestDependencies(agent *workspaceChatNativeTestAgent) WorkspaceChatDependencies {
+	return WorkspaceChatDependencies{Catalog: agent, Validator: agent, Backend: agent, Settings: agent, Turns: agent, Realtime: agent, I18n: NewI18n(LangEnglish)}
 }
 
 func workspaceChatTestDeepLink(threadID string) string {
@@ -1267,8 +1288,8 @@ func TestWorkspaceChatRealtimeAppendAndStopRevalidateResolvedWorkspace(t *testin
 	appendCalls := len(fixture.agent.realtimeAppendCalls)
 	stopCalls := len(fixture.agent.realtimeStopCalls)
 	fixture.agent.mu.Unlock()
-	if resolveCallsAfter-resolveCallsBefore != 2 {
-		t.Fatalf("realtime operations resolved workspace %d times, want 2", resolveCallsAfter-resolveCallsBefore)
+	if resolveCallsAfter-resolveCallsBefore != 4 {
+		t.Fatalf("realtime operations resolved and authoritatively revalidated workspace %d times, want 4", resolveCallsAfter-resolveCallsBefore)
 	}
 	if appendCalls != 0 || stopCalls != 0 {
 		t.Fatalf("realtime mutations after workspace remap = append %d, stop %d; want 0, 0", appendCalls, stopCalls)
@@ -1302,8 +1323,8 @@ func TestWorkspaceChatRealtimeRejectsForgedWorkspaceAndCrossDirectoryThread(t *t
 	appendCalls := len(fixture.agent.realtimeAppendCalls)
 	stopCalls := len(fixture.agent.realtimeStopCalls)
 	fixture.agent.mu.Unlock()
-	if resolveCallsAfter-resolveCallsBefore != 4 {
-		t.Fatalf("realtime rejection resolved workspace %d times, want 4", resolveCallsAfter-resolveCallsBefore)
+	if resolveCallsAfter-resolveCallsBefore != 6 {
+		t.Fatalf("realtime rejection resolved and authoritatively revalidated workspace %d times, want 6", resolveCallsAfter-resolveCallsBefore)
 	}
 	if appendCalls != 0 || stopCalls != 0 {
 		t.Fatalf("realtime mutations for forged references = append %d, stop %d; want 0, 0", appendCalls, stopCalls)
@@ -1824,4 +1845,16 @@ func eventuallyWorkspaceChat(timeout time.Duration, condition func() bool) bool 
 		time.Sleep(5 * time.Millisecond)
 	}
 	return condition()
+}
+
+func TestWorkspaceChatService_RuntimeActivityReportsDeploymentBlockers(t *testing.T) {
+	service := &WorkspaceChatService{actors: make(map[string]*workspaceChatActor)}
+	service.actors["workspace\x00thread"] = &workspaceChatActor{
+		activeTurnID: "turn-1", realtime: true,
+		pending: map[string]NativeInteraction{"request-1": {ID: "request-1"}},
+	}
+	activity := service.RuntimeActivity()
+	if activity.ActiveTurns != 1 || activity.PendingInteractions != 1 || activity.RealtimeSessions != 1 || !activity.Busy() {
+		t.Fatalf("RuntimeActivity() = %#v", activity)
+	}
 }

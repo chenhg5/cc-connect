@@ -3,24 +3,24 @@ const API_BASE = '/api/v1';
 type UnauthorizedHandler = () => void;
 
 class ApiClient {
-  private token: string = '';
+  private csrfToken: string = '';
   private onUnauthorized?: UnauthorizedHandler;
 
-  setToken(token: string) {
-    this.token = token;
+  setCSRFToken(token: string) {
+    this.csrfToken = token;
   }
 
-  getToken(): string {
-    return this.token;
+  clearSession() {
+    this.csrfToken = '';
   }
 
   setOnUnauthorized(handler: UnauthorizedHandler) {
     this.onUnauthorized = handler;
   }
 
-  private headers(): HeadersInit {
+  private headers(method: string): HeadersInit {
     const h: HeadersInit = { 'Content-Type': 'application/json' };
-    if (this.token) h['Authorization'] = `Bearer ${this.token}`;
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && this.csrfToken) h['X-CSRF-Token'] = this.csrfToken;
     return h;
   }
 
@@ -32,7 +32,8 @@ class ApiClient {
     }
     const res = await fetch(url, {
       method,
-      headers: this.headers(),
+      headers: this.headers(method),
+      credentials: 'same-origin',
       body: body ? JSON.stringify(body) : undefined,
     });
     if (res.status === 401 && this.onUnauthorized) {
@@ -54,9 +55,7 @@ class ApiClient {
 
   /** Fetch raw text (non-JSON) from an API endpoint. */
   async raw(path: string): Promise<string> {
-    const h: HeadersInit = {};
-    if (this.token) h['Authorization'] = `Bearer ${this.token}`;
-    const res = await fetch(`${API_BASE}${path}`, { headers: h });
+    const res = await fetch(`${API_BASE}${path}`, { credentials: 'same-origin' });
     if (res.status === 401 && this.onUnauthorized) {
       this.onUnauthorized();
       throw new ApiError('Unauthorized', 401);
@@ -64,6 +63,30 @@ class ApiClient {
     if (!res.ok) throw new ApiError(res.statusText, res.status);
     return res.text();
   }
+
+	async streamJSONLines<T>(path: string, onValue: (value: T) => void, signal?: AbortSignal): Promise<void> {
+		const res = await fetch(`${API_BASE}${path}`, { credentials: 'same-origin', signal });
+		if (res.status === 401 && this.onUnauthorized) {
+			this.onUnauthorized();
+			throw new ApiError('Unauthorized', 401);
+		}
+		if (!res.ok || !res.body) throw new ApiError(res.statusText, res.status);
+		const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+		let pending = '';
+		for (;;) {
+			const { value, done } = await reader.read();
+			pending += value || '';
+			let newline = pending.indexOf('\n');
+			while (newline >= 0) {
+				const line = pending.slice(0, newline).trim();
+				pending = pending.slice(newline + 1);
+				if (line) onValue(JSON.parse(line) as T);
+				newline = pending.indexOf('\n');
+			}
+			if (done) break;
+		}
+		if (pending.trim()) onValue(JSON.parse(pending) as T);
+	}
 }
 
 export class ApiError extends Error {

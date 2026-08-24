@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
-	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -103,13 +102,15 @@ type workspaceChatActor struct {
 // WorkspaceChatService 是工作区 conversation actor、活动 Turn、交互、实时会话、
 // 持久状态和事件顺序的唯一生命周期所有者。
 type WorkspaceChatService struct {
-	engine   *Engine
-	catalog  WorkspaceCatalogProvider
-	backend  NativeConversationBackend
-	settings NativeConversationSettingsController
-	turns    NativeConversationTurnController
-	realtime NativeConversationRealtimeController
-	repo     WorkspaceChatRepository
+	catalog   WorkspaceCatalogProvider
+	devices   WorkspaceDeviceCatalogProvider
+	validator WorkspaceAccessValidator
+	backend   NativeConversationBackend
+	settings  NativeConversationSettingsController
+	turns     NativeConversationTurnController
+	realtime  NativeConversationRealtimeController
+	i18n      *I18n
+	repo      WorkspaceChatRepository
 
 	transports map[string]struct{}
 	ctx        context.Context
@@ -127,27 +128,56 @@ type WorkspaceChatService struct {
 	workers        sync.WaitGroup
 }
 
-func NewWorkspaceChatService(engine *Engine, repo WorkspaceChatRepository, transports []string) (*WorkspaceChatService, error) {
-	if engine == nil || repo == nil || engine.agent == nil {
-		return nil, fmt.Errorf("workspace chat: template engine and repository are required")
+// WorkspaceChatRuntimeActivity 是部署前检查使用的只读运行快照。它只汇总
+// WorkspaceChatService 已拥有的 actor 状态，不触发原生请求或改变会话状态。
+type WorkspaceChatRuntimeActivity struct {
+	ActiveTurns         int `json:"active_turns"`
+	PendingInteractions int `json:"pending_interactions"`
+	RealtimeSessions    int `json:"realtime_sessions"`
+}
+
+func (a WorkspaceChatRuntimeActivity) Busy() bool {
+	return a.ActiveTurns > 0 || a.PendingInteractions > 0 || a.RealtimeSessions > 0
+}
+
+func (s *WorkspaceChatService) RuntimeActivity() WorkspaceChatRuntimeActivity {
+	s.actorsMu.Lock()
+	actors := make([]*workspaceChatActor, 0, len(s.actors))
+	for _, actor := range s.actors {
+		actors = append(actors, actor)
 	}
-	catalog, ok := engine.agent.(WorkspaceCatalogProvider)
-	if !ok {
-		return nil, fmt.Errorf("workspace chat: template agent does not provide a workspace catalog")
+	s.actorsMu.Unlock()
+
+	var activity WorkspaceChatRuntimeActivity
+	for _, actor := range actors {
+		actor.mu.Lock()
+		if actor.activeTurnID != "" || actor.pendingStart != nil {
+			activity.ActiveTurns++
+		}
+		activity.PendingInteractions += len(actor.pending)
+		if actor.realtime {
+			activity.RealtimeSessions++
+		}
+		actor.mu.Unlock()
 	}
-	backend, ok := engine.agent.(NativeConversationBackend)
-	if !ok {
-		return nil, fmt.Errorf("workspace chat: template agent does not provide native conversations")
+	return activity
+}
+
+type WorkspaceChatDependencies struct {
+	Catalog   WorkspaceCatalogProvider
+	Devices   WorkspaceDeviceCatalogProvider
+	Validator WorkspaceAccessValidator
+	Backend   NativeConversationBackend
+	Settings  NativeConversationSettingsController
+	Turns     NativeConversationTurnController
+	Realtime  NativeConversationRealtimeController
+	I18n      *I18n
+}
+
+func NewWorkspaceChatService(dependencies WorkspaceChatDependencies, repo WorkspaceChatRepository, transports []string) (*WorkspaceChatService, error) {
+	if repo == nil || dependencies.Catalog == nil || dependencies.Validator == nil || dependencies.Backend == nil || dependencies.Settings == nil || dependencies.Turns == nil || dependencies.I18n == nil {
+		return nil, fmt.Errorf("workspace chat: catalog, validator, backend, settings, turns, i18n and repository are required")
 	}
-	settings, ok := engine.agent.(NativeConversationSettingsController)
-	if !ok {
-		return nil, fmt.Errorf("workspace chat: template agent does not provide native settings")
-	}
-	turns, ok := engine.agent.(NativeConversationTurnController)
-	if !ok {
-		return nil, fmt.Errorf("workspace chat: template agent does not provide native turns")
-	}
-	realtime, _ := engine.agent.(NativeConversationRealtimeController)
 	allowed := make(map[string]struct{}, len(transports))
 	for _, value := range transports {
 		value = strings.ToLower(strings.TrimSpace(value))
@@ -157,8 +187,15 @@ func NewWorkspaceChatService(engine *Engine, repo WorkspaceChatRepository, trans
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	operations, cancelOps := context.WithCancel(context.Background())
+	devices := dependencies.Devices
+	if devices == nil {
+		devices, _ = dependencies.Catalog.(WorkspaceDeviceCatalogProvider)
+	}
 	service := &WorkspaceChatService{
-		engine: engine, catalog: catalog, backend: backend, settings: settings, turns: turns, realtime: realtime,
+		catalog: dependencies.Catalog, validator: dependencies.Validator, backend: dependencies.Backend,
+		devices:  devices,
+		settings: dependencies.Settings, turns: dependencies.Turns, realtime: dependencies.Realtime,
+		i18n: dependencies.I18n,
 		repo: repo, transports: allowed, ctx: ctx, cancel: cancel, operations: operations, cancelOps: cancelOps,
 		actors: make(map[string]*workspaceChatActor),
 	}
@@ -377,12 +414,8 @@ func (s *WorkspaceChatService) resolveWorkspace(ctx context.Context, ref string)
 	if !workspace.Available {
 		return Workspace{}, fmt.Errorf("workspace chat: workspace is unavailable: %s", workspace.Error)
 	}
-	info, err := os.Stat(workspace.RootPath)
-	if err != nil {
-		return Workspace{}, fmt.Errorf("workspace chat: inspect workspace root: %w", err)
-	}
-	if !info.IsDir() {
-		return Workspace{}, fmt.Errorf("workspace chat: workspace root is not a directory")
+	if err := s.validator.ValidateWorkspaceAccess(ctx, workspace); err != nil {
+		return Workspace{}, fmt.Errorf("workspace chat: validate workspace access: %w", err)
 	}
 	return workspace, nil
 }
@@ -419,7 +452,7 @@ func (s *WorkspaceChatService) ListThreads(ctx context.Context, workspaceRef str
 		return NativeThreadPage{}, fmt.Errorf("workspace chat: list native conversations: %w", err)
 	}
 	for _, thread := range result.Data {
-		if thread.ID == "" || !sameWorkspacePath(thread.Cwd, workspace.RootPath) {
+		if thread.ID == "" || s.validator.ValidateNativeThreadAccess(ctx, workspace, thread) != nil {
 			return NativeThreadPage{}, fmt.Errorf("workspace chat: backend returned a thread outside the requested workspace")
 		}
 	}
@@ -509,10 +542,10 @@ func (s *WorkspaceChatService) ReadThread(ctx context.Context, workspaceRef, thr
 	}
 	snapshot := cloneNativeConversationSnapshot(*actor.snapshot)
 	actor.mu.Unlock()
-	if snapshot.Thread.ID != threadID || !sameWorkspacePath(snapshot.Thread.Cwd, workspace.RootPath) {
+	if snapshot.Thread.ID != threadID || s.validator.ValidateNativeThreadAccess(ctx, workspace, snapshot.Thread) != nil {
 		return NativeConversationSnapshot{}, fmt.Errorf("%w: thread does not belong to workspace", ErrNativeThreadNotFound)
 	}
-	if err := validateNativeSnapshot(workspace, threadID, snapshot); err != nil {
+	if err := s.validateNativeSnapshot(ctx, workspace, threadID, snapshot); err != nil {
 		return NativeConversationSnapshot{}, fmt.Errorf("%w: %v", ErrNativeThreadNotFound, err)
 	}
 	actor.mu.Lock()
@@ -1067,7 +1100,7 @@ func (s *WorkspaceChatService) materializeDraftTurn(ctx context.Context, actor *
 		return NativeTurnResult{}, fmt.Errorf("workspace chat: start native conversation: %w", err)
 	}
 	threadID := strings.TrimSpace(snapshot.Thread.ID)
-	if err := validateNativeSnapshot(actor.workspace, threadID, snapshot); err != nil {
+	if err := s.validateNativeSnapshot(ctx, actor.workspace, threadID, snapshot); err != nil {
 		return NativeTurnResult{}, s.failDraftMaterialization(actor, draft.ID, requestID, "", fmt.Errorf("invalid created native conversation: %w", err))
 	}
 	actor.mu.Lock()
@@ -1133,7 +1166,7 @@ func (s *WorkspaceChatService) startThreadTurn(ctx context.Context, actor *works
 	if err != nil {
 		return NativeTurnResult{}, fmt.Errorf("workspace chat: refresh native thread: %w", err)
 	}
-	if err := validateNativeSnapshot(actor.workspace, actor.threadID, snapshot); err != nil {
+	if err := s.validateNativeSnapshot(ctx, actor.workspace, actor.threadID, snapshot); err != nil {
 		return NativeTurnResult{}, fmt.Errorf("workspace chat: refresh native thread: %w", err)
 	}
 	if snapshot.ActiveTurn != nil {
@@ -1918,7 +1951,7 @@ func (s *WorkspaceChatService) runNativePump(ctx context.Context, actor *workspa
 			}
 			continue
 		}
-		if err := validateNativeSnapshot(actor.workspace, threadID, snapshot); err != nil {
+		if err := s.validateNativeSnapshot(ctx, actor.workspace, threadID, snapshot); err != nil {
 			err = fmt.Errorf("%w: %v", ErrNativeThreadNotFound, err)
 			subscription.Cancel()
 			if ctx.Err() != nil {
@@ -2325,7 +2358,7 @@ func (s *WorkspaceChatService) handleNativeEvent(actor *workspaceChatActor, even
 	}
 	if method == "turn/completed" && terminalStatus != "completed" {
 		if terminalDelivery != nil {
-			s.deliverPlatform(actor.workspace.Ref, actor.conversation, terminalDelivery, s.engine.i18n.Tf(MsgWorkspaceChatTurnEndedStatus, terminalStatus), "assistant")
+			s.deliverPlatform(actor.workspace.Ref, actor.conversation, terminalDelivery, s.i18n.Tf(MsgWorkspaceChatTurnEndedStatus, terminalStatus), "assistant")
 		}
 	}
 	if method == "turn/completed" || method == "serverRequest/resolved" || method == "thread/realtime/closed" || method == "thread/realtime/error" {
@@ -2444,7 +2477,7 @@ func (s *WorkspaceChatService) deliverInteraction(actor *workspaceChatActor, int
 	if target == nil || target.platform == nil {
 		return
 	}
-	content := s.engine.i18n.Tf(MsgWorkspaceChatInteractionDelivery, interaction.Kind, interaction.ID)
+	content := s.i18n.Tf(MsgWorkspaceChatInteractionDelivery, interaction.Kind, interaction.ID)
 	s.deliverPlatform(actor.workspace.Ref, conversation, target, content, "interaction")
 }
 
@@ -2489,12 +2522,12 @@ func (s *WorkspaceChatService) deliverPlatform(workspaceRef string, conversation
 	}()
 }
 
-func validateNativeSnapshot(workspace Workspace, threadID string, snapshot NativeConversationSnapshot) error {
+func (s *WorkspaceChatService) validateNativeSnapshot(ctx context.Context, workspace Workspace, threadID string, snapshot NativeConversationSnapshot) error {
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" || snapshot.Thread.ID != threadID {
 		return fmt.Errorf("native snapshot returned a different thread")
 	}
-	if !sameWorkspacePath(snapshot.Thread.Cwd, workspace.RootPath) {
+	if err := s.validator.ValidateNativeThreadAccess(ctx, workspace, snapshot.Thread); err != nil {
 		return fmt.Errorf("native snapshot does not belong to workspace")
 	}
 	deepLink := strings.TrimSpace(snapshot.DeepLink)
@@ -2704,22 +2737,25 @@ func (s *WorkspaceChatService) validateNativeInputs(input []NativeUserInput, tru
 			if item.Text == "" {
 				return nil, fmt.Errorf("workspace chat: text input is empty")
 			}
-			if item.URL != "" || item.LocalPath != "" {
-				return nil, fmt.Errorf("workspace chat: text input cannot contain a path or URL")
+			if item.URL != "" || item.LocalPath != "" || item.AttachmentRef != "" || len(item.Data) != 0 {
+				return nil, fmt.Errorf("workspace chat: text input cannot contain attachment data")
 			}
-		case "image":
+		case "image", "audio", "file":
 			if !trusted {
 				return nil, fmt.Errorf("workspace chat: browser media requires a server-signed attachment reference")
 			}
-			if item.LocalPath == "" && item.URL == "" {
+			sources := 0
+			for _, present := range []bool{item.LocalPath != "", item.URL != "", item.AttachmentRef != "", len(item.Data) != 0} {
+				if present {
+					sources++
+				}
+			}
+			if sources != 1 {
 				return nil, fmt.Errorf("workspace chat: trusted media input has no source")
 			}
-		case "audio", "file":
-			if !trusted || item.LocalPath == "" {
-				return nil, fmt.Errorf("workspace chat: attachment input must come from a verified platform attachment")
+			if item.Type != "image" && item.URL != "" {
+				return nil, fmt.Errorf("workspace chat: file and audio inputs cannot use a URL")
 			}
-			result = append(result, NativeUserInput{Type: "text", Text: s.engine.i18n.Tf(MsgWorkspaceChatVerifiedAttachment, item.LocalPath)})
-			continue
 		default:
 			return nil, fmt.Errorf("workspace chat: unsupported input type %q", item.Type)
 		}

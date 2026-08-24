@@ -9,7 +9,8 @@
     "cron": "Расписание",
     "bridge": "Мост",
     "skills": "Навыки",
-    "system": "Система"
+    "system": "Система",
+    "operations": "Операции"
   },
   "dashboard": {
     "title": "Панель",
@@ -193,7 +194,9 @@
     "optional": "необязательно",
     "confirmDelete": "Вы уверены, что хотите это удалить?",
     "close": "Закрыть",
-    "saving": "Сохранение…"
+    "saving": "Сохранение…",
+    "copy": "Копировать",
+    "theme": "Тема"
   },
   "setup": {
     "addPlatform": "Добавить платформу",
@@ -478,6 +481,15 @@
     "free": "Бесплатно",
     "freemium": "Freemium",
     "paid": "Платно"
+  },
+  "control": {
+    "firstSetup": "Инициализация панели управления", "setupSubtitle": "Создайте единственную учетную запись администратора", "loginSubtitle": "Вход в панель управления cc-connect",
+    "setupToken": "Одноразовый токен настройки", "adminPassword": "Пароль администратора", "confirmPassword": "Подтвердите пароль", "passwordMismatch": "Пароли не совпадают", "createAdmin": "Создать администратора",
+    "operations": "Операции", "operationsSubtitle": "Управление Runtime, релизами, журналами и сервисом", "devices": "Устройства macOS Runtime", "pairDevice": "Сопряжение", "pairExpires": "Действует до {{time}}", "online": "В сети", "offline": "Не в сети", "revoke": "Отозвать", "renameDevice": "Переименовать устройство", "deviceLogs": "Журнал подключений", "noDevices": "Нет сопряженных устройств",
+    "service": "Бизнес-сервис", "currentRelease": "Текущий релиз", "update": "Проверить и обновить", "rollback": "Откат", "restart": "Перезапустить", "running": "Работает", "stopped": "Остановлен", "noLogs": "Нет журналов", "deployRuns": "Запуски развертывания",
+    "setupWizard": "Настройка развертывания", "setupWizardSubtitle": "Подключите публичный адрес, macOS Runtime и сервис", "publicURL": "Публичный HTTPS URL", "openrestyConfig": "Обратный прокси 1Panel / OpenResty",
+    "runtimePairing": "Подключение macOS Runtime", "createPairingCode": "Создать код подключения", "runtimeReady": "Runtime в сети, корней проектов: {{count}}", "runtimeWaiting": "Ожидание Runtime с допустимым проектом Codex", "codexValidation": "Проверить Codex и каталог проектов",
+    "wecomOptional": "WeCom WebSocket (необязательно)", "enableWeCom": "Включить чат WeCom", "wecomBotID": "WeCom Bot ID", "wecomBotSecret": "WeCom Bot Secret", "wecomAllowFrom": "Разрешенные пользователи (необязательно)", "startService": "Создать конфигурацию и запустить"
   },
   "theme": {
     "light": "Светлая",

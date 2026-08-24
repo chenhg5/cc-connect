@@ -2,12 +2,11 @@ package core
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -35,11 +34,8 @@ type ProjectSettingsUpdate struct {
 // ManagementServer provides an HTTP REST API for external management tools
 // (web dashboards, TUI clients, GUI desktop apps, Mac tray apps, etc.).
 type ManagementServer struct {
-	port        int
-	token       string
-	corsOrigins []string
-	server      *http.Server
-	startedAt   time.Time
+	server    *http.Server
+	startedAt time.Time
 
 	mu      sync.RWMutex
 	engines map[string]*Engine // project name → engine
@@ -74,13 +70,10 @@ type ManagementServer struct {
 }
 
 // NewManagementServer creates a new management API server.
-func NewManagementServer(port int, token string, corsOrigins []string) *ManagementServer {
+func NewManagementServer() *ManagementServer {
 	return &ManagementServer{
-		port:        port,
-		token:       token,
-		corsOrigins: corsOrigins,
-		engines:     make(map[string]*Engine),
-		startedAt:   time.Now(),
+		engines:   make(map[string]*Engine),
+		startedAt: time.Now(),
 	}
 }
 
@@ -147,10 +140,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -197,20 +190,20 @@ type CCSwitchProviderInfo struct {
 	IsCurrent bool   `json:"is_current"`
 }
 
-func (m *ManagementServer) Start() {
+func (m *ManagementServer) Handler() http.Handler {
 	mux := http.NewServeMux()
-	handler := m.buildHandler(mux)
+	return m.buildHandler(mux)
+}
 
-	m.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", m.port),
-		Handler: handler,
+func (m *ManagementServer) Serve(listener net.Listener) error {
+	if listener == nil {
+		return fmt.Errorf("private management listener is required")
 	}
-	go func() {
-		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("management api server error", "error", err)
-		}
-	}()
-	slog.Info("management api started", "port", m.port)
+	m.server = &http.Server{Handler: m.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	if err := m.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("private management server: %w", err)
+	}
+	return nil
 }
 
 func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
@@ -259,106 +252,32 @@ func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
 	mux.HandleFunc(prefix+"/chat/selection", m.wrap(m.handleWorkspaceChatSelection))
 	mux.HandleFunc(prefix+"/chat/ws", m.wrap(m.handleWorkspaceChatWS))
 
-	// Static file serving for cc-connect-web (SPA)
-	return m.withStaticFallback(mux)
+	// control 仅通过私有 server Unix Socket 访问；公开反代不转发 /internal/。
+	mux.HandleFunc("/internal/v1/control/runtime-activity", m.wrap(m.handleRuntimeActivity))
+
+	return mux
+}
+
+func (m *ManagementServer) handleRuntimeActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mgmtError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if m.workspaceChat == nil {
+		mgmtJSON(w, http.StatusOK, WorkspaceChatRuntimeActivity{})
+		return
+	}
+	mgmtJSON(w, http.StatusOK, m.workspaceChat.RuntimeActivity())
 }
 
 func (m *ManagementServer) Stop() {
 	if m.server != nil {
-		m.server.Close()
+		_ = m.server.Close()
 	}
 }
-
-// withStaticFallback wraps the API mux with a file server for the web UI.
-// API requests (/api/) go to the mux; everything else tries embedded static
-// files, falling back to index.html for SPA routing.
-func (m *ManagementServer) withStaticFallback(apiMux *http.ServeMux) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			apiMux.ServeHTTP(w, r)
-			return
-		}
-		if m.bridgeServer != nil && r.URL.Path == m.bridgeServer.path {
-			m.bridgeServer.handleWS(w, r)
-			return
-		}
-		assets := GetWebAssets()
-		if assets == nil {
-			apiMux.ServeHTTP(w, r)
-			return
-		}
-		m.setCORS(w, r)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		// Try to serve the exact file from the embedded FS.
-		urlPath := strings.TrimPrefix(r.URL.Path, "/")
-		if urlPath == "" {
-			urlPath = "index.html"
-		}
-		if f, err := assets.Open(urlPath); err == nil {
-			f.Close()
-			http.FileServer(http.FS(assets)).ServeHTTP(w, r)
-			return
-		}
-		// SPA fallback: serve index.html for any non-file route.
-		indexData, err := fs.ReadFile(assets, "index.html")
-		if err != nil {
-			apiMux.ServeHTTP(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(indexData)
-	})
-}
-
-// ── Auth & Middleware ──────────────────────────────────────────
 
 func (m *ManagementServer) wrap(handler http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		m.setCORS(w, r)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		if !m.authenticate(r) {
-			mgmtError(w, http.StatusUnauthorized, "unauthorized: missing or invalid token")
-			return
-		}
-		handler(w, r)
-	}
-}
-
-func (m *ManagementServer) authenticate(r *http.Request) bool {
-	if m.token == "" {
-		return true
-	}
-	// Bearer token
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(m.token)) == 1
-	}
-	// Query param
-	if t := r.URL.Query().Get("token"); t != "" {
-		return subtle.ConstantTimeCompare([]byte(t), []byte(m.token)) == 1
-	}
-	return false
-}
-
-func (m *ManagementServer) setCORS(w http.ResponseWriter, r *http.Request) {
-	if len(m.corsOrigins) == 0 {
-		return
-	}
-	origin := r.Header.Get("Origin")
-	for _, o := range m.corsOrigins {
-		if o == "*" || o == origin {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-			w.Header().Set("Access-Control-Max-Age", "86400")
-			break
-		}
-	}
+	return handler
 }
 
 // ── Response helpers ──────────────────────────────────────────
@@ -1921,10 +1840,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep

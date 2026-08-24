@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+const DefaultLogMaxBackups = 3
+
 // ParseLogBackups converts a string into a positive integer count of log
 // backups to retain when the rotating writer rotates the active log file.
 // Unlike ParseLogSize, no unit suffix is accepted — a backup count is

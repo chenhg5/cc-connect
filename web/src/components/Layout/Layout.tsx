@@ -9,8 +9,7 @@ export default function Layout() {
     <div
       className={cn(
         'flex h-screen overflow-hidden',
-        'bg-gradient-to-br from-gray-100 via-white to-gray-100',
-        'dark:from-gray-950 dark:via-[#0a0a0c] dark:to-gray-950',
+        'bg-gray-100 dark:bg-[#0a0a0c]',
       )}
     >
       <Sidebar />

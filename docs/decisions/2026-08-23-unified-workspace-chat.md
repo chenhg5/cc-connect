@@ -8,7 +8,7 @@ cc-connect 原有主聊天以平台 `session_key` 和截断 History 为中心，
 
 主 Web 聊天使用“只读工作区 -> 草稿或 Codex 原生 thread -> Turn”模型，旧平台 Session 只保留在独立的 `/platform-sessions`。Codex App 状态文件是工作区目录和排序的权威来源；客户端只提交服务端签发的 `workspaceRef`，服务端每次操作都重新验证 thread 的规范 cwd。
 
-模板 Codex Agent 持有一个长驻 App Server 客户端，所有工作区共用该物理连接。`WorkspaceChatService` 是会话 actor、活动 Turn、设置、结构化交互、realtime、投递、订阅和关闭的唯一生命周期所有者。App Server 的 thread、item、Turn 和 settings 终态是运行状态的权威来源，SQLite 不复制原生对话正文。
+每台配对的 macOS Runtime 持有一个长驻 App Server 客户端，并为该设备的所有工作区复用物理连接。Linux server 通过远程 NativeConversation 能力访问它。`WorkspaceChatService` 是会话 actor、活动 Turn、设置、结构化交互、realtime、投递、订阅和关闭的唯一生命周期所有者。App Server 的 thread、item、Turn 和 settings 终态是运行状态的权威来源，SQLite 不复制原生对话正文。
 
 cc-connect 对外只提供一套工作区聊天协议。App Server stable/experimental 方法通过同一连接逐项探测，能力缺失时明确返回不可用，不保留旧 RPC、旧事件或第二套下游协议。完整历史只使用 `thread/turns/list` 和 `thread/items/list`；`thread/read(includeTurns=false)` 只承担精确 metadata 与 cwd 归属校验。
 
@@ -18,7 +18,7 @@ cc-connect 对外只提供一套工作区聊天协议。App Server stable/experi
 
 - 保留旧 REST/WS 并新增 v2：会形成两套生产者和消费者，当前 `v0.1.0` 没有兼容承诺，因此直接替换。
 - 用空 `thread/start` 立即创建会话：App Server 退出后该 thread 无 rollout 可恢复，因此新建先持久化 cc-connect 草稿，首个 Turn 才物化。
-- 每个工作区克隆 Codex Agent：会产生多个 App Server 进程和分裂的通知、审批及设置状态，因此改为模板 Agent 的单客户端。
+- 每个工作区克隆 Codex Agent：会产生多个 App Server 进程和分裂的通知、审批及设置状态，因此每台 Runtime 只持有一个客户端。
 - 把完整 History 复制进 SQLite：会形成双权威，并在 App Server 扩展未知 item 时丢失信息。
 - 接受客户端 `cwd` 或服务器路径：无法证明目录来自当前 Codex App 项目，存在跨目录访问风险。
 

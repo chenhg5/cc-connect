@@ -337,25 +337,17 @@ brew install cc-connect
 # Or download a binary from https://github.com/chenhg5/cc-connect/releases
 ```
 
-### 4️⃣ Start cc-connect and open the Web UI
+### 4️⃣ Install control on the Linux server
 
 ```bash
-cc-connect             # starts the service; first run auto-creates ~/.cc-connect/config.toml
+sudo ./deploy/bootstrap.sh --release-dir /path/to/v0.1.0-release
 ```
 
-On first launch, cc-connect prints something like:
+bootstrap listens only on `127.0.0.1:9820` and prints a one-time setup token plus an SSH forwarding command. Set the administrator, then configure the 1Panel/OpenResty HTTPS proxy.
 
-```
-Web admin:  http://localhost:9820
-```
+### 5️⃣ Pair a macOS Runtime
 
-Open that URL in your browser. If `9820` is already in use, pass `--web-port 9821` or set `web_port` in `config.toml`.
-
-> **Note:** `cc-connect web` *only* opens the browser and the config UI — it does **not** start the service. You still need `cc-connect` running in another terminal.
-
-### 5️⃣ Configure platform bot tokens in the Web UI
-
-In the Web UI, create a project, then add at least one platform (Feishu / Telegram / Discord / Slack / DingTalk / WeChat Work / QQ / LINE / Weixin) and paste the bot token from that platform's developer console. Save and cc-connect will hot-reload.
+Create a ten-minute pairing code in the setup wizard and run the shown Runtime installer on macOS. Runtime reads local Codex App projects over an outbound TLS connection, with no VPN or tunnel. Optionally configure WeCom WebSocket credentials, then start the business process.
 
 That's it — send a message to your bot and cc-connect will relay it to your local agent.
 
@@ -407,9 +399,9 @@ make build
 
 ### ⚙️ Configure
 
-> **💡 Tip: Use the Web UI to configure** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage providers, and chat with your agent — no need to manually edit TOML files. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
+> **Use the control setup wizard** — `cc-connect-control` owns administrator authentication, Runtime pairing, business configuration, logs, updates, and rollback. The business process exposes no public TCP listener and no management token.
 
-The main Web chat can use read-only Codex App projects and native Codex threads. Enable `[workspace_chat]` with a Codex `app_server` template project; `/chat` restores the exact SQLite selection, New creates an unnamed draft that materializes on its first Turn, and materialized threads expose native settings, interactions, complete paginated history, deep links, and WebRTC voice. Platform `session_key` conversations remain an independent product domain under **Platform sessions**. See [Unified workspace chat](docs/workspace-chat.md).
+The main Web chat groups read-only Codex App projects and native threads by Runtime device. `/chat` restores the exact SQLite selection; New creates an unnamed draft that materializes on its first Turn, then exposes native settings, interactions, complete paginated history, deep links, and WebRTC voice. See [Deployment](docs/deployment.md) and [Unified workspace chat](docs/workspace-chat.md).
 
 If you prefer manual configuration:
 

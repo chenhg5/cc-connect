@@ -105,7 +105,7 @@ qodercli --version
 
 ## Step 3: Create config.toml
 
-> **💡 Recommended: Use the Web UI** — After installing, run `cc-connect web` to configure the web admin and open the dashboard in your browser. You can visually create projects, add platforms, manage API providers, and even chat with your agent directly from the browser — no need to edit TOML files by hand. **Note:** `cc-connect web` only configures and opens the browser — you still need to run `cc-connect` separately to start the service.
+> **Recommended for Codex workspace chat:** deploy the signed three-process release with `deploy/bootstrap.sh`, then use the control setup wizard. See [Web control deployment](docs/deployment.md). Direct `config.toml` startup remains for standalone platform-session use, not for the public control plane.
 
 If you prefer manual configuration, cc-connect looks for config in this order:
 1. `-config <path>` flag (explicit)
@@ -463,14 +463,13 @@ access_token = "syt_xxx_xxx"
 
 ## Step 5: Run cc-connect
 
-**Open the Web UI (recommended):**
+**Controlled server deployment (recommended for Web workspace chat):**
 
 ```bash
-cc-connect web    # configure web admin & open browser (does NOT start cc-connect)
-cc-connect        # start the service
+sudo ./deploy/bootstrap.sh --release-dir /path/to/release
 ```
 
-> **Note:** `cc-connect web` only configures the web admin and opens the dashboard in your browser — it does **not** start the cc-connect service itself. You still need to run `cc-connect` (or `cc-connect --config <path>`) separately to actually start the bridge. Think of it as two steps: configure first, then run.
+This installs systemd-managed control, which exclusively supervises the private server process. bootstrap prints the one-time administrator token and SSH forwarding command.
 
 **Important: If you are running inside a Claude Code session** (e.g., Claude Code helped you install and configure cc-connect), you must unset the `CLAUDECODE` environment variable before starting, otherwise Claude Code will refuse to launch as a subprocess:
 
@@ -741,74 +740,9 @@ make build
 
 After upgrading, restart the running cc-connect process.
 
-## Step 8: Run as Background Service (Optional)
+## Step 8: Service lifecycle
 
-You can run cc-connect as a daemon managed by the OS init system (Linux systemd user service, macOS launchd LaunchAgent, Windows Task Scheduler task).
-
-### Install the daemon
-
-```bash
-cc-connect daemon install --config ~/.cc-connect/config.toml
-```
-
-You can also point the daemon at the directory that contains `config.toml`:
-
-```bash
-cc-connect daemon install --work-dir ~/.cc-connect
-```
-
-Optional flags: `--config PATH`, `--log-file PATH`, `--log-max-size N` (MB), `--work-dir DIR`, `--force` (overwrite existing unit). `--config` points to a config file, while `--work-dir` points to the directory containing `config.toml`.
-
-### Linux systemd: Keep service running after SSH disconnect
-
-When installed as a user-level systemd service (non-root), cc-connect runs under `user@UID.service`. By default, systemd stops this service when your last login session ends (e.g., SSH disconnect). This is controlled by the "linger" setting.
-
-To keep cc-connect running persistently, enable linger for your user:
-
-```bash
-sudo loginctl enable-linger $USER
-```
-
-After enabling linger, `user@UID.service` remains active even when you log out. The daemon install command will warn you if linger is not enabled.
-
-Alternatively, you can install as a system-level service (requires root):
-
-```bash
-sudo cc-connect daemon install --config ~/.cc-connect/config.toml
-```
-
-System-level services are independent of login sessions.
-
-### Control the service
-
-```bash
-cc-connect daemon start
-cc-connect daemon stop
-cc-connect daemon restart
-cc-connect daemon status
-```
-
-### View logs
-
-```bash
-cc-connect daemon logs           # tail current log
-cc-connect daemon logs -f         # follow (like tail -f)
-cc-connect daemon logs -n 100     # last 100 lines
-cc-connect daemon logs --log-file /path/to/log  # custom log file
-```
-
-Logs auto-rotate at the configured max size and keep one backup.
-
-On Windows, `daemon install` creates a native Task Scheduler task named `cc-connect`.
-The task runs at user logon and is also started immediately after installation. The
-installer writes a small PowerShell launcher under `~/.cc-connect` so the scheduled
-task uses the selected config directory, log file, PATH, and proxy environment.
-
-### Uninstall
-
-```bash
-cc-connect daemon uninstall
-```
+For the Web control-plane product, systemd manages only `cc-connect-control`; control manages server restart, updates, rollback, and logs. Use the Web operations page. SSH diagnosis is limited to `systemctl status cc-connect-control.service` and `journalctl -u cc-connect-control.service`. The product intentionally exposes no Web stop, uninstall, reset, or persistent-data deletion operation.
 
 ## Additional Features
 

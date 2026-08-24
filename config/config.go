@@ -109,7 +109,6 @@ type Config struct {
 	Queue              QueueConfig             `toml:"queue"`
 	Webhook            WebhookConfig           `toml:"webhook"`
 	Bridge             BridgeConfig            `toml:"bridge"`
-	Management         ManagementConfig        `toml:"management"`
 	WorkspaceChat      WorkspaceChatConfig     `toml:"workspace_chat"`
 	Hooks              []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
@@ -176,21 +175,18 @@ type HookConfig struct {
 	Async   *bool  `toml:"async,omitempty"`   // nil = true (async by default)
 }
 
-// ManagementConfig controls the HTTP Management API for external tools.
-type ManagementConfig struct {
-	Enabled     *bool    `toml:"enabled"`                // default false
-	Port        int      `toml:"port,omitempty"`         // listen port; default 9820
-	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
-	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
+// WorkspaceChatConfig controls the transport-independent workspace chat runtime.
+// Native Codex state is supplied by paired macOS Runtime devices.
+type WorkspaceChatConfig struct {
+	Enabled    *bool                    `toml:"enabled,omitempty"`
+	Transports []string                 `toml:"transports,omitempty"`
+	WeCom      WorkspaceChatWeComConfig `toml:"wecom,omitempty"`
 }
 
-// WorkspaceChatConfig controls the transport-independent workspace chat runtime.
-// The template project supplies the agent, provider, model and permission settings;
-// a selected workspace only replaces the agent working directory.
-type WorkspaceChatConfig struct {
-	Enabled         *bool    `toml:"enabled,omitempty"`
-	TemplateProject string   `toml:"template_project,omitempty"`
-	Transports      []string `toml:"transports,omitempty"`
+type WorkspaceChatWeComConfig struct {
+	BotID     string `toml:"bot_id,omitempty"`
+	BotSecret string `toml:"bot_secret,omitempty"`
+	AllowFrom string `toml:"allow_from,omitempty"`
 }
 
 // Display mode constants.
@@ -653,8 +649,8 @@ func load(path string) (*Config, error) {
 }
 
 // LoadPermissive loads the config file and performs all validation except the
-// "at least one platform per project" check. Use this for commands (like
-// `cc-connect web`) that should work even before platforms are configured.
+// "at least one platform per project" check. Control uses this while generating
+// the initial business configuration before any platform is enabled.
 func LoadPermissive(path string) (*Config, error) {
 	cfg, err := load(path)
 	if err != nil {
@@ -1003,8 +999,7 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 }
 
 // validatePermissive is like validate but skips the "at least one platform"
-// requirement so that commands like `cc-connect web` can operate on agent-only
-// configs before platforms have been set up.
+// requirement so control can validate an incomplete first-run configuration.
 func (c *Config) validatePermissive() error {
 	return c.validateInternal(true)
 }
@@ -1030,7 +1025,8 @@ func (c *Config) validateInternal(permissive bool) error {
 	default:
 		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
 	}
-	if len(c.Projects) == 0 {
+	workspaceChatEnabled := c.WorkspaceChat.Enabled != nil && *c.WorkspaceChat.Enabled
+	if len(c.Projects) == 0 && !workspaceChatEnabled {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
 	}
 	projectNames := make(map[string]int, len(c.Projects))
@@ -1040,29 +1036,7 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		projectNames[project.Name] = i
 	}
-	if c.WorkspaceChat.Enabled != nil && *c.WorkspaceChat.Enabled {
-		name := strings.TrimSpace(c.WorkspaceChat.TemplateProject)
-		if name == "" {
-			return fmt.Errorf("config: workspace_chat.template_project is required when workspace_chat is enabled")
-		}
-		var template *ProjectConfig
-		for i := range c.Projects {
-			if c.Projects[i].Name == name {
-				template = &c.Projects[i]
-				break
-			}
-		}
-		if template == nil {
-			return fmt.Errorf("config: workspace_chat.template_project %q does not exist", name)
-		}
-		if !strings.EqualFold(strings.TrimSpace(template.Agent.Type), "codex") {
-			return fmt.Errorf("config: workspace_chat.template_project %q must use the codex agent", name)
-		}
-		backend, _ := template.Agent.Options["backend"].(string)
-		backend = strings.TrimSpace(backend)
-		if backend != "app_server" {
-			return fmt.Errorf("config: workspace_chat.template_project %q must set projects.agent.options.backend = \"app_server\"", name)
-		}
+	if workspaceChatEnabled {
 		seenTransport := make(map[string]struct{}, len(c.WorkspaceChat.Transports))
 		if len(c.WorkspaceChat.Transports) == 0 {
 			return fmt.Errorf("config: workspace_chat.transports requires at least one of \"web\" or \"wecom\"")
@@ -1080,8 +1054,17 @@ func (c *Config) validateInternal(permissive bool) error {
 			}
 			seenTransport[transport] = struct{}{}
 		}
-		if _, wantsWeb := seenTransport["web"]; wantsWeb && (c.Management.Enabled == nil || !*c.Management.Enabled) {
-			return fmt.Errorf("config: workspace_chat transport \"web\" requires management.enabled = true")
+		if _, enabled := seenTransport["wecom"]; enabled {
+			if strings.TrimSpace(c.WorkspaceChat.WeCom.BotID) == "" || strings.TrimSpace(c.WorkspaceChat.WeCom.BotSecret) == "" {
+				return fmt.Errorf("config: workspace_chat.wecom.bot_id and bot_secret are required when the wecom transport is enabled")
+			}
+			for i, project := range c.Projects {
+				for j, platform := range project.Platforms {
+					if strings.EqualFold(strings.TrimSpace(platform.Type), "wecom") {
+						return fmt.Errorf("config: projects[%d].platforms[%d] duplicates the workspace_chat.wecom transport", i, j)
+					}
+				}
+			}
 		}
 	}
 	for i, proj := range c.Projects {
@@ -3952,94 +3935,4 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 		cfg.Queue.MaxDepth = u.QueueMaxDepth
 	}
 	return saveConfig(cfg)
-}
-
-// WebSetupResult holds the config values after enabling web admin.
-type WebSetupResult struct {
-	ManagementPort  int
-	ManagementToken string
-	BridgePort      int
-	BridgeToken     string
-	AlreadyEnabled  bool
-}
-
-// EnableWebAdmin enables the bridge and management sections in config.toml.
-// If already enabled, returns the existing config values without changes.
-func EnableWebAdmin(mgmtToken, bridgeToken string) (*WebSetupResult, error) {
-	configMu.Lock()
-	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return nil, fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-
-	mgmtEnabled := cfg.Management.Enabled != nil && *cfg.Management.Enabled
-	bridgeEnabled := cfg.Bridge.Enabled != nil && *cfg.Bridge.Enabled
-
-	if mgmtEnabled && bridgeEnabled {
-		return &WebSetupResult{
-			ManagementPort:  orDefault(cfg.Management.Port, 9820),
-			ManagementToken: cfg.Management.Token,
-			BridgePort:      orDefault(cfg.Bridge.Port, 9810),
-			BridgeToken:     cfg.Bridge.Token,
-			AlreadyEnabled:  true,
-		}, nil
-	}
-
-	t := true
-	changed := false
-	if !mgmtEnabled {
-		cfg.Management.Enabled = &t
-		if cfg.Management.Port == 0 {
-			cfg.Management.Port = 9820
-		}
-		if cfg.Management.Token == "" {
-			cfg.Management.Token = mgmtToken
-		}
-		if len(cfg.Management.CORSOrigins) == 0 {
-			cfg.Management.CORSOrigins = []string{"*"}
-		}
-		changed = true
-	}
-	if !bridgeEnabled {
-		cfg.Bridge.Enabled = &t
-		if cfg.Bridge.Port == 0 {
-			cfg.Bridge.Port = 9810
-		}
-		if cfg.Bridge.Token == "" {
-			cfg.Bridge.Token = bridgeToken
-		}
-		if len(cfg.Bridge.CORSOrigins) == 0 {
-			cfg.Bridge.CORSOrigins = []string{"*"}
-		}
-		changed = true
-	}
-
-	if changed {
-		if err := saveConfig(cfg); err != nil {
-			return nil, fmt.Errorf("save config: %w", err)
-		}
-	}
-
-	return &WebSetupResult{
-		ManagementPort:  orDefault(cfg.Management.Port, 9820),
-		ManagementToken: cfg.Management.Token,
-		BridgePort:      orDefault(cfg.Bridge.Port, 9810),
-		BridgeToken:     cfg.Bridge.Token,
-		AlreadyEnabled:  false,
-	}, nil
-}
-
-func orDefault(v, d int) int {
-	if v == 0 {
-		return d
-	}
-	return v
 }

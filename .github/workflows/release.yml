@@ -1,0 +1,104 @@
+name: Signed Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.1'
+          cache: true
+
+      - name: Build Web assets
+        working-directory: web
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build three product artifacts
+        env:
+          GOPROXY: https://goproxy.cn
+          GOSUMDB: sum.golang.org
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist stage
+          build_time="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          for arch in amd64 arm64; do
+            rm -rf stage/control stage/server stage/runtime
+            mkdir -p stage/control stage/server stage/runtime
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+              -ldflags "-s -w -X main.version=${RELEASE_TAG} -X main.commit=${RELEASE_COMMIT} -X main.buildTime=${build_time}" \
+              -o stage/control/cc-connect-control ./cmd/cc-connect-control
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+              -ldflags "-s -w -X main.version=${RELEASE_TAG} -X main.commit=${RELEASE_COMMIT} -X main.buildTime=${build_time}" \
+              -o stage/server/cc-connect-server ./cmd/cc-connect
+            CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build \
+              -ldflags "-s -w -X main.version=${RELEASE_TAG}" \
+              -o stage/runtime/cc-connect-runtime ./cmd/cc-connect-runtime
+            tar -C stage/control -czf "dist/cc-connect-control-linux-${arch}.tar.gz" cc-connect-control
+            tar -C stage/server -czf "dist/cc-connect-server-linux-${arch}.tar.gz" cc-connect-server
+            tar -C stage/runtime -czf "dist/cc-connect-runtime-darwin-${arch}.tar.gz" cc-connect-runtime
+          done
+          RELEASE_DIST=dist go run ./scripts/release-manifest.go
+          install -m 0755 deploy/bootstrap.sh dist/bootstrap.sh
+          install -m 0644 deploy/openresty-1panel.conf dist/openresty-1panel.conf
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.8.2
+
+      - name: Sign manifest with GitHub OIDC
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: cosign sign-blob --yes --bundle dist/manifest.bundle dist/manifest.json
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/manifest.json
+            dist/bootstrap.sh
+            dist/openresty-1panel.conf
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/manifest.json
+            dist/manifest.bundle
+            dist/bootstrap.sh
+            dist/openresty-1panel.conf

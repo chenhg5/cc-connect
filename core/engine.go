@@ -484,10 +484,6 @@ type Engine struct {
 	// warning. Default 10s; tests may override.
 	pendingRestartTimeout time.Duration
 
-	// /web command callbacks
-	webSetupFunc  func() (port int, token string, needRestart bool, err error)
-	webStatusFunc func() (url string)
-
 	// Data directory for socket path injection
 	dataDir string
 
@@ -989,9 +985,6 @@ func (e *Engine) SetFilterExternalSessions(v bool) {
 	e.filterExternalSessions = v
 }
 
-func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
-func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webStatusFunc = fn }
-
 func (e *Engine) SetSkipGit(skipGit bool) {
 	e.skipGit = skipGit
 }
@@ -1222,7 +1215,6 @@ var privilegedCommands = map[string]bool{
 	"dir":     true,
 	"restart": true,
 	"upgrade": true,
-	"web":     true,
 	"diff":    true,
 }
 
@@ -6396,7 +6388,6 @@ var builtinCommands = []struct {
 	{[]string{"tts"}, "tts"},
 	{[]string{"workspace", "ws"}, "workspace"},
 	{[]string{"whoami", "myid"}, "whoami"},
-	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
 }
@@ -6644,8 +6635,6 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		return true
 	case "whoami":
 		e.cmdWhoami(p, msg)
-	case "web":
-		e.cmdWeb(p, msg, args)
 	case "ps":
 		e.cmdPs(p, msg, args)
 	default:
@@ -17031,61 +17020,6 @@ func parseSelfReportedCtx(s string) int {
 	}
 	v, _ := strconv.Atoi(m[start:end])
 	return v
-}
-
-func (e *Engine) cmdWeb(p Platform, msg *Message, args []string) {
-	subCmd := ""
-	if len(args) > 0 {
-		subCmd = matchSubCommand(strings.ToLower(args[0]),
-			[]string{"setup", "status"})
-	}
-
-	switch subCmd {
-	case "setup":
-		e.cmdWebSetup(p, msg)
-	default:
-		e.cmdWebStatus(p, msg)
-	}
-}
-
-func (e *Engine) cmdWebSetup(p Platform, msg *Message) {
-	if !WebAssetsAvailable() {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
-		return
-	}
-	if e.webSetupFunc == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
-		return
-	}
-
-	port, token, needRestart, err := e.webSetupFunc()
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-	url := fmt.Sprintf("http://localhost:%d", port)
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebSetupSuccess), url, token))
-	if needRestart {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNeedRestart))
-	}
-}
-
-func (e *Engine) cmdWebStatus(p Platform, msg *Message) {
-	if !WebAssetsAvailable() {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
-		return
-	}
-	if e.webStatusFunc == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotSupported))
-		return
-	}
-
-	url := e.webStatusFunc()
-	if url == "" {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgWebNotEnabled))
-		return
-	}
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebStatus), url))
 }
 
 // restoreActiveProviderFromSession syncs the agent's active provider to the

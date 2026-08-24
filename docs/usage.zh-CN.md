@@ -855,19 +855,9 @@ cc-connect relay send --to gemini "你觉得这个架构怎么样？"
 
 ---
 
-## 守护进程模式
+## 控制面服务
 
-后台服务运行。
-
-```bash
-cc-connect daemon install --config ~/.cc-connect/config.toml
-cc-connect daemon start
-cc-connect daemon stop
-cc-connect daemon restart
-cc-connect daemon status
-cc-connect daemon logs [-f]
-cc-connect daemon uninstall
-```
+Web 产品由 Linux systemd 管理唯一的 `cc-connect-control`，control 再监管私有 server。安装、状态、日志、更新和回滚见[部署指南](deployment.zh-CN.md)。
 
 ---
 
@@ -904,59 +894,13 @@ type = "claudecode"
 
 ---
 
-## Web 管理后台（Beta）
+## Web 控制面
 
-> **状态：Beta。** 此功能自 v1.2.2-beta.5 起可用，UI 和 API 在后续版本中可能调整。
+Web UI 内嵌在 `cc-connect-control` 中，使用一次性 Token 初始化管理员，之后通过安全 Cookie、CSRF 和同源检查认证。业务进程不公开 TCP，也没有 management token。安装和 1Panel/OpenResty HTTPS 反代见[部署指南](deployment.zh-CN.md)。
 
-内嵌在二进制中的全功能管理界面，支持项目管理、会话管理、定时任务编辑、全局设置、聊天界面、多语言等。
+### Control API
 
-### 快速启用（聊天命令）
-
-最简单的方式，在聊天中发送：
-
-```
-/web setup
-```
-
-该命令会自动在 `config.toml` 中启用 **Management API** 和 **Bridge**，生成 token，并返回访问地址。首次启用后需要执行 `/restart` 使配置生效。
-
-启用后，打开返回的地址（默认 `http://localhost:9820`），用显示的 token 登录即可。
-
-### 查看状态
-
-```
-/web           # 或 /web status — 查看 Web 管理后台的地址和启用状态
-```
-
-### 手动配置
-
-在 `config.toml` 中添加：
-
-```toml
-[management]
-enabled = true
-port = 9820                     # 管理后台监听端口
-token = "your-secret-token"     # 登录 token；/web setup 会自动生成
-cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 CORS 头
-```
-
-然后重启 cc-connect。
-
-### 构建选项
-
-Web 前端资源默认编译进二进制。如果想排除（减小约 1MB）：
-
-```bash
-make build-noweb
-# 或
-go build -tags 'no_web' ./cmd/cc-connect
-```
-
-使用 `no_web` 构建时，`/web` 命令会提示 Web 管理后台不可用。
-
-### Management API
-
-API 与 Web UI 共用同一端口。基础 URL：`http://<host>:<port>/api/v1`
+API 与 Web UI 共用 control 的 HTTPS 地址，基础路径为 `/api/v1`。当前唯一契约见[控制面 API](management-api.zh-CN.md)。
 
 所有 API 请求需要 `Authorization: Bearer <token>` 请求头。
 
@@ -982,10 +926,6 @@ API 与 Web UI 共用同一端口。基础 URL：`http://<host>:<port>/api/v1`
 > **状态：Beta。** 此功能自 v1.2.2-beta.5 起可用，协议在后续版本中可能调整。
 
 Bridge 提供 WebSocket + REST 服务，让外部适配器（自定义 UI、机器人、脚本等）可以接入 cc-connect —— 发送消息、接收 Agent 事件、管理会话。
-
-### 通过聊天启用
-
-`/web setup` 命令会同时启用 Bridge 和管理后台，无需额外操作。
 
 ### 手动配置
 
@@ -1038,7 +978,7 @@ WebSocket 支持双向通信 —— 向 Agent 发送消息，并实时接收 Age
 
 | 服务 | 默认端口 | 配置块 |
 |------|---------|--------|
-| 管理后台（Web UI + API） | 9820 | `[management]` |
+| control（Web UI + API，仅 loopback） | 9820 | systemd/bootstrap |
 | Bridge（WebSocket + REST） | 9810 | `[bridge]` |
 
 ---
