@@ -7235,7 +7235,7 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 //
 // Sections (each skipped when its data is missing):
 //   - model: from session GetModel() / agent.Name()
-//   - effort: reasoning_effort (Codex / Claude high/medium/low/xhigh)
+//   - effort: reasoning_effort (Codex / Claude high/medium/low/xhigh/max)
 //   - token counts: out (output) · in (new input) · cw (cache create) · cr (cache read)
 //   - ctx %: UsedTokens / ContextWindow, capped at 100%
 //
