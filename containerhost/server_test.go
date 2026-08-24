@@ -116,6 +116,50 @@ func TestServerRejectsUnknownInputAndUnpreparedActivation(t *testing.T) {
 	}
 }
 
+func TestServerStartMakesSocketDirectoryTraversableByClientGroup(t *testing.T) {
+	directory := t.TempDir()
+	socketDirectory, err := os.MkdirTemp("/tmp", "cc-host-permissions-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	if err := os.Chmod(socketDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paths := testPaths{
+		socket:      filepath.Join(socketDirectory, "host.sock"),
+		state:       filepath.Join(directory, "state.json"),
+		environment: filepath.Join(directory, "deployment.env"),
+		database:    filepath.Join(directory, "control", "control.db"),
+	}
+	runner := &fakeRunner{failUp: make(map[int]error)}
+	config := testServerConfig(t, paths, runner)
+	config.ClientGID = os.Getgid()
+	server, err := NewServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestServer(t, server)
+
+	info, err := os.Stat(socketDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o750 {
+		t.Fatalf("socket directory mode = %04o, want 0750", info.Mode().Perm())
+	}
+	client, err := NewClient(paths.socket)
+	if err != nil {
+		t.Fatalf("client cannot use prepared socket directory: %v", err)
+	}
+	if _, err := client.Status(context.Background()); err != nil {
+		t.Fatalf("client cannot reach prepared socket: %v", err)
+	}
+}
+
 func TestServerComposeFailureRollsBackDatabaseAndImage(t *testing.T) {
 	server, client, runner, paths := startTestServer(t, 5*time.Second)
 	defer closeTestServer(t, server)

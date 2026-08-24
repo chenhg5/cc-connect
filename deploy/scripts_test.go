@@ -180,6 +180,13 @@ func TestContainerBootstrapIsIdempotentAndInstallsOnlyDeployHostService(t *testi
 	if strings.Contains(unit, "cc-connect-control.service") || strings.Contains(unit, "docker.sock") {
 		t.Fatalf("container bootstrap introduced a second service or Docker socket mount:\n%s", unit)
 	}
+	if strings.Contains(unit, "ExecStartPre=/bin/chown") {
+		t.Fatalf("container bootstrap must leave socket directory ownership to deploy-host:\n%s", unit)
+	}
+	systemctlLog := readFile(t, logPath)
+	if strings.Count(systemctlLog, "restart cc-connect-deploy-host.service") != 2 {
+		t.Fatalf("container bootstrap did not activate the installed deploy-host on every run:\n%s", systemctlLog)
+	}
 	compose := readFile(t, filepath.Join(root, "opt/cc-connect-docker/compose.yaml"))
 	if strings.Contains(compose, "docker.sock") || !strings.Contains(compose, "/run/cc-connect-deploy:/run/cc-connect-deploy:ro") {
 		t.Fatalf("installed compose has an unsafe control boundary:\n%s", compose)
