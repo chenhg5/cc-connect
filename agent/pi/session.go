@@ -327,90 +327,44 @@ func (s *piSession) Send(msg string, messageID string, images []core.ImageAttach
 		return fmt.Errorf("session is closed")
 	}
 
-	// attachDir is the per-message subdir used for IMAGE attachments.
-	//
-	// File attachments are written by core.SaveFilesToDisk into a
-	// separate tree (<workDir>/.cc-connect/attachments/<messageID>/).
-	// That tree is messageID-scoped, so collisions between turns are
-	// impossible (see issue #1552), and files survive across turns
-	// until reaped by a future prune job — per-Send cleanup of files
-	// is therefore unnecessary. The old behaviour of wiping the entire
-	// session dir on every Send was additionally racy: it deleted files
-	// the agent process could still be reading from earlier messages.
 	attachDir := s.attachDir
 	if safeMessageID := sanitizePiAttachmentName(messageID); safeMessageID != "" {
 		attachDir = filepath.Join(attachDir, safeMessageID)
 	}
 	cleanAttachments(attachDir)
 
-	prompt := s.buildPrompt(msg, messageID, attachDir, images, files)
-
-	if s.rpc {
-		return s.sendRPC(prompt)
-	}
-	return s.sendJSON(prompt)
-}
-
-// buildPrompt constructs the message that will be sent to the pi CLI from the
-// user prompt and any attachments.
-//
-// File attachments (PDF, DOCX, archives, …) are saved to disk via the shared
-// core.SaveFilesToDisk helper and referenced by absolute path in the prompt
-// text via core.AppendFileRefs. Their raw bytes are intentionally NOT
-// inlined — the previous behaviour stuffed the full binary of every uploaded
-// file into the prompt string, which both wasted context and, more
-// importantly, left the model staring at raw DOCX/ZIP bytes it could not
-// recover meaningful text from. Files land in
-// <workDir>/.cc-connect/attachments/<messageID>/.
-//
-// Image attachments are saved to attachDir (a per-messageID subdir of
-// s.attachDir) and their bytes are inlined for multimodal input. The pi CLI
-// does not yet consume image-path references from a plain text prompt, so
-// embedding is the only way to feed vision-capable models. Images and files
-// therefore live in two distinct directory trees — see Send for the cleanup
-// implications. Image handling is kept out of scope for this refactor;
-// unifying it would require deciding on a wire format per agent.
-func (s *piSession) buildPrompt(msg, messageID, attachDir string, images []core.ImageAttachment, files []core.FileAttachment) string {
-	var filePaths []string
-	if len(files) > 0 {
-		filePaths = core.SaveFilesToDisk(s.workDir, messageID, files)
-	}
-
-	// Build the prompt with a strings.Builder to avoid O(n^2) reallocation
-	// when several images are inlined: each += would otherwise copy the
-	// whole prompt so far for every byte appended.
-	var b strings.Builder
-	b.WriteString(core.AppendFileRefs(msg, filePaths))
-
+	var atFiles []string
 	if len(images) > 0 {
-		imgPaths := saveImagesToDisk(attachDir, images)
-		for _, f := range imgPaths {
-			data, err := os.ReadFile(f)
-			if err != nil {
-				slog.Warn("piSession: cannot read attachment", "file", f, "error", err)
-				continue
-			}
-			b.WriteString("\n\n--- " + filepath.Base(f) + " ---\n")
-			b.Write(data)
-		}
+		atFiles = append(atFiles, saveImagesToDisk(attachDir, images)...)
+	}
+	if len(files) > 0 {
+		atFiles = append(atFiles, saveFilesToDisk(attachDir, files)...)
 	}
 
-	return b.String()
+	// Issue #1723: do NOT inline attachment bytes back into the prompt.
+	// json mode passes the prompt via -p <argv>, so embedding raw image
+	// bytes triggers execve EINVAL on NUL bytes and the pi process never
+	// starts (model never sees the image). rpc mode goes through stdin
+	// so it doesn't crash, but the model still gets image bytes as text
+	// rather than a real visual input. Both paths must hand pi the saved
+	// paths via pi's @<path> mechanism — sendJSON appends them as argv
+	// entries; sendRPC embeds them in the message text, which pi parses
+	// the same way.
+	if s.rpc {
+		return s.sendRPC(msg, atFiles)
+	}
+	return s.sendJSON(msg, atFiles)
 }
 
 // sendJSON spawns `pi --mode json -p <prompt>` as a one-shot process,
 // reads all output events, and sends them to the events channel.
-func (s *piSession) sendJSON(prompt string) error {
-	args := append(append([]string{}, s.extraArgs...), "--mode", "json", "-p", prompt)
-	if sid := s.CurrentSessionID(); sid != "" {
-		args = append(args, "--session-id", sid)
-	}
-	if s.model != "" {
-		args = append(args, "--model", s.model)
-	}
-	if s.thinking != "" {
-		args = append(args, "--thinking", s.thinking)
-	}
+//
+// Issue #1723: attachment paths are passed as @<path> argv entries (Pi's
+// standard mechanism). Embedding the file bytes into -p would crash
+// execve on NUL bytes, and would also break pi's vision pipeline which
+// needs to know the file is on disk rather than be handed raw bytes.
+func (s *piSession) sendJSON(prompt string, atFiles []string) error {
+	args := buildJSONArgs(s.extraArgs, prompt, s.CurrentSessionID(), s.model, s.thinking, atFiles)
 
 	slog.Debug("piSession: spawning json mode", "cmd", s.cmd, "sessionID", s.CurrentSessionID())
 
@@ -503,13 +457,51 @@ func (s *piSession) writeRPCCommand(cmd map[string]any) error {
 // sendRPC writes a JSON "prompt" command to the persistent RPC process stdin.
 // Events are read asynchronously by readLoopRPC, including agent_end which
 // triggers EventResult.
-func (s *piSession) sendRPC(prompt string) error {
+//
+// Issue #1723: attachment paths are embedded into the message text as
+// @<path> references (pi's standard mechanism, parsed the same way as in
+// json mode). The rpc stdin pipe doesn't crash on NUL bytes, but the
+// model still needs to load the files from disk — embedding raw bytes
+// in the message field would give the model text-shaped garbage instead
+// of a real visual/file input.
+func (s *piSession) sendRPC(prompt string, atFiles []string) error {
 	cmd := map[string]any{
 		"type":    "prompt",
-		"message": prompt,
+		"message": composeRPCPrompt(prompt, atFiles),
 	}
 	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
 	return s.writeRPCCommand(cmd)
+}
+
+// composeRPCPrompt builds the rpc-mode message text, appending
+// "@<path>" references for any attachments. Pulled out of sendRPC so
+// the Issue #1723 attachment refactor is unit-testable without a live
+// rpc process.
+//
+// The format is stable on purpose:
+//   - a blank line separates the user's text from the attachment list
+//   - "Attachments:" header mirrors pi's CLI help so users see
+//     consistent wording whether they invoke the binary directly or
+//     via cc-connect
+//   - each @<path> is on its own line in the same order as atFiles
+//
+// When atFiles is empty the original prompt is returned unchanged —
+// we do NOT emit an empty "Attachments:" header, because an
+// assistant model could interpret that as a request to attach
+// something.
+func composeRPCPrompt(prompt string, atFiles []string) string {
+	if len(atFiles) == 0 {
+		return prompt
+	}
+	var b strings.Builder
+	b.WriteString(prompt)
+	b.WriteString("\n\nAttachments:\n")
+	for _, f := range atFiles {
+		b.WriteString("@")
+		b.WriteString(f)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // ── Event Handling (shared by both modes) ───────────────────
@@ -1223,6 +1215,31 @@ func (s *piSession) GetContextUsage() *core.ContextUsage {
 	return &u
 }
 
+// buildJSONArgs assembles the argv slice for the one-shot `pi --mode json`
+// process. Pulled out of sendJSON so the @<path> attachment refactor
+// (Issue #1723) can be unit-tested without spawning a process.
+//
+// Returns a fresh slice on every call — never aliased to the caller's
+// extraArgs, since sendJSON mutates it.
+func buildJSONArgs(extraArgs []string, prompt, sessionID, model, thinking string, atFiles []string) []string {
+	args := append(append([]string{}, extraArgs...), "--mode", "json", "-p", prompt)
+	if sessionID != "" {
+		args = append(args, "--session-id", sessionID)
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if thinking != "" {
+		args = append(args, "--thinking", thinking)
+	}
+	// Issue #1723: append attachment paths as @<path> argv entries (NOT
+	// inlined into the prompt text). pi treats them as inputs to load.
+	for _, f := range atFiles {
+		args = append(args, "@"+f)
+	}
+	return args
+}
+
 // ── Attachment helpers ───────────────────────────────────────
 
 func cleanAttachments(attachDir string) {
@@ -1275,6 +1292,30 @@ func saveImagesToDisk(attachDir string, images []core.ImageAttachment) []string 
 		fpath := filepath.Join(attachDir, fname)
 		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
 			slog.Error("piSession: save image failed", "error", err)
+			continue
+		}
+		paths = append(paths, fpath)
+	}
+	return paths
+}
+
+func saveFilesToDisk(attachDir string, files []core.FileAttachment) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		slog.Error("piSession: failed to create attachments dir", "error", err)
+		return nil
+	}
+	var paths []string
+	for i, f := range files {
+		fname := sanitizePiAttachmentName(f.FileName)
+		if fname == "" {
+			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
+		}
+		fpath := filepath.Join(attachDir, fname)
+		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
+			slog.Error("piSession: save file failed", "error", err)
 			continue
 		}
 		paths = append(paths, fpath)

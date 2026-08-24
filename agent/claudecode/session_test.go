@@ -631,9 +631,9 @@ func makeFiller(n int) string {
 // assistant text reaches the user.
 //
 // Cases covered:
-//  - string content (plain text result)
-//  - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
-//  - is_error=true (exit code 1, success=false)
+//   - string content (plain text result)
+//   - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
+//   - is_error=true (exit code 1, success=false)
 func TestHandleUserEmitsToolResult(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -649,10 +649,10 @@ func TestHandleUserEmitsToolResult(t *testing.T) {
 				"message": map[string]any{
 					"content": []any{
 						map[string]any{
-							"type":          "tool_result",
-							"tool_use_id":   "toolu_abc",
-							"is_error":      false,
-							"content":       "command output here",
+							"type":        "tool_result",
+							"tool_use_id": "toolu_abc",
+							"is_error":    false,
+							"content":     "command output here",
 						},
 					},
 				},
@@ -744,69 +744,6 @@ func TestHandleUserEmitsToolResult(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestBuildClaudeTextPart is the regression suite for the text-part
-// builder extracted from Send() during the file-handling refactor. Each
-// subtest guards one of the empty-prompt fallback rules documented on
-// buildClaudeTextPart, so a future "small cleanup" cannot silently
-// delete the image-only fallback again.
-func TestBuildClaudeTextPart(t *testing.T) {
-	t.Run("EmptyPrompt_OnlyImages_GetsImageFallback", func(t *testing.T) {
-		// Regression: a screenshot with no caption used to come through as
-		// an empty text part alongside bare image paths, leaving Claude
-		// with no instruction. The image-only fallback fixes that.
-		got := buildClaudeTextPart("", []string{"/tmp/shot.png"}, nil)
-		if !strings.Contains(got, "Please analyze the attached image(s).") {
-			t.Errorf("expected image-only fallback, got: %q", got)
-		}
-		if !strings.Contains(got, "/tmp/shot.png") {
-			t.Errorf("expected image path in output, got: %q", got)
-		}
-	})
-
-	t.Run("EmptyPrompt_OnlyFiles_GetsFileFallback", func(t *testing.T) {
-		// core.AppendFileRefs substitutes the file-only fallback; this
-		// test pins that contract so we do not duplicate the logic.
-		got := buildClaudeTextPart("", nil, []string{"/tmp/report.pdf"})
-		if !strings.Contains(got, "Please analyze the attached file(s).") {
-			t.Errorf("expected file-only fallback, got: %q", got)
-		}
-		if !strings.Contains(got, "(Files saved locally, please read them: /tmp/report.pdf)") {
-			t.Errorf("expected standard file-ref text, got: %q", got)
-		}
-	})
-
-	t.Run("EmptyPrompt_BothImagesAndFiles_FileFallbackWins", func(t *testing.T) {
-		// When both are present, the file fallback is the stronger signal.
-		got := buildClaudeTextPart("", []string{"/tmp/shot.png"}, []string{"/tmp/data.csv"})
-		if !strings.Contains(got, "Please analyze the attached file(s).") {
-			t.Errorf("expected file fallback to win when both present, got: %q", got)
-		}
-		if strings.Contains(got, "Please analyze the attached image(s).") {
-			t.Errorf("did not expect image fallback alongside files, got: %q", got)
-		}
-	})
-
-	t.Run("NonEmptyPrompt_PassesThroughUntouched", func(t *testing.T) {
-		got := buildClaudeTextPart("summarize this", []string{"/tmp/shot.png"}, nil)
-		if !strings.HasPrefix(got, "summarize this") {
-			t.Errorf("prompt should be preserved as prefix, got: %q", got)
-		}
-		if !strings.Contains(got, "/tmp/shot.png") {
-			t.Errorf("image path should be appended, got: %q", got)
-		}
-	})
-
-	t.Run("NonEmptyPrompt_WithFiles_AppendsFileRefs", func(t *testing.T) {
-		got := buildClaudeTextPart("what is in this", nil, []string{"/tmp/data.csv"})
-		if !strings.HasPrefix(got, "what is in this") {
-			t.Errorf("prompt should be preserved, got: %q", got)
-		}
-		if !strings.Contains(got, "(Files saved locally, please read them: /tmp/data.csv)") {
-			t.Errorf("expected file ref appended, got: %q", got)
-		}
-	})
 }
 
 func helperCommand(ctx context.Context, mode string) *exec.Cmd {

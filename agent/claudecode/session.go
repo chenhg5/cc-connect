@@ -216,7 +216,7 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Claude Code rejects bypassPermissions when running as root.
@@ -288,7 +288,11 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	// shared file is safe under concurrent spawns.
 	var promptFilePath string
 	var promptFileIsShared bool
-	if appended := buildAppendSystemPrompt(core.AgentSystemPrompt(), platformPrompt, appendSystemPrompt); appended != "" {
+	// Issue #1655: when a.language is non-empty, this session gets the
+	// localized cc-connect system prompt. When empty (legacy callers),
+	// AgentSystemPromptForLang returns the English default — same bytes as
+	// the pre-PR buildAppendSystemPrompt(core.AgentSystemPrompt(), ...) call.
+	if appended := buildAppendSystemPrompt(core.AgentSystemPromptForLang(lang), platformPrompt, appendSystemPrompt); appended != "" {
 		if platformPrompt == "" && appendSystemPrompt == "" {
 			path, err := ensureSharedSystemPromptFile(ccDataDir, appended)
 			if err != nil {
@@ -962,7 +966,7 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 
 	// Save and encode images
 	for i, img := range images {
-		ext := extFromMime(img.MimeType)
+		ext := core.ExtFromMime(img.MimeType)
 		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
 		fpath := filepath.Join(attachDir, fname)
 		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
@@ -989,73 +993,25 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 	// Save files to disk so Claude Code can read them
 	filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
 
-	textPart := buildClaudeTextPart(prompt, savedPaths, filePaths)
+	// Build text part: user prompt + file path references
+	textPart := prompt
+	if textPart == "" && len(filePaths) > 0 {
+		textPart = "Please analyze the attached file(s)."
+	} else if textPart == "" {
+		textPart = "Please analyze the attached image(s)."
+	}
+	if len(savedPaths) > 0 {
+		textPart += "\n\n(Images also saved locally: " + strings.Join(savedPaths, ", ") + ")"
+	}
+	if len(filePaths) > 0 {
+		textPart += "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
+	}
 	parts = append(parts, map[string]any{"type": "text", "text": textPart})
 
 	return cs.writeJSON(map[string]any{
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": parts},
 	})
-}
-
-// buildClaudeTextPart assembles the text content part of the Claude message
-// from the user prompt, any locally-saved image paths, and any saved file
-// paths. The logic exists as a free function so it can be unit-tested
-// without spawning the Claude CLI.
-//
-// Fallback rules:
-//   - Empty prompt + only files → core.AppendFileRefs substitutes
-//     "Please analyze the attached file(s).".
-//   - Empty prompt + only images → we substitute
-//     "Please analyze the attached image(s)." (core.AppendFileRefs does
-//     not cover this case, so we must handle it here or the model
-//     would receive an empty text part alongside bare image paths).
-//   - Empty prompt + both files and images → the file fallback wins
-//     (it is the stronger signal that the user wants analysis).
-//   - Empty prompt + no attachments → textPart is left empty; the
-//     engine does not reach this branch in practice (engine.go
-//     short-circuits messages with no content and no attachments).
-func buildClaudeTextPart(prompt string, savedImagePaths []string, savedFilePaths []string) string {
-	textPart := prompt
-
-	// Empty-prompt fallback: when the user sends no caption we still
-	// need to give Claude something actionable. Files take priority
-	// over images because file analysis is the stronger signal (a
-	// bare image is often "look at this"; a bare file is almost
-	// always "do something with this"). We compute the fallback
-	// BEFORE the image annotation so that the "empty prompt + both
-	// images and files" case still gets an instruction prefix rather
-	// than leading with the bare image path.
-	if textPart == "" {
-		switch {
-		case len(savedFilePaths) > 0:
-			textPart = "Please analyze the attached file(s)."
-		case len(savedImagePaths) > 0:
-			textPart = "Please analyze the attached image(s)."
-		}
-	}
-
-	if len(savedImagePaths) > 0 {
-		textPart += "\n\n(Images also saved locally: " + strings.Join(savedImagePaths, ", ") + ")"
-	}
-	// AppendFileRefs would also fire the file fallback when textPart
-	// is empty, but by the time we reach it textPart is non-empty
-	// (either the user prompt or our fallback). This is why the
-	// fallback literal duplicates the one inside core.AppendFileRefs.
-	return core.AppendFileRefs(textPart, savedFilePaths)
-}
-
-func extFromMime(mime string) string {
-	switch mime {
-	case "image/jpeg":
-		return ".jpg"
-	case "image/gif":
-		return ".gif"
-	case "image/webp":
-		return ".webp"
-	default:
-		return ".png"
-	}
 }
 
 // RespondPermission writes a control_response to the Claude process stdin.

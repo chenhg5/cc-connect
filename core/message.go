@@ -341,6 +341,50 @@ func AppendFileRefs(prompt string, filePaths []string) string {
 	return prompt + "\n\n(Files saved locally, please read them: " + strings.Join(abs, ", ") + ")"
 }
 
+// ExtFromMime maps an image MIME type to a file extension. Attachments that
+// arrive without a filename (Feishu image messages carry only bytes + MIME)
+// must still land on disk with a usable extension, otherwise downstream agents
+// have to guess the format from the bytes.
+func ExtFromMime(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/bmp":
+		return ".bmp"
+	default:
+		return ".png"
+	}
+}
+
+// AppendImageRefs appends saved image paths to the prompt. Kept separate from
+// AppendFileRefs so the wording tells the agent these are images the user sent
+// and that it should open them to see the content.
+func AppendImageRefs(prompt string, imagePaths []string) string {
+	if len(imagePaths) == 0 {
+		return prompt
+	}
+	if prompt == "" {
+		prompt = "Please look at the attached image(s)."
+	}
+	abs := make([]string, len(imagePaths))
+	for i, p := range imagePaths {
+		if filepath.IsAbs(p) {
+			abs[i] = p
+			continue
+		}
+		if a, err := filepath.Abs(p); err == nil {
+			abs[i] = a
+		} else {
+			abs[i] = p
+		}
+	}
+	return prompt + "\n\n(The user attached image(s), saved locally — read the file(s) to view them: " + strings.Join(abs, ", ") + ")"
+}
+
 // AudioAttachment represents a voice/audio message sent by the user.
 type AudioAttachment struct {
 	MimeType string // e.g. "audio/amr", "audio/ogg", "audio/mp4"

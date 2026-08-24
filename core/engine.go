@@ -16067,9 +16067,13 @@ func (e *Engine) setupMemoryFile() (setupResult, string, error) {
 
 	existing, _ := os.ReadFile(filePath)
 	existingText := string(existing)
-	block := "\n" + ccConnectInstructionMarker + "\n" + AgentSystemPrompt() + "\n"
+	// Use the engine's configured language so memory-file prompts reflect the
+	// operator's locale (Issue #1655). AgentSystemPromptForLang handles
+	// fallback to English internally when a tool key is missing.
+	prompt := AgentSystemPromptForLang(e.i18n.CurrentLang())
+	block := "\n" + ccConnectInstructionMarker + "\n" + prompt + "\n"
 	if idx := strings.Index(existingText, ccConnectInstructionMarker); idx >= 0 {
-		if strings.Contains(existingText[idx:], AgentSystemPrompt()) {
+		if strings.Contains(existingText[idx:], prompt) {
 			return setupExists, baseName, nil
 		}
 		updated := strings.TrimRight(existingText[:idx], "\n") + block
