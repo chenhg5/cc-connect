@@ -1904,6 +1904,74 @@ func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported
 	}
 }
 
+// TestProcessInteractiveEvents_CardProgressTruncatesToolInputByToolMaxLen verifies
+// that when progress_style=card is used (e.g. Feishu), a long tool input is
+// truncated to display.ToolMaxLen in the structured card payload. The original
+// event.ToolInput must remain unmutated.
+func TestProcessInteractiveEvents_CardProgressTruncatesToolInputByToolMaxLen(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       50,
+		ToolMessages:     true,
+		Mode:             "full",
+	})
+	sessionKey := "feishu:user-card-truncate"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-card-truncate")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-card-truncate",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	longInput := strings.Repeat("abcdefghij", 12) // 120 chars
+	agentSession.events <- Event{Type: EventThinking, Content: "Plan"}
+	toolEvt := Event{Type: EventToolUse, ToolName: "Bash", ToolInput: longInput}
+	agentSession.events <- toolEvt
+	agentSession.events <- Event{Type: EventText, Content: "done"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-card-truncate", time.Now(), nil, nil, state.replyCtx)
+
+	if toolEvt.ToolInput != longInput {
+		t.Fatalf("event.ToolInput was mutated: got len=%d, want len=%d", len(toolEvt.ToolInput), len(longInput))
+	}
+
+	edits := p.getPreviewEdits()
+	var toolUseText string
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		for _, item := range payload.Items {
+			if item.Kind == ProgressEntryToolUse {
+				toolUseText = item.Text
+			}
+		}
+	}
+	if toolUseText == "" {
+		t.Fatalf("no ProgressEntryToolUse found in any card edit; edits=%v", edits)
+	}
+	if utf8.RuneCountInString(toolUseText) > 50+len("...") {
+		t.Fatalf("card tool input not truncated: runeCount=%d, content=%q", utf8.RuneCountInString(toolUseText), toolUseText)
+	}
+	if !strings.HasSuffix(toolUseText, "...") {
+		t.Fatalf("expected truncated tool input to end with '...', got %q", toolUseText)
+	}
+	if !strings.HasPrefix(toolUseText, "abcdefghij") {
+		t.Fatalf("expected truncated tool input to start with original prefix, got %q", toolUseText)
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
@@ -13967,6 +14035,86 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	if resync {
 		t.Error("expected eventsNeedResync=false after clean unsolicited EventResult")
 	}
+}
+
+// TestUnsolicitedReader_ResetsIdleCloseOnEventResult verifies the P1-C P1-1
+// fix: an unsolicited EventResult must re-arm the per-session idle close
+// timer. Before the fix, the idle timer was only scheduled at the end of
+// the last foreground turn, so a long-running background turn (background
+// task that takes longer than the idle timeout) would be killed mid-flight
+// when the original timer fired.
+func TestUnsolicitedReader_ResetsIdleCloseOnEventResult(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-idle-reset")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetAgentSessionIdleTimeout(50 * time.Millisecond)
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch_idle:u1")
+
+	state := &interactiveState{
+		agentSession:     sess,
+		platform:         p,
+		replyCtx:         "ctx",
+		eventsNeedResync: false,
+	}
+	iKey := "test:ch_idle:u1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	// Pretend a previous foreground turn already scheduled an idle close
+	// with token N and a known cancel function. The cancel must be
+	// invoked by the unsolicited reader's EventResult path as part of
+	// re-scheduling.
+	var prevCancelCalled atomic.Int32
+	state.mu.Lock()
+	state.agentSessionIdleCancel = func() { prevCancelCalled.Add(1) }
+	state.agentSessionIdleToken = 42
+	state.mu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, iKey, "")
+	defer e.stopUnsolicitedReader(state)
+
+	// Send an EventResult — this is the trigger for re-scheduling.
+	sess.events <- Event{Type: EventResult, Content: "background step done", Done: true}
+
+	// Wait for the reader to drain the EventResult and reach the schedule
+	// call. The reader sends the relayed content asynchronously; we poll
+	// until either the cancel fires or a generous timeout elapses.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if prevCancelCalled.Load() > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if prevCancelCalled.Load() == 0 {
+		t.Fatal("expected EventResult path to call cancelAgentSessionIdleClose before re-scheduling")
+	}
+
+	// After re-scheduling, token must have advanced and a fresh cancel
+	// function must be installed. A stale token would risk the cleanup
+	// path closing the live agent session while the background turn is
+	// still running.
+	state.mu.Lock()
+	newToken := state.agentSessionIdleToken
+	newCancel := state.agentSessionIdleCancel
+	state.mu.Unlock()
+	if newToken == 42 {
+		t.Errorf("expected agentSessionIdleToken to advance after re-schedule, still %d", newToken)
+	}
+	if newCancel == nil {
+		t.Fatal("expected a fresh agentSessionIdleCancel to be installed after EventResult")
+	}
+
+	// Cancel the freshly installed timer so the test does not leak the
+	// background goroutine until idle timeout fires.
+	state.mu.Lock()
+	state.agentSessionIdleCancel = nil
+	state.agentSessionIdleToken = 0
+	state.mu.Unlock()
 }
 
 // TestUnsolicitedReader_StopsOnCancel verifies that stopUnsolicitedReader

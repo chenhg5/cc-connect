@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -456,5 +457,145 @@ func TestReconstructReplyCtx_MissingToken(t *testing.T) {
 	}
 	if !containsStr(err.Error(), "no stored context_token") {
 		t.Errorf("error = %q, want it to mention 'no stored context_token'", err.Error())
+	}
+}
+
+// TestIsSendThrottled verifies ret=-2 (ilink sendmessage burst throttle) is
+// recognized as a throttle and other errors are not.
+func TestIsSendThrottled(t *testing.T) {
+	if !isSendThrottled(fmt.Errorf("weixin: sendMessage: ret=-2 errcode=0 errmsg=prepare failed")) {
+		t.Fatal("ret=-2 should be recognized as a throttle")
+	}
+	if isSendThrottled(fmt.Errorf("weixin: sendMessage: connection reset by peer")) {
+		t.Fatal("non-ret=-2 error should not be treated as a throttle")
+	}
+	if isSendThrottled(nil) {
+		t.Fatal("nil error should not be treated as a throttle")
+	}
+}
+
+// TestSendChunk_FailsFastOnThrottle verifies a throttled send fails immediately
+// with a single sendmessage call — no retries, because every attempt made during
+// the ilink penalty window escalates it.
+func TestSendChunk_FailsFastOnThrottle(t *testing.T) {
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ret":-2,"errmsg":"prepare failed"}`))
+	}))
+	defer srv.Close()
+
+	p := &Platform{httpClient: &http.Client{}}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := p.sendChunk(ctx, rc, "hello")
+	if err == nil {
+		t.Fatal("expected a throttled error, got nil")
+	}
+	if !isSendThrottled(err) {
+		t.Fatalf("error should be recognized as a throttle, got: %v", err)
+	}
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("sendmessage calls = %d, want 1 (fail fast, no retries)", got)
+	}
+}
+
+// TestSendChunk_Succeeds verifies a normal send returns nil and issues exactly
+// one sendmessage call.
+func TestSendChunk_Succeeds(t *testing.T) {
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message_id":123}`))
+	}))
+	defer srv.Close()
+
+	p := &Platform{httpClient: &http.Client{}}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := p.sendChunk(ctx, rc, "hello"); err != nil {
+		t.Fatalf("sendChunk failed: %v", err)
+	}
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("sendmessage calls = %d, want 1", got)
+	}
+}
+
+// TestCheckSendQuota_AllowsUnderLimit verifies sends under the window limit pass
+// through without error.
+func TestCheckSendQuota_AllowsUnderLimit(t *testing.T) {
+	p := &Platform{sendQuotaLimit: 4, sendQuotaWindow: time.Hour}
+	ctx := context.Background()
+	for i := 0; i < 4; i++ {
+		if err := p.checkSendQuota(ctx); err != nil {
+			t.Fatalf("checkSendQuota(%d) unexpectedly failed: %v", i, err)
+		}
+	}
+}
+
+// TestCheckSendQuota_FailsWhenOverLimit verifies the quota fails fast (no
+// waiting) once the window budget is exhausted.
+func TestCheckSendQuota_FailsWhenOverLimit(t *testing.T) {
+	p := &Platform{sendQuotaLimit: 1, sendQuotaWindow: time.Hour}
+	ctx := context.Background()
+	if err := p.checkSendQuota(ctx); err != nil {
+		t.Fatalf("first send should pass: %v", err)
+	}
+	start := time.Now()
+	if err := p.checkSendQuota(ctx); err == nil {
+		t.Fatal("second send should fail (budget exhausted)")
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("over-budget send should fail fast, took %v", elapsed)
+	}
+}
+
+// TestCheckSendQuota_DisabledWhenZero verifies limit 0 disables the quota entirely.
+func TestCheckSendQuota_DisabledWhenZero(t *testing.T) {
+	p := &Platform{sendQuotaLimit: 0, sendQuotaWindow: time.Hour}
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if err := p.checkSendQuota(ctx); err != nil {
+			t.Fatalf("disabled quota should never fail: %v", err)
+		}
+	}
+}
+
+// TestSendChunks_AppliesQuota verifies the budget is enforced end-to-end through
+// sendChunks (httptest server): under budget sends succeed, over budget fails.
+func TestSendChunks_AppliesQuota(t *testing.T) {
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message_id":123}`))
+	}))
+	defer srv.Close()
+
+	p := &Platform{httpClient: &http.Client{}, sendQuotaLimit: 1, sendQuotaWindow: time.Hour}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := p.sendChunks(ctx, rc, "first"); err != nil {
+		t.Fatalf("first send failed: %v", err)
+	}
+	if err := p.sendChunks(ctx, rc, "second"); err == nil {
+		t.Fatal("second send should fail (budget exhausted)")
+	}
+	if got := sendCalls.Load(); got != 1 {
+		t.Fatalf("sendmessage calls = %d, want 1 (over-budget send not attempted)", got)
 	}
 }

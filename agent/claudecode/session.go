@@ -216,7 +216,7 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Claude Code rejects bypassPermissions when running as root.
@@ -288,7 +288,11 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	// shared file is safe under concurrent spawns.
 	var promptFilePath string
 	var promptFileIsShared bool
-	if appended := buildAppendSystemPrompt(core.AgentSystemPrompt(), platformPrompt, appendSystemPrompt); appended != "" {
+	// Issue #1655: when a.language is non-empty, this session gets the
+	// localized cc-connect system prompt. When empty (legacy callers),
+	// AgentSystemPromptForLang returns the English default — same bytes as
+	// the pre-PR buildAppendSystemPrompt(core.AgentSystemPrompt(), ...) call.
+	if appended := buildAppendSystemPrompt(core.AgentSystemPromptForLang(lang), platformPrompt, appendSystemPrompt); appended != "" {
 		if platformPrompt == "" && appendSystemPrompt == "" {
 			path, err := ensureSharedSystemPromptFile(ccDataDir, appended)
 			if err != nil {
@@ -962,7 +966,7 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 
 	// Save and encode images
 	for i, img := range images {
-		ext := extFromMime(img.MimeType)
+		ext := core.ExtFromMime(img.MimeType)
 		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
 		fpath := filepath.Join(attachDir, fname)
 		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
@@ -1008,19 +1012,6 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": parts},
 	})
-}
-
-func extFromMime(mime string) string {
-	switch mime {
-	case "image/jpeg":
-		return ".jpg"
-	case "image/gif":
-		return ".gif"
-	case "image/webp":
-		return ".webp"
-	default:
-		return ".png"
-	}
 }
 
 // RespondPermission writes a control_response to the Claude process stdin.
