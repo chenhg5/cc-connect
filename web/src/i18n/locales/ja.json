@@ -505,7 +505,7 @@
     "firstSetup": "コントロールプレーンの初期化", "setupSubtitle": "唯一の管理者アカウントを作成します", "loginSubtitle": "cc-connect コントロールプレーンにログイン",
     "setupToken": "ワンタイムセットアップトークン", "adminPassword": "管理者パスワード", "confirmPassword": "パスワード確認", "passwordMismatch": "パスワードが一致しません", "createAdmin": "管理者を作成",
     "operations": "運用", "operationsSubtitle": "Runtime デバイス、リリース、ログ、サービスを管理", "devices": "macOS Runtime デバイス", "pairDevice": "デバイスをペアリング", "pairExpires": "{{time}} まで有効", "online": "オンライン", "offline": "オフライン", "revoke": "取り消す", "renameDevice": "デバイス名を変更", "deviceLogs": "接続ログ", "noDevices": "ペアリング済みデバイスはありません",
-    "service": "業務サービス", "currentRelease": "現在のリリース", "update": "確認して更新", "rollback": "ロールバック", "restart": "再起動", "running": "実行中", "stopped": "停止", "noLogs": "サービスログはありません", "deployRuns": "デプロイ履歴",
+    "service": "業務サービス", "currentRelease": "現在のリリース", "update": "確認して更新", "rollback": "ロールバック", "restart": "再起動", "running": "実行中", "stopped": "停止", "noLogs": "サービスログはありません", "deployRuns": "デプロイ履歴", "containerHostUnavailable": "ホストデプロイ実行サービスを利用できません",
     "setupWizard": "デプロイ初期設定", "setupWizardSubtitle": "公開エンドポイント、macOS Runtime、業務サービスを接続します", "publicURL": "公開 HTTPS URL", "openrestyConfig": "1Panel / OpenResty リバースプロキシ設定",
     "runtimePairing": "macOS Runtime をペアリング", "createPairingCode": "ペアリングコードを作成", "runtimeReady": "Runtime はオンラインです（{{count}} プロジェクトルート）", "runtimeWaiting": "有効な Codex プロジェクトを持つ Runtime を待機中", "codexValidation": "Codex とプロジェクトカタログを検証",
     "wecomOptional": "WeCom WebSocket（任意）", "enableWeCom": "WeCom ワークスペースチャットを有効化", "wecomBotID": "WeCom Bot ID", "wecomBotSecret": "WeCom Bot Secret", "wecomAllowFrom": "許可するユーザー ID（任意）", "startService": "設定を生成して起動"

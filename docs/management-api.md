@@ -2,6 +2,8 @@
 
 `cc-connect-control` is the only public Web endpoint and listens on `127.0.0.1:9820` by default. 1Panel/OpenResty terminates production HTTPS. The business process listens only on `/run/cc-connect/server.sock`, while macOS Runtime devices connect outbound over TLS/WebSocket.
 
+`GET /api/v1/deploy/dashboard` includes the authoritative `deployment` capability (`owner`, `available`, `reason`, `detail`, `update`, `rollback`, `restart`). Both systemd and container owners support signed Web update and rollback. In container mode, an unavailable host executor returns `reason=container_host_unavailable` and disables version operations; server restart remains owned by control.
+
 At `v0.1.0`, the resources below are the sole current contract. Management tokens, query-string authentication, `cc-connect web`, and a public business-process TCP listener are removed.
 
 ## Authentication
@@ -39,7 +41,7 @@ Pairing codes expire after ten minutes and are one-time. Subsequent Runtime conn
 - `GET /api/v1/service/logs?after={cursor}`
 - `GET /api/v1/service/logs/stream?after={cursor}`
 
-Updates and rollbacks are manual Web actions. control pins and verifies the `shusfun/cc-connect` repository, Release workflow, tag, Sigstore OIDC identity, manifest, and artifact SHA-256. There is no unsigned fallback. Update, rollback, and restart share one machine execution slot.
+Updates and rollbacks are manual Web actions. Native installs verify releases directly. Container installs call the fixed-target host executor, which independently verifies the same Release identity and the signed `ghcr.io/shusfun/cc-connect` image digest. control has no Docker Socket access and the executor accepts no arbitrary repository, Compose project, service, path, or command. There is no unsigned fallback. Update, rollback, and restart share one machine execution slot.
 
 Deployment streams are cursor-replayable NDJSON backed by `control.db`; reconnect with the last confirmed `sequence`.
 

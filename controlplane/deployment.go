@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chenhg5/cc-connect/containerhost"
 	"github.com/chenhg5/cc-connect/controlstore"
 	"github.com/chenhg5/cc-connect/releasecontract"
 	"github.com/chenhg5/cc-connect/releaseinstall"
@@ -21,12 +22,30 @@ import (
 )
 
 type DeploymentConfig struct {
+	Owner             string
+	RunningVersion    string
 	ReleasesDirectory string
 	CurrentLink       string
 	ControlDatabase   string
 	ActivationPath    string
 	ReleaseClient     *releaseinstall.Client
+	ContainerHost     containerDeploymentHost
 	RestartControl    func()
+}
+
+const (
+	DeploymentOwnerSystemd   = "systemd"
+	DeploymentOwnerContainer = "container"
+)
+
+type DeploymentCapabilities struct {
+	Owner     string `json:"owner"`
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	Update    bool   `json:"update"`
+	Rollback  bool   `json:"rollback"`
+	Restart   bool   `json:"restart"`
 }
 
 type DeploymentManager struct {
@@ -51,16 +70,59 @@ type deploymentSupervisor interface {
 	Restart(context.Context) error
 }
 
+type containerDeploymentHost interface {
+	LatestTag(context.Context) (string, error)
+	Prepare(context.Context, string) (releaseinstall.Release, containerhost.Preparation, error)
+	Status(context.Context) (containerhost.Status, error)
+	Activate(context.Context, containerhost.ActivateRequest) error
+	Commit(context.Context, string) error
+	Cancel(context.Context, string) error
+	Confirm(context.Context, string) error
+}
+
 func NewDeploymentManager(config DeploymentConfig, store *controlstore.Store, broker deploymentBroker, supervisor deploymentSupervisor) (*DeploymentManager, error) {
-	if store == nil || broker == nil || supervisor == nil || config.ReleaseClient == nil || config.RestartControl == nil {
-		return nil, errors.New("deployment manager: store, broker, supervisor, release client and restart callback are required")
+	if store == nil || broker == nil || supervisor == nil {
+		return nil, errors.New("deployment manager: store, broker and supervisor are required")
 	}
-	for _, path := range []string{config.ReleasesDirectory, config.CurrentLink, config.ControlDatabase, config.ActivationPath} {
-		if !filepath.IsAbs(strings.TrimSpace(path)) {
-			return nil, errors.New("deployment manager: absolute release, activation and database paths are required")
+	if config.Owner == "" {
+		config.Owner = DeploymentOwnerSystemd
+	}
+	switch config.Owner {
+	case DeploymentOwnerSystemd:
+		if config.ReleaseClient == nil || config.RestartControl == nil {
+			return nil, errors.New("deployment manager: systemd owner requires release client and restart callback")
 		}
+		for _, path := range []string{config.ReleasesDirectory, config.CurrentLink, config.ControlDatabase, config.ActivationPath} {
+			if !filepath.IsAbs(strings.TrimSpace(path)) {
+				return nil, errors.New("deployment manager: absolute release, activation and database paths are required")
+			}
+		}
+	case DeploymentOwnerContainer:
+		if config.ContainerHost == nil || strings.TrimSpace(config.RunningVersion) == "" ||
+			!filepath.IsAbs(strings.TrimSpace(config.ControlDatabase)) || !filepath.IsAbs(strings.TrimSpace(config.ActivationPath)) {
+			return nil, errors.New("deployment manager: container owner requires running version, host executor and absolute activation and database paths")
+		}
+	default:
+		return nil, fmt.Errorf("deployment manager: unsupported owner %q", config.Owner)
 	}
 	return &DeploymentManager{config: config, store: store, broker: broker, supervisor: supervisor, operations: make(map[string]context.CancelFunc)}, nil
+}
+
+func (m *DeploymentManager) Capabilities(ctx context.Context) DeploymentCapabilities {
+	capabilities := DeploymentCapabilities{Owner: m.config.Owner, Available: true, Update: true, Rollback: true, Restart: true}
+	if m.config.Owner == DeploymentOwnerContainer {
+		statusCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err := m.config.ContainerHost.Status(statusCtx)
+		cancel()
+		if err != nil {
+			capabilities.Available = false
+			capabilities.Update = false
+			capabilities.Rollback = false
+			capabilities.Reason = "container_host_unavailable"
+			capabilities.Detail = err.Error()
+		}
+	}
+	return capabilities
 }
 
 func (m *DeploymentManager) Start(ctx context.Context, kind, targetTag string) (controlstore.DeployRun, error) {
@@ -113,7 +175,20 @@ func (m *DeploymentManager) resolveTarget(ctx context.Context, kind, requested s
 		if requested != "" {
 			return requested, nil
 		}
+		if m.config.Owner == DeploymentOwnerContainer {
+			return m.config.ContainerHost.LatestTag(ctx)
+		}
 		return m.config.ReleaseClient.LatestTag(ctx)
+	}
+	if m.config.Owner == DeploymentOwnerContainer {
+		status, err := m.config.ContainerHost.Status(ctx)
+		if err != nil {
+			return "", err
+		}
+		if status.PreviousTag == "" || (requested != "" && requested != status.PreviousTag) {
+			return "", errors.New("deployment manager: rollback is limited to the previous successful release")
+		}
+		return status.PreviousTag, nil
 	}
 	current, err := filepath.EvalSymlinks(m.config.CurrentLink)
 	if err != nil {
@@ -173,6 +248,10 @@ func (m *DeploymentManager) execute(ctx context.Context, run controlstore.Deploy
 		committed = true
 		return
 	}
+	if m.config.Owner == DeploymentOwnerContainer {
+		m.executeContainer(ctx, run, log, fail, &committed)
+		return
+	}
 
 	log("锁定 Release " + run.TargetTag)
 	release, err := m.config.ReleaseClient.Fetch(ctx, run.TargetTag)
@@ -215,27 +294,10 @@ func (m *DeploymentManager) execute(ctx context.Context, run controlstore.Deploy
 		return
 	}
 
-	devices, err := m.broker.Devices(ctx)
+	online, err := m.stageRuntimes(ctx, run.TargetTag)
 	if err != nil {
 		fail(err)
 		return
-	}
-	var online []string
-	for _, device := range devices {
-		if device.RevokedAt != nil {
-			continue
-		}
-		if !device.Online {
-			_ = m.store.SaveRuntimeUpdate(context.Background(), controlstore.RuntimeUpdate{DeviceID: device.ID, TargetTag: run.TargetTag, Status: "pending"})
-			continue
-		}
-		payload, _ := runtimeprotocol.MarshalPayload(runtimeprotocol.RuntimeUpdateRequest{Tag: run.TargetTag})
-		if _, err := m.broker.Call(ctx, device.ID, runtimeprotocol.MethodUpdateStage, runtimeprotocol.Resource{}, payload); err != nil {
-			fail(fmt.Errorf("deployment manager: stage runtime %s: %w", device.Name, err))
-			return
-		}
-		online = append(online, device.ID)
-		_ = m.store.SaveRuntimeUpdate(context.Background(), controlstore.RuntimeUpdate{DeviceID: device.ID, TargetTag: run.TargetTag, Status: "staged"})
 	}
 	log(fmt.Sprintf("Runtime 暂存完成：在线 %d 台，离线设备保留待更新状态", len(online)))
 
@@ -364,6 +426,16 @@ func (m *DeploymentManager) ConfirmPending(ctx context.Context) (resultErr error
 }
 
 func (m *DeploymentManager) RegisterCurrent(ctx context.Context) error {
+	if m.config.Owner == DeploymentOwnerContainer {
+		status, err := m.config.ContainerHost.Status(ctx)
+		if err != nil {
+			return err
+		}
+		if status.CurrentTag != m.config.RunningVersion {
+			return fmt.Errorf("deployment manager: running control version %q does not match host current release %q", m.config.RunningVersion, status.CurrentTag)
+		}
+		return m.store.PutSetting(ctx, "current_release_tag", status.CurrentTag)
+	}
 	directory, err := filepath.EvalSymlinks(m.config.CurrentLink)
 	if err != nil {
 		return err

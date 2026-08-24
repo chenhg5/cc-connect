@@ -12,6 +12,12 @@ const mocks = vi.hoisted(() => ({
   streamDevice: vi.fn(),
 }));
 
+const dashboardFixture = () => ({
+  service: { running: true, pid: 42 }, devices: [{ id: 'device-1', name: 'Mac', paired_at: new Date().toISOString(), online: true }], runs: [],
+  deployment: { owner: 'systemd' as const, available: true, update: true, rollback: true, restart: true },
+  runtime_contract_hash: 'contract', control_schema: 4, current_release_tag: 'v0.1.0', runtime_updates: [], configured: true, public_url: 'https://cc.example.com', workspace_count: 1,
+});
+
 vi.mock('@/api/control', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/control')>();
   return {
@@ -28,10 +34,7 @@ vi.mock('@/api/control', async (importOriginal) => {
 
 describe('Operations', () => {
   beforeEach(() => {
-    mocks.dashboard.mockResolvedValue({
-      service: { running: true, pid: 42 }, devices: [{ id: 'device-1', name: 'Mac', paired_at: new Date().toISOString(), online: true }], runs: [],
-      runtime_contract_hash: 'contract', control_schema: 4, current_release_tag: 'v0.1.0', runtime_updates: [], configured: true, public_url: 'https://cc.example.com', workspace_count: 1,
-    });
+    mocks.dashboard.mockResolvedValue(dashboardFixture());
     mocks.serviceLogs.mockResolvedValue([]);
     mocks.startRun.mockResolvedValue({ id: 'run-1', kind: 'update', status: 'running', target_tag: 'v0.1.0', started_at: new Date().toISOString() });
     mocks.streamRun.mockReset().mockImplementation(async (_id, _after, onLine) => {
@@ -65,5 +68,27 @@ describe('Operations', () => {
     fireEvent.click(view.getByRole('button', { name: 'Connection logs' }));
     await waitFor(() => expect(mocks.streamDevice).toHaveBeenCalledWith('device-1', 0, expect.any(Function), expect.any(AbortSignal)));
     expect(await view.findByText(/runtime_connected/)).toBeTruthy();
+  });
+
+  it('容器宿主执行器在线时允许 Web 更新和回滚', async () => {
+    mocks.dashboard.mockResolvedValue({
+      ...dashboardFixture(),
+      deployment: { owner: 'container', available: true, update: true, rollback: true, restart: true },
+    });
+    const view = render(<Operations />);
+    expect(await view.findByRole('button', { name: 'Check and update' })).toHaveProperty('disabled', false);
+    expect(view.getByRole('button', { name: 'Rollback' })).toHaveProperty('disabled', false);
+  });
+
+  it('容器宿主执行器离线时显示原因并禁用版本操作', async () => {
+    mocks.dashboard.mockResolvedValue({
+      ...dashboardFixture(),
+      deployment: { owner: 'container', available: false, reason: 'container_host_unavailable', detail: 'connect: no such file', update: false, rollback: false, restart: true },
+    });
+    const view = render(<Operations />);
+    expect(await view.findByText(/Container deployment host is unavailable.*no such file/)).toBeTruthy();
+    expect(view.getByRole('button', { name: 'Check and update' })).toHaveProperty('disabled', true);
+    expect(view.getByRole('button', { name: 'Rollback' })).toHaveProperty('disabled', true);
+    expect(view.getByRole('button', { name: 'Restart' })).toHaveProperty('disabled', false);
   });
 });

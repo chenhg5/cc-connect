@@ -53,6 +53,13 @@
 - 严格仓库基础审计再次为 `0 error / 0 warning / 0 exception`，`bash -n deploy/bootstrap.sh deploy/install-runtime.sh` 和 `git diff --check` 通过。生产代码中没有旧 management token、`template_project`、旧 daemon/Web 命令、旧工作区事件或服务器本地 Codex 后端；`thread/read(includeTurns=false)` 仍只用于 metadata/cwd 校验。
 - Release 输入必须同时满足“本地存在”和“Git 已跟踪”。首个 `v0.1.0` tag run 因 `scripts/` 整目录忽略，导致 manifest 生成器只存在于本机、全新 checkout 缺失；Release workflow 现在在安装工具链和交叉编译前显式检查 manifest 生成器、bootstrap 与 OpenResty 模板。
 
+## Docker 正式部署通道
+
+- 2026-08-24 在基线 `c9701214` 的工作树新增正式 Docker 通道。容器中只有 control，server 仍由 control 通过私有 Unix Socket 监管；宿主 systemd 只管理 `cc-connect-deploy-host`。control 不挂 Docker Socket，只通过只读挂载的 `/run/cc-connect-deploy/host.sock` 请求固定目标操作。
+- deploy-host 只接受单一协议指纹和 `latest/status/prepare/activate/commit/cancel/confirm`，并用 `SO_PEERCRED` 限制 UID。Docker/cosign 命令固定仓库 `ghcr.io/shusfun/cc-connect`、GitHub OIDC identity、Compose project 与 service；API 不接受仓库、路径或命令。Web 在宿主在线时支持更新/回滚，离线时返回结构化 `container_host_unavailable`，不切换旧路径。
+- control 负责活动操作检查、Runtime 暂存/确认和 `control.db` 备份；deploy-host 负责 control 容器替换、确认超时和失败回滚。候选确认同时比对运行中 control 版本、activation 目标和 host 状态。数据库、环境或 Compose 恢复失败时保持容器停止；成功回滚后恢复数据库所有权为 UID/GID 10001。
+- Compose 使用 `/var/lib/cc-connect-docker/control` 与 `/var/lib/cc-connect-docker/app` 固定 bind 持久目录。签名 `bootstrap-container.sh` 从 deploy-host 制品安装二进制与 Compose，只创建一个 systemd service。Release workflow 从后续 tag 起构建两个 Linux 架构的 deploy-host、八个 manifest 目标和签名 GHCR 镜像；既有 `v0.1.0` Release 不包含这些制品。
+
 ## 当前限制与候选优化
 
 - 无真实企业微信凭据时只能验证适配、命令与伪边界，线上 WebSocket 连接和真实附件投递仍是交付风险。
@@ -63,8 +70,10 @@
 
 ## 失效条件
 
-以下任一项变化后必须重新核验本 Note：`NativeConversationBackend` 或事件 envelope 改名；管理路由或 WebSocket 请求集变化；SQLite schema 版本策略变化；App Server RPC 版本变化；Web 测试脚本、Makefile 门禁或设备资源守卫入口变化。
+以下任一项变化后必须重新核验本 Note：`NativeConversationBackend` 或事件 envelope 改名；管理路由或 WebSocket 请求集变化；SQLite schema 版本策略变化；App Server RPC 版本变化；Web 测试脚本、Makefile 门禁或设备资源守卫入口变化；Docker 基础镜像 digest、Compose 持久卷、`deployment` capability 或 Release 镜像签名流程变化。
 
 ## 最后验证
 
-2026-08-24，基线 `e492ec49` 加 `codex/control-runtime-v0.1.0` 当前工作树；本地适用门禁已完成。未启动 Docker、浏览器自动化或真实服务器；没有真实企业微信凭据，因此线上企业微信 WebSocket 与附件投递仍需部署后验证。
+2026-08-24，基线 `c9701214` 加当前 Docker 部署工作树；本地适用门禁已完成：Web 9 个文件 53 个测试和生产构建通过；Go 1.25.1 聚焦测试、`go build -p=2 ./...`、`go vet -p=2 ./...`、`CI=1 go test -p=2 -parallel=2 ./...`、受影响部署包 race、`go mod tidy -diff`、`go mod verify` 均通过。`golangci-lint v2.11.4` 通过 `go run` 固定版本执行为 `0 issues`，`actionlint v1.7.8` 通过；所有部署脚本 `bash -n`、Compose 配置解析、严格仓库基础审计和 `git diff --check` 通过。
+
+按 macOS 设备规则未启动 Docker，也未运行浏览器自动化、真实服务器或真实企业微信连接；Docker 镜像冷/暖构建、容器健康检查、systemd/deploy-host 实机权限、GHCR 推送与 cosign 在线验证留给包含本变更的下一次 tag Release。已发布的 `v0.1.0` 没有镜像、deploy-host 或容器 bootstrap，本次没有创建 tag 或 Release。

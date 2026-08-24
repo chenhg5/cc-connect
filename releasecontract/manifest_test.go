@@ -16,6 +16,7 @@ func validManifest() Manifest {
 	for _, target := range [][3]string{
 		{"control", "linux", "amd64"}, {"control", "linux", "arm64"},
 		{"server", "linux", "amd64"}, {"server", "linux", "arm64"},
+		{"deployhost", "linux", "amd64"}, {"deployhost", "linux", "arm64"},
 		{"runtime", "darwin", "amd64"}, {"runtime", "darwin", "arm64"},
 	} {
 		manifest.Artifacts = append(manifest.Artifacts, Artifact{
@@ -60,7 +61,8 @@ func TestReleaseWorkflowInputsAreTracked(t *testing.T) {
 		t.Skip("source is not a Git checkout")
 	}
 	command := exec.Command("git", "-C", strings.TrimSpace(string(root)), "ls-files", "--error-unmatch", "--",
-		"scripts/release-manifest.go", "deploy/bootstrap.sh", "deploy/openresty-1panel.conf")
+		"scripts/release-manifest.go", "deploy/bootstrap.sh", "deploy/openresty-1panel.conf",
+		"deploy/docker-entrypoint.sh", "Dockerfile", "compose.yaml")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("release workflow input is not tracked: %v: %s", err, strings.TrimSpace(string(output)))
 	}

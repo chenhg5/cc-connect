@@ -1,0 +1,17 @@
+.git
+.github
+.agents
+.codex
+.worktrees
+dist
+build
+bin
+node_modules
+web/node_modules
+web/dist
+coverage.*
+*.log
+*.test
+config.toml
+config.*.toml
+.env

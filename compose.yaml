@@ -1,0 +1,32 @@
+services:
+  cc-connect:
+    image: ${CC_CONNECT_IMAGE:?CC_CONNECT_IMAGE must be an explicit local tag, release tag, or digest}
+    build:
+      context: .
+      args:
+        VERSION: ${CC_CONNECT_VERSION:-dev}
+        COMMIT: ${CC_CONNECT_COMMIT:-local}
+        BUILD_TIME: ${CC_CONNECT_BUILD_TIME:-unknown}
+        NODE_IMAGE: ${CC_CONNECT_NODE_IMAGE:-m.daocloud.io/docker.io/library/node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293}
+        GO_IMAGE: ${CC_CONNECT_GO_IMAGE:-m.daocloud.io/docker.io/library/golang:1.25.1-alpine@sha256:b6ed3fd0452c0e9bcdef5597f29cc1418f61672e9d3a2f55bf02e7222c014abd}
+        ALPINE_IMAGE: ${CC_CONNECT_ALPINE_IMAGE:-m.daocloud.io/docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce}
+        NPM_REGISTRY: ${CC_CONNECT_NPM_REGISTRY:-https://registry.npmmirror.com}
+        GOPROXY: ${CC_CONNECT_GOPROXY:-https://goproxy.cn}
+        GOSUMDB: ${CC_CONNECT_GOSUMDB:-sum.golang.org}
+        ALPINE_MIRROR: ${CC_CONNECT_ALPINE_MIRROR:-https://mirrors.aliyun.com/alpine}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CC_CONNECT_PORT:-9820}:9820"
+    volumes:
+      - ${CC_CONNECT_STATE_ROOT:-/var/lib/cc-connect-docker}/control:/var/lib/cc-connect/control
+      - ${CC_CONNECT_STATE_ROOT:-/var/lib/cc-connect-docker}/app:/var/lib/cc-connect/app
+      - /run/cc-connect-deploy:/run/cc-connect-deploy:ro
+    tmpfs:
+      - /run/cc-connect:mode=0750,uid=10001,gid=10001
+      - /tmp:mode=1777
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s

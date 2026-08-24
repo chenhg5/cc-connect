@@ -29,6 +29,7 @@ export interface DeployRun {
 
 export interface Dashboard {
   service: ServiceStatus;
+  deployment: { owner: 'systemd' | 'container'; available: boolean; reason?: 'container_host_unavailable'; detail?: string; update: boolean; rollback: boolean; restart: boolean };
   devices: DeviceStatus[];
   runs: DeployRun[];
   runtime_contract_hash: string;

@@ -9,6 +9,7 @@ permissions:
   contents: write
   id-token: write
   attestations: write
+  packages: write
 
 jobs:
   release:
@@ -22,7 +23,11 @@ jobs:
         run: |
           test -f scripts/release-manifest.go
           test -f deploy/bootstrap.sh
+          test -f deploy/bootstrap-container.sh
           test -f deploy/openresty-1panel.conf
+          test -f deploy/docker-entrypoint.sh
+          test -f Dockerfile
+          test -f compose.yaml
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -50,38 +55,95 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      - name: Build three product artifacts
+      - name: Resolve build metadata
+        id: build-metadata
+        run: echo "build_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Build four product artifacts
         env:
           GOPROXY: https://goproxy.cn
           GOSUMDB: sum.golang.org
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_COMMIT: ${{ github.sha }}
+          BUILD_TIME: ${{ steps.build-metadata.outputs.build_time }}
         run: |
           set -euo pipefail
           mkdir -p dist stage
-          build_time="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           for arch in amd64 arm64; do
-            rm -rf stage/control stage/server stage/runtime
-            mkdir -p stage/control stage/server stage/runtime
+            rm -rf stage/control stage/server stage/deployhost stage/runtime
+            mkdir -p stage/control stage/server stage/deployhost stage/runtime
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
-              -ldflags "-s -w -X main.version=${RELEASE_TAG} -X main.commit=${RELEASE_COMMIT} -X main.buildTime=${build_time}" \
+              -ldflags "-s -w -X main.version=${RELEASE_TAG} -X main.commit=${RELEASE_COMMIT} -X main.buildTime=${BUILD_TIME}" \
               -o stage/control/cc-connect-control ./cmd/cc-connect-control
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
-              -ldflags "-s -w -X main.version=${RELEASE_TAG} -X main.commit=${RELEASE_COMMIT} -X main.buildTime=${build_time}" \
+              -ldflags "-s -w -X main.version=${RELEASE_TAG} -X main.commit=${RELEASE_COMMIT} -X main.buildTime=${BUILD_TIME}" \
               -o stage/server/cc-connect-server ./cmd/cc-connect
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+              -ldflags "-s -w -X main.version=${RELEASE_TAG} -X main.commit=${RELEASE_COMMIT} -X main.buildTime=${BUILD_TIME}" \
+              -o stage/deployhost/cc-connect-deploy-host ./cmd/cc-connect-deploy-host
             CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build \
               -ldflags "-s -w -X main.version=${RELEASE_TAG}" \
               -o stage/runtime/cc-connect-runtime ./cmd/cc-connect-runtime
             tar -C stage/control -czf "dist/cc-connect-control-linux-${arch}.tar.gz" cc-connect-control
             tar -C stage/server -czf "dist/cc-connect-server-linux-${arch}.tar.gz" cc-connect-server
+            install -m 0644 compose.yaml stage/deployhost/compose.yaml
+            tar -C stage/deployhost -czf "dist/cc-connect-deployhost-linux-${arch}.tar.gz" cc-connect-deploy-host compose.yaml
             tar -C stage/runtime -czf "dist/cc-connect-runtime-darwin-${arch}.tar.gz" cc-connect-runtime
           done
           RELEASE_DIST=dist go run ./scripts/release-manifest.go
           install -m 0755 deploy/bootstrap.sh dist/bootstrap.sh
+          install -m 0755 deploy/bootstrap-container.sh dist/bootstrap-container.sh
           install -m 0644 deploy/openresty-1panel.conf dist/openresty-1panel.conf
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3.8.2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve container image tags
+        id: image-metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/shusfun/cc-connect
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+
+      - name: Build and publish multi-platform container image
+        id: container
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image-metadata.outputs.tags }}
+          labels: ${{ steps.image-metadata.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ steps.build-metadata.outputs.build_time }}
+            NODE_IMAGE=docker.io/library/node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293
+            GO_IMAGE=docker.io/library/golang:1.25.1-alpine@sha256:b6ed3fd0452c0e9bcdef5597f29cc1418f61672e9d3a2f55bf02e7222c014abd
+            ALPINE_IMAGE=docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+          cache-from: type=gha,scope=cc-connect-container
+          cache-to: type=gha,mode=max,scope=cc-connect-container
+          provenance: mode=max
+
+      - name: Sign container image with GitHub OIDC
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+          IMAGE_DIGEST: ${{ steps.container.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/shusfun/cc-connect@${IMAGE_DIGEST}"
 
       - name: Sign manifest with GitHub OIDC
         env:
@@ -95,7 +157,9 @@ jobs:
             dist/*.tar.gz
             dist/manifest.json
             dist/bootstrap.sh
+            dist/bootstrap-container.sh
             dist/openresty-1panel.conf
+            compose.yaml
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -107,4 +171,6 @@ jobs:
             dist/manifest.json
             dist/manifest.bundle
             dist/bootstrap.sh
+            dist/bootstrap-container.sh
             dist/openresty-1panel.conf
+            compose.yaml

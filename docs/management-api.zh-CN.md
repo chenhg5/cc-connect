@@ -2,6 +2,8 @@
 
 `cc-connect-control` 是唯一公开 Web 入口，默认只监听 `127.0.0.1:9820`。生产环境由 1Panel/OpenResty 提供 HTTPS，业务进程只监听 `/run/cc-connect/server.sock`，Runtime 通过出站 TLS/WebSocket 连接 control。
 
+`GET /api/v1/deploy/dashboard` 的 `deployment` 是部署能力权威来源，包含 `owner`、`available`、`reason`、`detail`、`update`、`rollback` 和 `restart`。systemd 与 container 两种所有者都支持 Web 签名更新和回滚；容器宿主执行器离线时返回 `reason=container_host_unavailable` 并禁用版本操作，server 重启仍由 control 负责。
+
 项目处于 `v0.1.0`，以下是唯一现行契约。旧 management token、query token、CORS 登录、`cc-connect web` 和业务进程公开 TCP 不再支持。
 
 ## 认证
@@ -39,7 +41,7 @@
 - `GET /api/v1/service/logs?after={cursor}`
 - `GET /api/v1/service/logs/stream?after={cursor}`
 
-更新和回滚只能由管理员在 Web 手动发起。control 固定验证 `shusfun/cc-connect`、Release workflow、tag、Sigstore OIDC 身份、manifest 和制品 SHA-256；不存在未签名 fallback。更新、回滚和重启共用一个机器级执行槽。
+更新和回滚只能由管理员在 Web 手动发起。原生安装由 control 直接验签；容器安装调用固定目标的宿主执行器，后者独立验证同一 Release 身份和 `ghcr.io/shusfun/cc-connect` 镜像签名。control 不持有 Docker Socket，宿主执行器不接受任意仓库、Compose 项目、service、路径或命令；不存在未签名 fallback。更新、回滚和重启共用一个机器级执行槽。
 
 部署日志流是带持久游标的 NDJSON。重连时客户端提交最后确认的 `sequence`，服务端从 `control.db` 回放，运行结束后关闭流。
 

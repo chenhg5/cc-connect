@@ -510,7 +510,7 @@
     "firstSetup": "初始化控制面", "setupSubtitle": "创建唯一的管理员账户", "loginSubtitle": "登录 cc-connect 控制面",
     "setupToken": "一次性设置 Token", "adminPassword": "管理员密码", "confirmPassword": "确认密码", "passwordMismatch": "两次输入的密码不一致", "createAdmin": "创建管理员",
     "operations": "运维中心", "operationsSubtitle": "管理 Runtime 设备、发布、日志和业务进程", "devices": "macOS Runtime 设备", "pairDevice": "配对设备", "pairExpires": "有效期至 {{time}}", "online": "在线", "offline": "离线", "revoke": "撤销", "renameDevice": "重命名设备", "deviceLogs": "连接日志", "noDevices": "尚未配对设备",
-    "service": "业务进程", "currentRelease": "当前版本", "update": "检查并更新", "rollback": "回滚", "restart": "重启", "running": "运行中", "stopped": "已停止", "noLogs": "暂无服务日志", "deployRuns": "部署运行记录",
+    "service": "业务进程", "currentRelease": "当前版本", "update": "检查并更新", "rollback": "回滚", "restart": "重启", "running": "运行中", "stopped": "已停止", "noLogs": "暂无服务日志", "deployRuns": "部署运行记录", "containerHostUnavailable": "宿主部署执行器不可用",
     "setupWizard": "初始化部署", "setupWizardSubtitle": "连接公开入口、macOS Runtime 和业务进程", "publicURL": "公开 HTTPS 地址", "openrestyConfig": "1Panel / OpenResty 反向代理配置",
     "runtimePairing": "配对 macOS Runtime", "createPairingCode": "生成配对码", "runtimeReady": "Runtime 在线，已发现 {{count}} 个项目目录", "runtimeWaiting": "等待 Runtime 在线并报告有效 Codex 项目", "codexValidation": "校验 Codex 与项目目录",
     "wecomOptional": "企业微信 WebSocket（可选）", "enableWeCom": "启用企业微信工作区聊天", "wecomBotID": "企业微信 Bot ID", "wecomBotSecret": "企业微信 Bot Secret", "wecomAllowFrom": "允许的用户 ID（可选）", "startService": "生成配置并启动"

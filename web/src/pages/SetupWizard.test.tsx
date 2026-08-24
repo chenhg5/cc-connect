@@ -25,6 +25,7 @@ describe('SetupWizard', () => {
   beforeEach(() => {
     mocks.dashboard.mockResolvedValue({
       service: { running: false },
+      deployment: { owner: 'systemd', available: true, update: true, rollback: true, restart: true },
       devices: [{ id: 'device-1', name: 'Mac', paired_at: new Date().toISOString(), online: true }],
       runs: [], runtime_updates: [], runtime_contract_hash: 'contract', control_schema: 4,
       current_release_tag: 'v0.1.0', configured: false, public_url: 'https://cc.example.com', workspace_count: 2,

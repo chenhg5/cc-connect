@@ -3,6 +3,7 @@ MODULE     := github.com/chenhg5/cc-connect
 CMD        := ./cmd/cc-connect
 CONTROL_CMD := ./cmd/cc-connect-control
 RUNTIME_CMD := ./cmd/cc-connect-runtime
+DEPLOY_HOST_CMD := ./cmd/cc-connect-deploy-host
 DIST       := dist
 
 VERSION := v0.1.0
@@ -59,7 +60,7 @@ endif
 _BUILD_TAGS := $(strip $(_EXCLUDE_TAGS) goolm)
 _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 
-.PHONY: build build-control build-server build-runtime run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-performance pre-test lint release-all web
+.PHONY: build build-control build-server build-runtime build-deploy-host run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-performance pre-test lint release-all web
 
 web:
 	pnpm --dir web install --frozen-lockfile
@@ -77,6 +78,9 @@ build-server: web
 build-runtime:
 	go build -ldflags "-s -w -X main.version=$(VERSION)" -o cc-connect-runtime $(RUNTIME_CMD)
 
+build-deploy-host:
+	go build -ldflags "$(LDFLAGS)" -o cc-connect-deploy-host $(DEPLOY_HOST_CMD)
+
 build-noweb:
 	go build $(_TAGS_FLAG) -tags 'no_web' -ldflags "$(LDFLAGS)" -o $(APP) $(CMD)
 
@@ -85,7 +89,7 @@ run: build
 
 clean:
 	rm -f $(APP)
-	rm -f cc-connect-control cc-connect-server cc-connect-runtime
+	rm -f cc-connect-control cc-connect-server cc-connect-runtime cc-connect-deploy-host
 	rm -rf $(DIST)
 
 # ---------------------------------------------------------------------------

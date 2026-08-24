@@ -147,11 +147,14 @@ export default function Operations() {
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-white"><Server size={16} />{t('control.service')}</h2>
           <div className="flex gap-2">
-            <button type="button" disabled={busy !== ''} onClick={() => act('update', async () => { const run = await startDeployRun('update'); setSelectedRun(run.id); })} className="rounded-md border border-gray-300 px-3 py-2 text-xs dark:border-gray-700">{t('control.update')}</button>
-            <button type="button" disabled={busy !== ''} onClick={() => act('rollback', async () => { const run = await startDeployRun('rollback'); setSelectedRun(run.id); })} className="rounded-md border border-gray-300 px-3 py-2 text-xs dark:border-gray-700">{t('control.rollback')}</button>
+            <button type="button" disabled={busy !== '' || !dashboard?.deployment.update} onClick={() => act('update', async () => { const run = await startDeployRun('update'); setSelectedRun(run.id); })} className="rounded-md border border-gray-300 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700">{t('control.update')}</button>
+            <button type="button" disabled={busy !== '' || !dashboard?.deployment.rollback} onClick={() => act('rollback', async () => { const run = await startDeployRun('rollback'); setSelectedRun(run.id); })} className="rounded-md border border-gray-300 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700">{t('control.rollback')}</button>
             <button type="button" disabled={busy !== ''} onClick={() => act('restart', async () => { const run = await restartService(); setSelectedRun(run.id); })} className="flex items-center gap-1 rounded-md bg-gray-900 px-3 py-2 text-xs text-white dark:bg-white dark:text-black"><RotateCcw size={13} />{t('control.restart')}</button>
           </div>
         </div>
+        {dashboard?.deployment.reason === 'container_host_unavailable' && (
+          <p className="mb-4 text-xs text-red-700 dark:text-red-300">{t('control.containerHostUnavailable')}{dashboard.deployment.detail ? `: ${dashboard.deployment.detail}` : ''}</p>
+        )}
         <div className="mb-4 flex items-center gap-2 text-sm">
           <span className={`h-2 w-2 rounded-full ${dashboard?.service.running ? 'bg-green-500' : 'bg-red-500'}`} />
           <span className="text-gray-700 dark:text-gray-300">{dashboard?.service.running ? t('control.running') : t('control.stopped')}</span>

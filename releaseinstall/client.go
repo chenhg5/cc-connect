@@ -111,14 +111,23 @@ func (c *Client) Fetch(ctx context.Context, tag string) (Release, error) {
 	if err := c.verify(ctx, tag, manifestRaw, bundleRaw); err != nil {
 		return Release{}, fmt.Errorf("release install: verify signed manifest: %w", err)
 	}
-	manifest, err := releasecontract.Decode(manifestRaw)
+	manifest, err := DecodeLockedManifest(manifestRaw, tag)
 	if err != nil {
 		return Release{}, err
 	}
-	if manifest.Tag != tag {
-		return Release{}, fmt.Errorf("release install: manifest tag %q does not match locked tag %q", manifest.Tag, tag)
-	}
 	return Release{Manifest: manifest, ManifestRaw: manifestRaw, BundleRaw: bundleRaw}, nil
+}
+
+// DecodeLockedManifest 校验已由调用方可信边界验签的清单，并将其绑定到指定标签。
+func DecodeLockedManifest(manifestRaw []byte, tag string) (releasecontract.Manifest, error) {
+	manifest, err := releasecontract.Decode(manifestRaw)
+	if err != nil {
+		return releasecontract.Manifest{}, err
+	}
+	if manifest.Tag != tag {
+		return releasecontract.Manifest{}, fmt.Errorf("release install: manifest tag %q does not match locked tag %q", manifest.Tag, tag)
+	}
+	return manifest, nil
 }
 
 func (c *Client) DownloadArtifact(ctx context.Context, release Release, artifact releasecontract.Artifact, destination string) error {

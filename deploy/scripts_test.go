@@ -65,6 +65,89 @@ func TestBootstrapIsIdempotentAndCreatesOnlyControlService(t *testing.T) {
 	}
 }
 
+func TestDockerDeploymentKeepsControlAsSingleProcessOwner(t *testing.T) {
+	dockerfile := readFile(t, filepath.Join("..", "Dockerfile"))
+	compose := readFile(t, filepath.Join("..", "compose.yaml"))
+	entrypoint := readFile(t, "docker-entrypoint.sh")
+
+	for name, content := range map[string]string{
+		"Dockerfile": dockerfile, "compose.yaml": compose, "docker-entrypoint.sh": entrypoint,
+	} {
+		if strings.Contains(content, "cc-connect-server.service") || strings.Contains(content, "docker.sock") {
+			t.Fatalf("%s introduces a second lifecycle owner", name)
+		}
+	}
+	for _, required := range []string{
+		`USER cc-connect:cc-connect`, `--deployment-owner", "container`,
+		`ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]`,
+	} {
+		if !strings.Contains(dockerfile, required) {
+			t.Fatalf("Dockerfile missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		`127.0.0.1:${CC_CONNECT_PORT:-9820}:9820`,
+		`${CC_CONNECT_STATE_ROOT:-/var/lib/cc-connect-docker}/control:/var/lib/cc-connect/control`,
+		`${CC_CONNECT_STATE_ROOT:-/var/lib/cc-connect-docker}/app:/var/lib/cc-connect/app`,
+		`/run/cc-connect-deploy:/run/cc-connect-deploy:ro`,
+		`no-new-privileges:true`,
+	} {
+		if !strings.Contains(compose, required) {
+			t.Fatalf("compose.yaml missing %q", required)
+		}
+	}
+	if !strings.Contains(entrypoint, `exec /usr/local/bin/cc-connect-control "$@"`) {
+		t.Fatal("container entrypoint does not exec control as the only managed process")
+	}
+}
+
+func TestContainerBootstrapIsIdempotentAndInstallsOnlyDeployHostService(t *testing.T) {
+	fixture := newReleaseFixture(t, false)
+	root := filepath.Join(t.TempDir(), "root")
+	fakeBin := filepath.Join(t.TempDir(), "bin")
+	writeExecutable(t, filepath.Join(fakeBin, "cosign"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "docker"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CC_TEST_SYSTEMCTL_LOG\"\n")
+	logPath := filepath.Join(t.TempDir(), "systemctl.log")
+	run := func() string {
+		command := exec.Command("bash", "./bootstrap-container.sh", "--release-dir", fixture.directory)
+		command.Env = append(os.Environ(), "PATH="+fakeBin+":"+os.Getenv("PATH"),
+			"CC_CONNECT_BOOTSTRAP_ROOT="+root, "CC_CONNECT_BOOTSTRAP_TESTING=1", "CC_TEST_SYSTEMCTL_LOG="+logPath)
+		raw, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("container bootstrap: %v\n%s", err, raw)
+		}
+		return string(raw)
+	}
+	first := run()
+	token := strings.TrimSpace(readFile(t, filepath.Join(root, "var/lib/cc-connect-docker/control/setup-token")))
+	second := run()
+	if token == "" || !strings.Contains(first, token) || !strings.Contains(second, token) {
+		t.Fatalf("container bootstrap token is not stable: %q", token)
+	}
+	for _, path := range []string{
+		filepath.Join(root, "opt/cc-connect-docker/cc-connect-deploy-host"),
+		filepath.Join(root, "opt/cc-connect-docker/compose.yaml"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("container bootstrap missing %s: %v", path, err)
+		}
+	}
+	unit := readFile(t, filepath.Join(root, "etc/systemd/system/cc-connect-deploy-host.service"))
+	for _, required := range []string{"User=root", "cc-connect-deploy-host", "--client-uid 10001", "--initial-tag v0.1.0", "RuntimeDirectory=cc-connect-deploy"} {
+		if !strings.Contains(unit, required) {
+			t.Fatalf("deploy host unit missing %q:\n%s", required, unit)
+		}
+	}
+	if strings.Contains(unit, "cc-connect-control.service") || strings.Contains(unit, "docker.sock") {
+		t.Fatalf("container bootstrap introduced a second service or Docker socket mount:\n%s", unit)
+	}
+	compose := readFile(t, filepath.Join(root, "opt/cc-connect-docker/compose.yaml"))
+	if strings.Contains(compose, "docker.sock") || !strings.Contains(compose, "/run/cc-connect-deploy:/run/cc-connect-deploy:ro") {
+		t.Fatalf("installed compose has an unsafe control boundary:\n%s", compose)
+	}
+}
+
 func TestRuntimeInstallerIsIdempotentAndPreservesSignedSlot(t *testing.T) {
 	fixture := newReleaseFixture(t, true)
 	home := t.TempDir()
@@ -135,14 +218,22 @@ func newReleaseFixture(t *testing.T, executableRuntime bool) releaseFixture {
 	manifest := releasecontract.Manifest{Version: 1, Repository: releasecontract.Repository, Workflow: releasecontract.Workflow,
 		Tag: "v0.1.0", CommitSHA: strings.Repeat("a", 40), RuntimeContractHash: runtimeprotocol.ContractHash,
 		ControlSchema: controlstore.SchemaVersion, WorkspaceChatSchema: 3, GeneratedAt: time.Now().UTC()}
-	for _, target := range [][3]string{{"control", "linux", "amd64"}, {"control", "linux", "arm64"}, {"server", "linux", "amd64"}, {"server", "linux", "arm64"}, {"runtime", "darwin", "amd64"}, {"runtime", "darwin", "arm64"}} {
+	for _, target := range [][3]string{{"control", "linux", "amd64"}, {"control", "linux", "arm64"}, {"server", "linux", "amd64"}, {"server", "linux", "arm64"}, {"deployhost", "linux", "amd64"}, {"deployhost", "linux", "arm64"}, {"runtime", "darwin", "amd64"}, {"runtime", "darwin", "arm64"}} {
 		name := "cc-connect-" + strings.Join(target[:], "-") + ".tar.gz"
 		binary := "cc-connect-" + target[0]
 		contents := []byte(target[0])
 		if target[0] == "runtime" && executableRuntime {
 			contents = []byte("#!/bin/sh\nstate=\"$HOME/Library/Application Support/cc-connect-runtime\"\nmkdir -p \"$state\"\ncount=0\n[ ! -f \"$state/pair-count\" ] || count=$(cat \"$state/pair-count\")\nprintf '%s\\n' $((count + 1)) > \"$state/pair-count\"\nprintf '{\"server_url\":\"https://cc.example.com\",\"device_id\":\"device-test\"}\\n' > \"$state/identity.json\"\n")
 		}
-		archive := makeArchive(t, binary, contents)
+		var archive []byte
+		if target[0] == "deployhost" {
+			archive = makeArchiveFiles(t, map[string]archiveFile{
+				"cc-connect-deploy-host": {mode: 0o755, contents: []byte("deployhost")},
+				"compose.yaml":           {mode: 0o644, contents: []byte("services:\n  cc-connect:\n    image: ${CC_CONNECT_IMAGE}\n    volumes:\n      - /run/cc-connect-deploy:/run/cc-connect-deploy:ro\n")},
+			})
+		} else {
+			archive = makeArchive(t, binary, contents)
+		}
 		if err := os.WriteFile(filepath.Join(directory, name), archive, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -163,15 +254,26 @@ func newReleaseFixture(t *testing.T, executableRuntime bool) releaseFixture {
 }
 
 func makeArchive(t *testing.T, name string, contents []byte) []byte {
+	return makeArchiveFiles(t, map[string]archiveFile{name: {mode: 0o755, contents: contents}})
+}
+
+type archiveFile struct {
+	mode     int64
+	contents []byte
+}
+
+func makeArchiveFiles(t *testing.T, files map[string]archiveFile) []byte {
 	t.Helper()
 	var buffer bytes.Buffer
 	gzipWriter := gzip.NewWriter(&buffer)
 	tarWriter := tar.NewWriter(gzipWriter)
-	if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Typeflag: tar.TypeReg, Size: int64(len(contents))}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tarWriter.Write(contents); err != nil {
-		t.Fatal(err)
+	for name, file := range files {
+		if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: file.mode, Typeflag: tar.TypeReg, Size: int64(len(file.contents))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tarWriter.Write(file.contents); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := tarWriter.Close(); err != nil {
 		t.Fatal(err)

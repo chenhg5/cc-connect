@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chenhg5/cc-connect/containerhost"
 	"github.com/chenhg5/cc-connect/controlplane"
 	"github.com/chenhg5/cc-connect/controlstore"
 	"github.com/chenhg5/cc-connect/core"
@@ -53,6 +54,8 @@ func run() error {
 	cosignBinary := flag.String("cosign", "cosign", "cosign binary used for release verification")
 	releaseBase := flag.String("release-base", "", "optional signed Release download base")
 	releaseAPI := flag.String("release-api", "", "optional latest Release API")
+	deploymentOwner := flag.String("deployment-owner", controlplane.DeploymentOwnerSystemd, "release lifecycle owner: systemd or container")
+	containerHostSocket := flag.String("container-host-socket", containerhost.DefaultSocket, "container host executor Unix socket")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -66,8 +69,19 @@ func run() error {
 		return fmt.Errorf("read one-time setup token: %w", readErr)
 	}
 	controlDatabase := filepath.Join(*controlDir, "control.db")
+	if *deploymentOwner != controlplane.DeploymentOwnerSystemd && *deploymentOwner != controlplane.DeploymentOwnerContainer {
+		return fmt.Errorf("unsupported deployment owner %q", *deploymentOwner)
+	}
 	activationPath := filepath.Join(*controlDir, "activation.json")
-	pendingActivation, err := controlplane.ReadActivation(activationPath)
+	var pendingActivation *controlplane.ActivationRecord
+	var pendingContainerActivation *controlplane.ContainerActivationRecord
+	var err error
+	if *deploymentOwner == controlplane.DeploymentOwnerSystemd {
+		pendingActivation, err = controlplane.ReadActivation(activationPath)
+	} else {
+		activationPath = filepath.Join(*controlDir, "container-activation.json")
+		pendingContainerActivation, err = controlplane.ReadContainerActivation(activationPath)
+	}
 	if err != nil {
 		return err
 	}
@@ -85,6 +99,8 @@ func run() error {
 	preserveRunID := ""
 	if pendingActivation != nil {
 		preserveRunID = pendingActivation.RunID
+	} else if pendingContainerActivation != nil {
+		preserveRunID = pendingContainerActivation.RunID
 	}
 	if err := store.RecoverInterruptedRuns(context.Background(), preserveRunID); err != nil {
 		return err
@@ -111,14 +127,24 @@ func run() error {
 		return err
 	}
 	controlServer.SetSupervisor(supervisor)
-	releaseClient, err := releaseinstall.New(releaseinstall.Config{ReleaseBase: *releaseBase, ReleaseAPI: *releaseAPI, Cosign: *cosignBinary})
-	if err != nil {
-		return err
+	var releaseClient *releaseinstall.Client
+	var containerHost *containerhost.Client
+	if *deploymentOwner == controlplane.DeploymentOwnerSystemd {
+		releaseClient, err = releaseinstall.New(releaseinstall.Config{ReleaseBase: *releaseBase, ReleaseAPI: *releaseAPI, Cosign: *cosignBinary})
+		if err != nil {
+			return err
+		}
+	} else {
+		containerHost, err = containerhost.NewClient(*containerHostSocket)
+		if err != nil {
+			return err
+		}
 	}
 	restartControl := make(chan struct{}, 1)
 	deployment, err := controlplane.NewDeploymentManager(controlplane.DeploymentConfig{
+		Owner: *deploymentOwner, RunningVersion: version,
 		ReleasesDirectory: *releasesDir, CurrentLink: *currentLink, ControlDatabase: controlDatabase,
-		ActivationPath: activationPath, ReleaseClient: releaseClient,
+		ActivationPath: activationPath, ReleaseClient: releaseClient, ContainerHost: containerHost,
 		RestartControl: func() {
 			select {
 			case restartControl <- struct{}{}:
@@ -137,9 +163,9 @@ func run() error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect server configuration: %w", err)
 	}
-	if pendingActivation == nil {
+	if pendingActivation == nil && pendingContainerActivation == nil {
 		if err := deployment.RegisterCurrent(context.Background()); err != nil {
-			return fmt.Errorf("register current signed release: %w", err)
+			return fmt.Errorf("register current release: %w", err)
 		}
 	}
 	defer func() {
@@ -162,6 +188,13 @@ func run() error {
 		if err != nil {
 			return err
 		}
+	} else if pendingContainerActivation != nil {
+		confirmCtx, confirmCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err = deployment.ConfirmContainerPending(confirmCtx)
+		confirmCancel()
+		if err != nil {
+			return err
+		}
 	}
 	slog.Info("cc-connect control started", "listen", *listen, "version", version)
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -169,7 +202,7 @@ func run() error {
 	select {
 	case <-ctx.Done():
 	case <-restartControl:
-		slog.Info("signed release activation requested; handing control back to systemd")
+		slog.Info("signed release activation requested; handing control back to process manager")
 	}
 	shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer shutdownCancel()

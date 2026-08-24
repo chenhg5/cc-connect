@@ -682,8 +682,12 @@ func (s *Server) handleDeployDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := ServiceStatus{}
+	deploymentCapabilities := DeploymentCapabilities{}
 	if s.supervisor != nil {
 		status = s.supervisor.Status()
+	}
+	if s.deployment != nil {
+		deploymentCapabilities = s.deployment.Capabilities(r.Context())
 	}
 	publicURL, _, err := s.store.Setting(r.Context(), "public_url")
 	if err != nil {
@@ -707,6 +711,7 @@ func (s *Server) handleDeployDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, true, map[string]any{
 		"service": status, "devices": devices, "runs": runs, "runtime_updates": runtimeUpdates,
+		"deployment":            deploymentCapabilities,
 		"runtime_contract_hash": runtimeprotocol.ContractHash, "control_schema": controlstore.SchemaVersion,
 		"current_release_tag": currentReleaseTag, "configured": configErr == nil, "public_url": publicURL, "workspace_count": len(workspaces),
 	}, "")

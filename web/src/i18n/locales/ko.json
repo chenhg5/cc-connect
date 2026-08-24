@@ -505,7 +505,7 @@
     "firstSetup": "컨트롤 플레인 초기화", "setupSubtitle": "유일한 관리자 계정을 만듭니다", "loginSubtitle": "cc-connect 컨트롤 플레인 로그인",
     "setupToken": "일회용 설정 토큰", "adminPassword": "관리자 비밀번호", "confirmPassword": "비밀번호 확인", "passwordMismatch": "비밀번호가 일치하지 않습니다", "createAdmin": "관리자 만들기",
     "operations": "운영", "operationsSubtitle": "Runtime 장치, 릴리스, 로그 및 서비스를 관리합니다", "devices": "macOS Runtime 장치", "pairDevice": "장치 페어링", "pairExpires": "{{time}}까지 유효", "online": "온라인", "offline": "오프라인", "revoke": "해지", "renameDevice": "장치 이름 변경", "deviceLogs": "연결 로그", "noDevices": "페어링된 장치가 없습니다",
-    "service": "비즈니스 서비스", "currentRelease": "현재 릴리스", "update": "확인 및 업데이트", "rollback": "롤백", "restart": "재시작", "running": "실행 중", "stopped": "중지됨", "noLogs": "서비스 로그 없음", "deployRuns": "배포 실행",
+    "service": "비즈니스 서비스", "currentRelease": "현재 릴리스", "update": "확인 및 업데이트", "rollback": "롤백", "restart": "재시작", "running": "실행 중", "stopped": "중지됨", "noLogs": "서비스 로그 없음", "deployRuns": "배포 실행", "containerHostUnavailable": "호스트 배포 실행기를 사용할 수 없습니다",
     "setupWizard": "배포 초기 설정", "setupWizardSubtitle": "공개 엔드포인트, macOS Runtime 및 서비스 연결", "publicURL": "공개 HTTPS URL", "openrestyConfig": "1Panel / OpenResty 리버스 프록시 설정",
     "runtimePairing": "macOS Runtime 페어링", "createPairingCode": "페어링 코드 생성", "runtimeReady": "Runtime 온라인, 프로젝트 루트 {{count}}개", "runtimeWaiting": "유효한 Codex 프로젝트가 있는 Runtime 대기 중", "codexValidation": "Codex 및 프로젝트 카탈로그 확인",
     "wecomOptional": "WeCom WebSocket(선택 사항)", "enableWeCom": "WeCom 채팅 활성화", "wecomBotID": "WeCom Bot ID", "wecomBotSecret": "WeCom Bot Secret", "wecomAllowFrom": "허용 사용자 ID(선택 사항)", "startService": "설정 생성 및 시작"

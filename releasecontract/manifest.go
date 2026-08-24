@@ -74,6 +74,7 @@ func (m Manifest) Validate() error {
 	required := map[string]struct{}{
 		"control/linux/amd64": {}, "control/linux/arm64": {},
 		"server/linux/amd64": {}, "server/linux/arm64": {},
+		"deployhost/linux/amd64": {}, "deployhost/linux/arm64": {},
 		"runtime/darwin/amd64": {}, "runtime/darwin/arm64": {},
 	}
 	seen := make(map[string]struct{}, len(m.Artifacts))

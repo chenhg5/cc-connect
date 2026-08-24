@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	appconfig "github.com/chenhg5/cc-connect/config"
+	"github.com/chenhg5/cc-connect/containerhost"
 	"github.com/chenhg5/cc-connect/controlstore"
 	"github.com/chenhg5/cc-connect/runtimeprotocol"
 )
@@ -110,6 +111,68 @@ func TestControlAuthenticationSetupCookieCSRFAndLoginRateLimit(t *testing.T) {
 	}
 	if required, err := store.SetupRequired(ctx); err != nil || required {
 		t.Fatalf("setup state = %v, %v", required, err)
+	}
+}
+
+func TestDeployDashboardPublishesContainerLifecycleCapabilities(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	store, err := controlstore.Open(filepath.Join(directory, "control.db"), "setup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	broker, err := NewBroker(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	server, err := New(Config{PublicURL: "http://127.0.0.1:9820", ServerSocket: filepath.Join(directory, "server.sock"),
+		RuntimeSocket: filepath.Join(directory, "runtime.sock"), AppDirectory: filepath.Join(directory, "app")}, store, broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(SupervisorConfig{
+		Binary: "/usr/local/bin/cc-connect-server", ConfigPath: filepath.Join(directory, "app", "config.toml"),
+		ServerSocket: filepath.Join(directory, "server.sock"), RuntimeSocket: filepath.Join(directory, "runtime.sock"),
+		LogDirectory: filepath.Join(directory, "logs"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &deploymentContainerHost{status: containerhost.Status{
+		CurrentTag: "v0.1.1", CurrentImage: "ghcr.io/shusfun/cc-connect@sha256:" + strings.Repeat("1", 64),
+	}}
+	manager, err := NewDeploymentManager(DeploymentConfig{
+		Owner: DeploymentOwnerContainer, RunningVersion: "v0.1.1", ContainerHost: host,
+		ControlDatabase: filepath.Join(directory, "control.db"), ActivationPath: filepath.Join(directory, "container-activation.json"),
+	}, store, broker, supervisor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RegisterCurrent(ctx); err != nil {
+		t.Fatal(err)
+	}
+	server.SetSupervisor(supervisor)
+	server.SetDeploymentManager(manager)
+
+	response := httptest.NewRecorder()
+	server.handleDeployDashboard(response, httptest.NewRequest(http.MethodGet, "/api/v1/deploy/dashboard", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("dashboard status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			Deployment DeploymentCapabilities `json:"deployment"`
+			CurrentTag string                 `json:"current_release_tag"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.CurrentTag != "v0.1.1" || envelope.Data.Deployment.Owner != DeploymentOwnerContainer ||
+		!envelope.Data.Deployment.Available || !envelope.Data.Deployment.Update || !envelope.Data.Deployment.Rollback || !envelope.Data.Deployment.Restart {
+		t.Fatalf("dashboard data = %#v", envelope.Data)
 	}
 }
 
