@@ -105,7 +105,6 @@ Environment=HOME=/var/lib/cc-connect-docker/deployer
 RuntimeDirectory=cc-connect-deploy
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
-ExecStartPre=/bin/chown root:10001 /run/cc-connect-deploy
 ExecStart=/opt/cc-connect-docker/cc-connect-deploy-host --socket /run/cc-connect-deploy/host.sock --state /var/lib/cc-connect-docker/deployer/state.json --environment /var/lib/cc-connect-docker/deployment.env --control-database /var/lib/cc-connect-docker/control/control.db --compose-file /opt/cc-connect-docker/compose.yaml --project-directory /opt/cc-connect-docker --initial-tag $tag --client-uid 10001 --client-gid 10001
 Restart=always
 RestartSec=3
@@ -121,7 +120,8 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now cc-connect-deploy-host.service
+systemctl enable cc-connect-deploy-host.service
+systemctl restart cc-connect-deploy-host.service
 echo "cc-connect Docker 控制面将仅监听 127.0.0.1:9820，systemd 只管理宿主部署执行器。"
 if [ -n "$setup_token" ]; then
   echo "一次性设置 Token: $setup_token"

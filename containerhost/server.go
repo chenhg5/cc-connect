@@ -96,7 +96,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.state.Pending != nil && s.state.Pending.Committed && s.state.LastRunID == s.state.Pending.RunID && s.state.LastOutcome == "failed" {
 		return fmt.Errorf("container host: pending rollback requires operator recovery: %s", s.state.LastError)
 	}
-	if err := os.MkdirAll(filepath.Dir(s.config.SocketPath), 0o750); err != nil {
+	if err := prepareSocketDirectory(s.config.SocketPath, s.config.ClientGID); err != nil {
 		return err
 	}
 	if err := removeSocket(s.config.SocketPath); err != nil {
@@ -111,7 +111,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	if s.config.ClientGID >= 0 {
-		if err := os.Chown(s.config.SocketPath, 0, s.config.ClientGID); err != nil {
+		if err := os.Chown(s.config.SocketPath, -1, s.config.ClientGID); err != nil {
 			_ = listener.Close()
 			return err
 		}
@@ -131,6 +131,22 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("container host: ensure control container: %w", err)
 	}
 	s.schedulePendingRollback()
+	return nil
+}
+
+func prepareSocketDirectory(socketPath string, clientGID int) error {
+	directory := filepath.Dir(socketPath)
+	if err := os.MkdirAll(directory, 0o750); err != nil {
+		return fmt.Errorf("container host: create socket directory: %w", err)
+	}
+	if err := os.Chmod(directory, 0o750); err != nil {
+		return fmt.Errorf("container host: secure socket directory: %w", err)
+	}
+	if clientGID >= 0 {
+		if err := os.Chown(directory, -1, clientGID); err != nil {
+			return fmt.Errorf("container host: set socket directory group: %w", err)
+		}
+	}
 	return nil
 }
 

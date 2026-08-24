@@ -59,6 +59,8 @@
 - deploy-host 只接受单一协议指纹和 `latest/status/prepare/activate/commit/cancel/confirm`，并用 `SO_PEERCRED` 限制 UID。Docker/cosign 命令固定仓库 `ghcr.io/shusfun/cc-connect`、GitHub OIDC identity、Compose project 与 service；API 不接受仓库、路径或命令。Web 在宿主在线时支持更新/回滚，离线时返回结构化 `container_host_unavailable`，不切换旧路径。
 - control 负责活动操作检查、Runtime 暂存/确认和 `control.db` 备份；deploy-host 负责 control 容器替换、确认超时和失败回滚。候选确认同时比对运行中 control 版本、activation 目标和 host 状态。数据库、环境或 Compose 恢复失败时保持容器停止；成功回滚后恢复数据库所有权为 UID/GID 10001。
 - Compose 使用 `/var/lib/cc-connect-docker/control` 与 `/var/lib/cc-connect-docker/app` 固定 bind 持久目录。签名 `bootstrap-container.sh` 从 deploy-host 制品安装二进制与 Compose，只创建一个 systemd service。Release workflow 从后续 tag 起构建两个 Linux 架构的 deploy-host、八个 manifest 目标和签名 GHCR 镜像；既有 `v0.1.0` Release 不包含这些制品。
+- 2026-08-25 首次在 Debian 12 + Docker 29.1.2 实机部署 `v0.1.3` 时，镜像与 manifest 验签通过，但 control 因 `/run/cc-connect-deploy` 实际为 `root:root 0750` 而无法连接 `root:10001 0660` 的 socket，进入重启循环。systemd 会在 `ExecStart` 前按 service 的 `User/Group` 重新物化 `RuntimeDirectory`，因此 `ExecStartPre chown` 不能拥有这条权限契约。deploy-host 现在在监听前统一把父目录收紧为 `0750` 并设置 client GID，再创建 `0660` socket；回归从预置 `0700` 目录验证服务可恢复可用边界。
+- 已运行服务上的 `systemctl enable --now` 不会激活刚覆盖的 deploy-host 二进制。容器 bootstrap 必须执行 `daemon-reload -> enable -> restart`；幂等测试要求每次运行都出现一次 restart，避免补丁 Release 安装后仍由旧进程拥有部署事务。
 
 ## 当前限制与候选优化
 
