@@ -3106,8 +3106,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	msgType, msgBody := p.buildReplyContent(ctx, rc.chatID, content)
 
 	if !p.shouldUseThreadOrReplyAPI(rc) {
 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
@@ -3128,8 +3127,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return p.Reply(ctx, rctx, content)
 	}
 
-	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	msgType, msgBody := p.buildReplyContent(ctx, rc.chatID, content)
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
@@ -3143,6 +3141,12 @@ func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, 
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if cardJSON, ok := normalizeCardJSON(content); ok && p.useInteractiveCard {
+		if p.shouldUseThreadOrReplyAPI(rc) {
+			return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+		}
+		return p.sendNewMessageToChat(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
 	}
 	// Resolve mentions first so we can detect whether a real @mention is
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
@@ -3401,6 +3405,13 @@ func buildReplyContent(content string) (msgType string, body string) {
 		return larkim.MsgTypePost, buildPostMdJSON(content)
 	}
 	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
+}
+
+func (p *Platform) buildReplyContent(ctx context.Context, chatID, content string) (msgType string, body string) {
+	if cardJSON, ok := normalizeCardJSON(content); ok && p.useInteractiveCard {
+		return larkim.MsgTypeInteractive, cardJSON
+	}
+	return buildReplyContent(p.resolveMentionsInContent(ctx, chatID, content))
 }
 
 // hasComplexMarkdown detects code blocks or tables that require card rendering.
@@ -4757,6 +4768,9 @@ func buildPreviewCardJSON(content string) string {
 	if payload, ok := core.ParseProgressCardPayload(content); ok {
 		return buildProgressCardJSONFromPayload(payload)
 	}
+	if isIncompleteJSONObject(content) {
+		return buildCardJSON(" ")
+	}
 	return buildCardJSON(sanitizeMarkdownURLs(content))
 }
 
@@ -4764,17 +4778,15 @@ func buildPreviewCardJSON(content string) string {
 // Using card (interactive) type for both preview and final message so updates
 // are in-place without needing to delete and resend.
 //
-// Card 2.0 + cardkit-v1 path (when content is a rich card JSON and we're NOT
-// in thread/reply mode): runs a two-step flow that captures a card_id usable
-// for streaming text updates:
+// Card 2.0 + cardkit-v1 path (when content is a rich card JSON): runs a
+// two-step flow that captures a card_id usable for streaming text updates:
 //
 //  1. POST /open-apis/cardkit/v1/cards with {type:"card_json", data:<cardJSON>}
 //     → returns card_id (numeric string, 14-day TTL).
 //  2. Im.Message.Create with content {"type":"card","data":{"card_id":"..."}}
 //     → returns message_id; both ids are stored on feishuPreviewHandle.
 //
-// If step (1) fails OR we're in thread/reply mode (Reply API doesn't accept
-// card_id reference), we fall back to the inline-card-JSON path. The handle's
+// If step (1) fails, we fall back to the inline-card-JSON path. The handle's
 // cardID stays empty in that case and the engine routes EventText through the
 // full-card Patch path (= original #657 behavior, no typewriter).
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
@@ -4796,8 +4808,8 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	var cardJSON string
 	var sendContent string // what goes into the Im.Message.Create / Reply content field
 	var cardID string      // cardkit-v1 entity id (empty = no streaming text path)
-	if isCardJSON(content) {
-		cardJSON = content
+	if normalized, ok := normalizeCardJSON(content); ok {
+		cardJSON = normalized
 		// Try cardkit-v1 two-step flow regardless of Reply vs Create. Both
 		// Im.Message.Reply and Im.Message.Create accept the {type:card,data:{card_id}}
 		// content schema (verified by direct API call); skipping Reply mode would
@@ -4943,6 +4955,16 @@ func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fu
 	if h.cardID == "" {
 		return core.ErrNotSupported
 	}
+	if isCardJSON(fullText) {
+		// A complete Card 2.0 payload must replace the whole entity; putting it
+		// into the streaming markdown element would display the JSON as text.
+		return core.ErrNotSupported
+	}
+	if isIncompleteJSONObject(fullText) {
+		// Agent output may arrive in chunks. Keep the existing card unchanged
+		// until the complete Card 2.0 object can be applied atomically.
+		return nil
+	}
 
 	h.sequence++
 	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s/elements/%s/content",
@@ -4994,12 +5016,14 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 
 	cardJSON := ""
-	if isCardJSON(content) {
+	if normalized, ok := normalizeCardJSON(content); ok {
 		// Card 2.0: engine passes full card JSON directly, skip all processing.
-		cardJSON = content
+		cardJSON = normalized
 		h.mu.Lock()
-		h.lastContent = content
+		h.lastContent = normalized
 		h.mu.Unlock()
+	} else if isIncompleteJSONObject(content) {
+		return nil
 	} else if payload, ok := core.ParseProgressCardPayload(content); ok {
 		cardJSON = buildProgressCardJSONFromPayload(payload)
 	} else {
@@ -5028,6 +5052,9 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHandle any, content, footer string) error {
 	if !p.useInteractiveCard {
 		return core.ErrNotSupported
+	}
+	if isCardJSON(content) {
+		return p.UpdateMessage(ctx, previewHandle, content)
 	}
 	if strings.TrimSpace(footer) == "" {
 		return p.UpdateMessage(ctx, previewHandle, content)
@@ -6144,6 +6171,9 @@ var blockedRichCardImagePrefixes = []netip.Prefix{
 // Streaming frames start uploads and strip unresolved images; final frames wait
 // briefly so resolved images can be embedded before the Done update.
 func (p *Platform) ResolveRichCardMarkdown(ctx context.Context, markdown string, final bool) string {
+	if cardJSON, ok := normalizeCardJSON(markdown); ok {
+		return cardJSON
+	}
 	if !strings.Contains(markdown, "![") {
 		return markdown
 	}
@@ -6639,13 +6669,47 @@ func richStepBody(step core.ToolStep) string {
 	return strings.Join(lines, "\n")
 }
 
-// isCardJSON returns true if content looks like a complete Feishu card JSON
-// (has "schema" and "body"). Used to avoid double-wrapping rich card output.
+// normalizeCardJSON validates and trims a complete Feishu Card 2.0 payload.
+// Agent-provided cards are otherwise opaque: their body elements, including
+// native chart/chart_spec elements, are passed to Feishu unchanged.
+func normalizeCardJSON(content string) (string, bool) {
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) < 2 || trimmed[0] != '{' {
+		return "", false
+	}
+	var card struct {
+		Schema string `json:"schema"`
+		Body   struct {
+			Elements json.RawMessage `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &card); err != nil || card.Schema != "2.0" || len(card.Body.Elements) == 0 {
+		return "", false
+	}
+	var elements []json.RawMessage
+	if err := json.Unmarshal(card.Body.Elements, &elements); err != nil || elements == nil {
+		return "", false
+	}
+	return trimmed, true
+}
+
+// isCardJSON reports whether content is a complete Feishu Card 2.0 payload.
 func isCardJSON(content string) bool {
-	if len(content) < 10 || content[0] != '{' {
+	_, ok := normalizeCardJSON(content)
+	return ok
+}
+
+// isIncompleteJSONObject identifies a streamed JSON object that has not
+// reached its closing tokens yet. Feishu preview paths use this to avoid
+// exposing partial Card 2.0 JSON as user-visible markdown.
+func isIncompleteJSONObject(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" || trimmed[0] != '{' || json.Valid([]byte(trimmed)) {
 		return false
 	}
-	return strings.Contains(content, `"schema"`) && strings.Contains(content, `"body"`)
+	var value any
+	err := json.Unmarshal([]byte(trimmed), &value)
+	return err != nil && strings.Contains(err.Error(), "unexpected end of JSON input")
 }
 
 // buildCardJSONWithStatus builds a Feishu card JSON with a colored header
@@ -6786,6 +6850,12 @@ const maxRichCardJSONBytes = 28000
 // reasoning/tool panels, streaming markdown body, status-colored header, and a
 // pre-composed multi-line statusFooter (engine-owned, includes elapsed).
 func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
+	if cardJSON, ok := normalizeCardJSON(markdown); ok {
+		return cardJSON
+	}
+	if isIncompleteJSONObject(markdown) {
+		markdown = ""
+	}
 	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
@@ -7032,6 +7102,11 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	h.mu.Unlock()
 
 	if lastContent == "" {
+		return
+	}
+	if isCardJSON(lastContent) {
+		// Agent-provided Card 2.0 payloads own their header and visual status.
+		// Rebuilding them as markdown here would discard native chart elements.
 		return
 	}
 	cardJSON := buildCardJSONWithStatus(lastContent, status)

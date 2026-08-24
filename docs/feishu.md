@@ -125,6 +125,39 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 > `done_emoji` 设置后，agent 每次完成回复时会在用户消息上添加指定表情（如 `"Done"` → ✅）。先移除 "OnIt" 表情（如果有），再添加 done 表情。在 quiet 模式下特别有用，因为飞书卡片原地更新不触发推送，done 表情可以通知用户 agent 已完成。设为 `"none"` 或不配置则禁用。
 > `image_batch_window_ms` 控制连续多张图片合并成一条 agent 消息的等待窗口（默认 500ms）。飞书手机端一次连发多张图时，每张图是独立事件；cc-connect 会在窗口内将它们合并成一条多图消息再分发给 agent。如果你的网络/设备发送间隔超过 500ms 且仍被拆成多轮回复（每张图独立处理），可调高到 800–1200ms；如果以单图为主、希望响应更快，可适当调低。设为 `0` 时回退到默认 500ms。
 
+### Agent 返回 Card 2.0 / VChart
+
+启用交互卡片后，如果 agent 的整条回复是完整的飞书 Card 2.0 JSON，cc-connect 会将其作为原生卡片发送，不再包裹为 Markdown。卡片元素（包括 `chart` 的 `chart_spec`）由飞书负责解析和渲染。例如：
+
+```json
+{
+  "schema": "2.0",
+  "body": {
+    "elements": [
+      {
+        "tag": "chart",
+        "chart_spec": {
+          "type": "bar",
+          "data": [
+            {
+              "id": "sales",
+              "values": [
+                {"month": "一月", "value": 12},
+                {"month": "二月", "value": 18}
+              ]
+            }
+          ],
+          "xField": "month",
+          "yField": "value"
+        }
+      }
+    ]
+  }
+}
+```
+
+回复必须是裸 JSON：第一个非空白字符为 `{`，最后一个非空白字符为 `}`，并包含 `schema: "2.0"` 和 `body.elements`。Markdown 代码围栏、JSON 前后的说明文字以及不完整的 JSON 都不会被当作原生卡片。cc-connect 不生成或转换 `chart_spec`，只负责透传完整卡片。
+
 ---
 
 ## 第三步：配置应用能力
