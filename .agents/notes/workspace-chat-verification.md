@@ -79,3 +79,5 @@
 按 macOS 设备规则未启动 Docker，也未运行浏览器自动化、真实服务器或真实企业微信连接；Docker 镜像冷/暖构建、容器健康检查、systemd/deploy-host 实机权限、GHCR 推送与 cosign 在线验证留给包含本变更的下一次 tag Release。已发布的 `v0.1.0` 没有镜像、deploy-host 或容器 bootstrap，本次没有创建 tag 或 Release。
 
 `v0.1.1` tag 的 Signed Release run `32754800828` 在多架构镜像冷构建中失败：Dockerfile 已把唯一根 `pnpm-lock.yaml` 复制到 `/src`，却调用 `pnpm --dir web install --frozen-lockfile`，BuildKit 中 pnpm 因 `/src/web/pnpm-lock.yaml` 不存在而返回 `ERR_PNPM_NO_LOCKFILE`。仅切换工作目录或添加 `--lockfile-dir` 仍会分别触发缺少锁文件或 importer 不匹配；根锁已有 `web` importer，但 Dockerfile 没有复制仓库现有的 `pnpm-workspace.yaml`。修复复制唯一根 workspace 契约，在 `/src` 执行一次 `pnpm install --frozen-lockfile`，随后进入 `/src/web` 构建；不得复制第二份锁或关闭 frozen。隔离临时目录按 Docker 顺序执行根 frozen install、复制 Web 源码和生产构建已通过，331 个包全部来自锁定依赖图。`deploy/scripts_test.go` 固化这条约束，禁止恢复 `pnpm --dir web install`。`v0.1.1` tag 不移动，修复通过新提交和下一补丁版本发布。
+
+`v0.1.2` tag 的 Signed Release run `32757886163` 已跨过 pnpm frozen install，并完成两个架构的 Web 生产构建；随后 Go 容器编译因 `embed.go` 的 `config.example.toml` 不在 Docker context 而失败。根因是 `.dockerignore` 的 `config.*.toml` 同时排除了部署配置和受 Git 管理的 embed 输入。修复保留该敏感配置排除规则，并在其后显式添加 `!config.example.toml`；回归测试校验重新包含规则的顺序和全部 Go embed 输入存在。`v0.1.2` tag 不移动，继续使用下一补丁版本发布。

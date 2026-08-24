@@ -121,6 +121,24 @@ func TestDockerWebBuildUsesRepositoryLockfile(t *testing.T) {
 	}
 }
 
+func TestDockerContextIncludesGoEmbedInputs(t *testing.T) {
+	dockerIgnore := readFile(t, filepath.Join("..", ".dockerignore"))
+	excludeIndex := strings.Index(dockerIgnore, "config.*.toml")
+	includeIndex := strings.Index(dockerIgnore, "!config.example.toml")
+	if excludeIndex < 0 || includeIndex <= excludeIndex {
+		t.Fatal(".dockerignore must re-include config.example.toml after excluding deployment config variants")
+	}
+	for _, path := range []string{
+		filepath.Join("..", "config.example.toml"),
+		"install-runtime.sh",
+		filepath.Join("..", "core", "runas_probe.sh"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("embedded Docker build input missing: %s: %v", path, err)
+		}
+	}
+}
+
 func TestContainerBootstrapIsIdempotentAndInstallsOnlyDeployHostService(t *testing.T) {
 	fixture := newReleaseFixture(t, false)
 	root := filepath.Join(t.TempDir(), "root")
