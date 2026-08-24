@@ -72,7 +72,8 @@ web/tsconfig.tsbuildinfo
 # Testing & temporary files
 # ============================================================================
 test/
-scripts/
+scripts/*
+!scripts/release-manifest.go
 tmp/
 temp/
 *.tmp

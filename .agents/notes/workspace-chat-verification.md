@@ -51,6 +51,7 @@
 - macOS 已 `Wait` 的旧进程组可能对负 PGID 返回 `EPERM`；只有直接子进程的 `os.Process` 同时确认 `os.ErrProcessDone` 时才能将其视为幂等终态。对应 Claude Code 回归连续 20 次通过。
 - OpenCode 后台模型刷新先原子写磁盘、再提交内存状态。测试必须等待已有的 `refreshWg`，不能把“磁盘已变化”当作 goroutine 已完成；对应回归连续 20 次通过。
 - 严格仓库基础审计再次为 `0 error / 0 warning / 0 exception`，`bash -n deploy/bootstrap.sh deploy/install-runtime.sh` 和 `git diff --check` 通过。生产代码中没有旧 management token、`template_project`、旧 daemon/Web 命令、旧工作区事件或服务器本地 Codex 后端；`thread/read(includeTurns=false)` 仍只用于 metadata/cwd 校验。
+- Release 输入必须同时满足“本地存在”和“Git 已跟踪”。首个 `v0.1.0` tag run 因 `scripts/` 整目录忽略，导致 manifest 生成器只存在于本机、全新 checkout 缺失；Release workflow 现在在安装工具链和交叉编译前显式检查 manifest 生成器、bootstrap 与 OpenResty 模板。
 
 ## 当前限制与候选优化
 

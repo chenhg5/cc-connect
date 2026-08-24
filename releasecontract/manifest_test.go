@@ -1,6 +1,7 @@
 package releasecontract
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -47,5 +48,20 @@ func TestDecodeRejectsUnknownAndTrailingJSON(t *testing.T) {
 	}
 	if _, err := Decode([]byte(`{} {}`)); err == nil {
 		t.Fatal("trailing manifest JSON was accepted")
+	}
+}
+
+func TestReleaseWorkflowInputsAreTracked(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is unavailable")
+	}
+	root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Skip("source is not a Git checkout")
+	}
+	command := exec.Command("git", "-C", strings.TrimSpace(string(root)), "ls-files", "--error-unmatch", "--",
+		"scripts/release-manifest.go", "deploy/bootstrap.sh", "deploy/openresty-1panel.conf")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("release workflow input is not tracked: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 }

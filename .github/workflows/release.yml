@@ -18,6 +18,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify release inputs
+        run: |
+          test -f scripts/release-manifest.go
+          test -f deploy/bootstrap.sh
+          test -f deploy/openresty-1panel.conf
+
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
