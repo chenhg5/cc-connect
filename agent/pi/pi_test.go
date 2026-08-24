@@ -216,6 +216,41 @@ func TestAgent_AvailableModels(t *testing.T) {
 	}
 }
 
+func TestAgent_AvailableModels_FallsBackToStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+
+	// settings.json with empty enabledModels → readSettingsModels returns empty.
+	settings := map[string]any{"enabledModels": []string{}}
+	data, _ := json.Marshal(settings)
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	// models-store.json with two models.
+	store := map[string]any{
+		"deepseek": map[string]any{
+			"models": []any{
+				map[string]any{"id": "deepseek-chat", "name": "DeepSeek Chat"},
+				map[string]any{"id": "deepseek-reasoner", "name": "DeepSeek Reasoner"},
+			},
+		},
+	}
+	sdata, _ := json.Marshal(store)
+	if err := os.WriteFile(filepath.Join(tmpDir, "models-store.json"), sdata, 0o644); err != nil {
+		t.Fatalf("write models-store.json: %v", err)
+	}
+
+	a := &Agent{}
+	models := a.AvailableModels(context.Background())
+	if len(models) != 2 {
+		t.Fatalf("AvailableModels() = %d models, want 2 (fallback to models-store.json)", len(models))
+	}
+	if models[0].Name != "deepseek/deepseek-chat" || models[1].Name != "deepseek/deepseek-reasoner" {
+		t.Errorf("AvailableModels() = %+v, want store models in sorted order", models)
+	}
+}
+
 func TestReadSettingsModels(t *testing.T) {
 	// Save and restore settings path.
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
@@ -243,7 +278,7 @@ func TestReadSettingsModels(t *testing.T) {
 			"provider-a/family-a/model-beta",
 			"provider-b/family-b/model-gamma",
 		},
-		"defaultModel":  "family-a/model-beta",
+		"defaultModel":    "family-a/model-beta",
 		"defaultProvider": "provider-a",
 	}
 	data, _ := json.Marshal(settings)
@@ -275,6 +310,86 @@ func TestReadSettingsModels(t *testing.T) {
 			t.Errorf("models[%d].Alias = %q, want %q", i, models[i].Alias, tt.alias)
 		}
 	}
+}
+
+func TestReadModelsStore(t *testing.T) {
+	writeStore := func(t *testing.T, store any) {
+		t.Helper()
+		tmpDir := t.TempDir()
+		t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+		data, _ := json.Marshal(store)
+		if err := os.WriteFile(filepath.Join(tmpDir, "models-store.json"), data, 0o644); err != nil {
+			t.Fatalf("write models-store.json: %v", err)
+		}
+	}
+
+	t.Run("missing file returns nil", func(t *testing.T) {
+		t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+		if got := readModelsStore(); got != nil {
+			t.Errorf("readModelsStore() = %v, want nil for missing models-store.json", got)
+		}
+	})
+
+	t.Run("valid file returns sorted provider-qualified models", func(t *testing.T) {
+		writeStore(t, map[string]any{
+			"openai": map[string]any{
+				"models": []any{
+					map[string]any{"id": "gpt-4", "name": "GPT-4"},
+					map[string]any{"id": "gpt-4o", "name": "GPT-4o"},
+				},
+			},
+			"deepseek": map[string]any{
+				"models": []any{
+					map[string]any{"id": "deepseek-chat", "name": "DeepSeek Chat"},
+					map[string]any{"id": "deepseek-reasoner", "name": "DeepSeek Reasoner"},
+				},
+			},
+		})
+		got := readModelsStore()
+		want := []core.ModelOption{
+			{Name: "deepseek/deepseek-chat", Alias: "deepseek-chat", Desc: "DeepSeek Chat"},
+			{Name: "deepseek/deepseek-reasoner", Alias: "deepseek-reasoner", Desc: "DeepSeek Reasoner"},
+			{Name: "openai/gpt-4", Alias: "gpt-4", Desc: "GPT-4"},
+			{Name: "openai/gpt-4o", Alias: "gpt-4o", Desc: "GPT-4o"},
+		}
+		if len(got) != len(want) {
+			t.Fatalf("got %d models, want %d: %+v", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("got[%d] = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("empty id model is skipped", func(t *testing.T) {
+		writeStore(t, map[string]any{
+			"openai": map[string]any{
+				"models": []any{
+					map[string]any{"id": "", "name": "Empty"},
+					map[string]any{"id": "gpt-4", "name": "GPT-4"},
+				},
+			},
+		})
+		got := readModelsStore()
+		if len(got) != 1 {
+			t.Fatalf("got %d models, want 1 (empty-id skipped): %+v", len(got), got)
+		}
+		if got[0].Name != "openai/gpt-4" || got[0].Alias != "gpt-4" || got[0].Desc != "GPT-4" {
+			t.Errorf("got[0] = %+v, want openai/gpt-4", got[0])
+		}
+	})
+
+	t.Run("malformed json returns nil", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+		if err := os.WriteFile(filepath.Join(tmpDir, "models-store.json"), []byte("{invalid json"), 0o644); err != nil {
+			t.Fatalf("write models-store.json: %v", err)
+		}
+		if got := readModelsStore(); got != nil {
+			t.Errorf("readModelsStore() = %v, want nil for malformed models-store.json", got)
+		}
+	})
 }
 
 func TestReadDefaultModel(t *testing.T) {
@@ -455,6 +570,73 @@ func TestAgent_StartSession(t *testing.T) {
 	}
 	if !ps.Alive() {
 		t.Error("session should be alive")
+	}
+	// CC_PERMISSION_MODE 必须被注入，permission-gate 扩展才能感知全自动模式。
+	found := false
+	for _, e := range ps.extraEnv {
+		if e == "CC_PERMISSION_MODE=yolo" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("extraEnv = %v, want CC_PERMISSION_MODE=yolo", ps.extraEnv)
+	}
+}
+
+func TestAgent_StartSession_NoModeNoEnv(t *testing.T) {
+	a := &Agent{cmd: "echo", workDir: "/tmp"} // mode 为空
+
+	sess, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	defer func() {
+		if err := sess.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+
+	ps := sess.(*piSession)
+	for _, e := range ps.extraEnv {
+		if len(e) >= len("CC_PERMISSION_MODE=") && e[:len("CC_PERMISSION_MODE=")] == "CC_PERMISSION_MODE=" {
+			t.Errorf("extraEnv = %v, CC_PERMISSION_MODE should be absent when mode is empty", ps.extraEnv)
+		}
+	}
+}
+
+func TestAgent_StartSession_UserOverrideWins(t *testing.T) {
+	// 回归保护：引擎注入的 CC_PERMISSION_MODE 必须追加在 configEnv/sessionEnv
+	// 之后，这样用户显式设置的 CC_PERMISSION_MODE 排在前面、优先生效（getenv
+	// 返回第一个匹配项）。若未来重构把它提前，引擎值会反过来覆盖用户的显式设置。
+	a := &Agent{cmd: "echo", workDir: "/tmp", mode: "yolo"}
+	a.SetSessionEnv([]string{"CC_PERMISSION_MODE=default"})
+
+	sess, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	defer func() {
+		if err := sess.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+
+	ps := sess.(*piSession)
+	userIdx, engineIdx := -1, -1
+	for i, e := range ps.extraEnv {
+		switch e {
+		case "CC_PERMISSION_MODE=default":
+			userIdx = i
+		case "CC_PERMISSION_MODE=yolo":
+			engineIdx = i
+		}
+	}
+	if userIdx == -1 || engineIdx == -1 {
+		t.Fatalf("extraEnv = %v, want both user (default) and engine (yolo) CC_PERMISSION_MODE entries", ps.extraEnv)
+	}
+	if userIdx > engineIdx {
+		t.Errorf("user CC_PERMISSION_MODE at %d must precede engine value at %d so user override wins", userIdx, engineIdx)
 	}
 }
 
@@ -807,6 +989,95 @@ func TestHandleEvent_AgentEndEmitsResult(t *testing.T) {
 	}
 }
 
+// ── handleEvent: agent_end willRetry (transient error auto-retry) ──
+//
+// Pi auto-retries transient provider failures (e.g. HTTP 429) inside the
+// same turn: it emits agent_end with willRetry=true, then re-runs the agent
+// loop. Closing the turn on the first agent_end (or on the intermediate
+// message_end error) makes the engine report a failure that Pi is about to
+// recover from, and the retry outcome is dropped as stale events.
+
+func TestHandleEvent_AgentEndWillRetryKeepsTurnOpen(t *testing.T) {
+	s := newTestSession(true) // rpc=true
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":         "assistant",
+			"errorMessage": "429 rate_limit_error",
+		},
+	})
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": true, "messages": []any{}})
+
+	evts := drainEvents(s)
+	if len(evts) != 0 {
+		t.Fatalf("willRetry agent_end must not close the turn, got %d events: %#v", len(evts), evts)
+	}
+	if s.pendingErr == "" {
+		t.Error("pendingErr must be retained while Pi is retrying")
+	}
+}
+
+func TestHandleEvent_AgentEndFlushesPendingError(t *testing.T) {
+	s := newTestSession(true) // rpc=true
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":         "assistant",
+			"errorMessage": "429 rate_limit_error",
+		},
+	})
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": false, "messages": []any{}})
+
+	evts := drainEvents(s)
+	if len(evts) != 2 {
+		t.Fatalf("expected EventError + EventResult, got %d events: %#v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventError {
+		t.Errorf("first event = %s, want EventError", evts[0].Type)
+	}
+	if evts[0].Error == nil || !strings.Contains(evts[0].Error.Error(), "429") {
+		t.Errorf("error = %v, want deferred 429", evts[0].Error)
+	}
+	if evts[1].Type != core.EventResult {
+		t.Errorf("second event = %s, want EventResult", evts[1].Type)
+	}
+	if s.pendingErr != "" {
+		t.Errorf("pendingErr must be cleared after flush, got %q", s.pendingErr)
+	}
+}
+
+func TestHandleEvent_AgentEndRetrySuccessDropsPendingError(t *testing.T) {
+	s := newTestSession(true) // rpc=true
+	defer s.cancel()
+
+	// Transient 429 -> Pi retries (willRetry) -> retry succeeds.
+	s.handleEvent(map[string]any{
+		"type": "message_end",
+		"message": map[string]any{
+			"role":         "assistant",
+			"errorMessage": "429 rate_limit_error",
+		},
+	})
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": true, "messages": []any{}})
+	s.handleEvent(map[string]any{
+		"type":    "message_end",
+		"message": map[string]any{"role": "assistant"},
+	})
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": false, "messages": []any{}})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("expected only EventResult after successful retry, got %d events: %#v", len(evts), evts)
+	}
+	if evts[0].Type != core.EventResult {
+		t.Errorf("expected EventResult, got %s", evts[0].Type)
+	}
+}
+
 func TestHandleEvent_UnhandledType(t *testing.T) {
 	s := newTestSession()
 	defer s.cancel()
@@ -1111,6 +1382,115 @@ func TestHandleMessageUpdate_ToolcallEnd_UsesPartialFallback(t *testing.T) {
 	}
 }
 
+// TestHandleMessageUpdate_ToolcallEnd_DirectToolCall covers the pi v0.84.0
+// breaking change: message_update emits only assistantMessageEvent deltas,
+// with the cumulative message and assistantMessageEvent.partial removed.
+// toolcall_end now carries the complete toolCall object; without the
+// toolCall branch, EventToolUse is never emitted and tool calls are lost.
+func TestHandleMessageUpdate_ToolcallEnd_DirectToolCall(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type": "toolcall_end",
+			"toolCall": map[string]any{
+				"type":      "toolCall",
+				"name":      "read",
+				"arguments": map[string]any{"file_path": "/tmp/foo.txt"},
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1", len(evts))
+	}
+	if evts[0].Type != core.EventToolUse || evts[0].ToolName != "read" || evts[0].ToolInput != "/tmp/foo.txt" {
+		t.Errorf("event = %+v", evts[0])
+	}
+}
+
+// TestHandleMessageUpdate_ToolcallEnd_CoexistsWithPartial pins the dedup
+// semantics: on v0.83.0 the wire carried BOTH toolCall and partial (they
+// reference the same finalized content block). The fast path must win and
+// emit exactly one EventToolUse — a future refactor that removes the early
+// return would double-emit, and one that breaks the fast path would emit 0.
+func TestHandleMessageUpdate_ToolcallEnd_CoexistsWithPartial(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":         "toolcall_end",
+			"contentIndex": float64(0),
+			"toolCall": map[string]any{
+				"type":      "toolCall",
+				"name":      "read",
+				"arguments": map[string]any{"file_path": "/tmp/foo.txt"},
+			},
+			"partial": map[string]any{
+				"content": []any{
+					map[string]any{
+						"type":      "toolCall",
+						"name":      "bash",
+						"arguments": map[string]any{"command": "ls"},
+					},
+				},
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want exactly 1 (no double-emit)", len(evts))
+	}
+	if evts[0].Type != core.EventToolUse || evts[0].ToolName != "read" || evts[0].ToolInput != "/tmp/foo.txt" {
+		t.Errorf("event = %+v (want the toolCall fast-path event, not the partial one)", evts[0])
+	}
+}
+
+// TestHandleMessageUpdate_ToolcallEnd_NonToolCallType exercises the
+// toolCall-present-but-wrong-type path: it must fall through to the
+// message/partial snapshot path rather than emit from the toolCall fast
+// path. The partial carries a real toolCall so the fixture can observe the
+// fall-through — an unconditional early return (the M1 bug) would emit 0.
+func TestHandleMessageUpdate_ToolcallEnd_NonToolCallType(t *testing.T) {
+	s := newTestSession()
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type": "message_update",
+		"assistantMessageEvent": map[string]any{
+			"type":         "toolcall_end",
+			"contentIndex": float64(0),
+			"toolCall": map[string]any{
+				"type": "text",
+				"text": "hello",
+			},
+			"partial": map[string]any{
+				"content": []any{
+					map[string]any{
+						"type":      "toolCall",
+						"name":      "read",
+						"arguments": map[string]any{"file_path": "/tmp/foo.txt"},
+					},
+				},
+			},
+		},
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1 from the message/partial fallback", len(evts))
+	}
+	if evts[0].Type != core.EventToolUse || evts[0].ToolName != "read" || evts[0].ToolInput != "/tmp/foo.txt" {
+		t.Errorf("event = %+v (want the partial-path event)", evts[0])
+	}
+}
+
 func TestHandleMessageUpdate_ToolcallEnd_NonToolCallItem(t *testing.T) {
 	s := newTestSession()
 	defer s.cancel()
@@ -1295,15 +1675,15 @@ func TestHandleMessageEnd_AssistantError(t *testing.T) {
 		},
 	})
 
+	// Errors are deferred (buffered in pendingErr) so transient provider
+	// failures that Pi auto-retries are not surfaced mid-turn. The agent_end
+	// handler flushes the buffer once the turn truly ends.
 	evts := drainEvents(s)
-	if len(evts) != 1 {
-		t.Fatalf("got %d events, want 1", len(evts))
+	if len(evts) != 0 {
+		t.Fatalf("expected no immediate events for assistant error, got %d", len(evts))
 	}
-	if evts[0].Type != core.EventError {
-		t.Errorf("type = %s", evts[0].Type)
-	}
-	if evts[0].Error == nil || !strings.Contains(evts[0].Error.Error(), "400") {
-		t.Errorf("error = %v", evts[0].Error)
+	if s.pendingErr != "400 model not supported" {
+		t.Errorf("pendingErr = %q, want %q", s.pendingErr, "400 model not supported")
 	}
 }
 
@@ -1371,17 +1751,17 @@ func newFakeRPCSession(t *testing.T, sessionID, cmd, workDir string) *piSession 
 	}
 
 	s := &piSession{
-		cmd:       rpcCmd[0],
-		workDir:   workDir,
-		events:    make(chan core.Event, 64),
-		extraEnv:  nil,
-		modelsCW:  nil,
-		rpcReady:  make(chan struct{}),
-		rpc:       true,
+		cmd:           rpcCmd[0],
+		workDir:       workDir,
+		events:        make(chan core.Event, 64),
+		extraEnv:      nil,
+		modelsCW:      nil,
+		rpcReady:      make(chan struct{}),
+		rpc:           true,
 		extPending:    make(map[string]string),
 		extPendingRev: make(map[string]string),
 		extMethod:     make(map[string]string),
-		attachDir: filepath.Join(workDir, ".cc-connect", "attachments", "pi-"+sessionID),
+		attachDir:     filepath.Join(workDir, ".cc-connect", "attachments", "pi-"+sessionID),
 	}
 	s.alive.Store(true)
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -1594,7 +1974,7 @@ func TestPiSession_SendWhenClosed(t *testing.T) {
 	s, _ := newPiSession(context.Background(), "echo", nil, "/tmp", "", "default", "", false, "", nil)
 	s.Close()
 
-	err := s.Send("hello", nil, nil)
+	err := s.Send("hello", "", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Errorf("expected 'closed' error, got %v", err)
 	}
@@ -1938,7 +2318,7 @@ func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	// Create a process that emits Pi RPC JSONL: session, text delta, agent_end.
 	sessionJSON, _ := json.Marshal(map[string]any{"type": "session", "id": "echo-sess"})
 	textJSON, _ := json.Marshal(map[string]any{
-		"type": "message_update",
+		"type":                  "message_update",
 		"assistantMessageEvent": map[string]any{"type": "text_delta", "delta": "hi"},
 	})
 	agentEndJSON, _ := json.Marshal(map[string]any{"type": "agent_end"})
@@ -1950,11 +2330,11 @@ func TestPiSession_ReadLoopWithEcho(t *testing.T) {
 	defer cancel()
 
 	s := &piSession{
-		cmd:       "echo",
-		workDir:   t.TempDir(),
-		rpc:       true,
-		events:    make(chan core.Event, 64),
-		rpcReady:  make(chan struct{}),
+		cmd:           "echo",
+		workDir:       t.TempDir(),
+		rpc:           true,
+		events:        make(chan core.Event, 64),
+		rpcReady:      make(chan struct{}),
 		extPending:    make(map[string]string),
 		extPendingRev: make(map[string]string),
 		extMethod:     make(map[string]string),

@@ -58,7 +58,7 @@ func newIntegrationRoutingSession(sessionID, workDir string) *integrationRouting
 	}
 }
 
-func (s *integrationRoutingSession) Send(prompt string, _ []core.ImageAttachment, _ []core.FileAttachment) error {
+func (s *integrationRoutingSession) Send(prompt string, _ string, _ []core.ImageAttachment, _ []core.FileAttachment) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if !s.alive {

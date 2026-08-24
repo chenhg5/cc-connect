@@ -28,7 +28,7 @@ func Benchmark_SingleMessageLatency(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		sess, _ := agent.StartSession(ctx, "bench-session")
-		sess.Send("Hello", nil, nil)
+		sess.Send("Hello", "", nil, nil)
 		for e := range sess.Events() {
 			if e.Done {
 				break
@@ -66,7 +66,7 @@ func Benchmark_ConcurrentThroughput(b *testing.B) {
 		idx := 0
 		for pb.Next() {
 			a := &agents[idx%numAgents]
-			a.sess.Send("Concurrent message", nil, nil)
+			a.sess.Send("Concurrent message", "", nil, nil)
 			atomic.AddInt64(&totalMessages, 1)
 			idx++
 		}
@@ -96,7 +96,7 @@ func Benchmark_SessionSwitch(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		sess := sessions[i%numSessions]
-		sess.Send("Switch test", nil, nil)
+		sess.Send("Switch test", "", nil, nil)
 	}
 }
 
@@ -113,7 +113,7 @@ func Benchmark_MemoryUsage(b *testing.B) {
 	b.ReportMetric(float64(b.N)*32, "bytes/op") // baseline estimate
 
 	for i := 0; i < b.N; i++ {
-		sess.Send("Memory test message", nil, nil)
+		sess.Send("Memory test message", "", nil, nil)
 		// Consume events
 		for e := range sess.Events() {
 			if e.Done {
@@ -247,7 +247,7 @@ func Benchmark_SessionSendReceive(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sess.Send("Bench message", nil, nil)
+		sess.Send("Bench message", "", nil, nil)
 		for e := range sess.Events() {
 			if e.Done {
 				break
@@ -315,7 +315,7 @@ func Benchmark_MultiAgentCoordination(b *testing.B) {
 			go func(a *fake.FakeAgent) {
 				defer wg.Done()
 				sess, _ := a.StartSession(ctx, "coord-session")
-				sess.Send("Coordinated message", nil, nil)
+				sess.Send("Coordinated message", "", nil, nil)
 			}(agents[j])
 		}
 		wg.Wait()

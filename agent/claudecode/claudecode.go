@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/chenhg5/cc-connect/agent/internal/skillroots"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -48,12 +49,19 @@ type Agent struct {
 	providers        []core.ProviderConfig
 	activeIdx        int // -1 = no provider set
 	sessionEnv       []string
-	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey     string // Claude Code Router API key (optional)
-	systemPrompt     string // Custom system prompt to pass to Claude CLI
+	routerURL        string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey     string   // Claude Code Router API key (optional)
+	systemPrompt     string   // Custom system prompt to pass to Claude CLI
 	pluginDirs       []string // Plugin directories to load via --plugin-dir (repeatable)
 
 	appendSystemPrompt string // Custom text appended to the system prompt (keeps Claude's default)
+
+	// lang is the operator's configured cc-connect language (Issue #1655).
+	// When non-empty, session spawns use the localized cc-connect system
+	// prompt for the four tool sections (send / cron / timer / relay).
+	// Empty means "use English / cc-connect default" — back-compat with
+	// callers that pre-date the language option.
+	lang core.Language
 
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
@@ -76,41 +84,41 @@ type Agent struct {
 }
 
 var claudeProviderManagedEnvVars = map[string]struct{}{
-	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                  {},
-	"CLAUDE_CODE_USE_BEDROCK":                               {},
-	"CLAUDE_CODE_USE_VERTEX":                                {},
-	"CLAUDE_CODE_USE_FOUNDRY":                               {},
-	"ANTHROPIC_BASE_URL":                                    {},
-	"ANTHROPIC_BEDROCK_BASE_URL":                            {},
-	"ANTHROPIC_VERTEX_BASE_URL":                             {},
-	"ANTHROPIC_FOUNDRY_BASE_URL":                            {},
-	"ANTHROPIC_FOUNDRY_RESOURCE":                            {},
-	"ANTHROPIC_VERTEX_PROJECT_ID":                           {},
-	"CLOUD_ML_REGION":                                       {},
-	"ANTHROPIC_API_KEY":                                     {},
-	"ANTHROPIC_AUTH_TOKEN":                                  {},
-	"CLAUDE_CODE_OAUTH_TOKEN":                               {},
-	"AWS_BEARER_TOKEN_BEDROCK":                              {},
-	"ANTHROPIC_FOUNDRY_API_KEY":                             {},
-	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                         {},
-	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                          {},
-	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                         {},
-	"ANTHROPIC_MODEL":                                       {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                         {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":             {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                    {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES":  {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL":                          {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":              {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                     {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":   {},
+	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                 {},
+	"CLAUDE_CODE_USE_BEDROCK":                              {},
+	"CLAUDE_CODE_USE_VERTEX":                               {},
+	"CLAUDE_CODE_USE_FOUNDRY":                              {},
+	"ANTHROPIC_BASE_URL":                                   {},
+	"ANTHROPIC_BEDROCK_BASE_URL":                           {},
+	"ANTHROPIC_VERTEX_BASE_URL":                            {},
+	"ANTHROPIC_FOUNDRY_BASE_URL":                           {},
+	"ANTHROPIC_FOUNDRY_RESOURCE":                           {},
+	"ANTHROPIC_VERTEX_PROJECT_ID":                          {},
+	"CLOUD_ML_REGION":                                      {},
+	"ANTHROPIC_API_KEY":                                    {},
+	"ANTHROPIC_AUTH_TOKEN":                                 {},
+	"CLAUDE_CODE_OAUTH_TOKEN":                              {},
+	"AWS_BEARER_TOKEN_BEDROCK":                             {},
+	"ANTHROPIC_FOUNDRY_API_KEY":                            {},
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                        {},
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                         {},
+	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                        {},
+	"ANTHROPIC_MODEL":                                      {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                        {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":            {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                   {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL":                         {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":             {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                    {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":  {},
 
 	// Provider-specific base URL env vars for thinking rewrite proxy routing.
 	// These are set by cc-connect when thinking override is needed for
 	// Bedrock/Vertex/Foundry providers that don't use base_url config.
-	"ANTHROPIC_BEDROCK_PROXY_BASE_URL": {},
-	"ANTHROPIC_VERTEX_PROXY_BASE_URL":  {},
-	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL": {},
+	"ANTHROPIC_BEDROCK_PROXY_BASE_URL":                      {},
+	"ANTHROPIC_VERTEX_PROXY_BASE_URL":                       {},
+	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL":                      {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL":                        {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION":            {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":                   {},
@@ -128,6 +136,9 @@ func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
 		workDir = "."
+	}
+	if _, err := os.Stat(workDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("claudecode: work_dir %q does not exist", workDir)
 	}
 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "claude")
 	cmdArgsFlag, _ := opts["cmd_args_flag"].(string)
@@ -147,6 +158,11 @@ func New(opts map[string]any) (core.Agent, error) {
 	systemPrompt, _ := opts["system_prompt"].(string)
 	appendSystemPrompt, _ := opts["append_system_prompt"].(string)
 	ccDataDir, _ := opts["cc_data_dir"].(string)
+	// Issue #1655: pass the operator's configured cc-connect language into the
+	// agent so per-spawn prompts can be localized. Empty string (legacy callers)
+	// falls back to English via AgentSystemPromptForLang.
+	langRaw, _ := opts["language"].(string)
+	lang := core.NormalizeLanguageString(langRaw)
 
 	var pluginDirs []string
 	if dir, ok := opts["plugin_dir"].(string); ok && dir != "" {
@@ -241,7 +257,12 @@ func New(opts map[string]any) (core.Agent, error) {
 	// newClaudeSession still covers content drift (cc-connect upgrades)
 	// and the empty-ccDataDir corner case. Failure here is non-fatal —
 	// the next spawn will retry and surface the error then.
-	if _, err := ensureSharedSystemPromptFile(ccDataDir, core.AgentSystemPrompt()); err != nil {
+	//
+	// Issue #1655: when the operator has set language="zh", the shared
+	// file content is the localized AgentSystemPromptForLang so the very
+	// first session (which uses the shared-file fast path) already sees
+	// the right language without waiting for the per-spawn merge.
+	if _, err := ensureSharedSystemPromptFile(ccDataDir, core.AgentSystemPromptForLang(lang)); err != nil {
 		slog.Warn("claudecode: failed to write shared system prompt file at startup; will retry on first spawn", "err", err, "cc_data_dir", ccDataDir)
 	}
 
@@ -266,6 +287,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		ccDataDir:        ccDataDir,
 
 		appendSystemPrompt: appendSystemPrompt,
+		lang:               lang,
 	}, nil
 }
 
@@ -368,6 +390,7 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	}
 	return []core.ModelOption{
 		{Name: "sonnet", Desc: "Claude Sonnet (balanced)"},
+		{Name: "sonnet[1m]", Desc: "Claude Sonnet (1M context)"},
 		{Name: "opus", Desc: "Claude Opus (most capable)"},
 		{Name: "opus[1m]", Desc: "Claude Opus (1M context)"},
 		{Name: "haiku", Desc: "Claude Haiku (fastest)"},
@@ -521,12 +544,16 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	platformPrompt := a.platformPrompt
 	systemPrompt := a.systemPrompt
 	appendSystemPrompt := a.appendSystemPrompt
+	// Issue #1655: agent-level language drives the localized cc-connect system
+	// prompt. Read under the mutex and pass through to newClaudeSession so the
+	// session picks up the right tool-prompt bundle at spawn time.
+	lang := a.lang
 	// When router_url is set, --verbose conflicts with --output-format stream-json
 	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, a.ccDataDir)
+	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, a.ccDataDir, lang)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -632,27 +659,48 @@ func scanSessionMeta(path string) (string, int) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
-	var summary string
+	var firstUserMessage string
+	var aiTitle string
+	var customTitle string
 	var count int
 
 	for scanner.Scan() {
 		var entry struct {
-			Type    string `json:"type"`
-			Message struct {
+			Type        string `json:"type"`
+			AITitle     string `json:"aiTitle"`
+			CustomTitle string `json:"customTitle"`
+			Message     struct {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
 		}
-		if entry.Type == "user" || entry.Type == "assistant" {
+		switch entry.Type {
+		case "ai-title":
+			if entry.AITitle != "" {
+				aiTitle = entry.AITitle
+			}
+		case "custom-title":
+			if entry.CustomTitle != "" {
+				customTitle = entry.CustomTitle
+			}
+		case "user", "assistant":
 			count++
-			if entry.Type == "user" {
+			if entry.Type == "user" && firstUserMessage == "" {
 				if s := extractStringContent(entry.Message.Content); s != "" {
-					summary = s
+					firstUserMessage = s
 				}
 			}
 		}
+	}
+
+	summary := customTitle
+	if summary == "" {
+		summary = aiTitle
+	}
+	if summary == "" {
+		summary = firstUserMessage
 	}
 	summary = stripXMLTags(summary)
 	summary = strings.TrimSpace(summary)
@@ -973,12 +1021,13 @@ func (a *Agent) CommandDirs() []string {
 func (a *Agent) SkillDirs() []string {
 	a.mu.RLock()
 	workDir := a.workDir
+	pluginDirs := append([]string(nil), a.pluginDirs...)
 	a.mu.RUnlock()
 	absDir, err := filepath.Abs(workDir)
 	if err != nil {
 		absDir = workDir
 	}
-	return appendProjectClaudeSkillDirs(absDir, claudeConfigHomeDir())
+	return claudeSkillDirs(absDir, claudeConfigHomeDir(), pluginDirs)
 }
 
 // ── ContextCompressor implementation ──────────────────────────
@@ -996,13 +1045,17 @@ func claudeConfigHomeDir() string {
 	return filepath.Join(home, ".claude")
 }
 
-func appendProjectClaudeSkillDirs(workDir, configHome string) []string {
+func claudeSkillDirs(workDir, configHome string, pluginDirs []string) []string {
 	home, _ := os.UserHomeDir()
-	projectDirs := walkUpClaudeSkillDirs(workDir, home)
-	if configHome == "" {
-		return projectDirs
+	dirs := walkUpClaudeSkillDirs(workDir, home)
+	if configHome != "" {
+		dirs = append(dirs, filepath.Join(configHome, "skills"))
+		dirs = append(dirs, skillroots.Find(filepath.Join(configHome, "plugins"))...)
 	}
-	return uniqueSkillDirs(append(projectDirs, filepath.Join(configHome, "skills")))
+	for _, pluginDir := range pluginDirs {
+		dirs = append(dirs, skillroots.Find(pluginDir)...)
+	}
+	return uniqueSkillDirs(dirs)
 }
 
 func walkUpClaudeSkillDirs(workDir, home string) []string {

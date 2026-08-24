@@ -39,8 +39,8 @@ type cursorSession struct {
 
 	// Permission handling: each Send() creates a new process whose stdin is used
 	// to respond to interaction_query permission requests.
-	stdinMu  sync.Mutex
-	stdin    io.WriteCloser // current process stdin; nil when no process is running
+	stdinMu sync.Mutex
+	stdin   io.WriteCloser // current process stdin; nil when no process is running
 
 	pendingMu sync.Mutex
 	pending   *pendingInteractionQuery // most recent unresolved interaction_query/request
@@ -75,12 +75,30 @@ func newCursorSession(ctx context.Context, cmd string, extraArgs []string, workD
 	return cs, nil
 }
 
-func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (cs *cursorSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
-		slog.Warn("cursorSession: images not yet supported in CLI mode, ignoring")
+		// The Cursor Agent CLI has no image flag, but it can open image files
+		// from disk and see their content. So route images through the same
+		// on-disk channel as files instead of dropping them.
+		imgFiles := make([]core.FileAttachment, 0, len(images))
+		for i, im := range images {
+			name := im.FileName
+			if name == "" {
+				// Feishu image messages carry no filename — synthesise one so
+				// the file lands with a correct extension.
+				name = fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, core.ExtFromMime(im.MimeType))
+			}
+			imgFiles = append(imgFiles, core.FileAttachment{
+				MimeType: im.MimeType,
+				Data:     im.Data,
+				FileName: name,
+			})
+		}
+		imagePaths := core.SaveFilesToDisk(cs.workDir, messageID, imgFiles)
+		prompt = core.AppendImageRefs(prompt, imagePaths)
 	}
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(cs.workDir, files)
+		filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !cs.alive.Load() {

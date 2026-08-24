@@ -23,6 +23,9 @@ export default function PlatformManualForm({ platformType, projectName, workDir,
     if (platformType === 'cloud_web') {
       return { transport: 'websocket' };
     }
+    if (platformType === 'tuitui') {
+      return { group_policy: 'allowlist', require_mention: true, history_limit: 50 };
+    }
     return {};
   });
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -76,7 +79,7 @@ export default function PlatformManualForm({ platformType, projectName, workDir,
       for (const f of meta.fields) {
         if (!fieldVisible(f)) continue;
         const v = values[f.key];
-        if (v !== undefined && v !== '' && v !== false) {
+        if (v !== undefined && v !== '') {
           opts[f.key] = v;
         }
       }

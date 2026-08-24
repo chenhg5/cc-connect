@@ -46,7 +46,7 @@ func newPersistentEventsSession(id string) *persistentEventsSession {
 	}
 }
 
-func (s *persistentEventsSession) Send(prompt string, _ []core.ImageAttachment, _ []core.FileAttachment) error {
+func (s *persistentEventsSession) Send(prompt string, _ string, _ []core.ImageAttachment, _ []core.FileAttachment) error {
 	s.mu.Lock()
 	s.prompts = append(s.prompts, prompt)
 	s.mu.Unlock()

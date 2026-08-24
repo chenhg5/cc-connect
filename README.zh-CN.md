@@ -47,13 +47,13 @@
 <details open>
 <summary>赞助商</summary>
 
-[![Kimi](assets/sponsors/kimi-banner-zh.png)](https://www.kimi.com/code/?aff=cc-connect)
+[![Kimi](https://gcdn.moonshot.cn/growth-cdn/sponsor/kimi-zh.png)](https://www.kimi.com/code/?aff=cc-connect)
 
-感谢 [Kimi](https://www.kimi.com/code/?aff=cc-connect) 赞助本项目！[Kimi K2.7 Code](https://platform.kimi.com/docs/guide/kimi-k2-7-code-quickstart) 是 Moonshot AI 推出的编程专用开源智能体模型，在真实长程编程与复杂软件工程工作流中显著提升端到端任务成功率，同时优化推理效率，相比 K2.6 平均减少约 30% 的推理 Token 消耗。
+感谢 [Kimi](https://www.kimi.com/code/?aff=cc-connect) 赞助本项目！[Kimi K3](https://www.kimi.com/blog/kimi-k3) 是 Moonshot AI 迄今能力最强的模型，也是全球首个开源 3T 级模型。K3 拥有 2.8T 参数、原生视觉能力与 100 万 Token 上下文，在长程编码、知识工作和推理任务中展现前沿性能。
 
-在 cc-connect 中，你可以直接接入 Kimi CLI，将运行在本地电脑上的 Kimi 连接到飞书、钉钉、Telegram、Slack、Discord、企业微信等即时通讯工具。无论身在何处，都能通过消息继续处理本地项目，让 Kimi 协助阅读和修改代码、排查问题、执行命令与自动化任务。
+通过 cc-connect，你可以将本地运行的 Kimi CLI 连接到飞书、钉钉、Telegram、Slack、Discord、企业微信等即时通讯工具，随时让 Kimi 阅读和修改代码、排查问题、执行命令与处理自动化任务。
 
-cc-connect 已支持 Kimi CLI。立即体验高性价比的 [Kimi Code 订阅](https://www.kimi.com/code/?aff=cc-connect)，或前往 Kimi 开放平台（[中文站](https://platform.kimi.com/?aff=cc-connect)｜[Global](https://platform.kimi.ai/?aff=cc-connect)）使用 API。
+**cc-connect 已支持 Kimi CLI。立即体验 **[Kimi Code 订阅](https://www.kimi.com/code/?aff=cc-connect)**，或前往 Kimi 开放平台（[中文站](https://platform.kimi.com?track_id=track-78c5d46574a54286a4ff42f7331272ba&aff=cc-connect)｜[Global](https://platform.kimi.ai?track_id=track-dd37b0bea7a64b99b3fe2217b398e20b&aff=cc-connect)）使用 API。
 
 ---
 
@@ -274,6 +274,91 @@ cc-connect 已支持 Kimi CLI。立即体验高性价比的 [Kimi Code 订阅](h
   <em>左：飞书 &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; 右：微信</em>
 </p>
 
+
+## 📋 准备工作
+
+> **请严格按照以下顺序安装** — cc-connect 是本地 AI 编程 Agent 的桥接工具，因此对应的 Agent CLI 必须先安装并完成登录认证，之后 cc-connect 才能正常启动。如果跳过前面的步骤直接启动 cc-connect，进程会直接退出并报错 `claudecode: claude CLI not found in PATH`（其他 Agent 报错类似），Web UI 在 `:9820` 也就无从访问。
+
+### 1️⃣ 安装 AI Agent CLI
+
+选择你要桥接的 Agent，至少装一个。
+
+```bash
+# Claude Code（最常用）
+brew install --cask claude-code            # macOS / Linux Homebrew
+# 或
+npm install -g @anthropic-ai/claude-code   # 任意平台通过 npm
+
+# OpenAI Codex
+npm install -g @openai/codex
+
+# Google Gemini CLI
+npm install -g @google/gemini-cli
+
+# iFlow CLI
+npm install -g @iflow-ai/iflow-cli
+
+# Qoder CLI
+curl -fsSL https://qoder.com/install | bash
+```
+
+**Cursor Agent** 和 **OpenCode** 请参考各自的官方安装文档：
+- Cursor Agent: <https://docs.cursor.com/agent>
+- OpenCode: <https://github.com/opencode-ai/opencode>
+
+确认可执行文件在 `PATH` 中：
+
+```bash
+claude --version       # 或 codex / gemini / opencode / qodercli / cursor-agent ...
+```
+
+### 2️⃣ 完成 Agent 登录认证
+
+每个 Agent 都有自己的登录流程 — 先在终端交互式跑一次，让它把凭据存到你的 home 目录：
+
+```bash
+claude login           # 会在浏览器里打开授权页面
+# 或
+codex login            # / gemini / opencode 等也类似，请参考各自文档
+```
+
+跳过这一步的话，cc-connect 仍能启动，但 Agent 会因为未认证拒绝所有请求。
+
+### 3️⃣ 安装 cc-connect
+
+```bash
+# npm（任意平台）
+npm install -g cc-connect
+
+# Homebrew（macOS / Linux）
+brew install cc-connect
+
+# 也可以从 https://github.com/chenhg5/cc-connect/releases 直接下载二进制
+```
+
+### 4️⃣ 启动 cc-connect 并打开 Web UI
+
+```bash
+cc-connect             # 启动服务；首次运行会自动生成 ~/.cc-connect/config.toml
+```
+
+首次启动时，cc-connect 会打印类似：
+
+```
+Web admin:  http://localhost:9820
+```
+
+在浏览器里打开该地址。如果 `9820` 已被占用，可以传 `--web-port 9821` 或在 `config.toml` 里设置 `web_port`。
+
+> **注意：** `cc-connect web` *只* 打开浏览器和配置界面，并**不会**启动服务本身。仍需要在另一个终端里跑 `cc-connect`。
+
+### 5️⃣ 在 Web UI 里配置平台 Bot Token
+
+在 Web UI 里新建一个项目，然后添加至少一个平台（飞书 / Telegram / Discord / Slack / 钉钉 / 企业微信 / QQ / LINE / 微信 ilink），把该平台开发者后台的 Bot Token 粘贴进去。保存后 cc-connect 会热加载。
+
+至此完成 — 给你的 Bot 发条消息，cc-connect 就会把它转给本地的 Agent。
+
+---
 
 ## 🚀 快速开始
 

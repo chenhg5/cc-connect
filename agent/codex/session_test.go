@@ -284,6 +284,11 @@ func TestGetModelAndReasoningEffort_FromRuntimeConfigWhenUnset(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("mkdir bin: %v", err)
 	}
+	oldTimeout := codexRuntimeConfigTimeout
+	codexRuntimeConfigTimeout = 5 * time.Second
+	t.Cleanup(func() {
+		codexRuntimeConfigTimeout = oldTimeout
+	})
 
 	script := `#!/bin/sh
 while IFS= read -r line; do
@@ -407,7 +412,7 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 		Data:     []byte("png-bytes"),
 		FileName: "sample.png",
 	}
-	if err := cs.Send("", []core.ImageAttachment{img}, nil); err != nil {
+	if err := cs.Send("", "", []core.ImageAttachment{img}, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -463,7 +468,7 @@ func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	}
 	defer cs.Close()
 
-	if err := cs.Send("describe this", []core.ImageAttachment{{MimeType: "image/jpeg", Data: []byte("jpg")}}, nil); err != nil {
+	if err := cs.Send("describe this", "", []core.ImageAttachment{{MimeType: "image/jpeg", Data: []byte("jpg")}}, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -517,7 +522,7 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 	defer cs.Close()
 
 	prompt := "line1\nline2"
-	if err := cs.Send(prompt, nil, nil); err != nil {
+	if err := cs.Send(prompt, "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -559,7 +564,7 @@ func TestSend_PrependsProjectPromptOnFreshSession(t *testing.T) {
 	}
 	defer func() { _ = cs.Close() }()
 
-	if err := cs.Send("Create a Chat issue.", nil, nil); err != nil {
+	if err := cs.Send("Create a Chat issue.", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -611,7 +616,7 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	}
 	defer cs.Close()
 
-	if err := cs.Send("hello", nil, nil); err != nil {
+	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -735,11 +740,17 @@ func writeFakeCodexScript(t *testing.T, dir, shellScript, powershellScript strin
 func waitForArgsFile(t *testing.T, path string) []string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
+	var last string
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			text := strings.TrimSpace(string(data))
 			if text != "" {
+				if text != last {
+					last = text
+					time.Sleep(20 * time.Millisecond)
+					continue
+				}
 				lines := strings.Split(text, "\n")
 				args := make([]string, 0, len(lines))
 				for _, line := range lines {
@@ -872,7 +883,7 @@ func TestClose_ForceKillsProcessGroupAfterGracefulTimeout(t *testing.T) {
 		t.Fatalf("newCodexSession: %v", err)
 	}
 
-	if err := cs.Send("hello", nil, nil); err != nil {
+	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -939,13 +950,13 @@ func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
 		t.Fatalf("newCodexSession: %v", err)
 	}
 
-	if err := cs.Send("first", nil, nil); err != nil {
+	if err := cs.Send("first", "", nil, nil); err != nil {
 		t.Fatalf("Send(first): %v", err)
 	}
 	waitForThreadID(t, cs, "thread-overlap")
 	waitForDoneResult(t, cs.Events())
 
-	if err := cs.Send("second", nil, nil); err != nil {
+	if err := cs.Send("second", "", nil, nil); err != nil {
 		t.Fatalf("Send(second): %v", err)
 	}
 	waitForFileLines(t, startsFile, 2)

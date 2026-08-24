@@ -118,12 +118,12 @@ func newIFlowSession(ctx context.Context, cmd string, extraArgs []string, workDi
 	return s, nil
 }
 
-func (s *iflowSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (s *iflowSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
 		slog.Warn("iflowSession: images are not supported, ignoring")
 	}
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(s.workDir, files)
+		filePaths := core.SaveFilesToDisk(s.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !s.alive.Load() {

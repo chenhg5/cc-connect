@@ -310,7 +310,7 @@ func TestIntegration_Codex_ProviderSwitch_SendMessage(t *testing.T) {
 			}
 			defer sess.Close()
 
-			err = sess.Send("reply with exactly 'codex-provider-ok' and nothing else", nil, nil)
+			err = sess.Send("reply with exactly 'codex-provider-ok' and nothing else", "", nil, nil)
 			if err != nil {
 				t.Fatalf("Send failed: %v", err)
 			}

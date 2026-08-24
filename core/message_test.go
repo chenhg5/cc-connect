@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -48,6 +49,19 @@ func TestUnauthorizedAccessMessage(t *testing.T) {
 	}
 }
 
+func TestInjectedAgentEnv(t *testing.T) {
+	// Empty mode must yield no injected var (do-no-harm for non-yolo sessions).
+	if got := InjectedAgentEnv(""); got != nil {
+		t.Fatalf("InjectedAgentEnv(\"\") = %v, want nil", got)
+	}
+
+	// Non-empty mode must produce the single CC_PERMISSION_MODE entry.
+	got := InjectedAgentEnv("yolo")
+	if len(got) != 1 || got[0] != "CC_PERMISSION_MODE=yolo" {
+		t.Fatalf("InjectedAgentEnv(\"yolo\") = %v, want [CC_PERMISSION_MODE=yolo]", got)
+	}
+}
+
 // TestSaveFilesToDisk_RejectsPathTraversal is a regression test for a real
 // path-traversal vulnerability in SaveFilesToDisk: the attachment FileName
 // (which comes from user-controlled IM/HTTP upload metadata) was passed
@@ -78,7 +92,7 @@ func TestSaveFilesToDisk_RejectsPathTraversal(t *testing.T) {
 		{FileName: "..", Data: []byte("payload")},
 	}
 
-	paths := SaveFilesToDisk(workDir, files)
+	paths := SaveFilesToDisk(workDir, "", files)
 
 	// Every returned path must live inside attachDir.
 	for _, p := range paths {
@@ -126,7 +140,7 @@ func TestSaveFilesToDisk_RelativeWorkDirReturnsAbsolutePaths(t *testing.T) {
 	// returned paths are absolute.
 	files := []FileAttachment{{FileName: "photo.png", Data: []byte("png")}}
 
-	got := SaveFilesToDisk(relWorkDir, files)
+	got := SaveFilesToDisk(relWorkDir, "", files)
 	if len(got) != 1 {
 		t.Fatalf("SaveFilesToDisk(absolute=%q) returned %d paths, want 1", relWorkDir, len(got))
 	}
@@ -135,7 +149,10 @@ func TestSaveFilesToDisk_RelativeWorkDirReturnsAbsolutePaths(t *testing.T) {
 	}
 
 	// Now also exercise a truly relative workDir.
-	gotRel := SaveFilesToDisk(filepath.Join("rel", "sub"), files)
+	baseName := filepath.Base(base)
+	relativeWorkDir := filepath.Join("rel", baseName, "sub")
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Join("rel", baseName)) })
+	gotRel := SaveFilesToDisk(relativeWorkDir, "", files)
 	if len(gotRel) != 1 {
 		t.Fatalf("SaveFilesToDisk(relative workDir) returned %d paths, want 1", len(gotRel))
 	}
@@ -159,7 +176,7 @@ func TestSaveFilesToDisk_AbsoluteWorkDirReturnsAbsolutePaths(t *testing.T) {
 		{FileName: "a.txt", Data: []byte("a")},
 		{FileName: "b.pdf", Data: []byte("b")},
 	}
-	got := SaveFilesToDisk(workDir, files)
+	got := SaveFilesToDisk(workDir, "", files)
 	if len(got) != 2 {
 		t.Fatalf("got %d paths, want 2", len(got))
 	}
@@ -186,7 +203,7 @@ func TestSaveFilesToDisk_EmptyWorkDirFallsBackToCwd(t *testing.T) {
 		t.Fatalf("getwd: %v", err)
 	}
 	files := []FileAttachment{{FileName: "hello.txt", Data: []byte("hi")}}
-	got := SaveFilesToDisk("", files)
+	got := SaveFilesToDisk("", "", files)
 	if len(got) != 1 {
 		t.Fatalf("empty workDir returned %d paths, want 1", len(got))
 	}
@@ -199,6 +216,109 @@ func TestSaveFilesToDisk_EmptyWorkDirFallsBackToCwd(t *testing.T) {
 	}
 	// Clean up so we don't litter the test cwd.
 	t.Cleanup(func() { _ = os.Remove(got[0]) })
+}
+
+func TestSaveFilesToDisk_SameNameInOneCall(t *testing.T) {
+	workDir := t.TempDir()
+	paths := SaveFilesToDisk(workDir, "message-1", []FileAttachment{
+		{FileName: "same.txt", Data: []byte("first")},
+		{FileName: "same.txt", Data: []byte("second")},
+	})
+	if len(paths) != 2 {
+		t.Fatalf("got %d paths, want 2", len(paths))
+	}
+	if paths[0] == paths[1] {
+		t.Fatalf("duplicate attachments share path %q", paths[0])
+	}
+	contents := make(map[string]string, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %q: %v", path, err)
+		}
+		contents[string(data)] = path
+	}
+	for _, want := range []string{"first", "second"} {
+		if _, ok := contents[want]; !ok {
+			t.Errorf("missing attachment content %q; got %#v", want, contents)
+		}
+	}
+
+	entries, err := os.ReadDir(filepath.Join(workDir, ".cc-connect", "attachments", "message-1"))
+	if err != nil {
+		t.Fatalf("read message attachment directory: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("message attachment directory contains %d entries, want 2", len(entries))
+	}
+}
+
+func TestSaveFilesToDisk_ConcurrentDifferentMessages(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	messageIDs := []string{"message-a", "message-b"}
+	contents := [][]byte{[]byte("from a"), []byte("from b")}
+	paths := make([][]string, len(messageIDs))
+
+	var wg sync.WaitGroup
+	wg.Add(len(messageIDs))
+	for i := range messageIDs {
+		go func(i int) {
+			defer wg.Done()
+			paths[i] = SaveFilesToDisk(workDir, messageIDs[i], []FileAttachment{{
+				FileName: "same.txt",
+				Data:     contents[i],
+			}})
+		}(i)
+	}
+	wg.Wait()
+
+	for i, messageID := range messageIDs {
+		if len(paths[i]) != 1 {
+			t.Fatalf("message %q returned %d paths, want 1", messageID, len(paths[i]))
+		}
+		path := paths[i][0]
+		if filepath.Base(filepath.Dir(path)) != messageID {
+			t.Errorf("path %q is not scoped to message %q", path, messageID)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %q: %v", path, err)
+		}
+		if string(data) != string(contents[i]) {
+			t.Errorf("message %q content = %q, want %q", messageID, data, contents[i])
+		}
+	}
+}
+
+func TestSaveFilesToDisk_NoSubdirBackwardsCompat(t *testing.T) {
+	workDir := t.TempDir()
+	first := SaveFilesToDisk(workDir, "", []FileAttachment{{
+		FileName: "legacy.txt",
+		Data:     []byte("original"),
+	}})
+	if len(first) != 1 {
+		t.Fatalf("first legacy save returned %d paths, want 1", len(first))
+	}
+	wantPath := filepath.Join(workDir, ".cc-connect", "attachments", "legacy.txt")
+	if first[0] != wantPath {
+		t.Fatalf("legacy path = %q, want %q", first[0], wantPath)
+	}
+
+	second := SaveFilesToDisk(workDir, "", []FileAttachment{{
+		FileName: "legacy.txt",
+		Data:     []byte("replacement"),
+	}})
+	if len(second) != 0 {
+		t.Fatalf("second legacy save returned %d paths, want collision to be rejected", len(second))
+	}
+	data, err := os.ReadFile(first[0])
+	if err != nil {
+		t.Fatalf("read original legacy attachment: %v", err)
+	}
+	if string(data) != "original" {
+		t.Fatalf("legacy attachment was overwritten: got %q", data)
+	}
 }
 
 // TestAppendFileRefs_AbsolutizesRelativePaths guards the defensive layer

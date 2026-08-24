@@ -300,6 +300,11 @@ level = "info" # debug, info, warn, error
 # max_per_second = 25
 # [outgoing_rate_limit.platforms.feishu]
 # max_per_second = 5
+# Weixin (ilink) sendmessage throttles the bot after a short burst (ret=-2
+# "prepare failed", penalty on the order of an hour). Pace sends to avoid it:
+# [outgoing_rate_limit.platforms.weixin]
+# max_per_second = 0.5
+# burst = 1
 
 # =============================================================================
 # Relay Settings / Relay 设置
@@ -1035,8 +1040,8 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
 # share_session_in_channel = false  # If true, all users in a group share one agent session
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
-# thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session)
-#                           # 设为 true 时，群聊按飞书话题/根消息隔离会话（一个 thread/root 对应一个 Agent 会话）
+# thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session and, in multi-workspace mode, one workspace binding)
+#                           # 设为 true 时，群聊按飞书话题/根消息隔离会话；multi-workspace 模式下每个话题也独立绑定 workspace
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
@@ -1241,6 +1246,41 @@ app_secret = "your-feishu-app-secret"
 #                         # "thread" (one session per Slack thread — a new top-level message starts
 #                         #  a fresh session, replies in the same thread continue it).
 #                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话)
+
+# Google Chat (uncomment to enable / 取消注释以启用)
+# Uses a registered Google Chat app whose Cloud Pub/Sub connection publishes
+# events to a topic. No public IP is needed and there is NO Workspace Events
+# subscription expiry or per-restart resource leak (the subscription is fixed).
+# 注册的 Google Chat 应用通过 Cloud Pub/Sub 连接发布事件，无需公网 IP，且订阅固定（无过期/泄漏）。
+#
+# - receive: cc-connect pulls the Chat app's Pub/Sub subscription with a native
+#   streaming pull (no gws binary). 接收：原生流式拉取 Chat 应用的 Pub/Sub 订阅（无需 gws）。
+# - send: replies post via the Chat REST API as the app's service account
+#   (chat.bot), so replies appear as the bot. 发送：以服务账号（chat.bot）作为机器人回复。
+# Both directions use the same service-account key. 收发使用同一个服务账号密钥。
+#
+# Setup / 配置:
+# 1. Enable Chat API + Pub/Sub API. / 启用 Chat API 与 Pub/Sub API。
+# 2. Create a Pub/Sub topic; grant Publisher to
+#    chat-api-push@system.gserviceaccount.com; create a pull subscription.
+#    创建 Pub/Sub 主题并授予 chat-api-push@system Publisher，创建拉取订阅。
+# 3. Create a service account + JSON key (chat.bot). Grant it
+#    roles/pubsub.subscriber on the subscription so it can pull events.
+#    创建服务账号及 JSON 密钥，并在订阅上授予 roles/pubsub.subscriber 以拉取事件。
+# 4. Configure a Chat app (Chat API > Configuration): set status LIVE,
+#    Connection settings = Cloud Pub/Sub (your topic), Visibility = yourself.
+#    Do NOT check "Build as a Google Workspace add-on".
+#    配置 Chat 应用：状态 LIVE，连接方式选 Cloud Pub/Sub（你的主题），可见性=自己；不要勾选 add-on。
+# 5. DM the app (or @mention it in a space). / 私聊该应用（或在空间中 @ 它）。
+
+# [[projects.platforms]]
+# type = "googlechat"
+#
+# [projects.platforms.options]
+# subscription = "projects/PROJECT/subscriptions/NAME"  # Pub/Sub subscription the Chat app publishes to (required) / Chat 应用发布到的 Pub/Sub 订阅（必填）
+# credentials_file = "/path/to/service-account.json"    # SA key, used to pull events AND reply (chat.bot) (required) / 服务账号密钥，用于拉取事件与回复（必填）
+# allow_from = "*"                                  # Allowed sender IDs, e.g. "users/123456789" / 允许的发送者 ID
+# session_scope = "space"                           # "space" (default) | "thread" | "user" / 会话粒度
 
 # Discord (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://discord.com/developers/applications / 创建应用
@@ -1447,6 +1487,17 @@ app_secret = "your-feishu-app-secret"
 # proxy = ""                                   # optional HTTP proxy / 可选代理
 # proxy_username = ""
 # proxy_password = ""
+#
+# Send-volume quota vs ilink's burst throttle (sendMessage ret=-2 "prepare failed"):
+# the gateway throttles the bot after roughly 5-6 separate messages within a short
+# window (multi-chunk sends are fine), and the penalty escalates with every attempt
+# made while active. The quota paces separate messages so the bot stays below the
+# trigger. 0 disables the quota.
+# 发送量配额（防 ilink 突发节流 ret=-2）：网关在短窗口内约 5-6 条独立消息即节流
+# （多切块发送不计数），且节流期内每次尝试都会升级惩罚。配额对独立消息限速，
+# 使其低于触发阈值。设为 0 关闭配额。
+# burst_limit = 4           # max separate messages per window / 每窗口最多独立消息数
+# burst_window_secs = 86400 # window length (default 24h) / 窗口时长（秒，默认24小时）
 
 # -----------------------------------------------------------------------------
 # Tencent Yuanbao (yuanbao.tencent.com bot platform)
@@ -1625,6 +1676,29 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # token = "your-telegram-bot-token"
 
+# =============================================================================
+# TuiTui Platform / 推推平台
+# =============================================================================
+# Uses the official robot WebSocket callback and REST APIs documented at
+# https://im.live.360.cn:8282/robot.
+# 使用推推机器人 WebSocket 长连接和 REST API，无需公网回调地址。
+#
+# [[projects.platforms]]
+# type = "tuitui"
+#
+# [projects.platforms.options]
+# app_id = "${TUITUI_APP_ID}"
+# app_secret = "${TUITUI_APP_SECRET}"
+# allow_from = "*"                         # Direct-message users / 单聊用户
+# group_allow_from = "7652669649132694"   # Group, team, or channel IDs / 群、团队或频道 ID
+# group_policy = "allowlist"               # allowlist | open | disabled
+# require_mention = true                    # Unmentioned messages are cached but do not trigger the agent
+# history_limit = 50                        # Pending unmentioned messages kept per chat; 0 disables caching
+# receive_reaction = "收到"                 # Empty string disables the immediate reaction
+# share_session_in_channel = false          # Share one session among group members
+# api_base = "https://im.live.360.cn:8282"  # Optional override
+# ws_base = "wss://im.live.360.cn:8282"     # Optional override
+
 # QQ (via NapCat / OneBot v11) (uncomment to enable / 取消注释以启用)
 # Requires a OneBot v11 implementation running alongside your QQ client:
 # 需要一个 OneBot v11 实现配合 QQ 客户端运行：
@@ -1703,6 +1777,16 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify a model tier / 可选：指定模型级别
 # model = "auto"  # "auto" | "ultimate" | "performance" | "efficient" | "lite"
+#
+# Optional: override the CLI invocation via the unified `cmd` field. Accepts
+# both a whitespace-separated string and a TOML array. Useful for passing
+# flags that the IM-platform user expects to take effect, e.g. forcing
+# permission bypass without a wrapper script.
+# 可选：通过统一的 `cmd` 字段覆盖 CLI 调用方式，同时接受空白分隔字符串
+# 和 TOML 数组两种写法。可用于让 IM 平台用户透传 CLI 参数，例如绕过权限
+# 检查而无需再用 wrapper 脚本。
+# cmd = "qodercli --permission-mode bypass_permissions"
+# cmd = ["qodercli", "--permission-mode", "bypass_permissions"]
 #
 # [[projects.platforms]]
 # type = "telegram"
@@ -2200,4 +2284,3 @@ app_secret = "your-feishu-app-secret"
 # wps_sid = "your-wps-sid"             # WPS登录凭证 (Cookie中的wps_sid)
 # device_name = "cc-connect"           # 设备名称（可选）
 # device_uuid = ""                     # 设备UUID（可选，留空自动生成）
-

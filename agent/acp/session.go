@@ -394,7 +394,7 @@ func (s *acpSession) maybeAbsorbCurrentModeUpdate(params json.RawMessage) {
 		return
 	}
 	var head struct {
-		Kind     string `json:"sessionUpdate"`
+		Kind          string `json:"sessionUpdate"`
 		CurrentModeID string `json:"currentModeId"`
 	}
 	if json.Unmarshal(wrap.Update, &head) != nil {
@@ -587,7 +587,7 @@ func (s *acpSession) emit(ev core.Event) {
 	}
 }
 
-func (s *acpSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("acp: session closed")
 	}
@@ -595,7 +595,7 @@ func (s *acpSession) Send(prompt string, images []core.ImageAttachment, files []
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
-	filePaths := core.SaveFilesToDisk(s.workDir, files)
+	filePaths := core.SaveFilesToDisk(s.workDir, messageID, files)
 	prompt = core.AppendFileRefs(prompt, filePaths)
 	if len(images) > 0 {
 		prompt = s.appendImageRefs(prompt, images)

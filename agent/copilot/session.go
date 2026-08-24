@@ -683,7 +683,7 @@ func summarizeToolInput(tool string, input map[string]any) string {
 }
 
 // Send sends a user message to the running Copilot process.
-func (cs *copilotSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (cs *copilotSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
 	}
@@ -700,7 +700,7 @@ func (cs *copilotSession) Send(prompt string, images []core.ImageAttachment, fil
 
 	// Handle files
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(cs.workDir, files)
+		filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 

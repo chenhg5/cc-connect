@@ -35,6 +35,7 @@ const PLATFORM_OPTIONS: { key: string; label: string; color: string; qr?: boolea
   { key: 'yuanbao', label: 'Yuanbao', color: 'bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400' },
   { key: 'line', label: 'LINE', color: 'bg-lime-50 dark:bg-lime-900/30 text-lime-600 dark:text-lime-400' },
   { key: 'weibo', label: 'Weibo (微博)', color: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' },
+  { key: 'tuitui', label: 'TuiTui (推推)', color: 'bg-teal-50 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300' },
   { key: 'cloud_web', label: 'Cloud Web (自建 IM)', color: 'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400' },
 ];
 

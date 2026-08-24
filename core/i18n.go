@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -56,6 +57,38 @@ func DetectLanguage(text string) Language {
 		return LangSpanish
 	}
 	return LangEnglish
+}
+
+// NormalizeLanguageString parses a configuration string (e.g. from
+// opts["language"] or [projects].language) into a Language constant. The
+// accepted spellings mirror the ones documented in config.example.toml:
+// "en"/"english", "zh"/"chinese", "zh-TW"/"zh_TW"/"zhtw", "ja"/"japanese",
+// "es"/"spanish", and "" / "auto" for auto-detect. Unknown values return
+// LangAuto so the engine falls back to detection rather than silently
+// snapping to English — operators who set language = "klingon" should see
+// "auto" behaviour, not a hard English default they didn't ask for.
+//
+// Issue #1655 introduced this helper so the Claude Code agent (which
+// receives the language via opts["language"]) can decode the string
+// without duplicating the switch statement that cmd/cc-connect/main.go
+// uses for engine construction.
+func NormalizeLanguageString(s string) Language {
+	switch strings.ToLower(s) {
+	case "en", "english":
+		return LangEnglish
+	case "zh", "chinese":
+		return LangChinese
+	case "zh-tw", "zh_tw", "zhtw":
+		return LangTraditionalChinese
+	case "ja", "japanese":
+		return LangJapanese
+	case "es", "spanish":
+		return LangSpanish
+	case "", "auto":
+		return LangAuto
+	default:
+		return LangAuto
+	}
 }
 
 func isChinese(r rune) bool {
@@ -647,6 +680,17 @@ const (
 	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
 	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
 	MsgPermissionTimeoutNotification MsgKey = "permission_timeout_notification"
+
+	// Agent system-prompt tool sections (Issue #1655). These are appended
+	// to the agent's own system prompt by core/interfaces.go AgentSystemPromptForLang
+	// so that operators running cc-connect with language="zh" see the
+	// send / cron / timer / relay tool documentation in their native
+	// language. Translation coverage is en + zh for this PR; additional
+	// languages fall back to en automatically.
+	MsgAgentSendToolPrompt MsgKey = "agent_send_tool_prompt"
+	MsgAgentCronToolPrompt MsgKey = "agent_cron_tool_prompt"
+	MsgAgentTimerToolPrompt MsgKey = "agent_timer_tool_prompt"
+	MsgAgentRelayToolPrompt MsgKey = "agent_relay_tool_prompt"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -2211,11 +2255,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Modelo actual: %s",
 	},
 	MsgModelChanged: {
-		LangEnglish:            "Model switched to `%s`. New sessions will use this model.",
-		LangChinese:            "模型已切换为 `%s`，新会话将使用此模型。",
-		LangTraditionalChinese: "模型已切換為 `%s`，新會話將使用此模型。",
-		LangJapanese:           "モデルを `%s` に切り替えました。新しいセッションで使用されます。",
-		LangSpanish:            "Modelo cambiado a `%s`. Las nuevas sesiones usarán este modelo.",
+		LangEnglish:            "Model switched to `%s`. This session and all future sessions will use it.",
+		LangChinese:            "模型已切换为 `%s`，当前会话与后续会话均使用此模型。",
+		LangTraditionalChinese: "模型已切換為 `%s`，當前會話與後續會話均使用此模型。",
+		LangJapanese:           "モデルを `%s` に切り替えました。このセッションと今後のセッションで使用されます。",
+		LangSpanish:            "Modelo cambiado a `%s`. Esta sesión y las futuras usarán este modelo.",
 	},
 	MsgModelChangeFailed: {
 		LangEnglish:            "❌ Failed to change model: %v",
@@ -4200,6 +4244,261 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "`/workspace init` 未啟用本機目錄目標。請使用 git 倉庫地址，或在此專案配置 `workspace_init_allow_local_paths = true`。",
 		LangJapanese:           "`/workspace init` ではローカルディレクトリ対象が無効です。git URL を使うか、このプロジェクトで `workspace_init_allow_local_paths = true` を有効にしてください。",
 		LangSpanish:            "Los destinos de directorio local están deshabilitados para `/workspace init`. Use una URL de git o habilite `workspace_init_allow_local_paths = true` para este proyecto.",
+	},
+	MsgAgentSendToolPrompt: {
+		LangEnglish: `### Send generated images, files, or voice messages back to the user
+When you generate a local image or file that should be sent to the user, use:
+
+  cc-connect send --image /absolute/path/to/image.png
+  cc-connect send --file /absolute/path/to/report.pdf
+  cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+
+You may repeat --image / --file multiple times. Use this only for generated attachments that need to be delivered to the user.
+If you include --message, do not repeat the exact same sentence again in your normal reply, because your normal reply is also delivered automatically.
+
+When sending an audio (mp3/wav/m4a/ogg/opus) or video (mp4/mov/webm) clip that should render inline as a native voice bubble or video player — instead of as a generic file download — use the dedicated flags:
+
+  cc-connect send --audio /absolute/path/to/clip.mp3
+  cc-connect send --video /absolute/path/to/demo.mp4
+
+These render as native media on platforms that support it (e.g. Feishu voice bubbles, Telegram voice messages). cc-connect transparently transcodes audio to the platform's preferred codec (e.g. opus for Feishu). On platforms without dedicated audio/video support cc-connect automatically falls back to the file-attachment path so delivery is preserved. Do NOT downgrade the user's request to --file when they explicitly asked for audio or video.
+
+When the user explicitly asks you to synthesize speech from text, use:
+
+  cc-connect send --tts "text to speak"
+
+After cc-connect send --tts (or --audio) succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.`,
+		LangChinese: `### 把生成的图片、文件、语音消息回发给用户
+当你生成了需要发送给用户的本地图片或文件时,使用:
+
+  cc-connect send --image /absolute/path/to/image.png
+  cc-connect send --file /absolute/path/to/report.pdf
+  cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+
+可以重复使用 --image / --file。仅在需要把生成的附件投递到用户时使用这个命令。
+如果同时使用了 --message,不要在正常回复里再说一遍完全相同的句子,因为正常回复本身也会自动发送给用户。
+
+发送音频 (mp3/wav/m4a/ogg/opus) 或视频 (mp4/mov/webm) 片段、且希望它们以内联的原生语音气泡或视频播放器形态呈现(而不是作为普通文件下载)时,使用专用参数:
+
+  cc-connect send --audio /absolute/path/to/clip.mp3
+  cc-connect send --video /absolute/path/to/demo.mp4
+
+这些参数会在支持原生媒体的平台上渲染为原生形态(例如飞书的语音气泡、Telegram 的语音消息)。cc-connect 会自动把音频转码为平台偏好的编码(例如飞书的 opus)。在不支持专用音视频的平台,cc-connect 会自动回退到文件附件路径以保证投递成功。当用户明确要求 audio/video 时,不要把请求降级为 --file。
+
+当用户明确要求把文字合成为语音时,使用:
+
+  cc-connect send --tts "要朗读的文字"
+
+cc-connect send --tts(或 --audio)成功之后,除非用户同时要求可见的文字确认,否则只回复 NO_REPLY,避免在语音消息后再发一条文字消息。`,
+	},
+	MsgAgentCronToolPrompt: {
+		LangEnglish: `### Scheduled tasks: when to use /cron vs /timer
+
+cc-connect has TWO distinct scheduling commands. Picking the wrong one creates a confusing UX for the user.
+
+  ┌──────────────────────────────┬─────────────────────────────┐
+  │ Use cc-connect cron …        │ Use cc-connect timer …      │
+  ├──────────────────────────────┼─────────────────────────────┤
+  │ Recurring schedule           │ One-shot delay / one-time   │
+  │ "每天/每周/每小时"            │ "X 分钟后/小时后/明天"        │
+  │ "every day/week/Monday"      │ "in 30 min", "tomorrow 9am"  │
+  │ "每天早上6点总结"             │ "3 分钟后检查负载"            │
+  │ Lives forever until deleted  │ Auto-archives after firing  │
+  │ Queried via /cron            │ Queried via /timer          │
+  └──────────────────────────────┴─────────────────────────────┘
+
+When telling the user the task is scheduled, tell them which command to use to view/manage it
+(say "use /timer to view" for one-shot, "use /cron to view" for recurring).
+
+### Scheduled tasks (cron) — RECURRING
+When the user asks you to do something on a schedule (e.g. "每天早上6点帮我总结GitHub trending"), use the Bash tool to run:
+
+  cc-connect cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task description>" --desc "<short label>"
+
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so you do NOT need to specify --project or --session-key.
+
+Optional flags:
+  --session-mode <mode>     reuse (default) or new-per-run (fresh session each trigger)
+  --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
+  --exec <command>          run a shell command directly instead of --prompt
+
+Examples:
+  cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
+  cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
+  cc-connect cron add --cron "*/2 * * * *" --exec "ipconfig" --session-mode new-per-run --desc "Every 2 min ipconfig"
+
+You can also list, inspect, run, edit, or delete cron jobs:
+  cc-connect cron list
+  cc-connect cron info <job-id> [field]
+  cc-connect cron exec <job-id>
+  cc-connect cron edit <job-id> <field> <value>
+  cc-connect cron del <job-id>
+
+When changing an existing job, first run ` + "`cc-connect cron info <job-id>`" + ` to inspect the current values, then use ` + "`cron edit`" + ` for only the field(s) the user asked to change.
+Use ` + "`cron exec <job-id>`" + ` to run an existing scheduled task immediately; this is different from the ` + "`--exec <command>`" + ` flag used when creating a shell-command cron job.
+Use ` + "`cron edit`" + ` instead of delete-and-recreate when only one field changes. Do not delete and recreate a job unless the user explicitly asks to replace it.
+Common editable fields:
+  cron_expr     new schedule, e.g. "0 9 * * *"
+  prompt        new task prompt (or ` + "`exec`" + ` for shell command)
+  description   short label
+  enabled       true / false  (pause without deleting)
+  mute          true / false  (silence all messages)
+  timeout_mins  integer minutes (0 = unlimited)
+Run ` + "`cc-connect cron edit --help`" + ` for the full field list.
+
+Examples:
+  cc-connect cron exec abc123
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 prompt "Updated daily summary task"`,
+		LangChinese: `### 定时任务:什么时候用 /cron,什么时候用 /timer
+
+cc-connect 有两个不同的调度命令。选错会让用户感到很困惑。
+
+  ┌──────────────────────────────┬─────────────────────────────┐
+  │ 使用 cc-connect cron …       │ 使用 cc-connect timer …     │
+  ├──────────────────────────────┼─────────────────────────────┤
+  │ 周期性调度                    │ 单次延时 / 一次性任务         │
+  │ "每天/每周/每小时"            │ "X 分钟后/小时后/明天"        │
+  │ "every day/week/Monday"      │ "in 30 min", "tomorrow 9am"  │
+  │ "每天早上6点总结"             │ "3 分钟后检查负载"            │
+  │ 一直存在直到被删除             │ 触发后自动归档                │
+  │ 通过 /cron 查看               │ 通过 /timer 查看              │
+  └──────────────────────────────┴─────────────────────────────┘
+
+告诉用户任务已安排好后,顺手告诉他们用哪个命令查看/管理:
+(单次任务说"用 /timer 查看",周期任务说"用 /cron 查看")。
+
+### 周期任务 (cron) — RECURRING
+当用户让你做周期性任务时(例如"每天早上6点帮我总结GitHub trending"),用 Bash 工具执行:
+
+  cc-connect cron add --cron "<分> <时> <日> <月> <星期>" --prompt "<任务描述>" --desc "<简短标签>"
+
+环境变量 CC_PROJECT 和 CC_SESSION_KEY 已经设置好,你不需要传 --project 或 --session-key。
+
+可选参数:
+  --session-mode <mode>     reuse(默认)或 new-per-run(每次触发用新会话)
+  --timeout-mins <n>        每次运行最长等待分钟数(默认 30,0 = 不限)
+  --exec <command>          直接跑 shell 命令而不是 --prompt
+
+示例:
+  cc-connect cron add --cron "0 6 * * *" --prompt "汇总 GitHub trending 仓库并发摘要" --desc "每日 GitHub Trending"
+  cc-connect cron add --cron "0 9 * * 1" --prompt "生成本周项目状态报告" --desc "每周报告"
+  cc-connect cron add --cron "*/2 * * * *" --exec "ipconfig" --session-mode new-per-run --desc "每 2 分钟跑 ipconfig"
+
+你也可以列出、检查、立即执行、修改或删除 cron 任务:
+  cc-connect cron list
+  cc-connect cron info <job-id> [字段]
+  cc-connect cron exec <job-id>
+  cc-connect cron edit <job-id> <字段> <新值>
+  cc-connect cron del <job-id>
+
+修改现有任务时,先用 ` + "`cc-connect cron info <job-id>`" + ` 看当前值,再用 ` + "`cron edit`" + ` 只改用户要求改的字段。
+用 ` + "`cron exec <job-id>`" + ` 立即执行已存在的调度任务;这和创建 shell 任务时用的 ` + "`--exec <command>`" + ` 参数不同。
+只有修改一个字段时,用 ` + "`cron edit`" + ` 而不是删除后重建。除非用户明确要求替换任务,不要先删再建。
+常用可编辑字段:
+  cron_expr     新调度,例如 "0 9 * * *"
+  prompt        新任务 prompt(或 ` + "`exec`" + ` 表示 shell 命令)
+  description   简短标签
+  enabled       true / false(暂停而不删除)
+  mute          true / false(静默所有消息)
+  timeout_mins  整数分钟(0 = 不限)
+完整字段列表见 ` + "`cc-connect cron edit --help`" + `。
+
+示例:
+  cc-connect cron exec abc123
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 prompt "更新后的每日摘要任务"`,
+	},
+	MsgAgentTimerToolPrompt: {
+		LangEnglish: `### One-shot timers (timer) — ONE-TIME DELAY
+When the user asks you to do something AFTER A DELAY or AT A SPECIFIC FUTURE TIME
+(e.g. "两小时后帮我检查PR", "3 分钟后看下系统负载", "明天早上 9 点提醒我"),
+use the Bash tool to run:
+
+  cc-connect timer add --delay <duration> --prompt "<task description>"
+
+IMPORTANT: do NOT use cron for one-shot delays. A cron expression like "4 19 14 6 *"
+means "every year on June 14 at 19:04", not "once on this date". Cron has no built-in
+"fire once" mode — use timer for any one-time / delayed request.
+
+Duration examples: 30m, 2h, 1h30m. Or use absolute time: --at "2026-05-16T09:00"
+Absolute times without timezone (e.g. "2026-05-16T09:00") are interpreted as the
+system's local timezone. When the user says "明天早上9点", use local time.
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set.
+
+Optional flags:
+  --exec <command>          run a shell command directly instead of --prompt
+  --desc <text>             short description
+  --session-mode <mode>     reuse (default) or new-per-run (fresh session each run)
+  --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
+  --mute                    suppress all messages (start notification + result)
+
+Examples:
+  cc-connect timer add --delay 2h --prompt "Check PR status" --desc "PR check"
+  cc-connect timer add --delay 30m --exec "df -h" --desc "Disk check"
+  cc-connect timer add --at "2026-05-16T09:00" --prompt "Morning standup reminder"
+
+You can also list or cancel timers:
+  cc-connect timer list
+  cc-connect timer del <timer-id>`,
+		LangChinese: `### 一次性延时 (timer) — ONE-TIME DELAY
+当用户让你在一段延时之后或在某个未来时刻做某事时
+(例如"两小时后帮我检查PR"、"3 分钟后看下系统负载"、"明天早上 9 点提醒我"),
+用 Bash 工具执行:
+
+  cc-connect timer add --delay <时长> --prompt "<任务描述>"
+
+重要:不要用 cron 跑单次延时。形如 "4 19 14 6 *" 的 cron 表达式
+意思是"每年 6 月 14 日 19:04"而不是"这一天跑一次"。cron 没有内建"只跑一次"模式 ——
+所有一次性 / 延时任务都用 timer。
+
+时长示例:30m、2h、1h30m。或者用绝对时间:--at "2026-05-16T09:00"
+不带时区的绝对时间(例如 "2026-05-16T09:00")按系统本地时区解释。用户说"明天早上9点"时用本地时间。
+环境变量 CC_PROJECT 和 CC_SESSION_KEY 已经设置好。
+
+可选参数:
+  --exec <command>          直接跑 shell 命令而不是 --prompt
+  --desc <text>             简短描述
+  --session-mode <mode>     reuse(默认)或 new-per-run(每次跑用新会话)
+  --timeout-mins <n>        每次最长等待分钟数(默认 30,0 = 不限)
+  --mute                    静默所有消息(开始通知和结果)
+
+示例:
+  cc-connect timer add --delay 2h --prompt "检查 PR 状态" --desc "PR 检查"
+  cc-connect timer add --delay 30m --exec "df -h" --desc "磁盘检查"
+  cc-connect timer add --at "2026-05-16T09:00" --prompt "早会提醒"
+
+你也可以列出或取消 timer:
+  cc-connect timer list
+  cc-connect timer del <timer-id>`,
+	},
+	MsgAgentRelayToolPrompt: {
+		LangEnglish: `### Bot-to-bot relay
+When you need to communicate with another bot (e.g. ask another AI agent a question), use:
+
+  cc-connect relay send --to <target_project> "<message>"
+
+IMPORTANT: <target_project> must be the EXACT project name from the /bind command output.
+Do NOT guess or modify the name — use it exactly as shown (e.g. "gemini", not "gemini-bot").
+
+This sends a message to the target bot and waits for its response (printed to stdout).
+The conversation is visible in the group chat and each bot maintains its own relay session.
+
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.`,
+		LangChinese: `### Bot 之间转发 (relay)
+当需要和另一个 bot 通信(例如向另一个 AI agent 提问)时,使用:
+
+  cc-connect relay send --to <目标项目名> "<消息>"
+
+重要:<目标项目名> 必须是 /bind 命令输出里的 EXACT 项目名。
+不要猜测或修改名字 —— 完全照搬显示值(例如 "gemini" 而不是 "gemini-bot")。
+
+这会把消息发给目标 bot 并等待它的回复(打印到 stdout)。
+会话在群聊里可见,每个 bot 维护自己的 relay 会话。
+
+环境变量 CC_PROJECT 和 CC_SESSION_KEY 已经设置好,relay 知道用哪个群聊。`,
 	},
 }
 

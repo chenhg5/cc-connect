@@ -1,4 +1,4 @@
-﻿package reasonix
+package reasonix
 
 import (
 	"context"
@@ -178,7 +178,7 @@ func TestReasonixSession_Send_PostsToSubmitEndpoint(t *testing.T) {
 		sseCh <- mustJSON(wireEvent{Kind: "turn_done"})
 	}()
 
-	err = sess.Send("hello world", nil, nil)
+	err = sess.Send("hello world", "", nil, nil)
 	assert.NoError(t, err)
 	assert.True(t, submitCalled.Load())
 	assert.Equal(t, "POST", submitMethod)
@@ -211,7 +211,7 @@ func TestReasonixSession_SSE_MapsEventTypes(t *testing.T) {
 
 	// Send triggers SSE consumption
 	go func() {
-		_ = sess.Send("test", nil, nil)
+		_ = sess.Send("test", "", nil, nil)
 	}()
 
 	// Drain events
@@ -433,7 +433,7 @@ func TestReasonixSession_Send_CompactCommand(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = sess.Close() }()
 
-	err = sess.Send("/compact", nil, nil)
+	err = sess.Send("/compact", "", nil, nil)
 	assert.NoError(t, err)
 	assert.True(t, compactCalled.Load(), "/compact should forward to POST /compact")
 }
@@ -480,7 +480,7 @@ func TestReasonixSession_Send_FailsAfterClose(t *testing.T) {
 	err = sess.Close()
 	require.NoError(t, err)
 
-	err = sess.Send("hello", nil, nil)
+	err = sess.Send("hello", "", nil, nil)
 	assert.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "closed") || strings.Contains(err.Error(), "send after close"),
 		"error should mention session is closed")
@@ -505,7 +505,7 @@ func TestReasonixSession_ThinkingAccumulator(t *testing.T) {
 		sseCh <- mustJSON(wireEvent{Kind: "turn_done"})
 	}()
 
-	go func() { _ = sess.Send("test", nil, nil) }()
+	go func() { _ = sess.Send("test", "", nil, nil) }()
 
 	events := drainEvents(sess.Events(), 5, 5*time.Second)
 
