@@ -100,6 +100,40 @@ func TestDispatchMergeForwardPreservesInteractiveChildren(t *testing.T) {
 	}
 }
 
+func TestDispatchEngagedThreadStillPreservesQuotedCards(t *testing.T) {
+	got := make(chan *core.Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/open-apis/im/v1/messages/om_root_card" {
+			writeInboundCardResponse(t, w, "om_root_card", testCard20)
+			return
+		}
+		writeInboundCardResponse(t, w, "", "")
+	}))
+	defer srv.Close()
+
+	const sessionKey = "feishu:oc_chat:root:om_root_card"
+	p := newInboundCardTestPlatform(srv, "both", func(msg *core.Message) { got <- msg })
+	p.threadIsolation = true
+	p.activeThreadSessions.Store(sessionKey, time.Now())
+	p.dispatchMessage(
+		context.Background(), "text", `{"text":"你拿到卡片了吗"}`, nil,
+		"om_followup", sessionKey, "ou_user", "oc_chat",
+		replyContext{messageID: "om_followup", chatID: "oc_chat", sessionKey: sessionKey}, "om_root_card", time.Now().UnixMilli(),
+	)
+
+	select {
+	case msg := <-got:
+		if len(msg.Cards) != 1 {
+			t.Fatalf("Cards = %d, want 1 for an engaged thread quote", len(msg.Cards))
+		}
+		if !strings.Contains(string(msg.Cards[0].Raw), `"alert_id":"alert-1"`) {
+			t.Fatalf("quoted card raw payload lost: %s", msg.Cards[0].Raw)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for engaged-thread quoted card")
+	}
+}
+
 func newInboundCardTestPlatform(srv *httptest.Server, mode string, handler func(*core.Message)) *Platform {
 	return &Platform{
 		platformName:        "feishu",

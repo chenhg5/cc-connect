@@ -1521,8 +1521,18 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	// exception: earlier unmentioned messages were never dispatched to the
 	// agent, so bootstrap its context from the parent/root reply chain once.
 	var quoted quotedMessage
-	if parentID != "" && (!p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread) {
-		quoted = p.fetchQuotedMessage(ctx, parentID)
+	if parentID != "" {
+		switch {
+		case !p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread:
+			quoted = p.fetchQuotedMessage(ctx, parentID)
+		case p.threadIsolation && isThreadSessionKey(sessionKey):
+			// An engaged thread already has its text context in the agent
+			// session, but its root may be an interactive alert card that was
+			// never dispatched (the alert bot cannot @ this bot in the root
+			// message). Preserve only cards from the reply chain here; do not
+			// re-ingest ordinary group messages or attachments.
+			quoted = p.fetchQuotedCards(ctx, parentID)
+		}
 	}
 
 	switch msgType {
@@ -2119,6 +2129,17 @@ func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) quot
 		images: collectReplyChainImages(chain),
 		files:  collectReplyChainFiles(chain),
 	}
+}
+
+// fetchQuotedCards retrieves only interactive cards from a quoted reply chain.
+// It is used for already-engaged isolated threads so the root alert card remains
+// available without re-ingesting the thread's ordinary group messages.
+func (p *Platform) fetchQuotedCards(ctx context.Context, parentID string) quotedMessage {
+	chain := p.fetchReplyChain(ctx, parentID, maxReplyChainDepth)
+	if len(chain) == 0 {
+		return quotedMessage{}
+	}
+	return quotedMessage{cards: collectReplyChainCards(chain)}
 }
 
 // resolveBotSenderName returns a display name for a bot sender in a quoted
