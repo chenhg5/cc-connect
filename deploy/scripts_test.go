@@ -101,6 +101,26 @@ func TestDockerDeploymentKeepsControlAsSingleProcessOwner(t *testing.T) {
 	}
 }
 
+func TestDockerWebBuildUsesRepositoryLockfile(t *testing.T) {
+	dockerfile := readFile(t, filepath.Join("..", "Dockerfile"))
+	for _, required := range []string{
+		"COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./",
+		"pnpm install --frozen-lockfile",
+		"WORKDIR /src/web",
+	} {
+		if !strings.Contains(dockerfile, required) {
+			t.Fatalf("Dockerfile missing workspace lockfile install step %q", required)
+		}
+	}
+	if strings.Contains(dockerfile, "pnpm --dir web install") {
+		t.Fatal("Dockerfile uses --dir install instead of the declared root workspace")
+	}
+	workspace := readFile(t, filepath.Join("..", "pnpm-workspace.yaml"))
+	if !strings.Contains(workspace, "- web") {
+		t.Fatal("pnpm workspace does not declare the web importer")
+	}
+}
+
 func TestContainerBootstrapIsIdempotentAndInstallsOnlyDeployHostService(t *testing.T) {
 	fixture := newReleaseFixture(t, false)
 	root := filepath.Join(t.TempDir(), "root")

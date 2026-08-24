@@ -10,12 +10,13 @@ ENV COREPACK_NPM_REGISTRY=${NPM_REGISTRY} \
     NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
 WORKDIR /src
 RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY web/package.json web/package.json
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm --dir web install --frozen-lockfile
-COPY web web
-RUN pnpm --dir web build
+    pnpm install --frozen-lockfile
+WORKDIR /src/web
+COPY web .
+RUN pnpm build
 
 FROM ${GO_IMAGE} AS go-build
 ARG GOPROXY=https://goproxy.cn
