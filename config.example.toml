@@ -157,6 +157,15 @@ level = "info" # debug, info, warn, error
 # 推荐值：30–60。默认 0（禁用）。
 # max_turn_time_mins = 0  # default: disabled / 默认禁用
 
+# Retriable agent errors (e.g. Codex capacity overloads) are retried with a
+# backoff before cc-connect gives up on the turn.
+# 可重试的 Agent 错误（例如 Codex 容量满载）会先按下面的回退策略重试，
+# 直到达到最大次数后才放弃本次回合。
+# [retriable_error]
+# initial_delay_secs = 30  # delay before the first retry / 首次重试前等待秒数
+# retry_delay_secs = 60    # delay between later retries / 后续重试等待秒数
+# max_attempts = 30        # total attempts including the first send / 总尝试次数（含首次发送）
+
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
 # rotates to a fresh cc-connect session when the user comes back after being idle.

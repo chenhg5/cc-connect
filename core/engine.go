@@ -3846,7 +3846,7 @@ type interactiveRetryTurn struct {
 }
 
 func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, promptContent string, msgID string, images []ImageAttachment, files []FileAttachment, replyCtx any, turnStart time.Time, logSessionKey string, contentLen int) {
-	maxAttempts := RetriableErrorMaxAttempts
+	maxAttempts := RetriableErrorMaxAttemptsValue()
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
