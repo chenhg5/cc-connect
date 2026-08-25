@@ -392,7 +392,16 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, false, nil, "method not allowed")
 		return
 	}
-	session, _ := r.Context().Value(sessionContextKey{}).(controlstore.Session)
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, false, nil, "authentication required")
+		return
+	}
+	session, err := s.store.RefreshSessionCSRF(r.Context(), cookie.Value)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, false, nil, "authentication required")
+		return
+	}
 	writeJSON(w, http.StatusOK, true, session, "")
 }
 

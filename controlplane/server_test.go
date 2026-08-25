@@ -74,6 +74,25 @@ func TestControlAuthenticationSetupCookieCSRFAndLoginRateLimit(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"username":"ccshus"`) {
 		t.Fatalf("profile response = %d, body=%s", response.Code, response.Body.String())
 	}
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	request.AddCookie(cookies[0])
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var restored struct {
+		Data controlstore.Session `json:"data"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &restored) != nil || restored.Data.CSRFToken == "" {
+		t.Fatalf("restored session = %d, body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/devices/pairing-code", nil)
+	request.AddCookie(cookies[0])
+	request.Header.Set("Origin", "http://127.0.0.1:9820")
+	request.Header.Set("X-CSRF-Token", restored.Data.CSRFToken)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("request after session restore = %d, body=%s", response.Code, response.Body.String())
+	}
 
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/devices/pairing-code", nil)
 	request.AddCookie(cookies[0])
@@ -86,7 +105,7 @@ func TestControlAuthenticationSetupCookieCSRFAndLoginRateLimit(t *testing.T) {
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/devices/pairing-code", nil)
 	request.AddCookie(cookies[0])
 	request.Header.Set("Origin", "https://forged.example")
-	request.Header.Set("X-CSRF-Token", envelope.Data.CSRFToken)
+	request.Header.Set("X-CSRF-Token", restored.Data.CSRFToken)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
@@ -95,7 +114,7 @@ func TestControlAuthenticationSetupCookieCSRFAndLoginRateLimit(t *testing.T) {
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/devices/pairing-code", nil)
 	request.AddCookie(cookies[0])
 	request.Header.Set("Origin", "http://127.0.0.1:9820")
-	request.Header.Set("X-CSRF-Token", envelope.Data.CSRFToken)
+	request.Header.Set("X-CSRF-Token", restored.Data.CSRFToken)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusCreated {

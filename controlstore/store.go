@@ -475,6 +475,32 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	return err
 }
 
+func (s *Store) RefreshSessionCSRF(ctx context.Context, token string) (Session, error) {
+	csrf, err := randomToken(24)
+	if err != nil {
+		return Session{}, err
+	}
+	var session Session
+	var expires int64
+	err = s.db.QueryRowContext(ctx, "SELECT id, expires_at_ms FROM sessions WHERE token_hash = ?", digest(token)).Scan(&session.ID, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, errors.New("control store: invalid session")
+	}
+	if err != nil {
+		return Session{}, fmt.Errorf("control store: read session: %w", err)
+	}
+	session.ExpiresAt = time.UnixMilli(expires)
+	if !session.ExpiresAt.After(s.now()) {
+		_, _ = s.db.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", session.ID)
+		return Session{}, errors.New("control store: session expired")
+	}
+	if _, err := s.db.ExecContext(ctx, "UPDATE sessions SET csrf_hash = ?, last_seen_at_ms = ? WHERE id = ?", digest(csrf), s.now().UnixMilli(), session.ID); err != nil {
+		return Session{}, fmt.Errorf("control store: refresh csrf token: %w", err)
+	}
+	session.CSRFToken = csrf
+	return session, nil
+}
+
 func (s *Store) CreatePairingCode(ctx context.Context) (PairingCode, error) {
 	code, err := randomToken(9)
 	if err != nil {
