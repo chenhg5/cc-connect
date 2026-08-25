@@ -150,6 +150,15 @@ type Platform struct {
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
 	recalledMu       sync.Mutex
 	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
+
+	// botOpenIDRetryCancel cancels the background goroutine that keeps retrying
+	// bot open_id discovery after the eager startup fetch failed. Guarded by p.mu.
+	botOpenIDRetryCancel context.CancelFunc
+	// botOpenIDRetryInitialDelay / botOpenIDRetryMaxDelay override the retry
+	// backoff bounds. Zero means the package defaults; set only in tests.
+	botOpenIDRetryInitialDelay time.Duration
+	botOpenIDRetryMaxDelay     time.Duration
+
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -478,8 +487,13 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	// can still receive events and operate correctly. We therefore only attempt
 	// bot open_id discovery eagerly for WebSocket mode.
 	if !p.shouldUseWebhookMode() {
-		if openID, err := p.fetchBotOpenID(); err != nil {
-			slog.Warn(p.platformName+": failed to get bot open_id, group chat filtering disabled", "error", err)
+		if openID, err := p.fetchBotOpenID(context.Background()); err != nil {
+			// A transient failure here (DNS/network not ready yet when the
+			// process is launched at boot or after a laptop wakes from sleep)
+			// must not permanently disable group chat filtering, so keep
+			// retrying in the background until it succeeds or we shut down.
+			slog.Warn(p.platformName+": failed to get bot open_id, group chat filtering disabled until retry succeeds", "error", err)
+			p.startBotOpenIDRetry()
 		} else {
 			p.mu.Lock()
 			p.botOpenID = openID
@@ -3435,8 +3449,8 @@ func findSingleAsterisk(s string) int {
 }
 
 // fetchBotOpenID retrieves the bot's open_id via the Feishu bot info API.
-func (p *Platform) fetchBotOpenID() (string, error) {
-	resp, err := p.client.Get(context.Background(),
+func (p *Platform) fetchBotOpenID(ctx context.Context) (string, error) {
+	resp, err := p.client.Get(ctx,
 		"/open-apis/bot/v3/info", nil, larkcore.AccessTokenTypeTenant)
 	if err != nil {
 		return "", fmt.Errorf("api call: %w", err)
@@ -3454,6 +3468,88 @@ func (p *Platform) fetchBotOpenID() (string, error) {
 		return "", fmt.Errorf("api code=%d", result.Code)
 	}
 	return result.Bot.OpenID, nil
+}
+
+const (
+	// botOpenIDRetryInitial is the first backoff delay after the eager bot
+	// open_id fetch failed at startup.
+	botOpenIDRetryInitial = 2 * time.Second
+	// botOpenIDRetryMax caps the exponential backoff between retries.
+	botOpenIDRetryMax = 60 * time.Second
+)
+
+// startBotOpenIDRetry launches a background goroutine that retries bot open_id
+// discovery with exponential backoff until it succeeds or the platform stops.
+// Without it a single startup-time network hiccup leaves p.botOpenID empty for
+// the whole process lifetime, which silently disables group @-mention filtering.
+func (p *Platform) startBotOpenIDRetry() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	p.mu.Lock()
+	if p.botOpenIDRetryCancel != nil {
+		// A retry loop is already running; keep it and drop the new context.
+		p.mu.Unlock()
+		cancel()
+		return
+	}
+	p.botOpenIDRetryCancel = cancel
+	initialDelay, maxDelay := p.botOpenIDRetryInitialDelay, p.botOpenIDRetryMaxDelay
+	p.mu.Unlock()
+
+	if initialDelay <= 0 {
+		initialDelay = botOpenIDRetryInitial
+	}
+	if maxDelay <= 0 {
+		maxDelay = botOpenIDRetryMax
+	}
+
+	go func() {
+		delay := initialDelay
+		for attempt := 1; ; attempt++ {
+			select {
+			case <-ctx.Done():
+				slog.Debug(p.platformName + ": bot open_id retry cancelled")
+				return
+			case <-time.After(delay):
+			}
+
+			openID, err := p.fetchBotOpenID(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					slog.Debug(p.platformName + ": bot open_id retry cancelled")
+					return
+				}
+				delay = min(delay*2, maxDelay)
+				slog.Warn(p.platformName+": bot open_id retry failed",
+					"attempt", attempt,
+					"next_delay", delay,
+					"error", err,
+				)
+				continue
+			}
+
+			p.mu.Lock()
+			p.botOpenID = openID
+			p.mu.Unlock()
+			slog.Info(p.platformName+": bot identified after retry, group chat filtering restored",
+				"open_id", openID,
+				"attempt", attempt,
+			)
+			return
+		}
+	}()
+}
+
+// stopBotOpenIDRetry cancels the background bot open_id retry goroutine, if any.
+// Safe to call when no retry is running and safe to call more than once.
+func (p *Platform) stopBotOpenIDRetry() {
+	p.mu.Lock()
+	cancel := p.botOpenIDRetryCancel
+	p.botOpenIDRetryCancel = nil
+	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func isBotMentioned(mentions []*larkim.MentionEvent, botOpenID string) bool {
@@ -4830,6 +4926,7 @@ func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle,
 }
 
 func (p *Platform) Stop() error {
+	p.stopBotOpenIDRetry()
 	if p.isWSPrimary {
 		remaining := unregisterSharedWS(p)
 		if remaining > 0 {
