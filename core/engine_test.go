@@ -14363,7 +14363,7 @@ func TestUnsolicitedReader_EmitsFinalizedHookAfterReplySend(t *testing.T) {
 		marker:             sentMarker,
 	}
 	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 	e.SetHooks(NewHookManager("my-project", []HookConfig{{
 		Event:   string(HookEventMessageFinalized),
 		Type:    "command",
@@ -14408,7 +14408,7 @@ func TestUnsolicitedReader_DoesNotEmitFinalizedHookWhenReplySendFails(t *testing
 		marker:             sendAttemptMarker,
 	}
 	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 	e.SetHooks(NewHookManager("my-project", []HookConfig{{
 		Event:   string(HookEventMessageFinalized),
 		Type:    "command",

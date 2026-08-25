@@ -27,7 +27,7 @@ func TestRunRelaySendAsyncUsesAsyncEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen unix socket: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	gotPath := make(chan string, 1)
 	gotBody := make(chan string, 1)
@@ -45,7 +45,7 @@ func TestRunRelaySendAsyncUsesAsyncEndpoint(t *testing.T) {
 	go func() {
 		_ = srv.Serve(ln)
 	}()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	oldStdout := os.Stdout
 	rOut, wOut, err := os.Pipe()

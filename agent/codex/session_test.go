@@ -315,7 +315,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	if got := cs.GetModel(); got != "gpt-5.4" {
 		t.Fatalf("GetModel() = %q, want gpt-5.4", got)
