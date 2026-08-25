@@ -121,6 +121,7 @@ jobs:
 
       - name: Build and publish multi-platform container image
         id: container
+        timeout-minutes: 45
         uses: docker/build-push-action@v6
         with:
           context: .
