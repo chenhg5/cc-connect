@@ -152,7 +152,17 @@ func (s *Store) initialize(ctx context.Context, setupToken string) error {
 	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM control_meta WHERE key = 'setup_token_hash'").Scan(&initialized); err != nil {
 		return fmt.Errorf("control store: inspect setup token: %w", err)
 	}
-	if initialized == 0 {
+	var administratorCount int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM administrators").Scan(&administratorCount); err != nil {
+		return fmt.Errorf("control store: inspect administrator: %w", err)
+	}
+	if administratorCount > 0 {
+		if initialized > 0 {
+			if _, err := s.db.ExecContext(ctx, "DELETE FROM control_meta WHERE key = 'setup_token_hash'"); err != nil {
+				return fmt.Errorf("control store: remove consumed setup token: %w", err)
+			}
+		}
+	} else if initialized == 0 {
 		if strings.TrimSpace(setupToken) == "" {
 			return errors.New("control store: first start requires a one-time setup token")
 		}

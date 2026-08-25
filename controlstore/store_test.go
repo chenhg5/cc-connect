@@ -60,6 +60,31 @@ func TestStoreSetupSessionAndPairingAreOneTime(t *testing.T) {
 	}
 }
 
+func TestOpenInitializedAdministratorWithoutSetupToken(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "control.db")
+	store, err := Open(path, "setup-once")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.SetupAdministrator(ctx, "setup-once", "ccshus", "long-enough-password"); err != nil {
+		_ = store.Close()
+		t.Fatalf("SetupAdministrator() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := Open(path, "")
+	if err != nil {
+		t.Fatalf("Open(initialized) error = %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	if err := reopened.AuthenticateAdministrator(ctx, "ccshus", "long-enough-password"); err != nil {
+		t.Fatalf("AuthenticateAdministrator() error = %v", err)
+	}
+}
+
 func TestChangeAdministratorPasswordInvalidatesAllSessions(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "control.db"), "setup")
