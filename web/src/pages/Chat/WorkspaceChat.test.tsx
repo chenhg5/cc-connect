@@ -105,6 +105,7 @@ function NavigationControls() {
   return (
     <>
       <button type="button" onClick={() => navigate('/chat/workspace-1/thread-2')}>go thread 2</button>
+      <button type="button" onClick={() => navigate('/chat/workspace-1/draft/draft-2')}>go draft 2</button>
       <button type="button" onClick={() => navigate('/chat/workspace-2/thread-2')}>go workspace 2</button>
     </>
   );
@@ -380,6 +381,50 @@ describe('WorkspaceChat', () => {
     await act(async () => slowThread.resolve(threadSnapshot('thread-1')));
     expect(view.queryByText('thread-1 response')).toBeNull();
     expect(view.getByText('thread-2 response')).toBeTruthy();
+  });
+
+  it('切换到新草稿时串行提交 selection 并让最新目标最终生效', async () => {
+    const slowSelection = deferred<{
+      client_id: string;
+      workspace_ref: string;
+      conversation: { kind: 'thread'; id: string };
+      updated_at: string;
+    }>();
+    const committed: string[] = [];
+    mocks.listWorkspaceThreads.mockResolvedValue({ data: [threadSnapshot('thread-1').thread] });
+    mocks.readWorkspaceThread.mockResolvedValue(threadSnapshot('thread-1'));
+    mocks.readWorkspaceDraft.mockImplementation(async (_workspaceRef: string, draftID: string) => ({
+      id: draftID, owner_client_id: 'web:admin', workspace_ref: workspace.ref,
+      state: 'draft', settings_patch: {}, created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z',
+    }));
+    mocks.putWorkspaceChatSelection.mockImplementation(async (_workspaceRef: string, conversation: { kind: string; id: string }) => {
+      if (conversation.id === 'thread-1') {
+        const value = await slowSelection.promise;
+        committed.push(conversation.id);
+        return value;
+      }
+      committed.push(conversation.id);
+      return {
+        client_id: 'web:admin', workspace_ref: workspace.ref, conversation,
+        updated_at: '2026-08-23T00:00:01Z',
+      };
+    });
+
+    const view = renderChat('/chat/workspace-1/thread-1');
+    await waitFor(() => expect(mocks.putWorkspaceChatSelection).toHaveBeenCalledWith(
+      'workspace-1', { kind: 'thread', id: 'thread-1' },
+    ));
+    fireEvent.click(view.getByRole('button', { name: 'go draft 2' }));
+    await waitFor(() => expect(mocks.readWorkspaceDraft).toHaveBeenCalledWith('workspace-1', 'draft-2'));
+
+    await act(async () => slowSelection.resolve({
+      client_id: 'web:admin', workspace_ref: workspace.ref,
+      conversation: { kind: 'thread', id: 'thread-1' }, updated_at: '2026-08-23T00:00:00Z',
+    }));
+    await waitFor(() => expect(mocks.putWorkspaceChatSelection).toHaveBeenCalledWith(
+      'workspace-1', { kind: 'draft', id: 'draft-2' },
+    ));
+    expect(committed).toEqual(['thread-1', 'draft-2']);
   });
 
   it('切换 workspace 后不提交旧 workspace 的慢 thread 列表', async () => {

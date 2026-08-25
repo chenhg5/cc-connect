@@ -116,9 +116,17 @@ export default function WorkspaceChat() {
   const realtimeEventRef = useRef<(event: NativeEventEnvelope) => void>(() => undefined);
   const realtimeRequestErrorRef = useRef<(requestID: string | undefined, message: string) => void>(() => undefined);
 	const streamCursorRef = useRef<{ epoch?: string; sequence?: number }>({});
-	const reconnectPendingRef = useRef(false);
+  const reconnectPendingRef = useRef(false);
+	const selectionWriteRef = useRef<Promise<void>>(Promise.resolve());
 	targetKeyRef.current = targetKey;
 	streamCursorRef.current = { epoch: stream.epoch, sequence: stream.sequence };
+	const persistSelection = useCallback((ref: string, nextConversation: ConversationRef) => {
+		const write = selectionWriteRef.current
+			.catch(() => undefined)
+			.then(() => putWorkspaceChatSelection(ref, nextConversation));
+		selectionWriteRef.current = write.then(() => undefined, () => undefined);
+		return write;
+	}, []);
 
   const loadWorkspaceCatalog = useCallback(async () => {
     const response = await listWorkspaces();
@@ -186,7 +194,7 @@ export default function WorkspaceChat() {
           await readWorkspaceThread(workspaceRef, nextDraft.thread_id);
           if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
           const materializedConversation: ConversationRef = { kind: 'thread', id: nextDraft.thread_id };
-          await putWorkspaceChatSelection(workspaceRef, materializedConversation);
+		  await persistSelection(workspaceRef, materializedConversation);
           if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
           navigate(conversationPath(workspaceRef, materializedConversation), { replace: true });
           return;
@@ -198,7 +206,7 @@ export default function WorkspaceChat() {
 		validatedSnapshot = await readWorkspaceThread(workspaceRef, conversation.id);
 		if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
 	  }
-	  await putWorkspaceChatSelection(workspaceRef, conversation);
+		  await persistSelection(workspaceRef, conversation);
 	  if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
 	  const [runtimeCatalog, availableThreads, loadedThread] = await Promise.all([
         getWorkspaceRuntimeCatalog(workspaceRef),
@@ -228,7 +236,7 @@ export default function WorkspaceChat() {
     })
       .finally(() => { if (!cancelled && generation === loadGeneration.current) setLoading(false); });
     return () => { cancelled = true; };
-  }, [conversation?.id, conversation?.kind, fetchThreads, navigate, t, targetKey, workspaceRef]);
+	  }, [conversation?.id, conversation?.kind, fetchThreads, navigate, persistSelection, t, targetKey, workspaceRef]);
 
   const onSocketEvent = useCallback((event: WorkspaceChatServerEvent) => {
     if (!workspaceRef || !conversation || event.workspace_ref !== workspaceRef) return;
