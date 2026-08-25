@@ -121,6 +121,22 @@ func TestDockerWebBuildUsesRepositoryLockfile(t *testing.T) {
 	}
 }
 
+func TestDockerPortableBuildersRunOnBuildPlatform(t *testing.T) {
+	dockerfile := readFile(t, filepath.Join("..", "Dockerfile"))
+	for _, required := range []string{
+		"FROM --platform=${BUILDPLATFORM} ${NODE_IMAGE} AS web-build",
+		"FROM --platform=${BUILDPLATFORM} ${GO_IMAGE} AS go-build",
+		"CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build",
+	} {
+		if !strings.Contains(dockerfile, required) {
+			t.Fatalf("Dockerfile missing native cross-build contract %q", required)
+		}
+	}
+	if strings.Contains(dockerfile, "FROM --platform=${BUILDPLATFORM} ${ALPINE_IMAGE} AS runtime") {
+		t.Fatal("Dockerfile pins the target runtime image to the build platform")
+	}
+}
+
 func TestDockerContextIncludesGoEmbedInputs(t *testing.T) {
 	dockerIgnore := readFile(t, filepath.Join("..", ".dockerignore"))
 	excludeIndex := strings.Index(dockerIgnore, "config.*.toml")
