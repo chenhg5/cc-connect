@@ -78,7 +78,7 @@ func contractHash() string {
 	}
 	sort.Strings(names)
 	canonical := Version + "|contract_hash,device_id,connection_generation,sequence,request_id,method,resource,payload,error|" + strings.Join(names, ",") +
-		"|native_user_input:type,text,attachment_ref,mime_type,file_name,detail|attachment_download:workspace_ref,type,mime_type,file_name,data|runtime_update:tag"
+		"|native_user_input:type,text,attachment_ref,mime_type,file_name,detail|native_event:event,request_id,native_connection_generation|attachment_download:workspace_ref,type,mime_type,file_name,data|runtime_update:tag"
 	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:])
 }
@@ -134,6 +134,14 @@ type AttachmentContent struct {
 	MimeType     string `json:"mime_type,omitempty"`
 	FileName     string `json:"file_name,omitempty"`
 	Data         []byte `json:"data"`
+}
+
+// NativeEventPayload 保留 Runtime 原生订阅的私有路由字段。Event 仍使用
+// 对外事件 JSON，避免把原生 JSON-RPC request id 和连接代际暴露给 Web。
+type NativeEventPayload struct {
+	Event                      json.RawMessage `json:"event"`
+	RequestID                  json.RawMessage `json:"request_id,omitempty"`
+	NativeConnectionGeneration uint64          `json:"native_connection_generation"`
 }
 
 // SignedRequestMessage 是 Runtime HTTP 边界的唯一签名规范。

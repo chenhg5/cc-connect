@@ -4,14 +4,16 @@
 
 `GET /api/v1/deploy/dashboard` 的 `deployment` 是部署能力权威来源，包含 `owner`、`available`、`reason`、`detail`、`update`、`rollback` 和 `restart`。systemd 与 container 两种所有者都支持 Web 签名更新和回滚；容器宿主执行器离线时返回 `reason=container_host_unavailable` 并禁用版本操作，server 重启仍由 control 负责。
 
-项目处于 `v0.1.0`，以下是唯一现行契约。旧 management token、query token、CORS 登录、`cc-connect web` 和业务进程公开 TCP 不再支持。
+项目处于 `v0.2.0`，以下是唯一现行契约。旧 management token、query token、CORS 登录、`cc-connect web` 和业务进程公开 TCP 不再支持。
 
 ## 认证
 
-- `GET|POST /api/v1/auth/setup`：读取初始化状态或使用 bootstrap 输出的一次性 Token 设置管理员密码。
-- `POST /api/v1/auth/login`：管理员密码登录。
+- `GET|POST /api/v1/auth/setup`：读取初始化状态或使用 bootstrap 输出的一次性 Token 设置管理员账号和密码。
+- `POST /api/v1/auth/login`：使用管理员账号和密码登录。
 - `POST /api/v1/auth/logout`：注销当前会话。
 - `GET /api/v1/auth/session`：恢复 Cookie 会话并取得 CSRF Token。
+- `GET /api/v1/auth/profile`：读取管理员账号资料。
+- `POST /api/v1/auth/password`：校验当前密码并设置至少 12 位的新密码，同时让全部浏览器会话失效。
 
 密码使用 Argon2id。会话 Token 只保存摘要；Cookie 为 `Secure`、`HttpOnly`、`SameSite=Strict`。所有非安全方法必须同时通过同源 `Origin` 和 `X-CSRF-Token` 校验。
 

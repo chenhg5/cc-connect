@@ -21,7 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 const (
 	defaultSessionTTL = 24 * time.Hour
@@ -98,6 +98,12 @@ type AuditEvent struct {
 	Details    json.RawMessage `json:"details"`
 }
 
+type AdministratorProfile struct {
+	Username  string    `json:"username"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 func Open(path, setupToken string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("control store: database path is required")
@@ -134,11 +140,11 @@ func (s *Store) initialize(ctx context.Context, setupToken string) error {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("control store: read schema version: %w", err)
 	}
-	if version > SchemaVersion {
-		return fmt.Errorf("control store: schema version %d is newer than supported version %d", version, SchemaVersion)
+	if version != 0 && version != SchemaVersion {
+		return fmt.Errorf("control store: schema version %d does not match required version %d", version, SchemaVersion)
 	}
-	for next := version + 1; next <= SchemaVersion; next++ {
-		if err := s.migrate(ctx, next); err != nil {
+	if version == 0 {
+		if err := s.createSchema(ctx); err != nil {
 			return err
 		}
 	}
@@ -146,7 +152,17 @@ func (s *Store) initialize(ctx context.Context, setupToken string) error {
 	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM control_meta WHERE key = 'setup_token_hash'").Scan(&initialized); err != nil {
 		return fmt.Errorf("control store: inspect setup token: %w", err)
 	}
-	if initialized == 0 {
+	var administratorCount int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM administrators").Scan(&administratorCount); err != nil {
+		return fmt.Errorf("control store: inspect administrator: %w", err)
+	}
+	if administratorCount > 0 {
+		if initialized > 0 {
+			if _, err := s.db.ExecContext(ctx, "DELETE FROM control_meta WHERE key = 'setup_token_hash'"); err != nil {
+				return fmt.Errorf("control store: remove consumed setup token: %w", err)
+			}
+		}
+	} else if initialized == 0 {
 		if strings.TrimSpace(setupToken) == "" {
 			return errors.New("control store: first start requires a one-time setup token")
 		}
@@ -170,53 +186,38 @@ func (s *Store) initialize(ctx context.Context, setupToken string) error {
 	return nil
 }
 
-func (s *Store) migrate(ctx context.Context, version int) error {
+func (s *Store) createSchema(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("control store: begin migration %d: %w", version, err)
+		return fmt.Errorf("control store: begin schema creation: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	var statements []string
-	switch version {
-	case 1:
-		statements = []string{
-			`CREATE TABLE control_meta (key TEXT PRIMARY KEY, value BLOB NOT NULL)`,
-			`CREATE TABLE administrators (id INTEGER PRIMARY KEY CHECK(id = 1), password_hash TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)`,
-			`CREATE TABLE sessions (id TEXT PRIMARY KEY, token_hash BLOB NOT NULL UNIQUE, csrf_hash BLOB NOT NULL, expires_at_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER NOT NULL)`,
-			`CREATE TABLE devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, public_key BLOB NOT NULL UNIQUE, paired_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER, revoked_at_ms INTEGER)`,
-			`CREATE TABLE pairing_codes (code_hash BLOB PRIMARY KEY, expires_at_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, consumed_at_ms INTEGER)`,
-			`CREATE TABLE deploy_runs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL, target_tag TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '', started_at_ms INTEGER NOT NULL, ended_at_ms INTEGER, error TEXT NOT NULL DEFAULT '')`,
-			`CREATE TABLE deploy_run_logs (run_id TEXT NOT NULL REFERENCES deploy_runs(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, occurred_at_ms INTEGER NOT NULL, stream TEXT NOT NULL, line TEXT NOT NULL, PRIMARY KEY(run_id, sequence))`,
-			`CREATE TABLE execution_slot (id INTEGER PRIMARY KEY CHECK(id = 1), run_id TEXT NOT NULL REFERENCES deploy_runs(id), acquired_at_ms INTEGER NOT NULL)`,
-			`CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at_ms INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, resource TEXT NOT NULL, outcome TEXT NOT NULL, details_json BLOB NOT NULL DEFAULT '{}')`,
-		}
-	case 2:
-		statements = []string{
-			`CREATE TABLE runtime_checkpoints (device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, connection_generation INTEGER NOT NULL, confirmed_sequence INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)`,
-			`CREATE TABLE runtime_catalog (device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE, local_ref TEXT NOT NULL, global_ref TEXT NOT NULL UNIQUE, payload_json BLOB NOT NULL, available INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '', updated_at_ms INTEGER NOT NULL, PRIMARY KEY(device_id, local_ref))`,
-		}
-	case 3:
-		statements = []string{
-			`CREATE TABLE control_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)`,
-		}
-	case 4:
-		statements = []string{
-			`CREATE TABLE release_slots (tag TEXT PRIMARY KEY, commit_sha TEXT NOT NULL, directory TEXT NOT NULL UNIQUE, manifest_json BLOB NOT NULL, status TEXT NOT NULL, activated_at_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL)`,
-			`CREATE TABLE runtime_updates (device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, target_tag TEXT NOT NULL, status TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)`,
-		}
-	default:
-		return fmt.Errorf("control store: unknown migration %d", version)
+	statements := []string{
+		`CREATE TABLE control_meta (key TEXT PRIMARY KEY, value BLOB NOT NULL)`,
+		`CREATE TABLE administrators (id INTEGER PRIMARY KEY CHECK(id = 1), username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)`,
+		`CREATE TABLE sessions (id TEXT PRIMARY KEY, token_hash BLOB NOT NULL UNIQUE, csrf_hash BLOB NOT NULL, expires_at_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER NOT NULL)`,
+		`CREATE TABLE devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, public_key BLOB NOT NULL UNIQUE, paired_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER, revoked_at_ms INTEGER)`,
+		`CREATE TABLE pairing_codes (code_hash BLOB PRIMARY KEY, expires_at_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, consumed_at_ms INTEGER)`,
+		`CREATE TABLE deploy_runs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL, target_tag TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '', started_at_ms INTEGER NOT NULL, ended_at_ms INTEGER, error TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE deploy_run_logs (run_id TEXT NOT NULL REFERENCES deploy_runs(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, occurred_at_ms INTEGER NOT NULL, stream TEXT NOT NULL, line TEXT NOT NULL, PRIMARY KEY(run_id, sequence))`,
+		`CREATE TABLE execution_slot (id INTEGER PRIMARY KEY CHECK(id = 1), run_id TEXT NOT NULL REFERENCES deploy_runs(id), acquired_at_ms INTEGER NOT NULL)`,
+		`CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at_ms INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, resource TEXT NOT NULL, outcome TEXT NOT NULL, details_json BLOB NOT NULL DEFAULT '{}')`,
+		`CREATE TABLE runtime_checkpoints (device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, connection_generation INTEGER NOT NULL, confirmed_sequence INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)`,
+		`CREATE TABLE runtime_catalog (device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE, local_ref TEXT NOT NULL, global_ref TEXT NOT NULL UNIQUE, payload_json BLOB NOT NULL, available INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '', updated_at_ms INTEGER NOT NULL, PRIMARY KEY(device_id, local_ref))`,
+		`CREATE TABLE control_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)`,
+		`CREATE TABLE release_slots (tag TEXT PRIMARY KEY, commit_sha TEXT NOT NULL, directory TEXT NOT NULL UNIQUE, manifest_json BLOB NOT NULL, status TEXT NOT NULL, activated_at_ms INTEGER NOT NULL, created_at_ms INTEGER NOT NULL)`,
+		`CREATE TABLE runtime_updates (device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, target_tag TEXT NOT NULL, status TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("control store: migration %d: %w", version, err)
+			return fmt.Errorf("control store: create schema: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
-		return fmt.Errorf("control store: set schema version %d: %w", version, err)
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)); err != nil {
+		return fmt.Errorf("control store: set schema version: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("control store: commit migration %d: %w", version, err)
+		return fmt.Errorf("control store: commit schema creation: %w", err)
 	}
 	return nil
 }
@@ -311,9 +312,28 @@ func (s *Store) SetupRequired(ctx context.Context) (bool, error) {
 	return count == 0, nil
 }
 
-func (s *Store) SetupAdministrator(ctx context.Context, setupToken, password string) error {
+func validateUsername(username string) (string, error) {
+	username = strings.TrimSpace(username)
+	if len(username) < 3 || len(username) > 64 || strings.IndexFunc(username, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' }) >= 0 {
+		return "", errors.New("control store: administrator username must be 3-64 characters without whitespace")
+	}
+	return username, nil
+}
+
+func validatePassword(password string) error {
 	if len(password) < 12 {
 		return errors.New("control store: administrator password must contain at least 12 characters")
+	}
+	return nil
+}
+
+func (s *Store) SetupAdministrator(ctx context.Context, setupToken, username, password string) error {
+	username, err := validateUsername(username)
+	if err != nil {
+		return err
+	}
+	if err := validatePassword(password); err != nil {
+		return err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -333,7 +353,7 @@ func (s *Store) SetupAdministrator(ctx context.Context, setupToken, password str
 		return err
 	}
 	now := s.now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, "INSERT INTO administrators(id, password_hash, created_at_ms, updated_at_ms) VALUES(1, ?, ?, ?)", passwordHash, now, now); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO administrators(id, username, password_hash, created_at_ms, updated_at_ms) VALUES(1, ?, ?, ?, ?)", username, passwordHash, now, now); err != nil {
 		return fmt.Errorf("control store: create administrator: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM control_meta WHERE key = 'setup_token_hash'"); err != nil {
@@ -342,9 +362,13 @@ func (s *Store) SetupAdministrator(ctx context.Context, setupToken, password str
 	return tx.Commit()
 }
 
-func (s *Store) AuthenticateAdministrator(ctx context.Context, password string) error {
+func (s *Store) AuthenticateAdministrator(ctx context.Context, username, password string) error {
+	username, err := validateUsername(username)
+	if err != nil {
+		return err
+	}
 	var encoded string
-	if err := s.db.QueryRowContext(ctx, "SELECT password_hash FROM administrators WHERE id = 1").Scan(&encoded); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT password_hash FROM administrators WHERE id = 1 AND username = ?", username).Scan(&encoded); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("control store: administrator setup is incomplete")
 		}
@@ -356,6 +380,56 @@ func (s *Store) AuthenticateAdministrator(ctx context.Context, password string) 
 	}
 	if !ok {
 		return errors.New("control store: invalid administrator credentials")
+	}
+	return nil
+}
+
+func (s *Store) AdministratorProfile(ctx context.Context) (AdministratorProfile, error) {
+	var profile AdministratorProfile
+	var created, updated int64
+	if err := s.db.QueryRowContext(ctx, "SELECT username, created_at_ms, updated_at_ms FROM administrators WHERE id = 1").Scan(&profile.Username, &created, &updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AdministratorProfile{}, errors.New("control store: administrator setup is incomplete")
+		}
+		return AdministratorProfile{}, fmt.Errorf("control store: read administrator profile: %w", err)
+	}
+	profile.CreatedAt = time.UnixMilli(created)
+	profile.UpdatedAt = time.UnixMilli(updated)
+	return profile, nil
+}
+
+func (s *Store) ChangeAdministratorPassword(ctx context.Context, currentPassword, newPassword string) error {
+	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("control store: begin password change: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var encoded string
+	if err := tx.QueryRowContext(ctx, "SELECT password_hash FROM administrators WHERE id = 1").Scan(&encoded); err != nil {
+		return fmt.Errorf("control store: read administrator: %w", err)
+	}
+	ok, err := verifyPassword(currentPassword, encoded)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("control store: current administrator password is invalid")
+	}
+	hash, err := hashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE administrators SET password_hash = ?, updated_at_ms = ? WHERE id = 1", hash, s.now().UnixMilli()); err != nil {
+		return fmt.Errorf("control store: update administrator password: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM sessions"); err != nil {
+		return fmt.Errorf("control store: invalidate sessions: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("control store: commit password change: %w", err)
 	}
 	return nil
 }
@@ -409,6 +483,32 @@ func (s *Store) ValidateSession(ctx context.Context, token, csrf string, require
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	_, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE token_hash = ?", digest(token))
 	return err
+}
+
+func (s *Store) RefreshSessionCSRF(ctx context.Context, token string) (Session, error) {
+	csrf, err := randomToken(24)
+	if err != nil {
+		return Session{}, err
+	}
+	var session Session
+	var expires int64
+	err = s.db.QueryRowContext(ctx, "SELECT id, expires_at_ms FROM sessions WHERE token_hash = ?", digest(token)).Scan(&session.ID, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, errors.New("control store: invalid session")
+	}
+	if err != nil {
+		return Session{}, fmt.Errorf("control store: read session: %w", err)
+	}
+	session.ExpiresAt = time.UnixMilli(expires)
+	if !session.ExpiresAt.After(s.now()) {
+		_, _ = s.db.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", session.ID)
+		return Session{}, errors.New("control store: session expired")
+	}
+	if _, err := s.db.ExecContext(ctx, "UPDATE sessions SET csrf_hash = ?, last_seen_at_ms = ? WHERE id = ?", digest(csrf), s.now().UnixMilli(), session.ID); err != nil {
+		return Session{}, fmt.Errorf("control store: refresh csrf token: %w", err)
+	}
+	session.CSRFToken = csrf
+	return session, nil
 }
 
 func (s *Store) CreatePairingCode(ctx context.Context) (PairingCode, error) {

@@ -4,7 +4,7 @@ ARG NODE_IMAGE=m.daocloud.io/docker.io/library/node:20-alpine@sha256:fb4cd12c85e
 ARG GO_IMAGE=m.daocloud.io/docker.io/library/golang:1.25.1-alpine@sha256:b6ed3fd0452c0e9bcdef5597f29cc1418f61672e9d3a2f55bf02e7222c014abd
 ARG ALPINE_IMAGE=m.daocloud.io/docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 
-FROM ${NODE_IMAGE} AS web-build
+FROM --platform=${BUILDPLATFORM} ${NODE_IMAGE} AS web-build
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ENV COREPACK_NPM_REGISTRY=${NPM_REGISTRY} \
     NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
@@ -18,7 +18,7 @@ WORKDIR /src/web
 COPY web .
 RUN pnpm build
 
-FROM ${GO_IMAGE} AS go-build
+FROM --platform=${BUILDPLATFORM} ${GO_IMAGE} AS go-build
 ARG GOPROXY=https://goproxy.cn
 ARG GOSUMDB=sum.golang.org
 ENV GOPROXY=${GOPROXY} \

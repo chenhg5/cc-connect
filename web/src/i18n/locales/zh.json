@@ -9,7 +9,7 @@
     "cron": "定时任务",
     "bridge": "桥接",
     "skills": "技能",
-    "system": "系统",
+    "system": "系统", "profile": "个人中心",
     "operations": "运维中心"
   },
   "dashboard": {
@@ -507,6 +507,8 @@
     "paid": "付费"
   },
   "control": {
+    "profileTitle": "管理员个人中心", "account": "账号", "changePassword": "修改密码", "currentPassword": "当前密码", "newPassword": "新密码", "passwordChanged": "密码已修改，请重新登录。", "savePassword": "更新密码",
+    "adminUsername": "管理员账号",
     "firstSetup": "初始化控制面", "setupSubtitle": "创建唯一的管理员账户", "loginSubtitle": "登录 cc-connect 控制面",
     "setupToken": "一次性设置 Token", "adminPassword": "管理员密码", "confirmPassword": "确认密码", "passwordMismatch": "两次输入的密码不一致", "createAdmin": "创建管理员",
     "operations": "运维中心", "operationsSubtitle": "管理 Runtime 设备、发布、日志和业务进程", "devices": "macOS Runtime 设备", "pairDevice": "配对设备", "pairExpires": "有效期至 {{time}}", "online": "在线", "offline": "离线", "revoke": "撤销", "renameDevice": "重命名设备", "deviceLogs": "连接日志", "noDevices": "尚未配对设备",

@@ -180,7 +180,7 @@ func (m *DeploymentManager) ConfirmContainerPending(ctx context.Context) error {
 		if m.config.RunningVersion != record.TargetTag {
 			return fmt.Errorf("deployment manager: running control version %q is not pending target %q", m.config.RunningVersion, record.TargetTag)
 		}
-		activity, healthErr := m.supervisor.RuntimeActivity(ctx)
+		activity, healthErr := m.waitForRuntimeActivity(ctx)
 		if healthErr != nil {
 			return fmt.Errorf("deployment manager: candidate server health check failed: %w", healthErr)
 		}

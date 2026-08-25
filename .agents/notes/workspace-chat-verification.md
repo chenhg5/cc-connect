@@ -13,7 +13,7 @@
 
 ## 应避免路径
 
-- 不使用已删除的整线程读取 RPC、固定条数读取或旧事件扁平化来替代 `thread/turns/list`、`thread/items/list` 和 `NativeEventEnvelope`；这会重新引入第二套历史或事件协议。
+- Codex 0.147.0 的 schema 已删除 `thread/turns/list` 和 `thread/items/list`。完整历史只调用当前 `thread/read(includeTurns=true)`，再由 Runtime 对权威快照做确定性分页；不得保留两个旧 RPC、fallback 或第二套历史读取器。
 - 不用空 `thread/start` 实现“新建”。首个 Turn 前没有可恢复 rollout，新建必须先落 SQLite 草稿。
 - 不为 `workspace_chat.db` 增加迁移 runner、旧表读取或损坏数据库 fallback。只有通过完整性检查的版本不匹配数据库才允许精确重建。
 - 不先反复运行全仓门禁来定位接口错误。先完成静态契约清理和聚焦测试，修复真实原因后再运行一次完整门禁。
@@ -39,6 +39,7 @@
 - 测试中的空主 SessionManager 路径必须连同派生工作区存储一起保持禁用。否则相对路径会在包目录生成 `test_ws_*.json`，产物本身也是后台生命周期未收口的诊断信号。
 - 远程 Runtime 的 `connection_generation` 不能只在 control 内存递增；control 重启后必须从 `control.db` 的最后 checkpoint 继续，否则新连接会复用旧代际。每个连接还需要独立 context 和任务等待，断线后旧 RPC 响应与旧原生订阅不得进入新连接。
 - Runtime 原生订阅的取消函数和事件泵必须由同一个登记项拥有。旧订阅退出时只删除自身登记，不能按 workspace/thread key 无条件删除后来建立的新订阅；连接释放需要先取消再等待事件泵退出。
+- Runtime WebSocket 的外层 `connection_generation` 与 Codex App Server 原生订阅 generation 是两个独立代际。`core.NativeEventEnvelope` 为避免向 Web 暴露原生 JSON-RPC request ID 和 generation，把这两个字段排除在公开 JSON 外；跨 Runtime/control 边界必须使用 `runtimeprotocol.NativeEventPayload` 显式承载并在 server 侧恢复。若直接 `json.Marshal(NativeEventEnvelope)`，control 仍会 ACK 外层事件，但 Core 会因原生 generation 变成 0 而过滤全部实时通知，审批 request ID 也会丢失。
 - 设备撤销不能只写数据库标记。Broker 必须在同一操作中摘除并关闭活动 WebSocket、释放附件并记录审计事件，否则已认证连接会在“离线”显示后继续工作。
 - Runtime 版本激活在本机写入 `pending-activation.json` 后才切换 `current`，并且只有候选 control 的 `runtime/update/confirm` 能清除看门狗；未确认、启动失败或超时都恢复上一槽。control 的不可取消部署阶段从停止 server 的提交点开始，提交前必须最后检查取消。
 - bootstrap 与 Runtime installer 应用真实脚本夹具验证幂等、权限和部分状态。已有 Runtime 身份必须在任何下载或槽切换前校验 server URL；不同控制面必须在产生本地修改前失败。

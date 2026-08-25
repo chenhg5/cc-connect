@@ -18,7 +18,7 @@ bot_secret = "your-bot-secret"
 
 该配置由 control 初始化向导原子生成。`transports` 至少包含 `web` 或 `wecom`；启用企业微信时必须填写 WebSocket Bot 凭据。服务器不运行本地 Codex Agent，也不读取服务器 `CODEX_HOME`。
 
-每台配对的 macOS Runtime 读取本机 Codex App 状态并持有一个 App Server 连接。初始化时 Runtime 启用 experimental API，并分别探测原生设置、协作模式、分页历史和 realtime。能力不可用时返回真实原因，不切换到已删除的 RPC 或事件协议。
+每台配对的 macOS Runtime 读取本机 Codex App 状态并持有一个 App Server 连接。初始化时 Runtime 启用 experimental API，并分别探测原生设置、协作模式、权威历史和 realtime。能力不可用时返回真实原因，不切换到已删除的 RPC 或事件协议。
 
 ## 项目与会话
 
@@ -50,7 +50,7 @@ bot_secret = "your-bot-secret"
 
 每个 `workspaceRef + conversationRef` 由一个 `WorkspaceChatService` actor 持有。同会话操作串行，不同会话可以并发。空闲 thread 接受 `turn_start`；活动 thread 只接受携带预期 Turn ID 的显式 `turn_steer` 或携带活动 Turn ID 的 `turn_interrupt`。审批与结构化交互保留原始 JSON-RPC request ID，并且只接受 App Server 声明的决定。secret 不写入数据库或日志。
 
-完整历史只使用分页的 `thread/turns/list` 和 `thread/items/list`。`thread/read(includeTurns=false)` 仅用于精确读取 metadata 并校验 thread ID 与规范 cwd，绝不读取历史。Web 将权威分页快照与实时事件合并，展示已知消息、推理摘要、计划、命令、文件修改、MCP/动态工具、搜索、错误，并为未知 item 保留通用原始详情。系统没有固定 200 条历史请求，也不保留第二套历史协议。
+Codex 0.147.0 的完整历史只使用当前 App Server 的 `thread/read(includeTurns=true)`，该方法返回持久化 Turn 及其 item。Runtime 对这份权威快照做确定性切片，并通过 CC-Connect 的不透明 Turn/item 游标分页契约提供给消费者。已删除的 `thread/turns/list` 和 `thread/items/list` 不再调用，也不保留 fallback。`thread/read(includeTurns=false)` 仍只用于精确读取 metadata，并校验 thread ID 与规范 cwd。Web 将权威分页快照与实时事件合并，展示已知消息、推理摘要、计划、命令、文件修改、MCP/动态工具、搜索、错误，并为未知 item 保留通用原始详情。
 
 ## Web 协议与实时语音
 

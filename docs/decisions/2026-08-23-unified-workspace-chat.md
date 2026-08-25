@@ -10,7 +10,7 @@ cc-connect 原有主聊天以平台 `session_key` 和截断 History 为中心，
 
 每台配对的 macOS Runtime 持有一个长驻 App Server 客户端，并为该设备的所有工作区复用物理连接。Linux server 通过远程 NativeConversation 能力访问它。`WorkspaceChatService` 是会话 actor、活动 Turn、设置、结构化交互、realtime、投递、订阅和关闭的唯一生命周期所有者。App Server 的 thread、item、Turn 和 settings 终态是运行状态的权威来源，SQLite 不复制原生对话正文。
 
-cc-connect 对外只提供一套工作区聊天协议。App Server stable/experimental 方法通过同一连接逐项探测，能力缺失时明确返回不可用，不保留旧 RPC、旧事件或第二套下游协议。完整历史只使用 `thread/turns/list` 和 `thread/items/list`；`thread/read(includeTurns=false)` 只承担精确 metadata 与 cwd 归属校验。
+cc-connect 对外只提供一套工作区聊天协议。App Server stable/experimental 方法通过同一连接逐项探测，能力缺失时明确返回不可用，不保留旧 RPC、旧事件或第二套下游协议。Codex 0.147.0 的完整历史只使用 `thread/read(includeTurns=true)`；Runtime 从该权威快照为 CC-Connect 的 Turn/item 列表接口生成不透明游标分页。`thread/turns/list` 和 `thread/items/list` 已从当前 App Server schema 删除，不保留调用或 fallback。`thread/read(includeTurns=false)` 仍承担精确 metadata 与 cwd 归属校验。
 
 项目只读展示和切换；会话只提供列表、切换、新建草稿和复制深链。模型、effort、Default/Plan、权限、tier、personality、reasoning summary、审批、结构化提问、steer、取消、状态、usage、完整历史和事件属于当前会话操控范围。fork、命名/重命名、pin、archive、delete、search、sections、goal、compact、review、终端与桌面全局管理明确排除。
 
@@ -32,7 +32,7 @@ cc-connect 对外只提供一套工作区聊天协议。App Server stable/experi
 
 新建只提交草稿和 selection；首个普通 Turn 由同一 actor 顺序执行 `thread/start` 和 `turn/start`。App Server 接受后，actor 使用服务拥有的有界提交 context，在一个数据库事务中绑定真实 thread、更新 selection 和提交投递状态，再发布 `thread_materialized`；客户端此时取消请求不会撤销已被原生后端接受的本地终态。原生 mutation 的连接结果不确定时清除可重放正文并标记 `needs_retry`，草稿物化窗口不确定时另标记 `materialization_uncertain`，两者都禁止自动重发。草稿物化前不提供深链或 realtime。
 
-设置修改由 actor 串行发送，收到 `thread/settings/updated` 后才发布成功。审批和结构化提问以原始 JSON-RPC ID、thread/turn/item 及连接 generation 路由；旧连接响应不会进入新连接。事件先进入按 thread 排序的序列流，再发送给订阅者；缓冲缺口或客户端提交同 epoch 的未来 cursor 都触发显式 resync，不静默丢弃。每个 WebSocket 连接至多拥有一个 realtime 目标，切换会话必须先成功 stop，失败时保留所有权供关闭路径再次清理。
+设置修改由 actor 串行发送，收到 `thread/settings/updated` 后才发布成功。审批和结构化提问以原始 JSON-RPC ID、thread/turn/item 及连接 generation 路由；旧连接响应不会进入新连接。Runtime 的 `native/event` 使用独立内部载荷承载原生 generation 和 JSON-RPC request ID，对外事件 JSON 不暴露这两个私有路由字段。事件先进入按 thread 排序的序列流，再发送给订阅者；缓冲缺口或客户端提交同 epoch 的未来 cursor 都触发显式 resync，不静默丢弃。每个 WebSocket 连接至多拥有一个 realtime 目标，切换会话必须先成功 stop，失败时保留所有权供关闭路径再次清理。
 
 服务关闭时先停止 realtime、取消活动 Turn、终结 pending interaction 和投递状态，再注销 thread 路由并关闭唯一 App Server 连接，最后关闭 repository。
 

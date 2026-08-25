@@ -48,6 +48,14 @@ func TestWorkspaceAppServerUsesOneConnectionAndIsolatesThreads(t *testing.T) {
 	if err != nil || len(items.Data) != 2 {
 		t.Fatalf("ListNativeItems() = %#v, %v", items, err)
 	}
+	firstItems, err := agent.ListNativeItems(context.Background(), workspace, "thread-1", "turn-history", core.NativePageRequest{Limit: 1})
+	if err != nil || len(firstItems.Data) != 1 || firstItems.NextCursor == "" {
+		t.Fatalf("ListNativeItems(first page) = %#v, %v", firstItems, err)
+	}
+	secondItems, err := agent.ListNativeItems(context.Background(), workspace, "thread-1", "turn-history", core.NativePageRequest{Cursor: firstItems.NextCursor, Limit: 1})
+	if err != nil || len(secondItems.Data) != 1 || secondItems.NextCursor != "" {
+		t.Fatalf("ListNativeItems(second page) = %#v, %v", secondItems, err)
+	}
 	created, err := agent.StartNativeConversation(context.Background(), workspace)
 	if err != nil || created.Thread.ID != "thread-new" || created.Thread.Name != "thread-new" {
 		t.Fatalf("StartNativeConversation() = %#v, %v", created, err)
@@ -144,6 +152,62 @@ func TestWorkspaceAppServerUsesOneConnectionAndIsolatesThreads(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "turn/interrupt:legacy-1:turn-legacy-1") {
 		t.Fatalf("logical close did not interrupt the active turn, log:\n%s", data)
+	}
+}
+
+func TestStartNativeConversationDoesNotWaitForNoopSettingsNotification(t *testing.T) {
+	agent, _ := newWorkspaceFakeAppServerAgent(t)
+	agent.configEnv = append(agent.configEnv, "CC_WORKSPACE_FAKE_NOOP_SETTINGS_NO_NOTIFICATION=1")
+	t.Cleanup(func() {
+		if err := agent.Stop(); err != nil {
+			t.Errorf("Stop: %v", err)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	created, err := agent.StartNativeConversation(ctx, fakeWorkspace(t, agent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Thread.ID != "thread-new" || created.Settings.Revision == "" {
+		t.Fatalf("StartNativeConversation() = %#v", created)
+	}
+}
+
+func TestSubscribeNativeConversationReusesLoadedEmptyThread(t *testing.T) {
+	agent, _ := newWorkspaceFakeAppServerAgent(t)
+	agent.configEnv = append(agent.configEnv,
+		"CC_WORKSPACE_FAKE_NOOP_SETTINGS_NO_NOTIFICATION=1",
+		"CC_WORKSPACE_FAKE_EMPTY_THREAD_NO_ROLLOUT=1",
+	)
+	t.Cleanup(func() {
+		if err := agent.Stop(); err != nil {
+			t.Errorf("Stop: %v", err)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	workspace := fakeWorkspace(t, agent)
+	created, err := agent.StartNativeConversation(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription, err := agent.SubscribeNativeConversation(ctx, workspace, created.Thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Cancel()
+	if subscription.Generation == 0 {
+		t.Fatal("subscription generation is empty")
+	}
+	read, err := agent.ReadNativeConversation(ctx, workspace, created.Thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.Thread.ID != created.Thread.ID || read.Settings.Revision == "" {
+		t.Fatalf("ReadNativeConversation() = %#v", read)
 	}
 }
 
@@ -1007,8 +1071,8 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 				IncludeTurns *bool  `json:"includeTurns"`
 			}
 			_ = json.Unmarshal(request["params"], &params)
-			if params.IncludeTurns == nil || *params.IncludeTurns {
-				write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": "thread/read requires includeTurns=false"}})
+			if params.IncludeTurns == nil {
+				write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": "thread/read requires includeTurns"}})
 				continue
 			}
 			if params.ThreadID == "missing" {
@@ -1024,6 +1088,15 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 				returnedThreadID = "different-thread"
 			}
 			thread := fakeNativeThread(returnedThreadID, threadCwd)
+			if *params.IncludeTurns && params.ThreadID != "thread-new" {
+				thread["turns"] = []any{map[string]any{
+					"id": "turn-history", "status": "completed",
+					"items": []any{
+						map[string]any{"id": "user-1", "type": "userMessage", "text": "hello"},
+						map[string]any{"id": "agent-1", "type": "agentMessage", "text": "world"},
+					},
+				}}
+			}
 			respond(map[string]any{"thread": thread})
 		case "thread/start":
 			thread := fakeNativeThread("thread-new", cwd)
@@ -1035,6 +1108,10 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 				PersistExtendedHistory *bool  `json:"persistExtendedHistory"`
 			}
 			_ = json.Unmarshal(request["params"], &params)
+			if os.Getenv("CC_WORKSPACE_FAKE_EMPTY_THREAD_NO_ROLLOUT") == "1" && params.ThreadID == "thread-new" {
+				write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32600, "message": "no rollout found for thread id " + params.ThreadID}})
+				continue
+			}
 			if params.PersistExtendedHistory == nil && (params.ExcludeTurns == nil || !*params.ExcludeTurns) {
 				write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32602, "message": "thread/resume requires excludeTurns=true"}})
 				continue
@@ -1044,13 +1121,6 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 				resumeCwd = filepath.Join(cwd, "foreign")
 			}
 			respond(fakeNativeRuntime(fakeNativeThread(params.ThreadID, resumeCwd), resumeCwd))
-		case "thread/turns/list":
-			respond(map[string]any{"data": []any{map[string]any{"id": "turn-history", "status": "completed", "items": []any{}}}, "nextCursor": nil, "backwardsCursor": "turn-back"})
-		case "thread/items/list":
-			respond(map[string]any{"data": []any{
-				map[string]any{"turnId": "turn-history", "item": map[string]any{"id": "user-1", "type": "userMessage", "text": "hello"}},
-				map[string]any{"turnId": "turn-history", "item": map[string]any{"id": "agent-1", "type": "agentMessage", "text": "world"}},
-			}, "nextCursor": nil, "backwardsCursor": "item-back"})
 		case "model/list":
 			var params struct {
 				Cursor string `json:"cursor"`
@@ -1088,6 +1158,10 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 			_ = json.Unmarshal(request["params"], &params)
 			if params.ThreadID == "00000000-0000-7000-8000-000000000000" {
 				write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32004, "message": "thread not found"}})
+				continue
+			}
+			if os.Getenv("CC_WORKSPACE_FAKE_NOOP_SETTINGS_NO_NOTIFICATION") == "1" && params.Model == "" && params.Effort == "" && len(params.CollaborationMode) == 0 {
+				respond(map[string]any{})
 				continue
 			}
 			if delay, delayErr := time.ParseDuration(os.Getenv("CC_WORKSPACE_FAKE_SETTINGS_DELAY")); delayErr == nil && delay > 0 {

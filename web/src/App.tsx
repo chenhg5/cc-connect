@@ -14,6 +14,7 @@ import ProviderList from '@/pages/Providers/ProviderList';
 import SkillList from '@/pages/Skills/SkillList';
 import Operations from '@/pages/Operations';
 import SetupWizard from '@/pages/SetupWizard';
+import Profile from '@/pages/Profile';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -44,6 +45,7 @@ export default function App() {
         <Route path="cron" element={<CronList />} />
         <Route path="system" element={<SystemConfig />} />
         <Route path="operations" element={<Operations />} />
+        <Route path="profile" element={<Profile />} />
       </Route>
     </Routes>
   );

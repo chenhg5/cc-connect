@@ -19,6 +19,7 @@ export default function Login() {
   const { theme, setTheme } = useThemeStore();
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
   const [setupToken, setSetupToken] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmation, setConfirmation] = useState('');
   const [error, setError] = useState('');
@@ -40,8 +41,8 @@ export default function Login() {
     setLoading(true);
     setError('');
     try {
-      if (setupRequired) await setup(setupToken.trim(), password);
-      else await login(password);
+      if (setupRequired) await setup(setupToken.trim(), username.trim(), password);
+      else await login(username.trim(), password);
       navigate(setupRequired ? '/setup' : '/', { replace: true });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -97,6 +98,11 @@ export default function Login() {
             </label>
           )}
           <label className="block text-sm text-gray-700 dark:text-gray-300">
+            <span className="mb-1.5 block font-medium">{t('control.adminUsername')}</span>
+            <input type="text" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username"
+              className="w-full rounded-md border border-gray-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-accent dark:border-gray-700 dark:bg-gray-900" />
+          </label>
+          <label className="block text-sm text-gray-700 dark:text-gray-300">
             <span className="mb-1.5 block font-medium">{t('control.adminPassword')}</span>
             <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoFocus={!setupRequired}
               autoComplete={setupRequired ? 'new-password' : 'current-password'}
@@ -109,7 +115,7 @@ export default function Login() {
                 className="w-full rounded-md border border-gray-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-accent dark:border-gray-700 dark:bg-gray-900" />
             </label>
           )}
-          <button type="submit" disabled={loading || setupRequired === null || !password || (setupRequired && !setupToken)}
+          <button type="submit" disabled={loading || setupRequired === null || !username.trim() || !password || (setupRequired && !setupToken)}
             className="flex w-full items-center justify-center gap-2 rounded-md bg-accent px-4 py-2.5 text-sm font-semibold text-black disabled:opacity-50">
             {setupRequired ? <KeyRound size={16} /> : <LogIn size={16} />}
             {loading ? t('common.loading') : setupRequired ? t('control.createAdmin') : t('login.connect')}
