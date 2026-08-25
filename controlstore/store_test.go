@@ -85,6 +85,39 @@ func TestOpenInitializedAdministratorWithoutSetupToken(t *testing.T) {
 	}
 }
 
+func TestOpenInitializedAdministratorRemovesConsumedSetupToken(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "control.db")
+	store, err := Open(path, "setup-once")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := store.SetupAdministrator(ctx, "setup-once", "ccshus", "long-enough-password"); err != nil {
+		_ = store.Close()
+		t.Fatalf("SetupAdministrator() error = %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "INSERT INTO control_meta(key, value) VALUES('setup_token_hash', randomblob(32))"); err != nil {
+		_ = store.Close()
+		t.Fatalf("insert consumed setup token: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := Open(path, "")
+	if err != nil {
+		t.Fatalf("Open(initialized) error = %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	var count int
+	if err := reopened.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM control_meta WHERE key = 'setup_token_hash'").Scan(&count); err != nil {
+		t.Fatalf("count setup token: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("consumed setup token count = %d, want 0", count)
+	}
+}
+
 func TestChangeAdministratorPasswordInvalidatesAllSessions(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "control.db"), "setup")

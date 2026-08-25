@@ -379,7 +379,7 @@ func (m *DeploymentManager) ConfirmPending(ctx context.Context) (resultErr error
 	if err != nil || !sameFile(current, record.TargetDirectory) {
 		return errors.New("deployment manager: candidate control did not start from the pending target slot")
 	}
-	activity, err := m.supervisor.RuntimeActivity(ctx)
+	activity, err := m.waitForRuntimeActivity(ctx)
 	if err != nil {
 		return fmt.Errorf("deployment manager: candidate server health check failed: %w", err)
 	}
@@ -423,6 +423,24 @@ func (m *DeploymentManager) ConfirmPending(ctx context.Context) (resultErr error
 		slog.Warn("deployment release slot pruning failed", "error", err)
 	}
 	return nil
+}
+
+func (m *DeploymentManager) waitForRuntimeActivity(ctx context.Context) (ServerRuntimeActivity, error) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		activity, err := m.supervisor.RuntimeActivity(ctx)
+		if err == nil {
+			return activity, nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ServerRuntimeActivity{}, fmt.Errorf("%w (last health error: %v)", ctx.Err(), lastErr)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (m *DeploymentManager) RegisterCurrent(ctx context.Context) error {

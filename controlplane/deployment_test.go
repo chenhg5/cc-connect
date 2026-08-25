@@ -28,11 +28,19 @@ import (
 )
 
 type deploymentTestSupervisor struct {
-	mu      sync.Mutex
-	running bool
+	mu               sync.Mutex
+	running          bool
+	activityCalls    int
+	activityFailures int
 }
 
 func (s *deploymentTestSupervisor) RuntimeActivity(context.Context) (ServerRuntimeActivity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activityCalls++
+	if s.activityCalls <= s.activityFailures {
+		return ServerRuntimeActivity{}, errors.New("server socket is not ready")
+	}
 	return ServerRuntimeActivity{}, nil
 }
 func (s *deploymentTestSupervisor) Start(context.Context) error {
@@ -331,9 +339,13 @@ func TestDeploymentManagerContainerOwnerExposesCapabilitiesAndKeepsRestart(t *te
 	if err := manager.ConfirmContainerPending(ctx); err == nil || !strings.Contains(err.Error(), "running control version") {
 		t.Fatalf("old control confirmed candidate: %v", err)
 	}
+	supervisor.activityFailures = 2
 	manager.config.RunningVersion = "v0.1.2"
 	if err := manager.ConfirmContainerPending(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if supervisor.activityCalls != 3 {
+		t.Fatalf("candidate server health attempts = %d, want 3", supervisor.activityCalls)
 	}
 	completed, err := store.DeployRun(ctx, update.ID)
 	if err != nil || completed.Status != "succeeded" {
