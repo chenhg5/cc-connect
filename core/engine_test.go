@@ -58,6 +58,30 @@ type stubPlatformEngine struct {
 	mu   sync.Mutex
 }
 
+type finalizedOrderPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *finalizedOrderPlatform) Send(ctx context.Context, replyCtx any, content string) error {
+	if err := os.WriteFile(p.marker, []byte("sent\n"), 0600); err != nil {
+		return err
+	}
+	return p.stubPlatformEngine.Send(ctx, replyCtx, content)
+}
+
+type failedSendPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *failedSendPlatform) Send(_ context.Context, _ any, _ string) error {
+	if err := os.WriteFile(p.marker, []byte("attempted\n"), 0600); err != nil {
+		return err
+	}
+	return errors.New("platform send failed")
+}
+
 func (p *stubPlatformEngine) Name() string               { return p.n }
 func (p *stubPlatformEngine) Start(MessageHandler) error { return nil }
 func (p *stubPlatformEngine) Reply(_ context.Context, _ any, content string) error {
@@ -1026,6 +1050,47 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	}
 }
 
+func TestProcessInteractiveEvents_FinalizedHookRunsAfterReplySend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &finalizedOrderPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "test -f '" + sentMarker + "' && touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-finalized")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-finalized",
+		ccSessionKey: sessionKey,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "final reply", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "turn-1", time.Now(), nil, nil, state.replyCtx)
+
+	if _, err := os.Stat(sentMarker); err != nil {
+		t.Fatalf("final reply was not sent: %v", err)
+	}
+	if _, err := os.Stat(hookMarker); err != nil {
+		t.Fatalf("message.finalized hook did not run after send: %v", err)
+	}
+	if got := p.getSent(); len(got) != 1 || got[0] != "final reply" {
+		t.Fatalf("sent replies = %#v, want one final reply", got)
+	}
+}
+
 func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelTextWithContextIndicator(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -1086,6 +1151,181 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 	}
 	if got := p.getSent()[1]; got != finalText {
 		t.Fatalf("final sent text = %q, want %q", got, finalText)
+	}
+}
+
+func TestProcessInteractiveEvents_ReturnsRetriableErrorWithoutSendingRawError(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:      EventError,
+		Error:     errors.New("Selected model is at capacity. Please try a different model."),
+		ErrorKind: ErrorKindOverloaded,
+	}
+	retryTurn := e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil)
+
+	if retryTurn == nil {
+		t.Fatal("retryTurn = nil, want retriable turn")
+	}
+	if retryTurn.kind != ErrorKindOverloaded {
+		t.Fatalf("retryKind = %q, want %q", retryTurn.kind, ErrorKindOverloaded)
+	}
+	if retryTurn.err == nil || !strings.Contains(retryTurn.err.Error(), "capacity") {
+		t.Fatalf("retryErr = %v, want capacity error", retryTurn.err)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("sent = %#v, want no raw error sent before retry", sent)
+	}
+	state.mu.Lock()
+	needResync := state.eventsNeedResync
+	state.mu.Unlock()
+	if !needResync {
+		t.Fatal("eventsNeedResync = false, want true after retriable error")
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ReplaysQueuedPromptAfterOverloaded(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 3
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newQueuedRetryAgentSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-queued", content: "queued-msg", messageID: "queued-1"},
+		},
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "initial-msg", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("initial-msg"))
+
+	calls := agentSession.prompts()
+	if len(calls) != 3 {
+		t.Fatalf("prompts = %#v, want initial + queued + queued retry", calls)
+	}
+	if calls[0] != "initial-msg" {
+		t.Fatalf("first prompt = %q, want initial-msg", calls[0])
+	}
+	if !strings.Contains(calls[1], "queued-msg") || !strings.Contains(calls[2], "queued-msg") {
+		t.Fatalf("queued prompts = %#v, want both retries to target queued-msg", calls[1:])
+	}
+	if strings.Contains(calls[2], "initial-msg") {
+		t.Fatalf("retry prompt = %q, should not replay initial prompt", calls[2])
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_StopCancelsRetryDelay(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Hour
+	RetriableErrorRetryDelay = time.Hour
+	RetriableErrorMaxAttempts = 3
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newAlwaysRetryAgentSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"))
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for agentSession.sendCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	state.markStopped()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry delay did not stop after state.markStopped")
+	}
+	if got := agentSession.sendCount(); got != 1 {
+		t.Fatalf("sendCount = %d, want no retry after stop", got)
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ReplaysPromptAfterOverloaded(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRetryOnceAgentSession("s1")
+	state := &interactiveState{
+		agentSession:     agentSession,
+		platform:         p,
+		replyCtx:         "ctx-1",
+		eventsNeedResync: true,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"))
+
+	if got := agentSession.sendCount(); got != 2 {
+		t.Fatalf("sendCount = %d, want 2", got)
+	}
+	sent := p.getSent()
+	if len(sent) != 2 {
+		t.Fatalf("sent = %#v, want retry notice and final response", sent)
+	}
+	if !strings.Contains(sent[0], "Retrying") {
+		t.Fatalf("retry notice = %q, want English retry notice", sent[0])
+	}
+	if sent[1] != "ok after retry" {
+		t.Fatalf("final response = %q, want ok after retry", sent[1])
 	}
 }
 
@@ -7269,6 +7509,149 @@ func (s *controllableAgentSession) Close() error {
 		close(s.closed)
 	}
 	return nil
+}
+
+type retryOnceAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
+type queuedRetryAgentSession struct {
+	sessionID  string
+	events     chan Event
+	promptList []string
+	queuedSeen int
+	mu         sync.Mutex
+}
+
+type alwaysRetryAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
+func newRetryOnceAgentSession(id string) *retryOnceAgentSession {
+	return &retryOnceAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newQueuedRetryAgentSession(id string) *queuedRetryAgentSession {
+	return &queuedRetryAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newAlwaysRetryAgentSession(id string) *alwaysRetryAgentSession {
+	return &alwaysRetryAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func (s *retryOnceAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	sendNo := s.sends
+	s.mu.Unlock()
+	if sendNo == 1 {
+		s.events <- Event{
+			Type:      EventError,
+			Error:     errors.New("Selected model is at capacity. Please try a different model."),
+			ErrorKind: ErrorKindOverloaded,
+		}
+		return nil
+	}
+	s.events <- Event{Type: EventResult, Content: "ok after retry", Done: true}
+	return nil
+}
+
+func (s *retryOnceAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *retryOnceAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *retryOnceAgentSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *retryOnceAgentSession) Alive() bool                                          { return true }
+func (s *retryOnceAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+
+func (s *retryOnceAgentSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+func (s *queuedRetryAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.promptList = append(s.promptList, prompt)
+	isQueued := strings.Contains(prompt, "queued-msg")
+	if isQueued {
+		s.queuedSeen++
+	}
+	queuedSeen := s.queuedSeen
+	s.mu.Unlock()
+
+	if !isQueued {
+		s.events <- Event{Type: EventResult, Content: "initial ok", Done: true}
+		return nil
+	}
+	if queuedSeen == 1 {
+		s.events <- Event{
+			Type:      EventError,
+			Error:     errors.New("Selected model is at capacity. Please try a different model."),
+			ErrorKind: ErrorKindOverloaded,
+		}
+		return nil
+	}
+	s.events <- Event{Type: EventResult, Content: "queued ok", Done: true}
+	return nil
+}
+
+func (s *queuedRetryAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *queuedRetryAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *queuedRetryAgentSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *queuedRetryAgentSession) Alive() bool                                          { return true }
+func (s *queuedRetryAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+
+func (s *queuedRetryAgentSession) prompts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.promptList...)
+}
+
+func (s *alwaysRetryAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	s.mu.Unlock()
+	s.events <- Event{
+		Type:      EventError,
+		Error:     errors.New("Selected model is at capacity. Please try a different model."),
+		ErrorKind: ErrorKindOverloaded,
+	}
+	return nil
+}
+
+func (s *alwaysRetryAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *alwaysRetryAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *alwaysRetryAgentSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *alwaysRetryAgentSession) Alive() bool                                          { return true }
+func (s *alwaysRetryAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+
+func (s *alwaysRetryAgentSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
 }
 
 func waitForInteractiveStateRemoved(t *testing.T, e *Engine, key string) {
@@ -13968,6 +14351,99 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	state.mu.Unlock()
 	if resync {
 		t.Error("expected eventsNeedResync=false after clean unsolicited EventResult")
+	}
+}
+
+func TestUnsolicitedReader_EmitsFinalizedHookAfterReplySend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &finalizedOrderPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer e.Stop()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "test -f '" + sentMarker + "' && touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: "background reply", Done: true}
+
+	if sent := waitForPlatformSend(&p.stubPlatformEngine, 1, 5*time.Second); len(sent) != 1 || sent[0] != "background reply" {
+		t.Fatalf("sent replies = %#v, want one background reply", sent)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(hookMarker); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("message.finalized hook did not run after background reply send")
+}
+
+func TestUnsolicitedReader_DoesNotEmitFinalizedHookWhenReplySendFails(t *testing.T) {
+	dir := t.TempDir()
+	sendAttemptMarker := filepath.Join(dir, "send-attempt")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &failedSendPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sendAttemptMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer e.Stop()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized-failure")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: "background reply", Done: true}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sendAttemptMarker); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(sendAttemptMarker); err != nil {
+		t.Fatalf("background reply send was not attempted: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Fatalf("message.finalized hook ran after failed background send: err=%v", err)
 	}
 }
 

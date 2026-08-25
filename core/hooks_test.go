@@ -20,11 +20,11 @@ func boolPtr(v bool) *bool { return &v }
 func TestNewHookManager_ValidatesConfig(t *testing.T) {
 	hooks := []HookConfig{
 		{Event: "message.received", Type: "command", Command: "echo ok"},
-		{Event: "", Type: "command", Command: "echo bad"},         // missing event
-		{Event: "error", Type: "http", URL: ""},                   // missing url
-		{Event: "error", Type: "http", URL: "ftp://bad"},          // bad url scheme
-		{Event: "error", Type: "unknown", Command: "echo"},        // bad type
-		{Event: "error", Type: "command", Command: ""},            // missing command
+		{Event: "", Type: "command", Command: "echo bad"},  // missing event
+		{Event: "error", Type: "http", URL: ""},            // missing url
+		{Event: "error", Type: "http", URL: "ftp://bad"},   // bad url scheme
+		{Event: "error", Type: "unknown", Command: "echo"}, // bad type
+		{Event: "error", Type: "command", Command: ""},     // missing command
 		{Event: "message.sent", Type: "http", URL: "http://ok.com"},
 	}
 	hm := NewHookManager("test", hooks, "sh", "-c", "")
@@ -384,10 +384,15 @@ func TestEventToEnv(t *testing.T) {
 		Event:      HookEventCronTriggered,
 		Timestamp:  time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC),
 		Project:    "myproj",
+		TurnID:     "turn-123",
 		SessionKey: "tg:1:1",
+		Workspace:  "/tmp/project",
 		Platform:   "telegram",
 		UserID:     "U123",
 		UserName:   "alice",
+		Source:     "agent.final_reply",
+		Internal:   true,
+		ReplyKind:  "card",
 		Content:    "hello world",
 		Error:      "oops",
 	}
@@ -403,10 +408,15 @@ func TestEventToEnv(t *testing.T) {
 	checks := map[string]string{
 		"CC_HOOK_EVENT":       "cron.triggered",
 		"CC_HOOK_PROJECT":     "myproj",
+		"CC_HOOK_TURN_ID":     "turn-123",
 		"CC_HOOK_SESSION_KEY": "tg:1:1",
+		"CC_HOOK_WORKSPACE":   "/tmp/project",
 		"CC_HOOK_PLATFORM":    "telegram",
 		"CC_HOOK_USER_ID":     "U123",
 		"CC_HOOK_USER_NAME":   "alice",
+		"CC_HOOK_SOURCE":      "agent.final_reply",
+		"CC_HOOK_INTERNAL":    "true",
+		"CC_HOOK_REPLY_KIND":  "card",
 		"CC_HOOK_CONTENT":     "hello world",
 		"CC_HOOK_ERROR":       "oops",
 	}
@@ -417,6 +427,12 @@ func TestEventToEnv(t *testing.T) {
 	}
 	if _, ok := m["CC_HOOK_TIMESTAMP"]; !ok {
 		t.Error("expected CC_HOOK_TIMESTAMP in env")
+	}
+}
+
+func TestMessageFinalizedEventType(t *testing.T) {
+	if string(HookEventMessageFinalized) != "message.finalized" {
+		t.Fatalf("HookEventMessageFinalized = %q, want message.finalized", HookEventMessageFinalized)
 	}
 }
 

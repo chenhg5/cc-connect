@@ -91,6 +91,66 @@ func TestHandleSend_AllowsTTSTextOnly(t *testing.T) {
 	}
 }
 
+func TestHandleRelaySendAsync_AcceptsAndQueues(t *testing.T) {
+	relay := NewRelayManager("")
+	relay.Bind("feishu", "chat-1", map[string]string{
+		"source": "source-bot",
+		"target": "target-bot",
+	})
+	relay.RegisterEngine("source", NewEngine("source", &stubAgent{}, []Platform{&stubPlatformEngine{n: "feishu"}}, "", LangEnglish))
+	relay.RegisterEngine("target", NewEngine("target", &resultAgent{session: newResultAgentSession("relay response")}, []Platform{&stubPlatformEngine{n: "feishu"}}, "", LangEnglish))
+	api := &APIServer{relay: relay}
+	body, err := json.Marshal(RelayRequest{
+		From:       "source",
+		To:         "target",
+		SessionKey: "feishu:chat-1:user",
+		Message:    "please work in the background",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/relay/send-async", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleRelaySendAsync(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got["status"] != "queued" {
+		t.Fatalf("status payload = %q, want queued", got["status"])
+	}
+	if !strings.HasPrefix(got["job"], "relay-") {
+		t.Fatalf("job = %q, want relay-*", got["job"])
+	}
+}
+
+func TestHandleRelaySendAsync_ValidatesRequest(t *testing.T) {
+	api := &APIServer{relay: NewRelayManager("")}
+	body, err := json.Marshal(RelayRequest{
+		To:         "target",
+		SessionKey: "feishu:chat:user",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/relay/send-async", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.handleRelaySendAsync(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "to, session_key, and message are required") {
+		t.Fatalf("body = %q, want validation error", rec.Body.String())
+	}
+}
+
 // TestHandleSend_UnknownProjectReturns404 ensures the API does NOT silently
 // fall back to the only registered engine when the caller named a different
 // project. Previously a typo'd project name routed messages to whatever
