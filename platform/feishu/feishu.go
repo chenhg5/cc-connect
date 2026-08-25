@@ -430,6 +430,10 @@ func (p *Platform) ProgressStyle() string { return p.progressStyle }
 
 func (p *Platform) SupportsProgressCardPayload() bool { return true }
 
+// ProgressUpdateInterval limits card edits so a burst of tool events does not
+// exhaust Feishu PATCH capacity or turn a transient timeout into fallback spam.
+func (p *Platform) ProgressUpdateInterval() time.Duration { return 1500 * time.Millisecond }
+
 func (p *Platform) tag() string { return p.platformName }
 
 func (p *Platform) dispatchPlatform() core.Platform {
