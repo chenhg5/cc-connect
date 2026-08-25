@@ -349,7 +349,7 @@ func TestRefreshContextUsageFromRollout_UsesLastTokenCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	cs.refreshContextUsageFromRollout()
 
@@ -400,7 +400,7 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	img := core.ImageAttachment{
 		MimeType: "image/png",
@@ -461,7 +461,7 @@ func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	if err := cs.Send("describe this", "", []core.ImageAttachment{{MimeType: "image/jpeg", Data: []byte("jpg")}}, nil); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -514,7 +514,7 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	prompt := "line1\nline2"
 	if err := cs.Send(prompt, "", nil, nil); err != nil {
@@ -609,7 +609,7 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -664,7 +664,7 @@ func TestSend_TurnFailedServerOverloadedIsRetriable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)

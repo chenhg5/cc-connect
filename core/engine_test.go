@@ -14308,7 +14308,7 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-relay")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:ch1:u1")
@@ -14533,7 +14533,7 @@ func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-cancel")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:ch1:u1")
@@ -14579,7 +14579,7 @@ func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-close")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:close:u1")
@@ -14621,7 +14621,7 @@ func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-error")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:error:u1")
@@ -14674,7 +14674,7 @@ func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
 func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sess := newControllableSession("unsol-perm")
 	permRecorder := &permRecordingSession{
@@ -14749,7 +14749,7 @@ func (s *permRecordingSession) RespondPermission(_ string, res PermissionResult)
 func TestEventsNeedResync_DefaultTrue(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	e.ensureInteractiveStateForQueueing("key1", p, "ctx")
 
@@ -14771,7 +14771,7 @@ func TestEventsNeedResync_ClearedOnCleanResult(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("resync-clean")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:resync:u1")
@@ -14808,7 +14808,7 @@ func TestCleanupInteractiveState_StopsUnsolicitedReader(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("cleanup-unsol")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:cleanup:u1")
@@ -14848,7 +14848,7 @@ func TestCleanupInteractiveState_StopsUnsolicitedReader(t *testing.T) {
 func TestWorkspaceIdleTimeout_Configurable(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	tmpDir := t.TempDir()
 	e.SetMultiWorkspace(tmpDir, filepath.Join(tmpDir, "bindings.json"))
