@@ -13,7 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,13 +35,14 @@ const (
 )
 
 type nativeThreadWire struct {
-	ID        string          `json:"id"`
-	Cwd       string          `json:"cwd"`
-	Name      *string         `json:"name"`
-	Preview   string          `json:"preview"`
-	Status    json.RawMessage `json:"status"`
-	CreatedAt int64           `json:"createdAt"`
-	UpdatedAt int64           `json:"updatedAt"`
+	ID        string           `json:"id"`
+	Cwd       string           `json:"cwd"`
+	Name      *string          `json:"name"`
+	Preview   string           `json:"preview"`
+	Status    json.RawMessage  `json:"status"`
+	CreatedAt int64            `json:"createdAt"`
+	UpdatedAt int64            `json:"updatedAt"`
+	Turns     []nativeTurnWire `json:"turns"`
 }
 
 type nativeTurnWire struct {
@@ -253,6 +256,16 @@ func (s *appServerSession) registerNativeThread(threadID, cwd string) error {
 	}
 	s.nativeMu.Unlock()
 	return nil
+}
+
+func (s *appServerSession) hasNativeThread(threadID, cwd string) bool {
+	if s.owner != nil {
+		return s.owner.hasNativeThread(threadID, cwd)
+	}
+	s.nativeMu.Lock()
+	defer s.nativeMu.Unlock()
+	registeredCwd, registered := s.nativeThreads[strings.TrimSpace(threadID)]
+	return registered && registeredCwd == strings.TrimSpace(cwd)
 }
 
 func (s *appServerSession) subscribeNative(threadID string) (<-chan core.NativeEventEnvelope, func(), error) {
@@ -901,7 +914,7 @@ func (a *Agent) ListNativeConversations(ctx context.Context, workspace core.Work
 	return result, nil
 }
 
-func (a *Agent) readNativeThread(ctx context.Context, control *appServerSession, cwd, threadID string) (nativeThreadWire, error) {
+func (a *Agent) readNativeThreadWithTurns(ctx context.Context, control *appServerSession, cwd, threadID string, includeTurns bool) (nativeThreadWire, error) {
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" {
 		return nativeThreadWire{}, fmt.Errorf("codex: thread id is empty")
@@ -909,7 +922,7 @@ func (a *Agent) readNativeThread(ctx context.Context, control *appServerSession,
 	var response struct {
 		Thread nativeThreadWire `json:"thread"`
 	}
-	if err := control.requestContext(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": false}, &response); err != nil {
+	if err := control.requestContext(ctx, "thread/read", map[string]any{"threadId": threadID, "includeTurns": includeTurns}, &response); err != nil {
 		var rpcErr *rpcError
 		if errors.As(err, &rpcErr) && rpcErr.Code == -32004 {
 			err = fmt.Errorf("%w: %v", core.ErrNativeThreadNotFound, err)
@@ -921,6 +934,10 @@ func (a *Agent) readNativeThread(ctx context.Context, control *appServerSession,
 		return nativeThreadWire{}, fmt.Errorf("%w: codex thread does not belong to workspace", core.ErrNativeThreadNotFound)
 	}
 	return response.Thread, nil
+}
+
+func (a *Agent) readNativeThread(ctx context.Context, control *appServerSession, cwd, threadID string) (nativeThreadWire, error) {
+	return a.readNativeThreadWithTurns(ctx, control, cwd, threadID, false)
 }
 
 func (a *Agent) resumeNativeThread(ctx context.Context, control *appServerSession, cwd, threadID string) (nativeThreadRuntimeResponse, error) {
@@ -951,27 +968,21 @@ func (a *Agent) resumeNativeThread(ctx context.Context, control *appServerSessio
 	return response, nil
 }
 
-func (a *Agent) refreshNativeActiveTurn(ctx context.Context, control *appServerSession, threadID string) error {
-	var response struct {
-		Data []nativeTurnWire `json:"data"`
-	}
-	if err := control.requestContext(ctx, "thread/turns/list", map[string]any{
-		"threadId": threadID, "limit": 1, "sortDirection": "desc", "itemsView": "summary",
-	}, &response); err != nil {
-		if unavailable, _ := isUnavailableCapability(err); unavailable {
-			return nil
-		}
+func (a *Agent) refreshNativeActiveTurn(ctx context.Context, control *appServerSession, cwd, threadID string) error {
+	thread, err := a.readNativeThreadWithTurns(ctx, control, cwd, threadID, true)
+	if err != nil {
 		return fmt.Errorf("codex: refresh active Turn: %w", err)
 	}
 	control.nativeMu.Lock()
 	state := control.nativeStateLocked(threadID)
 	state.ActiveTurn = nil
-	if len(response.Data) > 0 && response.Data[0].Status == "inProgress" {
+	if len(thread.Turns) > 0 && thread.Turns[len(thread.Turns)-1].Status == "inProgress" {
+		active := thread.Turns[len(thread.Turns)-1]
 		startedAt := time.Now().UTC()
-		if response.Data[0].StartedAt != nil {
-			startedAt = time.Unix(*response.Data[0].StartedAt, 0).UTC()
+		if active.StartedAt != nil {
+			startedAt = time.Unix(*active.StartedAt, 0).UTC()
 		}
-		state.ActiveTurn = &core.NativeActiveTurn{ID: response.Data[0].ID, StartedAt: startedAt}
+		state.ActiveTurn = &core.NativeActiveTurn{ID: active.ID, StartedAt: startedAt}
 	}
 	control.nativeMu.Unlock()
 	return nil
@@ -1018,6 +1029,13 @@ func (s *appServerSession) waitNativeSettings(ctx context.Context, threadID stri
 	s.nativeMu.Unlock()
 	state.settingsMu.Lock()
 	defer state.settingsMu.Unlock()
+	s.nativeMu.Lock()
+	if state.HasSettings && nativeSettingsMatchParams(state.Settings, params) {
+		settings := cloneNativeSettings(state.Settings)
+		s.nativeMu.Unlock()
+		return settings, nil
+	}
+	s.nativeMu.Unlock()
 	waiter := make(chan core.NativeThreadSettings, 1)
 	s.nativeMu.Lock()
 	s.nativeNextID++
@@ -1067,11 +1085,16 @@ func (a *Agent) ReadNativeConversation(ctx context.Context, workspace core.Works
 	if err != nil {
 		return core.NativeConversationSnapshot{}, err
 	}
-	if _, err := a.resumeNativeThread(ctx, control, cwd, threadID); err != nil {
-		return core.NativeConversationSnapshot{}, err
+	alreadyLoaded := control.hasNativeThread(threadID, cwd)
+	if !alreadyLoaded {
+		if _, err := a.resumeNativeThread(ctx, control, cwd, threadID); err != nil {
+			return core.NativeConversationSnapshot{}, err
+		}
 	}
-	if err := a.refreshNativeActiveTurn(ctx, control, threadID); err != nil {
-		return core.NativeConversationSnapshot{}, err
+	if !alreadyLoaded {
+		if err := a.refreshNativeActiveTurn(ctx, control, cwd, threadID); err != nil {
+			return core.NativeConversationSnapshot{}, err
+		}
 	}
 	catalog, err := a.nativeRuntimeCatalog(ctx, control, resolved, cwd)
 	if err != nil {
@@ -1156,9 +1179,6 @@ func (a *Agent) ListNativeTurns(ctx context.Context, workspace core.Workspace, t
 	if err != nil {
 		return core.NativeTurnPage{}, err
 	}
-	if _, err := a.readNativeThread(ctx, control, cwd, threadID); err != nil {
-		return core.NativeTurnPage{}, err
-	}
 	direction, err := validNativeSortDirection(page.SortDirection, "desc")
 	if err != nil {
 		return core.NativeTurnPage{}, err
@@ -1167,29 +1187,21 @@ func (a *Agent) ListNativeTurns(ctx context.Context, workspace core.Workspace, t
 	if err != nil {
 		return core.NativeTurnPage{}, err
 	}
-	params := map[string]any{"threadId": threadID, "sortDirection": direction, "itemsView": "summary"}
-	if page.Cursor != "" {
-		params["cursor"] = page.Cursor
+	thread, err := a.readNativeThreadWithTurns(ctx, control, cwd, threadID, true)
+	if err != nil {
+		return core.NativeTurnPage{}, err
 	}
-	if limit > 0 {
-		params["limit"] = limit
+	turns := append([]nativeTurnWire(nil), thread.Turns...)
+	if direction == "desc" {
+		slices.Reverse(turns)
 	}
-	var response struct {
-		Data                        []nativeTurnWire `json:"data"`
-		NextCursor, BackwardsCursor *string
+	start, end, next, err := nativeHistoryPage("turn", direction, page.Cursor, limit, len(turns))
+	if err != nil {
+		return core.NativeTurnPage{}, err
 	}
-	if err := control.requestContext(ctx, "thread/turns/list", params, &response); err != nil {
-		return core.NativeTurnPage{}, fmt.Errorf("codex: thread/turns/list: %w", err)
-	}
-	result := core.NativeTurnPage{Data: make([]core.NativeTurn, 0, len(response.Data))}
-	for _, turn := range response.Data {
+	result := core.NativeTurnPage{Data: make([]core.NativeTurn, 0, end-start), NextCursor: next}
+	for _, turn := range turns[start:end] {
 		result.Data = append(result.Data, nativeTurn(turn))
-	}
-	if response.NextCursor != nil {
-		result.NextCursor = *response.NextCursor
-	}
-	if response.BackwardsCursor != nil {
-		result.BackwardsCursor = *response.BackwardsCursor
 	}
 	return result, nil
 }
@@ -1197,9 +1209,6 @@ func (a *Agent) ListNativeTurns(ctx context.Context, workspace core.Workspace, t
 func (a *Agent) ListNativeItems(ctx context.Context, workspace core.Workspace, threadID, turnID string, page core.NativePageRequest) (core.NativeItemPage, error) {
 	control, _, cwd, err := a.nativeControl(ctx, workspace)
 	if err != nil {
-		return core.NativeItemPage{}, err
-	}
-	if _, err := a.readNativeThread(ctx, control, cwd, threadID); err != nil {
 		return core.NativeItemPage{}, err
 	}
 	direction, err := validNativeSortDirection(page.SortDirection, "asc")
@@ -1210,40 +1219,57 @@ func (a *Agent) ListNativeItems(ctx context.Context, workspace core.Workspace, t
 	if err != nil {
 		return core.NativeItemPage{}, err
 	}
-	params := map[string]any{"threadId": threadID, "sortDirection": direction}
-	if turnID = strings.TrimSpace(turnID); turnID != "" {
-		params["turnId"] = turnID
+	thread, err := a.readNativeThreadWithTurns(ctx, control, cwd, threadID, true)
+	if err != nil {
+		return core.NativeItemPage{}, err
 	}
-	if page.Cursor != "" {
-		params["cursor"] = page.Cursor
-	}
-	if limit > 0 {
-		params["limit"] = limit
-	}
-	var response struct {
-		Data []struct {
-			TurnID string          `json:"turnId"`
-			Item   json.RawMessage `json:"item"`
-		} `json:"data"`
-		NextCursor, BackwardsCursor *string
-	}
-	if err := control.requestContext(ctx, "thread/items/list", params, &response); err != nil {
-		return core.NativeItemPage{}, fmt.Errorf("codex: thread/items/list: %w", err)
-	}
-	result := core.NativeItemPage{Data: make([]core.NativeItem, 0, len(response.Data))}
-	for _, entry := range response.Data {
-		if turnID != "" && entry.TurnID != turnID {
-			return core.NativeItemPage{}, fmt.Errorf("codex: thread/items/list returned item for unexpected turn")
+	turnID = strings.TrimSpace(turnID)
+	items := make([]core.NativeItem, 0)
+	foundTurn := turnID == ""
+	for _, turn := range thread.Turns {
+		if turnID != "" && turn.ID != turnID {
+			continue
 		}
-		result.Data = append(result.Data, core.NativeItem{TurnID: entry.TurnID, Item: cloneRawMessage(entry.Item)})
+		foundTurn = true
+		for _, item := range turn.Items {
+			items = append(items, core.NativeItem{TurnID: turn.ID, Item: cloneRawMessage(item)})
+		}
 	}
-	if response.NextCursor != nil {
-		result.NextCursor = *response.NextCursor
+	if !foundTurn {
+		return core.NativeItemPage{}, fmt.Errorf("codex: turn %q was not found in thread history", turnID)
 	}
-	if response.BackwardsCursor != nil {
-		result.BackwardsCursor = *response.BackwardsCursor
+	if direction == "desc" {
+		slices.Reverse(items)
 	}
-	return result, nil
+	start, end, next, err := nativeHistoryPage("item", direction, page.Cursor, limit, len(items))
+	if err != nil {
+		return core.NativeItemPage{}, err
+	}
+	return core.NativeItemPage{Data: items[start:end], NextCursor: next}, nil
+}
+
+func nativeHistoryPage(kind, direction, cursor string, limit, total int) (int, int, string, error) {
+	start := 0
+	if cursor = strings.TrimSpace(cursor); cursor != "" {
+		prefix := kind + ":" + direction + ":"
+		if !strings.HasPrefix(cursor, prefix) {
+			return 0, 0, "", fmt.Errorf("codex: invalid %s history cursor", kind)
+		}
+		parsed, err := strconv.Atoi(strings.TrimPrefix(cursor, prefix))
+		if err != nil || parsed < 0 || parsed > total {
+			return 0, 0, "", fmt.Errorf("codex: invalid %s history cursor", kind)
+		}
+		start = parsed
+	}
+	end := total
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	next := ""
+	if end < total {
+		next = fmt.Sprintf("%s:%s:%d", kind, direction, end)
+	}
+	return start, end, next, nil
 }
 
 func (a *Agent) SubscribeNativeConversation(ctx context.Context, workspace core.Workspace, threadID string) (core.NativeConversationSubscription, error) {
@@ -1254,8 +1280,10 @@ func (a *Agent) SubscribeNativeConversation(ctx context.Context, workspace core.
 	if err != nil {
 		return core.NativeConversationSubscription{}, err
 	}
-	if _, err := a.resumeNativeThread(ctx, control, cwd, threadID); err != nil {
-		return core.NativeConversationSubscription{}, err
+	if !control.hasNativeThread(threadID, cwd) {
+		if _, err := a.resumeNativeThread(ctx, control, cwd, threadID); err != nil {
+			return core.NativeConversationSubscription{}, err
+		}
 	}
 	events, cancelNative, err := control.subscribeNative(threadID)
 	if err != nil {
@@ -1480,7 +1508,7 @@ func (a *Agent) nativeRuntimeCatalog(ctx context.Context, control *appServerSess
 			nativeCapabilityPermissionProfiles: permissionCapability,
 			nativeCapabilityRealtime:           realtimeCapability,
 			nativeCapabilitySettings:           probeNativeMethod(ctx, control, "thread/settings/update", map[string]any{"threadId": "00000000-0000-7000-8000-000000000000"}),
-			nativeCapabilityTurns:              probeNativeMethod(ctx, control, "thread/turns/list", map[string]any{"threadId": "00000000-0000-7000-8000-000000000000", "limit": 1}),
+			nativeCapabilityTurns:              probeNativeMethod(ctx, control, "thread/read", map[string]any{"threadId": "00000000-0000-7000-8000-000000000000", "includeTurns": true}),
 		},
 		Personalities: []string{"none", "friendly", "pragmatic"},
 		Summaries:     []string{"auto", "concise", "detailed", "none"}, Voices: voices,

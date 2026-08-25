@@ -3,6 +3,7 @@ package runtimeclient
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -57,6 +58,41 @@ func TestHandlerOldSubscriptionCannotDeleteReplacement(t *testing.T) {
 	}
 	if cancelled.Load() != 1 {
 		t.Fatalf("旧订阅取消次数 = %d, want 1", cancelled.Load())
+	}
+}
+
+func TestHandlerNativeEventPayloadPreservesPrivateRoutingFields(t *testing.T) {
+	events := make(chan core.NativeEventEnvelope, 1)
+	events <- core.NativeEventEnvelope{
+		Method: "item/commandExecution/requestApproval", ThreadID: "thread", TurnID: "turn-1",
+		RequestID: json.RawMessage(`91`), ConnectionGeneration: 7, Payload: json.RawMessage(`{"command":"go test"}`),
+	}
+	close(events)
+	var captured runtimeprotocol.NativeEventPayload
+	handler := &Handler{
+		subscriptions: map[string]*runtimeSubscription{}, turnArtifacts: make(map[string][]string), terminalTurns: make(map[string]struct{}),
+		emit: func(method runtimeprotocol.Method, _ runtimeprotocol.Resource, payload json.RawMessage) error {
+			if method != runtimeprotocol.MethodNativeEvent {
+				t.Fatalf("事件方法 = %s", method)
+			}
+			envelope := runtimeprotocol.Envelope{Method: method, Payload: payload}
+			decoded, err := runtimeprotocol.DecodePayload[runtimeprotocol.NativeEventPayload](envelope)
+			if err != nil {
+				return err
+			}
+			captured = decoded
+			return nil
+		},
+	}
+	registered := &runtimeSubscription{cancel: func() {}, done: make(chan struct{})}
+	handler.forwardEvents("workspace", "thread", "workspace\x00thread", registered, core.NativeConversationSubscription{
+		Events: events, Cancel: registered.cancel,
+	})
+	if captured.NativeConnectionGeneration != 7 || string(captured.RequestID) != "91" {
+		t.Fatalf("Runtime 原生私有路由载荷 = %#v", captured)
+	}
+	if strings.Contains(string(captured.Event), "connection_generation") || strings.Contains(string(captured.Event), "request_id") {
+		t.Fatalf("公开事件泄露了私有路由字段: %s", captured.Event)
 	}
 }
 

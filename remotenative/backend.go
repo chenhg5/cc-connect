@@ -382,10 +382,16 @@ func (b *Backend) streamEvents(ctx context.Context, workspaceRef, threadID strin
 		if envelope.Method != runtimeprotocol.MethodNativeEvent || envelope.Resource.WorkspaceRef != workspaceRef || envelope.Resource.ConversationRef != threadID {
 			continue
 		}
-		var event core.NativeEventEnvelope
-		if err := json.Unmarshal(envelope.Payload, &event); err != nil {
+		payload, err := runtimeprotocol.DecodePayload[runtimeprotocol.NativeEventPayload](envelope)
+		if err != nil || payload.NativeConnectionGeneration == 0 || len(payload.Event) == 0 {
 			return
 		}
+		var event core.NativeEventEnvelope
+		if err := json.Unmarshal(payload.Event, &event); err != nil {
+			return
+		}
+		event.ConnectionGeneration = payload.NativeConnectionGeneration
+		event.RequestID = append(json.RawMessage(nil), payload.RequestID...)
 		select {
 		case events <- event:
 		case <-ctx.Done():

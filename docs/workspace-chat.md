@@ -18,7 +18,7 @@ bot_secret = "your-bot-secret"
 
 The control setup wizard generates this configuration atomically. At least one of `web` and `wecom` is required; WeCom requires its WebSocket Bot credentials. The Linux server does not run a local Codex Agent or read a server-side `CODEX_HOME`.
 
-Each paired macOS Runtime reads its local Codex App state and owns one App Server connection. Runtime enables the experimental API and probes native settings, collaboration modes, paginated history, and realtime separately. An unavailable capability is returned with its reason; no removed RPC or event protocol is used.
+Each paired macOS Runtime reads its local Codex App state and owns one App Server connection. Runtime enables the experimental API and probes native settings, collaboration modes, authoritative history, and realtime separately. An unavailable capability is returned with its reason; no removed RPC or event protocol is used.
 
 ## Projects and conversations
 
@@ -50,7 +50,7 @@ Models, efforts, service tiers, and permission profiles must be selected from va
 
 One `WorkspaceChatService` actor owns each `workspaceRef + conversationRef`. Operations on one conversation are serialized while different conversations may run concurrently. An idle thread accepts `turn_start`; an active thread accepts only explicit `turn_steer` with the expected Turn ID or `turn_interrupt` with the active Turn ID. Approvals and structured interactions retain their original JSON-RPC request ID and accept only decisions advertised by App Server. Secrets are not persisted or logged.
 
-History is read exclusively through paginated `thread/turns/list` and `thread/items/list`. `thread/read(includeTurns=false)` is used only for exact metadata and canonical-cwd ownership validation; it never reads history. Web combines the authoritative pages with live events and displays known messages, reasoning summaries, plans, commands, file changes, MCP and dynamic tools, searches, errors, and generic raw details for unknown items. There is no fixed 200-item history request and no second history protocol.
+Codex 0.147.0 history is read exclusively through `thread/read(includeTurns=true)`, the current App Server method that returns persisted Turns and their items. Runtime deterministically slices that authoritative snapshot behind CC-Connect's opaque Turn/item pagination contract. Removed `thread/turns/list` and `thread/items/list` methods are never called and are not retained as fallbacks. `thread/read(includeTurns=false)` remains the exact metadata and canonical-cwd ownership check. Web combines the authoritative pages with live events and displays known messages, reasoning summaries, plans, commands, file changes, MCP and dynamic tools, searches, errors, and generic raw details for unknown items.
 
 ## Web protocol and realtime
 

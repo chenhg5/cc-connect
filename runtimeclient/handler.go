@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -314,17 +315,31 @@ func (h *Handler) forwardEvents(workspaceRef, threadID, key string, registered *
 	}()
 	for event := range subscription.Events {
 		h.completeTurnArtifacts(workspaceRef, threadID, event.TurnID, event.Method)
-		payload, err := json.Marshal(event)
+		publicEvent, err := json.Marshal(event)
 		if err != nil {
+			slog.Error("runtime native event encoding failed", "method", event.Method, "thread_id", threadID, "turn_id", event.TurnID, "error", err)
+			continue
+		}
+		payload, err := runtimeprotocol.MarshalPayload(runtimeprotocol.NativeEventPayload{
+			Event: publicEvent, RequestID: event.RequestID,
+			NativeConnectionGeneration: event.ConnectionGeneration,
+		})
+		if err != nil {
+			slog.Error("runtime native event payload encoding failed", "method", event.Method, "thread_id", threadID, "turn_id", event.TurnID, "error", err)
 			continue
 		}
 		h.mu.Lock()
 		emitter := h.emit
 		h.mu.Unlock()
-		if emitter == nil || emitter(runtimeprotocol.MethodNativeEvent, runtimeprotocol.Resource{
+		if emitter == nil {
+			slog.Error("runtime native event forwarding stopped", "method", event.Method, "thread_id", threadID, "turn_id", event.TurnID, "error", "event emitter is unavailable")
+			return
+		}
+		if err := emitter(runtimeprotocol.MethodNativeEvent, runtimeprotocol.Resource{
 			WorkspaceRef: workspaceRef, ConversationRef: threadID, TurnID: event.TurnID,
 			ItemID: event.ItemID, InteractionID: event.InteractionID,
-		}, payload) != nil {
+		}, payload); err != nil {
+			slog.Error("runtime native event forwarding stopped", "method", event.Method, "thread_id", threadID, "turn_id", event.TurnID, "error", err)
 			return
 		}
 	}
