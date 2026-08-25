@@ -46,11 +46,14 @@ func (k *macOSKeychain) Save(key ed25519.PrivateKey) error {
 		return errors.New("runtime identity: invalid Ed25519 private key")
 	}
 	encoded := base64.RawStdEncoding.EncodeToString(key)
-	// security(1) 在 -w 作为最后一个参数时从 stdin 读取密码，避免私钥出现在进程参数中。
-	command := exec.Command("/usr/bin/security", "add-generic-password", "-U", "-s", "cc-connect-runtime", "-a", k.account, "-w")
-	command.Stdin = strings.NewReader(encoded + "\n")
+	// security(1) 的 add-generic-password 需要将 -w 的值作为参数传入；省略该值只会读取已有条目。
+	command := exec.Command("/usr/bin/security", keychainSaveArguments(k.account, encoded)...)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("runtime identity: save macOS Keychain item: %w (%s)", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func keychainSaveArguments(account, encoded string) []string {
+	return []string{"add-generic-password", "-U", "-s", "cc-connect-runtime", "-a", account, "-w", encoded}
 }
