@@ -64,6 +64,7 @@ export function useWorkspaceChatSocket({ workspaceRef, conversation, onEvent, on
         subscribe();
       };
       socket.onmessage = (message) => {
+        if (disposed || socketRef.current !== socket) return;
         try {
           const parsed: unknown = JSON.parse(String(message.data));
           if (!isWorkspaceChatServerEvent(parsed)) throw new Error('workspace_chat_invalid_event');

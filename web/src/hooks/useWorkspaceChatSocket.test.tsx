@@ -35,10 +35,14 @@ class FakeWebSocket {
   }
 }
 
-function Harness({ onEvent, onError }: { onEvent: (event: WorkspaceChatServerEvent) => void; onError: (error: Error) => void }) {
+function Harness({ onEvent, onError, conversationID = 'thread-1' }: {
+  onEvent: (event: WorkspaceChatServerEvent) => void;
+  onError: (error: Error) => void;
+  conversationID?: string;
+}) {
   const socket = useWorkspaceChatSocket({
     workspaceRef: 'workspace-1',
-    conversation: { kind: 'thread', id: 'thread-1' },
+    conversation: { kind: 'thread', id: conversationID },
     onEvent,
     onProtocolError: onError,
   });
@@ -150,6 +154,29 @@ describe('useWorkspaceChatSocket', () => {
       ['protocol_error', 0],
       ['native_event', 3],
     ]);
+    view.unmount();
+  });
+
+  it('切换会话后忽略已销毁 Socket 排队到达的旧物化事件', async () => {
+    FakeWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', FakeWebSocket);
+    const onEvent = vi.fn();
+    const onError = vi.fn();
+    const view = render(<Harness onEvent={onEvent} onError={onError} conversationID="draft-1" />);
+    const oldSocket = FakeWebSocket.instances[0];
+    act(() => oldSocket.open());
+    await waitFor(() => expect(oldSocket.sent.length).toBe(1));
+
+    view.rerender(<Harness onEvent={onEvent} onError={onError} conversationID="draft-2" />);
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2));
+    act(() => oldSocket.emit({
+      ...event(1, 'thread_materialized'),
+      thread_id: 'thread-from-old-draft',
+      conversation: { kind: 'thread', id: 'thread-from-old-draft' },
+    }));
+
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
     view.unmount();
   });
 });
