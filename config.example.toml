@@ -1475,13 +1475,17 @@ app_secret = "your-feishu-app-secret"
 # proxy_password = ""
 #
 # Send-volume quota vs ilink's burst throttle (sendMessage ret=-2 "prepare failed"):
-# the gateway throttles the bot after roughly 5-6 separate messages within a short
-# window (multi-chunk sends are fine), and the penalty escalates with every attempt
-# made while active. The quota paces separate messages so the bot stays below the
-# trigger. 0 disables the quota.
-# 发送量配额（防 ilink 突发节流 ret=-2）：网关在短窗口内约 5-6 条独立消息即节流
+# the gateway throttles the bot after roughly 5-6 separate messages per window
+# (multi-chunk sends are fine), and the penalty escalates with every attempt made
+# while active. The quota paces separate messages so the bot stays below the
+# trigger. Note the default window is 24h, so the defaults below cap the bot at 4
+# outbound messages per day — raise burst_limit / shorten burst_window_secs for
+# interactive deployments, or set burst_limit = 0 to disable the quota entirely.
+# 发送量配额（防 ilink 突发节流 ret=-2）：网关在单个窗口内约 5-6 条独立消息即节流
 # （多切块发送不计数），且节流期内每次尝试都会升级惩罚。配额对独立消息限速，
-# 使其低于触发阈值。设为 0 关闭配额。
+# 使其低于触发阈值。注意默认窗口为 24 小时，即下方默认值会将机器人限制为
+# 每天 4 条外发消息；交互式部署请调大 burst_limit 或调小 burst_window_secs，
+# 或设 burst_limit = 0 完全关闭配额。
 # burst_limit = 4           # max separate messages per window / 每窗口最多独立消息数
 # burst_window_secs = 86400 # window length (default 24h) / 窗口时长（秒，默认24小时）
 #
