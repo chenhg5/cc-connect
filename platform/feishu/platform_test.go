@@ -41,6 +41,45 @@ func TestNew_CanDisableInteractiveCards(t *testing.T) {
 	}
 }
 
+func TestNew_SilentUnauthorizedOption(t *testing.T) {
+	tests := []struct {
+		name string
+		opts map[string]any
+		want bool
+	}{
+		{
+			name: "default is false",
+			opts: map[string]any{"app_id": "cli_xxx", "app_secret": "secret"},
+			want: false,
+		},
+		{
+			name: "enabled",
+			opts: map[string]any{
+				"app_id":              "cli_xxx",
+				"app_secret":          "secret",
+				"silent_unauthorized": true,
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := New(tt.opts)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			fp := extractBasePlatform(p)
+			if fp == nil {
+				t.Fatalf("platform type = %T, want *Platform or *interactivePlatform", p)
+			}
+			if fp.silentUnauthorized != tt.want {
+				t.Fatalf("silentUnauthorized = %v, want %v", fp.silentUnauthorized, tt.want)
+			}
+		})
+	}
+}
+
 func TestNew_DisabledInteractiveCardsDoesNotStartPreviewCard(t *testing.T) {
 	pAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": false})
 	if err != nil {

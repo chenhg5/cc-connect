@@ -522,6 +522,94 @@ func TestOnMessageRepliesToUnauthorizedMention(t *testing.T) {
 	}
 }
 
+func TestOnMessageSilentlyIgnoresUnauthorizedMention(t *testing.T) {
+	const appID = "cli_silent_unauthorized"
+	const appSecret = "secret-silent-unauthorized"
+	const botOpenID = "ou_bot"
+	const userOpenID = "ou_blocked"
+
+	replyCalls := 0
+	handlerCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			replyCalls++
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"message_id": "om_reply_unexpected"},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:       "feishu",
+		domain:             srv.URL,
+		appID:              appID,
+		appSecret:          appSecret,
+		allowFrom:          "ou_allowed",
+		silentUnauthorized: true,
+		botOpenID:          botOpenID,
+		dedup:              &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(core.Platform, *core.Message) {
+			handlerCalls++
+		},
+	}
+
+	chatType := "group"
+	msgType := "text"
+	senderType := "user"
+	content := `{"text":"@_user_1 hello"}`
+	createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: stringPtr(userOpenID)},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_silent_unauthorized"),
+				ChatId:      stringPtr("oc_group"),
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+				Mentions: []*larkim.MentionEvent{
+					{
+						Key:  stringPtr("@_user_1"),
+						Id:   &larkim.UserId{OpenId: stringPtr(botOpenID)},
+						Name: stringPtr("bot"),
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+	if replyCalls != 0 {
+		t.Fatalf("reply calls = %d, want 0", replyCalls)
+	}
+	if handlerCalls != 0 {
+		t.Fatalf("handler calls = %d, want 0", handlerCalls)
+	}
+}
+
 func TestIsMessageRecalledDetectsWithdrawnMessageFromGetAPI(t *testing.T) {
 	const appID = "cli_recall_probe"
 	const appSecret = "secret-recall-probe"
