@@ -131,6 +131,7 @@ type Platform struct {
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
+	groupChatHistoryShare      bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -169,6 +170,14 @@ type Platform struct {
 	// without requiring another @bot mention. Value is the last-seen time so
 	// stale entries can be expired by a future TTL sweep if needed.
 	activeThreadSessions sync.Map // sessionKey -> time.Time
+
+	// pendingGroupHistory keeps text/post messages that were observed in an
+	// allowed group chat without an explicit bot trigger. It is deliberately
+	// platform-local and in-memory: the next accepted agent turn consumes the
+	// snapshot, while slash commands that are handled by core leave it intact.
+	groupHistoryMu      sync.Mutex
+	pendingGroupHistory map[string][]groupHistoryEntry
+	nextGroupHistoryID  uint64
 
 	richCardImageMu         sync.Mutex
 	richCardImageResolved   map[string]string
@@ -244,6 +253,7 @@ type imageBatchEntry struct {
 	chatName     string
 	rctx         replyContext
 	quoted       quotedMessage
+	onAccepted   func()
 	images       []core.ImageAttachment
 	messageIDs   []string
 	createTimeMs int64
@@ -311,6 +321,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	groupChatHistoryShare, _ := opts["group_chat_history_share"].(bool)
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -402,6 +413,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
+		groupChatHistoryShare:      groupChatHistoryShare,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1276,6 +1288,7 @@ func (p *Platform) dispatchImageBatchEntry(entry *imageBatchEntry) {
 		UserID:    entry.userID, UserName: entry.userName, ChatName: entry.chatName,
 		Content:           "",
 		ExtraContent:      entry.quoted.text,
+		OnAccepted:        entry.onAccepted,
 		Images:            append(entry.quoted.images, entry.images...),
 		ReplyCtx:          entry.rctx,
 		UserMessageTimeMs: entry.createTimeMs,
@@ -1299,6 +1312,7 @@ func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageR
 	}
 
 	p.markMessageRecalled(messageID)
+	p.removeGroupHistory(messageID)
 	slog.Info(p.tag()+": message recalled",
 		"message_id", messageID,
 		"chat_id", chatID,
@@ -1318,6 +1332,213 @@ func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageR
 	return nil
 }
 
+func isGroupHistoryMessageType(msgType string) bool {
+	return msgType == "text" || msgType == "post"
+}
+
+// groupHistoryScope deliberately differs from makeSessionKey. With
+// thread_isolation enabled, a main-channel mention creates a root-scoped
+// agent session, but later main-channel messages must remain in the chat-level
+// history rather than being attached to that forked session.
+func (p *Platform) groupHistoryScope(msg *larkim.EventMessage, chatID string) string {
+	if chatID == "" {
+		return ""
+	}
+	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
+		if rootID := stringValue(msg.RootId); rootID != "" {
+			return "thread:" + chatID + ":" + rootID
+		}
+	}
+	return "chat:" + chatID
+}
+
+func (p *Platform) historyText(msgType, content string, mentions []*larkim.MentionEvent) string {
+	if content == "" {
+		return ""
+	}
+	switch msgType {
+	case "text":
+		var textBody struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(content), &textBody); err != nil {
+			return ""
+		}
+		return stripMentions(textBody.Text, mentions, p.getBotOpenID())
+	case "post":
+		return strings.TrimSpace(extractPostPlainText(content))
+	default:
+		return ""
+	}
+}
+
+func (p *Platform) rememberGroupHistory(scope, messageID, msgType, content string, mentions []*larkim.MentionEvent, senderID, senderType string) {
+	if !p.groupChatHistoryShare || scope == "" || !isGroupHistoryMessageType(msgType) {
+		return
+	}
+	text := p.historyText(msgType, content, mentions)
+	if text == "" {
+		return
+	}
+
+	p.groupHistoryMu.Lock()
+	defer p.groupHistoryMu.Unlock()
+	p.nextGroupHistoryID++
+	entry := groupHistoryEntry{
+		id:         p.nextGroupHistoryID,
+		messageID:  messageID,
+		senderID:   senderID,
+		senderType: senderType,
+		text:       text,
+	}
+	history := append(p.pendingGroupHistory[scope], entry)
+	if len(history) > maxPendingGroupHistoryEntries {
+		history = history[len(history)-maxPendingGroupHistoryEntries:]
+	}
+	if p.pendingGroupHistory == nil {
+		p.pendingGroupHistory = make(map[string][]groupHistoryEntry)
+	}
+	p.pendingGroupHistory[scope] = history
+}
+
+func (p *Platform) removeGroupHistory(messageID string) {
+	if messageID == "" {
+		return
+	}
+	p.groupHistoryMu.Lock()
+	defer p.groupHistoryMu.Unlock()
+	for scope, history := range p.pendingGroupHistory {
+		kept := history[:0]
+		for _, entry := range history {
+			if entry.messageID != messageID {
+				kept = append(kept, entry)
+			}
+		}
+		if len(kept) == 0 {
+			delete(p.pendingGroupHistory, scope)
+		} else {
+			p.pendingGroupHistory[scope] = kept
+		}
+	}
+}
+
+func (p *Platform) snapshotGroupHistory(scope string) groupHistoryContext {
+	if !p.groupChatHistoryShare || scope == "" {
+		return groupHistoryContext{}
+	}
+
+	p.groupHistoryMu.Lock()
+	history := append([]groupHistoryEntry(nil), p.pendingGroupHistory[scope]...)
+	p.groupHistoryMu.Unlock()
+	if len(history) == 0 {
+		return groupHistoryContext{}
+	}
+
+	maxID := history[len(history)-1].id
+	var once sync.Once
+	return groupHistoryContext{
+		entries: history,
+		onAccepted: func() {
+			once.Do(func() { p.consumeGroupHistory(scope, maxID) })
+		},
+	}
+}
+
+func (p *Platform) consumeGroupHistory(scope string, maxID uint64) {
+	p.groupHistoryMu.Lock()
+	defer p.groupHistoryMu.Unlock()
+	history := p.pendingGroupHistory[scope]
+	kept := history[:0]
+	for _, entry := range history {
+		if entry.id > maxID {
+			kept = append(kept, entry)
+		}
+	}
+	if len(kept) == 0 {
+		delete(p.pendingGroupHistory, scope)
+		return
+	}
+	p.pendingGroupHistory[scope] = kept
+}
+
+func (p *Platform) resetGroupHistory(scope string) {
+	if scope == "" {
+		return
+	}
+	p.groupHistoryMu.Lock()
+	delete(p.pendingGroupHistory, scope)
+	p.groupHistoryMu.Unlock()
+}
+
+func (p *Platform) historySenderName(entry groupHistoryEntry) string {
+	if strings.EqualFold(entry.senderType, "app") {
+		return p.resolveBotSenderName(entry.senderID)
+	}
+	if entry.senderID == "" {
+		return "User"
+	}
+	if cached, ok := p.userNameCache.Load(entry.senderID); ok {
+		if name, ok := cached.(string); ok && name != "" {
+			return name
+		}
+	}
+	if p.client != nil {
+		if name := p.resolveUserName(entry.senderID); name != "" && name != entry.senderID {
+			return name
+		}
+	}
+	return entry.senderID
+}
+
+func (p *Platform) formatGroupHistory(ctx groupHistoryContext) string {
+	if len(ctx.entries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	formatted := 0
+	for _, entry := range ctx.entries {
+		if entry.messageID != "" && p.isMessageRecalled(entry.messageID) {
+			continue
+		}
+		if formatted == 0 {
+			b.WriteString("--- Recent Feishu group messages (context only) ---\n")
+		}
+		name := strings.NewReplacer("\n", " ", "\r", "").Replace(p.historySenderName(entry))
+		fmt.Fprintf(&b, "%s:\n%s\n\n", name, entry.text)
+		formatted++
+	}
+	if formatted == 0 {
+		return ""
+	}
+	b.WriteString("---\n\n")
+	return b.String()
+}
+
+func joinFeishuExtraContent(parts ...string) string {
+	var nonEmpty []string
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			nonEmpty = append(nonEmpty, strings.TrimSpace(part))
+		}
+	}
+	return strings.Join(nonEmpty, "\n\n")
+}
+
+func (p *Platform) isGroupHistoryNewCommand(msgType, content string, mentions []*larkim.MentionEvent) bool {
+	if msgType != "text" {
+		return false
+	}
+	var textBody struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal([]byte(content), &textBody) != nil {
+		return false
+	}
+	text := strings.TrimSpace(stripMentions(textBody.Text, mentions, p.getBotOpenID()))
+	fields := strings.Fields(text)
+	return len(fields) > 0 && strings.EqualFold(fields[0], "/new")
+}
+
 func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	msg := event.Event.Message
 	sender := event.Event.Sender
@@ -1332,6 +1553,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		chatID = *msg.ChatId
 	}
 	userID := userIDFromEvent(sender.SenderId)
+	senderType := ""
+	if sender.SenderType != nil {
+		senderType = *sender.SenderType
+	}
 	// userName and chatName are resolved in dispatchMessage to avoid blocking
 	// the SDK dispatcher goroutine with synchronous HTTP calls.
 
@@ -1382,12 +1607,36 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// Pre-compute sessionKey so the @bot filter below can consult the active
 	// thread set; sessionKey is also used downstream for dispatch.
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
+	botOpenID := ""
+	if chatType == "group" && !p.groupReplyAll {
+		botOpenID = p.getBotOpenID()
+	}
+	botMentioned := botOpenID != "" && isBotMentioned(msg.Mentions, botOpenID)
+	atEveryone := p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all")
 
-	if chatType == "group" && !p.groupReplyAll && p.getBotOpenID() != "" {
-		if !isBotMentioned(msg.Mentions, p.getBotOpenID()) {
+	// With history sharing enabled, observe ordinary text/post messages only
+	// after the chat-level allow list has admitted the chat. Do this before the
+	// existing mention filter and before allow_from: the chat controls whether
+	// cc-connect may observe the conversation, while allow_from controls who may
+	// trigger an agent turn.
+	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" &&
+		!botMentioned && !atEveryone && isGroupHistoryMessageType(msgType) {
+		if !core.AllowList(p.allowChat, chatID) {
+			slog.Debug(p.tag()+": group history ignored for unauthorized chat", "chat_id", chatID)
+			return nil
+		}
+		p.rememberGroupHistory(
+			p.groupHistoryScope(msg, chatID), messageID, msgType, stringValue(msg.Content), msg.Mentions,
+			userID, senderType,
+		)
+		return nil
+	}
+
+	if chatType == "group" && !p.groupReplyAll && botOpenID != "" {
+		if !botMentioned {
 			switch {
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
-			case p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all"):
+			case atEveryone:
 				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
 			// Once a thread has been engaged via @bot, allow follow-up
 			// attachment-only messages (image/file/audio) in the same thread
@@ -1433,6 +1682,15 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	parentID := stringValue(msg.ParentId)
 
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	var groupHistoryCtx groupHistoryContext
+	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" && (botMentioned || atEveryone) {
+		scope := p.groupHistoryScope(msg, chatID)
+		if p.isGroupHistoryNewCommand(msgType, content, mentions) {
+			p.resetGroupHistory(scope)
+		} else {
+			groupHistoryCtx = p.snapshotGroupHistory(scope)
+		}
+	}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,
@@ -1452,7 +1710,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs)
+	go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx)
 
 	return nil
 }
@@ -1470,6 +1728,10 @@ func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContex
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
 func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64) {
+	p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryContext{})
+}
+
+func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64, groupHistoryCtx groupHistoryContext) {
 	if p.isMessageRecalled(messageID) {
 		slog.Debug(p.tag()+": recalled message ignored in async dispatch", "message_id", messageID)
 		return
@@ -1494,6 +1756,14 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	if parentID != "" && (!p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread) {
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
+	historyText := p.formatGroupHistory(groupHistoryCtx)
+	dispatchCore := func(msg *core.Message) {
+		if historyText != "" {
+			msg.ExtraContent = joinFeishuExtraContent(historyText, msg.ExtraContent)
+			msg.OnAccepted = groupHistoryCtx.onAccepted
+		}
+		p.dispatchCoreMessage(msg)
+	}
 
 	switch msgType {
 	case "text":
@@ -1513,7 +1783,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		// zero file-resource API calls.
 		approvedFileMetas := p.filterQuotedFilesForUser(quoted.files, mentions, userID)
 		quotedFiles := p.downloadQuotedFiles(ctx, approvedFileMetas)
-		if text == "" && quoted.text == "" && len(quoted.images) == 0 && len(quotedFiles) == 0 {
+		if text == "" && historyText == "" && quoted.text == "" && len(quoted.images) == 0 && len(quotedFiles) == 0 {
 			slog.Debug(p.tag()+": dropping empty text after mention stripping",
 				"message_id", messageID,
 				"raw_text_len", len(textBody.Text),
@@ -1525,7 +1795,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		// reaches the engine before the text message advances the user-message
 		// watermark (#1686 P1-B, related #1395).
 		p.flushImageBatchForSession(sessionKey)
-		p.dispatchCoreMessage(&core.Message{
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1563,6 +1833,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				userName:     userName,
 				chatName:     chatName,
 				rctx:         rctx,
+				quoted:       quotedMessage{text: historyText, images: quoted.images},
+				onAccepted:   groupHistoryCtx.onAccepted,
 				images:       []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 				messageIDs:   []string{messageID},
 				createTimeMs: createTimeMs,
@@ -1570,7 +1842,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			})
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1603,7 +1875,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		// reaches the engine before this audio message advances the user-message
 		// watermark (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
-		p.dispatchCoreMessage(&core.Message{
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1620,12 +1892,12 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	case "post":
 		textParts, images := p.parsePostContent(messageID, content)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
-		if text == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
+		if text == "" && historyText == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
 			return
 		}
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
-		p.dispatchCoreMessage(&core.Message{
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1656,7 +1928,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		mimeType := detectMimeType(fileData)
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
-		p.dispatchCoreMessage(&core.Message{
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1687,7 +1959,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		}
-		p.dispatchCoreMessage(coreMsg)
+		dispatchCore(coreMsg)
 
 	case "sticker":
 		var stickerBody struct {
@@ -1703,7 +1975,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			slog.Warn(p.tag()+": download sticker failed, falling back to placeholder", "error", err)
 			// Flush any image batch buffered earlier in this session (#1686 P1-B).
 			p.flushImageBatchForSession(sessionKey)
-			p.dispatchCoreMessage(&core.Message{
+			dispatchCore(&core.Message{
 				SessionKey: sessionKey, Platform: p.platformName,
 				MessageID: messageID,
 				UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1714,7 +1986,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
-		p.dispatchCoreMessage(&core.Message{
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1753,7 +2025,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
-		p.dispatchCoreMessage(&core.Message{
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -2021,6 +2293,28 @@ type quotedMessage struct {
 	text   string
 	images []core.ImageAttachment
 	files  []quotedFileMeta
+}
+
+// maxPendingGroupHistoryEntries bounds the per-scope in-memory buffer. The
+// feature is intentionally a small recent-context window rather than a chat
+// history store.
+const maxPendingGroupHistoryEntries = 50
+
+type groupHistoryEntry struct {
+	id         uint64
+	messageID  string
+	senderID   string
+	senderType string
+	text       string
+}
+
+// groupHistoryContext is captured synchronously when a triggering event is
+// received, before its asynchronous dispatch can race with later events.
+// onAccepted consumes only that captured prefix once the core accepts a real
+// agent turn. Recognized slash commands return before OnAccepted is called.
+type groupHistoryContext struct {
+	entries    []groupHistoryEntry
+	onAccepted func()
 }
 
 // maxReplyChainDepth is the maximum number of parent messages to traverse
@@ -2812,8 +3106,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	msgType, msgBody := p.buildReplyContent(ctx, rc.chatID, content)
 
 	if !p.shouldUseThreadOrReplyAPI(rc) {
 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
@@ -2834,8 +3127,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return p.Reply(ctx, rctx, content)
 	}
 
-	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	msgType, msgBody := p.buildReplyContent(ctx, rc.chatID, content)
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
@@ -2849,6 +3141,12 @@ func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, 
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if cardJSON, ok := normalizeCardJSON(content); ok && p.useInteractiveCard {
+		if p.shouldUseThreadOrReplyAPI(rc) {
+			return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+		}
+		return p.sendNewMessageToChat(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
 	}
 	// Resolve mentions first so we can detect whether a real @mention is
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
@@ -3107,6 +3405,13 @@ func buildReplyContent(content string) (msgType string, body string) {
 		return larkim.MsgTypePost, buildPostMdJSON(content)
 	}
 	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
+}
+
+func (p *Platform) buildReplyContent(ctx context.Context, chatID, content string) (msgType string, body string) {
+	if cardJSON, ok := normalizeCardJSON(content); ok && p.useInteractiveCard {
+		return larkim.MsgTypeInteractive, cardJSON
+	}
+	return buildReplyContent(p.resolveMentionsInContent(ctx, chatID, content))
 }
 
 // hasComplexMarkdown detects code blocks or tables that require card rendering.
@@ -4463,6 +4768,9 @@ func buildPreviewCardJSON(content string) string {
 	if payload, ok := core.ParseProgressCardPayload(content); ok {
 		return buildProgressCardJSONFromPayload(payload)
 	}
+	if isIncompleteJSONObject(content) {
+		return buildCardJSON(" ")
+	}
 	return buildCardJSON(sanitizeMarkdownURLs(content))
 }
 
@@ -4470,17 +4778,15 @@ func buildPreviewCardJSON(content string) string {
 // Using card (interactive) type for both preview and final message so updates
 // are in-place without needing to delete and resend.
 //
-// Card 2.0 + cardkit-v1 path (when content is a rich card JSON and we're NOT
-// in thread/reply mode): runs a two-step flow that captures a card_id usable
-// for streaming text updates:
+// Card 2.0 + cardkit-v1 path (when content is a rich card JSON): runs a
+// two-step flow that captures a card_id usable for streaming text updates:
 //
 //  1. POST /open-apis/cardkit/v1/cards with {type:"card_json", data:<cardJSON>}
 //     → returns card_id (numeric string, 14-day TTL).
 //  2. Im.Message.Create with content {"type":"card","data":{"card_id":"..."}}
 //     → returns message_id; both ids are stored on feishuPreviewHandle.
 //
-// If step (1) fails OR we're in thread/reply mode (Reply API doesn't accept
-// card_id reference), we fall back to the inline-card-JSON path. The handle's
+// If step (1) fails, we fall back to the inline-card-JSON path. The handle's
 // cardID stays empty in that case and the engine routes EventText through the
 // full-card Patch path (= original #657 behavior, no typewriter).
 func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
@@ -4502,8 +4808,8 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	var cardJSON string
 	var sendContent string // what goes into the Im.Message.Create / Reply content field
 	var cardID string      // cardkit-v1 entity id (empty = no streaming text path)
-	if isCardJSON(content) {
-		cardJSON = content
+	if normalized, ok := normalizeCardJSON(content); ok {
+		cardJSON = normalized
 		// Try cardkit-v1 two-step flow regardless of Reply vs Create. Both
 		// Im.Message.Reply and Im.Message.Create accept the {type:card,data:{card_id}}
 		// content schema (verified by direct API call); skipping Reply mode would
@@ -4649,6 +4955,16 @@ func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fu
 	if h.cardID == "" {
 		return core.ErrNotSupported
 	}
+	if isCardJSON(fullText) {
+		// A complete Card 2.0 payload must replace the whole entity; putting it
+		// into the streaming markdown element would display the JSON as text.
+		return core.ErrNotSupported
+	}
+	if isIncompleteJSONObject(fullText) {
+		// Agent output may arrive in chunks. Keep the existing card unchanged
+		// until the complete Card 2.0 object can be applied atomically.
+		return nil
+	}
 
 	h.sequence++
 	apiPath := fmt.Sprintf("/open-apis/cardkit/v1/cards/%s/elements/%s/content",
@@ -4700,12 +5016,14 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 
 	cardJSON := ""
-	if isCardJSON(content) {
+	if normalized, ok := normalizeCardJSON(content); ok {
 		// Card 2.0: engine passes full card JSON directly, skip all processing.
-		cardJSON = content
+		cardJSON = normalized
 		h.mu.Lock()
-		h.lastContent = content
+		h.lastContent = normalized
 		h.mu.Unlock()
+	} else if isIncompleteJSONObject(content) {
+		return nil
 	} else if payload, ok := core.ParseProgressCardPayload(content); ok {
 		cardJSON = buildProgressCardJSONFromPayload(payload)
 	} else {
@@ -4734,6 +5052,9 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHandle any, content, footer string) error {
 	if !p.useInteractiveCard {
 		return core.ErrNotSupported
+	}
+	if isCardJSON(content) {
+		return p.UpdateMessage(ctx, previewHandle, content)
 	}
 	if strings.TrimSpace(footer) == "" {
 		return p.UpdateMessage(ctx, previewHandle, content)
@@ -5850,6 +6171,9 @@ var blockedRichCardImagePrefixes = []netip.Prefix{
 // Streaming frames start uploads and strip unresolved images; final frames wait
 // briefly so resolved images can be embedded before the Done update.
 func (p *Platform) ResolveRichCardMarkdown(ctx context.Context, markdown string, final bool) string {
+	if cardJSON, ok := normalizeCardJSON(markdown); ok {
+		return cardJSON
+	}
 	if !strings.Contains(markdown, "![") {
 		return markdown
 	}
@@ -6345,13 +6669,47 @@ func richStepBody(step core.ToolStep) string {
 	return strings.Join(lines, "\n")
 }
 
-// isCardJSON returns true if content looks like a complete Feishu card JSON
-// (has "schema" and "body"). Used to avoid double-wrapping rich card output.
+// normalizeCardJSON validates and trims a complete Feishu Card 2.0 payload.
+// Agent-provided cards are otherwise opaque: their body elements, including
+// native chart/chart_spec elements, are passed to Feishu unchanged.
+func normalizeCardJSON(content string) (string, bool) {
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) < 2 || trimmed[0] != '{' {
+		return "", false
+	}
+	var card struct {
+		Schema string `json:"schema"`
+		Body   struct {
+			Elements json.RawMessage `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &card); err != nil || card.Schema != "2.0" || len(card.Body.Elements) == 0 {
+		return "", false
+	}
+	var elements []json.RawMessage
+	if err := json.Unmarshal(card.Body.Elements, &elements); err != nil || elements == nil {
+		return "", false
+	}
+	return trimmed, true
+}
+
+// isCardJSON reports whether content is a complete Feishu Card 2.0 payload.
 func isCardJSON(content string) bool {
-	if len(content) < 10 || content[0] != '{' {
+	_, ok := normalizeCardJSON(content)
+	return ok
+}
+
+// isIncompleteJSONObject identifies a streamed JSON object that has not
+// reached its closing tokens yet. Feishu preview paths use this to avoid
+// exposing partial Card 2.0 JSON as user-visible markdown.
+func isIncompleteJSONObject(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" || trimmed[0] != '{' || json.Valid([]byte(trimmed)) {
 		return false
 	}
-	return strings.Contains(content, `"schema"`) && strings.Contains(content, `"body"`)
+	var value any
+	err := json.Unmarshal([]byte(trimmed), &value)
+	return err != nil && strings.Contains(err.Error(), "unexpected end of JSON input")
 }
 
 // buildCardJSONWithStatus builds a Feishu card JSON with a colored header
@@ -6492,6 +6850,12 @@ const maxRichCardJSONBytes = 28000
 // reasoning/tool panels, streaming markdown body, status-colored header, and a
 // pre-composed multi-line statusFooter (engine-owned, includes elapsed).
 func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
+	if cardJSON, ok := normalizeCardJSON(markdown); ok {
+		return cardJSON
+	}
+	if isIncompleteJSONObject(markdown) {
+		markdown = ""
+	}
 	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
@@ -6738,6 +7102,11 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	h.mu.Unlock()
 
 	if lastContent == "" {
+		return
+	}
+	if isCardJSON(lastContent) {
+		// Agent-provided Card 2.0 payloads own their header and visual status.
+		// Rebuilding them as markdown here would discard native chart elements.
 		return
 	}
 	cardJSON := buildCardJSONWithStatus(lastContent, status)
