@@ -38,14 +38,19 @@ type Platform struct {
 	// the first time that thread reaches it (see thread_context.go).
 	threadContext       bool
 	threadContextDepth  int
-	bootstrappedThreads sync.Map // "<channel>:<threadTS>" -> time.Time
-	client              *slack.Client
-	socket              *socketmode.Client
-	handler             core.MessageHandler
-	cancel              context.CancelFunc
-	channelNameCache    map[string]string
-	channelCacheMu      sync.RWMutex
-	userNameCache       sync.Map // userID -> display name
+	bootstrappedThreads sync.Map // "<sessionKey>\x00<threadTS>" -> time.Time
+	// selfBotID / selfUserID come from auth.test at Start and tell a quoted
+	// message written by THIS bot apart from one written by another app.
+	selfMu           sync.RWMutex
+	selfBotID        string
+	selfUserID       string
+	client           *slack.Client
+	socket           *socketmode.Client
+	handler          core.MessageHandler
+	cancel           context.CancelFunc
+	channelNameCache map[string]string
+	channelCacheMu   sync.RWMutex
+	userNameCache    sync.Map // userID -> display name
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -135,6 +140,23 @@ func threadRootTS(threadTS, msgTS string) string {
 	return msgTS
 }
 
+// learnSelfIdentity asks Slack who this token is, so a thread transcript can
+// label the bot's own past messages as the agent's own output. Best effort:
+// without it every bot message in a quoted thread reads as a third party,
+// which is noisier but never wrong in the dangerous direction.
+func (p *Platform) learnSelfIdentity() {
+	auth, err := p.client.AuthTest()
+	if err != nil {
+		slog.Warn("slack: auth.test failed; quoted thread history will label this bot's own messages as a third-party bot",
+			"error", err)
+		return
+	}
+	p.selfMu.Lock()
+	p.selfBotID, p.selfUserID = auth.BotID, auth.UserID
+	p.selfMu.Unlock()
+	slog.Debug("slack: identified self", "bot_id", auth.BotID, "user_id", auth.UserID)
+}
+
 func (p *Platform) Name() string { return "slack" }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
@@ -144,6 +166,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		slack.OptionAppLevelToken(p.appToken),
 	)
 	p.socket = socketmode.New(p.client)
+	p.learnSelfIdentity()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel

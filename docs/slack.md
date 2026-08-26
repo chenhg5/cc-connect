@@ -242,6 +242,12 @@ Slack returns the thread's root plus the most recent `thread_context_depth`
 replies. On a thread longer than that the block says so, so the agent knows it
 is reading a window rather than the whole conversation.
 
+A top-level DM reads nothing — there is no thread, and the conversation is
+already continuous. DM *threads*, including every conversation in the Assistant
+tab, are read like any other thread; the bot's own past messages there are
+labelled `assistant`, so a restarted process re-reads its own conversation as
+its own, not as someone else's.
+
 Quoted messages are labelled by author and marked as data rather than
 instructions: anyone who can post in the channel can write into that text,
 including people `allow_from` does not let drive the bot. Another app's

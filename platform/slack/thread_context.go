@@ -121,7 +121,7 @@ func (p *Platform) threadHistoryFor(sessionKey, channel, threadTS, messageTS str
 	}
 	slog.Debug("slack: thread history bootstrapped",
 		"channel", channel, "thread_ts", threadTS, "quoted", len(history), "older_omitted", hasMore)
-	return formatThreadHistory(history, hasMore, p.displayNameResolver()), mark
+	return formatThreadHistory(history, hasMore, p.self(), p.displayNameResolver()), mark
 }
 
 // fetchThreadHistory reads the messages posted before messageTS in the thread
@@ -242,7 +242,11 @@ func skipThreadSubtype(subType string) bool {
 	switch subType {
 	case "channel_join", "channel_leave", "group_join", "group_leave",
 		"channel_topic", "channel_purpose", "channel_name", "channel_archive",
-		"channel_unarchive", "pinned_item", "unpinned_item", "bot_add", "bot_remove":
+		"channel_unarchive", "pinned_item", "unpinned_item", "bot_add", "bot_remove",
+		// Slack roots every Assistant-tab conversation with a placeholder whose
+		// text is the literal "New Assistant Thread" — quoting it back tells the
+		// agent nothing and costs a line of its context.
+		"assistant_app_thread":
 		return true
 	}
 	return false
@@ -255,7 +259,7 @@ func skipThreadSubtype(subType string) bool {
 // instructions. Anyone who can post in the channel can write into this text —
 // including people `allow_from` does not let drive the bot at all — so it must
 // not read as if the agent said it, or as if it were the operator talking.
-func formatThreadHistory(history []slack.Message, hasMore bool, resolveName func(string) string) string {
+func formatThreadHistory(history []slack.Message, hasMore bool, self threadSelf, resolveName func(string) string) string {
 	if len(history) == 0 {
 		return ""
 	}
@@ -265,21 +269,42 @@ func formatThreadHistory(history []slack.Message, hasMore bool, resolveName func
 		b.WriteString("(the thread is longer than this window — older replies between the first message and the rest are omitted)\n")
 	}
 	for i, m := range history {
-		role, name := threadMessageRole(m, resolveName)
+		role, name := threadMessageRole(m, self, resolveName)
 		fmt.Fprintf(&b, "[%d] %s (%s):\n%s\n\n", i+1, name, role, truncateMessage(neutralizeFence(messageText(m))))
 	}
 	b.WriteString("--- end of quoted thread history ---\n\n")
 	return b.String()
 }
 
-// threadMessageRole labels a quoted message. Another app's messages are
-// labelled "bot", never "assistant": calling them assistant would present
-// whatever an incoming webhook posted as something the agent itself had already
-// concluded, which is the strongest possible framing for injected text.
-func threadMessageRole(m slack.Message, resolveName func(string) string) (role, name string) {
-	if m.BotID != "" || m.SubType == "bot_message" {
+// threadSelf is how a quoted message is recognised as this bot's own. Empty
+// fields mean the identity is unknown, in which case nothing is labelled
+// "assistant" — over-claiming is the dangerous direction.
+type threadSelf struct {
+	botID  string
+	userID string
+}
+
+func (s threadSelf) owns(m slack.Message) bool {
+	if s.botID != "" && m.BotID == s.botID {
+		return true
+	}
+	return s.userID != "" && m.User == s.userID
+}
+
+// threadMessageRole labels a quoted message. Only THIS bot's own messages are
+// "assistant" — the agent's own prior output, which is what it is in an
+// Assistant-tab thread where most of the transcript is the agent talking.
+// Another app's messages are "bot", never "assistant": calling them assistant
+// would present whatever an incoming webhook posted as something the agent
+// itself had already concluded, the strongest possible framing for injected
+// text.
+func threadMessageRole(m slack.Message, self threadSelf, resolveName func(string) string) (role, name string) {
+	switch {
+	case self.owns(m):
+		role, name = "assistant", m.Username
+	case m.BotID != "" || m.SubType == "bot_message":
 		role, name = "bot", m.Username
-	} else {
+	default:
 		role = "user"
 		if resolveName != nil {
 			name = resolveName(m.User)
@@ -415,4 +440,11 @@ func (p *Platform) displayNameResolver() func(string) string {
 		seen[userID] = name
 		return name
 	}
+}
+
+// self reports the identity Start learned from auth.test, if it got one.
+func (p *Platform) self() threadSelf {
+	p.selfMu.RLock()
+	defer p.selfMu.RUnlock()
+	return threadSelf{botID: p.selfBotID, userID: p.selfUserID}
 }
