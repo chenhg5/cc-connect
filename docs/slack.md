@@ -184,6 +184,67 @@ app_token = "xapp-xxxxxxx..."
 
 ---
 
+### Threads
+
+Slack conversations branch into threads, and two options control how cc-connect
+handles that.
+
+```toml
+[projects.platforms.options]
+bot_token = "xoxb-xxxxxxx..."
+app_token = "xapp-xxxxxxx..."
+session_scope = "user"        # "user" (default) | "channel" | "thread"
+thread_context = true         # default; read a thread before answering in it
+thread_context_depth = 20     # messages to read (default 20, max 100)
+```
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `session_scope` | `user` | Which conversations share one agent session: `user` = one per channel + user, `channel` = one per channel, `thread` = one per Slack thread, so each new thread starts a fresh session |
+| `thread_context` | `true` | When the bot is pulled into a thread it did not start, read that thread's earlier messages and give them to the agent as context |
+| `thread_context_depth` | `20` | How many earlier messages to read, newest-first, capped at 100 |
+
+**`session_scope`** decides whether a new thread means a new agent session. With
+the default `user`, every thread in a channel continues the same session, so the
+agent carries context — and clutter — from unrelated threads. Set
+`session_scope = "thread"` if you want each thread to start clean.
+
+> When using `session_scope = "thread"` with the tmux agent runtime, also set
+> `window_per_session = true`; otherwise concurrent threads share one pane and
+> their output interleaves.
+
+**`thread_context`** covers the opposite problem. A Slack event carries only the
+message that triggered it, so a bot `@`-mentioned halfway down a thread cannot
+see the question it is being asked about, or what anyone else in the thread
+already said. With `thread_context` on, the first time a thread reaches the
+agent cc-connect reads that thread with `conversations.replies` and prepends a
+transcript:
+
+```
+--- Slack thread history (3 messages before this one) ---
+[1] Ada (user):
+what broke the deploy?
+
+[2] other-bot (assistant):
+the migration timed out
+...
+---
+```
+
+It fires **once per thread**, not once per message: after the bootstrap the
+agent's own session carries the conversation. Threads the bot itself started
+are never re-read, since the agent already received those messages.
+
+This needs a history scope for the conversation type — `channels:history`,
+`groups:history`, `im:history`, or `mpim:history`. Apps created from
+[`slack-app-manifest.json`](./slack-app-manifest.json) already have the first
+three; add `mpim:history` if your bot works in group DMs. Without the scope the
+fetch fails, one warning is logged, and the message is delivered without the
+transcript — nothing is dropped. Set `thread_context = false` to turn the
+feature off.
+
+---
+
 ## Step 8: Start cc-connect
 
 ### 8.1 Launch

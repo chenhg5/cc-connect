@@ -30,17 +30,22 @@ type replyContext struct {
 }
 
 type Platform struct {
-	botToken         string
-	appToken         string
-	allowFrom        string
-	sessionScope     string // "user" (default) | "channel" | "thread"
-	client           *slack.Client
-	socket           *socketmode.Client
-	handler          core.MessageHandler
-	cancel           context.CancelFunc
-	channelNameCache map[string]string
-	channelCacheMu   sync.RWMutex
-	userNameCache    sync.Map // userID -> display name
+	botToken     string
+	appToken     string
+	allowFrom    string
+	sessionScope string // "user" (default) | "channel" | "thread"
+	// threadContext bootstraps the agent with what a thread already contains
+	// the first time that thread reaches it (see thread_context.go).
+	threadContext       bool
+	threadContextDepth  int
+	bootstrappedThreads sync.Map // "<channel>:<threadTS>" -> time.Time
+	client              *slack.Client
+	socket              *socketmode.Client
+	handler             core.MessageHandler
+	cancel              context.CancelFunc
+	channelNameCache    map[string]string
+	channelCacheMu      sync.RWMutex
+	userNameCache       sync.Map // userID -> display name
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -52,6 +57,10 @@ func New(opts map[string]any) (core.Platform, error) {
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
+	threadContext := true
+	if v, ok := opts["thread_context"].(bool); ok {
+		threadContext = v
+	}
 	scope := normalizeSessionScope(opts["session_scope"], shareSessionInChannel)
 	if scope == "thread" {
 		slog.Warn("slack: session_scope=thread gives each Slack thread its own session; " +
@@ -59,11 +68,13 @@ func New(opts map[string]any) (core.Platform, error) {
 			"without it, concurrent threads share a single pane and their output will interleave")
 	}
 	return &Platform{
-		botToken:         botToken,
-		appToken:         appToken,
-		allowFrom:        allowFrom,
-		sessionScope:     scope,
-		channelNameCache: make(map[string]string),
+		botToken:           botToken,
+		appToken:           appToken,
+		allowFrom:          allowFrom,
+		sessionScope:       scope,
+		threadContext:      threadContext,
+		threadContextDepth: normalizeThreadContextDepth(opts["thread_context_depth"]),
+		channelNameCache:   make(map[string]string),
 	}, nil
 }
 
@@ -219,6 +230,10 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
+					// Being @-mentioned inside a running thread is the case
+					// where the agent knows least: the payload carries the
+					// mention and nothing the thread already said.
+					ExtraContent: p.threadHistoryFor(ev.Channel, threadTS, ev.TimeStamp),
 				}
 				p.handler(p, msg)
 
@@ -280,6 +295,10 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
+					// assistantOrThreadTS() returns "" for a top-level DM and
+					// the message's own ts for a new channel message, so this
+					// only fires for a reply inside an existing thread.
+					ExtraContent: p.threadHistoryFor(ev.Channel, threadTS, ts),
 				}
 				p.handler(p, msg)
 			}
