@@ -230,11 +230,14 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
-					// Being @-mentioned inside a running thread is the case
-					// where the agent knows least: the payload carries the
-					// mention and nothing the thread already said.
-					ExtraContent: p.threadHistoryFor(ev.Channel, threadTS, ev.TimeStamp),
 				}
+				// Being @-mentioned inside a running thread is the case where
+				// the agent knows least: the payload carries the mention and
+				// nothing the thread already said. The thread is recorded as
+				// bootstrapped only once the engine accepts the message, so a
+				// turn it drops (a /command, a busy session) does not consume
+				// the one chance to read the thread.
+				msg.ExtraContent, msg.OnAccepted = p.threadHistoryFor(sessionKey, ev.Channel, threadTS, ev.TimeStamp)
 				p.handler(p, msg)
 
 			case *slackevents.AssistantThreadStartedEvent:
@@ -295,11 +298,11 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
-					// assistantOrThreadTS() returns "" for a top-level DM and
-					// the message's own ts for a new channel message, so this
-					// only fires for a reply inside an existing thread.
-					ExtraContent: p.threadHistoryFor(ev.Channel, threadTS, ts),
 				}
+				// assistantOrThreadTS() returns "" for a top-level DM and the
+				// message's own ts for a new channel message, so a fetch only
+				// happens for a reply inside an existing thread.
+				msg.ExtraContent, msg.OnAccepted = p.threadHistoryFor(sessionKey, ev.Channel, threadTS, ts)
 				p.handler(p, msg)
 			}
 		}

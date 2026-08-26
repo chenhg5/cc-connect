@@ -231,16 +231,30 @@ the migration timed out
 ---
 ```
 
-It fires **once per thread**, not once per message: after the bootstrap the
-agent's own session carries the conversation. Threads the bot itself started
-are never re-read, since the agent already received those messages.
+It fires **once per thread per agent session**, not once per message: after the
+bootstrap that session carries the conversation, and repeating the transcript
+every turn would bury the question being asked. Threads the bot itself started
+are never re-read, since the agent already received those messages as ordinary
+turns. Where `session_scope` gives two people separate sessions, each of them
+gets the thread once — otherwise whoever spoke second would be left without it.
+
+Slack returns the thread's root plus the most recent `thread_context_depth`
+replies. On a thread longer than that the block says so, so the agent knows it
+is reading a window rather than the whole conversation.
+
+Quoted messages are labelled by author and marked as data rather than
+instructions: anyone who can post in the channel can write into that text,
+including people `allow_from` does not let drive the bot. Another app's
+messages are labelled `bot`, never as the agent's own prior output.
 
 This needs a history scope for the conversation type — `channels:history`,
 `groups:history`, `im:history`, or `mpim:history`. Apps created from
 [`slack-app-manifest.json`](./slack-app-manifest.json) already have the first
 three; add `mpim:history` if your bot works in group DMs. Without the scope the
-fetch fails, one warning is logged, and the message is delivered without the
-transcript — nothing is dropped. Set `thread_context = false` to turn the
+fetch fails, one warning names the scope you need, and the message is delivered
+without the transcript — nothing is dropped. A temporary failure (a rate limit,
+a timeout, a Slack blip) is retried on the next message in that thread rather
+than disabling it until restart. Set `thread_context = false` to turn the
 feature off.
 
 ---
