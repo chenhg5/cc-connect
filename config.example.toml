@@ -412,7 +412,8 @@ level = "info" # debug, info, warn, error
 #
 # Supported events / 支持的事件:
 #   message.received   — user message arrives / 用户消息到达
-#   message.sent       — agent reply sent / Agent 回复发送完成
+#   message.sent       — legacy pre-delivery agent reply hook / 兼容旧版发送前事件
+#   message.finalized  — final reply send completed / 最终回复发送完成
 #   session.started    — agent session spawned / Agent 会话启动
 #   session.ended      — agent session stopped / Agent 会话结束
 #   cron.triggered     — cron job fires / 定时任务触发
