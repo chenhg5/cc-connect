@@ -103,6 +103,106 @@ func TestLaunchdStatusUsesUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 	}
 }
 
+func TestLaunchdStatusRecognizesLegacyRetryLabel(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	guiDomain := launchdGUIDomain()
+	userDomain := launchdUserDomain()
+	legacyGUI := legacyLaunchdTarget(guiDomain)
+	legacyUser := legacyLaunchdTarget(userDomain)
+	legacyPlist := legacyLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(legacyPlist), 0755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(legacyPlist, []byte("plist"), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	runLaunchctl = func(args ...string) (string, error) {
+		if len(args) < 2 || args[0] != "print" {
+			return "", nil
+		}
+		switch args[1] {
+		case guiDomain, launchdGUIDomain() + "/" + launchdLabel:
+			return "Bootstrap failed: 125: Domain does not support specified action", fmt.Errorf("exit status 125")
+		case userDomain:
+			return "subsystem", nil
+		case legacyGUI, legacyUser:
+			return "\tstate = running\n\tpid = 9001", nil
+		default:
+			return "", fmt.Errorf("unexpected target %q", args[1])
+		}
+	}
+
+	mgr := &launchdManager{}
+	st, err := mgr.Status()
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if !st.Installed {
+		t.Fatal("Status().Installed = false, want true")
+	}
+	if !st.Running {
+		t.Fatal("Status().Running = false, want true")
+	}
+	if st.PID != 9001 {
+		t.Fatalf("Status().PID = %d, want 9001", st.PID)
+	}
+}
+
+func TestLaunchdStatusIgnoresNestedActiveState(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	guiDomain := launchdGUIDomain()
+	userDomain := launchdUserDomain()
+	currentGUI := launchdTarget(guiDomain)
+	currentUser := launchdTarget(userDomain)
+	currentPlist := launchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(currentPlist), 0755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(currentPlist, []byte("plist"), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	runLaunchctl = func(args ...string) (string, error) {
+		if len(args) < 2 || args[0] != "print" {
+			return "", nil
+		}
+		switch args[1] {
+		case guiDomain, userDomain:
+			return "subsystem", nil
+		case currentGUI, currentUser:
+			return "state = spawn scheduled\n\t\tstate = active", nil
+		default:
+			return "", fmt.Errorf("unexpected target %q", args[1])
+		}
+	}
+
+	mgr := &launchdManager{}
+	st, err := mgr.Status()
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if !st.Installed {
+		t.Fatal("Status().Installed = false, want true")
+	}
+	if st.Running {
+		t.Fatalf("Status().Running = true, want false")
+	}
+	if st.PID != 0 {
+		t.Fatalf("Status().PID = %d, want 0", st.PID)
+	}
+}
+
 func TestRestartPrefersGUIDomainWhenAvailable(t *testing.T) {
 	orig := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = orig })
@@ -510,5 +610,40 @@ func TestInstallLaunchd_TightensExistingPlistFrom0644(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("plist mode after reinstall = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestInstallLaunchd_RemovesLegacyRetryPlist(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+	runLaunchctl = func(args ...string) (string, error) { return "", nil }
+
+	legacyPath := legacyLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
+		t.Fatalf("mkdir legacy: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("<plist>legacy</plist>\n"), 0o644); err != nil {
+		t.Fatalf("seed legacy plist: %v", err)
+	}
+
+	mgr := &launchdManager{}
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    t.TempDir(),
+		LogFile:    filepath.Join(t.TempDir(), "cc.log"),
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+	}
+	if err := mgr.Install(cfg); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy plist still exists after install: %v", err)
+	}
+	if _, err := os.Stat(launchdPlistPath()); err != nil {
+		t.Fatalf("current plist missing after install: %v", err)
 	}
 }
