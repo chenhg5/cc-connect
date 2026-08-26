@@ -274,6 +274,116 @@ func TestAppServerSession_HandleRequestUserInputEmitsAskQuestion(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_FileChangeApprovalWithNullReasonDoesNotExposeMetadata(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := &appServerSession{
+		events:           make(chan core.Event, 1),
+		ctx:              ctx,
+		pendingApprovals: make(map[string]chan core.PermissionResult),
+		stdin:            &lockedWriteCloser{},
+	}
+	s.handleServerRequest(serverRequestProbe(t, `"patch-1"`, "item/fileChange/requestApproval", map[string]any{
+		"threadId":    "thread-1",
+		"turnId":      "turn-1",
+		"itemId":      "exec-1",
+		"reason":      nil,
+		"grantRoot":   nil,
+		"startedAtMs": 1787724290697,
+	}))
+
+	event := <-s.events
+	if event.ToolName != "Patch" {
+		t.Fatalf("tool name = %q, want Patch", event.ToolName)
+	}
+	if event.ToolInput != "File changes" {
+		t.Fatalf("tool input = %q, want friendly fallback", event.ToolInput)
+	}
+	for _, internalField := range []string{"threadId", "turnId", "itemId", "startedAtMs"} {
+		if strings.Contains(event.ToolInput, internalField) {
+			t.Fatalf("tool input %q exposes internal field %q", event.ToolInput, internalField)
+		}
+	}
+}
+
+func TestAppServerSession_FileChangeApprovalShowsChangesFromStartedItem(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := &appServerSession{
+		events:           make(chan core.Event, 2),
+		ctx:              ctx,
+		pendingApprovals: make(map[string]chan core.PermissionResult),
+		stdin:            &lockedWriteCloser{},
+	}
+	s.handleItemStarted(map[string]any{
+		"id":   "exec-1",
+		"type": "fileChange",
+		"changes": []any{
+			map[string]any{
+				"path": "/workspace/restart.sh",
+				"kind": "update",
+				"diff": "+export https_proxy=http://0.0.0.0:1087",
+			},
+		},
+	})
+	<-s.events
+
+	s.handleServerRequest(serverRequestProbe(t, `"patch-with-changes"`, "item/fileChange/requestApproval", map[string]any{
+		"threadId":  "thread-1",
+		"turnId":    "turn-1",
+		"itemId":    "exec-1",
+		"reason":    nil,
+		"grantRoot": nil,
+	}))
+
+	event := <-s.events
+	want := "/workspace/restart.sh\n```diff\n+export https_proxy=http://0.0.0.0:1087\n```"
+	if event.ToolInput != want {
+		t.Fatalf("tool input = %q, want %q", event.ToolInput, want)
+	}
+	for _, internalField := range []string{"threadId", "turnId", "itemId"} {
+		if strings.Contains(event.ToolInput, internalField) {
+			t.Fatalf("tool input %q exposes internal field %q", event.ToolInput, internalField)
+		}
+	}
+}
+
+func TestAppServerSession_PermissionsApprovalDoesNotExposeMetadata(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := &appServerSession{
+		events:           make(chan core.Event, 1),
+		ctx:              ctx,
+		pendingApprovals: make(map[string]chan core.PermissionResult),
+		stdin:            &lockedWriteCloser{},
+	}
+	s.handleServerRequest(serverRequestProbe(t, `"permissions-1"`, "item/permissions/requestApproval", map[string]any{
+		"threadId": "thread-1",
+		"turnId":   "turn-1",
+		"itemId":   "exec-1",
+		"cwd":      "/workspace",
+		"permissions": map[string]any{
+			"disk": map[string]any{"write": []any{"/workspace"}},
+		},
+	}))
+
+	event := <-s.events
+	if event.ToolName != "Permissions" {
+		t.Fatalf("tool name = %q, want Permissions", event.ToolName)
+	}
+	if !strings.Contains(event.ToolInput, `"write":["/workspace"]`) || !strings.Contains(event.ToolInput, "(in /workspace)") {
+		t.Fatalf("tool input = %q, want permissions and working directory", event.ToolInput)
+	}
+	for _, internalField := range []string{"threadId", "turnId", "itemId"} {
+		if strings.Contains(event.ToolInput, internalField) {
+			t.Fatalf("tool input %q exposes internal field %q", event.ToolInput, internalField)
+		}
+	}
+}
+
 func TestAppServerSession_HandleRequestUserInputWritesCodexResponse(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

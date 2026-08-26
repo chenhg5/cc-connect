@@ -178,6 +178,7 @@ type appServerSession struct {
 
 	stateMu      sync.Mutex
 	pendingMsgs  []string
+	fileChanges  map[string]string
 	currentTurn  string
 	preambleSent bool
 
@@ -209,6 +210,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		cancel:           cancel,
 		pending:          make(map[int64]chan rpcResponseEnvelope),
 		pendingApprovals: make(map[string]chan core.PermissionResult),
+		fileChanges:      make(map[string]string),
 		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
 	}
 	s.alive.Store(true)
@@ -585,7 +587,7 @@ func (s *appServerSession) handleApprovalRequest(rawID json.RawMessage, method s
 		return
 	}
 
-	toolName, toolInput := method, appServerJSON(params)
+	toolName, toolInput := method, ""
 	switch method {
 	case "item/commandExecution/requestApproval":
 		toolName = "Bash"
@@ -597,8 +599,18 @@ func (s *appServerSession) handleApprovalRequest(rawID json.RawMessage, method s
 		}
 	case "item/fileChange/requestApproval":
 		toolName = "Patch"
+		if itemID, _ := params["itemId"].(string); itemID != "" {
+			toolInput = s.fileChangeInput(itemID)
+		}
+		if toolInput != "" {
+			break
+		}
 		if reason, _ := params["reason"].(string); reason != "" {
 			toolInput = reason
+		} else if grantRoot, _ := params["grantRoot"].(string); grantRoot != "" {
+			toolInput = grantRoot
+		} else {
+			toolInput = "File changes"
 		}
 	}
 
@@ -659,7 +671,7 @@ func (s *appServerSession) handlePermissionsApproval(rawID json.RawMessage, para
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
 		ToolName:     "Permissions",
-		ToolInput:    appServerJSON(params),
+		ToolInput:    appServerPermissionsInput(params),
 		ToolInputRaw: params,
 	})
 
@@ -694,6 +706,26 @@ func (s *appServerSession) handlePermissionsApproval(rawID json.RawMessage, para
 			})
 		}
 	}()
+}
+
+func appServerPermissionsInput(params map[string]any) string {
+	parts := make([]string, 0, 2)
+	if permissions := appServerJSON(params["permissions"]); permissions != "" {
+		parts = append(parts, permissions)
+	}
+	if cwd, _ := params["cwd"].(string); cwd != "" {
+		parts = append(parts, "(in "+cwd+")")
+	}
+	if len(parts) == 0 {
+		return "Additional permissions"
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (s *appServerSession) fileChangeInput(itemID string) string {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.fileChanges[itemID]
 }
 
 func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsRaw json.RawMessage) {
@@ -1107,6 +1139,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.stateMu.Lock()
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
+			clear(s.fileChanges)
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
 		}
@@ -1194,14 +1227,70 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 		s.emit(core.Event{Type: core.EventToolUse, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
 
 	case "fileChange":
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
+		changes := appServerFileChangesInput(item["changes"])
+		if itemID, _ := item["id"].(string); itemID != "" && changes != "" {
+			s.stateMu.Lock()
+			if s.fileChanges == nil {
+				s.fileChanges = make(map[string]string)
+			}
+			s.fileChanges[itemID] = changes
+			s.stateMu.Unlock()
+		}
+		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Patch", ToolInput: changes})
 	}
+}
+
+func appServerFileChangesInput(raw any) string {
+	changes, ok := raw.([]any)
+	if !ok || len(changes) == 0 {
+		return appServerJSON(raw)
+	}
+
+	parts := make([]string, 0, len(changes))
+	for _, rawChange := range changes {
+		change, ok := rawChange.(map[string]any)
+		if !ok {
+			continue
+		}
+		path, _ := change["path"].(string)
+		diff, _ := change["diff"].(string)
+		path = strings.TrimSpace(path)
+		diff = strings.TrimSpace(diff)
+		if path == "" && diff == "" {
+			continue
+		}
+
+		var part strings.Builder
+		if path != "" {
+			part.WriteString(path)
+		}
+		if diff != "" {
+			if part.Len() > 0 {
+				part.WriteByte('\n')
+			}
+			part.WriteString("```diff\n")
+			part.WriteString(diff)
+			part.WriteString("\n```")
+		}
+		parts = append(parts, part.String())
+	}
+	if len(parts) == 0 {
+		return appServerJSON(raw)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	itemType, _ := item["type"].(string)
 	if itemType == "" {
 		return
+	}
+	if itemType == "fileChange" {
+		if itemID, _ := item["id"].(string); itemID != "" {
+			s.stateMu.Lock()
+			delete(s.fileChanges, itemID)
+			s.stateMu.Unlock()
+		}
 	}
 
 	switch itemType {
