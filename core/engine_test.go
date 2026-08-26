@@ -88,6 +88,30 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Unlock()
 }
 
+type finalizedOrderPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *finalizedOrderPlatform) Send(ctx context.Context, replyCtx any, content string) error {
+	if err := os.WriteFile(p.marker, []byte("sent\n"), 0600); err != nil {
+		return err
+	}
+	return p.stubPlatformEngine.Send(ctx, replyCtx, content)
+}
+
+type failedSendPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *failedSendPlatform) Send(_ context.Context, _ any, _ string) error {
+	if err := os.WriteFile(p.marker, []byte("attempted\n"), 0600); err != nil {
+		return err
+	}
+	return errors.New("platform send failed")
+}
+
 type recallCheckingPlatform struct {
 	stubPlatformEngine
 	recalled bool
@@ -1023,6 +1047,47 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 
 	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
 		t.Fatalf("sent text = %#v, want one side-channel message", got)
+	}
+}
+
+func TestProcessInteractiveEvents_FinalizedHookRunsAfterReplySend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &finalizedOrderPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "test -f '" + sentMarker + "' && touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-finalized")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-finalized",
+		ccSessionKey: sessionKey,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "final reply", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "turn-1", time.Now(), nil, nil, state.replyCtx)
+
+	if _, err := os.Stat(sentMarker); err != nil {
+		t.Fatalf("final reply was not sent: %v", err)
+	}
+	if _, err := os.Stat(hookMarker); err != nil {
+		t.Fatalf("message.finalized hook did not run after send: %v", err)
+	}
+	if got := p.getSent(); len(got) != 1 || got[0] != "final reply" {
+		t.Fatalf("sent replies = %#v, want one final reply", got)
 	}
 }
 
@@ -13921,6 +13986,99 @@ func waitForPlatformSend(p *stubPlatformEngine, n int, timeout time.Duration) []
 
 // TestUnsolicitedReader_RelaysEventResult verifies that the unsolicited reader
 // goroutine relays EventResult content to the platform.
+func TestUnsolicitedReader_EmitsFinalizedHookAfterReplySend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &finalizedOrderPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "test -f '" + sentMarker + "' && touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: "background reply", Done: true}
+
+	if sent := waitForPlatformSend(&p.stubPlatformEngine, 1, 5*time.Second); len(sent) != 1 || sent[0] != "background reply" {
+		t.Fatalf("sent replies = %#v, want one background reply", sent)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(hookMarker); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("message.finalized hook did not run after background reply send")
+}
+
+func TestUnsolicitedReader_DoesNotEmitFinalizedHookWhenReplySendFails(t *testing.T) {
+	dir := t.TempDir()
+	sendAttemptMarker := filepath.Join(dir, "send-attempt")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &failedSendPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sendAttemptMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized-failure")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: "background reply", Done: true}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sendAttemptMarker); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(sendAttemptMarker); err != nil {
+		t.Fatalf("background reply send was not attempted: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Fatalf("message.finalized hook ran after failed background send: err=%v", err)
+	}
+}
+
 func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-relay")
