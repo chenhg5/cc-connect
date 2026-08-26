@@ -106,7 +106,7 @@ func TestGracefulStopTimeoutIsShortEnoughForUserStop(t *testing.T) {
 
 // 闲置会话必须走「干净退出」这条路，不该被 SIGKILL —— 否则 5s 就设错了。
 func TestIdleSessionExitsWithinGracefulWindow(t *testing.T) {
-	cmd := exec.Command("cmd", "/c", "more")   // 读 stdin，EOF 即退
+	cmd := exec.Command("cmd", "/c", "more") // 读 stdin，EOF 即退
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("stdin pipe: %v", err)
