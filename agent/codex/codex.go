@@ -52,6 +52,19 @@ type Agent struct {
 	mu              sync.RWMutex
 }
 
+type reasoningEffortDefinition struct {
+	name    string
+	aliases []string
+}
+
+var reasoningEffortDefinitions = []reasoningEffortDefinition{
+	{name: "low"},
+	{name: "medium", aliases: []string{"med"}},
+	{name: "high"},
+	{name: "xhigh", aliases: []string{"x-high", "very-high"}},
+	{name: "max", aliases: []string{"maximum"}},
+}
+
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
@@ -143,20 +156,21 @@ func normalizeMode(raw string) string {
 }
 
 func normalizeReasoningEffort(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "":
-		return ""
-	case "low":
-		return "low"
-	case "medium", "med":
-		return "medium"
-	case "high":
-		return "high"
-	case "xhigh", "x-high", "very-high":
-		return "xhigh"
-	default:
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
 		return ""
 	}
+	for _, definition := range reasoningEffortDefinitions {
+		if normalized == definition.name {
+			return definition.name
+		}
+		for _, alias := range definition.aliases {
+			if normalized == alias {
+				return definition.name
+			}
+		}
+	}
+	return ""
 }
 
 func (a *Agent) Name() string { return "codex" }
@@ -201,7 +215,11 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "xhigh"}
+	efforts := make([]string, len(reasoningEffortDefinitions))
+	for i, definition := range reasoningEffortDefinitions {
+		efforts[i] = definition.name
+	}
+	return efforts
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
