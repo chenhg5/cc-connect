@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -30,7 +31,12 @@ type ClientConfig struct {
 	AllowInsecureLoopback bool
 }
 
-const maxRuntimeAttachmentSize = 50 << 20
+const (
+	maxRuntimeAttachmentSize = 50 << 20
+	runtimePingInterval      = 30 * time.Second
+	runtimePongWait          = 90 * time.Second
+	runtimePingWriteTimeout  = 10 * time.Second
+)
 
 type EventCheckpointStore interface {
 	RecordUnconfirmed(generation, sequence uint64, method runtimeprotocol.Method, resource runtimeprotocol.Resource, payload []byte) error
@@ -46,6 +52,8 @@ type Client struct {
 	generation uint64
 	sequence   uint64
 	closed     bool
+	pingEvery  time.Duration
+	pongWait   time.Duration
 }
 
 func NewClient(config ClientConfig) (*Client, error) {
@@ -60,7 +68,12 @@ func NewClient(config ClientConfig) (*Client, error) {
 		return nil, errors.New("runtime client: device identity, handler and checkpoint store are required")
 	}
 	config.ServerURL = strings.TrimSuffix(base.String(), "/")
-	client := &Client{config: config, http: &http.Client{Timeout: 20 * time.Second}}
+	client := &Client{
+		config:    config,
+		http:      &http.Client{Timeout: 20 * time.Second},
+		pingEvery: runtimePingInterval,
+		pongWait:  runtimePongWait,
+	}
 	config.Handler.SetEventEmitter(client.emit)
 	config.Handler.SetAttachmentFetcher(client.fetchAttachment)
 	return client, nil
@@ -120,6 +133,7 @@ func (c *Client) Run(ctx context.Context) error {
 		if errors.Is(err, runtimeprotocol.ErrContractMismatch) || strings.Contains(err.Error(), "update_required") {
 			return err
 		}
+		slog.Warn("Runtime 连接已断开，等待重连", "error", err, "retry_after", delay)
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -163,15 +177,28 @@ func (c *Client) runConnection(ctx context.Context) error {
 		_ = connection.Close()
 		return errors.New("runtime client: control did not assign a connection generation")
 	}
+	if err := c.configureConnectionLiveness(connection); err != nil {
+		_ = connection.Close()
+		return err
+	}
 	c.mu.Lock()
 	c.connection, c.generation, c.sequence = connection, generation, 0
 	c.mu.Unlock()
 	connectionCtx, cancelConnection := context.WithCancel(ctx)
-	var responses sync.WaitGroup
-	responses.Add(1)
+	var workers sync.WaitGroup
+	workers.Add(3)
 	go func() {
-		defer responses.Done()
+		defer workers.Done()
 		c.watchCatalog(connectionCtx, 15*time.Second)
+	}()
+	go func() {
+		defer workers.Done()
+		c.keepConnectionAlive(connectionCtx, connection, generation)
+	}()
+	go func() {
+		defer workers.Done()
+		<-connectionCtx.Done()
+		_ = connection.Close()
 	}()
 	defer func() {
 		cancelConnection()
@@ -181,7 +208,7 @@ func (c *Client) runConnection(ctx context.Context) error {
 		}
 		c.mu.Unlock()
 		_ = connection.Close()
-		responses.Wait()
+		workers.Wait()
 		c.config.Handler.ReleaseConnection()
 	}()
 	var guard runtimeprotocol.SequenceGuard
@@ -213,12 +240,47 @@ func (c *Client) runConnection(ctx context.Context) error {
 		if envelope.RequestID == "" {
 			return errors.New("runtime client: control sent an unsolicited request")
 		}
-		responses.Add(1)
+		workers.Add(1)
 		go func(request runtimeprotocol.Envelope) {
-			defer responses.Done()
+			defer workers.Done()
 			c.respond(connectionCtx, connection, generation, request)
 		}(envelope)
 	}
+}
+
+func (c *Client) configureConnectionLiveness(connection *websocket.Conn) error {
+	if err := connection.SetReadDeadline(time.Now().Add(c.pongWait)); err != nil {
+		return fmt.Errorf("runtime client: set pong deadline: %w", err)
+	}
+	connection.SetPongHandler(func(string) error {
+		return connection.SetReadDeadline(time.Now().Add(c.pongWait))
+	})
+	return nil
+}
+
+func (c *Client) keepConnectionAlive(ctx context.Context, connection *websocket.Conn, generation uint64) {
+	ticker := time.NewTicker(c.pingEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := c.pingForConnection(connection, generation); err != nil {
+				_ = connection.Close()
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) pingForConnection(connection *websocket.Conn, generation uint64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.connection == nil || c.connection != connection || c.generation != generation {
+		return errors.New("runtime client: stale connection generation")
+	}
+	return connection.WriteControl(websocket.PingMessage, nil, time.Now().Add(runtimePingWriteTimeout))
 }
 
 func (c *Client) watchCatalog(ctx context.Context, interval time.Duration) {

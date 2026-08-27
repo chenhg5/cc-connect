@@ -32,7 +32,10 @@
 
 ## 可复用的生命周期经验
 
+- 异步交互的终态必须在用户可见输出尝试完成后发布。删除会话流程曾先把 phase 标成 `result`、再刷新结果卡，导致覆盖率全仓测试在 GitHub Actions run `33041249321` 中看到终态却还没有卡片；把结果数据先写入、刷新卡片后再提交终态，并用阻塞 `RefreshCard` 的回归测试固定提交顺序后，全仓覆盖率、Core CUJ 和完整 Core race 均通过。测试等待也应以这个提交点为准，不能用内部阶段提前代表用户已经收到结果。
 - Engine、Hook 与 Cron 创建的异步任务都必须在停止锁下登记，并由唯一生命周期所有者等待；只取消 context 而不等待任务会在测试临时目录销毁后继续写文件。
+- Runtime 到控制面的空闲 WebSocket 必须由 Runtime 主动发送 Ping，并用 Pong 刷新读截止时间；只依赖业务消息会在反代空闲超时后留下半开连接。连接 context 取消时必须主动关闭 socket 以解除阻塞读，Ping、业务响应和事件写入必须服从同一个写并发所有者。
+- Codex 原生 thread 只有在 `thread/resume` 成功并核验 thread/cwd 后才能提交为已加载。Read 与 Subscribe 必须按 thread 串行经过同一个 ensure 生命周期；resume 失败要回滚 registration、owner 和派生状态，使下一次调用真实重试，不能把失败尝试泄漏为已加载状态。
 - session 的 unsolicited pump 必须先关闭并等待，再关闭 Agent session；停止开始后不得重新登记 pump，否则会在 session 关闭后继续消费事件或写 Session。后台审批响应也属于 Engine worker，不能以裸 goroutine 绕过 stopping 锁和 WaitGroup。
 - 旧 Engine 与工作区 Native 会话应共用同一个事件泵 runner 来仲裁 channel 关闭、context 取消、已取出事件的 handoff 和退出清理；审批等不可重放事件只在 runner 的 handoff 回调中收口，避免两个消费者各自复制有差异的 select 循环。
 - Codex `thread/read` 与 `thread/resume` 的 thread/cwd 归属失败都必须包装 `ErrNativeThreadNotFound`。Core 只依赖该通用终态回收 provisional actor；普通字符串错误会让跨目录 actor 永久重试订阅。
@@ -84,3 +87,5 @@
 `v0.1.1` tag 的 Signed Release run `32754800828` 在多架构镜像冷构建中失败：Dockerfile 已把唯一根 `pnpm-lock.yaml` 复制到 `/src`，却调用 `pnpm --dir web install --frozen-lockfile`，BuildKit 中 pnpm 因 `/src/web/pnpm-lock.yaml` 不存在而返回 `ERR_PNPM_NO_LOCKFILE`。仅切换工作目录或添加 `--lockfile-dir` 仍会分别触发缺少锁文件或 importer 不匹配；根锁已有 `web` importer，但 Dockerfile 没有复制仓库现有的 `pnpm-workspace.yaml`。修复复制唯一根 workspace 契约，在 `/src` 执行一次 `pnpm install --frozen-lockfile`，随后进入 `/src/web` 构建；不得复制第二份锁或关闭 frozen。隔离临时目录按 Docker 顺序执行根 frozen install、复制 Web 源码和生产构建已通过，331 个包全部来自锁定依赖图。`deploy/scripts_test.go` 固化这条约束，禁止恢复 `pnpm --dir web install`。`v0.1.1` tag 不移动，修复通过新提交和下一补丁版本发布。
 
 `v0.1.2` tag 的 Signed Release run `32757886163` 已跨过 pnpm frozen install，并完成两个架构的 Web 生产构建；随后 Go 容器编译因 `embed.go` 的 `config.example.toml` 不在 Docker context 而失败。根因是 `.dockerignore` 的 `config.*.toml` 同时排除了部署配置和受 Git 管理的 embed 输入。修复保留该敏感配置排除规则，并在其后显式添加 `!config.example.toml`；回归测试校验重新包含规则的顺序和全部 Go embed 输入存在。`v0.1.2` tag 不移动，继续使用下一补丁版本发布。
+
+2026-08-27 在 `v0.2.8` 基线验证 Runtime 心跳修复：修复前 VPS 审计显示连接从 `2026-08-27T04:02:08Z` 到 `04:12:08Z` 精确十分钟后断开；修复后的源码 Runtime 连续在线超过十分钟，浏览器原生 Turn、历史和连接状态保持可用，随后主动停止能显示设备离线，重启后同一深链恢复完整历史。Runtime 与 Codex 聚焦测试、完整受影响包测试和 race 均通过；暖缓存 Go 全仓构建为 8.67 秒，Web 生产构建为 30.36 秒。

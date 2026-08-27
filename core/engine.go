@@ -12619,7 +12619,8 @@ func (e *Engine) performDeleteModeAsync(sessionKey string, selectedIDs map[strin
 	lines := e.submitDeleteModeSelection(sessionKey, selectedIDs)
 	result := strings.Join(lines, "\n")
 
-	// Update the interactive state to "result" phase.
+	// Store the result before rendering the final card, but do not publish the
+	// terminal phase until the user-visible refresh attempt has completed.
 	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 	e.interactiveMu.Lock()
 	state := e.interactiveStates[interactiveKey]
@@ -12629,13 +12630,19 @@ func (e *Engine) performDeleteModeAsync(sessionKey string, selectedIDs map[strin
 		if state.deleteMode != nil {
 			state.deleteMode.result = result
 			state.deleteMode.hint = ""
-			state.deleteMode.phase = "result"
 		}
 		state.mu.Unlock()
 	}
 
 	// Push the result card to the platform proactively.
 	e.pushDeleteModeResultCard(sessionKey)
+	if state != nil {
+		state.mu.Lock()
+		if state.deleteMode != nil {
+			state.deleteMode.phase = "result"
+		}
+		state.mu.Unlock()
+	}
 }
 
 // pushDeleteModeResultCard resolves the platform from the session key and

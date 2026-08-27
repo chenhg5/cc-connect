@@ -211,6 +211,34 @@ func TestSubscribeNativeConversationReusesLoadedEmptyThread(t *testing.T) {
 	}
 }
 
+func TestReadNativeConversation_RetriesAfterFailedResume(t *testing.T) {
+	agent, logPath := newWorkspaceFakeAppServerAgent(t)
+	agent.configEnv = append(agent.configEnv, "CC_WORKSPACE_FAKE_RESUME_FAIL_ONCE=1")
+	t.Cleanup(func() {
+		if err := agent.Stop(); err != nil {
+			t.Errorf("Stop: %v", err)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	workspace := fakeWorkspace(t, agent)
+	if _, err := agent.ReadNativeConversation(ctx, workspace, "thread-1"); err == nil || !strings.Contains(err.Error(), "temporary resume failure") {
+		t.Fatalf("首次 resume 错误 = %v", err)
+	}
+	detail, err := agent.ReadNativeConversation(ctx, workspace, "thread-1")
+	if err != nil || detail.Thread.ID != "thread-1" || detail.Settings.Revision == "" {
+		t.Fatalf("第二次 ReadNativeConversation() = %#v, %v", detail, err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(logData), "thread/resume\n"); count != 2 {
+		t.Fatalf("thread/resume 次数 = %d, want 2; log:\n%s", count, logData)
+	}
+}
+
 func TestWorkspaceAppServerReconnectsAfterDisconnect(t *testing.T) {
 	agent, logPath := newWorkspaceFakeAppServerAgent(t)
 	t.Cleanup(func() {
@@ -1006,6 +1034,8 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	pendingApprovals := make(map[string]string)
+	failedResumes := make(map[string]bool)
+	resumedThreads := make(map[string]bool)
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		var request map[string]json.RawMessage
@@ -1108,6 +1138,11 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 				PersistExtendedHistory *bool  `json:"persistExtendedHistory"`
 			}
 			_ = json.Unmarshal(request["params"], &params)
+			if os.Getenv("CC_WORKSPACE_FAKE_RESUME_FAIL_ONCE") == "1" && !failedResumes[params.ThreadID] {
+				failedResumes[params.ThreadID] = true
+				write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32600, "message": "temporary resume failure"}})
+				continue
+			}
 			if os.Getenv("CC_WORKSPACE_FAKE_EMPTY_THREAD_NO_ROLLOUT") == "1" && params.ThreadID == "thread-new" {
 				write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32600, "message": "no rollout found for thread id " + params.ThreadID}})
 				continue
@@ -1120,6 +1155,7 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 			if params.ThreadID == "resume-foreign" {
 				resumeCwd = filepath.Join(cwd, "foreign")
 			}
+			resumedThreads[params.ThreadID] = true
 			respond(fakeNativeRuntime(fakeNativeThread(params.ThreadID, resumeCwd), resumeCwd))
 		case "model/list":
 			var params struct {
@@ -1156,6 +1192,10 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 				CollaborationMode json.RawMessage `json:"collaborationMode"`
 			}
 			_ = json.Unmarshal(request["params"], &params)
+			if os.Getenv("CC_WORKSPACE_FAKE_RESUME_FAIL_ONCE") == "1" && !resumedThreads[params.ThreadID] {
+				write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32600, "message": "thread not found: " + params.ThreadID}})
+				continue
+			}
 			if params.ThreadID == "00000000-0000-7000-8000-000000000000" {
 				write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32004, "message": "thread not found"}})
 				continue
