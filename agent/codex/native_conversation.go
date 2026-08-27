@@ -204,6 +204,15 @@ func (s *appServerSession) nativeStateLocked(threadID string) *nativeConversatio
 	return state
 }
 
+func (s *appServerSession) nativeState(threadID string) *nativeConversationState {
+	if s.owner != nil {
+		return s.owner.nativeState(threadID)
+	}
+	s.nativeMu.Lock()
+	defer s.nativeMu.Unlock()
+	return s.nativeStateLocked(strings.TrimSpace(threadID))
+}
+
 func (s *appServerSession) claimThreadOwner(threadID, owner string) error {
 	if s.owner != nil {
 		return s.owner.claimThreadOwner(threadID, owner)
@@ -256,6 +265,33 @@ func (s *appServerSession) registerNativeThread(threadID, cwd string) error {
 	}
 	s.nativeMu.Unlock()
 	return nil
+}
+
+func (s *appServerSession) rollbackNativeThreadRegistration(threadID, cwd string) {
+	if s.owner != nil {
+		s.owner.rollbackNativeThreadRegistration(threadID, cwd)
+		return
+	}
+	threadID, cwd = strings.TrimSpace(threadID), strings.TrimSpace(cwd)
+	removed := false
+	s.nativeMu.Lock()
+	if s.nativeThreads[threadID] == cwd {
+		delete(s.nativeThreads, threadID)
+		state := s.nativeStateLocked(threadID)
+		state.Cwd = ""
+		state.Settings = core.NativeThreadSettings{}
+		state.HasSettings = false
+		state.Status = nil
+		state.Usage = nil
+		state.ActiveTurn = nil
+		state.LastCompletedTurnID = ""
+		state.PendingInteractions = make(map[string]core.NativeInteraction)
+		removed = true
+	}
+	s.nativeMu.Unlock()
+	if removed {
+		s.releaseThreadOwner(threadID, "native")
+	}
 }
 
 func (s *appServerSession) hasNativeThread(threadID, cwd string) bool {
@@ -947,6 +983,12 @@ func (a *Agent) resumeNativeThread(ctx context.Context, control *appServerSessio
 	if err := control.registerNativeThread(threadID, cwd); err != nil {
 		return nativeThreadRuntimeResponse{}, err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			control.rollbackNativeThreadRegistration(threadID, cwd)
+		}
+	}()
 	params := map[string]any{"threadId": threadID, "excludeTurns": true}
 	var response nativeThreadRuntimeResponse
 	if err := control.requestContext(ctx, "thread/resume", params, &response); err != nil {
@@ -965,7 +1007,21 @@ func (a *Agent) resumeNativeThread(ctx context.Context, control *appServerSessio
 	}
 	state.Status = cloneRawMessage(response.Thread.Status)
 	control.nativeMu.Unlock()
+	committed = true
 	return response, nil
+}
+
+func (a *Agent) ensureNativeThread(ctx context.Context, control *appServerSession, cwd, threadID string) (bool, error) {
+	state := control.nativeState(threadID)
+	state.settingsMu.Lock()
+	defer state.settingsMu.Unlock()
+	if control.hasNativeThread(threadID, cwd) {
+		return false, nil
+	}
+	if _, err := a.resumeNativeThread(ctx, control, cwd, threadID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (a *Agent) refreshNativeActiveTurn(ctx context.Context, control *appServerSession, cwd, threadID string) error {
@@ -1085,13 +1141,11 @@ func (a *Agent) ReadNativeConversation(ctx context.Context, workspace core.Works
 	if err != nil {
 		return core.NativeConversationSnapshot{}, err
 	}
-	alreadyLoaded := control.hasNativeThread(threadID, cwd)
-	if !alreadyLoaded {
-		if _, err := a.resumeNativeThread(ctx, control, cwd, threadID); err != nil {
-			return core.NativeConversationSnapshot{}, err
-		}
+	resumed, err := a.ensureNativeThread(ctx, control, cwd, threadID)
+	if err != nil {
+		return core.NativeConversationSnapshot{}, err
 	}
-	if !alreadyLoaded {
+	if resumed {
 		if err := a.refreshNativeActiveTurn(ctx, control, cwd, threadID); err != nil {
 			return core.NativeConversationSnapshot{}, err
 		}
@@ -1280,10 +1334,8 @@ func (a *Agent) SubscribeNativeConversation(ctx context.Context, workspace core.
 	if err != nil {
 		return core.NativeConversationSubscription{}, err
 	}
-	if !control.hasNativeThread(threadID, cwd) {
-		if _, err := a.resumeNativeThread(ctx, control, cwd, threadID); err != nil {
-			return core.NativeConversationSubscription{}, err
-		}
+	if _, err := a.ensureNativeThread(ctx, control, cwd, threadID); err != nil {
+		return core.NativeConversationSubscription{}, err
 	}
 	events, cancelNative, err := control.subscribeNative(threadID)
 	if err != nil {
