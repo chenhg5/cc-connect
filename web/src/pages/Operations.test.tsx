@@ -80,6 +80,21 @@ describe('Operations', () => {
     expect(view.getByRole('button', { name: 'Rollback' })).toHaveProperty('disabled', false);
   });
 
+	it('页面恢复时根据持久化运行记录阻断冲突操作并恢复取消入口', async () => {
+		mocks.dashboard.mockResolvedValue({
+			...dashboardFixture(),
+			runs: [{ id: 'run-active', kind: 'update', status: 'running', target_tag: 'v0.2.13', started_at: new Date().toISOString() }],
+		});
+		const view = render(<Operations />);
+
+		expect(await view.findByRole('button', { name: 'Cancel' })).toBeTruthy();
+		expect(view.getByRole('button', { name: 'Pair device' })).toHaveProperty('disabled', true);
+		expect(view.getByRole('button', { name: 'Check and update' })).toHaveProperty('disabled', true);
+		expect(view.getByRole('button', { name: 'Rollback' })).toHaveProperty('disabled', true);
+		expect(view.getByRole('button', { name: 'Restart' })).toHaveProperty('disabled', true);
+		expect(mocks.streamRun).toHaveBeenCalledWith('run-active', 0, expect.any(Function), expect.any(AbortSignal));
+	});
+
   it('容器宿主执行器离线时显示原因并禁用版本操作', async () => {
     mocks.dashboard.mockResolvedValue({
       ...dashboardFixture(),

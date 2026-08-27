@@ -19,6 +19,8 @@ export default function Operations() {
   const [deviceName, setDeviceName] = useState('');
   const [selectedDevice, setSelectedDevice] = useState('');
   const [deviceLogs, setDeviceLogs] = useState<DeviceLogLine[]>([]);
+	const activeRun = dashboard?.runs.find((run) => run.status === 'running');
+	const controlsBusy = busy !== '' || activeRun !== undefined;
 
   const refresh = useCallback(async () => {
     try {
@@ -36,6 +38,12 @@ export default function Operations() {
     const timer = window.setInterval(refresh, 5000);
     return () => window.clearInterval(timer);
   }, [refresh]);
+
+	useEffect(() => {
+		if (!activeRun) return;
+		const selected = dashboard?.runs.find((run) => run.id === selectedRun);
+		if (selected?.status !== 'running') setSelectedRun(activeRun.id);
+	}, [activeRun, dashboard?.runs, selectedRun]);
 
 	useEffect(() => {
 		if (!selectedRun) return;
@@ -93,7 +101,7 @@ export default function Operations() {
       <section className="border-t border-gray-200 pt-5 dark:border-gray-800">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-white"><Laptop size={16} />{t('control.devices')}</h2>
-          <button type="button" disabled={busy !== ''} onClick={() => act('pair', async () => setPairing(await createPairingCode()))}
+          <button type="button" disabled={controlsBusy} onClick={() => act('pair', async () => setPairing(await createPairingCode()))}
             className="rounded-md bg-accent px-3 py-2 text-xs font-semibold text-black disabled:opacity-50">{t('control.pairDevice')}</button>
         </div>
         {pairing && (
@@ -147,9 +155,9 @@ export default function Operations() {
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-white"><Server size={16} />{t('control.service')}</h2>
           <div className="flex gap-2">
-            <button type="button" disabled={busy !== '' || !dashboard?.deployment.update} onClick={() => act('update', async () => { const run = await startDeployRun('update'); setSelectedRun(run.id); })} className="rounded-md border border-gray-300 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700">{t('control.update')}</button>
-            <button type="button" disabled={busy !== '' || !dashboard?.deployment.rollback} onClick={() => act('rollback', async () => { const run = await startDeployRun('rollback'); setSelectedRun(run.id); })} className="rounded-md border border-gray-300 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700">{t('control.rollback')}</button>
-            <button type="button" disabled={busy !== ''} onClick={() => act('restart', async () => { const run = await restartService(); setSelectedRun(run.id); })} className="flex items-center gap-1 rounded-md bg-gray-900 px-3 py-2 text-xs text-white dark:bg-white dark:text-black"><RotateCcw size={13} />{t('control.restart')}</button>
+            <button type="button" disabled={controlsBusy || !dashboard?.deployment.update} onClick={() => act('update', async () => { const run = await startDeployRun('update'); setSelectedRun(run.id); })} className="rounded-md border border-gray-300 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700">{t('control.update')}</button>
+            <button type="button" disabled={controlsBusy || !dashboard?.deployment.rollback} onClick={() => act('rollback', async () => { const run = await startDeployRun('rollback'); setSelectedRun(run.id); })} className="rounded-md border border-gray-300 px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700">{t('control.rollback')}</button>
+            <button type="button" disabled={controlsBusy} onClick={() => act('restart', async () => { const run = await restartService(); setSelectedRun(run.id); })} className="flex items-center gap-1 rounded-md bg-gray-900 px-3 py-2 text-xs text-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-black"><RotateCcw size={13} />{t('control.restart')}</button>
           </div>
         </div>
         {dashboard?.deployment.reason === 'container_host_unavailable' && (
