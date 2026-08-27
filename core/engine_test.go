@@ -11316,6 +11316,28 @@ func TestRunShellWithProgress_BasicOutput(t *testing.T) {
 	}
 }
 
+func TestExecuteShellCommand_InjectsSessionEnv(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "feishu:oc_test:ou_test"}
+	cmd := &CustomCommand{Name: "echo-test", Exec: "echo SESSION=[$CC_SESSION_KEY] PROJECT=[$CC_PROJECT]"}
+	e.executeShellCommand(p, msg, cmd, nil)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last = sent[len(sent)-1]
+			if strings.Contains(last, "SESSION=[feishu:oc_test:ou_test]") && strings.Contains(last, "PROJECT=[test]") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected CC_SESSION_KEY/CC_PROJECT injected into shell command env, got %q", last)
+}
+
 func TestRunShellWithProgress_FailedCommand(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
