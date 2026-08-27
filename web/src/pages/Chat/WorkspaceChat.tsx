@@ -267,6 +267,7 @@ export default function WorkspaceChat() {
         return;
       }
       setSubmitting(false);
+      reconnectPendingRef.current = true;
       navigate(conversationPath(workspaceRef, { kind: 'thread', id: threadID }), { replace: true });
     }
   }, [conversation, navigate, t, workspaceRef]);

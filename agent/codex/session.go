@@ -60,7 +60,7 @@ type codexSession struct {
 var codexSessionCloseTimeout = 8 * time.Second
 var codexSessionForceKillWait = 2 * time.Second
 var codexRuntimeConfigCacheTTL = 5 * time.Second
-var codexRuntimeConfigTimeout = 1500 * time.Millisecond
+var codexRuntimeConfigTimeout = 5 * time.Second
 var codexContextUsageRetryDelay = 50 * time.Millisecond
 var codexContextUsageRetryCount = 4
 

@@ -39,6 +39,9 @@
 - session 的 unsolicited pump 必须先关闭并等待，再关闭 Agent session；停止开始后不得重新登记 pump，否则会在 session 关闭后继续消费事件或写 Session。后台审批响应也属于 Engine worker，不能以裸 goroutine 绕过 stopping 锁和 WaitGroup。
 - 旧 Engine 与工作区 Native 会话应共用同一个事件泵 runner 来仲裁 channel 关闭、context 取消、已取出事件的 handoff 和退出清理；审批等不可重放事件只在 runner 的 handoff 回调中收口，避免两个消费者各自复制有差异的 select 循环。
 - Codex `thread/read` 与 `thread/resume` 的 thread/cwd 归属失败都必须包装 `ErrNativeThreadNotFound`。Core 只依赖该通用终态回收 provisional actor；普通字符串错误会让跨目录 actor 永久重试订阅。
+- `thread/settings/updated` 的 Plan 模式会回填服务端生成的 `developer_instructions`，并把 Plan 的 reasoning effort 规范化为顶层有效 effort。设置确认只能精确比较客户端可控的 mode、model 和 reasoning effort；不得把服务端管理字段纳入全量相等，也不得用普通模式 effort 作为 Plan 顶层期望值。
+- 草稿首 Turn 物化后，原生终态可能在 draft URL 切换到 thread URL 的窗口内到达。Web 收到 `thread_materialized` 时必须标记一次权威重连收口，使新 thread 路由再次读取完整历史；否则 completed 事件可能被旧 draft 订阅按 thread 身份过滤，页面会停留在 `inProgress`。
+- Codex Runtime 配置读取会启动真实 App Server；1.5 秒上限在全仓并发负载下已出现模型空值。当前使用 5 秒有界超时，并用延迟 2 秒的夹具固定“仍可完成且不会无界等待”的契约。
 - 测试中的空主 SessionManager 路径必须连同派生工作区存储一起保持禁用。否则相对路径会在包目录生成 `test_ws_*.json`，产物本身也是后台生命周期未收口的诊断信号。
 - 远程 Runtime 的 `connection_generation` 不能只在 control 内存递增；control 重启后必须从 `control.db` 的最后 checkpoint 继续，否则新连接会复用旧代际。每个连接还需要独立 context 和任务等待，断线后旧 RPC 响应与旧原生订阅不得进入新连接。
 - Runtime 原生订阅的取消函数和事件泵必须由同一个登记项拥有。旧订阅退出时只删除自身登记，不能按 workspace/thread key 无条件删除后来建立的新订阅；连接释放需要先取消再等待事件泵退出。
@@ -89,3 +92,5 @@
 `v0.1.2` tag 的 Signed Release run `32757886163` 已跨过 pnpm frozen install，并完成两个架构的 Web 生产构建；随后 Go 容器编译因 `embed.go` 的 `config.example.toml` 不在 Docker context 而失败。根因是 `.dockerignore` 的 `config.*.toml` 同时排除了部署配置和受 Git 管理的 embed 输入。修复保留该敏感配置排除规则，并在其后显式添加 `!config.example.toml`；回归测试校验重新包含规则的顺序和全部 Go embed 输入存在。`v0.1.2` tag 不移动，继续使用下一补丁版本发布。
 
 2026-08-27 在 `v0.2.8` 基线验证 Runtime 心跳修复：修复前 VPS 审计显示连接从 `2026-08-27T04:02:08Z` 到 `04:12:08Z` 精确十分钟后断开；修复后的源码 Runtime 连续在线超过十分钟，浏览器原生 Turn、历史和连接状态保持可用，随后主动停止能显示设备离线，重启后同一深链恢复完整历史。Runtime 与 Codex 聚焦测试、完整受影响包测试和 race 均通过；暖缓存 Go 全仓构建为 8.67 秒，Web 生产构建为 30.36 秒。
+
+2026-08-27 在 `v0.2.9` 线上控制面与当前源码 Runtime 验证 Plan 设置、草稿物化、完整历史、steer、interrupt、刷新和 Runtime 断线重连。浏览器实际发现并修复 Plan 有效 effort、服务端管理指令确认、历史 mutation 未 resume、草稿物化终态收口和 Runtime 配置读取窗口问题。Web 11 个文件 58 个测试、生产构建、Core CUJ、Codex race、Go 全仓 build/vet/test、golangci-lint、actionlint、Compose 解析和严格基础审计均通过；暖缓存 Go 全仓构建为 8.93 秒，Web Vite 生产阶段为 9.66 秒。
