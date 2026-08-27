@@ -252,12 +252,16 @@ function ProviderGrid({
             <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
               <button
                 onClick={() => onEdit(p)}
+                aria-label={t('globalProviders.edit')}
+                title={t('globalProviders.edit')}
                 className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-white/[0.06] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
               >
                 <Pencil size={14} />
               </button>
               <button
                 onClick={() => onDelete(p.name)}
+                aria-label={t('common.delete')}
+                title={t('common.delete')}
                 className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-500/10 text-gray-400 hover:text-red-500"
               >
                 <Trash2 size={14} />
