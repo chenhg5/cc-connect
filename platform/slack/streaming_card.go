@@ -119,12 +119,35 @@ func (c *slackStreamingCard) Update(ctx context.Context, content string) error {
 	return nil
 }
 
+// retireCard removes the frozen streaming card after the full reply has been
+// delivered as a separate message. Caller must hold c.mu and must call this
+// only AFTER the fresh post succeeded, so a delete failure degrades to the old
+// behaviour (card left in place) rather than losing the turn's only output.
+//
+// The card is retired rather than kept because its content is a snapshot of the
+// same aggregated turn the fresh message repeats in full — leaving it turns
+// every long reply into two messages whose opening paragraphs are identical.
+// Best-effort: a failed delete is logged and the card is left alone.
+func (c *slackStreamingCard) retireCard(ctx context.Context) {
+	if c.ts == "" {
+		return
+	}
+	if _, _, err := c.client.DeleteMessageContext(ctx, c.channel, c.ts); err != nil {
+		slog.Debug("slack: could not retire the streaming card after oversize finalize (leaving it in place)",
+			"error", err, "ts", c.ts)
+		return
+	}
+	// No card to edit any more. A later render() sees the empty ts and posts
+	// fresh, which is the same outcome the overflow path produces anyway.
+	c.ts = ""
+}
+
 // Finalize writes the final content unconditionally (no throttle); it posts the
 // card if it was never posted. When the final payload exceeds the chat.update
 // size limit AND a card has already been posted, we deliver the full reply as
-// a fresh postMessage (the streaming card stays at its last fitting snapshot)
-// instead of failing with `msg_too_long`. The engine sees success, so no
-// fallback duplicate is sent.
+// a fresh postMessage and retire the now-redundant card, instead of failing
+// with `msg_too_long`. The engine sees success, so no fallback duplicate is
+// sent.
 func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -136,9 +159,11 @@ func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error
 		return nil
 	}
 	// Long reply + card already posted: chat.update would 413 with msg_too_long;
-	// post a fresh message with the full content instead. This is the in-house
-	// equivalent of "see full reply below" — the partial streaming card stays
-	// visible above the new full-content message.
+	// post a fresh message with the full content instead, then retire the card.
+	// Update() stops editing once the payload passes slackUpdateMaxText, so the
+	// card is frozen at an earlier snapshot of this same turn — keeping it would
+	// publish that snapshot twice, once alone and once as the opening of the
+	// full reply.
 	if c.ts != "" && len(rendered) > slackUpdateMaxText {
 		slog.Debug("slack: streaming card finalize switching to fresh postMessage (payload exceeds chat.update limit)",
 			"size", len(rendered), "limit", slackUpdateMaxText)
@@ -146,6 +171,7 @@ func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error
 			c.failed = true
 			return fmt.Errorf("slack: finalize streaming card: %w", err)
 		}
+		c.retireCard(ctx)
 		c.lastSent = rendered
 		return nil
 	}
