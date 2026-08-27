@@ -425,7 +425,7 @@ func TestWorkspaceNativeConversationRoutesInteractionsSettingsAndRealtime(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.Model != "gpt-other" || settings.Effort != "medium" || settings.CollaborationMode == nil ||
+	if settings.Model != "gpt-other" || settings.Effort != "high" || settings.CollaborationMode == nil ||
 		settings.CollaborationMode.Settings.Model != "gpt-other" || settings.CollaborationMode.Settings.ReasoningEffort == nil ||
 		*settings.CollaborationMode.Settings.ReasoningEffort != "high" {
 		t.Fatalf("plan mask defaults were not applied to top-level and nested settings: %#v", settings)
@@ -592,6 +592,75 @@ func TestWorkspaceNativeSettingsNotificationsCannotConfirmAnotherIntent(t *testi
 		if result.settings.Model != result.model {
 			t.Fatalf("settings intent for %q confirmed by %q notification", result.model, result.settings.Model)
 		}
+	}
+}
+
+func TestWorkspaceNativePlanModeUsesPlanEffortAsEffectiveEffort(t *testing.T) {
+	agent, _ := newWorkspaceFakeAppServerAgent(t)
+	agent.configEnv = append(agent.configEnv, "CC_WORKSPACE_FAKE_PLAN_EFFORT_IS_EFFECTIVE=1")
+	t.Cleanup(func() { _ = agent.Stop() })
+	workspace := fakeWorkspace(t, agent)
+	subscription, err := agent.SubscribeNativeConversation(context.Background(), workspace, "thread-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Cancel()
+
+	mode := "plan"
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	settings, err := agent.UpdateNativeConversationSettings(ctx, workspace, "thread-1", subscription.Generation, core.NativeThreadSettingsPatch{Mode: &mode})
+	if err != nil {
+		t.Fatalf("plan settings update did not observe the canonical notification: %v", err)
+	}
+	if settings.Effort != "high" || settings.CollaborationMode == nil || settings.CollaborationMode.Settings.ReasoningEffort == nil ||
+		*settings.CollaborationMode.Settings.ReasoningEffort != "high" {
+		t.Fatalf("plan effort was not canonical at both levels: %#v", settings)
+	}
+}
+
+func TestWorkspaceNativePlanModeAcceptsServerManagedDeveloperInstructions(t *testing.T) {
+	agent, _ := newWorkspaceFakeAppServerAgent(t)
+	agent.configEnv = append(agent.configEnv, "CC_WORKSPACE_FAKE_SERVER_MANAGED_MODE_INSTRUCTIONS=1")
+	t.Cleanup(func() { _ = agent.Stop() })
+	workspace := fakeWorkspace(t, agent)
+	subscription, err := agent.SubscribeNativeConversation(context.Background(), workspace, "thread-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Cancel()
+
+	mode := "plan"
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	settings, err := agent.UpdateNativeConversationSettings(ctx, workspace, "thread-1", subscription.Generation, core.NativeThreadSettingsPatch{Mode: &mode})
+	if err != nil {
+		t.Fatalf("server-managed plan instructions prevented settings confirmation: %v", err)
+	}
+	if settings.CollaborationMode == nil || settings.CollaborationMode.Settings.DeveloperInstructions == nil ||
+		*settings.CollaborationMode.Settings.DeveloperInstructions != "server-managed" {
+		t.Fatalf("canonical server-managed instructions were not preserved: %#v", settings)
+	}
+}
+
+func TestUpdateNativeConversationSettings_ResumesThreadBeforeMutation(t *testing.T) {
+	agent, _ := newWorkspaceFakeAppServerAgent(t)
+	agent.configEnv = append(agent.configEnv, "CC_WORKSPACE_FAKE_REQUIRE_RESUME=1")
+	t.Cleanup(func() { _ = agent.Stop() })
+	workspace := fakeWorkspace(t, agent)
+	control, _, _, err := agent.nativeControl(context.Background(), workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := "plan"
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	settings, err := agent.UpdateNativeConversationSettings(ctx, workspace, "thread-1", control.connectionGeneration, core.NativeThreadSettingsPatch{Mode: &mode})
+	if err != nil {
+		t.Fatalf("settings mutation did not resume the thread first: %v", err)
+	}
+	if settings.CollaborationMode == nil || settings.CollaborationMode.Mode != "plan" {
+		t.Fatalf("settings mutation returned unexpected settings: %#v", settings)
 	}
 }
 
@@ -1192,7 +1261,7 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 				CollaborationMode json.RawMessage `json:"collaborationMode"`
 			}
 			_ = json.Unmarshal(request["params"], &params)
-			if os.Getenv("CC_WORKSPACE_FAKE_RESUME_FAIL_ONCE") == "1" && !resumedThreads[params.ThreadID] {
+			if (os.Getenv("CC_WORKSPACE_FAKE_RESUME_FAIL_ONCE") == "1" || os.Getenv("CC_WORKSPACE_FAKE_REQUIRE_RESUME") == "1") && !resumedThreads[params.ThreadID] {
 				write(map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32600, "message": "thread not found: " + params.ThreadID}})
 				continue
 			}
@@ -1219,6 +1288,24 @@ func TestWorkspaceFakeAppServerProcess(t *testing.T) {
 			mode := any(map[string]any{"mode": "default", "settings": map[string]any{"model": model, "reasoning_effort": effort, "developer_instructions": nil}})
 			if len(params.CollaborationMode) > 0 {
 				_ = json.Unmarshal(params.CollaborationMode, &mode)
+				if os.Getenv("CC_WORKSPACE_FAKE_PLAN_EFFORT_IS_EFFECTIVE") == "1" {
+					var canonical struct {
+						Mode     string `json:"mode"`
+						Settings struct {
+							ReasoningEffort *string `json:"reasoning_effort"`
+						} `json:"settings"`
+					}
+					if json.Unmarshal(params.CollaborationMode, &canonical) == nil && canonical.Mode == "plan" && canonical.Settings.ReasoningEffort != nil {
+						effort = *canonical.Settings.ReasoningEffort
+					}
+				}
+				if os.Getenv("CC_WORKSPACE_FAKE_SERVER_MANAGED_MODE_INSTRUCTIONS") == "1" {
+					if modeValue, ok := mode.(map[string]any); ok {
+						if settingsValue, ok := modeValue["settings"].(map[string]any); ok {
+							settingsValue["developer_instructions"] = "server-managed"
+						}
+					}
+				}
 			}
 			write(map[string]any{"method": "thread/settings/updated", "params": map[string]any{"threadId": params.ThreadID, "threadSettings": fakeNativeSettings(cwd, model, effort, mode)}})
 		case "turn/start":

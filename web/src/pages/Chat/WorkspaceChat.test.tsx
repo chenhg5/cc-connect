@@ -244,6 +244,42 @@ describe('WorkspaceChat', () => {
     ));
   });
 
+  it('草稿物化切换后再次读取权威历史收口首 Turn 终态', async () => {
+    const active = {
+      ...threadSnapshot('thread-1'),
+      active_turn: {
+        id: 'turn-1',
+        started_at: '2026-08-23T00:00:01Z',
+      },
+    };
+    mocks.listWorkspaceThreads.mockResolvedValue({ data: [active.thread] });
+    mocks.readWorkspaceThread
+      .mockResolvedValueOnce(active)
+      .mockResolvedValue(threadSnapshot('thread-1'));
+    mocks.listWorkspaceTurns.mockResolvedValue({ data: [{ id: 'turn-1', status: 'completed' }] });
+
+    const view = renderChat('/chat/workspace-1/draft/draft-1');
+    const input = await view.findByPlaceholderText('Message Codex...');
+    fireEvent.change(input, { target: { value: 'Materialize this draft' } });
+    fireEvent.click(view.getByRole('button', { name: 'Send message' }));
+    const request = mocks.send.mock.calls
+      .map(([value]) => value as { type: string; request_id: string })
+      .find((value) => value.type === 'turn_start');
+    if (!request) throw new Error('turn_start request was not sent');
+
+    act(() => mocks.socketEvent({
+      type: 'thread_materialized', epoch: 'epoch-1', sequence: 1,
+      workspace_ref: 'workspace-1', conversation: { kind: 'thread', id: 'thread-1' },
+      thread_id: 'thread-1', turn_id: 'turn-1', request_id: request.request_id,
+      occurred_at: '2026-08-23T00:00:01Z',
+    }));
+
+    await waitFor(() => expect(mocks.readWorkspaceThread.mock.calls.filter(
+      ([workspaceRef, threadID]) => workspaceRef === 'workspace-1' && threadID === 'thread-1',
+    ).length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(view.queryByRole('button', { name: 'Cancel current Turn' })).toBeNull());
+  });
+
   it('Plan 模式显示 collaboration mode 的独立 effort', async () => {
     mocks.listWorkspaceThreads.mockResolvedValue({ data: [threadSnapshot('thread-1').thread] });
     mocks.readWorkspaceThread.mockResolvedValue(threadSnapshot('thread-1', {

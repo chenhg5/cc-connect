@@ -1072,8 +1072,18 @@ func nativeSettingsMatchParams(settings core.NativeThreadSettings, params map[st
 	if err != nil || settings.CollaborationMode == nil {
 		return false
 	}
-	actualRaw, err := json.Marshal(settings.CollaborationMode)
-	return err == nil && rawMessagesEqual(actualRaw, expectedRaw)
+	var expected nativeCollaborationModeWire
+	if err := json.Unmarshal(expectedRaw, &expected); err != nil {
+		return false
+	}
+	actual := settings.CollaborationMode
+	if actual.Mode != expected.Mode || actual.Settings.Model != expected.Settings.Model {
+		return false
+	}
+	if actual.Settings.ReasoningEffort == nil || expected.Settings.ReasoningEffort == nil {
+		return actual.Settings.ReasoningEffort == nil && expected.Settings.ReasoningEffort == nil
+	}
+	return *actual.Settings.ReasoningEffort == *expected.Settings.ReasoningEffort
 }
 
 func (s *appServerSession) waitNativeSettings(ctx context.Context, threadID string, params map[string]any) (core.NativeThreadSettings, error) {
@@ -1660,7 +1670,7 @@ func nativeModeSettings(mask nativeModeMaskWire, model string, effort *string) m
 	}
 	return map[string]any{
 		"mode":     *mask.Mode,
-		"settings": map[string]any{"model": model, "reasoning_effort": reasoning, "developer_instructions": nil},
+		"settings": map[string]any{"model": model, "reasoning_effort": reasoning},
 	}
 }
 
@@ -1672,10 +1682,7 @@ func (a *Agent) UpdateNativeConversationSettings(ctx context.Context, workspace 
 	if err := requireNativeGeneration(control, generation); err != nil {
 		return core.NativeThreadSettings{}, err
 	}
-	if _, err := a.readNativeThread(ctx, control, cwd, threadID); err != nil {
-		return core.NativeThreadSettings{}, err
-	}
-	if err := control.registerNativeThread(threadID, cwd); err != nil {
+	if _, err := a.ensureNativeThread(ctx, control, cwd, threadID); err != nil {
 		return core.NativeThreadSettings{}, err
 	}
 	current, hasCurrent, _, _, _, _ := control.nativeSnapshotState(threadID)
@@ -1858,7 +1865,11 @@ func (a *Agent) UpdateNativeConversationSettings(ctx context.Context, workspace 
 		if desiredMode == "plan" {
 			modeEffort = planEffort
 		}
-		params["model"], params["effort"] = desiredModel, normalEffort
+		effectiveEffort := normalEffort
+		if modeEffort != nil {
+			effectiveEffort = *modeEffort
+		}
+		params["model"], params["effort"] = desiredModel, effectiveEffort
 		params["collaborationMode"] = nativeModeSettings(selectedMode, desiredModel, modeEffort)
 	}
 	if len(params) == 1 {
@@ -1957,10 +1968,7 @@ func (a *Agent) StartNativeTurn(ctx context.Context, workspace core.Workspace, t
 	if err := requireNativeGeneration(control, generation); err != nil {
 		return core.NativeTurnResult{}, err
 	}
-	if _, err := a.readNativeThread(ctx, control, cwd, threadID); err != nil {
-		return core.NativeTurnResult{}, err
-	}
-	if err := control.registerNativeThread(threadID, cwd); err != nil {
+	if _, err := a.ensureNativeThread(ctx, control, cwd, threadID); err != nil {
 		return core.NativeTurnResult{}, err
 	}
 	input, err := nativeUserInputs(request.Input)
@@ -1998,10 +2006,7 @@ func (a *Agent) SteerNativeTurn(ctx context.Context, workspace core.Workspace, t
 	if err := requireNativeGeneration(control, generation); err != nil {
 		return core.NativeTurnResult{}, err
 	}
-	if _, err := a.readNativeThread(ctx, control, cwd, threadID); err != nil {
-		return core.NativeTurnResult{}, err
-	}
-	if err := control.registerNativeThread(threadID, cwd); err != nil {
+	if _, err := a.ensureNativeThread(ctx, control, cwd, threadID); err != nil {
 		return core.NativeTurnResult{}, err
 	}
 	expectedTurnID = strings.TrimSpace(expectedTurnID)
@@ -2034,10 +2039,7 @@ func (a *Agent) InterruptNativeTurn(ctx context.Context, workspace core.Workspac
 	if err := requireNativeGeneration(control, generation); err != nil {
 		return err
 	}
-	if _, err := a.readNativeThread(ctx, control, cwd, threadID); err != nil {
-		return err
-	}
-	if err := control.registerNativeThread(threadID, cwd); err != nil {
+	if _, err := a.ensureNativeThread(ctx, control, cwd, threadID); err != nil {
 		return err
 	}
 	turnID = strings.TrimSpace(turnID)
@@ -2210,10 +2212,7 @@ func (a *Agent) RespondNativeInteraction(ctx context.Context, workspace core.Wor
 	if err := requireNativeGeneration(control, generation); err != nil {
 		return err
 	}
-	if _, err := a.readNativeThread(ctx, control, cwd, threadID); err != nil {
-		return err
-	}
-	if err := control.registerNativeThread(threadID, cwd); err != nil {
+	if _, err := a.ensureNativeThread(ctx, control, cwd, threadID); err != nil {
 		return err
 	}
 	key := nativeRequestKey(generation, threadID, requestID)
@@ -2262,10 +2261,7 @@ func (a *Agent) StartNativeRealtime(ctx context.Context, workspace core.Workspac
 	if err := requireNativeGeneration(control, generation); err != nil {
 		return err
 	}
-	if _, err := a.readNativeThread(ctx, control, cwd, threadID); err != nil {
-		return err
-	}
-	if err := control.registerNativeThread(threadID, cwd); err != nil {
+	if _, err := a.ensureNativeThread(ctx, control, cwd, threadID); err != nil {
 		return err
 	}
 	sdp := strings.TrimSpace(request.SDP)
@@ -2315,10 +2311,7 @@ func (a *Agent) AppendNativeRealtimeText(ctx context.Context, workspace core.Wor
 	if err := requireNativeGeneration(control, generation); err != nil {
 		return err
 	}
-	if _, err := a.readNativeThread(ctx, control, cwd, threadID); err != nil {
-		return err
-	}
-	if err := control.registerNativeThread(threadID, cwd); err != nil {
+	if _, err := a.ensureNativeThread(ctx, control, cwd, threadID); err != nil {
 		return err
 	}
 	if strings.TrimSpace(text) == "" {
@@ -2338,10 +2331,7 @@ func (a *Agent) StopNativeRealtime(ctx context.Context, workspace core.Workspace
 	if err := requireNativeGeneration(control, generation); err != nil {
 		return err
 	}
-	if _, err := a.readNativeThread(ctx, control, cwd, threadID); err != nil {
-		return err
-	}
-	if err := control.registerNativeThread(threadID, cwd); err != nil {
+	if _, err := a.ensureNativeThread(ctx, control, cwd, threadID); err != nil {
 		return err
 	}
 	if err := control.mutationRequestContext(ctx, "thread/realtime/stop", map[string]any{"threadId": threadID}, nil); err != nil {
