@@ -196,6 +196,8 @@
     "close": "Close",
     "saving": "Saving…",
     "copy": "Copy",
+    "navigation": "Navigation",
+    "openNavigation": "Open navigation",
     "theme": "Theme"
   },
   "setup": {

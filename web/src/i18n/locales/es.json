@@ -196,6 +196,8 @@
     "close": "Cerrar",
     "saving": "Guardando…",
     "copy": "Copiar",
+    "navigation": "Navegación",
+    "openNavigation": "Abrir navegación",
     "theme": "Tema"
   },
   "setup": {

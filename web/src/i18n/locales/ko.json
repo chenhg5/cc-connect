@@ -196,6 +196,8 @@
     "close": "닫기",
     "saving": "저장 중…",
     "copy": "복사",
+    "navigation": "탐색",
+    "openNavigation": "탐색 열기",
     "theme": "테마"
   },
   "setup": {

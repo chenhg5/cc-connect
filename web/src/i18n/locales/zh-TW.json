@@ -196,6 +196,8 @@
     "close": "關閉",
     "saving": "儲存中…",
     "copy": "複製",
+    "navigation": "導覽",
+    "openNavigation": "開啟導覽",
     "theme": "主題"
   },
   "setup": {

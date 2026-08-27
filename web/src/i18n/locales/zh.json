@@ -196,6 +196,8 @@
     "close": "关闭",
     "saving": "保存中…",
     "copy": "复制",
+    "navigation": "导航",
+    "openNavigation": "打开导航",
     "theme": "主题"
   },
   "setup": {

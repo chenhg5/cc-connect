@@ -196,6 +196,8 @@
     "close": "閉じる",
     "saving": "保存中…",
     "copy": "コピー",
+    "navigation": "ナビゲーション",
+    "openNavigation": "ナビゲーションを開く",
     "theme": "テーマ"
   },
   "setup": {
