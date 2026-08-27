@@ -32,6 +32,7 @@
 
 ## 可复用的生命周期经验
 
+- 异步交互的终态必须在用户可见输出尝试完成后发布。删除会话流程曾先把 phase 标成 `result`、再刷新结果卡，导致覆盖率全仓测试在 GitHub Actions run `33041249321` 中看到终态却还没有卡片；把结果数据先写入、刷新卡片后再提交终态，并用阻塞 `RefreshCard` 的回归测试固定提交顺序后，全仓覆盖率、Core CUJ 和完整 Core race 均通过。测试等待也应以这个提交点为准，不能用内部阶段提前代表用户已经收到结果。
 - Engine、Hook 与 Cron 创建的异步任务都必须在停止锁下登记，并由唯一生命周期所有者等待；只取消 context 而不等待任务会在测试临时目录销毁后继续写文件。
 - Runtime 到控制面的空闲 WebSocket 必须由 Runtime 主动发送 Ping，并用 Pong 刷新读截止时间；只依赖业务消息会在反代空闲超时后留下半开连接。连接 context 取消时必须主动关闭 socket 以解除阻塞读，Ping、业务响应和事件写入必须服从同一个写并发所有者。
 - Codex 原生 thread 只有在 `thread/resume` 成功并核验 thread/cwd 后才能提交为已加载。Read 与 Subscribe 必须按 thread 串行经过同一个 ensure 生命周期；resume 失败要回滚 registration、owner 和派生状态，使下一次调用真实重试，不能把失败尝试泄漏为已加载状态。

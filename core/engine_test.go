@@ -306,6 +306,25 @@ type stubCardPlatform struct {
 	cardErr        error
 }
 
+type blockingRefreshCardPlatform struct {
+	stubCardPlatform
+	refreshStarted chan struct{}
+	refreshRelease chan struct{}
+}
+
+func (p *blockingRefreshCardPlatform) RefreshCard(ctx context.Context, sessionKey string, card *Card) error {
+	select {
+	case p.refreshStarted <- struct{}{}:
+	default:
+	}
+	select {
+	case <-p.refreshRelease:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return p.stubCardPlatform.RefreshCard(ctx, sessionKey, card)
+}
+
 func (p *stubCardPlatform) ReplyCard(_ context.Context, _ any, card *Card) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -4255,6 +4274,46 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 	}
 	if !strings.Contains(resultText, "Missing selected session") || !strings.Contains(resultText, "session-3") {
 		t.Fatalf("result text = %q, want missing selected session to be reported", resultText)
+	}
+}
+
+func TestDeleteMode_ResultPhaseWaitsForResultCardRefresh(t *testing.T) {
+	p := &blockingRefreshCardPlatform{
+		stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+		refreshStarted:   make(chan struct{}, 1),
+		refreshRelease:   make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		select {
+		case <-p.refreshRelease:
+		default:
+			close(p.refreshRelease)
+		}
+	})
+	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "session-1", Summary: "One"},
+	}}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+
+	e.cmdDelete(p, msg, nil)
+	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
+	if card := e.handleCardNav("act:/delete-mode submit", msg.SessionKey); card == nil {
+		t.Fatal("expected deleting card after submit")
+	}
+	select {
+	case <-p.refreshStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for result card refresh")
+	}
+	if dm := e.getDeleteModeState(msg.SessionKey); dm == nil || dm.phase != "deleting" {
+		t.Fatalf("phase during result card refresh = %v, want deleting", dm)
+	}
+
+	close(p.refreshRelease)
+	waitDeleteModePhase(t, e, msg.SessionKey, "result")
+	if refreshed := p.getRefreshedCards(); len(refreshed) != 1 {
+		t.Fatalf("refreshed cards = %d, want 1", len(refreshed))
 	}
 }
 
