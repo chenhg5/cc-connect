@@ -396,6 +396,30 @@ describe('WorkspaceChat', () => {
     expect(mocks.putWorkspaceChatSelection).not.toHaveBeenCalledWith('workspace-1', { kind: 'draft', id: 'draft-1' });
   });
 
+  it('新建草稿在导航前提交 selection，避免重连恢复旧线程', async () => {
+    mocks.listWorkspaceThreads.mockResolvedValue({ data: [threadSnapshot('thread-1').thread] });
+    mocks.readWorkspaceThread.mockResolvedValue(threadSnapshot('thread-1'));
+    mocks.readWorkspaceDraft.mockImplementation(async (_workspaceRef: string, draftID: string) => ({
+      id: draftID, owner_client_id: 'web:admin', workspace_ref: workspace.ref,
+      state: 'draft', settings_patch: {}, created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z',
+    }));
+
+    const view = renderChat('/chat/workspace-1/thread-1');
+    await view.findByPlaceholderText('Message Codex...');
+    fireEvent.click(view.getByRole('button', { name: 'New conversation' }));
+
+    await waitFor(() => expect(mocks.putWorkspaceChatSelection).toHaveBeenCalledWith(
+      'workspace-1', { kind: 'draft', id: 'draft-2' },
+    ));
+    await waitFor(() => expect(mocks.readWorkspaceDraft).toHaveBeenCalledWith('workspace-1', 'draft-2'));
+    const selectionCall = mocks.putWorkspaceChatSelection.mock.calls.findIndex(([, selected]) => selected.id === 'draft-2');
+    const draftReadCall = mocks.readWorkspaceDraft.mock.calls.findIndex(([, draftID]) => draftID === 'draft-2');
+    expect(selectionCall).toBeGreaterThanOrEqual(0);
+    expect(draftReadCall).toBeGreaterThanOrEqual(0);
+    expect(mocks.putWorkspaceChatSelection.mock.invocationCallOrder[selectionCall])
+      .toBeLessThan(mocks.readWorkspaceDraft.mock.invocationCallOrder[draftReadCall]);
+  });
+
   it('切换 thread 后不提交旧 thread 的慢历史响应', async () => {
     const slowThread = deferred<ReturnType<typeof threadSnapshot>>();
     const threads = [threadSnapshot('thread-1').thread, threadSnapshot('thread-2').thread];
