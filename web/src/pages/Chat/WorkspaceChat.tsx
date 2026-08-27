@@ -118,18 +118,26 @@ export default function WorkspaceChat() {
 	const streamCursorRef = useRef<{ epoch?: string; sequence?: number }>({});
   const reconnectPendingRef = useRef(false);
 	const selectionWriteRef = useRef<Promise<void>>(Promise.resolve());
+	const selectionIntentGenerationRef = useRef(0);
+	const draftCreationGenerationRef = useRef(0);
 	targetKeyRef.current = targetKey;
 	streamCursorRef.current = { epoch: stream.epoch, sequence: stream.sequence };
-	const persistSelection = useCallback((ref: string, nextConversation: ConversationRef) => {
+	const persistSelection = useCallback((ref: string, nextConversation: ConversationRef, intentGeneration: number) => {
 		const write = selectionWriteRef.current
 			.catch(() => undefined)
-			.then(() => putWorkspaceChatSelection(ref, nextConversation));
+			.then(() => {
+				if (intentGeneration !== selectionIntentGenerationRef.current) return;
+				return putWorkspaceChatSelection(ref, nextConversation);
+			});
 		selectionWriteRef.current = write.then(() => undefined, () => undefined);
 		return write;
 	}, []);
-  const selectConversation = useCallback(async (ref: string, nextConversation: ConversationRef) => {
-    await persistSelection(ref, nextConversation);
+  const selectConversation = useCallback(async (ref: string, nextConversation: ConversationRef, intentGeneration: number) => {
+    if (intentGeneration !== selectionIntentGenerationRef.current) return false;
+    await persistSelection(ref, nextConversation, intentGeneration);
+    if (intentGeneration !== selectionIntentGenerationRef.current) return false;
     navigate(conversationPath(ref, nextConversation));
+    return true;
   }, [navigate, persistSelection]);
 
   const loadWorkspaceCatalog = useCallback(async () => {
@@ -168,8 +176,12 @@ export default function WorkspaceChat() {
   useEffect(() => {
     if (workspaceRef || conversation) return;
     let cancelled = false;
+    const intentGeneration = selectionIntentGenerationRef.current;
     getWorkspaceChatSelection().then((selection) => {
-      if (!cancelled && selection) navigate(conversationPath(selection.workspace_ref, selection.conversation), { replace: true });
+      if (!cancelled && intentGeneration === selectionIntentGenerationRef.current && selection) {
+		selectionIntentGenerationRef.current++;
+		navigate(conversationPath(selection.workspace_ref, selection.conversation), { replace: true });
+	  }
     }).catch((cause) => { if (!cancelled) setError(errorMessage(cause)); });
     return () => { cancelled = true; };
   }, [conversation, navigate, workspaceRef]);
@@ -177,6 +189,7 @@ export default function WorkspaceChat() {
   useEffect(() => {
     if (!workspaceRef || !conversation) return;
     const generation = ++loadGeneration.current;
+    const intentGeneration = selectionIntentGenerationRef.current;
     let cancelled = false;
     dispatch({ type: 'reset' });
     setDraft(null);
@@ -192,14 +205,15 @@ export default function WorkspaceChat() {
 	  let validatedSnapshot: Awaited<ReturnType<typeof readWorkspaceThread>> | undefined;
       if (conversation.kind === 'draft') {
         nextDraft = await readWorkspaceDraft(workspaceRef, conversation.id);
-        if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+        if (cancelled || generation !== loadGeneration.current || intentGeneration !== selectionIntentGenerationRef.current || targetKeyRef.current !== targetKey) return;
         if (nextDraft.state === 'materialized') {
           if (!nextDraft.thread_id) throw new Error(t('workspaceChat.materializationMissingThread'));
           await readWorkspaceThread(workspaceRef, nextDraft.thread_id);
-          if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+          if (cancelled || generation !== loadGeneration.current || intentGeneration !== selectionIntentGenerationRef.current || targetKeyRef.current !== targetKey) return;
           const materializedConversation: ConversationRef = { kind: 'thread', id: nextDraft.thread_id };
-		  await persistSelection(workspaceRef, materializedConversation);
-          if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+		  const materializationIntent = ++selectionIntentGenerationRef.current;
+		  await persistSelection(workspaceRef, materializedConversation, materializationIntent);
+          if (cancelled || generation !== loadGeneration.current || materializationIntent !== selectionIntentGenerationRef.current || targetKeyRef.current !== targetKey) return;
           navigate(conversationPath(workspaceRef, materializedConversation), { replace: true });
           return;
         }
@@ -208,16 +222,16 @@ export default function WorkspaceChat() {
 		}
 	  } else {
 		validatedSnapshot = await readWorkspaceThread(workspaceRef, conversation.id);
-		if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+		if (cancelled || generation !== loadGeneration.current || intentGeneration !== selectionIntentGenerationRef.current || targetKeyRef.current !== targetKey) return;
 	  }
-		  await persistSelection(workspaceRef, conversation);
-	  if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+		  await persistSelection(workspaceRef, conversation, intentGeneration);
+	  if (cancelled || generation !== loadGeneration.current || intentGeneration !== selectionIntentGenerationRef.current || targetKeyRef.current !== targetKey) return;
 	  const [runtimeCatalog, availableThreads, loadedThread] = await Promise.all([
         getWorkspaceRuntimeCatalog(workspaceRef),
         fetchThreads(workspaceRef),
 		conversation.kind === 'thread' ? loadThreadHistory(workspaceRef, conversation.id, validatedSnapshot) : Promise.resolve(null),
 	  ]);
-	  if (cancelled || generation !== loadGeneration.current || targetKeyRef.current !== targetKey) return;
+	  if (cancelled || generation !== loadGeneration.current || intentGeneration !== selectionIntentGenerationRef.current || targetKeyRef.current !== targetKey) return;
       setThreads(availableThreads);
       setCatalog(runtimeCatalog);
       const preferredVoice = runtimeCatalog.voices.default_v2
@@ -236,9 +250,11 @@ export default function WorkspaceChat() {
       dispatch({ type: 'history_loaded', ...loadedThread });
     };
     load().catch((cause) => {
-      if (!cancelled && generation === loadGeneration.current && targetKeyRef.current === targetKey) setError(errorMessage(cause));
+      if (!cancelled && generation === loadGeneration.current && intentGeneration === selectionIntentGenerationRef.current && targetKeyRef.current === targetKey) setError(errorMessage(cause));
     })
-      .finally(() => { if (!cancelled && generation === loadGeneration.current) setLoading(false); });
+      .finally(() => {
+		if (!cancelled && generation === loadGeneration.current && intentGeneration === selectionIntentGenerationRef.current) setLoading(false);
+	  });
     return () => { cancelled = true; };
 	  }, [conversation?.id, conversation?.kind, fetchThreads, navigate, persistSelection, t, targetKey, workspaceRef]);
 
@@ -272,6 +288,7 @@ export default function WorkspaceChat() {
       }
       setSubmitting(false);
       reconnectPendingRef.current = true;
+      selectionIntentGenerationRef.current++;
       navigate(conversationPath(workspaceRef, { kind: 'thread', id: threadID }), { replace: true });
     }
   }, [conversation, navigate, t, workspaceRef]);
@@ -293,22 +310,27 @@ export default function WorkspaceChat() {
 	  if (socketStatus !== 'connected' || !reconnectPendingRef.current || !workspaceRef || !conversation) return;
 	  reconnectPendingRef.current = false;
 	  let cancelled = false;
+	  const intentGeneration = selectionIntentGenerationRef.current;
 	  const reconcile = async () => {
 		const selection = await getWorkspaceChatSelection();
-		if (cancelled) return;
+		if (cancelled || intentGeneration !== selectionIntentGenerationRef.current) return;
 		if (selection && (selection.workspace_ref !== workspaceRef || selection.conversation.kind !== conversation.kind || selection.conversation.id !== conversation.id)) {
+		  selectionIntentGenerationRef.current++;
 		  navigate(conversationPath(selection.workspace_ref, selection.conversation), { replace: true });
 		  return;
 		}
 		if (conversation.kind === 'thread') await refreshThread();
 		else {
 		  const currentDraft = await readWorkspaceDraft(workspaceRef, conversation.id);
-		  if (!cancelled && currentDraft.state === 'materialized' && currentDraft.thread_id) {
+		  if (!cancelled && intentGeneration === selectionIntentGenerationRef.current && currentDraft.state === 'materialized' && currentDraft.thread_id) {
+			selectionIntentGenerationRef.current++;
 			navigate(conversationPath(workspaceRef, { kind: 'thread', id: currentDraft.thread_id }), { replace: true });
 		  }
 		}
 	  };
-	  reconcile().catch((cause) => { if (!cancelled) setError(errorMessage(cause)); });
+	  reconcile().catch((cause) => {
+		if (!cancelled && intentGeneration === selectionIntentGenerationRef.current) setError(errorMessage(cause));
+	  });
 	  return () => { cancelled = true; };
 	}, [conversation, navigate, refreshThread, socketStatus, workspaceRef]);
 
@@ -365,46 +387,50 @@ export default function WorkspaceChat() {
   const tokenCount = totalTokenCount(stream.snapshot?.usage);
   const unsupportedCapabilities = Object.entries(catalog?.capabilities || {}).filter(([, status]) => !status.supported);
 
-  const createDraft = useCallback(async (ref: string) => {
+  const createDraft = useCallback(async (ref: string, existingIntentGeneration?: number) => {
+    const intentGeneration = existingIntentGeneration ?? ++selectionIntentGenerationRef.current;
+    if (intentGeneration !== selectionIntentGenerationRef.current) return;
+    const creationGeneration = ++draftCreationGenerationRef.current;
     setCreating(true);
     setError('');
     try {
       const nextDraft = await createWorkspaceDraft(ref);
+      if (intentGeneration !== selectionIntentGenerationRef.current) return;
       const nextConversation: ConversationRef = { kind: 'draft', id: nextDraft.id };
-      await selectConversation(ref, nextConversation);
-      setProjectPanelOpen(false);
+      if (await selectConversation(ref, nextConversation, intentGeneration)) setProjectPanelOpen(false);
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (intentGeneration === selectionIntentGenerationRef.current) setError(errorMessage(cause));
     } finally {
-      setCreating(false);
+      if (creationGeneration === draftCreationGenerationRef.current) setCreating(false);
     }
   }, [selectConversation]);
 
   const chooseWorkspace = async (workspace: Workspace) => {
     if (!workspace.available) return;
+    const intentGeneration = ++selectionIntentGenerationRef.current;
     setError('');
     try {
       const availableThreads = await fetchThreads(workspace.ref);
+      if (intentGeneration !== selectionIntentGenerationRef.current) return;
       if (availableThreads.length === 0) {
-        await createDraft(workspace.ref);
+        await createDraft(workspace.ref, intentGeneration);
         return;
       }
       const nextConversation: ConversationRef = { kind: 'thread', id: availableThreads[0].id };
-      await selectConversation(workspace.ref, nextConversation);
-      setProjectPanelOpen(false);
+      if (await selectConversation(workspace.ref, nextConversation, intentGeneration)) setProjectPanelOpen(false);
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (intentGeneration === selectionIntentGenerationRef.current) setError(errorMessage(cause));
     }
   };
 
   const chooseThread = async (thread: NativeThread) => {
     if (!workspaceRef) return;
+    const intentGeneration = ++selectionIntentGenerationRef.current;
     const nextConversation: ConversationRef = { kind: 'thread', id: thread.id };
     try {
-      await selectConversation(workspaceRef, nextConversation);
-      setProjectPanelOpen(false);
+      if (await selectConversation(workspaceRef, nextConversation, intentGeneration)) setProjectPanelOpen(false);
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (intentGeneration === selectionIntentGenerationRef.current) setError(errorMessage(cause));
     }
   };
 

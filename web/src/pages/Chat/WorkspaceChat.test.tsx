@@ -1,6 +1,6 @@
 import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import WorkspaceChat from './WorkspaceChat';
 
 const mocks = vi.hoisted(() => ({
@@ -102,8 +102,10 @@ function threadSnapshot(threadID: string, messageSettings: Record<string, unknow
 
 function NavigationControls() {
   const navigate = useNavigate();
+  const location = useLocation();
   return (
     <>
+      <output aria-label="current path">{location.pathname}</output>
       <button type="button" onClick={() => navigate('/chat/workspace-1/thread-2')}>go thread 2</button>
       <button type="button" onClick={() => navigate('/chat/workspace-1/draft/draft-2')}>go draft 2</button>
       <button type="button" onClick={() => navigate('/chat/workspace-2/thread-2')}>go workspace 2</button>
@@ -418,6 +420,39 @@ describe('WorkspaceChat', () => {
     expect(draftReadCall).toBeGreaterThanOrEqual(0);
     expect(mocks.putWorkspaceChatSelection.mock.invocationCallOrder[selectionCall])
       .toBeLessThan(mocks.readWorkspaceDraft.mock.invocationCallOrder[draftReadCall]);
+  });
+
+  it('迟到的项目线程查询不能覆盖后发的新草稿', async () => {
+    const slowWorkspaceThreads = deferred<{ data: ReturnType<typeof threadSnapshot>['thread'][] }>();
+    const thread = threadSnapshot('thread-1').thread;
+    mocks.listWorkspaceThreads
+      .mockResolvedValueOnce({ data: [thread] })
+      .mockImplementationOnce(() => slowWorkspaceThreads.promise)
+      .mockResolvedValue({ data: [thread] });
+    mocks.readWorkspaceThread.mockResolvedValue(threadSnapshot('thread-1'));
+    mocks.readWorkspaceDraft.mockImplementation(async (_workspaceRef: string, draftID: string) => ({
+      id: draftID, owner_client_id: 'web:admin', workspace_ref: workspace.ref,
+      state: 'draft', settings_patch: {}, created_at: '2026-08-23T00:00:00Z', updated_at: '2026-08-23T00:00:00Z',
+    }));
+
+    const view = renderChat('/chat/workspace-1/thread-1');
+    await view.findByPlaceholderText('Message Codex...');
+    fireEvent.click(view.getByRole('button', { name: /Mac One/ }));
+    fireEvent.click(view.getByRole('button', { name: /Project One/ }));
+    await waitFor(() => expect(mocks.listWorkspaceThreads).toHaveBeenCalledTimes(2));
+    fireEvent.click(view.getByRole('button', { name: 'New conversation' }));
+    await waitFor(() => expect(mocks.readWorkspaceDraft).toHaveBeenCalledWith('workspace-1', 'draft-2'));
+
+    await act(async () => {
+      slowWorkspaceThreads.resolve({ data: [thread] });
+      await slowWorkspaceThreads.promise;
+      await Promise.resolve();
+    });
+
+    const threadSelections = mocks.putWorkspaceChatSelection.mock.calls
+      .filter(([, selected]) => selected.kind === 'thread' && selected.id === 'thread-1');
+    expect(threadSelections).toHaveLength(1);
+    expect(view.getByLabelText('current path').textContent).toBe('/chat/workspace-1/draft/draft-2');
   });
 
   it('切换 thread 后不提交旧 thread 的慢历史响应', async () => {
