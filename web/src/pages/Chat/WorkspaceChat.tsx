@@ -127,6 +127,10 @@ export default function WorkspaceChat() {
 		selectionWriteRef.current = write.then(() => undefined, () => undefined);
 		return write;
 	}, []);
+  const selectConversation = useCallback(async (ref: string, nextConversation: ConversationRef) => {
+    await persistSelection(ref, nextConversation);
+    navigate(conversationPath(ref, nextConversation));
+  }, [navigate, persistSelection]);
 
   const loadWorkspaceCatalog = useCallback(async () => {
     const response = await listWorkspaces();
@@ -367,14 +371,14 @@ export default function WorkspaceChat() {
     try {
       const nextDraft = await createWorkspaceDraft(ref);
       const nextConversation: ConversationRef = { kind: 'draft', id: nextDraft.id };
-      navigate(conversationPath(ref, nextConversation));
+      await selectConversation(ref, nextConversation);
       setProjectPanelOpen(false);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
       setCreating(false);
     }
-  }, [navigate]);
+  }, [selectConversation]);
 
   const chooseWorkspace = async (workspace: Workspace) => {
     if (!workspace.available) return;
@@ -386,7 +390,7 @@ export default function WorkspaceChat() {
         return;
       }
       const nextConversation: ConversationRef = { kind: 'thread', id: availableThreads[0].id };
-      navigate(conversationPath(workspace.ref, nextConversation));
+      await selectConversation(workspace.ref, nextConversation);
       setProjectPanelOpen(false);
     } catch (cause) {
       setError(errorMessage(cause));
@@ -397,7 +401,7 @@ export default function WorkspaceChat() {
     if (!workspaceRef) return;
     const nextConversation: ConversationRef = { kind: 'thread', id: thread.id };
     try {
-      navigate(conversationPath(workspaceRef, nextConversation));
+      await selectConversation(workspaceRef, nextConversation);
       setProjectPanelOpen(false);
     } catch (cause) {
       setError(errorMessage(cause));
