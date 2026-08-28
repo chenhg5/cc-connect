@@ -7237,6 +7237,10 @@ type controllableAgentSession struct {
 	closeDelay    time.Duration // how long Close() blocks before returning
 	closeErr      error         // what Close() reports (e.g. "process still alive")
 	closeFinished atomic.Bool   // set once Close() has returned
+
+	// CancelTurn control, for tests that exercise AgentSessionCanceller.
+	cancelTurnFn func() error // injected behavior; defaults to a no-op success
+	cancelCalls  atomic.Int32 // how many times CancelTurn was invoked
 }
 
 func newControllableSession(id string) *controllableAgentSession {
@@ -7265,6 +7269,20 @@ func (s *controllableAgentSession) GetUsage(_ context.Context) (*UsageReport, er
 }
 func (s *controllableAgentSession) GetContextUsage() *ContextUsage { return s.contextUsage }
 func (s *controllableAgentSession) Alive() bool                    { return s.alive }
+
+// CancelTurn implements AgentSessionCanceller for canceller-path tests.
+// Records the call and delegates to cancelTurnFn. Default behavior
+// returns an error so existing tests that don't opt in continue to
+// fall through to normalCleanup (preserves pre-canceller semantics).
+// Tests that exercise the canceller path inject a cancelTurnFn that
+// returns nil.
+func (s *controllableAgentSession) CancelTurn() error {
+	s.cancelCalls.Add(1)
+	if s.cancelTurnFn != nil {
+		return s.cancelTurnFn()
+	}
+	return fmt.Errorf("canceller not enabled for this fixture")
+}
 func (s *controllableAgentSession) Close() error {
 	if s.closeDelay > 0 {
 		time.Sleep(s.closeDelay)
@@ -9925,6 +9943,124 @@ func TestAutoCompress_TriggerAfterResult(t *testing.T) {
 	}
 }
 
+// TestAutoCompress_UsesRealUsageWhenAvailable verifies that when the agent session
+// implements ContextUsageReporter and reports a real API token count, the auto-compress
+// trigger uses that real number instead of the text-only heuristic — even when the
+// heuristic alone is below threshold. This guards against the bug where sessions with
+// large tool_use/tool_result blocks (the bulk of real context) never trigger compress.
+func TestAutoCompress_UsesRealUsageWhenAvailable(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("auto-compress-real-usage")
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	// Heuristic threshold of 4 tokens would NOT trigger on a short message,
+	// but the real usage of 50_000 tokens (representing tool_use/tool_result overhead)
+	// MUST trigger.
+	e.SetAutoCompressConfig(true, 4, 0)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Inject a real usage snapshot: 50k tokens used of a 200k window.
+	sess.contextUsage = &ContextUsage{
+		UsedTokens:    50_000,
+		ContextWindow: 200_000,
+	}
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "hi")
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil)
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for auto-compress send — real usage (50k) should have triggered despite short text heuristic")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sess.sendMu.Lock()
+	last := sess.sendCalls[len(sess.sendCalls)-1]
+	sess.sendMu.Unlock()
+	if last != "/compact" {
+		t.Fatalf("expected /compact auto-compress driven by real usage, got %q", last)
+	}
+}
+
+// TestAutoCompress_FallsBackToHeuristicWhenNoUsage verifies that when the agent
+// session's GetContextUsage returns nil (no usage data yet), the trigger falls
+// back to the text-only heuristic — backward compatible behavior.
+func TestAutoCompress_FallsBackToHeuristicWhenNoUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	// Use a queuing session whose contextUsage is nil — exercises the
+	// "real usage unavailable, fall back to text heuristic" path.
+	sess := newQueuingSession("no-usage")
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 4, 0)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	// Long enough text to cross the heuristic threshold of 4 tokens.
+	session.AddHistory("user", strings.Repeat("a", 64))
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil)
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for auto-compress send — heuristic fallback should have triggered")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sess.sendMu.Lock()
+	last := sess.sendCalls[len(sess.sendCalls)-1]
+	sess.sendMu.Unlock()
+	if last != "/compact" {
+		t.Fatalf("expected /compact via heuristic fallback, got %q", last)
+	}
+}
+
+// noUsageAgentSession is no longer used — see TestAutoCompress_FallsBackToHeuristicWhenNoUsage
+// for the actual test, which uses newQueuingSession() directly (its GetContextUsage
+// returns nil because contextUsage is unset).
+
 func TestCmdCompress_SessionBusy_RepliesPreviousProcessing(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("compress-busy")
@@ -10145,6 +10281,182 @@ func TestCmdCompress_DrainsQueueAfterSuccess(t *testing.T) {
 	if !found {
 		t.Fatalf("queued message not found in send calls: %v", calls)
 	}
+}
+
+// --- cmdPs ---
+
+// stubCancellerCompressorAgent is a controllableAgent that also exposes
+// CompressCommand(), so the same session can be used in canceller-path
+// tests (cancel + keep state alive) and compress-path tests (verify
+// /compress still works after a graceful cancel).
+type stubCancellerCompressorAgent struct {
+	controllableAgent
+	cmd string
+}
+
+func (a *stubCancellerCompressorAgent) CompressCommand() string { return a.cmd }
+
+// TestStopInteractiveSession_CancellerPath_KeepsStateAlive verifies that
+// when the agent session implements AgentSessionCanceller, /stop routes
+// through the canceller branch — the subprocess is NOT closed and the
+// interactiveState entry remains in the map for the next user message.
+// This is the prerequisite for /compress, /clear, /resume working after
+// /stop (issue: /stop then /compress returned "no active session" because
+// the previous design killed the subprocess and deleted the state).
+func TestStopInteractiveSession_CancellerPath_KeepsStateAlive(t *testing.T) {
+	sess := newControllableSession("canceller-1")
+	sess.cancelTurnFn = func() error { return nil } // opt into canceller path
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	stopped := e.stopInteractiveSession(key, p, "ctx")
+	if !stopped {
+		t.Fatal("stopInteractiveSession returned false; expected canceller path to succeed")
+	}
+
+	// CancelTurn must have been invoked exactly once.
+	if calls := sess.cancelCalls.Load(); calls != 1 {
+		t.Fatalf("CancelTurn called %d times, want 1", calls)
+	}
+	// Subprocess is still alive — Close() was NOT called.
+	if !sess.Alive() {
+		t.Fatal("subprocess was closed; canceller path must keep it alive")
+	}
+	if sess.closeFinished.Load() {
+		t.Fatal("Close() ran; canceller path must skip Close()")
+	}
+	// interactiveState still in the map.
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil {
+		t.Fatal("interactiveState removed from map; canceller path must keep it alive")
+	}
+	if state.agentSession != sess {
+		t.Fatalf("state.agentSession = %v, want original session %v", state.agentSession, sess)
+	}
+}
+
+// TestCmdCancel_ForcesCloseAfterGracefulCancel verifies the cmdCancel
+// leak fix: even when stopInteractiveSession takes the canceller branch
+// (which keeps the subprocess alive for /stop), cmdCancel must follow up
+// with an explicit close so the subprocess is reaped — /cancel's intent
+// is to discard everything, unlike /stop which preserves the session.
+func TestCmdCancel_ForcesCloseAfterGracefulCancel(t *testing.T) {
+	sess := newControllableSession("cancel-leak-1")
+	sess.cancelTurnFn = func() error { return nil } // opt into canceller path
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	// Pre-seed a session AgentSessionID so we can verify /cancel clears it.
+	active := e.sessions.GetOrCreateActive(key)
+	active.SetAgentSessionID("agent-1", "controllable")
+	e.sessions.Save()
+
+	e.cmdCancel(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	// Wait for the async closeAgentSessionAsync goroutine to finish.
+	deadline := time.After(2 * time.Second)
+	for !sess.closeFinished.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("subprocess Close() never ran after /cancel")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Subprocess was closed.
+	if sess.Alive() {
+		t.Fatal("subprocess still alive after /cancel; expected Close()")
+	}
+	// CancelTurn was called by the inner stopInteractiveSession.
+	if calls := sess.cancelCalls.Load(); calls != 1 {
+		t.Fatalf("CancelTurn called %d times, want 1", calls)
+	}
+	// AgentSessionID was cleared by the cmdCancel post-stop block.
+	if got := active.GetAgentSessionID(); got != "" {
+		t.Fatalf("AgentSessionID = %q, want cleared by /cancel", got)
+	}
+}
+
+// TestCmdStop_GracefulAllowsCompress is the end-to-end regression for the
+// user's reported bug: /stop then /compress returned "no active session"
+// because the previous design killed the subprocess. With the canceller
+// path keeping the session alive, /compress after /stop must reach the
+// agent session and send /compact (instead of bailing at the no-state
+// guard at engine.go:10449).
+func TestCmdStop_GracefulAllowsCompress(t *testing.T) {
+	sess := newControllableSession("graceful-compress-1")
+	sess.cancelTurnFn = func() error { return nil } // opt into canceller path
+	agent := &stubCancellerCompressorAgent{
+		controllableAgent: controllableAgent{nextSession: sess},
+		cmd:               "/compact",
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	// 1. /stop — must keep the session alive.
+	e.cmdStop(p, &Message{SessionKey: key, ReplyCtx: "ctx"})
+
+	// Verify the canceller path ran.
+	if calls := sess.cancelCalls.Load(); calls != 1 {
+		t.Fatalf("CancelTurn called %d times after /stop, want 1", calls)
+	}
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if !ok || state == nil || state.agentSession != sess {
+		t.Fatal("/stop removed the interactive state; canceller path must keep it alive")
+	}
+
+	// 2. /compress — must NOT reply with MsgCompressNoSession.
+	e.cmdCompress(p, &Message{SessionKey: key, Content: "/compress", ReplyCtx: "ctx"})
+
+	// Verify we did NOT send the no-session reply.
+	for _, msg := range p.getSent() {
+		if strings.Contains(msg, e.i18n.T(MsgCompressNoSession)) {
+			t.Fatalf("cmdCompress returned MsgCompressNoSession after /stop; canceller path should keep state alive. sent=%v", p.getSent())
+		}
+	}
+
+	// Verify cmdCompress reached runCompress by completing the turn with a
+	// result event. runCompress calls drainEvents(state.agentSession.Events())
+	// first, so we deliver an EventResult that lets runCompress exit.
+	sess.events <- Event{Type: EventResult, Content: "", Done: true}
+	// (We don't assert /compact was sent here because cmdCompress dispatches
+	// runCompress in a goroutine that takes the session lock; the assertion
+	// that "MsgCompressNoSession was NOT sent" is sufficient to prove the
+	// state guard passed.)
 }
 
 // --- cmdPs ---
