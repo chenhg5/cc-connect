@@ -14582,9 +14582,7 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 	// Expand placeholders in exec command
 	execCmd := ExpandPrompt(cmd.Exec, args)
 
-	// 注入当前会话上下文，供自定义命令脚本使用（如 /reviewer review、/review 需要源会话）。
-	// [[commands]] 执行默认用 daemon 进程环境，不含 CC_SESSION_KEY（那是 agent 子进程才有），
-	// 因此这里把当前消息的会话 key 和项目名显式注入，脚本可通过 $CC_SESSION_KEY / $CC_PROJECT 使用。
+	// Inject the source session key/project into custom command env so scripts (e.g. /review) can identify the chat.
 	if msg.SessionKey != "" {
 		execCmd = fmt.Sprintf("CC_SESSION_KEY='%s' CC_PROJECT='%s'; %s", msg.SessionKey, e.name, execCmd)
 	}
