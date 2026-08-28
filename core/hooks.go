@@ -74,6 +74,7 @@ type HookEvent struct {
 	Source     string         `json:"source,omitempty"`
 	Internal   bool           `json:"internal"`
 	ReplyKind  string         `json:"reply_kind,omitempty"`
+	Changed    bool           `json:"changed,omitempty"`
 	Content    string         `json:"content,omitempty"`
 	Error      string         `json:"error,omitempty"`
 	Extra      map[string]any `json:"extra,omitempty"`
@@ -274,6 +275,7 @@ func eventToEnv(e HookEvent) []string {
 		env = append(env, "CC_HOOK_SOURCE="+e.Source)
 	}
 	env = append(env, fmt.Sprintf("CC_HOOK_INTERNAL=%t", e.Internal))
+	env = append(env, fmt.Sprintf("CC_HOOK_CHANGED=%t", e.Changed))
 	if e.ReplyKind != "" {
 		env = append(env, "CC_HOOK_REPLY_KIND="+e.ReplyKind)
 	}
