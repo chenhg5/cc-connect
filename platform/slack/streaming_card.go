@@ -89,9 +89,9 @@ func (c *slackStreamingCard) render(ctx context.Context, rendered string) error 
 // swallowed (Finalize retries) so a blip doesn't abort the turn.
 //
 // Once the rendered payload exceeds slackUpdateMaxText we stop attempting
-// chat.update edits (which would fail with `msg_too_long`); the existing
-// streaming card stays at the last fitting snapshot and Finalize delivers the
-// full reply via a fresh postMessage.
+// chat.update edits (which would fail with `msg_too_long`); the streaming
+// card is frozen at the last fitting snapshot until Finalize delivers the
+// full reply via a fresh postMessage and retires the card.
 func (c *slackStreamingCard) Update(ctx context.Context, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

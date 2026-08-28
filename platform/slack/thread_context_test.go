@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -237,7 +238,7 @@ func TestFetchThreadHistory_RequestAndFiltering(t *testing.T) {
 		})
 		p.threadContextDepth = 4
 
-		history, hasMore, retryable := p.fetchThreadHistory(channel, rootTS, trigger)
+		history, hasMore, retryable := p.fetchThreadHistory(context.Background(), channel, rootTS, trigger)
 		if retryable {
 			t.Fatal("a successful fetch was reported retryable")
 		}
@@ -256,7 +257,7 @@ func TestFetchThreadHistory_RequestAndFiltering(t *testing.T) {
 		p := newThreadContextPlatform(t, func(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, "missing_scope")
 		})
-		history, hasMore, retryable := p.fetchThreadHistory(channel, rootTS, trigger)
+		history, hasMore, retryable := p.fetchThreadHistory(context.Background(), channel, rootTS, trigger)
 		if history != nil || hasMore || retryable {
 			t.Errorf("missing_scope = (%v, %v, %v), want (nil, false, false)", history, hasMore, retryable)
 		}
@@ -264,7 +265,7 @@ func TestFetchThreadHistory_RequestAndFiltering(t *testing.T) {
 
 	t.Run("an uninitialised client is retryable, not fatal", func(t *testing.T) {
 		p := &Platform{threadContext: true, threadContextDepth: 20}
-		if _, _, retryable := p.fetchThreadHistory(channel, rootTS, trigger); !retryable {
+		if _, _, retryable := p.fetchThreadHistory(context.Background(), channel, rootTS, trigger); !retryable {
 			t.Error("a nil client should be retryable")
 		}
 	})
@@ -465,7 +466,7 @@ func TestFormatThreadHistory(t *testing.T) {
 
 	t.Run("says so when the thread is longer than the window", func(t *testing.T) {
 		got := formatThreadHistory([]slack.Message{replyMessage("U1", "hi", "1717000000.000100")}, true, threadSelf{}, resolve)
-		if !strings.Contains(got, "older replies") {
+		if !strings.Contains(got, "replies older than [1]") {
 			t.Errorf("a partial transcript did not disclose the gap:\n%s", got)
 		}
 	})
@@ -505,6 +506,28 @@ func TestFormatThreadHistory(t *testing.T) {
 		got := formatThreadHistory([]slack.Message{replyMessage("U7", "hi", "1717000000.000100")}, false, threadSelf{}, nil)
 		if !strings.Contains(got, "[1] U7 (user):\nhi") {
 			t.Errorf("nil resolver output = %q", got)
+		}
+	})
+	t.Run("userID identity also claims the bot's own messages", func(t *testing.T) {
+		// Identity by userID is what an app without a bot id gets (or a slack-go
+		// shape that only reports the user axis); the dangerous direction is a
+		// regression that labels the agent's own prior output as a user.
+		own := replyMessage("USELF", "I already looked at the logs", "1717000000.000100")
+		got := formatThreadHistory([]slack.Message{own}, false, threadSelf{userID: "USELF"}, resolve)
+		if !strings.Contains(got, "[1] USELF (assistant):") {
+			t.Errorf("userID identity did not label the bot's own message assistant:\n%s", got)
+		}
+	})
+
+	t.Run("a webhook with a subtype and no bot id is still a bot", func(t *testing.T) {
+		// Legacy webhooks set subtype=bot_message but no BotID; the subtype is
+		// the only marker keeping machine text out of the (user) label.
+		m := botReplyMessage("uptime-cellfire", "down: api", "1717000000.000100")
+		m.BotID = ""
+		m.SubType = "bot_message"
+		got := formatThreadHistory([]slack.Message{m}, false, threadSelf{botID: "BSELF"}, resolve)
+		if !strings.Contains(got, "[1] uptime-cellfire (bot):") {
+			t.Errorf("a subtype-only webhook was not labelled bot:\n%s", got)
 		}
 	})
 }
@@ -598,6 +621,58 @@ func TestMessageText(t *testing.T) {
 		}
 		if got := messageText(m); got != "Deploy failed" {
 			t.Errorf("messageText(blocks) = %q, want %q", got, "Deploy failed")
+		}
+	})
+	t.Run("block kit section text and fields", func(t *testing.T) {
+		m := botReplyMessage("alerts", "", "1717000000.000100")
+		m.Blocks.BlockSet = []slack.Block{
+			slack.NewSectionBlock(
+				slack.NewTextBlockObject(slack.MarkdownType, "*Deploy failed*", false, false),
+				[]*slack.TextBlockObject{
+					slack.NewTextBlockObject(slack.MarkdownType, "replica: 3 -> 0", false, false),
+				},
+				nil,
+			),
+		}
+		if got := messageText(m); got != "*Deploy failed*\nreplica: 3 -> 0" {
+			t.Errorf("messageText(section) = %q, want text+fields", got)
+		}
+	})
+
+	t.Run("block kit section with fields only", func(t *testing.T) {
+		// Sections whose Text is nil carry everything in Fields; dropping
+		// those deletes the message the discussion is about.
+		m := botReplyMessage("alerts", "", "1717000000.000100")
+		m.Blocks.BlockSet = []slack.Block{
+			slack.NewSectionBlock(nil, []*slack.TextBlockObject{
+				slack.NewTextBlockObject(slack.MarkdownType, "service: api", false, false),
+				slack.NewTextBlockObject(slack.MarkdownType, "state: down", false, false),
+			}, nil),
+		}
+		if got := messageText(m); got != "service: api\nstate: down" {
+			t.Errorf("messageText(fields-only section) = %q", got)
+		}
+	})
+
+	t.Run("block kit context elements", func(t *testing.T) {
+		m := botReplyMessage("status", "", "1717000000.000100")
+		m.Blocks.BlockSet = []slack.Block{
+			slack.NewContextBlock("meta", slack.NewTextBlockObject(slack.PlainTextType, "rollup of 12 incidents", false, false)),
+		}
+		if got := messageText(m); got != "rollup of 12 incidents" {
+			t.Errorf("messageText(context) = %q", got)
+		}
+	})
+
+	t.Run("mixed: divider then section before empty context", func(t *testing.T) {
+		m := botReplyMessage("alerts", "", "1717000000.000100")
+		m.Blocks.BlockSet = []slack.Block{
+			slack.NewDividerBlock(),
+			&slack.ContextBlock{},
+			slack.NewSectionBlock(slack.NewTextBlockObject(slack.MarkdownType, "still down", false, false), nil, nil),
+		}
+		if got := messageText(m); got != "still down" {
+			t.Errorf("messageText(mixed) = %q", got)
 		}
 	})
 }
@@ -725,5 +800,27 @@ func eventsAPIEvent(inner any) socketmode.Event {
 				Data: inner,
 			},
 		},
+	}
+}
+
+// Bootstrap marks must expire: the map gains one entry per accepted message,
+// so without a TTL it grows for the life of the process, and a mark must not
+// outlive a session that was since rotated (the agent would answer blind).
+func TestExpireBootstrappedThreads(t *testing.T) {
+	p := &Platform{}
+	now := time.Now()
+	p.bootstrappedThreads.Store("old", now.Add(-threadBootstrapTTL-time.Hour))
+	p.bootstrappedThreads.Store("boundary", now.Add(-threadBootstrapTTL/2))
+	p.bootstrappedThreads.Store("fresh", now.Add(-time.Minute))
+
+	p.expireBootstrappedThreads(now)
+
+	for _, k := range []string{"fresh", "boundary"} {
+		if _, ok := p.bootstrappedThreads.Load(k); !ok {
+			t.Errorf("entry %q was expired early (age under the TTL)", k)
+		}
+	}
+	if _, ok := p.bootstrappedThreads.Load("old"); ok {
+		t.Error("entry older than threadBootstrapTTL was kept; the map grows unboundedly")
 	}
 }

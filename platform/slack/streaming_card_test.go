@@ -213,3 +213,52 @@ func TestStreamingCard_FinalizeKeepsCardWhenRetireFails(t *testing.T) {
 		t.Fatal("card.ts cleared even though chat.delete failed; the card is still live")
 	}
 }
+
+// The overflow path's ONLY failure mode: the fresh post carrying the full
+// reply is refused. The frozen card is then the user's one partial copy, so
+// retireCard must NOT run, the error must reach the engine (which falls back
+// to plain messages), failed must latch, and the card ts stays live.
+func TestStreamingCard_FinalizeOversizeFreshPostFails(t *testing.T) {
+	var (
+		postCalls   int32
+		deleteCalls int32
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/chat.postMessage":
+			if atomic.AddInt32(&postCalls, 1) == 1 {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": "C1", "ts": "1700000000.0001"})
+			} else {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid_auth"})
+			}
+		case "/chat.delete":
+			atomic.AddInt32(&deleteCalls, 1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": "C1", "ts": "1700000000.0001"})
+		default:
+			t.Fatalf("unexpected slack API path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := slack.New("xoxb-test", slack.OptionAPIURL(srv.URL+"/"))
+	card := &slackStreamingCard{client: client, channel: "C1"}
+
+	if err := card.Update(context.Background(), "hi"); err != nil {
+		t.Fatalf("first Update: %v", err)
+	}
+	liveTS := card.ts
+	huge := strings.Repeat("c", slackUpdateMaxText+1024)
+	if err := card.Finalize(context.Background(), huge); err == nil {
+		t.Fatal("Finalize succeeded even though the full-reply post failed; the engine would not fall back")
+	}
+	if got := atomic.LoadInt32(&deleteCalls); got != 0 {
+		t.Fatalf("chat.delete calls = %d, want 0; the card is the user's only copy once the fresh post failed", got)
+	}
+	if !card.failed {
+		t.Fatal("card not marked failed after the full reply could not be delivered")
+	}
+	if card.ts != liveTS {
+		t.Fatal("card.ts lost after the failed fresh post; the frozen card is still the only copy")
+	}
+}

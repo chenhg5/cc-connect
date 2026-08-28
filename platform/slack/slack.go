@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -38,7 +39,8 @@ type Platform struct {
 	// the first time that thread reaches it (see thread_context.go).
 	threadContext       bool
 	threadContextDepth  int
-	bootstrappedThreads sync.Map // "<sessionKey>\x00<threadTS>" -> time.Time
+	bootstrappedThreads sync.Map     // set of "<sessionKey>\x00<threadTS>"; value time.Time is the claim time, read only by the TTL sweep (thread_context.go)
+	lastBootstrapSweep  atomic.Int64 // last expiry sweep, unix nano
 	// selfBotID / selfUserID come from auth.test at Start and tell a quoted
 	// message written by THIS bot apart from one written by another app.
 	selfMu           sync.RWMutex
@@ -145,7 +147,9 @@ func threadRootTS(threadTS, msgTS string) string {
 // without it every bot message in a quoted thread reads as a third party,
 // which is noisier but never wrong in the dangerous direction.
 func (p *Platform) learnSelfIdentity() {
-	auth, err := p.client.AuthTest()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	auth, err := p.client.AuthTestContext(ctx)
 	if err != nil {
 		slog.Warn("slack: auth.test failed; quoted thread history will label this bot's own messages as a third-party bot",
 			"error", err)
@@ -260,7 +264,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				// bootstrapped only once the engine accepts the message, so a
 				// turn it drops (a /command, a busy session) does not consume
 				// the one chance to read the thread.
-				msg.ExtraContent, msg.OnAccepted = p.threadHistoryFor(sessionKey, ev.Channel, threadTS, ev.TimeStamp)
+				p.attachThreadContext(msg, sessionKey, ev.Channel, threadTS, ev.TimeStamp)
 				p.handler(p, msg)
 
 			case *slackevents.AssistantThreadStartedEvent:
@@ -325,7 +329,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				// assistantOrThreadTS() returns "" for a top-level DM and the
 				// message's own ts for a new channel message, so a fetch only
 				// happens for a reply inside an existing thread.
-				msg.ExtraContent, msg.OnAccepted = p.threadHistoryFor(sessionKey, ev.Channel, threadTS, ts)
+				p.attachThreadContext(msg, sessionKey, ev.Channel, threadTS, ts)
 				p.handler(p, msg)
 			}
 		}
@@ -652,10 +656,19 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 }
 
 func (p *Platform) resolveUserName(userID string) string {
+	return p.resolveUserNameContext(context.Background(), userID)
+}
+
+// resolveUserNameContext is resolveUserName with a caller deadline. The
+// slack-go default HTTP client has NO timeout, so an unbounded context hangs
+// forever on a stalled users.info — anything on the serialized event loop
+// must pass one.
+
+func (p *Platform) resolveUserNameContext(ctx context.Context, userID string) string {
 	if cached, ok := p.userNameCache.Load(userID); ok {
 		return cached.(string)
 	}
-	user, err := p.client.GetUserInfo(userID)
+	user, err := p.client.GetUserInfoContext(ctx, userID)
 	if err != nil {
 		slog.Debug("slack: resolve user name failed", "user", userID, "error", err)
 		return userID
@@ -669,6 +682,14 @@ func (p *Platform) resolveUserName(userID string) string {
 	}
 	p.userNameCache.Store(userID, name)
 	return name
+}
+
+// attachThreadContext wires the thread bootstrap onto the inbound message.
+// ExtraContent (the transcript) and OnAccepted (the deferred mark) travel
+// together to the same message: a fetch without the mark burns the thread's
+// one read on every turn and a mark without a fetch claims it blind.
+func (p *Platform) attachThreadContext(msg *core.Message, sessionKey, channel, threadTS, messageTS string) {
+	msg.ExtraContent, msg.OnAccepted = p.threadHistoryFor(sessionKey, channel, threadTS, messageTS)
 }
 
 func (p *Platform) resolveChannelNameForMsg(channelID string) string {
