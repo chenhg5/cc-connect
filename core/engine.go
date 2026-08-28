@@ -4561,6 +4561,10 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 	events := agentSession.Events()
 
+	// Record workspace git state at reader start so background replies can report
+	// whether the working tree changed during this reader's lifetime.
+	readerStartGitFingerprint := workspaceGitFingerprint(workspaceDir)
+
 	var turnActive bool // true after first event, cleared on EventResult
 	defer func() {
 		if turnActive {
@@ -4703,6 +4707,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 						Source:     "agent.background_reply",
 						Internal:   false,
 						ReplyKind:  "text",
+						Changed:    readerStartGitFingerprint != "" && readerStartGitFingerprint != workspaceGitFingerprint(hookWorkspace),
 						Content:    fullResponse,
 					})
 				}
@@ -4887,6 +4892,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
+
+	// Record the workspace git state at the start of this turn so post-reply
+	// hooks can tell whether this turn actually changed the working tree.
+	turnStartGitFingerprint := workspaceGitFingerprint(hookWorkspace)
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
@@ -5917,6 +5926,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Source:     "agent.final_reply",
 					Internal:   false,
 					ReplyKind:  replyKind,
+					Changed:    turnStartGitFingerprint != "" && turnStartGitFingerprint != workspaceGitFingerprint(hookWorkspace),
 					Content:    fullResponse,
 				})
 			}
@@ -11797,6 +11807,25 @@ func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, wo
 
 func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
 	_ = e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+}
+
+// workspaceGitFingerprint returns a fingerprint of the git working tree at workDir
+// (porcelain status + HEAD). Empty when workDir is not a git repo or git fails.
+// Used to detect whether a turn actually changed the workspace, so post-reply
+// hooks (e.g. auto-review) can skip turns that made no code change.
+func workspaceGitFingerprint(workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	status, err := exec.Command("git", "-C", workDir, "status", "--porcelain").Output()
+	if err != nil {
+		return ""
+	}
+	head, err := exec.Command("git", "-C", workDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return string(status) + "\x00" + string(head)
 }
 
 func (e *Engine) renderCardForPlatform(p Platform, card *Card) *Card {
