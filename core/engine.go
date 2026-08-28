@@ -5778,10 +5778,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
 
-			// Evaluate auto-compress trigger (token estimate on user+assistant text,
-			// including this turn's assistant reply before it is appended to history).
+			// Evaluate auto-compress trigger.
+			//
+			// Prefer the agent's actual API-reported input tokens when the session
+			// implements ContextUsageReporter — the text-only heuristic misses
+			// tool_use/tool_result blocks (~70-85% of context) and the fixed overhead
+			// of system prompt + tools + skills (issue #1115). The real number is the
+			// size of the last assistant event's prompt: input + cache_creation +
+			// cache_read (the three are disjoint subsets that sum to the full prompt,
+			// per Anthropic's usage semantics), which already includes everything
+			// the model will see on the next inference call.
 			if e.autoCompressEnabled && e.autoCompressMaxTokens > 0 {
 				estimate := contextEstimate
+				if usage := replyFooterSessionContextUsage(state.agentSession); usage != nil && usage.UsedTokens > 0 {
+					estimate = usage.UsedTokens
+				}
 				now := time.Now()
 				state.mu.Lock()
 				last := state.lastAutoCompressAt

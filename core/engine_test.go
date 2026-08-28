@@ -9925,6 +9925,124 @@ func TestAutoCompress_TriggerAfterResult(t *testing.T) {
 	}
 }
 
+// TestAutoCompress_UsesRealUsageWhenAvailable verifies that when the agent session
+// implements ContextUsageReporter and reports a real API token count, the auto-compress
+// trigger uses that real number instead of the text-only heuristic — even when the
+// heuristic alone is below threshold. This guards against the bug where sessions with
+// large tool_use/tool_result blocks (the bulk of real context) never trigger compress.
+func TestAutoCompress_UsesRealUsageWhenAvailable(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("auto-compress-real-usage")
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	// Heuristic threshold of 4 tokens would NOT trigger on a short message,
+	// but the real usage of 50_000 tokens (representing tool_use/tool_result overhead)
+	// MUST trigger.
+	e.SetAutoCompressConfig(true, 4, 0)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	// Inject a real usage snapshot: 50k tokens used of a 200k window.
+	sess.contextUsage = &ContextUsage{
+		UsedTokens:    50_000,
+		ContextWindow: 200_000,
+	}
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "hi")
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil)
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for auto-compress send — real usage (50k) should have triggered despite short text heuristic")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sess.sendMu.Lock()
+	last := sess.sendCalls[len(sess.sendCalls)-1]
+	sess.sendMu.Unlock()
+	if last != "/compact" {
+		t.Fatalf("expected /compact auto-compress driven by real usage, got %q", last)
+	}
+}
+
+// TestAutoCompress_FallsBackToHeuristicWhenNoUsage verifies that when the agent
+// session's GetContextUsage returns nil (no usage data yet), the trigger falls
+// back to the text-only heuristic — backward compatible behavior.
+func TestAutoCompress_FallsBackToHeuristicWhenNoUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	// Use a queuing session whose contextUsage is nil — exercises the
+	// "real usage unavailable, fall back to text heuristic" path.
+	sess := newQueuingSession("no-usage")
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 4, 0)
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	// Long enough text to cross the heuristic threshold of 4 tokens.
+	session.AddHistory("user", strings.Repeat("a", 64))
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil)
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		n := len(sess.sendCalls)
+		sess.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for auto-compress send — heuristic fallback should have triggered")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sess.sendMu.Lock()
+	last := sess.sendCalls[len(sess.sendCalls)-1]
+	sess.sendMu.Unlock()
+	if last != "/compact" {
+		t.Fatalf("expected /compact via heuristic fallback, got %q", last)
+	}
+}
+
+// noUsageAgentSession is no longer used — see TestAutoCompress_FallsBackToHeuristicWhenNoUsage
+// for the actual test, which uses newQueuingSession() directly (its GetContextUsage
+// returns nil because contextUsage is unset).
+
 func TestCmdCompress_SessionBusy_RepliesPreviousProcessing(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("compress-busy")
