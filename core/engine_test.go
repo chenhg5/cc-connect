@@ -1050,6 +1050,39 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	}
 }
 
+func TestWorkspaceGitFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	// non-git directory -> empty
+	if got := workspaceGitFingerprint(dir); got != "" {
+		t.Errorf("non-git dir: want empty, got %q", got)
+	}
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "a.txt")
+	runGit("commit", "-qm", "init")
+	fp := workspaceGitFingerprint(dir)
+	if fp == "" {
+		t.Fatal("git repo should have a fingerprint")
+	}
+	// working tree change -> fingerprint changes
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if workspaceGitFingerprint(dir) == fp {
+		t.Error("working tree change should change the fingerprint")
+	}
+}
+
 func TestProcessInteractiveEvents_FinalizedHookRunsAfterReplySend(t *testing.T) {
 	dir := t.TempDir()
 	sentMarker := filepath.Join(dir, "sent")
