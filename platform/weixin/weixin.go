@@ -916,17 +916,17 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	return &replyContext{peerUserID: peer, contextToken: tok}, nil
 }
 
-// FormattingInstructions implements core.FormattingInstructionProvider.
-func (p *Platform) FormattingInstructions() string {
-	return "Replies are delivered as plain text to Weixin. Avoid markdown tables; use short paragraphs."
-}
+// Weixin renders standard Markdown, so this platform intentionally does not
+// implement core.FormattingInstructionProvider. That optional interface exists
+// for platforms whose syntax deviates from standard Markdown (Slack mrkdwn,
+// Google Chat), and the majority of adapters — Feishu, Telegram, Discord,
+// DingTalk among them — likewise leave it unimplemented.
 
 var (
-	_ core.Platform                      = (*Platform)(nil)
-	_ core.ReplyContextReconstructor     = (*Platform)(nil)
-	_ core.FormattingInstructionProvider = (*Platform)(nil)
-	_ core.ImageSender                   = (*Platform)(nil)
-	_ core.FileSender                    = (*Platform)(nil)
-	_ core.TypingIndicator               = (*Platform)(nil)
-	_ core.AsyncRecoverablePlatform      = (*Platform)(nil)
+	_ core.Platform                  = (*Platform)(nil)
+	_ core.ReplyContextReconstructor = (*Platform)(nil)
+	_ core.ImageSender               = (*Platform)(nil)
+	_ core.FileSender                = (*Platform)(nil)
+	_ core.TypingIndicator           = (*Platform)(nil)
+	_ core.AsyncRecoverablePlatform  = (*Platform)(nil)
 )
