@@ -416,6 +416,7 @@ func TestEventToEnv(t *testing.T) {
 		"CC_HOOK_USER_NAME":   "alice",
 		"CC_HOOK_SOURCE":      "agent.final_reply",
 		"CC_HOOK_INTERNAL":    "true",
+		"CC_HOOK_CHANGED":     "false",
 		"CC_HOOK_REPLY_KIND":  "card",
 		"CC_HOOK_CONTENT":     "hello world",
 		"CC_HOOK_ERROR":       "oops",
