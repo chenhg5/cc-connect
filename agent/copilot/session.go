@@ -73,6 +73,12 @@ type copilotSessionConfig struct {
 	Streaming                      *bool                      `json:"streaming,omitempty"`
 	IncludeSubAgentStreamingEvents *bool                      `json:"includeSubAgentStreamingEvents,omitempty"`
 	EnvValueMode                   string                     `json:"envValueMode,omitempty"`
+	// EnableConfigDiscovery must be sent explicitly: Copilot CLI's
+	// session.create/session.resume path defaults it to false, and derives
+	// enableSkills from it. Omitting it disables every environment-discovered
+	// skill source (.github/skills, .agents/skills, .claude/skills,
+	// ~/.copilot/skills, ~/.agents/skills), leaving only builtin skills.
+	EnableConfigDiscovery *bool `json:"enableConfigDiscovery,omitempty"`
 }
 
 type copilotPermissionResult struct {
@@ -214,6 +220,7 @@ func (cs *copilotSession) sessionConfig(sessionID string) copilotSessionConfig {
 	requestPermission := true
 	streaming := true
 	includeSubAgentStreaming := true
+	enableConfigDiscovery := true
 	return copilotSessionConfig{
 		SessionID:                      sessionID,
 		ClientName:                     "cc-connect",
@@ -224,6 +231,7 @@ func (cs *copilotSession) sessionConfig(sessionID string) copilotSessionConfig {
 		Streaming:                      &streaming,
 		IncludeSubAgentStreamingEvents: &includeSubAgentStreaming,
 		EnvValueMode:                   "direct",
+		EnableConfigDiscovery:          &enableConfigDiscovery,
 	}
 }
 
