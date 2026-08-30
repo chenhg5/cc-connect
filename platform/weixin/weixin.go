@@ -37,8 +37,8 @@ const (
 	// active. We pace separate messages (not chunks: multi-chunk sends are fine)
 	// to stay well below the trigger. Configurable via burst_limit /
 	// burst_window_secs platform options.
-	defaultBurstLimit      = 4     // max separate messages per window
-	defaultBurstWindowSecs = 86400 // window length (24h: ilink budgets ~5-6 sends/day)
+	defaultBurstLimit      = 4    // max separate messages per window
+	defaultBurstWindowSecs = 1800 // window length (30m: short-window burst guard, not a daily cap)
 	// typingTicketTTL is how long a cached typing ticket remains valid.
 	typingTicketTTL = 10 * time.Minute
 	// typingRepeatInterval is how often to resend the typing status to keep it alive.
@@ -148,13 +148,21 @@ func New(opts map[string]any) (core.Platform, error) {
 	lp := pickInt(opts["long_poll_timeout_ms"])
 
 	// Send-volume quota (see defaultBurstLimit constants). 0 disables the quota.
-	burstLimit := pickInt(opts["burst_limit"])
-	if burstLimit < 0 {
-		burstLimit = 0
+	// Only an explicitly provided value overrides the default, so an explicit 0
+	// means "disabled" instead of silently falling back to the default limit.
+	burstLimit := defaultBurstLimit
+	if v, ok := opts["burst_limit"]; ok {
+		burstLimit = pickInt(v)
+		if burstLimit < 0 {
+			burstLimit = 0
+		}
 	}
-	burstWindow := pickInt(opts["burst_window_secs"])
-	if burstWindow < 0 {
-		burstWindow = 0
+	burstWindow := defaultBurstWindowSecs
+	if v, ok := opts["burst_window_secs"]; ok {
+		burstWindow = pickInt(v)
+		if burstWindow < 0 {
+			burstWindow = 0
+		}
 	}
 
 	dataDir, _ := opts["cc_data_dir"].(string)
@@ -187,13 +195,6 @@ func New(opts map[string]any) (core.Platform, error) {
 	cdnHttpClient := &http.Client{
 		Timeout:   60 * time.Second,
 		Transport: &http.Transport{Proxy: nil},
-	}
-
-	if burstLimit <= 0 {
-		burstLimit = defaultBurstLimit
-	}
-	if burstWindow <= 0 {
-		burstWindow = defaultBurstWindowSecs
 	}
 
 	p := &Platform{

@@ -571,6 +571,76 @@ func TestCheckSendQuota_DisabledWhenZero(t *testing.T) {
 	}
 }
 
+// TestNew_BurstLimitZeroDisablesQuota verifies an explicit burst_limit=0 in the
+// config disables the send-volume quota entirely, instead of falling back to the
+// default limit (regression for #1716).
+func TestNew_BurstLimitZeroDisablesQuota(t *testing.T) {
+	p, err := New(map[string]any{"token": "tok", "burst_limit": 0})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	wp := p.(*Platform)
+	if wp.sendQuotaLimit != 0 {
+		t.Fatalf("burst_limit=0 should disable the quota, got limit=%d", wp.sendQuotaLimit)
+	}
+	for i := 0; i < 10; i++ {
+		if err := wp.checkSendQuota(context.Background()); err != nil {
+			t.Fatalf("disabled quota must never fail: %v", err)
+		}
+	}
+}
+
+// TestNew_DefaultQuota verifies that when burst_limit / burst_window_secs are not
+// set, the documented 24h account budget defaults are applied.
+func TestNew_DefaultQuota(t *testing.T) {
+	p, err := New(map[string]any{"token": "tok"})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	wp := p.(*Platform)
+	if wp.sendQuotaLimit != defaultBurstLimit {
+		t.Fatalf("default limit = %d, want %d", wp.sendQuotaLimit, defaultBurstLimit)
+	}
+	wantWindow := time.Duration(defaultBurstWindowSecs) * time.Second
+	if wp.sendQuotaWindow != wantWindow {
+		t.Fatalf("default window = %v, want %v", wp.sendQuotaWindow, wantWindow)
+	}
+}
+
+// TestNew_ExplicitBurstLimit verifies explicitly provided quota values are honored.
+func TestNew_ExplicitBurstLimit(t *testing.T) {
+	p, err := New(map[string]any{"token": "tok", "burst_limit": 7, "burst_window_secs": 1800})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	wp := p.(*Platform)
+	if wp.sendQuotaLimit != 7 {
+		t.Fatalf("explicit burst_limit = %d, want 7", wp.sendQuotaLimit)
+	}
+	if wp.sendQuotaWindow != 1800*time.Second {
+		t.Fatalf("explicit window = %v, want 1800s", wp.sendQuotaWindow)
+	}
+}
+
+// TestNew_DefaultQuotaEnforced verifies the default short-window budget is
+// enforced end-to-end on a default instance: sends within the window pass, the
+// next one over the budget fails fast.
+func TestNew_DefaultQuotaEnforced(t *testing.T) {
+	p, err := New(map[string]any{"token": "tok"})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	wp := p.(*Platform)
+	for i := 0; i < defaultBurstLimit; i++ {
+		if err := wp.checkSendQuota(context.Background()); err != nil {
+			t.Fatalf("send %d within the default window should pass: %v", i+1, err)
+		}
+	}
+	if err := wp.checkSendQuota(context.Background()); err == nil {
+		t.Fatal("send over the default window budget should fail")
+	}
+}
+
 // TestSendChunks_AppliesQuota verifies the budget is enforced end-to-end through
 // sendChunks (httptest server): under budget sends succeed, over budget fails.
 func TestSendChunks_AppliesQuota(t *testing.T) {

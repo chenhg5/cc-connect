@@ -291,8 +291,9 @@ level = "info" # debug, info, warn, error
 # max_per_second = 25
 # [outgoing_rate_limit.platforms.feishu]
 # max_per_second = 5
-# Weixin (ilink) sendmessage throttles the bot after a short burst (ret=-2
-# "prepare failed", penalty on the order of an hour). Pace sends to avoid it:
+# Weixin (ilink) sendmessage throttles the bot after roughly 5-6 separate
+# messages within a short window (ret=-2 "prepare failed", penalty on the
+# order of an hour, escalated by every attempt). Pace sends to avoid it:
 # [outgoing_rate_limit.platforms.weixin]
 # max_per_second = 0.5
 # burst = 1
@@ -1443,12 +1444,12 @@ app_secret = "your-feishu-app-secret"
 # the gateway throttles the bot after roughly 5-6 separate messages within a short
 # window (multi-chunk sends are fine), and the penalty escalates with every attempt
 # made while active. The quota paces separate messages so the bot stays below the
-# trigger. 0 disables the quota.
-# 发送量配额（防 ilink 突发节流 ret=-2）：网关在短窗口内约 5-6 条独立消息即节流
+# trigger. 0 disables the quota (explicitly set burst_limit = 0).
+# 发送量配额（防 ilink 突发节流 ret=-2）：网关在短窗口内约 5-6 条独立消息即触发节流
 # （多切块发送不计数），且节流期内每次尝试都会升级惩罚。配额对独立消息限速，
-# 使其低于触发阈值。设为 0 关闭配额。
+# 使其低于触发阈值。显式设为 0 关闭配额。
 # burst_limit = 4           # max separate messages per window / 每窗口最多独立消息数
-# burst_window_secs = 86400 # window length (default 24h) / 窗口时长（秒，默认24小时）
+# burst_window_secs = 1800  # window length (default 30m) / 窗口时长（秒，默认30分钟）
 
 # -----------------------------------------------------------------------------
 # Tencent Yuanbao (yuanbao.tencent.com bot platform)
