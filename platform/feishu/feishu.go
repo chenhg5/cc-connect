@@ -2669,7 +2669,7 @@ func (p *Platform) deliverableFileContents(content string) []string {
 // duplicate over a missed delivery (e.g. alert summaries / root-cause blocks).
 func (p *Platform) maybeDeliverFileTokens(ctx context.Context, rc replyContext, content string) {
 	for _, text := range p.deliverableFileContents(content) {
-		for _, chunk := range core.SplitMessageCodeFenceAware(text, 4000) {
+		for _, chunk := range core.SplitMessageCodeFenceAware(text, 10000) {
 			if strings.TrimSpace(chunk) == "" {
 				continue
 			}
