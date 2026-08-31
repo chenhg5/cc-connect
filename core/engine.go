@@ -14584,7 +14584,10 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 
 	// Inject the source session key/project into custom command env so scripts (e.g. /review) can identify the chat.
 	if msg.SessionKey != "" {
-		execCmd = fmt.Sprintf("CC_SESSION_KEY='%s' CC_PROJECT='%s'; %s", msg.SessionKey, e.name, execCmd)
+		// export rather than plain assignment: `VAR='x'; cmd` only sets a non-exported
+		// shell var, so cmd and its children cannot see it. export makes the vars
+		// available to /review, /reviewer, etc.
+		execCmd = fmt.Sprintf("export CC_SESSION_KEY='%s' CC_PROJECT='%s'; %s", msg.SessionKey, e.name, execCmd)
 	}
 
 	// Determine working directory
