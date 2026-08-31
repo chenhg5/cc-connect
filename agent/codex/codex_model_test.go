@@ -82,6 +82,15 @@ func TestWorkspaceAgentOptions_PreservesStdIOAppServerURL(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAgentOptions_PreservesListAllWorkdirs(t *testing.T) {
+	a := &Agent{listAllWorkdirs: true}
+
+	opts := a.WorkspaceAgentOptions()
+	if got := opts["list_all_workdirs"]; got != true {
+		t.Fatalf("WorkspaceAgentOptions()[list_all_workdirs] = %#v, want true", got)
+	}
+}
+
 func TestIsCodexChatModel(t *testing.T) {
 	tests := []struct {
 		id   string

@@ -86,16 +86,19 @@ func resolveCodexHomeDir(explicit string) string {
 	return filepath.Join(homeDir, ".codex")
 }
 
-// listCodexSessions scans the codex sessions directory for JSONL transcript
-// files whose cwd matches workDir.
+// listCodexSessions 扫描 Codex 会话；空 workDir 表示浏览所有目录，仍应用会话内容前缀过滤。
 func listCodexSessions(workDir, codexHome string, extraPrefixes ...[]string) ([]core.AgentSessionInfo, error) {
 	var prefixes []string
 	if len(extraPrefixes) > 0 {
 		prefixes = extraPrefixes[0]
 	}
-	absWorkDir, err := filepath.Abs(workDir)
-	if err != nil {
-		absWorkDir = workDir
+	absWorkDir := strings.TrimSpace(workDir)
+	if absWorkDir != "" {
+		var err error
+		absWorkDir, err = filepath.Abs(absWorkDir)
+		if err != nil {
+			absWorkDir = workDir
+		}
 	}
 
 	sessionsDir := filepath.Join(resolveCodexHomeDir(codexHome), "sessions")

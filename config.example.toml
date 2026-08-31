@@ -1820,6 +1820,9 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
+# Show Codex sessions from all cwd values in /list.
+# /list 显示所有 cwd 的 Codex 会话。
+# list_all_workdirs = false
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 # Optional: app_server supports interactive approvals and named permissions.
 # 可选：app_server 支持交互审批及命名权限配置。
