@@ -14593,8 +14593,15 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 	// Determine working directory
 	workDir := cmd.WorkDir
 	if workDir == "" {
-		// Default to agent's work_dir if available
-		if e.agent != nil {
+		// Prefer the session's bound workspace (set via /workspace bind or /proj)
+		// so custom exec commands run in the repo the user is actually working in,
+		// then fall back to the project agent's work_dir.
+		if channelID := effectiveChannelID(msg); channelID != "" {
+			if bound, _, err := e.resolveWorkspace(p, channelID); err == nil && bound != "" {
+				workDir = bound
+			}
+		}
+		if workDir == "" && e.agent != nil {
 			if agentOpts, ok := e.agent.(interface{ GetWorkDir() string }); ok {
 				workDir = agentOpts.GetWorkDir()
 			}
