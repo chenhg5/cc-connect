@@ -245,7 +245,7 @@ func TestSmoke_CommandParsing(t *testing.T) {
 	registry := core.NewCommandRegistry()
 
 	// Add some test commands
-	registry.Add("test", "Test command", "echo {{1}}", "", "", "test")
+	registry.Add("test", "Test command", "echo {{1}}", "", "", 0, "test")
 
 	// Test command resolution
 	cmd, ok := registry.Resolve("test")
@@ -272,8 +272,8 @@ func TestSmoke_CommandRegistryList(t *testing.T) {
 	registry := core.NewCommandRegistry()
 
 	// Add multiple commands
-	registry.Add("cmd1", "Command 1", "{{1}}", "", "", "test")
-	registry.Add("cmd2", "Command 2", "{{2}}", "", "", "test")
+	registry.Add("cmd1", "Command 1", "{{1}}", "", "", 0, "test")
+	registry.Add("cmd2", "Command 2", "{{2}}", "", "", 0, "test")
 	registry.Add("alias", "Alias for cmd1", "", "", "", "alias")
 
 	// List all commands

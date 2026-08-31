@@ -864,7 +864,7 @@ func TestEngineSendToSessionWithAttachments_WorkspacePrefixedSessionKey(t *testi
 func TestEngineStart_DefersAsyncPlatformReadyInitialization(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("help", "help", "", "", "", "test")
+	e.AddCommand("help", "help", "", "", "", 0, "test")
 
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -883,7 +883,7 @@ func TestEngineStart_DefersAsyncPlatformReadyInitialization(t *testing.T) {
 func TestEngine_OnPlatformReady_IsIdempotentUntilUnavailable(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("help", "help", "", "", "", "test")
+	e.AddCommand("help", "help", "", "", "", 0, "test")
 
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -910,7 +910,7 @@ func TestEngine_OnPlatformReady_IsIdempotentUntilUnavailable(t *testing.T) {
 func TestEngine_OnPlatformUnavailable_IsIdempotent(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("help", "help", "", "", "", "test")
+	e.AddCommand("help", "help", "", "", "", 0, "test")
 
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -929,7 +929,7 @@ func TestEngine_OnPlatformUnavailable_IsIdempotent(t *testing.T) {
 func TestEngine_LifecycleCallbacksIgnoredAfterStopBegins(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("help", "help", "", "", "", "test")
+	e.AddCommand("help", "help", "", "", "", 0, "test")
 
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -949,7 +949,7 @@ func TestEngine_LifecycleCallbacksIgnoredAfterStopBegins(t *testing.T) {
 func TestEngine_StopDoesNotWaitForBlockedPlatformCapabilityInit(t *testing.T) {
 	p := newBlockingRegisterPlatform("telegram")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("help", "help", "", "", "", "test")
+	e.AddCommand("help", "help", "", "", "", 0, "test")
 
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -2743,7 +2743,7 @@ func TestEngine_AdminFrom_GatesCommandsAddExec(t *testing.T) {
 
 func TestEngine_AdminFrom_GatesCustomExecCommand(t *testing.T) {
 	e := newTestEngine()
-	e.commands.Add("deploy", "", "", "echo deploying", "", "config")
+	e.commands.Add("deploy", "", "", "echo deploying", "", 0, "config")
 	p := &stubPlatformEngine{n: "test"}
 
 	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
@@ -2857,7 +2857,7 @@ func TestEngine_RoleBasedACL_NoUsersConfig_Legacy(t *testing.T) {
 
 func TestEngine_CustomCommand_DisabledByRole(t *testing.T) {
 	e := newTestEngine()
-	e.commands.Add("deploy", "deploy command", "deploy it", "", "", "test")
+	e.commands.Add("deploy", "deploy command", "deploy it", "", "", 0, "test")
 
 	urm := NewUserRoleManager()
 	urm.Configure("member", []RoleInput{
@@ -6189,7 +6189,7 @@ func TestFormatUsageReport_SingleSevenDayWindowDoesNotDuplicate(t *testing.T) {
 func TestCmdCommands_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("deploy", "Deploy app", "ship it", "", "", "config")
+	e.AddCommand("deploy", "Deploy app", "ship it", "", "", 0, "config")
 
 	e.cmdCommands(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
 
@@ -13008,8 +13008,8 @@ func TestEngine_ClearCommands(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	// Add commands from two sources
-	e.AddCommand("cmd1", "desc1", "prompt1", "", "", "config")
-	e.AddCommand("cmd2", "desc2", "prompt2", "", "", "agent")
+	e.AddCommand("cmd1", "desc1", "prompt1", "", "", 0, "config")
+	e.AddCommand("cmd2", "desc2", "prompt2", "", "", 0, "agent")
 
 	// Verify commands exist
 	if _, ok := e.commands.Resolve("cmd1"); !ok {
@@ -13048,7 +13048,7 @@ func TestEngine_AddCommand(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	// Add a command
-	e.AddCommand("testcmd", "A test command", "This is a test {{args}}", "", "", "config")
+	e.AddCommand("testcmd", "A test command", "This is a test {{args}}", "", "", 0, "config")
 
 	// Resolve should find it
 	cmd, ok := e.commands.Resolve("testcmd")
@@ -13077,7 +13077,7 @@ func TestEngine_AddAlias(t *testing.T) {
 
 	// Check alias was stored (via internal map)
 	// We can verify this through command resolution if shortcut is used as a command
-	e.AddCommand("very-long-command", "Long command", "prompt", "", "", "config")
+	e.AddCommand("very-long-command", "Long command", "prompt", "", "", 0, "config")
 
 	// The alias mechanism works through the alias map
 	if len(e.aliases) != 1 {

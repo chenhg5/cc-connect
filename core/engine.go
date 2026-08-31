@@ -1116,8 +1116,8 @@ func (e *Engine) GetSessions() *SessionManager {
 }
 
 // AddCommand registers a custom slash command.
-func (e *Engine) AddCommand(name, description, prompt, exec, workDir, source string) {
-	e.commands.Add(name, description, prompt, exec, workDir, source)
+func (e *Engine) AddCommand(name, description, prompt, exec, workDir string, timeout int, source string) {
+	e.commands.Add(name, description, prompt, exec, workDir, timeout, source)
 }
 
 // ClearCommands removes all commands from the given source.
@@ -14611,7 +14611,12 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 		workDir, _ = os.Getwd()
 	}
 
-	_ = e.runShellWithProgress(p, msg.ReplyCtx, execCmd, workDir, 60*time.Second, 4000)
+	// Shell exec timeout: command's own `timeout` config wins (seconds); default 60s.
+	execTimeout := 60 * time.Second
+	if cmd.Timeout > 0 {
+		execTimeout = time.Duration(cmd.Timeout) * time.Second
+	}
+	_ = e.runShellWithProgress(p, msg.ReplyCtx, execCmd, workDir, execTimeout, 4000)
 }
 
 func (e *Engine) cmdCommands(p Platform, msg *Message, args []string) {
@@ -14692,7 +14697,7 @@ func (e *Engine) cmdCommandsAdd(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	e.commands.Add(name, "", prompt, "", "", "config")
+	e.commands.Add(name, "", prompt, "", "", 0, "config")
 
 	if e.commandSaveAddFunc != nil {
 		if err := e.commandSaveAddFunc(name, "", prompt, "", ""); err != nil {
@@ -14744,7 +14749,7 @@ func (e *Engine) cmdCommandsAddExec(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	e.commands.Add(name, "", "", execCmd, workDir, "config")
+	e.commands.Add(name, "", "", execCmd, workDir, 0, "config")
 
 	if e.commandSaveAddFunc != nil {
 		if err := e.commandSaveAddFunc(name, "", "", execCmd, workDir); err != nil {
