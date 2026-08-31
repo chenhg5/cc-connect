@@ -56,8 +56,26 @@
       "overview": "Overview",
       "providers": "Providers",
       "heartbeat": "Heartbeat",
-      "settings": "Settings"
-    }
+      "settings": "Settings",
+      "workspaces": "Workspaces"
+    },
+    "workspaceMode": "Multi-workspace mode",
+    "workspaceModeHint": "Route different chat channels to different working directories under a shared base directory.",
+    "workspaceModeEnable": "Enable multi-workspace mode",
+    "workspaceModeWarning": "Switching modes requires a restart. The single work_dir is not used while multi-workspace mode is on.",
+    "workspaceBaseDir": "Base directory",
+    "workspaceBaseDirRequired": "Base directory is required to enable multi-workspace mode.",
+    "workspaceModeConfirm": "Changing workspace mode requires a service restart. Continue?",
+    "workspaceBindings": "Channel bindings",
+    "workspaceNoBindings": "No channels are bound to a workspace yet.",
+    "workspaceActive": "active",
+    "workspaceIdle": "idle",
+    "workspaceAddBinding": "Bind a channel",
+    "workspaceChannelKey": "Channel key",
+    "workspaceChannelName": "Channel name (optional)",
+    "workspacePath": "Workspace path",
+    "workspaceSuggestions": "Unbound directories in base_dir:",
+    "workspaceBind": "Bind"
   },
   "sessions": {
     "title": "Sessions",

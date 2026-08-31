@@ -56,8 +56,26 @@
       "overview": "概要",
       "providers": "プロバイダー",
       "heartbeat": "ハートビート",
-      "settings": "設定"
-    }
+      "settings": "設定",
+      "workspaces": "ワークスペース"
+    },
+    "workspaceMode": "マルチワークスペースモード",
+    "workspaceModeHint": "共有のベースディレクトリの下で、異なるチャットチャンネルを異なる作業ディレクトリにルーティングします。",
+    "workspaceModeEnable": "マルチワークスペースモードを有効化",
+    "workspaceModeWarning": "モードの切り替えには再起動が必要です。マルチワークスペースモードが有効な間は単一の work_dir は使用されません。",
+    "workspaceBaseDir": "ベースディレクトリ",
+    "workspaceBaseDirRequired": "マルチワークスペースモードを有効にするにはベースディレクトリが必要です。",
+    "workspaceModeConfirm": "ワークスペースモードの変更にはサービスの再起動が必要です。続行しますか？",
+    "workspaceBindings": "チャンネルの紐付け",
+    "workspaceNoBindings": "まだワークスペースに紐付けられたチャンネルはありません。",
+    "workspaceActive": "実行中",
+    "workspaceIdle": "アイドル",
+    "workspaceAddBinding": "チャンネルを紐付け",
+    "workspaceChannelKey": "チャンネルキー",
+    "workspaceChannelName": "チャンネル名（任意）",
+    "workspacePath": "ワークスペースのパス",
+    "workspaceSuggestions": "base_dir 内の未紐付けディレクトリ:",
+    "workspaceBind": "紐付け"
   },
   "sessions": {
     "title": "セッション",
