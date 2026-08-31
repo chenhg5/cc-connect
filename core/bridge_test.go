@@ -156,7 +156,7 @@ func TestBridge_RegisterSendsCapabilitiesSnapshotWhenAdapterSupportsIt(t *testin
 	bs, wsURL := startTestBridge(t, "")
 	bp := bs.NewPlatform("test-proj")
 	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
-	e.AddCommand("deploy", "Deploy app", "ship it", "", "", "config")
+	e.AddCommand("deploy", "Deploy app", "ship it", "", "", 0, "config")
 	bs.RegisterEngine("test-proj", e, bp)
 
 	conn := dialWS(t, wsURL, nil)
