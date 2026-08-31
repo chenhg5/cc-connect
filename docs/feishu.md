@@ -110,6 +110,8 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # domain = "https://open.feishu.cn" # 可选：覆盖运行时 API/WebSocket 域名
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
+# inbound_card_mode = "both" # 可选：summary（默认）| raw | both；保留入站 Card 2.0 原始 JSON
+# inbound_card_max_bytes = 0  # 可选：单卡原始 JSON 上限，0 表示不截断
 # progress_style = "legacy"  # 可选：legacy | compact | card
 # done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # image_batch_window_ms = 500  # 可选：连续多图合批窗口（默认 500ms，详见下文）
@@ -122,6 +124,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 > `domain` 只影响运行时 API / WebSocket 请求地址；CLI `setup/new/bind` 的引导域名仍然使用内置默认值。
 > `done_emoji` 设置后，agent 每次完成回复时会在用户消息上添加指定表情（如 `"Done"` → ✅）。先移除 "OnIt" 表情（如果有），再添加 done 表情。在 quiet 模式下特别有用，因为飞书卡片原地更新不触发推送，done 表情可以通知用户 agent 已完成。设为 `"none"` 或不配置则禁用。
 > `image_batch_window_ms` 控制连续多张图片合并成一条 agent 消息的等待窗口（默认 500ms）。飞书手机端一次连发多张图时，每张图是独立事件；cc-connect 会在窗口内将它们合并成一条多图消息再分发给 agent。如果你的网络/设备发送间隔超过 500ms 且仍被拆成多轮回复（每张图独立处理），可调高到 800–1200ms；如果以单图为主、希望响应更快，可适当调低。设为 `0` 时回退到默认 500ms。
+> `inbound_card_mode = "both"` 只影响已经通过正常入站门控（群聊仍需真实 @ 机器人）的消息：`interactive` 和 `merge_forward` 中的交互卡会保留完整原始 JSON，并同时提供可读摘要；不会打开全群消息接收。`raw` 只把原始卡片交给 agent，`summary` 保持旧行为。
 
 ---
 

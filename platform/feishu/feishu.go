@@ -128,6 +128,8 @@ type Platform struct {
 	allowChat                  string
 	groupOnly                  bool
 	groupReplyAll              bool
+	inboundCardMode            string // summary (default), raw, or both
+	inboundCardMaxBytes        int
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
@@ -349,6 +351,31 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowChat, _ := opts["allow_chat"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	inboundCardMode := "summary"
+	if v, ok := opts["inbound_card_mode"].(string); ok && strings.TrimSpace(v) != "" {
+		inboundCardMode = strings.ToLower(strings.TrimSpace(v))
+	}
+	if inboundCardMode != "summary" && inboundCardMode != "raw" && inboundCardMode != "both" {
+		return nil, fmt.Errorf("%s: invalid inbound_card_mode %q (want summary, raw, or both)", name, inboundCardMode)
+	}
+	// Zero means lossless/unbounded at the platform boundary. The engine still
+	// applies its prompt safety cap when serializing cards for the agent.
+	inboundCardMaxBytes := 0
+	if raw, ok := opts["inbound_card_max_bytes"]; ok {
+		switch v := raw.(type) {
+		case int:
+			inboundCardMaxBytes = v
+		case int64:
+			inboundCardMaxBytes = int(v)
+		case float64:
+			inboundCardMaxBytes = int(v)
+		default:
+			return nil, fmt.Errorf("%s: invalid inbound_card_max_bytes %v", name, raw)
+		}
+	}
+	if inboundCardMaxBytes < 0 {
+		return nil, fmt.Errorf("%s: inbound_card_max_bytes must be >= 0", name)
+	}
 	// require_mention = false is equivalent to group_reply_all = true:
 	// both mean "respond to all group messages without needing an @mention".
 	if v, ok := opts["require_mention"].(bool); ok && !v {
@@ -466,6 +493,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		allowChat:                  allowChat,
 		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
+		inboundCardMode:            inboundCardMode,
+		inboundCardMaxBytes:        inboundCardMaxBytes,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
@@ -1360,6 +1389,7 @@ func (p *Platform) dispatchImageBatchEntry(entry *imageBatchEntry) {
 		UserID:    entry.userID, UserName: entry.userName, ChatName: entry.chatName,
 		Content:           "",
 		ExtraContent:      entry.quoted.text,
+		Cards:             entry.quoted.cards,
 		Images:            append(entry.quoted.images, entry.images...),
 		ReplyCtx:          entry.rctx,
 		UserMessageTimeMs: entry.createTimeMs,
@@ -1522,7 +1552,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		return nil
 	}
 
-	if msg.Content == nil && msgType != "merge_forward" {
+	if msg.Content == nil && msgType != "merge_forward" && msgType != "interactive" {
 		slog.Debug(p.tag()+": message content is nil", "message_id", messageID, "type", msgType)
 		return nil
 	}
@@ -1594,8 +1624,18 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	// exception: earlier unmentioned messages were never dispatched to the
 	// agent, so bootstrap its context from the parent/root reply chain once.
 	var quoted quotedMessage
-	if parentID != "" && (!p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread) {
-		quoted = p.fetchQuotedMessage(ctx, parentID)
+	if parentID != "" {
+		switch {
+		case !p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread:
+			quoted = p.fetchQuotedMessage(ctx, parentID)
+		case p.threadIsolation && isThreadSessionKey(sessionKey):
+			// An engaged thread already has its text context in the agent
+			// session, but its root may be an interactive alert card that was
+			// never dispatched (the alert bot cannot @ this bot in the root
+			// message). Preserve only cards from the reply chain here; do not
+			// re-ingest ordinary group messages or attachments.
+			quoted = p.fetchQuotedCards(ctx, parentID)
+		}
 	}
 
 	switch msgType {
@@ -1616,7 +1656,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		// zero file-resource API calls.
 		approvedFileMetas := p.filterQuotedFilesForUser(quoted.files, mentions, userID)
 		quotedFiles := p.downloadQuotedFiles(ctx, approvedFileMetas)
-		if text == "" && quoted.text == "" && len(quoted.images) == 0 && len(quotedFiles) == 0 {
+		if text == "" && quoted.text == "" && len(quoted.cards) == 0 && len(quoted.images) == 0 && len(quotedFiles) == 0 {
 			slog.Debug(p.tag()+": dropping empty text after mention stripping",
 				"message_id", messageID,
 				"raw_text_len", len(textBody.Text),
@@ -1632,7 +1672,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: quoted.images, Files: quotedFiles, ReplyCtx: rctx,
+			Content: text, ExtraContent: quoted.text, Cards: quoted.cards, Images: quoted.images, Files: quotedFiles, ReplyCtx: rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
 
@@ -1679,6 +1719,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content:           "",
 			ExtraContent:      quoted.text,
+			Cards:             quoted.cards,
 			Images:            append(quoted.images, core.ImageAttachment{MimeType: mimeType, Data: imgData}),
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
@@ -1710,6 +1751,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
+			Cards: quoted.cards,
 			Audio: &core.AudioAttachment{
 				MimeType: "audio/opus",
 				Data:     audioData,
@@ -1723,7 +1765,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	case "post":
 		textParts, images := p.parsePostContent(messageID, content)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
-		if text == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
+		if text == "" && len(images) == 0 && quoted.text == "" && len(quoted.cards) == 0 && len(quoted.images) == 0 {
 			return
 		}
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
@@ -1732,8 +1774,43 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
+			Content: text, ExtraContent: quoted.text, Cards: quoted.cards, Images: append(quoted.images, images...),
 			ReplyCtx:          rctx,
+			UserMessageTimeMs: createTimeMs,
+		})
+
+	case "interactive":
+		text := extractInteractiveCardText(content)
+		cards := append([]core.InboundCard(nil), quoted.cards...)
+		// Fetching through raw_card_content is necessary because the event
+		// payload may contain only a lossy card summary.
+		if fetched := p.fetchSingleMessage(ctx, messageID); fetched != nil {
+			if fetched.text != "" {
+				text = fetched.text
+			}
+			if fetched.card != nil && p.inboundCardMode != "summary" {
+				cards = append(cards, *fetched.card)
+			}
+		}
+		if len(cards) == 0 && p.inboundCardMode != "summary" {
+			if card, ok := parseInboundCard(content, messageID, p.inboundCardMaxBytes); ok {
+				card.Summary = text
+				cards = append(cards, card)
+			}
+		}
+		if p.inboundCardMode == "raw" {
+			text = "[interactive card]"
+		}
+		if text == "" || text == "[interactive card]" {
+			text = "[interactive card]"
+		}
+		p.flushImageBatchForSession(sessionKey)
+		p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Content: text, ExtraContent: quoted.text, Cards: cards,
+			Images: quoted.images, ReplyCtx: rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
 
@@ -1773,8 +1850,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		})
 
 	case "merge_forward":
-		text, images, files := p.parseMergeForward(messageID)
-		if text == "" && len(images) == 0 && len(files) == 0 {
+		text, images, files, cards := p.parseMergeForward(ctx, messageID)
+		cards = append(append([]core.InboundCard(nil), quoted.cards...), cards...)
+		if text == "" && len(images) == 0 && len(files) == 0 && len(cards) == 0 {
 			slog.Warn(p.tag()+": merge_forward produced no content", "message_id", messageID)
 			return
 		}
@@ -1785,6 +1863,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content:           text,
+			ExtraContent:      quoted.text,
+			Cards:             cards,
 			Images:            images,
 			Files:             files,
 			ReplyCtx:          rctx,
@@ -1810,7 +1890,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				SessionKey: sessionKey, Platform: p.platformName,
 				MessageID: messageID,
 				UserID:    userID, UserName: userName, ChatName: chatName,
-				Content: "[sticker]", ExtraContent: quoted.text, ReplyCtx: rctx,
+				Content: "[sticker]", ExtraContent: quoted.text, Cards: quoted.cards, ReplyCtx: rctx,
 				UserMessageTimeMs: createTimeMs,
 			})
 			return
@@ -1821,6 +1901,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
+			Cards:             quoted.cards,
 			Images:            []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
@@ -1860,7 +1941,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
+			Content: text, ExtraContent: quoted.text, Cards: quoted.cards, Images: images, ReplyCtx: rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
 
@@ -2100,6 +2181,7 @@ type chainMessage struct {
 	senderID   string // Feishu open_id (or app_id for bots) — used by the caller
 	// to enforce same-user privacy when forwarding quoted files.
 	text     string
+	card     *core.InboundCard
 	images   []core.ImageAttachment
 	files    []quotedFileMeta
 	parentID string
@@ -2122,6 +2204,7 @@ type quotedFileMeta struct {
 
 type quotedMessage struct {
 	text   string
+	cards  []core.InboundCard
 	images []core.ImageAttachment
 	files  []quotedFileMeta
 }
@@ -2145,9 +2228,21 @@ func (p *Platform) fetchQuotedMessage(ctx context.Context, parentID string) quot
 	}
 	return quotedMessage{
 		text:   formatReplyChain(chain),
+		cards:  collectReplyChainCards(chain),
 		images: collectReplyChainImages(chain),
 		files:  collectReplyChainFiles(chain),
 	}
+}
+
+// fetchQuotedCards retrieves only interactive cards from a quoted reply chain.
+// It is used for already-engaged isolated threads so the root alert card remains
+// available without re-ingesting the thread's ordinary group messages.
+func (p *Platform) fetchQuotedCards(ctx context.Context, parentID string) quotedMessage {
+	chain := p.fetchReplyChain(ctx, parentID, maxReplyChainDepth)
+	if len(chain) == 0 {
+		return quotedMessage{}
+	}
+	return quotedMessage{cards: collectReplyChainCards(chain)}
 }
 
 // resolveBotSenderName returns a display name for a bot sender in a quoted
@@ -2204,6 +2299,7 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 
 	// Extract plain text based on message type.
 	var text string
+	var card *core.InboundCard
 	var images []core.ImageAttachment
 	var files []quotedFileMeta
 	switch item.MsgType {
@@ -2273,13 +2369,23 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		}
 	case "interactive":
 		text = extractInteractiveCardText(content)
+		if parsedCard, ok := parseInboundCard(content, messageID, p.inboundCardMaxBytes); ok {
+			parsedCard.Summary = text
+			card = &parsedCard
+		}
+		if text == "" && card != nil {
+			text = "[interactive card]"
+		}
+		if p.inboundCardMode == "raw" {
+			text = "[interactive card]"
+		}
 	default:
 		text = fmt.Sprintf("[%s]", item.MsgType)
 	}
 	// Empty quoted payloads (no text, no images, no files) are dropped here:
 	// keeping a chainMessage with an empty text would otherwise produce an
 	// empty reply prefix and an empty files slice in the dispatch layer.
-	if text == "" && len(images) == 0 && len(files) == 0 {
+	if text == "" && card == nil && len(images) == 0 && len(files) == 0 {
 		return nil
 	}
 	if text == "" {
@@ -2307,6 +2413,7 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		senderType: item.Sender.SenderType,
 		senderID:   item.Sender.ID,
 		text:       text,
+		card:       card,
 		images:     images,
 		files:      files,
 		parentID:   item.ParentID,
@@ -2319,6 +2426,16 @@ func collectReplyChainImages(chain []chainMessage) []core.ImageAttachment {
 		images = append(images, msg.images...)
 	}
 	return images
+}
+
+func collectReplyChainCards(chain []chainMessage) []core.InboundCard {
+	var cards []core.InboundCard
+	for _, msg := range chain {
+		if msg.card != nil {
+			cards = append(cards, *msg.card)
+		}
+	}
+	return cards
 }
 
 // collectReplyChainFiles flattens file metadata from every chainMessage.
@@ -2473,11 +2590,16 @@ func extractPostPlainText(content string) string {
 func extractInteractiveCardText(content string) string {
 	// Try raw_card_content format: {"json_card": "<escaped JSON>", ...}
 	var wrapper struct {
-		JsonCard string `json:"json_card"`
+		JsonCard json.RawMessage `json:"json_card"`
 	}
 	cardJSON := content
-	if json.Unmarshal([]byte(content), &wrapper) == nil && wrapper.JsonCard != "" {
-		cardJSON = wrapper.JsonCard
+	if json.Unmarshal([]byte(content), &wrapper) == nil && len(wrapper.JsonCard) > 0 {
+		var nested string
+		if json.Unmarshal(wrapper.JsonCard, &nested) == nil {
+			cardJSON = nested
+		} else {
+			cardJSON = string(wrapper.JsonCard)
+		}
 	}
 
 	var card map[string]json.RawMessage
@@ -2559,9 +2681,12 @@ func extractInteractiveCardText(content string) string {
 func extractCardElements(elements []json.RawMessage, parts *[]string) {
 	for _, raw := range elements {
 		var elem struct {
-			Tag      string `json:"tag"`
-			Content  string `json:"content"`
-			Property struct {
+			Tag       string          `json:"tag"`
+			Content   string          `json:"content"`
+			Text      json.RawMessage `json:"text"`
+			Actions   json.RawMessage `json:"actions"`
+			Behaviors json.RawMessage `json:"behaviors"`
+			Property  struct {
 				Content   string            `json:"content"`
 				Contents  json.RawMessage   `json:"contents"`
 				Language  string            `json:"language"`
@@ -2581,6 +2706,14 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			// Extract button label text and open_url from behaviors.
 			label := elem.Property.Content
 			if label == "" {
+				var textElem struct {
+					Content string `json:"content"`
+				}
+				if json.Unmarshal(elem.Text, &textElem) == nil {
+					label = textElem.Content
+				}
+			}
+			if label == "" {
 				// label may be in property.text.property.content
 				var textElem struct {
 					Property struct {
@@ -2592,15 +2725,25 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 				}
 			}
 			var openURL string
-			if len(elem.Property.Behaviors) > 0 {
+			behaviorsRaw := elem.Property.Behaviors
+			if len(behaviorsRaw) == 0 {
+				behaviorsRaw = elem.Behaviors
+			}
+			if len(behaviorsRaw) > 0 {
 				var behaviors []struct {
-					Type string `json:"type"`
-					URL  string `json:"url"`
+					Type       string `json:"type"`
+					URL        string `json:"url"`
+					DefaultURL string `json:"default_url"`
 				}
-				if json.Unmarshal(elem.Property.Behaviors, &behaviors) == nil {
+				if json.Unmarshal(behaviorsRaw, &behaviors) == nil {
 					for _, b := range behaviors {
-						if b.Type == "open_url" && b.URL != "" {
+						if b.Type == "open_url" {
 							openURL = b.URL
+							if openURL == "" {
+								openURL = b.DefaultURL
+							}
+						}
+						if openURL != "" {
 							break
 						}
 					}
@@ -2610,6 +2753,11 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 				*parts = append(*parts, fmt.Sprintf("[%s](%s)", label, openURL))
 			} else if label != "" {
 				*parts = append(*parts, label)
+			}
+		case "action":
+			var actions []json.RawMessage
+			if json.Unmarshal(elem.Actions, &actions) == nil {
+				extractCardElements(actions, parts)
 			}
 		case "code_block":
 			var lines []struct {
@@ -2650,6 +2798,14 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			content := elem.Property.Content
 			if content == "" {
 				content = elem.Content
+			}
+			if content == "" && len(elem.Text) > 0 {
+				var textElem struct {
+					Content string `json:"content"`
+				}
+				if json.Unmarshal(elem.Text, &textElem) == nil {
+					content = textElem.Content
+				}
 			}
 			if content != "" {
 				*parts = append(*parts, content)
@@ -2733,24 +2889,35 @@ func extractCardListItems(itemsRaw json.RawMessage, parts *[]string) {
 }
 
 // parseMergeForward fetches sub-messages of a merge_forward message via the
-// GET /open-apis/im/v1/messages/{message_id} API, then formats them into
-// readable text. Returns combined text, images, and files from the sub-messages.
-func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.ImageAttachment, []core.FileAttachment) {
-	resp, err := p.client.Im.Message.Get(context.Background(),
-		larkim.NewGetMessageReqBuilder().
-			MessageId(rootMessageID).
-			Build())
+// raw-card variant of GET /open-apis/im/v1/messages/{message_id}, then formats
+// them into readable text while retaining each interactive card's original
+// JSON. The generated SDK request does not expose card_msg_content_type, so the
+// raw client is intentional here.
+func (p *Platform) parseMergeForward(ctx context.Context, rootMessageID string) (string, []core.ImageAttachment, []core.FileAttachment, []core.InboundCard) {
+	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", rootMessageID)
+	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
 	if err != nil {
 		slog.Error(p.tag()+": fetch merge_forward sub-messages failed", "error", err)
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
-	if !resp.Success() {
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items []*larkim.Message `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		slog.Error(p.tag()+": parse merge_forward response failed", "error", err)
+		return "", nil, nil, nil
+	}
+	if resp.Code != 0 {
 		slog.Error(p.tag()+": fetch merge_forward sub-messages failed", "code", resp.Code, "msg", resp.Msg)
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
-	if resp.Data == nil || len(resp.Data.Items) == 0 {
+	if len(resp.Data.Items) == 0 {
 		slog.Warn(p.tag()+": merge_forward has no sub-messages", "message_id", rootMessageID)
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
 
 	items := resp.Data.Items
@@ -2785,12 +2952,13 @@ func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.Image
 
 	var allImages []core.ImageAttachment
 	var allFiles []core.FileAttachment
+	var allCards []core.InboundCard
 	var sb strings.Builder
 	sb.WriteString("<forwarded_messages>\n")
-	p.formatMergeForwardTree(rootMessageID, childrenMap, nameMap, &sb, &allImages, &allFiles, 0)
+	p.formatMergeForwardTree(ctx, rootMessageID, childrenMap, nameMap, &sb, &allImages, &allFiles, &allCards, 0)
 	sb.WriteString("</forwarded_messages>")
 
-	return sb.String(), allImages, allFiles
+	return sb.String(), allImages, allFiles, allCards
 }
 
 // replaceMentions replaces @_user_N placeholders with real names from the Mentions list.
@@ -2804,7 +2972,7 @@ func replaceMentions(text string, mentions []*larkim.Mention) string {
 }
 
 // formatMergeForwardTree recursively formats the sub-message tree.
-func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
+func (p *Platform) formatMergeForwardTree(ctx context.Context, parentID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, cards *[]core.InboundCard, depth int) {
 	if depth > 10 {
 		sb.WriteString(strings.Repeat("    ", depth) + "[nested forwarding truncated]\n")
 		return
@@ -2901,7 +3069,35 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 
 		case "merge_forward":
 			sb.WriteString(fmt.Sprintf("%s[%s] %s: [forwarded messages]\n", indent, ts, senderName))
-			p.formatMergeForwardTree(msgID, childrenMap, nameMap, sb, images, files, depth+1)
+			p.formatMergeForwardTree(ctx, msgID, childrenMap, nameMap, sb, images, files, cards, depth+1)
+
+		case "interactive":
+			text := extractInteractiveCardText(content)
+			card, parsed := parseInboundCard(content, msgID, p.inboundCardMaxBytes)
+			if parsed {
+				if card.Summary != "" {
+					text = card.Summary
+				}
+				if p.inboundCardMode != "summary" {
+					*cards = append(*cards, card)
+				}
+			} else if fetched := p.fetchSingleMessage(ctx, msgID); fetched != nil {
+				if fetched.text != "" {
+					text = fetched.text
+				}
+				if fetched.card != nil && p.inboundCardMode != "summary" {
+					*cards = append(*cards, *fetched.card)
+				}
+			}
+			if p.inboundCardMode == "raw" {
+				text = "[interactive card]"
+			}
+			if text != "" {
+				sb.WriteString(fmt.Sprintf("%s[%s] %s:\n", indent, ts, senderName))
+				for _, line := range strings.Split(text, "\n") {
+					sb.WriteString(fmt.Sprintf("%s    %s\n", indent, line))
+				}
+			}
 
 		default:
 			sb.WriteString(fmt.Sprintf("%s[%s] %s: [%s message]\n", indent, ts, senderName, msgType))
