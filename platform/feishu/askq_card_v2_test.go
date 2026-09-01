@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 	larkcallback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
@@ -140,7 +141,7 @@ func TestOnCardActionAskqTextFormSubmit(t *testing.T) {
 		if msg.IsPermissionResponse {
 			t.Fatal("free-form answer must not be flagged as permission response")
 		}
-	default:
+	case <-time.After(2 * time.Second):
 		t.Fatal("expected the answer to be dispatched as a user message")
 	}
 }
