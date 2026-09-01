@@ -11799,6 +11799,30 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		titleSuffix = fmt.Sprintf(" (%d/%d)", qIdx+1, total)
 	}
 
+	// Try native rich ask-question card (Feishu schema 2.0: option buttons +
+	// free-form input in one card). Single-select only — for multiSelect,
+	// buttons would resolve on the first click and prevent selecting multiple.
+	if !q.MultiSelect {
+		if aqs, ok := p.(AskQuestionCardSender); ok {
+			body := "**" + q.Question + "**\n\n"
+			for i, opt := range q.Options {
+				body += fmt.Sprintf("%d. **%s**", i+1, opt.Label)
+				if opt.Description != "" {
+					body += " — " + opt.Description
+				}
+				body += "\n"
+			}
+			err := aqs.SendAskQuestionCard(context.Background(), replyCtx,
+				e.i18n.T(MsgAskQuestionTitle)+titleSuffix, body,
+				e.i18n.T(MsgAskQuestionNoteFreeform), q, qIdx)
+			if err == nil {
+				return
+			}
+			slog.Debug("sendAskQuestionPrompt: native card unavailable, falling back",
+				"platform", p.Name(), "error", err)
+		}
+	}
+
 	// Try card (Feishu/Lark)
 	if supportsCards(p) {
 		cb := NewCard().Title(e.i18n.T(MsgAskQuestionTitle)+titleSuffix, "blue")

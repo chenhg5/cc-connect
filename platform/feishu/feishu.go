@@ -150,18 +150,18 @@ type Platform struct {
 	// Issue #1618: previous behavior treated botOpenID=="" as "filter off", which
 	// silently turned the bot into a loud responder for the rest of the process
 	// lifetime when the bot-info API failed.
-	groupFilterDegraded     bool
-	groupFilterDegradedAt   time.Time
-	groupFilterDegradedErr  string
-	groupFilterRetryCancel  context.CancelFunc
-	groupFilterRetryStop    chan struct{}
-	peerBots                map[string]string // app_id -> friendly alias, for quoted-reply attribution
-	mentionMap       map[string]string // agent name -> open_id (for outbound @ resolution)
-	userNameCache    sync.Map          // open_id -> display name
-	chatNameCache    sync.Map          // chat_id -> chat name
-	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
-	recalledMu       sync.Mutex
-	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
+	groupFilterDegraded    bool
+	groupFilterDegradedAt  time.Time
+	groupFilterDegradedErr string
+	groupFilterRetryCancel context.CancelFunc
+	groupFilterRetryStop   chan struct{}
+	peerBots               map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	mentionMap             map[string]string // agent name -> open_id (for outbound @ resolution)
+	userNameCache          sync.Map          // open_id -> display name
+	chatNameCache          sync.Map          // chat_id -> chat name
+	chatMemberCache        sync.Map          // chatID -> *chatMemberEntry
+	recalledMu             sync.Mutex
+	recalledMsgIDs         map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -775,6 +775,15 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}
 	}
 
+	// Card schema 2.0 free-form input: the ask-question card's form_submit
+	// button ("submit") carries the typed text in the "answer" form field.
+	// Route it as an askq free-form answer.
+	if actionVal == "" && event.Event.Action.Name == "submit" {
+		if ans, _ := event.Event.Action.FormValue["answer"].(string); strings.TrimSpace(ans) != "" {
+			actionVal = "askq_text:" + ans
+		}
+	}
+
 	userID := ""
 	if event.Event.Operator != nil {
 		userID = event.Event.Operator.OpenID
@@ -916,15 +925,44 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		if answerLabel == "" {
 			answerLabel = actionVal
 		}
-		cb := core.NewCard().Title("✅ "+answerLabel, "green")
+		md := ""
 		if askqQuestion != "" {
-			cb.Markdown(askqQuestion)
+			md = askqQuestion + "\n"
 		}
-		cb.Markdown("**→ " + answerLabel + "**")
+		md += "**→ " + answerLabel + "**"
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
-				Data: renderCardMap(cb.Build(), sessionKey),
+				Data: simpleCard2("✅ "+answerLabel, md, "green"),
+			},
+		}, nil
+	}
+
+	// askq_text: — AskUserQuestion free-form answer submitted via the card
+	// schema 2.0 input box. Forward the raw text as a user message; while an
+	// askq prompt is pending the engine resolves non-numeric text as a
+	// free-form answer (resolveAskQuestionAnswer returns it as-is).
+	if strings.HasPrefix(actionVal, "askq_text:") {
+		answer := strings.TrimPrefix(actionVal, "askq_text:")
+		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		go p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey,
+			Platform:   p.platformName,
+			UserID:     userID,
+			UserName:   p.resolveUserName(userID),
+			ChatName:   p.resolveChatName(chatID),
+			Content:    answer,
+			ReplyCtx:   rctx,
+		})
+
+		title := answer
+		if len(title) > 50 {
+			title = title[:50] + "…"
+		}
+		return &callback.CardActionTriggerResponse{
+			Card: &callback.Card{
+				Type: "raw",
+				Data: simpleCard2("✅ "+title, "**→ "+answer+"**", "green"),
 			},
 		}, nil
 	}
