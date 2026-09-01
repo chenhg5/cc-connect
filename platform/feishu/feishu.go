@@ -161,7 +161,7 @@ type Platform struct {
 	chatNameCache    sync.Map          // chat_id -> chat name
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
 	recalledMu       sync.Mutex
-	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
+	recalledMsgIDs         map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -778,6 +778,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	userID := ""
 	if event.Event.Operator != nil {
 		userID = event.Event.Operator.OpenID
+	}
+	if !core.AllowList(p.allowFrom, userID) {
+		slog.Debug(p.tag()+": card action from unauthorized user", "user", userID)
+		return nil, nil
 	}
 	chatID := ""
 	messageID := ""

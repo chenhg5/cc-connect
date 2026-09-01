@@ -314,6 +314,47 @@ func TestInteractivePlatform_CardActionPassesCardSenderToHandler(t *testing.T) {
 	}
 }
 
+func TestInteractivePlatform_CardActionRejectsUnauthorizedUser(t *testing.T) {
+	platformAny, err := New(map[string]any{
+		"app_id":             "cli_xxx",
+		"app_secret":         "secret",
+		"enable_feishu_card": true,
+		"allow_from":         "ou_allowed",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ip := platformAny.(*interactivePlatform)
+
+	invoked := make(chan struct{}, 1)
+	ip.handler = func(_ core.Platform, _ *core.Message) {
+		invoked <- struct{}{}
+	}
+	ip.cardNavHandler = func(_ string, _ string) *core.Card {
+		invoked <- struct{}{}
+		return core.NewCard().Markdown("unexpected").Build()
+	}
+
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Operator: &callback.Operator{OpenID: "ou_denied"},
+			Action:   &callback.CallBackAction{Value: map[string]any{"action": "cmd:/help"}},
+			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onCardAction() error = %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("unauthorized card action response = %#v, want nil", resp)
+	}
+	select {
+	case <-invoked:
+		t.Fatal("unauthorized card action reached a handler")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestInteractivePlatform_CardActionActWithoutCardResponseDoesNotWarn(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
