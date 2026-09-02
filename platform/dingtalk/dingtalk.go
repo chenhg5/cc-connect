@@ -90,8 +90,11 @@ type Platform struct {
 	cardTemplateID  string
 	cardTemplateKey string
 	cardThrottleMs  int
-	degradeUntil    time.Time
-	degradeMu       sync.Mutex
+	// cardFinalPreviewMessage sends a normal Markdown message after an AI Card
+	// turn so DingTalk refreshes the conversation-list preview.
+	cardFinalPreviewMessage bool
+	degradeUntil            time.Time
+	degradeMu               sync.Mutex
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -152,20 +155,22 @@ func New(opts map[string]any) (core.Platform, error) {
 	} else if v, ok := opts["card_throttle_ms"].(int); ok && v > 0 {
 		cardThrottleMs = v
 	}
+	cardFinalPreviewMessage, _ := opts["card_final_preview_message"].(bool)
 
 	return &Platform{
-		clientID:              clientID,
-		clientSecret:          clientSecret,
-		robotCode:             robotCode,
-		agentID:               agentID,
-		allowFrom:             allowFrom,
-		shareSessionInChannel: shareSessionInChannel,
-		httpClient:            &http.Client{Timeout: 30 * time.Second},
-		reactionEmoji:         reactionEmoji,
-		doneEmoji:             doneEmoji,
-		cardTemplateID:        cardTemplateID,
-		cardTemplateKey:       cardTemplateKey,
-		cardThrottleMs:        cardThrottleMs,
+		clientID:                clientID,
+		clientSecret:            clientSecret,
+		robotCode:               robotCode,
+		agentID:                 agentID,
+		allowFrom:               allowFrom,
+		shareSessionInChannel:   shareSessionInChannel,
+		httpClient:              &http.Client{Timeout: 30 * time.Second},
+		reactionEmoji:           reactionEmoji,
+		doneEmoji:               doneEmoji,
+		cardTemplateID:          cardTemplateID,
+		cardTemplateKey:         cardTemplateKey,
+		cardThrottleMs:          cardThrottleMs,
+		cardFinalPreviewMessage: cardFinalPreviewMessage,
 	}, nil
 }
 

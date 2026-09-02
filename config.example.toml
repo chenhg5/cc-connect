@@ -1098,6 +1098,8 @@ app_secret = "your-feishu-app-secret"
 #                                 # 收到消息时添加的表情回复（默认 "🤔Thinking"）；设为 "none" 可禁用
 # done_emoji = "none"             # Emotion when agent finishes a reply (e.g. "🥳Done"); set to "none" to disable
 #                                 # Agent 完成回复后添加的表情回复（如 "🥳Done"）；设为 "none" 可禁用
+# card_final_preview_message = false # After an AI Card turn, send a separate Markdown summary
+#                                    # AI 卡片完成后额外发送一条普通 Markdown 摘要，用于刷新会话列表预览
 
 # WPS Xiezuo / WPS 协作 (uncomment to enable / 取消注释以启用)
 # 1. Create a WPS Open Platform app and enable event WebSocket delivery
