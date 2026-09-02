@@ -502,3 +502,20 @@ func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
 		}
 	}
 }
+
+func TestAppServerListenURL(t *testing.T) {
+	cases := map[string]string{
+		"":                       "",
+		"  ":                     "",
+		"stdio://":               "",
+		"stdio":                  "",
+		"ws://127.0.0.1:3845":    "ws://127.0.0.1:3845",
+		"ws://localhost:9000":    "ws://localhost:9000",
+		"ws://127.0.0.1:3845 ":   "ws://127.0.0.1:3845",
+	}
+	for in, want := range cases {
+		if got := appServerListenURL(in); got != want {
+			t.Errorf("appServerListenURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
