@@ -278,7 +278,7 @@ func TestAliasDisabledCommandAndBannedWordsThroughReceiveMessage(t *testing.T) {
 
 func TestCustomPromptCommandThroughReceiveMessage(t *testing.T) {
 	engine, agent, platform := newMatrixEngine(t)
-	engine.AddCommand("daily", "Daily summary", "Summarize release status for {{1}}", "", "", "release-test")
+	engine.AddCommand("daily", "Daily summary", "Summarize release status for {{1}}", "", "", 0, "release-test")
 
 	receive(engine, platform, "/daily beta")
 
