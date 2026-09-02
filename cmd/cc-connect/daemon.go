@@ -57,9 +57,24 @@ func daemonInstall(args []string) {
 
 	configPath := cfg.WorkDir + "/config.toml"
 	if _, err := os.Stat(configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: config.toml not found in %s\n", cfg.WorkDir)
-		fmt.Fprintf(os.Stderr, "  Use --work-dir to specify the config directory or --config to point to the config file\n")
-		os.Exit(1)
+		// Fall back to the standard ~/.cc-connect location before giving up,
+		// matching the lookup behavior of other subcommands (see main.go
+		// config resolution: ./config.toml first, then ~/.cc-connect/config.toml).
+		if home, herr := os.UserHomeDir(); herr == nil {
+			homeConfig := filepath.Join(home, ".cc-connect", "config.toml")
+			if _, serr := os.Stat(homeConfig); serr == nil {
+				configPath = homeConfig
+				if cfg.WorkDir == "" {
+					cfg.WorkDir = filepath.Join(home, ".cc-connect")
+				}
+				fmt.Fprintf(os.Stderr, "Note: using config from %s\n", homeConfig)
+			}
+		}
+		if _, err := os.Stat(configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: config.toml not found in %s\n", cfg.WorkDir)
+			fmt.Fprintf(os.Stderr, "  Use --work-dir to specify the config directory or --config to point to the config file\n")
+			os.Exit(1)
+		}
 	}
 
 	mgr, err := daemon.NewManager()
