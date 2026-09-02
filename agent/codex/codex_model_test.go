@@ -64,9 +64,9 @@ func TestNormalizeAppServerURL_StdIOIsExplicit(t *testing.T) {
 	}
 }
 
-func TestNormalizeAppServerURL_EmptyKeepsWebSocketDefault(t *testing.T) {
-	if got := normalizeAppServerURL(""); got != "ws://127.0.0.1:3845" {
-		t.Fatalf("normalizeAppServerURL(empty) = %q, want ws://127.0.0.1:3845", got)
+func TestNormalizeAppServerURL_EmptyDefaultsToStdio(t *testing.T) {
+	if got := normalizeAppServerURL(""); got != "stdio://" {
+		t.Fatalf("normalizeAppServerURL(empty) = %q, want stdio://", got)
 	}
 }
 

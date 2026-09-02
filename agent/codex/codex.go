@@ -121,7 +121,11 @@ func normalizeBackend(raw string) string {
 func normalizeAppServerURL(raw string) string {
 	url := strings.TrimSpace(raw)
 	if url == "" {
-		return "ws://127.0.0.1:3845"
+		// Default to the stdio transport: cc-connect's app_server backend
+		// speaks JSON-RPC over the stdio pipes, and on codex 0.152+ a ws://
+		// --listen value leaves stdio unresponsive (see #1781). Users who
+		// need a WebSocket listener can still set app_server_url explicitly.
+		return "stdio://"
 	}
 	if strings.EqualFold(url, "stdio") {
 		return "stdio://"
