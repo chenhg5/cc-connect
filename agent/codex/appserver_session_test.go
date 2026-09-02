@@ -512,6 +512,10 @@ func TestAppServerListenURL(t *testing.T) {
 		"ws://127.0.0.1:3845":    "ws://127.0.0.1:3845",
 		"ws://localhost:9000":    "ws://localhost:9000",
 		"ws://127.0.0.1:3845 ":   "ws://127.0.0.1:3845",
+		" stdio ":                 "",
+		" stdio:// ":               "",
+		"STDIO":                    "",
+		"STDIO://":                 "",
 	}
 	for in, want := range cases {
 		if got := appServerListenURL(in); got != want {
