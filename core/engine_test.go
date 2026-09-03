@@ -8556,6 +8556,13 @@ type queuingAgentSession struct {
 	sendMu    sync.Mutex
 }
 
+type steeringAgentSession struct {
+	*queuingAgentSession
+	steerMu    sync.Mutex
+	steerCalls []string
+	steerErr   error
+}
+
 func newQueuingSession(id string) *queuingAgentSession {
 	return &queuingAgentSession{
 		controllableAgentSession: controllableAgentSession{
@@ -8567,11 +8574,22 @@ func newQueuingSession(id string) *queuingAgentSession {
 	}
 }
 
+func newSteeringSession(id string) *steeringAgentSession {
+	return &steeringAgentSession{queuingAgentSession: newQueuingSession(id)}
+}
+
 func (s *queuingAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
 	s.sendMu.Lock()
 	s.sendCalls = append(s.sendCalls, prompt)
 	s.sendMu.Unlock()
 	return nil
+}
+
+func (s *steeringAgentSession) SteerTurn(prompt string) error {
+	s.steerMu.Lock()
+	defer s.steerMu.Unlock()
+	s.steerCalls = append(s.steerCalls, prompt)
+	return s.steerErr
 }
 
 // blockingSendAgentSession blocks in Send until unblock is closed, mimicking agents
@@ -8922,6 +8940,209 @@ func TestQueueMessageForBusySession_FIFODequeue(t *testing.T) {
 			state.pendingMessages[0].content, state.pendingMessages[1].content)
 	}
 	state.mu.Unlock()
+}
+
+func TestHandleMessage_BusySteerableSessionSteersPlainText(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newSteeringSession("steer-success")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetBusyMessageMode("steer")
+
+	key := "test:steer-user"
+	state := &interactiveState{
+		agentSession:                 sess,
+		platform:                     p,
+		currentTurnUserMessageTimeMs: 1_000,
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+	defer session.UnlockWithoutUpdate()
+
+	accepted := false
+	e.ReceiveMessage(p, &Message{
+		SessionKey:        key,
+		Platform:          "test",
+		MessageID:         "follow-up-1",
+		UserID:            "steer-user",
+		UserName:          "Steer User",
+		Content:           "also update the docs",
+		ReplyCtx:          "ctx-follow-up",
+		UserMessageTimeMs: 2_000,
+		OnAccepted:        func() { accepted = true },
+	})
+
+	sess.steerMu.Lock()
+	steered := append([]string(nil), sess.steerCalls...)
+	sess.steerMu.Unlock()
+	if len(steered) != 1 || steered[0] != "also update the docs" {
+		t.Fatalf("steer calls = %#v, want one follow-up", steered)
+	}
+	if !accepted {
+		t.Fatal("steered message did not run OnAccepted")
+	}
+	state.mu.Lock()
+	queueDepth := len(state.pendingMessages)
+	watermark := state.currentTurnUserMessageTimeMs
+	state.mu.Unlock()
+	if queueDepth != 0 {
+		t.Fatalf("pending messages = %d, want 0 after steering", queueDepth)
+	}
+	if watermark != 2_000 {
+		t.Fatalf("current turn watermark = %d, want 2000", watermark)
+	}
+
+	history := session.GetHistory(0)
+	if len(history) != 1 || history[0].Role != "user" || history[0].Content != "also update the docs" {
+		t.Fatalf("history = %#v, want steered user message", history)
+	}
+	foundAck := false
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, e.i18n.T(MsgMessageSteered)) {
+			foundAck = true
+			break
+		}
+	}
+	if !foundAck {
+		t.Fatalf("expected steering acknowledgement, got %v", p.getSent())
+	}
+}
+
+func TestHandleMessage_BusySteerableSessionDefaultsToQueue(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newSteeringSession("steer-default-queue")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:steer-default-queue"
+	state := &interactiveState{agentSession: sess, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+	defer session.UnlockWithoutUpdate()
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "default-queue",
+		Content:    "keep the compatible queue behavior",
+		ReplyCtx:   "ctx-default-queue",
+	})
+
+	sess.steerMu.Lock()
+	steerCount := len(sess.steerCalls)
+	sess.steerMu.Unlock()
+	if steerCount != 0 {
+		t.Fatalf("default mode steered %d time(s), want 0", steerCount)
+	}
+	state.mu.Lock()
+	queueDepth := len(state.pendingMessages)
+	state.mu.Unlock()
+	if queueDepth != 1 {
+		t.Fatalf("pending messages = %d, want 1 in default queue mode", queueDepth)
+	}
+}
+
+func TestHandleMessage_SteerFailureFallsBackToQueue(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newSteeringSession("steer-fallback")
+	sess.steerErr = errors.New("turn changed")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetBusyMessageMode("steer")
+
+	key := "test:steer-fallback"
+	state := &interactiveState{agentSession: sess, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+	defer session.UnlockWithoutUpdate()
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "follow-up-fallback",
+		Content:    "do this next if steering fails",
+		ReplyCtx:   "ctx-fallback",
+	})
+
+	state.mu.Lock()
+	queueDepth := len(state.pendingMessages)
+	queuedContent := ""
+	if queueDepth > 0 {
+		queuedContent = state.pendingMessages[0].content
+	}
+	state.mu.Unlock()
+	if queueDepth != 1 || queuedContent != "do this next if steering fails" {
+		t.Fatalf("queue = (%d, %q), want fallback message", queueDepth, queuedContent)
+	}
+	if got := session.GetHistory(0); len(got) != 0 {
+		t.Fatalf("history = %#v, queued fallback must not be persisted before drain", got)
+	}
+	foundQueued := false
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, e.i18n.T(MsgMessageQueued)) {
+			foundQueued = true
+			break
+		}
+	}
+	if !foundQueued {
+		t.Fatalf("expected queue fallback acknowledgement, got %v", p.getSent())
+	}
+}
+
+func TestHandleMessage_BusyAttachmentRemainsQueued(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newSteeringSession("steer-file")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetBusyMessageMode("steer")
+
+	key := "test:steer-file"
+	state := &interactiveState{agentSession: sess, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected session lock")
+	}
+	defer session.UnlockWithoutUpdate()
+
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key,
+		Platform:   "test",
+		MessageID:  "follow-up-file",
+		Content:    "use this file too",
+		Files:      []FileAttachment{{}},
+		ReplyCtx:   "ctx-file",
+	})
+
+	sess.steerMu.Lock()
+	steerCount := len(sess.steerCalls)
+	sess.steerMu.Unlock()
+	if steerCount != 0 {
+		t.Fatalf("attachment was steered %d time(s), want queue-only", steerCount)
+	}
+	state.mu.Lock()
+	queueDepth := len(state.pendingMessages)
+	state.mu.Unlock()
+	if queueDepth != 1 {
+		t.Fatalf("pending messages = %d, want 1 attachment message", queueDepth)
+	}
 }
 
 func TestQueuedUserMessageStaleForDrainIgnoresOtherPendingMessages(t *testing.T) {
@@ -10323,7 +10544,7 @@ func TestCmdPs_IdleSession_RepliesNoSession(t *testing.T) {
 
 func TestCmdPs_BusySession_InjectsToAgent(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
-	sess := newQueuingSession("ps-busy")
+	sess := newSteeringSession("ps-busy")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
 	key := "test:user1"
@@ -10342,11 +10563,11 @@ func TestCmdPs_BusySession_InjectsToAgent(t *testing.T) {
 	msg := &Message{SessionKey: key, Content: "/ps add unit tests", ReplyCtx: "ctx"}
 	e.cmdPs(p, msg, []string{"add", "unit", "tests"})
 
-	sess.sendMu.Lock()
-	calls := append([]string(nil), sess.sendCalls...)
-	sess.sendMu.Unlock()
+	sess.steerMu.Lock()
+	calls := append([]string(nil), sess.steerCalls...)
+	sess.steerMu.Unlock()
 	if len(calls) != 1 || calls[0] != "add unit tests" {
-		t.Fatalf("expected Send(\"add unit tests\"), got %v", calls)
+		t.Fatalf("expected SteerTurn(\"add unit tests\"), got %v", calls)
 	}
 
 	sent := p.getSent()
@@ -10359,6 +10580,44 @@ func TestCmdPs_BusySession_InjectsToAgent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected MsgPsSent reply, got %v", sent)
+	}
+}
+
+func TestCmdPs_BusySessionWithoutSteeringCapabilityFailsSafely(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("ps-unsupported")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	state := &interactiveState{agentSession: sess, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if !session.TryLock() {
+		t.Fatal("expected TryLock to succeed")
+	}
+	defer session.Unlock()
+
+	msg := &Message{SessionKey: key, Content: "/ps do not start another turn", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, []string{"do", "not", "start", "another", "turn"})
+
+	sess.sendMu.Lock()
+	sendCount := len(sess.sendCalls)
+	sess.sendMu.Unlock()
+	if sendCount != 0 {
+		t.Fatalf("unsupported /ps called Send %d time(s), want 0", sendCount)
+	}
+	foundFailure := false
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, e.i18n.T(MsgPsSendFailed)) {
+			foundFailure = true
+			break
+		}
+	}
+	if !foundFailure {
+		t.Fatalf("expected MsgPsSendFailed reply, got %v", p.getSent())
 	}
 }
 

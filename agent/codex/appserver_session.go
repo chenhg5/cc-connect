@@ -64,6 +64,10 @@ type turnStartResponse struct {
 	} `json:"turn"`
 }
 
+type turnSteerResponse struct {
+	TurnID string `json:"turnId"`
+}
+
 type turnNotification struct {
 	ThreadID string `json:"threadId"`
 	Turn     struct {
@@ -177,6 +181,7 @@ type appServerSession struct {
 	wg        sync.WaitGroup
 
 	stateMu      sync.Mutex
+	steerMu      sync.Mutex
 	pendingMsgs  []string
 	currentTurn  string
 	preambleSent bool
@@ -188,6 +193,7 @@ type appServerSession struct {
 
 const (
 	appServerRequestTimeout      = 120 * time.Second
+	appServerSteerTimeout        = 5 * time.Second
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
@@ -508,6 +514,53 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
+	return nil
+}
+
+// SteerTurn appends text to the active Codex turn without starting a second
+// turn. expectedTurnId prevents a late follow-up from being attached to a newer
+// turn if the original one completes while this request is in flight.
+func (s *appServerSession) SteerTurn(prompt string) error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return fmt.Errorf("codex app-server turn/steer prompt is empty")
+	}
+
+	// Preserve the arrival order of rapid follow-ups and avoid issuing multiple
+	// concurrent turn/steer requests for the same active turn.
+	s.steerMu.Lock()
+	defer s.steerMu.Unlock()
+
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return fmt.Errorf("codex app-server thread id is empty")
+	}
+	s.stateMu.Lock()
+	turnID := s.currentTurn
+	s.stateMu.Unlock()
+	if turnID == "" {
+		return fmt.Errorf("codex app-server has no active turn to steer")
+	}
+
+	params := map[string]any{
+		"threadId": threadID,
+		"input": []map[string]any{
+			{
+				"type": "text",
+				"text": prompt,
+			},
+		},
+		"expectedTurnId": turnID,
+	}
+	var resp turnSteerResponse
+	if err := s.requestWithTimeout("turn/steer", params, &resp, appServerSteerTimeout); err != nil {
+		return fmt.Errorf("codex app-server turn/steer: %w", err)
+	}
+	if resp.TurnID != turnID {
+		return fmt.Errorf("codex app-server turn/steer returned turn id %q, want %q", resp.TurnID, turnID)
+	}
 	return nil
 }
 
