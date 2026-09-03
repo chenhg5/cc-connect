@@ -609,6 +609,7 @@ type CommandConfig struct {
 	Prompt      string `toml:"prompt"`   // prompt template (mutually exclusive with Exec)
 	Exec        string `toml:"exec"`     // shell command to execute (mutually exclusive with Prompt)
 	WorkDir     string `toml:"work_dir"` // optional: working directory for exec command
+	Timeout     int    `toml:"timeout"`  // optional: shell exec timeout in seconds; 0 = default (60s)
 }
 
 type LogConfig struct {

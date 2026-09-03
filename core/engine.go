@@ -1137,8 +1137,8 @@ func (e *Engine) GetSessions() *SessionManager {
 }
 
 // AddCommand registers a custom slash command.
-func (e *Engine) AddCommand(name, description, prompt, exec, workDir, source string) {
-	e.commands.Add(name, description, prompt, exec, workDir, source)
+func (e *Engine) AddCommand(name, description, prompt, exec, workDir string, timeout int, source string) {
+	e.commands.Add(name, description, prompt, exec, workDir, timeout, source)
 }
 
 // ClearCommands removes all commands from the given source.
@@ -14791,11 +14791,26 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 	// Expand placeholders in exec command
 	execCmd := ExpandPrompt(cmd.Exec, args)
 
+	// Inject the source session key/project into custom command env so scripts (e.g. /review) can identify the chat.
+	if msg.SessionKey != "" {
+		// export rather than plain assignment: `VAR='x'; cmd` only sets a non-exported
+		// shell var, so cmd and its children cannot see it. export makes the vars
+		// available to /review, /reviewer, etc.
+		execCmd = fmt.Sprintf("export CC_SESSION_KEY='%s' CC_PROJECT='%s'; %s", msg.SessionKey, e.name, execCmd)
+	}
+
 	// Determine working directory
 	workDir := cmd.WorkDir
 	if workDir == "" {
-		// Default to agent's work_dir if available
-		if e.agent != nil {
+		// Prefer the session's bound workspace (set via /workspace bind or /proj)
+		// so custom exec commands run in the repo the user is actually working in,
+		// then fall back to the project agent's work_dir.
+		if channelID := effectiveChannelID(msg); channelID != "" {
+			if bound, _, err := e.resolveWorkspace(p, channelID); err == nil && bound != "" {
+				workDir = bound
+			}
+		}
+		if workDir == "" && e.agent != nil {
 			if agentOpts, ok := e.agent.(interface{ GetWorkDir() string }); ok {
 				workDir = agentOpts.GetWorkDir()
 			}
@@ -14805,7 +14820,12 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 		workDir, _ = os.Getwd()
 	}
 
-	_ = e.runShellWithProgress(p, msg.ReplyCtx, execCmd, workDir, 60*time.Second, 4000)
+	// Shell exec timeout: command's own `timeout` config wins (seconds); default 60s.
+	execTimeout := 60 * time.Second
+	if cmd.Timeout > 0 {
+		execTimeout = time.Duration(cmd.Timeout) * time.Second
+	}
+	_ = e.runShellWithProgress(p, msg.ReplyCtx, execCmd, workDir, execTimeout, 4000)
 }
 
 func (e *Engine) cmdCommands(p Platform, msg *Message, args []string) {
@@ -14886,7 +14906,7 @@ func (e *Engine) cmdCommandsAdd(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	e.commands.Add(name, "", prompt, "", "", "config")
+	e.commands.Add(name, "", prompt, "", "", 0, "config")
 
 	if e.commandSaveAddFunc != nil {
 		if err := e.commandSaveAddFunc(name, "", prompt, "", ""); err != nil {
@@ -14938,7 +14958,7 @@ func (e *Engine) cmdCommandsAddExec(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	e.commands.Add(name, "", "", execCmd, workDir, "config")
+	e.commands.Add(name, "", "", execCmd, workDir, 0, "config")
 
 	if e.commandSaveAddFunc != nil {
 		if err := e.commandSaveAddFunc(name, "", "", execCmd, workDir); err != nil {

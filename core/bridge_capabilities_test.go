@@ -4,7 +4,7 @@ import "testing"
 
 func TestEngine_GetBridgePublishedCommands_IncludesBuiltinsAndCustoms(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
-	e.AddCommand("deploy", "Deploy app", "ship it", "", "", "config")
+	e.AddCommand("deploy", "Deploy app", "ship it", "", "", 0, "config")
 
 	commands := e.GetBridgePublishedCommands()
 	if len(commands) == 0 {
@@ -41,8 +41,8 @@ func TestEngine_GetBridgePublishedCommands_IncludesBuiltinsAndCustoms(t *testing
 
 func TestEngine_GetBridgePublishedCommands_SkipsDisabledAndBuiltinCollisions(t *testing.T) {
 	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
-	e.AddCommand("help", "custom help", "override", "", "", "config")
-	e.AddCommand("deploy", "Deploy app", "ship it", "", "", "config")
+	e.AddCommand("help", "custom help", "override", "", "", 0, "config")
+	e.AddCommand("deploy", "Deploy app", "ship it", "", "", 0, "config")
 	e.SetDisabledCommands([]string{"help", "deploy"})
 
 	commands := e.GetBridgePublishedCommands()
