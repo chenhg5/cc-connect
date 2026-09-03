@@ -5849,11 +5849,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			var statusFooter string
 			var legacyStatusFooter string
 			if !isSilent {
-				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
+				footerUsage := replyFooterSessionContextUsage(state.agentSession)
+				footerContext := replyFooterContextText(footerUsage, e.i18n)
 				if e.showContextIndicator {
 					if sdkPlausible {
-						if text := contextIndicatorText(event.InputTokens); text != "" {
-							footerContext = text
+						// Use the real ContextWindow from the active session
+						// instead of the previous hardcoded 200k fallback (see
+						// issue #1672). Prefer ContextUsage.UsedTokens (which
+						// already includes cache-read tokens) over the raw
+						// event.InputTokens to avoid inflating the ratio.
+						// When the session does NOT expose a real window we
+						// deliberately emit nothing rather than fall back to
+						// a misleading percentage.
+						if footerUsage != nil && footerUsage.ContextWindow > 0 {
+							used := footerUsage.UsedTokens
+							if used <= 0 {
+								used = event.InputTokens
+							}
+							if text := contextIndicatorText(used, footerUsage.ContextWindow); text != "" {
+								footerContext = text
+							}
 						}
 					} else if selfPct > 0 {
 						footerContext = fmt.Sprintf("[ctx: ~%d%%]", selfPct)
@@ -17056,13 +17071,21 @@ func gitClone(repoURL, dest string) error {
 
 // ── Context usage indicator ──────────────────────────────────
 
-const modelContextWindow = 200_000 // generic fallback window for heuristic context estimates
-
-func contextIndicatorText(inputTokens int) string {
-	if inputTokens <= 0 {
+// contextIndicatorText formats a "[ctx: ~N%]" reply footer marker.
+//
+// contextWindow is the active model's real context window in tokens
+// (sourced from ContextUsage.ContextWindow). Callers must pass a positive
+// value; when the agent session does not report a real window, callers
+// should NOT fall back to a hardcoded constant — returning "" is
+// preferred to emitting a misleading percentage. The fallback heuristic
+// was the source of the v1.4.1 regression tracked in issue #1672 where
+// any model with a window larger than 200k (e.g. deepseek-v4-flash[1M])
+// displayed a flat 100% once input_tokens crossed the hardcoded ceiling.
+func contextIndicatorText(inputTokens, contextWindow int) string {
+	if inputTokens <= 0 || contextWindow <= 0 {
 		return ""
 	}
-	pct := inputTokens * 100 / modelContextWindow
+	pct := inputTokens * 100 / contextWindow
 	if pct > 100 {
 		pct = 100
 	}
