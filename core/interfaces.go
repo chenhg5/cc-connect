@@ -76,6 +76,20 @@ type MessageRecallDetector interface {
 	IsMessageRecalled(ctx context.Context, replyCtx any) (bool, error)
 }
 
+// MessageRecallSender is an optional interface for platforms that support
+// sending a message and later recalling (deleting) it by message ID.
+// This is used for instant reply auto-recall: the bot sends a "thinking..."
+// placeholder, then recalls it when the real response arrives.
+type MessageRecallSender interface {
+	// SendAndRecall sends a message and returns its platform message ID
+	// for later recall. The returned msgID is non-empty only when the
+	// platform supports recall (e.g. WeChat Work within 24h).
+	SendAndRecall(ctx context.Context, replyCtx any, content string) (msgID string, err error)
+	// RecallMessage recalls (deletes) a previously sent message by its ID.
+	// Returns nil if recall is not supported or the message was already recalled.
+	RecallMessage(ctx context.Context, msgID string) error
+}
+
 // CronReplyTargetResolver is an optional interface for platforms that need to
 // map a logical cron session key to the actual reply target used at execution
 // time. This is useful for platforms where proactive replies may need to create
