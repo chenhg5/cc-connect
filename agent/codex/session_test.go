@@ -14,27 +14,37 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-func TestNormalizeReasoningEffort_RejectsMinimal(t *testing.T) {
-	if got := normalizeReasoningEffort("minimal"); got != "" {
-		t.Fatalf("normalizeReasoningEffort(minimal) = %q, want empty", got)
+func TestNormalizeReasoningEffort_CodexGPT56Levels(t *testing.T) {
+	tests := map[string]string{
+		"off":        "none",
+		"none":       "none",
+		"minimal":    "minimal",
+		"min":        "minimal",
+		"low":        "low",
+		"med":        "medium",
+		"medium":     "medium",
+		"high":       "high",
+		"x-high":     "xhigh",
+		"extra-high": "xhigh",
+		"xhigh":      "xhigh",
+		"max":        "max",
+		" MAX ":      "max",
+		"maximum":    "max",
+		"ultra":      "ultra",
+		"unknown":    "",
 	}
-	if got := normalizeReasoningEffort("min"); got != "" {
-		t.Fatalf("normalizeReasoningEffort(min) = %q, want empty", got)
-	}
-}
 
-func TestNormalizeReasoningEffort_AcceptsMax(t *testing.T) {
-	for _, raw := range []string{"max", " MAX "} {
-		if got := normalizeReasoningEffort(raw); got != "max" {
-			t.Fatalf("normalizeReasoningEffort(%q) = %q, want max", raw, got)
+	for raw, want := range tests {
+		if got := normalizeReasoningEffort(raw); got != want {
+			t.Fatalf("normalizeReasoningEffort(%q) = %q, want %q", raw, got, want)
 		}
 	}
 }
 
-func TestAvailableReasoningEfforts_IncludesMax(t *testing.T) {
+func TestAvailableReasoningEfforts_IncludesCodexGPT56Levels(t *testing.T) {
 	agent := &Agent{}
 	got := agent.AvailableReasoningEfforts()
-	want := []string{"low", "medium", "high", "xhigh", "max"}
+	want := []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 	if len(got) != len(want) {
 		t.Fatalf("AvailableReasoningEfforts len = %d, want %d, got=%v", len(got), len(want), got)
 	}
