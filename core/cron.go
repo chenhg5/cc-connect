@@ -418,6 +418,7 @@ type CronScheduler struct {
 	entries            map[string]cron.EntryID // job ID → cron entry
 	defaultSilent      bool                    // global default for suppressing cron start notifications
 	defaultSessionMode string                  // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	activeJobs         sync.WaitGroup          // tracks in-flight runJob goroutines for test cleanup
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
@@ -476,6 +477,14 @@ func (cs *CronScheduler) Start() error {
 
 func (cs *CronScheduler) Stop() {
 	cs.cron.Stop()
+	cs.activeJobs.Wait()
+}
+
+// WaitActiveJobs waits for all in-flight runJob goroutines to complete.
+// Use this in tests to ensure all cron job side effects (file writes, etc.)
+// finish before cleaning up temp directories or asserting results.
+func (cs *CronScheduler) WaitActiveJobs() {
+	cs.activeJobs.Wait()
 }
 
 func (cs *CronScheduler) AddJob(job *CronJob) error {
@@ -673,7 +682,11 @@ func (cs *CronScheduler) RunJobNow(id string) error {
 		return fmt.Errorf("%w: %q", ErrCronProjectNotFound, job.Project)
 	}
 	snapshot := *job
-	go cs.runJob(&snapshot, true)
+	cs.activeJobs.Add(1)
+	go func() {
+		defer cs.activeJobs.Done()
+		cs.runJob(&snapshot, true)
+	}()
 	return nil
 }
 
