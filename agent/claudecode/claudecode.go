@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -695,6 +696,16 @@ func scanSessionMeta(path string) (string, int) {
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			slog.Warn("claudecode: session transcript line exceeded scanner buffer; summary may be incomplete",
+				"path", path, "error", err)
+		} else {
+			slog.Warn("claudecode: failed to scan session transcript",
+				"path", path, "error", err)
+		}
+	}
+
 	summary := customTitle
 	if summary == "" {
 		summary = aiTitle
@@ -769,6 +780,13 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 			Content:   text,
 			Timestamp: ts,
 		})
+	}
+
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return entries, fmt.Errorf("claudecode: session history line exceeds %d-byte scanner buffer (history truncated): %w", 256*1024, err)
+		}
+		return entries, fmt.Errorf("claudecode: scan session transcript: %w", err)
 	}
 
 	if limit > 0 && len(entries) > limit {
