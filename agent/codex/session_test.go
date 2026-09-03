@@ -622,7 +622,11 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
-	defer cs.Close()
+	defer func() {
+		if err := cs.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}()
 
 	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -654,6 +658,93 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	}
 	if got := cs.CurrentSessionID(); got != "thread-large" {
 		t.Fatalf("CurrentSessionID() = %q, want thread-large", got)
+	}
+}
+
+func TestSend_TurnFailedServerOverloadedIsRetriable(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	shellScript := "#!/bin/sh\n" +
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-overloaded\"}'\n" +
+		"printf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\",\"codex_error_info\":\"server_overloaded\"}}'\n"
+	powershellScript := "[Console]::Out.WriteLine('{\"type\":\"thread.started\",\"thread_id\":\"thread-overloaded\"}')\n" +
+		"[Console]::Out.WriteLine('{\"type\":\"turn.failed\",\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\",\"codex_error_info\":\"server_overloaded\"}}')\n"
+	writeFakeCodexScript(t, binDir, shellScript, powershellScript)
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer func() {
+		if err := cs.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}()
+
+	if err := cs.Send("hello", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case evt := <-cs.Events():
+			if evt.Type != core.EventError {
+				continue
+			}
+			if evt.ErrorKind != core.ErrorKindOverloaded {
+				t.Fatalf("ErrorKind = %q, want %q", evt.ErrorKind, core.ErrorKindOverloaded)
+			}
+			if evt.Error == nil || !strings.Contains(evt.Error.Error(), "Selected model is at capacity") {
+				t.Fatalf("Error = %v, want capacity message", evt.Error)
+			}
+			return
+		case <-timeout:
+			t.Fatal("timed out waiting for retriable error event")
+		}
+	}
+}
+
+func TestCodexErrorKind_RetriableStreamFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    core.ErrorKind
+	}{
+		{
+			name:    "generic processing error with retry hint",
+			message: "stream disconnected before completion: An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 0a043d4a-c04a-4ace-becd-deb4cc1f5dd2 in your message.",
+			want:    core.ErrorKindOverloaded,
+		},
+		{
+			name:    "stream closed before response completed",
+			message: "stream disconnected before completion: stream closed before response.completed",
+			want:    core.ErrorKindOverloaded,
+		},
+		{
+			name:    "gateway error",
+			message: "unexpected status 502 Bad Gateway, url: https://aiapi.uu.cc/v1/responses",
+			want:    core.ErrorKindOverloaded,
+		},
+		{
+			name:    "non transient error remains unknown",
+			message: "authentication failed: invalid api key",
+			want:    core.ErrorKindUnknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexErrorKind("", tc.message); got != tc.want {
+				t.Fatalf("codexErrorKind() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

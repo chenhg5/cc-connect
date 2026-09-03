@@ -192,6 +192,15 @@ func resolveMaxAttachmentSize(cfg *config.Config) int64 {
 	return core.DefaultMaxAttachmentSize
 }
 
+func applyRetriableErrorConfig(cfg *config.Config) {
+	initialDelaySecs, retryDelaySecs, maxAttempts := config.EffectiveRetriableErrorConfig(cfg)
+	core.SetRetriableErrorPolicy(
+		time.Duration(initialDelaySecs)*time.Second,
+		time.Duration(retryDelaySecs)*time.Second,
+		maxAttempts,
+	)
+}
+
 type initialModelRefreshStarter interface {
 	StartInitialModelRefresh()
 }
@@ -336,6 +345,7 @@ func main() {
 
 	config.ConfigPath = configPath
 	slog.Info("config loaded", "path", configPath)
+	applyRetriableErrorConfig(cfg)
 
 	if len(cfg.Projects) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
@@ -1224,6 +1234,18 @@ func main() {
 				iv := int(v)
 				u.RateLimitWindow = &iv
 			}
+			if v, ok := updates["retriable_error_initial_delay_secs"].(float64); ok {
+				iv := int(v)
+				u.RetriableErrorInitialDelaySecs = &iv
+			}
+			if v, ok := updates["retriable_error_retry_delay_secs"].(float64); ok {
+				iv := int(v)
+				u.RetriableErrorRetryDelaySecs = &iv
+			}
+			if v, ok := updates["retriable_error_max_attempts"].(float64); ok {
+				iv := int(v)
+				u.RetriableErrorMaxAttempts = &iv
+			}
 			return config.SaveGlobalSettings(u)
 		})
 		mgmtSrv.SetListGlobalProviders(func() ([]core.GlobalProviderInfo, error) {
@@ -1731,11 +1753,6 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	result := &core.ConfigReloadResult{}
 
-	// Re-apply process-global hot-reloadable settings.
-	if globalAPIServer != nil {
-		globalAPIServer.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
-	}
-
 	// Find the matching project
 	var proj *config.ProjectConfig
 	for i := range cfg.Projects {
@@ -1747,6 +1764,13 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	if proj == nil {
 		return nil, fmt.Errorf("project %q not found in config", projName)
 	}
+
+	// Re-apply process-global hot-reloadable settings after we know the reload
+	// can target a real project.
+	if globalAPIServer != nil {
+		globalAPIServer.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+	}
+	applyRetriableErrorConfig(cfg)
 
 	// Reload display config (includes legacy quiet → display mapping)
 	mode, tm, tool, tmlen, toollen, showCtx, showFooter, hideAgentFooter := config.EffectiveDisplay(cfg, proj)

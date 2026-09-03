@@ -355,6 +355,13 @@
     "rlMaxMessagesHint": "每个窗口内的最大消息数；0 = 不限制",
     "rlWindowSecs": "窗口时间（秒）",
     "rlWindowSecsHint": "时间窗口的秒数",
+    "retriableError": "可重试错误",
+    "retriableInitialDelay": "首次重试延迟（秒）",
+    "retriableInitialDelayHint": "首次重试前的等待时间；0 = 立即重试",
+    "retriableRetryDelay": "后续重试延迟（秒）",
+    "retriableRetryDelayHint": "后续重试之间的等待时间；0 = 立即重试",
+    "retriableMaxAttempts": "最大尝试次数",
+    "retriableMaxAttemptsHint": "包含首次发送在内的总尝试次数",
     "log": "日志",
     "logLevel": "日志级别"
   },
