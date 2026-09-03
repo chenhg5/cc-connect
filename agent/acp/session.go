@@ -52,6 +52,12 @@ type acpSession struct {
 	availableModes []acpModeInfo
 	currentMode    string
 
+	// configMu guards configOptionsCache, which is populated from the
+	// configOptions field on session/new and session/load responses.
+	// Used by SetLiveModel to validate and resolve user-typed model IDs.
+	configMu           sync.RWMutex
+	configOptionsCache []acpConfigOption
+
 	callbacks sessionCallbacks // may be nil (tests, integration harness)
 }
 
@@ -62,8 +68,8 @@ type permState struct {
 
 // acpSessionConfig bundles the inputs newACPSession needs. It's a
 // struct rather than a long positional argument list because we keep
-// adding optional knobs (initialMode, callbacks) and would otherwise
-// break every call site each time.
+// adding optional knobs (initialMode, initialModel, callbacks) and
+// would otherwise break every call site each time.
 type acpSessionConfig struct {
 	command         string
 	args            []string
@@ -72,6 +78,7 @@ type acpSessionConfig struct {
 	resumeSessionID string
 	authMethod      string
 	initialMode     string           // if non-empty, applied via session/set_mode after session/new
+	initialModel    string           // if non-empty, applied via session/set_config_option after session/new
 	callbacks       sessionCallbacks // may be nil
 }
 
@@ -155,6 +162,16 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		}
 	}
 
+	// Apply the agent-level model preference the same way.
+	if strings.TrimSpace(cfg.initialModel) != "" {
+		if ok := s.SetLiveModel(cfg.initialModel); !ok {
+			slog.Warn("acp: initial model could not be applied",
+				"model", cfg.initialModel,
+				"session_id", s.currentACPSessionID(),
+			)
+		}
+	}
+
 	return s, nil
 }
 
@@ -216,12 +233,14 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 			slog.Warn("acp: session/load failed, starting new session", "error", err)
 		} else {
 			var lr struct {
-				SessionID string         `json:"sessionId"`
-				Modes     *acpModesBlock `json:"modes"`
+				SessionID     string            `json:"sessionId"`
+				Modes         *acpModesBlock    `json:"modes"`
+				ConfigOptions []acpConfigOption `json:"configOptions"`
 			}
 			if json.Unmarshal(loadRes, &lr) == nil && lr.SessionID != "" {
 				s.setACPSessionID(lr.SessionID)
 				s.absorbModes(lr.Modes)
+				s.absorbConfigOptions(lr.ConfigOptions)
 				return nil
 			}
 		}
@@ -236,8 +255,9 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		return fmt.Errorf("acp: session/new: %w", err)
 	}
 	var sn struct {
-		SessionID string         `json:"sessionId"`
-		Modes     *acpModesBlock `json:"modes"`
+		SessionID     string            `json:"sessionId"`
+		Modes         *acpModesBlock    `json:"modes"`
+		ConfigOptions []acpConfigOption `json:"configOptions"`
 	}
 	if err := json.Unmarshal(newRes, &sn); err != nil {
 		return fmt.Errorf("acp: parse session/new: %w", err)
@@ -247,6 +267,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	}
 	s.setACPSessionID(sn.SessionID)
 	s.absorbModes(sn.Modes)
+	s.absorbConfigOptions(sn.ConfigOptions)
 	return nil
 }
 
@@ -267,6 +288,113 @@ func (s *acpSession) absorbModes(block *acpModesBlock) {
 	if s.callbacks != nil {
 		s.callbacks.reportModes(*block)
 	}
+}
+
+// absorbConfigOptions extracts the model select option from configOptions,
+// caches it locally, and fans it out to the parent agent callbacks so
+// that the /model command can show available models.
+func (s *acpSession) absorbConfigOptions(opts []acpConfigOption) {
+	s.configMu.Lock()
+	s.configOptionsCache = append(s.configOptionsCache[:0], opts...)
+	s.configMu.Unlock()
+
+	modelOpts, currentModel := acpConfigOptionsToModelOptions(opts)
+	if s.callbacks != nil {
+		s.callbacks.reportModelOptions(modelOpts, currentModel)
+	}
+}
+
+// acpConfigOptionsToModelOptions extracts model options from the ACP
+// configOptions array. Returns the model list and the current model value.
+func acpConfigOptionsToModelOptions(opts []acpConfigOption) ([]core.ModelOption, string) {
+	for _, o := range opts {
+		if o.Category != "model" {
+			continue
+		}
+		models := make([]core.ModelOption, 0, len(o.Options))
+		for _, item := range o.Options {
+			models = append(models, core.ModelOption{
+				Name: item.Value,
+				Desc: item.Name,
+			})
+		}
+		return models, o.CurrentValue
+	}
+	return nil, ""
+}
+
+// modelOptions returns the cached model options from the most recent
+// configOptions. Thread-safe.
+func (s *acpSession) modelOptions() []core.ModelOption {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	opts, _ := acpConfigOptionsToModelOptions(s.configOptionsCache)
+	return opts
+}
+
+// matchAvailableConfigValue resolves a user-typed value for a config
+// option (identified by category, e.g. "model") to a known option
+// value. Matching is case-insensitive on both value and display name.
+// Returns (value, true) on match; ("", false) otherwise.
+func (s *acpSession) matchAvailableConfigValue(category, input string) (string, bool) {
+	if strings.TrimSpace(input) == "" {
+		return "", false
+	}
+	lower := strings.ToLower(input)
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	for _, o := range s.configOptionsCache {
+		if o.Category != category {
+			continue
+		}
+		for _, item := range o.Options {
+			if strings.ToLower(item.Value) == lower || strings.ToLower(item.Name) == lower {
+				return item.Value, true
+			}
+		}
+		// Also accept the currentValue as-is if it matches.
+		if strings.ToLower(o.CurrentValue) == lower {
+			return o.CurrentValue, true
+		}
+	}
+	return "", false
+}
+
+// SetLiveModel applies a model change to the running session via
+// `session/set_config_option` (configId="model"). Returns true on
+// success, false if the model is unknown / call errors / session closed.
+func (s *acpSession) SetLiveModel(modelID string) bool {
+	if !s.alive.Load() {
+		return false
+	}
+	sid := s.currentACPSessionID()
+	if sid == "" {
+		return false
+	}
+
+	// Try to resolve the user-typed model ID against configOptions.
+	resolved, ok := s.matchAvailableConfigValue("model", modelID)
+	if !ok {
+		// If we don't have configOptions (older ACP agent), pass through
+		// the user-typed value as-is.
+		resolved = modelID
+	}
+
+	if _, err := s.tr.call(s.ctx, "session/set_config_option", map[string]any{
+		"sessionId": sid,
+		"configId":  "model",
+		"value":     resolved,
+	}); err != nil {
+		slog.Warn("acp: session/set_config_option (model) failed",
+			"model", resolved,
+			"session_id", sid,
+			"error", err,
+		)
+		return false
+	}
+
+	slog.Info("acp: live model applied", "model", resolved, "session_id", sid)
+	return true
 }
 
 func (s *acpSession) setACPSessionID(id string) {
