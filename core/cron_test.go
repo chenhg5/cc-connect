@@ -114,7 +114,6 @@ func TestMutePlatform_DiscardMessages(t *testing.T) {
 	}
 }
 
-
 func TestCronJob_MuteField(t *testing.T) {
 	job := &CronJob{ID: "m1", Mute: false}
 	if job.Mute {

@@ -14,8 +14,8 @@ import (
 func TestPreflightRunAsUser_AllPass(t *testing.T) {
 	runner := &stubSudoRunner{
 		script: map[string]stubResponse{
-			key("-n", "-iu", "target", "--", "/usr/bin/true"):                          {nil, nil},
-			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):            {nil, &exec.ExitError{}}, // escalation fails as required
+			key("-n", "-iu", "target", "--", "/usr/bin/true"):                                {nil, nil},
+			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):                  {nil, &exec.ExitError{}}, // escalation fails as required
 			key("-n", "-iu", "target", "--", "test", "-r", "/tmp/wd", "-a", "-w", "/tmp/wd"): {nil, nil},
 		},
 	}
@@ -76,9 +76,9 @@ func TestPreflightRunAsUser_NoSudoToTargetIsFatal(t *testing.T) {
 func TestPreflightRunAsUser_TargetCanEscalateIsFatal(t *testing.T) {
 	runner := &stubSudoRunner{
 		script: map[string]stubResponse{
-			key("-n", "-iu", "target", "--", "/usr/bin/true"):               {nil, nil},
-			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"): {nil, nil}, // BAD
-			key("-n", "-iu", "target", "--", "sudo", "-n", "-l"):        {[]byte("(ALL) NOPASSWD: ALL"), nil},
+			key("-n", "-iu", "target", "--", "/usr/bin/true"):                                {nil, nil},
+			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):                  {nil, nil}, // BAD
+			key("-n", "-iu", "target", "--", "sudo", "-n", "-l"):                             {[]byte("(ALL) NOPASSWD: ALL"), nil},
 			key("-n", "-iu", "target", "--", "test", "-r", "/tmp/wd", "-a", "-w", "/tmp/wd"): {nil, nil},
 		},
 	}
@@ -117,8 +117,8 @@ func TestPreflightRunAsUser_TargetCanEscalateIsFatal(t *testing.T) {
 func TestPreflightRunAsUser_WorkDirInaccessibleIsFatal(t *testing.T) {
 	runner := &stubSudoRunner{
 		script: map[string]stubResponse{
-			key("-n", "-iu", "target", "--", "/usr/bin/true"):                          {nil, nil},
-			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):            {nil, &exec.ExitError{}},
+			key("-n", "-iu", "target", "--", "/usr/bin/true"):                                {nil, nil},
+			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):                  {nil, &exec.ExitError{}},
 			key("-n", "-iu", "target", "--", "test", "-r", "/tmp/wd", "-a", "-w", "/tmp/wd"): {[]byte(""), &exec.ExitError{}},
 		},
 	}
@@ -141,8 +141,8 @@ func TestPreflightRunAsUser_WorkDirInaccessibleIsFatal(t *testing.T) {
 func TestPreflightRunAsUser_DescendantWarnings(t *testing.T) {
 	runner := &stubSudoRunner{
 		script: map[string]stubResponse{
-			key("-n", "-iu", "target", "--", "/usr/bin/true"):                          {nil, nil},
-			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):            {nil, &exec.ExitError{}},
+			key("-n", "-iu", "target", "--", "/usr/bin/true"):                                {nil, nil},
+			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):                  {nil, &exec.ExitError{}},
 			key("-n", "-iu", "target", "--", "test", "-r", "/tmp/wd", "-a", "-w", "/tmp/wd"): {nil, nil},
 		},
 	}
@@ -183,8 +183,8 @@ func TestPreflightRunAsUser_DescendantWarnings(t *testing.T) {
 func TestPreflightRunAsUser_DescendantWarningsCapped(t *testing.T) {
 	runner := &stubSudoRunner{
 		script: map[string]stubResponse{
-			key("-n", "-iu", "target", "--", "/usr/bin/true"):                          {nil, nil},
-			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):            {nil, &exec.ExitError{}},
+			key("-n", "-iu", "target", "--", "/usr/bin/true"):                                {nil, nil},
+			key("-n", "-iu", "target", "--", "sudo", "-n", "/usr/bin/true"):                  {nil, &exec.ExitError{}},
 			key("-n", "-iu", "target", "--", "test", "-r", "/tmp/wd", "-a", "-w", "/tmp/wd"): {nil, nil},
 		},
 	}
@@ -226,4 +226,3 @@ func TestPreflightRunAsUser_DescendantWarningsCapped(t *testing.T) {
 		t.Errorf("want '... and 72 more' in warning, got: %s", w)
 	}
 }
-

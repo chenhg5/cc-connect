@@ -1117,4 +1117,3 @@ func TestKnownAgentSessionIDs_ResetAllSessionsBug(t *testing.T) {
 		t.Fatalf("filterOwnedSessions returned %d, want 3", len(filtered))
 	}
 }
-

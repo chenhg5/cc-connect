@@ -732,7 +732,6 @@ type mutePlatform struct {
 func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
 
-
 func GenerateCronID() string {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {

@@ -225,24 +225,24 @@ func (p *Platform) cleanupFailedCrypto(client *mautrix.Client, ch *cryptohelper.
 
 // tryEncryptAndSend attempts to encrypt and send an event if E2EE is available.
 // Returns (true, nil) if handled, (true, err) if handled with error, (false, nil) if not handled.
-func (p *Platform) tryEncryptAndSend(ctx context.Context, client *mautrix.Client, roomID id.RoomID, evtType event.Type, content any) (bool, error) {
+func (p *Platform) tryEncryptAndSend(ctx context.Context, client *mautrix.Client, roomID id.RoomID, evtType event.Type, content any) (bool, id.EventID, error) {
 	ch := p.getE2EECryptoHelper()
 	if ch == nil {
-		return false, nil
+		return false, "", nil
 	}
 	if !p.isRoomEncrypted(ctx, roomID) {
-		return false, nil
+		return false, "", nil
 	}
 
 	encContent, err := ch.Encrypt(ctx, roomID, evtType, content)
 	if err != nil {
-		return true, fmt.Errorf("matrix: encrypt: %w", err)
+		return true, "", fmt.Errorf("matrix: encrypt: %w", err)
 	}
-	_, err = client.SendMessageEvent(ctx, roomID, event.EventEncrypted, encContent)
+	resp, err := client.SendMessageEvent(ctx, roomID, event.EventEncrypted, encContent)
 	if err != nil {
-		return true, fmt.Errorf("matrix: send encrypted: %w", err)
+		return true, "", fmt.Errorf("matrix: send encrypted: %w", err)
 	}
-	return true, nil
+	return true, resp.EventID, nil
 }
 
 func (p *Platform) isRoomEncrypted(ctx context.Context, roomID id.RoomID) bool {
