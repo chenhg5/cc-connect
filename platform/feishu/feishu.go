@@ -2145,7 +2145,9 @@ func (p *Platform) resolveUserName(openID string) string {
 	if cached, ok := p.userNameCache.Load(openID); ok {
 		return cached.(string)
 	}
-	resp, err := p.client.Contact.User.Get(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := p.client.Contact.User.Get(ctx,
 		larkcontact.NewGetUserReqBuilder().
 			UserId(openID).
 			UserIdType("open_id").
@@ -2215,7 +2217,9 @@ func (p *Platform) resolveChatName(chatID string) string {
 	if cached, ok := p.chatNameCache.Load(chatID); ok {
 		return cached.(string)
 	}
-	resp, err := p.client.Im.Chat.Get(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := p.client.Im.Chat.Get(ctx,
 		larkim.NewGetChatReqBuilder().ChatId(chatID).Build())
 	if err != nil {
 		slog.Debug(p.tag()+": resolve chat name failed", "chat_id", chatID, "error", err)
