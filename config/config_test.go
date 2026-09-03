@@ -2801,6 +2801,59 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	}
 }
 
+func TestSaveProjectSettings_WorkspaceModeAndBaseDir(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	wsMode := "multi-workspace"
+	wsBaseDir := "/tmp/workspaces"
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
+		WorkspaceMode:    &wsMode,
+		WorkspaceBaseDir: &wsBaseDir,
+	})
+	if err != nil {
+		t.Fatalf("SaveProjectSettings: %v", err)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	proj := cfg.Projects[0]
+	if proj.Mode != wsMode {
+		t.Fatalf("Mode = %q, want %q", proj.Mode, wsMode)
+	}
+	if proj.BaseDir != wsBaseDir {
+		t.Fatalf("BaseDir = %q, want %q", proj.BaseDir, wsBaseDir)
+	}
+
+	details := GetProjectConfigDetails("alpha")
+	if details["workspace_mode"] != wsMode {
+		t.Fatalf("workspace_mode = %v, want %q", details["workspace_mode"], wsMode)
+	}
+	if details["workspace_base_dir"] != wsBaseDir {
+		t.Fatalf("workspace_base_dir = %v, want %q", details["workspace_base_dir"], wsBaseDir)
+	}
+
+	// Switching back to single mode clears Mode but leaves BaseDir untouched.
+	single := "single"
+	if err := SaveProjectSettings("alpha", ProjectSettingsUpdate{WorkspaceMode: &single}); err != nil {
+		t.Fatalf("SaveProjectSettings (single): %v", err)
+	}
+	cfg = readConfigFixture(t, configPath)
+	if cfg.Projects[0].Mode != "" {
+		t.Fatalf("Mode = %q, want empty after switching to single", cfg.Projects[0].Mode)
+	}
+}
+
+func TestSaveProjectSettings_WorkspaceModeRequiresBaseDir(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	wsMode := "multi-workspace"
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{WorkspaceMode: &wsMode})
+	if err == nil {
+		t.Fatal("expected error enabling multi-workspace mode without base_dir, got nil")
+	}
+}
+
 func TestGetProjectConfigDetails(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)
