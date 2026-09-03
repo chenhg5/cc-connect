@@ -1622,6 +1622,9 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
+# Show Codex sessions from all cwd values in /list.
+# /list 显示所有 cwd 的 Codex 会话。
+# list_all_workdirs = false
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #
 # Mode options / 模式说明:

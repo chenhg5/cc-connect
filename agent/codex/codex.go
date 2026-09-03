@@ -41,6 +41,7 @@ type Agent struct {
 	backend         string // "exec" | "app_server"
 	appServerURL    string
 	codexHome       string
+	listAllWorkdirs bool
 	systemPrompt    string
 	appendPrompt    string
 	cmd             string   // CLI binary name, default "codex"
@@ -63,6 +64,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend, _ := opts["backend"].(string)
 	appServerURL, _ := opts["app_server_url"].(string)
 	codexHome, _ := opts["codex_home"].(string)
+	listAllWorkdirs, _ := opts["list_all_workdirs"].(bool)
 	systemPrompt, _ := opts["system_prompt"].(string)
 	appendPrompt, _ := opts["append_system_prompt"].(string)
 	mode = normalizeMode(mode)
@@ -100,6 +102,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		backend:         backend,
 		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
+		listAllWorkdirs: listAllWorkdirs,
 		systemPrompt:    strings.TrimSpace(systemPrompt),
 		appendPrompt:    strings.TrimSpace(appendPrompt),
 		cmd:             cmd,
@@ -515,7 +518,11 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	a.mu.RLock()
 	codexHome := a.codexHome
 	workDir := a.workDir
+	listAllWorkdirs := a.listAllWorkdirs
 	a.mu.RUnlock()
+	if listAllWorkdirs {
+		workDir = ""
+	}
 	return listCodexSessions(workDir, codexHome)
 }
 
@@ -558,8 +565,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	defer a.mu.RUnlock()
 
 	opts := map[string]any{
-		"mode":    a.mode,
-		"backend": a.backend,
+		"mode":              a.mode,
+		"backend":           a.backend,
+		"list_all_workdirs": a.listAllWorkdirs,
 	}
 	if a.model != "" {
 		opts["model"] = a.model
