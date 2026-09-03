@@ -450,6 +450,33 @@ type ModelOption struct {
 	Alias string // optional short alias for the /model command (e.g. "codex" for "gpt-5.3-codex")
 }
 
+// AgentInfo describes a switchable coding agent exposed by AgentSwitcher.
+type AgentInfo struct {
+	Name string // agent name passed to the CLI (e.g. "--agent build")
+	Mode string // agent mode: "primary", "all", or "subagent"
+}
+
+// AgentSwitcher is an optional interface for agents that support runtime
+// switching of the coding agent (e.g. opencode's --agent). The switch is
+// global (agent-level, like ModelSwitcher) and takes effect on the next
+// session; the current in-flight session keeps running with the agent it
+// was started with.
+type AgentSwitcher interface {
+	// SetAgent switches the active agent. An empty name clears the value so
+	// the CLI default agent applies. Non-empty names that cannot be used as
+	// a primary agent (subagent, internal, or unknown names) are rejected
+	// with an error; the current agent is left unchanged.
+	SetAgent(name string) error
+	// GetAgent returns the current agent name. An empty string means the
+	// CLI default agent is in use.
+	GetAgent() string
+	// AvailableAgents enumerates switchable agents (primary/all mode only;
+	// subagents and internal agents are filtered out). A nil or empty
+	// result indicates enumeration failure — callers should degrade
+	// gracefully (still show the current agent, allow switching by name).
+	AvailableAgents(ctx context.Context) []AgentInfo
+}
+
 // UsageReporter is an optional interface for agents that can report account or
 // model quota usage from their backing provider.
 type UsageReporter interface {
