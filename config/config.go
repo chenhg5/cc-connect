@@ -627,6 +627,7 @@ func load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	resolveEnvInConfig(cfg)
+	expandHomeInConfig(cfg)
 	if cfg.DataDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			cfg.DataDir = filepath.Join(home, ".cc-connect")
@@ -671,6 +672,38 @@ var envPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 func resolveEnvInConfig(cfg *Config) {
 	resolveEnvValue(reflect.ValueOf(cfg))
+}
+
+// expandHomeInConfig expands a leading ~ / ~/ in path-like agent options
+// (work_dir, base_dir) to the user's home directory. Without this, a config
+// like work_dir = "~/.codex/workspace" is passed literally to exec.Cmd.Dir,
+// which fails at spawn time with a misleading "fork/exec ...: no such file
+// or directory" that points at the agent binary instead of the directory.
+func expandHomeInConfig(cfg *Config) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	for i := range cfg.Projects {
+		proj := &cfg.Projects[i]
+		proj.BaseDir = expandLeadingHome(proj.BaseDir, home)
+		if v, ok := proj.Agent.Options["work_dir"]; ok {
+			if s, ok := v.(string); ok {
+				proj.Agent.Options["work_dir"] = expandLeadingHome(s, home)
+			}
+		}
+	}
+}
+
+// expandLeadingHome expands "~" and "~/" at the start of a path to home.
+func expandLeadingHome(s, home string) string {
+	if s == "~" {
+		return home
+	}
+	if strings.HasPrefix(s, "~/") {
+		return filepath.Join(home, s[2:])
+	}
+	return s
 }
 
 func resolveEnvValue(v reflect.Value) {
