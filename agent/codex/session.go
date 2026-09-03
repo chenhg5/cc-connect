@@ -381,6 +381,12 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 			cs.contextUsage = nil
 			cs.contextMu.Unlock()
 			slog.Debug("codexSession: thread started", "thread_id", tid)
+			// 立即通知 Engine 持久化新会话 ID，避免首轮尚未完成时重启导致无法恢复。
+			select {
+			case cs.events <- core.Event{Type: core.EventText, SessionID: tid}:
+			case <-cs.ctx.Done():
+				return
+			}
 		}
 
 	case "turn.started":
