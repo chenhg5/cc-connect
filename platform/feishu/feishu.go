@@ -2178,9 +2178,10 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		Code int `json:"code"`
 		Data struct {
 			Items []struct {
-				MsgType  string `json:"msg_type"`
-				ParentID string `json:"parent_id"`
-				Sender   struct {
+				MessageID string `json:"message_id"`
+				MsgType   string `json:"msg_type"`
+				ParentID  string `json:"parent_id"`
+				Sender    struct {
 					ID         string `json:"id"`
 					SenderType string `json:"sender_type"`
 				} `json:"sender"`
@@ -2196,9 +2197,21 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		return nil
 	}
 
+	// Prefer the item matching the requested message ID. Get-message for a
+	// merge_forward root returns the root plus all sub-messages; Items[0] may
+	// be a child, which would make the quote look like a random sub-message.
 	item := resp.Data.Items[0]
+	for _, candidate := range resp.Data.Items {
+		if candidate.MessageID == messageID {
+			item = candidate
+			break
+		}
+	}
+
 	content := item.Body.Content
-	if content == "" {
+	// merge_forward body is a fixed placeholder ("Merged and Forwarded Message");
+	// real content lives in sub-messages and must be fetched separately.
+	if content == "" && item.MsgType != "merge_forward" {
 		return nil
 	}
 
@@ -2273,6 +2286,16 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		}
 	case "interactive":
 		text = extractInteractiveCardText(content)
+	case "merge_forward":
+		// Expanding the forward is required when the user replies to a
+		// merge_forward: the reply arrives with a newer create_time and can
+		// set the engine watermark before the async merge_forward dispatch
+		// finishes, causing the standalone forward event to be dropped as
+		// stale. Without this expansion the agent only sees "[merge_forward]".
+		text, images, _ = p.parseMergeForward(messageID)
+		if text == "" {
+			text = "[merge_forward]"
+		}
 	default:
 		text = fmt.Sprintf("[%s]", item.MsgType)
 	}
