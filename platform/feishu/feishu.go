@@ -787,6 +787,15 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}
 	}
 
+	// Card schema 2.0 free-form input: the ask-question card's form_submit
+	// button ("submit") carries the typed text in the "answer" form field.
+	// Route it as an askq free-form answer.
+	if actionVal == "" && event.Event.Action.Name == "submit" {
+		if ans, _ := event.Event.Action.FormValue["answer"].(string); strings.TrimSpace(ans) != "" {
+			actionVal = "askq_text:" + ans
+		}
+	}
+
 	userID := ""
 	if event.Event.Operator != nil {
 		userID = event.Event.Operator.OpenID
@@ -928,15 +937,44 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		if answerLabel == "" {
 			answerLabel = actionVal
 		}
-		cb := core.NewCard().Title("✅ "+answerLabel, "green")
+		md := ""
 		if askqQuestion != "" {
-			cb.Markdown(askqQuestion)
+			md = askqQuestion + "\n"
 		}
-		cb.Markdown("**→ " + answerLabel + "**")
+		md += "**→ " + answerLabel + "**"
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
-				Data: renderCardMap(cb.Build(), sessionKey),
+				Data: simpleCard2("✅ "+answerLabel, md, "green"),
+			},
+		}, nil
+	}
+
+	// askq_text: — AskUserQuestion free-form answer submitted via the card
+	// schema 2.0 input box. Forward the raw text as a user message; while an
+	// askq prompt is pending the engine resolves non-numeric text as a
+	// free-form answer (resolveAskQuestionAnswer returns it as-is).
+	if strings.HasPrefix(actionVal, "askq_text:") {
+		answer := strings.TrimPrefix(actionVal, "askq_text:")
+		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		go p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey,
+			Platform:   p.platformName,
+			UserID:     userID,
+			UserName:   p.resolveUserName(userID),
+			ChatName:   p.resolveChatName(chatID),
+			Content:    answer,
+			ReplyCtx:   rctx,
+		})
+
+		title := answer
+		if len(title) > 50 {
+			title = title[:50] + "…"
+		}
+		return &callback.CardActionTriggerResponse{
+			Card: &callback.Card{
+				Type: "raw",
+				Data: simpleCard2("✅ "+title, "**→ "+answer+"**", "green"),
 			},
 		}, nil
 	}
