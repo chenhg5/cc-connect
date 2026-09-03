@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -688,9 +689,10 @@ func TestProactiveRouting_DirectSessionUsesDirectAPI(t *testing.T) {
 
 func TestExtractRichText(t *testing.T) {
 	tests := []struct {
-		name    string
-		content interface{}
-		want    string
+		name         string
+		content      interface{}
+		want         string
+		wantPictures []richTextImageDownload
 	}{
 		{
 			name:    "nil content",
@@ -739,15 +741,16 @@ func TestExtractRichText(t *testing.T) {
 			want: "normal bold",
 		},
 		{
-			name: "mixed text and picture elements — pictures skipped",
+			name: "mixed text and picture elements",
 			content: map[string]interface{}{
 				"richText": []interface{}{
 					map[string]interface{}{"text": "See image: "},
-					map[string]interface{}{"pictureDownloadCode": "abc123"},
+					map[string]interface{}{"downloadCode": "v1-code", "pictureDownloadCode": "legacy-code"},
 					map[string]interface{}{"text": "done"},
 				},
 			},
-			want: "See image: done",
+			want:         "See image: done",
+			wantPictures: []richTextImageDownload{{DownloadCode: "v1-code", FallbackCode: "legacy-code"}},
 		},
 		{
 			name: "missing richText key",
@@ -760,9 +763,12 @@ func TestExtractRichText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractRichText(tt.content)
+			got, pictures := extractRichText(tt.content)
 			if got != tt.want {
 				t.Errorf("extractRichText() = %q, want %q", got, tt.want)
+			}
+			if !slices.Equal(pictures, tt.wantPictures) {
+				t.Errorf("extractRichText() picture codes = %v, want %v", pictures, tt.wantPictures)
 			}
 		})
 	}
@@ -936,6 +942,76 @@ func TestStartTypingAndDoneReaction(t *testing.T) {
 	}
 }
 
+func TestOnRawMessage_RichTextForwardsInlineImage(t *testing.T) {
+	const imageBody = "fake-richtext-image"
+
+	imageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte(imageBody))
+	}))
+	defer imageSrv.Close()
+
+	rt := &dingtalkDownloadRT{
+		accessToken:      "tok-richtext-image",
+		downloadURL:      imageSrv.URL,
+		failDownloadCode: "dc-v1-image",
+	}
+
+	captured := make(chan *core.Message, 1)
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured <- msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-richtext-image-1",
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"conversationTitle": "test",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"robotCode": "robot-from-callback",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "Please inspect "},
+				{"type": "picture", "downloadCode": "dc-v1-image", "pictureDownloadCode": "dc-legacy-image"},
+				{"text": "this screenshot"}
+			]
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "Please inspect this screenshot" {
+			t.Fatalf("Content = %q, want rich text", msg.Content)
+		}
+		if len(msg.Images) != 1 {
+			t.Fatalf("Images len = %d, want 1", len(msg.Images))
+		}
+		if got := string(msg.Images[0].Data); got != imageBody {
+			t.Errorf("image bytes = %q, want %q", got, imageBody)
+		}
+		if msg.Images[0].MimeType != "image/png" {
+			t.Errorf("image MIME type = %q, want image/png", msg.Images[0].MimeType)
+		}
+		if rt.requestRobotCode != "robot-from-callback" {
+			t.Errorf("download robotCode = %q, want callback robotCode", rt.requestRobotCode)
+		}
+		if !slices.Equal(rt.requestDownloadCodes, []string{"dc-v1-image", "dc-legacy-image"}) {
+			t.Errorf("download codes = %v, want v1 code then legacy fallback", rt.requestDownloadCodes)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never invoked with richText image message")
+	}
+}
+
 func TestOnRawMessage_PictureMsgTypeNotDroppedAsEmptyText(t *testing.T) {
 	// Regression test for #1128: DingTalk sometimes sends msgtype="picture"
 	// for image messages. Before the fix, this fell through to the text handler,
@@ -1028,7 +1104,7 @@ func TestHandleFileMessage_BuildsFileAttachmentWithName(t *testing.T) {
 	}))
 	defer fileSrv.Close()
 
-	rt := &dingtalkFileDownloadRT{
+	rt := &dingtalkDownloadRT{
 		accessToken: "tok-files",
 		downloadURL: fileSrv.URL,
 	}
@@ -1076,16 +1152,18 @@ func TestHandleFileMessage_BuildsFileAttachmentWithName(t *testing.T) {
 	}
 }
 
-// dingtalkFileDownloadRT mocks /v1.0/oauth2/accessToken and
+// dingtalkDownloadRT mocks /v1.0/oauth2/accessToken and
 // /v1.0/robot/messageFiles/download. The latter returns downloadURL pointing
-// to a test server that serves the actual file body. Used by
-// TestHandleFileMessage_BuildsFileAttachmentWithName.
-type dingtalkFileDownloadRT struct {
-	accessToken string
-	downloadURL string
+// to a test server that serves the actual attachment body.
+type dingtalkDownloadRT struct {
+	accessToken          string
+	downloadURL          string
+	failDownloadCode     string
+	requestRobotCode     string
+	requestDownloadCodes []string
 }
 
-func (f *dingtalkFileDownloadRT) RoundTrip(req *http.Request) (*http.Response, error) {
+func (f *dingtalkDownloadRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	switch req.URL.Path {
 	case "/v1.0/oauth2/accessToken":
 		body := fmt.Sprintf(`{"accessToken":%q,"expireIn":7200}`, f.accessToken)
@@ -1096,6 +1174,21 @@ func (f *dingtalkFileDownloadRT) RoundTrip(req *http.Request) (*http.Response, e
 			Request:    req,
 		}, nil
 	case "/v1.0/robot/messageFiles/download":
+		var requestBody struct {
+			RobotCode    string `json:"robotCode"`
+			DownloadCode string `json:"downloadCode"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&requestBody)
+		f.requestRobotCode = requestBody.RobotCode
+		f.requestDownloadCodes = append(f.requestDownloadCodes, requestBody.DownloadCode)
+		if requestBody.DownloadCode == f.failDownloadCode {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader(`{"code":"unknownError","message":"未知错误"}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
 		body := fmt.Sprintf(`{"downloadUrl":%q}`, f.downloadURL)
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -1206,7 +1299,7 @@ func TestOnMessageRepliesToUnauthorizedSender(t *testing.T) {
 		ConversationType: "1",
 		SessionWebhook:   sessionWebhook.URL,
 		Text:             chatbot.BotCallbackDataTextModel{Content: "hello"},
-	}, nil)
+	}, nil, "")
 
 	select {
 	case got := <-gotReply:
