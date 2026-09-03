@@ -6625,6 +6625,64 @@ func TestSendAskQuestionPrompt_CardPlatform(t *testing.T) {
 	}
 }
 
+// TestSendAskQuestionPrompt_CardPlatform_SingleSelectUsesActionRows is a
+// regression for issue #1658 (Feishu pi ask_user_question card: button clicks
+// never dispatched on mobile/desktop). The old layout rendered each option
+// as a `column_set` row with the button nested inside a column; Feishu mobile
+// clients dropped those click events, and even on desktop the layout was
+// reported as unreliable. The fix renders each option as a markdown line +
+// a flat action row (tag:"action") whose single button carries the askq:
+// value and the askq_label/askq_question extras — the same shape that
+// permission cards use for their cmd: clicks, which the issue reporter
+// confirmed dispatch reliably.
+func TestSendAskQuestionPrompt_CardPlatform_SingleSelectUsesActionRows(t *testing.T) {
+	e := newTestEngine()
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e.sendAskQuestionPrompt(p, "ctx", testQuestions(), 0)
+
+	if len(p.sentCards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(p.sentCards))
+	}
+	card := p.sentCards[0]
+
+	// Count askq action rows. We expect exactly 3 options, each rendered as
+	// its own CardActions (one button per row) — not as nested CardListItem.
+	var actionRows int
+	var askqButtons int
+	var sawCardListItem bool
+	for _, elem := range card.Elements {
+		switch e := elem.(type) {
+		case CardActions:
+			for _, btn := range e.Buttons {
+				if strings.HasPrefix(btn.Value, "askq:") {
+					askqButtons++
+					// Each button must carry the askq_label + askq_question
+					// extras so the Feishu callback handler can render the
+					// post-answer card without re-fetching the question.
+					if btn.Extra["askq_label"] == "" {
+						t.Errorf("askq button %q missing askq_label extra", btn.Text)
+					}
+					if btn.Extra["askq_question"] == "" {
+						t.Errorf("askq button %q missing askq_question extra", btn.Text)
+					}
+				}
+			}
+			actionRows++
+		case CardListItem:
+			sawCardListItem = true
+		}
+	}
+	if actionRows != 3 {
+		t.Errorf("expected 3 CardActions rows (one per option), got %d", actionRows)
+	}
+	if askqButtons != 3 {
+		t.Errorf("expected 3 askq buttons in action rows, got %d", askqButtons)
+	}
+	if sawCardListItem {
+		t.Errorf("CardListItem must not be used for single-select AskUserQuestion on Feishu (issue #1658)")
+	}
+}
+
 func TestSendAskQuestionPrompt_CardPlatform_MultiQuestion_ShowsIndex(t *testing.T) {
 	e := newTestEngine()
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
