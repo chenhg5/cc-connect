@@ -709,6 +709,11 @@ level = "info" # debug, info, warn, error
 # [projects.platforms.options]
 # bot_token = "xoxb-..."
 # app_token = "xapp-..."
+# # When the bot is @-mentioned in an existing Slack thread, fetch the
+# # thread history and inject it into the agent's prompt as ExtraContent.
+# # 当机器人在现有 Slack 串中被 @ 时，拉取该串历史并作为 ExtraContent 注入。
+# thread_context_enabled = true        # Default: true / 默认 true
+# thread_context_max_messages = 20     # Default: 20, hard cap 100 / 默认 20, 上限 100
 
 # =============================================================================
 # Project 1 / 项目 1
