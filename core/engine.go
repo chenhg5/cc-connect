@@ -6722,7 +6722,9 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	case "allow":
 		e.cmdAllow(p, msg, args)
 	case "model":
-		e.cmdModel(p, msg, args)
+		if !e.cmdModel(p, msg, args) {
+			return false
+		}
 	case "reasoning":
 		e.cmdReasoning(p, msg, args)
 	case "mode":
@@ -9776,17 +9778,20 @@ func sanitizeTelegramMenuCommand(cmd string) string {
 	return result
 }
 
-func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
+func (e *Engine) cmdModel(p Platform, msg *Message, args []string) bool {
 	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
-		return
+		return true
 	}
 
 	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
+		if agent != nil && agent.Name() == "acp" {
+			return false
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelNotSupported))
-		return
+		return true
 	}
 
 	if len(args) == 0 {
@@ -9843,16 +9848,16 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			sb.WriteString("\n")
 			sb.WriteString(e.i18n.T(MsgModelUsage))
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
-			return
+			return true
 		}
 		e.replyWithCard(p, msg.ReplyCtx, e.renderModelCard(msg.SessionKey))
-		return
+		return true
 	}
 
 	targetInput, ok := parseModelSwitchArgs(args)
 	if !ok {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelUsage))
-		return
+		return true
 	}
 
 	target := strings.TrimSpace(targetInput)
@@ -9866,7 +9871,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	target, err = e.switchModelOnAgent(agent, target, agent == e.agent)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
-		return
+		return true
 	}
 	e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
 	e.cleanupInteractiveState(interactiveKey)
@@ -9877,6 +9882,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+	return true
 }
 
 // resolveModelAlias resolves a user-supplied string to a model name.
