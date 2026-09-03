@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,6 +22,12 @@ import (
 // toolInputCacheMaxEntries caps toolInputByID growth; beyond this we evict
 // roughly half the map (iteration order is arbitrary) to bound memory.
 const toolInputCacheMaxEntries = 1000
+
+// sessionLoadTimeout bounds a single ACP session/load call. Resuming a very
+// large saved session (history replayed as many tool calls) can otherwise
+// hang indefinitely and wedge the whole topic. When it fires we surface
+// core.ErrSessionResumeTimeout instead of silently starting a fresh session.
+var sessionLoadTimeout = 90 * time.Second
 
 type acpSession struct {
 	workDir string
@@ -211,8 +218,22 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 			"cwd":        s.workDir,
 			"mcpServers": []any{},
 		}
-		loadRes, err := s.tr.call(s.ctx, "session/load", loadParams)
+		// Bound session/load so a giant history replay cannot hang the topic
+		// forever. Some sessions (e.g. ones stuffed with huge tool outputs)
+		// take many minutes to reload and, combined with a slow-first-token
+		// model, effectively wedge the whole conversation. On timeout we do
+		// NOT silently fall through to session/new — that would overwrite the
+		// saved session ID and truncate history. Instead return a distinct
+		// error so the engine preserves the ID and tells the user to /new.
+		loadCtx, cancelLoad := context.WithTimeout(s.ctx, sessionLoadTimeout)
+		loadRes, err := s.tr.call(loadCtx, "session/load", loadParams)
+		cancelLoad()
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && s.ctx.Err() == nil {
+				slog.Error("acp: session/load timed out, preserving saved session id",
+					"session_id", resumeSessionID, "timeout", sessionLoadTimeout)
+				return fmt.Errorf("acp: session/load: %w", core.ErrSessionResumeTimeout)
+			}
 			slog.Warn("acp: session/load failed, starting new session", "error", err)
 		} else {
 			var lr struct {
