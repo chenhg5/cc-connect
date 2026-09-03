@@ -1191,6 +1191,42 @@ func (cs *claudeSession) Alive() bool {
 	return cs.alive.Load()
 }
 
+// CancelTurn implements core.AgentSessionCanceller. Asks Claude Code
+// to interrupt the current generation over the existing stream-json
+// stdin channel — `{"type":"control_request","request":{"subtype":
+// "interrupt"}, "request_id": "..."}`. The CLI replies with a
+// `control_response`, emits a `result` event with
+// subtype="error_during_execution", and returns to its idle-waiting
+// state with the same Claude session ID. The subprocess stays alive
+// and stdin stays open so the next user message can be delivered
+// without a re-spawn — matching TUI Esc/Ctrl+C semantics through the
+// stream-json wire protocol instead of an in-process AbortController
+// (TUI-only) or an OS signal (which closes stdin in stream-json mode
+// and is unreliable on Windows).
+//
+// Verified empirically against Claude Code v2.x in --input-format
+// stream-json mode; see /tmp/cc-cancel-verify/v7 in the local fork.
+func (cs *claudeSession) CancelTurn() error {
+	cs.stdinMu.Lock()
+	stdinClosed := cs.stdin == nil
+	cs.stdinMu.Unlock()
+	if stdinClosed {
+		return fmt.Errorf("claudecode: stdin closed, session torn down")
+	}
+	if !cs.alive.Load() {
+		return fmt.Errorf("claudecode: process not alive")
+	}
+	requestID := fmt.Sprintf("interrupt-%d", time.Now().UnixNano())
+	if err := cs.writeJSON(map[string]any{
+		"type":       "control_request",
+		"request_id": requestID,
+		"request":    map[string]any{"subtype": "interrupt"},
+	}); err != nil {
+		return fmt.Errorf("claudecode: write interrupt: %w", err)
+	}
+	return nil
+}
+
 // defaultGracefulStopTimeout 是 Close() Phase 1「关掉 stdin、等它自己干净退出」
 // 的等待上限。
 //
