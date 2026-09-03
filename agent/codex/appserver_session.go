@@ -325,7 +325,6 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	if resumeID != "" && resumeID != core.ContinueSession {
 		params := s.threadRequestParams()
 		params["threadId"] = resumeID
-		params["persistExtendedHistory"] = true
 
 		var resp threadResumeResponse
 		if err := s.request("thread/resume", params, &resp); err != nil {
@@ -970,24 +969,18 @@ func (s *appServerSession) Close() error {
 
 func (s *appServerSession) readLoop(r io.Reader) {
 	defer s.wg.Done()
-	scanner := bufio.NewScanner(r)
-	scanBuf := make([]byte, 0, 64*1024)
-	const maxLineSize = 10 * 1024 * 1024 // 10MB
-	scanner.Buffer(scanBuf, maxLineSize)
 
-	for scanner.Scan() {
+	err := readJSONLines(r, func(data []byte) error {
 		select {
 		case <-s.ctx.Done():
-			return
+			return s.ctx.Err()
 		default:
 		}
-
-		data := scanner.Bytes()
 
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(data, &probe); err != nil {
 			slog.Debug("codex app-server: invalid JSON", "error", err)
-			continue
+			return nil
 		}
 
 		_, hasID := probe["id"]
@@ -999,7 +992,7 @@ func (s *appServerSession) readLoop(r io.Reader) {
 			var resp rpcResponseEnvelope
 			if err := json.Unmarshal(data, &resp); err != nil {
 				slog.Debug("codex app-server: bad response envelope", "error", err)
-				continue
+				return nil
 			}
 			s.handleResponse(resp)
 
@@ -1012,31 +1005,24 @@ func (s *appServerSession) readLoop(r io.Reader) {
 			var notif rpcNotificationEnvelope
 			if err := json.Unmarshal(data, &notif); err != nil {
 				slog.Debug("codex app-server: bad notification envelope", "error", err)
-				continue
+				return nil
 			}
 			s.handleNotification(notif.Method, notif.Params)
 		}
-	}
+		return nil
+	})
 
-	err := scanner.Err()
 	if err != nil {
 		if s.ctx.Err() == nil && !errors.Is(err, io.EOF) {
 			slog.Warn("codex app-server read failed", "error", err)
-			if errors.Is(err, bufio.ErrTooLong) {
-				s.emitError(fmt.Errorf("codex app-server line exceeds max size (%d bytes): %w", maxLineSize, err))
-			} else {
-				s.emitError(fmt.Errorf("codex app-server connection closed: %w", err))
-			}
+			s.emitError(fmt.Errorf("codex app-server connection closed: %w", err))
 		}
-		s.alive.Store(false)
-		s.rejectPending(err)
-		s.rejectPendingApprovals(err)
-		return
+	} else {
+		err = io.EOF
 	}
-
 	s.alive.Store(false)
-	s.rejectPending(io.EOF)
-	s.rejectPendingApprovals(io.EOF)
+	s.rejectPending(err)
+	s.rejectPendingApprovals(err)
 }
 
 func (s *appServerSession) stderrLoop(r io.Reader) {
