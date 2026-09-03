@@ -1914,6 +1914,76 @@ token = "test"
 	}
 }
 
+func TestLoad_HideSchedulerSessionsDefault(t *testing.T) {
+	configPath := writeConfigFixture(t, attachmentSendConfigFixture)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	proj := cfg.Projects[0]
+	if proj.HideSchedulerSessions != nil {
+		t.Fatalf("HideSchedulerSessions should be nil by default, got %v", *proj.HideSchedulerSessions)
+	}
+}
+
+func TestLoad_HideSchedulerSessionsFalse(t *testing.T) {
+	fixture := `
+[[projects]]
+name = "delta"
+hide_scheduler_sessions = false
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/delta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "test"
+`
+	configPath := writeConfigFixture(t, fixture)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	proj := cfg.Projects[0]
+	if proj.HideSchedulerSessions == nil || *proj.HideSchedulerSessions {
+		t.Fatalf("HideSchedulerSessions should be false, got %v", proj.HideSchedulerSessions)
+	}
+}
+
+func TestLoad_HideSchedulerSessionsTrue(t *testing.T) {
+	fixture := `
+[[projects]]
+name = "epsilon"
+hide_scheduler_sessions = true
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/epsilon"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "test"
+`
+	configPath := writeConfigFixture(t, fixture)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	proj := cfg.Projects[0]
+	if proj.HideSchedulerSessions == nil || !*proj.HideSchedulerSessions {
+		t.Fatalf("HideSchedulerSessions should be true, got %v", proj.HideSchedulerSessions)
+	}
+}
+
 func validProject(name string) ProjectConfig {
 	return ProjectConfig{
 		Name: name,
