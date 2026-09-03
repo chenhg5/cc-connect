@@ -1373,6 +1373,105 @@ func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 	}
 }
 
+// TestProcessInteractiveEvents_TrailingNoReplyPreservesTextBeforeTool covers
+// the claudecode shape where the agent emits substantive user-facing text,
+// issues a tool call in the same turn, and then closes the trailing
+// continuation with a bare NO_REPLY (EventResult.Content = "NO_REPLY").
+// The marker only ends that continuation: the text already committed to the
+// user before the tool call must stay the turn response and must survive in
+// session history instead of collapsing to the marker.
+func TestProcessInteractiveEvents_TrailingNoReplyPreservesTextBeforeTool(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-trailing-noreply"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-trailing-noreply")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-trailing-noreply",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	const report = "结论：三处风险，已按优先级排序。"
+	agentSession.events <- Event{Type: EventText, Content: "先检查一下。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: report}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "TaskUpdate", ToolInput: "completed"}
+	agentSession.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-trailing-noreply", time.Now(), nil, nil, state.replyCtx)
+
+	history := session.GetHistory(0)
+	if len(history) == 0 {
+		t.Fatal("history is empty, want the assistant turn recorded")
+	}
+	last := history[len(history)-1]
+	if last.Role != "assistant" {
+		t.Fatalf("last history role = %q, want assistant", last.Role)
+	}
+	if !strings.Contains(last.Content, report) {
+		t.Fatalf("history lost the committed body: %q", last.Content)
+	}
+	if strings.Contains(last.Content, "NO_REPLY") {
+		t.Fatalf("history collapsed to the NO_REPLY marker: %q", last.Content)
+	}
+
+	sent := p.getSent()
+	delivered := false
+	for _, msg := range sent {
+		if strings.Contains(msg, "NO_REPLY") {
+			t.Fatalf("NO_REPLY marker leaked to the platform: %q (all sent = %#v)", msg, sent)
+		}
+		if strings.Contains(msg, report) {
+			delivered = true
+		}
+	}
+	if !delivered {
+		t.Fatalf("committed body was never delivered, sent = %#v", sent)
+	}
+}
+
+// TestProcessInteractiveEvents_BareNoReplyWithToolsStaysSilent is the
+// regression guard for the case above: a turn whose only assistant text is the
+// marker stays fully silent even when tool calls happened.
+func TestProcessInteractiveEvents_BareNoReplyWithToolsStaysSilent(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-bare-noreply"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-bare-noreply")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-bare-noreply",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-bare-noreply", time.Now(), nil, nil, state.replyCtx)
+
+	history := session.GetHistory(0)
+	if len(history) == 0 {
+		t.Fatal("history is empty, want the assistant turn recorded")
+	}
+	last := history[len(history)-1]
+	if strings.TrimSpace(last.Content) != "NO_REPLY" {
+		t.Fatalf("history = %q, want the bare NO_REPLY marker preserved", last.Content)
+	}
+	for _, msg := range p.getSent() {
+		if strings.Contains(msg, "NO_REPLY") {
+			t.Fatalf("NO_REPLY marker leaked to the platform: %q", msg)
+		}
+	}
+}
+
 func TestProcessInteractiveEvents_DropsStandaloneEllipsisProgress(t *testing.T) {
 	p := &stubPlatformEngine{n: "telegram"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
