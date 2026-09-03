@@ -914,7 +914,22 @@ func (s *piSession) handleMessageUpdate(raw map[string]any) {
 		}
 
 	case "toolcall_end":
-		s.emitToolFromMessage(msg)
+		// pi ≥ 0.84.0 ships the completed call directly on the event
+		// (assistantMessageEvent.toolCall), avoiding the quadratic growth
+		// caused by sending the accumulated message/partial each tick.
+		// Fall back to the legacy message/partial + contentIndex path so
+		// pi < 0.84.0 keeps working.
+		if tc, ok := msg["toolCall"].(map[string]any); ok {
+			name, _ := tc["name"].(string)
+			input := extractToolInput(tc)
+			evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: input}
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+		} else {
+			s.emitToolFromMessage(msg)
+		}
 	}
 }
 
@@ -1380,7 +1395,19 @@ func truncStr(s string, maxRunes int) string {
 func extractToolInput(item map[string]any) string {
 	args, hasArgs := item["arguments"].(map[string]any)
 	if !hasArgs {
-		args = item
+		// No arguments map — fall back to dumping the item itself, but
+		// strip fields that are surfaced elsewhere on the Event so the
+		// JSON doesn't repeat them in the tool-progress card. This branch
+		// is exercised by pi ≥ 0.84.0's new toolcall_end protocol, where
+		// the completed call is delivered directly on the event and may
+		// omit `arguments` when the tool takes no parameters.
+		args = make(map[string]any, len(item))
+		for k, v := range item {
+			if k == "name" || k == "type" || k == "id" {
+				continue
+			}
+			args[k] = v
+		}
 	}
 
 	if desc, ok := args["description"].(string); ok && desc != "" {
