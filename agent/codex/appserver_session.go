@@ -377,7 +377,7 @@ func appServerModeSettings(mode string) (approval string, sandbox string) {
 	case "yolo":
 		return "never", "danger-full-access"
 	default:
-		return "on-request", "read-only"
+		return "on-request", "workspace-write"
 	}
 }
 
