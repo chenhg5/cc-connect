@@ -72,13 +72,21 @@ func TestNormalizeAppServerURL_EmptyKeepsWebSocketDefault(t *testing.T) {
 
 func TestWorkspaceAgentOptions_PreservesStdIOAppServerURL(t *testing.T) {
 	a := &Agent{
-		backend:      "app_server",
-		appServerURL: normalizeAppServerURL("stdio"),
+		backend:                      "app_server",
+		appServerURL:                 normalizeAppServerURL("stdio"),
+		workspaceDependencies:        true,
+		workspaceDependenciesRuntime: "/runtime",
 	}
 
 	opts := a.WorkspaceAgentOptions()
 	if got := opts["app_server_url"]; got != "stdio://" {
 		t.Fatalf("WorkspaceAgentOptions()[app_server_url] = %#v, want stdio://", got)
+	}
+	if got := opts["workspace_dependencies"]; got != true {
+		t.Fatalf("WorkspaceAgentOptions()[workspace_dependencies] = %#v, want true", got)
+	}
+	if got := opts["workspace_dependencies_runtime"]; got != "/runtime" {
+		t.Fatalf("WorkspaceAgentOptions()[workspace_dependencies_runtime] = %#v, want /runtime", got)
 	}
 }
 
