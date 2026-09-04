@@ -1012,6 +1012,10 @@ app_secret = "your-feishu-app-secret"
 # domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
+# inbound_card_mode = "both"  # Inbound card payload: summary (default), raw, or both
+#                              # 入站卡片内容：summary（默认）、raw 或 both
+# inbound_card_max_bytes = 0   # Maximum raw card JSON bytes; 0 = no truncation
+#                              # 单卡原始 JSON 最大字节数；0 表示不截断
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # allow_chat = "*"          # Allowed group chat_ids, comma-separated; "*" = all (default). Find chat_id in group settings.
@@ -1078,6 +1082,8 @@ app_secret = "your-feishu-app-secret"
 # callback_path = "/feishu/webhook"  # Webhook callback path / Webhook 回调路径
 # encrypt_key = ""               # Event encrypt key (optional) / 事件加密密钥（可选）
 # enable_feishu_card = true
+# inbound_card_mode = "both"  # summary (default), raw, or both
+# inbound_card_max_bytes = 0   # Maximum raw card JSON bytes; 0 = no truncation
 # allow_from = "*"
 # reaction_emoji = "OnIt"
 # done_emoji = "none"
