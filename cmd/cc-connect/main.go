@@ -932,6 +932,9 @@ func main() {
 		engine.SetModelSaveFunc(func(model string) error {
 			return config.SaveAgentModel(projName, model)
 		})
+		engine.SetFastModeSaveFunc(func(serviceTier string) error {
+			return config.SaveAgentServiceTier(projName, serviceTier)
+		})
 
 		// Wire config reload
 		capturedEngine := engine

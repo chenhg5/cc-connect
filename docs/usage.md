@@ -44,6 +44,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/dir [path]` | Show or switch the agent work directory |
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
+| `/fast [on|off]` | View or switch Codex Fast mode (`service_tier`) |
 | `/mode [name]` | View or switch permission mode |
 | `/stop` | Stop current execution |
 | `/help` | Show available commands |
@@ -85,6 +86,23 @@ All agents support permission modes switchable at runtime via `/mode`.
 | YOLO | `bypassPermissions` / `yolo` | All tools auto-approved |
 
 ### Codex Modes
+
+Codex Fast mode is separate from reasoning effort. Configure the project default
+with `service_tier = "fast"` (or `"default"`) under
+`[projects.agent.options]`, or switch it from chat:
+
+```text
+/fast       # show current state
+/fast on    # use service_tier="fast"
+/fast off   # use service_tier="default"
+```
+
+Switching restarts the agent process for the next message while preserving the
+Codex conversation ID so it can resume the existing conversation. Fast mode is
+subject to model, account, and provider availability. If `service_tier` is
+omitted, cc-connect inherits the native Codex configuration. Outside multi-workspace
+mode, this is a project-wide default and therefore affects every user of that
+project; multi-workspace selections are stored per workspace.
 
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
