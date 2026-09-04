@@ -119,6 +119,11 @@ type Config struct {
 	// setting so the reaper policy is consistent across projects; per-project
 	// configuration is intentionally not supported.
 	WorkspaceIdleTimeoutMins *int `toml:"workspace_idle_timeout_mins,omitempty"`
+	// PermissionTimeoutMins sets how long (in minutes) the permission prompt waits
+	// for the user to respond before auto-denying. 0 (default) means no timeout.
+	// Per-project [[projects]].permission_timeout_mins overrides this value.
+	PermissionTimeoutMins *int `toml:"permission_timeout_mins,omitempty"`
+
 	// Shell overrides the default shell used for /shell commands, cron exec,
 	// hooks, and webhook exec. On Unix the default is "sh"; on Windows it is
 	// "powershell.exe". Set to an absolute path (e.g. "/bin/zsh") to use a
@@ -544,6 +549,10 @@ type ProjectConfig struct {
 	Display    *DisplayConfig  `toml:"display,omitempty"`
 	Observe    *ObserveConfig  `toml:"observe,omitempty"`
 	References ReferenceConfig `toml:"references,omitempty"`
+	// PermissionTimeoutMins overrides the global permission timeout for this project.
+	// 0 (or nil) means use the global value. If global is also 0, no timeout.
+	PermissionTimeoutMins *int `toml:"permission_timeout_mins,omitempty"`
+
 	// FilterExternalSessions: when true, /list only shows sessions created by
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
