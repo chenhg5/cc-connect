@@ -232,6 +232,14 @@ const (
 	MsgQuietGlobalOff            MsgKey = "quiet_global_off"
 	MsgModeChanged               MsgKey = "mode_changed"
 	MsgModeNotSupported          MsgKey = "mode_not_supported"
+	MsgPresetNotSupported        MsgKey = "preset_not_supported"
+	MsgPresetUsage               MsgKey = "preset_usage"
+	MsgPresetListTitle           MsgKey = "preset_list_title"
+	MsgPresetListEmpty           MsgKey = "preset_list_empty"
+	MsgPresetCurrent             MsgKey = "preset_current"
+	MsgPresetChanged             MsgKey = "preset_changed"
+	MsgPresetLocked              MsgKey = "preset_locked"
+	MsgPresetNotFound            MsgKey = "preset_not_found"
 	MsgSessionRestarting         MsgKey = "session_restarting"
 	MsgSessionNotStarted         MsgKey = "session_not_started"
 	MsgUntitled                  MsgKey = "untitled"
@@ -382,6 +390,8 @@ const (
 	MsgLangSelectPlaceholder     MsgKey = "lang_select_placeholder"
 	MsgModelSelectPlaceholder    MsgKey = "model_select_placeholder"
 	MsgModeSelectPlaceholder     MsgKey = "mode_select_placeholder"
+	MsgPresetSelectPlaceholder   MsgKey = "preset_select_placeholder"
+	MsgPresetChangeAnother       MsgKey = "preset_change_another"
 	MsgProviderSelectPlaceholder MsgKey = "provider_select_placeholder"
 	MsgProviderClearOption       MsgKey = "provider_clear_option"
 	MsgCardBack                  MsgKey = "card_back"
@@ -392,6 +402,7 @@ const (
 	MsgCardTitleModel            MsgKey = "card_title_model"
 	MsgCardTitleReasoning        MsgKey = "card_title_reasoning"
 	MsgCardTitleMode             MsgKey = "card_title_mode"
+	MsgCardTitlePreset           MsgKey = "card_title_preset"
 	MsgCardTitleSessions         MsgKey = "card_title_sessions"
 	MsgCardTitleSessionsPaged    MsgKey = "card_title_sessions_paged"
 	MsgCardTitleCurrentSession   MsgKey = "card_title_current_session"
@@ -413,31 +424,31 @@ const (
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
 
-	MsgTimerNotAvailable  MsgKey = "timer_not_available"
-	MsgTimerUsage         MsgKey = "timer_usage"
-	MsgTimerAddUsage      MsgKey = "timer_add_usage"
-	MsgTimerAdded         MsgKey = "timer_added"
-	MsgTimerAddedExec     MsgKey = "timer_added_exec"
-	MsgTimerAddExecUsage  MsgKey = "timer_addexec_usage"
-	MsgTimerEmpty         MsgKey = "timer_empty"
-	MsgTimerListTitle     MsgKey = "timer_list_title"
-	MsgTimerListFooter    MsgKey = "timer_list_footer"
-	MsgTimerDelUsage      MsgKey = "timer_del_usage"
-	MsgTimerMuteUsage     MsgKey = "timer_mute_usage"
-	MsgTimerDeleted       MsgKey = "timer_deleted"
-	MsgTimerNotFound      MsgKey = "timer_not_found"
-	MsgTimerMuted         MsgKey = "timer_muted"
-	MsgTimerUnmuted       MsgKey = "timer_unmuted"
-	MsgTimerCardHint      MsgKey = "timer_card_hint"
-	MsgTimerBtnMute       MsgKey = "timer_btn_mute"
-	MsgTimerBtnUnmute     MsgKey = "timer_btn_unmute"
-	MsgTimerBtnDelete     MsgKey = "timer_btn_delete"
-	MsgTimerIDLabel       MsgKey = "timer_id_label"
-	MsgTimerScheduledLabel MsgKey = "timer_scheduled_label"
-	MsgTimerFailedSuffix  MsgKey = "timer_failed_suffix"
-	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
-	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
-	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
+	MsgTimerNotAvailable    MsgKey = "timer_not_available"
+	MsgTimerUsage           MsgKey = "timer_usage"
+	MsgTimerAddUsage        MsgKey = "timer_add_usage"
+	MsgTimerAdded           MsgKey = "timer_added"
+	MsgTimerAddedExec       MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage    MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty           MsgKey = "timer_empty"
+	MsgTimerListTitle       MsgKey = "timer_list_title"
+	MsgTimerListFooter      MsgKey = "timer_list_footer"
+	MsgTimerDelUsage        MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage       MsgKey = "timer_mute_usage"
+	MsgTimerDeleted         MsgKey = "timer_deleted"
+	MsgTimerNotFound        MsgKey = "timer_not_found"
+	MsgTimerMuted           MsgKey = "timer_muted"
+	MsgTimerUnmuted         MsgKey = "timer_unmuted"
+	MsgTimerCardHint        MsgKey = "timer_card_hint"
+	MsgTimerBtnMute         MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute       MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete       MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel         MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel  MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix    MsgKey = "timer_failed_suffix"
+	MsgCommandsTagAgent     MsgKey = "commands_tag_agent"
+	MsgCommandsTagShell     MsgKey = "commands_tag_shell"
+	MsgUpgradeTimeoutSuffix MsgKey = "upgrade_timeout_suffix"
 
 	MsgCronScheduleLabel MsgKey = "cron_schedule_label"
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
@@ -597,6 +608,7 @@ const (
 	MsgBuiltinCmdModel     MsgKey = "model"
 	MsgBuiltinCmdReasoning MsgKey = "reasoning"
 	MsgBuiltinCmdMode      MsgKey = "mode"
+	MsgBuiltinCmdPreset    MsgKey = "preset"
 	MsgBuiltinCmdLang      MsgKey = "lang"
 	MsgBuiltinCmdQuiet     MsgKey = "quiet"
 	MsgBuiltinCmdCompress  MsgKey = "compress"
@@ -978,6 +990,62 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "當前 Agent 不支援權限模式切換。",
 		LangJapanese:           "このエージェントは権限モードの切り替えをサポートしていません。",
 		LangSpanish:            "Este agente no soporta el cambio de modo de permisos.",
+	},
+	MsgPresetNotSupported: {
+		LangEnglish:            "This agent does not support preset switching.",
+		LangChinese:            "当前 Agent 不支持 preset 切换。",
+		LangTraditionalChinese: "當前 Agent 不支援 preset 切換。",
+		LangJapanese:           "このエージェントはプリセットの切り替えをサポートしていません。",
+		LangSpanish:            "Este agente no soporta el cambio de presets.",
+	},
+	MsgPresetUsage: {
+		LangEnglish:            "Usage: `/preset` to list presets or `/preset <name>` to select one.",
+		LangChinese:            "用法：`/preset` 列出 preset，或使用 `/preset <名称>` 选择。",
+		LangTraditionalChinese: "用法：`/preset` 列出 preset，或使用 `/preset <名稱>` 選擇。",
+		LangJapanese:           "使い方: `/preset` で一覧表示、`/preset <名前>` で選択します。",
+		LangSpanish:            "Uso: `/preset` lista los presets o `/preset <nombre>` selecciona uno.",
+	},
+	MsgPresetListTitle: {
+		LangEnglish:            "Available presets:\n",
+		LangChinese:            "可用 preset：\n",
+		LangTraditionalChinese: "可用 preset：\n",
+		LangJapanese:           "利用可能なプリセット:\n",
+		LangSpanish:            "Presets disponibles:\n",
+	},
+	MsgPresetListEmpty: {
+		LangEnglish:            "No agent presets are available.",
+		LangChinese:            "没有可用的 agent preset。",
+		LangTraditionalChinese: "沒有可用的 agent preset。",
+		LangJapanese:           "利用可能なエージェントプリセットはありません。",
+		LangSpanish:            "No hay presets de agente disponibles.",
+	},
+	MsgPresetCurrent: {
+		LangEnglish:            "Current preset: `%s`",
+		LangChinese:            "当前 preset：`%s`",
+		LangTraditionalChinese: "目前 preset：`%s`",
+		LangJapanese:           "現在のプリセット: `%s`",
+		LangSpanish:            "Preset actual: `%s`",
+	},
+	MsgPresetChanged: {
+		LangEnglish:            "Preset switched to `%s`. It will apply on the next turn while this session is blank.",
+		LangChinese:            "preset 已切换为 `%s`，当前空白会话将在下一轮应用。",
+		LangTraditionalChinese: "preset 已切換為 `%s`，目前空白會話將在下一輪套用。",
+		LangJapanese:           "プリセットを `%s` に切り替えました。空のセッションでは次のターンから適用されます。",
+		LangSpanish:            "Preset cambiado a `%s`. Se aplicará en el próximo turno mientras la sesión esté vacía.",
+	},
+	MsgPresetLocked: {
+		LangEnglish:            "This session already has history, so its preset is locked. Use `/new` before switching presets.",
+		LangChinese:            "当前会话已有历史，preset 已锁定；请先使用 `/new` 再切换。",
+		LangTraditionalChinese: "目前會話已有歷史，preset 已鎖定；請先使用 `/new` 再切換。",
+		LangJapanese:           "このセッションには履歴があるため、プリセットは固定されています。切り替える前に `/new` を使ってください。",
+		LangSpanish:            "La sesión ya tiene historial y su preset está bloqueado. Usa `/new` antes de cambiarlo.",
+	},
+	MsgPresetNotFound: {
+		LangEnglish:            "Preset `%s` was not found. Use `/preset` to list available presets.",
+		LangChinese:            "找不到 preset `%s`，请使用 `/preset` 查看可用列表。",
+		LangTraditionalChinese: "找不到 preset `%s`，請使用 `/preset` 查看可用列表。",
+		LangJapanese:           "プリセット `%s` が見つかりません。`/preset` で一覧を確認してください。",
+		LangSpanish:            "No se encontró el preset `%s`. Usa `/preset` para ver la lista.",
 	},
 	MsgSessionRestarting: {
 		LangEnglish:            "🔄 Session process exited, restarting...",
@@ -2572,6 +2640,14 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "Select mode", LangChinese: "选择模式", LangTraditionalChinese: "選擇模式",
 		LangJapanese: "モードを選択", LangSpanish: "Seleccionar modo",
 	},
+	MsgPresetSelectPlaceholder: {
+		LangEnglish: "Select preset", LangChinese: "选择 preset", LangTraditionalChinese: "選擇 preset",
+		LangJapanese: "プリセットを選択", LangSpanish: "Seleccionar preset",
+	},
+	MsgPresetChangeAnother: {
+		LangEnglish: "Change preset", LangChinese: "切换 preset", LangTraditionalChinese: "切換 preset",
+		LangJapanese: "プリセットを変更", LangSpanish: "Cambiar preset",
+	},
 	MsgProviderSelectPlaceholder: {
 		LangEnglish: "Select provider", LangChinese: "选择 Provider", LangTraditionalChinese: "選擇 Provider",
 		LangJapanese: "プロバイダーを選択", LangSpanish: "Seleccionar proveedor",
@@ -2611,6 +2687,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgCardTitleMode: {
 		LangEnglish: "Permission Mode", LangChinese: "权限模式", LangTraditionalChinese: "權限模式",
 		LangJapanese: "権限モード", LangSpanish: "Modo de permisos",
+	},
+	MsgCardTitlePreset: {
+		LangEnglish: "Agent Preset", LangChinese: "Agent preset", LangTraditionalChinese: "Agent preset",
+		LangJapanese: "エージェントプリセット", LangSpanish: "Preset del agente",
 	},
 	MsgCardTitleSessions: {
 		LangEnglish: "%s Sessions (%d)", LangChinese: "%s 会话列表 (%d)", LangTraditionalChinese: "%s 會話列表 (%d)",
@@ -3696,6 +3776,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看/切換權限模式，參數: [名稱]",
 		LangJapanese:           "権限モードの表示/切り替え、引数: [名前]",
 		LangSpanish:            "Ver/cambiar modo de permisos, arg: [nombre]",
+	},
+	MsgBuiltinCmdPreset: {
+		LangEnglish:            "View/switch agent preset, arg: [name]",
+		LangChinese:            "查看/切换 Agent preset，参数: [名称]",
+		LangTraditionalChinese: "查看/切換 Agent preset，參數: [名稱]",
+		LangJapanese:           "エージェントプリセットの表示/切り替え、引数: [名前]",
+		LangSpanish:            "Ver/cambiar preset del agente, arg: [nombre]",
 	},
 	MsgBuiltinCmdLang: {
 		LangEnglish:            "View/switch language, arg: [en|zh|zh-TW|ja|es|auto]",
