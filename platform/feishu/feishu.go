@@ -3373,9 +3373,9 @@ func (p *Platform) formatMergeForwardTree(ctx context.Context, parentID string, 
 				text = "[interactive card]"
 			}
 			if text != "" {
-				sb.WriteString(fmt.Sprintf("%s[%s] %s:\n", indent, ts, senderName))
+				fmt.Fprintf(sb, "%s[%s] %s:\n", indent, ts, senderName)
 				for _, line := range strings.Split(text, "\n") {
-					sb.WriteString(fmt.Sprintf("%s    %s\n", indent, line))
+					fmt.Fprintf(sb, "%s    %s\n", indent, line)
 				}
 			}
 
