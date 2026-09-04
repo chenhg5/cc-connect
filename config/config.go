@@ -631,8 +631,23 @@ func load(path string) (*Config, error) {
 		if home, err := os.UserHomeDir(); err == nil {
 			cfg.DataDir = filepath.Join(home, ".cc-connect")
 		} else {
+			// HOME unset (common when systemd unit does not inject it):
+			// warn loudly, because a relative data_dir will be resolved
+			// differently by any subprocess that changes cwd — most
+			// notably the claude/codex/etc. agent processes that cd into
+			// work_dir before reading files written by the supervisor.
 			cfg.DataDir = ".cc-connect"
+			slog.Warn("config: data_dir empty and HOME unset; falling back to relative path. Set data_dir to an absolute path in config.toml, or ensure the service manager injects HOME.")
 		}
+	}
+	cfg.DataDir = expandUserPath(cfg.DataDir)
+	// Always resolve to an absolute path so a data_dir written by the
+	// supervisor is read back at the same location by agent subprocesses
+	// regardless of their working directory. Users who write a relative
+	// data_dir explicitly still get it anchored to the supervisor's cwd
+	// (the same behaviour they would see running any other CLI).
+	if abs, err := filepath.Abs(cfg.DataDir); err == nil {
+		cfg.DataDir = abs
 	}
 	cfg.AttachmentSend = strings.ToLower(strings.TrimSpace(cfg.AttachmentSend))
 	if cfg.AttachmentSend == "" {
