@@ -109,6 +109,10 @@ func (s *dshSession) Send(msg string, messageID string, images []core.ImageAttac
 	if len(s.extraEnv) > 0 {
 		env = core.MergeEnv(env, s.extraEnv)
 	}
+	// Node 22's stripTypeScriptTypes warning is informational, but dsh writes
+	// it to stderr and cc-connect surfaces stderr as an agent error. Suppress
+	// only that warning for the child while preserving existing Node options.
+	env = withNodeWarningSuppressed(env)
 	cmd.Env = env
 
 	stdinPipe, err := cmd.StdinPipe()
@@ -179,6 +183,23 @@ func (s *dshSession) Send(msg string, messageID string, images []core.ImageAttac
 		s.emit(core.Event{Type: core.EventResult, Content: *finalText, SessionID: s.CurrentSessionID(), Done: true})
 	}
 	return nil
+}
+
+func withNodeWarningSuppressed(env []string) []string {
+	const option = "--disable-warning=ExperimentalWarning"
+	for i, value := range env {
+		if !strings.HasPrefix(value, "NODE_OPTIONS=") {
+			continue
+		}
+		current := strings.TrimSpace(strings.TrimPrefix(value, "NODE_OPTIONS="))
+		if current == "" {
+			env[i] = "NODE_OPTIONS=" + option
+		} else if !strings.Contains(current, option) {
+			env[i] = "NODE_OPTIONS=" + current + " " + option
+		}
+		return env
+	}
+	return append(env, "NODE_OPTIONS="+option)
 }
 
 // readJSONL reads the dsh --jsonl event stream and maps it to core.Events.

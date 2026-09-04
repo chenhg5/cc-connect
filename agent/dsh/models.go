@@ -293,8 +293,19 @@ func dshInstallPresetRoot(cmd string) string {
 	if err != nil {
 		return ""
 	}
-	// Installed dsh layout: <store>/apps/cli/config/agent-presets.
-	return filepath.Join(filepath.Dir(filepath.Dir(resolved)), "apps", "cli", "config", "agent-presets")
+	// Published dsh installs keep presets below apps/cli/config, while the
+	// source-tree layout used by package-based installs keeps them beside the
+	// agent-presets package. Follow the installation that is actually invoked.
+	installRoot := filepath.Dir(filepath.Dir(resolved))
+	for _, root := range []string{
+		filepath.Join(installRoot, "apps", "cli", "config", "agent-presets"),
+		filepath.Join(installRoot, "packages", "preset", "agent-presets", "presets"),
+	} {
+		if info, statErr := os.Stat(root); statErr == nil && info.IsDir() {
+			return root
+		}
+	}
+	return ""
 }
 
 // settingsPath returns $DSH_HOME/settings.yaml.

@@ -319,6 +319,70 @@ func TestAvailablePresets_FromUserRoot(t *testing.T) {
 	}
 }
 
+func fakeDshInstall(t *testing.T) (string, string) {
+	t.Helper()
+	installRoot := t.TempDir()
+	binDir := filepath.Join(installRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := filepath.Join(binDir, "dsh")
+	if err := os.WriteFile(cmd, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return installRoot, cmd
+}
+
+func TestDshInstallPresetRoot_UsesSourceTreeLayout(t *testing.T) {
+	installRoot, cmd := fakeDshInstall(t)
+	want := filepath.Join(installRoot, "packages", "preset", "agent-presets", "presets")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := dshInstallPresetRoot(cmd); got != want {
+		t.Fatalf("dshInstallPresetRoot() = %q, want %q", got, want)
+	}
+}
+
+func TestDshInstallPresetRoot_PrefersPublishedLayout(t *testing.T) {
+	installRoot, cmd := fakeDshInstall(t)
+	want := filepath.Join(installRoot, "apps", "cli", "config", "agent-presets")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := dshInstallPresetRoot(cmd); got != want {
+		t.Fatalf("dshInstallPresetRoot() = %q, want %q", got, want)
+	}
+}
+
+func TestWithNodeWarningSuppressed(t *testing.T) {
+	const option = "--disable-warning=ExperimentalWarning"
+	tests := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{name: "adds option", env: []string{"PATH=/bin"}, want: option},
+		{name: "preserves existing options", env: []string{"NODE_OPTIONS=--trace-warnings"}, want: "--trace-warnings " + option},
+		{name: "does not duplicate option", env: []string{"NODE_OPTIONS=--trace-warnings " + option}, want: "--trace-warnings " + option},
+		{name: "replaces empty option", env: []string{"NODE_OPTIONS="}, want: option},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withNodeWarningSuppressed(append([]string(nil), tt.env...))
+			for _, value := range got {
+				if strings.HasPrefix(value, "NODE_OPTIONS=") {
+					if actual := strings.TrimPrefix(value, "NODE_OPTIONS="); actual != tt.want {
+						t.Fatalf("NODE_OPTIONS = %q, want %q", actual, tt.want)
+					}
+					return
+				}
+			}
+			t.Fatal("NODE_OPTIONS was not added")
+		})
+	}
+}
+
 // ── buildArgs ────────────────────────────────────────────────
 
 func TestBuildArgs(t *testing.T) {
@@ -411,6 +475,7 @@ echo "got:$RESPONSE"
 	}
 	body := `#!/bin/sh
 echo "$@" > "` + argvFile + `"
+printf 'NODE_OPTIONS=%s\n' "$NODE_OPTIONS" >> "` + argvFile + `"
 if [ "` + fmt.Sprint(wantErr) + `" = "true" ]; then
   echo "dsh: BOOM: test failure" >&2
   exit 1
@@ -495,6 +560,9 @@ loop:
 		if !strings.Contains(joined, want) {
 			t.Errorf("fake dsh argv %q missing %q", joined, want)
 		}
+	}
+	if !strings.Contains(joined, "--disable-warning=ExperimentalWarning") {
+		t.Errorf("fake dsh environment %q missing ExperimentalWarning suppression", joined)
 	}
 }
 
