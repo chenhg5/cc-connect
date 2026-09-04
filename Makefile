@@ -44,20 +44,28 @@ COMMA := ,
 # Compute exclusion tags from AGENTS / PLATFORMS_INCLUDE / EXCLUDE variables
 _EXCLUDE_TAGS :=
 
+# Normalize comma-separated user input into the form used by ALL_AGENTS /
+# ALL_PLATFORMS (space-separated, dashes folded to underscores). Without
+# the dash→underscore fold, an agent registered under a hyphenated name
+# (e.g. AGENTS=foo-bar with build tag `no_foo_bar`) would fail to match
+# `foo_bar` in the ALL list and silently emit `no_foo_bar` via filter-out
+# — excluding the very plugin the user asked to include.
+_normalize = $(subst -,_,$(subst $(COMMA), ,$(1)))
+
 ifdef AGENTS
-  _WANTED_AGENTS := $(subst $(COMMA), ,$(AGENTS))
+  _WANTED_AGENTS := $(call _normalize,$(AGENTS))
   _EXCLUDE_AGENTS := $(filter-out $(_WANTED_AGENTS),$(ALL_AGENTS))
   _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_AGENTS))
 endif
 
 ifdef PLATFORMS_INCLUDE
-  _WANTED_PLATFORMS := $(subst $(COMMA), ,$(PLATFORMS_INCLUDE))
+  _WANTED_PLATFORMS := $(call _normalize,$(PLATFORMS_INCLUDE))
   _EXCLUDE_PLATFORMS := $(filter-out $(_WANTED_PLATFORMS),$(ALL_PLATFORMS))
   _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_PLATFORMS))
 endif
 
 ifdef EXCLUDE
-  _EXCLUDE_TAGS += $(addprefix no_,$(subst $(COMMA), ,$(EXCLUDE)))
+  _EXCLUDE_TAGS += $(addprefix no_,$(call _normalize,$(EXCLUDE)))
 endif
 
 ifdef NO_WEB
