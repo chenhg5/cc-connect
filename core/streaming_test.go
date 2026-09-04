@@ -461,6 +461,36 @@ func TestStreamPreview_AppliesTransform(t *testing.T) {
 	}
 }
 
+func TestStreamPreview_AppliesANSINormalizationTransform(t *testing.T) {
+	mp := &mockUpdaterPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    50,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), NormalizeOutgoingContent)
+	sp.appendText("See \x1b[31mwarn\x1b[0m")
+	time.Sleep(100 * time.Millisecond)
+
+	ok := sp.finish("Final \x1b[32mok\x1b[0m", "")
+	if !ok {
+		t.Fatal("finish should succeed when preview is active")
+	}
+
+	msgs := mp.getMessages()
+	if len(msgs) < 2 {
+		t.Fatalf("messages = %#v, want preview start and final update", msgs)
+	}
+	if got := msgs[0]; got != "start:See warn" {
+		t.Fatalf("start message = %q, want sanitized preview start", got)
+	}
+	if got := msgs[len(msgs)-1]; got != "update:Final ok" {
+		t.Fatalf("final message = %q, want sanitized final preview", got)
+	}
+}
+
 // TestStreamPreview_UnfreezeResumesStreaming is the unit-level regression
 // test for the bug where sp.freeze()+detachPreview() (emitted by the
 // EventPermissionRequest handler in core/engine.go) permanently degraded

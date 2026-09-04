@@ -1,10 +1,13 @@
 package wecom
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -139,3 +142,77 @@ func TestGetAccessToken_NormalExpiresIn_AppliesBuffer(t *testing.T) {
 	}
 }
 
+type recordingRoundTripper struct {
+	mu     sync.Mutex
+	bodies [][]byte
+}
+
+func (rt *recordingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	rt.mu.Lock()
+	rt.bodies = append(rt.bodies, append([]byte(nil), body...))
+	rt.mu.Unlock()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"errcode":0,"errmsg":"ok"}`)),
+	}, nil
+}
+
+func (rt *recordingRoundTripper) LastBody() string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if len(rt.bodies) == 0 {
+		return ""
+	}
+	return string(rt.bodies[len(rt.bodies)-1])
+}
+
+func TestReply_StripsANSISequences(t *testing.T) {
+	tests := []struct {
+		name           string
+		enableMarkdown bool
+		wantMsgType    string
+		wantContent    string
+	}{
+		{name: "markdown", enableMarkdown: true, wantMsgType: `"msgtype":"markdown"`, wantContent: `status **failed**`},
+		{name: "text", enableMarkdown: false, wantMsgType: `"msgtype":"text"`, wantContent: `status failed`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := &recordingRoundTripper{}
+			p := &Platform{
+				agentID:        "1000001",
+				enableMarkdown: tt.enableMarkdown,
+				apiClient:      &http.Client{Transport: rt},
+				tokenCache: tokenCache{
+					token:     "token",
+					expiresAt: time.Now().Add(time.Hour),
+				},
+			}
+
+			err := p.Reply(context.Background(), replyContext{userID: "alice"}, "status **\x1b[31mfailed\x1b[0m**")
+			if err != nil {
+				t.Fatalf("Reply() error = %v", err)
+			}
+
+			body := rt.LastBody()
+			if body == "" {
+				t.Fatal("Reply() did not send request body")
+			}
+			if strings.Contains(body, "\u001b") || bytes.Contains([]byte(body), []byte{0x1b}) {
+				t.Fatalf("Reply() leaked ANSI sequence: %q", body)
+			}
+			if !strings.Contains(body, tt.wantMsgType) {
+				t.Fatalf("Reply() body = %q, want msg type %q", body, tt.wantMsgType)
+			}
+			if !strings.Contains(body, tt.wantContent) {
+				t.Fatalf("Reply() body = %q, want content %q", body, tt.wantContent)
+			}
+		})
+	}
+}
