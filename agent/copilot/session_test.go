@@ -93,6 +93,61 @@ func TestHandleSessionEvent_MessageDelta(t *testing.T) {
 	}
 }
 
+func TestHandleSessionEvent_ReasoningDelta(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{events: make(chan core.Event, 10), ctx: ctx, cancel: cancel}
+	cs.alive.Store(true)
+
+	data, _ := json.Marshal(map[string]any{
+		"reasoningId":   "r-1",
+		"deltaContent":  "let me think",
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "assistant.reasoning_delta", Data: data},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventThinking {
+			t.Fatalf("event type = %v, want EventThinking", evt.Type)
+		}
+		if evt.Content != "let me think" {
+			t.Fatalf("content = %q, want 'let me think'", evt.Content)
+		}
+	default:
+		t.Fatal("no thinking event emitted for reasoning_delta")
+	}
+}
+
+func TestHandleSessionEvent_ReasoningFinal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{events: make(chan core.Event, 10), ctx: ctx, cancel: cancel}
+	cs.alive.Store(true)
+
+	data, _ := json.Marshal(map[string]any{
+		"reasoningId": "r-1",
+		"content":     "final reasoning",
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Kind: "assistant_reasoning", Data: data},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventThinking {
+			t.Fatalf("event type = %v, want EventThinking", evt.Type)
+		}
+		if evt.Content != "final reasoning" {
+			t.Fatalf("content = %q, want 'final reasoning'", evt.Content)
+		}
+	default:
+		t.Fatal("no thinking event emitted for reasoning final")
+	}
+}
+
+
 func TestHandleSessionEvent_KindAndCurrentCopilotEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
