@@ -28,6 +28,7 @@ Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability,
 
 ### Added
 - **Feishu: outbound bot-to-bot @mention resolution** via new `mention_map` config option. Maps agent-friendly names (e.g. `BOT-A`) to Feishu open_ids so that when an agent writes `@BOT-A` in its reply, cc-connect converts it to a native Feishu `<at>` tag that triggers a real notification. Layered on top of `resolve_mentions` (group-member matching) with higher priority, so explicit config always wins (#1322).
+- **codex: configurable AskUserQuestion timeout** via new `[projects.agent.options] request_user_input_timeout_mins` integer (default 5). When the Codex app-server forwards an `item/tool/requestUserInput` approval to a remote IM user, cc-connect waits up to this many minutes for the reply before resolving to deny (fail-closed). Set `0` to wait indefinitely — the approval stays pending until the user replies, the session cancels, or the agent shuts down. Negative or unparseable values log a startup warning and fall back to 5. Affects only the codex app-server backend (#1484).
 
 ### Fixed
 - **codex**: expose the `max` reasoning effort in `/reasoning` and Codex project configuration. The Codex adapter now accepts and forwards `max` instead of rejecting it and showing usage limited to `low|medium|high|xhigh` (#1726).
