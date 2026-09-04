@@ -37,6 +37,7 @@ type Agent struct {
 	workDir         string
 	model           string
 	reasoningEffort string
+	serviceTier     string // "fast" | "default" | "" (inherit Codex config)
 	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
 	backend         string // "exec" | "app_server"
 	appServerURL    string
@@ -59,6 +60,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
+	serviceTier, _ := opts["service_tier"].(string)
 	mode, _ := opts["mode"].(string)
 	backend, _ := opts["backend"].(string)
 	appServerURL, _ := opts["app_server_url"].(string)
@@ -96,6 +98,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir:         workDir,
 		model:           model,
 		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
+		serviceTier:     normalizeServiceTier(serviceTier),
 		mode:            mode,
 		backend:         backend,
 		appServerURL:    appServerURL,
@@ -107,6 +110,17 @@ func New(opts map[string]any) (core.Agent, error) {
 		configEnv:       configEnv,
 		activeIdx:       -1,
 	}, nil
+}
+
+func normalizeServiceTier(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "fast":
+		return "fast"
+	case "default":
+		return "default"
+	default:
+		return ""
+	}
 }
 
 func normalizeBackend(raw string) string {
@@ -204,6 +218,23 @@ func (a *Agent) GetReasoningEffort() string {
 
 func (a *Agent) AvailableReasoningEfforts() []string {
 	return []string{"low", "medium", "high", "xhigh", "max"}
+}
+
+func (a *Agent) SetFastMode(enabled bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if enabled {
+		a.serviceTier = "fast"
+	} else {
+		a.serviceTier = "default"
+	}
+	slog.Info("codex: fast mode changed", "enabled", enabled)
+}
+
+func (a *Agent) FastModeEnabled() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.serviceTier == "fast"
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -467,6 +498,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	model := a.model
 	reasoningEffort := a.reasoningEffort
+	serviceTier := a.serviceTier
 	backend := a.backend
 	appServerURL := a.appServerURL
 	codexHome := a.codexHome
@@ -502,13 +534,18 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		return newAppServerSessionWithServiceTier(ctx, appServerURL, workDir, model, reasoningEffort, serviceTier, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
+	session, err := newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
+	if err != nil {
+		return nil, err
+	}
+	session.serviceTier = serviceTier
+	return session, nil
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -566,6 +603,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.reasoningEffort != "" {
 		opts["reasoning_effort"] = a.reasoningEffort
+	}
+	if a.serviceTier != "" {
+		opts["service_tier"] = a.serviceTier
 	}
 	if a.appServerURL != "" {
 		opts["app_server_url"] = a.appServerURL

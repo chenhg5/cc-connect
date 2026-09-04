@@ -376,6 +376,7 @@ type Engine struct {
 	providerRefsSaveFunc    func(refs []string) error
 	listGlobalProvidersFunc func(agentType string) ([]ProviderConfig, error)
 	modelSaveFunc           func(model string) error
+	fastModeSaveFunc        func(serviceTier string) error
 
 	ttsSaveFunc func(mode string) error
 
@@ -1082,6 +1083,10 @@ func (e *Engine) SetListGlobalProvidersFunc(fn func(agentType string) ([]Provide
 
 func (e *Engine) SetModelSaveFunc(fn func(model string) error) {
 	e.modelSaveFunc = fn
+}
+
+func (e *Engine) SetFastModeSaveFunc(fn func(serviceTier string) error) {
+	e.fastModeSaveFunc = fn
 }
 
 // AddPlatform appends a platform to the engine after construction.
@@ -3925,6 +3930,9 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		if m := e.projectState.WorkspaceModelOverride(workspace); m != "" {
 			opts["model"] = m
 		}
+		if tier := e.projectState.WorkspaceServiceTierOverride(workspace); tier != "" {
+			opts["service_tier"] = tier
+		}
 	}
 
 	// Copy model from original agent if possible
@@ -6515,6 +6523,7 @@ var builtinCommands = []struct {
 	{[]string{"allow"}, "allow"},
 	{[]string{"model"}, "model"},
 	{[]string{"reasoning", "effort"}, "reasoning"},
+	{[]string{"fast"}, "fast"},
 	{[]string{"mode"}, "mode"},
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
@@ -6725,6 +6734,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdModel(p, msg, args)
 	case "reasoning":
 		e.cmdReasoning(p, msg, args)
+	case "fast":
+		e.cmdFast(p, msg, args)
 	case "mode":
 		e.cmdMode(p, msg, args)
 	case "lang":
@@ -8759,6 +8770,13 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 				modeStr = e.i18n.Tf(MsgStatusMode, mode)
 			}
 		}
+		if fs, ok := agent.(FastModeSwitcher); ok {
+			state := e.i18n.T(MsgDisabledShort)
+			if fs.FastModeEnabled() {
+				state = e.i18n.T(MsgEnabledShort)
+			}
+			modeStr += e.i18n.Tf(MsgStatusFastMode, state)
+		}
 		thinkingStr := e.i18n.T(MsgDisabledShort)
 		if e.display.ThinkingMessages {
 			thinkingStr = e.i18n.T(MsgEnabledShort)
@@ -9196,6 +9214,13 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 			modeStr = e.i18n.Tf(MsgStatusMode, mode)
 		}
 	}
+	if fs, ok := agent.(FastModeSwitcher); ok {
+		state := e.i18n.T(MsgDisabledShort)
+		if fs.FastModeEnabled() {
+			state = e.i18n.T(MsgEnabledShort)
+		}
+		modeStr += e.i18n.Tf(MsgStatusFastMode, state)
+	}
 	thinkingStr := e.i18n.T(MsgDisabledShort)
 	if e.display.ThinkingMessages {
 		thinkingStr = e.i18n.T(MsgEnabledShort)
@@ -9525,6 +9550,7 @@ func helpCardGroups() []helpCardGroup {
 			items: []helpCardItem{
 				{command: "/model", action: "nav:/model"},
 				{command: "/reasoning", action: "nav:/reasoning"},
+				{command: "/fast", action: "cmd:/fast"},
 				{command: "/mode", action: "nav:/mode"},
 				{command: "/lang", action: "nav:/lang"},
 				{command: "/provider", action: "nav:/provider"},
@@ -10076,6 +10102,58 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
+}
+
+func (e *Engine) cmdFast(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	switcher, ok := agent.(FastModeSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFastNotSupported))
+		return
+	}
+	if len(args) == 0 {
+		if switcher.FastModeEnabled() {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFastEnabled))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFastDisabled))
+		}
+		return
+	}
+	var enabled bool
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "on", "enable", "enabled", "true", "1":
+		enabled = true
+	case "off", "disable", "disabled", "false", "0":
+		enabled = false
+	default:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFastUsage))
+		return
+	}
+	serviceTier := "default"
+	if enabled {
+		serviceTier = "fast"
+	}
+	if agent == e.agent && e.fastModeSaveFunc != nil {
+		if err := e.fastModeSaveFunc(serviceTier); err != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgFastChangeFailed, err))
+			return
+		}
+	}
+	switcher.SetFastMode(enabled)
+	e.persistWorkspaceFastModeOverride(interactiveKey, msg.SessionKey, agent, serviceTier)
+	e.cleanupInteractiveState(interactiveKey)
+	// Keep the backend ID and local history so the next process resumes the
+	// conversation with the new service tier.
+	sessions.Save()
+	if enabled {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFastChangedOn))
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFastChangedOff))
+	}
 }
 
 func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
@@ -12277,6 +12355,18 @@ func (e *Engine) persistWorkspaceModelOverride(interactiveKey, sessionKey string
 		return
 	}
 	e.projectState.SetWorkspaceModelOverride(workspace, model)
+	e.projectState.Save()
+}
+
+func (e *Engine) persistWorkspaceFastModeOverride(interactiveKey, sessionKey string, agent Agent, serviceTier string) {
+	if e.projectState == nil || !e.multiWorkspace || agent == e.agent {
+		return
+	}
+	workspace := workspaceModelOverrideKey(interactiveKey, sessionKey, agent)
+	if workspace == "" {
+		return
+	}
+	e.projectState.SetWorkspaceServiceTierOverride(workspace, serviceTier)
 	e.projectState.Save()
 }
 
