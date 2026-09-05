@@ -218,7 +218,7 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 		reason = "命中简单关键词"
 	} else if cfg.UseLLMClassify && classifyCred.Model != "" {
 		// 4. LLM 兜底
-		if t, ok := classifyViaLLM(ctx, text, classifyCred, cfg.ClassifyPrompt); ok {
+		if t, ok := classifyViaLLM(ctx, text, classifyCred, cfg.ClassifyPrompt, complexKws, simpleKws); ok {
 			tier = t
 			res.UsedLLM = true
 			reason = "LLM 判定为 " + t
@@ -269,7 +269,7 @@ func containsAny(text string, keywords []string) bool {
 
 // classifyViaLLM 用指定凭证的 anthropic 兼容端点做一次轻量分类。
 // 返回 "simple" | "complex"。
-func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, prompt string) (string, bool) {
+func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, prompt string, complexKws, simpleKws []string) (string, bool) {
 	if cred.BaseURL == "" || cred.APIKey == "" || cred.Model == "" {
 		slog.Warn("model_router: llm classify skip, missing credential", "model", cred.Model, "has_base_url", cred.BaseURL != "", "has_api_key", cred.APIKey != "")
 		return "", false
@@ -282,6 +282,18 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 		prompt = strings.ReplaceAll(prompt, "{text}", text)
 	} else {
 		prompt = prompt + "\n\n" + text
+	}
+	// 注入规则关键词，让 LLM 参考关键词判断、与规则层保持一致
+	if len(complexKws) > 0 || len(simpleKws) > 0 {
+		var ref strings.Builder
+		ref.WriteString("\n\n参考规则关键词（消息命中这些词就按对应档位判）：\n")
+		if len(complexKws) > 0 {
+			ref.WriteString("复杂（判 complex）：" + strings.Join(complexKws, "、") + "\n")
+		}
+		if len(simpleKws) > 0 {
+			ref.WriteString("简单（判 simple）：" + strings.Join(simpleKws, "、") + "\n")
+		}
+		prompt += ref.String()
 	}
 
 	url := strings.TrimRight(cred.BaseURL, "/") + "/v1/messages"
