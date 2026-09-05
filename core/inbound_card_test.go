@@ -33,6 +33,9 @@ func TestBuildInboundCardPromptBoundsOversizedPayload(t *testing.T) {
 	if !strings.Contains(got, "(truncated)") {
 		t.Fatalf("expected truncation marker: %s", got)
 	}
+	if !strings.Contains(got, "external content (truncated)") {
+		t.Fatalf("expected truncation marker in framing line: %s", got)
+	}
 	if strings.Contains(got, "```json") {
 		t.Fatalf("oversized card should not be embedded as an unbounded JSON block")
 	}

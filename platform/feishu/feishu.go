@@ -113,6 +113,8 @@ type replyContext struct {
 	bootstrapThread bool
 }
 
+const defaultInboundCardMaxBytes = 32 * 1024
+
 type Platform struct {
 	mu                         sync.RWMutex
 	platformName               string
@@ -368,9 +370,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if inboundCardMode != "summary" && inboundCardMode != "raw" && inboundCardMode != "both" {
 		return nil, fmt.Errorf("%s: invalid inbound_card_mode %q (want summary, raw, or both)", name, inboundCardMode)
 	}
-	// Zero means lossless/unbounded at the platform boundary. The engine still
-	// applies its prompt safety cap when serializing cards for the agent.
-	inboundCardMaxBytes := 0
+	inboundCardMaxBytes := defaultInboundCardMaxBytes
 	if raw, ok := opts["inbound_card_max_bytes"]; ok {
 		switch v := raw.(type) {
 		case int:
@@ -2049,13 +2049,15 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		text := extractInteractiveCardText(content)
 		cards := append([]core.InboundCard(nil), quoted.cards...)
 		// Event payloads may contain only a lossy summary. Fetch the raw-card
-		// variant so alert metadata and action values survive end-to-end.
-		if fetched := p.fetchSingleMessage(ctx, messageID); fetched != nil {
-			if fetched.text != "" {
-				text = fetched.text
-			}
-			if fetched.card != nil && p.inboundCardMode != "summary" {
-				cards = append(cards, *fetched.card)
+		// variant when raw card data is requested or no usable summary is present.
+		if p.inboundCardMode != "summary" || text == "" || text == "[interactive card]" {
+			if fetched := p.fetchSingleMessage(ctx, messageID); fetched != nil {
+				if fetched.text != "" {
+					text = fetched.text
+				}
+				if fetched.card != nil && p.inboundCardMode != "summary" {
+					cards = append(cards, *fetched.card)
+				}
 			}
 		}
 		if len(cards) == 0 && p.inboundCardMode != "summary" {
@@ -3361,12 +3363,14 @@ func (p *Platform) formatMergeForwardTree(ctx context.Context, parentID string, 
 				if p.inboundCardMode != "summary" {
 					*cards = append(*cards, card)
 				}
-			} else if fetched := p.fetchSingleMessage(ctx, msgID); fetched != nil {
-				if fetched.text != "" {
-					text = fetched.text
-				}
-				if fetched.card != nil && p.inboundCardMode != "summary" {
-					*cards = append(*cards, *fetched.card)
+			} else if p.inboundCardMode != "summary" || text == "" || text == "[interactive card]" {
+				if fetched := p.fetchSingleMessage(ctx, msgID); fetched != nil {
+					if fetched.text != "" {
+						text = fetched.text
+					}
+					if fetched.card != nil && p.inboundCardMode != "summary" {
+						*cards = append(*cards, *fetched.card)
+					}
 				}
 			}
 			if p.inboundCardMode == "raw" {

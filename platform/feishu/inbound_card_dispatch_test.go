@@ -63,6 +63,41 @@ func TestDispatchInteractiveFetchesAndPreservesRawCard(t *testing.T) {
 	}
 }
 
+func TestDispatchInteractiveSummarySkipsFetchWhenSummaryIsPresent(t *testing.T) {
+	var fetches int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/open-apis/im/v1/messages/om_interactive" {
+			fetches++
+		}
+		writeInboundCardTestResponse(t, w, "", "")
+	}))
+	defer srv.Close()
+
+	got := make(chan *core.Message, 1)
+	p := &Platform{
+		platformName: "feishu", domain: srv.URL, appID: "cli_card_test", appSecret: "secret-card-test",
+		inboundCardMode: "summary", client: lark.NewClient("cli_card_test", "secret-card-test", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+		handler:       func(_ core.Platform, msg *core.Message) { got <- msg },
+		userNameCache: sync.Map{}, chatNameCache: sync.Map{}, recalledMsgIDs: map[string]time.Time{}, imageBatch: map[string]*imageBatchEntry{},
+	}
+	content := `{"schema":"2.0","body":{"elements":[{"tag":"div","text":{"tag":"plain_text","content":"告警摘要"}}]}}`
+	p.dispatchMessage(context.Background(), "interactive", content, nil,
+		"om_interactive", "feishu:oc_chat:ou_user", "ou_user", "oc_chat",
+		replyContext{messageID: "om_interactive", chatID: "oc_chat", sessionKey: "feishu:oc_chat:ou_user"}, "", time.Now().UnixMilli())
+
+	select {
+	case msg := <-got:
+		if !strings.Contains(msg.Content, "告警摘要") {
+			t.Fatalf("summary = %q, want card text", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for interactive card")
+	}
+	if fetches != 0 {
+		t.Fatalf("summary mode made %d fetches, want 0", fetches)
+	}
+}
+
 func TestParseMergeForwardPreservesInteractiveChildren(t *testing.T) {
 	const card = `{"schema":"2.0","body":{"elements":[{"tag":"div","text":{"tag":"plain_text","content":"告警正文"}}],"action":{"value":{"alert_id":"alert-1"}}}}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

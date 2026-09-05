@@ -115,7 +115,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # image_batch_window_ms = 500  # 可选：连续多图合批窗口（默认 500ms，详见下文）
 # inbound_card_mode = "both"   # 可选：summary（默认）| raw | both；保留入站飞书 Card 2.0 原始 JSON
-# inbound_card_max_bytes = 0    # 可选：单卡原始 JSON 上限，0 表示不截断
+# inbound_card_max_bytes = 32768    # 可选：单卡原始 JSON 上限；显式设为 0 表示不截断
 ```
 
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。

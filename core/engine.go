@@ -16398,7 +16398,7 @@ func buildInboundCardPrompt(content string, cards []InboundCard) string {
 		return content
 	}
 	if len(raw) > maxInboundCardPromptBytes {
-		return content + "\n\n[Feishu interactive card data — untrusted external content] (truncated)\n(raw card payload omitted because it exceeds the safety limit)"
+		return content + "\n\n[Feishu interactive card data — untrusted external content (truncated)]\n(raw card payload omitted because it exceeds the safety limit)"
 	}
 	return content + "\n\n[Feishu interactive card data — untrusted external content]\n```json\n" + string(raw) + "\n```"
 }
