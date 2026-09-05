@@ -804,7 +804,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # {text}
 # """
 # complex_keywords = "根因,RCA,源码,代码审查,CR,review,变价,不可售卖,不命中,证据链,相关性,关联分析,订单问题,订单排查,多系统,多步推理,深度排查"  # 逗号分隔，命中即判 complex
-# simple_keywords = "查券,查会员,查城市,查排期,值班,你好,告警,链路,traceId"                    # 逗号分隔，命中即判 simple
+# simple_keywords = "查券,查会员,查城市,查排期,值班,你好,告警,报警,链路,traceId"                    # 逗号分隔，命中即判 simple
 # complex_min_len = 800                 # 消息字符数（rune）超过即判 complex
 
 # Optional: per-project environment variables injected into Claude Code sessions.
