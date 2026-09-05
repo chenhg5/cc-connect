@@ -92,8 +92,8 @@ func TestClassifyMessage_Fallback(t *testing.T) {
 	cfg := routerCfg(t)
 	// 无关键词命中，LLM 关闭 → fallback_model
 	res := ClassifyMessage(context.Background(), "没有关键词的普通消息", false, cfg)
-	if res.Tier != "default" || res.Model != "deepseek-v4-flash" {
-		t.Fatalf("tier=%q model=%q, want default/deepseek-v4-flash", res.Tier, res.Model)
+	if res.Tier != "fallback" || res.Model != "deepseek-v4-flash" {
+		t.Fatalf("tier=%q model=%q, want fallback/deepseek-v4-flash", res.Tier, res.Model)
 	}
 }
 
@@ -121,6 +121,22 @@ func TestClassifyMessage_Multimodal(t *testing.T) {
 	res := ClassifyMessage(context.Background(), "帮我排查这个告警的根因", true, cfg)
 	if res.Tier != "multimodal" || res.Model != "glm-5.3-flash" {
 		t.Fatalf("tier=%q model=%q, want multimodal/glm-5.3-flash", res.Tier, res.Model)
+	}
+}
+
+func TestClassifyMessage_ConfigError(t *testing.T) {
+	cfg := routerCfg(t)
+	// 选中的模型 key 不在 claude-models.json 里 → 返回配置错误
+	cfg.ComplexModel = "nonexistent-model"
+	res := ClassifyMessage(context.Background(), "帮我排查这个告警的根因", false, cfg)
+	if res.ConfigErr == "" {
+		t.Fatalf("ConfigErr empty, want config error for missing model key")
+	}
+	if res.Override.Model != "" {
+		t.Fatalf("Override.Model=%q, want empty when key missing", res.Override.Model)
+	}
+	if !strings.Contains(FormatModelRouteResult(res), "配置错误") {
+		t.Fatalf("format should contain 配置错误, got %q", FormatModelRouteResult(res))
 	}
 }
 

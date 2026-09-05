@@ -41,12 +41,13 @@ type ModelRouteOverride struct {
 
 // ModelRouteResult 分类结果。
 type ModelRouteResult struct {
-	Tier     string // "complex" | "simple" | "default" | "disabled" | "multimodal"
-	Model    string // 选中的模型 key
-	Reason   string // 选择原因（展示给用户）
-	Override ModelRouteOverride
-	UsedLLM  bool
-	Elapsed  time.Duration
+	Tier      string // "complex" | "simple" | "fallback" | "disabled" | "multimodal"
+	Model     string // 选中的模型 key
+	Reason    string // 选择原因（展示给用户）
+	ConfigErr string // 配置错误（选中的模型 key 不在 claude-models.json 的 models 中时非空）
+	Override  ModelRouteOverride
+	UsedLLM   bool
+	Elapsed   time.Duration
 }
 
 // claudeModelsFile 是 claude-models.json 的顶层结构。
@@ -89,6 +90,19 @@ func loadClaudeModels(path string) map[string]ModelRouteOverride {
 		out[key] = cred
 	}
 	return out
+}
+
+// resolveOverride 从 models 查 key 的凭证。key 为空返回空凭证；
+// key 不在 models 中返回配置错误信息（用于路由后卡片告知用户）。
+func resolveOverride(models map[string]ModelRouteOverride, key string) (ModelRouteOverride, string) {
+	if key == "" {
+		return ModelRouteOverride{}, ""
+	}
+	cred, ok := models[key]
+	if !ok {
+		return ModelRouteOverride{}, fmt.Sprintf("模型 %q 不在 claude-models.json 的 models 节点中", key)
+	}
+	return cred, ""
 }
 
 // expandHome 展开路径开头的 ~ 为当前用户主目录。
@@ -154,7 +168,7 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 		res.Tier = "disabled"
 		res.Model = cfg.FallbackModel
 		res.Reason = "路由未启用"
-		res.Override = models[res.Model]
+		res.Override, res.ConfigErr = resolveOverride(models, res.Model)
 		res.Elapsed = time.Since(start)
 		return res
 	}
@@ -164,7 +178,7 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 		res.Tier = "multimodal"
 		res.Model = cfg.MultimodalModel
 		res.Reason = "多模态消息"
-		res.Override = models[res.Model]
+		res.Override, res.ConfigErr = resolveOverride(models, res.Model)
 		res.Elapsed = time.Since(start)
 		return res
 	}
@@ -214,7 +228,7 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 	}
 	if key == "" {
 		key = cfg.FallbackModel
-		tier = "default"
+		tier = "fallback"
 		if reason == "" {
 			if llmFailed {
 				reason = "LLM 分类失败，回退兜底"
@@ -227,7 +241,7 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 	res.Tier = tier
 	res.Model = key
 	res.Reason = reason
-	res.Override = models[key]
+	res.Override, res.ConfigErr = resolveOverride(models, key)
 	res.Elapsed = time.Since(start)
 	return res
 }
@@ -324,6 +338,9 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 
 // FormatModelRouteResult 返回分类结果的可读描述（用于卡片/日志）。
 func FormatModelRouteResult(res ModelRouteResult) string {
+	if res.ConfigErr != "" {
+		return fmt.Sprintf("⚠️ 配置错误：%s", res.ConfigErr)
+	}
 	if res.Reason != "" {
 		return fmt.Sprintf("分类耗时 %s · 选中 %s · 原因 %s", formatElapsed(res.Elapsed), res.Model, res.Reason)
 	}
