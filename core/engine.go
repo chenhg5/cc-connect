@@ -232,6 +232,9 @@ type Engine struct {
 	autoCompressMinGap    time.Duration
 	resetOnIdle           time.Duration
 
+	// Model router (complexity-based flash/pro selection)
+	routerConfig ModelRouterConfig
+
 	// When true, append [ctx: ~N%] (or model self-report) to assistant replies shown on platforms.
 	showContextIndicator bool
 	replyFooterEnabled   bool
@@ -322,6 +325,7 @@ type interactiveState struct {
 	pendingProviderAdd     *pendingProviderAddState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+	currentModel           string // model the live agent process was spawned with (model router)
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -604,6 +608,11 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 	e.resetOnIdle = d
 }
 
+// SetModelRouter configures complexity-based model routing.
+func (e *Engine) SetModelRouter(cfg ModelRouterConfig) {
+	e.routerConfig = cfg
+}
+
 // SetShowContextIndicator controls whether assistant replies include the [ctx: ~N%] suffix.
 func (e *Engine) SetShowContextIndicator(show bool) {
 	e.showContextIndicator = show
@@ -628,7 +637,6 @@ func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webSt
 func (e *Engine) SetSkipGit(skipGit bool) {
 	e.skipGit = skipGit
 }
-
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
@@ -2583,12 +2591,36 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	e.i18n.DetectAndSet(msg.Content)
 	session.AddHistory("user", msg.Content)
 
+	// —— 模型路由：按复杂度选择 flash / pro ——
+	var targetModel string
+	if e.routerConfig.Enabled {
+		res := ClassifyMessage(e.ctx, msg.Content, e.routerConfig)
+		targetModel = res.Model
+		if targetModel != "" {
+			if overrider, ok := agent.(SessionModelOverrider); ok {
+				overrider.SetSessionModelOverride(ModelRouteOverride{Model: targetModel})
+			}
+			if cur := e.currentSessionModel(interactiveKey); cur != "" && cur != targetModel {
+				slog.Info("model router: switching model",
+					"session", interactiveKey, "from", cur, "to", targetModel,
+					"tier", res.Tier, "elapsed", res.Elapsed.String())
+				e.cleanupInteractiveState(interactiveKey)
+			}
+			e.sendModelRouterCard(p, msg.ReplyCtx, res)
+		}
+	}
+
 	// Use the agent override when available (multi-workspace mode)
 	var agentOverride Agent
 	if agent != e.agent {
 		agentOverride = agent
 	}
 	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	if targetModel != "" {
+		state.mu.Lock()
+		state.currentModel = targetModel
+		state.mu.Unlock()
+	}
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -2999,6 +3031,29 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	})
 
 	return state
+}
+
+// currentSessionModel returns the model the live agent process for sessionKey
+// was spawned with (empty when the session has no recorded routed model).
+func (e *Engine) currentSessionModel(sessionKey string) string {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	if st, ok := e.interactiveStates[sessionKey]; ok && st != nil {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return st.currentModel
+	}
+	return ""
+}
+
+// sendModelRouterCard posts a small card showing the classification result
+// (elapsed + selected model) so the routing decision is visible to the user.
+func (e *Engine) sendModelRouterCard(p Platform, replyCtx any, res ModelRouteResult) {
+	card := NewCard().
+		Title("模型路由", "indigo").
+		Markdown(FormatModelRouteResult(res)).
+		Build()
+	e.replyWithCard(p, replyCtx, card)
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key
@@ -4129,12 +4184,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					contextText = fmt.Sprintf("[ctx: ~%d%%]", selfPct)
 				}
 			}
+			turnDuration := time.Since(turnStart)
 			if !isSilent {
 				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
 				if contextText != "" && e.replyFooterEnabled {
 					footerContext = contextText
 				}
-				if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, footerContext); footer != "" {
+				if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, footerContext, turnDuration); footer != "" {
 					cleanResponse = appendReplyFooter(cleanResponse, footer)
 				} else if contextText != "" {
 					cleanResponse += "\n" + contextText
@@ -4142,7 +4198,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			fullResponse = cleanResponse
 
-			turnDuration := time.Since(turnStart)
 			slog.Info("turn complete",
 				"session", session.ID,
 				"agent_session", session.GetAgentSessionID(),
@@ -5470,7 +5525,7 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 	return ""
 }
 
-func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string) string {
+func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string, elapsed time.Duration) string {
 	if !e.replyFooterEnabled || agent == nil {
 		return ""
 	}
@@ -5503,16 +5558,48 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 	if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
 		parts = append(parts, dir)
 	}
+	if elapsed > 0 {
+		parts = append(parts, "⏱ "+formatElapsed(elapsed))
+	}
 	if !hasStatus {
 		return ""
 	}
 	return strings.Join(parts, " · ")
 }
 
+// formatElapsed formats a duration as a compact, human-readable elapsed time,
+// e.g. 1h01m20s, 05m02s, 05s, or <1s for sub-second durations.
+func formatElapsed(d time.Duration) string {
+	if d < time.Second {
+		return "<1s"
+	}
+	total := int64(d / time.Second)
+	h := total / 3600
+	m := (total % 3600) / 60
+	s := total % 60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
+	case m > 0:
+		return fmt.Sprintf("%02dm%02ds", m, s)
+	default:
+		return fmt.Sprintf("%02ds", s)
+	}
+}
+
 func replyFooterModel(session AgentSession, agent Agent) string {
+	// 实际模型优先：session 记录了本次 spawn 的真实模型（含模型路由 override），
+	// 最能反映"实际用的模型"。footer_model 仅作为无 session 模型信息时的展示名兜底。
 	if session != nil {
 		if getter, ok := session.(interface{ GetModel() string }); ok {
 			if model := strings.TrimSpace(getter.GetModel()); model != "" {
+				return model
+			}
+		}
+	}
+	if agent != nil {
+		if getter, ok := agent.(interface{ GetFooterModel() string }); ok {
+			if model := strings.TrimSpace(getter.GetFooterModel()); model != "" {
 				return model
 			}
 		}

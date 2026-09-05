@@ -390,6 +390,15 @@ type UsageReporter interface {
 	GetUsage(ctx context.Context) (*UsageReport, error)
 }
 
+// SessionModelOverrider lets an agent accept a per-spawn model override that
+// takes effect only on the next StartSession call. The model router uses this
+// to select flash/pro per message without mutating the agent's global default.
+// The override carries its own provider config (base URL + token) so routing
+// does not depend on the agent's globally inherited ANTHROPIC_* env.
+type SessionModelOverrider interface {
+	SetSessionModelOverride(override ModelRouteOverride)
+}
+
 // UsageReport is a provider-neutral quota snapshot returned by UsageReporter.
 type UsageReport struct {
 	Provider  string

@@ -285,6 +285,7 @@ func main() {
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
 		engine.SetDataDir(cfg.DataDir)
+		applyModelRouter(engine, &proj)
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
@@ -1423,6 +1424,37 @@ func setupLogger(level string, w io.Writer) {
 	})))
 }
 
+// applyModelRouter wires the project's [projects.model_router] config into the
+// engine. No-op when the section is absent.
+func applyModelRouter(engine *core.Engine, proj *config.ProjectConfig) {
+	if proj.ModelRouter == nil {
+		return
+	}
+	mr := proj.ModelRouter
+	engine.SetModelRouter(core.ModelRouterConfig{
+		Enabled:         mr.Enabled,
+		UseLLM:          mr.UseLLM,
+		ModelDefault:    mr.ModelDefault,
+		ComplexKeywords: splitCommaList(mr.ComplexKeywords),
+		SimpleKeywords:  splitCommaList(mr.SimpleKeywords),
+		ComplexMinLen:   mr.ComplexMinLen,
+	})
+}
+
+func splitCommaList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // reloadConfig re-reads config.toml and applies hot-reloadable settings
 // (display, providers, commands) to the given engine.
 func reloadConfig(configPath, projName string, engine *core.Engine) (*core.ConfigReloadResult, error) {
@@ -1477,6 +1509,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 	engine.SetResetOnIdle(resetIdle)
+	applyModelRouter(engine, proj)
 	if defaulted {
 		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)

@@ -175,14 +175,14 @@ const (
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	Mode               *string `toml:"mode"`                 // "full" (default), "compact", or "quiet"
-	CardMode           *string `toml:"card_mode"`            // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages   *bool   `toml:"thinking_messages"`    // whether thinking messages are shown; default true
-	ThinkingMaxLen     *int    `toml:"thinking_max_len"`     // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen         *int    `toml:"tool_max_len"`         // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages       *bool   `toml:"tool_messages"`        // whether tool progress messages are shown; default true
-	ShowContextIndicator *bool `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
-	ReplyFooter        *bool   `toml:"reply_footer"`         // whether Codex-like footer is shown; default true
+	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
+	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
+	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
+	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -400,6 +400,9 @@ type ProjectConfig struct {
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
 	FilterExternalSessions *bool `toml:"filter_external_sessions,omitempty"`
+	// ModelRouter routes messages to a simple vs complex model by complexity.
+	// See ModelRouterConfig.
+	ModelRouter *ModelRouterConfig `toml:"model_router,omitempty"`
 }
 
 type AgentConfig struct {
@@ -407,6 +410,20 @@ type AgentConfig struct {
 	Options      map[string]any   `toml:"options"`
 	ProviderRefs []string         `toml:"provider_refs,omitempty"` // references to global [[providers]] by name
 	Providers    []ProviderConfig `toml:"providers"`
+}
+
+// ModelRouterConfig routes messages to a simple vs complex model by complexity.
+// Model names, base URL and tokens are NOT configured here — they come from the
+// claude-models preset injected via ~/.zshrc (ANTHROPIC_MODEL = complex model,
+// ANTHROPIC_DEFAULT_HAIKU_MODEL = simple model). This section only holds the
+// routing rules (keywords, length, default tier).
+type ModelRouterConfig struct {
+	Enabled         bool   `toml:"enabled"`
+	UseLLM          bool   `toml:"use_llm,omitempty"`          // 规则未命中时是否用 LLM 兜底分类
+	ModelDefault    string `toml:"model_default"`              // "simple" | "complex"，分类失败兜底档位
+	ComplexKeywords string `toml:"complex_keywords,omitempty"` // comma-separated
+	SimpleKeywords  string `toml:"simple_keywords,omitempty"`  // comma-separated
+	ComplexMinLen   int    `toml:"complex_min_len,omitempty"`
 }
 
 // ProviderModelConfig defines a selectable model entry for a provider,

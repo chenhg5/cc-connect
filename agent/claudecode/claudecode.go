@@ -34,23 +34,25 @@ func init() {
 //   - "auto":              Claude's automatic permission classifier
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
-	workDir          string
-	cliBin           string   // CLI binary name or path (default: "claude")
-	cliExtraArgs     []string // extra args parsed from cli_path (e.g. ["code", "-t", "foo"])
-	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	cliArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
-	model            string
-	reasoningEffort  string // "low" | "medium" | "high" | "max"
-	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
-	allowedTools     []string
-	disallowedTools  []string
-	maxContextTokens int // optional: passed as --max-context-tokens when > 0
-	providers        []core.ProviderConfig
-	activeIdx        int // -1 = no provider set
-	sessionEnv       []string
-	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey     string // Claude Code Router API key (optional)
-	systemPrompt     string // Custom system prompt to pass to Claude CLI
+	workDir              string
+	cliBin               string   // CLI binary name or path (default: "claude")
+	cliExtraArgs         []string // extra args parsed from cli_path (e.g. ["code", "-t", "foo"])
+	configEnv            []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	cliArgsFlag          string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
+	model                string
+	footerModel          string                  // footer 显示的模型名（仅展示，不传给 CLI 的 --model）
+	sessionModelOverride core.ModelRouteOverride // per-spawn model override set by the model router; read (and cleared) in StartSession
+	reasoningEffort      string                  // "low" | "medium" | "high" | "max"
+	mode                 string                  // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
+	allowedTools         []string
+	disallowedTools      []string
+	maxContextTokens     int // optional: passed as --max-context-tokens when > 0
+	providers            []core.ProviderConfig
+	activeIdx            int // -1 = no provider set
+	sessionEnv           []string
+	routerURL            string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey         string // Claude Code Router API key (optional)
+	systemPrompt         string // Custom system prompt to pass to Claude CLI
 
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
@@ -64,41 +66,41 @@ type Agent struct {
 }
 
 var claudeProviderManagedEnvVars = map[string]struct{}{
-	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                  {},
-	"CLAUDE_CODE_USE_BEDROCK":                               {},
-	"CLAUDE_CODE_USE_VERTEX":                                {},
-	"CLAUDE_CODE_USE_FOUNDRY":                               {},
-	"ANTHROPIC_BASE_URL":                                    {},
-	"ANTHROPIC_BEDROCK_BASE_URL":                            {},
-	"ANTHROPIC_VERTEX_BASE_URL":                             {},
-	"ANTHROPIC_FOUNDRY_BASE_URL":                            {},
-	"ANTHROPIC_FOUNDRY_RESOURCE":                            {},
-	"ANTHROPIC_VERTEX_PROJECT_ID":                           {},
-	"CLOUD_ML_REGION":                                       {},
-	"ANTHROPIC_API_KEY":                                     {},
-	"ANTHROPIC_AUTH_TOKEN":                                  {},
-	"CLAUDE_CODE_OAUTH_TOKEN":                               {},
-	"AWS_BEARER_TOKEN_BEDROCK":                              {},
-	"ANTHROPIC_FOUNDRY_API_KEY":                             {},
-	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                         {},
-	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                          {},
-	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                         {},
-	"ANTHROPIC_MODEL":                                       {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                         {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":             {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                    {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES":  {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL":                          {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":              {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                     {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":   {},
+	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                 {},
+	"CLAUDE_CODE_USE_BEDROCK":                              {},
+	"CLAUDE_CODE_USE_VERTEX":                               {},
+	"CLAUDE_CODE_USE_FOUNDRY":                              {},
+	"ANTHROPIC_BASE_URL":                                   {},
+	"ANTHROPIC_BEDROCK_BASE_URL":                           {},
+	"ANTHROPIC_VERTEX_BASE_URL":                            {},
+	"ANTHROPIC_FOUNDRY_BASE_URL":                           {},
+	"ANTHROPIC_FOUNDRY_RESOURCE":                           {},
+	"ANTHROPIC_VERTEX_PROJECT_ID":                          {},
+	"CLOUD_ML_REGION":                                      {},
+	"ANTHROPIC_API_KEY":                                    {},
+	"ANTHROPIC_AUTH_TOKEN":                                 {},
+	"CLAUDE_CODE_OAUTH_TOKEN":                              {},
+	"AWS_BEARER_TOKEN_BEDROCK":                             {},
+	"ANTHROPIC_FOUNDRY_API_KEY":                            {},
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                        {},
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                         {},
+	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                        {},
+	"ANTHROPIC_MODEL":                                      {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                        {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":            {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                   {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL":                         {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":             {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                    {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":  {},
 
 	// Provider-specific base URL env vars for thinking rewrite proxy routing.
 	// These are set by cc-connect when thinking override is needed for
 	// Bedrock/Vertex/Foundry providers that don't use base_url config.
-	"ANTHROPIC_BEDROCK_PROXY_BASE_URL": {},
-	"ANTHROPIC_VERTEX_PROXY_BASE_URL":  {},
-	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL": {},
+	"ANTHROPIC_BEDROCK_PROXY_BASE_URL":                      {},
+	"ANTHROPIC_VERTEX_PROXY_BASE_URL":                       {},
+	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL":                      {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL":                        {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION":            {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":                   {},
@@ -130,6 +132,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	cliArgsFlag, _ := opts["cli_args_flag"].(string)
 	model, _ := opts["model"].(string)
+	footerModel, _ := opts["footer_model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
@@ -217,6 +220,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliExtraArgs:     cliExtraArgs,
 		cliArgsFlag:      cliArgsFlag,
 		model:            model,
+		footerModel:      footerModel,
 		reasoningEffort:  normalizeEffort(reasoningEffort),
 		mode:             mode,
 		systemPrompt:     systemPrompt,
@@ -292,10 +296,25 @@ func (a *Agent) SetModel(model string) {
 	slog.Info("claudecode: model changed", "model", model)
 }
 
+// SetSessionModelOverride sets a one-shot model override that applies only to
+// the next StartSession call (model router support). The override is cleared
+// after the next spawn.
+func (a *Agent) SetSessionModelOverride(override core.ModelRouteOverride) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionModelOverride = override
+}
+
 func (a *Agent) GetModel() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
+}
+
+func (a *Agent) GetFooterModel() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.footerModel
 }
 
 func (a *Agent) SetReasoningEffort(effort string) {
@@ -415,10 +434,21 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	copy(disTools, a.disallowedTools)
 	maxTok := a.maxContextTokens
 	model := a.model
+	// One-shot per-spawn model override from the model router. Read and clear
+	// under the lock; it only affects the session spawned by this call.
+	modelOverride := a.sessionModelOverride
+	a.sessionModelOverride = core.ModelRouteOverride{}
 	effort := a.reasoningEffort
 	workDir := a.workDir
 	mode := a.mode
 	extraEnv := a.runtimeEnvLocked()
+	// Inject the routed model via ANTHROPIC_MODEL env (authoritative for
+	// third-party providers; a non-standard --model flag would be rejected).
+	// MergeEnv guarantees this entry overrides any provider or inherited value.
+	// base_url / token stay inherited from the claude-models preset env.
+	if modelOverride.Model != "" {
+		extraEnv = core.MergeEnv(extraEnv, []string{"ANTHROPIC_MODEL=" + modelOverride.Model})
+	}
 
 	activeIdx := a.activeIdx
 	var activeProviderName string
@@ -441,7 +471,14 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
+	// sessionModel is the actual model this session will use (routing-aware);
+	// it is recorded for the reply footer, while `model` keeps driving --model.
+	sessionModel := model
+	if modelOverride.Model != "" {
+		sessionModel = modelOverride.Model
+	}
+
+	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, sessionModel, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -764,6 +801,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.model != "" {
 		opts["model"] = a.model
+	}
+	if a.footerModel != "" {
+		opts["footer_model"] = a.footerModel
 	}
 	if a.reasoningEffort != "" {
 		opts["reasoning_effort"] = a.reasoningEffort

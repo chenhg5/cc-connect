@@ -33,6 +33,7 @@ type claudeSession struct {
 	stdinMu         sync.Mutex
 	events          chan core.Event
 	sessionID       atomic.Value // stores string
+	model           atomic.Value // stores string — actual model the process was spawned with (routing-aware)
 	permissionMode  atomic.Value // stores string
 	autoApprove     atomic.Bool
 	acceptEditsOnly atomic.Bool
@@ -51,7 +52,7 @@ type claudeSession struct {
 	gracefulStopTimeout time.Duration
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cliArgsFlag string, model, sessionModel, effort, sessionID, mode, systemPrompt string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// innerArgs are Claude Code CLI flags — when a wrapper is used with
@@ -212,6 +213,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
+	cs.model.Store(sessionModel)
 	cs.alive.Store(true)
 
 	go cs.readLoop(stdout, &stderrBuf)
@@ -695,6 +697,13 @@ func (cs *claudeSession) Events() <-chan core.Event {
 
 func (cs *claudeSession) CurrentSessionID() string {
 	v, _ := cs.sessionID.Load().(string)
+	return v
+}
+
+// GetModel returns the actual model this session's process was spawned with
+// (includes any model-router override). Used by the reply footer.
+func (cs *claudeSession) GetModel() string {
+	v, _ := cs.model.Load().(string)
 	return v
 }
 
