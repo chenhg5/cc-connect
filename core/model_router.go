@@ -9,58 +9,105 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
-// ModelRouterConfig 模型路由规则。模型名 / base_url / token 一律不在此配置，
-// 统一走 claude-models preset 注入的 env（见 routerModels）。
+// ModelRouterConfig 模型路由规则。模型凭证（base_url/token/model）不在此配置，
+// 统一从 models_config 指向的 claude-models.json 读取（唯一凭证源）。
+// complex_model/simple_model/fallback_model/classify_model/multimodal_model 必须与 claude-models.json 的 models 节点 key 一致。
 type ModelRouterConfig struct {
 	Enabled         bool
-	UseLLM          bool   // 规则未命中时是否用 LLM 兜底分类
-	ModelDefault    string // "simple" | "complex"，规则未命中且 LLM 分类失败时的兜底档位
+	ModelsConfig    string // claude-models.json 路径（唯一凭证源）
+	ComplexModel    string // 复杂问题模型 key
+	SimpleModel     string // 简单问题模型 key
+	FallbackModel   string // 兜底模型 key（分类失败/LLM 失败时）
+	ClassifyModel   string // LLM 分类用模型 key
+	ClassifyPrompt  string // LLM 分类提示词（{text} 占位符替换为用户消息；空则用内置默认）
+	MultimodalModel string // 多模态消息（图片/文件等）时强制用的模型 key
+	UseLLMClassify  bool   // 规则未命中时是否用 LLM 兜底分类
 	ComplexKeywords []string
 	SimpleKeywords  []string
 	ComplexMinLen   int // 消息字符数（rune）超过即判 complex
 }
 
-// ModelRouteOverride 模型路由的 per-spawn 覆盖：目标模型名。
-// base_url / token 由 claude-models preset 注入的 env 提供，无需覆盖。
+// ModelRouteOverride 模型路由的 per-spawn 覆盖：完整凭证（来自 claude-models.json）。
 type ModelRouteOverride struct {
-	Model string
+	BaseURL string
+	APIKey  string
+	Model   string
 }
 
 // ModelRouteResult 分类结果。
 type ModelRouteResult struct {
-	Tier    string // "simple" | "complex" | "default" | "disabled"
-	Model   string
-	UsedLLM bool
-	Elapsed time.Duration
+	Tier     string // "complex" | "simple" | "default" | "disabled" | "multimodal"
+	Model    string // 选中的模型 key
+	Reason   string // 选择原因（展示给用户）
+	Override ModelRouteOverride
+	UsedLLM  bool
+	Elapsed  time.Duration
 }
 
-// routerModels 返回 (simple/flash 模型名, complex/pro 模型名)，均取自
-// claude-models preset 注入的环境变量。pro = ANTHROPIC_MODEL（主模型），
-// flash = ANTHROPIC_DEFAULT_HAIKU_MODEL（无则回退 CLAUDE_CODE_SUBAGENT_MODEL）。
-func routerModels() (simple, complex string) {
-	complex = os.Getenv("ANTHROPIC_MODEL")
-	simple = os.Getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL")
-	if simple == "" {
-		simple = os.Getenv("CLAUDE_CODE_SUBAGENT_MODEL")
+// claudeModelsFile 是 claude-models.json 的顶层结构。
+type claudeModelsFile struct {
+	Models map[string]struct {
+		Env map[string]string `json:"env"`
+	} `json:"models"`
+}
+
+// loadClaudeModels 读取 claude-models.json，返回 key -> 完整凭证 的映射。
+func loadClaudeModels(path string) map[string]ModelRouteOverride {
+	path = expandHome(path)
+	if path == "" {
+		return nil
 	}
-	return simple, complex
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.Warn("model_router: cannot read models config", "path", path, "error", err)
+		return nil
+	}
+	var f claudeModelsFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		slog.Warn("model_router: invalid models config", "path", path, "error", err)
+		return nil
+	}
+	out := make(map[string]ModelRouteOverride, len(f.Models))
+	for key, m := range f.Models {
+		env := m.Env
+		if env == nil {
+			env = map[string]string{}
+		}
+		cred := ModelRouteOverride{
+			BaseURL: env["ANTHROPIC_BASE_URL"],
+			APIKey:  env["ANTHROPIC_AUTH_TOKEN"],
+			Model:   env["ANTHROPIC_MODEL"],
+		}
+		if cred.APIKey == "" {
+			cred.APIKey = env["ANTHROPIC_API_KEY"]
+		}
+		out[key] = cred
+	}
+	return out
 }
 
-// defaultComplexKeywords 内置复杂关键词（config 未配时兜底）。
-var defaultComplexKeywords = []string{
-	"告警", "排查", "RCA", "traceId", "trace", "链路", "分析", "代码", "报错", "错误",
-	"异常", "根因", "源码", "变价", "不命中", "不可售卖", "为什么", "怎么实现", "CR",
-	"review", "架构", "panic", "error", "exception", "bug", "崩溃", "超时", "定位",
-}
-
-// defaultSimpleKeywords 内置简单关键词（config 未配时兜底）。
-var defaultSimpleKeywords = []string{
-	"查券", "查会员", "查城市", "查排期", "值班", "你好", "在吗", "同步skill", "最近修改",
-	"查飞书", "查订单", "查redis", "查缓存", "谢谢", "好的",
+// expandHome 展开路径开头的 ~ 为当前用户主目录。
+func expandHome(p string) string {
+	if p == "" {
+		return p
+	}
+	if p == "~" {
+		if h, err := os.UserHomeDir(); err == nil {
+			return h
+		}
+		return p
+	}
+	if strings.HasPrefix(p, "~/") {
+		if h, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(h, p[2:])
+		}
+	}
+	return p
 }
 
 // defaultComplexMinLen 消息长度阈值（rune 数）。
@@ -69,70 +116,118 @@ const defaultComplexMinLen = 800
 // classifyTimeout LLM 兜底分类的调用超时。
 const classifyTimeout = 5 * time.Second
 
-// ClassifyMessage 按复杂度把消息路由到 simple/complex 模型。
-// 判定顺序：复杂关键词 → 长度阈值 → 简单关键词 → LLM 兜底 → 默认档位。
-func ClassifyMessage(ctx context.Context, text string, cfg ModelRouterConfig) ModelRouteResult {
-	start := time.Now()
-	res := ModelRouteResult{Elapsed: time.Since(start)}
+// defaultClassifyPrompt 内置分类提示词（config 未配 classify_prompt 时兜底）。
+// {text} 占位符替换为用户消息。
+const defaultClassifyPrompt = `你是消息复杂度分类器。判断下面这条用户消息该用「复杂模型」还是「简单模型」处理，只回复一个词 simple 或 complex，不要任何解释、标点或换行。
 
-	simpleModel, complexModel := routerModels()
+判 complex（复杂，需要强模型）：
+- 根因分析（RCA）、源码定位
+- 代码审查（CR）
+- 价格变价、渠道不可售卖、营销不命中等需要证据链的分析
+- 相关性分析、关联分析
+- 订单问题排查、深度排查
+- 涉及多系统、多步推理的深度分析
+- 新增/修改脚本
+- 整理文档
+- 整理/修改 skill 和知识库
+
+判 simple（简单，轻量模型即可）：
+- 简单查询：查券、查会员、查城市、查排期、查订单、查 redis/缓存
+- 查告警、查链路、查 traceId 等日常查询
+- 问候、寒暄、简单确认
+- 一句话回答或查单个值的问题
+
+用户消息：
+{text}`
+
+// ClassifyMessage 按复杂度把消息路由到 complex/simple 模型。
+// 多模态消息（multimodal=true）优先用 multimodal_model，跳过复杂度分类。
+// 判定顺序：复杂关键词 → 长度阈值 → 简单关键词 → LLM 兜底 → fallback_model。
+// 选中的模型 key 从 claude-models.json 取完整凭证（base_url/token/model）。
+func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg ModelRouterConfig) ModelRouteResult {
+	start := time.Now()
+	res := ModelRouteResult{}
+
+	models := loadClaudeModels(cfg.ModelsConfig)
 
 	if !cfg.Enabled {
 		res.Tier = "disabled"
-		res.Model = complexModel
-		if res.Model == "" {
-			res.Model = simpleModel
-		}
+		res.Model = cfg.FallbackModel
+		res.Reason = "路由未启用"
+		res.Override = models[res.Model]
+		res.Elapsed = time.Since(start)
+		return res
+	}
+
+	// 多模态消息（图片/文件等）强制走 multimodal_model
+	if multimodal && cfg.MultimodalModel != "" {
+		res.Tier = "multimodal"
+		res.Model = cfg.MultimodalModel
+		res.Reason = "多模态消息"
+		res.Override = models[res.Model]
 		res.Elapsed = time.Since(start)
 		return res
 	}
 
 	complexKws := cfg.ComplexKeywords
-	if len(complexKws) == 0 {
-		complexKws = defaultComplexKeywords
-	}
 	simpleKws := cfg.SimpleKeywords
-	if len(simpleKws) == 0 {
-		simpleKws = defaultSimpleKeywords
-	}
 	minLen := cfg.ComplexMinLen
 	if minLen <= 0 {
 		minLen = defaultComplexMinLen
 	}
 
+	classifyCred := models[cfg.ClassifyModel]
+
 	tier := ""
+	reason := ""
+	llmFailed := false
 	// 1. 复杂关键词
 	if containsAny(text, complexKws) {
 		tier = "complex"
+		reason = "命中复杂关键词"
 	} else if minLen > 0 && len([]rune(text)) >= minLen {
 		// 2. 长度阈值
 		tier = "complex"
+		reason = "消息长度超阈值"
 	} else if containsAny(text, simpleKws) {
 		// 3. 简单关键词
 		tier = "simple"
-	} else if cfg.UseLLM && simpleModel != "" {
-		// 4. LLM 兜底（用 flash 模型做分类，最省）
-		if t, ok := classifyViaLLM(ctx, text, simpleModel); ok {
+		reason = "命中简单关键词"
+	} else if cfg.UseLLMClassify && classifyCred.Model != "" {
+		// 4. LLM 兜底
+		if t, ok := classifyViaLLM(ctx, text, classifyCred, cfg.ClassifyPrompt); ok {
 			tier = t
 			res.UsedLLM = true
+			reason = "LLM 判定为 " + t
+		} else {
+			llmFailed = true
 		}
 	}
 
-	// 5. 默认档位
-	if tier != "complex" && tier != "simple" {
-		if strings.EqualFold(cfg.ModelDefault, "complex") {
-			tier = "complex"
-		} else {
-			tier = "simple"
+	// 5. 选模型 key
+	var key string
+	switch tier {
+	case "complex":
+		key = cfg.ComplexModel
+	case "simple":
+		key = cfg.SimpleModel
+	}
+	if key == "" {
+		key = cfg.FallbackModel
+		tier = "default"
+		if reason == "" {
+			if llmFailed {
+				reason = "LLM 分类失败，回退兜底"
+			} else {
+				reason = "规则未命中，回退兜底"
+			}
 		}
 	}
 
 	res.Tier = tier
-	if tier == "complex" {
-		res.Model = complexModel
-	} else {
-		res.Model = simpleModel
-	}
+	res.Model = key
+	res.Reason = reason
+	res.Override = models[key]
 	res.Elapsed = time.Since(start)
 	return res
 }
@@ -149,23 +244,26 @@ func containsAny(text string, keywords []string) bool {
 	return false
 }
 
-// classifyViaLLM 用 provider 的 anthropic 兼容端点做一次轻量分类。
-// 返回 "simple" | "complex"。base_url / token 取自 claude-models preset 注入的 env。
-func classifyViaLLM(ctx context.Context, text, model string) (string, bool) {
-	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
-	token := os.Getenv("ANTHROPIC_AUTH_TOKEN")
-	if token == "" {
-		token = os.Getenv("ANTHROPIC_API_KEY")
-	}
-	if baseURL == "" || token == "" || model == "" {
+// classifyViaLLM 用指定凭证的 anthropic 兼容端点做一次轻量分类。
+// 返回 "simple" | "complex"。
+func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, prompt string) (string, bool) {
+	if cred.BaseURL == "" || cred.APIKey == "" || cred.Model == "" {
 		return "", false
 	}
+	if prompt == "" {
+		prompt = defaultClassifyPrompt
+	}
+	// {text} 占位符替换为用户消息；无占位符则直接拼到末尾。
+	if strings.Contains(prompt, "{text}") {
+		prompt = strings.ReplaceAll(prompt, "{text}", text)
+	} else {
+		prompt = prompt + "\n\n" + text
+	}
 
-	url := strings.TrimRight(baseURL, "/") + "/v1/messages"
-	prompt := "判断下面这条用户消息的复杂度，只回复一个词 simple 或 complex，不要解释：\n\n" + text
+	url := strings.TrimRight(cred.BaseURL, "/") + "/v1/messages"
 
 	payload := map[string]any{
-		"model":      model,
+		"model":      cred.Model,
 		"max_tokens": 4,
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
@@ -181,7 +279,7 @@ func classifyViaLLM(ctx context.Context, text, model string) (string, bool) {
 		return "", false
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+cred.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
 	client := &http.Client{Timeout: classifyTimeout}
@@ -226,5 +324,8 @@ func classifyViaLLM(ctx context.Context, text, model string) (string, bool) {
 
 // FormatModelRouteResult 返回分类结果的可读描述（用于卡片/日志）。
 func FormatModelRouteResult(res ModelRouteResult) string {
+	if res.Reason != "" {
+		return fmt.Sprintf("分类耗时 %s · 选中 %s · 原因 %s", formatElapsed(res.Elapsed), res.Model, res.Reason)
+	}
 	return fmt.Sprintf("分类耗时 %s · 选中 %s", formatElapsed(res.Elapsed), res.Model)
 }

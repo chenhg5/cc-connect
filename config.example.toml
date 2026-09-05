@@ -772,20 +772,30 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 可选：按消息复杂度动态路由模型——简单问题用轻量模型，复杂问题用强模型。
 # 这是 project 级独立段（[projects.model_router]），不在 [projects.agent.options] 下。
 #
-# Model names / base_url / token are NOT configured here — they come from the
-# claude-models preset injected via ~/.zshrc:
-#   complex model = ANTHROPIC_MODEL
-#   simple  model = ANTHROPIC_DEFAULT_HAIKU_MODEL (fallback CLAUDE_CODE_SUBAGENT_MODEL)
-# 模型名 / base_url / token 不在此配置，统一走 claude-models preset（经 ~/.zshrc 注入）：
-#   复杂模型 = ANTHROPIC_MODEL；简单模型 = ANTHROPIC_DEFAULT_HAIKU_MODEL（回退 CLAUDE_CODE_SUBAGENT_MODEL）。
+# Model credentials (base_url/token/model) come from claude-models.json pointed
+# to by models_config (the single source of credentials). complex_model/
+# simple_model/fallback_model/classify_model must match keys under its `models` node.
+# 模型凭证（base_url/token/model）统一从 models_config 指向的 claude-models.json 读取（唯一凭证源）。
+# complex_model/simple_model/fallback_model/classify_model 必须与它的 models 节点 key 一致。
 #
 # [projects.model_router]
 # enabled = true
-# use_llm = true                            # 规则未命中时是否用 LLM 兜底分类 / whether to fall back to LLM classify
-# model_default = "flash"                   # "simple" | "complex" 分类失败兜底档位 / fallback tier
-# complex_keywords = "告警,排查,RCA,traceId,链路,分析,代码,报错,异常,根因"  # 逗号分隔，命中即判 complex
-# simple_keywords = "查券,查会员,查城市,查排期,值班,你好"                    # 逗号分隔，命中即判 simple
-# complex_min_len = 800                     # 消息字符数（rune）超过即判 complex
+# models_config = "~/Documents/ObsidianNotes/AgentSync/config/claude-models.json"  # 凭证文件路径（~ 自动展开为主目录）
+# complex_model = "deepseek-v4-pro"     # 复杂问题模型 key
+# simple_model = "glm-5.3-flash"        # 简单问题模型 key
+# fallback_model = "deepseek-v4-flash"  # 兜底模型 key
+# classify_model = "deepseek-v4-flash"  # LLM 分类用模型 key
+# multimodal_model = "glm-5.3-flash"    # 多模态消息（图片/文件）时强制用的模型 key
+# use_llm_classify = true               # 规则未命中时是否用 LLM 兜底分类
+# classify_prompt = """                 # LLM 分类提示词（{text} 占位符替换为用户消息；不配则用内置默认）
+# 你是消息复杂度分类器。判断用户消息该用复杂模型还是简单模型，只回复 simple 或 complex 一个词。
+# 判 complex：根因分析、源码定位、代码审查、价格变价/不可售卖等证据链分析、相关性分析、订单问题排查、深度排查、多系统/多步推理、新增/修改脚本、整理文档、整理/修改 skill 和知识库。
+# 判 simple：简单查询（查券/会员/城市/排期/订单/缓存）、查告警/链路/traceId、问候寒暄、一句话回答。
+# 用户消息：{text}
+# """
+# complex_keywords = "根因,RCA,源码,代码审查,CR,review,变价,不可售卖,不命中,证据链,相关性,关联分析,订单问题,订单排查,多系统,多步推理,深度排查"  # 逗号分隔，命中即判 complex
+# simple_keywords = "查券,查会员,查城市,查排期,值班,你好,告警,链路,traceId"                    # 逗号分隔，命中即判 simple
+# complex_min_len = 800                 # 消息字符数（rune）超过即判 complex
 
 # Optional: per-project environment variables injected into Claude Code sessions.
 # This allows different projects to use different model providers (Kimi, Mimo, DeepSeek, etc.)

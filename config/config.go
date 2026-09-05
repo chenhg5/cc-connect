@@ -413,14 +413,20 @@ type AgentConfig struct {
 }
 
 // ModelRouterConfig routes messages to a simple vs complex model by complexity.
-// Model names, base URL and tokens are NOT configured here — they come from the
-// claude-models preset injected via ~/.zshrc (ANTHROPIC_MODEL = complex model,
-// ANTHROPIC_DEFAULT_HAIKU_MODEL = simple model). This section only holds the
-// routing rules (keywords, length, default tier).
+// Model credentials (base_url/token/model) are NOT configured here — they come
+// from the claude-models.json pointed to by models_config (the single source of
+// credentials). complex_model/simple_model/fallback_model/classify_model must
+// match keys under that file's `models` node.
 type ModelRouterConfig struct {
 	Enabled         bool   `toml:"enabled"`
-	UseLLM          bool   `toml:"use_llm,omitempty"`          // 规则未命中时是否用 LLM 兜底分类
-	ModelDefault    string `toml:"model_default"`              // "simple" | "complex"，分类失败兜底档位
+	ModelsConfig    string `toml:"models_config,omitempty"`    // claude-models.json 路径（唯一凭证源）
+	ComplexModel    string `toml:"complex_model,omitempty"`    // 复杂问题模型 key
+	SimpleModel     string `toml:"simple_model,omitempty"`     // 简单问题模型 key
+	FallbackModel   string `toml:"fallback_model,omitempty"`   // 兜底模型 key
+	ClassifyModel   string `toml:"classify_model,omitempty"`   // LLM 分类用模型 key
+	ClassifyPrompt  string `toml:"classify_prompt,omitempty"`  // LLM 分类提示词（{text} 占位符；空则用内置默认）
+	MultimodalModel string `toml:"multimodal_model,omitempty"` // 多模态消息（图片/文件）时强制用的模型 key
+	UseLLMClassify  bool   `toml:"use_llm_classify,omitempty"` // 规则未命中时是否用 LLM 兜底分类
 	ComplexKeywords string `toml:"complex_keywords,omitempty"` // comma-separated
 	SimpleKeywords  string `toml:"simple_keywords,omitempty"`  // comma-separated
 	ComplexMinLen   int    `toml:"complex_min_len,omitempty"`

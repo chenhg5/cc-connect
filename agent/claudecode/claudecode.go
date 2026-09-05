@@ -442,12 +442,19 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	workDir := a.workDir
 	mode := a.mode
 	extraEnv := a.runtimeEnvLocked()
-	// Inject the routed model via ANTHROPIC_MODEL env (authoritative for
-	// third-party providers; a non-standard --model flag would be rejected).
-	// MergeEnv guarantees this entry overrides any provider or inherited value.
-	// base_url / token stay inherited from the claude-models preset env.
+	// Inject the routed model's full credentials (base_url/token/model) from
+	// claude-models.json. MergeEnv guarantees these entries override any
+	// provider or inherited value, so routing no longer depends on ~/.zshrc.
 	if modelOverride.Model != "" {
-		extraEnv = core.MergeEnv(extraEnv, []string{"ANTHROPIC_MODEL=" + modelOverride.Model})
+		env := []string{"ANTHROPIC_MODEL=" + modelOverride.Model}
+		if modelOverride.BaseURL != "" {
+			env = append(env, "ANTHROPIC_BASE_URL="+modelOverride.BaseURL)
+		}
+		if modelOverride.APIKey != "" {
+			env = append(env, "ANTHROPIC_AUTH_TOKEN="+modelOverride.APIKey)
+			env = append(env, "ANTHROPIC_API_KEY=")
+		}
+		extraEnv = core.MergeEnv(extraEnv, env)
 	}
 
 	activeIdx := a.activeIdx

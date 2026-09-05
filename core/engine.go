@@ -2594,11 +2594,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// —— 模型路由：按复杂度选择 flash / pro ——
 	var targetModel string
 	if e.routerConfig.Enabled {
-		res := ClassifyMessage(e.ctx, msg.Content, e.routerConfig)
+		multimodal := len(msg.Images) > 0 || len(msg.Files) > 0 || msg.Audio != nil
+		res := ClassifyMessage(e.ctx, msg.Content, multimodal, e.routerConfig)
 		targetModel = res.Model
 		if targetModel != "" {
 			if overrider, ok := agent.(SessionModelOverrider); ok {
-				overrider.SetSessionModelOverride(ModelRouteOverride{Model: targetModel})
+				overrider.SetSessionModelOverride(res.Override)
 			}
 			if cur := e.currentSessionModel(interactiveKey); cur != "" && cur != targetModel {
 				slog.Info("model router: switching model",
