@@ -207,7 +207,7 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 	// 1. 复杂关键词
 	if containsAny(text, complexKws) {
 		tier = "complex"
-		reason = "命中复杂关键词"
+		reason = "命中复杂语义关键词"
 	} else if minLen > 0 && len([]rune(text)) >= minLen {
 		// 2. 长度阈值
 		tier = "complex"
@@ -215,7 +215,7 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 	} else if containsAny(text, simpleKws) {
 		// 3. 简单关键词
 		tier = "simple"
-		reason = "命中简单关键词"
+		reason = "命中简单语义关键词"
 	} else if cfg.UseLLMClassify && classifyCred.Model != "" {
 		// 4. LLM 兜底
 		if t, ok := classifyViaLLM(ctx, text, classifyCred, cfg.ClassifyPrompt, complexKws, simpleKws); ok {
@@ -301,6 +301,7 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 	payload := map[string]any{
 		"model":      cred.Model,
 		"max_tokens": 256,
+		"thinking":   map[string]any{"type": "disabled"}, // 分类只需回一个词，关闭推理避免 deepseek 输出 thinking 块浪费 token/时间
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
@@ -392,7 +393,7 @@ func FormatModelRouteResult(res ModelRouteResult) string {
 		return fmt.Sprintf("⚠️ 配置错误：%s", res.ConfigErr)
 	}
 	if res.Reason != "" {
-		return fmt.Sprintf("分类耗时 %s · 选中 %s · 原因 %s", formatElapsed(res.Elapsed), res.Model, res.Reason)
+		return fmt.Sprintf("分配模型：**%s**\n调度依据：%s\n路由耗时：%s", res.Model, res.Reason, formatElapsed(res.Elapsed))
 	}
-	return fmt.Sprintf("分类耗时 %s · 选中 %s", formatElapsed(res.Elapsed), res.Model)
+	return fmt.Sprintf("分配模型：**%s**\n路由耗时：%s", res.Model, formatElapsed(res.Elapsed))
 }

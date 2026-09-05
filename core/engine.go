@@ -3051,7 +3051,7 @@ func (e *Engine) currentSessionModel(sessionKey string) string {
 // (elapsed + selected model) so the routing decision is visible to the user.
 func (e *Engine) sendModelRouterCard(p Platform, replyCtx any, res ModelRouteResult) {
 	card := NewCard().
-		Title("模型路由", "indigo").
+		Title("🚦 模型路由", "indigo").
 		Markdown(FormatModelRouteResult(res)).
 		Build()
 	e.replyWithCard(p, replyCtx, card)
