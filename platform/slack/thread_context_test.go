@@ -147,14 +147,22 @@ func TestThreadHistoryFor_BootstrapRules(t *testing.T) {
 		// With the default session_scope="user" each participant holds a
 		// separate agent session, so a thread-only key would leave whoever
 		// spoke second permanently without context.
+		var calls int
 		p := newThreadContextPlatform(t, func(w http.ResponseWriter, r *http.Request) {
+			calls++
 			writeReplies(w, false, replyMessage("U9", "earlier", rootTS))
 		})
-		if _, mark := p.threadHistoryFor("slack:C123:U1", channel, rootTS, replyTS); mark != nil {
+		if block, mark := p.threadHistoryFor("slack:C123:U1", channel, rootTS, replyTS); block == "" || mark == nil {
+			t.Fatal("the first participant's session got no thread context")
+		} else {
 			mark()
 		}
 		if block, _ := p.threadHistoryFor("slack:C123:U2", channel, rootTS, secondTS); block == "" {
 			t.Error("the second participant's session got no thread context")
+		}
+		// Each session pays for its own bootstrap: two participants, two fetches.
+		if calls != 2 {
+			t.Errorf("conversations.replies was called %d times, want 2 (one per session)", calls)
 		}
 	})
 

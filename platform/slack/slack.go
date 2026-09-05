@@ -37,9 +37,14 @@ type Platform struct {
 	sessionScope string // "user" (default) | "channel" | "thread"
 	// threadContext bootstraps the agent with what a thread already contains
 	// the first time that thread reaches it (see thread_context.go).
-	threadContext       bool
-	threadContextDepth  int
-	bootstrappedThreads sync.Map     // set of "<sessionKey>\x00<threadTS>"; value time.Time is the claim time, read only by the TTL sweep (thread_context.go)
+	threadContext      bool
+	threadContextDepth int
+	// bootstrappedThreads is the set of "<sessionKey>\x00<threadTS>" pairs already
+	// handed their history; the value is the claim time, read only by the TTL
+	// sweep. Not capped: it is bounded by the distinct (session, thread) pairs the
+	// bot is pulled into within threadBootstrapTTL (7 days), each entry two short
+	// strings and a time.Time. See thread_context.go.
+	bootstrappedThreads sync.Map
 	lastBootstrapSweep  atomic.Int64 // last expiry sweep, unix nano
 	// selfBotID / selfUserID come from auth.test at Start and tell a quoted
 	// message written by THIS bot apart from one written by another app.
