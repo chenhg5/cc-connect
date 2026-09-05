@@ -5589,18 +5589,10 @@ func formatElapsed(d time.Duration) string {
 }
 
 func replyFooterModel(session AgentSession, agent Agent) string {
-	// 实际模型优先：session 记录了本次 spawn 的真实模型（含模型路由 override），
-	// 最能反映"实际用的模型"。footer_model 仅作为无 session 模型信息时的展示名兜底。
+	// 实际模型优先：session 记录了本次 spawn 的真实模型（含模型路由 override）。
 	if session != nil {
 		if getter, ok := session.(interface{ GetModel() string }); ok {
 			if model := strings.TrimSpace(getter.GetModel()); model != "" {
-				return model
-			}
-		}
-	}
-	if agent != nil {
-		if getter, ok := agent.(interface{ GetFooterModel() string }); ok {
-			if model := strings.TrimSpace(getter.GetFooterModel()); model != "" {
 				return model
 			}
 		}

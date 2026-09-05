@@ -759,13 +759,6 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # Optional: specify a model / 可选：指定模型
 # model = "claude-sonnet-4-20250514"
 
-# Optional: display-only model name shown in the reply footer.
-# This is NOT passed to the CLI as --model; use it to show a human-readable
-# model name (e.g. the backend model behind a proxy) without changing behavior.
-# 可选：回复页脚里展示的模型名（仅展示，不作为 --model 传给 CLI）。
-# 用于在走代理/中转时显示真实后端模型名，而不影响实际模型行为。
-# footer_model = "deepseek-v4-pro"
-
 # Optional: complexity-based model routing — simple questions use a cheap model,
 # complex questions use a stronger model. This is a project-level section
 # ([projects.model_router]), NOT under [projects.agent.options].

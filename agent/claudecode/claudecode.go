@@ -40,7 +40,6 @@ type Agent struct {
 	configEnv            []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	cliArgsFlag          string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
 	model                string
-	footerModel          string                  // footer 显示的模型名（仅展示，不传给 CLI 的 --model）
 	sessionModelOverride core.ModelRouteOverride // per-spawn model override set by the model router; read (and cleared) in StartSession
 	reasoningEffort      string                  // "low" | "medium" | "high" | "max"
 	mode                 string                  // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
@@ -132,7 +131,6 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	cliArgsFlag, _ := opts["cli_args_flag"].(string)
 	model, _ := opts["model"].(string)
-	footerModel, _ := opts["footer_model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
@@ -220,7 +218,6 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliExtraArgs:     cliExtraArgs,
 		cliArgsFlag:      cliArgsFlag,
 		model:            model,
-		footerModel:      footerModel,
 		reasoningEffort:  normalizeEffort(reasoningEffort),
 		mode:             mode,
 		systemPrompt:     systemPrompt,
@@ -309,12 +306,6 @@ func (a *Agent) GetModel() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
-}
-
-func (a *Agent) GetFooterModel() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.footerModel
 }
 
 func (a *Agent) SetReasoningEffort(effort string) {
@@ -808,9 +799,6 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.model != "" {
 		opts["model"] = a.model
-	}
-	if a.footerModel != "" {
-		opts["footer_model"] = a.footerModel
 	}
 	if a.reasoningEffort != "" {
 		opts["reasoning_effort"] = a.reasoningEffort
