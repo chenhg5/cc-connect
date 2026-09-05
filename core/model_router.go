@@ -271,6 +271,7 @@ func containsAny(text string, keywords []string) bool {
 // 返回 "simple" | "complex"。
 func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, prompt string) (string, bool) {
 	if cred.BaseURL == "" || cred.APIKey == "" || cred.Model == "" {
+		slog.Warn("model_router: llm classify skip, missing credential", "model", cred.Model, "has_base_url", cred.BaseURL != "", "has_api_key", cred.APIKey != "")
 		return "", false
 	}
 	if prompt == "" {
@@ -287,18 +288,20 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 
 	payload := map[string]any{
 		"model":      cred.Model,
-		"max_tokens": 4,
+		"max_tokens": 256,
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
+		slog.Warn("model_router: llm classify marshal failed", "model", cred.Model, "error", err)
 		return "", false
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
+		slog.Warn("model_router: llm classify new request failed", "model", cred.Model, "url", url, "error", err)
 		return "", false
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -308,41 +311,67 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 	client := &http.Client{Timeout: classifyTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		slog.Debug("model_router: llm classify failed", "error", err)
+		slog.Warn("model_router: llm classify request failed", "model", cred.Model, "url", url, "error", err)
 		return "", false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Debug("model_router: llm classify non-200", "status", resp.StatusCode)
+		if b, e := io.ReadAll(io.LimitReader(resp.Body, 512)); e == nil {
+			slog.Warn("model_router: llm classify non-200", "model", cred.Model, "status", resp.StatusCode, "body", strings.TrimSpace(string(b)))
+		} else {
+			slog.Warn("model_router: llm classify non-200", "model", cred.Model, "status", resp.StatusCode)
+		}
 		return "", false
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
+		slog.Warn("model_router: llm classify read body failed", "model", cred.Model, "error", err)
 		return "", false
 	}
 	var out struct {
 		Content []struct {
+			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
-		return "", false
-	}
-	if len(out.Content) == 0 {
+		slog.Warn("model_router: llm classify unmarshal failed", "model", cred.Model, "error", err, "body", truncate(string(data), 200))
 		return "", false
 	}
 
-	answer := strings.ToLower(strings.TrimSpace(out.Content[0].Text))
+	// 遍历所有 content 块收集 text 字段（跳过 thinking 块：deepseek 等 reasoning 模型
+	// 会先输出 thinking 块，真正的答复在后面的 text 块里）
+	var sb strings.Builder
+	for _, c := range out.Content {
+		if c.Text != "" {
+			sb.WriteString(c.Text)
+		}
+	}
+	answer := strings.ToLower(strings.TrimSpace(sb.String()))
+	if answer == "" {
+		slog.Warn("model_router: llm classify empty answer", "model", cred.Model, "body", truncate(string(data), 200))
+		return "", false
+	}
+
 	switch {
 	case strings.Contains(answer, "complex"):
 		return "complex", true
 	case strings.Contains(answer, "simple"):
 		return "simple", true
 	default:
+		slog.Warn("model_router: llm classify unexpected answer", "model", cred.Model, "answer", answer)
 		return "", false
 	}
+}
+
+// truncate 截断字符串到 n 字节（用于日志里的响应片段）。
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // FormatModelRouteResult 返回分类结果的可读描述（用于卡片/日志）。
