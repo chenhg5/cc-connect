@@ -471,13 +471,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 
 	// sessionModel is the actual model this session will use (routing-aware);
 	// it is recorded for the reply footer, while `model` keeps driving --model.
+	// 初始值仅为配置值；Claude 实际用的模型由 system 事件回填（见 session.go handleSystem）。
 	sessionModel := model
 	if modelOverride.Model != "" {
 		sessionModel = modelOverride.Model
-	}
-	// 无路由 override（enabled=false 或凭证缺失）时，实际模型来自继承的 env（.zshrc 的 ANTHROPIC_MODEL）
-	if sessionModel == "" {
-		sessionModel = os.Getenv("ANTHROPIC_MODEL")
 	}
 
 	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, sessionModel, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)

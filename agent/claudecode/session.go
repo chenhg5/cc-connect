@@ -354,6 +354,11 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 			return
 		}
 	}
+	// Claude Code 在 system init 消息里报告实际使用的模型，覆盖 spawn 时的配置值，
+	// 使 footer 显示「Claude 实际用的模型」而非配置的表面值。
+	if m, ok := raw["model"].(string); ok && m != "" {
+		cs.model.Store(m)
+	}
 }
 
 func (cs *claudeSession) handleAssistant(raw map[string]any) {
