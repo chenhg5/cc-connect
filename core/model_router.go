@@ -34,9 +34,10 @@ type ModelRouterConfig struct {
 
 // ModelRouteOverride 模型路由的 per-spawn 覆盖：完整凭证（来自 claude-models.json）。
 type ModelRouteOverride struct {
-	BaseURL string
-	APIKey  string
-	Model   string
+	BaseURL string   // 用于 LLM 分类请求
+	APIKey  string   // 用于 LLM 分类请求
+	Model   string   // 模型 ID（LLM 分类请求 + footer 显示）
+	Env     []string // 完整 env（claude-models.json 该模型 env 的所有字段），配啥注入啥
 }
 
 // ModelRouteResult 分类结果。
@@ -87,6 +88,14 @@ func loadClaudeModels(path string) map[string]ModelRouteOverride {
 		if cred.APIKey == "" {
 			cred.APIKey = env["ANTHROPIC_API_KEY"]
 		}
+		// 完整 env 原样收集，配啥注入啥（以后加任何新字段都自动注入，不挑拣）
+		var envList []string
+		for k, v := range env {
+			if v != "" {
+				envList = append(envList, k+"="+v)
+			}
+		}
+		cred.Env = envList
 		out[key] = cred
 	}
 	return out

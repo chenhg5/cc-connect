@@ -152,6 +152,44 @@ func TestLoadClaudeModels(t *testing.T) {
 	if m["deepseek-v4-pro"].BaseURL != "https://api.deepseek.com/anthropic" {
 		t.Fatalf("ds base_url=%q", m["deepseek-v4-pro"].BaseURL)
 	}
+	// 完整 env 原样收集（配啥注入啥）
+	glmEnv := m["glm-5.3-flash"].Env
+	if len(glmEnv) != 3 {
+		t.Fatalf("glm Env len=%d, want 3（BASE_URL/AUTH_TOKEN/MODEL）: %v", len(glmEnv), glmEnv)
+	}
+}
+
+func TestLoadClaudeModels_EnvAllFields(t *testing.T) {
+	// env 里配的所有字段（含额外项）都应进 Env，不挑拣
+	content := `{
+  "models": {
+    "glm-5.3-flash": {
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://open.bigmodel.cn/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "key-glm",
+        "ANTHROPIC_MODEL": "glm-5.3-flash",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3-flash",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "glm-5.3-flash",
+        "CUSTOM_FUTURE_KEY": "some-value"
+      }
+    }
+  }
+}`
+	p := filepath.Join(t.TempDir(), "claude-models.json")
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := loadClaudeModels(p)
+	env := m["glm-5.3-flash"].Env
+	joined := strings.Join(env, "\n")
+	for _, want := range []string{"ANTHROPIC_BASE_URL=", "ANTHROPIC_AUTH_TOKEN=", "ANTHROPIC_MODEL=", "ANTHROPIC_DEFAULT_HAIKU_MODEL=", "CLAUDE_CODE_SUBAGENT_MODEL=", "CUSTOM_FUTURE_KEY="} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("Env 缺少 %q：%v", want, env)
+		}
+	}
+	if len(env) != 6 {
+		t.Fatalf("Env len=%d, want 6（配啥注入啥）", len(env))
+	}
 }
 
 func TestFormatModelRouteResult(t *testing.T) {
