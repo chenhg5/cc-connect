@@ -1236,6 +1236,14 @@ app_secret = "your-feishu-app-secret"
 #                         # "thread" (one session per Slack thread — a new top-level message starts
 #                         #  a fresh session, replies in the same thread continue it).
 #                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话)
+# thread_context = true   # Default. When the bot is @-mentioned in a thread it did not start, read that
+#                         # thread once via conversations.replies and hand the earlier messages to the
+#                         # agent as context. Needs a *:history scope for the conversation type
+#                         # (channels:history / groups:history / im:history / mpim:history); without it
+#                         # the fetch is skipped with a warning and the message still goes through.
+#                         # 机器人被拉进已有话题串时，先读取该话题串的历史消息作为上下文（每个话题串只读一次）
+# thread_context_depth = 20  # How many earlier messages to read (default 20, max 100)
+#                            # 读取的历史消息条数（默认 20，上限 100）
 
 # Google Chat (uncomment to enable / 取消注释以启用)
 # Uses a registered Google Chat app whose Cloud Pub/Sub connection publishes
