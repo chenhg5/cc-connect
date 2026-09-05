@@ -475,6 +475,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	if modelOverride.Model != "" {
 		sessionModel = modelOverride.Model
 	}
+	// 无路由 override（enabled=false 或凭证缺失）时，实际模型来自继承的 env（.zshrc 的 ANTHROPIC_MODEL）
+	if sessionModel == "" {
+		sessionModel = os.Getenv("ANTHROPIC_MODEL")
+	}
 
 	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, sessionModel, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
 }
