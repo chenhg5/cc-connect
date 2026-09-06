@@ -175,6 +175,14 @@ type Platform struct {
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
 	cardActionMsgIDs map[string]string // sessionKey → messageID
+	// cardWidthMode controls the Feishu Card 2.0 `width_mode` config field for
+	// every interactive card this platform renders. Valid values are
+	// "default" (the platform default — half-width on desktop) and "full"
+	// (full chat window width on desktop + mobile, see issue #1797). The
+	// value is parsed from the platform-level `card_width_mode` config key
+	// during newPlatform and is normalised via normalizeCardWidthMode so
+	// downstream card builders always see one of the two valid strings.
+	cardWidthMode string
 	// activeThreadSessions tracks thread sessionKeys that have already been
 	// accepted by the bot. In group chats with thread_isolation, once a thread
 	// has been engaged (the first @bot message), subsequent attachment-only
@@ -284,6 +292,40 @@ func coerceMilliseconds(v any) (int64, error) {
 		return int64(x), nil
 	default:
 		return 0, fmt.Errorf("expected number, got %T", v)
+	}
+}
+
+// stringFromOption extracts a string value from the platform options map,
+// tolerating nil / missing keys by returning "".
+func stringFromOption(opts map[string]any, key string) string {
+	if opts == nil {
+		return ""
+	}
+	v, _ := opts[key].(string)
+	return v
+}
+
+// defaultCardWidthMode is the fallback width used when the operator does
+// not configure `card_width_mode` (or sets an empty / unknown value). It
+// matches the Feishu Card 2.0 default (half-width on desktop, full width
+// on mobile) so existing deployments render exactly as before.
+const defaultCardWidthMode = "default"
+
+// normalizeCardWidthMode validates a config-supplied card width mode and
+// returns the canonical "default" / "full" string the card builders expect.
+// Empty / unknown inputs are coerced to defaultCardWidthMode and logged at
+// Debug so a typo in config.toml doesn't silently change every card's
+// layout (issue #1797).
+func normalizeCardWidthMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "default":
+		return "default"
+	case "full":
+		return "full"
+	default:
+		slog.Debug("feishu: unknown card_width_mode, falling back to default",
+			"value", raw)
+		return defaultCardWidthMode
 	}
 }
 
@@ -415,6 +457,14 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		useInteractiveCard = v
 	}
 
+	// card_width_mode: controls the Feishu Card 2.0 `width_mode` config field
+	// (issue #1797). Valid values are "default" (current behaviour — half
+	// width on desktop, full width on mobile) and "full" (full chat window
+	// width on both desktop and mobile). Empty / unset / unknown values fall
+	// back to "default" with a Debug log so a typo doesn't silently change the
+	// look of every card.
+	cardWidthMode := normalizeCardWidthMode(stringFromOption(opts, "card_width_mode"))
+
 	imageBatchWindow := defaultImageBatchWindow
 	if raw, ok := opts["image_batch_window_ms"]; ok {
 		ms, err := coerceMilliseconds(raw)
@@ -471,6 +521,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
+		cardWidthMode:              cardWidthMode,
 		reactionEmoji:              reactionEmoji,
 		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
@@ -834,7 +885,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 					return &callback.CardActionTriggerResponse{
 						Card: &callback.Card{
 							Type: "raw",
-							Data: renderCardMap(card, sessionKey),
+							Data: renderCardMap(card, sessionKey, p.cardWidthMode),
 						},
 					}, nil
 				}
@@ -905,7 +956,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
-				Data: renderCardMap(cb.Build(), sessionKey),
+				Data: renderCardMap(cb.Build(), sessionKey, p.cardWidthMode),
 			},
 		}, nil
 	}
@@ -936,7 +987,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
-				Data: renderCardMap(cb.Build(), sessionKey),
+				Data: renderCardMap(cb.Build(), sessionKey, p.cardWidthMode),
 			},
 		}, nil
 	}
@@ -976,7 +1027,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				return &callback.CardActionTriggerResponse{
 					Card: &callback.Card{
 						Type: "raw",
-						Data: renderCardMap(cb.Build(), sessionKey),
+						Data: renderCardMap(cb.Build(), sessionKey, p.cardWidthMode),
 					},
 				}, nil
 			}
@@ -3206,7 +3257,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	msgType, msgBody := buildReplyContent(content, p.cardWidthMode)
 
 	if !p.shouldUseThreadOrReplyAPI(rc) {
 		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
@@ -3228,7 +3279,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
-	msgType, msgBody := buildReplyContent(content)
+	msgType, msgBody := buildReplyContent(content, p.cardWidthMode)
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
 }
 
@@ -3253,7 +3304,7 @@ func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, 
 	}
 	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
 	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
-	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
+	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter, p.cardWidthMode)
 	if p.shouldUseThreadOrReplyAPI(rc) {
 		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
 	}
@@ -3460,7 +3511,7 @@ func detectMimeType(data []byte) string {
 	return "image/png"
 }
 
-func buildReplyContent(content string) (msgType string, body string) {
+func buildReplyContent(content, cardWidthMode string) (msgType string, body string) {
 	// Feishu does not generate mention events for <at> tags in card/post
 	// messages sent by bots. Force MsgTypeText when a real mention is present
 	// (resolved to an <at user_id="..."> or <at id=...> tag) so Feishu
@@ -3479,7 +3530,7 @@ func buildReplyContent(content string) (msgType string, body string) {
 	if countMarkdownTables(content) > maxCardTables {
 		return larkim.MsgTypePost, buildPostMdJSON(content)
 	}
-	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)))
+	return larkim.MsgTypeInteractive, buildCardJSON(sanitizeMarkdownURLs(preprocessFeishuMarkdown(content)), cardWidthMode)
 }
 
 // hasComplexMarkdown detects code blocks or tables that require card rendering.
@@ -4513,12 +4564,17 @@ type feishuPreviewHandle struct {
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
 // Uses schema 2.0 which supports code blocks, tables, and inline formatting.
 // Card font is inherently smaller than Post/Text — this is a Feishu platform limitation.
-func buildCardJSON(content string) string {
+//
+// cardWidthMode controls the Feishu Card 2.0 `width_mode` config field and must be
+// one of "default" or "full" (issue #1797). Callers should pass the platform's
+// pre-validated p.cardWidthMode; the helper does not re-validate so a typo at the
+// caller surfaces immediately during development rather than being silently rewritten.
+func buildCardJSON(content, cardWidthMode string) string {
 	content = sanitizeCardMarkdownForCard(content)
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": cardWidthMode, // schema 2.0; was wide_screen_mode (schema 1.0, #1797)
 		},
 		"body": map[string]any{
 			"elements": []map[string]any{
@@ -4536,9 +4592,12 @@ func buildCardJSON(content string) string {
 // buildCardJSONWithStatusFooter builds an interactive card with a body
 // markdown element followed by a small/dim status-footer markdown element
 // (Lark `text_size: "notation"`). Empty footer falls through to buildCardJSON.
-func buildCardJSONWithStatusFooter(content, footer string) string {
+//
+// cardWidthMode is propagated to buildCardJSON on the empty-footer path and
+// to the inline body here; see issue #1797 for the original feature request.
+func buildCardJSONWithStatusFooter(content, footer, cardWidthMode string) string {
 	if strings.TrimSpace(footer) == "" {
-		return buildCardJSON(content)
+		return buildCardJSON(content, cardWidthMode)
 	}
 	segments := sanitizeCardMarkdownSegmentsForCard([]string{content, footer})
 	content = segments[0]
@@ -4560,7 +4619,7 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": cardWidthMode, // schema 2.0; was wide_screen_mode (schema 1.0, #1797)
 		},
 		"body": map[string]any{
 			"elements": elements,
@@ -4966,10 +5025,10 @@ func appendProgressGroupedElements(elements []map[string]any, items []core.Progr
 	return elements
 }
 
-func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string {
+func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload, cardWidthMode string) string {
 	items := normalizeProgressItems(payload)
 	if len(items) == 0 {
-		return buildCardJSON(" ")
+		return buildCardJSON(" ", cardWidthMode)
 	}
 
 	agent := progressAgentLabel(payload.Agent)
@@ -5011,7 +5070,7 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": cardWidthMode, // schema 2.0; was wide_screen_mode (schema 1.0, #1797)
 		},
 		"header": map[string]any{
 			"title": map[string]any{
@@ -5028,11 +5087,11 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 	return string(b)
 }
 
-func buildPreviewCardJSON(content string) string {
+func buildPreviewCardJSON(content, cardWidthMode string) string {
 	if payload, ok := core.ParseProgressCardPayload(content); ok {
-		return buildProgressCardJSONFromPayload(payload)
+		return buildProgressCardJSONFromPayload(payload, cardWidthMode)
 	}
-	return buildCardJSON(sanitizeMarkdownURLs(content))
+	return buildCardJSON(sanitizeMarkdownURLs(content), cardWidthMode)
 }
 
 // SendPreviewStart sends a new card message and returns a handle for subsequent edits.
@@ -5086,7 +5145,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 			sendContent = cardJSON
 		}
 	} else {
-		cardJSON = buildPreviewCardJSON(content)
+		cardJSON = buildPreviewCardJSON(content, p.cardWidthMode)
 		sendContent = cardJSON
 	}
 
@@ -5276,13 +5335,13 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		h.lastContent = content
 		h.mu.Unlock()
 	} else if payload, ok := core.ParseProgressCardPayload(content); ok {
-		cardJSON = buildProgressCardJSONFromPayload(payload)
+		cardJSON = buildProgressCardJSONFromPayload(payload, p.cardWidthMode)
 	} else {
 		processed := content
 		if containsMarkdown(content) {
 			processed = preprocessFeishuMarkdown(content)
 		}
-		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed))
+		cardJSON = buildCardJSON(sanitizeMarkdownURLs(processed), p.cardWidthMode)
 	}
 	// Route card-entity-bound messages to cardkit-v1 full-card update API.
 	// Im.Message.Patch on entity-referenced messages is silently no-op for the
@@ -5316,7 +5375,7 @@ func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHan
 	// resolve since the matching Send path resolves on the chat-thread API.
 	processedBody := sanitizeMarkdownURLs(preprocessFeishuMarkdown(content))
 	processedFooter := sanitizeMarkdownURLs(preprocessFeishuMarkdown(footer))
-	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter)
+	cardJSON := buildCardJSONWithStatusFooter(processedBody, processedFooter, p.cardWidthMode)
 	// Same card-entity routing as UpdateMessage above.
 	h.mu.Lock()
 	cardID := h.cardID
@@ -6930,7 +6989,12 @@ func isCardJSON(content string) bool {
 
 // buildCardJSONWithStatus builds a Feishu card JSON with a colored header
 // reflecting the given status. Used as a fallback when rich-card assembly fails.
-func buildCardJSONWithStatus(content string, status core.CardStatus) string {
+//
+// cardWidthMode controls the Feishu Card 2.0 `width_mode` config field (#1797).
+// Pre-existing callers always passed "default" implicitly via the hardcoded
+// value; passing it through explicitly now keeps the default rendering for
+// status-fallback cards while letting project-level config opt into "full".
+func buildCardJSONWithStatus(content string, status core.CardStatus, cardWidthMode string) string {
 	content = sanitizeCardMarkdownForCard(content)
 	template := "grey"
 	switch status {
@@ -6944,7 +7008,7 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"width_mode": "default", // schema 2.0 field; was wide_screen_mode (schema 1.0)
+			"width_mode": cardWidthMode, // schema 2.0; was wide_screen_mode (schema 1.0, #1797)
 		},
 		"header": map[string]any{
 			"template": template,
@@ -7065,11 +7129,15 @@ const maxRichCardJSONBytes = 28000
 // buildRichCard renders a Card 2.0 "single-card" turn with collapsible
 // reasoning/tool panels, streaming markdown body, status-colored header, and a
 // pre-composed multi-line statusFooter (engine-owned, includes elapsed).
-func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
+//
+// cardWidthMode is propagated to the basic-card fallback paths (#1797) so a
+// user who opted into "full" via project config still gets full-width cards
+// when the rich layout can't fit.
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, cardWidthMode string) string {
+	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter, cardWidthMode)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
-		return buildCardJSONWithStatus(markdown, status)
+		return buildCardJSONWithStatus(markdown, status, cardWidthMode)
 	}
 	if len(b) <= maxRichCardJSONBytes {
 		return string(b)
@@ -7088,7 +7156,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		{perLane: 3, textLen: 80},
 	} {
 		compactSteps := compactRichStepsForCardSize(steps, limit.perLane, limit.textLen)
-		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter)
+		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter, cardWidthMode)
 		if err == nil && len(compact) <= maxRichCardJSONBytes {
 			slog.Debug("feishu: rich card exceeded size limit, compacted panels",
 				"original_size", len(b),
@@ -7105,10 +7173,10 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		fallbackMarkdown = compactRichFallbackMarkdown(steps)
 	}
 	slog.Debug("feishu: rich card exceeds size limit, fallback to compact markdown card", "size", len(b))
-	return buildCardJSONWithStatus(fallbackMarkdown, status)
+	return buildCardJSONWithStatus(fallbackMarkdown, status, cardWidthMode)
 }
 
-func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) ([]byte, error) {
+func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, cardWidthMode string) ([]byte, error) {
 	reasoningSteps, toolSteps := splitRichStepsByLane(steps)
 	panelMaps := make([]map[string]any, 0, 2)
 	if len(reasoningSteps) > 0 {
@@ -7185,6 +7253,7 @@ func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markd
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
+			"width_mode":                 cardWidthMode, // schema 2.0; was wide_screen_mode (schema 1.0, #1797)
 			"streaming_mode":             streaming,
 			"update_multi":               true,
 			"enable_forward_interaction": true,
@@ -7291,7 +7360,7 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 // statusFooter (multi-line, '\n'-separated) and passes it through; the renderer
 // splits it back into one dim notation block per line.
 func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
+	return buildRichCard(status, title, steps, markdown, streaming, statusFooter, p.cardWidthMode)
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.
@@ -7314,7 +7383,7 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	if lastContent == "" {
 		return
 	}
-	cardJSON := buildCardJSONWithStatus(lastContent, status)
+	cardJSON := buildCardJSONWithStatus(lastContent, status, p.cardWidthMode)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -12,7 +12,7 @@ func decodeRenderedCard(t *testing.T, card *core.Card) map[string]any {
 	t.Helper()
 
 	var got map[string]any
-	if err := json.Unmarshal([]byte(renderCard(card, "")), &got); err != nil {
+	if err := json.Unmarshal([]byte(renderCard(card, "", "default")), &got); err != nil {
 		t.Fatalf("renderCard JSON decode failed: %v", err)
 	}
 	return got
@@ -235,7 +235,7 @@ func TestRenderCardMap_InjectsSessionKeyIntoCallbacks(t *testing.T) {
 		Select("Pick one", []core.CardSelectOption{{Text: "A", Value: "askq:0:1"}}, "").
 		Build()
 
-	got := renderCardMap(card, "feishu:oc_chat:root:om_root")
+	got := renderCardMap(card, "feishu:oc_chat:root:om_root", "default")
 	elements, ok := got["elements"].([]map[string]any)
 	if !ok || len(elements) != 3 {
 		t.Fatalf("elements = %#v, want 3 elements", got["elements"])
@@ -269,7 +269,7 @@ func TestRenderCardMap_InjectsSessionKeyIntoCallbacks(t *testing.T) {
 func TestBuildCardJSONWithStatusFooter(t *testing.T) {
 	body := "Hello world"
 	footer := "Opus 4.7 · ↑ 1 ↓ 168 · 4%\n~/path/to/ws"
-	jsonStr := buildCardJSONWithStatusFooter(body, footer)
+	jsonStr := buildCardJSONWithStatusFooter(body, footer, "default")
 
 	var card map[string]any
 	if err := json.Unmarshal([]byte(jsonStr), &card); err != nil {
@@ -302,13 +302,13 @@ func TestBuildCardJSONWithStatusFooter(t *testing.T) {
 
 func TestBuildCardJSONWithStatusFooter_EmptyFooterFallsThrough(t *testing.T) {
 	body := "Hello"
-	a := buildCardJSONWithStatusFooter(body, "")
-	b := buildCardJSON(body)
+	a := buildCardJSONWithStatusFooter(body, "", "default")
+	b := buildCardJSON(body, "default")
 	if a != b {
 		t.Errorf("empty footer should match buildCardJSON output\n got: %s\nwant: %s", a, b)
 	}
 	// whitespace-only footer also falls through
-	if got := buildCardJSONWithStatusFooter(body, "   \n  "); got != b {
+	if got := buildCardJSONWithStatusFooter(body, "   \n  ", "default"); got != b {
 		t.Errorf("whitespace footer should fall through to buildCardJSON")
 	}
 }
