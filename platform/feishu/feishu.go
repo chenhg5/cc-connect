@@ -114,18 +114,26 @@ type replyContext struct {
 }
 
 type Platform struct {
-	mu                         sync.RWMutex
-	platformName               string
-	domain                     string
-	appID                      string
-	appSecret                  string
-	progressStyle              string
-	useInteractiveCard         bool
-	self                       core.Platform
-	reactionEmoji              string
-	doneEmoji                  string
-	allowFrom                  string
-	allowChat                  string
+	mu                 sync.RWMutex
+	platformName       string
+	domain             string
+	appID              string
+	appSecret          string
+	progressStyle      string
+	useInteractiveCard bool
+	self               core.Platform
+	reactionEmoji      string
+	doneEmoji          string
+	allowFrom          string
+	allowChat          string
+	// catchupChats / catchupP2PChats are comma-separated chat IDs for the
+	// catch-up poller (platform/feishu/catchup.go), a REST-polling compensation
+	// channel for messages the best-effort WebSocket push drops. Group chats go
+	// in catchup_chats (@bot mention required), p2p chats in catchup_chats_p2p
+	// (every user message qualifies). Both empty = disabled.
+	catchupChats               string
+	catchupP2PChats            string
+	catchupCancel              context.CancelFunc
 	groupOnly                  bool
 	groupReplyAll              bool
 	respondToAtEveryoneAndHere bool
@@ -357,6 +365,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	allowChat, _ := opts["allow_chat"].(string)
+	catchupChats, _ := opts["catchup_chats"].(string)
+	catchupP2PChats, _ := opts["catchup_chats_p2p"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	// require_mention = false is equivalent to group_reply_all = true:
@@ -475,6 +485,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
 		allowChat:                  allowChat,
+		catchupChats:               strings.TrimSpace(catchupChats),
+		catchupP2PChats:            strings.TrimSpace(catchupP2PChats),
 		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
@@ -664,7 +676,15 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		return p.startWebhookMode()
 	}
 
-	return p.startWebSocketMode()
+	if err := p.startWebSocketMode(); err != nil {
+		return err
+	}
+	// Start the catch-up poller after the WebSocket connection is up: it
+	// compensates for messages the WebSocket push path drops. It is a no-op
+	// unless catchup_chats / catchup_chats_p2p are configured, and only runs
+	// on the primary owner of the shared WebSocket connection.
+	p.startCatchupPoller()
+	return nil
 }
 
 func (p *Platform) shouldUseWebhookMode() bool {
@@ -5404,6 +5424,8 @@ func (p *Platform) Stop() error {
 	// goroutine could outlive the platform and leak into the next
 	// start cycle.
 	p.stopGroupFilterSupervisor()
+	// Stop the catch-up poller so it doesn't outlive the platform.
+	p.stopCatchupPoller()
 	if p.isWSPrimary {
 		remaining := unregisterSharedWS(p)
 		if remaining > 0 {
