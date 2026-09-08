@@ -414,6 +414,16 @@ level = "info" # debug, info, warn, error
 #   message.received   — user message arrives / 用户消息到达
 #   message.sent       — legacy pre-delivery agent reply hook / 兼容旧版发送前事件
 #   message.finalized  — final reply send completed / 最终回复发送完成
+#                       (CC_HOOK_CHANGED=true only when the turn actually
+#                       modified the git working tree. Semantics: false does NOT
+#                       mean "no change" — non-git workspaces, fresh repos
+#                       without commits, or git failures always report false.
+#                       Fingerprint windows are serialized per workspace, so
+#                       concurrent turns cannot pollute each other's flag.)
+#                       (CC_HOOK_CHANGED 仅在该轮确实改动 git 工作树时为 true。
+#                       注意：false 不等于"无改动"——非 git 工作区、无提交的
+#                       新仓库或 git 失败时恒为 false。指纹窗口按工作区互斥，
+#                       并发轮次不会互相污染该标志。)
 #   session.started    — agent session spawned / Agent 会话启动
 #   session.ended      — agent session stopped / Agent 会话结束
 #   cron.triggered     — cron job fires / 定时任务触发
