@@ -1201,7 +1201,7 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		quotedText = quotedTextFromElements(d.MsgElements)
 	}
 	content = prependQuotedMessage(quotedText, content)
-	images := downloadAttachmentImages(d.Attachments)
+	images := downloadAttachmentImages(messageImageAttachments(d.Attachments, d.MessageReference, d.MessageType, d.MsgElements))
 	files := downloadAttachmentFiles(d.Attachments)
 	p.cacheMessage(d.ID, contentOrAttachmentSummary(content, d.Attachments))
 
@@ -1288,7 +1288,7 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 	content = prependQuotedMessage(quotedText, content)
 
 	// Download image and file attachments
-	images := downloadAttachmentImages(d.Attachments)
+	images := downloadAttachmentImages(messageImageAttachments(d.Attachments, d.MessageReference, d.MessageType, d.MsgElements))
 	files := downloadAttachmentFiles(d.Attachments)
 	p.cacheMessage(d.ID, contentOrAttachmentSummary(content, d.Attachments))
 
@@ -1485,6 +1485,47 @@ type attachment struct {
 	ContentType string `json:"content_type"`
 	URL         string `json:"url"`
 	Filename    string `json:"filename"`
+}
+
+// messageImageAttachments combines current images with images explicitly carried
+// by this event's quoted message. It never looks up an unrelated previous message.
+func messageImageAttachments(current []attachment, ref *messageReference, messageType *int, elements []msgElement) []attachment {
+	var images []attachment
+	seen := make(map[string]struct{})
+	add := func(attachments []attachment) {
+		for _, att := range attachments {
+			if !strings.HasPrefix(att.ContentType, "image/") {
+				continue
+			}
+			url := strings.TrimSpace(att.URL)
+			if url == "" {
+				continue
+			}
+			// Match the downloader's handling of QQ URLs without a scheme.
+			if !strings.HasPrefix(url, "http") {
+				url = "https://" + url
+			}
+			if _, exists := seen[url]; exists {
+				continue
+			}
+			seen[url] = struct{}{}
+			att.URL = url
+			images = append(images, att)
+		}
+	}
+	add(current)
+	if ref != nil {
+		for _, quoted := range []*quotedMessage{ref.Message, ref.ReferencedMessage, ref.SourceMessage} {
+			if quoted != nil {
+				add(quoted.Attachments)
+			}
+		}
+	}
+	// Official QQ quote payloads place the referenced message in element zero.
+	if messageType != nil && *messageType == msgTypeQuote && len(elements) > 0 {
+		add(elements[0].Attachments)
+	}
+	return images
 }
 
 // downloadAttachmentImages downloads all image attachments and returns ImageAttachments.
