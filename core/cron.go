@@ -567,8 +567,11 @@ func (cs *CronScheduler) signalWakeUp() {
 func (cs *CronScheduler) runLoop() {
 	defer close(cs.done)
 	for {
-		// Compute the earliest entry under read lock, then drop the lock
-		// for the timer wait so AddJob/RemoveJob don't block on sleep.
+		// Compute the earliest entry and the next wait duration under
+		// the read lock. We must read `earliest.nextRun` while still
+		// holding the lock, otherwise concurrent writers (AddJob,
+		// UpdateJob, or a backdated test entry) would race the timer
+		// computation that runs after the unlock.
 		cs.mu.RLock()
 		var earliest *cronEntry
 		for _, e := range cs.entries {
@@ -579,8 +582,6 @@ func (cs *CronScheduler) runLoop() {
 				earliest = e
 			}
 		}
-		cs.mu.RUnlock()
-
 		var wait time.Duration
 		if earliest == nil {
 			// No scheduled jobs. Sleep long; we'll be woken by wakeUp
@@ -599,6 +600,7 @@ func (cs *CronScheduler) runLoop() {
 			}
 			wait = d
 		}
+		cs.mu.RUnlock()
 
 		timer := time.NewTimer(wait)
 		select {
@@ -668,11 +670,8 @@ func (cs *CronScheduler) AddJob(job *CronJob) error {
 
 func (cs *CronScheduler) RemoveJob(id string) bool {
 	cs.mu.Lock()
-	hadEntry := false
-	if _, ok := cs.entries[id]; ok {
-		delete(cs.entries, id)
-		hadEntry = true
-	}
+	_, hadEntry := cs.entries[id]
+	delete(cs.entries, id)
 	cs.mu.Unlock()
 	if hadEntry {
 		cs.signalWakeUp()
@@ -696,11 +695,8 @@ func (cs *CronScheduler) DisableJob(id string) error {
 		return fmt.Errorf("job %q not found", id)
 	}
 	cs.mu.Lock()
-	hadEntry := false
-	if _, ok := cs.entries[id]; ok {
-		delete(cs.entries, id)
-		hadEntry = true
-	}
+	_, hadEntry := cs.entries[id]
+	delete(cs.entries, id)
 	cs.mu.Unlock()
 	if hadEntry {
 		cs.signalWakeUp()
@@ -763,11 +759,10 @@ func (cs *CronScheduler) UpdateJob(id string, field string, value any) error {
 	needsReschedule := field == "cron_expr" || field == "enabled"
 
 	if needsReschedule {
-		// Remove current schedule
+		// Drop the entry so the runLoop forgets the old schedule; we
+		// re-add it below from the updated job (if still enabled).
 		cs.mu.Lock()
-		if _, ok := cs.entries[id]; ok {
-			delete(cs.entries, id)
-		}
+		delete(cs.entries, id)
 		cs.mu.Unlock()
 	}
 
