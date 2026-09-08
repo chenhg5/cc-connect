@@ -18,6 +18,7 @@ cc-connect 完整功能使用指南。
 - [语音回复（文字转语音）](#语音回复文字转语音)
 - [图片与文件回传](#图片与文件回传)
 - [定时任务 (Cron)](#定时任务-cron)
+- [优雅重启与丢消息恢复](#优雅重启与丢消息恢复)
 - [Shell 配置](#shell-配置)
 - [多机器人中继](#多机器人中继)
 - [守护进程模式](#守护进程模式)
@@ -759,6 +760,63 @@ cc-connect cron del <job-id>
 > "每天早上6点帮我总结 GitHub trending"
 
 Claude Code 会自动创建定时任务。对依赖记忆文件的其他 Agent，先执行一次 `/cron setup` 或 `/bind setup`，效果相同。
+
+---
+
+## 优雅重启与丢消息恢复
+
+如果你的 Agent 在一个长会话的最后一步工具调用是重启 cc-connect
+（比如 `cc-connect daemon restart`），收到 SIGTERM 时上一条回复可能还
+没真正送到聊天窗口。v1.6.x 之前这种场景会在平台侧出现
+`context canceled`，用户看不到那条回复。
+
+v1.6.x 起 cc-connect 做三件事：
+
+1. **退出前最多 10 秒的优雅排空。** SIGTERM 触发的关闭会等待平台
+   API 调用完成，让用户的最后一条消息正常送达。超过 10 秒仍未完成
+   的回复交给下面的磁盘 journal 兜底。
+2. **把最近一条 pending reply 持久化到
+   `<dataDir>/run/last_reply.json`（权限 `0o600`）。** 这是给硬杀
+   （OOM、panic、SIGKILL）准备的兜底，绕开了优雅排空路径。重启后
+   engine 会按原始平台和会话自动重放。
+3. **按内容哈希去重。** 重放时如果平台 API 返回
+   `duplicate` / `already sent` / `重复`，journal 条目会被静默清
+   掉——用户意图已经达成。
+
+journal 只保留最近一条 pending reply，因为用户能感知到的丢消息永远
+是最近一轮。
+
+### 验证重启后最后一条回复是否真的送达
+
+如果你的 Agent 最后一步工具调用是重启 cc-connect，可以再排一个
+一次性 timer，让它在重启完成后读一下最近的聊天记录并回报：
+
+```bash
+cc-connect timer add --delay 15s --prompt "verify restart result and report"
+```
+
+这条命令排一个 15 秒后的一次性 timer，会在同一个会话里把 Agent
+唤醒，让它读最近的聊天并告诉你最后那条回复是否真的到了。如果在
+Agent 历史里仍看到 `context canceled`，journal 在下一次启动时已经
+成功重放——虽然平台原始 API 调用返回了 `context canceled`，但内容
+实际送达了。
+
+### 从管理 API 检查 journal
+
+`<dataDir>/run/last_reply.json` 是纯 JSON，可以直接读取（权限
+`0o600`）：
+
+```json
+{
+  "platform": "feishu",
+  "session_key": "feishu:chat:user",
+  "content": "...",
+  "content_hash": "<sha256 hex>",
+  "created_at": "2026-09-08T12:34:56Z"
+}
+```
+
+reply 送达（或被识别为重复）后，文件会自动删除。
 
 ---
 
