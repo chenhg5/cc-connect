@@ -9108,6 +9108,95 @@ func TestProcessInteractiveEvents_DrainsQueuedMessagesFIFOWithCreateTimes(t *tes
 	}
 }
 
+// TestProcessInteractiveEvents_DrainPreservesQueuedUserMessageTime verifies
+// that a user message queued behind an in-flight turn is stamped in history
+// with its original platform post time (queued.userMessageTimeMs), not the
+// time the queue was drained (which used to be the previous turn's response
+// time).
+func TestProcessInteractiveEvents_DrainPreservesQueuedUserMessageTime(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("qs-drain-time")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession:                 sess,
+		platform:                     p,
+		replyCtx:                     "ctx-turn1",
+		currentTurnUserMessageTimeMs: 1_000,
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-msg1", content: "msg1", userMessageTimeMs: 2_000},
+			{platform: p, replyCtx: "ctx-msg2", content: "msg2", userMessageTimeMs: 3_000},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	waitSendCount := func(n int) bool {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			sess.sendMu.Lock()
+			got := len(sess.sendCalls)
+			sess.sendMu.Unlock()
+			if got >= n {
+				return true
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		return false
+	}
+
+	go func() {
+		sess.events <- Event{Type: EventResult, Content: "response0", Done: true}
+		if waitSendCount(1) {
+			sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+		}
+		if waitSendCount(2) {
+			sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+		}
+	}()
+
+	session.AddHistory("user", "initial-msg")
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg0", time.Now(), nil, sendDone, "ctx-turn1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	// The drained queued user entries must keep their original post times.
+	want := map[string]time.Time{
+		"msg1": time.UnixMilli(2_000),
+		"msg2": time.UnixMilli(3_000),
+	}
+	got := map[string]time.Time{}
+	for _, h := range session.GetHistory(0) {
+		if h.Role == "user" {
+			got[h.Content] = h.Timestamp
+		}
+	}
+	for content, wantTS := range want {
+		gotTS, ok := got[content]
+		if !ok {
+			t.Fatalf("user history entry for %q not found", content)
+		}
+		if !gotTS.Equal(wantTS) {
+			t.Fatalf("queued user entry %q timestamp = %v, want original post time %v", content, gotTS, wantTS)
+		}
+	}
+}
+
 // replyCtxRecordingPlatform records (replyCtx, content) for each Send/Reply
 // so tests can assert which trigger context was used for which message.
 type replyCtxRecordingPlatform struct {
