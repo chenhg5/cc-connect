@@ -34,7 +34,9 @@ func receiptTestPlatform(t *testing.T, opts map[string]any, serve func(http.Resp
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "/auth/") {
-			fmt.Fprint(w, `{"code":0,"expire":7200,"tenant_access_token":"test-token"}`)
+			if _, err := fmt.Fprint(w, `{"code":0,"expire":7200,"tenant_access_token":"test-token"}`); err != nil {
+				t.Errorf("write fixture response: %v", err)
+			}
 			return
 		}
 		serve(w, r)
@@ -70,7 +72,8 @@ func TestReceiptAcknowledgement_AcceptedMessagePersistsThroughTypingCleanup(t *t
 			p := receiptTestPlatform(t, map[string]any{"ack_emoji": "Get", "reaction_emoji": processingEmoji}, func(w http.ResponseWriter, r *http.Request) {
 				req := receiptRequest{method: r.Method, path: r.URL.Path}
 				mu.Lock()
-				if r.Method == http.MethodPost {
+				switch r.Method {
+				case http.MethodPost:
 					var body struct {
 						ReactionType struct {
 							EmojiType string `json:"emoji_type"`
@@ -81,15 +84,19 @@ func TestReceiptAcknowledgement_AcceptedMessagePersistsThroughTypingCleanup(t *t
 					}
 					req.emoji = body.ReactionType.EmojiType
 					active[req.emoji] = "reaction-" + req.emoji
-					fmt.Fprintf(w, `{"code":0,"data":{"reaction_id":%q}}`, "reaction-"+req.emoji)
-				} else if r.Method == http.MethodDelete {
+					if _, err := fmt.Fprintf(w, `{"code":0,"data":{"reaction_id":%q}}`, "reaction-"+req.emoji); err != nil {
+						t.Errorf("write fixture response: %v", err)
+					}
+				case http.MethodDelete:
 					for emoji, id := range active {
 						if strings.HasSuffix(r.URL.Path, "/"+id) {
 							delete(active, emoji)
 						}
 					}
-					fmt.Fprint(w, `{"code":0}`)
-				} else {
+					if _, err := fmt.Fprint(w, `{"code":0}`); err != nil {
+						t.Errorf("write fixture response: %v", err)
+					}
+				default:
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 				}
 				mu.Unlock()
@@ -180,9 +187,13 @@ func TestReceiptAcknowledgement_SlowOrFailedAPIIsBestEffort(t *testing.T) {
 				close(started)
 				<-release
 				if fail {
-					fmt.Fprint(w, `{"code":99991672,"msg":"permission denied"}`)
+					if _, err := fmt.Fprint(w, `{"code":99991672,"msg":"permission denied"}`); err != nil {
+						t.Errorf("write fixture response: %v", err)
+					}
 				} else {
-					fmt.Fprint(w, `{"code":0,"data":{"reaction_id":"receipt"}}`)
+					if _, err := fmt.Fprint(w, `{"code":0,"data":{"reaction_id":"receipt"}}`); err != nil {
+						t.Errorf("write fixture response: %v", err)
+					}
 				}
 			})
 			var accepted atomic.Int32
@@ -212,9 +223,13 @@ func TestReceiptAcknowledgement_OnlyAdmittedInboundEvents(t *testing.T) {
 	p := receiptTestPlatform(t, map[string]any{"ack_emoji": "Get"}, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/reactions") {
 			requests <- receiptRequest{method: r.Method, path: r.URL.Path}
-			fmt.Fprint(w, `{"code":0,"data":{"reaction_id":"receipt"}}`)
+			if _, err := fmt.Fprint(w, `{"code":0,"data":{"reaction_id":"receipt"}}`); err != nil {
+				t.Errorf("write fixture response: %v", err)
+			}
 		} else if strings.HasSuffix(r.URL.Path, "/reply") {
-			fmt.Fprint(w, `{"code":0,"data":{"message_id":"denied-reply"}}`)
+			if _, err := fmt.Fprint(w, `{"code":0,"data":{"message_id":"denied-reply"}}`); err != nil {
+				t.Errorf("write fixture response: %v", err)
+			}
 		} else {
 			t.Errorf("unexpected request: %s", r.URL.Path)
 		}
@@ -258,7 +273,9 @@ func TestReceiptAcknowledgement_ImageBatchUsesAcceptedCanonicalMessage(t *testin
 	requests := make(chan receiptRequest, 10)
 	p := receiptTestPlatform(t, map[string]any{"ack_emoji": "Get", "reaction_emoji": "Get"}, func(w http.ResponseWriter, r *http.Request) {
 		requests <- receiptRequest{method: r.Method, path: r.URL.Path}
-		fmt.Fprint(w, `{"code":0,"data":{"reaction_id":"reaction-Get"}}`)
+		if _, err := fmt.Fprint(w, `{"code":0,"data":{"reaction_id":"reaction-Get"}}`); err != nil {
+			t.Errorf("write fixture response: %v", err)
+		}
 	})
 	var msg *core.Message
 	p.handler = func(_ core.Platform, m *core.Message) { msg = m; m.OnAccepted() }
@@ -298,7 +315,9 @@ func TestReceiptAcknowledgement_TypingStopsBeforeReceiptCompletes(t *testing.T) 
 		}
 		close(started)
 		<-release
-		fmt.Fprint(w, `{"code":0,"data":{"reaction_id":"receipt"}}`)
+		if _, err := fmt.Fprint(w, `{"code":0,"data":{"reaction_id":"receipt"}}`); err != nil {
+			t.Errorf("write fixture response: %v", err)
+		}
 	})
 	p.handler = func(_ core.Platform, m *core.Message) { m.OnAccepted() }
 	msg := receiptMessage()
