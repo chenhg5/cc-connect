@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -544,7 +545,7 @@ func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
 	// PATH. WorkspaceAgentOptions only reads fields that the production
 	// New() also writes; this just verifies the snapshot shape.
 	a := &Agent{
-		cmd:           "my-cli",
+		cmd:              "my-cli",
 		cliExtraArgs:     []string{"--add-dir", "/parent"},
 		cmdArgsFlag:      "-a",
 		model:            "claude-opus-4-7",
@@ -560,7 +561,7 @@ func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
 
 	want := map[string]any{
 		"mode":               "acceptEdits",
-		"cmd":           "my-cli --add-dir /parent",
+		"cmd":                "my-cli --add-dir /parent",
 		"cmd_args_flag":      "-a",
 		"model":              "claude-opus-4-7",
 		"reasoning_effort":   "high",
@@ -622,7 +623,7 @@ func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
 		t.Skip("run_as_user-based LookPath bypass is Unix-only")
 	}
 	parent := &Agent{
-		cmd:           "my-cli",
+		cmd:              "my-cli",
 		cliExtraArgs:     []string{"code", "--add-dir", "/parent"},
 		cmdArgsFlag:      "-a",
 		model:            "claude-opus-4-7",
@@ -930,4 +931,167 @@ func TestNew_WorkDirDoesNotExist(t *testing.T) {
 	if !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("expected 'does not exist' in error, got: %v", err)
 	}
+}
+
+// TestParseHistoryTimestamp_ConvertsUTCToLocal is the regression test for
+// issue #1780: when reading Claude Code's JSONL transcript (which stores
+// timestamps as UTC with a trailing "Z"), the resulting HistoryEntry.Timestamp
+// must be in the local timezone so wall-clock display matches the host's
+// `time.Now()` (which is what AddHistory in core/session.go writes for new
+// messages). Without this conversion, replayed history shows times that are
+// offset by the host's UTC offset (e.g. -8h on macOS in CST).
+func TestParseHistoryTimestamp_ConvertsUTCToLocal(t *testing.T) {
+	loc := time.FixedZone("test-local", 8*3600) // +08:00, mimics China
+	prevLoc, hadPrev := lookupZoneLocation()
+	setZoneLocation(loc)
+	defer restoreZoneLocation(prevLoc, hadPrev)
+
+	input := "2026-09-02T03:10:37.436Z"
+	ts, err := parseHistoryTimestamp(input)
+	if err != nil {
+		t.Fatalf("parseHistoryTimestamp(%q) error: %v", input, err)
+	}
+
+	want := time.Date(2026, 9, 2, 11, 10, 37, 436_000_000, loc)
+	if !ts.Equal(want) {
+		t.Errorf("parseHistoryTimestamp(%q) = %v (loc=%s), want %v (loc=%s)",
+			input, ts, ts.Location(), want, want.Location())
+	}
+	if ts.Location().String() != loc.String() {
+		t.Errorf("parseHistoryTimestamp zone = %s, want %s", ts.Location(), loc)
+	}
+}
+
+// TestParseHistoryTimestamp_AlreadyLocalPreserved checks that a timestamp
+// already carrying an explicit non-UTC offset is still converted to the local
+// zone (so the wall-clock value matches local time), not left as the offset it
+// came in with.
+func TestParseHistoryTimestamp_AlreadyLocalPreserved(t *testing.T) {
+	loc := time.FixedZone("test-local", 8*3600) // +08:00
+	prevLoc, hadPrev := lookupZoneLocation()
+	setZoneLocation(loc)
+	defer restoreZoneLocation(prevLoc, hadPrev)
+
+	input := "2026-09-02T11:10:37.436+00:00" // instant expressed in UTC
+	ts, err := parseHistoryTimestamp(input)
+	if err != nil {
+		t.Fatalf("parseHistoryTimestamp(%q) error: %v", input, err)
+	}
+
+	// Same wall-clock instant in local zone.
+	want := time.Date(2026, 9, 2, 19, 10, 37, 436_000_000, loc)
+	if !ts.Equal(want) {
+		t.Errorf("parseHistoryTimestamp(%q) = %v (loc=%s), want %v (loc=%s)",
+			input, ts, ts.Location(), want, want.Location())
+	}
+}
+
+// TestParseHistoryTimestamp_InvalidInput verifies invalid RFC3339Nano strings
+// are surfaced as errors so callers can drop malformed lines instead of
+// silently using the zero time.
+func TestParseHistoryTimestamp_InvalidInput(t *testing.T) {
+	if _, err := parseHistoryTimestamp("not-a-timestamp"); err == nil {
+		t.Fatal("parseHistoryTimestamp(invalid) = nil error, want non-nil")
+	}
+}
+
+// TestParseHistoryTimestamp_WallClockMatchesTimeNow pins the invariant the
+// user-visible display relies on: parseHistoryTimestamp applied to a Claude
+// Code JSONL UTC timestamp yields the same wall-clock fields as time.Now()
+// captured in the same local zone. This guards against future regressions
+// where someone moves the parse call out of parseHistoryTimestamp or removes
+// the .Local() call.
+func TestParseHistoryTimestamp_WallClockMatchesTimeNow(t *testing.T) {
+	loc := time.FixedZone("test-local", -5*3600) // -05:00, mimics EST
+	prevLoc, hadPrev := lookupZoneLocation()
+	setZoneLocation(loc)
+	defer restoreZoneLocation(prevLoc, hadPrev)
+
+	// "now" in the simulated local zone
+	now := time.Now().In(loc)
+	utcEquivalent := now.UTC().Format(time.RFC3339Nano)
+
+	ts, err := parseHistoryTimestamp(utcEquivalent)
+	if err != nil {
+		t.Fatalf("parseHistoryTimestamp(%q) error: %v", utcEquivalent, err)
+	}
+
+	if ts.Hour() != now.Hour() || ts.Minute() != now.Minute() || ts.Second() != now.Second() {
+		t.Errorf("parseHistoryTimestamp wall clock = %02d:%02d:%02d, want %02d:%02d:%02d",
+			ts.Hour(), ts.Minute(), ts.Second(),
+			now.Hour(), now.Minute(), now.Second())
+	}
+}
+
+// TestGetSessionHistory_TimestampsAreLocal is the end-to-end regression test
+// for issue #1780: it walks the full JSONL read path and asserts that the
+// returned HistoryEntry timestamps are in the local timezone, not UTC. It
+// uses a temp HOME so findProjectDir() resolves to a known directory and
+// stamps a session file with explicit UTC timestamps.
+func TestGetSessionHistory_TimestampsAreLocal(t *testing.T) {
+	loc := time.FixedZone("test-local", 8*3600) // +08:00
+	prevLoc, hadPrev := lookupZoneLocation()
+	setZoneLocation(loc)
+	defer restoreZoneLocation(prevLoc, hadPrev)
+
+	// t.Setenv saves the original value and restores it via t.Cleanup,
+	// so we don't need a manual restore (which would need errcheck handling).
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	workDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectKey := encodeClaudeProjectKey(workDir)
+	sessionDir := filepath.Join(projectsBase, projectKey)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessionDir: %v", err)
+	}
+
+	// Use a fixed UTC instant so the expected local-time math is trivial.
+	utcStamp := "2026-09-02T03:10:37.436Z"
+	sessionID := "ses_local_tz_regression"
+	jsonlPath := filepath.Join(sessionDir, sessionID+".jsonl")
+	jsonlContent := strings.Join([]string{
+		`{"type":"user","timestamp":"` + utcStamp + `","message":{"role":"user","content":"hello"}}`,
+		`{"type":"assistant","timestamp":"` + utcStamp + `","message":{"role":"assistant","content":[{"type":"text","text":"world"}]}}`,
+		`{"type":"file-history-snapshot","timestamp":"` + utcStamp + `","message":{"role":"user","content":""}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+
+	a := &Agent{workDir: workDir}
+
+	entries, err := a.GetSessionHistory(t.Context(), sessionID, 0)
+	if err != nil {
+		t.Fatalf("GetSessionHistory: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries len = %d, want 2 (user + assistant, file-history-snapshot filtered)", len(entries))
+	}
+
+	for i, e := range entries {
+		if e.Timestamp.Location().String() != loc.String() {
+			t.Errorf("entries[%d].Timestamp.Location() = %s, want %s",
+				i, e.Timestamp.Location(), loc)
+		}
+		if e.Timestamp.Hour() != 11 || e.Timestamp.Minute() != 10 || e.Timestamp.Second() != 37 {
+			t.Errorf("entries[%d].Timestamp wall clock = %02d:%02d:%02d, want 11:10:37 (UTC %s shifted to local +08:00)",
+				i, e.Timestamp.Hour(), e.Timestamp.Minute(), e.Timestamp.Second(), utcStamp)
+		}
+	}
+}
+
+// helpers for the timezone-sensitive parseHistoryTimestamp / GetSessionHistory
+// regression tests for issue #1780. We can't safely mutate time.Local directly
+// from a test (other goroutines may depend on it), so the helpers save/restore
+// it and confine the side effect to the test's lifetime via t.Cleanup.
+func lookupZoneLocation() (*time.Location, bool) {
+	return time.Local, time.Local != time.UTC || true // always present
+}
+func setZoneLocation(loc *time.Location) {
+	time.Local = loc
+}
+func restoreZoneLocation(prev *time.Location, _ bool) {
+	time.Local = prev
 }

@@ -716,6 +716,20 @@ func stripXMLTags(s string) string {
 	return xmlTagRe.ReplaceAllString(s, "")
 }
 
+// parseHistoryTimestamp parses an RFC3339Nano timestamp from a Claude Code
+// JSONL transcript entry and converts it to the local timezone so the wall-clock
+// time matches what `time.Now()` produces on the host (which is what AddHistory
+// in core/session.go writes for new messages). Without this conversion, history
+// fallback paths (e.g. /history in cc-connect when the local history is empty)
+// display UTC clock times instead of local clock times (issue #1780).
+func parseHistoryTimestamp(s string) (time.Time, error) {
+	ts, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return ts.Local(), nil
+}
+
 // GetSessionHistory reads the Claude Code JSONL transcript and returns user/assistant messages.
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
 	homeDir, err := os.UserHomeDir()
@@ -758,7 +772,7 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 			continue
 		}
 
-		ts, _ := time.Parse(time.RFC3339Nano, raw.Timestamp)
+		ts, _ := parseHistoryTimestamp(raw.Timestamp)
 		text := extractTextContent(raw.Message.Content)
 		if text == "" {
 			continue
