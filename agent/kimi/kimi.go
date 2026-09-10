@@ -50,7 +50,14 @@ type Agent struct {
 	activeIdx    int // -1 = no provider set
 	sessionEnv   []string
 	flagSupport  kimiFlagSupport // detected once at New() via `kimi --help`
-	mu           sync.RWMutex
+	discovered   []core.ModelOption
+	// discovered holds the model identifiers the startup probe learned
+	// from the installed kimi-code CLI (see probeKimiModels, #1795). Nil
+	// when the probe failed (CLI missing, older kimi-cli dialect without
+	// the `model list` subcommand, or unparseable output); in that case
+	// AvailableModels falls back to kimiBuiltinModels so users on older
+	// CLIs keep seeing *some* picker options instead of an empty list.
+	mu sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -90,6 +97,13 @@ func New(opts map[string]any) (core.Agent, error) {
 	// back to assuming the modern CLI (no --print).
 	flagSupport := probeKimiFlags(context.Background(), cmd, 5*time.Second)
 
+	// Also probe the locally installed CLI for its currently-registered
+	// model identifiers so the /model picker tracks the installed CLI
+	// instead of drifting every release (#1795). When the probe returns
+	// nothing (older kimi-cli dialect, binary unreachable, unparseable
+	// output) AvailableModels falls back to kimiBuiltinModels.
+	discovered := probeKimiModels(context.Background(), cmd, 5*time.Second)
+
 	return &Agent{
 		workDir:      workDir,
 		model:        model,
@@ -100,6 +114,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		timeout:      timeout,
 		activeIdx:    -1,
 		flagSupport:  flagSupport,
+		discovered:   discovered,
 	}, nil
 }
 
@@ -152,15 +167,52 @@ func (a *Agent) configuredModels() []core.ModelOption {
 	return core.GetProviderModels(a.providers, a.activeIdx)
 }
 
+func (a *Agent) discoveredModels() []core.ModelOption {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.discovered
+}
+
+// AvailableModels returns the model options for the /model picker.
+//
+// Resolution order (#1795):
+//  1. If a provider is configured with explicit models, use those.
+//  2. Otherwise, prefer the startup-probe result so the picker follows the
+//     installed kimi-code CLI instead of drifting every release. The probe
+//     is opportunistic — it tries `kimi model list`, `kimi models`, and
+//     `kimi models list`, and the parser is tolerant of various output
+//     layouts so future CLI tweaks don't silently empty the picker.
+//  3. Finally, fall back to kimiBuiltinModels. The list is refreshed for
+//     every cc-connect release (latest known models first, oldest kept for
+//     backward compatibility) so even users on CLIs that don't expose the
+//     `model list` subcommand still see current options.
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
+	if models := a.discoveredModels(); len(models) > 0 {
+		return models
+	}
+	return kimiBuiltinModels()
+}
+
+// kimiBuiltinModels returns the static fallback list used when no provider
+// is configured AND the startup probe could not discover installed models
+// (older kimi-cli dialect, CLI unreachable, unparseable probe output, …).
+//
+// The list is ordered newest-first and includes legacy K2 / K2.5 entries at
+// the bottom for users still on those CLIs — refreshing the *entire* list
+// to only new models would silently break /model selection for anyone who
+// hasn't upgraded yet, while keeping the old list frozen at K2/K2.5 is the
+// bug #1795 is reporting. See #1795 for context.
+func kimiBuiltinModels() []core.ModelOption {
 	return []core.ModelOption{
-		{Name: "kimi-k2-0711-preview", Desc: "Kimi K2 (most capable)"},
-		{Name: "kimi-k2-0711", Desc: "Kimi K2"},
+		{Name: "k3", Desc: "Kimi K3 (current default)"},
+		{Name: "k3-256k", Desc: "Kimi K3 256k (long context)"},
 		{Name: "kimi-k2-5-preview", Desc: "Kimi K2.5 (balanced)"},
 		{Name: "kimi-k2-5", Desc: "Kimi K2.5"},
+		{Name: "kimi-k2-0711-preview", Desc: "Kimi K2 (legacy)"},
+		{Name: "kimi-k2-0711", Desc: "Kimi K2"},
 	}
 }
 
