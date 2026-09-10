@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -53,18 +54,39 @@ func TestBodyFromItemList_Quote(t *testing.T) {
 	}
 }
 
-func TestSplitUTF8(t *testing.T) {
-	s := string([]rune{'a', '啊', 'b', '吧', 'c'})
-	parts := splitUTF8(s, 2)
-	if len(parts) != 3 || parts[0] != "a啊" || parts[1] != "b吧" || parts[2] != "c" {
-		t.Fatalf("parts=%#v", parts)
+// TestChunkingKeepsCodeFencesBalanced is a regression test for the outbound
+// splitter. The previous implementation cut purely on rune count, so a chunk
+// boundary landing inside a fenced code block left the first message with an
+// unclosed fence and the second one starting as bare text. Worse, the trailing
+// fence then arrived alone and the client read it as the *start* of a new code
+// block, swallowing whatever followed.
+func TestChunkingKeepsCodeFencesBalanced(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("intro line\n\n```go\n")
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&sb, "L%03d %s\n", i, strings.Repeat("x", 40))
+	}
+	sb.WriteString("```\ntrailing line")
+
+	chunks := core.SplitMessageCodeFenceAware(sb.String(), maxWeixinChunk)
+	if len(chunks) < 2 {
+		t.Fatalf("expected the sample to split, got %d chunk(s)", len(chunks))
+	}
+	for i, c := range chunks {
+		if n := strings.Count(c, "```"); n%2 != 0 {
+			t.Errorf("chunk %d/%d has %d fence markers, want an even count so the block is closed",
+				i+1, len(chunks), n)
+		}
+		if got := utf8.RuneCountInString(c); got > maxWeixinChunk {
+			t.Errorf("chunk %d/%d is %d runes, want <= %d", i+1, len(chunks), got, maxWeixinChunk)
+		}
 	}
 }
 
-func TestSplitUTF8Empty(t *testing.T) {
-	parts := splitUTF8("", maxWeixinChunk)
-	if len(parts) != 1 || parts[0] != "" {
-		t.Fatalf("parts=%#v", parts)
+func TestChunkingShortMessageStaysSingle(t *testing.T) {
+	chunks := core.SplitMessageCodeFenceAware("", maxWeixinChunk)
+	if len(chunks) != 1 || chunks[0] != "" {
+		t.Fatalf("chunks=%#v", chunks)
 	}
 }
 
