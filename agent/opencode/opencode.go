@@ -32,10 +32,11 @@ type Agent struct {
 	workDir              string
 	model                string
 	mode                 string
-	cmd                  string   // CLI binary name, default "opencode"
-	cliExtraArgs         []string // extra args from cmd after the binary name
-	configEnv            []string // env vars from [projects.agent.options.env]
-	agentName            string // passed as --agent to opencode (for plugin-defined agents)
+	cmd                  string      // CLI binary name, default "opencode"
+	cliExtraArgs         []string    // extra args from cmd after the binary name
+	configEnv            []string    // env vars from [projects.agent.options.env]
+	agentName            string      // passed as --agent to opencode (for plugin-defined agents)
+	agentList            []AgentInfo // cached full `opencode agent list` result (incl. subagents) for SetAgent validation
 	providers            []core.ProviderConfig
 	activeIdx            int
 	sessionEnv           []string
@@ -83,7 +84,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("opencode: %q CLI not found in PATH, install from: https://github.com/opencode-ai/opencode", cmd)
 	}
 
-	return &Agent{
+	a := &Agent{
 		workDir:              workDir,
 		model:                model,
 		mode:                 mode,
@@ -94,7 +95,32 @@ func New(opts map[string]any) (core.Agent, error) {
 		activeIdx:            -1,
 		modelCachePath:       modelCachePath,
 		persistentModelCache: persistentModelCache,
-	}, nil
+	}
+
+	if agentName != "" {
+		validateConfiguredAgentAtStartup(a, agentName)
+	}
+	return a, nil
+}
+
+// validateConfiguredAgentAtStartup checks the configured agent and logs a
+// structured warning when it cannot be used as the main agent. It never
+// blocks startup and never modifies configuration.
+func validateConfiguredAgentAtStartup(a *Agent, configured string) {
+	problem, available := a.ValidateConfiguredAgent(configured)
+	if problem == "" {
+		return
+	}
+	if strings.HasPrefix(problem, agentValidationSkippedPrefix) {
+		slog.Warn("opencode: agent validation skipped, could not enumerate available agents",
+			"configured_agent", configured,
+			"reason", strings.TrimPrefix(problem, agentValidationSkippedPrefix))
+		return
+	}
+	slog.Warn("opencode: configured agent is not usable; opencode silently falls back to the default agent",
+		"configured_agent", configured,
+		"reason", problem,
+		"available_agents", strings.Join(available, ", "))
 }
 
 func opencodeProjectModelCachePath(dataDir, project string) string {
@@ -527,6 +553,85 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Standard mode", DescZh: "标准模式"},
 		{Key: "yolo", Name: "YOLO", NameZh: "全自动", Desc: "Auto-approve all tool calls", DescZh: "自动批准所有工具调用"},
 	}
+}
+
+// -- AgentSwitcher --
+
+// SetAgent switches the active --agent value passed to opencode. An empty
+// name clears the value (the CLI default agent applies). A non-empty target
+// is validated against the last enumeration from `opencode agent list`
+// (populated by AvailableAgents): subagent, internal, and unknown names are
+// rejected. When no enumeration is available (never fetched or fetch
+// failed), only internal names are rejected so configured values remain
+// switchable by name (see core.AgentSwitcher).
+func (a *Agent) SetAgent(name string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	name = strings.TrimSpace(name)
+	if name == "" {
+		a.agentName = ""
+		slog.Info("opencode: agent cleared (default applies)")
+		return nil
+	}
+	if len(a.agentList) > 0 {
+		for _, info := range a.agentList {
+			if info.Name != name {
+				continue
+			}
+			if info.Mode == AgentModeSubagent {
+				return fmt.Errorf("opencode: agent %q is a subagent and cannot be used as a primary agent", name)
+			}
+			a.agentName = name
+			slog.Info("opencode: agent changed", "agent", name)
+			return nil
+		}
+		return fmt.Errorf("opencode: unknown agent %q", name)
+	}
+	if isInternalAgentName(name) {
+		return fmt.Errorf("opencode: agent %q is an internal agent and cannot be used as a primary agent", name)
+	}
+	a.agentName = name
+	slog.Info("opencode: agent changed", "agent", name)
+	return nil
+}
+
+func (a *Agent) GetAgent() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.agentName
+}
+
+// AvailableAgents enumerates switchable agents (primary/all mode) via
+// `opencode agent list` and caches the full result for SetAgent validation.
+// A nil result means enumeration failed; callers degrade gracefully.
+func (a *Agent) AvailableAgents(ctx context.Context) []core.AgentInfo {
+	agents, err := listAgents(ctx, a.cmd, a.workDir)
+	if err != nil {
+		slog.Warn("opencode: list agents failed", "err", err)
+		return nil
+	}
+	a.mu.Lock()
+	a.agentList = agents
+	a.mu.Unlock()
+
+	out := make([]core.AgentInfo, 0, len(agents))
+	for _, info := range agents {
+		if info.Mode == AgentModeSubagent {
+			continue
+		}
+		out = append(out, core.AgentInfo{Name: info.Name, Mode: string(info.Mode)})
+	}
+	return out
+}
+
+// internalAgentNames are built-in hidden agents that appear in `opencode
+// agent list` but cannot be selected as a primary agent.
+func isInternalAgentName(name string) bool {
+	switch name {
+	case "compaction", "title", "summary":
+		return true
+	}
+	return false
 }
 
 // -- ContextCompressor --
