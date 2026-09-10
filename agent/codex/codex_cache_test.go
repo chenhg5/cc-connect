@@ -105,8 +105,14 @@ func TestReadCodexModelCatalog_NoConfigFile(t *testing.T) {
 	models := a.AvailableModels(context.Background())
 
 	// No config.toml → no model_catalog.json → no models_cache.json
-	// → no OPENAI_API_KEY → all the way to hardcoded fallback (6 models)
-	if len(models) != 6 {
-		t.Fatalf("expected 6 hardcoded fallback models, got %d: %v", len(models), models)
+	// → no OPENAI_API_KEY → all the way to hardcoded fallback.
+	want := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6"}
+	if len(models) != len(defaultCodexModels()) {
+		t.Fatalf("expected %d hardcoded fallback models, got %d: %v", len(defaultCodexModels()), len(models), models)
+	}
+	for i, name := range want {
+		if models[i].Name != name {
+			t.Fatalf("fallback model %d = %q, want %q; models=%v", i, models[i].Name, name, models)
+		}
 	}
 }
