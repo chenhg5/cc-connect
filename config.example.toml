@@ -1012,6 +1012,16 @@ app_secret = "your-feishu-app-secret"
 # domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
+# card_width_mode = "default"  # Feishu Card 2.0 `width_mode` for all cards this platform renders
+#                              # (issue #1797). "default" = half-width on desktop, full width on mobile (matches
+#                              # the previous `wide_screen_mode = false` behaviour). "full" = full chat window
+#                              # width on desktop + mobile. Unknown / empty values fall back to "default"
+#                              # with a debug log. Affects reply cards, preview cards, status cards, rich cards,
+#                              # and card-action refresh responses.
+#                              # 飞书卡片 2.0 的 `width_mode`（issue #1797）。"default" = 桌面半宽 + 移动端全宽
+#                              # （与原 wide_screen_mode = false 行为一致）。"full" = 桌面+移动端均铺满聊天窗口。
+#                              # 未知或空值会以 debug 日志形式回退到 "default"。
+#                              # 影响回复卡片、预览卡片、状态卡片、富卡片以及卡片交互刷新响应。
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # allow_chat = "*"          # Allowed group chat_ids, comma-separated; "*" = all (default). Find chat_id in group settings.
