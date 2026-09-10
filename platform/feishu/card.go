@@ -462,3 +462,122 @@ func renderCard(card *core.Card, sessionKey string) string {
 	}
 	return string(b)
 }
+
+// SendAskQuestionCard renders an AskUserQuestion prompt as a Feishu card with
+// schema 2.0, combining option buttons with a free-form text input:
+//   - option buttons use a behaviors callback whose value reuses the legacy
+//     "askq:<qIdx>:<optIdx>" action contract, so the existing onCardAction
+//     askq path (and its confirmation card) works unchanged;
+//   - the input lives in a form whose form_submit button puts the typed text
+//     into the "answer" field; onCardAction forwards that text as the user's
+//     answer (resolved by the engine's resolveAskQuestionAnswer free-form path).
+func (p *interactivePlatform) SendAskQuestionCard(ctx context.Context, rctx any, title, body, note string, q core.UserQuestion, qIdx int) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if rc.chatID == "" {
+		return fmt.Errorf("%s: chatID is empty, cannot send ask-question card", p.tag())
+	}
+	cardJSON, err := json.Marshal(buildAskQuestionCard2(title, body, note, q, qIdx, rc.sessionKey))
+	if err != nil {
+		return fmt.Errorf("%s: marshal ask-question card: %w", p.tag(), err)
+	}
+	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
+		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, string(cardJSON))
+	}
+	return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, string(cardJSON), "send ask-question card")
+}
+
+// buildAskQuestionCard2 builds the Feishu card schema 2.0 map for an
+// AskUserQuestion prompt: option buttons (behaviors callback reusing the
+// legacy "askq:<qIdx>:<optIdx>" value contract) plus a free-form input whose
+// form_submit puts the typed text into the "answer" field.
+func buildAskQuestionCard2(title, body, note string, q core.UserQuestion, qIdx int, sessionKey string) map[string]any {
+
+	elements := []map[string]any{
+		{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": body}},
+	}
+	for i, opt := range q.Options {
+		btnType := "default"
+		if i == 0 {
+			btnType = "primary"
+		}
+		value := map[string]any{
+			"action":        fmt.Sprintf("askq:%d:%d", qIdx, i+1),
+			"askq_label":    opt.Label,
+			"askq_question": q.Question,
+		}
+		if sessionKey != "" {
+			value["session_key"] = sessionKey
+		}
+		elements = append(elements, map[string]any{
+			"tag":  "button",
+			"name": fmt.Sprintf("askq_opt_%d", i+1),
+			"text": plainText(opt.Label),
+			"type": btnType,
+			"size": "medium",
+			"behaviors": []map[string]any{
+				{"type": "callback", "value": value},
+			},
+		})
+	}
+	elements = append(elements,
+		map[string]any{"tag": "hr"},
+		map[string]any{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": note}},
+		map[string]any{
+			"tag":  "form",
+			"name": "askq_answer_form",
+			"elements": []map[string]any{
+				{
+					"tag":            "input",
+					"name":           "answer",
+					"placeholder":    plainText("输入你的想法… / Type your answer…"),
+					"label":          plainText("自由回答 / Free-form answer"),
+					"label_position": "top",
+					"max_length":     500,
+				},
+				{
+					"tag":         "button",
+					"action_type": "form_submit",
+					"name":        "submit",
+					"text":        plainText("发送 / Send"),
+					"type":        "primary",
+					"size":        "medium",
+				},
+			},
+		},
+	)
+
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"update_multi": true},
+		"header": map[string]any{
+			"title":    plainText(title),
+			"template": "blue",
+		},
+		"body": map[string]any{"elements": elements},
+	}
+	return card
+}
+
+// simpleCard2 builds a minimal Feishu card schema 2.0 with a colored header
+// and one markdown element. Callback responses for actions triggered on a
+// schema 2.0 card must themselves be schema 2.0 — a v1 response card is
+// rejected by Feishu with error 200830.
+func simpleCard2(title, markdown, color string) map[string]any {
+	if color == "" {
+		color = "blue"
+	}
+	return map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"update_multi": true},
+		"header": map[string]any{
+			"title":    plainText(title),
+			"template": color,
+		},
+		"body": map[string]any{"elements": []map[string]any{
+			{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": markdown}},
+		}},
+	}
+}
