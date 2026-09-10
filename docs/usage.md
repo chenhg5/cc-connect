@@ -17,6 +17,7 @@ Complete guide to using cc-connect features.
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
 - [Scheduled Tasks (Cron)](#scheduled-tasks-cron)
+- [Graceful Restart & Lost Replies](#graceful-restart--lost-replies)
 - [Shell Configuration](#shell-configuration)
 - [Multi-Bot Relay](#multi-bot-relay)
 - [Daemon Mode](#daemon-mode)
@@ -846,6 +847,68 @@ Optional: `--session-mode new-per-run` starts a fresh agent session on each run 
 > "Every day at 6am, summarize GitHub trending"
 
 Claude Code auto-creates the cron job. For other agents that rely on memory files, run `/cron setup` or `/bind setup` once first; both write the same instructions.
+
+---
+
+## Graceful Restart & Lost Replies
+
+If your agent finishes a turn by restarting cc-connect (e.g. as the very last
+tool call in a long session), the previous reply may not have reached the
+chat yet when SIGTERM arrives. Before v1.6.x this surfaced as
+`context canceled` and the user never saw the reply.
+
+Starting in v1.6.x, cc-connect now:
+
+1. **Drains in-flight replies for up to 10 seconds before exiting.** A
+   SIGTERM-triggered shutdown waits for the platform API call to finish
+   so the user's last message is delivered normally. After 10s any
+   still-pending replies are handed off to the on-disk journal.
+2. **Persists the most recent pending reply to
+   `<dataDir>/run/last_reply.json` (mode `0o600`).** This is a safety
+   net for hard kills (OOM, panic, SIGKILL) that bypass the graceful
+   drain path. After restart the entry is replayed automatically
+   against the original platform and session.
+3. **Deduplicates by content hash.** If the platform API responds
+   with "duplicate" / "already sent" / "重复" on replay, the journal
+   entry is cleared silently — the user's intent is satisfied.
+
+The journal only holds the single most recent pending reply because the
+user-visible symptom of a lost reply is always about the latest turn.
+
+### Verify a restart actually delivered the last reply
+
+If your agent's last tool call is `cc-connect daemon restart` (or
+equivalent), schedule a follow-up one-shot timer so the agent can confirm
+that the reply reached the chat after the restart completes:
+
+```bash
+cc-connect timer add --delay 15s --prompt "verify restart result and report"
+```
+
+This queues a one-off 15-second timer that wakes the agent on the same
+session so it can read the recent chat history and tell you whether the
+final reply made it through. If you still see "context canceled" in the
+agent's history, the journal at `<dataDir>/run/last_reply.json` was
+replayed successfully on the next start — the platform received the
+content even though the original API call returned `context canceled`.
+
+### Inspecting the journal from the management API
+
+`<dataDir>/run/last_reply.json` is plain JSON and safe to read
+(`mode 0o600`):
+
+```json
+{
+  "platform": "feishu",
+  "session_key": "feishu:chat:user",
+  "content": "...",
+  "content_hash": "<sha256 hex>",
+  "created_at": "2026-09-08T12:34:56Z"
+}
+```
+
+The file is removed automatically once the reply is delivered (or
+confirmed as a duplicate).
 
 ---
 

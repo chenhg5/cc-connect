@@ -83,6 +83,22 @@ const (
 // exits sooner — this is the ceiling, not the typical duration.
 const closeTimeout = 150 * time.Second
 
+// shutdownDrainTimeout caps the wait for in-flight platform reply/send
+// operations to complete before SIGTERM is allowed to cancel the engine's
+// shared context. Without this drain, replies mid-flight observe
+// "context canceled" mid-HTTP-call and are lost — see issue #1804.
+//
+// 10s is a deliberate trade-off:
+//   - long enough for a typical Feishu reply API call (~1-2s) plus a
+//     chunked-response burst (multiple replies within ~50ms of each other),
+//     even on a slow link;
+//   - short enough that a misbehaving agent (one that forgot to release a
+//     long-lived request) cannot block daemon restart for tens of seconds.
+//
+// Issue #1804 ships a journal fallback (see core/reply_journal.go) for the
+// hard-kill case where this drain is bypassed entirely.
+const shutdownDrainTimeout = 10 * time.Second
+
 const (
 	replyFooterUsageTimeout  = 1500 * time.Millisecond
 	replyFooterUsageCacheTTL = 30 * time.Second
@@ -506,6 +522,14 @@ type Engine struct {
 
 	// Data directory for socket path injection
 	dataDir string
+
+	// replyWG tracks in-flight platform Reply/Send operations so that
+	// Engine.Stop() can drain them before cancelling the shared context.
+	// Issue #1804: a context cancel during an active HTTP call to the
+	// platform API surfaces as "context canceled" and the reply is lost.
+	// Increment at the top of every wrapper that calls p.Reply / p.Send,
+	// defer Done at the bottom — the WG is only ever observed by Stop().
+	replyWG sync.WaitGroup
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -2350,6 +2374,16 @@ func (e *Engine) Start() error {
 	}
 
 	e.startObserver()
+
+	// Issue #1804: replay any pending reply that was persisted before a hard
+	// kill (OOM, panic, SIGKILL). Runs synchronously so the user sees the
+	// recovered reply before we declare startup complete. Sync platforms are
+	// ready at this point; async platforms that haven't connected yet will
+	// be retried on their first OnPlatformReady via OnPlatformReady hook
+	// (see e.platformReadyReplayOnce).
+	if e.dataDir != "" && len(e.platforms) > 0 {
+		e.replayPendingReplyJournal()
+	}
 	return nil
 }
 
@@ -2358,7 +2392,19 @@ func (e *Engine) Stop() error {
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
 
-	// Cancel first so late lifecycle callbacks observe shutdown immediately.
+	// Drain in-flight platform reply/send goroutines BEFORE cancelling the
+	// shared context. Issue #1804: a context cancel mid-HTTP-call surfaces
+	// as "context canceled" on the platform side and the reply body is
+	// lost forever (no journal replay covers SIGTERM, only hard kills).
+	//
+	// We bound the wait at shutdownDrainTimeout so a stuck platform call
+	// cannot block daemon restart indefinitely. Anything still in flight
+	// after the deadline is presumed lost — the journal layer (see
+	// core/reply_journal.go) catches the hard-kill case separately.
+	e.drainInFlightReplies(shutdownDrainTimeout)
+
+	// Cancel the shared context AFTER the drain so late lifecycle
+	// callbacks (agent stop, observer shutdown, etc.) observe shutdown.
 	e.cancel()
 
 	if e.observeCancel != nil {
@@ -2404,6 +2450,27 @@ func (e *Engine) Stop() error {
 		return fmt.Errorf("engine stop errors: %v", errs)
 	}
 	return nil
+}
+
+// drainInFlightReplies blocks until all platform reply/send operations
+// tracked by replyWG have completed, or the deadline elapses. Safe to
+// call when no replies are in flight (returns immediately).
+func (e *Engine) drainInFlightReplies(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = shutdownDrainTimeout
+	}
+	done := make(chan struct{})
+	go func() {
+		e.replyWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		slog.Debug("engine.Stop: in-flight replies drained cleanly")
+	case <-time.After(timeout):
+		slog.Warn("engine.Stop: drain timeout, some replies may be lost; relying on journal for retry",
+			"timeout", timeout)
+	}
 }
 
 // OnPlatformReady marks an async platform as ready and initializes platform-level
@@ -11986,7 +12053,7 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 
 func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
 	start := time.Now()
-	if err := p.Send(e.ctx, replyCtx, content); err != nil {
+	if err := e.trackAndSend(p, replyCtx, content, "send"); err != nil {
 		// Check for context_token missing error (common for Weixin platform)
 		if strings.Contains(err.Error(), "missing context_token") {
 			slog.Error("platform send failed: context_token missing",
@@ -12003,6 +12070,136 @@ func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content 
 		slog.Warn("slow platform send", "platform", p.Name(), "elapsed", elapsed, "content_len", len(content))
 	}
 	return nil
+}
+
+// trackAndSend centralises the WaitGroup + reply-journal bookkeeping around
+// a single platform send/reply call so that Engine.Stop() can drain
+// in-flight operations and a hard kill leaves a recoverable journal entry.
+//
+// Issue #1804: SIGTERM was cancelling the shared context mid-HTTP-call,
+// surfacing as "context canceled" on the platform side and losing the
+// reply. The drain in Stop() waits for these operations; the journal is
+// the safety net for the case where the drain is bypassed (OOM, panic,
+// SIGKILL).
+func (e *Engine) trackAndSend(p Platform, replyCtx any, content, op string) error {
+	e.replyWG.Add(1)
+	defer e.replyWG.Done()
+
+	// Persist a pending-reply journal entry BEFORE the actual call so a
+	// crash mid-call still leaves a recoverable record. Best-effort: a
+	// journal write failure must not block the reply itself.
+	e.writeJournalEntry(p, replyCtx, content, op)
+
+	var err error
+	switch op {
+	case "reply":
+		err = p.Reply(e.ctx, replyCtx, content)
+	default:
+		err = p.Send(e.ctx, replyCtx, content)
+	}
+	if err == nil {
+		e.clearJournalEntry()
+	}
+	return err
+}
+
+// writeJournalEntry writes a PendingReplyEntry if dataDir is set and the
+// platform provided a session key we can recover from. We use whatever the
+// caller hands us as replyCtx; on replay, ReplyContextReconstructor is the
+// authority on whether that can be turned back into a usable target.
+func (e *Engine) writeJournalEntry(p Platform, replyCtx any, content, op string) {
+	if e.dataDir == "" {
+		return
+	}
+	sessionKey := sessionKeyFromReplyCtx(p, replyCtx)
+	if sessionKey == "" {
+		// Without a recoverable session key the journal entry is useless
+		// for replay — skip silently rather than littering disk with dead
+		// entries that an operator would have to clean up.
+		return
+	}
+	entry := PendingReplyEntry{
+		Platform:   p.Name(),
+		SessionKey: sessionKey,
+		Content:    content,
+	}
+	if werr := WritePendingReply(e.dataDir, entry); werr != nil {
+		slog.Warn("reply journal: write failed; reply will proceed but cannot be replayed on hard kill",
+			"platform", p.Name(), "session", sessionKey, "op", op, "error", werr)
+	}
+}
+
+func (e *Engine) clearJournalEntry() {
+	if e.dataDir == "" {
+		return
+	}
+	if err := ClearPendingReply(e.dataDir); err != nil {
+		slog.Warn("reply journal: clear failed; entry may replay on next restart",
+			"path", ReplyJournalPath(e.dataDir), "error", err)
+	}
+}
+
+// sessionKeyFromReplyCtx pulls a session key out of a reply context. We try
+// a few well-known shapes; platforms with custom reply contexts can opt in
+// via SessionKeyCarrier (see core/interfaces.go). Empty string means we
+// cannot recover a session key — caller should skip the journal write.
+func sessionKeyFromReplyCtx(p Platform, replyCtx any) string {
+	if replyCtx == nil {
+		return ""
+	}
+	if skc, ok := p.(SessionKeyCarrier); ok {
+		if k := skc.SessionKey(replyCtx); k != "" {
+			return k
+		}
+	}
+	// Fallbacks for well-known reply-ctx shapes. These cover platforms
+	// that don't implement SessionKeyCarrier but do store the session
+	// key directly on the reply context.
+	type stringer interface{ String() string }
+	if s, ok := replyCtx.(stringer); ok {
+		return s.String()
+	}
+	if s, ok := replyCtx.(string); ok {
+		// Heuristic: a bare string is a session key only when it looks
+		// like "platform:id:user" — avoids confusing random string
+		// reply contexts with session keys.
+		if strings.Contains(s, ":") {
+			return s
+		}
+	}
+	return ""
+}
+
+// replayPendingReplyJournal runs the reply journal replay once during
+// Engine.Start(). Only relevant when a previous instance crashed (OOM,
+// panic, SIGKILL) before the graceful drain path could complete; under
+// SIGTERM the drain in Engine.Stop() already finishes the in-flight reply
+// so the journal entry is cleared without replay.
+//
+// Safe to call on every start: if the journal file does not exist
+// ConsumePendingReply returns nil and ReplayPendingReply is a no-op.
+func (e *Engine) replayPendingReplyJournal() {
+	if e.dataDir == "" {
+		return
+	}
+	res := ReplayPendingReply(e.dataDir, e.platforms)
+	if res.Delivered {
+		if res.Duplicate {
+			slog.Info("engine startup: pending reply replayed (platform reported duplicate, treated as delivered)",
+				"project", e.name)
+		} else {
+			slog.Info("engine startup: pending reply replayed successfully",
+				"project", e.name)
+		}
+		return
+	}
+	if res.ErrorMessage == "" {
+		// No entry to replay — normal startup.
+		return
+	}
+	slog.Warn("engine startup: pending reply replay failed",
+		"project", e.name, "error", res.ErrorMessage,
+		"journal_path", ReplyJournalPath(e.dataDir))
 }
 
 // send wraps p.Send with error logging, slow-operation warnings, and outgoing rate limiting.
@@ -12050,7 +12247,10 @@ func (e *Engine) replyWithError(p Platform, replyCtx any, content string) error 
 		return err
 	}
 	start := time.Now()
-	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
+	// Issue #1804: route through trackAndSend so the replyWaitGroup sees
+	// this call (Engine.Stop drains before cancel) and the journal
+	// persists a recoverable entry before the HTTP call.
+	if err := e.trackAndSend(p, replyCtx, content, "reply"); err != nil {
 		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
 		return err
 	}

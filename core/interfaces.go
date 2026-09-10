@@ -54,6 +54,15 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// SessionKeyCarrier is an optional interface for platforms whose reply
+// context carries a session key the engine can recover. Implementations
+// allow the reply-journal layer (issue #1804) to associate a pending reply
+// with a session key for later replay, without having to keep platform-
+// specific reply-ctx introspection in core.
+type SessionKeyCarrier interface {
+	SessionKey(replyCtx any) string
+}
+
 // RelayGroupVisibilityTarget is an optional interface for platforms that
 // want to customise the session key used when echoing relay request /
 // response messages into the group chat for visibility.  Platforms that
