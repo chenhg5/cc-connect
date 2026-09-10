@@ -31,6 +31,16 @@ func TestNormalizeReasoningEffort_AcceptsMax(t *testing.T) {
 	}
 }
 
+func TestNormalizeServiceTier(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"fast", "fast"}, {" FAST ", "fast"}, {"default", "default"}, {"", ""}, {"priority", ""},
+	} {
+		if got := normalizeServiceTier(tc.input); got != tc.want {
+			t.Fatalf("normalizeServiceTier(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
 func TestAvailableReasoningEfforts_IncludesMax(t *testing.T) {
 	agent := &Agent{}
 	got := agent.AvailableReasoningEfforts()
@@ -76,6 +86,30 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 		if args[i] != want[i] {
 			t.Fatalf("args[%d] = %q, want %q, args=%v", i, args[i], want[i], args)
 		}
+	}
+}
+
+func TestBuildExecArgs_IncludesFastServiceTier(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "suggest", "", "", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	cs.serviceTier = "fast"
+	args := cs.buildExecArgs("hello", nil)
+	if !containsSequence(args, []string{"-c", `service_tier="fast"`}) {
+		t.Fatalf("args missing fast service tier: %v", args)
+	}
+}
+
+func TestBuildExecArgs_IncludesExplicitDefaultServiceTier(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "suggest", "", "", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	cs.serviceTier = "default"
+	args := cs.buildExecArgs("hello", nil)
+	if !containsSequence(args, []string{"-c", `service_tier="default"`}) {
+		t.Fatalf("args missing default service tier: %v", args)
 	}
 }
 

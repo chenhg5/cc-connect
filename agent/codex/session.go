@@ -27,6 +27,7 @@ type codexSession struct {
 	workDir        string
 	model          string
 	effort         string
+	serviceTier    string
 	mode           string
 	baseURL        string   // provider base URL; passed as -c openai_base_url=<url>
 	modelProvider  string   // Codex model_provider name; passed as -c model_provider=<name>
@@ -264,6 +265,9 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 	}
 	if cs.effort != "" {
 		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", cs.effort))
+	}
+	if serviceTier := normalizeServiceTier(cs.serviceTier); serviceTier != "" {
+		args = append(args, "-c", fmt.Sprintf("service_tier=%q", serviceTier))
 	}
 
 	if isResume {
