@@ -918,7 +918,7 @@ Adds a cron job. Either `prompt` or `exec` must be provided, not both.
 | `work_dir`   | string  | no       | Working directory for exec                    |
 | `description`| string  | no       | Human-readable label                           |
 | `silent`     | boolean | no       | Suppress start notification                   |
-| `session_mode` | string | no       | `reuse` (default) or `new_per_run` — new agent session each run |
+| `session_mode` | string | no       | `new_per_run` (default) or `reuse` — new agent session each run unless explicitly reusing the active session |
 | `timeout_mins` | int    | no       | Scheduler wait per run: omit = 30 min, `0` = no time limit |
 
 **Response:**
