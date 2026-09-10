@@ -28,6 +28,7 @@ type WSPlatform struct {
 	botID       string
 	secret      string
 	allowFrom   string
+	wsURL       string // WebSocket endpoint; defaults to wsEndpoint (公有云), 可经 ws_url 覆盖为私有化部署地址
 	conn        *websocket.Conn
 	handler     core.MessageHandler
 	ctx         context.Context
@@ -124,11 +125,17 @@ func newWebSocket(opts map[string]any) (core.Platform, error) {
 		return nil, fmt.Errorf("wecom-ws: bot_id and bot_secret are required for websocket mode")
 	}
 	allowFrom, _ := opts["allow_from"].(string)
+	wsURL, _ := opts["ws_url"].(string)
+	wsURL = strings.TrimSpace(wsURL)
+	if wsURL == "" {
+		wsURL = wsEndpoint
+	}
 
 	return &WSPlatform{
 		botID:     botID,
 		secret:    secret,
 		allowFrom: allowFrom,
+		wsURL:     wsURL,
 	}, nil
 }
 
@@ -186,9 +193,9 @@ func (p *WSPlatform) connectLoop() {
 
 // runConnection dials, subscribes, and processes messages until disconnection.
 func (p *WSPlatform) runConnection() error {
-	slog.Info("wecom-ws: connecting", "endpoint", wsEndpoint)
+	slog.Info("wecom-ws: connecting", "endpoint", p.wsURL)
 
-	conn, _, err := websocket.DefaultDialer.DialContext(p.ctx, wsEndpoint, nil)
+	conn, _, err := websocket.DefaultDialer.DialContext(p.ctx, p.wsURL, nil)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}

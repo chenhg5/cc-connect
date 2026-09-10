@@ -452,10 +452,12 @@ func TestHandleCronExec_RunAliasRouteTriggersJob(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(platform.getSent()) >= 2 {
+			scheduler.WaitActiveJobs()
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	scheduler.WaitActiveJobs()
 	t.Fatalf("timed out waiting for local api alias trigger, sent=%v", platform.getSent())
 }
 

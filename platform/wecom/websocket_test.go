@@ -1096,3 +1096,48 @@ func TestNewWebSocket_ValidConfig(t *testing.T) {
 		t.Fatalf("unexpected config: botID=%s secret=%s allowFrom=%s", ws.botID, ws.secret, ws.allowFrom)
 	}
 }
+
+func TestNewWebSocket_DefaultWSEndpoint(t *testing.T) {
+	p, err := newWebSocket(map[string]any{
+		"bot_id":     "aibTest",
+		"bot_secret": "secretXYZ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := p.(*WSPlatform)
+	if ws.wsURL != wsEndpoint {
+		t.Fatalf("expected default wsURL %q, got %q", wsEndpoint, ws.wsURL)
+	}
+}
+
+func TestNewWebSocket_CustomWSEndpoint(t *testing.T) {
+	const custom = "wss://corp.example.com:85/im_openws?bizid=1"
+	p, err := newWebSocket(map[string]any{
+		"bot_id":     "aibTest",
+		"bot_secret": "secretXYZ",
+		"ws_url":     custom,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := p.(*WSPlatform)
+	if ws.wsURL != custom {
+		t.Fatalf("expected custom wsURL %q, got %q", custom, ws.wsURL)
+	}
+}
+
+func TestNewWebSocket_BlankWSEndpointFallsBack(t *testing.T) {
+	p, err := newWebSocket(map[string]any{
+		"bot_id":     "aibTest",
+		"bot_secret": "secretXYZ",
+		"ws_url":     "   ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := p.(*WSPlatform)
+	if ws.wsURL != wsEndpoint {
+		t.Fatalf("expected blank ws_url to fall back to %q, got %q", wsEndpoint, ws.wsURL)
+	}
+}
