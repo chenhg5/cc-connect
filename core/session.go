@@ -25,11 +25,11 @@ const ExplicitActivationTTL = 7 * 24 * time.Hour
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID                  string         `json:"id"`
-	Name                string         `json:"name"`
-	AgentSessionID      string         `json:"agent_session_id"`
-	AgentType           string         `json:"agent_type,omitempty"`
-	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	AgentSessionID      string   `json:"agent_session_id"`
+	AgentType           string   `json:"agent_type,omitempty"`
+	PastAgentSessionIDs []string `json:"past_agent_session_ids,omitempty"`
 	// ActiveProvider is the agent provider name that was active when this
 	// session last took a turn. It is restored before --resume so that a
 	// cc-connect process restart does not silently drop a user's
@@ -55,6 +55,14 @@ type Session struct {
 	// ExplicitActivationTTL caps how long this exemption lasts so abandoned
 	// sessions cannot permanently occupy the active slot.
 	ExplicitActivatedAt time.Time `json:"explicit_activated_at,omitempty"`
+
+	// BootstrappedFor tracks which agent types have already received the
+	// lazy history-bootstrap block (issue #1805). The marker is keyed on
+	// agent type so that a future second switch (e.g. claudecode → codex →
+	// claudecode) re-bootstraps correctly. The marker survives
+	// InvalidateForAgent so process restarts and agent-type switches don't
+	// repeat a bootstrap that has already happened once.
+	BootstrappedFor map[string]struct{} `json:"bootstrapped_for,omitempty"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
@@ -184,6 +192,50 @@ func (s *Session) markExplicitlyActivatedLocked() {
 	s.ExplicitActivatedAt = time.Now()
 }
 
+// IsBootstrappedFor reports whether the lazy history-bootstrap block
+// (issue #1805) has already been delivered to the named agent type on
+// this session. Safe to call without holding s.mu.
+func (s *Session) IsBootstrappedFor(agentType string) bool {
+	if agentType == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.BootstrappedFor[agentType]
+	return ok
+}
+
+// MarkBootstrappedFor records that the lazy history bootstrap has been
+// delivered to the named agent type on this session. Subsequent calls
+// for the same agent type are no-ops, so a session that switches agent
+// types multiple times only bootstraps once per (session, agent type)
+// pair. Safe to call without holding s.mu.
+func (s *Session) MarkBootstrappedFor(agentType string) {
+	if agentType == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.BootstrappedFor == nil {
+		s.BootstrappedFor = make(map[string]struct{})
+	}
+	s.BootstrappedFor[agentType] = struct{}{}
+}
+
+// copyBootstrappedFor returns a deep copy of the bootstrap-marker map so
+// the snapshot path doesn't race with concurrent writes via
+// MarkBootstrappedFor. May be called with s.mu held.
+func copyBootstrappedFor(src map[string]struct{}) map[string]struct{} {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]struct{}, len(src))
+	for k := range src {
+		dst[k] = struct{}{}
+	}
+	return dst
+}
+
 // GetExplicitActivatedAt returns when this session was last explicitly chosen.
 func (s *Session) GetExplicitActivatedAt() time.Time {
 	s.mu.Lock()
@@ -302,7 +354,8 @@ type UserMeta struct {
 // older code that didn't persist all migration flags.
 //   - 0 (missing): original format or early PastIDTracking-only format
 //   - 1: full LegacyData persistence
-const snapshotVersion = 1
+//   - 2: BootstrappedFor persistence (issue #1805)
+const snapshotVersion = 2
 
 // sessionSnapshot is the JSON-serializable state of the SessionManager.
 type sessionSnapshot struct {
@@ -693,6 +746,10 @@ func (sm *SessionManager) saveLocked() {
 			// restart; otherwise a /switch followed by a crash would lose the
 			// exemption and the next message after restart would be rotated.
 			ExplicitActivatedAt: s.ExplicitActivatedAt,
+			// #1805: per-agent-type bootstrap marker must survive a process
+			// restart, otherwise a cc-connect restart would re-bootstrap the
+			// new native session on the very next user message.
+			BootstrappedFor: copyBootstrappedFor(s.BootstrappedFor),
 		}
 		s.mu.Unlock()
 	}
@@ -802,6 +859,11 @@ func (sm *SessionManager) load() {
 // does not match the current agent. This handles the case where the user
 // switches agent types (e.g. opencode → pi) and stale session IDs from the
 // old agent would cause errors.
+//
+// BootstrappedFor (issue #1805) is deliberately NOT cleared here. The
+// bootstrap marker survives the agent-type switch so that the next time a
+// user returns to the same agent type, the lazy history-bootstrap does
+// not fire again for a conversation that already received one.
 func (sm *SessionManager) InvalidateForAgent(agentType string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -876,7 +938,7 @@ func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult 
 	defer sm.mu.Unlock()
 
 	// Group sessions by baseChat
-	chatSessions := make(map[string][]*Session) // baseChat -> sessions
+	chatSessions := make(map[string][]*Session)  // baseChat -> sessions
 	sessionToBaseChat := make(map[string]string) // session.ID -> baseChat
 
 	for userKey, sessionIDs := range sm.userSessions {

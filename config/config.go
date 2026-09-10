@@ -452,6 +452,23 @@ type AutoCompressConfig struct {
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
 }
 
+// HistoryBootstrapConfig controls the lazy history-bootstrap mechanism
+// (issue #1805). When enabled, the engine prefixes a bounded summary of
+// the cc-connect stored history into the first prompt sent to a
+// freshly-started native agent session after an agent-type switch.
+type HistoryBootstrapConfig struct {
+	// Enabled turns the lazy bootstrap on. Defaults to true.
+	Enabled *bool `toml:"enabled,omitempty"`
+	// MaxEntries caps the number of recent history entries included in the
+	// bootstrap block. Older entries are dropped with an info log so the
+	// behaviour stays visible. 0 falls back to the engine default (20).
+	MaxEntries *int `toml:"max_entries,omitempty"`
+	// MaxTokens caps the rough token count of the bootstrap block.
+	// Token estimation reuses the engine's estimateTokens heuristic
+	// (~1 token per 4 runes). 0 falls back to the engine default (4000).
+	MaxTokens *int `toml:"max_tokens,omitempty"`
+}
+
 // ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
 type ObserveConfig struct {
 	Enabled bool   `toml:"enabled"`
@@ -482,6 +499,10 @@ type ProjectConfig struct {
 	Platforms                    []PlatformConfig   `toml:"platforms"`
 	Heartbeat                    HeartbeatConfig    `toml:"heartbeat"`
 	AutoCompress                 AutoCompressConfig `toml:"auto_compress"`
+	// HistoryBootstrap controls the lazy history-bootstrap mechanism
+	// (issue #1805) that gives a freshly-started native agent session
+	// the cc-connect stored history after an agent-type switch.
+	HistoryBootstrap HistoryBootstrapConfig `toml:"history_bootstrap"`
 	// ResetOnIdleMins automatically rotates to a new cc-connect session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.

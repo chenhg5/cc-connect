@@ -704,6 +704,18 @@ func main() {
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
 		}
+
+		// Wire history bootstrap (issue #1805). Defaults to enabled so the
+		// user-facing cross-agent continuity works out of the box; operators
+		// who want a strictly fresh session per agent switch can disable it
+		// via [projects.X.history_bootstrap] enabled = false.
+		bootstrapEnabled := true
+		if proj.HistoryBootstrap.Enabled != nil {
+			bootstrapEnabled = *proj.HistoryBootstrap.Enabled
+		}
+		bootstrapMaxEntries := derefInt(proj.HistoryBootstrap.MaxEntries)
+		bootstrapMaxTokens := derefInt(proj.HistoryBootstrap.MaxTokens)
+		engine.SetHistoryBootstrap(bootstrapEnabled, bootstrapMaxEntries, bootstrapMaxTokens)
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 		engine.SetResetOnIdle(resetIdle)
 		if defaulted {
@@ -1786,6 +1798,15 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
+
+	// Reload history bootstrap (issue #1805).
+	bootstrapEnabled := true
+	if proj.HistoryBootstrap.Enabled != nil {
+		bootstrapEnabled = *proj.HistoryBootstrap.Enabled
+	}
+	bootstrapMaxEntries := derefInt(proj.HistoryBootstrap.MaxEntries)
+	bootstrapMaxTokens := derefInt(proj.HistoryBootstrap.MaxTokens)
+	engine.SetHistoryBootstrap(bootstrapEnabled, bootstrapMaxEntries, bootstrapMaxTokens)
 	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 	engine.SetResetOnIdle(resetIdle)
 	if defaulted {

@@ -429,6 +429,15 @@ type Engine struct {
 	autoCompressMinGap    time.Duration
 	resetOnIdle           time.Duration
 
+	// historyBootstrapEnabled controls lazy migration of cc-connect stored
+	// history into a freshly-started native agent session when the agent
+	// type changes (issue #1805). Defaults to true so the user-facing
+	// cross-agent continuity works out of the box; operators who want a
+	// strictly fresh session per agent switch can disable it via TOML.
+	historyBootstrapEnabled    bool
+	historyBootstrapMaxEntries int
+	historyBootstrapMaxTokens  int
+
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
 	//   line 2 — workspace directory                       (gated by showWorkdirIndicator)
@@ -944,6 +953,29 @@ func (e *Engine) SetAutoCompressConfig(enabled bool, maxTokens int, minGap time.
 		minGap = 30 * time.Minute
 	}
 	e.autoCompressMinGap = minGap
+}
+
+// SetHistoryBootstrap configures the lazy history-bootstrap mechanism
+// (issue #1805). When enabled, the engine prefixes a bounded summary of
+// the cc-connect stored history into the very first prompt sent to a
+// freshly-started native agent session, but only if:
+//   - the previous native agent session was invalidated by an agent-type
+//     switch (PastAgentSessionIDs non-empty), and
+//   - the (session, agentType) pair has not been bootstrapped before.
+//
+// Defaults: enabled=true, maxEntries=20, maxTokens=4000. Set enabled=false
+// to opt out of cross-agent continuity (strictly fresh native session per
+// agent switch). Negative or zero caps fall back to the defaults.
+func (e *Engine) SetHistoryBootstrap(enabled bool, maxEntries, maxTokens int) {
+	e.historyBootstrapEnabled = enabled
+	if maxEntries <= 0 {
+		maxEntries = 20
+	}
+	e.historyBootstrapMaxEntries = maxEntries
+	if maxTokens <= 0 {
+		maxTokens = 4000
+	}
+	e.historyBootstrapMaxTokens = maxTokens
 }
 
 // SetResetOnIdle configures automatic session rotation after prolonged inactivity.
@@ -3838,6 +3870,19 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+
+	// Issue #1805: lazy history-bootstrap when switching agent type.
+	// The first prompt a brand-new native agent sees in this session
+	// may be a continuation of an existing cc-connect conversation
+	// handled by a different agent type. Prefix a bounded, trimmed
+	// transcript of the prior cc-connect history so the new agent has
+	// the context it would otherwise have lost on the agent-type switch.
+	// The helper reports whether a bootstrap was actually injected so we
+	// can update the per-agent-type marker without false positives
+	// (buildSenderPrompt also mutates promptContent when injectSender=true).
+	if bootstrapInjected := e.maybeBootstrapHistory(session, agent, &promptContent); bootstrapInjected && e.ctx.Err() == nil {
+		session.MarkBootstrappedFor(agent.Name())
+	}
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -16378,6 +16423,136 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 	}
 	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
 }
+
+// historyBootstrapHeader is the well-known prefix that wraps the lazy
+// history-bootstrap block (issue #1805). It is intentionally short and
+// recognisable so an agent can distinguish it from a real platform-driven
+// message and from a subsequent user prompt. The bracket-style framing
+// matches the cc-connect sender_id header convention used by
+// buildSenderPrompt so the two are visually consistent.
+const historyBootstrapHeader = "[cc-connect history_bootstrap: agent_type=%s past_native_session_ids=%s]\n"
+
+// maybeBootstrapHistory conditionally prepends a bounded, trimmed
+// transcript of the cc-connect stored history to promptContent. It is
+// the lazy migration block that gives a freshly-started native agent
+// session the prior conversation context it would otherwise lose when
+// the project switches agent type.
+//
+// The helper returns true only when it actually mutated *promptContent;
+// a "no-op" call (disabled config, no prior history, already
+// bootstrapped, agent name empty) returns false so callers can use the
+// return value as the "set the per-agent-type marker" gate.
+//
+// Concurrency: it acquires s.mu briefly to read History + check the
+// BootstrappedFor marker. It is safe to call from the interactive turn
+// goroutine that already owns the engine's interactiveMu; no other
+// goroutine is expected to mutate promptContent during a single turn.
+func (e *Engine) maybeBootstrapHistory(session *Session, agent Agent, promptContent *string) bool {
+	if session == nil || agent == nil || promptContent == nil {
+		return false
+	}
+	if !e.historyBootstrapEnabled {
+		return false
+	}
+	agentType := agent.Name()
+	if agentType == "" {
+		return false
+	}
+
+	session.mu.Lock()
+	past := append([]string(nil), session.PastAgentSessionIDs...)
+	historyLen := len(session.History)
+	// Exclude the just-added current user message: processInteractiveMessageWith
+	// calls session.AddHistory("user", msg.Content) before the bootstrap
+	// check, so the tail of History already contains this turn's user
+	// input. We only want to inject older context; the current message
+	// will be sent as part of promptContent below.
+	olderLen := historyLen - 1
+	if olderLen < 0 {
+		olderLen = 0
+	}
+	history := append([]HistoryEntry(nil), session.History[:olderLen]...)
+	// Read BootstrappedFor under the lock — IsBootstrappedFor takes the
+	// same non-reentrant s.mu, so calling it here would deadlock.
+	_, alreadyBootstrapped := session.BootstrappedFor[agentType]
+	session.mu.Unlock()
+
+	if alreadyBootstrapped {
+		return false
+	}
+	if len(past) == 0 && len(history) == 0 {
+		// No prior conversation at this layer: nothing to bootstrap.
+		// This is the common /new case; bootstrap must not fire.
+		return false
+	}
+
+	// Trim history by entries cap, then by token cap. Use the most-recent
+	// entries (GetHistory-style tail) since older context is the part
+	// most likely to be irrelevant to the next turn.
+	if e.historyBootstrapMaxEntries > 0 && len(history) > e.historyBootstrapMaxEntries {
+		dropped := len(history) - e.historyBootstrapMaxEntries
+		history = history[len(history)-e.historyBootstrapMaxEntries:]
+		slog.Info("history_bootstrap: trimmed by entry cap",
+			"session", session.ID,
+			"agent_type", agentType,
+			"max_entries", e.historyBootstrapMaxEntries,
+			"dropped_entries", dropped,
+		)
+	}
+	if e.historyBootstrapMaxTokens > 0 && len(history) > 0 {
+		totalTokens := estimateTokens(history)
+		if totalTokens > e.historyBootstrapMaxTokens {
+			// Walk from the newest backwards, retaining as many tail entries
+			// as fit within the token budget. This is a simple but safe
+			// strategy; LLM-summarised older context is out of scope for
+			// the minimal v1 implementation.
+			kept := make([]HistoryEntry, 0, len(history))
+			used := 0
+			for i := len(history) - 1; i >= 0; i-- {
+				t := estimateTokens([]HistoryEntry{history[i]})
+				if used+t > e.historyBootstrapMaxTokens && len(kept) > 0 {
+					break
+				}
+				kept = append([]HistoryEntry{history[i]}, kept...)
+				used += t
+			}
+			droppedEntries := len(history) - len(kept)
+			slog.Info("history_bootstrap: trimmed by token cap",
+				"session", session.ID,
+				"agent_type", agentType,
+				"max_tokens", e.historyBootstrapMaxTokens,
+				"kept_entries", len(kept),
+				"dropped_entries", droppedEntries,
+			)
+			history = kept
+		}
+	}
+	if len(history) == 0 {
+		return false
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, historyBootstrapHeader, agentType, strings.Join(past, ","))
+	for _, h := range history {
+		// Compact one-entry-per-line form keeps the block predictable
+		// across agents and platforms. Quote newlines so a malicious or
+		// buggy transcript entry cannot break out of the line boundary.
+		safe := strings.NewReplacer("\n", " ", "\r", "").Replace(h.Content)
+		fmt.Fprintf(&b, "[%s] %s\n", h.Role, safe)
+	}
+	b.WriteString("[cc-connect history_bootstrap_end]\n\n")
+
+	*promptContent = b.String() + *promptContent
+	slog.Info("history_bootstrap: injected",
+		"session", session.ID,
+		"agent_type", agentType,
+		"history_entries", len(history),
+		"prompt_len", len(*promptContent),
+	)
+	return true
+}
+
+// max is the builtin max (Go 1.21+); no local alias needed.
 
 func extractChannelID(sessionKey string) string {
 	// Format: "platform:channelID:userID" or "platform:channelID"
