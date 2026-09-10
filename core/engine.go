@@ -455,10 +455,15 @@ type Engine struct {
 	workspaceInitAllowLocalPaths bool
 	workspaceBindings            *WorkspaceBindingManager
 	workspacePool                *workspacePool
-	initFlows                    map[string]*workspaceInitFlow // workspace channel key → init state
-	initFlowsMu                  sync.Mutex
-	sendWorkDirMu                sync.RWMutex
-	sendWorkDirs                 map[string]string // sessionKey → work_dir assigned by send --cwd
+	// workspaceFpMu/workspaceFpLocks serialize the git fingerprint window per
+	// workspace, so a turn's Changed flag cannot be polluted by concurrent turns
+	// (foreground-foreground or foreground-background) in the same directory.
+	workspaceFpMu    sync.Mutex
+	workspaceFpLocks map[string]*sync.Mutex        // workdir -> fingerprint window lock
+	initFlows        map[string]*workspaceInitFlow // workspace channel key → init state
+	initFlowsMu      sync.Mutex
+	sendWorkDirMu    sync.RWMutex
+	sendWorkDirs     map[string]string // sessionKey → work_dir assigned by send --cwd
 
 	// Terminal observation (--observe)
 	observeEnabled    bool
@@ -545,6 +550,7 @@ type interactiveState struct {
 	lastRecallProbeAt        time.Time
 	recallProbeInFlight      bool
 	workspaceDir             string
+	ccSessionKey             string // raw platform:chat:user key for hooks and agent env
 	agent                    Agent
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
@@ -4044,6 +4050,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	state, ok := e.interactiveStates[sessionKey]
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
+		if ccSessionKey != "" {
+			state.mu.Lock()
+			state.ccSessionKey = ccSessionKey
+			state.mu.Unlock()
+		}
 		// Verify the running agent session matches the current active session.
 		// After /new or /switch the active session changes, but the old agent
 		// process may still be alive. Reusing it would send messages to the
@@ -4119,7 +4130,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, ccSessionKey: ccKey, eventsNeedResync: true}
 		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 		state = newState
 		e.interactiveStates[sessionKey] = state
@@ -4196,7 +4207,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				Platform:   p.Name(),
 				Error:      fmt.Sprintf("failed to start session: %v", err),
 			})
-			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, ccSessionKey: ccKey, eventsNeedResync: true}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
 			e.interactiveStates[sessionKey] = state
@@ -4238,6 +4249,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		platform:         p,
 		replyCtx:         replyCtx,
 		agent:            agent,
+		ccSessionKey:     ccKey,
 		eventsNeedResync: true,
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
@@ -4848,15 +4860,70 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"status", event.ToolStatus)
 
 			case EventResult:
+				// Resolve hook context first so the fingerprint window lock uses
+				// the same effective workspace key as the foreground path.
+				state.mu.Lock()
+				hookSessionKey := state.ccSessionKey
+				hookWorkspace := state.workspaceDir
+				hookAgent := state.agent
+				state.mu.Unlock()
+				if hookSessionKey == "" {
+					hookSessionKey = sessionKey
+				}
+				if hookWorkspace == "" {
+					hookWorkspace = workspaceDir
+				}
+				if hookWorkspace == "" {
+					if hookAgent == nil {
+						hookAgent = e.agent
+					}
+					if wd, ok := hookAgent.(WorkDirSwitcher); ok {
+						hookWorkspace = wd.GetWorkDir()
+					}
+				}
+
+				// Serialize the fingerprint window per workspace: baseline is
+				// sampled inside the lock, so concurrent turns in the same
+				// directory cannot pollute this background turn's Changed flag.
+				// The lock also refreshes the baseline per background turn —
+				// a single reader may relay multiple EventResult turns.
+				fpLock := e.workspaceFingerprintLock(hookWorkspace)
+				if fpLock != nil {
+					fpLock.Lock()
+				}
+				turnStartGitFingerprint := workspaceGitFingerprint(e.ctx, hookWorkspace)
+
 				fullResponse := event.Content
 				if fullResponse == "" && len(textParts) > 0 {
 					fullResponse = strings.Join(textParts, "")
 				}
 
+				finalized := fullResponse != ""
 				if fullResponse != "" {
 					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
+						if err := e.sendWithErrorForWorkspace(p, replyCtx, chunk, workspaceDir); err != nil {
+							finalized = false
+							break
+						}
 					}
+				}
+				if finalized {
+					turnID := fmt.Sprintf("background-%d", time.Now().UnixNano())
+					e.hooks.Emit(HookEvent{
+						Event:      HookEventMessageFinalized,
+						TurnID:     turnID,
+						SessionKey: hookSessionKey,
+						Workspace:  hookWorkspace,
+						Platform:   p.Name(),
+						Source:     "agent.background_reply",
+						Internal:   false,
+						ReplyKind:  "text",
+						Changed:    turnStartGitFingerprint != "" && turnStartGitFingerprint != workspaceGitFingerprint(e.ctx, hookWorkspace),
+						Content:    fullResponse,
+					})
+				}
+				if fpLock != nil {
+					fpLock.Unlock()
 				}
 
 				// Safety note: concurrent writes to session.History by the
@@ -4998,9 +5065,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	state.mu.Lock()
 	workspaceDir := state.workspaceDir
+	hookSessionKey := state.ccSessionKey
 	replyAgent := state.agent
 	if replyAgent == nil {
 		replyAgent = e.agent
+	}
+	if hookSessionKey == "" {
+		hookSessionKey = sessionKey
+	}
+	hookWorkspace := workspaceDir
+	if hookWorkspace == "" {
+		if wd, ok := replyAgent.(WorkDirSwitcher); ok {
+			hookWorkspace = wd.GetWorkDir()
+		}
 	}
 	workspaceRenderer := func(content string) string {
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
@@ -5029,6 +5106,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
+
+	// Serialize the git fingerprint window per workspace: hold the lock from
+	// baseline sampling through the finalized emit so concurrent turns in the
+	// same directory (other sessions / background reader) cannot pollute this
+	// turn's Changed flag. Queued messages processed later in this call share
+	// the same window and re-sample their own baseline (see the queued branch).
+	fpLock := e.workspaceFingerprintLock(hookWorkspace)
+	if fpLock != nil {
+		fpLock.Lock()
+		defer fpLock.Unlock()
+	}
+
+	// Record the workspace git state at the start of this turn so post-reply
+	// hooks can tell whether this turn actually changed the working tree.
+	turnStartGitFingerprint := workspaceGitFingerprint(e.ctx, hookWorkspace)
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
@@ -5763,6 +5855,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
+			// Record whether the agent produced no content at all before the
+			// localized empty-response placeholder replaces it: an empty reply
+			// must not fire message.finalized (matches the background path,
+			// where an empty EventResult emits nothing).
+			hadEmptyReply := fullResponse == ""
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
@@ -5899,9 +5996,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			replyStart := time.Now()
+			finalized := false
+			replyKind := "text"
 
 			// --- StreamingCard path ---
 			if streamCard != nil && !streamCard.Failed() {
+				replyKind = "card"
 				sp.finish("", "") // cleanup preview (should be no-op if card was active)
 				// Silent reply: never render the NO_REPLY marker into the card.
 				// cardAnswerText holds only the text streamed BEFORE the marker
@@ -5916,6 +6016,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				finalContent := buildCardContent(cardThinkingText, cardToolCalls, cardBody)
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
+					replyKind = "fallback"
 					slog.Error("streaming card finalize failed, sending fallback", "error", err)
 					// Fallback: send the response as a normal message — but never
 					// for a silent reply, which has no deliverable content.
@@ -5925,7 +6026,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								return
 							}
 						}
+						finalized = true
 					}
+				} else {
+					finalized = true
 				}
 				if isSilent {
 					slog.Info("silent reply suppressed", "session", session.ID)
@@ -5971,6 +6075,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				slog.Info("silent reply suppressed", "session", session.ID)
 			} else if hasRichCard {
+				replyKind = "card"
 				parts := []string{fullResponse}
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
 					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
@@ -6016,6 +6121,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						return
 					}
 				}
+				finalized = true
 			} else if toolCount > 0 && segmentStart > 0 {
 				// When tool calls happened and prior text was already surfaced in segments,
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
@@ -6029,6 +6135,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				}
+				finalized = true
 			} else if suppressDuplicate {
 				sp.discard()
 				metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse))
@@ -6038,13 +6145,31 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
+				finalized = true
 			} else if sp.finish(fullResponse, statusFooter) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse), "footer_len", len(statusFooter))
+				finalized = true
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "footer_len", len(statusFooter))
 				if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, fullResponse, statusFooter, sendWorkspaceWithError) {
 					return
 				}
+				finalized = true
+			}
+
+			if finalized && !isSilent && !hadEmptyReply {
+				e.hooks.Emit(HookEvent{
+					Event:      HookEventMessageFinalized,
+					TurnID:     msgID,
+					SessionKey: hookSessionKey,
+					Workspace:  hookWorkspace,
+					Platform:   p.Name(),
+					Source:     "agent.final_reply",
+					Internal:   false,
+					ReplyKind:  replyKind,
+					Changed:    turnStartGitFingerprint != "" && turnStartGitFingerprint != workspaceGitFingerprint(e.ctx, hookWorkspace),
+					Content:    fullResponse,
+				})
 			}
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
@@ -6142,6 +6267,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+
+				// Re-sample the turn baseline before this queued message's agent
+				// turn starts: earlier queued messages may have changed the tree,
+				// and this message's Changed flag must not inherit their edits.
+				// The fingerprint window lock is already held for this call.
+				turnStartGitFingerprint = workspaceGitFingerprint(e.ctx, hookWorkspace)
 
 				state.mu.Lock()
 				as := state.agentSession // capture under lock to avoid race with cleanup
@@ -11925,6 +12056,55 @@ func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, wo
 
 func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
 	_ = e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+}
+
+// workspaceGitFingerprintTimeout bounds each git fingerprint scan. The scan runs
+// synchronously in the engine's event loop (per turn start and per finalized emit),
+// so an unbounded git (huge tree, network filesystem, hung process) would stall
+// every session; the timeout caps the worst-case blocking.
+const workspaceGitFingerprintTimeout = 5 * time.Second
+
+// workspaceGitFingerprint returns a fingerprint of the git working tree at workDir
+// (porcelain status + HEAD). Empty when workDir is not a git repo or git fails.
+// Used to detect whether a turn actually changed the workspace, so post-reply
+// hooks (e.g. auto-review) can skip turns that made no code change.
+func workspaceGitFingerprint(ctx context.Context, workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, workspaceGitFingerprintTimeout)
+	defer cancel()
+	status, err := exec.CommandContext(ctx, "git", "-C", workDir, "status", "--porcelain").Output()
+	if err != nil {
+		return ""
+	}
+	head, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return string(status) + "\x00" + string(head)
+}
+
+// workspaceFingerprintLock returns the per-workspace mutex that serializes git
+// fingerprint windows for workDir (nil when workDir is empty — no workspace, no
+// fingerprint, nothing to protect). The lock is held from baseline sampling
+// through the end-of-turn sampling so no other turn in the same directory can
+// interleave its own changes into this turn's fingerprint delta.
+func (e *Engine) workspaceFingerprintLock(workDir string) *sync.Mutex {
+	if workDir == "" {
+		return nil
+	}
+	e.workspaceFpMu.Lock()
+	defer e.workspaceFpMu.Unlock()
+	if e.workspaceFpLocks == nil {
+		e.workspaceFpLocks = make(map[string]*sync.Mutex)
+	}
+	m, ok := e.workspaceFpLocks[workDir]
+	if !ok {
+		m = &sync.Mutex{}
+		e.workspaceFpLocks[workDir] = m
+	}
+	return m
 }
 
 func (e *Engine) renderCardForPlatform(p Platform, card *Card) *Card {

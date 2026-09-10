@@ -2,8 +2,12 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,6 +90,30 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Lock()
 	p.sent = nil
 	p.mu.Unlock()
+}
+
+type finalizedOrderPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *finalizedOrderPlatform) Send(ctx context.Context, replyCtx any, content string) error {
+	if err := os.WriteFile(p.marker, []byte("sent\n"), 0600); err != nil {
+		return err
+	}
+	return p.stubPlatformEngine.Send(ctx, replyCtx, content)
+}
+
+type failedSendPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *failedSendPlatform) Send(_ context.Context, _ any, _ string) error {
+	if err := os.WriteFile(p.marker, []byte("attempted\n"), 0600); err != nil {
+		return err
+	}
+	return errors.New("platform send failed")
 }
 
 type recallCheckingPlatform struct {
@@ -1023,6 +1051,385 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 
 	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
 		t.Fatalf("sent text = %#v, want one side-channel message", got)
+	}
+}
+
+func TestWorkspaceGitFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	// non-git directory -> empty
+	if got := workspaceGitFingerprint(context.Background(), dir); got != "" {
+		t.Errorf("non-git dir: want empty, got %q", got)
+	}
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "a.txt")
+	runGit("commit", "-qm", "init")
+	fp := workspaceGitFingerprint(context.Background(), dir)
+	if fp == "" {
+		t.Fatal("git repo should have a fingerprint")
+	}
+	// working tree change -> fingerprint changes
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if workspaceGitFingerprint(context.Background(), dir) == fp {
+		t.Error("working tree change should change the fingerprint")
+	}
+}
+
+func TestProcessInteractiveEvents_FinalizedHookRunsAfterReplySend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &finalizedOrderPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "test -f '" + sentMarker + "' && touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-finalized")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-finalized",
+		ccSessionKey: sessionKey,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "final reply", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "turn-1", time.Now(), nil, nil, state.replyCtx)
+
+	if _, err := os.Stat(sentMarker); err != nil {
+		t.Fatalf("final reply was not sent: %v", err)
+	}
+	if _, err := os.Stat(hookMarker); err != nil {
+		t.Fatalf("message.finalized hook did not run after send: %v", err)
+	}
+	if got := p.getSent(); len(got) != 1 || got[0] != "final reply" {
+		t.Fatalf("sent replies = %#v, want one final reply", got)
+	}
+}
+
+// newFinalizedHookServer starts an HTTP hook receiver for message.finalized and
+// returns the server plus a channel that receives each emitted event.
+func newFinalizedHookServer(t *testing.T) (*httptest.Server, chan HookEvent) {
+	t.Helper()
+	events := make(chan HookEvent, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var ev HookEvent
+		_ = json.Unmarshal(body, &ev)
+		events <- ev
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, events
+}
+
+// TestProcessInteractiveEvents_EmptyReplyDoesNotEmitFinalizedHook verifies that
+// an agent reply with no content does not fire message.finalized even though the
+// localized empty-response placeholder is still delivered to the platform. The
+// PR description promises "empty replies do not trigger"; the placeholder send
+// must not be conflated with a real final reply.
+func TestProcessInteractiveEvents_EmptyReplyDoesNotEmitFinalizedHook(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	srv, hookEvents := newFinalizedHookServer(t)
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event: string(HookEventMessageFinalized),
+		Type:  "http",
+		URL:   srv.URL,
+		Async: boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-empty")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-empty",
+		ccSessionKey: sessionKey,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "turn-1", time.Now(), nil, nil, state.replyCtx)
+
+	// The empty reply is replaced by the localized placeholder and delivered.
+	if got := p.getSent(); len(got) != 1 {
+		t.Fatalf("sent replies = %#v, want the empty-response placeholder", got)
+	}
+	// ... but message.finalized must NOT fire for an empty reply.
+	select {
+	case ev := <-hookEvents:
+		t.Fatalf("message.finalized fired for empty reply: %#v", ev)
+	default:
+	}
+}
+
+// TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline verifies that a
+// queued message re-samples its turn-start git baseline instead of inheriting
+// the baseline captured for the first message of the call. Without the
+// re-sample, changes made during the first message's turn would make the second
+// message report changed=true even though it modified nothing itself.
+//
+// Timeline (synchronous engine call driven by a helper goroutine):
+//  1. turnStart baseline A captured (clean tree)
+//  2. engine goroutine then blocks on events; test writes file x (strictly
+//     after A — see the fingerprint-lock wait below) → first EventResult emits
+//     changed=true
+//  3. queued branch drains stale events and re-samples baseline B (tree now
+//     contains x)
+//  4. test feeds second EventResult after the first emit's marker → emits
+//     changed=false (B vs unchanged tree)
+//
+// If the queued branch failed to re-sample, step 4 would compare A vs B and
+// wrongly report changed=true.
+func TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "base.txt")
+	runGit("commit", "-qm", "init")
+
+	changedLog := filepath.Join(dir, "changed.log")
+	firstEmitMarker := filepath.Join(dir, "first-emit")
+	hookCmd := "echo \"$CC_HOOK_CHANGED\" >> '" + changedLog + "'; touch '" + firstEmitMarker + "'"
+
+	p := &stubPlatformEngine{n: "feishu"}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: hookCmd,
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-queued")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-queued",
+		ccSessionKey: sessionKey,
+		workspaceDir: dir,
+		pendingMessages: []queuedMessage{
+			{messageID: "msg-2", platform: p, replyCtx: "ctx-queued", content: "second"},
+		},
+	}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "msg-1", time.Now(), nil, nil, state.replyCtx)
+	}()
+
+	// Wait until the engine goroutine holds the fingerprint window lock
+	// (baseline A is sampled right after acquisition), plus a settle window for
+	// the git scan itself, so the tree change below lands strictly after A.
+	fpLock := e.workspaceFingerprintLock(dir)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if !fpLock.TryLock() {
+			time.Sleep(500 * time.Millisecond)
+			break
+		}
+		fpLock.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("engine goroutine did not acquire the fingerprint lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "x.txt"), []byte("change"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "first", Done: true}
+
+	// Wait for the first finalized emit (marker touched by the sync hook), then
+	// let the queued branch finish its stale-event drain and baseline re-sample
+	// before queuing EventResult #2 — feeding it earlier would get it dropped by
+	// drainEvents and the second turn would never start.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(firstEmitMarker); err == nil {
+			time.Sleep(300 * time.Millisecond)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first finalized emit did not run")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "second", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not finish")
+	}
+
+	logData, err := os.ReadFile(changedLog)
+	if err != nil {
+		t.Fatalf("read changed log: %v", err)
+	}
+	lines := strings.Fields(string(logData))
+	if len(lines) != 2 {
+		t.Fatalf("changed log = %q, want 2 emits", lines)
+	}
+	if lines[0] != "true" {
+		t.Errorf("first message changed = %q, want true (it modified the tree after baseline A)", lines[0])
+	}
+	if lines[1] != "false" {
+		t.Errorf("second message changed = %q, want false (queued message must re-sample its baseline, otherwise the first message's change leaks into it)", lines[1])
+	}
+}
+
+// TestWorkspaceFingerprintLock_SerializesConcurrentTurns verifies that
+// concurrent turns in the same workspace serialize their git fingerprint
+// windows: the second turn's Changed flag must not be polluted by the first
+// turn's edits. Without the per-workspace lock the second turn could sample its
+// baseline before the first turn's change and then report changed=true.
+func TestWorkspaceFingerprintLock_SerializesConcurrentTurns(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "base.txt")
+	runGit("commit", "-qm", "init")
+
+	p := &stubPlatformEngine{n: "feishu"}
+	srv, hookEvents := newFinalizedHookServer(t)
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event: string(HookEventMessageFinalized),
+		Type:  "http",
+		URL:   srv.URL,
+		Async: boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	newState := func(sessID, sk string) (*interactiveState, *Session) {
+		session := e.sessions.GetOrCreateActive(sk)
+		as := newControllableSession(sessID)
+		st := &interactiveState{
+			agentSession: as,
+			platform:     p,
+			replyCtx:     "ctx-" + sk,
+			ccSessionKey: sk,
+			workspaceDir: dir,
+		}
+		e.interactiveStates[sk] = st
+		return st, session
+	}
+	state1, session1 := newState("s1", "feishu:chat:u1")
+	state2, session2 := newState("s2", "feishu:chat:u2")
+
+	done1 := make(chan struct{})
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done1)
+		e.processInteractiveEvents(state1, session1, e.sessions, "feishu:chat:u1", "t1", time.Now(), nil, nil, state1.replyCtx)
+	}()
+	// Wait until turn 1 holds the fingerprint window lock, then start turn 2 —
+	// it must block on the lock instead of sampling concurrently with turn 1.
+	// Once the lock is held we still wait for the git scan itself to settle
+	// (baseline A is sampled right after lock acquisition; `git status` takes a
+	// few tens of ms), so the tree change below lands strictly after A.
+	fpLock := e.workspaceFingerprintLock(dir)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if !fpLock.TryLock() {
+			time.Sleep(500 * time.Millisecond)
+			break
+		}
+		fpLock.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("turn 1 did not acquire the fingerprint lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	go func() {
+		defer close(done2)
+		e.processInteractiveEvents(state2, session2, e.sessions, "feishu:chat:u2", "t2", time.Now(), nil, nil, state2.replyCtx)
+	}()
+
+	// Turn 1 modifies the tree, then completes.
+	if err := os.WriteFile(filepath.Join(dir, "y.txt"), []byte("change"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state1.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "one", Done: true}
+	select {
+	case <-done1:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn 1 did not finish")
+	}
+
+	// Turn 2 makes no further change; its Changed must be false.
+	state2.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "two", Done: true}
+	select {
+	case <-done2:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn 2 did not finish")
+	}
+
+	var ev1, ev2 HookEvent
+	deadline = time.Now().Add(5 * time.Second)
+	for ev1.Event == "" || ev2.Event == "" {
+		select {
+		case ev := <-hookEvents:
+			if ev.SessionKey == "feishu:chat:u1" && ev1.Event == "" {
+				ev1 = ev
+			} else if ev.SessionKey == "feishu:chat:u2" && ev2.Event == "" {
+				ev2 = ev
+			}
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("finalized events not received")
+		}
+	}
+	if !ev1.Changed {
+		t.Errorf("turn 1 changed = false, want true (it modified the tree)")
+	}
+	if ev2.Changed {
+		t.Errorf("turn 2 changed = true, want false (fingerprint window must be serialized per workspace)")
 	}
 }
 
@@ -14048,6 +14455,99 @@ func waitForPlatformSend(p *stubPlatformEngine, n int, timeout time.Duration) []
 
 // TestUnsolicitedReader_RelaysEventResult verifies that the unsolicited reader
 // goroutine relays EventResult content to the platform.
+func TestUnsolicitedReader_EmitsFinalizedHookAfterReplySend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &finalizedOrderPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "test -f '" + sentMarker + "' && touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: "background reply", Done: true}
+
+	if sent := waitForPlatformSend(&p.stubPlatformEngine, 1, 5*time.Second); len(sent) != 1 || sent[0] != "background reply" {
+		t.Fatalf("sent replies = %#v, want one background reply", sent)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(hookMarker); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("message.finalized hook did not run after background reply send")
+}
+
+func TestUnsolicitedReader_DoesNotEmitFinalizedHookWhenReplySendFails(t *testing.T) {
+	dir := t.TempDir()
+	sendAttemptMarker := filepath.Join(dir, "send-attempt")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &failedSendPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sendAttemptMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized-failure")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: "background reply", Done: true}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sendAttemptMarker); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(sendAttemptMarker); err != nil {
+		t.Fatalf("background reply send was not attempted: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Fatalf("message.finalized hook ran after failed background send: err=%v", err)
+	}
+}
+
 func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-relay")
