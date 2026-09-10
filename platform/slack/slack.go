@@ -41,6 +41,12 @@ type Platform struct {
 	channelNameCache map[string]string
 	channelCacheMu   sync.RWMutex
 	userNameCache    sync.Map // userID -> display name
+	// dedup drops the second delivery of a message that Slack reports through
+	// more than one subscription. A message that @-mentions the bot arrives as
+	// BOTH an app_mention event and a message event, and the two are handled
+	// independently below; without this guard each mention starts a turn and
+	// then queues a duplicate against the still-busy session.
+	dedup core.MessageDedup
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -112,6 +118,16 @@ func (p *Platform) buildSessionKey(channel, user, threadTS string) string {
 	default:
 		return fmt.Sprintf("slack:%s:%s", channel, user)
 	}
+}
+
+// dedupKey identifies one Slack message. A message ts is only unique within its
+// channel, so both parts are needed. An empty ts yields an empty key, which
+// core.MessageDedup never treats as a duplicate.
+func dedupKey(channel, ts string) string {
+	if ts == "" {
+		return ""
+	}
+	return channel + ":" + ts
 }
 
 // threadRootTS returns the thread parent timestamp for an event: the existing
@@ -197,6 +213,12 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				if p.dedup.IsDuplicate(dedupKey(ev.Channel, ev.TimeStamp)) {
+					slog.Debug("slack: duplicate message ignored", "source", "app_mention",
+						"channel", ev.Channel, "ts", ev.TimeStamp)
+					return
+				}
+
 				threadTS := threadRootTS(ev.ThreadTimeStamp, ev.TimeStamp)
 				sessionKey := p.buildSessionKey(ev.Channel, ev.User, threadTS)
 
@@ -256,6 +278,12 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 				if !core.AllowList(p.allowFrom, ev.User) {
 					slog.Debug("slack: message from unauthorized user", "user", ev.User)
+					return
+				}
+
+				if p.dedup.IsDuplicate(dedupKey(ev.Channel, ev.TimeStamp)) {
+					slog.Debug("slack: duplicate message ignored", "source", "message",
+						"channel", ev.Channel, "ts", ev.TimeStamp)
 					return
 				}
 

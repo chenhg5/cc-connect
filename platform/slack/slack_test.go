@@ -2,11 +2,16 @@ package slack
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestStripAppMentionText(t *testing.T) {
@@ -194,5 +199,117 @@ func TestProcessSlackFileShares_EmptyMimeBecomesOctetStream(t *testing.T) {
 	})
 	if len(docs) != 1 || docs[0].MimeType != "application/octet-stream" {
 		t.Fatalf("got %+v", docs)
+	}
+}
+
+// newDedupTestPlatform returns a Platform wired for handleEvent tests: the name
+// caches are pre-seeded so resolveUserName / resolveChannelNameForMsg never
+// reach for the (nil) API client.
+func newDedupTestPlatform(t *testing.T) (*Platform, *[]*core.Message) {
+	t.Helper()
+	var got []*core.Message
+	p := &Platform{
+		allowFrom:        "*",
+		sessionScope:     "channel",
+		channelNameCache: map[string]string{"C1": "product"},
+	}
+	p.userNameCache.Store("U1", "Jim")
+	p.handler = func(_ core.Platform, msg *core.Message) { got = append(got, msg) }
+	return p, &got
+}
+
+// freshTS returns a Slack ts that is newer than core.StartTime, so the adapter's
+// post-restart old-message filter does not drop the event before the dedup guard.
+func freshTS(seq int) string {
+	return fmt.Sprintf("%d.%06d", time.Now().Add(time.Minute).Unix(), seq)
+}
+
+// mentionEvent builds the socketmode event Slack delivers for the app_mention
+// subscription; messageEvent builds the one it delivers for message.channels.
+// A message that @-mentions the bot produces both.
+func mentionEvent(channel, user, ts, text string) socketmode.Event {
+	return socketmode.Event{
+		Type: socketmode.EventTypeEventsAPI,
+		Data: slackevents.EventsAPIEvent{
+			Type: slackevents.CallbackEvent,
+			InnerEvent: slackevents.EventsAPIInnerEvent{
+				Data: &slackevents.AppMentionEvent{
+					User: user, Channel: channel, TimeStamp: ts, Text: text,
+				},
+			},
+		},
+	}
+}
+
+func messageEvent(channel, user, ts, text string) socketmode.Event {
+	return socketmode.Event{
+		Type: socketmode.EventTypeEventsAPI,
+		Data: slackevents.EventsAPIEvent{
+			Type: slackevents.CallbackEvent,
+			InnerEvent: slackevents.EventsAPIInnerEvent{
+				Data: &slackevents.MessageEvent{
+					User: user, Channel: channel, TimeStamp: ts, Text: text,
+				},
+			},
+		},
+	}
+}
+
+// A message that mentions the bot arrives twice — once as app_mention, once as
+// message. Before the dedup guard both were dispatched: the first started a
+// turn and the second hit the still-busy session, so every mention drew a
+// "message queued" reply and burned a second turn.
+func TestHandleEvent_MentionDeliveredTwiceDispatchesOnce(t *testing.T) {
+	p, got := newDedupTestPlatform(t)
+	ts := freshTS(1)
+	text := "a quick intro to <@UBOT> for the team"
+
+	p.handleEvent(mentionEvent("C1", "U1", ts, text))
+	p.handleEvent(messageEvent("C1", "U1", ts, text))
+
+	if len(*got) != 1 {
+		t.Fatalf("dispatched %d times, want 1", len(*got))
+	}
+	if (*got)[0].MessageID != ts {
+		t.Errorf("MessageID = %q, want %q", (*got)[0].MessageID, ts)
+	}
+}
+
+// Order must not matter: Slack does not guarantee which subscription lands first.
+func TestHandleEvent_MentionDedupIsOrderIndependent(t *testing.T) {
+	p, got := newDedupTestPlatform(t)
+	ts := freshTS(1)
+
+	p.handleEvent(messageEvent("C1", "U1", ts, "hello <@UBOT>"))
+	p.handleEvent(mentionEvent("C1", "U1", ts, "hello <@UBOT>"))
+
+	if len(*got) != 1 {
+		t.Fatalf("dispatched %d times, want 1", len(*got))
+	}
+}
+
+// The guard must key on the message, not the channel: distinct messages still
+// get through, including the same ts seen in two different channels.
+func TestHandleEvent_DistinctMessagesStillDispatch(t *testing.T) {
+	p, got := newDedupTestPlatform(t)
+	p.channelNameCache["C2"] = "other"
+
+	p.handleEvent(messageEvent("C1", "U1", freshTS(1), "first"))
+	p.handleEvent(messageEvent("C1", "U1", freshTS(2), "second"))
+	p.handleEvent(messageEvent("C2", "U1", freshTS(1), "same ts, other channel"))
+
+	if len(*got) != 3 {
+		t.Fatalf("dispatched %d times, want 3", len(*got))
+	}
+}
+
+func TestDedupKey(t *testing.T) {
+	if got := dedupKey("C1", "123.456"); got != "C1:123.456" {
+		t.Errorf("dedupKey = %q, want %q", got, "C1:123.456")
+	}
+	// An empty ts must produce an empty key — core.MessageDedup never treats
+	// the empty string as a duplicate, so such events are never swallowed.
+	if got := dedupKey("C1", ""); got != "" {
+		t.Errorf("dedupKey with empty ts = %q, want empty", got)
 	}
 }
