@@ -102,7 +102,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		if strings.TrimSpace(resolved) == "" {
 			return nil, fmt.Errorf("cloud_web: ws_url or base_url is required for websocket transport")
 		}
-		tp = newWSTransport(resolved, token, name, project)
+		tp = newWSTransport(resolved, token, name, project, pickStringMap(opts["extra_headers"]))
 	case "long_poll":
 		if strings.TrimSpace(baseURL) == "" {
 			return nil, fmt.Errorf("cloud_web: base_url is required for long_poll transport")
@@ -152,6 +152,25 @@ func pickInt(v any) int {
 		}
 	}
 	return 0
+}
+
+// pickStringMap converts a TOML inline table to map[string]string.
+// Used for extra_headers: [projects.platforms.options.extra_headers].
+func pickStringMap(v any) map[string]string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		if s, ok := val.(string); ok {
+			out[k] = s
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (p *Platform) Name() string { return p.name }
