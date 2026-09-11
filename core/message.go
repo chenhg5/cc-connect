@@ -458,6 +458,24 @@ const (
 	EventThinking          EventType = "thinking"           // thinking/processing status
 )
 
+// ErrorKind classifies agent errors that need special handling by the engine.
+type ErrorKind string
+
+const (
+	ErrorKindUnknown    ErrorKind = ""
+	ErrorKindRateLimit  ErrorKind = "rate_limit"
+	ErrorKindOverloaded ErrorKind = "overloaded"
+)
+
+func (k ErrorKind) IsRetriable() bool {
+	switch k {
+	case ErrorKindRateLimit, ErrorKindOverloaded:
+		return true
+	default:
+		return false
+	}
+}
+
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
 	Question    string               `json:"question"`
@@ -488,6 +506,7 @@ type Event struct {
 	Questions                []UserQuestion // populated when ToolName == "AskUserQuestion"
 	Done                     bool
 	Error                    error
+	ErrorKind                ErrorKind
 	InputTokens              int // token usage from agent result events
 	OutputTokens             int
 	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
