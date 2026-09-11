@@ -217,8 +217,9 @@ type StreamPreviewConfig struct {
 // is received, before the agent starts processing. This gives users quick feedback
 // that their message was received (e.g. "🤔 Thinking...").
 type InstantReplyConfig struct {
-	Enabled *bool  `toml:"enabled"` // default false
-	Content string `toml:"content"` // custom reply text; empty = use i18n default ("⏳ Processing...")
+	Enabled    *bool  `toml:"enabled"`     // default false
+	Content    string `toml:"content"`     // custom reply text; empty = use i18n default ("⏳ Processing...")
+	AutoRecall *bool  `toml:"auto_recall"` // default true when enabled; recall instant reply when real response arrives
 }
 
 // RateLimitConfig controls per-session message rate limiting.

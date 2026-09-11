@@ -450,44 +450,98 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	_, err := p.replyWithMsgID(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) replyWithMsgID(ctx context.Context, rctx any, content string) (string, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("wecom: invalid reply context type %T", rctx)
+		return "", fmt.Errorf("wecom: invalid reply context type %T", rctx)
 	}
 	if content == "" {
-		return nil
+		return "", nil
 	}
 
 	accessToken, err := p.getAccessToken()
 	if err != nil {
 		slog.Error("wecom: get access_token failed", "error", err)
-		return fmt.Errorf("wecom: get access_token: %w", err)
+		return "", fmt.Errorf("wecom: get access_token: %w", err)
 	}
 
 	if !p.enableMarkdown {
 		content = core.StripMarkdown(content)
 	}
 
+	var lastMsgID string
 	chunks := splitByBytes(content, 2000)
 	for i, chunk := range chunks {
+		var msgID string
 		var sendErr error
 		if p.enableMarkdown {
-			sendErr = p.sendMarkdown(accessToken, rc.userID, chunk)
+			msgID, sendErr = p.sendMarkdown(accessToken, rc.userID, chunk)
 		} else {
-			sendErr = p.sendText(accessToken, rc.userID, chunk)
+			msgID, sendErr = p.sendText(accessToken, rc.userID, chunk)
+		}
+		if msgID != "" {
+			lastMsgID = msgID
 		}
 		if sendErr != nil {
 			slog.Error("wecom: send failed", "user", rc.userID, "chunk", i, "error", sendErr)
-			return sendErr
+			return lastMsgID, sendErr
 		}
 	}
 	slog.Debug("wecom: message sent", "user", rc.userID, "chunks", len(chunks), "total_len", len(content))
-	return nil
+	return lastMsgID, nil
 }
 
 // Send sends a new message (same as Reply for WeChat Work)
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.Reply(ctx, rctx, content)
+}
+
+// SendAndRecall sends a message and returns its msgID for later recall.
+// Implements core.MessageRecallSender.
+func (p *Platform) SendAndRecall(ctx context.Context, rctx any, content string) (string, error) {
+	return p.replyWithMsgID(ctx, rctx, content)
+}
+
+// RecallMessage recalls (deletes) a previously sent message by msgID.
+// WeChat Work allows recalling messages within 24 hours.
+// Implements core.MessageRecallSender.
+func (p *Platform) RecallMessage(ctx context.Context, msgID string) error {
+	if msgID == "" {
+		return nil
+	}
+	accessToken, err := p.getAccessToken()
+	if err != nil {
+		slog.Warn("wecom: recall: get access_token failed", "error", err)
+		return fmt.Errorf("wecom: recall: get access_token: %w", err)
+	}
+	payload := map[string]string{"msgid": msgID}
+	body, _ := json.Marshal(payload)
+	apiURL := p.wecomAPIURL("/cgi-bin/message/recall", url.Values{
+		"access_token": []string{accessToken},
+	})
+	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		slog.Warn("wecom: recall: request failed", "error", err)
+		return fmt.Errorf("wecom: recall: request: %w", err)
+	}
+	defer resp.Body.Close()
+	var result struct {
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("wecom: recall: decode response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		slog.Warn("wecom: recall failed", "errcode", result.ErrCode, "errmsg", result.ErrMsg, "msgid", msgID)
+		return fmt.Errorf("wecom: recall failed: %d %s", result.ErrCode, result.ErrMsg)
+	}
+	slog.Debug("wecom: message recalled", "msgid", msgID)
+	return nil
 }
 
 // SendImage uploads and sends an image to the user.
@@ -589,7 +643,7 @@ func (p *Platform) uploadImageMedia(accessToken string, img core.ImageAttachment
 
 var _ core.ImageSender = (*Platform)(nil)
 
-func (p *Platform) sendMarkdown(accessToken, toUser, content string) error {
+func (p *Platform) sendMarkdown(accessToken, toUser, content string) (string, error) {
 	payload := map[string]any{
 		"touser":   toUser,
 		"msgtype":  "markdown",
@@ -604,24 +658,25 @@ func (p *Platform) sendMarkdown(accessToken, toUser, content string) error {
 
 	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
 	if err != nil {
-		return fmt.Errorf("wecom: send markdown: %w", err)
+		return "", fmt.Errorf("wecom: send markdown: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var result struct {
 		ErrCode int    `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
+		MsgID   string `json:"msgid"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("wecom: decode send response: %w", err)
+		return "", fmt.Errorf("wecom: decode send response: %w", err)
 	}
 	if result.ErrCode != 0 {
-		return fmt.Errorf("wecom: send markdown failed: %d %s", result.ErrCode, result.ErrMsg)
+		return "", fmt.Errorf("wecom: send markdown failed: %d %s", result.ErrCode, result.ErrMsg)
 	}
-	return nil
+	return result.MsgID, nil
 }
 
-func (p *Platform) sendText(accessToken, toUser, text string) error {
+func (p *Platform) sendText(accessToken, toUser, text string) (string, error) {
 	payload := map[string]any{
 		"touser":  toUser,
 		"msgtype": "text",
@@ -637,21 +692,22 @@ func (p *Platform) sendText(accessToken, toUser, text string) error {
 
 	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
 	if err != nil {
-		return fmt.Errorf("wecom: send message: %w", err)
+		return "", fmt.Errorf("wecom: send message: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var result struct {
 		ErrCode int    `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
+		MsgID   string `json:"msgid"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("wecom: decode send response: %w", err)
+		return "", fmt.Errorf("wecom: decode send response: %w", err)
 	}
 	if result.ErrCode != 0 {
-		return fmt.Errorf("wecom: send failed: %d %s", result.ErrCode, result.ErrMsg)
+		return "", fmt.Errorf("wecom: send failed: %d %s", result.ErrCode, result.ErrMsg)
 	}
-	return nil
+	return result.MsgID, nil
 }
 
 func (p *Platform) getAccessToken() (string, error) {
