@@ -37,8 +37,9 @@ type opencodeSession struct {
 	cancel            context.CancelFunc
 	wg                sync.WaitGroup
 	alive             atomic.Bool
-	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
-	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	expectingContinue atomic.Bool  // true when compaction_continue received, waiting for next step
+	resultSent        atomic.Bool  // true when EventResult has been sent for this turn
+	turnGen           atomic.Int64 // incremented by each Send; a previous turn's readLoop must not emit terminal events into the current turn
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -80,6 +81,12 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	s.resultSent.Store(false)
 	s.expectingContinue.Store(false)
+	// Each Send starts a new turn. The previous turn's process may still be
+	// running (its readLoop lingers until the process exits, often hundreds of
+	// milliseconds after it emitted step_finish reason=stop). Its EOF fallback
+	// must not send an EventResult for THIS turn — that would terminate the new
+	// turn before any output arrives, delivering an empty response.
+	gen := s.turnGen.Add(1)
 
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
@@ -110,7 +117,7 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	}
 
 	s.wg.Add(1)
-	go s.readLoop(cmd, stdout, &stderrBuf)
+	go s.readLoop(cmd, stdout, &stderrBuf, gen)
 
 	return nil
 }
@@ -191,9 +198,8 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	return args
 }
 
-func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
+func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, gen int64) {
 	defer s.wg.Done()
-	defer func() { _ = cmd.Wait() }()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -210,11 +216,27 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 			continue
 		}
 
-		s.handleEvent(raw)
+		s.handleEvent(raw, gen)
 	}
 
+	// Reap the process before reading stderrBuf: cmd.Wait joins the exec
+	// goroutine that copies the child's stderr into stderrBuf, so reading the
+	// buffer any earlier races with that copy (and may see partial output).
+	// All stdout reads are complete here (scanner hit EOF or errored), which
+	// is the precondition os/exec documents for calling Wait.
+	_ = cmd.Wait()
+
+	// Terminal emissions below must be skipped if a newer turn has started:
+	// this readLoop belongs to a process whose turn already completed (the
+	// engine consumed its step_finish EventResult and moved on), so its EOF
+	// bookkeeping must not leak into the turn that is now in flight.
+	stale := s.turnGen.Load() != gen
+
 	if err := scanner.Err(); err != nil {
-		slog.Error("opencodeSession: scanner error", "error", err)
+		slog.Error("opencodeSession: scanner error", "error", err, "stale", stale)
+		if stale {
+			return
+		}
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
 		select {
 		case s.events <- evt:
@@ -226,7 +248,10 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 
 	stderrMsg := stderrBuf.String()
 	if stderrMsg != "" {
-		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
+		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500), "stale", stale)
+		if stale {
+			return
+		}
 		if strings.Contains(stderrMsg, "Session not found") {
 			s.chatID.Store("")
 			slog.Warn("opencodeSession: cleared stale session ID")
@@ -249,14 +274,14 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	}
 
 	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
-	s.sendEventResult()
+	s.sendEventResult(gen)
 }
 
 // OpenCode NDJSON event structure:
 //
 //	{ "type": "text|tool_use|reasoning|step_start|step_finish",
 //	  "part": { "type": "text|tool|reasoning|step-start|step-finish", ... } }
-func (s *opencodeSession) handleEvent(raw map[string]any) {
+func (s *opencodeSession) handleEvent(raw map[string]any, gen int64) {
 	eventType, _ := raw["type"].(string)
 
 	switch eventType {
@@ -269,7 +294,7 @@ func (s *opencodeSession) handleEvent(raw map[string]any) {
 	case "step_start":
 		s.handleStepStart(raw)
 	case "step_finish":
-		s.handleStepFinish(raw)
+		s.handleStepFinish(raw, gen)
 	case "error":
 		s.handleError(raw)
 	default:
@@ -479,7 +504,7 @@ func (s *opencodeSession) handleStepStart(raw map[string]any) {
 	}
 }
 
-func (s *opencodeSession) handleStepFinish(raw map[string]any) {
+func (s *opencodeSession) handleStepFinish(raw map[string]any, gen int64) {
 	part, _ := raw["part"].(map[string]any)
 	reason := ""
 	if part != nil {
@@ -488,11 +513,16 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
 	if reason == "stop" {
-		s.sendEventResult()
+		s.sendEventResult(gen)
 	}
 }
 
-func (s *opencodeSession) sendEventResult() {
+func (s *opencodeSession) sendEventResult(gen int64) {
+	if s.turnGen.Load() != gen {
+		slog.Warn("opencodeSession: suppressing stale EventResult from a previous turn's process",
+			"session_id", s.CurrentSessionID())
+		return
+	}
 	if s.resultSent.Load() {
 		slog.Debug("opencodeSession: EventResult already sent, skipping", "session_id", s.CurrentSessionID())
 		return
