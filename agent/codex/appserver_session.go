@@ -21,9 +21,10 @@ import (
 )
 
 type rpcResponseEnvelope struct {
-	ID     any             `json:"id"`
-	Result json.RawMessage `json:"result"`
-	Error  *rpcError       `json:"error"`
+	ID             any             `json:"id"`
+	Result         json.RawMessage `json:"result"`
+	Error          *rpcError       `json:"error"`
+	TransportError error           `json:"-"`
 }
 
 type rpcNotificationEnvelope struct {
@@ -35,6 +36,8 @@ type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
+
+func (e *rpcError) Error() string { return strings.TrimSpace(e.Message) }
 
 type initResponse struct {
 	ProtocolVersion string `json:"protocolVersion"`
@@ -179,6 +182,8 @@ type appServerSession struct {
 	stateMu      sync.Mutex
 	pendingMsgs  []string
 	currentTurn  string
+	turnRevision uint64
+	retiredTurns map[string]bool
 	preambleSent bool
 
 	runtimeMu sync.RWMutex
@@ -516,6 +521,10 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 		params["approvalPolicy"] = approval
 	}
 
+	s.stateMu.Lock()
+	revision := s.turnRevision
+	s.stateMu.Unlock()
+	s.storeContextUsage(nil)
 	var resp turnStartResponse
 	if err := s.request("turn/start", params, &resp); err != nil {
 		return fmt.Errorf("codex app-server turn/start: %w", err)
@@ -525,10 +534,76 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	}
 
 	s.stateMu.Lock()
-	s.currentTurn = resp.Turn.ID
-	s.pendingMsgs = s.pendingMsgs[:0]
+	// Notifications can arrive before the response, including completion.
+	// Never resurrect that turn or discard output already received.
+	if s.turnRevision == revision && !s.retiredTurns[resp.Turn.ID] {
+		s.currentTurn = resp.Turn.ID
+		s.pendingMsgs = s.pendingMsgs[:0]
+	}
 	s.stateMu.Unlock()
 
+	return nil
+}
+
+// CurrentTurnID identifies the only turn that can accept steering input.
+func (s *appServerSession) CurrentTurnID() string {
+	if !s.alive.Load() {
+		return ""
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.currentTurn
+}
+
+func (s *appServerSession) Steer(ctx context.Context, expectedTurnID, content string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err // No request has been sent.
+	}
+	if expectedTurnID == "" || s.CurrentTurnID() != expectedTurnID {
+		return core.ErrSteerNotActive
+	}
+	if len(files) > 0 {
+		paths := core.SaveFilesToDisk(s.GetWorkDir(), fmt.Sprintf("steer-%d", time.Now().UnixNano()), files)
+		if len(paths) != len(files) {
+			return fmt.Errorf("codex app-server steer: could not stage all attachments")
+		}
+		content = core.AppendFileRefs(content, paths)
+	}
+	content, imagePaths, err := s.stageImages(content, images)
+	if err != nil {
+		return err
+	}
+	input := []map[string]any{{"type": "text", "text": content, "text_elements": []any{}}}
+	for _, path := range imagePaths {
+		input = append(input, map[string]any{"type": "localImage", "path": path})
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.CurrentTurnID() != expectedTurnID {
+		return core.ErrSteerNotActive
+	}
+	var resp struct {
+		TurnID string `json:"turnId"`
+	}
+	err = s.requestWithContext(ctx, "turn/steer", map[string]any{
+		"threadId": s.CurrentSessionID(), "expectedTurnId": expectedTurnID, "input": input,
+	}, &resp, appServerRequestTimeout)
+	if err != nil {
+		var rejection *rpcError
+		if errors.As(err, &rejection) {
+			return fmt.Errorf("codex app-server turn/steer rejected: %w", err)
+		}
+		// Transport failure does not establish whether Codex consumed the input.
+		// Callers must not replay it as a queued turn automatically.
+		return fmt.Errorf("%w: codex app-server turn/steer: %w", core.ErrSteerOutcomeUnknown, err)
+	}
+	if resp.TurnID != expectedTurnID {
+		return fmt.Errorf("%w: codex app-server turn/steer returned unexpected turn id", core.ErrSteerOutcomeUnknown)
+	}
 	return nil
 }
 
@@ -537,20 +612,23 @@ func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachm
 		return prompt, nil, nil
 	}
 
-	imgDir := filepath.Join(s.workDir, ".cc-connect", "images")
+	imgDir := filepath.Join(s.GetWorkDir(), ".cc-connect", "images")
 	if err := os.MkdirAll(imgDir, 0o755); err != nil {
 		return "", nil, fmt.Errorf("codex app-server: create image dir: %w", err)
 	}
 
 	imagePaths := make([]string, 0, len(images))
-	for i, img := range images {
-		ext := codexImageExt(img.MimeType)
-		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
-		fpath := filepath.Join(imgDir, fname)
-		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+	for _, img := range images {
+		file, err := os.CreateTemp(imgDir, "img_*"+codexImageExt(img.MimeType))
+		if err != nil {
+			return "", nil, fmt.Errorf("codex app-server: create image: %w", err)
+		}
+		_, writeErr := file.Write(img.Data)
+		closeErr := file.Close()
+		if err := errors.Join(writeErr, closeErr); err != nil {
 			return "", nil, fmt.Errorf("codex app-server: save image: %w", err)
 		}
-		imagePaths = append(imagePaths, fpath)
+		imagePaths = append(imagePaths, file.Name())
 	}
 
 	if strings.TrimSpace(prompt) == "" {
@@ -1124,8 +1202,13 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	switch method {
 	case "turn/started":
 		var notif turnNotification
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.matchesThread(notif.ThreadID) && notif.Turn.ID != "" {
 			s.stateMu.Lock()
+			if s.retiredTurns[notif.Turn.ID] || s.currentTurn == notif.Turn.ID || (s.currentTurn != "" && s.currentTurn != notif.Turn.ID) {
+				s.stateMu.Unlock()
+				return
+			}
+			s.turnRevision++
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.stateMu.Unlock()
@@ -1146,7 +1229,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 
 	case "turn/completed":
 		var notif turnNotification
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.matchesThread(notif.ThreadID) && notif.Turn.ID != "" {
 			if strings.EqualFold(strings.TrimSpace(notif.Turn.Status), "failed") || notif.Turn.Error != nil {
 				errMsg := ""
 				if notif.Turn.Error != nil {
@@ -1155,23 +1238,16 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 				if errMsg == "" {
 					errMsg = "turn failed (no details)"
 				}
-				s.failTurn(fmt.Errorf("%s", errMsg))
+				s.finishTurn(notif.Turn.ID, fmt.Errorf("%s", errMsg))
 			} else {
-				s.completeTurn()
+				s.finishTurn(notif.Turn.ID, nil)
 			}
 		}
 
 	case "thread/status/changed":
-		var notif struct {
-			ThreadID string `json:"threadId"`
-			Status   struct {
-				Type string `json:"type"`
-			} `json:"status"`
-		}
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && notif.Status.Type == "idle" {
-			// In codex 0.125+, thread going idle signals turn completion.
-			s.completeTurn()
-		}
+		// Thread status has no turn ID. A late idle notification must not
+		// finish a newer queued turn; only turn/completed owns completion.
+		return
 
 	case "account/rateLimits/updated":
 		var notif appServerRateLimitsResponse
@@ -1540,28 +1616,41 @@ func rpcIDToInt64(v any) (int64, bool) {
 	return 0, false
 }
 
-func (s *appServerSession) completeTurn() {
-	s.stateMu.Lock()
-	if s.currentTurn == "" {
-		s.stateMu.Unlock()
-		return
-	}
-	s.currentTurn = ""
-	s.stateMu.Unlock()
-	s.flushPendingAsText()
-	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+func (s *appServerSession) matchesThread(id string) bool {
+	return s.CurrentSessionID() == "" || id == s.CurrentSessionID()
 }
 
-func (s *appServerSession) failTurn(err error) {
+func (s *appServerSession) finishTurn(expectedTurnID string, err error) {
 	s.stateMu.Lock()
-	if s.currentTurn == "" {
+	if expectedTurnID != "" {
+		if s.retiredTurns == nil {
+			s.retiredTurns = make(map[string]bool)
+		}
+		s.retiredTurns[expectedTurnID] = true
+	}
+	if s.currentTurn == "" || (expectedTurnID != "" && s.currentTurn != expectedTurnID) {
 		s.stateMu.Unlock()
 		return
 	}
+	s.turnRevision++
+	if s.retiredTurns == nil {
+		s.retiredTurns = make(map[string]bool)
+	}
+	s.retiredTurns[s.currentTurn] = true
 	s.currentTurn = ""
+	msgs := append([]string(nil), s.pendingMsgs...)
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
-	s.emitError(err)
+	if err != nil {
+		s.emitError(err)
+		return
+	}
+	for _, text := range msgs {
+		if strings.TrimSpace(text) != "" {
+			s.emit(core.Event{Type: core.EventText, Content: text})
+		}
+	}
+	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
 }
 
 func (s *appServerSession) flushPendingAsThinking() {
@@ -1611,7 +1700,7 @@ func (s *appServerSession) rejectPending(err error) {
 	for id, ch := range s.pending {
 		delete(s.pending, id)
 		select {
-		case ch <- rpcResponseEnvelope{ID: id, Error: &rpcError{Message: err.Error()}}:
+		case ch <- rpcResponseEnvelope{ID: id, TransportError: err}:
 		default:
 		}
 	}
@@ -1622,6 +1711,16 @@ func (s *appServerSession) request(method string, params any, out any) error {
 }
 
 func (s *appServerSession) requestWithTimeout(method string, params any, out any, timeout time.Duration) error {
+	return s.requestWithContext(context.Background(), method, params, out, timeout)
+}
+
+func (s *appServerSession) requestWithContext(ctx context.Context, method string, params any, out any, timeout time.Duration) error {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < timeout {
+		timeout = time.Until(deadline)
+	}
+	if timeout <= 0 {
+		return context.DeadlineExceeded
+	}
 	id := s.nextID.Add(1)
 	ch := make(chan rpcResponseEnvelope, 1)
 
@@ -1631,6 +1730,11 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	}
 	s.pending[id] = ch
 	s.pendingMu.Unlock()
+	defer func() {
+		s.pendingMu.Lock()
+		delete(s.pending, id)
+		s.pendingMu.Unlock()
+	}()
 
 	payload := map[string]any{
 		"jsonrpc": "2.0",
@@ -1640,17 +1744,11 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	}
 
 	deadline := time.Now().Add(timeout)
-	if err := s.writeJSONWithTimeout(method, payload, timeout); err != nil {
-		s.pendingMu.Lock()
-		delete(s.pending, id)
-		s.pendingMu.Unlock()
+	if err := s.writeJSONWithContext(ctx, method, payload, timeout); err != nil {
 		return err
 	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		s.pendingMu.Lock()
-		delete(s.pending, id)
-		s.pendingMu.Unlock()
 		return fmt.Errorf("%s timed out", method)
 	}
 
@@ -1659,8 +1757,11 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	ctxDone := s.contextDone()
 	select {
 	case resp := <-ch:
+		if resp.TransportError != nil {
+			return resp.TransportError
+		}
 		if resp.Error != nil {
-			return fmt.Errorf("%s", strings.TrimSpace(resp.Error.Message))
+			return resp.Error
 		}
 		if out != nil {
 			if err := json.Unmarshal(resp.Result, out); err != nil {
@@ -1670,15 +1771,14 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 		return nil
 	case <-ctxDone:
 		return s.contextErr()
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-timer.C:
-		s.pendingMu.Lock()
-		delete(s.pending, id)
-		s.pendingMu.Unlock()
 		return fmt.Errorf("%s timed out", method)
 	}
 }
 
-func (s *appServerSession) writeJSONWithTimeout(method string, v any, timeout time.Duration) error {
+func (s *appServerSession) writeJSONWithContext(ctx context.Context, method string, v any, timeout time.Duration) error {
 	done := make(chan error, 1)
 	go func() {
 		done <- s.writeJSON(v)
@@ -1693,6 +1793,9 @@ func (s *appServerSession) writeJSONWithTimeout(method string, v any, timeout ti
 		return err
 	case <-ctxDone:
 		return s.contextErr()
+	case <-ctx.Done():
+		s.abortTransport()
+		return ctx.Err()
 	case <-timer.C:
 		err := fmt.Errorf("%s write timed out", method)
 		slog.Warn("codex app-server write timed out, closing session", "method", method, "timeout", timeout)
@@ -1761,8 +1864,12 @@ func (s *appServerSession) writeJSON(v any) error {
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if _, err := stdin.Write(append(b, '\n')); err != nil {
+	n, err := stdin.Write(append(b, '\n'))
+	if err != nil {
 		return fmt.Errorf("codex app-server write: %w", err)
+	}
+	if n != len(b)+1 {
+		return fmt.Errorf("codex app-server write: %w", io.ErrShortWrite)
 	}
 	return nil
 }

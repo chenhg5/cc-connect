@@ -413,31 +413,31 @@ const (
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
 
-	MsgTimerNotAvailable  MsgKey = "timer_not_available"
-	MsgTimerUsage         MsgKey = "timer_usage"
-	MsgTimerAddUsage      MsgKey = "timer_add_usage"
-	MsgTimerAdded         MsgKey = "timer_added"
-	MsgTimerAddedExec     MsgKey = "timer_added_exec"
-	MsgTimerAddExecUsage  MsgKey = "timer_addexec_usage"
-	MsgTimerEmpty         MsgKey = "timer_empty"
-	MsgTimerListTitle     MsgKey = "timer_list_title"
-	MsgTimerListFooter    MsgKey = "timer_list_footer"
-	MsgTimerDelUsage      MsgKey = "timer_del_usage"
-	MsgTimerMuteUsage     MsgKey = "timer_mute_usage"
-	MsgTimerDeleted       MsgKey = "timer_deleted"
-	MsgTimerNotFound      MsgKey = "timer_not_found"
-	MsgTimerMuted         MsgKey = "timer_muted"
-	MsgTimerUnmuted       MsgKey = "timer_unmuted"
-	MsgTimerCardHint      MsgKey = "timer_card_hint"
-	MsgTimerBtnMute       MsgKey = "timer_btn_mute"
-	MsgTimerBtnUnmute     MsgKey = "timer_btn_unmute"
-	MsgTimerBtnDelete     MsgKey = "timer_btn_delete"
-	MsgTimerIDLabel       MsgKey = "timer_id_label"
-	MsgTimerScheduledLabel MsgKey = "timer_scheduled_label"
-	MsgTimerFailedSuffix  MsgKey = "timer_failed_suffix"
-	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
-	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
-	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
+	MsgTimerNotAvailable    MsgKey = "timer_not_available"
+	MsgTimerUsage           MsgKey = "timer_usage"
+	MsgTimerAddUsage        MsgKey = "timer_add_usage"
+	MsgTimerAdded           MsgKey = "timer_added"
+	MsgTimerAddedExec       MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage    MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty           MsgKey = "timer_empty"
+	MsgTimerListTitle       MsgKey = "timer_list_title"
+	MsgTimerListFooter      MsgKey = "timer_list_footer"
+	MsgTimerDelUsage        MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage       MsgKey = "timer_mute_usage"
+	MsgTimerDeleted         MsgKey = "timer_deleted"
+	MsgTimerNotFound        MsgKey = "timer_not_found"
+	MsgTimerMuted           MsgKey = "timer_muted"
+	MsgTimerUnmuted         MsgKey = "timer_unmuted"
+	MsgTimerCardHint        MsgKey = "timer_card_hint"
+	MsgTimerBtnMute         MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute       MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete       MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel         MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel  MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix    MsgKey = "timer_failed_suffix"
+	MsgCommandsTagAgent     MsgKey = "commands_tag_agent"
+	MsgCommandsTagShell     MsgKey = "commands_tag_shell"
+	MsgUpgradeTimeoutSuffix MsgKey = "upgrade_timeout_suffix"
 
 	MsgCronScheduleLabel MsgKey = "cron_schedule_label"
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
@@ -688,13 +688,144 @@ const (
 	// send / cron / timer / relay tool documentation in their native
 	// language. Translation coverage is en + zh for this PR; additional
 	// languages fall back to en automatically.
-	MsgAgentSendToolPrompt MsgKey = "agent_send_tool_prompt"
-	MsgAgentCronToolPrompt MsgKey = "agent_cron_tool_prompt"
+	MsgAgentSendToolPrompt  MsgKey = "agent_send_tool_prompt"
+	MsgAgentCronToolPrompt  MsgKey = "agent_cron_tool_prompt"
 	MsgAgentTimerToolPrompt MsgKey = "agent_timer_tool_prompt"
 	MsgAgentRelayToolPrompt MsgKey = "agent_relay_tool_prompt"
 )
 
+const (
+	MsgSteerSubmitting   MsgKey = "steer_submitting"
+	MsgSteerExpired      MsgKey = "steer_expired"
+	MsgSteerQueued       MsgKey = "steer_queued"
+	MsgSteerButton       MsgKey = "steer_button"
+	MsgSteerCancelButton MsgKey = "steer_cancel_button"
+	MsgSteerAccepted     MsgKey = "steer_accepted"
+	MsgSteerCancelled    MsgKey = "steer_cancelled"
+	MsgSteerUnknown      MsgKey = "steer_unknown"
+	MsgSteerFailed       MsgKey = "steer_failed"
+	MsgSteerEnded        MsgKey = "steer_ended"
+	MsgSteerNoTurn       MsgKey = "steer_no_turn"
+	MsgSteerUnsupported  MsgKey = "steer_unsupported"
+	MsgSteerUsage        MsgKey = "steer_usage"
+	MsgSteerRejected     MsgKey = "steer_rejected"
+	MsgBuiltinCmdSteer   MsgKey = "steer"
+	MsgSteerQueueHint    MsgKey = "steer_queue_hint"
+)
+
 var messages = map[MsgKey]map[Language]string{
+	MsgSteerSubmitting: {
+		LangEnglish:            "Submitting supplement…",
+		LangChinese:            "正在提交补充…",
+		LangTraditionalChinese: "正在提交補充…",
+		LangJapanese:           "追加内容を送信中…",
+		LangSpanish:            "Enviando información adicional…",
+	},
+	MsgSteerExpired: {
+		LangEnglish:            "This action has expired or is not available to you.",
+		LangChinese:            "此操作已失效或无权操作。",
+		LangTraditionalChinese: "此操作已失效或無權操作。",
+		LangJapanese:           "この操作は期限切れか、権限がありません。",
+		LangSpanish:            "Esta acción caducó o no tienes permiso.",
+	},
+	MsgSteerQueued: {
+		LangEnglish:            "Queued",
+		LangChinese:            "已排队",
+		LangTraditionalChinese: "已排隊",
+		LangJapanese:           "待機中",
+		LangSpanish:            "En cola",
+	},
+	MsgSteerButton: {
+		LangEnglish:            "Add to this turn",
+		LangChinese:            "补充到本轮",
+		LangTraditionalChinese: "補充到本輪",
+		LangJapanese:           "現在のターンに追加",
+		LangSpanish:            "Añadir al turno actual",
+	},
+	MsgSteerCancelButton: {
+		LangEnglish:            "Cancel queued message",
+		LangChinese:            "取消排队",
+		LangTraditionalChinese: "取消排隊",
+		LangJapanese:           "待機を取り消す",
+		LangSpanish:            "Cancelar mensaje en cola",
+	},
+	MsgSteerAccepted: {
+		LangEnglish:            "Added to this turn.",
+		LangChinese:            "已补充到本轮。",
+		LangTraditionalChinese: "已補充到本輪。",
+		LangJapanese:           "現在のターンに追加しました。",
+		LangSpanish:            "Añadido al turno actual.",
+	},
+	MsgSteerCancelled: {
+		LangEnglish:            "Removed from the queue.",
+		LangChinese:            "已取消排队。",
+		LangTraditionalChinese: "已取消排隊。",
+		LangJapanese:           "待機を取り消しました。",
+		LangSpanish:            "Eliminado de la cola.",
+	},
+	MsgSteerUnknown: {
+		LangEnglish:            "Submission outcome unknown. This message will not run from the queue. Check the task before resending.",
+		LangChinese:            "提交结果待确认；这条消息不会自动执行。请核对任务后再决定是否重发。",
+		LangTraditionalChinese: "提交結果待確認；這條訊息不會自動執行。請核對任務後再決定是否重發。",
+		LangJapanese:           "送信結果が不明です。このメッセージは自動実行されません。再送前にタスクを確認してください。",
+		LangSpanish:            "Resultado desconocido. Este mensaje no se ejecutará desde la cola. Revisa la tarea antes de reenviarlo.",
+	},
+	MsgSteerFailed: {
+		LangEnglish:            "Supplement rejected. The message remains queued.",
+		LangChinese:            "补充未被接受，消息仍在队列中。",
+		LangTraditionalChinese: "補充未被接受，訊息仍在佇列中。",
+		LangJapanese:           "追加できませんでした。メッセージは待機中です。",
+		LangSpanish:            "No se aceptó la información. El mensaje sigue en cola.",
+	},
+	MsgSteerEnded: {
+		LangEnglish:            "The original turn ended. This message remains queued.",
+		LangChinese:            "原任务已结束，这条消息仍按队列处理。",
+		LangTraditionalChinese: "原任務已結束，這條訊息仍按佇列處理。",
+		LangJapanese:           "元のターンが終了しました。メッセージは待機中です。",
+		LangSpanish:            "El turno original terminó. El mensaje sigue en cola.",
+	},
+	MsgSteerNoTurn: {
+		LangEnglish:            "No active turn. The supplement was not sent.",
+		LangChinese:            "当前没有可补充的活动任务，尚未发送。",
+		LangTraditionalChinese: "目前沒有可補充的活動任務，尚未傳送。",
+		LangJapanese:           "実行中のターンがないため、送信していません。",
+		LangSpanish:            "No hay un turno activo. No se envió la información.",
+	},
+	MsgSteerUnsupported: {
+		LangEnglish:            "This backend does not support same-turn supplements. Send a normal message to queue it.",
+		LangChinese:            "当前后端不支持同轮补充，请普通发送消息以排队。",
+		LangTraditionalChinese: "目前後端不支援同輪補充，請一般傳送訊息以排隊。",
+		LangJapanese:           "このバックエンドは実行中の追加に対応していません。通常のメッセージで待機させてください。",
+		LangSpanish:            "Este backend no admite añadir al turno activo. Envía un mensaje normal para ponerlo en cola.",
+	},
+	MsgSteerUsage: {
+		LangEnglish:            "Usage: /steer <additional instructions>",
+		LangChinese:            "用法：/补充 <追加要求>",
+		LangTraditionalChinese: "用法：/補充 <追加要求>",
+		LangJapanese:           "使い方: /steer <追加指示>",
+		LangSpanish:            "Uso: /steer <instrucciones adicionales>",
+	},
+	MsgSteerRejected: {
+		LangEnglish:            "The supplement was rejected and was not queued.",
+		LangChinese:            "补充未被接受，也未加入队列。",
+		LangTraditionalChinese: "補充未被接受，也未加入佇列。",
+		LangJapanese:           "追加内容は受け付けられず、待機にも入りませんでした。",
+		LangSpanish:            "La información no se aceptó ni se puso en cola.",
+	},
+	MsgBuiltinCmdSteer: {
+		LangEnglish:            "Add instructions to the active turn",
+		LangChinese:            "补充到当前任务",
+		LangTraditionalChinese: "補充到目前任務",
+		LangJapanese:           "実行中のターンに指示を追加",
+		LangSpanish:            "Añadir instrucciones al turno activo",
+	},
+	MsgSteerQueueHint: {
+		LangEnglish:            "Runs after the current task unless added to this turn.",
+		LangChinese:            "当前任务结束后处理，或点“补充到本轮”。",
+		LangTraditionalChinese: "目前任務結束後處理，或點「補充到本輪」。",
+		LangJapanese:           "現在のタスク終了後に実行するか、このターンに追加できます。",
+		LangSpanish:            "Se procesará después de la tarea actual, o puedes añadirlo a este turno.",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>飞书 · 补充到本轮 · 本地卡片预览</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:#1f2937;background:#f4f6fa;color-scheme:light}*{box-sizing:border-box}html{overflow-y:scroll;scrollbar-gutter:stable}body{margin:0}main{max-width:1200px;margin:0 auto;padding:42px 36px 30px}.eyebrow{font-size:13px;color:#4969aa;font-weight:600;letter-spacing:1px}h1{font-size:32px;letter-spacing:-.7px;margin:10px 0 12px;font-weight:650}header p{font-size:15px;color:#5c677a;line-height:1.8;margin:0;max-width:800px}.disclosure{display:inline-block;font-size:12px;color:#6b5d39;background:#fff8e5;border:1px solid #f1e2bc;border-radius:7px;padding:7px 10px;margin-top:16px}.context{margin:26px 0 28px;border-left:3px solid #6489d4;padding:1px 0 1px 15px;font-size:14px;line-height:1.8;color:#5d687b}.context strong{color:#34435c;font-weight:600}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:27px 25px}.example{min-width:0}.scenario{display:flex;align-items:center;gap:9px;font-size:13px;color:#687487;margin:0 0 10px}.number{display:flex;align-items:center;justify-content:center;width:23px;height:23px;flex:0 0 23px;border:1px solid #d7dfeb;border-radius:50%;font-size:11px;color:#526788;background:#fff}.card{border:1px solid #dce3ed;border-radius:10px;overflow:hidden;background:#fff;box-shadow:0 3px 9px #263e6506}.card-title{background:#eaf1ff;color:#284f99;padding:15px 19px;font-size:16px;line-height:1.65;font-weight:600;white-space:pre-wrap;overflow-wrap:anywhere}.card-body{padding:18px 19px 19px}.markdown{font-size:14px;line-height:1.85;white-space:pre-wrap;margin:0;color:#344054;overflow-wrap:anywhere}.actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:18px}.button{appearance:none;border:1px solid #d2d9e5;border-radius:5px;font:inherit;font-size:13px;background:white;color:#344054;padding:8px 14px;line-height:1.35;cursor:default}.button.primary{background:#3370ff;border-color:#3370ff;color:white}.note{font-size:12px;line-height:1.7;color:#8792a3;margin:13px 0 0}.example:last-child{max-width:551px}footer{margin-top:30px;border-top:1px solid #dfe5ed;padding-top:16px;font-size:12px;color:#7b8798;line-height:1.8}.error{padding:20px;border:1px solid #e1bf82;border-radius:8px;background:#fff8e8;line-height:1.8;font-size:14px}.error code{font-size:12px;overflow-wrap:anywhere}button:focus-visible{outline:2px solid #3370ff;outline-offset:3px}::-webkit-scrollbar{width:10px}::-webkit-scrollbar-thumb{background:#bdc7d6;border:2px solid #f4f6fa;border-radius:8px}@media(max-width:700px){main{padding:28px 18px 24px}h1{font-size:26px}.grid{grid-template-columns:1fr;gap:23px}.example:last-child{max-width:none}.card-title{font-size:15px}.context{margin-top:23px}header p{font-size:14px}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<div class="eyebrow">CC-CONNECT / 飞书</div>
+<h1>发出去以后，也能补充到本轮</h1>
+<p>普通消息先排队。点“补充到本轮”，将这条追加要求交给正在执行的任务。</p>
+<div class="disclosure">本地卡片预览，非飞书客户端截图</div>
+</header>
+<div class="context"><strong>示例场景</strong> · 你发起“检查登录失败原因”后，继续发送了下面的补充要求。<br>以下展示同一条消息在不同操作结果下的卡片。</div>
+<div id="cards" class="grid"></div>
+<footer>卡片标题、正文、按钮与提示来自实际卡片构建器；所有示例均为虚构内容。<br>此页面只展示状态，按钮未连接任何会话或账号。布局为本地展示样式，飞书客户端的排版可能不同。</footer>
+</main>
+<script type="application/json" id="card-data"><!-- CARD_FIXTURE --></script>
+<script>
+(function(){
+ const host=document.getElementById('cards');
+ const element=(tag,cls,text)=>{const node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node};
+ let data;
+ try{data=JSON.parse(document.getElementById('card-data').textContent)}catch{
+ const box=element('div','error','此文件是预览模板。请在仓库根目录生成卡片后，打开输出目录中的同名 HTML：');
+ box.append(element('br'),element('code','', 'CC_STEER_PREVIEW_DIR="$PWD/.artifacts/steer-preview" go test ./core -run TestExportSteerCardPreview -count=1'));host.append(box);return;
+ }
+ data.forEach((example,index)=>{
+ const section=element('section','example');section.dataset.state=example.state;
+ const scenario=element('div','scenario');scenario.append(element('span','number',String(index+1).padStart(2,'0')),element('span','',example.scenario));section.append(scenario);
+ const card=element('article','card');card.append(element('div','card-title',example.card.Header.Title));const body=element('div','card-body');
+ example.card.Elements.forEach(item=>{
+ if('Content' in item){body.append(element('p','markdown',item.Content));return;}
+ if('Buttons' in item){const row=element('div','actions');item.Buttons.forEach(button=>{const view=element('button','button '+(button.Type==='primary'?'primary':''),button.Text);view.type='button';view.setAttribute('aria-disabled','true');view.title='仅预览，无实际操作';row.append(view)});body.append(row);return;}
+ if('Text' in item)body.append(element('p','note',item.Text));
+ });
+ card.append(body);section.append(card);host.append(section);
+ });
+})();
+</script>
+</body>
+</html>
