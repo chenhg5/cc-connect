@@ -229,10 +229,17 @@ func (o *sessionObserver) tailFile(ctx context.Context, path string, offset int6
 
 	// Use file size as new offset when we've read to EOF cleanly.
 	// This avoids offset drift from line-length calculation (e.g. \r\n vs \n).
-	if scanner.Err() == nil {
-		return info.Size()
+	if err := scanner.Err(); err != nil {
+		// A JSONL line exceeded the scanner buffer cap (e.g. a Claude Code
+		// session entry containing a large embedded image / base64 payload).
+		// Returning the original offset here would cause the next poll to
+		// re-forward every line preceding the oversize one, every tick,
+		// forever. Advance past the file we've already seen instead — at
+		// the cost of skipping lines appended between this poll and the
+		// next, which is rare and recoverable.
+		slog.Warn("observe: scanner error during tail; advancing offset to avoid duplicate forwards", "path", path, "err", err)
 	}
-	return offset
+	return info.Size()
 }
 
 // forward sends a parsed observation to the target platform.
