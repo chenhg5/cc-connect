@@ -693,9 +693,10 @@ type deleteModeState struct {
 }
 
 type modelSwitchState struct {
-	phase  string
-	target string
-	result string
+	phase    string
+	target   string
+	provider string
+	result   string
 }
 
 // pendingPermission represents a permission request waiting for user response.
@@ -3943,6 +3944,23 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			}
 		}
 	}
+	// Copy provider route and reasoning effort for agents that expose the
+	// optional model-control capabilities. Without these, a newly created
+	// workspace agent silently reverts to the deployment defaults.
+	if _, ok := opts["provider"]; !ok {
+		if ma, ok := e.agent.(ProviderModelSwitcher); ok {
+			if provider := ma.GetModelProvider(); provider != "" {
+				opts["provider"] = provider
+			}
+		}
+	}
+	if _, ok := opts["reasoning_effort"]; !ok {
+		if ma, ok := e.agent.(ReasoningEffortSwitcher); ok {
+			if effort := ma.GetReasoningEffort(); effort != "" {
+				opts["reasoning_effort"] = effort
+			}
+		}
+	}
 	// Copy run_as_user (and run_as_env) for OS-level isolation. Without
 	// this, per-workspace agents silently bypass the project-level
 	// run_as_user config because their opts map is freshly constructed
@@ -4168,7 +4186,13 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	isResume := startSessionID != ""
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, startSessionID)
+	var agentSession AgentSession
+	var err error
+	if starter, ok := agent.(AgentPresetStarter); ok {
+		agentSession, err = starter.StartSessionWithPreset(e.ctx, startSessionID, session.GetAgentPreset())
+	} else {
+		agentSession, err = agent.StartSession(e.ctx, startSessionID)
+	}
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
@@ -4181,7 +4205,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			session.SetAgentSessionID("", agent.Name())
 			sessions.Save()
 			startAt = time.Now()
-			agentSession, err = agent.StartSession(e.ctx, "")
+			if starter, ok := agent.(AgentPresetStarter); ok {
+				agentSession, err = starter.StartSessionWithPreset(e.ctx, "", session.GetAgentPreset())
+			} else {
+				agentSession, err = agent.StartSession(e.ctx, "")
+			}
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
@@ -6516,6 +6544,7 @@ var builtinCommands = []struct {
 	{[]string{"model"}, "model"},
 	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
+	{[]string{"preset"}, "preset"},
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
@@ -6727,6 +6756,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdReasoning(p, msg, args)
 	case "mode":
 		e.cmdMode(p, msg, args)
+	case "preset":
+		e.cmdPreset(p, msg, args)
 	case "lang":
 		e.cmdLang(p, msg, args)
 	case "quiet":
@@ -9526,6 +9557,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/model", action: "nav:/model"},
 				{command: "/reasoning", action: "nav:/reasoning"},
 				{command: "/mode", action: "nav:/mode"},
+				{command: "/preset", action: "nav:/preset"},
 				{command: "/lang", action: "nav:/lang"},
 				{command: "/provider", action: "nav:/provider"},
 				{command: "/memory", action: "cmd:/memory"},
@@ -9797,6 +9829,10 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 
 			var sb strings.Builder
 			current := switcher.GetModel()
+			currentProvider := ""
+			if providerAware, ok := agent.(ProviderModelSwitcher); ok {
+				currentProvider = providerAware.GetModelProvider()
+			}
 			if current == "" {
 				sb.WriteString(e.i18n.T(MsgModelDefault))
 			} else {
@@ -9809,7 +9845,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			var row []ButtonOption
 			for i, m := range models {
 				marker := "  "
-				if m.Name == current {
+				if modelOptionIsCurrent(m, current, currentProvider) {
 					marker = "> "
 				}
 				var line string
@@ -9828,7 +9864,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				if m.Alias != "" {
 					label = m.Alias
 				}
-				if m.Name == current {
+				if modelOptionIsCurrent(m, current, currentProvider) {
 					label = "▶ " + label
 				}
 				row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model switch %d", i+1)})
@@ -9856,14 +9892,15 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	}
 
 	target := strings.TrimSpace(targetInput)
+	targetProvider := ""
 	if modelSwitchNeedsLookup(target) {
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
 		defer cancel()
 		models := switcher.AvailableModels(fetchCtx)
-		target = resolveModelSwitchTarget(target, models)
+		target, targetProvider = resolveModelSwitchSelection(target, models)
 	}
 
-	target, err = e.switchModelOnAgent(agent, target, agent == e.agent)
+	target, err = e.switchModelSelectionOnAgent(agent, target, targetProvider, agent == e.agent)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChangeFailed, err))
 		return
@@ -9891,20 +9928,33 @@ func resolveModelAlias(models []ModelOption, input string) string {
 	return input
 }
 
-func resolveModelSwitchTarget(input string, models []ModelOption) string {
+// resolveModelSwitchSelection resolves both the model id and its provider.
+// Provider is carried by catalog entries so selecting by number/alias does not
+// accidentally send a model id to a different route with the same name.
+func resolveModelSwitchSelection(input string, models []ModelOption) (string, string) {
 	input = strings.TrimSpace(input)
 	if idx, err := strconv.Atoi(input); err == nil && idx >= 1 && idx <= len(models) {
-		return models[idx-1].Name
+		model := models[idx-1]
+		return model.Name, model.Provider
 	}
-	if resolved := resolveModelAlias(models, input); resolved != input {
-		return resolved
-	}
-	for _, m := range models {
-		if strings.EqualFold(m.Name, input) {
-			return m.Name
+	for _, model := range models {
+		if model.Alias != "" && strings.EqualFold(model.Alias, input) {
+			return model.Name, model.Provider
 		}
 	}
-	return input
+	for _, model := range models {
+		if strings.EqualFold(model.Name, input) {
+			return model.Name, model.Provider
+		}
+	}
+	return input, ""
+}
+
+func modelOptionIsCurrent(option ModelOption, current, provider string) bool {
+	if option.Name != current {
+		return false
+	}
+	return provider == "" || option.Provider == "" || option.Provider == provider
 }
 
 func modelSwitchNeedsLookup(input string) bool {
@@ -9989,6 +10039,19 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 	switcher.SetModel(target)
 	providerSwitcher.SetActiveProvider(active.Name)
 	return target, nil
+}
+
+// switchModelSelectionOnAgent applies a model selection that may carry an
+// explicit provider route. Agents without the optional provider-aware seam
+// retain the historical model-only behavior.
+func (e *Engine) switchModelSelectionOnAgent(agent Agent, target, provider string, persistConfig bool) (string, error) {
+	if provider != "" {
+		if switcher, ok := agent.(ProviderModelSwitcher); ok {
+			switcher.SetModelForProvider(provider, target)
+			return target, nil
+		}
+	}
+	return e.switchModelOnAgent(agent, target, persistConfig)
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
@@ -10164,6 +10227,145 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 		reply += "\n\n(Current session updated immediately.)"
 	}
 	e.reply(p, msg.ReplyCtx, reply)
+}
+
+func (e *Engine) presetView(agent Agent, sessions *SessionManager, interactiveKey, sessionKey string) ([]PresetOption, string, AgentPresetSwitcher, *Session) {
+	provider, _ := agent.(AgentPresetProvider)
+	options := provider.AvailablePresets(e.ctx)
+	session := sessions.GetOrCreateActive(sessionKey)
+	current := session.GetAgentPreset()
+
+	e.interactiveMu.Lock()
+	liveState := e.interactiveStates[interactiveKey]
+	var livePreset AgentPresetSwitcher
+	if liveState != nil && liveState.agentSession != nil {
+		livePreset, _ = liveState.agentSession.(AgentPresetSwitcher)
+	}
+	e.interactiveMu.Unlock()
+	if current == "" && livePreset != nil {
+		current = livePreset.GetPreset()
+	}
+	if current == "" {
+		for _, option := range options {
+			if option.Default {
+				current = option.ID
+				break
+			}
+		}
+	}
+	return options, current, livePreset, session
+}
+
+func (e *Engine) applyPresetSelection(agent Agent, sessions *SessionManager, interactiveKey, sessionKey, target string) (PresetOption, bool, error) {
+	_, ok := agent.(AgentPresetProvider)
+	if !ok {
+		return PresetOption{}, false, fmt.Errorf("%s", e.i18n.T(MsgPresetNotSupported))
+	}
+	options, current, livePreset, session := e.presetView(agent, sessions, interactiveKey, sessionKey)
+	target = strings.TrimSpace(target)
+	var selected PresetOption
+	found := false
+	for _, option := range options {
+		if strings.EqualFold(option.ID, target) {
+			selected = option
+			found = true
+			break
+		}
+	}
+	if !found || selected.Broken != "" {
+		return PresetOption{}, false, fmt.Errorf("%s", e.i18n.Tf(MsgPresetNotFound, target))
+	}
+	if session.Busy() || session.HistoryLen() > 0 {
+		return selected, false, fmt.Errorf("%s", e.i18n.T(MsgPresetLocked))
+	}
+	if strings.EqualFold(current, selected.ID) {
+		return selected, false, nil
+	}
+	if livePreset != nil {
+		if err := livePreset.SetPreset(selected.ID); err != nil {
+			return selected, false, err
+		}
+	}
+	session.SetAgentPreset(selected.ID)
+	sessions.Save()
+	return selected, true, nil
+}
+
+// cmdPreset lists or selects an agent's per-session composition. Presets alter
+// the model-facing tool/prompt surface, so a non-blank session must not be
+// changed underneath its existing history. The selected id is stored on the
+// cc-connect session until the next agent turn, where a capable backend (DSH)
+// applies the native session-level switch and persists its own selection event.
+func (e *Engine) cmdPreset(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	_, ok := agent.(AgentPresetProvider)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPresetNotSupported))
+		return
+	}
+
+	options, current, _, _ := e.presetView(agent, sessions, interactiveKey, msg.SessionKey)
+
+	if len(args) == 0 {
+		if len(options) == 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPresetListEmpty))
+			return
+		}
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderPresetCard(msg.SessionKey))
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString(e.i18n.T(MsgPresetListTitle))
+		for _, option := range options {
+			label := option.Name
+			if label == "" {
+				label = option.ID
+			}
+			fmt.Fprintf(&sb, "• `%s`", option.ID)
+			if label != option.ID {
+				sb.WriteString(" — ")
+				sb.WriteString(label)
+			}
+			if option.Default {
+				sb.WriteString(" (default)")
+			}
+			if option.Description != "" {
+				sb.WriteString("\n  ")
+				sb.WriteString(option.Description)
+			}
+			if option.Broken != "" {
+				sb.WriteString("\n  ⚠️ ")
+				sb.WriteString(option.Broken)
+			}
+			sb.WriteByte('\n')
+		}
+		if current != "" {
+			sb.WriteByte('\n')
+			sb.WriteString(e.i18n.Tf(MsgPresetCurrent, current))
+		}
+		e.reply(p, msg.ReplyCtx, strings.TrimSpace(sb.String()))
+		return
+	}
+	if len(args) != 1 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPresetUsage))
+		return
+	}
+
+	selected, changed, err := e.applyPresetSelection(agent, sessions, interactiveKey, msg.SessionKey, args[0])
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, err.Error())
+		return
+	}
+	if !changed {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgPresetCurrent, selected.ID))
+		return
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgPresetChanged, selected.ID))
 }
 
 func (e *Engine) modeUsageText(modes []PermissionModeInfo) string {
@@ -12150,6 +12352,9 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	if prefix == "act" && cmd == "/model" {
 		return e.handleModelCardAction(args, sessionKey)
 	}
+	if prefix == "act" && cmd == "/preset" {
+		return e.handlePresetCardAction(args, sessionKey)
+	}
 
 	if prefix == "act" {
 		e.executeCardAction(cmd, args, sessionKey)
@@ -12164,6 +12369,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderReasoningCard()
 	case "/mode":
 		return e.renderModeCard()
+	case "/preset":
+		return e.renderPresetCard(sessionKey)
 	case "/lang":
 		return e.renderLangCard()
 	case "/status":
@@ -12245,14 +12452,15 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 		return e.renderModelCard(sessionKey)
 	}
 	target = strings.TrimSpace(target)
+	targetProvider := ""
 	if modelSwitchNeedsLookup(target) {
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
 		models := switcher.AvailableModels(fetchCtx)
-		target = resolveModelSwitchTarget(target, models)
+		target, targetProvider = resolveModelSwitchSelection(target, models)
 		cancel()
 	}
 
-	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
+	resolved, err := e.switchModelSelectionOnAgent(agent, target, targetProvider, agent == e.agent)
 	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 	if err == nil {
 		e.persistWorkspaceModelOverride(interactiveKey, sessionKey, agent, resolved)
@@ -12263,6 +12471,24 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	}
 
 	return e.renderModelSwitchResultCard(resolved, err)
+}
+
+func (e *Engine) handlePresetCardAction(args, sessionKey string) *Card {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	if _, ok := agent.(AgentPresetProvider); !ok {
+		return e.simpleCard(e.i18n.T(MsgCardTitlePreset), "violet", e.i18n.T(MsgPresetNotSupported))
+	}
+	fields := strings.Fields(args)
+	if len(fields) != 1 {
+		return e.renderPresetCard(sessionKey)
+	}
+
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	selected, changed, err := e.applyPresetSelection(agent, sessions, interactiveKey, sessionKey, fields[0])
+	if err != nil {
+		return e.renderPresetResultCard("", false, err)
+	}
+	return e.renderPresetResultCard(selected.ID, changed, nil)
 }
 
 func (e *Engine) persistWorkspaceModelOverride(interactiveKey, sessionKey string, agent Agent, model string) {
@@ -12322,9 +12548,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		target = strings.TrimSpace(target)
+		targetProvider := ""
 		if modelSwitchNeedsLookup(target) {
 			models := switcher.AvailableModels(fetchCtx)
-			target = resolveModelSwitchTarget(target, models)
+			target, targetProvider = resolveModelSwitchSelection(target, models)
 		}
 		cancel()
 		e.cleanupInteractiveState(interactiveKey)
@@ -12336,9 +12563,9 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		e.interactiveMu.Unlock()
 		state.mu.Lock()
-		state.modelSwitch = &modelSwitchState{phase: "switching", target: target}
+		state.modelSwitch = &modelSwitchState{phase: "switching", target: target, provider: targetProvider}
 		state.mu.Unlock()
-		go e.performModelSwitchAsync(sessionKey, state, agent, sessions, target)
+		go e.performModelSwitchAsync(sessionKey, state, agent, sessions, target, targetProvider)
 
 	case "/reasoning":
 		if args == "" {
@@ -12863,8 +13090,8 @@ func (e *Engine) pushDeleteModeResultCard(sessionKey string) {
 	e.sendWithCard(targetPlatform, rctx, card)
 }
 
-func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveState, agent Agent, sessions *SessionManager, target string) {
-	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
+func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveState, agent Agent, sessions *SessionManager, target, provider string) {
+	resolved, err := e.switchModelSelectionOnAgent(agent, target, provider, agent == e.agent)
 	if err == nil {
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 		e.persistWorkspaceModelOverride(interactiveKey, sessionKey, agent, resolved)
@@ -13108,6 +13335,10 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 	defer cancel()
 	models := switcher.AvailableModels(fetchCtx)
 	current := switcher.GetModel()
+	currentProvider := ""
+	if providerAware, ok := agent.(ProviderModelSwitcher); ok {
+		currentProvider = providerAware.GetModelProvider()
+	}
 
 	var sb strings.Builder
 	if current == "" {
@@ -13127,7 +13358,7 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 		}
 		val := fmt.Sprintf("act:/model switch %d", i+1)
 		opts = append(opts, CardSelectOption{Text: label, Value: val})
-		if m.Name == current {
+		if modelOptionIsCurrent(m, current, currentProvider) {
 			initVal = val
 		}
 	}
@@ -13194,6 +13425,71 @@ func (e *Engine) renderReasoningCard() *Card {
 		Buttons(e.cardBackButton())
 	cb.Note(e.i18n.T(MsgReasoningUsage))
 	return cb.Build()
+}
+
+func (e *Engine) renderPresetCard(sessionKey string) *Card {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	_, ok := agent.(AgentPresetProvider)
+	if !ok {
+		return e.simpleCard(e.i18n.T(MsgCardTitlePreset), "violet", e.i18n.T(MsgPresetNotSupported))
+	}
+	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	options, current, _, _ := e.presetView(agent, sessions, interactiveKey, sessionKey)
+	if len(options) == 0 {
+		return e.simpleCard(e.i18n.T(MsgCardTitlePreset), "violet", e.i18n.T(MsgPresetListEmpty))
+	}
+
+	var body strings.Builder
+	if current != "" {
+		body.WriteString(e.i18n.Tf(MsgPresetCurrent, current))
+		body.WriteString("\n\n")
+	}
+	var opts []CardSelectOption
+	initValue := ""
+	for _, option := range options {
+		label := option.Name
+		if label == "" {
+			label = option.ID
+		}
+		if option.Default {
+			label += " (default)"
+		}
+		marker := "◻"
+		if option.ID == current {
+			marker = "▶"
+			initValue = "act:/preset " + option.ID
+		}
+		fmt.Fprintf(&body, "%s `%s` — %s\n", marker, option.ID, label)
+		if option.Description != "" {
+			body.WriteString("  " + option.Description + "\n")
+		}
+		opts = append(opts, CardSelectOption{
+			Text:  label,
+			Value: "act:/preset " + option.ID,
+		})
+	}
+
+	cb := NewCard().Title(e.i18n.T(MsgCardTitlePreset), "violet").Markdown(strings.TrimSpace(body.String()))
+	cb.Select(e.i18n.T(MsgPresetSelectPlaceholder), opts, initValue)
+	cb.Buttons(e.cardBackButton())
+	return cb.Build()
+}
+
+func (e *Engine) renderPresetResultCard(target string, changed bool, err error) *Card {
+	if err != nil {
+		return NewCard().Title(e.i18n.T(MsgCardTitlePreset), "red").
+			Markdown(err.Error()).
+			Buttons(DefaultBtn(e.i18n.T(MsgPresetChangeAnother), "nav:/preset"), e.cardBackButton()).
+			Build()
+	}
+	body := e.i18n.Tf(MsgPresetCurrent, target)
+	if changed {
+		body = e.i18n.Tf(MsgPresetChanged, target)
+	}
+	return NewCard().Title(e.i18n.T(MsgCardTitlePreset), "green").
+		Markdown(body).
+		Buttons(DefaultBtn(e.i18n.T(MsgPresetChangeAnother), "nav:/preset"), e.cardBackButton()).
+		Build()
 }
 
 func (e *Engine) renderModeCard() *Card {
@@ -15983,7 +16279,12 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	// Use the engine context (not the relay timeout context) so that the
 	// agent process is not killed when the relay deadline fires. The relay
 	// timeout only controls how long we *wait* for the response.
-	agentSession, err := agent.StartSession(e.ctx, session.GetAgentSessionID())
+	var agentSession AgentSession
+	if starter, ok := agent.(AgentPresetStarter); ok {
+		agentSession, err = starter.StartSessionWithPreset(e.ctx, session.GetAgentSessionID(), session.GetAgentPreset())
+	} else {
+		agentSession, err = agent.StartSession(e.ctx, session.GetAgentSessionID())
+	}
 	if err != nil {
 		// Resume failed — fall back to a fresh session so the relay is not
 		// permanently broken by a corrupted/stale session ID.
@@ -15992,7 +16293,11 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 				"relay_key", relaySessionKey, "error", err)
 			session.SetAgentSessionID("", agent.Name())
 			sessions.Save()
-			agentSession, err = agent.StartSession(e.ctx, "")
+			if starter, ok := agent.(AgentPresetStarter); ok {
+				agentSession, err = starter.StartSessionWithPreset(e.ctx, "", session.GetAgentPreset())
+			} else {
+				agentSession, err = agent.StartSession(e.ctx, "")
+			}
 		}
 		if err != nil {
 			return "", fmt.Errorf("start relay session: %w", err)

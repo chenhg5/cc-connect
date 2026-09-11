@@ -435,6 +435,15 @@ type ModelSwitcher interface {
 	AvailableModels(ctx context.Context) []ModelOption
 }
 
+// ProviderModelSwitcher is an optional extension for agents whose model
+// catalog spans multiple provider routes. The ordinary ModelSwitcher remains
+// the compatibility path; callers use this interface when a catalog entry
+// carries an explicit provider so duplicate model ids stay unambiguous.
+type ProviderModelSwitcher interface {
+	SetModelForProvider(provider, model string)
+	GetModelProvider() string
+}
+
 // ReasoningEffortSwitcher is an optional interface for agents that support
 // runtime switching of reasoning effort.
 type ReasoningEffortSwitcher interface {
@@ -445,9 +454,10 @@ type ReasoningEffortSwitcher interface {
 
 // ModelOption describes a selectable model.
 type ModelOption struct {
-	Name  string // model identifier passed to CLI
-	Desc  string // short description (display_name or empty)
-	Alias string // optional short alias for the /model command (e.g. "codex" for "gpt-5.3-codex")
+	Name     string // model identifier passed to CLI
+	Desc     string // short description (display_name or empty)
+	Alias    string // optional short alias for the /model command (e.g. "codex" for "gpt-5.3-codex")
+	Provider string // provider route, when the catalog spans multiple routes
 }
 
 // UsageReporter is an optional interface for agents that can report account or
@@ -584,6 +594,38 @@ type ModeSwitcher interface {
 	SetMode(mode string)
 	GetMode() string
 	PermissionModes() []PermissionModeInfo
+}
+
+// PresetOption describes one selectable agent composition. Presets are an
+// optional agent capability because only some agents (currently DSH) expose
+// per-session model-facing compositions.
+type PresetOption struct {
+	ID          string
+	Name        string
+	Description string
+	Trust       string
+	Default     bool
+	Broken      string
+}
+
+// AgentPresetProvider lists the compositions an agent can use.
+type AgentPresetProvider interface {
+	AvailablePresets(ctx context.Context) []PresetOption
+}
+
+// AgentPresetStarter lets the engine pass a session's pending preset choice
+// when it creates or resumes an agent session. The ordinary StartSession
+// method remains the compatibility path for agents without this capability.
+type AgentPresetStarter interface {
+	StartSessionWithPreset(ctx context.Context, sessionID, preset string) (AgentSession, error)
+}
+
+// AgentPresetSwitcher changes the pending composition for one agent session.
+// The agent applies it before the next turn; it must not change a completed
+// conversation's tool surface in place.
+type AgentPresetSwitcher interface {
+	SetPreset(preset string) error
+	GetPreset() string
 }
 
 // WorkspaceAgentOptionSnapshotter is an optional interface for agents that can
