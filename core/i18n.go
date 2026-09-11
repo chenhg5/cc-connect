@@ -696,6 +696,7 @@ const (
 
 const (
 	MsgSteerSubmitting   MsgKey = "steer_submitting"
+	MsgSteerBusy         MsgKey = "steer_busy"
 	MsgSteerExpired      MsgKey = "steer_expired"
 	MsgSteerQueued       MsgKey = "steer_queued"
 	MsgSteerButton       MsgKey = "steer_button"
@@ -714,6 +715,13 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgSteerBusy: {
+		LangEnglish:            "Another supplement is being submitted. This one was not submitted; retry after it finishes.",
+		LangChinese:            "另一条补充正在提交，本条尚未提交。请等待完成后重试。",
+		LangTraditionalChinese: "另一條補充正在提交，本條尚未提交。請等待完成後重試。",
+		LangJapanese:           "別の追加内容を送信中です。この内容はまだ送信されていません。完了後に再試行してください。",
+		LangSpanish:            "Se está enviando otra información adicional. Esta no se ha enviado; inténtalo de nuevo cuando termine.",
+	},
 	MsgSteerSubmitting: {
 		LangEnglish:            "Submitting supplement…",
 		LangChinese:            "正在提交补充…",
@@ -771,11 +779,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Resultado desconocido. Este mensaje no se ejecutará desde la cola. Revisa la tarea antes de reenviarlo.",
 	},
 	MsgSteerFailed: {
-		LangEnglish:            "Supplement rejected. The message remains queued.",
-		LangChinese:            "补充未被接受，消息仍在队列中。",
-		LangTraditionalChinese: "補充未被接受，訊息仍在佇列中。",
-		LangJapanese:           "追加できませんでした。メッセージは待機中です。",
-		LangSpanish:            "No se aceptó la información. El mensaje sigue en cola.",
+		LangEnglish:            "Supplement rejected. The message remains queued; retry adding it or cancel it.",
+		LangChinese:            "补充未被接受，消息仍在队列中。可重试补充或取消排队。",
+		LangTraditionalChinese: "補充未被接受，訊息仍在佇列中。可重試補充或取消排隊。",
+		LangJapanese:           "追加できませんでした。メッセージは待機中です。再試行するか、待機を取り消してください。",
+		LangSpanish:            "No se aceptó la información. El mensaje sigue en cola; vuelve a añadirlo o cancélalo.",
 	},
 	MsgSteerEnded: {
 		LangEnglish:            "The original turn ended. This message remains queued.",

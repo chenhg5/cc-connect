@@ -24,13 +24,12 @@ func TestExportSteerCardPreview(t *testing.T) {
 	examples := []example{}
 	for _, state := range []struct {
 		name, scenario string
-		status         MsgKey
+		status         queuedTaskStatus
 	}{
-		{"queued", "普通发送，等待当前任务完成", MsgSteerQueued},
-		{"accepted", "点击补充，当前轮已接受输入", MsgSteerAccepted},
-		{"ended", "点击时原任务已结束，保留排队", MsgSteerEnded},
-		{"unknown", "提交结果不明，停止自动执行该消息", MsgSteerUnknown},
-		{"cancelled", "取消这条排队消息", MsgSteerCancelled},
+		{"queued", "普通发送，等待当前任务完成", taskQueued},
+		{"accepted", "点击补充，当前轮已接受输入", taskAccepted},
+		{"unknown", "提交结果不明，停止自动执行该消息", taskUnknown},
+		{"cancelled", "取消这条排队消息", taskCancelled},
 	} {
 		action := &queuedTaskAction{queued: queuedMessage{content: "先不要改代码，只检查登录失败的原因，并给出定位结果。"}, status: state.status}
 		examples = append(examples, example{State: state.name, Scenario: state.scenario, Card: engine.queuedTaskCard(action, "synthetic-preview-token")})

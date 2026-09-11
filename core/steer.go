@@ -49,15 +49,89 @@ type CardTaskActionHandlerSetter interface {
 	SetCardTaskActionHandler(CardTaskActionHandler)
 }
 
-func isSteerCommand(content string) bool {
+func supplementCommandID(content string) string {
 	fields := strings.Fields(content)
-	return len(fields) > 0 && matchPrefix(strings.TrimPrefix(strings.ToLower(fields[0]), "/"), builtinCommands) == "steer"
+	if len(fields) == 0 {
+		return ""
+	}
+	id := matchPrefix(strings.TrimPrefix(strings.ToLower(fields[0]), "/"), builtinCommands)
+	if id == "steer" || id == "ps" {
+		return id
+	}
+	return ""
+}
+
+// Preserve legacy agents' image-message routing while recognizing /ps and /btw
+// as commands for native steering and one-shot sessions that explicitly opt out.
+func (e *Engine) handlesImageSupplementCommand(content, interactiveKey string) bool {
+	switch supplementCommandID(content) {
+	case "steer":
+		return true
+	case "ps":
+		e.interactiveMu.Lock()
+		state := e.interactiveStates[interactiveKey]
+		if state == nil {
+			e.interactiveMu.Unlock()
+			return true // No active session: report it instead of starting image work.
+		}
+		state.mu.Lock()
+		e.interactiveMu.Unlock()
+		defer state.mu.Unlock()
+		if state.agentSession == nil {
+			return true
+		}
+		if _, ok := state.agentSession.(AgentSessionSteerer); ok {
+			return true
+		}
+		policy, ok := state.agentSession.(AgentSessionSupplementPolicy)
+		return ok && !policy.SupportsLegacySupplement()
+	default:
+		return false
+	}
+}
+
+type queuedTaskStatus uint8
+
+const (
+	taskQueued queuedTaskStatus = iota
+	taskSubmitting
+	taskAccepted
+	taskCancelled
+	taskUnknown
+	taskFailed
+	taskEnded
+	taskExpired
+)
+
+func (s queuedTaskStatus) messageKey() MsgKey {
+	switch s {
+	case taskQueued:
+		return MsgSteerQueued
+	case taskSubmitting:
+		return MsgSteerSubmitting
+	case taskAccepted:
+		return MsgSteerAccepted
+	case taskCancelled:
+		return MsgSteerCancelled
+	case taskUnknown:
+		return MsgSteerUnknown
+	case taskFailed:
+		return MsgSteerFailed
+	case taskEnded:
+		return MsgSteerEnded
+	default:
+		return MsgSteerExpired
+	}
+}
+
+func (s queuedTaskStatus) terminal() bool {
+	return s == taskAccepted || s == taskCancelled || s == taskUnknown || s == taskExpired
 }
 
 type queuedTaskAction struct {
 	queued queuedMessage
 	turnID string
-	status MsgKey
+	status queuedTaskStatus
 }
 
 func steerPreviewText(content string) string {
@@ -93,13 +167,9 @@ func lockQueueForDrain(state *interactiveState) {
 }
 
 func (e *Engine) queuedTaskCard(action *queuedTaskAction, token string) *Card {
-	status := action.status
-	if status == "" {
-		status = MsgSteerQueued
-	}
-	card := NewCard().Title(e.i18n.T(status), "blue").Markdown(steerPreviewText(action.queued.content))
-	switch status {
-	case MsgSteerQueued, MsgSteerFailed:
+	card := NewCard().UpdateAll(true).Title(e.i18n.T(action.status.messageKey()), "blue").Markdown(steerPreviewText(action.queued.content))
+	switch action.status {
+	case taskQueued:
 		buttons := []CardButton{
 			PrimaryBtn(e.i18n.T(MsgSteerButton), "steer:"+token),
 			DefaultBtn(e.i18n.T(MsgSteerCancelButton), "unqueue:"+token),
@@ -108,10 +178,6 @@ func (e *Engine) queuedTaskCard(action *queuedTaskAction, token string) *Card {
 			buttons[i].Extra = map[string]string{"lang": string(e.i18n.CurrentLang())}
 		}
 		card.Buttons(buttons...).Note(e.i18n.T(MsgSteerQueueHint))
-	case MsgSteerEnded:
-		button := DefaultBtn(e.i18n.T(MsgSteerCancelButton), "unqueue:"+token)
-		button.Extra = map[string]string{"lang": string(e.i18n.CurrentLang())}
-		card.Buttons(button)
 	}
 	return card.Build()
 }
@@ -119,6 +185,7 @@ func (e *Engine) queuedTaskCard(action *queuedTaskAction, token string) *Card {
 // registerQueuedTaskLocked opts in only when both ends support typed actions
 // and native steering. The map is session-local; old cards fail closed after
 // session replacement or restart. Completed entries are bounded per session.
+// future: Quote shortcuts, other platform buttons, default steering, and durable recovery are separate extensions.
 func (e *Engine) registerQueuedTaskLocked(state *interactiveState, q *queuedMessage) *Card {
 	if !e.steerCommandEnabled(q.userID) {
 		return nil
@@ -142,7 +209,7 @@ func (e *Engine) registerQueuedTaskLocked(state *interactiveState, q *queuedMess
 	}
 	if len(state.queueActions) >= 256 {
 		for token, action := range state.queueActions {
-			if action.status != MsgSteerSubmitting && taskQueueIndex(state, token) < 0 {
+			if action.status != taskSubmitting && taskQueueIndex(state, token) < 0 {
 				delete(state.queueActions, token)
 			}
 		}
@@ -161,7 +228,7 @@ func (e *Engine) registerQueuedTaskLocked(state *interactiveState, q *queuedMess
 	action := &queuedTaskAction{queued: queuedMessage{
 		content: strings.Clone(truncateIf(q.content, 500)), platform: q.platform,
 		userID: q.userID, msgSessionKey: q.msgSessionKey, channelID: q.channelID,
-	}, turnID: turnID, status: MsgSteerQueued}
+	}, turnID: turnID, status: taskQueued}
 	state.queueActions[q.actionToken] = action
 	return e.queuedTaskCard(action, q.actionToken)
 }
@@ -177,13 +244,19 @@ func taskQueueIndex(state *interactiveState, token string) int {
 
 func (e *Engine) taskActionResult(action *queuedTaskAction, token string) CardTaskActionResult {
 	typ := "info"
-	if action.status == MsgSteerAccepted || action.status == MsgSteerCancelled {
+	if action.status == taskAccepted || action.status == taskCancelled {
 		typ = "success"
 	}
-	if action.status == MsgSteerFailed || action.status == MsgSteerUnknown {
+	if action.status == taskFailed || action.status == taskUnknown {
 		typ = "error"
 	}
-	return CardTaskActionResult{Card: e.queuedTaskCard(action, token), Toast: e.i18n.T(action.status), ToastType: typ}
+	result := CardTaskActionResult{Toast: e.i18n.T(action.status.messageKey()), ToastType: typ}
+	// A delayed nonterminal response could overwrite a newer accepted/cancelled
+	// card. Keep the original queue card until an immutable outcome is known.
+	if action.status.terminal() {
+		result.Card = e.queuedTaskCard(action, token)
+	}
+	return result
 }
 
 func (e *Engine) handleTaskAction(p Platform, ctx context.Context, event CardTaskAction) CardTaskActionResult {
@@ -209,21 +282,21 @@ func (e *Engine) handleTaskAction(p Platform, ctx context.Context, event CardTas
 		state.mu.Unlock()
 		return invalid
 	}
-	if action.status == MsgSteerAccepted || action.status == MsgSteerCancelled || action.status == MsgSteerUnknown || action.status == MsgSteerSubmitting {
+	if action.status.terminal() || action.status == taskSubmitting {
 		result := e.taskActionResult(action, token)
 		state.mu.Unlock()
 		return result
 	}
 	index := taskQueueIndex(state, token)
 	if index < 0 {
-		action.status = MsgSteerExpired
+		action.status = taskExpired
 		result := e.taskActionResult(action, token)
 		state.mu.Unlock()
 		return result
 	}
 	if kind == "unqueue" {
 		state.pendingMessages = slices.Delete(state.pendingMessages, index, index+1)
-		action.status = MsgSteerCancelled
+		action.status = taskCancelled
 		result := e.taskActionResult(action, token)
 		state.mu.Unlock()
 		return result
@@ -234,18 +307,18 @@ func (e *Engine) handleTaskAction(p Platform, ctx context.Context, event CardTas
 		return invalid
 	}
 	if s.CurrentTurnID() != action.turnID {
-		action.status = MsgSteerEnded
+		action.status = taskEnded
 		result := e.taskActionResult(action, token)
 		state.mu.Unlock()
 		return result
 	}
 	if state.steerDone != nil {
 		state.mu.Unlock()
-		return CardTaskActionResult{Toast: e.i18n.T(MsgSteerSubmitting), ToastType: "info"}
+		return CardTaskActionResult{Toast: e.i18n.T(MsgSteerBusy), ToastType: "info"}
 	}
 	done := make(chan struct{})
 	state.steerDone = done
-	action.status = MsgSteerSubmitting
+	action.status = taskSubmitting
 	q := state.pendingMessages[index]
 	session := state.turnSession
 	state.mu.Unlock()
@@ -255,11 +328,11 @@ func (e *Engine) handleTaskAction(p Platform, ctx context.Context, event CardTas
 	err := s.Steer(submitCtx, action.turnID, prompt, q.images, q.files)
 	cancel()
 	state.mu.Lock()
-	action.status = steerResultStatus(err, true)
+	action.status = queuedSteerResultStatus(err)
 	if err != nil && !errors.Is(err, ErrSteerOutcomeUnknown) && taskQueueIndex(state, token) < 0 {
 		// A recall during submission already removed the input. A definite
 		// rejection must not advertise a retryable item that no longer exists.
-		action.status = MsgSteerCancelled
+		action.status = taskCancelled
 	}
 	if err == nil || errors.Is(err, ErrSteerOutcomeUnknown) {
 		if index := taskQueueIndex(state, token); index >= 0 {
@@ -268,7 +341,7 @@ func (e *Engine) handleTaskAction(p Platform, ctx context.Context, event CardTas
 	}
 	state.steerDone = nil
 	if err == nil && session != nil && !state.stopped {
-		session.AddHistory("user", q.content)
+		state.turnHistoryNext = session.insertHistory(state.turnHistoryNext, "user", q.content)
 	}
 	close(done)
 	result := e.taskActionResult(action, token)
@@ -285,21 +358,28 @@ func (e *Engine) handleTaskAction(p Platform, ctx context.Context, event CardTas
 	return result
 }
 
-func steerResultStatus(err error, queued bool) MsgKey {
+func queuedSteerResultStatus(err error) queuedTaskStatus {
+	switch {
+	case err == nil:
+		return taskAccepted
+	case errors.Is(err, ErrSteerOutcomeUnknown):
+		return taskUnknown
+	case errors.Is(err, ErrSteerNotActive):
+		return taskEnded
+	default:
+		return taskFailed
+	}
+}
+
+func steerResultStatus(err error) MsgKey {
 	switch {
 	case err == nil:
 		return MsgSteerAccepted
 	case errors.Is(err, ErrSteerOutcomeUnknown):
 		return MsgSteerUnknown
 	case errors.Is(err, ErrSteerNotActive):
-		if queued {
-			return MsgSteerEnded
-		}
 		return MsgSteerNoTurn
 	default:
-		if queued {
-			return MsgSteerFailed
-		}
 		return MsgSteerRejected
 	}
 }
@@ -346,7 +426,7 @@ func (e *Engine) cmdSteer(p Platform, msg *Message, args []string) {
 	}
 	if state.steerDone != nil {
 		state.mu.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerSubmitting))
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerBusy))
 		return
 	}
 	done := make(chan struct{})
@@ -360,7 +440,7 @@ func (e *Engine) cmdSteer(p Platform, msg *Message, args []string) {
 	state.mu.Lock()
 	state.steerDone = nil
 	if err == nil && session != nil && !state.stopped {
-		session.AddHistory("user", text)
+		state.turnHistoryNext = session.insertHistory(state.turnHistoryNext, "user", text)
 	}
 	close(done)
 	state.mu.Unlock()
@@ -374,7 +454,7 @@ func (e *Engine) cmdSteer(p Platform, msg *Message, args []string) {
 			sessions.Save()
 		}
 	}
-	e.reply(p, msg.ReplyCtx, e.i18n.T(steerResultStatus(err, false)))
+	e.reply(p, msg.ReplyCtx, e.i18n.T(steerResultStatus(err)))
 }
 
 // Command parsing may unquote arguments; preserve the original supplemental

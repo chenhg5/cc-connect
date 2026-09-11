@@ -89,13 +89,16 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 // using the v1 format. Used both for message API (via renderCard) and
 // callback responses (CardActionTriggerResponse).
 func renderCardMap(card *core.Card, sessionKey string) map[string]any {
+	config := map[string]any{"wide_screen_mode": true}
 	result := map[string]any{
-		"config": map[string]any{
-			"wide_screen_mode": true,
-		},
+		"config": config,
 	}
 	if card == nil {
 		return result
+	}
+	if card.UpdateAll {
+		// Message PATCH requires a shared card at creation and on every update.
+		config["update_multi"] = true
 	}
 
 	if card.Header != nil && card.Header.Title != "" {

@@ -414,7 +414,7 @@ func TestSteerCommand_PsRespectsOneShotSessionOptOut(t *testing.T) {
 }
 
 func TestSteerMessages_AllSupportedLanguagesPresent(t *testing.T) {
-	keys := []MsgKey{MsgSteerSubmitting, MsgSteerExpired, MsgSteerQueued, MsgSteerButton, MsgSteerCancelButton, MsgSteerAccepted, MsgSteerCancelled, MsgSteerUnknown, MsgSteerFailed, MsgSteerEnded, MsgSteerNoTurn, MsgSteerUnsupported, MsgSteerUsage, MsgSteerRejected, MsgBuiltinCmdSteer, MsgSteerQueueHint}
+	keys := []MsgKey{MsgSteerBusy, MsgSteerSubmitting, MsgSteerExpired, MsgSteerQueued, MsgSteerButton, MsgSteerCancelButton, MsgSteerAccepted, MsgSteerCancelled, MsgSteerUnknown, MsgSteerFailed, MsgSteerEnded, MsgSteerNoTurn, MsgSteerUnsupported, MsgSteerUsage, MsgSteerRejected, MsgBuiltinCmdSteer, MsgSteerQueueHint}
 	for _, key := range keys {
 		for _, lang := range []Language{LangEnglish, LangChinese, LangTraditionalChinese, LangJapanese, LangSpanish} {
 			if strings.TrimSpace(messages[key][lang]) == "" {
@@ -635,7 +635,7 @@ func TestSteerQueue_ConsumedActionCapacityDoesNotDisableFutureCards(t *testing.T
 				env.state.queueActions = make(map[string]*queuedTaskAction)
 			}
 			for i := range consumed {
-				env.state.queueActions[fmt.Sprintf("consumed-%d", i)] = &queuedTaskAction{status: MsgSteerQueued, turnID: "old-turn", queued: queuedMessage{actionToken: fmt.Sprintf("consumed-%d", i), content: "already consumed by FIFO"}}
+				env.state.queueActions[fmt.Sprintf("consumed-%d", i)] = &queuedTaskAction{status: taskQueued, turnID: "old-turn", queued: queuedMessage{actionToken: fmt.Sprintf("consumed-%d", i), content: "already consumed by FIFO"}}
 			}
 			env.state.mu.Unlock()
 			freshAction := env.queue(t, "fresh queued task")
