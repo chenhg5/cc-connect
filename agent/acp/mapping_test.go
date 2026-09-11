@@ -179,6 +179,23 @@ func TestMapSessionUpdate_reasoningChunk(t *testing.T) {
 	}
 }
 
+// TestMapSessionUpdate_agentThoughtChunk covers the discriminator Copilot CLI uses
+// for reasoning/thinking content in ACP mode. Without this case the chunk would
+// hit mapSessionUpdateFallback's default branch and leak as EventText.
+func TestMapSessionUpdate_agentThoughtChunk(t *testing.T) {
+	params := json.RawMessage(`{
+		"sessionId": "s1",
+		"update": {
+			"sessionUpdate": "agent_thought_chunk",
+			"content": {"type": "text", "text": "The user needs to check health"}
+		}
+	}`)
+	evs := mapSessionUpdate("", params)
+	if len(evs) != 1 || evs[0].Type != core.EventThinking || evs[0].Content != "The user needs to check health" {
+		t.Fatalf("got %+v", evs)
+	}
+}
+
 func TestMapSessionUpdate_toolCall(t *testing.T) {
 	params := json.RawMessage(`{
 		"sessionId": "s1",

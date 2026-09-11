@@ -3832,9 +3832,16 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	e.stopUnsolicitedReader(state)
 	state.mu.Lock()
 	needResync := state.eventsNeedResync
+	as := state.agentSession // capture under lock to avoid race with cleanup
 	state.mu.Unlock()
+	// A concurrent /new (cleanupInteractiveState) may have nil'd agentSession
+	// while this turn was starting up. Abort instead of dereferencing nil.
+	if as == nil {
+		slog.Warn("agent session cleaned up while turn was starting, aborting turn", "session_key", ccSessionKey)
+		return
+	}
 	if needResync {
-		drainEvents(state.agentSession.Events())
+		drainEvents(as.Events())
 	}
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
@@ -3844,7 +3851,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.currentMessageID = msg.MessageID
 	state.fromVoice = msg.FromVoice
 	state.sideText = ""
-	as := state.agentSession // capture under lock to avoid race with cleanup
+	as = state.agentSession // capture under lock to avoid race with cleanup
 	state.mu.Unlock()
 
 	// Run Send concurrently with processInteractiveEvents. Some agents block inside
@@ -5059,7 +5066,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		turnDeadlineCh = turnDeadlineTimer.C
 	}
 
-	events := state.agentSession.Events()
+	state.mu.Lock()
+	eventSession := state.agentSession
+	state.mu.Unlock()
+	if eventSession == nil {
+		slog.Warn("agent session nil at event loop start, aborting turn", "session_key", sessionKey)
+		sp.discard()
+		return
+	}
+	events := eventSession.Events()
 	stopCh := state.stopSignal()
 	for {
 		var event Event
@@ -6133,7 +6148,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Drain stale events before starting the next turn. Between
 				// EventResult and Send(), the only buffered events would be
 				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
-				drainEvents(state.agentSession.Events())
+				state.mu.Lock()
+				drainAS := state.agentSession
+				state.mu.Unlock()
+				if drainAS != nil {
+					drainEvents(drainAS.Events())
+				}
 
 				if pendingSend != nil {
 					if err := <-pendingSend; err != nil {
@@ -10483,9 +10503,14 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	state.mu.Lock()
 	state.platform = p
 	state.replyCtx = replyCtx
+	compressAS := state.agentSession
 	state.mu.Unlock()
 
-	drainEvents(state.agentSession.Events())
+	if compressAS == nil {
+		slog.Warn("agent session nil before compress drain, aborting", "session_key", iKey)
+		return
+	}
+	drainEvents(compressAS.Events())
 
 	compressor, ok := e.agent.(ContextCompressor)
 	if !ok || compressor.CompressCommand() == "" {
@@ -10496,11 +10521,11 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	}
 
 	cmd := compressor.CompressCommand()
-	if err := state.agentSession.Send(cmd, "", nil, nil); err != nil {
+	if err := compressAS.Send(cmd, "", nil, nil); err != nil {
 		if !auto {
 			e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 		}
-		if !state.agentSession.Alive() {
+		if !compressAS.Alive() {
 			e.cleanupInteractiveState(iKey)
 		}
 		return
@@ -10515,7 +10540,14 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 func (e *Engine) processCompressEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, p Platform, replyCtx any, unlocked *bool, auto bool) {
 
 	var textParts []string
-	events := state.agentSession.Events()
+	state.mu.Lock()
+	eventSession := state.agentSession
+	state.mu.Unlock()
+	if eventSession == nil {
+		slog.Warn("agent session nil at compress event loop start, aborting", "session_key", sessionKey)
+		return
+	}
+	events := eventSession.Events()
 	stopCh := state.stopSignal()
 
 	var idleTimer *time.Timer
