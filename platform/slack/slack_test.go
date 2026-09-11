@@ -41,6 +41,43 @@ func TestStripAppMentionText(t *testing.T) {
 	}
 }
 
+func TestReplyContextReactionTS(t *testing.T) {
+	tests := []struct {
+		name string
+		rc   replyContext
+		want string
+	}{
+		{
+			name: "mention inside a thread targets the mention, not the root",
+			rc:   replyContext{channel: "C1", timestamp: "1700000000.000100", msgTS: "1700000500.000200"},
+			want: "1700000500.000200",
+		},
+		{
+			name: "top-level mention where root and message coincide",
+			rc:   replyContext{channel: "C1", timestamp: "1700000000.000100", msgTS: "1700000000.000100"},
+			want: "1700000000.000100",
+		},
+		{
+			name: "reconstructed context (cron, send-to-session) falls back to the thread root",
+			rc:   replyContext{channel: "C1", timestamp: "1700000000.000100"},
+			want: "1700000000.000100",
+		},
+		{
+			name: "slash-command context has no reaction target",
+			rc:   replyContext{channel: "C1"},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rc.reactionTS(); got != tt.want {
+				t.Fatalf("reactionTS() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDownloadSlackFile_HTMLDetection(t *testing.T) {
 	// Test that we detect HTML responses (Slack login page) and return an error
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
