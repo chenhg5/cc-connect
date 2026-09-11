@@ -992,6 +992,8 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # enclosure_style = "code"          # none | bracket | angle | fullwidth | code
 
 # Feishu / Lark / 飞书
+# Codex same-turn input requires App Server plus card.action.trigger callbacks; see docs/feishu-steer.md.
+# Codex 补充到本轮需启用 App Server 和卡片回调，配置说明见 docs/feishu-steer.md。
 # 1. Create an app at https://open.feishu.cn / 在 https://open.feishu.cn 创建应用
 # 2. Enable Bot capability / 开启机器人能力
 # 3. Add im.message.receive_v1 event, select WebSocket long-connection mode

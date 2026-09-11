@@ -220,10 +220,39 @@ func newMediaEngine(t *testing.T) (*core.Engine, *recordingAgent, *mediaPlatform
 	platform := &mediaPlatform{}
 	engine := core.NewEngine("release-media", agent, []core.Platform{platform}, t.TempDir()+"/sessions.json", core.LangEnglish)
 	t.Cleanup(func() {
-		engine.Stop()
-		_ = agent.Stop()
+		if err := engine.Stop(); err != nil {
+			t.Errorf("stop engine: %v", err)
+		}
+		// Engine.Stop cancels sessions but does not join their processors.
+		// Keep the session store alive until their final persistence finishes.
+		waitMediaEngineIdle(t, engine)
 	})
 	return engine, agent, platform
+}
+
+func waitMediaEngineIdle(t *testing.T, engine *core.Engine) {
+	t.Helper()
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		busy := false
+		for _, session := range engine.GetSessions().AllSessions() {
+			if session.Busy() {
+				busy = true
+				break
+			}
+		}
+		if !busy {
+			return
+		}
+		select {
+		case <-poll.C:
+		case <-deadline.C:
+			t.Fatal("engine processors did not release their sessions after persistence")
+		}
+	}
 }
 
 func mediaMessage(content string) *core.Message {
@@ -295,6 +324,8 @@ func TestQueuedMessagePreservesFiles(t *testing.T) {
 	if len(records[1].files) != 1 || records[1].files[0].FileName != "queued.txt" || string(records[1].files[0].Data) != "queued-file" {
 		t.Fatalf("queued file not preserved: %#v", records[1].files)
 	}
+	platform.waitTextContaining(t, "media ok")
+	waitMediaEngineIdle(t, engine)
 }
 
 func TestSendToSessionWithAttachmentsDeliversTextImagesAndFiles(t *testing.T) {

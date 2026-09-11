@@ -136,17 +136,18 @@ type Platform struct {
 	threadIsolation            bool
 	groupChatHistoryShare      bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
-	noReplyToTrigger bool
-	resolveMentions  bool
-	client           *lark.Client
-	replayClient     *lark.Client
-	replayClientMu   sync.Mutex
-	wsClient         *larkws.Client
-	handler          core.MessageHandler
-	cardNavHandler   core.CardNavigationHandler
-	cancel           context.CancelFunc
-	dedup            *core.MessageDedup
-	botOpenID        string
+	noReplyToTrigger      bool
+	resolveMentions       bool
+	client                *lark.Client
+	replayClient          *lark.Client
+	replayClientMu        sync.Mutex
+	wsClient              *larkws.Client
+	handler               core.MessageHandler
+	cardNavHandler        core.CardNavigationHandler
+	cardTaskActionHandler core.CardTaskActionHandler
+	cancel                context.CancelFunc
+	dedup                 *core.MessageDedup
+	botOpenID             string
 	// groupFilterDegraded is true when bot open_id discovery failed at startup
 	// (e.g. transient network/DNS/proxy outage). When true, group chat mention
 	// filtering fails closed (silently drops group messages without @bot) instead
@@ -645,16 +646,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 			// Fan out card actions: try each platform, return first non-nil response.
 			// Each platform's onCardAction checks allow_chat before processing.
-			for _, sibling := range p.sharedGroup.allPlatforms() {
-				resp, err := sibling.onCardAction(event)
-				if err != nil {
-					return nil, err
-				}
-				if resp != nil {
-					return resp, nil
-				}
-			}
-			return nil, nil
+			return p.sharedGroup.onCardAction(event)
 		}).
 		OnP2BotMenuV6(func(ctx context.Context, event *larkapplication.P2BotMenuV6) error {
 			for _, sibling := range p.sharedGroup.allPlatforms() {
@@ -759,12 +751,14 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // onCardAction handles card.action.trigger callbacks via the official SDK event dispatcher.
-// Three prefixes are supported:
+// Navigation prefixes:
 //   - nav:/xxx   — render a card page and update the original card in-place
 //   - act:/xxx   — execute an action, then render and update the card in-place
 //   - cmd:/xxx   — legacy: dispatch as a user command (sends a new message)
+//
+// steer:/unqueue: dispatch authenticated queue operations separately.
 func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
-	if event.Event == nil || event.Event.Action == nil {
+	if event == nil || event.Event == nil || event.Event.Action == nil {
 		return nil, nil
 	}
 
@@ -810,6 +804,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		chatID = userID
 	}
 	sessionKey := p.sessionKeyFromCardAction(chatID, userID, event.Event.Action.Value)
+
+	if strings.HasPrefix(actionVal, "steer:") || strings.HasPrefix(actionVal, "unqueue:") {
+		return p.onTaskCardAction(event, actionVal)
+	}
 
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
@@ -1204,6 +1202,9 @@ func (p *Platform) dispatchCoreMessage(msg *core.Message) {
 	h := p.getHandler()
 	if msg == nil || h == nil {
 		return
+	}
+	if rc, ok := msg.ReplyCtx.(replyContext); ok && msg.ChannelID == "" {
+		msg.ChannelID = rc.chatID
 	}
 	p.populateWorkspaceChannelKeys(msg)
 	if p.isMessageRecalled(msg.MessageID) {
