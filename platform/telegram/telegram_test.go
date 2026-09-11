@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -228,6 +229,99 @@ func (b *stubTelegramBot) GetFileCallCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.getFileCalls
+}
+
+type callbackConcurrencyTransport struct {
+	getUpdatesCalls    atomic.Int32
+	allowedUpdatesSeen atomic.Bool
+}
+
+func (t *callbackConcurrencyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body string
+	if req.Body != nil {
+		data, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		body = string(data)
+	}
+
+	var response string
+	switch {
+	case strings.HasSuffix(req.URL.Path, "/getMe"):
+		response = `{"ok":true,"result":{"id":42,"is_bot":true,"first_name":"test","username":"testbot"}}`
+	case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/getUpdates"):
+		response = `{"ok":true,"result":[]}`
+	case strings.HasSuffix(req.URL.Path, "/getUpdates"):
+		if strings.Contains(body, "allowed_updates") {
+			t.allowedUpdatesSeen.Store(true)
+		}
+		if t.getUpdatesCalls.Add(1) == 1 {
+			response = `{"ok":true,"result":[{"update_id":1,"message":{"message_id":1}},{"update_id":2,"callback_query":{"id":"callback-1"}}]}`
+		} else {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}
+	default:
+		return nil, fmt.Errorf("unexpected Telegram API request: %s %s", req.Method, req.URL.Path)
+	}
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(response)),
+	}, nil
+}
+
+func TestDefaultNewBot_CallbackRunsWhileMessageHandlerBlocked(t *testing.T) {
+	messageStarted := make(chan struct{})
+	releaseMessage := make(chan struct{})
+	callbackProcessed := make(chan struct{})
+	transport := &callbackConcurrencyTransport{}
+	httpClient := &http.Client{Transport: transport}
+
+	_, _, startPoll, err := defaultNewBot("token", func(_ context.Context, update *models.Update) {
+		switch {
+		case update.Message != nil:
+			close(messageStarted)
+			<-releaseMessage
+		case update.CallbackQuery != nil:
+			close(callbackProcessed)
+		}
+	}, httpClient)
+	if err != nil {
+		t.Fatalf("defaultNewBot: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		startPoll(ctx)
+	}()
+	defer func() {
+		close(releaseMessage)
+		cancel()
+		select {
+		case <-pollDone:
+		case <-time.After(time.Second):
+			t.Fatal("polling did not stop")
+		}
+	}()
+
+	select {
+	case <-messageStarted:
+	case <-time.After(time.Second):
+		t.Fatal("message handler did not start")
+	}
+	select {
+	case <-callbackProcessed:
+	case <-time.After(time.Second):
+		t.Fatal("callback query was blocked by message handler")
+	}
+	if !transport.allowedUpdatesSeen.Load() {
+		t.Fatal("getUpdates request did not include explicit allowed_updates")
+	}
 }
 
 func TestPlatformStart_RetriesInBackgroundUntilConnected(t *testing.T) {
@@ -1035,4 +1129,3 @@ func TestProgressStyleProviderInterface(t *testing.T) {
 		t.Fatalf("ProgressStyle() = %q, want compact", got)
 	}
 }
-

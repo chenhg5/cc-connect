@@ -255,7 +255,13 @@ func defaultNewBot(token string, onUpdate func(context.Context, *models.Update),
 	}
 	opts := []tgbot.Option{
 		tgbot.WithDefaultHandler(handler),
-		tgbot.WithNotAsyncHandlers(),
+		tgbot.WithAllowedUpdates(tgbot.AllowedUpdates{
+			models.AllowedUpdateMessage,
+			models.AllowedUpdateCallbackQuery,
+		}),
+		tgbot.WithErrorsHandler(func(err error) {
+			slog.Error("telegram: polling error", "error", err)
+		}),
 	}
 	if httpClient != nil {
 		opts = append(opts, tgbot.WithHTTPClient(60*time.Second, httpClient))
@@ -781,10 +787,11 @@ func retryLogMessage(cause retryCause) string {
 }
 
 func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQuery) {
-	msg := cb.Message.Message
-	if msg == nil {
+	slog.Debug("telegram: received callback query", "id", cb.ID, "data", cb.Data)
+	if cb.Message.Message == nil {
 		return
 	}
+	msg := cb.Message.Message
 
 	bot, err := p.connectedBot("callback query")
 	if err != nil {
