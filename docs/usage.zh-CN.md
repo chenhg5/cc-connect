@@ -904,6 +904,39 @@ type = "claudecode"
 
 ---
 
+## 绑定已有 Agent 会话
+
+本地工具可以把平台会话绑定到 cc-connect 之外创建的 Agent 会话，
+例如由 IDE 启动的 Codex 或 Claude Code 会话。该 API 仅通过 cc-connect
+的 owner-only Unix Socket 提供：
+
+```bash
+curl --unix-socket ~/.cc-connect/run/api.sock \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "project": "my-project",
+    "session_key": "feishu:chat-id:user-id",
+    "session_id": "native-agent-session-id",
+    "session_name": "IDE session",
+    "work_dir": "/absolute/path/to/workspace"
+  }' \
+  http://unix/sessions/bind-agent
+```
+
+`project`、`session_key` 和 `session_id` 分别标识 cc-connect engine、
+平台会话和 Agent 原生会话。仅配置一个 engine 时可以省略 `project`；
+`session_name` 为可选字段。
+
+`work_dir` 为可选字段，仅适用于 `multi-workspace` 项目。目录必须已存在
+且位于项目 `base_dir` 内；请求成功后还会持久化会话到工作区的绑定。
+如果 Agent 实现了原生会话校验，cc-connect 会在修改绑定前拒绝不属于
+所选项目的 session ID。
+
+不要将该端点反向代理到 TCP。它的信任边界是权限为 `0600` 的 Unix Socket；
+任何能连接该 Socket 的进程都可以修改活跃会话路由。
+
+---
+
 ## Web 管理后台（Beta）
 
 > **状态：Beta。** 此功能自 v1.2.2-beta.5 起可用，UI 和 API 在后续版本中可能调整。
