@@ -1012,6 +1012,20 @@ app_secret = "your-feishu-app-secret"
 # domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
+# card_hook_dir = ""         # Optional directory of local hook scripts for instant card-button feedback.
+#                              # A button value like {"action":"cmd:...","hook":"myscript.sh"} runs that script
+#                              # synchronously on click: the full button value JSON goes to the script's stdin;
+#                              # if stdout is a JSON object it is returned as the replacement card immediately
+#                              # (sub-second feedback, no agent round-trip). Any failure (missing script, timeout,
+#                              # non-JSON output) falls back to normal dispatch, so hooks never block messages.
+#                              # Scripts must stay inside this directory (absolute paths and ".." are rejected).
+#                              # Empty (default) disables the feature. Also applies to the lark platform.
+#                              # 可选：本地钩子脚本目录，用于卡片按钮的即时反馈。按钮 value 含 {"hook":"myscript.sh"}
+#                              # 时，点击同步执行该脚本：完整 value JSON 走 stdin；stdout 为 JSON 对象则立即作为
+#                              # 替换卡片返回（亚秒级反馈，不经过 agent）。任何失败（脚本不存在/超时/输出非 JSON）
+#                              # 都自动回退正常派发，绝不阻塞消息。脚本必须位于该目录内（绝对路径与 ".." 会被拒绝）。
+#                              # 留空（默认）即关闭该功能。lark 平台同样适用。
+# card_hook_timeout_ms = 3000  # Card hook execution timeout in ms, range [100, 30000] / 钩子脚本执行超时（毫秒），范围 [100, 30000]
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # allow_chat = "*"          # Allowed group chat_ids, comma-separated; "*" = all (default). Find chat_id in group settings.
