@@ -5427,8 +5427,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// the rich-card path. event.ToolInput itself is left untouched.
 				cardToolInput := truncateIf(toolInput, e.display.ToolMaxLen)
 				if !cp.AppendEvent(ProgressEntryToolUse, cardToolInput, event.ToolName, toolMsg) {
-					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
-						sendWorkspace(p, replyCtx, chunk)
+					// Compact/card progress is best-effort. If its editable card
+					// fails, do not turn every subsequent tool event into a new
+					// chat message; the final answer remains authoritative.
+					if progressStyleForTarget(p, replyCtx) == progressStyleLegacy {
+						for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
+							sendWorkspace(p, replyCtx, chunk)
+						}
 					}
 				}
 			}
@@ -5473,7 +5478,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						Success:  event.ToolSuccess,
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
-						if !SuppressStandaloneToolResultEvent(p) {
+						if progressStyleForTarget(p, replyCtx) == progressStyleLegacy && !SuppressStandaloneToolResultEvent(p) {
 							e.sendRaw(p, replyCtx, resultMsg)
 						}
 					}
