@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 )
@@ -155,7 +156,12 @@ func (e *Engine) registerQueuedTaskLocked(state *interactiveState, q *queuedMess
 		return nil
 	}
 	q.actionToken = fmt.Sprintf("%x", random)
-	action := &queuedTaskAction{queued: *q, turnID: turnID, status: MsgSteerQueued}
+	// Receipts outlive the queued input. Retain only their routing metadata
+	// and a cloned preview, never attachment buffers or the full prompt.
+	action := &queuedTaskAction{queued: queuedMessage{
+		content: strings.Clone(truncateIf(q.content, 500)), platform: q.platform,
+		userID: q.userID, msgSessionKey: q.msgSessionKey, channelID: q.channelID,
+	}, turnID: turnID, status: MsgSteerQueued}
 	state.queueActions[q.actionToken] = action
 	return e.queuedTaskCard(action, q.actionToken)
 }
@@ -216,7 +222,7 @@ func (e *Engine) handleTaskAction(p Platform, ctx context.Context, event CardTas
 		return result
 	}
 	if kind == "unqueue" {
-		state.pendingMessages = append(state.pendingMessages[:index], state.pendingMessages[index+1:]...)
+		state.pendingMessages = slices.Delete(state.pendingMessages, index, index+1)
 		action.status = MsgSteerCancelled
 		result := e.taskActionResult(action, token)
 		state.mu.Unlock()
@@ -240,7 +246,7 @@ func (e *Engine) handleTaskAction(p Platform, ctx context.Context, event CardTas
 	done := make(chan struct{})
 	state.steerDone = done
 	action.status = MsgSteerSubmitting
-	q := action.queued
+	q := state.pendingMessages[index]
 	session := state.turnSession
 	state.mu.Unlock()
 
@@ -257,7 +263,7 @@ func (e *Engine) handleTaskAction(p Platform, ctx context.Context, event CardTas
 	}
 	if err == nil || errors.Is(err, ErrSteerOutcomeUnknown) {
 		if index := taskQueueIndex(state, token); index >= 0 {
-			state.pendingMessages = append(state.pendingMessages[:index], state.pendingMessages[index+1:]...)
+			state.pendingMessages = slices.Delete(state.pendingMessages, index, index+1)
 		}
 	}
 	state.steerDone = nil
