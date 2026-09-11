@@ -16443,6 +16443,51 @@ func extractWorkspaceChannelKey(sessionKey string) string {
 	return workspaceChannelKey(extractPlatformName(sessionKey), extractChannelID(sessionKey))
 }
 
+// threadTopicChannelID reconstructs the topic-scoped channel identifier from a
+// thread sessionKey. In thread-isolation mode a Feishu session key is
+// "platform:chatID:root:rootID", while the workspace binding scope for that
+// thread is stored as "chatID:topic:rootID". Returns "" when the sessionKey is
+// not a thread session key.
+func threadTopicChannelID(sessionKey string) string {
+	parts := strings.SplitN(sessionKey, ":", 4)
+	if len(parts) != 4 {
+		return ""
+	}
+	chatID, marker, rootID := parts[1], parts[2], parts[3]
+	if chatID == "" || rootID == "" {
+		return ""
+	}
+	switch marker {
+	case "root", "thread", "topic":
+		return chatID + ":topic:" + rootID
+	}
+	return ""
+}
+
+// workspaceChannelKeysFromSessionKey returns candidate workspace channel keys
+// derived from a sessionKey, in priority order. Callers that only have a
+// sessionKey (e.g. card render paths) must reconstruct the same binding scope
+// the platform used at dispatch time. In thread-isolation mode the sessionKey
+// encodes the thread root, so we try the topic-scoped key first and fall back
+// to the chat-level key (which is also the binding scope when isolation is off
+// or when a new topic inherits the chat's default binding).
+func workspaceChannelKeysFromSessionKey(sessionKey string) []string {
+	platform := extractPlatformName(sessionKey)
+	chatKey := workspaceChannelKey(platform, extractChannelID(sessionKey))
+	if topicChannelID := threadTopicChannelID(sessionKey); topicChannelID != "" {
+		if topicKey := workspaceChannelKey(platform, topicChannelID); topicKey != "" && topicKey != chatKey {
+			if chatKey != "" {
+				return []string{topicKey, chatKey}
+			}
+			return []string{topicKey}
+		}
+	}
+	if chatKey == "" {
+		return nil
+	}
+	return []string{chatKey}
+}
+
 // effectiveChannelID returns the channel identifier from a Message.
 // It prefers the platform-provided ChannelKey (e.g. "chatID:threadID" for forum topics)
 // and falls back to parsing the session key.
@@ -16528,7 +16573,11 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions
 	}
-	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+	// Try topic-scoped binding first, then chat-level. In thread-isolation mode
+	// the binding scope is keyed by the thread root ("chatID:topic:rootID"),
+	// which extractWorkspaceChannelKey alone cannot reconstruct because it drops
+	// the thread tail from the sessionKey.
+	for _, channelKey := range workspaceChannelKeysFromSessionKey(sessionKey) {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
 				return wsAgent, wsSessions
@@ -16665,7 +16714,7 @@ func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
 	if _, ok := e.interactiveStates[sessionKey]; ok {
 		return sessionKey
 	}
-	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+	for _, channelKey := range workspaceChannelKeysFromSessionKey(sessionKey) {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 			return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 		}
