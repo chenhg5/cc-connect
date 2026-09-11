@@ -62,8 +62,10 @@ type SendRequest struct {
 	AtAll      bool              `json:"at_all,omitempty"`
 }
 
-// NewAPIServer creates an API server on a Unix socket.
-func NewAPIServer(dataDir string) (*APIServer, error) {
+// NewAPIServer creates an API server on a Unix socket. runAsUsers is the set of
+// configured run_as_user targets (see Config.RunAsUsers); when non-empty the
+// socket is opened to those agent user(s) so they can connect without EACCES.
+func NewAPIServer(dataDir string, runAsUsers []string) (*APIServer, error) {
 	sockDir := filepath.Join(dataDir, "run")
 	if err := os.MkdirAll(sockDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create run dir: %w", err)
@@ -80,6 +82,11 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	if err := os.Chmod(sockPath, 0o600); err != nil {
 		_ = listener.Close()
 		return nil, fmt.Errorf("chmod socket: %w", err)
+	}
+	// Open the socket to the run_as_user agent(s). Non-fatal: on failure the
+	// socket still works for root, the agent just can't connect (issue #1527).
+	if err := grantSocketAccess(sockPath, runAsUsers); err != nil {
+		slog.Warn("api socket: could not grant run_as_user access", "error", err)
 	}
 
 	s := &APIServer{
