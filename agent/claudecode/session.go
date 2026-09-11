@@ -53,6 +53,11 @@ type claudeSession struct {
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
 
+	// reportedCtxWindow holds the context window (tokens) the CLI reported
+	// for the active model in the last result event's modelUsage map. Zero
+	// until a result event carries it; claudeContextWindow is the fallback.
+	reportedCtxWindow atomic.Int64
+
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
 	// SIGTERM and then SIGKILL. Default: 120s to match claude-mem's
@@ -706,8 +711,7 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		input, _, cc, cr := parseClaudeUsage(usageRaw)
 		used := input + cc + cr
 		if used > 0 {
-			model := cs.GetModel()
-			window := claudeContextWindow(model)
+			window := cs.contextWindow()
 			cs.usageMu.Lock()
 			prevOutput := 0
 			if cs.lastUsage != nil {
@@ -863,14 +867,23 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	if usage, ok := raw["usage"].(map[string]any); ok {
 		inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens = parseClaudeUsage(usage)
 	}
-	if outputTokens > 0 {
-		cs.usageMu.Lock()
-		if cs.lastUsage != nil {
+	// The result event also carries a modelUsage map holding the authoritative
+	// context window per model. Prefer it over the model-id heuristic: models
+	// such as claude-opus-5 have a native 1M window with no "[1m]" suffix in
+	// their id, which the heuristic would under-report as 200k.
+	if window := parseModelUsageContextWindow(raw, cs.GetModel()); window > 0 {
+		cs.reportedCtxWindow.Store(int64(window))
+	}
+	window := cs.contextWindow()
+	cs.usageMu.Lock()
+	if cs.lastUsage != nil {
+		cs.lastUsage.ContextWindow = window
+		if outputTokens > 0 {
 			cs.lastUsage.OutputTokens = outputTokens
 			cs.lastUsage.TotalTokens = cs.lastUsage.UsedTokens + outputTokens
 		}
-		cs.usageMu.Unlock()
 	}
+	cs.usageMu.Unlock()
 
 	evt := core.Event{
 		Type:                     core.EventResult,
@@ -1341,6 +1354,49 @@ func shellJoinArgs(args []string) string {
 		b.WriteByte('\'')
 	}
 	return b.String()
+}
+
+// contextWindow returns the context window (tokens) to report for the active
+// model: the CLI-reported value captured from the last result event when one
+// has been seen, otherwise the model-id heuristic.
+func (cs *claudeSession) contextWindow() int {
+	if w := cs.reportedCtxWindow.Load(); w > 0 {
+		return int(w)
+	}
+	return claudeContextWindow(cs.GetModel())
+}
+
+// parseModelUsageContextWindow extracts contextWindow from a result event's
+// modelUsage map for the given model id. A turn may touch several models (a
+// subagent running on haiku, say), so the active model's entry wins; a lone
+// entry is used when no id matches. Returns 0 when nothing usable is present.
+func parseModelUsageContextWindow(raw map[string]any, model string) int {
+	byModel, ok := raw["modelUsage"].(map[string]any)
+	if !ok || len(byModel) == 0 {
+		return 0
+	}
+	windowOf := func(v any) int {
+		entry, ok := v.(map[string]any)
+		if !ok {
+			return 0
+		}
+		w, _ := entry["contextWindow"].(float64)
+		if w <= 0 {
+			return 0
+		}
+		return int(w)
+	}
+	if model != "" {
+		if w := windowOf(byModel[model]); w > 0 {
+			return w
+		}
+	}
+	if len(byModel) == 1 {
+		for _, v := range byModel {
+			return windowOf(v)
+		}
+	}
+	return 0
 }
 
 // claudeContextWindow returns the context window size (tokens) that best
