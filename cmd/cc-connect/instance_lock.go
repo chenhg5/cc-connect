@@ -7,7 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
+
+// killWaitTimeout caps how long KillExistingInstance polls for the
+// SIGKILLed process to actually be reaped by the kernel. SIGKILL is
+// async, and the file lock isn't released until the process truly
+// exits — so without this wait, `cc-connect --force` would race the
+// kernel and trip "another instance running" against the lock that
+// the dying process still holds.
+const killWaitTimeout = 5 * time.Second
+
+// killWaitInterval is the poll interval between Signal(0) probes
+// while waiting for the killed process to exit. Short enough to
+// minimise the user-visible delay on a clean kill.
+const killWaitInterval = 25 * time.Millisecond
 
 // InstanceLock provides a file-based exclusive lock to prevent multiple
 // cc-connect instances with the same config from running simultaneously.
@@ -139,7 +153,26 @@ func KillExistingInstance(configPath string) bool {
 		return false
 	}
 
-	// Wait a moment for the process to exit
-	// Note: we can't use proc.Wait() as we're not the parent
+	// Wait for the process to actually exit before returning. SIGKILL
+	// is async — proc.Kill() just queues the signal, and the file lock
+	// stays held until the kernel reaps the process. Without this poll
+	// the immediately-following AcquireInstanceLock would race against
+	// the still-held flock and surface a confusing "already running"
+	// error after --force.
+	//
+	// We can't use proc.Wait() because we're not the parent; use
+	// Signal(0) instead, which fails with ESRCH once the process is
+	// gone.
+	deadline := time.Now().Add(killWaitTimeout)
+	for time.Now().Before(deadline) {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			return true
+		}
+		time.Sleep(killWaitInterval)
+	}
+	// Returning true anyway: the process didn't reap inside the
+	// timeout (very unusual for SIGKILL), but the caller's downstream
+	// AcquireInstanceLock will surface a clear error rather than
+	// silent corruption.
 	return true
 }
