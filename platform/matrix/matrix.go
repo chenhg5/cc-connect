@@ -25,8 +25,110 @@ func init() {
 }
 
 type replyContext struct {
-	roomID    id.RoomID
-	messageID id.EventID
+	roomID     id.RoomID
+	messageID  id.EventID
+	threadID   id.EventID // m.thread root this message belongs to ("" if none)
+	lastID     id.EventID // message being answered (thread fallback quote target)
+	sessionKey string     // agent session this outgoing message belongs to (event→session mapping)
+}
+
+// eventSessionMap remembers which agent session an event belongs to, so that
+// replies to a specific message (m.in_reply_to) or thread messages
+// (rel_type m.thread) can be routed back into the same conversation.
+// In-memory only: after a restart, replies fall back to the default
+// room/sender session until new messages re-seed the mapping.
+type eventSessionMap struct {
+	mu      sync.Mutex
+	entries map[string]eventSessionEntry
+}
+
+type eventSessionEntry struct {
+	session string
+	fromBot bool
+	at      time.Time
+}
+
+const (
+	eventSessionTTL      = 7 * 24 * time.Hour
+	eventSessionMaxItems = 20000
+)
+
+func newEventSessionMap() *eventSessionMap {
+	return &eventSessionMap{entries: make(map[string]eventSessionEntry)}
+}
+
+func (m *eventSessionMap) remember(eventID, session string) {
+	m.rememberWithOrigin(eventID, session, false)
+}
+
+// rememberWithOrigin records the event→session mapping; fromBot marks events
+// sent by the bot itself (used to detect "replying to the bot" addressing).
+func (m *eventSessionMap) rememberWithOrigin(eventID, session string, fromBot bool) {
+	if m == nil || eventID == "" || session == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	if len(m.entries) >= eventSessionMaxItems {
+		for k, e := range m.entries {
+			if now.Sub(e.at) > eventSessionTTL {
+				delete(m.entries, k)
+			}
+		}
+		for len(m.entries) >= eventSessionMaxItems { // hard cap: drop arbitrary entries
+			for k := range m.entries {
+				delete(m.entries, k)
+				break
+			}
+		}
+	}
+	m.entries[eventID] = eventSessionEntry{session: session, fromBot: fromBot, at: now}
+}
+
+func (m *eventSessionMap) lookup(eventID string) (string, bool) {
+	if m == nil || eventID == "" {
+		return "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[eventID]
+	if !ok {
+		return "", false
+	}
+	if time.Since(e.at) > eventSessionTTL {
+		delete(m.entries, eventID)
+		return "", false
+	}
+	return e.session, true
+}
+
+// isFromBot reports whether the event was sent by the bot (and is still known).
+func (m *eventSessionMap) isFromBot(eventID string) bool {
+	if m == nil || eventID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[eventID]
+	if !ok || time.Since(e.at) > eventSessionTTL {
+		return false
+	}
+	return e.fromBot
+}
+
+// isKnown reports whether we have any mapping for the event (bot or user).
+func (m *eventSessionMap) isKnown(eventID string) bool {
+	if m == nil || eventID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[eventID]
+	if !ok {
+		return false
+	}
+	return time.Since(e.at) <= eventSessionTTL
 }
 
 type Platform struct {
@@ -35,6 +137,9 @@ type Platform struct {
 	userID                string
 	allowFrom             string
 	shareSessionInChannel bool
+	threadSessions        bool
+	renderMermaidDiagrams bool
+	krokiURL              string
 	groupReplyAll         bool
 	autoJoin              bool
 	autoVerify            bool
@@ -52,6 +157,7 @@ type Platform struct {
 	unavailableNotified  bool
 	dedup                core.MessageDedup
 	httpClient           *http.Client
+	eventSessions        *eventSessionMap
 	cryptoHelper         any //nolint:unused // *cryptohelper.CryptoHelper when built with goolm tag
 	crossSigningPassword string
 }
@@ -77,6 +183,12 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSession, _ := opts["share_session_in_channel"].(bool)
+	threadSessions, _ := opts["thread_sessions"].(bool)
+	renderMermaidDiagrams, _ := opts["render_mermaid"].(bool)
+	krokiURL, _ := opts["kroki_url"].(string)
+	if krokiURL == "" {
+		krokiURL = "https://kroki.io"
+	}
 	autoJoin, _ := opts["auto_join"].(bool)
 	if !autoJoin {
 		_, hasKey := opts["auto_join"]
@@ -97,6 +209,12 @@ func New(opts map[string]any) (core.Platform, error) {
 		crossSigningPassword = env
 	}
 
+	slog.Info("matrix: platform options",
+		"thread_sessions", threadSessions,
+		"share_session_in_channel", shareSession,
+		"group_reply_all", groupReplyAll,
+		"render_mermaid", renderMermaidDiagrams)
+
 	httpClient := &http.Client{Timeout: 120 * time.Second}
 	if proxyURL != "" {
 		u, err := url.Parse(proxyURL)
@@ -114,12 +232,16 @@ func New(opts map[string]any) (core.Platform, error) {
 		allowFrom:             allowFrom,
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSession,
+		threadSessions:        threadSessions,
+		renderMermaidDiagrams: renderMermaidDiagrams,
+		krokiURL:              strings.TrimRight(krokiURL, "/"),
 		autoJoin:              autoJoin,
 		proxyURL:              proxyURL,
 		autoVerify:            autoVerify,
 		crossSigningPassword:  crossSigningPassword,
 		httpClient:            httpClient,
 		dedup:                 core.MessageDedup{},
+		eventSessions:         newEventSessionMap(),
 	}, nil
 }
 
@@ -280,18 +402,56 @@ func (p *Platform) handleMessage(ctx context.Context, evt *event.Event) {
 	roomID := evt.RoomID
 	isDM := p.isDMRoom(ctx, roomID)
 
-	// Group mention check
+	// Group addressing gate: in rooms with more participants than the bot and
+	// one user, stay silent unless directly addressed — via @mention, or by
+	// quoting (m.in_reply_to) a message that belongs to a bot conversation.
 	if !isDM && !p.groupReplyAll {
-		if !p.isDirectedAtBot(content, selfID) {
+		target := content.RelatesTo.GetNonFallbackReplyTo()
+		if target == "" {
+			target = content.RelatesTo.GetThreadParent()
+		}
+		addressedViaQuote := target != "" &&
+			(p.eventSessions.isFromBot(target.String()) || p.eventSessions.isKnown(target.String()))
+		if !p.isDirectedAtBot(content, selfID) && !p.mentionsWakeWord(content) && !addressedViaQuote {
+			slog.Debug("matrix: ignoring group message not directed at bot", "event_id", evt.ID)
 			return
 		}
 	}
 
 	userName := displayName(evt.Sender)
-	sessionKey := p.buildSessionKey(roomID, evt.Sender)
+	// thread_sessions: a top-level message (groups and DMs alike) becomes the
+	// root of a new conversation thread, so each conversation keeps its own
+	// isolated context/session.
+	var rootOverride id.EventID
+	if p.threadSessions &&
+		content.RelatesTo.GetThreadParent() == "" &&
+		content.RelatesTo.GetNonFallbackReplyTo() == "" &&
+		!p.eventSessions.isKnown(evt.ID.String()) {
+		// Only a relation-free event can start a thread: homeservers reject
+		// m.thread rooted at an event that already carries a relation
+		// (edits/m.replace, reactions, ...).
+		if canStartThread(content.RelatesTo) {
+			rootOverride = evt.ID
+		}
+	}
+	sessionKey := p.routeSessionKey(roomID, evt.Sender, content, rootOverride)
+	if rootOverride != "" {
+		slog.Info("matrix: thread session started",
+			"root", rootOverride.String(), "session_key", sessionKey)
+	}
 	channelKey := roomID.String()
 
-	rctx := replyContext{roomID: roomID, messageID: evt.ID}
+	rctx := replyContext{
+		roomID:     roomID,
+		messageID:  evt.ID,
+		threadID:   content.RelatesTo.GetThreadParent(),
+		lastID:     evt.ID,
+		sessionKey: sessionKey,
+	}
+	if rootOverride != "" {
+		rctx.threadID = rootOverride
+	}
+	p.eventSessions.remember(evt.ID.String(), sessionKey)
 
 	// Handle different message types
 	msgType := content.MsgType
@@ -382,22 +542,39 @@ func (p *Platform) dispatch(msg *core.Message) {
 }
 
 // sendRoomEvent sends an event to a room, encrypting it if E2EE is available and the room is encrypted.
-func (p *Platform) sendRoomEvent(ctx context.Context, roomID id.RoomID, evtType event.Type, content any) error {
+// sendRoomEvent sends an event to a room, encrypting it if E2EE is available and the room is encrypted.
+// It returns the event ID of the sent event ("" when unknown).
+func (p *Platform) sendRoomEvent(ctx context.Context, roomID id.RoomID, evtType event.Type, content any) (id.EventID, error) {
 	client := p.getClient()
 	if client == nil {
-		return fmt.Errorf("matrix: not connected")
+		return "", fmt.Errorf("matrix: not connected")
 	}
 
 	// Try E2EE path first (only available when built with goolm tag)
-	if handled, err := p.tryEncryptAndSend(ctx, client, roomID, evtType, content); handled {
-		return err
+	if handled, evtID, err := p.tryEncryptAndSend(ctx, client, roomID, evtType, content); handled {
+		return evtID, err
 	}
 
-	_, err := client.SendMessageEvent(ctx, roomID, evtType, content)
+	resp, err := client.SendMessageEvent(ctx, roomID, evtType, content)
 	if err != nil {
-		return fmt.Errorf("matrix: send: %w", err)
+		// Safety net: some roots are rejected ("Cannot start threads from an
+		// event with a relation"). Retry once without the thread relation so
+		// the answer is not lost; it still lands in the room.
+		if strings.Contains(err.Error(), "relation") && evtType == event.EventMessage {
+			if mc, ok := content.(*event.MessageEventContent); ok {
+				saved := mc.RelatesTo
+				mc.RelatesTo = nil
+				resp2, err2 := client.SendMessageEvent(ctx, roomID, evtType, content)
+				mc.RelatesTo = saved
+				if err2 == nil {
+					slog.Warn("matrix: resent without thread relation after rejection", "room", roomID.String())
+					return resp2.EventID, nil
+				}
+			}
+		}
+		return "", fmt.Errorf("matrix: send: %w", err)
 	}
-	return nil
+	return resp.EventID, nil
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -408,12 +585,19 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	parsed := format.RenderMarkdown(content, true, false)
 	parsed.Body = content
-	if content != "" {
+	switch {
+	case rc.threadID != "":
+		rel := &event.RelatesTo{}
+		rel.SetThread(rc.threadID, rc.messageID)
+		parsed.RelatesTo = rel
+	case content != "":
 		parsed.RelatesTo = &event.RelatesTo{}
 		parsed.RelatesTo.SetReplyTo(rc.messageID)
 	}
 
-	return p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, &parsed)
+	evtID, err := p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, &parsed)
+	p.rememberSent(rc, evtID)
+	return err
 }
 
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
@@ -422,10 +606,20 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("matrix: invalid reply context type %T", rctx)
 	}
 
+	if imgs := func() []core.ImageAttachment { c, i := p.renderMermaid(content); content = c; return i }(); len(imgs) > 0 {
+		defer func() {
+			for _, img := range imgs {
+				_ = p.SendImage(ctx, rc, img)
+			}
+		}()
+	}
 	parsed := format.RenderMarkdown(content, true, false)
 	parsed.Body = content
+	applyThreadRelation(&parsed.RelatesTo, rc)
 
-	return p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, &parsed)
+	evtID, err := p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, &parsed)
+	p.rememberSent(rc, evtID)
+	return err
 }
 
 func (p *Platform) Stop() error {
@@ -492,7 +686,10 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		}
 	}
 
-	return p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, content)
+	applyThreadRelation(&content.RelatesTo, rc)
+	evtID, err := p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, content)
+	p.rememberSent(rc, evtID)
+	return err
 }
 
 func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
@@ -539,7 +736,10 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		}
 	}
 
-	return p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, content)
+	applyThreadRelation(&content.RelatesTo, rc)
+	evtID, err := p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, content)
+	p.rememberSent(rc, evtID)
+	return err
 }
 
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
@@ -596,6 +796,13 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	newContent := parsed
 	newContent.Mentions = nil
 
+	if imgs := func() []core.ImageAttachment { c, i := p.renderMermaid(content); content = c; return i }(); len(imgs) > 0 {
+		defer func() {
+			for _, img := range imgs {
+				_ = p.SendImage(ctx, rc, img)
+			}
+		}()
+	}
 	parsed.NewContent = &newContent
 	parsed.RelatesTo = &event.RelatesTo{
 		Type:    event.RelReplace,
@@ -603,7 +810,9 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	}
 	parsed.Body = "* " + content
 
-	return p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, &parsed)
+	evtID, err := p.sendRoomEvent(ctx, rc.roomID, event.EventMessage, &parsed)
+	p.rememberSent(rc, evtID)
+	return err
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
@@ -628,19 +837,88 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		roomIDStr = rest
 	}
 
+	// Optional thread segment: matrix:{room}:t-{eventID}(:{userID})
+	var threadID id.EventID
+	if tIdx := strings.Index(roomIDStr, ":t-"); tIdx >= 0 {
+		threadID = id.EventID(roomIDStr[tIdx+3:])
+		roomIDStr = roomIDStr[:tIdx]
+	}
+
 	if !strings.HasPrefix(roomIDStr, "!") {
 		return nil, fmt.Errorf("matrix: invalid room ID in %q", sessionKey)
 	}
-	return replyContext{roomID: id.RoomID(roomIDStr)}, nil
+	return replyContext{roomID: id.RoomID(roomIDStr), threadID: threadID}, nil
 }
 
 // --- Internal helpers ---
+
+// routeSessionKey resolves the agent session for an incoming message:
+//  1. exact mapping when the message quotes/continues a known event —
+//     replying to any previous bot/user message resumes that conversation;
+//  2. a per-thread fork when the message continues an unknown thread root;
+//  3. otherwise the default room/sender key.
+func (p *Platform) routeSessionKey(roomID id.RoomID, sender id.UserID, content *event.MessageEventContent, rootOverride id.EventID) string {
+	rel := content.RelatesTo
+	threadRoot := rel.GetThreadParent()
+	replyTo := rel.GetNonFallbackReplyTo()
+	if rootOverride != "" {
+		threadRoot = rootOverride
+		replyTo = ""
+	}
+
+	routeID := threadRoot
+	if routeID == "" {
+		routeID = replyTo
+	}
+	if routeID != "" {
+		if sk, ok := p.eventSessions.lookup(routeID.String()); ok {
+			return sk
+		}
+	}
+	if threadRoot != "" {
+		return p.buildThreadSessionKey(roomID, sender, threadRoot)
+	}
+	return p.buildSessionKey(roomID, sender)
+}
+
+// canStartThread reports whether an event is free of relations and therefore
+// allowed by homeservers to become the root of a new m.thread conversation.
+func canStartThread(rel *event.RelatesTo) bool {
+	return rel == nil || (rel.Type == "" && rel.InReplyTo == nil && rel.Key == "")
+}
 
 func (p *Platform) buildSessionKey(roomID id.RoomID, sender id.UserID) string {
 	if p.shareSessionInChannel {
 		return fmt.Sprintf("matrix:%s", roomID)
 	}
 	return fmt.Sprintf("matrix:%s:%s", roomID, sender)
+}
+
+func (p *Platform) buildThreadSessionKey(roomID id.RoomID, sender id.UserID, root id.EventID) string {
+	if p.shareSessionInChannel {
+		return fmt.Sprintf("matrix:%s:t-%s", roomID, root)
+	}
+	return fmt.Sprintf("matrix:%s:t-%s:%s", roomID, root, sender)
+}
+
+// applyThreadRelation attaches an m.thread relation so outgoing messages stay
+// inside the conversation thread, with a fallback quote pointing at the
+// message being answered. No-op when not in a thread.
+func applyThreadRelation(rel **event.RelatesTo, rc replyContext) {
+	if rc.threadID == "" {
+		return
+	}
+	r := &event.RelatesTo{}
+	r.SetThread(rc.threadID, rc.lastID)
+	*rel = r
+}
+
+// rememberSent records the event→session mapping for outgoing messages so
+// later replies to them resume the same session.
+func (p *Platform) rememberSent(rc replyContext, evtID id.EventID) {
+	if evtID != "" && rc.sessionKey != "" {
+		p.eventSessions.rememberWithOrigin(evtID.String(), rc.sessionKey, true)
+	}
 }
 
 func (p *Platform) isDMRoom(ctx context.Context, roomID id.RoomID) bool {
@@ -654,6 +932,16 @@ func (p *Platform) isDMRoom(ctx context.Context, roomID id.RoomID) bool {
 		return false
 	}
 	return len(members.Chunk) <= 2
+}
+
+// mentionsWakeWord reports whether the message text addresses the bot by its
+// nickname ("Вася"/"vasya", case-insensitive) without a formal @mention.
+func (p *Platform) mentionsWakeWord(content *event.MessageEventContent) bool {
+	if content == nil {
+		return false
+	}
+	t := strings.ToLower(content.Body)
+	return strings.Contains(t, "вася") || strings.Contains(t, "vasya")
 }
 
 func (p *Platform) isDirectedAtBot(content *event.MessageEventContent, selfID id.UserID) bool {

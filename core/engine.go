@@ -28,6 +28,18 @@ import (
 )
 
 const maxPlatformMessageLen = 4000
+
+// matrixMaxMessageLen raises the per-message cap for Matrix: Synapse accepts
+// large event bodies, so long answers arrive as one message instead of chunks.
+const matrixMaxMessageLen = 20000
+
+func platformMessageLimit(p Platform) int {
+	if p != nil && p.Name() == "matrix" {
+		return matrixMaxMessageLen
+	}
+	return maxPlatformMessageLen
+}
+
 const telegramBotCommandLimit = 100
 const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
@@ -4854,7 +4866,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 
 				if fullResponse != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
+					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, platformMessageLimit(p)) {
 						e.send(p, replyCtx, chunk)
 					}
 				}
@@ -5261,7 +5273,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					} else {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
-							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, platformMessageLimit(p)) {
 								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
@@ -5284,7 +5296,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if !previewActive {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
-							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, platformMessageLimit(p)) {
 								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
@@ -5348,7 +5360,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					} else {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
-							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, platformMessageLimit(p)) {
 								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
@@ -5392,7 +5404,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if !previewActive {
 						segment := strings.Join(textParts[segmentStart:], "")
 						if segment != "" {
-							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, platformMessageLimit(p)) {
 								sendWorkspace(p, replyCtx, chunk)
 							}
 						}
@@ -5427,7 +5439,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// the rich-card path. event.ToolInput itself is left untouched.
 				cardToolInput := truncateIf(toolInput, e.display.ToolMaxLen)
 				if !cp.AppendEvent(ProgressEntryToolUse, cardToolInput, event.ToolName, toolMsg) {
-					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
+					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, platformMessageLimit(p)) {
 						sendWorkspace(p, replyCtx, chunk)
 					}
 				}
@@ -5644,7 +5656,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if !previewActive {
 					segment := strings.Join(textParts[segmentStart:], "")
 					if segment != "" {
-						for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+						for _, chunk := range SplitMessageCodeFenceAware(segment, platformMessageLimit(p)) {
 							sendWorkspace(p, replyCtx, chunk)
 						}
 					}
@@ -5920,7 +5932,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// Fallback: send the response as a normal message — but never
 					// for a silent reply, which has no deliverable content.
 					if !isSilent {
-						for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
+						for _, chunk := range SplitMessageCodeFenceAware(fullResponse, platformMessageLimit(p)) {
 							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 								return
 							}
@@ -6343,7 +6355,7 @@ channelClosed:
 			if segmentStart < len(textParts) {
 				unsent := strings.Join(textParts[segmentStart:], "")
 				if unsent != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(unsent, maxPlatformMessageLen) {
+					for _, chunk := range SplitMessageCodeFenceAware(unsent, platformMessageLimit(p)) {
 						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 							return
 						}
@@ -6353,7 +6365,7 @@ channelClosed:
 		} else if sp.finish(fullResponse, "") {
 			slog.Debug("stream preview: finalized in-place (process exited)")
 		} else {
-			for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
+			for _, chunk := range SplitMessageCodeFenceAware(fullResponse, platformMessageLimit(p)) {
 				if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 					return
 				}
@@ -7872,7 +7884,7 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 // which case caller should bail). sendFn is the workspace-aware send closure
 // (so the helper picks up workspace transforms like path remapping).
 func sendChunksWithStatusFooter(ctx context.Context, p Platform, replyCtx any, body, statusFooter string, sendFn func(Platform, any, string) error) bool {
-	chunks := SplitMessageCodeFenceAware(body, maxPlatformMessageLen)
+	chunks := SplitMessageCodeFenceAware(body, platformMessageLimit(p))
 	for i, chunk := range chunks {
 		isLast := i == len(chunks)-1
 		if isLast && statusFooter != "" {
