@@ -17,7 +17,8 @@ func init() {
 	core.RegisterAgent("qoder", New)
 }
 
-// Agent drives Qoder CLI using `qodercli -p <prompt> -f stream-json`.
+// Agent drives Qoder CLI using `qodercli -p -f stream-json --input-format stream-json`,
+// delivering each prompt via stdin as a stream-json user frame.
 type Agent struct {
 	workDir      string
 	cmd          string   // CLI binary name (default: "qodercli")
