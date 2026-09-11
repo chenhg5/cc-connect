@@ -54,6 +54,7 @@ ws://<host>:<port>/bridge/ws
 ```toml
 [bridge]
 enabled = true
+bind = "127.0.0.1"        # 默认仅本机；远程适配器接入时设为 0.0.0.0
 port = 9810
 path = "/bridge/ws"       # 可选，默认 "/bridge/ws"
 token = "your-secret"     # 认证密钥，必填
@@ -818,6 +819,7 @@ WebSocket 连接断开时，适配器应：
 ```toml
 [bridge]
 enabled = true
+bind = "127.0.0.1"
 port = 9810
 token = "一个强随机密钥"
 

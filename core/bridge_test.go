@@ -40,6 +40,20 @@ func startTestBridge(t *testing.T, token string) (*BridgeServer, string) {
 	return bs, wsURL
 }
 
+func TestBridgeServer_DefaultBindIsLoopback(t *testing.T) {
+	bs := NewBridgeServer(9810, "tok", "/bridge/ws", nil)
+	if got, want := listenAddress(bs.bind, bs.port), "127.0.0.1:9810"; got != want {
+		t.Fatalf("bridge listen address = %q, want %q", got, want)
+	}
+}
+
+func TestBridgeServer_ExplicitBindAllowsRemoteAccess(t *testing.T) {
+	bs := NewBridgeServerWithBind("0.0.0.0", 9810, "tok", "/bridge/ws", nil)
+	if got, want := listenAddress(bs.bind, bs.port), "0.0.0.0:9810"; got != want {
+		t.Fatalf("bridge listen address = %q, want %q", got, want)
+	}
+}
+
 func dialWS(t *testing.T, url string, headers http.Header) *websocket.Conn {
 	t.Helper()
 	conn, _, err := websocket.DefaultDialer.Dial(url, headers)

@@ -56,15 +56,17 @@ Add the following to `config.toml`:
 ```toml
 [management]
 enabled = true
+bind = "127.0.0.1"
 port = 9820
 token = "mgmt-secret"
 ```
 
-| Field    | Type    | Default   | Description                                      |
-|----------|---------|-----------|--------------------------------------------------|
-| `enabled`| boolean | `false`   | Enable the Management API server                 |
-| `port`   | integer | `9820`    | TCP port to listen on                            |
-| `token`  | string  | (required)| Shared secret for authentication                 |
+| Field     | Type    | Default     | Description                                                        |
+|-----------|---------|-------------|--------------------------------------------------------------------|
+| `enabled` | boolean | `false`     | Enable the Management API server                                   |
+| `bind`    | string  | `127.0.0.1` | Interface to bind; use `0.0.0.0` only when remote access is needed |
+| `port`    | integer | `9820`      | TCP port to listen on                                              |
+| `token`   | string  | (required)  | Shared secret for authentication                                   |
 
 When `enabled` is `false`, the Management API is not started. The token should be a strong, random string (e.g. 32+ characters).
 

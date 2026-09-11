@@ -935,6 +935,7 @@ type = "claudecode"
 ```toml
 [management]
 enabled = true
+bind = "127.0.0.1"              # 默认仅允许本机访问；设为 0.0.0.0 才允许远程访问
 port = 9820                     # 管理后台监听端口
 token = "your-secret-token"     # 登录 token；/web setup 会自动生成
 cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 CORS 头
@@ -994,6 +995,7 @@ Bridge 提供 WebSocket + REST 服务，让外部适配器（自定义 UI、机�
 ```toml
 [bridge]
 enabled = true
+bind = "127.0.0.1"              # 默认仅允许本机访问；远程适配器接入时设为 0.0.0.0
 port = 9810                     # Bridge 监听端口（与管理后台分开）
 token = "your-bridge-secret"    # WebSocket 和 REST 的认证 token
 path = "/bridge/ws"             # WebSocket 端点路径
