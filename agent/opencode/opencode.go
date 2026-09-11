@@ -23,7 +23,7 @@ func init() {
 	core.RegisterAgent("opencode", New)
 }
 
-// Agent drives the OpenCode CLI in headless mode using `opencode run --format json`.
+// Agent drives OpenCode via the CLI or a persistent HTTP/SSE server connection.
 //
 // Modes:
 //   - "default": standard mode
@@ -34,8 +34,11 @@ type Agent struct {
 	mode                 string
 	cmd                  string   // CLI binary name, default "opencode"
 	cliExtraArgs         []string // extra args from cmd after the binary name
+	connectionURL        string
+	username             string
+	password             string
 	configEnv            []string // env vars from [projects.agent.options.env]
-	agentName            string // passed as --agent to opencode (for plugin-defined agents)
+	agentName            string   // passed as --agent to opencode (for plugin-defined agents)
 	providers            []core.ProviderConfig
 	activeIdx            int
 	sessionEnv           []string
@@ -70,6 +73,16 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 	cmd, extraArgs := core.ParseCmdOpts(opts, "opencode")
+	connectionURL, _ := opts["connection_url"].(string)
+	if connectionURL != "" {
+		var err error
+		connectionURL, err = normalizeConnectionURL(connectionURL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	username, _ := opts["username"].(string)
+	password, _ := opts["password"].(string)
 	agentName, _ := opts["agent"].(string) // --agent flag for plugin-defined agents (#1210)
 	ccDataDir, _ := opts["cc_data_dir"].(string)
 	ccProject, _ := opts["cc_project"].(string)
@@ -80,7 +93,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	if _, err := exec.LookPath(cmd); err != nil {
-		return nil, fmt.Errorf("opencode: %q CLI not found in PATH, install from: https://github.com/opencode-ai/opencode", cmd)
+		return nil, fmt.Errorf("opencode: %q CLI not found in PATH, install from: https://github.com/anomalyco/opencode", cmd)
 	}
 
 	return &Agent{
@@ -89,6 +102,9 @@ func New(opts map[string]any) (core.Agent, error) {
 		mode:                 mode,
 		cmd:                  cmd,
 		cliExtraArgs:         extraArgs,
+		connectionURL:        connectionURL,
+		username:             username,
+		password:             password,
 		configEnv:            core.ParseConfigEnv(opts),
 		agentName:            agentName,
 		activeIdx:            -1,
@@ -466,6 +482,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
+	connectionURL := a.connectionURL
+	username := a.username
+	password := a.password
 	workDir := a.workDir
 	agentName := a.agentName
 	extraEnv := append([]string(nil), a.configEnv...)
@@ -478,6 +497,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
+	if connectionURL != "" {
+		return newOpencodeHTTPSession(ctx, connectionURL, username, password, workDir, model, mode, agentName, sessionID, extraEnv)
+	}
 	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv)
 }
 
