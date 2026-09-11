@@ -45,8 +45,9 @@ type Agent struct {
 	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
 	allowedTools     []string
 	disallowedTools  []string
-	maxContextTokens int // optional: passed as --max-context-tokens when > 0
-	providers        []core.ProviderConfig
+	maxContextTokens    int // optional: passed as --max-context-tokens when > 0
+	contextWindowTokens int // optional: override the context-window-size heuristic used by the ctx% indicator. When <= 0, fall back to model-name heuristics.
+	providers           []core.ProviderConfig
 	activeIdx        int // -1 = no provider set
 	sessionEnv       []string
 	routerURL        string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
@@ -209,6 +210,27 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	// context_window_tokens overrides the model-name heuristic used by
+	// the "ctx N%" indicator. Defaults to 0 (= heuristic), accepting the
+	// same numeric types as max_context_tokens because config parsers
+	// surface integer fields through one of these shapes depending on
+	// the source (TOML → float64, programmatic → int / int64).
+	contextWindowTokens := 0
+	switch v := opts["context_window_tokens"].(type) {
+	case int:
+		if v > 0 {
+			contextWindowTokens = v
+		}
+	case int64:
+		if v > 0 {
+			contextWindowTokens = int(v)
+		}
+	case float64:
+		if v > 0 {
+			contextWindowTokens = int(v)
+		}
+	}
+
 	// Claude Code Router support
 	routerURL, _ := opts["router_url"].(string)
 	routerAPIKey, _ := opts["router_api_key"].(string)
@@ -267,24 +289,25 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:          workDir,
-		cmd:              cmd,
-		cliExtraArgs:     cliExtraArgs,
-		cmdArgsFlag:      cmdArgsFlag,
-		model:            model,
-		reasoningEffort:  normalizeEffort(reasoningEffort),
-		mode:             mode,
-		systemPrompt:     systemPrompt,
-		pluginDirs:       pluginDirs,
-		allowedTools:     allowedTools,
-		disallowedTools:  disallowedTools,
-		maxContextTokens: maxContextTokens,
-		configEnv:        configEnv,
-		activeIdx:        -1,
-		routerURL:        routerURL,
-		routerAPIKey:     routerAPIKey,
-		spawnOpts:        spawnOpts,
-		ccDataDir:        ccDataDir,
+		workDir:             workDir,
+		cmd:                 cmd,
+		cliExtraArgs:        cliExtraArgs,
+		cmdArgsFlag:         cmdArgsFlag,
+		model:               model,
+		reasoningEffort:     normalizeEffort(reasoningEffort),
+		mode:                mode,
+		systemPrompt:        systemPrompt,
+		pluginDirs:          pluginDirs,
+		allowedTools:        allowedTools,
+		disallowedTools:     disallowedTools,
+		maxContextTokens:    maxContextTokens,
+		contextWindowTokens: contextWindowTokens,
+		configEnv:           configEnv,
+		activeIdx:           -1,
+		routerURL:           routerURL,
+		routerAPIKey:        routerAPIKey,
+		spawnOpts:           spawnOpts,
+		ccDataDir:           ccDataDir,
 
 		appendSystemPrompt: appendSystemPrompt,
 		lang:               lang,
@@ -519,6 +542,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disTools := make([]string, len(a.disallowedTools))
 	copy(disTools, a.disallowedTools)
 	maxTok := a.maxContextTokens
+	ctxWin := a.contextWindowTokens
 	model := a.model
 	effort := a.reasoningEffort
 	workDir := a.workDir
@@ -553,7 +577,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, a.ccDataDir, lang)
+	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, ctxWin, a.ccDataDir, lang)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -909,6 +933,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.maxContextTokens > 0 {
 		opts["max_context_tokens"] = a.maxContextTokens
+	}
+	if a.contextWindowTokens > 0 {
+		opts["context_window_tokens"] = a.contextWindowTokens
 	}
 	if a.routerURL != "" {
 		opts["router_url"] = a.routerURL

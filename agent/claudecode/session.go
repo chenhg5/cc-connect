@@ -53,6 +53,13 @@ type claudeSession struct {
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
 
+	// ctxWindowOverride is the user-configured context window size used by
+	// the "ctx N%" indicator. When <= 0, claudeContextWindow falls back to
+	// a model-name heuristic (200K, 1M for [1m] variants). The Agent sets
+	// this from `[projects.agent.options].context_window_tokens` at session
+	// construction time and never mutates it afterwards.
+	ctxWindowOverride int
+
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
 	// SIGTERM and then SIGKILL. Default: 120s to match claude-mem's
@@ -216,7 +223,7 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Claude Code rejects bypassPermissions when running as root.
@@ -490,6 +497,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		ccHooks:             newCCPermissionHookRunner(workDir),
 		startupWarning:      rootDowngradeWarning,
 		promptFilePath:      cleanupPromptPath,
+		ctxWindowOverride:   ctxWindowTokens,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -707,7 +715,7 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		used := input + cc + cr
 		if used > 0 {
 			model := cs.GetModel()
-			window := claudeContextWindow(model)
+			window := claudeContextWindow(model, cs.ctxWindowOverride)
 			cs.usageMu.Lock()
 			prevOutput := 0
 			if cs.lastUsage != nil {
@@ -1348,7 +1356,14 @@ func shellJoinArgs(args []string) string {
 // result event does not carry a modelUsage map. The "[1m]" suffix
 // (case-insensitive) signals the 1M-context variants; everything else
 // defaults to the standard 200k window.
-func claudeContextWindow(model string) int {
+// override (set from `[projects.agent.options].context_window_tokens`)
+// wins over the model-name heuristic when > 0. This lets operators pin a
+// specific window size for custom routers, fine-tuned models, or non-Claude
+// endpoints whose model id does not match Claude Code's naming scheme.
+func claudeContextWindow(model string, override int) int {
+	if override > 0 {
+		return override
+	}
 	lower := strings.ToLower(strings.TrimSpace(model))
 	if lower == "" {
 		return 200_000

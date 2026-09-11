@@ -954,6 +954,7 @@ func TestNewClaudeSession_NoReplayFlagKeepsProcessAlive(t *testing.T) {
 		false,                                // disableVerbose
 		spawnOpts,
 		0,  // maxContextTokens
+		0,  // ctxWindowTokens
 		"", // ccDataDir (lets ensureSharedSystemPromptFile fall back to TempDir)
 		"", // lang
 	)
