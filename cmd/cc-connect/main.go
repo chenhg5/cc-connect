@@ -682,6 +682,16 @@ func main() {
 			}
 		}
 
+		// Wire busy-lock stale-break threshold (#1829)
+		if cfg.BusyTimeoutMins != nil {
+			mins := *cfg.BusyTimeoutMins
+			if mins <= 0 {
+				engine.SetStaleLockBreakAfter(0)
+			} else {
+				engine.SetStaleLockBreakAfter(time.Duration(mins) * time.Minute)
+			}
+		}
+
 		// Wire max turn time (absolute per-turn wall-clock cap; 0 = disabled)
 		if cfg.MaxTurnTimeMins != nil && *cfg.MaxTurnTimeMins > 0 {
 			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)
