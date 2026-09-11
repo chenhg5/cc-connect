@@ -131,6 +131,30 @@ mode = "default"
 /mode default  # 切回默认
 ```
 
+### Codex 托管工作区依赖（实验性）
+
+Codex 的 `app_server` 后端可以通过动态工具协议暴露已经安装的托管工作区运行时。
+需要 `load_workspace_dependencies` 的托管 artifact 技能（包括使用
+`@oai/artifact-tool` 的表格、文档和演示文稿流程）可启用以下配置：
+
+```toml
+[projects.agent.options]
+backend = "app_server"
+app_server_url = "stdio://"
+workspace_dependencies = true
+# 可选；默认路径为 ~/.cache/codex-runtimes/codex-primary-runtime
+workspace_dependencies_runtime = "/absolute/path/to/codex-primary-runtime"
+```
+
+运行时必须已经由 Codex/ChatGPT 桌面 App 安装。cc-connect 会验证
+`runtime.json`、托管的 Node.js/Python 可执行文件、`node_modules` 和
+`@oai/artifact-tool`，但不会安装或修改运行时。该选项默认关闭，并且只影响新建
+的 app-server thread；未知动态工具仍会被拒绝。
+
+安全提示：启用后会把宿主机运行时的绝对路径返回给 Codex 会话。请仅在可信项目
+和可信用户范围内启用，并且不要让 `workspace_dependencies_runtime` 指向包含无关
+或敏感文件的目录。
+
 ---
 
 ## API Provider 管理
