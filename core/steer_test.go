@@ -723,3 +723,72 @@ func stopSteerTestEngine(t *testing.T, e *Engine) {
 		return true
 	})
 }
+
+func TestSteerQueue_HistoricalReceiptsReleasePayloadAndClearedQueueSlots(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind string
+		err        error
+	}{
+		{name: "accepted", kind: "steer"},
+		{name: "uncertain", kind: "steer", err: ErrSteerOutcomeUnknown},
+		{name: "cancelled", kind: "unqueue"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newSteerTestEnv(t)
+			// Keep the backing array observable after removing the final entry, so a
+			// shortened slice cannot hide references that would keep payloads alive.
+			env.state.pendingMessages = make([]queuedMessage, 0, 2)
+			env.queue(t, "unrelated next task")
+			content := strings.Repeat("补充说明", 400) + " preserve this full-prompt tail"
+			images := []ImageAttachment{{MimeType: "image/png", FileName: "diagram.png", Data: []byte("image payload")}}
+			files := []FileAttachment{{MimeType: "application/pdf", FileName: "spec.pdf", Data: []byte("file payload")}}
+			msg := &Message{SessionKey: env.key, ChannelID: "chat", UserID: "user1", MessageID: "long-supplement", Content: content, Images: images, Files: files, ReplyCtx: "ctx", Platform: "test"}
+			if !env.e.queueMessageForBusySession(env.p, msg, env.key) {
+				t.Fatal("supplement was not queued")
+			}
+			action := env.p.action(t, "steer:")
+			token := strings.TrimPrefix(action, "steer:")
+			env.state.mu.Lock()
+			receipt := env.state.queueActions[token]
+			backing := env.state.pendingMessages[:cap(env.state.pendingMessages)]
+			env.state.mu.Unlock()
+			assertReceiptHasNoPayload := func() {
+				t.Helper()
+				q := receipt.queued
+				if q.images != nil || q.files != nil || q.replyCtx != nil {
+					t.Fatalf("historical receipt retains payload-bearing fields: images=%v files=%v replyCtx=%v", q.images, q.files, q.replyCtx)
+				}
+				if len([]rune(q.content)) > 503 || strings.Contains(q.content, "full-prompt tail") {
+					t.Fatalf("historical receipt retained full prompt (%d runes)", len([]rune(q.content)))
+				}
+				if !strings.HasPrefix(q.content, "补充说明") {
+					t.Fatalf("receipt lost preview: %q", q.content)
+				}
+			}
+			assertReceiptHasNoPayload()
+			env.s.mu.Lock()
+			env.s.steerErr = tc.err
+			env.s.mu.Unlock()
+			env.act(strings.Replace(action, "steer:", tc.kind+":", 1))
+			assertReceiptHasNoPayload()
+			if !reflect.DeepEqual(backing[1], queuedMessage{}) {
+				t.Fatal("removed queue backing slot still retains the prompt or attachments")
+			}
+			if got := env.pending(); !reflect.DeepEqual(got, []string{"unrelated next task"}) {
+				t.Fatalf("unrelated queue changed: %v", got)
+			}
+			env.s.mu.Lock()
+			defer env.s.mu.Unlock()
+			if tc.kind == "steer" {
+				if len(env.s.steers) != 1 || env.s.steers[0].content != content {
+					t.Fatal("steering submitted the truncated receipt instead of the full prompt")
+				}
+				if !reflect.DeepEqual(env.s.steerImages, images) || !reflect.DeepEqual(env.s.steerFiles, files) {
+					t.Fatal("steering did not receive the original attachments")
+				}
+			} else if len(env.s.steers) != 0 {
+				t.Fatal("cancelling a receipt submitted its payload")
+			}
+		})
+	}
+}
