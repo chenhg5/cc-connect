@@ -16,7 +16,8 @@ import (
 )
 
 const (
-	launchdLabel = "com.cc-connect.service"
+	launchdLabel       = "com.cc-connect.service"
+	legacyLaunchdLabel = "com.cc-connect.retry"
 )
 
 var runLaunchctl = func(args ...string) (string, error) {
@@ -52,6 +53,7 @@ func (m *launchdManager) Install(cfg Config) error {
 	// Unload existing service first (ignore errors) so we do not leave a stale
 	// job behind when switching between GUI and headless sessions.
 	bootoutLaunchdTargets()
+	removeLegacyLaunchdPlist()
 
 	plist := buildPlist(cfg)
 	// 0600: plist may contain captured secret values (config.toml ${ENV}
@@ -81,20 +83,24 @@ func (m *launchdManager) Install(cfg Config) error {
 func (m *launchdManager) Uninstall() error {
 	bootoutLaunchdTargets()
 
-	plistPath := launchdPlistPath()
-	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove plist: %w", err)
+	for _, plistPath := range launchdPlistPaths() {
+		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove plist: %w", err)
+		}
 	}
 	return nil
 }
 
 func (*launchdManager) Start() error {
-	if _, target, _, ok := loadedLaunchdTarget(); ok {
+	if _, target, _, ok := loadedLaunchdTargetForLabel(launchdLabel); ok {
 		out, err := runLaunchctl("kickstart", "-kp", target)
 		if err != nil {
 			return fmt.Errorf("start: %s (%w)", out, err)
 		}
 		return nil
+	}
+	if _, _, _, ok := loadedLaunchdTargetForLabel(legacyLaunchdLabel); ok {
+		bootoutLaunchdTargets()
 	}
 
 	domain := preferredLaunchdDomain()
@@ -134,6 +140,7 @@ func (*launchdManager) Restart() error {
 	}
 	target := launchdTarget(domain)
 	bootoutLaunchdTargets()
+	removeLegacyLaunchdPlist()
 
 	plistPath := launchdPlistPath()
 
@@ -162,8 +169,7 @@ func (*launchdManager) Restart() error {
 func (*launchdManager) Status() (*Status, error) {
 	st := &Status{Platform: "launchd"}
 
-	plistPath := launchdPlistPath()
-	if _, err := os.Stat(plistPath); err != nil {
+	if !launchdAnyPlistExists() {
 		return st, nil
 	}
 	st.Installed = true
@@ -175,14 +181,20 @@ func (*launchdManager) Status() (*Status, error) {
 
 	for _, line := range strings.Split(out, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "pid = ") {
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if indent > 1 {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "pid = "):
 			if pid, err := strconv.Atoi(strings.TrimPrefix(trimmed, "pid = ")); err == nil && pid > 0 {
 				st.PID = pid
 				st.Running = true
 			}
-		}
-		if strings.Contains(trimmed, "state = running") {
-			st.Running = true
+		case strings.HasPrefix(trimmed, "state = "):
+			if strings.Contains(trimmed, "state = running") {
+				st.Running = true
+			}
 		}
 	}
 	return st, nil
@@ -193,6 +205,15 @@ func (*launchdManager) Status() (*Status, error) {
 func launchdPlistPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
+}
+
+func legacyLaunchdPlistPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", legacyLaunchdLabel+".plist")
+}
+
+func launchdPlistPaths() []string {
+	return []string{launchdPlistPath(), legacyLaunchdPlistPath()}
 }
 
 func launchdUserDomain() string {
@@ -225,18 +246,23 @@ func launchdTarget(domain string) string {
 	return fmt.Sprintf("%s/%s", domain, launchdLabel)
 }
 
+func legacyLaunchdTarget(domain string) string {
+	return fmt.Sprintf("%s/%s", domain, legacyLaunchdLabel)
+}
+
 func launchdTargets() []string {
 	domains := launchdDomains()
-	targets := make([]string, 0, len(domains))
+	targets := make([]string, 0, len(domains)*2)
 	for _, domain := range domains {
 		targets = append(targets, launchdTarget(domain))
+		targets = append(targets, legacyLaunchdTarget(domain))
 	}
 	return targets
 }
 
-func loadedLaunchdTarget() (string, string, string, bool) {
+func loadedLaunchdTargetForLabel(label string) (string, string, string, bool) {
 	for _, domain := range launchdDomains() {
-		target := launchdTarget(domain)
+		target := fmt.Sprintf("%s/%s", domain, label)
 		out, err := runLaunchctl("print", target)
 		if err == nil {
 			return domain, target, out, true
@@ -245,10 +271,30 @@ func loadedLaunchdTarget() (string, string, string, bool) {
 	return "", "", "", false
 }
 
+func loadedLaunchdTarget() (string, string, string, bool) {
+	if domain, target, out, ok := loadedLaunchdTargetForLabel(launchdLabel); ok {
+		return domain, target, out, true
+	}
+	return loadedLaunchdTargetForLabel(legacyLaunchdLabel)
+}
+
+func launchdAnyPlistExists() bool {
+	for _, plistPath := range launchdPlistPaths() {
+		if _, err := os.Stat(plistPath); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func bootoutLaunchdTargets() {
 	for _, target := range launchdTargets() {
 		_, _ = runLaunchctl("bootout", target)
 	}
+}
+
+func removeLegacyLaunchdPlist() {
+	_ = os.Remove(legacyLaunchdPlistPath())
 }
 
 // templateOwnedEnvKeys are keys the plist template renders directly; if
@@ -350,4 +396,3 @@ func buildPlist(cfg Config) string {
 </plist>
 `, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), envExtra)
 }
-
