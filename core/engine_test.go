@@ -1972,7 +1972,172 @@ func TestProcessInteractiveEvents_CardProgressTruncatesToolInputByToolMaxLen(t *
 	}
 }
 
+// TestProcessInteractiveEvents_NoticeDoesNotFinalizeTurn verifies that
+// EventNotice is rendered as a progress entry on the structured progress
+// card but does NOT finalize the turn. After the notice the agent emits
+// more events (EventToolUse, EventText, EventResult), the card ends in
+// ProgressCardStateCompleted, and the notice text remains in the entries.
+// See #1684 — pi auto-retry hints must keep the turn open.
+func TestProcessInteractiveEvents_NoticeDoesNotFinalizeTurn(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: false,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+	})
+	sessionKey := "feishu:user-notice-1684"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-notice-1684")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-notice-1684",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	// Simulate a pi retry sequence (#1684): tool_use → tool_result →
+	// EventNotice (willRetry hint) → EventText (retry resumed) → EventResult.
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "ok"}
+	agentSession.events <- Event{
+		Type:   EventNotice,
+		Notice: "⏳ provider is rate-limited: retry 2/5 in 8s — 429 rate-limited",
+		NoticeMetadata: map[string]any{
+			"source":      "pi",
+			"kind":        "retry",
+			"attempt":     2,
+			"maxAttempts": 5,
+			"delayMs":     8000,
+			"error":       "429 rate-limited",
+		},
+	}
+	agentSession.events <- Event{Type: EventText, Content: "after-retry-answer"}
+	agentSession.events <- Event{Type: EventResult, Content: "after-retry-answer", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-notice-1684", time.Now(), nil, nil, state.replyCtx)
+
+	// Find the final structured payload — it must reflect ProgressCardStateCompleted
+	// (EventResult drives terminal state, NOT EventNotice).
+	edits := p.getPreviewEdits()
+	var finalPayload *ProgressCardPayload
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		finalPayload = payload
+	}
+	if finalPayload == nil {
+		t.Fatalf("no structured payload found in any card edit; edits=%v", edits)
+	}
+	if finalPayload.State != ProgressCardStateCompleted {
+		t.Errorf("final payload state = %q, want %q (EventNotice must not finalize)",
+			finalPayload.State, ProgressCardStateCompleted)
+	}
+
+	// The notice text must appear in the entries — it's a transient hint
+	// but the engine still records it on the card so users see it.
+	var sawNotice bool
+	for _, item := range finalPayload.Items {
+		if item.Kind != ProgressEntryNotice {
+			continue
+		}
+		sawNotice = true
+		if !strings.Contains(item.Text, "retry 2/5") {
+			t.Errorf("notice item text = %q, missing \"retry 2/5\"", item.Text)
+		}
+	}
+	if !sawNotice {
+		t.Errorf("final payload items missing a ProgressEntryNotice: items=%v", finalPayload.Items)
+	}
+}
+
+// TestProcessInteractiveEvents_NoticeEmptyIsNoOp guards against accidental
+// empty-text entries when an adapter forgets to populate Notice. The engine
+// must silently skip rather than emitting an empty card line.
+func TestProcessInteractiveEvents_NoticeEmptyIsNoOp(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: false,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+	})
+	sessionKey := "feishu:user-notice-empty"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-notice-empty")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-notice-empty",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventNotice, Notice: "   "}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-notice-empty", time.Now(), nil, nil, state.replyCtx)
+
+	edits := p.getPreviewEdits()
+	var finalPayload *ProgressCardPayload
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		finalPayload = payload
+	}
+	if finalPayload == nil {
+		// No payload at all is fine — empty notice + EventResult means
+		// nothing meaningful to show. The engine must not emit "" as a
+		// progress entry.
+		return
+	}
+	for _, item := range finalPayload.Items {
+		if item.Kind == ProgressEntryNotice && strings.TrimSpace(item.Text) == "" {
+			t.Errorf("engine emitted an empty ProgressEntryNotice; items=%v", finalPayload.Items)
+		}
+	}
+}
+
+// TestProgressEntryNotice_InferLegacyKind checks that the legacy entry-kind
+// inference recognises ⏳ / ⚠️ prefixes as notices. Older pi builds that
+// emit raw "⏳ retrying…" text (rather than the typed EventNotice) still
+// get the notice kind from the heuristic — preserves backward compat.
+func TestProgressEntryNotice_InferLegacyKind(t *testing.T) {
+	cases := []struct {
+		entry string
+		want  ProgressCardEntryKind
+	}{
+		{"⏳ retrying in 8s", ProgressEntryNotice},
+		{"⚠️ rate limited", ProgressEntryNotice},
+		{"💭 thinking", ProgressEntryThinking},
+		{"🔧 Bash", ProgressEntryToolUse},
+		{"🧾 result", ProgressEntryToolResult},
+		{"❌ boom", ProgressEntryError},
+		{"plain text", ProgressEntryInfo},
+	}
+	for _, c := range cases {
+		if got := inferLegacyEntryKind(c.entry); got != c.want {
+			t.Errorf("inferLegacyEntryKind(%q) = %q, want %q", c.entry, got, c.want)
+		}
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
+
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 		style:              "card",
