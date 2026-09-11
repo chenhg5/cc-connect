@@ -1179,7 +1179,15 @@ func TestCUJ_A2_MultiTurnAgentReceivesHistory(t *testing.T) {
 // Each turn receives a reply, and only that turn's images reach the agent.
 func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 	env := newCUJEnv(t)
-	t.Cleanup(func() { _ = env.engine.Stop() })
+	session := env.engine.sessions.GetOrCreateActive("test:img")
+	t.Cleanup(func() {
+		if err := env.engine.Stop(); err != nil {
+			t.Errorf("stop engine: %v", err)
+		}
+		// Stop cancels the processor; its session lock is released only after the
+		// event loop and any final persistence have finished.
+		env.waitFor("image processor shutdown", 2*time.Second, func() bool { return !session.Busy() })
+	})
 	turns := []struct {
 		content string
 		images  []ImageAttachment
@@ -1266,11 +1274,14 @@ func TestCUJ_A4_VoiceMessageWithoutSTTSurfacesClearMessage(t *testing.T) {
 
 // CUJ-A5 · User uploads file → engine routes it to the agent.
 func TestCUJ_A5_FileReachesAgent(t *testing.T) {
-	plat := &stubPlatformEngine{n: "test"}
-	agent := &cujAgent{}
-	dir := t.TempDir()
-	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
-
+	env := newCUJEnv(t)
+	session := env.engine.sessions.GetOrCreateActive("test:file")
+	t.Cleanup(func() {
+		if err := env.engine.Stop(); err != nil {
+			t.Errorf("stop engine: %v", err)
+		}
+		env.waitFor("file processor shutdown", 2*time.Second, func() bool { return !session.Busy() })
+	})
 	msg := &Message{
 		SessionKey: "test:file", Platform: "test", MessageID: "f1",
 		UserID: "file", UserName: "file",
@@ -1278,23 +1289,11 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 		Files:    []FileAttachment{{MimeType: "text/plain", Data: []byte("hello world"), FileName: "note.txt"}},
 		ReplyCtx: "ctx",
 	}
-	e.ReceiveMessage(plat, msg)
-
-	deadline := time.After(2 * time.Second)
-	for {
-		agent.mu.Lock()
-		n := len(agent.sessions)
-		agent.mu.Unlock()
-		if n > 0 {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("agent never received the message with file attachment")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	env.engine.ReceiveMessage(env.plat, msg)
+	// Creating the agent session is only startup; wait for the persisted answer.
+	env.waitFor("file turn response and persistence", 2*time.Second, func() bool {
+		return !session.Busy() && session.HistoryLen() >= 2 && len(env.plat.getSent()) > 0
+	})
 }
 
 // CUJ-A6 / A7 are intentionally covered at the platform layer
@@ -2591,4 +2590,40 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 	e.ReceiveMessage(p, skillMessage(p.Name(), "a", "/skills"))
 	sent := p.getSent()
 	assertWorkspaceSkills(t, sent[len(sent)-1], "b", "a")
+}
+
+// CUJ: start work, queue a separate task, then steer the active work using the
+// command entrypoint. The queued task stays queued until the first answer, and
+// the correction receives its own visible acknowledgement without a new turn.
+func TestCUJ_A8_QueueAndSteerHaveDistinctVisibleOutcomes(t *testing.T) {
+	p := newSteerTestPlatform()
+	s := newSteerTestSession()
+	e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+	t.Cleanup(func() { stopSteerTestEngine(t, e) })
+	send := func(id, content string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:chat:user1", ChannelID: "chat", UserID: "user1", MessageID: id, Content: content, Platform: "test", ReplyCtx: "ctx"})
+	}
+	visible := func(text string) bool { return strings.Contains(strings.Join(p.getSent(), "\n"), text) }
+
+	// User action 1: submit the task; the external agent is still working.
+	send("original", "inspect login failure")
+	waitSteerTest(t, "initial turn", func() bool { sends, _ := s.snapshot(); return len(sends) == 1 })
+
+	// User action 2: a normal message produces the standard queued receipt.
+	send("queued", "then inspect the tests")
+	waitSteerTest(t, "queued receipt", func() bool { return visible(e.i18n.T(MsgSteerQueued)) })
+
+	// User action 3: an explicit correction is accepted into the running turn.
+	send("correction", "/steer inspect only; do not edit")
+	waitSteerTest(t, "steer accepted receipt", func() bool { return visible(e.i18n.T(MsgSteerAccepted)) })
+
+	// User action 4: a local command remains usable while work is running.
+	send("status", "/status")
+	s.events <- Event{Type: EventResult, Content: "Login cause identified without editing.", Done: true}
+	waitSteerTest(t, "first answer", func() bool { return visible("Login cause identified without editing.") })
+	waitSteerTest(t, "queued task starts", func() bool { sends, _ := s.snapshot(); return len(sends) == 2 })
+	s.events <- Event{Type: EventResult, Content: "Test inspection completed.", Done: true}
+	waitSteerTest(t, "queued answer", func() bool { return visible("Test inspection completed.") })
+	session := e.sessions.GetOrCreateActive("test:chat:user1")
+	waitSteerTest(t, "queued turn persisted", func() bool { return !session.Busy() })
 }
