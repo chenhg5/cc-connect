@@ -104,6 +104,12 @@ var CurrentVersion string
 // ErrAttachmentSendDisabled indicates that side-channel image/file delivery is disabled by config.
 var ErrAttachmentSendDisabled = errors.New("attachment send is disabled by config")
 
+// ErrSessionResumeTimeout indicates that resuming a saved agent session
+// (e.g. ACP session/load replaying a very large history) exceeded the
+// allowed time budget. The saved session ID must be preserved so the
+// conversation is not truncated; the user is told to /new to start fresh.
+var ErrSessionResumeTimeout = errors.New("agent session resume timed out")
+
 // RestartRequest carries info needed to send a post-restart notification.
 type RestartRequest struct {
 	SessionKey string `json:"session_key"`
@@ -575,6 +581,12 @@ type interactiveState struct {
 	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
 	// cleared to false only after a clean EventResult.
 	eventsNeedResync bool
+
+	// resumeTimedOut is true when the last attempt to resume this session's
+	// saved agent session exceeded the load budget (ErrSessionResumeTimeout).
+	// The saved session ID is preserved; the caller uses this to tell the user
+	// to /new rather than emitting the generic "failed to start" error.
+	resumeTimedOut bool
 
 	// lastCompletedUserMessageTimeMs is the max platform user-message create time
 	// (ms) for which an agent turn has finished with EventResult.
@@ -3752,6 +3764,25 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// on the turn completing without a process crash).
 	sessions.Save()
 
+	// Start the typing indicator (e.g. Feishu "processing" reaction) BEFORE
+	// obtaining the interactive state. getOrCreateInteractiveStateWith may block
+	// for a long time when it resumes a large/slow agent session (session/load
+	// replays the whole history), so adding the reaction here guarantees the user
+	// gets immediate "received, working on it" feedback even when resume is slow.
+	// Ownership is transferred to processInteractiveEvents which manages
+	// stopping/restarting it across queued message turns.
+	var stopTyping func()
+	if ti, ok := p.(TypingIndicator); ok {
+		stopTyping = ti.StartTyping(e.ctx, msg.ReplyCtx)
+	}
+	defer func() {
+		// Stop typing if ownership was NOT transferred to processInteractiveEvents
+		// (i.e. an early return before that call).
+		if stopTyping != nil {
+			stopTyping()
+		}
+	}()
+
 	// Use the agent override when available (multi-workspace mode)
 	var agentOverride Agent
 	if agent != e.agent {
@@ -3782,7 +3813,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	defer stopRecallMonitor()
 
 	if state.agentSession == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+		state.mu.Lock()
+		timedOut := state.resumeTimedOut
+		state.mu.Unlock()
+		if timedOut {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionResumeTimeout))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+		}
 		return
 	}
 	e.cancelAgentSessionIdleClose(state)
@@ -3810,21 +3848,6 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			}
 		}
 	}
-
-	// Start typing indicator if platform supports it.
-	// Ownership is transferred to processInteractiveEvents which manages
-	// stopping/restarting it across queued message turns.
-	var stopTyping func()
-	if ti, ok := p.(TypingIndicator); ok {
-		stopTyping = ti.StartTyping(e.ctx, msg.ReplyCtx)
-	}
-	defer func() {
-		// Stop typing if ownership was NOT transferred to processInteractiveEvents
-		// (i.e. an early return before that call).
-		if stopTyping != nil {
-			stopTyping()
-		}
-	}()
 
 	// Stop the unsolicited reader (if running) and hand off event channel
 	// ownership to this foreground turn. Only drain events when the previous
@@ -4171,6 +4194,36 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
+		// Shutdown/restart guard: if the engine context was canceled (e.g.
+		// cc-connect is restarting) a resume can fail with context.Canceled
+		// mid-flight. That is NOT a stale/invalid session id, so clearing it
+		// here would permanently truncate the conversation's history chain and
+		// the next message would start a blank session. Preserve the saved id
+		// and bail out with a resync placeholder; the next message re-loads the
+		// original session cleanly.
+		if errors.Is(err, context.Canceled) || e.ctx.Err() != nil {
+			slog.Warn("session start canceled (shutdown/restart), preserving saved session id",
+				"session_key", sessionKey, "saved_session_id", startSessionID, "elapsed", startElapsed)
+			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+			state = newState
+			e.interactiveStates[sessionKey] = state
+			return state
+		}
+		// Resume timeout guard: a very large saved session can make the agent's
+		// session/load hang past its budget. Like the shutdown case, this is NOT
+		// a stale/invalid id — clearing it would truncate history. Preserve the
+		// id, tell the user to /new, and bail out. The placeholder state has a
+		// nil agentSession so the caller replies MsgSessionResumeTimeout below.
+		if errors.Is(err, ErrSessionResumeTimeout) {
+			slog.Error("session resume timed out, preserving saved session id",
+				"session_key", sessionKey, "saved_session_id", startSessionID, "elapsed", startElapsed)
+			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true, resumeTimedOut: true}
+			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+			state = newState
+			e.interactiveStates[sessionKey] = state
+			return state
+		}
 		// If resume/continue failed, try a fresh session as fallback.
 		if startSessionID != "" {
 			slog.Error("session resume failed, falling back to fresh session",
@@ -15985,6 +16038,13 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	// timeout only controls how long we *wait* for the response.
 	agentSession, err := agent.StartSession(e.ctx, session.GetAgentSessionID())
 	if err != nil {
+		// Shutdown/restart guard (see interactive path above): a resume that
+		// fails with context.Canceled is a restart artifact, not a stale id.
+		// Preserve the saved id so the relay reconnects to the same
+		// conversation on the next attempt instead of losing history.
+		if errors.Is(err, context.Canceled) || e.ctx.Err() != nil {
+			return "", fmt.Errorf("start relay session canceled (shutdown/restart): %w", err)
+		}
 		// Resume failed — fall back to a fresh session so the relay is not
 		// permanently broken by a corrupted/stale session ID.
 		if session.GetAgentSessionID() != "" {
