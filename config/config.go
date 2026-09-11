@@ -144,7 +144,8 @@ type CronConfig struct {
 
 // QueueConfig controls the per-session message queue.
 type QueueConfig struct {
-	MaxDepth *int `toml:"max_depth"` // max queued messages per session; default 5
+	MaxDepth *int  `toml:"max_depth"` // max queued messages per session; default 5
+	Notice   *bool `toml:"notice"`    // send the "message queued" notice while the session is busy; default true
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
