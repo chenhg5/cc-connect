@@ -489,6 +489,10 @@ type ProjectConfig struct {
 	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
 	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`
+	// BusyMessageMode controls plain-text messages received while the current
+	// turn is running: "queue" (default) or "steer". Steering is attempted only
+	// when the active agent session implements the optional steering capability.
+	BusyMessageMode string `toml:"busy_message_mode,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who
@@ -1052,6 +1056,11 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
 			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)
+		}
+		switch strings.ToLower(strings.TrimSpace(proj.BusyMessageMode)) {
+		case "", "queue", "steer":
+		default:
+			return fmt.Errorf("config: %s.busy_message_mode must be queue or steer", prefix)
 		}
 		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
 			return err

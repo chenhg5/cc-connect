@@ -393,6 +393,89 @@ func TestAppServerSession_HandleRequestUserInputWritesCodexResponse(t *testing.T
 	}
 }
 
+func TestAppServerSession_SteerTurnUsesExpectedActiveTurn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		ctx:     ctx,
+		cancel:  cancel,
+		stdin:   stdin,
+		pending: make(map[int64]chan rpcResponseEnvelope),
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-1")
+	s.currentTurn = "turn-7"
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.SteerTurn("add unit tests")
+	}()
+
+	line := waitForWrittenJSONLine(t, stdin)
+	var request struct {
+		ID     int64  `json:"id"`
+		Method string `json:"method"`
+		Params struct {
+			ThreadID       string `json:"threadId"`
+			ExpectedTurnID string `json:"expectedTurnId"`
+			Input          []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"input"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(line), &request); err != nil {
+		t.Fatalf("decode request %q: %v", line, err)
+	}
+	if request.Method != "turn/steer" {
+		t.Fatalf("method = %q, want turn/steer", request.Method)
+	}
+	if request.Params.ThreadID != "thread-1" || request.Params.ExpectedTurnID != "turn-7" {
+		t.Fatalf("params = %#v, want thread-1/turn-7", request.Params)
+	}
+	if len(request.Params.Input) != 1 || request.Params.Input[0].Type != "text" || request.Params.Input[0].Text != "add unit tests" {
+		t.Fatalf("input = %#v, want one text item", request.Params.Input)
+	}
+
+	s.pendingMu.Lock()
+	responseCh := s.pending[request.ID]
+	delete(s.pending, request.ID)
+	s.pendingMu.Unlock()
+	if responseCh == nil {
+		t.Fatalf("no pending RPC response channel for id %d", request.ID)
+	}
+	responseCh <- rpcResponseEnvelope{ID: request.ID, Result: json.RawMessage(`{"turnId":"turn-7"}`)}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SteerTurn() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SteerTurn() did not finish after RPC response")
+	}
+}
+
+func TestAppServerSession_SteerTurnRejectsMissingActiveTurn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{ctx: ctx, cancel: cancel, stdin: stdin}
+	s.alive.Store(true)
+	s.threadID.Store("thread-1")
+
+	err := s.SteerTurn("too late")
+	if err == nil || !strings.Contains(err.Error(), "no active turn") {
+		t.Fatalf("SteerTurn() error = %v, want no active turn", err)
+	}
+	if got := stdin.String(); got != "" {
+		t.Fatalf("unexpected RPC write without active turn: %q", got)
+	}
+}
+
 var _ interface {
 	GetUsage(context.Context) (*core.UsageReport, error)
 } = (*appServerSession)(nil)
@@ -400,6 +483,8 @@ var _ interface {
 var _ interface {
 	GetContextUsage() *core.ContextUsage
 } = (*appServerSession)(nil)
+
+var _ core.AgentSessionSteerer = (*appServerSession)(nil)
 
 type lockedWriteCloser struct {
 	mu  sync.Mutex

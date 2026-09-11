@@ -418,6 +418,7 @@ type Engine struct {
 	// 同时保留已保存的 session ID，便于下次继续恢复。
 	agentSessionIdleTimeoutNanos atomic.Int64
 	agentSessionIdleSeq          atomic.Uint64
+	steerBusyMessages            atomic.Bool
 	maxQueuedMessages            int
 	dirHistory                   *DirHistory
 	baseWorkDir                  string
@@ -965,6 +966,13 @@ func (e *Engine) SetAgentSessionIdleTimeout(d time.Duration) {
 		return
 	}
 	e.agentSessionIdleTimeoutNanos.Store(int64(d))
+}
+
+// SetBusyMessageMode controls whether plain-text messages received during an
+// active turn are queued (the default) or offered to an agent's optional
+// steering capability. Unknown values safely resolve to queue mode.
+func (e *Engine) SetBusyMessageMode(mode string) {
+	e.steerBusyMessages.Store(strings.EqualFold(strings.TrimSpace(mode), "steer"))
 }
 
 func (e *Engine) cancelAllAgentSessionIdleCloses() {
@@ -3044,6 +3052,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 			return
 		}
+		// Sessions with a native steering capability can append plain-text
+		// follow-ups to the turn already in flight. Attachments remain queued so
+		// their storage and delivery semantics stay unchanged.
+		if e.steerBusyMessages.Load() && e.steerMessageForBusySession(p, msg, interactiveKey, session, sessions) {
+			return
+		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
@@ -3248,6 +3262,68 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"queue_depth", queueDepth,
 	)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	return true
+}
+
+// steerMessageForBusySession attempts to append a plain-text message to the
+// active agent turn. It returns true only when the message was handled (either
+// steered successfully or rejected as stale); unsupported sessions and RPC
+// failures return false so the caller can use the existing FIFO queue.
+func (e *Engine) steerMessageForBusySession(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager) bool {
+	if msg == nil || strings.TrimSpace(msg.Content) == "" || len(msg.Images) > 0 || len(msg.Files) > 0 {
+		return false
+	}
+
+	e.interactiveMu.Lock()
+	state, ok := e.interactiveStates[interactiveKey]
+	if !ok || state == nil {
+		e.interactiveMu.Unlock()
+		return false
+	}
+	state.mu.Lock()
+	e.interactiveMu.Unlock()
+
+	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
+		snap := userMessageWatermarkSnapshotLocked(state)
+		state.mu.Unlock()
+		e.logStaleUserMessageDropped("reject_before_steer", msg, interactiveKey, snap)
+		return true
+	}
+	agentSession := state.agentSession
+	state.mu.Unlock()
+
+	if agentSession == nil || !agentSession.Alive() {
+		return false
+	}
+	steerer, ok := agentSession.(AgentSessionSteerer)
+	if !ok {
+		return false
+	}
+
+	prompt := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	if err := steerer.SteerTurn(prompt); err != nil {
+		slog.Warn("failed to steer busy-session message; falling back to queue",
+			"error", err,
+			"session", msg.SessionKey,
+			"interactive_key", interactiveKey,
+			"msg_id", msg.MessageID,
+		)
+		return false
+	}
+
+	session.TouchUserActivity()
+	session.AddHistory("user", msg.Content)
+	sessions.Save()
+	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
+	runMessageAccepted(msg)
+
+	slog.Info("message steered into busy session",
+		"session", msg.SessionKey,
+		"interactive_key", interactiveKey,
+		"user", msg.UserName,
+		"msg_id", msg.MessageID,
+	)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageSteered))
 	return true
 }
 
@@ -6559,7 +6635,14 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
-	if !ok || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+	if !ok || state == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
+		return
+	}
+	state.mu.Lock()
+	agentSession := state.agentSession
+	state.mu.Unlock()
+	if agentSession == nil || !agentSession.Alive() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
@@ -6568,15 +6651,28 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	// session lock and races with concurrent normal messages on the CLI's
 	// stdin, so reject instead.
 	_, sessions := e.sessionContextForKey(msg.SessionKey)
-	if session := sessions.GetOrCreateActive(msg.SessionKey); !session.Busy() {
+	session := sessions.GetOrCreateActive(msg.SessionKey)
+	if !session.Busy() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
-	if err := state.agentSession.Send(text, "", nil, nil); err != nil {
+	steerer, ok := agentSession.(AgentSessionSteerer)
+	if !ok {
+		slog.Warn("ps: agent session does not support turn steering", "session", msg.SessionKey)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
+		return
+	}
+	prompt := e.buildSenderPrompt(text, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	if err := steerer.SteerTurn(prompt); err != nil {
 		slog.Error("ps: send failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
 		return
 	}
+	session.TouchUserActivity()
+	session.AddHistory("user", text)
+	sessions.Save()
+	e.noteUserMessageAccepted(iKey, msg.UserMessageTimeMs)
+	runMessageAccepted(msg)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
 }
 
