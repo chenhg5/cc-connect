@@ -646,16 +646,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 			// Fan out card actions: try each platform, return first non-nil response.
 			// Each platform's onCardAction checks allow_chat before processing.
-			for _, sibling := range p.sharedGroup.allPlatforms() {
-				resp, err := sibling.onCardAction(event)
-				if err != nil {
-					return nil, err
-				}
-				if resp != nil {
-					return resp, nil
-				}
-			}
-			return nil, nil
+			return p.sharedGroup.onCardAction(event)
 		}).
 		OnP2BotMenuV6(func(ctx context.Context, event *larkapplication.P2BotMenuV6) error {
 			for _, sibling := range p.sharedGroup.allPlatforms() {

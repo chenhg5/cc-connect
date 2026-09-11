@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,6 +124,12 @@ func TestTaskCardAction_SlowResultPatchesExactCardAndNeverClaimsEarlySuccess(t *
 		if !strings.Contains(body.Content, "Final result") {
 			t.Errorf("wrong patched card: %s", body.Content)
 		}
+		var card map[string]any
+		if err := json.Unmarshal([]byte(body.Content), &card); err != nil {
+			t.Error(err)
+		} else if config, ok := card["config"].(map[string]any); !ok || config["update_multi"] != true {
+			t.Errorf("patched task card must allow shared updates: %s", body.Content)
+		}
 		_, err := fmt.Fprint(w, `{"code":0,"data":{}}`)
 		if err != nil {
 			t.Error(err)
@@ -134,7 +141,7 @@ func TestTaskCardAction_SlowResultPatchesExactCardAndNeverClaimsEarlySuccess(t *
 	release := make(chan struct{})
 	p.SetCardTaskActionHandler(func(context.Context, core.CardTaskAction) core.CardTaskActionResult {
 		<-release
-		return core.CardTaskActionResult{Card: core.NewCard().Markdown("Final result").Build(), Toast: "Accepted", ToastType: "success"}
+		return core.CardTaskActionResult{Card: core.NewCard().UpdateAll(true).Markdown("Final result").Build(), Toast: "Accepted", ToastType: "success"}
 	})
 	resp, err := p.onCardAction(taskActionEvent("steer:opaque"))
 	if err != nil {
@@ -154,6 +161,105 @@ func TestTaskCardAction_SlowResultPatchesExactCardAndNeverClaimsEarlySuccess(t *
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no card patch after task result")
+	}
+}
+
+func TestTaskCardAction_SharedAppSkipsDisallowedOperator(t *testing.T) {
+	first := taskActionPlatform(t)
+	first.allowFrom = "ou_other"
+	second := taskActionPlatform(t)
+	second.allowFrom = "ou_owner"
+	first.SetCardTaskActionHandler(func(context.Context, core.CardTaskAction) core.CardTaskActionResult {
+		t.Error("foreign operator reached the first project")
+		return core.CardTaskActionResult{}
+	})
+	var reached bool
+	second.SetCardTaskActionHandler(func(context.Context, core.CardTaskAction) core.CardTaskActionResult {
+		reached = true
+		return core.CardTaskActionResult{Toast: "Accepted", ToastType: "success"}
+	})
+	group := &sharedWSGroup{platforms: []*Platform{first.Platform, second.Platform}}
+	response, err := group.onCardAction(taskActionEvent("steer:opaque"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reached || response == nil || response.Toast == nil || response.Toast.Type != "success" {
+		t.Fatalf("owning project was not reached: reached=%v response=%#v", reached, response)
+	}
+}
+
+func TestTaskCardAction_SlowResultRepliesAfterPatchFailureOrWithoutCard(t *testing.T) {
+	for _, withCard := range []bool{false, true} {
+		t.Run(fmt.Sprintf("card_%t", withCard), func(t *testing.T) {
+			t.Parallel()
+			p := taskActionPlatform(t)
+			p.threadIsolation = true
+			var calls, patches, replies atomic.Int32
+			feedback := make(chan struct{}, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				var response string
+				switch {
+				case strings.Contains(r.URL.Path, "/auth/"):
+					response = `{"code":0,"expire":7200,"tenant_access_token":"test-token"}`
+				case r.Method == http.MethodPatch:
+					patches.Add(1)
+					response = `{"code":230001,"msg":"card update rejected"}`
+				case r.Method == http.MethodPost && r.URL.Path == "/open-apis/im/v1/messages/om_queue_card/reply":
+					replies.Add(1)
+					var body struct {
+						Content       string `json:"content"`
+						ReplyInThread bool   `json:"reply_in_thread"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					if !strings.Contains(body.Content, "Final result") || !body.ReplyInThread {
+						t.Errorf("incorrect task feedback: %#v", body)
+					}
+					response = `{"code":0,"data":{}}`
+					defer func() { feedback <- struct{}{} }()
+				default:
+					t.Errorf("unexpected API call: %s %s", r.Method, r.URL.Path)
+					response = `{"code":230001,"msg":"unexpected API call"}`
+				}
+				if _, err := fmt.Fprint(w, response); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer srv.Close()
+			p.client = lark.NewClient(t.Name(), "test-secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
+			release := make(chan struct{})
+			p.SetCardTaskActionHandler(func(context.Context, core.CardTaskAction) core.CardTaskActionResult {
+				calls.Add(1)
+				<-release
+				result := core.CardTaskActionResult{Toast: "Final result", ToastType: "error"}
+				if withCard {
+					result.Card = core.NewCard().UpdateAll(true).Markdown("Final result").Build()
+				}
+				return result
+			})
+			response, err := p.onCardAction(taskActionEvent("steer:opaque"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response == nil || response.Card != nil || response.Toast == nil || response.Toast.Type != "info" {
+				t.Fatalf("slow action claimed completion: %#v", response)
+			}
+			close(release)
+			select {
+			case <-feedback:
+			case <-time.After(2 * time.Second):
+				t.Fatal("final task result was not delivered")
+			}
+			wantPatches := int32(0)
+			if withCard {
+				wantPatches = 1
+			}
+			if calls.Load() != 1 || replies.Load() != 1 || patches.Load() != wantPatches {
+				t.Fatalf("unexpected calls: task=%d patch=%d reply=%d", calls.Load(), patches.Load(), replies.Load())
+			}
+		})
 	}
 }
 

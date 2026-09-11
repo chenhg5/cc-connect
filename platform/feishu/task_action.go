@@ -29,11 +29,15 @@ func (p *Platform) onTaskCardAction(event *callback.CardActionTriggerEvent, acti
 		}}, nil
 	}
 	operator, callbackContext := event.Event.Operator, event.Event.Context
-	if p.cardTaskActionHandler == nil || operator == nil || operator.OpenID == "" ||
+	if operator == nil || operator.OpenID == "" ||
 		callbackContext == nil || callbackContext.OpenChatID == "" || callbackContext.OpenMessageID == "" {
 		return expired()
 	}
 	if !core.AllowList(p.allowFrom, operator.OpenID) || !core.AllowList(p.allowChat, callbackContext.OpenChatID) {
+		// A sibling project sharing this app may own the authenticated operator.
+		return nil, nil
+	}
+	if p.cardTaskActionHandler == nil {
 		return expired()
 	}
 	sessionKey := p.sessionKeyFromCardAction(callbackContext.OpenChatID, operator.OpenID, event.Event.Action.Value)
@@ -54,13 +58,20 @@ func (p *Platform) onTaskCardAction(event *callback.CardActionTriggerEvent, acti
 	case <-timer.C:
 		go func() {
 			result := <-done
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
 			if result.Card != nil {
-				if err := p.patchCardMessage(ctx, request.MessageID, renderCard(result.Card, sessionKey)); err != nil {
-					slog.Warn(p.tag()+": task action card update failed", "err", err)
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				err := p.patchCardMessage(ctx, request.MessageID, renderCard(result.Card, sessionKey))
+				cancel()
+				if err == nil {
+					return
 				}
-			} else if result.Toast != "" {
+				slog.Warn(p.tag()+": task action card update failed", "err", err)
+			}
+			if result.Toast != "" {
+				// A failed card update may have exhausted its deadline. Give the
+				// final status a separate delivery attempt in the original topic.
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
 				if err := p.Reply(ctx, rctx, result.Toast); err != nil {
 					slog.Warn(p.tag()+": task action reply failed", "err", err)
 				}

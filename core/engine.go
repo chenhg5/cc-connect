@@ -554,11 +554,12 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
-	turnUserID   string
-	turnSession  *Session
-	queueActions map[string]*queuedTaskAction
-	steerDone    chan struct{}
-	agentSession AgentSession
+	turnUserID      string
+	turnSession     *Session
+	turnHistoryNext int
+	queueActions    map[string]*queuedTaskAction
+	steerDone       chan struct{}
+	agentSession    AgentSession
 	// busySession is the core.Session whose busy lock guards the in-flight
 	// turn. Set by getOrCreateInteractiveStateWith so /stop can release the
 	// lock after tearing the turn down (#1830).
@@ -3142,7 +3143,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
-	if (len(msg.Images) == 0 || isSteerCommand(content)) && strings.HasPrefix(content, "/") {
+	if (len(msg.Images) == 0 || e.handlesImageSupplementCommand(content, interactiveKey)) && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
 		}
@@ -3978,7 +3979,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
-	session.AddHistory("user", msg.Content)
+	turnHistoryNext := session.insertHistory(-1, "user", msg.Content)
 	// Persist user message immediately so crashes between user input and
 	// assistant reply don't lose it (the assistant-side Save below depends
 	// on the turn completing without a process crash).
@@ -4010,6 +4011,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.currentMessageID = msg.MessageID
 	state.turnUserID = msg.UserID
 	state.turnSession = session
+	state.turnHistoryNext = turnHistoryNext
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
@@ -6430,6 +6432,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
 				state.turnUserID = queued.userID
+				state.turnHistoryNext = session.insertHistory(-1, "user", queued.content)
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
@@ -6531,7 +6534,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					e.send(queued.platform, queued.replyCtx, replyContent)
 				}
 
-				session.AddHistory("user", queued.content)
 				// Persist queued user message immediately (mirror of the
 				// initial AddHistory("user",...) save above).
 				sessions.Save()
@@ -6800,7 +6802,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		drainEvents(as.Events())
 
-		session.AddHistory("user", queued.content)
+		state.mu.Lock()
+		state.turnHistoryNext = session.insertHistory(-1, "user", queued.content)
+		state.mu.Unlock()
 
 		sendDone := make(chan error, 1)
 		go func() {
@@ -6879,7 +6883,7 @@ var builtinCommands = []struct {
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	text := strings.TrimSpace(strings.Join(args, " "))
-	if text == "" {
+	if text == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsEmpty))
 		return
 	}
@@ -6913,6 +6917,10 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	}
 	if policy, ok := agentSession.(AgentSessionSupplementPolicy); ok && !policy.SupportsLegacySupplement() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerUnsupported))
+		return
+	}
+	if text == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsEmpty))
 		return
 	}
 	if err := agentSession.Send(text, "", nil, nil); err != nil {
@@ -7007,6 +7015,12 @@ func splitCommandArgs(s string) []string {
 
 func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	parts := splitCommandArgs(raw)
+	if supplementCommandID(raw) != "" {
+		// Supplemental prose may start on the next line. Parse its command
+		// token with the same whitespace boundary used by steerInputText.
+		token := strings.Fields(raw)[0]
+		parts = append([]string{token}, splitCommandArgs(strings.TrimSpace(strings.TrimPrefix(raw, token)))...)
+	}
 	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 	args := parts[1:]
 
