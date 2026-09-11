@@ -188,12 +188,20 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	lp := pickInt(opts["long_poll_timeout_ms"])
 
-	// Send-volume quota (see defaultBurstLimit constants). 0 disables the quota.
-	burstLimit := pickInt(opts["burst_limit"])
+	// Send-volume quota (see defaultBurstLimit constants). An explicitly
+	// configured 0 disables the quota as documented in config.example.toml;
+	// only an absent key falls back to the default (issue #1716).
+	burstLimit := defaultBurstLimit
+	if v, ok := opts["burst_limit"]; ok {
+		burstLimit = pickInt(v)
+	}
 	if burstLimit < 0 {
 		burstLimit = 0
 	}
-	burstWindow := pickInt(opts["burst_window_secs"])
+	burstWindow := defaultBurstWindowSecs
+	if v, ok := opts["burst_window_secs"]; ok {
+		burstWindow = pickInt(v)
+	}
 	if burstWindow < 0 {
 		burstWindow = 0
 	}
@@ -228,13 +236,6 @@ func New(opts map[string]any) (core.Platform, error) {
 	cdnHttpClient := &http.Client{
 		Timeout:   60 * time.Second,
 		Transport: &http.Transport{Proxy: nil},
-	}
-
-	if burstLimit <= 0 {
-		burstLimit = defaultBurstLimit
-	}
-	if burstWindow <= 0 {
-		burstWindow = defaultBurstWindowSecs
 	}
 
 	// dedup_enabled (default true) and dedup_window_seconds (default 300s, the

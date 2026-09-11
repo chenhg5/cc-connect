@@ -571,6 +571,77 @@ func TestCheckSendQuota_DisabledWhenZero(t *testing.T) {
 	}
 }
 
+// TestNew_BurstQuotaOptions verifies how burst_limit / burst_window_secs are
+// resolved from platform options (issue #1716): an absent key falls back to the
+// documented default, while an explicit 0 disables the quota as config.example.toml
+// promises. Before the fix an explicit 0 was indistinguishable from "unset" and
+// silently became the default, capping bots at 4 messages/24h with no escape hatch.
+func TestNew_BurstQuotaOptions(t *testing.T) {
+	cases := []struct {
+		name       string
+		opts       map[string]any
+		wantLimit  int
+		wantWindow time.Duration
+	}{
+		{
+			name:       "unset falls back to defaults",
+			opts:       map[string]any{"token": "tok"},
+			wantLimit:  defaultBurstLimit,
+			wantWindow: time.Duration(defaultBurstWindowSecs) * time.Second,
+		},
+		{
+			name:       "explicit zero limit disables the quota",
+			opts:       map[string]any{"token": "tok", "burst_limit": 0},
+			wantLimit:  0,
+			wantWindow: time.Duration(defaultBurstWindowSecs) * time.Second,
+		},
+		{
+			name:       "explicit zero window disables the quota",
+			opts:       map[string]any{"token": "tok", "burst_window_secs": 0},
+			wantLimit:  defaultBurstLimit,
+			wantWindow: 0,
+		},
+		{
+			name:       "negative values are clamped to disabled",
+			opts:       map[string]any{"token": "tok", "burst_limit": -1, "burst_window_secs": -5},
+			wantLimit:  0,
+			wantWindow: 0,
+		},
+		{
+			name:       "explicit values are honored",
+			opts:       map[string]any{"token": "tok", "burst_limit": 30, "burst_window_secs": 600},
+			wantLimit:  30,
+			wantWindow: 600 * time.Second,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plat, err := New(tc.opts)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			p, ok := plat.(*Platform)
+			if !ok {
+				t.Fatalf("New returned %T, want *Platform", plat)
+			}
+			if p.sendQuotaLimit != tc.wantLimit {
+				t.Errorf("sendQuotaLimit = %d, want %d", p.sendQuotaLimit, tc.wantLimit)
+			}
+			if p.sendQuotaWindow != tc.wantWindow {
+				t.Errorf("sendQuotaWindow = %v, want %v", p.sendQuotaWindow, tc.wantWindow)
+			}
+			// The quota must actually be off when it is configured off.
+			if tc.wantLimit == 0 || tc.wantWindow == 0 {
+				for i := 0; i < defaultBurstLimit+5; i++ {
+					if err := p.checkSendQuota(context.Background()); err != nil {
+						t.Fatalf("disabled quota rejected send %d: %v", i, err)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestSendChunks_AppliesQuota verifies the budget is enforced end-to-end through
 // sendChunks (httptest server): under budget sends succeed, over budget fails.
 func TestSendChunks_AppliesQuota(t *testing.T) {
