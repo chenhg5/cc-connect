@@ -931,3 +931,125 @@ func TestNew_WorkDirDoesNotExist(t *testing.T) {
 		t.Fatalf("expected 'does not exist' in error, got: %v", err)
 	}
 }
+
+// TestNew_ParsesContextWindowTokens verifies that the agent stores
+// context_window_tokens from opts as the override value used by the
+// ctx% indicator. Mirrors the pattern of max_context_tokens parsing.
+//
+// We pass `run_as_user` in every case to short-circuit New()'s exec.LookPath
+// check for the "claude" binary — that check is meaningful in production
+// (warns the operator before they start a broken session) but irrelevant
+// to what we're asserting here (parser correctness), and would fail
+// under CI environments where the claude CLI is not installed.
+func TestNew_ParsesContextWindowTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		opts map[string]any
+		want int
+	}{
+		{
+			name: "int positive",
+			opts: map[string]any{"context_window_tokens": 500_000},
+			want: 500_000,
+		},
+		{
+			name: "int64 positive",
+			opts: map[string]any{"context_window_tokens": int64(800_000)},
+			want: 800_000,
+		},
+		{
+			name: "float64 positive (TOML shape)",
+			opts: map[string]any{"context_window_tokens": float64(1_000_000)},
+			want: 1_000_000,
+		},
+		{
+			name: "zero means unset (heuristic fallback)",
+			opts: map[string]any{"context_window_tokens": 0},
+			want: 0,
+		},
+		{
+			name: "negative ignored",
+			opts: map[string]any{"context_window_tokens": -1},
+			want: 0,
+		},
+		{
+			name: "missing key means unset",
+			opts: map[string]any{},
+			want: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.opts["work_dir"] = t.TempDir()
+			tc.opts["run_as_user"] = "ci-test-skip-cli-lookup"
+			a, err := New(tc.opts)
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+			ag := a.(*Agent)
+			if ag.contextWindowTokens != tc.want {
+				t.Errorf("contextWindowTokens = %d, want %d", ag.contextWindowTokens, tc.want)
+			}
+		})
+	}
+}
+
+// TestWorkspaceAgentOptions_PropagatesContextWindowTokens verifies that
+// the value reaches the per-workspace agent map. Without this, multi-
+// workspace mode would silently lose the override. See the
+// TestNew_ParsesContextWindowTokens doc comment for why run_as_user is set.
+func TestWorkspaceAgentOptions_PropagatesContextWindowTokens(t *testing.T) {
+	opts := map[string]any{
+		"work_dir":              t.TempDir(),
+		"context_window_tokens": 750_000,
+		"run_as_user":           "ci-test-skip-cli-lookup",
+	}
+	a, err := New(opts)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	ag := a.(*Agent)
+	workspaceOpts := ag.WorkspaceAgentOptions()
+	got, ok := workspaceOpts["context_window_tokens"].(int)
+	if !ok {
+		t.Fatalf("expected context_window_tokens in workspace opts as int, got %T (value=%v)",
+			workspaceOpts["context_window_tokens"], workspaceOpts["context_window_tokens"])
+	}
+	if got != 750_000 {
+		t.Errorf("workspace context_window_tokens = %d, want 750000", got)
+	}
+}
+
+// TestClaudeContextWindow covers all four paths of the heuristic + the
+// new override-wins branch (Issue #1823). Keep this table-driven so
+// future model-id additions (e.g. 2M variants) get caught immediately.
+func TestClaudeContextWindow(t *testing.T) {
+	cases := []struct {
+		name     string
+		model    string
+		override int
+		want     int
+	}{
+		{name: "empty model, no override -> 200K", model: "", override: 0, want: 200_000},
+		{name: "standard sonnet, no override -> 200K", model: "claude-sonnet-4-20250514", override: 0, want: 200_000},
+		{name: "1m variant, no override -> 1M", model: "claude-sonnet-4-20250514[1m]", override: 0, want: 1_000_000},
+		{name: "1m case-insensitive, no override -> 1M", model: "Claude-Opus-4-7[1M]", override: 0, want: 1_000_000},
+		{name: "with surrounding spaces, no override -> 200K", model: "  sonnet  ", override: 0, want: 200_000},
+
+		// Override-wins: any positive override short-circuits the heuristic.
+		{name: "override beats empty model", model: "", override: 500_000, want: 500_000},
+		{name: "override beats standard 200K", model: "claude-sonnet-4-20250514", override: 320_000, want: 320_000},
+		{name: "override beats 1M heuristic", model: "claude-opus-4-7[1m]", override: 2_000_000, want: 2_000_000},
+		{name: "zero override falls back to heuristic (1m)", model: "claude-opus-4-7[1m]", override: 0, want: 1_000_000},
+		{name: "negative override falls back to heuristic", model: "claude-sonnet-4-20250514", override: -100, want: 200_000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := claudeContextWindow(tc.model, tc.override)
+			if got != tc.want {
+				t.Errorf("claudeContextWindow(%q, %d) = %d, want %d",
+					tc.model, tc.override, got, tc.want)
+			}
+		})
+	}
+}

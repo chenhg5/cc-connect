@@ -831,6 +831,18 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 可选：设置推理强度等级（传递给 claude --effort）
 # reasoning_effort = "high"  # "low" | "medium" | "high" | "max"
 
+# Optional: override the context-window size used by the "ctx N%" indicator
+# in IM replies. By default cc-connect infers 200K vs 1M from the model id
+# (anything containing `[1m]` is treated as 1M). Set this when running
+# against a custom router / fine-tuned model whose id does not match
+# Claude Code's naming scheme, or when you want to hard-pin a specific
+# window. <= 0 falls back to the model-id heuristic.
+# 可选：覆盖 IM 回复中"ctx N%"指示符使用的上下文窗口大小。默认情况下，
+# cc-connect 根据模型 id 推断 200K 或 1M（任何包含 `[1m]` 的视为 1M）。
+# 当连接到自定义 router / 微调模型（id 与 Claude Code 命名规范不匹配），
+# 或者想硬编码一个特定窗口时设置此选项。<= 0 退回到按模型 id 推断。
+# context_window_tokens = 200000
+
 # In default/acceptEdits mode, you can pre-approve specific tools:
 # 在 default/acceptEdits 模式下，可预授权特定工具：
 # allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
