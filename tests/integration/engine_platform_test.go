@@ -199,9 +199,9 @@ func TestIntegration_CommandRegistryIntegration(t *testing.T) {
 	registry := core.NewCommandRegistry()
 
 	// Add multiple commands
-	registry.Add("start", "Start the process", "Starting...", "", "", "builtin")
-	registry.Add("stop", "Stop the process", "Stopping...", "", "", "builtin")
-	registry.Add("status", "Check status", "Status: running", "", "", "builtin")
+	registry.Add("start", "Start the process", "Starting...", "", "", 0, "builtin")
+	registry.Add("stop", "Stop the process", "Stopping...", "", "", 0, "builtin")
+	registry.Add("status", "Check status", "Status: running", "", "", 0, "builtin")
 
 	// Verify all commands are registered
 	commands := registry.ListAll()
@@ -221,7 +221,7 @@ func TestIntegration_CommandRegistryIntegration(t *testing.T) {
 	assert.Equal(t, "status", cmd.Name)
 
 	// Hyphen/underscore normalization
-	registry.Add("my-cmd", "My command", "Running...", "", "", "builtin")
+	registry.Add("my-cmd", "My command", "Running...", "", "", 0, "builtin")
 	cmd, ok = registry.Resolve("my_cmd") // Telegram sanitizes hyphens to underscores
 	require.True(t, ok)
 	assert.Equal(t, "my-cmd", cmd.Name)
@@ -486,7 +486,7 @@ func TestIntegration_MessageAttachmentHandling(t *testing.T) {
 	}
 
 	// Send with attachments
-	err = sess.Send("Analyze this", images, files)
+	err = sess.Send("Analyze this", "", images, files)
 	require.NoError(t, err)
 
 	// Verify prompts captured
