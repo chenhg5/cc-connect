@@ -97,18 +97,13 @@ func (gs *geminiSession) Send(prompt string, messageID string, images []core.Ima
 		imageRefs = append(imageRefs, fpath)
 	}
 
-	var fileRefs []string
-	for i, f := range files {
-		fname := filepath.Base(f.FileName)
-		if fname == "" || fname == "." || fname == ".." {
-			fname = fmt.Sprintf("file_%d_%d", time.Now().UnixMilli(), i)
-		}
-		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, f.Data, 0o644); err != nil {
-			slog.Warn("geminiSession: failed to save file", "error", err)
-			continue
-		}
-		fileRefs = append(fileRefs, fpath)
+	// File attachments go through the shared core helper for
+	// messageID-scoped subdirs, sanitized filenames, and a consistent
+	// "(Files saved locally, please read them: …)" reference wording. See
+	// issue #1552 for the collision-protection guarantees this brings.
+	var filePaths []string
+	if len(files) > 0 {
+		filePaths = core.SaveFilesToDisk(gs.workDir, messageID, files)
 	}
 
 	chatID := gs.CurrentSessionID()
@@ -142,12 +137,7 @@ func (gs *geminiSession) Send(prompt string, messageID string, images []core.Ima
 		}
 		fullPrompt += "\n\n[Attached images saved at: " + strings.Join(imageRefs, ", ") + "]"
 	}
-	if len(fileRefs) > 0 {
-		if fullPrompt == "" {
-			fullPrompt = "Please analyze the attached file(s)."
-		}
-		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
-	}
+	fullPrompt = core.AppendFileRefs(fullPrompt, filePaths)
 
 	// Pass prompt via stdin instead of -p flag to preserve newlines.
 	// The -p flag can truncate at newline characters in some Gemini CLI versions.
@@ -198,7 +188,7 @@ func (gs *geminiSession) Send(prompt string, messageID string, images []core.Ima
 	gs.wg.Add(1)
 	go func() {
 		defer cancel()
-		gs.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, fileRefs...))
+		gs.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, filePaths...))
 	}()
 
 	return nil
