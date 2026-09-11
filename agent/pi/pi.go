@@ -553,8 +553,9 @@ func findSessionFile(sessDir, sessionID string) string {
 }
 
 // piSessionDir returns the pi session directory for the given workDir.
-// Pi encodes the absolute path as: replace "/" with "-", wrap with "--".
+// Pi encodes the absolute path as: replace "/", "\" and ":" with "-", wrap with "--".
 // e.g. /home/user/project → --home-user-project--
+// e.g. D:\project         → --D-project--
 func piSessionDir(workDir string) string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -564,7 +565,12 @@ func piSessionDir(workDir string) string {
 	if err != nil {
 		return ""
 	}
-	encoded := "--" + strings.ReplaceAll(strings.TrimPrefix(absDir, "/"), "/", "-") + "--"
+	// Replace /, \ and : with - to produce a valid single-path-component directory name.
+	// Pi's TypeScript uses /[/\\:]/g to do the same (see getDefaultSessionDirPath in session-manager.ts).
+	safe := strings.ReplaceAll(absDir, "/", "-")
+	safe = strings.ReplaceAll(safe, "\\", "-")
+	safe = strings.ReplaceAll(safe, ":", "-")
+	encoded := "--" + strings.TrimPrefix(safe, "-") + "--"
 	return filepath.Join(homeDir, ".pi", "agent", "sessions", encoded)
 }
 
