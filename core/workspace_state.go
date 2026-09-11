@@ -11,16 +11,22 @@ import (
 // mismatches caused by trailing slashes, symlinks, or relative segments.
 // If the path cannot be resolved (e.g. doesn't exist yet), falls back to
 // filepath.Clean only.
+//
+// The result is always returned with forward-slash separators so that it can
+// be used as a stable, cross-platform key (workspace bindings, agent cache,
+// interactive session keys, etc.). On Windows, filepath.Clean/EvalSymlinks emit
+// backslashes, which would otherwise make the same logical path collide with
+// itself depending on which caller supplied the separators.
 func normalizeWorkspacePath(path string) string {
 	cleaned := filepath.Clean(path)
 	resolved, err := filepath.EvalSymlinks(cleaned)
 	if err != nil {
-		return cleaned
+		return filepath.ToSlash(cleaned)
 	}
 	if resolved != path {
 		slog.Debug("workspace path normalized", "original", path, "normalized", resolved)
 	}
-	return resolved
+	return filepath.ToSlash(resolved)
 }
 
 // workspaceState holds the runtime state for a single workspace.

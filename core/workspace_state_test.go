@@ -88,11 +88,14 @@ func TestNormalizeWorkspacePath(t *testing.T) {
 	}
 
 	// Resolve the expected path through EvalSymlinks so that the test works
-	// on macOS where /var is a symlink to /private/var.
-	resolvedRealDir, err := filepath.EvalSymlinks(realDir)
+	// on macOS where /var is a symlink to /private/var. Normalize to forward
+	// slashes to match normalizeWorkspacePath's separator-consistent output,
+	// keeping the expectation portable across Windows/Linux/macOS.
+	resolved, err := filepath.EvalSymlinks(realDir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	resolvedRealDir := filepath.ToSlash(resolved)
 
 	tests := []struct {
 		name  string
