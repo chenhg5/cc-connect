@@ -450,6 +450,36 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	}
 }
 
+// TestCodexSession_ThreadStartedEmitsSessionID 验证首轮启动时立即上报会话 ID，
+// 使 Engine 可以在 turn.completed 之前持久化绑定关系。
+func TestCodexSession_ThreadStartedEmitsSessionID(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, t.TempDir(), "", "", "", "", "", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	cs.handleEvent(map[string]any{
+		"type":      "thread.started",
+		"thread_id": "thread-before-turn-completed",
+	})
+
+	select {
+	case event := <-cs.Events():
+		if event.Type != core.EventText {
+			t.Fatalf("event type = %q, want %q", event.Type, core.EventText)
+		}
+		if event.SessionID != "thread-before-turn-completed" {
+			t.Fatalf("event session ID = %q, want thread-before-turn-completed", event.SessionID)
+		}
+		if event.Content != "" {
+			t.Fatalf("event content = %q, want empty", event.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("thread.started did not emit session ID event")
+	}
+}
+
 func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")
@@ -896,6 +926,14 @@ func TestClose_ForceKillsProcessGroupAfterGracefulTimeout(t *testing.T) {
 	}
 
 	waitForThreadID(t, cs, "thread-close")
+	select {
+	case event := <-cs.Events():
+		if event.Type != core.EventText || event.SessionID != "thread-close" {
+			t.Fatalf("startup event = %#v, want session ID event for thread-close", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for startup session ID event")
+	}
 
 	closeStarted := time.Now()
 	if err := cs.Close(); err != nil {
