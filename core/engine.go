@@ -428,6 +428,7 @@ type Engine struct {
 	autoCompressMaxTokens int
 	autoCompressMinGap    time.Duration
 	resetOnIdle           time.Duration
+	busyAckSkipPrefixes   []string
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
@@ -954,6 +955,15 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 		return
 	}
 	e.resetOnIdle = d
+}
+
+// SetBusyAckSkipPrefixes suppresses the "message queued" acknowledgment that is
+// normally sent when a message arrives while the agent is busy, for messages
+// whose content starts with any of the given prefixes. Useful for high-frequency
+// automated card actions (e.g. instant-feedback survey buttons) where the ack
+// would be pure noise. nil keeps the acknowledgment for every message (default).
+func (e *Engine) SetBusyAckSkipPrefixes(prefixes []string) {
+	e.busyAckSkipPrefixes = prefixes
 }
 
 // SetAgentSessionIdleTimeout 配置单轮正常结束后的 live agent 空闲关闭时间。
@@ -3247,8 +3257,20 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	if !hasAnyPrefix(msg.Content, e.busyAckSkipPrefixes) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	}
 	return true
+}
+
+// hasAnyPrefix reports whether s starts with any non-empty prefix.
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if p != "" && strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureInteractiveStateForQueueing creates a placeholder interactiveState
