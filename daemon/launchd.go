@@ -127,18 +127,76 @@ func (*launchdManager) Stop() error {
 	return nil
 }
 
+// launchdRestartInPlaceTimeout is the wall-clock budget for an in-place
+// `launchctl kickstart -k` to deliver SIGTERM and reap the old daemon. The
+// actual SIGTERM-to-exit time depends on what the daemon is doing (draining
+// interactive agent sessions, flushing logs, etc.) and can legitimately take
+// 5–30 s on a busy host. If the kickstart does not complete within this
+// budget we surface the error rather than fall through to bootout, because
+// the in-place path is precisely the one that avoids the bootout/bootstrap
+// race — silently retrying via bootout would re-introduce the race.
+const launchdRestartInPlaceTimeout = 60 * time.Second
+
+// launchdRestartWaitPoll is how often waitLaunchdTargetsGone re-checks
+// whether launchd has actually removed the job. launchd bootout is
+// asynchronous; the time between `launchctl bootout` returning and the job
+// disappearing from the domain can be several seconds when the daemon has
+// agent sessions in flight (see #1833). 200 ms strikes a balance between
+// responsiveness and launchctl exec overhead.
+const launchdRestartWaitPoll = 200 * time.Millisecond
+
+// launchdRestartWaitDefault is the default deadline for waitLaunchdTargetsGone
+// in the bootout/bootstrap fallback path. 30 s is comfortably above the
+// reporter's observed 5 s teardown window for a busy daemon, while still
+// failing loud if launchd genuinely never finishes removing the job.
+const launchdRestartWaitDefault = 30 * time.Second
+
 func (*launchdManager) Restart() error {
 	domain := preferredLaunchdDomain()
 	if loadedDomain, _, _, ok := loadedLaunchdTarget(); ok && domain != launchdGUIDomain() {
 		domain = loadedDomain
 	}
 	target := launchdTarget(domain)
-	bootoutLaunchdTargets()
-
 	plistPath := launchdPlistPath()
 
+	// Fast path: if the job is already loaded AND the canonical plist still
+	// exists on disk (i.e. the user hasn't uninstalled it out from under us),
+	// prefer an in-place `launchctl kickstart -k <target>`. This sends
+	// SIGTERM to the running daemon and waits for it to exit before
+	// relaunching — launchd handles the sequencing, so the bootout/bootstrap
+	// race documented in #1833 cannot occur on this path.
+	//
+	// We deliberately gate on "plist still on disk" rather than trying to
+	// diff plist contents: if a user has replaced the plist (binary path,
+	// env, etc.) they almost always also want a full reinstall, which goes
+	// through Install() rather than Restart(). The bootout path below is the
+	// fallback for the rare case where the job is not loaded or the plist
+	// has been removed between the daemon writing it and us restarting.
+	if _, _, _, loaded := loadedLaunchdTarget(); loaded {
+		if _, err := os.Stat(plistPath); err == nil {
+			slog.Info("daemon: launchd: in-place restart via kickstart -k",
+				"target", target)
+			out, err := runLaunchctl("kickstart", "-k", target)
+			if err != nil {
+				return fmt.Errorf("restart (in-place): %s (%w)", out, err)
+			}
+			return nil
+		}
+	}
+
+	// Fallback path: the job is not loaded (cold start, or it died) or the
+	// plist has been removed (reinstall scenario). bootout is async, so we
+	// must wait for launchd to actually remove the job before bootstrap will
+	// succeed — see #1833 for the race that occurs when the daemon has agent
+	// sessions in flight and needs several seconds to exit.
+	bootoutLaunchdTargets()
+	waitLaunchdTargetsGone(launchdRestartWaitDefault)
+
 	// launchd bootout is asynchronous; retry bootstrap with backoff
-	// to avoid "Bootstrap failed: 5" race condition.
+	// to avoid "Bootstrap failed: 5" race condition. This 3 × 500 ms safety
+	// net is now reached *after* waitLaunchdTargetsGone has confirmed the
+	// label is gone, so it only fires for genuine bootstrap races rather
+	// than the earlier bootout/agent-teardown race.
 	var out string
 	var err error
 	for i := 0; i < 3; i++ {
@@ -157,6 +215,29 @@ func (*launchdManager) Restart() error {
 		return fmt.Errorf("restart kickstart: %w", err)
 	}
 	return nil
+}
+
+// waitLaunchdTargetsGone polls loadedLaunchdTarget every
+// launchdRestartWaitPoll until launchd reports the job is no longer loaded
+// in any domain, or until deadline elapses. It is used between `bootout`
+// and `bootstrap` in the Restart fallback path to close the async-removal
+// race documented in #1833. A timeout is treated as a soft success: the
+// caller proceeds to bootstrap and the existing 3 × 500 ms retry handles
+// the residual race. We log a WARN on timeout so operators see when launchd
+// is unusually slow.
+func waitLaunchdTargetsGone(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, _, _, loaded := loadedLaunchdTarget(); !loaded {
+			return
+		}
+		if time.Now().After(deadline) {
+			slog.Warn("daemon: launchd: timed out waiting for job to disappear after bootout",
+				"timeout", timeout)
+			return
+		}
+		time.Sleep(launchdRestartWaitPoll)
+	}
 }
 
 func (*launchdManager) Status() (*Status, error) {
@@ -350,4 +431,3 @@ func buildPlist(cfg Config) string {
 </plist>
 `, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), envExtra)
 }
-
