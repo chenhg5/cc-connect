@@ -1,0 +1,409 @@
+goroutine 558 [running]:
+github.com/chenhg5/cc-connect/core.dumpGoroutineStacks.func1()
+	/Users/ce/src/cc-connect/core/engine.go:2836 +0x78
+created by github.com/chenhg5/cc-connect/core.dumpGoroutineStacks in goroutine 644
+	/Users/ce/src/cc-connect/core/engine.go:2833 +0x88
+
+goroutine 1 [chan receive]:
+testing.(*T).Run(0x42d23704e6c8, {0x103182b2c?, 0x42d236f9fb18?}, 0x10370af48)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/testing/testing.go:2109 +0x3bc
+testing.runTests.func1(0x42d23704e6c8)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/testing/testing.go:2585 +0x38
+testing.tRunner(0x42d23704e6c8, 0x42d236f9fc48)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/testing/testing.go:2036 +0xc4
+testing.runTests({0x10316c526, 0x1d}, {0x103176b87, 0x22}, 0x42d236f761c8, {0x10379ad00, 0x4db, 0x4db}, {0x808080803c7c1c1e?, 0x103155051?, ...})
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/testing/testing.go:2583 +0x3f0
+testing.(*M).Run(0x42d237162280)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/testing/testing.go:2443 +0x578
+main.main()
+	_testmain.go:2530 +0x80
+
+goroutine 640 [sync.WaitGroup.Wait]:
+sync.runtime_SemacquireWaitGroup(0x102c4c1b0?, 0x20?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/runtime/sema.go:114 +0x38
+sync.(*WaitGroup).Wait(0x42d2371a7030)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/sync/waitgroup.go:206 +0xa8
+github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed(0x42d237240908)
+	/Users/ce/src/cc-connect/core/cuj_test.go:2024 +0x22c
+testing.tRunner(0x42d237240908, 0x10370af48)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/testing/testing.go:2036 +0xc4
+created by testing.(*T).Run in goroutine 1
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/testing/testing.go:2101 +0x3a8
+
+goroutine 539 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d237198508, {0x10371b338, 0x42d2373ccb40}, 0x42d23739ef10?, 0x42d2371aca80?, 0x42d237270160, {0x10371d838, 0x42d2371e5200}, 0x42d23726a120, 0x42d2371a3c80, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 520
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 432 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2376b6a08, {0x10371b338, 0x42d2372375e0}, 0x42d2371ea1f0?, 0x42d2376e5ab0?, 0x42d237692f20, {0x10371d838, 0x42d2372a2e00}, 0x42d2376f2480, 0x42d237293500, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 428
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 19 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d237198f08, {0x10371b338, 0x42d237236050}, 0x42d23720c2f0?, 0x42d237224850?, 0x42d23722e000, {0x10371d4d8, 0x42d2371a0100}, 0x42d237196480, 0x42d237016a80, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 14
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 24 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d237260008, {0x10371b338, 0x42d2372367d0}, 0x42d23720ca20?, 0x42d237224c40?, 0x42d23722e6e0, {0x10371d4d8, 0x42d237208340}, 0x42d2372050e0, 0x42d237228540, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 21
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 444 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2372baf08, {0x10371b338, 0x42d2373e43c0}, 0x42d2370948f0?, 0x42d2371f6230?, 0x42d2371e69a0, {0x10371d838, 0x42d2371e4580}, 0x42d2372b8b40, 0x42d2371a2600, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 441
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 494 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2372bb908, {0x10371b338, 0x42d2373e4a00}, 0x42d237095490?, 0x42d237242540?, 0x42d2371e7760, {0x10371d838, 0x42d2371e4c00}, 0x42d237196b40, 0x42d2371a3140, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 490
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 425 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d237261408, {0x10371b338, 0x42d237237270}, 0x42d23720dad0?, 0x42d2376e4cb0?, 0x42d237173b80, {0x10371d838, 0x42d237234a80}, 0x42d2372105a0, 0x42d2372291a0, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 383
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 405 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2371fd908, {0x10371b338, 0x42d2373e5310}, 0x42d2370944e0?, 0x42d2371a5c00?, 0x42d2376926e0, {0x10371d838, 0x42d2372a2680}, 0x42d2376c4900, 0x42d2371a2cc0, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 391
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 426 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2372baa08, {0x10371b338, 0x42d2372372c0}, 0x42d23720dbd0?, 0x42d2376e4ee0?, 0x42d2371e7600, {0x10371d838, 0x42d2371e4b80}, 0x42d2372b8fc0, 0x42d2371a38c0, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 449
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 388 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2371fd408, {0x10371b338, 0x42d237236b90}, 0x42d23720ce30?, 0x42d237019490?, 0x42d237692420, {0x10371d838, 0x42d2372a2380}, 0x42d2373cb320, 0x42d2371a2840, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 207
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 381 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2372ba008, {0x10371b338, 0x42d2373cd450}, 0x42d23739f650?, 0x42d237225e30?, 0x42d2371e6dc0, {0x10371d838, 0x42d2371e4800}, 0x42d2372b8240, 0x42d2371a3200, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 421
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 406 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2376b6508, {0x10371b338, 0x42d2373e5360}, 0x42d2370945e0?, 0x42d2371a5f10?, 0x42d237692b00, {0x10371d838, 0x42d2372a2800}, 0x42d2376c5200, 0x42d237292d80, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 396
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 458 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d237260f08, {0x10371b338, 0x42d2373cc190}, 0x42d23739e3c0?, 0x42d2372223f0?, 0x42d2371729a0, {0x10371d838, 0x42d2370b6600}, 0x42d237205320, 0x42d2371f48a0, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 454
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 453 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2372ba508, {0x10371b338, 0x42d2373cc000}, 0x42d23739e0f0?, 0x42d237222230?, 0x42d2371e6420, {0x10371d838, 0x42d2371e4380}, 0x42d2372b8480, 0x42d2371a22a0, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 436
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 464 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d237261908, {0x10371b338, 0x42d2373cc3c0}, 0x42d23739e7d0?, 0x42d2372233b0?, 0x42d237172dc0, {0x10371d838, 0x42d2370b6880}, 0x42d2376f2000, 0x42d2371f4d80, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 468
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 138 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d237260a08, {0x10371b338, 0x42d2372363c0}, 0x42d237354550?, 0x42d2376e4a10?, 0x42d237172420, {0x10371d838, 0x42d2370b6180}, 0x42d237204480, 0x42d2371f4480, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 134
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 532 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2371fc008, {0x10371b338, 0x42d2373cc4b0}, 0x42d23739ea10?, 0x42d237223f10?, 0x42d237692580, {0x10371d838, 0x42d237234600}, 0x42d2370bf560, 0x42d237292420, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 509
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 537 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2371fc508, {0x10371b338, 0x42d2373ccaf0}, 0x42d23739edf0?, 0x42d2371ac4d0?, 0x42d237692dc0, {0x10371d838, 0x42d237234780}, 0x42d2370bfc20, 0x42d2372926c0, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 533
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 555 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2371d2508, {0x10371b338, 0x42d2373cc410}, 0x10371b0d0?, 0x42d2371a2180?, 0x42d23722ec60, {0x10371d838, 0x42d2371e4680}, 0x42d2373ca000, 0x42d2371a21e0, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 551
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 488 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2376b7908, {0x10371b338, 0x42d2373e4780}, 0x42d237094fc0?, 0x42d2371f70a0?, 0x42d23722e2c0, {0x10371d838, 0x42d2370b7080}, 0x42d2370bec60, 0x42d2371f5e60, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 504
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 481 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2370cc508, {0x10371b338, 0x42d2373e4500}, 0x42d237094b60?, 0x42d2371f6690?, 0x42d2376922c0, {0x10371d838, 0x42d237234500}, 0x42d2372107e0, 0x42d237228360, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 445
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 502 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2376b7408, {0x10371b338, 0x42d237237040}, 0x42d237355960?, 0x42d2371a5650?, 0x42d237173760, {0x10371d838, 0x42d2370b6d80}, 0x42d2376f38c0, 0x42d2371f5980, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 498
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 478 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2376b6f08, {0x10371b338, 0x42d237236c80}, 0x42d237355290?, 0x42d237019b20?, 0x42d2371731e0, {0x10371d838, 0x42d2370b6a80}, 0x42d2376f2900, 0x42d2371f53e0, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 474
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 528 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2371d2008, {0x10371b338, 0x42d2373e4140}, 0x0?, 0x0?, 0x42d237270000, {0x10371d838, 0x42d237234080}, 0x42d237383440, 0x42d237229440, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 584
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 557 [sync.RWMutex.RLock]:
+sync.runtime_SemacquireRWMutexR(0x42d2371a7040?, 0x8?, 0xc2a16f0397e9fa90?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/runtime/sema.go:100 +0x28
+sync.(*RWMutex).RLock(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/sync/rwmutex.go:74
+github.com/chenhg5/cc-connect/core.(*SessionManager).Save(0x42d237293380)
+	/Users/ce/src/cc-connect/core/session.go:725 +0x70
+github.com/chenhg5/cc-connect/core.(*Engine).processInteractiveMessageWith(0x42d2371fca08, {0x10371bf40, 0x42d2371bd260}, 0x42d2370c8b40, 0x42d2373cab40, {0x10371b0d0, 0x42d237293320}, 0x42d237293380, {0x10315054d, 0xb}, ...)
+	/Users/ce/src/cc-connect/core/engine.go:3843 +0xf0
+created by github.com/chenhg5/cc-connect/core.(*Engine).handleMessage in goroutine 650
+	/Users/ce/src/cc-connect/core/engine.go:3181 +0x1ad4
+
+goroutine 516 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d237198008, {0x10371b338, 0x42d2373e4c80}, 0x42d2370959b0?, 0x42d237243880?, 0x42d2371e7b80, {0x10371d838, 0x42d2371e4f00}, 0x42d237197440, 0x42d2371a3620, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 496
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 610 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d237198a08, {0x10371b338, 0x42d2373e41e0}, 0x0?, 0x0?, 0x42d2376931e0, {0x10371d838, 0x42d2370b6280}, 0x42d237382240, 0x42d237292780, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 600
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 548 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2371fc508, {0x10371b338, 0x42d23734a0a0}, 0x42d2371ea940?, 0x42d237225b90?, 0x42d23722eb00, {0x10371d838, 0x42d2370b7480}, 0x42d2370bf8c0, 0x42d2372926c0, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 512
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 583 [select]:
+github.com/chenhg5/cc-connect/core.(*RateLimiter).cleanupLoop(0x42d2373c3620)
+	/Users/ce/src/cc-connect/core/ratelimit.go:88 +0xa0
+created by github.com/chenhg5/cc-connect/core.NewRateLimiter in goroutine 582
+	/Users/ce/src/cc-connect/core/ratelimit.go:34 +0xf4
+
+goroutine 578 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d2370cca08, {0x10371b338, 0x42d2373cce10}, 0x42d23739f3f0?, 0x42d2371adc70?, 0x42d237693340, {0x10371d838, 0x42d237234b00}, 0x42d237382900, 0x42d237228d20, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 542
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 615 [runnable]:
+syscall.syscalln(0x102c91860, {0x42d23706c680, 0x3, 0x3})
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/runtime/sys_darwin.go:38 +0x20
+syscall.syscall(0x42d23720e380?, 0x76?, 0x42d23706c6d8?, 0x76?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/syscall/syscall_darwin.go:365 +0x24
+syscall.Open({0x42d23720e380?, 0x42d23720e3ec?}, 0x1000a02, 0x180)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/syscall/zsyscall_darwin_arm64.go:1162 +0x70
+os.open(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file_open_unix.go:15
+os.openFileNolog.func1(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file_unix.go:261
+os.ignoringEINTR(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file_posix.go:256
+os.openFileNolog({0x42d23720e380, 0x76}, 0xa02, 0x180)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file_unix.go:260 +0xd4
+os.OpenFile({0x42d23720e380, 0x76}, 0xa02, 0x180)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file.go:412 +0x40
+os.CreateTemp({0x42d2372c2000?, 0x42d2372c2000?}, {0x10314b820, 0x6})
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/tempfile.go:49 +0x1a0
+github.com/chenhg5/cc-connect/core.AtomicWriteFile({0x42d2372c2000, 0x74}, {0x42d237040900, 0x607, 0x882}, 0x1a4)
+	/Users/ce/src/cc-connect/core/atomicwrite.go:13 +0x4c
+github.com/chenhg5/cc-connect/core.(*SessionManager).saveLocked(0x42d237293380)
+	/Users/ce/src/cc-connect/core/session.go:797 +0x678
+github.com/chenhg5/cc-connect/core.(*SessionManager).Save(0x42d23726ad80?)
+	/Users/ce/src/cc-connect/core/session.go:727 +0x94
+github.com/chenhg5/cc-connect/core.(*Engine).processInteractiveEvents(0x42d2371fca08, 0x42d237270580, 0x42d23726ad80, 0x42d237293380, {0x103150542, 0xb}, {0x42d2373c032c, 0x2}, {0x42d237293380?, 0x103150542?, ...}, ...)
+	/Users/ce/src/cc-connect/core/engine.go:6315 +0x6a44
+github.com/chenhg5/cc-connect/core.(*Engine).processInteractiveMessageWith(0x42d2371fca08, {0x10371bf40, 0x42d2371bd230}, 0x42d2371a8640, 0x42d23726ad80, {0x10371b0d0, 0x42d237293320}, 0x42d237293380, {0x103150542, 0xb}, ...)
+	/Users/ce/src/cc-connect/core/engine.go:3952 +0x8f8
+created by github.com/chenhg5/cc-connect/core.(*Engine).handleMessage in goroutine 643
+	/Users/ce/src/cc-connect/core/engine.go:3181 +0x1ad4
+
+goroutine 642 [select]:
+github.com/chenhg5/cc-connect/core.dumpGoroutineStacks({0x42d2371c6de0, 0x25})
+	/Users/ce/src/cc-connect/core/engine.go:2841 +0xcc
+github.com/chenhg5/cc-connect/core.(*Engine).handleMessage(0x42d2371fca08, {0x10371bf40, 0x42d2371bd260}, 0x42d23714adc0)
+	/Users/ce/src/cc-connect/core/engine.go:3117 +0x1474
+github.com/chenhg5/cc-connect/core.(*Engine).ReceiveMessage(...)
+	/Users/ce/src/cc-connect/core/engine.go:2443
+github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed.func2()
+	/Users/ce/src/cc-connect/core/cuj_test.go:2016 +0x178
+created by github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed in goroutine 640
+	/Users/ce/src/cc-connect/core/cuj_test.go:2014 +0x158
+
+goroutine 556 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).runUnsolicitedReader(0x42d237199408, {0x10371b338, 0x42d2373cc460}, 0x10371b0d0?, 0x42d237292660?, 0x42d237693b80, {0x10371d838, 0x42d2370b6680}, 0x42d237382fc0, 0x42d237292ae0, ...)
+	/Users/ce/src/cc-connect/core/engine.go:4862 +0x1ac
+created by github.com/chenhg5/cc-connect/core.(*Engine).startUnsolicitedReader in goroutine 607
+	/Users/ce/src/cc-connect/core/engine.go:4835 +0x2e0
+
+goroutine 619 [runnable]:
+syscall.syscalln(0x102c919f0, {0x42d237304cd0, 0x3, 0x3})
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/runtime/sys_darwin.go:38 +0x20
+syscall.syscall(0x42d237304d28?, 0x102cb2b28?, 0x42d237228660?, 0x5?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/syscall/syscall_darwin.go:365 +0x24
+syscall.Fstat(0x26?, 0x0?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/syscall/zsyscall_darwin_arm64.go:1897 +0x38
+os.newFile.func1(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file_unix.go:170
+os.ignoringEINTR(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file_posix.go:256
+os.newFile(0x5, {0x42d2371c6de0, 0x25}, 0x1, 0x0)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file_unix.go:169 +0x238
+os.openFileNolog({0x42d2371c6de0, 0x25}, 0x601, 0x1a4)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file_unix.go:279 +0x148
+os.OpenFile({0x42d2371c6de0, 0x25}, 0x601, 0x1a4)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file.go:412 +0x40
+os.WriteFile({0x42d2371c6de0?, 0x400000?}, {0x42d237b00000, 0x68d9, 0x400000}, 0x0?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/os/file.go:933 +0x34
+github.com/chenhg5/cc-connect/core.dumpGoroutineStacks.func1()
+	/Users/ce/src/cc-connect/core/engine.go:2837 +0x9c
+created by github.com/chenhg5/cc-connect/core.dumpGoroutineStacks in goroutine 642
+	/Users/ce/src/cc-connect/core/engine.go:2833 +0x88
+
+goroutine 616 [select]:
+github.com/chenhg5/cc-connect/core.(*Engine).startMessageRecallMonitor.func1()
+	/Users/ce/src/cc-connect/core/engine.go:2854 +0xb8
+created by github.com/chenhg5/cc-connect/core.(*Engine).startMessageRecallMonitor in goroutine 615
+	/Users/ce/src/cc-connect/core/engine.go:2850 +0x98
+
+goroutine 644 [select]:
+github.com/chenhg5/cc-connect/core.dumpGoroutineStacks({0x42d236f911d0, 0x25})
+	/Users/ce/src/cc-connect/core/engine.go:2841 +0xcc
+github.com/chenhg5/cc-connect/core.(*Engine).handleMessage(0x42d2371fca08, {0x10371bf40, 0x42d2371bd260}, 0x42d2370c8c80)
+	/Users/ce/src/cc-connect/core/engine.go:3117 +0x1474
+github.com/chenhg5/cc-connect/core.(*Engine).ReceiveMessage(...)
+	/Users/ce/src/cc-connect/core/engine.go:2443
+github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed.func2()
+	/Users/ce/src/cc-connect/core/cuj_test.go:2016 +0x178
+created by github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed in goroutine 640
+	/Users/ce/src/cc-connect/core/cuj_test.go:2014 +0x158
+
+goroutine 645 [sync.Mutex.Lock]:
+internal/sync.runtime_SemacquireMutex(0x42d2374095b8?, 0x40?, 0x100000043?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/runtime/sema.go:95 +0x28
+internal/sync.(*Mutex).lockSlow(0x42d237293380)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/internal/sync/mutex.go:149 +0x170
+internal/sync.(*Mutex).Lock(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/internal/sync/mutex.go:70
+sync.(*Mutex).Lock(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/sync/mutex.go:46
+sync.(*RWMutex).Lock(0x42d237293380)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/sync/rwmutex.go:150 +0x6c
+github.com/chenhg5/cc-connect/core.(*SessionManager).UpdateUserMeta(0x42d237293380, {0x103150542, 0xb}, {0x10314b001, 0x5}, {0x0, 0x0})
+	/Users/ce/src/cc-connect/core/session.go:575 +0x58
+github.com/chenhg5/cc-connect/core.(*Engine).handleMessage(0x42d2371fca08, {0x10371bf40, 0x42d2371bd230}, 0x42d236f66140)
+	/Users/ce/src/cc-connect/core/engine.go:3088 +0x126c
+github.com/chenhg5/cc-connect/core.(*Engine).ReceiveMessage(...)
+	/Users/ce/src/cc-connect/core/engine.go:2443
+github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed.func1()
+	/Users/ce/src/cc-connect/core/cuj_test.go:2007 +0x178
+created by github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed in goroutine 640
+	/Users/ce/src/cc-connect/core/cuj_test.go:2005 +0x1d8
+
+goroutine 646 [sync.Mutex.Lock]:
+internal/sync.runtime_SemacquireMutex(0x42d2372cf5b8?, 0x40?, 0x100000031?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/runtime/sema.go:95 +0x28
+internal/sync.(*Mutex).lockSlow(0x42d237293380)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/internal/sync/mutex.go:149 +0x170
+internal/sync.(*Mutex).Lock(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/internal/sync/mutex.go:70
+sync.(*Mutex).Lock(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/sync/mutex.go:46
+sync.(*RWMutex).Lock(0x42d237293380)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/sync/rwmutex.go:150 +0x6c
+github.com/chenhg5/cc-connect/core.(*SessionManager).UpdateUserMeta(0x42d237293380, {0x10315054d, 0xb}, {0x10314affc, 0x5}, {0x0, 0x0})
+	/Users/ce/src/cc-connect/core/session.go:575 +0x58
+github.com/chenhg5/cc-connect/core.(*Engine).handleMessage(0x42d2371fca08, {0x10371bf40, 0x42d2371bd260}, 0x42d237310000)
+	/Users/ce/src/cc-connect/core/engine.go:3088 +0x126c
+github.com/chenhg5/cc-connect/core.(*Engine).ReceiveMessage(...)
+	/Users/ce/src/cc-connect/core/engine.go:2443
+github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed.func2()
+	/Users/ce/src/cc-connect/core/cuj_test.go:2016 +0x178
+created by github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed in goroutine 640
+	/Users/ce/src/cc-connect/core/cuj_test.go:2014 +0x158
+
+goroutine 647 [sync.RWMutex.Lock]:
+sync.runtime_SemacquireRWMutex(0x42d237293380?, 0x42?, 0x42d237319648?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/runtime/sema.go:105 +0x28
+sync.(*RWMutex).Lock(0x42d2373c0338?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/sync/rwmutex.go:155 +0xf4
+github.com/chenhg5/cc-connect/core.(*SessionManager).UpdateUserMeta(0x42d237293380, {0x103150542, 0xb}, {0x10314b001, 0x5}, {0x0, 0x0})
+	/Users/ce/src/cc-connect/core/session.go:575 +0x58
+github.com/chenhg5/cc-connect/core.(*Engine).handleMessage(0x42d2371fca08, {0x10371bf40, 0x42d2371bd230}, 0x42d237392000)
+	/Users/ce/src/cc-connect/core/engine.go:3088 +0x126c
+github.com/chenhg5/cc-connect/core.(*Engine).ReceiveMessage(...)
+	/Users/ce/src/cc-connect/core/engine.go:2443
+github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed.func1()
+	/Users/ce/src/cc-connect/core/cuj_test.go:2007 +0x178
+created by github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed in goroutine 640
+	/Users/ce/src/cc-connect/core/cuj_test.go:2005 +0x1d8
+
+goroutine 648 [sync.Mutex.Lock]:
+internal/sync.runtime_SemacquireMutex(0x42d23731d5b8?, 0x40?, 0x3?)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/runtime/sema.go:95 +0x28
+internal/sync.(*Mutex).lockSlow(0x42d237293380)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/internal/sync/mutex.go:149 +0x170
+internal/sync.(*Mutex).Lock(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/internal/sync/mutex.go:70
+sync.(*Mutex).Lock(...)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/sync/mutex.go:46
+sync.(*RWMutex).Lock(0x42d237293380)
+	/opt/homebrew/Cellar/go/1.26.2/libexec/src/sync/rwmutex.go:150 +0x6c
+github.com/chenhg5/cc-connect/core.(*SessionManager).UpdateUserMeta(0x42d237293380, {0x10315054d, 0xb}, {0x10314affc, 0x5}, {0x0, 0x0})
+	/Users/ce/src/cc-connect/core/session.go:575 +0x58
+github.com/chenhg5/cc-connect/core.(*Engine).handleMessage(0x42d2371fca08, {0x10371bf40, 0x42d2371bd260}, 0x42d2370c8dc0)
+	/Users/ce/src/cc-connect/core/engine.go:3088 +0x126c
+github.com/chenhg5/cc-connect/core.(*Engine).ReceiveMessage(...)
+	/Users/ce/src/cc-connect/core/engine.go:2443
+github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed.func2()
+	/Users/ce/src/cc-connect/core/cuj_test.go:2016 +0x178
+created by github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed in goroutine 640
+	/Users/ce/src/cc-connect/core/cuj_test.go:2014 +0x158
+
+goroutine 649 [runnable]:
+github.com/chenhg5/cc-connect/core.(*stubPlatformEngine).Reply(0x42d2371bd230, {0x10371bf40?, 0x42d2371bd230?}, {0x0?, 0x0?}, {0x1031abc8d, 0x47})
+	/Users/ce/src/cc-connect/core/engine_test.go:65 +0xc4
+github.com/chenhg5/cc-connect/core.(*Engine).replyWithError(0x42d2371fca08, {0x10371bf40, 0x42d2371bd230}, {0x103646f60, 0x103710980}, {0x1031abc8d, 0x47})
+	/Users/ce/src/cc-connect/core/engine.go:12161 +0x14c
+github.com/chenhg5/cc-connect/core.(*Engine).reply(...)
+	/Users/ce/src/cc-connect/core/engine.go:12173
+github.com/chenhg5/cc-connect/core.(*Engine).queueMessageForBusySession(0x42d2371fca08, {0x10371bf40, 0x42d2371bd230}, 0x42d23714ac80, {0x103150542, 0xb})
+	/Users/ce/src/cc-connect/core/engine.go:3338 +0x6a0
+github.com/chenhg5/cc-connect/core.(*Engine).handleMessage(0x42d2371fca08, {0x10371bf40, 0x42d2371bd230}, 0x42d23714ac80)
+	/Users/ce/src/cc-connect/core/engine.go:3135 +0x1604
+github.com/chenhg5/cc-connect/core.(*Engine).ReceiveMessage(...)
+	/Users/ce/src/cc-connect/core/engine.go:2443
+github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed.func1()
+	/Users/ce/src/cc-connect/core/cuj_test.go:2007 +0x178
+created by github.com/chenhg5/cc-connect/core.TestCUJ_H2_TwoPlatformsConcurrentNoBleed in goroutine 640
+	/Users/ce/src/cc-connect/core/cuj_test.go:2005 +0x1d8

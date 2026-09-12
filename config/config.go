@@ -112,6 +112,7 @@ type Config struct {
 	Management         ManagementConfig        `toml:"management"`
 	Hooks              []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
+	BusyTimeoutMins    *int                    `toml:"busy_timeout_mins,omitempty"`  // minutes a dead agent's session busy lock may be held before the next message breaks it; 0 = disable; default 2
 	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
