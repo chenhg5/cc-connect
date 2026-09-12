@@ -1206,6 +1206,11 @@ app_secret = "your-feishu-app-secret"
 #                     # 允许的 MAX 用户 ID，如 "66624886,12345678"；"*" 表示所有
 # api_base = "https://platform-api.max.ru"   # optional override / 可选覆盖默认 API
 #
+# max_attachment_size_mb = 50   # optional: inbound attachment download cap (MiB).
+#                               # Default: core default (50). Raise to receive
+#                               # larger files/images/voice from users.
+# max_attachment_size_mb = 50   # 可选：接收附件的下载上限（MiB），默认 50，调大可接收更大文件
+#
 # --- Webhook mode (optional) ---
 # Set webhook_url to switch from long-poll to webhook. Required for high-traffic
 # bots since MAX throttles long-poll to 2 RPS from 2026-05-11.
