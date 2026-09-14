@@ -528,6 +528,9 @@ func (cs *copilotSession) emitToolExecutionStart(inner sessionEventInner) {
 		}
 		if len(cs.toolCallNames) < 1024 {
 			cs.toolCallNames[data.ToolCallID] = data.ToolName
+		} else {
+			slog.Warn("copilotSession: toolCallNames map at capacity, tool result may lose its name",
+				"toolCallId", data.ToolCallID, "toolName", data.ToolName, "capacity", 1024)
 		}
 		cs.toolCallMu.Unlock()
 	}
@@ -965,6 +968,12 @@ var (
 )
 
 func (cs *copilotSession) Close() error {
+	// Drop pending tool-call name mappings; any in-flight completes after
+	// close would otherwise linger until the session is GC'd.
+	cs.toolCallMu.Lock()
+	cs.toolCallNames = nil
+	cs.toolCallMu.Unlock()
+
 	// Close stdin to signal EOF
 	if w, ok := cs.rpc.writer.w.(io.Closer); ok {
 		_ = w.Close()

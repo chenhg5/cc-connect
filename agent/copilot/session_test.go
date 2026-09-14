@@ -790,6 +790,11 @@ func TestHandleSessionEvent_ToolExecutionSubAgentSkipped(t *testing.T) {
 		t.Fatalf("unexpected event emitted for sub-agent tool: %v", evt.Type)
 	default:
 	}
+	cs.toolCallMu.Lock()
+	defer cs.toolCallMu.Unlock()
+	if len(cs.toolCallNames) != 0 {
+		t.Fatalf("sub-agent start must not populate toolCallNames, got %v", cs.toolCallNames)
+	}
 }
 
 func TestHandleSessionEvent_Reasoning(t *testing.T) {
