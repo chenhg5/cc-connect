@@ -5824,7 +5824,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					usageSource = src.GetUsageSource()
 				}
 				estimate := contextEstimate
-				estimateSource := "none"
+				// Every branch below assigns; declared (not initialised) so the
+				// switch is the single place that decides the source.
+				var estimateSource string
 				switch {
 				case !hasReporter:
 					estimateSource = "heuristic: agent has no ContextUsageReporter"

@@ -778,7 +778,9 @@ func tailUsageFromTranscript(path string, windowBytes int64) (usage *core.Contex
 	if err != nil {
 		return nil, false
 	}
-	defer f.Close()
+	// Read-only handle: a Close error carries nothing actionable, and the
+	// descriptor is released either way. errcheck wants that said explicitly.
+	defer func() { _ = f.Close() }()
 
 	st, err := f.Stat()
 	if err != nil {
