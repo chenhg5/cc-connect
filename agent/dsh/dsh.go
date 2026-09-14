@@ -108,6 +108,7 @@ func New(opts map[string]any) (core.Agent, error) {
 
 	agentPreset, _ := opts["agent_preset"].(string)
 	model, _ := opts["model"].(string)
+	effort, _ := opts["reasoning_effort"].(string)
 
 	var timeout time.Duration
 	switch v := opts["timeout_mins"].(type) {
@@ -120,7 +121,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	slog.Info("dsh: agent created", "base_url", baseURL, "work_dir", workDir,
-		"agent_preset", agentPreset, "model", model, "timeout", timeout)
+		"agent_preset", agentPreset, "model", model, "effort", effort, "timeout", timeout)
 
 	// Soft reachability probe: warn early about a missing server without
 	// blocking project startup (the server may still be booting).
@@ -139,6 +140,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir:     workDir,
 		agentPreset: agentPreset,
 		model:       model,
+		effort:      effort,
 		timeout:     timeout,
 		client:      client,
 	}, nil

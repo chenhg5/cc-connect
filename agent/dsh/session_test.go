@@ -60,6 +60,30 @@ func newTestAgent(t *testing.T, m *mockDshServer, workDir string) *Agent {
 	return agent.(*Agent)
 }
 
+func TestNew_ParsesModelAndReasoningEffort(t *testing.T) {
+	m := newMockDshServer()
+	ts := startMockServer(m)
+	t.Cleanup(func() { ts.Close() })
+	t.Cleanup(m.close)
+
+	got, err := New(map[string]any{
+		"base_url":         ts.URL,
+		"work_dir":         "/tmp/proj",
+		"model":            "deepseek-official/deepseek-v4-pro",
+		"reasoning_effort": "max",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	agent := got.(*Agent)
+	if agent.model != "deepseek-official/deepseek-v4-pro" {
+		t.Fatalf("model not parsed from config: %q", agent.model)
+	}
+	if agent.effort != "max" {
+		t.Fatalf("reasoning_effort not parsed from config: %q", agent.effort)
+	}
+}
+
 // TestStartSession_CreateAndResume verifies fresh creation vs resume reuse.
 func TestStartSession_CreateAndResume(t *testing.T) {
 	m := newMockDshServer()
