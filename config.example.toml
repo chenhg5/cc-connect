@@ -313,24 +313,41 @@ level = "info" # debug, info, warn, error
 # visibility = "full"       # "full" (default), "summary", or "none" / 群内可见消息：完整、摘要或不显示
 
 # =============================================================================
-# Auto-Compress / 自动压缩
+# Auto-Compress (after each turn) / 自动压缩（每轮结束后）
 # =============================================================================
-# Automatically trigger /compress when estimated token usage exceeds threshold.
-# 当估算 token 超过阈值时自动触发 /compress。
+# Automatically trigger /compress when token usage exceeds the threshold.
+#
+# Timing matters here: this runs AFTER a turn has finished, not inside it. The
+# agent's own loop is not interrupted, so a turn that grows past the threshold
+# mid-flight is only compressed once it completes. Agents that compact natively
+# mid-turn (Claude Code, via autoCompactWindow) do so *during* the loop and are
+# therefore strictly more timely — prefer that where it is available, and use
+# this when the agent has no such mechanism or when you want a visible,
+# turn-boundary compaction point.
+#
+# 时机很关键：本功能在**一轮对话结束后**触发，不会打断 agent 自己的迭代循环。
+# 因此如果某一轮在中途就越过了阈值，也要等该轮跑完才会压缩。原生支持轮内压缩的
+# agent（如 Claude Code 的 autoCompactWindow）会在循环过程中压缩，时机更准；能用
+# 原生机制就优先用原生，本功能适用于 agent 自身没有压缩能力、或你希望压缩发生在
+# 一个可见的、干净的轮次边界上的场景。
 #
 # [projects.auto_compress]
 # enabled = true
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
-# allow_heuristic = false  # decide from the text-length heuristic when the agent
-#                          # reports no exact usage. Off by default: the heuristic
-#                          # counts only cc-connect's own history text, ignoring
-#                          # tool results and the fixed system-prompt+tools
-#                          # overhead, so it is routinely several times off.
-#                          # 当 agent 未上报精确用量时，是否退回文本长度启发式估算。
-#                          # 默认关闭：该启发式只统计 cc-connect 自身的对话文本，
-#                          # 忽略 tool_result 与系统提示词/工具定义的固定开销，
-#                          # 误差常达数倍，容易过早压缩或永不压缩。
+# allow_heuristic = false  # decide from the text-length heuristic when an agent that
+#                          # CAN report exact usage has not reported it yet. Off by
+#                          # default: wait for the exact number instead. The heuristic
+#                          # counts only cc-connect's own history text, ignoring tool
+#                          # results and the fixed system-prompt+tools overhead, so it
+#                          # is routinely several times off. Agents with no usage
+#                          # reporting at all always use the heuristic — for them it is
+#                          # the only mechanism available, and this flag does not apply.
+#                          # 当「有能力上报精确用量的 agent」暂时还没上报时，是否退回文本
+#                          # 长度启发式估算。默认关闭：宁可等到精确值。该启发式只统计
+#                          # cc-connect 自身的对话文本，忽略 tool_result 与系统提示词/
+#                          # 工具定义的固定开销，误差常达数倍。完全没有用量上报能力的
+#                          # agent 始终使用启发式——那是它们唯一的机制，本开关对其无效。
 
 # [projects.observe]
 # enabled = true                    # Forward native terminal sessions to Slack

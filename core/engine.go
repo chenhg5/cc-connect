@@ -428,14 +428,18 @@ type Engine struct {
 	autoCompressMaxTokens int
 	autoCompressMinGap    time.Duration
 	// autoCompressAllowHeuristic permits a trigger decision built from the
-	// text-length heuristic (1 token / 4 runes of cc-connect's own history)
-	// when no exact API-reported usage is available. The heuristic ignores
-	// tool_use/tool_result blocks and the fixed system-prompt+tools overhead,
-	// so it is routinely several times off in either direction — measured at
-	// 574,797 while the same session never exceeded 229,783 real tokens.
-	// Default false: a turn with no exact number makes no decision at all,
-	// leaving lastAutoCompressAt untouched so the NEXT turn (which always has
-	// exact usage) can decide with real data.
+	// text-length heuristic (1 token / 4 runes of cc-connect's own history) on a
+	// turn where an agent that CAN report exact usage has not reported it yet.
+	// The heuristic ignores tool_use/tool_result blocks and the fixed
+	// system-prompt+tools overhead, so it is routinely several times off in
+	// either direction — measured at 574,797 while the same session never
+	// exceeded 229,783 real tokens.
+	//
+	// Default false: such a turn makes no decision at all, leaving
+	// lastAutoCompressAt untouched so the NEXT turn — which does carry the exact
+	// number — decides on real data. Agents with no ContextUsageReporter are
+	// unaffected and always use the heuristic; see the gate in
+	// processInteractiveEvents.
 	autoCompressAllowHeuristic bool
 	resetOnIdle                time.Duration
 
@@ -5823,7 +5827,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				estimateSource := "none"
 				switch {
 				case !hasReporter:
-					estimateSource = "none: session does not implement ContextUsageReporter"
+					estimateSource = "heuristic: agent has no ContextUsageReporter"
 				case usage == nil:
 					estimateSource = "none: agent has not reported usage yet"
 				case usage.UsedTokens <= 0:
@@ -5837,11 +5841,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				last := state.lastAutoCompressAt
 				state.mu.Unlock()
 
-				// Only an exact number may drive a decision, unless the
-				// heuristic fallback was explicitly opted into. A wrong guess
-				// either compacts early — dropping context that was still in
-				// use — or never compacts at all.
-				if estimateSource == "exact" || e.autoCompressAllowHeuristic {
+				// A decision needs a number worth acting on. Two cases qualify:
+				//
+				//   - the agent reported exact usage; or
+				//   - the agent has no ContextUsageReporter at all. For those the
+				//     heuristic has always been the only mechanism available, and
+				//     refusing to use it would silently disable auto-compress for
+				//     that agent — a main-path behavior change this fix has no
+				//     business making. Most agents live here.
+				//
+				// The third case is the one this change is about: an agent that
+				// CAN report exact usage but has none for this turn yet. Wait for
+				// it rather than guess — a wrong guess either compacts early,
+				// dropping context still in use, or never compacts at all.
+				decidable := estimateSource == "exact" || !hasReporter || e.autoCompressAllowHeuristic
+				if decidable {
 					triggered := estimate >= e.autoCompressMaxTokens &&
 						(last.IsZero() || now.Sub(last) >= e.autoCompressMinGap)
 					slog.Info("auto-compress: decision",

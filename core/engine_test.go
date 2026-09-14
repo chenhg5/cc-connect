@@ -10088,6 +10088,82 @@ func TestAutoCompress_HeuristicOptIn_StillTriggers(t *testing.T) {
 	}
 }
 
+// noReporterSession is an AgentSession that deliberately does NOT implement
+// ContextUsageReporter — the shape most cc-connect agents (gemini, cursor, kimi,
+// qoder, iflow, opencode, devin, …) actually have. Embedding the AgentSession
+// *interface* rather than a concrete session is what makes that work: only the
+// interface's methods are promoted, so GetContextUsage stays out of the method
+// set while every method the engine needs to run a turn still forwards.
+type noReporterSession struct {
+	AgentSession
+	inner *queuingAgentSession
+}
+
+// TestAutoCompress_AgentWithoutReporter_StillUsesHeuristic pins the boundary of
+// the "wait for exact usage" rule. That rule exists because an agent which CAN
+// report exact usage but has none yet is merely early — waiting costs nothing,
+// since the next turn carries the real number.
+//
+// An agent with no ContextUsageReporter is a different situation: it can never
+// report, so the text-length heuristic is the only mechanism it has ever had.
+// Skipping the decision there would silently disable auto-compress for the
+// majority of cc-connect's agents — a main-path regression, not a fix. This
+// test fails if the gate is ever widened to `estimateSource == "exact"` alone.
+func TestAutoCompress_AgentWithoutReporter_StillUsesHeuristic(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	inner := newQueuingSession("no-reporter")
+	sess := &noReporterSession{AgentSession: inner, inner: inner}
+
+	// Guard the premise: if this ever implements the reporter, the test is
+	// silently testing nothing.
+	if _, ok := AgentSession(sess).(ContextUsageReporter); ok {
+		t.Fatal("fixture implements ContextUsageReporter — it must not, or this test proves nothing")
+	}
+
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 4, 0) // default config, allow_heuristic off
+
+	key := "test:user1"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", strings.Repeat("a", 64)) // 16 heuristic tokens > threshold 4
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil)
+	inner.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		inner.sendMu.Lock()
+		n := len(inner.sendCalls)
+		inner.sendMu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out — an agent with no ContextUsageReporter must keep the pre-existing heuristic trigger")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	inner.sendMu.Lock()
+	last := inner.sendCalls[len(inner.sendCalls)-1]
+	inner.sendMu.Unlock()
+	if last != "/compact" {
+		t.Fatalf("expected /compact via heuristic for a reporter-less agent, got %q", last)
+	}
+}
+
 func TestCmdCompress_SessionBusy_RepliesPreviousProcessing(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("compress-busy")

@@ -446,17 +446,28 @@ type HeartbeatConfig struct {
 }
 
 // AutoCompressConfig controls automatic context compression for a project.
+// AutoCompressConfig controls automatic context compression.
+//
+// The name is about the *trigger*, not the timing: this fires AFTER a turn
+// completes (see the auto-compress decision block in core/engine.go), never
+// inside the agent's own loop. Agents that compact natively mid-turn — Claude
+// Code, via autoCompactWindow — act during the loop and are more timely; this is
+// for agents that have no such mechanism, or for users who want compaction at a
+// visible, predictable turn boundary.
 type AutoCompressConfig struct {
 	Enabled    *bool `toml:"enabled,omitempty"`      // default false
 	MaxTokens  *int  `toml:"max_tokens,omitempty"`   // estimated token threshold to trigger /compress
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
-	// AllowHeuristic restores the legacy behavior of deciding from the
-	// text-length heuristic when no exact API-reported usage is available.
-	// Default false: such turns make no decision at all and wait for the next
-	// turn, which always carries exact usage. The heuristic ignores tool
-	// results and the fixed system-prompt+tools overhead, so it was measured
-	// 2.5x off (574,797 estimated vs 229,783 real) — leaving it on is what
-	// made auto-compress fire on the wrong signal.
+	// AllowHeuristic restores deciding from the text-length heuristic when an
+	// agent that CAN report exact usage has not reported it yet. Default false:
+	// such turns make no decision and wait for the next turn, which carries the
+	// exact number. The heuristic ignores tool results and the fixed
+	// system-prompt+tools overhead, so it was measured 2.5x off (574,797
+	// estimated vs 229,783 real).
+	//
+	// This does not apply to agents with no usage reporting at all: for them the
+	// heuristic is the only mechanism that has ever existed, and removing it
+	// would silently disable auto-compress for most of cc-connect's agents.
 	AllowHeuristic bool `toml:"allow_heuristic,omitempty"`
 }
 
