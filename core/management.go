@@ -402,9 +402,23 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 	defer m.mu.RUnlock()
 
 	platformSet := make(map[string]bool)
+	var degradedEntries []map[string]any
 	for _, e := range m.engines {
 		for _, p := range e.platforms {
 			platformSet[p.Name()] = true
+			// Issue #1618: surface per-platform degraded state in the
+			// management API so external monitors can alert on it.
+			if ph, ok := p.(PlatformHealth); ok {
+				info := ph.PlatformHealth()
+				if info.Degraded {
+					entry := map[string]any{
+						"name":    info.Name,
+						"reason":  info.DegradedReason,
+						"since":   info.DegradedSince,
+					}
+					degradedEntries = append(degradedEntries, entry)
+				}
+			}
 		}
 	}
 	platforms := make([]string, 0, len(platformSet))
@@ -423,6 +437,7 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 		"connected_platforms": platforms,
 		"projects_count":      len(m.engines),
 		"bridge_adapters":     adapters,
+		"degraded_platforms":  degradedEntries,
 	}
 	if m.bridgeServer != nil {
 		resp["bridge"] = map[string]any{
@@ -640,10 +655,24 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 	if r.Method == http.MethodGet {
 		platInfos := make([]map[string]any, len(e.platforms))
 		for i, p := range e.platforms {
-			platInfos[i] = map[string]any{
+			entry := map[string]any{
 				"type":      p.Name(),
 				"connected": true,
 			}
+			// Issue #1618: surface per-platform degraded state instead
+			// of a hardcoded "connected": true.
+			if ph, ok := p.(PlatformHealth); ok {
+				info := ph.PlatformHealth()
+				if info.Degraded {
+					entry["connected"] = false
+					entry["degraded"] = true
+					entry["degraded_reason"] = info.DegradedReason
+					if !info.DegradedSince.IsZero() {
+						entry["degraded_since"] = info.DegradedSince
+					}
+				}
+			}
+			platInfos[i] = entry
 		}
 
 		allSessions := e.sessions.AllSessions()
@@ -725,6 +754,14 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
+		}
+		if body.WorkDir != nil {
+			workDir, err := validateProjectWorkDir(*body.WorkDir)
+			if err != nil {
+				mgmtError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			*body.WorkDir = workDir
 		}
 
 		if body.Language != nil {

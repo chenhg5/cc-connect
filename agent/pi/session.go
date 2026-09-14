@@ -75,6 +75,15 @@ type piSession struct {
 	usageMu     sync.Mutex
 	lastUsage   *core.ContextUsage
 
+	// pendingErr buffers the most recent assistant errorMessage. Pi
+	// auto-retries transient provider failures (e.g. HTTP 429 rate limits)
+	// inside the same turn and announces this via agent_end.willRetry.
+	// Surfacing such errors immediately would make the engine fail the
+	// turn while Pi is still recovering it, and the retry outcome would
+	// be dropped as stale events. Only written from handleEvent, which
+	// runs on a single goroutine per mode.
+	pendingErr string
+
 	// RPC-only fields (nil/zero when rpc=false)
 	rpcCmd     *exec.Cmd
 	rpcStdin   io.WriteCloser
@@ -324,46 +333,48 @@ func (s *piSession) Send(msg string, messageID string, images []core.ImageAttach
 	}
 	cleanAttachments(attachDir)
 
-	var atFiles []string
+	// Issue #1723: images are passed via pi's @<path> argv / message-text
+	// mechanism. pi's processImage loads them as visual inputs and the
+	// bytes never enter our prompt text.
+	//
+	// Issue #1767: non-image files are NOT passed via @<path>. pi's
+	// processFileArguments reads every @<path> file's full UTF-8 contents
+	// and inlines them into the prompt the model sees. For a >~1MB text
+	// attachment this can blow the model's context and trigger a 400 from
+	// the provider. Mirror the claudecode behaviour: save non-image files
+	// to disk and tell the model where they live via a plain path
+	// reference; pi's own file-reading tools will load only the bytes the
+	// model actually needs.
+	var imageAtFiles []string
 	if len(images) > 0 {
-		atFiles = append(atFiles, saveImagesToDisk(attachDir, images)...)
+		imageAtFiles = append(imageAtFiles, saveImagesToDisk(attachDir, images)...)
 	}
+	var filePaths []string
 	if len(files) > 0 {
-		atFiles = append(atFiles, saveFilesToDisk(attachDir, files)...)
-	}
-
-	// Build the message with attachment contents embedded
-	var promptText strings.Builder
-	promptText.WriteString(msg)
-	for _, f := range atFiles {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			slog.Warn("piSession: cannot read attachment", "file", f, "error", err)
-			continue
-		}
-		promptText.WriteString("\n\n--- " + filepath.Base(f) + " ---\n")
-		promptText.Write(data)
+		filePaths = append(filePaths, saveFilesToDisk(attachDir, files)...)
 	}
 
 	if s.rpc {
-		return s.sendRPC(promptText.String())
+		return s.sendRPC(msg, imageAtFiles, filePaths)
 	}
-	return s.sendJSON(promptText.String())
+	return s.sendJSON(msg, imageAtFiles, filePaths)
 }
 
 // sendJSON spawns `pi --mode json -p <prompt>` as a one-shot process,
 // reads all output events, and sends them to the events channel.
-func (s *piSession) sendJSON(prompt string) error {
-	args := append(append([]string{}, s.extraArgs...), "--mode", "json", "-p", prompt)
-	if sid := s.CurrentSessionID(); sid != "" {
-		args = append(args, "--session-id", sid)
-	}
-	if s.model != "" {
-		args = append(args, "--model", s.model)
-	}
-	if s.thinking != "" {
-		args = append(args, "--thinking", s.thinking)
-	}
+//
+// Issue #1723: image paths are passed as @<path> argv entries (Pi's
+// standard mechanism). Embedding the image bytes into -p would crash
+// execve on NUL bytes, and would also break pi's vision pipeline which
+// needs to know the file is on disk rather than be handed raw bytes.
+//
+// Issue #1767: filePaths (non-image attachments) are NOT passed as
+// @<path>. We append a plain "Files saved locally, please read them: …"
+// trailer to the prompt instead — pi's processFileArguments would
+// otherwise inline the entire UTF-8 contents into the prompt the model
+// sees, which triggers a 400 for files larger than the model's context.
+func (s *piSession) sendJSON(prompt string, imageAtFiles []string, filePaths []string) error {
+	args := buildJSONArgs(s.extraArgs, promptWithFileRefs(prompt, filePaths), s.CurrentSessionID(), s.model, s.thinking, imageAtFiles)
 
 	slog.Debug("piSession: spawning json mode", "cmd", s.cmd, "sessionID", s.CurrentSessionID())
 
@@ -412,7 +423,17 @@ func (s *piSession) sendJSON(prompt string) error {
 		}
 	}
 
-	// Signal turn completion
+	// Signal turn completion. Flush a deferred terminal error first in
+	// case the process exited without a final non-retry agent_end (the
+	// agent_end handler normally flushes pendingErr already).
+	if s.pendingErr != "" {
+		errEvt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", s.pendingErr)}
+		s.pendingErr = ""
+		select {
+		case s.events <- errEvt:
+		case <-s.ctx.Done():
+		}
+	}
 	sid := s.CurrentSessionID()
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
 	select {
@@ -446,13 +467,77 @@ func (s *piSession) writeRPCCommand(cmd map[string]any) error {
 // sendRPC writes a JSON "prompt" command to the persistent RPC process stdin.
 // Events are read asynchronously by readLoopRPC, including agent_end which
 // triggers EventResult.
-func (s *piSession) sendRPC(prompt string) error {
+//
+// Issue #1723: image paths are embedded into the message text as
+// @<path> references (pi's standard mechanism, parsed the same way as in
+// json mode). The rpc stdin pipe doesn't crash on NUL bytes, but the
+// model still needs to load the images from disk — embedding raw bytes
+// in the message field would give the model text-shaped garbage instead
+// of a real visual input.
+//
+// Issue #1767: filePaths (non-image attachments) are NOT @<path>'d.
+// pi's processFileArguments would inline their full UTF-8 contents into
+// the message text the model sees; we append a plain "Files saved
+// locally, please read them: …" trailer instead so pi's own file
+// tools load only what the model actually needs.
+func (s *piSession) sendRPC(prompt string, imageAtFiles []string, filePaths []string) error {
 	cmd := map[string]any{
 		"type":    "prompt",
-		"message": prompt,
+		"message": composeRPCPrompt(promptWithFileRefs(prompt, filePaths), imageAtFiles),
 	}
 	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
 	return s.writeRPCCommand(cmd)
+}
+
+// promptWithFileRefs appends a plain-text trailer that tells the model
+// where non-image attachments were saved on disk. Pulled out of Send()
+// so the Issue #1767 regression test can assert that the path strings
+// appear in the prompt without inlining file bytes.
+//
+// The trailer mirrors the wording cc-connect uses for the claudecode
+// agent so users see consistent phrasing across runtimes. Paths are
+// joined with ", " and wrapped in parentheses to make the boundary with
+// the original prompt text unambiguous.
+//
+// Returns prompt unchanged when filePaths is empty — we do NOT emit an
+// empty "Files saved locally" trailer because an assistant model could
+// interpret that as a request to attach something that isn't there.
+func promptWithFileRefs(prompt string, filePaths []string) string {
+	if len(filePaths) == 0 {
+		return prompt
+	}
+	return prompt + "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
+}
+
+// composeRPCPrompt builds the rpc-mode message text, appending
+// "@<path>" references for any attachments. Pulled out of sendRPC so
+// the Issue #1723 attachment refactor is unit-testable without a live
+// rpc process.
+//
+// The format is stable on purpose:
+//   - a blank line separates the user's text from the attachment list
+//   - "Attachments:" header mirrors pi's CLI help so users see
+//     consistent wording whether they invoke the binary directly or
+//     via cc-connect
+//   - each @<path> is on its own line in the same order as atFiles
+//
+// When atFiles is empty the original prompt is returned unchanged —
+// we do NOT emit an empty "Attachments:" header, because an
+// assistant model could interpret that as a request to attach
+// something.
+func composeRPCPrompt(prompt string, atFiles []string) string {
+	if len(atFiles) == 0 {
+		return prompt
+	}
+	var b strings.Builder
+	b.WriteString(prompt)
+	b.WriteString("\n\nAttachments:\n")
+	for _, f := range atFiles {
+		b.WriteString("@")
+		b.WriteString(f)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // ── Event Handling (shared by both modes) ───────────────────
@@ -505,6 +590,25 @@ func (s *piSession) handleEvent(raw map[string]any) {
 
 	case "agent_end":
 		s.handleAgentEnd(raw)
+		if willRetry, _ := raw["willRetry"].(bool); willRetry {
+			// Pi is auto-retrying a transient failure (e.g. 429) inside
+			// this turn: it emits agent_end with willRetry=true, then
+			// re-runs the agent loop and emits a fresh agent_start /
+			// agent_end cycle. Keep the turn open and wait for the
+			// retry outcome instead of closing the turn on a failure
+			// Pi is about to recover from.
+			break
+		}
+		if s.pendingErr != "" {
+			// Turn is really over and the last assistant message failed:
+			// surface the deferred error before closing the turn.
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", s.pendingErr)}
+			s.pendingErr = ""
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+		}
 		if s.rpc {
 			// RPC mode: agent_end marks turn completion; json mode relies
 			// on process exit to emit EventResult.
@@ -815,6 +919,28 @@ func (s *piSession) handleMessageUpdate(raw map[string]any) {
 }
 
 func (s *piSession) emitToolFromMessage(ame map[string]any) {
+	// pi >= 0.84.0: message_update emits only assistantMessageEvent deltas
+	// (the cumulative message and assistantMessageEvent.partial were removed
+	// to make JSON/RPC streaming output linear). toolcall_end now carries the
+	// complete toolCall object directly, so read it before falling back to
+	// the pre-0.84.0 message/partial snapshots. (toolCall has carried the
+	// same finalized block on every released pi version, so the fast path
+	// always wins; the fallback is a defensive safety net.)
+	if tc, ok := ame["toolCall"].(map[string]any); ok {
+		if itemType, _ := tc["type"].(string); itemType == "toolCall" {
+			name, _ := tc["name"].(string)
+			input := extractToolInput(tc)
+			evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: input}
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+			return
+		}
+		// type != "toolCall" cannot happen on the real pi wire; fall through
+		// to the pre-0.84.0 snapshot path rather than silently dropping.
+	}
+
 	msg, _ := ame["message"].(map[string]any)
 	if msg == nil {
 		msg, _ = ame["partial"].(map[string]any)
@@ -880,11 +1006,15 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 
 	case "assistant":
 		if errMsg, ok := msg["errorMessage"].(string); ok && errMsg != "" {
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
-			}
+			// Defer surfacing: Pi may auto-retry this turn (announced
+			// via agent_end.willRetry). The buffered error is flushed
+			// by the agent_end handler once the turn truly ends, or by
+			// sendJSON on process exit.
+			s.pendingErr = errMsg
+		} else {
+			// A healthy assistant message supersedes any earlier error
+			// that Pi has already retried successfully.
+			s.pendingErr = ""
 		}
 	}
 }
@@ -1119,6 +1249,31 @@ func (s *piSession) GetContextUsage() *core.ContextUsage {
 	}
 	u := *s.lastUsage
 	return &u
+}
+
+// buildJSONArgs assembles the argv slice for the one-shot `pi --mode json`
+// process. Pulled out of sendJSON so the @<path> attachment refactor
+// (Issue #1723) can be unit-tested without spawning a process.
+//
+// Returns a fresh slice on every call — never aliased to the caller's
+// extraArgs, since sendJSON mutates it.
+func buildJSONArgs(extraArgs []string, prompt, sessionID, model, thinking string, atFiles []string) []string {
+	args := append(append([]string{}, extraArgs...), "--mode", "json", "-p", prompt)
+	if sessionID != "" {
+		args = append(args, "--session-id", sessionID)
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if thinking != "" {
+		args = append(args, "--thinking", thinking)
+	}
+	// Issue #1723: append attachment paths as @<path> argv entries (NOT
+	// inlined into the prompt text). pi treats them as inputs to load.
+	for _, f := range atFiles {
+		args = append(args, "@"+f)
+	}
+	return args
 }
 
 // ── Attachment helpers ───────────────────────────────────────

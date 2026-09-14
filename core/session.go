@@ -16,6 +16,13 @@ import (
 // to use --continue (resume most recent session) instead of a specific session ID.
 const ContinueSession = "__continue__"
 
+// ExplicitActivationTTL is the hard ceiling for the explicit-activation
+// exemption (issue #1731). Even when a user has `/switch`-ed to a session,
+// if no real user activity has been recorded for this long, the idle reset
+// must still fire so a long-silent session cannot permanently occupy the
+// active slot.
+const ExplicitActivationTTL = 7 * 24 * time.Hour
+
 // Session tracks one conversation between a user and the agent.
 type Session struct {
 	ID                  string         `json:"id"`
@@ -39,6 +46,15 @@ type Session struct {
 	// processes an actual incoming user message. It is used by reset_on_idle_mins
 	// so that automated activity cannot prevent idle session rotation.
 	LastUserActivity time.Time `json:"last_user_activity,omitempty"`
+
+	// ExplicitActivatedAt records when this session was last explicitly chosen
+	// by the user (via /switch, /new against an existing entry, or any other
+	// intentional selection). Issue #1731: an explicit choice should override
+	// reset_on_idle_mins, otherwise the very first message after /switch into
+	// a long-idle session is wrongly routed to a brand-new session.
+	// ExplicitActivationTTL caps how long this exemption lasts so abandoned
+	// sessions cannot permanently occupy the active slot.
+	ExplicitActivatedAt time.Time `json:"explicit_activated_at,omitempty"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
@@ -149,6 +165,30 @@ func (s *Session) TouchUserActivity() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.LastUserActivity = time.Now()
+}
+
+// MarkExplicitlyActivated records that the user explicitly chose this session
+// (issue #1731). Use this from /switch, SwitchToAgentSession, and any other
+// path that intentionally points the dispatcher at a specific session. The
+// idle-reset decision treats ExplicitActivatedAt as the baseline for the
+// explicit-activation grace window (capped at ExplicitActivationTTL).
+func (s *Session) MarkExplicitlyActivated() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markExplicitlyActivatedLocked()
+}
+
+// markExplicitlyActivatedLocked is the lock-free internal variant for
+// callers that already hold s.mu (tests, internal invariants).
+func (s *Session) markExplicitlyActivatedLocked() {
+	s.ExplicitActivatedAt = time.Now()
+}
+
+// GetExplicitActivatedAt returns when this session was last explicitly chosen.
+func (s *Session) GetExplicitActivatedAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ExplicitActivatedAt
 }
 
 // GetLastUserActivity returns when the last real user message was received.
@@ -386,6 +426,7 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 		s := sm.sessions[sid]
 		if s != nil && (s.ID == target || s.Name == target) {
 			sm.activeSession[userKey] = s.ID
+			s.MarkExplicitlyActivated()
 			sm.saveLocked()
 			return s, nil
 		}
@@ -411,6 +452,7 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 		s.mu.Unlock()
 		if aid == agentSID {
 			sm.activeSession[userKey] = s.ID
+			s.MarkExplicitlyActivated()
 			sm.saveLocked()
 			return s
 		}
@@ -418,6 +460,7 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 
 	s := sm.createLocked(userKey, summary)
 	s.SetAgentInfo(agentSID, agentName, summary)
+	s.MarkExplicitlyActivated()
 	sm.saveLocked()
 	return s
 }
@@ -645,6 +688,11 @@ func (sm *SessionManager) saveLocked() {
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,
+			LastUserActivity:    s.LastUserActivity,
+			// #1731: explicit-activation timestamp must survive a process
+			// restart; otherwise a /switch followed by a crash would lose the
+			// exemption and the next message after restart would be rotated.
+			ExplicitActivatedAt: s.ExplicitActivatedAt,
 		}
 		s.mu.Unlock()
 	}

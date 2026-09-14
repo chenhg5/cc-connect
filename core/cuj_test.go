@@ -40,6 +40,37 @@ import (
 	"time"
 )
 
+// CUJ: submit work during slow startup, queue a follow-up while the agent is
+// working, then check status. Both messages have receipts before either answer;
+// draining the queue must preserve each receipt without adding another one.
+func TestCUJ_A8_ImmediateReceiptsDuringStartupAndQueue(t *testing.T) {
+	env := newReceiptAckEnv(t, nil)
+
+	// User action 1: submit the first task while agent startup is blocked.
+	env.send("first", "first task", 1000)
+	env.awaitStartup()
+	env.assertReceipts("first")
+	close(env.startup.release)
+	env.awaitSendCount(1)
+
+	// User action 2: submit a follow-up while the first task awaits its result.
+	env.send("second", "follow-up task", 2000)
+	env.assertReceipts("first", "second")
+	env.awaitVisible(env.engine.i18n.T(MsgMessageQueued))
+
+	// User action 3: check status; local commands do not claim an agent turn.
+	env.send("status", "/status", 3000)
+	env.assertReceipts("first", "second")
+
+	env.startup.session.events <- Event{Type: EventResult, Content: "first answer", Done: true}
+	env.awaitVisible("first answer")
+	env.awaitSendCount(2)
+	env.assertReceipts("first", "second")
+	env.startup.session.events <- Event{Type: EventResult, Content: "second answer", Done: true}
+	env.awaitVisible("second answer")
+	env.assertReceipts("first", "second")
+}
+
 // ---------------------------------------------------------------------------
 // Helper types: cujAgent + cujAgentSession give per-CUJ control over what the
 // agent "replies" for each user prompt, without bringing up a real LLM.

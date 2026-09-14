@@ -79,6 +79,11 @@
 </tr>
 
 <tr>
+<td width="150"><a href="https://go.apimart.ai/gh-cc-connect"><img src="assets/sponsors/apimart.png" alt="APIMart" width="120"></a></td>
+<td>感谢 APIMart 赞助本项目！APIMart 是专注 AI 图片/视频生成的低价 API 平台，GPT-Image-2 低至 $0.006/张，1 美元可出图 160+ 张。图片、视频一套异步 API 通吃，提交任务拿 ID、回调取结果，跑批万张不超时、换模型不改代码。按量付费、无月费，通过 <a href="https://go.apimart.ai/gh-cc-connect">此注册链接</a> 注册即可开用。</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://www.dmxapi.cn/register?aff=NDln"><img src="assets/sponsors/dmx-zh.jpeg" alt="DMXAPI" width="120"></a></td>
 <td>感谢 DMXAPI（大模型API）赞助本项目！DMXAPI，一个 Key 用全球大模型。为 200+ 企业用户提供全球大模型 API 服务。充值即开票、当天开票、并发不限制、1元起充、7x24 在线技术辅导。GPT/Claude/Gemini 全部 6.8 折，国内模型 5~8 折，Claude Code 专属模型 3.4 折进行中！<a href="https://www.dmxapi.cn/register?aff=NDln">点击这里注册</a></td>
 </tr>
@@ -187,21 +192,19 @@
 </p>
 
 
-## 🆕 v1.3.3 更新了什么
+## 🆕 v1.5.1-beta.1 更新了什么
 
-1.3.3 系列首个正式版 —— 把 beta.1 → beta.5（自 v1.3.2 起约 235 个 PR）与 7 个 post-beta 修复一并稳定下来。亮点：
+自 v1.5.0 正式版以来的 beta —— 16 个已合并 PR。亮点：
 
-- **新增 Agent** — Devin CLI、Google Antigravity (`agy`)、GitHub Copilot CLI 均为一等公民 agent (#672, #1123, #865)；Cursor / OpenCode / Qoder / Kimi / Pi 覆盖大幅加强。
-- **平台能力扩展** — QQ (OneBot) 文件收发 (#323)、QQ Bot 内联键盘 (#1131)、企业微信 WebSocket `SendFile` (#1199)、飞书原生音视频附件 (#1202)、Slack Assistant API (#844)、MAX webhook 投递模式 (#818)、钉钉 @mention / richText / 图片 / 文件入站 (#1188, #828, #1357)、微博私信能力扩充、WPS 协作（金山协作）。
-- **长任务保护** — 新增 `max_turn_time_mins` 绝对墙钟上限，软停 + 强杀 + 下一条消息自动 `--resume`，避免长跑的 bash / test 命令把 session 永久锁住 (#1091)。
-- **新核心命令** — `/timer`（一次性延时任务）、`/cancel`（中断当前 turn）、`/ps`（替代 `/btw`，`/btw` 保留为别名）、`cron add --silent`、agent 主动 TTS 输出。
-- **多用户 / 权限** — 可选「回复未授权 IM 发件人」、`@Bot/permit` ≡ `/permit` 关键字匹配、Bridge 启用时必须配置 token。
-- **Provider 生态** — 新增 NekoCode、VisionCoder、AIHubMix、MiniMax M3 预设；Claude Code 1M-context Opus + `append_system_prompt` + PermissionRequest hooks；Codex `request_user_input` app-server 事件；可配置 `shell` 与 shell profile。
-- **可观测性** — Blackbox 测试框架（P0/P1/P2 + config-switch 矩阵）、CUJ 测试框架、codex/opencode/kimi 的 provider-resume 回归套件、Pi 在 reply footer 输出 context 用量。
+- **i18n** — 按 language 配置本地化 agent system prompt（cron/timer/send/relay）(#1721)。
+- **Cursor** — 图片附件通过 on-disk path 传给 Cursor CLI (#1709)。
+- **飞书** — 大文件 HTTP Range 分块下载，绕过 code=234037 (#1746)；bot open_id 发现失败 fail-closed (#1725)。
+- **微信** — 回复/推送分路径 send budget (#1743)；入站 dedup 可配置 (#1733)。
+- **Claude Code** — 移除 `--replay-user-messages`，恢复 `/compact` 等 slash 命令 (#1737)；session teardown 竞态修复 (#1714)。
+- **Codex** — 传播 app-server turn 失败 (#1730)；支持 max reasoning effort (#1727)；`/list` 正确读 session 名 (#1639)。
+- **Pi** — 附件 @path 引用而非 inline bytes (#1724)；Windows 编译修复 (#1738)。
 
-⚠️ **行为变更（可能需要改配置）**：Telegram / Discord `progress_style` 默认值改为 `compact`（设回 `legacy` 可还原）；QQ Bot 默认 `intents` 现在包含 `INTERACTION_CREATE`，若自定义 `intents` 需手动包含 `1<<26`；钉钉 `msgtype=file` 入站现在送达 agent；引擎权限关键字容忍 @mention；`reset_on_idle_mins` 默认值改为 30 分钟；Bridge 未配置 token 时拒绝启动。完整主题汇总见 `changelogs/v1.3.3.md`。
-
-无任何破坏性变更（No breaking changes）。从任意 v1.3.3-beta.\* 升级到 v1.3.3 是 fix-only 的小升级。
+无任何破坏性变更。完整 changelog 见 `changelogs/v1.5.1-beta.1.md`。
 
 
 ## 🧩 平台能力一览

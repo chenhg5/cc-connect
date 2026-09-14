@@ -419,6 +419,51 @@ func TestSessionConfig_MatchesCopilotCreateResumeShape(t *testing.T) {
 	}
 }
 
+// TestSessionConfig_SendsEnableConfigDiscoveryForSkills is a regression test
+// for skills under ~/.agents/skills (and every other discovered source) never
+// loading in cc-connect sessions.
+//
+// Copilot CLI's session.create/session.resume config builder defaults
+// enableConfigDiscovery to false and derives enableSkills from it
+// (`enableSkills: t.enableSkills ?? t.enableConfigDiscovery`). Note the
+// asymmetry that made this easy to miss: the lower-level skill discovery
+// helpers default the same flag to true, so interactive `copilot` and
+// `copilot -p` load skills fine — only the programmatic session.create path
+// defaults it off. Omitting the field therefore left cc-connect sessions with
+// builtin skills only, while `copilot skill list` in the same directory
+// listed all of them.
+func TestSessionConfig_SendsEnableConfigDiscoveryForSkills(t *testing.T) {
+	cs := &copilotSession{model: "gpt-5.2", workDir: "/work/project"}
+	cfg := cs.sessionConfig("sess-1")
+
+	if cfg.EnableConfigDiscovery == nil {
+		t.Fatal("EnableConfigDiscovery = nil (field omitted from session.create); " +
+			"Copilot CLI then defaults it to false and disables all skill discovery")
+	}
+	if !*cfg.EnableConfigDiscovery {
+		t.Fatalf("EnableConfigDiscovery = %v, want true", *cfg.EnableConfigDiscovery)
+	}
+
+	// The wire payload must actually carry the flag — `omitempty` on a *bool
+	// only elides a nil pointer, but assert it to pin the serialized shape
+	// Copilot CLI reads.
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal session config: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal session config: %v", err)
+	}
+	got, ok := wire["enableConfigDiscovery"]
+	if !ok {
+		t.Fatalf("session.create payload has no enableConfigDiscovery key: %s", raw)
+	}
+	if got != true {
+		t.Fatalf("enableConfigDiscovery = %v, want true, payload: %s", got, raw)
+	}
+}
+
 func TestRespondPermission_RPCUsesCopilotResultShape(t *testing.T) {
 	var buf bytes.Buffer
 	cs := &copilotSession{

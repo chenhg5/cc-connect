@@ -107,10 +107,12 @@ func init() {
 }
 
 type replyContext struct {
-	messageID       string
-	chatID          string
-	sessionKey      string
-	bootstrapThread bool
+	messageID        string
+	chatID           string
+	sessionKey       string
+	bootstrapThread  bool
+	receiptEmoji     string // persistent reaction owned by the accepted-message callback
+	receiptMessageID string
 }
 
 type Platform struct {
@@ -123,6 +125,7 @@ type Platform struct {
 	useInteractiveCard         bool
 	self                       core.Platform
 	reactionEmoji              string
+	ackEmoji                   string
 	doneEmoji                  string
 	allowFrom                  string
 	allowChat                  string
@@ -131,6 +134,7 @@ type Platform struct {
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
+	groupChatHistoryShare      bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -143,13 +147,25 @@ type Platform struct {
 	cancel           context.CancelFunc
 	dedup            *core.MessageDedup
 	botOpenID        string
-	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
-	mentionMap       map[string]string // agent name -> open_id (for outbound @ resolution)
-	userNameCache    sync.Map          // open_id -> display name
-	chatNameCache    sync.Map          // chat_id -> chat name
-	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
-	recalledMu       sync.Mutex
-	recalledMsgIDs   map[string]time.Time // message_id -> recall time, short TTL race guard
+	// groupFilterDegraded is true when bot open_id discovery failed at startup
+	// (e.g. transient network/DNS/proxy outage). When true, group chat mention
+	// filtering fails closed (silently drops group messages without @bot) instead
+	// of failing open (accepting every group message). DM traffic is unaffected.
+	// Issue #1618: previous behavior treated botOpenID=="" as "filter off", which
+	// silently turned the bot into a loud responder for the rest of the process
+	// lifetime when the bot-info API failed.
+	groupFilterDegraded    bool
+	groupFilterDegradedAt  time.Time
+	groupFilterDegradedErr string
+	groupFilterRetryCancel context.CancelFunc
+	groupFilterRetryStop   chan struct{}
+	peerBots               map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	mentionMap             map[string]string // agent name -> open_id (for outbound @ resolution)
+	userNameCache          sync.Map          // open_id -> display name
+	chatNameCache          sync.Map          // chat_id -> chat name
+	chatMemberCache        sync.Map          // chatID -> *chatMemberEntry
+	recalledMu             sync.Mutex
+	recalledMsgIDs         map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
 	server       *http.Server
 	port         string
@@ -170,6 +186,14 @@ type Platform struct {
 	// stale entries can be expired by a future TTL sweep if needed.
 	activeThreadSessions sync.Map // sessionKey -> time.Time
 
+	// pendingGroupHistory keeps text/post messages that were observed in an
+	// allowed group chat without an explicit bot trigger. It is deliberately
+	// platform-local and in-memory: the next accepted agent turn consumes the
+	// snapshot, while slash commands that are handled by core leave it intact.
+	groupHistoryMu      sync.Mutex
+	pendingGroupHistory map[string][]groupHistoryEntry
+	nextGroupHistoryID  uint64
+
 	richCardImageMu         sync.Mutex
 	richCardImageResolved   map[string]string
 	richCardImagePending    map[string]*richCardImageUpload
@@ -185,6 +209,29 @@ type Platform struct {
 	imageBatchMu     sync.Mutex
 	imageBatch       map[string]*imageBatchEntry
 	imageBatchWindow time.Duration // quiet period before flushing a batch; 0 means use defaultImageBatchWindow
+
+	// resourceDownloadHTTP is the bare HTTP client used to download message
+	// resources directly from Feishu with HTTP Range requests. The larkim SDK's
+	// GetMessageResource does not expose a Range header (#1741), so for files
+	// larger than ~2MB the SDK issues a plain GET and Feishu rejects the
+	// response with code=234037. Bypassing the SDK with our own client and
+	// Range header is the supported workaround.
+	resourceDownloadHTTP *http.Client
+	// resourceChunkSize is the byte size of each Range request issued during
+	// chunked downloads. 8 MiB matches Feishu's documented guidance and keeps
+	// memory bounded. Operators can override via resource_chunk_size_bytes in
+	// config; values are clamped to [1 MiB, 64 MiB].
+	resourceChunkSize int64
+	// resourceMaxBytes caps the total bytes a single resource download may
+	// consume, guarding against adversarial servers that report an
+	// unboundedly large Content-Length. 512 MiB matches cc-connect's own
+	// inbound attachment cap and is large enough for any plausible bot user
+	// attachment on Feishu/Lark today.
+	resourceMaxBytes int64
+	// fetchResourceToken returns the bearer token used for resource downloads.
+	// When nil, defaults to fetchFreshTenantAccessToken. Indirected so unit
+	// tests can inject a stub without spinning up the full lark SDK.
+	fetchResourceToken func(ctx context.Context) (string, error)
 }
 
 // defaultImageBatchWindow is the quiet period after the last image in a
@@ -195,6 +242,17 @@ type Platform struct {
 // image sends. Operators that need a longer or shorter window can override
 // it via the platform option `image_batch_window_ms`.
 const defaultImageBatchWindow = 500 * time.Millisecond
+
+// defaultResourceMaxBytes caps the total bytes a single Feishu resource
+// download may consume. Feishu's message-resource endpoint does not validate
+// caller-side size limits beyond the per-app upload cap (typically 1 GiB for
+// files; 60 MiB for images), and a misconfigured server can advertise a
+// Content-Length orders of magnitude larger than the actual resource. 512 MiB
+// matches the inbound attachment cap cc-connect applies everywhere else and is
+// large enough to cover any realistic bot user attachment on Feishu/Lark.
+// Operators that need to download larger files can raise this via
+// resource_max_bytes; the value is clamped to a sane minimum of 1 MiB.
+const defaultResourceMaxBytes int64 = 512 * 1024 * 1024
 
 // batchWindow returns the effective image-batch coalesce window for this
 // Platform. Tests and zero-initialised Platforms fall back to the default so
@@ -244,6 +302,7 @@ type imageBatchEntry struct {
 	chatName     string
 	rctx         replyContext
 	quoted       quotedMessage
+	onAccepted   func()
 	images       []core.ImageAttachment
 	messageIDs   []string
 	createTimeMs int64
@@ -294,6 +353,11 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["reaction_emoji"].(string); ok && v == "none" {
 		reactionEmoji = ""
 	}
+	ackEmoji, _ := opts["ack_emoji"].(string)
+	ackEmoji = strings.TrimSpace(ackEmoji)
+	if strings.EqualFold(ackEmoji, "none") {
+		ackEmoji = ""
+	}
 	doneEmoji, _ := opts["done_emoji"].(string)
 	if doneEmoji == "none" {
 		doneEmoji = ""
@@ -311,6 +375,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	groupChatHistoryShare, _ := opts["group_chat_history_share"].(bool)
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -370,6 +435,27 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		imageBatchWindow = time.Duration(ms) * time.Millisecond
 	}
 
+	// resource_chunk_size_bytes: byte size for each Range request when chunked-
+	// downloading Feishu message resources (issue #1741). The larkim SDK does
+	// not expose Range headers, so for resources above ~2 MiB a plain GET
+	// returns code=234037. Default 8 MiB; clamped to [1 MiB, 64 MiB].
+	resourceChunkSize := int64(8 * 1024 * 1024)
+	if raw, ok := opts["resource_chunk_size_bytes"]; ok {
+		n, err := coerceMilliseconds(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: invalid resource_chunk_size_bytes %v: %w", name, raw, err)
+		}
+		if n > 0 {
+			resourceChunkSize = n
+		}
+	}
+	if resourceChunkSize < 1*1024*1024 {
+		resourceChunkSize = 1 * 1024 * 1024
+	}
+	if resourceChunkSize > 64*1024*1024 {
+		resourceChunkSize = 64 * 1024 * 1024
+	}
+
 	// Webhook mode configuration (for Lark international version)
 	port, _ := opts["port"].(string)
 	if port == "" {
@@ -394,6 +480,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
 		reactionEmoji:              reactionEmoji,
+		ackEmoji:                   ackEmoji,
 		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
 		allowChat:                  allowChat,
@@ -402,6 +489,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
+		groupChatHistoryShare:      groupChatHistoryShare,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -414,6 +502,9 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		mentionMap:                 mentionMap,
 		imageBatch:                 make(map[string]*imageBatchEntry),
 		imageBatchWindow:           imageBatchWindow,
+		resourceDownloadHTTP:       &http.Client{Timeout: 60 * time.Second},
+		resourceChunkSize:          resourceChunkSize,
+		resourceMaxBytes:           defaultResourceMaxBytes,
 	}
 	if !useInteractiveCard {
 		base.self = base
@@ -478,8 +569,22 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	// can still receive events and operate correctly. We therefore only attempt
 	// bot open_id discovery eagerly for WebSocket mode.
 	if !p.shouldUseWebhookMode() {
-		if openID, err := p.fetchBotOpenID(); err != nil {
-			slog.Warn(p.platformName+": failed to get bot open_id, group chat filtering disabled", "error", err)
+		openID, err := p.fetchBotOpenIDWithRetry(p.bgCtxForStartup())
+		if err != nil {
+			// Issue #1618: previous code failed open here — when bot open_id
+			// discovery failed, the group mention filter read botOpenID=="" as
+			// "filter off", which made the bot reply to every group message for
+			// the rest of the process lifetime. Now we fail closed: mark the
+			// filter as degraded (group chats silently drop messages without
+			// @bot; DM traffic is unaffected), upgrade the log to ERROR, and
+			// start a background supervisor that retries every 5 minutes so
+			// transient proxy/DNS/VPN issues self-heal without a process restart.
+			p.markGroupFilterDegraded(err)
+			slog.Error(p.platformName+": failed to get bot open_id; group chat filtering is degraded (group messages without @bot will be silently dropped) — a background supervisor will keep retrying",
+				"error", err,
+				"supervision_interval", groupFilterRetryInterval,
+			)
+			p.startGroupFilterSupervisor()
 		} else {
 			p.mu.Lock()
 			p.botOpenID = openID
@@ -895,10 +1000,14 @@ func (p *Platform) addReaction(messageID string) string {
 }
 
 func (p *Platform) addReactionWithEmoji(messageID, emojiType string) string {
+	return p.addReactionWithEmojiContext(context.Background(), messageID, emojiType)
+}
+
+func (p *Platform) addReactionWithEmojiContext(ctx context.Context, messageID, emojiType string) string {
 	if emojiType == "" {
 		return ""
 	}
-	resp, err := p.client.Im.MessageReaction.Create(context.Background(),
+	resp, err := p.client.Im.MessageReaction.Create(ctx,
 		larkim.NewCreateMessageReactionReqBuilder().
 			MessageId(messageID).
 			Body(larkim.NewCreateMessageReactionReqBodyBuilder().
@@ -942,6 +1051,12 @@ func (p *Platform) removeReaction(messageID, reactionID string) {
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(replyContext)
 	if !ok || rc.messageID == "" {
+		return func() {}
+	}
+	// Feishu identifies a bot's reaction by message and emoji. If receipt and
+	// processing use the same emoji, the persistent receipt owns it: creating
+	// and later deleting a typing reaction would remove the receipt as well.
+	if rc.receiptMessageID == rc.messageID && rc.receiptEmoji != "" && rc.receiptEmoji == p.reactionEmoji {
 		return func() {}
 	}
 	reactionID := p.addReaction(rc.messageID)
@@ -1095,7 +1210,47 @@ func (p *Platform) dispatchCoreMessage(msg *core.Message) {
 		slog.Debug(p.tag()+": recalled message dispatch dropped", "message_id", msg.MessageID)
 		return
 	}
+	p.prepareReceiptAcknowledgement(msg)
 	h(p.dispatchPlatform(), msg)
+}
+
+// prepareReceiptAcknowledgement waits for the engine's admission decision.
+// OnAccepted runs before agent startup or after successful queue insertion;
+// rejected messages and local commands never invoke it. Preserve the existing
+// callback (for example group-history consumption) and keep network IO out of
+// the admission path, which may hold the session queue lock.
+func (p *Platform) prepareReceiptAcknowledgement(msg *core.Message) {
+	rc, ok := msg.ReplyCtx.(replyContext)
+	if p.ackEmoji == "" || !ok || rc.messageID == "" || msg.MessageID == "" || msg.Recalled {
+		return
+	}
+	if rc.receiptEmoji != "" {
+		return // the message already carries this callback
+	}
+	rc.receiptEmoji = p.ackEmoji
+	// Image batches retain the first image's reply context but are admitted
+	// under the newest canonical message ID. Acknowledge that accepted message.
+	rc.receiptMessageID = msg.MessageID
+	msg.ReplyCtx = rc
+	previous := msg.OnAccepted
+	var once sync.Once
+	msg.OnAccepted = func() {
+		once.Do(func() {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if p.isMessageRecalled(rc.receiptMessageID) {
+					return
+				}
+				if p.addReactionWithEmojiContext(ctx, rc.receiptMessageID, rc.receiptEmoji) == "" {
+					slog.Warn(p.tag()+": receipt acknowledgement failed", "message_id", rc.receiptMessageID)
+				}
+			}()
+			if previous != nil {
+				previous()
+			}
+		})
+	}
 }
 
 // populateWorkspaceChannelKeys keeps workspace binding scope aligned with the
@@ -1204,6 +1359,34 @@ func (p *Platform) flushImageBatchByRef(sessionKey string, ref *imageBatchEntry)
 	p.dispatchImageBatchEntry(current)
 }
 
+// flushImageBatchForSession synchronously dispatches the pending image batch
+// (if any) for the given session key, then returns. Called from non-image
+// dispatchMessage branches (text/audio/file/post/media/...) so an image
+// already buffered for this session is sent to the engine before the new
+// message advances the user-message watermark. Without this flush, the
+// batch timer can fire AFTER the text message has set the watermark, causing
+// core/engine.go to drop the image as stale (see #1686 P1-B and #1395).
+//
+// Safe to call when no batch is buffered for this session — it is a no-op.
+func (p *Platform) flushImageBatchForSession(sessionKey string) {
+	if sessionKey == "" {
+		return
+	}
+	p.imageBatchMu.Lock()
+	entry, ok := p.imageBatch[sessionKey]
+	if !ok {
+		p.imageBatchMu.Unlock()
+		return
+	}
+	if entry.timer != nil {
+		entry.timer.Stop()
+	}
+	delete(p.imageBatch, sessionKey)
+	p.imageBatchMu.Unlock()
+
+	p.dispatchImageBatchEntry(entry)
+}
+
 // flushImageBatches synchronously dispatches any pending image batches.
 // Intended to be called from Stop() so buffered images aren't lost when
 // cc-connect shuts down.
@@ -1248,6 +1431,7 @@ func (p *Platform) dispatchImageBatchEntry(entry *imageBatchEntry) {
 		UserID:    entry.userID, UserName: entry.userName, ChatName: entry.chatName,
 		Content:           "",
 		ExtraContent:      entry.quoted.text,
+		OnAccepted:        entry.onAccepted,
 		Images:            append(entry.quoted.images, entry.images...),
 		ReplyCtx:          entry.rctx,
 		UserMessageTimeMs: entry.createTimeMs,
@@ -1271,6 +1455,7 @@ func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageR
 	}
 
 	p.markMessageRecalled(messageID)
+	p.removeGroupHistory(messageID)
 	slog.Info(p.tag()+": message recalled",
 		"message_id", messageID,
 		"chat_id", chatID,
@@ -1290,6 +1475,213 @@ func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageR
 	return nil
 }
 
+func isGroupHistoryMessageType(msgType string) bool {
+	return msgType == "text" || msgType == "post"
+}
+
+// groupHistoryScope deliberately differs from makeSessionKey. With
+// thread_isolation enabled, a main-channel mention creates a root-scoped
+// agent session, but later main-channel messages must remain in the chat-level
+// history rather than being attached to that forked session.
+func (p *Platform) groupHistoryScope(msg *larkim.EventMessage, chatID string) string {
+	if chatID == "" {
+		return ""
+	}
+	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
+		if rootID := stringValue(msg.RootId); rootID != "" {
+			return "thread:" + chatID + ":" + rootID
+		}
+	}
+	return "chat:" + chatID
+}
+
+func (p *Platform) historyText(msgType, content string, mentions []*larkim.MentionEvent) string {
+	if content == "" {
+		return ""
+	}
+	switch msgType {
+	case "text":
+		var textBody struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(content), &textBody); err != nil {
+			return ""
+		}
+		return stripMentions(textBody.Text, mentions, p.getBotOpenID())
+	case "post":
+		return strings.TrimSpace(extractPostPlainText(content))
+	default:
+		return ""
+	}
+}
+
+func (p *Platform) rememberGroupHistory(scope, messageID, msgType, content string, mentions []*larkim.MentionEvent, senderID, senderType string) {
+	if !p.groupChatHistoryShare || scope == "" || !isGroupHistoryMessageType(msgType) {
+		return
+	}
+	text := p.historyText(msgType, content, mentions)
+	if text == "" {
+		return
+	}
+
+	p.groupHistoryMu.Lock()
+	defer p.groupHistoryMu.Unlock()
+	p.nextGroupHistoryID++
+	entry := groupHistoryEntry{
+		id:         p.nextGroupHistoryID,
+		messageID:  messageID,
+		senderID:   senderID,
+		senderType: senderType,
+		text:       text,
+	}
+	history := append(p.pendingGroupHistory[scope], entry)
+	if len(history) > maxPendingGroupHistoryEntries {
+		history = history[len(history)-maxPendingGroupHistoryEntries:]
+	}
+	if p.pendingGroupHistory == nil {
+		p.pendingGroupHistory = make(map[string][]groupHistoryEntry)
+	}
+	p.pendingGroupHistory[scope] = history
+}
+
+func (p *Platform) removeGroupHistory(messageID string) {
+	if messageID == "" {
+		return
+	}
+	p.groupHistoryMu.Lock()
+	defer p.groupHistoryMu.Unlock()
+	for scope, history := range p.pendingGroupHistory {
+		kept := history[:0]
+		for _, entry := range history {
+			if entry.messageID != messageID {
+				kept = append(kept, entry)
+			}
+		}
+		if len(kept) == 0 {
+			delete(p.pendingGroupHistory, scope)
+		} else {
+			p.pendingGroupHistory[scope] = kept
+		}
+	}
+}
+
+func (p *Platform) snapshotGroupHistory(scope string) groupHistoryContext {
+	if !p.groupChatHistoryShare || scope == "" {
+		return groupHistoryContext{}
+	}
+
+	p.groupHistoryMu.Lock()
+	history := append([]groupHistoryEntry(nil), p.pendingGroupHistory[scope]...)
+	p.groupHistoryMu.Unlock()
+	if len(history) == 0 {
+		return groupHistoryContext{}
+	}
+
+	maxID := history[len(history)-1].id
+	var once sync.Once
+	return groupHistoryContext{
+		entries: history,
+		onAccepted: func() {
+			once.Do(func() { p.consumeGroupHistory(scope, maxID) })
+		},
+	}
+}
+
+func (p *Platform) consumeGroupHistory(scope string, maxID uint64) {
+	p.groupHistoryMu.Lock()
+	defer p.groupHistoryMu.Unlock()
+	history := p.pendingGroupHistory[scope]
+	kept := history[:0]
+	for _, entry := range history {
+		if entry.id > maxID {
+			kept = append(kept, entry)
+		}
+	}
+	if len(kept) == 0 {
+		delete(p.pendingGroupHistory, scope)
+		return
+	}
+	p.pendingGroupHistory[scope] = kept
+}
+
+func (p *Platform) resetGroupHistory(scope string) {
+	if scope == "" {
+		return
+	}
+	p.groupHistoryMu.Lock()
+	delete(p.pendingGroupHistory, scope)
+	p.groupHistoryMu.Unlock()
+}
+
+func (p *Platform) historySenderName(entry groupHistoryEntry) string {
+	if strings.EqualFold(entry.senderType, "app") {
+		return p.resolveBotSenderName(entry.senderID)
+	}
+	if entry.senderID == "" {
+		return "User"
+	}
+	if cached, ok := p.userNameCache.Load(entry.senderID); ok {
+		if name, ok := cached.(string); ok && name != "" {
+			return name
+		}
+	}
+	if p.client != nil {
+		if name := p.resolveUserName(entry.senderID); name != "" && name != entry.senderID {
+			return name
+		}
+	}
+	return entry.senderID
+}
+
+func (p *Platform) formatGroupHistory(ctx groupHistoryContext) string {
+	if len(ctx.entries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	formatted := 0
+	for _, entry := range ctx.entries {
+		if entry.messageID != "" && p.isMessageRecalled(entry.messageID) {
+			continue
+		}
+		if formatted == 0 {
+			b.WriteString("--- Recent Feishu group messages (context only) ---\n")
+		}
+		name := strings.NewReplacer("\n", " ", "\r", "").Replace(p.historySenderName(entry))
+		fmt.Fprintf(&b, "%s:\n%s\n\n", name, entry.text)
+		formatted++
+	}
+	if formatted == 0 {
+		return ""
+	}
+	b.WriteString("---\n\n")
+	return b.String()
+}
+
+func joinFeishuExtraContent(parts ...string) string {
+	var nonEmpty []string
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			nonEmpty = append(nonEmpty, strings.TrimSpace(part))
+		}
+	}
+	return strings.Join(nonEmpty, "\n\n")
+}
+
+func (p *Platform) isGroupHistoryNewCommand(msgType, content string, mentions []*larkim.MentionEvent) bool {
+	if msgType != "text" {
+		return false
+	}
+	var textBody struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal([]byte(content), &textBody) != nil {
+		return false
+	}
+	text := strings.TrimSpace(stripMentions(textBody.Text, mentions, p.getBotOpenID()))
+	fields := strings.Fields(text)
+	return len(fields) > 0 && strings.EqualFold(fields[0], "/new")
+}
+
 func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	msg := event.Event.Message
 	sender := event.Event.Sender
@@ -1304,6 +1696,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		chatID = *msg.ChatId
 	}
 	userID := userIDFromEvent(sender.SenderId)
+	senderType := ""
+	if sender.SenderType != nil {
+		senderType = *sender.SenderType
+	}
 	// userName and chatName are resolved in dispatchMessage to avoid blocking
 	// the SDK dispatcher goroutine with synchronous HTTP calls.
 
@@ -1354,12 +1750,40 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// Pre-compute sessionKey so the @bot filter below can consult the active
 	// thread set; sessionKey is also used downstream for dispatch.
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
+	botOpenID := p.getBotOpenID()
+	filterActive := botOpenID != "" || p.IsGroupFilterDegraded()
+	botMentioned := botOpenID != "" && isBotMentioned(msg.Mentions, botOpenID)
+	atEveryone := p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all")
 
-	if chatType == "group" && !p.groupReplyAll && p.getBotOpenID() != "" {
-		if !isBotMentioned(msg.Mentions, p.getBotOpenID()) {
+	// With history sharing enabled, observe ordinary text/post messages only
+	// after the chat-level allow list has admitted the chat. Do this before the
+	// existing mention filter and before allow_from: the chat controls whether
+	// cc-connect may observe the conversation, while allow_from controls who may
+	// trigger an agent turn.
+	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" &&
+		!botMentioned && !atEveryone && isGroupHistoryMessageType(msgType) {
+		if !core.AllowList(p.allowChat, chatID) {
+			slog.Debug(p.tag()+": group history ignored for unauthorized chat", "chat_id", chatID)
+			return nil
+		}
+		p.rememberGroupHistory(
+			p.groupHistoryScope(msg, chatID), messageID, msgType, stringValue(msg.Content), msg.Mentions,
+			userID, senderType,
+		)
+		return nil
+	}
+
+	// Issue #1618: the mention filter used to gate on `botOpenID != ""`,
+	// which silently *disabled* filtering when bot discovery had failed
+	// at startup — the bot would answer every group message for the
+	// rest of the process lifetime. We now consult both flags: when
+	// the filter is degraded we fail closed (drop the message) and
+	// emit a periodic warning, instead of failing open.
+	if chatType == "group" && !p.groupReplyAll && filterActive {
+		if !botMentioned {
 			switch {
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
-			case p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all"):
+			case atEveryone:
 				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
 			// Once a thread has been engaged via @bot, allow follow-up
 			// attachment-only messages (image/file/audio) in the same thread
@@ -1370,7 +1794,18 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 				slog.Debug(p.tag()+": passing attachment through active thread without mention",
 					"chat_id", chatID, "session_key", sessionKey, "msg_type", msgType, "message_id", messageID)
 			default:
-				slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
+				if p.IsGroupFilterDegraded() && botOpenID == "" {
+					// Fail closed: drop the message. Use WARN (not
+					// ERROR) here per-message to avoid log floods;
+					// the supervisor already emits a periodic ERROR
+					// with the underlying cause.
+					slog.Warn(p.tag()+": group filter degraded; dropping non-mention group message (use /status to inspect)",
+						"chat_id", chatID,
+						"message_id", messageID,
+					)
+				} else {
+					slog.Debug(p.tag()+": ignoring group message without bot mention", "chat_id", chatID)
+				}
 				return nil
 			}
 		}
@@ -1405,6 +1840,15 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	parentID := stringValue(msg.ParentId)
 
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	var groupHistoryCtx groupHistoryContext
+	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" && (botMentioned || atEveryone) {
+		scope := p.groupHistoryScope(msg, chatID)
+		if p.isGroupHistoryNewCommand(msgType, content, mentions) {
+			p.resetGroupHistory(scope)
+		} else {
+			groupHistoryCtx = p.snapshotGroupHistory(scope)
+		}
+	}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,
@@ -1424,7 +1868,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessage(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs)
+	go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx)
 
 	return nil
 }
@@ -1442,6 +1886,10 @@ func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContex
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
 func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64) {
+	p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryContext{})
+}
+
+func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64, groupHistoryCtx groupHistoryContext) {
 	if p.isMessageRecalled(messageID) {
 		slog.Debug(p.tag()+": recalled message ignored in async dispatch", "message_id", messageID)
 		return
@@ -1466,6 +1914,14 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	if parentID != "" && (!p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread) {
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
+	historyText := p.formatGroupHistory(groupHistoryCtx)
+	dispatchCore := func(msg *core.Message) {
+		if historyText != "" {
+			msg.ExtraContent = joinFeishuExtraContent(historyText, msg.ExtraContent)
+			msg.OnAccepted = groupHistoryCtx.onAccepted
+		}
+		p.dispatchCoreMessage(msg)
+	}
 
 	switch msgType {
 	case "text":
@@ -1485,7 +1941,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		// zero file-resource API calls.
 		approvedFileMetas := p.filterQuotedFilesForUser(quoted.files, mentions, userID)
 		quotedFiles := p.downloadQuotedFiles(ctx, approvedFileMetas)
-		if text == "" && quoted.text == "" && len(quoted.images) == 0 && len(quotedFiles) == 0 {
+		if text == "" && historyText == "" && quoted.text == "" && len(quoted.images) == 0 && len(quotedFiles) == 0 {
 			slog.Debug(p.tag()+": dropping empty text after mention stripping",
 				"message_id", messageID,
 				"raw_text_len", len(textBody.Text),
@@ -1493,7 +1949,11 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			)
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		// Flush any image batch buffered earlier in this session so the image
+		// reaches the engine before the text message advances the user-message
+		// watermark (#1686 P1-B, related #1395).
+		p.flushImageBatchForSession(sessionKey)
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1531,6 +1991,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				userName:     userName,
 				chatName:     chatName,
 				rctx:         rctx,
+				quoted:       quotedMessage{text: historyText, images: quoted.images},
+				onAccepted:   groupHistoryCtx.onAccepted,
 				images:       []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
 				messageIDs:   []string{messageID},
 				createTimeMs: createTimeMs,
@@ -1538,7 +2000,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			})
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1567,7 +2029,11 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			}
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		// Flush any image batch buffered earlier in this session so the image
+		// reaches the engine before this audio message advances the user-message
+		// watermark (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1584,10 +2050,12 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	case "post":
 		textParts, images := p.parsePostContent(messageID, content)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
-		if text == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
+		if text == "" && historyText == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1616,7 +2084,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
 		mimeType := detectMimeType(fileData)
-		p.dispatchCoreMessage(&core.Message{
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1635,6 +2105,8 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			slog.Warn(p.tag()+": merge_forward produced no content", "message_id", messageID)
 			return
 		}
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
 		coreMsg := &core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
@@ -1645,7 +2117,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		}
-		p.dispatchCoreMessage(coreMsg)
+		dispatchCore(coreMsg)
 
 	case "sticker":
 		var stickerBody struct {
@@ -1659,7 +2131,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 		imgData, mimeType, err := p.downloadImage(messageID, stickerBody.FileKey)
 		if err != nil {
 			slog.Warn(p.tag()+": download sticker failed, falling back to placeholder", "error", err)
-			p.dispatchCoreMessage(&core.Message{
+			// Flush any image batch buffered earlier in this session (#1686 P1-B).
+			p.flushImageBatchForSession(sessionKey)
+			dispatchCore(&core.Message{
 				SessionKey: sessionKey, Platform: p.platformName,
 				MessageID: messageID,
 				UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1668,7 +2142,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			})
 			return
 		}
-		p.dispatchCoreMessage(&core.Message{
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1705,7 +2181,9 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				slog.Warn(p.tag()+": download media thumbnail failed", "error", err)
 			}
 		}
-		p.dispatchCoreMessage(&core.Message{
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
@@ -1973,6 +2451,28 @@ type quotedMessage struct {
 	text   string
 	images []core.ImageAttachment
 	files  []quotedFileMeta
+}
+
+// maxPendingGroupHistoryEntries bounds the per-scope in-memory buffer. The
+// feature is intentionally a small recent-context window rather than a chat
+// history store.
+const maxPendingGroupHistoryEntries = 50
+
+type groupHistoryEntry struct {
+	id         uint64
+	messageID  string
+	senderID   string
+	senderType string
+	text       string
+}
+
+// groupHistoryContext is captured synchronously when a triggering event is
+// received, before its asynchronous dispatch can race with later events.
+// onAccepted consumes only that captured prefix once the core accepts a real
+// agent turn. Recognized slash commands return before OnAccepted is called.
+type groupHistoryContext struct {
+	entries    []groupHistoryEntry
+	onAccepted func()
 }
 
 // maxReplyChainDepth is the maximum number of parent messages to traverse
@@ -2972,24 +3472,14 @@ func buildFeishuFileMessageContent(msgType, fileKey string) (string, error) {
 }
 
 func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, error) {
-	resp, err := p.client.Im.MessageResource.Get(context.Background(),
-		larkim.NewGetMessageResourceReqBuilder().
-			MessageId(messageID).
-			FileKey(imageKey).
-			Type("image").
-			Build())
+	// Issue #1741: large image bodies suffer the same code=234037 truncation
+	// as files when fetched through the larkim SDK (which cannot set Range
+	// headers). Route image downloads through the same chunked helper used
+	// for files so a 20-MiB screenshot lands whole instead of being capped
+	// at the SDK's ~2 MiB streaming ceiling.
+	data, err := p.downloadResourceChunked(context.Background(), messageID, imageKey, "image")
 	if err != nil {
-		return nil, "", fmt.Errorf("%s: image API: %w", p.tag(), err)
-	}
-	if !resp.Success() {
-		return nil, "", fmt.Errorf("%s: image API code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	if resp.File == nil {
-		return nil, "", fmt.Errorf("%s: image API returned nil file body", p.tag())
-	}
-	data, err := io.ReadAll(resp.File)
-	if err != nil {
-		return nil, "", fmt.Errorf("%s: read image: %w", p.tag(), err)
+		return nil, "", fmt.Errorf("%s: image download: %w", p.tag(), err)
 	}
 
 	mimeType := detectMimeType(data)
@@ -2998,24 +3488,14 @@ func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, er
 }
 
 func (p *Platform) downloadResource(messageID, fileKey, resType string) ([]byte, error) {
-	resp, err := p.client.Im.MessageResource.Get(context.Background(),
-		larkim.NewGetMessageResourceReqBuilder().
-			MessageId(messageID).
-			FileKey(fileKey).
-			Type(resType).
-			Build())
+	// Issue #1741: the larkim SDK issues a plain GET that Feishu truncates
+	// with code=234037 for resources above ~2 MiB. downloadResourceChunked
+	// bypasses the SDK, sends Range headers, and reassembles the bytes
+	// client-side. All four existing call sites (audio body, file body,
+	// merge_forward file, #1588 quoted file) flow through here unchanged.
+	data, err := p.downloadResourceChunked(context.Background(), messageID, fileKey, resType)
 	if err != nil {
-		return nil, fmt.Errorf("%s: resource API: %w", p.tag(), err)
-	}
-	if !resp.Success() {
-		return nil, fmt.Errorf("%s: resource API code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-	}
-	if resp.File == nil {
-		return nil, fmt.Errorf("%s: resource API returned nil file body", p.tag())
-	}
-	data, err := io.ReadAll(resp.File)
-	if err != nil {
-		return nil, fmt.Errorf("%s: read resource: %w", p.tag(), err)
+		return nil, err
 	}
 	slog.Debug(p.tag()+": downloaded resource", "key", fileKey, "type", resType, "size", len(data))
 	return data, nil
@@ -3722,8 +4202,10 @@ func isTenantAccessTokenInvalid(err error) bool {
 	return strings.Contains(msg, "99991663") || strings.Contains(msg, "invalid access token")
 }
 
-// Transient retry constants for network-level failures.
-const (
+// Transient retry settings for network-level failures. Declared as var (not
+// const) so tests can shrink the retry window; production callers never
+// touch them after init.
+var (
 	maxTransientRetries    = 3
 	transientRetryInitial  = 500 * time.Millisecond
 	transientRetryMaxDelay = 5 * time.Second
@@ -3807,6 +4289,200 @@ func (p *Platform) withTransientRetry(ctx context.Context, operation string, fn 
 		delay = min(delay*2, transientRetryMaxDelay)
 	}
 	return fmt.Errorf("%s failed after %d retries: %w", operation, maxTransientRetries, lastErr)
+}
+
+// ── Issue #1618: fail-closed + supervised retry for bot open_id ──
+//
+// When the Feishu/Lark bot-info API call fails at startup (transient
+// proxy/VPN/DNS outage, server hiccup, etc.), the bot's open_id stays
+// unknown. The previous behaviour read this as "group mention filter
+// off", so the bot would reply to every group message for the rest of
+// the process lifetime — a 3h10m window in the user's incident where
+// the bot suddenly became a loud responder with no way for operators
+// to notice. The functions below:
+//
+//   - wrap the initial fetch in transient retry so most startup
+//     failures self-heal before we degrade,
+//   - mark the filter as "degraded" (rather than "off") when the
+//     retry budget is exhausted, with timestamp + last error captured
+//     for /status surface,
+//   - start a background supervisor that retries every
+//     groupFilterRetryInterval until success or process shutdown so
+//     transient outages self-heal without a restart,
+//   - and keep group-message handling fail-closed (drop, do not
+//     answer) while degraded.
+
+const groupFilterRetryInterval = 5 * time.Minute
+
+// bgCtxForStartup returns a fresh background context for the initial
+// bot-open_id retry burst. We deliberately do not tie it to p.cancel:
+// the cancel is only set later in startWebSocketMode / startWebhookMode,
+// and we want the retry to start even before that wiring is in place.
+func (p *Platform) bgCtxForStartup() context.Context {
+	return context.Background()
+}
+
+// fetchBotOpenIDWithRetry wraps the bot-info API call with the
+// platform's standard transient retry loop. Returns the open_id on
+// success, or the final error if every retry failed.
+func (p *Platform) fetchBotOpenIDWithRetry(ctx context.Context) (string, error) {
+	var openID string
+	err := p.withTransientRetry(ctx, "fetchBotOpenID", func() error {
+		id, err := p.fetchBotOpenID()
+		if err != nil {
+			return err
+		}
+		openID = id
+		return nil
+	})
+	return openID, err
+}
+
+// markGroupFilterDegraded records that bot open_id discovery failed
+// and the group mention filter must fail closed. Caller must hold p.mu
+// OR be the only writer to these fields; in practice Start() is the
+// sole caller at startup and the supervisor is the sole caller later.
+func (p *Platform) markGroupFilterDegraded(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.groupFilterDegraded = true
+	p.groupFilterDegradedAt = time.Now()
+	p.groupFilterDegradedErr = err.Error()
+}
+
+// clearGroupFilterDegraded records a successful recovery.
+func (p *Platform) clearGroupFilterDegraded() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.groupFilterDegraded = false
+	p.groupFilterDegradedErr = ""
+}
+
+// groupFilterStatus is a read-only snapshot of the degraded state,
+// safe to expose to /status and the management API without holding
+// p.mu for long.
+type groupFilterStatus struct {
+	Degraded    bool      `json:"degraded"`
+	Since       time.Time `json:"since,omitempty"`
+	LastError   string    `json:"last_error,omitempty"`
+	RecoveredAt time.Time `json:"recovered_at,omitempty"`
+}
+
+// snapshotGroupFilter returns a copy of the current degraded state.
+func (p *Platform) snapshotGroupFilter() groupFilterStatus {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	st := groupFilterStatus{Degraded: p.groupFilterDegraded}
+	if p.groupFilterDegraded {
+		st.Since = p.groupFilterDegradedAt
+		st.LastError = p.groupFilterDegradedErr
+	}
+	return st
+}
+
+// startGroupFilterSupervisor launches a background goroutine that
+// retries the bot-info API every groupFilterRetryInterval until the
+// open_id resolves (or the process stops). On success, it populates
+// p.botOpenID and clears the degraded flag so the group mention filter
+// resumes normal operation without a restart.
+func (p *Platform) startGroupFilterSupervisor() {
+	p.mu.Lock()
+	if p.groupFilterRetryStop != nil {
+		// already running; do not double-start.
+		p.mu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	p.groupFilterRetryStop = stop
+	p.groupFilterRetryCancel = cancel
+	p.mu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(groupFilterRetryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				id, err := p.fetchBotOpenIDWithRetry(ctx)
+				if err != nil {
+					p.mu.RLock()
+					stale := p.groupFilterDegraded
+					p.mu.RUnlock()
+					if stale {
+						slog.Error(p.platformName+": bot open_id still unresolved; group filter remains degraded",
+							"error", err,
+							"interval", groupFilterRetryInterval,
+						)
+					}
+					continue
+				}
+				p.mu.Lock()
+				p.botOpenID = id
+				p.groupFilterDegraded = false
+				p.groupFilterDegradedErr = ""
+				p.mu.Unlock()
+				slog.Info(p.platformName+": bot open_id recovered via supervisor; group filter restored",
+					"open_id", id,
+				)
+				// We only need one successful recovery before idling;
+				// the next Stop() will tear us down. If a *future*
+				// regression invalidates botOpenID (it can't in the
+				// current model since the value is immutable), this
+				// goroutine simply keeps running and re-checking.
+				return
+			}
+		}
+	}()
+}
+
+// stopGroupFilterSupervisor signals the background supervisor to exit.
+// Safe to call even if it was never started.
+func (p *Platform) stopGroupFilterSupervisor() {
+	p.mu.Lock()
+	cancel := p.groupFilterRetryCancel
+	stop := p.groupFilterRetryStop
+	p.groupFilterRetryCancel = nil
+	p.groupFilterRetryStop = nil
+	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if stop != nil {
+		close(stop)
+	}
+}
+
+// PlatformHealth implements the optional core.PlatformHealth
+// interface so /status, cc-connect doctor, and the management API can
+// surface degraded state to operators. Issue #1618.
+func (p *Platform) PlatformHealth() core.PlatformHealthInfo {
+	st := p.snapshotGroupFilter()
+	info := core.PlatformHealthInfo{
+		Name:      p.Name(),
+		Connected: true,
+	}
+	if st.Degraded {
+		info.Connected = false
+		info.Degraded = true
+		info.DegradedReason = fmt.Sprintf("bot open_id unknown: %s", st.LastError)
+		info.DegradedSince = st.Since
+	}
+	return info
+}
+
+// IsGroupFilterDegraded reports whether the group mention filter is
+// currently in the fail-closed "degraded" state. Exposed for tests and
+// downstream tooling that needs the raw flag without copying the
+// PlatformHealthInfo plumbing.
+func (p *Platform) IsGroupFilterDegraded() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.groupFilterDegraded
 }
 
 func stringValue(v *string) string {
@@ -4782,6 +5458,11 @@ func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle,
 }
 
 func (p *Platform) Stop() error {
+	// Issue #1618: stop the background supervisor that retries the
+	// bot-info API when startup discovery fails. Without this the
+	// goroutine could outlive the platform and leak into the next
+	// start cycle.
+	p.stopGroupFilterSupervisor()
 	if p.isWSPrimary {
 		remaining := unregisterSharedWS(p)
 		if remaining > 0 {

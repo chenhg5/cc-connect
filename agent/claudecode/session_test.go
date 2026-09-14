@@ -1,8 +1,10 @@
 package claudecode
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -631,9 +633,9 @@ func makeFiller(n int) string {
 // assistant text reaches the user.
 //
 // Cases covered:
-//  - string content (plain text result)
-//  - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
-//  - is_error=true (exit code 1, success=false)
+//   - string content (plain text result)
+//   - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
+//   - is_error=true (exit code 1, success=false)
 func TestHandleUserEmitsToolResult(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -649,10 +651,10 @@ func TestHandleUserEmitsToolResult(t *testing.T) {
 				"message": map[string]any{
 					"content": []any{
 						map[string]any{
-							"type":          "tool_result",
-							"tool_use_id":   "toolu_abc",
-							"is_error":      false,
-							"content":       "command output here",
+							"type":        "tool_result",
+							"tool_use_id": "toolu_abc",
+							"is_error":    false,
+							"content":     "command output here",
 						},
 					},
 				},
@@ -759,7 +761,19 @@ func TestHelperProcess(t *testing.T) {
 		return
 	}
 
-	mode := os.Args[len(os.Args)-1]
+	mode := "unknown"
+	for i := len(os.Args) - 1; i >= 0; i-- {
+		if os.Args[i] == "--" && i+1 < len(os.Args) {
+			mode = os.Args[i+1]
+			break
+		}
+	}
+	if mode == "unknown" && len(os.Args) > 1 {
+		// Backward-compatible fallback for tests that don't pass "--":
+		// TestHelperProcess_StdinEofExit and friends invoke the helper
+		// directly with the mode as the last arg.
+		mode = os.Args[len(os.Args)-1]
+	}
 	switch mode {
 	case "sleep":
 		time.Sleep(30 * time.Second)
@@ -771,7 +785,271 @@ func TestHelperProcess(t *testing.T) {
 	case "stdin-eof-exit":
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		os.Exit(0)
+	case "claude-stdin-echo":
+		// Issue #1736 regression harness: act as a Claude Code stub that
+		//   1. asserts --replay-user-messages is NOT in argv (its presence
+		//      would make the CLI exit after the first message and break
+		//      `/compact`, `/clear`, `/resume`).
+		//   2. emits a system + result event on startup so cc-connect
+		//      recognises the session as live.
+		//   3. reads stdin line-by-line, treating each line as a new user
+		//      turn, and replies with a `type:"result"` event containing
+		//      the line's text — proving the process stayed alive across
+		//      turns instead of exiting after the first one.
+		//   4. exits cleanly only when stdin closes (which is exactly how
+		//      cc-connect's Close() and the #1338 idle reaper will end
+		//      the session).
+		for _, a := range os.Args {
+			if a == "--replay-user-messages" {
+				_, _ = os.Stderr.WriteString("HELPER: --replay-user-messages unexpectedly present in argv\n")
+				os.Exit(3)
+			}
+		}
+		// Args layout reminder: the helper is invoked via
+		//   test_bin -test.run=TestHelperProcess -- claude-stdin-echo <innerArgs...> <outerArgs...>
+		// so the mode token (the value after "--") is the second-to-last
+		// element, not the last one. Walk from the end backwards until we
+		// hit it. Falling back to os.Args[1] is harmless if "--" is
+		// missing (the earlier helperCommand usage relies on it).
+		mode := "unknown"
+		for i := len(os.Args) - 1; i >= 0; i-- {
+			if os.Args[i] == "--" && i+1 < len(os.Args) {
+				mode = os.Args[i+1]
+				break
+			}
+		}
+		_, _ = os.Stderr.WriteString("HELPER start mode=" + mode + " argvLen=" + itoa(len(os.Args)) + "\n")
+		if mode != "claude-stdin-echo" {
+			_, _ = os.Stderr.WriteString("HELPER: unexpected mode token; exiting\n")
+			os.Exit(2)
+		}
+		_, _ = os.Stdout.WriteString(`{"type":"system","subtype":"init","session_id":"helper-keepalive"}` + "\n")
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1*1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			// cc-connect's Send() wraps every user message in the
+			// envelope `{"type":"user","message":{"role":"user","content":"<text>"}}`.
+			// Unwrap it so the echoed `result` field carries the human-
+			// readable text and the regression test can assert ordering
+			// against its expected slice without false negatives caused by
+			// JSON quoting.
+			turnText := line
+			var envelope struct {
+				Type    string `json:"type"`
+				Message struct {
+					Role    string `json:"role"`
+					Content any    `json:"content"`
+				} `json:"message"`
+			}
+			if err := json.Unmarshal([]byte(line), &envelope); err == nil && envelope.Type == "user" {
+				switch c := envelope.Message.Content.(type) {
+				case string:
+					turnText = c
+				case []any:
+					var parts []string
+					for _, item := range c {
+						m, ok := item.(map[string]any)
+						if !ok {
+							continue
+						}
+						if t, ok := m["text"].(string); ok {
+							parts = append(parts, t)
+						}
+					}
+					turnText = strings.Join(parts, "\n")
+				}
+			}
+			// Echo every turn back as a result event so the test
+			// can assert the live process saw each one. Use json.Marshal
+			// to keep escaping correct for any character class.
+			payload, _ := json.Marshal(map[string]any{
+				"type":    "result",
+				"result":  "echo: " + turnText,
+				"isError": false,
+			})
+			_, _ = os.Stdout.Write(payload)
+			_, _ = os.Stdout.Write([]byte("\n"))
+		}
+		os.Exit(0)
 	default:
 		os.Exit(2)
 	}
+}
+
+// TestNewClaudeSession_NoReplayFlagKeepsProcessAlive is the regression
+// test for issue #1736. Before the fix, newClaudeSession passed
+// --replay-user-messages to Claude Code, which drained stdin and exited
+// after each turn. That made /compact (and any other in-session slash
+// command) unreachable. The fix removes the flag; Claude Code then
+// keeps reading stdin until either Close() or agent_session_idle_timeout_mins
+// (#1338) reaps it.
+//
+// We verify both halves:
+//
+//	(a) the helper process (standing in for Claude Code) reports a
+//	    missing --replay-user-messages in argv via a non-zero exit,
+//	(b) the session can drive 100+ messages through the live process
+//	    with /compact / /clear / /resume interleaved and the process
+//	    echoes every one of them back, proving keep-alive works.
+func TestNewClaudeSession_NoReplayFlagKeepsProcessAlive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Build the helper command directly so the test does not depend on
+	// any particular agent/session.go code path that would mask the flag.
+	helperPath, err := exec.LookPath(os.Args[0])
+	if err != nil {
+		t.Fatalf("cannot locate test binary: %v", err)
+	}
+	bin := helperPath
+	helperArgs := []string{
+		"-test.run=TestHelperProcess",
+		"--", "claude-stdin-echo",
+	}
+	helpEnv := append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+
+	// Sanity: the helper itself asserts --replay-user-messages is not
+	// present in argv. Run it once and verify the helper exits 0.
+	probe := exec.CommandContext(ctx, bin, helperArgs...)
+	probe.Env = helpEnv
+	var probeStderr bytes.Buffer
+	probe.Stderr = &probeStderr
+	probe.Stdin = strings.NewReader("")
+	if err := probe.Run(); err != nil {
+		t.Fatalf("helper probe failed: %v\nstderr=%s", err, probeStderr.String())
+	}
+
+	workDir := t.TempDir()
+
+	// Spawn newClaudeSession directly so we exercise the exact code path
+	// that decides innerArgs/outerArgs. We bypass newClaudeSession's
+	// permission-mode / system-prompt / plugin-dir machinery — they are
+	// orthogonal to the flag under test.
+	spawnOpts := core.SpawnOptions{}
+	// The helper is the same Go test binary running TestHelperProcess in
+	// helper mode; without GO_WANT_HELPER_PROCESS=1 the child would just
+	// execute the parent test suite and exit immediately, never reaching
+	// the helper branch.
+	cs, err := newClaudeSession(
+		ctx,
+		workDir,
+		bin,
+		helperArgs,                           // cliExtraArgs (forwarded into allArgs)
+		"",                                   // cmdArgsFlag (no wrapper bundling)
+		"",                                   // model
+		"",                                   // effort
+		"",                                   // sessionID (truly fresh)
+		"default",                            // mode
+		"",                                   // systemPrompt
+		"",                                   // appendSystemPrompt
+		nil,                                  // allowedTools
+		nil,                                  // disallowedTools
+		nil,                                  // pluginDirs
+		[]string{"GO_WANT_HELPER_PROCESS=1"}, // extraEnv: route child into helper branch
+		"",                                   // platformPrompt
+		false,                                // disableVerbose
+		spawnOpts,
+		0,  // maxContextTokens
+		"", // ccDataDir (lets ensureSharedSystemPromptFile fall back to TempDir)
+		"", // lang
+	)
+	if err != nil {
+		t.Fatalf("newClaudeSession: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+
+	// Wait for the system event so we know the helper is alive.
+	// claudeSession.handleSystem emits EventText carrying the session id
+	// when a `type:"system"` event with a session_id field arrives.
+	startDeadline := time.After(5 * time.Second)
+	for cs.CurrentSessionID() != "helper-keepalive" {
+		select {
+		case <-cs.Events():
+			// drain
+		case <-startDeadline:
+			t.Fatalf("session id never set; helper did not emit a system event (alive=%v)", cs.Alive())
+			return
+		}
+	}
+
+	// Drive 100 normal messages + the three slash commands interleaved.
+	// Issue #1736 expected behaviour: every one of these reaches the live
+	// process and the process echoes it back. With --replay-user-messages
+	// the process would have exited after the first message and the
+	// remaining sends would fail with "session process is not running".
+	plan := []string{}
+	for i := 0; i < 100; i++ {
+		plan = append(plan, "regular message "+itoa(i))
+	}
+	// Interleave the slash commands in the middle so the regression is
+	// sensitive to keep-alive surviving a normal-message burst as well.
+	plan = append(plan, "/compact", "/clear", "/resume")
+
+	gotResults := 0
+	for i, msg := range plan {
+		if err := cs.Send(msg, "msg-"+itoa(i), nil, nil); err != nil {
+			t.Fatalf("Send #%d (%q) failed: %v", i, msg, err)
+		}
+		if !cs.Alive() {
+			t.Fatalf("session died after message #%d (%q) — the helper exited when it should have stayed alive", i, msg)
+		}
+	}
+
+	// Drain echoed results until we have at least len(plan) of them or
+	// time out. The helper echoes one `result` event per line written to
+	// stdin.
+	deadline := time.After(15 * time.Second)
+	for gotResults < len(plan) {
+		select {
+		case ev, ok := <-cs.Events():
+			if !ok {
+				t.Fatalf("event channel closed after %d results; helper exited early (alive=%v)", gotResults, cs.Alive())
+			}
+			if ev.Type == core.EventResult {
+				if !strings.HasPrefix(ev.Content, "echo: ") {
+					t.Fatalf("result #%d = %q, want echo prefix", gotResults, ev.Content)
+				}
+				want := plan[gotResults]
+				if ev.Content != "echo: "+want {
+					t.Fatalf("result #%d = %q, want %q (order must be preserved across turns)", gotResults, ev.Content, "echo: "+want)
+				}
+				gotResults++
+			}
+		case <-deadline:
+			t.Fatalf("only received %d/%d echoes within 15s", gotResults, len(plan))
+		}
+	}
+
+	// Final assertion: the helper is still alive after 100+ messages.
+	// Close() will send stdin EOF and the helper will exit cleanly.
+	if !cs.Alive() {
+		t.Fatal("helper died before Close() — keep-alive contract violated")
+	}
+}
+
+// itoa avoids strconv import noise in the test body.
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	neg := i < 0
+	if neg {
+		i = -i
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for i > 0 {
+		pos--
+		buf[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
 }

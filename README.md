@@ -79,6 +79,11 @@ With cc-connect, you can bring Kimi CLI from your local machine into Feishu/Lark
 </tr>
 
 <tr>
+<td width="150"><a href="https://go.apimart.ai/gh-cc-connect"><img src="assets/sponsors/apimart.png" alt="APIMart" width="120"></a></td>
+<td>Thanks to APIMart for sponsoring this project! APIMart is a low-cost API platform for AI image & video generation — GPT-Image-2 from $0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — <a href="https://go.apimart.ai/gh-cc-connect">sign up here</a> to get started.</td>
+</tr>
+
+<tr>
 <td width="150"><a href="https://www.dmxapi.cn/register?aff=NDln"><img src="assets/sponsors/dmx-en.jpg" alt="DMXAPI" width="120"></a></td>
 <td>Thanks to DMXAPI for sponsoring this project! DMXAPI provides global large model API services to 200+ enterprise users. One API key for all global models. Features include: instant invoicing, unlimited concurrency, starting from $0.15, 24/7 technical support. GPT/Claude/Gemini all at 32% off, domestic models 20-50% off, Claude Code exclusive models at 66% off! Register via <a href="https://www.dmxapi.cn/register?aff=NDln">this link</a>.</td>
 </tr>
@@ -188,21 +193,19 @@ With cc-connect, you can bring Kimi CLI from your local machine into Feishu/Lark
 </p>
 
 
-## 🆕 What’s New in v1.3.3
+## 🆕 What’s New in v1.5.1-beta.1
 
-First stable of the 1.3.3 series — stabilizes beta.1 → beta.5 (≈ 235 PRs since v1.3.2) plus 7 post-beta fixes. Highlights:
+Beta since v1.5.0 stable — 16 merged PRs. Highlights:
 
-- **New agents** — Devin CLI, Google Antigravity (`agy`), GitHub Copilot CLI as first-class agents (#672, #1123, #865). Hardened Cursor / OpenCode / Qoder / Kimi / Pi coverage.
-- **Platform expansion** — QQ (OneBot) file send & receive (#323), QQ Bot inline keyboards (#1131), WeCom `SendFile` in WebSocket (#1199), Feishu audio + video native media (#1202), Slack Assistant API (#844), MAX webhook delivery (#818), DingTalk @mentions / richText / image / file inbound (#1188, #828, #1357), broader Weibo DM, WPS Xiezuo (金山协作).
-- **Long-running turn hardening** — new `max_turn_time_mins` wall-clock cap with soft-stop + force-kill + auto-resume so a long bash / test command can no longer lock a session indefinitely (#1091).
-- **New core commands** — `/timer` (one-shot delayed task), `/cancel` (interrupt current turn), `/ps` (replaces `/btw`, kept as alias), `cron add --silent`, agent-driven TTS.
-- **Multi-user / permissions** — reply-to-unauthorized-IM-senders option, `@Bot/permit` ≡ `/permit` keyword matching, Bridge requires token when enabled.
-- **Provider ecosystem** — NekoCode, VisionCoder, AIHubMix, MiniMax M3 presets; Claude Code 1M-context Opus + `append_system_prompt` + PermissionRequest hooks; Codex `request_user_input` app-server events; configurable `shell` + shell profile for `exec`.
-- **Observability** — blackbox testing framework (P0/P1/P2 + config-switch matrix), CUJ test framework, provider-resume regression suite for codex/opencode/kimi, Pi context-usage reporter in reply footer.
+- **i18n** — Localize agent system prompts (cron/timer/send/relay) based on language config (#1721).
+- **Cursor** — Image attachments delivered via on-disk paths to the Cursor CLI (#1709).
+- **Feishu** — Large file download via HTTP Range chunks, bypassing code=234037 (#1746); fail-closed when bot open_id discovery fails (#1725).
+- **Weixin** — Reply and push paths now have separate send budgets (#1743); inbound dedup is configurable (#1733).
+- **Claude Code** — `/compact` and slash commands restored by dropping `--replay-user-messages` (#1737); bounded session teardown (#1714).
+- **Codex** — Failed app-server turns propagate (#1730); max reasoning effort supported (#1727); `/list` reads session names correctly (#1639).
+- **Pi** — Attachments passed as `@path` refs (#1724); Windows build fix (#1738).
 
-⚠️ **Behavior changes (action may be required)**: Telegram/Discord `progress_style` defaults to `compact` (set `legacy` to revert); QQ Bot default `intents` now include `INTERACTION_CREATE` (custom values must include `1<<26`); DingTalk `msgtype=file` inbound now reaches the agent; engine permission keywords are @mention-tolerant; `reset_on_idle_mins` defaults to 30 min; Bridge with no token configured refuses to start. See `changelogs/v1.3.3.md` for the full themed summary.
-
-No breaking changes. Coming from a v1.3.3-beta.*, this is a small fix-only upgrade.
+No breaking changes. See `changelogs/v1.5.1-beta.1.md` for the full changelog.
 
 
 ## 🧩 Platform feature snapshot

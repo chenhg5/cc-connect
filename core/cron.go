@@ -409,23 +409,54 @@ func toExportedFieldName(s string) string {
 	return string(result)
 }
 
+// maxCronTimerSpan caps the sleep duration between wake-ups so the scheduler
+// recovers from system suspend (laptop sleep on macOS/Windows). Without the
+// cap, a `time.NewTimer(d)` for the full cron interval (e.g. 8 hours) does not
+// fire while the OS is suspended, and once the OS wakes, Go's monotonic clock
+// still shows the original duration as "not elapsed" — so the timer fires
+// hours late and catch-up never happens.
+//
+// With the cap, the loop wakes at least every maxCronTimerSpan and on each
+// wake-up recomputes the next firing time from `time.Now()`. A job whose
+// `nextRun` is already in the past fires immediately on the next iteration,
+// so missed ticks during sleep are caught up promptly after wake.
+//
+// Value is intentionally a private constant: exposing it as a config knob
+// would invite users to lower it (cheaper catch-up) at the cost of more idle
+// wakeups, which is the wrong default for headless servers. Bug-fix scope.
+const maxCronTimerSpan = 30 * time.Second
+
+// cronEntry is one scheduled job's bookkeeping inside CronScheduler.
+type cronEntry struct {
+	jobID    string
+	schedule cron.Schedule
+	nextRun  time.Time // next firing time; zero = schedule unsatisfiable
+	prevRun  time.Time // last firing time; zero = never fired
+}
+
 // CronScheduler runs cron jobs by injecting synthetic messages into engines.
 type CronScheduler struct {
 	store              *CronStore
-	cron               *cron.Cron
 	engines            map[string]*Engine // project name → engine
+	entries            map[string]*cronEntry
 	mu                 sync.RWMutex
-	entries            map[string]cron.EntryID // job ID → cron entry
-	defaultSilent      bool                    // global default for suppressing cron start notifications
-	defaultSessionMode string                  // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	defaultSilent      bool   // global default for suppressing cron start notifications
+	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+
+	// runLoop plumbing. wakeUp carries a "schedule changed, re-evaluate"
+	// signal (buffered 1). stop ends the loop. done closes when the loop
+	// returns. running guards Start/Stop against double-init.
+	wakeUp  chan struct{}
+	stop    chan struct{}
+	done    chan struct{}
+	running bool
 }
 
 func NewCronScheduler(store *CronStore) *CronScheduler {
 	return &CronScheduler{
 		store:   store,
-		cron:    cron.New(),
 		engines: make(map[string]*Engine),
-		entries: make(map[string]cron.EntryID),
+		entries: make(map[string]*cronEntry),
 	}
 }
 
@@ -461,6 +492,21 @@ func (cs *CronScheduler) UsesNewSession(job *CronJob) bool {
 }
 
 func (cs *CronScheduler) Start() error {
+	cs.mu.Lock()
+	if cs.running {
+		cs.mu.Unlock()
+		return nil
+	}
+	cs.running = true
+	// Buffered so a Stop signal sent before runLoop has started (or
+	// during the small window before runLoop reaches its select) is not
+	// dropped. Wake-up signaling is also buffered so a flurry of
+	// AddJob/RemoveJob collapses to a single re-evaluation.
+	cs.wakeUp = make(chan struct{}, 1)
+	cs.stop = make(chan struct{}, 1)
+	cs.done = make(chan struct{})
+	cs.mu.Unlock()
+
 	jobs := cs.store.List()
 	for _, job := range jobs {
 		if job.Enabled {
@@ -469,13 +515,140 @@ func (cs *CronScheduler) Start() error {
 			}
 		}
 	}
-	cs.cron.Start()
+	go cs.runLoop()
 	slog.Info("cron: scheduler started", "jobs", len(jobs))
 	return nil
 }
 
+// Stop signals the runLoop to exit and waits for it to return. Safe to call
+// when Start was never invoked.
 func (cs *CronScheduler) Stop() {
-	cs.cron.Stop()
+	cs.mu.Lock()
+	if !cs.running {
+		cs.mu.Unlock()
+		return
+	}
+	cs.running = false
+	stopCh := cs.stop
+	doneCh := cs.done
+	cs.mu.Unlock()
+
+	select {
+	case stopCh <- struct{}{}:
+	default:
+	}
+	<-doneCh
+}
+
+// signalWakeUp nudges the runLoop to re-evaluate the next firing time.
+// Non-blocking: if a signal is already pending, the buffered channel absorbs
+// the dedup. Safe to call before Start (no-op) and after Stop (no-op).
+func (cs *CronScheduler) signalWakeUp() {
+	cs.mu.RLock()
+	ch := cs.wakeUp
+	cs.mu.RUnlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// runLoop is the scheduler's main goroutine. It computes the earliest
+// scheduled job, sleeps at most maxCronTimerSpan, fires any jobs whose
+// `nextRun` has elapsed, and repeats.
+//
+// The bounded sleep is the recovery mechanism for system suspend: a long
+// `time.NewTimer` (e.g. hours) would not fire while the OS is asleep and
+// Go's monotonic clock wouldn't have advanced, so we'd miss catch-up. The
+// cap guarantees we re-check at most every maxCronTimerSpan after wake.
+func (cs *CronScheduler) runLoop() {
+	defer close(cs.done)
+	for {
+		// Compute the earliest entry and the next wait duration under
+		// the read lock. We must read `earliest.nextRun` while still
+		// holding the lock, otherwise concurrent writers (AddJob,
+		// UpdateJob, or a backdated test entry) would race the timer
+		// computation that runs after the unlock.
+		cs.mu.RLock()
+		var earliest *cronEntry
+		for _, e := range cs.entries {
+			if e.nextRun.IsZero() {
+				continue
+			}
+			if earliest == nil || e.nextRun.Before(earliest.nextRun) {
+				earliest = e
+			}
+		}
+		var wait time.Duration
+		if earliest == nil {
+			// No scheduled jobs. Sleep long; we'll be woken by wakeUp
+			// when something is added.
+			wait = time.Hour
+		} else {
+			d := time.Until(earliest.nextRun)
+			if d < 0 {
+				// Already overdue (e.g. system just woke from sleep
+				// past the scheduled time). Fire on the next wakeUp
+				// tick instead of burning CPU in a tight loop.
+				d = 0
+			}
+			if d > maxCronTimerSpan {
+				d = maxCronTimerSpan
+			}
+			wait = d
+		}
+		cs.mu.RUnlock()
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+			cs.fireDueJobs()
+		case <-cs.wakeUp:
+			timer.Stop()
+			// Re-iterate: a job may have been added/removed, or its
+			// schedule changed. Recompute earliest.
+		case <-cs.stop:
+			timer.Stop()
+			return
+		}
+	}
+}
+
+// fireDueJobs runs every entry whose nextRun has elapsed and advances their
+// nextRun. Jobs whose `Enabled` flag was flipped off since the entry was
+// scheduled are silently skipped (runJob re-checks the store).
+func (cs *CronScheduler) fireDueJobs() {
+	now := time.Now()
+
+	cs.mu.RLock()
+	var due []*cronEntry
+	for _, e := range cs.entries {
+		if !e.nextRun.IsZero() && !e.nextRun.After(now) {
+			due = append(due, e)
+		}
+	}
+	cs.mu.RUnlock()
+
+	for _, e := range due {
+		job := cs.store.Get(e.jobID)
+		if job != nil {
+			cs.runJob(job, false)
+		}
+
+		// Advance nextRun under the write lock so concurrent
+		// AddJob/RemoveJob can't race with the schedule refresh. If
+		// the entry was removed mid-fire (job deleted), skip.
+		cs.mu.Lock()
+		cur, ok := cs.entries[e.jobID]
+		if ok && cur == e {
+			cur.prevRun = cur.nextRun
+			cur.nextRun = cur.schedule.Next(time.Now())
+		}
+		cs.mu.Unlock()
+	}
 }
 
 func (cs *CronScheduler) AddJob(job *CronJob) error {
@@ -497,11 +670,12 @@ func (cs *CronScheduler) AddJob(job *CronJob) error {
 
 func (cs *CronScheduler) RemoveJob(id string) bool {
 	cs.mu.Lock()
-	if entryID, ok := cs.entries[id]; ok {
-		cs.cron.Remove(entryID)
-		delete(cs.entries, id)
-	}
+	_, hadEntry := cs.entries[id]
+	delete(cs.entries, id)
 	cs.mu.Unlock()
+	if hadEntry {
+		cs.signalWakeUp()
+	}
 	return cs.store.Remove(id)
 }
 
@@ -521,11 +695,12 @@ func (cs *CronScheduler) DisableJob(id string) error {
 		return fmt.Errorf("job %q not found", id)
 	}
 	cs.mu.Lock()
-	if entryID, ok := cs.entries[id]; ok {
-		cs.cron.Remove(entryID)
-		delete(cs.entries, id)
-	}
+	_, hadEntry := cs.entries[id]
+	delete(cs.entries, id)
 	cs.mu.Unlock()
+	if hadEntry {
+		cs.signalWakeUp()
+	}
 	return nil
 }
 
@@ -584,12 +759,10 @@ func (cs *CronScheduler) UpdateJob(id string, field string, value any) error {
 	needsReschedule := field == "cron_expr" || field == "enabled"
 
 	if needsReschedule {
-		// Remove current schedule
+		// Drop the entry so the runLoop forgets the old schedule; we
+		// re-add it below from the updated job (if still enabled).
 		cs.mu.Lock()
-		if entryID, ok := cs.entries[id]; ok {
-			cs.cron.Remove(entryID)
-			delete(cs.entries, id)
-		}
+		delete(cs.entries, id)
 		cs.mu.Unlock()
 	}
 
@@ -618,45 +791,32 @@ func (cs *CronScheduler) Store() *CronStore {
 // NextRun returns the next scheduled run time for a job, or zero if not scheduled.
 func (cs *CronScheduler) NextRun(jobID string) time.Time {
 	cs.mu.RLock()
-	entryID, ok := cs.entries[jobID]
-	cs.mu.RUnlock()
-	if !ok {
-		return time.Time{}
-	}
-	for _, e := range cs.cron.Entries() {
-		if e.ID == entryID {
-			return e.Next
-		}
+	defer cs.mu.RUnlock()
+	if e, ok := cs.entries[jobID]; ok {
+		return e.nextRun
 	}
 	return time.Time{}
 }
 
 func (cs *CronScheduler) scheduleJob(job *CronJob) error {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-
-	// Remove existing schedule if any
-	if old, ok := cs.entries[job.ID]; ok {
-		cs.cron.Remove(old)
-	}
-
-	jobID := job.ID
-	entryID, err := cs.cron.AddFunc(job.CronExpr, func() {
-		cs.executeJob(jobID)
-	})
+	schedule, err := cron.ParseStandard(job.CronExpr)
 	if err != nil {
-		return err
+		return fmt.Errorf("invalid cron expression %q: %w", job.CronExpr, err)
 	}
-	cs.entries[jobID] = entryID
-	return nil
-}
 
-func (cs *CronScheduler) executeJob(jobID string) {
-	job := cs.store.Get(jobID)
-	if job == nil {
-		return
+	cs.mu.Lock()
+	// Replace any existing entry for this job (UpdateJob may call us on a
+	// cron_expr change; AddJob calls us on first schedule).
+	delete(cs.entries, job.ID)
+	cs.entries[job.ID] = &cronEntry{
+		jobID:    job.ID,
+		schedule: schedule,
+		nextRun:  schedule.Next(time.Now()),
 	}
-	cs.runJob(job, false)
+	cs.mu.Unlock()
+
+	cs.signalWakeUp()
+	return nil
 }
 
 // RunJobNow triggers a persisted cron job immediately in the background.
@@ -731,7 +891,6 @@ type mutePlatform struct {
 
 func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
-
 
 func GenerateCronID() string {
 	b := make([]byte, 4)

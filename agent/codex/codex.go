@@ -15,6 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/chenhg5/cc-connect/agent/internal/skillroots"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -120,7 +121,11 @@ func normalizeBackend(raw string) string {
 func normalizeAppServerURL(raw string) string {
 	url := strings.TrimSpace(raw)
 	if url == "" {
-		return "ws://127.0.0.1:3845"
+		// Default to the stdio transport: cc-connect's app_server backend
+		// speaks JSON-RPC over the stdio pipes, and on codex 0.152+ a ws://
+		// --listen value leaves stdio unresponsive (see #1781). Users who
+		// need a WebSocket listener can still set app_server_url explicitly.
+		return "stdio://"
 	}
 	if strings.EqualFold(url, "stdio") {
 		return "stdio://"
@@ -153,6 +158,8 @@ func normalizeReasoningEffort(raw string) string {
 		return "high"
 	case "xhigh", "x-high", "very-high":
 		return "xhigh"
+	case "max":
+		return "max"
 	default:
 		return ""
 	}
@@ -200,7 +207,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "xhigh"}
+	return []string{"low", "medium", "high", "xhigh", "max"}
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -353,7 +360,6 @@ func readCodexCachedModels() []core.ModelOption {
 	return parseCodexModelsJSON(b)
 }
 
-
 // parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
 // or models_cache.json) into a deduplicated, filtered slice of ModelOption.
 // It is shared by readCodexCachedModels and readCodexModelCatalog.
@@ -398,7 +404,6 @@ func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	}
 	return models
 }
-
 
 // readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
 // model_catalog_json setting, then reads and parses that JSON file.
@@ -607,12 +612,21 @@ func codexSkillDirs(workDir, explicitCodexHome string) []string {
 	}
 
 	projectDirs := walkUpCodexProjectSkillDirs(workDir, homeDir)
-	userDirs := make([]string, 0, 2)
+	userDirs := make([]string, 0, 4)
 	if codexHome != "" {
-		userDirs = append(userDirs, filepath.Join(codexHome, "skills"))
+		userDirs = append(userDirs,
+			filepath.Join(codexHome, "skills"),
+			// Superpowers installs Codex-compatible skills under this layout.
+			filepath.Join(codexHome, "superpowers", "skills"),
+		)
+		userDirs = append(userDirs, skillroots.Find(filepath.Join(codexHome, "plugins"))...)
 	}
 	if homeDir != "" {
-		userDirs = append(userDirs, filepath.Join(homeDir, ".agents", "skills"))
+		userDirs = append(userDirs,
+			filepath.Join(homeDir, ".agents", "skills"),
+			// Codex deliberately shares Claude-format SKILL.md directories.
+			filepath.Join(homeDir, ".claude", "skills"),
+		)
 	}
 	return uniqueCodexSkillDirs(append(projectDirs, userDirs...))
 }
@@ -630,6 +644,8 @@ func walkUpCodexProjectSkillDirs(workDir, homeDir string) []string {
 		dirs = append(dirs,
 			filepath.Join(current, ".agents", "skills"),
 			filepath.Join(current, ".codex", "skills"),
+			// Keep project-local Claude-format skills portable to Codex.
+			filepath.Join(current, ".claude", "skills"),
 		)
 		if stopAt != "" && sameCodexPath(current, stopAt) {
 			break
