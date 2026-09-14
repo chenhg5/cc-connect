@@ -450,6 +450,14 @@ type AutoCompressConfig struct {
 	Enabled    *bool `toml:"enabled,omitempty"`      // default false
 	MaxTokens  *int  `toml:"max_tokens,omitempty"`   // estimated token threshold to trigger /compress
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
+	// AllowHeuristic restores the legacy behavior of deciding from the
+	// text-length heuristic when no exact API-reported usage is available.
+	// Default false: such turns make no decision at all and wait for the next
+	// turn, which always carries exact usage. The heuristic ignores tool
+	// results and the fixed system-prompt+tools overhead, so it was measured
+	// 2.5x off (574,797 estimated vs 229,783 real) — leaving it on is what
+	// made auto-compress fire on the wrong signal.
+	AllowHeuristic bool `toml:"allow_heuristic,omitempty"`
 }
 
 // ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.

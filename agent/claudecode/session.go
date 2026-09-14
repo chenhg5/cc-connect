@@ -52,6 +52,29 @@ type claudeSession struct {
 	// usageMu guards lastUsage. Populated from the most recent result event.
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
+	// usageSource records where lastUsage came from, so an auto-compress
+	// decision is never confused with a different data source:
+	//   "event"                — a live stream-json assistant event (per-sub-call
+	//                            prompt size; the most faithful snapshot)
+	//   "transcript"           — the last per-call record read from the Claude
+	//                            Code JSONL transcript. Used when the provider
+	//                            sends an empty assistant usage block
+	//                            (measured: MiniMax-M3)
+	//   "transcript-recovered" — the same tail read, done once at attach time
+	//                            after a --resume, before the first live number
+	//   ""                     — lastUsage is nil
+	//
+	// The result event's own aggregate is deliberately NOT a source: its
+	// cache_read sums every sub-call in the turn, so it overstates the final
+	// prompt by a factor that grows with the sub-call count.
+	usageSource string
+	// recoverUsageOnce guards the one-shot transcript recovery performed when
+	// the init event arrives (see handleSystem).
+	recoverUsageOnce sync.Once
+	// transcriptOverride, when non-empty, replaces the derived transcript path.
+	// Test-only seam: transcriptPath() resolves through the real
+	// ~/.claude/projects/<key>/ layout, which a unit test cannot fabricate.
+	transcriptOverride string
 
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
@@ -661,24 +684,265 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 			return
 		}
 	}
+	// Attach-time recovery: after a --resume this fresh process has no usage
+	// yet, but the resumed transcript already records the exact prompt size the
+	// previous process ended on. Without this the first auto-compress decision
+	// of every resumed session had only the text-length heuristic available.
+	cs.recoverUsageOnce.Do(func() {
+		if cs.GetContextUsage() != nil {
+			return // already have live usage; nothing to recover
+		}
+		if u := cs.recoverUsageFromTranscript(); u != nil {
+			cs.usageMu.Lock()
+			if cs.lastUsage == nil {
+				cs.lastUsage = u
+				cs.usageSource = "transcript-recovered"
+			}
+			cs.usageMu.Unlock()
+		}
+	})
+}
+
+// claudeUsageFromTranscriptLine parses one JSONL transcript line and returns
+// the exact prompt size it records, or nil when the line is not an assistant
+// event carrying a usable usage block.
+//
+// input + cache_creation + cache_read is the true prompt size of THAT call:
+// on a transcript the cache_read of the next entry equals the previous entry's
+// in+cc+cr (verified against live data: cr 38802 → in+cr 38948 → next cr 38948),
+// so the value does NOT accumulate the way the result event's aggregate does.
+func claudeUsageFromTranscriptLine(line []byte) *core.ContextUsage {
+	if len(line) == 0 || !bytes.Contains(line, []byte(`"usage"`)) {
+		return nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return nil
+	}
+	if t, _ := raw["type"].(string); t != "assistant" {
+		return nil
+	}
+	msg, ok := raw["message"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	usageRaw, ok := msg["usage"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	input, _, cc, cr := parseClaudeUsage(usageRaw)
+	used := input + cc + cr
+	if used <= 0 {
+		return nil
+	}
+	model, _ := msg["model"].(string)
+	return &core.ContextUsage{
+		UsedTokens:               used,
+		TotalTokens:              used,
+		InputTokens:              input,
+		CachedInputTokens:        cr,
+		CacheCreationInputTokens: cc,
+		ContextWindow:            claudeContextWindow(model),
+	}
+}
+
+// transcriptInitialWindow is the first tail window we read. Each per-call usage
+// line is a self-contained JSON object appended at the end of the transcript, so
+// one record is all we need: measured across 11k real transcripts the last line
+// is 478 bytes at the median and under 1.5 KiB at the 99th percentile. The window
+// doubles when the last line is still being written, or when it is one of the
+// rare multi-KiB ones.
+const transcriptInitialWindow = 4 << 10 // 4KiB
+
+// transcriptLineCap is the hard ceiling on the tail look-back, so a pathological
+// transcript can never make this allocate without bound.
+const transcriptLineCap = 64 << 20 // 64MiB
+
+// tailUsageFromTranscript reads the tail of a Claude Code JSONL transcript and
+// returns the LAST recorded per-call prompt size.
+//
+// This is deliberately a TAIL read, not a full scan: a long-lived session's
+// transcript runs to hundreds of MiB (one measured at 136MiB), and auto-compress
+// consults this every turn — a full rescan would be O(n²).
+//
+// windowBytes caps how far back we look before giving up and reporting "no
+// data"; it is clamped by transcriptLineCap. found distinguishes "read the file
+// and there was nothing usable" from "could not read it at all" — production
+// callers only need usage != nil, but the distinction is what lets a test assert
+// the reader actually opened and scanned the file rather than silently bailing.
+func tailUsageFromTranscript(path string, windowBytes int64) (usage *core.ContextUsage, found bool) {
+	if path == "" {
+		return nil, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return nil, false
+	}
+	size := st.Size()
+	if size == 0 {
+		return nil, false
+	}
+
+	// Start small and grow only when a single line (a tool result embedding a
+	// whole file, say) keeps the record out of reach. The common case is a
+	// transcript whose newest record sits in the last few KiB, so the first read
+	// usually settles it.
+	//
+	// windowBytes and transcriptLineCap are both ceilings: a caller that asks for
+	// a narrow look-back gets exactly that, and never a silent wider search.
+	limit := int64(transcriptLineCap)
+	if windowBytes > 0 && windowBytes < limit {
+		limit = windowBytes
+	}
+	window := int64(transcriptInitialWindow)
+	if window > limit {
+		window = limit
+	}
+	for window > 0 && window <= limit {
+		start := size - window
+		if start < 0 {
+			start = 0
+		}
+		buf := make([]byte, window)
+		n, err := f.ReadAt(buf, start)
+		if err != nil && err != io.EOF {
+			return nil, false
+		}
+		buf = buf[:n]
+
+		// Walk lines from the newest backwards and take the first one that parses.
+		//
+		// No boundary bookkeeping is needed: a record only ever spans lines
+		// Claude Code finished writing, so a truncated line either fails to parse
+		// or fails the "type":"assistant" check, and the walk simply moves on.
+		// That is what makes the multi-MiB tool-result case fall out for free
+		// instead of needing a carry buffer.
+		end := len(buf)
+		if end > 0 && buf[end-1] == '\n' {
+			end--
+		}
+		for end > 0 {
+			nl := bytes.LastIndexByte(buf[:end], '\n')
+			begin := 0
+			if nl >= 0 {
+				begin = nl + 1
+			}
+			if line := buf[begin:end]; len(line) > 0 {
+				if u := claudeUsageFromTranscriptLine(line); u != nil {
+					return u, true
+				}
+			}
+			if nl < 0 {
+				break
+			}
+			end = nl
+		}
+
+		if start == 0 || window == limit {
+			// The whole file (or the caller's look-back limit) was searched and
+			// held no record.
+			return nil, true
+		}
+		window *= 2
+		if window > limit {
+			window = limit
+		}
+	}
+	// The look-back limit was reached without a usable record.
+	return nil, true
+}
+
+// recoverUsageFromTranscript restores the exact context-usage numbers from the
+// Claude Code JSONL transcript at process attach time.
+//
+// Why this exists: every `--resume` spawns a NEW claudeSession whose lastUsage
+// starts nil, so the first auto-compress decision of every resumed process had
+// no exact number and silently fell back to the text-length heuristic. The
+// heuristic counts cc-connect's own history text (which excludes tool results
+// and the fixed system-prompt + tools overhead) and is routinely several times
+// off — measured at 574,797 while the same session's real API-reported prompt
+// never exceeded 229,783. Reading the transcript gives the exact number the
+// previous process ended on, so the decision stays exact across restarts.
+//
+// Returns nil when the transcript is missing, unreadable, or carries no
+// assistant event with a non-zero prompt. Callers must treat nil as "no exact
+// data" and NOT substitute an estimate.
+func (cs *claudeSession) recoverUsageFromTranscript() *core.ContextUsage {
+	u, _ := tailUsageFromTranscript(cs.transcriptPath(), transcriptRecoveryWindow)
+	if u != nil {
+		slog.Info("claudeSession: recovered context usage from transcript",
+			"used", u.UsedTokens, "input", u.InputTokens,
+			"cache_read", u.CachedInputTokens, "cache_creation", u.CacheCreationInputTokens,
+			"context_window", u.ContextWindow)
+	}
+	return u
+}
+
+// transcriptRecoveryWindow is how far back the attach-time recovery looks. The
+// last usable line is normally in the final chunk; this bound only matters for
+// a transcript whose tail is one enormous tool result.
+const transcriptRecoveryWindow = 64 << 20 // 64MiB
+
+// GetUsageSource reports where GetContextUsage()'s value came from.
+// Empty when there is no usage yet.
+func (cs *claudeSession) GetUsageSource() string {
+	cs.usageMu.Lock()
+	defer cs.usageMu.Unlock()
+	return cs.usageSource
 }
 
 // parseClaudeUsage extracts the four token counts Claude reports per API call.
 // Missing fields default to zero.
 func parseClaudeUsage(usage map[string]any) (input, output, cacheCreation, cacheRead int) {
-	if v, ok := usage["input_tokens"].(float64); ok {
-		input = int(v)
-	}
-	if v, ok := usage["output_tokens"].(float64); ok {
-		output = int(v)
-	}
-	if v, ok := usage["cache_creation_input_tokens"].(float64); ok {
-		cacheCreation = int(v)
-	}
-	if v, ok := usage["cache_read_input_tokens"].(float64); ok {
-		cacheRead = int(v)
-	}
+	input = asInt(usage["input_tokens"])
+	output = asInt(usage["output_tokens"])
+	cacheCreation = asInt(usage["cache_creation_input_tokens"])
+	cacheRead = asInt(usage["cache_read_input_tokens"])
 	return
+}
+
+// asInt coerces a JSON-decoded value to int. json.Unmarshal defaults numeric
+// fields to float64, but some CLI builds encode large token counts as strings
+// (to avoid float64 precision loss past 2^53) or as json.Number. Without this
+// shim, parseClaudeUsage would silently zero out non-float64 fields and the
+// auto-compress trigger would fall back to the text-history heuristic.
+func asInt(v any) int {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	case float32:
+		return int(x)
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return int(n)
+		}
+		if f, err := x.Float64(); err == nil {
+			return int(f)
+		}
+		return 0
+	case string:
+		if n, err := strconv.ParseInt(x, 10, 64); err == nil {
+			return int(n)
+		}
+		if f, err := strconv.ParseFloat(x, 64); err == nil {
+			return int(f)
+		}
+		return 0
+	default:
+		return 0
+	}
 }
 
 func (cs *claudeSession) handleAssistant(raw map[string]any) {
@@ -722,8 +986,13 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 				OutputTokens:             prevOutput,
 				ContextWindow:            window,
 			}
+			cs.usageSource = "event"
 			cs.usageMu.Unlock()
 		}
+		// used == 0 means the usage block is present but empty — measured on
+		// MiniMax-M3, which sends {"input_tokens":0,...} on every assistant
+		// event. Deliberately leave lastUsage's previous value in place rather
+		// than clearing it; handleResult consults the transcript tail instead.
 	}
 
 	contentArr, ok := msg["content"].([]any)
@@ -846,23 +1115,54 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
 	}
 
-	// Aggregated usage across all sub-calls in this turn — used for billing-
-	// style reporting in the EventResult event (slog turn-complete log etc.).
-	// We do NOT pull input/cache values into cs.lastUsage from here:
-	// cache_read_input_tokens is summed across every sub-call that hit the
-	// cached prefix, so on long agentic turns it vastly exceeds the model
-	// context window. The per-sub-call usage captured in handleAssistant
-	// gives a faithful "context used right now" snapshot.
+	// Exact context size, in order of preference:
 	//
-	// We DO use the result's output_tokens to update lastUsage.OutputTokens
-	// because output is additive (each sub-call's tokens are real new
-	// tokens, never recycled) and the per-assistant-event output_tokens in
+	//   1. the in-process stream-json assistant event (handleAssistant) — a
+	//      per-sub-call prompt size, and the freshest thing available;
+	//   2. the Claude Code JSONL transcript tail — the same per-sub-call
+	//      figure, recovered from disk. This is the path that matters for
+	//      providers whose assistant events carry an EMPTY usage block
+	//      (measured: MiniMax-M3 sends {"input_tokens":0,"output_tokens":0}
+	//      on every assistant event), where path 1 writes nothing at all.
+	//
+	// We deliberately do NOT use this event's own `usage` as the fallback.
+	// That object is the result aggregate: its cache_read_input_tokens sums
+	// every sub-call in the turn (measured: in+cc+cr walked 38377 → 38538 →
+	// 38671 within one turn), so it overstates the final prompt by a factor
+	// that grows with the number of sub-calls — roughly 2x on a short turn,
+	// and the user's own estimate is 5-7x on a session of a dozen iterations.
+	// The transcript carries the true per-call figure instead. The aggregate
+	// stays in use ONLY for the EventResult billing fields below.
+	//
+	// output_tokens is taken from this event because output is additive (never
+	// recycled across sub-calls) and the per-assistant-event output_tokens in
 	// stream-json is a placeholder (typically 1). The result is the only
 	// authoritative source of total tokens generated for this turn.
 	var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int
 	if usage, ok := raw["usage"].(map[string]any); ok {
 		inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens = parseClaudeUsage(usage)
 	}
+
+	// Path 2: consult the transcript when the in-process snapshot is absent.
+	cs.usageMu.Lock()
+	haveExact := cs.lastUsage != nil && cs.usageSource == "event"
+	cs.usageMu.Unlock()
+
+	if !haveExact {
+		if u, _ := tailUsageFromTranscript(cs.transcriptPath(), transcriptRecoveryWindow); u != nil {
+			cs.usageMu.Lock()
+			// A recovered snapshot is a placeholder and a result snapshot is an
+			// aggregate — the transcript's per-call figure supersedes both.
+			cs.lastUsage = u
+			cs.usageSource = "transcript"
+			cs.usageMu.Unlock()
+		}
+		// A nil u means the transcript is absent, unreadable, or carries no
+		// usable assistant record yet (the first turn of a fresh session).
+		// Leave lastUsage alone rather than substituting this event's
+		// aggregate — that substitution is what produced the overestimate.
+	}
+
 	if outputTokens > 0 {
 		cs.usageMu.Lock()
 		if cs.lastUsage != nil {
@@ -1142,6 +1442,9 @@ func (cs *claudeSession) permissionModeValue() string {
 // transcriptPath returns the path to the Claude Code JSONL transcript
 // for the current session, or "" if it cannot be determined.
 func (cs *claudeSession) transcriptPath() string {
+	if cs.transcriptOverride != "" {
+		return cs.transcriptOverride
+	}
 	sessionID := cs.CurrentSessionID()
 	if sessionID == "" || cs.workDir == "" {
 		return ""

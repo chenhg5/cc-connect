@@ -223,6 +223,57 @@ func TestHandleAssistantCapturesPerSubCallUsage(t *testing.T) {
 	}
 }
 
+func TestParseClaudeUsageAcceptsNonFloat64Types(t *testing.T) {
+	// Claude Code CLI stream-json normally encodes numbers as float64, but
+	// builds that prefer precision safety (or future Anthropic format changes)
+	// may emit ints, json.Number, or strings. parseClaudeUsage must coerce all
+	// of these — otherwise auto-compress falls back to the text-history
+	// heuristic (411k chars / 4 ≈ 102k tokens, easily crossing 400k over a
+	// long debug session) and triggers spurious compress cycles.
+	cases := []struct {
+		name    string
+		usage   map[string]any
+		wantIn  int
+		wantCC  int
+		wantCR  int
+		wantOut int
+	}{
+		{"float64 (canonical)", map[string]any{
+			"input_tokens": float64(508), "cache_creation_input_tokens": float64(0),
+			"cache_read_input_tokens": float64(165376), "output_tokens": float64(68),
+		}, 508, 0, 165376, 68},
+		{"int (json decoder with int path)", map[string]any{
+			"input_tokens": int(508), "cache_creation_input_tokens": int(0),
+			"cache_read_input_tokens": int(165376), "output_tokens": int(68),
+		}, 508, 0, 165376, 68},
+		{"int64", map[string]any{
+			"input_tokens": int64(508), "cache_creation_input_tokens": int64(0),
+			"cache_read_input_tokens": int64(165376), "output_tokens": int64(68),
+		}, 508, 0, 165376, 68},
+		{"json.Number (UseNumber path)", map[string]any{
+			"input_tokens": json.Number("508"), "cache_creation_input_tokens": json.Number("0"),
+			"cache_read_input_tokens": json.Number("165376"), "output_tokens": json.Number("68"),
+		}, 508, 0, 165376, 68},
+		{"string-encoded ints", map[string]any{
+			"input_tokens": "508", "cache_creation_input_tokens": "0",
+			"cache_read_input_tokens": "165376", "output_tokens": "68",
+		}, 508, 0, 165376, 68},
+		{"string-encoded floats", map[string]any{
+			"input_tokens": "508.0", "cache_creation_input_tokens": "0.0",
+			"cache_read_input_tokens": "165376.0", "output_tokens": "68.0",
+		}, 508, 0, 165376, 68},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in, out, cc, cr := parseClaudeUsage(tc.usage)
+			if in != tc.wantIn || out != tc.wantOut || cc != tc.wantCC || cr != tc.wantCR {
+				t.Errorf("parseClaudeUsage = (in=%d out=%d cc=%d cr=%d), want (in=%d out=%d cc=%d cr=%d)",
+					in, out, cc, cr, tc.wantIn, tc.wantOut, tc.wantCC, tc.wantCR)
+			}
+		})
+	}
+}
+
 func TestHandleResultNoUsage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1052,4 +1103,287 @@ func itoa(i int) string {
 		buf[pos] = '-'
 	}
 	return string(buf[pos:])
+}
+
+// TestScanTranscriptForUsage covers the cold-resume recovery path. Every
+// `--resume` spawns a fresh claudeSession with no usage, so without this the
+// first auto-compress decision of every resumed process fell back to the
+// text-length heuristic.
+// writeFixture writes a transcript fixture and returns its path.
+func writeFixture(t *testing.T, lines []string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return path
+}
+
+// TestClaudeUsageFromTranscriptLine covers the per-line parse, including the
+// two shapes that must NOT yield a value: a non-assistant line, and an
+// assistant line whose usage is the all-zero block MiniMax-M3 sends.
+func TestClaudeUsageFromTranscriptLine(t *testing.T) {
+	t.Run("assistant with real usage", func(t *testing.T) {
+		line := []byte(`{"type":"assistant","message":{"model":"MiniMax-M3",` +
+			`"usage":{"input_tokens":146,"cache_creation_input_tokens":0,` +
+			`"cache_read_input_tokens":38802,"output_tokens":9}}}`)
+		u := claudeUsageFromTranscriptLine(line)
+		if u == nil {
+			t.Fatal("expected usage, got nil")
+		}
+		if u.UsedTokens != 146+38802 {
+			t.Errorf("UsedTokens = %d, want %d", u.UsedTokens, 146+38802)
+		}
+		if u.ContextWindow != 200000 {
+			t.Errorf("ContextWindow = %d, want 200000 for MiniMax-M3", u.ContextWindow)
+		}
+	})
+
+	t.Run("assistant with the all-zero usage MiniMax streams", func(t *testing.T) {
+		line := []byte(`{"type":"assistant","message":{"model":"MiniMax-M3",` +
+			`"usage":{"input_tokens":0,"output_tokens":0,"service_tier":"standard"}}}`)
+		if u := claudeUsageFromTranscriptLine(line); u != nil {
+			t.Fatalf("all-zero usage must not produce a snapshot, got %+v", u)
+		}
+	})
+
+	t.Run("non-assistant line", func(t *testing.T) {
+		line := []byte(`{"type":"user","message":{"role":"user","content":"hi"},"usage":{"input_tokens":5}}`)
+		if u := claudeUsageFromTranscriptLine(line); u != nil {
+			t.Fatalf("user line must not produce a snapshot, got %+v", u)
+		}
+	})
+
+	t.Run("malformed json", func(t *testing.T) {
+		if u := claudeUsageFromTranscriptLine([]byte(`not json`)); u != nil {
+			t.Fatalf("garbage must not produce a snapshot, got %+v", u)
+		}
+	})
+}
+
+// TestTailUsageFromTranscript asserts the tail reader returns the LAST usable
+// record — the whole point of the mechanism is that the newest per-call number
+// wins, not the largest or the first.
+func TestTailUsageFromTranscript(t *testing.T) {
+	path := writeFixture(t, []string{
+		`{"type":"assistant","message":{"model":"MiniMax-M3","usage":{"input_tokens":100,"cache_read_input_tokens":900}}}`,
+		`{"type":"user","message":{"role":"user","content":"hi"}}`,
+		`{"type":"assistant","message":{"model":"MiniMax-M3","usage":{"input_tokens":0,"output_tokens":0}}}`,
+		`{"type":"assistant","message":{"model":"MiniMax-M3","usage":{"input_tokens":146,"cache_read_input_tokens":38802}}}`,
+		`{"type":"assistant","message":{"model":"MiniMax-M3","usage":{"input_tokens":120,"cache_read_input_tokens":38948}}}`,
+	})
+
+	u, found := tailUsageFromTranscript(path, 1<<20)
+	if !found {
+		t.Fatal("found = false, want true (file is readable)")
+	}
+	if u == nil {
+		t.Fatal("expected usage, got nil")
+	}
+	if want := 120 + 38948; u.UsedTokens != want {
+		t.Errorf("UsedTokens = %d, want %d (the LAST record, not the largest)", u.UsedTokens, want)
+	}
+}
+
+// TestTailUsageFromTranscript_LineSpanningChunks is the case that breaks a
+// naive tail reader: a single transcript line larger than the read chunk. Tool
+// results embed whole file contents, so this is the common case in real
+// sessions, not an edge case.
+func TestTailUsageFromTranscript_LineSpanningChunks(t *testing.T) {
+	huge := strings.Repeat("x", 12<<20) // one line far larger than any read window
+	path := writeFixture(t, []string{
+		`{"type":"assistant","message":{"model":"MiniMax-M3","usage":{"input_tokens":111,"cache_read_input_tokens":222}}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"` + huge + `"}]}}`,
+	})
+
+	u, found := tailUsageFromTranscript(path, 1<<30)
+	if !found {
+		t.Fatal("found = false, want true")
+	}
+	if u == nil {
+		t.Fatal("expected the pre-huge-line record to be found by walking back past the oversized line")
+	}
+	if want := 111 + 222; u.UsedTokens != want {
+		t.Errorf("UsedTokens = %d, want %d", u.UsedTokens, want)
+	}
+}
+
+// TestTailUsageFromTranscript_BoundedWindow asserts the window argument is a
+// real ceiling: a record outside it reports "readable but nothing found" rather
+// than being reached by a silent wider search.
+func TestTailUsageFromTranscript_BoundedWindow(t *testing.T) {
+	path := writeFixture(t, []string{
+		`{"type":"assistant","message":{"model":"MiniMax-M3","usage":{"input_tokens":111,"cache_read_input_tokens":222}}}`,
+		`{"type":"user","message":{"role":"user","content":"` + strings.Repeat("y", 5000) + `"}}`,
+	})
+
+	u, found := tailUsageFromTranscript(path, 256) // window far too small
+	if !found {
+		t.Error("found = false, want true — the file WAS readable, there was just nothing usable in the window")
+	}
+	if u != nil {
+		t.Errorf("expected nil within a 256-byte window, got %+v", u)
+	}
+}
+
+// TestTailUsageFromTranscript_MissingFile asserts unreadable is distinguishable
+// from readable-but-empty: callers log differently, and the auto-compress
+// decision treats them differently.
+func TestTailUsageFromTranscript_MissingFile(t *testing.T) {
+	u, found := tailUsageFromTranscript(filepath.Join(t.TempDir(), "nope.jsonl"), 1<<20)
+	if found {
+		t.Error("found = true for a missing file, want false")
+	}
+	if u != nil {
+		t.Errorf("expected nil for a missing file, got %+v", u)
+	}
+}
+
+// TestTailUsageFromTranscript_NoAssistantUsage asserts a transcript with no
+// usable assistant record yields nil rather than a zero snapshot — a zero
+// snapshot would look like "exactly 0 tokens used" to auto-compress.
+func TestTailUsageFromTranscript_NoAssistantUsage(t *testing.T) {
+	path := writeFixture(t, []string{
+		`{"type":"user","message":{"role":"user","content":"hi"}}`,
+		`{"type":"assistant","message":{"model":"m","usage":{"input_tokens":0,"output_tokens":1}}}`,
+	})
+	u, found := tailUsageFromTranscript(path, 1<<20)
+	if !found {
+		t.Error("found = false, want true")
+	}
+	if u != nil {
+		t.Fatalf("expected nil when no assistant record carries usage, got %+v", u)
+	}
+}
+
+// TestHandleResultUsesTranscriptTailWhenAssistantEmpty is the end-to-end
+// reproduction of the reported bug: MiniMax-M3 streams an EMPTY usage block on
+// every assistant event, so handleAssistant writes nothing. The result event's
+// own usage is an aggregate that overstates the prompt (it sums cache_read
+// across sub-calls), so the fix reads the exact per-call figure from the
+// transcript instead.
+func TestHandleResultUsesTranscriptTailWhenAssistantEmpty(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A transcript with a per-call record, plus an aggregate that is larger —
+	// the aggregate must NOT be what gets stored.
+	path := writeFixture(t, []string{
+		`{"type":"assistant","message":{"model":"MiniMax-M3","usage":{"input_tokens":220,"cache_read_input_tokens":38157}}}`,
+	})
+
+	cs := &claudeSession{events: make(chan core.Event, 8), ctx: ctx, workDir: t.TempDir()}
+	cs.sessionID.Store("mini-sess")
+	cs.alive.Store(true)
+	cs.activeModel.Store("MiniMax-M3")
+	cs.transcriptOverride = path
+
+	// 1) The empty assistant usage MiniMax sends — must write nothing.
+	cs.handleAssistant(map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"model": "MiniMax-M3",
+			"usage": map[string]any{"input_tokens": float64(0), "output_tokens": float64(0)},
+		},
+	})
+	if u := cs.GetContextUsage(); u != nil {
+		t.Fatalf("empty assistant usage must not write lastUsage, got %+v", u)
+	}
+
+	// 2) The result event carries an AGGREGATE (larger) plus output tokens.
+	cs.handleResult(map[string]any{
+		"type":       "result",
+		"result":     "done",
+		"session_id": "mini-sess",
+		"usage": map[string]any{
+			"input_tokens":                float64(38029),
+			"cache_creation_input_tokens": float64(0),
+			"cache_read_input_tokens":     float64(76019),
+			"output_tokens":               float64(212),
+		},
+	})
+
+	u := cs.GetContextUsage()
+	if u == nil {
+		t.Fatal("expected a snapshot from the transcript tail, got nil")
+	}
+	if want := 220 + 38157; u.UsedTokens != want {
+		t.Errorf("UsedTokens = %d, want %d (the transcript per-call figure, NOT the %d aggregate)",
+			u.UsedTokens, want, 38029+76019)
+	}
+	if u.InputTokens != 220 {
+		t.Errorf("InputTokens = %d, want 220", u.InputTokens)
+	}
+	if u.CachedInputTokens != 38157 {
+		t.Errorf("CachedInputTokens = %d, want 38157", u.CachedInputTokens)
+	}
+	if src := cs.GetUsageSource(); src != "transcript" {
+		t.Errorf("usage source = %q, want %q", src, "transcript")
+	}
+	// output_tokens is additive and still comes from the result event.
+	if u.OutputTokens != 212 {
+		t.Errorf("OutputTokens = %d, want 212", u.OutputTokens)
+	}
+}
+
+// TestHandleResultKeepsLiveAssistantUsage guards the other half: on a provider
+// that DOES report per-call usage (Claude / DeepSeek), the live in-process
+// snapshot wins and neither the transcript nor the aggregate replaces it.
+func TestHandleResultKeepsLiveAssistantUsage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The transcript here records a DIFFERENT (older) value; if the live path
+	// is working, it must not be what ends up stored.
+	path := writeFixture(t, []string{
+		`{"type":"assistant","message":{"model":"deepseek-flash","usage":{"input_tokens":100,"cache_read_input_tokens":200}}}`,
+	})
+
+	cs := &claudeSession{events: make(chan core.Event, 8), ctx: ctx, workDir: t.TempDir()}
+	cs.sessionID.Store("live-sess")
+	cs.alive.Store(true)
+	cs.activeModel.Store("deepseek-flash")
+	cs.transcriptOverride = path
+
+	cs.handleAssistant(map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"model": "deepseek-flash",
+			"usage": map[string]any{
+				"input_tokens":            float64(271),
+				"cache_read_input_tokens": float64(224768),
+				"output_tokens":           float64(1),
+			},
+		},
+	})
+	before := cs.GetContextUsage()
+	if before == nil || before.UsedTokens != 271+224768 {
+		t.Fatalf("precondition: expected live snapshot %d, got %+v", 271+224768, before)
+	}
+
+	cs.handleResult(map[string]any{
+		"type":       "result",
+		"result":     "done",
+		"session_id": "live-sess",
+		"usage": map[string]any{
+			"input_tokens":            float64(1744),
+			"cache_read_input_tokens": float64(204544),
+			"output_tokens":           float64(406),
+		},
+	})
+
+	u := cs.GetContextUsage()
+	if u == nil {
+		t.Fatal("lastUsage disappeared")
+	}
+	if u.UsedTokens != 271+224768 {
+		t.Errorf("live per-call snapshot was replaced: UsedTokens = %d, want %d",
+			u.UsedTokens, 271+224768)
+	}
+	if src := cs.GetUsageSource(); src != "event" {
+		t.Errorf("usage source = %q, want %q", src, "event")
+	}
+	if u.OutputTokens != 406 {
+		t.Errorf("OutputTokens = %d, want 406 (result is authoritative for output)", u.OutputTokens)
+	}
 }

@@ -322,6 +322,15 @@ level = "info" # debug, info, warn, error
 # enabled = true
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
+# allow_heuristic = false  # decide from the text-length heuristic when the agent
+#                          # reports no exact usage. Off by default: the heuristic
+#                          # counts only cc-connect's own history text, ignoring
+#                          # tool results and the fixed system-prompt+tools
+#                          # overhead, so it is routinely several times off.
+#                          # 当 agent 未上报精确用量时，是否退回文本长度启发式估算。
+#                          # 默认关闭：该启发式只统计 cc-connect 自身的对话文本，
+#                          # 忽略 tool_result 与系统提示词/工具定义的固定开销，
+#                          # 误差常达数倍，容易过早压缩或永不压缩。
 
 # [projects.observe]
 # enabled = true                    # Forward native terminal sessions to Slack

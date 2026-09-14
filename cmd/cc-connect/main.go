@@ -702,7 +702,7 @@ func main() {
 			if maxTokens <= 0 {
 				maxTokens = 12000
 			}
-			engine.SetAutoCompressConfig(true, maxTokens, minGap)
+			engine.SetAutoCompressConfigWithSource(true, maxTokens, minGap, proj.AutoCompress.AllowHeuristic)
 		}
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 		engine.SetResetOnIdle(resetIdle)
@@ -1782,7 +1782,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		if maxTokens <= 0 {
 			maxTokens = 12000
 		}
-		engine.SetAutoCompressConfig(true, maxTokens, minGap)
+		engine.SetAutoCompressConfigWithSource(true, maxTokens, minGap, proj.AutoCompress.AllowHeuristic)
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}

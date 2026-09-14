@@ -497,6 +497,14 @@ type ContextUsageReporter interface {
 	GetContextUsage() *ContextUsage
 }
 
+// UsageSourceReporter is an optional refinement of ContextUsageReporter: it
+// reports where the current usage value came from. Used by auto-compress to
+// distinguish a live API-reported number ("event") from one recovered out of
+// the on-disk transcript ("transcript-recovered") in logs and diagnostics.
+type UsageSourceReporter interface {
+	GetUsageSource() string
+}
+
 // ContextUsage describes runtime context consumption for the active session.
 type ContextUsage struct {
 	// UsedTokens is the current token load to compare against ContextWindow when

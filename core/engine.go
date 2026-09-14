@@ -427,7 +427,17 @@ type Engine struct {
 	autoCompressEnabled   bool
 	autoCompressMaxTokens int
 	autoCompressMinGap    time.Duration
-	resetOnIdle           time.Duration
+	// autoCompressAllowHeuristic permits a trigger decision built from the
+	// text-length heuristic (1 token / 4 runes of cc-connect's own history)
+	// when no exact API-reported usage is available. The heuristic ignores
+	// tool_use/tool_result blocks and the fixed system-prompt+tools overhead,
+	// so it is routinely several times off in either direction — measured at
+	// 574,797 while the same session never exceeded 229,783 real tokens.
+	// Default false: a turn with no exact number makes no decision at all,
+	// leaving lastAutoCompressAt untouched so the NEXT turn (which always has
+	// exact usage) can decide with real data.
+	autoCompressAllowHeuristic bool
+	resetOnIdle                time.Duration
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
@@ -938,8 +948,18 @@ func estimateTokensWithPendingAssistant(entries []HistoryEntry, pendingAssistant
 
 // SetAutoCompressConfig configures automatic context compression.
 func (e *Engine) SetAutoCompressConfig(enabled bool, maxTokens int, minGap time.Duration) {
+	e.SetAutoCompressConfigWithSource(enabled, maxTokens, minGap, false)
+}
+
+// SetAutoCompressConfigWithSource is SetAutoCompressConfig plus the
+// allowHeuristic escape hatch. Pass allowHeuristic=true only to restore the
+// legacy behavior of deciding from the text-length heuristic when no exact
+// API-reported usage exists; the default (false) makes such turns wait for
+// exact data instead of guessing.
+func (e *Engine) SetAutoCompressConfigWithSource(enabled bool, maxTokens int, minGap time.Duration, allowHeuristic bool) {
 	e.autoCompressEnabled = enabled
 	e.autoCompressMaxTokens = maxTokens
+	e.autoCompressAllowHeuristic = allowHeuristic
 	if minGap <= 0 {
 		minGap = 30 * time.Minute
 	}
@@ -5789,19 +5809,64 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// per Anthropic's usage semantics), which already includes everything
 			// the model will see on the next inference call.
 			if e.autoCompressEnabled && e.autoCompressMaxTokens > 0 {
+				// Resolve the exact prompt size, and record WHY it was
+				// unavailable when it was. "The agent reported a small prompt"
+				// and "the agent reported nothing and we guessed from text"
+				// used to look identical here, which is what kept the original
+				// bug invisible.
+				usage, hasReporter := replyFooterContextUsage(state.agentSession)
+				usageSource := ""
+				if src, ok := state.agentSession.(UsageSourceReporter); ok {
+					usageSource = src.GetUsageSource()
+				}
 				estimate := contextEstimate
-				if usage := replyFooterSessionContextUsage(state.agentSession); usage != nil && usage.UsedTokens > 0 {
+				estimateSource := "none"
+				switch {
+				case !hasReporter:
+					estimateSource = "none: session does not implement ContextUsageReporter"
+				case usage == nil:
+					estimateSource = "none: agent has not reported usage yet"
+				case usage.UsedTokens <= 0:
+					estimateSource = "none: agent reported zero"
+				default:
 					estimate = usage.UsedTokens
+					estimateSource = "exact"
 				}
 				now := time.Now()
 				state.mu.Lock()
 				last := state.lastAutoCompressAt
 				state.mu.Unlock()
-				if estimate >= e.autoCompressMaxTokens && (last.IsZero() || now.Sub(last) >= e.autoCompressMinGap) {
-					triggerAutoCompress = true
-					state.mu.Lock()
-					state.lastAutoCompressTokens = estimate
-					state.mu.Unlock()
+
+				// Only an exact number may drive a decision, unless the
+				// heuristic fallback was explicitly opted into. A wrong guess
+				// either compacts early — dropping context that was still in
+				// use — or never compacts at all.
+				if estimateSource == "exact" || e.autoCompressAllowHeuristic {
+					triggered := estimate >= e.autoCompressMaxTokens &&
+						(last.IsZero() || now.Sub(last) >= e.autoCompressMinGap)
+					slog.Info("auto-compress: decision",
+						"estimate", estimate,
+						"estimate_source", estimateSource,
+						"usage_source", usageSource,
+						"heuristic_estimate", contextEstimate,
+						"max_tokens", e.autoCompressMaxTokens,
+						"triggered", triggered,
+					)
+					if triggered {
+						triggerAutoCompress = true
+						state.mu.Lock()
+						state.lastAutoCompressTokens = estimate
+						state.mu.Unlock()
+					}
+				} else {
+					// Leave lastAutoCompressAt untouched so the next turn —
+					// which does carry exact usage — decides on real data.
+					slog.Debug("auto-compress: skipped, waiting for exact usage",
+						"reason", estimateSource,
+						"heuristic_estimate", contextEstimate,
+						"max_tokens", e.autoCompressMaxTokens,
+						"session_key", sessionKey,
+					)
 				}
 			}
 
@@ -7663,14 +7728,22 @@ func formatReplyFooterUsage(report *UsageReport, i18n *I18n) string {
 }
 
 func replyFooterSessionContextUsage(session AgentSession) *ContextUsage {
+	u, _ := replyFooterContextUsage(session)
+	return u
+}
+
+// replyFooterContextUsage is replyFooterSessionContextUsage plus the "was
+// there a reporter at all?" bit, which auto-compress needs to tell a session
+// that cannot report usage apart from one that simply has not reported yet.
+func replyFooterContextUsage(session AgentSession) (*ContextUsage, bool) {
 	if session == nil {
-		return nil
+		return nil, false
 	}
 	reporter, ok := session.(ContextUsageReporter)
 	if !ok {
-		return nil
+		return nil, false
 	}
-	return reporter.GetContextUsage()
+	return reporter.GetContextUsage(), true
 }
 
 func replyFooterContextText(usage *ContextUsage, i18n *I18n) string {
