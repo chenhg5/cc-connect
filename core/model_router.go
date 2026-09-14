@@ -19,19 +19,20 @@ import (
 // 统一从 models_config 指向的 claude-models.json 读取（唯一凭证源）。
 // complex_model/simple_model/fallback_model/classify_model/multimodal_model 必须与 claude-models.json 的 models 节点 key 一致。
 type ModelRouterConfig struct {
-	Enabled          bool
-	ModelsConfig     string // claude-models.json 路径（唯一凭证源）
-	ComplexModel     string // 复杂问题模型 key
-	SimpleModel      string // 简单问题模型 key
-	FallbackModel    string // 兜底模型 key（分类失败/LLM 失败时）
-	ClassifyModel    string // LLM 分类用模型 key
-	ClassifyPrompt   string // LLM 分类提示词（{text} 占位符替换为用户消息；空则用内置默认）
-	MultimodalModel  string // 多模态消息（图片/文件等）时强制用的模型 key
-	UseLLMClassify   bool   // 规则未命中时是否用 LLM 兜底分类
-	ComplexKeywords  []string
-	SimpleKeywords   []string
-	ComplexMinLen    int  // 消息字符数（rune）超过即判 complex
-	ClassifyThinking bool // LLM 分类请求是否开 thinking（true → "enabled"，false → "disabled"）
+	Enabled           bool
+	ModelsConfig      string // claude-models.json 路径（唯一凭证源）
+	ComplexModel      string // 复杂问题模型 key
+	SimpleModel       string // 简单问题模型 key
+	FallbackModel     string // 兜底模型 key（分类失败/LLM 失败时）
+	ClassifyModel     string // LLM 分类用模型 key
+	ClassifyPrompt    string // LLM 分类提示词（{text} 占位符替换为用户消息；空则用内置默认）
+	MultimodalModel   string // 多模态消息（图片/文件等）时强制用的模型 key
+	UseLLMClassify    bool   // 规则未命中时是否用 LLM 兜底分类
+	ComplexKeywords   []string
+	SimpleKeywords    []string
+	ComplexMinLen     int  // 消息字符数（rune）超过即判 complex
+	ClassifyThinking  bool // LLM 分类请求是否开 thinking（true → "enabled"，false → "disabled"）
+	ClassifyMaxTokens int  // LLM 分类请求的 max_tokens（<=0 用 defaultClassifyMaxTokens）
 }
 
 // ModelRouteOverride 模型路由的 per-spawn 覆盖：完整凭证（来自 claude-models.json）。
@@ -141,6 +142,11 @@ const defaultComplexMinLen = 800
 // classifyTimeout LLM 兜底分类的调用超时。
 const classifyTimeout = 5 * time.Second
 
+// defaultClassifyMaxTokens 分类请求 max_tokens 的默认值（config 未配 classify_max_tokens 时）。
+// 这是整条响应的上限：开 thinking 时 thinking 块与 text 块一起算，thinking 变长会吃掉额度
+// 导致 text 块不生成（空答案 → 回退兜底）。
+const defaultClassifyMaxTokens = 256
+
 // defaultClassifyPrompt 内置分类提示词（config 未配 classify_prompt 时兜底）。
 // {text} 占位符替换为用户消息。
 const defaultClassifyPrompt = `你是消息复杂度分类器。判断下面这条用户消息该用「复杂模型」还是「简单模型」处理，只回复一个词 simple 或 complex，不要任何解释、标点或换行。
@@ -221,7 +227,7 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 		reason = fmt.Sprintf("命中简单语义关键词「%s」", kw)
 	} else if cfg.UseLLMClassify && classifyCred.Model != "" {
 		// 4. LLM 兜底
-		if t, ok, failReason := classifyViaLLM(ctx, text, classifyCred, cfg.ClassifyPrompt, complexKws, simpleKws, cfg.ClassifyThinking); ok {
+		if t, ok, failReason := classifyViaLLM(ctx, text, classifyCred, cfg.ClassifyPrompt, complexKws, simpleKws, cfg.ClassifyThinking, cfg.ClassifyMaxTokens); ok {
 			tier = t
 			res.UsedLLM = true
 			reason = "LLM 判定为 " + t
@@ -290,7 +296,7 @@ func classifyModelName(model string) string {
 // classifyViaLLM 用指定凭证的 anthropic 兼容端点做一次轻量分类。
 // 返回 ("simple"|"complex", 是否成功, 失败原因)。
 // 失败原因会拼进路由卡片「调度依据」，便于直接看到是 400 还是超时，不用翻日志。
-func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, prompt string, complexKws, simpleKws []string, thinking bool) (string, bool, string) {
+func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, prompt string, complexKws, simpleKws []string, thinking bool, maxTokens int) (string, bool, string) {
 	if cred.BaseURL == "" || cred.APIKey == "" || cred.Model == "" {
 		slog.Warn("model_router: llm classify skip, missing credential", "model", cred.Model, "has_base_url", cred.BaseURL != "", "has_api_key", cred.APIKey != "")
 		return "", false, "凭证缺失"
@@ -325,9 +331,12 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 	if thinking {
 		thinkingType = "enabled"
 	}
+	if maxTokens <= 0 {
+		maxTokens = defaultClassifyMaxTokens
+	}
 	payload := map[string]any{
 		"model":      classifyModelName(cred.Model), // 直连端点，剥掉客户端窗口声明后缀（见 classifyModelName）
-		"max_tokens": 256,
+		"max_tokens": maxTokens,
 		"thinking":   map[string]any{"type": thinkingType},
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},

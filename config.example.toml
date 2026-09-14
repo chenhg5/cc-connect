@@ -783,6 +783,8 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # classify_thinking = false             # LLM 分类请求是否开 thinking：false → "disabled"（默认，deepseek 必须关，
 #                                       # 否则 thinking 块吃掉 max_tokens 且拖慢分类）；端点不接受 disabled 时
 #                                       # （智谱 400 [1210]「该模型始终思考」）设 true → "enabled"
+# classify_max_tokens = 256             # 分类请求 max_tokens（不配即用 256）。这是整条响应的上限，
+#                                       # 开 thinking 时 thinking 块与 text 块一起算，被吃光会空答案 → 回退兜底
 # classify_prompt = """                 # LLM 分类提示词（{text} 占位符替换为用户消息；不配则用内置默认，默认内容如下）
 # 你是消息复杂度分类器。判断下面这条用户消息该用「复杂模型」还是「简单模型」处理，只回复一个词 simple 或 complex，不要任何解释、标点或换行。
 #

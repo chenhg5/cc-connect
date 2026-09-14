@@ -265,7 +265,7 @@ func TestClassifyViaLLM_ThinkingFlag(t *testing.T) {
 
 	cred := ModelRouteOverride{BaseURL: srv.URL, APIKey: "k", Model: "deepseek-flash[1m]"}
 	for _, want := range []string{"disabled", "enabled"} {
-		tier, ok, reason := classifyViaLLM(context.Background(), "查下这个订单", cred, "", nil, nil, want == "enabled")
+		tier, ok, reason := classifyViaLLM(context.Background(), "查下这个订单", cred, "", nil, nil, want == "enabled", 0)
 		if !ok || tier != "simple" {
 			t.Fatalf("thinking=%s: tier=%q ok=%v reason=%q", want, tier, ok, reason)
 		}
@@ -311,4 +311,29 @@ func writeTempModelsConfig(t *testing.T, key, baseURL, model string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// TestClassifyViaLLM_MaxTokens 验证 classify_max_tokens 透传，且未配（<=0）时回落默认 256。
+func TestClassifyViaLLM_MaxTokens(t *testing.T) {
+	var gotTokens int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		json.NewDecoder(r.Body).Decode(&p)
+		gotTokens = p.MaxTokens
+		fmt.Fprint(w, `{"content":[{"type":"text","text":"simple"}]}`)
+	}))
+	defer srv.Close()
+
+	cred := ModelRouteOverride{BaseURL: srv.URL, APIKey: "k", Model: "deepseek-flash"}
+	cases := map[int]int{0: 256, -1: 256, 1024: 1024}
+	for in, want := range cases {
+		if _, ok, _ := classifyViaLLM(context.Background(), "查下这个订单", cred, "", nil, nil, false, in); !ok {
+			t.Fatalf("maxTokens=%d: classify failed", in)
+		}
+		if gotTokens != want {
+			t.Fatalf("maxTokens=%d → 请求 max_tokens=%d, want %d", in, gotTokens, want)
+		}
+	}
 }

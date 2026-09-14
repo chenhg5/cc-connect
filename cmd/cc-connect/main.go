@@ -1432,19 +1432,20 @@ func applyModelRouter(engine *core.Engine, proj *config.ProjectConfig) {
 	}
 	mr := proj.ModelRouter
 	engine.SetModelRouter(core.ModelRouterConfig{
-		Enabled:          mr.Enabled,
-		ModelsConfig:     mr.ModelsConfig,
-		ComplexModel:     mr.ComplexModel,
-		SimpleModel:      mr.SimpleModel,
-		FallbackModel:    mr.FallbackModel,
-		ClassifyModel:    mr.ClassifyModel,
-		ClassifyPrompt:   mr.ClassifyPrompt,
-		MultimodalModel:  mr.MultimodalModel,
-		UseLLMClassify:   mr.UseLLMClassify,
-		ComplexKeywords:  splitCommaList(mr.ComplexKeywords),
-		SimpleKeywords:   splitCommaList(mr.SimpleKeywords),
-		ComplexMinLen:    mr.ComplexMinLen,
-		ClassifyThinking: mr.ClassifyThinking,
+		Enabled:           mr.Enabled,
+		ModelsConfig:      mr.ModelsConfig,
+		ComplexModel:      mr.ComplexModel,
+		SimpleModel:       mr.SimpleModel,
+		FallbackModel:     mr.FallbackModel,
+		ClassifyModel:     mr.ClassifyModel,
+		ClassifyPrompt:    mr.ClassifyPrompt,
+		MultimodalModel:   mr.MultimodalModel,
+		UseLLMClassify:    mr.UseLLMClassify,
+		ComplexKeywords:   splitCommaList(mr.ComplexKeywords),
+		SimpleKeywords:    splitCommaList(mr.SimpleKeywords),
+		ComplexMinLen:     mr.ComplexMinLen,
+		ClassifyThinking:  mr.ClassifyThinking,
+		ClassifyMaxTokens: mr.ClassifyMaxTokens,
 	})
 }
 

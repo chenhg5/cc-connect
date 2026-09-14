@@ -434,6 +434,10 @@ type ModelRouterConfig struct {
 	// 默认 false（"disabled"）：deepseek 默认就吐 thinking 块、会吃掉 max_tokens 并拖慢分类。
 	// 端点不接受 disabled 时（如智谱 400 [1210]「该模型始终思考」）才需要设 true。
 	ClassifyThinking bool `toml:"classify_thinking,omitempty"`
+	// ClassifyMaxTokens 分类请求的 max_tokens（<=0 用内置默认 256）。
+	// 这是整条响应的上限：开 thinking 时 thinking 块与 text 块一起算，
+	// thinking 变长会吃掉额度导致 text 块不生成（空答案 → 回退兜底），此时可上调。
+	ClassifyMaxTokens int `toml:"classify_max_tokens,omitempty"`
 }
 
 // ProviderModelConfig defines a selectable model entry for a provider,
