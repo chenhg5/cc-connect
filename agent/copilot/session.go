@@ -50,6 +50,11 @@ type copilotSession struct {
 	// context usage tracking
 	contextMu    sync.RWMutex
 	contextUsage *core.ContextUsage
+
+	// toolCallNames maps toolCallId -> toolName so tool.execution_complete,
+	// which carries only the toolCallId, can be surfaced with a readable name.
+	toolCallMu    sync.Mutex
+	toolCallNames map[string]string
 }
 
 type copilotWireProviderConfig struct {
@@ -386,9 +391,10 @@ type sessionEvent struct {
 }
 
 type sessionEventInner struct {
-	Type string          `json:"type"`
-	Kind string          `json:"kind"`
-	Data json.RawMessage `json:"data"`
+	Type    string          `json:"type"`
+	Kind    string          `json:"kind"`
+	AgentID string          `json:"agentId"` // non-empty when the event originates from a sub-agent
+	Data    json.RawMessage `json:"data"`
 }
 
 func (cs *copilotSession) handleSessionEvent(params json.RawMessage) {
@@ -441,6 +447,15 @@ func (cs *copilotSession) handleSessionEvent(params json.RawMessage) {
 	case "permission.requested":
 		cs.handlePermissionRequestedEvent(evt.Event.Data)
 
+	case "assistant.reasoning":
+		cs.emitReasoning(evt.Event)
+
+	case "tool.execution_start":
+		cs.emitToolExecutionStart(evt.Event)
+
+	case "tool.execution_complete":
+		cs.emitToolExecutionComplete(evt.Event)
+
 	case "assistant.turn_start":
 		slog.Debug("copilotSession: turn started")
 
@@ -463,6 +478,115 @@ func (cs *copilotSession) handleSessionEvent(params json.RawMessage) {
 
 	default:
 		slog.Debug("copilotSession: unhandled session event", "type", eventType)
+	}
+}
+
+// emitReasoning forwards a completed extended-thinking block as
+// core.EventThinking. Streaming deltas are intentionally ignored: the full
+// block arrives on assistant.reasoning once the model finishes thinking.
+// Sub-agent reasoning is skipped to keep the progress card readable.
+func (cs *copilotSession) emitReasoning(inner sessionEventInner) {
+	if inner.AgentID != "" {
+		return
+	}
+	var data struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(inner.Data, &data); err != nil || data.Content == "" {
+		return
+	}
+	evt := core.Event{Type: core.EventThinking, Content: data.Content}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+	}
+}
+
+// emitToolExecutionStart forwards tool.execution_start as core.EventToolUse
+// and remembers the toolCallId -> toolName mapping for the matching
+// completion event.
+func (cs *copilotSession) emitToolExecutionStart(inner sessionEventInner) {
+	if inner.AgentID != "" {
+		return
+	}
+	var data struct {
+		ToolCallID string          `json:"toolCallId"`
+		ToolName   string          `json:"toolName"`
+		Arguments  json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(inner.Data, &data); err != nil || data.ToolName == "" {
+		return
+	}
+	var input map[string]any
+	if len(data.Arguments) > 0 {
+		_ = json.Unmarshal(data.Arguments, &input)
+	}
+	if data.ToolCallID != "" {
+		cs.toolCallMu.Lock()
+		if cs.toolCallNames == nil {
+			cs.toolCallNames = make(map[string]string, 16)
+		}
+		if len(cs.toolCallNames) < 1024 {
+			cs.toolCallNames[data.ToolCallID] = data.ToolName
+		}
+		cs.toolCallMu.Unlock()
+	}
+	evt := core.Event{
+		Type:      core.EventToolUse,
+		ToolName:  data.ToolName,
+		ToolInput: summarizeToolInput(data.ToolName, input),
+	}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+	}
+}
+
+// emitToolExecutionComplete forwards tool.execution_complete as
+// core.EventToolResult, resolving the tool name recorded by
+// emitToolExecutionStart.
+func (cs *copilotSession) emitToolExecutionComplete(inner sessionEventInner) {
+	if inner.AgentID != "" {
+		return
+	}
+	var data struct {
+		ToolCallID string `json:"toolCallId"`
+		Success    *bool  `json:"success"`
+		Error      *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(inner.Data, &data); err != nil {
+		return
+	}
+	toolName := ""
+	if data.ToolCallID != "" {
+		cs.toolCallMu.Lock()
+		toolName = cs.toolCallNames[data.ToolCallID]
+		delete(cs.toolCallNames, data.ToolCallID)
+		cs.toolCallMu.Unlock()
+	}
+	if toolName == "" {
+		return // sub-agent or missed start event; nothing to attach the result to
+	}
+	status := "completed"
+	if data.Success != nil && !*data.Success {
+		status = "failed"
+	}
+	result := ""
+	if data.Error != nil {
+		result = data.Error.Message
+	}
+	evt := core.Event{
+		Type:        core.EventToolResult,
+		ToolName:    toolName,
+		ToolResult:  result,
+		ToolStatus:  status,
+		ToolSuccess: data.Success,
+	}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
 	}
 }
 
@@ -502,6 +626,12 @@ func normalizeCopilotEventType(eventType string) string {
 		return "assistant.message_delta"
 	case "assistant_streaming_delta":
 		return "assistant.streaming_delta"
+	case "assistant_reasoning":
+		return "assistant.reasoning"
+	case "tool_execution_start":
+		return "tool.execution_start"
+	case "tool_execution_complete":
+		return "tool.execution_complete"
 	}
 	return eventType
 }

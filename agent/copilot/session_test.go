@@ -651,3 +651,188 @@ func TestSaveImagesToTempDir(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleSessionEvent_ToolExecutionStartAndComplete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{
+		events: make(chan core.Event, 10),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	cs.alive.Store(true)
+
+	startData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-1",
+		"toolName":   "shell",
+		"arguments":  map[string]any{"command": "ls -la"},
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_start", Data: startData},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventToolUse {
+			t.Fatalf("event type = %v, want EventToolUse", evt.Type)
+		}
+		if evt.ToolName != "shell" {
+			t.Fatalf("tool name = %q, want shell", evt.ToolName)
+		}
+		if evt.ToolInput == "" {
+			t.Fatal("tool input summary is empty")
+		}
+	default:
+		t.Fatal("no EventToolUse emitted")
+	}
+
+	completeData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-1",
+		"success":    true,
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_complete", Data: completeData},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventToolResult {
+			t.Fatalf("event type = %v, want EventToolResult", evt.Type)
+		}
+		if evt.ToolName != "shell" {
+			t.Fatalf("tool name = %q, want shell (resolved from start event)", evt.ToolName)
+		}
+		if evt.ToolStatus != "completed" {
+			t.Fatalf("tool status = %q, want completed", evt.ToolStatus)
+		}
+		if evt.ToolSuccess == nil || !*evt.ToolSuccess {
+			t.Fatal("tool success = nil/false, want true")
+		}
+	default:
+		t.Fatal("no EventToolResult emitted")
+	}
+}
+
+func TestHandleSessionEvent_ToolExecutionFailed(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{
+		events: make(chan core.Event, 10),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	cs.alive.Store(true)
+
+	startData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-err",
+		"toolName":   "read",
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_start", Data: startData},
+	})))
+	<-cs.events
+
+	completeData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-err",
+		"success":    false,
+		"error":      map[string]any{"message": "file not found"},
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_complete", Data: completeData},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventToolResult {
+			t.Fatalf("event type = %v, want EventToolResult", evt.Type)
+		}
+		if evt.ToolStatus != "failed" {
+			t.Fatalf("tool status = %q, want failed", evt.ToolStatus)
+		}
+		if evt.ToolResult != "file not found" {
+			t.Fatalf("tool result = %q, want error message", evt.ToolResult)
+		}
+		if evt.ToolSuccess == nil || *evt.ToolSuccess {
+			t.Fatal("tool success = nil/true, want false")
+		}
+	default:
+		t.Fatal("no EventToolResult emitted")
+	}
+}
+
+func TestHandleSessionEvent_ToolExecutionSubAgentSkipped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{
+		events: make(chan core.Event, 10),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	cs.alive.Store(true)
+
+	startData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-sub",
+		"toolName":   "shell",
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_start", AgentID: "sub-1", Data: startData},
+	})))
+	completeData, _ := json.Marshal(map[string]any{
+		"toolCallId": "call-sub",
+		"success":    true,
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "tool.execution_complete", AgentID: "sub-1", Data: completeData},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		t.Fatalf("unexpected event emitted for sub-agent tool: %v", evt.Type)
+	default:
+	}
+}
+
+func TestHandleSessionEvent_Reasoning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{
+		events: make(chan core.Event, 10),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	cs.alive.Store(true)
+
+	data, _ := json.Marshal(map[string]any{
+		"reasoningId": "r-1",
+		"content":     "thinking hard",
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "assistant.reasoning", Data: data},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventThinking {
+			t.Fatalf("event type = %v, want EventThinking", evt.Type)
+		}
+		if evt.Content != "thinking hard" {
+			t.Fatalf("content = %q, want 'thinking hard'", evt.Content)
+		}
+	default:
+		t.Fatal("no EventThinking emitted")
+	}
+
+	// Sub-agent reasoning must be skipped.
+	subData, _ := json.Marshal(map[string]any{
+		"reasoningId": "r-2",
+		"content":     "sub thinking",
+	})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		Event: sessionEventInner{Type: "assistant.reasoning", AgentID: "sub-1", Data: subData},
+	})))
+	select {
+	case evt := <-cs.events:
+		t.Fatalf("unexpected event emitted for sub-agent reasoning: %v", evt.Type)
+	default:
+	}
+}
