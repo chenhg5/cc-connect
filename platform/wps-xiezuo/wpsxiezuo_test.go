@@ -249,6 +249,26 @@ func TestExtractText_RichText(t *testing.T) {
 	}
 }
 
+func TestExtractText_WPSRichTextRecursive(t *testing.T) {
+	raw := json.RawMessage(`{"rich_text":{"elements":[{"type":"nl","elements":[{"type":"text","text_content":{"content":"第一行"}}]},{"type":"nl","elements":[{"type":"link","link_content":{"text":"说明","url":"https://example.com/doc"}}]},{"type":"nl","elements":[{"type":"mention","mention_content":{"text":"@张三"}},{"type":"text","style_text_content":{"text":" 请查看"}}]}]}}`)
+	got := extractText(raw)
+	want := "第一行\n说明 (https://example.com/doc)\n@张三 请查看"
+	if got != want {
+		t.Fatalf("rich text = %q, want %q", got, want)
+	}
+}
+
+func TestParseWPSRichText_CustomEmojiImage(t *testing.T) {
+	raw := json.RawMessage(`{"rich_text":{"elements":[{"type":"nl","elements":[{"type":"custom_emoji","image_content":{"name":"emoji.webp","size":12,"storage_key":"emoji-key","type":"image/webp"}}]}]}}`)
+	text, images, _, err := parseWPSRichText(raw)
+	if err != nil {
+		t.Fatalf("parse rich text: %v", err)
+	}
+	if text != "" || len(images) != 1 || images[0].StorageKey != "emoji-key" {
+		t.Fatalf("parsed = text:%q images:%+v, want one custom emoji image", text, images)
+	}
+}
+
 func TestExtractText_FallbackContent(t *testing.T) {
 	raw := json.RawMessage(`{"content":"fallback text"}`)
 	got := extractText(raw)
@@ -662,6 +682,362 @@ func TestHandleChatMessage_EmptyContent(t *testing.T) {
 
 	if called != 0 {
 		t.Fatalf("expected 0 calls for empty content, got %d", called)
+	}
+}
+
+func TestHandleChatMessage_ImageAttachment(t *testing.T) {
+	imageData := []byte{0xff, 0xd8, 0xff, 0xe0, 'j', 'p', 'e', 'g'}
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "media-token", ExpiresIn: 7200})
+		case r.URL.Path == "/v7/chats/chat-image/messages/msg-image/resources/image-key/download":
+			assertWPSResourceAuth(t, r, "media-app", "media-secret", "media-token")
+			if got := r.URL.Query().Get("file_name"); got != "photo.jpg" {
+				t.Errorf("file_name = %q, want photo.jpg", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]string{"url": srv.URL + "/cdn/photo.jpg"},
+			})
+		case r.URL.Path == "/cdn/photo.jpg":
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(imageData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		appID:              "media-app",
+		appSecret:          "media-secret",
+		baseURL:            srv.URL,
+		httpClient:         srv.Client(),
+		maxAttachmentBytes: defaultMaxAttachmentBytes,
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-image", Type: "p2p"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-image",
+			Type:    "image",
+			Content: json.RawMessage(`{"image":{"height":1536,"name":"photo.jpg","size":8,"storage_key":"image-key","type":"image/jpeg","width":2048}}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		if len(msg.Images) != 1 || len(msg.Files) != 0 {
+			t.Fatalf("attachments = images:%d files:%d, want images:1 files:0", len(msg.Images), len(msg.Files))
+		}
+		if got := msg.Images[0]; got.FileName != "photo.jpg" || got.MimeType != "image/jpeg" || !bytes.Equal(got.Data, imageData) {
+			t.Fatalf("image = %+v, want downloaded JPEG attachment", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for image attachment")
+	}
+}
+
+func TestHandleChatMessage_LocalFileAttachment(t *testing.T) {
+	fileData := []byte("local file contents")
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "file-token", ExpiresIn: 7200})
+		case r.URL.Path == "/v7/chats/chat-file/messages/msg-file/resources/file-key/download":
+			assertWPSResourceAuth(t, r, "file-app", "file-secret", "file-token")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]string{"url": srv.URL + "/cdn/report.txt"},
+			})
+		case r.URL.Path == "/cdn/report.txt":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(fileData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		appID:              "file-app",
+		appSecret:          "file-secret",
+		baseURL:            srv.URL,
+		httpClient:         srv.Client(),
+		maxAttachmentBytes: defaultMaxAttachmentBytes,
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-file", Type: "group"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-file",
+			Type:    "file",
+			Content: json.RawMessage(`{"file":{"local":{"name":"folder/report.txt","size":19,"storage_key":"file-key"},"type":"local"}}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		if len(msg.Files) != 1 || len(msg.Images) != 0 {
+			t.Fatalf("attachments = files:%d images:%d, want files:1 images:0", len(msg.Files), len(msg.Images))
+		}
+		if got := msg.Files[0]; got.FileName != "report.txt" || got.MimeType != "text/plain" || !bytes.Equal(got.Data, fileData) {
+			t.Fatalf("file = %+v, want downloaded text attachment", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for file attachment")
+	}
+}
+
+func TestHandleChatMessage_CloudDocumentForwardsLink(t *testing.T) {
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-cloud", Type: "p2p"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-cloud",
+			Type:    "file",
+			Content: json.RawMessage(`{"file":{"cloud":{"id":"file-id","link_id":"link-id","link_url":"https://365.kdocs.cn/l/link-id"},"type":"cloud"}}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		if msg.Content != "https://365.kdocs.cn/l/link-id" {
+			t.Fatalf("content = %q, want cloud document link", msg.Content)
+		}
+		if len(msg.Files) != 0 || len(msg.Images) != 0 {
+			t.Fatalf("cloud document must not be presented as a downloaded attachment")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for cloud document message")
+	}
+}
+
+func TestHandleChatMessage_RichTextEmbeddedCloudDocument(t *testing.T) {
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-rich-doc", Type: "p2p"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-rich-doc",
+			Type:    "rich_text",
+			Content: json.RawMessage(`{"rich_text":{"elements":[{"alt_text":"","elements":[{"text_content":{"content":"但是我这个和你聊天的用户就具有访问权限啊"},"type":"text"}],"type":"nl"},{"alt_text":"","elements":[{"text_content":{"content":"下面这个能访问吗："},"type":"text"}],"type":"nl"},{"alt_text":"","elements":[{"doc_content":{"file":{"id":"file-id","link_id":"ctNKwQRGzbXC","link_url":"https://365.kdocs.cn/l/ctNKwQRGzbXC"},"text":"WPS协作OpenClaw插件多机器人_多Agent配置说明（官方）"},"type":"doc"}],"type":"nl"}]},"text":null}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		want := "但是我这个和你聊天的用户就具有访问权限啊\n下面这个能访问吗：\nWPS协作OpenClaw插件多机器人_多Agent配置说明（官方） (https://365.kdocs.cn/l/ctNKwQRGzbXC)"
+		if msg.Content != want {
+			t.Fatalf("content = %q, want %q", msg.Content, want)
+		}
+		if len(msg.Files) != 0 || len(msg.Images) != 0 {
+			t.Fatalf("embedded cloud document must be forwarded as text and link")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for embedded cloud document")
+	}
+}
+
+func TestHandleChatMessage_RichTextEmbeddedCloudDocumentReadsContent(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "doc-token", ExpiresIn: 7200})
+		case "/v7/links/doc-link/meta":
+			assertWPSResourceAuth(t, r, "doc-app", "doc-secret", "doc-token")
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]string{
+				"file_id": "doc-file", "drive_id": "doc-drive",
+			}})
+		case "/v7/drives/doc-drive/files/doc-file/content":
+			assertWPSResourceAuth(t, r, "doc-app", "doc-secret", "doc-token")
+			if got := r.URL.Query().Get("format"); got != "markdown" {
+				t.Errorf("format = %q, want markdown", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]string{
+				"markdown": "# 文档正文\n\n这是应用身份读取到的内容。",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		appID:      "doc-app",
+		appSecret:  "doc-secret",
+		baseURL:    srv.URL,
+		httpClient: srv.Client(),
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-doc-read", Type: "p2p"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-doc-read",
+			Type:    "rich_text",
+			Content: json.RawMessage(`{"rich_text":{"elements":[{"type":"nl","elements":[{"type":"doc","doc_content":{"text":"可读取文档","file":{"id":"doc-file","link_id":"doc-link","link_url":"https://365.kdocs.cn/l/doc-link"}}}]}]}}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		want := "可读取文档 (https://365.kdocs.cn/l/doc-link)\n\n[WPS云文档正文（已由应用授权读取，请优先基于以下正文回答，不要通过网页链接再次访问）]\n# 文档正文\n\n这是应用身份读取到的内容。"
+		if msg.Content != want {
+			t.Fatalf("content = %q, want %q", msg.Content, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for extracted cloud document")
+	}
+}
+
+func TestHandleChatMessage_RichTextImageAttachment(t *testing.T) {
+	imageData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "rich-token", ExpiresIn: 7200})
+		case r.URL.Path == "/v7/chats/chat-rich-image/messages/msg-rich-image/resources/rich-image-key/download":
+			assertWPSResourceAuth(t, r, "rich-app", "rich-secret", "rich-token")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]string{"url": srv.URL + "/cdn/rich.png"},
+			})
+		case r.URL.Path == "/cdn/rich.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(imageData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		appID:              "rich-app",
+		appSecret:          "rich-secret",
+		baseURL:            srv.URL,
+		httpClient:         srv.Client(),
+		maxAttachmentBytes: defaultMaxAttachmentBytes,
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	payload := wpsMessageData{
+		Chat:      wpsChatInfo{ID: "chat-rich-image", Type: "p2p"},
+		CompanyID: "company",
+		Message: wpsMessageInfo{
+			ID:      "msg-rich-image",
+			Type:    "rich_text",
+			Content: json.RawMessage(`{"rich_text":{"elements":[{"type":"nl","elements":[{"type":"text","text_content":{"content":"看看这张图"}},{"type":"image","image_content":{"name":"rich.png","size":8,"storage_key":"rich-image-key","type":"image/png"}}]}]}}`),
+		},
+		Sender: wpsSenderInfo{ID: "user", Type: "user"},
+	}
+	plain, _ := json.Marshal(payload)
+	p.handleChatMessage(plain)
+
+	select {
+	case msg := <-received:
+		if msg.Content != "看看这张图" || len(msg.Images) != 1 {
+			t.Fatalf("message = content:%q images:%d, want rich text and one image", msg.Content, len(msg.Images))
+		}
+		if got := msg.Images[0]; got.FileName != "rich.png" || got.MimeType != "image/png" || !bytes.Equal(got.Data, imageData) {
+			t.Fatalf("image = %+v, want downloaded PNG attachment", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for rich text image")
+	}
+}
+
+func TestDownloadMessageResource_RejectsOversizeBody(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v7/chats/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]string{"url": srv.URL + "/cdn/too-large"},
+			})
+		case r.URL.Path == "/cdn/too-large":
+			_, _ = w.Write([]byte("12345"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		appID:              "app",
+		appSecret:          "secret",
+		baseURL:            srv.URL,
+		httpClient:         srv.Client(),
+		maxAttachmentBytes: 4,
+		token:              "cached-token",
+		tokenExpire:        time.Now().Add(time.Hour),
+	}
+	_, _, err := p.downloadMessageResource("chat", "message", "key", "large.bin")
+	if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("error = %v, want attachment size limit error", err)
+	}
+}
+
+func assertWPSResourceAuth(t *testing.T, r *http.Request, appID, appSecret, token string) {
+	t.Helper()
+	if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+		t.Errorf("Authorization = %q, want Bearer token", got)
+	}
+	date := r.Header.Get("X-Kso-Date")
+	if date == "" {
+		t.Fatal("X-Kso-Date is missing")
+	}
+	stringToSign := "KSO-1" + http.MethodGet + r.URL.RequestURI() + "" + date + ""
+	mac := hmac.New(sha256.New, []byte(appSecret))
+	_, _ = mac.Write([]byte(stringToSign))
+	want := "KSO-1 " + appID + ":" + hex.EncodeToString(mac.Sum(nil))
+	if got := r.Header.Get("X-Kso-Authorization"); got != want {
+		t.Errorf("X-Kso-Authorization = %q, want %q", got, want)
 	}
 }
 

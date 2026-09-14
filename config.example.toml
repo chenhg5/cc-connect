@@ -1110,7 +1110,11 @@ app_secret = "your-feishu-app-secret"
 #    创建 WPS 开放平台应用，并启用事件 WebSocket 推送
 # 2. Subscribe to app chat message events such as kso.app_chat.message
 #    订阅应用会话消息事件，如 kso.app_chat.message
-# 3. Fill in app_id and app_secret below
+# 3. Grant kso.chat_message.readwrite to receive chat images and files
+#    授予 kso.chat_message.readwrite 权限以接收聊天图片和文件
+# 4. Grant kso.file.read (or kso.file.readwrite) to read cloud-document content
+#    授予 kso.file.read（或 kso.file.readwrite）权限以读取云文档正文
+# 5. Fill in app_id and app_secret below
 #    填入下方 app_id 和 app_secret
 # Connection: WebSocket — no public URL required / 无需公网地址
 
