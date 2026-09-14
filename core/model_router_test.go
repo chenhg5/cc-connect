@@ -2,7 +2,10 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -242,4 +245,70 @@ func TestClassifyModelName_StripsContextWindowSuffix(t *testing.T) {
 			t.Fatalf("classifyModelName(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+// TestClassifyViaLLM_ThinkingFlag 验证 classify_thinking 开关直接决定请求体的 thinking.type，
+// 且直连端点时模型名已剥掉 [1m] 后缀。
+func TestClassifyViaLLM_ThinkingFlag(t *testing.T) {
+	var got struct {
+		Model    string `json:"model"`
+		Thinking struct {
+			Type string `json:"type"`
+		} `json:"thinking"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"content":[{"type":"thinking","thinking":"..."},{"type":"text","text":"simple"}]}`)
+	}))
+	defer srv.Close()
+
+	cred := ModelRouteOverride{BaseURL: srv.URL, APIKey: "k", Model: "deepseek-flash[1m]"}
+	for _, want := range []string{"disabled", "enabled"} {
+		tier, ok, reason := classifyViaLLM(context.Background(), "查下这个订单", cred, "", nil, nil, want == "enabled")
+		if !ok || tier != "simple" {
+			t.Fatalf("thinking=%s: tier=%q ok=%v reason=%q", want, tier, ok, reason)
+		}
+		if got.Thinking.Type != want {
+			t.Fatalf("thinking.type = %q, want %q", got.Thinking.Type, want)
+		}
+		if got.Model != "deepseek-flash" {
+			t.Fatalf("model = %q, want [1m] 后缀被剥离", got.Model)
+		}
+	}
+}
+
+// TestClassifyMessage_LLMFailReasonOnCard 验证 LLM 分类失败时，失败原因（HTTP 状态码 + 端点错误摘要）
+// 会出现在路由卡片的「调度依据」里，不用翻日志。
+func TestClassifyMessage_LLMFailReasonOnCard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","code":"1210","message":"该模型始终思考，不支持关闭思考"}}`)
+	}))
+	defer srv.Close()
+
+	cfg := routerCfg(t)
+	cfg.ModelsConfig = writeTempModelsConfig(t, "glm-5.3-flash", srv.URL, "glm-5.3-flash[1m]")
+	cfg.ClassifyModel = "glm-5.3-flash"
+	cfg.FallbackModel = "glm-5.3-flash" // 临时配置只有这一个 key，兜底也指它
+	cfg.UseLLMClassify = true
+	// 关键词都不命中的消息 → 走 LLM 兜底
+	res := ClassifyMessage(context.Background(), "在吗", false, cfg)
+	if res.Tier != "fallback" {
+		t.Fatalf("tier=%q, want fallback", res.Tier)
+	}
+	card := FormatModelRouteResult(res)
+	if !strings.Contains(card, "HTTP 400") || !strings.Contains(card, "该模型始终思考") {
+		t.Fatalf("卡片未带上失败原因: %q", card)
+	}
+}
+
+func writeTempModelsConfig(t *testing.T, key, baseURL, model string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "claude-models.json")
+	content := fmt.Sprintf(`{"models":{%q:{"env":{"ANTHROPIC_BASE_URL":%q,"ANTHROPIC_AUTH_TOKEN":"k","ANTHROPIC_MODEL":%q}}}}`, key, baseURL, model)
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

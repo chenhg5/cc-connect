@@ -780,6 +780,9 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # classify_model = "deepseek-v4-flash"  # LLM 分类用模型 key
 # multimodal_model = "glm-5.3-flash"    # 多模态消息（图片/文件）时强制用的模型 key
 # use_llm_classify = true               # 规则未命中时是否用 LLM 兜底分类
+# classify_thinking = false             # LLM 分类请求是否开 thinking：false → "disabled"（默认，deepseek 必须关，
+#                                       # 否则 thinking 块吃掉 max_tokens 且拖慢分类）；端点不接受 disabled 时
+#                                       # （智谱 400 [1210]「该模型始终思考」）设 true → "enabled"
 # classify_prompt = """                 # LLM 分类提示词（{text} 占位符替换为用户消息；不配则用内置默认，默认内容如下）
 # 你是消息复杂度分类器。判断下面这条用户消息该用「复杂模型」还是「简单模型」处理，只回复一个词 simple 或 complex，不要任何解释、标点或换行。
 #

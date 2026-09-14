@@ -19,18 +19,19 @@ import (
 // 统一从 models_config 指向的 claude-models.json 读取（唯一凭证源）。
 // complex_model/simple_model/fallback_model/classify_model/multimodal_model 必须与 claude-models.json 的 models 节点 key 一致。
 type ModelRouterConfig struct {
-	Enabled         bool
-	ModelsConfig    string // claude-models.json 路径（唯一凭证源）
-	ComplexModel    string // 复杂问题模型 key
-	SimpleModel     string // 简单问题模型 key
-	FallbackModel   string // 兜底模型 key（分类失败/LLM 失败时）
-	ClassifyModel   string // LLM 分类用模型 key
-	ClassifyPrompt  string // LLM 分类提示词（{text} 占位符替换为用户消息；空则用内置默认）
-	MultimodalModel string // 多模态消息（图片/文件等）时强制用的模型 key
-	UseLLMClassify  bool   // 规则未命中时是否用 LLM 兜底分类
-	ComplexKeywords []string
-	SimpleKeywords  []string
-	ComplexMinLen   int // 消息字符数（rune）超过即判 complex
+	Enabled          bool
+	ModelsConfig     string // claude-models.json 路径（唯一凭证源）
+	ComplexModel     string // 复杂问题模型 key
+	SimpleModel      string // 简单问题模型 key
+	FallbackModel    string // 兜底模型 key（分类失败/LLM 失败时）
+	ClassifyModel    string // LLM 分类用模型 key
+	ClassifyPrompt   string // LLM 分类提示词（{text} 占位符替换为用户消息；空则用内置默认）
+	MultimodalModel  string // 多模态消息（图片/文件等）时强制用的模型 key
+	UseLLMClassify   bool   // 规则未命中时是否用 LLM 兜底分类
+	ComplexKeywords  []string
+	SimpleKeywords   []string
+	ComplexMinLen    int  // 消息字符数（rune）超过即判 complex
+	ClassifyThinking bool // LLM 分类请求是否开 thinking（true → "enabled"，false → "disabled"）
 }
 
 // ModelRouteOverride 模型路由的 per-spawn 覆盖：完整凭证（来自 claude-models.json）。
@@ -205,6 +206,7 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 	tier := ""
 	reason := ""
 	llmFailed := false
+	llmFailReason := ""
 	// 1. 复杂关键词
 	if kw := matchKeyword(text, complexKws); kw != "" {
 		tier = "complex"
@@ -219,12 +221,13 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 		reason = fmt.Sprintf("命中简单语义关键词「%s」", kw)
 	} else if cfg.UseLLMClassify && classifyCred.Model != "" {
 		// 4. LLM 兜底
-		if t, ok := classifyViaLLM(ctx, text, classifyCred, cfg.ClassifyPrompt, complexKws, simpleKws); ok {
+		if t, ok, failReason := classifyViaLLM(ctx, text, classifyCred, cfg.ClassifyPrompt, complexKws, simpleKws, cfg.ClassifyThinking); ok {
 			tier = t
 			res.UsedLLM = true
 			reason = "LLM 判定为 " + t
 		} else {
 			llmFailed = true
+			llmFailReason = failReason
 		}
 	}
 
@@ -241,7 +244,12 @@ func ClassifyMessage(ctx context.Context, text string, multimodal bool, cfg Mode
 		tier = "fallback"
 		if reason == "" {
 			if llmFailed {
-				reason = "LLM 分类失败，回退兜底"
+				// 失败原因带上，卡片「调度依据」直接可见，省得翻日志
+				if llmFailReason != "" {
+					reason = "LLM 分类失败（" + llmFailReason + "），回退兜底"
+				} else {
+					reason = "LLM 分类失败，回退兜底"
+				}
 			} else {
 				reason = "规则未命中，回退兜底"
 			}
@@ -280,11 +288,12 @@ func classifyModelName(model string) string {
 }
 
 // classifyViaLLM 用指定凭证的 anthropic 兼容端点做一次轻量分类。
-// 返回 "simple" | "complex"。
-func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, prompt string, complexKws, simpleKws []string) (string, bool) {
+// 返回 ("simple"|"complex", 是否成功, 失败原因)。
+// 失败原因会拼进路由卡片「调度依据」，便于直接看到是 400 还是超时，不用翻日志。
+func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, prompt string, complexKws, simpleKws []string, thinking bool) (string, bool, string) {
 	if cred.BaseURL == "" || cred.APIKey == "" || cred.Model == "" {
 		slog.Warn("model_router: llm classify skip, missing credential", "model", cred.Model, "has_base_url", cred.BaseURL != "", "has_api_key", cred.APIKey != "")
-		return "", false
+		return "", false, "凭证缺失"
 	}
 	if prompt == "" {
 		prompt = defaultClassifyPrompt
@@ -310,10 +319,16 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 
 	url := strings.TrimRight(cred.BaseURL, "/") + "/v1/messages"
 
+	// thinking 档位：默认 disabled（deepseek 默认就吐 thinking 块，会吃掉 max_tokens 且拖慢分类）；
+	// 端点不接受 disabled 时（智谱 400 [1210]「该模型始终思考」）由 classify_thinking=true 打开。
+	thinkingType := "disabled"
+	if thinking {
+		thinkingType = "enabled"
+	}
 	payload := map[string]any{
 		"model":      classifyModelName(cred.Model), // 直连端点，剥掉客户端窗口声明后缀（见 classifyModelName）
 		"max_tokens": 256,
-		"thinking":   map[string]any{"type": "disabled"}, // 分类只需回一个词，关闭推理避免 deepseek 输出 thinking 块浪费 token/时间
+		"thinking":   map[string]any{"type": thinkingType},
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
@@ -321,13 +336,13 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 	body, err := json.Marshal(payload)
 	if err != nil {
 		slog.Warn("model_router: llm classify marshal failed", "model", cred.Model, "error", err)
-		return "", false
+		return "", false, "构造请求失败"
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		slog.Warn("model_router: llm classify new request failed", "model", cred.Model, "url", url, "error", err)
-		return "", false
+		return "", false, "构造请求失败"
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cred.APIKey)
@@ -337,23 +352,27 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 	resp, err := client.Do(req)
 	if err != nil {
 		slog.Warn("model_router: llm classify request failed", "model", cred.Model, "url", url, "error", err)
-		return "", false
+		if ctx.Err() != nil {
+			return "", false, "请求超时"
+		}
+		return "", false, "网络错误"
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		if b, e := io.ReadAll(io.LimitReader(resp.Body, 512)); e == nil {
+		b, e := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if e == nil {
 			slog.Warn("model_router: llm classify non-200", "model", cred.Model, "status", resp.StatusCode, "body", strings.TrimSpace(string(b)))
-		} else {
-			slog.Warn("model_router: llm classify non-200", "model", cred.Model, "status", resp.StatusCode)
+			return "", false, fmt.Sprintf("HTTP %d %s", resp.StatusCode, classifyErrSummary(b))
 		}
-		return "", false
+		slog.Warn("model_router: llm classify non-200", "model", cred.Model, "status", resp.StatusCode)
+		return "", false, fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
 		slog.Warn("model_router: llm classify read body failed", "model", cred.Model, "error", err)
-		return "", false
+		return "", false, "读取响应失败"
 	}
 	var out struct {
 		Content []struct {
@@ -363,7 +382,7 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
 		slog.Warn("model_router: llm classify unmarshal failed", "model", cred.Model, "error", err, "body", truncate(string(data), 200))
-		return "", false
+		return "", false, "响应解析失败"
 	}
 
 	// 遍历所有 content 块收集 text 字段（跳过 thinking 块：deepseek 等 reasoning 模型
@@ -377,18 +396,37 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 	answer := strings.ToLower(strings.TrimSpace(sb.String()))
 	if answer == "" {
 		slog.Warn("model_router: llm classify empty answer", "model", cred.Model, "body", truncate(string(data), 200))
-		return "", false
+		return "", false, "空答案"
 	}
 
 	switch {
 	case strings.Contains(answer, "complex"):
-		return "complex", true
+		return "complex", true, ""
 	case strings.Contains(answer, "simple"):
-		return "simple", true
+		return "simple", true, ""
 	default:
 		slog.Warn("model_router: llm classify unexpected answer", "model", cred.Model, "answer", answer)
-		return "", false
+		return "", false, "非预期答案：" + truncate(answer, 20)
 	}
+}
+
+// classifyErrSummary 从 anthropic 兼容端点的错误响应里取一句人话原因（取不到返回空串）。
+// 例：{"error":{"message":"[1211] 模型不存在"}} → "[1211] 模型不存在"。
+func classifyErrSummary(body []byte) string {
+	var e struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &e); err != nil {
+		return ""
+	}
+	msg := e.Error.Message
+	if msg == "" {
+		msg = e.Message
+	}
+	return truncate(strings.TrimSpace(msg), 60)
 }
 
 // truncate 截断字符串到 n 字节（用于日志里的响应片段）。

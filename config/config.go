@@ -430,6 +430,10 @@ type ModelRouterConfig struct {
 	ComplexKeywords string `toml:"complex_keywords,omitempty"` // comma-separated
 	SimpleKeywords  string `toml:"simple_keywords,omitempty"`  // comma-separated
 	ComplexMinLen   int    `toml:"complex_min_len,omitempty"`
+	// ClassifyThinking 控制 LLM 分类请求是否开 thinking（true → "enabled"）。
+	// 默认 false（"disabled"）：deepseek 默认就吐 thinking 块、会吃掉 max_tokens 并拖慢分类。
+	// 端点不接受 disabled 时（如智谱 400 [1210]「该模型始终思考」）才需要设 true。
+	ClassifyThinking bool `toml:"classify_thinking,omitempty"`
 }
 
 // ProviderModelConfig defines a selectable model entry for a provider,
