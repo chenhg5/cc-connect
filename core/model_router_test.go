@@ -226,3 +226,20 @@ func TestFormatModelRouteResult(t *testing.T) {
 		t.Fatalf("unexpected format: %q", out)
 	}
 }
+
+func TestClassifyModelName_StripsContextWindowSuffix(t *testing.T) {
+	cases := map[string]string{
+		"deepseek-flash[1m]":    "deepseek-flash",
+		"deepseek-v4-pro[1m]":   "deepseek-v4-pro",
+		"glm-5.3-flash[1m]":     "glm-5.3-flash",
+		"glm-5.3-flash[1M]":     "glm-5.3-flash",
+		"glm-5.3-flash":         "glm-5.3-flash",
+		"deepseek-flash [1m]":   "deepseek-flash",
+		"claude-sonnet-4-5[1m]": "claude-sonnet-4-5",
+	}
+	for in, want := range cases {
+		if got := classifyModelName(in); got != want {
+			t.Fatalf("classifyModelName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

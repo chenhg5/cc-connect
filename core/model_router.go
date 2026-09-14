@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -268,6 +269,16 @@ func matchKeyword(text string, keywords []string) string {
 	return ""
 }
 
+// classifyModelName 剥掉模型名里的 [1m] 上下文窗口后缀。
+// [1m] 是 Claude Code 客户端的窗口声明，走 CLI 时由客户端在发请求前剥掉、端点看不到；
+// 但 classify 是 cc-connect 用 Go 直连 /v1/messages、不经过 CLI，必须自己剥：
+// deepseek 端点容忍带后缀名（回显时自行去掉），智谱端点直接 400「模型不存在」。
+var contextWindowSuffixRe = regexp.MustCompile(`(?i)\[1m\]`)
+
+func classifyModelName(model string) string {
+	return strings.TrimSpace(contextWindowSuffixRe.ReplaceAllString(model, ""))
+}
+
 // classifyViaLLM 用指定凭证的 anthropic 兼容端点做一次轻量分类。
 // 返回 "simple" | "complex"。
 func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, prompt string, complexKws, simpleKws []string) (string, bool) {
@@ -300,7 +311,7 @@ func classifyViaLLM(ctx context.Context, text string, cred ModelRouteOverride, p
 	url := strings.TrimRight(cred.BaseURL, "/") + "/v1/messages"
 
 	payload := map[string]any{
-		"model":      cred.Model,
+		"model":      classifyModelName(cred.Model), // 直连端点，剥掉客户端窗口声明后缀（见 classifyModelName）
 		"max_tokens": 256,
 		"thinking":   map[string]any{"type": "disabled"}, // 分类只需回一个词，关闭推理避免 deepseek 输出 thinking 块浪费 token/时间
 		"messages": []map[string]string{
