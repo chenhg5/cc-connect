@@ -152,6 +152,8 @@ func TestPlatformImplementsInterfaces(t *testing.T) {
 	var _ core.ReplyContextReconstructor = (*Platform)(nil)
 	var _ core.TypingIndicator = (*Platform)(nil)
 	var _ core.TypingIndicatorDone = (*Platform)(nil)
+	var _ core.ImageSender = (*Platform)(nil)
+	var _ core.FileSender = (*Platform)(nil)
 }
 
 // ============================================================================
@@ -1293,6 +1295,247 @@ func TestHandleChatMessage_AllowFrom(t *testing.T) {
 // ============================================================================
 // sendWPSMessage via httptest server
 // ============================================================================
+
+func TestSendFile_UploadsResourceAndCreatesMessage(t *testing.T) {
+	fileData := []byte("generated report")
+	wantChecksum := sha256.Sum256(fileData)
+	var credentialCalls, uploadCalls, messageCalls int
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "file-token", ExpiresIn: 7200})
+		case "/v7/chats/resources/upload":
+			credentialCalls++
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read credential request: %v", err)
+			}
+			assertWPSSignedRequest(t, r, body, "file-app", "file-secret", "file-token")
+			var request resourceUploadRequest
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Errorf("decode credential request: %v", err)
+			}
+			if request.FileName != "report.pdf" || request.FileSize != int64(len(fileData)) {
+				t.Errorf("upload request = %+v", request)
+			}
+			if request.Checksum != hex.EncodeToString(wantChecksum[:]) {
+				t.Errorf("checksum = %q, want %q", request.Checksum, hex.EncodeToString(wantChecksum[:]))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"storage_key": "file-storage-key",
+					"upload_entry": map[string]any{
+						"method":  http.MethodPut,
+						"url":     srv.URL + "/object/report.pdf",
+						"headers": map[string]string{"X-Upload-Token": "upload-token"},
+						"params":  map[string]string{},
+					},
+				},
+			})
+		case "/object/report.pdf":
+			uploadCalls++
+			if r.Method != http.MethodPut {
+				t.Errorf("upload method = %s, want PUT", r.Method)
+			}
+			if got := r.Header.Get("X-Upload-Token"); got != "upload-token" {
+				t.Errorf("X-Upload-Token = %q", got)
+			}
+			body, _ := io.ReadAll(r.Body)
+			if !bytes.Equal(body, fileData) {
+				t.Errorf("uploaded body = %q, want %q", body, fileData)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case "/v7/messages/create":
+			messageCalls++
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read message request: %v", err)
+			}
+			assertWPSSignedRequest(t, r, body, "file-app", "file-secret", "file-token")
+			var request sendMessageRequest
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Errorf("decode message request: %v", err)
+			}
+			if request.Type != "file" || request.Receiver.ReceiverID != "chat-file" {
+				t.Errorf("message envelope = %+v", request)
+			}
+			if request.Content.File == nil || request.Content.File.Local == nil {
+				t.Errorf("file message content = %+v", request.Content)
+				return
+			}
+			local := request.Content.File.Local
+			if request.Content.File.Type != "local" || local.Name != "report.pdf" || local.Size != int64(len(fileData)) || local.StorageKey != "file-storage-key" {
+				t.Errorf("file message = %+v", request.Content.File)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		appID:      "file-app",
+		appSecret:  "file-secret",
+		baseURL:    srv.URL,
+		httpClient: srv.Client(),
+	}
+	err := p.SendFile(context.Background(), replyContext{ChatID: "chat-file"}, core.FileAttachment{
+		FileName: "report.pdf",
+		MimeType: "application/pdf",
+		Data:     fileData,
+	})
+	if err != nil {
+		t.Fatalf("SendFile: %v", err)
+	}
+	if credentialCalls != 1 || uploadCalls != 1 || messageCalls != 1 {
+		t.Fatalf("calls = credentials:%d upload:%d message:%d, want 1 each", credentialCalls, uploadCalls, messageCalls)
+	}
+}
+
+func TestSendImage_UploadsResourceAndCreatesImageMessage(t *testing.T) {
+	imageData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	var gotMessage sendMessageRequest
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth2/token":
+			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "image-token", ExpiresIn: 7200})
+		case "/v7/chats/resources/upload":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 0,
+				"data": map[string]any{
+					"storage_key": "image-storage-key",
+					"upload_entry": map[string]any{
+						"method":  http.MethodPut,
+						"url":     srv.URL + "/object/chart.png",
+						"headers": map[string]string{},
+						"params":  map[string]string{},
+					},
+				},
+			})
+		case "/object/chart.png":
+			body, _ := io.ReadAll(r.Body)
+			if !bytes.Equal(body, imageData) {
+				t.Errorf("uploaded image = %v, want %v", body, imageData)
+			}
+		case "/v7/messages/create":
+			body, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(body, &gotMessage); err != nil {
+				t.Errorf("decode image message: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{appID: "image-app", appSecret: "image-secret", baseURL: srv.URL, httpClient: srv.Client()}
+	err := p.SendImage(context.Background(), replyContext{ChatID: "chat-image"}, core.ImageAttachment{
+		FileName: "chart.png",
+		MimeType: "image/png",
+		Data:     imageData,
+	})
+	if err != nil {
+		t.Fatalf("SendImage: %v", err)
+	}
+	if gotMessage.Type != "image" || gotMessage.Content.Image == nil {
+		t.Fatalf("image message = %+v", gotMessage)
+	}
+	image := gotMessage.Content.Image
+	if image.StorageKey != "image-storage-key" || image.Name != "chart.png" || image.Type != "image/png" || image.Size != int64(len(imageData)) {
+		t.Errorf("image content = %+v", image)
+	}
+}
+
+func TestUploadMessageResource_ReportsCredentialAPIErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 403000001,
+			"msg":  "permission denied",
+		})
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		appID:       "app",
+		appSecret:   "secret",
+		baseURL:     srv.URL,
+		httpClient:  srv.Client(),
+		token:       "cached-token",
+		tokenExpire: time.Now().Add(time.Hour),
+	}
+	_, err := p.uploadMessageResource(context.Background(), "report.pdf", []byte("report"))
+	if err == nil || !strings.Contains(err.Error(), "code=403000001") {
+		t.Fatalf("error = %v, want WPS permission error code", err)
+	}
+}
+
+func TestUploadResourceData_POSTUsesMultipartParams(t *testing.T) {
+	data := []byte("post upload")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if err := r.ParseMultipartForm(1024); err != nil {
+			t.Errorf("ParseMultipartForm: %v", err)
+			return
+		}
+		if got := r.FormValue("policy"); got != "signed-policy" {
+			t.Errorf("policy = %q", got)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Errorf("FormFile: %v", err)
+			return
+		}
+		defer file.Close()
+		if header.Filename != "bundle.zip" {
+			t.Errorf("filename = %q", header.Filename)
+		}
+		body, _ := io.ReadAll(file)
+		if !bytes.Equal(body, data) {
+			t.Errorf("file body = %q, want %q", body, data)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{httpClient: srv.Client()}
+	err := p.uploadResourceData(context.Background(), resourceUploadEntry{
+		Method: http.MethodPost,
+		URL:    srv.URL,
+		Params: map[string]any{"policy": "signed-policy"},
+	}, "bundle.zip", data)
+	if err != nil {
+		t.Fatalf("uploadResourceData: %v", err)
+	}
+}
+
+func assertWPSSignedRequest(t *testing.T, r *http.Request, body []byte, appID, appSecret, token string) {
+	t.Helper()
+	if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+		t.Errorf("Authorization = %q, want Bearer token", got)
+	}
+	date := r.Header.Get("X-Kso-Date")
+	if date == "" {
+		t.Fatal("X-Kso-Date is missing")
+	}
+	bodyHash := ""
+	if len(body) > 0 {
+		hash := sha256.Sum256(body)
+		bodyHash = hex.EncodeToString(hash[:])
+	}
+	stringToSign := "KSO-1" + r.Method + r.URL.RequestURI() + r.Header.Get("Content-Type") + date + bodyHash
+	mac := hmac.New(sha256.New, []byte(appSecret))
+	_, _ = mac.Write([]byte(stringToSign))
+	want := "KSO-1 " + appID + ":" + hex.EncodeToString(mac.Sum(nil))
+	if got := r.Header.Get("X-Kso-Authorization"); got != want {
+		t.Errorf("X-Kso-Authorization = %q, want %q", got, want)
+	}
+}
 
 func TestSendWPSMessage_Success(t *testing.T) {
 	var gotBody []byte
