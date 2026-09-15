@@ -689,10 +689,10 @@ func TestHandleChatMessage_ImageAttachment(t *testing.T) {
 	imageData := []byte{0xff, 0xd8, 0xff, 0xe0, 'j', 'p', 'e', 'g'}
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/oauth2/token":
+		switch r.URL.Path {
+		case "/oauth2/token":
 			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "media-token", ExpiresIn: 7200})
-		case r.URL.Path == "/v7/chats/chat-image/messages/msg-image/resources/image-key/download":
+		case "/v7/chats/chat-image/messages/msg-image/resources/image-key/download":
 			assertWPSResourceAuth(t, r, "media-app", "media-secret", "media-token")
 			if got := r.URL.Query().Get("file_name"); got != "photo.jpg" {
 				t.Errorf("file_name = %q, want photo.jpg", got)
@@ -701,7 +701,7 @@ func TestHandleChatMessage_ImageAttachment(t *testing.T) {
 				"code": 0,
 				"data": map[string]string{"url": srv.URL + "/cdn/photo.jpg"},
 			})
-		case r.URL.Path == "/cdn/photo.jpg":
+		case "/cdn/photo.jpg":
 			w.Header().Set("Content-Type", "image/jpeg")
 			_, _ = w.Write(imageData)
 		default:
@@ -751,16 +751,16 @@ func TestHandleChatMessage_LocalFileAttachment(t *testing.T) {
 	fileData := []byte("local file contents")
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/oauth2/token":
+		switch r.URL.Path {
+		case "/oauth2/token":
 			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "file-token", ExpiresIn: 7200})
-		case r.URL.Path == "/v7/chats/chat-file/messages/msg-file/resources/file-key/download":
+		case "/v7/chats/chat-file/messages/msg-file/resources/file-key/download":
 			assertWPSResourceAuth(t, r, "file-app", "file-secret", "file-token")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"code": 0,
 				"data": map[string]string{"url": srv.URL + "/cdn/report.txt"},
 			})
-		case r.URL.Path == "/cdn/report.txt":
+		case "/cdn/report.txt":
 			w.Header().Set("Content-Type", "application/octet-stream")
 			_, _ = w.Write(fileData)
 		default:
@@ -874,8 +874,7 @@ func TestHandleChatMessage_RichTextEmbeddedCloudDocument(t *testing.T) {
 }
 
 func TestHandleChatMessage_RichTextEmbeddedCloudDocumentReadsContent(t *testing.T) {
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/oauth2/token":
 			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "doc-token", ExpiresIn: 7200})
@@ -936,16 +935,16 @@ func TestHandleChatMessage_RichTextImageAttachment(t *testing.T) {
 	imageData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/oauth2/token":
+		switch r.URL.Path {
+		case "/oauth2/token":
 			_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "rich-token", ExpiresIn: 7200})
-		case r.URL.Path == "/v7/chats/chat-rich-image/messages/msg-rich-image/resources/rich-image-key/download":
+		case "/v7/chats/chat-rich-image/messages/msg-rich-image/resources/rich-image-key/download":
 			assertWPSResourceAuth(t, r, "rich-app", "rich-secret", "rich-token")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"code": 0,
 				"data": map[string]string{"url": srv.URL + "/cdn/rich.png"},
 			})
-		case r.URL.Path == "/cdn/rich.png":
+		case "/cdn/rich.png":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(imageData)
 		default:
