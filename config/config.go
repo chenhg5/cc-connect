@@ -193,7 +193,7 @@ const (
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
 	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
-	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	CardMode             *string `toml:"card_mode"`              // "legacy" (default), "rich", or "rich-anonymous" (Card 2.0)
 	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
@@ -972,20 +972,20 @@ func EffectiveShell(cfg *Config, proj *ProjectConfig) (shell, flag, shellProfile
 	}
 }
 
-// EffectiveCardMode returns the card rendering mode for the project: "rich" (Feishu Card 2.0)
-// or "legacy" (default plain messages). Per-project overrides global.
+// EffectiveCardMode returns "legacy" (default), "rich", or "rich-anonymous".
+// Per-project overrides global. Platforms opt into the rich card capabilities.
 func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 	var projDisp *DisplayConfig
 	if proj != nil {
 		projDisp = proj.Display
 	}
 	if projDisp != nil && projDisp.CardMode != nil {
-		if m := strings.ToLower(strings.TrimSpace(*projDisp.CardMode)); m == "rich" || m == "legacy" {
+		if m := strings.ToLower(strings.TrimSpace(*projDisp.CardMode)); m == "rich" || m == "legacy" || m == "rich-anonymous" {
 			return m
 		}
 	}
 	if cfg.Display.CardMode != nil {
-		if m := strings.ToLower(strings.TrimSpace(*cfg.Display.CardMode)); m == "rich" || m == "legacy" {
+		if m := strings.ToLower(strings.TrimSpace(*cfg.Display.CardMode)); m == "rich" || m == "legacy" || m == "rich-anonymous" {
 			return m
 		}
 	}
@@ -1085,9 +1085,9 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 	}
 	if display.CardMode != nil {
 		switch strings.ToLower(strings.TrimSpace(*display.CardMode)) {
-		case "legacy", "rich":
+		case "legacy", "rich", "rich-anonymous":
 		default:
-			return fmt.Errorf("config: %s.card_mode must be \"legacy\" or \"rich\"", prefix)
+			return fmt.Errorf("config: %s.card_mode must be \"legacy\", \"rich\", or \"rich-anonymous\"", prefix)
 		}
 	}
 	if display.HistoryMaxLen != nil && *display.HistoryMaxLen < 0 {
