@@ -202,6 +202,9 @@ const (
 	MsgToolResultFmtOk           MsgKey = "tool_result_fmt_ok"
 	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
+	MsgAnonymousProgressTools    MsgKey = "anonymous_progress_tools"
+	MsgAnonymousProgressDone     MsgKey = "anonymous_progress_done"
+	MsgAnonymousProgressError    MsgKey = "anonymous_progress_error"
 	MsgSessionCloseFailed        MsgKey = "session_close_failed"
 	MsgSessionResumeUnsafe       MsgKey = "session_resume_unsafe"
 	MsgSessionCancelled          MsgKey = "session_cancelled"
@@ -769,6 +772,21 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "failed",
 		LangJapanese:           "failed",
 		LangSpanish:            "fallido",
+	},
+	MsgAnonymousProgressTools: {
+		LangEnglish:            "Tool calls: %d",
+		LangChinese:            "工具调用：%d 次",
+		LangTraditionalChinese: "工具呼叫：%d 次",
+		LangJapanese:           "ツール呼び出し：%d 回",
+		LangSpanish:            "Llamadas a herramientas: %d",
+	},
+	MsgAnonymousProgressDone: {
+		LangEnglish: "✅ Completed", LangChinese: "✅ 已完成", LangTraditionalChinese: "✅ 已完成",
+		LangJapanese: "✅ 完了", LangSpanish: "✅ Completado",
+	},
+	MsgAnonymousProgressError: {
+		LangEnglish: "⚠️ Interrupted", LangChinese: "⚠️ 已中断", LangTraditionalChinese: "⚠️ 已中斷",
+		LangJapanese: "⚠️ 中断", LangSpanish: "⚠️ Interrumpido",
 	},
 	MsgExecutionStopped: {
 		LangEnglish:            "⏹ Execution stopped.",

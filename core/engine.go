@@ -331,7 +331,7 @@ var RestartCh = make(chan RestartRequest, 1)
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
 	Mode             string // "full" (default), "compact", or "quiet" — thinking/tool visibility
-	CardMode         string // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	CardMode         string // "legacy" (default), "rich", or "rich-anonymous"
 	ThinkingMessages bool
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
@@ -601,6 +601,8 @@ type interactiveState struct {
 	pendingProviderAdd       *pendingProviderAddState
 	lastAutoCompressAt       time.Time
 	lastAutoCompressTokens   int
+
+	initialAnonymousProgress *anonymousProgressStart
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -4331,6 +4333,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
+	progress := anonymousProgressStart{lang: e.i18n.CurrentLang()}
+	progress.handle = startAnonymousRichCard(e.ctx, p, msg.ReplyCtx, e.display.CardMode, progress.lang)
+	progressTransferred := false
+	defer func() {
+		if !progressTransferred && progress.handle != nil {
+			interruptAnonymousRichCard(e.ctx, p, progress.handle, progress.lang, nil, "")
+		}
+	}()
 	session.AddHistory("user", msg.Content)
 	// Persist user message immediately so crashes between user input and
 	// assistant reply don't lose it (the assistant-side Save below depends
@@ -4371,6 +4381,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("failed to start agent session"))
 		return
+	}
+	if progress.handle != nil {
+		state.mu.Lock()
+		state.initialAnonymousProgress = &progress
+		state.mu.Unlock()
 	}
 	e.cancelAgentSessionIdleClose(state)
 
@@ -4453,6 +4468,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		sendDone <- err
 	}()
 
+	progressTransferred = true
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, lockGen)
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
@@ -5886,6 +5902,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var lastRichCardUpdate time.Time
 	var lastRichCardLen int
 	var cardMessageID any
+	richCardFinished := false
+	richCardLang := e.i18n.CurrentLang()
 	var partialText string
 	var richSegmentStart int
 	richCardText := func() string { return partialText[richSegmentStart:] }
@@ -5909,6 +5927,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	state.mu.Lock()
 	workspaceDir := state.workspaceDir
+	initialPlatform := state.platform
+	if progress := state.initialAnonymousProgress; progress != nil {
+		cardMessageID, richCardLang = progress.handle, progress.lang
+		state.initialAnonymousProgress = nil
+	}
 	replyAgent := state.agent
 	if replyAgent == nil {
 		replyAgent = e.agent
@@ -5929,7 +5952,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
-	if scp, ok := state.platform.(StreamingCardPlatform); ok {
+	_, anonymousSupported := state.platform.(AnonymousRichCardSupporter)
+	anonymousMode := e.display.CardMode == "rich-anonymous" && anonymousSupported
+	if scp, ok := state.platform.(StreamingCardPlatform); ok && !anonymousMode {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
 			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
 		} else {
@@ -5941,10 +5966,29 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
+	if cardMessageID == nil && anonymousMode {
+		cardMessageID = startAnonymousRichCard(e.ctx, initialPlatform, replyCtx, e.display.CardMode, richCardLang)
+	}
+	// An immediate placeholder also exists when the agent never emits an event.
+	// Resolve it on cancellation/startup failure without changing legacy modes.
+	defer func() {
+		if cardMessageID == nil || richCardFinished || e.display.CardMode != "rich-anonymous" {
+			return
+		}
+		state.mu.Lock()
+		p := state.platform
+		state.mu.Unlock()
+		body := partialText
+		if silentHold {
+			body = ""
+		}
+		interruptAnonymousRichCard(e.ctx, p, cardMessageID, richCardLang, toolSteps, body)
+	}()
+
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
 	// is only needed when the platform doesn't support cards or card creation failed.
-	if e.instantReply.Enabled && streamCard == nil {
+	if e.instantReply.Enabled && streamCard == nil && cardMessageID == nil {
 		replyContent := e.instantReply.Content
 		if replyContent == "" {
 			replyContent = e.i18n.T(MsgStarting)
@@ -6106,23 +6150,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		p := state.platform
 		state.mu.Unlock()
 
-		// main codebase has no per-session quiet flag; pr309 referenced
-		// sessionQuiet which we drop. e.display.ThinkingMessages /
-		// ToolMessages handle user-level quiet in the fallback branches.
-		richCardSupporter, hasRichCard := p.(RichCardSupporter)
-		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
-		// Default "legacy" keeps upstream behavior for all platforms.
-		if e.display.CardMode != "rich" {
-			hasRichCard = false
-		}
+		richCardSupporter, hasRichCard := richCardSupporterForMode(p, e.display.CardMode, richCardLang)
+		_, anonymousProgress := richCardSupporter.(anonymousRichCardAdapter)
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
 		resolveRichCardMarkdown := func(markdown string, final bool) string {
+			if anonymousProgress {
+				if silentHold {
+					return ""
+				}
+				if stripped, ok := stripTrailingSilent(markdown); ok {
+					markdown = stripped
+				}
+			}
 			if !hasRichMarkdownResolver || markdown == "" {
 				return markdown
 			}
 			return richMarkdownResolver.ResolveRichCardMarkdown(e.ctx, markdown, final)
 		}
 		buildResolvedRichCard := func(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
+			if anonymousProgress && streaming && !sp.canPreview() {
+				markdown = ""
+			}
 			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
 		}
 
@@ -6138,11 +6186,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			segmentStart = 0
 			silentHold = false
 			partialText = ""
+			richSegmentStart = 0
 			cardAnswerText.Reset()
 			lastRichCardUpdate = time.Time{}
 			lastRichCardLen = 0
 
 		case EventThinking:
+			if anonymousProgress {
+				break
+			}
 			if isEllipsisOnly(event.Content) {
 				break
 			}
@@ -6240,10 +6292,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			toolCount++
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
-				if !e.display.ToolMessages {
-					break
+				if anonymousProgress {
+					// Retain only the count, never tool names/inputs/results.
+					toolSteps = append(toolSteps, ToolStep{Kind: ToolStepKindTool})
+				} else {
+					if !e.display.ToolMessages {
+						break
+					}
+					toolSteps = appendToolStep(toolSteps, event.ToolName, truncateIf(formatToolInput(event.ToolName, event.ToolInput), e.display.ToolMaxLen))
 				}
-				toolSteps = appendToolStep(toolSteps, event.ToolName, truncateIf(formatToolInput(event.ToolName, event.ToolInput), e.display.ToolMaxLen))
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, richCardText(), true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
@@ -6378,6 +6435,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			if anonymousProgress {
+				break
+			}
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -6476,7 +6536,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					textParts = append(textParts, content)
 					partialText += content
 					if hasRichCard {
-						if !silentHold {
+						if !silentHold && (!anonymousProgress || sp.canPreview()) {
 							// Lazy creation: if we held during the first text events and
 							// only released this chunk, the initial-create branch above
 							// won't fire (textParts is non-empty by now). Build the card
@@ -6585,9 +6645,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 
-			// Flush accumulated text segment before permission prompt
+			// The anonymous card already owns its answer; only legacy paths
+			// need to flush a separate segment before the permission prompt.
 			previewActive := sp.canPreview()
-			if len(textParts) > segmentStart {
+			if !anonymousProgress && len(textParts) > segmentStart {
 				if !previewActive {
 					segment := strings.Join(textParts[segmentStart:], "")
 					if segment != "" {
@@ -6599,10 +6660,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				segmentStart = len(textParts)
 				silentHold = false
 			}
-			// A permission prompt is a visible break in the rich-card stream.
-			// Finish the current card before waiting, then let the continuation
-			// open a new card while retaining partialText for turn history.
-			if hasRichCard {
+			// Ordinary rich cards split around the permission prompt. The
+			// opt-in anonymous card keeps ownership of the answer.
+			if hasRichCard && !anonymousProgress {
 				if cardMessageID != nil {
 					card := buildResolvedRichCard(CardStatusDone, "", toolSteps, richCardText(), false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if updater, ok := p.(MessageUpdater); ok {
@@ -6737,7 +6797,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			if len(textParts) > 0 && segmentStart == 0 && (!e.display.ToolMessages || anonymousProgress) {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -7018,29 +7078,32 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// accumulates every EventText chunk this turn, so it captures any
 				// pre-NO_REPLY content the user already saw streaming (e.g. when the
 				// agent wrote "Hello\nNO_REPLY"). Strip the trailing NO_REPLY marker
-				// before rendering. Even an empty card is finalized in place when
-				// updates are supported: deleting it leaves a "撤回了一条消息" gray bar
-				// in Lark. Platforms without updates keep the old delete fallback.
+				// before rendering. Finalize ordinary cards in place where
+				// possible. An empty anonymous progress placeholder is withdrawn.
 				if hasRichCard && cardMessageID != nil {
 					silentBody := richCardText()
 					if stripped, ok := stripTrailingSilent(silentBody); ok {
 						silentBody = strings.TrimRight(stripped, " \t\r\n")
 					}
-					if silentBody != "" || len(toolSteps) > 0 {
+					if silentBody != "" || (len(toolSteps) > 0 && !anonymousProgress) {
 						card := buildResolvedRichCard(CardStatusDone, "", toolSteps, silentBody, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
 						if updater, ok := p.(MessageUpdater); ok {
 							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 								slog.Debug("rich card: failed to finalize card on silent reply", "platform", p.Name(), "error", err)
 							}
 						}
-					} else if updater, ok := p.(MessageUpdater); ok {
-						card := buildResolvedRichCard(CardStatusDone, "", nil, "", false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
-						if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
-							slog.Debug("rich card: failed to finalize empty card on silent reply", "platform", p.Name(), "error", err)
-						}
-					} else if cleaner, ok := p.(PreviewCleaner); ok {
-						if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
-							slog.Debug("rich card: failed to delete card on silent reply", "platform", p.Name(), "error", err)
+					} else {
+						updater, canUpdate := p.(MessageUpdater)
+						cleaner, canDelete := p.(PreviewCleaner)
+						if canUpdate && (!anonymousProgress || !canDelete) {
+							card := buildResolvedRichCard(CardStatusDone, "", nil, "", false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
+							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
+								slog.Debug("rich card: failed to finalize empty card on silent reply", "platform", p.Name(), "error", err)
+							}
+						} else if canDelete {
+							if err := cleaner.DeletePreviewMessage(e.ctx, cardMessageID); err != nil {
+								slog.Debug("rich card: failed to delete card on silent reply", "platform", p.Name(), "error", err)
+							}
 						}
 					}
 					cardMessageID = nil
@@ -7073,7 +7136,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// catch-up keeps the typewriter rendering smooth all the way to the
 					// end. ErrNotSupported (no cardID) and any error are silent — the
 					// subsequent UpdateMessage will rewrite the body anyway.
-					if streamer, ok := p.(RichCardTextStreamer); ok {
+					if streamer, ok := p.(RichCardTextStreamer); ok && (!anonymousProgress || sp.canPreview()) {
 						if err := streamer.StreamRichCardText(e.ctx, cardMessageID, finalBody); err != nil && !errors.Is(err, ErrNotSupported) {
 							slog.Debug("rich card: final streaming flush failed (proceeding to full Patch)", "platform", p.Name(), "error", err)
 						}
@@ -7131,6 +7194,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return
 				}
 			}
+
+			richCardFinished = true
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
@@ -7272,6 +7337,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				richSegmentStart = 0
 				lastRichCardUpdate = time.Time{}
 				lastRichCardLen = 0
+				richCardFinished = false
+				richCardLang = e.i18n.CurrentLang()
+				cardMessageID = startAnonymousRichCard(e.ctx, queued.platform, replyCtx, e.display.CardMode, richCardLang)
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
@@ -7285,7 +7353,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cardAnswerText.Reset()
 
 				// Try to create a new streaming card for the queued turn
-				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
+				_, anonymousSupported = queued.platform.(AnonymousRichCardSupporter)
+				anonymousMode = e.display.CardMode == "rich-anonymous" && anonymousSupported
+				if scp, ok := queued.platform.(StreamingCardPlatform); ok && !anonymousMode {
 					if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
 						slog.Warn("streaming card creation failed for queued turn", "error", err)
 					} else {
@@ -7294,7 +7364,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 
 				// Send instant reply for queued turn if no streaming card is active.
-				if e.instantReply.Enabled && streamCard == nil {
+				if e.instantReply.Enabled && streamCard == nil && cardMessageID == nil {
 					replyContent := e.instantReply.Content
 					if replyContent == "" {
 						replyContent = e.i18n.T(MsgStarting)
@@ -7365,6 +7435,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if updater, ok := p.(MessageUpdater); ok {
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, errCard); err != nil {
 						slog.Debug("rich card: failed to update error card", "platform", p.Name(), "error", err)
+					} else {
+						richCardFinished = true
 					}
 				}
 			}
@@ -7429,6 +7501,11 @@ channelClosed:
 			Platform:   p.Name(),
 			Content:    fullResponse,
 		})
+
+		if anonymousMode && interruptAnonymousRichCard(e.ctx, p, cardMessageID, richCardLang, toolSteps, fullResponse) {
+			richCardFinished = true
+			return
+		}
 
 		if toolCount > 0 && segmentStart > 0 {
 			sp.discard()
