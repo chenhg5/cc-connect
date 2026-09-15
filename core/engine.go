@@ -5237,6 +5237,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		_, anonymousProgress := richCardSupporter.(anonymousRichCardAdapter)
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
 		resolveRichCardMarkdown := func(markdown string, final bool) string {
+			if anonymousProgress {
+				if silentHold {
+					return ""
+				}
+				if stripped, ok := stripTrailingSilent(markdown); ok {
+					markdown = stripped
+				}
+			}
 			if !hasRichMarkdownResolver || markdown == "" {
 				return markdown
 			}

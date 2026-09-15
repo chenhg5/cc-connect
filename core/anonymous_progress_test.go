@@ -267,6 +267,25 @@ func TestAnonymousProgressKeepsPartialAnswerOnInterruptedCard(t *testing.T) {
 	}
 }
 
+func TestAnonymousProgressSilentPrefixStaysHiddenAcrossToolAndErrorEvents(t *testing.T) {
+	p := &anonymousProgressPlatform{}
+	p.n = "test-card"
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich-anonymous"})
+	as := newControllableSession("silent-error")
+	as.events <- Event{Type: EventText, Content: "NO_R"}
+	as.events <- Event{Type: EventToolUse, ToolName: "private-tool"}
+	as.events <- Event{Type: EventText, Content: "EPLY"}
+	as.events <- Event{Type: EventError, Error: fmt.Errorf("interrupted")}
+	state := &interactiveState{agentSession: as, platform: p, replyCtx: "trigger"}
+	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger")
+	starts, streams, updates, _ := p.snapshot()
+	all := strings.Join(append(append(append(starts, streams...), updates...), p.getSent()...), "\n")
+	if strings.Contains(all, "NO_R") || strings.Contains(all, "private-tool") || !strings.Contains(updates[len(updates)-1], "status=error") {
+		t.Fatalf("silent marker leaked at a non-text boundary: %s", all)
+	}
+}
+
 func TestAnonymousProgressPermissionKeepsAnswerOnCard(t *testing.T) {
 	p := &anonymousProgressPlatform{}
 	p.n = "test-card"
