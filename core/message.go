@@ -450,6 +450,7 @@ type EventType string
 
 const (
 	EventText              EventType = "text"               // intermediate or final text
+	EventHookRejected      EventType = "hook_rejected"      // Stop hook rejected prior assistant text
 	EventToolUse           EventType = "tool_use"           // tool invocation info
 	EventToolResult        EventType = "tool_result"        // tool execution result
 	EventResult            EventType = "result"             // final aggregated result

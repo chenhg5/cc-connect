@@ -5211,6 +5211,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		switch event.Type {
+		case EventHookRejected:
+			// Claude Code emits this between a Stop-hook-rejected draft and its
+			// rewritten answer. Discard only per-segment assistant text state so
+			// final aggregation cannot concatenate the invalid draft.
+			textParts = nil
+			segmentStart = 0
+			silentHold = false
+			partialText = ""
+			cardAnswerText.Reset()
+			lastRichCardUpdate = time.Time{}
+			lastRichCardLen = 0
+
 		case EventThinking:
 			if isEllipsisOnly(event.Content) {
 				break

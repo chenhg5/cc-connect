@@ -786,6 +786,18 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			continue
 		}
 		contentType, _ := item["type"].(string)
+		if contentType == "text" {
+			text, _ := item["text"].(string)
+			if strings.HasPrefix(text, "Stop hook feedback:") {
+				evt := core.Event{Type: core.EventHookRejected}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
+				}
+			}
+			continue
+		}
 		if contentType == "tool_result" {
 			isError, _ := item["is_error"].(bool)
 			var result string
