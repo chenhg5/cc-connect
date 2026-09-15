@@ -16772,6 +16772,11 @@ func (c *recordingStreamCard) Finalize(_ context.Context, content string) error 
 	return nil
 }
 func (c *recordingStreamCard) Failed() bool { return false }
+
+// SupportsStreamingCardPayload mirrors the Feishu streaming card: structured
+// progress payloads (foldable panels) are used, and the final answer is
+// delivered as a separate message instead of being embedded in the card.
+func (c *recordingStreamCard) SupportsStreamingCardPayload() bool { return true }
 func (c *recordingStreamCard) finalized() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -16827,5 +16832,315 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 	}
 	if strings.Contains(card.finalContent(), "NO_REPLY") {
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
+	}
+}
+
+// TestProcessInteractiveEvents_StreamingCard_AnswerInSeparateMessage is a
+// regression test for the user-requested behavior: the process card ends at
+// the "本过程卡片已停止更新，完整答复见下一条消息。" footer (the payload
+// carries NO answer), and the final answer is delivered as a separate
+// message with the status footer — not embedded in the card.
+func TestProcessInteractiveEvents_StreamingCard_AnswerInSeparateMessage(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "slack:user-streamcard-separate-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-streamcard-separate-answer")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-streamcard-separate-answer",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "step one"}
+	agentSession.events <- Event{Type: EventText, Content: "step two"}
+	agentSession.events <- Event{Type: EventResult, Content: "final answer text", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-streamcard-separate-answer", time.Now(), nil, nil, state.replyCtx, 0)
+
+	if !card.finalized() {
+		t.Fatalf("expected streaming card to be finalized")
+	}
+	payload, ok := ParseProgressCardPayload(card.finalContent())
+	if !ok {
+		t.Fatalf("final content is not a progress payload: %q", card.finalContent())
+	}
+	if strings.TrimSpace(payload.Answer) != "" {
+		t.Errorf("payload card must NOT embed the answer (delivered separately), got %q", payload.Answer)
+	}
+	// The step texts must still live in the foldable thinking panel.
+	if len(payload.Items) == 0 {
+		t.Errorf("payload card should carry thinking panel entries from step texts")
+	}
+	// The separate final message must carry the answer text.
+	sent := p.getSent()
+	joined := strings.Join(sent, "\n")
+	if !strings.Contains(joined, "final answer text") {
+		t.Errorf("separate final message missing the answer; sent=%v", sent)
+	}
+}
+
+// dualCardPlatform simulates a platform that supports BOTH the streaming-card
+// (StreamingCardPlatform) and the card-style compact progress writer
+// (ProgressStyleProvider=card + PreviewStarter + MessageUpdater). Regression
+// for the "two cards for one turn" bug: with a StreamingCard active the
+// compact progress writer must be disabled, otherwise the platform posts two
+// independently-updated cards for the same turn.
+type dualCardPlatform struct {
+	stubCompactProgressPlatform
+	cardCreated int
+	lastCard    *recordingStreamingCard // last card handed out, for content assertions
+}
+
+// recordingStreamingCard records preview creation through the platform's
+// SendPreviewStart so tests can count how many cards were actually posted.
+type recordingStreamingCard struct {
+	p       *dualCardPlatform
+	updates []string // every Update/Finalize content, in order
+}
+
+func (c *recordingStreamingCard) Update(_ context.Context, content string) error {
+	c.updates = append(c.updates, content)
+	return c.p.sendPreviewOnce()
+}
+
+func (c *recordingStreamingCard) Finalize(_ context.Context, content string) error {
+	c.updates = append(c.updates, content)
+	return c.p.sendPreviewOnce()
+}
+
+func (c *recordingStreamingCard) Failed() bool { return false }
+
+// SupportsStreamingCardPayload marks the card as a payload-style card
+// (mirroring feishuStreamingCard), so the engine encodes the turn as the
+// structured progress payload and the final answer ships as a separate
+// message instead of being embedded in the card body.
+func (c *recordingStreamingCard) SupportsStreamingCardPayload() bool { return true }
+
+// sendPreviewOnce posts a preview exactly once (lazy creation), mirroring
+// feishuStreamingCard's behavior of one SendPreviewStart for the whole turn.
+func (p *dualCardPlatform) sendPreviewOnce() error {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	if p.cardCreated == 1 {
+		p.cardCreated = 2 // already posted
+		p.previewStarts = append(p.previewStarts, "streaming-card")
+	}
+	return nil
+}
+
+func (p *dualCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	p.previewMu.Lock()
+	p.cardCreated = 1
+	card := &recordingStreamingCard{p: p}
+	p.lastCard = card
+	p.previewMu.Unlock()
+	return card, nil
+}
+
+// dualCardAgentSession emits a full turn: thinking, tool use, tool result,
+// final text, then finishes.
+type dualCardAgentSession struct {
+	events chan Event
+}
+
+func newDualCardAgentSession() *dualCardAgentSession {
+	return &dualCardAgentSession{events: make(chan Event, 16)}
+}
+
+func (s *dualCardAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	go func() {
+		s.events <- Event{Type: EventThinking, Content: "分析中……"}
+		s.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "ls"}
+		s.events <- Event{Type: EventToolResult, ToolName: "bash", Content: "ok"}
+		s.events <- Event{Type: EventText, Content: "完成。"}
+		s.events <- Event{Type: EventResult, Content: "完成。", Done: true}
+	}()
+	return nil
+}
+
+func (s *dualCardAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *dualCardAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *dualCardAgentSession) CurrentSessionID() string                             { return "dual" }
+func (s *dualCardAgentSession) Alive() bool                                          { return true }
+func (s *dualCardAgentSession) Close() error                                         { return nil }
+
+// TestStreamingCard_DisablesCompactProgressWriter verifies that when a
+// StreamingCard is active for a turn, the card-style compact progress writer
+// is disabled: the platform must only see the streaming card's single preview
+// creation, never a second "progress card" preview from the compact writer.
+func TestStreamingCard_DisablesCompactProgressWriter(t *testing.T) {
+	p := &dualCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+			style:              "card",
+			supportPayload:     true,
+		},
+	}
+	agentSession := newDualCardAgentSession()
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "legacy", // rich-card path off; streaming card + progress writer both eligible
+	})
+
+	msg := &Message{
+		SessionKey: "feishu:dual",
+		Platform:   "feishu",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// The turn is consumed synchronously up to EventResult; the streaming-card
+	// preview send is a short async tail. Poll (bounded) instead of a fixed
+	// sleep so slow CI runners don't flake.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.previewMu.Lock()
+		cardCreated := p.cardCreated
+		starts := len(p.previewStarts)
+		p.previewMu.Unlock()
+		if cardCreated > 0 && starts >= 1 {
+			// Brief settle window so a (buggy) second preview surfaces too.
+			time.Sleep(100 * time.Millisecond)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for streaming card turn: cardCreated=%d previewStarts=%d", cardCreated, starts)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	p.previewMu.Lock()
+	starts := len(p.previewStarts)
+	p.previewMu.Unlock()
+	if starts != 1 {
+		t.Fatalf("SendPreviewStart calls = %d, want exactly 1 (only the streaming card; compact progress writer must be disabled)", starts)
+	}
+}
+
+// progressCardAgentSession emits a turn with intermediate step text (opencode
+// step buffering) followed by an EventResult carrying the answer content —
+// mirroring the opencode session behavior after the step-buffer change,
+// where the final step's text is delivered ONLY via EventResult.Content.
+type progressCardAgentSession struct {
+	events chan Event
+}
+
+func newProgressCardAgentSession() *progressCardAgentSession {
+	return &progressCardAgentSession{events: make(chan Event, 16)}
+}
+
+func (s *progressCardAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	go func() {
+		s.events <- Event{Type: EventText, Content: "计划：先核对剩余改动。"}
+		s.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "git status"}
+		s.events <- Event{Type: EventToolResult, ToolName: "bash", Content: "ok"}
+		s.events <- Event{Type: EventText, Content: "正在跑全量测试。"}
+		s.events <- Event{Type: EventResult, Content: "都已处理。代码提交 0a66f11。", Done: true}
+	}()
+	return nil
+}
+
+func (s *progressCardAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *progressCardAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *progressCardAgentSession) CurrentSessionID() string                             { return "dual" }
+func (s *progressCardAgentSession) Alive() bool                                          { return true }
+func (s *progressCardAgentSession) Close() error                                         { return nil }
+
+// TestStreamingCard_ProgressTextFoldedIntoPanel is the regression test for
+// "process narration leaked into the final message": intermediate step text
+// must be folded into the foldable thinking panel of the streaming card, and
+// the separate final reply (payload platforms deliver the answer as its own
+// message after the card) must contain ONLY the final answer — never the
+// accumulated per-step narration. The answer arrives solely via
+// EventResult.Content (opencode never forwards it as EventText).
+func TestStreamingCard_ProgressTextFoldedIntoPanel(t *testing.T) {
+	p := &dualCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+			style:              "card",
+			supportPayload:     true,
+		},
+	}
+	agentSession := newProgressCardAgentSession()
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "legacy",
+	})
+
+	msg := &Message{
+		SessionKey: "feishu:dual",
+		Platform:   "feishu",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Wait for the streaming-card turn to settle (finalize + final reply).
+	deadline := time.Now().Add(5 * time.Second)
+	var lastPayload *ProgressCardPayload
+	for {
+		p.previewMu.Lock()
+		card := p.lastCard
+		p.previewMu.Unlock()
+		sent := p.getSent()
+		if card != nil && len(card.updates) > 0 && len(sent) > 0 {
+			content := card.updates[len(card.updates)-1] // final content
+			if pl, ok := ParseProgressCardPayload(content); ok {
+				lastPayload = pl
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for streaming card turn: sent=%d", len(sent))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The final card payload must NOT contain the final answer in its
+	// thinking panel — the answer lives in the separate reply message.
+	for _, item := range lastPayload.Items {
+		if strings.Contains(item.Text, "都已处理") || strings.Contains(item.Text, "0a66f11") {
+			t.Errorf("final answer leaked into card panel: %+v", item)
+		}
+	}
+	panelTexts := map[string]bool{}
+	for _, item := range lastPayload.Items {
+		panelTexts[item.Text] = true
+	}
+	if !panelTexts["计划：先核对剩余改动。"] || !panelTexts["正在跑全量测试。"] {
+		t.Errorf("intermediate step text missing from card panel; items=%v", lastPayload.Items)
+	}
+
+	// The final reply message contains ONLY the answer.
+	sent := p.getSent()
+	joined := strings.Join(sent, "\n")
+	if !strings.Contains(joined, "都已处理。代码提交 0a66f11。") {
+		t.Errorf("final reply missing the answer; sent=%q", sent)
+	}
+	if strings.Contains(joined, "计划：先核对剩余改动。") || strings.Contains(joined, "正在跑全量测试。") {
+		t.Errorf("intermediate step text leaked into final reply; sent=%q", sent)
 	}
 }
