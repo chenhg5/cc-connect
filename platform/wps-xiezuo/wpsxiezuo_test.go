@@ -111,6 +111,35 @@ func TestNew_Valid(t *testing.T) {
 	if p.Name() != "wps-xiezuo" {
 		t.Fatalf("expected name wps-xiezuo, got %s", p.Name())
 	}
+	if got := p.(*Platform).maxAttachmentBytes; got != defaultMaxAttachmentBytes {
+		t.Fatalf("default max attachment bytes = %d, want %d", got, defaultMaxAttachmentBytes)
+	}
+}
+
+func TestNew_CustomAttachmentLimit(t *testing.T) {
+	configured := int64(3 * 1024 * 1024 * 1024)
+	p, err := New(map[string]any{
+		"app_id":               "id",
+		"app_secret":           "secret",
+		"max_attachment_bytes": configured,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := p.(*Platform).maxAttachmentBytes; got != configured {
+		t.Fatalf("max attachment bytes = %d, want %d", got, configured)
+	}
+}
+
+func TestNew_RejectsAttachmentLimitAboveWPSBound(t *testing.T) {
+	_, err := New(map[string]any{
+		"app_id":               "id",
+		"app_secret":           "secret",
+		"max_attachment_bytes": maxAttachmentBytes + 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not exceed") {
+		t.Fatalf("error = %v, want maximum-limit error", err)
+	}
 }
 
 func TestNew_CustomBaseURL(t *testing.T) {
@@ -1392,6 +1421,17 @@ func TestSendFile_UploadsResourceAndCreatesMessage(t *testing.T) {
 	}
 	if credentialCalls != 1 || uploadCalls != 1 || messageCalls != 1 {
 		t.Fatalf("calls = credentials:%d upload:%d message:%d, want 1 each", credentialCalls, uploadCalls, messageCalls)
+	}
+}
+
+func TestSendFile_RejectsConfiguredSizeLimit(t *testing.T) {
+	p := &Platform{maxAttachmentBytes: 4}
+	err := p.SendFile(context.Background(), replyContext{ChatID: "chat-file"}, core.FileAttachment{
+		FileName: "report.pdf",
+		Data:     []byte("five!"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("error = %v, want configured attachment limit error", err)
 	}
 }
 

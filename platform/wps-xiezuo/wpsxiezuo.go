@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -36,11 +37,16 @@ var (
 )
 
 const (
-	defaultMaxAttachmentBytes = 50 * 1024 * 1024
+	// WPS does not publish a maximum for /v7/chats/resources/upload. Keep a
+	// generous default for chat attachments while bounding configuration to the
+	// 5 GiB limit documented for WPS document-attachment uploads.
+	defaultMaxAttachmentBytes = 2 * 1024 * 1024 * 1024
+	maxAttachmentBytes        = 5 * 1024 * 1024 * 1024
 	resourceDownloadTimeout   = 2 * time.Minute
 	maxResourceAPIResponse    = 64 * 1024
 	maxCloudDocumentBytes     = 4 * 1024 * 1024
 	maxCloudDocumentResponse  = 8 * 1024 * 1024
+	wpsCloudDocumentMarker    = "[WPS云文档正文（已由应用授权读取，请优先基于以下正文回答，不要通过网页链接再次访问）]"
 )
 
 // Platform implements core.Platform for WPS Xiezuo (WPS 协作).
@@ -313,6 +319,10 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	cleanReply, _ := opts["clean_reply"].(bool)
 	allowFrom, _ := opts["allow_from"].(string)
+	maxAttachmentBytes, err := parseWPSAttachmentLimit(opts["max_attachment_bytes"])
+	if err != nil {
+		return nil, fmt.Errorf("wps-xiezuo: max_attachment_bytes: %w", err)
+	}
 
 	core.CheckAllowFrom("wps-xiezuo", allowFrom)
 
@@ -323,7 +333,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		cleanReply:         cleanReply,
 		allowFrom:          allowFrom,
 		httpClient:         &http.Client{Timeout: resourceDownloadTimeout},
-		maxAttachmentBytes: defaultMaxAttachmentBytes,
+		maxAttachmentBytes: maxAttachmentBytes,
 	}, nil
 }
 
@@ -1203,7 +1213,7 @@ func (p *Platform) enrichCloudDocument(ctx context.Context, title string, cloud 
 	if base == "" {
 		base = linkURL
 	}
-	return base + "\n\n[WPS云文档正文（已由应用授权读取，请优先基于以下正文回答，不要通过网页链接再次访问）]\n" + content
+	return base + "\n\n" + wpsCloudDocumentMarker + "\n" + content
 }
 
 func appendCloudDocumentContent(existing, document string) string {
@@ -1213,7 +1223,7 @@ func appendCloudDocumentContent(existing, document string) string {
 	if strings.TrimSpace(existing) == "" {
 		return document
 	}
-	if strings.Contains(existing, "[WPS云文档正文（已由应用授权读取") || strings.Contains(existing, "[云文档正文]") {
+	if strings.Contains(existing, wpsCloudDocumentMarker) || strings.Contains(existing, "[云文档正文]") {
 		return existing + "\n\n" + document
 	}
 	return existing + "\n\n" + document
@@ -1429,6 +1439,68 @@ func (p *Platform) validateAttachmentSize(size int64) error {
 	return nil
 }
 
+func parseWPSAttachmentLimit(raw any) (int64, error) {
+	if raw == nil {
+		return defaultMaxAttachmentBytes, nil
+	}
+
+	var value int64
+	switch v := raw.(type) {
+	case int:
+		value = int64(v)
+	case int8:
+		value = int64(v)
+	case int16:
+		value = int64(v)
+	case int32:
+		value = int64(v)
+	case int64:
+		value = v
+	case uint:
+		if uint64(v) > uint64(math.MaxInt64) {
+			return 0, fmt.Errorf("must be an integer number of bytes")
+		}
+		value = int64(v)
+	case uint8:
+		value = int64(v)
+	case uint16:
+		value = int64(v)
+	case uint32:
+		value = int64(v)
+	case uint64:
+		if v > uint64(math.MaxInt64) {
+			return 0, fmt.Errorf("must be an integer number of bytes")
+		}
+		value = int64(v)
+	case float32:
+		if float32(int64(v)) != v {
+			return 0, fmt.Errorf("must be an integer number of bytes")
+		}
+		value = int64(v)
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v > float64(math.MaxInt64) {
+			return 0, fmt.Errorf("must be an integer number of bytes")
+		}
+		value = int64(v)
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("must be an integer number of bytes: %w", err)
+		}
+		value = parsed
+	default:
+		return 0, fmt.Errorf("must be an integer number of bytes")
+	}
+
+	if value <= 0 {
+		return 0, fmt.Errorf("must be greater than zero")
+	}
+	if value > maxAttachmentBytes {
+		return 0, fmt.Errorf("must not exceed %d bytes (5 GiB)", maxAttachmentBytes)
+	}
+	return value, nil
+}
+
 func validateResourceDownloadURL(rawURL string) error {
 	return validateResourceURL(rawURL, "download")
 }
@@ -1559,6 +1631,9 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 
 	fileName := sanitizeAttachmentName(img.FileName, "image.png")
+	if err := p.validateAttachmentSize(int64(len(img.Data))); err != nil {
+		return fmt.Errorf("wps-xiezuo: send image: %w", err)
+	}
 	mimeType, err := normalizeWPSImageMIME(img.MimeType, fileName, img.Data)
 	if err != nil {
 		return fmt.Errorf("wps-xiezuo: send image: %w", err)
@@ -1588,6 +1663,9 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	}
 
 	fileName := sanitizeAttachmentName(file.FileName, "attachment")
+	if err := p.validateAttachmentSize(int64(len(file.Data))); err != nil {
+		return fmt.Errorf("wps-xiezuo: send file: %w", err)
+	}
 	storageKey, err := p.uploadMessageResource(ctx, fileName, file.Data)
 	if err != nil {
 		return fmt.Errorf("wps-xiezuo: send file: %w", err)

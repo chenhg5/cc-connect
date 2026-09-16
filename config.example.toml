@@ -1126,6 +1126,7 @@ app_secret = "your-feishu-app-secret"
 # app_secret = "your-wps-xiezuo-app-secret"
 # allow_from = "*"             # Allowed WPS user IDs / 允许的 WPS 用户 ID
 # clean_reply = false          # Strip thinking/tool progress lines from replies / 过滤思考和工具进度行
+# max_attachment_bytes = 2147483648 # Per-file WPS limit, default 2 GiB, max 5 GiB / 单文件限制，默认 2 GiB，最大 5 GiB
 # base_url = "https://openapi.wps.cn"  # Optional API base URL override / 可选 API 基础地址覆盖
 
 # Telegram (uncomment to enable / 取消注释以启用)

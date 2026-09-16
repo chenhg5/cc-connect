@@ -59,6 +59,7 @@ app_id = "your-wps-xiezuo-app-id"
 app_secret = "your-wps-xiezuo-app-secret"
 allow_from = "*"        # optional; set to WPS user IDs in production
 clean_reply = false     # optional; strip thinking/tool progress lines
+max_attachment_bytes = 2147483648 # optional; default 2 GiB, maximum 5 GiB
 ```
 
 ### Options
@@ -70,6 +71,9 @@ clean_reply = false     # optional; strip thinking/tool progress lines
 | `allow_from` | no | all users | Comma-separated WPS user IDs allowed to use the bot; set this in production |
 | `clean_reply` | no | `false` | Removes common thinking/tool progress lines from replies before sending |
 | `base_url` | no | `https://openapi.wps.cn` | Override WPS REST API base URL for private or test environments |
+| `max_attachment_bytes` | no | `2147483648` (2 GiB) | Per-attachment limit used by the WPS adapter. Must be greater than zero and no more than `5368709120` (5 GiB). |
+
+The public WPS chat-resource upload documentation does not specify a maximum file size. cc-connect therefore uses a 2 GiB default and allows deployments to raise it up to 5 GiB, based on the 5 GB limit documented for WPS document-attachment uploads. This is an adapter-side bound, not a claim that the chat-resource API guarantees 5 GiB. The top-level `max_attachment_size_mb` setting still limits files loaded by the `cc-connect send` command before they reach a platform; raise that setting as well when sending larger generated files through the CLI.
 
 ## Start and Verify
 
