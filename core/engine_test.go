@@ -16208,3 +16208,180 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
 	}
 }
+
+// TestProcessInteractiveEvents_ContextIndicatorUsesSessionUsageAndWindow is the
+// regression test for the reply-footer ctx% bug: contextIndicatorText divided
+// event.InputTokens by a hardcoded 200k window, ignoring both the cache
+// counters and the real window the session already reports. On a 1M-window
+// model a 37k prompt was therefore rendered as ~18% instead of ~3%.
+//
+// The session here reports UsedTokens/ContextWindow but no cache breakdown, so
+// buildClaudeStatusLineFooter declines and the legacy footer path — the one
+// that owns contextIndicatorText — is exercised.
+func TestProcessInteractiveEvents_ContextIndicatorUsesSessionUsageAndWindow(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	workDir := filepath.Join(homeDir, "code", "ctx-window")
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
+		workDir:            workDir,
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-ctx-window"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-ctx-window")
+	// 37430 of a 1M window == 3%. Pre-fix the footer showed 18% (36662/200k).
+	agentSession.contextUsage = &ContextUsage{
+		UsedTokens:    37_430,
+		ContextWindow: 1_000_000,
+	}
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-ctx-window",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:                 EventResult,
+		Content:              "answer",
+		InputTokens:          36_662,
+		CacheReadInputTokens: 768,
+		Done:                 true,
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-ctx-window", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := "answer\n\n*[ctx: ~3%] · glm-5.1 · " + compactReplyFooterPath(workDir) + "*"
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q\n(18%% here means the hardcoded 200k window regressed)", sent[0], want)
+	}
+}
+
+// TestProcessInteractiveEvents_ContextIndicatorCountsCacheTokens is the
+// regression test for the second half of the same bug: a prompt-caching turn
+// reports only a handful of input_tokens with the bulk in cache_read. The
+// sdkPlausible gate looked at input_tokens alone, so such turns were dropped
+// and the footer carried no ctx marker at all.
+func TestProcessInteractiveEvents_ContextIndicatorCountsCacheTokens(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	workDir := filepath.Join(homeDir, "code", "ctx-cache")
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "glm-5.1"},
+		workDir:            workDir,
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-ctx-cache"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	// No contextUsage: exercises the event-counter fallback for agents that
+	// do not implement ContextUsageReporter.
+	agentSession := newControllableSession("s-ctx-cache")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-ctx-cache",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	// 42 + 150_000 = 150_042 of the generic 200k window == 75%.
+	// Pre-fix: 42 < 100 failed sdkPlausible, so no ctx marker was emitted.
+	agentSession.events <- Event{
+		Type:                 EventResult,
+		Content:              "answer",
+		InputTokens:          42,
+		CacheReadInputTokens: 150_000,
+		Done:                 true,
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-ctx-cache", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := "answer\n\n*[ctx: ~75%] · glm-5.1 · " + compactReplyFooterPath(workDir) + "*"
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q\n(a missing ctx marker means the sdkPlausible gate still ignores cache tokens)", sent[0], want)
+	}
+}
+
+func TestContextIndicatorText(t *testing.T) {
+	tests := []struct {
+		name  string
+		event Event
+		usage *ContextUsage
+		want  string
+	}{
+		{
+			name:  "session usage and window win over event counters",
+			event: Event{InputTokens: 36_662, CacheReadInputTokens: 768},
+			usage: &ContextUsage{UsedTokens: 37_430, ContextWindow: 1_000_000},
+			want:  "[ctx: ~3%]",
+		},
+		{
+			name:  "session window applies to the event fallback numerator",
+			event: Event{InputTokens: 1_267, CacheReadInputTokens: 103_808},
+			usage: &ContextUsage{ContextWindow: 1_000_000},
+			want:  "[ctx: ~10%]",
+		},
+		{
+			name:  "cache tokens counted when no session usage exists",
+			event: Event{InputTokens: 42, CacheReadInputTokens: 150_000},
+			want:  "[ctx: ~75%]",
+		},
+		{
+			name:  "cache creation tokens counted too",
+			event: Event{InputTokens: 1_000, CacheCreationInputTokens: 19_000},
+			want:  "[ctx: ~10%]",
+		},
+		{
+			name:  "TotalTokens used when UsedTokens is absent",
+			event: Event{},
+			usage: &ContextUsage{TotalTokens: 50_000, ContextWindow: 200_000},
+			want:  "[ctx: ~25%]",
+		},
+		{
+			name:  "bare input over the generic window stays backward compatible",
+			event: Event{InputTokens: 28_000},
+			want:  "[ctx: ~14%]",
+		},
+		{
+			name:  "clamped at 100 percent",
+			event: Event{InputTokens: 500_000, CacheReadInputTokens: 700_000},
+			want:  "[ctx: ~100%]",
+		},
+		{
+			name:  "empty when there is no token signal at all",
+			event: Event{},
+			want:  "",
+		},
+		{
+			name:  "empty when session usage is present but zeroed",
+			event: Event{},
+			usage: &ContextUsage{ContextWindow: 1_000_000},
+			want:  "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := contextIndicatorText(tt.event, tt.usage); got != tt.want {
+				t.Fatalf("contextIndicatorText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
