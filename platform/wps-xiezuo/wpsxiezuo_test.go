@@ -1532,7 +1532,11 @@ func TestUploadResourceData_POSTUsesMultipartParams(t *testing.T) {
 			t.Errorf("FormFile: %v", err)
 			return
 		}
-		defer file.Close()
+		defer func() {
+			if err := file.Close(); err != nil {
+				t.Errorf("close multipart file: %v", err)
+			}
+		}()
 		if header.Filename != "bundle.zip" {
 			t.Errorf("filename = %q", header.Filename)
 		}
