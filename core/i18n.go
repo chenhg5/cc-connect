@@ -216,6 +216,7 @@ const (
 	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
+	MsgAttachmentUnavailable     MsgKey = "attachment_unavailable"
 	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
@@ -852,6 +853,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 工具 `%s` 已預授權。將在下次會話生效。",
 		LangJapanese:           "✅ ツール `%s` を事前許可しました。次のセッションから有効になります。",
 		LangSpanish:            "✅ Herramienta `%s` pre-autorizada. Se aplicará en la próxima sesión.",
+	},
+	MsgAttachmentUnavailable: {
+		LangEnglish:            "Attachment unavailable: %s. The attachment was sent but could not be read.",
+		LangChinese:            "附件无法读取：%s。消息确实带有附件，但本次未能取得文件内容。",
+		LangTraditionalChinese: "附件無法讀取：%s。訊息確實帶有附件，但本次未能取得檔案內容。",
+		LangJapanese:           "添付ファイルを読み取れません：%s。添付ファイルは送信されましたが、内容を取得できませんでした。",
+		LangSpanish:            "Archivo adjunto no disponible: %s. Se envió el archivo, pero no se pudo leer su contenido.",
 	},
 	MsgError: {
 		LangEnglish:            "❌ Error: %v",

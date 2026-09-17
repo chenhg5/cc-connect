@@ -2067,8 +2067,11 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 
 	case "post":
 		textParts, images := p.parsePostContent(messageID, content)
+		files, notices := p.downloadPostFiles(messageID, content, strings.Join(textParts, "\n"))
+		textParts = append(textParts, notices...)
+		files = append(files, p.downloadQuotedFiles(ctx, p.filterQuotedFilesForUser(quoted.files, mentions, userID))...)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
-		if text == "" && historyText == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
+		if text == "" && historyText == "" && len(images) == 0 && len(files) == 0 && quoted.text == "" && len(quoted.images) == 0 {
 			return
 		}
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
@@ -2078,6 +2081,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
 			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
+			Files:             files,
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
@@ -2585,6 +2589,15 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		textParts, postImages := p.parsePostContent(messageID, content)
 		text = replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 		images = postImages
+		// Keep post files lazy, with the same mention/sender privacy gates as standalone quoted files.
+		for _, file := range postFiles(content) {
+			if file.FileKey != "" && !file.IsFolder {
+				files = append(files, quotedFileMeta{fileKey: file.FileKey, fileName: file.FileName, messageID: messageID, senderID: item.Sender.ID})
+			}
+		}
+		if text == "" && len(files) > 0 {
+			text = "[file]"
+		}
 		if text == "" && len(images) > 0 {
 			text = "[image]"
 		}
@@ -3237,6 +3250,9 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 
 		case "post":
 			textParts, postImages := p.parsePostContent(msgID, content)
+			postAttachments, notices := p.downloadPostFiles(msgID, content, strings.Join(textParts, "\n"))
+			*files = append(*files, postAttachments...)
+			textParts = append(textParts, notices...)
 			*images = append(*images, postImages...)
 			text := replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 			if text != "" {
@@ -5692,25 +5708,17 @@ type postElement struct {
 type postLang struct {
 	Title   string          `json:"title"`
 	Content [][]postElement `json:"content"`
+	Files   []postFile      `json:"files"`
 }
 
 // parsePostContent handles both formats of feishu post content:
 // 1. {"title":"...", "content":[[...]]}  (receive event)
 // 2. {"zh_cn":{"title":"...", "content":[[...]]}}  (some SDK versions)
 func (p *Platform) parsePostContent(messageID, raw string) ([]string, []core.ImageAttachment) {
-	// try flat format first
-	var flat postLang
-	if err := json.Unmarshal([]byte(raw), &flat); err == nil && flat.Content != nil {
-		return p.extractPostParts(messageID, &flat)
+	if post := decodePostBody(raw); post != nil {
+		return p.extractPostParts(messageID, post)
 	}
-	// try language-keyed format
-	var langMap map[string]postLang
-	if err := json.Unmarshal([]byte(raw), &langMap); err == nil {
-		for _, lang := range langMap {
-			return p.extractPostParts(messageID, &lang)
-		}
-	}
-	slog.Error(p.tag()+": failed to parse post content", "raw", raw)
+	slog.Error(p.tag()+": failed to parse post content", "message_id", messageID)
 	return nil, nil
 }
 
