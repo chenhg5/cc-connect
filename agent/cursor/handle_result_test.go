@@ -144,6 +144,24 @@ func TestHandleResultParsesUsage_AllFieldsPopulated(t *testing.T) {
 	case <-cs.ctx.Done():
 		t.Fatal("context cancelled before event emitted")
 	}
+
+	usage := cs.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage returned nil after result with usage")
+	}
+	if usage.InputTokens != 5749 || usage.OutputTokens != 25 {
+		t.Fatalf("usage in/out = (%d,%d), want (5749,25)", usage.InputTokens, usage.OutputTokens)
+	}
+	if usage.CachedInputTokens != 9728 || usage.CacheCreationInputTokens != 0 {
+		t.Fatalf("usage cr/cw = (%d,%d), want (9728,0)", usage.CachedInputTokens, usage.CacheCreationInputTokens)
+	}
+	wantUsed := 5749 + 9728
+	if usage.UsedTokens != wantUsed {
+		t.Fatalf("UsedTokens = %d, want %d", usage.UsedTokens, wantUsed)
+	}
+	if usage.ContextWindow != cursorContextWindow {
+		t.Fatalf("ContextWindow = %d, want %d", usage.ContextWindow, cursorContextWindow)
+	}
 }
 
 // TestHandleResultParsesUsage_MissingUsageKeepsZeroTokens ensures
@@ -170,6 +188,10 @@ func TestHandleResultParsesUsage_MissingUsageKeepsZeroTokens(t *testing.T) {
 		}
 	case <-cs.ctx.Done():
 		t.Fatal("context cancelled before event emitted")
+	}
+
+	if usage := cs.GetContextUsage(); usage != nil {
+		t.Fatalf("GetContextUsage should be nil when usage absent, got %+v", usage)
 	}
 }
 
@@ -199,6 +221,28 @@ func TestHandleResultParsesUsage_NonMapUsageIgnored(t *testing.T) {
 		}
 	case <-cs.ctx.Done():
 		t.Fatal("context cancelled before event emitted")
+	}
+
+	if usage := cs.GetContextUsage(); usage != nil {
+		t.Fatalf("GetContextUsage should be nil for non-map usage, got %+v", usage)
+	}
+}
+
+// TestHandleSystemStoresModel verifies the CLI system init model is
+// available via GetModel for the reply footer.
+func TestHandleSystemStoresModel(t *testing.T) {
+	cs := newTestSession("default")
+	defer cs.cancel()
+
+	cs.handleSystem(map[string]any{
+		"type":       "system",
+		"session_id": "sid-1",
+		"model":      "Auto Balance",
+	})
+	<-cs.events // drain EventText
+
+	if got := cs.GetModel(); got != "Auto Balance" {
+		t.Fatalf("GetModel() = %q, want %q", got, "Auto Balance")
 	}
 }
 
@@ -241,3 +285,4 @@ func TestHandleResult_DoesNotBlockOnFullChannel(t *testing.T) {
 // Touching this guard forces the integration test above to be updated
 // alongside any token-related Event field.
 var _ = context.Background
+var _ core.ContextUsageReporter = (*cursorSession)(nil)

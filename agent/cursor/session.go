@@ -37,6 +37,16 @@ type cursorSession struct {
 
 	thinkingBuf strings.Builder // accumulate thinking deltas
 
+	// activeModel is the model id from the most recent system init event
+	// (e.g. "Auto Balance"). Empty until handleSystem has seen one.
+	activeModel atomic.Value // stores string
+
+	// usageMu guards lastUsage. Populated from the most recent result event
+	// so the reply footer can render model · out/in/cw/cr · ctx% via
+	// ContextUsageReporter (same path Claude Code uses).
+	usageMu   sync.Mutex
+	lastUsage *core.ContextUsage
+
 	// Permission handling: each Send() creates a new process whose stdin is used
 	// to respond to interaction_query permission requests.
 	stdinMu sync.Mutex
@@ -263,6 +273,9 @@ func (cs *cursorSession) handleSystem(raw map[string]any) {
 		slog.Debug("cursorSession: session init", "session_id", sid)
 
 		model, _ := raw["model"].(string)
+		if model != "" {
+			cs.activeModel.Store(model)
+		}
 		evt := core.Event{Type: core.EventText, SessionID: sid, Content: "", ToolName: model}
 		select {
 		case cs.events <- evt:
@@ -577,6 +590,23 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 	if usage, ok := raw["usage"].(map[string]any); ok {
 		inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens = parseCursorUsage(usage)
 	}
+	// Persist a ContextUsage snapshot for the reply footer's CCD-style line
+	// (model · out/in/cw/cr · ctx%). ContextWindow matches core's
+	// contextIndicatorText fallback (200k) so [ctx: ~N%] stays consistent.
+	used := inputTokens + cacheReadTokens + cacheWriteTokens
+	if used > 0 || outputTokens > 0 {
+		cs.usageMu.Lock()
+		cs.lastUsage = &core.ContextUsage{
+			UsedTokens:               used,
+			TotalTokens:              used + outputTokens,
+			InputTokens:              inputTokens,
+			CachedInputTokens:        cacheReadTokens,
+			CacheCreationInputTokens: cacheWriteTokens,
+			OutputTokens:             outputTokens,
+			ContextWindow:            cursorContextWindow,
+		}
+		cs.usageMu.Unlock()
+	}
 	evt := core.Event{
 		Type:                     core.EventResult,
 		Content:                  content,
@@ -593,6 +623,10 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 		return
 	}
 }
+
+// cursorContextWindow is the generic context-window size used when Cursor's
+// result.usage does not report one. Matches core.contextIndicatorText.
+const cursorContextWindow = 200_000
 
 // parseCursorUsage extracts token counts from a Cursor result event's `usage`
 // object. The Cursor Agent CLI emits camelCase keys (inputTokens,
@@ -646,6 +680,29 @@ func (cs *cursorSession) Events() <-chan core.Event {
 func (cs *cursorSession) CurrentSessionID() string {
 	v, _ := cs.chatID.Load().(string)
 	return v
+}
+
+// GetModel returns the model id from the CLI system init event, falling
+// back to the session's configured model. Empty until either is known.
+func (cs *cursorSession) GetModel() string {
+	if v, ok := cs.activeModel.Load().(string); ok {
+		if m := strings.TrimSpace(v); m != "" {
+			return m
+		}
+	}
+	return strings.TrimSpace(cs.model)
+}
+
+// GetContextUsage returns a snapshot of the most recent per-turn context
+// usage, or nil if no result event with tokens has been observed yet.
+func (cs *cursorSession) GetContextUsage() *core.ContextUsage {
+	cs.usageMu.Lock()
+	defer cs.usageMu.Unlock()
+	if cs.lastUsage == nil {
+		return nil
+	}
+	clone := *cs.lastUsage
+	return &clone
 }
 
 func (cs *cursorSession) Alive() bool {
