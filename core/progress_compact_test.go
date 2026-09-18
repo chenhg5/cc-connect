@@ -103,6 +103,34 @@ func TestBuildAndParseProgressCardPayload(t *testing.T) {
 	}
 }
 
+// TestBuildStreamingCardPayload_EmptyReturnsEmpty guards against the empty
+// progress-payload leak: a streaming-card turn with no thinking, no step text,
+// no tool calls and no answer must produce no transport payload at all.
+// Otherwise the empty payload (rejected by ParseProgressCardPayload) is
+// rendered as raw markdown on Feishu and the internal
+// "__cc_connect_progress_card_v1__:..." JSON is shown verbatim to the user on
+// every simple Q&A turn.
+func TestBuildStreamingCardPayload_EmptyReturnsEmpty(t *testing.T) {
+	got := BuildStreamingCardPayload("", nil, nil, "", "opencode", LangChinese, ProgressCardStateCompleted)
+	if got != "" {
+		t.Fatalf("BuildStreamingCardPayload(empty) = %q, want empty string", got)
+	}
+
+	// Sanity: a non-empty turn still builds a parseable payload with the
+	// answer body intact.
+	payload := BuildStreamingCardPayload("思考中", nil, nil, "最终答复", "opencode", LangChinese, ProgressCardStateCompleted)
+	if payload == "" {
+		t.Fatal("BuildStreamingCardPayload(non-empty) returned empty string")
+	}
+	parsed, ok := ParseProgressCardPayload(payload)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload() failed for %q", payload)
+	}
+	if parsed.Answer != "最终答复" {
+		t.Fatalf("answer = %q, want %q", parsed.Answer, "最终答复")
+	}
+}
+
 func TestCompactProgressWriter_UsesReplyContextHints(t *testing.T) {
 	p := &previewCapturePlatform{}
 	replyCtx := progressHintReplyCtx{
