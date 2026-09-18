@@ -406,15 +406,14 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter            *RateLimiter
-	outgoingRL             *OutgoingRateLimiter
-	streamPreview          StreamPreviewCfg
-	instantReply           InstantReplyCfg
-	references             ReferenceRenderCfg
-	relayManager           *RelayManager
-	eventIdleTimeout       time.Duration
-	maxTurnTime            time.Duration // absolute wall-clock cap per turn (0 = disabled)
-	permissionTimeoutNanos atomic.Int64  // max wait for user to respond to permission prompt (0 = no timeout)
+	rateLimiter      *RateLimiter
+	outgoingRL       *OutgoingRateLimiter
+	streamPreview    StreamPreviewCfg
+	instantReply     InstantReplyCfg
+	references       ReferenceRenderCfg
+	relayManager     *RelayManager
+	eventIdleTimeout time.Duration
+	maxTurnTime      time.Duration // absolute wall-clock cap per turn (0 = disabled)
 	// agentSessionIdleTimeoutNanos 在单轮正常结束后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下次继续恢复。
 	agentSessionIdleTimeoutNanos atomic.Int64
@@ -10733,7 +10732,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 		var sb strings.Builder
 		if current != nil {
-			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+			fmt.Fprintf(&sb, e.i18n.T(MsgProviderCurrent), current.Name)
 			sb.WriteString("\n\n")
 		}
 		sb.WriteString(e.i18n.T(MsgProviderListTitle))
@@ -10990,7 +10989,7 @@ func (e *Engine) renderGotoCard(sessionKey string) *Card {
 
 	var sb strings.Builder
 	if current != nil {
-		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+		fmt.Fprintf(&sb, e.i18n.T(MsgProviderCurrent), current.Name)
 	} else {
 		sb.WriteString(e.i18n.T(MsgGotoDefault))
 	}
@@ -11030,7 +11029,7 @@ func (e *Engine) renderGotoText(switcher ProviderSwitcher) (string, [][]ButtonOp
 
 	var sb strings.Builder
 	if current != nil {
-		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+		fmt.Fprintf(&sb, e.i18n.T(MsgProviderCurrent), current.Name)
 		sb.WriteString("\n")
 	} else {
 		sb.WriteString(e.i18n.T(MsgGotoDefault))
@@ -11046,7 +11045,7 @@ func (e *Engine) renderGotoText(switcher ProviderSwitcher) (string, [][]ButtonOp
 		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
 			marker = "> "
 		}
-		sb.WriteString(fmt.Sprintf("%s%d. %s\n", marker, i+1, ent.Model))
+		fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+1, ent.Model)
 
 		label := ent.Model
 		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
