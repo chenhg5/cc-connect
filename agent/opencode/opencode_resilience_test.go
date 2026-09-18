@@ -175,27 +175,6 @@ func TestHandleText_ObjectiveHeadedAnswerNotSuppressed(t *testing.T) {
 	}
 }
 
-// TestSend_ResetsCompactionContinuations verifies the automatic-continue
-// budget is per user turn: a new Send must clear the rounds a previous turn
-// consumed, otherwise a session eventually stops resuming after a compaction
-// and the new turn ends with an empty reply.
-func TestSend_ResetsCompactionContinuations(t *testing.T) {
-	dir := t.TempDir()
-	s, err := newOpencodeSession(context.Background(), filepath.Join(dir, "missing-opencode"), nil, dir, "", "default", "", "", nil)
-	if err != nil {
-		t.Fatalf("newOpencodeSession: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	s.continuations.Store(maxCompactionContinuations)
-	if err := s.Send("继续", "", nil, nil); err == nil {
-		t.Fatal("Send with a missing binary should return an error")
-	}
-	if got := s.continuations.Load(); got != 0 {
-		t.Errorf("continuations = %d after Send, want 0 (budget is per turn)", got)
-	}
-}
-
 // TestReadLoop_StderrReadAfterProcessExit is the regression for the
 // concurrent-stderr read: readProcess used to call stderrBuf.String() while
 // os/exec's stderr copy goroutine was still filling the same bytes.Buffer

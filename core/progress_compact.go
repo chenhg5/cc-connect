@@ -217,6 +217,18 @@ func BuildStreamingCardPayload(thinking string, stepTexts []string, tools []card
 		cleaned = kept
 	}
 
+	// A streaming-card turn with no thinking, no step text, no tool calls and
+	// no answer body must not produce a payload at all. Otherwise the transport
+	// string carries an empty progress card that ParseProgressCardPayload
+	// rejects (no items/answer), and the Feishu renderer then falls back to
+	// displaying the raw payload prefix as markdown — the
+	// "__cc_connect_progress_card_v1__:..." JSON leaked verbatim to users on
+	// every simple Q&A turn. Empty turns return "" so the engine has no payload
+	// to send (mirrors BuildProgressCardPayloadV2's empty guard).
+	if len(cleaned) == 0 && strings.TrimSpace(answer) == "" {
+		return ""
+	}
+
 	if state == "" {
 		state = ProgressCardStateRunning
 	}
