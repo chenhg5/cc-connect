@@ -10287,10 +10287,40 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 				return
 			}
 		}
+		// Cron-triggered turns run under "<chatSessionKey>#cron:<id>" keys and
+		// are invisible to the exact/suffix lookups above. A /stop in the same
+		// chat must tear down any running cron turn too, so the user can switch
+		// provider and re-trigger instead of waiting out the retry window.
+		if n := e.stopCronTurns(msg.SessionKey); n > 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+			return
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+// stopCronTurns stops every live cron-triggered turn for the given chat
+// session key (keys shaped "<sessionKey>#cron:<id>"), returning how many
+// turns were stopped.
+func (e *Engine) stopCronTurns(sessionKey string) int {
+	e.interactiveMu.Lock()
+	prefix := sessionKey + "#cron:"
+	var keys []string
+	for k := range e.interactiveStates {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	e.interactiveMu.Unlock()
+	stopped := 0
+	for _, k := range keys {
+		if e.stopInteractiveSessionSilently(k) {
+			stopped++
+		}
+	}
+	return stopped
 }
 
 // cmdCancel stops the current execution and starts a fresh session.
