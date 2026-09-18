@@ -605,7 +605,7 @@ func TestSendResetsStallWatchdogClock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	s.alive.Store(true)
 	// Stale last-event from a previous turn (way past the stall timeout).
 	s.lastEvent.Store(time.Now().Add(-time.Hour).UnixNano())
@@ -627,7 +627,7 @@ func TestStdinPipe_PromptThenEOF(t *testing.T) {
 	defer cancel()
 
 	pr, pw := io.Pipe()
-	defer pr.Close()
+	defer func() { _ = pr.Close() }()
 
 	// In production launch() calls writeStdin in a goroutine; the consumer
 	// (opencode) reads concurrently. Mirror that here.
