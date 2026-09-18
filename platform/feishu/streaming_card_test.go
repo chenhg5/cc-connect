@@ -361,5 +361,3 @@ func TestStreamingCard_PayloadUpdateAppends(t *testing.T) {
 		t.Errorf("full-card updates after finalize = %d, want 1 (final render)", update)
 	}
 }
-
-
