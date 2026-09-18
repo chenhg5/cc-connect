@@ -5051,7 +5051,8 @@ const (
 	progressPanelUpdatesElementID  = "updates_panel"
 )
 
-func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[string]any {	text := strings.TrimSpace(item.Text)
+func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[string]any {
+	text := strings.TrimSpace(item.Text)
 	if text == "" {
 		text = " "
 	}
