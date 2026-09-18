@@ -111,11 +111,24 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	return opts
 }
 
+// SetModel affects future sessions; the engine recreates sessions after switching.
 func (a *Agent) SetModel(model string) {
 	model = resolveModelRef(model)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.model = model
+	if levels, known := supportedThinkingLevels(model); known && a.thinking != "" {
+		supported := false
+		for _, level := range levels {
+			if level == a.thinking {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			a.thinking = ""
+		}
+	}
 	slog.Info("pi: model changed", "model", model)
 }
 
@@ -138,7 +151,7 @@ func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
 	// 切换的模型列表。此前这里只读 models-store.json，会把用户在 models.json 里
 	// 配置的自定义 provider（如 workbuddy/chunfeng）全部漏掉。
 	if catalog := readModelCatalog(); len(catalog) > 0 {
-		return catalogOptions(catalog)
+		return unambiguousModelOptions(catalogOptions(catalog))
 	}
 	return nil
 }
@@ -289,8 +302,110 @@ func (a *Agent) GetReasoningEffort() string {
 	return a.thinking
 }
 
+// allThinkingLevels mirrors pi-ai's EXTENDED_THINKING_LEVELS: the canonical
+// pi thinking levels in ascending order.
+var allThinkingLevels = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// AvailableReasoningEfforts returns the thinking levels supported by the
+// current model, derived from its thinkingLevelMap (models.json /
+// models-store.json) exactly like pi-ai's getSupportedThinkingLevels:
+//   - non-reasoning models only support off;
+//   - a level explicitly mapped to null is unsupported;
+//   - xhigh/max are only offered when explicitly mapped to a string;
+//   - the remaining levels default to supported when absent from the map.
+//
+// Models unknown to the catalog fall back to the full level list.
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"off", "minimal", "low", "medium", "high", "xhigh"}
+	a.mu.Lock()
+	model := a.model
+	a.mu.Unlock()
+	if levels, ok := supportedThinkingLevels(model); ok {
+		return levels
+	}
+	return append([]string(nil), allThinkingLevels...)
+}
+
+// supportedThinkingLevels resolves model → supported thinking levels.
+// ok is false when the model cannot be resolved from the catalog.
+func supportedThinkingLevels(model string) ([]string, bool) {
+	_, m, ok := lookupModelDef(model)
+	if !ok {
+		return nil, false
+	}
+	return thinkingLevelsForDef(m), true
+}
+
+// thinkingLevelsForDef applies pi-ai's getSupportedThinkingLevels rules to a
+// resolved model definition.
+func thinkingLevelsForDef(m *piModel) []string {
+	if !m.Reasoning {
+		return []string{"off"}
+	}
+	var out []string
+	for _, level := range allThinkingLevels {
+		mapped, present := m.ThinkingLevelMap[level]
+		switch {
+		case present && mapped == nil:
+			// Explicitly disabled for this model.
+		case !present && (level == "xhigh" || level == "max"):
+			// Only offered when the model explicitly maps them.
+		default:
+			out = append(out, level)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"off"}
+	}
+	return out
+}
+
+// lookupModelDef resolves a model reference ("provider/id", "id", or
+// "provider/id:thinking") against the merged model catalog. A bare id is
+// matched against every provider, preferring settings.json defaultProvider.
+func lookupModelDef(model string) (string, *piModel, bool) {
+	ref := strings.TrimSpace(model)
+	if ref == "" {
+		return "", nil, false
+	}
+	catalog := readModelCatalog()
+	// A colon can be part of a real model ID. Exact catalog matches win.
+	if provider, model, ok := lookupCatalogRef(catalog, ref); ok {
+		return provider, model, true
+	}
+	if idx := strings.LastIndex(ref, ":"); idx > 0 {
+		for _, level := range allThinkingLevels {
+			if ref[idx+1:] == level {
+				return lookupCatalogRef(catalog, ref[:idx])
+			}
+		}
+	}
+	return "", nil, false
+}
+
+func lookupCatalogRef(catalog []piModel, ref string) (string, *piModel, bool) {
+	// Qualified IDs win even when a bare model ID contains a slash.
+	for i := range catalog {
+		m := &catalog[i]
+		if strings.EqualFold(m.Provider+"/"+m.ID, ref) {
+			return m.Provider, m, true
+		}
+	}
+	if settings, err := readSettings(); err == nil && settings.DefaultProvider != "" {
+		for i := range catalog {
+			m := &catalog[i]
+			if m.Provider == settings.DefaultProvider && strings.EqualFold(m.ID, ref) {
+				return m.Provider, m, true
+			}
+		}
+	}
+	// The catalog is sorted, keeping the fallback deterministic.
+	for i := range catalog {
+		m := &catalog[i]
+		if strings.EqualFold(m.ID, ref) {
+			return m.Provider, m, true
+		}
+	}
+	return "", nil, false
 }
 
 // ── WorkDirSwitcher ───────────────────────────────────────────
@@ -363,11 +478,7 @@ func (a *Agent) SkillDirs() []string {
 // modelsJSON represents the structure of ~/.pi/agent/models.json.
 type modelsJSON struct {
 	Providers map[string]struct {
-		Models []struct {
-			ID            string `json:"id"`
-			Name          string `json:"name"`
-			ContextWindow int    `json:"contextWindow"`
-		} `json:"models"`
+		Models []piModel `json:"models"`
 	} `json:"providers"`
 }
 
@@ -385,6 +496,9 @@ type modelsJSON struct {
 func loadModelsContextWindows() map[string]int {
 	m := make(map[string]int)
 	for _, c := range readModelCatalog() {
+		if c.ContextWindow <= 0 {
+			continue
+		}
 		m[c.ID] = c.ContextWindow
 		m[c.Provider+"/"+c.ID] = c.ContextWindow
 	}
@@ -473,7 +587,9 @@ func readSettingsModels() ([]core.ModelOption, error) {
 		models = append(models, opt)
 	}
 	for _, pattern := range s.EnabledModels {
-		if pattern == "" {
+		pattern = strings.TrimSpace(pattern)
+		provider, id, qualified := strings.Cut(pattern, "/")
+		if pattern == "" || (qualified && (strings.TrimSpace(provider) == "" || strings.TrimSpace(id) == "")) {
 			continue
 		}
 		matched := matchModelPattern(pattern, catalog)
@@ -490,25 +606,47 @@ func readSettingsModels() ([]core.ModelOption, error) {
 			add(c)
 		}
 	}
-	return aliasUniqueOptions(models), nil
+	return unambiguousModelOptions(models), nil
 }
 
-// aliasUniqueOptions replaces any Alias that repeats (case-insensitively) with
-// the provider-qualified ID, so a model selected by alias always resolves to
-// exactly one entry.
-func aliasUniqueOptions(models []core.ModelOption) []core.ModelOption {
-	counts := make(map[string]int, len(models))
+// unambiguousModelOptions keeps one option per qualified name. Shared aliases
+// belong only to the configured default provider; without a matching default,
+// users must select the qualified name instead of an arbitrary provider.
+func unambiguousModelOptions(models []core.ModelOption) []core.ModelOption {
+	unique := make([]core.ModelOption, 0, len(models))
+	seen := map[string]bool{}
+	counts := map[string]int{}
+	preferredCounts := map[string]int{}
+	defaultProvider := ""
+	if settings, err := readSettings(); err == nil {
+		defaultProvider = settings.DefaultProvider
+	}
 	for _, m := range models {
+		name := strings.TrimSpace(m.Name)
+		provider, id, qualified := strings.Cut(name, "/")
+		if name == "" || (qualified && (strings.TrimSpace(provider) == "" || strings.TrimSpace(id) == "")) || seen[name] {
+			continue
+		}
+		m.Name = name
+		seen[name] = true
+		unique = append(unique, m)
 		if m.Alias != "" {
-			counts[strings.ToLower(m.Alias)]++
+			// Core resolves aliases case-insensitively.
+			alias := strings.ToLower(m.Alias)
+			counts[alias]++
+			if defaultProvider != "" && provider == defaultProvider {
+				preferredCounts[alias]++
+			}
 		}
 	}
-	for i := range models {
-		if models[i].Alias != "" && counts[strings.ToLower(models[i].Alias)] > 1 {
-			models[i].Alias = models[i].Name
+	for i := range unique {
+		m := &unique[i]
+		alias := strings.ToLower(m.Alias)
+		if counts[alias] > 1 && (preferredCounts[alias] != 1 || !strings.HasPrefix(m.Name, defaultProvider+"/")) {
+			m.Alias = ""
 		}
 	}
-	return models
+	return unique
 }
 
 // modelsStoreJSON represents the structure of ~/.pi/agent/models-store.json,
@@ -520,21 +658,19 @@ func aliasUniqueOptions(models []core.ModelOption) []core.ModelOption {
 //	  "deepseek": { "models": [ { "id": "...", "name": "...", ... } ] }
 //	}
 type modelsStoreJSON map[string]struct {
-	Models []struct {
-		ID            string `json:"id"`
-		Name          string `json:"name"`
-		ContextWindow int    `json:"contextWindow"`
-	} `json:"models"`
+	Models []piModel `json:"models"`
 }
 
 // ── Model catalog ───────────────────────────────────────────
 
 // piModel is one model in pi's merged catalog.
 type piModel struct {
-	Provider      string
-	ID            string
-	Name          string // display name, may be empty
-	ContextWindow int
+	Provider         string         `json:"-"`
+	ID               string         `json:"id"`
+	Name             string         `json:"name"`
+	ContextWindow    int            `json:"contextWindow"`
+	Reasoning        bool           `json:"reasoning"`
+	ThinkingLevelMap map[string]any `json:"thinkingLevelMap"`
 }
 
 // readModelCatalog merges models.json (user-defined endpoints) with
@@ -543,11 +679,12 @@ type piModel struct {
 // provider then ID so the /model card is stable across calls.
 func readModelCatalog() []piModel {
 	byKey := make(map[string]piModel)
-	add := func(provider string, id, name string, cw int) {
-		if provider == "" || id == "" {
+	add := func(provider string, model piModel) {
+		if strings.TrimSpace(provider) == "" || strings.TrimSpace(model.ID) == "" {
 			return
 		}
-		byKey[provider+"/"+id] = piModel{Provider: provider, ID: id, Name: name, ContextWindow: cw}
+		model.Provider = provider
+		byKey[provider+"/"+model.ID] = model
 	}
 
 	// Bundled catalog first so models.json can override it.
@@ -559,7 +696,7 @@ func readModelCatalog() []piModel {
 			} else {
 				for provider, p := range store {
 					for _, m := range p.Models {
-						add(provider, m.ID, m.Name, m.ContextWindow)
+						add(provider, m)
 					}
 				}
 			}
@@ -585,7 +722,9 @@ func readModelCatalog() []piModel {
 						if cw == 0 {
 							cw = byKey[provider+"/"+m.ID].ContextWindow
 						}
-						add(provider, m.ID, name, cw)
+						m.Name = name
+						m.ContextWindow = cw
+						add(provider, m)
 					}
 				}
 			}
@@ -827,6 +966,9 @@ func resolveModelRef(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" || hasGlobMeta(model) {
 		return model
+	}
+	if provider, def, ok := lookupModelDef(model); ok {
+		return provider + "/" + def.ID
 	}
 	matched := matchModelPattern(model, readModelCatalog())
 	if len(matched) != 1 {
