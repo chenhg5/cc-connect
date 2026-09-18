@@ -11364,7 +11364,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 		var sb strings.Builder
 		if current != nil {
-			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+			fmt.Fprintf(&sb, e.i18n.T(MsgProviderCurrent), current.Name)
 			sb.WriteString("\n\n")
 		}
 		sb.WriteString(e.i18n.T(MsgProviderListTitle))
@@ -11621,7 +11621,7 @@ func (e *Engine) renderGotoCard(sessionKey string) *Card {
 
 	var sb strings.Builder
 	if current != nil {
-		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+		fmt.Fprintf(&sb, e.i18n.T(MsgProviderCurrent), current.Name)
 	} else {
 		sb.WriteString(e.i18n.T(MsgGotoDefault))
 	}
@@ -11661,7 +11661,7 @@ func (e *Engine) renderGotoText(switcher ProviderSwitcher) (string, [][]ButtonOp
 
 	var sb strings.Builder
 	if current != nil {
-		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+		fmt.Fprintf(&sb, e.i18n.T(MsgProviderCurrent), current.Name)
 		sb.WriteString("\n")
 	} else {
 		sb.WriteString(e.i18n.T(MsgGotoDefault))
@@ -11677,7 +11677,7 @@ func (e *Engine) renderGotoText(switcher ProviderSwitcher) (string, [][]ButtonOp
 		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
 			marker = "> "
 		}
-		sb.WriteString(fmt.Sprintf("%s%d. %s\n", marker, i+1, ent.Model))
+		fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+1, ent.Model)
 
 		label := ent.Model
 		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
