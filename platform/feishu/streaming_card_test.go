@@ -298,6 +298,31 @@ func TestCardJSONForContent_MarkdownFallback(t *testing.T) {
 	}
 }
 
+// TestCardJSONForContent_UnparseablePayloadDoesNotLeak verifies that a content
+// string carrying the progress-payload prefix which ParseProgressCardPayload
+// rejects (e.g. an empty payload with no items/answer) is never rendered as
+// raw markdown — that would leak the internal transport format
+// ("__cc_connect_progress_card_v1__:...") verbatim to the user.
+func TestCardJSONForContent_UnparseablePayloadDoesNotLeak(t *testing.T) {
+	leaky := core.ProgressCardPayloadPrefix +
+		`{"version":2,"agent":"opencode","lang":"zh","state":"completed","truncated":false}`
+	if _, ok := core.ParseProgressCardPayload(leaky); ok {
+		t.Fatal("ParseProgressCardPayload(empty payload) should fail")
+	}
+
+	got := cardJSONForContent(leaky, core.CardStatusDone)
+	if strings.Contains(got, "cc_connect_progress_card_v1") {
+		t.Fatalf("card JSON leaked payload prefix:\n%s", got)
+	}
+	if strings.Contains(got, `"version":2`) {
+		t.Fatalf("card JSON leaked payload JSON body:\n%s", got)
+	}
+	// The empty payload must decode to a valid (blank) card, not raw text.
+	if !strings.Contains(got, `"schema":"2.0"`) {
+		t.Fatalf("card JSON is not a valid card:\n%s", got)
+	}
+}
+
 // TestStreamingCard_PayloadUpdateAppends verifies structured payload content
 // streams new thinking/tool entries into the collapsible panels via the
 // cardkit element append API (type=append) — an update that does NOT

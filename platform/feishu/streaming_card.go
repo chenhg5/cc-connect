@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,6 +96,14 @@ func cardJSONForContent(content string, status core.CardStatus) string {
 			payload.State = core.ProgressCardStateRunning
 		}
 		return buildProgressCardJSONFromPayload(payload)
+	}
+	// A content string that still carries the progress-payload prefix was a
+	// payload ParseProgressCardPayload could not decode (e.g. an empty payload
+	// with no items/answer). Never render it as raw markdown — that would leak
+	// the internal transport format ("__cc_connect_progress_card_v1__:...")
+	// verbatim to the user. Render an empty card instead.
+	if strings.HasPrefix(content, core.ProgressCardPayloadPrefix) {
+		return buildCardJSON(" ")
 	}
 	return buildCardJSONWithStatus(content, status)
 }
