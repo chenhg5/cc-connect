@@ -1290,3 +1290,62 @@ func mustParseStandardForTest(t *testing.T, expr string) cron.Schedule {
 	}
 	return s
 }
+
+// TestCronTimeout_StopsRunningTurn is the regression test for a timed-out cron
+// leaving its agent turn running: runJob marked the job failed after
+// ExecutionTimeout but never stopped the turn, so the job goroutine (and the
+// turn) kept running for another 30+ minutes. The fix stops the cron turn on
+// timeout (see stopCronTurnOnTimeout).
+func TestCronTimeout_StopsRunningTurn(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: &stubAgentSession{}}, nil, "", LangEnglish)
+	defer e.cancel()
+
+	p := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	key := "discord:channel-1:user-1#cron:s1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{platform: p, replyCtx: "ctx", eventsNeedResync: true}
+	e.interactiveMu.Unlock()
+
+	job := &CronJob{ID: "timeout1", SessionKey: "discord:channel-1:user-1"}
+
+	if got := stopCronTurnOnTimeout(e, job); got != 1 {
+		t.Errorf("stopCronTurnOnTimeout stopped = %d, want 1", got)
+	}
+
+	e.interactiveMu.Lock()
+	_, still := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if still {
+		t.Error("cron turn state still present after timeout stop")
+	}
+}
+
+// TestCronTimeout_StopsSharedSessionTurn covers the shared-session cron variant
+// whose turn key is the session key itself (no #cron: suffix).
+func TestCronTimeout_StopsSharedSessionTurn(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: &stubAgentSession{}}, nil, "", LangEnglish)
+	defer e.cancel()
+
+	p := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	key := "discord:channel-1:user-1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{platform: p, replyCtx: "ctx", eventsNeedResync: true}
+	e.interactiveMu.Unlock()
+
+	job := &CronJob{ID: "timeout2", SessionKey: key}
+
+	if got := stopCronTurnOnTimeout(e, job); got != 1 {
+		t.Errorf("stopCronTurnOnTimeout stopped = %d, want 1", got)
+	}
+
+	e.interactiveMu.Lock()
+	_, still := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if still {
+		t.Error("shared-session turn state still present after timeout stop")
+	}
+}
