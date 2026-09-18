@@ -4506,6 +4506,323 @@ func TestCmdProvider_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+// TestCmdGoto_SwitchesProviderKeepsContext locks down the core /goto
+// contract: switching provider MUST keep the agent_session_id and the
+// conversation history (unlike /provider switch, which clears both), and the
+// new provider must be persisted on the session.
+func TestCmdGoto_SwitchesProviderKeepsContext(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "aiapi", BaseURL: "https://aiapi.uu.cc", Model: "glm-5.3"},
+			{Name: "chatgpt", BaseURL: "https://api.openai.com", Model: "gpt-5.6-sol"},
+		},
+		active: "chatgpt",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	s := e.sessions.GetOrCreateActive("test:user1")
+	s.SetAgentSessionID("ses-abc", "opencode")
+	s.AddHistory("user", "hello")
+	s.AddHistory("assistant", "hi")
+
+	e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"aiapi"})
+
+	if agent.active != "aiapi" {
+		t.Fatalf("active provider = %q, want aiapi", agent.active)
+	}
+	if s.AgentSessionID != "ses-abc" {
+		t.Fatalf("agent_session_id = %q, want ses-abc (must be preserved)", s.AgentSessionID)
+	}
+	if got := s.GetHistory(0); len(got) != 2 {
+		t.Fatalf("history entries = %d, want 2 (must be preserved)", len(got))
+	}
+	if s.ActiveProvider != "aiapi" {
+		t.Fatalf("session active provider = %q, want aiapi", s.ActiveProvider)
+	}
+	if len(p.sent) == 0 || !strings.Contains(p.sent[0], "aiapi") {
+		t.Fatalf("reply = %q, want switch confirmation", p.sent)
+	}
+}
+
+// scopedStubProviderAgent is a ProviderSwitcher agent that also declares
+// provider-scoped model names (opencode-style).
+type scopedStubProviderAgent struct {
+	stubProviderAgent
+}
+
+func (a *scopedStubProviderAgent) ProviderScopedModelNames() bool { return true }
+
+// TestCmdGoto_WithModel_PersistsModelPerAgentScoping verifies the model stored
+// by "/goto <provider>/<model>" respects the agent's ProviderScopedModelNames
+// capability: scoped agents (opencode) persist the full "aiapi/<model>" name,
+// others persist the bare model name.
+func TestCmdGoto_WithModel_PersistsModelPerAgentScoping(t *testing.T) {
+	providers := func() []ProviderConfig {
+		return []ProviderConfig{
+			{Name: "aiapi", Model: "glm-5.3"},
+			{Name: "chatgpt", Model: "gpt-5.6-sol"},
+		}
+	}
+
+	// Scoped agent (opencode): the full prefixed name is persisted.
+	p := &stubPlatformEngine{n: "plain"}
+	scoped := &scopedStubProviderAgent{stubProviderAgent: stubProviderAgent{providers: providers(), active: "chatgpt"}}
+	e := NewEngine("test", scoped, []Platform{p}, "", LangEnglish)
+	e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"aiapi/gpt-5.6-sol"})
+	if scoped.providers[0].Model != "aiapi/gpt-5.6-sol" {
+		t.Fatalf("scoped agent model = %q, want aiapi/gpt-5.6-sol", scoped.providers[0].Model)
+	}
+
+	// Bare agent (claudecode/codex style): the model after the slash is stored.
+	p2 := &stubPlatformEngine{n: "plain"}
+	bare := &stubProviderAgent{providers: providers(), active: "chatgpt"}
+	e2 := NewEngine("test", bare, []Platform{p2}, "", LangEnglish)
+	e2.cmdGoto(p2, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"aiapi/claude-sonnet-5"})
+	if bare.providers[0].Model != "claude-sonnet-5" {
+		t.Fatalf("bare agent model = %q, want claude-sonnet-5", bare.providers[0].Model)
+	}
+}
+
+// TestCmdGoto_NoArgsRendersGroupedList verifies "/goto" with no arguments
+// renders the two-level grouped provider → model list with continuous
+// numbering and a usage hint.
+func TestCmdGoto_NoArgsRendersGroupedList(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "aiapi", Models: []ModelOption{{Name: "aiapi/gpt-5.6-sol"}, {Name: "aiapi/glm-5.3"}}},
+			{Name: "chatgpt", Model: "gpt-5.6-sol"},
+		},
+		active: "chatgpt",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	text := p.sent[0]
+	for _, want := range []string{"Targets:", "1. aiapi/gpt-5.6-sol", "2. aiapi/glm-5.3", "3. gpt-5.6-sol", "/goto <number>"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("goto list missing %q in:\n%s", want, text)
+		}
+	}
+}
+
+// TestCmdGoto_NumberedTarget verifies "/goto <number>" picks the numbered
+// entry from the grouped list and switches to that provider + model while
+// keeping context.
+func TestCmdGoto_NumberedTarget(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "aiapi", Models: []ModelOption{{Name: "aiapi/gpt-5.6-sol"}}},
+			{Name: "chatgpt", Model: "gpt-5.6-sol"},
+		},
+		active: "chatgpt",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	s := e.sessions.GetOrCreateActive("test:user1")
+	s.SetAgentSessionID("ses-abc", "opencode")
+
+	e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"1"})
+
+	if agent.active != "aiapi" {
+		t.Fatalf("active provider = %q, want aiapi", agent.active)
+	}
+	if agent.providers[0].Model != "aiapi/gpt-5.6-sol" {
+		t.Fatalf("provider model = %q, want aiapi/gpt-5.6-sol", agent.providers[0].Model)
+	}
+	if s.AgentSessionID != "ses-abc" {
+		t.Fatalf("agent_session_id = %q, want ses-abc (must be preserved)", s.AgentSessionID)
+	}
+
+	// Out-of-range numbers report an error instead of switching.
+	e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"99"})
+	if len(p.sent) < 2 || !strings.Contains(p.sent[1], "Invalid") {
+		t.Fatalf("out-of-range reply = %q, want invalid-target message", p.sent)
+	}
+}
+
+// TestCardAction_Goto_SwitchesProviderKeepsContext is the regression test for
+// the bug where picking an option in the /goto card's select did nothing: the
+// card action was routed to executeCardAction, which only knew "/model" and
+// silently dropped "/goto", so the provider never switched and the next spawn
+// still used the old model. It locks down that act:/goto switches immediately
+// while preserving agent_session_id and history.
+func TestCardAction_Goto_SwitchesProviderKeepsContext(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "aiapi", Model: "glm-5.3"},
+			{Name: "chatgpt", Model: "gpt-5.6-sol"},
+		},
+		active: "chatgpt",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	s := e.sessions.GetOrCreateActive("test:user1")
+	s.SetAgentSessionID("ses-abc", "opencode")
+	s.AddHistory("user", "hello")
+	s.AddHistory("assistant", "hi")
+
+	// Simulate the Feishu card action for picking aiapi/gpt-5.6-sol.
+	// stubProviderAgent does not implement ProviderScopedModelNames, so the
+	// bare model name is persisted (claudecode/codex style).
+	e.executeCardAction("/goto", "aiapi/gpt-5.6-sol", "test:user1")
+
+	if agent.active != "aiapi" {
+		t.Fatalf("active provider = %q, want aiapi (card action must switch)", agent.active)
+	}
+	if agent.providers[0].Model != "gpt-5.6-sol" {
+		t.Fatalf("provider model = %q, want gpt-5.6-sol (bare name for non-scoped agent)", agent.providers[0].Model)
+	}
+	if s.AgentSessionID != "ses-abc" {
+		t.Fatalf("agent_session_id = %q, want ses-abc (must be preserved)", s.AgentSessionID)
+	}
+	if got := s.GetHistory(0); len(got) != 2 {
+		t.Fatalf("history entries = %d, want 2 (must be preserved)", len(got))
+	}
+	if s.ActiveProvider != "aiapi" {
+		t.Fatalf("session active provider = %q, want aiapi", s.ActiveProvider)
+	}
+}
+
+// TestCardAction_Goto_RefreshesPicker verifies handleCardNav returns an
+// updated /goto picker card after an act:/goto selection, so the user sees the
+// switch result in the card itself.
+func TestCardAction_Goto_RefreshesPicker(t *testing.T) {
+	agent := &scopedStubProviderAgent{stubProviderAgent: stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "aiapi", Model: "aiapi/glm-5.3"},
+			{Name: "chatgpt", Model: "openai/gpt-5.6-sol"},
+		},
+		active: "chatgpt",
+	}}
+	e := NewEngine("test", agent, []Platform{}, "", LangEnglish)
+
+	card := e.handleCardNav("act:/goto aiapi/glm-5.3", "test:user1")
+	if card == nil {
+		t.Fatal("handleCardNav(act:/goto ...) returned nil card")
+	}
+	if agent.active != "aiapi" {
+		t.Fatalf("active provider = %q, want aiapi", agent.active)
+	}
+	var sel *CardSelect
+	var md *CardMarkdown
+	for _, el := range card.Elements {
+		if s, ok := el.(CardSelect); ok {
+			sel = &s
+		}
+		if m, ok := el.(CardMarkdown); ok {
+			md = &m
+		}
+	}
+	if sel == nil {
+		t.Fatal("refreshed picker card has no select element")
+	}
+	if md == nil || !strings.Contains(md.Content, "aiapi") {
+		t.Fatalf("refreshed picker markdown = %q, want current provider aiapi", md.Content)
+	}
+	found := false
+	for _, opt := range sel.Options {
+		if opt.Value == "act:/goto aiapi/glm-5.3" && opt.Text == "aiapi/glm-5.3" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("refreshed picker missing aiapi/glm-5.3 option: %+v", sel.Options)
+	}
+	if sel.InitValue != "act:/goto aiapi/glm-5.3" {
+		t.Fatalf("init value = %q, want act:/goto aiapi/glm-5.3", sel.InitValue)
+	}
+}
+
+// TestCardAction_Goto_OpenAIScopedModel_NoDoublePrefix is the regression test
+// for the /goto bug where picking a ChatGPT-subscription model
+// ("openai/gpt-5.6-sol" under the cc-connect "chatgpt" provider) got an extra
+// "chatgpt/" prefix ("chatgpt/openai/gpt-5.6-sol"), which opencode rejects
+// with UnknownError because "chatgpt" is not an opencode provider name. The
+// persisted model must stay "openai/gpt-5.6-sol" and the refreshed picker
+// must show that option as selected.
+func TestCardAction_Goto_OpenAIScopedModel_NoDoublePrefix(t *testing.T) {
+	agent := &scopedStubProviderAgent{stubProviderAgent: stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "aiapi", Model: "aiapi/deepseek-v4.1-flash"},
+			{Name: "chatgpt", Model: "openai/gpt-5.6-sol"},
+		},
+		active: "chatgpt",
+	}}
+	e := NewEngine("test", agent, []Platform{}, "", LangEnglish)
+
+	// Card action for the subscription model: the model part already carries
+	// the "openai/" provider prefix and must NOT get a second "chatgpt/".
+	e.executeCardAction("/goto", "chatgpt/openai/gpt-5.6-sol", "test:user1")
+
+	if agent.active != "chatgpt" {
+		t.Fatalf("active provider = %q, want chatgpt", agent.active)
+	}
+	var got string
+	for i := range agent.providers {
+		if agent.providers[i].Name == "chatgpt" {
+			got = agent.providers[i].Model
+		}
+	}
+	if got != "openai/gpt-5.6-sol" {
+		t.Fatalf("chatgpt model = %q, want openai/gpt-5.6-sol (no double prefix)", got)
+	}
+
+	// The refreshed picker must show the subscription model as selected
+	// (initVal matches), not an empty selection.
+	card := e.handleCardNav("act:/goto chatgpt/openai/gpt-5.6-sol", "test:user1")
+	if card == nil {
+		t.Fatal("handleCardNav(act:/goto ...) returned nil card")
+	}
+	var sel *CardSelect
+	for _, el := range card.Elements {
+		if s, ok := el.(CardSelect); ok {
+			sel = &s
+		}
+	}
+	if sel == nil {
+		t.Fatal("refreshed picker card has no select element")
+	}
+	if sel.InitValue != "act:/goto chatgpt/openai/gpt-5.6-sol" {
+		t.Fatalf("init value = %q, want act:/goto chatgpt/openai/gpt-5.6-sol (picker must show subscription model selected)", sel.InitValue)
+	}
+}
+
+// TestCmdGoto_OpenAIScopedModel_NoDoublePrefix covers the same bug in the
+// text-command path: "/goto chatgpt/openai/gpt-5.6-sol" must persist
+// "openai/gpt-5.6-sol", not "chatgpt/openai/gpt-5.6-sol".
+func TestCmdGoto_OpenAIScopedModel_NoDoublePrefix(t *testing.T) {
+	agent := &scopedStubProviderAgent{stubProviderAgent: stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "aiapi", Model: "aiapi/glm-5.3"},
+			{Name: "chatgpt", Model: "openai/gpt-5.6-sol"},
+		},
+		active: "aiapi",
+	}}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"chatgpt", "openai/gpt-5.6-sol"})
+
+	if agent.active != "chatgpt" {
+		t.Fatalf("active provider = %q, want chatgpt", agent.active)
+	}
+	var got string
+	for i := range agent.providers {
+		if agent.providers[i].Name == "chatgpt" {
+			got = agent.providers[i].Model
+		}
+	}
+	if got != "openai/gpt-5.6-sol" {
+		t.Fatalf("chatgpt model = %q, want openai/gpt-5.6-sol (no double prefix)", got)
+	}
+}
+
 func TestCmdModel_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
 	agent := &stubModelModeAgent{}

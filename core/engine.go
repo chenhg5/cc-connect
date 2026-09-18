@@ -406,14 +406,15 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter      *RateLimiter
-	outgoingRL       *OutgoingRateLimiter
-	streamPreview    StreamPreviewCfg
-	instantReply     InstantReplyCfg
-	references       ReferenceRenderCfg
-	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
-	maxTurnTime      time.Duration // absolute wall-clock cap per turn (0 = disabled)
+	rateLimiter            *RateLimiter
+	outgoingRL             *OutgoingRateLimiter
+	streamPreview          StreamPreviewCfg
+	instantReply           InstantReplyCfg
+	references             ReferenceRenderCfg
+	relayManager           *RelayManager
+	eventIdleTimeout       time.Duration
+	maxTurnTime            time.Duration // absolute wall-clock cap per turn (0 = disabled)
+	permissionTimeoutNanos atomic.Int64  // max wait for user to respond to permission prompt (0 = no timeout)
 	// agentSessionIdleTimeoutNanos 在单轮正常结束后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下次继续恢复。
 	agentSessionIdleTimeoutNanos atomic.Int64
@@ -6519,6 +6520,7 @@ var builtinCommands = []struct {
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
+	{[]string{"goto"}, "goto"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
 	{[]string{"timer", "at", "remind"}, "timer"},
@@ -6733,6 +6735,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
+	case "goto":
+		e.cmdGoto(p, msg, args)
 	case "memory":
 		e.cmdMemory(p, msg, args)
 	case "cron":
@@ -10287,10 +10291,40 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 				return
 			}
 		}
+		// Cron-triggered turns run under "<chatSessionKey>#cron:<id>" keys and
+		// are invisible to the exact/suffix lookups above. A /stop in the same
+		// chat must tear down any running cron turn too, so the user can switch
+		// provider and re-trigger instead of waiting out the retry window.
+		if n := e.stopCronTurns(msg.SessionKey); n > 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+			return
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+// stopCronTurns stops every live cron-triggered turn for the given chat
+// session key (keys shaped "<sessionKey>#cron:<id>"), returning how many
+// turns were stopped.
+func (e *Engine) stopCronTurns(sessionKey string) int {
+	e.interactiveMu.Lock()
+	prefix := sessionKey + "#cron:"
+	var keys []string
+	for k := range e.interactiveStates {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	e.interactiveMu.Unlock()
+	stopped := 0
+	for _, k := range keys {
+		if e.stopInteractiveSessionSilently(k) {
+			stopped++
+		}
+	}
+	return stopped
 }
 
 // cmdCancel stops the current execution and starts a fresh session.
@@ -10795,6 +10829,241 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 	default:
 		e.switchProvider(p, msg, sessions, switcher, args[0])
 	}
+}
+
+// cmdGoto switches the provider (and optionally the model) for the current
+// session while KEEPING the agent session id and conversation history —
+// unlike /provider switch, which clears both. With no arguments it renders a
+// grouped provider → model list where any entry can be picked directly.
+func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
+	agent, sessions, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	switcher, ok := agent.(ProviderSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNotSupported))
+		return
+	}
+	if len(args) == 0 {
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderGotoCard(msg.SessionKey))
+			return
+		}
+		text, buttons := e.renderGotoText(switcher)
+		e.replyWithButtons(p, msg.ReplyCtx, text, buttons)
+		return
+	}
+
+	// Numbered targets pick an entry from the grouped list directly.
+	target := strings.TrimSpace(strings.Join(args, "/"))
+	if n, perr := strconv.Atoi(target); perr == nil {
+		entries := collectGotoModels(switcher)
+		if n < 1 || n > len(entries) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgGotoInvalid))
+			return
+		}
+		ent := entries[n-1]
+		text := e.applyGoto(agent, sessions, switcher, msg.SessionKey, ent.Provider, ent.Model, true)
+		e.reply(p, msg.ReplyCtx, text)
+		return
+	}
+
+	// "<provider>[/<model>]" — resolve the model to its full stored name per
+	// the agent's ProviderScopedModelNames capability before switching.
+	pname, rest := target, ""
+	if idx := strings.Index(target, "/"); idx > 0 {
+		pname, rest = target[:idx], target[idx+1:]
+	}
+	fullModel := ""
+	if rest != "" {
+		fullModel = rest
+		// See executeCardAction "/goto": only prefix the provider name for a
+		// bare model name; a rest that already contains "/" is a complete
+		// provider-scoped name (e.g. ChatGPT-subscription models are
+		// "openai/gpt-5.6-sol" under the cc-connect "chatgpt" provider) and
+		// must not get a second prefix.
+		if ps, ok := agent.(ProviderScopedModelNames); ok && ps.ProviderScopedModelNames() && !strings.Contains(rest, "/") {
+			fullModel = pname + "/" + rest
+		}
+	}
+	text := e.applyGoto(agent, sessions, switcher, msg.SessionKey, pname, fullModel, rest != "")
+	e.reply(p, msg.ReplyCtx, text)
+}
+
+// applyGoto activates the named provider without clearing the session context
+// (agent_session_id and history stay intact — the key difference from
+// switchProvider), and optionally updates the provider's model to fullModel
+// (the model name exactly as it should be persisted, already resolved by the
+// caller per the agent's model-naming capability). It returns the user-facing
+// confirmation text so both the /goto command and card actions can reuse it.
+func (e *Engine) applyGoto(agent Agent, sessions *SessionManager, switcher ProviderSwitcher, sessionKey, pname, fullModel string, setModel bool) string {
+	providers := switcher.ListProviders()
+	found := false
+	for i := range providers {
+		if providers[i].Name == pname {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Sprintf(e.i18n.T(MsgProviderNotFound), pname)
+	}
+	if !switcher.SetActiveProvider(pname) {
+		return fmt.Sprintf(e.i18n.T(MsgProviderNotFound), pname)
+	}
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
+
+	// Keep the agent session id and history: unlike switchProvider we never
+	// call SetAgentSessionID("","") or ClearHistory() here.
+	s := sessions.GetOrCreateActive(sessionKey)
+	s.SetActiveProvider(pname)
+
+	replyText := fmt.Sprintf(e.i18n.T(MsgGotoSwitched), pname)
+	if setModel {
+		if updated, ok2 := SetProviderModel(providers, pname, fullModel); ok2 {
+			switcher.SetProviders(updated)
+			if msw, ok3 := agent.(ModelSwitcher); ok3 {
+				msw.SetModel(fullModel)
+			}
+			replyText = fmt.Sprintf(e.i18n.T(MsgGotoSwitchedModel), pname, fullModel)
+		}
+		if e.providerModelSaveFunc != nil {
+			if err := e.providerModelSaveFunc(pname, fullModel); err != nil {
+				slog.Error("failed to save provider model", "error", err)
+			}
+		}
+	}
+	sessions.Save()
+	if sessions == e.sessions && e.providerSaveFunc != nil {
+		if err := e.providerSaveFunc(pname); err != nil {
+			slog.Error("failed to save provider", "error", err)
+		}
+	}
+	return replyText
+}
+
+// gotoModelEntry is one selectable target in the /goto grouped list.
+type gotoModelEntry struct {
+	Provider string
+	Model    string
+}
+
+// collectGotoModels aggregates every provider's configured models into the
+// /goto grouped list, preserving provider order. A provider without an
+// explicit model list contributes its default Model only when set.
+func collectGotoModels(switcher ProviderSwitcher) []gotoModelEntry {
+	var out []gotoModelEntry
+	for _, prov := range switcher.ListProviders() {
+		if len(prov.Models) > 0 {
+			for _, m := range prov.Models {
+				if strings.TrimSpace(m.Name) != "" {
+					out = append(out, gotoModelEntry{Provider: prov.Name, Model: m.Name})
+				}
+			}
+			continue
+		}
+		if strings.TrimSpace(prov.Model) != "" {
+			out = append(out, gotoModelEntry{Provider: prov.Name, Model: prov.Model})
+		}
+	}
+	return out
+}
+
+// renderGotoCard renders the /goto picker as a card, mirroring the native
+// /model card: a short status line plus a select whose options carry the full
+// provider-scoped model names, so picking any entry switches to that provider
+// + model directly.
+func (e *Engine) renderGotoCard(sessionKey string) *Card {
+	agent := e.agent
+	if sessionKey != "" {
+		agent, _ = e.sessionContextForKey(sessionKey)
+	}
+	switcher, ok := agent.(ProviderSwitcher)
+	if !ok {
+		return e.simpleCard(e.i18n.T(MsgCardTitleGoto), "indigo", e.i18n.T(MsgProviderNotSupported))
+	}
+
+	current := switcher.GetActiveProvider()
+	entries := collectGotoModels(switcher)
+
+	var sb strings.Builder
+	if current != nil {
+		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+	} else {
+		sb.WriteString(e.i18n.T(MsgGotoDefault))
+	}
+
+	var opts []CardSelectOption
+	initVal := ""
+	for _, ent := range entries {
+		// The option's action value is "<provider>/<model>" with a bare model
+		// name: applyGoto re-resolves the full stored name per the agent's
+		// ProviderScopedModelNames capability, so provider-scoped models
+		// (which already carry the "<provider>/" prefix in config) must have
+		// that prefix stripped here to avoid "aiapi/aiapi/gpt-5.6-sol".
+		model := ent.Model
+		if strings.HasPrefix(model, ent.Provider+"/") {
+			model = strings.TrimPrefix(model, ent.Provider+"/")
+		}
+		val := fmt.Sprintf("act:/goto %s/%s", ent.Provider, model)
+		opts = append(opts, CardSelectOption{Text: ent.Model, Value: val})
+		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
+			initVal = val
+		}
+	}
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleGoto), "indigo").
+		Markdown(sb.String()).
+		Select(e.i18n.T(MsgGotoSelectPlaceholder), opts, initVal)
+	cb.Note(e.i18n.T(MsgGotoUsageHint))
+	cb.Buttons(e.cardBackButton())
+	return cb.Build()
+}
+
+// renderGotoText renders the /goto picker as text, mirroring the native
+// /model text list: the current provider plus a continuously numbered target
+// list with inline buttons, so `/goto <number>` switches directly.
+func (e *Engine) renderGotoText(switcher ProviderSwitcher) (string, [][]ButtonOption) {
+	current := switcher.GetActiveProvider()
+	entries := collectGotoModels(switcher)
+
+	var sb strings.Builder
+	if current != nil {
+		sb.WriteString(fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString(e.i18n.T(MsgGotoDefault))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(e.i18n.T(MsgGotoListTitle))
+
+	var buttons [][]ButtonOption
+	var row []ButtonOption
+	for i, ent := range entries {
+		marker := "  "
+		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
+			marker = "> "
+		}
+		sb.WriteString(fmt.Sprintf("%s%d. %s\n", marker, i+1, ent.Model))
+
+		label := ent.Model
+		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
+			label = "▶ " + label
+		}
+		row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/goto %d", i+1)})
+		if len(row) >= 3 {
+			buttons = append(buttons, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		buttons = append(buttons, row)
+	}
+	sb.WriteString("\n")
+	sb.WriteString(e.i18n.T(MsgGotoUsageHint))
+	return sb.String(), buttons
 }
 
 func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
@@ -12160,6 +12429,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderHelpGroupCard(args)
 	case "/model":
 		return e.renderModelCard(sessionKey)
+	case "/goto":
+		return e.renderGotoCard(sessionKey)
 	case "/reasoning":
 		return e.renderReasoningCard()
 	case "/mode":
@@ -12339,6 +12610,49 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		state.modelSwitch = &modelSwitchState{phase: "switching", target: target}
 		state.mu.Unlock()
 		go e.performModelSwitchAsync(sessionKey, state, agent, sessions, target)
+
+	case "/goto":
+		// Card action from the /goto picker: args are "<provider>/<model>"
+		// (or a numbered target for robustness). Switch immediately while
+		// keeping agent_session_id and history — same semantics as the
+		// /goto command. The card refresh (handleCardNav "/goto") shows the
+		// result.
+		if args == "" {
+			return
+		}
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		switcher, ok := agent.(ProviderSwitcher)
+		if !ok {
+			return
+		}
+		target := strings.TrimSpace(args)
+		if n, perr := strconv.Atoi(target); perr == nil {
+			entries := collectGotoModels(switcher)
+			if n < 1 || n > len(entries) {
+				return
+			}
+			ent := entries[n-1]
+			e.applyGoto(agent, sessions, switcher, sessionKey, ent.Provider, ent.Model, true)
+			return
+		}
+		pname, rest := target, ""
+		if i := strings.Index(target, "/"); i > 0 {
+			pname, rest = target[:i], target[i+1:]
+		}
+		fullModel := ""
+		if rest != "" {
+			fullModel = rest
+			// opencode model names are "<provider>/<model>" (ProviderScopedModelNames).
+			// Only prefix the provider name when rest is a bare model name: a rest
+			// that already contains "/" is a complete provider-scoped name (e.g. the
+			// ChatGPT-subscription models are "openai/gpt-5.6-sol" under the cc-connect
+			// "chatgpt" provider) and must not get a second "chatgpt/" prefix — that
+			// would make opencode resolve an unknown provider and fail the run.
+			if ps, ok := agent.(ProviderScopedModelNames); ok && ps.ProviderScopedModelNames() && !strings.Contains(rest, "/") {
+				fullModel = pname + "/" + rest
+			}
+		}
+		e.applyGoto(agent, sessions, switcher, sessionKey, pname, fullModel, rest != "")
 
 	case "/reasoning":
 		if args == "" {
