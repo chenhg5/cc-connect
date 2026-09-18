@@ -590,7 +590,6 @@ func TestStallWatchdogSparesActiveProcess(t *testing.T) {
 	<-done
 }
 
-
 // TestSendResetsStallWatchdogClock is the regression test for the
 // watchdog-miskill bug: lastEvent carried over from the previous turn, so the
 // stall watchdog saw a multi-minute idle immediately after a new turn started,
