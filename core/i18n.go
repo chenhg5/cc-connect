@@ -267,6 +267,14 @@ const (
 	MsgProviderNotFound          MsgKey = "provider_not_found"
 	MsgProviderSwitched          MsgKey = "provider_switched"
 	MsgProviderCleared           MsgKey = "provider_cleared"
+	MsgGotoSwitched              MsgKey = "goto_switched"
+	MsgGotoSwitchedModel         MsgKey = "goto_switched_model"
+	MsgGotoDefault               MsgKey = "goto_default"
+	MsgGotoListTitle             MsgKey = "goto_list_title"
+	MsgGotoUsageHint             MsgKey = "goto_usage_hint"
+	MsgGotoInvalid               MsgKey = "goto_invalid"
+	MsgGotoSelectPlaceholder     MsgKey = "goto_select_placeholder"
+	MsgCardTitleGoto             MsgKey = "card_title_goto"
 	MsgProviderAdded             MsgKey = "provider_added"
 	MsgProviderAddUsage          MsgKey = "provider_add_usage"
 	MsgProviderAddFailed         MsgKey = "provider_add_failed"
@@ -1593,6 +1601,62 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ Provider 已清除，新會話將使用預設 Provider。",
 		LangJapanese:           "✅ プロバイダをクリアしました。新しいセッションではデフォルトのプロバイダが使用されます。",
 		LangSpanish:            "✅ Proveedor eliminado. Las nuevas sesiones usarán el proveedor predeterminado.",
+	},
+	MsgGotoSwitched: {
+		LangEnglish:            "✅ Switched to **%s** (context preserved).",
+		LangChinese:            "✅ 已切换到 **%s**（保留上下文）。",
+		LangTraditionalChinese: "✅ 已切換到 **%s**（保留上下文）。",
+		LangJapanese:           "✅ **%s** に切り替えました（コンテキスト保持）。",
+		LangSpanish:            "✅ Cambiado a **%s** (contexto conservado).",
+	},
+	MsgGotoSwitchedModel: {
+		LangEnglish:            "✅ Switched to **%s** / **%s** (context preserved).",
+		LangChinese:            "✅ 已切换到 **%s** / **%s**（保留上下文）。",
+		LangTraditionalChinese: "✅ 已切換到 **%s** / **%s**（保留上下文）。",
+		LangJapanese:           "✅ **%s** / **%s** に切り替えました（コンテキスト保持）。",
+		LangSpanish:            "✅ Cambiado a **%s** / **%s** (contexto conservado).",
+	},
+	MsgGotoDefault: {
+		LangEnglish:            "No active provider. Choose a target below:",
+		LangChinese:            "当前无 Provider。选择下面的目标：",
+		LangTraditionalChinese: "目前無 Provider。選擇下面的目標：",
+		LangJapanese:           "アクティブなプロバイダがありません。以下から選択してください：",
+		LangSpanish:            "Sin proveedor activo. Elige un destino abajo:",
+	},
+	MsgGotoListTitle: {
+		LangEnglish:            "Targets:",
+		LangChinese:            "目标：",
+		LangTraditionalChinese: "目標：",
+		LangJapanese:           "ターゲット：",
+		LangSpanish:            "Destinos:",
+	},
+	MsgGotoUsageHint: {
+		LangEnglish:            "Send `/goto <number>`, `/goto <provider>` or `/goto <provider>/<model>` to switch directly (context is preserved).",
+		LangChinese:            "发送 `/goto <编号>`、`/goto <provider>` 或 `/goto <provider>/<model>` 直接切换（保留上下文）。",
+		LangTraditionalChinese: "發送 `/goto <編號>`、`/goto <provider>` 或 `/goto <provider>/<model>` 直接切換（保留上下文）。",
+		LangJapanese:           "`/goto <番号>`、`/goto <provider>`、`/goto <provider>/<model>` で直接切り替え（コンテキスト保持）。",
+		LangSpanish:            "Envía `/goto <número>`, `/goto <provider>` o `/goto <provider>/<model>` para cambiar (contexto conservado).",
+	},
+	MsgGotoInvalid: {
+		LangEnglish:            "❌ Invalid `/goto` target. Send `/goto` to see the grouped list.",
+		LangChinese:            "❌ 无效的 `/goto` 目标。发送 `/goto` 查看分组列表。",
+		LangTraditionalChinese: "❌ 無效的 `/goto` 目標。發送 `/goto` 查看分組列表。",
+		LangJapanese:           "❌ `/goto` のターゲットが無効です。`/goto` で一覧を確認してください。",
+		LangSpanish:            "❌ Destino `/goto` no válido. Envía `/goto` para ver la lista.",
+	},
+	MsgGotoSelectPlaceholder: {
+		LangEnglish:            "Select a target (provider + model)…",
+		LangChinese:            "选择目标（provider + 模型）…",
+		LangTraditionalChinese: "選擇目標（provider + 模型）…",
+		LangJapanese:           "ターゲットを選択（プロバイダ + モデル）…",
+		LangSpanish:            "Selecciona un destino (proveedor + modelo)…",
+	},
+	MsgCardTitleGoto: {
+		LangEnglish:            "Goto",
+		LangChinese:            "切换",
+		LangTraditionalChinese: "切換",
+		LangJapanese:           "切替",
+		LangSpanish:            "Ir a",
 	},
 	MsgProviderAdded: {
 		LangEnglish:            "✅ Provider **%s** added.\n\nUse `/provider switch %s` to activate.",
