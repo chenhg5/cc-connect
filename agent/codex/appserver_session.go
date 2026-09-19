@@ -240,6 +240,20 @@ func newAppServerSessionWithServiceTier(ctx context.Context, url, workDir, model
 	return s, nil
 }
 
+// appServerListenURL returns the --listen value for the spawn. A stdio
+// transport ("stdio" / "stdio://", case-insensitive, matching
+// normalizeAppServerURL's EqualFold handling) must not open a listener:
+// on codex 0.152+ any --listen value switches the app-server to serve the
+// protocol over the listener only, leaving stdio unresponsive and timing
+// out every initialize (see #1781).
+func appServerListenURL(url string) string {
+	listenURL := strings.TrimSpace(url)
+	if strings.EqualFold(listenURL, "stdio://") || strings.EqualFold(listenURL, "stdio") {
+		return ""
+	}
+	return listenURL
+}
+
 func (s *appServerSession) connect() error {
 	args := s.buildCommandArgs()
 	cmd := exec.CommandContext(s.ctx, "codex", args...)
@@ -284,8 +298,8 @@ func (s *appServerSession) connect() error {
 
 func (s *appServerSession) buildCommandArgs() []string {
 	args := []string{"app-server"}
-	if strings.TrimSpace(s.url) != "" {
-		args = append(args, "--listen", strings.TrimSpace(s.url))
+	if listenURL := appServerListenURL(s.url); listenURL != "" {
+		args = append(args, "--listen", listenURL)
 	}
 	if model := strings.TrimSpace(s.model); model != "" {
 		args = append(args, "-c", fmt.Sprintf("model=%q", model))
