@@ -20,11 +20,11 @@ func boolPtr(v bool) *bool { return &v }
 func TestNewHookManager_ValidatesConfig(t *testing.T) {
 	hooks := []HookConfig{
 		{Event: "message.received", Type: "command", Command: "echo ok"},
-		{Event: "", Type: "command", Command: "echo bad"},         // missing event
-		{Event: "error", Type: "http", URL: ""},                   // missing url
-		{Event: "error", Type: "http", URL: "ftp://bad"},          // bad url scheme
-		{Event: "error", Type: "unknown", Command: "echo"},        // bad type
-		{Event: "error", Type: "command", Command: ""},            // missing command
+		{Event: "", Type: "command", Command: "echo bad"},  // missing event
+		{Event: "error", Type: "http", URL: ""},            // missing url
+		{Event: "error", Type: "http", URL: "ftp://bad"},   // bad url scheme
+		{Event: "error", Type: "unknown", Command: "echo"}, // bad type
+		{Event: "error", Type: "command", Command: ""},     // missing command
 		{Event: "message.sent", Type: "http", URL: "http://ok.com"},
 	}
 	hm := NewHookManager("test", hooks, "sh", "-c", "")
