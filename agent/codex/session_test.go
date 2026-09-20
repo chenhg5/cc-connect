@@ -544,6 +544,70 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 	waitForFileEquals(t, stdinFile, prompt)
 }
 
+func TestSend_RejectsConcurrentTurn(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	startsFile := filepath.Join(workDir, "starts.txt")
+	releaseFile := filepath.Join(workDir, "release")
+	script := "#!/bin/sh\n" +
+		"printf 'started\\n' >> \"$CODEX_STARTS_FILE\"\n" +
+		"while [ ! -f \"$CODEX_RELEASE_FILE\" ]; do sleep 0.01; done\n" +
+		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+	powershellScript := `
+[IO.File]::AppendAllText($env:CODEX_STARTS_FILE, "started` + "`n" + `")
+while (-not (Test-Path $env:CODEX_RELEASE_FILE)) { Start-Sleep -Milliseconds 10 }
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
+
+	t.Setenv("CODEX_STARTS_FILE", startsFile)
+	t.Setenv("CODEX_RELEASE_FILE", releaseFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "thread-busy", "", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	if err := cs.Send("first", "", nil, nil); err != nil {
+		t.Fatalf("first Send: %v", err)
+	}
+	waitForFileContains(t, startsFile, "started")
+
+	err = cs.Send("steer", "", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "turn already in progress") {
+		t.Fatalf("second Send error = %v, want turn already in progress", err)
+	}
+
+	data, err := os.ReadFile(startsFile)
+	if err != nil {
+		t.Fatalf("read starts file: %v", err)
+	}
+	if got := strings.Count(string(data), "started"); got != 1 {
+		t.Fatalf("started process count = %d, want 1", got)
+	}
+
+	if err := os.WriteFile(releaseFile, nil, 0o644); err != nil {
+		t.Fatalf("release fake codex: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for cs.turnInFlight.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if cs.turnInFlight.Load() {
+		t.Fatal("turn remained in progress after codex process exited")
+	}
+	if err := cs.Send("after", "", nil, nil); err != nil {
+		t.Fatalf("Send after first process exited: %v", err)
+	}
+	waitForFileLines(t, startsFile, 2)
+}
+
 func TestSend_PrependsProjectPromptOnFreshSession(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")
@@ -915,7 +979,7 @@ func TestClose_ForceKillsProcessGroupAfterGracefulTimeout(t *testing.T) {
 	}
 }
 
-func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
+func TestClose_ForceKillsProcessStillRunningAfterTurnCompleted(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process-group semantics differ on windows")
 	}
@@ -931,10 +995,8 @@ func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"prompt=$(cat)\n" +
 		"printf '%s\\n' \"$prompt\" >> \"$CODEX_STARTS_FILE\"\n" +
-		"if [ \"$prompt\" = \"first\" ]; then\n" +
-		"  printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-overlap\"}'\n" +
-		"  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n" +
-		"fi\n" +
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-overlap\"}'\n" +
+		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n" +
 		"sleep 30\n"
 	scriptPath := filepath.Join(binDir, "codex")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
@@ -964,17 +1026,17 @@ func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
 	waitForThreadID(t, cs, "thread-overlap")
 	waitForDoneResult(t, cs.Events())
 
-	if err := cs.Send("second", "", nil, nil); err != nil {
-		t.Fatalf("Send(second): %v", err)
+	if err := cs.Send("second", "", nil, nil); err == nil || !strings.Contains(err.Error(), "turn already in progress") {
+		t.Fatalf("Send(second) error = %v, want turn already in progress", err)
 	}
-	waitForFileLines(t, startsFile, 2)
+	waitForFileLines(t, startsFile, 1)
 
 	closeStarted := time.Now()
 	if err := cs.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if elapsed := time.Since(closeStarted); elapsed > time.Second {
-		t.Fatalf("Close took too long after force killing tracked processes: %v", elapsed)
+		t.Fatalf("Close took too long after force killing tracked process: %v", elapsed)
 	}
 
 	select {
