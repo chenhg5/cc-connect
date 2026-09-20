@@ -903,8 +903,9 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 
 	toolName, _ := request["tool_name"].(string)
 	input, _ := request["input"].(map[string]any)
+	isAskUserQuestion := toolName == "AskUserQuestion"
 
-	if cs.autoApprove.Load() {
+	if cs.autoApprove.Load() && !isAskUserQuestion {
 		slog.Debug("claudeSession: auto-approving", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior:     "allow",
@@ -912,7 +913,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		})
 		return
 	}
-	if cs.dontAsk.Load() {
+	if cs.dontAsk.Load() && !isAskUserQuestion {
 		slog.Debug("claudeSession: auto-denying", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior: "deny",
@@ -961,7 +962,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		ToolInputRaw: input,
 	}
 
-	if toolName == "AskUserQuestion" {
+	if isAskUserQuestion {
 		evt.Questions = parseUserQuestions(input)
 	}
 
@@ -1109,6 +1110,8 @@ func isClaudeEditTool(toolName string) bool {
 	}
 }
 
+// setPermissionMode configures automatic permission handling. AskUserQuestion
+// remains interactive even in bypassPermissions and dontAsk modes.
 func (cs *claudeSession) setPermissionMode(mode string) {
 	cs.permissionMode.Store(mode)
 	cs.autoApprove.Store(mode == "bypassPermissions")
