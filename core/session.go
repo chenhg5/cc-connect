@@ -96,13 +96,31 @@ func (s *Session) unlock(update bool) {
 }
 
 func (s *Session) AddHistory(role, content string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.History = append(s.History, HistoryEntry{
+	s.AddHistoryAt(role, content, time.Time{})
+}
+
+// AddHistoryAt appends an entry to the conversation history with an explicit
+// timestamp. A zero ts falls back to time.Now().
+func (s *Session) AddHistoryAt(role, content string, ts time.Time) {
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	s.AddHistoryEntry(HistoryEntry{
 		Role:      role,
 		Content:   content,
-		Timestamp: time.Now(),
+		Timestamp: ts,
 	})
+}
+
+// AddHistoryEntry appends a pre-built entry to the conversation history.
+// A zero Timestamp falls back to time.Now().
+func (s *Session) AddHistoryEntry(entry HistoryEntry) {
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.History = append(s.History, entry)
 }
 
 // recordPastAgentSessionID saves the current AgentSessionID to PastAgentSessionIDs
