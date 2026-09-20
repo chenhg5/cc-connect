@@ -486,6 +486,13 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// BusyAckSkipPrefixes suppresses the "message queued" acknowledgment that is
+	// normally sent when a message arrives while the agent is busy, for messages
+	// whose content starts with any of these prefixes. Intended for high-frequency
+	// automated card actions (e.g. instant-feedback survey buttons dispatched as
+	// commands) where the ack would be pure noise for the user. Empty (default)
+	// keeps the acknowledgment for every message.
+	BusyAckSkipPrefixes []string `toml:"busy_ack_skip_prefixes,omitempty"`
 	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
 	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`
@@ -1049,6 +1056,11 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
+		}
+		for _, pfx := range proj.BusyAckSkipPrefixes {
+			if strings.TrimSpace(pfx) == "" {
+				return fmt.Errorf("config: %s.busy_ack_skip_prefixes must not contain empty entries", prefix)
+			}
 		}
 		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
 			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)

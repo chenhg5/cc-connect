@@ -189,6 +189,21 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # agent_session_idle_timeout_mins = 30
 
+# Suppress the "message queued" acknowledgment for selected message prefixes.
+# When a message arrives while the agent is busy, cc-connect normally replies
+# with a queued-ack so the user knows it was received. For high-frequency
+# automated card actions (e.g. instant-feedback survey buttons dispatched as
+# commands) that ack is pure noise, so it can be skipped per prefix. Note that
+# card buttons dispatch their command as "cmd:<text>", so include both forms
+# if you use both paths. Messages are still queued and drained as usual —
+# only the acknowledgment is suppressed. Empty (default) acks everything.
+# 当消息在 agent 忙碌期间到达时，cc-connect 通常会回复一条"已入队"回执。对于高频的
+# 自动化卡片动作（例如即时反馈的问卷按钮派发为命令），这条回执是纯噪音，可按前缀
+# 跳过。注意卡片按钮会以 "cmd:<文本>" 形式派发命令，两种形式都用到就都写上。
+# 消息照常入队和补发，只是不回执。留空（默认）则每条都回执。
+# [[projects]]
+# busy_ack_skip_prefixes = ["【问卷】", "cmd:【问卷】"]
+
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）
