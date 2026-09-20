@@ -800,6 +800,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	if event.Event.Operator != nil {
 		userID = event.Event.Operator.OpenID
 	}
+	if !core.AllowList(p.allowFrom, userID) {
+		slog.Debug(p.tag()+": card action from unauthorized user", "user", userID)
+		return nil, nil
+	}
 	chatID := ""
 	messageID := ""
 	if event.Event.Context != nil {
