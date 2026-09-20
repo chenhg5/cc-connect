@@ -2443,3 +2443,68 @@ func TestCUJ_H4_FeishuTopicsKeepWorkspaceBindingsIsolated(t *testing.T) {
 		t.Fatalf("topic B changed after topic A unbind: %q", got)
 	}
 }
+
+// Anonymous progress must follow each queued trigger and keep prior answers
+// intact. A status command while busy is the third user action.
+func TestCUJ_I2_AnonymousProgressAcrossQueuedTurns(t *testing.T) {
+	p := &anonymousDeliveryPlatform{}
+	p.n = "test-card"
+	as := newQueuingSession("anonymous-cuj")
+	e := NewEngine("test", &controllableAgent{nextSession: as}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangAuto)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich-anonymous", ThinkingMessages: true, ToolMessages: true})
+	t.Cleanup(func() { e.cancel() })
+	send := func(id, content string) {
+		e.ReceiveMessage(p, &Message{Platform: p.Name(), SessionKey: "card:user", UserID: "user", UserName: "User", MessageID: id, Content: content, ReplyCtx: "ctx-" + id})
+	}
+	// User 1: request work; a card appears before any model output.
+	send("one", "请检查第一项")
+	awaitAnonymousProgress(t, func() bool { starts, _, _, _ := p.snapshot(); return len(starts) == 1 })
+	awaitAnonymousProgress(t, func() bool {
+		as.sendMu.Lock()
+		defer as.sendMu.Unlock()
+		return len(as.sendCalls) == 1
+	})
+	as.events <- Event{Type: EventToolUse, ToolName: "private-first-tool"}
+	as.events <- Event{Type: EventText, Content: "first answer"}
+	awaitAnonymousProgress(t, func() bool { _, streams, _, _ := p.snapshot(); return len(streams) > 0 })
+	// User 2: queue a second request in a different language.
+	send("two", "Please check the second item")
+	awaitAnonymousProgress(t, func() bool { return strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(MsgMessageQueued)) })
+	// User 3: inspect status while the first task is still active.
+	send("status", "/status")
+	as.events <- Event{Type: EventResult, Content: "first answer", Done: true}
+	awaitAnonymousProgress(t, func() bool { starts, _, _, _ := p.snapshot(); return len(starts) == 2 })
+	as.events <- Event{Type: EventToolUse, ToolName: "private-second-tool"}
+	as.events <- Event{Type: EventResult, Content: "second answer", Done: true}
+	awaitAnonymousProgress(t, func() bool {
+		_, _, updates, _ := p.snapshot()
+		return len(updates) > 0 && strings.Contains(updates[len(updates)-1], "status=done") && strings.Contains(updates[len(updates)-1], "second answer")
+	})
+	starts, _, _, _ := p.snapshot()
+	if len(starts) != 2 || !strings.Contains(starts[0], "lang=zh") || !strings.Contains(starts[1], "lang=en") {
+		t.Fatalf("turn locale or start count: %v", starts)
+	}
+	finals := map[any]string{}
+	for _, call := range p.callSnapshot() {
+		if strings.Contains(call.content, "private-") {
+			t.Fatalf("private progress: %+v", call)
+		}
+		if call.kind == "start" {
+			want := "ctx-one"
+			if call.handle == "handle-2" {
+				want = "ctx-two"
+			}
+			if call.replyCtx != want || !strings.Contains(call.content, "tools=0") {
+				t.Fatalf("incorrect new turn card: %+v", call)
+			}
+		}
+		if call.kind == "update" && strings.Contains(call.content, "status=done") {
+			finals[call.handle] = call.content
+		}
+	}
+	if len(finals) != 2 || !strings.Contains(finals["handle-1"], "first answer") || !strings.Contains(finals["handle-2"], "second answer") || !strings.Contains(finals["handle-2"], "tools=1") {
+		t.Fatalf("answers or counts crossed queued turns: %v", finals)
+	}
+	// Wait for the final history save before TempDir cleanup.
+	awaitAnonymousProgress(t, func() bool { return !e.sessions.GetOrCreateActive("card:user").Busy() })
+}

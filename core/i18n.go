@@ -192,6 +192,9 @@ func (i *I18n) SetLang(lang Language) {
 type MsgKey string
 
 const (
+	MsgAnonymousProgressTools    MsgKey = "anonymous_progress_tools"
+	MsgAnonymousProgressDone     MsgKey = "anonymous_progress_done"
+	MsgAnonymousProgressError    MsgKey = "anonymous_progress_error"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
@@ -695,6 +698,21 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgAnonymousProgressTools: {
+		LangEnglish:            "Tool calls: %d",
+		LangChinese:            "工具调用：%d 次",
+		LangTraditionalChinese: "工具呼叫：%d 次",
+		LangJapanese:           "ツール呼び出し：%d 回",
+		LangSpanish:            "Llamadas a herramientas: %d",
+	},
+	MsgAnonymousProgressDone: {
+		LangEnglish: "✅ Completed", LangChinese: "✅ 已完成", LangTraditionalChinese: "✅ 已完成",
+		LangJapanese: "✅ 完了", LangSpanish: "✅ Completado",
+	},
+	MsgAnonymousProgressError: {
+		LangEnglish: "⚠️ Interrupted", LangChinese: "⚠️ 已中断", LangTraditionalChinese: "⚠️ 已中斷",
+		LangJapanese: "⚠️ 中断", LangSpanish: "⚠️ Interrumpido",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

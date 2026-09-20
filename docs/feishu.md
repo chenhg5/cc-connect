@@ -518,3 +518,14 @@ enable_feishu_card = false
 - [接入 Slack](./slack.md)
 - [接入 Discord](./discord.md)
 - [返回首页](../README.md)
+
+## Anonymous progress cards / 匿名进度卡片
+
+Set `[display] card_mode = "rich-anonymous"` (or override it in
+`[projects.display]`) to show an immediate processing card with a tool-call
+count, followed by the streaming answer. Existing display defaults remain
+unchanged. See [configuration, behavior, and validation](feishu-anonymous-progress.md).
+
+设置 `[display] card_mode = "rich-anonymous"`，或在 `[projects.display]` 中按项目覆盖，
+即可先显示处理状态与工具调用次数，再在同一卡片中流式展示回答。现有默认显示行为保持不变。
+详见[配置、行为和验证说明](feishu-anonymous-progress.md)。
