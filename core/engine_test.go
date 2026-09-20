@@ -16329,3 +16329,292 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
 	}
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Stale-result grace window (issue #1877, #1687 family)
+//
+// Claude Code's --resume auto-continuation micro-turn and opencode's first-
+// message dequeue race can both emit a terminal type:"result" event with empty
+// Content + Done:true while the real turn is still in flight. Without the
+// grace window the engine treats that empty Done:true as the real end and
+// returns — silently losing the real report. The grace window holds the loop
+// open long enough for the real turn's events to surface, dropping the stale
+// result only if a follow-up event arrives in time.
+//
+// All tests below toggle staleResultGraceWindow to a small value via t.Cleanup
+// so the grace-expiration test does not have to wait the production 5s.
+// ──────────────────────────────────────────────────────────────────────────────
+
+// withShortGraceWindow swaps staleResultGraceWindow for d for the duration of
+// the test, restoring the production value via t.Cleanup. Returns the value
+// the variable held before the swap so callers can assert on the original
+// default if they care.
+func withShortGraceWindow(t *testing.T, d time.Duration) time.Duration {
+	t.Helper()
+	prev := staleResultGraceWindow
+	staleResultGraceWindow = d
+	t.Cleanup(func() { staleResultGraceWindow = prev })
+	return prev
+}
+
+// TestProcessInteractiveEvents_StaleResultGraceWindow_FollowUpArrives covers
+// the #1877 happy path: an empty Done:true result lands first, then a real
+// text event arrives within the grace window. The engine must drop the
+// stale result, dispatch the follow-up, and only finalize after the real
+// terminal result lands. The real reply text must reach the platform.
+func TestProcessInteractiveEvents_StaleResultGraceWindow_FollowUpArrives(t *testing.T) {
+	withShortGraceWindow(t, 2*time.Second)
+
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "telegram:user-stale-grace-followup"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stale-grace-followup")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-stale-grace-followup",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	// Sequence observed in the #1877 transcript (compressed):
+	//   1) empty Done:true micro-turn completion (auto-continuation)
+	//   2) real assistant text chunk
+	//   3) real terminal result with full content
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+	agentSession.events <- Event{Type: EventText, Content: "real answer from the model"}
+	agentSession.events <- Event{Type: EventResult, Content: "real answer from the model", Done: true}
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stale-grace-followup", time.Now(), nil, nil, state.replyCtx, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("processInteractiveEvents did not return within 3s")
+	}
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("expected platform to receive the real answer")
+	}
+	last := sent[len(sent)-1]
+	if !strings.Contains(last, "real answer from the model") {
+		t.Fatalf("final sent message = %q, want it to contain the real answer", last)
+	}
+	// No "(空响应)" should have been delivered — the empty stale result
+	// must not reach the platform as a reply.
+	for _, m := range sent {
+		if strings.Contains(m, "(空响应)") || m == "" {
+			t.Fatalf("stale-shape message reached platform: %q", m)
+		}
+	}
+}
+
+// TestProcessInteractiveEvents_StaleResultGraceWindow_Expires covers the
+// "no follow-up arrives within grace" path: the empty Done:true is the only
+// signal, so after the grace window expires the engine must finalize with
+// whatever accumulated text there is (none in this case) and return. This
+// guards against infinite hangs when the agent truly did finish with an
+// empty result (a rare but valid case, e.g. silent /clear).
+func TestProcessInteractiveEvents_StaleResultGraceWindow_Expires(t *testing.T) {
+	withShortGraceWindow(t, 200*time.Millisecond)
+
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "telegram:user-stale-grace-expire"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stale-grace-expire")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-stale-grace-expire",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	// Only the empty Done:true. After grace expires the engine finalizes
+	// and returns — no infinite hang.
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stale-grace-expire", time.Now(), nil, nil, state.replyCtx, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return after grace window expired")
+	}
+}
+
+// TestProcessInteractiveEvents_StaleResultGraceWindow_NonEmptyResultSkipsGrace
+// covers the no-op path: a Done:true result with non-empty Content must NOT
+// trigger the grace sub-loop at all (sub-second finalization, identical to
+// the pre-#1877 behaviour for healthy turns).
+func TestProcessInteractiveEvents_StaleResultGraceWindow_NonEmptyResultSkipsGrace(t *testing.T) {
+	withShortGraceWindow(t, 5*time.Second) // long enough that a hang would be obvious
+
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "telegram:user-stale-grace-skipped"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stale-grace-skipped")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-stale-grace-skipped",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "real answer"}
+	agentSession.events <- Event{Type: EventResult, Content: "real answer", Done: true}
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stale-grace-skipped", time.Now(), nil, nil, state.replyCtx, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("non-empty Done:true should finalize immediately, not wait for grace window")
+	}
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
+		t.Fatalf("finalize took %v, expected sub-second for healthy turn (grace window must not engage on non-empty content)", elapsed)
+	}
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "real answer") {
+		t.Fatalf("expected real answer to be delivered, got %#v", sent)
+	}
+}
+
+// TestProcessInteractiveEvents_StaleResultGraceWindow_DeadAgentSkipsGrace
+// guards the precondition: if the agent process is no longer Alive() (e.g.
+// it crashed or exited cleanly after the empty result), the grace window
+// MUST NOT engage. The agent can't possibly produce a follow-up event, so
+// we'd just be holding the foreground loop open for nothing. Finalize
+// immediately with the empty result.
+func TestProcessInteractiveEvents_StaleResultGraceWindow_DeadAgentSkipsGrace(t *testing.T) {
+	withShortGraceWindow(t, 5*time.Second)
+
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "telegram:user-stale-grace-deadagent"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stale-grace-deadagent")
+	agentSession.alive = false // agent already exited before the stale result
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-stale-grace-deadagent",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stale-grace-deadagent", time.Now(), nil, nil, state.replyCtx, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dead-agent Done:true should finalize immediately, not enter grace window")
+	}
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
+		t.Fatalf("finalize took %v, expected sub-second when agent is not Alive()", elapsed)
+	}
+}
+
+// TestProcessInteractiveEvents_StaleResultGraceWindow_NonDoneResultSkipsGrace
+// guards the Done=false compaction path: a non-terminal EventResult (e.g.
+// mid-turn compaction, see #481 / PR #1272) must not trigger the grace
+// sub-loop. The pre-existing `if !event.Done { continue }` short-circuit
+// runs before the grace check, so this test simply documents that ordering.
+func TestProcessInteractiveEvents_StaleResultGraceWindow_NonDoneResultSkipsGrace(t *testing.T) {
+	withShortGraceWindow(t, 5*time.Second)
+
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "telegram:user-stale-grace-nondone"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stale-grace-nondone")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-stale-grace-nondone",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	// Non-terminal compaction result (Done=false) followed by a real
+	// terminal result. The compaction event must not block on grace.
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: false, Metadata: map[string]any{"subtype": "compact"}}
+	agentSession.events <- Event{Type: EventText, Content: "compacted answer"}
+	agentSession.events <- Event{Type: EventResult, Content: "compacted answer", Done: true}
+
+	start := time.Now()
+	doneCh := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stale-grace-nondone", time.Now(), nil, nil, state.replyCtx, 0)
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("compaction + real terminal should finalize quickly")
+	}
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
+		t.Fatalf("finalize took %v, expected sub-second (compaction must not engage grace)", elapsed)
+	}
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], "compacted answer") {
+		t.Fatalf("expected compacted answer delivered, got %#v", sent)
+	}
+}
+
+// TestProcessInteractiveEvents_StaleResultGraceWindow_DisabledByZeroValue
+// verifies the escape hatch: setting staleResultGraceWindow to 0 restores
+// the pre-#1877 behaviour (no grace sub-loop at all). This is what
+// deployments should set if they want to opt out, and what the doc
+// comment promises.
+func TestProcessInteractiveEvents_StaleResultGraceWindow_DisabledByZeroValue(t *testing.T) {
+	withShortGraceWindow(t, 0)
+
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "telegram:user-stale-grace-disabled"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stale-grace-disabled")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-stale-grace-disabled",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	// Empty Done:true with grace disabled: must finalize immediately,
+	// delivering the empty text and returning — same behaviour as before
+	// #1877 was reported.
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+
+	start := time.Now()
+	doneCh := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stale-grace-disabled", time.Now(), nil, nil, state.replyCtx, 0)
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("with grace disabled, empty Done:true must finalize immediately")
+	}
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
+		t.Fatalf("finalize took %v, expected sub-second when grace disabled", elapsed)
+	}
+}

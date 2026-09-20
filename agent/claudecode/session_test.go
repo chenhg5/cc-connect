@@ -1387,3 +1387,204 @@ func TestHandleResultKeepsLiveAssistantUsage(t *testing.T) {
 		t.Errorf("OutputTokens = %d, want 406 (result is authoritative for output)", u.OutputTokens)
 	}
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// --resume auto-continuation micro-turn suppression (issue #1877 / #1687)
+//
+// Claude Code's --resume spawn injects an isMeta=true "Continue from where you
+// left off" micro-turn immediately after the resume; the micro-turn completes
+// with a terminal type:"result" carrying empty Content + Done:true, while the
+// real user message is still queued. Forwarding that empty Done:true to the
+// engine makes processInteractiveEvents return immediately and the real
+// turn's report (minutes later) is silently dropped.
+//
+// The drop-first-empty-result guard in handleResult suppresses exactly one
+// such event right after a --resume spawn, so the foreground loop keeps
+// waiting for the real turn. The guard must:
+//   • suppress the FIRST empty + non-compaction result when the flag is set
+//   • leave subsequent empty results alone (flag is cleared after first call)
+//   • leave non-empty results alone even on the first event
+//   • leave compaction results alone (they have their own engine semantics)
+//   • be a no-op for sessions that didn't --resume (flag stays false)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// newResumeTestSession builds a minimal claudeSession for handleResult tests.
+// It uses a small buffered events channel (so handleResult's send never
+// blocks on slow consumers) and pre-stamps sessionID so Done:true paths can
+// persist it correctly.
+func newResumeTestSession(t *testing.T, dropFirst bool) *claudeSession {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cs := &claudeSession{
+		events: make(chan core.Event, 4),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	cs.sessionID.Store("test-resume-session")
+	cs.alive.Store(true)
+	cs.dropFirstEmptyResult.Store(dropFirst)
+	return cs
+}
+
+// TestHandleResult_DropFirstEmptyResult_AfterResume covers the #1877 happy
+// path: --resume flag set, first result event has empty Content + Done:true.
+// handleResult must suppress the event (channel stays empty) and clear the
+// flag so subsequent events are emitted normally.
+func TestHandleResult_DropFirstEmptyResult_AfterResume(t *testing.T) {
+	cs := newResumeTestSession(t, true)
+
+	raw := map[string]any{
+		"type":   "result",
+		"result": "",
+	}
+	cs.handleResult(raw)
+
+	if cs.dropFirstEmptyResult.Load() {
+		t.Fatal("dropFirstEmptyResult should be cleared after first result processed")
+	}
+	select {
+	case evt := <-cs.events:
+		t.Fatalf("expected empty result to be suppressed, but event was emitted: %+v", evt)
+	case <-time.After(50 * time.Millisecond):
+		// OK — channel still empty.
+	}
+}
+
+// TestHandleResult_DropFirstEmptyResult_OnlyFirstAfterResume ensures the
+// suppression is single-shot. After the first empty result is suppressed,
+// subsequent results (even empty ones) must be emitted normally so a
+// legitimately-empty terminal completion later in the session is not lost.
+func TestHandleResult_DropFirstEmptyResult_OnlyFirstAfterResume(t *testing.T) {
+	cs := newResumeTestSession(t, true)
+
+	// First: empty auto-continuation result → suppressed.
+	cs.handleResult(map[string]any{"type": "result", "result": ""})
+	// Second: another empty result (e.g. a real /clear) → must NOT be suppressed.
+	cs.handleResult(map[string]any{"type": "result", "result": ""})
+
+	select {
+	case evt := <-cs.events:
+		if evt.Type != core.EventResult {
+			t.Fatalf("evt.Type = %v, want EventResult", evt.Type)
+		}
+		if !evt.Done {
+			t.Fatal("second empty result must still have Done=true")
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("second empty result was incorrectly suppressed; only the FIRST should be dropped")
+	}
+}
+
+// TestHandleResult_DropFirstEmptyResult_NonEmptyFirstNotSuppressed guards
+// against over-suppression: if the first result after --resume carries
+// non-empty content (e.g. a successful micro-turn that actually said
+// something), it must be emitted normally. Empty-content match is the
+// suppression trigger, not just "first result after resume".
+func TestHandleResult_DropFirstEmptyResult_NonEmptyFirstNotSuppressed(t *testing.T) {
+	cs := newResumeTestSession(t, true)
+
+	cs.handleResult(map[string]any{"type": "result", "result": "Resumed successfully"})
+
+	select {
+	case evt := <-cs.events:
+		if evt.Content != "Resumed successfully" {
+			t.Fatalf("evt.Content = %q, want %q", evt.Content, "Resumed successfully")
+		}
+		if !evt.Done {
+			t.Fatal("Done should be true for non-compaction result")
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("non-empty first result was incorrectly suppressed")
+	}
+	// Flag must still be cleared even though we didn't suppress, so a
+	// later empty result would be emitted.
+	if cs.dropFirstEmptyResult.Load() {
+		t.Fatal("dropFirstEmptyResult should be cleared after first result processed, regardless of suppression")
+	}
+}
+
+// TestHandleResult_DropFirstEmptyResult_FreshSpawnNoSuppression verifies the
+// non-resume path: a session that did not --resume (dropFirstEmptyResult
+// stays false) must emit its first result event normally, even if it is
+// empty. This is the regression guard for the "we accidentally suppress
+// every empty result" failure mode.
+func TestHandleResult_DropFirstEmptyResult_FreshSpawnNoSuppression(t *testing.T) {
+	cs := newResumeTestSession(t, false) // no --resume
+
+	cs.handleResult(map[string]any{"type": "result", "result": ""})
+
+	select {
+	case evt := <-cs.events:
+		if !evt.Done {
+			t.Fatal("Done should be true")
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("fresh-spawn empty result was suppressed; drop must only engage after --resume")
+	}
+}
+
+// TestHandleResult_DropFirstEmptyResult_CompactionPreserved guards the
+// compaction carve-out: a compaction result event has empty Content + Done:
+// false, and must NOT be suppressed by the --resume guard. The compaction
+// path in core/engine.go handles these explicitly (#481 / PR #1272), and
+// dropping them would break auto-context-compact mid-turn.
+func TestHandleResult_DropFirstEmptyResult_CompactionPreserved(t *testing.T) {
+	cs := newResumeTestSession(t, true)
+
+	cs.handleResult(map[string]any{
+		"type":    "result",
+		"result":  "",
+		"subtype": "compact",
+	})
+
+	select {
+	case evt := <-cs.events:
+		if evt.Done {
+			t.Fatal("compaction result must have Done=false")
+		}
+		if evt.Type != core.EventResult {
+			t.Fatalf("evt.Type = %v, want EventResult", evt.Type)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("compaction result was suppressed; --resume guard must skip compaction events")
+	}
+	// Flag should still be cleared so the eventual real terminal result
+	// is processed normally.
+	if cs.dropFirstEmptyResult.Load() {
+		t.Fatal("dropFirstEmptyResult should be cleared after first result processed")
+	}
+}
+
+// TestHandleResult_DropFirstEmptyResult_FlagClearedAfterNonSuppressed covers
+// the consistency path: even when the suppression condition is NOT met
+// (non-empty content), the flag must still be cleared. Otherwise a
+// legitimate empty terminal result later in the session would be silently
+// suppressed because the flag was never observed.
+func TestHandleResult_DropFirstEmptyResult_FlagClearedAfterNonSuppressed(t *testing.T) {
+	cs := newResumeTestSession(t, true)
+
+	if !cs.dropFirstEmptyResult.Load() {
+		t.Fatal("flag should start true")
+	}
+
+	// First result is non-empty: not suppressed, flag cleared.
+	cs.handleResult(map[string]any{"type": "result", "result": "first"})
+	if cs.dropFirstEmptyResult.Load() {
+		t.Fatal("flag must clear even when suppression condition is not met")
+	}
+
+	// Drain first.
+	<-cs.events
+
+	// Second result empty: must NOT be suppressed (flag already cleared).
+	cs.handleResult(map[string]any{"type": "result", "result": ""})
+	select {
+	case evt := <-cs.events:
+		if !evt.Done {
+			t.Fatal("second empty result must have Done=true (not suppressed)")
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("second empty result was incorrectly suppressed after flag was cleared")
+	}
+}

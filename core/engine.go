@@ -31,6 +31,38 @@ const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
 const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
+// staleResultGraceWindow bounds how long the engine holds a terminal
+// EventResult in a grace sub-loop when it might be a stale "auto-
+// continuation" micro-turn completion rather than the real turn end.
+// See issue #1877 (claudecode --resume) and #1687 (opencode first-message
+// race) for the original bug shape.
+//
+// Background: certain agents (Claude Code CLI on --resume, opencode on
+// first message from a busy-session queue) emit a terminal `type:"result"`
+// event with an empty `result` payload while the model is still actively
+// processing the real queued message. The micro-turn's "result" lands
+// after Send() has already returned (so drainEvents() doesn't catch it)
+// but before the real turn's terminal event. If the engine treats it as
+// Done:true, processInteractiveEvents returns immediately, the real
+// turn's report is only drained by the background reader, and the user
+// sees "(空响应)" with the actual report silently dropped.
+//
+// Fix: when a Done:true result arrives with empty accumulated text and
+// the agent process is still Alive(), give the event loop up to this
+// many seconds to see a follow-up non-Done event. If one arrives, the
+// original result is stale and the loop continues reading the real turn.
+// If none arrives, we finalize as today — short turns are unaffected.
+//
+// 5s is enough to cover the MCP-servers-load-then-emit race window
+// (~2.4s in the #1877 transcript; up to ~3-4s on slower machines) while
+// staying invisible to users on healthy turns (sub-second after
+// Result.Done:true). 0 = disabled (legacy behaviour).
+//
+// Declared as a var (not const) so blackbox tests can swap it for a shorter
+// value when exercising the grace-expiration path without making CI hang
+// on the real 5s window.
+var staleResultGraceWindow = 5 * time.Second
+
 // defaultPendingRestartTimeout is how long the post-restart notify
 // dispatcher waits for the target platform to reach ready before
 // dropping the notify with a warning. 10s covers the typical 2-3s
@@ -5415,6 +5447,96 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 		buildResolvedRichCard := func(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
 			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
+		}
+
+		// Issue #1877 / #1687 stale-result grace window.
+		//
+		// When an auto-continuation micro-turn (e.g. claudecode --resume
+		// emitting isMeta=true "Continue from where you left off", or opencode
+		// dequeueing the first user message before the real turn) completes,
+		// the CLI can emit a terminal type:"result" with empty Content BEFORE
+		// the real turn's terminal event. The engine, treating that empty
+		// Done:true as the real end, replies "(空响应)" and the foreground
+		// event loop returns — even though the agent process is still
+		// processing the real request and emitting real events into the
+		// background reader, which the engine never re-reads.
+		//
+		// Hold the dispatch for staleResultGraceWindow (5s by default). If a
+		// follow-up event arrives within the window, the original Done:true
+		// was stale: replace `event` with the follow-up so it gets dispatched
+		// through the same switch (and a normal terminal result, when it
+		// arrives later, will then naturally take the EventResult Done:true
+		// finalize path). If nothing arrives within the window, the original
+		// Done:true IS the real turn end and we fall through to dispatch.
+		//
+		// The check is deliberately narrow: only triggers on the exact shape
+		// that produced silent delivery loss in #1877 (empty Content + no
+		// accumulated textParts + Alive agent). A result with non-empty
+		// content or any prior text/tool activity skips the grace sub-loop
+		// entirely, so healthy turns pay zero overhead.
+		if staleResultGraceWindow > 0 &&
+			event.Type == EventResult &&
+			event.Done &&
+			event.Content == "" &&
+			len(textParts) == 0 &&
+			state.agentSession != nil &&
+			state.agentSession.Alive() {
+			graceTimer := time.NewTimer(staleResultGraceWindow)
+			graceDispatched := false
+			for !graceDispatched {
+				select {
+				case <-stopCh:
+					graceTimer.Stop()
+					sp.discard()
+					return
+				case <-graceTimer.C:
+					graceTimer.Stop()
+					graceDispatched = true
+					// event remains the original Done:true; fall through to
+					// switch dispatch where the EventResult case finalizes.
+				case next, ok := <-events:
+					graceTimer.Stop()
+					if !ok {
+						// Channel closed mid-grace: agent exited after the
+						// stale result. Handle via the same goto path the
+						// outer read would have used.
+						goto channelClosed
+					}
+					slog.Info("EventResult: stale terminal result during grace window; continuing with follow-up event",
+						"session", session.ID,
+						"next_type", next.Type,
+						"next_done", next.Done,
+					)
+					// The original Done:true was stale (auto-continuation
+					// micro-turn). Drop it and dispatch the follow-up
+					// event through the same switch; reset idle timer to
+					// give the real turn its full window.
+					event = next
+					if idleTimer != nil {
+						if !idleTimer.Stop() {
+							select {
+							case <-idleTimer.C:
+							default:
+							}
+						}
+						idleTimer.Reset(e.eventIdleTimeout)
+					}
+					graceDispatched = true
+				case <-idleCh:
+					// Idle timeout fired mid-grace. Treat as if the agent
+					// died; dispatch the original Done:true so the
+					// EventResult case can finalize with whatever partial
+					// state we have.
+					graceTimer.Stop()
+					graceDispatched = true
+				case err := <-pendingSend:
+					if err != nil {
+						slog.Debug("pendingSend error during grace window", "error", err)
+					}
+					pendingSend = nil
+					// Stay in grace — wait for the timer or a real event.
+				}
+			}
 		}
 
 		switch event.Type {
