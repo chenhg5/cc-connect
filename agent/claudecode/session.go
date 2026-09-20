@@ -72,7 +72,27 @@ type claudeSession struct {
 	// when the session reuses the shared file (the common 99% case)
 	// or when there is nothing to append.
 	promptFilePath string
+
+	// resumeContinueAt records when the CLI injected the isMeta
+	// auto-continuation user message ("Continue from where you left off.")
+	// right after `--resume` of a session whose previous turn was
+	// interrupted. That micro-turn terminates with a result event whose
+	// `result` payload is EMPTY — it belongs to no cc-connect Send(), yet
+	// the engine would consume it as the pending user message's turn
+	// completion and reply "(empty response)" while the CLI keeps working
+	// on the real prompt (issue #1877, same family as #1687). The next
+	// result event is swallowed when it is empty and arrives within
+	// resumeContinueResultWindow of the injection. Stores time.Time;
+	// zero value means "no continuation pending".
+	resumeContinueAt atomic.Value
 }
+
+// resumeContinueResultWindow bounds how long after the isMeta continuation
+// injection an empty result event is attributed to the auto-continuation
+// micro-turn. The micro-turn completes within seconds (MCP server startup
+// dominates the observed ~2.4s); two minutes is a generous ceiling that also
+// bounds any staleness of the flag if no result ever follows.
+const resumeContinueResultWindow = 2 * time.Minute
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
 // when the session was started under degraded conditions that the user should
@@ -771,7 +791,52 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	}
 }
 
+// isResumeContinuationEvent reports whether a stream-json `user` event is the
+// CLI-injected auto-continuation message that `claude --resume` emits when the
+// resumed session's previous turn was interrupted. The CLI marks it with
+// isMeta=true; matching the text prefix as well keeps the guard working if the
+// flag is absent in some CLI versions, and failing open (no match) merely
+// restores the pre-fix behavior.
+func isResumeContinuationEvent(raw map[string]any) bool {
+	if meta, _ := raw["isMeta"].(bool); !meta {
+		return false
+	}
+	msg, ok := raw["message"].(map[string]any)
+	if !ok {
+		return false
+	}
+	var text string
+	switch c := msg["content"].(type) {
+	case string:
+		text = c
+	case []any:
+		for _, item := range c {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := m["text"].(string); t != "" {
+				text = t
+				break
+			}
+		}
+	}
+	return strings.HasPrefix(text, "Continue from where you left off")
+}
+
 func (cs *claudeSession) handleUser(raw map[string]any) {
+	// Resume auto-continuation guard (issue #1877): after `claude --resume`
+	// of a session whose previous turn was killed mid-flight, the CLI injects
+	// an isMeta user message "Continue from where you left off." and answers
+	// it itself ("No response requested."), ending that micro-turn with an
+	// EMPTY terminal result event. Record the injection time so handleResult
+	// can swallow that result instead of letting the engine mistake it for
+	// the pending user message's turn completion ("(empty response)").
+	if isResumeContinuationEvent(raw) {
+		cs.resumeContinueAt.Store(time.Now())
+		slog.Info("claudeSession: resume auto-continuation micro-turn detected; will suppress its result event if empty")
+	}
+
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
 		return
@@ -870,6 +935,21 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 			cs.lastUsage.TotalTokens = cs.lastUsage.UsedTokens + outputTokens
 		}
 		cs.usageMu.Unlock()
+	}
+
+	// Resume auto-continuation guard (issue #1877): consume the pending
+	// injection marker. If this result event is the auto-continuation
+	// micro-turn's terminator AND carries no text, swallow it — the turn
+	// the user's message actually belongs to has not started yet, and the
+	// CLI will emit its own terminal result once the real work finishes.
+	// A non-empty result passes through unchanged (the continuation
+	// produced real output the user should see), and the marker is
+	// consumed either way so it can never suppress a later turn.
+	if at, ok := cs.resumeContinueAt.Swap(time.Time{}).(time.Time); ok && !at.IsZero() &&
+		time.Since(at) < resumeContinueResultWindow && strings.TrimSpace(content) == "" {
+		slog.Info("claudeSession: suppressed empty result event from resume auto-continuation turn",
+			"session_id", cs.CurrentSessionID(), "injected_at", at.Format(time.RFC3339))
+		return
 	}
 
 	evt := core.Event{
