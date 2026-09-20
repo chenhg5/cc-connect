@@ -49,9 +49,17 @@ type claudeSession struct {
 	// configured model.
 	activeModel atomic.Value // stores string
 
-	// usageMu guards lastUsage. Populated from the most recent result event.
+	// usageMu guards lastUsage and assistantUsageSeen. Populated from the
+	// most recent result event.
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
+	// assistantUsageSeen records whether the current turn produced at least
+	// one assistant event carrying a usable per-sub-call usage. It gates the
+	// result event's turn-aggregated fallback so the aggregate never
+	// overwrites the more faithful per-sub-call snapshot, and is cleared at
+	// each turn boundary so the fallback stays live on endpoints that never
+	// populate assistant usage at all.
+	assistantUsageSeen bool
 
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
@@ -681,6 +689,62 @@ func parseClaudeUsage(usage map[string]any) (input, output, cacheCreation, cache
 	return
 }
 
+// claudeModelUsage is one entry of a result event's `modelUsage` map. Unlike
+// the snake_case `usage` object it is keyed by model id, uses camelCase field
+// names, and additionally reports that model's context window.
+type claudeModelUsage struct {
+	used          int // input + cacheRead + cacheCreation, per Anthropic's usage semantics
+	input         int
+	output        int
+	cacheRead     int
+	cacheCreation int
+	contextWindow int
+}
+
+// parseClaudeModelUsage extracts the entry describing preferModel from a result
+// event's `modelUsage` map. A turn may bill more than one model (e.g. a helper
+// model for session titles), so an exact model match wins; otherwise the entry
+// with the largest prompt is used, since that is the one driving the context
+// window. Returns ok=false when the map is absent or carries no usable totals.
+func parseClaudeModelUsage(raw map[string]any, preferModel string) (claudeModelUsage, bool) {
+	entries, ok := raw["modelUsage"].(map[string]any)
+	if !ok {
+		return claudeModelUsage{}, false
+	}
+	var best claudeModelUsage
+	found := false
+	for model, entry := range entries {
+		fields, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		num := func(key string) int {
+			if v, ok := fields[key].(float64); ok {
+				return int(v)
+			}
+			return 0
+		}
+		cur := claudeModelUsage{
+			input:         num("inputTokens"),
+			output:        num("outputTokens"),
+			cacheRead:     num("cacheReadInputTokens"),
+			cacheCreation: num("cacheCreationInputTokens"),
+			contextWindow: num("contextWindow"),
+		}
+		cur.used = cur.input + cur.cacheRead + cur.cacheCreation
+		if cur.used <= 0 {
+			continue
+		}
+		if preferModel != "" && strings.EqualFold(model, preferModel) {
+			return cur, true
+		}
+		if cur.used > best.used {
+			best, found = cur, true
+		}
+	}
+	return best, found
+}
+
 func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
@@ -722,6 +786,7 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 				OutputTokens:             prevOutput,
 				ContextWindow:            window,
 			}
+			cs.assistantUsageSeen = true
 			cs.usageMu.Unlock()
 		}
 	}
@@ -860,29 +925,75 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 
 	// Aggregated usage across all sub-calls in this turn — used for billing-
 	// style reporting in the EventResult event (slog turn-complete log etc.).
-	// We do NOT pull input/cache values into cs.lastUsage from here:
+	// We prefer NOT to pull input/cache values into cs.lastUsage from here:
 	// cache_read_input_tokens is summed across every sub-call that hit the
 	// cached prefix, so on long agentic turns it vastly exceeds the model
 	// context window. The per-sub-call usage captured in handleAssistant
-	// gives a faithful "context used right now" snapshot.
+	// gives a faithful "context used right now" snapshot, and wins whenever
+	// it exists; the aggregate below is only a fallback for endpoints that
+	// leave assistant usage empty.
 	//
-	// We DO use the result's output_tokens to update lastUsage.OutputTokens
-	// because output is additive (each sub-call's tokens are real new
-	// tokens, never recycled) and the per-assistant-event output_tokens in
-	// stream-json is a placeholder (typically 1). The result is the only
-	// authoritative source of total tokens generated for this turn.
+	// We always use the result's output_tokens to update
+	// lastUsage.OutputTokens because output is additive (each sub-call's
+	// tokens are real new tokens, never recycled) and the per-assistant-event
+	// output_tokens in stream-json is a placeholder (typically 1). The result
+	// is the only authoritative source of total tokens generated this turn.
 	var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int
 	if usage, ok := raw["usage"].(map[string]any); ok {
 		inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens = parseClaudeUsage(usage)
 	}
-	if outputTokens > 0 {
-		cs.usageMu.Lock()
-		if cs.lastUsage != nil {
-			cs.lastUsage.OutputTokens = outputTokens
-			cs.lastUsage.TotalTokens = cs.lastUsage.UsedTokens + outputTokens
+
+	// Anthropic's own endpoint populates message_start.usage, so every
+	// assistant event carries the prompt size of its sub-call and
+	// handleAssistant records the last one. Anthropic-compatible gateways
+	// are not obliged to do the same: some send an all-zero placeholder and
+	// only report real totals at the end of the turn, which leaves
+	// handleAssistant with nothing to record and used to leave lastUsage nil
+	// for the whole session. Fall back to this event's aggregate so the ctx
+	// footer and the auto-compress trigger still see a real number and a
+	// real context window.
+	modelUsage, haveModelUsage := parseClaudeModelUsage(raw, cs.GetModel())
+	fallbackWindow := claudeContextWindow(cs.GetModel())
+
+	cs.usageMu.Lock()
+	if !cs.assistantUsageSeen {
+		switch {
+		case haveModelUsage:
+			cs.lastUsage = &core.ContextUsage{
+				UsedTokens:               modelUsage.used,
+				TotalTokens:              modelUsage.used + modelUsage.output,
+				InputTokens:              modelUsage.input,
+				CachedInputTokens:        modelUsage.cacheRead,
+				CacheCreationInputTokens: modelUsage.cacheCreation,
+				OutputTokens:             modelUsage.output,
+				ContextWindow:            modelUsage.contextWindow,
+			}
+			if cs.lastUsage.ContextWindow <= 0 {
+				cs.lastUsage.ContextWindow = fallbackWindow
+			}
+		case inputTokens+cacheReadTokens+cacheCreationTokens > 0:
+			used := inputTokens + cacheReadTokens + cacheCreationTokens
+			cs.lastUsage = &core.ContextUsage{
+				UsedTokens:               used,
+				TotalTokens:              used + outputTokens,
+				InputTokens:              inputTokens,
+				CachedInputTokens:        cacheReadTokens,
+				CacheCreationInputTokens: cacheCreationTokens,
+				OutputTokens:             outputTokens,
+				ContextWindow:            fallbackWindow,
+			}
 		}
-		cs.usageMu.Unlock()
 	}
+	if outputTokens > 0 && cs.lastUsage != nil {
+		cs.lastUsage.OutputTokens = outputTokens
+		cs.lastUsage.TotalTokens = cs.lastUsage.UsedTokens + outputTokens
+	}
+	// A compaction result is mid-turn; the assistant events that follow still
+	// belong to this turn, so only a real turn boundary clears the flag.
+	if !isCompaction {
+		cs.assistantUsageSeen = false
+	}
+	cs.usageMu.Unlock()
 
 	evt := core.Event{
 		Type:                     core.EventResult,

@@ -5782,7 +5782,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Strip any agent-self-reported "[ctx: ~XX%]" marker so it does not
 			// leak into the delivered text. The on-screen ctx indicator is now
 			// rendered exclusively in the reply footer.
-			sdkPlausible := event.InputTokens >= 100
+			// Gate the SDK-reported ctx indicator on the full prompt size, not
+			// input_tokens alone: with prompt caching a turn can report only a
+			// handful of input_tokens while cache_read carries hundreds of
+			// thousands. Per Anthropic's usage semantics the three counters are
+			// disjoint subsets that sum to the real prompt.
+			sdkPlausible := event.InputTokens+event.CacheReadInputTokens+event.CacheCreationInputTokens >= 100
 			selfPct := parseSelfReportedCtx(fullResponse)
 			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
 			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
@@ -5861,10 +5866,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			var statusFooter string
 			var legacyStatusFooter string
 			if !isSilent {
-				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
+				sessionUsage := replyFooterSessionContextUsage(state.agentSession)
+				footerContext := replyFooterContextText(sessionUsage, e.i18n)
 				if e.showContextIndicator {
 					if sdkPlausible {
-						if text := contextIndicatorText(event.InputTokens); text != "" {
+						if text := contextIndicatorText(event, sessionUsage); text != "" {
 							footerContext = text
 						}
 					} else if selfPct > 0 {
@@ -17070,11 +17076,33 @@ func gitClone(repoURL, dest string) error {
 
 const modelContextWindow = 200_000 // generic fallback window for heuristic context estimates
 
-func contextIndicatorText(inputTokens int) string {
-	if inputTokens <= 0 {
+// contextIndicatorText renders the reply footer's "[ctx: ~N%]" marker.
+//
+// Both operands prefer the session's API-reported ContextUsage, matching
+// buildClaudeStatusLineFooter: UsedTokens over ContextWindow. When the
+// session does not implement ContextUsageReporter (or has no usage yet) the
+// numerator falls back to the turn's own event counters — summing input,
+// cache_read and cache_creation, which are disjoint subsets of the real
+// prompt — and the denominator to the generic modelContextWindow.
+func contextIndicatorText(event Event, usage *ContextUsage) string {
+	used, window := 0, modelContextWindow
+	if usage != nil {
+		if usage.UsedTokens > 0 {
+			used = usage.UsedTokens
+		} else if usage.TotalTokens > 0 {
+			used = usage.TotalTokens
+		}
+		if usage.ContextWindow > 0 {
+			window = usage.ContextWindow
+		}
+	}
+	if used <= 0 {
+		used = event.InputTokens + event.CacheReadInputTokens + event.CacheCreationInputTokens
+	}
+	if used <= 0 {
 		return ""
 	}
-	pct := inputTokens * 100 / modelContextWindow
+	pct := used * 100 / window
 	if pct > 100 {
 		pct = 100
 	}

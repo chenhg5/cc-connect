@@ -1053,3 +1053,269 @@ func itoa(i int) string {
 	}
 	return string(buf[pos:])
 }
+
+// newZeroedUsageSession builds a session standing in for an
+// Anthropic-compatible gateway that sends all-zero message_start usage, so
+// handleAssistant can never record a per-sub-call snapshot.
+func newZeroedUsageSession(t *testing.T, model string) (*claudeSession, func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	cs := &claudeSession{
+		events: make(chan core.Event, 64),
+		ctx:    ctx,
+	}
+	cs.sessionID.Store("zeroed-usage-session")
+	cs.alive.Store(true)
+	cs.activeModel.Store(model)
+	return cs, cancel
+}
+
+// zeroedUsageTurn replays one turn of a gateway that zeroes assistant usage:
+// an assistant event with an all-zero usage, then a result event carrying the
+// turn's real totals in both `usage` and `modelUsage`.
+func zeroedUsageTurn(cs *claudeSession, model string, input, cacheRead, output, window int) {
+	cs.handleAssistant(map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"content": []any{},
+			"usage": map[string]any{
+				"input_tokens":  float64(0),
+				"output_tokens": float64(0),
+			},
+		},
+	})
+	cs.handleResult(map[string]any{
+		"type":       "result",
+		"result":     "done",
+		"session_id": "zeroed-usage-session",
+		"usage": map[string]any{
+			"input_tokens":                float64(input),
+			"output_tokens":               float64(output),
+			"cache_creation_input_tokens": float64(0),
+			"cache_read_input_tokens":     float64(cacheRead),
+		},
+		"modelUsage": map[string]any{
+			model: map[string]any{
+				"inputTokens":              float64(input),
+				"outputTokens":             float64(output),
+				"cacheReadInputTokens":     float64(cacheRead),
+				"cacheCreationInputTokens": float64(0),
+				"contextWindow":            float64(window),
+			},
+		},
+	})
+	for len(cs.events) > 0 {
+		<-cs.events
+	}
+}
+
+// TestHandleResult_ZeroedAssistantUsageRefreshesEveryTurn is the regression
+// test for the reply footer freezing on Anthropic-compatible gateways that
+// send an all-zero message_start.usage (observed on
+// open.bigmodel.cn/api/anthropic with Claude Code 2.1.273).
+//
+// handleAssistant has nothing to record on such endpoints, so the result
+// event's aggregate is the only usage source. A guard that only filled
+// lastUsage while UsedTokens was still zero would populate it once and then
+// pin it to the first turn's numbers for the rest of the session — which the
+// ctx footer shows and, worse, the auto-compress trigger consumes.
+func TestHandleResult_ZeroedAssistantUsageRefreshesEveryTurn(t *testing.T) {
+	const model = "glm-5.3-flash[1m]"
+	cs, cancel := newZeroedUsageSession(t, model)
+	defer cancel()
+
+	zeroedUsageTurn(cs, model, 36_000, 768, 14, 1_000_000)
+	first := cs.GetContextUsage()
+	if first == nil {
+		t.Fatal("GetContextUsage returned nil after a result event carrying modelUsage")
+	}
+	if first.UsedTokens != 36_768 {
+		t.Fatalf("turn 1 UsedTokens = %d, want 36768", first.UsedTokens)
+	}
+
+	// The conversation has grown; the second turn must be reflected.
+	zeroedUsageTurn(cs, model, 300_000, 50_000, 20, 1_000_000)
+	second := cs.GetContextUsage()
+	if second == nil {
+		t.Fatal("GetContextUsage returned nil on turn 2")
+	}
+	if second.UsedTokens != 350_000 {
+		t.Fatalf("turn 2 UsedTokens = %d, want 350000 (stale %d means lastUsage froze on turn 1)",
+			second.UsedTokens, first.UsedTokens)
+	}
+}
+
+// TestHandleResult_ModelUsageReportsRealContextWindow verifies the window
+// travels with the usage snapshot, so core/ never has to guess it from the
+// model id. 1M-window models were otherwise measured against the generic 200k
+// fallback in the reply footer.
+func TestHandleResult_ModelUsageReportsRealContextWindow(t *testing.T) {
+	const model = "glm-5.3-flash[1m]"
+	cs, cancel := newZeroedUsageSession(t, model)
+	defer cancel()
+
+	zeroedUsageTurn(cs, model, 36_000, 768, 14, 1_000_000)
+
+	usage := cs.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage returned nil")
+	}
+	if usage.ContextWindow != 1_000_000 {
+		t.Fatalf("ContextWindow = %d, want 1000000 (from modelUsage.contextWindow)", usage.ContextWindow)
+	}
+	if usage.CachedInputTokens != 768 {
+		t.Errorf("CachedInputTokens = %d, want 768", usage.CachedInputTokens)
+	}
+	if usage.InputTokens != 36_000 {
+		t.Errorf("InputTokens = %d, want 36000", usage.InputTokens)
+	}
+	if usage.OutputTokens != 14 {
+		t.Errorf("OutputTokens = %d, want 14", usage.OutputTokens)
+	}
+}
+
+// TestHandleResult_AggregateNeverOverwritesAssistantUsage guards the ordering
+// the fallback must preserve across turns: whenever assistant events do carry
+// real usage (Anthropic's own endpoint), the per-sub-call snapshot must win
+// even though the result event also has a modelUsage map whose cache_read is
+// summed over every sub-call.
+func TestHandleResult_AggregateNeverOverwritesAssistantUsage(t *testing.T) {
+	const model = "claude-opus-4-7[1m]"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{events: make(chan core.Event, 64), ctx: ctx}
+	cs.sessionID.Store("real-usage-session")
+	cs.alive.Store(true)
+	cs.activeModel.Store(model)
+
+	turn := func(input, cacheRead, aggregateCacheRead int) {
+		cs.handleAssistant(map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []any{},
+				"usage": map[string]any{
+					"input_tokens":            float64(input),
+					"output_tokens":           float64(1), // stream-json placeholder
+					"cache_read_input_tokens": float64(cacheRead),
+				},
+			},
+		})
+		cs.handleResult(map[string]any{
+			"type":       "result",
+			"result":     "done",
+			"session_id": "real-usage-session",
+			"usage": map[string]any{
+				"input_tokens":            float64(input),
+				"output_tokens":           float64(648),
+				"cache_read_input_tokens": float64(aggregateCacheRead),
+			},
+			"modelUsage": map[string]any{
+				model: map[string]any{
+					"inputTokens":          float64(input),
+					"outputTokens":         float64(648),
+					"cacheReadInputTokens": float64(aggregateCacheRead),
+					"contextWindow":        float64(1_000_000),
+				},
+			},
+		})
+		for len(cs.events) > 0 {
+			<-cs.events
+		}
+	}
+
+	// Turn 1: last sub-call saw 500k of cached prefix; the turn summed to 8M.
+	turn(80, 500_000, 8_000_000)
+	if got := cs.GetContextUsage(); got.UsedTokens != 500_080 {
+		t.Fatalf("turn 1 UsedTokens = %d, want 500080 (8M means the aggregate leaked)", got.UsedTokens)
+	}
+
+	// Turn 2 must behave identically — clearing the per-turn flag must not
+	// let the aggregate take over on subsequent turns.
+	turn(90, 600_000, 9_000_000)
+	if got := cs.GetContextUsage(); got.UsedTokens != 600_090 {
+		t.Fatalf("turn 2 UsedTokens = %d, want 600090 (9M means the aggregate leaked)", got.UsedTokens)
+	}
+}
+
+// TestHandleResult_FallsBackToTopLevelUsageWithoutModelUsage covers result
+// events that carry no modelUsage map: the aggregate `usage` object still
+// keeps the snapshot alive, with the window derived from the model id.
+func TestHandleResult_FallsBackToTopLevelUsageWithoutModelUsage(t *testing.T) {
+	cs, cancel := newZeroedUsageSession(t, "glm-5.3-flash[1m]")
+	defer cancel()
+
+	cs.handleResult(map[string]any{
+		"type":       "result",
+		"result":     "done",
+		"session_id": "zeroed-usage-session",
+		"usage": map[string]any{
+			"input_tokens":                float64(120_000),
+			"output_tokens":               float64(42),
+			"cache_read_input_tokens":     float64(5_000),
+			"cache_creation_input_tokens": float64(1_000),
+		},
+	})
+	for len(cs.events) > 0 {
+		<-cs.events
+	}
+
+	usage := cs.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage returned nil with only a top-level usage object")
+	}
+	if usage.UsedTokens != 126_000 {
+		t.Errorf("UsedTokens = %d, want 126000", usage.UsedTokens)
+	}
+	if usage.ContextWindow != 1_000_000 {
+		t.Errorf("ContextWindow = %d, want 1000000 from claudeContextWindow(model)", usage.ContextWindow)
+	}
+}
+
+func TestParseClaudeModelUsage(t *testing.T) {
+	raw := map[string]any{
+		"modelUsage": map[string]any{
+			// A helper model billed a much larger prompt this turn.
+			"glm-5.3-air": map[string]any{
+				"inputTokens":   float64(900_000),
+				"outputTokens":  float64(10),
+				"contextWindow": float64(200_000),
+			},
+			"glm-5.3-flash[1m]": map[string]any{
+				"inputTokens":              float64(36_000),
+				"outputTokens":             float64(14),
+				"cacheReadInputTokens":     float64(768),
+				"cacheCreationInputTokens": float64(32),
+				"contextWindow":            float64(1_000_000),
+			},
+		},
+	}
+
+	// An exact model match wins over the larger entry.
+	got, ok := parseClaudeModelUsage(raw, "glm-5.3-flash[1M]") // case-insensitive
+	if !ok {
+		t.Fatal("parseClaudeModelUsage returned ok=false for a matching model")
+	}
+	if got.used != 36_800 {
+		t.Errorf("used = %d, want 36800", got.used)
+	}
+	if got.contextWindow != 1_000_000 {
+		t.Errorf("contextWindow = %d, want 1000000", got.contextWindow)
+	}
+
+	// With no match, the largest prompt wins.
+	got, ok = parseClaudeModelUsage(raw, "some-other-model")
+	if !ok || got.used != 900_000 {
+		t.Errorf("fallback = %+v ok=%v, want the 900000 entry", got, ok)
+	}
+
+	if _, ok := parseClaudeModelUsage(map[string]any{}, "m"); ok {
+		t.Error("expected ok=false when modelUsage is absent")
+	}
+	zeroed := map[string]any{"modelUsage": map[string]any{
+		"m": map[string]any{"inputTokens": float64(0), "outputTokens": float64(5)},
+	}}
+	if _, ok := parseClaudeModelUsage(zeroed, "m"); ok {
+		t.Error("expected ok=false when every entry has a zero prompt")
+	}
+}
