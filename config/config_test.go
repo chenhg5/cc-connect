@@ -1751,6 +1751,30 @@ func TestLoad_RejectsNegativeAgentSessionIdleTimeoutMins(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesBusyMessageMode(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithBusyMessageModeFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got := cfg.Projects[0].BusyMessageMode; got != "steer" {
+		t.Fatalf("busy_message_mode = %q, want steer", got)
+	}
+}
+
+func TestLoad_RejectsInvalidBusyMessageMode(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithInvalidBusyMessageModeFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for invalid busy_message_mode")
+	}
+	if !strings.Contains(err.Error(), "busy_message_mode") {
+		t.Fatalf("error = %q, want busy_message_mode validation", err.Error())
+	}
+}
+
 func TestLoad_ParsesRunAsUser(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("run_as_user is only supported on Linux/macOS")
@@ -2202,6 +2226,42 @@ const projectWithNegativeAgentSessionIdleTimeoutFixture = `
 [[projects]]
 name = "beta"
 agent_session_idle_timeout_mins = -1
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithBusyMessageModeFixture = `
+[[projects]]
+name = "beta"
+busy_message_mode = "steer"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithInvalidBusyMessageModeFixture = `
+[[projects]]
+name = "beta"
+busy_message_mode = "parallel"
 
 [projects.agent]
 type = "codex"
