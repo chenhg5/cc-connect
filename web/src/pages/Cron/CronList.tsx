@@ -9,6 +9,7 @@ import { listCronJobs, createCronJob, updateCronJob, deleteCronJob, triggerCronJ
 import { listProjects, type ProjectSummary } from '@/api/projects';
 import { listSessions, type Session } from '@/api/sessions';
 import { formatTime, cn } from '@/lib/utils';
+import { validateCronForm, pickMostRecentSession } from './cronFormHelpers';
 
 const MODE_OPTIONS = ['bypassPermissions', 'acceptEdits', 'auto', 'plan', 'dontAsk'] as const;
 
@@ -100,26 +101,36 @@ function CronPicker({ value, onChange }: { value: string; onChange: (v: string) 
 }
 
 /* ── Select dropdown ── */
-function Select({ label, value, onChange, options, placeholder }: {
+function Select({ label, value, onChange, options, placeholder, required, disabled, hint }: {
   label?: string;
   value: string;
   onChange: (v: string) => void;
   options: { value: string; label: string }[];
   placeholder?: string;
+  required?: boolean;
+  disabled?: boolean;
+  hint?: string;
 }) {
   return (
     <div className="space-y-1.5">
-      {label && <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">{label}</label>}
+      {label && (
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+          {label}
+          {required && <span className="text-red-500 ml-0.5" aria-label="required">*</span>}
+        </label>
+      )}
       <div className="relative">
         <select
           value={value}
           onChange={e => onChange(e.target.value)}
+          disabled={disabled}
           className={cn(
             'w-full px-3 py-2 text-sm rounded-lg transition-all duration-200 appearance-none pr-8',
             'border border-gray-300/90 dark:border-white/[0.1]',
             'bg-white/90 backdrop-blur-sm dark:bg-[rgba(0,0,0,0.45)]',
             'text-gray-900 dark:text-white',
             'focus:outline-none focus:ring-2 focus:ring-accent/45 focus:border-accent',
+            disabled && 'opacity-50 cursor-not-allowed bg-gray-100 dark:bg-white/[0.03]',
           )}
         >
           {placeholder && <option value="">{placeholder}</option>}
@@ -127,6 +138,7 @@ function Select({ label, value, onChange, options, placeholder }: {
         </select>
         <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
       </div>
+      {hint && <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">{hint}</p>}
     </div>
   );
 }
@@ -188,6 +200,8 @@ export default function CronList() {
   const [saving, setSaving] = useState(false);
   const [triggeringId, setTriggeringId] = useState<string | null>(null);
   const [sessionKeys, setSessionKeys] = useState<string[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const isEdit = !!editJob;
 
@@ -197,18 +211,28 @@ export default function CronList() {
   );
 
   useEffect(() => {
-    if (!form.project) { setSessionKeys([]); return; }
+    if (!form.project) { setSessionKeys([]); setSessions([]); return; }
     let cancelled = false;
     listSessions(form.project).then(data => {
       if (cancelled) return;
+      const list = data.sessions || [];
+      setSessions(list);
       const keys = new Set<string>();
-      for (const s of data.sessions || []) {
+      for (const s of list) {
         if (s.session_key) keys.add(s.session_key);
       }
       setSessionKeys([...keys]);
-    }).catch(() => { if (!cancelled) setSessionKeys([]); });
+      // In add mode, auto-select the most recently active session so the
+      // user doesn't have to pick one manually when there's an obvious
+      // default. In edit mode we leave session_key alone so the original
+      // assignment is preserved (Issue #1857).
+      if (!isEdit) {
+        const newest = pickMostRecentSession(list);
+        setForm(prev => ({ ...prev, session_key: newest?.session_key ?? '' }));
+      }
+    }).catch(() => { if (!cancelled) { setSessionKeys([]); setSessions([]); } });
     return () => { cancelled = true; };
-  }, [form.project]);
+  }, [form.project, isEdit]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -231,6 +255,7 @@ export default function CronList() {
   const openAdd = () => {
     setEditJob(null);
     setForm({ ...emptyForm });
+    setFormError(null);
     setShowForm(true);
   };
 
@@ -248,10 +273,21 @@ export default function CronList() {
       mode: job.mode || '',
       _type: job.exec ? 'exec' : 'prompt',
     });
+    setFormError(null);
     setShowForm(true);
   };
 
   const handleSave = async () => {
+    // Client-side validation: session_key is required. The backend returns a
+    // generic error if it's empty, but the form had a misleading hint that
+    // suggested "leave empty for default" — so guard it here to give the user
+    // a clear message before sending the request (Issue #1857).
+    const errs = validateCronForm(form);
+    if (errs.sessionKey === 'required') {
+      setFormError(t('cron.errors.sessionKeyRequired'));
+      return;
+    }
+    setFormError(null);
     setSaving(true);
     const activePrompt = form._type === 'prompt' ? form.prompt : '';
     const activeExec   = form._type === 'exec'   ? form.exec   : '';
@@ -437,7 +473,7 @@ export default function CronList() {
       {/* Add / Edit modal */}
       <Modal
         open={showForm}
-        onClose={() => setShowForm(false)}
+        onClose={() => { setShowForm(false); setFormError(null); }}
         title={isEdit ? t('cron.editJob') : t('cron.add')}
         className="max-w-xl"
       >
@@ -516,10 +552,24 @@ export default function CronList() {
 
           <Select
             label={t('cron.sessionKey')}
+            required
             value={form.session_key}
-            onChange={v => setForm({ ...form, session_key: v })}
+            onChange={v => {
+              setForm({ ...form, session_key: v });
+              if (formError) setFormError(null);
+            }}
             options={sessionKeys.map(k => ({ value: k, label: k }))}
-            placeholder={t('cron.selectSessionKey')}
+            placeholder={
+              sessions.length === 0
+                ? t('cron.sessionKeyEmptyPlaceholder')
+                : t('cron.sessionKeyPlaceholder')
+            }
+            disabled={sessions.length === 0}
+            hint={
+              sessions.length === 0 && form.project
+                ? t('cron.noSessionsForProject')
+                : undefined
+            }
           />
 
           <Select
@@ -536,7 +586,15 @@ export default function CronList() {
           </div>
 
           <div className="flex justify-end gap-2 pt-3 border-t border-gray-100 dark:border-white/[0.06]">
-            <Button variant="secondary" onClick={() => setShowForm(false)}>{t('common.cancel')}</Button>
+            {formError && (
+              <div
+                role="alert"
+                className="mr-auto text-sm text-red-500 bg-red-50 dark:bg-red-900/20 px-3 py-1.5 rounded-lg"
+              >
+                {formError}
+              </div>
+            )}
+            <Button variant="secondary" onClick={() => { setShowForm(false); setFormError(null); }}>{t('common.cancel')}</Button>
             <Button onClick={handleSave} loading={saving}>
               {isEdit ? t('common.save') : t('cron.add')}
             </Button>
