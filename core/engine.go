@@ -10285,6 +10285,13 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 	return target, nil
 }
 
+// reasoningUsageText renders the /reasoning usage line with the effort levels
+// actually supported by the active agent, so no agent's level set (nor name)
+// is hardcoded in core.
+func reasoningUsageText(i *I18n, efforts []string) string {
+	return i.Tf(MsgReasoningUsage, strings.Join(efforts, "|"))
+}
+
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
@@ -10335,7 +10342,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 				buttons = append(buttons, row)
 			}
 			sb.WriteString("\n")
-			sb.WriteString(e.i18n.T(MsgReasoningUsage))
+			sb.WriteString(reasoningUsageText(e.i18n, efforts))
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
@@ -10357,7 +10364,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 		}
 	}
 	if !valid {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningUsage))
+		e.reply(p, msg.ReplyCtx, reasoningUsageText(e.i18n, efforts))
 		return
 	}
 
@@ -13500,7 +13507,7 @@ func (e *Engine) renderReasoningCard() *Card {
 		Markdown(sb.String()).
 		Select(e.i18n.T(MsgReasoningSelectPlaceholder), opts, initVal).
 		Buttons(e.cardBackButton())
-	cb.Note(e.i18n.T(MsgReasoningUsage))
+	cb.Note(reasoningUsageText(e.i18n, efforts))
 	return cb.Build()
 }
 

@@ -2825,3 +2825,257 @@ func TestHandleAgentEnd_SkipsAssistantWithoutUsage(t *testing.T) {
 		t.Errorf("InputTokens = %d, want 3000", usage.InputTokens)
 	}
 }
+
+// ── model catalog merge (models.json + models-store.json) ────
+
+// writePiModelFiles writes settings.json (optional, nil to skip),
+// models.json (custom providers) and models-store.json (catalog) into a
+// fresh temp PI_CODING_AGENT_DIR.
+func writePiModelFiles(t *testing.T, settings, custom, store any) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+	write := func(name string, v any) {
+		if v == nil {
+			return
+		}
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, name), data, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	write("settings.json", settings)
+	write("models.json", custom)
+	write("models-store.json", store)
+}
+
+// glmTeamProvider mimics the user's custom models.json provider
+// "zai-coding-team" (GLM models where only low/high/max are mapped).
+func glmTeamProvider() map[string]any {
+	return map[string]any{
+		"name":    "ZAI Coding Plan (Team)",
+		"baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
+		"api":     "openai-completions",
+		"models": []any{
+			map[string]any{
+				"id":        "glm-5.3",
+				"name":      "GLM-5.3 (Team)",
+				"reasoning": true,
+				"thinkingLevelMap": map[string]any{
+					"off": nil, "minimal": nil, "low": "low",
+					"medium": nil, "high": "high", "xhigh": nil, "max": "max",
+				},
+				"contextWindow": 1000000,
+			},
+			map[string]any{
+				"id":               "glm-5.3-flash",
+				"name":             "GLM-5.3-Flash (Team)",
+				"reasoning":        true,
+				"thinkingLevelMap": map[string]any{"low": "low", "high": "high", "max": "max"},
+			},
+		},
+	}
+}
+
+// TestAvailableModels_MergesCustomProviders is a regression test for the bug
+// where the /model list only read models-store.json, so user-defined
+// providers from models.json (e.g. a second GLM provider "zai-coding-team"
+// next to the catalog's "zai-coding-cn") were missing entirely.
+func TestAvailableModels_MergesCustomProviders(t *testing.T) {
+	writePiModelFiles(t,
+		map[string]any{"enabledModels": []string{}},
+		map[string]any{"providers": map[string]any{"zai-coding-team": glmTeamProvider()}},
+		map[string]any{
+			"zai-coding-cn": map[string]any{
+				"models": []any{map[string]any{"id": "glm-5.3", "name": "GLM-5.3"}},
+			},
+			"deepseek": map[string]any{
+				"models": []any{map[string]any{"id": "deepseek-flash", "name": "DeepSeek V4.1 Flash"}},
+			},
+		},
+	)
+
+	a := &Agent{}
+	models := a.AvailableModels(context.Background())
+	names := make([]string, len(models))
+	for i, m := range models {
+		names[i] = m.Name
+	}
+	for _, want := range []string{"zai-coding-team/glm-5.3", "zai-coding-team/glm-5.3-flash", "zai-coding-cn/glm-5.3", "deepseek/deepseek-flash"} {
+		found := false
+		for _, n := range names {
+			if n == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("AvailableModels() missing %q, got %v", want, names)
+		}
+	}
+}
+
+// TestAvailableModels_CustomOverridesCatalogModel verifies custom models.json
+// defs replace same-id catalog entries instead of duplicating them.
+func TestAvailableModels_CustomOverridesCatalogModel(t *testing.T) {
+	writePiModelFiles(t,
+		map[string]any{"enabledModels": []string{}},
+		map[string]any{"providers": map[string]any{
+			"deepseek": map[string]any{"models": []any{
+				map[string]any{"id": "deepseek-flash", "name": "Custom Flash"},
+			}},
+		}},
+		map[string]any{
+			"deepseek": map[string]any{"models": []any{
+				map[string]any{"id": "deepseek-flash", "name": "Catalog Flash"},
+				map[string]any{"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro"},
+			}},
+		},
+	)
+
+	a := &Agent{}
+	models := a.AvailableModels(context.Background())
+	if len(models) != 2 {
+		t.Fatalf("AvailableModels() = %+v, want 2 models", models)
+	}
+	byName := map[string]core.ModelOption{}
+	for _, m := range models {
+		byName[m.Name] = m
+	}
+	if got := byName["deepseek/deepseek-flash"]; got.Desc != "Custom Flash" {
+		t.Errorf("deepseek/deepseek-flash Desc = %q, want custom override %q", got.Desc, "Custom Flash")
+	}
+	if _, ok := byName["deepseek/deepseek-v4-pro"]; !ok {
+		t.Errorf("AvailableModels() missing catalog model deepseek/deepseek-v4-pro: %+v", models)
+	}
+}
+
+// ── model-aware reasoning efforts ────────────────────────────
+
+// TestAvailableReasoningEfforts_DeepSeekFlashIncludesMax is a regression
+// test for the bug where /reasoning hardcoded
+// ["off","minimal","low","medium","high","xhigh"] for every model: it lacked
+// "max" entirely and ignored the per-model thinkingLevelMap that pi-ai's
+// getSupportedThinkingLevels uses. deepseek-flash maps low/high/max, so the
+// offered levels must be exactly off/low/high/max.
+func TestAvailableReasoningEfforts_DeepSeekFlashIncludesMax(t *testing.T) {
+	writePiModelFiles(t,
+		nil,
+		nil,
+		map[string]any{
+			"deepseek": map[string]any{"models": []any{
+				map[string]any{
+					"id":        "deepseek-flash",
+					"name":      "DeepSeek V4.1 Flash",
+					"reasoning": true,
+					"thinkingLevelMap": map[string]any{
+						"minimal": nil, "low": "low", "medium": nil, "high": "high", "max": "max",
+					},
+				},
+			}},
+		},
+	)
+
+	a := &Agent{}
+	a.SetModel("deepseek/deepseek-flash")
+
+	want := []string{"off", "low", "high", "max"}
+	got := a.AvailableReasoningEfforts()
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("AvailableReasoningEfforts() = %v, want %v", got, want)
+	}
+}
+
+func TestAvailableReasoningEfforts_ModelAware(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		want  []string
+	}{
+		{
+			// glm-5.3 maps only low/high/max; off is explicitly null.
+			name:  "glm explicit null off unsupported",
+			model: "zai-coding-team/glm-5.3",
+			want:  []string{"low", "high", "max"},
+		},
+		{
+			name:  "non-reasoning model only off",
+			model: "deepseek/cheap-chat",
+			want:  []string{"off"},
+		},
+		{
+			name:  "reasoning without map defaults without xhigh/max",
+			model: "other/r1",
+			want:  []string{"off", "minimal", "low", "medium", "high"},
+		},
+		{
+			name:  "unknown model falls back to full list",
+			model: "foo/bar",
+			want:  []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"},
+		},
+		{
+			name:  "thinking suffix is stripped",
+			model: "zai-coding-team/glm-5.3:high",
+			want:  []string{"low", "high", "max"},
+		},
+	}
+
+	writePiModelFiles(t,
+		nil,
+		map[string]any{"providers": map[string]any{"zai-coding-team": glmTeamProvider()}},
+		map[string]any{
+			"deepseek": map[string]any{"models": []any{
+				map[string]any{"id": "cheap-chat", "name": "Cheap Chat"},
+			}},
+			"other": map[string]any{"models": []any{
+				map[string]any{"id": "r1", "name": "R1", "reasoning": true},
+			}},
+		},
+	)
+
+	a := &Agent{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a.SetModel(tt.model)
+			got := a.AvailableReasoningEfforts()
+			if fmt.Sprint(got) != fmt.Sprint(tt.want) {
+				t.Fatalf("AvailableReasoningEfforts(%q) = %v, want %v", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSupportedThinkingLevels_BareIDPrefersDefaultProvider verifies a bare
+// model id resolves against settings.json defaultProvider first, so both
+// GLM providers' identically-named models stay distinguishable.
+func TestSupportedThinkingLevels_BareIDPrefersDefaultProvider(t *testing.T) {
+	writePiModelFiles(t,
+		map[string]any{"defaultProvider": "zai-coding-team"},
+		map[string]any{"providers": map[string]any{"zai-coding-team": glmTeamProvider()}},
+		map[string]any{
+			"zai-coding-cn": map[string]any{"models": []any{
+				map[string]any{
+					"id": "glm-5.3", "name": "GLM-5.3", "reasoning": true,
+					"thinkingLevelMap": map[string]any{
+						"off": "off", "minimal": "minimal", "low": "low",
+						"medium": "medium", "high": "high",
+					},
+				},
+			}},
+		},
+	)
+
+	provider, m, ok := lookupModelDef("glm-5.3")
+	if !ok {
+		t.Fatal("lookupModelDef(glm-5.3) not found")
+	}
+	if provider != "zai-coding-team" {
+		t.Fatalf("lookupModelDef resolved provider %q, want zai-coding-team (defaultProvider)", provider)
+	}
+	if got := thinkingLevelsForDef(m); fmt.Sprint(got) != fmt.Sprint([]string{"low", "high", "max"}) {
+		t.Fatalf("levels = %v, want [low high max]", got)
+	}
+}
