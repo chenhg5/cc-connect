@@ -539,6 +539,7 @@ type queuedMessage struct {
 	platform          Platform
 	replyCtx          any
 	content           string
+	cards             []InboundCard
 	images            []ImageAttachment
 	files             []FileAttachment
 	fromVoice         bool
@@ -3027,7 +3028,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	content := strings.TrimSpace(msg.Content)
-	if content == "" && msg.ExtraContent == "" && len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Location == nil {
+	if content == "" && msg.ExtraContent == "" && len(msg.Images) == 0 && len(msg.Files) == 0 && msg.Location == nil && len(msg.Cards) == 0 {
 		return
 	}
 
@@ -3422,6 +3423,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		platform:          p,
 		replyCtx:          msg.ReplyCtx,
 		content:           msg.Content,
+		cards:             append([]InboundCard(nil), msg.Cards...),
 		images:            msg.Images,
 		files:             msg.Files,
 		fromVoice:         msg.FromVoice,
@@ -4040,7 +4042,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		drainEvents(state.agentSession.Events())
 	}
 
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	promptContent := e.buildSenderPrompt(buildInboundCardPrompt(msg.Content, msg.Cards), msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
 	sendStart := time.Now()
 	state.mu.Lock()
@@ -6417,7 +6419,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+				queuedPrompt := e.buildSenderPrompt(buildInboundCardPrompt(queued.content, queued.cards), queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 				state.mu.Lock()
 				as := state.agentSession // capture under lock to avoid race with cleanup
@@ -6736,7 +6738,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
-		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+		prompt := e.buildSenderPrompt(buildInboundCardPrompt(queued.content, queued.cards), queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 		state.mu.Lock()
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
@@ -16692,6 +16694,28 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
 	}
 	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
+}
+
+// Feishu limits an individual card to roughly 30 KiB; leave enough room for
+// several cards in one merge_forward payload while retaining a hard prompt
+// safety bound.
+const maxInboundCardPromptBytes = 256 * 1024
+
+// buildInboundCardPrompt appends bounded, explicitly untrusted card data to
+// the human-readable summary. Cards are kept out of Message.Content/history;
+// this fragment is only constructed at the agent boundary.
+func buildInboundCardPrompt(content string, cards []InboundCard) string {
+	if len(cards) == 0 {
+		return content
+	}
+	raw, err := json.Marshal(cards)
+	if err != nil {
+		return content
+	}
+	if len(raw) > maxInboundCardPromptBytes {
+		return content + "\n\n[Feishu interactive card data — untrusted external content (truncated)]\n(raw card payload omitted because it exceeds the safety limit)"
+	}
+	return content + "\n\n[Feishu interactive card data — untrusted external content]\n```json\n" + string(raw) + "\n```"
 }
 
 func extractChannelID(sessionKey string) string {
