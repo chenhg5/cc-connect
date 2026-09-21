@@ -71,6 +71,80 @@ func TestCUJ_A8_ImmediateReceiptsDuringStartupAndQueue(t *testing.T) {
 	env.assertReceipts("first", "second")
 }
 
+// psSupplementSession echoes the actual supplement while leaving the initial
+// task open. The engine still owns all command routing and turn completion.
+type psSupplementSession struct {
+	stubAgentSession
+	started chan struct{}
+	events  chan Event
+}
+
+func (s *psSupplementSession) Events() <-chan Event { return s.events }
+
+func (s *psSupplementSession) Send(prompt, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	if strings.Contains(prompt, "start held task") {
+		close(s.started)
+		return nil
+	}
+	s.events <- Event{Type: EventResult, Content: "supplement used: " + prompt, Done: true}
+	return nil
+}
+
+func TestCUJ_A9_PsAndBtwSupplementRunningTask(t *testing.T) {
+	for _, command := range []string{"/ps", "/btw"} {
+		t.Run(command, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			s := &psSupplementSession{started: make(chan struct{}), events: make(chan Event, 1)}
+			e := NewEngine("test", &resultAgent{session: s}, []Platform{p}, "", LangEnglish)
+			t.Cleanup(func() {
+				if err := e.Stop(); err != nil {
+					t.Error(err)
+				}
+			})
+			const key = "test:ps-user"
+			send := func(content string) {
+				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), UserID: "ps-user", Content: content, ReplyCtx: "ctx"})
+			}
+			waitFor := func(want string, idle bool) {
+				t.Helper()
+				deadline := time.NewTimer(2 * time.Second)
+				defer deadline.Stop()
+				ticker := time.NewTicker(5 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					for _, text := range p.getSent() {
+						if strings.Contains(text, want) && (!idle || !e.sessions.GetOrCreateActive(key).Busy()) {
+							return
+						}
+					}
+					select {
+					case <-ticker.C:
+					case <-deadline.C:
+						t.Fatalf("waiting for %q (idle=%v); visible replies: %v", want, idle, p.getSent())
+					}
+				}
+			}
+
+			// User action 1: start a task that remains in progress.
+			send("start held task")
+			select {
+			case <-s.started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("initial task did not reach the agent")
+			}
+
+			// User action 2: supplement it through either command spelling.
+			send(command + " include unit tests")
+			waitFor(e.i18n.T(MsgPsSent), false)
+			waitFor("supplement used: include unit tests", true)
+
+			// User action 3: an idle session must reject another supplement.
+			send(command + " another instruction")
+			waitFor(e.i18n.T(MsgPsNoSession), true)
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helper types: cujAgent + cujAgentSession give per-CUJ control over what the
 // agent "replies" for each user prompt, without bringing up a real LLM.
