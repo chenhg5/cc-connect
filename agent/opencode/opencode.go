@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,12 +29,20 @@ func init() {
 // Modes:
 //   - "default": standard mode
 //   - "yolo":    auto mode (opencode run is auto by default in non-interactive mode)
+//
+// When server_url is configured, each run attaches to an already-running
+// OpenCode backend (`opencode run --attach <server_url> ...`) instead of
+// cold-starting a new instance. The backend must already be running;
+// cc-connect never starts, stops, or otherwise manages its lifecycle.
+// Auth uses OpenCode's official environment behavior (OPENCODE_SERVER_USERNAME
+// / OPENCODE_SERVER_PASSWORD); no credentials are stored in config.
 type Agent struct {
 	workDir              string
 	model                string
 	mode                 string
 	cmd                  string   // CLI binary name, default "opencode"
 	cliExtraArgs         []string // extra args from cmd after the binary name
+	serverURL            string   // optional: attach to existing backend; empty = standalone
 	configEnv            []string // env vars from [projects.agent.options.env]
 	agentName            string   // passed as --agent to opencode (for plugin-defined agents)
 	providers            []core.ProviderConfig
@@ -71,6 +80,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode = normalizeMode(mode)
 	cmd, extraArgs := core.ParseCmdOpts(opts, "opencode")
 	agentName, _ := opts["agent"].(string) // --agent flag for plugin-defined agents (#1210)
+	serverURL, err := normalizeServerURL(opts["server_url"])
+	if err != nil {
+		return nil, err
+	}
 	ccDataDir, _ := opts["cc_data_dir"].(string)
 	ccProject, _ := opts["cc_project"].(string)
 	modelCachePath := opencodeProjectModelCachePath(ccDataDir, ccProject)
@@ -83,12 +96,19 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("opencode: %q CLI not found in PATH, install from: https://github.com/opencode-ai/opencode", cmd)
 	}
 
+	if serverURL != "" {
+		slog.Info("opencode: mode attached", "server", sanitizeServerURLForLog(serverURL))
+	} else {
+		slog.Info("opencode: mode standalone")
+	}
+
 	return &Agent{
 		workDir:              workDir,
 		model:                model,
 		mode:                 mode,
 		cmd:                  cmd,
 		cliExtraArgs:         extraArgs,
+		serverURL:            serverURL,
 		configEnv:            core.ParseConfigEnv(opts),
 		agentName:            agentName,
 		activeIdx:            -1,
@@ -194,6 +214,62 @@ func normalizeMode(raw string) string {
 	}
 }
 
+// normalizeServerURL validates the configured server_url. Empty (absent)
+// means standalone mode. A non-empty value must be a string holding an
+// http(s) URL with a non-empty host. Embedded userinfo is rejected outright:
+// server auth belongs in OPENCODE_SERVER_USERNAME / OPENCODE_SERVER_PASSWORD
+// env vars, never in the URL. Anything invalid fails fast at startup instead
+// of on the first message. Error messages carry only the sanitized URL so a
+// secret-bearing value can never leak through them.
+func normalizeServerURL(raw any) (string, error) {
+	if raw == nil {
+		return "", nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("opencode: invalid server_url: must be a string, got %T", raw)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", fmt.Errorf("opencode: invalid server_url: not a valid URL: %v", err)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("opencode: invalid server_url %q: embedded credentials are not allowed; use OPENCODE_SERVER_USERNAME / OPENCODE_SERVER_PASSWORD env vars instead", sanitizeServerURLForLog(s))
+	}
+	if !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") {
+		return "", fmt.Errorf("opencode: invalid server_url %q: scheme must be http or https", sanitizeServerURLForLog(s))
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("opencode: invalid server_url %q: host must be non-empty", sanitizeServerURLForLog(s))
+	}
+	return s, nil
+}
+
+// sanitizeServerURLForLog strips userinfo, query, and fragment from a server
+// URL so logs (and error messages) never expose secrets. Server auth is
+// env-based (OPENCODE_SERVER_*), so a well-formed URL carries nothing
+// sensitive — but a misconfigured one must still be safe to log. Values that
+// do not parse are replaced with a fixed placeholder rather than echoed.
+func sanitizeServerURLForLog(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "[invalid server_url]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	if u.Scheme == "" || u.Host == "" {
+		return "[invalid server_url]"
+	}
+	return u.String()
+}
+
 func (a *Agent) Name() string { return "opencode" }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -215,6 +291,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.agentName != "" {
 		opts["agent"] = a.agentName
+	}
+	if a.serverURL != "" {
+		opts["server_url"] = a.serverURL
 	}
 	if len(a.configEnv) > 0 {
 		env := make(map[string]string, len(a.configEnv))
@@ -495,6 +574,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
 	agentName := a.agentName
+	serverURL := a.serverURL
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
@@ -505,7 +585,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv)
+	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, serverURL, sessionID, extraEnv)
 }
 
 // ListSessions runs `opencode session list` and parses the JSON output.

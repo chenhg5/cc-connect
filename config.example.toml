@@ -1920,6 +1920,34 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify a model (provider/model format) / 可选：指定模型
 # model = "anthropic/claude-sonnet-4-20250514"
 #
+# Optional: attach to an already-running OpenCode backend instead of
+# cold-starting a new instance per message / 可选：连接到已在运行的 OpenCode 后端，
+# 避免每条消息都冷启动一个新实例：
+# server_url = "http://127.0.0.1:4096"
+#
+# Attached mode reuses the BACKEND only (`opencode run --attach <server_url>`).
+# Each cc-connect conversation keeps its own OpenCode session (--session) and
+# its own work_dir (--dir is interpreted on the server side, so the server
+# must see the same filesystem paths). The backend must already be running
+# (e.g. `opencode web` / `opencode serve`); cc-connect never starts or stops
+# it. Auth uses OpenCode's official environment variables
+# (OPENCODE_SERVER_USERNAME / OPENCODE_SERVER_PASSWORD) — no credentials go
+# in this file. Attach failures return a clear error; there is no silent
+# fallback to standalone mode. When server_url is absent (default),
+# behavior is exactly the historical standalone mode.
+#
+# Current limitation / 已知限制: attach mode reuses Send() (`opencode run
+# --attach`) against the configured backend, but local session/model discovery
+# helpers (`session list/delete`, model discovery, message-count/title lookups
+# from the local data store) still assume the same host/user data store. This
+# is verified for same-host deployments only (cc-connect and `opencode web` /
+# `opencode serve` on the same machine and user). Arbitrary remote-server
+# parity is not claimed.
+# attach 模式仅验证过本机同用户部署；远端服务器的数据一致性不在保证范围内.
+# attach 模式仅复用后端 `--attach`，各会话的 session 与 work_dir 保持独立；
+# 后端需自行提前启动，认证走环境变量，失败时直接报错不静默回退。
+# 不配置 server_url 时为默认的 standalone 模式，行为与之前完全一致.
+#
 # [[projects.platforms]]
 # type = "telegram"
 #

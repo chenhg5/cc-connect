@@ -1232,17 +1232,31 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	}
 	e.ReceiveMessage(plat, msg)
 
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(5 * time.Second)
 	for {
 		agent.mu.Lock()
 		n := len(agent.sessions)
 		agent.mu.Unlock()
-		if n > 0 {
+		if n == 0 {
+			select {
+			case <-deadline:
+				t.Fatal("agent never received the message with file attachment")
+			default:
+				time.Sleep(10 * time.Millisecond)
+			}
+			continue
+		}
+		// Wait for the turn to complete (reply delivered), not just session
+		// creation: sessions.Save() runs synchronously inside result
+		// processing before the reply is sent, so returning any earlier
+		// races TempDir cleanup against in-flight session writes
+		// ("directory not empty" flakes on CI).
+		if len(plat.getSent()) > 0 {
 			return
 		}
 		select {
 		case <-deadline:
-			t.Fatal("agent never received the message with file attachment")
+			t.Fatal("agent received the message with file attachment but never replied")
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
