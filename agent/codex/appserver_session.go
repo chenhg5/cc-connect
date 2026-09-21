@@ -145,6 +145,7 @@ type appServerSession struct {
 	workDir        string
 	model          string
 	effort         string
+	serviceTier    string
 	mode           string
 	baseURL        string
 	modelProvider  string
@@ -192,12 +193,17 @@ const (
 )
 
 func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+	return newAppServerSessionWithServiceTier(ctx, url, workDir, model, effort, "", mode, resumeID, baseURL, modelProvider, extraEnv, codexHome, systemPrompt, appendPrompt)
+}
+
+func newAppServerSessionWithServiceTier(ctx context.Context, url, workDir, model, effort, serviceTier, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
 		workDir:          workDir,
 		model:            model,
 		effort:           effort,
+		serviceTier:      normalizeServiceTier(serviceTier),
 		mode:             mode,
 		baseURL:          baseURL,
 		modelProvider:    modelProvider,
@@ -249,29 +255,7 @@ func appServerListenURL(url string) string {
 }
 
 func (s *appServerSession) connect() error {
-	args := []string{"app-server"}
-	// With url "stdio://" the session speaks JSON-RPC over the stdio pipes.
-	// Pass no --listen flag in that case: on codex 0.152+ a --listen value
-	// (including ws://) switches the app-server to serve the protocol over
-	// the listener only, leaving stdio unresponsive and causing every
-	// initialize request to time out (see #1781). --listen stdio:// is kept
-	// for explicitness on older codex versions where it is a no-op, but a
-	// bare stdio transport should simply not open a listener.
-	if listenURL := appServerListenURL(s.url); listenURL != "" {
-		args = append(args, "--listen", listenURL)
-	}
-	if model := strings.TrimSpace(s.model); model != "" {
-		args = append(args, "-c", fmt.Sprintf("model=%q", model))
-	}
-	if effort := strings.TrimSpace(s.effort); effort != "" {
-		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
-	}
-	if provider := strings.TrimSpace(s.modelProvider); provider != "" {
-		args = append(args, "-c", fmt.Sprintf("model_provider=%q", provider))
-	}
-	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
-		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
-	}
+	args := s.buildCommandArgs()
 	cmd := exec.CommandContext(s.ctx, "codex", args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
@@ -310,6 +294,29 @@ func (s *appServerSession) connect() error {
 	go s.stderrLoop(stderr)
 	go s.waitLoop()
 	return nil
+}
+
+func (s *appServerSession) buildCommandArgs() []string {
+	args := []string{"app-server"}
+	if listenURL := appServerListenURL(s.url); listenURL != "" {
+		args = append(args, "--listen", listenURL)
+	}
+	if model := strings.TrimSpace(s.model); model != "" {
+		args = append(args, "-c", fmt.Sprintf("model=%q", model))
+	}
+	if effort := strings.TrimSpace(s.effort); effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
+	}
+	if serviceTier := normalizeServiceTier(s.serviceTier); serviceTier != "" {
+		args = append(args, "-c", fmt.Sprintf("service_tier=%q", serviceTier))
+	}
+	if provider := strings.TrimSpace(s.modelProvider); provider != "" {
+		args = append(args, "-c", fmt.Sprintf("model_provider=%q", provider))
+	}
+	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
+		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
+	}
+	return args
 }
 
 func (s *appServerSession) initialize() error {

@@ -95,3 +95,14 @@ func TestWorkspaceModelOverride(t *testing.T) {
 		t.Fatalf("WorkspaceModelOverride(%q) after clearing other workspace = %q, want %q", workspaceB, got, "sonnet")
 	}
 }
+
+func TestWorkspaceServiceTierOverride(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewProjectStateStore(path)
+	store.SetWorkspaceServiceTierOverride("/tmp/workspace", "fast")
+	store.Save()
+	reloaded := NewProjectStateStore(path)
+	if got := reloaded.WorkspaceServiceTierOverride("/tmp/workspace"); got != "fast" {
+		t.Fatalf("WorkspaceServiceTierOverride() = %q, want fast", got)
+	}
+}

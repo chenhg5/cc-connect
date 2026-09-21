@@ -808,6 +808,17 @@ func TestSaveAgentModel(t *testing.T) {
 	}
 }
 
+func TestSaveAgentServiceTier(t *testing.T) {
+	writeTestConfig(t, providerConfigTOML)
+	if err := SaveAgentServiceTier("demo", "fast"); err != nil {
+		t.Fatalf("SaveAgentServiceTier() error: %v", err)
+	}
+	cfg := readTestConfig(t)
+	if got, _ := cfg.Projects[0].Agent.Options["service_tier"].(string); got != "fast" {
+		t.Fatalf("agent.options.service_tier = %q, want fast", got)
+	}
+}
+
 const providerConfigWithCommentsTOML = `# This is my config file
 # Very important - do not lose this!
 custom_top = "keep_me"

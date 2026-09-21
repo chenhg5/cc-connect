@@ -342,6 +342,13 @@ const (
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
 	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
+	MsgFastEnabled           MsgKey = "fast_enabled"
+	MsgFastDisabled          MsgKey = "fast_disabled"
+	MsgFastChangedOn         MsgKey = "fast_changed_on"
+	MsgFastChangedOff        MsgKey = "fast_changed_off"
+	MsgFastChangeFailed      MsgKey = "fast_change_failed"
+	MsgFastNotSupported      MsgKey = "fast_not_supported"
+	MsgFastUsage             MsgKey = "fast_usage"
 
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
 	MsgCompressing          MsgKey = "compressing"
@@ -360,6 +367,7 @@ const (
 
 	// Inline strings previously hardcoded in engine.go
 	MsgStatusMode             MsgKey = "status_mode"
+	MsgStatusFastMode         MsgKey = "status_fast_mode"
 	MsgStatusSession          MsgKey = "status_session"
 	MsgStatusCron             MsgKey = "status_cron"
 	MsgStatusThinkingMessages MsgKey = "status_thinking_messages"
@@ -413,31 +421,31 @@ const (
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
 
-	MsgTimerNotAvailable  MsgKey = "timer_not_available"
-	MsgTimerUsage         MsgKey = "timer_usage"
-	MsgTimerAddUsage      MsgKey = "timer_add_usage"
-	MsgTimerAdded         MsgKey = "timer_added"
-	MsgTimerAddedExec     MsgKey = "timer_added_exec"
-	MsgTimerAddExecUsage  MsgKey = "timer_addexec_usage"
-	MsgTimerEmpty         MsgKey = "timer_empty"
-	MsgTimerListTitle     MsgKey = "timer_list_title"
-	MsgTimerListFooter    MsgKey = "timer_list_footer"
-	MsgTimerDelUsage      MsgKey = "timer_del_usage"
-	MsgTimerMuteUsage     MsgKey = "timer_mute_usage"
-	MsgTimerDeleted       MsgKey = "timer_deleted"
-	MsgTimerNotFound      MsgKey = "timer_not_found"
-	MsgTimerMuted         MsgKey = "timer_muted"
-	MsgTimerUnmuted       MsgKey = "timer_unmuted"
-	MsgTimerCardHint      MsgKey = "timer_card_hint"
-	MsgTimerBtnMute       MsgKey = "timer_btn_mute"
-	MsgTimerBtnUnmute     MsgKey = "timer_btn_unmute"
-	MsgTimerBtnDelete     MsgKey = "timer_btn_delete"
-	MsgTimerIDLabel       MsgKey = "timer_id_label"
-	MsgTimerScheduledLabel MsgKey = "timer_scheduled_label"
-	MsgTimerFailedSuffix  MsgKey = "timer_failed_suffix"
-	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
-	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
-	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
+	MsgTimerNotAvailable    MsgKey = "timer_not_available"
+	MsgTimerUsage           MsgKey = "timer_usage"
+	MsgTimerAddUsage        MsgKey = "timer_add_usage"
+	MsgTimerAdded           MsgKey = "timer_added"
+	MsgTimerAddedExec       MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage    MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty           MsgKey = "timer_empty"
+	MsgTimerListTitle       MsgKey = "timer_list_title"
+	MsgTimerListFooter      MsgKey = "timer_list_footer"
+	MsgTimerDelUsage        MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage       MsgKey = "timer_mute_usage"
+	MsgTimerDeleted         MsgKey = "timer_deleted"
+	MsgTimerNotFound        MsgKey = "timer_not_found"
+	MsgTimerMuted           MsgKey = "timer_muted"
+	MsgTimerUnmuted         MsgKey = "timer_unmuted"
+	MsgTimerCardHint        MsgKey = "timer_card_hint"
+	MsgTimerBtnMute         MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute       MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete       MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel         MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel  MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix    MsgKey = "timer_failed_suffix"
+	MsgCommandsTagAgent     MsgKey = "commands_tag_agent"
+	MsgCommandsTagShell     MsgKey = "commands_tag_shell"
+	MsgUpgradeTimeoutSuffix MsgKey = "upgrade_timeout_suffix"
 
 	MsgCronScheduleLabel MsgKey = "cron_schedule_label"
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
@@ -596,6 +604,7 @@ const (
 	MsgBuiltinCmdAllow     MsgKey = "allow"
 	MsgBuiltinCmdModel     MsgKey = "model"
 	MsgBuiltinCmdReasoning MsgKey = "reasoning"
+	MsgBuiltinCmdFast      MsgKey = "fast"
 	MsgBuiltinCmdMode      MsgKey = "mode"
 	MsgBuiltinCmdLang      MsgKey = "lang"
 	MsgBuiltinCmdQuiet     MsgKey = "quiet"
@@ -688,8 +697,8 @@ const (
 	// send / cron / timer / relay tool documentation in their native
 	// language. Translation coverage is en + zh for this PR; additional
 	// languages fall back to en automatically.
-	MsgAgentSendToolPrompt MsgKey = "agent_send_tool_prompt"
-	MsgAgentCronToolPrompt MsgKey = "agent_cron_tool_prompt"
+	MsgAgentSendToolPrompt  MsgKey = "agent_send_tool_prompt"
+	MsgAgentCronToolPrompt  MsgKey = "agent_cron_tool_prompt"
 	MsgAgentTimerToolPrompt MsgKey = "agent_timer_tool_prompt"
 	MsgAgentRelayToolPrompt MsgKey = "agent_relay_tool_prompt"
 )
@@ -1050,6 +1059,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
 			"/model [switch <name>]\n  View/switch model\n\n" +
 			"/reasoning [level]\n  View/switch reasoning effort\n\n" +
+			"/fast [on|off]\n  View/switch Codex Fast mode\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
@@ -1094,6 +1104,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
 			"/model [switch <名称>]\n  查看/切换模型\n\n" +
 			"/reasoning [级别]\n  查看/切换推理强度\n\n" +
+			"/fast [on|off]\n  查看/切换 Codex Fast 模式\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
@@ -1138,6 +1149,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
 			"/model [switch <名稱>]\n  查看/切換模型\n\n" +
 			"/reasoning [級別]\n  查看/切換推理強度\n\n" +
+			"/fast [on|off]\n  查看/切換 Codex Fast 模式\n\n" +
 			"/mode [名稱]\n  查看/切換權限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
@@ -1180,6 +1192,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
 			"/model [switch <名前>]\n  モデルの表示/切り替え\n\n" +
 			"/reasoning [レベル]\n  推論レベルの表示/切り替え\n\n" +
+			"/fast [on|off]\n  Codex Fast モードの表示/切り替え\n\n" +
 			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
@@ -1222,6 +1235,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
 			"/model [switch <nombre>]\n  Ver/cambiar modelo\n\n" +
 			"/reasoning [nivel]\n  Ver/cambiar nivel de razonamiento\n\n" +
+			"/fast [on|off]\n  Ver/cambiar el modo Fast de Codex\n\n" +
 			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
@@ -2324,6 +2338,45 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "このエージェントは推論強度の切り替えをサポートしていません。",
 		LangSpanish:            "Este agente no soporta el cambio de esfuerzo de razonamiento.",
 	},
+	MsgFastEnabled: {
+		LangEnglish: "Fast mode is enabled.", LangChinese: "Fast 模式已开启。",
+		LangTraditionalChinese: "Fast 模式已開啟。", LangJapanese: "Fast モードは有効です。",
+		LangSpanish: "El modo Fast está activado.",
+	},
+	MsgFastDisabled: {
+		LangEnglish: "Fast mode is disabled.", LangChinese: "Fast 模式已关闭。",
+		LangTraditionalChinese: "Fast 模式已關閉。", LangJapanese: "Fast モードは無効です。",
+		LangSpanish: "El modo Fast está desactivado.",
+	},
+	MsgFastChangedOn: {
+		LangEnglish:            "Fast mode enabled. The next message will resume this conversation using the fast service tier.",
+		LangChinese:            "Fast 模式已开启。下一条消息将使用 fast 服务层恢复当前对话。",
+		LangTraditionalChinese: "Fast 模式已開啟。下一則訊息將使用 fast 服務層恢復目前對話。",
+		LangJapanese:           "Fast モードを有効にしました。次のメッセージから fast サービス階層でこの会話を再開します。",
+		LangSpanish:            "Modo Fast activado. El próximo mensaje reanudará esta conversación con el nivel de servicio fast.",
+	},
+	MsgFastChangedOff: {
+		LangEnglish:            "Fast mode disabled. The next message will resume this conversation using the default service tier.",
+		LangChinese:            "Fast 模式已关闭。下一条消息将使用 default 服务层恢复当前对话。",
+		LangTraditionalChinese: "Fast 模式已關閉。下一則訊息將使用 default 服務層恢復目前對話。",
+		LangJapanese:           "Fast モードを無効にしました。次のメッセージから default サービス階層でこの会話を再開します。",
+		LangSpanish:            "Modo Fast desactivado. El próximo mensaje reanudará esta conversación con el nivel de servicio default.",
+	},
+	MsgFastChangeFailed: {
+		LangEnglish: "Failed to change Fast mode: %v", LangChinese: "切换 Fast 模式失败：%v",
+		LangTraditionalChinese: "切換 Fast 模式失敗：%v", LangJapanese: "Fast モードの変更に失敗しました: %v",
+		LangSpanish: "No se pudo cambiar el modo Fast: %v",
+	},
+	MsgFastNotSupported: {
+		LangEnglish: "This agent does not support Fast mode.", LangChinese: "当前 Agent 不支持 Fast 模式。",
+		LangTraditionalChinese: "目前 Agent 不支援 Fast 模式。", LangJapanese: "このエージェントは Fast モードをサポートしていません。",
+		LangSpanish: "Este agente no admite el modo Fast.",
+	},
+	MsgFastUsage: {
+		LangEnglish: "Usage: /fast [on|off]", LangChinese: "用法：/fast [on|off]",
+		LangTraditionalChinese: "用法：/fast [on|off]", LangJapanese: "使用法: /fast [on|off]",
+		LangSpanish: "Uso: /fast [on|off]",
+	},
 	MsgMemoryNotSupported: {
 		LangEnglish:            "This agent does not support memory files.",
 		LangChinese:            "当前 Agent 不支持记忆文件。",
@@ -2443,6 +2496,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "權限模式: %s\n",
 		LangJapanese:           "権限モード: %s\n",
 		LangSpanish:            "Modo: %s\n",
+	},
+	MsgStatusFastMode: {
+		LangEnglish: "⚡ Fast mode: %s\n", LangChinese: "⚡ Fast 模式：%s\n",
+		LangTraditionalChinese: "⚡ Fast 模式：%s\n", LangJapanese: "⚡ Fast モード: %s\n",
+		LangSpanish: "⚡ Modo Fast: %s\n",
 	},
 	MsgStatusSession: {
 		LangEnglish:            "Session: %s (messages: %d)\n",
@@ -3689,6 +3747,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "查看/切換推理強度，參數: [等級]",
 		LangJapanese:           "推論強度の表示/切り替え、引数: [レベル]",
 		LangSpanish:            "Ver/cambiar esfuerzo de razonamiento, arg: [nivel]",
+	},
+	MsgBuiltinCmdFast: {
+		LangEnglish:            "View/switch Codex Fast mode, arg: [on|off]",
+		LangChinese:            "查看/切换 Codex Fast 模式，参数: [on|off]",
+		LangTraditionalChinese: "查看/切換 Codex Fast 模式，參數: [on|off]",
+		LangJapanese:           "Codex Fast モードの表示/切り替え、引数: [on|off]",
+		LangSpanish:            "Ver/cambiar el modo Fast de Codex, arg: [on|off]",
 	},
 	MsgBuiltinCmdMode: {
 		LangEnglish:            "View/switch permission mode, arg: [name]",

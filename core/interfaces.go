@@ -443,6 +443,14 @@ type ReasoningEffortSwitcher interface {
 	AvailableReasoningEfforts() []string
 }
 
+// FastModeSwitcher is an optional capability for agents whose backend supports
+// a low-latency service tier. The engine recreates the current process after a
+// change while preserving the backend conversation ID for resume.
+type FastModeSwitcher interface {
+	SetFastMode(enabled bool)
+	FastModeEnabled() bool
+}
+
 // ModelOption describes a selectable model.
 type ModelOption struct {
 	Name  string // model identifier passed to CLI
