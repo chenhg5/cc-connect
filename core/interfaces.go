@@ -675,6 +675,16 @@ type StreamingCardPlatform interface {
 	CreateStreamingCard(ctx context.Context, replyCtx any) (StreamingCard, error)
 }
 
+// StreamingCardPayloadSupporter is an optional interface a StreamingCard
+// platform implements when its card renderer understands the structured
+// progress payload (ProgressCardPayload) — i.e. it can render thinking/tool
+// entries as foldable panels instead of inline markdown. The engine sends
+// structured payloads to such cards and falls back to markdown for everyone
+// else.
+type StreamingCardPayloadSupporter interface {
+	SupportsStreamingCardPayload() bool
+}
+
 // CardStatus represents the visual status of a card header.
 type CardStatus string
 

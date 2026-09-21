@@ -2,8 +2,12 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,6 +90,30 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Lock()
 	p.sent = nil
 	p.mu.Unlock()
+}
+
+type finalizedOrderPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *finalizedOrderPlatform) Send(ctx context.Context, replyCtx any, content string) error {
+	if err := os.WriteFile(p.marker, []byte("sent\n"), 0600); err != nil {
+		return err
+	}
+	return p.stubPlatformEngine.Send(ctx, replyCtx, content)
+}
+
+type failedSendPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *failedSendPlatform) Send(_ context.Context, _ any, _ string) error {
+	if err := os.WriteFile(p.marker, []byte("attempted\n"), 0600); err != nil {
+		return err
+	}
+	return errors.New("platform send failed")
 }
 
 type recallCheckingPlatform struct {
@@ -649,6 +677,22 @@ func waitDeleteModePhase(t *testing.T, e *Engine, sessionKey, targetPhase string
 	t.Fatalf("timed out waiting for delete mode phase %q", targetPhase)
 }
 
+// waitForRefreshedCards waits until the stub platform has observed at least
+// minCount refreshes or the timeout expires.
+func waitForRefreshedCards(t *testing.T, p *stubCardPlatform, minCount int) []*Card {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		refreshed := p.getRefreshedCards()
+		if len(refreshed) >= minCount {
+			return refreshed
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d refreshed cards", minCount)
+	return nil
+}
+
 type stubProviderAgent struct {
 	stubAgent
 	providers []ProviderConfig
@@ -1026,6 +1070,385 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 	}
 }
 
+func TestWorkspaceGitFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	// non-git directory -> empty
+	if got := workspaceGitFingerprint(context.Background(), dir); got != "" {
+		t.Errorf("non-git dir: want empty, got %q", got)
+	}
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "a.txt")
+	runGit("commit", "-qm", "init")
+	fp := workspaceGitFingerprint(context.Background(), dir)
+	if fp == "" {
+		t.Fatal("git repo should have a fingerprint")
+	}
+	// working tree change -> fingerprint changes
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if workspaceGitFingerprint(context.Background(), dir) == fp {
+		t.Error("working tree change should change the fingerprint")
+	}
+}
+
+func TestProcessInteractiveEvents_FinalizedHookRunsAfterReplySend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &finalizedOrderPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "test -f '" + sentMarker + "' && touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-finalized")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-finalized",
+		ccSessionKey: sessionKey,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "final reply", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "turn-1", time.Now(), nil, nil, state.replyCtx, 0)
+
+	if _, err := os.Stat(sentMarker); err != nil {
+		t.Fatalf("final reply was not sent: %v", err)
+	}
+	if _, err := os.Stat(hookMarker); err != nil {
+		t.Fatalf("message.finalized hook did not run after send: %v", err)
+	}
+	if got := p.getSent(); len(got) != 1 || got[0] != "final reply" {
+		t.Fatalf("sent replies = %#v, want one final reply", got)
+	}
+}
+
+// newFinalizedHookServer starts an HTTP hook receiver for message.finalized and
+// returns the server plus a channel that receives each emitted event.
+func newFinalizedHookServer(t *testing.T) (*httptest.Server, chan HookEvent) {
+	t.Helper()
+	events := make(chan HookEvent, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var ev HookEvent
+		_ = json.Unmarshal(body, &ev)
+		events <- ev
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, events
+}
+
+// TestProcessInteractiveEvents_EmptyReplyDoesNotEmitFinalizedHook verifies that
+// an agent reply with no content does not fire message.finalized even though the
+// localized empty-response placeholder is still delivered to the platform. The
+// PR description promises "empty replies do not trigger"; the placeholder send
+// must not be conflated with a real final reply.
+func TestProcessInteractiveEvents_EmptyReplyDoesNotEmitFinalizedHook(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	srv, hookEvents := newFinalizedHookServer(t)
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event: string(HookEventMessageFinalized),
+		Type:  "http",
+		URL:   srv.URL,
+		Async: boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-empty")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-empty",
+		ccSessionKey: sessionKey,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "turn-1", time.Now(), nil, nil, state.replyCtx, 0)
+
+	// The empty reply is replaced by the localized placeholder and delivered.
+	if got := p.getSent(); len(got) != 1 {
+		t.Fatalf("sent replies = %#v, want the empty-response placeholder", got)
+	}
+	// ... but message.finalized must NOT fire for an empty reply.
+	select {
+	case ev := <-hookEvents:
+		t.Fatalf("message.finalized fired for empty reply: %#v", ev)
+	default:
+	}
+}
+
+// TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline verifies that a
+// queued message re-samples its turn-start git baseline instead of inheriting
+// the baseline captured for the first message of the call. Without the
+// re-sample, changes made during the first message's turn would make the second
+// message report changed=true even though it modified nothing itself.
+//
+// Timeline (synchronous engine call driven by a helper goroutine):
+//  1. turnStart baseline A captured (clean tree)
+//  2. engine goroutine then blocks on events; test writes file x (strictly
+//     after A — see the fingerprint-lock wait below) → first EventResult emits
+//     changed=true
+//  3. queued branch drains stale events and re-samples baseline B (tree now
+//     contains x)
+//  4. test feeds second EventResult after the first emit's marker → emits
+//     changed=false (B vs unchanged tree)
+//
+// If the queued branch failed to re-sample, step 4 would compare A vs B and
+// wrongly report changed=true.
+func TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "base.txt")
+	runGit("commit", "-qm", "init")
+
+	changedLog := filepath.Join(dir, "changed.log")
+	firstEmitMarker := filepath.Join(dir, "first-emit")
+	hookCmd := "echo \"$CC_HOOK_CHANGED\" >> '" + changedLog + "'; touch '" + firstEmitMarker + "'"
+
+	p := &stubPlatformEngine{n: "feishu"}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: hookCmd,
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-queued")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-queued",
+		ccSessionKey: sessionKey,
+		workspaceDir: dir,
+		pendingMessages: []queuedMessage{
+			{messageID: "msg-2", platform: p, replyCtx: "ctx-queued", content: "second"},
+		},
+	}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "msg-1", time.Now(), nil, nil, state.replyCtx, 0)
+	}()
+
+	// Wait until the engine goroutine holds the fingerprint window lock
+	// (baseline A is sampled right after acquisition), plus a settle window for
+	// the git scan itself, so the tree change below lands strictly after A.
+	fpLock := e.workspaceFingerprintLock(dir)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if !fpLock.TryLock() {
+			time.Sleep(500 * time.Millisecond)
+			break
+		}
+		fpLock.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("engine goroutine did not acquire the fingerprint lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "x.txt"), []byte("change"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "first", Done: true}
+
+	// Wait for the first finalized emit (marker touched by the sync hook), then
+	// let the queued branch finish its stale-event drain and baseline re-sample
+	// before queuing EventResult #2 — feeding it earlier would get it dropped by
+	// drainEvents and the second turn would never start.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(firstEmitMarker); err == nil {
+			time.Sleep(300 * time.Millisecond)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first finalized emit did not run")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "second", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not finish")
+	}
+
+	logData, err := os.ReadFile(changedLog)
+	if err != nil {
+		t.Fatalf("read changed log: %v", err)
+	}
+	lines := strings.Fields(string(logData))
+	if len(lines) != 2 {
+		t.Fatalf("changed log = %q, want 2 emits", lines)
+	}
+	if lines[0] != "true" {
+		t.Errorf("first message changed = %q, want true (it modified the tree after baseline A)", lines[0])
+	}
+	if lines[1] != "false" {
+		t.Errorf("second message changed = %q, want false (queued message must re-sample its baseline, otherwise the first message's change leaks into it)", lines[1])
+	}
+}
+
+// TestWorkspaceFingerprintLock_SerializesConcurrentTurns verifies that
+// concurrent turns in the same workspace serialize their git fingerprint
+// windows: the second turn's Changed flag must not be polluted by the first
+// turn's edits. Without the per-workspace lock the second turn could sample its
+// baseline before the first turn's change and then report changed=true.
+func TestWorkspaceFingerprintLock_SerializesConcurrentTurns(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "base.txt")
+	runGit("commit", "-qm", "init")
+
+	p := &stubPlatformEngine{n: "feishu"}
+	srv, hookEvents := newFinalizedHookServer(t)
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event: string(HookEventMessageFinalized),
+		Type:  "http",
+		URL:   srv.URL,
+		Async: boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	newState := func(sessID, sk string) (*interactiveState, *Session) {
+		session := e.sessions.GetOrCreateActive(sk)
+		as := newControllableSession(sessID)
+		st := &interactiveState{
+			agentSession: as,
+			platform:     p,
+			replyCtx:     "ctx-" + sk,
+			ccSessionKey: sk,
+			workspaceDir: dir,
+		}
+		e.interactiveStates[sk] = st
+		return st, session
+	}
+	state1, session1 := newState("s1", "feishu:chat:u1")
+	state2, session2 := newState("s2", "feishu:chat:u2")
+
+	done1 := make(chan struct{})
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done1)
+		e.processInteractiveEvents(state1, session1, e.sessions, "feishu:chat:u1", "t1", time.Now(), nil, nil, state1.replyCtx, 0)
+	}()
+	// Wait until turn 1 holds the fingerprint window lock, then start turn 2 —
+	// it must block on the lock instead of sampling concurrently with turn 1.
+	// Once the lock is held we still wait for the git scan itself to settle
+	// (baseline A is sampled right after lock acquisition; `git status` takes a
+	// few tens of ms), so the tree change below lands strictly after A.
+	fpLock := e.workspaceFingerprintLock(dir)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if !fpLock.TryLock() {
+			time.Sleep(500 * time.Millisecond)
+			break
+		}
+		fpLock.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("turn 1 did not acquire the fingerprint lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	go func() {
+		defer close(done2)
+		e.processInteractiveEvents(state2, session2, e.sessions, "feishu:chat:u2", "t2", time.Now(), nil, nil, state2.replyCtx, 0)
+	}()
+
+	// Turn 1 modifies the tree, then completes.
+	if err := os.WriteFile(filepath.Join(dir, "y.txt"), []byte("change"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state1.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "one", Done: true}
+	select {
+	case <-done1:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn 1 did not finish")
+	}
+
+	// Turn 2 makes no further change; its Changed must be false.
+	state2.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "two", Done: true}
+	select {
+	case <-done2:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn 2 did not finish")
+	}
+
+	var ev1, ev2 HookEvent
+	deadline = time.Now().Add(5 * time.Second)
+	for ev1.Event == "" || ev2.Event == "" {
+		select {
+		case ev := <-hookEvents:
+			if ev.SessionKey == "feishu:chat:u1" && ev1.Event == "" {
+				ev1 = ev
+			} else if ev.SessionKey == "feishu:chat:u2" && ev2.Event == "" {
+				ev2 = ev
+			}
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("finalized events not received")
+		}
+	}
+	if !ev1.Changed {
+		t.Errorf("turn 1 changed = false, want true (it modified the tree)")
+	}
+	if ev2.Changed {
+		t.Errorf("turn 2 changed = true, want false (fingerprint window must be serialized per workspace)")
+	}
+}
+
 func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelTextWithContextIndicator(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -1086,6 +1509,410 @@ func TestProcessInteractiveEvents_DoesNotSuppressDifferentFinalText(t *testing.T
 	}
 	if got := p.getSent()[1]; got != finalText {
 		t.Fatalf("final sent text = %q, want %q", got, finalText)
+	}
+}
+
+func TestProcessInteractiveEvents_ReturnsRetriableErrorWithoutSendingRawError(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{
+		Type:      EventError,
+		Error:     errors.New("Selected model is at capacity. Please try a different model."),
+		ErrorKind: ErrorKindOverloaded,
+	}
+	retryTurn := e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m1", time.Now(), nil, nil, nil, 0)
+
+	if retryTurn == nil {
+		t.Fatal("retryTurn = nil, want retriable turn")
+	}
+	if retryTurn.kind != ErrorKindOverloaded {
+		t.Fatalf("retryKind = %q, want %q", retryTurn.kind, ErrorKindOverloaded)
+	}
+	if retryTurn.err == nil || !strings.Contains(retryTurn.err.Error(), "capacity") {
+		t.Fatalf("retryErr = %v, want capacity error", retryTurn.err)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("sent = %#v, want no raw error sent before retry", sent)
+	}
+	state.mu.Lock()
+	needResync := state.eventsNeedResync
+	state.mu.Unlock()
+	if !needResync {
+		t.Fatal("eventsNeedResync = false, want true after retriable error")
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ReplaysQueuedPromptAfterOverloaded(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 3
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newQueuedRetryAgentSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-queued", content: "queued-msg", messageID: "queued-1"},
+		},
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "initial-msg", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("initial-msg"), 0)
+
+	calls := agentSession.prompts()
+	if len(calls) != 3 {
+		t.Fatalf("prompts = %#v, want initial + queued + queued retry", calls)
+	}
+	if calls[0] != "initial-msg" {
+		t.Fatalf("first prompt = %q, want initial-msg", calls[0])
+	}
+	if !strings.Contains(calls[1], "queued-msg") || !strings.Contains(calls[2], "queued-msg") {
+		t.Fatalf("queued prompts = %#v, want both retries to target queued-msg", calls[1:])
+	}
+	if strings.Contains(calls[2], "initial-msg") {
+		t.Fatalf("retry prompt = %q, should not replay initial prompt", calls[2])
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_StopCancelsRetryDelay(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Hour
+	RetriableErrorRetryDelay = time.Hour
+	RetriableErrorMaxAttempts = 3
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newAlwaysRetryAgentSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for agentSession.sendCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	state.markStopped()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry delay did not stop after state.markStopped")
+	}
+	if got := agentSession.sendCount(); got != 1 {
+		t.Fatalf("sendCount = %d, want no retry after stop", got)
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ReplaysPromptAfterOverloaded(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRetryOnceAgentSession("s1")
+	state := &interactiveState{
+		agentSession:     agentSession,
+		platform:         p,
+		replyCtx:         "ctx-1",
+		eventsNeedResync: true,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
+
+	if got := agentSession.sendCount(); got != 2 {
+		t.Fatalf("sendCount = %d, want 2", got)
+	}
+	sent := p.getSent()
+	if len(sent) != 2 {
+		t.Fatalf("sent = %#v, want retry notice and final response", sent)
+	}
+	if !strings.Contains(sent[0], "Retrying") {
+		t.Fatalf("retry notice = %q, want English retry notice", sent[0])
+	}
+	if sent[1] != "ok after retry" {
+		t.Fatalf("final response = %q, want ok after retry", sent[1])
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_RichCardNoticeUpdatesCard(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "rich",
+	})
+	sessionKey := "feishu:user-rich-retry"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRichCardRetryOnceAgentSession("s-rich-retry")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-retry",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-rich-retry", nil, nil, "ctx-rich-retry", time.Now(), sessionKey, len("hello"), 0)
+
+	if got := agentSession.sendCount(); got != 2 {
+		t.Fatalf("sendCount = %d, want 2", got)
+	}
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "Retrying") || strings.Contains(sent, "rate-limited") {
+			t.Fatalf("retry notice was sent as standalone message: %#v", p.getSent())
+		}
+	}
+	rendered := strings.Join(append(p.getPreviewStarts(), p.getPreviewEdits()...), "\n")
+	if !strings.Contains(rendered, "Retrying in") || !strings.Contains(rendered, "attempt 2/2") {
+		t.Fatalf("rich card updates should contain retry notice, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "rich status=done") {
+		t.Fatalf("rich card retry notice should be finalized before replay, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "ok after retry") {
+		t.Fatalf("rich card updates should contain final response, got %q", rendered)
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ProgressCardNoticeUpdatesCard(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user-progress-card-retry"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRichCardRetryOnceAgentSession("s-progress-card-retry")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-progress-card-retry",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry", nil, nil, "ctx-progress-card-retry", time.Now(), sessionKey, len("hello"), 0)
+
+	for _, sent := range p.getSent() {
+		if strings.Contains(sent, "Retrying") || strings.Contains(sent, "rate-limited") {
+			t.Fatalf("retry notice was sent as standalone message: %#v", p.getSent())
+		}
+	}
+	edits := p.getPreviewEdits()
+	if len(edits) == 0 {
+		t.Fatal("preview edits = 0, want retry notice to update progress card")
+	}
+	var sawRetry bool
+	var sawCompleted bool
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		if payload.State == ProgressCardStateCompleted {
+			sawCompleted = true
+		}
+		for _, item := range payload.Items {
+			if item.Kind == ProgressEntryInfo && strings.Contains(item.Text, "Retrying in") && strings.Contains(item.Text, "attempt 2/2") {
+				sawRetry = true
+			}
+		}
+	}
+	if !sawRetry {
+		t.Fatalf("progress card edits should contain retry info item, got %#v", edits)
+	}
+	if !sawCompleted {
+		t.Fatalf("progress card retry notice should be finalized before replay, got %#v", edits)
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ProgressCardRetryExhaustionFinalizesFailed(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 1
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		style:              "card",
+		supportPayload:     true,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "feishu:user-progress-card-retry-exhausted"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRichCardAlwaysRetryAgentSession("s-progress-card-retry-exhausted")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-progress-card-retry-exhausted",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry-exhausted", nil, nil, "ctx-progress-card-retry-exhausted", time.Now(), sessionKey, len("hello"), 0)
+
+	edits := p.getPreviewEdits()
+	var sawFailed bool
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		if payload.State == ProgressCardStateFailed {
+			sawFailed = true
+		}
+	}
+	if !sawFailed {
+		t.Fatalf("exhausted retry progress card should be finalized failed, edits=%#v", edits)
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_ProgressCardRetryNoticeBypassesThrottle(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 2
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubThrottledProgressPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "discord"},
+			style:              "card",
+			supportPayload:     true,
+		},
+		throttle: time.Hour,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "discord:user-progress-card-retry"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newRichCardRetryOnceAgentSession("s-progress-card-retry-throttle")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-progress-card-retry-throttle",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m-progress-card-retry-throttle", nil, nil, "ctx-progress-card-retry-throttle", time.Now(), sessionKey, len("hello"), 0)
+
+	edits := p.getPreviewEdits()
+	var sawRetry bool
+	var sawCompleted bool
+	for _, edit := range edits {
+		payload, ok := ParseProgressCardPayload(edit)
+		if !ok {
+			continue
+		}
+		if payload.State == ProgressCardStateCompleted {
+			sawCompleted = true
+		}
+		for _, item := range payload.Items {
+			if item.Kind == ProgressEntryInfo && strings.Contains(item.Text, "Retrying in") {
+				sawRetry = true
+			}
+		}
+	}
+	if !sawRetry {
+		t.Fatalf("retry notice should bypass progress edit throttle, edits=%#v", edits)
+	}
+	if !sawCompleted {
+		t.Fatalf("retry notice should finalize progress card before replay, edits=%#v", edits)
 	}
 }
 
@@ -4209,10 +5036,7 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
+	refreshed := waitForRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
 		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
@@ -4244,10 +5068,7 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 	}
 	// Wait for async deletion to complete.
 	waitDeleteModePhase(t, e, msg.SessionKey, "result")
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
+	refreshed := waitForRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	resultText := pushedCard.RenderText()
 	if !strings.Contains(resultText, "Session deleted: One") {
@@ -4349,10 +5170,8 @@ func TestDeleteMode_SubmitBlocksActiveSession(t *testing.T) {
 	if len(agent.deleted) != 0 {
 		t.Fatalf("deleted = %v, want none", agent.deleted)
 	}
-	if len(p.getRefreshedCards()) == 0 {
-		t.Fatal("expected refreshed result card via RefreshCard")
-	}
-	pushedCard := p.getRefreshedCards()[len(p.getRefreshedCards())-1]
+	refreshed := waitForRefreshedCards(t, p, 1)
+	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Cannot delete the currently active session") {
 		t.Fatalf("result text = %q, want active-session warning", pushedCard.RenderText())
 	}
@@ -4425,10 +5244,7 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 	if got, want := strings.Join(agent.deleted, ","), "session-1,session-3"; got != want {
 		t.Fatalf("deleted = %q, want %q", got, want)
 	}
-	refreshed := p.getRefreshedCards()
-	if len(refreshed) == 0 {
-		t.Fatal("expected pushed result card via RefreshCard")
-	}
+	refreshed := waitForRefreshedCards(t, p, 1)
 	pushedCard := refreshed[len(refreshed)-1]
 	if !strings.Contains(pushedCard.RenderText(), "Session deleted: One") {
 		t.Fatalf("result text = %q, want delete result", pushedCard.RenderText())
@@ -7237,6 +8053,236 @@ type controllableAgentSession struct {
 	closeDelay    time.Duration // how long Close() blocks before returning
 	closeErr      error         // what Close() reports (e.g. "process still alive")
 	closeFinished atomic.Bool   // set once Close() has returned
+}
+
+type retryOnceAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
+type queuedRetryAgentSession struct {
+	sessionID  string
+	events     chan Event
+	promptList []string
+	queuedSeen int
+	mu         sync.Mutex
+}
+
+type alwaysRetryAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
+type richCardRetryOnceAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
+type richCardAlwaysRetryAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
+func newRetryOnceAgentSession(id string) *retryOnceAgentSession {
+	return &retryOnceAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newQueuedRetryAgentSession(id string) *queuedRetryAgentSession {
+	return &queuedRetryAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newAlwaysRetryAgentSession(id string) *alwaysRetryAgentSession {
+	return &alwaysRetryAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newRichCardRetryOnceAgentSession(id string) *richCardRetryOnceAgentSession {
+	return &richCardRetryOnceAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func newRichCardAlwaysRetryAgentSession(id string) *richCardAlwaysRetryAgentSession {
+	return &richCardAlwaysRetryAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func (s *retryOnceAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	sendNo := s.sends
+	s.mu.Unlock()
+	if sendNo == 1 {
+		s.events <- Event{
+			Type:      EventError,
+			Error:     errors.New("Selected model is at capacity. Please try a different model."),
+			ErrorKind: ErrorKindOverloaded,
+		}
+		return nil
+	}
+	s.events <- Event{Type: EventResult, Content: "ok after retry", Done: true}
+	return nil
+}
+
+func (s *retryOnceAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *retryOnceAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *retryOnceAgentSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *retryOnceAgentSession) Alive() bool                                          { return true }
+func (s *retryOnceAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+
+func (s *retryOnceAgentSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+func (s *queuedRetryAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.promptList = append(s.promptList, prompt)
+	isQueued := strings.Contains(prompt, "queued-msg")
+	if isQueued {
+		s.queuedSeen++
+	}
+	queuedSeen := s.queuedSeen
+	s.mu.Unlock()
+
+	if !isQueued {
+		s.events <- Event{Type: EventResult, Content: "initial ok", Done: true}
+		return nil
+	}
+	if queuedSeen == 1 {
+		s.events <- Event{
+			Type:      EventError,
+			Error:     errors.New("Selected model is at capacity. Please try a different model."),
+			ErrorKind: ErrorKindOverloaded,
+		}
+		return nil
+	}
+	s.events <- Event{Type: EventResult, Content: "queued ok", Done: true}
+	return nil
+}
+
+func (s *queuedRetryAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *queuedRetryAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *queuedRetryAgentSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *queuedRetryAgentSession) Alive() bool                                          { return true }
+func (s *queuedRetryAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+
+func (s *queuedRetryAgentSession) prompts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.promptList...)
+}
+
+func (s *alwaysRetryAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	s.mu.Unlock()
+	s.events <- Event{
+		Type:      EventError,
+		Error:     errors.New("Selected model is at capacity. Please try a different model."),
+		ErrorKind: ErrorKindOverloaded,
+	}
+	return nil
+}
+
+func (s *alwaysRetryAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *alwaysRetryAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *alwaysRetryAgentSession) CurrentSessionID() string                             { return s.sessionID }
+func (s *alwaysRetryAgentSession) Alive() bool                                          { return true }
+func (s *alwaysRetryAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+
+func (s *alwaysRetryAgentSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+func (s *richCardRetryOnceAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	sendNo := s.sends
+	s.mu.Unlock()
+	if sendNo == 1 {
+		s.events <- Event{Type: EventThinking, Content: "Inspecting retry path"}
+		s.events <- Event{
+			Type:      EventError,
+			Error:     errors.New("Selected model is at capacity. Please try a different model."),
+			ErrorKind: ErrorKindOverloaded,
+		}
+		return nil
+	}
+	s.events <- Event{Type: EventText, Content: "ok after retry"}
+	s.events <- Event{Type: EventResult, Content: "ok after retry", Done: true}
+	return nil
+}
+
+func (s *richCardRetryOnceAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *richCardRetryOnceAgentSession) Events() <-chan Event     { return s.events }
+func (s *richCardRetryOnceAgentSession) CurrentSessionID() string { return s.sessionID }
+func (s *richCardRetryOnceAgentSession) Alive() bool              { return true }
+func (s *richCardRetryOnceAgentSession) Close() error {
+	close(s.events)
+	return nil
+}
+func (s *richCardRetryOnceAgentSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+func (s *richCardAlwaysRetryAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	s.mu.Unlock()
+	s.events <- Event{Type: EventThinking, Content: "Inspecting retry path"}
+	s.events <- Event{
+		Type:      EventError,
+		Error:     errors.New("Selected model is at capacity. Please try a different model."),
+		ErrorKind: ErrorKindOverloaded,
+	}
+	return nil
+}
+
+func (s *richCardAlwaysRetryAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *richCardAlwaysRetryAgentSession) Events() <-chan Event     { return s.events }
+func (s *richCardAlwaysRetryAgentSession) CurrentSessionID() string { return s.sessionID }
+func (s *richCardAlwaysRetryAgentSession) Alive() bool              { return true }
+func (s *richCardAlwaysRetryAgentSession) Close() error {
+	close(s.events)
+	return nil
 }
 
 func newControllableSession(id string) *controllableAgentSession {
@@ -14169,6 +15215,99 @@ func waitForPlatformSend(p *stubPlatformEngine, n int, timeout time.Duration) []
 
 // TestUnsolicitedReader_RelaysEventResult verifies that the unsolicited reader
 // goroutine relays EventResult content to the platform.
+func TestUnsolicitedReader_EmitsFinalizedHookAfterReplySend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &finalizedOrderPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "test -f '" + sentMarker + "' && touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: "background reply", Done: true}
+
+	if sent := waitForPlatformSend(&p.stubPlatformEngine, 1, 5*time.Second); len(sent) != 1 || sent[0] != "background reply" {
+		t.Fatalf("sent replies = %#v, want one background reply", sent)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(hookMarker); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("message.finalized hook did not run after background reply send")
+}
+
+func TestUnsolicitedReader_DoesNotEmitFinalizedHookWhenReplySendFails(t *testing.T) {
+	dir := t.TempDir()
+	sendAttemptMarker := filepath.Join(dir, "send-attempt")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &failedSendPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sendAttemptMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized-failure")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: "background reply", Done: true}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sendAttemptMarker); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(sendAttemptMarker); err != nil {
+		t.Fatalf("background reply send was not attempted: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Fatalf("message.finalized hook ran after failed background send: err=%v", err)
+	}
+}
+
 func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-relay")
@@ -16272,6 +17411,11 @@ func (c *recordingStreamCard) Finalize(_ context.Context, content string) error 
 	return nil
 }
 func (c *recordingStreamCard) Failed() bool { return false }
+
+// SupportsStreamingCardPayload mirrors the Feishu streaming card: structured
+// progress payloads (foldable panels) are used, and the final answer is
+// delivered as a separate message instead of being embedded in the card.
+func (c *recordingStreamCard) SupportsStreamingCardPayload() bool { return true }
 func (c *recordingStreamCard) finalized() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -16327,5 +17471,315 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 	}
 	if strings.Contains(card.finalContent(), "NO_REPLY") {
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
+	}
+}
+
+// TestProcessInteractiveEvents_StreamingCard_AnswerInSeparateMessage is a
+// regression test for the user-requested behavior: the process card ends at
+// the "本过程卡片已停止更新，完整答复见下一条消息。" footer (the payload
+// carries NO answer), and the final answer is delivered as a separate
+// message with the status footer — not embedded in the card.
+func TestProcessInteractiveEvents_StreamingCard_AnswerInSeparateMessage(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "slack:user-streamcard-separate-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-streamcard-separate-answer")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-streamcard-separate-answer",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "step one"}
+	agentSession.events <- Event{Type: EventText, Content: "step two"}
+	agentSession.events <- Event{Type: EventResult, Content: "final answer text", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-streamcard-separate-answer", time.Now(), nil, nil, state.replyCtx, 0)
+
+	if !card.finalized() {
+		t.Fatalf("expected streaming card to be finalized")
+	}
+	payload, ok := ParseProgressCardPayload(card.finalContent())
+	if !ok {
+		t.Fatalf("final content is not a progress payload: %q", card.finalContent())
+	}
+	if strings.TrimSpace(payload.Answer) != "" {
+		t.Errorf("payload card must NOT embed the answer (delivered separately), got %q", payload.Answer)
+	}
+	// The step texts must still live in the foldable thinking panel.
+	if len(payload.Items) == 0 {
+		t.Errorf("payload card should carry thinking panel entries from step texts")
+	}
+	// The separate final message must carry the answer text.
+	sent := p.getSent()
+	joined := strings.Join(sent, "\n")
+	if !strings.Contains(joined, "final answer text") {
+		t.Errorf("separate final message missing the answer; sent=%v", sent)
+	}
+}
+
+// dualCardPlatform simulates a platform that supports BOTH the streaming-card
+// (StreamingCardPlatform) and the card-style compact progress writer
+// (ProgressStyleProvider=card + PreviewStarter + MessageUpdater). Regression
+// for the "two cards for one turn" bug: with a StreamingCard active the
+// compact progress writer must be disabled, otherwise the platform posts two
+// independently-updated cards for the same turn.
+type dualCardPlatform struct {
+	stubCompactProgressPlatform
+	cardCreated int
+	lastCard    *recordingStreamingCard // last card handed out, for content assertions
+}
+
+// recordingStreamingCard records preview creation through the platform's
+// SendPreviewStart so tests can count how many cards were actually posted.
+type recordingStreamingCard struct {
+	p       *dualCardPlatform
+	updates []string // every Update/Finalize content, in order
+}
+
+func (c *recordingStreamingCard) Update(_ context.Context, content string) error {
+	c.updates = append(c.updates, content)
+	return c.p.sendPreviewOnce()
+}
+
+func (c *recordingStreamingCard) Finalize(_ context.Context, content string) error {
+	c.updates = append(c.updates, content)
+	return c.p.sendPreviewOnce()
+}
+
+func (c *recordingStreamingCard) Failed() bool { return false }
+
+// SupportsStreamingCardPayload marks the card as a payload-style card
+// (mirroring feishuStreamingCard), so the engine encodes the turn as the
+// structured progress payload and the final answer ships as a separate
+// message instead of being embedded in the card body.
+func (c *recordingStreamingCard) SupportsStreamingCardPayload() bool { return true }
+
+// sendPreviewOnce posts a preview exactly once (lazy creation), mirroring
+// feishuStreamingCard's behavior of one SendPreviewStart for the whole turn.
+func (p *dualCardPlatform) sendPreviewOnce() error {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	if p.cardCreated == 1 {
+		p.cardCreated = 2 // already posted
+		p.previewStarts = append(p.previewStarts, "streaming-card")
+	}
+	return nil
+}
+
+func (p *dualCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	p.previewMu.Lock()
+	p.cardCreated = 1
+	card := &recordingStreamingCard{p: p}
+	p.lastCard = card
+	p.previewMu.Unlock()
+	return card, nil
+}
+
+// dualCardAgentSession emits a full turn: thinking, tool use, tool result,
+// final text, then finishes.
+type dualCardAgentSession struct {
+	events chan Event
+}
+
+func newDualCardAgentSession() *dualCardAgentSession {
+	return &dualCardAgentSession{events: make(chan Event, 16)}
+}
+
+func (s *dualCardAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	go func() {
+		s.events <- Event{Type: EventThinking, Content: "分析中……"}
+		s.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "ls"}
+		s.events <- Event{Type: EventToolResult, ToolName: "bash", Content: "ok"}
+		s.events <- Event{Type: EventText, Content: "完成。"}
+		s.events <- Event{Type: EventResult, Content: "完成。", Done: true}
+	}()
+	return nil
+}
+
+func (s *dualCardAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *dualCardAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *dualCardAgentSession) CurrentSessionID() string                             { return "dual" }
+func (s *dualCardAgentSession) Alive() bool                                          { return true }
+func (s *dualCardAgentSession) Close() error                                         { return nil }
+
+// TestStreamingCard_DisablesCompactProgressWriter verifies that when a
+// StreamingCard is active for a turn, the card-style compact progress writer
+// is disabled: the platform must only see the streaming card's single preview
+// creation, never a second "progress card" preview from the compact writer.
+func TestStreamingCard_DisablesCompactProgressWriter(t *testing.T) {
+	p := &dualCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+			style:              "card",
+			supportPayload:     true,
+		},
+	}
+	agentSession := newDualCardAgentSession()
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "legacy", // rich-card path off; streaming card + progress writer both eligible
+	})
+
+	msg := &Message{
+		SessionKey: "feishu:dual",
+		Platform:   "feishu",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// The turn is consumed synchronously up to EventResult; the streaming-card
+	// preview send is a short async tail. Poll (bounded) instead of a fixed
+	// sleep so slow CI runners don't flake.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.previewMu.Lock()
+		cardCreated := p.cardCreated
+		starts := len(p.previewStarts)
+		p.previewMu.Unlock()
+		if cardCreated > 0 && starts >= 1 {
+			// Brief settle window so a (buggy) second preview surfaces too.
+			time.Sleep(100 * time.Millisecond)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for streaming card turn: cardCreated=%d previewStarts=%d", cardCreated, starts)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	p.previewMu.Lock()
+	starts := len(p.previewStarts)
+	p.previewMu.Unlock()
+	if starts != 1 {
+		t.Fatalf("SendPreviewStart calls = %d, want exactly 1 (only the streaming card; compact progress writer must be disabled)", starts)
+	}
+}
+
+// progressCardAgentSession emits a turn with intermediate step text (opencode
+// step buffering) followed by an EventResult carrying the answer content —
+// mirroring the opencode session behavior after the step-buffer change,
+// where the final step's text is delivered ONLY via EventResult.Content.
+type progressCardAgentSession struct {
+	events chan Event
+}
+
+func newProgressCardAgentSession() *progressCardAgentSession {
+	return &progressCardAgentSession{events: make(chan Event, 16)}
+}
+
+func (s *progressCardAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	go func() {
+		s.events <- Event{Type: EventText, Content: "计划：先核对剩余改动。"}
+		s.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "git status"}
+		s.events <- Event{Type: EventToolResult, ToolName: "bash", Content: "ok"}
+		s.events <- Event{Type: EventText, Content: "正在跑全量测试。"}
+		s.events <- Event{Type: EventResult, Content: "都已处理。代码提交 0a66f11。", Done: true}
+	}()
+	return nil
+}
+
+func (s *progressCardAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *progressCardAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *progressCardAgentSession) CurrentSessionID() string                             { return "dual" }
+func (s *progressCardAgentSession) Alive() bool                                          { return true }
+func (s *progressCardAgentSession) Close() error                                         { return nil }
+
+// TestStreamingCard_ProgressTextFoldedIntoPanel is the regression test for
+// "process narration leaked into the final message": intermediate step text
+// must be folded into the foldable thinking panel of the streaming card, and
+// the separate final reply (payload platforms deliver the answer as its own
+// message after the card) must contain ONLY the final answer — never the
+// accumulated per-step narration. The answer arrives solely via
+// EventResult.Content (opencode never forwards it as EventText).
+func TestStreamingCard_ProgressTextFoldedIntoPanel(t *testing.T) {
+	p := &dualCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+			style:              "card",
+			supportPayload:     true,
+		},
+	}
+	agentSession := newProgressCardAgentSession()
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "legacy",
+	})
+
+	msg := &Message{
+		SessionKey: "feishu:dual",
+		Platform:   "feishu",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Wait for the streaming-card turn to settle (finalize + final reply).
+	deadline := time.Now().Add(5 * time.Second)
+	var lastPayload *ProgressCardPayload
+	for {
+		p.previewMu.Lock()
+		card := p.lastCard
+		p.previewMu.Unlock()
+		sent := p.getSent()
+		if card != nil && len(card.updates) > 0 && len(sent) > 0 {
+			content := card.updates[len(card.updates)-1] // final content
+			if pl, ok := ParseProgressCardPayload(content); ok {
+				lastPayload = pl
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for streaming card turn: sent=%d", len(sent))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The final card payload must NOT contain the final answer in its
+	// thinking panel — the answer lives in the separate reply message.
+	for _, item := range lastPayload.Items {
+		if strings.Contains(item.Text, "都已处理") || strings.Contains(item.Text, "0a66f11") {
+			t.Errorf("final answer leaked into card panel: %+v", item)
+		}
+	}
+	panelTexts := map[string]bool{}
+	for _, item := range lastPayload.Items {
+		panelTexts[item.Text] = true
+	}
+	if !panelTexts["计划：先核对剩余改动。"] || !panelTexts["正在跑全量测试。"] {
+		t.Errorf("intermediate step text missing from card panel; items=%v", lastPayload.Items)
+	}
+
+	// The final reply message contains ONLY the answer.
+	sent := p.getSent()
+	joined := strings.Join(sent, "\n")
+	if !strings.Contains(joined, "都已处理。代码提交 0a66f11。") {
+		t.Errorf("final reply missing the answer; sent=%q", sent)
+	}
+	if strings.Contains(joined, "计划：先核对剩余改动。") || strings.Contains(joined, "正在跑全量测试。") {
+		t.Errorf("intermediate step text leaked into final reply; sent=%q", sent)
 	}
 }

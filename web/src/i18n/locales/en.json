@@ -355,6 +355,13 @@
     "rlMaxMessagesHint": "Max messages per window; 0 = disabled",
     "rlWindowSecs": "Window (sec)",
     "rlWindowSecsHint": "Time window in seconds",
+    "retriableError": "Retriable errors",
+    "retriableInitialDelay": "Initial retry delay (sec)",
+    "retriableInitialDelayHint": "Delay before the first retry; 0 = retry immediately",
+    "retriableRetryDelay": "Retry delay (sec)",
+    "retriableRetryDelayHint": "Delay between later retries; 0 = retry immediately",
+    "retriableMaxAttempts": "Max attempts",
+    "retriableMaxAttemptsHint": "Total attempts including the first send",
     "log": "Log",
     "logLevel": "Log level"
   },
