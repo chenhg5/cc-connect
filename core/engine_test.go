@@ -10988,6 +10988,38 @@ func TestCmdStop_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
 	}
 }
 
+// TestCmdStop_StopsCronTurn is the regression test for the bug where /stop in
+// a chat reported "no execution in progress" while a cron-triggered turn was
+// still running (and stuck retrying). Cron turns live under
+// "<chatSessionKey>#cron:<id>" keys, which the exact/suffix lookups missed;
+// /stop must tear them down too so the user can switch provider and re-trigger.
+func TestCmdStop_StopsCronTurn(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("cron-stop-test")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	chatKey := "feishu:ch1:user1"
+	cronKey := chatKey + "#cron:s42"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[cronKey] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: chatKey, Content: "/stop", ReplyCtx: "ctx"}
+	e.cmdStop(p, msg)
+
+	e.interactiveMu.Lock()
+	_, cronExists := e.interactiveStates[cronKey]
+	e.interactiveMu.Unlock()
+
+	if cronExists {
+		t.Error("expected cron-triggered interactive state to be cleaned up by /stop")
+	}
+	if len(p.getSent()) != 1 || !strings.Contains(p.getSent()[0], "stopped") {
+		t.Fatalf("reply = %q, want stopped confirmation (not no-execution)", p.getSent())
+	}
+}
+
 // ===========================================================================
 // Beta pre-release tests: inject_sender, idle_timeout, /shell, /workspace,
 //                         /switch, /memory

@@ -869,6 +869,12 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 		case err = <-done:
 		case <-time.After(timeout):
 			err = fmt.Errorf("job timed out after %v", timeout)
+			// The job goroutine is still waiting on the agent turn. Stop the
+			// running cron turn(s) so the goroutine can return instead of
+			// leaving the turn running for another 30+ minutes (observed live:
+			// a timed-out cron kept its turn alive long after the timeout).
+			stopped := stopCronTurnOnTimeout(engine, job)
+			slog.Warn("cron: job timed out, stopped running turns", "id", job.ID, "manual", manual, "stopped", stopped, "timeout", timeout)
 		}
 	} else {
 		err = <-done
@@ -881,6 +887,22 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 	} else {
 		slog.Info("cron: job completed", "id", job.ID, "manual", manual)
 	}
+}
+
+// stopCronTurnOnTimeout stops the running cron turn(s) for a job whose
+// execution exceeded ExecutionTimeout, so the job goroutine can return instead
+// of leaving the turn running for another 30+ minutes (observed live: a
+// timed-out cron kept its turn alive long after the timeout). New-per-run
+// turns use keys of the form <sessionKey>#cron:<sid>; shared-session turns
+// use <sessionKey> itself. Returns the number of turns stopped.
+func stopCronTurnOnTimeout(engine *Engine, job *CronJob) int {
+	stopped := engine.stopCronTurns(job.SessionKey)
+	if stopped == 0 {
+		if engine.stopInteractiveSessionSilently(job.SessionKey) {
+			stopped = 1
+		}
+	}
+	return stopped
 }
 
 // mutePlatform wraps a Platform and discards all outgoing messages.
