@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -116,13 +118,17 @@ type replyContext struct {
 }
 
 type Platform struct {
-	mu                         sync.RWMutex
-	platformName               string
-	domain                     string
-	appID                      string
-	appSecret                  string
-	progressStyle              string
-	useInteractiveCard         bool
+	mu                 sync.RWMutex
+	platformName       string
+	domain             string
+	appID              string
+	appSecret          string
+	progressStyle      string
+	useInteractiveCard bool
+	// cardHookDir: optional directory of local hook scripts for instant card-action
+	// feedback (see runCardHook). Empty disables the feature entirely.
+	cardHookDir                string
+	cardHookTimeout            time.Duration
 	self                       core.Platform
 	reactionEmoji              string
 	ackEmoji                   string
@@ -423,6 +429,29 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		useInteractiveCard = v
 	}
 
+	// Card hook: optional local scripts for instant card-action feedback.
+	// An empty card_hook_dir (the default) keeps the feature fully disabled.
+	cardHookDir, _ := opts["card_hook_dir"].(string)
+	cardHookDir = strings.TrimSpace(cardHookDir)
+	if cardHookDir != "" {
+		abs, absErr := filepath.Abs(cardHookDir)
+		if absErr != nil {
+			return nil, fmt.Errorf("%s: invalid card_hook_dir %q: %w", name, cardHookDir, absErr)
+		}
+		cardHookDir = abs
+	}
+	cardHookTimeout := 3 * time.Second
+	if raw, ok := opts["card_hook_timeout_ms"]; ok {
+		ms, msErr := coerceMilliseconds(raw)
+		if msErr != nil {
+			return nil, fmt.Errorf("%s: invalid card_hook_timeout_ms %v: %w", name, raw, msErr)
+		}
+		if ms < 100 || ms > 30000 {
+			return nil, fmt.Errorf("%s: card_hook_timeout_ms must be within [100, 30000], got %d", name, ms)
+		}
+		cardHookTimeout = time.Duration(ms) * time.Millisecond
+	}
+
 	imageBatchWindow := defaultImageBatchWindow
 	if raw, ok := opts["image_batch_window_ms"]; ok {
 		ms, err := coerceMilliseconds(raw)
@@ -479,6 +508,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
+		cardHookDir:                cardHookDir,
+		cardHookTimeout:            cardHookTimeout,
 		reactionEmoji:              reactionEmoji,
 		ackEmoji:                   ackEmoji,
 		doneEmoji:                  doneEmoji,
@@ -967,6 +998,22 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			ReplyCtx:   rctx,
 		})
 
+		// Card hook: synchronously run a local script from card_hook_dir and use
+		// its stdout JSON as the replacement card, giving instant click feedback
+		// without an agent round-trip. Any failure falls back to normal dispatch.
+		if p.cardHookDir != "" {
+			if hookName, _ := event.Event.Action.Value["hook"].(string); hookName != "" {
+				cardMap, hookErr := p.runCardHook(hookName, event.Event.Action.Value)
+				if hookErr != nil {
+					slog.Warn(p.tag()+": card hook failed", "hook", hookName, "error", hookErr)
+				} else if cardMap != nil {
+					return &callback.CardActionTriggerResponse{
+						Card: &callback.Card{Type: "raw", Data: cardMap},
+					}, nil
+				}
+			}
+		}
+
 		if ac, ok := event.Event.Action.Value["after_click"].(map[string]any); ok {
 			if title, _ := ac["title"].(string); title != "" {
 				color, _ := ac["color"].(string)
@@ -993,6 +1040,56 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	}
 
 	return nil, nil
+}
+
+// runCardHook executes a local hook script from cardHookDir synchronously.
+// The full button value is passed as JSON on stdin; if stdout parses as a JSON
+// object it is returned as the raw replacement card. The caller treats any
+// error as "no card" and falls back to normal agent dispatch, so a broken or
+// slow hook (bounded by cardHookTimeout) never blocks message handling.
+func (p *Platform) runCardHook(name string, value map[string]any) (map[string]any, error) {
+	script, err := safeHookPath(p.cardHookDir, name)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), p.cardHookTimeout)
+	defer cancel()
+	input, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "bash", script)
+	cmd.Dir = p.cardHookDir
+	// If a killed hook leaves children holding the output pipes, Output() would
+	// block until they exit; WaitDelay caps that grace period so the timeout
+	// above actually holds.
+	cmd.WaitDelay = time.Second
+	cmd.Stdin = bytes.NewReader(input)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("hook exec: %w", err)
+	}
+	var card map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(out), &card); err != nil {
+		return nil, fmt.Errorf("hook stdout not json: %w", err)
+	}
+	return card, nil
+}
+
+// safeHookPath resolves name inside dir, rejecting empty names, absolute paths,
+// and anything that would escape dir after cleaning (e.g. "..", "a/../..").
+func safeHookPath(dir, name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("empty hook name")
+	}
+	if filepath.IsAbs(name) {
+		return "", fmt.Errorf("hook %q must be relative to card_hook_dir", name)
+	}
+	clean := filepath.Clean(filepath.Join(dir, name))
+	if clean == dir || !strings.HasPrefix(clean, dir+string(filepath.Separator)) {
+		return "", fmt.Errorf("hook %q escapes card_hook_dir", name)
+	}
+	return clean, nil
 }
 
 func (p *Platform) addReaction(messageID string) string {
