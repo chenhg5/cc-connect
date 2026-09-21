@@ -17,6 +17,7 @@ type CustomCommand struct {
 	Prompt      string // template with {{1}}, {{2}}, {{2*}}, {{args}} placeholders
 	Exec        string // shell command to execute (mutually exclusive with Prompt)
 	WorkDir     string // optional: working directory for exec command
+	Timeout     int    // optional: shell exec timeout in seconds; 0 = default (60s)
 	Source      string // "config" or "agent" (for display)
 }
 
@@ -34,7 +35,7 @@ func NewCommandRegistry() *CommandRegistry {
 }
 
 // Add registers a custom command.
-func (r *CommandRegistry) Add(name, description, prompt, exec, workDir, source string) {
+func (r *CommandRegistry) Add(name, description, prompt, exec, workDir string, timeout int, source string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.commands[strings.ToLower(name)] = &CustomCommand{
@@ -43,6 +44,7 @@ func (r *CommandRegistry) Add(name, description, prompt, exec, workDir, source s
 		Prompt:      prompt,
 		Exec:        exec,
 		WorkDir:     workDir,
+		Timeout:     timeout,
 		Source:      source,
 	}
 }

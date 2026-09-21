@@ -160,9 +160,9 @@ func Benchmark_CommandRegistryLookup(b *testing.B) {
 
 	// Add commands
 	for i := 0; i < 50; i++ {
-		registry.Add("cmd", "Command", "{{1}}", "", "", "bench")
+		registry.Add("cmd", "Command", "{{1}}", "", "", 0, "bench")
 	}
-	registry.Add("target", "Target command", "{{1}}", "", "", "bench")
+	registry.Add("target", "Target command", "{{1}}", "", "", 0, "bench")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

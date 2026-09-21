@@ -16,7 +16,7 @@ func TestBridgeBuildCapabilitiesSnapshotIncludesProjectCatalog(t *testing.T) {
 	bs := NewBridgeServerInsecure(0, "", "/bridge/ws", nil)
 	bp := bs.NewPlatform("test-proj")
 	e := NewEngine("test-proj", &stubAgent{}, []Platform{bp}, "", LangEnglish)
-	e.AddCommand("deploy", "Deploy app", "ship it", "", "", "config")
+	e.AddCommand("deploy", "Deploy app", "ship it", "", "", 0, "config")
 	bs.RegisterEngine("test-proj", e, bp)
 
 	snapshot := bs.buildCapabilitiesSnapshot()

@@ -245,7 +245,7 @@ func TestSmoke_CommandParsing(t *testing.T) {
 	registry := core.NewCommandRegistry()
 
 	// Add some test commands
-	registry.Add("test", "Test command", "echo {{1}}", "", "", "test")
+	registry.Add("test", "Test command", "echo {{1}}", "", "", 0, "test")
 
 	// Test command resolution
 	cmd, ok := registry.Resolve("test")
@@ -255,7 +255,7 @@ func TestSmoke_CommandParsing(t *testing.T) {
 	assert.Equal(t, "Test command", cmd.Description)
 
 	// Test built-in commands
-	registry.Add("help", "Show help", "help prompt", "", "", "builtin")
+	registry.Add("help", "Show help", "help prompt", "", "", 0, "builtin")
 	cmd, ok = registry.Resolve("help")
 	require.True(t, ok)
 	assert.Equal(t, "help", cmd.Name)
@@ -272,9 +272,9 @@ func TestSmoke_CommandRegistryList(t *testing.T) {
 	registry := core.NewCommandRegistry()
 
 	// Add multiple commands
-	registry.Add("cmd1", "Command 1", "{{1}}", "", "", "test")
-	registry.Add("cmd2", "Command 2", "{{2}}", "", "", "test")
-	registry.Add("alias", "Alias for cmd1", "", "", "", "alias")
+	registry.Add("cmd1", "Command 1", "{{1}}", "", "", 0, "test")
+	registry.Add("cmd2", "Command 2", "{{2}}", "", "", 0, "test")
+	registry.Add("alias", "Alias for cmd1", "", "", "", 0, "alias")
 
 	// List all commands
 	commands := registry.ListAll()
