@@ -82,6 +82,7 @@ type Platform struct {
 	tokenCache     tokenCache
 	dedup          msgDedup
 	userNameCache  sync.Map // userID -> display name
+	sendQuota      sendQuota // outbound sliding-window quota (burst_limit/burst_window_secs)
 }
 
 const defaultAPIBaseURL = "https://qyapi.weixin.qq.com"
@@ -113,6 +114,86 @@ func (d *msgDedup) isDuplicate(msgID int64) bool {
 	}
 	d.seen[msgID] = now
 	return false
+}
+
+// nowFunc returns the current time. It is a package-level variable so tests
+// can override it to drive sendQuota without real sleeps.
+var nowFunc = time.Now
+
+// sendQuota enforces a sliding-window cap on outbound messages to stay under
+// WeChat Work's app-message frequency limit (~20-30 msgs/min for private
+// deployments; excess triggers throttling/account restrictions). Unlike
+// weixin's fail-fast quota (ilink escalates on retry), wecom's limit is a
+// cumulative frequency gate, so this BLOCKS until the window slides — no
+// messages are dropped, matching the engine-level token-bucket semantics.
+//
+// Counting granularity is per API request: a long reply split by splitByBytes
+// into N chunks consumes N slots, because each chunk is a separate WeCom API
+// call and WeCom counts API calls. Configure via the burst_limit /
+// burst_window_secs platform options. A limit of 0 disables the quota.
+type sendQuota struct {
+	mu     sync.Mutex
+	times  []time.Time // send timestamps still inside the window
+	limit  int         // max sends per window; 0 = disabled
+	window time.Duration
+}
+
+// wait blocks until one send slot is available within the sliding window, then
+// records it. Returns nil on success, or ctx.Err() if ctx is cancelled while
+// waiting. When disabled (limit <= 0 or window <= 0) it returns immediately.
+func (q *sendQuota) wait(ctx context.Context) error {
+	if q.limit <= 0 || q.window <= 0 {
+		return nil
+	}
+	for {
+		now := nowFunc()
+		cutoff := now.Add(-q.window)
+		q.mu.Lock()
+		// Drop timestamps that have slid out of the window.
+		kept := q.times[:0]
+		for _, t := range q.times {
+			if t.After(cutoff) {
+				kept = append(kept, t)
+			}
+		}
+		q.times = kept
+		if len(q.times) < q.limit {
+			q.times = append(q.times, now)
+			q.mu.Unlock()
+			return nil
+		}
+		// Window full: wait until the oldest send slides out.
+		oldest := q.times[0]
+		q.mu.Unlock()
+
+		waitFor := oldest.Add(q.window).Sub(now)
+		if waitFor <= 0 {
+			continue // window already slid; retry immediately
+		}
+		timer := time.NewTimer(waitFor)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+			// Loop back to re-check and consume a slot.
+		}
+	}
+}
+
+// pickInt extracts an int from a map value, tolerating the int/int64/float64
+// types TOML decoding may produce. Returns 0 for missing/unsupported values.
+func pickInt(v any) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	default:
+		return 0
+	}
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -183,6 +264,23 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("wecom", allowFrom)
 
+	// Outbound sliding-window quota (see sendQuota). 0 disables the quota.
+	burstLimit := pickInt(opts["burst_limit"])
+	if burstLimit < 0 {
+		burstLimit = 0
+	}
+	burstWindow := pickInt(opts["burst_window_secs"])
+	if burstWindow < 0 {
+		burstWindow = 0
+	}
+	quotaWindow := time.Duration(0)
+	if burstLimit > 0 {
+		if burstWindow <= 0 {
+			burstWindow = 60
+		}
+		quotaWindow = time.Duration(burstWindow) * time.Second
+	}
+
 	return &Platform{
 		corpID:         corpID,
 		corpSecret:     corpSecret,
@@ -195,6 +293,10 @@ func New(opts map[string]any) (core.Platform, error) {
 		callbackPath:   path,
 		enableMarkdown: enableMarkdown,
 		apiClient:      apiClient,
+		sendQuota: sendQuota{
+			limit:  burstLimit,
+			window: quotaWindow,
+		},
 	}, nil
 }
 
@@ -470,6 +572,11 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 
 	chunks := splitByBytes(content, 2000)
 	for i, chunk := range chunks {
+		// Throttle per API request: each chunk is a separate WeCom send call.
+		if err := p.sendQuota.wait(ctx); err != nil {
+			slog.Error("wecom: send quota wait cancelled", "user", rc.userID, "chunk", i, "error", err)
+			return fmt.Errorf("wecom: send quota: %w", err)
+		}
 		var sendErr error
 		if p.enableMarkdown {
 			sendErr = p.sendMarkdown(accessToken, rc.userID, chunk)
@@ -501,6 +608,11 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	accessToken, err := p.getAccessToken()
 	if err != nil {
 		return fmt.Errorf("wecom: send image: %w", err)
+	}
+
+	// Throttle: an image send is one WeCom API call.
+	if err := p.sendQuota.wait(ctx); err != nil {
+		return fmt.Errorf("wecom: send image quota: %w", err)
 	}
 
 	mediaID, err := p.uploadImageMedia(accessToken, img)
