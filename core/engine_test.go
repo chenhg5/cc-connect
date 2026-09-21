@@ -352,6 +352,7 @@ type stubCompactProgressPlatform struct {
 	stubPlatformEngine
 	style          string
 	supportPayload bool
+	updateErr      error
 	previewMu      sync.Mutex
 	previewStarts  []string
 	previewEdits   []string
@@ -379,7 +380,7 @@ func (p *stubCompactProgressPlatform) UpdateMessage(_ context.Context, _ any, co
 	p.previewMu.Lock()
 	p.previewEdits = append(p.previewEdits, content)
 	p.previewMu.Unlock()
-	return nil
+	return p.updateErr
 }
 
 func (p *stubCompactProgressPlatform) BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
@@ -1748,6 +1749,47 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	}
 	if !strings.Contains(edits[0], "echo hi") {
 		t.Fatalf("updated preview should contain tool command, got %q", edits[0])
+	}
+}
+
+func TestProcessInteractiveEvents_CardProgressDoesNotSpamFallbackWhenUpdateFails(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		style string
+	}{
+		{name: "compact", style: "compact"},
+		{name: "card", style: "card"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubCompactProgressPlatform{
+				stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+				style:              tt.style,
+				updateErr:          errors.New("simulated progress update failure"),
+			}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			sessionKey := "feishu:user-fallback"
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-fallback")
+			state := &interactiveState{
+				agentSession: agentSession,
+				platform:     p,
+				replyCtx:     "ctx-fallback",
+			}
+			e.interactiveStates[sessionKey] = state
+
+			agentSession.events <- Event{Type: EventThinking, Content: "Plan first"}
+			agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+			agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"}
+			agentSession.events <- Event{Type: EventText, Content: "done"}
+			agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-fallback", time.Now(), nil, nil, state.replyCtx)
+
+			sent := p.getSent()
+			if len(sent) != 1 || sent[0] != "done" {
+				t.Fatalf("sent = %#v, want only final assistant reply", sent)
+			}
+		})
 	}
 }
 
