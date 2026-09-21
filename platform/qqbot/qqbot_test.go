@@ -1011,6 +1011,257 @@ func TestHandleInteractionCreate_RouterPermission(t *testing.T) {
 	}
 }
 
+// TestHandleInteractionCreate_AskUserQuestion verifies the askq: prefix
+// introduced in #1859 is routed back to the engine as a regular user message
+// (not as a permission response) with the trailing session_key stripped so
+// core.engine.resolveAskQuestionAnswer can map "askq:<qIdx>:<optIdx>" to
+// the option label.
+func TestHandleInteractionCreate_AskUserQuestion(t *testing.T) {
+	tests := []struct {
+		name        string
+		buttonData  string
+		chatType    int
+		wantContent string // expected msg.Content after stripping session_key
+		wantSession string
+		wantMsgType string
+		wantCall    bool
+	}{
+		{
+			name:        "group askq option click",
+			buttonData:  "askq:0:2:qqbot:group-1:user-1",
+			chatType:    1,
+			wantContent: "askq:0:2",
+			wantSession: "qqbot:group-1:user-1",
+			wantMsgType: "group",
+			wantCall:    true,
+		},
+		{
+			name:        "c2c askq option click",
+			buttonData:  "askq:1:1:qqbot:user-1",
+			chatType:    2,
+			wantContent: "askq:1:1",
+			wantSession: "qqbot:user-1",
+			wantMsgType: "c2c",
+			wantCall:    true,
+		},
+		{
+			name:        "multi-question group click",
+			buttonData:  "askq:2:4:qqbot:group-9:user-9",
+			chatType:    1,
+			wantContent: "askq:2:4",
+			wantSession: "qqbot:group-9:user-9",
+			wantMsgType: "group",
+			wantCall:    true,
+		},
+		{
+			name:       "askq missing session_key",
+			buttonData: "askq:0:1",
+			chatType:   2,
+			wantCall:   false,
+		},
+		{
+			name:       "askq empty session_key",
+			buttonData: "askq:0:1:",
+			chatType:   2,
+			wantCall:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Platform{
+				allowFrom: "*",
+			}
+			var got *core.Message
+			p.handler = func(_ core.Platform, msg *core.Message) {
+				got = msg
+			}
+
+			payload := map[string]any{
+				"id":                  "interact-" + tt.name,
+				"group_openid":        "group-1",
+				"group_member_openid": "user-1",
+				"user_openid":         "user-1",
+				"chat_type":           tt.chatType,
+				"data": map[string]any{
+					"type": 11,
+					"resolved": map[string]any{
+						"button_data": tt.buttonData,
+						"button_id":   "b_0_0",
+					},
+				},
+			}
+			data, _ := json.Marshal(payload)
+			p.handleInteractionCreate(data)
+
+			if tt.wantCall && got == nil {
+				t.Fatal("expected synthetic message, got nil")
+			}
+			if !tt.wantCall && got != nil {
+				t.Fatal("expected no message, but handler was called")
+			}
+			if !tt.wantCall {
+				return
+			}
+
+			if got.Content != tt.wantContent {
+				t.Errorf("content = %q, want %q", got.Content, tt.wantContent)
+			}
+			if got.SessionKey != tt.wantSession {
+				t.Errorf("session_key = %q, want %q", got.SessionKey, tt.wantSession)
+			}
+			if got.Platform != "qqbot" {
+				t.Errorf("platform = %q, want qqbot", got.Platform)
+			}
+			if got.IsPermissionResponse {
+				t.Errorf("askq click should NOT set IsPermissionResponse, got true")
+			}
+
+			rctx, ok := got.ReplyCtx.(*replyContext)
+			if !ok {
+				t.Fatal("replyCtx is not *replyContext")
+			}
+			if rctx.messageType != tt.wantMsgType {
+				t.Errorf("messageType = %q, want %q", rctx.messageType, tt.wantMsgType)
+			}
+			if rctx.sessionKey != tt.wantSession {
+				t.Errorf("replyCtx.sessionKey = %q, want %q", rctx.sessionKey, tt.wantSession)
+			}
+		})
+	}
+}
+
+// TestHandleInteractionCreate_AskUserQuestionUnknownChatType verifies that an
+// askq: click arriving with an unrecognised chat_type is dropped silently
+// rather than panicking (mirrors the existing permission-click defensive
+// branch in #1131).
+func TestHandleInteractionCreate_AskUserQuestionUnknownChatType(t *testing.T) {
+	p := &Platform{allowFrom: "*"}
+	called := false
+	p.handler = func(_ core.Platform, _ *core.Message) { called = true }
+
+	payload := map[string]any{
+		"id":          "interact-bad",
+		"group_openid": "group-1",
+		"user_openid":  "user-1",
+		"chat_type":    99, // not 1 (group) or 2 (c2c)
+		"data": map[string]any{
+			"type": 11,
+			"resolved": map[string]any{
+				"button_data": "askq:0:1:qqbot:user-1",
+				"button_id":   "b_0_0",
+			},
+		},
+	}
+	data, _ := json.Marshal(payload)
+	p.handleInteractionCreate(data)
+
+	if called {
+		t.Error("expected handler NOT to be called for unknown chat_type")
+	}
+}
+
+// TestSendWithButtons_AskUserQuestionEncoding verifies that SendWithButtons
+// preserves the engine-recognized "askq:<qIdx>:<optIdx>" payload while
+// appending the session_key suffix used by the INTERACTION_CREATE dispatcher.
+func TestSendWithButtons_AskUserQuestionEncoding(t *testing.T) {
+	var receivedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"id": "msg-out"}`)
+	}))
+	defer server.Close()
+
+	origClient := core.HTTPClient
+	t.Cleanup(func() { core.HTTPClient = origClient })
+	core.HTTPClient = server.Client()
+
+	origProd := apiBaseProduction
+	apiBaseProduction = server.URL
+	t.Cleanup(func() { apiBaseProduction = origProd })
+
+	p := &Platform{
+		token:       "test-token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+	ctx := context.Background()
+	rctx := &replyContext{
+		messageType: "group",
+		groupOpenID: "group-1",
+		userOpenID:  "user-1",
+		sessionKey:  "qqbot:group-1:user-1",
+	}
+
+	buttons := [][]core.ButtonOption{
+		{
+			{Text: "Option A", Data: "askq:0:1"},
+			{Text: "Option B", Data: "askq:0:2"},
+		},
+		{
+			{Text: "允许", Data: "perm:allow"}, // perm: stays unchanged
+		},
+	}
+
+	if err := p.SendWithButtons(ctx, rctx, "请选择", buttons); err != nil {
+		t.Fatalf("SendWithButtons returned error: %v", err)
+	}
+
+	keyboard, ok := receivedBody["keyboard"].(map[string]any)
+	if !ok {
+		t.Fatal("keyboard missing")
+	}
+	content, _ := keyboard["content"].(map[string]any)
+	rows, _ := content["rows"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+
+	// Row 0: askq buttons
+	row0, _ := rows[0].(map[string]any)
+	btns0, _ := row0["buttons"].([]any)
+	if len(btns0) != 2 {
+		t.Fatalf("row 0 expected 2 buttons, got %d", len(btns0))
+	}
+
+	for i, want := range []string{"askq:0:1:qqbot:group-1:user-1", "askq:0:2:qqbot:group-1:user-1"} {
+		btn, _ := btns0[i].(map[string]any)
+		act, _ := btn["action"].(map[string]any)
+		gotData, _ := act["data"].(string)
+		if gotData != want {
+			t.Errorf("askq button[%d] data = %q, want %q", i, gotData, want)
+		}
+		// AskUserQuestion uses yellow visited_label "已选择" + group_id "askq"
+		rd, _ := btn["render_data"].(map[string]any)
+		if rd["visited_label"] != "已选择" {
+			t.Errorf("askq button[%d] visited_label = %v, want %q", i, rd["visited_label"], "已选择")
+		}
+		if btn["group_id"] != "askq" {
+			t.Errorf("askq button[%d] group_id = %v, want %q", i, btn["group_id"], "askq")
+		}
+	}
+
+	// Row 1: perm button must still encode as before
+	row1, _ := rows[1].(map[string]any)
+	btns1, _ := row1["buttons"].([]any)
+	if len(btns1) != 1 {
+		t.Fatalf("row 1 expected 1 button, got %d", len(btns1))
+	}
+	btn1, _ := btns1[0].(map[string]any)
+	act1, _ := btn1["action"].(map[string]any)
+	gotPermData, _ := act1["data"].(string)
+	if gotPermData != "perm:allow:qqbot:group-1:user-1" {
+		t.Errorf("perm button data = %q, want %q", gotPermData, "perm:allow:qqbot:group-1:user-1")
+	}
+	rd1, _ := btn1["render_data"].(map[string]any)
+	if rd1["visited_label"] != "已允许" {
+		t.Errorf("perm button visited_label = %v, want %q", rd1["visited_label"], "已允许")
+	}
+	if btn1["group_id"] != "perm" {
+		t.Errorf("perm button group_id = %v, want %q", btn1["group_id"], "perm")
+	}
+}
+
 func TestSendWithButtons_InvalidReplyCtx(t *testing.T) {
 	p := &Platform{}
 	err := p.SendWithButtons(context.Background(), "invalid", "test", nil)
