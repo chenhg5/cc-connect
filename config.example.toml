@@ -1085,6 +1085,10 @@ app_secret = "your-feishu-app-secret"
 #                           # 机器人间 @通知映射表：friendly_name -> open_id。
 #                           # 当 @name 不是群成员（例如另一个机器人 / Agent，只能用 open_id 标识）时使用。
 #                           # 优先级高于 resolve_mentions 的群成员匹配；需同时开启 resolve_mentions = true。
+# forward_merge_window_ms = 0 # Opt-in fixed window (0–10000ms; 0 disables). Use 1000 to wait up to 1s
+#                            # for the next same-user text explicitly replying to a merged forward.
+#                            # Unrelated messages/commands are never merged and flush the pending forward.
+#                            # 转发与明确引用它的文字附言合并窗口：默认关闭，1000 表示最多等待 1 秒。
 # image_batch_window_ms = 500  # Coalesce window for consecutive images from the same session (default: 500ms).
 #                              # When the Feishu mobile client sends multiple images, each arrives as a separate
 #                              # event; cc-connect buffers them and dispatches a single multi-image message once
