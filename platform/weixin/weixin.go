@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -822,7 +821,7 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string,
 	if strings.TrimSpace(content) == "" {
 		return nil
 	}
-	chunks := splitUTF8(content, maxWeixinChunk)
+	chunks := core.SplitMessageCodeFenceAware(content, maxWeixinChunk)
 	total := len(chunks)
 	for i, chunk := range chunks {
 		// Add delay between chunks to avoid rate limiting (except for first chunk)
@@ -886,23 +885,6 @@ func truncatePreview(s string, max int) string {
 	return s[:max] + "..."
 }
 
-func splitUTF8(s string, maxRunes int) []string {
-	if maxRunes <= 0 || utf8.RuneCountInString(s) <= maxRunes {
-		return []string{s}
-	}
-	var out []string
-	runes := []rune(s)
-	for len(runes) > 0 {
-		n := maxRunes
-		if len(runes) < n {
-			n = len(runes)
-		}
-		out = append(out, string(runes[:n]))
-		runes = runes[n:]
-	}
-	return out
-}
-
 // ReconstructReplyCtx implements core.ReplyContextReconstructor for cron / proactive sends.
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if !strings.HasPrefix(sessionKey, sessionKeyPrefix) {
@@ -916,17 +898,17 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	return &replyContext{peerUserID: peer, contextToken: tok}, nil
 }
 
-// FormattingInstructions implements core.FormattingInstructionProvider.
-func (p *Platform) FormattingInstructions() string {
-	return "Replies are delivered as plain text to Weixin. Avoid markdown tables; use short paragraphs."
-}
+// Weixin renders standard Markdown, so this platform intentionally does not
+// implement core.FormattingInstructionProvider. That optional interface exists
+// for platforms whose syntax deviates from standard Markdown (Slack mrkdwn,
+// Google Chat), and the majority of adapters — Feishu, Telegram, Discord,
+// DingTalk among them — likewise leave it unimplemented.
 
 var (
-	_ core.Platform                      = (*Platform)(nil)
-	_ core.ReplyContextReconstructor     = (*Platform)(nil)
-	_ core.FormattingInstructionProvider = (*Platform)(nil)
-	_ core.ImageSender                   = (*Platform)(nil)
-	_ core.FileSender                    = (*Platform)(nil)
-	_ core.TypingIndicator               = (*Platform)(nil)
-	_ core.AsyncRecoverablePlatform      = (*Platform)(nil)
+	_ core.Platform                  = (*Platform)(nil)
+	_ core.ReplyContextReconstructor = (*Platform)(nil)
+	_ core.ImageSender               = (*Platform)(nil)
+	_ core.FileSender                = (*Platform)(nil)
+	_ core.TypingIndicator           = (*Platform)(nil)
+	_ core.AsyncRecoverablePlatform  = (*Platform)(nil)
 )
