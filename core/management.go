@@ -145,10 +145,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -412,9 +412,9 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 				info := ph.PlatformHealth()
 				if info.Degraded {
 					entry := map[string]any{
-						"name":    info.Name,
-						"reason":  info.DegradedReason,
-						"since":   info.DegradedSince,
+						"name":   info.Name,
+						"reason": info.DegradedReason,
+						"since":  info.DegradedSince,
 					}
 					degradedEntries = append(degradedEntries, entry)
 				}
@@ -571,7 +571,7 @@ func (m *ManagementServer) handleProjects(w http.ResponseWriter, r *http.Request
 			platNames[i] = p.Name()
 		}
 
-		sessCount := len(e.sessions.AllSessions())
+		sessCount := e.managementSessionCount()
 
 		hbEnabled := false
 		if m.heartbeatScheduler != nil {
@@ -675,8 +675,7 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			platInfos[i] = entry
 		}
 
-		allSessions := e.sessions.AllSessions()
-		sessCount := len(allSessions)
+		sessCount := e.managementSessionCount()
 
 		e.interactiveMu.Lock()
 		keys := make([]string, 0, len(e.interactiveStates))
@@ -965,56 +964,63 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		}
 		e.interactiveMu.Unlock()
 
-		idToKey, activeIDs := e.sessions.SessionKeyMap()
-		stored := e.sessions.AllSessions()
-		sessions := make([]map[string]any, 0, len(stored))
-		for _, s := range stored {
-			s.mu.Lock()
-			histCount := len(s.History)
-			var lastMsg map[string]any
-			if histCount > 0 {
-				last := s.History[histCount-1]
-				preview := last.Content
-				if len(preview) > 200 {
-					preview = preview[:200]
+		// In multi-workspace mode sessions live in per-workspace managers, not
+		// the base manager, so aggregate across all of them.
+		var sessions []map[string]any
+		for _, mm := range e.managementSessionManagers() {
+			idToKey, activeIDs := mm.manager.SessionKeyMap()
+			for _, s := range mm.manager.AllSessions() {
+				s.mu.Lock()
+				histCount := len(s.History)
+				var lastMsg map[string]any
+				if histCount > 0 {
+					last := s.History[histCount-1]
+					preview := last.Content
+					if len(preview) > 200 {
+						preview = preview[:200]
+					}
+					lastMsg = map[string]any{
+						"role":      last.Role,
+						"content":   preview,
+						"timestamp": last.Timestamp,
+					}
 				}
-				lastMsg = map[string]any{
-					"role":      last.Role,
-					"content":   preview,
-					"timestamp": last.Timestamp,
+				info := map[string]any{
+					"id":            managementSessionID(s, mm.qualifier),
+					"name":          s.Name,
+					"session_key":   idToKey[s.ID],
+					"agent_type":    s.AgentType,
+					"active":        activeIDs[s.ID],
+					"history_count": histCount,
+					"created_at":    s.CreatedAt,
+					"updated_at":    s.UpdatedAt,
+					"last_message":  lastMsg,
 				}
-			}
-			info := map[string]any{
-				"id":            s.ID,
-				"name":          s.Name,
-				"session_key":   idToKey[s.ID],
-				"agent_type":    s.AgentType,
-				"active":        activeIDs[s.ID],
-				"history_count": histCount,
-				"created_at":    s.CreatedAt,
-				"updated_at":    s.UpdatedAt,
-				"last_message":  lastMsg,
-			}
-			s.mu.Unlock()
+				s.mu.Unlock()
 
-			sessionKey := idToKey[s.ID]
-			_, live := activeKeys[sessionKey]
-			info["live"] = live
-			if p, ok := activeKeys[sessionKey]; ok {
-				info["platform"] = p
-			} else if len(sessionKey) > 0 {
-				parts := splitSessionKey(sessionKey)
-				if len(parts) > 0 {
-					info["platform"] = parts[0]
+				if mm.workspace != "" {
+					info["workspace"] = mm.workspace
 				}
-			}
 
-			if meta := e.sessions.GetUserMeta(sessionKey); meta != nil {
-				info["user_name"] = meta.UserName
-				info["chat_name"] = meta.ChatName
-			}
+				sessionKey := idToKey[s.ID]
+				_, live := activeKeys[sessionKey]
+				info["live"] = live
+				if p, ok := activeKeys[sessionKey]; ok {
+					info["platform"] = p
+				} else if len(sessionKey) > 0 {
+					parts := splitSessionKey(sessionKey)
+					if len(parts) > 0 {
+						info["platform"] = parts[0]
+					}
+				}
 
-			sessions = append(sessions, info)
+				if meta := mm.manager.GetUserMeta(sessionKey); meta != nil {
+					info["user_name"] = meta.UserName
+					info["chat_name"] = meta.ChatName
+				}
+
+				sessions = append(sessions, info)
+			}
 		}
 
 		mgmtJSON(w, http.StatusOK, map[string]any{
@@ -1036,11 +1042,14 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 			return
 		}
 
-		s := e.sessions.GetOrCreateActive(body.SessionKey)
+		// Resolve the workspace manager for this session key so the new session
+		// lands where the agent will actually look (multi-workspace mode).
+		_, sessions := e.sessionContextForKey(body.SessionKey)
+		s := sessions.GetOrCreateActive(body.SessionKey)
 		if body.Name != "" {
 			s.SetName(body.Name)
 		}
-		e.sessions.Save()
+		sessions.Save()
 
 		mgmtJSON(w, http.StatusOK, map[string]any{
 			"session_key": body.SessionKey,
@@ -1055,11 +1064,12 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *http.Request, e *Engine, sessionID string) {
 	switch r.Method {
 	case http.MethodGet:
-		s := e.sessions.FindByID(sessionID)
-		if s == nil {
+		ms, ok := e.findManagementSession(sessionID)
+		if !ok {
 			mgmtError(w, http.StatusNotFound, "session not found")
 			return
 		}
+		s := ms.session
 		histLimit := 50
 		if v := r.URL.Query().Get("history_limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -1077,7 +1087,7 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 			}
 		}
 
-		idToKey, activeIDs := e.sessions.SessionKeyMap()
+		idToKey, activeIDs := ms.manager.SessionKeyMap()
 		sessionKey := idToKey[s.ID]
 
 		e.interactiveMu.Lock()
@@ -1086,7 +1096,7 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 
 		s.mu.Lock()
 		data := map[string]any{
-			"id":               s.ID,
+			"id":               managementSessionID(s, ms.qualifier),
 			"name":             s.Name,
 			"session_key":      sessionKey,
 			"agent_session_id": s.AgentSessionID,
@@ -1106,11 +1116,14 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 				data["platform"] = parts[0]
 			}
 		}
+		if ms.workspace != "" {
+			data["workspace"] = ms.workspace
+		}
 
 		mgmtJSON(w, http.StatusOK, data)
 
 	case http.MethodDelete:
-		if e.sessions.DeleteByID(sessionID) {
+		if ms, ok := e.findManagementSession(sessionID); ok && ms.manager.DeleteByID(ms.session.ID) {
 			mgmtOK(w, "session deleted")
 		} else {
 			mgmtError(w, http.StatusNotFound, "session not found")
@@ -1138,7 +1151,12 @@ func (m *ManagementServer) handleProjectSessionSwitch(w http.ResponseWriter, r *
 		mgmtError(w, http.StatusBadRequest, "session_key and session_id are required")
 		return
 	}
-	s, err := e.sessions.SwitchSession(body.SessionKey, body.SessionID)
+	ms, ok := e.findManagementSession(body.SessionID)
+	if !ok {
+		mgmtError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	s, err := ms.manager.SwitchSession(body.SessionKey, ms.session.ID)
 	if err != nil {
 		mgmtError(w, http.StatusNotFound, err.Error())
 		return
@@ -1942,10 +1960,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep
