@@ -775,6 +775,18 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}
 	}
 
+	// Check allow_from filter: card actions (nav:/act:/cmd:/perm:/askq:) can
+	// trigger an agent turn exactly like a typed message, so they must be
+	// gated by the same per-user allowlist the text-message handler enforces.
+	// allow_chat only controls which chat cc-connect observes; allow_from
+	// controls who may act within it.
+	if event.Event.Operator != nil && event.Event.Operator.OpenID != "" {
+		if !core.AllowList(p.allowFrom, event.Event.Operator.OpenID) {
+			slog.Debug(p.tag()+": card action from unauthorized user", "user", event.Event.Operator.OpenID)
+			return nil, nil
+		}
+	}
+
 	actionVal, _ := event.Event.Action.Value["action"].(string)
 
 	// select_static callbacks put the chosen value in event.Event.Action.Option
