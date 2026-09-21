@@ -5506,6 +5506,79 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	}
 }
 
+// stubPiEffortAgent mimics agent/pi's reasoning effort set, which differs from
+// Codex's (no "max"; adds "off" and "minimal").
+type stubPiEffortAgent struct {
+	stubModelModeAgent
+}
+
+func (a *stubPiEffortAgent) AvailableReasoningEfforts() []string {
+	return []string{"off", "minimal", "low", "medium", "high", "xhigh"}
+}
+
+// TestCmdReasoning_NoHardcodedCodexLevels is a regression test for the bug
+// where /reasoning displayed Codex-specific text for every agent: the
+// not-set hint said "using Codex default" and the usage line hardcoded
+// Codex's <low|medium|high|xhigh|max> set. The usage line must list the
+// active agent's own AvailableReasoningEfforts() and mention no agent name.
+func TestCmdReasoning_NoHardcodedCodexLevels(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubPiEffortAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Listing (no args) on a text platform.
+	e.cmdReasoning(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	got := p.sent[0]
+	if !strings.Contains(got, "off|minimal|low|medium|high|xhigh") {
+		t.Fatalf("usage line must list the agent's own efforts, got: %s", got)
+	}
+	if strings.Contains(got, "max") {
+		t.Fatalf("usage line must not contain efforts outside the agent's set (max), got: %s", got)
+	}
+	if strings.Contains(got, "Codex") {
+		t.Fatalf("output must not hardcode the agent name Codex, got: %s", got)
+	}
+
+	// Invalid target (a Codex-only level) also renders the agent-specific usage line.
+	p.sent = nil
+	e.cmdReasoning(p, msg, []string{"max"})
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply for invalid effort, got %d", len(p.sent))
+	}
+	got = p.sent[0]
+	if !strings.Contains(got, "off|minimal|low|medium|high|xhigh") || strings.Contains(got, "Codex") {
+		t.Fatalf("invalid-effort reply = %q, want agent-specific usage without Codex mention", got)
+	}
+	if agent.reasoningEffort != "" {
+		t.Fatalf("reasoning effort = %q, want unchanged empty", agent.reasoningEffort)
+	}
+
+	// Card path: the not-set hint and card note must also stay agent-agnostic.
+	card := e.renderReasoningCard()
+	var md, note string
+	for _, el := range card.Elements {
+		switch v := el.(type) {
+		case CardMarkdown:
+			md += v.Content
+		case CardNote:
+			note += v.Text
+		}
+	}
+	if strings.Contains(md, "Codex") || strings.Contains(note, "Codex") {
+		t.Fatalf("card must not mention Codex, markdown: %q note: %q", md, note)
+	}
+	if !strings.Contains(md, "not set, using default") {
+		t.Fatalf("card markdown should show agent-agnostic default hint, got: %q", md)
+	}
+	if !strings.Contains(note, "off|minimal|low|medium|high|xhigh") {
+		t.Fatalf("card note must list the agent's own efforts, got: %q", note)
+	}
+}
+
 // TestCmdReasoning_MultiWorkspaceSavesToWorkspaceSessions is a regression test
 // for the bug where cmdReasoning called e.sessions.Save() (global) instead of
 // sessions.Save() (workspace-resolved), leaving workspace session state unsaved.
