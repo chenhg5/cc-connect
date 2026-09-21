@@ -24,6 +24,7 @@ import (
 // A single instance is created globally; each project engine receives a
 // lightweight BridgePlatform handle that delegates to this server.
 type BridgeServer struct {
+	bind        string
 	port        int
 	token       string
 	path        string
@@ -153,16 +154,26 @@ type bridgeAudioData struct {
 }
 
 func NewBridgeServer(port int, token, path string, corsOrigins []string) *BridgeServer {
-	return newBridgeServer(port, token, path, corsOrigins, false)
+	return newBridgeServer("", port, token, path, corsOrigins, false)
+}
+
+// NewBridgeServerWithBind creates a BridgeServer on the specified interface.
+func NewBridgeServerWithBind(bind string, port int, token, path string, corsOrigins []string) *BridgeServer {
+	return newBridgeServer(bind, port, token, path, corsOrigins, false)
 }
 
 // NewBridgeServerInsecure creates a BridgeServer that allows running without token.
 // This should only be used for local development.
 func NewBridgeServerInsecure(port int, token, path string, corsOrigins []string) *BridgeServer {
-	return newBridgeServer(port, token, path, corsOrigins, true)
+	return newBridgeServer("", port, token, path, corsOrigins, true)
 }
 
-func newBridgeServer(port int, token, path string, corsOrigins []string, insecure bool) *BridgeServer {
+// NewBridgeServerInsecureWithBind creates an insecure BridgeServer on the specified interface.
+func NewBridgeServerInsecureWithBind(bind string, port int, token, path string, corsOrigins []string) *BridgeServer {
+	return newBridgeServer(bind, port, token, path, corsOrigins, true)
+}
+
+func newBridgeServer(bind string, port int, token, path string, corsOrigins []string, insecure bool) *BridgeServer {
 	if port <= 0 {
 		port = 9810
 	}
@@ -184,6 +195,7 @@ func newBridgeServer(port int, token, path string, corsOrigins []string, insecur
 	}
 
 	return &BridgeServer{
+		bind:        normalizeBind(bind),
 		port:        port,
 		token:       token,
 		path:        path,
@@ -219,7 +231,7 @@ func (bs *BridgeServer) Start() {
 	mux.HandleFunc("/bridge/sessions", bs.corsHTTP(bs.authHTTP(bs.handleSessions)))
 	mux.HandleFunc("/bridge/sessions/", bs.corsHTTP(bs.authHTTP(bs.handleSessionRoutes)))
 
-	addr := fmt.Sprintf(":%d", bs.port)
+	addr := listenAddress(bs.bind, bs.port)
 	bs.server = &http.Server{Addr: addr, Handler: mux}
 
 	go func() {

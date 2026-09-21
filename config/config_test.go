@@ -1969,6 +1969,22 @@ func readTestConfig(t *testing.T) Config {
 	return cfg
 }
 
+func TestEnableWebAdmin_DefaultsServersToLoopback(t *testing.T) {
+	writeTestConfig(t, "")
+
+	if _, err := EnableWebAdmin("management-token", "bridge-token"); err != nil {
+		t.Fatalf("EnableWebAdmin returned error: %v", err)
+	}
+
+	cfg := readTestConfig(t)
+	if got, want := cfg.Management.Bind, "127.0.0.1"; got != want {
+		t.Fatalf("management bind = %q, want %q", got, want)
+	}
+	if got, want := cfg.Bridge.Bind, "127.0.0.1"; got != want {
+		t.Fatalf("bridge bind = %q, want %q", got, want)
+	}
+}
+
 func TestLoadRelayTimeoutConfig(t *testing.T) {
 	configPath := writeConfigFixture(t, relayConfigFixture)
 

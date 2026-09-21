@@ -1022,6 +1022,7 @@ Add the following to `config.toml`:
 ```toml
 [management]
 enabled = true
+bind = "127.0.0.1"              # Loopback only by default; set 0.0.0.0 to allow remote access
 port = 9820                     # Management UI & API listen port
 token = "your-secret-token"     # Login token; /web setup generates one automatically
 cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS headers
@@ -1081,6 +1082,7 @@ Add the following to `config.toml`:
 ```toml
 [bridge]
 enabled = true
+bind = "127.0.0.1"              # Loopback only by default; set 0.0.0.0 to allow remote adapters
 port = 9810                     # Bridge listen port (separate from management)
 token = "your-bridge-secret"    # Auth token for WebSocket and REST
 path = "/bridge/ws"             # WebSocket endpoint path

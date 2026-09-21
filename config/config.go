@@ -159,6 +159,7 @@ type WebhookConfig struct {
 // BridgeConfig controls the WebSocket bridge for external platform adapters.
 type BridgeConfig struct {
 	Enabled     *bool    `toml:"enabled"`                // default false
+	Bind        string   `toml:"bind,omitempty"`         // listen interface; default 127.0.0.1
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9810
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required unless insecure=true
 	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
@@ -179,6 +180,7 @@ type HookConfig struct {
 // ManagementConfig controls the HTTP Management API for external tools.
 type ManagementConfig struct {
 	Enabled     *bool    `toml:"enabled"`                // default false
+	Bind        string   `toml:"bind,omitempty"`         // listen interface; default 127.0.0.1
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9820
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
@@ -3989,6 +3991,9 @@ func EnableWebAdmin(mgmtToken, bridgeToken string) (*WebSetupResult, error) {
 	changed := false
 	if !mgmtEnabled {
 		cfg.Management.Enabled = &t
+		if cfg.Management.Bind == "" {
+			cfg.Management.Bind = "127.0.0.1"
+		}
 		if cfg.Management.Port == 0 {
 			cfg.Management.Port = 9820
 		}
@@ -4002,6 +4007,9 @@ func EnableWebAdmin(mgmtToken, bridgeToken string) (*WebSetupResult, error) {
 	}
 	if !bridgeEnabled {
 		cfg.Bridge.Enabled = &t
+		if cfg.Bridge.Bind == "" {
+			cfg.Bridge.Bind = "127.0.0.1"
+		}
 		if cfg.Bridge.Port == 0 {
 			cfg.Bridge.Port = 9810
 		}
