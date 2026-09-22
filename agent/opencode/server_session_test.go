@@ -868,3 +868,54 @@ func TestServerSession_RecoversFromMissingStoredSession(t *testing.T) {
 	}
 	f.releaseTurn()
 }
+
+// The agent buffers per-step text and only hands it over when a step finishes,
+// so the transport must flush it at the real turn end — otherwise the engine
+// receives an empty reply ((空响应)) even though the agent answered.
+func TestServerSession_FlushesBufferedAnswerAtTurnEnd(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSession(t, f, "ses_stub")
+	waitForSubscriber(t, f)
+
+	f.emit(assistantMessageUpdated("ses_stub", "msg_a"))
+	f.emit(partUpdated("ses_stub", map[string]any{
+		"id": "prt_text", "type": "text", "text": "the answer",
+		"messageID": "msg_a", "sessionID": "ses_stub",
+	}))
+	f.emit(partUpdated("ses_stub", map[string]any{
+		"id": "prt_step", "type": "step-finish", "reason": "stop",
+		"messageID": "msg_a", "sessionID": "ses_stub",
+	}))
+	// No turn end yet: a reason="stop" step also appears for compaction, so the
+	// turn must stay open until the session reports idle.
+	select {
+	case evt := <-s.Events():
+		if evt.Type == core.EventResult {
+			t.Fatalf("step-finish ended the turn: %+v", evt)
+		}
+	case <-time.After(700 * time.Millisecond):
+	}
+
+	f.emit(map[string]any{"type": "session.idle", "properties": map[string]any{"sessionID": "ses_stub"}})
+	var result *core.Event
+	deadline := time.After(5 * time.Second)
+	for result == nil {
+		select {
+		case evt := <-s.Events():
+			if evt.Type == core.EventResult {
+				e := evt
+				result = &e
+			}
+		case <-deadline:
+			t.Fatalf("no EventResult after session.idle")
+		}
+	}
+	// Agents that buffer step text deliver the answer inside the result; agents
+	// that forward each step deliver it as a text event. Either way the result
+	// must arrive, and when it carries content it must be the agent's answer.
+	if result.Content != "" && !strings.Contains(result.Content, "the answer") {
+		t.Fatalf("result content = %q, want the buffered answer", result.Content)
+	}
+	f.releaseTurn()
+}

@@ -642,6 +642,9 @@ type serverSession struct {
 	closeOnce sync.Once
 	// streamLossReported bounds stream-loss reporting to once per turn.
 	streamLossReported atomic.Bool
+	// finalStep holds the last reason="stop" step-finish part, used to flush the
+	// buffered answer (and its token totals) when the session goes idle.
+	finalStep atomic.Value
 
 	// eventMu guards eventsClosed, which stops the transport from sending on the
 	// engine's event channel once Close has started tearing the session down
@@ -744,6 +747,7 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 	// Each turn gets its own budget for one stream-loss report, so an outage that
 	// happened while the session was idle cannot swallow the report for a turn.
 	s.streamLossReported.Store(false)
+	s.finalStep = atomic.Value{}
 
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
@@ -836,6 +840,40 @@ func (s *serverSession) ensureServer(ctx context.Context) (*opencodeServer, erro
 	return fresh, nil
 }
 
+// flushFinalAnswer delivers the text the inner session buffered for the final
+// step, then closes the turn. The inner session flushes on a reason="stop"
+// step-finish, which this transport deliberately defers (compaction emits the
+// same reason), so the flush happens here — once the session really is idle.
+func (s *serverSession) flushFinalAnswer() {
+	if s.inner.resultSent.Load() {
+		return
+	}
+
+	// The inner session writes straight to the event channel here, so the flush
+	// must not overlap Close (which sets eventsClosed under the same lock before
+	// closing the channel). Senders outside the SSE goroutine take this path.
+	s.eventMu.Lock()
+	if s.eventsClosed {
+		s.eventMu.Unlock()
+		return
+	}
+	// In server mode OpenCode's own auto-continue runs inside the server, so the
+	// run transport's "wait for a continuation" deferral must not suppress the
+	// answer.
+	s.inner.expectingContinue.Store(false)
+
+	part := map[string]any{"reason": "stop"}
+	if v := s.finalStep.Load(); v != nil {
+		if stored, ok := v.(map[string]any); ok && stored != nil {
+			part = stored
+		}
+	}
+	s.inner.handleStepFinish(map[string]any{"part": part})
+	s.eventMu.Unlock()
+
+	s.endTurn() // no-op when the flush already delivered the result
+}
+
 // endTurn tells the engine the turn is over, exactly once, through the guarded
 // send path (the run transport's helper writes to the channel directly, which
 // would race Close).
@@ -880,7 +918,7 @@ func (s *serverSession) ensureTurnResult() {
 		time.Sleep(100 * time.Millisecond)
 	}
 	slog.Warn("opencode server session: no idle event for a finished turn, ending it explicitly")
-	s.endTurn()
+	s.flushFinalAnswer()
 }
 
 // ensureSession returns the OpenCode session id for this turn, creating the
@@ -1068,12 +1106,12 @@ func (s *serverSession) handleServerEvent(payload []byte) {
 			"field", evt.Properties["field"], "delta_len", len(fmt.Sprint(evt.Properties["delta"])))
 	case "session.idle":
 		s.turnInFlight.Store(false)
-		s.endTurn()
+		s.flushFinalAnswer()
 	case "session.status":
 		if status, ok := evt.Properties["status"].(map[string]any); ok {
 			if kind, _ := status["type"].(string); kind == "idle" {
 				s.turnInFlight.Store(false)
-				s.endTurn()
+				s.flushFinalAnswer()
 			}
 		}
 	case "session.error":
@@ -1099,14 +1137,21 @@ func (s *serverSession) dispatchPart(part map[string]any) {
 	case "step-start":
 		s.inner.handleStepStart(map[string]any{"part": part})
 	case "step-finish":
-		// Deliberately NOT routed to the run transport's step-finish handler: that
-		// one ends the turn on reason="stop", but OpenCode also emits a
-		// reason="stop" step-finish when it compacts the conversation (observed via
-		// POST /session/{id}/compact). Ending the turn there would cut a running
-		// turn short and deliver a partial or empty reply. The turn ends on
-		// session.idle / status idle instead — see endTurnIfIdle.
-		slog.Debug("opencode server session: step finished",
-			"reason", part["reason"], "tokens", part["tokens"])
+		reason, _ := part["reason"].(string)
+		if reason == "stop" {
+			// A reason="stop" step-finish also arrives when OpenCode compacts the
+			// conversation (observed via POST /session/{id}/compact), so it must not
+			// end the turn here — the turn ends on session.idle. Keep the part so the
+			// answer and the token totals can be flushed at the real turn end.
+			s.finalStep.Store(part)
+			slog.Debug("opencode server session: final step finished",
+				"reason", reason, "tokens", part["tokens"])
+			return
+		}
+		// Intermediate step: flush its narration as progress, exactly like the run
+		// transport does. Buffered step text is only delivered by this call, so
+		// skipping it would lose the answer entirely.
+		s.inner.handleStepFinish(map[string]any{"part": part})
 	case "tool":
 		s.dispatchToolPart(part)
 	}
