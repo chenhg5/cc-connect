@@ -22,6 +22,23 @@ import (
 // slow we'd rather return nothing than block `/ls` in IM.
 var listSessionsProbeTimeout = 15 * time.Second
 
+// sessionConfigProbeTimeout bounds a one-shot initialize + session/new
+// probe used to answer /model and /mode when no session is active
+// (see probeSessionConfig). It is deliberately independent from the
+// caller's ctx (cmdModel/cmdMode only pass 10s) because a cold start —
+// spawning the agent, initializing MCP servers, returning a possibly
+// large model list — can exceed 10s.
+//
+// This is an upper bound, not a fixed wait: fast agents return in well
+// under a second (mimo ~0.8s, codebuddy ~3s, kiro ~5s) and are unaffected.
+// It only matters for slow agents. The slowest tested (hermes, 108 models
+// fetched from a dynamic backend) has a highly variable probe: ~11-13s
+// typical but observed above 20s under load. 20s timed out intermittently
+// (probe returned an empty list -> /model showed "not supported"), so 30s
+// is used to reliably cover the worst case while leaving fast agents
+// unaffected.
+var sessionConfigProbeTimeout = 30 * time.Second
+
 // acpModeInfo mirrors the ACP `modes.availableModes[]` shape sent by
 // servers like `devin acp`, Cursor Agent, Copilot CLI, etc.
 type acpModeInfo struct {
@@ -35,6 +52,59 @@ type acpModeInfo struct {
 type acpModesBlock struct {
 	CurrentModeID  string        `json:"currentModeId"`
 	AvailableModes []acpModeInfo `json:"availableModes"`
+}
+
+// acpModelInfo mirrors an entry in the ACP `models.availableModels[]`
+// array (early Zed-style model selector, used by Kiro CLI and others).
+// See: ACP model selector PR #182.
+type acpModelInfo struct {
+	ModelID     string `json:"modelId"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// acpModelsBlock mirrors the `models` object returned inside `session/new`
+// and `session/load` responses. It is the model-selector counterpart of
+// acpModesBlock (modes), and is switched via `session/set_model`.
+type acpModelsBlock struct {
+	CurrentModelID  string         `json:"currentModelId"`
+	AvailableModels []acpModelInfo `json:"availableModels"`
+}
+
+// acpConfigOption mirrors an entry in the newer ACP `configOptions[]`
+// mechanism (Session Config Options RFD), an alternative to the top-level
+// `models`/`modes` blocks. A single `configOptions` array carries multiple
+// selectors distinguished by Category ("model", "mode", "thought_level",
+// ...), and values are switched via `session/set_config_option`.
+// Agents such as OpenCode use this; kiro/mimo/codebuddy/hermes use the
+// `models`/`modes` blocks instead. cc-connect supports both.
+// See: https://agentclientprotocol.com/rfds/session-config-options
+type acpConfigOption struct {
+	ID           string                   `json:"id"`
+	Name         string                   `json:"name"`
+	Description  string                   `json:"description,omitempty"`
+	Category     string                   `json:"category,omitempty"`
+	Type         string                   `json:"type"`
+	CurrentValue string                   `json:"currentValue"`
+	Options      []acpConfigSelectOptions `json:"options"`
+}
+
+// acpConfigSelectOptions is an entry in a configOption's option list. It is
+// either a direct option (Value non-empty) or a group (Group non-empty with
+// nested Options).
+type acpConfigSelectOptions struct {
+	Value       string                  `json:"value,omitempty"`
+	Name        string                  `json:"name,omitempty"`
+	Description string                  `json:"description,omitempty"`
+	Group       string                  `json:"group,omitempty"`
+	Options     []acpConfigSelectOption `json:"options,omitempty"`
+}
+
+// acpConfigSelectOption is a single option inside a group.
+type acpConfigSelectOption struct {
+	Value       string `json:"value"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 // acpInitializeResult is the subset of `initialize` fields this package
