@@ -178,7 +178,7 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	// In yolo/auto mode, skip permission prompts entirely so headless
 	// runs don't get stuck with auto-rejected external-directory ops.
 	if s.mode == "yolo" {
-		args = append(args, "--dangerously-skip-permissions")
+		args = append(args, "--auto")
 	}
 
 	for _, imagePath := range imagePaths {

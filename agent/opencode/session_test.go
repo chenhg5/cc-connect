@@ -120,6 +120,37 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 	}
 }
 
+func TestOpencodeSessionBuildRunArgsYoloUsesAuto(t *testing.T) {
+	s := &opencodeSession{workDir: "/repo", mode: "yolo"}
+
+	args := s.buildRunArgs("run automatically", nil, "")
+	if !containsString(args, "--auto") {
+		t.Fatalf("args = %#v, want --auto", args)
+	}
+	if containsString(args, "--dangerously-skip-permissions") {
+		t.Fatalf("args = %#v, contains removed legacy permission flag", args)
+	}
+}
+
+func TestOpencodeSessionBuildRunArgsNonYoloOmitsAuto(t *testing.T) {
+	for _, mode := range []string{"", "default"} {
+		s := &opencodeSession{workDir: "/repo", mode: mode}
+		args := s.buildRunArgs("run normally", nil, "")
+		if containsString(args, "--auto") {
+			t.Fatalf("mode %q args = %#v, must not contain --auto", mode, args)
+		}
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestHandleStepStart_SessionIDFromTopLevel verifies that handleStepStart
 // prefers the sessionID from the top-level JSON field when both top-level
 // and part-level sessionID are present. This matches OpenCode's stdout format.
