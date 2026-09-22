@@ -7919,7 +7919,7 @@ func (e *Engine) cmdTasks(p Platform, msg *Message, args []string) {
 			title = string(runes[:60]) + "..."
 		}
 		project := filepath.Base(filepath.Clean(session.WorkDir))
-		sb.WriteString(fmt.Sprintf("%d. %s\n   %s · %s\n", i+1, title, project, session.ModifiedAt.Format("01-02 15:04")))
+		fmt.Fprintf(&sb, "%d. %s\n   %s · %s\n", i+1, title, project, session.ModifiedAt.Format("01-02 15:04"))
 	}
 	sb.WriteString(e.i18n.T(MsgTasksHint))
 	e.reply(p, msg.ReplyCtx, sb.String())
