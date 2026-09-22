@@ -12,8 +12,8 @@ import (
 // digits, so lexicographic order is chronological even across the 9→10→11
 // digit boundaries. A regression to bare %d breaks both assertions below.
 func TestStaleLockDumpNamePadding(t *testing.T) {
-	older := staleLockDumpName(999999999, "sessA")   // 9-digit ts
-	newer := staleLockDumpName(1000000000, "sessB")  // 10-digit ts
+	older := staleLockDumpName(999999999, "sessA")  // 9-digit ts
+	newer := staleLockDumpName(1000000000, "sessB") // 10-digit ts
 	wantOlder := "busy-stale-0000999999999-sessA.txt"
 	if older != wantOlder {
 		t.Fatalf("got %q, want %q", older, wantOlder)
