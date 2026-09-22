@@ -254,6 +254,16 @@ const (
 	MsgListPageHint              MsgKey = "list_page_hint"
 	MsgListSwitchHint            MsgKey = "list_switch_hint"
 	MsgListError                 MsgKey = "list_error"
+	MsgTasksNotSupported         MsgKey = "tasks_not_supported"
+	MsgTasksMultiWorkspace       MsgKey = "tasks_multi_workspace"
+	MsgTasksEmpty                MsgKey = "tasks_empty"
+	MsgTasksNoMatch              MsgKey = "tasks_no_match"
+	MsgTasksTitle                MsgKey = "tasks_title"
+	MsgTasksSearchTitle          MsgKey = "tasks_search_title"
+	MsgTasksHint                 MsgKey = "tasks_hint"
+	MsgGotoUsage                 MsgKey = "goto_usage"
+	MsgGotoInvalidIndex          MsgKey = "goto_invalid_index"
+	MsgGotoSuccess               MsgKey = "goto_success"
 	MsgHistoryEmpty              MsgKey = "history_empty"
 	MsgNameUsage                 MsgKey = "name_usage"
 	MsgNameSet                   MsgKey = "name_set"
@@ -585,6 +595,8 @@ const (
 
 	MsgBuiltinCmdNew       MsgKey = "new"
 	MsgBuiltinCmdList      MsgKey = "list"
+	MsgBuiltinCmdTasks     MsgKey = "tasks"
+	MsgBuiltinCmdGoto      MsgKey = "goto"
 	MsgBuiltinCmdSearch    MsgKey = "search"
 	MsgBuiltinCmdSwitch    MsgKey = "switch"
 	MsgBuiltinCmdDelete    MsgKey = "delete"
@@ -1039,6 +1051,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "📖 Available Commands\n\n" +
 			"/new [name]\n  Start a new session\n\n" +
 			"/list\n  List agent sessions\n\n" +
+			"/tasks [keyword]\n  List sessions across work directories\n\n" +
+			"/goto <number>\n  Resume a session from /tasks\n\n" +
 			"/search <keyword>\n  Search sessions by name or ID\n\n" +
 			"/switch <number>\n  Resume a session by its list number\n\n" +
 			"/delete <number>|1,2,3|3-7|1,3-5,8\n  Delete sessions by list number(s)\n\n" +
@@ -1083,6 +1097,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "📖 可用命令\n\n" +
 			"/new [名称]\n  创建新会话\n\n" +
 			"/list\n  列出 Agent 会话列表\n\n" +
+			"/tasks [关键词]\n  列出所有工作目录的会话\n\n" +
+			"/goto <序号>\n  继续 /tasks 列表中的会话\n\n" +
 			"/search <关键词>\n  搜索会话名称或 ID\n\n" +
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
 			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
@@ -1127,6 +1143,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📖 可用命令\n\n" +
 			"/new [名稱]\n  建立新會話\n\n" +
 			"/list\n  列出 Agent 會話列表\n\n" +
+			"/tasks [關鍵詞]\n  列出所有工作目錄的會話\n\n" +
+			"/goto <序號>\n  繼續 /tasks 列表中的會話\n\n" +
 			"/search <關鍵詞>\n  搜尋會話名稱或 ID\n\n" +
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
 			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
@@ -1170,6 +1188,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
 			"/new [名前]\n  新しいセッションを開始\n\n" +
 			"/list\n  エージェントセッション一覧\n\n" +
+			"/tasks [キーワード]\n  すべての作業ディレクトリのセッション一覧\n\n" +
+			"/goto <番号>\n  /tasks からセッションを再開\n\n" +
 			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
 			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
@@ -1212,6 +1232,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish: "📖 Comandos disponibles\n\n" +
 			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
 			"/list\n  Listar sesiones del agente\n\n" +
+			"/tasks [palabra clave]\n  Listar sesiones de todos los directorios\n\n" +
+			"/goto <número>\n  Reanudar sesión de /tasks\n\n" +
 			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
 			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
@@ -1263,6 +1285,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangEnglish: "**Session Management**\n" +
 			"/new [name] — Start a new session\n" +
 			"/list — List agent sessions\n" +
+			"/tasks [keyword] — List sessions across work directories\n" +
+			"/goto <number> — Resume a session from /tasks\n" +
 			"/search <keyword> — Search sessions\n" +
 			"/switch <number> — Resume a session\n" +
 			"/delete <number>|1,2,3|3-7|1,3-5,8 — Delete session(s)\n" +
@@ -1272,6 +1296,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese: "**会话管理**\n" +
 			"/new [名称] — 创建新会话\n" +
 			"/list — 列出会话列表\n" +
+			"/tasks [关键词] — 列出所有工作目录的会话\n" +
+			"/goto <序号> — 继续 /tasks 列表中的会话\n" +
 			"/search <关键词> — 搜索会话\n" +
 			"/switch <序号> — 切换会话\n" +
 			"/delete <序号>|1,2,3|3-7|1,3-5,8 — 删除会话\n" +
@@ -1281,6 +1307,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "**會話管理**\n" +
 			"/new [名稱] — 建立新會話\n" +
 			"/list — 列出會話列表\n" +
+			"/tasks [關鍵詞] — 列出所有工作目錄的會話\n" +
+			"/goto <序號> — 繼續 /tasks 列表中的會話\n" +
 			"/search <關鍵詞> — 搜尋會話\n" +
 			"/switch <序號> — 切換會話\n" +
 			"/delete <序號>|1,2,3|3-7|1,3-5,8 — 刪除會話\n" +
@@ -1290,6 +1318,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "**セッション管理**\n" +
 			"/new [名前] — 新しいセッションを開始\n" +
 			"/list — セッション一覧\n" +
+			"/tasks [キーワード] — すべての作業ディレクトリのセッション一覧\n" +
+			"/goto <番号> — /tasks からセッションを再開\n" +
 			"/search <キーワード> — セッション検索\n" +
 			"/switch <番号> — セッション切り替え\n" +
 			"/delete <番号>|1,2,3|3-7|1,3-5,8 — セッション削除\n" +
@@ -1299,6 +1329,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish: "**Gestión de sesiones**\n" +
 			"/new [nombre] — Iniciar nueva sesión\n" +
 			"/list — Listar sesiones\n" +
+			"/tasks [palabra clave] — Listar sesiones de todos los directorios\n" +
+			"/goto <número> — Reanudar sesión de /tasks\n" +
 			"/search <keyword> — Buscar sesiones\n" +
 			"/switch <número> — Reanudar sesión\n" +
 			"/delete <número>|1,2,3|3-7|1,3-5,8 — Eliminar sesión(es)\n" +
@@ -1460,6 +1492,76 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "**%s 會話列表** (%d)\n\n",
 		LangJapanese:           "**%s セッション** (%d)\n\n",
 		LangSpanish:            "**Sesiones de %s** (%d)\n\n",
+	},
+	MsgTasksNotSupported: {
+		LangEnglish:            "This agent does not support listing sessions across work directories.",
+		LangChinese:            "当前 Agent 不支持跨工作目录列出会话。",
+		LangTraditionalChinese: "目前 Agent 不支援跨工作目錄列出會話。",
+		LangJapanese:           "このエージェントは作業ディレクトリをまたぐセッション一覧に対応していません。",
+		LangSpanish:            "Este agente no permite listar sesiones de distintos directorios de trabajo.",
+	},
+	MsgTasksMultiWorkspace: {
+		LangEnglish:            "Cross-directory task routing is unavailable in multi-workspace mode. Use /workspace and /list instead.",
+		LangChinese:            "多工作区模式下无法跨目录切换任务。请使用 /workspace 和 /list。",
+		LangTraditionalChinese: "多工作區模式無法跨目錄切換任務。請使用 /workspace 和 /list。",
+		LangJapanese:           "マルチワークスペースモードではディレクトリ間のタスク切り替えはできません。/workspace と /list を使用してください。",
+		LangSpanish:            "No se puede cambiar de tarea entre directorios en modo multi-workspace. Usa /workspace y /list.",
+	},
+	MsgTasksEmpty: {
+		LangEnglish:            "No resumable agent sessions found.",
+		LangChinese:            "没有找到可继续的 Agent 会话。",
+		LangTraditionalChinese: "找不到可繼續的 Agent 會話。",
+		LangJapanese:           "再開可能なエージェントセッションが見つかりません。",
+		LangSpanish:            "No se encontraron sesiones del agente que se puedan reanudar.",
+	},
+	MsgTasksNoMatch: {
+		LangEnglish:            "No sessions matching %q.",
+		LangChinese:            "没有找到匹配 %q 的会话。",
+		LangTraditionalChinese: "找不到符合 %q 的會話。",
+		LangJapanese:           "%q に一致するセッションが見つかりません。",
+		LangSpanish:            "No se encontraron sesiones que coincidan con %q.",
+	},
+	MsgTasksTitle: {
+		LangEnglish:            "Recent sessions (all work directories)\n\n",
+		LangChinese:            "最近的会话（全部工作目录）\n\n",
+		LangTraditionalChinese: "最近的會話（所有工作目錄）\n\n",
+		LangJapanese:           "最近のセッション（すべての作業ディレクトリ）\n\n",
+		LangSpanish:            "Sesiones recientes (todos los directorios de trabajo)\n\n",
+	},
+	MsgTasksSearchTitle: {
+		LangEnglish:            "Sessions matching %q\n\n",
+		LangChinese:            "匹配 %q 的会话\n\n",
+		LangTraditionalChinese: "符合 %q 的會話\n\n",
+		LangJapanese:           "%q に一致するセッション\n\n",
+		LangSpanish:            "Sesiones que coinciden con %q\n\n",
+	},
+	MsgTasksHint: {
+		LangEnglish:            "\nUse /goto <number> to resume a session, e.g. /goto 2",
+		LangChinese:            "\n使用 /goto <序号> 继续会话，例如 /goto 2",
+		LangTraditionalChinese: "\n使用 /goto <序號> 繼續會話，例如 /goto 2",
+		LangJapanese:           "\n/goto <番号> でセッションを再開（例: /goto 2）",
+		LangSpanish:            "\nUsa /goto <número> para reanudar una sesión, p. ej. /goto 2",
+	},
+	MsgGotoUsage: {
+		LangEnglish:            "Usage: /goto <number>. First use /tasks [keyword].",
+		LangChinese:            "用法：/goto <序号>。请先发送 /tasks [关键词]。",
+		LangTraditionalChinese: "用法：/goto <序號>。請先傳送 /tasks [關鍵詞]。",
+		LangJapanese:           "使い方: /goto <番号>。先に /tasks [キーワード] を実行してください。",
+		LangSpanish:            "Uso: /goto <número>. Primero usa /tasks [palabra clave].",
+	},
+	MsgGotoInvalidIndex: {
+		LangEnglish:            "Invalid or expired task number. Run /tasks again.",
+		LangChinese:            "任务序号无效或列表已过期，请重新发送 /tasks。",
+		LangTraditionalChinese: "任務序號無效或列表已過期，請重新傳送 /tasks。",
+		LangJapanese:           "タスク番号が無効か期限切れです。/tasks を再実行してください。",
+		LangSpanish:            "Número de tarea inválido o caducado. Ejecuta /tasks de nuevo.",
+	},
+	MsgGotoSuccess: {
+		LangEnglish:            "Resumed: %s\nWork directory: %s\nSession: %s\n\nSend your next message to continue.",
+		LangChinese:            "已继续：%s\n工作目录：%s\n会话：%s\n\n直接发送下一条消息即可继续。",
+		LangTraditionalChinese: "已繼續：%s\n工作目錄：%s\n會話：%s\n\n直接傳送下一則訊息即可繼續。",
+		LangJapanese:           "再開しました: %s\n作業ディレクトリ: %s\nセッション: %s\n\n次のメッセージを送って続行できます。",
+		LangSpanish:            "Reanudada: %s\nDirectorio de trabajo: %s\nSesión: %s\n\nEnvía el siguiente mensaje para continuar.",
 	},
 	MsgListTitlePaged: {
 		LangEnglish:            "**%s Sessions** (%d) · Page %d/%d\n\n",
@@ -3612,6 +3714,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "列出 Agent 會話列表",
 		LangJapanese:           "エージェントセッション一覧",
 		LangSpanish:            "Listar sesiones del agente",
+	},
+	MsgBuiltinCmdTasks: {
+		LangEnglish:            "List recent sessions across work directories, arg: [keyword]",
+		LangChinese:            "列出跨工作目录的最近会话，参数: [关键词]",
+		LangTraditionalChinese: "列出跨工作目錄的最近會話，參數: [關鍵詞]",
+		LangJapanese:           "作業ディレクトリをまたぐ最近のセッション一覧、引数: [キーワード]",
+		LangSpanish:            "Listar sesiones recientes de distintos directorios, arg: [palabra clave]",
+	},
+	MsgBuiltinCmdGoto: {
+		LangEnglish:            "Resume a session from /tasks, arg: <number>",
+		LangChinese:            "按 /tasks 列表序号继续会话，参数: <序号>",
+		LangTraditionalChinese: "按 /tasks 列表序號繼續會話，參數: <序號>",
+		LangJapanese:           "/tasks の番号でセッションを再開、引数: <番号>",
+		LangSpanish:            "Reanudar sesión de /tasks, arg: <número>",
 	},
 	MsgBuiltinCmdSearch: {
 		LangEnglish:            "Search sessions by name or ID, arg: <keyword>",

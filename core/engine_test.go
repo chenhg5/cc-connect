@@ -599,6 +599,124 @@ func (a *stubWorkDirAgent) GetWorkDir() string {
 	return a.workDir
 }
 
+type stubGlobalTaskAgent struct {
+	stubWorkDirAgent
+	sessions []AgentSessionInfo
+}
+
+func (a *stubGlobalTaskAgent) ListAllSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return append([]AgentSessionInfo(nil), a.sessions...), nil
+}
+
+func TestTasksAndGotoRouteAcrossWorkDirs(t *testing.T) {
+	alpha := t.TempDir()
+	beta := t.TempDir()
+	agent := &stubGlobalTaskAgent{
+		stubWorkDirAgent: stubWorkDirAgent{workDir: alpha},
+		sessions: []AgentSessionInfo{
+			{ID: "alpha-session-id", Summary: "Alpha login fix", WorkDir: alpha, ModifiedAt: time.Now()},
+			{ID: "beta-session-id", Summary: "Beta refactor", WorkDir: beta, ModifiedAt: time.Now().Add(-time.Hour)},
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangChinese)
+	msg := &Message{SessionKey: "test:user", ReplyCtx: "ctx"}
+
+	if !e.handleCommand(p, msg, "/tasks beta") {
+		t.Fatal("/tasks was not handled as a built-in command")
+	}
+	replies := p.getSent()
+	if len(replies) != 1 || !strings.Contains(replies[0], "Beta refactor") || strings.Contains(replies[0], "Alpha login fix") {
+		t.Fatalf("unexpected /tasks reply: %#v", replies)
+	}
+
+	p.clearSent()
+	if !e.handleCommand(p, msg, "/goto 1") {
+		t.Fatal("/goto was not handled as a built-in command")
+	}
+	if got := agent.GetWorkDir(); got != beta {
+		t.Fatalf("work dir = %q, want %q", got, beta)
+	}
+	if got := e.sessions.GetOrCreateActive(msg.SessionKey).GetAgentSessionID(); got != "beta-session-id" {
+		t.Fatalf("agent session = %q, want beta-session-id", got)
+	}
+	if replies = p.getSent(); len(replies) != 1 || !strings.Contains(replies[0], beta) {
+		t.Fatalf("unexpected /goto reply: %#v", replies)
+	}
+}
+
+func TestListGlobalTasksSortsAndDeduplicates(t *testing.T) {
+	agent := &stubGlobalTaskAgent{sessions: []AgentSessionInfo{
+		{ID: "older", Summary: "Older task", WorkDir: t.TempDir(), ModifiedAt: time.Unix(100, 0)},
+		{ID: "newer", Summary: "Newer task", WorkDir: t.TempDir(), ModifiedAt: time.Unix(300, 0)},
+		{ID: "older", Summary: "Duplicate task", WorkDir: t.TempDir(), ModifiedAt: time.Unix(200, 0)},
+		{ID: "missing-work-dir", Summary: "Invalid task", ModifiedAt: time.Unix(400, 0)},
+	}}
+
+	sessions, err := listGlobalTasks(context.Background(), agent, "")
+	if err != nil {
+		t.Fatalf("listGlobalTasks() error: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("listGlobalTasks() returned %d sessions, want 2", len(sessions))
+	}
+	if sessions[0].ID != "newer" || sessions[1].Summary != "Duplicate task" {
+		t.Fatalf("listGlobalTasks() order = %#v, want newer then most recent older", sessions)
+	}
+}
+
+func TestTaskRoutesAreScopedPerChat(t *testing.T) {
+	e := &Engine{}
+	e.saveTaskRoutes("chat-a", []AgentSessionInfo{{ID: "session-a"}})
+	e.saveTaskRoutes("chat-b", []AgentSessionInfo{{ID: "session-b"}})
+
+	if got := e.loadTaskRoutes("chat-a"); len(got) != 1 || got[0].ID != "session-a" {
+		t.Fatalf("chat-a routes = %#v, want session-a", got)
+	}
+	if got := e.loadTaskRoutes("chat-b"); len(got) != 1 || got[0].ID != "session-b" {
+		t.Fatalf("chat-b routes = %#v, want session-b", got)
+	}
+}
+
+func TestTasksRejectsUnsupportedAndMultiWorkspaceAgents(t *testing.T) {
+	tests := []struct {
+		name           string
+		agent          Agent
+		multiWorkspace bool
+		want           string
+	}{
+		{name: "unsupported agent", agent: &stubAgent{}, want: "does not support"},
+		{name: "multi-workspace", agent: &stubGlobalTaskAgent{}, multiWorkspace: true, want: "multi-workspace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			e := NewEngine("test", tt.agent, []Platform{p}, "", LangEnglish)
+			e.multiWorkspace = tt.multiWorkspace
+			msg := &Message{SessionKey: "test:user", ReplyCtx: "ctx"}
+
+			e.cmdTasks(p, msg, nil)
+			replies := p.getSent()
+			if len(replies) != 1 || !strings.Contains(replies[0], tt.want) {
+				t.Fatalf("/tasks reply = %#v, want text containing %q", replies, tt.want)
+			}
+		})
+	}
+}
+
+func TestGotoRejectsMissingOrStaleTaskNumber(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubGlobalTaskAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user", ReplyCtx: "ctx"}
+
+	e.cmdGoto(p, msg, []string{"1"})
+	replies := p.getSent()
+	if len(replies) != 1 || !strings.Contains(replies[0], "Invalid or expired") {
+		t.Fatalf("/goto reply = %#v, want invalid or expired task number", replies)
+	}
+}
+
 type namedStubWorkDirAgent struct {
 	stubWorkDirAgent
 	name string

@@ -417,6 +417,55 @@ func TestCUJ_B3_SwitchPreservesHistoryEndToEnd(t *testing.T) {
 	}
 }
 
+// CUJ-B4: discover a session outside the current work directory, resume it,
+// then verify that the selected session is now active.
+func TestCUJ_B4_GlobalTaskDiscoveryAndResume(t *testing.T) {
+	alpha := t.TempDir()
+	beta := t.TempDir()
+	agent := &stubGlobalTaskAgent{
+		stubWorkDirAgent: stubWorkDirAgent{workDir: alpha},
+		sessions: []AgentSessionInfo{
+			{ID: "alpha-session-id", Summary: "Alpha login fix", WorkDir: alpha, ModifiedAt: time.Now().Add(-time.Hour)},
+			{ID: "beta-session-id", Summary: "Beta refactor", WorkDir: beta, ModifiedAt: time.Now()},
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	msg := func(content string) *Message {
+		return &Message{
+			SessionKey: "test:alice",
+			Platform:   "test",
+			UserID:     "alice",
+			UserName:   "alice",
+			Content:    content,
+			ReplyCtx:   "ctx-alice",
+		}
+	}
+
+	// 1. Search globally. Only the session in beta should be visible.
+	e.ReceiveMessage(p, msg("/tasks beta"))
+	replies := p.getSent()
+	if len(replies) != 1 || !strings.Contains(replies[0], "Beta refactor") || strings.Contains(replies[0], "Alpha login fix") {
+		t.Fatalf("unexpected /tasks reply: %#v", replies)
+	}
+
+	// 2. Resume the first result. The user-facing reply includes its work dir.
+	p.clearSent()
+	e.ReceiveMessage(p, msg("/goto 1"))
+	replies = p.getSent()
+	if len(replies) != 1 || !strings.Contains(replies[0], beta) || !strings.Contains(replies[0], "beta-session") {
+		t.Fatalf("unexpected /goto reply: %#v", replies)
+	}
+
+	// 3. /current confirms that the selected task remains the active session.
+	p.clearSent()
+	e.ReceiveMessage(p, msg("/current"))
+	replies = p.getSent()
+	if len(replies) != 1 || !strings.Contains(replies[0], "beta-session-id") {
+		t.Fatalf("unexpected /current reply: %#v", replies)
+	}
+}
+
 // ===========================================================================
 // CUJ-C4 · /cancel stops current turn AND creates a fresh session
 //

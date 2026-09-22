@@ -583,6 +583,13 @@ type WorkDirSwitcher interface {
 	GetWorkDir() string
 }
 
+// GlobalSessionLister is implemented by agents that can enumerate sessions
+// across work directories. It powers cross-directory session routing without
+// changing the behavior of the regular, work-dir-scoped /list command.
+type GlobalSessionLister interface {
+	ListAllSessions(ctx context.Context) ([]AgentSessionInfo, error)
+}
+
 // AgentOptsProvider is an optional interface for agents that need to carry
 // their full configuration options when the engine clones a per-workspace
 // agent instance in multi-workspace mode. The engine merges the returned map
