@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,21 @@ type fakeOpencodeServer struct {
 	// missingSessionOnce makes the next message request fail the way OpenCode
 	// does when the stored session id no longer exists.
 	missingSessionOnce atomic.Bool
+
+	// patchedSessions/patchedBodys record PATCH /session/{id} calls (permission
+	// ruleset updates); permissionReplies records POST /permission/{id}/reply.
+	patchedSessions   []string
+	patchedBodys      []map[string]any
+	permissionReplies []fakePermissionReply
+	// resyncMessages is what GET /session/{id}/message returns; the transport
+	// asks for it to rebuild its role map on every stream (re)connect.
+	resyncMessages []map[string]any
+}
+
+// fakePermissionReply is one recorded answer to a permission request.
+type fakePermissionReply struct {
+	requestID string
+	reply     string
 }
 
 func newFakeOpencodeServer(t *testing.T) *fakeOpencodeServer {
@@ -49,6 +65,7 @@ func newFakeOpencodeServer(t *testing.T) *fakeOpencodeServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/session", f.handleCreate)
 	mux.HandleFunc("/session/", f.handleSession)
+	mux.HandleFunc("/permission/", f.handlePermissionReply)
 	mux.HandleFunc("/event", f.handleEvents)
 	f.ts = httptest.NewServer(mux)
 	t.Cleanup(f.shutdown)
@@ -72,6 +89,26 @@ func (f *fakeOpencodeServer) handleCreate(w http.ResponseWriter, r *http.Request
 
 func (f *fakeOpencodeServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/session/")
+	if r.Method == http.MethodGet && strings.HasSuffix(path, "/message") {
+		f.mu.Lock()
+		msgs := append([]map[string]any(nil), f.resyncMessages...)
+		f.mu.Unlock()
+		if msgs == nil {
+			msgs = []map[string]any{}
+		}
+		writeJSONResponse(w, msgs)
+		return
+	}
+	if r.Method == http.MethodPatch {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.patchedSessions = append(f.patchedSessions, path)
+		f.patchedBodys = append(f.patchedBodys, body)
+		f.mu.Unlock()
+		writeJSONResponse(w, map[string]any{"id": path})
+		return
+	}
 	switch {
 	case strings.HasSuffix(path, "/abort"):
 		f.mu.Lock()
@@ -101,6 +138,34 @@ func (f *fakeOpencodeServer) handleSession(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// handlePermissionReply records answers to pending permission requests.
+func (f *fakeOpencodeServer) handlePermissionReply(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasSuffix(r.URL.Path, "/reply") {
+		http.NotFound(w, r)
+		return
+	}
+	requestID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/permission/"), "/reply")
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	reply, _ := body["reply"].(string)
+	f.mu.Lock()
+	f.permissionReplies = append(f.permissionReplies, fakePermissionReply{requestID: requestID, reply: reply})
+	f.mu.Unlock()
+	writeJSONResponse(w, true)
+}
+
+func (f *fakeOpencodeServer) replies() []fakePermissionReply {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakePermissionReply(nil), f.permissionReplies...)
+}
+
+func (f *fakeOpencodeServer) patches() ([]string, []map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.patchedSessions...), append([]map[string]any(nil), f.patchedBodys...)
+}
+
 func (f *fakeOpencodeServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -122,7 +187,7 @@ func (f *fakeOpencodeServer) handleEvents(w http.ResponseWriter, r *http.Request
 			if !ok {
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", payload)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
 			flusher.Flush()
 		case <-r.Context().Done():
 			f.subscribersMu.Lock()
@@ -218,6 +283,16 @@ func partUpdated(sessionID string, part map[string]any) map[string]any {
 	return map[string]any{
 		"type":       "message.part.updated",
 		"properties": map[string]any{"sessionID": sessionID, "part": part},
+	}
+}
+
+func messageUpdatedWithRole(sessionID, messageID, role string) map[string]any {
+	return map[string]any{
+		"type": "message.updated",
+		"properties": map[string]any{
+			"sessionID": sessionID,
+			"info":      map[string]any{"id": messageID, "role": role, "sessionID": sessionID},
+		},
 	}
 }
 
@@ -392,8 +467,9 @@ func TestServerSession_MapsAssistantPartsAndSuppressesUserEcho(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// The user's own prompt arrives as a text part of a *user* message: it must
-	// not be replayed as reply text.
+	// The user's own prompt arrives as a text part of a *user* message (announced
+	// first, as OpenCode does): it must not be replayed as reply text.
+	f.emit(messageUpdatedWithRole("ses_stub", "msg_user", "user"))
 	f.emit(partUpdated("ses_stub", map[string]any{
 		"id": "prt_user", "type": "text", "text": "run a tool",
 		"messageID": "msg_user", "sessionID": "ses_stub",
@@ -611,10 +687,24 @@ func (f *fakeOpencodeServer) Close() error {
 	return nil
 }
 
+// existingCmd returns a command that exists on any machine, so tests about
+// option parsing do not depend on the opencode CLI being installed (CI does not
+// have it) — New only uses it for an exec.LookPath check.
+func existingCmd(t *testing.T) string {
+	t.Helper()
+	for _, candidate := range []string{"sh", "true", "env"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path
+		}
+	}
+	t.Skip("no shell available to stand in for the opencode CLI")
+	return ""
+}
+
 // The transport is opt-in: default stays "run" so existing deployments are
 // unaffected, and an unknown value fails loudly instead of silently falling back.
 func TestNew_TransportOption(t *testing.T) {
-	base := map[string]any{"work_dir": t.TempDir()}
+	base := map[string]any{"work_dir": t.TempDir(), "cmd": existingCmd(t)}
 
 	agent, err := New(base)
 	if err != nil {
@@ -624,7 +714,7 @@ func TestNew_TransportOption(t *testing.T) {
 		t.Fatalf("default transport = %q, want %q", got, opencodeTransportRun)
 	}
 
-	withServer := map[string]any{"work_dir": t.TempDir(), "opencode_transport": "server"}
+	withServer := map[string]any{"work_dir": t.TempDir(), "cmd": existingCmd(t), "opencode_transport": "server"}
 	agent, err = New(withServer)
 	if err != nil {
 		t.Fatalf("New(server): %v", err)
@@ -633,7 +723,7 @@ func TestNew_TransportOption(t *testing.T) {
 		t.Fatalf("transport = %q, want %q", got, opencodeTransportServer)
 	}
 
-	if _, err := New(map[string]any{"work_dir": t.TempDir(), "opencode_transport": "nonsense"}); err == nil {
+	if _, err := New(map[string]any{"work_dir": t.TempDir(), "cmd": existingCmd(t), "opencode_transport": "nonsense"}); err == nil {
 		t.Fatal("New(bad transport) = nil error, want rejection")
 	}
 }
@@ -645,6 +735,7 @@ func TestNew_TransportOption(t *testing.T) {
 func TestWorkspaceAgentOptions_CarriesTransport(t *testing.T) {
 	agent, err := New(map[string]any{
 		"work_dir":           t.TempDir(),
+		"cmd":                existingCmd(t),
 		"opencode_transport": opencodeTransportServer,
 	})
 	if err != nil {
@@ -918,4 +1009,410 @@ func TestServerSession_FlushesBufferedAnswerAtTurnEnd(t *testing.T) {
 		t.Fatalf("result content = %q, want the buffered answer", result.Content)
 	}
 	f.releaseTurn()
+}
+
+// permissionAsked builds a permission.asked SSE event, the shape OpenCode uses
+// when a tool call needs approval.
+func permissionAsked(sessionID, requestID, permission string, patterns ...string) map[string]any {
+	raw := make([]any, 0, len(patterns))
+	for _, p := range patterns {
+		raw = append(raw, p)
+	}
+	return map[string]any{
+		"type": "permission.asked",
+		"properties": map[string]any{
+			"id":         requestID,
+			"sessionID":  sessionID,
+			"permission": permission,
+			"patterns":   raw,
+		},
+	}
+}
+
+// hasRule reports whether a ruleset body carries the given rule.
+func hasRule(body map[string]any, permission, pattern, action string) bool {
+	rules, ok := body["permission"].([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range rules {
+		rule, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if rule["permission"] == permission && rule["pattern"] == pattern && rule["action"] == action {
+			return true
+		}
+	}
+	return false
+}
+
+// A resumed conversation never received the create-time ruleset, so yolo mode
+// must push it onto the existing session — otherwise any tool call outside the
+// workspace parks the turn on an approval no bridge user can answer (the
+// session stays busy and every later message queues behind it).
+func TestServerSession_ResumedSessionGetsYoloPermissionRuleset(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	s := newTestServerSessionWithMode(t, f, "ses_existing", "yolo")
+	defer func() { _ = s.Close() }()
+
+	f.holdMessages.Store(true) // keep the turn in flight while the transport attaches
+	if err := s.Send("hello", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sessions, bodys := f.patches()
+		if len(sessions) > 0 {
+			if sessions[0] != "ses_existing" {
+				t.Fatalf("patched session = %q, want the resumed one", sessions[0])
+			}
+			if !hasRule(bodys[0], "external_directory", "*", "allow") {
+				t.Fatalf("ruleset does not allow external_directory: %v", bodys[0])
+			}
+			if !hasRule(bodys[0], "bash", "*", "allow") {
+				t.Fatalf("ruleset does not allow bash: %v", bodys[0])
+			}
+			// The interactive tools stay denied: nobody can answer them here.
+			if !hasRule(bodys[0], "question", "*", "deny") {
+				t.Fatalf("ruleset does not deny the question tool: %v", bodys[0])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no permission ruleset was applied to the resumed session")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// A second turn must not repeat the request.
+	f.releaseTurn()
+	if err := s.Send("again", "", nil, nil); err != nil {
+		t.Fatalf("second Send: %v", err)
+	}
+	f.releaseTurn()
+	if sessions, _ := f.patches(); len(sessions) != 1 {
+		t.Fatalf("permission ruleset applied %d times, want once", len(sessions))
+	}
+}
+
+// A brand-new session gets the ruleset from POST /session, so no PATCH is
+// needed and, in default mode, no ruleset is sent at all.
+func TestServerSession_FreshSessionRulesetOnlyInYoloMode(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	s := newTestServerSessionWithMode(t, f, "", "yolo")
+	defer func() { _ = s.Close() }()
+	f.holdMessages.Store(true) // keep the turn in flight while the transport attaches
+	if err := s.Send("hello", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if create, _, _ := f.counts(); create != 1 {
+		t.Fatalf("create calls = %d, want 1", create)
+	}
+	f.mu.Lock()
+	body := f.createdBody
+	f.mu.Unlock()
+	if !hasRule(body, "external_directory", "*", "allow") {
+		t.Fatalf("create body lacks the yolo ruleset: %v", body)
+	}
+	if sessions, _ := f.patches(); len(sessions) != 0 {
+		t.Fatalf("fresh session was patched %d times, want 0", len(sessions))
+	}
+
+	f2 := newFakeOpencodeServer(t)
+	s2 := newTestServerSessionWithMode(t, f2, "ses_default", "default")
+	defer func() { _ = s2.Close() }()
+	f2.holdMessages.Store(true)
+	if err := s2.Send("hello", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if sessions, _ := f2.patches(); len(sessions) != 0 {
+		t.Fatalf("default mode must not push a ruleset (got %d patches)", len(sessions))
+	}
+}
+
+// In yolo mode an approval request is answered immediately, exactly as the run
+// transport's --dangerously-skip-permissions does; leaving it unanswered is what
+// hung the session.
+func TestServerSession_PermissionAskedAutoApprovedInYoloMode(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	s := newTestServerSessionWithMode(t, f, "ses_perm", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	f.emit(permissionAsked("ses_perm", "per_abc", "external_directory", "/usr/local/data/docs/*"))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		replies := f.replies()
+		if len(replies) > 0 {
+			if replies[0].requestID != "per_abc" {
+				t.Fatalf("replied to %q, want per_abc", replies[0].requestID)
+			}
+			if replies[0].reply != "always" {
+				t.Fatalf("reply = %q, want always", replies[0].reply)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("permission request was never answered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Outside yolo mode the request goes to the engine (Allow/Deny prompt) and the
+// user's answer is forwarded to OpenCode.
+func TestServerSession_PermissionAskedSurfacedInDefaultMode(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	s := newTestServerSessionWithMode(t, f, "ses_perm", "default")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	f.emit(permissionAsked("ses_perm", "per_xyz", "external_directory", "/srv/data/*"))
+
+	evt := collectEvents(t, s.Events(), 1, 2*time.Second)[0]
+	if evt.Type != core.EventPermissionRequest {
+		t.Fatalf("event type = %v, want a permission request", evt.Type)
+	}
+	if evt.RequestID != "per_xyz" || evt.ToolName != "external_directory" {
+		t.Fatalf("permission event = %+v, want per_xyz/external_directory", evt)
+	}
+	if !strings.Contains(evt.ToolInput, "/srv/data/*") {
+		t.Fatalf("permission event input = %q, want the requested pattern", evt.ToolInput)
+	}
+
+	if err := s.RespondPermission(evt.RequestID, core.PermissionResult{Behavior: "allow"}); err != nil {
+		t.Fatalf("RespondPermission(allow): %v", err)
+	}
+	if err := s.RespondPermission("per_other", core.PermissionResult{Behavior: "deny"}); err != nil {
+		t.Fatalf("RespondPermission(deny): %v", err)
+	}
+
+	replies := f.replies()
+	if len(replies) != 2 {
+		t.Fatalf("replies = %+v, want two", replies)
+	}
+	if replies[0].reply != "once" {
+		t.Fatalf("allow reply = %q, want once", replies[0].reply)
+	}
+	if replies[1].reply != "reject" {
+		t.Fatalf("deny reply = %q, want reject", replies[1].reply)
+	}
+}
+
+// messageWithRole builds one entry of the GET /session/{id}/message response.
+func messageWithRole(id, role string) map[string]any {
+	return map[string]any{"info": map[string]any{"id": id, "role": role}}
+}
+
+func textPartOf(messageID, text string) map[string]any {
+	return map[string]any{"type": "text", "messageID": messageID, "text": text}
+}
+
+// stepFinishPart closes a step so the buffered step text is delivered; reason
+// "tool-calls" marks it as an intermediate step (the answer path uses "stop").
+func stepFinishPart() map[string]any {
+	return map[string]any{"type": "step-finish", "reason": "tool-calls"}
+}
+
+// A stream that opens mid-turn (or reconnects) never announces the messages
+// that started earlier, so their parts arrive with an unknown message id. They
+// must still reach the engine: dropping them loses the answer, while the run
+// transport never filtered by role at all.
+func TestServerSession_KeepsPartsFromUnannouncedMessage(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	s := newTestServerSessionWithMode(t, f, "ses_gap", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	f.emit(partUpdated("ses_gap", textPartOf("msg_never_announced", "the answer")))
+	f.emit(partUpdated("ses_gap", stepFinishPart()))
+
+	evt := collectEvents(t, s.Events(), 1, 2*time.Second)[0]
+	if evt.Type != core.EventText || !strings.Contains(evt.Content, "the answer") {
+		t.Fatalf("event = %+v, want the text of the unannounced message", evt)
+	}
+}
+
+// The role map is rebuilt from the session's messages when the stream opens, so
+// the echo of the user's own prompt is still suppressed even though this
+// connection never saw its message.updated event.
+func TestServerSession_ResyncsRolesOnAttach(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.mu.Lock()
+	f.resyncMessages = []map[string]any{
+		messageWithRole("msg_user_old", "user"),
+		messageWithRole("msg_assistant_old", "assistant"),
+	}
+	f.mu.Unlock()
+
+	s := newTestServerSessionWithMode(t, f, "ses_resync", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	// The resync is asynchronous; wait until the role map knows the assistant
+	// message (its parts are then accepted without any message.updated).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.msgMu.Lock()
+		_, known := s.assistantMsgs["msg_assistant_old"]
+		s.msgMu.Unlock()
+		if known {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("role map was never resynced from the session")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// User echo: suppressed. Assistant text: delivered.
+	f.emit(partUpdated("ses_resync", textPartOf("msg_user_old", "my own prompt")))
+	f.emit(partUpdated("ses_resync", textPartOf("msg_assistant_old", "the answer")))
+	f.emit(partUpdated("ses_resync", stepFinishPart()))
+
+	evt := collectEvents(t, s.Events(), 1, 2*time.Second)[0]
+	if evt.Type != core.EventText || !strings.Contains(evt.Content, "the answer") {
+		t.Fatalf("first event = %+v, want the assistant text (the user echo must be dropped)", evt)
+	}
+	if strings.Contains(evt.Content, "my own prompt") {
+		t.Fatalf("user echo leaked into the reply: %+v", evt)
+	}
+}
+
+// The engine asks the running session for real token usage (reply footer and
+// auto-compress decisions). The server transport must report it too — the
+// inner session accumulates it from OpenCode's step-finish parts.
+func TestServerSession_ReportsContextUsage(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	s := newTestServerSessionWithMode(t, f, "ses_usage", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+	if _, ok := any(s.inner).(core.ContextUsageReporter); !ok {
+		t.Skip("this base's run session does not report context usage")
+	}
+
+	if usage := s.GetContextUsage(); usage != nil {
+		t.Fatalf("usage before any step = %+v, want nil", usage)
+	}
+
+	f.emit(partUpdated("ses_usage", map[string]any{
+		"type":   "step-finish",
+		"reason": "tool-calls",
+		"tokens": map[string]any{
+			"input": 1234, "output": 56, "reasoning": 7, "cache": map[string]any{"read": 89, "write": 10},
+		},
+	}))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if usage := s.GetContextUsage(); usage != nil {
+			if usage.InputTokens != 1234 || usage.OutputTokens != 56 {
+				t.Fatalf("usage = %+v, want input 1234 / output 56", usage)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no context usage was reported after a step-finish with tokens")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A server instance is shared by every conversation in a workspace, so a
+// session that does not know its own id yet must not swallow other sessions'
+// events into this session's reply.
+func TestServerSession_IgnoresForeignEventsBeforeOwnID(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	s := newTestServerSessionWithMode(t, f, "", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	f.emit(partUpdated("ses_somebody_else", textPartOf("msg_other", "another user's answer")))
+	f.emit(partUpdated("ses_somebody_else", stepFinishPart()))
+
+	select {
+	case evt := <-s.Events():
+		t.Fatalf("event from another session leaked into this one: %+v", evt)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// A turn whose stream goes quiet must be aborted with a visible notice instead
+// of hanging until the engine's idle timeout (two hours by default) — the
+// session would stay busy the whole time and queue every later message behind
+// it. The run transport kills a silent process after the same delay.
+func TestServerSession_AbortsStalledTurn(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true) // the turn never finishes on its own
+	s := newTestServerSessionWithMode(t, f, "ses_stall", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	if err := s.Send("slow task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	// One event, then silence.
+	f.emit(partUpdated("ses_stall", textPartOf("msg_a", "partial answer")))
+	f.emit(partUpdated("ses_stall", stepFinishPart()))
+
+	s.stallTimeout = 80 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.stallWatchdog(ctx, 10*time.Millisecond)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case evt := <-s.Events():
+			if evt.Type != core.EventResult {
+				continue
+			}
+			if !strings.Contains(evt.Content, "已自动终止") {
+				t.Fatalf("stall result = %q, want the timeout notice", evt.Content)
+			}
+			_, aborts, _ := f.counts()
+			if aborts == 0 {
+				t.Fatalf("stalled turn was ended without aborting the session")
+			}
+			return
+		case <-deadline:
+			t.Fatalf("stalled turn was never ended")
+		}
+	}
+}
+
+// Events keep a turn alive: the watchdog must only fire after real silence.
+func TestServerSession_StallWatchdogKeepsLiveTurn(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSessionWithMode(t, f, "ses_alive", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	if err := s.Send("busy task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	s.stallTimeout = 400 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.stallWatchdog(ctx, 20*time.Millisecond)
+
+	for i := 0; i < 12; i++ {
+		f.emit(partUpdated("ses_alive", textPartOf("msg_a", "working")))
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case evt := <-s.Events():
+			if evt.Type == core.EventResult {
+				t.Fatalf("a live turn was ended by the stall watchdog: %+v", evt)
+			}
+		default:
+		}
+	}
+	if _, aborts, _ := f.counts(); aborts != 0 {
+		t.Fatalf("live turn was aborted %d times, want 0", aborts)
+	}
 }

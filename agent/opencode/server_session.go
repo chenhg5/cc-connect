@@ -496,7 +496,7 @@ func (srv *opencodeServer) createSession(ctx context.Context, directory, agentNa
 	// request. Other modes keep OpenCode's own permission behaviour, exactly as
 	// the run transport does by omitting the flag.
 	if mode == "yolo" {
-		body["permission"] = []map[string]any{{"permission": "*", "pattern": "*", "action": "allow"}}
+		body["permission"] = yoloPermissionRuleset()
 	}
 
 	path := "/session"
@@ -533,6 +533,65 @@ func (srv *opencodeServer) sendMessage(ctx context.Context, sessionID string, pa
 
 func (srv *opencodeServer) abortSession(ctx context.Context, sessionID string) error {
 	return srv.do(ctx, http.MethodPost, "/session/"+url.PathEscape(sessionID)+"/abort", map[string]any{}, nil)
+}
+
+// updateSessionPermissions replaces a session's permission ruleset.
+//
+// The ruleset is a property of the *session*, and OpenCode only takes it when
+// the session is created. A cc-connect session is usually attached to an
+// OpenCode conversation that already exists (resume), so the create-time
+// ruleset never applied there — and without it every external-directory access
+// asks for an approval that no bridge user can give, hanging the turn forever.
+func (srv *opencodeServer) updateSessionPermissions(ctx context.Context, sessionID string, directory string, ruleset []map[string]any) error {
+	path := "/session/" + url.PathEscape(sessionID)
+	if directory != "" {
+		path += "?directory=" + url.QueryEscape(directory)
+	}
+	return srv.do(ctx, http.MethodPatch, path, map[string]any{"permission": ruleset}, nil)
+}
+
+// replyPermission answers a pending permission request. reply is one of
+// "once", "always" or "reject" — the same vocabulary OpenCode's TUI uses.
+func (srv *opencodeServer) replyPermission(ctx context.Context, requestID, reply string) error {
+	body := map[string]any{"reply": reply}
+	return srv.do(ctx, http.MethodPost, "/permission/"+url.PathEscape(requestID)+"/reply", body, nil)
+}
+
+// listMessages returns a session's messages, each with its role, so the
+// transport can rebuild its role map after a stream gap.
+func (srv *opencodeServer) listMessages(ctx context.Context, sessionID, directory string) ([]map[string]any, error) {
+	path := "/session/" + url.PathEscape(sessionID) + "/message"
+	if directory != "" {
+		path += "?directory=" + url.QueryEscape(directory)
+	}
+	var out []map[string]any
+	if err := srv.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// yoloPermissionRuleset is the server-side equivalent of the run transport's
+// --dangerously-skip-permissions: every tool may run without a prompt.
+//
+// The kinds are listed explicitly rather than through a single "*" rule so the
+// headless denies for the interactive tools survive: over the bridge nobody can
+// answer OpenCode's question dialog or a plan-mode switch, and a denied tool
+// just reports back to the model instead of hanging the turn.
+func yoloPermissionRuleset() []map[string]any {
+	rules := []map[string]any{
+		{"permission": "question", "pattern": "*", "action": "deny"},
+		{"permission": "plan_enter", "pattern": "*", "action": "deny"},
+		{"permission": "plan_exit", "pattern": "*", "action": "deny"},
+	}
+	for _, kind := range []string{
+		"read", "edit", "glob", "grep", "list", "bash", "task",
+		"external_directory", "todowrite", "webfetch", "websearch",
+		"lsp", "doom_loop", "skill",
+	} {
+		rules = append(rules, map[string]any{"permission": kind, "pattern": "*", "action": "allow"})
+	}
+	return rules
 }
 
 // events opens the server's event stream (SSE).
@@ -609,6 +668,21 @@ func (t *tailBuffer) String() string {
 // serverSession
 // ---------------------------------------------------------------------------
 
+// serverStallNotice is what the user sees when a silent turn is aborted. It
+// mirrors the run transport's stall notice; kept local so this transport does
+// not depend on the run transport's watchdog.
+const serverStallNotice = "⚠️ 任务处理超时（长时间无响应），已自动终止。请重试；若任务较大，建议拆成更小的步骤分步发送。"
+
+// serverStallTimeout/serverStallTick mirror the run transport's stall watchdog
+// (stallTimeout). A turn whose stream goes quiet is aborted with a visible
+// notice instead of hanging until the engine's idle timeout — two hours by
+// default, during which the session stays busy and every later message queues
+// behind it.
+const (
+	serverStallTimeout = 5 * time.Minute
+	serverStallTick    = 30 * time.Second
+)
+
 // serverSession implements core.AgentSession on top of the OpenCode server API.
 //
 // Event parsing is delegated to an embedded opencodeSession, whose handlers
@@ -629,12 +703,16 @@ type serverSession struct {
 
 	sessionMu sync.Mutex
 	sessionID string
+	// permsApplied records that this session's permission ruleset was already
+	// pushed to the server (once per attached conversation).
+	permsApplied bool
 
 	sendMu       sync.Mutex
 	turnInFlight atomic.Bool
 
 	msgMu         sync.Mutex
 	assistantMsgs map[string]struct{}
+	userMsgs      map[string]struct{}
 	emittedTools  map[string]struct{}
 
 	sseCancel context.CancelFunc
@@ -642,6 +720,15 @@ type serverSession struct {
 	closeOnce sync.Once
 	// streamLossReported bounds stream-loss reporting to once per turn.
 	streamLossReported atomic.Bool
+	// lastSessionEvent is the timestamp of the newest event belonging to this
+	// session; turnStartedAt is when the current turn began. Together they drive
+	// the stall watchdog.
+	lastSessionEvent atomic.Int64
+	turnStartedAt    atomic.Int64
+	stallReported    atomic.Bool
+	// stallTimeout is how long a turn may stay silent before it is aborted
+	// (field, not const, so tests can shorten it).
+	stallTimeout time.Duration
 	// finalStep holds the last reason="stop" step-finish part, used to flush the
 	// buffered answer (and its token totals) when the session goes idle.
 	finalStep atomic.Value
@@ -687,12 +774,15 @@ func newServerSessionOn(ctx context.Context, srv *opencodeServer, serveCfg openc
 		mode:          mode,
 		sessionID:     resumeID,
 		assistantMsgs: map[string]struct{}{},
+		userMsgs:      map[string]struct{}{},
 		emittedTools:  map[string]struct{}{},
 		sseCancel:     cancel,
+		stallTimeout:  serverStallTimeout,
 	}
 
 	s.wg.Add(1)
 	go s.readEventStream(sessionCtx)
+	go s.stallWatchdog(sessionCtx, serverStallTick)
 	return s, nil
 }
 
@@ -748,6 +838,11 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 	// happened while the session was idle cannot swallow the report for a turn.
 	s.streamLossReported.Store(false)
 	s.finalStep = atomic.Value{}
+	// Per-turn stall bookkeeping: a timestamp from the previous turn would make
+	// the watchdog abort this one immediately.
+	s.lastSessionEvent.Store(0)
+	s.turnStartedAt.Store(time.Now().UnixNano())
+	s.stallReported.Store(false)
 
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
@@ -795,6 +890,13 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 			err := <-done
 			s.turnInFlight.Store(false)
 			if err != nil {
+				// A turn that was ended deliberately (stall abort, /stop) makes the
+				// request fail afterwards; an error event then would only confuse.
+				if s.inner.resultSent.Load() {
+					slog.Debug("opencode server session: message request failed after the turn ended",
+						"error", err)
+					return
+				}
 				s.emitError(err)
 				return
 			}
@@ -901,6 +1003,8 @@ func isSessionMissing(err error) bool {
 func (s *serverSession) forgetSession() {
 	s.sessionMu.Lock()
 	s.sessionID = ""
+	// The replacement conversation gets its ruleset from createSession.
+	s.permsApplied = false
 	s.sessionMu.Unlock()
 	s.inner.chatID.Store("")
 }
@@ -928,6 +1032,7 @@ func (s *serverSession) ensureSession() (string, bool, error) {
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
 	if s.sessionID != "" {
+		s.applyYoloPermissionsLocked()
 		return s.sessionID, false, nil
 	}
 	id, err := s.srv.createSession(s.inner.ctx, s.workDir, s.agentName, s.mode)
@@ -936,7 +1041,28 @@ func (s *serverSession) ensureSession() (string, bool, error) {
 	}
 	s.sessionID = id
 	s.inner.chatID.Store(id)
+	// createSession already sent the ruleset for yolo mode.
+	s.permsApplied = s.mode == "yolo"
 	return id, true, nil
+}
+
+// applyYoloPermissionsLocked pushes the allow-everything ruleset onto an
+// already existing conversation. Only yolo mode does this: the run transport's
+// --dangerously-skip-permissions is a per-prompt flag, but the server API has no
+// such flag, so the equivalent is the session ruleset. Without it a resumed
+// session keeps asking for approvals nobody can give over the bridge.
+func (s *serverSession) applyYoloPermissionsLocked() {
+	if s.mode != "yolo" || s.permsApplied || s.sessionID == "" {
+		return
+	}
+	// One attempt per attached conversation: a failure must not add a request
+	// to every turn. The permission.asked safety net below still covers it.
+	s.permsApplied = true
+	if err := s.srv.updateSessionPermissions(s.inner.ctx, s.sessionID, s.workDir, yoloPermissionRuleset()); err != nil {
+		slog.Warn("opencode server session: could not apply the yolo permission ruleset; "+
+			"a tool call that needs approval may wait for one nobody can give",
+			"session", s.sessionID, "error", err)
+	}
 }
 
 func (s *serverSession) emitError(err error) {
@@ -1003,6 +1129,10 @@ func (s *serverSession) readEventStream(ctx context.Context) {
 			}
 			continue
 		}
+		// The stream carries no history, so anything announced before this
+		// connection was opened is unknown to us; rebuild the role map from the
+		// session's messages.
+		s.resyncMessageRoles(ctx)
 
 		scanner := bufio.NewScanner(body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -1075,9 +1205,14 @@ func (s *serverSession) handleServerEvent(payload []byte) {
 	}
 
 	// Session-scoped events are filtered; server-wide ones (heartbeats etc. carry
-	// no sessionID) are ignored below by their type.
-	if sid, _ := evt.Properties["sessionID"].(string); sid != "" && !s.matchesSession(sid) {
-		return
+	// no sessionID) are ignored below by their type. Only this session's own
+	// events count as activity for the stall watchdog — a heartbeat must not make
+	// a hung turn look alive.
+	if sid, _ := evt.Properties["sessionID"].(string); sid != "" {
+		if !s.matchesSession(sid) {
+			return
+		}
+		s.lastSessionEvent.Store(time.Now().UnixNano())
 	}
 
 	switch evt.Type {
@@ -1086,10 +1221,17 @@ func (s *serverSession) handleServerEvent(payload []byte) {
 		if info == nil {
 			return
 		}
-		if role, _ := info["role"].(string); role == "assistant" {
-			if id, _ := info["id"].(string); id != "" {
+		if id, _ := info["id"].(string); id != "" {
+			switch role, _ := info["role"].(string); role {
+			case "assistant":
 				s.msgMu.Lock()
 				s.assistantMsgs[id] = struct{}{}
+				s.msgMu.Unlock()
+			case "user":
+				// Remember the echo of the user's own prompt so its text part can
+				// be dropped instead of showing up inside the reply.
+				s.msgMu.Lock()
+				s.userMsgs[id] = struct{}{}
 				s.msgMu.Unlock()
 			}
 		}
@@ -1117,7 +1259,61 @@ func (s *serverSession) handleServerEvent(payload []byte) {
 	case "session.error":
 		s.turnInFlight.Store(false)
 		s.inner.handleError(map[string]any{"error": evt.Properties["error"]})
+	case "permission.asked":
+		s.handlePermissionAsked(evt.Properties)
 	}
+}
+
+// handlePermissionAsked deals with OpenCode asking for approval on a tool call.
+//
+// Unanswered, the request parks the turn forever: no event is emitted, the
+// session stays busy, and every later message just queues behind it. yolo mode
+// therefore approves immediately (the run transport gets the same effect from
+// --dangerously-skip-permissions); other modes hand the request to the engine,
+// which renders an Allow/Deny prompt and answers through RespondPermission.
+func (s *serverSession) handlePermissionAsked(props map[string]any) {
+	requestID, _ := props["id"].(string)
+	if requestID == "" {
+		return
+	}
+	permission, _ := props["permission"].(string)
+	patterns := stringList(props["patterns"])
+
+	if s.mode == "yolo" {
+		if err := s.srv.replyPermission(s.inner.ctx, requestID, "always"); err != nil {
+			slog.Error("opencode server session: auto-approve failed; the turn will wait for an approval",
+				"request", requestID, "permission", permission, "patterns", patterns, "error", err)
+			return
+		}
+		slog.Info("opencode server session: auto-approved tool permission (yolo mode)",
+			"request", requestID, "permission", permission, "patterns", patterns)
+		return
+	}
+
+	slog.Info("opencode server session: tool permission requested",
+		"request", requestID, "permission", permission, "patterns", patterns)
+	s.sendEvent(core.Event{
+		Type:         core.EventPermissionRequest,
+		RequestID:    requestID,
+		ToolName:     permission,
+		ToolInput:    strings.Join(patterns, ", "),
+		ToolInputRaw: props,
+	})
+}
+
+// stringList reads a JSON string array without panicking on other shapes.
+func stringList(raw any) []string {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // dispatchPart converts one OpenCode part into engine events.
@@ -1157,15 +1353,73 @@ func (s *serverSession) dispatchPart(part map[string]any) {
 	}
 }
 
+// resyncMessageRoles rebuilds the assistant/user message maps from the session
+// itself. They are otherwise filled only by `message.updated` events, and a
+// stream gap (a reconnect, or a turn that started before this connection) would
+// leave a message unknown — which used to mean dropping its parts, i.e. losing
+// the answer.
+func (s *serverSession) resyncMessageRoles(ctx context.Context) {
+	sessionID := s.CurrentSessionID()
+	if sessionID == "" {
+		return
+	}
+	srv := s.server()
+	if srv == nil {
+		return
+	}
+	msgs, err := srv.listMessages(ctx, sessionID, s.workDir)
+	if err != nil {
+		slog.Debug("opencode server session: message role resync failed", "session", sessionID, "error", err)
+		return
+	}
+	assistant, user := 0, 0
+	s.msgMu.Lock()
+	for _, m := range msgs {
+		info, _ := m["info"].(map[string]any)
+		if info == nil {
+			continue
+		}
+		id, _ := info["id"].(string)
+		if id == "" {
+			continue
+		}
+		switch role, _ := info["role"].(string); role {
+		case "assistant":
+			s.assistantMsgs[id] = struct{}{}
+			assistant++
+		case "user":
+			s.userMsgs[id] = struct{}{}
+			user++
+		}
+	}
+	s.msgMu.Unlock()
+	slog.Debug("opencode server session: message roles resynced",
+		"session", sessionID, "assistant", assistant, "user", user)
+}
+
 func (s *serverSession) isAssistantPart(part map[string]any) bool {
 	id, _ := part["messageID"].(string)
 	if id == "" {
 		return false
 	}
 	s.msgMu.Lock()
-	defer s.msgMu.Unlock()
-	_, ok := s.assistantMsgs[id]
-	return ok
+	_, isUser := s.userMsgs[id]
+	_, isAssistant := s.assistantMsgs[id]
+	s.msgMu.Unlock()
+	if isUser {
+		return false
+	}
+	if isAssistant {
+		return true
+	}
+	// Unknown message: its `message.updated` was missed (a stream gap at the
+	// start of a turn, before the roles were announced). Accept the part — the
+	// run transport never filtered by role at all, so accepting is the safe
+	// default: leaking the user's own prompt into the progress lane is cosmetic,
+	// silently dropping the answer is not.
+	slog.Debug("opencode server session: part from an unknown message, accepting as assistant",
+		"message_id", id, "part_type", part["type"])
+	return true
 }
 
 // dispatchToolPart emits a single tool-use event per call plus its result. The
@@ -1212,14 +1466,126 @@ func (s *serverSession) dispatchToolPart(part map[string]any) {
 	}
 }
 
+// stallWatchdog aborts a turn that stops producing events. The run transport
+// kills a silent opencode process after the same delay; the server equivalent is
+// an abort, which keeps the conversation usable for the next message.
+func (s *serverSession) stallWatchdog(ctx context.Context, tick time.Duration) {
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !s.turnInFlight.Load() || s.inner.resultSent.Load() {
+				continue
+			}
+			started := s.turnStartedAt.Load()
+			if started == 0 {
+				continue
+			}
+			last := s.lastSessionEvent.Load()
+			if last == 0 {
+				// No event at all yet: measure from the start of the turn, so a
+				// turn that hangs before its first event is caught too.
+				last = started
+			}
+			idle := time.Since(time.Unix(0, last))
+			if idle < s.stallTimeout {
+				continue
+			}
+			if !s.stallReported.CompareAndSwap(false, true) {
+				continue
+			}
+			s.abortStalledTurn(idle)
+		}
+	}
+}
+
+// abortStalledTurn stops a silent turn and ends it with the same notice the run
+// transport shows, so the conversation can continue.
+func (s *serverSession) abortStalledTurn(idle time.Duration) {
+	sessionID := s.CurrentSessionID()
+	slog.Error("opencode server session: no events for a long time, aborting the stalled turn",
+		"session", sessionID, "idle", idle.Round(time.Second), "timeout", s.stallTimeout)
+
+	if srv := s.server(); srv != nil && sessionID != "" && !srv.isExited() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := srv.abortSession(ctx, sessionID); err != nil {
+			slog.Warn("opencode server session: abort of the stalled turn failed", "session", sessionID, "error", err)
+		}
+		cancel()
+	}
+
+	s.inner.expectingContinue.Store(false)
+	s.endTurnWithNotice(serverStallNotice)
+	s.turnInFlight.Store(false)
+}
+
+// endTurnWithNotice ends the turn with a user-visible reason, delivering the
+// notice both as text and as the result content so it reaches the user no matter
+// how the base delivers the final answer (with step buffering the answer rides
+// on the result, without it on the text events).
+func (s *serverSession) endTurnWithNotice(notice string) {
+	if !s.inner.resultSent.CompareAndSwap(false, true) {
+		return
+	}
+	sessionID := s.CurrentSessionID()
+	evt := core.Event{Type: core.EventResult, SessionID: sessionID, Content: notice, Done: true}
+	if reporter, ok := any(s.inner).(core.ContextUsageReporter); ok {
+		if usage := reporter.GetContextUsage(); usage != nil {
+			evt.InputTokens = usage.InputTokens
+			evt.OutputTokens = usage.OutputTokens
+			evt.CacheReadInputTokens = usage.CachedInputTokens
+			evt.CacheCreationInputTokens = usage.CacheCreationInputTokens
+		}
+	}
+	s.sendEvent(core.Event{Type: core.EventText, Content: notice, SessionID: sessionID})
+	s.sendEvent(evt)
+}
+
 func (s *serverSession) matchesSession(sessionID string) bool {
 	s.sessionMu.Lock()
 	current := s.sessionID
 	s.sessionMu.Unlock()
-	return current == "" || current == sessionID
+	// Before this session has an id, nothing on the stream can belong to it —
+	// the server is shared by every conversation in the workspace, so accepting
+	// events "while we do not know our id yet" leaks another user's turn into
+	// this reply. (A part can only be produced after the message that created
+	// the session, so no event of ours is ever dropped here.)
+	return current != "" && current == sessionID
 }
 
-func (s *serverSession) RespondPermission(_ string, _ core.PermissionResult) error { return nil }
+// GetContextUsage implements core.ContextUsageReporter so server-transport turns
+// report real token counts too (reply footer, and auto-compress decisions instead
+// of the engine's heuristic estimate). OpenCode's token totals are accumulated by
+// the run session, which reports them when it has the capability; on bases
+// without that the delegation simply yields nil.
+func (s *serverSession) GetContextUsage() *core.ContextUsage {
+	reporter, ok := any(s.inner).(core.ContextUsageReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.GetContextUsage()
+}
+
+// RespondPermission answers a permission request surfaced as
+// core.EventPermissionRequest (non-yolo modes). "once" mirrors Allow;
+// everything else rejects, which reports the refusal back to the model instead
+// of leaving the turn parked.
+func (s *serverSession) RespondPermission(requestID string, result core.PermissionResult) error {
+	if requestID == "" {
+		return nil
+	}
+	reply := "reject"
+	if result.Behavior == "allow" {
+		reply = "once"
+	}
+	if err := s.srv.replyPermission(s.inner.ctx, requestID, reply); err != nil {
+		return fmt.Errorf("opencode server session: reply to permission %s: %w", requestID, err)
+	}
+	return nil
+}
 
 func (s *serverSession) Events() <-chan core.Event { return s.inner.Events() }
 
