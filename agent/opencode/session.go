@@ -302,7 +302,7 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 	}
 
 	if text != "" {
-		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
+		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic, SessionID: s.CurrentSessionID()}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -330,7 +330,7 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 
 	if status == "completed" {
 		// OpenCode bundles call + result in one event; emit both for UI.
-		useEvt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+		useEvt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input, SessionID: s.CurrentSessionID()}
 		select {
 		case s.events <- useEvt:
 		case <-s.ctx.Done():
@@ -338,14 +338,14 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 		}
 
 		output, _ := state["output"].(string)
-		resultEvt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(output, 500)}
+		resultEvt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(output, 500), SessionID: s.CurrentSessionID()}
 		select {
 		case s.events <- resultEvt:
 		case <-s.ctx.Done():
 			return
 		}
 	} else {
-		evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+		evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input, SessionID: s.CurrentSessionID()}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -361,7 +361,7 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 			errMsg, _ := state["error"].(string)
 			if errMsg != "" {
 				slog.Info("opencodeSession: tool rejected, surfacing error as text", "tool", toolName, "error", errMsg)
-				errEvt := core.Event{Type: core.EventText, Content: errMsg}
+				errEvt := core.Event{Type: core.EventText, Content: errMsg, SessionID: s.CurrentSessionID()}
 				select {
 				case s.events <- errEvt:
 				case <-s.ctx.Done():
@@ -404,7 +404,7 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 	}
 	text, _ := part["text"].(string)
 	if text != "" {
-		evt := core.Event{Type: core.EventThinking, Content: text}
+		evt := core.Event{Type: core.EventThinking, Content: text, SessionID: s.CurrentSessionID()}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -416,7 +416,7 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
-	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg), SessionID: s.CurrentSessionID()}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
