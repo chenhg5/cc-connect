@@ -2172,3 +2172,134 @@ func TestFlushImageBatchForSession_NoBatchIsSafe(t *testing.T) {
 		t.Fatalf("imageBatch size = %d, want 0", n)
 	}
 }
+
+// --- Issue #1884: top-level files[] of a rich-text (post) message ------
+
+func TestParsePostFiles_FlatFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	raw := `{"title":"","content":[[{"tag":"text","text":"按这个表里的字段,重新填充"}]],"files":[{"file_key":"file_v3_0015o_b1621303","file_name":"Huidive -询盘跟进表.xlsx","is_folder":false}]}`
+	got := p.parsePostFiles(raw)
+	if len(got) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(got))
+	}
+	if got[0].FileKey != "file_v3_0015o_b1621303" {
+		t.Fatalf("FileKey = %q, want file_v3_0015o_b1621303", got[0].FileKey)
+	}
+	if got[0].FileName != "Huidive -询盘跟进表.xlsx" {
+		t.Fatalf("FileName = %q, want Huidive -询盘跟进表.xlsx", got[0].FileName)
+	}
+	if got[0].IsFolder {
+		t.Fatal("IsFolder = true, want false")
+	}
+}
+
+func TestParsePostFiles_LangKeyedFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	raw := `{"zh_cn":{"title":"","content":[[{"tag":"text","text":"看这个"}]],"files":[{"file_key":"file_lang_k","file_name":"LANG.pdf"}]}}`
+	got := p.parsePostFiles(raw)
+	if len(got) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(got))
+	}
+	if got[0].FileKey != "file_lang_k" {
+		t.Fatalf("FileKey = %q, want file_lang_k", got[0].FileKey)
+	}
+	if got[0].FileName != "LANG.pdf" {
+		t.Fatalf("FileName = %q, want LANG.pdf", got[0].FileName)
+	}
+}
+
+func TestParsePostFiles_NoFiles(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	raw := `{"title":"","content":[[{"tag":"text","text":"just text, no files"}]]}`
+	if got := p.parsePostFiles(raw); len(got) != 0 {
+		t.Fatalf("len(files) = %d, want 0", len(got))
+	}
+}
+
+func TestDispatchMessagePostWithFiles(t *testing.T) {
+	const appID = "cli_post_files"
+	const appSecret = "secret-post-files"
+	const messageID = "om_post_files"
+	const fileKey = "file_v3_0015o_post"
+	fileBytes := []byte("fake-xlsx-bytes-here")
+
+	got := make(chan *core.Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+messageID+"/resources/"+fileKey:
+			if r.URL.Query().Get("type") != "file" {
+				t.Fatalf("resource type = %q, want file", r.URL.Query().Get("type"))
+			}
+			if _, err := w.Write(fileBytes); err != nil {
+				t.Fatalf("write file: %v", err)
+			}
+		case strings.HasPrefix(r.URL.Path, "/open-apis/contact/v3/users/"):
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/chats/"):
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+
+	content := `{"title":"","content":[[{"tag":"text","text":"按这个表里的字段,重新填充"}]],"files":[{"file_key":"` + fileKey + `","file_name":"Huidive -询盘跟进表.xlsx","is_folder":false}]}`
+	p.dispatchMessage(
+		context.Background(),
+		"post",
+		content,
+		nil,
+		messageID,
+		"feishu:oc_chat:ou_user",
+		"ou_user",
+		"oc_chat",
+		replyContext{messageID: messageID, sessionKey: "feishu:oc_chat:ou_user"},
+		"",
+		0,
+	)
+
+	select {
+	case msg := <-got:
+		if msg.Content != "按这个表里的字段,重新填充" {
+			t.Fatalf("Content = %q, want 按这个表里的字段,重新填充", msg.Content)
+		}
+		if len(msg.Files) != 1 {
+			t.Fatalf("len(Files) = %d, want 1", len(msg.Files))
+		}
+		if msg.Files[0].FileName != "Huidive -询盘跟进表.xlsx" {
+			t.Fatalf("Files[0].FileName = %q, want Huidive -询盘跟进表.xlsx", msg.Files[0].FileName)
+		}
+		if string(msg.Files[0].Data) != string(fileBytes) {
+			t.Fatal("Files[0].Data did not match downloaded resource bytes")
+		}
+		if msg.Files[0].MimeType == "" {
+			t.Fatal("Files[0].MimeType is empty; detectMimeType should populate it")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatched message")
+	}
+}
