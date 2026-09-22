@@ -4325,7 +4325,7 @@ When the user asks you to do something on a schedule (e.g. "每天早上6点帮�
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so you do NOT need to specify --project or --session-key.
 
 Optional flags:
-  --session-mode <mode>     reuse (default) or new-per-run (fresh session each trigger)
+  --session-mode <mode>     new-per-run (default; fresh session each trigger) or reuse
   --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
   --exec <command>          run a shell command directly instead of --prompt
 
@@ -4384,7 +4384,7 @@ cc-connect 有两个不同的调度命令。选错会让用户感到很困惑。
 环境变量 CC_PROJECT 和 CC_SESSION_KEY 已经设置好,你不需要传 --project 或 --session-key。
 
 可选参数:
-  --session-mode <mode>     reuse(默认)或 new-per-run(每次触发用新会话)
+  --session-mode <mode>     new-per-run(默认,每次触发用新会话)或 reuse
   --timeout-mins <n>        每次运行最长等待分钟数(默认 30,0 = 不限)
   --exec <command>          直接跑 shell 命令而不是 --prompt
 
@@ -4438,7 +4438,7 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set.
 Optional flags:
   --exec <command>          run a shell command directly instead of --prompt
   --desc <text>             short description
-  --session-mode <mode>     reuse (default) or new-per-run (fresh session each run)
+  --session-mode <mode>     new-per-run (default; fresh session each run) or reuse
   --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
   --mute                    suppress all messages (start notification + result)
 
@@ -4468,7 +4468,7 @@ You can also list or cancel timers:
 可选参数:
   --exec <command>          直接跑 shell 命令而不是 --prompt
   --desc <text>             简短描述
-  --session-mode <mode>     reuse(默认)或 new-per-run(每次跑用新会话)
+  --session-mode <mode>     new-per-run(默认,每次跑用新会话)或 reuse
   --timeout-mins <n>        每次最长等待分钟数(默认 30,0 = 不限)
   --mute                    静默所有消息(开始通知和结果)
 

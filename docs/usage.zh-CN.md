@@ -752,7 +752,7 @@ cc-connect cron exec <job-id>
 cc-connect cron del <job-id>
 ```
 
-可选：`--session-mode new-per-run` 每次触发使用新的 agent 会话（默认 `reuse` 与旧行为一致）。`--timeout-mins N` 设置单次调度最长等待分钟数（`0` 表示不限制；省略为 30 分钟）。
+默认情况下，prompt cron 每次触发都会使用新的 agent 会话，避免被正在进行的聊天 turn 阻塞。需要复用活跃会话时可设置 `--session-mode reuse`。`--timeout-mins N` 设置单次调度最长等待分钟数（`0` 表示不限制；省略为 30 分钟）。
 
 ### 自然语言（Claude Code）
 
