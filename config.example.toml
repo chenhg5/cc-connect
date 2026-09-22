@@ -1920,6 +1920,16 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify a model (provider/model format) / 可选：指定模型
 # model = "anthropic/claude-sonnet-4-20250514"
 #
+# Optional: transport used to drive OpenCode / 可选：驱动 OpenCode 的传输方式
+# - "run" (default): one `opencode run --format json` process per turn.
+#   / 默认：每个回合启动一个 `opencode run --format json` 进程。
+# - "server": keep one `opencode serve` instance per workspace and drive sessions
+#   through its HTTP API. Mid-turn supplements (/ps) then join the running turn
+#   instead of starting a competing run, so in-flight tool calls are not
+#   interrupted. / "server"：每个工作区常驻一个 `opencode serve`，通过 HTTP API 驱动会话；
+#   回合进行中的 /ps 会加入当前回合而不是另起一个竞争的 run，正在执行的工具调用不会被打断。
+# opencode_transport = "run"
+#
 # [[projects.platforms]]
 # type = "telegram"
 #

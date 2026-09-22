@@ -32,6 +32,7 @@ type Agent struct {
 	workDir              string
 	model                string
 	mode                 string
+	transport            string   // "run" (default) or "server" — see server_session.go
 	cmd                  string   // CLI binary name, default "opencode"
 	cliExtraArgs         []string // extra args from cmd after the binary name
 	configEnv            []string // env vars from [projects.agent.options.env]
@@ -69,6 +70,15 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
+	transport, _ := opts["opencode_transport"].(string)
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	switch transport {
+	case "", opencodeTransportRun:
+		transport = opencodeTransportRun
+	case opencodeTransportServer:
+	default:
+		return nil, fmt.Errorf("opencode: unknown opencode_transport %q (want %q or %q)", transport, opencodeTransportRun, opencodeTransportServer)
+	}
 	cmd, extraArgs := core.ParseCmdOpts(opts, "opencode")
 	agentName, _ := opts["agent"].(string) // --agent flag for plugin-defined agents (#1210)
 	ccDataDir, _ := opts["cc_data_dir"].(string)
@@ -87,6 +97,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir:              workDir,
 		model:                model,
 		mode:                 mode,
+		transport:            transport,
 		cmd:                  cmd,
 		cliExtraArgs:         extraArgs,
 		configEnv:            core.ParseConfigEnv(opts),
@@ -209,6 +220,11 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 
 	opts := map[string]any{
 		"mode": a.mode,
+		// Multi-workspace projects build a per-workspace agent from these
+		// options; without the transport here a project configured for the
+		// server transport would silently fall back to spawning `opencode run`
+		// per turn in every workspace.
+		"opencode_transport": a.transport,
 	}
 	if a.model != "" {
 		opts["model"] = a.model
@@ -491,6 +507,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	model := a.model
 	mode := a.mode
+	transport := a.transport
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
@@ -505,6 +522,18 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
+	if transport == opencodeTransportServer {
+		// The server transport drives a long-lived `opencode serve` instance over
+		// its HTTP API so a mid-turn `/ps` joins the running turn instead of
+		// pre-empting it (see server_session.go).
+		return newServerSession(ctx, opencodeServeConfig{
+			cmd:       cmd,
+			extraArgs: extraArgs,
+			workDir:   workDir,
+			extraEnv:  extraEnv,
+		}, model, mode, agentName, sessionID)
+	}
+
 	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv)
 }
 
@@ -517,7 +546,18 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	return listOpencodeSessions(cmd, workDir)
 }
 
-func (a *Agent) Stop() error { return nil }
+// Stop shuts down anything the agent owns. For the server transport that means
+// the `opencode serve` processes started for its workspaces, so a daemon
+// shutdown does not leave orphans behind.
+func (a *Agent) Stop() error {
+	a.mu.RLock()
+	transport := a.transport
+	a.mu.RUnlock()
+	if transport == opencodeTransportServer {
+		stopAllOpencodeServers()
+	}
+	return nil
+}
 
 // DeleteSession implements core.SessionDeleter via `opencode session delete <id>`.
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
