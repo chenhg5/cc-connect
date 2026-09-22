@@ -16900,18 +16900,33 @@ type dualCardPlatform struct {
 // recordingStreamingCard records preview creation through the platform's
 // SendPreviewStart so tests can count how many cards were actually posted.
 type recordingStreamingCard struct {
-	p       *dualCardPlatform
+	p *dualCardPlatform
+	// mu guards updates: the engine goroutine writes it while the test
+	// goroutine polls for the card content it expects.
+	mu      sync.Mutex
 	updates []string // every Update/Finalize content, in order
 }
 
 func (c *recordingStreamingCard) Update(_ context.Context, content string) error {
+	c.mu.Lock()
 	c.updates = append(c.updates, content)
+	c.mu.Unlock()
 	return c.p.sendPreviewOnce()
 }
 
 func (c *recordingStreamingCard) Finalize(_ context.Context, content string) error {
+	c.mu.Lock()
 	c.updates = append(c.updates, content)
+	c.mu.Unlock()
 	return c.p.sendPreviewOnce()
+}
+
+// snapshot returns a copy of the recorded card contents, safe to read from the
+// test goroutine while the turn is still running.
+func (c *recordingStreamingCard) snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.updates...)
 }
 
 func (c *recordingStreamingCard) Failed() bool { return false }
@@ -17106,8 +17121,12 @@ func TestStreamingCard_ProgressTextFoldedIntoPanel(t *testing.T) {
 		card := p.lastCard
 		p.previewMu.Unlock()
 		sent := p.getSent()
-		if card != nil && len(card.updates) > 0 && len(sent) > 0 {
-			content := card.updates[len(card.updates)-1] // final content
+		var snap []string
+		if card != nil {
+			snap = card.snapshot()
+		}
+		if len(snap) > 0 && len(sent) > 0 {
+			content := snap[len(snap)-1] // final content
 			if pl, ok := ParseProgressCardPayload(content); ok {
 				lastPayload = pl
 				break
@@ -17142,5 +17161,205 @@ func TestStreamingCard_ProgressTextFoldedIntoPanel(t *testing.T) {
 	}
 	if strings.Contains(joined, "计划：先核对剩余改动。") || strings.Contains(joined, "正在跑全量测试。") {
 		t.Errorf("intermediate step text leaked into final reply; sent=%q", sent)
+	}
+}
+
+// A supplement delivered mid-turn must show up on the running turn's card
+// immediately (the model only reads it at the next step boundary), so /ps queues
+// a note the turn loop renders.
+func TestCmdPs_BusySession_QueuesCardNote(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newQueuingSession("ps-card-note")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangChinese)
+
+	key := "test:user1"
+	state := &interactiveState{agentSession: sess, platform: p}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	session := e.sessions.GetOrCreateActive(key)
+	if _, lockedNow := session.TryLock(); !lockedNow {
+		t.Fatal("expected TryLock to succeed")
+	}
+	defer session.Unlock(0)
+
+	msg := &Message{SessionKey: key, Content: "/ps 记得跑单测", ReplyCtx: "ctx"}
+	e.cmdPs(p, msg, []string{"记得跑单测"})
+
+	notes := state.takeCardNotes()
+	if len(notes) != 1 {
+		t.Fatalf("card notes = %v, want exactly one", notes)
+	}
+	if !strings.Contains(notes[0], "记得跑单测") {
+		t.Fatalf("card note = %q, want it to carry the P.S. text", notes[0])
+	}
+	if ch := state.cardNoteChannel(); ch == nil {
+		t.Fatal("no wake-up channel was armed for the turn loop")
+	}
+	// The wake-up is edge-triggered and must not block a second caller.
+	state.noteForCard("again")
+	if len(state.takeCardNotes()) != 1 {
+		t.Fatal("second note was lost")
+	}
+}
+
+// heldTurnAgentSession emits one intermediate step and then waits for the test
+// to release it, so a /ps can be injected while the turn is genuinely in flight.
+type heldTurnAgentSession struct {
+	events  chan Event
+	release chan struct{}
+
+	mu    sync.Mutex
+	sends int
+}
+
+func newHeldTurnAgentSession() *heldTurnAgentSession {
+	return &heldTurnAgentSession{events: make(chan Event, 16), release: make(chan struct{})}
+}
+
+func (s *heldTurnAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	first := s.sends == 1
+	s.mu.Unlock()
+	if !first {
+		return nil // the /ps lands in the in-flight turn, like the server transport
+	}
+	go func() {
+		s.events <- Event{Type: EventText, Content: "开始核对改动。"}
+		<-s.release
+		s.events <- Event{Type: EventResult, Content: "核对完成。", Done: true}
+	}()
+	return nil
+}
+
+func (s *heldTurnAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *heldTurnAgentSession) Events() <-chan Event     { return s.events }
+func (s *heldTurnAgentSession) CurrentSessionID() string { return "held" }
+func (s *heldTurnAgentSession) Alive() bool              { return true }
+func (s *heldTurnAgentSession) Close() error             { return nil }
+
+// waitForCardNote polls the card until it contains want, within its own
+// deadline (the turn is still running while the test waits).
+func waitForCardNote(cardUpdates func() []string, want string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, content := range cardUpdates() {
+			if strings.Contains(content, want) {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A supplement delivered mid-turn must be visible on the running card right
+// away: the model only reads it at its next step boundary (up to ~a minute on
+// opencode), so without the card entry the user sees the ✅ ack but nothing on
+// the card until the turn moves on.
+func TestStreamingCard_PsNoteShownOnRunningCard(t *testing.T) {
+	p := &dualCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+			style:              "card",
+			supportPayload:     true,
+		},
+	}
+	agentSession := newHeldTurnAgentSession()
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "legacy",
+	})
+
+	key := "feishu:dual"
+	msg := &Message{
+		SessionKey: key,
+		Platform:   "feishu",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Wait until the card exists and the turn's first step was rendered.
+	deadline := time.Now().Add(5 * time.Second)
+	cardUpdates := func() []string {
+		p.previewMu.Lock()
+		card := p.lastCard
+		p.previewMu.Unlock()
+		if card == nil {
+			return nil
+		}
+		return card.snapshot()
+	}
+	for {
+		if updates := cardUpdates(); len(updates) > 0 && strings.Contains(updates[len(updates)-1], "开始核对改动。") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the running card: updates=%v", cardUpdates())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The session is busy (the turn is held), so /ps joins the running turn.
+	e.cmdPs(p, &Message{SessionKey: key, Content: "/ps 记得跑单测", ReplyCtx: "ctx"}, []string{"记得跑单测"})
+
+	want := e.i18n.Tf(MsgPsCardEntry, "记得跑单测")
+	if !waitForCardNote(cardUpdates, want, 5*time.Second) {
+		t.Fatalf("P.S. never reached the running card; want %q in %v; sent=%v", want, cardUpdates(), p.getSent())
+	}
+
+	// Release the turn; the note must survive as a panel item on the final card.
+	close(agentSession.release)
+	settle := time.Now().Add(5 * time.Second)
+	for {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			joined := strings.Join(sent, "\n")
+			if strings.Contains(joined, "核对完成。") {
+				break
+			}
+		}
+		if time.Now().After(settle) {
+			t.Fatalf("timed out waiting for the turn to finish: sent=%v", sent)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	updates := cardUpdates()
+	last := updates[len(updates)-1]
+	pl, ok := ParseProgressCardPayload(last)
+	if !ok {
+		t.Fatalf("final card is not a progress payload: %q", last)
+	}
+	var panelHasNote bool
+	for _, item := range pl.Items {
+		if strings.Contains(item.Text, want) {
+			panelHasNote = true
+		}
+	}
+	if !panelHasNote {
+		t.Errorf("P.S. note missing from the final card panel; items=%v", pl.Items)
+	}
+	if joined := strings.Join(p.getSent(), "\n"); strings.Contains(joined, want) {
+		t.Errorf("P.S. note leaked into the reply message instead of the card panel; sent=%q", p.getSent())
+	}
+	// The ack still goes to the user as its own message.
+	if joined := strings.Join(p.getSent(), "\n"); !strings.Contains(joined, e.i18n.T(MsgPsSent)) {
+		t.Errorf("missing /ps ack; sent=%v", p.getSent())
 	}
 }

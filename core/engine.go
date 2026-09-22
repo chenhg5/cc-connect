@@ -557,6 +557,14 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
+	// cardNoteMu guards the notes queued for the turn's card, and cardNoteCh wakes
+	// the turn loop so a note is rendered immediately instead of waiting for the
+	// agent's next event. /ps uses this so a supplement is visible on the card the
+	// moment it lands in the running turn.
+	cardNoteMu sync.Mutex
+	cardNotes  []string
+	cardNoteCh chan struct{}
+
 	agentSession AgentSession
 	// busySession is the core.Session whose busy lock guards the in-flight
 	// turn. Set by getOrCreateInteractiveStateWith so /stop can release the
@@ -5362,6 +5370,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardThinkingText string       // latest thinking text
 	var cardStepTexts []string        // intermediate step text (opencode per-step updates) folded into the thinking panel
 
+	// A /ps that raced with the end of the previous turn may have left a note
+	// behind; it belongs to that turn, so drop it instead of showing it here.
+	_ = state.takeCardNotes()
+
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
 			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
@@ -5426,11 +5438,32 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
+
+	// renderCardNotes surfaces supplements that a command (/ps) added to this
+	// running turn. The agent only reads them at its next step boundary — which
+	// can be a minute away — so without this the user gets the ack but sees
+	// nothing on the card until the turn moves on.
+	renderCardNotes := func(notes []string) {
+		switch {
+		case len(notes) == 0:
+		case streamCard != nil && !streamCard.Failed():
+			cardStepTexts = append(cardStepTexts, notes...)
+			_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
+		default:
+			for _, note := range notes {
+				cp.AppendStructured(ProgressCardEntry{Kind: ProgressEntryInfo, Text: note}, note)
+			}
+		}
+	}
+
 	for {
 		var event Event
 		var ok bool
 
 		select {
+		case <-state.cardNoteChannel():
+			renderCardNotes(state.takeCardNotes())
+			continue
 		case <-stopCh:
 			sp.discard()
 			return
@@ -6997,6 +7030,61 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 	}
 }
 
+// noteForCard queues text for the running turn's card and wakes the turn loop.
+func (st *interactiveState) noteForCard(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" || st == nil {
+		return
+	}
+	st.cardNoteMu.Lock()
+	st.cardNotes = append(st.cardNotes, text)
+	if st.cardNoteCh == nil {
+		st.cardNoteCh = make(chan struct{}, 1)
+	}
+	ch := st.cardNoteCh
+	st.cardNoteMu.Unlock()
+
+	select {
+	case ch <- struct{}{}:
+	default: // a wake-up is already pending, the loop will pick the notes up
+	}
+}
+
+// cardNoteChannel returns the wake-up channel, creating it on first use. The
+// turn loop reads it as a select case, so it must exist (be non-nil) from the
+// moment the loop blocks: a channel created later would never wake that select.
+func (st *interactiveState) cardNoteChannel() <-chan struct{} {
+	if st == nil {
+		return nil
+	}
+	st.cardNoteMu.Lock()
+	defer st.cardNoteMu.Unlock()
+	if st.cardNoteCh == nil {
+		st.cardNoteCh = make(chan struct{}, 1)
+	}
+	return st.cardNoteCh
+}
+
+// takeCardNotes drains the queued notes.
+func (st *interactiveState) takeCardNotes() []string {
+	if st == nil {
+		return nil
+	}
+	st.cardNoteMu.Lock()
+	defer st.cardNoteMu.Unlock()
+	notes := st.cardNotes
+	st.cardNotes = nil
+	return notes
+}
+
+// cardNoteLine renders the panel entry for a command that joined a running turn.
+func cardNoteLine(i18n *I18n, preview string) string {
+	if i18n == nil {
+		return preview
+	}
+	return i18n.Tf(MsgPsCardEntry, preview)
+}
+
 // ──────────────────────────────────────────────────────────────
 // Command handling
 // ──────────────────────────────────────────────────────────────
@@ -7080,6 +7168,9 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
 		return
 	}
+	// Surface the supplement on the running turn's card so the user can see that
+	// it joined this turn; the model reads it at the next step boundary.
+	state.noteForCard(cardNoteLine(e.i18n, truncateIf(text, 80)))
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
 }
 
