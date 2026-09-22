@@ -38,6 +38,10 @@ type fakeOpencodeServer struct {
 
 	subscribersMu sync.Mutex
 	subscribers   []chan string
+
+	// missingSessionOnce makes the next message request fail the way OpenCode
+	// does when the stored session id no longer exists.
+	missingSessionOnce atomic.Bool
 }
 
 func newFakeOpencodeServer(t *testing.T) *fakeOpencodeServer {
@@ -77,6 +81,12 @@ func (f *fakeOpencodeServer) handleSession(w http.ResponseWriter, r *http.Reques
 	case strings.HasSuffix(path, "/message"):
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if f.missingSessionOnce.CompareAndSwap(true, false) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"name":"NotFoundError","data":{"message":"Session not found: ses_gone"}}`))
+			return
+		}
 		f.mu.Lock()
 		f.messageBodys = append(f.messageBodys, body)
 		f.mu.Unlock()
@@ -829,4 +839,32 @@ func TestServerSession_TurnResultFallbackWhenIdleMissed(t *testing.T) {
 	if got[0].Type != core.EventResult || !got[0].Done {
 		t.Fatalf("event = %+v, want the turn-closing EventResult", got[0])
 	}
+}
+
+// A stored agent session can disappear underneath cc-connect (e.g. someone runs
+// `opencode session delete`). The run transport recovers by clearing the id; the
+// server transport must do the same, otherwise every later message in that
+// conversation fails with 404.
+func TestServerSession_RecoversFromMissingStoredSession(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	s := newTestServerSession(t, f, "ses_gone")
+	f.missingSessionOnce.Store(true)
+
+	if err := s.Send("hello", "m1", nil, nil); err != nil {
+		t.Fatalf("Send after a deleted session = %v, want a transparent recovery", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		create, _, msgs := f.counts()
+		// The session was pre-bound, so the single create is the one the recovery
+		// performed after the 404; the single message is the successful retry.
+		if create >= 1 && msgs == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("create=%d messages=%d, want a fresh session and a retried message", create, msgs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.releaseTurn()
 }

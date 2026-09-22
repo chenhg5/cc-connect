@@ -754,7 +754,19 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 		// the final assistant message). Events arrive over the SSE stream in
 		// parallel; a supplement posted mid-turn additionally extends the turn
 		// that is already running.
-		done <- srv.sendMessage(s.inner.ctx, sessionID, parts, s.agentName, s.model)
+		err := srv.sendMessage(s.inner.ctx, sessionID, parts, s.agentName, s.model)
+		if isSessionMissing(err) {
+			slog.Warn("opencode server session: stored session no longer exists, starting a fresh one",
+				"session_id", sessionID)
+			s.forgetSession()
+			fresh, _, cerr := s.ensureSession()
+			if cerr != nil {
+				done <- cerr
+				return
+			}
+			err = srv.sendMessage(s.inner.ctx, fresh, parts, s.agentName, s.model)
+		}
+		done <- err
 	}()
 
 	select {
@@ -832,6 +844,27 @@ func (s *serverSession) endTurn() {
 		return
 	}
 	s.sendEvent(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+}
+
+// sessionMissingMarker is how OpenCode reports a session id that no longer
+// exists (e.g. after `opencode session delete`).
+const sessionMissingMarker = "Session not found"
+
+// isSessionMissing reports whether err is OpenCode's "this session is gone"
+// response. The run transport recovers from it by clearing the stored id; the
+// server transport must do the same, otherwise every later message in that
+// conversation fails with 404.
+func isSessionMissing(err error) bool {
+	return err != nil && strings.Contains(err.Error(), sessionMissingMarker)
+}
+
+// forgetSession drops the cached agent session id so the next send creates a
+// fresh session.
+func (s *serverSession) forgetSession() {
+	s.sessionMu.Lock()
+	s.sessionID = ""
+	s.sessionMu.Unlock()
+	s.inner.chatID.Store("")
 }
 
 // ensureTurnResult makes sure the engine is told the turn is over exactly once.
