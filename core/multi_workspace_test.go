@@ -304,7 +304,8 @@ func TestSessionContextForKey_MissingSharedBindingFallsBack(t *testing.T) {
 	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
 	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, channelID, "shared-channel", missingDir)
 
-	agent, sessions := e.sessionContextForKey("mock:" + channelID + ":user")
+	sessionKey := "mock:" + channelID + ":user"
+	agent, sessions := e.sessionContextForKey(sessionKey, sessionKey)
 	if agent != e.agent {
 		t.Fatal("expected base agent for missing shared binding")
 	}
@@ -327,7 +328,8 @@ func TestSessionContextForKey_SharedBinding(t *testing.T) {
 	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
 	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, channelID, "shared-channel", wsDir)
 
-	agent, sessions := e.sessionContextForKey("mock:" + channelID + ":user")
+	sessionKey := "mock:" + channelID + ":user"
+	agent, sessions := e.sessionContextForKey(sessionKey, sessionKey)
 	if agent == nil {
 		t.Fatal("expected workspace agent, got nil")
 	}
@@ -342,6 +344,45 @@ func TestSessionContextForKey_SharedBinding(t *testing.T) {
 	}
 	if got := e.workspacePool.Get(normalizeWorkspacePath(wsDir)); got == nil || got.agent == nil || got.sessions == nil {
 		t.Fatal("expected workspace pool entry to be created for shared binding")
+	}
+}
+
+func TestSessionContextForKey_ExplicitTopicKeyKeepsPerKeyDirOverride(t *testing.T) {
+	baseDir := t.TempDir()
+	chatDir := filepath.Join(baseDir, "chat")
+	topicDir := filepath.Join(baseDir, "topic")
+	childDir := filepath.Join(topicDir, "child")
+	for _, dir := range []string{chatDir, childDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	chatDir = normalizeWorkspacePath(chatDir)
+	topicDir = normalizeWorkspacePath(topicDir)
+	childDir = normalizeWorkspacePath(childDir)
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	channelID := "C-topic"
+	sessionKey := "mock:" + channelID + ":root:R-topic"
+	e.workspaceBindings.Bind(
+		sharedWorkspaceBindingsKey,
+		workspaceChannelKey("mock", channelID),
+		"chat-default",
+		chatDir,
+	)
+
+	interactiveKey := topicDir + ":" + sessionKey
+	store := NewProjectStateStore(filepath.Join(t.TempDir(), "project-state.json"))
+	store.SetWorkspaceDirOverride(interactiveKey, childDir)
+	e.SetProjectStateStore(store)
+
+	agent, sessions := e.sessionContextForKey(interactiveKey, sessionKey)
+	childState := e.workspacePool.Get(childDir)
+	if childState == nil || childState.agent != agent || childState.sessions != sessions {
+		t.Fatal("explicit topic interactive key did not resolve the child workspace override")
+	}
+	if e.workspacePool.Get(chatDir) != nil {
+		t.Fatal("chat-level fallback should not win over an explicit topic interactive key")
 	}
 }
 
