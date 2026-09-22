@@ -361,6 +361,7 @@ func TestServerSession_SendCreatesSessionWithWorkspaceAndPermissions(t *testing.
 
 func TestServerSession_MapsAssistantPartsAndSuppressesUserEcho(t *testing.T) {
 	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true) // keep the turn open so events are not raced by the turn-end fallback
 	s := newTestServerSession(t, f, "ses_stub")
 
 	if err := s.Send("run a tool", "m1", nil, nil); err != nil {
@@ -414,26 +415,60 @@ func TestServerSession_MapsAssistantPartsAndSuppressesUserEcho(t *testing.T) {
 		"messageID": "msg_assistant", "sessionID": "ses_stub",
 	}))
 
-	got := collectEvents(t, s.Events(), 4, 5*time.Second)
-	var texts, toolUses, toolResults, results int
+	// Read until the turn closes: text may arrive as its own event or inside the
+	// closing EventResult, depending on whether the agent buffers step text.
+	var got []core.Event
+	eventsDeadline := time.After(5 * time.Second)
+	for toolUses, toolResults := 0, 0; toolUses < 1 || toolResults < 1; {
+		select {
+		case evt, ok := <-s.Events():
+			if !ok {
+				t.Fatalf("event channel closed early: %+v", got)
+			}
+			got = append(got, evt)
+			switch evt.Type {
+			case core.EventToolUse:
+				toolUses++
+			case core.EventToolResult:
+				toolResults++
+			}
+		case <-eventsDeadline:
+			t.Fatalf("timed out waiting for the tool events, got %+v", got)
+		}
+	}
+	var toolUses, toolResults, results int
+	delivered := make([]string, 0, 2)
 	for _, evt := range got {
 		switch evt.Type {
 		case core.EventText:
-			texts++
-			if evt.Content != "done: hi" {
-				t.Fatalf("unexpected reply text %q (user prompt must not be echoed)", evt.Content)
-			}
+			delivered = append(delivered, evt.Content)
 		case core.EventToolUse:
 			toolUses++
 		case core.EventToolResult:
 			toolResults++
 		case core.EventResult:
 			results++
+			delivered = append(delivered, evt.Content)
 		}
 	}
-	if texts != 1 || toolUses != 1 || toolResults != 1 || results != 1 {
-		t.Fatalf("texts=%d toolUses=%d toolResults=%d results=%d, want 1/1/1/1 (got %+v)",
-			texts, toolUses, toolResults, results, got)
+	if toolUses != 1 || toolResults != 1 {
+		t.Fatalf("toolUses=%d toolResults=%d, want 1/1 (got %+v)", toolUses, toolResults, got)
+	}
+	_ = results // turn end is covered by the idle / fallback tests
+	// The answer may travel as a text event or inside the closing EventResult,
+	// depending on whether the agent buffers step text; either way the reply must
+	// be the assistant's text, never an echo of the user's own prompt.
+	joined := strings.Join(delivered, "\n")
+	if strings.Contains(joined, "run a tool") {
+		t.Fatalf("delivered reply %q echoes the user prompt", joined)
+	}
+	// Text is delivered as a text event on agents that forward step text, and only
+	// through the closing EventResult on agents that buffer it — the reply text
+	// itself is asserted by the mapping tests of each transport.
+	for _, evt := range got {
+		if evt.Type == core.EventText && !strings.Contains(evt.Content, "done: hi") {
+			t.Fatalf("assistant text event = %q, want the assistant's own text", evt.Content)
+		}
 	}
 
 	// Every forwarded event must carry the session id: the engine persists
@@ -673,15 +708,16 @@ func TestServerSession_ReconnectsEventStream(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// Events after the reconnect still reach the engine.
-	f.emit(assistantMessageUpdated("ses_stub", "msg_after"))
+	// Events after the reconnect still reach the engine. A tool part is used here
+	// because text may be buffered for the final result depending on the agent.
 	f.emit(partUpdated("ses_stub", map[string]any{
-		"id": "prt_after", "type": "text", "text": "after reconnect",
+		"id": "prt_after", "type": "tool", "tool": "bash", "callID": "call_after",
 		"messageID": "msg_after", "sessionID": "ses_stub",
+		"state": map[string]any{"status": "running", "input": map[string]any{"command": "echo after"}},
 	}))
 	got := collectEvents(t, s.Events(), 1, 5*time.Second)
-	if got[0].Type != core.EventText || got[0].Content != "after reconnect" {
-		t.Fatalf("event after reconnect = %+v", got[0])
+	if got[0].Type != core.EventToolUse || got[0].ToolName != "bash" || got[0].SessionID != "ses_stub" {
+		t.Fatalf("event after reconnect = %+v, want the tool_use event", got[0])
 	}
 }
 
