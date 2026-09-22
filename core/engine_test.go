@@ -52,6 +52,15 @@ func (s *recordingAgentSession) RespondPermission(id string, res PermissionResul
 	return nil
 }
 
+type stubNamedAgent struct {
+	stubAgent
+	name string
+}
+
+func (a *stubNamedAgent) Name() string {
+	return a.name
+}
+
 type stubPlatformEngine struct {
 	n    string
 	sent []string
@@ -2635,6 +2644,40 @@ func TestEngine_DisabledCommandsWildcard(t *testing.T) {
 	}
 	if !strings.Contains(p.sent[0], "disabled") && !strings.Contains(p.sent[0], "禁用") {
 		t.Errorf("expected disabled message, got: %s", p.sent[0])
+	}
+}
+
+func TestHandleCommand_ModelPassesThroughForACPAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubNamedAgent{name: "acp"}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+
+	handled := e.handleCommand(p, msg, "/model")
+
+	if handled {
+		t.Fatal("expected /model on ACP agent to fall through to the agent")
+	}
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("expected no cc-connect reply before fallthrough, got %#v", got)
+	}
+}
+
+func TestHandleCommand_ModelUnsupportedForNonACPAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
+
+	handled := e.handleCommand(p, msg, "/model")
+
+	if !handled {
+		t.Fatal("expected /model on non-ACP agent to be handled by cc-connect")
+	}
+	got := p.getSent()
+	if len(got) != 1 {
+		t.Fatalf("expected one unsupported-model reply, got %#v", got)
+	}
+	if !strings.Contains(got[0], "does not support model switching") {
+		t.Fatalf("expected unsupported-model reply, got %q", got[0])
 	}
 }
 
