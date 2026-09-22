@@ -2,8 +2,10 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -28,6 +30,7 @@ type Agent struct {
 	sessionEnv   []string
 	authMethod   string // optional, e.g. "cursor_login" for Cursor CLI (see authenticate RPC)
 	displayName  string // optional, for doctor (default "ACP")
+	model        string // optional, for Trae CLI ACP only
 
 	// mode is the pending permission mode to apply to new sessions.
 	// When set, StartSession applies it via session/set_mode right after
@@ -45,9 +48,9 @@ type Agent struct {
 	// handshake so that future PermissionModes() calls can reflect the
 	// actual modes this specific ACP agent offers (rather than a
 	// hard-coded fallback that may not match).
-	modesMu       sync.RWMutex
-	modesCache    []core.PermissionModeInfo
-	modesCurrent  string
+	modesMu      sync.RWMutex
+	modesCache   []core.PermissionModeInfo
+	modesCurrent string
 
 	mu sync.RWMutex
 }
@@ -93,18 +96,25 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	mode, _ := opts["mode"].(string)
 	mode = strings.TrimSpace(mode)
+	model, _ := opts["model"].(string)
+	model = strings.TrimSpace(model)
 
-	return &Agent{
-		workDir:     workDir,
+	agent := &Agent{
+		workDir:      workDir,
 		cmd:          cmdStr,
 		cliExtraArgs: cliExtraArgs,
-		args:        args,
-		staticEnv:   staticEnv,
-		extraEnv:    extra,
-		authMethod:  authMethod,
-		displayName: displayName,
-		mode:        mode,
-	}, nil
+		args:         args,
+		staticEnv:    staticEnv,
+		extraEnv:     extra,
+		authMethod:   authMethod,
+		displayName:  displayName,
+		mode:         mode,
+		model:        model,
+	}
+	if isTraeCLICommand(cmdStr) {
+		return &TraeAgent{Agent: agent}, nil
+	}
+	return agent, nil
 }
 
 func envMapFromOpts(opts map[string]any) map[string]string {
@@ -213,6 +223,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	if a.displayName != "" {
 		opts["display_name"] = a.displayName
 	}
+	if a.model != "" {
+		opts["model"] = a.model
+	}
 	return opts
 }
 
@@ -226,6 +239,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.RLock()
 	command := a.cmd
 	allArgs := append(append([]string{}, a.cliExtraArgs...), a.args...)
+	if model := a.traeModelOverrideLocked(); model != "" {
+		allArgs = append([]string{"-c", fmt.Sprintf("model=%q", model)}, allArgs...)
+	}
 	workDir := a.workDir
 	authMethod := a.authMethod
 	pendingMode := a.mode
@@ -246,6 +262,122 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 }
 
 func (a *Agent) Stop() error { return nil }
+
+// TraeAgent wraps the generic ACP adapter with Trae CLI-specific model
+// discovery and selection. ACP itself has no generic model-switch RPC, but
+// Trae exposes `models --json` and accepts `-c model=...` before `acp serve`.
+type TraeAgent struct {
+	*Agent
+}
+
+// -- ModelSwitcher for Trae CLI ACP --
+//
+// ACP itself does not define a generic model-list/model-set RPC. Trae CLI exposes
+// models through its local CLI and accepts model overrides before `acp serve`, so
+// cc-connect can provide IM-side model cards for Trae without affecting other ACP
+// agents such as Cursor, Copilot, Devin, or OpenClaw.
+
+func (a *TraeAgent) SetModel(model string) {
+	model = strings.TrimSpace(model)
+	a.mu.Lock()
+	a.model = model
+	a.mu.Unlock()
+	slog.Info("acp: Trae CLI model changed for future sessions", "model", model)
+}
+
+func (a *TraeAgent) GetModel() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.model
+}
+
+func (a *TraeAgent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	cmd := a.cmd
+	extra := append([]string(nil), a.extraEnv...)
+	extra = append(extra, a.sessionEnv...)
+	workDir := a.workDir
+	a.mu.RUnlock()
+	return fetchTraeModels(ctx, cmd, workDir, extra)
+}
+
+func (a *Agent) traeModelOverrideLocked() string {
+	if !isTraeCLICommand(a.cmd) {
+		return ""
+	}
+	return strings.TrimSpace(a.model)
+}
+
+func isTraeCLICommand(cmd string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(cmd)))
+	return base == "traecli" || base == "traex"
+}
+
+type traeModelJSON struct {
+	Name        string `json:"name"`
+	RealName    string `json:"real_name"`
+	Description string `json:"description"`
+}
+
+func fetchTraeModels(ctx context.Context, cmd, workDir string, extraEnv []string) []core.ModelOption {
+	c := exec.CommandContext(ctx, cmd, "models", "--json")
+	c.Dir = workDir
+	c.Env = core.MergeEnv(os.Environ(), extraEnv)
+	out, err := c.Output()
+	if err != nil {
+		slog.Debug("acp: Trae CLI models failed", "error", err)
+		return nil
+	}
+	var raw []traeModelJSON
+	if err := json.Unmarshal(out, &raw); err != nil {
+		slog.Debug("acp: parse Trae CLI models failed", "error", err)
+		return parseTraeModelLines(string(out))
+	}
+	models := make([]core.ModelOption, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, m := range raw {
+		name := strings.TrimSpace(m.Name)
+		if name == "" {
+			name = strings.TrimSpace(m.RealName)
+		}
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		desc := strings.TrimSpace(m.Description)
+		if real := strings.TrimSpace(m.RealName); real != "" && !strings.EqualFold(real, name) {
+			if desc != "" {
+				desc = real + " — " + desc
+			} else {
+				desc = real
+			}
+		}
+		models = append(models, core.ModelOption{Name: name, Desc: desc})
+	}
+	return models
+}
+
+func parseTraeModelLines(out string) []core.ModelOption {
+	var models []core.ModelOption
+	seen := map[string]struct{}{}
+	for _, line := range strings.Split(out, "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || strings.HasPrefix(name, "WARNING:") {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		models = append(models, core.ModelOption{Name: name})
+	}
+	return models
+}
 
 // -- AgentDoctorInfo --
 
