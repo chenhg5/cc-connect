@@ -4710,20 +4710,18 @@ func TestCardAction_Goto_RefreshesPicker(t *testing.T) {
 		t.Fatalf("active provider = %q, want aiapi", agent.active)
 	}
 	var sel *CardSelect
-	var md *CardMarkdown
 	for _, el := range card.Elements {
 		if s, ok := el.(CardSelect); ok {
 			sel = &s
 		}
-		if m, ok := el.(CardMarkdown); ok {
-			md = &m
+		// The card carries no status line: the select marks the active entry
+		// itself (a separate "current provider" markdown only repeated it).
+		if m, ok := el.(CardMarkdown); ok && strings.Contains(m.Content, "Provider") {
+			t.Fatalf("refreshed picker still shows a status line: %q", m.Content)
 		}
 	}
 	if sel == nil {
 		t.Fatal("refreshed picker card has no select element")
-	}
-	if md == nil || !strings.Contains(md.Content, "aiapi") {
-		t.Fatalf("refreshed picker markdown = %q, want current provider aiapi", md.Content)
 	}
 	found := false
 	for _, opt := range sel.Options {

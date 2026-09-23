@@ -11052,13 +11052,9 @@ func (e *Engine) renderGotoCard(sessionKey string) *Card {
 	current := switcher.GetActiveProvider()
 	entries := collectGotoModels(switcher)
 
-	var sb strings.Builder
-	if current != nil {
-		fmt.Fprintf(&sb, e.i18n.T(MsgProviderCurrent), current.Name)
-	} else {
-		sb.WriteString(e.i18n.T(MsgGotoDefault))
-	}
-
+	// No status line above the select: the select itself marks the active
+	// provider+model, and the header hint that used to sit there pointed at
+	// /provider, which is not what this card does.
 	var opts []CardSelectOption
 	initVal := ""
 	for _, ent := range entries {
@@ -11078,7 +11074,6 @@ func (e *Engine) renderGotoCard(sessionKey string) *Card {
 		}
 	}
 	cb := NewCard().Title(e.i18n.T(MsgCardTitleGoto), "indigo").
-		Markdown(sb.String()).
 		Select(e.i18n.T(MsgGotoSelectPlaceholder), opts, initVal)
 	cb.Note(e.i18n.T(MsgGotoUsageHint))
 	cb.Buttons(e.cardBackButton())
