@@ -3974,6 +3974,16 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			if active := ps.GetActiveProvider(); active != nil && active.Name != "" {
 				ps2.SetActiveProvider(active.Name)
 			}
+			// A provider chosen for this workspace with /goto outranks the
+			// project default, and has to survive the pool evicting this agent.
+			if e.projectState != nil {
+				if p := e.projectState.WorkspaceProviderOverride(normalizeWorkspacePath(workspace)); p != "" {
+					if !ps2.SetActiveProvider(p) {
+						slog.Warn("workspace provider override is no longer registered; keeping the project default",
+							"workspace", workspace, "provider", p)
+					}
+				}
+			}
 		}
 	}
 
@@ -10835,7 +10845,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 // unlike /provider switch, which clears both. With no arguments it renders a
 // grouped provider → model list where any entry can be picked directly.
 func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
-	agent, sessions, _, err := e.commandContext(p, msg)
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
@@ -10864,7 +10874,7 @@ func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
 			return
 		}
 		ent := entries[n-1]
-		text := e.applyGoto(agent, sessions, switcher, msg.SessionKey, ent.Provider, ent.Model, true)
+		text := e.applyGoto(agent, sessions, switcher, msg.SessionKey, interactiveKey, ent.Provider, ent.Model, true)
 		e.reply(p, msg.ReplyCtx, text)
 		return
 	}
@@ -10887,7 +10897,7 @@ func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
 			fullModel = pname + "/" + rest
 		}
 	}
-	text := e.applyGoto(agent, sessions, switcher, msg.SessionKey, pname, fullModel, rest != "")
+	text := e.applyGoto(agent, sessions, switcher, msg.SessionKey, interactiveKey, pname, fullModel, rest != "")
 	e.reply(p, msg.ReplyCtx, text)
 }
 
@@ -10897,7 +10907,23 @@ func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
 // (the model name exactly as it should be persisted, already resolved by the
 // caller per the agent's model-naming capability). It returns the user-facing
 // confirmation text so both the /goto command and card actions can reuse it.
-func (e *Engine) applyGoto(agent Agent, sessions *SessionManager, switcher ProviderSwitcher, sessionKey, pname, fullModel string, setModel bool) string {
+func (e *Engine) applyGoto(agent Agent, sessions *SessionManager, switcher ProviderSwitcher, sessionKey, interactiveKey, pname, fullModel string, setModel bool) string {
+	// The choice belongs on the session the conversation actually uses. Command
+	// dispatch can hand us the global manager (observed live: a /goto in a
+	// workspace chat wrote the project-level default provider while the chat's own
+	// session stayed provider-less, so the switch was gone after the next idle
+	// reap), while every turn — and every card action — resolves the chat through
+	// sessionContextForKey. Prefer that resolution when the two disagree, so a
+	// per-chat switch never leaks into the project default.
+	if sessions == e.sessions {
+		if wsAgent, wsSessions := e.sessionContextForKey(sessionKey); wsSessions != nil && wsSessions != e.sessions {
+			agent, sessions = wsAgent, wsSessions
+			if wsSwitcher, ok := wsAgent.(ProviderSwitcher); ok {
+				switcher = wsSwitcher
+			}
+		}
+	}
+
 	providers := switcher.ListProviders()
 	found := false
 	for i := range providers {
@@ -10916,8 +10942,25 @@ func (e *Engine) applyGoto(agent Agent, sessions *SessionManager, switcher Provi
 
 	// Keep the agent session id and history: unlike switchProvider we never
 	// call SetAgentSessionID("","") or ClearHistory() here.
+	// A /goto inside a workspace chat is workspace-level, exactly like the native
+	// /model command: it is stored on the workspace, so every chat bound to the
+	// same workspace follows it (and another chat's later switch moves them all).
+	// Chats without a workspace keep the session-level behaviour.
+	workspace := ""
+	if e.multiWorkspace && e.projectState != nil && agent != e.agent {
+		// Same key the native /model command stores its override under, so a
+		// workspace keeps one provider and one model.
+		workspace = workspaceModelOverrideKey(interactiveKey, sessionKey, agent)
+	}
+
 	s := sessions.GetOrCreateActive(sessionKey)
-	s.SetActiveProvider(pname)
+	if workspace == "" {
+		s.SetActiveProvider(pname)
+	} else {
+		// Drop any per-chat provider recorded before this switch: the workspace
+		// value has to apply uniformly to every chat in it.
+		s.SetActiveProvider("")
+	}
 
 	replyText := fmt.Sprintf(e.i18n.T(MsgGotoSwitched), pname)
 	if setModel {
@@ -10928,14 +10971,23 @@ func (e *Engine) applyGoto(agent Agent, sessions *SessionManager, switcher Provi
 			}
 			replyText = fmt.Sprintf(e.i18n.T(MsgGotoSwitchedModel), pname, fullModel)
 		}
-		if e.providerModelSaveFunc != nil {
+		// The model rides along in the workspace override (like /model) instead of
+		// being written into the provider definition in the project config, which
+		// would change it for every workspace at once.
+		if workspace == "" && e.providerModelSaveFunc != nil {
 			if err := e.providerModelSaveFunc(pname, fullModel); err != nil {
 				slog.Error("failed to save provider model", "error", err)
 			}
 		}
 	}
 	sessions.Save()
-	if sessions == e.sessions && e.providerSaveFunc != nil {
+	if workspace != "" {
+		e.projectState.SetWorkspaceProviderOverride(workspace, pname)
+		if setModel && fullModel != "" {
+			e.projectState.SetWorkspaceModelOverride(workspace, fullModel)
+		}
+		e.projectState.Save()
+	} else if sessions == e.sessions && e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(pname); err != nil {
 			slog.Error("failed to save provider", "error", err)
 		}
@@ -12631,7 +12683,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				return
 			}
 			ent := entries[n-1]
-			e.applyGoto(agent, sessions, switcher, sessionKey, ent.Provider, ent.Model, true)
+			e.applyGoto(agent, sessions, switcher, sessionKey, e.interactiveKeyForSessionKey(sessionKey), ent.Provider, ent.Model, true)
 			return
 		}
 		pname, rest := target, ""
@@ -12651,7 +12703,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				fullModel = pname + "/" + rest
 			}
 		}
-		e.applyGoto(agent, sessions, switcher, sessionKey, pname, fullModel, rest != "")
+		e.applyGoto(agent, sessions, switcher, sessionKey, e.interactiveKeyForSessionKey(sessionKey), pname, fullModel, rest != "")
 
 	case "/reasoning":
 		if args == "" {

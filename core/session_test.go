@@ -25,6 +25,25 @@ func TestSessionManager_GetOrCreateActive(t *testing.T) {
 	}
 }
 
+// Regression test for the /goto promise that a provider choice survives a
+// process restart: SessionManager.Save deep-copies each session to snapshot it
+// for serialization, and that snapshot previously omitted ActiveProvider — so a
+// provider picked with /goto (or /provider switch) was never written to disk and
+// the next turn after a workspace idle-reap silently fell back to the project
+// default.
+func TestSessionManagerSave_PersistsActiveProvider(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "sessions.json")
+
+	sm := NewSessionManager(store)
+	sm.GetOrCreateActive("feishu:chat:user").SetActiveProvider("deepseek")
+	sm.Save()
+
+	reloaded := NewSessionManager(store)
+	if got := reloaded.GetOrCreateActive("feishu:chat:user").GetActiveProvider(); got != "deepseek" {
+		t.Fatalf("active_provider after reload = %q, want %q", got, "deepseek")
+	}
+}
+
 func TestSessionManager_NewSession(t *testing.T) {
 	sm := NewSessionManager("")
 	s1 := sm.NewSession("user1", "chat-a")

@@ -671,6 +671,10 @@ func (sm *SessionManager) saveLocked() {
 	}
 
 	// Build a deep-copy snapshot to avoid racing with concurrent Session mutations.
+	// Every field that must survive a restart has to be listed here: one that is
+	// left out is silently dropped on save. ActiveProvider used to be missing, so
+	// a provider chosen with /goto or /provider switch never reached the disk and
+	// the next turn after a workspace idle-reap fell back to the project default.
 	snapSessions := make(map[string]*Session, len(sm.sessions))
 	for id, s := range sm.sessions {
 		s.mu.Lock()
@@ -685,6 +689,7 @@ func (sm *SessionManager) saveLocked() {
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
+			ActiveProvider:      s.ActiveProvider,
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,

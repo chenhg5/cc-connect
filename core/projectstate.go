@@ -9,9 +9,10 @@ import (
 )
 
 type projectStateData struct {
-	WorkDirOverride         string            `json:"work_dir_override,omitempty"`
-	WorkspaceDirOverrides   map[string]string `json:"workspace_dir_overrides,omitempty"`
-	WorkspaceModelOverrides map[string]string `json:"workspace_model_overrides,omitempty"`
+	WorkDirOverride            string            `json:"work_dir_override,omitempty"`
+	WorkspaceDirOverrides      map[string]string `json:"workspace_dir_overrides,omitempty"`
+	WorkspaceModelOverrides    map[string]string `json:"workspace_model_overrides,omitempty"`
+	WorkspaceProviderOverrides map[string]string `json:"workspace_provider_overrides,omitempty"`
 }
 
 // ProjectStateStore persists lightweight runtime state for one project.
@@ -149,4 +150,42 @@ func (ps *ProjectStateStore) load() {
 		return
 	}
 	ps.state = state
+}
+
+// WorkspaceProviderOverride returns the provider chosen for a workspace (the
+// workspace-level counterpart of the session's active provider). A workspace
+// chat's /goto records its choice here, so every chat bound to that workspace
+// follows it — the same granularity the native /model command uses for models.
+func (ps *ProjectStateStore) WorkspaceProviderOverride(workspace string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if ps.state.WorkspaceProviderOverrides == nil {
+		return ""
+	}
+	return ps.state.WorkspaceProviderOverrides[workspace]
+}
+
+func (ps *ProjectStateStore) SetWorkspaceProviderOverride(workspace, provider string) {
+	if provider == "" {
+		ps.ClearWorkspaceProviderOverride(workspace)
+		return
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceProviderOverrides == nil {
+		ps.state.WorkspaceProviderOverrides = make(map[string]string)
+	}
+	ps.state.WorkspaceProviderOverrides[workspace] = provider
+}
+
+func (ps *ProjectStateStore) ClearWorkspaceProviderOverride(workspace string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceProviderOverrides == nil {
+		return
+	}
+	delete(ps.state.WorkspaceProviderOverrides, workspace)
+	if len(ps.state.WorkspaceProviderOverrides) == 0 {
+		ps.state.WorkspaceProviderOverrides = nil
+	}
 }
