@@ -120,6 +120,20 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 	}
 }
 
+func TestOpencodeSessionBuildRunArgsOmitsDir(t *testing.T) {
+	s := &opencodeSession{
+		workDir:   "/repo",
+		model:     "provider/model",
+		agentName: "default",
+		mode:      "yolo",
+	}
+
+	args := s.buildRunArgs("check working directory", []string{"/tmp/image.png"}, "ses_123")
+	if containsString(args, "--dir") {
+		t.Fatalf("args = %#v, must not contain --dir", args)
+	}
+}
+
 func TestOpencodeSessionUsesCommandWorkingDirectory(t *testing.T) {
 	workDir := t.TempDir()
 	cliPath := filepath.Join(t.TempDir(), "opencode")
