@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -110,13 +111,55 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 		"run", "--format", "json",
 		"--session", "ses_123",
 		"--model", "provider/model",
-		"--dir", "/repo",
 		"--thinking",
 		"--file", "/tmp/a.png",
 		"--file", "/tmp/b.jpg",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestOpencodeSessionUsesCommandWorkingDirectory(t *testing.T) {
+	workDir := t.TempDir()
+	cliPath := filepath.Join(t.TempDir(), "opencode")
+	script := `#!/bin/sh
+set -eu
+exec 2>/dev/null
+test "$PWD" = "$EXPECTED_WORKDIR"
+printf '%s\n' '{"type":"step_start","sessionID":"ses-cwd"}'
+printf '%s\n' '{"type":"text","part":{"text":"cwd-ok"}}'
+
+`
+	if err := os.WriteFile(cliPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake opencode: %v", err)
+	}
+	s, err := newOpencodeSession(context.Background(), cliPath, nil, workDir, "", "default", "", "", []string{"EXPECTED_WORKDIR=" + workDir})
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.Send("check cwd", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case event := <-s.Events():
+			if event.Type == core.EventError {
+				t.Fatalf("cwd smoke error: %v", event.Error)
+			}
+			if event.Type == core.EventResult {
+				if s.CurrentSessionID() != "ses-cwd" {
+					t.Fatalf("session ID = %q, want ses-cwd", s.CurrentSessionID())
+				}
+				return
+			}
+		case <-deadline.C:
+			t.Fatal("timed out waiting for cwd smoke result")
+		}
 	}
 }
 
