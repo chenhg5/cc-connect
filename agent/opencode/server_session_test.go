@@ -1452,3 +1452,90 @@ func TestServerKey_ScopedByProviderCredentials(t *testing.T) {
 		t.Fatal("different workspaces must not share a server")
 	}
 }
+
+// When we stop a stalled turn ourselves, OpenCode reports the abort back on the
+// stream (and the POST fails with MessageAbortedError). That echo must not reach
+// the chat: the user already got the notice explaining the stop. Observed live
+// as a raw "❌ MessageAbortedError: Aborted" right after the timeout notice.
+func TestServerSession_AbortEchoIsNotRelayed(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSessionWithMode(t, f, "ses_echo", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	if err := s.Send("long task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	s.stallTimeout = 40 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.stallWatchdog(ctx, 10*time.Millisecond)
+
+	var got []core.Event
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case evt := <-s.Events():
+			got = append(got, evt)
+			if evt.Type == core.EventResult {
+				goto done
+			}
+			if evt.Type == core.EventError {
+				t.Fatalf("abort echo reached the engine: %+v", evt)
+			}
+		case <-deadline:
+			t.Fatalf("stalled turn was never ended; got %+v", got)
+		}
+	}
+done:
+	// The stream reports the abort afterwards; it must stay silent.
+	f.emit(map[string]any{
+		"type":       "session.error",
+		"properties": map[string]any{"sessionID": "ses_echo", "error": map[string]any{"name": "MessageAbortedError", "data": map[string]any{"message": "Aborted"}}},
+	})
+	select {
+	case evt := <-s.Events():
+		t.Fatalf("abort echo relayed after the turn: %+v", evt)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// The watchdog threshold is configurable per project: long silent tool calls are
+// normal for some workloads.
+func TestParseStallTimeout(t *testing.T) {
+	cases := []struct {
+		raw  any
+		want time.Duration
+		bad  bool
+	}{
+		{raw: "", want: 0},
+		{raw: "10m", want: 10 * time.Minute},
+		{raw: "90s", want: 90 * time.Second},
+		{raw: "OFF", want: 0},
+		{raw: "0", want: 0},
+		{raw: "nonsense", bad: true},
+	}
+	for _, c := range cases {
+		got, err := parseStallTimeout(c.raw)
+		if c.bad {
+			if err == nil {
+				t.Errorf("parseStallTimeout(%v) = %v, want an error", c.raw, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseStallTimeout(%v): %v", c.raw, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("parseStallTimeout(%v) = %v, want %v", c.raw, got, c.want)
+		}
+	}
+	if stallTimeoutOrDefault(0) != serverStallTimeout {
+		t.Error("an unset timeout must fall back to the default")
+	}
+	if stallTimeoutOrDefault(7*time.Minute) != 7*time.Minute {
+		t.Error("a configured timeout must be used")
+	}
+}

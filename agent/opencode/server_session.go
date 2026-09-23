@@ -74,6 +74,10 @@ type opencodeServeConfig struct {
 	// server may only be shared by sessions using the same provider — see
 	// serverKey.
 	providerScope string
+	// stallTimeout is how long a turn may stay silent before the watchdog aborts
+	// it (0 = use the default). Not part of serverKey: it does not affect the
+	// server process itself.
+	stallTimeout time.Duration
 }
 
 // opencodeServer is a ref-counted `opencode serve` process for one
@@ -683,6 +687,15 @@ func (t *tailBuffer) String() string {
 // serverSession
 // ---------------------------------------------------------------------------
 
+// stallTimeoutOrDefault keeps the default watchdog threshold unless the project
+// configured one (opencode_stall_timeout).
+func stallTimeoutOrDefault(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return serverStallTimeout
+	}
+	return configured
+}
+
 // serverStallNotice is what the user sees when a silent turn is aborted. It
 // mirrors the run transport's stall notice; kept local so this transport does
 // not depend on the run transport's watchdog.
@@ -741,6 +754,11 @@ type serverSession struct {
 	lastSessionEvent atomic.Int64
 	turnStartedAt    atomic.Int64
 	stallReported    atomic.Bool
+	// abortedTurn records that this session deliberately stopped the turn (stall
+	// watchdog, /stop). OpenCode then reports the abort back as a
+	// MessageAbortedError on the stream, which must not be relayed to the chat as
+	// a failure: the user already got the reason.
+	abortedTurn atomic.Bool
 	// stallTimeout is how long a turn may stay silent before it is aborted
 	// (field, not const, so tests can shorten it).
 	stallTimeout time.Duration
@@ -792,7 +810,7 @@ func newServerSessionOn(ctx context.Context, srv *opencodeServer, serveCfg openc
 		userMsgs:      map[string]struct{}{},
 		emittedTools:  map[string]struct{}{},
 		sseCancel:     cancel,
-		stallTimeout:  serverStallTimeout,
+		stallTimeout:  stallTimeoutOrDefault(serveCfg.stallTimeout),
 	}
 
 	s.wg.Add(1)
@@ -858,6 +876,7 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 	s.lastSessionEvent.Store(0)
 	s.turnStartedAt.Store(time.Now().UnixNano())
 	s.stallReported.Store(false)
+	s.abortedTurn.Store(false)
 
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
@@ -1081,6 +1100,10 @@ func (s *serverSession) applyYoloPermissionsLocked() {
 }
 
 func (s *serverSession) emitError(err error) {
+	if s.abortedTurn.Load() && isAbortEcho(err) {
+		slog.Debug("opencode server session: ignoring the abort echo of our own stop", "error", err)
+		return
+	}
 	slog.Error("opencode server session: error", "error", err)
 	s.sendEvent(core.Event{Type: core.EventError, Error: err})
 }
@@ -1272,6 +1295,13 @@ func (s *serverSession) handleServerEvent(payload []byte) {
 			}
 		}
 	case "session.error":
+		if s.abortedTurn.Load() && isAbortEcho(evt.Properties["error"]) {
+			// We stopped this turn ourselves; the abort is reported back on the
+			// stream. Relaying it would hand the user a raw error right after the
+			// notice that already explained the stop.
+			slog.Debug("opencode server session: ignoring the abort echo of our own stop")
+			return
+		}
 		s.turnInFlight.Store(false)
 		s.inner.handleError(map[string]any{"error": evt.Properties["error"]})
 	case "permission.asked":
@@ -1481,6 +1511,14 @@ func (s *serverSession) dispatchToolPart(part map[string]any) {
 	}
 }
 
+// isAbortEcho reports whether an error is OpenCode's report of a turn we aborted
+// ourselves (its message always carries NaN/abort wording rather than a provider
+// failure).
+func isAbortEcho(payload any) bool {
+	text := strings.ToLower(fmt.Sprint(payload))
+	return strings.Contains(text, "messageabortederror") || strings.Contains(text, "aborted")
+}
+
 // stallWatchdog aborts a turn that stops producing events. The run transport
 // kills a silent opencode process after the same delay; the server equivalent is
 // an abort, which keeps the conversation usable for the next message.
@@ -1524,6 +1562,7 @@ func (s *serverSession) abortStalledTurn(idle time.Duration) {
 	slog.Error("opencode server session: no events for a long time, aborting the stalled turn",
 		"session", sessionID, "idle", idle.Round(time.Second), "timeout", s.stallTimeout)
 
+	s.abortedTurn.Store(true)
 	if srv := s.server(); srv != nil && sessionID != "" && !srv.isExited() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := srv.abortSession(ctx, sessionID); err != nil {
@@ -1629,6 +1668,7 @@ func (s *serverSession) Close() error {
 
 func (s *serverSession) close() error {
 	if s.turnInFlight.Load() {
+		s.abortedTurn.Store(true)
 		sessionID := s.CurrentSessionID()
 		if srv := s.server(); sessionID != "" && srv != nil && !srv.isExited() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
