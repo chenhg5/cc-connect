@@ -152,7 +152,11 @@ printf '%s\n' '{"type":"text","part":{"text":"cwd-ok"}}'
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
-	defer s.Close()
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
 
 	if err := s.Send("check cwd", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
