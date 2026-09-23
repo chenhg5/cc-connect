@@ -4878,6 +4878,19 @@ type cardToolEntry struct {
 // thinking panel instead of being appended to the answer body, so streaming
 // updates grow the foldable panels rather than re-flowing the answer text.
 // Other platforms keep receiving plain markdown via buildCardContent.
+// cardStepTextsContain reports whether the panel lane already holds text. The
+// lane is append-only by design: the streaming card appends only the entries it
+// has not shown yet, indexed by position, so an entry must never be removed or
+// re-ordered after it was rendered.
+func cardStepTextsContain(lane []string, text string) bool {
+	for _, item := range lane {
+		if item == text {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) streamingCardContentFor(streamCard StreamingCard, thinking string, stepTexts []string, tools []cardToolEntry, answer string, done bool) string {
 	if supp, ok := streamCard.(StreamingCardPayloadSupporter); ok && supp.SupportsStreamingCardPayload() {
 		state := ProgressCardStateRunning
@@ -5691,10 +5704,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// cardThinkingText itself is latest-only (kept for the
 					// markdown fallback), but the streaming card must grow one
 					// panel entry per reasoning step, otherwise the "思考 (N)"
-					// count stays stuck at 1. Skip consecutive duplicates (the
-					// agent may re-emit the same reasoning text across steps),
-					// which would otherwise duplicate panel entries.
-					if len(cardStepTexts) == 0 || cardStepTexts[len(cardStepTexts)-1] != cardThinkingText {
+					// count stays stuck at 1. Skip a snapshot the lane already
+					// shows (the agent re-emits the same reasoning text across
+					// steps), not only the previous one: a /ps note inserted
+					// between two of them defeats an adjacency-only check, and the
+					// note plus the same block then repeat on the card.
+					if !cardStepTextsContain(cardStepTexts, cardThinkingText) {
 						cardStepTexts = append(cardStepTexts, cardThinkingText)
 					}
 					_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))

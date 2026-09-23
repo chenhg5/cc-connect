@@ -17363,3 +17363,222 @@ func TestStreamingCard_PsNoteShownOnRunningCard(t *testing.T) {
 		t.Errorf("missing /ps ack; sent=%v", p.getSent())
 	}
 }
+
+// scriptedTurnAgentSession lets a test push exact events into a running turn,
+// so panel accumulation can be reproduced precisely.
+type scriptedTurnAgentSession struct {
+	events chan Event
+
+	mu    sync.Mutex
+	sends int
+}
+
+func newScriptedTurnAgentSession() *scriptedTurnAgentSession {
+	return &scriptedTurnAgentSession{events: make(chan Event, 64)}
+}
+
+func (s *scriptedTurnAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	first := s.sends == 1
+	s.mu.Unlock()
+	if first {
+		// The turn's first event arrives asynchronously, like a real agent.
+		go func() {
+			s.events <- Event{Type: EventThinking, Content: "The feature keys are appended as a block at the end."}
+		}()
+	}
+	return nil
+}
+
+func (s *scriptedTurnAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *scriptedTurnAgentSession) Events() <-chan Event     { return s.events }
+func (s *scriptedTurnAgentSession) CurrentSessionID() string { return "scripted" }
+func (s *scriptedTurnAgentSession) Alive() bool              { return true }
+func (s *scriptedTurnAgentSession) Close() error             { return nil }
+
+// A /ps note lands in the panel between the agent's thinking snapshots. The
+// agent re-emits the *same* reasoning text on later steps (opencode sends the
+// full reasoning part again), so the note ends up sandwiched between identical
+// entries — which defeats the "skip the previous duplicate" rule and made the
+// panel show the note and the same thinking block over and over.
+func TestStreamingCard_PsNoteWithRepeatedThinking_NoDuplicatePanelEntries(t *testing.T) {
+	p := &dualCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+			style:              "card",
+			supportPayload:     true,
+		},
+	}
+	agentSession := newScriptedTurnAgentSession()
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "legacy",
+	})
+
+	key := "feishu:dup"
+	msg := &Message{SessionKey: key, Platform: "feishu", UserID: "u1", UserName: "user", Content: "hello", ReplyCtx: "ctx"}
+	e.handleMessage(p, msg)
+
+	cardUpdates := func() []string {
+		p.previewMu.Lock()
+		card := p.lastCard
+		p.previewMu.Unlock()
+		if card == nil {
+			return nil
+		}
+		return card.snapshot()
+	}
+	waitForCard := func(want string, timeout time.Duration) bool {
+		deadline := time.Now().Add(timeout)
+		for {
+			for _, content := range cardUpdates() {
+				if strings.Contains(content, want) {
+					return true
+				}
+			}
+			if time.Now().After(deadline) {
+				return false
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	const thinking = "The feature keys are appended as a block at the end."
+	if !waitForCard(thinking, 3*time.Second) {
+		t.Fatalf("card never showed the thinking text: %v (sent=%v)", cardUpdates(), p.getSent())
+	}
+
+	// The user's supplement arrives mid-turn.
+	e.cmdPs(p, &Message{SessionKey: key, Content: "/ps 这个桶是小时还是天？", ReplyCtx: "ctx"}, []string{"这个桶是小时还是天？"})
+	note := e.i18n.Tf(MsgPsCardEntry, "这个桶是小时还是天？")
+	if !waitForCard(note, 3*time.Second) {
+		t.Fatalf("card never showed the P.S. note: %v", cardUpdates())
+	}
+
+	// Later steps re-emit the same reasoning text, as opencode does.
+	for i := 0; i < 3; i++ {
+		agentSession.events <- Event{Type: EventThinking, Content: thinking}
+		time.Sleep(30 * time.Millisecond)
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "已完成。", Done: true}
+
+	// Wait for the final card.
+	deadline := time.Now().Add(4 * time.Second)
+	var last string
+	for {
+		updates := cardUpdates()
+		if len(updates) > 0 {
+			last = updates[len(updates)-1]
+			if strings.Contains(last, "已完成") || strings.Contains(last, `"state":"completed"`) {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	pl, ok := ParseProgressCardPayload(last)
+	if !ok {
+		t.Fatalf("final card is not a progress payload: %q", last)
+	}
+
+	notes, thinkings := 0, 0
+	for _, item := range pl.Items {
+		switch item.Text {
+		case note:
+			notes++
+		case thinking:
+			thinkings++
+		}
+	}
+	if notes != 1 {
+		t.Errorf("panel shows the P.S. note %d times, want 1; items=%v", notes, pl.Items)
+	}
+	if thinkings != 1 {
+		t.Errorf("panel shows the same thinking text %d times, want 1; items=%v", thinkings, pl.Items)
+	}
+}
+
+// The same supplement text sent several times collapses to one panel entry: the
+// panel is a record of what entered the turn, and the repeated ack replies
+// already tell the user each delivery. Without the whole-lane dedupe each
+// repeat also restarts the reasoning block that follows it.
+func TestStreamingCard_RepeatedPsNotesCollapseInPanel(t *testing.T) {
+	p := &dualCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+			style:              "card",
+			supportPayload:     true,
+		},
+	}
+	agentSession := newScriptedTurnAgentSession()
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true, Mode: "full", CardMode: "legacy"})
+
+	key := "feishu:dup-ps"
+	e.handleMessage(p, &Message{SessionKey: key, Platform: "feishu", UserID: "u1", UserName: "user", Content: "hello", ReplyCtx: "ctx"})
+
+	note := e.i18n.Tf(MsgPsCardEntry, "同样的补充")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		p.previewMu.Lock()
+		card := p.lastCard
+		p.previewMu.Unlock()
+		if card != nil && len(card.snapshot()) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("streaming card was never created")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	for i := 0; i < 3; i++ {
+		e.cmdPs(p, &Message{SessionKey: key, Content: "/ps 同样的补充", ReplyCtx: "ctx"}, []string{"同样的补充"})
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "完成。", Done: true}
+
+	deadline = time.Now().Add(4 * time.Second)
+	var last string
+	for {
+		p.previewMu.Lock()
+		card := p.lastCard
+		p.previewMu.Unlock()
+		if card != nil {
+			updates := card.snapshot()
+			if len(updates) > 0 {
+				last = updates[len(updates)-1]
+			}
+		}
+		if strings.Contains(last, `"state":"completed"`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	pl, ok := ParseProgressCardPayload(last)
+	if !ok {
+		t.Fatalf("final card is not a progress payload: %q", last)
+	}
+	notes := 0
+	for _, item := range pl.Items {
+		if item.Text == note {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Errorf("panel shows the repeated P.S. note %d times, want 1; items=%v", notes, pl.Items)
+	}
+}
