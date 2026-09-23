@@ -548,6 +548,7 @@ const (
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
+	MsgSessionBusy       MsgKey = "session_busy"
 	MsgPsSent            MsgKey = "ps_sent"
 	MsgPsSendFailed      MsgKey = "ps_send_failed"
 	MsgPsEmpty           MsgKey = "ps_empty"
@@ -3404,6 +3405,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏳ 訊息發送過快，請稍後再試。",
 		LangJapanese:           "⏳ メッセージの送信が速すぎます。しばらくお待ちください。",
 		LangSpanish:            "⏳ Estás enviando mensajes demasiado rápido. Espera un momento.",
+	},
+	MsgSessionBusy: {
+		LangEnglish:            "⏳ Session is busy processing your previous request. Use /stop to cancel it, or wait for it to complete.",
+		LangChinese:            "⏳ 会话正在处理您之前的请求，请使用 /stop 取消，或等待完成。",
+		LangTraditionalChinese: "⏳ 會話正在處理您之前的請求，請使用 /stop 取消，或等待完成。",
+		LangJapanese:           "⏳ セッションは前のリクエストを処理中です。/stop でキャンセルするか、完了するまでお待ちください。",
+		LangSpanish:            "⏳ La sesión está procesando tu solicitud anterior. Usa /stop para cancelarla o espera a que termine.",
 	},
 	MsgPsSent: {
 		LangEnglish:            "✅ P.S. delivered.",
