@@ -16525,3 +16525,34 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
 	}
 }
+
+func TestCollectGotoModels_DedupesRepeatedEntries(t *testing.T) {
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "deepseek", Model: "deepseek/deepseek-flash", Models: []ModelOption{
+				{Name: "deepseek/deepseek-flash"},
+				{Name: "deepseek/deepseek-v4-pro"},
+				{Name: "deepseek/deepseek-flash"},
+				{Name: "  "},
+			}},
+			{Name: "chatgpt", Model: "openai/gpt-5.6-sol"},
+		},
+	}
+
+	entries := collectGotoModels(agent)
+	if len(entries) != 3 {
+		t.Fatalf("entries = %+v, want 3 (two deepseek models plus chatgpt's)", entries)
+	}
+	seen := map[string]int{}
+	for _, e := range entries {
+		seen[e.Provider+"/"+e.Model]++
+	}
+	for key, count := range seen {
+		if count != 1 {
+			t.Errorf("%s appears %d times, want 1", key, count)
+		}
+	}
+	if seen["deepseek/deepseek/deepseek-flash"] != 1 || seen["deepseek/deepseek/deepseek-v4-pro"] != 1 {
+		t.Errorf("unexpected entries: %v", seen)
+	}
+}

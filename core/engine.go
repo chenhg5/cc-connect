@@ -11006,18 +11006,31 @@ type gotoModelEntry struct {
 // explicit model list contributes its default Model only when set.
 func collectGotoModels(switcher ProviderSwitcher) []gotoModelEntry {
 	var out []gotoModelEntry
+	seen := make(map[gotoModelEntry]struct{}, 16)
+	add := func(provider, model string) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return
+		}
+		entry := gotoModelEntry{Provider: provider, Model: model}
+		// A provider's model list is configuration, and a repeated entry there
+		// used to fill the picker with identical rows (reported live: the /goto
+		// selector showed the same model over and over). Collapse duplicates so
+		// the list stays readable whatever the config holds.
+		if _, dup := seen[entry]; dup {
+			return
+		}
+		seen[entry] = struct{}{}
+		out = append(out, entry)
+	}
 	for _, prov := range switcher.ListProviders() {
 		if len(prov.Models) > 0 {
 			for _, m := range prov.Models {
-				if strings.TrimSpace(m.Name) != "" {
-					out = append(out, gotoModelEntry{Provider: prov.Name, Model: m.Name})
-				}
+				add(prov.Name, m.Name)
 			}
 			continue
 		}
-		if strings.TrimSpace(prov.Model) != "" {
-			out = append(out, gotoModelEntry{Provider: prov.Name, Model: prov.Model})
-		}
+		add(prov.Name, prov.Model)
 	}
 	return out
 }
