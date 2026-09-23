@@ -37,6 +37,24 @@ type acpModesBlock struct {
 	AvailableModes []acpModeInfo `json:"availableModes"`
 }
 
+// acpConfigOption mirrors the ACP `configOptions[]` shape sent by
+// servers inside `session/new`, `session/load`, etc. responses.
+type acpConfigOption struct {
+	ID           string               `json:"id"`
+	Name         string               `json:"name"`
+	Category     string               `json:"category"`
+	Type         string               `json:"type"`
+	CurrentValue string               `json:"currentValue,omitempty"`
+	Options      []acpConfigOptionItem `json:"options"`
+}
+
+// acpConfigOptionItem is a single selectable value inside a configOption.
+type acpConfigOptionItem struct {
+	Value       string `json:"value"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
 // acpInitializeResult is the subset of `initialize` fields this package
 // cares about. Additional vendor metadata is ignored.
 type acpInitializeResult struct {
