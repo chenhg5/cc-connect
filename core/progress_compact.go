@@ -168,15 +168,28 @@ func BuildStreamingCardPayload(thinking string, stepTexts []string, tools []card
 			cleaned = append(cleaned, ProgressCardEntry{Kind: ProgressEntryThinking, Text: text})
 		}
 	}
-	for _, step := range stepTexts {
-		if text := strings.TrimSpace(step); text != "" {
-			// Skip consecutive duplicates (the agent may re-emit the same
-			// reasoning/step text) so the panel doesn't show repeated entries.
-			if len(cleaned) > 0 && cleaned[len(cleaned)-1].Kind == ProgressEntryThinking && cleaned[len(cleaned)-1].Text == text {
-				continue
-			}
-			cleaned = append(cleaned, ProgressCardEntry{Kind: ProgressEntryThinking, Text: text})
+	seenThinking := make(map[string]struct{}, len(stepTexts)+1)
+	for _, item := range cleaned {
+		if item.Kind == ProgressEntryThinking {
+			seenThinking[item.Text] = struct{}{}
 		}
+	}
+	for _, step := range stepTexts {
+		text := strings.TrimSpace(step)
+		if text == "" {
+			continue
+		}
+		// Skip any entry the panel already shows, not just the previous one:
+		// opencode re-emits the same reasoning snapshot on later steps, and a
+		// /ps note landing between two of them defeats an adjacency-only check —
+		// observed live as the note and the same thinking block repeating over
+		// and over on the card. Skipping (never removing) keeps the lane
+		// append-only, which the card's index-based append updates rely on.
+		if _, dup := seenThinking[text]; dup {
+			continue
+		}
+		seenThinking[text] = struct{}{}
+		cleaned = append(cleaned, ProgressCardEntry{Kind: ProgressEntryThinking, Text: text})
 	}
 	for _, t := range tools {
 		name := strings.TrimSpace(t.Name)
