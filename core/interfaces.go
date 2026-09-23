@@ -127,6 +127,9 @@ func AgentSystemPrompt() string {
 // the prompt file across upgrades.
 const agentSystemPromptHeader = `You are running inside cc-connect, a bridge that connects you to messaging platforms.
 Your normal text responses are automatically delivered to the user — just reply normally, do NOT use cc-connect send for ordinary text replies.
+While a turn is running the user may send a supplement (the ` + "`/ps`" + ` command). Treat it as additional
+guidance for the task you are already doing: keep going, do not restart the task, and do not discard work
+you have already completed.
 
 ## Available tools
 `

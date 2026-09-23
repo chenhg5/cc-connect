@@ -32,10 +32,12 @@ type Agent struct {
 	workDir              string
 	model                string
 	mode                 string
-	cmd                  string   // CLI binary name, default "opencode"
-	cliExtraArgs         []string // extra args from cmd after the binary name
-	configEnv            []string // env vars from [projects.agent.options.env]
-	agentName            string   // passed as --agent to opencode (for plugin-defined agents)
+	transport            string        // "run" (default) or "server" — see server_session.go
+	stallTimeout         time.Duration // server transport: silence before a turn is aborted (0 = default)
+	cmd                  string        // CLI binary name, default "opencode"
+	cliExtraArgs         []string      // extra args from cmd after the binary name
+	configEnv            []string      // env vars from [projects.agent.options.env]
+	agentName            string        // passed as --agent to opencode (for plugin-defined agents)
 	providers            []core.ProviderConfig
 	activeIdx            int
 	sessionEnv           []string
@@ -69,6 +71,19 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
+	transport, _ := opts["opencode_transport"].(string)
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	switch transport {
+	case "", opencodeTransportRun:
+		transport = opencodeTransportRun
+	case opencodeTransportServer:
+	default:
+		return nil, fmt.Errorf("opencode: unknown opencode_transport %q (want %q or %q)", transport, opencodeTransportRun, opencodeTransportServer)
+	}
+	stallTimeout, err := parseStallTimeout(opts["opencode_stall_timeout"])
+	if err != nil {
+		return nil, err
+	}
 	cmd, extraArgs := core.ParseCmdOpts(opts, "opencode")
 	agentName, _ := opts["agent"].(string) // --agent flag for plugin-defined agents (#1210)
 	ccDataDir, _ := opts["cc_data_dir"].(string)
@@ -87,6 +102,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir:              workDir,
 		model:                model,
 		mode:                 mode,
+		transport:            transport,
+		stallTimeout:         stallTimeout,
 		cmd:                  cmd,
 		cliExtraArgs:         extraArgs,
 		configEnv:            core.ParseConfigEnv(opts),
@@ -209,6 +226,11 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 
 	opts := map[string]any{
 		"mode": a.mode,
+		// Multi-workspace projects build a per-workspace agent from these
+		// options; without the transport here a project configured for the
+		// server transport would silently fall back to spawning `opencode run`
+		// per turn in every workspace.
+		"opencode_transport": a.transport,
 	}
 	if a.model != "" {
 		opts["model"] = a.model
@@ -491,6 +513,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	model := a.model
 	mode := a.mode
+	transport := a.transport
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
@@ -505,6 +528,22 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
+	if transport == opencodeTransportServer {
+		// The server transport drives a long-lived `opencode serve` instance over
+		// its HTTP API so a mid-turn `/ps` joins the running turn instead of
+		// pre-empting it (see server_session.go).
+		return newServerSession(ctx, opencodeServeConfig{
+			cmd:       cmd,
+			extraArgs: extraArgs,
+			workDir:   workDir,
+			extraEnv:  extraEnv,
+			// Credentials travel in the process environment, so servers are shared
+			// per provider, not per workspace alone.
+			providerScope: a.providerScope(),
+			stallTimeout:  a.stallTimeout,
+		}, model, mode, agentName, sessionID)
+	}
+
 	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv)
 }
 
@@ -517,7 +556,18 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	return listOpencodeSessions(cmd, workDir)
 }
 
-func (a *Agent) Stop() error { return nil }
+// Stop shuts down anything the agent owns. For the server transport that means
+// the `opencode serve` processes started for its workspaces, so a daemon
+// shutdown does not leave orphans behind.
+func (a *Agent) Stop() error {
+	a.mu.RLock()
+	transport := a.transport
+	a.mu.RUnlock()
+	if transport == opencodeTransportServer {
+		stopAllOpencodeServers()
+	}
+	return nil
+}
 
 // DeleteSession implements core.SessionDeleter via `opencode session delete <id>`.
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
@@ -623,6 +673,48 @@ func (a *Agent) ListProviders() []core.ProviderConfig {
 	result := make([]core.ProviderConfig, len(a.providers))
 	copy(result, a.providers)
 	return result
+}
+
+// providerScope identifies the credential set the current provider injects into
+// a child process (see providerEnvLocked). Two sessions may share one OpenCode
+// server only when their scope matches.
+// parseStallTimeout reads opencode_stall_timeout ("10m", "90s"; empty keeps the
+// default, "0"/"off" disables the watchdog). A long silent tool call is normal
+// for some workloads, so the threshold is per project rather than fixed.
+func parseStallTimeout(raw any) (time.Duration, error) {
+	text, _ := raw.(string)
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return 0, nil
+	}
+	switch text {
+	case "0", "off", "none", "disabled":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(text)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("opencode: invalid opencode_stall_timeout %q (use a duration such as \"10m\", or \"off\")", text)
+	}
+	return d, nil
+}
+
+func (a *Agent) providerScope() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.providerScopeLocked()
+}
+
+func (a *Agent) providerScopeLocked() string {
+	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		return ""
+	}
+	p := a.providers[a.activeIdx]
+	parts := []string{p.Name, p.APIKey, p.BaseURL}
+	for k, v := range p.Env {
+		parts = append(parts, k+"="+v)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\x00")
 }
 
 func (a *Agent) providerEnvLocked() []string {

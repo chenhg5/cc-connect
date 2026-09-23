@@ -1920,6 +1920,24 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify a model (provider/model format) / 可选：指定模型
 # model = "anthropic/claude-sonnet-4-20250514"
 #
+# Optional: transport used to drive OpenCode / 可选：驱动 OpenCode 的传输方式
+# - "run" (default): one `opencode run --format json` process per turn.
+#   / 默认：每个回合启动一个 `opencode run --format json` 进程。
+# - "server": keep one `opencode serve` instance per workspace and drive sessions
+#   through its HTTP API. Mid-turn supplements (/ps) then join the running turn
+#   instead of starting a competing run, so in-flight tool calls are not
+#   interrupted. / "server"：每个工作区常驻一个 `opencode serve`，通过 HTTP API 驱动会话；
+#   回合进行中的 /ps 会加入当前回合而不是另起一个竞争的 run，正在执行的工具调用不会被打断。
+# opencode_transport = "run"
+#
+# Optional: server transport only. How long a turn may produce no events before
+# the watchdog aborts it (the session would otherwise stay busy, queueing every
+# later message). Default 5m; "off" disables it. Raise it when long silent tool
+# calls are normal in this workspace. / 可选：仅 server 传输生效。回合一连多久没有任何事件
+# 就判定卡死并终止（否则会话会一直 busy，后续消息全部排队）。默认 5m；"off" 关闭。工作区里常有
+# 长时间静默的工具调用时可以调大。
+# opencode_stall_timeout = "10m"
+#
 # [[projects.platforms]]
 # type = "telegram"
 #
