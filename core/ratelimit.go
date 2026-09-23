@@ -92,12 +92,22 @@ func (rl *RateLimiter) cleanupLoop() {
 			rl.mu.Lock()
 			now := time.Now().UnixMilli()
 			staleThreshold := rl.windowMs * 2
+			// Collect keys to delete under lock, then delete outside the iteration
+			var staleKeys []string
 			for k, b := range rl.buckets {
 				if now-b.lastAccess > staleThreshold {
-					delete(rl.buckets, k)
+					staleKeys = append(staleKeys, k)
 				}
 			}
 			rl.mu.Unlock()
+			// Delete stale entries without holding the lock
+			if len(staleKeys) > 0 {
+				rl.mu.Lock()
+				for _, k := range staleKeys {
+					delete(rl.buckets, k)
+				}
+				rl.mu.Unlock()
+			}
 		}
 	}
 }
