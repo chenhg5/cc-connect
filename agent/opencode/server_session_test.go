@@ -1416,3 +1416,39 @@ func TestServerSession_StallWatchdogKeepsLiveTurn(t *testing.T) {
 		t.Fatalf("live turn was aborted %d times, want 0", aborts)
 	}
 }
+
+// One OpenCode server per workspace is not enough: the provider credentials
+// reach it through the process environment (the config's {env:...} placeholder
+// is resolved when the process starts), so two chats in one workspace on
+// different providers would share whichever key was injected first — observed
+// live as "APIError: Invalid token" for a chat on aiapi whose workspace server
+// had been started for deepseek. The provider scope is part of the server key.
+func TestServerKey_ScopedByProviderCredentials(t *testing.T) {
+	base := opencodeServeConfig{cmd: "opencode", workDir: "/tmp/ws"}
+
+	deepseek := base
+	deepseek.providerScope = "deepseek\x00sk-deepseek\x00https://api.deepseek.com/v1"
+	aiapi := base
+	aiapi.providerScope = "aiapi\x00sk-aiapi\x00https://aiapi.uu.cc/v1"
+
+	if serverKey(deepseek) == serverKey(aiapi) {
+		t.Fatal("servers on different providers must not share a key")
+	}
+	// Same provider, same workspace: still shared.
+	key := serverKey(deepseek)
+	if key != serverKey(deepseek) {
+		t.Fatal("the same provider scope must keep one shared server")
+	}
+	// A rotated key for the same provider must not reuse the old server.
+	rotated := base
+	rotated.providerScope = "deepseek\x00sk-rotated\x00https://api.deepseek.com/v1"
+	if serverKey(rotated) == serverKey(deepseek) {
+		t.Fatal("a rotated credential must start a fresh server")
+	}
+	// Work directories stay isolated as before.
+	other := deepseek
+	other.workDir = "/tmp/other"
+	if serverKey(other) == serverKey(deepseek) {
+		t.Fatal("different workspaces must not share a server")
+	}
+}

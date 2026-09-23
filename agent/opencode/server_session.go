@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -67,6 +68,12 @@ type opencodeServeConfig struct {
 	extraArgs []string
 	workDir   string
 	extraEnv  []string
+	// providerScope identifies the credentials this server was started with (the
+	// active provider's name and key). OpenCode resolves the config's
+	// {env:ANTHROPIC_API_KEY} placeholder once, when the process starts, so a
+	// server may only be shared by sessions using the same provider — see
+	// serverKey.
+	providerScope string
 }
 
 // opencodeServer is a ref-counted `opencode serve` process for one
@@ -134,8 +141,16 @@ func liveServer(key string) *opencodeServer {
 
 // serverKey identifies a server by the binary, its extra args and the
 // workspace directory it serves.
+// serverKey identifies a server instance. The provider scope is part of it
+// because the credentials reach OpenCode through the process environment: one
+// server per workspace is not enough when a workspace hosts chats on different
+// providers, or the second provider inherits the first one's key (observed live
+// as "APIError: Invalid token" for a chat on aiapi whose workspace server had
+// been started for deepseek).
 func serverKey(cfg opencodeServeConfig) string {
-	return cfg.cmd + "\x00" + strings.Join(cfg.extraArgs, "\x00") + "\x00" + cfg.workDir
+	sum := sha256.Sum256([]byte(cfg.providerScope))
+	return cfg.cmd + "\x00" + strings.Join(cfg.extraArgs, "\x00") + "\x00" + cfg.workDir +
+		"\x00" + hex.EncodeToString(sum[:8])
 }
 
 // acquireOpencodeServer returns a running server for cfg, starting one when
