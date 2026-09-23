@@ -188,6 +188,9 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	if cfg.EnvPATH != "" {
 		fmt.Fprintf(&sb, "Environment=\"PATH=%s\"\n", cfg.EnvPATH)
 	}
+	if home := getHomeDir(); home != "" {
+		fmt.Fprintf(&sb, "Environment=\"HOME=%s\"\n", home)
+	}
 	if len(cfg.EnvExtra) > 0 {
 		keys := make([]string, 0, len(cfg.EnvExtra))
 		for key := range cfg.EnvExtra {
@@ -353,4 +356,14 @@ func CheckLinger() (enabled bool, user string) {
 
 	linger := strings.TrimSpace(string(out))
 	return linger == "Linger=yes", user
+}
+
+// getHomeDir returns the user's home directory. It falls back to
+// os/user.Current() (which reads /etc/passwd via the pure-Go NSS
+// loader; NSS LDAP backends require CGO and are not supported).
+func getHomeDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home
+	}
+	return ""
 }

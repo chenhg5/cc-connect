@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -649,8 +650,10 @@ func load(path string) (*Config, error) {
 	resolveEnvInConfig(cfg)
 	expandHomeInConfig(cfg)
 	if cfg.DataDir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			cfg.DataDir = filepath.Join(home, ".cc-connect")
+		} else if u, err := user.Current(); err == nil && u.HomeDir != "" {
+			cfg.DataDir = filepath.Join(u.HomeDir, ".cc-connect")
 		} else {
 			cfg.DataDir = ".cc-connect"
 		}
