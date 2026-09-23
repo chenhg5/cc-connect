@@ -81,6 +81,28 @@ func (rl *RateLimiter) Allow(key string) bool {
 	return true
 }
 
+// RetryAfter returns how long the given key must wait before sending again.
+// It returns the time until the oldest message in the window expires,
+// or 0 if the key is not currently rate-limited.
+func (rl *RateLimiter) RetryAfter(key string) time.Duration {
+	if rl.maxMessages <= 0 {
+		return 0
+	}
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now().UnixMilli()
+	b := rl.buckets[key]
+	if b == nil || len(b.timestamps) < rl.maxMessages {
+		return 0
+	}
+	oldest := b.timestamps[0]
+	expiresAt := oldest + rl.windowMs
+	if expiresAt <= now {
+		return 0
+	}
+	return time.Duration(expiresAt-now) * time.Millisecond
+}
+
 func (rl *RateLimiter) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()

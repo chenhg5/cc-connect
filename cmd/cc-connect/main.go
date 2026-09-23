@@ -338,10 +338,17 @@ func main() {
 	slog.Info("config loaded", "path", configPath)
 
 	if len(cfg.Projects) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
-		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
-		fmt.Fprintln(os.Stderr, "  cc-connect init")
-		os.Exit(1)
+		// Allow startup if management server is enabled — the web UI can
+		// be used to add projects, and no agent needs to run.
+		if cfg.Management.Enabled == nil || !*cfg.Management.Enabled {
+			fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
+			fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, run:")
+			fmt.Fprintln(os.Stderr, "  cc-connect init")
+			fmt.Fprintln(os.Stderr, "Or enable the web admin to configure via UI:")
+			fmt.Fprintln(os.Stderr, "  cc-connect web")
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "Warning: no projects configured. The web admin will start so you can add projects via the UI.")
 	}
 
 	setupLogger(cfg.Log.Level, logWriter)

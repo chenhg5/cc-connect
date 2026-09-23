@@ -3048,7 +3048,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if !e.checkRateLimit(msg) {
 		slog.Info("message rate limited",
 			"session", msg.SessionKey, "user_id", msg.UserID, "user", msg.UserName)
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRateLimited))
+		var retryDur time.Duration
+		if e.rateLimiter != nil {
+			retryDur = e.rateLimiter.RetryAfter(msg.SessionKey)
+		}
+		if retryDur > 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgRateLimitedRetry, "Seconds", int(retryDur.Seconds()+0.5)))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRateLimited))
+		}
 		return
 	}
 

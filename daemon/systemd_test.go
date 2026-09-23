@@ -72,6 +72,35 @@ func TestBuildUnit_DropsEmptyValue(t *testing.T) {
 	}
 }
 
+func TestBuildUnit_IncludesConfigPath(t *testing.T) {
+	mgr := &systemdManager{system: false}
+	cfg := Config{
+		BinaryPath:  "/bin/true",
+		WorkDir:     "/tmp",
+		ConfigPath:  "/opt/myapp/config.toml",
+		LogFile:     "/tmp/log",
+		LogMaxSize:  1024,
+	}
+	out := mgr.buildUnit(cfg)
+	if !strings.Contains(out, `Environment="CC_CONFIG=/opt/myapp/config.toml"`) {
+		t.Errorf("expected CC_CONFIG in unit; got:\n%s", out)
+	}
+}
+
+func TestBuildUnit_OmitsConfigPathWhenEmpty(t *testing.T) {
+	mgr := &systemdManager{system: false}
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+	}
+	out := mgr.buildUnit(cfg)
+	if strings.Contains(out, "CC_CONFIG") {
+		t.Errorf("CC_CONFIG should not appear when ConfigPath is empty: %s", out)
+	}
+}
+
 // TestSystemdInstall_TightensExistingUnitFrom0644 covers the upgrade
 // path: os.WriteFile would truncate-in-place and KEEP the old 0644
 // permissions of a unit file left over from earlier cc-connect

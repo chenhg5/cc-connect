@@ -245,6 +245,53 @@ func TestEmit_HTTPHook(t *testing.T) {
 	}
 }
 
+func TestEmit_HTTPRetryOnFailure(t *testing.T) {
+	var attempts atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	hooks := []HookConfig{
+		{Event: "error", Type: "http", URL: srv.URL, Async: boolPtr(false)},
+	}
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
+
+	hm.Emit(HookEvent{Event: HookEventError})
+
+	if attempts.Load() != 2 {
+		t.Errorf("expected 2 attempts (1 fail + 1 retry), got %d", attempts.Load())
+	}
+}
+
+func TestEmit_HTTPAllRetriesFail(t *testing.T) {
+	var attempts atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	hooks := []HookConfig{
+		{Event: "error", Type: "http", URL: srv.URL, Async: boolPtr(false)},
+	}
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
+
+	hm.Emit(HookEvent{Event: HookEventError})
+
+	// 1 initial + 1 retry = 2 total attempts
+	if attempts.Load() != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempts.Load())
+	}
+}
+
 func TestEmit_WildcardMatchesAll(t *testing.T) {
 	var count atomic.Int32
 

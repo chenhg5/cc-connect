@@ -17,7 +17,7 @@ func TestConfigValidate(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "requires at least one project",
+			name:    "zero projects: validate fails, validatePermissive passes",
 			cfg:     Config{},
 			wantErr: "at least one [[projects]] entry is required",
 		},
@@ -186,6 +186,14 @@ func TestConfigValidate(t *testing.T) {
 			}
 			assertErrContains(t, err, tt.wantErr)
 		})
+	}
+}
+
+func TestConfigValidatePermissive_ZeroProjects(t *testing.T) {
+	// validatePermissive should allow zero projects (web UI can still run)
+	err := (&Config{}).validatePermissive()
+	if err != nil {
+		t.Errorf("validatePermissive() with zero projects = %v, want nil", err)
 	}
 }
 

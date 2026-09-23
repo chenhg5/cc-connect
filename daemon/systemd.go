@@ -180,6 +180,9 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	sb.WriteString("Type=simple\n")
 	fmt.Fprintf(&sb, "ExecStart=%s\n", cfg.BinaryPath)
 	fmt.Fprintf(&sb, "WorkingDirectory=%s\n", cfg.WorkDir)
+	if cfg.ConfigPath != "" {
+		fmt.Fprintf(&sb, "Environment=\"CC_CONFIG=%s\"\n", escapeSystemdEnvValue(cfg.ConfigPath))
+	}
 	sb.WriteString("Restart=on-failure\n")
 	sb.WriteString("RestartSec=10\n")
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_FILE=%s\"\n", cfg.LogFile)

@@ -95,3 +95,38 @@ func TestRateLimiter_StopDisabled(t *testing.T) {
 	rl := NewRateLimiter(0, time.Minute)
 	rl.Stop()
 }
+
+func TestRateLimiter_RetryAfter(t *testing.T) {
+	rl := NewRateLimiter(2, 50*time.Millisecond)
+
+	// Not rate-limited yet
+	if d := rl.RetryAfter("user1"); d != 0 {
+		t.Errorf("should be 0, got %v", d)
+	}
+
+	// Exhaust limit
+	rl.Allow("user1")
+	rl.Allow("user1")
+
+	// Now should report retry-after
+	d := rl.RetryAfter("user1")
+	if d == 0 {
+		t.Error("should report retry-after when rate-limited")
+	}
+	if d > 50*time.Millisecond {
+		t.Errorf("should be ~50ms, got %v", d)
+	}
+
+	// Unknown key should return 0
+	if d := rl.RetryAfter("user2"); d != 0 {
+		t.Errorf("unknown key should be 0, got %v", d)
+	}
+}
+
+func TestRateLimiter_RetryAfter_Disabled(t *testing.T) {
+	// Disabled limiter always returns 0
+	rl := NewRateLimiter(0, time.Minute)
+	if d := rl.RetryAfter("user1"); d != 0 {
+		t.Errorf("disabled should be 0, got %v", d)
+	}
+}

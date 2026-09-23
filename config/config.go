@@ -1076,7 +1076,7 @@ func (c *Config) validateInternal(permissive bool) error {
 	default:
 		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
 	}
-	if len(c.Projects) == 0 {
+	if len(c.Projects) == 0 && !permissive {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
 	}
 	for i, proj := range c.Projects {

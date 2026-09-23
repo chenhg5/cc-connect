@@ -548,6 +548,7 @@ const (
 	MsgCommandDisabled   MsgKey = "command_disabled"
 	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
+	MsgRateLimitedRetry  MsgKey = "rate_limited_retry"
 	MsgPsSent            MsgKey = "ps_sent"
 	MsgPsSendFailed      MsgKey = "ps_send_failed"
 	MsgPsEmpty           MsgKey = "ps_empty"
@@ -3404,6 +3405,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏳ 訊息發送過快，請稍後再試。",
 		LangJapanese:           "⏳ メッセージの送信が速すぎます。しばらくお待ちください。",
 		LangSpanish:            "⏳ Estás enviando mensajes demasiado rápido. Espera un momento.",
+	},
+	MsgRateLimitedRetry: {
+		LangEnglish:            "⏳ Slow down! Try again in {{.Seconds}} seconds.",
+		LangChinese:            "⏳ 发送过快，请在 {{.Seconds}} 秒后重试。",
+		LangTraditionalChinese: "⏳ 發送過快，請在 {{.Seconds}} 秒後重試。",
+		LangJapanese:           "⏳ 送信が多すぎます。{{.Seconds}} 秒後に再試行してください。",
+		LangSpanish:            "⏳ ¡Demasiado rápido! Inténtalo de nuevo en {{.Seconds}} segundos.",
 	},
 	MsgPsSent: {
 		LangEnglish:            "✅ P.S. delivered.",
