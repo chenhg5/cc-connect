@@ -549,6 +549,7 @@ const (
 	MsgAdminRequired     MsgKey = "admin_required"
 	MsgRateLimited       MsgKey = "rate_limited"
 	MsgPsSent            MsgKey = "ps_sent"
+	MsgPsCardEntry       MsgKey = "ps_card_entry"
 	MsgPsSendFailed      MsgKey = "ps_send_failed"
 	MsgPsEmpty           MsgKey = "ps_empty"
 	MsgPsNoSession       MsgKey = "ps_no_session"
@@ -3411,6 +3412,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ P.S. 已送達。",
 		LangJapanese:           "✅ P.S. を送信しました。",
 		LangSpanish:            "✅ P.S. entregado.",
+	},
+	MsgPsCardEntry: {
+		LangEnglish:            "📌 P.S. delivered: %s",
+		LangChinese:            "📌 补充已送达：%s",
+		LangTraditionalChinese: "📌 補充已送達：%s",
+		LangJapanese:           "📌 P.S. を送信しました：%s",
+		LangSpanish:            "📌 P.D. entregado: %s",
 	},
 	MsgPsSendFailed: {
 		LangEnglish:            "❌ Failed to deliver P.S.",

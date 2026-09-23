@@ -470,10 +470,15 @@ type Engine struct {
 	workspaceInitAllowLocalPaths bool
 	workspaceBindings            *WorkspaceBindingManager
 	workspacePool                *workspacePool
-	initFlows                    map[string]*workspaceInitFlow // workspace channel key → init state
-	initFlowsMu                  sync.Mutex
-	sendWorkDirMu                sync.RWMutex
-	sendWorkDirs                 map[string]string // sessionKey → work_dir assigned by send --cwd
+	// workspaceFpMu/workspaceFpLocks serialize the git fingerprint window per
+	// workspace, so a turn's Changed flag cannot be polluted by concurrent turns
+	// (foreground-foreground or foreground-background) in the same directory.
+	workspaceFpMu    sync.Mutex
+	workspaceFpLocks map[string]*sync.Mutex        // workdir -> fingerprint window lock
+	initFlows        map[string]*workspaceInitFlow // workspace channel key → init state
+	initFlowsMu      sync.Mutex
+	sendWorkDirMu    sync.RWMutex
+	sendWorkDirs     map[string]string // sessionKey → work_dir assigned by send --cwd
 
 	// Terminal observation (--observe)
 	observeEnabled    bool
@@ -552,6 +557,14 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
+	// cardNoteMu guards the notes queued for the turn's card, and cardNoteCh wakes
+	// the turn loop so a note is rendered immediately instead of waiting for the
+	// agent's next event. /ps uses this so a supplement is visible on the card the
+	// moment it lands in the running turn.
+	cardNoteMu sync.Mutex
+	cardNotes  []string
+	cardNoteCh chan struct{}
+
 	agentSession AgentSession
 	// busySession is the core.Session whose busy lock guards the in-flight
 	// turn. Set by getOrCreateInteractiveStateWith so /stop can release the
@@ -564,6 +577,7 @@ type interactiveState struct {
 	lastRecallProbeAt        time.Time
 	recallProbeInFlight      bool
 	workspaceDir             string
+	ccSessionKey             string // raw platform:chat:user key for hooks and agent env
 	agent                    Agent
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
@@ -4247,6 +4261,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	state, ok := e.interactiveStates[sessionKey]
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
+		if ccSessionKey != "" {
+			state.mu.Lock()
+			state.ccSessionKey = ccSessionKey
+			state.mu.Unlock()
+		}
 		// Verify the running agent session matches the current active session.
 		// After /new or /switch the active session changes, but the old agent
 		// process may still be alive. Reusing it would send messages to the
@@ -4325,7 +4344,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Check if context is already canceled (e.g. during shutdown/restart)
 	if e.ctx.Err() != nil {
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
-		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true, busySession: session}
+		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, ccSessionKey: ccKey, eventsNeedResync: true, busySession: session}
 		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 		state = newState
 		e.interactiveStates[sessionKey] = state
@@ -4402,7 +4421,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				Platform:   p.Name(),
 				Error:      fmt.Sprintf("failed to start session: %v", err),
 			})
-			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true, busySession: session}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, ccSessionKey: ccKey, eventsNeedResync: true, busySession: session}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
 			e.interactiveStates[sessionKey] = state
@@ -4445,6 +4464,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		platform:         p,
 		replyCtx:         replyCtx,
 		agent:            agent,
+		ccSessionKey:     ccKey,
 		eventsNeedResync: true,
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
@@ -4849,29 +4869,102 @@ type cardToolEntry struct {
 	Input string
 }
 
+// streamingCardContentFor renders the content handed to streamCard.Update /
+// Finalize for one turn. When the card implements StreamingCardPayloadSupporter
+// (e.g. Feishu), the turn is encoded as the structured progress payload so the
+// platform renders the familiar foldable panels ("思考 (N)" / "工具 (N)") with
+// the final answer below — identical to the compact progress card style.
+// Intermediate step text (opencode per-step updates) is folded into the
+// thinking panel instead of being appended to the answer body, so streaming
+// updates grow the foldable panels rather than re-flowing the answer text.
+// Other platforms keep receiving plain markdown via buildCardContent.
+// cardStepTextsContain reports whether the panel lane already holds text. The
+// lane is append-only by design: the streaming card appends only the entries it
+// has not shown yet, indexed by position, so an entry must never be removed or
+// re-ordered after it was rendered.
+func cardStepTextsContain(lane []string, text string) bool {
+	for _, item := range lane {
+		if item == text {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) streamingCardContentFor(streamCard StreamingCard, thinking string, stepTexts []string, tools []cardToolEntry, answer string, done bool) string {
+	if supp, ok := streamCard.(StreamingCardPayloadSupporter); ok && supp.SupportsStreamingCardPayload() {
+		state := ProgressCardStateRunning
+		if done {
+			state = ProgressCardStateCompleted
+		}
+		return BuildStreamingCardPayload(thinking, stepTexts, tools, answer, e.agent.Name(), e.i18n.CurrentLang(), state)
+	}
+	// Markdown fallback (DingTalk/Slack): keep the previous behavior where
+	// streamed step text showed up in the card body as it arrived.
+	fallbackAnswer := answer
+	if len(stepTexts) > 0 {
+		fallbackAnswer = strings.Join(stepTexts, "\n") + "\n" + fallbackAnswer
+	}
+	return buildCardContent(thinking, tools, fallbackAnswer)
+}
+
 // buildCardContent constructs the full markdown for the streaming card.
+//
+// Thinking and tool entries are rendered as compact summaries (a one-line
+// thinking excerpt plus a tool name/count line) rather than dumping the
+// full reasoning text and every tool input inline. Streaming an entire
+// agent turn verbatim into one card produces an ugly wall of intermediate
+// process; the final answer stays full-length and authoritative.
 func buildCardContent(thinking string, tools []cardToolEntry, answer string) string {
 	var sb strings.Builder
 	if thinking != "" {
-		sb.WriteString("💭 **Thinking**\n\n")
-		sb.WriteString(thinking)
-		sb.WriteString("\n\n---\n\n")
+		sb.WriteString("💭 **思考**\n")
+		sb.WriteString(compactOneLine(thinking))
+		sb.WriteString("\n\n")
 	}
-	for _, t := range tools {
-		sb.WriteString(fmt.Sprintf("🔧 **Tool #%d**: `%s`\n", t.Index, t.Name))
-		if t.Input != "" {
-			sb.WriteString(t.Input)
-			sb.WriteString("\n")
+	if len(tools) > 0 {
+		fmt.Fprintf(&sb, "🔧 **工具 (%d)**: ", len(tools))
+		names := make([]string, 0, len(tools))
+		seen := make(map[string]bool, len(tools))
+		for _, t := range tools {
+			if t.Name == "" || seen[t.Name] {
+				continue
+			}
+			seen[t.Name] = true
+			names = append(names, t.Name)
 		}
-		sb.WriteString("\n")
+		if len(names) == 0 {
+			sb.WriteString("调用中…")
+		} else {
+			sb.WriteString(strings.Join(names, ", "))
+		}
+		sb.WriteString("\n\n")
 	}
 	if answer != "" {
-		if len(tools) > 0 || thinking != "" {
+		if thinking != "" || len(tools) > 0 {
 			sb.WriteString("---\n\n")
 		}
 		sb.WriteString(answer)
 	}
 	return sb.String()
+}
+
+// compactOneLine collapses a multi-line block into a single trimmed line,
+// replacing interior whitespace runs with a single space and capping the
+// length so the streaming card shows a short excerpt instead of a wall of
+// intermediate reasoning.
+func compactOneLine(s string) string {
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return ""
+	}
+	line := strings.Join(fields, " ")
+	const maxRunes = 120
+	r := []rune(line)
+	if len(r) > maxRunes {
+		return string(r[:maxRunes]) + "…"
+	}
+	return line
 }
 
 // unsolicitedReaderStopTimeout bounds how long stopUnsolicitedReader waits
@@ -5055,15 +5148,70 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"status", event.ToolStatus)
 
 			case EventResult:
+				// Resolve hook context first so the fingerprint window lock uses
+				// the same effective workspace key as the foreground path.
+				state.mu.Lock()
+				hookSessionKey := state.ccSessionKey
+				hookWorkspace := state.workspaceDir
+				hookAgent := state.agent
+				state.mu.Unlock()
+				if hookSessionKey == "" {
+					hookSessionKey = sessionKey
+				}
+				if hookWorkspace == "" {
+					hookWorkspace = workspaceDir
+				}
+				if hookWorkspace == "" {
+					if hookAgent == nil {
+						hookAgent = e.agent
+					}
+					if wd, ok := hookAgent.(WorkDirSwitcher); ok {
+						hookWorkspace = wd.GetWorkDir()
+					}
+				}
+
+				// Serialize the fingerprint window per workspace: baseline is
+				// sampled inside the lock, so concurrent turns in the same
+				// directory cannot pollute this background turn's Changed flag.
+				// The lock also refreshes the baseline per background turn —
+				// a single reader may relay multiple EventResult turns.
+				fpLock := e.workspaceFingerprintLock(hookWorkspace)
+				if fpLock != nil {
+					fpLock.Lock()
+				}
+				turnStartGitFingerprint := workspaceGitFingerprint(e.ctx, hookWorkspace)
+
 				fullResponse := event.Content
 				if fullResponse == "" && len(textParts) > 0 {
 					fullResponse = strings.Join(textParts, "")
 				}
 
+				finalized := fullResponse != ""
 				if fullResponse != "" {
 					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
+						if err := e.sendWithErrorForWorkspace(p, replyCtx, chunk, workspaceDir); err != nil {
+							finalized = false
+							break
+						}
 					}
+				}
+				if finalized {
+					turnID := fmt.Sprintf("background-%d", time.Now().UnixNano())
+					e.hooks.Emit(HookEvent{
+						Event:      HookEventMessageFinalized,
+						TurnID:     turnID,
+						SessionKey: hookSessionKey,
+						Workspace:  hookWorkspace,
+						Platform:   p.Name(),
+						Source:     "agent.background_reply",
+						Internal:   false,
+						ReplyKind:  "text",
+						Changed:    turnStartGitFingerprint != "" && turnStartGitFingerprint != workspaceGitFingerprint(e.ctx, hookWorkspace),
+						Content:    fullResponse,
+					})
+				}
+				if fpLock != nil {
+					fpLock.Unlock()
 				}
 
 				// Safety note: concurrent writes to session.History by the
@@ -5205,9 +5353,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	state.mu.Lock()
 	workspaceDir := state.workspaceDir
+	hookSessionKey := state.ccSessionKey
 	replyAgent := state.agent
 	if replyAgent == nil {
 		replyAgent = e.agent
+	}
+	if hookSessionKey == "" {
+		hookSessionKey = sessionKey
+	}
+	hookWorkspace := workspaceDir
+	if hookWorkspace == "" {
+		if wd, ok := replyAgent.(WorkDirSwitcher); ok {
+			hookWorkspace = wd.GetWorkDir()
+		}
 	}
 	workspaceRenderer := func(content string) string {
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
@@ -5221,9 +5379,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
-	var cardToolCalls []cardToolEntry  // track tool calls for card content
-	var cardThinkingText string        // latest thinking text
-	var cardAnswerText strings.Builder // accumulated answer text
+	var cardToolCalls []cardToolEntry // track tool calls for card content
+	var cardThinkingText string       // latest thinking text
+	var cardStepTexts []string        // intermediate step text (opencode per-step updates) folded into the thinking panel
+
+	// A /ps that raced with the end of the previous turn may have left a note
+	// behind; it belongs to that turn, so drop it instead of showing it here.
+	_ = state.takeCardNotes()
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
@@ -5235,7 +5397,28 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	// A StreamingCard aggregates the entire turn into one card; the compact
+	// progress writer must not also post/update its own card, or the platform
+	// shows two independently-updated cards for the same turn.
+	if streamCard != nil && !streamCard.Failed() {
+		cp.disable()
+	}
 	state.mu.Unlock()
+
+	// Serialize the git fingerprint window per workspace: hold the lock from
+	// baseline sampling through the finalized emit so concurrent turns in the
+	// same directory (other sessions / background reader) cannot pollute this
+	// turn's Changed flag. Queued messages processed later in this call share
+	// the same window and re-sample their own baseline (see the queued branch).
+	fpLock := e.workspaceFingerprintLock(hookWorkspace)
+	if fpLock != nil {
+		fpLock.Lock()
+		defer fpLock.Unlock()
+	}
+
+	// Record the workspace git state at the start of this turn so post-reply
+	// hooks can tell whether this turn actually changed the working tree.
+	turnStartGitFingerprint := workspaceGitFingerprint(e.ctx, hookWorkspace)
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
@@ -5268,11 +5451,32 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
+
+	// renderCardNotes surfaces supplements that a command (/ps) added to this
+	// running turn. The agent only reads them at its next step boundary — which
+	// can be a minute away — so without this the user gets the ack but sees
+	// nothing on the card until the turn moves on.
+	renderCardNotes := func(notes []string) {
+		switch {
+		case len(notes) == 0:
+		case streamCard != nil && !streamCard.Failed():
+			cardStepTexts = append(cardStepTexts, notes...)
+			_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
+		default:
+			for _, note := range notes {
+				cp.AppendStructured(ProgressCardEntry{Kind: ProgressEntryInfo, Text: note}, note)
+			}
+		}
+	}
+
 	for {
 		var event Event
 		var ok bool
 
 		select {
+		case <-state.cardNoteChannel():
+			renderCardNotes(state.takeCardNotes())
+			continue
 		case <-stopCh:
 			sp.discard()
 			return
@@ -5426,7 +5630,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			segmentStart = 0
 			silentHold = false
 			partialText = ""
-			cardAnswerText.Reset()
+			// The progress card panel accumulates per-step text in cardStepTexts
+			// on this branch (the upstream cardAnswerText builder it replaced is
+			// gone), so drop the rejected draft there as well.
+			cardStepTexts = nil
 			lastRichCardUpdate = time.Time{}
 			lastRichCardLen = 0
 
@@ -5493,7 +5700,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					cardThinkingText = truncateIf(event.Content, e.display.ThinkingMaxLen)
-					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					// Accumulate EVERY thinking event into the foldable panel —
+					// cardThinkingText itself is latest-only (kept for the
+					// markdown fallback), but the streaming card must grow one
+					// panel entry per reasoning step, otherwise the "思考 (N)"
+					// count stays stuck at 1. Skip a snapshot the lane already
+					// shows (the agent re-emits the same reasoning text across
+					// steps), not only the previous one: a /ps note inserted
+					// between two of them defeats an adjacency-only check, and the
+					// note plus the same block then repeat on the card.
+					if !cardStepTextsContain(cardStepTexts, cardThinkingText) {
+						cardStepTexts = append(cardStepTexts, cardThinkingText)
+					}
+					_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
@@ -5601,7 +5820,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						Name:  event.ToolName,
 						Input: formattedInput,
 					})
-					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+					_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
@@ -5721,12 +5940,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if streamCard != nil && !streamCard.Failed() {
 					textParts = append(textParts, content) // always accumulate for history
 					if !silentHold {
-						if releasedNow {
-							cardAnswerText.WriteString(peekSegment)
-						} else {
-							cardAnswerText.WriteString(content)
+						// Intermediate step text goes into the foldable
+						// thinking panel, NOT the answer body — otherwise every
+						// step re-flows the card text and the chat window keeps
+						// jumping. The final answer is displayed once at
+						// Finalize time. Skip consecutive duplicates.
+						if len(cardStepTexts) == 0 || cardStepTexts[len(cardStepTexts)-1] != content {
+							cardStepTexts = append(cardStepTexts, content)
 						}
-						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
+						_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 					}
 					handledByStreamCard = true
 				}
@@ -5982,6 +6204,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
+			// Record whether the agent produced no content at all before the
+			// localized empty-response placeholder replaces it: an empty reply
+			// must not fire message.finalized (matches the background path,
+			// where an empty EventResult emits nothing).
+			hadEmptyReply := fullResponse == ""
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
@@ -6175,23 +6402,35 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			replyStart := time.Now()
+			finalized := false
+			replyKind := "text"
 
 			// --- StreamingCard path ---
 			if streamCard != nil && !streamCard.Failed() {
+				replyKind = "card"
 				sp.finish("", "") // cleanup preview (should be no-op if card was active)
 				// Silent reply: never render the NO_REPLY marker into the card.
-				// cardAnswerText holds only the text streamed BEFORE the marker
-				// (empty for a bare NO_REPLY, since silentHold suppresses card
-				// writes while the segment is still a NO_REPLY prefix). Finalize
-				// with that instead of fullResponse so the card resolves to Done
-				// without leaking the marker, and skip the fallback send that
-				// would otherwise post the suppressed marker verbatim.
+				// Intermediate step text lives in the foldable thinking panel;
+				// the answer body stays empty for a silent reply. Finalize with
+				// the empty body so the card resolves to Done without leaking
+				// the marker, and skip the fallback send that would otherwise
+				// post the suppressed marker verbatim.
 				cardBody := fullResponse
 				if isSilent {
-					cardBody = strings.TrimRight(cardAnswerText.String(), " \t\r\n")
+					cardBody = ""
 				}
-				finalContent := buildCardContent(cardThinkingText, cardToolCalls, cardBody)
+				// Payload-style cards (Feishu) end the process card at the
+				// "本过程卡片已停止更新，完整答复见下一条消息。" footer and
+				// deliver the answer as a SEPARATE message carrying the status
+				// footer (model/ctx/cwd). Markdown-fallback platforms keep the
+				// body inside the card (they don't send a second message).
+				finalAnswer := cardBody
+				if supp, ok := streamCard.(StreamingCardPayloadSupporter); ok && supp.SupportsStreamingCardPayload() {
+					finalAnswer = ""
+				}
+				finalContent := e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, finalAnswer, true)
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
+					replyKind = "fallback"
 					slog.Error("streaming card finalize failed, sending fallback", "error", err)
 					// Fallback: send the response as a normal message — but never
 					// for a silent reply, which has no deliverable content.
@@ -6200,6 +6439,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
 								return
 							}
+						}
+						finalized = true
+					}
+				} else {
+					finalized = true
+					// Independent final reply with the status footer.
+					if !isSilent {
+						if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, fullResponse, statusFooter, sendWorkspaceWithError) {
+							return
 						}
 					}
 				}
@@ -6247,6 +6495,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				slog.Info("silent reply suppressed", "session", session.ID)
 			} else if hasRichCard {
+				replyKind = "card"
 				parts := []string{fullResponse}
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
 					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
@@ -6292,6 +6541,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						return
 					}
 				}
+				finalized = true
 			} else if toolCount > 0 && segmentStart > 0 {
 				// When tool calls happened and prior text was already surfaced in segments,
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
@@ -6305,6 +6555,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				}
+				finalized = true
 			} else if suppressDuplicate {
 				sp.discard()
 				metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse))
@@ -6314,13 +6565,31 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 				slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
+				finalized = true
 			} else if sp.finish(fullResponse, statusFooter) {
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse), "footer_len", len(statusFooter))
+				finalized = true
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "footer_len", len(statusFooter))
 				if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, fullResponse, statusFooter, sendWorkspaceWithError) {
 					return
 				}
+				finalized = true
+			}
+
+			if finalized && !isSilent && !hadEmptyReply {
+				e.hooks.Emit(HookEvent{
+					Event:      HookEventMessageFinalized,
+					TurnID:     msgID,
+					SessionKey: hookSessionKey,
+					Workspace:  hookWorkspace,
+					Platform:   p.Name(),
+					Source:     "agent.final_reply",
+					Internal:   false,
+					ReplyKind:  replyKind,
+					Changed:    turnStartGitFingerprint != "" && turnStartGitFingerprint != workspaceGitFingerprint(e.ctx, hookWorkspace),
+					Content:    fullResponse,
+				})
 			}
 
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
@@ -6419,6 +6688,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
+				// Re-sample the turn baseline before this queued message's agent
+				// turn starts: earlier queued messages may have changed the tree,
+				// and this message's Changed flag must not inherit their edits.
+				// The fingerprint window lock is already held for this call.
+				turnStartGitFingerprint = workspaceGitFingerprint(e.ctx, hookWorkspace)
+
 				state.mu.Lock()
 				as := state.agentSession // capture under lock to avoid race with cleanup
 				state.mu.Unlock()
@@ -6471,7 +6746,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				streamCard = nil
 				cardToolCalls = nil
 				cardThinkingText = ""
-				cardAnswerText.Reset()
+				cardStepTexts = nil
 
 				// Try to create a new streaming card for the queued turn
 				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
@@ -6770,6 +7045,61 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 	}
 }
 
+// noteForCard queues text for the running turn's card and wakes the turn loop.
+func (st *interactiveState) noteForCard(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" || st == nil {
+		return
+	}
+	st.cardNoteMu.Lock()
+	st.cardNotes = append(st.cardNotes, text)
+	if st.cardNoteCh == nil {
+		st.cardNoteCh = make(chan struct{}, 1)
+	}
+	ch := st.cardNoteCh
+	st.cardNoteMu.Unlock()
+
+	select {
+	case ch <- struct{}{}:
+	default: // a wake-up is already pending, the loop will pick the notes up
+	}
+}
+
+// cardNoteChannel returns the wake-up channel, creating it on first use. The
+// turn loop reads it as a select case, so it must exist (be non-nil) from the
+// moment the loop blocks: a channel created later would never wake that select.
+func (st *interactiveState) cardNoteChannel() <-chan struct{} {
+	if st == nil {
+		return nil
+	}
+	st.cardNoteMu.Lock()
+	defer st.cardNoteMu.Unlock()
+	if st.cardNoteCh == nil {
+		st.cardNoteCh = make(chan struct{}, 1)
+	}
+	return st.cardNoteCh
+}
+
+// takeCardNotes drains the queued notes.
+func (st *interactiveState) takeCardNotes() []string {
+	if st == nil {
+		return nil
+	}
+	st.cardNoteMu.Lock()
+	defer st.cardNoteMu.Unlock()
+	notes := st.cardNotes
+	st.cardNotes = nil
+	return notes
+}
+
+// cardNoteLine renders the panel entry for a command that joined a running turn.
+func cardNoteLine(i18n *I18n, preview string) string {
+	if i18n == nil {
+		return preview
+	}
+	return i18n.Tf(MsgPsCardEntry, preview)
+}
+
 // ──────────────────────────────────────────────────────────────
 // Command handling
 // ──────────────────────────────────────────────────────────────
@@ -6853,6 +7183,9 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
 		return
 	}
+	// Surface the supplement on the running turn's card so the user can see that
+	// it joined this turn; the model reads it at the next step boundary.
+	state.noteForCard(cardNoteLine(e.i18n, truncateIf(text, 80)))
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
 }
 
@@ -12233,6 +12566,55 @@ func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, wo
 
 func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
 	_ = e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+}
+
+// workspaceGitFingerprintTimeout bounds each git fingerprint scan. The scan runs
+// synchronously in the engine's event loop (per turn start and per finalized emit),
+// so an unbounded git (huge tree, network filesystem, hung process) would stall
+// every session; the timeout caps the worst-case blocking.
+const workspaceGitFingerprintTimeout = 5 * time.Second
+
+// workspaceGitFingerprint returns a fingerprint of the git working tree at workDir
+// (porcelain status + HEAD). Empty when workDir is not a git repo or git fails.
+// Used to detect whether a turn actually changed the workspace, so post-reply
+// hooks (e.g. auto-review) can skip turns that made no code change.
+func workspaceGitFingerprint(ctx context.Context, workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, workspaceGitFingerprintTimeout)
+	defer cancel()
+	status, err := exec.CommandContext(ctx, "git", "-C", workDir, "status", "--porcelain").Output()
+	if err != nil {
+		return ""
+	}
+	head, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return string(status) + "\x00" + string(head)
+}
+
+// workspaceFingerprintLock returns the per-workspace mutex that serializes git
+// fingerprint windows for workDir (nil when workDir is empty — no workspace, no
+// fingerprint, nothing to protect). The lock is held from baseline sampling
+// through the end-of-turn sampling so no other turn in the same directory can
+// interleave its own changes into this turn's fingerprint delta.
+func (e *Engine) workspaceFingerprintLock(workDir string) *sync.Mutex {
+	if workDir == "" {
+		return nil
+	}
+	e.workspaceFpMu.Lock()
+	defer e.workspaceFpMu.Unlock()
+	if e.workspaceFpLocks == nil {
+		e.workspaceFpLocks = make(map[string]*sync.Mutex)
+	}
+	m, ok := e.workspaceFpLocks[workDir]
+	if !ok {
+		m = &sync.Mutex{}
+		e.workspaceFpLocks[workDir] = m
+	}
+	return m
 }
 
 func (e *Engine) renderCardForPlatform(p Platform, card *Card) *Card {
