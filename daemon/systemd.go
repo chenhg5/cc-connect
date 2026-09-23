@@ -180,6 +180,9 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	sb.WriteString("Type=simple\n")
 	fmt.Fprintf(&sb, "ExecStart=%s\n", cfg.BinaryPath)
 	fmt.Fprintf(&sb, "WorkingDirectory=%s\n", cfg.WorkDir)
+	if cfg.ConfigPath != "" {
+		fmt.Fprintf(&sb, "Environment=\"CC_CONFIG=%s\"\n", escapeSystemdEnvValue(cfg.ConfigPath))
+	}
 	sb.WriteString("Restart=on-failure\n")
 	sb.WriteString("RestartSec=10\n")
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_FILE=%s\"\n", cfg.LogFile)
@@ -187,6 +190,9 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_MAX_BACKUPS=%d\"\n", cfg.LogMaxBackups)
 	if cfg.EnvPATH != "" {
 		fmt.Fprintf(&sb, "Environment=\"PATH=%s\"\n", cfg.EnvPATH)
+	}
+	if home := getHomeDir(); home != "" {
+		fmt.Fprintf(&sb, "Environment=\"HOME=%s\"\n", home)
 	}
 	if len(cfg.EnvExtra) > 0 {
 		keys := make([]string, 0, len(cfg.EnvExtra))
@@ -353,4 +359,11 @@ func CheckLinger() (enabled bool, user string) {
 
 	linger := strings.TrimSpace(string(out))
 	return linger == "Linger=yes", user
+}
+
+func getHomeDir() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return home
+	}
+	return ""
 }

@@ -1099,14 +1099,12 @@ func TestMgmt_AddPlatformToNewProject_RejectsMissingWorkDir(t *testing.T) {
 		"options":  map[string]any{"client_id": "abc", "client_secret": "def"},
 		"work_dir": missing,
 	})
-	if r.OK {
-		t.Fatal("expected missing work_dir to be rejected")
+	// work_dir is auto-created when missing (createIfMissing=true)
+	if !r.OK {
+		t.Fatalf("expected missing work_dir to be created, got error: %v", r.Error)
 	}
-	if !strings.Contains(r.Error, "work_dir does not exist") {
-		t.Fatalf("error = %q, want work_dir does not exist", r.Error)
-	}
-	if called {
-		t.Fatal("addPlatformToProject should not be called when work_dir is invalid")
+	if !called {
+		t.Fatal("addPlatformToProject should be called after work_dir is created")
 	}
 }
 
@@ -1127,14 +1125,12 @@ func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
 			"app_secret": "secret",
 			"work_dir":   missing,
 		})
-		if r.OK || code != http.StatusBadRequest {
-			t.Fatalf("response ok=%v status=%d error=%q, want 400", r.OK, code, r.Error)
+		// work_dir is auto-created when missing (createIfMissing=true)
+		if !r.OK || code != http.StatusOK {
+			t.Fatalf("response ok=%v status=%d error=%q, want 200", r.OK, code, r.Error)
 		}
-		if !strings.Contains(r.Error, "work_dir does not exist") {
-			t.Fatalf("error = %q, want work_dir does not exist", r.Error)
-		}
-		if called {
-			t.Fatal("setupFeishuSave should not be called when work_dir is invalid")
+		if !called {
+			t.Fatal("setupFeishuSave should be called after work_dir is created")
 		}
 	})
 
@@ -1151,14 +1147,12 @@ func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
 			"token":    "token",
 			"work_dir": missing,
 		})
-		if r.OK || code != http.StatusBadRequest {
-			t.Fatalf("response ok=%v status=%d error=%q, want 400", r.OK, code, r.Error)
+		// work_dir is auto-created when missing (createIfMissing=true)
+		if !r.OK || code != http.StatusOK {
+			t.Fatalf("response ok=%v status=%d error=%q, want 200", r.OK, code, r.Error)
 		}
-		if !strings.Contains(r.Error, "work_dir does not exist") {
-			t.Fatalf("error = %q, want work_dir does not exist", r.Error)
-		}
-		if called {
-			t.Fatal("setupWeixinSave should not be called when work_dir is invalid")
+		if !called {
+			t.Fatal("setupWeixinSave should be called after work_dir is created")
 		}
 	})
 }
