@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	// aliased: checkSystemdRunning / CheckLinger already bind a local
+	// identifier named "user".
+	osuser "os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -182,6 +185,18 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	fmt.Fprintf(&sb, "WorkingDirectory=%s\n", cfg.WorkDir)
 	sb.WriteString("Restart=on-failure\n")
 	sb.WriteString("RestartSec=10\n")
+	// System units inherit almost nothing from the installing shell, so
+	// HOME is undefined unless the unit sets it. Without it
+	// os.UserHomeDir() fails and the default data_dir degrades to the
+	// relative "./.cc-connect", which then resolves against whatever
+	// working directory each consumer happens to have. User units are
+	// started by the per-user systemd manager, which already exports a
+	// correct HOME, so they are left alone.
+	if m.system {
+		if home := systemUnitHome(cfg); home != "" {
+			fmt.Fprintf(&sb, "Environment=\"HOME=%s\"\n", escapeSystemdEnvValue(home))
+		}
+	}
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_FILE=%s\"\n", cfg.LogFile)
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_MAX_SIZE=%d\"\n", cfg.LogMaxSize)
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_MAX_BACKUPS=%d\"\n", cfg.LogMaxBackups)
@@ -214,6 +229,44 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 		sb.WriteString("WantedBy=default.target\n")
 	}
 	return sb.String()
+}
+
+// lookupUserHome is a var (not a func) so tests can stub the passwd
+// lookup without depending on the accounts of the test host.
+var lookupUserHome = func(uid int) (string, error) {
+	u, err := osuser.LookupId(strconv.Itoa(uid))
+	if err != nil {
+		return "", err
+	}
+	return u.HomeDir, nil
+}
+
+// systemUnitHome resolves the HOME value to bake into a system-level unit.
+//
+// The generated unit carries no User=, so systemd runs the service as the
+// account that installed it — root, since newPlatformManager only selects
+// system mode for uid 0. The home directory is read from the passwd
+// database rather than hardcoded to /root so that a relocated root home,
+// or a service account installing on root's behalf, gets its own home
+// instead of one belonging to another user.
+//
+// Returns "" when the caller already emits HOME from cfg.EnvExtra (a
+// ${HOME} placeholder captured out of config.toml): an operator's explicit
+// value wins and must not be written twice.
+func systemUnitHome(cfg Config) string {
+	if cfg.EnvExtra["HOME"] != "" {
+		return ""
+	}
+	if home, err := lookupUserHome(os.Getuid()); err == nil && filepath.IsAbs(home) {
+		return home
+	}
+	// Passwd lookup can fail in minimal images with no /etc/passwd entry
+	// for uid 0. Fall back to the installing shell's HOME, then to the
+	// conventional root home so the unit never ships a relative path.
+	if home := os.Getenv("HOME"); filepath.IsAbs(home) {
+		return home
+	}
+	return "/root"
 }
 
 // escapeSystemdEnvValue prepares a value for inclusion inside the double

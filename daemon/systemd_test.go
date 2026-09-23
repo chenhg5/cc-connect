@@ -72,6 +72,83 @@ func TestBuildUnit_DropsEmptyValue(t *testing.T) {
 	}
 }
 
+// stubUserHome makes systemUnitHome deterministic regardless of the
+// accounts present on the test host.
+func stubUserHome(t *testing.T, home string, err error) {
+	t.Helper()
+	orig := lookupUserHome
+	t.Cleanup(func() { lookupUserHome = orig })
+	lookupUserHome = func(int) (string, error) { return home, err }
+}
+
+func systemUnitCfg() Config {
+	return Config{
+		BinaryPath: "/usr/local/bin/cc-connect",
+		WorkDir:    "/srv/cc-connect",
+		LogFile:    "/var/log/cc-connect.log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+	}
+}
+
+// TestBuildUnit_SystemSetsHOME covers issue #1634: a system unit inherits
+// no HOME, so os.UserHomeDir() fails and the default data_dir degrades to
+// the relative ".cc-connect".
+func TestBuildUnit_SystemSetsHOME(t *testing.T) {
+	stubUserHome(t, "/root", nil)
+	out := (&systemdManager{system: true}).buildUnit(systemUnitCfg())
+	if !strings.Contains(out, `Environment="HOME=/root"`) {
+		t.Errorf("system unit missing HOME; got:\n%s", out)
+	}
+}
+
+// A relocated service-account home must be used verbatim rather than the
+// hardcoded /root.
+func TestBuildUnit_SystemUsesAccountHome(t *testing.T) {
+	stubUserHome(t, "/var/lib/ccbot", nil)
+	out := (&systemdManager{system: true}).buildUnit(systemUnitCfg())
+	if !strings.Contains(out, `Environment="HOME=/var/lib/ccbot"`) {
+		t.Errorf("system unit did not use the account home; got:\n%s", out)
+	}
+}
+
+// User units are started by the per-user systemd manager, which already
+// exports HOME; the unit must not pin one.
+func TestBuildUnit_UserDoesNotSetHOME(t *testing.T) {
+	stubUserHome(t, "/root", nil)
+	out := (&systemdManager{system: false}).buildUnit(systemUnitCfg())
+	if strings.Contains(out, "HOME=") {
+		t.Errorf("user unit should not pin HOME; got:\n%s", out)
+	}
+}
+
+// An explicit HOME captured from config.toml wins and is written once.
+func TestBuildUnit_SystemHOMENotDuplicated(t *testing.T) {
+	stubUserHome(t, "/root", nil)
+	cfg := systemUnitCfg()
+	cfg.EnvExtra = map[string]string{"HOME": "/opt/ccdata"}
+	out := (&systemdManager{system: true}).buildUnit(cfg)
+	if n := strings.Count(out, "HOME="); n != 1 {
+		t.Errorf("want exactly 1 HOME line, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, `Environment="HOME=/opt/ccdata"`) {
+		t.Errorf("explicit HOME should win; got:\n%s", out)
+	}
+}
+
+// A failed passwd lookup must still yield an absolute HOME.
+func TestSystemUnitHome_FallbackIsAbsolute(t *testing.T) {
+	stubUserHome(t, "", os.ErrNotExist)
+	t.Setenv("HOME", "relative/path")
+	if got := systemUnitHome(Config{}); got != "/root" {
+		t.Errorf("systemUnitHome() = %q, want /root", got)
+	}
+	t.Setenv("HOME", "/home/installer")
+	if got := systemUnitHome(Config{}); got != "/home/installer" {
+		t.Errorf("systemUnitHome() = %q, want /home/installer", got)
+	}
+}
+
 // TestSystemdInstall_TightensExistingUnitFrom0644 covers the upgrade
 // path: os.WriteFile would truncate-in-place and KEEP the old 0644
 // permissions of a unit file left over from earlier cc-connect
