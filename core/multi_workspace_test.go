@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -801,5 +802,235 @@ func TestLookupEffectiveBinding_NoIsolationUnbindsMissing(t *testing.T) {
 	}
 	if got := e.workspaceBindings.Lookup("project:test", channelKey); got != nil {
 		t.Errorf("expected missing workspace binding to be unbound without isolation, got %+v", got)
+	}
+}
+
+// namedProviderAgent is a provider-capable test agent that reports the name it
+// was registered under, so multi-workspace agent factories resolve.
+type namedProviderAgent struct {
+	stubProviderAgent
+	name string
+}
+
+// gotoTestAgentSeq keeps every registered test agent name unique, so parallel
+// tests never collide in the global agent registry.
+var gotoTestAgentSeq int64
+
+func (a *namedProviderAgent) Name() string { return a.name }
+
+// ProviderScopedModelNames mirrors opencode: models are stored with their
+// provider prefix ("aiapi/glm-5.3"), which is what /goto resolves to.
+func (a *namedProviderAgent) ProviderScopedModelNames() bool { return true }
+
+// /goto inside a workspace chat is workspace-level, like the native /model
+// command: the choice lives on the workspace, so every chat bound to it follows
+// (and a later switch in any of them moves them all). It must not leak into the
+// project config — that was the reported bug, where the switch survived as the
+// project default while the chat's own session stayed provider-less.
+func TestCmdGoto_WorkspaceChatSetsWorkspaceProvider(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "goto-ws")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, newAgent := registerGotoTestAgent(t)
+	e := NewEngine("test", newAgent(), nil, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	statePath := filepath.Join(t.TempDir(), "project.state.json")
+	e.SetProjectStateStore(NewProjectStateStore(statePath))
+
+	var projectSaves []string
+	e.SetProviderSaveFunc(func(name string) error {
+		projectSaves = append(projectSaves, name)
+		return nil
+	})
+
+	channelID := "C-goto"
+	channelKey := "test-platform:" + channelID
+	e.workspaceBindings.Bind("project:test", channelKey, "goto-ws", wsDir)
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{Platform: "test-platform", ChannelKey: channelID, SessionKey: channelKey + ":U-001", ReplyCtx: "ctx"}
+
+	e.cmdGoto(p, msg, []string{"aiapi"})
+
+	wantWS := normalizeWorkspacePath(wsDir)
+	if got := e.projectState.WorkspaceProviderOverride(wantWS); got != "aiapi" {
+		t.Fatalf("workspace provider override = %q, want aiapi", got)
+	}
+	if len(projectSaves) != 0 {
+		t.Fatalf("project-level provider saves = %v, want none for a workspace chat", projectSaves)
+	}
+
+	_, sessions, _, _, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		t.Fatalf("commandContextWithWorkspace: %v", err)
+	}
+	if got := sessions.GetOrCreateActive(msg.SessionKey).GetActiveProvider(); got != "" {
+		t.Fatalf("session-level provider = %q, want empty (the workspace level applies)", got)
+	}
+
+	// A later chat in the same workspace follows the same choice, and so does a
+	// freshly created workspace agent (pool eviction / daemon restart).
+	second := &Message{Platform: "test-platform", ChannelKey: channelID, SessionKey: channelKey + ":U-002", ReplyCtx: "ctx"}
+	secondAgent, _, _, _, err := e.commandContextWithWorkspace(p, second)
+	if err != nil {
+		t.Fatalf("second chat context: %v", err)
+	}
+	if got := secondAgent.(ProviderSwitcher).GetActiveProvider(); got == nil || got.Name != "aiapi" {
+		t.Fatalf("second chat provider = %+v, want aiapi from the workspace override", got)
+	}
+
+	restarted := NewEngine("test", newAgent(), nil, filepath.Join(t.TempDir(), "sessions2.json"), LangEnglish)
+	restarted.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings2.json"))
+	restarted.SetProjectStateStore(NewProjectStateStore(statePath))
+	wsAgent, _, err := restarted.getOrCreateWorkspaceAgent(wantWS)
+	if err != nil {
+		t.Fatalf("reloaded workspace agent: %v", err)
+	}
+	if got := wsAgent.(ProviderSwitcher).GetActiveProvider(); got == nil || got.Name != "aiapi" {
+		t.Fatalf("reloaded workspace provider = %+v, want aiapi", got)
+	}
+}
+
+// /goto <provider>/<model> in a workspace chat records the model on the
+// workspace too (same granularity as /model) instead of writing it into the
+// provider definition in the project config, which would change it for every
+// workspace at once.
+func TestCmdGoto_WorkspaceChatRecordsModelOnWorkspace(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "goto-ws-model")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, newAgent := registerGotoTestAgent(t)
+	e := NewEngine("test", newAgent(), nil, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(NewProjectStateStore(filepath.Join(t.TempDir(), "project.state.json")))
+
+	var modelSaves []string
+	e.SetProviderModelSaveFunc(func(provider, model string) error {
+		modelSaves = append(modelSaves, provider+"="+model)
+		return nil
+	})
+
+	channelID := "C-goto-model"
+	channelKey := "test-platform:" + channelID
+	e.workspaceBindings.Bind("project:test", channelKey, "goto-ws-model", wsDir)
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{Platform: "test-platform", ChannelKey: channelID, SessionKey: channelKey + ":U-001", ReplyCtx: "ctx"}
+
+	e.cmdGoto(p, msg, []string{"aiapi/glm-5.3"})
+
+	wantWS := normalizeWorkspacePath(wsDir)
+	if got := e.projectState.WorkspaceModelOverride(wantWS); got != "aiapi/glm-5.3" {
+		t.Fatalf("workspace model override = %q, want aiapi/glm-5.3", got)
+	}
+	if len(modelSaves) != 0 {
+		t.Fatalf("provider-model config saves = %v, want none for a workspace chat", modelSaves)
+	}
+}
+
+// Chats without a workspace keep the previous semantics: the provider is
+// recorded on the session, and the project default is updated (the only
+// persistence available without a workspace).
+func TestCmdGoto_UnboundChatKeepsSessionSemantics(t *testing.T) {
+	baseDir := t.TempDir()
+	_, newAgent := registerGotoTestAgent(t)
+	e := NewEngine("test", newAgent(), nil, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(NewProjectStateStore(filepath.Join(t.TempDir(), "project.state.json")))
+
+	var projectSaves []string
+	e.SetProviderSaveFunc(func(name string) error {
+		projectSaves = append(projectSaves, name)
+		return nil
+	})
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{Platform: "test-platform", ChannelKey: "C-unbound", SessionKey: "test-platform:C-unbound:U-001", ReplyCtx: "ctx"}
+
+	e.cmdGoto(p, msg, []string{"aiapi"})
+
+	if got := e.sessions.GetOrCreateActive(msg.SessionKey).GetActiveProvider(); got != "aiapi" {
+		t.Fatalf("session provider = %q, want aiapi", got)
+	}
+	if len(projectSaves) != 1 || projectSaves[0] != "aiapi" {
+		t.Fatalf("project-level saves = %v, want one aiapi save", projectSaves)
+	}
+	if got := e.projectState.WorkspaceProviderOverride(""); got != "" {
+		t.Fatalf("unexpected workspace override %q for an unbound chat", got)
+	}
+}
+
+// registerGotoTestAgent registers a provider-capable test agent for the /goto
+// workspace tests and returns its name plus a constructor.
+func registerGotoTestAgent(t *testing.T) (string, func() *namedProviderAgent) {
+	t.Helper()
+	agentName := fmt.Sprintf("ws-goto-agent-%d", atomic.AddInt64(&gotoTestAgentSeq, 1))
+	newAgent := func() *namedProviderAgent {
+		return &namedProviderAgent{
+			stubProviderAgent: stubProviderAgent{
+				providers: []ProviderConfig{
+					{Name: "aiapi", Model: "glm-5.3"},
+					{Name: "chatgpt", Model: "gpt-5.6-sol"},
+				},
+				active: "chatgpt",
+			},
+			name: agentName,
+		}
+	}
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) { return newAgent(), nil })
+	return agentName, newAgent
+}
+
+// A workspace binding is keyed by the platform identifier the *message* carries
+// — for a bridge adapter that is the registered adapter name ("live-goto2")
+// while Platform.Name() reports the platform type ("bridge"). Resolution must
+// try the message-derived key too, otherwise a channel bound through the message
+// path can never be resolved back: every message fell into the workspace-init
+// flow ("此频道未找到工作区…") instead of using its workspace.
+func TestResolveWorkspaceForChannel_UsesMessageDerivedKey(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "bridge-ws")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	channelID := "PROBE"
+	// Bound the way the message path binds it: prefixed with msg.Platform.
+	e.workspaceBindings.Bind("project:test", "live-goto2:"+channelID, "bridge-ws", wsDir)
+
+	p := &mockChannelResolver{name: "bridge", names: map[string]string{}}
+	msg := &Message{
+		Platform:   "live-goto2",
+		ChannelKey: channelID,
+		SessionKey: "live-goto2:" + channelID + ":U-001",
+	}
+
+	// The platform-name lookup misses — the inconsistency this test documents.
+	if ws, _, err := e.resolveWorkspace(p, channelID); err != nil || ws != "" {
+		t.Fatalf("resolveWorkspace carried %q (err=%v), want the mismatch this test documents", ws, err)
+	}
+
+	wantWS := normalizeWorkspacePath(wsDir)
+	if ws, _, err := e.resolveWorkspaceForChannel(p, channelID, effectiveWorkspaceChannelKey(msg)); err != nil || ws != wantWS {
+		t.Fatalf("resolveWorkspaceForChannel = %q (err=%v), want %q", ws, err, wantWS)
+	}
+
+	// Same through the command context, which every command uses.
+	agent, sessions, _, workspaceDir, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		t.Fatalf("commandContextWithWorkspace: %v", err)
+	}
+	if agent == e.agent || sessions == e.sessions {
+		t.Fatal("expected the workspace agent/sessions for a channel bound under the message platform name")
+	}
+	if workspaceDir != wantWS {
+		t.Fatalf("workspaceDir = %q, want %q", workspaceDir, wantWS)
 	}
 }

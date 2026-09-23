@@ -3081,7 +3081,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	} else if e.multiWorkspace {
 		channelID := effectiveChannelID(msg)
 		channelKey := effectiveWorkspaceChannelKey(msg)
-		workspace, channelName, err := e.resolveWorkspace(p, channelID)
+		workspace, channelName, err := e.resolveWorkspaceForChannel(p, channelID, channelKey)
 		if err != nil {
 			slog.Error("workspace resolution failed", "err", err)
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
@@ -4176,6 +4176,16 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			ps2.SetProviders(ps.ListProviders())
 			if active := ps.GetActiveProvider(); active != nil && active.Name != "" {
 				ps2.SetActiveProvider(active.Name)
+			}
+			// A provider chosen for this workspace with /goto outranks the
+			// project default, and has to survive the pool evicting this agent.
+			if e.projectState != nil {
+				if p := e.projectState.WorkspaceProviderOverride(normalizeWorkspacePath(workspace)); p != "" {
+					if !ps2.SetActiveProvider(p) {
+						slog.Warn("workspace provider override is no longer registered; keeping the project default",
+							"workspace", workspace, "provider", p)
+					}
+				}
 			}
 		}
 	}
@@ -6795,6 +6805,7 @@ var builtinCommands = []struct {
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
+	{[]string{"goto"}, "goto"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
 	{[]string{"timer", "at", "remind"}, "timer"},
@@ -7009,6 +7020,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
+	case "goto":
+		e.cmdGoto(p, msg, args)
 	case "memory":
 		e.cmdMemory(p, msg, args)
 	case "cron":
@@ -10581,10 +10594,40 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 				return
 			}
 		}
+		// Cron-triggered turns run under "<chatSessionKey>#cron:<id>" keys and
+		// are invisible to the exact/suffix lookups above. A /stop in the same
+		// chat must tear down any running cron turn too, so the user can switch
+		// provider and re-trigger instead of waiting out the retry window.
+		if n := e.stopCronTurns(msg.SessionKey); n > 0 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+			return
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+// stopCronTurns stops every live cron-triggered turn for the given chat
+// session key (keys shaped "<sessionKey>#cron:<id>"), returning how many
+// turns were stopped.
+func (e *Engine) stopCronTurns(sessionKey string) int {
+	e.interactiveMu.Lock()
+	prefix := sessionKey + "#cron:"
+	var keys []string
+	for k := range e.interactiveStates {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	e.interactiveMu.Unlock()
+	stopped := 0
+	for _, k := range keys {
+		if e.stopInteractiveSessionSilently(k) {
+			stopped++
+		}
+	}
+	return stopped
 }
 
 // cmdCancel stops the current execution and starts a fresh session.
@@ -11007,7 +11050,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 		var sb strings.Builder
 		if current != nil {
-			sb.WriteString(fmt.Sprintf(e.i18n.T(MsgProviderCurrent), current.Name))
+			fmt.Fprintf(&sb, e.i18n.T(MsgProviderCurrent), current.Name)
 			sb.WriteString("\n\n")
 		}
 		sb.WriteString(e.i18n.T(MsgProviderListTitle))
@@ -11103,6 +11146,291 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 	default:
 		e.switchProvider(p, msg, sessions, switcher, args[0])
 	}
+}
+
+// cmdGoto switches the provider (and optionally the model) for the current
+// session while KEEPING the agent session id and conversation history —
+// unlike /provider switch, which clears both. With no arguments it renders a
+// grouped provider → model list where any entry can be picked directly.
+func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
+	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	switcher, ok := agent.(ProviderSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderNotSupported))
+		return
+	}
+	if len(args) == 0 {
+		if supportsCards(p) {
+			e.replyWithCard(p, msg.ReplyCtx, e.renderGotoCard(msg.SessionKey))
+			return
+		}
+		text, buttons := e.renderGotoText(switcher)
+		e.replyWithButtons(p, msg.ReplyCtx, text, buttons)
+		return
+	}
+
+	// Numbered targets pick an entry from the grouped list directly.
+	target := strings.TrimSpace(strings.Join(args, "/"))
+	if n, perr := strconv.Atoi(target); perr == nil {
+		entries := collectGotoModels(switcher)
+		if n < 1 || n > len(entries) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgGotoInvalid))
+			return
+		}
+		ent := entries[n-1]
+		text := e.applyGoto(agent, sessions, switcher, msg.SessionKey, interactiveKey, ent.Provider, ent.Model, true)
+		e.reply(p, msg.ReplyCtx, text)
+		return
+	}
+
+	// "<provider>[/<model>]" — resolve the model to its full stored name per
+	// the agent's ProviderScopedModelNames capability before switching.
+	pname, rest := target, ""
+	if idx := strings.Index(target, "/"); idx > 0 {
+		pname, rest = target[:idx], target[idx+1:]
+	}
+	fullModel := ""
+	if rest != "" {
+		fullModel = rest
+		// See executeCardAction "/goto": only prefix the provider name for a
+		// bare model name; a rest that already contains "/" is a complete
+		// provider-scoped name (e.g. ChatGPT-subscription models are
+		// "openai/gpt-5.6-sol" under the cc-connect "chatgpt" provider) and
+		// must not get a second prefix.
+		if ps, ok := agent.(ProviderScopedModelNames); ok && ps.ProviderScopedModelNames() && !strings.Contains(rest, "/") {
+			fullModel = pname + "/" + rest
+		}
+	}
+	text := e.applyGoto(agent, sessions, switcher, msg.SessionKey, interactiveKey, pname, fullModel, rest != "")
+	e.reply(p, msg.ReplyCtx, text)
+}
+
+// applyGoto activates the named provider without clearing the session context
+// (agent_session_id and history stay intact — the key difference from
+// switchProvider), and optionally updates the provider's model to fullModel
+// (the model name exactly as it should be persisted, already resolved by the
+// caller per the agent's model-naming capability). It returns the user-facing
+// confirmation text so both the /goto command and card actions can reuse it.
+func (e *Engine) applyGoto(agent Agent, sessions *SessionManager, switcher ProviderSwitcher, sessionKey, interactiveKey, pname, fullModel string, setModel bool) string {
+	// The choice belongs on the session the conversation actually uses. Command
+	// dispatch can hand us the global manager (observed live: a /goto in a
+	// workspace chat wrote the project-level default provider while the chat's own
+	// session stayed provider-less, so the switch was gone after the next idle
+	// reap), while every turn — and every card action — resolves the chat through
+	// sessionContextForKey. Prefer that resolution when the two disagree, so a
+	// per-chat switch never leaks into the project default.
+	if sessions == e.sessions {
+		if wsAgent, wsSessions := e.sessionContextForKey(sessionKey); wsSessions != nil && wsSessions != e.sessions {
+			agent, sessions = wsAgent, wsSessions
+			if wsSwitcher, ok := wsAgent.(ProviderSwitcher); ok {
+				switcher = wsSwitcher
+			}
+		}
+	}
+
+	providers := switcher.ListProviders()
+	found := false
+	for i := range providers {
+		if providers[i].Name == pname {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Sprintf(e.i18n.T(MsgProviderNotFound), pname)
+	}
+	if !switcher.SetActiveProvider(pname) {
+		return fmt.Sprintf(e.i18n.T(MsgProviderNotFound), pname)
+	}
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
+
+	// Keep the agent session id and history: unlike switchProvider we never
+	// call SetAgentSessionID("","") or ClearHistory() here.
+	// A /goto inside a workspace chat is workspace-level, exactly like the native
+	// /model command: it is stored on the workspace, so every chat bound to the
+	// same workspace follows it (and another chat's later switch moves them all).
+	// Chats without a workspace keep the session-level behaviour.
+	workspace := ""
+	if e.multiWorkspace && e.projectState != nil && agent != e.agent {
+		// Same key the native /model command stores its override under, so a
+		// workspace keeps one provider and one model.
+		workspace = workspaceModelOverrideKey(interactiveKey, sessionKey, agent)
+	}
+
+	s := sessions.GetOrCreateActive(sessionKey)
+	if workspace == "" {
+		s.SetActiveProvider(pname)
+	} else {
+		// Drop any per-chat provider recorded before this switch: the workspace
+		// value has to apply uniformly to every chat in it.
+		s.SetActiveProvider("")
+	}
+
+	replyText := fmt.Sprintf(e.i18n.T(MsgGotoSwitched), pname)
+	if setModel {
+		if updated, ok2 := SetProviderModel(providers, pname, fullModel); ok2 {
+			switcher.SetProviders(updated)
+			if msw, ok3 := agent.(ModelSwitcher); ok3 {
+				msw.SetModel(fullModel)
+			}
+			replyText = fmt.Sprintf(e.i18n.T(MsgGotoSwitchedModel), pname, fullModel)
+		}
+		// The model rides along in the workspace override (like /model) instead of
+		// being written into the provider definition in the project config, which
+		// would change it for every workspace at once.
+		if workspace == "" && e.providerModelSaveFunc != nil {
+			if err := e.providerModelSaveFunc(pname, fullModel); err != nil {
+				slog.Error("failed to save provider model", "error", err)
+			}
+		}
+	}
+	sessions.Save()
+	if workspace != "" {
+		e.projectState.SetWorkspaceProviderOverride(workspace, pname)
+		if setModel && fullModel != "" {
+			e.projectState.SetWorkspaceModelOverride(workspace, fullModel)
+		}
+		e.projectState.Save()
+	} else if sessions == e.sessions && e.providerSaveFunc != nil {
+		if err := e.providerSaveFunc(pname); err != nil {
+			slog.Error("failed to save provider", "error", err)
+		}
+	}
+	return replyText
+}
+
+// gotoModelEntry is one selectable target in the /goto grouped list.
+type gotoModelEntry struct {
+	Provider string
+	Model    string
+}
+
+// collectGotoModels aggregates every provider's configured models into the
+// /goto grouped list, preserving provider order. A provider without an
+// explicit model list contributes its default Model only when set.
+func collectGotoModels(switcher ProviderSwitcher) []gotoModelEntry {
+	var out []gotoModelEntry
+	seen := make(map[gotoModelEntry]struct{}, 16)
+	add := func(provider, model string) {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return
+		}
+		entry := gotoModelEntry{Provider: provider, Model: model}
+		// A provider's model list is configuration, and a repeated entry there
+		// used to fill the picker with identical rows (reported live: the /goto
+		// selector showed the same model over and over). Collapse duplicates so
+		// the list stays readable whatever the config holds.
+		if _, dup := seen[entry]; dup {
+			return
+		}
+		seen[entry] = struct{}{}
+		out = append(out, entry)
+	}
+	for _, prov := range switcher.ListProviders() {
+		if len(prov.Models) > 0 {
+			for _, m := range prov.Models {
+				add(prov.Name, m.Name)
+			}
+			continue
+		}
+		add(prov.Name, prov.Model)
+	}
+	return out
+}
+
+// renderGotoCard renders the /goto picker as a card, mirroring the native
+// /model card: a short status line plus a select whose options carry the full
+// provider-scoped model names, so picking any entry switches to that provider
+// + model directly.
+func (e *Engine) renderGotoCard(sessionKey string) *Card {
+	agent := e.agent
+	if sessionKey != "" {
+		agent, _ = e.sessionContextForKey(sessionKey)
+	}
+	switcher, ok := agent.(ProviderSwitcher)
+	if !ok {
+		return e.simpleCard(e.i18n.T(MsgCardTitleGoto), "indigo", e.i18n.T(MsgProviderNotSupported))
+	}
+
+	current := switcher.GetActiveProvider()
+	entries := collectGotoModels(switcher)
+
+	// No status line above the select: the select itself marks the active
+	// provider+model, and the header hint that used to sit there pointed at
+	// /provider, which is not what this card does.
+	var opts []CardSelectOption
+	initVal := ""
+	for _, ent := range entries {
+		// The option's action value is "<provider>/<model>" with a bare model
+		// name: applyGoto re-resolves the full stored name per the agent's
+		// ProviderScopedModelNames capability, so provider-scoped models
+		// (which already carry the "<provider>/" prefix in config) must have
+		// that prefix stripped here to avoid "aiapi/aiapi/gpt-5.6-sol".
+		model := ent.Model
+		if strings.HasPrefix(model, ent.Provider+"/") {
+			model = strings.TrimPrefix(model, ent.Provider+"/")
+		}
+		val := fmt.Sprintf("act:/goto %s/%s", ent.Provider, model)
+		opts = append(opts, CardSelectOption{Text: ent.Model, Value: val})
+		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
+			initVal = val
+		}
+	}
+	cb := NewCard().Title(e.i18n.T(MsgCardTitleGoto), "indigo").
+		Select(e.i18n.T(MsgGotoSelectPlaceholder), opts, initVal)
+	cb.Note(e.i18n.T(MsgGotoUsageHint))
+	cb.Buttons(e.cardBackButton())
+	return cb.Build()
+}
+
+// renderGotoText renders the /goto picker as text, mirroring the native
+// /model text list: the current provider plus a continuously numbered target
+// list with inline buttons, so `/goto <number>` switches directly.
+func (e *Engine) renderGotoText(switcher ProviderSwitcher) (string, [][]ButtonOption) {
+	current := switcher.GetActiveProvider()
+	entries := collectGotoModels(switcher)
+
+	var sb strings.Builder
+	if current != nil {
+		fmt.Fprintf(&sb, e.i18n.T(MsgProviderCurrent), current.Name)
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString(e.i18n.T(MsgGotoDefault))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(e.i18n.T(MsgGotoListTitle))
+
+	var buttons [][]ButtonOption
+	var row []ButtonOption
+	for i, ent := range entries {
+		marker := "  "
+		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
+			marker = "> "
+		}
+		fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+1, ent.Model)
+
+		label := ent.Model
+		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
+			label = "▶ " + label
+		}
+		row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/goto %d", i+1)})
+		if len(row) >= 3 {
+			buttons = append(buttons, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		buttons = append(buttons, row)
+	}
+	sb.WriteString("\n")
+	sb.WriteString(e.i18n.T(MsgGotoUsageHint))
+	return sb.String(), buttons
 }
 
 func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
@@ -12468,6 +12796,8 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.renderHelpGroupCard(args)
 	case "/model":
 		return e.renderModelCard(sessionKey)
+	case "/goto":
+		return e.renderGotoCard(sessionKey)
 	case "/reasoning":
 		return e.renderReasoningCard()
 	case "/mode":
@@ -12647,6 +12977,49 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		state.modelSwitch = &modelSwitchState{phase: "switching", target: target}
 		state.mu.Unlock()
 		go e.performModelSwitchAsync(sessionKey, state, agent, sessions, target)
+
+	case "/goto":
+		// Card action from the /goto picker: args are "<provider>/<model>"
+		// (or a numbered target for robustness). Switch immediately while
+		// keeping agent_session_id and history — same semantics as the
+		// /goto command. The card refresh (handleCardNav "/goto") shows the
+		// result.
+		if args == "" {
+			return
+		}
+		agent, sessions := e.sessionContextForKey(sessionKey)
+		switcher, ok := agent.(ProviderSwitcher)
+		if !ok {
+			return
+		}
+		target := strings.TrimSpace(args)
+		if n, perr := strconv.Atoi(target); perr == nil {
+			entries := collectGotoModels(switcher)
+			if n < 1 || n > len(entries) {
+				return
+			}
+			ent := entries[n-1]
+			e.applyGoto(agent, sessions, switcher, sessionKey, e.interactiveKeyForSessionKey(sessionKey), ent.Provider, ent.Model, true)
+			return
+		}
+		pname, rest := target, ""
+		if i := strings.Index(target, "/"); i > 0 {
+			pname, rest = target[:i], target[i+1:]
+		}
+		fullModel := ""
+		if rest != "" {
+			fullModel = rest
+			// opencode model names are "<provider>/<model>" (ProviderScopedModelNames).
+			// Only prefix the provider name when rest is a bare model name: a rest
+			// that already contains "/" is a complete provider-scoped name (e.g. the
+			// ChatGPT-subscription models are "openai/gpt-5.6-sol" under the cc-connect
+			// "chatgpt" provider) and must not get a second "chatgpt/" prefix — that
+			// would make opencode resolve an unknown provider and fail the run.
+			if ps, ok := agent.(ProviderScopedModelNames); ok && ps.ProviderScopedModelNames() && !strings.Contains(rest, "/") {
+				fullModel = pname + "/" + rest
+			}
+		}
+		e.applyGoto(agent, sessions, switcher, sessionKey, e.interactiveKeyForSessionKey(sessionKey), pname, fullModel, rest != "")
 
 	case "/reasoning":
 		if args == "" {
@@ -16818,7 +17191,7 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 	if channelKey == "" || channelID == "" {
 		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
-	workspace, _, err := e.resolveWorkspace(p, channelID)
+	workspace, _, err := e.resolveWorkspaceForChannel(p, channelID, channelKey)
 	if err != nil {
 		return nil, nil, "", "", err
 	}
@@ -17091,6 +17464,28 @@ func (e *Engine) runAsUser() string {
 // resolveWorkspace resolves a channel to a workspace directory.
 // Returns (workspacePath, channelName, error).
 // If workspacePath is empty, the init flow should be triggered.
+// resolveWorkspaceForChannel resolves a channel to a workspace using the binding
+// key derived from the incoming message.
+//
+// Bindings are keyed by the platform identifier the *message* carries, which for
+// a bridge adapter is the registered adapter name (e.g. "live-goto2"), while
+// Platform.Name() reports the platform *type* ("bridge"). Looking a binding up
+// under p.Name() therefore misses for those channels: a workspace bound through
+// the message path could never be resolved back, and every message fell into the
+// workspace-init flow instead of using the workspace. Callers that hold the
+// message pass its channel key so both spellings are tried.
+func (e *Engine) resolveWorkspaceForChannel(p Platform, channelID, channelKey string) (string, string, error) {
+	if channelKey != "" {
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil {
+			if !usable {
+				return "", b.ChannelName, nil
+			}
+			return normalizeWorkspacePath(b.Workspace), b.ChannelName, nil
+		}
+	}
+	return e.resolveWorkspace(p, channelID)
+}
+
 func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string, error) {
 	channelKey := workspaceChannelKey(p.Name(), channelID)
 

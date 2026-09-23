@@ -435,6 +435,17 @@ type ModelSwitcher interface {
 	AvailableModels(ctx context.Context) []ModelOption
 }
 
+// ProviderScopedModelNames is an optional interface for agents whose model
+// names are provider-scoped ("<provider>/<model>", e.g. opencode's
+// "aiapi/gpt-5.6-sol"). The /goto command uses it to decide how to persist a
+// model entered as "<provider>/<model>": scoped agents store the full
+// prefixed name (their CLI requires it), other agents store the bare model
+// name after the slash. Agents that do not implement it default to bare
+// model names (claudecode/codex style).
+type ProviderScopedModelNames interface {
+	ProviderScopedModelNames() bool
+}
+
 // ReasoningEffortSwitcher is an optional interface for agents that support
 // runtime switching of reasoning effort.
 type ReasoningEffortSwitcher interface {

@@ -98,6 +98,51 @@ type cujAgent struct {
 	// setNextSessionEvents on cujAgent.
 	nextSessionEvents  []Event
 	nextSessionDelayMs int
+
+	// providers / activeProvider back the ProviderSwitcher capability so CUJs
+	// can exercise /goto and /provider against a real engine.
+	providers      []ProviderConfig
+	activeProvider string
+}
+
+func (a *cujAgent) ListProviders() []ProviderConfig {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]ProviderConfig(nil), a.providers...)
+}
+
+func (a *cujAgent) SetProviders(providers []ProviderConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.providers = providers
+}
+
+func (a *cujAgent) GetActiveProvider() *ProviderConfig {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.providers {
+		if a.providers[i].Name == a.activeProvider {
+			p := a.providers[i]
+			return &p
+		}
+	}
+	return nil
+}
+
+func (a *cujAgent) SetActiveProvider(name string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if name == "" {
+		a.activeProvider = ""
+		return true
+	}
+	for _, p := range a.providers {
+		if p.Name == name {
+			a.activeProvider = name
+			return true
+		}
+	}
+	return false
 }
 
 func (a *cujAgent) Name() string { return "cuj" }
@@ -418,6 +463,78 @@ func TestCUJ_B3_SwitchPreservesHistoryEndToEnd(t *testing.T) {
 }
 
 // ===========================================================================
+// TestCUJ_Goto_SwitchKeepsContextEndToEnd locks down the /goto contract from
+// the user's perspective: after chatting, "/goto <provider>/<model>" switches
+// provider WITHOUT wiping the conversation — the next message resumes the same
+// agent session and /history still shows the pre-switch turns.
+func TestCUJ_Goto_SwitchKeepsContextEndToEnd(t *testing.T) {
+	env := newCUJEnv(t)
+	key := "test:alice"
+	env.agent.providers = []ProviderConfig{
+		{Name: "chatgpt", BaseURL: "https://api.openai.com", Model: "gpt-5.6-sol"},
+		{Name: "aiapi", BaseURL: "https://aiapi.uu.cc", Model: "glm-5.3"},
+	}
+	env.agent.activeProvider = "chatgpt"
+
+	// 1. User chats — 1 turn establishes an agent session.
+	env.userSends("alice", "hello from chatgpt")
+	env.waitFor("first reply", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) >= 1
+	})
+	s := env.activeSession(key)
+	if s == nil {
+		t.Fatal("expected an active session after first message")
+	}
+	beforeID := s.AgentSessionID
+	if beforeID == "" {
+		t.Fatal("expected an agent_session_id after first turn")
+	}
+	beforeCount := len(s.GetHistory(0))
+
+	env.plat.clearSent()
+
+	// 2. User runs /goto aiapi/gpt-5.6-sol.
+	env.userSends("alice", "/goto aiapi/gpt-5.6-sol")
+	env.waitFor("goto reply", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) >= 1
+	})
+	reply := env.plat.getSent()[0]
+	if !strings.Contains(reply, "aiapi") {
+		t.Fatalf("goto reply = %q, want switch confirmation", reply)
+	}
+	if env.agent.activeProvider != "aiapi" {
+		t.Fatalf("active provider = %q, want aiapi", env.agent.activeProvider)
+	}
+	// Agent session id and history must survive the switch.
+	if s.AgentSessionID != beforeID {
+		t.Fatalf("agent_session_id changed by /goto: %q → %q (must be preserved)", beforeID, s.AgentSessionID)
+	}
+	if len(s.GetHistory(0)) != beforeCount {
+		t.Fatalf("history changed by /goto: %d → %d entries (must be preserved)", beforeCount, len(s.GetHistory(0)))
+	}
+
+	// 3. User keeps chatting — the next turn must resume the SAME agent session.
+	env.plat.clearSent()
+	env.userSends("alice", "continue on aiapi")
+	env.waitFor("resume reply", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) >= 1
+	})
+	if s.AgentSessionID != beforeID {
+		t.Fatalf("agent_session_id changed after /goto + chat: %q → %q", beforeID, s.AgentSessionID)
+	}
+
+	// 4. /history still shows the pre-goto turns.
+	env.plat.clearSent()
+	env.userSends("alice", "/history")
+	env.waitFor("history reply", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) >= 1
+	})
+	hist := env.plat.getSent()[0]
+	if !strings.Contains(hist, "hello from chatgpt") {
+		t.Fatalf("/history after /goto lost pre-switch turns:\n%s", hist)
+	}
+}
+
 // CUJ-C4 · /cancel stops current turn AND creates a fresh session
 //
 // SPOTLIGHT: This was a 🔴 RED hole in CUJ-INVENTORY (cmdCancel had 0
