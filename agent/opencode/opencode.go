@@ -531,6 +531,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			extraArgs: extraArgs,
 			workDir:   workDir,
 			extraEnv:  extraEnv,
+			// Credentials travel in the process environment, so servers are shared
+			// per provider, not per workspace alone.
+			providerScope: a.providerScope(),
 		}, model, mode, agentName, sessionID)
 	}
 
@@ -663,6 +666,28 @@ func (a *Agent) ListProviders() []core.ProviderConfig {
 	result := make([]core.ProviderConfig, len(a.providers))
 	copy(result, a.providers)
 	return result
+}
+
+// providerScope identifies the credential set the current provider injects into
+// a child process (see providerEnvLocked). Two sessions may share one OpenCode
+// server only when their scope matches.
+func (a *Agent) providerScope() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.providerScopeLocked()
+}
+
+func (a *Agent) providerScopeLocked() string {
+	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		return ""
+	}
+	p := a.providers[a.activeIdx]
+	parts := []string{p.Name, p.APIKey, p.BaseURL}
+	for k, v := range p.Env {
+		parts = append(parts, k+"="+v)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\x00")
 }
 
 func (a *Agent) providerEnvLocked() []string {
