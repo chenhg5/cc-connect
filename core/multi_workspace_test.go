@@ -986,3 +986,51 @@ func registerGotoTestAgent(t *testing.T) (string, func() *namedProviderAgent) {
 	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) { return newAgent(), nil })
 	return agentName, newAgent
 }
+
+// A workspace binding is keyed by the platform identifier the *message* carries
+// — for a bridge adapter that is the registered adapter name ("live-goto2")
+// while Platform.Name() reports the platform type ("bridge"). Resolution must
+// try the message-derived key too, otherwise a channel bound through the message
+// path can never be resolved back: every message fell into the workspace-init
+// flow ("此频道未找到工作区…") instead of using its workspace.
+func TestResolveWorkspaceForChannel_UsesMessageDerivedKey(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "bridge-ws")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
+	channelID := "PROBE"
+	// Bound the way the message path binds it: prefixed with msg.Platform.
+	e.workspaceBindings.Bind("project:test", "live-goto2:"+channelID, "bridge-ws", wsDir)
+
+	p := &mockChannelResolver{name: "bridge", names: map[string]string{}}
+	msg := &Message{
+		Platform:   "live-goto2",
+		ChannelKey: channelID,
+		SessionKey: "live-goto2:" + channelID + ":U-001",
+	}
+
+	// The platform-name lookup misses — the inconsistency this test documents.
+	if ws, _, err := e.resolveWorkspace(p, channelID); err != nil || ws != "" {
+		t.Fatalf("resolveWorkspace carried %q (err=%v), want the mismatch this test documents", ws, err)
+	}
+
+	wantWS := normalizeWorkspacePath(wsDir)
+	if ws, _, err := e.resolveWorkspaceForChannel(p, channelID, effectiveWorkspaceChannelKey(msg)); err != nil || ws != wantWS {
+		t.Fatalf("resolveWorkspaceForChannel = %q (err=%v), want %q", ws, err, wantWS)
+	}
+
+	// Same through the command context, which every command uses.
+	agent, sessions, _, workspaceDir, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		t.Fatalf("commandContextWithWorkspace: %v", err)
+	}
+	if agent == e.agent || sessions == e.sessions {
+		t.Fatal("expected the workspace agent/sessions for a channel bound under the message platform name")
+	}
+	if workspaceDir != wantWS {
+		t.Fatalf("workspaceDir = %q, want %q", workspaceDir, wantWS)
+	}
+}

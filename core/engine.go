@@ -2927,7 +2927,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	} else if e.multiWorkspace {
 		channelID := effectiveChannelID(msg)
 		channelKey := effectiveWorkspaceChannelKey(msg)
-		workspace, channelName, err := e.resolveWorkspace(p, channelID)
+		workspace, channelName, err := e.resolveWorkspaceForChannel(p, channelID, channelKey)
 		if err != nil {
 			slog.Error("workspace resolution failed", "err", err)
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
@@ -16868,7 +16868,7 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 	if channelKey == "" || channelID == "" {
 		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
-	workspace, _, err := e.resolveWorkspace(p, channelID)
+	workspace, _, err := e.resolveWorkspaceForChannel(p, channelID, channelKey)
 	if err != nil {
 		return nil, nil, "", "", err
 	}
@@ -17141,6 +17141,28 @@ func (e *Engine) runAsUser() string {
 // resolveWorkspace resolves a channel to a workspace directory.
 // Returns (workspacePath, channelName, error).
 // If workspacePath is empty, the init flow should be triggered.
+// resolveWorkspaceForChannel resolves a channel to a workspace using the binding
+// key derived from the incoming message.
+//
+// Bindings are keyed by the platform identifier the *message* carries, which for
+// a bridge adapter is the registered adapter name (e.g. "live-goto2"), while
+// Platform.Name() reports the platform *type* ("bridge"). Looking a binding up
+// under p.Name() therefore misses for those channels: a workspace bound through
+// the message path could never be resolved back, and every message fell into the
+// workspace-init flow instead of using the workspace. Callers that hold the
+// message pass its channel key so both spellings are tried.
+func (e *Engine) resolveWorkspaceForChannel(p Platform, channelID, channelKey string) (string, string, error) {
+	if channelKey != "" {
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil {
+			if !usable {
+				return "", b.ChannelName, nil
+			}
+			return normalizeWorkspacePath(b.Workspace), b.ChannelName, nil
+		}
+	}
+	return e.resolveWorkspace(p, channelID)
+}
+
 func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string, error) {
 	channelKey := workspaceChannelKey(p.Name(), channelID)
 
