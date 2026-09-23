@@ -1444,6 +1444,10 @@ func (e *Engine) SetBaseWorkDir(dir string) {
 	e.baseWorkDir = dir
 }
 
+func (e *Engine) WorkDir() string {
+	return e.baseWorkDir
+}
+
 func (e *Engine) SetProjectStateStore(store *ProjectStateStore) {
 	e.projectState = store
 }

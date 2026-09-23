@@ -1084,7 +1084,7 @@ func TestMgmt_AddPlatformToNewProject_DoesNotRequireEngine(t *testing.T) {
 	}
 }
 
-func TestMgmt_AddPlatformToNewProject_RejectsMissingWorkDir(t *testing.T) {
+func TestMgmt_AddPlatformToNewProject_CreatesMissingWorkDir(t *testing.T) {
 	mgmt, ts, _ := testManagementServer(t, "tok")
 
 	called := false
@@ -1093,25 +1093,22 @@ func TestMgmt_AddPlatformToNewProject_RejectsMissingWorkDir(t *testing.T) {
 		return nil
 	})
 
-	missing := filepath.Join(t.TempDir(), "missing")
+	missing := filepath.Join(t.TempDir(), "brand-new-missing-dir")
 	r := mgmtPost(t, ts.URL+"/api/v1/projects/brand-new-project/add-platform", "tok", map[string]any{
 		"type":     "dingtalk",
 		"options":  map[string]any{"client_id": "abc", "client_secret": "def"},
 		"work_dir": missing,
 	})
-	if r.OK {
-		t.Fatal("expected missing work_dir to be rejected")
+	if !r.OK {
+		t.Fatalf("expected missing work_dir to be created, got error: %s", r.Error)
 	}
-	if !strings.Contains(r.Error, "work_dir does not exist") {
-		t.Fatalf("error = %q, want work_dir does not exist", r.Error)
-	}
-	if called {
-		t.Fatal("addPlatformToProject should not be called when work_dir is invalid")
+	if !called {
+		t.Fatal("addPlatformToProject should be called after work_dir is created")
 	}
 }
 
-func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "missing")
+func TestMgmt_SetupSave_CreatesMissingWorkDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-workdir")
 
 	t.Run("feishu", func(t *testing.T) {
 		mgmt := NewManagementServer(0, "", nil)
@@ -1127,14 +1124,11 @@ func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
 			"app_secret": "secret",
 			"work_dir":   missing,
 		})
-		if r.OK || code != http.StatusBadRequest {
-			t.Fatalf("response ok=%v status=%d error=%q, want 400", r.OK, code, r.Error)
+		if !r.OK || code != http.StatusOK {
+			t.Fatalf("response ok=%v status=%d error=%q, want 200", r.OK, code, r.Error)
 		}
-		if !strings.Contains(r.Error, "work_dir does not exist") {
-			t.Fatalf("error = %q, want work_dir does not exist", r.Error)
-		}
-		if called {
-			t.Fatal("setupFeishuSave should not be called when work_dir is invalid")
+		if !called {
+			t.Fatal("setupFeishuSave should be called after work_dir is created")
 		}
 	})
 
@@ -1151,14 +1145,11 @@ func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
 			"token":    "token",
 			"work_dir": missing,
 		})
-		if r.OK || code != http.StatusBadRequest {
-			t.Fatalf("response ok=%v status=%d error=%q, want 400", r.OK, code, r.Error)
+		if !r.OK || code != http.StatusOK {
+			t.Fatalf("response ok=%v status=%d error=%q, want 200", r.OK, code, r.Error)
 		}
-		if !strings.Contains(r.Error, "work_dir does not exist") {
-			t.Fatalf("error = %q, want work_dir does not exist", r.Error)
-		}
-		if called {
-			t.Fatal("setupWeixinSave should not be called when work_dir is invalid")
+		if !called {
+			t.Fatal("setupWeixinSave should be called after work_dir is created")
 		}
 	})
 }
@@ -1187,6 +1178,37 @@ func TestValidateProjectWorkDir(t *testing.T) {
 	}
 	if _, err := validateProjectWorkDir(file); err == nil || !strings.Contains(err.Error(), "work_dir is not a directory") {
 		t.Fatalf("file work_dir error = %v, want not a directory", err)
+	}
+}
+
+func TestWorkDirStatus(t *testing.T) {
+	// unset
+	st := workDirStatus("")
+	if st["status"] != "unset" {
+		t.Fatalf("empty workDir status = %v, want unset", st["status"])
+	}
+
+	// ok
+	good := t.TempDir()
+	st = workDirStatus(good)
+	if st["status"] != "ok" {
+		t.Fatalf("good workDir status = %v, want ok", st["status"])
+	}
+
+	// missing
+	st = workDirStatus(filepath.Join(t.TempDir(), "does-not-exist"))
+	if st["status"] != "missing" {
+		t.Fatalf("missing workDir status = %v, want missing", st["status"])
+	}
+
+	// not a directory
+	file := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	st = workDirStatus(file)
+	if st["status"] != "not_a_directory" {
+		t.Fatalf("file workDir status = %v, want not_a_directory", st["status"])
 	}
 }
 
