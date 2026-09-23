@@ -239,7 +239,9 @@ func (hm *HookManager) executeHTTP(h *HookConfig, event HookEvent) {
 			)
 			continue
 		}
-		resp.Body.Close()
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("hooks: close response body", "error", closeErr)
+		}
 
 		if resp.StatusCode >= 400 {
 			lastErr = fmt.Errorf("http %d", resp.StatusCode)
