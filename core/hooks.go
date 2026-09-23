@@ -100,7 +100,13 @@ func NewHookManager(project string, hooks []HookConfig, shell, shellFlag, shellP
 		shell:       shell,
 		shellFlag:   shellFlag,
 		shellProfile: shellProfile,
-		client:      &http.Client{},
+		client: &http.Client{
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConnsPerHost: 10,
+			},
+		},
 	}
 }
 
