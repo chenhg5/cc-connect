@@ -83,6 +83,12 @@ type stubTelegramBot struct {
 	getFileCalls         int
 	setReactionCalls     int
 
+	// setMyCommandsCallsByScope records one entry per SetMyCommands call,
+	// with the scope identifier ("" for default, "chat:<id>" for chat scope).
+	// Tests assert against this slice to verify the chat-scope mirror path
+	// introduced for #1813.
+	setMyCommandsCallsByScope []string
+
 	sendErr    error
 	getFileErr error
 	file       *models.File
@@ -181,14 +187,32 @@ func (b *stubTelegramBot) AnswerCallbackQuery(_ context.Context, _ *tgbot.Answer
 	return true, nil
 }
 
-func (b *stubTelegramBot) SetMyCommands(_ context.Context, _ *tgbot.SetMyCommandsParams) (bool, error) {
+func (b *stubTelegramBot) SetMyCommands(_ context.Context, params *tgbot.SetMyCommandsParams) (bool, error) {
+	scopeLabel := ""
+	if params != nil && params.Scope != nil {
+		if cs, ok := params.Scope.(*models.BotCommandScopeChat); ok {
+			scopeLabel = fmt.Sprintf("chat:%v", cs.ChatID)
+		} else {
+			scopeLabel = fmt.Sprintf("scope:%T", params.Scope)
+		}
+	}
 	b.mu.Lock()
 	b.setMyCommandsCalls++
+	b.setMyCommandsCallsByScope = append(b.setMyCommandsCallsByScope, scopeLabel)
 	b.mu.Unlock()
 	if b.sendErr != nil {
 		return false, b.sendErr
 	}
 	return true, nil
+}
+
+// setMyCommandsScopes returns a snapshot of SetMyCommands call scopes.
+func (b *stubTelegramBot) setMyCommandsScopes() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, len(b.setMyCommandsCallsByScope))
+	copy(out, b.setMyCommandsCallsByScope)
+	return out
 }
 
 func (b *stubTelegramBot) GetFile(_ context.Context, _ *tgbot.GetFileParams) (*models.File, error) {
@@ -1035,4 +1059,3 @@ func TestProgressStyleProviderInterface(t *testing.T) {
 		t.Fatalf("ProgressStyle() = %q, want compact", got)
 	}
 }
-
