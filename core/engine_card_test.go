@@ -101,6 +101,71 @@ func TestCompactOneLine(t *testing.T) {
 	}
 }
 
+// TestStripAnswerEchoes pins the rule that keeps the final answer out of the
+// process panel.
+//
+// The card folds every EventText chunk into the foldable thinking panel, and
+// for every adapter except opencode the assistant text IS the answer — so the
+// reply used to render inside the "思考" panel and then again as the separate
+// answer message (observed live on a claudecode project). Only a trailing run
+// of entries that reproduces the END of the answer is dropped.
+func TestStripAnswerEchoes(t *testing.T) {
+	tests := []struct {
+		name      string
+		stepTexts []string
+		answer    string
+		want      int // expected len(kept)
+	}{
+		{
+			name:      "answer-only turn loses the echoed answer",
+			stepTexts: []string{"这是最终答复。"},
+			answer:    "这是最终答复。",
+			want:      0,
+		},
+		{
+			name:      "narration before the answer stays in the panel",
+			stepTexts: []string{"先看一下代码。", "这是最终答复。"},
+			answer:    "这是最终答复。",
+			want:      1,
+		},
+		{
+			name:      "chunked answer echo is dropped as one trailing run",
+			stepTexts: []string{"先看一下代码。", "第一段。", "第二段。"},
+			answer:    "第一段。\n第二段。",
+			want:      1,
+		},
+		{
+			name:      "opencode-style step narration is untouched",
+			stepTexts: []string{"先看一下代码。", "再核对调用方。"},
+			answer:    "结论：上游重复计费。",
+			want:      2,
+		},
+		{
+			name:      "empty answer leaves the panel alone",
+			stepTexts: []string{"先看一下代码。"},
+			answer:    "",
+			want:      1,
+		},
+		{
+			name:      "trailing answer duplicate is dropped, earlier note kept",
+			stepTexts: []string{"[ps] 补充：顺便看下日志。", "结论：上游重复计费。"},
+			answer:    "结论：上游重复计费。",
+			want:      1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripAnswerEchoes(tc.stepTexts, tc.answer)
+			if len(got) != tc.want {
+				t.Fatalf("stripAnswerEchoes() kept %d entries (%q), want %d", len(got), got, tc.want)
+			}
+			if tc.want > 0 && got[0] != tc.stepTexts[0] {
+				t.Errorf("stripAnswerEchoes() dropped from the wrong end: %q", got)
+			}
+		})
+	}
+}
+
 // TestBuildStreamingCardPayload verifies the streaming-card payload encodes
 // thinking and tool entries as typed panels plus the final answer body, and
 // that the transport string parses back into the structured payload.
