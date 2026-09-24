@@ -1011,8 +1011,14 @@ func TestHandleEvent_AgentEndWillRetryKeepsTurnOpen(t *testing.T) {
 	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": true, "messages": []any{}})
 
 	evts := drainEvents(s)
-	if len(evts) != 0 {
-		t.Fatalf("willRetry agent_end must not close the turn, got %d events: %#v", len(evts), evts)
+	// #1684: emitRetryNotice runs first and surfaces a transient
+	// EventNotice so the progress card stays informative during the
+	// backoff. The turn itself must still stay open: no EventResult
+	// and no EventError yet — those come from the retry outcome.
+	for _, e := range evts {
+		if e.Type == core.EventResult || e.Type == core.EventError {
+			t.Fatalf("willRetry agent_end must not close the turn, got %s: %#v", e.Type, e)
+		}
 	}
 	if s.pendingErr == "" {
 		t.Error("pendingErr must be retained while Pi is retrying")
@@ -1070,11 +1076,30 @@ func TestHandleEvent_AgentEndRetrySuccessDropsPendingError(t *testing.T) {
 	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": false, "messages": []any{}})
 
 	evts := drainEvents(s)
-	if len(evts) != 1 {
-		t.Fatalf("expected only EventResult after successful retry, got %d events: %#v", len(evts), evts)
+	// #1684: the first willRetry agent_end emits a transient
+	// EventNotice so the progress card stays informative during the
+	// backoff. The retry outcome then emits EventResult only — the
+	// deferred 429 must NOT surface as EventError because the retry
+	// ultimately succeeded.
+	var results, notices, errs int
+	for _, e := range evts {
+		switch e.Type {
+		case core.EventResult:
+			results++
+		case core.EventNotice:
+			notices++
+		case core.EventError:
+			errs++
+		}
 	}
-	if evts[0].Type != core.EventResult {
-		t.Errorf("expected EventResult, got %s", evts[0].Type)
+	if results != 1 {
+		t.Fatalf("expected 1 EventResult after successful retry, got %d events: %#v", results, evts)
+	}
+	if errs != 0 {
+		t.Errorf("deferred 429 must be dropped after successful retry, got %d EventError(s): %#v", errs, evts)
+	}
+	if notices < 1 {
+		t.Errorf("expected at least 1 EventNotice from willRetry agent_end (#1684), got %d", notices)
 	}
 }
 
@@ -1086,6 +1111,186 @@ func TestHandleEvent_UnhandledType(t *testing.T) {
 	evts := drainEvents(s)
 	if len(evts) != 0 {
 		t.Errorf("expected no events, got %d", len(evts))
+	}
+}
+
+// ── handleEvent: pi auto-retry hint (#1684) ─────────────────
+//
+// During provider rate-limit backoff pi emits agent_end.willRetry=true
+// (Pi 0.84.0+ RPC mode) or a separate auto_retry_start session event.
+// Neither is terminal: the turn stays open and a final agent_end or
+// agent_start will follow. We translate these into a transient
+// core.EventNotice so the platform progress card shows a "retrying…"
+// hint instead of staying silent.
+
+func TestHandleEvent_AgentEndWillRetryEmitsNotice(t *testing.T) {
+	s := newTestSession(true) // rpc=true: agent_end also emits EventResult
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type":        "agent_end",
+		"messages":    []any{},
+		"willRetry":   true,
+		"attempt":     float64(3),
+		"maxAttempts": float64(8),
+		"delayMs":     float64(8000),
+		"error":       "429 rate-limited",
+	})
+
+	evts := drainEvents(s)
+	if len(evts) < 1 {
+		t.Fatalf("expected at least 1 event, got %d", len(evts))
+	}
+
+	var notice *core.Event
+	for i := range evts {
+		if evts[i].Type == core.EventNotice {
+			notice = &evts[i]
+			break
+		}
+	}
+	if notice == nil {
+		t.Fatalf("expected EventNotice in events, got %v", evts)
+	}
+
+	// Notice text must contain the attempt fraction and delay so users can
+	// see "we are retrying, not hanging".
+	wantSubstrings := []string{"retry 3/8", "8s", "429"}
+	for _, sub := range wantSubstrings {
+		if !strings.Contains(notice.Notice, sub) {
+			t.Errorf("notice text %q missing substring %q", notice.Notice, sub)
+		}
+	}
+
+	// Structured metadata must round-trip for platforms that want richer UX.
+	if got := notice.NoticeMetadata["attempt"]; got != 3 {
+		t.Errorf("NoticeMetadata[attempt] = %v, want 3", got)
+	}
+	if got := notice.NoticeMetadata["maxAttempts"]; got != 8 {
+		t.Errorf("NoticeMetadata[maxAttempts] = %v, want 8", got)
+	}
+	if got := notice.NoticeMetadata["delayMs"]; got != 8000 {
+		t.Errorf("NoticeMetadata[delayMs] = %v, want 8000", got)
+	}
+	if got := notice.NoticeMetadata["error"]; got != "429 rate-limited" {
+		t.Errorf("NoticeMetadata[error] = %v, want %q", got, "429 rate-limited")
+	}
+	if got := notice.NoticeMetadata["source"]; got != "pi" {
+		t.Errorf("NoticeMetadata[source] = %v, want \"pi\"", got)
+	}
+}
+
+func TestHandleEvent_AgentEndWithoutWillRetryNoNotice(t *testing.T) {
+	s := newTestSession(true) // rpc=true
+	defer s.cancel()
+
+	// Normal terminal agent_end — no willRetry, no auto-retry in flight.
+	// The engine should NOT see an EventNotice for this.
+	s.handleEvent(map[string]any{"type": "agent_end", "messages": []any{}})
+
+	evts := drainEvents(s)
+	for _, e := range evts {
+		if e.Type == core.EventNotice {
+			t.Errorf("expected no EventNotice for non-retry agent_end, got Notice=%q", e.Notice)
+		}
+	}
+}
+
+func TestHandleEvent_AutoRetryStartEmitsNotice(t *testing.T) {
+	s := newTestSession(true) // rpc=true (auto_retry_start is a session-level event)
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{
+		"type":        "auto_retry_start",
+		"attempt":     float64(2),
+		"maxAttempts": float64(5),
+		"delayMs":     float64(1500),
+		"error":       "overloaded",
+	})
+
+	evts := drainEvents(s)
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evts))
+	}
+	if evts[0].Type != core.EventNotice {
+		t.Fatalf("expected EventNotice, got %s", evts[0].Type)
+	}
+	if !strings.Contains(evts[0].Notice, "retry 2/5") {
+		t.Errorf("notice text %q missing \"retry 2/5\"", evts[0].Notice)
+	}
+	if !strings.Contains(evts[0].Notice, "overloaded") {
+		t.Errorf("notice text %q missing error string", evts[0].Notice)
+	}
+}
+
+func TestHandleEvent_AutoRetryEndNoNotice(t *testing.T) {
+	s := newTestSession(true)
+	defer s.cancel()
+
+	// auto_retry_end is just the close of a prior auto_retry_start — the
+	// next event is agent_start (success) or EventError (failure). Do
+	// not flood the progress card with redundant notices.
+	s.handleEvent(map[string]any{
+		"type":    "auto_retry_end",
+		"attempt": float64(3),
+	})
+
+	evts := drainEvents(s)
+	for _, e := range evts {
+		if e.Type == core.EventNotice {
+			t.Errorf("expected no EventNotice from auto_retry_end, got Notice=%q", e.Notice)
+		}
+	}
+}
+
+func TestHandleEvent_WillRetryMissingFieldsFallsBackToPlainHint(t *testing.T) {
+	s := newTestSession(true)
+	defer s.cancel()
+
+	// Older pi builds or a fast-fail agent_end may not have time to populate
+	// the structured fields. We still want a recognisable "retrying…" hint
+	// rather than no hint at all.
+	s.handleEvent(map[string]any{
+		"type":      "agent_end",
+		"messages":  []any{},
+		"willRetry": true,
+	})
+
+	evts := drainEvents(s)
+	var notice *core.Event
+	for i := range evts {
+		if evts[i].Type == core.EventNotice {
+			notice = &evts[i]
+			break
+		}
+	}
+	if notice == nil {
+		t.Fatalf("expected EventNotice fallback, got %v", evts)
+	}
+	if !strings.Contains(notice.Notice, "retrying") {
+		t.Errorf("fallback notice text %q should mention \"retrying\"", notice.Notice)
+	}
+}
+
+func TestBuildRetryHint_DelayFormatting(t *testing.T) {
+	cases := []struct {
+		name string
+		ms   int
+		want string
+	}{
+		{"zero", 0, "a moment"},
+		{"millis", 250, "250ms"},
+		{"seconds-rounding", 1500, "2s"}, // 1500ms rounds to 2s
+		{"minute", 60_000, "1m"},
+		{"minute-seconds", 65_000, "1m5s"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := formatDelayMs(c.ms)
+			if got != c.want {
+				t.Errorf("formatDelayMs(%d) = %q, want %q", c.ms, got, c.want)
+			}
+		})
 	}
 }
 

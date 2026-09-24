@@ -42,6 +42,10 @@ const (
 	ProgressEntryToolUse    ProgressCardEntryKind = "tool_use"
 	ProgressEntryToolResult ProgressCardEntryKind = "tool_result"
 	ProgressEntryError      ProgressCardEntryKind = "error"
+	// ProgressEntryNotice is a transient, non-fatal hint (e.g. provider
+	// rate-limited, retrying in 8s). Rendered on the progress card but never
+	// finalizes the turn. See #1684.
+	ProgressEntryNotice ProgressCardEntryKind = "notice"
 )
 
 type ProgressCardEntry struct {
@@ -196,6 +200,8 @@ func inferLegacyEntryKind(entry string) ProgressCardEntryKind {
 		return ProgressEntryToolResult
 	case strings.HasPrefix(entry, "❌"):
 		return ProgressEntryError
+	case strings.HasPrefix(entry, "⏳"), strings.HasPrefix(entry, "⚠️"):
+		return ProgressEntryNotice
 	default:
 		return ProgressEntryInfo
 	}

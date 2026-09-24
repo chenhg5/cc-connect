@@ -590,6 +590,11 @@ func (s *piSession) handleEvent(raw map[string]any) {
 
 	case "agent_end":
 		s.handleAgentEnd(raw)
+		// Issue #1684: when pi reports willRetry=true on agent_end, the turn
+		// is NOT terminal (#1597 keeps it open) but the user has no visible
+		// signal during the backoff. Surface a transient engine notice so the
+		// platform progress card shows "retrying…" rather than staying silent.
+		s.emitRetryNotice(raw)
 		if willRetry, _ := raw["willRetry"].(bool); willRetry {
 			// Pi is auto-retrying a transient failure (e.g. 429) inside
 			// this turn: it emits agent_end with willRetry=true, then
@@ -619,6 +624,12 @@ func (s *piSession) handleEvent(raw map[string]any) {
 			case <-s.ctx.Done():
 			}
 		}
+
+	case "auto_retry_start", "auto_retry_end":
+		// Pi 0.84.0+ session-level retry hint. Same engine surface as the
+		// agent_end.willRetry path — issue #1684 keeps the progress card
+		// informative while pi is backing off between attempts.
+		s.emitRetryNotice(raw)
 
 	case "compaction_start":
 		// Pi fires this when ctx.compact() begins (slash command or
@@ -1036,6 +1047,168 @@ func extractToolResult(msg map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// emitRetryNotice surfaces a transient progress hint when pi is between
+// retry attempts. Issue #1684: pi auto-retry backoff can span minutes on
+// rate-limited providers (HTTP 429 / 5xx / overloaded). Without this hint
+// the platform progress card stays silent and users can't tell retry from
+// hang. Triggers:
+//   - agent_end.willRetry=true (RPC mode): the turn is intentionally kept
+//     open by #1597/#1677, so we must emit a notice BEFORE the engine
+//     processes EventResult for the same agent_end.
+//   - auto_retry_start session event (Pi 0.84.0+): pi announces the next
+//     retry attempt with attempt/maxAttempts/delayMs/error.
+//
+// Engine EventNotice is non-fatal and non-terminal — it appends a progress
+// entry but does not finalize the turn. The next EventToolUse / EventText
+// (or a final EventResult / EventError) flows through the normal handlers.
+func (s *piSession) emitRetryNotice(raw map[string]any) {
+	notice, ok := buildRetryHint(raw)
+	if !ok {
+		return
+	}
+	evt := core.Event{
+		Type:           core.EventNotice,
+		Notice:         notice.text,
+		NoticeMetadata: notice.metadata,
+	}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	}
+}
+
+type retryHint struct {
+	text     string
+	metadata map[string]any
+}
+
+// buildRetryHint extracts a transient progress hint from a pi event payload.
+//
+// Returns ok=false when the payload does not actually describe a retry:
+//   - agent_end without willRetry=true (i.e. a normal terminal agent_end)
+//   - auto_retry_end without an attempt (treated as the close of an earlier
+//     auto_retry_start, no hint needed)
+//
+// Hint text format is intentionally short and emoji-led so platform progress
+// cards render it distinctly from real tool errors. We pass the structured
+// fields in metadata so platforms that want a richer rendering (e.g.
+// "retry 3/8 in 8s — rate limited") can read them; the fallback text in
+// `Notice` is good enough on its own for any platform that ignores metadata.
+func buildRetryHint(raw map[string]any) (retryHint, bool) {
+	eventType, _ := raw["type"].(string)
+
+	switch eventType {
+	case "agent_end":
+		// willRetry is a top-level bool on the agent_end payload per the
+		// pi RPC schema (pi 0.84.0+). Older builds omit the field; treat
+		// absent as false.
+		willRetry, _ := raw["willRetry"].(bool)
+		if !willRetry {
+			return retryHint{}, false
+		}
+		attempt := getInt(raw, "attempt")
+		maxAttempts := getInt(raw, "maxAttempts")
+		delayMs := getInt(raw, "delayMs")
+		errMsg, _ := raw["error"].(string)
+		text := formatRetryHint(attempt, maxAttempts, delayMs, errMsg)
+		return retryHint{text: text, metadata: retryMetadata(attempt, maxAttempts, delayMs, errMsg)}, true
+
+	case "auto_retry_start":
+		attempt := getInt(raw, "attempt")
+		maxAttempts := getInt(raw, "maxAttempts")
+		delayMs := getInt(raw, "delayMs")
+		errMsg, _ := raw["error"].(string)
+		text := formatRetryHint(attempt, maxAttempts, delayMs, errMsg)
+		return retryHint{text: text, metadata: retryMetadata(attempt, maxAttempts, delayMs, errMsg)}, true
+
+	case "auto_retry_end":
+		// No hint needed — the retry either succeeded (engine gets the
+		// next agent_start) or failed (engine gets EventError). Avoid
+		// flooding the progress card with redundant entries.
+		return retryHint{}, false
+	}
+	return retryHint{}, false
+}
+
+func formatRetryHint(attempt, maxAttempts, delayMs int, errMsg string) string {
+	// Fall back to a minimal hint when pi omits the structured fields
+	// (older builds, or pi did not have time to populate them before
+	// the agent_end wire). Users still get the "retrying…" signal.
+	if attempt <= 0 && maxAttempts <= 0 && delayMs <= 0 && errMsg == "" {
+		return "⏳ provider is rate-limited, retrying…"
+	}
+	delay := formatDelayMs(delayMs)
+	err := strings.TrimSpace(errMsg)
+	if err == "" {
+		err = "rate-limited"
+	}
+	if attempt <= 0 {
+		attempt = 1
+	}
+	if maxAttempts <= 0 {
+		// Without a max, omit the "N/M" fraction and just say "retrying
+		// in 8s — rate-limited".
+		return fmt.Sprintf("⏳ provider is rate-limited: retrying in %s — %s", delay, err)
+	}
+	return fmt.Sprintf("⏳ provider is rate-limited: retry %d/%d in %s — %s", attempt, maxAttempts, delay, err)
+}
+
+func formatDelayMs(ms int) string {
+	if ms <= 0 {
+		return "a moment"
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	if ms < 60_000 {
+		// Round to nearest second; pi's baseDelayMs is typically
+		// configured in ms so seconds is more user-friendly.
+		return fmt.Sprintf("%ds", (ms+500)/1000)
+	}
+	minutes := ms / 60_000
+	secs := (ms % 60_000) / 1000
+	if secs == 0 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	return fmt.Sprintf("%dm%ds", minutes, secs)
+}
+
+func retryMetadata(attempt, maxAttempts, delayMs int, errMsg string) map[string]any {
+	m := map[string]any{
+		"source": "pi",
+		"kind":   "retry",
+	}
+	if attempt > 0 {
+		m["attempt"] = attempt
+	}
+	if maxAttempts > 0 {
+		m["maxAttempts"] = maxAttempts
+	}
+	if delayMs > 0 {
+		m["delayMs"] = delayMs
+	}
+	if strings.TrimSpace(errMsg) != "" {
+		m["error"] = errMsg
+	}
+	return m
+}
+
+func getInt(m map[string]any, key string) int {
+	v, ok := m[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	}
+	return 0
 }
 
 func (s *piSession) handleAgentEnd(raw map[string]any) {
