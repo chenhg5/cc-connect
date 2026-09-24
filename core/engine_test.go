@@ -11195,6 +11195,7 @@ func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
 	e.interactiveMu.Unlock()
 
 	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("idle-test", agent.Name())
 	session.TryLock()
 
 	done := make(chan struct{})
@@ -11218,6 +11219,9 @@ func TestEventIdleTimeout_CleansUpSession(t *testing.T) {
 	}
 	if !foundTimeout {
 		t.Fatalf("expected timeout error message, got %v", sent)
+	}
+	if got := session.GetAgentSessionID(); got != "" {
+		t.Fatalf("agent session ID = %q, want cleared after idle timeout", got)
 	}
 }
 
