@@ -4433,6 +4433,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				pendingName := session.GetName()
 				if pendingName != "" && pendingName != "session" && pendingName != "default" {
 					sessions.SetSessionName(newID, pendingName)
+					e.exportSessionNameToAgent(agent, newID, pendingName)
 				}
 			}
 			sessions.Save()
@@ -5824,6 +5825,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						pendingName := session.GetName()
 						if pendingName != "" && pendingName != "session" && pendingName != "default" {
 							sessions.SetSessionName(event.SessionID, pendingName)
+							e.exportSessionNameToAgent(e.agent, event.SessionID, pendingName)
 						}
 					}
 					sessions.Save()
@@ -5958,6 +5960,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							pendingName := session.GetName()
 							if pendingName != "" && pendingName != "session" && pendingName != "default" {
 								sessions.SetSessionName(currentID, pendingName)
+								e.exportSessionNameToAgent(e.agent, currentID, pendingName)
 							}
 						}
 					}
@@ -7427,6 +7430,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			return
 		}
 		agentSessions = e.applySessionFilter(agentSessions, sessions)
+		e.syncSessionNamesFromAgent(agent, sessions, agentSessions)
 		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
@@ -7524,6 +7528,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		return
 	}
 	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	e.syncSessionNamesFromAgent(agent, sessions, agentSessions)
 
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
@@ -8966,6 +8971,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 			return
 		}
 		agentSessions = e.applySessionFilter(agentSessions, sessions)
+		e.syncSessionNamesFromAgent(agent, sessions, agentSessions)
 		if idx > len(agentSessions) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx))
 			return
@@ -8990,6 +8996,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 	}
 
 	sessions.SetSessionName(targetID, name)
+	e.exportSessionNameToAgent(agent, targetID, name)
 
 	shortID := targetID
 	if len(shortID) > 12 {
@@ -12975,6 +12982,7 @@ func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
 	}
 	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	e.syncSessionNamesFromAgent(agent, sessions, agentSessions)
 	dm := e.getDeleteModeState(sessionKey)
 	if dm == nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgDeleteUsage))
@@ -13556,6 +13564,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
 	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	e.syncSessionNamesFromAgent(agent, sessions, agentSessions)
 	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
@@ -15908,6 +15917,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		return
 	}
 	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	e.syncSessionNamesFromAgent(agent, sessions, agentSessions)
 
 	prefix := strings.TrimSpace(args[0])
 	if isExplicitDeleteBatchArg(prefix) {
@@ -16331,6 +16341,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 		pendingName := session.GetName()
 		if pendingName != "" && pendingName != "session" && pendingName != "default" {
 			sessions.SetSessionName(id, pendingName)
+			e.exportSessionNameToAgent(agent, id, pendingName)
 		}
 		sessions.Save()
 	}
