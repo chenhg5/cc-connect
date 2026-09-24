@@ -81,6 +81,34 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	preEntries := make(map[string]bool)
 	homeDir, err := os.UserHomeDir()
 	if err == nil {
+		absWorkDir, _ := filepath.Abs(as.workDir)
+		absWorkDir = filepath.Clean(absWorkDir)
+
+		// 1. Capture from ~/.gemini/antigravity-cli/cache/last_conversations.json
+		lastConvPath := filepath.Join(homeDir, ".gemini", "antigravity-cli", "cache", "last_conversations.json")
+		if data, err := os.ReadFile(lastConvPath); err == nil {
+			var lastMap map[string]string
+			if json.Unmarshal(data, &lastMap) == nil {
+				if cid := lastMap[absWorkDir]; cid != "" {
+					preEntries[cid] = true
+				}
+				if cid := lastMap[as.workDir]; cid != "" {
+					preEntries[cid] = true
+				}
+			}
+		}
+
+		// 2. Capture from ~/.gemini/antigravity-cli/brain/
+		brainDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
+		if entries, err := os.ReadDir(brainDir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					preEntries[entry.Name()] = true
+				}
+			}
+		}
+
+		// 3. Capture from legacy path
 		slug := antigravityProjectSlug(as.workDir)
 		chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
 		if entries, err := os.ReadDir(chatsDir); err == nil {
@@ -314,6 +342,74 @@ func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sen
 	if err != nil {
 		return ""
 	}
+
+	absWorkDir, err := filepath.Abs(as.workDir)
+	if err != nil {
+		absWorkDir = as.workDir
+	}
+	absWorkDir = filepath.Clean(absWorkDir)
+
+	// 1. Check ~/.gemini/antigravity-cli/cache/last_conversations.json
+	lastConvPath := filepath.Join(homeDir, ".gemini", "antigravity-cli", "cache", "last_conversations.json")
+	if data, err := os.ReadFile(lastConvPath); err == nil {
+		var lastMap map[string]string
+		if json.Unmarshal(data, &lastMap) == nil {
+			if cid, ok := lastMap[absWorkDir]; ok && cid != "" && !preEntries[cid] {
+				return cid
+			}
+			if cid, ok := lastMap[as.workDir]; ok && cid != "" && !preEntries[cid] {
+				return cid
+			}
+		}
+	}
+
+	// 2. Check ~/.gemini/antigravity-cli/brain/
+	brainDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
+	if entries, err := os.ReadDir(brainDir); err == nil {
+		type candidate struct {
+			sessionID string
+			modTime   time.Time
+			diff      time.Duration
+		}
+		var candidates []candidate
+		for _, entry := range entries {
+			if !entry.IsDir() || preEntries[entry.Name()] {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			mod := info.ModTime()
+			if !sendStartedAt.IsZero() && mod.Before(sendStartedAt.Add(-2*time.Second)) {
+				continue
+			}
+			diff := time.Duration(0)
+			if !sendStartedAt.IsZero() {
+				if mod.After(sendStartedAt) {
+					diff = mod.Sub(sendStartedAt)
+				} else {
+					diff = sendStartedAt.Sub(mod)
+				}
+			}
+			candidates = append(candidates, candidate{
+				sessionID: entry.Name(),
+				modTime:   mod,
+				diff:      diff,
+			})
+		}
+		if len(candidates) > 0 {
+			sort.Slice(candidates, func(i, j int) bool {
+				if candidates[i].diff == candidates[j].diff {
+					return candidates[i].modTime.After(candidates[j].modTime)
+				}
+				return candidates[i].diff < candidates[j].diff
+			})
+			return candidates[0].sessionID
+		}
+	}
+
+	// 3. Legacy path
 	slug := antigravityProjectSlug(as.workDir)
 	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
 
