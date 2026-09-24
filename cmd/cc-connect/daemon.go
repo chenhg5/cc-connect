@@ -200,12 +200,15 @@ func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {
 			if err != nil {
 				return daemon.Config{}, false, err
 			}
+			cfg.ConfigPath = value
 			cfg.WorkDir = filepath.Dir(value)
 			i = next
 		case strings.HasPrefix(arg, "--config="):
-			cfg.WorkDir = filepath.Dir(strings.TrimPrefix(arg, "--config="))
+			cfg.ConfigPath = strings.TrimPrefix(arg, "--config=")
+			cfg.WorkDir = filepath.Dir(cfg.ConfigPath)
 		case strings.HasPrefix(arg, "-config="):
-			cfg.WorkDir = filepath.Dir(strings.TrimPrefix(arg, "-config="))
+			cfg.ConfigPath = strings.TrimPrefix(arg, "-config=")
+			cfg.WorkDir = filepath.Dir(cfg.ConfigPath)
 		default:
 			return daemon.Config{}, false, fmt.Errorf("unknown flag: %s", arg)
 		}

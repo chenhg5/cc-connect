@@ -100,7 +100,13 @@ func NewHookManager(project string, hooks []HookConfig, shell, shellFlag, shellP
 		shell:       shell,
 		shellFlag:   shellFlag,
 		shellProfile: shellProfile,
-		client:      &http.Client{},
+		client: &http.Client{
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConnsPerHost: 10,
+			},
+		},
 	}
 }
 
@@ -203,40 +209,66 @@ func (hm *HookManager) executeHTTP(h *HookConfig, event HookEvent) {
 		return
 	}
 
-	timeout := h.timeoutDuration()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	var lastErr error
+	const maxRetries = 1
+	const retryDelay = 500 * time.Millisecond
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
-	if err != nil {
-		slog.Warn("hooks: create request failed", "url", h.URL, "error", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "CC-Connect-Hooks/1.0")
-	req.Header.Set("X-Hook-Event", string(event.Event))
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			slog.Info("hooks: http retry",
+				"project", hm.project, "event", event.Event,
+				"url", h.URL, "attempt", attempt,
+			)
+			time.Sleep(retryDelay)
+		}
 
-	resp, err := hm.client.Do(req)
-	if err != nil {
-		slog.Warn("hooks: http request failed",
-			"project", hm.project, "event", event.Event,
-			"url", h.URL, "error", err,
-		)
-		return
-	}
-	defer resp.Body.Close()
+		timeout := h.timeoutDuration()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
 
-	if resp.StatusCode >= 400 {
-		slog.Warn("hooks: http response error",
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			slog.Warn("hooks: create request failed", "url", h.URL, "error", err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "CC-Connect-Hooks/1.0")
+		req.Header.Set("X-Hook-Event", string(event.Event))
+
+		resp, err := hm.client.Do(req)
+		if err != nil {
+			lastErr = err
+			slog.Warn("hooks: http request failed",
+				"project", hm.project, "event", event.Event,
+				"url", h.URL, "error", err,
+			)
+			continue
+		}
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("hooks: resp.Body.Close()", "error", closeErr)
+		}
+
+		if resp.StatusCode >= 400 {
+			lastErr = fmt.Errorf("http %d", resp.StatusCode)
+			slog.Warn("hooks: http response error",
+				"project", hm.project, "event", event.Event,
+				"url", h.URL, "status", resp.StatusCode,
+			)
+			continue
+		}
+		slog.Debug("hooks: http delivered",
 			"project", hm.project, "event", event.Event,
 			"url", h.URL, "status", resp.StatusCode,
 		)
 		return
 	}
-	slog.Debug("hooks: http delivered",
-		"project", hm.project, "event", event.Event,
-		"url", h.URL, "status", resp.StatusCode,
-	)
+	if lastErr != nil {
+		slog.Warn("hooks: http failed after retries",
+			"project", hm.project, "event", event.Event,
+			"url", h.URL, "error", lastErr,
+		)
+	}
 }
 
 // eventToEnv converts a HookEvent to environment variables for shell hooks.
