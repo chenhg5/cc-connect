@@ -40,6 +40,10 @@ type streamingCardAPI interface {
 	// collapsible_panel) via the cardkit element API — an intermediate update
 	// that does NOT re-render the panel, so a user-expanded panel stays open.
 	appendCardElements(ctx context.Context, h *feishuPreviewHandle, targetElementID string, elements []map[string]any) error
+	// insertCardElements adds elements positioned against targetElementID, or
+	// at the end of the card body when it is empty. Used to create a panel the
+	// rendered card does not contain yet without re-rendering the whole card.
+	insertCardElements(ctx context.Context, h *feishuPreviewHandle, targetElementID string, after bool, elements []map[string]any) error
 	// patchCardElementTitle updates ONLY the header title of a collapsible
 	// panel (keeping the "思考 (N)" count live) without touching the panel's
 	// expanded state.
@@ -70,6 +74,14 @@ type feishuStreamingCard struct {
 	// a user-expanded panel stays expanded.
 	appendedThinking int
 	appendedTools    int
+
+	// hasThinkingPanel/hasToolsPanel record whether the card entity currently
+	// contains that lane's collapsible panel. A lane panel only exists once the
+	// lane had at least one entry at render time, so the first entry of a lane
+	// must INSERT the panel — appending to a panel the card does not have fails
+	// with cardkit error 300315 ("no such element id").
+	hasThinkingPanel bool
+	hasToolsPanel    bool
 }
 
 // Ensure feishuStreamingCard implements core.StreamingCard.
@@ -240,6 +252,8 @@ func (c *feishuStreamingCard) send(ctx context.Context, content string) error {
 			reasoning, tools, _ := splitProgressItemsByLane(payload.Items)
 			c.appendedThinking = len(reasoning)
 			c.appendedTools = len(tools)
+			c.hasThinkingPanel = len(reasoning) > 0
+			c.hasToolsPanel = len(tools) > 0
 		}
 		c.mu.Unlock()
 		return nil
@@ -274,13 +288,13 @@ func (c *feishuStreamingCard) send(ctx context.Context, content string) error {
 		c.mu.Unlock()
 		appendedOK := true
 		if len(newThinking) > 0 {
-			if err := p.appendCardElements(ctx, handle, progressPanelThinkingElementID, renderProgressEntries(newThinking, payload.Lang)); err != nil {
+			if err := c.writeLane(ctx, p, handle, laneThinking, newThinking, len(reasoning), payload.Lang); err != nil {
 				slog.Warn("feishu: append thinking entries failed, falling back to card update", "error", err)
 				appendedOK = false
 			}
 		}
 		if len(newTools) > 0 && appendedOK {
-			if err := p.appendCardElements(ctx, handle, progressPanelToolsElementID, renderProgressEntries(newTools, payload.Lang)); err != nil {
+			if err := c.writeLane(ctx, p, handle, laneTools, newTools, len(tools), payload.Lang); err != nil {
 				slog.Warn("feishu: append tool entries failed, falling back to card update", "error", err)
 				appendedOK = false
 			}
@@ -307,10 +321,12 @@ func (c *feishuStreamingCard) send(ctx context.Context, content string) error {
 			return nil
 		}
 		// Fall through to full-card sync; after it the whole payload is
-		// rendered, so reset the append bookkeeping to the full totals.
+		// rendered, so reset the append + panel bookkeeping to the full totals.
 		c.mu.Lock()
 		c.appendedThinking = len(reasoning)
 		c.appendedTools = len(tools)
+		c.hasThinkingPanel = len(reasoning) > 0
+		c.hasToolsPanel = len(tools) > 0
 		c.mu.Unlock()
 	}
 	cardJSON := cardJSONForContent(content, core.CardStatusWorking)
@@ -318,6 +334,99 @@ func (c *feishuStreamingCard) send(ctx context.Context, content string) error {
 		return p.updateCardEntity(ctx, handle, cardJSON)
 	}
 	return p.UpdateMessage(ctx, handle, cardJSON)
+}
+
+// progressLane identifies one collapsible process panel on the card.
+type progressLane int
+
+const (
+	laneThinking progressLane = iota
+	laneTools
+)
+
+// elementID returns the fixed cardkit element id of the lane's panel.
+func (l progressLane) elementID() string {
+	if l == laneTools {
+		return progressPanelToolsElementID
+	}
+	return progressPanelThinkingElementID
+}
+
+// titleKey is the English label that progressPanelTitle localizes.
+func (l progressLane) titleKey() string {
+	if l == laneTools {
+		return "Tools"
+	}
+	return "Reasoning"
+}
+
+// laneHasPanel reports whether the card entity currently contains the lane's
+// panel.
+func (c *feishuStreamingCard) laneHasPanel(l progressLane) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if l == laneTools {
+		return c.hasToolsPanel
+	}
+	return c.hasThinkingPanel
+}
+
+// setLanePanel records that the lane's panel is (no longer) on the card.
+func (c *feishuStreamingCard) setLanePanel(l progressLane, present bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if l == laneTools {
+		c.hasToolsPanel = present
+		return
+	}
+	c.hasThinkingPanel = present
+}
+
+// laneInsertAnchor picks where to position a lane panel that has to be
+// inserted: next to its sibling panel, in the order a full render uses
+// (thinking above tools). With no sibling panel yet the element goes at the
+// end of the card body (empty target).
+func (c *feishuStreamingCard) laneInsertAnchor(l progressLane) (target string, after bool) {
+	if l == laneTools {
+		if c.laneHasPanel(laneThinking) {
+			return progressPanelThinkingElementID, true
+		}
+		return "", false
+	}
+	if c.laneHasPanel(laneTools) {
+		return progressPanelToolsElementID, false
+	}
+	return "", false
+}
+
+// writeLane streams the new entries of one lane into its collapsible panel.
+//
+// It appends to the panel when the card already has it. When the panel is
+// missing — its lane was still empty when the card was rendered — it INSERTS
+// the panel (positioned against the sibling panel, or at the end of the card
+// body) filled with these entries. Inserting avoids the full-card re-render
+// that a missing panel used to trigger, and a full re-render resets the
+// expand/collapse state of every panel the user had touched.
+//
+// A failed append against an EXISTING panel is still returned to the caller,
+// which falls back to a full render: that failure is not a missing element
+// (rate limit, transient API error, …) and inserting a second panel would
+// render the lane twice.
+func (c *feishuStreamingCard) writeLane(ctx context.Context, p streamingCardAPI, handle *feishuPreviewHandle, lane progressLane, entries []core.ProgressCardEntry, total int, lang string) error {
+	rendered := renderProgressEntries(entries, lang)
+	if c.laneHasPanel(lane) {
+		return p.appendCardElements(ctx, handle, lane.elementID(), rendered)
+	}
+
+	panel := buildProgressPanel(progressPanelTitle(lane.titleKey(), total, lang), false, lane.elementID(), rendered)
+	target, after := c.laneInsertAnchor(lane)
+	if err := p.insertCardElements(ctx, handle, target, after, []map[string]any{panel}); err != nil {
+		return err
+	}
+	c.setLanePanel(lane, true)
+	slog.Debug("feishu: inserted missing progress panel",
+		"element_id", lane.elementID(), "anchor", target, "insert_after", after, "entries", len(entries))
+	return nil
 }
 
 // renderProgressEntries renders payload entries as card elements for the
