@@ -1009,7 +1009,7 @@ func (p *Platform) AddDoneReaction(rctx any) {
 	}
 }
 
-// SendImage uploads and sends an image via DingTalk oToMessages API.
+// SendImage uploads and sends an image via the matching DingTalk conversation API.
 // Implements core.ImageSender.
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
 	rc, ok := rctx.(replyContext)
@@ -1035,11 +1035,9 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 
 	msgParamBytes, _ := json.Marshal(map[string]string{"photoURL": mediaID})
-	requestBody := map[string]any{
-		"robotCode": p.robotCode,
-		"userIds":   []string{rc.senderStaffId},
-		"msgKey":    "sampleImageMsg",
-		"msgParam":  string(msgParamBytes),
+	apiURL, requestBody, err := p.attachmentSendRequest(rc, "sampleImageMsg", string(msgParamBytes))
+	if err != nil {
+		return fmt.Errorf("dingtalk: prepare image message: %w", err)
 	}
 
 	body, err := json.Marshal(requestBody)
@@ -1048,7 +1046,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+		apiURL,
 		bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("dingtalk: create image request: %w", err)
@@ -1063,7 +1061,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("dingtalk: oToMessages image response", "status", resp.StatusCode, "body", string(respBody))
+	slog.Debug("dingtalk: image message response", "status", resp.StatusCode, "body", string(respBody))
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("dingtalk: send image failed: status=%d, body=%s", resp.StatusCode, string(respBody))
@@ -1095,7 +1093,7 @@ func (p *Platform) CreateStreamingCard(ctx context.Context, replyCtx any) (core.
 	return p.createAICard(ctx, rc)
 }
 
-// SendFile uploads and sends a file via DingTalk oToMessages API.
+// SendFile uploads and sends a file via the matching DingTalk conversation API.
 // Implements core.FileSender.
 func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
 	rc, ok := rctx.(replyContext)
@@ -1130,11 +1128,9 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		"fileName": name,
 		"fileType": ext,
 	})
-	requestBody := map[string]any{
-		"robotCode": p.robotCode,
-		"userIds":   []string{rc.senderStaffId},
-		"msgKey":    "sampleFile",
-		"msgParam":  string(msgParamBytes),
+	apiURL, requestBody, err := p.attachmentSendRequest(rc, "sampleFile", string(msgParamBytes))
+	if err != nil {
+		return fmt.Errorf("dingtalk: prepare file message: %w", err)
 	}
 
 	body, err := json.Marshal(requestBody)
@@ -1143,7 +1139,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+		apiURL,
 		bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("dingtalk: create file request: %w", err)
@@ -1158,7 +1154,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	slog.Debug("dingtalk: oToMessages file response", "status", resp.StatusCode, "body", string(respBody))
+	slog.Debug("dingtalk: file message response", "status", resp.StatusCode, "body", string(respBody))
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("dingtalk: send file failed: status=%d, body=%s", resp.StatusCode, string(respBody))
@@ -1169,6 +1165,27 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 }
 
 var _ core.FileSender = (*Platform)(nil)
+
+func (p *Platform) attachmentSendRequest(rc replyContext, msgKey, msgParam string) (string, map[string]any, error) {
+	requestBody := map[string]any{
+		"robotCode": p.robotCode,
+		"msgKey":    msgKey,
+		"msgParam":  msgParam,
+	}
+
+	if rc.isGroup {
+		if rc.conversationId == "" {
+			return "", nil, fmt.Errorf("group message requires conversationId")
+		}
+		requestBody["openConversationId"] = rc.conversationId
+		return "https://api.dingtalk.com/v1.0/robot/groupMessages/send", requestBody, nil
+	}
+	if rc.senderStaffId != "" {
+		requestBody["userIds"] = []string{rc.senderStaffId}
+		return "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend", requestBody, nil
+	}
+	return "", nil, fmt.Errorf("requires conversationId (group) or senderStaffId (direct)")
+}
 
 // SendAudio uploads audio bytes to DingTalk and sends a voice message.
 // Implements core.AudioSender interface.
