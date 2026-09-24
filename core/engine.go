@@ -568,6 +568,7 @@ type interactiveState struct {
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
 	stopped                  bool
+	turnCancelled            bool // set when a graceful ACP CancelTurn aborted the live turn
 	pending                  *pendingPermission
 	pendingMessages          []queuedMessage // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
@@ -3675,7 +3676,9 @@ found:
 		}); err != nil {
 			slog.Error("failed to send permission response", "error", err)
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-		} else {
+		} else if _, hasButtons := p.(InlineButtonSender); !hasButtons {
+			// Platforms with native inline buttons already acknowledge the click
+			// client-side (visited state); an extra text confirmation is noise.
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionAllowed))
 		}
 	} else if isDenyResponse(lower) {
@@ -5983,7 +5986,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = strings.Join(textParts, "")
 			}
 			if fullResponse == "" {
-				fullResponse = e.i18n.T(MsgEmptyResponse)
+				state.mu.Lock()
+				cancelled := state.turnCancelled
+				state.turnCancelled = false // read-and-clear
+				stopped := state.stopped
+				state.mu.Unlock()
+				if cancelled || stopped {
+					// User-aborted/cancelled mid-turn with no agent output: stay silent —
+					// the /stop ack already told the user. Reuses the NO_REPLY
+					// silent-delivery path so no "(empty response)" noise is sent.
+					fullResponse = "NO_REPLY"
+				} else {
+					fullResponse = e.i18n.T(MsgEmptyResponse)
+				}
 			}
 
 			// Strip any agent-self-reported "[ctx: ~XX%]" marker so it does not
@@ -10669,6 +10684,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		// the cancelled turn before processing fresh input.
 		state.mu.Lock()
 		state.eventsNeedResync = true
+		state.turnCancelled = true
 		state.mu.Unlock()
 
 		cancelErr := canceller.CancelTurn()
