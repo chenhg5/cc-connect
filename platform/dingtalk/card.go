@@ -22,6 +22,7 @@ type aiCard struct {
 	outTrackId     string
 	templateKey    string // 卡片模板变量名，默认 "content"
 	platform       *Platform
+	replyCtx       replyContext
 
 	mu              sync.Mutex
 	state           string // "processing" | "finished" | "failed"
@@ -209,6 +210,7 @@ func (p *Platform) createAICard(ctx context.Context, rc replyContext) (*aiCard, 
 		outTrackId:     resolvedOutTrackId,
 		templateKey:    p.cardTemplateKey,
 		platform:       p,
+		replyCtx:       rc,
 		state:          "processing",
 		throttleMs:     p.cardThrottleMs,
 		done:           make(chan struct{}),
@@ -429,7 +431,19 @@ func (c *aiCard) Finalize(ctx context.Context, content string) error {
 	}
 	c.mu.Unlock()
 
-	return err
+	if err != nil {
+		return err
+	}
+	// DingTalk does not refresh the conversation-list preview when an AI Card
+	// is finalized. Opt-in to a separate normal message to refresh it.
+	if c.platform.cardFinalPreviewMessage {
+		if sendErr := c.platform.Reply(ctx, c.replyCtx, content); sendErr != nil {
+			slog.Warn("dingtalk: final preview message failed", "error", sendErr, "outTrackId", c.outTrackId)
+		} else {
+			slog.Info("dingtalk: final preview message sent", "outTrackId", c.outTrackId)
+		}
+	}
+	return nil
 }
 
 // Failed returns true if the card has entered a failed state.
