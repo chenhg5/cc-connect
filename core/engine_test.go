@@ -1309,6 +1309,14 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 	sessionKey := "telegram:user-footer-context"
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s-footer-context")
+	// glm-5.1 has a 200k context window — set it so the indicator can be
+	// computed against the real window instead of the previous 200k fallback
+	// (regression test for issue #1672).
+	agentSession.contextUsage = &ContextUsage{
+		ContextWindow: 200_000,
+		UsedTokens:    28000,
+		InputTokens:   28000,
+	}
 	state := &interactiveState{
 		agentSession: agentSession,
 		platform:     p,
@@ -1348,6 +1356,14 @@ func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 	sessionKey := "telegram:user-tool-footer"
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	agentSession := newControllableSession("s-tool-footer")
+	// glm-5.1 has a 200k context window — set it so the indicator can be
+	// computed against the real window instead of the previous 200k fallback
+	// (regression test for issue #1672).
+	agentSession.contextUsage = &ContextUsage{
+		ContextWindow: 200_000,
+		UsedTokens:    28000,
+		InputTokens:   28000,
+	}
 	state := &interactiveState{
 		agentSession: agentSession,
 		platform:     p,
@@ -8498,6 +8514,161 @@ func TestParseSelfReportedCtx(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("parseSelfReportedCtx(%q) = %d, want %d", tt.input, got, tt.want)
 		}
+	}
+}
+
+// TestContextIndicatorText covers the indicator computation for issue #1672.
+// The function used to divide against a hardcoded 200_000 constant which made
+// it display ~100% for any model whose window was larger than 200k. The fix
+// requires the caller to pass the real context window, so these tests pin
+// the new contract: positive inputs + positive window => "[ctx: ~N%]"; zero
+// or negative inputs/windows => empty string.
+func TestContextIndicatorText(t *testing.T) {
+	tests := []struct {
+		name          string
+		inputTokens   int
+		contextWindow int
+		want          string
+	}{
+		// 200k default model — behavior must match the previous 200k hardcoded path.
+		{"200k model small usage", 28_000, 200_000, "[ctx: ~14%]"},
+		{"200k model half full", 100_000, 200_000, "[ctx: ~50%]"},
+		{"200k model over full clamped to 100", 250_000, 200_000, "[ctx: ~100%]"},
+
+		// 1M window model — the headline regression from issue #1672.
+		// 360527 / 1_000_000 = 36%, NOT 100% as the buggy hardcoded path produced.
+		{"1M model 360k tokens shows 36%", 360_527, 1_000_000, "[ctx: ~36%]"},
+		{"1M model small usage", 50_000, 1_000_000, "[ctx: ~5%]"},
+		{"1M model fully saturated", 1_500_000, 1_000_000, "[ctx: ~100%]"},
+
+		// Edge cases: no real window or no tokens => no indicator.
+		{"no context window returns empty", 28_000, 0, ""},
+		{"negative context window returns empty", 28_000, -1, ""},
+		{"no input tokens returns empty", 0, 200_000, ""},
+		{"negative input tokens returns empty", -1, 200_000, ""},
+		{"both zero returns empty", 0, 0, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := contextIndicatorText(tt.inputTokens, tt.contextWindow)
+			if got != tt.want {
+				t.Errorf("contextIndicatorText(%d, %d) = %q, want %q",
+					tt.inputTokens, tt.contextWindow, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestContextIndicatorText_OneMillionWindowRegression is the headline scenario
+// from issue #1672: deepseek-v4-flash[1M] with input_tokens=360527 used to
+// display ~100% because the indicator was hardcoded to a 200k denominator.
+// With the real 1M context window in hand it must display ~36%.
+func TestContextIndicatorText_OneMillionWindowRegression(t *testing.T) {
+	const (
+		inputTokens   = 360_527
+		contextWindow = 1_000_000
+	)
+	got := contextIndicatorText(inputTokens, contextWindow)
+	if got != "[ctx: ~36%]" {
+		t.Fatalf("360527/1M must display ~36%% (issue #1672 regression); got %q", got)
+	}
+}
+
+// TestReplyFooterUsesRealContextWindowForOneMillionModel is the integration
+// regression for issue #1672: the full reply footer path must read the
+// active session's ContextWindow rather than the previous 200k hardcoded
+// constant, and prefer ContextUsage.UsedTokens over event.InputTokens when
+// cache-read tokens would otherwise inflate the percentage.
+func TestReplyFooterUsesRealContextWindowForOneMillionModel(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	workDir := filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "deepseek-v4-flash[1m]"},
+		workDir:            workDir,
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-ctx-1m"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-ctx-1m")
+	// Real session reports a 1M window. UsedTokens already includes
+	// cache-read tokens; event.InputTokens is just the new prompt slice
+	// (smaller than UsedTokens).
+	agentSession.contextUsage = &ContextUsage{
+		ContextWindow: 1_000_000,
+		UsedTokens:    360_527,
+		InputTokens:   5_000,
+	}
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1m",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 5_000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-ctx-1m", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	// Must reflect the real 1M window — 360527/1M ~= 36%, NOT 100%.
+	want := "answer\n\n*[ctx: ~36%] · deepseek-v4-flash[1m] · " + compactReplyFooterPath(workDir) + "*"
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
+	}
+}
+
+// TestReplyFooterHidesIndicatorWhenContextWindowUnknown pins the contract
+// that without a real context window the engine must NOT fall back to a
+// hardcoded percentage — it must drop the misleading indicator instead.
+func TestReplyFooterHidesIndicatorWhenContextWindowUnknown(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	workDir := filepath.Join(homeDir, "code", "TechStudio", "projects", "core", "agents", "ceo")
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "mystery-model"},
+		workDir:            workDir,
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-ctx-unknown"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-ctx-unknown")
+	// Deliberately leave contextUsage == nil so the engine sees no real
+	// context window. event.InputTokens alone must NOT trigger an
+	// indicator (that was the buggy path).
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-unknown",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 50_000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-ctx-unknown", time.Now(), nil, nil, state.replyCtx)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	// No real context window => no "[ctx: ~N%]" marker; the rest of the
+	// footer still renders.
+	want := "answer\n\n*mystery-model · " + compactReplyFooterPath(workDir) + "*"
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q", sent[0], want)
 	}
 }
 
