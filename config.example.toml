@@ -1919,7 +1919,7 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Requires: OpenCode CLI — https://github.com/opencode-ai/opencode
+# Requires: OpenCode CLI — https://opencode.ai/download
 # 需要安装：OpenCode CLI
 # Uses `opencode run --format json` under the hood.
 # 底层使用 `opencode run --format json` 命令。
