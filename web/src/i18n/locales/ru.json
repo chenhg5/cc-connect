@@ -56,8 +56,26 @@
       "overview": "Обзор",
       "providers": "Провайдеры",
       "heartbeat": "Пульс",
-      "settings": "Настройки"
-    }
+      "settings": "Настройки",
+      "workspaces": "Рабочие области"
+    },
+    "workspaceMode": "Режим нескольких рабочих областей",
+    "workspaceModeHint": "Направлять разные чат-каналы в разные рабочие директории в пределах общей базовой директории.",
+    "workspaceModeEnable": "Включить режим нескольких рабочих областей",
+    "workspaceModeWarning": "Переключение режима требует перезапуска службы. Единый work_dir не используется, пока включён режим нескольких рабочих областей.",
+    "workspaceBaseDir": "Базовая директория",
+    "workspaceBaseDirRequired": "Для включения режима нескольких рабочих областей требуется базовая директория.",
+    "workspaceModeConfirm": "Изменение режима рабочей области требует перезапуска службы. Продолжить?",
+    "workspaceBindings": "Привязки каналов",
+    "workspaceNoBindings": "Пока ни один канал не привязан к рабочей области.",
+    "workspaceActive": "активен",
+    "workspaceIdle": "простой",
+    "workspaceAddBinding": "Привязать канал",
+    "workspaceChannelKey": "Ключ канала",
+    "workspaceChannelName": "Имя канала (необязательно)",
+    "workspacePath": "Путь рабочей области",
+    "workspaceSuggestions": "Непривязанные директории в base_dir:",
+    "workspaceBind": "Привязать"
   },
   "sessions": {
     "title": "Сессии",

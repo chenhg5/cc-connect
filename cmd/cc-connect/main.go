@@ -1184,6 +1184,8 @@ func main() {
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
+				WorkspaceMode:        u.WorkspaceMode,
+				WorkspaceBaseDir:     u.WorkspaceBaseDir,
 			})
 		})
 		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)

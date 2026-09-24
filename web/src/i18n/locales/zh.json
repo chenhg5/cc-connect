@@ -56,8 +56,26 @@
       "overview": "概览",
       "providers": "服务商",
       "heartbeat": "心跳",
-      "settings": "设置"
-    }
+      "settings": "设置",
+      "workspaces": "工作区"
+    },
+    "workspaceMode": "多工作区模式",
+    "workspaceModeHint": "在共享的基础目录下，将不同的聊天频道路由到不同的工作目录。",
+    "workspaceModeEnable": "启用多工作区模式",
+    "workspaceModeWarning": "切换模式需要重启服务。多工作区模式开启后，单一的 work_dir 将不再使用。",
+    "workspaceBaseDir": "基础目录",
+    "workspaceBaseDirRequired": "启用多工作区模式需要设置基础目录。",
+    "workspaceModeConfirm": "修改工作区模式需要重启服务，确定继续吗？",
+    "workspaceBindings": "频道绑定",
+    "workspaceNoBindings": "尚无频道绑定到工作区。",
+    "workspaceActive": "运行中",
+    "workspaceIdle": "空闲",
+    "workspaceAddBinding": "绑定频道",
+    "workspaceChannelKey": "频道 Key",
+    "workspaceChannelName": "频道名称（可选）",
+    "workspacePath": "工作区路径",
+    "workspaceSuggestions": "base_dir 中未绑定的目录：",
+    "workspaceBind": "绑定"
   },
   "sessions": {
     "title": "会话",
