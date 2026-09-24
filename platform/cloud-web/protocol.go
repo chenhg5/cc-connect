@@ -128,6 +128,7 @@ type wireInboundMessage struct {
 	Images     []wireImage `json:"images,omitempty"`
 	Files      []wireFile  `json:"files,omitempty"`
 	Audio      *wireAudio  `json:"audio,omitempty"`
+	WorkDir    string      `json:"work_dir,omitempty"`
 }
 
 type wireCardAction struct {
