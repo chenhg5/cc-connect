@@ -1022,7 +1022,7 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesStructuredCard(t *testing.T) {
 		t.Fatal("BuildProgressCardPayload returned empty payload")
 	}
 
-	cardJSON := buildPreviewCardJSON(payload)
+	cardJSON := buildPreviewCardJSON(payload, "default")
 	if strings.Contains(cardJSON, core.ProgressCardPayloadPrefix) {
 		t.Fatalf("card JSON should not leak payload prefix, got %q", cardJSON)
 	}
@@ -1057,7 +1057,7 @@ func TestBuildPreviewCardJSON_ProgressPayloadSeparatesReasoningAndTools(t *testi
 		{Kind: core.ProgressEntryToolResult, Tool: "Bash", Text: "/tmp/project", ExitCode: &exitCode},
 	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
 
-	panels := collectCardPanels(t, buildPreviewCardJSON(payload))
+	panels := collectCardPanels(t, buildPreviewCardJSON(payload, "default"))
 	if len(panels) != 2 {
 		t.Fatalf("panel count = %d, want 2 panels: %#v", len(panels), panels)
 	}
@@ -1083,7 +1083,7 @@ func TestBuildPreviewCardJSON_ProgressPayloadUsesToolDescriptors(t *testing.T) {
 		{Kind: core.ProgressEntryToolUse, Tool: "web_fetch", Text: "https://example.com/docs?token=secret"},
 	}, false, "Codex", core.LangEnglish, core.ProgressCardStateRunning)
 
-	panels := collectCardPanels(t, buildPreviewCardJSON(payload))
+	panels := collectCardPanels(t, buildPreviewCardJSON(payload, "default"))
 	if len(panels) != 1 {
 		t.Fatalf("panel count = %d, want 1 tools panel: %#v", len(panels), panels)
 	}
@@ -1109,7 +1109,7 @@ func TestBuildRichCard_UsesCodexRuntimeToolDescriptors(t *testing.T) {
 		{Kind: core.ToolStepKindTool, Name: "tool_search_tool", Summary: "search available tools"},
 		{Kind: core.ToolStepKindTool, Name: "update_plan", Summary: "revise checklist"},
 		{Kind: core.ToolStepKindTool, Name: "request_user_input", Summary: "ask for confirmation"},
-	}, "answer", true, "")
+	}, "answer", true, "", "default")
 
 	panels := collectCardPanels(t, cardJSON)
 	if len(panels) != 1 {
@@ -1155,7 +1155,7 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 			Success:  &success,
 			Done:     true,
 		},
-	}, "done", true, "")
+	}, "done", true, "", "default")
 
 	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit: 0", "hi"} {
 		if !strings.Contains(cardJSON, want) {
@@ -1184,7 +1184,7 @@ func TestBuildRichCard_OversizePanelsKeepVisibleContent(t *testing.T) {
 		})
 	}
 
-	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "", true, "")
+	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "", true, "", "default")
 
 	panels := collectCardPanels(t, cardJSON)
 	if len(panels) == 0 {
@@ -1213,7 +1213,7 @@ func TestBuildRichCard_PanelsShowLatestTenSteps(t *testing.T) {
 		})
 	}
 
-	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "answer", true, "")
+	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "answer", true, "", "default")
 
 	panels := collectCardPanels(t, cardJSON)
 	if len(panels) != 2 {
@@ -1264,7 +1264,7 @@ func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
 	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
 		{Kind: core.ToolStepKindThinking, Summary: "Inspecting event routing"},
 		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "pwd"},
-	}, "answer", true, "")
+	}, "answer", true, "", "default")
 
 	panels := collectCardPanels(t, cardJSON)
 	if len(panels) != 2 {
@@ -1290,7 +1290,7 @@ func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
 func TestBuildRichCard_UsesToolDescriptorsForAliases(t *testing.T) {
 	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
 		{Kind: core.ToolStepKindTool, Name: "web_fetch", Summary: "https://example.com/docs?token=secret"},
-	}, "answer", true, "")
+	}, "answer", true, "", "default")
 
 	panels := collectCardPanels(t, cardJSON)
 	if len(panels) != 1 {
@@ -1336,7 +1336,7 @@ func TestBuildRichCard_SanitizesMarkdownForCardLimits(t *testing.T) {
 		"![ok](img_v3_abc)",
 	}, "\n")
 
-	content := strings.Join(collectCardMarkdownContents(t, buildRichCard(core.CardStatusDone, "", nil, markdown, false, "")), "\n")
+	content := strings.Join(collectCardMarkdownContents(t, buildRichCard(core.CardStatusDone, "", nil, markdown, false, "", "default")), "\n")
 	if containsMarkdownLine(content, "# Big Result") {
 		t.Fatalf("card markdown should downgrade h1 headings, got %q", content)
 	}
@@ -1515,7 +1515,7 @@ func TestBuildCardJSONWithStatusFooter_SharesCardTableBudget(t *testing.T) {
 		"| 4 |",
 	}, "\n")
 
-	content := strings.Join(collectCardMarkdownContents(t, buildCardJSONWithStatusFooter(body, footer)), "\n")
+	content := strings.Join(collectCardMarkdownContents(t, buildCardJSONWithStatusFooter(body, footer, "default")), "\n")
 	if !strings.Contains(content, "| C |\n|---|\n| 3 |") {
 		t.Fatalf("third table should remain renderable, got %q", content)
 	}
@@ -1542,7 +1542,7 @@ func TestFeishuCardAPIErrorClassification(t *testing.T) {
 }
 
 func TestBuildPreviewCardJSON_NormalTextFallback(t *testing.T) {
-	cardJSON := buildPreviewCardJSON("plain progress text")
+	cardJSON := buildPreviewCardJSON("plain progress text", "default")
 	if strings.Contains(cardJSON, "cc-connect · 进度") {
 		t.Fatalf("normal text should use default card template, got %q", cardJSON)
 	}
@@ -2353,5 +2353,155 @@ func TestCmdAction_WithAfterClick_SessionKeyRoutes(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected command to be dispatched with correct session key")
+	}
+}
+
+// decodeCardConfig extracts the top-level "config" map from a card JSON string
+// produced by one of the buildCard* helpers. Used by tests below to assert the
+// Feishu Card 2.0 `width_mode` propagation (#1797).
+func decodeCardConfig(t *testing.T, cardJSON string) map[string]any {
+	t.Helper()
+	var got map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &got); err != nil {
+		t.Fatalf("decode card json: %v", err)
+	}
+	cfg, ok := got["config"].(map[string]any)
+	if !ok {
+		t.Fatalf("card has no config block: %v", got)
+	}
+	return cfg
+}
+
+func TestNormalizeCardWidthMode(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", "default"},
+		{"default", "default"},
+		{"DEFAULT", "default"},
+		{"  full  ", "full"},
+		{"FULL", "full"},
+		{"Full", "full"},
+		{"narrow", "default"}, // unknown value falls back
+		{"auto", "default"},   // unknown value falls back
+	}
+	for _, tc := range cases {
+		t.Run("input="+tc.in, func(t *testing.T) {
+			if got := normalizeCardWidthMode(tc.in); got != tc.want {
+				t.Fatalf("normalizeCardWidthMode(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNew_CardWidthModeDefaultsToDefault(t *testing.T) {
+	p, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	pf, ok := p.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", p)
+	}
+	if pf.cardWidthMode != "default" {
+		t.Fatalf("cardWidthMode = %q, want default", pf.cardWidthMode)
+	}
+}
+
+func TestNew_CardWidthModeHonorsFull(t *testing.T) {
+	p, err := New(map[string]any{
+		"app_id":          "cli_xxx",
+		"app_secret":      "secret",
+		"card_width_mode": "full",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	pf, ok := p.(*interactivePlatform)
+	if !ok {
+		t.Fatalf("platform type = %T, want *interactivePlatform", p)
+	}
+	if pf.cardWidthMode != "full" {
+		t.Fatalf("cardWidthMode = %q, want full", pf.cardWidthMode)
+	}
+}
+
+func TestBuildCardJSON_PropagatesWidthMode(t *testing.T) {
+	cases := []struct {
+		mode string
+		want string
+	}{
+		{"default", "default"},
+		{"full", "full"},
+	}
+	for _, tc := range cases {
+		t.Run("mode="+tc.mode, func(t *testing.T) {
+			cfg := decodeCardConfig(t, buildCardJSON("body", tc.mode))
+			if got := cfg["width_mode"]; got != tc.want {
+				t.Fatalf("width_mode = %v, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildCardJSONWithStatusFooter_PropagatesWidthMode(t *testing.T) {
+	cfg := decodeCardConfig(t, buildCardJSONWithStatusFooter("body", "Opus 4.7 · 100t", "full"))
+	if got := cfg["width_mode"]; got != "full" {
+		t.Fatalf("width_mode = %v, want full", got)
+	}
+}
+
+func TestBuildCardJSONWithStatus_PropagatesWidthMode(t *testing.T) {
+	cfg := decodeCardConfig(t, buildCardJSONWithStatus("body", core.CardStatusDone, "full"))
+	if got := cfg["width_mode"]; got != "full" {
+		t.Fatalf("width_mode = %v, want full", got)
+	}
+}
+
+func TestBuildPreviewCardJSON_PropagatesWidthMode(t *testing.T) {
+	cfg := decodeCardConfig(t, buildPreviewCardJSON("body", "full"))
+	if got := cfg["width_mode"]; got != "full" {
+		t.Fatalf("width_mode = %v, want full", got)
+	}
+}
+
+func TestBuildRichCard_PropagatesWidthMode(t *testing.T) {
+	cfg := decodeCardConfig(t, buildRichCard(core.CardStatusDone, "", nil, "answer", false, "", "full"))
+	if got := cfg["width_mode"]; got != "full" {
+		t.Fatalf("width_mode = %v, want full", got)
+	}
+}
+
+func TestBuildReplyContent_PropagatesWidthMode(t *testing.T) {
+	// Markdown content routes through the interactive card path so the
+	// cardWidthMode argument ends up in the rendered width_mode field.
+	_, body := buildReplyContent("\n# heading\nbody", "full")
+	cfg := decodeCardConfig(t, body)
+	if got := cfg["width_mode"]; got != "full" {
+		t.Fatalf("width_mode = %v, want full", got)
+	}
+}
+
+func TestRenderCardMap_PropagatesWidthMode(t *testing.T) {
+	card := core.NewCard().Markdown("body").Build()
+	cases := []struct {
+		mode string
+		want string
+	}{
+		{"default", "default"},
+		{"full", "full"},
+	}
+	for _, tc := range cases {
+		t.Run("mode="+tc.mode, func(t *testing.T) {
+			got := renderCardMap(card, "", tc.mode)
+			cfg, ok := got["config"].(map[string]any)
+			if !ok {
+				t.Fatalf("config = %#v, want map", got["config"])
+			}
+			if mode := cfg["width_mode"]; mode != tc.want {
+				t.Fatalf("width_mode = %v, want %q", mode, tc.want)
+			}
+		})
 	}
 }

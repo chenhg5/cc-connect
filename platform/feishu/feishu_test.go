@@ -897,7 +897,7 @@ func TestBuildReplyContent_FallbackWhenManyTables(t *testing.T) {
 	}
 	content := sb.String()
 
-	msgType, _ := buildReplyContent(content)
+	msgType, _ := buildReplyContent(content, "default")
 	if msgType == larkim.MsgTypeInteractive {
 		t.Errorf("expected non-card message type for >5 tables, got interactive")
 	}
@@ -912,7 +912,7 @@ func TestBuildReplyContent_FallbackWhenManyTables(t *testing.T) {
 	}
 	content5 := sb.String()
 
-	msgType5, _ := buildReplyContent(content5)
+	msgType5, _ := buildReplyContent(content5, "default")
 	if msgType5 != larkim.MsgTypeInteractive {
 		t.Errorf("expected interactive card for 5 tables, got %s", msgType5)
 	}
@@ -1465,7 +1465,7 @@ func TestResolveMentions_MultipleOccurrences(t *testing.T) {
 // inside an email (or URL) must not be mistaken for a mention and must not
 // force MsgTypeText, so markdown content still renders as an interactive card.
 func TestBuildReplyContent_NoFalsePositiveOnEmail(t *testing.T) {
-	msgType, _ := buildReplyContent("**bold** report sent to a@b.com")
+	msgType, _ := buildReplyContent("**bold** report sent to a@b.com", "default")
 	if msgType != larkim.MsgTypeInteractive {
 		t.Errorf("email '@' should not force MsgTypeText; got %s", msgType)
 	}
@@ -1474,7 +1474,7 @@ func TestBuildReplyContent_NoFalsePositiveOnEmail(t *testing.T) {
 // TestBuildReplyContent_RealMentionForcesText confirms a resolved mention
 // (<at user_id="...">) still forces MsgTypeText even when markdown is present.
 func TestBuildReplyContent_RealMentionForcesText(t *testing.T) {
-	msgType, _ := buildReplyContent("**bold** <at user_id=\"ou_bot\">Collector-B</at> please review")
+	msgType, _ := buildReplyContent("**bold** <at user_id=\"ou_bot\">Collector-B</at> please review", "default")
 	if msgType != larkim.MsgTypeText {
 		t.Errorf("resolved mention should force MsgTypeText; got %s", msgType)
 	}
@@ -1489,7 +1489,7 @@ func TestBuildReplyContent_CardFormatMentionForcesText(t *testing.T) {
 		{"card_format", "# report\n\n<at id=ou_bot></at> please review\n\n```\nok\n```"},
 	}
 	for _, tc := range cases {
-		msgType, _ := buildReplyContent(tc.content)
+		msgType, _ := buildReplyContent(tc.content, "default")
 		if msgType != larkim.MsgTypeText {
 			t.Errorf("%s: mention should force MsgTypeText; got %s", tc.name, msgType)
 		}
@@ -1508,7 +1508,7 @@ func TestResolveMentions_MarkdownForcesTextFormat(t *testing.T) {
 		t.Fatalf("markdown content must still resolve to text format; got %q", result)
 	}
 	// Verify the full pipeline forces MsgTypeText
-	msgType, _ := buildReplyContent(result)
+	msgType, _ := buildReplyContent(result, "default")
 	if msgType != larkim.MsgTypeText {
 		t.Fatalf("markdown + mention must force MsgTypeText so Feishu fires the mention event; got %s", msgType)
 	}
