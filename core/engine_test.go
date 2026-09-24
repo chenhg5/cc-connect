@@ -2,8 +2,12 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,6 +90,30 @@ func (p *stubPlatformEngine) clearSent() {
 	p.mu.Lock()
 	p.sent = nil
 	p.mu.Unlock()
+}
+
+type finalizedOrderPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *finalizedOrderPlatform) Send(ctx context.Context, replyCtx any, content string) error {
+	if err := os.WriteFile(p.marker, []byte("sent\n"), 0600); err != nil {
+		return err
+	}
+	return p.stubPlatformEngine.Send(ctx, replyCtx, content)
+}
+
+type failedSendPlatform struct {
+	stubPlatformEngine
+	marker string
+}
+
+func (p *failedSendPlatform) Send(_ context.Context, _ any, _ string) error {
+	if err := os.WriteFile(p.marker, []byte("attempted\n"), 0600); err != nil {
+		return err
+	}
+	return errors.New("platform send failed")
 }
 
 type recallCheckingPlatform struct {
@@ -1023,6 +1051,385 @@ func TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText(t *testing.
 
 	if got := p.getSent(); len(got) != 1 || got[0] != sideText {
 		t.Fatalf("sent text = %#v, want one side-channel message", got)
+	}
+}
+
+func TestWorkspaceGitFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	// non-git directory -> empty
+	if got := workspaceGitFingerprint(context.Background(), dir); got != "" {
+		t.Errorf("non-git dir: want empty, got %q", got)
+	}
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "a.txt")
+	runGit("commit", "-qm", "init")
+	fp := workspaceGitFingerprint(context.Background(), dir)
+	if fp == "" {
+		t.Fatal("git repo should have a fingerprint")
+	}
+	// working tree change -> fingerprint changes
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if workspaceGitFingerprint(context.Background(), dir) == fp {
+		t.Error("working tree change should change the fingerprint")
+	}
+}
+
+func TestProcessInteractiveEvents_FinalizedHookRunsAfterReplySend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &finalizedOrderPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "test -f '" + sentMarker + "' && touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-finalized")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-finalized",
+		ccSessionKey: sessionKey,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "final reply", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "turn-1", time.Now(), nil, nil, state.replyCtx, 0)
+
+	if _, err := os.Stat(sentMarker); err != nil {
+		t.Fatalf("final reply was not sent: %v", err)
+	}
+	if _, err := os.Stat(hookMarker); err != nil {
+		t.Fatalf("message.finalized hook did not run after send: %v", err)
+	}
+	if got := p.getSent(); len(got) != 1 || got[0] != "final reply" {
+		t.Fatalf("sent replies = %#v, want one final reply", got)
+	}
+}
+
+// newFinalizedHookServer starts an HTTP hook receiver for message.finalized and
+// returns the server plus a channel that receives each emitted event.
+func newFinalizedHookServer(t *testing.T) (*httptest.Server, chan HookEvent) {
+	t.Helper()
+	events := make(chan HookEvent, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var ev HookEvent
+		_ = json.Unmarshal(body, &ev)
+		events <- ev
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, events
+}
+
+// TestProcessInteractiveEvents_EmptyReplyDoesNotEmitFinalizedHook verifies that
+// an agent reply with no content does not fire message.finalized even though the
+// localized empty-response placeholder is still delivered to the platform. The
+// PR description promises "empty replies do not trigger"; the placeholder send
+// must not be conflated with a real final reply.
+func TestProcessInteractiveEvents_EmptyReplyDoesNotEmitFinalizedHook(t *testing.T) {
+	p := &stubPlatformEngine{n: "feishu"}
+	srv, hookEvents := newFinalizedHookServer(t)
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event: string(HookEventMessageFinalized),
+		Type:  "http",
+		URL:   srv.URL,
+		Async: boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-empty")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-empty",
+		ccSessionKey: sessionKey,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "turn-1", time.Now(), nil, nil, state.replyCtx, 0)
+
+	// The empty reply is replaced by the localized placeholder and delivered.
+	if got := p.getSent(); len(got) != 1 {
+		t.Fatalf("sent replies = %#v, want the empty-response placeholder", got)
+	}
+	// ... but message.finalized must NOT fire for an empty reply.
+	select {
+	case ev := <-hookEvents:
+		t.Fatalf("message.finalized fired for empty reply: %#v", ev)
+	default:
+	}
+}
+
+// TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline verifies that a
+// queued message re-samples its turn-start git baseline instead of inheriting
+// the baseline captured for the first message of the call. Without the
+// re-sample, changes made during the first message's turn would make the second
+// message report changed=true even though it modified nothing itself.
+//
+// Timeline (synchronous engine call driven by a helper goroutine):
+//  1. turnStart baseline A captured (clean tree)
+//  2. engine goroutine then blocks on events; test writes file x (strictly
+//     after A — see the fingerprint-lock wait below) → first EventResult emits
+//     changed=true
+//  3. queued branch drains stale events and re-samples baseline B (tree now
+//     contains x)
+//  4. test feeds second EventResult after the first emit's marker → emits
+//     changed=false (B vs unchanged tree)
+//
+// If the queued branch failed to re-sample, step 4 would compare A vs B and
+// wrongly report changed=true.
+func TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "base.txt")
+	runGit("commit", "-qm", "init")
+
+	changedLog := filepath.Join(dir, "changed.log")
+	firstEmitMarker := filepath.Join(dir, "first-emit")
+	hookCmd := "echo \"$CC_HOOK_CHANGED\" >> '" + changedLog + "'; touch '" + firstEmitMarker + "'"
+
+	p := &stubPlatformEngine{n: "feishu"}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: hookCmd,
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-queued")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-queued",
+		ccSessionKey: sessionKey,
+		workspaceDir: dir,
+		pendingMessages: []queuedMessage{
+			{messageID: "msg-2", platform: p, replyCtx: "ctx-queued", content: "second"},
+		},
+	}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "msg-1", time.Now(), nil, nil, state.replyCtx, 0)
+	}()
+
+	// Wait until the engine goroutine holds the fingerprint window lock
+	// (baseline A is sampled right after acquisition), plus a settle window for
+	// the git scan itself, so the tree change below lands strictly after A.
+	fpLock := e.workspaceFingerprintLock(dir)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if !fpLock.TryLock() {
+			time.Sleep(500 * time.Millisecond)
+			break
+		}
+		fpLock.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("engine goroutine did not acquire the fingerprint lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "x.txt"), []byte("change"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "first", Done: true}
+
+	// Wait for the first finalized emit (marker touched by the sync hook), then
+	// let the queued branch finish its stale-event drain and baseline re-sample
+	// before queuing EventResult #2 — feeding it earlier would get it dropped by
+	// drainEvents and the second turn would never start.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(firstEmitMarker); err == nil {
+			time.Sleep(300 * time.Millisecond)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first finalized emit did not run")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "second", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not finish")
+	}
+
+	logData, err := os.ReadFile(changedLog)
+	if err != nil {
+		t.Fatalf("read changed log: %v", err)
+	}
+	lines := strings.Fields(string(logData))
+	if len(lines) != 2 {
+		t.Fatalf("changed log = %q, want 2 emits", lines)
+	}
+	if lines[0] != "true" {
+		t.Errorf("first message changed = %q, want true (it modified the tree after baseline A)", lines[0])
+	}
+	if lines[1] != "false" {
+		t.Errorf("second message changed = %q, want false (queued message must re-sample its baseline, otherwise the first message's change leaks into it)", lines[1])
+	}
+}
+
+// TestWorkspaceFingerprintLock_SerializesConcurrentTurns verifies that
+// concurrent turns in the same workspace serialize their git fingerprint
+// windows: the second turn's Changed flag must not be polluted by the first
+// turn's edits. Without the per-workspace lock the second turn could sample its
+// baseline before the first turn's change and then report changed=true.
+func TestWorkspaceFingerprintLock_SerializesConcurrentTurns(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "base.txt")
+	runGit("commit", "-qm", "init")
+
+	p := &stubPlatformEngine{n: "feishu"}
+	srv, hookEvents := newFinalizedHookServer(t)
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event: string(HookEventMessageFinalized),
+		Type:  "http",
+		URL:   srv.URL,
+		Async: boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	newState := func(sessID, sk string) (*interactiveState, *Session) {
+		session := e.sessions.GetOrCreateActive(sk)
+		as := newControllableSession(sessID)
+		st := &interactiveState{
+			agentSession: as,
+			platform:     p,
+			replyCtx:     "ctx-" + sk,
+			ccSessionKey: sk,
+			workspaceDir: dir,
+		}
+		e.interactiveStates[sk] = st
+		return st, session
+	}
+	state1, session1 := newState("s1", "feishu:chat:u1")
+	state2, session2 := newState("s2", "feishu:chat:u2")
+
+	done1 := make(chan struct{})
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done1)
+		e.processInteractiveEvents(state1, session1, e.sessions, "feishu:chat:u1", "t1", time.Now(), nil, nil, state1.replyCtx, 0)
+	}()
+	// Wait until turn 1 holds the fingerprint window lock, then start turn 2 —
+	// it must block on the lock instead of sampling concurrently with turn 1.
+	// Once the lock is held we still wait for the git scan itself to settle
+	// (baseline A is sampled right after lock acquisition; `git status` takes a
+	// few tens of ms), so the tree change below lands strictly after A.
+	fpLock := e.workspaceFingerprintLock(dir)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if !fpLock.TryLock() {
+			time.Sleep(500 * time.Millisecond)
+			break
+		}
+		fpLock.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("turn 1 did not acquire the fingerprint lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	go func() {
+		defer close(done2)
+		e.processInteractiveEvents(state2, session2, e.sessions, "feishu:chat:u2", "t2", time.Now(), nil, nil, state2.replyCtx, 0)
+	}()
+
+	// Turn 1 modifies the tree, then completes.
+	if err := os.WriteFile(filepath.Join(dir, "y.txt"), []byte("change"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state1.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "one", Done: true}
+	select {
+	case <-done1:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn 1 did not finish")
+	}
+
+	// Turn 2 makes no further change; its Changed must be false.
+	state2.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "two", Done: true}
+	select {
+	case <-done2:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn 2 did not finish")
+	}
+
+	var ev1, ev2 HookEvent
+	deadline = time.Now().Add(5 * time.Second)
+	for ev1.Event == "" || ev2.Event == "" {
+		select {
+		case ev := <-hookEvents:
+			if ev.SessionKey == "feishu:chat:u1" && ev1.Event == "" {
+				ev1 = ev
+			} else if ev.SessionKey == "feishu:chat:u2" && ev2.Event == "" {
+				ev2 = ev
+			}
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("finalized events not received")
+		}
+	}
+	if !ev1.Changed {
+		t.Errorf("turn 1 changed = false, want true (it modified the tree)")
+	}
+	if ev2.Changed {
+		t.Errorf("turn 2 changed = true, want false (fingerprint window must be serialized per workspace)")
 	}
 }
 
@@ -14169,6 +14576,99 @@ func waitForPlatformSend(p *stubPlatformEngine, n int, timeout time.Duration) []
 
 // TestUnsolicitedReader_RelaysEventResult verifies that the unsolicited reader
 // goroutine relays EventResult content to the platform.
+func TestUnsolicitedReader_EmitsFinalizedHookAfterReplySend(t *testing.T) {
+	dir := t.TempDir()
+	sentMarker := filepath.Join(dir, "sent")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &finalizedOrderPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sentMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "test -f '" + sentMarker + "' && touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: "background reply", Done: true}
+
+	if sent := waitForPlatformSend(&p.stubPlatformEngine, 1, 5*time.Second); len(sent) != 1 || sent[0] != "background reply" {
+		t.Fatalf("sent replies = %#v, want one background reply", sent)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(hookMarker); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("message.finalized hook did not run after background reply send")
+}
+
+func TestUnsolicitedReader_DoesNotEmitFinalizedHookWhenReplySendFails(t *testing.T) {
+	dir := t.TempDir()
+	sendAttemptMarker := filepath.Join(dir, "send-attempt")
+	hookMarker := filepath.Join(dir, "hook")
+	p := &failedSendPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		marker:             sendAttemptMarker,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized-failure")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: "background reply", Done: true}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sendAttemptMarker); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(sendAttemptMarker); err != nil {
+		t.Fatalf("background reply send was not attempted: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Fatalf("message.finalized hook ran after failed background send: err=%v", err)
+	}
+}
+
 func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-relay")
@@ -16272,6 +16772,11 @@ func (c *recordingStreamCard) Finalize(_ context.Context, content string) error 
 	return nil
 }
 func (c *recordingStreamCard) Failed() bool { return false }
+
+// SupportsStreamingCardPayload mirrors the Feishu streaming card: structured
+// progress payloads (foldable panels) are used, and the final answer is
+// delivered as a separate message instead of being embedded in the card.
+func (c *recordingStreamCard) SupportsStreamingCardPayload() bool { return true }
 func (c *recordingStreamCard) finalized() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -16327,5 +16832,370 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 	}
 	if strings.Contains(card.finalContent(), "NO_REPLY") {
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
+	}
+}
+
+// TestProcessInteractiveEvents_StreamingCard_AnswerInSeparateMessage is a
+// regression test for the user-requested behavior: the process card ends at
+// the "本过程卡片已停止更新，完整答复见下一条消息。" footer (the payload
+// carries NO answer), and the final answer is delivered as a separate
+// message with the status footer — not embedded in the card.
+func TestProcessInteractiveEvents_StreamingCard_AnswerInSeparateMessage(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "slack:user-streamcard-separate-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-streamcard-separate-answer")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-streamcard-separate-answer",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "step one"}
+	agentSession.events <- Event{Type: EventText, Content: "step two"}
+	agentSession.events <- Event{Type: EventResult, Content: "final answer text", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-streamcard-separate-answer", time.Now(), nil, nil, state.replyCtx, 0)
+
+	if !card.finalized() {
+		t.Fatalf("expected streaming card to be finalized")
+	}
+	payload, ok := ParseProgressCardPayload(card.finalContent())
+	if !ok {
+		t.Fatalf("final content is not a progress payload: %q", card.finalContent())
+	}
+	if strings.TrimSpace(payload.Answer) != "" {
+		t.Errorf("payload card must NOT embed the answer (delivered separately), got %q", payload.Answer)
+	}
+	// The step texts must still live in the foldable thinking panel.
+	if len(payload.Items) == 0 {
+		t.Errorf("payload card should carry thinking panel entries from step texts")
+	}
+	// The separate final message must carry the answer text.
+	sent := p.getSent()
+	joined := strings.Join(sent, "\n")
+	if !strings.Contains(joined, "final answer text") {
+		t.Errorf("separate final message missing the answer; sent=%v", sent)
+	}
+}
+
+// TestProcessInteractiveEvents_StreamingCard_AnswerNotEchoedIntoPanel is the
+// regression test for the claudecode-family bug: every agent adapter except
+// opencode emits the assistant text — which IS the final answer — as EventText,
+// and every EventText chunk is folded into the card's foldable thinking panel.
+// The reply therefore rendered inside the "思考" panel and then again as the
+// separate answer message (observed live on a claudecode project: the panel
+// showed the answer, with no real reasoning in it, while only the tool count
+// moved during the turn). The panel must keep the process entries — here the
+// tool call — without echoing the answer, and the answer must still arrive as
+// the separate final message.
+func TestProcessInteractiveEvents_StreamingCard_AnswerNotEchoedIntoPanel(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+	sessionKey := "slack:user-streamcard-answer-echo"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-streamcard-answer-echo")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-streamcard-answer-echo",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	const answer = "结论：DR 侧已修复，客户端 SSE 路径不受影响。"
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "grep -r cache_creation"}
+	agentSession.events <- Event{Type: EventText, Content: answer}
+	agentSession.events <- Event{Type: EventResult, Content: answer, Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-streamcard-answer-echo", time.Now(), nil, nil, state.replyCtx, 0)
+
+	if !card.finalized() {
+		t.Fatalf("expected streaming card to be finalized")
+	}
+	payload, ok := ParseProgressCardPayload(card.finalContent())
+	if !ok {
+		t.Fatalf("final content is not a progress payload: %q", card.finalContent())
+	}
+	if len(payload.Items) == 0 {
+		t.Fatalf("process panel lost the tool entry: %q", card.finalContent())
+	}
+	for _, item := range payload.Items {
+		if strings.TrimSpace(item.Text) == answer {
+			t.Errorf("the answer is echoed into the process panel: %+v", item)
+		}
+	}
+	if sent := strings.Join(p.getSent(), "\n"); !strings.Contains(sent, answer) {
+		t.Errorf("separate final message missing the answer; sent=%q", sent)
+	}
+}
+
+// dualCardPlatform simulates a platform that supports BOTH the streaming-card
+// (StreamingCardPlatform) and the card-style compact progress writer
+// (ProgressStyleProvider=card + PreviewStarter + MessageUpdater). Regression
+// for the "two cards for one turn" bug: with a StreamingCard active the
+// compact progress writer must be disabled, otherwise the platform posts two
+// independently-updated cards for the same turn.
+type dualCardPlatform struct {
+	stubCompactProgressPlatform
+	cardCreated int
+	lastCard    *recordingStreamingCard // last card handed out, for content assertions
+}
+
+// recordingStreamingCard records preview creation through the platform's
+// SendPreviewStart so tests can count how many cards were actually posted.
+type recordingStreamingCard struct {
+	p       *dualCardPlatform
+	updates []string // every Update/Finalize content, in order
+}
+
+func (c *recordingStreamingCard) Update(_ context.Context, content string) error {
+	c.updates = append(c.updates, content)
+	return c.p.sendPreviewOnce()
+}
+
+func (c *recordingStreamingCard) Finalize(_ context.Context, content string) error {
+	c.updates = append(c.updates, content)
+	return c.p.sendPreviewOnce()
+}
+
+func (c *recordingStreamingCard) Failed() bool { return false }
+
+// SupportsStreamingCardPayload marks the card as a payload-style card
+// (mirroring feishuStreamingCard), so the engine encodes the turn as the
+// structured progress payload and the final answer ships as a separate
+// message instead of being embedded in the card body.
+func (c *recordingStreamingCard) SupportsStreamingCardPayload() bool { return true }
+
+// sendPreviewOnce posts a preview exactly once (lazy creation), mirroring
+// feishuStreamingCard's behavior of one SendPreviewStart for the whole turn.
+func (p *dualCardPlatform) sendPreviewOnce() error {
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	if p.cardCreated == 1 {
+		p.cardCreated = 2 // already posted
+		p.previewStarts = append(p.previewStarts, "streaming-card")
+	}
+	return nil
+}
+
+func (p *dualCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	p.previewMu.Lock()
+	p.cardCreated = 1
+	card := &recordingStreamingCard{p: p}
+	p.lastCard = card
+	p.previewMu.Unlock()
+	return card, nil
+}
+
+// dualCardAgentSession emits a full turn: thinking, tool use, tool result,
+// final text, then finishes.
+type dualCardAgentSession struct {
+	events chan Event
+}
+
+func newDualCardAgentSession() *dualCardAgentSession {
+	return &dualCardAgentSession{events: make(chan Event, 16)}
+}
+
+func (s *dualCardAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	go func() {
+		s.events <- Event{Type: EventThinking, Content: "分析中……"}
+		s.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "ls"}
+		s.events <- Event{Type: EventToolResult, ToolName: "bash", Content: "ok"}
+		s.events <- Event{Type: EventText, Content: "完成。"}
+		s.events <- Event{Type: EventResult, Content: "完成。", Done: true}
+	}()
+	return nil
+}
+
+func (s *dualCardAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *dualCardAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *dualCardAgentSession) CurrentSessionID() string                             { return "dual" }
+func (s *dualCardAgentSession) Alive() bool                                          { return true }
+func (s *dualCardAgentSession) Close() error                                         { return nil }
+
+// TestStreamingCard_DisablesCompactProgressWriter verifies that when a
+// StreamingCard is active for a turn, the card-style compact progress writer
+// is disabled: the platform must only see the streaming card's single preview
+// creation, never a second "progress card" preview from the compact writer.
+func TestStreamingCard_DisablesCompactProgressWriter(t *testing.T) {
+	p := &dualCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+			style:              "card",
+			supportPayload:     true,
+		},
+	}
+	agentSession := newDualCardAgentSession()
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "legacy", // rich-card path off; streaming card + progress writer both eligible
+	})
+
+	msg := &Message{
+		SessionKey: "feishu:dual",
+		Platform:   "feishu",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// The turn is consumed synchronously up to EventResult; the streaming-card
+	// preview send is a short async tail. Poll (bounded) instead of a fixed
+	// sleep so slow CI runners don't flake.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p.previewMu.Lock()
+		cardCreated := p.cardCreated
+		starts := len(p.previewStarts)
+		p.previewMu.Unlock()
+		if cardCreated > 0 && starts >= 1 {
+			// Brief settle window so a (buggy) second preview surfaces too.
+			time.Sleep(100 * time.Millisecond)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for streaming card turn: cardCreated=%d previewStarts=%d", cardCreated, starts)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	p.previewMu.Lock()
+	starts := len(p.previewStarts)
+	p.previewMu.Unlock()
+	if starts != 1 {
+		t.Fatalf("SendPreviewStart calls = %d, want exactly 1 (only the streaming card; compact progress writer must be disabled)", starts)
+	}
+}
+
+// progressCardAgentSession emits a turn with intermediate step text (opencode
+// step buffering) followed by an EventResult carrying the answer content —
+// mirroring the opencode session behavior after the step-buffer change,
+// where the final step's text is delivered ONLY via EventResult.Content.
+type progressCardAgentSession struct {
+	events chan Event
+}
+
+func newProgressCardAgentSession() *progressCardAgentSession {
+	return &progressCardAgentSession{events: make(chan Event, 16)}
+}
+
+func (s *progressCardAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	go func() {
+		s.events <- Event{Type: EventText, Content: "计划：先核对剩余改动。"}
+		s.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "git status"}
+		s.events <- Event{Type: EventToolResult, ToolName: "bash", Content: "ok"}
+		s.events <- Event{Type: EventText, Content: "正在跑全量测试。"}
+		s.events <- Event{Type: EventResult, Content: "都已处理。代码提交 0a66f11。", Done: true}
+	}()
+	return nil
+}
+
+func (s *progressCardAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *progressCardAgentSession) Events() <-chan Event                                 { return s.events }
+func (s *progressCardAgentSession) CurrentSessionID() string                             { return "dual" }
+func (s *progressCardAgentSession) Alive() bool                                          { return true }
+func (s *progressCardAgentSession) Close() error                                         { return nil }
+
+// TestStreamingCard_ProgressTextFoldedIntoPanel is the regression test for
+// "process narration leaked into the final message": intermediate step text
+// must be folded into the foldable thinking panel of the streaming card, and
+// the separate final reply (payload platforms deliver the answer as its own
+// message after the card) must contain ONLY the final answer — never the
+// accumulated per-step narration. The answer arrives solely via
+// EventResult.Content (opencode never forwards it as EventText).
+func TestStreamingCard_ProgressTextFoldedIntoPanel(t *testing.T) {
+	p := &dualCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+			style:              "card",
+			supportPayload:     true,
+		},
+	}
+	agentSession := newProgressCardAgentSession()
+	agent := &resultAgent{session: agentSession}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+		Mode:             "full",
+		CardMode:         "legacy",
+	})
+
+	msg := &Message{
+		SessionKey: "feishu:dual",
+		Platform:   "feishu",
+		UserID:     "u1",
+		UserName:   "user",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+	e.handleMessage(p, msg)
+
+	// Wait for the streaming-card turn to settle (finalize + final reply).
+	deadline := time.Now().Add(5 * time.Second)
+	var lastPayload *ProgressCardPayload
+	for {
+		p.previewMu.Lock()
+		card := p.lastCard
+		p.previewMu.Unlock()
+		sent := p.getSent()
+		if card != nil && len(card.updates) > 0 && len(sent) > 0 {
+			content := card.updates[len(card.updates)-1] // final content
+			if pl, ok := ParseProgressCardPayload(content); ok {
+				lastPayload = pl
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for streaming card turn: sent=%d", len(sent))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The final card payload must NOT contain the final answer in its
+	// thinking panel — the answer lives in the separate reply message.
+	for _, item := range lastPayload.Items {
+		if strings.Contains(item.Text, "都已处理") || strings.Contains(item.Text, "0a66f11") {
+			t.Errorf("final answer leaked into card panel: %+v", item)
+		}
+	}
+	panelTexts := map[string]bool{}
+	for _, item := range lastPayload.Items {
+		panelTexts[item.Text] = true
+	}
+	if !panelTexts["计划：先核对剩余改动。"] || !panelTexts["正在跑全量测试。"] {
+		t.Errorf("intermediate step text missing from card panel; items=%v", lastPayload.Items)
+	}
+
+	// The final reply message contains ONLY the answer.
+	sent := p.getSent()
+	joined := strings.Join(sent, "\n")
+	if !strings.Contains(joined, "都已处理。代码提交 0a66f11。") {
+		t.Errorf("final reply missing the answer; sent=%q", sent)
+	}
+	if strings.Contains(joined, "计划：先核对剩余改动。") || strings.Contains(joined, "正在跑全量测试。") {
+		t.Errorf("intermediate step text leaked into final reply; sent=%q", sent)
 	}
 }

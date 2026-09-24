@@ -4887,6 +4887,17 @@ func progressToolElement(iconToken string, content string) map[string]any {
 	return elem
 }
 
+// Fixed element_ids for the progress-payload collapsible panels so cardkit
+// element APIs (POST /elements with type=append) can add entries to a panel
+// without re-rendering it — preserving a user-expanded panel across
+// intermediate updates. Must be ≤20 chars, start with a letter, and be
+// unique per card.
+const (
+	progressPanelThinkingElementID = "thinking_panel"
+	progressPanelToolsElementID    = "tools_panel"
+	progressPanelUpdatesElementID  = "updates_panel"
+)
+
 func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[string]any {
 	text := strings.TrimSpace(item.Text)
 	if text == "" {
@@ -4976,8 +4987,8 @@ func progressPanelTitle(label string, count int, lang string) string {
 	return label
 }
 
-func buildProgressPanel(title string, expanded bool, elements []map[string]any) map[string]any {
-	return map[string]any{
+func buildProgressPanel(title string, expanded bool, elementID string, elements []map[string]any) map[string]any {
+	panel := map[string]any{
 		"tag":              "collapsible_panel",
 		"expanded":         expanded,
 		"background_color": "grey",
@@ -4989,6 +5000,13 @@ func buildProgressPanel(title string, expanded bool, elements []map[string]any) 
 		"padding":          "4px 8px",
 		"elements":         elements,
 	}
+	if elementID != "" {
+		// element_id lets cardkit element APIs (append/insert) target this
+		// container so intermediate updates can add entries WITHOUT
+		// re-rendering the panel — a user-expanded panel stays expanded.
+		panel["element_id"] = elementID
+	}
+	return panel
 }
 
 func buildProgressPanelElements(items []core.ProgressCardEntry, lang string) []map[string]any {
@@ -5000,25 +5018,33 @@ func buildProgressPanelElements(items []core.ProgressCardEntry, lang string) []m
 }
 
 func appendProgressGroupedElements(elements []map[string]any, items []core.ProgressCardEntry, lang string, running bool) []map[string]any {
+	// Panels stay collapsed at every state (running AND done): the user
+	// expands explicitly if they want to read the process; nothing in the
+	// card auto-expands, so the chat window never jumps and the final card
+	// matches whatever state the user left it in.
+	expanded := false
 	reasoning, tools, others := splitProgressItemsByLane(items)
 	if len(reasoning) > 0 {
 		elements = append(elements, buildProgressPanel(
 			progressPanelTitle("Reasoning", len(reasoning), lang),
-			running,
+			expanded,
+			progressPanelThinkingElementID,
 			buildProgressPanelElements(reasoning, lang),
 		))
 	}
 	if len(tools) > 0 {
 		elements = append(elements, buildProgressPanel(
 			progressPanelTitle("Tools", len(tools), lang),
-			running,
+			expanded,
+			progressPanelToolsElementID,
 			buildProgressPanelElements(tools, lang),
 		))
 	}
 	if len(others) > 0 {
 		elements = append(elements, buildProgressPanel(
 			progressPanelTitle("Updates", len(others), lang),
-			running,
+			expanded,
+			progressPanelUpdatesElementID,
 			buildProgressPanelElements(others, lang),
 		))
 	}
@@ -5054,6 +5080,13 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 	}
 
 	elements = appendProgressGroupedElements(elements, items, payload.Lang, running)
+	if answer := strings.TrimSpace(payload.Answer); answer != "" {
+		elements = append(elements, map[string]any{"tag": "hr"})
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": sanitizeCardMarkdownForCard(answer),
+		})
+	}
 	if footer != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})
 		elements = append(elements, map[string]any{
@@ -5071,6 +5104,10 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 		"schema": "2.0",
 		"config": map[string]any{
 			"wide_screen_mode": true,
+			// cardkit element APIs (append/insert) require streaming mode so
+			// intermediate updates can add panel entries without re-rendering.
+			"streaming_mode": true,
+			"update_multi":   true,
 		},
 		"header": map[string]any{
 			"title": map[string]any{
@@ -5308,6 +5345,202 @@ func (p *Platform) StreamRichCardText(ctx context.Context, previewHandle any, fu
 		err := classifyFeishuCardAPIError("stream rich card text", resp.Code, resp.Msg)
 		if errors.Is(err, errFeishuCardRateLimited) {
 			slog.Debug(p.tag()+": stream rich card text rate limited; skipping frame", "code", resp.Code)
+			return nil
+		}
+		return fmt.Errorf("%s: %w", p.tag(), err)
+	}
+	return nil
+}
+
+// cardElementAddType is the cardkit element-add operation. All three values
+// share one endpoint and body shape; only the positioning differs.
+type cardElementAddType string
+
+const (
+	cardElementAppend       cardElementAddType = "append"
+	cardElementInsertBefore cardElementAddType = "insert_before"
+	cardElementInsertAfter  cardElementAddType = "insert_after"
+)
+
+// addCardElements adds elements to a card entity via the cardkit element API:
+//
+//	POST /open-apis/cardkit/v1/cards/{card_id}/elements
+//	{"type":"append|insert_before|insert_after","target_element_id":"<element>","elements":"[{...}]","sequence":N}
+//
+// These operations add entries WITHOUT re-rendering the target container, so a
+// collapsible panel the user expanded stays expanded while new thinking/tool
+// entries stream in. `append` adds at the end of the target container (or of
+// the card body when targetElementID is empty); the insert modes position the
+// new elements relative to targetElementID, which must be a container element.
+// Requires the card entity to be in streaming mode (config.streaming_mode +
+// update_multi set on creation). Returns ErrNotSupported when the handle has
+// no cardID.
+func (p *Platform) addCardElements(ctx context.Context, h *feishuPreviewHandle, op cardElementAddType, targetElementID string, elements []map[string]any) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.cardID == "" {
+		return core.ErrNotSupported
+	}
+
+	h.sequence++
+	elementsJSON, err := json.Marshal(elements)
+	if err != nil {
+		return fmt.Errorf("%s: %s: marshal: %w", p.tag(), op, err)
+	}
+	body := map[string]any{
+		"type":     string(op),
+		"elements": string(elementsJSON),
+		"sequence": h.sequence,
+	}
+	if targetElementID != "" {
+		body["target_element_id"] = targetElementID
+	}
+	opLabel := string(op) + " card elements"
+
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, opLabel, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Post(ctx, "/open-apis/cardkit/v1/cards/"+h.cardID+"/elements", body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return fmt.Errorf("%s: %s: %w", p.tag(), opLabel, err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return cardElementAPIStatusError(p.tag(), opLabel, apiResp)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return fmt.Errorf("%s: %s: parse response: %w", p.tag(), opLabel, err)
+	}
+	if resp.Code != 0 {
+		err := classifyFeishuCardAPIError(opLabel, resp.Code, resp.Msg)
+		if errors.Is(err, errFeishuCardRateLimited) {
+			slog.Debug(p.tag()+": "+opLabel+" rate limited; falling back", "code", resp.Code)
+			return err
+		}
+		return fmt.Errorf("%s: %w", p.tag(), err)
+	}
+	return nil
+}
+
+// appendCardElements appends elements to a container element (collapsible
+// panel) of the card entity — the incremental update that streams new
+// thinking/tool entries into a panel without re-rendering it.
+func (p *Platform) appendCardElements(ctx context.Context, h *feishuPreviewHandle, targetElementID string, elements []map[string]any) error {
+	return p.addCardElements(ctx, h, cardElementAppend, targetElementID, elements)
+}
+
+// insertCardElements inserts elements before/after targetElementID, or at the
+// end of the card body when targetElementID is empty. Used to add a
+// collapsible panel the rendered card does not contain yet (its lane was still
+// empty when the card was rendered) — the alternative, a full-card re-render,
+// would reset the expand/collapse state of every panel the user touched.
+func (p *Platform) insertCardElements(ctx context.Context, h *feishuPreviewHandle, targetElementID string, after bool, elements []map[string]any) error {
+	op := cardElementInsertBefore
+	if after {
+		op = cardElementInsertAfter
+	}
+	return p.addCardElements(ctx, h, op, targetElementID, elements)
+}
+
+// cardElementAPIStatusError formats a non-200 cardkit response together with
+// the (truncated) response body. Reporting "HTTP status 400" alone made a
+// rejected element request impossible to diagnose from the logs; the body
+// names the offending field.
+func cardElementAPIStatusError(tag, op string, apiResp *larkcore.ApiResp) error {
+	if apiResp == nil {
+		return fmt.Errorf("%s: %s: no response", tag, op)
+	}
+	body := strings.TrimSpace(string(apiResp.RawBody))
+	if len(body) > 300 {
+		body = body[:300] + "..."
+	}
+	if body == "" {
+		return fmt.Errorf("%s: %s: HTTP status %d", tag, op, apiResp.StatusCode)
+	}
+	return fmt.Errorf("%s: %s: HTTP status %d: %s", tag, op, apiResp.StatusCode, body)
+}
+
+// buildPatchElementTitleBody builds the body of the cardkit "update element
+// properties" request (PATCH
+// /open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}).
+//
+// The property payload MUST be carried in the API's `partial_element` field as
+// a JSON-serialized string; the API merges it into the existing element, so
+// only header.title is sent and the panel's own `expanded` property is not
+// part of the request — the client keeps whatever expand/collapse state the
+// user chose.
+//
+// Regression (2026-09-24): this payload used to be sent in a field named
+// `element`. Every call was rejected with HTTP 400 (missing required
+// `partial_element`), so the "思考 (N) / 工具 (N)" panel counts never updated
+// while a turn was running. Keep the field name pinned by
+// TestPatchCardElementTitleBodyUsesPartialElement.
+func buildPatchElementTitleBody(title string, sequence int) (map[string]any, error) {
+	partialElement, err := json.Marshal(map[string]any{
+		"header": map[string]any{
+			"title": map[string]any{"tag": "plain_text", "content": title},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"partial_element": string(partialElement),
+		"sequence":        sequence,
+	}, nil
+}
+
+// patchCardElementTitle updates the header title of a collapsible panel via
+// the cardkit PATCH element API:
+//
+//	PATCH /open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}
+//
+// Only the header.title.content is patched; expanded is NOT part of the
+// request, so the client-side expand/collapse state of the panel is left
+// untouched. This keeps the "思考 (N)" / "工具 (N)" counts live while the
+// user-expanded panel stays expanded. Failures are reported (caller falls
+// back to leaving the title stale — never to a full-card update).
+func (p *Platform) patchCardElementTitle(ctx context.Context, h *feishuPreviewHandle, elementID, title string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.cardID == "" {
+		return core.ErrNotSupported
+	}
+
+	h.sequence++
+	body, err := buildPatchElementTitleBody(title, h.sequence)
+	if err != nil {
+		return fmt.Errorf("%s: patch card element title: marshal: %w", p.tag(), err)
+	}
+
+	var apiResp *larkcore.ApiResp
+	if err := p.withFreshTenantAccessTokenRetry(ctx, "patch card element title", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		var err error
+		apiResp, err = client.Patch(ctx, "/open-apis/cardkit/v1/cards/"+h.cardID+"/elements/"+elementID, body, larkcore.AccessTokenTypeTenant, options...)
+		return err
+	}); err != nil {
+		return fmt.Errorf("%s: patch card element title: %w", p.tag(), err)
+	}
+	if apiResp == nil || apiResp.StatusCode != http.StatusOK {
+		return cardElementAPIStatusError(p.tag(), "patch card element title", apiResp)
+	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil {
+		return fmt.Errorf("%s: patch card element title: parse response: %w", p.tag(), err)
+	}
+	if resp.Code != 0 {
+		err := classifyFeishuCardAPIError("patch card element title", resp.Code, resp.Msg)
+		if errors.Is(err, errFeishuCardRateLimited) {
+			slog.Debug(p.tag()+": patch card element title rate limited", "code", resp.Code)
 			return nil
 		}
 		return fmt.Errorf("%s: %w", p.tag(), err)

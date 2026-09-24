@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -309,5 +310,53 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 	}
 	if got := payload.Items[0].Text; got != raw {
 		t.Fatalf("tool result text = %q, want raw %q", got, raw)
+	}
+}
+
+// TestBuildStreamingCardPayload_CapsPanelEntries is the regression test for
+// the Feishu cardkit "element exceeds the limit" failure (code 300305): a
+// long agent turn with dozens of tool calls must be capped per panel so the
+// final card stays within the platform element budget. Excess entries are
+// dropped and the payload is marked truncated.
+func TestBuildStreamingCardPayload_CapsPanelEntries(t *testing.T) {
+	var stepTexts []string
+	for i := 0; i < maxThinkingPanelEntries+5; i++ {
+		stepTexts = append(stepTexts, fmt.Sprintf("思考步骤 %d", i+1))
+	}
+	var tools []cardToolEntry
+	for i := 0; i < 41; i++ {
+		tools = append(tools, cardToolEntry{Index: i, Name: "bash", Input: fmt.Sprintf("cmd %d", i)})
+	}
+
+	content := BuildStreamingCardPayload("", stepTexts, tools, "最终答案。", "test", LangChinese, ProgressCardStateCompleted)
+	payload, ok := ParseProgressCardPayload(content)
+	if !ok {
+		t.Fatalf("ParseProgressCardPayload failed")
+	}
+	thinkingCount, toolCount := 0, 0
+	for _, item := range payload.Items {
+		switch item.Kind {
+		case ProgressEntryThinking:
+			thinkingCount++
+		case ProgressEntryToolUse:
+			toolCount++
+		}
+	}
+	if thinkingCount > maxThinkingPanelEntries {
+		t.Errorf("thinking entries = %d, want <= %d", thinkingCount, maxThinkingPanelEntries)
+	}
+	if toolCount > maxToolPanelEntries {
+		t.Errorf("tool entries = %d, want <= %d", toolCount, maxToolPanelEntries)
+	}
+	if !payload.Truncated {
+		t.Error("payload.Truncated = false, want true (entries were capped)")
+	}
+	if payload.Answer != "最终答案。" {
+		t.Errorf("answer = %q, want %q", payload.Answer, "最终答案。")
+	}
+	// The first tool entry survives (prefix record is kept).
+	firstTool := payload.Items[len(payload.Items)-toolCount]
+	if firstTool.Tool != "bash" || !strings.Contains(firstTool.Text, "cmd 0") {
+		t.Errorf("first tool entry = %+v, want bash/cmd 0", firstTool)
 	}
 }
