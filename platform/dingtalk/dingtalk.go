@@ -242,16 +242,17 @@ func (p *Platform) onRawMessage(rawJSON string) {
 	// Parse the full "text" object from raw JSON to recover isReplyMsg/repliedMsg.
 	// The SDK's BotCallbackDataTextModel only has Content string, losing these fields.
 	var envelope struct {
-		Text richTextContent `json:"text"`
+		Text      richTextContent `json:"text"`
+		RobotCode string          `json:"robotCode"`
 	}
 	if err := json.Unmarshal([]byte(rawJSON), &envelope); err != nil {
 		slog.Warn("dingtalk: failed to parse rich text content", "error", err)
 	}
 
-	p.onMessage(&data, &envelope.Text)
+	p.onMessage(&data, &envelope.Text, envelope.RobotCode)
 }
 
-func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richTextContent) {
+func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richTextContent, callbackRobotCode string) {
 	slog.Debug("dingtalk: message received", "user", data.SenderNick, "msgtype", data.Msgtype)
 
 	if p.dedup.IsDuplicate(data.MsgId) {
@@ -291,11 +292,24 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		return
 	}
 
-	// Handle richText messages — extract plain text from rich content
+	// Handle richText messages, including images embedded alongside text.
 	if data.Msgtype == "richText" {
-		text := extractRichText(data.Content)
-		if text == "" {
-			slog.Debug("dingtalk: richText message with no extractable text", "msg_id", data.MsgId)
+		text, pictureDownloads := extractRichText(data.Content)
+		images := make([]core.ImageAttachment, 0, len(pictureDownloads))
+		for _, picture := range pictureDownloads {
+			img, err := p.downloadImage(picture.DownloadCode, callbackRobotCode)
+			if err != nil && picture.FallbackCode != "" {
+				slog.Warn("dingtalk: retrying richText image with legacy download code", "error", err, "msg_id", data.MsgId)
+				img, err = p.downloadImage(picture.FallbackCode, callbackRobotCode)
+			}
+			if err != nil {
+				slog.Error("dingtalk: failed to download richText image", "error", err, "msg_id", data.MsgId)
+				continue
+			}
+			images = append(images, img)
+		}
+		if text == "" && len(images) == 0 {
+			slog.Debug("dingtalk: richText message with no extractable content", "msg_id", data.MsgId)
 			return
 		}
 		msg := &core.Message{
@@ -306,6 +320,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 			ChatName:   data.ConversationTitle,
 			Content:    text,
 			MessageID:  data.MsgId,
+			ChannelKey: data.ConversationId,
 			ReplyCtx: replyContext{
 				sessionWebhook: data.SessionWebhook,
 				conversationId: data.ConversationId,
@@ -313,6 +328,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 				messageID:      data.MsgId,
 				isGroup:        data.ConversationType == "2",
 			},
+			Images: images,
 		}
 		p.handler(p, msg)
 		return
@@ -380,19 +396,26 @@ func (p *Platform) replyUnauthorized(data *chatbot.BotCallbackDataModel) {
 	}
 }
 
-// extractRichText extracts plain text from a DingTalk richText content payload.
+type richTextImageDownload struct {
+	DownloadCode string
+	FallbackCode string
+}
+
+// extractRichText extracts plain text and embedded image download codes from a
+// DingTalk richText content payload. New callbacks use downloadCode with the
+// v1.0 API; pictureDownloadCode is retained as a legacy fallback.
 // The expected structure is: {"richText": [{"text": "..."}, {"text": "...", "attrs": {...}}, ...]}
-// Non-text elements (e.g. pictureDownloadCode) are skipped.
-func extractRichText(content interface{}) string {
+func extractRichText(content interface{}) (string, []richTextImageDownload) {
 	m, ok := content.(map[string]interface{})
 	if !ok {
-		return ""
+		return "", nil
 	}
 	parts, ok := m["richText"].([]interface{})
 	if !ok {
-		return ""
+		return "", nil
 	}
 	var b strings.Builder
+	var pictureDownloads []richTextImageDownload
 	for _, part := range parts {
 		item, ok := part.(map[string]interface{})
 		if !ok {
@@ -401,8 +424,23 @@ func extractRichText(content interface{}) string {
 		if text, ok := item["text"].(string); ok {
 			b.WriteString(text)
 		}
+		downloadCode, _ := item["downloadCode"].(string)
+		fallbackCode, _ := item["pictureDownloadCode"].(string)
+		downloadCode = strings.TrimSpace(downloadCode)
+		fallbackCode = strings.TrimSpace(fallbackCode)
+		if downloadCode == "" {
+			downloadCode, fallbackCode = fallbackCode, ""
+		} else if fallbackCode == downloadCode {
+			fallbackCode = ""
+		}
+		if downloadCode != "" {
+			pictureDownloads = append(pictureDownloads, richTextImageDownload{
+				DownloadCode: downloadCode,
+				FallbackCode: fallbackCode,
+			})
+		}
 	}
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(b.String()), pictureDownloads
 }
 
 func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessionKey string) {
@@ -496,42 +534,11 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		return
 	}
 
-	// Download image file using the same messageFiles/download API as audio
-	downloadURL, err := p.getDownloadURL(downloadCode)
-	if err != nil {
-		slog.Error("dingtalk: failed to get image download URL", "error", err)
-		return
-	}
-
-	resp, err := p.httpClient.Get(downloadURL)
+	img, err := p.downloadImage(downloadCode)
 	if err != nil {
 		slog.Error("dingtalk: failed to download image", "error", err)
 		return
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		slog.Error("dingtalk: image download returned status", "status", resp.StatusCode)
-		return
-	}
-
-	const maxImageBytes = 25 * 1024 * 1024 // 25 MiB, same cap as other platforms
-	imgBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
-	if err != nil {
-		slog.Error("dingtalk: failed to read image data", "error", err)
-		return
-	}
-	if len(imgBytes) > maxImageBytes {
-		slog.Error("dingtalk: image too large, dropping", "size", len(imgBytes), "limit", maxImageBytes)
-		return
-	}
-
-	mimeType := resp.Header.Get("Content-Type")
-	if mimeType == "" {
-		mimeType = "image/png"
-	}
-
-	slog.Info("dingtalk: image downloaded successfully", "size", len(imgBytes), "mime", mimeType)
 
 	msg := &core.Message{
 		SessionKey: sessionKey,
@@ -546,13 +553,45 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 			messageID:      data.MsgId,
 			isGroup:        data.ConversationType == "2",
 		},
-		Images: []core.ImageAttachment{{
-			MimeType: mimeType,
-			Data:     imgBytes,
-		}},
+		Images: []core.ImageAttachment{img},
 	}
 
 	p.handler(p, msg)
+}
+
+func (p *Platform) downloadImage(downloadCode string, robotCodes ...string) (core.ImageAttachment, error) {
+	// Download image file using the same messageFiles/download API as audio.
+	downloadURL, err := p.getDownloadURL(downloadCode, robotCodes...)
+	if err != nil {
+		return core.ImageAttachment{}, fmt.Errorf("get download URL: %w", err)
+	}
+
+	resp, err := p.httpClient.Get(downloadURL)
+	if err != nil {
+		return core.ImageAttachment{}, fmt.Errorf("http get: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return core.ImageAttachment{}, fmt.Errorf("download returned status %d", resp.StatusCode)
+	}
+
+	const maxImageBytes = 25 * 1024 * 1024 // 25 MiB, same cap as other platforms
+	imgBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
+	if err != nil {
+		return core.ImageAttachment{}, fmt.Errorf("read image data: %w", err)
+	}
+	if len(imgBytes) > maxImageBytes {
+		return core.ImageAttachment{}, fmt.Errorf("image too large: size %d exceeds limit %d", len(imgBytes), maxImageBytes)
+	}
+
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+
+	slog.Info("dingtalk: image downloaded successfully", "size", len(imgBytes), "mime", mimeType)
+	return core.ImageAttachment{MimeType: mimeType, Data: imgBytes}, nil
 }
 
 // handleFileMessage downloads a file attachment (msgtype=file) and dispatches
@@ -639,9 +678,9 @@ func (p *Platform) handleFileMessage(data *chatbot.BotCallbackDataModel, session
 	p.handler(p, msg)
 }
 
-func (p *Platform) downloadAudio(downloadCode string) ([]byte, string, error) {
+func (p *Platform) downloadAudio(downloadCode string, robotCodes ...string) ([]byte, string, error) {
 	// Get download URL
-	downloadURL, err := p.getDownloadURL(downloadCode)
+	downloadURL, err := p.getDownloadURL(downloadCode, robotCodes...)
 	if err != nil {
 		return nil, "", fmt.Errorf("get download URL: %w", err)
 	}
@@ -671,15 +710,19 @@ func (p *Platform) downloadAudio(downloadCode string) ([]byte, string, error) {
 	return data, mimeType, nil
 }
 
-func (p *Platform) getDownloadURL(downloadCode string) (string, error) {
+func (p *Platform) getDownloadURL(downloadCode string, robotCodes ...string) (string, error) {
 	token, err := p.getAccessToken()
 	if err != nil {
 		return "", fmt.Errorf("get access token: %w", err)
 	}
 
+	robotCode := p.robotCode
+	if len(robotCodes) > 0 && strings.TrimSpace(robotCodes[0]) != "" {
+		robotCode = strings.TrimSpace(robotCodes[0])
+	}
 	reqBody := map[string]string{
 		"downloadCode": downloadCode,
-		"robotCode":    p.robotCode,
+		"robotCode":    robotCode,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -705,6 +748,10 @@ func (p *Platform) getDownloadURL(downloadCode string) (string, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
+		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if detail := strings.TrimSpace(string(errorBody)); detail != "" {
+			return "", fmt.Errorf("api returned status %d: %s", resp.StatusCode, detail)
+		}
 		return "", fmt.Errorf("api returned status %d", resp.StatusCode)
 	}
 
