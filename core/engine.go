@@ -6533,6 +6533,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventError:
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
+			// A backend can create its resumable session before a turn fails
+			// (for example Codex emits thread.started, then turn.failed). Persist
+			// that ID here as well as from event.SessionID so the retry reuses the
+			// conversation that already contains the user's original prompt.
+			if state.agentSession != nil {
+				if currentID := state.agentSession.CurrentSessionID(); currentID != "" && session.GetAgentSessionID() != currentID {
+					session.SetAgentSessionID(currentID, e.agent.Name())
+					sessions.Save()
+				}
+			}
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()

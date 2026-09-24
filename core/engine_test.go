@@ -15421,6 +15421,67 @@ func (s *codexLikeSession) CurrentSessionID() string {
 func (s *codexLikeSession) Alive() bool  { return s.alive }
 func (s *codexLikeSession) Close() error { s.alive = false; return nil }
 
+// failOnceCodexLikeSession models a backend that creates a resumable thread,
+// then fails its first turn without including the thread ID on EventError.
+type failOnceCodexLikeSession struct {
+	threadID string
+	events   chan Event
+	alive    bool
+	sends    atomic.Int32
+}
+
+func (s *failOnceCodexLikeSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	if s.sends.Add(1) == 1 {
+		s.events <- Event{Type: EventError, Error: errors.New("Selected model is at capacity")}
+	} else {
+		s.events <- Event{Type: EventResult, SessionID: s.threadID, Content: "recovered", Done: true}
+	}
+	return nil
+}
+func (s *failOnceCodexLikeSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *failOnceCodexLikeSession) Events() <-chan Event { return s.events }
+func (s *failOnceCodexLikeSession) CurrentSessionID() string {
+	if s.sends.Load() > 0 {
+		return s.threadID
+	}
+	return ""
+}
+func (s *failOnceCodexLikeSession) Alive() bool  { return s.alive }
+func (s *failOnceCodexLikeSession) Close() error { s.alive = false; return nil }
+
+func TestEventErrorPersistsLateSessionIDForRetry(t *testing.T) {
+	sess := &failOnceCodexLikeSession{
+		threadID: "codex-thread-capacity",
+		events:   make(chan Event, 4),
+		alive:    true,
+	}
+	starts := atomic.Int32{}
+	agent := &controllableAgent{startSessionFn: func(_ context.Context, _ string) (AgentSession, error) {
+		starts.Add(1)
+		return sess, nil
+	}}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	key := "test:capacity-retry"
+
+	e.ReceiveMessage(p, &Message{SessionKey: key, Content: "full alert context", ReplyCtx: "ctx1"})
+	waitForAgentSessionID(t, e.sessions.GetOrCreateActive(key), "codex-thread-capacity")
+	e.ReceiveMessage(p, &Message{SessionKey: key, Content: "retry", ReplyCtx: "ctx2"})
+
+	deadline := time.Now().Add(time.Second)
+	for sess.sends.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("StartSession calls = %d, want 1; retry recycled the live context", got)
+	}
+	if got := sess.sends.Load(); got != 2 {
+		t.Fatalf("Send calls = %d, want 2", got)
+	}
+}
+
 // TestSessionName_CodexLikeFlow does an end-to-end test simulating real codex
 // behavior: CurrentSessionID()="" initially, thread ID only available after Send().
 // This is the exact bug: /new xxx → send message → agent replies with SessionID
