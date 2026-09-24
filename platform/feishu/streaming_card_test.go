@@ -21,7 +21,17 @@ type fakePlatformForStreamCard struct {
 	updateCalls       int
 	finalizeCalls     int
 	appendCalls       int
+	insertCalls       int
 	lastPreviewHandle *feishuPreviewHandle
+	lastAppendPanel   string
+	insertAnchor      string
+	insertAfter       bool
+	insertedElements  []map[string]any
+	// missingPanels lists panel element ids the fake pretends the card does not
+	// contain, so appends to them fail the way cardkit does: code 300315
+	// "no such element id". Inserting the panel clears the entry, mirroring the
+	// real API where the inserted panel then exists.
+	missingPanels map[string]bool
 }
 
 func (f *fakePlatformForStreamCard) ProgressStyle() string { return "card" }
@@ -49,7 +59,26 @@ func (f *fakePlatformForStreamCard) StreamRichCardText(ctx context.Context, prev
 func (f *fakePlatformForStreamCard) appendCardElements(ctx context.Context, h *feishuPreviewHandle, targetElementID string, elements []map[string]any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.missingPanels[targetElementID] {
+		return fmt.Errorf("fake-feishu: append card elements failed: code=300315 msg=ErrMsg: msg: [no such element id: %s]", targetElementID)
+	}
 	f.appendCalls++
+	f.lastAppendPanel = targetElementID
+	return nil
+}
+
+func (f *fakePlatformForStreamCard) insertCardElements(ctx context.Context, h *feishuPreviewHandle, targetElementID string, after bool, elements []map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.insertCalls++
+	f.insertAnchor = targetElementID
+	f.insertAfter = after
+	for _, el := range elements {
+		if id, ok := el["element_id"].(string); ok {
+			delete(f.missingPanels, id)
+		}
+	}
+	f.insertedElements = append(f.insertedElements, elements...)
 	return nil
 }
 
@@ -82,6 +111,24 @@ func (f *fakePlatformForStreamCard) appendCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.appendCalls
+}
+
+func (f *fakePlatformForStreamCard) insertCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.insertCalls
+}
+
+func (f *fakePlatformForStreamCard) lastInsert() (anchor string, after bool, elements []map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.insertAnchor, f.insertAfter, f.insertedElements
+}
+
+func (f *fakePlatformForStreamCard) lastAppendElementID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastAppendPanel
 }
 
 // CreateStreamingCard mirrors the real *Platform implementation for tests.
@@ -337,4 +384,88 @@ func TestStreamingCard_PayloadUpdateAppends(t *testing.T) {
 	}
 }
 
+// TestStreamingCard_InsertsMissingPanelInsteadOfFullUpdate covers the
+// regression where the first entry of a lane whose panel the card does not
+// have yet (appending to it fails with cardkit 300315 "no such element id")
+// fell back to a full-card re-render. A full re-render re-sends the card JSON,
+// which resets the expand/collapse state of every panel the user had touched —
+// the opposite of what the incremental append path exists for. The panel must
+// be inserted next to its sibling panel instead, and later entries of that
+// lane must append to it.
+func TestStreamingCard_InsertsMissingPanelInsteadOfFullUpdate(t *testing.T) {
+	p := &fakePlatformForStreamCard{
+		useInteractive: true,
+		// The card is rendered with a thinking lane only, so it carries no
+		// tools_panel: appends to it fail exactly like cardkit does.
+		missingPanels: map[string]bool{progressPanelToolsElementID: true},
+	}
+	sc, _ := p.CreateStreamingCard(context.Background(), replyContext{chatID: "chat_fake"})
+	card := sc.(*feishuStreamingCard)
 
+	thinkingOnly := core.BuildProgressCardPayloadV2(
+		[]core.ProgressCardEntry{{Kind: core.ProgressEntryThinking, Text: "思考一"}},
+		false, "opencode", core.LangChinese, core.ProgressCardStateRunning)
+	_ = card.Update(context.Background(), thinkingOnly)
+	time.Sleep(feishuStreamingCardUpdateMinInterval + 200*time.Millisecond)
+
+	withOneTool := core.BuildProgressCardPayloadV2(
+		[]core.ProgressCardEntry{
+			{Kind: core.ProgressEntryThinking, Text: "思考一"},
+			{Kind: core.ProgressEntryToolUse, Tool: "bash", Text: "ls -l"},
+		},
+		false, "opencode", core.LangChinese, core.ProgressCardStateRunning)
+	_ = card.Update(context.Background(), withOneTool)
+	time.Sleep(feishuStreamingCardUpdateMinInterval + 200*time.Millisecond)
+
+	if _, updates, _ := p.count(); updates != 0 {
+		t.Errorf("full-card updates = %d, want 0: a missing panel must be inserted, never re-rendered", updates)
+	}
+	if got := p.insertCount(); got != 1 {
+		t.Fatalf("insert calls = %d, want 1 (tools panel inserted once)", got)
+	}
+	anchor, after, inserted := p.lastInsert()
+	if anchor != progressPanelThinkingElementID || !after {
+		t.Errorf("insert anchor = (%q, after=%v), want (%q, after=true) so thinking stays above tools",
+			anchor, after, progressPanelThinkingElementID)
+	}
+	if len(inserted) != 1 {
+		t.Fatalf("inserted elements = %d, want 1 (the tools panel itself)", len(inserted))
+	}
+	panel := inserted[0]
+	if panel["element_id"] != progressPanelToolsElementID {
+		t.Errorf("inserted element_id = %v, want %q", panel["element_id"], progressPanelToolsElementID)
+	}
+	header, _ := panel["header"].(map[string]any)
+	title, _ := header["title"].(map[string]any)
+	if content, _ := title["content"].(string); content != "工具 (1)" {
+		t.Errorf("inserted panel title = %q, want %q", content, "工具 (1)")
+	}
+	if children, _ := panel["elements"].([]map[string]any); len(children) != 1 {
+		t.Errorf("inserted panel entries = %d, want 1 (the tool entry that triggered the insert)", len(children))
+	}
+
+	// Once the panel exists, further entries of that lane must append to it —
+	// still without any full-card re-render.
+	withTwoTools := core.BuildProgressCardPayloadV2(
+		[]core.ProgressCardEntry{
+			{Kind: core.ProgressEntryThinking, Text: "思考一"},
+			{Kind: core.ProgressEntryToolUse, Tool: "bash", Text: "ls -l"},
+			{Kind: core.ProgressEntryToolUse, Tool: "read", Text: "a.go"},
+		},
+		false, "opencode", core.LangChinese, core.ProgressCardStateRunning)
+	_ = card.Update(context.Background(), withTwoTools)
+	time.Sleep(feishuStreamingCardUpdateMinInterval + 200*time.Millisecond)
+
+	if got := p.insertCount(); got != 1 {
+		t.Errorf("insert calls = %d, want 1 (the panel is inserted once, then appended to)", got)
+	}
+	if got := p.appendCount(); got == 0 {
+		t.Error("append calls = 0, want > 0 once the panel exists")
+	}
+	if got := p.lastAppendElementID(); got != progressPanelToolsElementID {
+		t.Errorf("last append target = %q, want %q", got, progressPanelToolsElementID)
+	}
+	if _, updates, _ := p.count(); updates != 0 {
+		t.Errorf("full-card updates = %d, want 0 after the panel exists", updates)
+	}
+}
