@@ -8209,7 +8209,7 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			t.Cleanup(func() {
 				// Remove the crons subdirectory created by NewCronStore
 				cronsDir := filepath.Join(tmpDir, "crons")
-				os.RemoveAll(cronsDir)
+				_ = os.RemoveAll(cronsDir) // best effort, ignore errors
 			})
 			scheduler := NewCronScheduler(store)
 			platform := &stubCronReplyTargetPlatform{
