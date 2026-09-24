@@ -182,6 +182,41 @@ app_token = "xapp-xxxxxxx..."
 | Bot Token | `xoxb-` | Bot API authentication |
 | App Token | `xapp-` | Socket Mode connection |
 
+### Thread Context (Optional)
+
+When the bot is @-mentioned in an existing Slack thread, cc-connect can fetch
+the thread history and inject it into the agent's prompt as `ExtraContent`.
+This lets the agent see what humans said earlier in the thread instead of
+only the most recent message.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `thread_context_enabled` | bool | `true` | Fetch the parent thread history when the bot is mentioned in a thread reply. Set to `false` to disable. |
+| `thread_context_max_messages` | int | `20` | Maximum non-bot messages included in the injected context. Hard-capped at `100`. |
+
+Example:
+
+```toml
+[[projects.platforms]]
+type = "slack"
+
+[projects.platforms.options]
+bot_token = "xoxb-xxxxxxx..."
+app_token = "xapp-xxxxxxx..."
+thread_context_enabled = true
+thread_context_max_messages = 20
+```
+
+Notes:
+- The fetch soft-degrades: any Slack API failure (network, missing scope, rate
+  limit) is logged and the agent still receives the new message without
+  context. The main message flow is never blocked.
+- Bot messages (`BotID` set or `subtype == "bot_message"`) are filtered out so
+  the agent only sees the human side of the conversation.
+- Metrics are exposed as `slack_thread_context_fetch_total`,
+  `slack_thread_context_fetch_failed_total`, and
+  `slack_thread_context_messages_total` for observability.
+
 ---
 
 ## Step 8: Start cc-connect

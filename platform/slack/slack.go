@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -19,6 +20,17 @@ import (
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 )
+
+// defaultSlackThreadContextMaxMessages is the fallback cap for the number of
+// non-bot thread replies we include in core.Message.ExtraContent when the
+// operator has not explicitly configured slack.thread_context_max_messages.
+// Chosen to fit comfortably in a Claude prompt without overwhelming context.
+const defaultSlackThreadContextMaxMessages = 20
+
+// slackThreadContextMaxMessagesHardCap is the upper bound enforced regardless
+// of user configuration; protects against accidental misconfiguration that
+// would balloon prompts and burn Slack rate-limit quota.
+const slackThreadContextMaxMessagesHardCap = 100
 
 func init() {
 	core.RegisterPlatform("slack", New)
@@ -41,6 +53,21 @@ type Platform struct {
 	channelNameCache map[string]string
 	channelCacheMu   sync.RWMutex
 	userNameCache    sync.Map // userID -> display name
+
+	// Thread context injection (issue #1749). When threadContextEnabled is
+	// true and an inbound event arrives inside an existing Slack thread
+	// (ThreadTimeStamp != ""), the platform calls conversations.replies to
+	// build a human-readable transcript and injects it as core.Message.
+	// ExtraContent. Failures are soft-degraded: the main message is still
+	// dispatched, just without the transcript.
+	threadContextEnabled     bool
+	threadContextMaxMessages int
+	// Metric counters — exposed via the slog-debug "slack: thread context
+	// summary" line and any future /metrics hook. Atomic so concurrent event
+	// handlers can increment without locking.
+	metricThreadContextFetchTotal        atomic.Int64
+	metricThreadContextFetchFailedTotal  atomic.Int64
+	metricThreadContextMessagesTotal     atomic.Int64
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -58,12 +85,35 @@ func New(opts map[string]any) (core.Platform, error) {
 			"if your agent runtime is tmux, also set window_per_session=true — " +
 			"without it, concurrent threads share a single pane and their output will interleave")
 	}
+	threadEnabled := true
+	if v, ok := opts["thread_context_enabled"].(bool); ok {
+		threadEnabled = v
+	}
+	threadMax := defaultSlackThreadContextMaxMessages
+	if v, ok := opts["thread_context_max_messages"]; ok {
+		switch n := v.(type) {
+		case int:
+			threadMax = n
+		case int64:
+			threadMax = int(n)
+		case float64:
+			threadMax = int(n)
+		}
+	}
+	if threadMax < 1 {
+		threadMax = 1
+	}
+	if threadMax > slackThreadContextMaxMessagesHardCap {
+		threadMax = slackThreadContextMaxMessagesHardCap
+	}
 	return &Platform{
-		botToken:         botToken,
-		appToken:         appToken,
-		allowFrom:        allowFrom,
-		sessionScope:     scope,
-		channelNameCache: make(map[string]string),
+		botToken:                 botToken,
+		appToken:                 appToken,
+		allowFrom:                allowFrom,
+		sessionScope:             scope,
+		channelNameCache:         make(map[string]string),
+		threadContextEnabled:     threadEnabled,
+		threadContextMaxMessages: threadMax,
 	}, nil
 }
 
@@ -220,6 +270,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					MessageID: ev.TimeStamp,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
 				}
+				if extra := p.maybeFetchThreadContext(ev.Channel, ev.ThreadTimeStamp); extra != "" {
+					msg.ExtraContent = extra
+				}
 				p.handler(p, msg)
 
 			case *slackevents.AssistantThreadStartedEvent:
@@ -280,6 +333,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
+				}
+				if extra := p.maybeFetchThreadContext(ev.Channel, ev.ThreadTimeStamp); extra != "" {
+					msg.ExtraContent = extra
 				}
 				p.handler(p, msg)
 			}
