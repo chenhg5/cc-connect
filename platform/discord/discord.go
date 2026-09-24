@@ -507,11 +507,19 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 		return nil
 	}
 
-	registered, err := p.session.ApplicationCommandBulkOverwrite(p.appID, p.guildID, cmds)
+	p.mu.RLock()
+	session := p.session
+	appID := p.appID
+	p.mu.RUnlock()
+	if session == nil {
+		return fmt.Errorf("discord: session not connected")
+	}
+
+	registered, err := session.ApplicationCommandBulkOverwrite(appID, p.guildID, cmds)
 	if err != nil {
 		slog.Error("discord: failed to register slash commands — "+
 			"make sure the bot was invited with BOTH 'bot' AND 'applications.commands' OAuth2 scopes. "+
-			"Re-invite URL: https://discord.com/oauth2/authorize?client_id="+p.appID+
+			"Re-invite URL: https://discord.com/oauth2/authorize?client_id="+appID+
 			"&scope=bot+applications.commands&permissions=2147485696",
 			"error", err, "guild_id", p.guildID)
 		return err
@@ -576,8 +584,12 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 	session.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		// botID/appID are read from MessageCreate / GuildCreate / RegisterCommands
+		// which may run concurrently with this Ready callback; take the write lock.
+		p.mu.Lock()
 		p.botID = r.User.ID
 		p.appID = r.User.ID
+		p.mu.Unlock()
 		slog.Info("discord: connected", "bot", r.User.Username+"#"+r.User.Discriminator)
 		// Signal readiness before guild role lookups so RegisterCommands
 		// is not blocked by slow API calls when there are many guilds.
@@ -602,13 +614,22 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 	})
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
+		// Snapshot botID/session under the read lock. The Ready handler
+		// writes botID concurrently with this handler, and the connect
+		// loop swaps p.session on reconnect; reading without the lock
+		// races on both fields under -race.
+		p.mu.RLock()
+		botID := p.botID
+		connSession := p.session
+		p.mu.RUnlock()
+
 		// Deduplicate: Discord gateway may deliver the same event twice
 		if !rememberDedupID(&p.seenMsgs, m.ID) {
 			slog.Debug("discord: ignoring duplicate message", "msg_id", m.ID)
 			return
 		}
 
-		if m.Author.Bot || m.Author.ID == p.botID {
+		if m.Author.Bot || m.Author.ID == botID {
 			return
 		}
 		if core.IsOldMessage(m.Timestamp) {
@@ -629,11 +650,11 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			botRoleID = p.botRoleIDForGuild(m.GuildID)
 		}
 		if m.GuildID != "" && !p.isGroupReplyAllGuild(m.GuildID) {
-			if !isDiscordBotMention(m, p.botID, botRoleID, p.respondToAtEveryoneAndHere) {
+			if !isDiscordBotMention(m, botID, botRoleID, p.respondToAtEveryoneAndHere) {
 				slog.Debug("discord: ignoring guild message without bot mention", "channel", m.ChannelID)
 				return
 			}
-			m.Content = stripDiscordMentionWithRole(m.Content, p.botID, botRoleID)
+			m.Content = stripDiscordMentionWithRole(m.Content, botID, botRoleID)
 			if m.MentionEveryone {
 				m.Content = stripEveryoneHere(m.Content)
 			}
@@ -651,7 +672,7 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 		// (the historical, non-isolated behavior).
 		channelKey := ""
 		if p.threadIsolation && m.GuildID != "" {
-			threadSessionKey, threadCtx, parentChannelID, err := resolveThreadReplyContext(m, p.botID, sessionThreadOps{session: p.session})
+			threadSessionKey, threadCtx, parentChannelID, err := resolveThreadReplyContext(m, botID, sessionThreadOps{session: connSession})
 			if err != nil {
 				slog.Warn("discord: thread isolation setup failed, falling back", "message", m.ID, "channel", m.ChannelID, "error", err)
 			} else {
@@ -1422,10 +1443,16 @@ func (p *Platform) botRoleIDForGuild(guildID string) string {
 }
 
 func (p *Platform) cacheBotRoleIDForGuild(s *discordgo.Session, guildID string, guildRoles []*discordgo.Role) {
-	if s == nil || guildID == "" || p.botID == "" {
+	if s == nil || guildID == "" {
 		return
 	}
-	roleID, err := p.resolveBotRoleIDForGuild(s, guildID, guildRoles)
+	p.mu.RLock()
+	botID := p.botID
+	p.mu.RUnlock()
+	if botID == "" {
+		return
+	}
+	roleID, err := p.resolveBotRoleIDForGuild(s, guildID, botID, guildRoles)
 	if err != nil {
 		slog.Debug("discord: resolve bot managed role failed", "guild", guildID, "error", err)
 		return
@@ -1436,8 +1463,8 @@ func (p *Platform) cacheBotRoleIDForGuild(s *discordgo.Session, guildID string, 
 	p.botRoleIDs.Store(guildID, roleID)
 }
 
-func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID string, guildRoles []*discordgo.Role) (string, error) {
-	member, err := s.GuildMember(guildID, p.botID)
+func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID, botID string, guildRoles []*discordgo.Role) (string, error) {
+	member, err := s.GuildMember(guildID, botID)
 	if err != nil {
 		return "", fmt.Errorf("fetch bot member: %w", err)
 	}
