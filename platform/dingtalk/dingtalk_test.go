@@ -798,6 +798,145 @@ type fakeDingTalkEmotionRT struct {
 	calls []dingtalkEmotionCall
 }
 
+type dingtalkAttachmentCall struct {
+	path string
+	body map[string]any
+}
+
+type fakeDingTalkAttachmentRT struct {
+	calls []dingtalkAttachmentCall
+}
+
+func (f *fakeDingTalkAttachmentRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host == "oapi.dingtalk.com" && req.URL.Path == "/media/upload" {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"errcode":0,"errmsg":"ok","media_id":"media-1","type":"file"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	f.calls = append(f.calls, dingtalkAttachmentCall{path: req.URL.Path, body: body})
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func TestSendFile_GroupUsesGroupMessageAPI(t *testing.T) {
+	rt := &fakeDingTalkAttachmentRT{}
+	p := &Platform{
+		robotCode:   "robot-code",
+		httpClient:  &http.Client{Transport: rt},
+		accessToken: "token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	err := p.SendFile(context.Background(), replyContext{
+		conversationId: "group-conversation",
+		senderStaffId:  "sender-id",
+		isGroup:        true,
+	}, core.FileAttachment{FileName: "report.pdf", Data: []byte("pdf")})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(rt.calls))
+	}
+	call := rt.calls[0]
+	if call.path != "/v1.0/robot/groupMessages/send" {
+		t.Fatalf("path = %q, want groupMessages/send", call.path)
+	}
+	if call.body["openConversationId"] != "group-conversation" {
+		t.Errorf("openConversationId = %v, want group-conversation", call.body["openConversationId"])
+	}
+	if _, exists := call.body["userIds"]; exists {
+		t.Errorf("group request unexpectedly contains userIds: %#v", call.body["userIds"])
+	}
+}
+
+func TestSendFile_DirectUsesOneToOneMessageAPI(t *testing.T) {
+	rt := &fakeDingTalkAttachmentRT{}
+	p := &Platform{
+		robotCode:   "robot-code",
+		httpClient:  &http.Client{Transport: rt},
+		accessToken: "token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	err := p.SendFile(context.Background(), replyContext{
+		senderStaffId: "sender-id",
+	}, core.FileAttachment{FileName: "report.pdf", Data: []byte("pdf")})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(rt.calls))
+	}
+	call := rt.calls[0]
+	if call.path != "/v1.0/robot/oToMessages/batchSend" {
+		t.Fatalf("path = %q, want oToMessages/batchSend", call.path)
+	}
+	userIDs, ok := call.body["userIds"].([]any)
+	if !ok || len(userIDs) != 1 || userIDs[0] != "sender-id" {
+		t.Errorf("userIds = %#v, want [sender-id]", call.body["userIds"])
+	}
+	if _, exists := call.body["openConversationId"]; exists {
+		t.Errorf("direct request unexpectedly contains openConversationId: %#v", call.body["openConversationId"])
+	}
+}
+
+func TestSendImage_GroupUsesGroupMessageAPI(t *testing.T) {
+	rt := &fakeDingTalkAttachmentRT{}
+	p := &Platform{
+		robotCode:   "robot-code",
+		httpClient:  &http.Client{Transport: rt},
+		accessToken: "token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	err := p.SendImage(context.Background(), replyContext{
+		conversationId: "group-conversation",
+		senderStaffId:  "sender-id",
+		isGroup:        true,
+	}, core.ImageAttachment{FileName: "chart.png", Data: []byte("png")})
+	if err != nil {
+		t.Fatalf("SendImage() error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(rt.calls))
+	}
+	call := rt.calls[0]
+	if call.path != "/v1.0/robot/groupMessages/send" {
+		t.Fatalf("path = %q, want groupMessages/send", call.path)
+	}
+	if call.body["openConversationId"] != "group-conversation" {
+		t.Errorf("openConversationId = %v, want group-conversation", call.body["openConversationId"])
+	}
+	if _, exists := call.body["userIds"]; exists {
+		t.Errorf("group request unexpectedly contains userIds: %#v", call.body["userIds"])
+	}
+}
+
+func TestAttachmentSendRequest_GroupRequiresConversationID(t *testing.T) {
+	p := &Platform{robotCode: "robot-code"}
+
+	_, _, err := p.attachmentSendRequest(replyContext{
+		isGroup:       true,
+		senderStaffId: "sender-id",
+	}, "sampleFile", `{}`)
+	if err == nil {
+		t.Fatal("attachmentSendRequest() error = nil, want missing group conversation ID error")
+	}
+}
+
 func (f *fakeDingTalkEmotionRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL.Path == "/v1.0/oauth2/accessToken" {
 		return &http.Response{
