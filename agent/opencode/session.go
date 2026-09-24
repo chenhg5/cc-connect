@@ -168,17 +168,13 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
-	if s.workDir != "" {
-		args = append(args, "--dir", s.workDir)
-	}
-
 	// Enable thinking blocks.
 	args = append(args, "--thinking")
 
 	// In yolo/auto mode, skip permission prompts entirely so headless
 	// runs don't get stuck with auto-rejected external-directory ops.
 	if s.mode == "yolo" {
-		args = append(args, "--dangerously-skip-permissions")
+		args = append(args, "--auto")
 	}
 
 	for _, imagePath := range imagePaths {
@@ -193,7 +189,6 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
-	defer func() { _ = cmd.Wait() }()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -212,6 +207,10 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 
 		s.handleEvent(raw)
 	}
+
+	// Wait for os/exec's stderr copy goroutine before reading stderrBuf.
+	// Reading it earlier races with that goroutine on fast-exiting commands.
+	_ = cmd.Wait()
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("opencodeSession: scanner error", "error", err)

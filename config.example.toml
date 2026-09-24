@@ -1895,7 +1895,7 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Requires: OpenCode CLI — https://github.com/opencode-ai/opencode
+# Requires: OpenCode CLI — https://opencode.ai/download
 # 需要安装：OpenCode CLI
 # Uses `opencode run --format json` under the hood.
 # 底层使用 `opencode run --format json` 命令。
@@ -1912,7 +1912,7 @@ app_secret = "your-feishu-app-secret"
 #
 # Mode options / 模式说明:
 # - "default": Standard mode / 标准模式
-# - "yolo":    Auto-approve all tool calls / 自动批准所有工具调用
+# - "yolo":    Auto-approve all tool calls (--auto) / 自动批准所有工具调用
 #
 # Optional: pass --agent to opencode (for plugin-defined agents) / 可选：传递 --agent 给 opencode（适用于插件定义的 agent）
 # agent = "Sisyphus - Ultraworker"

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -110,7 +111,6 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 		"run", "--format", "json",
 		"--session", "ses_123",
 		"--model", "provider/model",
-		"--dir", "/repo",
 		"--thinking",
 		"--file", "/tmp/a.png",
 		"--file", "/tmp/b.jpg",
@@ -118,6 +118,98 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
 	}
+}
+
+func TestOpencodeSessionBuildRunArgsOmitsDir(t *testing.T) {
+	s := &opencodeSession{
+		workDir:   "/repo",
+		model:     "provider/model",
+		agentName: "default",
+		mode:      "yolo",
+	}
+
+	args := s.buildRunArgs("check working directory", []string{"/tmp/image.png"}, "ses_123")
+	if containsString(args, "--dir") {
+		t.Fatalf("args = %#v, must not contain --dir", args)
+	}
+}
+
+func TestOpencodeSessionUsesCommandWorkingDirectory(t *testing.T) {
+	workDir := t.TempDir()
+	cliPath := filepath.Join(t.TempDir(), "opencode")
+	script := `#!/bin/sh
+set -eu
+exec 2>/dev/null
+test "$PWD" = "$EXPECTED_WORKDIR"
+printf '%s\n' '{"type":"step_start","sessionID":"ses-cwd"}'
+printf '%s\n' '{"type":"text","part":{"text":"cwd-ok"}}'
+
+`
+	if err := os.WriteFile(cliPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake opencode: %v", err)
+	}
+	s, err := newOpencodeSession(context.Background(), cliPath, nil, workDir, "", "default", "", "", []string{"EXPECTED_WORKDIR=" + workDir})
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	if err := s.Send("check cwd", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case event := <-s.Events():
+			if event.Type == core.EventError {
+				t.Fatalf("cwd smoke error: %v", event.Error)
+			}
+			if event.Type == core.EventResult {
+				if s.CurrentSessionID() != "ses-cwd" {
+					t.Fatalf("session ID = %q, want ses-cwd", s.CurrentSessionID())
+				}
+				return
+			}
+		case <-deadline.C:
+			t.Fatal("timed out waiting for cwd smoke result")
+		}
+	}
+}
+
+func TestOpencodeSessionBuildRunArgsYoloUsesAuto(t *testing.T) {
+	s := &opencodeSession{workDir: "/repo", mode: "yolo"}
+
+	args := s.buildRunArgs("run automatically", nil, "")
+	if !containsString(args, "--auto") {
+		t.Fatalf("args = %#v, want --auto", args)
+	}
+	if containsString(args, "--dangerously-skip-permissions") {
+		t.Fatalf("args = %#v, contains removed legacy permission flag", args)
+	}
+}
+
+func TestOpencodeSessionBuildRunArgsNonYoloOmitsAuto(t *testing.T) {
+	for _, mode := range []string{"", "default"} {
+		s := &opencodeSession{workDir: "/repo", mode: mode}
+		args := s.buildRunArgs("run normally", nil, "")
+		if containsString(args, "--auto") {
+			t.Fatalf("mode %q args = %#v, must not contain --auto", mode, args)
+		}
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestHandleStepStart_SessionIDFromTopLevel verifies that handleStepStart
