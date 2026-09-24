@@ -4887,6 +4887,54 @@ func (e *Engine) streamingCardContentFor(streamCard StreamingCard, thinking stri
 	return buildCardContent(thinking, tools, fallbackAnswer)
 }
 
+// stripAnswerEchoes drops the trailing step-text entries that are the final
+// answer streamed back as ordinary text, so the process panel does not show the
+// reply a second time.
+//
+// The card folds every EventText chunk into the foldable "thinking" panel and
+// leaves the answer body empty (the answer is delivered as a separate
+// message). opencode's adapter cooperates by NOT forwarding its final step as
+// EventText (see agent/opencode/session.go), but the other agent adapters
+// forward the assistant text verbatim — and for those, the assistant text is
+// the answer. Observed live with a claudecode project: the reply appeared
+// inside the "思考" panel and again as the final message.
+//
+// Only a trailing run of entries that reproduces the END of the delivered
+// answer is dropped, walking backwards and stopping at the first entry that no
+// longer matches. A turn whose step narration merely precedes the answer keeps
+// its panel entries, and opencode (whose step texts are never part of the
+// answer) is unaffected.
+func stripAnswerEchoes(stepTexts []string, answer string) []string {
+	answerNorm := squashWhitespace(answer)
+	if answerNorm == "" || len(stepTexts) == 0 {
+		return stepTexts
+	}
+	end := len(stepTexts)
+	tail := ""
+	for end > 0 {
+		entry := squashWhitespace(stepTexts[end-1])
+		if entry != "" {
+			candidate := entry + tail
+			if !strings.HasSuffix(answerNorm, candidate) {
+				break
+			}
+			tail = candidate
+		}
+		end--
+	}
+	if end == len(stepTexts) {
+		return stepTexts
+	}
+	return stepTexts[:end]
+}
+
+// squashWhitespace removes every whitespace character so a streamed chunk
+// compares equal to the same text in the assembled answer: adapters chunk and
+// wrap the text differently from the concatenation the engine ends up with.
+func squashWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), "")
+}
+
 // buildCardContent constructs the full markdown for the streaming card.
 //
 // Thinking and tool entries are rendered as compact summaries (a one-line
@@ -6380,7 +6428,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if supp, ok := streamCard.(StreamingCardPayloadSupporter); ok && supp.SupportsStreamingCardPayload() {
 					finalAnswer = ""
 				}
-				finalContent := e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, finalAnswer, true)
+				// The panel lane must not echo the answer. Adapters other than
+				// opencode forward the assistant's text — which IS the final
+				// answer — as EventText, and every EventText is folded into the
+				// foldable thinking panel, so the reply showed up inside the
+				// process panel and then again as the separate answer message.
+				finalStepTexts := stripAnswerEchoes(cardStepTexts, fullResponse)
+				finalContent := e.streamingCardContentFor(streamCard, cardThinkingText, finalStepTexts, cardToolCalls, finalAnswer, true)
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
 					replyKind = "fallback"
 					slog.Error("streaming card finalize failed, sending fallback", "error", err)

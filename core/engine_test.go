@@ -16885,6 +16885,61 @@ func TestProcessInteractiveEvents_StreamingCard_AnswerInSeparateMessage(t *testi
 	}
 }
 
+// TestProcessInteractiveEvents_StreamingCard_AnswerNotEchoedIntoPanel is the
+// regression test for the claudecode-family bug: every agent adapter except
+// opencode emits the assistant text — which IS the final answer — as EventText,
+// and every EventText chunk is folded into the card's foldable thinking panel.
+// The reply therefore rendered inside the "思考" panel and then again as the
+// separate answer message (observed live on a claudecode project: the panel
+// showed the answer, with no real reasoning in it, while only the tool count
+// moved during the turn). The panel must keep the process entries — here the
+// tool call — without echoing the answer, and the answer must still arrive as
+// the separate final message.
+func TestProcessInteractiveEvents_StreamingCard_AnswerNotEchoedIntoPanel(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+	sessionKey := "slack:user-streamcard-answer-echo"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-streamcard-answer-echo")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-streamcard-answer-echo",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	const answer = "结论：DR 侧已修复，客户端 SSE 路径不受影响。"
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "bash", ToolInput: "grep -r cache_creation"}
+	agentSession.events <- Event{Type: EventText, Content: answer}
+	agentSession.events <- Event{Type: EventResult, Content: answer, Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-streamcard-answer-echo", time.Now(), nil, nil, state.replyCtx, 0)
+
+	if !card.finalized() {
+		t.Fatalf("expected streaming card to be finalized")
+	}
+	payload, ok := ParseProgressCardPayload(card.finalContent())
+	if !ok {
+		t.Fatalf("final content is not a progress payload: %q", card.finalContent())
+	}
+	if len(payload.Items) == 0 {
+		t.Fatalf("process panel lost the tool entry: %q", card.finalContent())
+	}
+	for _, item := range payload.Items {
+		if strings.TrimSpace(item.Text) == answer {
+			t.Errorf("the answer is echoed into the process panel: %+v", item)
+		}
+	}
+	if sent := strings.Join(p.getSent(), "\n"); !strings.Contains(sent, answer) {
+		t.Errorf("separate final message missing the answer; sent=%q", sent)
+	}
+}
+
 // dualCardPlatform simulates a platform that supports BOTH the streaming-card
 // (StreamingCardPlatform) and the card-style compact progress writer
 // (ProgressStyleProvider=card + PreviewStarter + MessageUpdater). Regression
