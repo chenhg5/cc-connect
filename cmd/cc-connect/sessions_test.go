@@ -237,6 +237,80 @@ func writeSessionFile(t *testing.T, dir, name string, data sessionFileData) {
 	}
 }
 
+// TestExtractProjectFromFilename pins the bug where loadAllSessions
+// used to derive the project name by stripping only ".json", leaving
+// the per-work_dir hash suffix in place. That caused
+// `cc-connect sessions list` to display "myproject_a1b2c3d4" and
+// broke `cc-connect sessions show myproject:<sid>` lookups.
+func TestExtractProjectFromFilename(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "myproject.json", "myproject"},
+		{"single-workdir hash", "myproject_a1b2c3d4.json", "myproject"},
+		{"multi-workspace hash", "myproject_ws_a1b2c3d4.json", "myproject"},
+		{"legacy", "myproject.sessions.json", "myproject"},
+		// project names that contain underscores but no 8-hex tail
+		// must be preserved verbatim (regression: previous heuristic
+		// considered any-length hex; now requires exactly 8 hex chars).
+		{"short hex suffix is part of name", "project_a.json", "project_a"},
+		{"4-hex suffix is part of name", "foo_dead.json", "foo_dead"},
+		{"non-hex suffix is part of name", "myproject_extra.json", "myproject_extra"},
+		// real project name happens to end with `_ws_<hex>` pattern
+		{"project with snake_case + hash", "my_project_a1b2c3d4.json", "my_project"},
+		{"project with _ws_ + hash", "my_project_ws_a1b2c3d4.json", "my_project"},
+		// no underscore, no .sessions
+		{"single token", "project.json", "project"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractProjectFromFilename(tt.in); got != tt.want {
+				t.Fatalf("extractProjectFromFilename(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLoadAllSessions_StripsWorkDirHash exercises loadAllSessions
+// end-to-end against a session file written with the real engine
+// naming convention (myproject_<8hex>.json) and confirms the project
+// name shown to the user no longer carries the hash suffix.
+func TestLoadAllSessions_StripsWorkDirHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	file := sessionFileData{
+		Sessions: map[string]*sessionData{
+			"s1": {ID: "s1", Name: "default", UpdatedAt: now},
+		},
+		UserSessions: map[string][]string{
+			"slack:C123": {"s1"},
+		},
+	}
+	// The 8-hex suffix is what sessionStorePath in main.go produces.
+	writeSessionFile(t, sessionsDir, "myproject_deadbeef.json", file)
+
+	records, err := loadAllSessions(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("got %d records, want 1", len(records))
+	}
+	if records[0].Project != "myproject" {
+		t.Errorf("Project = %q, want %q", records[0].Project, "myproject")
+	}
+	if records[0].GlobalID != "myproject:s1" {
+		t.Errorf("GlobalID = %q, want %q", records[0].GlobalID, "myproject:s1")
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	tests := []struct {
 		in     string
