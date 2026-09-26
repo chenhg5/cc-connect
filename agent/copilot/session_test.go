@@ -37,8 +37,8 @@ func TestHandleSessionEvent_AssistantMessage(t *testing.T) {
 		if evt.Type != core.EventResult {
 			t.Fatalf("event type = %v, want EventResult", evt.Type)
 		}
-		if evt.Content != "" {
-			t.Fatalf("content = %q, want empty final content because text was streamed", evt.Content)
+		if evt.Content != "Hello, world!" {
+			t.Fatalf("content = %q, want streamed content preserved", evt.Content)
 		}
 		if evt.OutputTokens != 42 {
 			t.Fatalf("outputTokens = %d, want 42", evt.OutputTokens)
@@ -60,6 +60,49 @@ func TestHandleSessionEvent_AssistantMessage(t *testing.T) {
 	}
 	if usage.TotalTokens != 142 {
 		t.Fatalf("usage.TotalTokens = %d, want 142", usage.TotalTokens)
+	}
+}
+
+func TestHandleSessionEvent_StreamedTextWithEmptyFinalMessageCompletes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{events: make(chan core.Event, 10), ctx: ctx, cancel: cancel}
+	cs.sessionID.Store("test-session")
+
+	for _, event := range []sessionEventInner{
+		{Type: "assistant.turn_start"},
+		{Type: "assistant.message_delta", Data: json.RawMessage(`{"content":"Hello"}`)},
+		{Type: "assistant.message", Data: json.RawMessage(`{"outputTokens":1}`)},
+		{Type: "assistant.turn_end"},
+	} {
+		cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{SessionID: "test-session", Event: event})))
+	}
+
+	var events []core.Event
+	for len(cs.events) > 0 {
+		events = append(events, <-cs.events)
+	}
+	if len(events) != 2 || events[0].Type != core.EventText || events[1].Type != core.EventResult || !events[1].Done {
+		t.Fatalf("events = %+v, want streamed text followed by result", events)
+	}
+}
+
+func TestHandleSessionEvent_EmptyAssistantMessageDoesNotComplete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{events: make(chan core.Event, 10), ctx: ctx, cancel: cancel}
+	cs.sessionID.Store("test-session")
+
+	data, _ := json.Marshal(map[string]any{"outputTokens": 1})
+	cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{
+		SessionID: "test-session",
+		Event:     sessionEventInner{Type: "assistant.message", Data: data},
+	})))
+
+	select {
+	case evt := <-cs.events:
+		t.Fatalf("unexpected event for empty assistant.message: %+v", evt)
+	default:
 	}
 }
 

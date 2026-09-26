@@ -2,6 +2,7 @@ package copilot
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -309,7 +310,7 @@ func TestAgent_ListSessions_RPC(t *testing.T) {
 
 	// Point agent at the test binary itself acting as a mock copilot
 	a := &Agent{
-		cmd:  bin,
+		cmd:     bin,
 		workDir: ".",
 	}
 
@@ -341,7 +342,7 @@ func TestAgent_DeleteSession_RPC(t *testing.T) {
 	}
 
 	a := &Agent{
-		cmd:  bin,
+		cmd:     bin,
 		workDir: ".",
 	}
 
@@ -366,4 +367,76 @@ func envMap(env []string) map[string]string {
 		}
 	}
 	return out
+}
+
+// TestAgent_EmptyAssistantMessageDoesNotComplete verifies the bug fix:
+// when Copilot sends an empty assistant.message (during tool execution),
+// cc-connect should NOT treat it as turn completion. Only the final
+// non-empty assistant.message should complete the turn.
+func TestAgent_EmptyAssistantMessageDoesNotComplete(t *testing.T) {
+	bin, err := os.Executable()
+	if err != nil {
+		t.Skip("cannot get test executable path")
+	}
+
+	a := &Agent{
+		cmd:     bin,
+		workDir: ".",
+	}
+
+	t.Setenv("CC_MOCK_COPILOT_MODE", "empty_assistant_message")
+	t.Setenv("CC_CONNECT_LOG_LEVEL", "debug")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	session, err := a.StartSession(ctx, "")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+
+	err = session.Send("hello", "", nil, nil)
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var gotResult bool
+	var gotEvents []string
+	timeout := 8 * time.Second
+	timeoutCh := time.After(timeout)
+	for {
+		select {
+		case ev, ok := <-session.Events():
+			if !ok {
+				t.Logf("events channel closed, got %d events", len(gotEvents))
+				goto done
+			}
+			gotEvents = append(gotEvents, fmt.Sprintf("%s(content=%q)", ev.Type, ev.Content))
+			t.Logf("received event: %s", ev.Type)
+			switch ev.Type {
+			case core.EventText:
+				t.Logf("  -> text: %q", ev.Content)
+			case core.EventResult:
+				gotResult = true
+				t.Logf("  -> result: done=%v content=%q", ev.Done, ev.Content)
+				if ev.Content != "Hello from Copilot!" {
+					t.Errorf("EventResult content = %q, want 'Hello from Copilot!'", ev.Content)
+				}
+				if ev.Done != true {
+					t.Errorf("EventResult.Done = %v, want true", ev.Done)
+				}
+				goto done
+			case core.EventError:
+				t.Errorf("unexpected error event: %v", ev.Error)
+			}
+		case <-timeoutCh:
+			t.Logf("timed out after %s, got %d events: %v", timeout, len(gotEvents), gotEvents)
+			t.Fatal("timeout waiting for response")
+		}
+	}
+done:
+	if !gotResult {
+		t.Fatal("no EventResult received")
+	}
 }

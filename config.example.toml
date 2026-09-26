@@ -2059,6 +2059,24 @@ app_secret = "your-feishu-app-secret"
 # args = ["acp"]
 # auth_method = "cursor_login"
 # display_name = "Cursor ACP"
+#
+# --- Example: Oh My Pi ---
+# Oh My Pi exposes ACP through its `omp acp` subcommand.
+# Oh My Pi 通过 `omp acp` 子命令提供 ACP 接口。
+# Install and authenticate Oh My Pi separately before starting cc-connect.
+# 启动 cc-connect 前，请先单独安装并完成 Oh My Pi 的认证。
+#
+# [[projects]]
+# name = "oh-my-pi-acp"
+#
+# [projects.agent]
+# type = "acp"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# cmd = "omp"
+# args = ["acp"]
+# display_name = "Oh My Pi ACP"
 
 # --- Example: OpenClaw (Gateway-backed ACP bridge) ---
 # Docs: https://docs.openclaw.ai/cli/acp
