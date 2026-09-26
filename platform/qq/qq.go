@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -294,22 +295,15 @@ func (p *Platform) parseMessage(payload map[string]any, msgType string, groupID 
 				}
 			case "record":
 				if url, ok := data["url"].(string); ok && url != "" {
-					audioData, _, err := downloadFile(url)
+					size, _ := strconv.ParseInt(fmt.Sprint(data["file_size"]), 10, 64)
+					audioData, err := readRecord(url, size)
 					if err != nil {
-						slog.Warn("qq: download audio failed", "error", err)
+						slog.Warn("qq: read audio failed", "error", err)
 						continue
-					}
-					format := "silk"
-					if f, ok := data["file"].(string); ok {
-						if strings.HasSuffix(f, ".amr") {
-							format = "amr"
-						} else if strings.HasSuffix(f, ".mp3") {
-							format = "mp3"
-						}
 					}
 					audio = &core.AudioAttachment{
 						Data:   audioData,
-						Format: format,
+						Format: recordFormat(audioData),
 					}
 				}
 			case "file":
@@ -701,6 +695,48 @@ func stripCQCodes(s string) string {
 		s = s[idx+end+1:]
 	}
 	return result.String()
+}
+
+// recordWaitTimeout bounds how long readRecord waits for QQ to finish
+// downloading a voice file.
+var recordWaitTimeout = 10 * time.Second
+
+// readRecord returns the bytes of a voice segment. A NapCat instance on the
+// same host puts the local file path in "url" instead of an HTTP URL, and
+// pushes the event before QQ has finished downloading the file, so wait until
+// the file reaches the size reported in the segment.
+func readRecord(src string, size int64) ([]byte, error) {
+	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		data, _, err := downloadFile(src)
+		return data, err
+	}
+	deadline := time.Now().Add(recordWaitTimeout)
+	for {
+		data, err := os.ReadFile(src)
+		if err == nil && int64(len(data)) >= size {
+			return data, nil
+		}
+		if time.Now().After(deadline) {
+			if err == nil {
+				err = fmt.Errorf("incomplete voice file %s: %d of %d bytes", src, len(data), size)
+			}
+			return nil, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// recordFormat detects the voice codec from the file header. QQ NT saves SILK
+// voice under a ".amr" file name, so the name cannot be trusted.
+func recordFormat(data []byte) string {
+	switch {
+	case bytes.HasPrefix(data, []byte("#!AMR")):
+		return "amr"
+	case bytes.HasPrefix(data, []byte("ID3")), len(data) > 1 && data[0] == 0xFF && data[1]&0xE0 == 0xE0:
+		return "mp3"
+	default:
+		return "silk"
+	}
 }
 
 func downloadLargeFile(url string) ([]byte, string, error) {

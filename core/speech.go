@@ -12,8 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wdvxdr1123/go-silk"
 )
 
 // SpeechToText transcribes audio to text.
@@ -296,6 +299,28 @@ func (g *GeminiSTT) Transcribe(ctx context.Context, audio []byte, format string,
 	return strings.TrimSpace(result.Candidates[0].Content.Parts[0].Text), nil
 }
 
+// silkSampleRate is the PCM sample rate SILK audio is decoded to before
+// being handed to ffmpeg.
+const silkSampleRate = 24000
+
+// ffmpegInput returns the bytes to feed ffmpeg on stdin and the input-format
+// flags that go before "-i". ffmpeg has no SILK decoder, so SILK audio is
+// decoded to raw 16-bit PCM here first.
+func ffmpegInput(audio []byte, srcFormat string) ([]byte, []string, error) {
+	switch srcFormat {
+	case "silk":
+		pcm, err := silk.DecodeSilkBuffToPcm(audio, silkSampleRate)
+		if err != nil {
+			return nil, nil, fmt.Errorf("silk decode failed: %w", err)
+		}
+		return pcm, []string{"-f", "s16le", "-ar", strconv.Itoa(silkSampleRate), "-ac", "1"}, nil
+	case "amr":
+		return audio, []string{"-f", "amr"}, nil
+	default:
+		return audio, nil, nil
+	}
+}
+
 // ConvertAudioToMP3 uses ffmpeg to convert audio from unsupported formats to mp3.
 // Returns the mp3 bytes. If ffmpeg is not installed, returns an error.
 // The ctx is honored: cancellation kills the ffmpeg subprocess, matching the
@@ -306,29 +331,13 @@ func ConvertAudioToMP3(ctx context.Context, audio []byte, srcFormat string) ([]b
 		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable voice message support")
 	}
 
-	var cmd *exec.Cmd
-	if srcFormat == "amr" || srcFormat == "silk" {
-		cmd = exec.CommandContext(ctx, ffmpegPath,
-			"-f", srcFormat,
-			"-i", "pipe:0",
-			"-f", "mp3",
-			"-ac", "1",
-			"-ar", "16000",
-			"-y",
-			"pipe:1",
-		)
-	} else {
-		cmd = exec.CommandContext(ctx, ffmpegPath,
-			"-i", "pipe:0",
-			"-f", "mp3",
-			"-ac", "1",
-			"-ar", "16000",
-			"-y",
-			"pipe:1",
-		)
+	input, inArgs, err := ffmpegInput(audio, srcFormat)
+	if err != nil {
+		return nil, err
 	}
-
-	cmd.Stdin = bytes.NewReader(audio)
+	args := append(inArgs, "-i", "pipe:0", "-f", "mp3", "-ac", "1", "-ar", "16000", "-y", "pipe:1")
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd.Stdin = bytes.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -347,12 +356,13 @@ func ConvertAudioToOpus(ctx context.Context, audio []byte, srcFormat string) ([]
 		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable audio conversion")
 	}
 
-	args := []string{"-i", "pipe:0", "-c:a", "libopus", "-f", "opus", "-y", "pipe:1"}
-	if srcFormat == "amr" || srcFormat == "silk" {
-		args = append([]string{"-f", srcFormat}, args...)
+	input, inArgs, err := ffmpegInput(audio, srcFormat)
+	if err != nil {
+		return nil, err
 	}
+	args := append(inArgs, "-i", "pipe:0", "-c:a", "libopus", "-f", "opus", "-y", "pipe:1")
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-	cmd.Stdin = bytes.NewReader(audio)
+	cmd.Stdin = bytes.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -372,21 +382,22 @@ func ConvertAudioToAMR(ctx context.Context, audio []byte, srcFormat string) ([]b
 		return nil, fmt.Errorf("ffmpeg not found in PATH: install ffmpeg to enable audio conversion")
 	}
 
-	args := []string{
+	input, inArgs, err := ffmpegInput(audio, srcFormat)
+	if err != nil {
+		return nil, err
+	}
+	args := append(inArgs,
 		"-i", "pipe:0",
 		"-c:a", "amr_nb",
-		"-ar", "8000",   // 8kHz sample rate (AMR-NB standard)
-		"-ac", "1",      // mono
+		"-ar", "8000", // 8kHz sample rate (AMR-NB standard)
+		"-ac", "1", // mono
 		"-b:a", "12.2k", // 12.2 kbps bitrate (AMR-NB max)
 		"-f", "amr",
 		"-y",
 		"pipe:1",
-	}
-	if srcFormat == "amr" || srcFormat == "silk" {
-		args = append([]string{"-f", srcFormat}, args...)
-	}
+	)
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-	cmd.Stdin = bytes.NewReader(audio)
+	cmd.Stdin = bytes.NewReader(input)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

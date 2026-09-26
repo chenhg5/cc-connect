@@ -74,6 +74,7 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
+	github.com/wdvxdr1123/go-silk v0.0.0-20220304095002-f67345df09ea // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.8.2 // indirect
 	go.einride.tech/aip v0.83.0 // indirect
