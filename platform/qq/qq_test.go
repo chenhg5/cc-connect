@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -147,5 +149,84 @@ func TestStart_FetchesSelfIDWithoutTimeout(t *testing.T) {
 
 	if p.selfID != botUserID {
 		t.Errorf("selfID = %d, want %d (self-message filter would be disabled)", p.selfID, botUserID)
+	}
+}
+
+func TestReadRecord_LocalPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "voice.amr")
+	want := []byte("\x02#!SILK_V3 payload")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readRecord(path, int64(len(want)))
+	if err != nil {
+		t.Fatalf("readRecord: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("readRecord = %q, want %q", got, want)
+	}
+}
+
+func TestReadRecord_WaitsForDownload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "voice.amr")
+	want := []byte("\x02#!SILK_V3 payload")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		if err := os.WriteFile(path, want[:4], 0o600); err != nil {
+			t.Error(err)
+		}
+		time.Sleep(200 * time.Millisecond)
+		if err := os.WriteFile(path, want, 0o600); err != nil {
+			t.Error(err)
+		}
+	}()
+	got, err := readRecord(path, int64(len(want)))
+	if err != nil {
+		t.Fatalf("readRecord: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("readRecord = %q, want %q", got, want)
+	}
+}
+
+func TestReadRecord_TimesOut(t *testing.T) {
+	old := recordWaitTimeout
+	recordWaitTimeout = 300 * time.Millisecond
+	defer func() { recordWaitTimeout = old }()
+	if _, err := readRecord(filepath.Join(t.TempDir(), "missing.amr"), 10); err == nil {
+		t.Fatal("expected an error for a file that never appears")
+	}
+}
+
+func TestReadRecord_HTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("#!AMR\n"))
+	}))
+	defer srv.Close()
+	got, err := readRecord(srv.URL+"/voice.amr", 0)
+	if err != nil {
+		t.Fatalf("readRecord: %v", err)
+	}
+	if string(got) != "#!AMR\n" {
+		t.Errorf("readRecord = %q", got)
+	}
+}
+
+func TestRecordFormat(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{"tencent silk", "\x02#!SILK_V3", "silk"},
+		{"plain silk", "#!SILK_V3", "silk"},
+		{"amr", "#!AMR\n", "amr"},
+		{"mp3 with id3", "ID3\x04", "mp3"},
+		{"mp3 frame sync", "\xff\xfb\x90", "mp3"},
+	}
+	for _, tt := range tests {
+		if got := recordFormat([]byte(tt.data)); got != tt.want {
+			t.Errorf("%s: recordFormat = %q, want %q", tt.name, got, tt.want)
+		}
 	}
 }
