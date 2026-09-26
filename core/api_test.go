@@ -396,12 +396,12 @@ func TestHandleCronExec_TriggersJob(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 2 {
+		if len(platform.getSent()) >= 2 && !store.Get(job.ID).LastRun.IsZero() {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for local api trigger, sent=%v", platform.getSent())
+	t.Fatalf("timed out waiting for local api trigger, sent=%v job=%+v", platform.getSent(), store.Get(job.ID))
 }
 
 func TestHandleCronExec_RunAliasRouteTriggersJob(t *testing.T) {
@@ -451,12 +451,12 @@ func TestHandleCronExec_RunAliasRouteTriggersJob(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 2 {
+		if len(platform.getSent()) >= 2 && !store.Get(job.ID).LastRun.IsZero() {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for local api alias trigger, sent=%v", platform.getSent())
+	t.Fatalf("timed out waiting for local api alias trigger, sent=%v job=%+v", platform.getSent(), store.Get(job.ID))
 }
 
 func TestHandleCronExec_ProjectMissingIsBadRequest(t *testing.T) {
