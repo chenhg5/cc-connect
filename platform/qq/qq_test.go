@@ -145,7 +145,71 @@ func TestStart_FetchesSelfIDWithoutTimeout(t *testing.T) {
 	}
 	defer p.Stop()
 
-	if p.selfID != botUserID {
-		t.Errorf("selfID = %d, want %d (self-message filter would be disabled)", p.selfID, botUserID)
+	if got := p.selfID.Load(); got != botUserID {
+		t.Errorf("selfID = %d, want %d (self-message filter would be disabled)", got, botUserID)
+	}
+}
+
+// Regression for a deadlock where readLoop called the message handler
+// directly: a handler that replied through callAPI waited for a response that
+// only readLoop could deliver, so every reply sent while handling a message
+// timed out after 15s.
+func TestHandler_CanCallAPI(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		for {
+			_, msg, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			var req map[string]any
+			if err := json.Unmarshal(msg, &req); err != nil {
+				continue
+			}
+			echo, _ := req["echo"].(string)
+			resp := map[string]any{"status": "ok", "retcode": 0, "echo": echo, "data": map[string]any{}}
+			if req["action"] == "get_login_info" {
+				resp["data"] = map[string]any{"user_id": 999999, "nickname": "TestBot"}
+			}
+			raw, _ := json.Marshal(resp)
+			_ = c.WriteMessage(websocket.TextMessage, raw)
+			if req["action"] == "get_login_info" {
+				event, _ := json.Marshal(map[string]any{
+					"post_type":    "message",
+					"message_type": "private",
+					"message_id":   1,
+					"user_id":      123,
+					"self_id":      999999,
+					"message":      []any{map[string]any{"type": "text", "data": map[string]any{"text": "hi"}}},
+					"sender":       map[string]any{"nickname": "u"},
+				})
+				_ = c.WriteMessage(websocket.TextMessage, event)
+			}
+		}
+	}))
+	defer ts.Close()
+
+	p := &Platform{wsURL: "ws" + strings.TrimPrefix(ts.URL, "http"), allowFrom: "*"}
+	replied := make(chan error, 1)
+	if err := p.Start(func(core.Platform, *core.Message) {
+		_, err := p.callAPI("send_private_msg", map[string]any{"user_id": 123, "message": "ok"})
+		replied <- err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Stop() }()
+
+	select {
+	case err := <-replied:
+		if err != nil {
+			t.Fatalf("callAPI from handler: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("callAPI from the message handler did not return within 5s; the handler is blocking readLoop")
 	}
 }

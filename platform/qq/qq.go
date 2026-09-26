@@ -37,10 +37,11 @@ type Platform struct {
 	echoSeq               atomic.Int64
 	echoCh                sync.Map // echo -> chan json.RawMessage
 	cancel                context.CancelFunc
-	selfID                int64
+	selfID                atomic.Int64 // written by Start, read by handleLoop
 	dedup                 core.MessageDedup
 	groupNameCache        sync.Map // groupID -> group name
 	httpURL            string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
+	events                chan map[string]any // message events from readLoop to handleLoop
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -91,15 +92,17 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	// so calling it first would always time out after 15s and leave selfID=0,
 	// which disables the self-message filter in handleMessage and lets the bot
 	// respond to its own messages.
+	p.events = make(chan map[string]any, 64)
+	go p.handleLoop(ctx)
 	go p.readLoop(ctx)
 
 	// Get bot self info
 	if info, err := p.callAPI("get_login_info", nil); err == nil {
 		if uid, ok := info["user_id"].(float64); ok {
-			p.selfID = int64(uid)
+			p.selfID.Store(int64(uid))
 		}
 		nick, _ := info["nickname"].(string)
-		slog.Info("qq: logged in", "qq", p.selfID, "nickname", nick)
+		slog.Info("qq: logged in", "qq", p.selfID.Load(), "nickname", nick)
 	} else {
 		slog.Warn("qq: get_login_info failed; self-message filter disabled until next reconnect", "error", err)
 	}
@@ -143,6 +146,24 @@ func (p *Platform) readLoop(ctx context.Context) {
 		// Otherwise it's an event
 		postType, _ := payload["post_type"].(string)
 		if postType == "message" {
+			select {
+			case p.events <- payload:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+// handleLoop handles message events one at a time, in arrival order. It runs
+// apart from readLoop because handling a message can call callAPI (to reply,
+// for example), and only readLoop can deliver the API response.
+func (p *Platform) handleLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case payload := <-p.events:
 			p.handleMessage(payload)
 		}
 	}
@@ -175,7 +196,7 @@ func (p *Platform) handleMessage(payload map[string]any) {
 	groupID := jsonInt64(payload, "group_id")
 	messageID := jsonInt64(payload, "message_id")
 
-	if userID == p.selfID {
+	if userID == p.selfID.Load() {
 		return
 	}
 
