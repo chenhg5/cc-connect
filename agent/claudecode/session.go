@@ -49,6 +49,24 @@ type claudeSession struct {
 	// configured model.
 	activeModel atomic.Value // stores string
 
+	// dropFirstEmptyResult is set when this session was spawned with --resume.
+	// Claude Code injects an isMeta=true "Continue from where you left off"
+	// auto-continuation micro-turn immediately after a --resume spawn; that
+	// micro-turn returns "No response requested" and the CLI emits a terminal
+	// type:"result" with empty Content + Done:true ~2.4s after spawn, while
+	// the real user message is still queued. Without intervention, the
+	// engine's processInteractiveEvents would treat this as the real turn end
+	// and the foreground loop would return, leaving the real turn's report
+	// (which the agent emits minutes later) silently undelivered — see
+	// issue #1877 and #1687.
+	//
+	// When this flag is true, the first result event with empty Content +
+	// Done:true is suppressed in handleResult so the foreground loop keeps
+	// waiting for the real turn. The flag is cleared after the first result
+	// is processed (whether suppressed or not), so a legitimate empty
+	// completion later in the session still produces the usual EventResult.
+	dropFirstEmptyResult atomic.Bool
+
 	// usageMu guards lastUsage. Populated from the most recent result event.
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
@@ -242,6 +260,11 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
+	// Set when --resume is requested (see switch sessionID below). Forwarded
+	// to claudeSession.dropFirstEmptyResult so the first spurious empty
+	// auto-continuation result event is suppressed (issue #1877).
+	dropFirstResumeEmpty := false
+
 	// Claude Code rejects bypassPermissions when running as root.
 	// Downgrade to "auto" which auto-approves internally in cc-connect.
 	var rootDowngradeWarning string
@@ -281,6 +304,9 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		// Resuming a known session ID — this is cc-connect's own session
 		// from a previous connection, safe to resume directly.
 		innerArgs = append(innerArgs, "--resume", sessionID)
+		// Mark for first-empty-result suppression; see the field's doc
+		// comment on claudeSession.dropFirstEmptyResult (issue #1877).
+		dropFirstResumeEmpty = true
 	}
 	if len(allowedTools) > 0 {
 		innerArgs = append(innerArgs, "--allowedTools", strings.Join(allowedTools, ","))
@@ -517,6 +543,9 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
 	cs.alive.Store(true)
+	if dropFirstResumeEmpty {
+		cs.dropFirstEmptyResult.Store(true)
+	}
 
 	go cs.readLoop(stdout, &stderrBuf)
 
@@ -1196,6 +1225,33 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,
 	}
+
+	// Issue #1877 / #1687: --resume auto-continuation micro-turn suppression.
+	// The first result event emitted by Claude Code after a --resume spawn
+	// is almost always an internal "Continue from where you left off" micro-turn
+	// (isMeta=true, model returns "No response requested"). The CLI emits a
+	// terminal type:"result" with empty Content + Done:true, while the real
+	// user message is still queued and the real turn's report is minutes
+	// away. If we forward this to the engine, processInteractiveEvents will
+	// treat it as the real end and return — silently losing the real report.
+	//
+	// Suppress the first empty + terminal result after --resume so the
+	// engine keeps waiting for the real turn. Compaction events are kept
+	// (they have their own mid-turn semantics in core/engine.go).
+	droppedFirstResumeEmpty := false
+	if cs.dropFirstEmptyResult.CompareAndSwap(true, false) &&
+		content == "" &&
+		!isCompaction {
+		slog.Info("claudeSession: suppressing first empty terminal result after --resume (likely auto-continuation micro-turn); engine will wait for real turn",
+			"session_id", cs.CurrentSessionID(),
+			"subtype", resultSubtype(raw),
+		)
+		droppedFirstResumeEmpty = true
+	}
+	if droppedFirstResumeEmpty {
+		return
+	}
+
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
