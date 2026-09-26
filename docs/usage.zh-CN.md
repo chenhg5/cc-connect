@@ -595,6 +595,19 @@ api_key = "sk-xxx"
 # model = "whisper-large-v3-turbo"
 ```
 
+### 识别上下文（Qwen）
+
+Qwen ASR 可以参考一段背景文字来识别人名和术语。`[speech]` 下有两个可选配置：
+
+```toml
+[speech]
+provider = "qwen"
+context = "NapCat, cc-connect, Kubernetes"  # 经常说的人名、术语
+context_history = 16                          # 同时带上当前会话最近 16 条消息
+```
+
+开了 `context_history` 后，对话里出现过的词再说一遍就能认对。这些消息的文字会和语音一起发给语音识别服务。其他 provider 会忽略这两个配置。
+
 ### 安装 ffmpeg
 
 ```bash

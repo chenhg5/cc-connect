@@ -3529,7 +3529,7 @@ func (e *Engine) handleVoiceMessage(p Platform, msg *Message) {
 	)
 	e.send(p, msg.ReplyCtx, e.i18n.T(MsgVoiceTranscribing))
 
-	text, err := TranscribeAudio(e.ctx, e.speech.STT, audio, e.speech.Language)
+	text, err := TranscribeAudio(e.ctx, e.speech.STT, audio, e.speech.Language, e.speechHint(msg.SessionKey))
 	if err != nil {
 		slog.Error("speech transcription failed", "error", err)
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgVoiceTranscribeFailed), err))
@@ -3550,6 +3550,32 @@ func (e *Engine) handleVoiceMessage(p Platform, msg *Message) {
 	msg.Content = text
 	msg.FromVoice = true
 	e.handleMessage(p, msg)
+}
+
+// speechHintEntryRunes caps each history message in the speech hint, so one
+// long reply does not crowd out the rest.
+const speechHintEntryRunes = 300
+
+// speechHint builds background text for speech recognition from the
+// configured context and the session's recent messages, so that names and
+// terms already used in the conversation are recognized.
+func (e *Engine) speechHint(sessionKey string) string {
+	var parts []string
+	if c := strings.TrimSpace(e.speech.Context); c != "" {
+		parts = append(parts, c)
+	}
+	if e.speech.ContextHistory > 0 {
+		if s := e.sessions.FindByID(e.sessions.ActiveSessionID(sessionKey)); s != nil {
+			var b strings.Builder
+			for _, h := range s.GetHistory(e.speech.ContextHistory) {
+				fmt.Fprintf(&b, "%s: %s\n", h.Role, truncateRunes(strings.TrimSpace(h.Content), speechHintEntryRunes))
+			}
+			if b.Len() > 0 {
+				parts = append(parts, "Recent conversation:\n"+b.String())
+			}
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // ──────────────────────────────────────────────────────────────
