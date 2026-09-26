@@ -1197,6 +1197,26 @@ Empty responses from OpenClaw are almost always a missing pairing step
 (issue #432). Re-run `openclaw pair` and re-approve before debugging
 anything else. Reference: <https://zhuanlan.zhihu.com/p/2005687480976970296>
 
+### Does cc-connect support Oh My Pi?
+
+Yes. Oh My Pi exposes an ACP server through its `omp acp` subcommand, so it can use the generic `acp` agent type. It is not the same integration as cc-connect's native Pi agent.
+
+```toml
+[[projects]]
+name = "oh-my-pi-acp"
+
+[projects.agent]
+type = "acp"
+
+[projects.agent.options]
+work_dir = "/path/to/project"
+cmd = "omp"
+args = ["acp"]
+display_name = "Oh My Pi ACP"
+```
+
+Install and authenticate a version of Oh My Pi that provides the `omp acp` subcommand, and make sure `omp` is available on cc-connect's `PATH`.
+
 ### Personal WeChat group chat — finding the right `chat_id` (issue #805)
 
 Personal WeChat (the `weixin` platform) supports group chats. To bind the
