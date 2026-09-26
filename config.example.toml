@@ -494,6 +494,8 @@ level = "info" # debug, info, warn, error
 # enabled = true
 # provider = "openai"    # "openai", "groq", or "qwen" / "openai"、"groq" 或 "qwen"
 # language = ""          # e.g. "zh", "en"; empty = auto-detect / 如 "zh"、"en"；留空自动检测
+# context = ""           # optional: names/jargon that help recognition (qwen only) / 可选：帮助识别的人名、术语（仅 qwen）
+# context_history = 0    # recent messages sent along as context (qwen only), 0 = off / 同时发送的最近消息条数（仅 qwen），0 为关闭
 #
 # [speech.openai]
 # api_key = "sk-xxx"     # OpenAI API key

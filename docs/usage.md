@@ -682,6 +682,19 @@ api_key = "sk-xxx"
 # model = "whisper-large-v3-turbo"
 ```
 
+### Recognition context (Qwen)
+
+Qwen ASR can use background text to recognize names and jargon. Two optional settings under `[speech]` provide it:
+
+```toml
+[speech]
+provider = "qwen"
+context = "NapCat, cc-connect, Kubernetes"  # names and terms you often say
+context_history = 16                          # also send the session's last 16 messages
+```
+
+With `context_history`, terms that already came up in the conversation are recognized when you say them again. The text of those messages is sent to the speech provider along with the audio. Other providers ignore both settings.
+
 ### Install ffmpeg
 
 ```bash
