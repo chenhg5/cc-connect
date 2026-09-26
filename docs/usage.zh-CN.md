@@ -1130,7 +1130,7 @@ args = ["acp"]
 display_name = "Oh My Pi ACP"
 ```
 
-请先单独安装并完成 Oh My Pi 的认证，并确保 cc-connect 启动时的 `PATH` 中可以找到 `omp`。
+请先单独安装并完成 Oh My Pi 的认证，使用提供 `omp acp` 子命令的版本，并确保 cc-connect 启动时的 `PATH` 中可以找到 `omp`。
 
 ### 个人微信群聊 — 如何获取正确的 `chat_id`(issue #805)
 

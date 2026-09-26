@@ -56,8 +56,9 @@ type copilotSession struct {
 	toolCallMu    sync.Mutex
 	toolCallNames map[string]string
 
-	turnMu      sync.Mutex
-	turnHasText bool
+	turnMu        sync.Mutex
+	turnHasText   bool
+	turnCompleted bool
 }
 
 type copilotWireProviderConfig struct {
@@ -420,7 +421,9 @@ func (cs *copilotSession) handleSessionEvent(params json.RawMessage) {
 		content := copilotEventText(evt.Event.Data)
 		if content != "" {
 			cs.turnMu.Lock()
-			cs.turnHasText = true
+			if !cs.turnCompleted {
+				cs.turnHasText = true
+			}
 			cs.turnMu.Unlock()
 			e := core.Event{Type: core.EventText, Content: content}
 			select {
@@ -442,7 +445,12 @@ func (cs *copilotSession) handleSessionEvent(params json.RawMessage) {
 			return
 		}
 		cs.turnMu.Lock()
+		if cs.turnCompleted {
+			cs.turnMu.Unlock()
+			return
+		}
 		cs.turnHasText = false
+		cs.turnCompleted = true
 		cs.turnMu.Unlock()
 		e := core.Event{
 			Type:         core.EventResult,
@@ -475,12 +483,16 @@ func (cs *copilotSession) handleSessionEvent(params json.RawMessage) {
 	case "assistant.turn_start":
 		cs.turnMu.Lock()
 		cs.turnHasText = false
+		cs.turnCompleted = false
 		cs.turnMu.Unlock()
 		slog.Debug("copilotSession: turn started")
 
 	case "assistant.turn_end":
 		cs.turnMu.Lock()
 		hasText := cs.turnHasText
+		if hasText && !cs.turnCompleted {
+			cs.turnCompleted = true
+		}
 		cs.turnHasText = false
 		cs.turnMu.Unlock()
 		if hasText {

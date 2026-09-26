@@ -87,6 +87,32 @@ func TestHandleSessionEvent_StreamedTextWithEmptyFinalMessageCompletes(t *testin
 	}
 }
 
+func TestHandleSessionEvent_LateDeltaDoesNotDoubleComplete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &copilotSession{events: make(chan core.Event, 10), ctx: ctx, cancel: cancel}
+	cs.sessionID.Store("test-session")
+
+	for _, event := range []sessionEventInner{
+		{Type: "assistant.turn_start"},
+		{Type: "assistant.message", Data: json.RawMessage(`{"content":"done"}`)},
+		{Type: "assistant.message_delta", Data: json.RawMessage(`{"content":"late"}`)},
+		{Type: "assistant.turn_end"},
+	} {
+		cs.handleSessionEvent(json.RawMessage(mustMarshal(t, sessionEvent{SessionID: "test-session", Event: event})))
+	}
+
+	var results int
+	for len(cs.events) > 0 {
+		if event := <-cs.events; event.Type == core.EventResult {
+			results++
+		}
+	}
+	if results != 1 {
+		t.Fatalf("EventResult count = %d, want 1", results)
+	}
+}
+
 func TestHandleSessionEvent_EmptyAssistantMessageDoesNotComplete(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

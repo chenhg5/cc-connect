@@ -1215,7 +1215,7 @@ args = ["acp"]
 display_name = "Oh My Pi ACP"
 ```
 
-Install and authenticate Oh My Pi separately, and make sure `omp` is available on cc-connect's `PATH`.
+Install and authenticate a version of Oh My Pi that provides the `omp acp` subcommand, and make sure `omp` is available on cc-connect's `PATH`.
 
 ### Personal WeChat group chat — finding the right `chat_id` (issue #805)
 
