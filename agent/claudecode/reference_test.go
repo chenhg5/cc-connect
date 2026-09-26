@@ -16,7 +16,7 @@ func referenceTailUsage(path string) (int, bool) {
 	}
 	lines := bytes.Split(bytes.TrimRight(raw, "\n"), []byte("\n"))
 	for i := len(lines) - 1; i >= 0; i-- {
-		if u := claudeUsageFromTranscriptLine(lines[i]); u != nil {
+		if u := claudeUsageFromTranscriptLine(lines[i], 0); u != nil {
 			return u.UsedTokens, true
 		}
 	}
@@ -63,7 +63,7 @@ func TestTailUsageFromTranscript_MatchesReference(t *testing.T) {
 			t.Fatal(err)
 		}
 		want, wantOK := referenceTailUsage(path)
-		got, found := tailUsageFromTranscript(path, 1<<30)
+		got, found := tailUsageFromTranscript(path, 1<<30, 0)
 		if !wantOK {
 			if got != nil {
 				t.Errorf("cut=%d: reference found nothing, bounded returned %d", cut, got.UsedTokens)
@@ -94,7 +94,7 @@ func TestTailUsageFromTranscript_GrowsWindowOnlyAsNeeded(t *testing.T) {
 	}
 	path := writeFixture(t, lines)
 
-	u, found := tailUsageFromTranscript(path, 1<<30)
+	u, found := tailUsageFromTranscript(path, 1<<30, 0)
 	if !found || u == nil {
 		t.Fatalf("found=%v usage=%v, want the record 240KB back from EOF", found, u)
 	}
