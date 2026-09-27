@@ -3,6 +3,7 @@ package copilot
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -242,6 +243,73 @@ func TestAgent_CLIDisplayName(t *testing.T) {
 	}
 }
 
+func TestCopilotSkillDirs_UsesProjectAndUserRoots(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "repo", "src")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "repo", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home")
+	want := []string{
+		filepath.Join(workDir, ".github", "skills"),
+		filepath.Join(workDir, ".agents", "skills"),
+		filepath.Join(workDir, ".claude", "skills"),
+		filepath.Join(root, "repo", ".github", "skills"),
+		filepath.Join(root, "repo", ".agents", "skills"),
+		filepath.Join(root, "repo", ".claude", "skills"),
+		filepath.Join(home, ".copilot", "skills"),
+		filepath.Join(home, ".agents", "skills"),
+	}
+
+	got := copilotSkillDirs(workDir, home)
+	if len(got) != len(want) {
+		t.Fatalf("len(copilotSkillDirs()) = %d, want %d\n got=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("copilotSkillDirs()[%d] = %q, want %q\nfull=%v", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestCopilotSkillDirs_StopsProjectSearchAtHome(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := copilotSkillDirs(root, root)
+	want := []string{
+		filepath.Join(root, ".copilot", "skills"),
+		filepath.Join(root, ".agents", "skills"),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len(copilotSkillDirs()) = %d, want %d\n got=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("copilotSkillDirs()[%d] = %q, want %q\nfull=%v", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestUniqueCopilotSkillDirs_PreservesFirstOccurrence(t *testing.T) {
+	first := filepath.Join("project", ".agents", "skills")
+	second := filepath.Join("home", ".copilot", "skills")
+	got := uniqueCopilotSkillDirs([]string{first, second, first, second})
+	want := []string{first, second}
+	if len(got) != len(want) {
+		t.Fatalf("len(uniqueCopilotSkillDirs()) = %d, want %d\n got=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("uniqueCopilotSkillDirs()[%d] = %q, want %q\nfull=%v", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestAgent_WorkspaceAgentOptions(t *testing.T) {
 	a := &Agent{mode: "bypassPermissions", model: "gpt-4o", cmd: "copilot"}
 	opts := a.WorkspaceAgentOptions()
@@ -309,7 +377,7 @@ func TestAgent_ListSessions_RPC(t *testing.T) {
 
 	// Point agent at the test binary itself acting as a mock copilot
 	a := &Agent{
-		cmd:  bin,
+		cmd:     bin,
 		workDir: ".",
 	}
 
@@ -341,7 +409,7 @@ func TestAgent_DeleteSession_RPC(t *testing.T) {
 	}
 
 	a := &Agent{
-		cmd:  bin,
+		cmd:     bin,
 		workDir: ".",
 	}
 

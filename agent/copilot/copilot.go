@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,87 @@ func normalizeMode(raw string) string {
 func (a *Agent) Name() string           { return "copilot" }
 func (a *Agent) CLIBinaryName() string  { return a.cmd }
 func (a *Agent) CLIDisplayName() string { return "GitHub Copilot" }
+
+// SkillDirs exposes Copilot's project and user skill roots to cc-connect's
+// SkillRegistry. Copilot CLI discovers these same roots when config discovery
+// is enabled for a programmatic session.
+func (a *Agent) SkillDirs() []string {
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
+	if err != nil {
+		absDir = workDir
+	}
+	home, _ := os.UserHomeDir()
+	return copilotSkillDirs(absDir, home)
+}
+
+func copilotSkillDirs(workDir, home string) []string {
+	dirs := walkUpCopilotSkillDirs(workDir, home)
+	if home != "" {
+		dirs = append(dirs,
+			filepath.Join(home, ".copilot", "skills"),
+			filepath.Join(home, ".agents", "skills"),
+		)
+	}
+	return uniqueCopilotSkillDirs(dirs)
+}
+
+func walkUpCopilotSkillDirs(workDir, home string) []string {
+	current := filepath.Clean(workDir)
+	home = filepath.Clean(home)
+	stopAt := findCopilotGitRoot(current)
+
+	var dirs []string
+	for home == "" || current != home {
+		dirs = append(dirs,
+			filepath.Join(current, ".github", "skills"),
+			filepath.Join(current, ".agents", "skills"),
+			filepath.Join(current, ".claude", "skills"),
+		)
+		if stopAt != "" && current == stopAt {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return uniqueCopilotSkillDirs(dirs)
+}
+
+func findCopilotGitRoot(start string) string {
+	current := filepath.Clean(start)
+	for {
+		if _, err := os.Stat(filepath.Join(current, ".git")); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func uniqueCopilotSkillDirs(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		clean := filepath.Clean(path)
+		if clean == "." {
+			continue
+		}
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
+}
 
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
@@ -198,7 +280,7 @@ type probeSession struct {
 }
 
 type probeSnapshot struct {
-	cmd  string
+	cmd     string
 	workDir string
 	env     []string
 }
