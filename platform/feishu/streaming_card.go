@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -82,6 +83,8 @@ type feishuStreamingCard struct {
 	// a user-expanded panel stays expanded.
 	appendedThinking int
 	appendedTools    int
+	renderedThinking []core.ProgressCardEntry
+	renderedTools    []core.ProgressCardEntry
 
 	// hasThinkingPanel/hasToolsPanel record whether the card entity currently
 	// contains that lane's collapsible panel. A lane panel only exists once the
@@ -94,6 +97,18 @@ type feishuStreamingCard struct {
 
 // Ensure feishuStreamingCard implements core.StreamingCard.
 var _ core.StreamingCard = (*feishuStreamingCard)(nil)
+
+func laneHasPrefix(rendered, current []core.ProgressCardEntry) bool {
+	if len(current) < len(rendered) {
+		return false
+	}
+	for i, item := range rendered {
+		if !reflect.DeepEqual(current[i], item) {
+			return false
+		}
+	}
+	return true
+}
 
 // SupportsStreamingCardPayload implements core.StreamingCardPayloadSupporter:
 // the Feishu streaming card renders the structured progress payload as the
@@ -287,6 +302,8 @@ func (c *feishuStreamingCard) sendWithStatus(ctx context.Context, content string
 			reasoning, tools, _ := splitProgressItemsByLane(payload.Items)
 			c.appendedThinking = len(reasoning)
 			c.appendedTools = len(tools)
+			c.renderedThinking = append([]core.ProgressCardEntry(nil), reasoning...)
+			c.renderedTools = append([]core.ProgressCardEntry(nil), tools...)
 			c.hasThinkingPanel = len(reasoning) > 0
 			c.hasToolsPanel = len(tools) > 0
 		}
@@ -318,21 +335,20 @@ func (c *feishuStreamingCard) sendWithStatus(ctx context.Context, content string
 	if payload, isPayload := core.ParseProgressCardPayload(content); isPayload && handle.cardID != "" {
 		reasoning, tools, _ := splitProgressItemsByLane(payload.Items)
 		c.mu.Lock()
-		// A later payload may carry FEWER entries than the ones already
-		// appended (the engine clears and rebuilds the step list, e.g. when a
-		// hook rejects a step). Pull the cursors back to the payload length so
-		// the delta slices can never go out of range and later entries are
-		// still appended once the list grows again.
-		if c.appendedThinking > len(reasoning) {
-			c.appendedThinking = len(reasoning)
+		// Append-only cardkit updates are valid only while the payload keeps
+		// the already-rendered lane as an unchanged prefix. A cumulative
+		// reasoning snapshot can replace an earlier short entry; in that case
+		// use a full-card sync instead of slicing by stale indexes (which would
+		// either duplicate entries or panic after the lane shrinks).
+		appendable := laneHasPrefix(c.renderedThinking, reasoning) && laneHasPrefix(c.renderedTools, tools)
+		newThinking := []core.ProgressCardEntry(nil)
+		newTools := []core.ProgressCardEntry(nil)
+		if appendable {
+			newThinking = reasoning[len(c.renderedThinking):]
+			newTools = tools[len(c.renderedTools):]
 		}
-		if c.appendedTools > len(tools) {
-			c.appendedTools = len(tools)
-		}
-		newThinking := reasoning[c.appendedThinking:]
-		newTools := tools[c.appendedTools:]
 		c.mu.Unlock()
-		appendedOK := true
+		appendedOK := appendable
 		if len(newThinking) > 0 {
 			if err := c.writeLane(ctx, p, handle, laneThinking, newThinking, len(reasoning), payload.Lang); err != nil {
 				slog.Warn("feishu: append thinking entries failed, falling back to card update", "error", err)
@@ -363,6 +379,8 @@ func (c *feishuStreamingCard) sendWithStatus(ctx context.Context, content string
 			c.mu.Lock()
 			c.appendedThinking = len(reasoning)
 			c.appendedTools = len(tools)
+			c.renderedThinking = append([]core.ProgressCardEntry(nil), reasoning...)
+			c.renderedTools = append([]core.ProgressCardEntry(nil), tools...)
 			c.mu.Unlock()
 			return nil
 		}
@@ -371,6 +389,8 @@ func (c *feishuStreamingCard) sendWithStatus(ctx context.Context, content string
 		c.mu.Lock()
 		c.appendedThinking = len(reasoning)
 		c.appendedTools = len(tools)
+		c.renderedThinking = append([]core.ProgressCardEntry(nil), reasoning...)
+		c.renderedTools = append([]core.ProgressCardEntry(nil), tools...)
 		c.hasThinkingPanel = len(reasoning) > 0
 		c.hasToolsPanel = len(tools) > 0
 		c.mu.Unlock()
@@ -507,9 +527,19 @@ func (c *feishuStreamingCard) Finalize(ctx context.Context, content string) erro
 	defer c.apiMu.Unlock()
 
 	if handle == nil {
-		// No intermediate content ever arrived; create the card now with the
-		// final content directly — in the terminal (done) state, so the lazy
-		// path does not leave a permanently "running" card behind.
+		// No intermediate content ever arrived. A turn with nothing to show
+		// (no thinking, no tool calls, no answer — e.g. a quiet-mode turn)
+		// must not post an empty card: the answer is delivered as its own
+		// message and the engine already returns "" for an empty payload.
+		// Posting it anyway produced a blank collapsed card next to every
+		// reply.
+		if strings.TrimSpace(content) == "" {
+			c.finish(nil)
+			return nil
+		}
+		// Create the card now with the final content directly — in the terminal
+		// (done) state, so the lazy path does not leave a permanently "running"
+		// card behind.
 		err := c.sendWithStatus(ctx, content, core.CardStatusDone)
 		c.finish(err)
 		return err
