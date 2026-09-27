@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -26,17 +27,21 @@ const (
 	// maxIlinkHTTPResponseBody caps JSON response size (getUpdates may batch many msgs).
 	maxIlinkHTTPResponseBody = 64 << 20
 
-	channelVersion = "cc-connect-weixin/1.0"
+	channelVersion        = "cc-connect-weixin/1.0"
+	defaultBotAgent       = "CCConnect/1.0"
+	ilinkAppID            = "bot"
+	ilinkAppClientVersion = "65536" // 1.0.0 encoded as 0x00010000, matching Tencent's uint32 format.
 )
 
 type apiClient struct {
 	baseURL    string
 	token      string
 	routeTag   string
+	botAgent   string
 	httpClient *http.Client
 }
 
-func newAPIClient(baseURL, token, routeTag string, httpClient *http.Client) *apiClient {
+func newAPIClient(baseURL, token, routeTag string, httpClient *http.Client, botAgent ...string) *apiClient {
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = defaultBaseURL
 	}
@@ -44,11 +49,47 @@ func newAPIClient(baseURL, token, routeTag string, httpClient *http.Client) *api
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultAPITimeout}
 	}
+	agent := defaultBotAgent
+	if len(botAgent) > 0 {
+		agent = sanitizeBotAgent(botAgent[0])
+	}
 	return &apiClient{
 		baseURL:    baseURL,
 		token:      strings.TrimSpace(token),
 		routeTag:   strings.TrimSpace(routeTag),
+		botAgent:   agent,
 		httpClient: httpClient,
+	}
+}
+
+var botAgentProductRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,32}/[A-Za-z0-9_.+-]{1,32}$`)
+
+func sanitizeBotAgent(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultBotAgent
+	}
+	parts := strings.Fields(raw)
+	accepted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if botAgentProductRE.MatchString(part) {
+			accepted = append(accepted, part)
+		}
+	}
+	if len(accepted) == 0 {
+		return defaultBotAgent
+	}
+	joined := strings.Join(accepted, " ")
+	if len(joined) > 256 {
+		return defaultBotAgent
+	}
+	return joined
+}
+
+func (c *apiClient) baseInfo() baseInfo {
+	return baseInfo{
+		ChannelVersion: channelVersion,
+		BotAgent:       c.botAgent,
 	}
 }
 
@@ -84,8 +125,9 @@ func (c *apiClient) post(ctx context.Context, endpoint string, body []byte, time
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("AuthorizationType", "ilink_bot_token")
-	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	req.Header.Set("X-WECHAT-UIN", randomWechatUIN())
+	req.Header.Set("iLink-App-Id", ilinkAppID)
+	req.Header.Set("iLink-App-ClientVersion", ilinkAppClientVersion)
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
@@ -132,7 +174,7 @@ func (c *apiClient) getUpdates(ctx context.Context, buf string, timeoutMs int) (
 	}
 	req := getUpdatesReq{
 		GetUpdatesBuf: buf,
-		BaseInfo:      baseInfo{ChannelVersion: channelVersion},
+		BaseInfo:      c.baseInfo(),
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
@@ -163,7 +205,7 @@ func (c *apiClient) sendMessage(ctx context.Context, msg *sendMessageReq) error 
 	if msg == nil {
 		return fmt.Errorf("weixin: sendMessage: nil request")
 	}
-	msg.BaseInfo = baseInfo{ChannelVersion: channelVersion}
+	msg.BaseInfo = c.baseInfo()
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -190,7 +232,7 @@ func (c *apiClient) sendMessage(ctx context.Context, msg *sendMessageReq) error 
 }
 
 func (c *apiClient) getUploadURL(ctx context.Context, req getUploadURLRequest) (*getUploadURLResponse, error) {
-	req.BaseInfo = baseInfo{ChannelVersion: channelVersion}
+	req.BaseInfo = c.baseInfo()
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -213,9 +255,9 @@ func (c *apiClient) getUploadURL(ctx context.Context, req getUploadURLRequest) (
 
 func (c *apiClient) getConfig(ctx context.Context, userID, contextToken string) (*getConfigResp, error) {
 	req := getConfigReq{
-		UserID:       userID,
+		IlinkUserID:  userID,
 		ContextToken: contextToken,
-		BaseInfo:     baseInfo{ChannelVersion: channelVersion},
+		BaseInfo:     c.baseInfo(),
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
@@ -240,7 +282,7 @@ func (c *apiClient) sendTyping(ctx context.Context, userID, typingTicket string,
 		IlinkUserID:  userID,
 		TypingTicket: typingTicket,
 		Status:       status,
-		BaseInfo:     baseInfo{ChannelVersion: channelVersion},
+		BaseInfo:     c.baseInfo(),
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
@@ -251,9 +293,6 @@ func (c *apiClient) sendTyping(ctx context.Context, userID, typingTicket string,
 }
 
 func (c *apiClient) sendText(ctx context.Context, to, text, contextToken, clientID string) error {
-	if strings.TrimSpace(contextToken) == "" {
-		return fmt.Errorf("weixin: context_token is required for send")
-	}
 	items := []messageItem{}
 	if strings.TrimSpace(text) != "" {
 		items = append(items, messageItem{

@@ -43,11 +43,16 @@ func (p *Platform) resolveReplyContext(replyCtx any) (*replyContext, error) {
 	if !ok || rc == nil {
 		return nil, fmt.Errorf("weixin: invalid reply context")
 	}
-	if strings.TrimSpace(rc.contextToken) == "" {
-		rc.contextToken = p.getContextToken(rc.peerUserID)
+	if p.refreshReplyContextToken(rc) {
+		slog.Debug("weixin: using latest cached context_token before media send", "peer", rc.peerUserID)
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {
-		return nil, fmt.Errorf("weixin: missing context_token for peer %q", rc.peerUserID)
+		slog.Warn("weixin: context_token unavailable; attempting media send without context", "peer", rc.peerUserID)
+	} else if !p.replyContextTokenFresh(rc) {
+		slog.Warn("weixin: context_token is older than the conservative freshness window; attempting media send before deferring",
+			"peer", rc.peerUserID,
+			"token_age", p.replyContextTokenAge(rc),
+			"message_id", rc.messageID)
 	}
 	return rc, nil
 }

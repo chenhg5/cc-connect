@@ -43,8 +43,23 @@ type appServerThreadTokenUsageNotification struct {
 	} `json:"tokenUsage"`
 }
 
-func mapAppServerTokenUsage(notif appServerThreadTokenUsageNotification) *core.ContextUsage {
+type codexUsageSnapshot struct {
+	Context *core.ContextUsage
+	Total   *core.TokenUsage
+	Last    *core.TokenUsage
+	Turn    *core.TokenUsage
+}
+
+func mapAppServerContextUsage(notif appServerThreadTokenUsageNotification) *core.ContextUsage {
 	return contextUsageFromCamel(notif.TokenUsage.Last, notif.TokenUsage.ModelContextWindow)
+}
+
+func mapAppServerTurnUsage(notif appServerThreadTokenUsageNotification, baseline *core.TokenUsage) *core.TokenUsage {
+	return turnUsageFromCumulativeAndLast(
+		tokenUsageFromCamel(notif.TokenUsage.Total),
+		tokenUsageFromCamel(notif.TokenUsage.Last),
+		baseline,
+	)
 }
 
 func contextUsageFromCamel(usage codexTokenUsage, contextWindow int) *core.ContextUsage {
@@ -69,6 +84,83 @@ func contextUsageFromSnake(usage codexSnakeTokenUsage, contextWindow int) *core.
 		usage.ReasoningOutputTokens,
 		contextWindow,
 	)
+}
+
+func tokenUsageFromCamel(usage codexTokenUsage) *core.TokenUsage {
+	return tokenUsageFromParts(
+		usage.TotalTokens,
+		usage.InputTokens,
+		usage.CachedInputTokens,
+		usage.OutputTokens,
+		usage.ReasoningOutputTokens,
+	)
+}
+
+func tokenUsageFromSnake(usage codexSnakeTokenUsage) *core.TokenUsage {
+	return tokenUsageFromParts(
+		usage.TotalTokens,
+		usage.InputTokens,
+		usage.CachedInputTokens,
+		usage.OutputTokens,
+		usage.ReasoningOutputTokens,
+	)
+}
+
+func tokenUsageFromParts(totalTokens, inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens int) *core.TokenUsage {
+	if totalTokens <= 0 && inputTokens <= 0 && cachedInputTokens <= 0 && outputTokens <= 0 && reasoningOutputTokens <= 0 {
+		return nil
+	}
+	return &core.TokenUsage{
+		TotalTokens:           totalTokens,
+		InputTokens:           inputTokens,
+		CachedInputTokens:     cachedInputTokens,
+		OutputTokens:          outputTokens,
+		ReasoningOutputTokens: reasoningOutputTokens,
+	}
+}
+
+func turnUsageFromCumulativeAndLast(total, last, baseline *core.TokenUsage) *core.TokenUsage {
+	if delta := deltaTokenUsage(total, baseline); delta != nil {
+		return delta
+	}
+	return cloneTokenUsage(last)
+}
+
+func deltaTokenUsage(total, baseline *core.TokenUsage) *core.TokenUsage {
+	if total == nil || baseline == nil {
+		return nil
+	}
+	delta := &core.TokenUsage{
+		TotalTokens:           positiveDelta(total.TotalTokens, baseline.TotalTokens),
+		InputTokens:           positiveDelta(total.InputTokens, baseline.InputTokens),
+		CachedInputTokens:     positiveDelta(total.CachedInputTokens, baseline.CachedInputTokens),
+		OutputTokens:          positiveDelta(total.OutputTokens, baseline.OutputTokens),
+		ReasoningOutputTokens: positiveDelta(total.ReasoningOutputTokens, baseline.ReasoningOutputTokens),
+	}
+	if delta.TotalTokens == 0 && delta.InputTokens == 0 && delta.CachedInputTokens == 0 && delta.OutputTokens == 0 && delta.ReasoningOutputTokens == 0 {
+		return nil
+	}
+	return delta
+}
+
+func inferTokenUsageBaseline(total, last *core.TokenUsage) *core.TokenUsage {
+	if total == nil || last == nil {
+		return nil
+	}
+	return &core.TokenUsage{
+		TotalTokens:           positiveDelta(total.TotalTokens, last.TotalTokens),
+		InputTokens:           positiveDelta(total.InputTokens, last.InputTokens),
+		CachedInputTokens:     positiveDelta(total.CachedInputTokens, last.CachedInputTokens),
+		OutputTokens:          positiveDelta(total.OutputTokens, last.OutputTokens),
+		ReasoningOutputTokens: positiveDelta(total.ReasoningOutputTokens, last.ReasoningOutputTokens),
+	}
+}
+
+func positiveDelta(current, previous int) int {
+	if current <= previous {
+		return 0
+	}
+	return current - previous
 }
 
 func currentContextTokens(totalTokens, inputTokens, outputTokens int) int {
@@ -108,12 +200,20 @@ func cloneContextUsage(usage *core.ContextUsage) *core.ContextUsage {
 	return &cloned
 }
 
-func loadContextUsageFromRollout(extraEnv []string, sessionID, cachedPath string) (*core.ContextUsage, string, error) {
+func cloneTokenUsage(usage *core.TokenUsage) *core.TokenUsage {
+	if usage == nil {
+		return nil
+	}
+	cloned := *usage
+	return &cloned
+}
+
+func loadUsageSnapshotFromRollout(extraEnv []string, sessionID, cachedPath string) (*codexUsageSnapshot, string, error) {
 	path := strings.TrimSpace(cachedPath)
 	if path != "" {
-		usage, err := readContextUsageFromRollout(path)
-		if err == nil && usage != nil {
-			return usage, path, nil
+		snapshot, err := readUsageSnapshotFromRollout(path)
+		if err == nil && snapshot != nil {
+			return snapshot, path, nil
 		}
 	}
 
@@ -125,14 +225,14 @@ func loadContextUsageFromRollout(extraEnv []string, sessionID, cachedPath string
 	if path == "" {
 		return nil, "", fmt.Errorf("session file not found for %s", sessionID)
 	}
-	usage, err := readContextUsageFromRollout(path)
+	snapshot, err := readUsageSnapshotFromRollout(path)
 	if err != nil {
 		return nil, path, err
 	}
-	if usage == nil {
+	if snapshot == nil {
 		return nil, path, fmt.Errorf("context usage not found in rollout")
 	}
-	return usage, path, nil
+	return snapshot, path, nil
 }
 
 func resolveCodexHome(extraEnv []string) (string, error) {
@@ -185,14 +285,14 @@ func findSessionFileInCodexHome(codexHome, sessionID string) string {
 	return found
 }
 
-func readContextUsageFromRollout(path string) (*core.ContextUsage, error) {
+func readUsageSnapshotFromRollout(path string) (*codexUsageSnapshot, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	if usage, err := readContextUsageFromRolloutTail(f); err != nil {
+	if usage, err := readUsageSnapshotFromRolloutTail(f); err != nil {
 		return nil, err
 	} else if usage != nil {
 		return usage, nil
@@ -201,10 +301,10 @@ func readContextUsageFromRollout(path string) (*core.ContextUsage, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	return scanContextUsageFromRollout(f)
+	return scanUsageSnapshotFromRollout(f)
 }
 
-func readContextUsageFromRolloutTail(f *os.File) (*core.ContextUsage, error) {
+func readUsageSnapshotFromRolloutTail(f *os.File) (*codexUsageSnapshot, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -228,31 +328,66 @@ func readContextUsageFromRolloutTail(f *os.File) (*core.ContextUsage, error) {
 			buf = buf[idx+1:]
 		}
 	}
-	return parseContextUsageFromRolloutBytes(buf), nil
+	return parseUsageSnapshotFromRolloutBytes(buf), nil
 }
 
-func parseContextUsageFromRolloutBytes(data []byte) *core.ContextUsage {
+func parseUsageSnapshotFromRolloutBytes(data []byte) *codexUsageSnapshot {
 	lines := bytes.Split(data, []byte{'\n'})
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := bytes.TrimSpace(lines[i])
+	var last *codexUsageSnapshot
+	var previousTotal *core.TokenUsage
+	var turnBaseline *core.TokenUsage
+	inTurn := false
+	for _, line := range lines {
+		line := bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
 		}
-		if usage := parseContextUsageFromRolloutLine(line); usage != nil {
-			return usage
+		if isTurnContextRolloutLine(line) {
+			turnBaseline = cloneTokenUsage(previousTotal)
+			inTurn = true
+			continue
+		}
+		if usage := parseUsageSnapshotFromRolloutLine(line); usage != nil {
+			if inTurn && turnBaseline == nil {
+				turnBaseline = inferTokenUsageBaseline(usage.Total, usage.Last)
+			}
+			if turnBaseline != nil {
+				usage.Turn = turnUsageFromCumulativeAndLast(usage.Total, usage.Last, turnBaseline)
+			}
+			last = usage
+			previousTotal = cloneTokenUsage(usage.Total)
 		}
 	}
-	return nil
+	return last
 }
 
-func scanContextUsageFromRollout(r io.Reader) (*core.ContextUsage, error) {
+func scanUsageSnapshotFromRollout(r io.Reader) (*codexUsageSnapshot, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
 
-	var last *core.ContextUsage
+	var last *codexUsageSnapshot
+	var previousTotal *core.TokenUsage
+	var turnBaseline *core.TokenUsage
+	inTurn := false
 	for scanner.Scan() {
-		if usage := parseContextUsageFromRolloutLine(scanner.Bytes()); usage != nil {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		if isTurnContextRolloutLine(line) {
+			turnBaseline = cloneTokenUsage(previousTotal)
+			inTurn = true
+			continue
+		}
+		if usage := parseUsageSnapshotFromRolloutLine(line); usage != nil {
+			if inTurn && turnBaseline == nil {
+				turnBaseline = inferTokenUsageBaseline(usage.Total, usage.Last)
+			}
+			if turnBaseline != nil {
+				usage.Turn = turnUsageFromCumulativeAndLast(usage.Total, usage.Last, turnBaseline)
+			}
 			last = usage
+			previousTotal = cloneTokenUsage(usage.Total)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -261,7 +396,17 @@ func scanContextUsageFromRollout(r io.Reader) (*core.ContextUsage, error) {
 	return last, nil
 }
 
-func parseContextUsageFromRolloutLine(line []byte) *core.ContextUsage {
+func isTurnContextRolloutLine(line []byte) bool {
+	var entry struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(line, &entry); err != nil {
+		return false
+	}
+	return entry.Type == "turn_context"
+}
+
+func parseUsageSnapshotFromRolloutLine(line []byte) *codexUsageSnapshot {
 	var entry struct {
 		Type    string          `json:"type"`
 		Payload json.RawMessage `json:"payload"`
@@ -287,5 +432,9 @@ func parseContextUsageFromRolloutLine(line []byte) *core.ContextUsage {
 	if payload.Type != "token_count" || payload.Info == nil {
 		return nil
 	}
-	return contextUsageFromSnake(payload.Info.LastTokenUsage, payload.Info.ModelContextWindow)
+	return &codexUsageSnapshot{
+		Context: contextUsageFromSnake(payload.Info.LastTokenUsage, payload.Info.ModelContextWindow),
+		Total:   tokenUsageFromSnake(payload.Info.TotalTokenUsage),
+		Last:    tokenUsageFromSnake(payload.Info.LastTokenUsage),
+	}
 }

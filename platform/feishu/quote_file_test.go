@@ -281,8 +281,10 @@ func TestDispatchMessageQuotedFileAcceptance(t *testing.T) {
 				"feishu:oc_chat:ou_alice",
 				currentUser,
 				"oc_chat",
-				replyContext{messageID: "om_child_" + sc.name, sessionKey: "feishu:oc_chat:ou_alice"},
+				"p2p",
 				sc.parentID,
+				"",
+				"",
 				0,
 			)
 
@@ -404,8 +406,10 @@ func TestDispatchMessageQuotedFileForeignUserDropped(t *testing.T) {
 		"feishu:oc_chat:ou_alice",
 		currentUser,
 		"oc_chat",
-		replyContext{messageID: "om_child_foreign", sessionKey: "feishu:oc_chat:ou_alice"},
+		"p2p",
 		parentMessageID,
+		"",
+		"",
 		0,
 	)
 

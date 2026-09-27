@@ -771,6 +771,20 @@ func TestAvailableModels_BackgroundRefreshUpdatesDiskCache(t *testing.T) {
 	}
 
 	waitForModelsInPersistentCache(t, cachePath, []string{"fresh/model", "second/model"})
+	// The disk write completes just before the refreshed models are installed in memory.
+	// Wait for both parts of the asynchronous refresh before checking the public API.
+	a := agent.(*Agent)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		models := a.persistentModels()
+		if len(models) == 2 && models[0].Name == "fresh/model" && models[1].Name == "second/model" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("in-memory cache models = %v, want refreshed cache", models)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	got = switcher.AvailableModels(context.Background())
 	if len(got) != 2 || got[0].Name != "fresh/model" || got[1].Name != "second/model" {

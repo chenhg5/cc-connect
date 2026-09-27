@@ -110,9 +110,45 @@ type replyContext struct {
 	messageID        string
 	chatID           string
 	sessionKey       string
+	userID           string
+	userName         string
+	chatName         string
+	rootMessageID    string
+	threadID         string
 	bootstrapThread  bool
-	receiptEmoji     string // persistent reaction owned by the accepted-message callback
+	receiptEmoji     string
 	receiptMessageID string
+}
+
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return core.AuditReplyMetadata{}
+	}
+	rootID := rc.rootMessageID
+	threadID := rc.threadID
+	if rootID == "" || threadID == "" {
+		derivedRootID, _ := parseThreadRootID(strings.TrimPrefix(rc.sessionKey, p.platformName+":"+rc.chatID+":"))
+		if rootID == "" {
+			rootID = derivedRootID
+		}
+		if threadID == "" {
+			threadID = derivedRootID
+		}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.userID,
+		UserName:         rc.userName,
+		ChatName:         rc.chatName,
+		ChannelKey:       rc.chatID,
+		ReplyToMessageID: rc.messageID,
+		RootMessageID:    rootID,
+		ThreadID:         threadID,
+		Extra: map[string]any{
+			"chat_id": rc.chatID,
+		},
+	}
 }
 
 type Platform struct {
@@ -307,6 +343,7 @@ type imageBatchEntry struct {
 	messageIDs   []string
 	createTimeMs int64
 	parentID     string
+	auditExtra   map[string]any
 	timer        *time.Timer
 }
 
@@ -900,13 +937,22 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			return nil, nil
 		}
 
-		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		userName := p.resolveUserName(userID)
+		chatName := p.resolveChatName(chatID)
+		rctx := replyContext{
+			messageID:  messageID,
+			chatID:     chatID,
+			sessionKey: sessionKey,
+			userID:     userID,
+			userName:   userName,
+			chatName:   chatName,
+		}
 		go p.dispatchCoreMessage(&core.Message{
 			SessionKey:           sessionKey,
 			Platform:             p.platformName,
 			UserID:               userID,
-			UserName:             p.resolveUserName(userID),
-			ChatName:             p.resolveChatName(chatID),
+			UserName:             userName,
+			ChatName:             chatName,
 			Content:              responseText,
 			ReplyCtx:             rctx,
 			IsPermissionResponse: true,
@@ -932,13 +978,22 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
-		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		userName := p.resolveUserName(userID)
+		chatName := p.resolveChatName(chatID)
+		rctx := replyContext{
+			messageID:  messageID,
+			chatID:     chatID,
+			sessionKey: sessionKey,
+			userID:     userID,
+			userName:   userName,
+			chatName:   chatName,
+		}
 		go p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
+			UserName:   userName,
+			ChatName:   chatName,
 			Content:    actionVal,
 			ReplyCtx:   rctx,
 		})
@@ -964,7 +1019,16 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// cmd: — async command dispatch, with optional in-place card replacement
 	if strings.HasPrefix(actionVal, "cmd:") {
 		cmdText := strings.TrimPrefix(actionVal, "cmd:")
-		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		userName := p.resolveUserName(userID)
+		chatName := p.resolveChatName(chatID)
+		rctx := replyContext{
+			messageID:  messageID,
+			chatID:     chatID,
+			sessionKey: sessionKey,
+			userID:     userID,
+			userName:   userName,
+			chatName:   chatName,
+		}
 
 		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
 
@@ -972,8 +1036,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
+			UserName:   userName,
+			ChatName:   chatName,
 			Content:    cmdText,
 			ReplyCtx:   rctx,
 		})
@@ -1446,6 +1510,10 @@ func (p *Platform) dispatchImageBatchEntry(entry *imageBatchEntry) {
 		Images:            append(entry.quoted.images, entry.images...),
 		ReplyCtx:          entry.rctx,
 		UserMessageTimeMs: entry.createTimeMs,
+		ParentMessageID:   entry.parentID,
+		RootMessageID:     entry.rctx.rootMessageID,
+		ThreadID:          entry.rctx.threadID,
+		AuditExtra:        core.CloneAuditExtra(entry.auditExtra),
 	})
 }
 
@@ -1849,8 +1917,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	}
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
+	rootID := stringValue(msg.RootId)
+	threadID := stringValue(msg.ThreadId)
 
-	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, rootMessageID: rootID, threadID: threadID}
 	var groupHistoryCtx groupHistoryContext
 	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" && (botMentioned || atEveryone) {
 		scope := p.groupHistoryScope(msg, chatID)
@@ -1863,7 +1933,13 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,
-		"reply_in_thread", p.shouldReplyInThread(rctx),
+		"reply_in_thread", p.shouldReplyInThread(replyContext{
+			messageID:     messageID,
+			chatID:        chatID,
+			sessionKey:    sessionKey,
+			rootMessageID: rootID,
+			threadID:      threadID,
+		}),
 	)
 
 	// Mark this thread as bot-engaged so subsequent attachment-only messages
@@ -1879,7 +1955,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx)
+	go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, chatType, rctx, parentID, rootID, threadID, createTimeMs, groupHistoryCtx)
 
 	return nil
 }
@@ -1896,11 +1972,12 @@ func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContex
 // dispatchMessage handles the message content parsing, media download, and
 // handler invocation. It runs in its own goroutine so that onMessage returns
 // quickly and does not block the SDK event loop.
-func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64) {
-	p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryContext{})
+func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID, chatType, parentID, rootID, threadID string, createTimeMs int64) {
+	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, rootMessageID: rootID, threadID: threadID}
+	p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, chatType, rctx, parentID, rootID, threadID, createTimeMs, groupHistoryContext{})
 }
 
-func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID string, rctx replyContext, parentID string, createTimeMs int64, groupHistoryCtx groupHistoryContext) {
+func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, content string, mentions []*larkim.MentionEvent, messageID, sessionKey, userID, chatID, chatType string, rctx replyContext, parentID, rootID, threadID string, createTimeMs int64, groupHistoryCtx groupHistoryContext) {
 	if p.isMessageRecalled(messageID) {
 		slog.Debug(p.tag()+": recalled message ignored in async dispatch", "message_id", messageID)
 		return
@@ -1912,6 +1989,14 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		userName = p.resolveUserName(userID)
 	}
 	chatName := p.resolveChatName(chatID)
+	if threadID == "" {
+		threadID = rootID
+	}
+	rctx.userID = userID
+	rctx.userName = userName
+	rctx.chatName = chatName
+	rctx.rootMessageID = rootID
+	rctx.threadID = threadID
 
 	// If this message is a reply to another message, fetch the quoted content
 	// and prepend it so the agent has full context.
@@ -1932,6 +2017,36 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			msg.OnAccepted = groupHistoryCtx.onAccepted
 		}
 		p.dispatchCoreMessage(msg)
+	}
+
+	auditExtra := map[string]any{
+		"chat_id":                chatID,
+		"chat_type":              chatType,
+		"message_type":           msgType,
+		"mentions_count":         len(mentions),
+		"quoted_message_present": parentID != "",
+	}
+	newMessage := func() *core.Message {
+		return &core.Message{
+			SessionKey:        sessionKey,
+			Platform:          p.platformName,
+			MessageID:         messageID,
+			ParentMessageID:   parentID,
+			RootMessageID:     rootID,
+			ThreadID:          threadID,
+			UserID:            userID,
+			UserName:          userName,
+			ChatName:          chatName,
+			AuditExtra:        core.CloneAuditExtra(auditExtra),
+			ReplyCtx:          rctx,
+			UserMessageTimeMs: createTimeMs,
+		}
+	}
+	applyQuotedContext := func(msg *core.Message) {
+		msg.ExtraContent = quoted.text
+		if len(quoted.images) > 0 {
+			msg.Images = append(append([]core.ImageAttachment{}, quoted.images...), msg.Images...)
+		}
 	}
 
 	switch msgType {
@@ -1960,17 +2075,12 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			)
 			return
 		}
-		// Flush any image batch buffered earlier in this session so the image
-		// reaches the engine before the text message advances the user-message
-		// watermark (#1686 P1-B, related #1395).
 		p.flushImageBatchForSession(sessionKey)
-		dispatchCore(&core.Message{
-			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: quoted.images, Files: quotedFiles, ReplyCtx: rctx,
-			UserMessageTimeMs: createTimeMs,
-		})
+		msg := newMessage()
+		msg.Content = text
+		msg.Files = quotedFiles
+		applyQuotedContext(msg)
+		dispatchCore(msg)
 
 	case "image":
 		var imgBody struct {
@@ -2008,19 +2118,15 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 				messageIDs:   []string{messageID},
 				createTimeMs: createTimeMs,
 				parentID:     parentID,
+				auditExtra:   core.CloneAuditExtra(auditExtra),
 			})
 			return
 		}
-		dispatchCore(&core.Message{
-			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content:           "",
-			ExtraContent:      quoted.text,
-			Images:            append(quoted.images, core.ImageAttachment{MimeType: mimeType, Data: imgData}),
-			ReplyCtx:          rctx,
-			UserMessageTimeMs: createTimeMs,
-		})
+		p.flushImageBatchForSession(sessionKey)
+		msg := newMessage()
+		msg.Images = []core.ImageAttachment{{MimeType: mimeType, Data: imgData}}
+		applyQuotedContext(msg)
+		dispatchCore(msg)
 
 	case "audio":
 		var audioBody struct {
@@ -2040,23 +2146,16 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			}
 			return
 		}
-		// Flush any image batch buffered earlier in this session so the image
-		// reaches the engine before this audio message advances the user-message
-		// watermark (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
-		dispatchCore(&core.Message{
-			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
-			Audio: &core.AudioAttachment{
-				MimeType: "audio/opus",
-				Data:     audioData,
-				Format:   "ogg",
-				Duration: audioBody.Duration / 1000,
-			},
-			ReplyCtx:          rctx,
-			UserMessageTimeMs: createTimeMs,
-		})
+		msg := newMessage()
+		msg.Audio = &core.AudioAttachment{
+			MimeType: "audio/opus",
+			Data:     audioData,
+			Format:   "ogg",
+			Duration: audioBody.Duration / 1000,
+		}
+		applyQuotedContext(msg)
+		dispatchCore(msg)
 
 	case "post":
 		textParts, images := p.parsePostContent(messageID, content)
@@ -2064,16 +2163,12 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		if text == "" && historyText == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
 			return
 		}
-		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
-		dispatchCore(&core.Message{
-			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
-			ReplyCtx:          rctx,
-			UserMessageTimeMs: createTimeMs,
-		})
+		msg := newMessage()
+		msg.Content = text
+		msg.Images = images
+		applyQuotedContext(msg)
+		dispatchCore(msg)
 
 	case "file":
 		var fileBody struct {
@@ -2095,20 +2190,15 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
 		mimeType := detectMimeType(fileData)
-		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
-		dispatchCore(&core.Message{
-			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
-			Files: []core.FileAttachment{{
-				MimeType: mimeType,
-				Data:     fileData,
-				FileName: fileBody.FileName,
-			}},
-			ReplyCtx:          rctx,
-			UserMessageTimeMs: createTimeMs,
-		})
+		msg := newMessage()
+		msg.Files = []core.FileAttachment{{
+			MimeType: mimeType,
+			Data:     fileData,
+			FileName: fileBody.FileName,
+		}}
+		applyQuotedContext(msg)
+		dispatchCore(msg)
 
 	case "merge_forward":
 		text, images, files := p.parseMergeForward(messageID)
@@ -2116,18 +2206,12 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			slog.Warn(p.tag()+": merge_forward produced no content", "message_id", messageID)
 			return
 		}
-		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
-		coreMsg := &core.Message{
-			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content:           text,
-			Images:            images,
-			Files:             files,
-			ReplyCtx:          rctx,
-			UserMessageTimeMs: createTimeMs,
-		}
+		coreMsg := newMessage()
+		coreMsg.Content = text
+		coreMsg.Images = images
+		coreMsg.Files = files
+		applyQuotedContext(coreMsg)
 		dispatchCore(coreMsg)
 
 	case "sticker":
@@ -2142,27 +2226,17 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		imgData, mimeType, err := p.downloadImage(messageID, stickerBody.FileKey)
 		if err != nil {
 			slog.Warn(p.tag()+": download sticker failed, falling back to placeholder", "error", err)
-			// Flush any image batch buffered earlier in this session (#1686 P1-B).
 			p.flushImageBatchForSession(sessionKey)
-			dispatchCore(&core.Message{
-				SessionKey: sessionKey, Platform: p.platformName,
-				MessageID: messageID,
-				UserID:    userID, UserName: userName, ChatName: chatName,
-				Content: "[sticker]", ExtraContent: quoted.text, ReplyCtx: rctx,
-				UserMessageTimeMs: createTimeMs,
-			})
+			msg := newMessage()
+			msg.Content = "[sticker]"
+			applyQuotedContext(msg)
+			dispatchCore(msg)
 			return
 		}
-		// Flush any image batch buffered earlier in this session (#1686 P1-B).
-		p.flushImageBatchForSession(sessionKey)
-		dispatchCore(&core.Message{
-			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
-			Images:            []core.ImageAttachment{{MimeType: mimeType, Data: imgData}},
-			ReplyCtx:          rctx,
-			UserMessageTimeMs: createTimeMs,
-		})
+		msg := newMessage()
+		msg.Images = []core.ImageAttachment{{MimeType: mimeType, Data: imgData}}
+		applyQuotedContext(msg)
+		dispatchCore(msg)
 
 	case "media":
 		var mediaBody struct {
@@ -2192,15 +2266,12 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 				slog.Warn(p.tag()+": download media thumbnail failed", "error", err)
 			}
 		}
-		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
-		dispatchCore(&core.Message{
-			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: images, ReplyCtx: rctx,
-			UserMessageTimeMs: createTimeMs,
-		})
+		msg := newMessage()
+		msg.Content = text
+		msg.Images = images
+		applyQuotedContext(msg)
+		dispatchCore(msg)
 
 	default:
 		slog.Debug(p.tag()+": ignoring unsupported message type", "type", msgType)
@@ -2632,7 +2703,10 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 			})
 		}
 	case "interactive":
-		text = extractInteractiveCardText(content)
+		// Preserve the full card payload for quoted replies so downstream agents
+		// can inspect structured fields (for example, diagnostic JSON embedded in
+		// card content) instead of only receiving a lossy text summary.
+		text = preserveInteractiveCardPayload(content)
 	default:
 		text = fmt.Sprintf("[%s]", item.MsgType)
 	}
@@ -2824,6 +2898,14 @@ func extractPostPlainText(content string) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// preserveInteractiveCardPayload returns the raw interactive card payload for
+// quoted-message injection. We intentionally do not summarize or compress it:
+// callers replying to a card often need the original JSON structure rather
+// than a lossy text extraction.
+func preserveInteractiveCardPayload(content string) string {
+	return strings.TrimSpace(content)
 }
 
 // extractInteractiveCardText extracts readable text from a Feishu interactive card JSON.
@@ -3270,36 +3352,46 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	_, err := p.ReplyWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+		return nil, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
 
 	if !p.shouldUseThreadOrReplyAPI(rc) {
-		return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+		return p.sendNewMessageToChatWithReceipt(ctx, rc, msgType, msgBody)
 	}
-	return p.replyMessage(ctx, rc, msgType, msgBody)
+	return p.replyMessageWithReceipt(ctx, rc, msgType, msgBody)
 }
 
 // Send sends a message. When the original message ID is available, the message
 // is sent as a reply (quoting the original) so the conversation stays threaded.
 // Falls back to creating a standalone message when no message ID exists.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	_, err := p.SendWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+		return nil, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
 	if p.shouldUseThreadOrReplyAPI(rc) {
-		return p.Reply(ctx, rctx, content)
+		return p.ReplyWithReceipt(ctx, rctx, content)
 	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
-	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+	return p.sendNewMessageToChatWithReceipt(ctx, rc, msgType, msgBody)
 }
 
 // SendWithStatusFooter implements core.StatusFooterSender: send a reply with
@@ -4097,10 +4189,15 @@ func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
 }
 
 func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, msgType, content string) error {
+	_, err := p.sendNewMessageToChatWithReceipt(ctx, rc, msgType, content)
+	return err
+}
+
+func (p *Platform) sendNewMessageToChatWithReceipt(ctx context.Context, rc replyContext, msgType, content string) (*core.SendReceipt, error) {
 	if rc.chatID == "" {
-		return fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
+		return nil, fmt.Errorf("%s: chatID is empty, cannot send new message", p.tag())
 	}
-	return p.createMessage(ctx, rc.chatID, msgType, content, "send")
+	return p.createMessageWithReceipt(ctx, rc.chatID, msgType, content, "send")
 }
 
 func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content string) *larkim.ReplyMessageReqBody {
@@ -4114,11 +4211,17 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 }
 
 func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	_, err := p.replyMessageWithReceipt(ctx, rc, msgType, content)
+	return err
+}
+
+func (p *Platform) replyMessageWithReceipt(ctx context.Context, rc replyContext, msgType, content string) (*core.SendReceipt, error) {
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
 		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
 		Build()
-	return p.withTransientRetry(ctx, "reply", func() error {
+	var messageID string
+	err := p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Reply(ctx, req, options...)
 			if err != nil {
@@ -4127,12 +4230,29 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 			if !resp.Success() {
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				messageID = *resp.Data.MessageId
+			}
 			return nil
 		})
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &core.SendReceipt{
+		MessageID: messageID,
+		Extra: map[string]any{
+			"chat_id": rc.chatID,
+		},
+	}, nil
 }
 
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
+	_, err := p.createMessageWithReceipt(ctx, chatID, msgType, content, op)
+	return err
+}
+
+func (p *Platform) createMessageWithReceipt(ctx context.Context, chatID, msgType, content, op string) (*core.SendReceipt, error) {
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
@@ -4141,7 +4261,8 @@ func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, 
 			Content(content).
 			Build()).
 		Build()
-	return p.withTransientRetry(ctx, op, func() error {
+	var messageID string
+	err := p.withTransientRetry(ctx, op, func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Create(ctx, req, options...)
 			if err != nil {
@@ -4150,9 +4271,21 @@ func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, 
 			if !resp.Success() {
 				return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
 			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				messageID = *resp.Data.MessageId
+			}
 			return nil
 		})
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &core.SendReceipt{
+		MessageID: messageID,
+		Extra: map[string]any{
+			"chat_id": chatID,
+		},
+	}, nil
 }
 
 func (p *Platform) withFreshTenantAccessTokenRetry(ctx context.Context, operation string, fn feishuRequestFunc) error {
@@ -4513,6 +4646,8 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) == 3 {
 		if rootID, ok := parseThreadRootID(parts[2]); ok {
 			rc.messageID = rootID
+			rc.rootMessageID = rootID
+			rc.threadID = rootID
 		}
 	}
 	return rc, nil
@@ -4578,6 +4713,19 @@ type feishuPreviewHandle struct {
 	sequence    int    // cardkit-v1 streaming text monotonic counter (++ before use; first call = 1)
 	status      core.CardStatus
 	lastContent string
+}
+
+func (p *Platform) PreviewReceipt(previewHandle any) *core.SendReceipt {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok || h == nil {
+		return nil
+	}
+	return &core.SendReceipt{
+		MessageID: h.messageID,
+		Extra: map[string]any{
+			"chat_id": h.chatID,
+		},
+	}
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.
@@ -5794,7 +5942,12 @@ func (p *Platform) onBotMenu(event *larkapplication.P2BotMenuV6) error {
 		Content:    content,
 		UserID:     userID,
 		UserName:   userName,
-		ReplyCtx:   replyContext{chatID: userID, sessionKey: sessionKey},
+		ReplyCtx: replyContext{
+			chatID:     userID,
+			sessionKey: sessionKey,
+			userID:     userID,
+			userName:   userName,
+		},
 	})
 	return nil
 }

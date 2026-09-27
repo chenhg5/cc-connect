@@ -38,6 +38,9 @@ func init() {
 type replyContext struct {
 	fromUserID string
 	sessionKey string
+	messageID  string
+	userName   string
+	chatName   string
 }
 
 type Platform struct {
@@ -102,6 +105,25 @@ func New(opts map[string]any) (core.Platform, error) {
 
 func (p *Platform) Name() string { return p.name }
 
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(replyContext)
+	if !ok {
+		return core.AuditReplyMetadata{}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.fromUserID,
+		UserName:         rc.userName,
+		ChatName:         rc.chatName,
+		ChannelKey:       rc.fromUserID,
+		ReplyToMessageID: rc.messageID,
+		ParentMessageID:  rc.messageID,
+		Extra: map[string]any{
+			"to_user_id": rc.fromUserID,
+		},
+	}
+}
+
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 	p.ctx, p.cancel = context.WithCancel(context.Background())
@@ -116,11 +138,21 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
-	return p.sendMessage(rctx, content)
+	_, err := p.ReplyWithReceipt(ctx, rctx, content)
+	return err
 }
 
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
-	return p.sendMessage(rctx, content)
+	_, err := p.SendWithReceipt(ctx, rctx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
+	return p.SendWithReceipt(ctx, rctx, content)
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, rctx any, content string) (*core.SendReceipt, error) {
+	return p.sendMessageWithReceipt(rctx, content)
 }
 
 func (p *Platform) Stop() error {
@@ -305,11 +337,11 @@ type wsMessage struct {
 }
 
 type messagePayload struct {
-	MessageID  string              `json:"messageId"`
-	FromUserID string              `json:"fromUserId"`
-	Text       string              `json:"text"`
-	Timestamp  int64               `json:"timestamp"`
-	Input      []messageInputItem  `json:"input,omitempty"`
+	MessageID  string             `json:"messageId"`
+	FromUserID string             `json:"fromUserId"`
+	Text       string             `json:"text"`
+	Timestamp  int64              `json:"timestamp"`
+	Input      []messageInputItem `json:"input,omitempty"`
 }
 
 type messageInputItem struct {
@@ -419,6 +451,9 @@ func (p *Platform) handleInbound(raw json.RawMessage) {
 	rctx := replyContext{
 		fromUserID: userID,
 		sessionKey: sessionKey,
+		messageID:  msgID,
+		userName:   userID,
+		chatName:   userID,
 	}
 
 	msg := &core.Message{
@@ -427,10 +462,14 @@ func (p *Platform) handleInbound(raw json.RawMessage) {
 		MessageID:  msgID,
 		UserID:     userID,
 		UserName:   userID,
+		ChannelKey: userID,
 		Content:    text,
 		Images:     images,
 		Files:      files,
 		ReplyCtx:   rctx,
+		AuditExtra: map[string]any{
+			"timestamp": payload.Timestamp,
+		},
 	}
 
 	if hasAttachments {
@@ -518,9 +557,14 @@ type sendPayload struct {
 }
 
 func (p *Platform) sendMessage(rctx any, content string) error {
+	_, err := p.sendMessageWithReceipt(rctx, content)
+	return err
+}
+
+func (p *Platform) sendMessageWithReceipt(rctx any, content string) (*core.SendReceipt, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
-		return fmt.Errorf("weibo: invalid reply context type: %T", rctx)
+		return nil, fmt.Errorf("weibo: invalid reply context type: %T", rctx)
 	}
 
 	chunks := splitText(content, maxTextPerChunk)
@@ -538,10 +582,16 @@ func (p *Platform) sendMessage(rctx any, content string) error {
 			},
 		}
 		if err := p.writeWS(env); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return &core.SendReceipt{
+		MessageID:       msgID,
+		ParentMessageID: rc.messageID,
+		Extra: map[string]any{
+			"to_user_id": rc.fromUserID,
+		},
+	}, nil
 }
 
 func (p *Platform) SendImage(_ context.Context, rctx any, img core.ImageAttachment) error {

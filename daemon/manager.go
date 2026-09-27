@@ -269,4 +269,3 @@ func captureConfigEnvPlaceholdersInString(s string, env map[string]string) {
 		}
 	}
 }
-

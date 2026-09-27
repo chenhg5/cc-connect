@@ -30,6 +30,21 @@ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_ApplyTurnRuntimeStateUpdatesModelWithoutClearingEffort(t *testing.T) {
+	s := &appServerSession{}
+	effort := "high"
+	s.applyThreadRuntimeState("/tmp/project", "gpt-5.4", &effort)
+
+	s.applyTurnRuntimeState("", "gpt-5.5", nil)
+
+	if got := s.GetModel(); got != "gpt-5.5" {
+		t.Fatalf("GetModel() = %q, want gpt-5.5", got)
+	}
+	if got := s.GetReasoningEffort(); got != "high" {
+		t.Fatalf("GetReasoningEffort() = %q, want high", got)
+	}
+}
+
 func TestAppServerSession_HandleRateLimitsUpdatedCachesUsage(t *testing.T) {
 	s := &appServerSession{}
 	raw, err := json.Marshal(appServerRateLimitsResponse{
@@ -128,6 +143,58 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 	if usage.InputTokens != 40849 {
 		t.Fatalf("input tokens = %d, want 40849", usage.InputTokens)
+	}
+	turnUsage := s.GetTurnUsage()
+	if turnUsage == nil {
+		t.Fatal("GetTurnUsage() = nil, want fallback last turn usage")
+	}
+	if turnUsage.InputTokens != 40849 || turnUsage.OutputTokens != 212 || turnUsage.CachedInputTokens != 36864 {
+		t.Fatalf("turn usage = %#v, want last token usage", turnUsage)
+	}
+
+	turn := turnNotification{ThreadID: "thread-1"}
+	turn.Turn.ID = "turn-2"
+	rawTurn, err := json.Marshal(turn)
+	if err != nil {
+		t.Fatalf("marshal turn notification: %v", err)
+	}
+	s.handleNotification("turn/started", rawTurn)
+
+	raw, err = json.Marshal(appServerThreadTokenUsageNotification{
+		ThreadID: "thread-1",
+		TurnID:   "turn-2",
+		TokenUsage: struct {
+			Total              codexTokenUsage `json:"total"`
+			Last               codexTokenUsage `json:"last"`
+			ModelContextWindow int             `json:"modelContextWindow"`
+		}{
+			Total: codexTokenUsage{
+				TotalTokens:           52012645,
+				InputTokens:           51848383,
+				CachedInputTokens:     48188204,
+				OutputTokens:          164262,
+				ReasoningOutputTokens: 78920,
+			},
+			Last: codexTokenUsage{
+				TotalTokens:           999999,
+				InputTokens:           999999,
+				CachedInputTokens:     999999,
+				OutputTokens:          999999,
+				ReasoningOutputTokens: 999999,
+			},
+			ModelContextWindow: 258400,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal second notification: %v", err)
+	}
+	s.handleNotification("thread/tokenUsage/updated", raw)
+	turnUsage = s.GetTurnUsage()
+	if turnUsage == nil {
+		t.Fatal("GetTurnUsage() = nil, want cumulative delta")
+	}
+	if turnUsage.InputTokens != 1000 || turnUsage.OutputTokens != 250 || turnUsage.CachedInputTokens != 300 || turnUsage.ReasoningOutputTokens != 10 {
+		t.Fatalf("turn usage delta = %#v, want input=1000 output=250 cache=300 reasoning=10", turnUsage)
 	}
 }
 

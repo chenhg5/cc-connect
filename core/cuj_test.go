@@ -157,8 +157,10 @@ type cujAgentSession struct {
 	pendingDelayMs int
 
 	// observed
-	sentPrompts []string
-	closeCount  int
+	sentPrompts     []string
+	sentImageCounts []int
+	sentFileCounts  []int
+	closeCount      int
 }
 
 // atomic_bool is intentionally lowercase to avoid clash with stdlib atomic.Bool
@@ -178,9 +180,11 @@ func newCUJAgentSession() *cujAgentSession {
 	}
 }
 
-func (s *cujAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *cujAgentSession) Send(prompt string, _ string, images []ImageAttachment, files []FileAttachment) error {
 	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
+	s.sentImageCounts = append(s.sentImageCounts, len(images))
+	s.sentFileCounts = append(s.sentFileCounts, len(files))
 	reply := s.reply
 	delay := s.delayMs
 	override := s.nextEventOverride
@@ -240,6 +244,14 @@ func (s *cujAgentSession) getSentPrompts() []string {
 	out := make([]string, len(s.sentPrompts))
 	copy(out, s.sentPrompts)
 	return out
+}
+
+func (s *cujAgentSession) getSentAttachmentCounts() ([]int, []int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	imageCounts := append([]int(nil), s.sentImageCounts...)
+	fileCounts := append([]int(nil), s.sentFileCounts...)
+	return imageCounts, fileCounts
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,10 +1183,17 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 	deadline := time.After(2 * time.Second)
 	for {
 		agent.mu.Lock()
-		n := len(agent.sessions)
+		var session *cujAgentSession
+		if len(agent.sessions) > 0 {
+			session = agent.sessions[0]
+		}
 		agent.mu.Unlock()
-		if n > 0 {
-			break
+		if session != nil && len(plat.getSent()) > 0 {
+			imageCounts, _ := session.getSentAttachmentCounts()
+			if len(imageCounts) != 1 || imageCounts[0] != 1 {
+				t.Fatalf("agent image counts = %v, want [1]", imageCounts)
+			}
+			return
 		}
 		select {
 		case <-deadline:
@@ -1235,9 +1254,16 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	deadline := time.After(2 * time.Second)
 	for {
 		agent.mu.Lock()
-		n := len(agent.sessions)
+		var session *cujAgentSession
+		if len(agent.sessions) > 0 {
+			session = agent.sessions[0]
+		}
 		agent.mu.Unlock()
-		if n > 0 {
+		if session != nil && len(plat.getSent()) > 0 {
+			_, fileCounts := session.getSentAttachmentCounts()
+			if len(fileCounts) != 1 || fileCounts[0] != 1 {
+				t.Fatalf("agent file counts = %v, want [1]", fileCounts)
+			}
 			return
 		}
 		select {
@@ -2357,7 +2383,6 @@ func TestCUJ_STREAM1_StreamingResumesAfterPermissionPrompt(t *testing.T) {
 		}
 	}
 }
-
 func TestCUJ_H4_FeishuTopicsKeepWorkspaceBindingsIsolated(t *testing.T) {
 	baseDir := t.TempDir()
 	defaultWorkspace := normalizeWorkspacePath(filepath.Join(baseDir, "workspace-default"))

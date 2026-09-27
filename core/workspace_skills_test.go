@@ -114,6 +114,8 @@ func newWorkspaceSkillsEngine(t *testing.T, p Platform) (*Engine, string, string
 		writeWorkspaceSkill(t, filepath.Join(ws, ".agents", "skills"), filepath.Base(ws)+"-only", "Unique "+filepath.Base(ws))
 		writeWorkspaceSkill(t, filepath.Join(ws, ".agents", "skills"), "shared-skill", "Instructions "+filepath.Base(ws))
 	}
+	// macOS temp paths may enter as /var and resolve to /private/var in the engine.
+	a, b = normalizeWorkspacePath(a), normalizeWorkspacePath(b)
 	writeWorkspaceSkill(t, global, "global-skill", "Global instructions")
 	writeWorkspaceSkill(t, global, "shared-skill", "Wrong global instructions")
 	name := "workspace-skills-" + t.Name()

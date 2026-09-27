@@ -30,20 +30,22 @@ const (
 
 	// weixinChunkSendDelay is the delay between sending message chunks to avoid rate limiting.
 	weixinChunkSendDelay = 100 * time.Millisecond
-
-	// Send-volume quota that keeps the bot under ilink's burst throttle
-	// (sendMessage ret=-2 "prepare failed"). Live testing showed the gateway
-	// throttles the bot after roughly 5-6 separate messages within a short window,
-	// and that the penalty is escalated by every send attempt made while it is
-	// active. We pace separate messages (not chunks: multi-chunk sends are fine)
-	// to stay well below the trigger. Configurable via burst_limit /
-	// burst_window_secs platform options.
-	defaultBurstLimit      = 4     // max separate messages per window
-	defaultBurstWindowSecs = 86400 // window length (24h: ilink budgets ~5-6 sends/day)
+	// pendingFlushInterval is a best-effort background retry interval for persisted replies.
+	pendingFlushInterval = 15 * time.Second
+	// pendingRetryCooldown avoids repeatedly trying the same expired context_token.
+	pendingRetryCooldown = 30 * time.Second
+	// pendingMaxAttemptsPerToken caps background attempts until a new context_token arrives.
+	pendingMaxAttemptsPerToken = 3
+	defaultBurstLimit          = 4
+	defaultBurstWindowSecs     = 86400
 	// typingTicketTTL is how long a cached typing ticket remains valid.
 	typingTicketTTL = 10 * time.Minute
 	// typingRepeatInterval is how often to resend the typing status to keep it alive.
 	typingRepeatInterval = 5 * time.Second
+	// contextTokenFreshTTL is a conservative real-time send window for iLink replies.
+	contextTokenFreshTTL = 90 * time.Second
+	maxLongPollTimeout   = 60 * time.Second
+	maxPendingReplyRunes = 12000
 )
 
 // sendPath labels the call site that reaches the outbound API so the burst
@@ -83,8 +85,14 @@ func resetPushBudgetExceededCounter() {
 }
 
 type replyContext struct {
-	peerUserID   string
-	contextToken string
+	peerUserID             string
+	contextToken           string
+	contextTokenCapturedAt time.Time
+	proactive              bool
+	deliveryUnconfirmed    bool
+	messageID              string
+	sessionKey             string
+	userName               string
 }
 
 // Platform implements core.Platform for Weixin personal chat via the ilink bot HTTP API
@@ -129,12 +137,14 @@ type Platform struct {
 	pauseUntil time.Time
 
 	tokensMu   sync.RWMutex
-	tokens     map[string]string
+	tokens     map[string]contextTokenEntry
 	tokensPath string
 
 	typingMu      sync.RWMutex
 	typingTickets map[string]typingTicketEntry // peerUserID → cached ticket
 
+	pendingMu   sync.Mutex
+	pendingPath string
 	// Send-volume quota guarding against ilink's burst throttle (see constants).
 	sendQuotaMu     sync.Mutex
 	sendQuotaTimes  []time.Time
@@ -145,6 +155,25 @@ type Platform struct {
 type typingTicketEntry struct {
 	ticket    string
 	fetchedAt time.Time
+}
+
+type contextTokenEntry struct {
+	Token      string `json:"token"`
+	AccountID  string `json:"account_id,omitempty"`
+	CapturedAt string `json:"captured_at,omitempty"`
+	MessageID  string `json:"message_id,omitempty"`
+	SentCount  int    `json:"sent_count,omitempty"`
+}
+
+type pendingReplyEntry struct {
+	Peer              string `json:"peer"`
+	Content           string `json:"content"`
+	Reason            string `json:"reason,omitempty"`
+	CreatedAt         string `json:"created_at"`
+	Attempts          int    `json:"attempts,omitempty"`
+	LastAttemptAt     string `json:"last_attempt_at,omitempty"`
+	LastAttemptToken  string `json:"last_attempt_token,omitempty"`
+	TokenAttemptCount int    `json:"token_attempt_count,omitempty"`
 }
 
 func sanitizePathSegment(s string) string {
@@ -182,11 +211,12 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	cdnBaseURL = strings.TrimRight(strings.TrimSpace(cdnBaseURL), "/")
 	routeTag, _ := opts["route_tag"].(string)
+	botAgent, _ := opts["bot_agent"].(string)
 	accountLabel, _ := opts["account_id"].(string)
 	if accountLabel == "" {
 		accountLabel = "default"
 	}
-	lp := pickInt(opts["long_poll_timeout_ms"])
+	lp := sanitizeLongPollTimeoutMS(pickInt(opts["long_poll_timeout_ms"]))
 
 	// Send-volume quota (see defaultBurstLimit constants). 0 disables the quota.
 	burstLimit := pickInt(opts["burst_limit"])
@@ -260,14 +290,14 @@ func New(opts map[string]any) (core.Platform, error) {
 		accountLabel:    accountLabel,
 		httpClient:      httpClient,
 		cdnHttpClient:   cdnHttpClient,
-		tokens:          make(map[string]string),
+		tokens:          make(map[string]contextTokenEntry),
 		dedupEnabled:    dedupEnabled,
 		dedup:           core.NewMessageDedup(time.Duration(dedupWindow) * time.Second),
 		typingTickets:   make(map[string]typingTicketEntry),
 		sendQuotaLimit:  burstLimit,
 		sendQuotaWindow: time.Duration(burstWindow) * time.Second,
 	}
-	p.api = newAPIClient(baseURL, token, routeTag, httpClient)
+	p.api = newAPIClient(baseURL, token, routeTag, httpClient, botAgent)
 
 	if stateDir != "" {
 		if err := os.MkdirAll(stateDir, 0o755); err != nil {
@@ -275,6 +305,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		}
 		p.syncBufPath = filepath.Join(stateDir, "get_updates.buf")
 		p.tokensPath = filepath.Join(stateDir, "context_tokens.json")
+		p.pendingPath = filepath.Join(stateDir, "pending_replies.json")
 		p.loadSyncBuf()
 		p.loadTokens()
 	}
@@ -293,6 +324,18 @@ func pickInt(v any) int {
 	default:
 		return 0
 	}
+}
+
+func sanitizeLongPollTimeoutMS(v int) int {
+	if v <= 0 {
+		return 0
+	}
+	maxMS := int(maxLongPollTimeout / time.Millisecond)
+	if v > maxMS {
+		slog.Warn("weixin: long_poll_timeout_ms too large, using default/server value", "configured_ms", v, "max_ms", maxMS)
+		return 0
+	}
+	return v
 }
 
 // pickBool interprets an any value as a bool. Numeric values are treated as
@@ -316,6 +359,31 @@ func pickBool(v any) bool {
 }
 
 func (p *Platform) Name() string { return "weixin" }
+
+func (p *Platform) NeedsEarlyInstantReply() bool { return true }
+
+func (p *Platform) HoldIntermediateTextUntilFinal() bool { return true }
+
+func (p *Platform) AuditReplyMetadata(replyCtx any) core.AuditReplyMetadata {
+	rc, ok := replyCtx.(*replyContext)
+	if !ok || rc == nil {
+		return core.AuditReplyMetadata{}
+	}
+	return core.AuditReplyMetadata{
+		SessionKey:       rc.sessionKey,
+		UserID:           rc.peerUserID,
+		UserName:         rc.userName,
+		ChatName:         rc.userName,
+		ChannelKey:       rc.peerUserID,
+		ReplyToMessageID: rc.messageID,
+		ParentMessageID:  rc.messageID,
+		Extra: map[string]any{
+			"peer_user_id":      rc.peerUserID,
+			"has_context_token": strings.TrimSpace(rc.contextToken) != "",
+			"context_token_age": p.replyContextTokenAge(rc).String(),
+		},
+	}
+}
 
 func (p *Platform) loadSyncBuf() {
 	if p.syncBufPath == "" {
@@ -347,9 +415,35 @@ func (p *Platform) loadTokens() {
 	if err != nil {
 		return
 	}
-	var m map[string]string
-	if json.Unmarshal(b, &m) != nil {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(b, &raw) != nil {
 		return
+	}
+	m := make(map[string]contextTokenEntry, len(raw))
+	for peer, payload := range raw {
+		peer = strings.TrimSpace(peer)
+		if peer == "" {
+			continue
+		}
+		var legacy string
+		if json.Unmarshal(payload, &legacy) == nil {
+			if tok := strings.TrimSpace(legacy); tok != "" {
+				m[peer] = contextTokenEntry{Token: tok, AccountID: p.accountLabel}
+			}
+			continue
+		}
+		var entry contextTokenEntry
+		if json.Unmarshal(payload, &entry) != nil {
+			continue
+		}
+		entry.Token = strings.TrimSpace(entry.Token)
+		if entry.Token == "" {
+			continue
+		}
+		if strings.TrimSpace(entry.AccountID) == "" {
+			entry.AccountID = p.accountLabel
+		}
+		m[peer] = entry
 	}
 	p.tokensMu.Lock()
 	p.tokens = m
@@ -371,23 +465,88 @@ func (p *Platform) persistTokens() {
 	}
 }
 
-func (p *Platform) setContextToken(peer, tok string) {
+func (p *Platform) setContextToken(peer, tok, messageID string, capturedAt time.Time) {
+	peer = strings.TrimSpace(peer)
+	tok = strings.TrimSpace(tok)
 	if peer == "" || tok == "" {
 		return
 	}
+	if capturedAt.IsZero() {
+		capturedAt = time.Now()
+	}
 	p.tokensMu.Lock()
 	if p.tokens == nil {
-		p.tokens = make(map[string]string)
+		p.tokens = make(map[string]contextTokenEntry)
 	}
-	p.tokens[peer] = tok
+	p.tokens[peer] = contextTokenEntry{
+		Token:      tok,
+		AccountID:  p.accountLabel,
+		CapturedAt: capturedAt.Format(time.RFC3339Nano),
+		MessageID:  strings.TrimSpace(messageID),
+	}
 	p.tokensMu.Unlock()
 	p.persistTokens()
 }
 
 func (p *Platform) getContextToken(peer string) string {
+	entry := p.getContextTokenEntry(peer)
+	return entry.Token
+}
+
+func (p *Platform) getContextTokenEntry(peer string) contextTokenEntry {
 	p.tokensMu.RLock()
 	defer p.tokensMu.RUnlock()
 	return p.tokens[peer]
+}
+
+func (p *Platform) markContextSendAccepted(peer, token string) int {
+	peer = strings.TrimSpace(peer)
+	token = strings.TrimSpace(token)
+	if peer == "" || token == "" {
+		return 0
+	}
+	p.tokensMu.Lock()
+	entry := p.tokens[peer]
+	if entry.Token != token {
+		p.tokensMu.Unlock()
+		return 0
+	}
+	entry.SentCount++
+	p.tokens[peer] = entry
+	count := entry.SentCount
+	p.tokensMu.Unlock()
+	p.persistTokens()
+	return count
+}
+
+func (entry contextTokenEntry) capturedTime() (time.Time, bool) {
+	if strings.TrimSpace(entry.CapturedAt) == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, entry.CapturedAt)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func (entry contextTokenEntry) fresh(now time.Time) bool {
+	if strings.TrimSpace(entry.Token) == "" {
+		return false
+	}
+	capturedAt, ok := entry.capturedTime()
+	if !ok {
+		return false
+	}
+	return now.Sub(capturedAt) >= 0 && now.Sub(capturedAt) <= contextTokenFreshTTL
+}
+
+func (entry contextTokenEntry) age(now time.Time) time.Duration {
+	capturedAt, ok := entry.capturedTime()
+	if !ok {
+		return 0
+	}
+	return now.Sub(capturedAt)
 }
 
 func (p *Platform) isPaused() bool {
@@ -420,6 +579,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	go p.pollLoop(ctx)
+	go p.pendingFlushLoop(ctx)
 	return nil
 }
 
@@ -448,6 +608,7 @@ func (p *Platform) Stop() error {
 func (p *Platform) pollLoop(ctx context.Context) {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
+	nextTimeoutMS := p.longPollMS
 	readyNotified := false
 	for {
 		if ctx.Err() != nil {
@@ -466,8 +627,7 @@ func (p *Platform) pollLoop(ctx context.Context) {
 		buf := p.syncBuf
 		p.syncBufMu.Unlock()
 
-		timeoutMs := p.longPollMS
-		resp, err := p.api.getUpdates(ctx, buf, timeoutMs)
+		resp, err := p.api.getUpdates(ctx, buf, nextTimeoutMS)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -483,6 +643,9 @@ func (p *Platform) pollLoop(ctx context.Context) {
 			continue
 		}
 		backoff = time.Second
+		if resp.LongpollingTimeoutMs > 0 {
+			nextTimeoutMS = sanitizeLongPollTimeoutMS(resp.LongpollingTimeoutMs)
+		}
 
 		if resp.Errcode == sessionExpiredErrcode {
 			p.pauseSession(time.Hour)
@@ -569,9 +732,16 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		return
 	}
 
+	msgID := fmt.Sprintf("%d", m.MessageID)
+	if m.MessageID == 0 {
+		msgID = randomHex(8)
+	}
+	var contextTokenCapturedAt time.Time
 	if tok := strings.TrimSpace(m.ContextToken); tok != "" {
-		p.setContextToken(from, tok)
+		contextTokenCapturedAt = time.Now()
+		p.setContextToken(from, tok, msgID, contextTokenCapturedAt)
 		p.refreshTypingTicket(ctx, from, tok)
+		p.flushPendingReply(context.Background(), from, tok, true)
 	}
 
 	body := bodyFromItemList(m.ItemList)
@@ -583,10 +753,13 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		return
 	}
 
-	rc := &replyContext{peerUserID: from, contextToken: strings.TrimSpace(m.ContextToken)}
-	msgID := fmt.Sprintf("%d", m.MessageID)
-	if m.MessageID == 0 {
-		msgID = randomHex(8)
+	rc := &replyContext{
+		peerUserID:             from,
+		contextToken:           strings.TrimSpace(m.ContextToken),
+		contextTokenCapturedAt: contextTokenCapturedAt,
+		messageID:              msgID,
+		sessionKey:             sessionKeyPrefix + from,
+		userName:               shortWeixinUser(from),
 	}
 
 	h(p, &core.Message{
@@ -595,11 +768,22 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		MessageID:  msgID,
 		UserID:     from,
 		UserName:   shortWeixinUser(from),
+		ChatName:   shortWeixinUser(from),
+		ChannelKey: from,
 		Content:    body,
 		Images:     images,
 		Files:      files,
 		Audio:      audio,
 		ReplyCtx:   rc,
+		AuditExtra: map[string]any{
+			"session_id":        m.SessionID,
+			"message_type":      m.MessageType,
+			"message_state":     m.MessageState,
+			"sequence":          m.Seq,
+			"create_time_ms":    m.CreateTimeMs,
+			"item_count":        len(m.ItemList),
+			"has_context_token": strings.TrimSpace(m.ContextToken) != "",
+		},
 	})
 }
 
@@ -638,14 +822,24 @@ func randomHex(n int) string {
 // budget silently bricked weixin bots at 4 replies per 24h after the v1.5.0
 // default landed.
 func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) error {
-	return p.sendChunks(ctx, replyCtx, content, sendPathReply)
+	_, err := p.ReplyWithReceipt(ctx, replyCtx, content)
+	return err
 }
 
 // Send proactively pushes a message to the user (cron / timer / Relay). Pushes
 // count against the burst budget because ilink DOES throttle proactive sends
 // (see #1643 / #1742).
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
-	return p.sendChunks(ctx, replyCtx, content, sendPathPush)
+	_, err := p.SendWithReceipt(ctx, replyCtx, content)
+	return err
+}
+
+func (p *Platform) ReplyWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
+	return p.sendChunksWithReceipt(ctx, replyCtx, content, sendPathReply)
+}
+
+func (p *Platform) SendWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
+	return p.sendChunksWithReceipt(ctx, replyCtx, content, sendPathPush)
 }
 
 // StartTyping sends a typing indicator to the peer and repeats every few seconds
@@ -802,57 +996,328 @@ func (p *Platform) checkSendQuota(ctx context.Context, path sendPath) error {
 }
 
 func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string, path sendPath) error {
+	_, err := p.sendChunksWithReceipt(ctx, replyCtx, content, path)
+	return err
+}
+
+func (p *Platform) sendChunksWithReceipt(ctx context.Context, replyCtx any, content string, path sendPath) (*core.SendReceipt, error) {
 	rc, ok := replyCtx.(*replyContext)
 	if !ok || rc == nil {
-		return fmt.Errorf("weixin: invalid reply context")
+		return nil, fmt.Errorf("weixin: invalid reply context")
 	}
-	if err := p.checkSendQuota(ctx, path); err != nil {
-		return err
-	}
-	if strings.TrimSpace(rc.contextToken) == "" {
-		rc.contextToken = p.getContextToken(rc.peerUserID)
-	}
-	if strings.TrimSpace(rc.contextToken) == "" {
-		slog.Error("weixin: cannot send message - missing context_token",
-			"peer", rc.peerUserID,
-			"content_preview", truncatePreview(content, 100),
-			"hint", "user needs to send a message to the bot first so a context_token can be captured")
-		return fmt.Errorf("weixin: missing context_token for peer %q - user must send a message to the bot first", rc.peerUserID)
+	if p.refreshReplyContextToken(rc) {
+		slog.Debug("weixin: using latest cached context_token before send", "peer", rc.peerUserID)
 	}
 	if strings.TrimSpace(content) == "" {
-		return nil
+		return nil, nil
+	}
+	if strings.TrimSpace(rc.contextToken) == "" {
+		p.enqueuePendingReply(rc.peerUserID, content, "missing_context_token")
+		return nil, fmt.Errorf("weixin: missing context_token for peer %q - user must send a message to the bot first", rc.peerUserID)
+	}
+	if err := p.checkSendQuota(ctx, path); err != nil {
+		p.enqueuePendingReply(rc.peerUserID, content, "throttled")
+		return nil, err
+	}
+	if !p.replyContextTokenFresh(rc) {
+		slog.Warn("weixin: context_token is older than the conservative freshness window; attempting send before deferring",
+			"peer", rc.peerUserID,
+			"token_age", p.replyContextTokenAge(rc),
+			"message_id", rc.messageID)
 	}
 	chunks := splitUTF8(content, maxWeixinChunk)
+	clientIDs := make([]string, 0, len(chunks))
 	total := len(chunks)
 	for i, chunk := range chunks {
 		// Add delay between chunks to avoid rate limiting (except for first chunk)
 		if i > 0 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return nil, ctx.Err()
 			case <-time.After(weixinChunkSendDelay):
 			}
 		}
-		err := p.sendChunk(ctx, rc, chunk)
+		clientID := "cc-" + randomHex(6)
+		err := p.sendChunkWithID(ctx, rc, chunk, clientID)
 		if err != nil {
 			slog.Error("weixin: chunk send failed, message incomplete",
 				"peer", rc.peerUserID,
 				"failed_chunk", fmt.Sprintf("%d/%d", i+1, total),
 				"error", err)
-			// Notify user that message delivery was incomplete, unless the failure
-			// is the ilink throttle: the notice send would be refused too, only
-			// adding another throttled request.
-			if !isSendThrottled(err) {
+			reason := "send_failed"
+			if isSendThrottled(err) {
+				reason = "throttled"
+			} else {
+				// A throttle rejects the notice too and every attempt worsens the penalty.
 				notice := "⚠️ 消息发送不完整，请在终端查看完整结果。"
-				noticeID := "cc-" + randomHex(6)
-				if nerr := p.api.sendText(ctx, rc.peerUserID, notice, rc.contextToken, noticeID); nerr != nil {
+				if nerr := p.api.sendText(ctx, rc.peerUserID, notice, rc.contextToken, "cc-"+randomHex(6)); nerr != nil {
 					slog.Warn("weixin: failed to send incomplete-delivery notice", "peer", rc.peerUserID, "error", nerr)
 				}
 			}
-			return fmt.Errorf("weixin: send chunk %d/%d: %w", i+1, total, err)
+			p.enqueuePendingReply(rc.peerUserID, content, reason)
+			return nil, fmt.Errorf("weixin: send chunk %d/%d: %w", i+1, total, err)
+		}
+		clientIDs = append(clientIDs, clientID)
+	}
+	deliveryConfidence := "contextual_api_accepted"
+	if rc.deliveryUnconfirmed {
+		deliveryConfidence = "context_free_api_accepted_unconfirmed"
+		slog.Warn("weixin: message accepted without context_token; downstream delivery is unconfirmed",
+			"peer", rc.peerUserID, "proactive", rc.proactive, "chunks", total)
+	}
+	return &core.SendReceipt{
+		ParentMessageID: rc.messageID,
+		Extra: map[string]any{
+			"peer_user_id":        rc.peerUserID,
+			"client_ids":          clientIDs,
+			"delivery_confidence": deliveryConfidence,
+		},
+	}, nil
+}
+
+func (p *Platform) refreshReplyContextToken(rc *replyContext) bool {
+	if rc == nil || strings.TrimSpace(rc.peerUserID) == "" {
+		return false
+	}
+	entry := p.getContextTokenEntry(rc.peerUserID)
+	freshToken := strings.TrimSpace(entry.Token)
+	if freshToken == "" {
+		return false
+	}
+	if capturedAt, ok := entry.capturedTime(); ok {
+		if freshToken == strings.TrimSpace(rc.contextToken) {
+			if rc.contextTokenCapturedAt.IsZero() || capturedAt.After(rc.contextTokenCapturedAt) {
+				rc.contextTokenCapturedAt = capturedAt
+				return true
+			}
+			return false
+		}
+		rc.contextToken = freshToken
+		rc.contextTokenCapturedAt = capturedAt
+		return true
+	}
+	if freshToken == strings.TrimSpace(rc.contextToken) {
+		return false
+	}
+	rc.contextToken = freshToken
+	rc.contextTokenCapturedAt = time.Time{}
+	return true
+}
+
+func (p *Platform) replyContextTokenFresh(rc *replyContext) bool {
+	if rc == nil || strings.TrimSpace(rc.contextToken) == "" {
+		return false
+	}
+	if rc.contextTokenCapturedAt.IsZero() {
+		return false
+	}
+	age := time.Since(rc.contextTokenCapturedAt)
+	return age >= 0 && age <= contextTokenFreshTTL
+}
+
+func (p *Platform) replyContextTokenAge(rc *replyContext) time.Duration {
+	if rc == nil || rc.contextTokenCapturedAt.IsZero() {
+		return 0
+	}
+	return time.Since(rc.contextTokenCapturedAt).Round(time.Millisecond)
+}
+
+func (p *Platform) loadPendingRepliesLocked() map[string]pendingReplyEntry {
+	out := make(map[string]pendingReplyEntry)
+	if p.pendingPath == "" {
+		return out
+	}
+	b, err := os.ReadFile(p.pendingPath)
+	if err != nil {
+		return out
+	}
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+func (p *Platform) writePendingRepliesLocked(entries map[string]pendingReplyEntry) {
+	if p.pendingPath == "" {
+		return
+	}
+	if len(entries) == 0 {
+		if err := os.Remove(p.pendingPath); err != nil && !os.IsNotExist(err) {
+			slog.Warn("weixin: remove pending replies failed", "path", p.pendingPath, "error", err)
+		}
+		return
+	}
+	out, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(p.pendingPath, out, 0o600); err != nil {
+		slog.Warn("weixin: save pending replies failed", "path", p.pendingPath, "error", err)
+	}
+}
+
+func (p *Platform) enqueuePendingReply(peer, content, reason string) {
+	peer = strings.TrimSpace(peer)
+	content = strings.TrimSpace(content)
+	if peer == "" || content == "" || p.pendingPath == "" {
+		return
+	}
+	runes := []rune(content)
+	if len(runes) > maxPendingReplyRunes {
+		content = string(runes[:maxPendingReplyRunes]) + "\n\n[truncated pending reply]"
+	}
+
+	p.pendingMu.Lock()
+	defer p.pendingMu.Unlock()
+	entries := p.loadPendingRepliesLocked()
+	entry := entries[peer]
+	entries[peer] = pendingReplyEntry{
+		Peer:              peer,
+		Content:           content,
+		Reason:            strings.TrimSpace(reason),
+		CreatedAt:         time.Now().Format(time.RFC3339),
+		Attempts:          entry.Attempts,
+		LastAttemptAt:     entry.LastAttemptAt,
+		LastAttemptToken:  entry.LastAttemptToken,
+		TokenAttemptCount: entry.TokenAttemptCount,
+	}
+	p.writePendingRepliesLocked(entries)
+}
+
+func (p *Platform) pendingFlushLoop(ctx context.Context) {
+	if p.pendingPath == "" {
+		return
+	}
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			p.flushPendingReplies(ctx, false)
+			timer.Reset(pendingFlushInterval)
 		}
 	}
-	return nil
+}
+
+func (p *Platform) flushPendingReplies(ctx context.Context, force bool) {
+	if p.pendingPath == "" {
+		return
+	}
+	p.pendingMu.Lock()
+	entries := p.loadPendingRepliesLocked()
+	peers := make([]string, 0, len(entries))
+	for peer := range entries {
+		peers = append(peers, peer)
+	}
+	p.pendingMu.Unlock()
+
+	for _, peer := range peers {
+		if ctx.Err() != nil {
+			return
+		}
+		entry := p.getContextTokenEntry(peer)
+		if !force && !entry.fresh(time.Now()) {
+			continue
+		}
+		p.flushPendingReply(ctx, peer, entry.Token, force)
+	}
+}
+
+func (p *Platform) shouldAttemptPendingFlush(entry pendingReplyEntry, contextToken string, force bool, now time.Time) bool {
+	if entry.Reason == "throttled" {
+		if queuedAt, err := time.Parse(time.RFC3339, entry.CreatedAt); err == nil {
+			window := p.sendQuotaWindow
+			if window <= 0 {
+				window = defaultBurstWindowSecs * time.Second
+			}
+			if now.Sub(queuedAt) < window {
+				return false
+			}
+		}
+	}
+	if force {
+		return true
+	}
+	if strings.TrimSpace(contextToken) == "" {
+		return false
+	}
+	if entry.LastAttemptToken != contextToken {
+		return true
+	}
+	if entry.TokenAttemptCount >= pendingMaxAttemptsPerToken {
+		return false
+	}
+	if entry.LastAttemptAt == "" {
+		return true
+	}
+	lastAttempt, err := time.Parse(time.RFC3339, entry.LastAttemptAt)
+	if err != nil {
+		return true
+	}
+	return now.Sub(lastAttempt) >= pendingRetryCooldown
+}
+
+func (p *Platform) flushPendingReply(ctx context.Context, peer, contextToken string, force bool) {
+	peer = strings.TrimSpace(peer)
+	contextToken = strings.TrimSpace(contextToken)
+	if peer == "" || contextToken == "" || p.pendingPath == "" {
+		return
+	}
+
+	p.pendingMu.Lock()
+	entries := p.loadPendingRepliesLocked()
+	entry, ok := entries[peer]
+	if !ok || strings.TrimSpace(entry.Content) == "" {
+		p.pendingMu.Unlock()
+		return
+	}
+	now := time.Now()
+	if !p.shouldAttemptPendingFlush(entry, contextToken, force, now) {
+		p.pendingMu.Unlock()
+		return
+	}
+	entry.Attempts++
+	if entry.LastAttemptToken == contextToken {
+		entry.TokenAttemptCount++
+	} else {
+		entry.LastAttemptToken = contextToken
+		entry.TokenAttemptCount = 1
+	}
+	entry.LastAttemptAt = now.Format(time.RFC3339)
+	entries[peer] = entry
+	p.writePendingRepliesLocked(entries)
+	p.pendingMu.Unlock()
+
+	content := "上次未送达的回复，自动补发：\n\n" + entry.Content
+	chunks := splitUTF8(content, maxWeixinChunk)
+	clientIDPrefix := "cc-pending-" + randomHex(4)
+	for i, chunk := range chunks {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(weixinChunkSendDelay):
+			}
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, defaultAPITimeout)
+		err := p.api.sendText(sendCtx, peer, chunk, contextToken, fmt.Sprintf("%s-%d", clientIDPrefix, i+1))
+		cancel()
+		if err != nil {
+			if isSendThrottled(err) {
+				p.enqueuePendingReply(peer, entry.Content, "throttled")
+			}
+			slog.Warn("weixin: pending reply flush failed", "peer", peer, "chunk", i+1, "error", err)
+			return
+		}
+		p.markContextSendAccepted(peer, contextToken)
+	}
+
+	p.pendingMu.Lock()
+	entries = p.loadPendingRepliesLocked()
+	delete(entries, peer)
+	p.writePendingRepliesLocked(entries)
+	p.pendingMu.Unlock()
+	slog.Info("weixin: pending reply flushed", "peer", peer, "chunks", len(chunks))
 }
 
 // isSendThrottled reports whether err is ilink sendmessage's burst-throttle
@@ -868,8 +1333,16 @@ func isSendThrottled(err error) bool {
 // (e.g. the old 3×500ms loop plus the extra notice send) only prolongs the outage.
 func (p *Platform) sendChunk(ctx context.Context, rc *replyContext, chunk string) error {
 	clientID := "cc-" + randomHex(6)
+	return p.sendChunkWithID(ctx, rc, chunk, clientID)
+}
+
+func (p *Platform) sendChunkWithID(ctx context.Context, rc *replyContext, chunk, clientID string) error {
 	err := p.api.sendText(ctx, rc.peerUserID, chunk, rc.contextToken, clientID)
 	if err == nil {
+		if count := p.markContextSendAccepted(rc.peerUserID, rc.contextToken); count >= 8 {
+			slog.Warn("weixin: reply allowance is near the observed per-context limit",
+				"peer", rc.peerUserID, "accepted_count", count)
+		}
 		return nil
 	}
 	if isSendThrottled(err) {
@@ -909,11 +1382,21 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		return nil, fmt.Errorf("weixin: not a weixin session key")
 	}
 	peer := strings.TrimPrefix(sessionKey, sessionKeyPrefix)
-	tok := p.getContextToken(peer)
-	if tok == "" {
-		return nil, fmt.Errorf("weixin: no stored context_token for %q (user must message the bot first)", peer)
+	if strings.TrimSpace(peer) == "" {
+		return nil, fmt.Errorf("weixin: empty peer in session key")
 	}
-	return &replyContext{peerUserID: peer, contextToken: tok}, nil
+	entry := p.getContextTokenEntry(peer)
+	rc := &replyContext{
+		peerUserID:   peer,
+		contextToken: entry.Token,
+		proactive:    true,
+		sessionKey:   sessionKey,
+		userName:     shortWeixinUser(peer),
+	}
+	if capturedAt, ok := entry.capturedTime(); ok {
+		rc.contextTokenCapturedAt = capturedAt
+	}
+	return rc, nil
 }
 
 // FormattingInstructions implements core.FormattingInstructionProvider.
@@ -928,5 +1411,7 @@ var (
 	_ core.ImageSender                   = (*Platform)(nil)
 	_ core.FileSender                    = (*Platform)(nil)
 	_ core.TypingIndicator               = (*Platform)(nil)
+	_ core.EarlyInstantReplyRequester    = (*Platform)(nil)
+	_ core.FinalOnlyTextRequester        = (*Platform)(nil)
 	_ core.AsyncRecoverablePlatform      = (*Platform)(nil)
 )

@@ -10,6 +10,10 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
 func TestConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -181,6 +185,100 @@ func TestConfigValidate(t *testing.T) {
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("validate() unexpected error: %v", err)
+				}
+				return
+			}
+			assertErrContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestValidateAuditConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     AuditConfig
+		wantErr string
+	}{
+		{
+			name: "disabled audit without sinks",
+			cfg:  AuditConfig{},
+		},
+		{
+			name: "enabled audit requires at least one sink",
+			cfg: AuditConfig{
+				Enabled: boolPtr(true),
+			},
+			wantErr: `at least one audit sink must be configured when audit is enabled`,
+		},
+		{
+			name: "rejects invalid table name",
+			cfg: AuditConfig{
+				Postgres: AuditPostgresConfig{
+					DSN:   "postgres://demo",
+					Table: "audit-records",
+				},
+			},
+			wantErr: `audit.postgres.table "audit-records" contains invalid characters`,
+		},
+		{
+			name: "accepts postgres sink config",
+			cfg: AuditConfig{
+				Postgres: AuditPostgresConfig{
+					DSN:          "postgres://demo",
+					Table:        "audit_records",
+					IndexProfile: "lookup",
+				},
+			},
+		},
+		{
+			name: "rejects invalid postgres index profile",
+			cfg: AuditConfig{
+				Postgres: AuditPostgresConfig{
+					DSN:          "postgres://demo",
+					IndexProfile: "wide",
+				},
+			},
+			wantErr: `audit.postgres.index_profile "wide" must be one of: minimal, lookup, full`,
+		},
+		{
+			name: "mongodb uri requires database",
+			cfg: AuditConfig{
+				MongoDB: AuditMongoDBConfig{
+					URI: "mongodb://localhost:27017",
+				},
+			},
+			wantErr: `audit.mongodb.database is required when audit.mongodb.uri is set`,
+		},
+		{
+			name: "accepts mongodb sink config",
+			cfg: AuditConfig{
+				MongoDB: AuditMongoDBConfig{
+					URI:          "mongodb://localhost:27017",
+					Database:     "cc_connect",
+					Collection:   "audit_records",
+					IndexProfile: "full",
+				},
+			},
+		},
+		{
+			name: "rejects invalid mongodb index profile",
+			cfg: AuditConfig{
+				MongoDB: AuditMongoDBConfig{
+					URI:          "mongodb://localhost:27017",
+					Database:     "cc_connect",
+					IndexProfile: "wide",
+				},
+			},
+			wantErr: `audit.mongodb.index_profile "wide" must be one of: minimal, lookup, full`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAuditConfig(tt.cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateAuditConfig() unexpected error: %v", err)
 				}
 				return
 			}
@@ -2765,6 +2863,7 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	patchConfigPath(t, configPath)
 
 	show := true
+	footerTokens := true
 	hideWorkdir := false
 	wd := "/tmp/patched"
 	mode := "yolo"
@@ -2772,6 +2871,7 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 		WorkDir:              &wd,
 		Mode:                 &mode,
 		ShowContextIndicator: &show,
+		ReplyFooterTokens:    &footerTokens,
 		ShowWorkdirIndicator: &hideWorkdir,
 		PlatformAllowFrom:    map[string]string{"telegram": "u1", "Feishu": "u2"},
 	})
@@ -2790,6 +2890,9 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	if proj.ShowContextIndicator == nil || !*proj.ShowContextIndicator {
 		t.Fatalf("ShowContextIndicator = %v, want true", proj.ShowContextIndicator)
 	}
+	if proj.ReplyFooterTokens == nil || !*proj.ReplyFooterTokens {
+		t.Fatalf("ReplyFooterTokens = %v, want true", proj.ReplyFooterTokens)
+	}
 	if proj.ShowWorkdirIndicator == nil || *proj.ShowWorkdirIndicator {
 		t.Fatalf("ShowWorkdirIndicator = %v, want false (per patch)", proj.ShowWorkdirIndicator)
 	}
@@ -2805,12 +2908,20 @@ func TestGetProjectConfigDetails(t *testing.T) {
 	configPath := writeConfigFixture(t, feishuConfigFixture)
 	patchConfigPath(t, configPath)
 
+	footerTokens := true
+	if err := SaveProjectSettings("alpha", ProjectSettingsUpdate{ReplyFooterTokens: &footerTokens}); err != nil {
+		t.Fatalf("SaveProjectSettings: %v", err)
+	}
+
 	details := GetProjectConfigDetails("alpha")
 	if details == nil {
 		t.Fatal("GetProjectConfigDetails returned nil")
 	}
 	if details["work_dir"] != "/tmp/alpha" {
 		t.Fatalf("work_dir = %v", details["work_dir"])
+	}
+	if details["reply_footer_tokens"] != true {
+		t.Fatalf("reply_footer_tokens = %#v, want true", details["reply_footer_tokens"])
 	}
 	pcs, ok := details["platform_configs"].([]map[string]any)
 	if !ok || len(pcs) < 2 {

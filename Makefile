@@ -3,6 +3,11 @@ MODULE     := github.com/chenhg5/cc-connect
 CMD        := ./cmd/cc-connect
 DIST       := dist
 
+# Keep module downloads working in isolated/containerized builds while still
+# allowing callers to override the proxy with GOPROXY=... make <target>.
+GOPROXY ?= https://goproxy.cn,direct
+export GOPROXY
+
 VERSION := v1.5.1-beta.1
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')

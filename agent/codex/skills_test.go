@@ -43,7 +43,11 @@ func TestSkillsMetadataProcess(t *testing.T) {
 		}
 		cwd, _ := os.Getwd()
 		cwds, _ := req.Params["cwds"].([]any)
-		if len(cwds) != 1 || cwds[0] != cwd || req.Params["forceReload"] != true || os.Getenv("CODEX_HOME") != os.Getenv("CC_EXPECT_CODEX_HOME") {
+		requestedCWD := ""
+		if len(cwds) == 1 {
+			requestedCWD, _ = cwds[0].(string)
+		}
+		if !sameCodexPath(requestedCWD, cwd) || req.Params["forceReload"] != true || os.Getenv("CODEX_HOME") != os.Getenv("CC_EXPECT_CODEX_HOME") {
 			os.Exit(4)
 		}
 		if os.Getenv("CC_SKILLS_HANG") == "1" {
