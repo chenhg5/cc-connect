@@ -23,6 +23,7 @@ const (
 type Config struct {
 	BinaryPath        string
 	WorkDir           string
+	ConfigPath        string            // explicit config file path; written as CC_CONFIG in systemd unit
 	LogFile           string
 	LogMaxSize        int64
 	LogMaxBackups     int

@@ -227,6 +227,7 @@ func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {
 	// Projects
 	mux.HandleFunc(prefix+"/projects", m.wrap(m.handleProjects))
 	mux.HandleFunc(prefix+"/projects/", m.wrap(m.handleProjectRoutes))
+	mux.HandleFunc(prefix+"/health", m.wrap(m.handleProjectHealth))
 
 	// Cron (global)
 	mux.HandleFunc(prefix+"/cron", m.wrap(m.handleCron))
@@ -2030,4 +2031,56 @@ func (m *ManagementServer) handleSkillPresets(w http.ResponseWriter, r *http.Req
 		return
 	}
 	mgmtJSON(w, http.StatusOK, data)
+}
+
+func workDirStatus(workDir string) map[string]any {
+	result := map[string]any{"path": workDir}
+	if workDir == "" {
+		result["status"] = "unset"
+		return result
+	}
+	info, err := os.Stat(workDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			result["status"] = "missing"
+		} else {
+			result["status"] = "inaccessible"
+			result["error"] = err.Error()
+		}
+		return result
+	}
+	if !info.IsDir() {
+		result["status"] = "not_a_directory"
+		return result
+	}
+	result["status"] = "ok"
+	return result
+}
+
+// handleProjectHealth returns the health status of all projects including work_dir checks.
+func (m *ManagementServer) handleProjectHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		mgmtError(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	type projectHealth struct {
+		Name          string         `json:"name"`
+		AgentType     string         `json:"agent_type"`
+		WorkDirStatus map[string]any `json:"work_dir_status"`
+		Sessions      int            `json:"sessions_count"`
+	}
+
+	health := make([]projectHealth, 0, len(m.engines))
+	for name, e := range m.engines {
+		health = append(health, projectHealth{
+			Name:          name,
+			AgentType:     e.agent.Name(),
+			WorkDirStatus: workDirStatus(e.WorkDir()),
+			Sessions:      len(e.sessions.AllSessions()),
+		})
+	}
+	mgmtJSON(w, http.StatusOK, map[string]any{"projects": health})
 }

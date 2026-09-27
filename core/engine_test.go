@@ -8200,10 +8200,17 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 
 	for _, subcommand := range []string{"exec", "run", "trigger"} {
 		t.Run(subcommand, func(t *testing.T) {
-			store, err := NewCronStore(t.TempDir())
+			tmpDir := t.TempDir()
+			store, err := NewCronStore(tmpDir)
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Clean up cron store files before temp dir cleanup
+			t.Cleanup(func() {
+				// Remove the crons subdirectory created by NewCronStore
+				cronsDir := filepath.Join(tmpDir, "crons")
+				_ = os.RemoveAll(cronsDir) // best effort, ignore errors
+			})
 			scheduler := NewCronScheduler(store)
 			platform := &stubCronReplyTargetPlatform{
 				stubPlatformEngine: stubPlatformEngine{n: "plain"},

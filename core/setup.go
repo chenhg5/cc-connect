@@ -202,7 +202,7 @@ func (m *ManagementServer) handleSetupFeishuSave(w http.ResponseWriter, r *http.
 		mgmtError(w, http.StatusBadRequest, "project, app_id, app_secret required")
 		return
 	}
-	workDir, err := validateProjectWorkDir(req.WorkDir)
+	workDir, err := validateProjectWorkDir(req.WorkDir, true)
 	if err != nil {
 		mgmtError(w, http.StatusBadRequest, err.Error())
 		return
@@ -446,7 +446,7 @@ func (m *ManagementServer) handleSetupWeixinSave(w http.ResponseWriter, r *http.
 		mgmtError(w, http.StatusBadRequest, "project and token required")
 		return
 	}
-	workDir, err := validateProjectWorkDir(req.WorkDir)
+	workDir, err := validateProjectWorkDir(req.WorkDir, true)
 	if err != nil {
 		mgmtError(w, http.StatusBadRequest, err.Error())
 		return
@@ -489,7 +489,7 @@ func (m *ManagementServer) handleProjectAddPlatform(w http.ResponseWriter, r *ht
 		mgmtError(w, http.StatusBadRequest, "type is required")
 		return
 	}
-	workDir, err := validateProjectWorkDir(req.WorkDir)
+	workDir, err := validateProjectWorkDir(req.WorkDir, true)
 	if err != nil {
 		mgmtError(w, http.StatusBadRequest, err.Error())
 		return
@@ -509,7 +509,9 @@ func (m *ManagementServer) handleProjectAddPlatform(w http.ResponseWriter, r *ht
 	})
 }
 
-func validateProjectWorkDir(workDir string) (string, error) {
+// validateProjectWorkDir validates the work_dir path.
+// If createIfMissing is true and the directory does not exist, it will be created.
+func validateProjectWorkDir(workDir string, createIfMissing ...bool) (string, error) {
 	trimmed := strings.TrimSpace(workDir)
 	if trimmed == "" {
 		return "", nil
@@ -518,6 +520,12 @@ func validateProjectWorkDir(workDir string) (string, error) {
 	info, err := os.Stat(trimmed)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if len(createIfMissing) > 0 && createIfMissing[0] {
+				if mkErr := os.MkdirAll(trimmed, 0755); mkErr != nil {
+					return "", fmt.Errorf("work_dir cannot be created: %s: %w", trimmed, mkErr)
+				}
+				return trimmed, nil
+			}
 			return "", fmt.Errorf("work_dir does not exist: %s", trimmed)
 		}
 		return "", fmt.Errorf("work_dir is not accessible: %s: %w", trimmed, err)
