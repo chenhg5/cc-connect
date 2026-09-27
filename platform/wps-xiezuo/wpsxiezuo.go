@@ -14,11 +14,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/gorilla/websocket"
@@ -30,24 +36,39 @@ var (
 	maxBackoff    = 60 * time.Second
 )
 
+const (
+	// WPS does not publish a maximum for /v7/chats/resources/upload. Keep a
+	// generous default for chat attachments while bounding configuration to the
+	// 5 GiB limit documented for WPS document-attachment uploads.
+	defaultMaxAttachmentBytes = 2 * 1024 * 1024 * 1024
+	maxAttachmentBytes        = 5 * 1024 * 1024 * 1024
+	resourceDownloadTimeout   = 2 * time.Minute
+	maxResourceAPIResponse    = 64 * 1024
+	maxCloudDocumentBytes     = 4 * 1024 * 1024
+	maxCloudDocumentResponse  = 8 * 1024 * 1024
+	wpsCloudDocumentMarker    = "[WPS云文档正文（已由应用授权读取，请优先基于以下正文回答，不要通过网页链接再次访问）]"
+)
+
 // Platform implements core.Platform for WPS Xiezuo (WPS 协作).
 type Platform struct {
-	appID       string
-	appSecret   string
-	baseURL     string
-	cleanReply  bool
-	allowFrom   string
-	handler     core.MessageHandler
-	cancel      context.CancelFunc
-	conn        *websocket.Conn
-	mu          sync.Mutex // protects conn access
-	writeCh     chan any   // serializes all WebSocket writes (ACK, reactions, etc.)
-	dedup       core.MessageDedup
-	token       string
-	tokenExpire time.Time
-	tokenMu     sync.Mutex
-	stopOnce    sync.Once
-	stopped     bool
+	appID              string
+	appSecret          string
+	baseURL            string
+	cleanReply         bool
+	allowFrom          string
+	handler            core.MessageHandler
+	cancel             context.CancelFunc
+	conn               *websocket.Conn
+	mu                 sync.Mutex // protects conn access
+	writeCh            chan any   // serializes all WebSocket writes (ACK, reactions, etc.)
+	dedup              core.MessageDedup
+	token              string
+	tokenExpire        time.Time
+	tokenMu            sync.Mutex
+	httpClient         *http.Client
+	maxAttachmentBytes int64
+	stopOnce           sync.Once
+	stopped            bool
 }
 
 // replyContext holds the context needed to reply to a specific message.
@@ -114,6 +135,77 @@ type wpsSenderInfo struct {
 	Type string `json:"type"`
 }
 
+type wpsMessageContent struct {
+	Image    *wpsImageContent    `json:"image"`
+	File     *wpsFileContent     `json:"file"`
+	RichText *wpsRichTextContent `json:"rich_text"`
+}
+
+type wpsImageContent struct {
+	Height     int    `json:"height,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	StorageKey string `json:"storage_key"`
+	Type       string `json:"type,omitempty"`
+	Width      int    `json:"width,omitempty"`
+}
+
+type wpsFileContent struct {
+	Type  string               `json:"type"`
+	Local *wpsLocalFileContent `json:"local"`
+	Cloud *wpsCloudFileContent `json:"cloud"`
+}
+
+type wpsLocalFileContent struct {
+	Name       string `json:"name,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	StorageKey string `json:"storage_key"`
+}
+
+type wpsCloudFileContent struct {
+	ID      string `json:"id"`
+	LinkID  string `json:"link_id"`
+	LinkURL string `json:"link_url"`
+}
+
+type wpsRichTextContent struct {
+	Elements []wpsRichTextElement `json:"elements"`
+}
+
+type wpsRichTextElement struct {
+	Type             string                  `json:"type"`
+	AltText          string                  `json:"alt_text"`
+	Elements         []wpsRichTextElement    `json:"elements"`
+	TextContent      *wpsRichTextTextContent `json:"text_content"`
+	StyleTextContent *wpsStyleTextContent    `json:"style_text_content"`
+	MentionContent   *wpsMentionContent      `json:"mention_content"`
+	ImageContent     *wpsImageContent        `json:"image_content"`
+	LinkContent      *wpsRichTextLinkContent `json:"link_content"`
+	DocContent       *wpsRichTextDocContent  `json:"doc_content"`
+}
+
+type wpsRichTextTextContent struct {
+	Content string `json:"content"`
+}
+
+type wpsStyleTextContent struct {
+	Text string `json:"text"`
+}
+
+type wpsMentionContent struct {
+	Text string `json:"text"`
+}
+
+type wpsRichTextLinkContent struct {
+	Text string `json:"text"`
+	URL  string `json:"url"`
+}
+
+type wpsRichTextDocContent struct {
+	Text string              `json:"text"`
+	File wpsCloudFileContent `json:"file"`
+}
+
 // --- Message create API ---
 
 type sendMessageRequest struct {
@@ -128,7 +220,9 @@ type receiverInfo struct {
 }
 
 type messageContent struct {
-	Text textContent `json:"text"`
+	Text  *textContent     `json:"text,omitempty"`
+	Image *wpsImageContent `json:"image,omitempty"`
+	File  *wpsFileContent  `json:"file,omitempty"`
 }
 
 type textContent struct {
@@ -141,6 +235,61 @@ type textContent struct {
 type tokenResponse struct {
 	AccessToken string `json:"access_token"`
 	ExpiresIn   int64  `json:"expires_in"`
+}
+
+type resourceDownloadResponse struct {
+	Data struct {
+		URL string `json:"url"`
+	} `json:"data"`
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+}
+
+type resourceUploadRequest struct {
+	FileName string `json:"file_name"`
+	FileSize int64  `json:"file_size"`
+	Checksum string `json:"checksum"`
+}
+
+type resourceUploadEntry struct {
+	Method  string         `json:"method"`
+	URL     string         `json:"url"`
+	Headers map[string]any `json:"headers"`
+	Params  map[string]any `json:"params"`
+}
+
+type resourceUploadResponse struct {
+	Data struct {
+		StorageKey  string              `json:"storage_key"`
+		UploadEntry resourceUploadEntry `json:"upload_entry"`
+	} `json:"data"`
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+}
+
+type apiResponse struct {
+	Code json.RawMessage `json:"code"`
+	Msg  string          `json:"msg"`
+}
+
+type cloudLinkMetaResponse struct {
+	Data struct {
+		FileID  string `json:"file_id"`
+		DriveID string `json:"drive_id"`
+		URL     string `json:"url"`
+	} `json:"data"`
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+}
+
+type cloudDocumentContentResponse struct {
+	Data struct {
+		Markdown string `json:"markdown"`
+		Plain    string `json:"plain"`
+		HTML     string `json:"html"`
+	} `json:"data"`
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
 }
 
 // --- Reaction API ---
@@ -170,15 +319,21 @@ func New(opts map[string]any) (core.Platform, error) {
 
 	cleanReply, _ := opts["clean_reply"].(bool)
 	allowFrom, _ := opts["allow_from"].(string)
+	maxAttachmentBytes, err := parseWPSAttachmentLimit(opts["max_attachment_bytes"])
+	if err != nil {
+		return nil, fmt.Errorf("wps-xiezuo: max_attachment_bytes: %w", err)
+	}
 
 	core.CheckAllowFrom("wps-xiezuo", allowFrom)
 
 	return &Platform{
-		appID:      appID,
-		appSecret:  appSecret,
-		baseURL:    baseURL,
-		cleanReply: cleanReply,
-		allowFrom:  allowFrom,
+		appID:              appID,
+		appSecret:          appSecret,
+		baseURL:            baseURL,
+		cleanReply:         cleanReply,
+		allowFrom:          allowFrom,
+		httpClient:         &http.Client{Timeout: resourceDownloadTimeout},
+		maxAttachmentBytes: maxAttachmentBytes,
 	}, nil
 }
 
@@ -394,24 +549,29 @@ func (p *Platform) signWSHeader() (http.Header, error) {
 		return nil, fmt.Errorf("parse ws url: %w", err)
 	}
 
-	uri := u.RequestURI()
-	dateStr := time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT")
+	header := p.signKSO1Header(http.MethodGet, u.RequestURI(), "", nil)
+	header.Set("X-Ack-Mode", "required")
+	return header, nil
+}
 
-	// stringToSign = "KSO-1" + method + uri + contentType + date + sha256Hex
-	// For WebSocket: method=GET, contentType="", sha256Hex=""
-	stringToSign := "KSO-1" + "GET" + uri + "" + dateStr + ""
+func (p *Platform) signKSO1Header(method, requestURI, contentType string, body []byte) http.Header {
+	dateStr := time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT")
+	sha256Hex := ""
+	if len(body) > 0 {
+		hash := sha256.Sum256(body)
+		sha256Hex = hex.EncodeToString(hash[:])
+	}
+
+	stringToSign := "KSO-1" + method + requestURI + contentType + dateStr + sha256Hex
 
 	mac := hmac.New(sha256.New, []byte(p.appSecret))
 	mac.Write([]byte(stringToSign))
 	signature := hex.EncodeToString(mac.Sum(nil))
 
-	header := http.Header{
+	return http.Header{
 		"X-Kso-Date":          {dateStr},
 		"X-Kso-Authorization": {fmt.Sprintf("KSO-1 %s:%s", p.appID, signature)},
-		"X-Ack-Mode":          {"required"},
 	}
-
-	return header, nil
 }
 
 // --- Raw message dispatch ---
@@ -628,10 +788,151 @@ func (p *Platform) handleChatMessage(plain []byte) {
 		return
 	}
 
-	// Extract text content
+	if strings.EqualFold(msgData.Message.Type, "image") || strings.EqualFold(msgData.Message.Type, "file") {
+		go p.handleMediaMessage(msgData)
+		return
+	}
+	if strings.EqualFold(msgData.Message.Type, "rich_text") {
+		go p.handleRichTextMessage(msgData)
+		return
+	}
+
 	text := extractText(msgData.Message.Content)
 	if text == "" {
-		slog.Debug("wps-xiezuo: no text content in message", "msg_id", msgData.Message.ID)
+		slog.Debug("wps-xiezuo: no supported content in message", "msg_id", msgData.Message.ID, "type", msgData.Message.Type)
+		return
+	}
+	go p.dispatchChatMessage(msgData, text, nil, nil)
+}
+
+func (p *Platform) handleMediaMessage(msgData wpsMessageData) {
+	var content wpsMessageContent
+	if err := json.Unmarshal(msgData.Message.Content, &content); err != nil {
+		slog.Warn("wps-xiezuo: parse media content failed", "error", err, "msg_id", msgData.Message.ID, "type", msgData.Message.Type)
+		return
+	}
+
+	var (
+		text   string
+		images []core.ImageAttachment
+		files  []core.FileAttachment
+	)
+
+	switch {
+	case strings.EqualFold(msgData.Message.Type, "image"):
+		image := content.Image
+		if image == nil || strings.TrimSpace(image.StorageKey) == "" {
+			slog.Warn("wps-xiezuo: image message missing storage_key", "msg_id", msgData.Message.ID)
+			return
+		}
+		if err := p.validateAttachmentSize(image.Size); err != nil {
+			slog.Warn("wps-xiezuo: image rejected", "error", err, "msg_id", msgData.Message.ID, "file_name", image.Name)
+			return
+		}
+
+		data, responseType, err := p.downloadMessageResource(msgData.Chat.ID, msgData.Message.ID, image.StorageKey, image.Name)
+		if err != nil {
+			slog.Warn("wps-xiezuo: image download failed", "error", err, "msg_id", msgData.Message.ID, "file_name", image.Name)
+			return
+		}
+		images = []core.ImageAttachment{{
+			MimeType: chooseAttachmentMIME(image.Type, responseType, image.Name, data),
+			Data:     data,
+			FileName: sanitizeAttachmentName(image.Name, "image"),
+		}}
+
+	case strings.EqualFold(msgData.Message.Type, "file"):
+		if content.File == nil {
+			slog.Warn("wps-xiezuo: file message missing file content", "msg_id", msgData.Message.ID)
+			return
+		}
+
+		switch {
+		case strings.EqualFold(content.File.Type, "local") && content.File.Local != nil:
+			local := content.File.Local
+			if strings.TrimSpace(local.StorageKey) == "" {
+				slog.Warn("wps-xiezuo: local file missing storage_key", "msg_id", msgData.Message.ID, "file_name", local.Name)
+				return
+			}
+			if err := p.validateAttachmentSize(local.Size); err != nil {
+				slog.Warn("wps-xiezuo: file rejected", "error", err, "msg_id", msgData.Message.ID, "file_name", local.Name)
+				return
+			}
+
+			data, responseType, err := p.downloadMessageResource(msgData.Chat.ID, msgData.Message.ID, local.StorageKey, local.Name)
+			if err != nil {
+				slog.Warn("wps-xiezuo: file download failed", "error", err, "msg_id", msgData.Message.ID, "file_name", local.Name)
+				return
+			}
+			name := sanitizeAttachmentName(local.Name, "attachment")
+			files = []core.FileAttachment{{
+				MimeType: chooseAttachmentMIME("", responseType, name, data),
+				Data:     data,
+				FileName: name,
+			}}
+
+		case strings.EqualFold(content.File.Type, "cloud") && content.File.Cloud != nil:
+			text = p.enrichCloudDocument(context.Background(), "", *content.File.Cloud)
+			if text == "" {
+				slog.Warn("wps-xiezuo: cloud document missing link_url", "msg_id", msgData.Message.ID)
+				return
+			}
+
+		default:
+			slog.Debug("wps-xiezuo: unsupported file content", "msg_id", msgData.Message.ID, "file_type", content.File.Type)
+			return
+		}
+	}
+
+	p.dispatchChatMessage(msgData, text, images, files)
+}
+
+func (p *Platform) handleRichTextMessage(msgData wpsMessageData) {
+	text, richImages, richDocuments, err := parseWPSRichText(msgData.Message.Content)
+	if err != nil {
+		slog.Warn("wps-xiezuo: parse rich text failed", "error", err, "msg_id", msgData.Message.ID)
+		return
+	}
+
+	images := make([]core.ImageAttachment, 0, len(richImages))
+	for _, image := range richImages {
+		if strings.TrimSpace(image.StorageKey) == "" {
+			continue
+		}
+		if err := p.validateAttachmentSize(image.Size); err != nil {
+			slog.Warn("wps-xiezuo: rich text image rejected", "error", err, "msg_id", msgData.Message.ID, "file_name", image.Name)
+			continue
+		}
+
+		data, responseType, err := p.downloadMessageResource(msgData.Chat.ID, msgData.Message.ID, image.StorageKey, image.Name)
+		if err != nil {
+			slog.Warn("wps-xiezuo: rich text image download failed", "error", err, "msg_id", msgData.Message.ID, "file_name", image.Name)
+			continue
+		}
+		images = append(images, core.ImageAttachment{
+			MimeType: chooseAttachmentMIME(image.Type, responseType, image.Name, data),
+			Data:     data,
+			FileName: sanitizeAttachmentName(image.Name, "image"),
+		})
+	}
+	for _, document := range richDocuments {
+		rendered := p.enrichCloudDocument(context.Background(), document.Title, document.File)
+		base := formatWPSRichLink(document.Title, document.File.LinkURL)
+		if rendered != base {
+			text = appendCloudDocumentContent(text, strings.TrimSpace(strings.TrimPrefix(rendered, base)))
+		}
+	}
+
+	if strings.TrimSpace(text) == "" && len(images) == 0 {
+		slog.Debug("wps-xiezuo: rich text contains no supported content", "msg_id", msgData.Message.ID)
+		return
+	}
+	p.dispatchChatMessage(msgData, text, images, nil)
+}
+
+func (p *Platform) dispatchChatMessage(msgData wpsMessageData, text string, images []core.ImageAttachment, files []core.FileAttachment) {
+	if p.handler == nil {
+		slog.Warn("wps-xiezuo: message handler is not configured", "msg_id", msgData.Message.ID)
 		return
 	}
 
@@ -650,13 +951,15 @@ func (p *Platform) handleChatMessage(plain []byte) {
 		SenderID:  msgData.Sender.ID,
 	}
 
-	go p.handler(p, &core.Message{
+	p.handler(p, &core.Message{
 		SessionKey: sessionKey,
 		Platform:   "wps-xiezuo",
 		MessageID:  msgData.Message.ID,
 		UserID:     msgData.Sender.ID,
 		UserName:   msgData.Sender.ID, // WPS doesn't include name in event data
 		Content:    text,
+		Images:     images,
+		Files:      files,
 		ChannelKey: msgData.Chat.ID, // needed for per-group session isolation (#1217)
 		ReplyCtx:   rctx,
 	})
@@ -710,9 +1013,14 @@ func extractText(raw json.RawMessage) string {
 		Text struct {
 			Content string `json:"content"`
 		} `json:"text"`
+		RichText *wpsRichTextContent `json:"rich_text"`
 	}
 	if err := json.Unmarshal(raw, &wpsContent); err == nil && wpsContent.Text.Content != "" {
 		return strings.TrimSpace(wpsContent.Text.Content)
+	}
+	if wpsContent.RichText != nil {
+		text, _ := flattenWPSRichText(wpsContent.RichText.Elements)
+		return text
 	}
 
 	// Try {"type":"text","content":"xxx"}
@@ -773,6 +1081,479 @@ func extractRichText(raw json.RawMessage) string {
 	return strings.Join(parts, " ")
 }
 
+func parseWPSRichText(raw json.RawMessage) (string, []wpsImageContent, []wpsRichDocument, error) {
+	var content wpsMessageContent
+	if err := json.Unmarshal(raw, &content); err != nil {
+		return "", nil, nil, fmt.Errorf("decode rich text content: %w", err)
+	}
+	if content.RichText == nil {
+		return "", nil, nil, fmt.Errorf("missing rich_text content")
+	}
+	text, images := flattenWPSRichText(content.RichText.Elements)
+	return text, images, collectWPSRichDocuments(content.RichText.Elements), nil
+}
+
+type wpsRichDocument struct {
+	Title string
+	File  wpsCloudFileContent
+}
+
+func collectWPSRichDocuments(elements []wpsRichTextElement) []wpsRichDocument {
+	documents := make([]wpsRichDocument, 0)
+	for _, element := range elements {
+		if strings.EqualFold(element.Type, "doc") && element.DocContent != nil {
+			documents = append(documents, wpsRichDocument{
+				Title: strings.TrimSpace(element.DocContent.Text),
+				File:  element.DocContent.File,
+			})
+		}
+		documents = append(documents, collectWPSRichDocuments(element.Elements)...)
+	}
+	return documents
+}
+
+func flattenWPSRichText(elements []wpsRichTextElement) (string, []wpsImageContent) {
+	lines := make([]string, 0, len(elements))
+	images := make([]wpsImageContent, 0)
+	for _, element := range elements {
+		text, nestedImages := flattenWPSRichTextElement(element)
+		if strings.TrimSpace(text) != "" {
+			lines = append(lines, strings.TrimSpace(text))
+		}
+		images = append(images, nestedImages...)
+	}
+	return strings.Join(lines, "\n"), images
+}
+
+func flattenWPSRichTextElement(element wpsRichTextElement) (string, []wpsImageContent) {
+	parts := make([]string, 0, 2)
+	images := make([]wpsImageContent, 0)
+
+	switch strings.ToLower(element.Type) {
+	case "text", "emoji":
+		if element.TextContent != nil {
+			parts = appendNonEmpty(parts, element.TextContent.Content)
+		} else if element.StyleTextContent != nil {
+			parts = appendNonEmpty(parts, element.StyleTextContent.Text)
+		}
+	case "mention":
+		if element.MentionContent != nil {
+			parts = appendNonEmpty(parts, element.MentionContent.Text)
+		}
+	case "link":
+		if element.LinkContent != nil {
+			parts = appendNonEmpty(parts, formatWPSRichLink(element.LinkContent.Text, element.LinkContent.URL))
+		}
+	case "doc":
+		if element.DocContent != nil {
+			parts = appendNonEmpty(parts, formatWPSRichLink(element.DocContent.Text, element.DocContent.File.LinkURL))
+		}
+	case "image", "custom_emoji":
+		if element.ImageContent != nil && strings.TrimSpace(element.ImageContent.StorageKey) != "" {
+			images = append(images, *element.ImageContent)
+		}
+	default:
+		if element.TextContent != nil {
+			parts = appendNonEmpty(parts, element.TextContent.Content)
+		} else if element.StyleTextContent != nil {
+			parts = appendNonEmpty(parts, element.StyleTextContent.Text)
+		}
+	}
+
+	for _, child := range element.Elements {
+		text, nestedImages := flattenWPSRichTextElement(child)
+		parts = appendNonEmpty(parts, text)
+		images = append(images, nestedImages...)
+	}
+	if len(parts) == 0 && len(images) == 0 {
+		parts = appendNonEmpty(parts, element.AltText)
+	}
+	return strings.Join(parts, ""), images
+}
+
+func appendNonEmpty(parts []string, value string) []string {
+	if strings.TrimSpace(value) != "" {
+		return append(parts, value)
+	}
+	return parts
+}
+
+func formatWPSRichLink(text, rawURL string) string {
+	text = strings.TrimSpace(text)
+	rawURL = strings.TrimSpace(rawURL)
+	switch {
+	case rawURL == "":
+		return text
+	case text == "" || text == rawURL:
+		return rawURL
+	default:
+		return fmt.Sprintf("%s (%s)", text, rawURL)
+	}
+}
+
+func (p *Platform) enrichCloudDocument(ctx context.Context, title string, cloud wpsCloudFileContent) string {
+	linkURL := strings.TrimSpace(cloud.LinkURL)
+	base := formatWPSRichLink(title, linkURL)
+	if strings.TrimSpace(cloud.LinkID) == "" {
+		return base
+	}
+
+	content, err := p.readCloudDocument(ctx, cloud.LinkID)
+	if err != nil {
+		slog.Warn("wps-xiezuo: cloud document content unavailable", "error", err, "link_id", cloud.LinkID)
+		return base
+	}
+	if strings.TrimSpace(content) == "" {
+		return base
+	}
+	slog.Info("wps-xiezuo: cloud document content loaded",
+		"link_id", cloud.LinkID,
+		"content_len", len(content),
+	)
+	if base == "" {
+		base = linkURL
+	}
+	return base + "\n\n" + wpsCloudDocumentMarker + "\n" + content
+}
+
+func appendCloudDocumentContent(existing, document string) string {
+	if strings.TrimSpace(document) == "" {
+		return existing
+	}
+	if strings.TrimSpace(existing) == "" {
+		return document
+	}
+	if strings.Contains(existing, wpsCloudDocumentMarker) || strings.Contains(existing, "[云文档正文]") {
+		return existing + "\n\n" + document
+	}
+	return existing + "\n\n" + document
+}
+
+func (p *Platform) readCloudDocument(ctx context.Context, linkID string) (string, error) {
+	if strings.TrimSpace(linkID) == "" {
+		return "", fmt.Errorf("cloud document link_id is empty")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, resourceDownloadTimeout)
+	defer cancel()
+
+	token, err := p.getToken(requestCtx)
+	if err != nil {
+		return "", fmt.Errorf("get cloud document token: %w", err)
+	}
+
+	metaURI := fmt.Sprintf("/v7/links/%s/meta", url.PathEscape(linkID))
+	meta, err := p.doSignedJSON(requestCtx, http.MethodGet, metaURI, token, maxResourceAPIResponse)
+	if err != nil {
+		return "", fmt.Errorf("resolve cloud document link: %w", err)
+	}
+	var metaResponse cloudLinkMetaResponse
+	if err := json.Unmarshal(meta, &metaResponse); err != nil {
+		return "", fmt.Errorf("parse cloud document link: %w", err)
+	}
+	if metaResponse.Code != 0 {
+		return "", fmt.Errorf("cloud document link API: code=%d msg=%s", metaResponse.Code, metaResponse.Msg)
+	}
+	if strings.TrimSpace(metaResponse.Data.FileID) == "" || strings.TrimSpace(metaResponse.Data.DriveID) == "" {
+		return "", fmt.Errorf("cloud document link API returned incomplete file metadata")
+	}
+
+	query := url.Values{"format": {"markdown"}}
+	contentURI := fmt.Sprintf("/v7/drives/%s/files/%s/content?%s",
+		url.PathEscape(metaResponse.Data.DriveID), url.PathEscape(metaResponse.Data.FileID), query.Encode())
+	contentBody, err := p.doSignedJSON(requestCtx, http.MethodGet, contentURI, token, maxCloudDocumentResponse)
+	if err != nil {
+		return "", fmt.Errorf("read cloud document content: %w", err)
+	}
+	var contentResponse cloudDocumentContentResponse
+	if err := json.Unmarshal(contentBody, &contentResponse); err != nil {
+		return "", fmt.Errorf("parse cloud document content: %w", err)
+	}
+	if contentResponse.Code != 0 {
+		return "", fmt.Errorf("cloud document content API: code=%d msg=%s", contentResponse.Code, contentResponse.Msg)
+	}
+	content := strings.TrimSpace(contentResponse.Data.Markdown)
+	if content == "" {
+		content = strings.TrimSpace(contentResponse.Data.Plain)
+	}
+	if content == "" {
+		content = strings.TrimSpace(contentResponse.Data.HTML)
+	}
+	if len([]byte(content)) > maxCloudDocumentBytes {
+		return "", fmt.Errorf("cloud document content exceeds %d bytes", maxCloudDocumentBytes)
+	}
+	return content, nil
+}
+
+func (p *Platform) doSignedJSON(ctx context.Context, method, requestURI, token string, maxBytes int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, p.baseURL+requestURI, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	for key, values := range p.signKSO1Header(method, requestURI, "", nil) {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := p.client().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status=%d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxBytes {
+		return nil, fmt.Errorf("response exceeds %d bytes", maxBytes)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("response exceeds %d bytes", maxBytes)
+	}
+	return body, nil
+}
+
+func (p *Platform) downloadMessageResource(chatID, messageID, storageKey, fileName string) ([]byte, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), resourceDownloadTimeout)
+	defer cancel()
+
+	downloadURL, err := p.getMessageResourceDownloadURL(ctx, chatID, messageID, storageKey, fileName)
+	if err != nil {
+		return nil, "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("build resource download request: %w", err)
+	}
+	resp, err := p.client().Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("download resource: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("download resource: status=%d", resp.StatusCode)
+	}
+	limit := p.attachmentSizeLimit()
+	if resp.ContentLength > limit {
+		return nil, "", fmt.Errorf("download resource: content length %d exceeds limit %d", resp.ContentLength, limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("read resource: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return nil, "", fmt.Errorf("download resource: body exceeds limit %d", limit)
+	}
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("download resource: empty body")
+	}
+
+	return data, resp.Header.Get("Content-Type"), nil
+}
+
+func (p *Platform) getMessageResourceDownloadURL(ctx context.Context, chatID, messageID, storageKey, fileName string) (string, error) {
+	if strings.TrimSpace(chatID) == "" || strings.TrimSpace(messageID) == "" || strings.TrimSpace(storageKey) == "" {
+		return "", fmt.Errorf("message resource requires chat_id, message_id, and storage_key")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get resource token: %w", err)
+	}
+
+	requestURI := fmt.Sprintf("/v7/chats/%s/messages/%s/resources/%s/download",
+		url.PathEscape(chatID), url.PathEscape(messageID), url.PathEscape(storageKey))
+	if strings.TrimSpace(fileName) != "" {
+		query := url.Values{"file_name": {fileName}}
+		requestURI += "?" + query.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+requestURI, nil)
+	if err != nil {
+		return "", fmt.Errorf("build resource URL request: %w", err)
+	}
+	for key, values := range p.signKSO1Header(http.MethodGet, requestURI, "", nil) {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := p.client().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request resource URL: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("request resource URL: status=%d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResourceAPIResponse+1))
+	if err != nil {
+		return "", fmt.Errorf("read resource URL response: %w", err)
+	}
+	if len(body) > maxResourceAPIResponse {
+		return "", fmt.Errorf("resource URL response exceeds %d bytes", maxResourceAPIResponse)
+	}
+
+	var result resourceDownloadResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parse resource URL response: %w", err)
+	}
+	if result.Code != 0 {
+		return "", fmt.Errorf("resource URL API: code=%d msg=%s", result.Code, result.Msg)
+	}
+	downloadURL := strings.TrimSpace(result.Data.URL)
+	if err := validateResourceDownloadURL(downloadURL); err != nil {
+		return "", err
+	}
+	return downloadURL, nil
+}
+
+func (p *Platform) client() *http.Client {
+	if p.httpClient != nil {
+		return p.httpClient
+	}
+	return http.DefaultClient
+}
+
+func (p *Platform) attachmentSizeLimit() int64 {
+	if p.maxAttachmentBytes > 0 {
+		return p.maxAttachmentBytes
+	}
+	return defaultMaxAttachmentBytes
+}
+
+func (p *Platform) validateAttachmentSize(size int64) error {
+	if size < 0 {
+		return fmt.Errorf("invalid declared size %d", size)
+	}
+	if size > p.attachmentSizeLimit() {
+		return fmt.Errorf("declared size %d exceeds limit %d", size, p.attachmentSizeLimit())
+	}
+	return nil
+}
+
+func parseWPSAttachmentLimit(raw any) (int64, error) {
+	if raw == nil {
+		return defaultMaxAttachmentBytes, nil
+	}
+
+	var value int64
+	switch v := raw.(type) {
+	case int:
+		value = int64(v)
+	case int8:
+		value = int64(v)
+	case int16:
+		value = int64(v)
+	case int32:
+		value = int64(v)
+	case int64:
+		value = v
+	case uint:
+		if uint64(v) > uint64(math.MaxInt64) {
+			return 0, fmt.Errorf("must be an integer number of bytes")
+		}
+		value = int64(v)
+	case uint8:
+		value = int64(v)
+	case uint16:
+		value = int64(v)
+	case uint32:
+		value = int64(v)
+	case uint64:
+		if v > uint64(math.MaxInt64) {
+			return 0, fmt.Errorf("must be an integer number of bytes")
+		}
+		value = int64(v)
+	case float32:
+		if float32(int64(v)) != v {
+			return 0, fmt.Errorf("must be an integer number of bytes")
+		}
+		value = int64(v)
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v > float64(math.MaxInt64) {
+			return 0, fmt.Errorf("must be an integer number of bytes")
+		}
+		value = int64(v)
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("must be an integer number of bytes: %w", err)
+		}
+		value = parsed
+	default:
+		return 0, fmt.Errorf("must be an integer number of bytes")
+	}
+
+	if value <= 0 {
+		return 0, fmt.Errorf("must be greater than zero")
+	}
+	if value > maxAttachmentBytes {
+		return 0, fmt.Errorf("must not exceed %d bytes (5 GiB)", maxAttachmentBytes)
+	}
+	return value, nil
+}
+
+func validateResourceDownloadURL(rawURL string) error {
+	return validateResourceURL(rawURL, "download")
+}
+
+func validateResourceUploadURL(rawURL string) error {
+	return validateResourceURL(rawURL, "upload")
+}
+
+func validateResourceURL(rawURL, operation string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid resource %s URL: %w", operation, err)
+	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil {
+		return fmt.Errorf("invalid resource %s URL", operation)
+	}
+	return nil
+}
+
+func sanitizeAttachmentName(name, fallback string) string {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return fallback
+	}
+	return name
+}
+
+func chooseAttachmentMIME(declared, responseType, fileName string, data []byte) string {
+	generic := ""
+	for _, candidate := range []string{declared, responseType} {
+		mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(candidate))
+		if err != nil || mediaType == "" {
+			continue
+		}
+		if mediaType != "application/octet-stream" {
+			return mediaType
+		}
+		generic = mediaType
+	}
+	if byExtension := mime.TypeByExtension(strings.ToLower(filepath.Ext(fileName))); byExtension != "" {
+		if mediaType, _, err := mime.ParseMediaType(byExtension); err == nil {
+			return mediaType
+		}
+	}
+	if len(data) > 0 {
+		return http.DetectContentType(data)
+	}
+	if generic != "" {
+		return generic
+	}
+	return "application/octet-stream"
+}
+
 func isP2P(chatType string) bool {
 	return chatType == "p2p" || chatType == "single" || chatType == "direct"
 }
@@ -821,11 +1602,6 @@ func (p *Platform) sendWPSMessage(ctx context.Context, rctx any, content string)
 	// preserved verbatim but visually invisible).
 	content = applyWPSLineBreaks(content)
 
-	token, err := p.getToken(ctx)
-	if err != nil {
-		return fmt.Errorf("wps-xiezuo: get token: %w", err)
-	}
-
 	reqBody := sendMessageRequest{
 		Type: "text",
 		Receiver: receiverInfo{
@@ -833,11 +1609,225 @@ func (p *Platform) sendWPSMessage(ctx context.Context, rctx any, content string)
 			ReceiverID: rc.ChatID,
 		},
 		Content: messageContent{
-			Text: textContent{
+			Text: &textContent{
 				Content: content,
 				Type:    "markdown",
 			},
 		},
+	}
+	if err := p.createWPSMessage(ctx, reqBody); err != nil {
+		return err
+	}
+
+	slog.Debug("wps-xiezuo: message sent", "chat_id", rc.ChatID, "len", len(content))
+	return nil
+}
+
+// SendImage uploads an image and sends it to the current WPS chat.
+func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("wps-xiezuo: SendImage: invalid reply context type %T", rctx)
+	}
+
+	fileName := sanitizeAttachmentName(img.FileName, "image.png")
+	if err := p.validateAttachmentSize(int64(len(img.Data))); err != nil {
+		return fmt.Errorf("wps-xiezuo: send image: %w", err)
+	}
+	mimeType, err := normalizeWPSImageMIME(img.MimeType, fileName, img.Data)
+	if err != nil {
+		return fmt.Errorf("wps-xiezuo: send image: %w", err)
+	}
+	storageKey, err := p.uploadMessageResource(ctx, fileName, img.Data)
+	if err != nil {
+		return fmt.Errorf("wps-xiezuo: send image: %w", err)
+	}
+
+	return p.createWPSMessage(ctx, sendMessageRequest{
+		Type:     "image",
+		Receiver: receiverInfo{Type: "chat", ReceiverID: rc.ChatID},
+		Content: messageContent{Image: &wpsImageContent{
+			Name:       fileName,
+			Size:       int64(len(img.Data)),
+			StorageKey: storageKey,
+			Type:       mimeType,
+		}},
+	})
+}
+
+// SendFile uploads a local file and sends it to the current WPS chat.
+func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachment) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("wps-xiezuo: SendFile: invalid reply context type %T", rctx)
+	}
+
+	fileName := sanitizeAttachmentName(file.FileName, "attachment")
+	if err := p.validateAttachmentSize(int64(len(file.Data))); err != nil {
+		return fmt.Errorf("wps-xiezuo: send file: %w", err)
+	}
+	storageKey, err := p.uploadMessageResource(ctx, fileName, file.Data)
+	if err != nil {
+		return fmt.Errorf("wps-xiezuo: send file: %w", err)
+	}
+
+	return p.createWPSMessage(ctx, sendMessageRequest{
+		Type:     "file",
+		Receiver: receiverInfo{Type: "chat", ReceiverID: rc.ChatID},
+		Content: messageContent{File: &wpsFileContent{
+			Type: "local",
+			Local: &wpsLocalFileContent{
+				Name:       fileName,
+				Size:       int64(len(file.Data)),
+				StorageKey: storageKey,
+			},
+		}},
+	})
+}
+
+func (p *Platform) uploadMessageResource(ctx context.Context, fileName string, data []byte) (string, error) {
+	if utf8.RuneCountInString(fileName) > 256 {
+		return "", fmt.Errorf("file name exceeds 256 characters")
+	}
+
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get token: %w", err)
+	}
+	checksum := sha256.Sum256(data)
+	payload, err := json.Marshal(resourceUploadRequest{
+		FileName: fileName,
+		FileSize: int64(len(data)),
+		Checksum: hex.EncodeToString(checksum[:]),
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal upload request: %w", err)
+	}
+
+	const requestURI = "/v7/chats/resources/upload"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+requestURI, bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("create upload request: %w", err)
+	}
+	for key, values := range p.signKSO1Header(http.MethodPost, requestURI, "application/json", payload) {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request upload credentials: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResourceAPIResponse+1))
+	if err != nil {
+		return "", fmt.Errorf("read upload credentials: %w", err)
+	}
+	if len(body) > maxResourceAPIResponse {
+		return "", fmt.Errorf("upload credentials response exceeds %d bytes", maxResourceAPIResponse)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("request upload credentials: status=%d body=%s", resp.StatusCode, core.RedactToken(string(body), token))
+	}
+
+	var result resourceUploadResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parse upload credentials: %w", err)
+	}
+	if result.Code != 0 {
+		return "", fmt.Errorf("upload credentials API: code=%d msg=%s", result.Code, result.Msg)
+	}
+	if strings.TrimSpace(result.Data.StorageKey) == "" {
+		return "", fmt.Errorf("upload credentials API returned empty storage_key")
+	}
+	if err := p.uploadResourceData(ctx, result.Data.UploadEntry, fileName, data); err != nil {
+		return "", err
+	}
+	return result.Data.StorageKey, nil
+}
+
+func (p *Platform) uploadResourceData(ctx context.Context, entry resourceUploadEntry, fileName string, data []byte) error {
+	if err := validateResourceUploadURL(entry.URL); err != nil {
+		return err
+	}
+	method := strings.ToUpper(strings.TrimSpace(entry.Method))
+	if method != http.MethodPut && method != http.MethodPost {
+		return fmt.Errorf("unsupported resource upload method %q", entry.Method)
+	}
+
+	var body io.Reader = bytes.NewReader(data)
+	contentType := ""
+	if method == http.MethodPost {
+		var multipartBody bytes.Buffer
+		writer := multipart.NewWriter(&multipartBody)
+		for key, value := range entry.Params {
+			if err := writer.WriteField(key, fmt.Sprint(value)); err != nil {
+				return fmt.Errorf("build resource upload form: %w", err)
+			}
+		}
+		part, err := writer.CreateFormFile("file", fileName)
+		if err != nil {
+			return fmt.Errorf("build resource upload file: %w", err)
+		}
+		if _, err := part.Write(data); err != nil {
+			return fmt.Errorf("write resource upload file: %w", err)
+		}
+		if err := writer.Close(); err != nil {
+			return fmt.Errorf("close resource upload form: %w", err)
+		}
+		body = &multipartBody
+		contentType = writer.FormDataContentType()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, entry.URL, body)
+	if err != nil {
+		return fmt.Errorf("create resource upload request: %w", err)
+	}
+	for key, value := range entry.Headers {
+		switch values := value.(type) {
+		case []any:
+			for _, item := range values {
+				req.Header.Add(key, fmt.Sprint(item))
+			}
+		default:
+			req.Header.Set(key, fmt.Sprint(value))
+		}
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	resp, err := p.client().Do(req)
+	if err != nil {
+		return fmt.Errorf("upload resource: %s", core.RedactToken(err.Error(), entry.URL))
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResourceAPIResponse))
+		return fmt.Errorf("upload resource: status=%d body=%s", resp.StatusCode, core.RedactToken(string(respBody), entry.URL))
+	}
+	return nil
+}
+
+func normalizeWPSImageMIME(declared, fileName string, data []byte) (string, error) {
+	mimeType := chooseAttachmentMIME(declared, "", fileName, data)
+	switch mimeType {
+	case "image/jpeg", "image/jpg":
+		return "image/jpg", nil
+	case "image/png", "image/gif", "image/webp":
+		return mimeType, nil
+	default:
+		return "", fmt.Errorf("unsupported image MIME type %q", mimeType)
+	}
+}
+
+func (p *Platform) createWPSMessage(ctx context.Context, reqBody sendMessageRequest) error {
+	token, err := p.getToken(ctx)
+	if err != nil {
+		return fmt.Errorf("wps-xiezuo: get token: %w", err)
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -845,25 +1835,67 @@ func (p *Platform) sendWPSMessage(ctx context.Context, rctx any, content string)
 		return fmt.Errorf("wps-xiezuo: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v7/messages/create", bytes.NewReader(body))
+	const requestURI = "/v7/messages/create"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+requestURI, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("wps-xiezuo: create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	for key, values := range p.signKSO1Header(http.MethodPost, requestURI, "application/json", body) {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.client().Do(req)
 	if err != nil {
 		return fmt.Errorf("wps-xiezuo: send request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("wps-xiezuo: send failed: status=%d body=%s", resp.StatusCode, string(respBody))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResourceAPIResponse))
+		return fmt.Errorf("wps-xiezuo: send failed: status=%d body=%s", resp.StatusCode, core.RedactToken(string(respBody), token))
 	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResourceAPIResponse+1))
+	if err != nil {
+		return fmt.Errorf("wps-xiezuo: read send response: %w", err)
+	}
+	if len(respBody) > maxResourceAPIResponse {
+		return fmt.Errorf("wps-xiezuo: send response exceeds %d bytes", maxResourceAPIResponse)
+	}
+	if err := checkWPSAPIResponse(respBody); err != nil {
+		return fmt.Errorf("wps-xiezuo: send failed: %w", err)
+	}
+	return nil
+}
 
-	slog.Debug("wps-xiezuo: message sent", "chat_id", rc.ChatID, "len", len(content))
+func checkWPSAPIResponse(body []byte) error {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	var result apiResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+	if len(result.Code) == 0 {
+		return nil
+	}
+	var code int
+	if err := json.Unmarshal(result.Code, &code); err != nil {
+		var codeString string
+		if stringErr := json.Unmarshal(result.Code, &codeString); stringErr != nil {
+			return fmt.Errorf("parse response code: %w", err)
+		}
+		code, err = strconv.Atoi(codeString)
+		if err != nil {
+			return fmt.Errorf("parse response code %q: %w", codeString, err)
+		}
+	}
+	if code != 0 {
+		return fmt.Errorf("code=%d msg=%s", code, result.Msg)
+	}
 	return nil
 }
 
@@ -895,7 +1927,7 @@ func (p *Platform) getToken(ctx context.Context) (string, error) {
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := p.client().Do(req)
 		if err != nil {
 			lastErr = err
 			continue
@@ -956,7 +1988,7 @@ func (p *Platform) addReaction(ctx context.Context, rctx replyContext, reactionT
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.client().Do(req)
 	if err != nil {
 		return err
 	}
@@ -985,7 +2017,7 @@ func (p *Platform) deleteReaction(ctx context.Context, rctx replyContext, reacti
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.client().Do(req)
 	if err != nil {
 		return err
 	}

@@ -297,7 +297,7 @@ func TestProcessInteractiveEventsAuditsAgentResultAndPreviewFinalize(t *testing.
 		agent:        e.agent,
 	}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-preview", time.Now(), nil, nil, "ctx")
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-preview", time.Now(), nil, nil, "ctx", 0)
 
 	records := sink.recordsSnapshot()
 	if len(records) < 2 {
@@ -365,7 +365,7 @@ func TestProcessInteractiveEvents_AuditsToolEventsWhenToolMessagesDisabled(t *te
 	agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"}
 	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
 
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "msg-1", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "msg-1", time.Now(), nil, nil, state.replyCtx, 0)
 
 	records := sink.recordsSnapshot()
 	var toolUseRecord, toolResultRecord *AuditRecord

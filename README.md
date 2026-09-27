@@ -53,7 +53,7 @@ Thanks to [Kimi](https://www.kimi.com/code/?aff=cc-connect) for sponsoring this 
 
 With cc-connect, you can bring Kimi CLI from your local machine into Feishu/Lark, DingTalk, Telegram, Slack, Discord, WeCom, and other instant messaging tools. Wherever you are, you can continue working on local projects through chat and ask Kimi to inspect or modify code, troubleshoot issues, run commands, and handle automation tasks.
 
-**cc-connect already supports Kimi CLI. Try the **[Kimi Code subscription](https://www.kimi.com/code/?aff=cc-connect)**, or use the API through the Kimi Open Platform ([中文站](https://platform.kimi.com/?aff=cc-connect) | [Global](https://platform.kimi.ai/?aff=cc-connect)).
+**cc-connect already supports Kimi CLI. Try the **[Kimi Code subscription](https://www.kimi.com/code/?aff=cc-connect)**, or use the API through the Kimi Open Platform ([中文站](https://platform.kimi.com?track_id=track-78c5d46574a54286a4ff42f7331272ba&aff=cc-connect) | [Global](https://platform.kimi.ai?track_id=track-dd37b0bea7a64b99b3fe2217b398e20b&aff=cc-connect)).
 
 ---
 
@@ -76,6 +76,11 @@ With cc-connect, you can bring Kimi CLI from your local machine into Feishu/Lark
 <tr>
 <td width="150"><a href="https://aigocode.com/invite/CYY3C85C"><img src="assets/sponsors/aigocode.png" alt="AIGoCode" width="120"></a></td>
 <td>Thanks to AIGoCode for sponsoring this project! AIGoCode is an all-in-one platform that integrates Claude Code, Codex, and the latest Gemini models, providing you with stable, efficient, and highly cost-effective AI coding services. The platform offers flexible subscription plans, zero risk of account suspension, direct access with no VPN required, and lightning-fast responses. AIGoCode has prepared a special benefit for cc-connect users: if you register via <a href="https://aigocode.com/invite/CYY3C85C">this link</a>, you'll receive an extra 10% bonus credit on your first top-up!</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://go.apimart.ai/gh-cc-connect"><img src="assets/sponsors/apimart.png" alt="APIMart" width="120"></a></td>
+<td>Thanks to APIMart for sponsoring this project! APIMart is a low-cost API platform for AI image & video generation — GPT-Image-2 from $0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — <a href="https://go.apimart.ai/gh-cc-connect">sign up here</a> to get started.</td>
 </tr>
 
 <tr>
@@ -188,21 +193,19 @@ With cc-connect, you can bring Kimi CLI from your local machine into Feishu/Lark
 </p>
 
 
-## 🆕 What’s New in v1.3.3
+## 🆕 What’s New in v1.5.1-beta.1
 
-First stable of the 1.3.3 series — stabilizes beta.1 → beta.5 (≈ 235 PRs since v1.3.2) plus 7 post-beta fixes. Highlights:
+Beta since v1.5.0 stable — 16 merged PRs. Highlights:
 
-- **New agents** — Devin CLI, Google Antigravity (`agy`), GitHub Copilot CLI as first-class agents (#672, #1123, #865). Hardened Cursor / OpenCode / Qoder / Kimi / Pi coverage.
-- **Platform expansion** — QQ (OneBot) file send & receive (#323), QQ Bot inline keyboards (#1131), WeCom `SendFile` in WebSocket (#1199), Feishu audio + video native media (#1202), Slack Assistant API (#844), MAX webhook delivery (#818), DingTalk @mentions / richText / image / file inbound (#1188, #828, #1357), broader Weibo DM, WPS Xiezuo (金山协作).
-- **Long-running turn hardening** — new `max_turn_time_mins` wall-clock cap with soft-stop + force-kill + auto-resume so a long bash / test command can no longer lock a session indefinitely (#1091).
-- **New core commands** — `/timer` (one-shot delayed task), `/cancel` (interrupt current turn), `/ps` (replaces `/btw`, kept as alias), `cron add --silent`, agent-driven TTS.
-- **Multi-user / permissions** — reply-to-unauthorized-IM-senders option, `@Bot/permit` ≡ `/permit` keyword matching, Bridge requires token when enabled.
-- **Provider ecosystem** — NekoCode, VisionCoder, AIHubMix, MiniMax M3 presets; Claude Code 1M-context Opus + `append_system_prompt` + PermissionRequest hooks; Codex `request_user_input` app-server events; configurable `shell` + shell profile for `exec`.
-- **Observability** — blackbox testing framework (P0/P1/P2 + config-switch matrix), CUJ test framework, provider-resume regression suite for codex/opencode/kimi, Pi context-usage reporter in reply footer.
+- **i18n** — Localize agent system prompts (cron/timer/send/relay) based on language config (#1721).
+- **Cursor** — Image attachments delivered via on-disk paths to the Cursor CLI (#1709).
+- **Feishu** — Large file download via HTTP Range chunks, bypassing code=234037 (#1746); fail-closed when bot open_id discovery fails (#1725).
+- **Weixin** — Reply and push paths now have separate send budgets (#1743); inbound dedup is configurable (#1733).
+- **Claude Code** — `/compact` and slash commands restored by dropping `--replay-user-messages` (#1737); bounded session teardown (#1714).
+- **Codex** — Failed app-server turns propagate (#1730); max reasoning effort supported (#1727); `/list` reads session names correctly (#1639).
+- **Pi** — Attachments passed as `@path` refs (#1724); Windows build fix (#1738).
 
-⚠️ **Behavior changes (action may be required)**: Telegram/Discord `progress_style` defaults to `compact` (set `legacy` to revert); QQ Bot default `intents` now include `INTERACTION_CREATE` (custom values must include `1<<26`); DingTalk `msgtype=file` inbound now reaches the agent; engine permission keywords are @mention-tolerant; `reset_on_idle_mins` defaults to 30 min; Bridge with no token configured refuses to start. See `changelogs/v1.3.3.md` for the full themed summary.
-
-No breaking changes. Coming from a v1.3.3-beta.*, this is a small fix-only upgrade.
+No breaking changes. See `changelogs/v1.5.1-beta.1.md` for the full changelog.
 
 
 ## 🧩 Platform feature snapshot
@@ -275,6 +278,91 @@ High-level view of what each **built-in platform** can do in cc-connect.
   <em>Left：Lark &nbsp;|&nbsp; Telegram &nbsp;|&nbsp; Right：Wechat</em>
 </p>
 
+
+## 📋 Prerequisites
+
+> **Install in this exact order** — cc-connect is a bridge for local AI coding agents, so the agent CLI must be installed and authenticated *before* cc-connect starts. Skipping ahead will cause `cc-connect` to exit with `claudecode: claude CLI not found in PATH` (or similar for your chosen agent), and the Web UI on `:9820` will never come up.
+
+### 1️⃣ Install your AI Agent CLI
+
+Pick the agent you want to bridge. You need **at least one**.
+
+```bash
+# Claude Code (most common)
+brew install --cask claude-code            # macOS / Linux Homebrew
+# or
+npm install -g @anthropic-ai/claude-code   # any platform via npm
+
+# OpenAI Codex
+npm install -g @openai/codex
+
+# Google Gemini CLI
+npm install -g @google/gemini-cli
+
+# iFlow CLI
+npm install -g @iflow-ai/iflow-cli
+
+# Qoder CLI
+curl -fsSL https://qoder.com/install | bash
+```
+
+For **Cursor Agent** and **OpenCode**, follow the official install pages:
+- Cursor Agent: <https://docs.cursor.com/agent>
+- OpenCode: <https://github.com/opencode-ai/opencode>
+
+Verify the binary is on your `PATH`:
+
+```bash
+claude --version       # or: codex / gemini / opencode / qodercli / cursor-agent ...
+```
+
+### 2️⃣ Authenticate the agent
+
+Each agent has its own login flow — run the agent once interactively so it stores credentials in your home directory:
+
+```bash
+claude login           # opens a browser to authenticate
+# or
+codex login            # /gemini / opencode auth — see the agent's docs
+```
+
+If you skip this step, `cc-connect` will still start, but the agent will reject every prompt with an auth error.
+
+### 3️⃣ Install cc-connect
+
+```bash
+# npm (any platform)
+npm install -g cc-connect
+
+# Homebrew (macOS / Linux)
+brew install cc-connect
+
+# Or download a binary from https://github.com/chenhg5/cc-connect/releases
+```
+
+### 4️⃣ Start cc-connect and open the Web UI
+
+```bash
+cc-connect             # starts the service; first run auto-creates ~/.cc-connect/config.toml
+```
+
+On first launch, cc-connect prints something like:
+
+```
+Web admin:  http://localhost:9820
+```
+
+Open that URL in your browser. If `9820` is already in use, pass `--web-port 9821` or set `web_port` in `config.toml`.
+
+> **Note:** `cc-connect web` *only* opens the browser and the config UI — it does **not** start the service. You still need `cc-connect` running in another terminal.
+
+### 5️⃣ Configure platform bot tokens in the Web UI
+
+In the Web UI, create a project, then add at least one platform (Feishu / Telegram / Discord / Slack / DingTalk / WeChat Work / QQ / LINE / Weixin) and paste the bot token from that platform's developer console. Save and cc-connect will hot-reload.
+
+That's it — send a message to your bot and cc-connect will relay it to your local agent.
+
+---
 
 ## 🚀 Quick Start
 
@@ -401,6 +489,7 @@ cc-connect update --pre     # Include pre-releases
 | WPS Xiezuo | [docs/wps-xiezuo.md](docs/wps-xiezuo.md) | WebSocket | No |
 | Telegram | [docs/telegram.md](docs/telegram.md) | Long Polling | No |
 | Slack | [docs/slack.md](docs/slack.md) | Socket Mode | No |
+| Google Chat | [docs/googlechat.md](docs/googlechat.md) | Cloud Pub/Sub | No |
 | Discord | [docs/discord.md](docs/discord.md) | Gateway | No |
 | Weibo | [docs/weibo.md](docs/weibo.md) | WebSocket | No |
 | WeChat Work | [docs/wecom.md](docs/wecom.md) | WebSocket / Webhook | No (WS) / Yes (Webhook) |

@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -114,8 +113,38 @@ func (p *Platform) uploadToWeixinCDN(ctx context.Context, to string, plaintext [
 	}, nil
 }
 
+// sendSingleItem sends a media item. If ilink throttles the send (ret=-2
+// "prepare failed"), it fails fast instead of retrying: the penalty is escalated
+// by every send attempt made while it is active, so retrying only prolongs the
+// outage.
+//
+// Media sends are scoped to the push path: they share the outbound sendMessage
+// endpoint that the gateway throttles and are exactly the kind of
+// "separate-message" traffic the burst budget is meant to pace (issue #1742).
 func (p *Platform) sendSingleItem(ctx context.Context, rc *replyContext, item messageItem) error {
-	return p.sendSingleItemWithRetry(ctx, rc, item)
+	if err := p.checkSendQuota(ctx, sendPathPush); err != nil {
+		return err
+	}
+	msg := sendMessageReq{
+		Msg: weixinOutboundMsg{
+			FromUserID:   "",
+			ToUserID:     rc.peerUserID,
+			ClientID:     "cc-" + randomHex(8),
+			MessageType:  messageTypeBot,
+			MessageState: messageStateFinish,
+			ItemList:     []messageItem{item},
+			ContextToken: rc.contextToken,
+		},
+	}
+	err := p.api.sendMessage(ctx, &msg)
+	if err == nil {
+		return nil
+	}
+	if isSendThrottled(err) {
+		return fmt.Errorf("weixin: sendMessage throttled by ilink (ret=-2); "+
+			"the bot is rate-limited and sending during the penalty escalates it, retry the message later: %w", err)
+	}
+	return err
 }
 
 func mediaFromUploadRef(ref *cdnUploadedRef) *cdnMedia {
@@ -134,55 +163,6 @@ func buildVideoMessageItem(ref *cdnUploadedRef) messageItem {
 			VideoSize: ref.cipherSize,
 		},
 	}
-}
-
-// sendSingleItemWithRetry mirrors text delivery: one contextual attempt, then
-// one context-free fallback when the server rejects a stale token.
-func (p *Platform) sendSingleItemWithRetry(ctx context.Context, rc *replyContext, item messageItem) error {
-	send := func(token, clientID string) error {
-		msg := sendMessageReq{
-			Msg: weixinOutboundMsg{
-				FromUserID:   "",
-				ToUserID:     rc.peerUserID,
-				ClientID:     clientID,
-				MessageType:  messageTypeBot,
-				MessageState: messageStateFinish,
-				ItemList:     []messageItem{item},
-				ContextToken: token,
-			},
-		}
-		return p.api.sendMessage(ctx, &msg)
-	}
-
-	token := strings.TrimSpace(rc.contextToken)
-	clientID := "cc-" + randomHex(8)
-	err := send(token, clientID)
-	if err == nil {
-		if token == "" {
-			rc.deliveryUnconfirmed = true
-		} else {
-			p.markContextSendAccepted(rc.peerUserID, token)
-		}
-		return nil
-	}
-	if !isStaleContextTokenError(err) || token == "" {
-		return err
-	}
-
-	slog.Warn("weixin: sendMessage ret=-2 for media; trying one context-free proactive fallback",
-		"peer", rc.peerUserID, "token_age", p.replyContextTokenAge(rc))
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(weixinSendRetryDelay):
-	}
-	if err := send("", clientID+"-noctx"); err != nil {
-		return err
-	}
-	rc.contextToken = ""
-	rc.contextTokenCapturedAt = time.Time{}
-	rc.deliveryUnconfirmed = true
-	return nil
 }
 
 // SendImage implements core.ImageSender.

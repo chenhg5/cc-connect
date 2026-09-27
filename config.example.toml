@@ -58,6 +58,18 @@
 # 也可用环境变量 CC_MAX_ATTACHMENT_SIZE_MB 覆盖（同样单位 MiB；设置后优先级高于本配置项）。
 # max_attachment_size_mb = 50
 
+# Stale busy-lock self-heal threshold (minutes). When a message arrives, the
+# session is busy, the agent process is dead, and the lock has been held longer
+# than this, cc-connect dumps goroutine stacks to the OS temp dir, breaks the
+# lock, and processes the message in a fresh turn. Live agents are never
+# touched (process-alive gate), so long-running turns are safe at any value.
+# Default: 2 (just above the 120s graceful-stop wait). 0 disables the breaker.
+# 会话忙锁自愈阈值（分钟）。消息到达时会话忙、agent 进程已死、且锁持有超过该时长时，
+# cc-connect 会把 goroutine 栈转储到系统临时目录、破锁并在新 turn 中处理该消息。
+# 存活的长任务永远不会被触碰（进程存活门控），任何取值都安全。
+# 默认 2（略高于 120 秒优雅停止等待）。设 0 关闭该自愈。
+# busy_timeout_mins = 2
+
 [log]
 level = "info" # debug, info, warn, error
 
@@ -291,6 +303,11 @@ level = "info" # debug, info, warn, error
 # max_per_second = 25
 # [outgoing_rate_limit.platforms.feishu]
 # max_per_second = 5
+# Weixin (ilink) sendmessage throttles the bot after a short burst (ret=-2
+# "prepare failed", penalty on the order of an hour). Pace sends to avoid it:
+# [outgoing_rate_limit.platforms.weixin]
+# max_per_second = 0.5
+# burst = 1
 
 # =============================================================================
 # Relay Settings / Relay 设置
@@ -308,15 +325,41 @@ level = "info" # debug, info, warn, error
 # visibility = "full"       # "full" (default), "summary", or "none" / 群内可见消息：完整、摘要或不显示
 
 # =============================================================================
-# Auto-Compress / 自动压缩
+# Auto-Compress (after each turn) / 自动压缩（每轮结束后）
 # =============================================================================
-# Automatically trigger /compress when estimated token usage exceeds threshold.
-# 当估算 token 超过阈值时自动触发 /compress。
+# Automatically trigger /compress when token usage exceeds the threshold.
+#
+# Timing matters here: this runs AFTER a turn has finished, not inside it. The
+# agent's own loop is not interrupted, so a turn that grows past the threshold
+# mid-flight is only compressed once it completes. Agents that compact natively
+# mid-turn (Claude Code, via autoCompactWindow) do so *during* the loop and are
+# therefore strictly more timely — prefer that where it is available, and use
+# this when the agent has no such mechanism or when you want a visible,
+# turn-boundary compaction point.
+#
+# 时机很关键：本功能在**一轮对话结束后**触发，不会打断 agent 自己的迭代循环。
+# 因此如果某一轮在中途就越过了阈值，也要等该轮跑完才会压缩。原生支持轮内压缩的
+# agent（如 Claude Code 的 autoCompactWindow）会在循环过程中压缩，时机更准；能用
+# 原生机制就优先用原生，本功能适用于 agent 自身没有压缩能力、或你希望压缩发生在
+# 一个可见的、干净的轮次边界上的场景。
 #
 # [projects.auto_compress]
 # enabled = true
 # max_tokens = 12000     # estimated token threshold to trigger compression
 # min_gap_mins = 30      # minimum minutes between auto-compress runs (default 30)
+# allow_heuristic = false  # decide from the text-length heuristic when an agent that
+#                          # CAN report exact usage has not reported it yet. Off by
+#                          # default: wait for the exact number instead. The heuristic
+#                          # counts only cc-connect's own history text, ignoring tool
+#                          # results and the fixed system-prompt+tools overhead, so it
+#                          # is routinely several times off. Agents with no usage
+#                          # reporting at all always use the heuristic — for them it is
+#                          # the only mechanism available, and this flag does not apply.
+#                          # 当「有能力上报精确用量的 agent」暂时还没上报时，是否退回文本
+#                          # 长度启发式估算。默认关闭：宁可等到精确值。该启发式只统计
+#                          # cc-connect 自身的对话文本，忽略 tool_result 与系统提示词/
+#                          # 工具定义的固定开销，误差常达数倍。完全没有用量上报能力的
+#                          # agent 始终使用启发式——那是它们唯一的机制，本开关对其无效。
 
 # [projects.observe]
 # enabled = true                    # Forward native terminal sessions to Slack
@@ -1067,8 +1110,10 @@ app_secret = "your-feishu-app-secret"
 #                           # 允许的群聊 chat_id，逗号分隔；"*" 表示所有（默认）。在群设置中查看 chat_id。
 # group_only = false        # If true, only respond to group chat messages; ignore private (P2P) messages (default: false)
 #                           # 设为 true 时，仅响应群聊消息，忽略私聊（P2P）消息（默认 false）
-# reaction_emoji = "OnIt"  # Emoji reaction on incoming messages (default: "OnIt"); set to "none" to disable
-#                           # 收到消息时添加的表情回复（默认 "OnIt"）；设为 "none" 可禁用
+# ack_emoji = "Get"        # Immediate persistent receipt when accepted for processing/queueing; omitted/"none" disables
+#                           # 消息被接受处理或入队时立即添加并保留的确认表情；不配置或设为 "none" 可禁用
+# reaction_emoji = "OnIt"  # Temporary reaction while the agent is processing (default: "OnIt"); "none" disables
+#                           # Agent 处理期间的临时表情（默认 "OnIt"），结束后移除；设为 "none" 可禁用
 # done_emoji = "none"       # Emoji reaction when agent finishes a reply (e.g. "Done"); set to "none" to disable
 #                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
@@ -1077,6 +1122,10 @@ app_secret = "your-feishu-app-secret"
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session and, in multi-workspace mode, one workspace binding)
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话；multi-workspace 模式下每个话题也独立绑定 workspace
+# Share non-mentioned group messages as context with the next bot-triggered turn.
+# Messages themselves do not trigger a reply.
+# group_chat_history_share = false
+# 将未 @ 机器人的群消息作为下一次触发的上下文共享；消息本身不会触发回复。
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
@@ -1153,7 +1202,11 @@ app_secret = "your-feishu-app-secret"
 #    创建 WPS 开放平台应用，并启用事件 WebSocket 推送
 # 2. Subscribe to app chat message events such as kso.app_chat.message
 #    订阅应用会话消息事件，如 kso.app_chat.message
-# 3. Fill in app_id and app_secret below
+# 3. Grant kso.chat_message.readwrite to receive chat images and files
+#    授予 kso.chat_message.readwrite 权限以接收聊天图片和文件
+# 4. Grant kso.file.read (or kso.file.readwrite) to read cloud-document content
+#    授予 kso.file.read（或 kso.file.readwrite）权限以读取云文档正文
+# 5. Fill in app_id and app_secret below
 #    填入下方 app_id 和 app_secret
 # Connection: WebSocket — no public URL required / 无需公网地址
 
@@ -1165,6 +1218,7 @@ app_secret = "your-feishu-app-secret"
 # app_secret = "your-wps-xiezuo-app-secret"
 # allow_from = "*"             # Allowed WPS user IDs / 允许的 WPS 用户 ID
 # clean_reply = false          # Strip thinking/tool progress lines from replies / 过滤思考和工具进度行
+# max_attachment_bytes = 2147483648 # Per-file WPS limit, default 2 GiB, max 5 GiB / 单文件限制，默认 2 GiB，最大 5 GiB
 # base_url = "https://openapi.wps.cn"  # Optional API base URL override / 可选 API 基础地址覆盖
 
 # Telegram (uncomment to enable / 取消注释以启用)
@@ -1249,6 +1303,11 @@ app_secret = "your-feishu-app-secret"
 #                     # 允许的 MAX 用户 ID，如 "66624886,12345678"；"*" 表示所有
 # api_base = "https://platform-api.max.ru"   # optional override / 可选覆盖默认 API
 #
+# max_attachment_size_mb = 50   # optional: inbound attachment download cap (MiB).
+#                               # Default: core default (50). Raise to receive
+#                               # larger files/images/voice from users.
+# max_attachment_size_mb = 50   # 可选：接收附件的下载上限（MiB），默认 50，调大可接收更大文件
+#
 # --- Webhook mode (optional) ---
 # Set webhook_url to switch from long-poll to webhook. Required for high-traffic
 # bots since MAX throttles long-poll to 2 RPS from 2026-05-11.
@@ -1281,6 +1340,41 @@ app_secret = "your-feishu-app-secret"
 #                         # "thread" (one session per Slack thread — a new top-level message starts
 #                         #  a fresh session, replies in the same thread continue it).
 #                         # 会话粒度："user"(默认) | "channel"(整个频道一个会话) | "thread"(每个 Slack 话题串一个会话)
+
+# Google Chat (uncomment to enable / 取消注释以启用)
+# Uses a registered Google Chat app whose Cloud Pub/Sub connection publishes
+# events to a topic. No public IP is needed and there is NO Workspace Events
+# subscription expiry or per-restart resource leak (the subscription is fixed).
+# 注册的 Google Chat 应用通过 Cloud Pub/Sub 连接发布事件，无需公网 IP，且订阅固定（无过期/泄漏）。
+#
+# - receive: cc-connect pulls the Chat app's Pub/Sub subscription with a native
+#   streaming pull (no gws binary). 接收：原生流式拉取 Chat 应用的 Pub/Sub 订阅（无需 gws）。
+# - send: replies post via the Chat REST API as the app's service account
+#   (chat.bot), so replies appear as the bot. 发送：以服务账号（chat.bot）作为机器人回复。
+# Both directions use the same service-account key. 收发使用同一个服务账号密钥。
+#
+# Setup / 配置:
+# 1. Enable Chat API + Pub/Sub API. / 启用 Chat API 与 Pub/Sub API。
+# 2. Create a Pub/Sub topic; grant Publisher to
+#    chat-api-push@system.gserviceaccount.com; create a pull subscription.
+#    创建 Pub/Sub 主题并授予 chat-api-push@system Publisher，创建拉取订阅。
+# 3. Create a service account + JSON key (chat.bot). Grant it
+#    roles/pubsub.subscriber on the subscription so it can pull events.
+#    创建服务账号及 JSON 密钥，并在订阅上授予 roles/pubsub.subscriber 以拉取事件。
+# 4. Configure a Chat app (Chat API > Configuration): set status LIVE,
+#    Connection settings = Cloud Pub/Sub (your topic), Visibility = yourself.
+#    Do NOT check "Build as a Google Workspace add-on".
+#    配置 Chat 应用：状态 LIVE，连接方式选 Cloud Pub/Sub（你的主题），可见性=自己；不要勾选 add-on。
+# 5. DM the app (or @mention it in a space). / 私聊该应用（或在空间中 @ 它）。
+
+# [[projects.platforms]]
+# type = "googlechat"
+#
+# [projects.platforms.options]
+# subscription = "projects/PROJECT/subscriptions/NAME"  # Pub/Sub subscription the Chat app publishes to (required) / Chat 应用发布到的 Pub/Sub 订阅（必填）
+# credentials_file = "/path/to/service-account.json"    # SA key, used to pull events AND reply (chat.bot) (required) / 服务账号密钥，用于拉取事件与回复（必填）
+# allow_from = "*"                                  # Allowed sender IDs, e.g. "users/123456789" / 允许的发送者 ID
+# session_scope = "space"                           # "space" (default) | "thread" | "user" / 会话粒度
 
 # Discord (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://discord.com/developers/applications / 创建应用
@@ -1488,6 +1582,29 @@ app_secret = "your-feishu-app-secret"
 # proxy = ""                                   # optional HTTP proxy / 可选代理
 # proxy_username = ""
 # proxy_password = ""
+#
+# Send-volume quota vs ilink's burst throttle (sendMessage ret=-2 "prepare failed"):
+# the gateway throttles the bot after roughly 5-6 separate messages within a short
+# window (multi-chunk sends are fine), and the penalty escalates with every attempt
+# made while active. The quota paces separate messages so the bot stays below the
+# trigger. 0 disables the quota.
+# 发送量配额（防 ilink 突发节流 ret=-2）：网关在短窗口内约 5-6 条独立消息即节流
+# （多切块发送不计数），且节流期内每次尝试都会升级惩罚。配额对独立消息限速，
+# 使其低于触发阈值。设为 0 关闭配额。
+# burst_limit = 4           # max separate messages per window / 每窗口最多独立消息数
+# burst_window_secs = 86400 # window length (default 24h) / 窗口时长（秒，默认24小时）
+#
+# Inbound message dedup (issue #1667):
+# ilink can retransmit the same message_id on ACK delay or jitter, which
+# otherwise causes the bot to reply twice with different answers. The dedup
+# cache is keyed on from + message_id + seq + create_time_ms + client_id.
+# Default: enabled with a 5-minute window. Set dedup_enabled=false to disable.
+# 入站消息去重（issue #1667）：ilink 在 ACK 延迟或网络抖动时会重传相同
+# message_id，导致 bot 回复两次不同的答案。缓存键由 from + message_id + seq
+# + create_time_ms + client_id 组合。默认开启，窗口 5 分钟。设为
+# dedup_enabled=false 可关闭。
+# dedup_enabled = true
+# dedup_window_seconds = 300
 
 # -----------------------------------------------------------------------------
 # Tencent Yuanbao (yuanbao.tencent.com bot platform)
@@ -1622,7 +1739,7 @@ app_secret = "your-feishu-app-secret"
 # model = "o3"
 #
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
-# reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh"
+# reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
 #
 # Optional: override whether tool call progress messages are sent for this project.
 # This only changes the startup default for the project; /quiet and /config can still change it at runtime.
@@ -1773,6 +1890,16 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify a model tier / 可选：指定模型级别
 # model = "auto"  # "auto" | "ultimate" | "performance" | "efficient" | "lite"
+#
+# Optional: override the CLI invocation via the unified `cmd` field. Accepts
+# both a whitespace-separated string and a TOML array. Useful for passing
+# flags that the IM-platform user expects to take effect, e.g. forcing
+# permission bypass without a wrapper script.
+# 可选：通过统一的 `cmd` 字段覆盖 CLI 调用方式，同时接受空白分隔字符串
+# 和 TOML 数组两种写法。可用于让 IM 平台用户透传 CLI 参数，例如绕过权限
+# 检查而无需再用 wrapper 脚本。
+# cmd = "qodercli --permission-mode bypass_permissions"
+# cmd = ["qodercli", "--permission-mode", "bypass_permissions"]
 #
 # [[projects.platforms]]
 # type = "telegram"

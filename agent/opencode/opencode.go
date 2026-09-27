@@ -35,7 +35,7 @@ type Agent struct {
 	cmd                  string   // CLI binary name, default "opencode"
 	cliExtraArgs         []string // extra args from cmd after the binary name
 	configEnv            []string // env vars from [projects.agent.options.env]
-	agentName            string // passed as --agent to opencode (for plugin-defined agents)
+	agentName            string   // passed as --agent to opencode (for plugin-defined agents)
 	providers            []core.ProviderConfig
 	activeIdx            int
 	sessionEnv           []string
@@ -201,6 +201,33 @@ func (a *Agent) SetWorkDir(dir string) {
 	defer a.mu.Unlock()
 	a.workDir = dir
 	slog.Info("opencode: work_dir changed", "work_dir", dir)
+}
+
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	opts := map[string]any{
+		"mode": a.mode,
+	}
+	if a.model != "" {
+		opts["model"] = a.model
+	}
+	if a.agentName != "" {
+		opts["agent"] = a.agentName
+	}
+	if len(a.configEnv) > 0 {
+		env := make(map[string]string, len(a.configEnv))
+		for _, kv := range a.configEnv {
+			if k, v, ok := strings.Cut(kv, "="); ok {
+				env[k] = v
+			}
+		}
+		if len(env) > 0 {
+			opts["env"] = env
+		}
+	}
+	return opts
 }
 
 func (a *Agent) GetWorkDir() string {

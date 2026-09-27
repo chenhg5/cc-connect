@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -27,8 +28,6 @@ const (
 	sessionKeyPrefix = "weixin:dm:"
 	maxWeixinChunk   = 3800 // stay under typical IM limits
 
-	// weixinSendRetryDelay is the delay between retries when sendMessage fails.
-	weixinSendRetryDelay = 500 * time.Millisecond
 	// weixinChunkSendDelay is the delay between sending message chunks to avoid rate limiting.
 	weixinChunkSendDelay = 100 * time.Millisecond
 	// pendingFlushInterval is a best-effort background retry interval for persisted replies.
@@ -37,6 +36,8 @@ const (
 	pendingRetryCooldown = 30 * time.Second
 	// pendingMaxAttemptsPerToken caps background attempts until a new context_token arrives.
 	pendingMaxAttemptsPerToken = 3
+	defaultBurstLimit          = 4
+	defaultBurstWindowSecs     = 86400
 	// typingTicketTTL is how long a cached typing ticket remains valid.
 	typingTicketTTL = 10 * time.Minute
 	// typingRepeatInterval is how often to resend the typing status to keep it alive.
@@ -46,6 +47,42 @@ const (
 	maxLongPollTimeout   = 60 * time.Second
 	maxPendingReplyRunes = 12000
 )
+
+// sendPath labels the call site that reaches the outbound API so the burst
+// budget can be scoped to where ilink actually throttles us (issue #1742).
+//   - sendPathReply: reactive reply to an inbound user message. The gateway
+//     does not throttle replies on interactive deployments, so the push-path
+//     budget must NOT consume them.
+//   - sendPathPush: proactive push (cron / timer / file transfer / SendImage /
+//     SendFile / SendAudio). Counts against burst_limit.
+//
+// File transfers count as push because they share the same outbound
+// sendMessage endpoint and are exactly the kind of "separate-message" traffic
+// that the gateway throttles.
+type sendPath string
+
+const (
+	sendPathReply sendPath = "reply"
+	sendPathPush  sendPath = "push"
+)
+
+// pushBudgetExceededCounter is incremented every time the push-path burst
+// budget is exhausted. Exposed via PushBudgetExceededTotal() for diagnostics
+// (`cc-connect doctor` and on-demand queries). Per-process — the budget itself
+// is per-account, but the counter is only observability and reset on restart.
+var pushBudgetExceededCounter atomic.Int64
+
+// PushBudgetExceededTotal returns how many times the push-path burst budget
+// has blocked a send since process start. Replies are not counted because they
+// bypass the quota entirely.
+func PushBudgetExceededTotal() int64 {
+	return pushBudgetExceededCounter.Load()
+}
+
+// resetPushBudgetExceededCounter is for tests only.
+func resetPushBudgetExceededCounter() {
+	pushBudgetExceededCounter.Store(0)
+}
 
 type replyContext struct {
 	peerUserID             string
@@ -89,8 +126,12 @@ type Platform struct {
 	syncBuf     string
 	syncBufPath string
 
-	dedupMu sync.Mutex
-	dedup   map[string]time.Time
+	// dedupEnabled mirrors the optional dedup_enabled config key (default true for
+	// weixin because ilink can retransmit the same message_id on ACK delay —
+	// see issue #1667). When false, the dispatch path skips the cache entirely.
+	dedupEnabled bool
+	// dedup tracks recently seen composite keys to absorb retransmissions.
+	dedup *core.MessageDedup
 
 	pauseMu    sync.Mutex
 	pauseUntil time.Time
@@ -104,6 +145,11 @@ type Platform struct {
 
 	pendingMu   sync.Mutex
 	pendingPath string
+	// Send-volume quota guarding against ilink's burst throttle (see constants).
+	sendQuotaMu     sync.Mutex
+	sendQuotaTimes  []time.Time
+	sendQuotaLimit  int
+	sendQuotaWindow time.Duration
 }
 
 type typingTicketEntry struct {
@@ -172,6 +218,16 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	lp := sanitizeLongPollTimeoutMS(pickInt(opts["long_poll_timeout_ms"]))
 
+	// Send-volume quota (see defaultBurstLimit constants). 0 disables the quota.
+	burstLimit := pickInt(opts["burst_limit"])
+	if burstLimit < 0 {
+		burstLimit = 0
+	}
+	burstWindow := pickInt(opts["burst_window_secs"])
+	if burstWindow < 0 {
+		burstWindow = 0
+	}
+
 	dataDir, _ := opts["cc_data_dir"].(string)
 	project, _ := opts["cc_project"].(string)
 	stateDir := ""
@@ -204,20 +260,42 @@ func New(opts map[string]any) (core.Platform, error) {
 		Transport: &http.Transport{Proxy: nil},
 	}
 
+	if burstLimit <= 0 {
+		burstLimit = defaultBurstLimit
+	}
+	if burstWindow <= 0 {
+		burstWindow = defaultBurstWindowSecs
+	}
+
+	// dedup_enabled (default true) and dedup_window_seconds (default 300s, the
+	// legacy value) — see issue #1667. ilink can retransmit the same message_id
+	// on ACK delay; without dedup the bot replies twice.
+	dedupEnabled := pickBool(opts["dedup_enabled"])
+	if _, ok := opts["dedup_enabled"]; !ok {
+		dedupEnabled = true
+	}
+	dedupWindow := pickInt(opts["dedup_window_seconds"])
+	if dedupWindow <= 0 {
+		dedupWindow = 300
+	}
+
 	p := &Platform{
-		token:         token,
-		baseURL:       baseURL,
-		cdnBaseURL:    cdnBaseURL,
-		allowFrom:     allowFrom,
-		routeTag:      routeTag,
-		stateDir:      stateDir,
-		longPollMS:    lp,
-		accountLabel:  accountLabel,
-		httpClient:    httpClient,
-		cdnHttpClient: cdnHttpClient,
-		tokens:        make(map[string]contextTokenEntry),
-		dedup:         make(map[string]time.Time),
-		typingTickets: make(map[string]typingTicketEntry),
+		token:           token,
+		baseURL:         baseURL,
+		cdnBaseURL:      cdnBaseURL,
+		allowFrom:       allowFrom,
+		routeTag:        routeTag,
+		stateDir:        stateDir,
+		longPollMS:      lp,
+		accountLabel:    accountLabel,
+		httpClient:      httpClient,
+		cdnHttpClient:   cdnHttpClient,
+		tokens:          make(map[string]contextTokenEntry),
+		dedupEnabled:    dedupEnabled,
+		dedup:           core.NewMessageDedup(time.Duration(dedupWindow) * time.Second),
+		typingTickets:   make(map[string]typingTicketEntry),
+		sendQuotaLimit:  burstLimit,
+		sendQuotaWindow: time.Duration(burstWindow) * time.Second,
 	}
 	p.api = newAPIClient(baseURL, token, routeTag, httpClient, botAgent)
 
@@ -258,6 +336,26 @@ func sanitizeLongPollTimeoutMS(v int) int {
 		return 0
 	}
 	return v
+}
+
+// pickBool interprets an any value as a bool. Numeric values are treated as
+// "non-zero => true" so the same key works for both booleans and 0/1 ints.
+func pickBool(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	case float64:
+		return x != 0
+	case string:
+		s := strings.ToLower(strings.TrimSpace(x))
+		return s == "true" || s == "1" || s == "yes" || s == "on"
+	default:
+		return false
+	}
 }
 
 func (p *Platform) Name() string { return "weixin" }
@@ -624,24 +722,15 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		}
 	}
 
-	// Include create_time_ms and client_id so (seq,message_id)=(0,0) or duplicates are less likely to collide.
+	// Include create_time_ms and client_id so (seq,message_id)=(0,0) or duplicates
+	// are less likely to collide. Dedup window is configurable via
+	// dedup_window_seconds; the cache is a thin wrapper over core.MessageDedup
+	// (see issue #1667).
 	dedupKey := fmt.Sprintf("%s|%d|%d|%d|%s", from, m.MessageID, m.Seq, m.CreateTimeMs, strings.TrimSpace(m.ClientID))
-	p.dedupMu.Lock()
-	if p.dedup == nil {
-		p.dedup = make(map[string]time.Time)
-	}
-	now := time.Now()
-	for k, ts := range p.dedup {
-		if now.Sub(ts) > 5*time.Minute {
-			delete(p.dedup, k)
-		}
-	}
-	if _, ok := p.dedup[dedupKey]; ok {
-		p.dedupMu.Unlock()
+	if p.dedupEnabled && p.dedup != nil && p.dedup.IsDuplicate(dedupKey) {
+		slog.Debug("weixin: dropping duplicate message", "from", from, "message_id", m.MessageID, "seq", m.Seq)
 		return
 	}
-	p.dedup[dedupKey] = now
-	p.dedupMu.Unlock()
 
 	msgID := fmt.Sprintf("%d", m.MessageID)
 	if m.MessageID == 0 {
@@ -727,22 +816,30 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// Reply sends a reactive text reply to an inbound user message. Replies bypass
+// the push-path burst budget (issue #1742): the gateway does not throttle
+// replies on interactive deployments, and counting them against the push
+// budget silently bricked weixin bots at 4 replies per 24h after the v1.5.0
+// default landed.
 func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) error {
 	_, err := p.ReplyWithReceipt(ctx, replyCtx, content)
 	return err
 }
 
+// Send proactively pushes a message to the user (cron / timer / Relay). Pushes
+// count against the burst budget because ilink DOES throttle proactive sends
+// (see #1643 / #1742).
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
 	_, err := p.SendWithReceipt(ctx, replyCtx, content)
 	return err
 }
 
 func (p *Platform) ReplyWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
-	return p.sendChunksWithReceipt(ctx, replyCtx, content)
+	return p.sendChunksWithReceipt(ctx, replyCtx, content, sendPathReply)
 }
 
 func (p *Platform) SendWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
-	return p.sendChunksWithReceipt(ctx, replyCtx, content)
+	return p.sendChunksWithReceipt(ctx, replyCtx, content, sendPathPush)
 }
 
 // StartTyping sends a typing indicator to the peer and repeats every few seconds
@@ -840,12 +937,70 @@ func (p *Platform) refreshTypingTicket(ctx context.Context, peerID, contextToken
 	}()
 }
 
-func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string) error {
-	_, err := p.sendChunksWithReceipt(ctx, replyCtx, content)
+// checkSendQuota enforces the bot's separate-message budget so ilink's
+// sendmessage throttle (ret=-2 "prepare failed") is not triggered. Live testing
+// showed the gateway throttles a bot after roughly 5-6 separate messages per
+// long window (about a day; matches the 24h context TTL), regardless of pacing,
+// and that attempts made during the penalty escalate it. Multi-chunk sends do
+// not count (a chunked message is one logical message). This quota counts
+// logical messages in a sliding window and FAILS FAST once the budget is
+// exhausted — waiting for the window to slide (up to a day) is useless, and the
+// fail-fast philosophy (see sendChunk) applies: do not keep hammering a
+// throttled bot. Configure via burst_limit / burst_window_secs platform
+// options. A limit of 0 disables the quota.
+//
+// The quota is intentionally scoped to the PUSH path (proactive cron/timer and
+// outbound media). The REPLY path bypasses it entirely: the gateway does not
+// throttle replies on interactive deployments, and counting them against the
+// push budget silently bricked weixin bots at 4 replies per 24h after the
+// v1.5.0 default landed (issue #1742). File transfers count as push because
+// they hit the same outbound API. See sendPath values below.
+func (p *Platform) checkSendQuota(ctx context.Context, path sendPath) error {
+	if path == sendPathReply {
+		// Replies are never throttled by ilink in practice; applying the
+		// push-path budget to replies would block interactive conversations
+		// the moment the proactive-push budget is exhausted. The fixed-cost
+		// window-bucket logic is also wrong for replies: a user can easily
+		// exchange >4 messages in a day on a busy chat. Issue #1742.
+		return nil
+	}
+	if p.sendQuotaLimit <= 0 || p.sendQuotaWindow <= 0 {
+		return nil
+	}
+	p.sendQuotaMu.Lock()
+	now := time.Now()
+	cutoff := now.Add(-p.sendQuotaWindow)
+	kept := p.sendQuotaTimes[:0]
+	for _, t := range p.sendQuotaTimes {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	p.sendQuotaTimes = kept
+	if len(p.sendQuotaTimes) >= p.sendQuotaLimit {
+		p.sendQuotaMu.Unlock()
+		pushBudgetExceededCounter.Add(1)
+		slog.Error("weixin: push_path_budget_exceeded",
+			"path", string(path),
+			"used", len(p.sendQuotaTimes),
+			"limit", p.sendQuotaLimit,
+			"window", p.sendQuotaWindow.String(),
+			"hint", "ilink throttles the bot after roughly 5-6 pushes per window — reduce cron/timer pushes or re-login later",
+		)
+		return fmt.Errorf("weixin: push budget exhausted (%d push messages in the last %s); "+
+			"ilink throttles the bot after roughly 5-6 pushes per window — reduce messages or re-login later", p.sendQuotaLimit, p.sendQuotaWindow)
+	}
+	p.sendQuotaTimes = append(p.sendQuotaTimes, now)
+	p.sendQuotaMu.Unlock()
+	return nil
+}
+
+func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string, path sendPath) error {
+	_, err := p.sendChunksWithReceipt(ctx, replyCtx, content, path)
 	return err
 }
 
-func (p *Platform) sendChunksWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
+func (p *Platform) sendChunksWithReceipt(ctx context.Context, replyCtx any, content string, path sendPath) (*core.SendReceipt, error) {
 	rc, ok := replyCtx.(*replyContext)
 	if !ok || rc == nil {
 		return nil, fmt.Errorf("weixin: invalid reply context")
@@ -857,11 +1012,14 @@ func (p *Platform) sendChunksWithReceipt(ctx context.Context, replyCtx any, cont
 		return nil, nil
 	}
 	if strings.TrimSpace(rc.contextToken) == "" {
-		slog.Warn("weixin: context_token unavailable; attempting proactive send without context",
-			"peer", rc.peerUserID,
-			"proactive", rc.proactive,
-			"content_preview", truncatePreview(content, 100))
-	} else if !p.replyContextTokenFresh(rc) {
+		p.enqueuePendingReply(rc.peerUserID, content, "missing_context_token")
+		return nil, fmt.Errorf("weixin: missing context_token for peer %q - user must send a message to the bot first", rc.peerUserID)
+	}
+	if err := p.checkSendQuota(ctx, path); err != nil {
+		p.enqueuePendingReply(rc.peerUserID, content, "throttled")
+		return nil, err
+	}
+	if !p.replyContextTokenFresh(rc) {
 		slog.Warn("weixin: context_token is older than the conservative freshness window; attempting send before deferring",
 			"peer", rc.peerUserID,
 			"token_age", p.replyContextTokenAge(rc),
@@ -879,17 +1037,22 @@ func (p *Platform) sendChunksWithReceipt(ctx context.Context, replyCtx any, cont
 			case <-time.After(weixinChunkSendDelay):
 			}
 		}
-		// Retry sendText with context_token refresh on failure
 		clientID := "cc-" + randomHex(6)
-		err := p.sendChunkWithRetry(ctx, rc, chunk, clientID, i+1, total)
+		err := p.sendChunkWithID(ctx, rc, chunk, clientID)
 		if err != nil {
 			slog.Error("weixin: chunk send failed, message incomplete",
 				"peer", rc.peerUserID,
 				"failed_chunk", fmt.Sprintf("%d/%d", i+1, total),
 				"error", err)
 			reason := "send_failed"
-			if isStaleContextTokenError(err) {
-				reason = "stale_context_token"
+			if isSendThrottled(err) {
+				reason = "throttled"
+			} else {
+				// A throttle rejects the notice too and every attempt worsens the penalty.
+				notice := "⚠️ 消息发送不完整，请在终端查看完整结果。"
+				if nerr := p.api.sendText(ctx, rc.peerUserID, notice, rc.contextToken, "cc-"+randomHex(6)); nerr != nil {
+					slog.Warn("weixin: failed to send incomplete-delivery notice", "peer", rc.peerUserID, "error", nerr)
+				}
 			}
 			p.enqueuePendingReply(rc.peerUserID, content, reason)
 			return nil, fmt.Errorf("weixin: send chunk %d/%d: %w", i+1, total, err)
@@ -910,50 +1073,6 @@ func (p *Platform) sendChunksWithReceipt(ctx context.Context, replyCtx any, cont
 			"delivery_confidence": deliveryConfidence,
 		},
 	}, nil
-}
-
-// sendChunkWithRetry sends once with the current context. A stale-token
-// rejection gets one context-free fallback, matching Tencent's official
-// plugin. HTTP acceptance of that fallback is not a delivery receipt.
-// chunkIdx and totalChunks are 1-based indices used for logging context.
-func (p *Platform) sendChunkWithRetry(ctx context.Context, rc *replyContext, chunk, clientID string, chunkIdx, totalChunks int) error {
-	token := strings.TrimSpace(rc.contextToken)
-	err := p.api.sendText(ctx, rc.peerUserID, chunk, token, clientID)
-	if err == nil {
-		if token == "" {
-			rc.deliveryUnconfirmed = true
-		} else if count := p.markContextSendAccepted(rc.peerUserID, token); count >= 8 {
-			slog.Warn("weixin: reply allowance is near the observed per-context limit",
-				"peer", rc.peerUserID, "accepted_count", count)
-		}
-		return nil
-	}
-	if !isStaleContextTokenError(err) || token == "" {
-		return err
-	}
-
-	preview := []rune(chunk)
-	if len(preview) > 50 {
-		preview = preview[:50]
-	}
-	slog.Warn("weixin: sendMessage ret=-2; trying one context-free proactive fallback",
-		"peer", rc.peerUserID,
-		"chunk", fmt.Sprintf("%d/%d", chunkIdx, totalChunks),
-		"chunk_runes", utf8.RuneCountInString(chunk),
-		"token_age", p.replyContextTokenAge(rc),
-		"preview", string(preview))
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(weixinSendRetryDelay):
-	}
-	if fallbackErr := p.api.sendText(ctx, rc.peerUserID, chunk, "", clientID+"-noctx"); fallbackErr != nil {
-		return fallbackErr
-	}
-	rc.contextToken = ""
-	rc.contextTokenCapturedAt = time.Time{}
-	rc.deliveryUnconfirmed = true
-	return nil
 }
 
 func (p *Platform) refreshReplyContextToken(rc *replyContext) bool {
@@ -1001,10 +1120,6 @@ func (p *Platform) replyContextTokenAge(rc *replyContext) time.Duration {
 		return 0
 	}
 	return time.Since(rc.contextTokenCapturedAt).Round(time.Millisecond)
-}
-
-func isStaleContextTokenError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "ret=-2")
 }
 
 func (p *Platform) loadPendingRepliesLocked() map[string]pendingReplyEntry {
@@ -1109,6 +1224,17 @@ func (p *Platform) flushPendingReplies(ctx context.Context, force bool) {
 }
 
 func (p *Platform) shouldAttemptPendingFlush(entry pendingReplyEntry, contextToken string, force bool, now time.Time) bool {
+	if entry.Reason == "throttled" {
+		if queuedAt, err := time.Parse(time.RFC3339, entry.CreatedAt); err == nil {
+			window := p.sendQuotaWindow
+			if window <= 0 {
+				window = defaultBurstWindowSecs * time.Second
+			}
+			if now.Sub(queuedAt) < window {
+				return false
+			}
+		}
+	}
 	if force {
 		return true
 	}
@@ -1162,7 +1288,7 @@ func (p *Platform) flushPendingReply(ctx context.Context, peer, contextToken str
 	p.writePendingRepliesLocked(entries)
 	p.pendingMu.Unlock()
 
-	content := "上次回复因微信 context_token 过期未发出，自动补发：\n\n" + entry.Content
+	content := "上次未送达的回复，自动补发：\n\n" + entry.Content
 	chunks := splitUTF8(content, maxWeixinChunk)
 	clientIDPrefix := "cc-pending-" + randomHex(4)
 	for i, chunk := range chunks {
@@ -1177,6 +1303,9 @@ func (p *Platform) flushPendingReply(ctx context.Context, peer, contextToken str
 		err := p.api.sendText(sendCtx, peer, chunk, contextToken, fmt.Sprintf("%s-%d", clientIDPrefix, i+1))
 		cancel()
 		if err != nil {
+			if isSendThrottled(err) {
+				p.enqueuePendingReply(peer, entry.Content, "throttled")
+			}
 			slog.Warn("weixin: pending reply flush failed", "peer", peer, "chunk", i+1, "error", err)
 			return
 		}
@@ -1189,6 +1318,38 @@ func (p *Platform) flushPendingReply(ctx context.Context, peer, contextToken str
 	p.writePendingRepliesLocked(entries)
 	p.pendingMu.Unlock()
 	slog.Info("weixin: pending reply flushed", "peer", peer, "chunks", len(chunks))
+}
+
+// isSendThrottled reports whether err is ilink sendmessage's burst-throttle
+// response (ret=-2 "prepare failed"). This is a bot-wide rate-limit penalty, not a
+// context_token problem: the gateway accepts any (or no) context_token on sends.
+func isSendThrottled(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "ret=-2")
+}
+
+// sendChunk sends a single chunk. If ilink throttles the send (ret=-2
+// "prepare failed"), it fails fast instead of retrying: live testing showed the
+// penalty is escalated by every send attempt made while it is active, so retrying
+// (e.g. the old 3×500ms loop plus the extra notice send) only prolongs the outage.
+func (p *Platform) sendChunk(ctx context.Context, rc *replyContext, chunk string) error {
+	clientID := "cc-" + randomHex(6)
+	return p.sendChunkWithID(ctx, rc, chunk, clientID)
+}
+
+func (p *Platform) sendChunkWithID(ctx context.Context, rc *replyContext, chunk, clientID string) error {
+	err := p.api.sendText(ctx, rc.peerUserID, chunk, rc.contextToken, clientID)
+	if err == nil {
+		if count := p.markContextSendAccepted(rc.peerUserID, rc.contextToken); count >= 8 {
+			slog.Warn("weixin: reply allowance is near the observed per-context limit",
+				"peer", rc.peerUserID, "accepted_count", count)
+		}
+		return nil
+	}
+	if isSendThrottled(err) {
+		return fmt.Errorf("weixin: sendMessage throttled by ilink (ret=-2); "+
+			"the bot is rate-limited and sending during the penalty escalates it, retry the message later: %w", err)
+	}
+	return err
 }
 
 func truncatePreview(s string, max int) string {
