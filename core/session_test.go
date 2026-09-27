@@ -1276,3 +1276,31 @@ func TestSession_ForceUnlock(t *testing.T) {
 		t.Fatal("ForceUnlock on an unlocked session must be a no-op (false)")
 	}
 }
+
+func TestSessionManager_VisibleSessions(t *testing.T) {
+	t.Run("hidden by default", func(t *testing.T) {
+		sm := NewSessionManager("")
+		main := sm.GetOrCreateActive("user1")
+		background := sm.NewBackgroundSession("user1", "cron-job")
+
+		visible := sm.VisibleSessions()
+		if len(visible) != 1 || visible[0].ID != main.ID {
+			t.Fatalf("VisibleSessions = %#v, want only %s", visible, main.ID)
+		}
+		if visible[0].ID == background.ID {
+			t.Fatal("background session leaked into visible list")
+		}
+	})
+
+	t.Run("all visible when disabled", func(t *testing.T) {
+		sm := NewSessionManager("")
+		sm.SetHideBackgroundSessions(false)
+		main := sm.GetOrCreateActive("user1")
+		background := sm.NewBackgroundSession("user1", "cron-job")
+
+		visible := sm.VisibleSessions()
+		if len(visible) != 2 {
+			t.Fatalf("VisibleSessions = %#v, want %s and %s", visible, main.ID, background.ID)
+		}
+	})
+}

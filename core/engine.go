@@ -1057,6 +1057,26 @@ func (e *Engine) SetHideSchedulerSessions(v bool) {
 	if e.sessions != nil {
 		e.sessions.SetHideBackgroundSessions(v)
 	}
+	e.forEachWorkspaceSessionManager(func(sessions *SessionManager) {
+		sessions.SetHideBackgroundSessions(v)
+	})
+}
+
+func (e *Engine) forEachWorkspaceSessionManager(fn func(*SessionManager)) {
+	e.interactiveMu.Lock()
+	pool := e.workspacePool
+	e.interactiveMu.Unlock()
+	if pool == nil {
+		return
+	}
+	for _, state := range pool.All() {
+		state.mu.Lock()
+		sessions := state.sessions
+		state.mu.Unlock()
+		if sessions != nil {
+			fn(sessions)
+		}
+	}
 }
 
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
@@ -4288,6 +4308,7 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	}
 	sessions := NewSessionManager(sessionFile)
 	sessions.InvalidateForAgent(agent.Name())
+	sessions.SetHideBackgroundSessions(e.hideSchedulerSessions)
 
 	ws.agent = agent
 	ws.sessions = sessions

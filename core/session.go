@@ -643,6 +643,29 @@ func (sm *SessionManager) AllSessions() []*Session {
 	return out
 }
 
+// VisibleSessions returns non-background sessions when background hiding is
+// enabled, and all sessions when an operator explicitly disables the filter.
+func (sm *SessionManager) VisibleSessions() []*Session {
+	sm.mu.RLock()
+	hideBackground := sm.hideBackgroundSessions
+	sm.mu.RUnlock()
+	if !hideBackground {
+		return sm.AllSessions()
+	}
+
+	all := sm.AllSessions()
+	out := make([]*Session, 0, len(all))
+	for _, s := range all {
+		s.mu.Lock()
+		background := s.Background
+		s.mu.Unlock()
+		if !background {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // KnownAgentSessionIDs returns the set of agent session IDs tracked by cc-connect.
 // This is used to filter agent.ListSessions() output to only sessions owned by
 // cc-connect, excluding sessions created by external CLI usage in the same work_dir.
