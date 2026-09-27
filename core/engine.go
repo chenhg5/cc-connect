@@ -4878,17 +4878,44 @@ type cardToolEntry struct {
 // thinking panel instead of being appended to the answer body, so streaming
 // updates grow the foldable panels rather than re-flowing the answer text.
 // Other platforms keep receiving plain markdown via buildCardContent.
-// cardStepTextsContain reports whether the panel lane already holds text. The
-// lane is append-only by design: the streaming card appends only the entries it
-// has not shown yet, indexed by position, so an entry must never be removed or
-// re-ordered after it was rendered.
-func cardStepTextsContain(lane []string, text string) bool {
-	for _, item := range lane {
-		if item == text {
-			return true
+// mergeCardStepText collapses cumulative reasoning snapshots. Some agents emit
+// the whole reasoning buffer again after each token/step, so a later snapshot
+// can contain an earlier one rather than being byte-for-byte identical. Keep
+// the longest snapshot for that lane position; never keep the shorter prefix.
+func isCumulativeReasoning(previous, current string) bool {
+	previous = strings.TrimSpace(previous)
+	current = strings.TrimSpace(current)
+	if previous == "" || len(current) <= len(previous) {
+		return false
+	}
+	if strings.HasPrefix(current, previous) {
+		return true
+	}
+	// Models may revise the punctuation at the snapshot boundary while
+	// continuing the same sentence ("claims." -> "claims against...").
+	trimmed := strings.TrimRight(previous, ".,;:!?…。；：！？")
+	return len(trimmed) >= 20 && strings.HasPrefix(current, trimmed)
+}
+
+func mergeCardStepText(lane []string, text string) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return lane
+	}
+	for i, item := range lane {
+		old := strings.TrimSpace(item)
+		if old == text {
+			return lane
+		}
+		if isCumulativeReasoning(old, text) {
+			lane[i] = text
+			return lane
+		}
+		if strings.HasPrefix(old, text) {
+			return lane
 		}
 	}
-	return false
+	return append(lane, text)
 }
 
 func (e *Engine) streamingCardContentFor(streamCard StreamingCard, thinking string, stepTexts []string, tools []cardToolEntry, answer string, done bool) string {
@@ -5757,9 +5784,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// steps), not only the previous one: a /ps note inserted
 					// between two of them defeats an adjacency-only check, and the
 					// note plus the same block then repeat on the card.
-					if !cardStepTextsContain(cardStepTexts, cardThinkingText) {
-						cardStepTexts = append(cardStepTexts, cardThinkingText)
-					}
+					cardStepTexts = mergeCardStepText(cardStepTexts, cardThinkingText)
 					_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 					continue // skip original independent message sending
 				}
@@ -5987,7 +6012,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				handledByStreamCard := false
 				if streamCard != nil && !streamCard.Failed() {
 					textParts = append(textParts, content) // always accumulate for history
-					if !silentHold {
+					// Step text is intermediate "thinking": only fold it into
+					// the panel when thinking messages are enabled, mirroring
+					// the EventThinking branch above. Otherwise quiet mode
+					// still showed a 思考 (N) panel for every step. The answer
+					// is unaffected — it is accumulated in textParts and
+					// delivered once at Finalize.
+					if !silentHold && e.display.ThinkingMessages {
 						// Intermediate step text goes into the foldable
 						// thinking panel, NOT the answer body — otherwise every
 						// step re-flows the card text and the chat window keeps
@@ -6245,10 +6276,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = stripAgentFooterLines(fullResponse)
 			}
 			// When tool progress is hidden, segmentStart stays 0 and textParts
-			// contains ALL text across tool boundaries. Prefer the full accumulated
-			// text over event.Content which only contains the last assistant segment.
+			// contains ALL text across tool boundaries. Some agents stream their
+			// answer as EventText and report only the last segment in
+			// event.Content (#549), so the accumulated text is the real reply and
+			// must win. But an agent like opencode emits per-step narration (and
+			// tool-rejection notices) as EventText while delivering the answer
+			// solely via EventResult.Content: there event.Content is NOT the tail
+			// of the accumulation, and using the accumulation would replace the
+			// answer with narration. Prefer the accumulated text only when
+			// event.Content is empty or is merely the accumulation's suffix.
 			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
-				fullResponse = strings.Join(textParts, "")
+				accumulated := strings.Join(textParts, "")
+				if fullResponse == "" ||
+					strings.HasSuffix(strings.TrimRight(accumulated, "\n "), strings.TrimRight(fullResponse, "\n ")) {
+					fullResponse = accumulated
+				}
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}

@@ -245,3 +245,22 @@ func TestBuildStreamingCardPayload_DedupLatestThinking(t *testing.T) {
 		t.Errorf("panel items = %d, want 3 (latest thinking deduped)", len(payload.Items))
 	}
 }
+
+func TestBuildStreamingCardPayload_KeepsLongestCumulativeThinking(t *testing.T) {
+	steps := []string{
+		"💭 Let me read the full doc.",
+		"💭 Let me read the full doc. Now I need to verify the other AI's claims.",
+		"💭 Let me read the full doc. Now I need to verify the other AI's claims against the actual source code.",
+	}
+	payload, ok := ParseProgressCardPayload(BuildStreamingCardPayload("", steps, nil, "答复", "opencode", LangChinese, ProgressCardStateRunning))
+	if !ok {
+		t.Fatal("payload did not parse back")
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("thinking items = %d, want 1: %+v", len(payload.Items), payload.Items)
+	}
+	want := steps[len(steps)-1]
+	if payload.Items[0].Text != want {
+		t.Fatalf("thinking item = %q, want longest final snapshot %q", payload.Items[0].Text, want)
+	}
+}

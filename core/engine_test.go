@@ -16885,6 +16885,165 @@ func TestProcessInteractiveEvents_StreamingCard_AnswerInSeparateMessage(t *testi
 	}
 }
 
+// TestProcessInteractiveEvents_StreamingCard_QuietModeHidesStepText is a
+// regression test for a quiet-mode leak: the EventText branch folded every
+// intermediate step text into the foldable "thinking" panel without checking
+// display.ThinkingMessages, so a quiet project (thinking_messages=false) still
+// showed "思考 (N)" on the process card for each step. With thinking messages
+// disabled the step text must not reach the panel; nothing is left to render
+// (the empty payload finalizes as "" and the answer arrives as its own message).
+func TestProcessInteractiveEvents_StreamingCard_QuietModeHidesStepText(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	// ToolMessages stays on so the accumulated text is NOT promoted to the
+	// answer (engine.go prefers textParts only when tool progress is hidden);
+	// this isolates the panel behavior under test. ThinkingMessages off is the
+	// quiet-mode config whose 思考 (N) panel used to leak the step texts.
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: false, ToolMessages: true})
+	sessionKey := "slack:user-streamcard-quiet"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-streamcard-quiet")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-streamcard-quiet",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "step one reasoning"}
+	agentSession.events <- Event{Type: EventText, Content: "step two reasoning"}
+	agentSession.events <- Event{Type: EventResult, Content: "final answer text", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-streamcard-quiet", time.Now(), nil, nil, state.replyCtx, 0)
+
+	if !card.finalized() {
+		t.Fatalf("expected streaming card to be finalized")
+	}
+	if got := strings.TrimSpace(card.finalContent()); got != "" {
+		t.Fatalf("quiet-mode card must render nothing, got %q", got)
+	}
+	if joined := strings.Join(p.getSent(), "\n"); !strings.Contains(joined, "final answer text") {
+		t.Fatalf("answer missing from separate message; sent=%v", p.getSent())
+	}
+}
+
+// TestProcessInteractiveEvents_QuietMode_KeepsEventResultAnswer is the
+// regression test for the live dr-kefu leak: with tool progress hidden
+// (quiet mode / display.tool_messages=false) the finalization preferred the
+// accumulated EventText — opencode's per-step narration plus its
+// tool-rejection notices — over the real answer, which opencode delivers only
+// via EventResult.Content. The delivered reply therefore read like a garbled
+// stream of "tool X: ...prevents you from using this tool" lines instead of
+// the answer. The EventResult content must survive and the narration must not
+// leak into the final reply.
+func TestProcessInteractiveEvents_QuietMode_KeepsEventResultAnswer(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: false, ToolMessages: false})
+	sessionKey := "test:user-quiet-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-quiet-answer")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-quiet-answer",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "先查项目知识库和凭证索引。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "glob", ToolInput: "**/*bestel*"}
+	agentSession.events <- Event{Type: EventText, Content: "tool glob: The user has specified a rule which prevents you from using this specific tool call."}
+	agentSession.events <- Event{Type: EventResult, Content: "未找到名为 bestel 的账号，请确认渠道 ID 或环境。", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-quiet-answer", time.Now(), nil, nil, state.replyCtx, 0)
+
+	joined := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(joined, "未找到名为 bestel 的账号") {
+		t.Fatalf("final answer replaced by narration; sent=%v", p.getSent())
+	}
+	if strings.Contains(joined, "先查项目知识库") || strings.Contains(joined, "prevents you from using") {
+		t.Fatalf("intermediate narration leaked into the final reply; sent=%v", p.getSent())
+	}
+}
+
+// TestProcessInteractiveEvents_QuietMode_AccumulatedStreamAnswerWins guards the
+// #549 behaviour the suffix heuristic must preserve: an agent that streams its
+// answer as EventText segments reports only the last segment in
+// EventResult.Content, so the accumulated text — not just the tail — is the
+// reply.
+func TestProcessInteractiveEvents_QuietMode_AccumulatedStreamAnswerWins(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: false, ToolMessages: false})
+	sessionKey := "test:user-stream-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-stream-answer")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-stream-answer",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "第一部分。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+	agentSession.events <- Event{Type: EventText, Content: "第二部分。"}
+	agentSession.events <- Event{Type: EventResult, Content: "第二部分。", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-stream-answer", time.Now(), nil, nil, state.replyCtx, 0)
+
+	joined := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(joined, "第一部分。") || !strings.Contains(joined, "第二部分。") {
+		t.Fatalf("accumulated stream answer lost; sent=%v", p.getSent())
+	}
+}
+
+// TestProcessInteractiveEvents_StreamingCard_QuietModeDeliversEventResultAnswer
+// locks the live dr-kefu path (Feishu payload streaming card + tool_messages
+// off): the answer delivered in the separate message must be opencode's
+// EventResult content, never the accumulated per-step narration or the
+// tool-rejection notices opencode emits as EventText.
+func TestProcessInteractiveEvents_StreamingCard_QuietModeDeliversEventResultAnswer(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: false, ToolMessages: false})
+	sessionKey := "feishu:user-streamcard-quiet-answer"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-streamcard-quiet-answer")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-streamcard-quiet-answer",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "先查项目知识库和凭证索引。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "glob", ToolInput: "**/*bestel*"}
+	agentSession.events <- Event{Type: EventText, Content: "tool glob: The user has specified a rule which prevents you from using this specific tool call."}
+	agentSession.events <- Event{Type: EventResult, Content: "未找到名为 bestel 的账号。", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-streamcard-quiet-answer", time.Now(), nil, nil, state.replyCtx, 0)
+
+	if !card.finalized() {
+		t.Fatalf("expected streaming card to be finalized")
+	}
+	joined := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(joined, "未找到名为 bestel 的账号。") {
+		t.Fatalf("separate answer message missing the EventResult answer; sent=%v", p.getSent())
+	}
+	if strings.Contains(joined, "prevents you from using") || strings.Contains(joined, "先查项目知识库") {
+		t.Fatalf("narration leaked into the delivered reply; sent=%v", p.getSent())
+	}
+}
+
 // TestProcessInteractiveEvents_StreamingCard_AnswerNotEchoedIntoPanel is the
 // regression test for the claudecode-family bug: every agent adapter except
 // opencode emits the assistant text — which IS the final answer — as EventText,

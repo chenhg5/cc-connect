@@ -223,6 +223,31 @@ func TestStreamingCard_FinalizeWithoutUpdate(t *testing.T) {
 	}
 }
 
+// TestStreamingCard_FinalizeEmptyContentSendsNothing is a regression test for
+// the blank process card posted next to every quiet-mode reply: with nothing to
+// show, the engine finalizes with an empty payload (BuildStreamingCardPayload
+// returns "" for an empty turn), and Finalize used to lazily create the card
+// anyway — a collapsed empty card beside the answer.
+func TestStreamingCard_FinalizeEmptyContentSendsNothing(t *testing.T) {
+	p := &fakePlatformForStreamCard{useInteractive: true}
+	sc, err := p.CreateStreamingCard(context.Background(), replyContext{chatID: "chat_fake"})
+	if err != nil {
+		t.Fatalf("CreateStreamingCard: %v", err)
+	}
+	card := sc.(*feishuStreamingCard)
+
+	if err := card.Finalize(context.Background(), ""); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	send, _, _ := p.count()
+	if send != 0 {
+		t.Errorf("SendPreviewStart calls = %d, want 0 (no empty card)", send)
+	}
+	if card.Failed() {
+		t.Error("card should not be failed after an empty finalize")
+	}
+}
+
 // TestStreamingCard_UpdateAfterFinalizeIsNoop verifies updates after the card
 // is finalized are ignored (no extra API calls).
 func TestStreamingCard_UpdateAfterFinalizeIsNoop(t *testing.T) {
@@ -357,7 +382,7 @@ func TestStreamingCard_PayloadUpdateAppends(t *testing.T) {
 	card := sc.(*feishuStreamingCard)
 
 	payload1 := core.BuildStreamingCardPayload("思考一", nil, nil, "", "opencode", core.LangChinese, core.ProgressCardStateRunning)
-	payload2 := core.BuildStreamingCardPayload("思考二", []string{"思考三"}, nil, "", "opencode", core.LangChinese, core.ProgressCardStateRunning)
+	payload2 := core.BuildStreamingCardPayload("思考一", []string{"思考三"}, nil, "", "opencode", core.LangChinese, core.ProgressCardStateRunning)
 	_ = card.Update(context.Background(), payload1)
 	time.Sleep(feishuStreamingCardUpdateMinInterval + 200*time.Millisecond)
 	_ = card.Update(context.Background(), payload2) // appends the delta entries
