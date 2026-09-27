@@ -1747,7 +1747,7 @@ func (s *serverSession) dispatchToolPart(part map[string]any) {
 			return
 		}
 		slog.Info("opencode server session: tool rejected, surfacing error as text", "tool", toolName, "error", errMsg)
-		s.sendEvent(core.Event{Type: core.EventText, Content: errMsg})
+		s.sendEvent(core.Event{Type: core.EventText, Content: toolRejectionNotice(toolName, errMsg)})
 	}
 }
 

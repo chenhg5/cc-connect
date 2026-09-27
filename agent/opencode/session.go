@@ -361,7 +361,7 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 			errMsg, _ := state["error"].(string)
 			if errMsg != "" {
 				slog.Info("opencodeSession: tool rejected, surfacing error as text", "tool", toolName, "error", errMsg)
-				errEvt := core.Event{Type: core.EventText, Content: errMsg, SessionID: s.CurrentSessionID()}
+				errEvt := core.Event{Type: core.EventText, Content: toolRejectionNotice(toolName, errMsg), SessionID: s.CurrentSessionID()}
 				select {
 				case s.events <- errEvt:
 				case <-s.ctx.Done():
@@ -546,4 +546,25 @@ func truncate(s string, maxRunes int) string {
 		return s
 	}
 	return string([]rune(s)[:maxRunes]) + "..."
+}
+
+// toolRejectionNotice renders a bounded, user-facing notice for a rejected
+// tool call. opencode embeds its entire permission ruleset in the error
+// message (tens of KB); forwarding that verbatim flooded the chat with huge
+// split messages and polluted the model's context, so keep only the leading
+// explanation and cap the length. The full error is still logged by the
+// callers.
+func toolRejectionNotice(toolName, errMsg string) string {
+	const rulesMarker = " Here are"
+	if i := strings.Index(errMsg, rulesMarker); i > 0 {
+		errMsg = errMsg[:i]
+	}
+	errMsg = strings.TrimSpace(errMsg)
+	if errMsg == "" {
+		errMsg = "tool call rejected by the permission policy"
+	}
+	if toolName != "" {
+		errMsg = "tool " + toolName + ": " + errMsg
+	}
+	return truncate(errMsg, 300)
 }
