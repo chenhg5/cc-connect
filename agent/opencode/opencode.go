@@ -34,6 +34,7 @@ type Agent struct {
 	mode                 string
 	transport            string        // "run" (default) or "server" — see server_session.go
 	stallTimeout         time.Duration // server transport: silence before a turn is aborted (0 = default)
+	serverIdleTTL        time.Duration // server transport: how long a released server is kept (0 = default, negative = off)
 	cmd                  string        // CLI binary name, default "opencode"
 	cliExtraArgs         []string      // extra args from cmd after the binary name
 	configEnv            []string      // env vars from [projects.agent.options.env]
@@ -84,6 +85,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	serverIdleTTL, err := parseServerIdleTTL(opts["opencode_server_idle_ttl"])
+	if err != nil {
+		return nil, err
+	}
 	cmd, extraArgs := core.ParseCmdOpts(opts, "opencode")
 	agentName, _ := opts["agent"].(string) // --agent flag for plugin-defined agents (#1210)
 	ccDataDir, _ := opts["cc_data_dir"].(string)
@@ -104,6 +109,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		mode:                 mode,
 		transport:            transport,
 		stallTimeout:         stallTimeout,
+		serverIdleTTL:        serverIdleTTL,
 		cmd:                  cmd,
 		cliExtraArgs:         extraArgs,
 		configEnv:            core.ParseConfigEnv(opts),
@@ -541,6 +547,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			// per provider, not per workspace alone.
 			providerScope: a.providerScope(),
 			stallTimeout:  a.stallTimeout,
+			serverIdleTTL: a.serverIdleTTL,
 		}, model, mode, agentName, sessionID)
 	}
 
@@ -694,6 +701,27 @@ func parseStallTimeout(raw any) (time.Duration, error) {
 	d, err := time.ParseDuration(text)
 	if err != nil || d < 0 {
 		return 0, fmt.Errorf("opencode: invalid opencode_stall_timeout %q (use a duration such as \"10m\", or \"off\")", text)
+	}
+	return d, nil
+}
+
+// parseServerIdleTTL reads opencode_server_idle_ttl ("10m", "90s"; empty keeps
+// the default, "0"/"off" keeps a released server for the life of the daemon).
+// The value is per project because it trades memory for restart latency: an
+// idle server is a process held only to spare the next turn its startup cost.
+func parseServerIdleTTL(raw any) (time.Duration, error) {
+	text, _ := raw.(string)
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return 0, nil
+	}
+	switch text {
+	case "0", "off", "none", "disabled":
+		return opencodeServerIdleTTLDisabled, nil
+	}
+	d, err := time.ParseDuration(text)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("opencode: invalid opencode_server_idle_ttl %q (use a duration such as \"10m\", or \"off\")", text)
 	}
 	return d, nil
 }

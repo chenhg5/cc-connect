@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1453,6 +1454,70 @@ func TestServerKey_ScopedByProviderCredentials(t *testing.T) {
 	}
 }
 
+// The provider scope alone is not enough: `opencode serve` freezes its whole
+// environment at start, so a server shared beyond that environment leaks it.
+// Observed live: the dr-kefu project shares a workspace with my-project, so its
+// agent inherited the other project's CC_SESSION_KEY and `cc-connect send` (via
+// lark-cli in that turn) posted a file into an unrelated chat; the same session
+// also lost its own OPENCODE_CONFIG/OPENCODE_PERMISSION and fell back to
+// OpenCode's defaults, prompting the user for an external_directory approval the
+// project had already allowed. The injected environment is part of the key.
+func TestServerKey_ScopedByInjectedEnvironment(t *testing.T) {
+	base := opencodeServeConfig{
+		cmd:           "opencode",
+		workDir:       "/tmp/ws",
+		providerScope: "deepseek\x00sk-deepseek\x00https://api.deepseek.com/v1",
+	}
+
+	chatA := base
+	chatA.extraEnv = []string{
+		"CC_PROJECT=dr-kefu",
+		"CC_SESSION_KEY=feishu:oc_89b9:ou_72bd",
+		"OPENCODE_CONFIG=/usr/local/data/system/dr-kefu/opencode.json",
+	}
+	chatB := base
+	chatB.extraEnv = []string{
+		"CC_PROJECT=dr-kefu",
+		"CC_SESSION_KEY=feishu:oc_ab47:ou_72bd",
+		"OPENCODE_CONFIG=/usr/local/data/system/dr-kefu/opencode.json",
+	}
+	if serverKey(chatA) == serverKey(chatB) {
+		t.Fatal("chats with different session env must not share a server")
+	}
+
+	// Same session key, another project's config: a shared server would hand the
+	// second project the first one's OPENCODE_CONFIG/OPENCODE_PERMISSION.
+	otherProject := base
+	otherProject.extraEnv = []string{
+		"CC_PROJECT=my-project",
+		"CC_SESSION_KEY=feishu:oc_89b9:ou_72bd",
+		"OPENCODE_CONFIG=/usr/local/data/system/my-project/opencode.json",
+	}
+	if serverKey(otherProject) == serverKey(chatA) {
+		t.Fatal("projects with different config env must not share a server")
+	}
+
+	// The same environment in another order is still the same server, so a chat
+	// keeps reusing its own server across turns.
+	reordered := base
+	reordered.extraEnv = []string{
+		"OPENCODE_CONFIG=/usr/local/data/system/dr-kefu/opencode.json",
+		"CC_SESSION_KEY=feishu:oc_89b9:ou_72bd",
+		"CC_PROJECT=dr-kefu",
+	}
+	if serverKey(reordered) != serverKey(chatA) {
+		t.Fatal("env order must not change the server key")
+	}
+
+	// Same workspace, same provider, same env: still shared (that is the point of
+	// the server transport).
+	same := chatA
+	same.extraEnv = append([]string(nil), chatA.extraEnv...)
+	if serverKey(same) != serverKey(chatA) {
+		t.Fatal("an identical environment must keep one shared server")
+	}
+}
+
 // When we stop a stalled turn ourselves, OpenCode reports the abort back on the
 // stream (and the POST fails with MessageAbortedError). That echo must not reach
 // the chat: the user already got the notice explaining the stop. Observed live
@@ -1498,6 +1563,235 @@ done:
 	case evt := <-s.Events():
 		t.Fatalf("abort echo relayed after the turn: %+v", evt)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// serverRefs reports how many references a server currently has.
+func serverRefs(srv *opencodeServer) int {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	return srv.refs
+}
+
+// liveServerCount reports how many servers this process is tracking.
+func liveServerCount() int {
+	opencodeServersMu.Lock()
+	defer opencodeServersMu.Unlock()
+	return len(opencodeServers)
+}
+
+func waitForRefs(t *testing.T, srv *opencodeServer, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for serverRefs(srv) != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("server references = %d, want %d", serverRefs(srv), want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A turn holds a reference on its server and drops it when the turn is over, so
+// an idle conversation releases the process after the usual grace period
+// instead of pinning it for the lifetime of the chat. The next turn takes the
+// same server again — a fresh process only costs a restart, never the
+// conversation.
+func TestServerSession_TurnLeaseIsScopedToTheTurn(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	cfg := opencodeServeConfig{cmd: "opencode", workDir: "/tmp/ws"}
+	stub := f.srv()
+	s, err := newServerSessionOn(context.Background(), stub, cfg, "openai/gpt-5.6-sol", "yolo", "", "ses_stub")
+	if err != nil {
+		t.Fatalf("newServerSessionOn: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	if err := s.Send("first", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got := serverRefs(stub); got != 1 {
+		t.Fatalf("references while the turn runs = %d, want 1", got)
+	}
+
+	f.releaseTurn()
+	collectEvents(t, s.Events(), 1, 5*time.Second) // the result event ends the turn
+	waitForRefs(t, stub, 0)
+
+	if err := s.Send("second", "m2", nil, nil); err != nil {
+		t.Fatalf("second Send: %v", err)
+	}
+	if got := serverRefs(stub); got != 1 {
+		t.Fatalf("references during the second turn = %d, want 1", got)
+	}
+
+	f.releaseTurn()
+	collectEvents(t, s.Events(), 1, 5*time.Second)
+	waitForRefs(t, stub, 0)
+
+	if create, _, _ := f.counts(); create != 0 {
+		t.Fatalf("resumed conversation created %d sessions, want 0", create)
+	}
+}
+
+// A turn that is closed while it runs (the engine's /stop, the idle reaper)
+// gives its reference back rather than leaking it.
+func TestServerSession_CloseDropsTheTurnLease(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	cfg := opencodeServeConfig{cmd: "opencode", workDir: "/tmp/ws"}
+	stub := f.srv()
+	s, err := newServerSessionOn(context.Background(), stub, cfg, "openai/gpt-5.6-sol", "yolo", "", "ses_stub")
+	if err != nil {
+		t.Fatalf("newServerSessionOn: %v", err)
+	}
+	waitForSubscriber(t, f)
+
+	if err := s.Send("long task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	waitForRefs(t, stub, 0)
+}
+
+// An idle conversation must not start a server on its own: the event-stream
+// reader waits for a turn to attach one instead of resurrecting a reaped process
+// (and, on a machine without the CLI, instead of trying to exec it).
+func TestServerSession_EventStreamDoesNotStartAServer(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	cfg := opencodeServeConfig{cmd: "opencode", workDir: "/tmp/ws"}
+	s, err := newServerSessionOn(context.Background(), nil, cfg, "openai/gpt-5.6-sol", "yolo", "", "ses_stub")
+	if err != nil {
+		t.Fatalf("newServerSessionOn: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	time.Sleep(200 * time.Millisecond)
+	if n := liveServerCount(); n != 0 {
+		t.Fatalf("idle conversation started %d servers, want 0", n)
+	}
+	if _, err := s.streamEvents(context.Background()); !errors.Is(err, errNoLiveServer) {
+		t.Fatalf("streamEvents on an idle conversation = %v, want errNoLiveServer", err)
+	}
+	select {
+	case evt := <-s.Events():
+		t.Fatalf("idle conversation emitted %+v, want silence", evt)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	// A turn attaching a server wakes the reader, which then waits for the stream
+	// before the prompt goes out.
+	s.srvMu.Lock()
+	s.srv = f.srv()
+	s.srvMu.Unlock()
+	s.signalTurn()
+	s.waitStreamReady(context.Background(), 2*time.Second)
+	waitForSubscriber(t, f)
+}
+
+// A server whose idle reap already fired must not be handed to a turn: the reap
+// owns the process and is stopping it. That state is only observable through the
+// timer, because a fired callback that has not run yet leaves stopped/exited
+// unset — the retained turn would then talk to a process on its way out.
+func TestRetainServerRefusesAReapThatAlreadyFired(t *testing.T) {
+	srv := &opencodeServer{key: "fired-reap"}
+	opencodeServersMu.Lock()
+	opencodeServers["fired-reap"] = srv
+	opencodeServersMu.Unlock()
+
+	fired := make(chan struct{})
+	srv.mu.Lock()
+	srv.idleTimer = time.AfterFunc(time.Nanosecond, func() { close(fired) })
+	srv.mu.Unlock()
+	<-fired
+
+	if got, err := retainServer("fired-reap", srv); !errors.Is(err, errServerGone) {
+		t.Fatalf("retainServer on a fired reap = (%v, %v), want errServerGone", got, err)
+	}
+	if n := serverRefs(srv); n != 0 {
+		t.Fatalf("references after the refused retain = %d, want 0", n)
+	}
+	opencodeServersMu.Lock()
+	_, present := opencodeServers["fired-reap"]
+	opencodeServersMu.Unlock()
+	if present {
+		t.Fatal("a server whose reap fired must be dropped from the map")
+	}
+}
+
+// The idle TTL is configurable per project too: it trades memory (a warm
+// process per recently used workspace) for restart latency.
+func TestParseServerIdleTTL(t *testing.T) {
+	cases := []struct {
+		raw  any
+		want time.Duration
+		bad  bool
+	}{
+		{raw: "", want: 0},
+		{raw: "10m", want: 10 * time.Minute},
+		{raw: "90s", want: 90 * time.Second},
+		{raw: "OFF", want: opencodeServerIdleTTLDisabled},
+		{raw: "0", want: opencodeServerIdleTTLDisabled},
+		{raw: "nonsense", bad: true},
+		{raw: "-5m", bad: true},
+	}
+	for _, c := range cases {
+		got, err := parseServerIdleTTL(c.raw)
+		if c.bad {
+			if err == nil {
+				t.Errorf("parseServerIdleTTL(%v) = %v, want an error", c.raw, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseServerIdleTTL(%v): %v", c.raw, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("parseServerIdleTTL(%v) = %v, want %v", c.raw, got, c.want)
+		}
+	}
+
+	if serverIdleTTLOrDefault(0) != opencodeServerDefaultIdleTTL {
+		t.Error("an unset TTL must fall back to the default")
+	}
+	if serverIdleTTLOrDefault(3*time.Minute) != 3*time.Minute {
+		t.Error("a configured TTL must be used")
+	}
+	if serverIdleTTLOrDefault(opencodeServerIdleTTLDisabled) != opencodeServerIdleTTLDisabled {
+		t.Error("turning recycling off must survive the default")
+	}
+}
+
+// Releasing a server arms a reap for the project's TTL; a project that turned
+// recycling off keeps the process instead of arming one.
+func TestReleaseOpencodeServerHonoursTheConfiguredTTL(t *testing.T) {
+	off := &opencodeServer{key: "no-reap", refs: 1, idleTTL: opencodeServerIdleTTLDisabled}
+	releaseOpencodeServer(off)
+	off.mu.Lock()
+	timer := off.idleTimer
+	off.mu.Unlock()
+	if timer != nil {
+		t.Fatal("recycling off must not arm an idle reap")
+	}
+
+	short := &opencodeServer{key: "short-reap", refs: 1, idleTTL: 30 * time.Millisecond}
+	releaseOpencodeServer(short)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		short.mu.Lock()
+		stopped := short.stopped
+		short.mu.Unlock()
+		if stopped {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the configured TTL did not reap the released server")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,8 +55,17 @@ const (
 
 	opencodeServerStartTimeout = 30 * time.Second
 	opencodeServerRetryDelay   = time.Second
-	opencodeServerIdleTTL      = 60 * time.Second
-	opencodeServerStopTimeout  = 5 * time.Second
+	// opencodeServerDefaultIdleTTL is how long a released server is kept for a
+	// follow-up turn before its process is stopped. opencode_server_idle_ttl
+	// overrides it per project.
+	opencodeServerDefaultIdleTTL = 10 * time.Minute
+	// opencodeServerIdleTTLDisabled marks a project that turned idle recycling
+	// off: released servers then live until the daemon stops or replaces them.
+	opencodeServerIdleTTLDisabled = time.Duration(-1)
+	opencodeServerStopTimeout     = 5 * time.Second
+	// streamReadyTimeout bounds how long a turn waits for the event stream before
+	// posting its prompt.
+	streamReadyTimeout = 3 * time.Second
 	// opencodeServerLogTail bounds how much server output we keep for error
 	// messages (a page of text is plenty for start failures).
 	opencodeServerLogTail = 8 * 1024
@@ -67,7 +77,12 @@ type opencodeServeConfig struct {
 	cmd       string
 	extraArgs []string
 	workDir   string
-	extraEnv  []string
+	// extraEnv is merged into the server process environment when it starts and
+	// is frozen from then on (project config, provider credentials, per-session
+	// CC_PROJECT/CC_SESSION_KEY/CC_DATA_DIR). It is part of serverKey, so a
+	// server is only ever shared by sessions that injected the same
+	// environment — see serverKey.
+	extraEnv []string
 	// providerScope identifies the credentials this server was started with (the
 	// active provider's name and key). OpenCode resolves the config's
 	// {env:ANTHROPIC_API_KEY} placeholder once, when the process starts, so a
@@ -78,6 +93,12 @@ type opencodeServeConfig struct {
 	// it (0 = use the default). Not part of serverKey: it does not affect the
 	// server process itself.
 	stallTimeout time.Duration
+	// serverIdleTTL is how long a released server is kept for a follow-up turn
+	// before its process is stopped (0 = use the default; negative = keep it for
+	// the life of the daemon). Not part of serverKey: it does not affect the
+	// process itself, only when it is reaped, so a shared server uses the value
+	// of the project that started it.
+	serverIdleTTL time.Duration
 }
 
 // opencodeServer is a ref-counted `opencode serve` process for one
@@ -90,6 +111,7 @@ type opencodeServer struct {
 	mu        sync.Mutex
 	cmd       *exec.Cmd
 	refs      int
+	idleTTL   time.Duration // <=0 keeps a released server forever
 	idleTimer *time.Timer
 	stopped   bool
 	logTail   *tailBuffer
@@ -143,18 +165,36 @@ func liveServer(key string) *opencodeServer {
 	return srv
 }
 
-// serverKey identifies a server by the binary, its extra args and the
-// workspace directory it serves.
-// serverKey identifies a server instance. The provider scope is part of it
-// because the credentials reach OpenCode through the process environment: one
-// server per workspace is not enough when a workspace hosts chats on different
-// providers, or the second provider inherits the first one's key (observed live
-// as "APIError: Invalid token" for a chat on aiapi whose workspace server had
-// been started for deepseek).
+// serverKey identifies a server instance by the binary, its extra args, the
+// workspace directory it serves and the environment it was started with.
+//
+// The provider scope is part of the key because the credentials reach OpenCode
+// through the process environment: one server per workspace is not enough when
+// a workspace hosts chats on different providers, or the second provider
+// inherits the first one's key (observed live as "APIError: Invalid token" for
+// a chat on aiapi whose workspace server had been started for deepseek).
+//
+// The injected environment is part of the key for the same reason one level up:
+// `opencode serve` freezes its environment when it starts, so any server shared
+// beyond the environment it was started with hands the newcomer whatever the
+// first one injected. That covers project config (OPENCODE_CONFIG,
+// OPENCODE_PERMISSION), provider credentials, and the per-session
+// CC_PROJECT/CC_SESSION_KEY/CC_DATA_DIR that `cc-connect send`, `cron` and the
+// relay rely on. Sessions with an identical environment still share one server;
+// anything else gets its own.
 func serverKey(cfg opencodeServeConfig) string {
-	sum := sha256.Sum256([]byte(cfg.providerScope))
+	provSum := sha256.Sum256([]byte(cfg.providerScope))
+	envSum := sha256.Sum256([]byte(strings.Join(sortedEnv(cfg.extraEnv), "\x00")))
 	return cfg.cmd + "\x00" + strings.Join(cfg.extraArgs, "\x00") + "\x00" + cfg.workDir +
-		"\x00" + hex.EncodeToString(sum[:8])
+		"\x00" + hex.EncodeToString(provSum[:8]) + "\x00" + hex.EncodeToString(envSum[:8])
+}
+
+// sortedEnv copies env sorted by entry, so the server key does not depend on the
+// order the agent happened to assemble the slice in.
+func sortedEnv(env []string) []string {
+	out := append([]string(nil), env...)
+	sort.Strings(out)
+	return out
 }
 
 // acquireOpencodeServer returns a running server for cfg, starting one when
@@ -225,27 +265,49 @@ func retainServer(key string, srv *opencodeServer) (*opencodeServer, error) {
 	defer srv.mu.Unlock()
 	if srv.stopped || srv.exited.Load() {
 		// Died between the liveness check and here: forget it and start over.
-		opencodeServersMu.Lock()
-		if cur, ok := opencodeServers[key]; ok && cur == srv {
-			delete(opencodeServers, key)
-		}
-		opencodeServersMu.Unlock()
+		forgetServer(key, srv)
 		return nil, errServerGone
 	}
-	srv.refs++
 	if srv.idleTimer != nil {
-		srv.idleTimer.Stop()
+		if !srv.idleTimer.Stop() {
+			// The idle reap already fired. Its callback takes the server out of
+			// the map and stops the process, so this is not a server we can hand
+			// a turn to but a dying one: starting a fresh process is cheaper than
+			// failing the turn against a process that is going away. The timer is
+			// the only way to observe this — a fired timer whose callback is
+			// still queued leaves stopped/exited unset.
+			forgetServer(key, srv)
+			return nil, errServerGone
+		}
 		srv.idleTimer = nil
 	}
+	srv.refs++
 	return srv, nil
+}
+
+// forgetServer drops srv from the shared map if it is still the entry for key.
+func forgetServer(key string, srv *opencodeServer) {
+	opencodeServersMu.Lock()
+	if cur, ok := opencodeServers[key]; ok && cur == srv {
+		delete(opencodeServers, key)
+	}
+	opencodeServersMu.Unlock()
 }
 
 // errServerGone signals that a server exited while being acquired.
 var errServerGone = errors.New("opencode server: process exited during acquire")
 
-// releaseOpencodeServer drops a reference; the process is kept alive for a
-// short grace period so a follow-up turn in the same workspace does not pay the
-// startup cost again, then stopped.
+// errNoLiveServer signals that this conversation currently has no server
+// attached. Idle conversations are reaped (references are held per turn, not per
+// session), so the event-stream reader must wait for the next turn instead of
+// starting a process of its own.
+var errNoLiveServer = errors.New("opencode server: no live server attached")
+
+// releaseOpencodeServer drops a reference; the process is kept alive for the
+// configured idle TTL so a follow-up turn in the same workspace does not pay
+// the startup cost again, then stopped. A project can turn the recycling off
+// (idleTTL <= 0), in which case a released server lives until the daemon stops
+// or replaces it.
 func releaseOpencodeServer(srv *opencodeServer) {
 	if srv == nil {
 		return
@@ -255,11 +317,11 @@ func releaseOpencodeServer(srv *opencodeServer) {
 		srv.refs--
 	}
 	remaining := srv.refs
-	if remaining == 0 && !srv.stopped {
+	if remaining == 0 && !srv.stopped && srv.idleTTL > 0 {
 		if srv.idleTimer != nil {
 			srv.idleTimer.Stop()
 		}
-		srv.idleTimer = time.AfterFunc(opencodeServerIdleTTL, func() {
+		srv.idleTimer = time.AfterFunc(srv.idleTTL, func() {
 			opencodeServersMu.Lock()
 			if cur, ok := opencodeServers[srv.key]; ok && cur == srv {
 				delete(opencodeServers, srv.key)
@@ -368,6 +430,7 @@ func startOpencodeServer(ctx context.Context, cfg opencodeServeConfig) (*opencod
 		password: password,
 		key:      serverKey(cfg),
 		cmd:      cmd,
+		idleTTL:  serverIdleTTLOrDefault(cfg.serverIdleTTL),
 		logTail:  tail,
 		waitDone: make(chan struct{}),
 	}
@@ -696,6 +759,16 @@ func stallTimeoutOrDefault(configured time.Duration) time.Duration {
 	return configured
 }
 
+// serverIdleTTLOrDefault keeps the default idle TTL unless the project
+// configured one (opencode_server_idle_ttl). A negative value is the project
+// turning recycling off, and is passed through.
+func serverIdleTTLOrDefault(configured time.Duration) time.Duration {
+	if configured == 0 {
+		return opencodeServerDefaultIdleTTL
+	}
+	return configured
+}
+
 // serverStallNotice is what the user sees when a silent turn is aborted. It
 // mirrors the run transport's stall notice; kept local so this transport does
 // not depend on the run transport's watchdog.
@@ -723,6 +796,22 @@ type serverSession struct {
 
 	srvMu sync.Mutex
 	srv   *opencodeServer
+
+	// turnWake is signalled when a turn attaches (or replaces) the server, so a
+	// reader waiting out an idle reap notices that there is something to attach
+	// to again.
+	turnWake chan struct{}
+	// leaseMu guards turnRelease: the reference this session holds for the turn
+	// that is currently running. It is dropped once, either by the turn itself or
+	// by Close.
+	leaseMu     sync.Mutex
+	turnRelease func()
+
+	// streamMu guards streamOpen/streamReady. A turn waits for the stream before
+	// posting its prompt so the first events of the turn cannot be missed.
+	streamMu    sync.Mutex
+	streamOpen  bool
+	streamReady chan struct{}
 
 	workDir   string
 	model     string
@@ -773,23 +862,17 @@ type serverSession struct {
 	eventsClosed bool
 }
 
-// newServerSession starts (or reuses) an `opencode serve` instance for the
-// workspace and attaches a session to it.
+// newServerSession builds a session for the workspace. The server process is
+// started by the first turn (see acquireTurnServer): a conversation that never
+// runs a prompt must not keep an `opencode serve` process alive, and a
+// conversation that goes idle releases its process again.
 func newServerSession(ctx context.Context, serveCfg opencodeServeConfig, model, mode, agentName, resumeID string) (*serverSession, error) {
-	srv, err := acquireOpencodeServer(ctx, serveCfg)
-	if err != nil {
-		return nil, err
-	}
-	s, err := newServerSessionOn(ctx, srv, serveCfg, model, mode, agentName, resumeID)
-	if err != nil {
-		releaseOpencodeServer(srv)
-		return nil, err
-	}
-	return s, nil
+	return newServerSessionOn(ctx, nil, serveCfg, model, mode, agentName, resumeID)
 }
 
-// newServerSessionOn attaches to an already running server. Split out from
-// newServerSession so tests can drive the session against a stub server.
+// newServerSessionOn builds a session around srv, which may be nil: the first
+// turn then attaches one. Split out from newServerSession so tests can drive the
+// session against a stub server.
 func newServerSessionOn(ctx context.Context, srv *opencodeServer, serveCfg opencodeServeConfig, model, mode, agentName, resumeID string) (*serverSession, error) {
 	inner, err := newOpencodeSession(ctx, serveCfg.cmd, serveCfg.extraArgs, serveCfg.workDir, model, mode, agentName, resumeID, serveCfg.extraEnv)
 	if err != nil {
@@ -811,6 +894,7 @@ func newServerSessionOn(ctx context.Context, srv *opencodeServer, serveCfg openc
 		emittedTools:  map[string]struct{}{},
 		sseCancel:     cancel,
 		stallTimeout:  stallTimeoutOrDefault(serveCfg.stallTimeout),
+		turnWake:      make(chan struct{}, 1),
 	}
 
 	s.wg.Add(1)
@@ -842,11 +926,24 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 		})
 	}
 
-	srv, err := s.ensureServer(s.inner.ctx)
+	srv, releaseTurn, err := s.acquireTurnServer(s.inner.ctx)
 	if err != nil {
 		s.emitError(err)
 		return err
 	}
+	// The reference lasts for this turn. Ownership moves to the request goroutine
+	// below; every early return here has to drop it.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			releaseTurn()
+		}
+	}()
+	// Let the event-stream reader attach to the server this turn just started, and
+	// wait for it so the prompt's first events (a permission request in
+	// particular) are not emitted before anyone is listening.
+	s.signalTurn()
+	s.waitStreamReady(s.inner.ctx, streamReadyTimeout)
 
 	sessionID, created, err := s.ensureSession()
 	if err != nil {
@@ -882,7 +979,12 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 	defer s.sendMu.Unlock()
 
 	done := make(chan error, 1)
+	handedOff = true
 	go func() {
+		// The turn owns the server reference until the request returns, which is
+		// when the server-side turn is over. Releasing it here (rather than at
+		// session close) is what keeps an idle conversation from holding a process.
+		defer releaseTurn()
 		// The request blocks until the turn completes (the server answers with
 		// the final assistant message). Events arrive over the SSE stream in
 		// parallel; a supplement posted mid-turn additionally extends the turn
@@ -949,31 +1051,136 @@ func (s *serverSession) server() *opencodeServer {
 	return s.srv
 }
 
-// ensureServer returns a live server, replacing one whose process has exited.
-// OpenCode keeps session state in its own store, so a fresh server resumes the
-// same conversation — a crashed server therefore costs one restart, not the
-// conversation.
-func (s *serverSession) ensureServer(ctx context.Context) (*opencodeServer, error) {
-	if cur := s.server(); cur != nil && !cur.isExited() {
-		return cur, nil
+// liveServer returns the server this session is attached to, or nil when there
+// is none or its process has exited. It holds no reference, so it is only good
+// for work that can fail and retry (abort, permission replies, the event stream)
+// — a reference for a turn comes from acquireTurnServer.
+func (s *serverSession) liveServer() *opencodeServer {
+	srv := s.server()
+	if srv == nil || srv.isExited() {
+		return nil
 	}
+	return srv
+}
 
+// acquireTurnServer returns a live server for the turn that is starting and
+// holds a reference on it until the returned release function runs (or Close
+// runs it, whichever comes first).
+//
+// The reference lasts for the turn rather than for the session: an idle
+// conversation must not keep an `opencode serve` process alive, and a reaped
+// process costs one restart for the next turn (OpenCode keeps the conversation
+// in its own store, so a fresh server resumes it). OpenCode resolves the
+// process environment once, at startup, which is why sessions with different
+// environments never share a server (see serverKey).
+func (s *serverSession) acquireTurnServer(ctx context.Context) (*opencodeServer, func(), error) {
 	s.srvMu.Lock()
 	defer s.srvMu.Unlock()
+
 	if s.srv != nil && !s.srv.isExited() {
-		return s.srv, nil
+		if retained, err := retainServer(s.srv.key, s.srv); err == nil {
+			return retained, s.leaseTurn(retained), nil
+		}
 	}
+
 	stale := s.srv
 	fresh, err := acquireOpencodeServer(ctx, s.serveCfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	s.srv = fresh
 	if stale != nil {
 		releaseOpencodeServer(stale)
 	}
-	slog.Info("opencode server session: reattached to a fresh server", "url", fresh.baseURL, "dir", s.serveCfg.workDir)
-	return fresh, nil
+	slog.Info("opencode server session: attached to a server", "url", fresh.baseURL, "dir", s.serveCfg.workDir)
+	return fresh, s.leaseTurn(fresh), nil
+}
+
+// leaseTurn records one turn's reference on srv and returns the function that
+// drops it exactly once, however many times it is called.
+func (s *serverSession) leaseTurn(srv *opencodeServer) func() {
+	var once sync.Once
+	release := func() { once.Do(func() { releaseOpencodeServer(srv) }) }
+	s.leaseMu.Lock()
+	s.turnRelease = release
+	s.leaseMu.Unlock()
+	return release
+}
+
+// releaseCurrentTurn drops the reference of the turn that is running, if any.
+// Close uses it to make sure a turn that is still in flight does not outlive the
+// session's own teardown.
+func (s *serverSession) releaseCurrentTurn() {
+	s.leaseMu.Lock()
+	release := s.turnRelease
+	s.turnRelease = nil
+	s.leaseMu.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
+// signalTurn wakes the event-stream reader after a turn attached (or replaced)
+// the server.
+func (s *serverSession) signalTurn() {
+	select {
+	case s.turnWake <- struct{}{}:
+	default:
+	}
+}
+
+// waitForTurn blocks until a turn starts (or the session is closing). Idle
+// conversations stay here without polling and without starting a server.
+func (s *serverSession) waitForTurn(ctx context.Context) {
+	select {
+	case <-s.turnWake:
+	case <-ctx.Done():
+	}
+}
+
+// markStreamOpen records that the event stream is attached, releasing any turn
+// that is waiting for it.
+func (s *serverSession) markStreamOpen() {
+	s.streamMu.Lock()
+	s.streamOpen = true
+	if s.streamReady != nil {
+		close(s.streamReady)
+		s.streamReady = nil
+	}
+	s.streamMu.Unlock()
+}
+
+// markStreamClosed records that the event stream is no longer attached.
+func (s *serverSession) markStreamClosed() {
+	s.streamMu.Lock()
+	s.streamOpen = false
+	s.streamMu.Unlock()
+}
+
+// waitStreamReady waits until the event stream is attached, so a turn does not
+// post its prompt before anything is listening. It gives up after d: an
+// unreadable stream is reported by the reader itself, and blocking the turn on
+// it would be worse than starting it late.
+func (s *serverSession) waitStreamReady(ctx context.Context, d time.Duration) {
+	s.streamMu.Lock()
+	if s.streamOpen {
+		s.streamMu.Unlock()
+		return
+	}
+	if s.streamReady == nil {
+		s.streamReady = make(chan struct{})
+	}
+	ready := s.streamReady
+	s.streamMu.Unlock()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ready:
+	case <-timer.C:
+		slog.Warn("opencode server session: event stream not ready, starting the turn anyway")
+	case <-ctx.Done():
+	}
 }
 
 // flushFinalAnswer delivers the text the inner session buffered for the final
@@ -1069,7 +1276,13 @@ func (s *serverSession) ensureSession() (string, bool, error) {
 		s.applyYoloPermissionsLocked()
 		return s.sessionID, false, nil
 	}
-	id, err := s.srv.createSession(s.inner.ctx, s.workDir, s.agentName, s.mode)
+	srv := s.liveServer()
+	if srv == nil {
+		// Only reachable when the turn's server died between acquiring it and
+		// creating the conversation; the next turn starts a fresh one.
+		return "", false, errNoLiveServer
+	}
+	id, err := srv.createSession(s.inner.ctx, s.workDir, s.agentName, s.mode)
 	if err != nil {
 		return "", false, err
 	}
@@ -1092,7 +1305,12 @@ func (s *serverSession) applyYoloPermissionsLocked() {
 	// One attempt per attached conversation: a failure must not add a request
 	// to every turn. The permission.asked safety net below still covers it.
 	s.permsApplied = true
-	if err := s.srv.updateSessionPermissions(s.inner.ctx, s.sessionID, s.workDir, yoloPermissionRuleset()); err != nil {
+	srv := s.liveServer()
+	if srv == nil {
+		s.permsApplied = false
+		return
+	}
+	if err := srv.updateSessionPermissions(s.inner.ctx, s.sessionID, s.workDir, yoloPermissionRuleset()); err != nil {
 		slog.Warn("opencode server session: could not apply the yolo permission ruleset; "+
 			"a tool call that needs approval may wait for one nobody can give",
 			"session", s.sessionID, "error", err)
@@ -1143,9 +1361,13 @@ func (s *serverSession) drainEvents() {
 
 // readEventStream consumes the server's SSE stream and forwards the parts that
 // belong to this session. It reconnects for the lifetime of the session: a
-// server that exits mid-turn is replaced (see ensureServer) and the stream is
-// re-opened against the replacement, so a crash costs a restart rather than the
-// conversation.
+// server that exits while a turn is running is replaced (see acquireTurnServer)
+// and the stream is re-opened against the replacement, so a crash costs a
+// restart rather than the conversation.
+//
+// Its own lifecycle is deliberately passive: it never starts a server. While the
+// conversation is idle (the process was reaped after the last turn) it waits for
+// the next turn to attach one instead of keeping a process alive just to listen.
 func (s *serverSession) readEventStream(ctx context.Context) {
 	defer s.wg.Done()
 
@@ -1159,6 +1381,10 @@ func (s *serverSession) readEventStream(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			if errors.Is(err, errNoLiveServer) {
+				s.waitForTurn(ctx)
+				continue
+			}
 			s.reportStreamFailure(err)
 			select {
 			case <-time.After(opencodeServerRetryDelay):
@@ -1171,6 +1397,7 @@ func (s *serverSession) readEventStream(ctx context.Context) {
 		// connection was opened is unknown to us; rebuild the role map from the
 		// session's messages.
 		s.resyncMessageRoles(ctx)
+		s.markStreamOpen()
 
 		scanner := bufio.NewScanner(body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -1191,6 +1418,7 @@ func (s *serverSession) readEventStream(ctx context.Context) {
 			}
 		}
 		_ = body.Close()
+		s.markStreamClosed()
 
 		if ctx.Err() != nil {
 			return
@@ -1210,11 +1438,15 @@ func (s *serverSession) readEventStream(ctx context.Context) {
 	}
 }
 
-// streamEvents opens the event stream against the current server, re-acquiring
-// one when the previous process exited.
+// streamEvents opens the event stream against the server this session is already
+// attached to. It never starts one: doing so would resurrect the process of an
+// idle conversation that was just reaped.
 func (s *serverSession) streamEvents(ctx context.Context) (io.ReadCloser, error) {
-	srv, err := s.ensureServer(ctx)
-	if err != nil {
+	srv := s.liveServer()
+	if srv == nil {
+		return nil, errNoLiveServer
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return srv.events(ctx)
@@ -1325,7 +1557,15 @@ func (s *serverSession) handlePermissionAsked(props map[string]any) {
 	patterns := stringList(props["patterns"])
 
 	if s.mode == "yolo" {
-		if err := s.srv.replyPermission(s.inner.ctx, requestID, "always"); err != nil {
+		srv := s.liveServer()
+		if srv == nil {
+			// The request came from a process that is already gone (an idle reap
+			// between the ask and this event): it cannot be answered any more.
+			slog.Warn("opencode server session: auto-approve skipped, no live server",
+				"request", requestID, "permission", permission)
+			return
+		}
+		if err := srv.replyPermission(s.inner.ctx, requestID, "always"); err != nil {
 			slog.Error("opencode server session: auto-approve failed; the turn will wait for an approval",
 				"request", requestID, "permission", permission, "patterns", patterns, "error", err)
 			return
@@ -1635,7 +1875,13 @@ func (s *serverSession) RespondPermission(requestID string, result core.Permissi
 	if result.Behavior == "allow" {
 		reply = "once"
 	}
-	if err := s.srv.replyPermission(s.inner.ctx, requestID, reply); err != nil {
+	srv := s.liveServer()
+	if srv == nil {
+		// The turn that asked is over (and its process reaped): the request can no
+		// longer be answered, and the model has already been told the turn ended.
+		return fmt.Errorf("opencode server session: no live server to answer permission %s", requestID)
+	}
+	if err := srv.replyPermission(s.inner.ctx, requestID, reply); err != nil {
 		return fmt.Errorf("opencode server session: reply to permission %s: %w", requestID, err)
 	}
 	return nil
@@ -1711,8 +1957,8 @@ waitLoop:
 
 	err := s.inner.Close()
 
-	if srv := s.server(); srv != nil {
-		releaseOpencodeServer(srv)
-	}
+	// Drop the reference the running turn holds, if any. Close during a turn is
+	// what /stop and the idle reaper do.
+	s.releaseCurrentTurn()
 	return err
 }
