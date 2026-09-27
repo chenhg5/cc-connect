@@ -153,6 +153,19 @@ func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent
 // stepTexts holds intermediate per-step text (opencode emits a text event per
 // step); each becomes a thinking-panel entry so streaming updates grow the
 // foldable panels instead of re-flowing the answer body.
+func isCumulativeProgressThinking(previous, current string) bool {
+	previous = strings.TrimSpace(previous)
+	current = strings.TrimSpace(current)
+	if previous == "" || len(current) <= len(previous) {
+		return false
+	}
+	if strings.HasPrefix(current, previous) {
+		return true
+	}
+	trimmed := strings.TrimRight(previous, ".,;:!?…。；：！？")
+	return len(trimmed) >= 20 && strings.HasPrefix(current, trimmed)
+}
+
 func BuildStreamingCardPayload(thinking string, stepTexts []string, tools []cardToolEntry, answer string, agent string, lang Language, state ProgressCardState) string {
 	cleaned := make([]ProgressCardEntry, 0, 8)
 	if text := strings.TrimSpace(thinking); text != "" {
@@ -168,28 +181,35 @@ func BuildStreamingCardPayload(thinking string, stepTexts []string, tools []card
 			cleaned = append(cleaned, ProgressCardEntry{Kind: ProgressEntryThinking, Text: text})
 		}
 	}
-	seenThinking := make(map[string]struct{}, len(stepTexts)+1)
-	for _, item := range cleaned {
-		if item.Kind == ProgressEntryThinking {
-			seenThinking[item.Text] = struct{}{}
-		}
-	}
 	for _, step := range stepTexts {
 		text := strings.TrimSpace(step)
 		if text == "" {
 			continue
 		}
-		// Skip any entry the panel already shows, not just the previous one:
-		// opencode re-emits the same reasoning snapshot on later steps, and a
-		// /ps note landing between two of them defeats an adjacency-only check —
-		// observed live as the note and the same thinking block repeating over
-		// and over on the card. Skipping (never removing) keeps the lane
-		// append-only, which the card's index-based append updates rely on.
-		if _, dup := seenThinking[text]; dup {
-			continue
+		merged := false
+		for i, item := range cleaned {
+			if item.Kind != ProgressEntryThinking {
+				continue
+			}
+			if item.Text == text {
+				merged = true
+				break
+			}
+			// Prefer the latest, longest cumulative snapshot rather than
+			// displaying both "Let me read..." and its expanded version.
+			if isCumulativeProgressThinking(item.Text, text) {
+				cleaned[i].Text = text
+				merged = true
+				break
+			}
+			if strings.HasPrefix(item.Text, text) {
+				merged = true
+				break
+			}
 		}
-		seenThinking[text] = struct{}{}
-		cleaned = append(cleaned, ProgressCardEntry{Kind: ProgressEntryThinking, Text: text})
+		if !merged {
+			cleaned = append(cleaned, ProgressCardEntry{Kind: ProgressEntryThinking, Text: text})
+		}
 	}
 	for _, t := range tools {
 		name := strings.TrimSpace(t.Name)
