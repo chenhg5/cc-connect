@@ -293,3 +293,33 @@ func TestSummarizeACPToolInput(t *testing.T) {
 		})
 	}
 }
+
+// Regression test for PR #1789: opencode emits agent_thought_chunk for
+// reasoning deltas. It must map to EventThinking (not leak into the final
+// visible reply), while visible agent_message_chunk stays EventText.
+func TestMapSessionUpdate_agentThoughtChunk(t *testing.T) {
+	thought := json.RawMessage(`{
+		"sessionId": "s1",
+		"update": {
+			"sessionUpdate": "agent_thought_chunk",
+			"content": {"type": "text", "text": "step 1"}
+		}
+	}`)
+	evs := mapSessionUpdate("", thought)
+	if len(evs) != 1 || evs[0].Type != core.EventThinking || evs[0].Content != "step 1" {
+		t.Fatalf("agent_thought_chunk: got %+v, want 1 EventThinking \"step 1\"", evs)
+	}
+
+	// Control: visible message chunks keep mapping to EventText.
+	visible := json.RawMessage(`{
+		"sessionId": "s1",
+		"update": {
+			"sessionUpdate": "agent_message_chunk",
+			"content": {"type": "text", "text": "hello"}
+		}
+	}`)
+	evs = mapSessionUpdate("", visible)
+	if len(evs) != 1 || evs[0].Type != core.EventText || evs[0].Content != "hello" {
+		t.Fatalf("agent_message_chunk: got %+v, want 1 EventText \"hello\"", evs)
+	}
+}
