@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +23,11 @@ import (
 // applied by the /send API and `cc-connect send` when max_attachment_size_mb
 // is unset. Exported so cmd/cc-connect can resolve the same default.
 const DefaultMaxAttachmentSize int64 = 50 << 20
+
+// relayJobShutdownGrace bounds how long APIServer.Stop waits for in-flight
+// async relay jobs to unwind after cancellation, so a stalled agent cannot
+// hang daemon shutdown indefinitely. A var (not const) so tests can shorten it.
+var relayJobShutdownGrace = 10 * time.Second
 
 // APIServer exposes a local Unix socket API for external tools (e.g. cron jobs)
 // to send messages to active sessions.
@@ -37,6 +45,36 @@ type APIServer struct {
 	// expansion + envelope). Defaults to DefaultMaxAttachmentSize.
 	maxAttachmentBytes int64
 	mu                 sync.RWMutex
+
+	// Async relay job lifecycle: every goroutine spawned by
+	// handleRelaySendAsync is tracked so Stop can cancel it via
+	// relayJobCancel and wait for it to finish before returning. relayJobMu
+	// guards relayJobClosed so no new job can be registered after Stop begins.
+	relayJobCtx    context.Context
+	relayJobCancel context.CancelFunc
+	relayJobWG     sync.WaitGroup
+	relayJobMu     sync.Mutex
+	relayJobClosed bool
+}
+
+// relayJobPrefix is a per-process random prefix used to build collision-free
+// async relay job IDs (prefix + monotonically increasing counter). UnixNano
+// alone is not unique under concurrency.
+var (
+	relayJobPrefix  = newRelayJobPrefix()
+	relayJobCounter atomic.Uint64
+)
+
+func newRelayJobPrefix() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func newRelayJobID() string {
+	return fmt.Sprintf("relay-%s-%d", relayJobPrefix, relayJobCounter.Add(1))
 }
 
 // SendRequest is the JSON body for POST /send.
@@ -90,6 +128,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		engines:            make(map[string]*Engine),
 		maxAttachmentBytes: DefaultMaxAttachmentSize,
 	}
+	s.relayJobCtx, s.relayJobCancel = context.WithCancel(context.Background())
 	s.mux.HandleFunc("/send", s.handleSend)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
@@ -188,6 +227,28 @@ func (s *APIServer) Stop() {
 		if err := s.server.Close(); err != nil && err != http.ErrServerClosed {
 			slog.Debug("api server close failed", "error", err)
 		}
+	}
+	// Stop accepting new async relay jobs, cancel the ones in flight, then wait
+	// for them to unwind so relay work cannot overlap engine shutdown. The wait
+	// is bounded: HandleRelay only observes cancellation on the next agent event,
+	// so a stalled agent (no more events) would otherwise block shutdown forever.
+	s.relayJobMu.Lock()
+	s.relayJobClosed = true
+	cancel := s.relayJobCancel
+	s.relayJobMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	unwound := make(chan struct{})
+	go func() {
+		s.relayJobWG.Wait()
+		close(unwound)
+	}()
+	select {
+	case <-unwound:
+	case <-time.After(relayJobShutdownGrace):
+		slog.Warn("api server: async relay jobs did not unwind before shutdown grace period; proceeding",
+			"grace", relayJobShutdownGrace)
 	}
 	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
 		slog.Debug("api server remove socket failed", "error", err)
@@ -802,9 +863,23 @@ func (s *APIServer) handleRelaySendAsync(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	jobID := fmt.Sprintf("relay-%d", time.Now().UnixNano())
+	s.relayJobMu.Lock()
+	if s.relayJobClosed {
+		s.relayJobMu.Unlock()
+		http.Error(w, "relay is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	s.relayJobWG.Add(1)
+	s.relayJobMu.Unlock()
+
+	jobCtx := s.relayJobCtx
+	if jobCtx == nil {
+		jobCtx = context.Background()
+	}
+	jobID := newRelayJobID()
 	go func() {
-		if _, err := s.relay.Send(context.Background(), req); err != nil {
+		defer s.relayJobWG.Done()
+		if _, err := s.relay.Send(jobCtx, req); err != nil {
 			slog.Error("relay: async job failed", "job", jobID, "error", err)
 			return
 		}
