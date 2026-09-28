@@ -571,7 +571,7 @@ func (m *ManagementServer) handleProjects(w http.ResponseWriter, r *http.Request
 			platNames[i] = p.Name()
 		}
 
-		sessCount := len(e.sessions.AllSessions())
+		sessCount := len(e.sessions.VisibleSessions())
 
 		hbEnabled := false
 		if m.heartbeatScheduler != nil {
@@ -675,7 +675,7 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			platInfos[i] = entry
 		}
 
-		allSessions := e.sessions.AllSessions()
+		allSessions := e.sessions.VisibleSessions()
 		sessCount := len(allSessions)
 
 		e.interactiveMu.Lock()
@@ -966,7 +966,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		e.interactiveMu.Unlock()
 
 		idToKey, activeIDs := e.sessions.SessionKeyMap()
-		stored := e.sessions.AllSessions()
+		stored := e.sessions.VisibleSessions()
 		sessions := make([]map[string]any, 0, len(stored))
 		for _, s := range stored {
 			s.mu.Lock()

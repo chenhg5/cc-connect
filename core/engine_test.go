@@ -15320,6 +15320,80 @@ func TestCmdList_DefaultShowsAllSessions(t *testing.T) {
 	}
 }
 
+func TestCmdList_HidesBackgroundSessionsByDefault(t *testing.T) {
+	agentSessions := []AgentSessionInfo{
+		{ID: "tracked-1", Summary: "Tracked session", MessageCount: 5},
+		{ID: "cron-1", Summary: "Cron background session", MessageCount: 10},
+		{ID: "external-1", Summary: "External session", MessageCount: 7},
+	}
+
+	agent := &stubListAgent{sessions: agentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	userKey := "test:user1"
+
+	s := e.sessions.GetOrCreateActive(userKey)
+	s.SetAgentSessionID("tracked-1", "codex")
+	bg := e.sessions.NewBackgroundSession(userKey, "cron-job")
+	bg.SetAgentSessionID("cron-1", "codex")
+	e.sessions.Save()
+
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	reply := p.sent[0]
+	if !strings.Contains(reply, "Tracked session") {
+		t.Errorf("should show tracked session:\n%s", reply)
+	}
+	if !strings.Contains(reply, "External session") {
+		t.Errorf("default mode should still show external session:\n%s", reply)
+	}
+	if strings.Contains(reply, "Cron background session") {
+		t.Errorf("should hide background cron session:\n%s", reply)
+	}
+}
+
+func TestCmdList_ShowsBackgroundSessionsWhenHideSchedulerSessionsDisabled(t *testing.T) {
+	agentSessions := []AgentSessionInfo{
+		{ID: "tracked-1", Summary: "Tracked session", MessageCount: 5},
+		{ID: "cron-1", Summary: "Cron background session", MessageCount: 10},
+		{ID: "external-1", Summary: "External session", MessageCount: 7},
+	}
+
+	agent := &stubListAgent{sessions: agentSessions}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetHideSchedulerSessions(false)
+	e.SetFilterExternalSessions(true)
+	userKey := "test:user1"
+
+	s := e.sessions.GetOrCreateActive(userKey)
+	s.SetAgentSessionID("tracked-1", "codex")
+	bg := e.sessions.NewBackgroundSession(userKey, "cron-job")
+	bg.SetAgentSessionID("cron-1", "codex")
+	e.sessions.Save()
+
+	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
+	e.cmdList(p, msg, nil)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	reply := p.sent[0]
+	if !strings.Contains(reply, "Tracked session") {
+		t.Errorf("should show tracked session:\n%s", reply)
+	}
+	if !strings.Contains(reply, "Cron background session") {
+		t.Errorf("hide_scheduler_sessions=false should show background cron session:\n%s", reply)
+	}
+	if strings.Contains(reply, "External session") {
+		t.Errorf("filter_external_sessions=true should still hide external sessions:\n%s", reply)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // filter_external_sessions integration test suite
 // Covers /list, /switch, /delete, renderListCard under both modes.
@@ -16492,5 +16566,23 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 	}
 	if strings.Contains(card.finalContent(), "NO_REPLY") {
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
+	}
+}
+
+func TestEngineSetHideSchedulerSessionsPropagatesToWorkspaceManagers(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	workspace := t.TempDir()
+	workspaceSessions := NewSessionManager("")
+	workspaceSessions.SetHideBackgroundSessions(false)
+
+	e.workspacePool = newWorkspacePool(0)
+	state := newWorkspaceState(workspace)
+	state.sessions = workspaceSessions
+	e.workspacePool.states[workspace] = state
+
+	e.SetHideSchedulerSessions(true)
+	background := workspaceSessions.NewBackgroundSession("user1", "cron-job")
+	if got := workspaceSessions.VisibleSessions(); len(got) != 0 {
+		t.Fatalf("workspace manager not updated: visible sessions = %#v, want %s hidden", got, background.ID)
 	}
 }

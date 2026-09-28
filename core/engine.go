@@ -457,6 +457,9 @@ type Engine struct {
 	// hiding sessions created by direct CLI usage in the same work_dir.
 	// Default false = show all sessions.
 	filterExternalSessions bool
+	// When true, scheduler-created background sessions stay out of user-facing
+	// /list, /switch, and /delete views. Default true.
+	hideSchedulerSessions bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
 	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
@@ -794,6 +797,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 		showWorkdirIndicator:  true,
+		hideSchedulerSessions: true,
 		shell:                 defaultShell(),
 		shellFlag:             defaultShellFlag(),
 		pendingRestartTimeout: defaultPendingRestartTimeout,
@@ -1036,6 +1040,35 @@ func (e *Engine) SetReplyFooterEnabled(show bool) {
 // Default false = show all sessions from the agent.
 func (e *Engine) SetFilterExternalSessions(v bool) {
 	e.filterExternalSessions = v
+}
+
+// SetHideSchedulerSessions controls whether cron/timer background sessions are
+// hidden from normal user-facing session commands.
+func (e *Engine) SetHideSchedulerSessions(v bool) {
+	e.hideSchedulerSessions = v
+	if e.sessions != nil {
+		e.sessions.SetHideBackgroundSessions(v)
+	}
+	e.forEachWorkspaceSessionManager(func(sessions *SessionManager) {
+		sessions.SetHideBackgroundSessions(v)
+	})
+}
+
+func (e *Engine) forEachWorkspaceSessionManager(fn func(*SessionManager)) {
+	e.interactiveMu.Lock()
+	pool := e.workspacePool
+	e.interactiveMu.Unlock()
+	if pool == nil {
+		return
+	}
+	for _, state := range pool.All() {
+		state.mu.Lock()
+		sessions := state.sessions
+		state.mu.Unlock()
+		if sessions != nil {
+			fn(sessions)
+		}
+	}
 }
 
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
@@ -1662,7 +1695,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
-		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
+		session := sessions.NewBackgroundSession(runSessionKey, "cron-"+job.ID)
 		lockGen, locked := session.TryLock()
 		if !locked {
 			return fmt.Errorf("session %q is busy", runSessionKey)
@@ -1867,7 +1900,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
-		session := sessions.NewSideSession(runSessionKey, "timer-"+job.ID)
+		session := sessions.NewBackgroundSession(runSessionKey, "timer-"+job.ID)
 		lockGen, locked := session.TryLock()
 		if !locked {
 			return fmt.Errorf("session %q is busy", runSessionKey)
@@ -4186,6 +4219,7 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
 	sessions := NewSessionManager(sessionFile)
 	sessions.InvalidateForAgent(agent.Name())
+	sessions.SetHideBackgroundSessions(e.hideSchedulerSessions)
 
 	ws.agent = agent
 	ws.sessions = sessions
@@ -7396,10 +7430,27 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 // filter_external_sessions config. When disabled (default), all sessions are
 // returned. When enabled, only sessions tracked by cc-connect are shown.
 func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager) []AgentSessionInfo {
+	if e.hideSchedulerSessions {
+		sessions = filterHiddenSessions(sessions, sm.BackgroundAgentSessionIDs())
+	}
 	if !e.filterExternalSessions {
 		return sessions
 	}
 	return filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
+}
+
+func filterHiddenSessions(sessions []AgentSessionInfo, hidden map[string]struct{}) []AgentSessionInfo {
+	if len(hidden) == 0 {
+		return sessions
+	}
+	filtered := make([]AgentSessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		if _, ok := hidden[s.ID]; ok {
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	return filtered
 }
 
 // filterOwnedSessions removes agent sessions that are not tracked by cc-connect's

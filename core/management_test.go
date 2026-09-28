@@ -3010,3 +3010,35 @@ func TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL(t *testing.T) {
 		}
 	}
 }
+
+func TestMgmt_SessionsHideBackgroundSessions(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	active := e.sessions.GetOrCreateActive("user1")
+	background := e.sessions.NewBackgroundSession("user1", "cron-job")
+
+	list := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	if !list.OK {
+		t.Fatalf("sessions list failed: %s", list.Error)
+	}
+	var data struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := json.Unmarshal(list.Data, &data); err != nil {
+		t.Fatalf("unmarshal sessions: %v", err)
+	}
+	if len(data.Sessions) != 1 || data.Sessions[0]["id"] != active.ID {
+		t.Fatalf("sessions = %#v, want only active %s; background %s should be hidden", data.Sessions, active.ID, background.ID)
+	}
+
+	detailResp := mgmtGet(t, ts.URL+"/api/v1/projects/test-project", "tok")
+	var detail struct {
+		SessionsCount int `json:"sessions_count"`
+	}
+	if err := json.Unmarshal(detailResp.Data, &detail); err != nil {
+		t.Fatalf("unmarshal project detail: %v", err)
+	}
+	if detail.SessionsCount != 1 {
+		t.Fatalf("detail sessions_count = %d, want 1 visible session", detail.SessionsCount)
+	}
+}
