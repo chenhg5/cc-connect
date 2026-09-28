@@ -16426,9 +16426,15 @@ type recordingStreamCard struct {
 	mu      sync.Mutex
 	final   bool
 	content string
+	updates []string // intermediate Update bodies, in order
 }
 
-func (c *recordingStreamCard) Update(_ context.Context, _ string) error { return nil }
+func (c *recordingStreamCard) Update(_ context.Context, content string) error {
+	c.mu.Lock()
+	c.updates = append(c.updates, content)
+	c.mu.Unlock()
+	return nil
+}
 func (c *recordingStreamCard) Finalize(_ context.Context, content string) error {
 	c.mu.Lock()
 	c.final = true
@@ -16446,6 +16452,11 @@ func (c *recordingStreamCard) finalContent() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.content
+}
+func (c *recordingStreamCard) updateBodies() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.updates...)
 }
 
 // recordingStreamCardPlatform is a StreamingCardPlatform whose card records the

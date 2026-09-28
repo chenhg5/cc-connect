@@ -13,8 +13,9 @@ package core
 // These tests run the same end-to-end event loop the production
 // code uses (processInteractiveEvents), so they exercise all
 // platform-agnostic finalization paths in one go: stream preview,
-// sendChunksWithStatusFooter, the !isSilent branch, and the
-// accumulated-textParts slice point in EventResult.
+// sendChunksWithStatusFooter, the !isSilent and isSilent branches, the
+// silent-hold live-frame path, and the accumulated-textParts slice point
+// in EventResult.
 
 import (
 	"strings"
@@ -186,6 +187,203 @@ func TestQuiet_Default_OnlyLastToolSurfaces(t *testing.T) {
 	}
 	if !strings.Contains(final, "Final answer: /home/user.") {
 		t.Errorf("final answer missing: %q", final)
+	}
+}
+
+// TestQuiet_StreamingCard_LiveFramesDropPreToolLeadIn checks the live card
+// frames: in quiet mode the update after the last tool_use shows only the
+// post-tool segment, matching the finalized card.
+func TestQuiet_StreamingCard_LiveFramesDropPreToolLeadIn(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "teams"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: false, ToolMessages: false, PrependPreToolText: false})
+	e.SetReplyFooterEnabled(false)
+
+	sessionKey := "teams:quiet-live"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("s-quiet-live")
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx-quiet-live"}
+	e.interactiveStates[sessionKey] = state
+
+	for _, ev := range []Event{
+		{Type: EventText, Content: "First lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Second lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"},
+		{Type: EventText, Content: "Final answer."},
+		{Type: EventResult, Content: "Final answer.", Done: true},
+	} {
+		sess.events <- ev
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-quiet-live", time.Now(), nil, nil, state.replyCtx, 0)
+
+	updates := card.updateBodies()
+	if len(updates) == 0 {
+		t.Fatal("expected at least one live card update")
+	}
+	// The last live frame (rendered for "Final answer.") must contain only
+	// the post-last-tool segment — no earlier lead-ins.
+	last := updates[len(updates)-1]
+	if !strings.Contains(last, "Final answer.") {
+		t.Errorf("last live frame missing the post-tool answer: %q", last)
+	}
+	if strings.Contains(last, "First lead-in") || strings.Contains(last, "Second lead-in") {
+		t.Errorf("live card frame accumulated a pre-tool lead-in: %q", last)
+	}
+	// And the finalized card stays clean too (mirrors the live frame).
+	if strings.Contains(card.finalContent(), "lead-in") {
+		t.Errorf("finalized card leaked a lead-in: %q", card.finalContent())
+	}
+}
+
+// TestQuiet_StreamingCard_SilentAfterToolNoMarkerFlash covers a lead-in, a
+// tool call, then a bare NO_REPLY: neither the live card frames nor the
+// finalized card may render the marker or the lead-in.
+func TestQuiet_StreamingCard_SilentAfterToolNoMarkerFlash(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "teams"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: false, ToolMessages: false, PrependPreToolText: false})
+	e.SetReplyFooterEnabled(false)
+
+	sessionKey := "teams:quiet-silent"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("s-quiet-silent")
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx-quiet-silent"}
+	e.interactiveStates[sessionKey] = state
+
+	for _, ev := range []Event{
+		{Type: EventText, Content: "Working on it."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "NO_REPLY"},
+		{Type: EventResult, Content: "NO_REPLY", Done: true},
+	} {
+		sess.events <- ev
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-quiet-silent", time.Now(), nil, nil, state.replyCtx, 0)
+
+	// No live frame may render the raw NO_REPLY marker.
+	for i, body := range card.updateBodies() {
+		if strings.Contains(body, "NO_REPLY") {
+			t.Errorf("live card frame %d flashed the NO_REPLY marker: %q", i, body)
+		}
+	}
+	// The finalized card must not render the marker either.
+	if strings.Contains(card.finalContent(), "NO_REPLY") {
+		t.Errorf("finalized card leaked the NO_REPLY marker: %q", card.finalContent())
+	}
+	if strings.Contains(card.finalContent(), "Working on it") {
+		t.Errorf("finalized silent card leaked the pre-tool lead-in: %q", card.finalContent())
+	}
+}
+
+// TestQuiet_QueuedTurnAfterTool_NoPanic runs a queued quiet turn after a turn
+// that used a tool. The queued turn starts with empty textParts, so a tool
+// boundary left over from the first turn would slice out of range and panic
+// the event loop.
+func TestQuiet_QueuedTurnAfterTool_NoPanic(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "teams"},
+		card:               card,
+	}
+	sess := newQueuingSession("qs-quiet-panic")
+	agent := &controllableAgent{nextSession: sess}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: false, ToolMessages: false, PrependPreToolText: false})
+	e.SetReplyFooterEnabled(false)
+
+	key := "teams:quiet-queued"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-turn2", content: "queued-msg"},
+		},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	go func() {
+		// Turn 1: text then a tool_use (sets postLastToolStart) then result.
+		sess.events <- Event{Type: EventText, Content: "Checking..."}
+		sess.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"}
+		sess.events <- Event{Type: EventResult, Content: "done", Done: true}
+		// Wait for the queued message's Send() before pushing turn 2 events.
+		sess.sendMu.Lock()
+		for len(sess.sendCalls) == 0 {
+			sess.sendMu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			sess.sendMu.Lock()
+		}
+		sess.sendMu.Unlock()
+		// Turn 2: its first EventText slices textParts at the tool boundary.
+		sess.events <- Event{Type: EventText, Content: "Hello again"}
+		sess.events <- Event{Type: EventResult, Content: "Hello again", Done: true}
+	}()
+
+	session.AddHistory("user", "initial-msg")
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+
+	done := make(chan struct{})
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked <- r
+			}
+			close(done)
+		}()
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil, 0)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+	select {
+	case r := <-panicked:
+		t.Fatalf("queued quiet turn after a tool panicked: %v", r)
+	default:
+	}
+}
+
+// TestQuiet_HookRejectedAfterTool_DeliversRewrite covers a Stop-hook rejection
+// of a draft written after a tool call. The rejection empties textParts, so a
+// tool boundary left over from before it would slice out of range and panic
+// the event loop.
+func TestQuiet_HookRejectedAfterTool_DeliversRewrite(t *testing.T) {
+	cfg := DisplayCfg{Mode: "quiet", ToolMessages: false}
+	var sent []string
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("hook rejection after a tool panicked: %v", r)
+			}
+		}()
+		sent = runQuietTurn(t, cfg, []Event{
+			{Type: EventText, Content: "Let me check."},
+			{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"},
+			{Type: EventText, Content: "Draft answer."},
+			{Type: EventHookRejected},
+			{Type: EventText, Content: "Rewritten answer."},
+			{Type: EventResult, Content: "Rewritten answer.", Done: true},
+		})
+	}()
+	if len(sent) != 1 || sent[0] != "Rewritten answer." {
+		t.Fatalf("final reply = %#v, want only the rewritten answer %q", sent, "Rewritten answer.")
 	}
 }
 
