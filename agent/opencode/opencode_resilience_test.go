@@ -185,7 +185,7 @@ func TestSend_ResetsCompactionContinuations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	s.continuations.Store(maxCompactionContinuations)
 	if err := s.Send("继续", "", nil, nil); err == nil {
@@ -221,7 +221,7 @@ func TestReadLoop_StderrReadAfterProcessExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if err := s.launch("hi", nil, ""); err != nil {
 		t.Fatalf("launch: %v", err)
