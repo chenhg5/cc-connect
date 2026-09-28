@@ -2,6 +2,7 @@ package kimi
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,7 +195,7 @@ func TestAgentAvailableModels_UsesKimiCodeCatalog(t *testing.T) {
 if [ "$1" != "--shim" ] || [ "$2" != "provider" ] || [ "$3" != "list" ] || [ "$4" != "--json" ]; then
   exit 2
 fi
-if [ "$KIMI_DISCOVERY_TOKEN" != "available" ] || [ "$PWD" != "$EXPECTED_WORK_DIR" ]; then
+if [ "$KIMI_DISCOVERY_TOKEN" != "available" ] || [ "$(pwd -P)" != "$EXPECTED_WORK_DIR" ]; then
   exit 3
 fi
 printf '%s\n' '{"providers":{"private":{"apiKey":"must-not-be-used"}},"models":{"private/model-z":{"displayName":"Model Z"},"private/model-a":{"displayName":"Model A"}}}'
@@ -202,13 +203,15 @@ printf '%s\n' '{"providers":{"private":{"apiKey":"must-not-be-used"}},"models":{
 	require.NoError(t, os.WriteFile(bin, []byte(script), 0o755))
 
 	workDir := t.TempDir()
+	canonicalWorkDir, err := filepath.EvalSymlinks(workDir)
+	require.NoError(t, err)
 	a := &Agent{
 		cmd:          bin,
 		cliExtraArgs: []string{"--shim"},
 		workDir:      workDir,
 		configEnv: []string{
 			"KIMI_DISCOVERY_TOKEN=available",
-			"EXPECTED_WORK_DIR=" + workDir,
+			"EXPECTED_WORK_DIR=" + canonicalWorkDir,
 		},
 		activeIdx: -1,
 	}
@@ -409,6 +412,63 @@ func TestAgentGetSessionHistory_KimiCode2WireFormat(t *testing.T) {
 	count, summary := parseKimiTranscript(sessionDir)
 	assert.Equal(t, 2, count, "Kimi Code 2.0 array content should count user turns")
 	assert.Equal(t, "first question", summary)
+}
+
+// Kimi Code 2.0 writes internal reminders as user-role messages with an
+// injection origin. They must never appear in /history or /list counts.
+func TestAgentGetSessionHistory_SkipsInjectedUserMessages(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("KIMI_CODE_HOME", "")
+	sessionID := "injection-fixture"
+	dir := filepath.Join(home, ".kimi-code", "sessions", "project", sessionID)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents", "main"), 0o755))
+	wire := []byte(`{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"real question"}],"origin":{"kind":"user"}}}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"<auto-mode-enter-reminder>"}],"origin":{"kind":"injection"}}}
+{"type":"context.append_message","message":{"role":"user","content":"slash question","origin":{"kind":"user-slash"}}}
+{"type":"context.append_message","message":{"role":"user","content":"old question"}}
+{"type":"context.append_message","message":{"role":"user","content":"another injected reminder"},"origin":{"kind":"injection"}}
+`)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agents", "main", "wire.jsonl"), wire, 0o644))
+	entries := getKimiSessionHistory(t, &Agent{}, sessionID, 0)
+	require.Len(t, entries, 3)
+	assert.Equal(t, "real question", entries[0].Content)
+	assert.Equal(t, "slash question", entries[1].Content)
+	assert.Equal(t, "old question", entries[2].Content)
+	count, summary := parseKimiTranscript(dir)
+	assert.Equal(t, 3, count)
+	assert.Equal(t, "real question", summary)
+}
+
+func TestAgentSessions_UsesRelocatedKimiCodeHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("KIMI_CODE_HOME", filepath.Join(home, "wrong-env-home"))
+	workDir := t.TempDir()
+	codeHome := filepath.Join(t.TempDir(), "code-home")
+	sessionID := "relocated-session"
+	dir := filepath.Join(codeHome, "sessions", "project", sessionID)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agents", "main"), 0o755))
+	state, err := json.Marshal(map[string]string{"title": "relocated", "workDir": workDir})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "state.json"), state, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agents", "main", "wire.jsonl"), []byte(`{"type":"context.append_message","message":{"role":"user","content":"from relocated home"},"origin":{"kind":"user"}}`+"\n"), 0o644))
+	a := &Agent{
+		workDir:    workDir,
+		configEnv:  []string{"KIMI_CODE_HOME=" + filepath.Join(home, "wrong-config-home")},
+		sessionEnv: []string{"KIMI_CODE_HOME=" + codeHome},
+		activeIdx:  -1,
+	}
+	sessions, err := a.ListSessions(context.Background())
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, sessionID, sessions[0].ID)
+	entries := getKimiSessionHistory(t, a, sessionID, 0)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "from relocated home", entries[0].Content)
+	require.NoError(t, a.DeleteSession(context.Background(), sessionID))
+	_, err = os.Stat(dir)
+	assert.True(t, os.IsNotExist(err))
 }
 
 func TestAgentGetSessionHistory_LegacyContextFormat(t *testing.T) {
