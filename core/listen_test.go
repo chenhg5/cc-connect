@@ -76,7 +76,7 @@ func TestListenAddressForIPv6BindIsDialable(t *testing.T) {
 	if err != nil {
 		t.Skipf("IPv6 loopback unavailable on this host: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	if _, _, err := net.SplitHostPort(ln.Addr().String()); err != nil {
 		t.Fatalf("bound address %q is not host:port: %v", ln.Addr(), err)
 	}
@@ -245,7 +245,7 @@ func TestManagementServer_ExplicitBindAllowsRemoteAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request the wildcard listener over loopback: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
@@ -295,7 +295,7 @@ func TestManagementServer_StartReportsPortInUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("occupy a port: %v", err)
 	}
-	defer blocker.Close()
+	defer func() { _ = blocker.Close() }()
 	port := blocker.Addr().(*net.TCPAddr).Port
 
 	mgmt := NewManagementServer(port, "tok", nil)
@@ -402,7 +402,7 @@ func TestBridgeServer_ExplicitBindAllowsRemoteAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request the wildcard listener over loopback: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
@@ -457,7 +457,7 @@ func TestBridgeServer_StartReportsPortInUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("occupy a port: %v", err)
 	}
-	defer blocker.Close()
+	defer func() { _ = blocker.Close() }()
 	port := blocker.Addr().(*net.TCPAddr).Port
 
 	bs := NewBridgeServer(port, "tok", "/bridge/ws", nil)
@@ -476,7 +476,7 @@ func TestListenTCPReportsAddressInUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("occupy a port: %v", err)
 	}
-	defer blocker.Close()
+	defer func() { _ = blocker.Close() }()
 	port := blocker.Addr().(*net.TCPAddr).Port
 
 	ln, addr, err := listenTCP("127.0.0.1", port)
