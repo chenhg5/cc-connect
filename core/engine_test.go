@@ -1415,7 +1415,7 @@ func TestProcessInteractiveEvents_TrailingNoReplyPreservesTextBeforeTool(t *test
 	agentSession.events <- Event{Type: EventToolUse, ToolName: "TaskUpdate", ToolInput: "completed"}
 	agentSession.events <- Event{Type: EventText, Content: "NO_REPLY"}
 	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-trailing-noreply", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-trailing-noreply", time.Now(), nil, nil, state.replyCtx, 0)
 
 	history := session.GetHistory(0)
 	if len(history) == 0 {
@@ -1468,7 +1468,7 @@ func TestProcessInteractiveEvents_BareNoReplyWithToolsStaysSilent(t *testing.T) 
 	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
 	agentSession.events <- Event{Type: EventText, Content: "NO_REPLY"}
 	agentSession.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
-	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-bare-noreply", time.Now(), nil, nil, state.replyCtx)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-bare-noreply", time.Now(), nil, nil, state.replyCtx, 0)
 
 	history := session.GetHistory(0)
 	if len(history) == 0 {
@@ -1481,6 +1481,148 @@ func TestProcessInteractiveEvents_BareNoReplyWithToolsStaysSilent(t *testing.T) 
 	for _, msg := range p.getSent() {
 		if strings.Contains(msg, "NO_REPLY") {
 			t.Fatalf("NO_REPLY marker leaked to the platform: %q", msg)
+		}
+	}
+}
+
+// TestProcessInteractiveEvents_AbnormalCloseStripsNoReplyMarker covers the
+// channel-close path: the agent process dies after committing visible text, a
+// tool call and a trailing NO_REPLY continuation, with no EventResult. The
+// marker must not reach the user through the unsent-remainder send, and history
+// must be persisted from the stripped text rather than from the raw join.
+func TestProcessInteractiveEvents_AbnormalCloseStripsNoReplyMarker(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+
+	sessionKey := "telegram:user-abnormal-close"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-abnormal-close")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-abnormal-close",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	const report = "结论：三处风险，已按优先级排序。"
+	agentSession.events <- Event{Type: EventText, Content: "先检查一下。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: report}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "TaskUpdate", ToolInput: "completed"}
+	agentSession.events <- Event{Type: EventText, Content: "NO_REPLY"}
+
+	// Abnormal close: the events channel ends without an EventResult.
+	_ = agentSession.Close()
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-abnormal-close", time.Now(), nil, nil, state.replyCtx, 0)
+
+	sent := p.getSent()
+	for _, msg := range sent {
+		if strings.Contains(msg, "NO_REPLY") {
+			t.Fatalf("NO_REPLY marker leaked to the platform on abnormal close: %q (all sent = %#v)", msg, sent)
+		}
+	}
+	history := session.GetHistory(0)
+	if len(history) == 0 {
+		t.Fatal("history is empty, want the assistant turn recorded")
+	}
+	last := history[len(history)-1]
+	if strings.Contains(last.Content, "NO_REPLY") {
+		t.Fatalf("history persisted the raw NO_REPLY marker: %q", last.Content)
+	}
+	if !strings.Contains(last.Content, report) {
+		t.Fatalf("history lost the committed body: %q", last.Content)
+	}
+}
+
+// TestProcessInteractiveEvents_CancelStripsNoReplyMarker covers the cancel
+// path: after committed text and a tool call, the trailing continuation is a
+// bare NO_REPLY and the user stops the turn before the EventResult arrives.
+// Cancelling must neither deliver the marker nor persist it.
+func TestProcessInteractiveEvents_CancelStripsNoReplyMarker(t *testing.T) {
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true})
+	e.eventIdleTimeout = time.Minute
+
+	sessionKey := "telegram:user-cancel-noreply"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-cancel-noreply")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-cancel-noreply",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	const report = "结论：三处风险，已按优先级排序。"
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-cancel-noreply", time.Now(), nil, nil, state.replyCtx, 0)
+	}()
+
+	agentSession.events <- Event{Type: EventText, Content: "先检查一下。"}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
+	agentSession.events <- Event{Type: EventText, Content: report}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "TaskUpdate", ToolInput: "completed"}
+
+	// Deterministic ordering: wait until the tool boundary has flushed the
+	// committed body, then hand over the marker chunk, then wait until the loop
+	// has consumed it. Only then is the turn cancelled.
+	waitForPlatformContains(t, p, report, 2*time.Second)
+	agentSession.events <- Event{Type: EventText, Content: "NO_REPLY"}
+	waitForEventsDrained(t, agentSession.events, 2*time.Second)
+
+	state.markStopped()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processInteractiveEvents did not return after the turn was cancelled")
+	}
+
+	for _, msg := range p.getSent() {
+		if strings.Contains(msg, "NO_REPLY") {
+			t.Fatalf("NO_REPLY marker leaked to the platform on cancel: %q", msg)
+		}
+	}
+	for _, h := range session.GetHistory(0) {
+		if strings.Contains(h.Content, "NO_REPLY") {
+			t.Fatalf("NO_REPLY marker leaked into history on cancel: %q", h.Content)
+		}
+	}
+}
+
+// waitForPlatformContains polls until some sent message contains substr.
+func waitForPlatformContains(t *testing.T, p *stubPlatformEngine, substr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		for _, msg := range p.getSent() {
+			if strings.Contains(msg, substr) {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("no sent message contained %q, sent = %#v", substr, p.getSent())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// waitForEventsDrained polls until the agent session's event channel is empty,
+// i.e. the interactive loop has consumed everything queued so far.
+func waitForEventsDrained(t *testing.T, events <-chan Event, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for len(events) > 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("interactive loop did not consume the queued events (%d left)", len(events))
+		case <-time.After(5 * time.Millisecond):
 		}
 	}
 }
@@ -7549,6 +7691,7 @@ type controllableAgentSession struct {
 	closeDelay    time.Duration // how long Close() blocks before returning
 	closeErr      error         // what Close() reports (e.g. "process still alive")
 	closeFinished atomic.Bool   // set once Close() has returned
+	closeOnce     sync.Once     // guards close(events); Close() must be idempotent
 }
 
 func newControllableSession(id string) *controllableAgentSession {
@@ -7582,7 +7725,12 @@ func (s *controllableAgentSession) Close() error {
 		time.Sleep(s.closeDelay)
 	}
 	s.alive = false
-	close(s.events)
+	// Idempotent: a test that closes the session itself may race the engine's
+	// own teardown (cleanupInteractiveState -> closeAgentSession -> Close), and
+	// closing the events channel twice panics.
+	s.closeOnce.Do(func() {
+		close(s.events)
+	})
 	select {
 	case <-s.closed:
 	default:
