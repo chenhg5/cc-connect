@@ -254,6 +254,7 @@ const (
 	MsgListPageHint              MsgKey = "list_page_hint"
 	MsgListSwitchHint            MsgKey = "list_switch_hint"
 	MsgListError                 MsgKey = "list_error"
+	MsgTasksDisabled             MsgKey = "tasks_disabled"
 	MsgTasksNotSupported         MsgKey = "tasks_not_supported"
 	MsgTasksMultiWorkspace       MsgKey = "tasks_multi_workspace"
 	MsgTasksEmpty                MsgKey = "tasks_empty"
@@ -1505,6 +1506,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "目前 Agent 不支援跨工作目錄列出會話。",
 		LangJapanese:           "このエージェントは作業ディレクトリをまたぐセッション一覧に対応していません。",
 		LangSpanish:            "Este agente no permite listar sesiones de distintos directorios de trabajo.",
+	},
+	MsgTasksDisabled: {
+		LangEnglish:            "Cross-directory session routing is disabled. An administrator must enable it and configure allowed roots.",
+		LangChinese:            "跨目录会话路由未启用。需要管理员开启并配置允许的根目录。",
+		LangTraditionalChinese: "跨目錄會話路由未啟用。需要管理員開啟並設定允許的根目錄。",
+		LangJapanese:           "ディレクトリをまたぐセッションルーティングは無効です。管理者が有効化し、許可するルートを設定する必要があります。",
+		LangSpanish:            "El enrutamiento de sesiones entre directorios está desactivado. Un administrador debe activarlo y configurar las raíces permitidas.",
 	},
 	MsgTasksMultiWorkspace: {
 		LangEnglish:            "Cross-directory task routing is unavailable in multi-workspace mode. Use /workspace and /list instead.",

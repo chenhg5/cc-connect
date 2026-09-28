@@ -425,6 +425,9 @@ type Engine struct {
 	projectState                 *ProjectStateStore
 	taskRoutesMu                 sync.RWMutex
 	taskRoutes                   map[string][]AgentSessionInfo
+	globalSessionRoutingMu       sync.RWMutex
+	globalSessionRouting         bool
+	globalSessionRoots           []string
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -1274,11 +1277,55 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 	}
 }
 
+// SetGlobalSessionRouting configures the opt-in cross-directory session
+// discovery boundary. Only sessions whose canonical work directory is inside
+// one of roots are discoverable. Invalid or missing roots are ignored so a
+// misconfiguration fails closed.
+func (e *Engine) SetGlobalSessionRouting(enabled bool, roots []string) {
+	normalized := make([]string, 0, len(roots))
+	for _, root := range roots {
+		canonical, err := canonicalExistingDir(root)
+		if err != nil {
+			slog.Warn("global session routing root ignored", "project", e.name, "root", root, "error", err)
+			continue
+		}
+		duplicate := false
+		for _, existing := range normalized {
+			if pathsEqual(existing, canonical) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			normalized = append(normalized, canonical)
+		}
+	}
+
+	e.globalSessionRoutingMu.Lock()
+	e.globalSessionRouting = enabled
+	e.globalSessionRoots = normalized
+	e.globalSessionRoutingMu.Unlock()
+
+	// Config reloads must invalidate numbered results produced under an older
+	// root boundary.
+	e.taskRoutesMu.Lock()
+	e.taskRoutes = nil
+	e.taskRoutesMu.Unlock()
+}
+
+func (e *Engine) globalSessionRoutingConfig() (bool, []string) {
+	e.globalSessionRoutingMu.RLock()
+	defer e.globalSessionRoutingMu.RUnlock()
+	return e.globalSessionRouting, append([]string(nil), e.globalSessionRoots...)
+}
+
 // privilegedCommands are commands that require admin_from authorization.
 var privilegedCommands = map[string]bool{
 	"shell":   true,
 	"show":    true,
 	"dir":     true,
+	"tasks":   true,
+	"goto":    true,
 	"restart": true,
 	"upgrade": true,
 	"web":     true,
@@ -7818,7 +7865,54 @@ const globalTaskListSize = 15
 
 var errGlobalTasksUnsupported = errors.New("agent does not support global session listing")
 
-func listGlobalTasks(ctx context.Context, agent Agent, keyword string) ([]AgentSessionInfo, error) {
+func canonicalExistingDir(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("empty path")
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("not a directory")
+	}
+	return filepath.Clean(canonical), nil
+}
+
+func pathsEqual(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func pathWithinRoots(path string, roots []string) (string, bool) {
+	canonical, err := canonicalExistingDir(path)
+	if err != nil {
+		return "", false
+	}
+	for _, root := range roots {
+		rel, err := filepath.Rel(root, canonical)
+		if err != nil || filepath.IsAbs(rel) {
+			continue
+		}
+		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+			return canonical, true
+		}
+	}
+	return "", false
+}
+
+func listGlobalTasks(ctx context.Context, agent Agent, roots []string, keyword string) ([]AgentSessionInfo, error) {
 	lister, ok := agent.(GlobalSessionLister)
 	if !ok {
 		return nil, errGlobalTasksUnsupported
@@ -7838,6 +7932,11 @@ func listGlobalTasks(ctx context.Context, agent Agent, keyword string) ([]AgentS
 		if session.ID == "" || session.WorkDir == "" {
 			continue
 		}
+		canonical, allowed := pathWithinRoots(session.WorkDir, roots)
+		if !allowed {
+			continue
+		}
+		session.WorkDir = canonical
 		if _, exists := seen[session.ID]; exists {
 			continue
 		}
@@ -7853,24 +7952,33 @@ func listGlobalTasks(ctx context.Context, agent Agent, keyword string) ([]AgentS
 	return filtered, nil
 }
 
-func (e *Engine) saveTaskRoutes(sessionKey string, sessions []AgentSessionInfo) {
+func taskRouteKey(sessionKey, userID string) string {
+	return sessionKey + "\x00" + userID
+}
+
+func (e *Engine) saveTaskRoutes(sessionKey, userID string, sessions []AgentSessionInfo) {
 	e.taskRoutesMu.Lock()
 	defer e.taskRoutesMu.Unlock()
 	if e.taskRoutes == nil {
 		e.taskRoutes = make(map[string][]AgentSessionInfo)
 	}
-	e.taskRoutes[sessionKey] = append([]AgentSessionInfo(nil), sessions...)
+	e.taskRoutes[taskRouteKey(sessionKey, userID)] = append([]AgentSessionInfo(nil), sessions...)
 }
 
-func (e *Engine) loadTaskRoutes(sessionKey string) []AgentSessionInfo {
+func (e *Engine) loadTaskRoutes(sessionKey, userID string) []AgentSessionInfo {
 	e.taskRoutesMu.RLock()
 	defer e.taskRoutesMu.RUnlock()
-	return append([]AgentSessionInfo(nil), e.taskRoutes[sessionKey]...)
+	return append([]AgentSessionInfo(nil), e.taskRoutes[taskRouteKey(sessionKey, userID)]...)
 }
 
 // cmdTasks lists recent agent sessions across every local work directory.
 // Unlike /list, this deliberately ignores the agent's current work_dir.
 func (e *Engine) cmdTasks(p Platform, msg *Message, args []string) {
+	enabled, roots := e.globalSessionRoutingConfig()
+	if !enabled || len(roots) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTasksDisabled))
+		return
+	}
 	if e.multiWorkspace {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTasksMultiWorkspace))
 		return
@@ -7881,7 +7989,7 @@ func (e *Engine) cmdTasks(p Platform, msg *Message, args []string) {
 		return
 	}
 	keyword := strings.TrimSpace(strings.Join(args, " "))
-	sessions, err := listGlobalTasks(e.ctx, agent, keyword)
+	sessions, err := listGlobalTasks(e.ctx, agent, roots, keyword)
 	if err != nil {
 		if errors.Is(err, errGlobalTasksUnsupported) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTasksNotSupported))
@@ -7893,7 +8001,7 @@ func (e *Engine) cmdTasks(p Platform, msg *Message, args []string) {
 	if len(sessions) > globalTaskListSize {
 		sessions = sessions[:globalTaskListSize]
 	}
-	e.saveTaskRoutes(msg.SessionKey, sessions)
+	e.saveTaskRoutes(msg.SessionKey, msg.UserID, sessions)
 
 	if len(sessions) == 0 {
 		if keyword == "" {
@@ -7928,6 +8036,11 @@ func (e *Engine) cmdTasks(p Platform, msg *Message, args []string) {
 // cmdGoto changes the agent work directory and resumes a task selected from
 // the stable result set produced by the caller's most recent /tasks command.
 func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
+	enabled, roots := e.globalSessionRoutingConfig()
+	if !enabled || len(roots) == 0 {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTasksDisabled))
+		return
+	}
 	if e.multiWorkspace {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTasksMultiWorkspace))
 		return
@@ -7937,40 +8050,30 @@ func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	routes := e.loadTaskRoutes(msg.SessionKey)
+	routes := e.loadTaskRoutes(msg.SessionKey, msg.UserID)
 	index, err := strconv.Atoi(args[0])
 	if err != nil || index < 1 || index > len(routes) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgGotoInvalidIndex))
 		return
 	}
 	target := routes[index-1]
-	info, err := os.Stat(target.WorkDir)
-	if err != nil || !info.IsDir() {
+	canonicalWorkDir, allowed := pathWithinRoots(target.WorkDir, roots)
+	if !allowed {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgDirInvalidPath, target.WorkDir))
 		return
 	}
+	target.WorkDir = canonicalWorkDir
 
-	agent, sessions, interactiveKey, err := e.commandContext(p, msg)
+	agent, sessions, err := e.getOrCreateWorkspaceAgent(target.WorkDir)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	switcher, ok := agent.(WorkDirSwitcher)
-	if !ok {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDirNotSupported))
-		return
-	}
 
-	switcher.SetWorkDir(target.WorkDir)
-	e.cleanupInteractiveState(interactiveKey)
+	oldInteractiveKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+	e.cleanupInteractiveState(oldInteractiveKey)
+	e.bindSessionWorkDir(msg.SessionKey, target.WorkDir)
 	_ = sessions.SwitchToAgentSession(msg.SessionKey, target.ID, agent.Name(), target.Summary)
-	if e.dirHistory != nil {
-		e.dirHistory.Add(e.name, target.WorkDir)
-	}
-	if e.projectState != nil {
-		e.projectState.SetWorkDirOverride(target.WorkDir)
-		e.projectState.Save()
-	}
 
 	shortID := target.ID
 	if len(shortID) > 12 {
@@ -17398,6 +17501,13 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 // the resolved workspace path for callers that need to forward it to
 // processInteractiveMessageWith (idle reaper bookkeeping, reply footer, etc).
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
+	if forcedWorkDir := e.sendWorkDirForSession(msg.SessionKey); forcedWorkDir != "" {
+		agent, sessions, err := e.getOrCreateWorkspaceAgent(forcedWorkDir)
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+		return agent, sessions, forcedWorkDir + ":" + msg.SessionKey, forcedWorkDir, nil
+	}
 	if !e.multiWorkspace {
 		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
@@ -17481,6 +17591,21 @@ func (e *Engine) bindSendWorkDir(sessionKey, workDir string) {
 			e.sendWorkDirs[key] = workDir
 		}
 	}
+}
+
+// bindSessionWorkDir binds exactly one chat/session. Unlike bindSendWorkDir it
+// deliberately does not add the direct-participant fallback key: /goto in one
+// chat must never reroute another chat owned by the same user.
+func (e *Engine) bindSessionWorkDir(sessionKey, workDir string) {
+	if sessionKey == "" || workDir == "" {
+		return
+	}
+	e.sendWorkDirMu.Lock()
+	defer e.sendWorkDirMu.Unlock()
+	if e.sendWorkDirs == nil {
+		e.sendWorkDirs = make(map[string]string)
+	}
+	e.sendWorkDirs[sessionKey] = workDir
 }
 
 func (e *Engine) sendWorkDirForSession(sessionKey string) string {

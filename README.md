@@ -512,13 +512,26 @@ cc-connect update --pre     # Include pre-releases
 /dir [path|reset] Show, switch, or reset work directory
 ```
 
-`/list` and `/switch` remain scoped to the current work directory. For agents
-that support global session discovery (currently Codex), `/tasks` shows the 15
-most recent sessions from all local work directories. Use `/tasks <keyword>` to
-search by title, directory, or ID, then `/goto <number>` to switch the work
-directory and resume that session. The numbered list is kept per chat in memory;
-run `/tasks` again after restarting cc-connect. These commands are unavailable
-in multi-workspace mode, where workspace routing is managed separately.
+`/list` and `/switch` remain scoped to the current work directory. Cross-directory
+routing is disabled by default and is restricted to users in `admin_from`. For
+agents that support global session discovery (currently Codex), enable it with
+an explicit root allowlist:
+
+```toml
+[[projects]]
+admin_from = "your-user-id"
+global_session_routing = true
+global_session_roots = ["/path/to/projects"]
+```
+
+`/tasks` then shows the 15 most recent sessions whose canonical work directory
+is inside an allowed root. Use `/tasks <keyword>` to search by title, directory,
+or ID, then `/goto <number>` to resume that session in a per-chat workspace
+context. It does not change the project's global work directory or another
+chat's context. Numbered results are isolated by chat and user and kept only in
+memory; run `/tasks` again after restarting cc-connect. These commands are
+unavailable in multi-workspace mode, where workspace routing is managed
+separately.
 
 Project configs rotate to a fresh session automatically after long inactivity. This prevents "context drift" where stale chat history (failed commands, debugging noise) is repeatedly re-ingested via `--continue` and starts to dominate the model's attention. The previous session is preserved and remains accessible via `/list` and `/switch`.
 

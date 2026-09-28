@@ -518,17 +518,36 @@ func TestCUJ_B3_SwitchPreservesHistoryEndToEnd(t *testing.T) {
 // CUJ-B4: discover a session outside the current work directory, resume it,
 // then verify that the selected session is now active.
 func TestCUJ_B4_GlobalTaskDiscoveryAndResume(t *testing.T) {
-	alpha := t.TempDir()
-	beta := t.TempDir()
-	agent := &stubGlobalTaskAgent{
-		stubWorkDirAgent: stubWorkDirAgent{workDir: alpha},
-		sessions: []AgentSessionInfo{
-			{ID: "alpha-session-id", Summary: "Alpha login fix", WorkDir: alpha, ModifiedAt: time.Now().Add(-time.Hour)},
-			{ID: "beta-session-id", Summary: "Beta refactor", WorkDir: beta, ModifiedAt: time.Now()},
+	root := t.TempDir()
+	alpha := filepath.Join(root, "alpha")
+	beta := filepath.Join(root, "beta")
+	for _, dir := range []string{alpha, beta} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agentName := "test-cuj-global-session-routing"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		workDir, _ := opts["work_dir"].(string)
+		return &namedStubWorkDirAgent{
+			stubWorkDirAgent: stubWorkDirAgent{workDir: workDir},
+			name:             agentName,
+		}, nil
+	})
+	agent := &namedStubGlobalTaskAgent{
+		name: agentName,
+		stubGlobalTaskAgent: stubGlobalTaskAgent{
+			stubWorkDirAgent: stubWorkDirAgent{workDir: alpha},
+			sessions: []AgentSessionInfo{
+				{ID: "alpha-session-id", Summary: "Alpha login fix", WorkDir: alpha, ModifiedAt: time.Now().Add(-time.Hour)},
+				{ID: "beta-session-id", Summary: "Beta refactor", WorkDir: beta, ModifiedAt: time.Now()},
+			},
 		},
 	}
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetAdminFrom("alice")
+	e.SetGlobalSessionRouting(true, []string{root})
 	msg := func(content string) *Message {
 		return &Message{
 			SessionKey: "test:alice",
