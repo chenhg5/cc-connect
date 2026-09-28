@@ -1679,8 +1679,8 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project 4: Using Codex agent / 项目 4：使用 Codex agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Requires: npm install -g @openai/codex
-# 需要安装：npm install -g @openai/codex
+# Requires a Codex CLI: npm install -g @openai/codex, or a supported macOS desktop app.
+# 需要 Codex CLI：npm install -g @openai/codex，或支持的 macOS 桌面应用。
 # Codex uses `codex exec --json` under the hood.
 # Codex 底层使用 `codex exec --json` 命令。
 
@@ -1689,6 +1689,10 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent]
 # type = "codex"
+# CLI lookup: cmd > CODEX_CLI_PATH > PATH; macOS also discovers current/legacy
+# ChatGPT.app and Codex.app bundled CLIs when no command override is set.
+# 命令查找：cmd > CODEX_CLI_PATH > PATH；未指定命令时，macOS 还会查找
+# ChatGPT.app、Codex.app 的新旧内置 CLI 目录。详见 docs/usage.zh-CN.md。
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"

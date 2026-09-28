@@ -91,6 +91,26 @@ reset_on_idle_mins = 60
 | 全自动 | `full-auto` | 自动通过 + 沙箱保护 |
 | YOLO | `yolo` | 跳过所有审批 |
 
+### macOS 上的 Codex CLI 查找
+
+Codex 适配器按以下顺序选择可执行文件：
+
+1. 项目的 `cmd` 配置（兼容已弃用的 `cli_path` / `command`）。
+2. 未配置命令时，读取启动 cc-connect 的进程环境中的 `CODEX_CLI_PATH`。
+3. 从该进程的 `PATH` 查找可执行的 `codex`。
+4. macOS 下依次查找 `/Applications/ChatGPT.app`、`/Applications/Codex.app`；每个应用优先检查新目录 `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`，再检查旧目录 `Contents/Resources/codex`。
+
+PATH 中没有命令或软链接失效时，会继续查找桌面应用。显式命令或 `CODEX_CLI_PATH` 必须有效，否则报错。每次启动 CLI 子进程都会重新查找，以兼容应用更新后的目录变化。Linux、Windows 继续使用配置的命令或 PATH。
+
+`exec`、`app_server`、运行配置读取、技能查询及 `/doctor` 使用同一选择规则。路径包含空格或需要额外参数时，使用数组形式：
+
+```toml
+[projects.agent.options]
+cmd = ["/path with spaces/codex", "--profile", "work"]
+```
+
+此功能通过现有 Codex 适配器运行应用内置 CLI。桌面专有工具和共享会话写锁有独立的适配要求，参见 [桌面后端讨论 #651](https://github.com/chenhg5/cc-connect/issues/651) 和 [会话写锁冲突 #1909](https://github.com/chenhg5/cc-connect/issues/1909)。
+
 ### Cursor Agent 模式
 
 | 模式 | 配置值 | 行为 |

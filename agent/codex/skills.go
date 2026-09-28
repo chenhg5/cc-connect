@@ -23,8 +23,9 @@ func (a *Agent) ListSkills(ctx context.Context) ([]*core.Skill, error) {
 	env = append(env, a.providerEnvLocked()...)
 	env = append(env, a.sessionEnv...)
 	a.mu.RUnlock()
-	if bin == "" {
-		bin = "codex"
+	bin, err := resolveCodexExecutable(bin)
+	if err != nil {
+		return nil, fmt.Errorf("codex: skills resolve CLI: %w", err)
 	}
 	if codexHome != "" {
 		env = append(env, "CODEX_HOME="+codexHome)

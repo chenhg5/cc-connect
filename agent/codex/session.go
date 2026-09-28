@@ -154,9 +154,9 @@ func (cs *codexSession) Send(prompt string, messageID string, images []core.Imag
 		args = append(append([]string{}, cs.cliExtraArgs...), args...)
 	}
 
-	bin := cs.cmd
-	if bin == "" {
-		bin = "codex"
+	bin, err := resolveCodexExecutable(cs.cmd)
+	if err != nil {
+		return fmt.Errorf("codexSession: resolve CLI: %w", err)
 	}
 
 	slog.Debug("codexSession: launching", "resume", isResume, "args", core.RedactArgs(args))
@@ -677,8 +677,13 @@ func codexToolSuccess(status string, exitCode *int) bool {
 	return s == "completed" || s == "success" || s == "succeeded" || s == "ok"
 }
 
-func loadCodexRuntimeConfig(ctx context.Context, workDir string, extraEnv []string) (string, string, error) {
-	cmd := exec.CommandContext(ctx, "codex", "app-server")
+func loadCodexRuntimeConfig(ctx context.Context, cliBin string, cliExtraArgs []string, workDir string, extraEnv []string) (string, string, error) {
+	bin, err := resolveCodexExecutable(cliBin)
+	if err != nil {
+		return "", "", fmt.Errorf("runtime config resolve CLI: %w", err)
+	}
+	args := append(append([]string(nil), cliExtraArgs...), "app-server")
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = workDir
 	prepareCmdForKill(cmd)
 	if len(extraEnv) > 0 {
@@ -860,7 +865,7 @@ func (cs *codexSession) runtimeConfig() (string, string) {
 	ctx, cancel := context.WithTimeout(cs.ctx, codexRuntimeConfigTimeout)
 	defer cancel()
 
-	model, effort, err := loadCodexRuntimeConfig(ctx, cs.workDir, cs.extraEnv)
+	model, effort, err := loadCodexRuntimeConfig(ctx, cs.cmd, cs.cliExtraArgs, cs.workDir, cs.extraEnv)
 	if err == nil {
 		cs.runtimeCfgModel = model
 		cs.runtimeCfgEffort = effort
