@@ -5068,8 +5068,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"status", event.ToolStatus)
 
 			case EventResult:
-				// Resolve hook context first so the fingerprint window lock uses
-				// the same effective workspace key as the foreground path.
+				// Resolve hook context from the state so the emitted event
+				// carries the same session/workspace identity as the
+				// foreground path.
 				state.mu.Lock()
 				hookSessionKey := state.ccSessionKey
 				hookWorkspace := state.workspaceDir
@@ -5089,17 +5090,6 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 						hookWorkspace = wd.GetWorkDir()
 					}
 				}
-
-				// Serialize the fingerprint window per workspace: baseline is
-				// sampled inside the lock, so concurrent turns in the same
-				// directory cannot pollute this background turn's Changed flag.
-				// The lock also refreshes the baseline per background turn —
-				// a single reader may relay multiple EventResult turns.
-				fpLock := e.workspaceFingerprintLock(hookWorkspace)
-				if fpLock != nil {
-					fpLock.Lock()
-				}
-				turnStartGitFingerprint := workspaceGitFingerprint(e.ctx, hookWorkspace)
 
 				fullResponse := event.Content
 				if fullResponse == "" && len(textParts) > 0 {
@@ -5126,12 +5116,14 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 						Source:     "agent.background_reply",
 						Internal:   false,
 						ReplyKind:  "text",
-						Changed:    turnStartGitFingerprint != "" && turnStartGitFingerprint != workspaceGitFingerprint(e.ctx, hookWorkspace),
-						Content:    fullResponse,
+						// The unsolicited protocol offers no turn-start
+						// boundary we can sample before the agent works, so
+						// tree changes cannot be attributed to this background
+						// turn. Report false rather than claim a change we did
+						// not observe (false does NOT mean "no change").
+						Changed: false,
+						Content: fullResponse,
 					})
-				}
-				if fpLock != nil {
-					fpLock.Unlock()
 				}
 
 				// Safety note: concurrent writes to session.History by the
@@ -6444,7 +6436,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Source:     "agent.final_reply",
 					Internal:   false,
 					ReplyKind:  replyKind,
-					Changed:    turnStartGitFingerprint != "" && turnStartGitFingerprint != workspaceGitFingerprint(e.ctx, hookWorkspace),
+					Changed:    fingerprintChanged(turnStartGitFingerprint, workspaceGitFingerprint(e.ctx, hookWorkspace)),
 					Content:    fullResponse,
 				})
 			}
@@ -12425,6 +12417,15 @@ func workspaceGitFingerprint(ctx context.Context, workDir string) string {
 		return ""
 	}
 	return string(status) + "\x00" + string(head)
+}
+
+// fingerprintChanged reports whether the working tree changed during a turn.
+// It is deliberately conservative: false when either scan failed (start or end
+// empty), because a failed end scan must never be reported as a change. Callers
+// document that false does NOT mean "no change" (non-git workspaces, fresh
+// repos without commits, and git failures all yield false).
+func fingerprintChanged(start, end string) bool {
+	return start != "" && end != "" && start != end
 }
 
 // workspaceFingerprintLock returns the per-workspace mutex that serializes git

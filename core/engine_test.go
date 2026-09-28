@@ -1091,6 +1091,271 @@ func TestWorkspaceGitFingerprint(t *testing.T) {
 	}
 }
 
+// TestFingerprintChanged_ConservativeOnFailedScan pins the owner-mandated
+// conservative semantics: a failed end scan (end == "") must never be reported
+// as a change, even when the start scan succeeded and the tree really changed.
+func TestFingerprintChanged_ConservativeOnFailedScan(t *testing.T) {
+	cases := []struct {
+		name       string
+		start, end string
+		want       bool
+	}{
+		{"both-empty", "", "", false},
+		{"start-failed-end-ok", "", "fp-b", false},
+		{"start-ok-end-failed", "fp-a", "", false},
+		{"unchanged", "fp-a", "fp-a", false},
+		{"changed", "fp-a", "fp-b", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fingerprintChanged(tc.start, tc.end); got != tc.want {
+				t.Fatalf("fingerprintChanged(%q, %q) = %v, want %v", tc.start, tc.end, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProcessInteractiveEvents_FailedEndScanIsNotReportedAsChanged is the
+// engine-level regression for the conservative Changed semantics: the turn
+// starts in a real git repo (baseline scan succeeds) but the workspace is
+// destroyed before the finalized emit, so the end scan fails. The emitted
+// event must carry Changed=false, not true.
+func TestProcessInteractiveEvents_FailedEndScanIsNotReportedAsChanged(t *testing.T) {
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "base.txt")
+	runGit("commit", "-qm", "init")
+
+	p := &stubPlatformEngine{n: "feishu"}
+	srv, hookEvents := newFinalizedHookServer(t)
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event: string(HookEventMessageFinalized),
+		Type:  "http",
+		URL:   srv.URL,
+		Async: boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-endscan-fail")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-endscan",
+		ccSessionKey: sessionKey,
+		workspaceDir: dir,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "msg-1", time.Now(), nil, nil, state.replyCtx, 0)
+	}()
+
+	// Wait until the turn holds the fingerprint window lock (baseline sampled),
+	// then destroy the workspace so the end-of-turn scan fails.
+	fpLock := e.workspaceFingerprintLock(dir)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if !fpLock.TryLock() {
+			time.Sleep(500 * time.Millisecond)
+			break
+		}
+		fpLock.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("engine goroutine did not acquire the fingerprint lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	agentSession.events <- Event{Type: EventResult, Content: "reply", Done: true}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not finish")
+	}
+	select {
+	case ev := <-hookEvents:
+		if ev.Changed {
+			t.Fatalf("Changed = true after a failed end scan; want conservative false")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("message.finalized hook did not fire")
+	}
+}
+
+// matrixStreamingCard is a fake StreamingCard whose Finalize can be made to
+// fail (fallback path) and that touches a marker file when it succeeds, so the
+// hook command can prove it ran after the card was finalized.
+type matrixStreamingCard struct {
+	marker       string
+	failFinalize bool
+	finalized    atomic.Int32
+}
+
+func (c *matrixStreamingCard) Update(context.Context, string) error { return nil }
+func (c *matrixStreamingCard) Finalize(_ context.Context, _ string) error {
+	c.finalized.Add(1)
+	if c.failFinalize {
+		return fmt.Errorf("finalize failed")
+	}
+	if c.marker != "" {
+		_ = os.WriteFile(c.marker, []byte("1"), 0600)
+	}
+	return nil
+}
+func (c *matrixStreamingCard) Failed() bool { return false }
+
+// matrixPlatform optionally exposes a streaming card and can fail Send, so a
+// single table drives the plain / card / fallback / send-failure reply paths.
+type matrixPlatform struct {
+	stubPlatformEngine
+	card    *matrixStreamingCard
+	sendErr error
+	marker  string
+}
+
+func (p *matrixPlatform) CreateStreamingCard(context.Context, any) (StreamingCard, error) {
+	if p.card == nil {
+		return nil, fmt.Errorf("streaming cards unsupported")
+	}
+	return p.card, nil
+}
+func (p *matrixPlatform) Send(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
+	p.sent = append(p.sent, content)
+	p.mu.Unlock()
+	if p.sendErr != nil {
+		return p.sendErr
+	}
+	if p.marker != "" {
+		_ = os.WriteFile(p.marker, []byte("1"), 0600)
+	}
+	return nil
+}
+
+// TestProcessInteractiveEvents_FinalizedExactlyOnceMatrix covers the
+// exactly-once / send-after contract across the reply paths: the finalized hook
+// fires exactly once and only after a successful delivery (plain send, streaming
+// card, card fallback), and never for silent (NO_REPLY) or failed sends. The
+// hook command appends a line only when the delivery marker already exists, so
+// exactly one line both proves ordering and rules out duplicate emits.
+func TestProcessInteractiveEvents_FinalizedExactlyOnceMatrix(t *testing.T) {
+	cases := []struct {
+		name         string
+		content      string
+		sideText     string
+		useCard      bool
+		failCard     bool
+		sendErr      error
+		wantFired    bool
+		wantDelivery bool
+		markerOwner  string // "send" or "card"
+	}{
+		{name: "plain", content: "hello", wantFired: true, wantDelivery: true, markerOwner: "send"},
+		{name: "streaming-card", content: "hello", useCard: true, wantFired: true, wantDelivery: true, markerOwner: "card"},
+		{name: "streaming-card-fallback", content: "hello", useCard: true, failCard: true, wantFired: true, wantDelivery: true, markerOwner: "send"},
+		{name: "suppressed-duplicate", content: "dup", sideText: "dup", wantFired: true, wantDelivery: false},
+		{name: "plain-send-failure", content: "hello", sendErr: fmt.Errorf("send failed"), wantFired: false},
+		{name: "silent-no-reply", content: "NO_REPLY", wantFired: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sendMarker := filepath.Join(dir, "send-marker")
+			cardMarker := filepath.Join(dir, "card-marker")
+			hookLog := filepath.Join(dir, "hook.log")
+
+			marker := sendMarker
+			if tc.markerOwner == "card" {
+				marker = cardMarker
+			}
+
+			p := &matrixPlatform{
+				stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+				sendErr:            tc.sendErr,
+				marker:             sendMarker,
+			}
+			if tc.useCard {
+				p.card = &matrixStreamingCard{marker: cardMarker, failFinalize: tc.failCard}
+			}
+
+			e := NewEngine("my-project", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetHooks(NewHookManager("my-project", []HookConfig{{
+				Event:   string(HookEventMessageFinalized),
+				Type:    "command",
+				Command: "echo fired >> '" + hookLog + "'; test -f '" + marker + "' && echo ok >> '" + hookLog + "'",
+				Async:   boolPtr(false),
+			}}, "sh", "-c", ""))
+
+			sessionKey := "feishu:chat:user"
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("s-matrix")
+			state := &interactiveState{
+				agentSession: agentSession,
+				platform:     p,
+				replyCtx:     "ctx-matrix",
+				ccSessionKey: sessionKey,
+				sideText:     tc.sideText,
+			}
+			e.interactiveStates[sessionKey] = state
+
+			agentSession.events <- Event{Type: EventResult, Content: tc.content, Done: true}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "turn-1", time.Now(), nil, nil, state.replyCtx, 0)
+
+			data, _ := os.ReadFile(hookLog)
+			fired := 0
+			sent := 0
+			for _, line := range strings.Fields(string(data)) {
+				switch line {
+				case "fired":
+					fired++
+				case "ok":
+					sent++
+				}
+			}
+			if tc.wantFired {
+				if fired != 1 {
+					t.Fatalf("finalized hook fired %d times, want exactly once (log=%q marker=%s exists=%v)", fired, string(data), marker, fileExists(marker))
+				}
+				if tc.wantDelivery && sent != 1 {
+					t.Fatalf("hook did not observe a successful delivery before firing (log=%q)", string(data))
+				}
+				if !tc.wantDelivery && sent != 0 {
+					t.Fatalf("suppressed duplicate delivered again (log=%q)", string(data))
+				}
+			} else if fired != 0 {
+				t.Fatalf("finalized hook fired %d times, want none: %q", fired, string(data))
+			}
+		})
+	}
+}
+
+func fileExists(p string) bool {
+	if p == "" {
+		return false
+	}
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 func TestProcessInteractiveEvents_FinalizedHookRunsAfterReplySend(t *testing.T) {
 	dir := t.TempDir()
 	sentMarker := filepath.Join(dir, "sent")
