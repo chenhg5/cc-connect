@@ -79,8 +79,10 @@ func (a *Agent) CLIBinaryName() string  { return a.cmd }
 func (a *Agent) CLIDisplayName() string { return "GitHub Copilot" }
 
 // SkillDirs exposes Copilot's project and user skill roots to cc-connect's
-// SkillRegistry. Copilot CLI discovers these same roots when config discovery
-// is enabled for a programmatic session.
+// SkillRegistry. Project roots are searched from the working directory upward,
+// with the nearest root taking precedence; personal roots are appended last.
+// Copilot CLI discovers these same roots when config discovery is enabled for
+// a programmatic session.
 func (a *Agent) SkillDirs() []string {
 	a.mu.RLock()
 	workDir := a.workDir
