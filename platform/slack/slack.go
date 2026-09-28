@@ -88,7 +88,9 @@ func New(opts map[string]any) (core.Platform, error) {
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
-	threadContext := true
+	// Off by default: the transcript carries text from people allow_from does
+	// not admit (Slack Connect guests, private channels) into the agent prompt.
+	threadContext := false
 	if v, ok := opts["thread_context"].(bool); ok {
 		threadContext = v
 	}
