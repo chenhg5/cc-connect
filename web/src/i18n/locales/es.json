@@ -373,6 +373,13 @@
     "rlMaxMessagesHint": "Máx. mensajes por ventana; 0 = desactivado",
     "rlWindowSecs": "Ventana (seg)",
     "rlWindowSecsHint": "Ventana de tiempo en segundos",
+    "retriableError": "Errores reintentables",
+    "retriableInitialDelay": "Retraso del primer reintento (s)",
+    "retriableInitialDelayHint": "Retraso antes del primer reintento; 0 = reintentar de inmediato",
+    "retriableRetryDelay": "Retraso entre reintentos (s)",
+    "retriableRetryDelayHint": "Retraso entre reintentos posteriores; 0 = reintentar de inmediato",
+    "retriableMaxAttempts": "Intentos máximos",
+    "retriableMaxAttemptsHint": "Intentos totales, incluido el primer envío",
     "log": "Registro",
     "logLevel": "Nivel de registro"
   },
