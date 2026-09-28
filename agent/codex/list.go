@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+const maxCodexJSONLLineSize = 64 * 1024 * 1024
 
 // resolveCodexHomeDir returns the effective CODEX_HOME directory.
 // Priority: explicit config value > CODEX_HOME env > ~/.codex
@@ -133,7 +136,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	userMsgSeen := 0
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 256*1024), maxCodexJSONLLineSize)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -191,6 +194,10 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("codex: scan session file", "path", path, "error", err)
+		return nil
+	}
 
 	// Filter by cwd
 	if filterCwd != "" && sessionCwd != "" && sessionCwd != filterCwd {
@@ -244,6 +251,17 @@ func findSessionFile(sessionID, codexHome string) string {
 	return found
 }
 
+func parseCodexTimestamp(value string) time.Time {
+	if value == "" {
+		return time.Time{}
+	}
+	ts, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return ts.In(time.Local)
+}
+
 // getSessionHistory reads the JSONL transcript and returns user/assistant messages.
 func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEntry, error) {
 	path := findSessionFile(sessionID, codexHome)
@@ -256,11 +274,18 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 		return nil, err
 	}
 	defer f.Close()
+	entries, err := readCodexSessionHistory(f, limit)
+	if err != nil {
+		return nil, fmt.Errorf("codex: scan session history %s: %w", path, err)
+	}
+	return entries, nil
+}
 
+func readCodexSessionHistory(r io.Reader, limit int) ([]core.HistoryEntry, error) {
 	var entries []core.HistoryEntry
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), maxCodexJSONLLineSize)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -293,7 +318,7 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 			continue
 		}
 
-		ts, _ := time.Parse(time.RFC3339Nano, raw.Timestamp)
+		ts := parseCodexTimestamp(raw.Timestamp)
 
 		switch {
 		case item.Role == "user" && len(item.Content) > 0:
@@ -316,7 +341,9 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 			// skip reasoning items
 		}
 	}
-
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
 	if limit > 0 && len(entries) > limit {
 		entries = entries[len(entries)-limit:]
 	}
