@@ -3,6 +3,9 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +19,7 @@ import (
 // as a user-visible EventText. Regression: compaction summaries used to leak
 // into the chat as giant formatted dumps and end the turn prematurely.
 func TestHandleText_CompactionSummarySuppressed(t *testing.T) {
-	summary := "## Objective\n- 主线：迁移 Nacos\n\n## Important Details\n- 硬约束：不允许装 helm\n\n## Work State\n- 已完成 ACR tag"
+	summary := "## Objective\n- 主线：迁移 Nacos\n\n## Important Details\n- 硬约束：不允许装 helm\n\n## Work State\n### Completed\n- 已完成 ACR tag\n\n## Next Move\n1. 重新部署\n\n## Relevant Files\n- deploy/nacos.yaml"
 	jsonData, _ := json.Marshal(map[string]any{
 		"type": "text",
 		"part": map[string]any{"type": "text", "text": summary},
@@ -106,9 +109,10 @@ func TestIsOpencodeCompactionSummary(t *testing.T) {
 		text string
 		want bool
 	}{
-		{"full summary", "## Objective\n- x\n\n## Important Details\n- y\n\n## Work State\n- z", true},
-		{"objective only", "## Objective\n- x", true},
-		{"objective + work state", "## Objective\n- x\n\n## Work State\n- z", true},
+		{"full summary", "## Objective\n- x\n\n## Important Details\n- y\n\n## Work State\n### Completed\n- z\n\n## Next Move\n1. w\n\n## Relevant Files\n- a.go", true},
+		{"objective only", "## Objective\n- x", false},
+		{"objective + work state", "## Objective\n- x\n\n## Work State\n- z", false},
+		{"missing relevant files", "## Objective\n- x\n\n## Important Details\n- y\n\n## Work State\n- z\n\n## Next Move\n1. w", false},
 		{"not summary - plain reply", "测试完成，全部通过。", false},
 		{"not summary - mentions objective inline", "我完成了目标（objective）：迁移完成", false},
 		{"not summary - empty", "", false},
@@ -120,6 +124,124 @@ func TestIsOpencodeCompactionSummary(t *testing.T) {
 				t.Errorf("isOpencodeCompactionSummary(%q) = %v, want %v", c.text, got, c.want)
 			}
 		})
+	}
+}
+
+// TestHandleText_ObjectiveHeadedAnswerNotSuppressed is the regression for the
+// compaction-summary false positive: an ordinary answer that opens with
+// "## Objective" (plans, specs and reviews often use that heading) must be
+// buffered and delivered as the final answer, NOT swallowed as an internal
+// compaction summary and answered with an automatic "continue".
+func TestHandleText_ObjectiveHeadedAnswerNotSuppressed(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 3), ctx: ctx}
+
+	answer := "## Objective\n把 dr-kefu 的会话收敛到单一 server\n\n## 方案\n1. serverKey 纳入 env\n2. 回合级租约"
+	textData, _ := json.Marshal(map[string]any{
+		"type": "text",
+		"part": map[string]any{"type": "text", "text": answer},
+	})
+	var textRaw map[string]any
+	if err := json.Unmarshal(textData, &textRaw); err != nil {
+		t.Fatalf("unmarshal text: %v", err)
+	}
+	s.handleText(textRaw)
+
+	if s.expectingContinue.Load() {
+		t.Fatal("answer opening with ## Objective was treated as a compaction summary (expectingContinue set)")
+	}
+
+	finishData, _ := json.Marshal(map[string]any{
+		"type": "step-finish",
+		"part": map[string]any{"type": "step-finish", "reason": "stop"},
+	})
+	var finishRaw map[string]any
+	if err := json.Unmarshal(finishData, &finishRaw); err != nil {
+		t.Fatalf("unmarshal step-finish: %v", err)
+	}
+	s.handleStepFinish(finishRaw)
+
+	select {
+	case evt := <-s.events:
+		if evt.Type != core.EventResult {
+			t.Fatalf("event = %+v, want EventResult carrying the answer", evt)
+		}
+		if evt.Content != answer {
+			t.Errorf("EventResult.Content = %q, want the full answer", evt.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for EventResult: the answer was swallowed")
+	}
+}
+
+// TestSend_ResetsCompactionContinuations verifies the automatic-continue
+// budget is per user turn: a new Send must clear the rounds a previous turn
+// consumed, otherwise a session eventually stops resuming after a compaction
+// and the new turn ends with an empty reply.
+func TestSend_ResetsCompactionContinuations(t *testing.T) {
+	dir := t.TempDir()
+	s, err := newOpencodeSession(context.Background(), filepath.Join(dir, "missing-opencode"), nil, dir, "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer s.Close()
+
+	s.continuations.Store(maxCompactionContinuations)
+	if err := s.Send("继续", "", nil, nil); err == nil {
+		t.Fatal("Send with a missing binary should return an error")
+	}
+	if got := s.continuations.Load(); got != 0 {
+		t.Errorf("continuations = %d after Send, want 0 (budget is per turn)", got)
+	}
+}
+
+// TestReadLoop_StderrReadAfterProcessExit is the regression for the
+// concurrent-stderr read: readProcess used to call stderrBuf.String() while
+// os/exec's stderr copy goroutine was still filling the same bytes.Buffer
+// (a data race under -race, and able to observe a torn buffer). The child
+// writes one stdout event and a stderr burst larger than the OS pipe buffer,
+// so the copy goroutine is still active when stdout reaches EOF.
+func TestReadLoop_StderrReadAfterProcessExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell script")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-opencode.sh")
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("printf '{\"type\":\"step_start\",\"sessionID\":\"ses_race\"}\\n'\n")
+	b.WriteString("i=0\n")
+	b.WriteString("while [ $i -lt 8000 ]; do printf 'stderr line %s padding padding padding\\n' \"$i\" >&2; i=$((i+1)); done\n")
+	if err := os.WriteFile(script, []byte(b.String()), 0o755); err != nil {
+		t.Fatalf("write fake opencode: %v", err)
+	}
+
+	s, err := newOpencodeSession(context.Background(), script, nil, dir, "", "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.launch("hi", nil, ""); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	s.wg.Wait()
+
+	sawStderrError := false
+drain:
+	for {
+		select {
+		case evt := <-s.events:
+			if evt.Type == core.EventError && evt.Error != nil && strings.Contains(evt.Error.Error(), "stderr line") {
+				sawStderrError = true
+			}
+		default:
+			break drain
+		}
+	}
+	if !sawStderrError {
+		t.Error("stderr burst was not surfaced as an EventError after the process exited")
 	}
 }
 

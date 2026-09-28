@@ -104,6 +104,11 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	s.resultSent.Store(false)
 	s.expectingContinue.Store(false)
+	// The compaction-continue budget is per user turn: a new prompt starts a
+	// fresh turn, so it must not inherit the rounds consumed by earlier turns
+	// (otherwise a long-lived session eventually stops resuming after a
+	// compaction and the turn ends with an empty reply).
+	s.continuations.Store(0)
 	s.usageMu.Lock()
 	s.usage = nil
 	s.usageMu.Unlock()
@@ -241,11 +246,30 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 // events channel until one ends without expectingContinue.
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
-	defer func() { _ = cmd.Wait() }()
 
-	// readProcess returns true when the process ended normally (no
-	// scanner/stderr error) and the engine should keep going.
-	keepGoing := s.readProcess(stdout, stderrBuf)
+	// readProcess returns true when stdout ended cleanly (no scanner error).
+	keepGoing := s.readProcess(stdout)
+
+	// stderr may only be read AFTER cmd.Wait: until then os/exec's stderr
+	// copy goroutine is still writing into the buffer, so reading it while
+	// stdout drains is a data race on bytes.Buffer (concurrent read + write).
+	// Wait also reaps the process and flushes the copy goroutine.
+	if err := cmd.Wait(); err != nil {
+		slog.Debug("opencodeSession: process exited", "error", err)
+	}
+	if stderrMsg := stderrBuf.String(); stderrMsg != "" {
+		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
+		if strings.Contains(stderrMsg, "Session not found") {
+			s.chatID.Store("")
+			slog.Warn("opencodeSession: cleared stale session ID")
+		}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+		keepGoing = false
+	}
 
 	if !s.expectingContinue.Load() {
 		slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
@@ -282,9 +306,9 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 }
 
 // readProcess reads NDJSON events from stdout until EOF and reports whether
-// the process ended cleanly (no scanner error, no stderr content). It is the
-// body of one opencode process's read loop.
-func (s *opencodeSession) readProcess(stdout io.ReadCloser, stderrBuf *bytes.Buffer) bool {
+// stdout ended cleanly (no scanner error). It is the body of one opencode
+// process's read loop; stderr is checked by readLoop after cmd.Wait.
+func (s *opencodeSession) readProcess(stdout io.ReadCloser) bool {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
@@ -306,21 +330,6 @@ func (s *opencodeSession) readProcess(stdout io.ReadCloser, stderrBuf *bytes.Buf
 	if err := scanner.Err(); err != nil {
 		slog.Error("opencodeSession: scanner error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-		}
-		return false
-	}
-
-	stderrMsg := stderrBuf.String()
-	if stderrMsg != "" {
-		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
-		if strings.Contains(stderrMsg, "Session not found") {
-			s.chatID.Store("")
-			slog.Warn("opencodeSession: cleared stale session ID")
-		}
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -404,18 +413,28 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 }
 
 // isOpencodeCompactionSummary reports whether text is OpenCode's automatic
-// compaction summary. Compaction summaries follow a fixed template headed by
-// "## Objective" and containing at least one of the other known sections
-// ("## Important Details", "## Work State"). Normal user-facing replies
-// essentially never start with this exact header combination.
+// compaction summary. Compaction summaries are generated from a fixed prompt
+// that demands "the Markdown structure shown inside <template>" and every
+// section, in order: "## Objective", "## Important Details", "## Work State",
+// "## Next Move", "## Relevant Files". All five headings must be present, so
+// an ordinary reply that merely opens with "## Objective" (plans, specs and
+// reviews often do) is NOT swallowed as an internal summary and auto-resumed.
 func isOpencodeCompactionSummary(text string) bool {
 	trimmed := strings.TrimSpace(text)
 	if !strings.HasPrefix(trimmed, "## Objective") {
 		return false
 	}
-	return strings.Contains(trimmed, "\n## Important Details") ||
-		strings.Contains(trimmed, "\n## Work State") ||
-		strings.Contains(trimmed, "## Objective\n")
+	for _, section := range []string{
+		"\n## Important Details",
+		"\n## Work State",
+		"\n## Next Move",
+		"\n## Relevant Files",
+	} {
+		if !strings.Contains(trimmed, section) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *opencodeSession) handleToolUse(raw map[string]any) {
