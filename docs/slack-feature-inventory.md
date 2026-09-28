@@ -69,6 +69,9 @@ The Slack platform was added in commit `eaec71f` with basic functionality:
 | `app_token` | Yes | Slack app-level token for Socket Mode |
 | `allow_from` | No | User allowlist |
 | `share_session_in_channel` | No | Share session across all users in channel |
+| `session_scope` | No | Session granularity: `user` (default) / `channel` / `thread` |
+| `thread_context` | No | Read a thread the bot was pulled into before answering (default `true`) |
+| `thread_context_depth` | No | Messages read per thread bootstrap (default 20, max 100) |
 
 ## Architecture Compliance
 
