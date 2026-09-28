@@ -5245,6 +5245,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardToolCalls []cardToolEntry  // track tool calls for card content
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
+	// cardBodyText is the answer text the streaming card shows. Quiet mode
+	// shows only the text after the last tool_use.
+	cardBodyText := func() string {
+		if e.display.quietDropsPreTool() {
+			return strings.Join(textParts[postLastToolStart:], "")
+		}
+		return cardAnswerText.String()
+	}
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
@@ -5766,13 +5774,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						} else {
 							cardAnswerText.WriteString(content)
 						}
-						// Quiet mode renders only the post-tool slice, matching the
-						// finalized card.
-						liveBody := cardAnswerText.String()
-						if e.display.quietDropsPreTool() {
-							liveBody = strings.Join(textParts[postLastToolStart:], "")
-						}
-						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, liveBody))
+						_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardBodyText()))
 					}
 					handledByStreamCard = true
 				}
@@ -6241,11 +6243,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// would otherwise post the suppressed marker verbatim.
 				cardBody := fullResponse
 				if isSilent {
-					silentBody := cardAnswerText.String()
+					silentBody := cardBodyText()
 					if e.display.quietDropsPreTool() {
-						// Quiet mode shows only the post-tool slice. textParts
-						// still ends with the marker, so strip it.
-						silentBody = strings.Join(textParts[postLastToolStart:], "")
+						// The post-tool slice comes from textParts, which still
+						// ends with the marker, so strip it.
 						if stripped, ok := stripTrailingSilent(silentBody); ok {
 							silentBody = stripped
 						}

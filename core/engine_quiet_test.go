@@ -240,6 +240,54 @@ func TestQuiet_StreamingCard_LiveFramesDropPreToolLeadIn(t *testing.T) {
 	}
 }
 
+// TestQuiet_StreamingCard_PrependOptIn_LiveFramesKeepLeadIn checks that with
+// PrependPreToolText the live card frames rendered after the tool call keep
+// the pre-tool lead-in, and so does the finalized card.
+func TestQuiet_StreamingCard_PrependOptIn_LiveFramesKeepLeadIn(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "teams"},
+		card:               card,
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: false, ToolMessages: false, PrependPreToolText: true})
+	e.SetReplyFooterEnabled(false)
+
+	sessionKey := "teams:quiet-prepend-live"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("s-quiet-prepend-live")
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx-quiet-prepend-live"}
+	e.interactiveStates[sessionKey] = state
+
+	for _, ev := range []Event{
+		{Type: EventText, Content: "Let me check that for you."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"},
+		{Type: EventText, Content: "Here is the answer: /home/user."},
+		{Type: EventResult, Content: "Here is the answer: /home/user.", Done: true},
+	} {
+		sess.events <- ev
+	}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-quiet-prepend-live", time.Now(), nil, nil, state.replyCtx, 0)
+
+	postToolFrames := 0
+	for i, body := range card.updateBodies() {
+		if !strings.Contains(body, "Here is the answer: /home/user.") {
+			continue
+		}
+		postToolFrames++
+		if !strings.Contains(body, "Let me check that for you.") {
+			t.Errorf("live card frame %d dropped the pre-tool lead-in with PrependPreToolText=true: %q", i, body)
+		}
+	}
+	if postToolFrames == 0 {
+		t.Fatalf("no live card frame rendered the post-tool answer: %q", card.updateBodies())
+	}
+	final := card.finalContent()
+	if !strings.Contains(final, "Let me check that for you.") || !strings.Contains(final, "Here is the answer: /home/user.") {
+		t.Errorf("finalized card missing lead-in or answer with PrependPreToolText=true: %q", final)
+	}
+}
+
 // TestQuiet_StreamingCard_SilentAfterToolNoMarkerFlash covers a lead-in, a
 // tool call, then a bare NO_REPLY: neither the live card frames nor the
 // finalized card may render the marker or the lead-in.
