@@ -3,9 +3,11 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -460,3 +462,144 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
+func TestOpencodeSessionUsesCommandWorkingDirectory(t *testing.T) {
+	workDir := t.TempDir()
+	staleDir := t.TempDir()
+	t.Setenv("PWD", staleDir)
+	s := newExecutableFixtureSession(t, workDir, "cwd")
+	if err := s.Send("check cwd", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	events := collectFixtureEvents(t, s)
+	var got struct{ CWD, PWD string }
+	for _, event := range events {
+		if event.Type == core.EventError {
+			t.Fatalf("cwd fixture error: %v", event.Error)
+		}
+		if event.Type == core.EventText {
+			if err := json.Unmarshal([]byte(event.Content), &got); err != nil {
+				t.Fatalf("decode cwd: %v", err)
+			}
+		}
+	}
+	assertTerminalEvents(t, events, core.EventResult)
+	want := resolvedPath(t, workDir)
+	if resolvedPath(t, got.CWD) != want {
+		t.Errorf("actual cwd = %q, want %q", got.CWD, workDir)
+	}
+	if runtime.GOOS != "windows" && resolvedPath(t, got.PWD) != want {
+		t.Errorf("PWD = %q, want %q (parent PWD was %q)", got.PWD, workDir, staleDir)
+	}
+}
+
+func TestOpencodeSessionNonzeroExitWithoutStderrEmitsOneError(t *testing.T) {
+	s := newExecutableFixtureSession(t, t.TempDir(), "exit7")
+	if err := s.Send("fail", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	assertTerminalEvents(t, collectFixtureEvents(t, s), core.EventError)
+}
+
+func TestOpencodeSessionJSONErrorEmitsOneTerminalEvent(t *testing.T) {
+	s := newExecutableFixtureSession(t, t.TempDir(), "json-error")
+	if err := s.Send("fail", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	assertTerminalEvents(t, collectFixtureEvents(t, s), core.EventError)
+}
+
+func TestOpencodeSessionSuccessfulTurnEmitsOneResult(t *testing.T) {
+	s := newExecutableFixtureSession(t, t.TempDir(), "success")
+	if err := s.Send("succeed", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	assertTerminalEvents(t, collectFixtureEvents(t, s), core.EventResult)
+}
+
+// TestOpenCodeExecutableFixture is run as a child executable by Send.
+func TestOpenCodeExecutableFixture(t *testing.T) {
+	mode := os.Getenv("CC_OPENCODE_TEST_FIXTURE")
+	if mode == "" {
+		return
+	}
+	switch mode {
+	case "cwd":
+		cwd, err := os.Getwd()
+		if err != nil {
+			os.Exit(2)
+		}
+		content, _ := json.Marshal(struct{ CWD, PWD string }{cwd, os.Getenv("PWD")})
+		line, _ := json.Marshal(map[string]any{"type": "text", "part": map[string]string{"text": string(content)}})
+		fmt.Println(string(line))
+	case "exit7":
+		os.Exit(7)
+	case "json-error":
+		fmt.Println(`{"type":"error","error":"fixture failure"}`)
+		os.Exit(1)
+	case "success":
+		fmt.Println(`{"type":"step_finish","part":{"reason":"stop"}}`)
+	default:
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+func newExecutableFixtureSession(t *testing.T, workDir, mode string) *opencodeSession {
+	t.Helper()
+	cliPath, err := os.Executable()
+	if err != nil {
+		t.Fatalf("test executable: %v", err)
+	}
+	s, err := newOpencodeSession(context.Background(), cliPath, []string{"-test.run=^TestOpenCodeExecutableFixture$"}, workDir, "", "default", "", "", []string{"CC_OPENCODE_TEST_FIXTURE=" + mode})
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	return s
+}
+
+func collectFixtureEvents(t *testing.T, s *opencodeSession) []core.Event {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { s.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for fixture process")
+	}
+	var events []core.Event
+	for len(s.events) > 0 {
+		events = append(events, <-s.events)
+	}
+	return events
+}
+
+func assertTerminalEvents(t *testing.T, events []core.Event, want core.EventType) {
+	t.Helper()
+	var terminal []core.Event
+	for _, event := range events {
+		if event.Type == core.EventError || event.Type == core.EventResult {
+			terminal = append(terminal, event)
+		}
+	}
+	if len(terminal) != 1 || terminal[0].Type != want {
+		t.Errorf("terminal events = %v, want exactly one %s (all events: %v)", terminal, want, events)
+	}
+}
+
+func resolvedPath(t *testing.T, path string) string {
+	t.Helper()
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("absolute path %q: %v", path, err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		t.Fatalf("resolve path %q: %v", path, err)
+	}
+	return resolved
+}
