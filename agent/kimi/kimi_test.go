@@ -184,10 +184,10 @@ func TestAgentAvailableModels(t *testing.T) {
 	require.True(t, len(models) > 0)
 }
 
-// Regression: /model used a stale hard-coded Kimi model list instead of the
-// aliases configured in Kimi Code itself. Kimi Code 2.0 exposes its catalog via
-// `kimi provider list --json`; that catalog must take priority over cc-connect
-// provider models and must be queried with the configured command environment.
+// Regression: without configured models, /model used a stale hard-coded Kimi
+// model list instead of the aliases configured in Kimi Code itself. Kimi Code
+// exposes its catalog via `kimi provider list --json`; discovery must use the
+// configured command environment.
 func TestAgentAvailableModels_UsesKimiCodeCatalog(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "fake-kimi")
 	script := `#!/bin/sh
@@ -210,11 +210,7 @@ printf '%s\n' '{"providers":{"private":{"apiKey":"must-not-be-used"}},"models":{
 			"KIMI_DISCOVERY_TOKEN=available",
 			"EXPECTED_WORK_DIR=" + workDir,
 		},
-		providers: []core.ProviderConfig{{
-			Name:   "cc-provider",
-			Models: []core.ModelOption{{Name: "stale/configured-model"}},
-		}},
-		activeIdx: 0,
+		activeIdx: -1,
 	}
 
 	models := a.AvailableModels(context.Background())
@@ -224,9 +220,18 @@ printf '%s\n' '{"providers":{"private":{"apiKey":"must-not-be-used"}},"models":{
 	}, models)
 }
 
-func TestAgentAvailableModels_FallsBackToConfiguredModels(t *testing.T) {
+func TestAgentAvailableModels_PrefersConfiguredModels(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "fake-kimi")
+	marker := filepath.Join(t.TempDir(), "cli-called")
+	script := `#!/bin/sh
+printf 'called' > "$KIMI_MARKER"
+printf '%s\n' '{"models":{"cli/model":{}}}'
+`
+	require.NoError(t, os.WriteFile(bin, []byte(script), 0o755))
+
 	a := &Agent{
-		cmd: "/does/not/exist/kimi",
+		cmd:       bin,
+		configEnv: []string{"KIMI_MARKER=" + marker},
 		providers: []core.ProviderConfig{{
 			Name:   "configured",
 			Models: []core.ModelOption{{Name: "configured/model"}},
@@ -236,6 +241,8 @@ func TestAgentAvailableModels_FallsBackToConfiguredModels(t *testing.T) {
 
 	models := a.AvailableModels(context.Background())
 	require.Equal(t, []core.ModelOption{{Name: "configured/model"}}, models)
+	_, err := os.Stat(marker)
+	require.ErrorIs(t, err, os.ErrNotExist, "configured models should skip CLI discovery")
 }
 
 // TestListKimiSessions_BothFlavors is the #1561 session-listing regression

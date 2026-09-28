@@ -162,10 +162,10 @@ func (a *Agent) configuredModels() []core.ModelOption {
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
-	if models := a.discoverModels(ctx); len(models) > 0 {
+	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
-	if models := a.configuredModels(); len(models) > 0 {
+	if models := a.discoverModels(ctx); len(models) > 0 {
 		return models
 	}
 	return []core.ModelOption{
