@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildPlist_KeepAliveDoesNotRestartOnCleanExit(t *testing.T) {
@@ -241,6 +242,325 @@ func TestRestartKeepsUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 	}
 	if !containsCall(calls, "kickstart -kp "+userTarget) {
 		t.Fatalf("expected kickstart to user target, calls = %#v", calls)
+	}
+}
+
+// TestRestartPrefersInPlaceKickstartWhenLoadedAndPlistPresent exercises the
+// fast path introduced for #1833: when launchd already has the job loaded
+// AND the canonical plist file still exists on disk, Restart() must use
+// `launchctl kickstart -k <target>` (in-place) instead of the bootout /
+// bootstrap sequence. The in-place path sends SIGTERM and lets launchd
+// sequence the relaunch, which avoids the bootout/agent-teardown race that
+// otherwise fails the first three bootstrap attempts with
+// "Bootstrap failed: 5: Input/output error".
+func TestRestartPrefersInPlaceKickstartWhenLoadedAndPlistPresent(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	plistPath := launchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(plistPath, []byte("plist"), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	guiDomain := launchdGUIDomain()
+	userDomain := launchdUserDomain()
+	guiTarget := launchdTarget(guiDomain)
+	userTarget := launchdTarget(userDomain)
+
+	var calls []string
+	runLaunchctl = func(args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if len(args) < 2 {
+			return "", nil
+		}
+		switch args[0] {
+		case "print":
+			switch args[1] {
+			case guiDomain:
+				return "subsystem", nil
+			case guiTarget:
+				// gui target not loaded
+				return "Bootstrap failed: 113: Could not find service", fmt.Errorf("exit status 113")
+			case userTarget:
+				return "pid = 4321\nstate = running", nil
+			default:
+				return "", fmt.Errorf("unexpected print target %q", args[1])
+			}
+		case "kickstart":
+			// In-place restart uses `kickstart -k` (kill+relaunch).
+			// We do NOT expect `kickstart -kp` on the in-place path.
+			if containsCall(calls[:len(calls)-1], "kickstart -k "+userTarget) {
+				t.Fatalf("kickstart -k called more than once")
+			}
+			return "", nil
+		default:
+			return "", fmt.Errorf("in-place path must not call %q (calls = %#v)", args[0], calls)
+		}
+	}
+
+	mgr := &launchdManager{}
+	if err := mgr.Restart(); err != nil {
+		t.Fatalf("Restart() error = %v", err)
+	}
+
+	// The in-place path must call kickstart -k on the user target (where
+	// the job is loaded) and must not touch bootout/bootstrap at all.
+	if !containsCall(calls, "kickstart -k "+userTarget) {
+		t.Fatalf("expected in-place `kickstart -k %s`, calls = %#v", userTarget, calls)
+	}
+	if containsCall(calls, "bootout "+userTarget) || containsCall(calls, "bootout "+guiTarget) {
+		t.Fatalf("in-place path must not call bootout, calls = %#v", calls)
+	}
+	if containsCall(calls, "bootstrap "+userDomain+" "+plistPath) ||
+		containsCall(calls, "bootstrap "+guiDomain+" "+plistPath) {
+		t.Fatalf("in-place path must not call bootstrap, calls = %#v", calls)
+	}
+	if containsCall(calls, "kickstart -kp "+userTarget) ||
+		containsCall(calls, "kickstart -kp "+guiTarget) {
+		t.Fatalf("in-place path must not call `kickstart -kp`, calls = %#v", calls)
+	}
+}
+
+// TestRestartFallbackToBootoutWhenJobNotLoaded covers the case where the
+// job is not currently loaded by launchd (cold start, or it died between
+// attempts). In that case the in-place kickstart path is unavailable and
+// Restart() must fall through to the bootout / waitLaunchdTargetsGone /
+// bootstrap sequence. The 3 × 500 ms bootstrap retry remains as the safety
+// net for genuine launchd-side races.
+func TestRestartFallbackToBootoutWhenJobNotLoaded(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	plistPath := launchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(plistPath, []byte("plist"), 0644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	guiDomain := launchdGUIDomain()
+	guiTarget := launchdTarget(guiDomain)
+
+	var calls []string
+	runLaunchctl = func(args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if len(args) < 2 {
+			return "", nil
+		}
+		switch args[0] {
+		case "print":
+			// gui domain available, but neither target is loaded → triggers
+			// fallback path.
+			switch args[1] {
+			case guiDomain:
+				return "subsystem", nil
+			case guiTarget:
+				return "Bootstrap failed: 113: Could not find service", fmt.Errorf("exit status 113")
+			default:
+				return "Bootstrap failed: 113: Could not find service", fmt.Errorf("exit status 113")
+			}
+		case "bootout":
+			return "", nil
+		case "bootstrap":
+			if args[1] != guiDomain {
+				t.Fatalf("bootstrap domain = %q, want %q", args[1], guiDomain)
+			}
+			return "", nil
+		case "kickstart":
+			if args[len(args)-1] != guiTarget {
+				t.Fatalf("kickstart target = %q, want %q", args[len(args)-1], guiTarget)
+			}
+			return "", nil
+		default:
+			return "", nil
+		}
+	}
+
+	mgr := &launchdManager{}
+	if err := mgr.Restart(); err != nil {
+		t.Fatalf("Restart() error = %v", err)
+	}
+
+	// Fallback path: bootout (both targets, since loadedLaunchdTarget
+	// returned ok=false for the lookup but bootoutLaunchdTargets iterates
+	// over all), waitLaunchdTargetsGone (poll only, no writes), then
+	// bootstrap + kickstart -kp.
+	if !containsCall(calls, "bootout "+guiTarget) {
+		t.Fatalf("expected bootout %s in fallback path, calls = %#v", guiTarget, calls)
+	}
+	if !containsCall(calls, "bootstrap "+guiDomain+" "+plistPath) {
+		t.Fatalf("expected bootstrap in fallback path, calls = %#v", calls)
+	}
+	if !containsCall(calls, "kickstart -kp "+guiTarget) {
+		t.Fatalf("expected `kickstart -kp %s` in fallback path, calls = %#v", guiTarget, calls)
+	}
+	// In-place path must NOT have been taken.
+	for _, c := range calls {
+		if strings.HasPrefix(c, "kickstart -k ") {
+			t.Fatalf("fallback path must not use in-place `kickstart -k`, calls = %#v", calls)
+		}
+	}
+}
+
+// TestRestartFallbackToBootoutWhenPlistMissing covers the reinstall path:
+// the job is loaded but the canonical plist file has been removed (e.g. by
+// a concurrent uninstall). In that case in-place kickstart is unsafe
+// (launchd would relaunch the old binary indefinitely), so Restart() must
+// fall through to bootout + wait + bootstrap.
+func TestRestartFallbackToBootoutWhenPlistMissing(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	// NOTE: plist file deliberately NOT created.
+
+	guiDomain := launchdGUIDomain()
+	userDomain := launchdUserDomain()
+	guiTarget := launchdTarget(guiDomain)
+	userTarget := launchdTarget(userDomain)
+
+	var calls []string
+	runLaunchctl = func(args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if len(args) < 2 {
+			return "", nil
+		}
+		switch args[0] {
+		case "print":
+			switch args[1] {
+			case guiDomain:
+				return "subsystem", nil
+			case guiTarget:
+				return "pid = 4321\nstate = running", nil // loaded
+			default:
+				return "", fmt.Errorf("unexpected print target %q", args[1])
+			}
+		case "bootout":
+			return "", nil
+		case "bootstrap":
+			// Even though plist is missing on disk, the fallback path
+			// still attempts bootstrap (which will surface the missing
+			// plist to the operator). This matches the pre-#1833
+			// behaviour; the test pins it so we don't silently swallow.
+			return "", nil
+		case "kickstart":
+			return "", nil
+		default:
+			return "", nil
+		}
+	}
+
+	mgr := &launchdManager{}
+	if err := mgr.Restart(); err != nil {
+		t.Fatalf("Restart() error = %v", err)
+	}
+
+	if !containsCall(calls, "bootout "+guiTarget) || !containsCall(calls, "bootout "+userTarget) {
+		t.Fatalf("expected bootout of both targets when plist missing, calls = %#v", calls)
+	}
+	if !containsCall(calls, "bootstrap "+guiDomain+" "+launchdPlistPath()) {
+		t.Fatalf("expected bootstrap (fallback) when plist missing, calls = %#v", calls)
+	}
+	for _, c := range calls {
+		if strings.HasPrefix(c, "kickstart -k ") {
+			t.Fatalf("plist-missing path must not use in-place `kickstart -k`, calls = %#v", calls)
+		}
+	}
+}
+
+// TestWaitLaunchdTargetsGoneReturnsImmediatelyWhenAlreadyGone ensures the
+// helper does not waste a poll interval when launchd has already removed
+// the job before we even start polling.
+func TestWaitLaunchdTargetsGoneReturnsImmediatelyWhenAlreadyGone(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	runLaunchctl = func(args ...string) (string, error) {
+		// Always report not loaded.
+		return "Bootstrap failed: 113: Could not find service", fmt.Errorf("exit status 113")
+	}
+
+	start := time.Now()
+	waitLaunchdTargetsGone(5 * time.Second)
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("waitLaunchdTargetsGone should return immediately when job is already gone; took %v", elapsed)
+	}
+}
+
+// TestWaitLaunchdTargetsGoneReturnsAfterJobDisappears ensures the helper
+// returns within a poll interval after launchd reports the job as gone.
+// We simulate the daemon hanging around for two polls by returning
+// "loaded" for the first two print calls and "not loaded" for the third.
+func TestWaitLaunchdTargetsGoneReturnsAfterJobDisappears(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	guiDomain := launchdGUIDomain()
+
+	calls := 0
+	runLaunchctl = func(args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "print" && args[1] == guiDomain {
+			// First call: report the gui domain is available so
+			// loadedLaunchdTarget iterates into targets.
+			return "subsystem", nil
+		}
+		calls++
+		if calls <= 2 {
+			// Still loaded for first two polls.
+			return "pid = 4321\nstate = running", nil
+		}
+		// Then gone.
+		return "Bootstrap failed: 113: Could not find service", fmt.Errorf("exit status 113")
+	}
+
+	start := time.Now()
+	waitLaunchdTargetsGone(5 * time.Second)
+	elapsed := time.Since(start)
+	// Two polls of 200ms each → ~400ms minimum, plus slack.
+	if elapsed < 300*time.Millisecond {
+		t.Fatalf("waitLaunchdTargetsGone returned too fast (%v); expected at least 2 polls", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("waitLaunchdTargetsGone returned too slow (%v); expected ~400ms after two polls", elapsed)
+	}
+}
+
+// TestWaitLaunchdTargetsGoneHonoursTimeout ensures the helper gives up
+// after the configured timeout when launchd never removes the job. We use
+// a tight timeout so the test stays fast.
+func TestWaitLaunchdTargetsGoneHonoursTimeout(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	runLaunchctl = func(args ...string) (string, error) {
+		// Always report loaded.
+		return "pid = 4321\nstate = running", nil
+	}
+
+	start := time.Now()
+	// 5× the poll interval is enough margin that a tight CI runner
+	// won't flake, but still proves the timeout fires well before
+	// the production default of 30 s.
+	waitLaunchdTargetsGone(5 * launchdRestartWaitPoll)
+	elapsed := time.Since(start)
+	minExpected := 4 * launchdRestartWaitPoll
+	maxExpected := 10 * launchdRestartWaitPoll
+	if elapsed < minExpected {
+		t.Fatalf("waitLaunchdTargetsGone returned too fast (%v); expected at least %v", elapsed, minExpected)
+	}
+	if elapsed > maxExpected {
+		t.Fatalf("waitLaunchdTargetsGone returned too slow (%v); expected <%v", elapsed, maxExpected)
 	}
 }
 
