@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -1798,6 +1799,31 @@ max_attempts = 7
 	}
 }
 
+func TestEffectiveRetriableErrorConfig_ClampsOutOfRange(t *testing.T) {
+	hugeDelay := 1 << 40
+	hugeAttempts := 1 << 20
+	cfg := &Config{RetriableError: RetriableErrorConfig{
+		InitialDelaySecs: &hugeDelay,
+		RetryDelaySecs:   &hugeDelay,
+		MaxAttempts:      &hugeAttempts,
+	}}
+
+	initial, retry, attempts := EffectiveRetriableErrorConfig(cfg)
+	if initial != MaxRetriableErrorDelaySecs || retry != MaxRetriableErrorDelaySecs {
+		t.Fatalf("delays = (%d,%d), want clamped to %d", initial, retry, MaxRetriableErrorDelaySecs)
+	}
+	if attempts != MaxRetriableErrorAttempts {
+		t.Fatalf("attempts = %d, want clamped to %d", attempts, MaxRetriableErrorAttempts)
+	}
+	// Clamped seconds must convert to a time.Duration without overflow.
+	if got := time.Duration(initial) * time.Second; got <= 0 {
+		t.Fatalf("initial delay overflowed: %v", got)
+	}
+	if got := time.Duration(retry) * time.Second; got <= 0 {
+		t.Fatalf("retry delay overflowed: %v", got)
+	}
+}
+
 func TestGetAndSaveGlobalSettings_RetriableErrorConfig(t *testing.T) {
 	configPath := writeConfigFixture(t, baseConfigTOML)
 	patchConfigPath(t, configPath)
@@ -1833,6 +1859,114 @@ func TestGetAndSaveGlobalSettings_RetriableErrorConfig(t *testing.T) {
 	}
 	if cfg.RetriableError.MaxAttempts == nil || *cfg.RetriableError.MaxAttempts != maxAttempts {
 		t.Fatalf("saved max_attempts = %v, want %d", cfg.RetriableError.MaxAttempts, maxAttempts)
+	}
+}
+
+func TestSaveGlobalSettings_RejectsInvalidRetriableErrorConfig(t *testing.T) {
+	zero := 0
+	negative := -1
+	tooLargeDelay := MaxRetriableErrorDelaySecs + 1
+	tooManyAttempts := MaxRetriableErrorAttempts + 1
+
+	cases := []struct {
+		name string
+		u    GlobalSettingsUpdate
+	}{
+		{name: "max attempts zero", u: GlobalSettingsUpdate{RetriableErrorMaxAttempts: &zero}},
+		{name: "negative initial delay", u: GlobalSettingsUpdate{RetriableErrorInitialDelaySecs: &negative}},
+		{name: "negative retry delay", u: GlobalSettingsUpdate{RetriableErrorRetryDelaySecs: &negative}},
+		{name: "delay above cap", u: GlobalSettingsUpdate{RetriableErrorRetryDelaySecs: &tooLargeDelay}},
+		{name: "attempts above cap", u: GlobalSettingsUpdate{RetriableErrorMaxAttempts: &tooManyAttempts}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := writeConfigFixture(t, baseConfigTOML)
+			patchConfigPath(t, configPath)
+
+			if err := SaveGlobalSettings(tc.u); err == nil {
+				t.Fatal("SaveGlobalSettings accepted invalid retriable_error config, want error")
+			}
+			// The on-disk config must remain loadable.
+			if _, err := Load(configPath); err != nil {
+				t.Fatalf("config no longer loads after rejected save: %v", err)
+			}
+		})
+	}
+}
+
+func TestSaveGlobalSettings_AllowsEnvPlaceholderConfig(t *testing.T) {
+	t.Setenv("AGENT_USER", "deploy")
+	const placeholderFixture = `
+[[projects]]
+name = "demo"
+run_as_user = "${AGENT_USER}"
+
+[projects.agent]
+type = "claudecode"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "test-token"
+`
+	configPath := writeConfigFixture(t, placeholderFixture)
+	patchConfigPath(t, configPath)
+
+	level := "debug"
+	if err := SaveGlobalSettings(GlobalSettingsUpdate{LogLevel: &level}); err != nil {
+		t.Fatalf("SaveGlobalSettings() rejected a config using ${VAR} placeholders: %v", err)
+	}
+
+	// The placeholder must survive verbatim; it must not be baked into its
+	// resolved plaintext value on disk.
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if !strings.Contains(string(data), "${AGENT_USER}") {
+		t.Fatalf("expected ${AGENT_USER} placeholder preserved, got:\n%s", data)
+	}
+}
+
+func TestLoad_ToleratesRetriableErrorAboveCap(t *testing.T) {
+	configPath := writeConfigFixture(t, baseConfigTOML+`
+[retriable_error]
+retry_delay_secs = 999999
+max_attempts = 5000
+`)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() must tolerate above-cap legacy retriable_error values, got: %v", err)
+	}
+	// EffectiveRetriableErrorConfig clamps the accepted values at runtime.
+	if _, retry, attempts := EffectiveRetriableErrorConfig(cfg); retry != MaxRetriableErrorDelaySecs || attempts != MaxRetriableErrorAttempts {
+		t.Fatalf("clamped values = (%d, %d), want (%d, %d)", retry, attempts, MaxRetriableErrorDelaySecs, MaxRetriableErrorAttempts)
+	}
+}
+
+func TestSaveGlobalSettings_IgnoresAboveCapDiskRetriableError(t *testing.T) {
+	// Legacy config written before the caps existed.
+	configPath := writeConfigFixture(t, baseConfigTOML+`
+[retriable_error]
+retry_delay_secs = 999999
+max_attempts = 5000
+`)
+	patchConfigPath(t, configPath)
+
+	// An unrelated global setting must still be saveable.
+	level := "debug"
+	if err := SaveGlobalSettings(GlobalSettingsUpdate{LogLevel: &level}); err != nil {
+		t.Fatalf("SaveGlobalSettings() blocked by pre-existing above-cap retriable_error: %v", err)
+	}
+	if _, err := Load(configPath); err != nil {
+		t.Fatalf("config no longer loads after save: %v", err)
+	}
+
+	// A newly provided out-of-range value must still be rejected.
+	tooLarge := MaxRetriableErrorDelaySecs + 1
+	if err := SaveGlobalSettings(GlobalSettingsUpdate{RetriableErrorRetryDelaySecs: &tooLarge}); err == nil {
+		t.Fatal("SaveGlobalSettings accepted an out-of-range new retriable_error value, want error")
 	}
 }
 

@@ -1194,6 +1194,86 @@ func TestProcessInteractiveTurnWithRetry_ReplaysQueuedPromptAfterOverloaded(t *t
 	}
 }
 
+// sideEffectQueuedRetryAgentSession completes the initial turn, then on the
+// queued message emits a side-effecting tool event followed by a retriable
+// overloaded error.
+type sideEffectQueuedRetryAgentSession struct {
+	sessionID string
+	events    chan Event
+}
+
+func newSideEffectQueuedRetryAgentSession(id string) *sideEffectQueuedRetryAgentSession {
+	return &sideEffectQueuedRetryAgentSession{sessionID: id, events: make(chan Event, 8)}
+}
+
+func (s *sideEffectQueuedRetryAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	if !strings.Contains(prompt, "queued-msg") {
+		s.events <- Event{Type: EventResult, Content: "initial ok", Done: true}
+		return nil
+	}
+	s.events <- Event{Type: EventToolUse, ToolName: "shell", ToolInput: "echo hi"}
+	s.events <- Event{
+		Type:      EventError,
+		Error:     errors.New("Selected model is at capacity. Please try a different model."),
+		ErrorKind: ErrorKindOverloaded,
+	}
+	return nil
+}
+
+func (s *sideEffectQueuedRetryAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *sideEffectQueuedRetryAgentSession) Events() <-chan Event     { return s.events }
+func (s *sideEffectQueuedRetryAgentSession) CurrentSessionID() string { return s.sessionID }
+func (s *sideEffectQueuedRetryAgentSession) Alive() bool              { return true }
+func (s *sideEffectQueuedRetryAgentSession) Close() error             { close(s.events); return nil }
+
+func TestProcessInteractiveTurnWithRetry_QueuedSideEffectErrorUsesQueuedReplyCtx(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 3
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &replyCtxRecordingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newSideEffectQueuedRetryAgentSession("s1")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-1",
+		pendingMessages: []queuedMessage{
+			{platform: p, replyCtx: "ctx-queued", content: "queued-msg", messageID: "queued-1"},
+		},
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "initial-msg", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("initial-msg"), 0)
+
+	var ctx any
+	found := false
+	for _, call := range p.recordedEvents() {
+		if strings.Contains(call.content, "capacity") {
+			ctx = call.replyCtx
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no capacity error sent, got %#v", p.recordedEvents())
+	}
+	if ctx != "ctx-queued" {
+		t.Fatalf("error replyCtx = %v, want ctx-queued (queued message's context)", ctx)
+	}
+}
+
 func TestProcessInteractiveTurnWithRetry_StopCancelsRetryDelay(t *testing.T) {
 	oldInitialDelay := RetriableErrorInitialDelay
 	oldRetryDelay := RetriableErrorRetryDelay
@@ -1281,6 +1361,48 @@ func TestProcessInteractiveTurnWithRetry_ReplaysPromptAfterOverloaded(t *testing
 	}
 	if sent[1] != "ok after retry" {
 		t.Fatalf("final response = %q, want ok after retry", sent[1])
+	}
+}
+
+func TestProcessInteractiveTurnWithRetry_NoReplayAfterSideEffects(t *testing.T) {
+	oldInitialDelay := RetriableErrorInitialDelay
+	oldRetryDelay := RetriableErrorRetryDelay
+	oldMaxAttempts := RetriableErrorMaxAttempts
+	RetriableErrorInitialDelay = time.Millisecond
+	RetriableErrorRetryDelay = time.Millisecond
+	RetriableErrorMaxAttempts = 5
+	t.Cleanup(func() {
+		RetriableErrorInitialDelay = oldInitialDelay
+		RetriableErrorRetryDelay = oldRetryDelay
+		RetriableErrorMaxAttempts = oldMaxAttempts
+	})
+
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newSideEffectThenRetryAgentSession("s1")
+	state := &interactiveState{
+		agentSession:     agentSession,
+		platform:         p,
+		replyCtx:         "ctx-1",
+		eventsNeedResync: true,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
+
+	if got := agentSession.sendCount(); got != 1 {
+		t.Fatalf("sendCount = %d, want 1 (must not replay prompt after observable side effects)", got)
+	}
+	var reported bool
+	for _, msg := range p.getSent() {
+		if strings.Contains(msg, "capacity") {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Fatalf("sent = %#v, want the retriable error reported to the user", p.getSent())
 	}
 }
 
@@ -7774,6 +7896,17 @@ type alwaysRetryAgentSession struct {
 	mu        sync.Mutex
 }
 
+// sideEffectThenRetryAgentSession emits observable/side-effecting events
+// (tool use/result and text) on the first send, then a retriable overloaded
+// error. A correct engine must not replay the prompt because the first attempt
+// may already have executed side effects.
+type sideEffectThenRetryAgentSession struct {
+	sessionID string
+	events    chan Event
+	sends     int
+	mu        sync.Mutex
+}
+
 type richCardRetryOnceAgentSession struct {
 	sessionID string
 	events    chan Event
@@ -7807,6 +7940,46 @@ func newAlwaysRetryAgentSession(id string) *alwaysRetryAgentSession {
 		sessionID: id,
 		events:    make(chan Event, 8),
 	}
+}
+
+func newSideEffectThenRetryAgentSession(id string) *sideEffectThenRetryAgentSession {
+	return &sideEffectThenRetryAgentSession{
+		sessionID: id,
+		events:    make(chan Event, 8),
+	}
+}
+
+func (s *sideEffectThenRetryAgentSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	s.sends++
+	sendNo := s.sends
+	s.mu.Unlock()
+	if sendNo == 1 {
+		s.events <- Event{Type: EventToolUse, ToolName: "shell", ToolInput: "echo hi"}
+		s.events <- Event{Type: EventToolResult, ToolName: "shell", ToolResult: "hi"}
+		s.events <- Event{Type: EventText, Content: "working"}
+		s.events <- Event{
+			Type:      EventError,
+			Error:     errors.New("Selected model is at capacity. Please try a different model."),
+			ErrorKind: ErrorKindOverloaded,
+		}
+		return nil
+	}
+	s.events <- Event{Type: EventResult, Content: "ok after retry", Done: true}
+	return nil
+}
+
+func (s *sideEffectThenRetryAgentSession) RespondPermission(_ string, _ PermissionResult) error {
+	return nil
+}
+func (s *sideEffectThenRetryAgentSession) Events() <-chan Event     { return s.events }
+func (s *sideEffectThenRetryAgentSession) CurrentSessionID() string { return s.sessionID }
+func (s *sideEffectThenRetryAgentSession) Alive() bool              { return true }
+func (s *sideEffectThenRetryAgentSession) Close() error             { close(s.events); return nil }
+func (s *sideEffectThenRetryAgentSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
 }
 
 func newRichCardRetryOnceAgentSession(id string) *richCardRetryOnceAgentSession {

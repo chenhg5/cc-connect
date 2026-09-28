@@ -4067,6 +4067,10 @@ type interactiveRetryTurn struct {
 	contentLen     int
 	notify         func(string) bool
 	finalizeNotice func(ProgressCardState, CardStatus)
+	// sawSideEffects marks that the attempt already emitted observable events
+	// (text, tool use/result, permission) before the retriable error, so the
+	// turn must fail conservatively instead of replaying the prompt.
+	sawSideEffects bool
 }
 
 func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, promptContent string, msgID string, images []ImageAttachment, files []FileAttachment, replyCtx any, turnStart time.Time, logSessionKey string, contentLen int, lockGen uint64) {
@@ -4132,12 +4136,11 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 			slog.Warn("slow agent send", "elapsed", elapsed, "session", logSessionKey, "content_len", contentLen, "attempt", attempt)
 		}
 
-		if retryTurn == nil || !retryTurn.kind.IsRetriable() {
-			return
-		}
-		retryKind := retryTurn.kind
-		retryErr := retryTurn.err
-		if retryTurn.promptContent != "" {
+		// Adopt the retry turn's request context before any terminal send below:
+		// when the error came from a queued message, the platform/replyCtx must
+		// be the queued message's, otherwise an error reply would reference the
+		// wrong parent message (see the replyCtx note in the queue handling).
+		if retryTurn != nil && retryTurn.promptContent != "" {
 			promptContent = retryTurn.promptContent
 			msgID = retryTurn.msgID
 			images = retryTurn.images
@@ -4146,6 +4149,24 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 			logSessionKey = retryTurn.logSessionKey
 			contentLen = retryTurn.contentLen
 		}
+
+		if retryTurn == nil || !retryTurn.kind.IsRetriable() || retryTurn.sawSideEffects {
+			if retryTurn != nil && retryTurn.sawSideEffects {
+				slog.Warn("retriable agent error after observable events; not retrying to avoid replaying side effects", "error", retryTurn.err, "kind", retryTurn.kind, "session", logSessionKey)
+				state.mu.Lock()
+				p := state.platform
+				state.mu.Unlock()
+				if retryTurn.finalizeNotice != nil {
+					retryTurn.finalizeNotice(ProgressCardStateFailed, CardStatusError)
+				}
+				if retryTurn.err != nil {
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), retryTurn.err))
+				}
+			}
+			return
+		}
+		retryKind := retryTurn.kind
+		retryErr := retryTurn.err
 
 		if attempt >= maxAttempts {
 			slog.Error("retriable agent error exhausted", "error", retryErr, "kind", retryKind, "session", logSessionKey, "attempts", attempt)
@@ -5304,6 +5325,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	triggerAutoCompress := false
 	pendingSend := sendDone
 	var currentRetryTurn *interactiveRetryTurn
+	// sawSideEffects records whether the current Send attempt produced any
+	// observable or side-effecting event (text, tool use/result, permission).
+	// A retriable error that arrives after such events must not replay the
+	// prompt: the first attempt may already have executed shell commands or
+	// external writes. It resets when a queued message starts a new attempt.
+	sawSideEffects := false
 
 	// stopTyping tracks the current turn's typing indicator so it can be
 	// stopped when a queued message starts a new turn.
@@ -5640,6 +5667,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolUse:
+			sawSideEffects = true
 			toolCount++
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
@@ -5770,6 +5798,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			sawSideEffects = true
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -5817,6 +5846,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventText:
+			sawSideEffects = true
 			content := event.Content
 			if e.display.HideAgentFooter {
 				content = stripAgentFooterLines(content)
@@ -5948,6 +5978,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventPermissionRequest:
+			sawSideEffects = true
 			// extension_select is a Pi extension UI request routed via the
 			// AskUserQuestion rich-card path. The pi session adapter populates
 			// event.Questions so it renders as a button card (same UX as Claude
@@ -6535,6 +6566,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
+				sawSideEffects = false // new attempt for the queued message
 				currentRetryTurn = &interactiveRetryTurn{
 					promptContent: queuedPrompt,
 					msgID:         queued.messageID,
@@ -6741,6 +6773,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				retryTurn.notify = notifyRetry
 				retryTurn.finalizeNotice = finalizeRetryNotice
+				retryTurn.sawSideEffects = sawSideEffects
 				return retryTurn
 			}
 			cp.Finalize(ProgressCardStateFailed)

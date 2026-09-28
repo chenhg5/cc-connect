@@ -841,6 +841,21 @@ func TestCodexErrorKind_RetriableStreamFailures(t *testing.T) {
 			message: "authentication failed: invalid api key",
 			want:    core.ErrorKindUnknown,
 		},
+		{
+			name:    "invalid request body containing processing your request is not retriable",
+			message: "failed processing your request because the request body is invalid",
+			want:    core.ErrorKindUnknown,
+		},
+		{
+			name:    "unauthorized is not retriable",
+			message: "401 unauthorized: invalid api key provided",
+			want:    core.ErrorKindUnknown,
+		},
+		{
+			name:    "safety policy refusal is not retriable",
+			message: "This request was refused by the safety policy",
+			want:    core.ErrorKindUnknown,
+		},
 	}
 
 	for _, tc := range tests {

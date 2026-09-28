@@ -262,6 +262,15 @@ type RelayConfig struct {
 	Visibility  string `toml:"visibility,omitempty"` // "full" (default), "summary", or "none" for group visibility echoes
 }
 
+// Bounds for retriable_error settings. The delay cap keeps retry waits finite
+// and well within the int64 nanosecond range of time.Duration (the cap is
+// 86400s, far below the ~9.22e9s overflow point); the attempt cap prevents
+// unbounded retry loops.
+const (
+	MaxRetriableErrorDelaySecs = 86400
+	MaxRetriableErrorAttempts  = 1000
+)
+
 // RetriableErrorConfig controls the retry policy for retriable agent errors
 // such as Codex "Selected model is at capacity" responses.
 type RetriableErrorConfig struct {
@@ -1034,6 +1043,24 @@ func EffectiveRetriableErrorConfig(cfg *Config) (initialDelaySecs, retryDelaySec
 	if cfg.RetriableError.MaxAttempts != nil {
 		maxAttempts = *cfg.RetriableError.MaxAttempts
 	}
+	// Clamp here as well as in validation: callers may pass an unvalidated or
+	// directly-constructed Config, and an out-of-range delay would otherwise
+	// overflow time.Duration when converted to nanoseconds.
+	if initialDelaySecs < 0 {
+		initialDelaySecs = 0
+	} else if initialDelaySecs > MaxRetriableErrorDelaySecs {
+		initialDelaySecs = MaxRetriableErrorDelaySecs
+	}
+	if retryDelaySecs < 0 {
+		retryDelaySecs = 0
+	} else if retryDelaySecs > MaxRetriableErrorDelaySecs {
+		retryDelaySecs = MaxRetriableErrorDelaySecs
+	}
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	} else if maxAttempts > MaxRetriableErrorAttempts {
+		maxAttempts = MaxRetriableErrorAttempts
+	}
 	return
 }
 
@@ -1101,6 +1128,46 @@ func (c *Config) validate() error {
 	return c.validateInternal(false)
 }
 
+// validateRetriableErrorConfig checks the retriable_error bounds. Lower bounds
+// are always enforced. When strict is true the upper caps are also hard errors;
+// this is used by SaveGlobalSettings so the web admin cannot persist runaway
+// values. On the full-config Load() path (strict=false) above-cap legacy values
+// are only logged and later clamped by EffectiveRetriableErrorConfig, so an
+// upgrade does not brick startup.
+func (c *Config) validateRetriableErrorConfig(strict bool) error {
+	if c.RetriableError.InitialDelaySecs != nil {
+		if v := *c.RetriableError.InitialDelaySecs; v < 0 {
+			return fmt.Errorf("config: retriable_error.initial_delay_secs must be >= 0")
+		} else if v > MaxRetriableErrorDelaySecs {
+			if strict {
+				return fmt.Errorf("config: retriable_error.initial_delay_secs must be between 0 and %d", MaxRetriableErrorDelaySecs)
+			}
+			slog.Warn("config: retriable_error.initial_delay_secs above cap; clamping", "value", v, "cap", MaxRetriableErrorDelaySecs)
+		}
+	}
+	if c.RetriableError.RetryDelaySecs != nil {
+		if v := *c.RetriableError.RetryDelaySecs; v < 0 {
+			return fmt.Errorf("config: retriable_error.retry_delay_secs must be >= 0")
+		} else if v > MaxRetriableErrorDelaySecs {
+			if strict {
+				return fmt.Errorf("config: retriable_error.retry_delay_secs must be between 0 and %d", MaxRetriableErrorDelaySecs)
+			}
+			slog.Warn("config: retriable_error.retry_delay_secs above cap; clamping", "value", v, "cap", MaxRetriableErrorDelaySecs)
+		}
+	}
+	if c.RetriableError.MaxAttempts != nil {
+		if v := *c.RetriableError.MaxAttempts; v < 1 {
+			return fmt.Errorf("config: retriable_error.max_attempts must be >= 1")
+		} else if v > MaxRetriableErrorAttempts {
+			if strict {
+				return fmt.Errorf("config: retriable_error.max_attempts must be between 1 and %d", MaxRetriableErrorAttempts)
+			}
+			slog.Warn("config: retriable_error.max_attempts above cap; clamping", "value", v, "cap", MaxRetriableErrorAttempts)
+		}
+	}
+	return nil
+}
+
 func (c *Config) validateInternal(permissive bool) error {
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err
@@ -1118,14 +1185,8 @@ func (c *Config) validateInternal(permissive bool) error {
 	default:
 		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
 	}
-	if c.RetriableError.InitialDelaySecs != nil && *c.RetriableError.InitialDelaySecs < 0 {
-		return fmt.Errorf("config: retriable_error.initial_delay_secs must be >= 0")
-	}
-	if c.RetriableError.RetryDelaySecs != nil && *c.RetriableError.RetryDelaySecs < 0 {
-		return fmt.Errorf("config: retriable_error.retry_delay_secs must be >= 0")
-	}
-	if c.RetriableError.MaxAttempts != nil && *c.RetriableError.MaxAttempts < 1 {
-		return fmt.Errorf("config: retriable_error.max_attempts must be >= 1")
+	if err := c.validateRetriableErrorConfig(false); err != nil {
+		return err
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
@@ -4050,6 +4111,19 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	}
 	if u.RetriableErrorMaxAttempts != nil {
 		cfg.RetriableError.MaxAttempts = u.RetriableErrorMaxAttempts
+	}
+	// Validate only the retriable_error fields this update actually changes.
+	// Checking the whole raw config would reject otherwise valid configs whose
+	// other fields use ${VAR} placeholders (this path does not env-resolve them
+	// like load() does). Checking the whole retriable_error section would reject
+	// unrelated saves when the disk already holds above-cap legacy values, which
+	// the Load path deliberately tolerates and clamps at runtime.
+	if err := (&Config{RetriableError: RetriableErrorConfig{
+		InitialDelaySecs: u.RetriableErrorInitialDelaySecs,
+		RetryDelaySecs:   u.RetriableErrorRetryDelaySecs,
+		MaxAttempts:      u.RetriableErrorMaxAttempts,
+	}}).validateRetriableErrorConfig(true); err != nil {
+		return err
 	}
 	return saveConfig(cfg)
 }
