@@ -53,6 +53,8 @@ type Agent struct {
 	mu           sync.RWMutex
 }
 
+var _ core.HistoryProvider = (*Agent)(nil)
+
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
@@ -137,6 +139,13 @@ func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.model = model
+	// Workspace-scoped model changes are intentionally not persisted through
+	// core's provider save callback. Keep the active provider's in-memory model
+	// in sync so StartSession does not overwrite the selection with its old
+	// value on the next turn.
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
+		a.providers[a.activeIdx].Model = model
+	}
 	slog.Info("kimi: model changed", "model", model)
 }
 
@@ -153,6 +162,9 @@ func (a *Agent) configuredModels() []core.ModelOption {
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	if models := a.discoverModels(ctx); len(models) > 0 {
+		return models
+	}
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
@@ -162,6 +174,85 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 		{Name: "kimi-k2-5-preview", Desc: "Kimi K2.5 (balanced)"},
 		{Name: "kimi-k2-5", Desc: "Kimi K2.5"},
 	}
+}
+
+type kimiModelDiscoverySnapshot struct {
+	cmd       string
+	extraArgs []string
+	workDir   string
+	env       []string
+}
+
+func (a *Agent) modelDiscoverySnapshot() kimiModelDiscoverySnapshot {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	env := append([]string(nil), a.configEnv...)
+	env = append(env, a.providerEnvLocked()...)
+	env = append(env, a.sessionEnv...)
+	return kimiModelDiscoverySnapshot{
+		cmd:       a.cmd,
+		extraArgs: append([]string(nil), a.cliExtraArgs...),
+		workDir:   a.workDir,
+		env:       env,
+	}
+}
+
+// discoverModels asks Kimi Code for the same model aliases shown by its own
+// model picker. The command output also contains provider configuration, so it
+// is decoded into a narrow struct and is never logged.
+func (a *Agent) discoverModels(ctx context.Context) []core.ModelOption {
+	snapshot := a.modelDiscoverySnapshot()
+	if snapshot.cmd == "" {
+		return nil
+	}
+
+	args := append(snapshot.extraArgs, "provider", "list", "--json")
+	cmd := exec.CommandContext(ctx, snapshot.cmd, args...)
+	cmd.Dir = snapshot.workDir
+	if len(snapshot.env) > 0 {
+		cmd.Env = append(os.Environ(), snapshot.env...)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		slog.Debug("kimi: model discovery failed", "error", err)
+		return nil
+	}
+
+	models, err := parseKimiModels(out)
+	if err != nil {
+		slog.Debug("kimi: parse model discovery output failed", "error", err)
+		return nil
+	}
+	return models
+}
+
+func parseKimiModels(data []byte) ([]core.ModelOption, error) {
+	var catalog struct {
+		Models map[string]struct {
+			DisplayName string `json:"displayName"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		return nil, fmt.Errorf("decode provider list: %w", err)
+	}
+
+	models := make([]core.ModelOption, 0, len(catalog.Models))
+	for alias, model := range catalog.Models {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			continue
+		}
+		desc := strings.TrimSpace(model.DisplayName)
+		if desc == alias {
+			desc = ""
+		}
+		models = append(models, core.ModelOption{Name: alias, Desc: desc})
+	}
+	sort.Slice(models, func(i, j int) bool {
+		return models[i].Name < models[j].Name
+	})
+	return models, nil
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -194,6 +285,42 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
 	return listKimiSessions(a.workDir)
+}
+
+// GetSessionHistory reads the transcript produced by either the legacy
+// kimi-cli or the current Kimi Code CLI.
+func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
+	sessionDir := findKimiSessionDir(sessionID)
+	if sessionDir == "" {
+		return nil, fmt.Errorf("kimi: session not found: %s", sessionID)
+	}
+
+	contextPath := filepath.Join(sessionDir, "context.jsonl")
+	entries, err := readKimiHistoryFile(contextPath, readKimiContextHistory)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("kimi: read legacy session history: %w", err)
+	}
+	if len(entries) == 0 {
+		wirePath := filepath.Join(sessionDir, "agents", "main", "wire.jsonl")
+		entries, err = readKimiHistoryFile(wirePath, readKimiWireHistory)
+		if err != nil {
+			return nil, fmt.Errorf("kimi: read session history: %w", err)
+		}
+	}
+
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries, nil
+}
+
+func readKimiHistoryFile(path string, parse func(io.Reader) ([]core.HistoryEntry, error)) ([]core.HistoryEntry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return parse(f)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
@@ -418,22 +545,9 @@ func parseKimiTranscript(sessionDir string) (msgCount int, summary string) {
 // countContextJSONL parses a legacy kimi-cli context.jsonl transcript,
 // counting user/assistant messages and taking the first user text as summary.
 func countContextJSONL(f io.Reader) (msgCount int, summary string) {
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-	for scanner.Scan() {
-		var entry struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &entry) != nil {
-			continue
-		}
-		if entry.Role == "user" || entry.Role == "assistant" {
-			msgCount++
-			if entry.Role == "user" && entry.Content != "" && summary == "" {
-				summary = strings.TrimSpace(entry.Content)
-			}
-		}
+	msgCount, summary, err := countKimiJSONL(f, false)
+	if err != nil {
+		slog.Warn("kimi: count context.jsonl", "error", err)
 	}
 	return msgCount, summary
 }
@@ -444,36 +558,217 @@ func countContextJSONL(f io.Reader) (msgCount int, summary string) {
 //	{"type":"context.append_message","message":{"role":"user","content":...},
 //	 "origin":{"kind":"user",...}}
 //
-// We count only user-side turns (origin.kind == "user") rather than every
-// appended event, which would also include tool results and streamed
-// assistant chunks. This matches the reviewer signal for "how many messages
-// are in this session" and keeps the count stable.
+// We count only user-side turns rather than every appended event, which would
+// also include tool results and streamed assistant chunks. Current Kimi Code
+// versions put origin under message and encode content as an array, while
+// older versions used a top-level origin and string content.
 func countWireJSONL(f io.Reader) (msgCount int, summary string) {
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	msgCount, summary, err := countKimiJSONL(f, true)
+	if err != nil {
+		slog.Warn("kimi: count wire.jsonl", "error", err)
+	}
+	return msgCount, summary
+}
+
+// countKimiJSONL only retains the count and first user prompt. Session listing
+// must not materialize every assistant response just to show a message count.
+func countKimiJSONL(r io.Reader, wire bool) (msgCount int, summary string, err error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), 10*1024*1024)
 	for scanner.Scan() {
-		var entry struct {
-			Type    string `json:"type"`
+		var raw struct {
+			Type    string          `json:"type"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
 			} `json:"message"`
-			Origin struct {
-				Kind string `json:"kind"`
-			} `json:"origin"`
 		}
-		if json.Unmarshal(scanner.Bytes(), &entry) != nil {
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
 			continue
 		}
-		if entry.Type != "context.append_message" || entry.Origin.Kind != "user" {
+		role, content := raw.Role, raw.Content
+		if wire {
+			if raw.Type != "context.append_message" || raw.Message.Role != "user" {
+				continue
+			}
+			role, content = raw.Message.Role, raw.Message.Content
+		} else if role != "user" && role != "assistant" {
+			continue
+		}
+		text := extractKimiText(content)
+		if text == "" {
 			continue
 		}
 		msgCount++
-		if entry.Message.Content != "" && summary == "" {
-			summary = strings.TrimSpace(entry.Message.Content)
+		if role == "user" && summary == "" {
+			summary = text
 		}
 	}
-	return msgCount, summary
+	return msgCount, summary, scanner.Err()
+}
+
+func readKimiContextHistory(r io.Reader) ([]core.HistoryEntry, error) {
+	var entries []core.HistoryEntry
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), 10*1024*1024)
+	for scanner.Scan() {
+		var raw struct {
+			Role      string          `json:"role"`
+			Content   json.RawMessage `json:"content"`
+			Timestamp json.RawMessage `json:"timestamp"`
+			Time      json.RawMessage `json:"time"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+		if raw.Role != "user" && raw.Role != "assistant" {
+			continue
+		}
+		content := extractKimiText(raw.Content)
+		if content == "" {
+			continue
+		}
+		timestamp := parseKimiTimestamp(raw.Timestamp)
+		if timestamp.IsZero() {
+			timestamp = parseKimiTimestamp(raw.Time)
+		}
+		entries = append(entries, core.HistoryEntry{
+			Role:      raw.Role,
+			Content:   content,
+			Timestamp: timestamp,
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan context.jsonl: %w", err)
+	}
+	return entries, nil
+}
+
+func readKimiWireHistory(r io.Reader) ([]core.HistoryEntry, error) {
+	var entries []core.HistoryEntry
+	var assistantTurnID string
+	var assistantText strings.Builder
+	var assistantTimestamp time.Time
+
+	flushAssistant := func() {
+		content := strings.TrimSpace(assistantText.String())
+		if content != "" {
+			entries = append(entries, core.HistoryEntry{
+				Role:      "assistant",
+				Content:   content,
+				Timestamp: assistantTimestamp,
+			})
+		}
+		assistantTurnID = ""
+		assistantText.Reset()
+		assistantTimestamp = time.Time{}
+	}
+
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), 10*1024*1024)
+	for scanner.Scan() {
+		var raw struct {
+			Type    string          `json:"type"`
+			Time    json.RawMessage `json:"time"`
+			Message struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+			Event struct {
+				Type   string `json:"type"`
+				TurnID string `json:"turnId"`
+				Part   struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"part"`
+			} `json:"event"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+
+		switch raw.Type {
+		case "context.append_message":
+			if raw.Message.Role != "user" && raw.Message.Role != "assistant" {
+				continue
+			}
+			content := extractKimiText(raw.Message.Content)
+			if content == "" {
+				continue
+			}
+			flushAssistant()
+			entries = append(entries, core.HistoryEntry{
+				Role:      raw.Message.Role,
+				Content:   content,
+				Timestamp: parseKimiTimestamp(raw.Time),
+			})
+		case "context.append_loop_event":
+			if raw.Event.Type != "content.part" || raw.Event.Part.Type != "text" || raw.Event.Part.Text == "" {
+				continue
+			}
+			if assistantText.Len() > 0 && raw.Event.TurnID != assistantTurnID {
+				flushAssistant()
+			}
+			if assistantText.Len() == 0 {
+				assistantTurnID = raw.Event.TurnID
+				assistantTimestamp = parseKimiTimestamp(raw.Time)
+			}
+			assistantText.WriteString(raw.Event.Part.Text)
+		}
+	}
+	flushAssistant()
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan wire.jsonl: %w", err)
+	}
+	return entries, nil
+}
+
+func extractKimiText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return strings.TrimSpace(text)
+	}
+
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+			texts = append(texts, strings.TrimSpace(part.Text))
+		}
+	}
+	return strings.Join(texts, "\n")
+}
+
+func parseKimiTimestamp(raw json.RawMessage) time.Time {
+	if len(raw) == 0 {
+		return time.Time{}
+	}
+
+	var millis int64
+	if json.Unmarshal(raw, &millis) == nil {
+		return time.UnixMilli(millis)
+	}
+
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return time.Time{}
+	}
+	if timestamp, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return timestamp
+	}
+	return time.Time{}
 }
 
 func parseKimiSessionDir(sessionDir, filterWorkDir string) *core.AgentSessionInfo {
