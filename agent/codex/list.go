@@ -183,7 +183,8 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 				slog.Warn("codex: decode session response item", "path", path, "error", err)
 				return nil
 			}
-			if item.Role == "user" {
+			switch item.Role {
+			case "user":
 				userMsgSeen++
 				msgCount++
 				// The actual user prompt is the last user response_item
@@ -194,7 +195,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 						summary = c.Text
 					}
 				}
-			} else if item.Role == "assistant" {
+			case "assistant":
 				msgCount++
 			}
 		}
