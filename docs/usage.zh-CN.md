@@ -943,6 +943,9 @@ cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 COR
 
 然后重启 cc-connect。
 
+> **已有远程部署的迁移：** `bind` 默认值已改为 `127.0.0.1`（回环）。如果你此前从其他机器访问管理后台，请补上 `bind = "0.0.0.0"`（或具体网卡地址）并重启——非回环 `bind` 必须同时配置 `token`。删除 `bind` 一行并重启即可回滚。`bind` 与 `port` 仅在启动时读取，详见
+> [management-api.zh-CN.md §2.2](management-api.zh-CN.md#22-监听绑定迁移与回滚)。
+
 ### 构建选项
 
 Web 前端资源默认编译进二进制。如果想排除（减小约 1MB）：
@@ -1003,6 +1006,9 @@ cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 COR
 ```
 
 然后重启 cc-connect。
+
+> **远程适配器的迁移：** `bind` 默认值已改为 `127.0.0.1`（回环）。其他机器上的适配器需要补上 `bind = "0.0.0.0"`（或具体网卡地址）并重启——非回环 `bind` 必须同时配置 `token`。删除 `bind` 一行并重启即可回滚。`bind` 与 `port` 仅在启动时读取，详见
+> [bridge-protocol.zh-CN.md](bridge-protocol.zh-CN.md#绑定规则迁移与回滚)。
 
 ### 认证方式
 

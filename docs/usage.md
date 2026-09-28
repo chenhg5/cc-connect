@@ -1030,6 +1030,13 @@ cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS headers
 
 Then restart cc-connect.
 
+> **Migrating a remote install:** the `bind` default changed to `127.0.0.1`
+> (loopback). If you reached the web admin from another machine, add
+> `bind = "0.0.0.0"` (or your NIC address) and restart — a non-loopback `bind`
+> requires `token` to be set. Remove the `bind` line and restart to roll back.
+> `bind` and `port` are read at startup only. See
+> [management-api.md §2.2](management-api.md#22-listener-binding-migration-and-rollback).
+
 ### Build Options
 
 Web assets are compiled into the binary by default. To exclude them (saves ~1MB):
@@ -1090,6 +1097,13 @@ cors_origins = ["*"]            # Allowed CORS origins; empty = no CORS
 ```
 
 Then restart cc-connect.
+
+> **Migrating a remote adapter:** the `bind` default changed to `127.0.0.1`
+> (loopback). For adapters on other machines, add `bind = "0.0.0.0"` (or your
+> NIC address) and restart — a non-loopback `bind` requires `token` to be set.
+> Remove the `bind` line and restart to roll back. `bind` and `port` are read at
+> startup only. See
+> [bridge-protocol.md](bridge-protocol.md#binding-rules-migration-and-rollback).
 
 ### Authentication
 

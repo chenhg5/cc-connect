@@ -1069,7 +1069,10 @@ func main() {
 			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
 			e.AddPlatform(bp)
 		}
-		bridgeSrv.Start()
+		if err := bridgeSrv.Start(); err != nil {
+			slog.Error("bridge: failed to start server", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Start webhook server if enabled
@@ -1252,7 +1255,10 @@ func main() {
 			core.SetPresetsURL(cfg.ProviderPresetsURL)
 		}
 		mgmtSrv.SetListCCSwitchProviders(listCCSwitchProvidersForWeb)
-		mgmtSrv.Start()
+		if err := mgmtSrv.Start(); err != nil {
+			slog.Error("management api: failed to start server", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Start internal API server for CLI send

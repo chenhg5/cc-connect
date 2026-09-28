@@ -60,6 +60,40 @@ path = "/bridge/ws"       # optional, default "/bridge/ws"
 token = "your-secret"     # required for authentication
 ```
 
+#### Binding rules, migration and rollback
+
+- `bind` defaults to `127.0.0.1`. Only this host can connect until you opt in.
+- `bind` takes a bare host, not `host:port`. IPv6 may be written bracketed or
+  bare (`"::1"` == `"[::1]"`, `"[::]"` is the IPv6 wildcard).
+- A non-loopback `bind` (`0.0.0.0`, `::`, a NIC address, or any hostname other
+  than `localhost`) **requires a non-empty `token`**. Startup refuses the
+  configuration otherwise, and `insecure = true` does not lift that rule —
+  insecure mode is only valid on loopback.
+- Non-loopback binds log a warning at startup. It names the extra risks when
+  they apply: `insecure = true` disables the WebSocket origin check, and
+  `cors_origins = ["*"]` accepts any browser origin.
+- A bind failure (invalid address, bad port, port in use) is returned before the
+  process reports readiness, so the process exits instead of silently running
+  without a listener.
+- `bind` and `port` are read at startup only — restart to change them.
+
+**Migrating a remote adapter install.** Releases before the loopback default
+listened on the wildcard address, so remote adapters connected with no `bind`
+setting. After upgrading, add both fields and restart:
+
+```toml
+[bridge]
+enabled = true
+bind = "0.0.0.0"          # or the specific NIC address
+port = 9810
+token = "a-strong-random-secret"
+```
+
+**Rollback.** Remove the `bind` line and restart to return to `127.0.0.1`;
+remote adapters will stop connecting. Adapters that must reach a loopback-bound
+bridge can be tunnelled (`ssh -L 9810:127.0.0.1:9810 user@host`) and then point
+at `ws://127.0.0.1:9810/bridge/ws`.
+
 ### Authentication
 
 The adapter must authenticate on connection using one of:

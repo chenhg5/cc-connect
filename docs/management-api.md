@@ -70,7 +70,58 @@ token = "mgmt-secret"
 
 When `enabled` is `false`, the Management API is not started. The token should be a strong, random string (e.g. 32+ characters).
 
-### 2.2 Base URL
+### 2.2 Listener Binding, Migration and Rollback
+
+The Management API and the Web UI listen on `bind` and default to `127.0.0.1`
+(loopback). Only this host can reach them until you opt in to remote access.
+
+Rules enforced at startup:
+
+- **`bind` must be a bare host, not `host:port`.** IPv6 literals may be written
+  with or without brackets (`"::1"` and `"[::1]"` are equivalent, and `"[::]"`
+  means the IPv6 wildcard).
+- **A non-loopback `bind` requires a non-empty `token`.** Startup fails with
+  `management: refusing to listen on non-loopback address "0.0.0.0" without a
+  token` when the token is empty. This includes `0.0.0.0`, `::`, a concrete NIC
+  address, and any hostname that is not `localhost`.
+- **Bind failures abort startup.** An invalid address, a bad port, or a port
+  already in use is reported before the process announces readiness — the
+  process exits with a non-zero status instead of logging the error from a
+  background goroutine.
+- **`bind` and `port` are read at startup only.** Changing either requires a
+  restart (`cc-connect daemon restart`, or restart the systemd/launchd unit /
+  container).
+
+**Migrating an existing remote install.** Previous releases listened on the
+wildcard address (`:9820`), so remote browsers and API clients connected without
+any `bind` setting. After upgrading, such an install becomes loopback-only and
+the remote connection fails. To restore it, add both fields:
+
+```toml
+[management]
+enabled = true
+bind = "0.0.0.0"        # or the specific NIC address, e.g. "192.168.1.10"
+port = 9820
+token = "mgmt-secret"   # mandatory for a non-loopback bind
+```
+
+Then restart the process. Docker, systemd and launchd deployments only need the
+config change: the container/host port publishing (`-p 9820:9820`, `ListenStream=`,
+`Sockets=`) is unaffected because the process now binds the wildcard again.
+
+**Rollback.** Delete the `bind` line (`port` may stay) and restart. The listener
+returns to `127.0.0.1`, so remote access stops working again — keep a local
+browser or SSH tunnel (`ssh -L 9820:127.0.0.1:9820 host`) available before you
+remove it.
+
+**Reaching a loopback-bound UI from another machine.** Prefer an SSH tunnel or
+a reverse proxy over widening `bind`. A tunnel keeps the token off the network:
+
+```bash
+ssh -L 9820:127.0.0.1:9820 user@host   # then open http://127.0.0.1:9820
+```
+
+### 2.3 Base URL
 
 All endpoints are relative to:
 

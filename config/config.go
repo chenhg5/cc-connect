@@ -158,9 +158,9 @@ type WebhookConfig struct {
 // BridgeConfig controls the WebSocket bridge for external platform adapters.
 type BridgeConfig struct {
 	Enabled     *bool    `toml:"enabled"`                // default false
-	Bind        string   `toml:"bind,omitempty"`         // listen interface; default 127.0.0.1
-	Port        int      `toml:"port,omitempty"`         // listen port; default 9810
-	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required unless insecure=true
+	Bind        string   `toml:"bind,omitempty"`         // bare host (not host:port; IPv6 may be "[::1]" or "::1"); default 127.0.0.1; a non-loopback value requires token; restart to change
+	Port        int      `toml:"port,omitempty"`         // listen port; default 9810; restart to change
+	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required unless insecure=true on loopback
 	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 	Insecure    *bool    `toml:"insecure,omitempty"`     // allow running without token (local dev only); default false
@@ -179,8 +179,8 @@ type HookConfig struct {
 // ManagementConfig controls the HTTP Management API for external tools.
 type ManagementConfig struct {
 	Enabled     *bool    `toml:"enabled"`                // default false
-	Bind        string   `toml:"bind,omitempty"`         // listen interface; default 127.0.0.1
-	Port        int      `toml:"port,omitempty"`         // listen port; default 9820
+	Bind        string   `toml:"bind,omitempty"`         // bare host (not host:port; IPv6 may be "[::1]" or "::1"); default 127.0.0.1; a non-loopback value requires token; restart to change
+	Port        int      `toml:"port,omitempty"`         // listen port; default 9820; restart to change
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 }

@@ -72,25 +72,8 @@ func testManagementServer(t *testing.T, token string) (*ManagementServer, *httpt
 	return mgmt, ts, e
 }
 
-func TestManagementServer_DefaultBindIsLoopback(t *testing.T) {
-	mgmt := NewManagementServer(0, "tok", nil)
-	mgmt.Start()
-	t.Cleanup(mgmt.Stop)
-
-	if got, want := mgmt.server.Addr, "127.0.0.1:0"; got != want {
-		t.Fatalf("management listen address = %q, want %q", got, want)
-	}
-}
-
-func TestManagementServer_ExplicitBindAllowsRemoteAccess(t *testing.T) {
-	mgmt := NewManagementServerWithBind("0.0.0.0", 0, "tok", nil)
-	mgmt.Start()
-	t.Cleanup(mgmt.Stop)
-
-	if got, want := mgmt.server.Addr, "0.0.0.0:0"; got != want {
-		t.Fatalf("management listen address = %q, want %q", got, want)
-	}
-}
+// Socket-level coverage for the loopback default and explicit bind lives in
+// listen_test.go (TestManagementServer_DefaultBindIsLoopback and friends).
 
 type mgmtResponse struct {
 	OK    bool            `json:"ok"`

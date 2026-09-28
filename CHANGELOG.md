@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Changed
+
+- **Management API / Web UI and Bridge now listen on `127.0.0.1` by default.** Both servers previously bound the wildcard address (`:9820` / `:9810`), so an enabled listener was reachable from the whole network. A new `bind` option on `[management]` and `[bridge]` restores remote access; the loopback default applies when it is unset.
+
+### Breaking
+
+- Existing remote Management/Web or Bridge deployments must set `bind = "0.0.0.0"` (or another non-loopback address) **and** keep a token set, then restart. `bind`/`port` are read at startup only. See `docs/management-api.md#22-listener-binding-migration-and-rollback` and `docs/bridge-protocol.md#binding-rules-migration-and-rollback` for migration, Docker/systemd/launchd notes, IPv6 forms and rollback.
+
+### Fixed
+
+- **core**: reject an unauthenticated non-loopback listener. A non-loopback `bind` (`0.0.0.0`, `::`, a concrete NIC address, or a hostname other than `localhost`) now requires a non-empty `token`, and `insecure = true` no longer permits an empty token off loopback — previously the Management API accepted `bind = "0.0.0.0"` with no token and then served every request, and the Bridge accepted wildcard + empty token + `insecure = true` + `cors_origins = ["*"]` with only a generic warning. Non-loopback binds now also log a targeted warning naming the remaining risks (`insecure` disables the WebSocket origin check; a wildcard CORS origin accepts any browser origin).
+- **core**: bind listeners synchronously so startup failures surface. `ManagementServer.Start` / `BridgeServer.Start` now return an error and both are consumed by `cmd/cc-connect`, which exits non-zero; previously the listener was created inside a goroutine and an invalid bind address or an in-use port only produced a background log after startup had already reported success.
+- **core**: normalize IPv6 bind addresses. `bind = "[::]"` produced the invalid `[[::]]:port` because the brackets survived into `net.JoinHostPort`; bracketed and bare forms are now equivalent (`"[::1]"` == `"::1"`).
+
 ### Added
 - **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
 - **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)

@@ -385,7 +385,7 @@ level = "info" # debug, info, warn, error
 #
 # [bridge]
 # enabled = true
-# bind = "127.0.0.1"                 # Listen interface (default: loopback only; use 0.0.0.0 for remote access) / 监听接口（默认仅本机；远程访问设为 0.0.0.0）
+# bind = "127.0.0.1"                 # Bare host, not "host:port"; IPv6 may be "[::1]" or "::1". Default loopback only; a non-loopback value (0.0.0.0 / :: / NIC address) requires token. Restart required to change. / 只填主机地址，不能写 "host:port"；IPv6 可写 "[::1]" 或 "::1"。默认仅本机；非回环取值（0.0.0.0 / :: / 网卡地址）必须同时配置 token。修改后需重启。
 # port = 9810                         # WebSocket listen port (default: 9810) / 监听端口
 # token = "your-bridge-secret"        # Auth token (required) / 认证密钥（必填）
 # path = "/bridge/ws"                 # URL path (default: "/bridge/ws") / URL 路径
@@ -401,7 +401,7 @@ level = "info" # debug, info, warn, error
 #
 # [management]
 # enabled = true
-# bind = "127.0.0.1"                   # Listen interface (default: loopback only; use 0.0.0.0 for remote access) / 监听接口（默认仅本机；远程访问设为 0.0.0.0）
+# bind = "127.0.0.1"                   # Bare host, not "host:port"; IPv6 may be "[::1]" or "::1". Default loopback only; a non-loopback value (0.0.0.0 / :: / NIC address) requires token. Restart required to change. / 只填主机地址，不能写 "host:port"；IPv6 可写 "[::1]" 或 "::1"。默认仅本机；非回环取值（0.0.0.0 / :: / 网卡地址）必须同时配置 token。修改后需重启。
 # port = 9820                           # HTTP listen port (default: 9820) / 监听端口
 # token = "your-mgmt-secret"            # Auth token (required) / 认证密钥（必填）
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
