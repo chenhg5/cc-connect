@@ -8,7 +8,7 @@ import (
 
 func TestCommandRegistry_AddAndResolve(t *testing.T) {
 	r := NewCommandRegistry()
-	r.Add("greet", "Say hello", "Hello {{1}}", "", "", 0, "config")
+	r.Add("greet", "Say hello", "Hello {{1}}", "", "", "config")
 
 	cmd, ok := r.Resolve("greet")
 	if !ok {
@@ -22,9 +22,34 @@ func TestCommandRegistry_AddAndResolve(t *testing.T) {
 	}
 }
 
+func TestCommandRegistry_AddWithOptionsTimeout(t *testing.T) {
+	r := NewCommandRegistry()
+	// Legacy Add keeps the zero value so existing callers are unaffected.
+	r.Add("legacy", "desc", "prompt", "", "", "config")
+	legacy, ok := r.Resolve("legacy")
+	if !ok {
+		t.Fatal("expected to resolve 'legacy'")
+	}
+	if legacy.Timeout != 0 {
+		t.Errorf("legacy Add Timeout = %d, want 0", legacy.Timeout)
+	}
+
+	r.AddWithOptions("slow", "desc", "", "sleep 1", "", "config", CommandOptions{Timeout: 300})
+	slow, ok := r.Resolve("slow")
+	if !ok {
+		t.Fatal("expected to resolve 'slow'")
+	}
+	if slow.Timeout != 300 {
+		t.Errorf("AddWithOptions Timeout = %d, want 300", slow.Timeout)
+	}
+	if slow.Exec != "sleep 1" {
+		t.Errorf("AddWithOptions Exec = %q, want %q", slow.Exec, "sleep 1")
+	}
+}
+
 func TestCommandRegistry_CaseInsensitive(t *testing.T) {
 	r := NewCommandRegistry()
-	r.Add("Hello", "test", "prompt", "", "", 0, "config")
+	r.Add("Hello", "test", "prompt", "", "", "config")
 
 	_, ok := r.Resolve("hello")
 	if !ok {
@@ -34,7 +59,7 @@ func TestCommandRegistry_CaseInsensitive(t *testing.T) {
 
 func TestCommandRegistry_Remove(t *testing.T) {
 	r := NewCommandRegistry()
-	r.Add("tmp", "temp", "prompt", "", "", 0, "config")
+	r.Add("tmp", "temp", "prompt", "", "", "config")
 
 	if !r.Remove("tmp") {
 		t.Error("Remove should return true")
@@ -49,9 +74,9 @@ func TestCommandRegistry_Remove(t *testing.T) {
 
 func TestCommandRegistry_ClearSource(t *testing.T) {
 	r := NewCommandRegistry()
-	r.Add("a", "", "", "", "", 0, "config")
-	r.Add("b", "", "", "", "", 0, "config")
-	r.Add("c", "", "", "", "", 0, "agent")
+	r.Add("a", "", "", "", "", "config")
+	r.Add("b", "", "", "", "", "config")
+	r.Add("c", "", "", "", "", "agent")
 
 	r.ClearSource("config")
 
@@ -88,7 +113,7 @@ func TestCommandRegistry_ConfigOverridesAgent(t *testing.T) {
 
 	r := NewCommandRegistry()
 	r.SetAgentDirs([]string{dir})
-	r.Add("deploy", "config deploy", "config prompt", "", "", 0, "config")
+	r.Add("deploy", "config deploy", "config prompt", "", "", "config")
 
 	cmd, ok := r.Resolve("deploy")
 	if !ok {
@@ -118,7 +143,7 @@ func TestCommandRegistry_ListAll(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "build.md"), []byte("Build project"), 0644)
 
 	r := NewCommandRegistry()
-	r.Add("test", "Run tests", "go test ./...", "", "", 0, "config")
+	r.Add("test", "Run tests", "go test ./...", "", "", "config")
 	r.SetAgentDirs([]string{dir})
 
 	all := r.ListAll()

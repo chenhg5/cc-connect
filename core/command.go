@@ -21,6 +21,15 @@ type CustomCommand struct {
 	Source      string // "config" or "agent" (for display)
 }
 
+// CommandOptions carries optional attributes for a custom command. The zero
+// value preserves the historical defaults, so existing callers of Add /
+// AddCommand keep their behavior unchanged.
+type CommandOptions struct {
+	// Timeout is the shell exec timeout in seconds. 0 uses the built-in
+	// default (60s). Added for slow commands such as /review and /reviewer.
+	Timeout int
+}
+
 // CommandRegistry holds all available custom commands and resolves agent command files.
 type CommandRegistry struct {
 	mu        sync.RWMutex
@@ -34,8 +43,15 @@ func NewCommandRegistry() *CommandRegistry {
 	}
 }
 
-// Add registers a custom command.
-func (r *CommandRegistry) Add(name, description, prompt, exec, workDir string, timeout int, source string) {
+// Add registers a custom command. It keeps the historical signature so
+// downstream callers stay source-compatible; use AddWithOptions to set
+// optional attributes such as the exec timeout.
+func (r *CommandRegistry) Add(name, description, prompt, exec, workDir, source string) {
+	r.AddWithOptions(name, description, prompt, exec, workDir, source, CommandOptions{})
+}
+
+// AddWithOptions registers a custom command with optional attributes.
+func (r *CommandRegistry) AddWithOptions(name, description, prompt, exec, workDir, source string, opts CommandOptions) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.commands[strings.ToLower(name)] = &CustomCommand{
@@ -44,7 +60,7 @@ func (r *CommandRegistry) Add(name, description, prompt, exec, workDir string, t
 		Prompt:      prompt,
 		Exec:        exec,
 		WorkDir:     workDir,
-		Timeout:     timeout,
+		Timeout:     opts.Timeout,
 		Source:      source,
 	}
 }

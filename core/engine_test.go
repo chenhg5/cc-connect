@@ -868,7 +868,7 @@ func TestEngineSendToSessionWithAttachments_WorkspacePrefixedSessionKey(t *testi
 func TestEngineStart_DefersAsyncPlatformReadyInitialization(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("help", "help", "", "", "", 0, "test")
+	e.AddCommand("help", "help", "", "", "", "test")
 
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -887,7 +887,7 @@ func TestEngineStart_DefersAsyncPlatformReadyInitialization(t *testing.T) {
 func TestEngine_OnPlatformReady_IsIdempotentUntilUnavailable(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("help", "help", "", "", "", 0, "test")
+	e.AddCommand("help", "help", "", "", "", "test")
 
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -914,7 +914,7 @@ func TestEngine_OnPlatformReady_IsIdempotentUntilUnavailable(t *testing.T) {
 func TestEngine_OnPlatformUnavailable_IsIdempotent(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("help", "help", "", "", "", 0, "test")
+	e.AddCommand("help", "help", "", "", "", "test")
 
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -933,7 +933,7 @@ func TestEngine_OnPlatformUnavailable_IsIdempotent(t *testing.T) {
 func TestEngine_LifecycleCallbacksIgnoredAfterStopBegins(t *testing.T) {
 	p := &stubLifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("help", "help", "", "", "", 0, "test")
+	e.AddCommand("help", "help", "", "", "", "test")
 
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -953,7 +953,7 @@ func TestEngine_LifecycleCallbacksIgnoredAfterStopBegins(t *testing.T) {
 func TestEngine_StopDoesNotWaitForBlockedPlatformCapabilityInit(t *testing.T) {
 	p := newBlockingRegisterPlatform("telegram")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("help", "help", "", "", "", 0, "test")
+	e.AddCommand("help", "help", "", "", "", "test")
 
 	if err := e.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -2747,7 +2747,7 @@ func TestEngine_AdminFrom_GatesCommandsAddExec(t *testing.T) {
 
 func TestEngine_AdminFrom_GatesCustomExecCommand(t *testing.T) {
 	e := newTestEngine()
-	e.commands.Add("deploy", "", "", "echo deploying", "", 0, "config")
+	e.commands.Add("deploy", "", "", "echo deploying", "", "config")
 	p := &stubPlatformEngine{n: "test"}
 
 	msg := &Message{SessionKey: "test:u1", UserID: "user1", ReplyCtx: "ctx"}
@@ -2861,7 +2861,7 @@ func TestEngine_RoleBasedACL_NoUsersConfig_Legacy(t *testing.T) {
 
 func TestEngine_CustomCommand_DisabledByRole(t *testing.T) {
 	e := newTestEngine()
-	e.commands.Add("deploy", "deploy command", "deploy it", "", "", 0, "test")
+	e.commands.Add("deploy", "deploy command", "deploy it", "", "", "test")
 
 	urm := NewUserRoleManager()
 	urm.Configure("member", []RoleInput{
@@ -6235,7 +6235,7 @@ func TestFormatUsageReport_SingleSevenDayWindowDoesNotDuplicate(t *testing.T) {
 func TestCmdCommands_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	e.AddCommand("deploy", "Deploy app", "ship it", "", "", 0, "config")
+	e.AddCommand("deploy", "Deploy app", "ship it", "", "", "config")
 
 	e.cmdCommands(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
 
@@ -11643,7 +11643,7 @@ func TestRunShellWithProgress_BasicOutput(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
-	err := e.runShellWithProgress(p, "ctx", "echo hello", t.TempDir(), 5*time.Second, 4000)
+	err := e.runShellWithProgress(p, "ctx", "echo hello", t.TempDir(), 5*time.Second, 4000, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -11665,6 +11665,41 @@ func TestRunShellWithProgress_BasicOutput(t *testing.T) {
 			t.Fatal("timed out waiting for shell response")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCustomCommandEnv_ReplacesInheritedAndPreservesSpecialValues(t *testing.T) {
+	cases := []struct {
+		name    string
+		session string
+		project string
+	}{
+		{"single quote and shell metacharacters", `x'; touch /tmp/pwned; echo '`, "proj"},
+		{"newlines", "line1\nline2", "proj"},
+		{"unicode", "飞书:群:用户🙂", "proj"},
+		{"empty session key clears inherited", "", "proj"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CC_SESSION_KEY", "stale-session")
+			t.Setenv("CC_PROJECT", "stale-project")
+			env := customCommandEnv(tc.session, tc.project)
+			var session, project []string
+			for _, kv := range env {
+				switch {
+				case strings.HasPrefix(kv, "CC_SESSION_KEY="):
+					session = append(session, strings.TrimPrefix(kv, "CC_SESSION_KEY="))
+				case strings.HasPrefix(kv, "CC_PROJECT="):
+					project = append(project, strings.TrimPrefix(kv, "CC_PROJECT="))
+				}
+			}
+			if len(session) != 1 || session[0] != tc.session {
+				t.Fatalf("CC_SESSION_KEY = %q, want exactly one entry equal to %q", session, tc.session)
+			}
+			if len(project) != 1 || project[0] != tc.project {
+				t.Fatalf("CC_PROJECT = %q, want exactly one entry equal to %q", project, tc.project)
+			}
+		})
 	}
 }
 
@@ -11690,11 +11725,143 @@ func TestExecuteShellCommand_InjectsSessionEnv(t *testing.T) {
 	t.Fatalf("expected CC_SESSION_KEY/CC_PROJECT injected into shell command env, got %q", last)
 }
 
+func TestExecuteShellCommand_SessionKeyIsNotShellInterpreted(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	marker := filepath.Join(t.TempDir(), "pwned")
+	// If the session key were concatenated into shell source, this would run `touch`.
+	key := "x'; touch " + marker + "; echo '"
+	msg := &Message{SessionKey: key}
+	cmd := &CustomCommand{Name: "echo-test", Exec: `printf '%s' "$CC_SESSION_KEY"`}
+	e.executeShellCommand(p, msg, cmd, nil)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		sent := p.getSent()
+		if len(sent) > 0 {
+			last = sent[len(sent)-1]
+			if strings.Contains(last, key) {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("session key was interpreted by the shell: marker %s was created", marker)
+	}
+	if !strings.Contains(last, key) {
+		t.Fatalf("expected literal session key in output, got %q", last)
+	}
+}
+
+func TestExecuteShellCommand_PrefersSessionBoundWorkspace(t *testing.T) {
+	p := &stubPlatformEngine{n: "slack"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "ws1")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	channelID := "C123"
+	e.workspaceBindings.Bind("project:test", "slack:"+channelID, "chan", normalizeWorkspacePath(wsDir))
+
+	msg := &Message{SessionKey: "slack:" + channelID + ":U1", ChannelKey: channelID}
+	cmd := &CustomCommand{Name: "pwd-test", Exec: "pwd -P"}
+	e.executeShellCommand(p, msg, cmd, nil)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		if sent := p.getSent(); len(sent) > 0 {
+			last = sent[len(sent)-1]
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	wantPhysical, err := filepath.EvalSymlinks(wsDir)
+	if err != nil {
+		wantPhysical = wsDir
+	}
+	if !strings.Contains(last, wantPhysical) && !strings.Contains(last, wsDir) {
+		t.Fatalf("custom exec command should run in bound workspace %q, got %q", wsDir, last)
+	}
+}
+
+// channelNameCountingPlatform implements ChannelNameResolver and counts lookups,
+// so tests can assert workspace resolution is skipped when it is not applicable.
+type channelNameCountingPlatform struct {
+	stubPlatformEngine
+	nameCalls int
+}
+
+func (p *channelNameCountingPlatform) ResolveChannelName(string) (string, error) {
+	p.mu.Lock()
+	p.nameCalls++
+	p.mu.Unlock()
+	return "", nil
+}
+
+func (p *channelNameCountingPlatform) getNameCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.nameCalls
+}
+
+func TestExecuteShellCommand_SingleWorkspaceSkipsWorkspaceResolution(t *testing.T) {
+	p := &channelNameCountingPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	// No SetMultiWorkspace: workspaceBindings must stay nil and resolveWorkspace
+	// must not be called (it would auto-bind on a nil manager and panic).
+
+	msg := &Message{SessionKey: "slack:C1:U1", ChannelKey: "C1"}
+	cmd := &CustomCommand{Name: "pwd-test", Exec: "pwd -P"}
+	e.executeShellCommand(p, msg, cmd, nil)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(p.getSent()) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := p.getNameCalls(); got != 0 {
+		t.Fatalf("single-workspace mode must skip workspace resolution, got %d channel-name lookups", got)
+	}
+}
+
+func TestExecuteShellCommand_UsesConfiguredTimeout(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "feishu:oc_test:ou_test"}
+	// Timeout is expressed in seconds; 1s must override the 60s default and
+	// kill the slow command well before it finishes.
+	cmd := &CustomCommand{Name: "slow", Exec: "sleep 5", Timeout: 1}
+
+	start := time.Now()
+	e.executeShellCommand(p, msg, cmd, nil)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("configured 1s timeout was not applied; command took %s", elapsed)
+	}
+
+	sent := p.getSent()
+	var last string
+	if len(sent) > 0 {
+		last = sent[len(sent)-1]
+	}
+	if !strings.Contains(last, "(timeout)") {
+		t.Fatalf("expected a timeout notice after the configured timeout, got %q", last)
+	}
+}
+
 func TestRunShellWithProgress_FailedCommand(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
-	err := e.runShellWithProgress(p, "ctx", "exit 42", t.TempDir(), 5*time.Second, 4000)
+	err := e.runShellWithProgress(p, "ctx", "exit 42", t.TempDir(), 5*time.Second, 4000, nil)
 	if err == nil {
 		t.Fatal("expected error for non-zero exit")
 	}
@@ -11723,7 +11890,7 @@ func TestRunShellWithProgress_Timeout(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
-	err := e.runShellWithProgress(p, "ctx", "sleep 30", t.TempDir(), 200*time.Millisecond, 4000)
+	err := e.runShellWithProgress(p, "ctx", "sleep 30", t.TempDir(), 200*time.Millisecond, 4000, nil)
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -11756,7 +11923,7 @@ func TestRunShellWithProgress_EmptyOutput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		cmd = `cmd /c "exit /b 0"`
 	}
-	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), 5*time.Second, 4000)
+	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), 5*time.Second, 4000, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -11786,7 +11953,7 @@ func TestRunShellWithProgress_StderrOutput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		cmd = `cmd /c "echo err >&2"`
 	}
-	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), 5*time.Second, 4000)
+	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), 5*time.Second, 4000, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -11822,7 +11989,7 @@ func TestRunShellWithProgress_LongOutputTruncated(t *testing.T) {
 		cmd = `Write-Host ('x' * 5000)`
 		timeout = 15 * time.Second
 	}
-	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), timeout, 100)
+	err := e.runShellWithProgress(p, "ctx", cmd, t.TempDir(), timeout, 100, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -11852,7 +12019,7 @@ func TestRunShellWithProgress_NonexistentCommand(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
-	err := e.runShellWithProgress(p, "ctx", "nonexistent_command_xyz_12345", t.TempDir(), 5*time.Second, 4000)
+	err := e.runShellWithProgress(p, "ctx", "nonexistent_command_xyz_12345", t.TempDir(), 5*time.Second, 4000, nil)
 	if err == nil {
 		t.Fatal("expected error for nonexistent command")
 	}
@@ -13360,8 +13527,8 @@ func TestEngine_ClearCommands(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	// Add commands from two sources
-	e.AddCommand("cmd1", "desc1", "prompt1", "", "", 0, "config")
-	e.AddCommand("cmd2", "desc2", "prompt2", "", "", 0, "agent")
+	e.AddCommand("cmd1", "desc1", "prompt1", "", "", "config")
+	e.AddCommand("cmd2", "desc2", "prompt2", "", "", "agent")
 
 	// Verify commands exist
 	if _, ok := e.commands.Resolve("cmd1"); !ok {
@@ -13400,7 +13567,7 @@ func TestEngine_AddCommand(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	// Add a command
-	e.AddCommand("testcmd", "A test command", "This is a test {{args}}", "", "", 0, "config")
+	e.AddCommand("testcmd", "A test command", "This is a test {{args}}", "", "", "config")
 
 	// Resolve should find it
 	cmd, ok := e.commands.Resolve("testcmd")
@@ -13429,7 +13596,7 @@ func TestEngine_AddAlias(t *testing.T) {
 
 	// Check alias was stored (via internal map)
 	// We can verify this through command resolution if shortcut is used as a command
-	e.AddCommand("very-long-command", "Long command", "prompt", "", "", 0, "config")
+	e.AddCommand("very-long-command", "Long command", "prompt", "", "", "config")
 
 	// The alias mechanism works through the alias map
 	if len(e.aliases) != 1 {
