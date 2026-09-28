@@ -9,6 +9,12 @@ const (
 	DefaultRetriableErrorInitialDelay = 30 * time.Second
 	DefaultRetriableErrorRetryDelay   = 60 * time.Second
 	DefaultRetriableErrorMaxAttempts  = 30
+
+	// MaxRetriableErrorDelay caps configured retry delays so time.Duration
+	// arithmetic cannot overflow (24h is far below the ~292y int64 limit).
+	MaxRetriableErrorDelay = 24 * time.Hour
+	// MaxRetriableErrorAttempts caps the retry loop.
+	MaxRetriableErrorAttempts = 1000
 )
 
 var (
@@ -27,6 +33,15 @@ func SetRetriableErrorPolicy(initialDelay, retryDelay time.Duration, maxAttempts
 	}
 	if maxAttempts < 1 {
 		maxAttempts = DefaultRetriableErrorMaxAttempts
+	}
+	if initialDelay > MaxRetriableErrorDelay {
+		initialDelay = MaxRetriableErrorDelay
+	}
+	if retryDelay > MaxRetriableErrorDelay {
+		retryDelay = MaxRetriableErrorDelay
+	}
+	if maxAttempts > MaxRetriableErrorAttempts {
+		maxAttempts = MaxRetriableErrorAttempts
 	}
 
 	retriableErrorMu.Lock()
