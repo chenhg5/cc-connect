@@ -231,7 +231,11 @@ func TestStartSession_UsesConfiguredCLIForBothBackendsAndMetadata(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer session.Close()
+			defer func() {
+				if err := session.Close(); err != nil {
+					t.Errorf("close session: %v", err)
+				}
+			}()
 			if cs, ok := session.(*codexSession); ok {
 				if got := cs.GetModel(); got != "fixture-model" {
 					t.Fatalf("runtime metadata model = %q", got)
