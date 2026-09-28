@@ -1492,10 +1492,39 @@ func (e *Engine) ActiveSessionKeys() []string {
 	return keys
 }
 
+// CronRunHandle identifies the single interactive turn started by one cron
+// invocation. ExecuteCronJob resolves the run session key, workspace and
+// session id while creating the run; reporting them back lets a job timeout
+// cancel exactly that turn instead of guessing from the job's configured key.
+type CronRunHandle struct {
+	// TurnKey is the interactiveStates key of the running turn. It is the only
+	// handle callers should use to address the turn.
+	TurnKey string
+	// RunSessionKey is the session key the run resolved to. It can differ from
+	// the job's stored SessionKey when a workspace binding or a
+	// CronReplyTargetResolver rewrote it.
+	RunSessionKey string
+	// WorkspaceDir is the workspace the run executes in ("" for global).
+	WorkspaceDir string
+	// NewSession reports whether the run used a per-run side session.
+	NewSession bool
+}
+
 // ExecuteCronJob runs a cron job by injecting a synthetic message into the engine.
 // It finds the platform that owns the session key, reconstructs a reply context,
 // and processes the message as if the user sent it.
 func (e *Engine) ExecuteCronJob(job *CronJob) error {
+	return e.executeCronJob(job, nil)
+}
+
+// ExecuteCronJobWithHandle is ExecuteCronJob, additionally reporting the exact
+// interactive turn (CronRunHandle) as soon as the run has resolved it, before
+// the agent turn starts blocking. onTurn may be nil.
+func (e *Engine) ExecuteCronJobWithHandle(job *CronJob, onTurn func(CronRunHandle)) error {
+	return e.executeCronJob(job, onTurn)
+}
+
+func (e *Engine) executeCronJob(job *CronJob, onTurn func(CronRunHandle)) error {
 	e.hooks.Emit(HookEvent{
 		Event:      HookEventCronTriggered,
 		SessionKey: job.SessionKey,
@@ -1671,6 +1700,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		if workspaceDir != "" {
 			iKey = workspaceDir + ":" + iKey
 		}
+		if onTurn != nil {
+			onTurn(CronRunHandle{TurnKey: iKey, RunSessionKey: runSessionKey, WorkspaceDir: workspaceDir, NewSession: true})
+		}
 		prevHistLen := session.HistoryLen()
 		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, lockGen)
 		e.cleanupInteractiveState(iKey)
@@ -1694,6 +1726,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	iKey := sessionKey
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
+	}
+	if onTurn != nil {
+		onTurn(CronRunHandle{TurnKey: iKey, RunSessionKey: runSessionKey, WorkspaceDir: workspaceDir})
 	}
 	prevHistLen := session.HistoryLen()
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey, lockGen)
@@ -10596,11 +10631,11 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 				return
 			}
 		}
-		// Cron-triggered turns run under "<chatSessionKey>#cron:<id>" keys and
-		// are invisible to the exact/suffix lookups above. A /stop in the same
+		// Cron-triggered turns run under "<chatKey>#cron:<id>" keys and are
+		// invisible to the exact/suffix lookups above. A /stop in the same
 		// chat must tear down any running cron turn too, so the user can switch
 		// provider and re-trigger instead of waiting out the retry window.
-		if n := e.stopCronTurns(msg.SessionKey); n > 0 {
+		if n := e.stopCronTurns(iKey); n > 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 			return
 		}
@@ -10610,15 +10645,24 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 }
 
-// stopCronTurns stops every live cron-triggered turn for the given chat
-// session key (keys shaped "<sessionKey>#cron:<id>"), returning how many
-// turns were stopped.
-func (e *Engine) stopCronTurns(sessionKey string) int {
+// stopCronTurns stops the live cron-triggered turns started from the chat that
+// owns baseKey, returning how many turns were stopped. A cron turn registers as
+// "<baseKey>#cron:<sid>", optionally prefixed with its workspace directory.
+//
+// This is the user-initiated /stop path, where stopping every cron turn of the
+// chat is the intent. Cron *timeouts* must not use it: they cancel one exact
+// run through its CronRunHandle so a sibling run or an unrelated interactive
+// turn on the same session key is left running.
+func (e *Engine) stopCronTurns(baseKey string) int {
+	if baseKey == "" {
+		return 0
+	}
+	exact := baseKey + "#cron:"
+	prefixed := ":" + baseKey + "#cron:"
 	e.interactiveMu.Lock()
-	prefix := sessionKey + "#cron:"
 	var keys []string
 	for k := range e.interactiveStates {
-		if strings.HasPrefix(k, prefix) {
+		if strings.HasPrefix(k, exact) || isWorkspacePrefixedCronKey(k, prefixed) {
 			keys = append(keys, k)
 		}
 	}
@@ -10630,6 +10674,18 @@ func (e *Engine) stopCronTurns(sessionKey string) int {
 		}
 	}
 	return stopped
+}
+
+// isWorkspacePrefixedCronKey reports whether key is "<workspaceDir>:<base>#cron:"
+// for the given "<base>#cron:" tail, and workspaceDir actually looks like a path.
+// Requiring a path separator keeps a chat key that merely ends with "base" (for
+// example base "user1" against "feishu:ch:user1#cron:x") from matching.
+func isWorkspacePrefixedCronKey(key, tail string) bool {
+	i := strings.Index(key, tail)
+	if i <= 0 {
+		return false
+	}
+	return strings.ContainsAny(key[:i], `/\`)
 }
 
 // cmdCancel stops the current execution and starts a fresh session.
