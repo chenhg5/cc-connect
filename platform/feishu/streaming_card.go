@@ -61,11 +61,18 @@ type feishuStreamingCard struct {
 	mu         sync.Mutex
 	handle     *feishuPreviewHandle // nil until first content arrives
 	failed     bool
+	finished   bool // true once finalized or failed: the card is terminal
 	pending    string
 	timer      *time.Timer
 	inFlight   bool
 	done       chan struct{} // closed when finalized or failed
 	lastUpdate time.Time
+
+	// apiMu serializes the card's write paths (a throttled flush vs. Finalize)
+	// so a Finalize can never be overtaken by an update that was already in
+	// flight, which would leave the card showing the intermediate state after
+	// the turn finished. Never held while acquiring mu.
+	apiMu sync.Mutex
 
 	// Incremental append bookkeeping for payload cards: how many thinking /
 	// tool entries have already been appended via cardkit element APIs since
@@ -141,7 +148,7 @@ func (p *Platform) CreateStreamingCard(ctx context.Context, replyCtx any) (core.
 // Finalize.
 func (c *feishuStreamingCard) Update(ctx context.Context, content string) error {
 	c.mu.Lock()
-	if c.failed {
+	if c.failed || c.finished {
 		c.mu.Unlock()
 		return nil
 	}
@@ -176,7 +183,7 @@ func (c *feishuStreamingCard) scheduleFlushLocked() {
 	c.timer = time.AfterFunc(delay, func() {
 		c.mu.Lock()
 		c.timer = nil
-		if c.failed {
+		if c.failed || c.finished {
 			c.mu.Unlock()
 			return
 		}
@@ -193,7 +200,9 @@ func (c *feishuStreamingCard) flush(ctx context.Context) error {
 	content := c.pending
 	c.mu.Unlock()
 
+	c.apiMu.Lock()
 	err := c.send(ctx, content)
+	c.apiMu.Unlock()
 
 	c.mu.Lock()
 	c.inFlight = false
@@ -209,21 +218,37 @@ func (c *feishuStreamingCard) flush(ctx context.Context) error {
 // send lazily creates the card on first use, then updates it in place.
 // Caller must NOT hold c.mu.
 func (c *feishuStreamingCard) send(ctx context.Context, content string) error {
+	return c.sendWithStatus(ctx, content, core.CardStatusWorking)
+}
+
+// sendWithStatus is send with an explicit lifecycle status, so the lazy
+// Finalize path can create the card directly in the terminal (done) state.
+// Caller must NOT hold c.mu.
+func (c *feishuStreamingCard) sendWithStatus(ctx context.Context, content string, status core.CardStatus) error {
 	p := c.platform
 
 	c.mu.Lock()
 	handle := c.handle
+	terminal := c.failed || c.finished
 	c.mu.Unlock()
+
+	// The card reached a terminal state (finalized or failed) while this
+	// update was queued: dropping it prevents a stale running render — or a
+	// stale panel append — from reviving a finished card.
+	if terminal {
+		return nil
+	}
 
 	if handle == nil {
 		// First content: create the card via the preview flow. The card JSON
 		// carries the main_text element so cardkit-v1 streaming text updates
 		// (typewriter) work when the card entity path is available.
-		initialJSON := cardJSONForContent(content, core.CardStatusWorking)
+		initialJSON := cardJSONForContent(content, status)
 		h, err := p.SendPreviewStart(ctx, c.replyCtx, initialJSON)
 		if err != nil {
 			c.mu.Lock()
 			c.failed = true
+			c.finished = true
 			select {
 			case <-c.done:
 			default:
@@ -236,6 +261,7 @@ func (c *feishuStreamingCard) send(ctx context.Context, content string) error {
 		if !ok {
 			c.mu.Lock()
 			c.failed = true
+			c.finished = true
 			select {
 			case <-c.done:
 			default:
@@ -283,6 +309,17 @@ func (c *feishuStreamingCard) send(ctx context.Context, content string) error {
 	if payload, isPayload := core.ParseProgressCardPayload(content); isPayload && handle.cardID != "" {
 		reasoning, tools, _ := splitProgressItemsByLane(payload.Items)
 		c.mu.Lock()
+		// A later payload may carry FEWER entries than the ones already
+		// appended (the engine clears and rebuilds the step list, e.g. when a
+		// hook rejects a step). Pull the cursors back to the payload length so
+		// the delta slices can never go out of range and later entries are
+		// still appended once the list grows again.
+		if c.appendedThinking > len(reasoning) {
+			c.appendedThinking = len(reasoning)
+		}
+		if c.appendedTools > len(tools) {
+			c.appendedTools = len(tools)
+		}
 		newThinking := reasoning[c.appendedThinking:]
 		newTools := tools[c.appendedTools:]
 		c.mu.Unlock()
@@ -329,7 +366,7 @@ func (c *feishuStreamingCard) send(ctx context.Context, content string) error {
 		c.hasToolsPanel = len(tools) > 0
 		c.mu.Unlock()
 	}
-	cardJSON := cardJSONForContent(content, core.CardStatusWorking)
+	cardJSON := cardJSONForContent(content, status)
 	if handle.cardID != "" {
 		return p.updateCardEntity(ctx, handle, cardJSON)
 	}
@@ -439,10 +476,11 @@ func renderProgressEntries(items []core.ProgressCardEntry, lang string) []map[st
 	return elements
 }
 
-// Finalize sends the final content and marks the card complete.
+// Finalize sends the final content and marks the card complete. It is
+// idempotent: once the card is terminal a second call is a no-op.
 func (c *feishuStreamingCard) Finalize(ctx context.Context, content string) error {
 	c.mu.Lock()
-	if c.failed {
+	if c.failed || c.finished {
 		c.mu.Unlock()
 		return nil
 	}
@@ -453,10 +491,19 @@ func (c *feishuStreamingCard) Finalize(ctx context.Context, content string) erro
 	handle := c.handle
 	c.mu.Unlock()
 
+	// Serialize with any throttled flush: a flush that already passed the
+	// terminal check would otherwise write the intermediate state after this
+	// final write.
+	c.apiMu.Lock()
+	defer c.apiMu.Unlock()
+
 	if handle == nil {
 		// No intermediate content ever arrived; create the card now with the
-		// final content directly.
-		return c.send(ctx, content)
+		// final content directly — in the terminal (done) state, so the lazy
+		// path does not leave a permanently "running" card behind.
+		err := c.sendWithStatus(ctx, content, core.CardStatusDone)
+		c.finish(err)
+		return err
 	}
 
 	// Full-card update with the final content; the engine already composed
@@ -476,6 +523,7 @@ func (c *feishuStreamingCard) Finalize(ctx context.Context, content string) erro
 // finish marks the card terminal and closes the done channel.
 func (c *feishuStreamingCard) finish(err error) {
 	c.mu.Lock()
+	c.finished = true
 	if err != nil {
 		c.failed = true
 	} else {

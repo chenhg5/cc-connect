@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,10 +24,15 @@ type fakePlatformForStreamCard struct {
 	appendCalls       int
 	insertCalls       int
 	lastPreviewHandle *feishuPreviewHandle
-	lastAppendPanel   string
-	insertAnchor      string
-	insertAfter       bool
-	insertedElements  []map[string]any
+	lastPreviewJSON   string
+	lastUpdateJSON    string
+	// onCardWrite, when set, runs after a card write, outside the fake's
+	// mutex. It lets a test hold one write in flight.
+	onCardWrite      func()
+	lastAppendPanel  string
+	insertAnchor     string
+	insertAfter      bool
+	insertedElements []map[string]any
 	// missingPanels lists panel element ids the fake pretends the card does not
 	// contain, so appends to them fail the way cardkit does: code 300315
 	// "no such element id". Inserting the panel clears the entry, mirroring the
@@ -47,12 +53,26 @@ func (f *fakePlatformForStreamCard) SendPreviewStart(ctx context.Context, rctx a
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sendPreviewCalls++
+	f.lastPreviewJSON = content
 	h := &feishuPreviewHandle{messageID: "msg_fake", chatID: "chat_fake", cardID: "card_fake"}
 	f.lastPreviewHandle = h
 	return h, nil
 }
 
+func (f *fakePlatformForStreamCard) lastPreviewContent() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastPreviewJSON
+}
+
 func (f *fakePlatformForStreamCard) StreamRichCardText(ctx context.Context, previewHandle any, fullText string) error {
+	f.mu.Lock()
+	f.lastUpdateJSON = fullText
+	hook := f.onCardWrite
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return nil
 }
 
@@ -88,17 +108,33 @@ func (f *fakePlatformForStreamCard) patchCardElementTitle(ctx context.Context, h
 
 func (f *fakePlatformForStreamCard) UpdateMessage(ctx context.Context, previewHandle any, content string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.updateCalls++
+	f.lastUpdateJSON = content
+	hook := f.onCardWrite
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return nil
 }
 
 func (f *fakePlatformForStreamCard) updateCardEntity(ctx context.Context, h *feishuPreviewHandle, cardJSON string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.updateCalls++
 	f.finalizeCalls++
+	f.lastUpdateJSON = cardJSON
+	hook := f.onCardWrite
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return nil
+}
+
+func (f *fakePlatformForStreamCard) lastUpdatedContent() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastUpdateJSON
 }
 
 func (f *fakePlatformForStreamCard) count() (send, update, finalize int) {
@@ -211,7 +247,8 @@ func TestStreamingCard_FinalizeWithoutUpdate(t *testing.T) {
 	}
 	card := sc.(*feishuStreamingCard)
 
-	if err := card.Finalize(context.Background(), "直接最终内容"); err != nil {
+	finalContent := "直接最终内容"
+	if err := card.Finalize(context.Background(), finalContent); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 	send, _, _ := p.count()
@@ -220,6 +257,159 @@ func TestStreamingCard_FinalizeWithoutUpdate(t *testing.T) {
 	}
 	if card.Failed() {
 		t.Error("card should not be failed after successful Finalize")
+	}
+
+	// The lazily created card must render the terminal (done) status: the
+	// working status would leave a "running" card behind on a finished turn.
+	if got, want := p.lastPreviewContent(), cardJSONForContent(finalContent, core.CardStatusDone); got != want {
+		t.Errorf("lazy Finalize created the card with the working status, want the done render:\ngot  %s\nwant %s", got, want)
+	}
+	// The card must be terminal, so a late Update cannot touch it.
+	select {
+	case <-card.done:
+	default:
+		t.Error("done channel not closed after Finalize")
+	}
+	if !card.finished {
+		t.Error("card not marked finished after Finalize")
+	}
+}
+
+// TestStreamingCard_ShrinkingPayloadDoesNotPanic is the regression for the
+// delta-cursor out-of-range panic: a payload may carry FEWER entries than the
+// ones already appended (the engine rebuilds/clears the step list, e.g. when a
+// hook rejects a step), while the append path sliced with the stale
+// appendedThinking/appendedTools cursors (reasoning[3:] on a 1-entry list).
+func TestStreamingCard_ShrinkingPayloadDoesNotPanic(t *testing.T) {
+	p := &fakePlatformForStreamCard{useInteractive: true}
+	sc, _ := p.CreateStreamingCard(context.Background(), replyContext{chatID: "chat_fake"})
+	card := sc.(*feishuStreamingCard)
+
+	big := core.BuildProgressCardPayloadV2(
+		[]core.ProgressCardEntry{
+			{Kind: core.ProgressEntryThinking, Text: "思考一"},
+			{Kind: core.ProgressEntryThinking, Text: "思考二"},
+			{Kind: core.ProgressEntryThinking, Text: "思考三"},
+		},
+		false, "opencode", core.LangChinese, core.ProgressCardStateRunning)
+	_ = card.Update(context.Background(), big) // lazy create: appendedThinking = 3
+
+	// Force the next Update to flush synchronously (skip the throttle window).
+	card.mu.Lock()
+	card.lastUpdate = time.Now().Add(-2 * feishuStreamingCardUpdateMinInterval)
+	card.mu.Unlock()
+
+	small := core.BuildProgressCardPayloadV2(
+		[]core.ProgressCardEntry{{Kind: core.ProgressEntryThinking, Text: "重来"}},
+		false, "opencode", core.LangChinese, core.ProgressCardStateRunning)
+	_ = card.Update(context.Background(), small) // used to panic: reasoning[3:]
+
+	card.mu.Lock()
+	got := card.appendedThinking
+	card.mu.Unlock()
+	if got != 1 {
+		t.Errorf("appendedThinking = %d after a shrinking payload, want 1", got)
+	}
+}
+
+// TestStreamingCard_FinalizeWaitsForInflightUpdate verifies Finalize cannot be
+// overtaken by a throttled flush that is already writing: without
+// serialization the earlier update lands AFTER the final render and the card
+// is left in the intermediate (running) state.
+func TestStreamingCard_FinalizeWaitsForInflightUpdate(t *testing.T) {
+	p := &fakePlatformForStreamCard{useInteractive: true}
+	sc, _ := p.CreateStreamingCard(context.Background(), replyContext{chatID: "chat_fake"})
+	card := sc.(*feishuStreamingCard)
+
+	if err := card.Update(context.Background(), "首条"); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var blocked atomic.Bool
+	p.onCardWrite = func() {
+		if blocked.CompareAndSwap(false, true) {
+			close(started)
+			<-release
+		}
+	}
+
+	// Force the next Update to flush synchronously; it blocks inside the fake's
+	// card write ("中间态" goes through the streaming-text path) until release
+	// is closed.
+	card.mu.Lock()
+	card.lastUpdate = time.Now().Add(-2 * feishuStreamingCardUpdateMinInterval)
+	card.mu.Unlock()
+	updateDone := make(chan error, 1)
+	go func() { updateDone <- card.Update(context.Background(), "中间态") }()
+	<-started
+
+	finalizeDone := make(chan error, 1)
+	go func() { finalizeDone <- card.Finalize(context.Background(), "最终答案") }()
+	select {
+	case <-finalizeDone:
+		t.Fatal("Finalize completed while a card write was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-updateDone; err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := <-finalizeDone; err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if got, want := p.lastUpdatedContent(), cardJSONForContent("最终答案", core.CardStatusDone); got != want {
+		t.Errorf("last card write is not the done render; the in-flight update overtook Finalize:\ngot  %s\nwant %s", got, want)
+	}
+}
+
+// TestStreamingCard_StalePayloadUpdateAfterFinalizeIgnored verifies a late
+// payload Update cannot revive a finalized card. Pre-fix, an Update arriving
+// after Finalize still appended delta entries to the collapsible panels and
+// patched their titles, mutating the card the turn had already completed.
+func TestStreamingCard_StalePayloadUpdateAfterFinalizeIgnored(t *testing.T) {
+	p := &fakePlatformForStreamCard{useInteractive: true}
+	sc, _ := p.CreateStreamingCard(context.Background(), replyContext{chatID: "chat_fake"})
+	card := sc.(*feishuStreamingCard)
+
+	one := core.BuildProgressCardPayloadV2(
+		[]core.ProgressCardEntry{{Kind: core.ProgressEntryThinking, Text: "思考一"}},
+		false, "opencode", core.LangChinese, core.ProgressCardStateRunning)
+	_ = card.Update(context.Background(), one) // lazy create
+
+	two := core.BuildProgressCardPayloadV2(
+		[]core.ProgressCardEntry{
+			{Kind: core.ProgressEntryThinking, Text: "思考一"},
+			{Kind: core.ProgressEntryThinking, Text: "思考二"},
+		},
+		false, "opencode", core.LangChinese, core.ProgressCardStateCompleted)
+	if err := card.Finalize(context.Background(), two); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	appendsAfterFinalize := p.appendCount()
+	_, updatesAfterFinalize, _ := p.count()
+
+	// A late payload update (e.g. a throttled flush that lost the race against
+	// Finalize) must be dropped.
+	card.mu.Lock()
+	card.lastUpdate = time.Now().Add(-2 * feishuStreamingCardUpdateMinInterval)
+	card.mu.Unlock()
+	three := core.BuildProgressCardPayloadV2(
+		[]core.ProgressCardEntry{
+			{Kind: core.ProgressEntryThinking, Text: "思考一"},
+			{Kind: core.ProgressEntryThinking, Text: "思考二"},
+			{Kind: core.ProgressEntryThinking, Text: "思考三"},
+		},
+		false, "opencode", core.LangChinese, core.ProgressCardStateRunning)
+	_ = card.Update(context.Background(), three)
+
+	if got := p.appendCount(); got != appendsAfterFinalize {
+		t.Errorf("append calls after Finalize = %d, want %d (stale update must be dropped)", got, appendsAfterFinalize)
+	}
+	if _, updates, _ := p.count(); updates != updatesAfterFinalize {
+		t.Errorf("card updates after Finalize = %d, want %d (stale update must be dropped)", updates, updatesAfterFinalize)
 	}
 }
 
