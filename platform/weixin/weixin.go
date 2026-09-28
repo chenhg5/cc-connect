@@ -218,10 +218,14 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	lp := sanitizeLongPollTimeoutMS(pickInt(opts["long_poll_timeout_ms"]))
 
-	// Send-volume quota (see defaultBurstLimit constants). 0 disables the quota.
-	burstLimit := pickInt(opts["burst_limit"])
-	if burstLimit < 0 {
-		burstLimit = 0
+	// Keep the default only when the option is absent. An explicit 0 disables
+	// the local quota, as documented for interactive deployments.
+	burstLimit := defaultBurstLimit
+	if configuredLimit, ok := opts["burst_limit"]; ok {
+		burstLimit = pickInt(configuredLimit)
+		if burstLimit < 0 {
+			burstLimit = 0
+		}
 	}
 	burstWindow := pickInt(opts["burst_window_secs"])
 	if burstWindow < 0 {
@@ -260,9 +264,6 @@ func New(opts map[string]any) (core.Platform, error) {
 		Transport: &http.Transport{Proxy: nil},
 	}
 
-	if burstLimit <= 0 {
-		burstLimit = defaultBurstLimit
-	}
 	if burstWindow <= 0 {
 		burstWindow = defaultBurstWindowSecs
 	}
@@ -826,9 +827,9 @@ func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) erro
 	return err
 }
 
-// Send proactively pushes a message to the user (cron / timer / Relay). Pushes
-// count against the burst budget because ilink DOES throttle proactive sends
-// (see #1643 / #1742).
+// Send handles both foreground agent output and proactive messages. The engine
+// uses Send, not Reply, for ordinary agent results, so the reply context must
+// decide whether the push budget applies (see #1742).
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
 	_, err := p.SendWithReceipt(ctx, replyCtx, content)
 	return err
@@ -839,7 +840,11 @@ func (p *Platform) ReplyWithReceipt(ctx context.Context, replyCtx any, content s
 }
 
 func (p *Platform) SendWithReceipt(ctx context.Context, replyCtx any, content string) (*core.SendReceipt, error) {
-	return p.sendChunksWithReceipt(ctx, replyCtx, content, sendPathPush)
+	path := sendPathPush
+	if rc, ok := replyCtx.(*replyContext); ok && rc != nil && !rc.proactive {
+		path = sendPathReply
+	}
+	return p.sendChunksWithReceipt(ctx, replyCtx, content, path)
 }
 
 // StartTyping sends a typing indicator to the peer and repeats every few seconds
@@ -977,12 +982,13 @@ func (p *Platform) checkSendQuota(ctx context.Context, path sendPath) error {
 		}
 	}
 	p.sendQuotaTimes = kept
-	if len(p.sendQuotaTimes) >= p.sendQuotaLimit {
+	used := len(p.sendQuotaTimes)
+	if used >= p.sendQuotaLimit {
 		p.sendQuotaMu.Unlock()
 		pushBudgetExceededCounter.Add(1)
 		slog.Error("weixin: push_path_budget_exceeded",
 			"path", string(path),
-			"used", len(p.sendQuotaTimes),
+			"used", used,
 			"limit", p.sendQuotaLimit,
 			"window", p.sendQuotaWindow.String(),
 			"hint", "ilink throttles the bot after roughly 5-6 pushes per window — reduce cron/timer pushes or re-login later",

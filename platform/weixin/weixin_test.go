@@ -969,6 +969,64 @@ func TestSendChunks_AppliesQuota(t *testing.T) {
 // behaviour: replies are exempt from the quota, pushes still count, file
 // transfers still count, and the over-budget event is observable.
 
+func TestNewBurstLimitExplicitZero(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		options   map[string]any
+		wantLimit int
+	}{
+		{name: "absent uses default", options: map[string]any{"token": "test"}, wantLimit: defaultBurstLimit},
+		{name: "explicit zero disables", options: map[string]any{"token": "test", "burst_limit": 0}, wantLimit: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			platform, err := New(tc.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := platform.(*Platform)
+			if p.sendQuotaLimit != tc.wantLimit {
+				t.Fatalf("sendQuotaLimit = %d, want %d", p.sendQuotaLimit, tc.wantLimit)
+			}
+		})
+	}
+}
+
+// The engine calls SendWithReceipt for an ordinary agent result. An inbound
+// reply context must not turn that result into a quota-limited proactive push.
+func TestSendWithReceiptUsesReplyContextForBudget(t *testing.T) {
+	resetPushBudgetExceededCounter()
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sendCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message_id":123}`))
+	}))
+	defer srv.Close()
+
+	p := &Platform{httpClient: &http.Client{}, sendQuotaLimit: 1, sendQuotaWindow: time.Hour}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	replyCtx := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
+	for i := 0; i < 5; i++ {
+		if _, err := p.SendWithReceipt(context.Background(), replyCtx, fmt.Sprintf("reply %d", i)); err != nil {
+			t.Fatalf("foreground result %d blocked: %v", i, err)
+		}
+	}
+	if len(p.sendQuotaTimes) != 0 {
+		t.Fatalf("foreground results consumed push budget: %d", len(p.sendQuotaTimes))
+	}
+
+	pushCtx := &replyContext{peerUserID: "peer-1", contextToken: "tok-1", proactive: true}
+	if _, err := p.SendWithReceipt(context.Background(), pushCtx, "first push"); err != nil {
+		t.Fatalf("first proactive push failed: %v", err)
+	}
+	if _, err := p.SendWithReceipt(context.Background(), pushCtx, "second push"); err == nil {
+		t.Fatal("second proactive push should be blocked")
+	}
+	if got := sendCalls.Load(); got != 6 {
+		t.Fatalf("sendmessage calls = %d, want 6", got)
+	}
+}
+
 // TestCheckSendQuota_ReplyBypassesQuota is the regression test for #1742.
 // Reply-path sends must never be blocked by the burst budget, regardless of
 // how many replies have already gone out — that's the bug v1.5.0 shipped.
