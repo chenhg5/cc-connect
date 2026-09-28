@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -403,17 +404,33 @@ type LocationAttachment struct {
 	ProximityAlertRadius int     // maximum distance for proximity alerts in meters (optional)
 }
 
+// InboundCard is a lossless snapshot of an inbound interactive card. Raw is
+// kept separate from Summary so platforms can preserve Card 2.0 fields while
+// retaining the historical plain-text message path for agents that do not
+// opt into raw card context.
+type InboundCard struct {
+	MessageID string          `json:"message_id,omitempty"`
+	Schema    string          `json:"schema,omitempty"`
+	Version   string          `json:"version,omitempty"`
+	Summary   string          `json:"summary,omitempty"`
+	Raw       json.RawMessage `json:"raw,omitempty"`
+	Truncated bool            `json:"truncated,omitempty"`
+}
+
 // Message represents a unified incoming message from any platform.
 type Message struct {
-	SessionKey   string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
-	Platform     string
-	MessageID    string // platform message ID for tracing
-	Recalled     bool   // true for platform message recall/delete events targeting MessageID
-	ChannelID    string
-	UserID       string
-	UserName     string
-	ChatName     string // human-readable chat/group name (optional)
-	Content      string
+	SessionKey string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
+	Platform   string
+	MessageID  string // platform message ID for tracing
+	Recalled   bool   // true for platform message recall/delete events targeting MessageID
+	ChannelID  string
+	UserID     string
+	UserName   string
+	ChatName   string // human-readable chat/group name (optional)
+	Content    string
+	// Cards contains lossless inbound interactive-card payloads. It is
+	// additive: existing platforms leave it empty and continue using Content.
+	Cards        []InboundCard
 	Images       []ImageAttachment   // attached images (if any)
 	Files        []FileAttachment    // attached files (if any)
 	Audio        *AudioAttachment    // voice message (if any)

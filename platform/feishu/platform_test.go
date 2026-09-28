@@ -31,6 +31,25 @@ func TestNew_DefaultsToInteractivePlatform(t *testing.T) {
 	}
 }
 
+func TestNew_DefaultsInboundCardMaxBytes(t *testing.T) {
+	pAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	var p *Platform
+	switch value := pAny.(type) {
+	case *Platform:
+		p = value
+	case *interactivePlatform:
+		p = value.Platform
+	default:
+		t.Fatalf("platform type = %T, want Feishu platform", pAny)
+	}
+	if p.inboundCardMaxBytes != defaultInboundCardMaxBytes {
+		t.Fatalf("inboundCardMaxBytes = %d, want %d", p.inboundCardMaxBytes, defaultInboundCardMaxBytes)
+	}
+}
+
 func TestNew_CanDisableInteractiveCards(t *testing.T) {
 	p, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": false})
 	if err != nil {
