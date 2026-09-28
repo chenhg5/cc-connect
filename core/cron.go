@@ -957,6 +957,9 @@ func parseStep(field string) (int, bool) {
 // CronExprToHuman converts a standard 5-field cron expression to a human-readable string.
 func CronExprToHuman(expr string, lang Language) string {
 	fields := strings.Fields(expr)
+	if len(fields) == 6 && (strings.HasPrefix(fields[0], "CRON_TZ=") || strings.HasPrefix(fields[0], "TZ=")) {
+		fields = fields[1:]
+	}
 	if len(fields) != 5 {
 		return expr
 	}
@@ -1123,4 +1126,25 @@ func padZero(s string) string {
 		return "0" + s
 	}
 	return s
+}
+
+// cronDisplayLocation returns the timezone a schedule is evaluated in: the
+// explicit CRON_TZ=/TZ= prefix when present (DST-aware), else local time.
+func cronDisplayLocation(expr string) *time.Location {
+	if schedule, err := cron.ParseStandard(expr); err == nil {
+		if spec, ok := schedule.(*cron.SpecSchedule); ok && spec.Location != nil {
+			return spec.Location
+		}
+	}
+	return time.Local
+}
+
+// cronDisplaySchedule renders the human-readable schedule, suffixed with the
+// timezone name when the expression pins one that differs from local time.
+func cronDisplaySchedule(expr string, lang Language) string {
+	human := CronExprToHuman(expr, lang)
+	if loc := cronDisplayLocation(expr); loc != time.Local {
+		human += " (" + loc.String() + ")"
+	}
+	return human
 }
