@@ -20,6 +20,15 @@ import (
 
 type stubAgent struct{}
 
+type failingHistoryAgent struct {
+	stubAgent
+	err error
+}
+
+func (a *failingHistoryAgent) GetSessionHistory(context.Context, string, int) ([]HistoryEntry, error) {
+	return []HistoryEntry{{Role: "user", Content: "partial history"}}, a.err
+}
+
 func (a *stubAgent) Name() string { return "stub" }
 func (a *stubAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
 	return &stubAgentSession{}, nil
@@ -3827,6 +3836,33 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 	if strings.Contains(p.sent[0], "cc-connect") {
 		t.Fatalf("current text = %q, should not be card fallback title", p.sent[0])
+	}
+}
+
+func TestCmdHistory_ReadFailureIsVisibleWithoutLeakingPath(t *testing.T) {
+	const secretPath = "/private/codex-home/sessions/secret.jsonl"
+	agent := &failingHistoryAgent{err: fmt.Errorf("scan %s: token too long", secretPath)}
+	msg := &Message{SessionKey: "test:history-failure", ReplyCtx: "ctx"}
+
+	plain := &stubPlatformEngine{n: "plain"}
+	textEngine := NewEngine("test", agent, []Platform{plain}, "", LangEnglish)
+	textEngine.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("broken", "test")
+	textEngine.cmdHistory(plain, msg, []string{"10"})
+	sent := plain.getSent()
+	if len(sent) != 1 || sent[0] != textEngine.i18n.T(MsgHistoryReadFailed) || strings.Contains(sent[0], secretPath) {
+		t.Fatalf("text history response = %q; want generic localized failure without path", sent)
+	}
+
+	cardPlatform := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "cards"}}
+	cardEngine := NewEngine("test", agent, []Platform{cardPlatform}, "", LangEnglish)
+	cardEngine.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("broken", "test")
+	cardEngine.cmdHistory(cardPlatform, msg, nil)
+	if len(cardPlatform.repliedCards) != 1 {
+		t.Fatalf("card replies = %d, want 1", len(cardPlatform.repliedCards))
+	}
+	cardText := cardPlatform.repliedCards[0].RenderText()
+	if !strings.Contains(cardText, cardEngine.i18n.T(MsgHistoryReadFailed)) || strings.Contains(cardText, secretPath) || strings.Contains(cardText, "partial history") {
+		t.Fatalf("card history response = %q; want generic localized failure without path or partial history", cardText)
 	}
 }
 

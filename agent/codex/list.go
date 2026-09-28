@@ -140,7 +140,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
 
@@ -149,7 +149,8 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 			Payload json.RawMessage `json:"payload"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
+			slog.Warn("codex: decode session file", "path", path, "error", err)
+			return nil
 		}
 
 		switch entry.Type {
@@ -162,11 +163,13 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 				Cwd    string          `json:"cwd"`
 				Source json.RawMessage `json:"source"`
 			}
-			if json.Unmarshal(entry.Payload, &meta) == nil {
-				sessionID = meta.ID
-				sessionCwd = meta.Cwd
-				sessionSource = meta.Source
+			if err := json.Unmarshal(entry.Payload, &meta); err != nil {
+				slog.Warn("codex: decode session metadata", "path", path, "error", err)
+				return nil
 			}
+			sessionID = meta.ID
+			sessionCwd = meta.Cwd
+			sessionSource = meta.Source
 
 		case "response_item":
 			var item struct {
@@ -176,21 +179,23 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 					Text string `json:"text"`
 				} `json:"content"`
 			}
-			if json.Unmarshal(entry.Payload, &item) == nil {
-				if item.Role == "user" {
-					userMsgSeen++
-					msgCount++
-					// The actual user prompt is the last user response_item
-					// (earlier ones are system/AGENTS.md instructions).
-					// Pick the last content block that looks like a real prompt.
-					for _, c := range item.Content {
-						if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
-							summary = c.Text
-						}
+			if err := json.Unmarshal(entry.Payload, &item); err != nil {
+				slog.Warn("codex: decode session response item", "path", path, "error", err)
+				return nil
+			}
+			if item.Role == "user" {
+				userMsgSeen++
+				msgCount++
+				// The actual user prompt is the last user response_item
+				// (earlier ones are system/AGENTS.md instructions).
+				// Pick the last content block that looks like a real prompt.
+				for _, c := range item.Content {
+					if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
+						summary = c.Text
 					}
-				} else if item.Role == "assistant" {
-					msgCount++
 				}
+			} else if item.Role == "assistant" {
+				msgCount++
 			}
 		}
 	}
@@ -289,7 +294,7 @@ func readCodexSessionHistory(r io.Reader, limit int) ([]core.HistoryEntry, error
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
 
@@ -298,8 +303,8 @@ func readCodexSessionHistory(r io.Reader, limit int) ([]core.HistoryEntry, error
 			Type      string          `json:"type"`
 			Payload   json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal([]byte(line), &raw) != nil {
-			continue
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			return nil, fmt.Errorf("decode session record: %w", err)
 		}
 		if raw.Type != "response_item" {
 			continue
@@ -314,8 +319,8 @@ func readCodexSessionHistory(r io.Reader, limit int) ([]core.HistoryEntry, error
 				Text string `json:"text"`
 			} `json:"content"`
 		}
-		if json.Unmarshal(raw.Payload, &item) != nil {
-			continue
+		if err := json.Unmarshal(raw.Payload, &item); err != nil {
+			return nil, fmt.Errorf("decode response item: %w", err)
 		}
 
 		ts := parseCodexTimestamp(raw.Timestamp)

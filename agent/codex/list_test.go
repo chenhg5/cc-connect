@@ -215,6 +215,51 @@ func TestReadCodexSessionHistory_ReportsScanError(t *testing.T) {
 	}
 }
 
+func TestReadCodexSessionHistory_RejectsCorruptJSONAfterValidPrefix(t *testing.T) {
+	valid := `{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"hello"}]}}`
+	for _, bad := range []string{
+		`{"type":"response_item",`,
+		`{"type":"response_item","payload":{"role":`,
+	} {
+		entries, err := readCodexSessionHistory(strings.NewReader(valid+"\n"+bad+"\n"), 10)
+		if err == nil || entries != nil {
+			t.Fatalf("corrupt record %q: entries = %+v, error = %v; want nil entries and error", bad, entries, err)
+		}
+	}
+
+	entries, err := readCodexSessionHistory(strings.NewReader(valid+"\n\n  \n"+`{"type":"unknown_event","payload":{}}`+"\n"), 10)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("blank and unknown records: entries = %+v, error = %v; want one entry", entries, err)
+	}
+}
+
+func TestAgentListSessions_BadFileDoesNotHideHealthySession(t *testing.T) {
+	workDir := t.TempDir()
+	codexHome := t.TempDir()
+	dir := filepath.Join(codexHome, "sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := json.Marshal(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthy := `{"type":"session_meta","payload":{"id":"healthy","cwd":` + string(cwd) + `}}` + "\n" +
+		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"hello"}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "rollout-healthy.jsonl"), []byte(healthy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bad := `{"type":"session_meta","payload":{"id":"bad","cwd":` + string(cwd) + `}}` + "\n" + `{"type":"response_item","payload":`
+	if err := os.WriteFile(filepath.Join(dir, "rollout-bad.jsonl"), []byte(bad), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{workDir: workDir, codexHome: codexHome}
+	sessions, err := a.ListSessions(context.Background())
+	if err != nil || len(sessions) != 1 || sessions[0].ID != "healthy" {
+		t.Fatalf("ListSessions() = %+v, %v; want only healthy session", sessions, err)
+	}
+}
+
 func TestGetSessionHistory_ConvertsTimestampToLocal(t *testing.T) {
 	codexHome := t.TempDir()
 	sessionID := "session-local-time"
