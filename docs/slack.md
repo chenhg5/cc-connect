@@ -194,14 +194,14 @@ handles that.
 bot_token = "xoxb-xxxxxxx..."
 app_token = "xapp-xxxxxxx..."
 session_scope = "user"        # "user" (default) | "channel" | "thread"
-thread_context = true         # default; read a thread before answering in it
+thread_context = true         # default false; read a thread before answering in it
 thread_context_depth = 20     # messages to read (default 20, max 100)
 ```
 
 | Option | Default | Effect |
 |--------|---------|--------|
 | `session_scope` | `user` | Which conversations share one agent session: `user` = one per channel + user, `channel` = one per channel, `thread` = one per Slack thread, so each new thread starts a fresh session |
-| `thread_context` | `true` | When the bot is pulled into a thread it did not start, read that thread's earlier messages and give them to the agent as context |
+| `thread_context` | `false` | When the bot is pulled into a thread it did not start, read that thread's earlier messages and give them to the agent as context |
 | `thread_context_depth` | `20` | How many earlier messages to inject — the most recent ones, capped at 100 |
 
 **`session_scope`** decides whether a new thread means a new agent session. With
@@ -216,7 +216,7 @@ agent carries context — and clutter — from unrelated threads. Set
 **`thread_context`** covers the opposite problem. A Slack event carries only the
 message that triggered it, so a bot `@`-mentioned halfway down a thread cannot
 see the question it is being asked about, or what anyone else in the thread
-already said. With `thread_context` on, the first time a thread reaches the
+already said. With `thread_context = true`, the first time a thread reaches the
 agent cc-connect reads that thread with `conversations.replies` and prepends a
 transcript:
 
@@ -238,15 +238,16 @@ are never re-read, since the agent already received those messages as ordinary
 turns. Where `session_scope` gives two people separate sessions, each of them
 gets the thread once — otherwise whoever spoke second would be left without it.
 
-cc-connect asks for the thread's root plus its most recent
-`thread_context_depth + 1` messages, drops the mention itself, and injects the
-up-to-`thread_context_depth` messages nearest the question. On a thread longer
-than that the root itself falls out of the window, and the block discloses
-that older replies are omitted — so the agent knows it is reading a window
-rather than the whole conversation. New Slack apps distributed outside the
-Marketplace are rate-limited harder for `conversations.replies` (1 req/min and
-a limit cap of 15, per Slack's 2025 change); on such apps the effective depth
-is smaller than configured.
+cc-connect reads the thread as it stood when the mention was posted (replies
+arriving during the read are excluded), following Slack's pagination to the
+end, and injects the up-to-`thread_context_depth` messages nearest the
+question. On a thread longer than that the root itself falls out of the window,
+and the block discloses that older replies are omitted — so the agent knows it
+is reading a window rather than the whole conversation. New Slack apps
+distributed outside the Marketplace are rate-limited harder for
+`conversations.replies` (1 req/min and 15 messages per page, per Slack's 2025
+change); on such apps a thread longer than one page is read only partly, and
+the block says that the replies nearest the question are missing.
 
 A top-level DM reads nothing — there is no thread, and the conversation is
 already continuous. DM *threads*, including every conversation in the Assistant
@@ -255,9 +256,13 @@ labelled `assistant`, so a restarted process re-reads its own conversation as
 its own, not as someone else's.
 
 Quoted messages are labelled by author and marked as data rather than
-instructions: anyone who can post in the channel can write into that text,
-including people `allow_from` does not let drive the bot. Another app's
-messages are labelled `bot`, never as the agent's own prior output.
+instructions. Another app's messages are labelled `bot`, never as the agent's
+own prior output. That framing reduces, but does not remove, prompt-injection
+risk: anyone who can post in the thread can write into that text — including
+people `allow_from` does not let drive the bot, Slack Connect guests from other
+organisations, and participants of private channels and DMs — and whatever they
+wrote is sent to the agent and its model provider. This is why the option is
+off by default; enable it only where everyone in the bot's channels is trusted.
 
 This needs a history scope for the conversation type — `channels:history`,
 `groups:history`, `im:history`, or `mpim:history`. Apps created from
@@ -266,8 +271,7 @@ three; add `mpim:history` if your bot works in group DMs. Without the scope the
 fetch fails, one warning names the scope you need, and the message is delivered
 without the transcript — nothing is dropped. A temporary failure (a rate limit,
 a timeout, a Slack blip) is retried on the next message in that thread rather
-than disabling it until restart. Set `thread_context = false` to turn the
-feature off.
+than disabling it until restart.
 
 ---
 
