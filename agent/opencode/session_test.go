@@ -3,11 +3,12 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -136,19 +137,93 @@ func TestOpencodeSessionBuildRunArgsOmitsDir(t *testing.T) {
 
 func TestOpencodeSessionUsesCommandWorkingDirectory(t *testing.T) {
 	workDir := t.TempDir()
-	cliPath := filepath.Join(t.TempDir(), "opencode")
-	script := `#!/bin/sh
-set -eu
-exec 2>/dev/null
-test "$PWD" = "$EXPECTED_WORKDIR"
-printf '%s\n' '{"type":"step_start","sessionID":"ses-cwd"}'
-printf '%s\n' '{"type":"text","part":{"text":"cwd-ok"}}'
-
-`
-	if err := os.WriteFile(cliPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake opencode: %v", err)
+	staleDir := t.TempDir()
+	t.Setenv("PWD", staleDir)
+	s := newExecutableFixtureSession(t, workDir, "cwd")
+	if err := s.Send("check cwd", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
 	}
-	s, err := newOpencodeSession(context.Background(), cliPath, nil, workDir, "", "default", "", "", []string{"EXPECTED_WORKDIR=" + workDir})
+	events := collectFixtureEvents(t, s)
+	var got struct{ CWD, PWD string }
+	for _, event := range events {
+		if event.Type == core.EventError {
+			t.Fatalf("cwd fixture error: %v", event.Error)
+		}
+		if event.Type == core.EventText {
+			if err := json.Unmarshal([]byte(event.Content), &got); err != nil {
+				t.Fatalf("decode cwd: %v", err)
+			}
+		}
+	}
+	assertTerminalEvents(t, events, core.EventResult)
+	want := resolvedPath(t, workDir)
+	if resolvedPath(t, got.CWD) != want {
+		t.Errorf("actual cwd = %q, want %q", got.CWD, workDir)
+	}
+	if runtime.GOOS != "windows" && resolvedPath(t, got.PWD) != want {
+		t.Errorf("PWD = %q, want %q (parent PWD was %q)", got.PWD, workDir, staleDir)
+	}
+}
+
+func TestOpencodeSessionNonzeroExitWithoutStderrEmitsOneError(t *testing.T) {
+	s := newExecutableFixtureSession(t, t.TempDir(), "exit7")
+	if err := s.Send("fail", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	assertTerminalEvents(t, collectFixtureEvents(t, s), core.EventError)
+}
+
+func TestOpencodeSessionJSONErrorEmitsOneTerminalEvent(t *testing.T) {
+	s := newExecutableFixtureSession(t, t.TempDir(), "json-error")
+	if err := s.Send("fail", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	assertTerminalEvents(t, collectFixtureEvents(t, s), core.EventError)
+}
+
+func TestOpencodeSessionSuccessfulTurnEmitsOneResult(t *testing.T) {
+	s := newExecutableFixtureSession(t, t.TempDir(), "success")
+	if err := s.Send("succeed", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	assertTerminalEvents(t, collectFixtureEvents(t, s), core.EventResult)
+}
+
+// TestOpenCodeExecutableFixture is run as a child executable by Send.
+func TestOpenCodeExecutableFixture(t *testing.T) {
+	mode := os.Getenv("CC_OPENCODE_TEST_FIXTURE")
+	if mode == "" {
+		return
+	}
+	switch mode {
+	case "cwd":
+		cwd, err := os.Getwd()
+		if err != nil {
+			os.Exit(2)
+		}
+		content, _ := json.Marshal(struct{ CWD, PWD string }{cwd, os.Getenv("PWD")})
+		line, _ := json.Marshal(map[string]any{"type": "text", "part": map[string]string{"text": string(content)}})
+		fmt.Println(string(line))
+	case "exit7":
+		os.Exit(7)
+	case "json-error":
+		fmt.Println(`{"type":"error","error":"fixture failure"}`)
+		os.Exit(1)
+	case "success":
+		fmt.Println(`{"type":"step_finish","part":{"reason":"stop"}}`)
+	default:
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+func newExecutableFixtureSession(t *testing.T, workDir, mode string) *opencodeSession {
+	t.Helper()
+	cliPath, err := os.Executable()
+	if err != nil {
+		t.Fatalf("test executable: %v", err)
+	}
+	s, err := newOpencodeSession(context.Background(), cliPath, []string{"-test.run=^TestOpenCodeExecutableFixture$"}, workDir, "", "default", "", "", []string{"CC_OPENCODE_TEST_FIXTURE=" + mode})
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -157,28 +232,49 @@ printf '%s\n' '{"type":"text","part":{"text":"cwd-ok"}}'
 			t.Errorf("Close: %v", err)
 		}
 	})
+	return s
+}
 
-	if err := s.Send("check cwd", "", nil, nil); err != nil {
-		t.Fatalf("Send: %v", err)
+func collectFixtureEvents(t *testing.T, s *opencodeSession) []core.Event {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { s.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for fixture process")
 	}
-	deadline := time.NewTimer(2 * time.Second)
-	defer deadline.Stop()
-	for {
-		select {
-		case event := <-s.Events():
-			if event.Type == core.EventError {
-				t.Fatalf("cwd smoke error: %v", event.Error)
-			}
-			if event.Type == core.EventResult {
-				if s.CurrentSessionID() != "ses-cwd" {
-					t.Fatalf("session ID = %q, want ses-cwd", s.CurrentSessionID())
-				}
-				return
-			}
-		case <-deadline.C:
-			t.Fatal("timed out waiting for cwd smoke result")
+	var events []core.Event
+	for len(s.events) > 0 {
+		events = append(events, <-s.events)
+	}
+	return events
+}
+
+func assertTerminalEvents(t *testing.T, events []core.Event, want core.EventType) {
+	t.Helper()
+	var terminal []core.Event
+	for _, event := range events {
+		if event.Type == core.EventError || event.Type == core.EventResult {
+			terminal = append(terminal, event)
 		}
 	}
+	if len(terminal) != 1 || terminal[0].Type != want {
+		t.Errorf("terminal events = %v, want exactly one %s (all events: %v)", terminal, want, events)
+	}
+}
+
+func resolvedPath(t *testing.T, path string) string {
+	t.Helper()
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("absolute path %q: %v", path, err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		t.Fatalf("resolve path %q: %v", path, err)
+	}
+	return resolved
 }
 
 func TestOpencodeSessionBuildRunArgsYoloUsesAuto(t *testing.T) {
@@ -314,9 +410,8 @@ func TestHandleStepDuplicateEventResultPrevented(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{
-		events:     make(chan core.Event, 2),
-		ctx:        ctx,
-		resultSent: atomic.Bool{},
+		events: make(chan core.Event, 2),
+		ctx:    ctx,
 	}
 
 	s.handleStepFinish(raw)
