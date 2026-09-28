@@ -748,6 +748,64 @@ func TestWorkspaceAgentOptions_CarriesTransport(t *testing.T) {
 	}
 }
 
+// The per-project server tuning and the CLI path have to survive the workspace
+// rebuild too: without them a workspace agent silently reverts to the defaults,
+// most visibly turning `opencode_stall_timeout = "off"` back into the 5m
+// watchdog the project switched off.
+func TestWorkspaceAgentOptions_CarriesServerTuning(t *testing.T) {
+	agent, err := New(map[string]any{
+		"work_dir":                 t.TempDir(),
+		"cmd":                      existingCmd(t) + " --flag",
+		"opencode_transport":       opencodeTransportServer,
+		"opencode_stall_timeout":   "off",
+		"opencode_server_idle_ttl": "30m",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	base := agent.(*Agent)
+	opts := base.WorkspaceAgentOptions()
+
+	if got := opts["opencode_stall_timeout"]; got != "off" {
+		t.Fatalf("WorkspaceAgentOptions()[opencode_stall_timeout] = %v, want \"off\"", got)
+	}
+	if got := opts["opencode_server_idle_ttl"]; got != "30m0s" {
+		t.Fatalf("WorkspaceAgentOptions()[opencode_server_idle_ttl] = %v, want \"30m0s\"", got)
+	}
+	cmdArr, ok := opts["cmd"].([]string)
+	if !ok || len(cmdArr) != 2 || cmdArr[0] != base.cmd || cmdArr[1] != "--flag" {
+		t.Fatalf("WorkspaceAgentOptions()[cmd] = %#v, want [%q --flag]", opts["cmd"], base.cmd)
+	}
+
+	rebuilt, err := New(opts)
+	if err != nil {
+		t.Fatalf("New(rebuilt): %v", err)
+	}
+	got := rebuilt.(*Agent)
+	if got.stallTimeout != serverStallTimeoutDisabled {
+		t.Fatalf("rebuilt stall timeout = %v, want the disabled marker", got.stallTimeout)
+	}
+	if got.serverIdleTTL != 30*time.Minute {
+		t.Fatalf("rebuilt idle TTL = %v, want 30m", got.serverIdleTTL)
+	}
+	if got.cmd != base.cmd || len(got.cliExtraArgs) != 1 || got.cliExtraArgs[0] != "--flag" {
+		t.Fatalf("rebuilt cmd = %q %v, want %q [--flag]", got.cmd, got.cliExtraArgs, base.cmd)
+	}
+}
+
+// A project that configured nothing must not have defaults injected into its
+// workspace options: "not set" is what keeps the server transport's default
+// stall watchdog in force.
+func TestWorkspaceAgentOptions_OmitsUnsetServerTuning(t *testing.T) {
+	agent := &Agent{transport: opencodeTransportRun, cmd: defaultOpencodeBin}
+	opts := agent.WorkspaceAgentOptions()
+	for _, key := range []string{"opencode_stall_timeout", "opencode_server_idle_ttl", "cmd"} {
+		if _, present := opts[key]; present {
+			t.Fatalf("WorkspaceAgentOptions() unexpectedly carries %q = %v", key, opts[key])
+		}
+	}
+}
+
 // The engine persists agent_session_id from text events only, so a turn aborted
 // before any text arrives (/stop during a tool call) must still learn the id up
 // front — otherwise the next message starts a fresh conversation.
@@ -823,9 +881,10 @@ func TestServerSession_ReconnectsEventStream(t *testing.T) {
 	}
 }
 
-// Losing the stream mid-turn is reported once; a flapping server must not spam
-// the chat with repeated errors.
-func TestServerSession_StreamLossReportedOnceMidTurn(t *testing.T) {
+// Losing the stream mid-turn is a hiccup, not a failed turn: the reader
+// reconnects and the session is resynced, so the engine must not be told the turn
+// failed (an EventError would finalize the card and end it for good).
+func TestServerSession_StreamLossMidTurnStaysTransparent(t *testing.T) {
 	f := newFakeOpencodeServer(t)
 	f.holdMessages.Store(true)
 	s := newTestServerSession(t, f, "ses_stub")
@@ -836,27 +895,199 @@ func TestServerSession_StreamLossReportedOnceMidTurn(t *testing.T) {
 	}
 
 	f.dropStreams()
-	first := collectEvents(t, s.Events(), 1, 5*time.Second)
-	if first[0].Type != core.EventError {
-		t.Fatalf("first event = %+v, want EventError for the lost stream", first[0])
-	}
-	// Wait for the reader to re-establish and drop again: no second report.
-	deadline := time.Now().Add(5 * time.Second)
-	for f.subscriberCount() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("stream never came back")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	f.dropStreams()
-	select {
-	case evt := <-s.Events():
-		if evt.Type == core.EventError {
-			t.Fatalf("duplicate stream-loss error: %+v", evt)
-		}
-	case <-time.After(1500 * time.Millisecond):
+	// No error event while the reader is away, and none after it re-attaches.
+	assertNoEventType(t, s.Events(), core.EventError, 1500*time.Millisecond)
+	waitForSubscriber(t, f)
+	assertNoEventType(t, s.Events(), core.EventError, 500*time.Millisecond)
+
+	// The turn is still alive and its events still reach the engine.
+	f.emit(assistantMessageUpdated("ses_stub", "msg_a"))
+	f.emit(partUpdated("ses_stub", textPartWithID("prt_a", "msg_a", "still here")))
+	if got := collectText(t, s.Events(), 2*time.Second); got != "still here" {
+		t.Fatalf("text after reconnect = %q, want the turn to continue", got)
 	}
 	f.releaseTurn()
+}
+
+// A stream gap in the middle of a turn must not lose the answer. Parts announced
+// while nothing was listening are replayed from the session itself once the stream
+// is back: the protocol-level reconnect is only transparent because of it.
+func TestServerSession_ReconnectReplaysMissedParts(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSession(t, f, "ses_replay")
+	waitForSubscriber(t, f)
+
+	if err := s.Send("task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitForMessageCount(t, f, 1)
+
+	// The answer appeared while the stream was down, so the session is the only
+	// place it exists.
+	f.mu.Lock()
+	f.resyncMessages = []map[string]any{
+		messageWithParts("msg_a", "assistant",
+			textPartWithID("prt_a", "msg_a", "the full answer"),
+			finalStepPartWithID("prt_fin", "msg_a")),
+	}
+	f.mu.Unlock()
+
+	f.dropStreams()
+	waitForSubscriber(t, f)
+
+	if got := collectText(t, s.Events(), 5*time.Second); got != "the full answer" {
+		t.Fatalf("replayed text = %q, want the answer produced during the gap", got)
+	}
+
+	// The result must carry that answer rather than mark an empty turn over.
+	f.emit(sessionIdle("ses_replay"))
+	if evt := collectEventType(t, s.Events(), core.EventResult, 3*time.Second); evt.Type != core.EventResult {
+		t.Fatalf("event = %+v, want the turn result", evt)
+	}
+	f.releaseTurn()
+}
+
+// Replaying must not duplicate what the engine already has: a text part whose text
+// grew across the gap contributes only the tail that was missed.
+func TestServerSession_ReconnectReplaysOnlyTheMissingTail(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSession(t, f, "ses_tail")
+	waitForSubscriber(t, f)
+
+	if err := s.Send("task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitForMessageCount(t, f, 1)
+
+	f.emit(assistantMessageUpdated("ses_tail", "msg_a"))
+	f.emit(partUpdated("ses_tail", textPartWithID("prt_a", "msg_a", "hello ")))
+	if got := collectText(t, s.Events(), 2*time.Second); got != "hello " {
+		t.Fatalf("live text = %q, want the first chunk", got)
+	}
+
+	f.mu.Lock()
+	f.resyncMessages = []map[string]any{
+		messageWithParts("msg_a", "assistant", textPartWithID("prt_a", "msg_a", "hello world")),
+	}
+	f.mu.Unlock()
+
+	f.dropStreams()
+	waitForSubscriber(t, f)
+
+	if got := collectText(t, s.Events(), 5*time.Second); got != "world" {
+		t.Fatalf("replayed text = %q, want only the tail the gap swallowed", got)
+	}
+	f.releaseTurn()
+}
+
+// A mid-turn /ps puts two message requests in flight for one turn. Whichever
+// returns first must not end the turn: only the last one may, otherwise the engine
+// sees a finished answer while the turn is still producing it.
+func TestServerSession_ConcurrentRequestsDoNotEndTurnEarly(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSession(t, f, "")
+	waitForSubscriber(t, f)
+
+	if err := s.Send("first", "m1", nil, nil); err != nil {
+		t.Fatalf("first Send: %v", err)
+	}
+	waitForMessageCount(t, f, 1)
+	if err := s.Send("/ps supplement", "m2", nil, nil); err != nil {
+		t.Fatalf("mid-turn Send: %v", err)
+	}
+	waitForMessageCount(t, f, 2)
+
+	// Release exactly one request. The turn still has one running, so it must not
+	// be ended from under it (the old code did, after the safety-net wait).
+	f.releaseTurn()
+	assertNoEventType(t, s.Events(), core.EventResult, 1800*time.Millisecond)
+	if !s.turnInFlight.Load() {
+		t.Fatalf("turn marked over while a request was still in flight")
+	}
+
+	// The last request returning does end it.
+	f.releaseTurn()
+	if evt := collectEventType(t, s.Events(), core.EventResult, 5*time.Second); evt.Type != core.EventResult {
+		t.Fatalf("event = %+v, want the turn result once every request returned", evt)
+	}
+}
+
+func waitForMessageCount(t *testing.T, f *fakeOpencodeServer, n int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, _, msgs := f.counts(); msgs == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			_, _, msgs := f.counts()
+			t.Fatalf("message requests = %d, want %d", msgs, n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// collectText waits for the next non-empty text event, skipping the others (the
+// stream-loss error is emitted before the replay).
+func collectText(t *testing.T, ch <-chan core.Event, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case evt, ok := <-ch:
+			if !ok {
+				t.Fatalf("event channel closed while waiting for text")
+			}
+			if evt.Type == core.EventText && evt.Content != "" {
+				return evt.Content
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for a text event")
+		}
+	}
+}
+
+func collectEventType(t *testing.T, ch <-chan core.Event, want core.EventType, timeout time.Duration) core.Event {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case evt, ok := <-ch:
+			if !ok {
+				t.Fatalf("event channel closed while waiting for %v", want)
+			}
+			if evt.Type == want {
+				return evt
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %v", want)
+		}
+	}
+}
+
+func assertNoEventType(t *testing.T, ch <-chan core.Event, unwanted core.EventType, d time.Duration) {
+	t.Helper()
+	timer := time.After(d)
+	for {
+		select {
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			if evt.Type == unwanted {
+				t.Fatalf("event %+v arrived within %s, want none", evt, d)
+			}
+		case <-timer:
+			return
+		}
+	}
+}
+
+func sessionIdle(sessionID string) map[string]any {
+	return map[string]any{"type": "session.idle", "properties": map[string]any{"sessionID": sessionID}}
 }
 
 func waitForSubscriber(t *testing.T, f *fakeOpencodeServer) {
@@ -867,6 +1098,84 @@ func waitForSubscriber(t *testing.T, f *fakeOpencodeServer) {
 			t.Fatalf("session never subscribed to the event stream")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The listen address is scraped from the child's stdout, so it must be checked
+// before any request (and the basic-auth password) is sent to it.
+func TestEnsureLoopbackURL(t *testing.T) {
+	cases := []struct {
+		raw   string
+		want  string
+		valid bool
+	}{
+		{raw: "http://127.0.0.1:4096", want: "http://127.0.0.1:4096", valid: true},
+		{raw: "http://localhost:4096", want: "http://localhost:4096", valid: true},
+		{raw: "http://[::1]:4096", want: "http://[::1]:4096", valid: true},
+		{raw: "http://127.0.0.5:8080", want: "http://127.0.0.5:8080", valid: true},
+		{raw: "http://10.0.0.7:4096"},
+		{raw: "http://evil.example.com:4096"},
+		{raw: "http://169.254.169.254/latest/meta-data"},
+		{raw: "file:///etc/passwd"},
+		{raw: "://nonsense"},
+	}
+	for _, tc := range cases {
+		got, err := ensureLoopbackURL(tc.raw)
+		if tc.valid {
+			if err != nil {
+				t.Errorf("ensureLoopbackURL(%q) = error %v, want %q", tc.raw, err, tc.want)
+				continue
+			}
+			if got != tc.want {
+				t.Errorf("ensureLoopbackURL(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("ensureLoopbackURL(%q) = %q, want a refusal", tc.raw, got)
+		}
+	}
+}
+
+// Every request carries the server password, so a redirect must not be followed:
+// whatever host the server points at would receive the credentials.
+func TestServerRequestsAreNotRedirected(t *testing.T) {
+	var leaked atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/leak", http.StatusFound)
+	}))
+	t.Cleanup(redirector.Close)
+
+	srv := &opencodeServer{baseURL: redirector.URL, password: "test-password"}
+	var out map[string]any
+	err := srv.do(context.Background(), http.MethodPost, "/session", map[string]any{}, &out)
+	if err == nil {
+		t.Fatalf("request through a redirect succeeded, want the 302 to be refused")
+	}
+	if n := leaked.Load(); n != 0 {
+		t.Fatalf("redirect target received %d request(s); the password must not leave the loopback server", n)
+	}
+}
+
+// The child's output can echo its environment, and that string is embedded in
+// logs and in the error shown to the user, so the password must be scrubbed.
+func TestServerDiagnosticsRedactThePassword(t *testing.T) {
+	tail := newTailBuffer(256)
+	tail.WriteString("opencode boot: OPENCODE_SERVER_PASSWORD=s3cret-value\nboom\n")
+	srv := &opencodeServer{password: "s3cret-value", logTail: tail}
+
+	got := srv.diagnostics()
+	if strings.Contains(got, "s3cret-value") {
+		t.Fatalf("diagnostics leaked the password: %q", got)
+	}
+	if !strings.Contains(got, "boom") {
+		t.Fatalf("diagnostics = %q, want the useful lines kept", got)
 	}
 }
 
@@ -1209,6 +1518,28 @@ func messageWithRole(id, role string) map[string]any {
 	return map[string]any{"info": map[string]any{"id": id, "role": role}}
 }
 
+// messageWithParts builds a resync entry whose message already carries its parts.
+func messageWithParts(id, role string, parts ...map[string]any) map[string]any {
+	anyParts := make([]any, 0, len(parts))
+	for _, p := range parts {
+		anyParts = append(anyParts, p)
+	}
+	return map[string]any{
+		"info":  map[string]any{"id": id, "role": role},
+		"parts": anyParts,
+	}
+}
+
+// textPartWithID is a text part with an id, as the real server always sends.
+func textPartWithID(id, messageID, text string) map[string]any {
+	return map[string]any{"id": id, "type": "text", "messageID": messageID, "text": text}
+}
+
+// finalStepPartWithID is the reason="stop" step-finish that closes the answer.
+func finalStepPartWithID(id, messageID string) map[string]any {
+	return map[string]any{"id": id, "type": "step-finish", "reason": "stop", "messageID": messageID}
+}
+
 func textPartOf(messageID, text string) map[string]any {
 	return map[string]any{"type": "text", "messageID": messageID, "text": text}
 }
@@ -1382,6 +1713,42 @@ func TestServerSession_AbortsStalledTurn(t *testing.T) {
 			return
 		case <-deadline:
 			t.Fatalf("stalled turn was never ended")
+		}
+	}
+}
+
+// opencode_stall_timeout = "off" must actually disable the watchdog. An unset
+// timeout also parses to 0, so the off state only works if it is distinct from
+// the default — otherwise a project that opted out silently gets the 5m abort.
+func TestServerSession_StallWatchdogDisabledNeverAborts(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSessionWithMode(t, f, "ses_off", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	if err := s.Send("slow task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	f.emit(partUpdated("ses_off", textPartOf("msg_a", "partial answer")))
+
+	s.stallTimeout = serverStallTimeoutDisabled
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.stallWatchdog(ctx, 10*time.Millisecond)
+
+	deadline := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case evt := <-s.Events():
+			if evt.Type == core.EventResult {
+				t.Fatalf("a disabled watchdog ended the turn: %+v", evt)
+			}
+		case <-deadline:
+			if _, aborts, _ := f.counts(); aborts != 0 {
+				t.Fatalf("a disabled watchdog aborted the session %d times, want 0", aborts)
+			}
+			return
 		}
 	}
 }
@@ -1806,9 +2173,10 @@ func TestParseStallTimeout(t *testing.T) {
 		{raw: "", want: 0},
 		{raw: "10m", want: 10 * time.Minute},
 		{raw: "90s", want: 90 * time.Second},
-		{raw: "OFF", want: 0},
-		{raw: "0", want: 0},
+		{raw: "OFF", want: serverStallTimeoutDisabled},
+		{raw: "0", want: serverStallTimeoutDisabled},
 		{raw: "nonsense", bad: true},
+		{raw: "-5m", bad: true},
 	}
 	for _, c := range cases {
 		got, err := parseStallTimeout(c.raw)
@@ -1831,5 +2199,8 @@ func TestParseStallTimeout(t *testing.T) {
 	}
 	if stallTimeoutOrDefault(7*time.Minute) != 7*time.Minute {
 		t.Error("a configured timeout must be used")
+	}
+	if stallTimeoutOrDefault(serverStallTimeoutDisabled) != serverStallTimeoutDisabled {
+		t.Error("turning the watchdog off must survive the default")
 	}
 }

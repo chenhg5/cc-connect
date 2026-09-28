@@ -23,6 +23,9 @@ func init() {
 	core.RegisterAgent("opencode", New)
 }
 
+// defaultOpencodeBin is used when a project does not configure its own cmd.
+const defaultOpencodeBin = "opencode"
+
 // Agent drives the OpenCode CLI in headless mode using `opencode run --format json`.
 //
 // Modes:
@@ -33,7 +36,7 @@ type Agent struct {
 	model                string
 	mode                 string
 	transport            string        // "run" (default) or "server" — see server_session.go
-	stallTimeout         time.Duration // server transport: silence before a turn is aborted (0 = default)
+	stallTimeout         time.Duration // server transport: silence before a turn is aborted (0 = default, negative = off)
 	serverIdleTTL        time.Duration // server transport: how long a released server is kept (0 = default, negative = off)
 	cmd                  string        // CLI binary name, default "opencode"
 	cliExtraArgs         []string      // extra args from cmd after the binary name
@@ -89,7 +92,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd, extraArgs := core.ParseCmdOpts(opts, "opencode")
+	cmd, extraArgs := core.ParseCmdOpts(opts, defaultOpencodeBin)
 	agentName, _ := opts["agent"].(string) // --agent flag for plugin-defined agents (#1210)
 	ccDataDir, _ := opts["cc_data_dir"].(string)
 	ccProject, _ := opts["cc_project"].(string)
@@ -226,6 +229,15 @@ func (a *Agent) SetWorkDir(dir string) {
 	slog.Info("opencode: work_dir changed", "work_dir", dir)
 }
 
+// opencodeDurationOption renders a parsed duration back into the string form the
+// opencode_* options accept. Negative durations are the "off" marker.
+func opencodeDurationOption(d time.Duration) string {
+	if d < 0 {
+		return "off"
+	}
+	return d.String()
+}
+
 func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -237,6 +249,18 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 		// server transport would silently fall back to spawning `opencode run`
 		// per turn in every workspace.
 		"opencode_transport": a.transport,
+	}
+	// The server transport's per-project tuning has to travel too: a workspace
+	// agent rebuilt without it would silently revert to the defaults, most
+	// visibly turning `opencode_stall_timeout = "off"` back into the 5m watchdog.
+	if a.stallTimeout != 0 {
+		opts["opencode_stall_timeout"] = opencodeDurationOption(a.stallTimeout)
+	}
+	if a.serverIdleTTL != 0 {
+		opts["opencode_server_idle_ttl"] = opencodeDurationOption(a.serverIdleTTL)
+	}
+	if a.cmd != defaultOpencodeBin || len(a.cliExtraArgs) > 0 {
+		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)
 	}
 	if a.model != "" {
 		opts["model"] = a.model
@@ -687,7 +711,8 @@ func (a *Agent) ListProviders() []core.ProviderConfig {
 // server only when their scope matches.
 // parseStallTimeout reads opencode_stall_timeout ("10m", "90s"; empty keeps the
 // default, "0"/"off" disables the watchdog). A long silent tool call is normal
-// for some workloads, so the threshold is per project rather than fixed.
+// for some workloads, so the threshold is per project rather than fixed. The
+// disabled state needs a value of its own because 0 already means "unset".
 func parseStallTimeout(raw any) (time.Duration, error) {
 	text, _ := raw.(string)
 	text = strings.ToLower(strings.TrimSpace(text))
@@ -696,7 +721,7 @@ func parseStallTimeout(raw any) (time.Duration, error) {
 	}
 	switch text {
 	case "0", "off", "none", "disabled":
-		return 0, nil
+		return serverStallTimeoutDisabled, nil
 	}
 	d, err := time.ParseDuration(text)
 	if err != nil || d < 0 {

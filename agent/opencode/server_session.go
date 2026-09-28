@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -367,14 +368,14 @@ func (srv *opencodeServer) stop() {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	_ = cmd.Process.Signal(os.Interrupt)
+	_ = terminateCmd(cmd)
 	if srv.waitDone == nil {
 		return
 	}
 	select {
 	case <-srv.waitDone:
 	case <-time.After(opencodeServerStopTimeout):
-		if err := cmd.Process.Kill(); err != nil {
+		if err := forceKillCmd(cmd); err != nil {
 			slog.Debug("opencode server: kill failed", "error", err)
 		}
 		select {
@@ -399,6 +400,7 @@ func startOpencodeServer(ctx context.Context, cfg opencodeServeConfig) (*opencod
 
 	args := append(append([]string{}, cfg.extraArgs...), "serve", "--hostname", "127.0.0.1", "--port", "0")
 	cmd := exec.Command(cfg.cmd, args...) //nolint:gosec // cmd comes from configured agent options, same as the run transport
+	prepareCmdForKill(cmd)
 	cmd.Dir = cfg.workDir
 	env := os.Environ()
 	if len(cfg.extraEnv) > 0 {
@@ -420,7 +422,7 @@ func startOpencodeServer(ctx context.Context, cfg opencodeServeConfig) (*opencod
 
 	baseURL, err := waitForServerURL(ctx, stdout, tail, cmd)
 	if err != nil {
-		_ = cmd.Process.Kill()
+		_ = forceKillCmd(cmd)
 		_, _ = cmd.Process.Wait()
 		return nil, err
 	}
@@ -468,7 +470,12 @@ func waitForServerURL(ctx context.Context, stdout io.Reader, tail *tailBuffer, c
 			line := scanner.Text()
 			tail.WriteString(line + "\n")
 			if m := opencodeListenRe.FindStringSubmatch(line); m != nil {
-				ch <- result{url: strings.TrimSuffix(m[1], "/")}
+				addr, err := ensureLoopbackURL(strings.TrimSuffix(m[1], "/"))
+				if err != nil {
+					ch <- result{err: err}
+					return
+				}
+				ch <- result{url: addr}
 				return
 			}
 		}
@@ -506,6 +513,38 @@ func randomServerPassword() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+// ensureLoopbackURL rejects a listen address that is not on the loopback
+// interface. The address is scraped from the child's own stdout, so without this
+// check a misbehaving (or replaced) `opencode` binary could point every request —
+// and the basic-auth password they carry — at a remote host.
+func ensureLoopbackURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("opencode server: parse listen address %q: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("opencode server: listen address %q is not http(s)", raw)
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return u.String(), nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return u.String(), nil
+	}
+	return "", fmt.Errorf("opencode server: refusing to talk to non-loopback address %q", raw)
+}
+
+// opencodeHTTPClient is used for every call to the local server. Redirects are
+// never followed: each request carries the basic-auth password, which must not be
+// forwarded to whatever host a redirect points at. A 3xx therefore reaches the
+// caller as the non-2xx response it is.
+var opencodeHTTPClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 // do performs an authenticated JSON request against the server.
 func (srv *opencodeServer) do(ctx context.Context, method, path string, body any, out any) error {
 	var reader io.Reader
@@ -526,7 +565,7 @@ func (srv *opencodeServer) do(ctx context.Context, method, path string, body any
 	}
 	req.SetBasicAuth(opencodeServerUser, srv.password)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := opencodeHTTPClient.Do(req)
 	if err != nil {
 		// A transport error usually means the server died; its last output lines
 		// are the most useful diagnostic we have.
@@ -552,12 +591,17 @@ func (srv *opencodeServer) do(ctx context.Context, method, path string, body any
 }
 
 // diagnostics returns the tail of the server's output, trimmed, for error
-// messages.
+// messages. The server's password is scrubbed out in case the child echoes its
+// environment: these strings end up in logs and in user-visible errors.
 func (srv *opencodeServer) diagnostics() string {
 	if srv.logTail == nil {
 		return ""
 	}
-	return truncate(strings.TrimSpace(srv.logTail.String()), 300)
+	tail := strings.TrimSpace(srv.logTail.String())
+	if srv.password != "" {
+		tail = strings.ReplaceAll(tail, srv.password, "***")
+	}
+	return truncate(tail, 300)
 }
 
 // createSession creates an OpenCode session rooted at directory.
@@ -685,7 +729,7 @@ func (srv *opencodeServer) events(ctx context.Context) (io.ReadCloser, error) {
 	req.Header.Set("Accept", "text/event-stream")
 	req.SetBasicAuth(opencodeServerUser, srv.password)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := opencodeHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("opencode server: open event stream: %w", err)
 	}
@@ -751,9 +795,10 @@ func (t *tailBuffer) String() string {
 // ---------------------------------------------------------------------------
 
 // stallTimeoutOrDefault keeps the default watchdog threshold unless the project
-// configured one (opencode_stall_timeout).
+// configured one (opencode_stall_timeout). A negative value is the project
+// turning the watchdog off, and is passed through.
 func stallTimeoutOrDefault(configured time.Duration) time.Duration {
-	if configured <= 0 {
+	if configured == 0 {
 		return serverStallTimeout
 	}
 	return configured
@@ -782,6 +827,10 @@ const serverStallNotice = "⚠️ 任务处理超时（长时间无响应），�
 const (
 	serverStallTimeout = 5 * time.Minute
 	serverStallTick    = 30 * time.Second
+	// serverStallTimeoutDisabled marks a project that turned the watchdog off
+	// (opencode_stall_timeout = "off"). Unset parses to 0, so the off state needs
+	// its own value or the default would swallow it.
+	serverStallTimeoutDisabled = time.Duration(-1)
 )
 
 // serverSession implements core.AgentSession on top of the OpenCode server API.
@@ -827,10 +876,31 @@ type serverSession struct {
 	sendMu       sync.Mutex
 	turnInFlight atomic.Bool
 
+	// turnMu guards the per-turn bookkeeping: turnGen identifies the current
+	// turn, turnRequests counts the message requests still running for it (a
+	// mid-turn /ps posts a second one), and turnFinished records the generation
+	// whose EventResult was already emitted. Without a generation a request that
+	// finishes after a newer turn started (or the first of two overlapping ones)
+	// would end the wrong turn / end it early.
+	turnMu       sync.Mutex
+	turnGen      int64
+	turnRequests int
+	turnFinished int64
+
 	msgMu         sync.Mutex
 	assistantMsgs map[string]struct{}
 	userMsgs      map[string]struct{}
 	emittedTools  map[string]struct{}
+	// msgTurn records the generation in which an assistant message was first
+	// seen. Only the running turn's messages are replayed after a stream gap;
+	// re-tagging an older answer with the new generation would duplicate it.
+	msgTurn map[string]int64
+	// partText records, per text part id, how much of its text was already
+	// emitted, so a replay sends only the tail the stream gap swallowed.
+	partText map[string]int
+	// seenParts records the part ids already dispatched, so a replay cannot
+	// re-emit a tool result or a step notice that already reached the engine.
+	seenParts map[string]struct{}
 
 	sseCancel context.CancelFunc
 	wg        sync.WaitGroup
@@ -892,6 +962,9 @@ func newServerSessionOn(ctx context.Context, srv *opencodeServer, serveCfg openc
 		assistantMsgs: map[string]struct{}{},
 		userMsgs:      map[string]struct{}{},
 		emittedTools:  map[string]struct{}{},
+		msgTurn:       map[string]int64{},
+		partText:      map[string]int{},
+		seenParts:     map[string]struct{}{},
 		sseCancel:     cancel,
 		stallTimeout:  stallTimeoutOrDefault(serveCfg.stallTimeout),
 		turnWake:      make(chan struct{}, 1),
@@ -959,6 +1032,22 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 		s.sendEvent(core.Event{Type: core.EventText, Content: "", SessionID: sessionID})
 	}
 
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+
+	// A prompt that arrives while a turn is already running (a mid-turn /ps)
+	// supplements that turn rather than starting a new one, so it shares the
+	// turn's generation: the answer, its result and its stall budget belong to the
+	// turn, not to the individual request. Without that distinction a request that
+	// returns early (or a stale one) would end the turn that is running now.
+	newTurn := !s.turnInFlight.Load()
+	var gen int64
+	if newTurn {
+		gen = s.beginTurn()
+	} else {
+		gen = s.joinTurn()
+	}
+
 	// A new prompt starts (or supplements) a turn: allow exactly one EventResult
 	// for it, matching the run transport.
 	s.inner.resultSent.Store(false)
@@ -974,9 +1063,6 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 	s.turnStartedAt.Store(time.Now().UnixNano())
 	s.stallReported.Store(false)
 	s.abortedTurn.Store(false)
-
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
 
 	done := make(chan error, 1)
 	handedOff = true
@@ -1007,24 +1093,24 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 	select {
 	case err := <-done:
 		// The server answers the message request only once the turn is over, so a
-		// successful return means nothing is in flight any more.
-		s.turnInFlight.Store(false)
-		if err == nil {
-			s.ensureTurnResult()
+		// successful return means this request is done. Only the last request of
+		// the turn may end it.
+		if s.finishTurnRequest(gen) {
+			s.turnInFlight.Store(false)
+			if err == nil {
+				s.ensureTurnResult(gen)
+			}
 		}
-		if err != nil {
-			// The engine surfaces Send errors itself, so no extra event here —
-			// mirroring the run transport.
-			return err
-		}
-		return nil
+		// The engine surfaces Send errors itself, so no extra event here —
+		// mirroring the run transport.
+		return err
 	case <-time.After(150 * time.Millisecond):
 		// Return promptly so the engine can keep processing incoming messages
 		// (including a mid-turn /ps) while the turn runs. The request itself
 		// stays open until the turn completes.
 		go func() {
 			err := <-done
-			s.turnInFlight.Store(false)
+			last := s.finishTurnRequest(gen)
 			if err != nil {
 				// A turn that was ended deliberately (stall abort, /stop) makes the
 				// request fail afterwards; an error event then would only confuse.
@@ -1033,15 +1119,79 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 						"error", err)
 					return
 				}
+				if last {
+					s.turnInFlight.Store(false)
+				}
 				s.emitError(err)
 				return
 			}
-			s.ensureTurnResult()
+			if !last {
+				// A supplement of the same turn that finished before the original
+				// request must not end the turn the sibling is still running.
+				return
+			}
+			s.turnInFlight.Store(false)
+			s.ensureTurnResult(gen)
 		}()
 		return nil
 	case <-s.inner.ctx.Done():
 		return s.inner.ctx.Err()
 	}
+}
+
+// beginTurn starts a new turn generation and registers the caller's message
+// request with it.
+func (s *serverSession) beginTurn() int64 {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	s.turnGen++
+	s.turnRequests = 1
+	return s.turnGen
+}
+
+// joinTurn registers a second, concurrent message request (a mid-turn /ps) with
+// the turn that is already running, instead of starting a new generation: the
+// supplement shares the turn's answer, so it must share its bookkeeping too.
+func (s *serverSession) joinTurn() int64 {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	s.turnRequests++
+	return s.turnGen
+}
+
+// finishTurnRequest drops one in-flight message request and reports whether this
+// was the last one of gen while gen is still the turn in progress — i.e. whether
+// the caller may end the turn.
+func (s *serverSession) finishTurnRequest(gen int64) bool {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if gen != s.turnGen {
+		return false
+	}
+	if s.turnRequests > 0 {
+		s.turnRequests--
+	}
+	return s.turnRequests == 0
+}
+
+// currentTurnGen returns the generation of the turn in progress.
+func (s *serverSession) currentTurnGen() int64 {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	return s.turnGen
+}
+
+// claimTurnEnd reports whether gen is the current turn and it has not been ended
+// yet, marking it ended when so. The turn is thus closed exactly once even when
+// several paths (idle event, returned request, stale safety net) race to do it.
+func (s *serverSession) claimTurnEnd(gen int64) bool {
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if gen != s.turnGen || s.turnFinished == gen {
+		return false
+	}
+	s.turnFinished = gen
+	return true
 }
 
 // server returns the server this session is currently talking to.
@@ -1187,7 +1337,12 @@ func (s *serverSession) waitStreamReady(ctx context.Context, d time.Duration) {
 // step, then closes the turn. The inner session flushes on a reason="stop"
 // step-finish, which this transport deliberately defers (compaction emits the
 // same reason), so the flush happens here — once the session really is idle.
-func (s *serverSession) flushFinalAnswer() {
+func (s *serverSession) flushFinalAnswer(gen int64) {
+	if gen != s.currentTurnGen() {
+		// A stale request (the safety net of a previous turn) must not end the
+		// turn that is running now.
+		return
+	}
 	if s.inner.resultSent.Load() {
 		return
 	}
@@ -1214,13 +1369,16 @@ func (s *serverSession) flushFinalAnswer() {
 	s.inner.handleStepFinish(map[string]any{"part": part})
 	s.eventMu.Unlock()
 
-	s.endTurn() // no-op when the flush already delivered the result
+	s.endTurn(gen) // no-op when the flush already delivered the result
 }
 
 // endTurn tells the engine the turn is over, exactly once, through the guarded
 // send path (the run transport's helper writes to the channel directly, which
 // would race Close).
-func (s *serverSession) endTurn() {
+func (s *serverSession) endTurn(gen int64) {
+	if !s.claimTurnEnd(gen) {
+		return
+	}
 	if !s.inner.resultSent.CompareAndSwap(false, true) {
 		return
 	}
@@ -1255,15 +1413,15 @@ func (s *serverSession) forgetSession() {
 // for a turn whose idle event was missed (stream hiccup), using the fact that the
 // message request only returns once the turn has finished. It waits briefly so
 // the trailing text parts are not overtaken by the result.
-func (s *serverSession) ensureTurnResult() {
+func (s *serverSession) ensureTurnResult(gen int64) {
 	for i := 0; i < 15; i++ {
-		if s.inner.resultSent.Load() {
+		if gen != s.currentTurnGen() || s.inner.resultSent.Load() {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	slog.Warn("opencode server session: no idle event for a finished turn, ending it explicitly")
-	s.flushFinalAnswer()
+	s.flushFinalAnswer(gen)
 }
 
 // ensureSession returns the OpenCode session id for this turn, creating the
@@ -1394,9 +1552,9 @@ func (s *serverSession) readEventStream(ctx context.Context) {
 			continue
 		}
 		// The stream carries no history, so anything announced before this
-		// connection was opened is unknown to us; rebuild the role map from the
-		// session's messages.
-		s.resyncMessageRoles(ctx)
+		// connection was opened is unknown to us; rebuild the session state
+		// (role map and, mid-turn, the parts of the running turn).
+		s.resyncSession(ctx)
 		s.markStreamOpen()
 
 		scanner := bufio.NewScanner(body)
@@ -1452,16 +1610,16 @@ func (s *serverSession) streamEvents(ctx context.Context) (io.ReadCloser, error)
 	return srv.events(ctx)
 }
 
-// reportStreamFailure tells the user once per turn that events stopped flowing
-// while a turn was running; reconnects afterwards stay silent so a flapping
-// server cannot spam the chat.
+// reportStreamFailure logs that events stopped flowing for a moment. A reconnect
+// is transparent — the reader re-attaches, the session is resynced and the turn
+// picks up where it left off — so this must never reach the engine: an EventError
+// would finalize the card and end the turn the reconnect is about to resume.
 func (s *serverSession) reportStreamFailure(err error) {
 	if !s.turnInFlight.Load() || !s.streamLossReported.CompareAndSwap(false, true) {
 		slog.Warn("opencode server session: event stream unavailable", "error", err)
 		return
 	}
-	slog.Error("opencode server session: event stream lost mid-turn", "error", err)
-	s.sendEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("opencode event stream lost: %w", err)})
+	slog.Error("opencode server session: event stream lost mid-turn, reconnecting", "error", err)
 }
 
 func (s *serverSession) handleServerEvent(payload []byte) {
@@ -1496,6 +1654,11 @@ func (s *serverSession) handleServerEvent(payload []byte) {
 			case "assistant":
 				s.msgMu.Lock()
 				s.assistantMsgs[id] = struct{}{}
+				if _, known := s.msgTurn[id]; !known {
+					// Bind the message to the turn that is running now, so a later
+					// resync replays it only while that same turn is in flight.
+					s.msgTurn[id] = s.currentTurnGen()
+				}
 				s.msgMu.Unlock()
 			case "user":
 				// Remember the echo of the user's own prompt so its text part can
@@ -1518,12 +1681,12 @@ func (s *serverSession) handleServerEvent(payload []byte) {
 			"field", evt.Properties["field"], "delta_len", len(fmt.Sprint(evt.Properties["delta"])))
 	case "session.idle":
 		s.turnInFlight.Store(false)
-		s.flushFinalAnswer()
+		s.flushFinalAnswer(s.currentTurnGen())
 	case "session.status":
 		if status, ok := evt.Properties["status"].(map[string]any); ok {
 			if kind, _ := status["type"].(string); kind == "idle" {
 				s.turnInFlight.Store(false)
-				s.flushFinalAnswer()
+				s.flushFinalAnswer(s.currentTurnGen())
 			}
 		}
 	case "session.error":
@@ -1604,6 +1767,7 @@ func stringList(raw any) []string {
 // dispatchPart converts one OpenCode part into engine events.
 func (s *serverSession) dispatchPart(part map[string]any) {
 	partType, _ := part["type"].(string)
+	s.markPartSeen(part)
 
 	switch partType {
 	case "text":
@@ -1612,8 +1776,10 @@ func (s *serverSession) dispatchPart(part map[string]any) {
 			// would duplicate the request inside the reply.
 			return
 		}
+		s.recordTextPart(part)
 		s.inner.handleText(map[string]any{"part": part})
 	case "reasoning":
+		s.recordTextPart(part)
 		s.inner.handleReasoning(map[string]any{"part": part})
 	case "step-start":
 		s.inner.handleStepStart(map[string]any{"part": part})
@@ -1638,12 +1804,110 @@ func (s *serverSession) dispatchPart(part map[string]any) {
 	}
 }
 
-// resyncMessageRoles rebuilds the assistant/user message maps from the session
-// itself. They are otherwise filled only by `message.updated` events, and a
-// stream gap (a reconnect, or a turn that started before this connection) would
-// leave a message unknown — which used to mean dropping its parts, i.e. losing
-// the answer.
-func (s *serverSession) resyncMessageRoles(ctx context.Context) {
+// markPartSeen records that a part reached the engine, so a replay after a stream
+// gap can skip it instead of emitting it a second time.
+func (s *serverSession) markPartSeen(part map[string]any) {
+	id, _ := part["id"].(string)
+	if id == "" {
+		return
+	}
+	s.msgMu.Lock()
+	s.seenParts[id] = struct{}{}
+	s.msgMu.Unlock()
+}
+
+// recordTextPart remembers how much of a text part has been emitted. The part's
+// text is cumulative on the wire, so a replay can send only the tail that a stream
+// gap swallowed.
+func (s *serverSession) recordTextPart(part map[string]any) {
+	id, _ := part["id"].(string)
+	if id == "" {
+		return
+	}
+	text, _ := part["text"].(string)
+	s.msgMu.Lock()
+	s.seenParts[id] = struct{}{}
+	if len(text) > s.partText[id] {
+		s.partText[id] = len(text)
+	}
+	s.msgMu.Unlock()
+}
+
+// partWithText returns a copy of part with its text replaced, so only a slice of a
+// replayed part reaches the engine.
+func partWithText(part map[string]any, text string) map[string]any {
+	out := make(map[string]any, len(part))
+	for k, v := range part {
+		out[k] = v
+	}
+	out["text"] = text
+	return out
+}
+
+// replayPart re-dispatches one authoritative part from the session's own message
+// list after a stream gap. Text is cumulative on the wire, so only the tail the
+// gap swallowed is emitted; everything else is emitted only when it never reached
+// the engine (a repeated tool result would otherwise show up twice).
+func (s *serverSession) replayPart(part map[string]any) {
+	partType, _ := part["type"].(string)
+	partID, _ := part["id"].(string)
+
+	switch partType {
+	case "text", "reasoning":
+		if partType == "text" && !s.isAssistantPart(part) {
+			return
+		}
+		if partID == "" {
+			// Without an id there is no way to tell what was delivered already,
+			// and a blind re-emit would duplicate the answer.
+			slog.Debug("opencode server session: cannot replay an id-less part", "part_type", partType)
+			return
+		}
+		text, _ := part["text"].(string)
+		s.msgMu.Lock()
+		delivered := s.partText[partID]
+		s.seenParts[partID] = struct{}{}
+		if len(text) > delivered {
+			s.partText[partID] = len(text)
+		}
+		s.msgMu.Unlock()
+		if len(text) <= delivered {
+			return
+		}
+		if delivered > 0 {
+			// The part grew after the gap: emit only what the stream did not.
+			s.dispatchPart(partWithText(part, text[delivered:]))
+			return
+		}
+		s.dispatchPart(part)
+	case "step-finish":
+		// Re-storing the final step is what lets the flushed result carry the
+		// answer's token totals; it emits no event of its own.
+		s.dispatchPart(part)
+	default:
+		if partID == "" {
+			return
+		}
+		s.msgMu.Lock()
+		_, seen := s.seenParts[partID]
+		s.msgMu.Unlock()
+		if seen {
+			return
+		}
+		s.dispatchPart(part)
+	}
+}
+
+// resyncSession rebuilds the state a stream gap would otherwise lose. The stream
+// carries no history, so after every (re)connect the transport re-reads the
+// session's messages: the role map is rebuilt from them, and — when a turn is in
+// flight — the parts of the running turn are replayed.
+//
+// Without the replay a reconnect mid-turn loses the answer: the parts announced
+// while the stream was down never arrive, and the turn then ends with an empty
+// result. Replaying them is what makes the reconnect transparent, which is the
+// whole point of the server transport.
+func (s *serverSession) resyncSession(ctx context.Context) {
 	sessionID := s.CurrentSessionID()
 	if sessionID == "" {
 		return
@@ -1654,11 +1918,18 @@ func (s *serverSession) resyncMessageRoles(ctx context.Context) {
 	}
 	msgs, err := srv.listMessages(ctx, sessionID, s.workDir)
 	if err != nil {
-		slog.Debug("opencode server session: message role resync failed", "session", sessionID, "error", err)
+		slog.Debug("opencode server session: message resync failed", "session", sessionID, "error", err)
 		return
 	}
+
+	// Only the turn that is running now may be replayed: an already delivered
+	// answer must not be re-emitted into a newer turn.
+	gen := s.currentTurnGen()
+	replaying := s.turnInFlight.Load() && !s.inner.resultSent.Load()
+
 	assistant, user := 0, 0
 	s.msgMu.Lock()
+	var replay []any
 	for _, m := range msgs {
 		info, _ := m["info"].(map[string]any)
 		if info == nil {
@@ -1672,14 +1943,34 @@ func (s *serverSession) resyncMessageRoles(ctx context.Context) {
 		case "assistant":
 			s.assistantMsgs[id] = struct{}{}
 			assistant++
+			if _, known := s.msgTurn[id]; !known {
+				// First seen now: it belongs to the turn running now, or to no
+				// turn at all when the session is idle (generation 0).
+				seen := int64(0)
+				if replaying {
+					seen = gen
+				}
+				s.msgTurn[id] = seen
+			}
+			if replaying && s.msgTurn[id] == gen {
+				if parts, ok := m["parts"].([]any); ok {
+					replay = append(replay, parts...)
+				}
+			}
 		case "user":
 			s.userMsgs[id] = struct{}{}
 			user++
 		}
 	}
 	s.msgMu.Unlock()
-	slog.Debug("opencode server session: message roles resynced",
-		"session", sessionID, "assistant", assistant, "user", user)
+
+	for _, raw := range replay {
+		if part, ok := raw.(map[string]any); ok {
+			s.replayPart(part)
+		}
+	}
+	slog.Debug("opencode server session: session resynced",
+		"session", sessionID, "assistant", assistant, "user", user, "replayed", len(replay))
 }
 
 func (s *serverSession) isAssistantPart(part map[string]any) bool {
@@ -1770,6 +2061,10 @@ func (s *serverSession) stallWatchdog(ctx context.Context, tick time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if s.stallTimeout < 0 {
+				// opencode_stall_timeout = "off": never abort a silent turn.
+				continue
+			}
 			if !s.turnInFlight.Load() || s.inner.resultSent.Load() {
 				continue
 			}
