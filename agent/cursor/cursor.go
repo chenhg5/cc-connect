@@ -84,6 +84,40 @@ func (a *Agent) Name() string           { return "cursor" }
 func (a *Agent) CLIBinaryName() string  { return "agent" }
 func (a *Agent) CLIDisplayName() string { return "Cursor Agent" }
 
+// WorkspaceAgentOptions implements core.WorkspaceAgentOptionSnapshotter so
+// multi-workspace reconstruction preserves cmd/env. Without this, the engine
+// rebuilds the agent with only work_dir/model/mode and defaults cmd to bare
+// "agent", which collides with other CLIs (e.g. Grok) that also install as
+// `agent` and interpret --print as --single.
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	opts := map[string]any{}
+	if cmd := joinCursorCommand(a.cmd, a.cliExtraArgs); cmd != "" {
+		opts["cmd"] = cmd
+	}
+	if len(a.configEnv) > 0 {
+		env := make(map[string]string, len(a.configEnv))
+		for _, pair := range a.configEnv {
+			if key, value, ok := strings.Cut(pair, "="); ok {
+				env[key] = value
+			}
+		}
+		opts["env"] = env
+	}
+	return opts
+}
+
+func joinCursorCommand(cmd string, args []string) string {
+	if cmd == "" {
+		return ""
+	}
+	if len(args) == 0 {
+		return cmd
+	}
+	return cmd + " " + strings.Join(args, " ")
+}
+
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -686,3 +720,5 @@ func countSessionMessages(dbPath, rootBlobID string) (int, string) {
 
 	return msgCount, firstUserMsg
 }
+
+var _ core.WorkspaceAgentOptionSnapshotter = (*Agent)(nil)
