@@ -17,12 +17,12 @@ import (
 // sessionFileData mirrors the unexported sessionSnapshot in core/session.go
 // for JSON deserialization of session files.
 type sessionFileData struct {
-	Sessions      map[string]*sessionData    `json:"sessions"`
-	ActiveSession map[string]string          `json:"active_session"`
-	UserSessions  map[string][]string        `json:"user_sessions"`
-	Counter       int64                      `json:"counter"`
-	SessionNames  map[string]string          `json:"session_names,omitempty"`
-	UserMeta      map[string]*userMetaData   `json:"user_meta,omitempty"`
+	Sessions      map[string]*sessionData  `json:"sessions"`
+	ActiveSession map[string]string        `json:"active_session"`
+	UserSessions  map[string][]string      `json:"user_sessions"`
+	Counter       int64                    `json:"counter"`
+	SessionNames  map[string]string        `json:"session_names,omitempty"`
+	UserMeta      map[string]*userMetaData `json:"user_meta,omitempty"`
 }
 
 type userMetaData struct {
@@ -52,6 +52,10 @@ type sessionRecord struct {
 	Messages   int
 	LastActive time.Time
 	History    []core.HistoryEntry
+}
+
+type sessionLoadOptions struct {
+	includeHistorical bool
 }
 
 func runSessions(args []string) {
@@ -183,7 +187,12 @@ func extractProjectFromFilename(filename string) string {
 	return base
 }
 
-func loadAllSessions(dataDir string) ([]sessionRecord, error) {
+func loadAllSessions(dataDir string, opts ...sessionLoadOptions) ([]sessionRecord, error) {
+	loadOpts := sessionLoadOptions{includeHistorical: true}
+	if len(opts) > 0 {
+		loadOpts = opts[0]
+	}
+
 	sessionsDir := filepath.Join(dataDir, "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
@@ -214,6 +223,11 @@ func loadAllSessions(dataDir string) ([]sessionRecord, error) {
 			continue
 		}
 
+		activeIDs := make(map[string]bool, len(fileData.ActiveSession))
+		for _, sid := range fileData.ActiveSession {
+			activeIDs[sid] = true
+		}
+
 		// Build reverse index: session_id -> user_key
 		sessionToUserKey := make(map[string]string)
 		for userKey, sids := range fileData.UserSessions {
@@ -226,6 +240,9 @@ func loadAllSessions(dataDir string) ([]sessionRecord, error) {
 
 		for _, s := range fileData.Sessions {
 			if s == nil {
+				continue
+			}
+			if !loadOpts.includeHistorical && len(activeIDs) > 0 && !activeIDs[s.ID] {
 				continue
 			}
 			platform, groupUser := "", ""
@@ -264,6 +281,18 @@ func loadAllSessions(dataDir string) ([]sessionRecord, error) {
 	return records, nil
 }
 
+func loadSessionsForList(dataDir string) ([]sessionRecord, error) {
+	return loadAllSessions(dataDir, sessionLoadOptions{includeHistorical: false})
+}
+
+func loadSessionsForShowID(dataDir, id string) ([]sessionRecord, error) {
+	idStr := strings.TrimPrefix(id, "#")
+	if _, err := strconv.Atoi(idStr); err == nil {
+		return loadSessionsForList(dataDir)
+	}
+	return loadAllSessions(dataDir)
+}
+
 func parseSessionKey(key string) (platform, groupUser string) {
 	if i := strings.Index(key, ":"); i >= 0 {
 		return key[:i], key[i+1:]
@@ -272,7 +301,7 @@ func parseSessionKey(key string) (platform, groupUser string) {
 }
 
 func runSessionsList(dataDir string) {
-	records, err := loadAllSessions(dataDir)
+	records, err := loadSessionsForList(dataDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -299,7 +328,7 @@ func runSessionsList(dataDir string) {
 }
 
 func runSessionsShow(dataDir, id string, limit int) {
-	records, err := loadAllSessions(dataDir)
+	records, err := loadSessionsForShowID(dataDir, id)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -460,7 +489,7 @@ Browse and manage session history.
 
 Commands:
   (none)             Interactive TUI browser (default)
-  list               List all sessions (pipe-friendly)
+  list               List active sessions (pipe-friendly)
   show <id> [-n N]   Show session messages
   prune [project] [--merge]  Remove duplicate sessions per chat
 
@@ -472,6 +501,9 @@ Session ID formats for 'show':
   <project>:<session>   e.g. "feishu_bot_64788ce0:s1"
   <number> or #<number> Index from 'sessions list', e.g. "1" or "#1"
 
+The TUI and explicit project:session lookups include historical sessions.
+Legacy stores without an active-session map list all sessions.
+
 Prune options:
   --merge    Merge history from removed sessions into kept one
              (without --merge, only removes sessions with no history)
@@ -481,7 +513,7 @@ Prune options:
 
 Examples:
   cc-connect sessions                           Interactive TUI browser
-  cc-connect sessions list                      List all sessions
+  cc-connect sessions list                      List active sessions
   cc-connect sessions show "mybot:s1"           Show all messages in session
   cc-connect sessions show "#1" -n 20           Show last 20 messages of first session
   cc-connect sessions prune                     Remove empty duplicate sessions
