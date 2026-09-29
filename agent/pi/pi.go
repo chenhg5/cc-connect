@@ -372,12 +372,8 @@ func lookupModelDef(model string) (string, *piModel, bool) {
 	if provider, model, ok := lookupCatalogRef(catalog, ref); ok {
 		return provider, model, true
 	}
-	if idx := strings.LastIndex(ref, ":"); idx > 0 {
-		for _, level := range allThinkingLevels {
-			if ref[idx+1:] == level {
-				return lookupCatalogRef(catalog, ref[:idx])
-			}
-		}
+	if base, level := splitThinkingSuffix(ref); level != "" {
+		return lookupCatalogRef(catalog, base)
 	}
 	return "", nil, false
 }
