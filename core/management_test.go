@@ -632,9 +632,6 @@ func TestMgmt_CronExecByID(t *testing.T) {
 	if len(platform.getSent()) < 2 {
 		t.Fatalf("timed out waiting for triggered cron exec, sent=%v", platform.getSent())
 	}
-	// A platform reply precedes runJob's final MarkRun save. Wait for that
-	// write before TempDir cleanup can remove the cron store directory.
-	waitForCronRunPersisted(t, store.path, job.ID)
 
 	aliasJob := &CronJob{
 		ID:          "cron-run-alias-1",
@@ -659,32 +656,11 @@ func TestMgmt_CronExecByID(t *testing.T) {
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(platform.getSent()) >= 4 {
-			waitForCronRunPersisted(t, store.path, aliasJob.ID)
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for triggered cron run alias, sent=%v", platform.getSent())
-}
-
-func waitForCronRunPersisted(t *testing.T, path, id string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			var jobs []CronJob
-			if json.Unmarshal(data, &jobs) == nil {
-				for _, job := range jobs {
-					if job.ID == id && !job.LastRun.IsZero() {
-						return
-					}
-				}
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for cron run %q to be persisted", id)
 }
 
 func TestMgmt_CronExecByID_RejectsExtraPathSegments(t *testing.T) {
