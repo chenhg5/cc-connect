@@ -91,6 +91,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
+	s.mux.HandleFunc("/sessions/bind-agent", s.handleBindAgentSession)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
 	s.mux.HandleFunc("/cron/info", s.handleCronInfo)
@@ -309,6 +310,152 @@ func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apiJSON(w, http.StatusOK, result)
+}
+
+// ── Local session attach API ────────────────────────────────────
+
+// BindAgentSessionRequest maps a platform conversation to a native session
+// that was created outside cc-connect (for example by a local IDE or CLI).
+// The endpoint is intentionally exposed only by the owner-only Unix socket.
+type BindAgentSessionRequest struct {
+	Project     string `json:"project"`
+	SessionKey  string `json:"session_key"`
+	SessionID   string `json:"session_id"`
+	SessionName string `json:"session_name,omitempty"`
+	WorkDir     string `json:"work_dir,omitempty"`
+}
+
+func (s *APIServer) resolveBindAgentEngine(project string) (*Engine, int, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if project != "" {
+		if engine, ok := s.engines[project]; ok {
+			return engine, 0, ""
+		}
+		return nil, http.StatusNotFound, fmt.Sprintf("project %q not found", project)
+	}
+	if len(s.engines) == 0 {
+		return nil, http.StatusServiceUnavailable, "no projects configured"
+	}
+	if len(s.engines) > 1 {
+		return nil, http.StatusBadRequest, "project is required (multiple projects configured)"
+	}
+	for _, engine := range s.engines {
+		return engine, 0, ""
+	}
+	return nil, http.StatusServiceUnavailable, "no projects configured"
+}
+
+type bindAgentTarget struct {
+	agent             Agent
+	sessions          *SessionManager
+	bindingChannelKey string
+	bindingWorkDir    string
+}
+
+type bindAgentError struct {
+	status  int
+	message string
+}
+
+func resolveBindAgentTarget(engine *Engine, req BindAgentSessionRequest) (bindAgentTarget, *bindAgentError) {
+	if req.WorkDir == "" {
+		return bindAgentTarget{agent: engine.agent, sessions: engine.sessions}, nil
+	}
+	if !engine.multiWorkspace || engine.workspaceBindings == nil {
+		return bindAgentTarget{}, &bindAgentError{http.StatusConflict, "work_dir requires a multi-workspace project"}
+	}
+
+	resolved, err := resolveLocalDirPath(req.WorkDir, engine.baseDir)
+	if err != nil {
+		return bindAgentTarget{}, &bindAgentError{http.StatusUnprocessableEntity, "invalid work_dir: " + err.Error()}
+	}
+	base, err := filepath.Abs(engine.baseDir)
+	if err != nil {
+		return bindAgentTarget{}, &bindAgentError{http.StatusInternalServerError, "invalid project base_dir"}
+	}
+	if evaluated, evalErr := filepath.EvalSymlinks(base); evalErr == nil {
+		base = evaluated
+	}
+	rel, err := filepath.Rel(base, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return bindAgentTarget{}, &bindAgentError{http.StatusUnprocessableEntity, "work_dir is outside project base_dir"}
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.IsDir() {
+		return bindAgentTarget{}, &bindAgentError{http.StatusUnprocessableEntity, "work_dir does not exist or is not a directory"}
+	}
+
+	channelKey := extractWorkspaceChannelKey(req.SessionKey)
+	if channelKey == "" {
+		return bindAgentTarget{}, &bindAgentError{http.StatusBadRequest, "cannot derive workspace channel from session_key"}
+	}
+	agent, sessions, err := engine.getOrCreateWorkspaceAgent(resolved)
+	if err != nil {
+		return bindAgentTarget{}, &bindAgentError{http.StatusInternalServerError, "create workspace agent: " + err.Error()}
+	}
+	return bindAgentTarget{
+		agent:             agent,
+		sessions:          sessions,
+		bindingChannelKey: channelKey,
+		bindingWorkDir:    resolved,
+	}, nil
+}
+
+func (s *APIServer) handleBindAgentSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req BindAgentSessionRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Project = strings.TrimSpace(req.Project)
+	req.SessionKey = strings.TrimSpace(req.SessionKey)
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.SessionName = strings.TrimSpace(req.SessionName)
+	req.WorkDir = strings.TrimSpace(req.WorkDir)
+	if req.SessionKey == "" || req.SessionID == "" {
+		http.Error(w, "session_key and session_id are required", http.StatusBadRequest)
+		return
+	}
+
+	engine, status, message := s.resolveBindAgentEngine(req.Project)
+	if engine == nil {
+		http.Error(w, message, status)
+		return
+	}
+
+	name := req.SessionName
+	if name == "" {
+		name = req.SessionID
+	}
+	target, targetErr := resolveBindAgentTarget(engine, req)
+	if targetErr != nil {
+		http.Error(w, targetErr.message, targetErr.status)
+		return
+	}
+
+	if validator, supported := target.agent.(SessionIDValidator); supported && !validator.ValidateSessionID(r.Context(), req.SessionID) {
+		http.Error(w, "agent session not found in the configured project", http.StatusUnprocessableEntity)
+		return
+	}
+	if target.bindingChannelKey != "" {
+		engine.workspaceBindings.Bind("project:"+engine.name, target.bindingChannelKey, name, target.bindingWorkDir)
+	}
+	session := target.sessions.SwitchToAgentSession(req.SessionKey, req.SessionID, target.agent.Name(), name)
+
+	apiJSON(w, http.StatusOK, map[string]string{
+		"status":           "ok",
+		"session_key":      req.SessionKey,
+		"agent_session_id": req.SessionID,
+		"session_id":       session.ID,
+	})
 }
 
 // ── Cron API ───────────────────────────────────────────────────
