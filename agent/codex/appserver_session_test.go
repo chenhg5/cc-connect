@@ -30,6 +30,26 @@ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	}
 }
 
+func TestAppServerModeSettingsSuggestUsesOnRequestWorkspaceWrite(t *testing.T) {
+	approval, sandbox := appServerModeSettings("suggest")
+	if approval != "on-request" {
+		t.Fatalf("approval = %q, want on-request", approval)
+	}
+	if sandbox != "workspace-write" {
+		t.Fatalf("sandbox = %q, want workspace-write", sandbox)
+	}
+}
+
+func TestAppServerThreadRequestParamsIncludesApprovalAndSandbox(t *testing.T) {
+	s := &appServerSession{mode: "suggest"}
+	params := s.threadRequestParams()
+	if got := params["approvalPolicy"]; got != "on-request" {
+		t.Fatalf("approvalPolicy = %#v, want on-request", got)
+	}
+	if got := params["sandbox"]; got != "workspace-write" {
+		t.Fatalf("sandbox = %#v, want workspace-write", got)
+	}
+}
 func TestAppServerSession_HandleRateLimitsUpdatedCachesUsage(t *testing.T) {
 	s := &appServerSession{}
 	raw, err := json.Marshal(appServerRateLimitsResponse{
