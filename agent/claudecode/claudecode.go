@@ -507,19 +507,65 @@ func (a *Agent) ValidateSessionID(_ context.Context, sessionID, cwd string) bool
 	a.mu.RLock()
 	workDir := a.workDir
 	a.mu.RUnlock()
-	// Locate the transcript under the session's real reported cwd, but only trust
-	// that cwd when it is within this project's work_dir. The CLI names its
-	// transcript directory after the process cwd, which a custom agent command may
-	// set to a subdirectory of work_dir — trusting an in-tree cwd is what makes
-	// resume survive a restart. A cwd OUTSIDE work_dir, however, cannot be told
-	// apart from another project's cwd leaked onto a shared Session row (issue
-	// #599), so we do not trust it and fall back to work_dir. Empty cwd (records
-	// predating cwd capture) also falls back — the original behavior.
-	dir := workDir
-	if cwd != "" && dirWithin(workDir, cwd) {
-		dir = cwd
+	// Claude Code names the transcript directory after the process cwd at launch
+	// and reports that cwd in its system/init event. The engine persists it as
+	// Session.agent_cwd and we look the transcript up under it on resume. But the
+	// reported cwd is not fixed for the lifetime of the session: the agent can cd
+	// into a subdirectory mid-conversation, after which the CLI reports the deeper
+	// directory while the transcript keeps living where the process started. Only
+	// checking that exact directory therefore made a healthy session look like a
+	// cross-project leak and cleared it (regression on #1581's #599 guard).
+	//
+	// We also cannot simply hardcode work_dir: a custom agent command may launch
+	// the CLI inside a subdirectory of work_dir, in which case the transcript
+	// really is under the subdirectory. So walk the reported cwd upward to
+	// work_dir and accept the transcript at any level — this covers both the
+	// subdirectory-launch case and the mid-conversation cd case, and still never
+	// leaves work_dir, preserving cross-project isolation (#599). A cwd outside
+	// work_dir, or an empty cwd (records predating cwd capture), falls back to
+	// work_dir alone — the original behavior.
+	for _, dir := range transcriptSearchDirs(workDir, cwd) {
+		if validateSessionIDInProject(homeDir, dir, sessionID) {
+			return true
+		}
 	}
-	return validateSessionIDInProject(homeDir, dir, sessionID)
+	return false
+}
+
+// transcriptSearchDirs returns the directories to look for a session transcript
+// in, innermost first: the reported cwd (only when it is within work_dir) and
+// each of its ancestors up to and including work_dir. A cwd outside work_dir is
+// ignored, leaving just work_dir — a foreign cwd cannot be told apart from
+// another project's cwd leaked onto a shared Session row (issue #599). See
+// ValidateSessionID for why the ancestor walk is needed.
+func transcriptSearchDirs(workDir, cwd string) []string {
+	if workDir == "" {
+		return nil
+	}
+	absWork, err := filepath.Abs(workDir)
+	if err != nil {
+		return []string{workDir}
+	}
+	if cwd == "" || !dirWithin(absWork, cwd) {
+		return []string{absWork}
+	}
+	absCwd, err := filepath.Abs(cwd)
+	if err != nil {
+		return []string{absWork}
+	}
+	dirs := []string{absCwd}
+	for dir := absCwd; dir != absWork; {
+		parent := filepath.Dir(dir)
+		if parent == dir { // hit the filesystem root without reaching work_dir
+			break
+		}
+		dir = parent
+		if !dirWithin(absWork, dir) {
+			break
+		}
+		dirs = append(dirs, dir)
+	}
+	return dirs
 }
 
 // dirWithin reports whether target is base or a descendant of base, comparing
