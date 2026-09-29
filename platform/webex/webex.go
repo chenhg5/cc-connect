@@ -152,8 +152,8 @@ func (p *Platform) buildMessage(ctx context.Context, m *message) *core.Message {
 		UserID:     m.PersonEmail,
 		// Webex message API exposes no display name; use email. A /people lookup could enrich this later.
 		UserName: m.PersonEmail,
-		Content:    content,
-		ReplyCtx:   replyContext{roomID: m.RoomID, messageID: m.ID, personID: m.PersonID},
+		Content:  content,
+		ReplyCtx: replyContext{roomID: m.RoomID, messageID: m.ID, personID: m.PersonID},
 	}
 
 	for _, url := range m.Files {

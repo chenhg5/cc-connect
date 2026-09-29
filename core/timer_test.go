@@ -17,11 +17,11 @@ func TestParseDelayOrTime_Relative(t *testing.T) {
 		{"1h30m", false},
 		{"2h30m15s", false},
 		{"500ms", false},
-		{"0s", true},       // zero = not positive
-		{"-1h", true},      // negative
-		{"", true},         // empty
-		{"garbage", true},  // invalid
-		{"2", true},        // bare number
+		{"0s", true},      // zero = not positive
+		{"-1h", true},     // negative
+		{"", true},        // empty
+		{"garbage", true}, // invalid
+		{"2", true},       // bare number
 	}
 
 	for _, tt := range tests {

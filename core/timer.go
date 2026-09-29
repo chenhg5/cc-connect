@@ -238,10 +238,10 @@ func (s *TimerStore) ListPending() []*TimerJob {
 
 // TimerScheduler runs one-shot timer jobs using time.AfterFunc.
 type TimerScheduler struct {
-	store    *TimerStore
-	engines  map[string]*Engine
-	mu       sync.RWMutex
-	timers   map[string]*time.Timer // job ID → active timer
+	store              *TimerStore
+	engines            map[string]*Engine
+	mu                 sync.RWMutex
+	timers             map[string]*time.Timer // job ID → active timer
 	defaultSilent      bool
 	defaultSessionMode string
 }

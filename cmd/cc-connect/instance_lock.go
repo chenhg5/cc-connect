@@ -12,8 +12,8 @@ import (
 // InstanceLock provides a file-based exclusive lock to prevent multiple
 // cc-connect instances with the same config from running simultaneously.
 type InstanceLock struct {
-	file    *os.File
-	path    string
+	file     *os.File
+	path     string
 	acquired bool
 }
 

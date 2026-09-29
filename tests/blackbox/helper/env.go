@@ -16,7 +16,6 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 	bbplatform "github.com/chenhg5/cc-connect/tests/blackbox/platform"
-
 )
 
 const (

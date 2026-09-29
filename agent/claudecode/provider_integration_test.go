@@ -160,7 +160,7 @@ func TestIntegration_ProviderSwitch_SessionStartModel(t *testing.T) {
 				providers: providers,
 				activeIdx: -1,
 				workDir:   workDir,
-				cmd:    cliBin,
+				cmd:       cliBin,
 			}
 			a.SetActiveProvider(prov.Name)
 

@@ -45,9 +45,9 @@ type Agent struct {
 	// handshake so that future PermissionModes() calls can reflect the
 	// actual modes this specific ACP agent offers (rather than a
 	// hard-coded fallback that may not match).
-	modesMu       sync.RWMutex
-	modesCache    []core.PermissionModeInfo
-	modesCurrent  string
+	modesMu      sync.RWMutex
+	modesCache   []core.PermissionModeInfo
+	modesCurrent string
 
 	mu sync.RWMutex
 }
@@ -95,15 +95,15 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode = strings.TrimSpace(mode)
 
 	return &Agent{
-		workDir:     workDir,
+		workDir:      workDir,
 		cmd:          cmdStr,
 		cliExtraArgs: cliExtraArgs,
-		args:        args,
-		staticEnv:   staticEnv,
-		extraEnv:    extra,
-		authMethod:  authMethod,
-		displayName: displayName,
-		mode:        mode,
+		args:         args,
+		staticEnv:    staticEnv,
+		extraEnv:     extra,
+		authMethod:   authMethod,
+		displayName:  displayName,
+		mode:         mode,
 	}, nil
 }
 

@@ -35,25 +35,25 @@ func init() {
 //   - "auto":              Claude's automatic permission classifier
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
-	workDir          string
-	cmd              string   // CLI binary name (default: "claude")
-	cliExtraArgs     []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
-	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	cmdArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
-	model            string
-	reasoningEffort  string // "low" | "medium" | "high" | "max"
-	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
-	allowedTools     []string
-	disallowedTools  []string
+	workDir             string
+	cmd                 string   // CLI binary name (default: "claude")
+	cliExtraArgs        []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
+	configEnv           []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	cmdArgsFlag         string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
+	model               string
+	reasoningEffort     string // "low" | "medium" | "high" | "max"
+	mode                string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
+	allowedTools        []string
+	disallowedTools     []string
 	maxContextTokens    int // optional: passed as --max-context-tokens when > 0
 	contextWindowTokens int // optional: override the context-window-size heuristic used by the ctx% indicator. When <= 0, fall back to model-name heuristics.
 	providers           []core.ProviderConfig
-	activeIdx        int // -1 = no provider set
-	sessionEnv       []string
-	routerURL        string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey     string   // Claude Code Router API key (optional)
-	systemPrompt     string   // Custom system prompt to pass to Claude CLI
-	pluginDirs       []string // Plugin directories to load via --plugin-dir (repeatable)
+	activeIdx           int // -1 = no provider set
+	sessionEnv          []string
+	routerURL           string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey        string   // Claude Code Router API key (optional)
+	systemPrompt        string   // Custom system prompt to pass to Claude CLI
+	pluginDirs          []string // Plugin directories to load via --plugin-dir (repeatable)
 
 	appendSystemPrompt string // Custom text appended to the system prompt (keeps Claude's default)
 
