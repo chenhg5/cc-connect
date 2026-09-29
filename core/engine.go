@@ -5292,7 +5292,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		select {
 		case <-stopCh:
-			sp.discard()
+			// See EventError below for why freeze() not discard().
+			sp.freeze()
 			return
 		case event, ok = <-events:
 			if !ok {
@@ -5322,7 +5323,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
 			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
+			// See EventError below for why freeze() not discard().
+			sp.freeze()
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			p := state.platform
@@ -5335,7 +5337,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
 				"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
 			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
+			// See EventError below for why freeze() not discard().
+			sp.freeze()
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
@@ -5386,7 +5389,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 
 		if state.isStopped() {
-			sp.discard()
+			// See EventError below for why freeze() not discard().
+			sp.freeze()
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
@@ -6604,7 +6608,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventError:
 			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
+			// Freeze (not discard) the streaming preview: discard() routes
+			// through PreviewCleaner.DeletePreviewMessage, which on Feishu/Lark
+			// surfaces as "XX 撤回了一条消息" and hides the partial answer the
+			// user just watched stream. freeze() commits the accumulated text
+			// in-place and marks the preview degraded. Same fix applied to the
+			// other "interrupt mid-stream" branches below (/stop, idle timeout,
+			// max_turn_time).
+			sp.freeze()
 			// A backend can create its resumable session before a turn fails
 			// (for example Codex emits thread.started, then turn.failed). Persist
 			// that ID here as well as from event.SessionID so the retry reuses the
