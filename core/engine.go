@@ -9648,9 +9648,13 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 	agentSID := s.GetAgentSessionID()
 	if len(entries) == 0 && agentSID != "" {
 		if hp, ok := agent.(HistoryProvider); ok {
-			if agentEntries, err := hp.GetSessionHistory(e.ctx, agentSID, n); err == nil {
-				entries = agentEntries
+			agentEntries, err := hp.GetSessionHistory(e.ctx, agentSID, n)
+			if err != nil {
+				slog.Warn("history: agent transcript read failed", "session_id", agentSID, "error", err)
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHistoryReadFailed))
+				return
 			}
+			entries = agentEntries
 		}
 	}
 
@@ -13817,9 +13821,12 @@ func (e *Engine) renderHistoryCard(sessionKey string) *Card {
 	agentSID := s.GetAgentSessionID()
 	if len(entries) == 0 && agentSID != "" {
 		if hp, ok := agent.(HistoryProvider); ok {
-			if agentEntries, err := hp.GetSessionHistory(e.ctx, agentSID, 10); err == nil {
-				entries = agentEntries
+			agentEntries, err := hp.GetSessionHistory(e.ctx, agentSID, 10)
+			if err != nil {
+				slog.Warn("history: agent transcript read failed", "session_id", agentSID, "error", err)
+				return e.simpleCard(e.i18n.T(MsgCardTitleHistory), "turquoise", e.i18n.T(MsgHistoryReadFailed))
 			}
+			entries = agentEntries
 		}
 	}
 

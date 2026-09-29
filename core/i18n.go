@@ -255,6 +255,7 @@ const (
 	MsgListSwitchHint            MsgKey = "list_switch_hint"
 	MsgListError                 MsgKey = "list_error"
 	MsgHistoryEmpty              MsgKey = "history_empty"
+	MsgHistoryReadFailed         MsgKey = "history_read_failed"
 	MsgNameUsage                 MsgKey = "name_usage"
 	MsgNameSet                   MsgKey = "name_set"
 	MsgNameNoSession             MsgKey = "name_no_session"
@@ -1509,6 +1510,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "當前會話暫無歷史訊息。",
 		LangJapanese:           "現在のセッションに履歴がありません。",
 		LangSpanish:            "No hay historial en la sesión actual.",
+	},
+	MsgHistoryReadFailed: {
+		LangEnglish:            "Failed to read session history.",
+		LangChinese:            "读取会话历史失败。",
+		LangTraditionalChinese: "讀取會話歷史失敗。",
+		LangJapanese:           "セッション履歴の読み取りに失敗しました。",
+		LangSpanish:            "No se pudo leer el historial de la sesión.",
 	},
 	MsgNameUsage: {
 		LangEnglish:            "Usage:\n`/name <text>` — name the current session\n`/name <number> <text>` — name a session by list number",
