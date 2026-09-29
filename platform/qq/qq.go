@@ -23,6 +23,20 @@ func init() {
 	core.RegisterPlatform("qq", New)
 }
 
+const (
+	// eventQueueSize is how many message events can wait for the handler.
+	// When the queue is full, readLoop drops new events instead of waiting,
+	// because it is the only reader of the connection and API responses
+	// arriving behind those events must still reach callAPI.
+	eventQueueSize = 64
+
+	// apiTimeout bounds how long callAPI waits for a OneBot response.
+	apiTimeout = 15 * time.Second
+
+	// stopTimeout bounds how long Stop waits for readLoop and handleLoop.
+	stopTimeout = 5 * time.Second
+)
+
 // Platform connects to a OneBot v11 implementation (NapCat, LLOneBot, etc.)
 // via forward WebSocket. It receives message events and sends messages back
 // through the same WS connection.
@@ -35,12 +49,17 @@ type Platform struct {
 	conn                  *websocket.Conn
 	mu                    sync.Mutex
 	echoSeq               atomic.Int64
-	echoCh                sync.Map // echo -> chan json.RawMessage
+	echoCh                sync.Map        // echo -> chan json.RawMessage
+	ctx                   context.Context // canceled by Stop
 	cancel                context.CancelFunc
-	selfID                int64
+	wg                    sync.WaitGroup // readLoop and handleLoop
+	stopOnce              sync.Once
+	selfID                atomic.Int64 // written by Start, read by handleLoop
 	dedup                 core.MessageDedup
-	groupNameCache        sync.Map // groupID -> group name
-	httpURL            string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
+	groupNameCache        sync.Map            // groupID -> group name
+	httpURL               string              // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
+	events                chan map[string]any // message events from readLoop to handleLoop
+	droppedEvents         atomic.Uint64       // message events dropped because events was full
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -62,7 +81,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		token:                 token,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
-		httpURL:            httpURL,
+		httpURL:               httpURL,
 	}, nil
 }
 
@@ -85,21 +104,31 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	slog.Info("qq: connected to OneBot", "url", p.wsURL)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	p.ctx = ctx
 	p.cancel = cancel
 
 	// Start readLoop BEFORE callAPI: callAPI's response is routed by readLoop,
 	// so calling it first would always time out after 15s and leave selfID=0,
 	// which disables the self-message filter in handleMessage and lets the bot
 	// respond to its own messages.
-	go p.readLoop(ctx)
+	p.events = make(chan map[string]any, eventQueueSize)
+	p.wg.Add(2)
+	go func() {
+		defer p.wg.Done()
+		p.handleLoop(ctx)
+	}()
+	go func() {
+		defer p.wg.Done()
+		p.readLoop(ctx)
+	}()
 
 	// Get bot self info
-	if info, err := p.callAPI("get_login_info", nil); err == nil {
+	if info, err := p.callAPI(ctx, "get_login_info", nil); err == nil {
 		if uid, ok := info["user_id"].(float64); ok {
-			p.selfID = int64(uid)
+			p.selfID.Store(int64(uid))
 		}
 		nick, _ := info["nickname"].(string)
-		slog.Info("qq: logged in", "qq", p.selfID, "nickname", nick)
+		slog.Info("qq: logged in", "qq", p.selfID.Load(), "nickname", nick)
 	} else {
 		slog.Warn("qq: get_login_info failed; self-message filter disabled until next reconnect", "error", err)
 	}
@@ -121,7 +150,7 @@ func (p *Platform) readLoop(ctx context.Context) {
 				return
 			}
 			slog.Error("qq: ws read error, reconnecting...", "error", err)
-			p.reconnect()
+			p.reconnect(ctx)
 			continue
 		}
 
@@ -143,24 +172,73 @@ func (p *Platform) readLoop(ctx context.Context) {
 		// Otherwise it's an event
 		postType, _ := payload["post_type"].(string)
 		if postType == "message" {
-			p.handleMessage(payload)
+			p.enqueueEvent(payload)
 		}
 	}
 }
 
-func (p *Platform) reconnect() {
+// enqueueEvent hands a message event to handleLoop without blocking. If the
+// handler has fallen eventQueueSize events behind, the new event is dropped
+// and counted, so readLoop keeps delivering API responses.
+func (p *Platform) enqueueEvent(payload map[string]any) {
+	select {
+	case p.events <- payload:
+	default:
+		dropped := p.droppedEvents.Add(1)
+		slog.Warn("qq: message handler is behind, dropping message",
+			"message_id", jsonInt64(payload, "message_id"),
+			"user_id", jsonInt64(payload, "user_id"),
+			"queue_size", eventQueueSize,
+			"dropped_total", dropped)
+	}
+}
+
+// DroppedEvents returns how many message events were dropped because the
+// handler queue was full.
+func (p *Platform) DroppedEvents() uint64 {
+	return p.droppedEvents.Load()
+}
+
+// handleLoop handles message events one at a time, in arrival order. It runs
+// apart from readLoop because handling a message can call callAPI (to reply,
+// for example), and only readLoop can deliver the API response.
+func (p *Platform) handleLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case payload := <-p.events:
+			p.handleMessage(ctx, payload)
+		}
+	}
+}
+
+func (p *Platform) reconnect(ctx context.Context) {
 	for i := 1; i <= 30; i++ {
-		time.Sleep(time.Duration(i) * 2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(i) * 2 * time.Second):
+		}
 		header := http.Header{}
 		if p.token != "" {
 			header.Set("Authorization", "Bearer "+p.token)
 		}
-		conn, _, err := websocket.DefaultDialer.Dial(p.wsURL, header)
+		conn, _, err := websocket.DefaultDialer.DialContext(ctx, p.wsURL, header)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			slog.Warn("qq: reconnect attempt failed", "attempt", i, "error", err)
 			continue
 		}
 		p.mu.Lock()
+		if ctx.Err() != nil {
+			// Stop already ran and will not close this connection.
+			p.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
 		p.conn = conn
 		p.mu.Unlock()
 		slog.Info("qq: reconnected")
@@ -169,13 +247,13 @@ func (p *Platform) reconnect() {
 	slog.Error("qq: failed to reconnect after 30 attempts")
 }
 
-func (p *Platform) handleMessage(payload map[string]any) {
+func (p *Platform) handleMessage(ctx context.Context, payload map[string]any) {
 	msgType, _ := payload["message_type"].(string)
 	userID := jsonInt64(payload, "user_id")
 	groupID := jsonInt64(payload, "group_id")
 	messageID := jsonInt64(payload, "message_id")
 
-	if userID == p.selfID {
+	if userID == p.selfID.Load() {
 		return
 	}
 
@@ -209,7 +287,7 @@ func (p *Platform) handleMessage(payload map[string]any) {
 	}
 
 	// Parse message content from CQ message array or raw_message
-	text, images, files, audio := p.parseMessage(payload, msgType, groupID)
+	text, images, files, audio := p.parseMessage(ctx, payload, msgType, groupID)
 	if text == "" && len(images) == 0 && len(files) == 0 && audio == nil {
 		return
 	}
@@ -234,7 +312,7 @@ func (p *Platform) handleMessage(payload map[string]any) {
 
 	var chatName string
 	if msgType == "group" {
-		chatName = p.resolveGroupName(groupID)
+		chatName = p.resolveGroupName(ctx, groupID)
 	}
 
 	msg := &core.Message{
@@ -255,7 +333,7 @@ func (p *Platform) handleMessage(payload map[string]any) {
 	p.handler(p, msg)
 }
 
-func (p *Platform) parseMessage(payload map[string]any, msgType string, groupID int64) (string, []core.ImageAttachment, []core.FileAttachment, *core.AudioAttachment) {
+func (p *Platform) parseMessage(ctx context.Context, payload map[string]any, msgType string, groupID int64) (string, []core.ImageAttachment, []core.FileAttachment, *core.AudioAttachment) {
 	var textParts []string
 	var images []core.ImageAttachment
 	var files []core.FileAttachment
@@ -350,7 +428,7 @@ func (p *Platform) parseMessage(payload map[string]any, msgType string, groupID 
 					if msgType == "group" && groupID != 0 {
 						groupStr := strconv.FormatInt(groupID, 10)
 						slog.Info("qq: [step2] trying get_group_file_url", "file_id", fileID, "group", groupStr)
-						result, err := p.callHTTPAPI("get_group_file_url", map[string]any{
+						result, err := p.callHTTPAPI(ctx, "get_group_file_url", map[string]any{
 							"file_id": fileID,
 							"group":   groupStr,
 						})
@@ -362,7 +440,7 @@ func (p *Platform) parseMessage(payload map[string]any, msgType string, groupID 
 						}
 					} else {
 						slog.Info("qq: [step2] trying get_private_file_url", "file_id", fileID)
-						result, err := p.callHTTPAPI("get_private_file_url", map[string]any{
+						result, err := p.callHTTPAPI(ctx, "get_private_file_url", map[string]any{
 							"file_id": fileID,
 						})
 						if err == nil {
@@ -390,7 +468,7 @@ func (p *Platform) parseMessage(payload map[string]any, msgType string, groupID 
 				// Step 3: Last resort — get_file (downloads to NapCat local or returns base64)
 				if !downloaded && p.httpURL != "" && fileID != "" {
 					slog.Info("qq: [step3] trying get_file", "file_id", fileID)
-					result, err := p.callHTTPAPI("get_file", map[string]any{"file_id": fileID})
+					result, err := p.callHTTPAPI(ctx, "get_file", map[string]any{"file_id": fileID})
 					if err == nil {
 						if fileURL, ok := result["url"].(string); ok && fileURL != "" {
 							fileData, mime, err := downloadLargeFile(fileURL)
@@ -455,12 +533,12 @@ func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error
 
 	if rctx.messageType == "group" {
 		params["group_id"] = rctx.groupID
-		_, err := p.callAPI("send_group_msg", params)
+		_, err := p.callAPI(ctx, "send_group_msg", params)
 		return err
 	}
 
 	params["user_id"] = rctx.userID
-	_, err := p.callAPI("send_private_msg", params)
+	_, err := p.callAPI(ctx, "send_private_msg", params)
 	return err
 }
 
@@ -483,7 +561,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 
 	if rctx.messageType == "group" {
 		params["group_id"] = rctx.groupID
-		_, err := p.callAPI("send_group_msg", params)
+		_, err := p.callAPI(ctx, "send_group_msg", params)
 		if err != nil {
 			return fmt.Errorf("qq: send image: %w", err)
 		}
@@ -491,7 +569,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 	}
 
 	params["user_id"] = rctx.userID
-	_, err := p.callAPI("send_private_msg", params)
+	_, err := p.callAPI(ctx, "send_private_msg", params)
 	if err != nil {
 		return fmt.Errorf("qq: send image: %w", err)
 	}
@@ -500,17 +578,41 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 
 var _ core.ImageSender = (*Platform)(nil)
 
+// Stop cancels in-flight API calls, closes the connection and waits up to
+// stopTimeout for readLoop and handleLoop to exit. A handler that ignores
+// cancellation keeps handleLoop running; Stop then returns an error instead of
+// hanging. Calls after the first are no-ops.
 func (p *Platform) Stop() error {
+	var err error
+	p.stopOnce.Do(func() { err = p.stop() })
+	return err
+}
+
+func (p *Platform) stop() error {
 	if p.cancel != nil {
 		p.cancel()
 	}
+	var closeErr error
+	p.mu.Lock()
 	if p.conn != nil {
-		return p.conn.Close()
+		closeErr = p.conn.Close()
 	}
-	return nil
+	p.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return closeErr
+	case <-time.After(stopTimeout):
+		return fmt.Errorf("qq: message handler did not exit within %s", stopTimeout)
+	}
 }
 
-func (p *Platform) resolveGroupName(groupID int64) string {
+func (p *Platform) resolveGroupName(ctx context.Context, groupID int64) string {
 	if groupID == 0 {
 		return ""
 	}
@@ -518,7 +620,7 @@ func (p *Platform) resolveGroupName(groupID int64) string {
 	if cached, ok := p.groupNameCache.Load(fallback); ok {
 		return cached.(string)
 	}
-	result, err := p.callAPI("get_group_info", map[string]any{"group_id": groupID})
+	result, err := p.callAPI(ctx, "get_group_info", map[string]any{"group_id": groupID})
 	if err != nil {
 		slog.Debug("qq: resolve group name failed", "group_id", groupID, "error", err)
 		return fallback
@@ -533,7 +635,9 @@ func (p *Platform) resolveGroupName(groupID int64) string {
 
 // ── OneBot API call via WebSocket ───────────────────────────────
 
-func (p *Platform) callAPI(action string, params map[string]any) (map[string]any, error) {
+// callAPI sends a OneBot action and waits for its response until ctx is
+// canceled, Stop is called or apiTimeout passes.
+func (p *Platform) callAPI(ctx context.Context, action string, params map[string]any) (map[string]any, error) {
 	seq := p.echoSeq.Add(1)
 	echo := strconv.FormatInt(seq, 10)
 
@@ -578,7 +682,11 @@ func (p *Platform) callAPI(action string, params map[string]any) (map[string]any
 		_ = json.Unmarshal(resp.Data, &result)
 		return result, nil
 
-	case <-time.After(15 * time.Second):
+	case <-ctx.Done():
+		return nil, fmt.Errorf("qq: API %s: %w", action, ctx.Err())
+	case <-p.ctx.Done():
+		return nil, fmt.Errorf("qq: API %s: platform stopped: %w", action, p.ctx.Err())
+	case <-time.After(apiTimeout):
 		return nil, fmt.Errorf("qq: API %s timeout", action)
 	}
 }
@@ -587,7 +695,7 @@ func (p *Platform) callAPI(action string, params map[string]any) (map[string]any
 // Used for file operations — avoids WebSocket message size limits and
 // file-path issues across Windows/WSL/Docker boundaries.
 // Requires http_url to be configured.
-func (p *Platform) callHTTPAPI(action string, params map[string]any) (map[string]any, error) {
+func (p *Platform) callHTTPAPI(ctx context.Context, action string, params map[string]any) (map[string]any, error) {
 	if p.httpURL == "" {
 		return nil, fmt.Errorf("qq: http_url not configured")
 	}
@@ -596,7 +704,7 @@ func (p *Platform) callHTTPAPI(action string, params map[string]any) (map[string
 		return nil, err
 	}
 	url := p.httpURL + "/" + action
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -773,7 +881,7 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 	}
 
 	if rctx.messageType == "group" {
-		_, err := call("upload_group_file", map[string]any{
+		_, err := call(ctx, "upload_group_file", map[string]any{
 			"group_id": rctx.groupID,
 			"file":     b64data,
 			"name":     name,
@@ -785,7 +893,7 @@ func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAtt
 	}
 
 	// Private: use send_private_msg with file segment
-	_, err := call("send_private_msg", map[string]any{
+	_, err := call(ctx, "send_private_msg", map[string]any{
 		"user_id": rctx.userID,
 		"message": []map[string]any{
 			{"type": "file", "data": map[string]any{"file": b64data, "name": name}},
