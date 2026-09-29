@@ -153,19 +153,6 @@ func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent
 // stepTexts holds intermediate per-step text (opencode emits a text event per
 // step); each becomes a thinking-panel entry so streaming updates grow the
 // foldable panels instead of re-flowing the answer body.
-func isCumulativeProgressThinking(previous, current string) bool {
-	previous = strings.TrimSpace(previous)
-	current = strings.TrimSpace(current)
-	if previous == "" || len(current) <= len(previous) {
-		return false
-	}
-	if strings.HasPrefix(current, previous) {
-		return true
-	}
-	trimmed := strings.TrimRight(previous, ".,;:!?…。；：！？")
-	return len(trimmed) >= 20 && strings.HasPrefix(current, trimmed)
-}
-
 func BuildStreamingCardPayload(thinking string, stepTexts []string, tools []cardToolEntry, answer string, agent string, lang Language, state ProgressCardState) string {
 	cleaned := make([]ProgressCardEntry, 0, 8)
 	if text := strings.TrimSpace(thinking); text != "" {
@@ -197,7 +184,7 @@ func BuildStreamingCardPayload(thinking string, stepTexts []string, tools []card
 			}
 			// Prefer the latest, longest cumulative snapshot rather than
 			// displaying both "Let me read..." and its expanded version.
-			if isCumulativeProgressThinking(item.Text, text) {
+			if isCumulativeReasoning(item.Text, text) {
 				cleaned[i].Text = text
 				merged = true
 				break

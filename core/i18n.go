@@ -3418,7 +3418,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese:            "📌 补充已送达：%s",
 		LangTraditionalChinese: "📌 補充已送達：%s",
 		LangJapanese:           "📌 P.S. を送信しました：%s",
-		LangSpanish:            "📌 P.D. entregado: %s",
+		LangSpanish:            "📌 P.D. entregado: %s", // "P.D." (postdata) is Spanish for "P.S.", not a typo
 	},
 	MsgPsSendFailed: {
 		LangEnglish:            "❌ Failed to deliver P.S.",

@@ -31,6 +31,11 @@ const maxPlatformMessageLen = 4000
 const telegramBotCommandLimit = 100
 const defaultMaxQueuedMessages = 5 // default cap for queued messages per session
 
+// cardNotePreviewMaxLen caps the preview of a /ps supplement shown on the
+// running turn's card. Named so platforms can tune the panel width without
+// hunting for a magic 80.
+const cardNotePreviewMaxLen = 80
+
 // defaultPendingRestartTimeout is how long the post-restart notify
 // dispatcher waits for the target platform to reach ready before
 // dropping the notify with a warning. 10s covers the typical 2-3s
@@ -4869,19 +4874,12 @@ type cardToolEntry struct {
 	Input string
 }
 
-// streamingCardContentFor renders the content handed to streamCard.Update /
-// Finalize for one turn. When the card implements StreamingCardPayloadSupporter
-// (e.g. Feishu), the turn is encoded as the structured progress payload so the
-// platform renders the familiar foldable panels ("思考 (N)" / "工具 (N)") with
-// the final answer below — identical to the compact progress card style.
-// Intermediate step text (opencode per-step updates) is folded into the
-// thinking panel instead of being appended to the answer body, so streaming
-// updates grow the foldable panels rather than re-flowing the answer text.
-// Other platforms keep receiving plain markdown via buildCardContent.
-// mergeCardStepText collapses cumulative reasoning snapshots. Some agents emit
-// the whole reasoning buffer again after each token/step, so a later snapshot
-// can contain an earlier one rather than being byte-for-byte identical. Keep
-// the longest snapshot for that lane position; never keep the shorter prefix.
+// isCumulativeReasoning reports whether current is a later, more complete
+// snapshot of previous. Some agents emit the whole reasoning buffer again
+// after each token/step, so a later snapshot can contain an earlier one
+// rather than being byte-for-byte identical. Shared by mergeCardStepText
+// (streaming card panel lanes) and BuildStreamingCardPayload (progress card
+// thinking entries) so the cumulative-snapshot rule lives in one place.
 func isCumulativeReasoning(previous, current string) bool {
 	previous = strings.TrimSpace(previous)
 	current = strings.TrimSpace(current)
@@ -4897,6 +4895,10 @@ func isCumulativeReasoning(previous, current string) bool {
 	return len(trimmed) >= 20 && strings.HasPrefix(current, trimmed)
 }
 
+// mergeCardStepText collapses cumulative reasoning snapshots. Some agents emit
+// the whole reasoning buffer again after each token/step, so a later snapshot
+// can contain an earlier one rather than being byte-for-byte identical. Keep
+// the longest snapshot for that lane position; never keep the shorter prefix.
 func mergeCardStepText(lane []string, text string) []string {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -4918,6 +4920,15 @@ func mergeCardStepText(lane []string, text string) []string {
 	return append(lane, text)
 }
 
+// streamingCardContentFor renders the content handed to streamCard.Update /
+// Finalize for one turn. When the card implements StreamingCardPayloadSupporter
+// (e.g. Feishu), the turn is encoded as the structured progress payload so the
+// platform renders the familiar foldable panels ("思考 (N)" / "工具 (N)") with
+// the final answer below — identical to the compact progress card style.
+// Intermediate step text (opencode per-step updates) is folded into the
+// thinking panel instead of being appended to the answer body, so streaming
+// updates grow the foldable panels rather than re-flowing the answer text.
+// Other platforms keep receiving plain markdown via buildCardContent.
 func (e *Engine) streamingCardContentFor(streamCard StreamingCard, thinking string, stepTexts []string, tools []cardToolEntry, answer string, done bool) string {
 	if supp, ok := streamCard.(StreamingCardPayloadSupporter); ok && supp.SupportsStreamingCardPayload() {
 		state := ProgressCardStateRunning
@@ -7281,7 +7292,7 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	}
 	// Surface the supplement on the running turn's card so the user can see that
 	// it joined this turn; the model reads it at the next step boundary.
-	state.noteForCard(cardNoteLine(e.i18n, truncateIf(text, 80)))
+	state.noteForCard(cardNoteLine(e.i18n, truncateIf(text, cardNotePreviewMaxLen)))
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
 }
 

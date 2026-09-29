@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -96,9 +95,26 @@ func laneHasPrefix(rendered, current []core.ProgressCardEntry) bool {
 		return false
 	}
 	for i, item := range rendered {
-		if !reflect.DeepEqual(current[i], item) {
+		if !progressCardEntryEqual(current[i], item) {
 			return false
 		}
+	}
+	return true
+}
+
+// progressCardEntryEqual compares two progress card entries field by field.
+// It replaces reflect.DeepEqual, which walked the whole slice on every card
+// update (O(n²) as a lane grows). ExitCode/Success are pointers, so compare
+// the pointed-to values rather than the addresses.
+func progressCardEntryEqual(a, b core.ProgressCardEntry) bool {
+	if a.Kind != b.Kind || a.Text != b.Text || a.Tool != b.Tool || a.Status != b.Status {
+		return false
+	}
+	if (a.ExitCode == nil) != (b.ExitCode == nil) || (a.ExitCode != nil && *a.ExitCode != *b.ExitCode) {
+		return false
+	}
+	if (a.Success == nil) != (b.Success == nil) || (a.Success != nil && *a.Success != *b.Success) {
+		return false
 	}
 	return true
 }
