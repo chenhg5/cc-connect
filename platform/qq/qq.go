@@ -5,10 +5,15 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,7 +45,8 @@ type Platform struct {
 	selfID                int64
 	dedup                 core.MessageDedup
 	groupNameCache        sync.Map // groupID -> group name
-	httpURL            string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
+	httpURL               string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
+	recordDirs            []string // absolute directories local voice files may be read from
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -57,12 +63,18 @@ func New(opts map[string]any) (core.Platform, error) {
 	httpURL, _ := opts["http_url"].(string)
 	httpURL = strings.TrimRight(httpURL, "/")
 
+	recordDirs, err := parseRecordDirs(opts["record_dirs"])
+	if err != nil {
+		return nil, err
+	}
+
 	return &Platform{
 		wsURL:                 wsURL,
 		token:                 token,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
-		httpURL:            httpURL,
+		httpURL:               httpURL,
+		recordDirs:            recordDirs,
 	}, nil
 }
 
@@ -294,22 +306,19 @@ func (p *Platform) parseMessage(payload map[string]any, msgType string, groupID 
 				}
 			case "record":
 				if url, ok := data["url"].(string); ok && url != "" {
-					audioData, _, err := downloadFile(url)
+					size, err := recordFileSize(data["file_size"])
 					if err != nil {
-						slog.Warn("qq: download audio failed", "error", err)
+						slog.Warn("qq: read audio failed", "error", err)
 						continue
 					}
-					format := "silk"
-					if f, ok := data["file"].(string); ok {
-						if strings.HasSuffix(f, ".amr") {
-							format = "amr"
-						} else if strings.HasSuffix(f, ".mp3") {
-							format = "mp3"
-						}
+					audioData, err := p.readRecord(url, size)
+					if err != nil {
+						slog.Warn("qq: read audio failed", "error", err)
+						continue
 					}
 					audio = &core.AudioAttachment{
 						Data:   audioData,
-						Format: format,
+						Format: recordFormat(audioData),
 					}
 				}
 			case "file":
@@ -701,6 +710,254 @@ func stripCQCodes(s string) string {
 		s = s[idx+end+1:]
 	}
 	return result.String()
+}
+
+const (
+	// maxRecordBytes caps a voice file, whether read from disk or over HTTP.
+	maxRecordBytes = 20 << 20
+
+	// recordWaitTimeout bounds how long readRecord waits for QQ to finish
+	// writing a local voice file.
+	recordWaitTimeout  = 10 * time.Second
+	recordPollInterval = 100 * time.Millisecond
+)
+
+// parseRecordDirs reads the record_dirs option: a directory or a list of
+// directories that local voice files may be read from. A leading ~ is
+// expanded to the home directory.
+func parseRecordDirs(v any) ([]string, error) {
+	var raw []string
+	switch v := v.(type) {
+	case nil:
+	case string:
+		if v != "" {
+			raw = []string{v}
+		}
+	case []string:
+		raw = v
+	case []any:
+		for _, d := range v {
+			s, ok := d.(string)
+			if !ok {
+				return nil, fmt.Errorf("qq: record_dirs: entry %v is not a string", d)
+			}
+			raw = append(raw, s)
+		}
+	default:
+		return nil, fmt.Errorf("qq: record_dirs must be a string or a list of strings")
+	}
+
+	dirs := make([]string, 0, len(raw))
+	for _, d := range raw {
+		if d == "~" || strings.HasPrefix(d, "~/") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, fmt.Errorf("qq: record_dirs %q: %w", d, err)
+			}
+			d = filepath.Join(home, d[1:])
+		}
+		if !filepath.IsAbs(d) {
+			return nil, fmt.Errorf("qq: record_dirs %q is not an absolute path", d)
+		}
+		dirs = append(dirs, filepath.Clean(d))
+	}
+	return dirs, nil
+}
+
+// recordFileSize parses a record segment's file_size. A missing value
+// returns 0; a present value must be a positive integer.
+func recordFileSize(v any) (int64, error) {
+	var n int64
+	switch v := v.(type) {
+	case nil:
+		return 0, nil
+	case float64:
+		if v != math.Trunc(v) || v > math.MaxInt64 {
+			return 0, fmt.Errorf("invalid voice file_size %v", v)
+		}
+		n = int64(v)
+	case string:
+		var err error
+		if n, err = strconv.ParseInt(v, 10, 64); err != nil {
+			return 0, fmt.Errorf("invalid voice file_size %q", v)
+		}
+	default:
+		return 0, fmt.Errorf("invalid voice file_size %v", v)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("invalid voice file_size %d", n)
+	}
+	return n, nil
+}
+
+// readRecord returns the bytes of a voice segment. size is the segment's
+// file_size, 0 if missing.
+//
+// A NapCat instance on the same host puts a local file path in "url" instead
+// of an HTTP URL. Such paths are only read inside record_dirs, and need a
+// file_size because NapCat pushes the event before QQ has finished writing
+// the file.
+func (p *Platform) readRecord(src string, size int64) ([]byte, error) {
+	if size > maxRecordBytes {
+		return nil, fmt.Errorf("voice file is %d bytes, limit is %d", size, maxRecordBytes)
+	}
+	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		return downloadRecord(src)
+	}
+	if size <= 0 {
+		return nil, fmt.Errorf("local voice file %s has no file_size", src)
+	}
+	return readLocalRecord(src, size, p.recordDirs, recordWaitTimeout)
+}
+
+// readLocalRecord reads a voice file inside one of roots, waiting up to
+// timeout for it to exist and reach size bytes.
+func readLocalRecord(path string, size int64, roots []string, timeout time.Duration) ([]byte, error) {
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("local voice file %s: set record_dirs to allow reading local voice files", path)
+	}
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("voice file path %q is not absolute", path)
+	}
+	path = filepath.Clean(path)
+	// Reject paths outside record_dirs without waiting for them to appear.
+	// readRecordFile checks again after resolving symlinks.
+	if !lexicallyInside(path, roots) {
+		return nil, fmt.Errorf("voice file %s is outside record_dirs", path)
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		data, err := readRecordFile(path, roots)
+		if err == nil && int64(len(data)) >= size {
+			return data, nil
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			if err == nil {
+				err = fmt.Errorf("incomplete voice file %s: %d of %d bytes", path, len(data), size)
+			}
+			return nil, err
+		}
+		time.Sleep(recordPollInterval)
+	}
+}
+
+// lexicallyInside reports whether path is inside one of roots, comparing
+// against each root both as configured and with symlinks resolved.
+func lexicallyInside(path string, roots []string) bool {
+	for _, root := range roots {
+		if _, ok := relInside(root, path); ok {
+			return true
+		}
+		if real, err := filepath.EvalSymlinks(root); err == nil {
+			if _, ok := relInside(real, path); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// relInside returns path relative to root if path is strictly inside root.
+func relInside(root, path string) (string, bool) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return rel, true
+}
+
+// readRecordFile resolves symlinks in path, checks that the target is a
+// regular file inside one of roots and reads at most maxRecordBytes of it.
+// The file is opened through os.Root, so a symlink swapped in after the check
+// still cannot lead outside the root.
+func readRecordFile(path string, roots []string) ([]byte, error) {
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+	for _, root := range roots {
+		realRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			continue
+		}
+		rel, ok := relInside(realRoot, real)
+		if !ok {
+			continue
+		}
+		r, err := os.OpenRoot(realRoot)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = r.Close() }()
+		// Lstat before Open: opening a FIFO would block.
+		info, err := r.Lstat(rel)
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("voice file %s is not a regular file", path)
+		}
+		f, err := r.Open(rel)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = f.Close() }()
+		if info, err = f.Stat(); err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("voice file %s is not a regular file", path)
+		}
+		return readRecordLimited(f)
+	}
+	return nil, fmt.Errorf("voice file %s is outside record_dirs", path)
+}
+
+// readRecordLimited reads r and fails if it holds more than maxRecordBytes.
+func readRecordLimited(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxRecordBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxRecordBytes {
+		return nil, fmt.Errorf("voice file exceeds %d bytes", maxRecordBytes)
+	}
+	return data, nil
+}
+
+func downloadRecord(url string) ([]byte, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download voice: HTTP %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxRecordBytes {
+		return nil, fmt.Errorf("voice file is %d bytes, limit is %d", resp.ContentLength, maxRecordBytes)
+	}
+	return readRecordLimited(resp.Body)
+}
+
+// recordFormat detects the voice codec from the file header. QQ NT saves SILK
+// voice under a ".amr" file name, so the name cannot be trusted. QQ voice is
+// SILK unless the header says AMR or MP3; anything else is passed on as SILK
+// and rejected by the SILK decoder if it is not.
+func recordFormat(data []byte) string {
+	switch {
+	case bytes.HasPrefix(data, []byte("#!AMR")):
+		return "amr"
+	case bytes.HasPrefix(data, []byte("ID3")), len(data) > 1 && data[0] == 0xFF && data[1]&0xE0 == 0xE0:
+		return "mp3"
+	default:
+		return "silk"
+	}
 }
 
 func downloadLargeFile(url string) ([]byte, string, error) {

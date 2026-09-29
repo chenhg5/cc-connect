@@ -2,12 +2,16 @@ package core
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/wdvxdr1123/go-silk"
 )
 
 func TestNewGeminiSTT_DefaultModel(t *testing.T) {
@@ -179,5 +183,64 @@ func TestConvertAudioToMP3_HonorsContextCancellation(t *testing.T) {
 	_, err := ConvertAudioToMP3(ctx, []byte{0, 1, 2, 3}, "mp3")
 	if err == nil {
 		t.Fatal("expected error after context cancellation, got nil")
+	}
+}
+
+// sineSilk returns one second of a 440 Hz tone encoded as Tencent-flavoured
+// SILK, the format QQ and WeChat use for voice messages.
+//
+// go-silk is C translated to Go and does pointer arithmetic that the checkptr
+// instrumentation enabled by -race rejects, so SILK tests only run without
+// -race.
+func sineSilk(t *testing.T) []byte {
+	t.Helper()
+	if raceEnabled {
+		t.Skip("go-silk fails checkptr under -race")
+	}
+	pcm := make([]byte, silkSampleRate*2)
+	for i := 0; i < silkSampleRate; i++ {
+		v := int16(8000 * math.Sin(2*math.Pi*440*float64(i)/silkSampleRate))
+		binary.LittleEndian.PutUint16(pcm[2*i:], uint16(v))
+	}
+	data, err := silk.EncodePcmBuffToSilk(pcm, silkSampleRate, silkSampleRate, true)
+	if err != nil {
+		t.Fatalf("encode silk: %v", err)
+	}
+	return data
+}
+
+func TestFFmpegInput_DecodesSilkToPCM(t *testing.T) {
+	input, args, err := ffmpegInput(sineSilk(t), "silk")
+	if err != nil {
+		t.Fatalf("ffmpegInput: %v", err)
+	}
+	if got, want := strings.Join(args, " "), "-f s16le -ar 24000 -ac 1"; got != want {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+	// One second of 16-bit mono PCM, give or take a SILK frame.
+	if len(input) < silkSampleRate*2*9/10 {
+		t.Errorf("decoded %d bytes of PCM, want about %d", len(input), silkSampleRate*2)
+	}
+}
+
+func TestFFmpegInput_RejectsInvalidSilk(t *testing.T) {
+	if raceEnabled {
+		t.Skip("go-silk fails checkptr under -race")
+	}
+	if _, _, err := ffmpegInput([]byte("not silk"), "silk"); err == nil {
+		t.Fatal("expected an error for invalid SILK data")
+	}
+}
+
+func TestConvertAudioToMP3_Silk(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	mp3, err := ConvertAudioToMP3(context.Background(), sineSilk(t), "silk")
+	if err != nil {
+		t.Fatalf("ConvertAudioToMP3: %v", err)
+	}
+	if len(mp3) == 0 {
+		t.Fatal("empty mp3 output")
 	}
 }

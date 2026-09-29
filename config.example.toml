@@ -1797,6 +1797,11 @@ app_secret = "your-feishu-app-secret"
 # allow_from = "*"                 # allowed QQ user IDs, e.g. "12345,67890" or "*" for all
 #                                  # 允许的 QQ 号，如 "12345,67890"，"*" 表示所有
 # share_session_in_channel = false  # If true, all users in a group share one agent session / 群聊共享会话
+# record_dirs = []                 # optional: directories voice files may be read from when NapCat runs on the
+#                                  # same host and sends a local path. Empty = local voice paths are rejected.
+#                                  # 可选：NapCat 与 cc-connect 同机、语音以本地路径下发时，允许读取的目录。
+#                                  # 为空则拒绝所有本地语音路径。
+#                                  # e.g. ["~/Library/Containers/com.tencent.qq/Data/Library/Application Support/QQ"]
 
 # QQ Bot (Official / 官方 QQ 机器人) (uncomment to enable / 取消注释以启用)
 # Uses the official QQ Bot Platform API — no third-party adapter needed.
