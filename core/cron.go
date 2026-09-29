@@ -857,22 +857,7 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 
 	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt", truncateStr(job.Prompt, 60))
 
-	done := make(chan error, 1)
-	go func() {
-		done <- engine.ExecuteCronJob(job)
-	}()
-
-	var err error
-	timeout := job.ExecutionTimeout()
-	if timeout > 0 {
-		select {
-		case err = <-done:
-		case <-time.After(timeout):
-			err = fmt.Errorf("job timed out after %v", timeout)
-		}
-	} else {
-		err = <-done
-	}
+	err := executeCronRun(engine, job, job.ExecutionTimeout())
 
 	cs.store.MarkRun(job.ID, err)
 
@@ -880,6 +865,120 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 		slog.Error("cron: job failed", "id", job.ID, "manual", manual, "error", err)
 	} else {
 		slog.Info("cron: job completed", "id", job.ID, "manual", manual)
+	}
+}
+
+const (
+	// cronStopGrace bounds how long the timeout path waits for a run to report
+	// its CronRunHandle after the timeout fired. The handle is reported before
+	// the agent turn starts blocking, so this only matters if the timeout races
+	// run creation; otherwise the wait ends as soon as the handle arrives.
+	cronStopGrace = 2 * time.Second
+	// cronStopRegisterGrace is the retry window applied when a reported turn is
+	// not yet present in interactiveStates. It closes the few instructions
+	// between reporting the handle and the turn registering its state.
+	cronStopRegisterGrace = 250 * time.Millisecond
+	// cronStopRegisterPoll is the retry interval used within that window.
+	cronStopRegisterPoll = 10 * time.Millisecond
+	// cronStopWait bounds how long the timeout path waits for the cancelled
+	// run's goroutine to unwind before reporting it as still executing.
+	cronStopWait = 15 * time.Second
+)
+
+// executeCronRun runs one cron invocation under timeout. When the timeout
+// elapses first it cancels exactly the turn that invocation started (carried
+// out of run creation via CronRunHandle) and waits a bounded time for the run
+// goroutine to unwind. A timeout <= 0 waits indefinitely.
+func executeCronRun(engine *Engine, job *CronJob, timeout time.Duration) error {
+	done := make(chan error, 1)
+	handles := make(chan CronRunHandle, 1)
+	go func() {
+		done <- engine.ExecuteCronJobWithHandle(job, func(h CronRunHandle) {
+			select {
+			case handles <- h:
+			default:
+			}
+		})
+	}()
+
+	if timeout <= 0 {
+		return <-done
+	}
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		return stopTimedOutCronRun(engine, job, timeout, handles, done)
+	}
+}
+
+// stopTimedOutCronRun cancels the single turn whose cron run exceeded timeout
+// and waits (bounded) for the run goroutine to unwind. It returns the error the
+// scheduler records for the run.
+//
+// The handle is resolved while the run is created, so only that invocation is
+// stopped: concurrent runs under the same session key and turns of other
+// sessions or workspaces are left alone. A bare-key fallback does the opposite
+// — it misses the actual timed-out run when a workspace prefix or reply-target
+// rewrite changed its key, and stops an unrelated interactive turn instead.
+func stopTimedOutCronRun(engine *Engine, job *CronJob, timeout time.Duration, handles <-chan CronRunHandle, done <-chan error) error {
+	err := fmt.Errorf("job timed out after %v", timeout)
+
+	var handle CronRunHandle
+	if !job.IsShellJob() {
+		// Agent turns report their handle; shell jobs guard themselves with
+		// their own execution context, so waiting for one would only delay the
+		// timeout report.
+		select {
+		case handle = <-handles:
+		case <-time.After(cronStopGrace):
+		}
+	}
+
+	stopped := false
+	if handle.TurnKey != "" {
+		stopped = stopCronRun(engine, handle)
+	}
+	slog.Warn("cron: job timed out, cancelled its turn",
+		"id", job.ID,
+		"stopped", stopped,
+		"turn_key", handle.TurnKey,
+		"run_session_key", handle.RunSessionKey,
+		"workspace", handle.WorkspaceDir,
+		"timeout", timeout)
+
+	// Wait, bounded, for the cancelled run to unwind. Without this the
+	// scheduler reports the timeout while the turn may still be tearing down,
+	// or — if its Close failed — still running.
+	select {
+	case <-done:
+	case <-time.After(cronStopWait):
+		closeErr := fmt.Errorf("run still executing %s after its turn was cancelled", cronStopWait)
+		slog.Error("cron: timed-out run did not exit after cancellation",
+			"id", job.ID, "turn_key", handle.TurnKey, "error", closeErr)
+		return fmt.Errorf("%w; %v (turn %q may still be running)", err, closeErr, handle.TurnKey)
+	}
+	return err
+}
+
+// stopCronRun stops exactly the turn identified by handle. The handle is
+// reported a few instructions before the turn registers its interactive state,
+// so a short bounded retry covers that window without ever addressing another
+// turn.
+func stopCronRun(engine *Engine, handle CronRunHandle) bool {
+	if handle.TurnKey == "" {
+		return false
+	}
+	deadline := time.Now().Add(cronStopRegisterGrace)
+	for {
+		if engine.stopInteractiveSessionSilently(handle.TurnKey) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(cronStopRegisterPoll)
 	}
 }
 

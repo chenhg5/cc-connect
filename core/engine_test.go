@@ -11092,6 +11092,101 @@ func TestCmdStop_UsesInteractiveKeyForMultiWorkspace(t *testing.T) {
 	}
 }
 
+// TestCmdStop_StopsCronTurn is the regression test for the bug where /stop in
+// a chat reported "no execution in progress" while a cron-triggered turn was
+// still running (and stuck retrying). Cron turns live under
+// "<chatSessionKey>#cron:<id>" keys, which the exact/suffix lookups missed;
+// /stop must tear them down too so the user can switch provider and re-trigger.
+func TestCmdStop_StopsCronTurn(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("cron-stop-test")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	chatKey := "feishu:ch1:user1"
+	cronKey := chatKey + "#cron:s42"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[cronKey] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: chatKey, Content: "/stop", ReplyCtx: "ctx"}
+	e.cmdStop(p, msg)
+
+	e.interactiveMu.Lock()
+	_, cronExists := e.interactiveStates[cronKey]
+	e.interactiveMu.Unlock()
+
+	if cronExists {
+		t.Error("expected cron-triggered interactive state to be cleaned up by /stop")
+	}
+	if len(p.getSent()) != 1 || !strings.Contains(p.getSent()[0], "stopped") {
+		t.Fatalf("reply = %q, want stopped confirmation (not no-execution)", p.getSent())
+	}
+}
+
+// TestCmdStop_StopsWorkspacePrefixedCronTurn covers /stop in multi-workspace
+// chats, where the cron turn key is workspace-prefixed. The old bare
+// "<sessionKey>#cron:" prefix missed it, so /stop reported "no execution"
+// while the turn kept running.
+func TestCmdStop_StopsWorkspacePrefixedCronTurn(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("cron-stop-ws")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+
+	chatKey := "feishu:ch1:user1"
+	cronKey := "/ws/project:" + chatKey + "#cron:s43"
+
+	e.interactiveMu.Lock()
+	e.interactiveStates[cronKey] = &interactiveState{agentSession: sess}
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: chatKey, Content: "/stop", ReplyCtx: "ctx"}
+	e.cmdStop(p, msg)
+
+	e.interactiveMu.Lock()
+	_, cronExists := e.interactiveStates[cronKey]
+	e.interactiveMu.Unlock()
+
+	if cronExists {
+		t.Error("expected workspace-prefixed cron interactive state to be cleaned up by /stop")
+	}
+	if sent := p.getSent(); len(sent) != 1 || !strings.Contains(sent[0], "stopped") {
+		t.Fatalf("reply = %q, want stopped confirmation (not no-execution)", sent)
+	}
+}
+
+// TestExecuteCronJobWithHandle_ReportsResolvedRunKey verifies the exact run
+// handle is reported from run creation, including the session key a
+// CronReplyTargetResolver rewrote.
+func TestExecuteCronJobWithHandle_ReportsResolvedRunKey(t *testing.T) {
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	job := &CronJob{ID: "job-handle", SessionKey: "discord:channel-1:user-1", Prompt: "ping"}
+
+	var got []CronRunHandle
+	if err := e.ExecuteCronJobWithHandle(job, func(h CronRunHandle) { got = append(got, h) }); err != nil {
+		t.Fatalf("ExecuteCronJobWithHandle() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("handles reported = %d, want 1", len(got))
+	}
+	// Shared-session runs keep the base session key as the turn key; the
+	// resolver only rewrote the reply target.
+	if got[0].TurnKey != "discord:channel-1:user-1" {
+		t.Errorf("TurnKey = %q, want %q", got[0].TurnKey, "discord:channel-1:user-1")
+	}
+	if got[0].RunSessionKey != "discord:thread-fresh" {
+		t.Errorf("RunSessionKey = %q, want resolved key %q", got[0].RunSessionKey, "discord:thread-fresh")
+	}
+	if got[0].NewSession {
+		t.Error("NewSession = true, want shared-session run")
+	}
+}
+
 // ===========================================================================
 // Beta pre-release tests: inject_sender, idle_timeout, /shell, /workspace,
 //                         /switch, /memory
