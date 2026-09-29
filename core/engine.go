@@ -568,16 +568,19 @@ type interactiveState struct {
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
 	stopped                  bool
-	pending                  *pendingPermission
-	pendingMessages          []queuedMessage // messages queued while session was busy
-	approveAll               bool            // when true, auto-approve all permission requests for this session
-	fromVoice                bool            // true if current turn originated from voice transcription
-	sideText                 string
-	deleteMode               *deleteModeState
-	modelSwitch              *modelSwitchState
-	pendingProviderAdd       *pendingProviderAddState
-	lastAutoCompressAt       time.Time
-	lastAutoCompressTokens   int
+	// recallHandoff keeps the stopped turn's busy lock with its processor until
+	// queued messages have been moved into the replacement state.
+	recallHandoff          bool
+	pending                *pendingPermission
+	pendingMessages        []queuedMessage // messages queued while session was busy
+	approveAll             bool            // when true, auto-approve all permission requests for this session
+	fromVoice              bool            // true if current turn originated from voice transcription
+	sideText               string
+	deleteMode             *deleteModeState
+	modelSwitch            *modelSwitchState
+	pendingProviderAdd     *pendingProviderAddState
+	lastAutoCompressAt     time.Time
+	lastAutoCompressTokens int
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -3484,11 +3487,26 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
+	if !hasState || state == nil {
+		return
+	}
 
-	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
-		if hasState && state != nil {
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
-		}
+	state.mu.Lock()
+	// Recall can release an empty handoff queue just after this message's
+	// first TryLock failed. In that case the retry above owns the lock,
+	// but the replacement agent has not started yet.
+	if state.agentSession == nil && len(state.pendingMessages) > 0 {
+		next := state.pendingMessages[0]
+		state.pendingMessages = state.pendingMessages[1:]
+		state.mu.Unlock()
+		e.processInteractiveMessageWith(next.platform, queuedMessageAsMessage(next, next.msgSessionKey, interactiveKey), session, agent, sessions, interactiveKey, workspaceDir, next.msgSessionKey, lockGen)
+		unlocked = true
+		return
+	}
+	agentSession := state.agentSession
+	state.mu.Unlock()
+	if agentSession == nil || !agentSession.Alive() {
+		e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 		return
 	}
 
@@ -4068,6 +4086,15 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	stopTyping = nil // ownership transferred; prevent defer from double-stopping
 
+	// Recalling the active message stops its agent process, but messages queued
+	// after the recalled one are independent user turns and must survive. Move
+	// them into a replacement interactive state and continue with the oldest
+	// queued message while retaining ownership of the session lock.
+	if e.resumePendingAfterStoppedTurn(state, session, sessions, interactiveKey, agent, workspaceDir, ccSessionKey, lockGen) {
+		unlocked = true // the nested processor now owns and releases the lock
+		return
+	}
+
 	// Start unsolicited reader and arm the idle close timer BEFORE draining
 	// queued messages. drainPendingMessages releases the session lock, and
 	// without this ordering the next user message can race in, call
@@ -4091,6 +4118,83 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// the message to queueMessageForBusySession). Drain any such orphans.
 	if e.drainPendingMessages(state, session, sessions, interactiveKey, lockGen) {
 		unlocked = true
+	}
+}
+
+// resumePendingAfterStoppedTurn starts a replacement agent session for user
+// messages that were queued after a recalled active message. It returns true
+// after transferring the busy lock to the replacement processor, or releasing
+// it under interactiveMu when both queues are empty.
+func (e *Engine) resumePendingAfterStoppedTurn(state *interactiveState, session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir, ccSessionKey string, lockGen uint64) bool {
+	state.mu.Lock()
+	if !state.stopped || !state.recallHandoff {
+		state.mu.Unlock()
+		return false
+	}
+	pending := append([]queuedMessage(nil), state.pendingMessages...)
+	state.pendingMessages = nil
+	state.mu.Unlock()
+
+	// New messages can arrive after the recalled state is detached but before
+	// this goroutine regains control. They live in a placeholder state; append
+	// them after the older preserved queue so FIFO order remains intact.
+	e.interactiveMu.Lock()
+	placeholder := e.interactiveStates[interactiveKey]
+	if placeholder == nil || placeholder == state {
+		placeholder = &interactiveState{eventsNeedResync: true}
+		e.interactiveStates[interactiveKey] = placeholder
+	}
+	placeholder.mu.Lock()
+	pending = append(pending, placeholder.pendingMessages...)
+	if len(pending) == 0 {
+		// Keep the map and busy-lock transition atomic with queue insertion.
+		// A new message can now acquire the lock and start its own turn.
+		session.Unlock(lockGen)
+		placeholder.mu.Unlock()
+		e.interactiveMu.Unlock()
+		return true
+	}
+	placeholder.pendingMessages = append([]queuedMessage(nil), pending[1:]...)
+	placeholder.mu.Unlock()
+	e.interactiveMu.Unlock()
+
+	next := pending[0]
+	nextMessage := queuedMessageAsMessage(next, ccSessionKey, interactiveKey)
+	slog.Info("resuming queued messages after stopped turn",
+		"session", interactiveKey,
+		"next_msg_id", next.messageID,
+		"remaining_queue", len(pending)-1,
+	)
+	e.processInteractiveMessageWith(next.platform, nextMessage, session, agent, sessions, interactiveKey, workspaceDir, ccSessionKey, lockGen)
+	return true
+}
+
+func queuedMessageAsMessage(next queuedMessage, ccSessionKey, interactiveKey string) *Message {
+	messageSessionKey := next.msgSessionKey
+	if messageSessionKey == "" {
+		messageSessionKey = ccSessionKey
+	}
+	if messageSessionKey == "" {
+		messageSessionKey = interactiveKey
+	}
+	messagePlatform := next.msgPlatform
+	if messagePlatform == "" && next.platform != nil {
+		messagePlatform = next.platform.Name()
+	}
+
+	return &Message{
+		SessionKey:        messageSessionKey,
+		Platform:          messagePlatform,
+		MessageID:         next.messageID,
+		UserID:            next.userID,
+		UserName:          next.userName,
+		Content:           next.content,
+		Images:            next.images,
+		Files:             next.files,
+		FromVoice:         next.fromVoice,
+		ReplyCtx:          next.replyCtx,
+		ChannelKey:        next.channelKey,
+		UserMessageTimeMs: next.userMessageTimeMs,
 	}
 }
 
@@ -5291,6 +5395,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case err := <-pendingSend:
 			pendingSend = nil
 			if err != nil {
+				if state.isStopped() {
+					sp.discard()
+					return
+				}
 				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
 				sp.discard()
 				if stopTyping != nil {
@@ -6592,6 +6700,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 channelClosed:
 	// Channel closed - process exited unexpectedly
+	// An intentional stop (notably message recall) closes the agent channel too.
+	// Its queued successors are recovered by processInteractiveMessageWith, so
+	// do not misclassify that close as a crash and drain their queue here.
+	if state.isStopped() {
+		sp.discard()
+		return
+	}
 	slog.Warn("agent process exited", "session_key", sessionKey)
 	state.mu.Lock()
 	state.eventsNeedResync = true
@@ -6708,6 +6823,10 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 // messages can no longer be delivered to the agent.
 func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason error) {
 	state.mu.Lock()
+	if state.stopped && state.recallHandoff {
+		state.mu.Unlock()
+		return
+	}
 	remaining := state.pendingMessages
 	state.pendingMessages = nil
 	state.mu.Unlock()
@@ -10681,10 +10800,6 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		}
 		if notifyQueued {
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session cancelled"))
-		} else {
-			state.mu.Lock()
-			state.pendingMessages = nil
-			state.mu.Unlock()
 		}
 
 		// Mark eventsNeedResync so the next turn drains stale events from
@@ -10697,11 +10812,12 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		if cancelErr != nil {
 			slog.Warn("agent session CancelTurn failed, falling back to Close",
 				"session_key", sessionKey, "error", cancelErr)
-			// Fall through to normal cleanup below.
+			// Restore the map lock before detaching the state below.
+			e.interactiveMu.Lock()
 			goto normalCleanup
 		}
 
-		if state.busySession != nil && state.busySession.ForceUnlock() {
+		if notifyQueued && state.busySession != nil && state.busySession.ForceUnlock() {
 			slog.Info("session busy lock released after turn cancel", "session_key", sessionKey)
 		}
 
@@ -10717,8 +10833,15 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	}
 
 normalCleanup:
+	if !notifyQueued {
+		state.mu.Lock()
+		state.recallHandoff = true
+		state.mu.Unlock()
+	}
 	state.markStopped()
-	delete(e.interactiveStates, sessionKey)
+	if e.interactiveStates[sessionKey] == state {
+		delete(e.interactiveStates, sessionKey)
+	}
 	e.interactiveMu.Unlock()
 
 	if pending != nil {
@@ -10726,19 +10849,13 @@ normalCleanup:
 	}
 	if notifyQueued {
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
-	} else {
-		state.mu.Lock()
-		state.pendingMessages = nil
-		state.mu.Unlock()
 	}
 	e.closeAgentSessionAsync(sessionKey, agentSession, closePlatform, closeReplyCtx)
 
-	// The stopped turn can never run its own Unlock — release its busy lock
-	// so the next message starts a fresh turn instead of queueing behind a
-	// dead one (#1830). ForceUnlock bumps the generation, so a late Unlock
-	// from the interrupted turn's goroutine (if it eventually unsticks) is
-	// dropped by the gen check.
-	if state.busySession != nil && state.busySession.ForceUnlock() {
+	// /stop releases the busy lock immediately (#1830). A silent recall keeps
+	// the same generation until the old processor has handed its queued turns
+	// to the replacement state; otherwise a new message can overtake them.
+	if notifyQueued && state.busySession != nil && state.busySession.ForceUnlock() {
 		slog.Info("session busy lock released after stop", "session_key", sessionKey)
 	}
 
