@@ -46,9 +46,16 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
 | `/stop` | Stop current execution |
+| `/ps <message>` / `/btw <message>` | Send a supplement to the running task |
 | `/help` | Show available commands |
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
+
+Use `/ps` (or `/btw`) to add instructions while a task is running. An idle session rejects the command. The delivery confirmation means the bridge sent the request, not that the agent has finished processing it.
+
+Pi native steering requires **Pi 0.32.2 or newer** and `rpc = true`. This is the minimum version for the RPC `prompt.streamingBehavior` field ([official 0.32.2 release notes](https://github.com/earendil-works/pi/releases/tag/v0.32.2)). The supplement is queued for the next model call, after the current assistant turn's tool calls. If Pi has already finished while the bridge is still delivering its reply, the supplement starts a follow-up turn. Pi's default JSON mode keeps its existing one-shot sending behavior; it cannot inject into an already running process.
+
+In Pi RPC mode, each prompt has a unique request ID. The bridge waits up to 30 seconds for Pi's matching acknowledgement before confirming delivery; a rejection, timeout, cancellation, or process exit reports a send failure. Acknowledgement does not mean processing has finished: if Pi later reports an asynchronous prompt error, the bridge surfaces it as an agent error. A timeout leaves delivery unconfirmed and does not automatically retry the prompt. Pi 0.32.1 and older are unsupported for native steering; upgrade Pi before using `/ps` or `/btw` (there is no `queue_message` fallback).
 
 cc-connect rotates to a fresh session automatically after long inactivity:
 

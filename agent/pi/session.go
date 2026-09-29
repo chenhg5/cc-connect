@@ -69,6 +69,9 @@ type piSession struct {
 	sendWg    sync.WaitGroup // tracks in-flight Send() calls
 	alive     atomic.Bool
 
+	lifecycleMu sync.Mutex // orders Send's Add against Close's Wait
+	closeOnce   sync.Once
+
 	thinkingBuf strings.Builder
 	thinkingMu  sync.Mutex
 	modelsCW    map[string]int // cached from ~/.pi/agent/models.json
@@ -90,6 +93,12 @@ type piSession struct {
 	rpcStdinMu sync.Mutex
 	stderrBuf  cappedStderrWriter
 	rpcReady   chan struct{} // closed once after handleEvent stores sessionId from the get_state probe written by startRPC
+
+	rpcKillOnce  sync.Once
+	rpcNextID    atomic.Uint64
+	rpcPendingMu sync.Mutex
+	rpcPending   map[string]chan error // buffered result channels; never closed
+	rpcErr       error                 // terminal transport error, protected by rpcPendingMu
 
 	// Extension UI: maps Pi's extension_ui_request id -> cc-connect RequestID
 	extPendingMu  sync.Mutex
@@ -184,6 +193,7 @@ func (s *piSession) startRPC(resumeID string) error {
 	slog.Debug("piSession: starting RPC", "cmd", s.cmd, "args", args)
 
 	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = s.workDir
 	env := os.Environ()
 	if len(s.extraEnv) > 0 {
@@ -238,12 +248,19 @@ func (s *piSession) startRPC(resumeID string) error {
 }
 
 func (s *piSession) killRPC() {
-	if s.rpcCmd != nil && s.rpcCmd.Process != nil {
-		if err := forceKillCmd(s.rpcCmd); err != nil {
-			slog.Warn("piSession: kill rpc process", "error", err)
+	s.rpcKillOnce.Do(func() {
+		// Closing stdin also releases a writer blocked on a full pipe.
+		if s.rpcStdin != nil {
+			if err := s.rpcStdin.Close(); err != nil {
+				slog.Debug("piSession: close rpc stdin", "error", err)
+			}
 		}
-		_, _ = s.rpcCmd.Process.Wait()
-	}
+		if s.rpcCmd != nil && s.rpcCmd.Process != nil {
+			if err := forceKillCmd(s.rpcCmd); err != nil {
+				slog.Warn("piSession: kill rpc process", "error", err)
+			}
+		}
+	})
 }
 
 // readLoopRPC is the persistent RPC readLoop goroutine.
@@ -285,9 +302,20 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 		}
 	}
 
-	// Process exited — reap the child and signal the engine.
-	// killRPC (now with Wait()) ensures the zombie is collected.
+	// Release acknowledgement waiters before any potentially blocked event
+	// delivery. Only this goroutine reaps the process and its stderr copier.
+	s.alive.Store(false)
+	exitErr := fmt.Errorf("pi: rpc process exited before acknowledging prompt")
+	if err := s.ctx.Err(); err != nil {
+		exitErr = fmt.Errorf("pi: rpc session cancelled: %w", err)
+	}
+	s.failRPCRequests(exitErr)
 	s.killRPC()
+	if s.rpcCmd != nil {
+		if err := s.rpcCmd.Wait(); err != nil && s.ctx.Err() == nil {
+			slog.Warn("piSession: rpc process exited", "error", err)
+		}
+	}
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("piSession: scanner error", "error", err)
@@ -320,18 +348,24 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 // In json mode (default): spawns a one-shot `pi --mode json` process.
 // In rpc mode: writes a "prompt" command to the persistent RPC process stdin.
 func (s *piSession) Send(msg string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
-	s.sendWg.Add(1)
-	defer s.sendWg.Done()
-
+	s.lifecycleMu.Lock()
 	if !s.alive.Load() {
+		s.lifecycleMu.Unlock()
 		return fmt.Errorf("session is closed")
 	}
+	s.sendWg.Add(1)
+	s.lifecycleMu.Unlock()
+	defer s.sendWg.Done()
 
 	attachDir := s.attachDir
 	if safeMessageID := sanitizePiAttachmentName(messageID); safeMessageID != "" {
 		attachDir = filepath.Join(attachDir, safeMessageID)
 	}
-	cleanAttachments(attachDir)
+	// Text-only supplements (such as /ps) must preserve attachments that
+	// the running task may still be reading, especially with no message ID.
+	if len(images) > 0 || len(files) > 0 {
+		cleanAttachments(attachDir)
+	}
 
 	// Issue #1723: images are passed via pi's @<path> argv / message-text
 	// mechanism. pi's processImage loads them as visual inputs and the
@@ -449,24 +483,17 @@ func (s *piSession) sendJSON(prompt string, imageAtFiles []string, filePaths []s
 // commands during a turn) and startRPC (for the startup "get_state" probe
 // that fetches the session id before callers are released).
 func (s *piSession) writeRPCCommand(cmd map[string]any) error {
-	b, err := json.Marshal(cmd)
-	if err != nil {
-		return fmt.Errorf("piSession: marshal command: %w", err)
-	}
-	b = append(b, '\n')
-
-	s.rpcStdinMu.Lock()
-	_, err = s.rpcStdin.Write(b)
-	s.rpcStdinMu.Unlock()
-	if err != nil {
-		return fmt.Errorf("piSession: write stdin: %w", err)
-	}
-	return nil
+	ctx, cancel := context.WithTimeout(s.ctx, rpcPromptTimeout)
+	defer cancel()
+	return s.writeRPCCommandContext(ctx, cmd)
 }
 
-// sendRPC writes a JSON "prompt" command to the persistent RPC process stdin.
+// sendRPC writes a JSON "prompt" command to the persistent RPC process stdin
+// and waits for its matching response before reporting delivery.
 // Events are read asynchronously by readLoopRPC, including agent_end which
 // triggers EventResult.
+// streamingBehavior lets Pi steer an active run or start a prompt if it has
+// already finished, even while the engine is still delivering the last reply.
 //
 // Issue #1723: image paths are embedded into the message text as
 // @<path> references (pi's standard mechanism, parsed the same way as in
@@ -482,11 +509,14 @@ func (s *piSession) writeRPCCommand(cmd map[string]any) error {
 // tools load only what the model actually needs.
 func (s *piSession) sendRPC(prompt string, imageAtFiles []string, filePaths []string) error {
 	cmd := map[string]any{
-		"type":    "prompt",
-		"message": composeRPCPrompt(promptWithFileRefs(prompt, filePaths), imageAtFiles),
+		"type":              "prompt",
+		"message":           composeRPCPrompt(promptWithFileRefs(prompt, filePaths), imageAtFiles),
+		"streamingBehavior": "steer",
 	}
 	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
-	return s.writeRPCCommand(cmd)
+	ctx, cancel := context.WithTimeout(s.ctx, rpcPromptTimeout)
+	defer cancel()
+	return s.requestRPCPrompt(ctx, cmd)
 }
 
 // promptWithFileRefs appends a plain-text trailer that tells the model
@@ -557,6 +587,7 @@ func (s *piSession) handleEvent(raw map[string]any) {
 		}
 
 	case "response":
+		s.handleRPCPromptResponse(raw)
 		// Startup probe response: matches the get_state request id set by
 		// startRPC. Stores sessionId so readLoopRPC can close rpcReady and
 		// the engine can persist it via the next EventResult.SessionID.
@@ -1220,22 +1251,20 @@ func (s *piSession) Alive() bool {
 }
 
 func (s *piSession) Close() error {
-	s.alive.Store(false)
-
-	// Cancel context to interrupt any in-flight Send() or readLoopRPC.
-	s.cancel()
-
-	if s.rpc {
-		s.killRPC()
-	}
-
-	// Wait for all in-flight Send() calls to finish (json mode) or be
-	// interrupted by ctx cancellation (both modes). Only then are we sure
-	// no goroutine can still write to s.events.
-	s.sendWg.Wait()
-	s.wg.Wait()
-
-	close(s.events)
+	s.closeOnce.Do(func() {
+		s.lifecycleMu.Lock()
+		s.alive.Store(false)
+		s.lifecycleMu.Unlock()
+		s.cancel()
+		if s.rpc {
+			s.failRPCRequests(fmt.Errorf("pi: rpc session closed: %w", context.Canceled))
+			s.killRPC()
+		}
+		// All event producers finish before the channel is closed.
+		s.sendWg.Wait()
+		s.wg.Wait()
+		close(s.events)
+	})
 	return nil
 }
 

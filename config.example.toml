@@ -1966,12 +1966,14 @@ app_secret = "your-feishu-app-secret"
 #     仅在你不需要问用户任何东西时使用。
 #
 #   - "rpc" mode: persistent `pi --mode rpc` process talking JSONL over
-#     stdin/stdout. The engine intercepts Pi's extension_ui_request events
+#     stdin/stdout. Native /ps and /btw steering requires Pi >= 0.32.2.
+#     The engine intercepts Pi's extension_ui_request events
 #     and surfaces them as permission / question cards on the messaging
 #     platform. The user's decision is piped back to Pi via
 #     extension_ui_response. **This is the mode you want.**
 #     "rpc" 模式：常驻 `pi --mode rpc` 进程，通过 stdin/stdout 走 JSONL
-#     协议。引擎会截获 Pi 的 extension_ui_request 事件，并在消息平台上
+#     协议。/ps 和 /btw 原生中途引导要求 Pi >= 0.32.2。
+#     引擎会截获 Pi 的 extension_ui_request 事件，并在消息平台上
 #     渲染为权限 / 询问卡片。用户的决策通过 extension_ui_response 回写到
 #     Pi。**这是你想要的模式。**
 #
