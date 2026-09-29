@@ -52,12 +52,21 @@ type acpSession struct {
 	availableModes []acpModeInfo
 	currentMode    string
 
+	// usageMu guards lastUsage, the most recent usage_update notification
+	// (ACP sessionUpdate "usage_update", e.g. kimi acp after each turn).
+	usageMu   sync.RWMutex
+	lastUsage *core.ContextUsage
+
 	callbacks sessionCallbacks // may be nil (tests, integration harness)
 }
 
 type permState struct {
 	RPCID   json.RawMessage
 	Options []permissionOption
+	// Elicitation is non-nil when this pending request arrived via
+	// elicitation/create instead of session/request_permission; it carries
+	// what RespondPermission needs to build a CreateElicitationResponse.
+	Elicitation *elicitationState
 }
 
 // acpSessionConfig bundles the inputs newACPSession needs. It's a
@@ -170,6 +179,13 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 				"writeTextFile": false,
 			},
 			"terminal": false,
+			// Advertise form-mode elicitation so agents with a structured
+			// question bridge (kimi acp routes AskUserQuestion through
+			// elicitation/create when this is set) use it instead of
+			// degrading to a single-question request_permission prompt.
+			"elicitation": map[string]any{
+				"form": map[string]any{},
+			},
 		},
 		"clientInfo": map[string]any{
 			"name":    "cc-connect",
@@ -372,6 +388,7 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	}
 	s.cacheToolCallInput(params)
 	s.maybeAbsorbCurrentModeUpdate(params)
+	s.maybeAbsorbUsageUpdate(params)
 	sid := s.currentACPSessionID()
 	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
 	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
@@ -481,10 +498,49 @@ func (s *acpSession) cacheToolCallInput(params json.RawMessage) {
 	}
 }
 
+// maybeAbsorbUsageUpdate watches session/update notifications for
+// `usage_update` (post-turn context token accounting, e.g. kimi acp) and
+// caches it for GetContextUsage. The update produces no IM event — it only
+// feeds the engine's ctx% footer and auto-compress trigger.
+func (s *acpSession) maybeAbsorbUsageUpdate(params json.RawMessage) {
+	var wrap struct {
+		Update json.RawMessage `json:"update"`
+	}
+	if json.Unmarshal(params, &wrap) != nil || len(wrap.Update) == 0 {
+		return
+	}
+	var u struct {
+		Kind string `json:"sessionUpdate"`
+		Used int    `json:"used"`
+		Size int    `json:"size"`
+	}
+	if json.Unmarshal(wrap.Update, &u) != nil || u.Kind != "usage_update" {
+		return
+	}
+	s.usageMu.Lock()
+	s.lastUsage = &core.ContextUsage{UsedTokens: u.Used, ContextWindow: u.Size}
+	s.usageMu.Unlock()
+	slog.Debug("acp: context usage update", "session_id", s.currentACPSessionID(), "used", u.Used, "size", u.Size)
+}
+
+// GetContextUsage implements core.ContextUsageReporter: the latest
+// usage_update snapshot, or nil before the first one arrives.
+func (s *acpSession) GetContextUsage() *core.ContextUsage {
+	s.usageMu.RLock()
+	defer s.usageMu.RUnlock()
+	if s.lastUsage == nil {
+		return nil
+	}
+	clone := *s.lastUsage
+	return &clone
+}
+
 func (s *acpSession) onServerRequest(method string, id json.RawMessage, params json.RawMessage) {
 	switch method {
 	case "session/request_permission":
 		s.handlePermissionRequest(id, params)
+	case "elicitation/create":
+		s.handleElicitationRequest(id, params)
 	case "cursor/ask_question", "cursor/create_plan", "cursor/update_todos", "cursor/task", "cursor/generate_image":
 		// Cursor CLI extensions — acknowledge so tool flows do not block; IM UX is limited for these.
 		slog.Debug("acp: cursor extension request (no-op ack)", "method", method)
@@ -575,6 +631,42 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 			SessionID:    s.currentACPSessionID(),
 		})
 	}()
+}
+
+// handleElicitationRequest bridges ACP elicitation/create (form mode) into
+// the engine's AskUserQuestion wizard: the form schema becomes
+// []core.UserQuestion and the request id is cached so RespondPermission can
+// translate the collected answers back into a CreateElicitationResponse.
+func (s *acpSession) handleElicitationRequest(id json.RawMessage, params json.RawMessage) {
+	st, err := parseElicitationCreateParams(params)
+	if err != nil {
+		slog.Warn("acp: elicitation/create rejected", "error", err)
+		// A JSON-RPC error lets agents like kimi acp fall back to the
+		// request_permission question bridge.
+		_ = s.tr.respondError(id, -32602, err.Error())
+		return
+	}
+	reqKey := jsonIDKey(id)
+	s.permMu.Lock()
+	s.permByID[reqKey] = permState{RPCID: id, Elicitation: st}
+	s.permMu.Unlock()
+
+	questions := make([]core.UserQuestion, 0, len(st.Questions))
+	for _, q := range st.Questions {
+		questions = append(questions, q.Question)
+	}
+	var rawParams map[string]any
+	_ = json.Unmarshal(params, &rawParams)
+	slog.Info("acp: elicitation request", "request_id", reqKey, "questions", len(questions))
+	s.emit(core.Event{
+		Type:         core.EventPermissionRequest,
+		RequestID:    reqKey,
+		ToolName:     "AskUserQuestion",
+		ToolInput:    questions[0].Question,
+		ToolInputRaw: rawParams,
+		Questions:    questions,
+		SessionID:    s.currentACPSessionID(),
+	})
 }
 
 func (s *acpSession) emit(ev core.Event) {
@@ -680,6 +772,12 @@ func (s *acpSession) RespondPermission(requestID string, result core.PermissionR
 	s.permMu.Unlock()
 	if !ok {
 		return fmt.Errorf("acp: unknown permission request %q", requestID)
+	}
+
+	if st.Elicitation != nil {
+		res := buildElicitationResponse(st.Elicitation, result)
+		slog.Debug("acp: elicitation response", "request_id", requestID, "action", res["action"])
+		return s.tr.respondSuccess(st.RPCID, res)
 	}
 
 	allow := strings.EqualFold(result.Behavior, "allow")
