@@ -2551,3 +2551,54 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 	sent := p.getSent()
 	assertWorkspaceSkills(t, sent[len(sent)-1], "b", "a")
 }
+
+// Opening, changing, and reopening reasoning controls must stay in the
+// workspace selected by the platform session, including card callbacks.
+func TestCUJ_R1_ReasoningCardsPreserveWorkspaceIsolation(t *testing.T) {
+	p := &reasoningJourneyPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+	global := &workspaceEffortAgent{levels: []string{"global"}, effort: "global"}
+	e := NewEngine("test", global, []Platform{p}, "", LangEnglish)
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"))
+	dir := normalizeWorkspacePath(t.TempDir())
+	e.workspaceBindings.Bind("project:test", "C-journey", "chan", dir)
+	ws := e.workspacePool.GetOrCreate(dir)
+	ws.agent = &workspaceEffortAgent{levels: []string{"off", "high"}}
+	ws.sessions = NewSessionManager("")
+	e.onPlatformReady(p)
+	key := "feishu:C-journey:u1"
+	send := func(content string) {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Content: content, ReplyCtx: "ctx", UserID: "u1"})
+	}
+	assertCard := func(card *Card, want string) {
+		t.Helper()
+		got := fmt.Sprintf("%+v", card.Elements)
+		if !strings.Contains(got, want) || strings.Contains(got, "global") {
+			t.Fatalf("card = %s; want %s without global effort", got, want)
+		}
+	}
+	// Action 1: open the workspace's controls through the message entrypoint.
+	send("/reasoning")
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("expected card, got %d", len(p.repliedCards))
+	}
+	assertCard(p.repliedCards[0], "off|high")
+	// Action 2: choose high through the platform's registered callback.
+	if p.navigation == nil {
+		t.Fatal("card callback not registered")
+	}
+	assertCard(p.navigation("act:/reasoning 2", key), e.i18n.Tf(MsgReasoningCurrent, "high"))
+	// Action 3: navigate back to the controls.
+	assertCard(p.navigation("nav:/reasoning", key), e.i18n.Tf(MsgReasoningCurrent, "high"))
+	// Action 4: reopen from a message; persisted selection remains visible.
+	send("/reasoning")
+	assertCard(p.repliedCards[len(p.repliedCards)-1], e.i18n.Tf(MsgReasoningCurrent, "high"))
+}
+
+type reasoningJourneyPlatform struct {
+	stubCardPlatform
+	navigation CardNavigationHandler
+}
+
+func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
+	p.navigation = h
+}
