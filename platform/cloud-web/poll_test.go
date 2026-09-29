@@ -89,15 +89,20 @@ func TestLongPollIntegration(t *testing.T) {
 }
 
 func TestCapabilityDegradeCard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
 	p := mustNew(t, map[string]any{
-		"token": "t", "transport": "long_poll", "base_url": "http://127.0.0.1",
+		"token": "t", "transport": "long_poll", "base_url": srv.URL,
 	})
 	p.tp.(*pollTransport).setCaps(map[string]bool{"text": true})
 
 	card := &core.Card{Elements: []core.CardElement{core.CardMarkdown{Content: "hello card"}}}
 	err := p.SendCard(context.Background(), replyContext{SessionKey: "s", ReplyCtx: "r"}, card)
 	if err == nil {
-		t.Fatal("expected error when send path unreachable")
+		t.Fatal("expected error when send endpoint is unavailable")
 	}
 }
 
