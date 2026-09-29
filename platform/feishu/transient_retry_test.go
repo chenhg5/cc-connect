@@ -423,7 +423,7 @@ func TestPatchMessageRetriesOnTransientError(t *testing.T) {
 func TestReplyTransientRetryThenTokenRefresh(t *testing.T) {
 	// Scenario: first call gets connection reset (transient), retry gets
 	// invalid token error, which triggers token refresh, then succeeds.
-	const appID = "cli_combined_retry"
+	appID := uniqueTokenRetryAppID()
 	const appSecret = "secret"
 
 	var authCalls, replyCalls atomic.Int32
