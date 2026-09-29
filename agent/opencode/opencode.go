@@ -27,7 +27,7 @@ func init() {
 //
 // Modes:
 //   - "default": standard mode
-//   - "yolo":    auto mode (opencode run is auto by default in non-interactive mode)
+//   - "yolo":    auto mode (uses OpenCode's --auto flag)
 type Agent struct {
 	workDir              string
 	model                string
@@ -80,7 +80,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	if _, err := exec.LookPath(cmd); err != nil {
-		return nil, fmt.Errorf("opencode: %q CLI not found in PATH, install from: https://github.com/opencode-ai/opencode", cmd)
+		return nil, fmt.Errorf("opencode: %q CLI not found in PATH, install from: https://opencode.ai/download", cmd)
 	}
 
 	return &Agent{
@@ -570,7 +570,7 @@ func (a *Agent) ProjectMemoryFile() string {
 	if err != nil {
 		absDir = workDir
 	}
-	return filepath.Join(absDir, "OPENCODE.md")
+	return filepath.Join(absDir, "AGENTS.md")
 }
 
 func (a *Agent) GlobalMemoryFile() string {
@@ -578,7 +578,11 @@ func (a *Agent) GlobalMemoryFile() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(homeDir, ".opencode", "OPENCODE.md")
+	configDir := filepath.Join(homeDir, ".config")
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		configDir = xdg
+	}
+	return filepath.Join(configDir, "opencode", "AGENTS.md")
 }
 
 // -- ProviderSwitcher --
@@ -717,14 +721,24 @@ func querySessionMessageCounts() map[string]int {
 }
 
 func opencodeDBPath() string {
+	if dbPath := os.Getenv("OPENCODE_DB"); dbPath != "" {
+		if dbPath == ":memory:" || filepath.IsAbs(dbPath) {
+			return dbPath
+		}
+		return filepath.Join(opencodeDataDir(), dbPath)
+	}
+	return filepath.Join(opencodeDataDir(), "opencode.db")
+}
+
+func opencodeDataDir() string {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "opencode", "opencode.db")
+		return filepath.Join(xdg, "opencode")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+	return filepath.Join(home, ".local", "share", "opencode")
 }
 
 func (a *Agent) GetSessionTitle(sessionID string) string {
