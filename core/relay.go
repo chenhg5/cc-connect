@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +14,10 @@ import (
 )
 
 const relayTimeout = 120 * time.Second
+
+// relayVisibilityGrace bounds the fresh context used to deliver a relay
+// response visibility receipt after the relay deadline has already expired.
+const relayVisibilityGrace = 5 * time.Second
 
 const (
 	RelayVisibilityFull    = "full"
@@ -203,6 +208,18 @@ type RelayResponse struct {
 
 // Send delivers a message from one bot to another and returns the response.
 func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayResponse, error) {
+	// Keep the caller's context so the response visibility receipt can still be
+	// delivered after the relay deadline fires (see below).
+	parentCtx := ctx
+
+	// Apply the relay timeout to the whole job — visibility request, target
+	// turn, and visibility response — so a slow pre-send cannot outlive the
+	// configured bound (previously the timeout only started after the request
+	// echo, so the pre-send could block unbounded).
+	relayCtx, cancel := rm.relayContext(ctx)
+	defer cancel()
+	ctx = relayCtx
+
 	platform, chatID, err := parseSessionKeyParts(req.SessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("relay: invalid session key: %w", err)
@@ -251,10 +268,7 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	}
 
 	// Execute relay: inject message into target engine and collect response
-	relayCtx, cancel := rm.relayContext(ctx)
-	defer cancel()
-
-	response, err := targetEngine.HandleRelay(relayCtx, req.From, req.SessionKey, req.Message)
+	response, err := targetEngine.HandleRelay(ctx, req.From, req.SessionKey, req.Message)
 	if err != nil {
 		return nil, fmt.Errorf("relay: %w", err)
 	}
@@ -262,7 +276,17 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	// Post the response to the group chat for visibility.
 	if targetEngine != nil && visibility != RelayVisibilityNone {
 		label := relayVisibilityResponseLabel(visibility, toName, response)
-		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, label)
+		sendCtx := ctx
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			// The relay deadline expired but HandleRelay still produced a
+			// (partial) response. Deliver the visibility receipt on a fresh,
+			// short-lived context derived from the caller's so the partial
+			// answer is still visible instead of being silently dropped.
+			var release context.CancelFunc
+			sendCtx, release = context.WithTimeout(context.WithoutCancel(parentCtx), relayVisibilityGrace)
+			defer release()
+		}
+		rm.sendToGroup(sendCtx, targetEngine, platform, groupSessionKey, label)
 	}
 
 	return &RelayResponse{Response: response}, nil
