@@ -38,10 +38,12 @@ type ProjectSettingsUpdate struct {
 // ManagementServer provides an HTTP REST API for external management tools
 // (web dashboards, TUI clients, GUI desktop apps, Mac tray apps, etc.).
 type ManagementServer struct {
+	bind        string
 	port        int
 	token       string
 	corsOrigins []string
 	server      *http.Server
+	listenAddr  string // resolved listener address, set by Start
 	startedAt   time.Time
 
 	mu      sync.RWMutex
@@ -77,7 +79,13 @@ type ManagementServer struct {
 
 // NewManagementServer creates a new management API server.
 func NewManagementServer(port int, token string, corsOrigins []string) *ManagementServer {
+	return NewManagementServerWithBind("", port, token, corsOrigins)
+}
+
+// NewManagementServerWithBind creates a management API server on the specified interface.
+func NewManagementServerWithBind(bind string, port int, token string, corsOrigins []string) *ManagementServer {
 	return &ManagementServer{
+		bind:        normalizeBind(bind),
 		port:        port,
 		token:       token,
 		corsOrigins: corsOrigins,
@@ -198,20 +206,50 @@ type CCSwitchProviderInfo struct {
 	IsCurrent bool   `json:"is_current"`
 }
 
-func (m *ManagementServer) Start() {
+// Start validates the listen configuration, binds the socket synchronously and
+// then serves in the background. A bind failure (invalid address, port in use)
+// or a missing token on a non-loopback address is returned to the caller, so
+// startup never reports a listener that is not actually accepting connections.
+func (m *ManagementServer) Start() error {
+	if err := checkRemoteBindAuth("management", m.bind, m.token); err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
 	handler := m.buildHandler(mux)
 
+	ln, addr, err := listenTCP(m.bind, m.port)
+	if err != nil {
+		return fmt.Errorf("management api: %w", err)
+	}
+	m.listenAddr = ln.Addr().String()
 	m.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", m.port),
+		Addr:    addr,
 		Handler: handler,
 	}
+
+	if !isLoopbackBind(m.bind) {
+		// The token is enforced, but the web UI is now reachable from the
+		// network. Point operators at the exposure explicitly.
+		slog.Warn("management api: listening on a non-loopback address",
+			"addr", m.listenAddr,
+			"scope", bindScope(m.bind),
+			"help", "the web UI and API are reachable from the network; keep the token secret and change bind/port (restart required) if this was unintended")
+	}
+
 	go func() {
-		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := m.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("management api server error", "error", err)
 		}
 	}()
-	slog.Info("management api started", "port", m.port)
+	slog.Info("management api started", "addr", m.listenAddr, "scope", bindScope(m.bind))
+	return nil
+}
+
+// Addr returns the resolved listener address after a successful Start, or the
+// empty string when the server has not started.
+func (m *ManagementServer) Addr() string {
+	return m.listenAddr
 }
 
 func (m *ManagementServer) buildHandler(mux *http.ServeMux) http.Handler {

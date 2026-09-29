@@ -955,12 +955,16 @@ type = "claudecode"
 ```toml
 [management]
 enabled = true
+bind = "127.0.0.1"              # 默认仅允许本机访问；设为 0.0.0.0 才允许远程访问
 port = 9820                     # 管理后台监听端口
 token = "your-secret-token"     # 登录 token；/web setup 会自动生成
 cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 CORS 头
 ```
 
 然后重启 cc-connect。
+
+> **已有远程部署的迁移：** `bind` 默认值已改为 `127.0.0.1`（回环）。如果你此前从其他机器访问管理后台，请补上 `bind = "0.0.0.0"`（或具体网卡地址）并重启——非回环 `bind` 必须同时配置 `token`。删除 `bind` 一行并重启即可回滚。`bind` 与 `port` 仅在启动时读取，详见
+> [management-api.zh-CN.md §2.2](management-api.zh-CN.md#22-监听绑定迁移与回滚)。
 
 ### 构建选项
 
@@ -1014,6 +1018,7 @@ Bridge 提供 WebSocket + REST 服务，让外部适配器（自定义 UI、机�
 ```toml
 [bridge]
 enabled = true
+bind = "127.0.0.1"              # 默认仅允许本机访问；远程适配器接入时设为 0.0.0.0
 port = 9810                     # Bridge 监听端口（与管理后台分开）
 token = "your-bridge-secret"    # WebSocket 和 REST 的认证 token
 path = "/bridge/ws"             # WebSocket 端点路径
@@ -1021,6 +1026,9 @@ cors_origins = ["*"]            # 允许的 CORS 来源；留空则不设置 COR
 ```
 
 然后重启 cc-connect。
+
+> **远程适配器的迁移：** `bind` 默认值已改为 `127.0.0.1`（回环）。其他机器上的适配器需要补上 `bind = "0.0.0.0"`（或具体网卡地址）并重启——非回环 `bind` 必须同时配置 `token`。删除 `bind` 一行并重启即可回滚。`bind` 与 `port` 仅在启动时读取，详见
+> [bridge-protocol.zh-CN.md](bridge-protocol.zh-CN.md#绑定规则迁移与回滚)。
 
 ### 认证方式
 
