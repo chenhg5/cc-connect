@@ -519,7 +519,7 @@ func main() {
 
 		// Wire global custom commands
 		for _, c := range cfg.Commands {
-			engine.AddCommand(c.Name, c.Description, c.Prompt, c.Exec, c.WorkDir, "config")
+			engine.AddCommandWithOptions(c.Name, c.Description, c.Prompt, c.Exec, c.WorkDir, "config", core.CommandOptions{Timeout: c.Timeout})
 		}
 
 		// Wire command persistence callbacks
@@ -1909,7 +1909,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	// Reload custom commands
 	engine.ClearCommands("config")
 	for _, c := range cfg.Commands {
-		engine.AddCommand(c.Name, c.Description, c.Prompt, c.Exec, c.WorkDir, "config")
+		engine.AddCommandWithOptions(c.Name, c.Description, c.Prompt, c.Exec, c.WorkDir, "config", core.CommandOptions{Timeout: c.Timeout})
 	}
 	result.CommandsUpdated = len(cfg.Commands)
 

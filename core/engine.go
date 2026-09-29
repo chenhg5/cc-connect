@@ -1182,9 +1182,16 @@ func (e *Engine) GetSessions() *SessionManager {
 	return e.sessions
 }
 
-// AddCommand registers a custom slash command.
+// AddCommand registers a custom slash command. It keeps the historical
+// signature so downstream callers stay source-compatible; use
+// AddCommandWithOptions to set optional attributes such as the exec timeout.
 func (e *Engine) AddCommand(name, description, prompt, exec, workDir, source string) {
 	e.commands.Add(name, description, prompt, exec, workDir, source)
+}
+
+// AddCommandWithOptions registers a custom slash command with optional attributes.
+func (e *Engine) AddCommandWithOptions(name, description, prompt, exec, workDir, source string, opts CommandOptions) {
+	e.commands.AddWithOptions(name, description, prompt, exec, workDir, source, opts)
 }
 
 // ClearCommands removes all commands from the given source.
@@ -8759,7 +8766,7 @@ func defaultShellFlag() string {
 // Strategy: start the command, wait 500ms. If it finishes within that window,
 // just send the result directly (no intermediate messages). If it's still running,
 // send a progress message and keep updating until completion.
-func (e *Engine) runShellWithProgress(p Platform, replyCtx any, command string, workDir string, timeout time.Duration, maxOutput int) error {
+func (e *Engine) runShellWithProgress(p Platform, replyCtx any, command string, workDir string, timeout time.Duration, maxOutput int, env []string) error {
 	cmdLabel := truncateStr(command, 60)
 
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
@@ -8767,6 +8774,9 @@ func (e *Engine) runShellWithProgress(p Platform, replyCtx any, command string, 
 
 	cmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, command)
 	cmd.Dir = workDir
+	if env != nil {
+		cmd.Env = env
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -9023,7 +9033,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		workDir, _ = os.Getwd()
 	}
 
-	go func() { _ = e.runShellWithProgress(p, msg.ReplyCtx, shellCmd, workDir, timeout, 4000) }()
+	go func() { _ = e.runShellWithProgress(p, msg.ReplyCtx, shellCmd, workDir, timeout, 4000, nil) }()
 }
 
 func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
@@ -15657,8 +15667,19 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 	// Determine working directory
 	workDir := cmd.WorkDir
 	if workDir == "" {
-		// Default to agent's work_dir if available
-		if e.agent != nil {
+		// Prefer the session's bound workspace (set via /workspace bind or /proj)
+		// so custom exec commands run in the repo the user is actually working in,
+		// then fall back to the project agent's work_dir. Guarded like the other
+		// resolveWorkspace call sites: bindings only exist in multi-workspace
+		// mode, and resolveWorkspace may auto-bind (nil manager panics).
+		if e.multiWorkspace && e.workspaceBindings != nil {
+			if channelID := effectiveChannelID(msg); channelID != "" {
+				if bound, _, err := e.resolveWorkspace(p, channelID); err == nil && bound != "" {
+					workDir = bound
+				}
+			}
+		}
+		if workDir == "" && e.agent != nil {
 			if agentOpts, ok := e.agent.(interface{ GetWorkDir() string }); ok {
 				workDir = agentOpts.GetWorkDir()
 			}
@@ -15668,7 +15689,39 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 		workDir, _ = os.Getwd()
 	}
 
-	_ = e.runShellWithProgress(p, msg.ReplyCtx, execCmd, workDir, 60*time.Second, 4000)
+	// Inject the source session key/project into the command environment so scripts
+	// (e.g. /review, /reviewer) can identify the chat. Values are passed via
+	// exec.Cmd.Env, never through shell source, so arbitrary characters in the
+	// session key (quotes, newlines, shell metacharacters, Unicode) cannot escape.
+	// An empty session key explicitly clears any inherited CC_SESSION_KEY/CC_PROJECT.
+	env := customCommandEnv(msg.SessionKey, e.name)
+
+	// Per-command timeout (seconds) from [[commands]]; 0 keeps the 60s default.
+	// Slow commands such as /review and /reviewer relay an independent reviewer
+	// agent that can take minutes, so a configurable timeout is required.
+	timeout := 60 * time.Second
+	if cmd.Timeout > 0 {
+		timeout = time.Duration(cmd.Timeout) * time.Second
+	}
+
+	_ = e.runShellWithProgress(p, msg.ReplyCtx, execCmd, workDir, timeout, 4000, env)
+}
+
+// customCommandEnv builds the environment for a custom command exec. It starts
+// from the daemon environment and replaces any inherited CC_SESSION_KEY and
+// CC_PROJECT with the current session's values. Empty values are kept as empty
+// assignments so a stale value inherited from the daemon process cannot leak
+// into the child.
+func customCommandEnv(sessionKey, project string) []string {
+	base := os.Environ()
+	env := make([]string, 0, len(base)+2)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "CC_SESSION_KEY=") || strings.HasPrefix(kv, "CC_PROJECT=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "CC_SESSION_KEY="+sessionKey, "CC_PROJECT="+project)
 }
 
 func (e *Engine) cmdCommands(p Platform, msg *Message, args []string) {

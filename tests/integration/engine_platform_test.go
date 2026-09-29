@@ -486,7 +486,7 @@ func TestIntegration_MessageAttachmentHandling(t *testing.T) {
 	}
 
 	// Send with attachments
-	err = sess.Send("Analyze this", images, files)
+	err = sess.Send("Analyze this", "", images, files)
 	require.NoError(t, err)
 
 	// Verify prompts captured

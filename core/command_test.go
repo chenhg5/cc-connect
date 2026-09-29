@@ -22,6 +22,31 @@ func TestCommandRegistry_AddAndResolve(t *testing.T) {
 	}
 }
 
+func TestCommandRegistry_AddWithOptionsTimeout(t *testing.T) {
+	r := NewCommandRegistry()
+	// Legacy Add keeps the zero value so existing callers are unaffected.
+	r.Add("legacy", "desc", "prompt", "", "", "config")
+	legacy, ok := r.Resolve("legacy")
+	if !ok {
+		t.Fatal("expected to resolve 'legacy'")
+	}
+	if legacy.Timeout != 0 {
+		t.Errorf("legacy Add Timeout = %d, want 0", legacy.Timeout)
+	}
+
+	r.AddWithOptions("slow", "desc", "", "sleep 1", "", "config", CommandOptions{Timeout: 300})
+	slow, ok := r.Resolve("slow")
+	if !ok {
+		t.Fatal("expected to resolve 'slow'")
+	}
+	if slow.Timeout != 300 {
+		t.Errorf("AddWithOptions Timeout = %d, want 300", slow.Timeout)
+	}
+	if slow.Exec != "sleep 1" {
+		t.Errorf("AddWithOptions Exec = %q, want %q", slow.Exec, "sleep 1")
+	}
+}
+
 func TestCommandRegistry_CaseInsensitive(t *testing.T) {
 	r := NewCommandRegistry()
 	r.Add("Hello", "test", "prompt", "", "", "config")
