@@ -1937,12 +1937,12 @@ func (e *Engine) executeTimerShell(p Platform, replyCtx any, job *TimerJob) erro
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()
 
-	var shellCmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", job.Exec)
-	} else {
-		shellCmd = exec.CommandContext(ctx, "sh", "-c", job.Exec)
-	}
+	// Reuse shellExecCommand so the timer path shares the default shell handling
+	// and, crucially, runs in its own process group with a WaitDelay backstop.
+	// Building the command here directly would leave a timeout unable to reach a
+	// grandchild that holds the stdout/stderr pipes, so the timeout notice and
+	// this goroutine would wait for that grandchild to exit on its own.
+	shellCmd := shellExecCommand(ctx, defaultShell(), defaultShellFlag(), "", job.Exec)
 	shellCmd.Dir = workDir
 
 	stdout, err := shellCmd.StdoutPipe()
@@ -8273,6 +8273,13 @@ func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
 // quickFinishTimeout is how long to wait before assuming the command is long-running.
 const quickFinishTimeout = 500 * time.Millisecond
 
+// shellWaitDelay bounds how long exec.Cmd.Wait may block on inherited
+// stdout/stderr pipes after the shell process has exited or been killed. It is
+// a backstop for platforms where the shell's descendant tree cannot be
+// signalled directly; on Unix the process group kill normally makes the pipes
+// close immediately.
+const shellWaitDelay = 2 * time.Second
+
 // shellExecCommand builds an exec.Cmd for running command via the given shell.
 // For PowerShell/pwsh, extra flags (-NoProfile, -ExecutionPolicy Bypass) are
 // added automatically. If shellProfile is non-empty, it is prepended to the command
@@ -8282,10 +8289,24 @@ func shellExecCommand(ctx context.Context, shell, flag, shellProfile, command st
 		command = shellProfile + "\n" + command
 	}
 	base := strings.ToLower(filepath.Base(shell))
+	var cmd *exec.Cmd
 	if strings.HasPrefix(base, "powershell") || strings.HasPrefix(base, "pwsh") {
-		return exec.CommandContext(ctx, shell, "-NoProfile", "-ExecutionPolicy", "Bypass", flag, command)
+		cmd = exec.CommandContext(ctx, shell, "-NoProfile", "-ExecutionPolicy", "Bypass", flag, command)
+	} else {
+		cmd = exec.CommandContext(ctx, shell, flag, command)
 	}
-	return exec.CommandContext(ctx, shell, flag, command)
+	// Run the shell in its own process group so a timeout can terminate the whole
+	// descendant tree, not just the shell itself. A pipeline (e.g. `sleep 5 | cat`)
+	// — and on Linux even a plain `sh -c "sleep 5"`, where /bin/sh forks instead of
+	// exec'ing — leaves a grandchild holding the stdout/stderr pipes. Killing only
+	// the shell leaves the pipe readers blocked until that grandchild exits on its
+	// own, so the configured timeout would not actually be enforced.
+	prepareShellCmdForKill(cmd)
+	// Backstop for platforms where the descendant tree cannot be signalled (e.g.
+	// Windows): bound how long Wait may block on inherited pipes after the process
+	// has exited or been killed.
+	cmd.WaitDelay = shellWaitDelay
+	return cmd
 }
 
 func defaultShell() string {
@@ -8523,9 +8544,7 @@ func (e *Engine) formatShellTimeout(cmdLabel, output string, maxOutput int) stri
 }
 
 func killAndWait(cmd *exec.Cmd, doneCh <-chan struct{}) {
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
+	killShellProcessGroup(cmd)
 	<-doneCh
 }
 

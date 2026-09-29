@@ -11857,6 +11857,66 @@ func TestExecuteShellCommand_UsesConfiguredTimeout(t *testing.T) {
 	}
 }
 
+// A command whose shell does not exec-replace itself leaves a grandchild (e.g.
+// `sleep`) holding the inherited stdout/stderr pipes. Killing only the shell
+// then leaves the pipe readers blocked until the grandchild exits on its own,
+// so the configured timeout would not be enforced. This is the shape Linux's
+// dash takes even for a plain `sleep 5`, so it must pass on every platform.
+func TestExecuteShellCommand_TimeoutKillsDescendants(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "feishu:oc_test:ou_test"}
+	cmd := &CustomCommand{Name: "slow-descendant", Exec: "sleep 5; true", Timeout: 1}
+
+	start := time.Now()
+	e.executeShellCommand(p, msg, cmd, nil)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("timeout did not reach the shell's descendants; command took %s", elapsed)
+	}
+
+	sent := p.getSent()
+	var last string
+	if len(sent) > 0 {
+		last = sent[len(sent)-1]
+	}
+	if !strings.Contains(last, "(timeout)") {
+		t.Fatalf("expected a timeout notice after the configured timeout, got %q", last)
+	}
+}
+
+// The timer shell path builds its own command, so it must get the same
+// process-group timeout handling as the interactive shell path. Otherwise a
+// grandchild holding the inherited pipes would delay the timeout notice and
+// pin the scheduler goroutine until that grandchild exits on its own.
+func TestExecuteTimerShell_TimeoutKillsDescendants(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	// Drive the deadline through the engine context: a timer job's TimeoutMins is
+	// expressed in whole minutes, which is far too coarse to exercise here.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	e.ctx = ctx
+
+	job := &TimerJob{ID: "t1", Exec: "sleep 5; true", WorkDir: t.TempDir()}
+
+	start := time.Now()
+	if err := e.executeTimerShell(p, "ctx", job); err == nil {
+		t.Fatal("expected the timer shell to report a timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("timeout did not reach the shell's descendants; job took %s", elapsed)
+	}
+
+	sent := p.getSent()
+	var last string
+	if len(sent) > 0 {
+		last = sent[len(sent)-1]
+	}
+	if !strings.Contains(last, "timeout") {
+		t.Fatalf("expected a timeout notice after the deadline, got %q", last)
+	}
+}
+
 func TestRunShellWithProgress_FailedCommand(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
