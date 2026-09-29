@@ -25,7 +25,7 @@ type TimerJob struct {
 	Description string    `json:"description"`
 	Silent      *bool     `json:"silent,omitempty"`       // suppress start notification; nil = use global default
 	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result)
-	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
+	SessionMode string    `json:"session_mode,omitempty"` // "" = scheduler default; "reuse" = share active session; "new_per_run" = fresh session each run
 	Mode        string    `json:"mode,omitempty"`         // permission mode override; "" = use project default
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m; 0 = no limit; >0 = minutes
 	CreatedAt   time.Time `json:"created_at"`
@@ -71,7 +71,7 @@ func validateTimerJob(j *TimerJob) error {
 		return fmt.Errorf("prompt and exec are mutually exclusive")
 	}
 	mode := NormalizeCronSessionMode(j.SessionMode)
-	if mode != "" && mode != "new_per_run" {
+	if mode != "" && mode != "reuse" && mode != "new_per_run" {
 		return fmt.Errorf("invalid session_mode %q (want reuse, new_per_run, or new-per-run)", j.SessionMode)
 	}
 	if j.Mode != "" {
@@ -238,10 +238,10 @@ func (s *TimerStore) ListPending() []*TimerJob {
 
 // TimerScheduler runs one-shot timer jobs using time.AfterFunc.
 type TimerScheduler struct {
-	store    *TimerStore
-	engines  map[string]*Engine
-	mu       sync.RWMutex
-	timers   map[string]*time.Timer // job ID → active timer
+	store              *TimerStore
+	engines            map[string]*Engine
+	mu                 sync.RWMutex
+	timers             map[string]*time.Timer // job ID → active timer
 	defaultSilent      bool
 	defaultSessionMode string
 }
@@ -252,9 +252,10 @@ const missedJobGracePeriod = 5 * time.Minute
 
 func NewTimerScheduler(store *TimerStore) *TimerScheduler {
 	return &TimerScheduler{
-		store:   store,
-		engines: make(map[string]*Engine),
-		timers:  make(map[string]*time.Timer),
+		store:              store,
+		engines:            make(map[string]*Engine),
+		timers:             make(map[string]*time.Timer),
+		defaultSessionMode: defaultScheduledSessionMode,
 	}
 }
 
