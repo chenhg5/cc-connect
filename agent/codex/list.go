@@ -16,6 +16,10 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// Keep large Codex transcript records readable while bounding scanner memory.
+// Records beyond this limit fail explicitly instead of returning partial history.
+// ListSessions scans files serially; a future parallel scan must bound its
+// concurrency because each scanner can allocate up to this limit.
 const maxCodexJSONLLineSize = 64 * 1024 * 1024
 
 // resolveCodexHomeDir returns the effective CODEX_HOME directory.
@@ -115,7 +119,8 @@ func loadCodexSessionTitles(codexHome string) map[string]string {
 }
 
 // parseCodexSessionFile reads a Codex JSONL transcript.
-// Returns nil if the session's cwd doesn't match filterCwd.
+// ListSessions skips a damaged file and keeps scanning other sessions; errors
+// are logged with the path for diagnosis. Returns nil if the cwd does not match.
 func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	f, err := os.Open(path)
 	if err != nil {
@@ -269,6 +274,8 @@ func parseCodexTimestamp(value string) time.Time {
 }
 
 // getSessionHistory reads the JSONL transcript and returns user/assistant messages.
+// Unlike ListSessions, it returns read errors so /history can report failure
+// without presenting incomplete history as a complete conversation.
 func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEntry, error) {
 	path := findSessionFile(sessionID, codexHome)
 	if path == "" {

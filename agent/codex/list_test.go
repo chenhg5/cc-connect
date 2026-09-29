@@ -296,6 +296,18 @@ func TestGetSessionHistory_ConvertsTimestampToLocal(t *testing.T) {
 	}
 }
 
+func TestParseCodexTimestamp_NonUTCOffsetConvertsToLocal(t *testing.T) {
+	const timestamp = "2026-09-24T20:34:56.123456789+08:00"
+	want, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parseCodexTimestamp(timestamp)
+	if !got.Equal(want) || got.Location() != time.Local {
+		t.Fatalf("parseCodexTimestamp(%q) = %v (%v), want instant %v in time.Local", timestamp, got, got.Location(), want)
+	}
+}
+
 func TestParseCodexTimestamp_PreservesZeroForInvalidInput(t *testing.T) {
 	if got := parseCodexTimestamp(""); !got.IsZero() {
 		t.Fatalf("empty timestamp = %v, want zero", got)
