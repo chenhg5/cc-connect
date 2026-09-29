@@ -94,6 +94,39 @@ func TestValidateSessionID_CwdOutsideWorkDirNotTrusted(t *testing.T) {
 	}
 }
 
+// TestValidateSessionID_SubdirCwdFindsTranscriptInAncestor is the regression for
+// the follow-up to #1581: the cwd the CLI reports is not fixed for the session's
+// lifetime — the agent can cd into a subdirectory mid-conversation, after which
+// the reported cwd is deeper while the transcript keeps living where the process
+// launched. Pre-fix, validation looked only in the exact reported directory and
+// cleared a perfectly healthy session as a #599 cross-project leak; it must
+// instead accept the transcript found at any ancestor up to work_dir.
+func TestValidateSessionID_SubdirCwdFindsTranscriptInAncestor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	const workDir = "/work/project"
+	const subdir = workDir + "/subdir"
+	const deeper = subdir + "/internal/router"
+	const id = "sess-moved-cwd"
+	writeCwdTranscript(t, home, workDir, id) // transcript stays where the process launched
+
+	a := &Agent{workDir: workDir}
+	if !a.ValidateSessionID(context.Background(), id, subdir) {
+		t.Errorf("cwd %q (a subdir): transcript under work_dir must be found via the ancestor walk", subdir)
+	}
+	if !a.ValidateSessionID(context.Background(), id, deeper) {
+		t.Errorf("cwd %q (deeper): transcript under work_dir must be found via the ancestor walk", deeper)
+	}
+
+	// The walk must not escape work_dir: a transcript that lives above it (the
+	// parent project) is not this project's and must not be matched (#599).
+	above := "sess-above-workdir"
+	writeCwdTranscript(t, home, filepath.Dir(workDir), above)
+	if a.ValidateSessionID(context.Background(), above, subdir) {
+		t.Errorf("transcript above work_dir matched; the ancestor walk must stop at work_dir (#599)")
+	}
+}
+
 // TestClaudeSession_CapturesCwdFromInit: handleSystem records the cwd reported in
 // the CLI init event; an init event without cwd leaves it empty (defensive).
 func TestClaudeSession_CapturesCwdFromInit(t *testing.T) {
