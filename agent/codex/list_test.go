@@ -163,3 +163,38 @@ func TestAgentListSessions_LongThreadNameTruncated(t *testing.T) {
 		t.Fatalf("ListSessions()[0].Summary = %q, want %q", sessions[0].Summary, want)
 	}
 }
+
+func TestAgentListAllSessions_IncludesEveryWorkDir(t *testing.T) {
+	codexHome := t.TempDir()
+	sessionsDir := filepath.Join(codexHome, "sessions", "2026", "09", "22")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("create sessions directory: %v", err)
+	}
+
+	workDirs := []string{filepath.Join(t.TempDir(), "alpha"), filepath.Join(t.TempDir(), "beta")}
+	for i, workDir := range workDirs {
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			t.Fatalf("create work directory: %v", err)
+		}
+		workDirJSON, _ := json.Marshal(workDir)
+		body := `{"type":"session_meta","payload":{"id":"session-` + string(rune('a'+i)) + `","cwd":` + string(workDirJSON) + `,"source":"vscode"}}` + "\n"
+		if err := os.WriteFile(filepath.Join(sessionsDir, "rollout-"+string(rune('a'+i))+".jsonl"), []byte(body), 0o644); err != nil {
+			t.Fatalf("write rollout: %v", err)
+		}
+	}
+
+	agent := &Agent{workDir: workDirs[0], codexHome: codexHome}
+	sessions, err := agent.ListAllSessions(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllSessions() error: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("ListAllSessions() returned %d sessions, want 2", len(sessions))
+	}
+	got := map[string]bool{sessions[0].WorkDir: true, sessions[1].WorkDir: true}
+	for _, workDir := range workDirs {
+		if !got[workDir] {
+			t.Fatalf("ListAllSessions() did not preserve work directory %q", workDir)
+		}
+	}
+}
