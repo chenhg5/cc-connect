@@ -577,7 +577,7 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 
 	if status == "completed" {
 		// OpenCode bundles call + result in one event; emit both for UI.
-		useEvt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+		useEvt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input, SessionID: s.CurrentSessionID()}
 		select {
 		case s.events <- useEvt:
 		case <-s.ctx.Done():
@@ -585,14 +585,14 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 		}
 
 		output, _ := state["output"].(string)
-		resultEvt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(output, 500)}
+		resultEvt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(output, 500), SessionID: s.CurrentSessionID()}
 		select {
 		case s.events <- resultEvt:
 		case <-s.ctx.Done():
 			return
 		}
 	} else {
-		evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+		evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input, SessionID: s.CurrentSessionID()}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -608,7 +608,7 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 			errMsg, _ := state["error"].(string)
 			if errMsg != "" {
 				slog.Info("opencodeSession: tool rejected, surfacing error as text", "tool", toolName, "error", errMsg)
-				errEvt := core.Event{Type: core.EventText, Content: errMsg}
+				errEvt := core.Event{Type: core.EventText, Content: toolRejectionNotice(toolName, errMsg), SessionID: s.CurrentSessionID()}
 				select {
 				case s.events <- errEvt:
 				case <-s.ctx.Done():
@@ -664,7 +664,7 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 		slog.Debug("opencodeSession: compaction reasoning suppressed", "session_id", s.CurrentSessionID(), "len", len(text))
 		return
 	}
-	evt := core.Event{Type: core.EventThinking, Content: text}
+	evt := core.Event{Type: core.EventThinking, Content: text, SessionID: s.CurrentSessionID()}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
@@ -703,7 +703,7 @@ func isCompactionReasoning(text string) bool {
 func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
-	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg), ErrorKind: opencodeErrorKind(errMsg)}
+	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg), ErrorKind: opencodeErrorKind(errMsg), SessionID: s.CurrentSessionID()}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
@@ -858,7 +858,7 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 		if text == "" {
 			continue
 		}
-		evt := core.Event{Type: core.EventText, Content: text}
+		evt := core.Event{Type: core.EventText, Content: text, SessionID: s.CurrentSessionID()}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -993,4 +993,25 @@ func truncate(s string, maxRunes int) string {
 		return s
 	}
 	return string([]rune(s)[:maxRunes]) + "..."
+}
+
+// toolRejectionNotice renders a bounded, user-facing notice for a rejected
+// tool call. opencode embeds its entire permission ruleset in the error
+// message (tens of KB); forwarding that verbatim flooded the chat with huge
+// split messages and polluted the model's context, so keep only the leading
+// explanation and cap the length. The full error is still logged by the
+// callers.
+func toolRejectionNotice(toolName, errMsg string) string {
+	const rulesMarker = " Here are"
+	if i := strings.Index(errMsg, rulesMarker); i > 0 {
+		errMsg = errMsg[:i]
+	}
+	errMsg = strings.TrimSpace(errMsg)
+	if errMsg == "" {
+		errMsg = "tool call rejected by the permission policy"
+	}
+	if toolName != "" {
+		errMsg = "tool " + toolName + ": " + errMsg
+	}
+	return truncate(errMsg, 300)
 }
