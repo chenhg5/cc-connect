@@ -141,8 +141,9 @@ func (s *matrixSession) Close() error {
 }
 
 type matrixPlatform struct {
-	mu    sync.Mutex
-	texts []string
+	mu         sync.Mutex
+	texts      []string
+	sentNotify chan string // optional observer set before ReceiveMessage
 }
 
 func (p *matrixPlatform) Name() string { return "matrix" }
@@ -157,6 +158,9 @@ func (p *matrixPlatform) Send(_ context.Context, _ any, content string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.texts = append(p.texts, content)
+	if p.sentNotify != nil {
+		p.sentNotify <- content
+	}
 	return nil
 }
 func (p *matrixPlatform) clear() {
@@ -291,6 +295,10 @@ func TestCustomPromptCommandThroughReceiveMessage(t *testing.T) {
 
 func TestUnknownSlashCommandNotifiesThenFallsThroughToAgent(t *testing.T) {
 	engine, agent, platform := newMatrixEngine(t)
+	const finalReply = "matrix response agent-session-1 #1"
+	replies := make(chan string, 8)
+	platform.sentNotify = replies
+	engine.SetReplyFooterEnabled(false)
 
 	receive(engine, platform, "/not-a-command keep this request")
 
@@ -298,5 +306,16 @@ func TestUnknownSlashCommandNotifiesThenFallsThroughToAgent(t *testing.T) {
 	records := agent.waitRecords(t, 1)
 	if !strings.Contains(records[0].prompt, "/not-a-command keep this request") {
 		t.Fatalf("unknown slash command should fall through to agent, got prompt %q", records[0].prompt)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case reply := <-replies:
+			if reply == finalReply {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("final reply %q not observed; sent=%v", finalReply, platform.snapshot())
+		}
 	}
 }

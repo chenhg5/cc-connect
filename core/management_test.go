@@ -581,6 +581,8 @@ func TestMgmt_CronExecByID(t *testing.T) {
 		t.Fatal(err)
 	}
 	cs := NewCronScheduler(store)
+	completed := make(chan cronRunResult, 2)
+	cs.afterRun = func(id string, err error) { completed <- cronRunResult{id: id, err: err} }
 	mgmt.SetCronScheduler(cs)
 
 	platform := &stubCronReplyTargetPlatform{
@@ -622,15 +624,9 @@ func TestMgmt_CronExecByID(t *testing.T) {
 		t.Fatalf("id = %v, want %s", data["id"], job.ID)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	awaitCronRun(t, completed, job.ID)
 	if len(platform.getSent()) < 2 {
-		t.Fatalf("timed out waiting for triggered cron exec, sent=%v", platform.getSent())
+		t.Fatalf("triggered cron exec did not send start and result, sent=%v", platform.getSent())
 	}
 
 	aliasJob := &CronJob{
@@ -653,14 +649,10 @@ func TestMgmt_CronExecByID(t *testing.T) {
 		t.Fatalf("cron run compatibility alias failed: %s", alias.Error)
 	}
 
-	deadline = time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 4 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	awaitCronRun(t, completed, aliasJob.ID)
+	if len(platform.getSent()) < 4 {
+		t.Fatalf("triggered cron run alias did not send start and result, sent=%v", platform.getSent())
 	}
-	t.Fatalf("timed out waiting for triggered cron run alias, sent=%v", platform.getSent())
 }
 
 func TestMgmt_CronExecByID_RejectsExtraPathSegments(t *testing.T) {

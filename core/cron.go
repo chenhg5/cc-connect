@@ -442,6 +442,10 @@ type CronScheduler struct {
 	mu                 sync.RWMutex
 	defaultSilent      bool   // global default for suppressing cron start notifications
 	defaultSessionMode string // global default session mode; "" = reuse, "new_per_run" = fresh session each run
+	// Set before starting work. These internal seams let package tests observe
+	// dispatch and completed persistence without involving Engine messages.
+	dispatchJob func(*CronJob, bool)
+	afterRun    func(string, error)
 
 	// runLoop plumbing. wakeUp carries a "schedule changed, re-evaluate"
 	// signal (buffered 1). stop ends the loop. done closes when the loop
@@ -635,7 +639,11 @@ func (cs *CronScheduler) fireDueJobs() {
 	for _, e := range due {
 		job := cs.store.Get(e.jobID)
 		if job != nil {
-			cs.runJob(job, false)
+			if cs.dispatchJob != nil {
+				cs.dispatchJob(job, false)
+			} else {
+				cs.runJob(job, false)
+			}
 		}
 
 		// Advance nextRun under the write lock so concurrent
@@ -851,7 +859,8 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 
 	if !ok {
 		slog.Error("cron: project not found", "job", job.ID, "project", job.Project, "manual", manual)
-		cs.store.MarkRun(job.ID, fmt.Errorf("project %q not found", job.Project))
+		err := fmt.Errorf("project %q not found", job.Project)
+		cs.finishRun(job.ID, err)
 		return
 	}
 
@@ -874,12 +883,19 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 		err = <-done
 	}
 
-	cs.store.MarkRun(job.ID, err)
+	cs.finishRun(job.ID, err)
 
 	if err != nil {
 		slog.Error("cron: job failed", "id", job.ID, "manual", manual, "error", err)
 	} else {
 		slog.Info("cron: job completed", "id", job.ID, "manual", manual)
+	}
+}
+
+func (cs *CronScheduler) finishRun(id string, runErr error) {
+	cs.store.MarkRun(id, runErr)
+	if cs.afterRun != nil {
+		cs.afterRun(id, runErr)
 	}
 }
 

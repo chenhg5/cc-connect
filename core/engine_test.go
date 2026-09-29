@@ -53,9 +53,10 @@ func (s *recordingAgentSession) RespondPermission(id string, res PermissionResul
 }
 
 type stubPlatformEngine struct {
-	n    string
-	sent []string
-	mu   sync.Mutex
+	n          string
+	sent       []string
+	mu         sync.Mutex
+	sentNotify chan string // optional test observer; configured before dispatch
 }
 
 func (p *stubPlatformEngine) Name() string               { return p.n }
@@ -64,12 +65,18 @@ func (p *stubPlatformEngine) Reply(_ context.Context, _ any, content string) err
 	p.mu.Lock()
 	p.sent = append(p.sent, content)
 	p.mu.Unlock()
+	if p.sentNotify != nil {
+		p.sentNotify <- content
+	}
 	return nil
 }
 func (p *stubPlatformEngine) Send(_ context.Context, _ any, content string) error {
 	p.mu.Lock()
 	p.sent = append(p.sent, content)
 	p.mu.Unlock()
+	if p.sentNotify != nil {
+		p.sentNotify <- content
+	}
 	return nil
 }
 func (p *stubPlatformEngine) Stop() error { return nil }
@@ -8309,6 +8316,8 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 				t.Fatal(err)
 			}
 			scheduler := NewCronScheduler(store)
+			completed := make(chan cronRunResult, 1)
+			scheduler.afterRun = func(id string, err error) { completed <- cronRunResult{id: id, err: err} }
 			platform := &stubCronReplyTargetPlatform{
 				stubPlatformEngine: stubPlatformEngine{n: "plain"},
 			}
@@ -8333,16 +8342,11 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 
 			msg := &Message{SessionKey: "plain:user1", ReplyCtx: "ctx"}
 			e.cmdCron(platform, msg, []string{subcommand, job.ID})
-
-			deadline := time.Now().Add(2 * time.Second)
-			for time.Now().Before(deadline) {
-				sent := platform.getSent()
-				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
-					return
-				}
-				time.Sleep(10 * time.Millisecond)
+			awaitCronRun(t, completed, job.ID)
+			sent := platform.getSent()
+			if !sentContains(sent, "triggered") || !sentContains(sent, "manual run complete") {
+				t.Fatalf("run output missing, sent=%v", sent)
 			}
-			t.Fatalf("timed out waiting for run output, sent=%v", platform.getSent())
 		})
 	}
 }
