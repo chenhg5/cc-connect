@@ -141,6 +141,8 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
+	cliBin         string
+	cliExtraArgs   []string
 	url            string
 	workDir        string
 	model          string
@@ -191,9 +193,11 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
+		cliBin:           cliBin,
+		cliExtraArgs:     append([]string(nil), cliExtraArgs...),
 		url:              url,
 		workDir:          workDir,
 		model:            model,
@@ -272,7 +276,12 @@ func (s *appServerSession) connect() error {
 	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
 	}
-	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	bin, err := resolveCodexExecutable(s.cliBin)
+	if err != nil {
+		return fmt.Errorf("codex app-server resolve CLI: %w", err)
+	}
+	args = append(append([]string(nil), s.cliExtraArgs...), args...)
+	cmd := exec.CommandContext(s.ctx, bin, args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {

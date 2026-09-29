@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -43,7 +42,7 @@ type Agent struct {
 	codexHome       string
 	systemPrompt    string
 	appendPrompt    string
-	cmd             string   // CLI binary name, default "codex"
+	cmd             string   // explicit CLI command; empty enables discovery
 	cliExtraArgs    []string // extra args parsed from cmd after the binary
 	providers       []core.ProviderConfig
 	activeIdx       int      // -1 = no provider set
@@ -69,10 +68,13 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
 
-	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "codex")
+	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "")
 
-	if _, err := exec.LookPath(cmd); err != nil {
-		return nil, fmt.Errorf("codex: %q CLI not found in PATH, install with: npm install -g @openai/codex", cmd)
+	if cmd == "" {
+		cmd = strings.TrimSpace(os.Getenv("CODEX_CLI_PATH"))
+	}
+	if _, err := resolveCodexExecutable(cmd); err != nil {
+		return nil, fmt.Errorf("codex: CLI lookup failed (set cmd or install with npm install -g @openai/codex): %w", err)
 	}
 
 	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml).
@@ -524,7 +526,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
@@ -582,6 +584,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	opts := map[string]any{
 		"mode":    a.mode,
 		"backend": a.backend,
+	}
+	if a.cmd != "" {
+		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)
 	}
 	if a.model != "" {
 		opts["model"] = a.model

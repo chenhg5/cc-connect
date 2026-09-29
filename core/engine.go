@@ -4414,10 +4414,17 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		}
 	}
 
-	// Create per-workspace session manager
+	// Create per-workspace session manager. An empty store path means "no
+	// persistence" everywhere else in the session manager, so it has to mean
+	// the same here: filepath.Dir("") is ".", which would otherwise drop
+	// "<engine>_ws_<hash>.json" into the process working directory — that is
+	// what littered core/ with test_ws_*.json during `go test ./core/`.
 	h := sha256.Sum256([]byte(workspace))
-	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
-		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+	sessionFile := ""
+	if storePath := e.sessions.StorePath(); storePath != "" {
+		sessionFile = filepath.Join(filepath.Dir(storePath),
+			fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+	}
 	sessions := NewSessionManager(sessionFile)
 	sessions.InvalidateForAgent(agent.Name())
 
@@ -15329,20 +15336,22 @@ func (e *Engine) renderCronCard(sessionKey string, userID string) *Card {
 			desc += " [mute]"
 		}
 
-		human := CronExprToHuman(j.CronExpr, lang)
+		human := cronDisplaySchedule(j.CronExpr, lang)
+		loc := cronDisplayLocation(j.CronExpr)
 
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
 		sb.WriteString(e.i18n.Tf(MsgCronIDLabel, j.ID))
 		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
-		nextRun := e.cronScheduler.NextRun(j.ID)
+		nextRun := e.cronScheduler.NextRun(j.ID).In(loc)
 		if !nextRun.IsZero() {
-			fmtStr := cronTimeFormat(nextRun, now)
+			fmtStr := cronTimeFormat(nextRun, now.In(loc))
 			sb.WriteString(e.i18n.Tf(MsgCronNextRunLabel, nextRun.Format(fmtStr)))
 		}
 		if !j.LastRun.IsZero() {
-			fmtStr := cronTimeFormat(j.LastRun, now)
-			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
+			lastRun := j.LastRun.In(loc)
+			fmtStr := cronTimeFormat(lastRun, now.In(loc))
+			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, lastRun.Format(fmtStr)))
 			if j.LastError != "" {
 				sb.WriteString(e.i18n.Tf(MsgCronFailedSuffix, truncateStr(j.LastError, 40)))
 			}
@@ -15848,18 +15857,20 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 
 		sb.WriteString(fmt.Sprintf("ID: %s\n", j.ID))
 
-		human := CronExprToHuman(j.CronExpr, lang)
+		human := cronDisplaySchedule(j.CronExpr, lang)
+		loc := cronDisplayLocation(j.CronExpr)
 		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
 
-		nextRun := e.cronScheduler.NextRun(j.ID)
+		nextRun := e.cronScheduler.NextRun(j.ID).In(loc)
 		if !nextRun.IsZero() {
-			fmtStr := cronTimeFormat(nextRun, now)
+			fmtStr := cronTimeFormat(nextRun, now.In(loc))
 			sb.WriteString(e.i18n.Tf(MsgCronNextRunLabel, nextRun.Format(fmtStr)))
 		}
 
 		if !j.LastRun.IsZero() {
-			fmtStr := cronTimeFormat(j.LastRun, now)
-			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
+			lastRun := j.LastRun.In(loc)
+			fmtStr := cronTimeFormat(lastRun, now.In(loc))
+			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, lastRun.Format(fmtStr)))
 			if j.LastError != "" {
 				sb.WriteString(fmt.Sprintf(" (failed: %s)", truncateStr(j.LastError, 40)))
 			}
