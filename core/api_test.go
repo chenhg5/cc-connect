@@ -214,9 +214,7 @@ type blockingVisibilityPlatform struct {
 
 func (p *blockingVisibilityPlatform) Send(ctx context.Context, _ any, _ string) error {
 	p.enteredOnce.Do(func() { close(p.entered) })
-	select {
-	case <-ctx.Done():
-	}
+	<-ctx.Done()
 	p.releaseOnce.Do(func() { close(p.released) })
 	return ctx.Err()
 }
