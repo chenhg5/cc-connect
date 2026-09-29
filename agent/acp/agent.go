@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/chenhg5/cc-connect/agent/kimi"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -246,6 +247,17 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 }
 
 func (a *Agent) Stop() error { return nil }
+
+// GetSessionHistory implements core.HistoryProvider. ACP itself defines no
+// history retrieval RPC, but backends like Kimi Code CLI (`kimi acp`) persist
+// transcripts locally; read them so /last and /history work after /switch.
+// For non-Kimi backends this reports "session not found", which the engine
+// surfaces as an ordinary lookup failure.
+func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
+	return kimi.ReadSessionHistory(sessionID, limit)
+}
+
+var _ core.HistoryProvider = (*Agent)(nil)
 
 // -- AgentDoctorInfo --
 
