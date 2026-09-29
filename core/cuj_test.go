@@ -285,6 +285,17 @@ func newCUJEnv(t *testing.T) *cujEnv {
 	agent := &cujAgent{}
 	storePath := dir + "/sessions.json"
 	e := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+
+	// Ensure async session saves (go sessions.Save()) complete before
+	// t.TempDir() cleanup removes the directory. The sync Save() flushes
+	// any pending state; the short sleep gives the background goroutine
+	// time to release the RLock and return so it doesn't race with
+	// directory removal.
+	t.Cleanup(func() {
+		e.sessions.Save()
+		time.Sleep(50 * time.Millisecond)
+	})
+
 	return &cujEnv{
 		t:       t,
 		engine:  e,
@@ -1271,6 +1282,16 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 	dir := t.TempDir()
 	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
 
+	// Ensure async session saves (go sessions.Save()) complete before
+	// t.TempDir() cleanup removes the directory. The sync Save() flushes
+	// any pending state; the short sleep gives the background goroutine
+	// time to release the RLock and return so it doesn't race with
+	// directory removal.
+	t.Cleanup(func() {
+		e.sessions.Save()
+		time.Sleep(50 * time.Millisecond)
+	})
+
 	msg := &Message{
 		SessionKey: "test:file", Platform: "test", MessageID: "f1",
 		UserID: "file", UserName: "file",
@@ -2044,6 +2065,13 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	pB := &stubPlatformEngine{n: "platB"}
 	agent := &cujAgent{}
 	e := NewEngine("test", agent, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
+
+	// Ensure async session saves (go sessions.Save()) complete before
+	// t.TempDir() cleanup removes the directory.
+	t.Cleanup(func() {
+		e.sessions.Save()
+		time.Sleep(50 * time.Millisecond)
+	})
 
 	// Fire 5 messages on each platform concurrently.
 	var wg sync.WaitGroup
