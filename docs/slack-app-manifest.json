@@ -9,11 +9,6 @@
     "background_color": "#1a1a2e"
   },
   "features": {
-    "app_home": {
-      "home_tab_enabled": true,
-      "messages_tab_enabled": true,
-      "messages_tab_read_only_enabled": false
-    },
     "bot_user": {
       "display_name": "CC-Connect",
       "always_online": true
@@ -60,6 +55,12 @@
         "should_escape": false
       },
       {
+        "command": "/search",
+        "description": "Search sessions by name or ID",
+        "usage_hint": "<keyword>",
+        "should_escape": false
+      },
+      {
         "command": "/history",
         "description": "Show last n messages",
         "usage_hint": "[n]",
@@ -91,6 +92,11 @@
         "command": "/quiet",
         "description": "Toggle thinking and tool progress display",
         "usage_hint": "[global]",
+        "should_escape": false
+      },
+      {
+        "command": "/status",
+        "description": "Show system status",
         "should_escape": false
       },
       {
