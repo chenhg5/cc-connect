@@ -13,6 +13,17 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+func countOpenFDs() int {
+	if runtime.GOOS != "linux" {
+		return -1
+	}
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1
+	}
+	return len(entries)
+}
+
 // TestAgent_StartSessionWorkDirRace exercises concurrent SetWorkDir + StartSession.
 // Without the fix, StartSession reads a.workDir without holding a.mu while
 // SetWorkDir writes it under the lock, which Go's -race detector flags as a
@@ -552,6 +563,82 @@ exit 0
 			}
 		case <-timeout:
 			t.Fatal("timeout waiting for result event")
+		}
+	}
+}
+
+// TestSend_ProcessCleanupOnEarlyExit verifies that when the child process exits
+// without reading stdin (simulating a broken-pipe or crash scenario), the adapter
+// properly cleans up: no zombie process, no leaked goroutines or FDs after
+// repeated Send() calls.
+func TestSend_ProcessCleanupOnEarlyExit(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+
+	shellScript := `exit 0`
+	powershellScript := `exit 0`
+	writeFakeQoderScript(t, binDir, shellScript, powershellScript)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	goroutineLeak := runtime.NumGoroutine()
+	fdLeak := countOpenFDs()
+
+	for i := 0; i < 10; i++ {
+		agent, err := New(map[string]any{"work_dir": workDir})
+		if err != nil {
+			t.Fatalf("New[%d]: %v", i, err)
+		}
+		sess, err := agent.StartSession(context.Background(), "")
+		if err != nil {
+			t.Fatalf("StartSession[%d]: %v", i, err)
+		}
+
+		_ = sess.Send("test-prompt", "", nil, nil)
+
+		timeout := time.After(5 * time.Second)
+	drain:
+		for {
+			select {
+			case ev, ok := <-sess.Events():
+				if !ok {
+					break drain
+				}
+				if ev.Type == core.EventError || ev.Type == core.EventResult {
+					break drain
+				}
+			case <-timeout:
+				break drain
+			}
+		}
+		_ = sess.Close()
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		got := runtime.NumGoroutine()
+		if got <= goroutineLeak+2 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got := runtime.NumGoroutine(); got > goroutineLeak+5 {
+		t.Errorf("goroutine leak: started at %d, now %d (leaked %d)", goroutineLeak, got, got-goroutineLeak)
+	}
+
+	if fdLeak >= 0 {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			got := countOpenFDs()
+			if got >= 0 && got <= fdLeak+5 {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if got := countOpenFDs(); got >= 0 && got > fdLeak+10 {
+			t.Errorf("FD leak: started at %d, now %d (leaked %d)", fdLeak, got, got-fdLeak)
 		}
 	}
 }

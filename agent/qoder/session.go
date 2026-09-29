@@ -124,6 +124,7 @@ func (qs *qoderSession) Send(prompt string, messageID string, images []core.Imag
 	if len(qs.extraEnv) > 0 {
 		cmd.Env = core.MergeEnv(os.Environ(), qs.extraEnv)
 	}
+	prepareCmdForKill(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -142,6 +143,10 @@ func (qs *qoderSession) Send(prompt string, messageID string, images []core.Imag
 		return fmt.Errorf("qoderSession: start: %w", err)
 	}
 
+	// From this point the readLoop goroutine is the sole owner of cmd.Wait().
+	// On any stdin error we kill the process (process-group) and let readLoop
+	// drain stdout and reap the zombie — Send() never calls Wait() itself.
+
 	// Deliver the prompt as a single stream-json user frame, then close stdin
 	// (EOF) so qodercli processes this turn and exits.
 	frame, err := json.Marshal(map[string]any{
@@ -150,13 +155,22 @@ func (qs *qoderSession) Send(prompt string, messageID string, images []core.Imag
 	})
 	if err != nil {
 		_ = stdin.Close()
+		_ = forceKillCmd(cmd)
+		qs.wg.Add(1)
+		go qs.readLoop(cmd, stdout, &stderrBuf)
 		return fmt.Errorf("qoderSession: marshal prompt: %w", err)
 	}
 	if _, err := stdin.Write(append(frame, '\n')); err != nil {
 		_ = stdin.Close()
+		_ = forceKillCmd(cmd)
+		qs.wg.Add(1)
+		go qs.readLoop(cmd, stdout, &stderrBuf)
 		return fmt.Errorf("qoderSession: write stdin: %w", err)
 	}
 	if err := stdin.Close(); err != nil {
+		_ = forceKillCmd(cmd)
+		qs.wg.Add(1)
+		go qs.readLoop(cmd, stdout, &stderrBuf)
 		return fmt.Errorf("qoderSession: close stdin: %w", err)
 	}
 
