@@ -3460,7 +3460,12 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, replyCtx any) {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
-	if _, ok := e.interactiveStates[key]; !ok {
+	state := e.interactiveStates[key]
+	// /new publishes the new Session before the old process finishes closing.
+	// Give incoming messages their own queue instead of attaching them to the
+	// stopped state that the old cleanup is about to delete. The close registry
+	// still prevents the new agent from spawning before teardown settles.
+	if state == nil || state.isStopped() {
 		e.interactiveStates[key] = &interactiveState{
 			platform:         p,
 			replyCtx:         replyCtx,
@@ -4479,6 +4484,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // skipped if the map entry has been replaced by a different state — this prevents
 // a stale goroutine (still running after /new created a fresh Session object and
 // a new turn started on it) from accidentally destroying the replacement state.
+// An explicit nil expectation means no state was present, not unconditional cleanup.
 //
 // IMPORTANT: The state is deleted from the map AFTER the agent session is closed
 // to avoid race conditions where concurrent requests see an empty map while the
@@ -4486,7 +4492,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
-	if len(expected) > 0 && expected[0] != nil && state != expected[0] {
+	if len(expected) > 0 && state != expected[0] {
 		// Another turn has already replaced the state — skip cleanup.
 		e.interactiveMu.Unlock()
 		return
@@ -4542,7 +4548,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	e.interactiveMu.Lock()
 	// Re-check that the state hasn't been replaced during the close
 	currentState, currentOk := e.interactiveStates[sessionKey]
-	if currentOk && len(expected) > 0 && expected[0] != nil && currentState != expected[0] {
+	if currentOk && len(expected) > 0 && currentState != expected[0] {
 		// Another turn has replaced the state during our close — don't delete it.
 		e.interactiveMu.Unlock()
 		return
@@ -7377,21 +7383,26 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
-	e.cleanupInteractiveState(interactiveKey)
-	slog.Info("cmdNew: cleanup done, creating new session", "session_key", msg.SessionKey)
+	e.interactiveMu.Lock()
+	oldState := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
 
 	// Clear old session's agent session ID so it cannot be resumed
 	old := sessions.GetOrCreateActive(msg.SessionKey)
 	old.SetAgentSessionID("", "")
 	old.ClearHistory()
-	sessions.Save()
 
 	name := ""
 	if len(args) > 0 {
 		name = strings.Join(args, " ")
 	}
+	// Publish and persist the new active session before potentially blocking in
+	// Close. Concurrent messages must acquire this session, not the old one.
 	sessions.NewSession(msg.SessionKey, name)
+
+	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
+	e.cleanupInteractiveState(interactiveKey, oldState)
+	slog.Info("cmdNew: cleanup done", "session_key", msg.SessionKey)
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 	} else {
