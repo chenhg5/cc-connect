@@ -16138,6 +16138,11 @@ func threadTopicChannelID(sessionKey string) string {
 	if chatID == "" || rootID == "" {
 		return ""
 	}
+	// Match extractChannelID: a single-character segment is a type tag,
+	// so the next segment is the channel ID rather than a topic marker.
+	if len(chatID) == 1 {
+		return ""
+	}
 	switch marker {
 	case "root", "thread", "topic":
 		return chatID + ":topic:" + rootID
