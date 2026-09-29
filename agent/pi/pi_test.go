@@ -172,6 +172,7 @@ func TestAgent_NameAndDisplay(t *testing.T) {
 }
 
 func TestAgent_ModelGetSet(t *testing.T) {
+	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
 	a := &Agent{}
 	if a.GetModel() != "" {
 		t.Errorf("initial model = %q", a.GetModel())
