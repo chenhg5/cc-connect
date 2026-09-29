@@ -232,6 +232,8 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 
 func (a *Agent) Stop() error { return nil }
 
+var _ core.SessionRenamer = (*Agent)(nil)
+
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
