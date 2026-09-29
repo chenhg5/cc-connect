@@ -4185,11 +4185,9 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// the same here: filepath.Dir("") is ".", which would otherwise drop
 	// "<engine>_ws_<hash>.json" into the process working directory — that is
 	// what littered core/ with test_ws_*.json during `go test ./core/`.
-	h := sha256.Sum256([]byte(workspace))
 	sessionFile := ""
 	if storePath := e.sessions.StorePath(); storePath != "" {
-		sessionFile = filepath.Join(filepath.Dir(storePath),
-			fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+		sessionFile = pickWorkspaceSessionFile(filepath.Dir(storePath), e.name, workspace)
 	}
 	sessions := NewSessionManager(sessionFile)
 	sessions.InvalidateForAgent(agent.Name())
@@ -4197,6 +4195,51 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	ws.agent = agent
 	ws.sessions = sessions
 	return agent, sessions, nil
+}
+
+// workspaceHash is the 8-hex-char digest used in per-workspace session file
+// names (<project>_ws_<hash>.json).
+func workspaceHash(workspace string) string {
+	h := sha256.Sum256([]byte(workspace))
+	return hex.EncodeToString(h[:4])
+}
+
+// workspaceSessionCandidates returns the session files to consider for a
+// workspace, most preferred first. The second entry is the file an older build
+// wrote, back when the workspace key still carried Windows backslashes. The
+// derivation is platform-independent, so a non-Windows caller builds the same
+// two-entry list and simply fails to stat the legacy file, which only a Windows
+// build can have written.
+func workspaceSessionCandidates(dir, project, workspace string) []string {
+	canonical := filepath.Join(dir, fmt.Sprintf("%s_ws_%s.json", project, workspaceHash(workspace)))
+	legacyWS := legacyWorkspaceKey(workspace)
+	if legacyWS == workspace {
+		return []string{canonical}
+	}
+	return []string{canonical,
+		filepath.Join(dir, fmt.Sprintf("%s_ws_%s.json", project, workspaceHash(legacyWS)))}
+}
+
+// pickWorkspaceSessionFile returns the first existing candidate so that
+// workspaces persisted before the separator normalization keep their sessions,
+// and the canonical path for a workspace that has no session file yet.
+//
+// The chosen file becomes the live session store: nothing is copied, renamed or
+// deleted, so sessions keep being written where the older build left them and a
+// downgrade still finds them. Note that normal startup invalidation
+// (InvalidateForAgent) can therefore rewrite a legacy file in place when the
+// agent type changed.
+func pickWorkspaceSessionFile(dir, project, workspace string) string {
+	candidates := workspaceSessionCandidates(dir, project, workspace)
+	for i, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			if i > 0 {
+				slog.Info("reading pre-normalization workspace session file", "path", c)
+			}
+			return c
+		}
+	}
+	return candidates[0]
 }
 
 func (e *Engine) resolveChannelWorkDir(workspace, interactiveKey string) string {

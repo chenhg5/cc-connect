@@ -3,9 +3,11 @@ package core
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -877,5 +879,109 @@ func TestLookupEffectiveBinding_NoIsolationUnbindsMissing(t *testing.T) {
 	}
 	if got := e.workspaceBindings.Lookup("project:test", channelKey); got != nil {
 		t.Errorf("expected missing workspace binding to be unbound without isolation, got %+v", got)
+	}
+}
+
+// The per-workspace session file is named from a hash of the workspace key, so
+// normalizing separators renames it. A workspace written by an older Windows
+// build must still be found, and the sessions inside it must still load — the
+// path alone being right is not enough.
+func TestWorkspaceSessionFile_LegacyHashFallback(t *testing.T) {
+	dataDir := t.TempDir()
+	const (
+		project   = "test"
+		canonical = "C:/work/repo"
+		userKey   = "feishu:oc_1:ou_1"
+	)
+
+	legacyPath := filepath.Join(dataDir,
+		fmt.Sprintf("%s_ws_%s.json", project, workspaceHash(legacyWorkspaceKey(canonical))))
+	canonicalPath := filepath.Join(dataDir,
+		fmt.Sprintf("%s_ws_%s.json", project, workspaceHash(canonical)))
+	if legacyPath == canonicalPath {
+		t.Fatal("test needs the legacy and canonical session files to differ")
+	}
+
+	// Persisted state exactly as the pre-normalization build left it.
+	seed, err := json.Marshal(sessionSnapshot{
+		Sessions:      map[string]*Session{"s1": {ID: "s1", Name: "legacy", AgentSessionID: "legacy-agent-sid"}},
+		ActiveSession: map[string]string{userKey: "s1"},
+		Counter:       1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, seed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := pickWorkspaceSessionFile(dataDir, project, canonical)
+	if got != legacyPath {
+		t.Fatalf("pickWorkspaceSessionFile() = %q, want legacy %q", got, legacyPath)
+	}
+
+	// The sessions inside the legacy file must actually be readable.
+	sm := NewSessionManager(got)
+	if id := sm.ActiveSessionID(userKey); id != "s1" {
+		t.Fatalf("ActiveSessionID(%q) = %q, want %q — legacy session content did not load", userKey, id, "s1")
+	}
+
+	// Once a canonical file exists it wins, so fresh state is not shadowed by
+	// stale legacy state.
+	if err := os.WriteFile(canonicalPath, []byte(`{"sessions":{},"active_session":{},"counter":0}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := pickWorkspaceSessionFile(dataDir, project, canonical); got != canonicalPath {
+		t.Fatalf("with both files present pickWorkspaceSessionFile() = %q, want canonical %q", got, canonicalPath)
+	}
+}
+
+// A workspace with no session file yet resolves to the canonical path, so a
+// fresh workspace is never pointed at another workspace's file.
+func TestPickWorkspaceSessionFile_DefaultsToCanonical(t *testing.T) {
+	dir := t.TempDir()
+	got := pickWorkspaceSessionFile(dir, "test", "C:/work/fresh")
+	want := workspaceSessionCandidates(dir, "test", "C:/work/fresh")[0]
+	if got != want {
+		t.Fatalf("pickWorkspaceSessionFile() = %q, want canonical %q", got, want)
+	}
+}
+
+// Candidates must cover the legacy form for every path shape the report asked
+// about, and must never collide across workspaces.
+func TestWorkspaceSessionCandidates(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name      string
+		workspace string
+		want      int
+	}{
+		{"windows drive", "C:/work/repo", 2},
+		{"unc path", "//server/share/repo", 2},
+		{"relative path", "work/repo", 2},
+		{"no separator", "repo", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := workspaceSessionCandidates(dir, "test", tt.workspace)
+			if len(got) != tt.want {
+				t.Fatalf("workspaceSessionCandidates(%q) = %v, want %d candidates", tt.workspace, got, tt.want)
+			}
+			for _, c := range got {
+				if !strings.Contains(filepath.Base(c), "_ws_") {
+					t.Errorf("candidate %q is not a per-workspace session file", c)
+				}
+			}
+		})
+	}
+
+	a := workspaceSessionCandidates(dir, "test", "C:/work/a")
+	b := workspaceSessionCandidates(dir, "test", "C:/work/b")
+	for _, x := range a {
+		for _, y := range b {
+			if x == y {
+				t.Fatalf("candidate collision between workspaces: %q", x)
+			}
+		}
 	}
 }

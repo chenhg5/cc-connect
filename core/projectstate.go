@@ -44,10 +44,21 @@ func (ps *ProjectStateStore) SetWorkDirOverride(dir string) {
 func (ps *ProjectStateStore) WorkspaceDirOverride(workspace string) string {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
-	if ps.state.WorkspaceDirOverrides == nil {
+	m := ps.state.WorkspaceDirOverrides
+	if m == nil {
 		return ""
 	}
-	return ps.state.WorkspaceDirOverrides[workspace]
+	if v, ok := m[workspace]; ok {
+		return v
+	}
+	// Fall back to the pre-normalization (backslash) key for overrides
+	// persisted by a build from before normalizeWorkspacePath emitted forward
+	// slashes. The derived key is never written on a non-Windows host, so there
+	// this lookup only ever misses.
+	if legacy := legacyWorkspaceKey(workspace); legacy != workspace {
+		return m[legacy]
+	}
+	return ""
 }
 
 func (ps *ProjectStateStore) SetWorkspaceDirOverride(workspace, dir string) {
@@ -66,6 +77,11 @@ func (ps *ProjectStateStore) ClearWorkspaceDirOverride(workspace string) {
 		return
 	}
 	delete(ps.state.WorkspaceDirOverrides, workspace)
+	// Drop the legacy key too: reads fall back to it, so leaving it behind
+	// would resurrect an override the caller just cleared.
+	if legacy := legacyWorkspaceKey(workspace); legacy != workspace {
+		delete(ps.state.WorkspaceDirOverrides, legacy)
+	}
 	if len(ps.state.WorkspaceDirOverrides) == 0 {
 		ps.state.WorkspaceDirOverrides = nil
 	}
@@ -74,10 +90,18 @@ func (ps *ProjectStateStore) ClearWorkspaceDirOverride(workspace string) {
 func (ps *ProjectStateStore) WorkspaceModelOverride(workspace string) string {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
-	if ps.state.WorkspaceModelOverrides == nil {
+	m := ps.state.WorkspaceModelOverrides
+	if m == nil {
 		return ""
 	}
-	return ps.state.WorkspaceModelOverrides[workspace]
+	if v, ok := m[workspace]; ok {
+		return v
+	}
+	// See WorkspaceDirOverride for why the legacy key is consulted.
+	if legacy := legacyWorkspaceKey(workspace); legacy != workspace {
+		return m[legacy]
+	}
+	return ""
 }
 
 func (ps *ProjectStateStore) SetWorkspaceModelOverride(workspace, model string) {
@@ -100,6 +124,10 @@ func (ps *ProjectStateStore) ClearWorkspaceModelOverride(workspace string) {
 		return
 	}
 	delete(ps.state.WorkspaceModelOverrides, workspace)
+	// See ClearWorkspaceDirOverride: the legacy key must go as well.
+	if legacy := legacyWorkspaceKey(workspace); legacy != workspace {
+		delete(ps.state.WorkspaceModelOverrides, legacy)
+	}
 	if len(ps.state.WorkspaceModelOverrides) == 0 {
 		ps.state.WorkspaceModelOverrides = nil
 	}

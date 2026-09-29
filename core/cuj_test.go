@@ -2538,8 +2538,11 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 		e.ReceiveMessage(p, skillMessage(p.Name(), channel, "/SHARED_SKILL"))
 		env := &cujEnv{t: t, engine: e, plat: p}
 		env.waitFor("workspace skill response", 3*time.Second, func() bool {
+			// The engine hands the agent the normalized workspace, so on
+			// Windows the echoed work_dir carries forward slashes.
+			wantDir := "Executed in " + normalizeWorkspacePath(ws)
 			for _, text := range p.getSent()[before:] {
-				if strings.Contains(text, "Executed in "+ws) && strings.Contains(text, "Instructions "+channel) {
+				if strings.Contains(text, wantDir) && strings.Contains(text, "Instructions "+channel) {
 					return true
 				}
 			}

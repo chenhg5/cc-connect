@@ -3,6 +3,8 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,11 +90,16 @@ func TestNormalizeWorkspacePath(t *testing.T) {
 	}
 
 	// Resolve the expected path through EvalSymlinks so that the test works
-	// on macOS where /var is a symlink to /private/var.
-	resolvedRealDir, err := filepath.EvalSymlinks(realDir)
+	// on macOS where /var is a symlink to /private/var, and normalize to
+	// forward slashes to match normalizeWorkspacePath's separator-consistent
+	// output. Note this test skips entirely where symlinks cannot be created
+	// (unprivileged Windows), so separator behaviour is asserted without
+	// symlinks in TestNormalizeWorkspacePathSeparators instead.
+	resolved, err := filepath.EvalSymlinks(realDir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	resolvedRealDir := filepath.ToSlash(resolved)
 
 	tests := []struct {
 		name  string
@@ -113,6 +120,77 @@ func TestNormalizeWorkspacePath(t *testing.T) {
 				t.Errorf("normalizeWorkspacePath(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+// legacyWorkspaceKey derives the key an older build persisted for the same
+// workspace, so state written before the separator normalization is still
+// reachable after an upgrade. Expectations are explicit (not derived from
+// filepath helpers) so the same assertions hold on every platform.
+func TestLegacyWorkspaceKey(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"windows drive", "C:/work/repo", `C:\work\repo`},
+		{"unc path", "//server/share/repo", `\\server\share\repo`},
+		{"relative path", "work/repo", `work\repo`},
+		{"no separator", "repo", "repo"},
+		{"interactive key leaves the session key alone", "C:/work/repo:feishu:oc_1:ou_2",
+			`C:\work\repo:feishu:oc_1:ou_2`},
+		// Known limitation, asserted rather than assumed: the swap covers the
+		// whole composite key, so a session key that itself contains '/'
+		// derives a value no older build wrote and the fallback misses. It
+		// cannot pick up another workspace's state, because the workspace prefix
+		// is preserved. Every platform builds session keys as "platform:id...",
+		// so this does not happen today; the case is here so that a future
+		// session-key format change is caught.
+		{"session key containing a separator misses", "C:/work/repo:web:chat/1",
+			`C:\work\repo:web:chat\1`},
+		{"already legacy form unchanged", `C:\work\repo`, `C:\work\repo`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := legacyWorkspaceKey(tt.in); got != tt.want {
+				t.Errorf("legacyWorkspaceKey(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+
+	// On Windows the derivation must be the exact inverse of the filepath.ToSlash
+	// in normalizeWorkspacePath. Elsewhere it is not the identity — the swap is
+	// unconditional — but no older build could have written the derived key
+	// there, so there is nothing to round-trip.
+	if runtime.GOOS == "windows" {
+		for _, canonical := range []string{"C:/work/repo", "//server/share/repo", "work/repo"} {
+			if got := filepath.ToSlash(legacyWorkspaceKey(canonical)); got != canonical {
+				t.Errorf("ToSlash(legacyWorkspaceKey(%q)) = %q, want round-trip", canonical, got)
+			}
+		}
+	}
+}
+
+// TestNormalizeWorkspacePathSeparators asserts the separator normalization
+// directly, on an input that needs no symlink. TestNormalizeWorkspacePath cannot
+// stand in for it: that test skips outright where symlinks cannot be created,
+// which is exactly the unprivileged Windows host this fix targets, so on that
+// platform it would pass without the fix.
+//
+// Before the fix this fails on Windows — filepath.Clean returns a backslash path,
+// which is not the forward-slash form the rest of the engine keys state by.
+func TestNormalizeWorkspacePathSeparators(t *testing.T) {
+	const (
+		in   = "/nonexistent/path/./foo/../bar"
+		want = "/nonexistent/path/bar"
+	)
+
+	got := normalizeWorkspacePath(in)
+	if got != want {
+		t.Errorf("normalizeWorkspacePath(%q) = %q, want %q", in, got, want)
+	}
+	if strings.ContainsRune(got, '\\') {
+		t.Errorf("normalizeWorkspacePath(%q) = %q, contains a backslash separator", in, got)
 	}
 }
 
