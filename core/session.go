@@ -36,10 +36,15 @@ type Session struct {
 	// `/provider switch` (the agent_session_id survives on disk while the
 	// in-memory active provider does not). Empty means "no explicit choice
 	// — use whatever the agent's default is".
-	ActiveProvider string         `json:"active_provider,omitempty"`
-	History        []HistoryEntry `json:"history"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ActiveProvider string `json:"active_provider,omitempty"`
+	// AgentPreset is the pending per-session DSH preset. It is intentionally
+	// kept on cc-connect's session record so a choice made before the first
+	// agent turn survives a daemon restart; dsh records the durable selection
+	// in its own session log when the next turn starts.
+	AgentPreset string         `json:"agent_preset,omitempty"`
+	History     []HistoryEntry `json:"history"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
 	// LastUserActivity records when a real user message was last received.
 	// Unlike UpdatedAt (bumped by every session.Unlock including heartbeats and
 	// unsolicited agent output), this field is only updated when the engine
@@ -287,6 +292,21 @@ func (s *Session) GetActiveProvider() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ActiveProvider
+}
+
+// SetAgentPreset records the preset selected for this cc-connect session.
+// An empty value means use the dsh deployment default.
+func (s *Session) SetAgentPreset(preset string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AgentPreset = preset
+}
+
+// GetAgentPreset atomically reads the selected per-session preset.
+func (s *Session) GetAgentPreset() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.AgentPreset
 }
 
 // SetAgentSessionID atomically sets the agent session ID and agent type.
@@ -751,6 +771,7 @@ func (sm *SessionManager) saveLocked() {
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
+			AgentPreset:         s.AgentPreset,
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,
