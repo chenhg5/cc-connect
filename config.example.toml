@@ -1681,6 +1681,10 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Requires a Codex CLI: npm install -g @openai/codex, or a supported macOS desktop app.
 # 需要 Codex CLI：npm install -g @openai/codex，或支持的 macOS 桌面应用。
+# GPT-6.1 Sol requires Codex CLI 0.159.1 or later; update the CLI selected by cmd/CODEX_CLI_PATH/PATH.
+# GPT-6.1 Sol 需要 Codex CLI 0.159.1 或更新版本；请更新 cmd/CODEX_CLI_PATH/PATH 实际选中的 CLI。
+# Model availability also depends on your ChatGPT plan or API account.
+# 模型可用性还取决于 ChatGPT 套餐或 API 账号。
 # Codex uses `codex exec --json` under the hood.
 # Codex 底层使用 `codex exec --json` 命令。
 
@@ -1705,7 +1709,7 @@ app_secret = "your-feishu-app-secret"
 # - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
 #
 # Optional: specify a model / 可选：指定模型
-# model = "o3"
+# model = "gpt-6.1-sol"
 #
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
