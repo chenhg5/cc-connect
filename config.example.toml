@@ -1709,6 +1709,7 @@ app_secret = "your-feishu-app-secret"
 #
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+# service_tier = "default"   # "default" | "fast" (OpenAI Codex Fast mode)
 #
 # Optional: project system prompt / 可选：项目系统提示
 # Codex has no native system-prompt flag, so cc-connect injects this as a

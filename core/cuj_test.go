@@ -129,6 +129,128 @@ func (a *cujAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
 }
 func (a *cujAgent) Stop() error { return nil }
 
+type cujFastResumeAgent struct {
+	cujAgent
+	fast bool
+}
+
+func (a *cujFastResumeAgent) SetFastMode(enabled bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fast = enabled
+}
+
+func (a *cujFastResumeAgent) FastModeEnabled() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.fast
+}
+
+func (a *cujFastResumeAgent) StartSession(_ context.Context, resumeID string) (AgentSession, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tier := "default"
+	if a.fast {
+		tier = "fast"
+	}
+	s := newCUJAgentSession()
+	s.reply = fmt.Sprintf("tier=%s resumed=%s", tier, resumeID)
+	return s, nil
+}
+
+func TestCUJ_B13_FastModeResumesConversationAndPreservesHistory(t *testing.T) {
+	platform := &stubPlatformEngine{n: "test"}
+	agent := &cujFastResumeAgent{}
+	engine := NewEngine("test", agent, []Platform{platform}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	t.Cleanup(func() { _ = engine.Stop() })
+	env := &cujEnv{t: t, engine: engine, plat: platform}
+
+	env.userSends("fast-user", "before-fast")
+	env.waitFor("first answer", 2*time.Second, func() bool {
+		return strings.Contains(strings.Join(platform.getSent(), "\n"), "tier=default")
+	})
+	env.userSends("fast-user", "/fast on")
+	env.waitFor("fast mode enabled", 2*time.Second, func() bool {
+		return strings.Contains(strings.Join(platform.getSent(), "\n"), engine.i18n.T(MsgFastChangedOn))
+	})
+	env.userSends("fast-user", "after-fast")
+	env.waitFor("resumed answer with new tier", 2*time.Second, func() bool {
+		return strings.Contains(strings.Join(platform.getSent(), "\n"), "tier=fast resumed=cuj-agent-session")
+	})
+	before := len(platform.getSent())
+	env.userSends("fast-user", "/history")
+	env.waitFor("original conversation in history", 2*time.Second, func() bool {
+		messages := platform.getSent()
+		return len(messages) > before && strings.Contains(strings.Join(messages[before:], "\n"), "before-fast")
+	})
+}
+
+type cujFastWorkspaceAgent struct {
+	namedStubModelModeAgent
+}
+
+func (a *cujFastWorkspaceAgent) WorkspaceAgentOptions() map[string]any {
+	return map[string]any{"service_tier": "fast"}
+}
+
+func TestCUJ_H6_FastModeWorkspaceOverridesSurviveRestart(t *testing.T) {
+	const agentName = "cuj-fast-workspace-agent"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		agent := &cujFastWorkspaceAgent{namedStubModelModeAgent: namedStubModelModeAgent{name: agentName}}
+		agent.fastMode = opts["service_tier"] == "fast"
+		return agent, nil
+	})
+	t.Cleanup(func() { delete(agentFactories, agentName) })
+	root := t.TempDir()
+	bindings := filepath.Join(root, "bindings.json")
+	state := filepath.Join(root, "state.json")
+	workspaceA, workspaceB := filepath.Join(root, "a"), filepath.Join(root, "b")
+	for _, dir := range []string{workspaceA, workspaceB} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	platform := &stubPlatformEngine{n: "feishu"}
+	newEngine := func() *Engine {
+		global := &cujFastWorkspaceAgent{namedStubModelModeAgent: namedStubModelModeAgent{name: agentName}}
+		global.fastMode = true
+		e := NewEngine("test", global, []Platform{platform}, filepath.Join(root, "sessions.json"), LangEnglish)
+		e.SetMultiWorkspace(root, bindings)
+		e.SetProjectStateStore(NewProjectStateStore(state))
+		e.SetFastModeSaveFunc(func(string) error {
+			t.Error("workspace toggle must not save project-wide tier")
+			return nil
+		})
+		t.Cleanup(func() { _ = e.Stop() })
+		return e
+	}
+	engine := newEngine()
+	engine.workspaceBindings.Bind("project:test", "feishu:channel-a", "a", normalizeWorkspacePath(workspaceA))
+	engine.workspaceBindings.Bind("project:test", "feishu:channel-b", "b", normalizeWorkspacePath(workspaceB))
+	send := func(channel, command string, want MsgKey) {
+		t.Helper()
+		before := len(platform.getSent())
+		engine.ReceiveMessage(platform, &Message{
+			SessionKey: "feishu:" + channel + ":user", Platform: "feishu",
+			ChannelKey: channel, UserID: "user", Content: command, ReplyCtx: "ctx",
+		})
+		env := &cujEnv{t: t, engine: engine, plat: platform}
+		env.waitFor(channel+" "+command, 2*time.Second, func() bool {
+			messages := platform.getSent()
+			return len(messages) > before && strings.Contains(strings.Join(messages[before:], "\n"), engine.i18n.T(want))
+		})
+	}
+	send("channel-a", "/fast on", MsgFastChangedOn)
+	send("channel-b", "/fast off", MsgFastChangedOff)
+	send("channel-a", "/fast", MsgFastEnabled)
+	if err := engine.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	engine = newEngine()
+	send("channel-a", "/fast", MsgFastEnabled)
+	send("channel-b", "/fast", MsgFastDisabled)
+}
+
 // cujAgentSession is an AgentSession whose reply is controllable per-Send.
 // Tests can set reply (and optionally toolEvent) before each Send to drive
 // scenarios like "agent calls tool", "agent returns error", "agent succeeds".

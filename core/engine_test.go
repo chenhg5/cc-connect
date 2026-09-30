@@ -448,6 +448,7 @@ type stubModelModeAgent struct {
 	reasoningEfforts []string
 	providers        []ProviderConfig
 	active           string
+	fastMode         bool
 }
 
 type stubStrictModelAgent struct {
@@ -551,6 +552,9 @@ func (a *stubModelModeAgent) AvailableReasoningEfforts() []string {
 	}
 	return []string{"low", "medium", "high", "xhigh"}
 }
+
+func (a *stubModelModeAgent) SetFastMode(enabled bool) { a.fastMode = enabled }
+func (a *stubModelModeAgent) FastModeEnabled() bool    { return a.fastMode }
 
 type namedStubModelModeAgent struct {
 	stubModelModeAgent
@@ -5549,6 +5553,62 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "/reasoning <number>") || strings.Contains(p.sent[0], "minimal") {
 		t.Fatalf("sent = %v, want usage without minimal", p.sent)
+	}
+}
+
+func TestCmdFast_SwitchesTierPersistsAndPreservesConversation(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session", "test")
+	s.AddHistory("user", "hello")
+	var saved string
+	e.SetFastModeSaveFunc(func(tier string) error { saved = tier; return nil })
+
+	e.cmdFast(p, msg, []string{"on"})
+
+	if !agent.FastModeEnabled() || saved != "fast" {
+		t.Fatalf("fast=%v saved=%q, want true/fast", agent.FastModeEnabled(), saved)
+	}
+	if got := s.GetAgentSessionID(); got != "existing-session" {
+		t.Fatalf("AgentSessionID = %q, want preserved", got)
+	}
+	if got := len(s.History); got != 1 {
+		t.Fatalf("history length = %d, want preserved", got)
+	}
+
+	e.cmdFast(p, msg, []string{"off"})
+	if agent.FastModeEnabled() || saved != "default" {
+		t.Fatalf("fast=%v saved=%q, want false/default", agent.FastModeEnabled(), saved)
+	}
+}
+
+func TestCmdFast_RejectsUnsupportedAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.cmdFast(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"on"})
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "does not support Fast mode") {
+		t.Fatalf("sent = %v", p.sent)
+	}
+}
+
+func TestCmdFast_SaveFailureLeavesTierAndConversationUnchanged(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubModelModeAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	s := e.sessions.GetOrCreateActive(msg.SessionKey)
+	s.SetAgentSessionID("existing-session", "test")
+	s.AddHistory("user", "keep this conversation")
+	e.SetFastModeSaveFunc(func(string) error { return errors.New("config is read-only") })
+	e.cmdFast(p, msg, []string{"on"})
+	if agent.FastModeEnabled() || s.GetAgentSessionID() != "existing-session" || len(s.History) != 1 {
+		t.Fatal("failed save changed tier or conversation")
+	}
+	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "config is read-only") {
+		t.Fatalf("missing save failure reply: %v", p.sent)
 	}
 }
 

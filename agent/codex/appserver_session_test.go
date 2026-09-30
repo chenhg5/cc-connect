@@ -13,6 +13,23 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+func TestAppServerCommandArgs_IncludesFastServiceTier(t *testing.T) {
+	s := &appServerSession{url: "stdio://", serviceTier: "fast"}
+	args := s.buildCommandArgs()
+	if !containsSequence(args, []string{"-c", `service_tier="fast"`}) {
+		t.Fatalf("args missing fast service tier: %v", args)
+	}
+}
+
+func TestAppServerCommandArgs_OmitsUnsetServiceTier(t *testing.T) {
+	args := (&appServerSession{url: "stdio://"}).buildCommandArgs()
+	for _, arg := range args {
+		if strings.Contains(arg, "service_tier=") {
+			t.Fatalf("unset service tier should inherit Codex config, args=%v", args)
+		}
+	}
+}
+
 func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
 	s := &appServerSession{}
 	effort := "xhigh"
