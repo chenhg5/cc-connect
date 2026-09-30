@@ -339,14 +339,15 @@ func (hs *HeartbeatScheduler) execute(entry *heartbeatEntry) {
 
 	if cfg.OnlyWhenIdle {
 		session := entry.engine.sessions.GetOrCreateActive(cfg.SessionKey)
-		if !session.TryLock() {
+		if gen, ok := session.TryLock(); !ok {
 			slog.Debug("heartbeat: session busy, skipping", "project", entry.project, "session_key", cfg.SessionKey)
 			hs.mu.Lock()
 			entry.skippedBusy++
 			hs.mu.Unlock()
 			return
+		} else {
+			session.Unlock(gen)
 		}
-		session.Unlock()
 	}
 
 	prompt := cfg.Prompt

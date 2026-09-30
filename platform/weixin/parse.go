@@ -28,6 +28,14 @@ func bodyFromItemList(items []messageItem) string {
 			text := strings.TrimSpace(item.TextItem.Text)
 			ref := item.RefMsg
 			if ref == nil {
+				if text == "" {
+					// Skip placeholder text items with no body and no quoted ref
+					// so the loop can still find a later voice transcription
+					// or text item. Returning "" here drops a voice item that
+					// followed an empty text item — dispatchInbound treats the
+					// message as empty + media-less and silently discards it.
+					continue
+				}
 				return text
 			}
 			if ref.MessageItem != nil && isMediaItemType(ref.MessageItem.Type) {
@@ -44,6 +52,9 @@ func bodyFromItemList(items []messageItem) string {
 				}
 			}
 			if len(parts) == 0 {
+				if text == "" {
+					continue
+				}
 				return text
 			}
 			return fmt.Sprintf("[引用: %s]\n%s", strings.Join(parts, " | "), text)

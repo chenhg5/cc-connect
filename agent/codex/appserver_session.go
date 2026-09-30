@@ -141,6 +141,8 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
+	cliBin         string
+	cliExtraArgs   []string
 	url            string
 	workDir        string
 	model          string
@@ -192,13 +194,15 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
-	return newAppServerSessionWithServiceTier(ctx, url, workDir, model, effort, "", mode, resumeID, baseURL, modelProvider, extraEnv, codexHome, systemPrompt, appendPrompt)
+func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+	return newAppServerSessionWithServiceTier(ctx, cliBin, cliExtraArgs, url, workDir, model, effort, "", mode, resumeID, baseURL, modelProvider, extraEnv, codexHome, systemPrompt, appendPrompt)
 }
 
-func newAppServerSessionWithServiceTier(ctx context.Context, url, workDir, model, effort, serviceTier, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSessionWithServiceTier(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, serviceTier, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
+		cliBin:           cliBin,
+		cliExtraArgs:     append([]string(nil), cliExtraArgs...),
 		url:              url,
 		workDir:          workDir,
 		model:            model,
@@ -256,7 +260,12 @@ func appServerListenURL(url string) string {
 
 func (s *appServerSession) connect() error {
 	args := s.buildCommandArgs()
-	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	bin, err := resolveCodexExecutable(s.cliBin)
+	if err != nil {
+		return fmt.Errorf("codex app-server resolve CLI: %w", err)
+	}
+	args = append(append([]string(nil), s.cliExtraArgs...), args...)
+	cmd := exec.CommandContext(s.ctx, bin, args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {

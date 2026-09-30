@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -688,9 +689,10 @@ func TestProactiveRouting_DirectSessionUsesDirectAPI(t *testing.T) {
 
 func TestExtractRichText(t *testing.T) {
 	tests := []struct {
-		name    string
-		content interface{}
-		want    string
+		name         string
+		content      interface{}
+		want         string
+		wantPictures []richTextImageDownload
 	}{
 		{
 			name:    "nil content",
@@ -739,15 +741,16 @@ func TestExtractRichText(t *testing.T) {
 			want: "normal bold",
 		},
 		{
-			name: "mixed text and picture elements — pictures skipped",
+			name: "mixed text and picture elements",
 			content: map[string]interface{}{
 				"richText": []interface{}{
 					map[string]interface{}{"text": "See image: "},
-					map[string]interface{}{"pictureDownloadCode": "abc123"},
+					map[string]interface{}{"downloadCode": "v1-code", "pictureDownloadCode": "legacy-code"},
 					map[string]interface{}{"text": "done"},
 				},
 			},
-			want: "See image: done",
+			want:         "See image: done",
+			wantPictures: []richTextImageDownload{{DownloadCode: "v1-code", FallbackCode: "legacy-code"}},
 		},
 		{
 			name: "missing richText key",
@@ -760,9 +763,12 @@ func TestExtractRichText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractRichText(tt.content)
+			got, pictures := extractRichText(tt.content)
 			if got != tt.want {
 				t.Errorf("extractRichText() = %q, want %q", got, tt.want)
+			}
+			if !slices.Equal(pictures, tt.wantPictures) {
+				t.Errorf("extractRichText() picture codes = %v, want %v", pictures, tt.wantPictures)
 			}
 		})
 	}
@@ -796,6 +802,145 @@ type dingtalkEmotionCall struct {
 
 type fakeDingTalkEmotionRT struct {
 	calls []dingtalkEmotionCall
+}
+
+type dingtalkAttachmentCall struct {
+	path string
+	body map[string]any
+}
+
+type fakeDingTalkAttachmentRT struct {
+	calls []dingtalkAttachmentCall
+}
+
+func (f *fakeDingTalkAttachmentRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host == "oapi.dingtalk.com" && req.URL.Path == "/media/upload" {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"errcode":0,"errmsg":"ok","media_id":"media-1","type":"file"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	f.calls = append(f.calls, dingtalkAttachmentCall{path: req.URL.Path, body: body})
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func TestSendFile_GroupUsesGroupMessageAPI(t *testing.T) {
+	rt := &fakeDingTalkAttachmentRT{}
+	p := &Platform{
+		robotCode:   "robot-code",
+		httpClient:  &http.Client{Transport: rt},
+		accessToken: "token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	err := p.SendFile(context.Background(), replyContext{
+		conversationId: "group-conversation",
+		senderStaffId:  "sender-id",
+		isGroup:        true,
+	}, core.FileAttachment{FileName: "report.pdf", Data: []byte("pdf")})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(rt.calls))
+	}
+	call := rt.calls[0]
+	if call.path != "/v1.0/robot/groupMessages/send" {
+		t.Fatalf("path = %q, want groupMessages/send", call.path)
+	}
+	if call.body["openConversationId"] != "group-conversation" {
+		t.Errorf("openConversationId = %v, want group-conversation", call.body["openConversationId"])
+	}
+	if _, exists := call.body["userIds"]; exists {
+		t.Errorf("group request unexpectedly contains userIds: %#v", call.body["userIds"])
+	}
+}
+
+func TestSendFile_DirectUsesOneToOneMessageAPI(t *testing.T) {
+	rt := &fakeDingTalkAttachmentRT{}
+	p := &Platform{
+		robotCode:   "robot-code",
+		httpClient:  &http.Client{Transport: rt},
+		accessToken: "token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	err := p.SendFile(context.Background(), replyContext{
+		senderStaffId: "sender-id",
+	}, core.FileAttachment{FileName: "report.pdf", Data: []byte("pdf")})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(rt.calls))
+	}
+	call := rt.calls[0]
+	if call.path != "/v1.0/robot/oToMessages/batchSend" {
+		t.Fatalf("path = %q, want oToMessages/batchSend", call.path)
+	}
+	userIDs, ok := call.body["userIds"].([]any)
+	if !ok || len(userIDs) != 1 || userIDs[0] != "sender-id" {
+		t.Errorf("userIds = %#v, want [sender-id]", call.body["userIds"])
+	}
+	if _, exists := call.body["openConversationId"]; exists {
+		t.Errorf("direct request unexpectedly contains openConversationId: %#v", call.body["openConversationId"])
+	}
+}
+
+func TestSendImage_GroupUsesGroupMessageAPI(t *testing.T) {
+	rt := &fakeDingTalkAttachmentRT{}
+	p := &Platform{
+		robotCode:   "robot-code",
+		httpClient:  &http.Client{Transport: rt},
+		accessToken: "token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	err := p.SendImage(context.Background(), replyContext{
+		conversationId: "group-conversation",
+		senderStaffId:  "sender-id",
+		isGroup:        true,
+	}, core.ImageAttachment{FileName: "chart.png", Data: []byte("png")})
+	if err != nil {
+		t.Fatalf("SendImage() error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(rt.calls))
+	}
+	call := rt.calls[0]
+	if call.path != "/v1.0/robot/groupMessages/send" {
+		t.Fatalf("path = %q, want groupMessages/send", call.path)
+	}
+	if call.body["openConversationId"] != "group-conversation" {
+		t.Errorf("openConversationId = %v, want group-conversation", call.body["openConversationId"])
+	}
+	if _, exists := call.body["userIds"]; exists {
+		t.Errorf("group request unexpectedly contains userIds: %#v", call.body["userIds"])
+	}
+}
+
+func TestAttachmentSendRequest_GroupRequiresConversationID(t *testing.T) {
+	p := &Platform{robotCode: "robot-code"}
+
+	_, _, err := p.attachmentSendRequest(replyContext{
+		isGroup:       true,
+		senderStaffId: "sender-id",
+	}, "sampleFile", `{}`)
+	if err == nil {
+		t.Fatal("attachmentSendRequest() error = nil, want missing group conversation ID error")
+	}
 }
 
 func (f *fakeDingTalkEmotionRT) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -936,6 +1081,76 @@ func TestStartTypingAndDoneReaction(t *testing.T) {
 	}
 }
 
+func TestOnRawMessage_RichTextForwardsInlineImage(t *testing.T) {
+	const imageBody = "fake-richtext-image"
+
+	imageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte(imageBody))
+	}))
+	defer imageSrv.Close()
+
+	rt := &dingtalkDownloadRT{
+		accessToken:      "tok-richtext-image",
+		downloadURL:      imageSrv.URL,
+		failDownloadCode: "dc-v1-image",
+	}
+
+	captured := make(chan *core.Message, 1)
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured <- msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-richtext-image-1",
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"conversationTitle": "test",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"robotCode": "robot-from-callback",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "Please inspect "},
+				{"type": "picture", "downloadCode": "dc-v1-image", "pictureDownloadCode": "dc-legacy-image"},
+				{"text": "this screenshot"}
+			]
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "Please inspect this screenshot" {
+			t.Fatalf("Content = %q, want rich text", msg.Content)
+		}
+		if len(msg.Images) != 1 {
+			t.Fatalf("Images len = %d, want 1", len(msg.Images))
+		}
+		if got := string(msg.Images[0].Data); got != imageBody {
+			t.Errorf("image bytes = %q, want %q", got, imageBody)
+		}
+		if msg.Images[0].MimeType != "image/png" {
+			t.Errorf("image MIME type = %q, want image/png", msg.Images[0].MimeType)
+		}
+		if rt.requestRobotCode != "robot-from-callback" {
+			t.Errorf("download robotCode = %q, want callback robotCode", rt.requestRobotCode)
+		}
+		if !slices.Equal(rt.requestDownloadCodes, []string{"dc-v1-image", "dc-legacy-image"}) {
+			t.Errorf("download codes = %v, want v1 code then legacy fallback", rt.requestDownloadCodes)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never invoked with richText image message")
+	}
+}
+
 func TestOnRawMessage_PictureMsgTypeNotDroppedAsEmptyText(t *testing.T) {
 	// Regression test for #1128: DingTalk sometimes sends msgtype="picture"
 	// for image messages. Before the fix, this fell through to the text handler,
@@ -1028,7 +1243,7 @@ func TestHandleFileMessage_BuildsFileAttachmentWithName(t *testing.T) {
 	}))
 	defer fileSrv.Close()
 
-	rt := &dingtalkFileDownloadRT{
+	rt := &dingtalkDownloadRT{
 		accessToken: "tok-files",
 		downloadURL: fileSrv.URL,
 	}
@@ -1076,16 +1291,18 @@ func TestHandleFileMessage_BuildsFileAttachmentWithName(t *testing.T) {
 	}
 }
 
-// dingtalkFileDownloadRT mocks /v1.0/oauth2/accessToken and
+// dingtalkDownloadRT mocks /v1.0/oauth2/accessToken and
 // /v1.0/robot/messageFiles/download. The latter returns downloadURL pointing
-// to a test server that serves the actual file body. Used by
-// TestHandleFileMessage_BuildsFileAttachmentWithName.
-type dingtalkFileDownloadRT struct {
-	accessToken string
-	downloadURL string
+// to a test server that serves the actual attachment body.
+type dingtalkDownloadRT struct {
+	accessToken          string
+	downloadURL          string
+	failDownloadCode     string
+	requestRobotCode     string
+	requestDownloadCodes []string
 }
 
-func (f *dingtalkFileDownloadRT) RoundTrip(req *http.Request) (*http.Response, error) {
+func (f *dingtalkDownloadRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	switch req.URL.Path {
 	case "/v1.0/oauth2/accessToken":
 		body := fmt.Sprintf(`{"accessToken":%q,"expireIn":7200}`, f.accessToken)
@@ -1096,6 +1313,21 @@ func (f *dingtalkFileDownloadRT) RoundTrip(req *http.Request) (*http.Response, e
 			Request:    req,
 		}, nil
 	case "/v1.0/robot/messageFiles/download":
+		var requestBody struct {
+			RobotCode    string `json:"robotCode"`
+			DownloadCode string `json:"downloadCode"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&requestBody)
+		f.requestRobotCode = requestBody.RobotCode
+		f.requestDownloadCodes = append(f.requestDownloadCodes, requestBody.DownloadCode)
+		if requestBody.DownloadCode == f.failDownloadCode {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader(`{"code":"unknownError","message":"未知错误"}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
 		body := fmt.Sprintf(`{"downloadUrl":%q}`, f.downloadURL)
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -1206,7 +1438,7 @@ func TestOnMessageRepliesToUnauthorizedSender(t *testing.T) {
 		ConversationType: "1",
 		SessionWebhook:   sessionWebhook.URL,
 		Text:             chatbot.BotCallbackDataTextModel{Content: "hello"},
-	}, nil)
+	}, nil, "")
 
 	select {
 	case got := <-gotReply:
@@ -1439,5 +1671,145 @@ func TestCardTitleFromContent_UsedInReplyPayload(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for reply payload")
+	}
+}
+
+// TestOnRawMessage_RichTextWithReplyEnrichesContent verifies that the fix for
+// richText messages (which previously skipped quote/reply detection) now
+// calls formatReplyContent and prepends the quoted text.
+func TestOnRawMessage_RichTextWithReplyEnrichesContent(t *testing.T) {
+	var got *core.Message
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rt-reply-1",
+		"createAt": 2000000000000,
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "please check this"}
+			]
+		},
+		"text": {
+			"content": "please check this",
+			"isReplyMsg": true,
+			"repliedMsg": {
+				"msgType": "text",
+				"content": {
+					"text": "what about the bug?"
+				}
+			}
+		}
+	}`)
+
+	if got == nil {
+		t.Fatal("handler was not called for richText reply message")
+	}
+	expected := "引用: \"what about the bug?\"\n\nplease check this"
+	if got.Content != expected {
+		t.Errorf("message content = %q, want %q", got.Content, expected)
+	}
+}
+
+// TestOnRawMessage_RichTextWithoutIsReplyMsgUsesRichTextBody guards the first
+// half of the richText reply guard: a richText message whose "text" object has
+// no isReplyMsg flag must NOT be treated as a quoted/reply message.
+//
+// The fixtures deliberately give the richText array and the "text" object
+// different bodies ("from richtext array" vs "from text object"). That way an
+// unconditional formatReplyContent call (the regression this test locks out)
+// would return the "text" object body via its RepliedMsg == nil fast path,
+// producing a different string and failing the assertion.
+func TestOnRawMessage_RichTextWithoutIsReplyMsgUsesRichTextBody(t *testing.T) {
+	var got *core.Message
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rt-no-isreply-1",
+		"createAt": 2000000000000,
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "from richtext array"}
+			]
+		},
+		"text": {
+			"content": "from text object"
+		}
+	}`)
+
+	if got == nil {
+		t.Fatal("handler was not called for richText message without isReplyMsg")
+	}
+	if strings.HasPrefix(got.Content, "引用: ") {
+		t.Errorf("message content = %q, must not carry the quote prefix when isReplyMsg is absent", got.Content)
+	}
+	want := "from richtext array"
+	if got.Content != want {
+		t.Errorf("message content = %q, want %q (richText array body, guard must be skipped)", got.Content, want)
+	}
+}
+
+// TestOnRawMessage_RichTextReplyFlagWithoutRepliedMsgUsesRichTextBody covers
+// the second, half-boundary case: isReplyMsg is true but the repliedMsg field
+// is missing. This must not panic and must not be treated as a quoted message.
+//
+// As above, the two fixtures differ on purpose so that dropping the
+// "&& RepliedMsg != nil" half of the guard would surface as "from text object".
+func TestOnRawMessage_RichTextReplyFlagWithoutRepliedMsgUsesRichTextBody(t *testing.T) {
+	var got *core.Message
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rt-flag-no-replied-1",
+		"createAt": 2000000000000,
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "from richtext array"}
+			]
+		},
+		"text": {
+			"content": "from text object",
+			"isReplyMsg": true
+		}
+	}`)
+
+	if got == nil {
+		t.Fatal("handler was not called for richText message with isReplyMsg but no repliedMsg")
+	}
+	if strings.HasPrefix(got.Content, "引用: ") {
+		t.Errorf("message content = %q, must not carry the quote prefix when repliedMsg is absent", got.Content)
+	}
+	want := "from richtext array"
+	if got.Content != want {
+		t.Errorf("message content = %q, want %q (richText array body, guard must require repliedMsg)", got.Content, want)
 	}
 }

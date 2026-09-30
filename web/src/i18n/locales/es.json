@@ -56,8 +56,26 @@
       "overview": "Resumen",
       "providers": "Proveedores",
       "heartbeat": "Latido",
-      "settings": "Ajustes"
-    }
+      "settings": "Ajustes",
+      "workspaces": "Espacios de trabajo"
+    },
+    "workspaceMode": "Modo multi-espacio",
+    "workspaceModeHint": "Enrutar diferentes canales de chat a diferentes directorios de trabajo bajo un directorio base compartido.",
+    "workspaceModeEnable": "Activar modo multi-espacio",
+    "workspaceModeWarning": "Cambiar de modo requiere reiniciar el servicio. El work_dir único no se usa mientras el modo multi-espacio esté activo.",
+    "workspaceBaseDir": "Directorio base",
+    "workspaceBaseDirRequired": "Se requiere un directorio base para activar el modo multi-espacio.",
+    "workspaceModeConfirm": "Cambiar el modo de espacio de trabajo requiere reiniciar el servicio. ¿Continuar?",
+    "workspaceBindings": "Vínculos de canal",
+    "workspaceNoBindings": "Todavía no hay canales vinculados a un espacio de trabajo.",
+    "workspaceActive": "activo",
+    "workspaceIdle": "inactivo",
+    "workspaceAddBinding": "Vincular un canal",
+    "workspaceChannelKey": "Clave de canal",
+    "workspaceChannelName": "Nombre de canal (opcional)",
+    "workspacePath": "Ruta del espacio de trabajo",
+    "workspaceSuggestions": "Directorios sin vincular en base_dir:",
+    "workspaceBind": "Vincular"
   },
   "sessions": {
     "title": "Sesiones",

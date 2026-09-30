@@ -112,6 +112,7 @@ type Config struct {
 	Management         ManagementConfig        `toml:"management"`
 	Hooks              []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
+	BusyTimeoutMins    *int                    `toml:"busy_timeout_mins,omitempty"`  // minutes a dead agent's session busy lock may be held before the next message breaks it; 0 = disable; default 2
 	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
@@ -446,10 +447,29 @@ type HeartbeatConfig struct {
 }
 
 // AutoCompressConfig controls automatic context compression for a project.
+// AutoCompressConfig controls automatic context compression.
+//
+// The name is about the *trigger*, not the timing: this fires AFTER a turn
+// completes (see the auto-compress decision block in core/engine.go), never
+// inside the agent's own loop. Agents that compact natively mid-turn — Claude
+// Code, via autoCompactWindow — act during the loop and are more timely; this is
+// for agents that have no such mechanism, or for users who want compaction at a
+// visible, predictable turn boundary.
 type AutoCompressConfig struct {
 	Enabled    *bool `toml:"enabled,omitempty"`      // default false
 	MaxTokens  *int  `toml:"max_tokens,omitempty"`   // estimated token threshold to trigger /compress
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
+	// AllowHeuristic restores deciding from the text-length heuristic when an
+	// agent that CAN report exact usage has not reported it yet. Default false:
+	// such turns make no decision and wait for the next turn, which carries the
+	// exact number. The heuristic ignores tool results and the fixed
+	// system-prompt+tools overhead, so it was measured 2.5x off (574,797
+	// estimated vs 229,783 real).
+	//
+	// This does not apply to agents with no usage reporting at all: for them the
+	// heuristic is the only mechanism that has ever existed, and removing it
+	// would silently disable auto-compress for most of cc-connect's agents.
+	AllowHeuristic bool `toml:"allow_heuristic,omitempty"`
 }
 
 // ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
@@ -627,12 +647,28 @@ func load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	resolveEnvInConfig(cfg)
+	expandHomeInConfig(cfg)
 	if cfg.DataDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			cfg.DataDir = filepath.Join(home, ".cc-connect")
 		} else {
+			// HOME unset (common when systemd unit does not inject it):
+			// warn loudly, because a relative data_dir will be resolved
+			// differently by any subprocess that changes cwd — most
+			// notably the claude/codex/etc. agent processes that cd into
+			// work_dir before reading files written by the supervisor.
 			cfg.DataDir = ".cc-connect"
+			slog.Warn("config: data_dir empty and HOME unset; falling back to relative path. Set data_dir to an absolute path in config.toml, or ensure the service manager injects HOME.")
 		}
+	}
+	cfg.DataDir = expandUserPath(cfg.DataDir)
+	// Always resolve to an absolute path so a data_dir written by the
+	// supervisor is read back at the same location by agent subprocesses
+	// regardless of their working directory. Users who write a relative
+	// data_dir explicitly still get it anchored to the supervisor's cwd
+	// (the same behaviour they would see running any other CLI).
+	if abs, err := filepath.Abs(cfg.DataDir); err == nil {
+		cfg.DataDir = abs
 	}
 	cfg.AttachmentSend = strings.ToLower(strings.TrimSpace(cfg.AttachmentSend))
 	if cfg.AttachmentSend == "" {
@@ -671,6 +707,38 @@ var envPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 func resolveEnvInConfig(cfg *Config) {
 	resolveEnvValue(reflect.ValueOf(cfg))
+}
+
+// expandHomeInConfig expands a leading ~ / ~/ in path-like agent options
+// (work_dir, base_dir) to the user's home directory. Without this, a config
+// like work_dir = "~/.codex/workspace" is passed literally to exec.Cmd.Dir,
+// which fails at spawn time with a misleading "fork/exec ...: no such file
+// or directory" that points at the agent binary instead of the directory.
+func expandHomeInConfig(cfg *Config) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	for i := range cfg.Projects {
+		proj := &cfg.Projects[i]
+		proj.BaseDir = expandLeadingHome(proj.BaseDir, home)
+		if v, ok := proj.Agent.Options["work_dir"]; ok {
+			if s, ok := v.(string); ok {
+				proj.Agent.Options["work_dir"] = expandLeadingHome(s, home)
+			}
+		}
+	}
+}
+
+// expandLeadingHome expands "~" and "~/" at the start of a path to home.
+func expandLeadingHome(s, home string) string {
+	if s == "~" {
+		return home
+	}
+	if strings.HasPrefix(s, "~/") {
+		return filepath.Join(home, s[2:])
+	}
+	return s
 }
 
 func resolveEnvValue(v reflect.Value) {
@@ -3381,6 +3449,11 @@ type ProjectSettingsUpdate struct {
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
+	// WorkspaceMode and WorkspaceBaseDir control the project-level
+	// multi-workspace feature (ProjectConfig.Mode/BaseDir), distinct from
+	// Mode above (which is the agent permission mode, e.g. yolo/plan).
+	WorkspaceMode    *string
+	WorkspaceBaseDir *string
 }
 
 // SaveProjectSettings persists project-level settings and the global language to config.toml.
@@ -3490,6 +3563,22 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 				proj.Agent.Options["mode"] = mode
 			}
 		}
+		if update.WorkspaceBaseDir != nil {
+			proj.BaseDir = strings.TrimSpace(*update.WorkspaceBaseDir)
+		}
+		if update.WorkspaceMode != nil {
+			mode := strings.TrimSpace(*update.WorkspaceMode)
+			if mode == "single" {
+				mode = ""
+			}
+			if mode != "" && mode != "multi-workspace" {
+				return fmt.Errorf("invalid workspace_mode %q", mode)
+			}
+			if mode == "multi-workspace" && proj.BaseDir == "" {
+				return fmt.Errorf("workspace_base_dir is required to enable multi-workspace mode")
+			}
+			proj.Mode = mode
+		}
 		if update.PlatformAllowFrom != nil {
 			for j := range proj.Platforms {
 				typ := strings.TrimSpace(proj.Platforms[j].Type)
@@ -3555,6 +3644,12 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.InjectSender != nil {
 			result["inject_sender"] = *p.InjectSender
+		}
+		if strings.TrimSpace(p.Mode) != "" {
+			result["workspace_mode"] = p.Mode
+		}
+		if strings.TrimSpace(p.BaseDir) != "" {
+			result["workspace_base_dir"] = p.BaseDir
 		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {

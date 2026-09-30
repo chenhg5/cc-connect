@@ -82,6 +82,13 @@ temp/
 *.pid
 *.log
 
+# Per-workspace session stores (<engine>_ws_<hash>.json, see
+# Engine.getOrCreateWorkspaceAgent). They are derived from the engine's own
+# session store, so they belong next to it — never in the working tree. This
+# is a guard for files already on disk from before that derivation was
+# corrected; the derivation itself no longer produces them.
+*_ws_????????.json
+
 # ============================================================================
 # IDE & Editor
 # ============================================================================

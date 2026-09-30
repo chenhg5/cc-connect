@@ -103,7 +103,7 @@ func TestLaunchdStatusUsesUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 	}
 }
 
-func TestRestartPrefersGUIDomainWhenAvailable(t *testing.T) {
+func TestRestartKeepsLoadedUserDomainWhenGUIAvailable(t *testing.T) {
 	orig := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = orig })
 
@@ -113,14 +113,6 @@ func TestRestartPrefersGUIDomainWhenAvailable(t *testing.T) {
 	if origHome != "" {
 		t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
 	}
-	plistPath := launchdPlistPath()
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	if err := os.WriteFile(plistPath, []byte("plist"), 0644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
 	guiDomain := launchdGUIDomain()
 	userDomain := launchdUserDomain()
 	guiTarget := launchdTarget(guiDomain)
@@ -144,19 +136,13 @@ func TestRestartPrefersGUIDomainWhenAvailable(t *testing.T) {
 			default:
 				return "", fmt.Errorf("unexpected print target %q", args[1])
 			}
-		case "bootout":
-			return "", nil
-		case "bootstrap":
-			if args[1] != guiDomain {
-				t.Fatalf("bootstrap domain = %q, want %q", args[1], guiDomain)
-			}
-			return "", nil
 		case "kickstart":
-			if args[len(args)-1] != guiTarget {
-				t.Fatalf("kickstart target = %q, want %q", args[len(args)-1], guiTarget)
+			if args[len(args)-1] != userTarget {
+				t.Fatalf("kickstart target = %q, want %q", args[len(args)-1], userTarget)
 			}
 			return "", nil
 		default:
+			t.Fatalf("unexpected launchctl call: %v", args)
 			return "", nil
 		}
 	}
@@ -166,11 +152,8 @@ func TestRestartPrefersGUIDomainWhenAvailable(t *testing.T) {
 		t.Fatalf("Restart() error = %v", err)
 	}
 
-	if !containsCall(calls, "bootstrap "+guiDomain+" "+plistPath) {
-		t.Fatalf("expected bootstrap to gui domain, calls = %#v", calls)
-	}
-	if !containsCall(calls, "kickstart -kp "+guiTarget) {
-		t.Fatalf("expected kickstart to gui target, calls = %#v", calls)
+	if !containsCall(calls, "kickstart -kp "+userTarget) {
+		t.Fatalf("expected kickstart of loaded user service, calls = %#v", calls)
 	}
 }
 
@@ -184,14 +167,6 @@ func TestRestartKeepsUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 	if origHome != "" {
 		t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
 	}
-	plistPath := launchdPlistPath()
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	if err := os.WriteFile(plistPath, []byte("plist"), 0644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
 	guiDomain := launchdGUIDomain()
 	userDomain := launchdUserDomain()
 	userTarget := launchdTarget(userDomain)
@@ -214,19 +189,13 @@ func TestRestartKeepsUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 			default:
 				return "", fmt.Errorf("unexpected print target %q", args[1])
 			}
-		case "bootout":
-			return "", nil
-		case "bootstrap":
-			if args[1] != userDomain {
-				t.Fatalf("bootstrap domain = %q, want %q", args[1], userDomain)
-			}
-			return "", nil
 		case "kickstart":
 			if args[len(args)-1] != userTarget {
 				t.Fatalf("kickstart target = %q, want %q", args[len(args)-1], userTarget)
 			}
 			return "", nil
 		default:
+			t.Fatalf("unexpected launchctl call: %v", args)
 			return "", nil
 		}
 	}
@@ -236,11 +205,39 @@ func TestRestartKeepsUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 		t.Fatalf("Restart() error = %v", err)
 	}
 
-	if !containsCall(calls, "bootstrap "+userDomain+" "+plistPath) {
-		t.Fatalf("expected bootstrap to user domain, calls = %#v", calls)
-	}
 	if !containsCall(calls, "kickstart -kp "+userTarget) {
 		t.Fatalf("expected kickstart to user target, calls = %#v", calls)
+	}
+}
+
+func TestRestartBootstrapsUnloadedService(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	guiDomain := launchdGUIDomain()
+	guiTarget := launchdTarget(guiDomain)
+	var calls []string
+	runLaunchctl = func(args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if args[0] == "print" && args[1] == guiDomain {
+			return "subsystem", nil
+		}
+		if args[0] == "print" {
+			return "not loaded", fmt.Errorf("exit status 113")
+		}
+		if args[0] == "bootstrap" || args[0] == "kickstart" {
+			return "", nil
+		}
+		t.Fatalf("unexpected launchctl call: %v", args)
+		return "", nil
+	}
+
+	if err := (&launchdManager{}).Restart(); err != nil {
+		t.Fatalf("Restart() error = %v", err)
+	}
+	if !containsCall(calls, "bootstrap "+guiDomain+" "+launchdPlistPath()) ||
+		!containsCall(calls, "kickstart -kp "+guiTarget) {
+		t.Fatalf("expected bootstrap and kickstart, calls = %#v", calls)
 	}
 }
 
@@ -510,5 +507,63 @@ func TestInstallLaunchd_TightensExistingPlistFrom0644(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("plist mode after reinstall = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestBuildPlist_IncludesHOME regresses the "Append system prompt file not
+// found" bug: launchd LaunchAgents do not always propagate HOME, so the
+// daemon (and Claude / Codex / etc. subprocesses it spawns) would call
+// os.UserHomeDir(), get an error, and config.Load would fall back to a
+// relative data_dir that agent subprocesses resolved against work_dir.
+func TestBuildPlist_IncludesHOME(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		HomeDir:    "/home/app",
+	}
+	out := buildPlist(cfg)
+	if !strings.Contains(out, "<key>HOME</key>\n\t\t<string>/home/app</string>") {
+		t.Fatalf("plist should include HOME=/home/app; got:\n%s", out)
+	}
+}
+
+// TestBuildPlist_OmitsHOMEWhenEmpty ensures we do not emit an empty
+// <string></string> for HOME when the caller could not determine one.
+func TestBuildPlist_OmitsHOMEWhenEmpty(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+	}
+	out := buildPlist(cfg)
+	if strings.Contains(out, "<key>HOME</key>") {
+		t.Fatalf("plist should omit HOME when HomeDir empty; got:\n%s", out)
+	}
+}
+
+// TestBuildPlist_EnvExtraHOMEDoesNotOverrideTemplateHOME pins that the
+// template-owned HOME wins over any HOME leaking in through EnvExtra —
+// the same guarantee we make for PATH and CC_LOG_FILE.
+func TestBuildPlist_EnvExtraHOMEDoesNotOverrideTemplateHOME(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		HomeDir:    "/home/app",
+		EnvExtra:   map[string]string{"HOME": "/should-not-override"},
+	}
+	out := buildPlist(cfg)
+	if strings.Contains(out, "/should-not-override") {
+		t.Fatalf("EnvExtra HOME leaked past template ownership: %s", out)
+	}
+	if !strings.Contains(out, "<string>/home/app</string>") {
+		t.Fatalf("expected template HOME /home/app to survive; got:\n%s", out)
 	}
 }

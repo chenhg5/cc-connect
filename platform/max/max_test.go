@@ -272,9 +272,10 @@ func (m *mockAPI) handleUploads(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCDN mimics per-kind MAX CDN response shapes:
-//   image: {"photos": {"<id>": {"token": "..."}}}
-//   file:  {"token": "..."}
-//   video/audio: XML "<retval>1</retval>" (token comes from /uploads instead)
+//
+//	image: {"photos": {"<id>": {"token": "..."}}}
+//	file:  {"token": "..."}
+//	video/audio: XML "<retval>1</retval>" (token comes from /uploads instead)
 func (m *mockAPI) handleCDN(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt32(&m.cdnCalls, 1)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -666,7 +667,6 @@ func TestSendAudio(t *testing.T) {
 	}
 }
 
-
 func TestNormalizeLineBreaks(t *testing.T) {
 	cases := []struct {
 		name, in, want string
@@ -787,6 +787,29 @@ func TestNewWebhookPathDefaults(t *testing.T) {
 		}
 		if got := p.(*Platform).webhookPath; got != c.want {
 			t.Errorf("webhook_path=%q: got %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestNewMaxAttachmentSize(t *testing.T) {
+	cases := []struct {
+		name string
+		opts map[string]any
+		want int64
+	}{
+		{"default", map[string]any{"token": "t"}, core.DefaultMaxAttachmentSize},
+		{"override int", map[string]any{"token": "t", "max_attachment_size_mb": 100}, int64(100) << 20},
+		{"override int64", map[string]any{"token": "t", "max_attachment_size_mb": int64(64)}, int64(64) << 20},
+		{"override float", map[string]any{"token": "t", "max_attachment_size_mb": 32.0}, int64(32) << 20},
+		{"zero keeps default", map[string]any{"token": "t", "max_attachment_size_mb": 0}, core.DefaultMaxAttachmentSize},
+	}
+	for _, c := range cases {
+		p, err := New(c.opts)
+		if err != nil {
+			t.Fatalf("%s: New: %v", c.name, err)
+		}
+		if got := p.(*Platform).maxAttachmentBytes; got != c.want {
+			t.Errorf("%s: maxAttachmentBytes = %d, want %d", c.name, got, c.want)
 		}
 	}
 }

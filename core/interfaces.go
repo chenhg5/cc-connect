@@ -505,6 +505,14 @@ type ContextUsageReporter interface {
 	GetContextUsage() *ContextUsage
 }
 
+// UsageSourceReporter is an optional refinement of ContextUsageReporter: it
+// reports where the current usage value came from. Used by auto-compress to
+// distinguish a live API-reported number ("event") from one recovered out of
+// the on-disk transcript ("transcript-recovered") in logs and diagnostics.
+type UsageSourceReporter interface {
+	GetUsageSource() string
+}
+
 // ContextUsage describes runtime context consumption for the active session.
 type ContextUsage struct {
 	// UsedTokens is the current token load to compare against ContextWindow when
@@ -557,6 +565,13 @@ type CommandProvider interface {
 // different agent types.
 type SkillProvider interface {
 	SkillDirs() []string
+}
+
+// SkillCatalogProvider supplies the agent's authoritative enabled skills for
+// its current workspace. It takes precedence over directory discovery; errors
+// must not fall back to scanning directories that can contain disabled skills.
+type SkillCatalogProvider interface {
+	ListSkills(ctx context.Context) ([]*Skill, error)
 }
 
 // SessionDeleter is an optional interface for agents that support deleting sessions.

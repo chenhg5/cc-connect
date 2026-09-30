@@ -31,12 +31,11 @@ const (
 	// pollTimeout, otherwise transient MAX backend lag pushes header arrival
 	// past the deadline and the client cancels the long-poll, triggering a
 	// retry storm.
-	httpTimeout = 90 * time.Second
+	httpTimeout             = 90 * time.Second
 	initialReconnectBackoff = time.Second
 	maxReconnectBackoff     = 30 * time.Second
 	stableConnectionWindow  = 10 * time.Second
 	typingInterval          = 4 * time.Second
-	maxAttachmentBytes      = 25 * 1024 * 1024 // 25 MiB cap per downloaded attachment
 	attachmentDownloadTO    = 60 * time.Second
 	attachmentUploadTO      = 5 * time.Minute
 	// attachmentReadyDelay is the pause between CDN upload and POST /messages.
@@ -67,6 +66,7 @@ type Platform struct {
 	webhookPath         string
 	webhookSecret       string
 	resubscribeInterval time.Duration
+	maxAttachmentBytes  int64 // inbound per-attachment download cap; from max_attachment_size_mb
 
 	mu           sync.RWMutex
 	handler      core.MessageHandler
@@ -135,6 +135,25 @@ func New(opts map[string]any) (core.Platform, error) {
 		resubscribeInterval = d
 	}
 
+	// Inbound attachment download cap. Defaults to the shared
+	// core.DefaultMaxAttachmentSize (50 MiB); override per-platform with
+	// max_attachment_size_mb (MiB).
+	maxAttachBytes := core.DefaultMaxAttachmentSize
+	if raw, ok := opts["max_attachment_size_mb"]; ok {
+		var mb int64
+		switch v := raw.(type) {
+		case int64:
+			mb = v
+		case int:
+			mb = int64(v)
+		case float64:
+			mb = int64(v)
+		}
+		if mb > 0 {
+			maxAttachBytes = mb << 20
+		}
+	}
+
 	return &Platform{
 		token:               token,
 		apiBase:             apiBase,
@@ -144,6 +163,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		webhookPath:         webhookPath,
 		webhookSecret:       webhookSecret,
 		resubscribeInterval: resubscribeInterval,
+		maxAttachmentBytes:  maxAttachBytes,
 		client:              &http.Client{Timeout: httpTimeout},
 		uploadClient:        &http.Client{Timeout: attachmentUploadTO},
 	}, nil
@@ -1176,7 +1196,7 @@ func audioFormatFromMime(mime, filename string) string {
 }
 
 // downloadAttachment GETs an arbitrary URL (typically a pre-signed CDN link
-// from MAX), capping the response at maxAttachmentBytes. The URLs MAX serves
+// from MAX), capping the response at p.maxAttachmentBytes. The URLs MAX serves
 // for image/file payloads are already authenticated, so no bot token is
 // attached to the request.
 func (p *Platform) downloadAttachment(ctx context.Context, url string) ([]byte, string, error) {
@@ -1197,12 +1217,12 @@ func (p *Platform) downloadAttachment(ctx context.Context, url string) ([]byte, 
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentBytes+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, p.maxAttachmentBytes+1))
 	if err != nil {
 		return nil, "", err
 	}
-	if len(data) > maxAttachmentBytes {
-		return nil, "", fmt.Errorf("attachment exceeds %d bytes", maxAttachmentBytes)
+	if int64(len(data)) > p.maxAttachmentBytes {
+		return nil, "", fmt.Errorf("attachment exceeds %d bytes", p.maxAttachmentBytes)
 	}
 	return data, resp.Header.Get("Content-Type"), nil
 }

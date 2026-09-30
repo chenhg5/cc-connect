@@ -29,6 +29,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -128,6 +129,128 @@ func (a *cujAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
 }
 func (a *cujAgent) Stop() error { return nil }
 
+type cujFastResumeAgent struct {
+	cujAgent
+	fast bool
+}
+
+func (a *cujFastResumeAgent) SetFastMode(enabled bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fast = enabled
+}
+
+func (a *cujFastResumeAgent) FastModeEnabled() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.fast
+}
+
+func (a *cujFastResumeAgent) StartSession(_ context.Context, resumeID string) (AgentSession, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tier := "default"
+	if a.fast {
+		tier = "fast"
+	}
+	s := newCUJAgentSession()
+	s.reply = fmt.Sprintf("tier=%s resumed=%s", tier, resumeID)
+	return s, nil
+}
+
+func TestCUJ_B13_FastModeResumesConversationAndPreservesHistory(t *testing.T) {
+	platform := &stubPlatformEngine{n: "test"}
+	agent := &cujFastResumeAgent{}
+	engine := NewEngine("test", agent, []Platform{platform}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	t.Cleanup(func() { _ = engine.Stop() })
+	env := &cujEnv{t: t, engine: engine, plat: platform}
+
+	env.userSends("fast-user", "before-fast")
+	env.waitFor("first answer", 2*time.Second, func() bool {
+		return strings.Contains(strings.Join(platform.getSent(), "\n"), "tier=default")
+	})
+	env.userSends("fast-user", "/fast on")
+	env.waitFor("fast mode enabled", 2*time.Second, func() bool {
+		return strings.Contains(strings.Join(platform.getSent(), "\n"), engine.i18n.T(MsgFastChangedOn))
+	})
+	env.userSends("fast-user", "after-fast")
+	env.waitFor("resumed answer with new tier", 2*time.Second, func() bool {
+		return strings.Contains(strings.Join(platform.getSent(), "\n"), "tier=fast resumed=cuj-agent-session")
+	})
+	before := len(platform.getSent())
+	env.userSends("fast-user", "/history")
+	env.waitFor("original conversation in history", 2*time.Second, func() bool {
+		messages := platform.getSent()
+		return len(messages) > before && strings.Contains(strings.Join(messages[before:], "\n"), "before-fast")
+	})
+}
+
+type cujFastWorkspaceAgent struct {
+	namedStubModelModeAgent
+}
+
+func (a *cujFastWorkspaceAgent) WorkspaceAgentOptions() map[string]any {
+	return map[string]any{"service_tier": "fast"}
+}
+
+func TestCUJ_H6_FastModeWorkspaceOverridesSurviveRestart(t *testing.T) {
+	const agentName = "cuj-fast-workspace-agent"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		agent := &cujFastWorkspaceAgent{namedStubModelModeAgent: namedStubModelModeAgent{name: agentName}}
+		agent.fastMode = opts["service_tier"] == "fast"
+		return agent, nil
+	})
+	t.Cleanup(func() { delete(agentFactories, agentName) })
+	root := t.TempDir()
+	bindings := filepath.Join(root, "bindings.json")
+	state := filepath.Join(root, "state.json")
+	workspaceA, workspaceB := filepath.Join(root, "a"), filepath.Join(root, "b")
+	for _, dir := range []string{workspaceA, workspaceB} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	platform := &stubPlatformEngine{n: "feishu"}
+	newEngine := func() *Engine {
+		global := &cujFastWorkspaceAgent{namedStubModelModeAgent: namedStubModelModeAgent{name: agentName}}
+		global.fastMode = true
+		e := NewEngine("test", global, []Platform{platform}, filepath.Join(root, "sessions.json"), LangEnglish)
+		e.SetMultiWorkspace(root, bindings)
+		e.SetProjectStateStore(NewProjectStateStore(state))
+		e.SetFastModeSaveFunc(func(string) error {
+			t.Error("workspace toggle must not save project-wide tier")
+			return nil
+		})
+		t.Cleanup(func() { _ = e.Stop() })
+		return e
+	}
+	engine := newEngine()
+	engine.workspaceBindings.Bind("project:test", "feishu:channel-a", "a", normalizeWorkspacePath(workspaceA))
+	engine.workspaceBindings.Bind("project:test", "feishu:channel-b", "b", normalizeWorkspacePath(workspaceB))
+	send := func(channel, command string, want MsgKey) {
+		t.Helper()
+		before := len(platform.getSent())
+		engine.ReceiveMessage(platform, &Message{
+			SessionKey: "feishu:" + channel + ":user", Platform: "feishu",
+			ChannelKey: channel, UserID: "user", Content: command, ReplyCtx: "ctx",
+		})
+		env := &cujEnv{t: t, engine: engine, plat: platform}
+		env.waitFor(channel+" "+command, 2*time.Second, func() bool {
+			messages := platform.getSent()
+			return len(messages) > before && strings.Contains(strings.Join(messages[before:], "\n"), engine.i18n.T(want))
+		})
+	}
+	send("channel-a", "/fast on", MsgFastChangedOn)
+	send("channel-b", "/fast off", MsgFastChangedOff)
+	send("channel-a", "/fast", MsgFastEnabled)
+	if err := engine.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	engine = newEngine()
+	send("channel-a", "/fast", MsgFastEnabled)
+	send("channel-b", "/fast", MsgFastDisabled)
+}
+
 // cujAgentSession is an AgentSession whose reply is controllable per-Send.
 // Tests can set reply (and optionally toolEvent) before each Send to drive
 // scenarios like "agent calls tool", "agent returns error", "agent succeeds".
@@ -158,6 +281,7 @@ type cujAgentSession struct {
 
 	// observed
 	sentPrompts []string
+	sentImages  [][]ImageAttachment
 	closeCount  int
 }
 
@@ -178,9 +302,10 @@ func newCUJAgentSession() *cujAgentSession {
 	}
 }
 
-func (s *cujAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *cujAgentSession) Send(prompt string, _ string, images []ImageAttachment, _ []FileAttachment) error {
 	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
+	s.sentImages = append(s.sentImages, cloneCUJImages(images))
 	reply := s.reply
 	delay := s.delayMs
 	override := s.nextEventOverride
@@ -239,6 +364,27 @@ func (s *cujAgentSession) getSentPrompts() []string {
 	defer s.mu.Unlock()
 	out := make([]string, len(s.sentPrompts))
 	copy(out, s.sentPrompts)
+	return out
+}
+
+// Copy attachment bytes as well as the slice so observations remain independent
+// of later caller mutations and can be read safely while the session is running.
+func cloneCUJImages(images []ImageAttachment) []ImageAttachment {
+	out := make([]ImageAttachment, len(images))
+	for i, image := range images {
+		out[i] = image
+		out[i].Data = append([]byte(nil), image.Data...)
+	}
+	return out
+}
+
+func (s *cujAgentSession) getSentImages() [][]ImageAttachment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][]ImageAttachment, len(s.sentImages))
+	for i, images := range s.sentImages {
+		out[i] = cloneCUJImages(images)
+	}
 	return out
 }
 
@@ -1151,36 +1297,60 @@ func TestCUJ_A2_MultiTurnAgentReceivesHistory(t *testing.T) {
 	}
 }
 
-// CUJ-A3 · User uploads image → engine routes it to the agent.
-// (No real vision LLM; we assert the image attachment reaches the agent.)
+// CUJ-A3 · User sends text with an image, an image alone, then text alone.
+// Each turn receives a reply, and only that turn's images reach the agent.
 func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
-	plat := &stubPlatformEngine{n: "test"}
-	agent := &cujAgent{}
-	dir := t.TempDir()
-	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
-
-	msg := &Message{
-		SessionKey: "test:img", Platform: "test", MessageID: "img1",
-		UserID: "img", UserName: "img",
-		Content:  "what is in this image",
-		Images:   []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
-		ReplyCtx: "ctx",
+	env := newCUJEnv(t)
+	t.Cleanup(func() { _ = env.engine.Stop() })
+	turns := []struct {
+		content string
+		images  []ImageAttachment
+	}{
+		{
+			content: "what is in this image",
+			images:  []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG chart"), FileName: "chart.png"}},
+		},
+		{
+			images: []ImageAttachment{{MimeType: "image/jpeg", Data: []byte("\xff\xd8 screenshot"), FileName: "screenshot.jpg"}},
+		},
+		{content: "thanks, no new image this time"},
 	}
-	e.ReceiveMessage(plat, msg)
+	for i, turn := range turns {
+		env.engine.ReceiveMessage(env.plat, &Message{
+			SessionKey: "test:img", Platform: "test", MessageID: fmt.Sprintf("img%d", i+1),
+			UserID: "img", UserName: "img", Content: turn.content,
+			Images: turn.images, ReplyCtx: "ctx",
+		})
+		env.waitFor(fmt.Sprintf("reply to image journey turn %d", i+1), 2*time.Second, func() bool {
+			count := 0
+			for _, reply := range env.plat.getSent() {
+				if reply == "ok" {
+					count++
+				}
+			}
+			return count >= i+1
+		})
 
-	deadline := time.After(2 * time.Second)
-	for {
-		agent.mu.Lock()
-		n := len(agent.sessions)
-		agent.mu.Unlock()
-		if n > 0 {
-			break
+		env.agent.mu.Lock()
+		if len(env.agent.sessions) != 1 {
+			n := len(env.agent.sessions)
+			env.agent.mu.Unlock()
+			t.Fatalf("turn %d: agent sessions = %d, want one continued session", i+1, n)
 		}
-		select {
-		case <-deadline:
-			t.Fatal("agent never received the message with image")
-		default:
-			time.Sleep(10 * time.Millisecond)
+		sess := env.agent.sessions[0]
+		env.agent.mu.Unlock()
+		sent := sess.getSentImages()
+		if len(sent) != i+1 {
+			t.Fatalf("turn %d: agent received %d sends, want %d", i+1, len(sent), i+1)
+		}
+		got := sent[i]
+		if len(got) != len(turn.images) {
+			t.Fatalf("turn %d: agent received %d images, want %d", i+1, len(got), len(turn.images))
+		}
+		for j, want := range turn.images {
+			if got[j].MimeType != want.MimeType || got[j].FileName != want.FileName || !bytes.Equal(got[j].Data, want.Data) {
+				t.Fatalf("turn %d image %d: got %#v, want %#v", i+1, j+1, got[j], want)
+			}
 		}
 	}
 }
@@ -2442,4 +2612,64 @@ func TestCUJ_H4_FeishuTopicsKeepWorkspaceBindingsIsolated(t *testing.T) {
 	if got := lastReply(); !strings.Contains(got, normalizeWorkspacePath(workspaceB)) {
 		t.Fatalf("topic B changed after topic A unbind: %q", got)
 	}
+}
+
+// Lists and invocation must agree across groups, including after rebinding.
+func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
+	t.Run("EnabledCatalogExcludesUnselectedSkills", func(t *testing.T) {
+		p := &stubPlatformEngine{n: "feishu"}
+		e, a := newCatalogSkillsEngine(t, p)
+		e.ReceiveMessage(p, skillMessage(p.Name(), "a", "/skills"))
+		sent := p.getSent()
+		text := sent[len(sent)-1]
+		if !strings.Contains(text, "/plugin:enabled") || strings.Contains(text, "disabled-sibling") || strings.Contains(text, "claude-only") || strings.Contains(text, "cached-only") {
+			t.Fatalf("incorrect native catalog: %s", text)
+		}
+		before := len(sent)
+		e.ReceiveMessage(p, skillMessage(p.Name(), "a", "/plugin:enabled"))
+		env := &cujEnv{t: t, engine: e, plat: p}
+		env.waitFor("native skill response", 3*time.Second, func() bool {
+			for _, text := range p.getSent()[before:] {
+				if strings.Contains(text, "Native selected instructions") {
+					return true
+				}
+			}
+			return false
+		})
+		// Simulate disabling/removing the skill in the agent's native manager.
+		a.catalog = nil
+		e.ReceiveMessage(p, skillMessage(p.Name(), "a", "/skills"))
+		sent = p.getSent()
+		if text := sent[len(sent)-1]; !strings.Contains(text, e.i18n.T(MsgSkillsEmpty)) {
+			t.Fatalf("disabled skill still listed: %s", text)
+		}
+	})
+	p := &stubPlatformEngine{n: "feishu"}
+	e, a, b := newWorkspaceSkillsEngine(t, p)
+	for _, channel := range []string{"a", "b"} {
+		e.ReceiveMessage(p, skillMessage(p.Name(), channel, "/skills"))
+		sent := p.getSent()
+		other := "a"
+		if channel == "a" {
+			other = "b"
+		}
+		assertWorkspaceSkills(t, sent[len(sent)-1], channel, other)
+	}
+	for channel, ws := range map[string]string{"a": a, "b": b} {
+		before := len(p.getSent())
+		e.ReceiveMessage(p, skillMessage(p.Name(), channel, "/SHARED_SKILL"))
+		env := &cujEnv{t: t, engine: e, plat: p}
+		env.waitFor("workspace skill response", 3*time.Second, func() bool {
+			for _, text := range p.getSent()[before:] {
+				if strings.Contains(text, "Executed in "+ws) && strings.Contains(text, "Instructions "+channel) {
+					return true
+				}
+			}
+			return false
+		})
+	}
+	e.ReceiveMessage(p, skillMessage(p.Name(), "a", "/workspace bind b"))
+	e.ReceiveMessage(p, skillMessage(p.Name(), "a", "/skills"))
+	sent := p.getSent()
+	assertWorkspaceSkills(t, sent[len(sent)-1], "b", "a")
 }
