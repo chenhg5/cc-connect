@@ -299,6 +299,18 @@ type CardSender interface {
 	ReplyCard(ctx context.Context, replyCtx any, card *Card) error
 }
 
+// AskQuestionCardSender is an optional interface for platforms that can render
+// an AskUserQuestion prompt as a native rich card combining option buttons
+// with a free-form text input (e.g. Feishu card schema 2.0 with an input +
+// form_submit pair). title/body/note are pre-rendered, localized strings;
+// q carries the structured options; qIdx identifies the question batch for
+// the "askq:<qIdx>:<optIdx>" callback value. Implementations should return an
+// error (e.g. for MultiSelect, where buttons would resolve on first click)
+// so the engine falls back to the generic card path.
+type AskQuestionCardSender interface {
+	SendAskQuestionCard(ctx context.Context, replyCtx any, title, body, note string, q UserQuestion, qIdx int) error
+}
+
 // CardNavigationHandler is called by platforms to render a card for in-place
 // card updates (e.g. Feishu card.action.trigger callback). The action string
 // uses prefixes like "nav:/model" or "act:/model 3".

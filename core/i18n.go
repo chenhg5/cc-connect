@@ -450,12 +450,13 @@ const (
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
-	MsgAskQuestionTitle     MsgKey = "ask_question_title"
-	MsgAskQuestionNote      MsgKey = "ask_question_note"
-	MsgAskQuestionNoteMulti MsgKey = "ask_question_note_multi"
-	MsgAskQuestionMulti     MsgKey = "ask_question_multi"
-	MsgAskQuestionPrompt    MsgKey = "ask_question_prompt"
-	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
+	MsgAskQuestionTitle        MsgKey = "ask_question_title"
+	MsgAskQuestionNote         MsgKey = "ask_question_note"
+	MsgAskQuestionNoteMulti    MsgKey = "ask_question_note_multi"
+	MsgAskQuestionNoteFreeform MsgKey = "ask_question_note_freeform"
+	MsgAskQuestionMulti        MsgKey = "ask_question_multi"
+	MsgAskQuestionPrompt       MsgKey = "ask_question_prompt"
+	MsgAskQuestionAnswered     MsgKey = "ask_question_answered"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -2786,6 +2787,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "請回覆逗號分隔的選項編號（如 1,3）或直接輸入你的回答",
 		LangJapanese:           "カンマ区切りの番号（例: 1,3）で返信するか、直接回答を入力してください",
 		LangSpanish:            "Responda con los números de opción separados por comas (ej. 1,3) o escriba su respuesta",
+	},
+	MsgAskQuestionNoteFreeform: {
+		LangEnglish:            "None of the options fit? Type your answer in the input box below — it is passed back to the agent as-is",
+		LangChinese:            "选项不合适？直接在下方输入框输入你的想法，会原样作为回答传回",
+		LangTraditionalChinese: "選項不合適？直接在下方輸入框輸入你的想法，會原樣作為回答傳回",
+		LangJapanese:           "選択肢が合わない場合は、下の入力欄に直接回答を入力してください（そのまま agent に渡されます）",
+		LangSpanish:            "¿Ninguna opción encaja? Escribe tu respuesta en el cuadro de abajo; se pasa al agente tal cual",
 	},
 	MsgAskQuestionMulti: {
 		LangEnglish:            " (multiple selections allowed, separate with commas)",
