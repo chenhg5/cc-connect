@@ -38,11 +38,20 @@ type WSPlatform struct {
 	reqSeq      atomic.Int64 // monotonic counter for generating unique req_id
 	missedPong  atomic.Int32 // consecutive heartbeat acks not received
 	pendingAcks sync.Map     // req_id -> chan wsAckResult, for sequential send with ack waiting
+	quota       *outboundQuota
+	stopOnce    sync.Once
+	stopErr     error
+
+	// This lock only guards admission/lifecycle state, never quota or network I/O.
+	unauthorizedMu      sync.Mutex
+	unauthorizedCancel  context.CancelFunc // non-nil until the single task exits
+	unauthorizedStopped bool
 }
 
 const (
-	wsAckTimeout      = 5 * time.Second
-	wsMediaAckTimeout = 30 * time.Second
+	wsAckTimeout               = 5 * time.Second
+	wsMediaAckTimeout          = 30 * time.Second
+	wsUnauthorizedReplyTimeout = 5 * time.Second
 )
 
 var errWSAckTimeout = errors.New("wecom-ws: ack timeout")
@@ -131,11 +140,17 @@ func newWebSocket(opts map[string]any) (core.Platform, error) {
 		wsURL = wsEndpoint
 	}
 
+	quota, err := newOutboundQuota(opts, quotaAccountKey{mode: "websocket", endpoint: quotaEndpoint(wsURL), appID: botID})
+	if err != nil {
+		return nil, err
+	}
+
 	return &WSPlatform{
 		botID:     botID,
 		secret:    secret,
 		allowFrom: allowFrom,
 		wsURL:     wsURL,
+		quota:     quota,
 	}, nil
 }
 
@@ -398,9 +413,7 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 
 	if !core.AllowList(p.allowFrom, body.From.UserID) {
 		slog.Debug("wecom-ws: message from unauthorized user", "user", body.From.UserID)
-		if err := p.Reply(context.Background(), rctx, core.UnauthorizedAccessMessage); err != nil {
-			slog.Warn("wecom-ws: unauthorized reply failed", "error", err)
-		}
+		p.replyUnauthorized(rctx)
 		return
 	}
 
@@ -480,6 +493,53 @@ func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error 
 		return nil
 	}
 
+	if err := p.replyStream(ctx, rc, content); err != nil {
+		slog.Error("wecom-ws: reply failed", "user", rc.userID, "error", err)
+		return err
+	}
+	slog.Debug("wecom-ws: reply sent", "user", rc.userID, "len", len(content))
+	return nil
+}
+
+// Denial notices are best effort. Admit before spawning so hostile callbacks
+// cannot build up goroutines, timers, or waiters, even across different chats.
+func (p *WSPlatform) replyUnauthorized(rc wsReplyContext) {
+	p.unauthorizedMu.Lock()
+	if p.unauthorizedStopped || p.unauthorizedCancel != nil {
+		p.unauthorizedMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wsUnauthorizedReplyTimeout)
+	p.unauthorizedCancel = cancel
+	p.unauthorizedMu.Unlock()
+
+	go func() {
+		defer func() {
+			cancel()
+			p.unauthorizedMu.Lock()
+			p.unauthorizedCancel = nil
+			p.unauthorizedMu.Unlock()
+		}()
+		if err := p.replyStream(ctx, rc, core.UnauthorizedAccessMessage); err != nil {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				slog.Debug("wecom-ws: unauthorized reply cancelled", "error", err)
+			} else {
+				slog.Warn("wecom-ws: unauthorized reply failed", "error", err)
+			}
+		}
+	}()
+}
+
+// replyStream leaves error logging to the caller, so expected cancellation of a
+// best-effort denial does not also emit the normal Reply error log.
+func (p *WSPlatform) replyStream(ctx context.Context, rc wsReplyContext, content string) error {
+	ctx, cancel := p.quota.context(ctx)
+	defer cancel()
+	chatID := rc.chatID
+	if chatID == "" {
+		chatID = rc.userID
+	}
+
 	streamID := p.generateReqID("stream")
 	frame := map[string]any{
 		"cmd":     "aibot_respond_msg",
@@ -493,12 +553,7 @@ func (p *WSPlatform) Reply(ctx context.Context, rctx any, content string) error 
 			},
 		},
 	}
-	if err := p.writeJSON(frame); err != nil {
-		slog.Error("wecom-ws: reply failed", "user", rc.userID, "error", err)
-		return err
-	}
-	slog.Debug("wecom-ws: reply sent", "user", rc.userID, "len", len(content))
-	return nil
+	return p.writeWithQuota(ctx, frame, quotaTarget{recipient: chatID})
 }
 
 // Send sends a proactive message via aibot_send_msg (markdown format).
@@ -516,6 +571,8 @@ func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("wecom-ws: chatID is empty, cannot send proactive message")
 	}
 
+	ctx, cancel := p.quota.context(ctx)
+	defer cancel()
 	chunks := splitByBytes(content, 2000)
 	for i, chunk := range chunks {
 		reqID := p.generateReqID("aibot_send_msg")
@@ -530,7 +587,7 @@ func (p *WSPlatform) Send(ctx context.Context, rctx any, content string) error {
 				},
 			},
 		}
-		if err := p.writeAndWaitAck(ctx, frame, reqID); err != nil {
+		if err := p.writeAndWaitAck(ctx, frame, reqID, quotaTarget{recipient: rc.chatID}); err != nil {
 			slog.Error("wecom-ws: send failed", "user", rc.userID, "chunk", i, "error", err)
 			return err
 		}
@@ -554,36 +611,71 @@ func (p *WSPlatform) ReconstructReplyCtx(sessionKey string) (any, error) {
 }
 
 func (p *WSPlatform) Stop() error {
-	if p.cancel != nil {
-		p.cancel()
-	}
-	p.mu.Lock()
-	conn := p.conn
-	p.mu.Unlock()
-	if conn != nil {
-		return conn.Close()
-	}
-	return nil
+	p.stopOnce.Do(func() {
+		p.unauthorizedMu.Lock()
+		p.unauthorizedStopped = true
+		cancel := p.unauthorizedCancel
+		p.unauthorizedMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		p.quota.close()
+		if p.cancel != nil {
+			p.cancel()
+		}
+		p.mu.Lock()
+		conn := p.conn
+		p.mu.Unlock()
+		if conn != nil {
+			p.stopErr = conn.Close()
+		}
+	})
+	return p.stopErr
 }
 
 // writeJSON sends a JSON message over the WebSocket connection with mutex protection.
 func (p *WSPlatform) writeJSON(v any) error {
+	_, err := p.writeJSONContext(context.Background(), v)
+	return err
+}
+
+func (p *WSPlatform) writeJSONContext(ctx context.Context, v any) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.conn == nil {
-		return fmt.Errorf("wecom-ws: not connected")
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
-	return p.conn.WriteJSON(v)
+	if p.conn == nil {
+		return false, fmt.Errorf("wecom-ws: not connected")
+	}
+	return true, p.conn.WriteJSON(v)
+}
+
+func (p *WSPlatform) writeWithQuota(ctx context.Context, frame any, targets ...quotaTarget) error {
+	if len(targets) == 0 {
+		_, err := p.writeJSONContext(ctx, frame)
+		return err
+	}
+	permit, err := p.quota.acquire(ctx, targets[0])
+	if err != nil {
+		return fmt.Errorf("wecom-ws: outbound quota: %w", err)
+	}
+	attempted, err := p.writeJSONContext(ctx, frame)
+	permit.finish(attempted)
+	return err
 }
 
 // writeAndWaitAck sends a frame and waits for the server ack before returning.
 // Falls back to non-blocking on timeout to avoid deadlocks.
-func (p *WSPlatform) writeAndWaitAck(ctx context.Context, frame map[string]any, reqID string) error {
-	return p.writeAndWaitAckWithTimeout(ctx, frame, reqID, wsAckTimeout)
+func (p *WSPlatform) writeAndWaitAck(ctx context.Context, frame map[string]any, reqID string, targets ...quotaTarget) error {
+	return p.writeAndWaitAckWithTimeout(ctx, frame, reqID, wsAckTimeout, targets...)
 }
 
-func (p *WSPlatform) writeAndWaitAckWithTimeout(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) error {
-	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout)
+func (p *WSPlatform) writeAndWaitAckWithTimeout(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration, targets ...quotaTarget) error {
+	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout, targets...)
 	if errors.Is(err, errWSAckTimeout) {
 		slog.Debug("wecom-ws: ack timeout, proceeding", "req_id", reqID)
 		return nil
@@ -594,8 +686,8 @@ func (p *WSPlatform) writeAndWaitAckWithTimeout(ctx context.Context, frame map[s
 	return result.err
 }
 
-func (p *WSPlatform) writeAndWaitAckStrict(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) error {
-	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout)
+func (p *WSPlatform) writeAndWaitAckStrict(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration, targets ...quotaTarget) error {
+	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout, targets...)
 	if errors.Is(err, errWSAckTimeout) {
 		return fmt.Errorf("wecom-ws: ack timeout waiting for %s", reqID)
 	}
@@ -605,8 +697,8 @@ func (p *WSPlatform) writeAndWaitAckStrict(ctx context.Context, frame map[string
 	return result.err
 }
 
-func (p *WSPlatform) writeAndWaitFrameWithTimeout(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) (wsFrame, error) {
-	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout)
+func (p *WSPlatform) writeAndWaitFrameWithTimeout(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration, targets ...quotaTarget) (wsFrame, error) {
+	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout, targets...)
 	if errors.Is(err, errWSAckTimeout) {
 		return wsFrame{}, fmt.Errorf("wecom-ws: ack timeout waiting for %s", reqID)
 	}
@@ -619,11 +711,11 @@ func (p *WSPlatform) writeAndWaitFrameWithTimeout(ctx context.Context, frame map
 	return result.frame, nil
 }
 
-func (p *WSPlatform) writeAndWaitResult(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) (wsAckResult, error) {
+func (p *WSPlatform) writeAndWaitResult(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration, targets ...quotaTarget) (wsAckResult, error) {
 	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
-	if err := p.writeJSON(frame); err != nil {
+	if err := p.writeWithQuota(ctx, frame, targets...); err != nil {
 		p.pendingAcks.Delete(reqID)
 		return wsAckResult{}, err
 	}

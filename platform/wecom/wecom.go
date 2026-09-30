@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -82,6 +83,7 @@ type Platform struct {
 	tokenCache     tokenCache
 	dedup          msgDedup
 	userNameCache  sync.Map // userID -> display name
+	quota          *outboundQuota
 }
 
 const defaultAPIBaseURL = "https://qyapi.weixin.qq.com"
@@ -183,6 +185,11 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("wecom", allowFrom)
 
+	quota, err := newOutboundQuota(opts, quotaAccountKey{mode: "http", endpoint: quotaEndpoint(apiBaseURL), corpID: corpID, appID: agentID})
+	if err != nil {
+		return nil, err
+	}
+
 	return &Platform{
 		corpID:         corpID,
 		corpSecret:     corpSecret,
@@ -195,6 +202,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		callbackPath:   path,
 		enableMarkdown: enableMarkdown,
 		apiClient:      apiClient,
+		quota:          quota,
 	}, nil
 }
 
@@ -457,90 +465,109 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if content == "" {
 		return nil
 	}
-
-	accessToken, err := p.getAccessToken()
-	if err != nil {
-		slog.Error("wecom: get access_token failed", "error", err)
-		return fmt.Errorf("wecom: get access_token: %w", err)
-	}
-
+	ctx, cancel := p.quota.context(ctx)
+	defer cancel()
 	if !p.enableMarkdown {
 		content = core.StripMarkdown(content)
 	}
-
-	chunks := splitByBytes(content, 2000)
-	for i, chunk := range chunks {
-		var sendErr error
-		if p.enableMarkdown {
-			sendErr = p.sendMarkdown(accessToken, rc.userID, chunk)
-		} else {
-			sendErr = p.sendText(accessToken, rc.userID, chunk)
-		}
-		if sendErr != nil {
-			slog.Error("wecom: send failed", "user", rc.userID, "chunk", i, "error", sendErr)
-			return sendErr
+	msgType := "text"
+	if p.enableMarkdown {
+		msgType = "markdown"
+	}
+	for i, chunk := range splitByBytes(content, 2000) {
+		if err := p.sendMessage(ctx, rc.userID, msgType, map[string]string{"content": chunk}); err != nil {
+			return fmt.Errorf("wecom: send chunk %d: %w", i, err)
 		}
 	}
-	slog.Debug("wecom: message sent", "user", rc.userID, "chunks", len(chunks), "total_len", len(content))
 	return nil
 }
 
-// Send sends a new message (same as Reply for WeChat Work)
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	return p.Reply(ctx, rctx, content)
 }
 
-// SendImage uploads and sends an image to the user.
-// Implements core.ImageSender.
+// SendImage uploads first; only the final message consumes recipient quota.
 func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttachment) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("wecom: SendImage: invalid reply context type %T", rctx)
 	}
-
-	accessToken, err := p.getAccessToken()
+	ctx, cancel := p.quota.context(ctx)
+	defer cancel()
+	accessToken, err := p.getAccessTokenContext(ctx)
 	if err != nil {
 		return fmt.Errorf("wecom: send image: %w", err)
 	}
-
-	mediaID, err := p.uploadImageMedia(accessToken, img)
+	mediaID, err := p.uploadImageMedia(ctx, accessToken, img)
 	if err != nil {
 		return fmt.Errorf("wecom: send image: %w", err)
 	}
+	return p.sendMessage(ctx, rc.userID, "image", map[string]string{"media_id": mediaID})
+}
 
-	payload := map[string]any{
-		"touser":  rc.userID,
-		"msgtype": "image",
-		"agentid": p.agentID,
-		"image":   map[string]string{"media_id": mediaID},
+// sendMessage is the sole HTTP application-message boundary. Waiting before
+// obtaining the token lets long queues refresh expired tokens before dispatch.
+func (p *Platform) sendMessage(ctx context.Context, userID, msgType string, data map[string]string) error {
+	payload := map[string]any{"touser": userID, "agentid": p.agentID, "msgtype": msgType, msgType: data}
+	if msgType == "text" {
+		payload["safe"] = 0
 	}
-
-	body, _ := json.Marshal(payload)
-	apiURL := p.wecomAPIURL("/cgi-bin/message/send", url.Values{
-		"access_token": []string{accessToken},
-	})
-
-	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
+	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("wecom: send image: %w", err)
+		return fmt.Errorf("wecom: encode message: %w", err)
+	}
+	permit, err := p.quota.acquire(ctx, quotaTarget{recipient: userID})
+	if err != nil {
+		return fmt.Errorf("wecom: message quota: %w", err)
+	}
+	attempted := false
+	defer func() { permit.finish(attempted) }()
+	accessToken, err := p.getAccessTokenContext(ctx)
+	if err != nil {
+		return err
+	}
+	apiURL := p.wecomAPIURL("/cgi-bin/message/send", url.Values{"access_token": {accessToken}})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("wecom: message request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	attempted = true
+	resp, err := p.apiClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("wecom: send message: %w", withoutRequestURL(err))
 	}
 	defer resp.Body.Close()
-
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("wecom: send message: HTTP %d", resp.StatusCode)
+	}
 	var result struct {
 		ErrCode int    `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("wecom: decode send image response: %w", err)
+		return fmt.Errorf("wecom: decode send response: %w", err)
 	}
 	if result.ErrCode != 0 {
-		return fmt.Errorf("wecom: send image failed: %d %s", result.ErrCode, result.ErrMsg)
+		return fmt.Errorf("wecom: send failed: %d %s", result.ErrCode, core.RedactToken(result.ErrMsg, accessToken))
 	}
 	return nil
 }
 
+// Preserve cancellation/error identity without exposing credential-bearing URLs.
+func withoutRequestURL(err error) error {
+	var requestError *url.Error
+	if errors.As(err, &requestError) {
+		return requestError.Err
+	}
+	return err
+}
+
 // uploadImageMedia uploads an image to WeChat Work media API and returns the media_id.
-func (p *Platform) uploadImageMedia(accessToken string, img core.ImageAttachment) (string, error) {
+func (p *Platform) uploadImageMedia(ctx context.Context, accessToken string, img core.ImageAttachment) (string, error) {
 	name := img.FileName
 	if name == "" {
 		name = "image.png"
@@ -564,9 +591,14 @@ func (p *Platform) uploadImageMedia(accessToken string, img core.ImageAttachment
 		"access_token": []string{accessToken},
 		"type":         []string{"image"},
 	})
-	resp, err := p.apiClient.Post(apiURL, writer.FormDataContentType(), body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, body)
 	if err != nil {
-		return "", fmt.Errorf("wecom: upload image: %w", err)
+		return "", fmt.Errorf("wecom: upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := p.apiClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("wecom: upload image: %w", withoutRequestURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -589,72 +621,14 @@ func (p *Platform) uploadImageMedia(accessToken string, img core.ImageAttachment
 
 var _ core.ImageSender = (*Platform)(nil)
 
-func (p *Platform) sendMarkdown(accessToken, toUser, content string) error {
-	payload := map[string]any{
-		"touser":   toUser,
-		"msgtype":  "markdown",
-		"agentid":  p.agentID,
-		"markdown": map[string]string{"content": content},
-	}
-
-	body, _ := json.Marshal(payload)
-	apiURL := p.wecomAPIURL("/cgi-bin/message/send", url.Values{
-		"access_token": []string{accessToken},
-	})
-
-	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		return fmt.Errorf("wecom: send markdown: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		ErrCode int    `json:"errcode"`
-		ErrMsg  string `json:"errmsg"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("wecom: decode send response: %w", err)
-	}
-	if result.ErrCode != 0 {
-		return fmt.Errorf("wecom: send markdown failed: %d %s", result.ErrCode, result.ErrMsg)
-	}
-	return nil
-}
-
-func (p *Platform) sendText(accessToken, toUser, text string) error {
-	payload := map[string]any{
-		"touser":  toUser,
-		"msgtype": "text",
-		"agentid": p.agentID,
-		"text":    map[string]string{"content": text},
-		"safe":    0,
-	}
-
-	body, _ := json.Marshal(payload)
-	apiURL := p.wecomAPIURL("/cgi-bin/message/send", url.Values{
-		"access_token": []string{accessToken},
-	})
-
-	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		return fmt.Errorf("wecom: send message: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		ErrCode int    `json:"errcode"`
-		ErrMsg  string `json:"errmsg"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("wecom: decode send response: %w", err)
-	}
-	if result.ErrCode != 0 {
-		return fmt.Errorf("wecom: send failed: %d %s", result.ErrCode, result.ErrMsg)
-	}
-	return nil
-}
-
 func (p *Platform) getAccessToken() (string, error) {
+	return p.getAccessTokenContext(context.Background())
+}
+
+func (p *Platform) getAccessTokenContext(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	p.tokenCache.mu.Lock()
 	defer p.tokenCache.mu.Unlock()
 
@@ -667,9 +641,13 @@ func (p *Platform) getAccessToken() (string, error) {
 		"corpsecret": []string{p.corpSecret},
 	})
 
-	resp, err := p.apiClient.Get(apiURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("wecom: request access_token: %w", err)
+		return "", fmt.Errorf("wecom: token request: %w", err)
+	}
+	resp, err := p.apiClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("wecom: request access_token: %w", withoutRequestURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -716,6 +694,7 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 }
 
 func (p *Platform) Stop() error {
+	p.quota.close()
 	if p.server != nil {
 		return p.server.Shutdown(context.Background())
 	}

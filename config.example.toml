@@ -1496,6 +1496,18 @@ app_secret = "your-feishu-app-secret"
 #             # 示例："http://你的VPS-IP:8888" — 将 VPS IP 加入可信 IP 列表
 # proxy_username = ""  # optional: proxy authentication username / 代理认证用户名
 # proxy_password = ""  # optional: proxy authentication password / 代理认证密码
+# Optional recipient-level minute/hour quota; disabled unless explicitly enabled.
+# 可选：按接收成员同时限制分钟和小时额度；默认关闭。
+# [projects.platforms.options.outbound_quota]
+# enabled = true
+# messages_per_minute = 20  # default when enabled / 启用后的默认值
+# messages_per_hour = 900   # default when enabled / 启用后的默认值
+# Applies to each text chunk and image message, across projects in this process.
+# 每个文本分片、图片消息分别计数；同进程相同应用跨项目共享，配置必须一致。
+# Stacks with [outgoing_rate_limit.platforms.wecom]; see docs/wecom.md.
+# 与通用出站令牌桶叠加；等待可被取消，详情见 docs/wecom.md。
+# Restart cc-connect after changing outbound_quota; /config reload does not recreate platforms.
+# 修改 outbound_quota 后须重启进程；/config reload 不会重新创建平台实例。
 
 # WeChat Work WebSocket / 企业微信长连接模式 (uncomment to enable / 取消注释以启用)
 # No public URL, no message encryption, no IP allowlist needed!
@@ -1516,6 +1528,21 @@ app_secret = "your-feishu-app-secret"
 # bot_secret = "your-bot-secret"
 # ws_url = "wss://your-wecom-host:port/im_openws?bizid=10001"  # optional / 可选：私有化部署 WebSocket 地址，留空默认公有云 wss://openws.work.weixin.qq.com
 # allow_from = "*"  # Allowed user IDs / 允许的用户 ID
+# Optional outbound quota; disabled unless explicitly enabled / 可选出站额度，默认关闭
+# [projects.platforms.options.outbound_quota]
+# enabled = true
+# messages_per_minute = 20  # Per conversation, reply + proactive + media / 每会话，回复、主动消息及媒体共用
+# messages_per_hour = 900
+# uploads_per_minute = 20   # Per bot, one slot per upload task / 每机器人，每个上传任务计一次
+# uploads_per_hour = 900
+# Same-account projects in this process must use identical effective settings.
+# 同进程相同机器人跨项目共享配额，有效配置必须一致；重启后计数重置。
+# Waits until admission or cancellation; no automatic retries. See docs/wecom.md.
+# 等待至可发或取消，不自动重试；详细边界见 docs/wecom.md。
+# Restart all same-account platform instances (or the process) after changing outbound_quota.
+# 修改后须重启所有共用账号的平台实例（或进程）；/config reload 不会更新额度。
+# Unauthorized notices: one in flight per platform, 5s queue timeout; extra notices are dropped.
+# 未授权提示每平台最多一个在途任务，排队超时 5 秒；繁忙时丢弃额外提示，配额关闭时也生效。
 
 # Weixin personal (ilink bot) / 微信个人号（ilink 机器人网关）
 # Same HTTP API as OpenClaw @tencent-weixin/openclaw-weixin: long-poll getUpdates + sendMessage.
