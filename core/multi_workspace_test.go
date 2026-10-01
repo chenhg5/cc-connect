@@ -1005,8 +1005,62 @@ func TestCmdGoto_WorkspaceChatRecordsModelOnWorkspace(t *testing.T) {
 	if got := e.projectState.WorkspaceModelOverride(wantWS); got != "aiapi/glm-5.3" {
 		t.Fatalf("workspace model override = %q, want aiapi/glm-5.3", got)
 	}
+	// The provider the model was picked for is recorded with it, which is what lets a
+	// rebuilt agent tell whether it may pin that model on its active provider.
+	if got := e.projectState.WorkspaceModelProvider(wantWS); got != "aiapi" {
+		t.Fatalf("recorded model provider = %q, want aiapi", got)
+	}
 	if len(modelSaves) != 0 {
 		t.Fatalf("provider-model config saves = %v, want none for a workspace chat", modelSaves)
+	}
+}
+
+// The model a workspace chat picked has to be the one its agent still runs after the
+// pool evicted and rebuilt it: every provider-aware transport prefers the active
+// provider's model, so the rebuild pins the stored model on that provider entry.
+func TestCmdGoto_WorkspaceModelSurvivesAgentRecreation(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "goto-ws-rebuild")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, newAgent := registerGotoTestAgent(t)
+	e := NewEngine("test", newAgent(), nil, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(NewProjectStateStore(filepath.Join(t.TempDir(), "project.state.json")))
+
+	channelID := "C-goto-rebuild"
+	channelKey := "test-platform:" + channelID
+	e.workspaceBindings.Bind("project:test", channelKey, "goto-ws-rebuild", wsDir)
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{Platform: "test-platform", ChannelKey: channelID, SessionKey: channelKey + ":U-001", ReplyCtx: "ctx"}
+
+	e.cmdGoto(p, msg, []string{"aiapi/glm-5.3"})
+
+	// The idle reaper drops the workspace agent; the next message rebuilds it.
+	wantWS := normalizeWorkspacePath(wsDir)
+	ws := e.workspacePool.GetOrCreate(wantWS)
+	ws.mu.Lock()
+	ws.agent = nil
+	ws.sessions = nil
+	ws.mu.Unlock()
+
+	rebuiltRaw, _, err := e.getOrCreateWorkspaceAgent(wantWS)
+	if err != nil {
+		t.Fatalf("rebuild workspace agent: %v", err)
+	}
+	switcher, ok := rebuiltRaw.(ProviderSwitcher)
+	if !ok {
+		t.Fatalf("rebuilt workspace agent type = %T, want a ProviderSwitcher", rebuiltRaw)
+	}
+	active := switcher.GetActiveProvider()
+	if active == nil || active.Name != "aiapi" {
+		t.Fatalf("rebuilt active provider = %+v, want the workspace provider override aiapi", active)
+	}
+	if active.Model != "aiapi/glm-5.3" {
+		t.Fatalf("rebuilt provider model = %q, want the model this workspace picked", active.Model)
 	}
 }
 
