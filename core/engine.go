@@ -4094,6 +4094,15 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 }
 
+// pinProviderModel gives the agent's own copy of the named provider the given model,
+// leaving the project agent and every other workspace untouched.
+func pinProviderModel(psw ProviderSwitcher, provider, model string) {
+	if updated, found := SetProviderModel(psw.ListProviders(), provider, model); found {
+		psw.SetProviders(updated)
+		psw.SetActiveProvider(provider)
+	}
+}
+
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
 // workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
@@ -4124,9 +4133,13 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// workspace-specific overrides always win
 	opts["work_dir"] = workspace
 
+	// The overrides are keyed by the normalized path (see workspaceModelOverrideKey),
+	// so every lookup below has to use the same key.
+	wsKey := normalizeWorkspacePath(workspace)
+	wsModel := ""
 	if e.projectState != nil {
-		if m := e.projectState.WorkspaceModelOverride(workspace); m != "" {
-			opts["model"] = m
+		if wsModel = e.projectState.WorkspaceModelOverride(wsKey); wsModel != "" {
+			opts["model"] = wsModel
 		}
 	}
 
@@ -4180,13 +4193,61 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 			// A provider chosen for this workspace with /goto outranks the
 			// project default, and has to survive the pool evicting this agent.
 			if e.projectState != nil {
-				if p := e.projectState.WorkspaceProviderOverride(normalizeWorkspacePath(workspace)); p != "" {
+				if p := e.projectState.WorkspaceProviderOverride(wsKey); p != "" {
 					if !ps2.SetActiveProvider(p) {
 						slog.Warn("workspace provider override is no longer registered; keeping the project default",
 							"workspace", workspace, "provider", p)
 					}
 				}
 			}
+		}
+	}
+
+	// A model chosen for this workspace has to survive the pool evicting this agent
+	// too, and the agent's own model cannot carry it: every provider-aware transport
+	// prefers the active provider's model (agent/opencode, for one, in StartSession),
+	// so the project's provider model shadows it as soon as the agent is rebuilt —
+	// which is how a picked model silently reverted to the provider default. Pin it
+	// on the active provider entry, the way /goto does, and keep the agent's model in
+	// step.
+	//
+	// Only a model that belongs to the active provider may be pinned on it. The state
+	// records the provider a model was picked for; entries stored before that record
+	// existed are recognised by the provider's own model list, and anything else is
+	// left alone rather than guessed — production states hold values picked while a
+	// different provider was active, and those would run the wrong model against the
+	// wrong endpoint. A session-level provider restored at turn start can still move
+	// the active provider afterwards, in which case the pinned entry is simply not
+	// consulted.
+	if wsModel != "" {
+		if psw, ok := agent.(ProviderSwitcher); ok {
+			if active := psw.GetActiveProvider(); active != nil && active.Name != "" {
+				recorded := ""
+				if e.projectState != nil {
+					recorded = e.projectState.WorkspaceModelProvider(wsKey)
+				}
+				resolved, offered := ProviderModelFor(*active, wsModel)
+				switch {
+				case recorded == active.Name:
+					// Picked for this provider: apply it as stored. A provider entry lists
+					// plain names while the transport may be handed a provider-scoped one, so
+					// "not listed" is not a problem in itself.
+					if !offered {
+						slog.Debug("workspace model is not listed by its provider",
+							"workspace", workspace, "provider", active.Name, "model", wsModel)
+					}
+					pinProviderModel(psw, active.Name, wsModel)
+				case recorded == "" && offered:
+					pinProviderModel(psw, active.Name, resolved)
+				default:
+					slog.Debug("workspace model override left out: it does not belong to the active provider",
+						"workspace", workspace, "provider", active.Name,
+						"model", wsModel, "chosen_for_provider", recorded)
+				}
+			}
+		}
+		if msw, ok := agent.(ModelSwitcher); ok {
+			msw.SetModel(wsModel)
 		}
 	}
 
@@ -10295,6 +10356,10 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 		return target, nil
 	}
 	if !persistConfig {
+		// A workspace switch deliberately leaves the provider entry alone (see
+		// TestCmdModel_MultiWorkspaceSwitchDoesNotMutateProviderModel); the choice is
+		// stored on the workspace and applied to the provider entry when the agent is
+		// rebuilt, see getOrCreateWorkspaceAgent.
 		switcher.SetModel(target)
 		return target, nil
 	}
@@ -11308,6 +11373,10 @@ func (e *Engine) applyGoto(agent Agent, sessions *SessionManager, switcher Provi
 		e.projectState.SetWorkspaceProviderOverride(workspace, pname)
 		if setModel && fullModel != "" {
 			e.projectState.SetWorkspaceModelOverride(workspace, fullModel)
+			// Remember which provider the model was picked for: a transport that
+			// prefers the provider's own model can only be given this one when the
+			// workspace is on that provider.
+			e.projectState.SetWorkspaceModelProvider(workspace, pname)
 		}
 		e.projectState.Save()
 	} else if sessions == e.sessions && e.providerSaveFunc != nil {
@@ -12949,6 +13018,17 @@ func (e *Engine) persistWorkspaceModelOverride(interactiveKey, sessionKey string
 		return
 	}
 	e.projectState.SetWorkspaceModelOverride(workspace, model)
+	// Record the provider the model was picked for (empty when none is active, which
+	// means "no longer attributable") so the rebuild path can tell whether that model
+	// may be handed to the active provider. Model and record are always written
+	// together, so they cannot drift apart.
+	activeProvider := ""
+	if psw, ok := agent.(ProviderSwitcher); ok {
+		if active := psw.GetActiveProvider(); active != nil {
+			activeProvider = active.Name
+		}
+	}
+	e.projectState.SetWorkspaceModelProvider(workspace, activeProvider)
 	e.projectState.Save()
 }
 
