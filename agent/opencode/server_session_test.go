@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,12 @@ type fakeOpencodeServer struct {
 	// resyncMessages is what GET /session/{id}/message returns; the transport
 	// asks for it to rebuild its role map on every stream (re)connect.
 	resyncMessages []map[string]any
+	// resyncLimits records the `limit` of every such request, so a test can tell a
+	// tail fetch from one that asks for the whole conversation.
+	resyncLimits []string
+	// rejectResyncLimit makes the message-list request fail when it carries a
+	// limit, the way a server that predates the parameter answers it.
+	rejectResyncLimit atomic.Bool
 }
 
 // fakePermissionReply is one recorded answer to a permission request.
@@ -91,9 +98,19 @@ func (f *fakeOpencodeServer) handleCreate(w http.ResponseWriter, r *http.Request
 func (f *fakeOpencodeServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/session/")
 	if r.Method == http.MethodGet && strings.HasSuffix(path, "/message") {
+		limit := r.URL.Query().Get("limit")
 		f.mu.Lock()
+		f.resyncLimits = append(f.resyncLimits, limit)
 		msgs := append([]map[string]any(nil), f.resyncMessages...)
 		f.mu.Unlock()
+		if f.rejectResyncLimit.Load() && limit != "" {
+			http.Error(w, `{"name":"BadRequest","data":{"message":"invalid query"}}`, http.StatusBadRequest)
+			return
+		}
+		// OpenCode answers with the newest `limit` messages, in order.
+		if n, err := strconv.Atoi(limit); err == nil && n > 0 && n < len(msgs) {
+			msgs = msgs[len(msgs)-n:]
+		}
 		if msgs == nil {
 			msgs = []map[string]any{}
 		}
@@ -273,6 +290,13 @@ func (f *fakeOpencodeServer) lastMessage() map[string]any {
 		return nil
 	}
 	return f.messageBodys[len(f.messageBodys)-1]
+}
+
+// resyncLimitRequests reports the `limit` of every message-list request, in order.
+func (f *fakeOpencodeServer) resyncLimitRequests() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.resyncLimits...)
 }
 
 func writeJSONResponse(w http.ResponseWriter, v any) {
@@ -1828,6 +1852,86 @@ func TestServerSession_KeepsPartsFromUnannouncedMessage(t *testing.T) {
 	evt := collectEvents(t, s.Events(), 1, 2*time.Second)[0]
 	if evt.Type != core.EventText || !strings.Contains(evt.Content, "the answer") {
 		t.Fatalf("event = %+v, want the text of the unannounced message", evt)
+	}
+}
+
+// The resync only needs the tail of the conversation: the role map for the
+// messages whose parts can still arrive, and the parts of the running turn. Asking
+// for the whole conversation is what made attaching to a long one slow (a session
+// of 8000 parts answers with ~28MB), and that delay is what let a turn start before
+// its event stream was ready.
+func TestServerSession_ResyncAsksOnlyForTheTailOfALongConversation(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	// Enough messages that one page cannot hold them all, whatever the page size is.
+	messages := resyncMessageTail + 20
+	f.mu.Lock()
+	for i := 0; i < messages; i++ {
+		f.resyncMessages = append(f.resyncMessages, messageWithRole(fmt.Sprintf("msg_old_%03d", i), "assistant"))
+	}
+	f.mu.Unlock()
+
+	s := newTestServerSession(t, f, "ses_tail_only")
+	waitForSubscriber(t, f)
+
+	newest := fmt.Sprintf("msg_old_%03d", messages-1)
+	if turn := waitForResyncMessage(t, s, newest); turn != 0 {
+		t.Fatalf("newest message bound to turn %d, want history (0) while no turn is running", turn)
+	}
+	limits := f.resyncLimitRequests()
+	if len(limits) != 1 || limits[0] != strconv.Itoa(resyncMessageTail) {
+		t.Fatalf("message-list limits = %q, want one request limited to %d", limits, resyncMessageTail)
+	}
+	s.msgMu.Lock()
+	_, knowsOldest := s.assistantMsgs["msg_old_000"]
+	s.msgMu.Unlock()
+	if knowsOldest {
+		t.Fatalf("the whole conversation was fetched: the oldest message reached the role map")
+	}
+
+	// A part of a message outside the page is still accepted: an unknown message is
+	// never mistaken for the echo of the user's own prompt.
+	f.emit(partUpdated("ses_tail_only", textPartOf("msg_old_000", "text of an unfetched message")))
+	f.emit(partUpdated("ses_tail_only", stepFinishPart()))
+	if got := collectText(t, s.Events(), 2*time.Second); !strings.Contains(got, "text of an unfetched message") {
+		t.Fatalf("text = %q, want the part of an unfetched message to reach the engine", got)
+	}
+}
+
+// OpenCode ignores query parameters it does not know, so this covers the defensive
+// path for a server or proxy that rejects the page size instead: losing the role map
+// costs the answer after a stream gap, so the resync retries unpaged.
+func TestServerSession_ResyncFallsBackWhenTheServerRejectsTheLimit(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.rejectResyncLimit.Store(true)
+	f.mu.Lock()
+	f.resyncMessages = []map[string]any{
+		messageWithRole("msg_user_old", "user"),
+		messageWithRole("msg_assistant_old", "assistant"),
+	}
+	f.mu.Unlock()
+
+	s := newTestServerSession(t, f, "ses_no_limit")
+	waitForSubscriber(t, f)
+
+	if turn := waitForResyncMessage(t, s, "msg_assistant_old"); turn != 0 {
+		t.Fatalf("message bound to turn %d, want history (0) while no turn is running", turn)
+	}
+	limits := f.resyncLimitRequests()
+	if len(limits) != 2 || limits[0] != strconv.Itoa(resyncMessageTail) || limits[1] != "" {
+		t.Fatalf("message-list limits = %q, want a limited request followed by an unpaged one", limits)
+	}
+
+	// The role map is rebuilt by the fallback, so the user's own prompt is still
+	// dropped and the assistant text still reaches the engine.
+	f.emit(partUpdated("ses_no_limit", textPartOf("msg_user_old", "my own prompt")))
+	f.emit(partUpdated("ses_no_limit", textPartOf("msg_assistant_old", "the answer")))
+	f.emit(partUpdated("ses_no_limit", stepFinishPart()))
+	evt := collectEvents(t, s.Events(), 1, 2*time.Second)[0]
+	if evt.Type != core.EventText || !strings.Contains(evt.Content, "the answer") {
+		t.Fatalf("event = %+v, want the assistant text", evt)
+	}
+	if strings.Contains(evt.Content, "my own prompt") {
+		t.Fatalf("the user echo leaked into the reply: %+v", evt)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -683,12 +684,55 @@ func (srv *opencodeServer) replyPermission(ctx context.Context, requestID, reply
 	return srv.do(ctx, http.MethodPost, "/permission/"+url.PathEscape(requestID)+"/reply", body, nil)
 }
 
-// listMessages returns a session's messages, each with its role, so the
-// transport can rebuild its role map after a stream gap.
+// resyncMessageTail bounds how much of a conversation the resync asks for. Only
+// the tail can matter: the role map is rebuilt for the messages whose parts may
+// still arrive, and the replay covers the running turn, whose messages are the
+// newest ones. Measured on a session of 8000 parts, the whole list answers with
+// ~28MB after ~1.7s, while the last 200 messages answer with ~2.9MB after ~55ms —
+// and that delay is what let a turn start before its event stream was ready.
+//
+// The page has to hold a whole turn: one turn can produce a message per step
+// (measured: up to 132 in one turn). A single silent gap in the event stream longer
+// than the turn needs to produce this many messages would leave the earliest of
+// them out of the replay, since the list cannot reach back past the page.
+const resyncMessageTail = 200
+
+// listMessages returns the newest messages of a session, each with its role and
+// parts, so the transport can rebuild its role map after a stream gap.
 func (srv *opencodeServer) listMessages(ctx context.Context, sessionID, directory string) ([]map[string]any, error) {
-	path := "/session/" + url.PathEscape(sessionID) + "/message"
+	out, err := srv.listMessagesLimited(ctx, sessionID, directory, resyncMessageTail)
+	if err == nil {
+		return out, nil
+	}
+	// OpenCode ignores query parameters it does not know, so this retry is defence
+	// for a server or a proxy in front of one that rejects the page size instead.
+	// Losing the role map costs the answer after a stream gap, so it is worth one
+	// more request rather than giving the resync up.
+	unpaged, unpagedErr := srv.listMessagesLimited(ctx, sessionID, directory, 0)
+	if unpagedErr != nil {
+		slog.Debug("opencode server: unpaged message list failed too",
+			"session", sessionID, "limit_error", err, "error", unpagedErr)
+		return nil, unpagedErr
+	}
+	slog.Debug("opencode server: fell back to an unpaged message list",
+		"session", sessionID, "limit_error", err)
+	return unpaged, nil
+}
+
+// listMessagesLimited is listMessages with an explicit page size; OpenCode answers
+// with the newest `limit` messages in chronological order, and with every message
+// when limit is 0.
+func (srv *opencodeServer) listMessagesLimited(ctx context.Context, sessionID, directory string, limit int) ([]map[string]any, error) {
+	query := url.Values{}
 	if directory != "" {
-		path += "?directory=" + url.QueryEscape(directory)
+		query.Set("directory", directory)
+	}
+	if limit > 0 {
+		query.Set("limit", strconv.Itoa(limit))
+	}
+	path := "/session/" + url.PathEscape(sessionID) + "/message"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
 	}
 	var out []map[string]any
 	if err := srv.do(ctx, http.MethodGet, path, nil, &out); err != nil {
@@ -1993,8 +2037,12 @@ func (s *serverSession) resyncSession(ctx context.Context) {
 			s.replayPart(part)
 		}
 	}
+	// The counters describe the fetched page, not the whole conversation: the
+	// resync only reads its tail. A page larger than the limit means the unpaged
+	// fallback ran.
 	slog.Debug("opencode server session: session resynced",
-		"session", sessionID, "assistant", assistant, "user", user, "replayed", len(replay))
+		"session", sessionID, "limit", resyncMessageTail, "messages", len(msgs),
+		"assistant", assistant, "user", user, "replayed", len(replay))
 }
 
 // messageBelongsToRunningTurn reports whether an assistant message was created by
