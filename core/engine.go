@@ -569,6 +569,7 @@ type interactiveState struct {
 	stopCh                   chan struct{}
 	stopped                  bool
 	pending                  *pendingPermission
+	pendingUserInput         *pendingUserInput
 	pendingMessages          []queuedMessage // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
@@ -3140,6 +3141,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 	// Permission responses bypass the session lock.
 	// Must be after workspace resolution so interactiveKey is correct.
+	var userInputHandled bool
+	questionContent := content
+	content, userInputHandled = e.handleAsyncUserInput(p, msg, content, interactiveKey, sessions)
+	if userInputHandled {
+		return
+	}
+	if content != questionContent {
+		msg.Content = content
+	}
 	if e.handlePendingPermission(p, msg, content, interactiveKey) {
 		return
 	}
@@ -4583,6 +4593,7 @@ func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interac
 		!state.agentSession.Alive() ||
 		state.eventsNeedResync ||
 		state.pending != nil ||
+		state.pendingUserInput != nil ||
 		len(state.pendingMessages) > 0 {
 		state.mu.Unlock()
 		cancel()
@@ -4621,6 +4632,7 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 		state.stopped ||
 		state.eventsNeedResync ||
 		state.pending != nil ||
+		state.pendingUserInput != nil ||
 		len(state.pendingMessages) > 0 {
 		state.mu.Unlock()
 		e.interactiveMu.Unlock()
@@ -5110,6 +5122,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				slog.Info("unsolicited turn complete",
 					"session", sessionKey,
 					"response_len", len(fullResponse))
+
+			case EventUserInputRequest:
+				e.showAsyncUserInput(state, p, replyCtx, event)
 
 			case EventPermissionRequest:
 				// If approveAll (/yolo) is set, grant the request. Otherwise
@@ -5837,6 +5852,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					sessions.Save()
 				}
 			}
+
+		case EventUserInputRequest:
+			e.showAsyncUserInput(state, p, replyCtx, event)
 
 		case EventPermissionRequest:
 			// extension_select is a Pi extension UI request routed via the
@@ -12117,12 +12135,18 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 
 // sendAskQuestionPrompt renders one question (by index) from the AskUserQuestion list.
 // qIdx is the 0-based index of the question to display.
-func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []UserQuestion, qIdx int) {
+func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []UserQuestion, qIdx int, requestID ...string) {
 	if qIdx >= len(questions) {
 		return
 	}
 	q := questions[qIdx]
 	total := len(questions)
+	answerValue := func(option int) string {
+		if len(requestID) > 0 && requestID[0] != "" {
+			return fmt.Sprintf("askq:%s:%d:%d", requestID[0], qIdx, option)
+		}
+		return fmt.Sprintf("askq:%d:%d", qIdx, option)
+	}
 
 	titleSuffix := ""
 	if total > 1 {
@@ -12167,7 +12191,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 				if opt.Description != "" {
 					desc += " — " + opt.Description
 				}
-				answerData := fmt.Sprintf("askq:%d:%d", qIdx, i+1)
+				answerData := answerValue(i + 1)
 				cb.Markdown("**" + desc + "**")
 				cb.Buttons(CardButton{
 					Text:  opt.Label,
@@ -12215,7 +12239,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		}
 		var rows [][]ButtonOption
 		for i, opt := range q.Options {
-			rows = append(rows, []ButtonOption{{Text: opt.Label, Data: fmt.Sprintf("askq:%d:%d", qIdx, i+1)}})
+			rows = append(rows, []ButtonOption{{Text: opt.Label, Data: answerValue(i + 1)}})
 		}
 		if err := e.waitOutgoing(p); err != nil {
 			slog.Warn("sendAskQuestionPrompt: outgoing wait cancelled", "platform", p.Name(), "error", err)

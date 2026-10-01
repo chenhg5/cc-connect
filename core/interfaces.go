@@ -383,6 +383,12 @@ type PermissionResult struct {
 	Message      string         `json:"message,omitempty"`      // reason for deny
 }
 
+// UserInputSteerer delivers an answer to a non-blocking question while the agent
+// continues working. False means there is no active turn; use normal Send instead.
+type UserInputSteerer interface {
+	SteerUserInput(prompt string) (bool, error)
+}
+
 // ToolAuthorizer is an optional interface for agents that support dynamic tool authorization.
 type ToolAuthorizer interface {
 	AddAllowedTools(tools ...string) error
