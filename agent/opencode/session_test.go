@@ -281,6 +281,58 @@ func TestHandleToolUsePermissionDeniedEmitsEventText(t *testing.T) {
 	}
 }
 
+// TestHandleToolUsePermissionDeniedBoundsRuleset is a regression test for the
+// chat flood: opencode embeds its entire permission ruleset (tens of KB) in a
+// rejected tool's error message, and forwarding that verbatim produced a 94 KB
+// reply split into a wall of messages and polluted the model's context. The
+// surfaced text must keep the leading explanation but drop the ruleset.
+func TestHandleToolUsePermissionDeniedBoundsRuleset(t *testing.T) {
+	ruleset := strings.Repeat(`{"permission":"external_directory","pattern":"/Users/ids/.claude/skills/x/*","action":"allow"},`, 400)
+	errMsg := "The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [" + ruleset + "]"
+	payload := map[string]any{
+		"type": "tool_use",
+		"part": map[string]any{
+			"tool": "glob",
+			"state": map[string]any{
+				"status": "error",
+				"error":  errMsg,
+				"input":  map[string]any{"pattern": "**/*"},
+			},
+		},
+	}
+	rawJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(rawJSON, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+	s.handleToolUse(raw)
+
+	var events []core.Event
+	for len(s.events) > 0 {
+		events = append(events, <-s.events)
+	}
+	if len(events) < 2 || events[1].Type != core.EventText {
+		t.Fatalf("expected an EventText rejection notice, got %v", events)
+	}
+	content := events[1].Content
+	if len(content) > 400 {
+		t.Fatalf("surfaced rejection is %d bytes, want a bounded notice", len(content))
+	}
+	if strings.Contains(content, "external_directory") {
+		t.Fatalf("surfaced rejection must not embed the permission ruleset: %q", content)
+	}
+	if !strings.Contains(content, "prevents you from using") {
+		t.Fatalf("surfaced rejection lost the reason: %q", content)
+	}
+}
+
 // TestHandleToolUseCompletedDoesNotEmitExtraText verifies that a successfully
 // completed tool call does NOT emit an EventText (regression guard).
 func TestHandleToolUseCompletedDoesNotEmitExtraText(t *testing.T) {
