@@ -22,7 +22,10 @@ import (
 
 // opencodeSession manages multi-turn conversations with the OpenCode CLI.
 // Each Send() launches a new `opencode run --format json` process
-// with --session for conversation continuity.
+// with --session for conversation continuity. When serverURL is set,
+// `--attach <server_url>` is prepended so the run reuses an already-running
+// backend instead of cold-starting one; only the backend is shared — each
+// cc-connect conversation keeps its own OpenCode session via --session.
 type opencodeSession struct {
 	cmd               string
 	extraArgs         []string // extra args from cmd, prepended before opencode args
@@ -30,6 +33,7 @@ type opencodeSession struct {
 	model             string
 	mode              string
 	agentName         string
+	serverURL         string // optional: attach target; empty = standalone
 	extraEnv          []string
 	events            chan core.Event
 	chatID            atomic.Value // stores string — OpenCode session ID
@@ -39,9 +43,10 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	sawOutput         atomic.Bool // true once any text/tool event arrived this turn (vacuous-success detector)
 }
 
-func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
+func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, serverURL, resumeID string, extraEnv []string) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &opencodeSession{
@@ -51,6 +56,7 @@ func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, wor
 		model:     model,
 		mode:      mode,
 		agentName: agentName,
+		serverURL: serverURL,
 		extraEnv:  extraEnv,
 		events:    make(chan core.Event, 64),
 		ctx:       sessionCtx,
@@ -80,6 +86,7 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	s.resultSent.Store(false)
 	s.expectingContinue.Store(false)
+	s.sawOutput.Store(false)
 
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
@@ -143,6 +150,17 @@ func (s *opencodeSession) stageImages(prompt string, images []core.ImageAttachme
 	return prompt, imagePaths, nil
 }
 
+// attachErrMsg prefixes backend errors with the (sanitized) server URL in
+// attach mode so failures are attributable. There is no silent fallback to
+// standalone: a real task failure must never silently re-execute in a
+// different backend context.
+func attachErrMsg(serverURL, stderrMsg string) string {
+	if serverURL == "" {
+		return stderrMsg
+	}
+	return fmt.Sprintf("opencode attach (%s): %s", sanitizeServerURLForLog(serverURL), stderrMsg)
+}
+
 func opencodeImageExt(mimeType string) string {
 	switch mimeType {
 	case "image/jpeg":
@@ -158,6 +176,15 @@ func opencodeImageExt(mimeType string) string {
 
 func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatID string) []string {
 	args := append(append([]string{}, s.extraArgs...), "run", "--format", "json")
+
+	// Attach mode reuses an existing backend. This is the only place
+	// serverURL branches: everything below is shared by both modes, and
+	// --dir keeps scoping each run to its own work_dir on the server.
+	// (--dir is interpreted on the server side when attaching, so attach
+	// deployments require the server to see the same filesystem paths.)
+	if s.serverURL != "" {
+		args = append(args, "--attach", s.serverURL)
+	}
 
 	if chatID != "" {
 		args = append(args, "--session", chatID)
@@ -231,7 +258,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 			s.chatID.Store("")
 			slog.Warn("opencodeSession: cleared stale session ID")
 		}
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", attachErrMsg(s.serverURL, stderrMsg))}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -249,7 +276,36 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	}
 
 	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
+	if evt := s.cleanExitEvent(); evt != nil {
+		select {
+		case s.events <- *evt:
+		case <-s.ctx.Done():
+		}
+		return
+	}
 	s.sendEventResult()
+}
+
+// cleanExitEvent decides what to emit when the run process exits cleanly
+// (exit 0, no stderr). Normally this is the fallback EventResult. But a run
+// that produced zero text AND zero tool events is a vacuous success: the
+// backend executed (or dropped) the turn without streaming anything back —
+// observed intermittently with `run --attach`, where the server records
+// parts the client never prints (and vice versa). Delivering an empty result
+// would surface as a confusing "(空响应)", so surface an explicit error
+// instead and ask for a resend. Deliberately no automatic retry here: the
+// unseen turn may have executed tools server-side, and re-running could
+// duplicate side effects. Returns nil when output was seen, in which case
+// the caller proceeds with the normal fallback EventResult.
+func (s *opencodeSession) cleanExitEvent() *core.Event {
+	if s.sawOutput.Load() {
+		return nil
+	}
+	slog.Warn("opencodeSession: run exited cleanly with no text or tool output; backend stream likely dropped",
+		"session_id", s.CurrentSessionID(), "server", sanitizeServerURLForLog(s.serverURL))
+	evt := core.Event{Type: core.EventError, Error: fmt.Errorf(
+		"opencode: run completed without producing any output; the backend stream was likely dropped — please resend the message")}
+	return &evt
 }
 
 // OpenCode NDJSON event structure:
@@ -302,6 +358,7 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 	}
 
 	if text != "" {
+		s.sawOutput.Store(true)
 		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
 		select {
 		case s.events <- evt:
@@ -327,6 +384,9 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 
 	// Extract tool input summary for display
 	input := extractToolInput(state)
+
+	// Any tool activity means the turn was not vacuous (see cleanExitEvent).
+	s.sawOutput.Store(true)
 
 	if status == "completed" {
 		// OpenCode bundles call + result in one event; emit both for UI.
