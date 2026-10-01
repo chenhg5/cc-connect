@@ -94,3 +94,38 @@ func TestSetProviderModel(t *testing.T) {
 		t.Fatalf("missing provider should leave copy unchanged, got %q want %q", updated[0].Model, providers[0].Model)
 	}
 }
+
+// A stored workspace model is pinned on a provider entry only when that provider
+// offers it, so the lookup has to recognise the configured model, a listed model and
+// an alias (resolved to the listed name).
+func TestProviderModelFor(t *testing.T) {
+	provider := ProviderConfig{
+		Name:  "chatgpt",
+		Model: "openai/gpt-5.6-sol",
+		Models: []ModelOption{
+			{Name: "openai/gpt-6.1-sol", Alias: "sol"},
+			{Name: "openai/gpt-5.6-sol"},
+		},
+	}
+
+	tests := []struct {
+		name      string
+		model     string
+		wantName  string
+		wantFound bool
+	}{
+		{name: "the configured model", model: "openai/gpt-5.6-sol", wantName: "openai/gpt-5.6-sol", wantFound: true},
+		{name: "a listed model", model: "openai/gpt-6.1-sol", wantName: "openai/gpt-6.1-sol", wantFound: true},
+		{name: "an alias resolves to the listed name", model: "sol", wantName: "openai/gpt-6.1-sol", wantFound: true},
+		{name: "another provider's model", model: "deepseek/deepseek-flash", wantFound: false},
+		{name: "a bare name the provider does not list", model: "sonnet", wantFound: false},
+		{name: "an empty value", model: "", wantFound: false},
+	}
+	for _, tc := range tests {
+		gotName, gotFound := ProviderModelFor(provider, tc.model)
+		if gotFound != tc.wantFound || (tc.wantFound && gotName != tc.wantName) {
+			t.Fatalf("%s: ProviderModelFor(%q) = (%q, %v), want (%q, %v)",
+				tc.name, tc.model, gotName, gotFound, tc.wantName, tc.wantFound)
+		}
+	}
+}

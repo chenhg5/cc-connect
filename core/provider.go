@@ -33,3 +33,27 @@ func SetProviderModel(providers []ProviderConfig, name, model string) ([]Provide
 	}
 	return updated, false
 }
+
+// ProviderModelFor returns the model name a provider offers for the given value:
+// the configured model itself, a listed model's name, or the name behind an alias.
+// The second result reports whether the provider offers it at all, which is what
+// tells a caller whether a stored workspace model may be handed to that provider.
+func ProviderModelFor(p ProviderConfig, model string) (string, bool) {
+	if model == "" {
+		return "", false
+	}
+	if p.Model == model {
+		return p.Model, true
+	}
+	for _, m := range p.Models {
+		if m.Name == model {
+			return m.Name, true
+		}
+	}
+	for _, m := range p.Models {
+		if m.Name != "" && m.Alias == model {
+			return m.Name, true
+		}
+	}
+	return "", false
+}

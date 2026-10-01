@@ -617,6 +617,12 @@ func (a *Agent) GetActiveProvider() *core.ProviderConfig {
 	return &p
 }
 
+// ProviderScopedModelNames reports that opencode model names carry the
+// "<provider>/<model>" prefix (e.g. "aiapi/gpt-5.6-sol") and its CLI requires
+// the prefixed form. The /goto command relies on this to persist models
+// entered as "<provider>/<model>" with the prefix intact.
+func (a *Agent) ProviderScopedModelNames() bool { return true }
+
 func (a *Agent) ListProviders() []core.ProviderConfig {
 	a.mu.Lock()
 	defer a.mu.Unlock()
