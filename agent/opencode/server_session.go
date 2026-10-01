@@ -912,6 +912,12 @@ type serverSession struct {
 	// the stall watchdog.
 	lastSessionEvent atomic.Int64
 	turnStartedAt    atomic.Int64
+	// turnMessageFloor is the creation time (milliseconds since the epoch, the
+	// unit OpenCode reports) from which messages belong to the running turn. It is
+	// set when a turn begins and deliberately not refreshed when a mid-turn
+	// supplement joins that turn: the supplement shares the turn, so the messages
+	// the turn already produced still belong to it.
+	turnMessageFloor atomic.Int64
 	stallReported    atomic.Bool
 	// abortedTurn records that this session deliberately stopped the turn (stall
 	// watchdog, /stop). OpenCode then reports the abort back as a
@@ -1044,6 +1050,11 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 	var gen int64
 	if newTurn {
 		gen = s.beginTurn()
+		// A message belongs to this turn only if it was created after the turn
+		// began. The boundary is set here, when the turn starts, and not refreshed
+		// for a supplement that merely joins the turn: the messages the turn
+		// already produced still belong to it.
+		s.turnMessageFloor.Store(time.Now().UnixMilli())
 	} else {
 		gen = s.joinTurn()
 	}
@@ -1654,9 +1665,13 @@ func (s *serverSession) handleServerEvent(payload []byte) {
 			case "assistant":
 				s.msgMu.Lock()
 				s.assistantMsgs[id] = struct{}{}
-				if _, known := s.msgTurn[id]; !known {
+				if _, known := s.msgTurn[id]; !known && s.messageBelongsToRunningTurn(info) {
 					// Bind the message to the turn that is running now, so a later
-					// resync replays it only while that same turn is in flight.
+					// resync replays it only while that same turn is in flight. The
+					// server also re-announces older messages (token totals,
+					// completion time) and announces parts of messages it created
+					// before this turn; those belong to no turn here, so they are
+					// left for the resync to classify from the session's own list.
 					s.msgTurn[id] = s.currentTurnGen()
 				}
 				s.msgMu.Unlock()
@@ -1907,6 +1922,10 @@ func (s *serverSession) replayPart(part map[string]any) {
 // while the stream was down never arrive, and the turn then ends with an empty
 // result. Replaying them is what makes the reconnect transparent, which is the
 // whole point of the server transport.
+//
+// Only the messages the running turn created are replayed (see
+// messageBelongsToRunningTurn): a resumed conversation's history arrives in the
+// same list and must not be mistaken for the turn's own work.
 func (s *serverSession) resyncSession(ctx context.Context) {
 	sessionID := s.CurrentSessionID()
 	if sessionID == "" {
@@ -1944,10 +1963,15 @@ func (s *serverSession) resyncSession(ctx context.Context) {
 			s.assistantMsgs[id] = struct{}{}
 			assistant++
 			if _, known := s.msgTurn[id]; !known {
-				// First seen now: it belongs to the turn running now, or to no
-				// turn at all when the session is idle (generation 0).
+				// First seen now: only a message the running turn created may
+				// belong to it. A resumed conversation hands the transport its
+				// entire history and every message in it is "first seen", so
+				// binding them all to the running turn replays the whole
+				// conversation as this turn's events — its answers, its tool
+				// calls and its compaction summaries. Messages created before the
+				// turn began stay on generation 0 (history).
 				seen := int64(0)
-				if replaying {
+				if replaying && s.messageBelongsToRunningTurn(info) {
 					seen = gen
 				}
 				s.msgTurn[id] = seen
@@ -1971,6 +1995,50 @@ func (s *serverSession) resyncSession(ctx context.Context) {
 	}
 	slog.Debug("opencode server session: session resynced",
 		"session", sessionID, "assistant", assistant, "user", user, "replayed", len(replay))
+}
+
+// messageBelongsToRunningTurn reports whether an assistant message was created by
+// the turn that is running now, which is the only thing that makes it that turn's
+// message. Both sides are milliseconds since the epoch, the unit OpenCode reports.
+//
+// This is what keeps a resumed conversation out of the turn it is resumed for:
+// attaching to a freshly started server asks for the whole session — every message
+// in it is "first seen" there — so without the boundary the entire conversation
+// would be replayed as the running turn's own work.
+func (s *serverSession) messageBelongsToRunningTurn(info map[string]any) bool {
+	floor := s.turnMessageFloor.Load()
+	if floor == 0 {
+		// No turn has begun yet, so no message can belong to one.
+		return false
+	}
+	created, ok := messageCreatedMillis(info)
+	if !ok {
+		// A message without a creation time cannot be placed on this side of the
+		// turn boundary. History is the safe reading: an unwanted replay is
+		// exactly what this check exists to prevent.
+		return false
+	}
+	// A message created in the same millisecond the turn began still counts as the
+	// turn's.
+	return created >= floor
+}
+
+// messageCreatedMillis reads OpenCode's message creation time, which the API
+// reports in milliseconds since the epoch. Numbers decoded from JSON arrive as
+// float64; the tests pass integers.
+func messageCreatedMillis(info map[string]any) (int64, bool) {
+	tm, _ := info["time"].(map[string]any)
+	if tm == nil {
+		return 0, false
+	}
+	switch v := tm["created"].(type) {
+	case float64:
+		return int64(v), true
+	case int64:
+		return v, true
+	default:
+		return 0, false
+	}
 }
 
 func (s *serverSession) isAssistantPart(part map[string]any) bool {

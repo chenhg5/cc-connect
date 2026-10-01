@@ -287,12 +287,20 @@ func partUpdated(sessionID string, part map[string]any) map[string]any {
 	}
 }
 
+// msgCreatedNow is the creation time OpenCode reports for a message it creates
+// while the test runs. The transport compares it against the running turn's start
+// to tell the turn's own messages from the conversation's history, so every
+// fixture that models a live message has to carry it.
+func msgCreatedNow() map[string]any {
+	return map[string]any{"created": time.Now().UnixMilli()}
+}
+
 func messageUpdatedWithRole(sessionID, messageID, role string) map[string]any {
 	return map[string]any{
 		"type": "message.updated",
 		"properties": map[string]any{
 			"sessionID": sessionID,
-			"info":      map[string]any{"id": messageID, "role": role, "sessionID": sessionID},
+			"info":      map[string]any{"id": messageID, "role": role, "sessionID": sessionID, "time": msgCreatedNow()},
 		},
 	}
 }
@@ -302,7 +310,7 @@ func assistantMessageUpdated(sessionID, messageID string) map[string]any {
 		"type": "message.updated",
 		"properties": map[string]any{
 			"sessionID": sessionID,
-			"info":      map[string]any{"id": messageID, "role": "assistant", "sessionID": sessionID},
+			"info":      map[string]any{"id": messageID, "role": "assistant", "sessionID": sessionID, "time": msgCreatedNow()},
 		},
 	}
 }
@@ -324,6 +332,40 @@ func collectEvents(t *testing.T, ch <-chan core.Event, n int, timeout time.Durat
 		}
 	}
 	return got
+}
+
+// assertNoEvents fails if the engine receives anything within the window. The
+// engine cannot tell a replayed part from a live one, so a leak here is
+// user-visible: reply text, progress noise and inflated token totals.
+func assertNoEvents(t *testing.T, ch <-chan core.Event, window time.Duration) {
+	t.Helper()
+	select {
+	case evt, ok := <-ch:
+		if !ok {
+			return
+		}
+		t.Fatalf("unexpected event %+v: the conversation's history must not be replayed", evt)
+	case <-time.After(window):
+	}
+}
+
+// waitForResyncMessage waits until a reconnect has resynced the session and
+// returns the turn generation the message was bound to (0 means history).
+func waitForResyncMessage(t *testing.T, s *serverSession, id string) int64 {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		s.msgMu.Lock()
+		turn, known := s.msgTurn[id]
+		s.msgMu.Unlock()
+		if known {
+			return turn
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session was never resynced with %s after the reconnect", id)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func newTestServerSession(t *testing.T, f *fakeOpencodeServer, resumeID string) *serverSession {
@@ -982,6 +1024,205 @@ func TestServerSession_ReconnectReplaysOnlyTheMissingTail(t *testing.T) {
 	f.releaseTurn()
 }
 
+// A resumed conversation hands the transport its entire history, and the first
+// resync of a freshly started server can land after the turn has already begun
+// (Send stops waiting for the stream after streamReadyTimeout and posts the prompt
+// anyway). Every message in that history is "first seen" there, so only the ones
+// the running turn created may be replayed: replaying the rest pours a whole day
+// of answers, tool output and compaction summaries into one turn — observed live
+// as a 49-second turn that reported 1239 tool calls and 1.7M input tokens, with
+// text from earlier turns in the reply.
+func TestServerSession_ResyncDoesNotReplayHistoryIntoARunningTurn(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSession(t, f, "ses_history")
+	waitForSubscriber(t, f)
+
+	if err := s.Send("task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitForMessageCount(t, f, 1)
+
+	// What the resumed conversation already contains, all created long before this
+	// turn began.
+	old := time.Now().Add(-90 * time.Minute).UnixMilli()
+	f.mu.Lock()
+	f.resyncMessages = []map[string]any{
+		messageWithRole("msg_old_user", "user"),
+		messageWithPartsAt("msg_old_text", "assistant", old,
+			textPartWithID("prt_old_text", "msg_old_text", "an answer from an earlier turn")),
+		messageWithPartsAt("msg_old_tool", "assistant", old,
+			completedToolPart("prt_old_tool", "msg_old_tool", "call_old")),
+	}
+	f.mu.Unlock()
+
+	// The stream drops mid-turn and reconnects: that reconnect resyncs the session,
+	// which is where the history used to come back as this turn's own work.
+	f.dropStreams()
+	waitForSubscriber(t, f)
+
+	assertNoEvents(t, s.Events(), 2*time.Second)
+	if turn := waitForResyncMessage(t, s, "msg_old_text"); turn != 0 {
+		t.Fatalf("resynced history message bound to turn %d, want history (0)", turn)
+	}
+	f.releaseTurn()
+}
+
+// The server also re-announces older messages while a turn is running (token
+// totals, completion time). Such an announcement must not bind them to the running
+// turn: a later resync would then replay that earlier message's remaining parts as
+// this turn's own work.
+func TestServerSession_UpdatedOldMessageStaysHistory(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSession(t, f, "ses_old_update")
+	waitForSubscriber(t, f)
+
+	if err := s.Send("task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitForMessageCount(t, f, 1)
+
+	// An earlier answer, announced again mid-turn with its original creation time.
+	old := time.Now().Add(-30 * time.Minute)
+	f.emit(map[string]any{
+		"type": "message.updated",
+		"properties": map[string]any{
+			"sessionID": "ses_old_update",
+			"info": map[string]any{
+				"id": "msg_old", "role": "assistant", "sessionID": "ses_old_update",
+				"time": map[string]any{"created": old.UnixMilli()},
+			},
+		},
+	})
+	f.emit(partUpdated("ses_old_update", textPartWithID("prt_old", "msg_old", "an earlier answer")))
+	f.emit(partUpdated("ses_old_update", stepFinishPart()))
+
+	// The announcement itself is a live part, so it does reach the engine.
+	if got := collectText(t, s.Events(), 2*time.Second); !strings.Contains(got, "an earlier answer") {
+		t.Fatalf("live text = %q, want the announced text", got)
+	}
+
+	// The same message comes back in the resync with the rest of its parts, next to
+	// the message the running turn produced. Only the turn's own message may be
+	// replayed; the earlier one's remaining parts must stay out.
+	f.mu.Lock()
+	f.resyncMessages = []map[string]any{
+		messageWithPartsAt("msg_old", "assistant", old.UnixMilli(),
+			textPartWithID("prt_old", "msg_old", "an earlier answer"),
+			completedToolPart("prt_old_tool", "msg_old", "call_old")),
+		messageWithPartsAt("msg_now", "assistant", time.Now().UnixMilli(),
+			textPartWithID("prt_now", "msg_now", "the running turn's answer")),
+	}
+	f.mu.Unlock()
+
+	f.dropStreams()
+	waitForSubscriber(t, f)
+
+	// Waiting for the resync also proves it ran with the running turn's message in
+	// the list it read. Closing the step afterwards is what delivers the replayed
+	// text on a transport that buffers text per step, and a no-op on one that
+	// delivers it straight away.
+	if turn := waitForResyncMessage(t, s, "msg_now"); turn == 0 {
+		t.Fatalf("the running turn's own message was bound to history")
+	}
+	f.emit(partUpdated("ses_old_update", stepFinishPart()))
+
+	// The running turn's own message arrives; the earlier message's tool part would
+	// have come before it.
+	evt := collectEvents(t, s.Events(), 1, 3*time.Second)[0]
+	if evt.Type != core.EventText || !strings.Contains(evt.Content, "the running turn's answer") {
+		t.Fatalf("first replayed event = %+v, want only the running turn's text", evt)
+	}
+	if turn := waitForResyncMessage(t, s, "msg_old"); turn != 0 {
+		t.Fatalf("re-announced old message bound to turn %d, want history (0)", turn)
+	}
+	assertNoEvents(t, s.Events(), 2*time.Second)
+	f.releaseTurn()
+}
+
+// A mid-turn supplement joins the running turn instead of starting a new one, so it
+// must not move the boundary that decides which messages belong to that turn. If it
+// did, a resync after a gap would treat the answer the turn already produced as
+// history and drop it — the reconnect would end the turn with an empty reply, which
+// is the failure this transport exists to prevent.
+func TestServerSession_MidTurnSupplementKeepsTheTurnsMessageBoundary(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSession(t, f, "ses_ps_boundary")
+	waitForSubscriber(t, f)
+
+	if err := s.Send("task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitForMessageCount(t, f, 1)
+
+	// The answer this turn has already produced, dated before the supplement
+	// arrives (and after the turn began).
+	produced := time.Now().UnixMilli()
+	time.Sleep(5 * time.Millisecond)
+
+	if err := s.Send("/ps supplement", "m2", nil, nil); err != nil {
+		t.Fatalf("mid-turn Send: %v", err)
+	}
+	waitForMessageCount(t, f, 2)
+
+	f.mu.Lock()
+	f.resyncMessages = []map[string]any{
+		messageWithPartsAt("msg_turn", "assistant", produced,
+			textPartWithID("prt_turn", "msg_turn", "the answer produced before the supplement")),
+	}
+	f.mu.Unlock()
+
+	f.dropStreams()
+	waitForSubscriber(t, f)
+
+	if turn := waitForResyncMessage(t, s, "msg_turn"); turn == 0 {
+		t.Fatalf("the running turn's own message was bound to history")
+	}
+	// Closing the step delivers the replayed text on a transport that buffers text
+	// per step; a transport that delivers it straight away has it already.
+	f.emit(partUpdated("ses_ps_boundary", stepFinishPart()))
+
+	if got := collectText(t, s.Events(), 3*time.Second); got != "the answer produced before the supplement" {
+		t.Fatalf("replayed text = %q, want the running turn's own message", got)
+	}
+	f.releaseTurn()
+}
+
+// The turn boundary is compared in the millisecond unit OpenCode reports, so a
+// message created in the same millisecond the turn began still belongs to it —
+// dropping it would lose the answer of a turn whose message arrived fast.
+func TestServerSession_MessageBelongsToRunningTurn(t *testing.T) {
+	s := &serverSession{}
+	created := map[string]any{"time": map[string]any{"created": time.Now().UnixMilli()}}
+	if s.messageBelongsToRunningTurn(created) {
+		t.Fatalf("no turn has begun, so no message can belong to one")
+	}
+
+	start := time.Now().UnixMilli()
+	s.turnMessageFloor.Store(start)
+
+	cases := []struct {
+		name string
+		info map[string]any
+		want bool
+	}{
+		{name: "same millisecond as the turn", info: map[string]any{"time": map[string]any{"created": start}}, want: true},
+		{name: "after the turn began", info: map[string]any{"time": map[string]any{"created": start + 1}}, want: true},
+		{name: "decoded from JSON as float64", info: map[string]any{"time": map[string]any{"created": float64(start + 5)}}, want: true},
+		{name: "one millisecond before the turn", info: map[string]any{"time": map[string]any{"created": start - 1}}, want: false},
+		{name: "an earlier answer", info: map[string]any{"time": map[string]any{"created": start - 3_600_000}}, want: false},
+		{name: "no creation time", info: map[string]any{}, want: false},
+		{name: "creation time of another shape", info: map[string]any{"time": map[string]any{"created": "yesterday"}}, want: false},
+	}
+	for _, tc := range cases {
+		if got := s.messageBelongsToRunningTurn(tc.info); got != tc.want {
+			t.Fatalf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // A mid-turn /ps puts two message requests in flight for one turn. Whichever
 // returns first must not end the turn: only the last one may, otherwise the engine
 // sees a finished answer while the turn is still producing it.
@@ -1519,14 +1760,35 @@ func messageWithRole(id, role string) map[string]any {
 }
 
 // messageWithParts builds a resync entry whose message already carries its parts.
+// The message is dated now, i.e. it is one the running turn created.
 func messageWithParts(id, role string, parts ...map[string]any) map[string]any {
+	return messageWithPartsAt(id, role, time.Now().UnixMilli(), parts...)
+}
+
+// messageWithPartsAt is messageWithParts with an explicit creation time (in
+// milliseconds), which is how the transport tells the running turn's messages from
+// the conversation's history.
+func messageWithPartsAt(id, role string, createdMs int64, parts ...map[string]any) map[string]any {
 	anyParts := make([]any, 0, len(parts))
 	for _, p := range parts {
 		anyParts = append(anyParts, p)
 	}
 	return map[string]any{
-		"info":  map[string]any{"id": id, "role": role},
+		"info":  map[string]any{"id": id, "role": role, "time": map[string]any{"created": createdMs}},
 		"parts": anyParts,
+	}
+}
+
+// completedToolPart is a finished tool call, the shape a resync replays.
+func completedToolPart(id, messageID, callID string) map[string]any {
+	return map[string]any{
+		"id": id, "type": "tool", "tool": "bash", "callID": callID,
+		"messageID": messageID,
+		"state": map[string]any{
+			"status": "completed",
+			"input":  map[string]any{"command": "echo old"},
+			"output": "old output",
+		},
 	}
 }
 
