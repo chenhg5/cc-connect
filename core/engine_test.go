@@ -5190,6 +5190,185 @@ func TestCmdModel_KeepHistoryPreservesSessionID(t *testing.T) {
 	}
 }
 
+// effectiveModelOf mirrors what a transport does when it prefers the active
+// provider's own model over the agent's model — every provider-aware transport does
+// that, agent/opencode in StartSession for one — i.e. the model the next turn will
+// actually run with.
+func effectiveModelOf(a *namedStubModelModeAgent) string {
+	model := a.GetModel()
+	if p := a.GetActiveProvider(); p != nil && p.Model != "" {
+		model = p.Model
+	}
+	return model
+}
+
+// newWorkspaceOverrideEngine builds an engine whose workspace agents carry the given
+// providers, so a test can drive getOrCreateWorkspaceAgent with workspace overrides.
+func newWorkspaceOverrideEngine(t *testing.T, agentName string, providers []ProviderConfig, active string) *Engine {
+	t.Helper()
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		agent := &namedStubModelModeAgent{name: agentName}
+		if model, ok := opts["model"].(string); ok {
+			agent.model = model
+		}
+		return agent, nil
+	})
+	globalAgent := &namedStubModelModeAgent{
+		name: agentName,
+		stubModelModeAgent: stubModelModeAgent{
+			model:     "project-default",
+			providers: providers,
+			active:    active,
+		},
+	}
+	e := NewEngine("test", globalAgent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetProjectStateStore(NewProjectStateStore(filepath.Join(t.TempDir(), "projects", "test.state.json")))
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"))
+	return e
+}
+
+func createWorkspaceAgentForTest(t *testing.T, e *Engine, wsDir string) *namedStubModelModeAgent {
+	t.Helper()
+	raw, _, err := e.getOrCreateWorkspaceAgent(wsDir)
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent(%s): %v", wsDir, err)
+	}
+	created, ok := raw.(*namedStubModelModeAgent)
+	if !ok {
+		t.Fatalf("workspace agent type = %T, want *namedStubModelModeAgent", raw)
+	}
+	return created
+}
+
+// A model picked for one workspace has to survive the pool evicting the workspace
+// agent. Carrying it on the agent's model alone is not enough: every provider-aware
+// transport prefers the active provider's model, so the project's provider model
+// shadowed it as soon as the agent was rebuilt — which is how a workspace pinned to
+// openai/gpt-6.1-sol silently reverted to openai/gpt-5.6-sol, the provider's own
+// configured model, after an idle reap, while the provider choice itself survived.
+func TestGetOrCreateWorkspaceAgent_PinsTheWorkspaceModelRecordedForTheActiveProvider(t *testing.T) {
+	e := newWorkspaceOverrideEngine(t, "test-ws-model-recorded",
+		[]ProviderConfig{
+			// chatgpt does not offer the picked model in its list here, so only the
+			// recorded provider can justify pinning it.
+			{Name: "chatgpt", Model: "openai/gpt-5.6-sol"},
+			{Name: "deepseek", Model: "deepseek/deepseek-flash"},
+		}, "deepseek")
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	e.projectState.SetWorkspaceProviderOverride(wsDir, "chatgpt")
+	e.projectState.SetWorkspaceModelOverride(wsDir, "openai/gpt-6.1-sol")
+	e.projectState.SetWorkspaceModelProvider(wsDir, "chatgpt")
+
+	created := createWorkspaceAgentForTest(t, e, wsDir)
+	if active := created.GetActiveProvider(); active == nil || active.Name != "chatgpt" {
+		t.Fatalf("active provider = %+v, want the workspace provider override chatgpt", active)
+	}
+	if got := effectiveModelOf(created); got != "openai/gpt-6.1-sol" {
+		t.Fatalf("effective model = %q, want the model recorded for chatgpt", got)
+	}
+}
+
+// Models stored before the provider was recorded (every entry written by an earlier
+// version) still have to be applied when the active provider offers them.
+func TestGetOrCreateWorkspaceAgent_PinsALegacyWorkspaceModelTheProviderOffers(t *testing.T) {
+	e := newWorkspaceOverrideEngine(t, "test-ws-model-legacy",
+		[]ProviderConfig{
+			{Name: "chatgpt", Model: "openai/gpt-5.6-sol", Models: []ModelOption{{Name: "openai/gpt-6.1-sol"}}},
+			{Name: "deepseek", Model: "deepseek/deepseek-flash"},
+		}, "deepseek")
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	e.projectState.SetWorkspaceProviderOverride(wsDir, "chatgpt")
+	e.projectState.SetWorkspaceModelOverride(wsDir, "openai/gpt-6.1-sol")
+
+	created := createWorkspaceAgentForTest(t, e, wsDir)
+	if got := effectiveModelOf(created); got != "openai/gpt-6.1-sol" {
+		t.Fatalf("effective model = %q, want the legacy workspace model the provider offers", got)
+	}
+}
+
+// A model picked for a provider this workspace no longer uses must not be forced
+// onto the active one: /goto <provider> without a model leaves the stored model
+// behind, and it may not exist on the provider that is now active.
+func TestGetOrCreateWorkspaceAgent_LeavesAModelOfAnotherProviderAlone(t *testing.T) {
+	e := newWorkspaceOverrideEngine(t, "test-ws-model-foreign",
+		[]ProviderConfig{
+			{Name: "chatgpt", Model: "openai/gpt-5.6-sol"},
+			{Name: "deepseek", Model: "deepseek/deepseek-flash"},
+		}, "deepseek")
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	e.projectState.SetWorkspaceProviderOverride(wsDir, "deepseek")
+	e.projectState.SetWorkspaceModelOverride(wsDir, "openai/gpt-6.1-sol")
+	e.projectState.SetWorkspaceModelProvider(wsDir, "chatgpt")
+
+	created := createWorkspaceAgentForTest(t, e, wsDir)
+	if active := created.GetActiveProvider(); active == nil || active.Name != "deepseek" {
+		t.Fatalf("active provider = %+v, want deepseek", active)
+	}
+	if got := effectiveModelOf(created); got != "deepseek/deepseek-flash" {
+		t.Fatalf("effective model = %q, want the active provider's own model", got)
+	}
+}
+
+// Same, for legacy entries whose provider is unknown and whose model the active
+// provider does not offer: production states carry values like a bare "sonnet" that
+// were picked while a different provider was active.
+func TestGetOrCreateWorkspaceAgent_LeavesAnUnattributableLegacyModelAlone(t *testing.T) {
+	e := newWorkspaceOverrideEngine(t, "test-ws-model-unattributable",
+		[]ProviderConfig{
+			{Name: "chatgpt", Model: "openai/gpt-5.6-sol"},
+			{Name: "deepseek", Model: "deepseek/deepseek-flash"},
+		}, "deepseek")
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	e.projectState.SetWorkspaceModelOverride(wsDir, "sonnet")
+
+	created := createWorkspaceAgentForTest(t, e, wsDir)
+	if active := created.GetActiveProvider(); active == nil || active.Name != "deepseek" {
+		t.Fatalf("active provider = %+v, want the project default deepseek", active)
+	}
+	if got := effectiveModelOf(created); got != "deepseek/deepseek-flash" {
+		t.Fatalf("effective model = %q, want the project default model", got)
+	}
+}
+
+// The workspace model must not leak into the project agent or into another
+// workspace: the pin is applied to the workspace agent's own copy of the providers.
+func TestGetOrCreateWorkspaceAgent_DoesNotLeakTheWorkspaceModel(t *testing.T) {
+	e := newWorkspaceOverrideEngine(t, "test-ws-model-no-leak",
+		[]ProviderConfig{
+			{Name: "chatgpt", Model: "openai/gpt-5.6-sol"},
+			{Name: "deepseek", Model: "deepseek/deepseek-flash"},
+		}, "deepseek")
+
+	wsDir := normalizeWorkspacePath(t.TempDir())
+	e.projectState.SetWorkspaceProviderOverride(wsDir, "chatgpt")
+	e.projectState.SetWorkspaceModelOverride(wsDir, "openai/gpt-6.1-sol")
+	e.projectState.SetWorkspaceModelProvider(wsDir, "chatgpt")
+	otherDir := normalizeWorkspacePath(t.TempDir())
+
+	created := createWorkspaceAgentForTest(t, e, wsDir)
+	if got := effectiveModelOf(created); got != "openai/gpt-6.1-sol" {
+		t.Fatalf("effective model = %q, want the workspace model", got)
+	}
+
+	global, ok := e.agent.(*namedStubModelModeAgent)
+	if !ok {
+		t.Fatalf("project agent type = %T", e.agent)
+	}
+	for _, p := range global.ListProviders() {
+		if p.Model == "openai/gpt-6.1-sol" {
+			t.Fatalf("the project agent's provider %q took the workspace model", p.Name)
+		}
+	}
+	other := createWorkspaceAgentForTest(t, e, otherDir)
+	if got := effectiveModelOf(other); got != "deepseek/deepseek-flash" {
+		t.Fatalf("second workspace effective model = %q, want the project default", got)
+	}
+}
+
 func TestGetOrCreateWorkspaceAgent_InheritsActiveProvider(t *testing.T) {
 	agentName := "test-workspace-provider-inherit"
 	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
