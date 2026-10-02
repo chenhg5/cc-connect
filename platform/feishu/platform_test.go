@@ -1750,6 +1750,15 @@ func TestBuildToolDisplay_RedactsKeyParameters(t *testing.T) {
 	}
 }
 
+func TestBuildToolDisplay_ShowsPatchText(t *testing.T) {
+	got := buildToolDisplay("apply_patch", `{"filePath":"/tmp/a.go","patchText":"@@\n-old\n+new"}`)
+	for _, want := range []string{"filePath: /tmp/a.go", "patchText: @@\n-old\n+new"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Errorf("detail %q does not contain %q", got.Detail, want)
+		}
+	}
+}
+
 func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 	tests := []struct {
 		name      string
