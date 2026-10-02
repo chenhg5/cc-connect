@@ -30,6 +30,11 @@ type acpSession struct {
 	wg      sync.WaitGroup
 	alive   atomic.Bool
 
+	// loadingSession is true while handshake waits for the session/load
+	// response; replayed history updates are not emitted because nothing
+	// reads s.events until newACPSession returns.
+	loadingSession atomic.Bool
+
 	cmd *exec.Cmd
 	tr  *transport
 
@@ -211,7 +216,9 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 			"cwd":        s.workDir,
 			"mcpServers": []any{},
 		}
+		s.loadingSession.Store(true)
 		loadRes, err := s.tr.call(s.ctx, "session/load", loadParams)
+		s.loadingSession.Store(false)
 		if err != nil {
 			slog.Warn("acp: session/load failed, starting new session", "error", err)
 		} else {
@@ -370,8 +377,11 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 		slog.Debug("acp: notification", "method", method)
 		return
 	}
-	s.cacheToolCallInput(params)
 	s.maybeAbsorbCurrentModeUpdate(params)
+	if s.loadingSession.Load() {
+		return
+	}
+	s.cacheToolCallInput(params)
 	sid := s.currentACPSessionID()
 	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
 	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
