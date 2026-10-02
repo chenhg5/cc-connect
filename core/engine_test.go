@@ -1516,7 +1516,7 @@ func TestProcessInteractiveTurnWithRetry_ProgressCardNoticeUpdatesCard(t *testin
 			sawCompleted = true
 		}
 		for _, item := range payload.Items {
-			if item.Kind == ProgressEntryInfo && strings.Contains(item.Text, "Retrying in") && strings.Contains(item.Text, "attempt 2/2") {
+			if item.Kind == ProgressEntryToolUse && item.Tool == "自动重试" && strings.Contains(item.Text, "Retrying in") && strings.Contains(item.Text, "attempt 2/2") {
 				sawRetry = true
 			}
 		}
@@ -1622,7 +1622,7 @@ func TestProcessInteractiveTurnWithRetry_ProgressCardRetryNoticeBypassesThrottle
 			sawCompleted = true
 		}
 		for _, item := range payload.Items {
-			if item.Kind == ProgressEntryInfo && strings.Contains(item.Text, "Retrying in") {
+			if item.Kind == ProgressEntryToolUse && item.Tool == "自动重试" && strings.Contains(item.Text, "Retrying in") {
 				sawRetry = true
 			}
 		}
