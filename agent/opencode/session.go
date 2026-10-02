@@ -52,8 +52,9 @@ type opencodeSession struct {
 	// usageMu guards usage: OpenCode reports per-step token usage in the
 	// step-finish part's "tokens" field. Input/output/cache counts
 	// accumulate across the turn (reported on EventResult and in the reply
-	// footer via ContextUsageReporter); TotalTokens is kept as the latest
-	// snapshot (current context load).
+	// footer via ContextUsageReporter); TotalTokens and UsedTokens are kept
+	// as the latest snapshot (the current context load the engine compares
+	// against the window when deciding auto-compress).
 	usageMu sync.RWMutex
 	usage   *core.ContextUsage
 }
@@ -678,7 +679,7 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 
 	// Accumulate this step's token usage (OpenCode reports it in the
 	// step-finish part's "tokens" field). Input/output/cache counts sum
-	// across the whole turn; total stays the latest snapshot.
+	// across the whole turn; total and used stay the latest snapshot.
 	if stepUsage := parseStepTokens(part); stepUsage != nil {
 		s.usageMu.Lock()
 		if s.usage == nil {
@@ -690,6 +691,11 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 			s.usage.CachedInputTokens += stepUsage.CachedInputTokens
 			s.usage.CacheCreationInputTokens += stepUsage.CacheCreationInputTokens
 			s.usage.TotalTokens = stepUsage.TotalTokens
+			// UsedTokens follows TotalTokens: it describes THIS step's prompt,
+			// not a turn total. The engine compares it against the context
+			// window to decide auto-compress, so summing it across steps would
+			// report a load the next call never sends.
+			s.usage.UsedTokens = stepUsage.UsedTokens
 		}
 		s.usageMu.Unlock()
 	}
@@ -780,6 +786,15 @@ func parseStepTokens(part map[string]any) *core.ContextUsage {
 			usage.CacheCreationInputTokens = int(v)
 		}
 	}
+	// UsedTokens is this step's prompt size — everything the model was sent,
+	// which the next call sends again — the number core/engine.go compares
+	// against the context window when deciding auto-compress. OpenCode splits a
+	// prompt into new input plus the cache write/read halves exactly like
+	// Claude's usage does, and the three are disjoint, so they sum to the full
+	// prompt. Leaving it unset made the reporter look like it had measured the
+	// context ("agent reported zero") instead of failing to measure it, which
+	// silently disabled auto-compress for every OpenCode project.
+	usage.UsedTokens = usage.InputTokens + usage.CacheCreationInputTokens + usage.CachedInputTokens
 	return usage
 }
 
