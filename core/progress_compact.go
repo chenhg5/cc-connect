@@ -187,30 +187,40 @@ func BuildStreamingCardPayload(thinking string, stepTexts []string, tools []card
 	}
 
 	// Cap per-panel entries (Feishu cardkit rejects over-limit cards with
-	// code 300305 "element exceeds the limit"). Thinking/step entries keep
-	// the first maxThinkingPanelEntries; tool entries keep the first
-	// maxToolPanelEntries. Excess entries are dropped — the foldable panels
-	// stay a faithful prefix record (append-style updates assume a
-	// monotonically growing head) and the card stays within the platform
-	// element budget.
+	// code 300305 "element exceeds the limit"). Keep the newest entries so
+	// a long-running turn continues to show current activity. Excess entries
+	// are dropped from the head and the payload is marked truncated; the
+	// streaming-card transport falls back to a full sync when this rolling
+	// window no longer has the previously-rendered lane as a prefix.
 	truncated := false
 	if len(cleaned) > 0 {
-		kept := cleaned[:0]
 		thinkingCount, toolCount := 0, 0
 		for _, item := range cleaned {
 			switch item.Kind {
 			case ProgressEntryThinking:
-				if thinkingCount >= maxThinkingPanelEntries {
-					truncated = true
-					continue
-				}
 				thinkingCount++
 			case ProgressEntryToolUse:
-				if toolCount >= maxToolPanelEntries {
-					truncated = true
+				toolCount++
+			}
+		}
+		thinkingToDrop := thinkingCount - maxThinkingPanelEntries
+		toolToDrop := toolCount - maxToolPanelEntries
+		if thinkingToDrop > 0 || toolToDrop > 0 {
+			truncated = true
+		}
+		kept := make([]ProgressCardEntry, 0, len(cleaned))
+		for _, item := range cleaned {
+			switch item.Kind {
+			case ProgressEntryThinking:
+				if thinkingToDrop > 0 {
+					thinkingToDrop--
 					continue
 				}
-				toolCount++
+			case ProgressEntryToolUse:
+				if toolToDrop > 0 {
+					toolToDrop--
+					continue
+				}
 			}
 			kept = append(kept, item)
 		}

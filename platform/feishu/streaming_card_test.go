@@ -574,6 +574,36 @@ func TestStreamingCard_PayloadUpdateAppends(t *testing.T) {
 	}
 }
 
+func TestStreamingCard_RollingToolWindowResyncsWhenHeadDrops(t *testing.T) {
+	const toolWindow = 15
+	p := &fakePlatformForStreamCard{useInteractive: true}
+	sc, _ := p.CreateStreamingCard(context.Background(), replyContext{chatID: "chat_fake"})
+	card := sc.(*feishuStreamingCard)
+
+	tools := make([]core.ProgressCardEntry, 0, toolWindow)
+	for i := 0; i < toolWindow; i++ {
+		tools = append(tools, core.ProgressCardEntry{Kind: core.ProgressEntryToolUse, Tool: "bash", Text: fmt.Sprintf("cmd %d", i)})
+	}
+	first := core.BuildProgressCardPayloadV2(tools, false, "opencode", core.LangChinese, core.ProgressCardStateRunning)
+	_ = card.Update(context.Background(), first)
+	time.Sleep(feishuStreamingCardUpdateMinInterval + 200*time.Millisecond)
+
+	tools = append(tools, core.ProgressCardEntry{Kind: core.ProgressEntryToolUse, Tool: "bash", Text: "cmd 15"})
+	second := core.BuildProgressCardPayloadV2(tools[1:], false, "opencode", core.LangChinese, core.ProgressCardStateRunning)
+	_ = card.Update(context.Background(), second)
+	time.Sleep(feishuStreamingCardUpdateMinInterval + 200*time.Millisecond)
+
+	if sends, updates, finalizes := p.count(); updates != 1 {
+		t.Fatalf("rolling window full-card updates = %d, want 1 after the head drops (send=%d finalize=%d append=%d)", updates, sends, finalizes, p.appendCount())
+	}
+	p.mu.Lock()
+	got := p.lastUpdateJSON
+	p.mu.Unlock()
+	if !strings.Contains(got, "cmd 15") || strings.Contains(got, "cmd 0") {
+		t.Fatalf("full-card resync does not contain the latest window: %s", got)
+	}
+}
+
 // TestStreamingCard_InsertsMissingPanelInsteadOfFullUpdate covers the
 // regression where the first entry of a lane whose panel the card does not
 // have yet (appending to it fails with cardkit 300315 "no such element id")

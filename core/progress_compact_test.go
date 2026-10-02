@@ -317,7 +317,7 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 // the Feishu cardkit "element exceeds the limit" failure (code 300305): a
 // long agent turn with dozens of tool calls must be capped per panel so the
 // final card stays within the platform element budget. Excess entries are
-// dropped and the payload is marked truncated.
+// dropped from the head and the payload is marked truncated.
 func TestBuildStreamingCardPayload_CapsPanelEntries(t *testing.T) {
 	var stepTexts []string
 	for i := 0; i < maxThinkingPanelEntries+5; i++ {
@@ -354,9 +354,9 @@ func TestBuildStreamingCardPayload_CapsPanelEntries(t *testing.T) {
 	if payload.Answer != "最终答案。" {
 		t.Errorf("answer = %q, want %q", payload.Answer, "最终答案。")
 	}
-	// The first tool entry survives (prefix record is kept).
-	firstTool := payload.Items[len(payload.Items)-toolCount]
-	if firstTool.Tool != "bash" || !strings.Contains(firstTool.Text, "cmd 0") {
-		t.Errorf("first tool entry = %+v, want bash/cmd 0", firstTool)
+	// The newest tool entry survives (the live panel is a rolling window).
+	lastTool := payload.Items[len(payload.Items)-1]
+	if lastTool.Tool != "bash" || !strings.Contains(lastTool.Text, "cmd 40") {
+		t.Errorf("last tool entry = %+v, want bash/cmd 40", lastTool)
 	}
 }
