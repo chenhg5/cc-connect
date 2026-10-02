@@ -527,3 +527,57 @@ func TestHandleStepFinish_TokenUsageAccumulated(t *testing.T) {
 			usage.InputTokens, evt.InputTokens, usage.OutputTokens, evt.OutputTokens)
 	}
 }
+
+// TestGetContextUsage_ReportsUsedTokensForAutoCompress is the regression test
+// for OpenCode silently disabling the engine's auto-compress: the adapter filled
+// every token field except core.ContextUsage.UsedTokens, so core/engine.go's
+// auto-compress block hit `case usage.UsedTokens <= 0`, recorded
+// "none: agent reported zero" and — because OpenCode DOES implement
+// ContextUsageReporter — refused to decide at any log level above Debug. A
+// project's `[projects.auto_compress] max_tokens` was therefore never enforced.
+//
+// UsedTokens must be the LAST step's prompt size (what the next inference call
+// sends again), while the per-token fields keep summing across the turn.
+func TestGetContextUsage_ReportsUsedTokensForAutoCompress(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{events: make(chan core.Event, 4), ctx: ctx}
+
+	steps := []map[string]any{
+		{"type": "step-finish", "part": map[string]any{
+			"type": "step-finish", "reason": "tool-calls",
+			"tokens": map[string]any{"total": 3050, "input": 1000, "output": 50, "reasoning": 0,
+				"cache": map[string]any{"write": 0, "read": 2000}}}},
+		{"type": "step-finish", "part": map[string]any{
+			"type": "step-finish", "reason": "stop",
+			"tokens": map[string]any{"total": 4600, "input": 500, "output": 100, "reasoning": 0,
+				"cache": map[string]any{"write": 0, "read": 4000}}}},
+	}
+	for _, raw := range steps {
+		b, _ := json.Marshal(raw)
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		s.handleStepFinish(m)
+	}
+
+	usage := s.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want usage")
+	}
+	// The last prompt is what the engine measures: input 500 + cache read 4000.
+	if usage.UsedTokens != 4500 {
+		t.Errorf("UsedTokens = %d, want 4500 (last step's prompt, not the turn sum 7500)", usage.UsedTokens)
+	}
+	if usage.TotalTokens != 4600 {
+		t.Errorf("TotalTokens = %d, want latest snapshot 4600", usage.TotalTokens)
+	}
+	// The turn sums keep their existing meaning (reply footer / EventResult).
+	if usage.InputTokens != 1500 {
+		t.Errorf("InputTokens = %d, want 1500 (summed across the turn)", usage.InputTokens)
+	}
+	if usage.CachedInputTokens != 6000 {
+		t.Errorf("CachedInputTokens = %d, want 6000 (summed across the turn)", usage.CachedInputTokens)
+	}
+}
