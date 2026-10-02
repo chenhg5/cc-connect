@@ -7372,6 +7372,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						return false
 					}
 					lastRetryNotice = notice
+					state.mu.Lock()
+					progressNotice := state.progressNotice
+					state.mu.Unlock()
+					if progressNotice != nil && progressNotice(notice) {
+						return true
+					}
 					if hasRichCard && cardMessageID != nil {
 						if updater, ok := p.(MessageUpdater); ok {
 							statusFooter := joinStatusFooterLines(
@@ -7386,7 +7392,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							}
 						}
 					}
-					if cp.AppendStructuredImmediate(ProgressCardEntry{Kind: ProgressEntryInfo, Text: notice}, notice) {
+					if cp.AppendStructuredImmediate(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "自动重试", Text: notice}, notice) {
 						return true
 					}
 					return sp.updateStatusFooter(CardStatusWorking, notice)
