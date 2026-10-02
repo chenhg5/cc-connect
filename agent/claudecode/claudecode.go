@@ -35,25 +35,25 @@ func init() {
 //   - "auto":              Claude's automatic permission classifier
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
-	workDir          string
-	cmd              string   // CLI binary name (default: "claude")
-	cliExtraArgs     []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
-	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	cmdArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
-	model            string
-	reasoningEffort  string // "low" | "medium" | "high" | "max"
-	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
-	allowedTools     []string
-	disallowedTools  []string
+	workDir             string
+	cmd                 string   // CLI binary name (default: "claude")
+	cliExtraArgs        []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
+	configEnv           []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	cmdArgsFlag         string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
+	model               string
+	reasoningEffort     string // "low" | "medium" | "high" | "max"
+	mode                string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
+	allowedTools        []string
+	disallowedTools     []string
 	maxContextTokens    int // optional: passed as --max-context-tokens when > 0
 	contextWindowTokens int // optional: override the context-window-size heuristic used by the ctx% indicator. When <= 0, fall back to model-name heuristics.
 	providers           []core.ProviderConfig
-	activeIdx        int // -1 = no provider set
-	sessionEnv       []string
-	routerURL        string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey     string   // Claude Code Router API key (optional)
-	systemPrompt     string   // Custom system prompt to pass to Claude CLI
-	pluginDirs       []string // Plugin directories to load via --plugin-dir (repeatable)
+	activeIdx           int // -1 = no provider set
+	sessionEnv          []string
+	routerURL           string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey        string   // Claude Code Router API key (optional)
+	systemPrompt        string   // Custom system prompt to pass to Claude CLI
+	pluginDirs          []string // Plugin directories to load via --plugin-dir (repeatable)
 
 	appendSystemPrompt string // Custom text appended to the system prompt (keeps Claude's default)
 
@@ -1430,33 +1430,14 @@ func getBaseURLEnvVarForProviderType(providerType string) string {
 	}
 }
 
-// summarizeInput produces a short human-readable description of tool input.
+// summarizeInput preserves structured tool input for downstream renderers.
+// Card renderers apply their own allowlist and redaction; reducing common tools
+// to one field here would discard parameters such as grep include/path and bash
+// descriptions before the renderer can inspect them.
 func summarizeInput(tool string, input any) string {
 	m, ok := input.(map[string]any)
 	if !ok {
 		return ""
-	}
-
-	switch tool {
-	case "Read", "Edit", "Write":
-		if fp, ok := m["file_path"].(string); ok {
-			return fp
-		}
-	case "Bash":
-		if cmd, ok := m["command"].(string); ok {
-			return cmd
-		}
-	case "Grep":
-		if p, ok := m["pattern"].(string); ok {
-			return p
-		}
-	case "Glob":
-		if p, ok := m["pattern"].(string); ok {
-			return p
-		}
-		if p, ok := m["glob_pattern"].(string); ok {
-			return p
-		}
 	}
 
 	b, err := json.Marshal(m)
