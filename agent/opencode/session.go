@@ -383,6 +383,7 @@ func extractToolInput(state map[string]any) string {
 		// Preserve structured input for downstream card renderers. They apply
 		// their own allowlist and redaction; reducing this to title/command here
 		// loses useful fields such as grep include/path and read offset/limit.
+		// The size cap prevents an unusually large tool payload from flooding cards.
 		b, _ := json.Marshal(input)
 		return truncate(string(b), 2000)
 	}
