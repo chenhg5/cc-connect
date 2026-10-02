@@ -70,6 +70,12 @@ func TestLaunchdStatusUsesUserDomainWhenGUIDomainUnavailable(t *testing.T) {
 	orig := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = orig })
 
+	// Status reports Installed from the presence of a plist, so it has to be one
+	// this test owns rather than whatever the machine has installed.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	seedLaunchdPlist(t, launchdPlistPath())
+
 	guiDomain := launchdGUIDomain()
 	userDomain := launchdUserDomain()
 	guiTarget := launchdTarget(guiDomain)
@@ -181,7 +187,7 @@ func TestLaunchdStatusIgnoresNestedActiveState(t *testing.T) {
 		case guiDomain, userDomain:
 			return "subsystem", nil
 		case currentGUI, currentUser:
-			return "state = spawn scheduled\n\t\tstate = active", nil
+			return "state = spawn scheduled\n\t\tstate = running\n\t\tpid = 999", nil
 		default:
 			return "", fmt.Errorf("unexpected target %q", args[1])
 		}
@@ -442,8 +448,90 @@ func TestLaunchdStartRetiresLegacyWhenCurrentIsAlreadyLoaded(t *testing.T) {
 	}
 }
 
-// Restart must not unload a working legacy service when it cannot bootstrap the
-// current one (missing plist).
+// With only the legacy service loaded and the current plist missing, a restart must
+// still restart the daemon: it may not unload anything, and it must keep the legacy
+// plist the loaded service would need to come back up.
+func TestRestartRestartsTheLoadedLegacyServiceWhenTheCurrentPlistIsMissing(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	guiDomain := launchdGUIDomain()
+	userDomain := launchdUserDomain()
+	legacyGUI := legacyLaunchdTarget(guiDomain)
+	legacyUser := legacyLaunchdTarget(userDomain)
+
+	seedLaunchdPlist(t, legacyLaunchdPlistPath())
+
+	var calls []string
+	runLaunchctl = func(args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if len(args) >= 2 && args[0] == "print" {
+			switch args[1] {
+			case guiDomain, userDomain:
+				return "subsystem", nil
+			case legacyGUI, legacyUser:
+				return "state = running\npid = 9001", nil
+			}
+			return "", fmt.Errorf("Could not find service")
+		}
+		return "", nil
+	}
+
+	mgr := &launchdManager{}
+	if err := mgr.Restart(); err != nil {
+		t.Fatalf("Restart() error = %v, want the loaded legacy service restarted", err)
+	}
+	kickstarted := false
+	for _, call := range calls {
+		if strings.HasPrefix(call, "bootout ") {
+			t.Fatalf("Restart() unloaded a service it could not replace: %#v", calls)
+		}
+		if strings.HasPrefix(call, "kickstart ") && strings.Contains(call, legacyLaunchdLabel) {
+			kickstarted = true
+		}
+	}
+	if !kickstarted {
+		t.Fatalf("Restart() did not restart the loaded legacy service: %#v", calls)
+	}
+	if _, err := os.Stat(legacyLaunchdPlistPath()); err != nil {
+		t.Fatalf("legacy plist was removed by Restart(): %v", err)
+	}
+}
+
+// Without the current plist and with nothing loaded there is nothing a restart could
+// start, so it has to fail with a clear message instead of silently doing nothing.
+func TestRestartRefusesWhenNothingIsLoadedAndTheCurrentPlistIsMissing(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	seedLaunchdPlist(t, legacyLaunchdPlistPath())
+
+	var calls []string
+	runLaunchctl = func(args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return "", fmt.Errorf("Could not find service")
+	}
+
+	mgr := &launchdManager{}
+	if err := mgr.Restart(); err == nil {
+		t.Fatal("Restart() = nil, want an error because the current plist is missing")
+	}
+	for _, call := range calls {
+		if !strings.HasPrefix(call, "print ") {
+			t.Fatalf("Restart() ran %q without a current plist: %#v", call, calls)
+		}
+	}
+	if _, err := os.Stat(legacyLaunchdPlistPath()); err != nil {
+		t.Fatalf("legacy plist was removed by a failed Restart(): %v", err)
+	}
+}
+
 func TestRestartKeepsLoadedUserDomainWhenGUIAvailable(t *testing.T) {
 	orig := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = orig })
@@ -555,6 +643,12 @@ func TestRestartBootstrapsUnloadedService(t *testing.T) {
 	orig := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = orig })
 
+	// Restart refuses before bootstrap when the current plist is missing, so this
+	// test has to install one under its own HOME.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	seedLaunchdPlist(t, launchdPlistPath())
+
 	guiDomain := launchdGUIDomain()
 	guiTarget := launchdTarget(guiDomain)
 	var calls []string
@@ -619,6 +713,111 @@ func containsCall(calls []string, want string) bool {
 // TestBuildPlist_EscapesXMLSpecialCharsInPaths pins the bug where unescaped
 // '&', '<', '>', quotes, and apostrophes in cfg paths produced malformed XML that
 // `launchctl bootstrap` rejected.
+// The legacy plist must survive a restart that could not bring the current service
+// up: removing it first would leave a legacy-only installation with nothing to run.
+func TestRestartKeepsTheLegacyPlistWhenTheBootstrapFails(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	seedLaunchdPlist(t, launchdPlistPath())
+	seedLaunchdPlist(t, legacyLaunchdPlistPath())
+
+	guiDomain := launchdGUIDomain()
+	runLaunchctl = func(args ...string) (string, error) {
+		switch {
+		case args[0] == "print" && args[1] == guiDomain:
+			return "subsystem", nil
+		case args[0] == "print":
+			return "not loaded", fmt.Errorf("exit status 113")
+		case args[0] == "bootstrap":
+			return "Bootstrap failed: 5", fmt.Errorf("exit status 5")
+		}
+		return "", nil
+	}
+
+	if err := (&launchdManager{}).Restart(); err == nil {
+		t.Fatal("Restart() = nil, want the bootstrap failure")
+	}
+	if _, err := os.Stat(legacyLaunchdPlistPath()); err != nil {
+		t.Fatalf("legacy plist was removed before the current service was up: %v", err)
+	}
+}
+
+// Once the current service is up the legacy fallback is retired.
+func TestRestartRemovesTheLegacyPlistOnceTheCurrentServiceIsUp(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	seedLaunchdPlist(t, launchdPlistPath())
+	seedLaunchdPlist(t, legacyLaunchdPlistPath())
+
+	guiDomain := launchdGUIDomain()
+	runLaunchctl = func(args ...string) (string, error) {
+		if args[0] == "print" {
+			if args[1] == guiDomain {
+				return "subsystem", nil
+			}
+			return "not loaded", fmt.Errorf("exit status 113")
+		}
+		return "", nil
+	}
+
+	if err := (&launchdManager{}).Restart(); err != nil {
+		t.Fatalf("Restart() error = %v", err)
+	}
+	if _, err := os.Stat(legacyLaunchdPlistPath()); !os.IsNotExist(err) {
+		t.Fatalf("legacy plist still exists after a successful restart: %v", err)
+	}
+}
+
+// With both labels loaded, restart must target the current one: kickstarting the
+// legacy agent would restart the service the user is migrating away from.
+func TestRestartKickstartsTheCurrentLabelWhenBothAreLoaded(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	guiDomain := launchdGUIDomain()
+	userDomain := launchdUserDomain()
+	currentGUI := launchdTarget(guiDomain)
+	currentUser := launchdTarget(userDomain)
+	legacyGUI := legacyLaunchdTarget(guiDomain)
+	legacyUser := legacyLaunchdTarget(userDomain)
+
+	var calls []string
+	runLaunchctl = func(args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if args[0] == "print" {
+			switch args[1] {
+			case guiDomain, userDomain:
+				return "subsystem", nil
+			case currentGUI, currentUser, legacyGUI, legacyUser:
+				return "state = running\npid = 9001", nil
+			}
+			return "not loaded", fmt.Errorf("exit status 113")
+		}
+		return "", nil
+	}
+
+	if err := (&launchdManager{}).Restart(); err != nil {
+		t.Fatalf("Restart() error = %v", err)
+	}
+	if !containsCall(calls, "kickstart -kp "+currentGUI) {
+		t.Fatalf("Restart() did not kickstart the current label: %#v", calls)
+	}
+	for _, call := range calls {
+		if strings.HasPrefix(call, "kickstart ") && strings.Contains(call, legacyLaunchdLabel) {
+			t.Fatalf("Restart() kickstarted the legacy label: %#v", calls)
+		}
+	}
+}
+
 func TestBuildPlist_EscapesXMLSpecialCharsInPaths(t *testing.T) {
 	cfg := Config{
 		BinaryPath: "/opt/cc-connect/bin & <tools>/cc-connect",

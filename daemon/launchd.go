@@ -151,23 +151,33 @@ func (*launchdManager) Restart() error {
 		if out, err := runLaunchctl("kickstart", "-kp", target); err != nil {
 			return fmt.Errorf("restart kickstart: %s (%w)", out, err)
 		}
-		// The current service is serving again; drop the legacy fallback so a
-		// restart cannot leave two agents loaded.
-		removeLegacyLaunchdPlist()
 		return nil
 	}
 
 	domain := preferredLaunchdDomain()
-	if out, err := runLaunchctl("bootstrap", domain, launchdPlistPath()); err != nil {
+	plistPath := launchdPlistPath()
+	if _, err := os.Stat(plistPath); err != nil {
+		// Refuse before touching anything: without the current plist a restart can
+		// only fail, and it must not take a working legacy service down with it.
+		return fmt.Errorf("restart: current service is not installed (%s missing: %w); run 'cc-connect daemon install'", plistPath, err)
+	}
+	if out, err := runLaunchctl("bootstrap", domain, plistPath); err != nil {
 		return fmt.Errorf("restart bootstrap: %s (%w)", out, err)
 	}
+	// Drop the legacy fallback only once the current service is bootstrapped.
+	removeLegacyLaunchdPlist()
 	if out, err := runLaunchctl("kickstart", "-kp", launchdTarget(domain)); err != nil {
 		return fmt.Errorf("restart kickstart: %s (%w)", out, err)
 	}
-	removeLegacyLaunchdPlist()
 	return nil
 }
 
+// Status reports the daemon's state across both labels.
+//
+// Installed is deliberately based on any cc-connect agent plist rather than the
+// current label's: a legacy-only installation has to stay reachable, otherwise
+// start/stop/restart refuse to run at all ("not installed") and leave the machine
+// with an agent the user can no longer manage or migrate.
 func (*launchdManager) Status() (*Status, error) {
 	st := &Status{Platform: "launchd"}
 
