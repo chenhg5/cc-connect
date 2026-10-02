@@ -10500,6 +10500,66 @@ func TestAutoCompress_UsesRealUsageWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestAutoCompress_StreamingCardPutsNoticeInToolPanel(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := &recordingStreamCardPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		card:               card,
+	}
+	sess := newQueuingSession("auto-compress-streaming-card")
+	agent := &stubCompressorAgent{cmd: "/compact"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetAutoCompressConfig(true, 4, 0)
+
+	key := "feishu:auto-compress-streaming-card"
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-auto-compress-streaming-card",
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+	sess.contextUsage = &ContextUsage{UsedTokens: 50_000}
+	session := e.sessions.GetOrCreateActive(key)
+	session.AddHistory("user", "hi")
+
+	go e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), func() {}, nil, nil, 0)
+	sess.events <- Event{Type: EventResult, Content: "response", Done: true}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		sess.sendMu.Lock()
+		sendCalls := append([]string(nil), sess.sendCalls...)
+		sess.sendMu.Unlock()
+		if len(sendCalls) > 0 && sendCalls[len(sendCalls)-1] == "/compact" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for auto-compress send")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	payload, ok := ParseProgressCardPayload(card.finalContent())
+	if !ok {
+		t.Fatalf("final streaming card is not a progress payload: %q", card.finalContent())
+	}
+	for _, item := range payload.Items {
+		if item.Kind == ProgressEntryToolUse && strings.Contains(item.Tool, "Compressing") && strings.Contains(item.Text, "Compressing") {
+			for _, sent := range p.getSent() {
+				if strings.Contains(sent, "Compressing context") {
+					t.Fatalf("auto-compress notice was also sent as a standalone message: %q", sent)
+				}
+			}
+			return
+		}
+	}
+	t.Fatalf("streaming card tool panel did not contain the auto-compress notice: %+v", payload.Items)
+}
+
 // TestAutoCompress_NoUsage_MakesNoDecision is the inverse of the old
 // TestAutoCompress_FallsBackToHeuristicWhenNoUsage: with no exact API-reported
 // usage available, the default configuration must NOT decide at all. The
