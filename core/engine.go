@@ -10621,11 +10621,26 @@ func (e *Engine) cmdCancel(p Platform, msg *Message) {
 
 	slog.Info("cmdCancel: stopping execution and creating new session", "session_key", msg.SessionKey)
 
+	// Capture the live agent session BEFORE stopInteractiveSession so we can
+	// force-close it regardless of which path stopInteractiveSession takes.
+	// When the agent implements AgentSessionCanceller (claudecode after
+	// PR-style fix, ACP, etc.) the canceller branch keeps the subprocess
+	// alive — without this follow-up close, cmdCancel would leak the
+	// subprocess. closeAgentSessionAsync is idempotent with the
+	// normalCleanup path, so the double-close is harmless.
+	savedAgent := e.interactiveStateForCancel(interactiveKey)
+
 	// Stop the current execution (like /stop)
 	stopped := e.stopInteractiveSession(interactiveKey, p, msg.ReplyCtx)
 	if !stopped {
 		// No execution in progress, but still create a new session
 		slog.Debug("cmdCancel: no execution to stop, proceeding with new session", "session_key", msg.SessionKey)
+	}
+
+	// Force-close the captured subprocess in case the canceller path kept
+	// it alive. Idempotent with normalCleanup, which already invoked Close.
+	if savedAgent != nil {
+		e.closeAgentSessionAsync(interactiveKey, savedAgent, p, msg.ReplyCtx)
 	}
 
 	// Clear old session's agent session ID so it cannot be resumed
@@ -10667,9 +10682,28 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	closeReplyCtx := state.replyCtx
 	state.mu.Unlock()
 
-	// If the agent session supports graceful turn cancellation (e.g. ACP),
-	// send a cancel notification and keep the session alive for the next
-	// user message, rather than killing the process and destroying state.
+	// If the agent session supports graceful turn cancellation (e.g. ACP,
+	// claudecode via stream-json control_request interrupt), call CancelTurn
+	// and keep the session alive for the next user message rather than
+	// killing the process and destroying state.
+	//
+	// Release the engine lock BEFORE calling CancelTurn.
+	//
+	// claudecode's CancelTurn now waits for the CLI to confirm the interrupted
+	// turn actually terminated (up to its confirm timeout) — it is a blocking
+	// call, and holding e.interactiveMu across it would stall every other
+	// session's message routing for the duration.
+	//
+	// The old "hold the lock across CancelTurn so the failure path can
+	// fall through to normalCleanup without a double-unlock" arrangement is no
+	// longer needed: the failure path re-acquires the lock before entering
+	// normalCleanup, so the unlock in normalCleanup is always the matching
+	// one. Delete on an already-absent key is a no-op, so the window opened
+	// here is benign.
+	//
+	// CancelTurn implementations must NOT acquire e.interactiveMu themselves —
+	// they operate on the agent subprocess's own state (stdin write, waiting
+	// for its result event) and don't touch engine bookkeeping.
 	if canceller, ok := agentSession.(AgentSessionCanceller); ok && agentSession != nil {
 		// Keep the state in the map so the next message reuses this session.
 		// Don't markStopped — the session is still usable.
@@ -10693,14 +10727,17 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		state.eventsNeedResync = true
 		state.mu.Unlock()
 
-		cancelErr := canceller.CancelTurn()
-		if cancelErr != nil {
+		if cancelErr := canceller.CancelTurn(); cancelErr != nil {
 			slog.Warn("agent session CancelTurn failed, falling back to Close",
 				"session_key", sessionKey, "error", cancelErr)
-			// Fall through to normal cleanup below.
+			// Re-acquire the lock that normalCleanup releases.
+			e.interactiveMu.Lock()
 			goto normalCleanup
 		}
 
+		// Release the busy lock: the turn is over, so the session must not stay
+		// locked against the next user message. Kept from the upstream (HEAD)
+		// side of the rebase.
 		if state.busySession != nil && state.busySession.ForceUnlock() {
 			slog.Info("session busy lock released after turn cancel", "session_key", sessionKey)
 		}
@@ -10709,7 +10746,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 			"session_key", sessionKey)
 
 		e.hooks.Emit(HookEvent{
-			Event:      HookEventSessionEnded,
+			Event:      HookEventTurnCancelled,
 			SessionKey: sessionKey,
 		})
 
@@ -17075,6 +17112,23 @@ func findInteractiveKeyInStatesLocked(states map[string]*interactiveState, sessi
 		}
 	}
 	return ""
+}
+
+// interactiveStateForCancel returns the agentSession currently bound to the
+// given interactive key, or nil if none. Used by cmdCancel BEFORE it calls
+// stopInteractiveSession, so it can force-close the subprocess even when
+// the canceller branch (AgentSessionCanceller) keeps the subprocess alive
+// for the next user message. Capturing the pointer up front avoids a
+// lookup-after race where another message arrives between the stop and the
+// close and races against the impending teardown.
+func (e *Engine) interactiveStateForCancel(key string) AgentSession {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	state, ok := e.interactiveStates[key]
+	if !ok || state == nil {
+		return nil
+	}
+	return state.agentSession
 }
 
 // lookupEffectiveWorkspaceBinding returns the effective binding for a channel
