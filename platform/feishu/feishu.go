@@ -5983,6 +5983,7 @@ var toolDescriptors = []toolDescriptor{
 		Title:           "Edit",
 		Sanitizer:       toolSanitizerPath,
 		ParamKeys:       []string{"file_path", "path", "file"},
+		DetailKeys:      []string{"filePath", "file_path", "path", "file", "patchText", "patch_text"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:edit|write|patch)\s+(?:file\s+)?(.+)$`)},
 	},
 	{
