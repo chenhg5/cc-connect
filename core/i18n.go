@@ -216,6 +216,7 @@ const (
 	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
+	MsgRetriableAgentError       MsgKey = "retriable_agent_error"
 	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
@@ -859,6 +860,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 錯誤: %v",
 		LangJapanese:           "❌ エラー: %v",
 		LangSpanish:            "❌ Error: %v",
+	},
+	MsgRetriableAgentError: {
+		LangEnglish:            "⚠️ Upstream model is busy or rate-limited. Retrying in %s (attempt %d/%d).",
+		LangChinese:            "⚠️ 上游模型繁忙或限流，将在 %s 后自动重试（第 %d/%d 次）。",
+		LangTraditionalChinese: "⚠️ 上游模型繁忙或限流，將在 %s 後自動重試（第 %d/%d 次）。",
+		LangJapanese:           "⚠️ 上流モデルが混雑またはレート制限中です。%s 後に自動再試行します（%d/%d 回目）。",
+		LangSpanish:            "⚠️ El modelo upstream está ocupado o limitado. Reintentando en %s (intento %d/%d).",
 	},
 	MsgBackgroundAutoDenied: {
 		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",

@@ -354,6 +354,13 @@
     "rlMaxMessagesHint": "Макс. сообщений за окно; 0 — выключено",
     "rlWindowSecs": "Окно (сек)",
     "rlWindowSecsHint": "Окно времени в секундах",
+    "retriableError": "Повторяемые ошибки",
+    "retriableInitialDelay": "Задержка первой повторной попытки (с)",
+    "retriableInitialDelayHint": "Задержка перед первой повторной попыткой; 0 = повторить сразу",
+    "retriableRetryDelay": "Задержка повторной попытки (с)",
+    "retriableRetryDelayHint": "Задержка между последующими попытками; 0 = повторить сразу",
+    "retriableMaxAttempts": "Макс. попыток",
+    "retriableMaxAttemptsHint": "Всего попыток, включая первую отправку",
     "log": "Логи",
     "logLevel": "Уровень логов"
   },
