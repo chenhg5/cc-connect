@@ -5828,6 +5828,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardMessageID any
 	var partialText string
 	triggerAutoCompress := false
+	autoCompressNoticeDelivered := false
+	autoCompressNoticeAdded := false
 	pendingSend := sendDone
 	var currentRetryTurn *interactiveRetryTurn
 	// sawSideEffects records whether the current Send attempt produced any
@@ -5843,6 +5845,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// doneReaction stores a function to add a "done" emoji after stopTyping.
 	// Set during EventResult handling for multi-round quiet turns.
 	var doneReaction func()
+	autoCompressNotice := func() string {
+		state.mu.Lock()
+		tokenEst := state.lastAutoCompressTokens
+		state.mu.Unlock()
+		notice := e.i18n.T(MsgCompressing)
+		if tokenEst > 0 {
+			notice = fmt.Sprintf("%s (~%dk tokens)", notice, tokenEst/1000)
+		}
+		return notice
+	}
 	defer func() {
 		if stopTyping != nil {
 			stopTyping()
@@ -5883,6 +5895,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardToolCalls []cardToolEntry // track tool calls for card content
 	var cardThinkingText string       // latest thinking text
 	var cardStepTexts []string        // intermediate step text (opencode per-step updates) folded into the thinking panel
+	setProgressNoticeSink := func() {
+		state.progressNotice = nil
+		if streamCard == nil || streamCard.Failed() {
+			return
+		}
+		if supporter, ok := streamCard.(StreamingCardPayloadSupporter); !ok || !supporter.SupportsStreamingCardPayload() {
+			return
+		}
+		state.progressNotice = func(notice string) bool {
+			cardToolCalls = append(cardToolCalls, cardToolEntry{
+				Index: len(cardToolCalls) + 1,
+				Name:  "自动重试",
+				Input: notice,
+			})
+			return streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false)) == nil
+		}
+	}
 
 	if carry := state.retryCarry; carry != nil {
 		// A retry attempt continues in the failed attempt's card.
@@ -5904,6 +5933,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			slog.Info("streaming card created for turn", "session", sessionKey)
 		}
 	}
+	setProgressNoticeSink()
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	// A StreamingCard aggregates the entire turn into one card; the compact
@@ -6929,6 +6959,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// answer — as EventText, and every EventText is folded into the
 				// foldable thinking panel, so the reply showed up inside the
 				// process panel and then again as the separate answer message.
+				if triggerAutoCompress {
+					if _, payloadCard := streamCard.(StreamingCardPayloadSupporter); payloadCard && !streamCard.Failed() {
+						cardToolCalls = append(cardToolCalls, cardToolEntry{
+							Index: len(cardToolCalls) + 1,
+							Name:  e.i18n.T(MsgCompressing),
+							Input: autoCompressNotice(),
+						})
+						autoCompressNoticeAdded = true
+					}
+				}
 				finalStepTexts := stripAnswerEchoes(cardStepTexts, fullResponse)
 				finalContent := e.streamingCardContentFor(streamCard, cardThinkingText, finalStepTexts, cardToolCalls, finalAnswer, true)
 				if err := streamCard.Finalize(e.ctx, finalContent); err != nil {
@@ -6946,6 +6986,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				} else {
 					finalized = true
+					autoCompressNoticeDelivered = triggerAutoCompress && autoCompressNoticeAdded
 					// Independent final reply with the status footer.
 					if !isSilent {
 						if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, fullResponse, statusFooter, sendWorkspaceWithError) {
@@ -7123,16 +7164,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					state.mu.Lock()
 					state.lastAutoCompressAt = time.Now()
-					tokenEst := state.lastAutoCompressTokens
 					state.mu.Unlock()
 					slog.Info("auto-compress: triggering", "session", sessionKey)
 
 					// Notify user before compressing so they know the context is about to change.
-					compressNotice := e.i18n.T(MsgCompressing)
-					if tokenEst > 0 {
-						compressNotice = fmt.Sprintf("%s (~%dk tokens)", compressNotice, tokenEst/1000)
+					if !autoCompressNoticeDelivered {
+						e.send(state.platform, state.replyCtx, autoCompressNotice())
 					}
-					e.send(state.platform, state.replyCtx, compressNotice)
 
 					// Run compress inline while the session is still locked.
 					e.runCompress(state, session, sessions, sessionKey, state.platform, state.replyCtx, true, lockGen)
@@ -7259,6 +7297,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cardToolCalls = nil
 				cardThinkingText = ""
 				cardStepTexts = nil
+				state.mu.Lock()
+				setProgressNoticeSink()
+				state.mu.Unlock()
 
 				// Try to create a new streaming card for the queued turn
 				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
@@ -7268,6 +7309,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						streamCard = sc
 					}
 				}
+				state.mu.Lock()
+				setProgressNoticeSink()
+				state.mu.Unlock()
 
 				// Send instant reply for queued turn if no streaming card is active.
 				if e.instantReply.Enabled && streamCard == nil {
