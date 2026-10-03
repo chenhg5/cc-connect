@@ -29,6 +29,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -158,6 +159,7 @@ type cujAgentSession struct {
 
 	// observed
 	sentPrompts []string
+	sentImages  [][]ImageAttachment
 	closeCount  int
 }
 
@@ -178,9 +180,10 @@ func newCUJAgentSession() *cujAgentSession {
 	}
 }
 
-func (s *cujAgentSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+func (s *cujAgentSession) Send(prompt string, _ string, images []ImageAttachment, _ []FileAttachment) error {
 	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
+	s.sentImages = append(s.sentImages, cloneCUJImages(images))
 	reply := s.reply
 	delay := s.delayMs
 	override := s.nextEventOverride
@@ -239,6 +242,27 @@ func (s *cujAgentSession) getSentPrompts() []string {
 	defer s.mu.Unlock()
 	out := make([]string, len(s.sentPrompts))
 	copy(out, s.sentPrompts)
+	return out
+}
+
+// Copy attachment bytes as well as the slice so observations remain independent
+// of later caller mutations and can be read safely while the session is running.
+func cloneCUJImages(images []ImageAttachment) []ImageAttachment {
+	out := make([]ImageAttachment, len(images))
+	for i, image := range images {
+		out[i] = image
+		out[i].Data = append([]byte(nil), image.Data...)
+	}
+	return out
+}
+
+func (s *cujAgentSession) getSentImages() [][]ImageAttachment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][]ImageAttachment, len(s.sentImages))
+	for i, images := range s.sentImages {
+		out[i] = cloneCUJImages(images)
+	}
 	return out
 }
 
@@ -1151,36 +1175,60 @@ func TestCUJ_A2_MultiTurnAgentReceivesHistory(t *testing.T) {
 	}
 }
 
-// CUJ-A3 · User uploads image → engine routes it to the agent.
-// (No real vision LLM; we assert the image attachment reaches the agent.)
+// CUJ-A3 · User sends text with an image, an image alone, then text alone.
+// Each turn receives a reply, and only that turn's images reach the agent.
 func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
-	plat := &stubPlatformEngine{n: "test"}
-	agent := &cujAgent{}
-	dir := t.TempDir()
-	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
-
-	msg := &Message{
-		SessionKey: "test:img", Platform: "test", MessageID: "img1",
-		UserID: "img", UserName: "img",
-		Content:  "what is in this image",
-		Images:   []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG fake"), FileName: "chart.png"}},
-		ReplyCtx: "ctx",
+	env := newCUJEnv(t)
+	t.Cleanup(func() { _ = env.engine.Stop() })
+	turns := []struct {
+		content string
+		images  []ImageAttachment
+	}{
+		{
+			content: "what is in this image",
+			images:  []ImageAttachment{{MimeType: "image/png", Data: []byte("\x89PNG chart"), FileName: "chart.png"}},
+		},
+		{
+			images: []ImageAttachment{{MimeType: "image/jpeg", Data: []byte("\xff\xd8 screenshot"), FileName: "screenshot.jpg"}},
+		},
+		{content: "thanks, no new image this time"},
 	}
-	e.ReceiveMessage(plat, msg)
+	for i, turn := range turns {
+		env.engine.ReceiveMessage(env.plat, &Message{
+			SessionKey: "test:img", Platform: "test", MessageID: fmt.Sprintf("img%d", i+1),
+			UserID: "img", UserName: "img", Content: turn.content,
+			Images: turn.images, ReplyCtx: "ctx",
+		})
+		env.waitFor(fmt.Sprintf("reply to image journey turn %d", i+1), 2*time.Second, func() bool {
+			count := 0
+			for _, reply := range env.plat.getSent() {
+				if reply == "ok" {
+					count++
+				}
+			}
+			return count >= i+1
+		})
 
-	deadline := time.After(2 * time.Second)
-	for {
-		agent.mu.Lock()
-		n := len(agent.sessions)
-		agent.mu.Unlock()
-		if n > 0 {
-			break
+		env.agent.mu.Lock()
+		if len(env.agent.sessions) != 1 {
+			n := len(env.agent.sessions)
+			env.agent.mu.Unlock()
+			t.Fatalf("turn %d: agent sessions = %d, want one continued session", i+1, n)
 		}
-		select {
-		case <-deadline:
-			t.Fatal("agent never received the message with image")
-		default:
-			time.Sleep(10 * time.Millisecond)
+		sess := env.agent.sessions[0]
+		env.agent.mu.Unlock()
+		sent := sess.getSentImages()
+		if len(sent) != i+1 {
+			t.Fatalf("turn %d: agent received %d sends, want %d", i+1, len(sent), i+1)
+		}
+		got := sent[i]
+		if len(got) != len(turn.images) {
+			t.Fatalf("turn %d: agent received %d images, want %d", i+1, len(got), len(turn.images))
+		}
+		for j, want := range turn.images {
+			if got[j].MimeType != want.MimeType || got[j].FileName != want.FileName || !bytes.Equal(got[j].Data, want.Data) {
+				t.Fatalf("turn %d image %d: got %#v, want %#v", i+1, j+1, got[j], want)
+			}
 		}
 	}
 }

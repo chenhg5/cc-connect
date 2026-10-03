@@ -4180,11 +4180,19 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		}
 	}
 
-	// Create per-workspace session manager
+	// Create per-workspace session manager. An empty store path means "no
+	// persistence" everywhere else in the session manager, so it has to mean
+	// the same here: filepath.Dir("") is ".", which would otherwise drop
+	// "<engine>_ws_<hash>.json" into the process working directory — that is
+	// what littered core/ with test_ws_*.json during `go test ./core/`.
 	h := sha256.Sum256([]byte(workspace))
-	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
-		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+	sessionFile := ""
+	if storePath := e.sessions.StorePath(); storePath != "" {
+		sessionFile = filepath.Join(filepath.Dir(storePath),
+			fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
+	}
 	sessions := NewSessionManager(sessionFile)
+	sessions.InvalidateForAgent(agent.Name())
 
 	ws.agent = agent
 	ws.sessions = sessions
@@ -6533,6 +6541,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventError:
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
+			// A backend can create its resumable session before a turn fails
+			// (for example Codex emits thread.started, then turn.failed). Persist
+			// that ID here as well as from event.SessionID so the retry reuses the
+			// conversation that already contains the user's original prompt.
+			if state.agentSession != nil {
+				if currentID := state.agentSession.CurrentSessionID(); currentID != "" && session.GetAgentSessionID() != currentID {
+					session.SetAgentSessionID(currentID, e.agent.Name())
+					sessions.Save()
+				}
+			}
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
@@ -10335,7 +10353,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 				buttons = append(buttons, row)
 			}
 			sb.WriteString("\n")
-			sb.WriteString(e.i18n.T(MsgReasoningUsage))
+			sb.WriteString(e.reasoningUsage(efforts))
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
@@ -10357,7 +10375,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 		}
 	}
 	if !valid {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningUsage))
+		e.reply(p, msg.ReplyCtx, e.reasoningUsage(efforts))
 		return
 	}
 
@@ -10370,6 +10388,10 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	sessions.Save()
 
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
+}
+
+func (e *Engine) reasoningUsage(efforts []string) string {
+	return e.i18n.Tf(MsgReasoningUsage, strings.Join(efforts, "|"))
 }
 
 func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
@@ -12126,6 +12148,19 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 			cb.Markdown(body)
 			cb.Note(e.i18n.T(MsgAskQuestionNoteMulti))
 		} else {
+			// Single-select path. Issue #1658: rendering each option as a
+			// column_set row (description column + button column) looked right
+			// on Feishu desktop but the button clicks never dispatched on
+			// Feishu mobile, and even on desktop the column_set > column >
+			// button layout was reported as unreliable. Permission cards use a
+			// flat action row (tag:"action") and their cmd: clicks dispatch
+			// reliably on both desktop and mobile. So mirror that pattern:
+			// description as markdown, then a per-option action row with a
+			// single button. Each click carries the askq:qIdx:optIdx value
+			// plus askq_label/askq_question extras so the Feishu callback
+			// handler can render the post-answer card. The Note still tells
+			// users how to fall back to numeric/text input if their client
+			// happens to ignore the button row.
 			cb.Markdown(body)
 			for i, opt := range q.Options {
 				desc := opt.Label
@@ -12133,9 +12168,15 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 					desc += " — " + opt.Description
 				}
 				answerData := fmt.Sprintf("askq:%d:%d", qIdx, i+1)
-				cb.ListItemBtnExtra(desc, opt.Label, "default", answerData, map[string]string{
-					"askq_label":    opt.Label,
-					"askq_question": q.Question,
+				cb.Markdown("**" + desc + "**")
+				cb.Buttons(CardButton{
+					Text:  opt.Label,
+					Type:  "primary",
+					Value: answerData,
+					Extra: map[string]string{
+						"askq_label":    opt.Label,
+						"askq_question": q.Question,
+					},
 				})
 			}
 			cb.Note(e.i18n.T(MsgAskQuestionNote))
@@ -13500,7 +13541,7 @@ func (e *Engine) renderReasoningCard() *Card {
 		Markdown(sb.String()).
 		Select(e.i18n.T(MsgReasoningSelectPlaceholder), opts, initVal).
 		Buttons(e.cardBackButton())
-	cb.Note(e.i18n.T(MsgReasoningUsage))
+	cb.Note(e.reasoningUsage(efforts))
 	return cb.Build()
 }
 
@@ -14021,20 +14062,22 @@ func (e *Engine) renderCronCard(sessionKey string, userID string) *Card {
 			desc += " [mute]"
 		}
 
-		human := CronExprToHuman(j.CronExpr, lang)
+		human := cronDisplaySchedule(j.CronExpr, lang)
+		loc := cronDisplayLocation(j.CronExpr)
 
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
 		sb.WriteString(e.i18n.Tf(MsgCronIDLabel, j.ID))
 		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
-		nextRun := e.cronScheduler.NextRun(j.ID)
+		nextRun := e.cronScheduler.NextRun(j.ID).In(loc)
 		if !nextRun.IsZero() {
-			fmtStr := cronTimeFormat(nextRun, now)
+			fmtStr := cronTimeFormat(nextRun, now.In(loc))
 			sb.WriteString(e.i18n.Tf(MsgCronNextRunLabel, nextRun.Format(fmtStr)))
 		}
 		if !j.LastRun.IsZero() {
-			fmtStr := cronTimeFormat(j.LastRun, now)
-			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
+			lastRun := j.LastRun.In(loc)
+			fmtStr := cronTimeFormat(lastRun, now.In(loc))
+			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, lastRun.Format(fmtStr)))
 			if j.LastError != "" {
 				sb.WriteString(e.i18n.Tf(MsgCronFailedSuffix, truncateStr(j.LastError, 40)))
 			}
@@ -14540,18 +14583,20 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 
 		sb.WriteString(fmt.Sprintf("ID: %s\n", j.ID))
 
-		human := CronExprToHuman(j.CronExpr, lang)
+		human := cronDisplaySchedule(j.CronExpr, lang)
+		loc := cronDisplayLocation(j.CronExpr)
 		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
 
-		nextRun := e.cronScheduler.NextRun(j.ID)
+		nextRun := e.cronScheduler.NextRun(j.ID).In(loc)
 		if !nextRun.IsZero() {
-			fmtStr := cronTimeFormat(nextRun, now)
+			fmtStr := cronTimeFormat(nextRun, now.In(loc))
 			sb.WriteString(e.i18n.Tf(MsgCronNextRunLabel, nextRun.Format(fmtStr)))
 		}
 
 		if !j.LastRun.IsZero() {
-			fmtStr := cronTimeFormat(j.LastRun, now)
-			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
+			lastRun := j.LastRun.In(loc)
+			fmtStr := cronTimeFormat(lastRun, now.In(loc))
+			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, lastRun.Format(fmtStr)))
 			if j.LastError != "" {
 				sb.WriteString(fmt.Sprintf(" (failed: %s)", truncateStr(j.LastError, 40)))
 			}

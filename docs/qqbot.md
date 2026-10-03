@@ -95,6 +95,16 @@ In group chats, the bot **only receives messages when @mentioned**. This is a li
 每个用户在每个群中拥有独立的会话。
 Each user gets an independent session per group.
 
+### 引用图片 / Replying to an image
+
+如果 QQ 客户端无法同时发送图片和 @，可以先发送图片，再引用/回复该图片并 @机器人。当 QQ 事件携带被引用消息的图片附件时，cc-connect 会将原图交给 Agent；正文为空也可以处理图片。
+
+If your QQ client cannot send an image and an @mention together, send the image first, then reply to that image and @mention the bot. When the QQ event includes the quoted image attachments, cc-connect forwards the images to the agent, including when the current message has no text.
+
+当前消息与引用消息中的相同图片 URL 只下载一次。仅处理本次事件显式携带的图片，不读取未推送的群历史，也不会将空 @ 与上一张群图片自动关联。
+
+Image URLs shared by the current and quoted messages are downloaded once. Only images explicitly included in the event are forwarded; cc-connect does not fetch unreceived group history or associate an empty @mention with the last group image.
+
 ## 私聊 / Private Messages (C2C)
 
 支持一对一私聊消息，无需 @提及。

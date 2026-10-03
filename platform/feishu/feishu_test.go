@@ -522,6 +522,94 @@ func TestOnMessageRepliesToUnauthorizedMention(t *testing.T) {
 	}
 }
 
+func TestOnMessageDropsUnauthorizedOverheardGroupMessage(t *testing.T) {
+	const appID = "cli_unauthorized_silent"
+	const appSecret = "secret-unauthorized-silent"
+	const botOpenID = "ou_bot"
+	const userOpenID = "ou_blocked"
+
+	replyBodies := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read reply body: %v", err)
+			}
+			replyBodies <- string(body)
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"message_id": "om_reply_ok"},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:  "feishu",
+		domain:        srv.URL,
+		appID:         appID,
+		appSecret:     appSecret,
+		allowFrom:     "ou_allowed",
+		botOpenID:     botOpenID,
+		groupReplyAll: true,
+		dedup:         &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(core.Platform, *core.Message) {
+			t.Fatal("handler should not run for unauthorized sender")
+		},
+	}
+
+	// A group message with no @bot mention: the platform only sees it because
+	// group_reply_all is enabled. Unauthorized senders must be dropped
+	// silently here — replying would announce the rejection for every single
+	// message in the chat.
+	chatType := "group"
+	msgType := "text"
+	senderType := "user"
+	content := `{"text":"hello"}`
+	createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: stringPtr(userOpenID)},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_unauthorized_silent"),
+				ChatId:      stringPtr("oc_group"),
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case got := <-replyBodies:
+		t.Fatalf("unexpected reply to overheard unauthorized message: %q", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 func TestIsMessageRecalledDetectsWithdrawnMessageFromGetAPI(t *testing.T) {
 	const appID = "cli_recall_probe"
 	const appSecret = "secret-recall-probe"
@@ -1011,6 +1099,42 @@ func TestExtractPostPlainText_CodeBlock(t *testing.T) {
 	want := "see:```go\nfmt.Println()\n```"
 	if got != want {
 		t.Errorf("expected %q, got %q", want, got)
+	}
+}
+
+// TestExtractPostPlainText_HrTag is a regression test for issue #508
+// (related #470/#472). Lark posts use the `hr` element to mark a
+// horizontal rule boundary between sections of a quoted post; the
+// extractor must surface it as a standalone `---` so the agent
+// understands the section break instead of silently dropping it.
+func TestExtractPostPlainText_HrTag(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "hr_alone",
+			content: `{"content":[[{"tag":"hr"}]]}`,
+			want:    "---",
+		},
+		{
+			name:    "hr_after_text",
+			content: `{"content":[[{"tag":"text","text":"before"},{"tag":"hr"},{"tag":"text","text":"after"}]]}`,
+			want:    "before\n---\nafter",
+		},
+		{
+			name:    "hr_between_paragraphs",
+			content: `{"content":[[{"tag":"text","text":"first"}],[{"tag":"hr"}],[{"tag":"text","text":"second"}]]}`,
+			want:    "first\n---\nsecond",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractPostPlainText(tc.content); got != tc.want {
+				t.Errorf("extractPostPlainText(%q) = %q, want %q", tc.content, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -2170,5 +2294,136 @@ func TestFlushImageBatchForSession_NoBatchIsSafe(t *testing.T) {
 	p.flushImageBatchForSession("") // empty session key is also a safe no-op
 	if n := len(p.imageBatch); n != 0 {
 		t.Fatalf("imageBatch size = %d, want 0", n)
+	}
+}
+
+// --- Issue #1884: top-level files[] of a rich-text (post) message ------
+
+func TestParsePostFiles_FlatFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	raw := `{"title":"","content":[[{"tag":"text","text":"按这个表里的字段,重新填充"}]],"files":[{"file_key":"file_v3_0015o_b1621303","file_name":"Huidive -询盘跟进表.xlsx","is_folder":false}]}`
+	got := p.parsePostFiles(raw)
+	if len(got) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(got))
+	}
+	if got[0].FileKey != "file_v3_0015o_b1621303" {
+		t.Fatalf("FileKey = %q, want file_v3_0015o_b1621303", got[0].FileKey)
+	}
+	if got[0].FileName != "Huidive -询盘跟进表.xlsx" {
+		t.Fatalf("FileName = %q, want Huidive -询盘跟进表.xlsx", got[0].FileName)
+	}
+	if got[0].IsFolder {
+		t.Fatal("IsFolder = true, want false")
+	}
+}
+
+func TestParsePostFiles_LangKeyedFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	raw := `{"zh_cn":{"title":"","content":[[{"tag":"text","text":"看这个"}]],"files":[{"file_key":"file_lang_k","file_name":"LANG.pdf"}]}}`
+	got := p.parsePostFiles(raw)
+	if len(got) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(got))
+	}
+	if got[0].FileKey != "file_lang_k" {
+		t.Fatalf("FileKey = %q, want file_lang_k", got[0].FileKey)
+	}
+	if got[0].FileName != "LANG.pdf" {
+		t.Fatalf("FileName = %q, want LANG.pdf", got[0].FileName)
+	}
+}
+
+func TestParsePostFiles_NoFiles(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	raw := `{"title":"","content":[[{"tag":"text","text":"just text, no files"}]]}`
+	if got := p.parsePostFiles(raw); len(got) != 0 {
+		t.Fatalf("len(files) = %d, want 0", len(got))
+	}
+}
+
+func TestDispatchMessagePostWithFiles(t *testing.T) {
+	const appID = "cli_post_files"
+	const appSecret = "secret-post-files"
+	const messageID = "om_post_files"
+	const fileKey = "file_v3_0015o_post"
+	fileBytes := []byte("fake-xlsx-bytes-here")
+
+	got := make(chan *core.Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+messageID+"/resources/"+fileKey:
+			if r.URL.Query().Get("type") != "file" {
+				t.Fatalf("resource type = %q, want file", r.URL.Query().Get("type"))
+			}
+			if _, err := w.Write(fileBytes); err != nil {
+				t.Fatalf("write file: %v", err)
+			}
+		case strings.HasPrefix(r.URL.Path, "/open-apis/contact/v3/users/"):
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/chats/"):
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+
+	content := `{"title":"","content":[[{"tag":"text","text":"按这个表里的字段,重新填充"}]],"files":[{"file_key":"` + fileKey + `","file_name":"Huidive -询盘跟进表.xlsx","is_folder":false}]}`
+	p.dispatchMessage(
+		context.Background(),
+		"post",
+		content,
+		nil,
+		messageID,
+		"feishu:oc_chat:ou_user",
+		"ou_user",
+		"oc_chat",
+		replyContext{messageID: messageID, sessionKey: "feishu:oc_chat:ou_user"},
+		"",
+		0,
+	)
+
+	select {
+	case msg := <-got:
+		if msg.Content != "按这个表里的字段,重新填充" {
+			t.Fatalf("Content = %q, want 按这个表里的字段,重新填充", msg.Content)
+		}
+		if len(msg.Files) != 1 {
+			t.Fatalf("len(Files) = %d, want 1", len(msg.Files))
+		}
+		if msg.Files[0].FileName != "Huidive -询盘跟进表.xlsx" {
+			t.Fatalf("Files[0].FileName = %q, want Huidive -询盘跟进表.xlsx", msg.Files[0].FileName)
+		}
+		if string(msg.Files[0].Data) != string(fileBytes) {
+			t.Fatal("Files[0].Data did not match downloaded resource bytes")
+		}
+		if msg.Files[0].MimeType == "" {
+			t.Fatal("Files[0].MimeType is empty; detectMimeType should populate it")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatched message")
 	}
 }

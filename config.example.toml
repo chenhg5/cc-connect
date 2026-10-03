@@ -37,6 +37,10 @@
 # Session data storage directory (default: ~/.cc-connect)
 # Stores conversation history and session state as JSON files.
 # 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
+# NOTE: Prefer an absolute path when running under systemd / launchd — service
+# managers may not propagate HOME, and any relative value would be resolved
+# against work_dir, which agent subprocesses cd into before reading files.
+# 建议在 systemd/launchd 部署下使用绝对路径，避免 HOME 缺失时相对路径解析到 work_dir。
 # data_dir = "/path/to/custom/dir"
 
 # Attachment send-back switch for `cc-connect send --image/--file`.
@@ -122,6 +126,7 @@ level = "info" # debug, info, warn, error
 
 # [display]
 # mode = "full"             # Display mode: "full" (default), "compact", or "quiet"
+# card_mode = "legacy"      # Card rendering: "legacy" (default) or "rich" (Feishu Card 2.0)
 #                           # full: show thinking + tool messages as separate messages
 #                           #       显示思考和工具消息，每条单独发送
 #                           # compact: hide thinking/tool, each text segment sent separately
@@ -869,6 +874,18 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 可选：设置推理强度等级（传递给 claude --effort）
 # reasoning_effort = "high"  # "low" | "medium" | "high" | "max"
 
+# Optional: override the context-window size used by the "ctx N%" indicator
+# in IM replies. By default cc-connect infers 200K vs 1M from the model id
+# (anything containing `[1m]` is treated as 1M). Set this when running
+# against a custom router / fine-tuned model whose id does not match
+# Claude Code's naming scheme, or when you want to hard-pin a specific
+# window. <= 0 falls back to the model-id heuristic.
+# 可选：覆盖 IM 回复中"ctx N%"指示符使用的上下文窗口大小。默认情况下，
+# cc-connect 根据模型 id 推断 200K 或 1M（任何包含 `[1m]` 的视为 1M）。
+# 当连接到自定义 router / 微调模型（id 与 Claude Code 命名规范不匹配），
+# 或者想硬编码一个特定窗口时设置此选项。<= 0 退回到按模型 id 推断。
+# context_window_tokens = 200000
+
 # In default/acceptEdits mode, you can pre-approve specific tools:
 # 在 default/acceptEdits 模式下，可预授权特定工具：
 # allowed_tools = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
@@ -1142,6 +1159,8 @@ app_secret = "your-feishu-app-secret"
 #                                 # 收到消息时添加的表情回复（默认 "🤔Thinking"）；设为 "none" 可禁用
 # done_emoji = "none"             # Emotion when agent finishes a reply (e.g. "🥳Done"); set to "none" to disable
 #                                 # Agent 完成回复后添加的表情回复（如 "🥳Done"）；设为 "none" 可禁用
+# card_final_preview_message = false # After an AI Card turn, send a separate Markdown summary
+#                                    # AI 卡片完成后额外发送一条普通 Markdown 摘要，用于刷新会话列表预览
 
 # WPS Xiezuo / WPS 协作 (uncomment to enable / 取消注释以启用)
 # 1. Create a WPS Open Platform app and enable event WebSocket delivery
@@ -1495,6 +1514,7 @@ app_secret = "your-feishu-app-secret"
 # mode = "websocket"
 # bot_id = "your-bot-id"
 # bot_secret = "your-bot-secret"
+# ws_url = "wss://your-wecom-host:port/im_openws?bizid=10001"  # optional / 可选：私有化部署 WebSocket 地址，留空默认公有云 wss://openws.work.weixin.qq.com
 # allow_from = "*"  # Allowed user IDs / 允许的用户 ID
 
 # Weixin personal (ilink bot) / 微信个人号（ilink 机器人网关）
@@ -1659,8 +1679,8 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project 4: Using Codex agent / 项目 4：使用 Codex agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Requires: npm install -g @openai/codex
-# 需要安装：npm install -g @openai/codex
+# Requires a Codex CLI: npm install -g @openai/codex, or a supported macOS desktop app.
+# 需要 Codex CLI：npm install -g @openai/codex，或支持的 macOS 桌面应用。
 # Codex uses `codex exec --json` under the hood.
 # Codex 底层使用 `codex exec --json` 命令。
 
@@ -1669,6 +1689,10 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent]
 # type = "codex"
+# CLI lookup: cmd > CODEX_CLI_PATH > PATH; macOS also discovers current/legacy
+# ChatGPT.app and Codex.app bundled CLIs when no command override is set.
+# 命令查找：cmd > CODEX_CLI_PATH > PATH；未指定命令时，macOS 还会查找
+# ChatGPT.app、Codex.app 的新旧内置 CLI 目录。详见 docs/usage.zh-CN.md。
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
@@ -1684,7 +1708,7 @@ app_secret = "your-feishu-app-secret"
 # model = "o3"
 #
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
-# reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+# reasoning_effort = "high"  # "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
 #
 # Optional: project system prompt / 可选：项目系统提示
 # Codex has no native system-prompt flag, so cc-connect injects this as a

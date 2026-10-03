@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -43,7 +42,7 @@ type Agent struct {
 	codexHome       string
 	systemPrompt    string
 	appendPrompt    string
-	cmd             string   // CLI binary name, default "codex"
+	cmd             string   // explicit CLI command; empty enables discovery
 	cliExtraArgs    []string // extra args parsed from cmd after the binary
 	providers       []core.ProviderConfig
 	activeIdx       int      // -1 = no provider set
@@ -69,10 +68,13 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
 
-	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "codex")
+	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "")
 
-	if _, err := exec.LookPath(cmd); err != nil {
-		return nil, fmt.Errorf("codex: %q CLI not found in PATH, install with: npm install -g @openai/codex", cmd)
+	if cmd == "" {
+		cmd = strings.TrimSpace(os.Getenv("CODEX_CLI_PATH"))
+	}
+	if _, err := resolveCodexExecutable(cmd); err != nil {
+		return nil, fmt.Errorf("codex: CLI lookup failed (set cmd or install with npm install -g @openai/codex): %w", err)
 	}
 
 	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml).
@@ -150,16 +152,22 @@ func normalizeReasoningEffort(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
 		return ""
+	case "none", "off", "disabled", "disable":
+		return "none"
+	case "minimal", "min":
+		return "minimal"
 	case "low":
 		return "low"
 	case "medium", "med":
 		return "medium"
 	case "high":
 		return "high"
-	case "xhigh", "x-high", "very-high":
+	case "xhigh", "x-high", "extra-high", "extra_high", "very-high":
 		return "xhigh"
-	case "max":
+	case "max", "maximum":
 		return "max"
+	case "ultra":
+		return "ultra"
 	default:
 		return ""
 	}
@@ -207,7 +215,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "xhigh", "max"}
+	return []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -229,7 +237,19 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := readCodexCachedModels(); len(models) > 0 {
 		return models
 	}
+	return defaultCodexModels()
+}
+
+func defaultCodexModels() []core.ModelOption {
 	return []core.ModelOption{
+		{Name: "gpt-5.6-sol", Desc: "GPT-5.6 Sol (strongest for complex Codex work)"},
+		{Name: "gpt-5.6-terra", Desc: "GPT-5.6 Terra (balanced everyday Codex work)"},
+		{Name: "gpt-5.6-luna", Desc: "GPT-5.6 Luna (fast, efficient GPT-5.6 model)"},
+		{Name: "gpt-5.6", Desc: "GPT-5.6 (recommended Codex model family default)"},
+		{Name: "gpt-5.5", Desc: "GPT-5.5 (previous frontier Codex model)"},
+		{Name: "gpt-5.4", Desc: "GPT-5.4 (frontier Codex model)"},
+		{Name: "gpt-5.4-mini", Desc: "GPT-5.4 Mini (fast Codex model)"},
+		{Name: "gpt-5.3-codex-spark", Desc: "GPT-5.3 Codex Spark (fast text-only iteration)"},
 		{Name: "o4-mini", Desc: "O4 Mini (fast reasoning)"},
 		{Name: "o3", Desc: "O3 (most capable reasoning)"},
 		{Name: "gpt-4.1", Desc: "GPT-4.1 (balanced)"},
@@ -506,7 +526,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
@@ -564,6 +584,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	opts := map[string]any{
 		"mode":    a.mode,
 		"backend": a.backend,
+	}
+	if a.cmd != "" {
+		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)
 	}
 	if a.model != "" {
 		opts["model"] = a.model
