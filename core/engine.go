@@ -474,6 +474,7 @@ type Engine struct {
 	initFlowsMu                  sync.Mutex
 	sendWorkDirMu                sync.RWMutex
 	sendWorkDirs                 map[string]string // sessionKey → work_dir assigned by send --cwd
+	desktopThreads               sync.Map          // (destination, notified thread) → workspace
 
 	// Terminal observation (--observe)
 	observeEnabled    bool
@@ -3057,6 +3058,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		if word := e.matchBannedWord(content); word != "" {
 			slog.Info("message blocked by banned word", "word", word, "user", msg.UserName)
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBannedWordBlocked))
+			return
+		}
+	}
+
+	// Thread commands resolve their registered destination before ordinary workspace setup.
+	if strings.HasPrefix(content, "/") {
+		id := matchPrefix(strings.ToLower(strings.TrimPrefix(strings.Fields(content)[0], "/")), builtinCommands)
+		if id == "reply" || id == "answer" {
+			e.handleCommand(p, msg, content)
 			return
 		}
 	}
@@ -6798,6 +6808,8 @@ var builtinCommands = []struct {
 	names []string
 	id    string
 }{
+	{[]string{"reply"}, "reply"},
+	{[]string{"answer"}, "answer"},
 	{[]string{"new"}, "new"},
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
@@ -6997,6 +7009,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	}
 
 	switch cmdID {
+	case "reply", "answer":
+		e.cmdDesktop(p, msg, cmdID, raw)
 	case "new":
 		e.cmdNew(p, msg, args)
 	case "list":
