@@ -8,6 +8,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// This covers the exact adapter output shape: engine card inputs are often
+// wrapped in Markdown fences before they reach the Feishu renderer.
 func TestToolPipeline_MarkdownWrappedInputRetainsValues(t *testing.T) {
 	for _, tc := range []struct {
 		tool, input, want string
