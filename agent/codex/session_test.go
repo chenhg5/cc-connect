@@ -397,6 +397,48 @@ func TestRefreshContextUsageFromRollout_UsesLastTokenCount(t *testing.T) {
 	}
 }
 
+func TestRefreshContextUsageFromRollout_WaitsForDelayedRollout(t *testing.T) {
+	workDir := t.TempDir()
+	codexHome := filepath.Join(workDir, ".codex")
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "04", "12")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatalf("mkdir rollout dir: %v", err)
+	}
+
+	sessionID := "019d8019-d05a-7612-ace2-db549494c0fa"
+	rolloutPath := filepath.Join(rolloutDir, "rollout-2026-04-12T05-11-08-"+sessionID+".jsonl")
+	rollout := strings.Join([]string{
+		`{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"/tmp/project"}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":183000,"cached_input_tokens":180000,"output_tokens":1000,"reasoning_output_tokens":50,"total_tokens":184000},"last_token_usage":{"input_tokens":35000,"cached_input_tokens":32000,"output_tokens":1000,"reasoning_output_tokens":50,"total_tokens":36000},"model_context_window":258400},"rate_limits":{"limit_id":"codex"}}}`,
+		"",
+	}, "\n")
+
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", sessionID, "", []string{"CODEX_HOME=" + codexHome}, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	written := make(chan error, 1)
+	go func() {
+		time.Sleep(350 * time.Millisecond)
+		written <- os.WriteFile(rolloutPath, []byte(rollout), 0o644)
+	}()
+
+	cs.refreshContextUsageFromRollout()
+	if err := <-written; err != nil {
+		t.Fatalf("write delayed rollout: %v", err)
+	}
+
+	usage := cs.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil after delayed rollout, want token count")
+	}
+	if usage.UsedTokens != 36000 {
+		t.Fatalf("used tokens = %d, want 36000", usage.UsedTokens)
+	}
+}
+
 func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newClaudeFooterEngine returns an Engine with all three footer-related flags
@@ -31,6 +32,80 @@ func TestFormatStatusTokenCount(t *testing.T) {
 		got := formatStatusTokenCount(in)
 		if got != want {
 			t.Errorf("formatStatusTokenCount(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestComposeRichStatusFooter_UsesCompactSummaryAndContextBar(t *testing.T) {
+	e := newClaudeFooterEngine()
+	e.SetShowWorkdirIndicator(false)
+	e.i18n = NewI18n(LangChinese)
+	session := &controllableAgentSession{
+		model:           "deepseek-v4-flash",
+		reasoningEffort: "max",
+		contextUsage: &ContextUsage{
+			UsedTokens:    12_700,
+			ContextWindow: 121_600,
+		},
+	}
+
+	got := e.composeRichStatusFooter(false, time.Now().Add(-7500*time.Millisecond), nil, session, "/tmp/ws")
+	lines := strings.Split(got, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("rich status footer lines = %d, want 2: %q", len(lines), got)
+	}
+	if want := "🧠 deepseek-v4-flash · 💪 强度 max · ⌛ 耗时 7.5s"; lines[0] != want {
+		t.Errorf("rich summary = %q, want %q", lines[0], want)
+	}
+	for _, want := range []string{"📝 上下文 12.7k/121.6k", "🟩", "(10%)"} {
+		if !strings.Contains(lines[1], want) {
+			t.Errorf("rich context line = %q, missing %q", lines[1], want)
+		}
+	}
+	if strings.Contains(got, "out ") || strings.Contains(got, "cw ") || strings.Contains(got, "/tmp/ws") {
+		t.Errorf("compact rich footer should hide per-turn token detail and workdir: %q", got)
+	}
+}
+
+func TestRichFinalStatusFooter_IgnoresLegacyAgentFooter(t *testing.T) {
+	e := newClaudeFooterEngine()
+	e.SetShowWorkdirIndicator(false)
+	e.i18n = NewI18n(LangChinese)
+	session := &controllableAgentSession{
+		model:           "deepseek-v4-flash",
+		reasoningEffort: "max",
+		contextUsage: &ContextUsage{
+			UsedTokens:    12_700,
+			ContextWindow: 121_600,
+		},
+	}
+
+	got := e.richFinalStatusFooter(time.Now().Add(-7500*time.Millisecond), nil, session, "/tmp/ws", "gpt-5.6 · out 999 · ctx 10%")
+	if !strings.Contains(got, "🧠 deepseek-v4-flash · 💪 强度 max · ⌛ 耗时 7.5s") {
+		t.Errorf("rich final footer did not retain compact summary: %q", got)
+	}
+	if strings.Contains(got, "out 999") || strings.Contains(got, "gpt-5.6") {
+		t.Errorf("rich final footer must ignore legacy agent footer: %q", got)
+	}
+}
+
+func TestRichStatusProgressBarShowsBoundedEightSegments(t *testing.T) {
+	for _, tt := range []struct {
+		percent int
+		filled  int
+	}{
+		{percent: 0, filled: 0},
+		{percent: 1, filled: 1},
+		{percent: 10, filled: 1},
+		{percent: 100, filled: 8},
+		{percent: 150, filled: 8},
+	} {
+		bar := richStatusProgressBar(tt.percent)
+		if got := strings.Count(bar, "🟩"); got != tt.filled {
+			t.Errorf("richStatusProgressBar(%d) filled = %d, want %d: %q", tt.percent, got, tt.filled, bar)
+		}
+		if got := strings.Count(bar, "🟩") + strings.Count(bar, "▫️"); got != 8 {
+			t.Errorf("richStatusProgressBar(%d) slots = %d, want 8: %q", tt.percent, got, bar)
 		}
 	}
 }
