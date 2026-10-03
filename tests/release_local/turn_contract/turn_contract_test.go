@@ -44,15 +44,16 @@ func (a *turnAgent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, er
 func (a *turnAgent) Stop() error                                                     { return a.session.Close() }
 
 type turnSession struct {
-	mu         sync.Mutex
-	id         string
-	alive      bool
-	records    []turnRecord
-	events     chan core.Event
-	blockFirst bool
-	blocked    bool
-	result     core.Event
-	permCalls  []permissionCall
+	mu           sync.Mutex
+	id           string
+	alive        bool
+	records      []turnRecord
+	events       chan core.Event
+	blockFirst   bool
+	blocked      bool
+	result       core.Event
+	permCalls    []permissionCall
+	contextUsage *core.ContextUsage
 }
 
 type permissionCall struct {
@@ -141,6 +142,23 @@ func (s *turnSession) releaseFirstResult(event core.Event) {
 	}
 	s.events <- event
 	s.blocked = false
+}
+
+// setContextUsage lets a test make the session report a real context
+// window so the engine's reply-footer ctx indicator can be computed
+// against the model (issue #1672). When left unset, the engine treats
+// the session as not having any context-window info and omits the
+// "[ctx: ~N%]" marker instead of falling back to a hardcoded 200k value.
+func (s *turnSession) setContextUsage(u *core.ContextUsage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.contextUsage = u
+}
+
+func (s *turnSession) GetContextUsage() *core.ContextUsage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.contextUsage
 }
 
 func (s *turnSession) emit(event core.Event) {
@@ -293,6 +311,13 @@ func TestBasicUserTurnContractAcrossInputModalities(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			engine, agent, platform := newTurnEngine(t)
 			engine.SetReplyFooterEnabled(true)
+			// Provide a real context window so the engine emits a
+			// meaningful "[ctx: ~N%]" marker (issue #1672).
+			agent.session.setContextUsage(&core.ContextUsage{
+				ContextWindow: 200_000,
+				UsedTokens:    52000,
+				InputTokens:   52000,
+			})
 			agent.session.setResult(core.Event{Type: core.EventResult, Content: "final answer", InputTokens: 52000, Done: true})
 
 			msg := turnMessage(tt.content)
@@ -606,6 +631,13 @@ func TestStreamingPreviewConfigurationMatrix(t *testing.T) {
 				engine.Stop()
 				_ = agent.Stop()
 			})
+			// Provide a real context window so the engine can compute a
+			// meaningful "[ctx: ~N%]" marker (issue #1672).
+			agent.session.setContextUsage(&core.ContextUsage{
+				ContextWindow: 200_000,
+				UsedTokens:    52000,
+				InputTokens:   52000,
+			})
 			agent.session.blockFirstResult()
 
 			msg := turnMessage("streaming config matrix")
@@ -722,6 +754,14 @@ func TestReplyMetadataConfigurationMatrix(t *testing.T) {
 			agent.workDir = "/tmp/release-agent"
 			engine.SetShowContextIndicator(tt.showCtx)
 			engine.SetReplyFooterEnabled(tt.showFooter)
+			// glm-5.1 has a 200k context window — make the session report
+			// it so the indicator is computed against the real window
+			// instead of the previous 200k hardcoded fallback (#1672).
+			agent.session.setContextUsage(&core.ContextUsage{
+				ContextWindow: 200_000,
+				UsedTokens:    28000,
+				InputTokens:   28000,
+			})
 			agent.session.setResult(core.Event{Type: core.EventResult, Content: "answer", InputTokens: 28000, Done: true})
 
 			engine.ReceiveMessage(platform, turnMessage("metadata matrix"))
@@ -750,6 +790,14 @@ func TestLongFinalResponseKeepsMetadataOnceAtTail(t *testing.T) {
 	agent.model = "glm-5.1"
 	agent.workDir = "/tmp/release-agent"
 	engine.SetReplyFooterEnabled(true)
+	// glm-5.1 has a 200k context window — make the session report it so
+	// the indicator is computed against the real window instead of the
+	// previous 200k hardcoded fallback (#1672).
+	agent.session.setContextUsage(&core.ContextUsage{
+		ContextWindow: 200_000,
+		UsedTokens:    28000,
+		InputTokens:   28000,
+	})
 
 	body := strings.Repeat("long-response ", 420)
 	agent.session.setResult(core.Event{Type: core.EventResult, Content: body, InputTokens: 28000, Done: true})
@@ -842,6 +890,14 @@ func TestRichCardModeKeepsToolStepsAndFinalMetadataInOneCard(t *testing.T) {
 		ToolMessages:     true,
 		ThinkingMaxLen:   300,
 		ToolMaxLen:       500,
+	})
+	// glm-5.1 has a 200k context window — make the session report it so
+	// the indicator is computed against the real window instead of the
+	// previous 200k hardcoded fallback (#1672).
+	agent.session.setContextUsage(&core.ContextUsage{
+		ContextWindow: 200_000,
+		UsedTokens:    28000,
+		InputTokens:   28000,
 	})
 	t.Cleanup(func() {
 		engine.Stop()
