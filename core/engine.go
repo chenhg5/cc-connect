@@ -550,6 +550,16 @@ type queuedMessage struct {
 	userMessageTimeMs int64  // Feishu create_time ms (optional); see Message.UserMessageTimeMs
 }
 
+// userMessageTimestamp converts a platform message creation time (Unix ms)
+// into a history timestamp. Zero/negative values fall back to the zero time
+// so the caller can stamp time.Now() instead.
+func userMessageTimestamp(timeMs int64) time.Time {
+	if timeMs <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(timeMs)
+}
+
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession AgentSession
@@ -3949,7 +3959,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
-	session.AddHistory("user", msg.Content)
+	session.AddHistoryAt("user", msg.Content, userMessageTimestamp(msg.UserMessageTimeMs))
 	// Persist user message immediately so crashes between user input and
 	// assistant reply don't lose it (the assistant-side Save below depends
 	// on the turn completing without a process crash).
@@ -6499,9 +6509,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					e.send(queued.platform, queued.replyCtx, replyContent)
 				}
 
-				session.AddHistory("user", queued.content)
+				session.AddHistoryAt("user", queued.content, userMessageTimestamp(queued.userMessageTimeMs))
 				// Persist queued user message immediately (mirror of the
-				// initial AddHistory("user",...) save above).
+				// initial AddHistoryAt("user",...) save above).
 				sessions.Save()
 
 				if idleTimer != nil {
@@ -6767,7 +6777,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		drainEvents(as.Events())
 
-		session.AddHistory("user", queued.content)
+		session.AddHistoryAt("user", queued.content, userMessageTimestamp(queued.userMessageTimeMs))
 
 		sendDone := make(chan error, 1)
 		go func() {
