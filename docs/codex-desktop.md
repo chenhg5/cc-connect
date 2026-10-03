@@ -82,3 +82,14 @@ python3 scripts/codex-desktop/test_answers.py
 python3 scripts/codex-desktop/test_native_answer.py
 go test ./core ./agent/codex -run 'TestCUJ_B12_DesktopCommands|TestDesktopHelper|TestValidateDesktopThread'
 ```
+
+## Read progress without a model call
+
+Send `/progress UUID` from the same notified messaging destination. It reads the existing desktop owner snapshot and shows the latest turn's public completed message, plan, elapsed time and pending request IDs. It excludes nonpublic channels and unclassified saved messages. A question with unknown answer acceptance stays pending, suppresses ETA, and shows a desktop-check warning instead of a replay command. It does not start, steer or resume a turn. If the owner is offline, the response explicitly uses saved history; saved task-started records never prove an active turn is still running.
+
+An ETA is shown only for a live running turn with no unanswered requests, a known start time, and a plan with some completed and some remaining steps. It divides observed elapsed time equally among completed steps and labels the result a rough estimate. Unequal step durations, newly changed plans and blockers can make it inaccurate. With insufficient evidence, completed/failed/interrupted turns or saved history, ETA is unknown. Turn completion does not establish that every implementation step is finished.
+
+```sh
+python3 scripts/codex-desktop/test_progress.py
+go test ./core -run 'TestCUJ_B13_DesktopProgress'
+```

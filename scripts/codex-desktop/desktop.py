@@ -368,6 +368,10 @@ if __name__ == '__main__':
         os.umask(0o077)
         if len(sys.argv) < 3 or str(uuid.UUID(sys.argv[2])) != sys.argv[2] or not notify.is_root_desktop(sys.argv[2]):
             raise ValueError('invalid root desktop thread UUID')
+        if len(sys.argv) == 3 and sys.argv[1] == 'progress':
+            import progress
+            print(json.dumps(progress.query(sys.argv[2]), ensure_ascii=False))
+            sys.exit(0)
         if len(sys.argv) == 6 and sys.argv[1] == 'reply':
             import replies
             print(json.dumps(replies.submit(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])))
@@ -379,7 +383,7 @@ if __name__ == '__main__':
         elif len(sys.argv) == 5 and sys.argv[1] == 'answer':
             answer(*sys.argv[2:])
         else:
-            raise ValueError('usage: desktop.py reply UUID MODE MESSAGE_ID TEXT | answer UUID REQUEST TEXT')
+            raise ValueError('usage: desktop.py reply UUID MODE MESSAGE_ID TEXT | answer UUID REQUEST TEXT | progress UUID')
         print(json.dumps({'status': 'accepted'}))
     except (OSError, ValueError, KeyError, sqlite3.Error) as error:
         print(str(error), file=sys.stderr)
