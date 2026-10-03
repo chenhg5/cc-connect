@@ -48,6 +48,7 @@ type APIServer struct {
 // the dispatch layer in engine.go. See cc-connect internal task
 // t-20260615-cqjbk1.
 type SendRequest struct {
+	DesktopRequestID      string            `json:"desktop_request_id,omitempty"`
 	DesktopRouteExpiresAt int64             `json:"desktop_route_expires_at,omitempty"`
 	ReplyThreadID         string            `json:"reply_thread_id,omitempty"`
 	DesktopEvent          string            `json:"desktop_event,omitempty"`

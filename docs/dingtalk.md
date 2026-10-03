@@ -327,3 +327,5 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 ## 可选：Codex Desktop 对话通知
 
 Codex Desktop 原对话的完成回复与已有阶段汇报，可通过可选伴随程序转发到钉钉。完整配置见 [Codex Desktop 指南](codex-desktop.md)。机器人使用既有 Stream 接入与消息分段能力；不上传本机文件，也不需要公网监听端口。
+
+续接时使用 `/reply UUID --queue 内容` 等待桌面空闲，或 `/reply UUID --now 内容` 立即插入；省略模式默认排队。`/answer UUID 请求ID 答案` 用于回答指定问题或审批。

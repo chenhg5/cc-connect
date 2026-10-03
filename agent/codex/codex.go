@@ -40,6 +40,8 @@ type Agent struct {
 	backend           string // "exec" | "app_server"
 	appServerURL      string
 	permissionProfile string
+	desktopHelper     []string
+	desktopStateDir   string
 	codexHome         string
 	systemPrompt      string
 	appendPrompt      string
@@ -83,6 +85,16 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	helper, helperArgs := core.ParseCmdOpts(map[string]any{"cmd": opts["desktop_helper"]}, "")
+	desktopStateDir, _ := opts["desktop_state_dir"].(string)
+	if desktopStateDir != "" && !filepath.IsAbs(desktopStateDir) {
+		return nil, fmt.Errorf("desktop_state_dir must be absolute")
+	}
+	var desktopHelper []string
+	if helper != "" {
+		desktopHelper = append([]string{helper}, helperArgs...)
+	}
+
 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "")
 
 	if cmd == "" {
@@ -110,6 +122,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
+		desktopHelper:     desktopHelper,
+		desktopStateDir:   desktopStateDir,
 		workDir:           workDir,
 		model:             model,
 		reasoningEffort:   normalizeReasoningEffort(reasoningEffort),
