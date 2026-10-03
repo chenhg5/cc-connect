@@ -5949,6 +5949,7 @@ type toolDescriptor struct {
 	Title           string
 	Sanitizer       toolSanitizer
 	ParamKeys       []string
+	DetailKeys      []string
 	SummaryPatterns []*regexp.Regexp
 }
 
@@ -5972,7 +5973,8 @@ var toolDescriptors = []toolDescriptor{
 		IconToken:       "file-link-text_outlined",
 		Title:           "Read",
 		Sanitizer:       toolSanitizerPath,
-		ParamKeys:       []string{"file_path", "path", "file"},
+		ParamKeys:       []string{"filePath", "file_path", "path", "file"},
+		DetailKeys:      []string{"filePath", "file_path", "path", "file", "offset", "limit"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:read|open)\s+(?:file\s+)?(.+)$`)},
 	},
 	{
@@ -5981,6 +5983,7 @@ var toolDescriptors = []toolDescriptor{
 		Title:           "Edit",
 		Sanitizer:       toolSanitizerPath,
 		ParamKeys:       []string{"file_path", "path", "file"},
+		DetailKeys:      []string{"filePath", "file_path", "path", "file", "patchText", "patch_text"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:edit|write|patch)\s+(?:file\s+)?(.+)$`)},
 	},
 	{
@@ -6012,6 +6015,7 @@ var toolDescriptors = []toolDescriptor{
 		Title:           "Search text",
 		Sanitizer:       toolSanitizerGeneric,
 		ParamKeys:       []string{"pattern"},
+		DetailKeys:      []string{"pattern", "include", "path", "file_path", "glob"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+text(?:\s+by\s+pattern)?|grep)\s+(.+)$`)},
 	},
 	{
@@ -6020,6 +6024,7 @@ var toolDescriptors = []toolDescriptor{
 		Title:           "Search files",
 		Sanitizer:       toolSanitizerGeneric,
 		ParamKeys:       []string{"pattern", "query"},
+		DetailKeys:      []string{"pattern", "include", "path"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+files(?:\s+by\s+pattern)?|glob)\s+(.+)$`)},
 	},
 	{
@@ -6035,6 +6040,7 @@ var toolDescriptors = []toolDescriptor{
 		Title:           "Run command",
 		Sanitizer:       toolSanitizerCommand,
 		ParamKeys:       []string{"cmd", "command", "script", "description"},
+		DetailKeys:      []string{"cmd", "command", "script", "description", "cwd", "timeout"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:run|execute)\s+(?:command|script)?\s*(.+)$`)},
 	},
 	{
@@ -6245,6 +6251,10 @@ func buildToolDisplay(toolName, detail string) toolDisplay {
 
 func classifyCommandToolDetail(detail string) (title, icon string, ok bool) {
 	command := strings.ToLower(strings.TrimSpace(stripToolDisplayQuotes(detail)))
+	if newline := strings.IndexByte(command, '\n'); newline >= 0 {
+		command = command[:newline]
+	}
+	command = regexp.MustCompile(`^(?:cmd|command|script):\s*`).ReplaceAllString(command, "")
 	if command == "" {
 		return "", "", false
 	}
@@ -6299,13 +6309,26 @@ func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
 		return ""
 	}
 	candidates := []string{text}
-	if idx := strings.Index(text, "{"); idx > 0 {
-		candidates = append(candidates, text[idx:])
+	if start := strings.Index(text, "{"); start >= 0 {
+		if end := strings.LastIndex(text, "}"); end >= start {
+			candidates = append(candidates, text[start:end+1])
+		}
 	}
 	for _, candidate := range candidates {
 		var params map[string]any
 		if err := json.Unmarshal([]byte(candidate), &params); err != nil {
 			continue
+		}
+		if len(desc.DetailKeys) > 0 {
+			var details []string
+			for _, key := range desc.DetailKeys {
+				if value := extractScalarText(params[key]); value != "" {
+					details = append(details, key+": "+sanitizeToolDetail(desc.Sanitizer, value))
+				}
+			}
+			if len(details) > 0 {
+				return strings.Join(details, "\n")
+			}
 		}
 		if desc.Title == "Search text" {
 			if pattern := extractScalarText(params["pattern"]); pattern != "" {
@@ -6432,6 +6455,9 @@ func sanitizeToolDetail(kind toolSanitizer, value string) string {
 	case toolSanitizerCommand:
 		return sanitizeCommandLike(cleaned)
 	case toolSanitizerPath:
+		if strings.Contains(cleaned, "://") || strings.Contains(cleaned, "?") {
+			return sanitizeURLText(cleaned)
+		}
 		return redactInlineSecrets(strings.TrimSpace(cleaned))
 	default:
 		return redactInlineSecrets(cleaned)
@@ -6462,8 +6488,10 @@ func sanitizeURLText(value string) string {
 	if value == "" {
 		return ""
 	}
-	if u, err := url.Parse(value); err == nil && u.Scheme != "" && u.Host != "" {
-		u.User = nil
+	if u, err := url.Parse(value); err == nil && ((u.Scheme != "" && u.Host != "") || u.RawQuery != "") {
+		if u.Scheme != "" && u.Host != "" {
+			u.User = nil
+		}
 		q := u.Query()
 		for key := range q {
 			if sensitiveNameRe.MatchString(key) {
