@@ -102,13 +102,18 @@ def _drain(root):
             event = json.loads(path.read_text())
             if not isinstance(event, dict):
                 raise ValueError("notification must be an object")
-            kind = {"agent-progress": "progress", "agent-turn-complete": "completed"}[event["type"]]
+            if event.get('human-key') and not (root / 'pending' / (event['human-key'] + '.json')).exists():
+                path.unlink()
+                continue
+            kind = {"agent-progress": "progress", "agent-turn-complete": "completed", "human-input-required": "request"}[event["type"]]
             if not event["thread-id"] or not Path(event["cwd"]).is_absolute():
                 raise ValueError("invalid thread or directory")
             body = {"project": settings["project"], "session_key": settings["session_key"],
                     "reply_thread_id": event["thread-id"], "work_dir": event["cwd"],
                     "desktop_event": kind,
                     "message": str(event.get("notification") or event.get("last-assistant-message") or "")}
+            if kind == 'request':
+                body['desktop_request_id'] = event['human-key']
         except (ValueError, KeyError, TypeError):
             (root / "invalid").mkdir(exist_ok=True, mode=0o700)
             path.replace(root / "invalid" / path.name)
@@ -126,7 +131,7 @@ def _drain(root):
             continue
         refs = root / "threads.json"
         threads = json.loads(refs.read_text()) if refs.exists() else {}
-        threads[event["thread-id"]] = {k: v for k, v in body.items() if k not in ("message", "desktop_event")}
+        threads[event["thread-id"]] = {k: v for k, v in body.items() if k not in ("message", "desktop_event", "desktop_request_id")}
         save(refs, threads)
         (root / "done").mkdir(exist_ok=True, mode=0o700)
         (root / "done" / path.stem).touch(mode=0o600)
@@ -152,6 +157,7 @@ def configure(project, session_key, api_socket, root=ROOT):
 
 def worker(root=ROOT):
     import desktop
+    import replies
     threading.Thread(target=desktop.watch, daemon=True, name="desktop-listener").start()
     restored_socket = None
     while True:
@@ -170,6 +176,7 @@ def worker(root=ROOT):
                         logging.warning("desktop route registration deferred")
                 if restored:
                     restored_socket = socket_id
+            replies.drain(root)
             drain(root)
         except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
             logging.exception("desktop delivery worker will retry")

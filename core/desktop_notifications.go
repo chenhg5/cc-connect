@@ -50,6 +50,11 @@ func (e *Engine) desktopNotice(req SendRequest) (string, error) {
 	switch req.DesktopEvent {
 	case "completed":
 		return e.i18n.Tf(MsgDesktopCompleted, req.ReplyThreadID, req.Message), nil
+	case "request":
+		if req.DesktopRequestID == "" {
+			return "", fmt.Errorf("request ID is required")
+		}
+		return e.i18n.Tf(MsgDesktopRequest, req.ReplyThreadID, req.DesktopRequestID, req.Message, req.ReplyThreadID, req.DesktopRequestID), nil
 	case "progress":
 		return e.i18n.Tf(MsgDesktopProgress, req.ReplyThreadID, req.Message), nil
 	default:

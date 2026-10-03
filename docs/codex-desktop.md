@@ -46,11 +46,39 @@ The companion forwards already-generated messages; model output during the origi
 
 ## Local API extension
 
-`POST /send` accepts `reply_thread_id` and optional `desktop_event` (`completed` or `progress`). Supply `work_dir` as runtime routing metadata. A request containing a thread ID but no message registers its route without sending. A nonexistent thread fails registration. The existing owner-only socket permission remains the trust boundary.
+`POST /send` accepts `reply_thread_id` and optional `desktop_event` (`completed`, `progress`, or `request`). Supply `work_dir` as runtime routing metadata. A request containing a thread ID but no message registers its route without sending. A nonexistent thread or a thread outside the registered desktop workspace fails registration. Request events also require `desktop_request_id`. The existing owner-only socket permission remains the trust boundary.
 
 ## Verification
 
 ```sh
 python3 scripts/codex-desktop/test_bridge.py
 go test ./core -run 'TestDesktopNotification|TestHandleSend'
+```
+
+## Continue or answer through the existing desktop owner
+
+Opt in on the Codex adapter with a helper command array. Replace only the generic checkout placeholder:
+
+```toml
+[projects.agent.options]
+desktop_helper = ["python3", "<absolute-checkout>/scripts/codex-desktop/desktop.py"]
+# Optional: use the same private state directory configured for the watcher.
+# desktop_state_dir = "<private-state-directory>"
+```
+
+Send `/reply UUID --queue <instruction>` to wait for the current task to finish, or `/reply UUID --now <instruction>` to insert a follow-up immediately. Without a flag, `/reply UUID <instruction>` defaults to `--queue`. Queue jobs persist in the companion's private state directory and survive watcher restarts; keep the watcher running. They do not replace the desktop's own queue and are displayed in the desktop conversation only when dispatched. In immediate mode an active turn uses the native steer operation, and an idle conversation starts another turn with inherited settings.
+
+The platform message ID produces a stable desktop message ID. A receipt is written before dispatch. Redeliveries and unknown acknowledgements do not replay the mutation, and a rejected steer never falls back to start-turn. Pending approvals and unconfirmed desktop submissions block queued dispatch. These checks remove the known active-turn start path that can leave a duplicate optimistic bubble; real desktop UI end-to-end verification is still required. The private IPC protocol does not expose an atomic cross-device claim, so no universal exactly-once guarantee is made. Commands use only routes notified to the exact messaging destination. They retain normal command disable/role policies and do not switch the mobile session. If the owner is unavailable, the command fails; it never resumes a second CLI writer.
+
+Pending desktop approvals, structured questions and asynchronous question cards are also forwarded in full. Use `/answer UUID REQUEST <answer>`. Approvals accept `approve` or `deny` for this request only. A single question accepts plain text; multiple questions require a JSON object keyed by every question ID. MCP form requests accept a JSON object or `deny`. Authentication/URL and other unsupported requests must be handled on the desktop.
+
+Before sending an answer, the helper refreshes the owner's live state and rejects a request already handled on the desktop. A private receipt is persisted before mutation. An explicit rejection permits a later retry; a transport/decode error keeps acceptance marked unknown and suppresses replay. Check the desktop after an unknown acknowledgement. The desktop has no atomic cross-device answer claim: a truly simultaneous desktop/mobile submission can still race. The bridge does not claim exactly-once cross-device answering or require both devices to answer.
+
+Additional checks:
+
+```sh
+python3 scripts/codex-desktop/test_replies.py
+python3 scripts/codex-desktop/test_answers.py
+python3 scripts/codex-desktop/test_native_answer.py
+go test ./core ./agent/codex -run 'TestCUJ_B12_DesktopCommands|TestDesktopHelper|TestValidateDesktopThread'
 ```

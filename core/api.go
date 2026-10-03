@@ -48,20 +48,21 @@ type APIServer struct {
 // the dispatch layer in engine.go. See cc-connect internal task
 // t-20260615-cqjbk1.
 type SendRequest struct {
-	ReplyThreadID string            `json:"reply_thread_id,omitempty"`
-	DesktopEvent  string            `json:"desktop_event,omitempty"`
-	Project       string            `json:"project"`
-	SessionKey    string            `json:"session_key"`
-	Message       string            `json:"message"`
-	WorkDir       string            `json:"work_dir,omitempty"`
-	CWD           string            `json:"cwd,omitempty"`
-	TTSText       string            `json:"tts_text,omitempty"`
-	Images        []ImageAttachment `json:"images,omitempty"`
-	Files         []FileAttachment  `json:"files,omitempty"`
-	Audios        []FileAttachment  `json:"audios,omitempty"`
-	Videos        []FileAttachment  `json:"videos,omitempty"`
-	AtUsers       []string          `json:"at_users,omitempty"`
-	AtAll         bool              `json:"at_all,omitempty"`
+	ReplyThreadID    string            `json:"reply_thread_id,omitempty"`
+	DesktopRequestID string            `json:"desktop_request_id,omitempty"`
+	DesktopEvent     string            `json:"desktop_event,omitempty"`
+	Project          string            `json:"project"`
+	SessionKey       string            `json:"session_key"`
+	Message          string            `json:"message"`
+	WorkDir          string            `json:"work_dir,omitempty"`
+	CWD              string            `json:"cwd,omitempty"`
+	TTSText          string            `json:"tts_text,omitempty"`
+	Images           []ImageAttachment `json:"images,omitempty"`
+	Files            []FileAttachment  `json:"files,omitempty"`
+	Audios           []FileAttachment  `json:"audios,omitempty"`
+	Videos           []FileAttachment  `json:"videos,omitempty"`
+	AtUsers          []string          `json:"at_users,omitempty"`
+	AtAll            bool              `json:"at_all,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.

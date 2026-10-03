@@ -11,7 +11,7 @@ with tempfile.TemporaryDirectory() as tmp:
     settings = {'project': 'example', 'session_key': 'test:owner', 'api_socket': str(root / 'api.sock'), 'enabled_at_ms': 1000}
     notify.save(root / 'settings.json', settings)
     stamp = 2000
-    state = {'cwd': tmp, 'turns': [{'turnId': 'turn', 'status': 'inProgress', 'items': [
+    state = {'cwd': tmp, 'requests': [], 'turns': [{'turnId': 'turn', 'status': 'inProgress', 'items': [
         {'id': 'public', 'type': 'agentMessage', 'phase': 'commentary', 'text': 'progress\n' + 'x' * 5000},
         {'id': 'partial', 'type': 'agentMessage', 'phase': 'commentary', 'text': 'unfinished'},
         {'id': 'old', 'type': 'agentMessage', 'phase': 'commentary', 'text': 'old'},

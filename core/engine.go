@@ -3070,6 +3070,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 	}
 
+	// Thread commands resolve their registered destination before ordinary workspace setup.
+	if strings.HasPrefix(content, "/") {
+		id := matchPrefix(strings.ToLower(strings.TrimPrefix(strings.Fields(content)[0], "/")), builtinCommands)
+		if id == "reply" || id == "answer" {
+			e.handleCommand(p, msg, content)
+			return
+		}
+	}
+
 	// Multi-workspace resolution
 	var wsAgent Agent
 	var wsSessions *SessionManager
@@ -7053,6 +7062,8 @@ var builtinCommands = []struct {
 	names []string
 	id    string
 }{
+	{[]string{"reply"}, "reply"},
+	{[]string{"answer"}, "answer"},
 	{[]string{"new"}, "new"},
 	{[]string{"list", "sessions"}, "list"},
 	{[]string{"switch"}, "switch"},
@@ -7252,6 +7263,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	}
 
 	switch cmdID {
+	case "reply", "answer":
+		e.cmdDesktop(p, msg, cmdID, raw)
 	case "new":
 		e.cmdNew(p, msg, args)
 	case "list":
