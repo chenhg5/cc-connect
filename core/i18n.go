@@ -199,6 +199,18 @@ const (
 	MsgDesktopError              MsgKey = "desktop_error"
 	MsgDesktopQueued             MsgKey = "desktop_queued"
 	MsgDesktopAccepted           MsgKey = "desktop_accepted"
+	MsgDesktopProgressReport     MsgKey = "DesktopProgressReport"
+	MsgDesktopStatusRunning      MsgKey = "DesktopStatusRunning"
+	MsgDesktopStatusWaiting      MsgKey = "DesktopStatusWaiting"
+	MsgDesktopStatusCompleted    MsgKey = "DesktopStatusCompleted"
+	MsgDesktopStatusFailed       MsgKey = "DesktopStatusFailed"
+	MsgDesktopStatusInterrupted  MsgKey = "DesktopStatusInterrupted"
+	MsgDesktopStatusUnknown      MsgKey = "DesktopStatusUnknown"
+	MsgDesktopLive               MsgKey = "DesktopLive"
+	MsgDesktopSaved              MsgKey = "DesktopSaved"
+	MsgDesktopEtaRough           MsgKey = "DesktopEtaRough"
+	MsgDesktopEtaUnknown         MsgKey = "DesktopEtaUnknown"
+	MsgDesktopAnswerUnknown      MsgKey = "desktop_answer_unknown"
 	MsgDesktopCompleted          MsgKey = "desktop_completed"
 	MsgDesktopProgress           MsgKey = "desktop_progress"
 	MsgStarting                  MsgKey = "starting"
@@ -726,11 +738,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Los comandos de escritorio solo aceptan texto. Envíe los archivos adjuntos directamente desde el escritorio.",
 	},
 	MsgDesktopUsage: {
-		LangEnglish:            "Usage: /reply UUID [--queue|--now] <instruction> or /answer UUID REQUEST <answer>",
-		LangChinese:            "用法：/reply UUID [--queue|--now] <指令> 或 /answer UUID 请求ID <答案>",
-		LangTraditionalChinese: "用法：/reply UUID [--queue|--now] <指令> 或 /answer UUID 請求ID <答案>",
-		LangJapanese:           "使い方: /reply UUID [--queue|--now] <指示> または /answer UUID REQUEST <回答>",
-		LangSpanish:            "Uso: /reply UUID [--queue|--now] <instrucción> o /answer UUID REQUEST <respuesta>",
+		LangEnglish:            "Usage: /reply UUID [--queue|--now] <instruction>, /answer UUID REQUEST <answer>, or /progress UUID",
+		LangChinese:            "用法：/reply UUID [--queue|--now] <指令>、/answer UUID 请求ID <答案> 或 /progress UUID",
+		LangTraditionalChinese: "用法：/reply UUID [--queue|--now] <指令>、/answer UUID 請求ID <答案> 或 /progress UUID",
+		LangJapanese:           "使い方: /reply UUID [--queue|--now] <指示>、/answer UUID REQUEST <回答>、/progress UUID",
+		LangSpanish:            "Uso: /reply UUID [--queue|--now] <instrucción>, /answer UUID REQUEST <respuesta> o /progress UUID",
 	},
 	MsgDesktopUnknown: {
 		LangEnglish:            "UUID has not been notified to this destination.",
@@ -759,6 +771,90 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "桌面原對話已接受。",
 		LangJapanese:           "既存のデスクトップ会話が受け付けました。",
 		LangSpanish:            "Aceptado por la conversación existente del escritorio.",
+	},
+	MsgDesktopProgressReport: {
+		LangEnglish:            "UUID: %s\nSource: %s\nTurn: %s\nElapsed: %d s\nETA: %s",
+		LangChinese:            "UUID：%s\n来源：%s\n本轮：%s\n耗时：%d 秒\n剩余预估：%s",
+		LangTraditionalChinese: "UUID：%s\n來源：%s\n本輪：%s\n耗時：%d 秒\n剩餘估計：%s",
+		LangJapanese:           "UUID: %s\nソース: %s\nターン: %s\n経過: %d 秒\n残り: %s",
+		LangSpanish:            "UUID: %s\nFuente: %s\nTurno: %s\nTiempo: %d s\nEstimación: %s",
+	},
+	MsgDesktopStatusRunning: {
+		LangEnglish:            "running",
+		LangChinese:            "运行中",
+		LangTraditionalChinese: "執行中",
+		LangJapanese:           "実行中",
+		LangSpanish:            "en ejecución",
+	},
+	MsgDesktopStatusWaiting: {
+		LangEnglish:            "waiting for input",
+		LangChinese:            "等待回答",
+		LangTraditionalChinese: "等待回答",
+		LangJapanese:           "入力待ち",
+		LangSpanish:            "esperando respuesta",
+	},
+	MsgDesktopStatusCompleted: {
+		LangEnglish:            "reply completed",
+		LangChinese:            "回复已完成",
+		LangTraditionalChinese: "回覆已完成",
+		LangJapanese:           "返信完了",
+		LangSpanish:            "respuesta completada",
+	},
+	MsgDesktopStatusFailed: {
+		LangEnglish:            "failed",
+		LangChinese:            "失败",
+		LangTraditionalChinese: "失敗",
+		LangJapanese:           "失敗",
+		LangSpanish:            "fallido",
+	},
+	MsgDesktopStatusInterrupted: {
+		LangEnglish:            "interrupted",
+		LangChinese:            "已中断",
+		LangTraditionalChinese: "已中斷",
+		LangJapanese:           "中断",
+		LangSpanish:            "interrumpido",
+	},
+	MsgDesktopStatusUnknown: {
+		LangEnglish:            "unknown",
+		LangChinese:            "未知",
+		LangTraditionalChinese: "未知",
+		LangJapanese:           "不明",
+		LangSpanish:            "desconocido",
+	},
+	MsgDesktopLive: {
+		LangEnglish:            "live desktop snapshot",
+		LangChinese:            "桌面实时快照",
+		LangTraditionalChinese: "桌面即時快照",
+		LangJapanese:           "デスクトップの現在の状態",
+		LangSpanish:            "estado actual del escritorio",
+	},
+	MsgDesktopSaved: {
+		LangEnglish:            "saved history (offline)",
+		LangChinese:            "保存的历史（离线）",
+		LangTraditionalChinese: "已儲存歷史（離線）",
+		LangJapanese:           "保存された履歴（オフライン）",
+		LangSpanish:            "historial guardado (sin conexión)",
+	},
+	MsgDesktopEtaRough: {
+		LangEnglish:            "%d s (rough estimate from equal-weight plan steps)",
+		LangChinese:            "%d 秒（按计划步骤等权粗估）",
+		LangTraditionalChinese: "%d 秒（依計畫步驟等權粗估）",
+		LangJapanese:           "%d 秒（各ステップの重みを同じとした概算）",
+		LangSpanish:            "%d s (estimación aproximada por pasos de igual peso)",
+	},
+	MsgDesktopEtaUnknown: {
+		LangEnglish:            "unknown",
+		LangChinese:            "无法估算",
+		LangTraditionalChinese: "無法估算",
+		LangJapanese:           "推定不可",
+		LangSpanish:            "no disponible",
+	},
+	MsgDesktopAnswerUnknown: {
+		LangEnglish:            "Request %s: acceptance unknown; check the desktop before retrying.",
+		LangChinese:            "请求 %s：回答是否接受尚不明确，请到桌面检查。",
+		LangTraditionalChinese: "請求 %s：回答是否接受尚不明確，請到桌面檢查。",
+		LangJapanese:           "リクエスト %s: 受理が不明なためデスクトップを確認してください。",
+		LangSpanish:            "Solicitud %s: aceptación desconocida; comprueba el escritorio.",
 	},
 	MsgDesktopCompleted: {
 		LangEnglish:            "✅ Codex reply completed\nUUID: %s\n\n%s\n\n/reply %[1]s --queue <instruction>\n/reply %[1]s --now <instruction>",
@@ -1130,6 +1226,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <number>|1,2,3|3-7|1,3-5,8\n  Delete sessions by list number(s)\n\n" +
 			"/name [number] <text>\n  Name a session for easy identification\n\n" +
 			"/reply UUID [--queue|--now] <instruction> | /answer UUID REQUEST <answer>\n  Continue a notified desktop conversation / answer its request\n\n" +
+			"/progress UUID\n  Read desktop progress without a model call\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
@@ -1175,6 +1272,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
 			"/reply UUID [--queue|--now] <instruction> | /answer UUID REQUEST <answer>\n  继续已通知的桌面对话 / 回答其请求\n\n" +
+			"/progress UUID\n  读取桌面进度，不调用模型\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
@@ -1220,6 +1318,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
 			"/reply UUID [--queue|--now] <instruction> | /answer UUID REQUEST <answer>\n  繼續已通知的桌面對話 / 回答請求\n\n" +
+			"/progress UUID\n  讀取桌面進度，不呼叫模型\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
@@ -1263,6 +1362,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
 			"/reply UUID [--queue|--now] <instruction> | /answer UUID REQUEST <answer>\n  通知済みのデスクトップ会話を継続 / 質問に回答\n\n" +
+			"/progress UUID\n  モデルを呼び出さず進捗を取得\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
@@ -1306,6 +1406,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
 			"/reply UUID [--queue|--now] <instruction> | /answer UUID REQUEST <answer>\n  Continuar una conversación notificada / responder a su solicitud\n\n" +
+			"/progress UUID\n  Leer progreso sin llamar al modelo\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +

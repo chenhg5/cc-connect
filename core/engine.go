@@ -3075,7 +3075,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Thread commands resolve their registered destination before ordinary workspace setup.
 	if strings.HasPrefix(content, "/") {
 		id := matchPrefix(strings.ToLower(strings.TrimPrefix(strings.Fields(content)[0], "/")), builtinCommands)
-		if id == "reply" || id == "answer" {
+		if id == "reply" || id == "answer" || id == "progress" {
 			key := e.interactiveKeyForSessionKey(msg.SessionKey)
 			e.interactiveMu.Lock()
 			state := e.interactiveStates[key]
@@ -7080,6 +7080,7 @@ var builtinCommands = []struct {
 	names []string
 	id    string
 }{
+	{[]string{"progress"}, "progress"},
 	{[]string{"reply"}, "reply"},
 	{[]string{"answer"}, "answer"},
 	{[]string{"new"}, "new"},
@@ -7281,7 +7282,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	}
 
 	switch cmdID {
-	case "reply", "answer":
+	case "reply", "answer", "progress":
 		e.cmdDesktop(p, msg, cmdID, raw)
 	case "new":
 		e.cmdNew(p, msg, args)

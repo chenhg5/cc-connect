@@ -156,3 +156,6 @@ func (a *Agent) ReplyToThreadWithMode(ctx context.Context, id, text, mode, messa
 func (a *Agent) AnswerThreadRequest(ctx context.Context, id, key, text string) error {
 	return a.desktopMutation(ctx, "answer", id, key, text)
 }
+func (a *Agent) ThreadProgress(ctx context.Context, id string) (json.RawMessage, error) {
+	return a.desktopCall(ctx, "progress", id)
+}
