@@ -192,6 +192,8 @@ func (i *I18n) SetLang(lang Language) {
 type MsgKey string
 
 const (
+	MsgDesktopCompleted          MsgKey = "desktop_completed"
+	MsgDesktopProgress           MsgKey = "desktop_progress"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
@@ -695,6 +697,20 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgDesktopCompleted: {
+		LangEnglish:            "✅ Codex reply completed\nUUID: %s\n\n%s",
+		LangChinese:            "✅ Codex 回复完成\nUUID：%s\n\n%s",
+		LangTraditionalChinese: "✅ Codex 回覆完成\nUUID：%s\n\n%s",
+		LangJapanese:           "✅ Codex の返信が完了\nUUID: %s\n\n%s",
+		LangSpanish:            "✅ Respuesta de Codex completada\nUUID: %s\n\n%s",
+	},
+	MsgDesktopProgress: {
+		LangEnglish:            "📣 Codex progress update\nUUID: %s\n\n%s",
+		LangChinese:            "📣 Codex 阶段性汇报\nUUID：%s\n\n%s",
+		LangTraditionalChinese: "📣 Codex 階段進度\nUUID：%s\n\n%s",
+		LangJapanese:           "📣 Codex 進捗報告\nUUID: %s\n\n%s",
+		LangSpanish:            "📣 Progreso de Codex\nUUID: %s\n\n%s",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
