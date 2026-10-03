@@ -478,6 +478,10 @@ type sessionMessage struct {
 }
 
 // textContent extracts text from the flexible content field.
+// Gemini CLI can serialize content as a plain string, an array of
+// typed {text: "..."} parts, or an array of generic objects with a
+// "text" field. The third shape is what newer Gemini CLI versions
+// emit (see issue #441), so all three must be tried in order.
 func (m *sessionMessage) textContent() string {
 	if len(m.RawContent) == 0 {
 		return ""
@@ -487,7 +491,20 @@ func (m *sessionMessage) textContent() string {
 	if json.Unmarshal(m.RawContent, &s) == nil {
 		return s
 	}
-	// Try as array of {text: "..."} parts
+	// Try as array of generic {"text": "..."} objects
+	var rawParts []map[string]any
+	if json.Unmarshal(m.RawContent, &rawParts) == nil {
+		var texts []string
+		for _, p := range rawParts {
+			if txt, ok := p["text"].(string); ok && txt != "" {
+				texts = append(texts, txt)
+			}
+		}
+		if len(texts) > 0 {
+			return strings.Join(texts, "\n")
+		}
+	}
+	// Fallback: typed array of struct{Text string}
 	var parts []struct {
 		Text string `json:"text"`
 	}
@@ -604,4 +621,73 @@ func extractSessionSummary(sf *sessionFile) string {
 		return sf.SessionID[:12] + "..."
 	}
 	return sf.SessionID
+}
+
+// GetSessionHistory implements core.HistoryProvider so the engine's
+// /switch command can auto-sync the most recent history entries
+// from the Gemini CLI session file. Returns nil, nil when the
+// session file does not exist (e.g. a freshly created session that
+// has not been written to disk yet).
+func (a *Agent) GetSessionHistory(ctx context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("gemini: cannot determine home dir: %w", err)
+	}
+
+	slug := geminiProjectSlug(a.workDir)
+	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
+
+	entries, err := os.ReadDir(chatsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("gemini: read chats dir: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		data, err := os.ReadFile(filepath.Join(chatsDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+
+		var sf sessionFile
+		if json.Unmarshal(data, &sf) != nil || sf.SessionID != sessionID {
+			continue
+		}
+
+		// Subagent sessions reuse the same on-disk layout but are
+		// not interactive conversations we want to sync.
+		if sf.Kind == "subagent" {
+			continue
+		}
+
+		var history []core.HistoryEntry
+		for _, msg := range sf.Messages {
+			text := strings.TrimSpace(msg.textContent())
+			if text == "" {
+				continue
+			}
+			role := "assistant"
+			if msg.Type == "user" {
+				role = "user"
+			}
+			history = append(history, core.HistoryEntry{
+				Role:    role,
+				Content: text,
+			})
+		}
+
+		if limit > 0 && len(history) > limit {
+			history = history[len(history)-limit:]
+		}
+
+		return history, nil
+	}
+
+	return nil, fmt.Errorf("gemini: session not found: %s", sessionID)
 }
