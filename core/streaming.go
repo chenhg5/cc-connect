@@ -59,6 +59,9 @@ type ToolStepKind string
 const (
 	ToolStepKindTool     ToolStepKind = "tool"
 	ToolStepKindThinking ToolStepKind = "thinking"
+	// ToolStepKindInfo is a transient, non-fatal progress row used for
+	// engine EventNotice hints (e.g. provider rate-limit retry hint, #1684).
+	ToolStepKindInfo ToolStepKind = "info"
 )
 
 // ToolStep is one summarized progress row shown in rich progress cards.
