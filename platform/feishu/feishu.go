@@ -6309,8 +6309,10 @@ func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
 		return ""
 	}
 	candidates := []string{text}
-	if idx := strings.Index(text, "{"); idx > 0 {
-		candidates = append(candidates, text[idx:])
+	if start := strings.Index(text, "{"); start >= 0 {
+		if end := strings.LastIndex(text, "}"); end >= start {
+			candidates = append(candidates, text[start:end+1])
+		}
 	}
 	for _, candidate := range candidates {
 		var params map[string]any
