@@ -5443,10 +5443,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				break
 			}
 			if hasRichCard {
-				// When thinking messages are suppressed, skip card creation.
-				if !e.display.ThinkingMessages {
-					break
-				}
 				if thinking := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen)); thinking != "" {
 					toolSteps = append(toolSteps, ToolStep{
 						Kind:    ToolStepKindThinking,
@@ -5454,6 +5450,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						Summary: thinking,
 						Done:    true,
 					})
+				}
+				// Quiet mode suppresses live progress updates, but the final rich card
+				// must still retain real reasoning steps in its collapsed panel.
+				if !e.display.ThinkingMessages {
+					break
 				}
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
@@ -5533,15 +5534,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if hasRichCard {
-				// When tool messages are suppressed, skip card updates on tool events.
-				if !e.display.ToolMessages {
-					break
-				}
 				toolSteps = append(toolSteps, ToolStep{
 					Kind:    ToolStepKindTool,
 					Name:    event.ToolName,
 					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
 				})
+				// Quiet mode suppresses live progress updates, but the final rich card
+				// must still retain real tool calls in its collapsed panel.
+				if !e.display.ToolMessages {
+					break
+				}
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
@@ -5661,35 +5663,38 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-			if e.display.ToolMessages {
-				result := strings.TrimSpace(event.ToolResult)
-				if result == "" {
-					result = strings.TrimSpace(event.Content)
-				}
-				if result != "" {
-					result = truncateIf(result, e.display.ToolMaxLen)
-				}
-				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
-					if hasRichCard {
-						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
-						if cardMessageID == nil {
-							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
-							if starter, ok := p.(PreviewStarter); ok {
-								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
-								if err != nil {
-									slog.Debug("rich card: failed to create tool-result card", "platform", p.Name(), "error", err)
-								} else {
-									cardMessageID = handle
-								}
-							}
-						} else if updater, ok := p.(MessageUpdater); ok {
-							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
-							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
-								slog.Debug("rich card: failed to update tool-result card", "platform", p.Name(), "error", err)
-							}
-						}
+			result := strings.TrimSpace(event.ToolResult)
+			if result == "" {
+				result = strings.TrimSpace(event.Content)
+			}
+			if result != "" {
+				result = truncateIf(result, e.display.ToolMaxLen)
+			}
+			if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
+				if hasRichCard {
+					toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
+					if !e.display.ToolMessages {
 						break
 					}
+					if cardMessageID == nil {
+						card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+						if starter, ok := p.(PreviewStarter); ok {
+							handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+							if err != nil {
+								slog.Debug("rich card: failed to create tool-result card", "platform", p.Name(), "error", err)
+							} else {
+								cardMessageID = handle
+							}
+						}
+					} else if updater, ok := p.(MessageUpdater); ok {
+						card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+						if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
+							slog.Debug("rich card: failed to update tool-result card", "platform", p.Name(), "error", err)
+						}
+					}
+					break
+				}
+				if e.display.ToolMessages {
 					resultMsg := e.formatToolResultEventFallback(event.ToolName, result, event.ToolStatus, event.ToolExitCode, event.ToolSuccess)
 					entry := ProgressCardEntry{
 						Kind:     ProgressEntryToolResult,
@@ -6259,10 +6264,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
 					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
 				}
-				richStatusFooter := e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir)
-				if legacyStatusFooter != "" {
-					richStatusFooter = formatElapsed(time.Since(turnStart), false, e.i18n.currentLang()) + "\n" + legacyStatusFooter
-				}
+				richStatusFooter := e.richFinalStatusFooter(turnStart, e.agent, state.agentSession, state.workspaceDir, legacyStatusFooter)
 				finalBody := resolveRichCardMarkdown(parts[0], true)
 				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, finalBody, false, richStatusFooter)
 				if cardMessageID != nil {
@@ -7701,8 +7703,8 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 // composeRichStatusFooter assembles the multi-line statusFooter passed to
 // RichCardSupporter.BuildRichCard. Layout (skipping any empty line):
 //
-//	line 1: ⏱ <i18n elapsed>                                  (subject to e.replyFooterEnabled)
-//	line 2: model · out N · in N cw N cr N · ctx N%           (subject to e.showContextIndicator)
+//	line 1: 🧠 <model> · 💪 <effort> · ⌛ <elapsed>
+//	line 2: 📝 <context used>/<window> · <segmented bar> (<pct>%)
 //	line 3: <workdir>                                         (subject to e.showWorkdirIndicator)
 //
 // Returns "" when the master replyFooterEnabled toggle is off, or while the
@@ -7718,27 +7720,25 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 	}
 	var lines []string
 
-	// Line 1: elapsed timer (now always the "done" form since streaming branch returned above)
-	lines = append(lines, formatElapsed(time.Since(turnStart), streaming, e.i18n.currentLang()))
+	// Line 1: compact turn summary. Keeping the model, effort, and elapsed
+	// time together makes the metadata scannable without exposing the noisy
+	// per-request input/cache/output counters that were previously shown here.
+	var summary []string
+	if model := replyFooterModel(session, agent); model != "" {
+		summary = append(summary, "🧠 "+model)
+	}
+	if effort := replyFooterReasoningEffort(session, agent); effort != "" {
+		summary = append(summary, e.richStatusText(MsgRichStatusEffort, effort))
+	}
+	summary = append(summary, e.richStatusText(MsgRichStatusElapsed, formatRichStatusDuration(time.Since(turnStart))))
+	lines = append(lines, strings.Join(summary, " · "))
 
-	// Line 2: model + effort + token usage detail + ctx %
+	// Line 2: actual context load and a compact eight-segment progress bar.
+	// This is deliberately based on ContextUsage instead of per-turn token
+	// deltas: it answers how much room the conversation itself has left.
 	if e.showContextIndicator {
-		usage := replyFooterSessionContextUsage(session)
-		model := replyFooterModel(session, agent)
-		effort := replyFooterReasoningEffort(session, agent)
-		if line := buildClaudeStatusLineFooter(model, effort, usage); line != "" {
+		if line := e.richStatusContextLine(replyFooterSessionContextUsage(session)); line != "" {
 			lines = append(lines, line)
-		} else if fallback := e.replyFooterUsageText(session, agent); fallback != "" {
-			// fallback for non-claudecode agents that still expose UsageReporter
-			parts := []string{}
-			if model != "" {
-				parts = append(parts, model)
-			}
-			if effort != "" {
-				parts = append(parts, effort)
-			}
-			parts = append(parts, fallback)
-			lines = append(lines, strings.Join(parts, " · "))
 		}
 	}
 
@@ -7750,6 +7750,112 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// richFinalStatusFooter selects the rich-card footer for a completed reply.
+// legacyAgentFooter is deliberately ignored: it belongs to the legacy plain
+// message path and otherwise overwrites the compact model/effort/context view.
+func (e *Engine) richFinalStatusFooter(turnStart time.Time, agent Agent, session AgentSession, workspaceDir, legacyAgentFooter string) string {
+	_ = legacyAgentFooter
+	return e.composeRichStatusFooter(false, turnStart, agent, session, workspaceDir)
+}
+
+// richStatusText translates a rich-card status segment. Engines created in
+// tests can omit i18n; that should still produce a useful English footer.
+func (e *Engine) richStatusText(key MsgKey, args ...any) string {
+	if e != nil && e.i18n != nil {
+		return e.i18n.Tf(key, args...)
+	}
+	switch key {
+	case MsgRichStatusEffort:
+		return fmt.Sprintf("💪 Effort %s", args[0])
+	case MsgRichStatusElapsed:
+		return fmt.Sprintf("⌛ Elapsed %s", args[0])
+	case MsgRichStatusContext:
+		return fmt.Sprintf("📝 Context %s/%s · %s (%d%%)", args...)
+	default:
+		return ""
+	}
+}
+
+// formatRichStatusDuration uses a dense duration string so the elapsed field
+// stays on the same line as the model on narrow mobile cards.
+func formatRichStatusDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	case d < time.Hour:
+		return fmt.Sprintf("%dm %02ds", int(d/time.Minute), int(d/time.Second)%60)
+	default:
+		return fmt.Sprintf("%dh %02dm", int(d/time.Hour), int(d/time.Minute)%60)
+	}
+}
+
+// richStatusContextLine renders ContextUsage as e.g.
+// "📝 上下文 12.7k/121.6k · 🟩 ▫️ ▫️ ▫️ ▫️ ▫️ ▫️ ▫️ (10%)".
+// It intentionally has no fallback to UsageReporter: only a runtime context
+// window can support a truthful used/window progress indicator.
+func (e *Engine) richStatusContextLine(usage *ContextUsage) string {
+	if usage == nil || usage.ContextWindow <= 0 {
+		return ""
+	}
+	used := usage.UsedTokens
+	if used <= 0 {
+		switch {
+		case usage.TotalTokens > 0:
+			used = usage.TotalTokens
+		case usage.InputTokens > 0 || usage.OutputTokens > 0:
+			used = usage.InputTokens + usage.OutputTokens + usage.CachedInputTokens + usage.CacheCreationInputTokens
+		default:
+			return ""
+		}
+	}
+	if used < 0 {
+		used = 0
+	}
+	if used > usage.ContextWindow {
+		used = usage.ContextWindow
+	}
+	percent := used * 100 / usage.ContextWindow
+	return e.richStatusText(
+		MsgRichStatusContext,
+		formatStatusTokenCount(used),
+		formatStatusTokenCount(usage.ContextWindow),
+		richStatusProgressBar(percent),
+		percent,
+	)
+}
+
+// richStatusProgressBar is an eight-slot text bar that stays readable in
+// Feishu's notation-size markdown. Any nonzero usage gets one filled segment
+// so early context growth remains visible.
+func richStatusProgressBar(percent int) string {
+	const slots = 8
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	filled := 0
+	if percent > 0 {
+		filled = (percent*slots + 99) / 100
+	}
+	if filled > slots {
+		filled = slots
+	}
+	parts := make([]string, 0, slots)
+	for i := 0; i < slots; i++ {
+		if i < filled {
+			parts = append(parts, "🟩")
+		} else {
+			parts = append(parts, "▫️")
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // buildClaudeStatusLineFooter renders the rich-card line-2 token-usage detail:
