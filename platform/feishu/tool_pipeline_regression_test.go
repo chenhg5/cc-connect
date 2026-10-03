@@ -9,7 +9,8 @@ import (
 )
 
 // This covers the exact adapter output shape: engine card inputs are often
-// wrapped in Markdown fences before they reach the Feishu renderer.
+// wrapped in Markdown fences before they reach the Feishu renderer. Keep this
+// at the renderer boundary so adapter and card regressions fail together.
 func TestToolPipeline_MarkdownWrappedInputRetainsValues(t *testing.T) {
 	for _, tc := range []struct {
 		tool, input, want string
