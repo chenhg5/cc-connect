@@ -9,7 +9,7 @@ import (
 )
 
 // ValidateDesktopThread checks exact rollout metadata rather than filename substrings.
-func (a *Agent) ValidateDesktopThread(id string) error {
+func (a *Agent) ValidateDesktopThread(id string) (err error) {
 	a.mu.RLock()
 	home, workDir := a.codexHome, a.workDir
 	a.mu.RUnlock()
@@ -17,7 +17,11 @@ func (a *Agent) ValidateDesktopThread(id string) error {
 	if err != nil {
 		return fmt.Errorf("desktop thread is unavailable")
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("desktop thread metadata could not be closed")
+		}
+	}()
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 1024*1024)
 	for scanner.Scan() {
