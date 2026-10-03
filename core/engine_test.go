@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -8292,7 +8293,7 @@ func TestCmdCronExec_UsageWhenMissingID(t *testing.T) {
 	}
 }
 
-func TestCmdCronExec_TriggersJob(t *testing.T) {
+func TestCmdCronExec_TriggersJob_WaitsForRunPersistence(t *testing.T) {
 	sentContains := func(sent []string, needle string) bool {
 		for _, msg := range sent {
 			if strings.Contains(msg, needle) {
@@ -8338,7 +8339,29 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			for time.Now().Before(deadline) {
 				sent := platform.getSent()
 				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
-					return
+					// The result is sent before runJob persists its status. Read
+					// under the store lock so TempDir cleanup cannot race MarkRun.
+					found, lastRunSet, lastErr := cronJobRunStatus(store, job.ID)
+					if !found {
+						t.Fatal("expected stored job")
+					}
+					if lastRunSet {
+						if lastErr != "" {
+							t.Fatalf("run failed: %s", lastErr)
+						}
+						data, err := os.ReadFile(store.path)
+						if err != nil {
+							t.Fatalf("read persisted run: %v", err)
+						}
+						var persisted []*CronJob
+						if err := json.Unmarshal(data, &persisted); err != nil {
+							t.Fatalf("decode persisted run: %v", err)
+						}
+						if len(persisted) != 1 || persisted[0].ID != job.ID || persisted[0].LastRun.IsZero() || persisted[0].LastError != "" {
+							t.Fatalf("expected persisted successful run, got %#v", persisted)
+						}
+						return
+					}
 				}
 				time.Sleep(10 * time.Millisecond)
 			}

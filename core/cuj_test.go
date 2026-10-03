@@ -31,6 +31,7 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -2550,4 +2551,136 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 	e.ReceiveMessage(p, skillMessage(p.Name(), "a", "/skills"))
 	sent := p.getSent()
 	assertWorkspaceSkills(t, sent[len(sent)-1], "b", "a")
+}
+
+type desktopCommandAgent struct {
+	desktopHistoryAgent
+	input, request, answer string
+	mode, messageID        string
+	fail                   bool
+}
+
+func (a *desktopCommandAgent) ReplyToThread(_ context.Context, _ string, text string) error {
+	if a.fail {
+		return context.DeadlineExceeded
+	}
+	a.input = text
+	return nil
+}
+func (a *desktopCommandAgent) ReplyToThreadWithMode(ctx context.Context, id, text, mode, messageID string) error {
+	a.mode, a.messageID = mode, messageID
+	return a.ReplyToThread(ctx, id, text)
+}
+func (a *desktopCommandAgent) AnswerThreadRequest(_ context.Context, _ string, key, text string) error {
+	if a.fail {
+		return context.DeadlineExceeded
+	}
+	a.request = key
+	a.answer = text
+	return nil
+}
+func TestCUJ_B12_DesktopCommandsUseRegisteredOwnerAndDestination(t *testing.T) {
+	env := newCUJEnv(t)
+	a := &desktopCommandAgent{}
+	env.engine.agent = a
+	RegisterAgent("stub", func(map[string]any) (Agent, error) { return a, nil })
+	if err := env.engine.registerThreadNotification("test:alice", t.TempDir(), "thread"); err != nil {
+		t.Fatal(err)
+	}
+	env.userSends("alice", `/reply thread keep  spaces and "quotes"`)
+	if a.input != `keep  spaces and "quotes"` {
+		t.Fatal("instruction modified", a.input)
+	}
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "Queued for the desktop") {
+		t.Fatal("acceptance not visible")
+	}
+	if a.mode != "queue" {
+		t.Fatal("unqualified reply did not default to queue")
+	}
+	if a.messageID != "test:test:alice:msg-/reply t" {
+		t.Fatal("platform message identity was not preserved")
+	}
+	env.userSends("alice", "/reply thread --now insert now")
+	if a.mode != "now" || a.input != "insert now" {
+		t.Fatal("immediate mode was not forwarded")
+	}
+	env.userSends("alice", "/reply thread --queue wait until idle")
+	if a.mode != "queue" || a.input != "wait until idle" {
+		t.Fatal("queue mode was not forwarded")
+	}
+	env.userSends("alice", "/reply thread --bad must not run")
+	if a.input == "must not run" {
+		t.Fatal("invalid mode dispatched")
+	}
+	env.userSends("bob", "/reply thread leaked")
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "UUID has not been notified") {
+		t.Fatal("destination rejection not visible")
+	}
+	if a.input == "leaked" {
+		t.Fatal("cross-destination route leaked")
+	}
+	env.userSends("alice", `/answer thread request {"1":"keep spaces","2":"yes"}`)
+	if a.request != "request" || a.answer != `{"1":"keep spaces","2":"yes"}` {
+		t.Fatal("answer modified", a.answer)
+	}
+	env.engine.SetDisabledCommands([]string{"reply"})
+	env.userSends("alice", "/reply thread disabled")
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "disabled") {
+		t.Fatal("disabled-command feedback missing")
+	}
+	if a.input == "disabled" {
+		t.Fatal("disabled command dispatched")
+	}
+	env.engine.SetDisabledCommands(nil)
+	a.fail = true
+	env.userSends("alice", "/reply thread failed")
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "deadline") {
+		t.Fatal("owner error hidden")
+	}
+	if env.engine.sendWorkDirForSession("test:alice") != "" {
+		t.Fatal("mobile session switched")
+	}
+}
+
+type desktopProgressAgent struct {
+	desktopHistoryAgent
+	calls int
+}
+
+func (a *desktopProgressAgent) ThreadProgress(context.Context, string) (json.RawMessage, error) {
+	a.calls++
+	return json.RawMessage(`{"live":true,"status":"running","elapsed_seconds":120,"completed_steps":1,"remaining_seconds":240,"summary":"Already-generated report","plan":[{"step":"Check","status":"completed"},{"step":"Fix","status":"in_progress"}]}`), nil
+}
+func TestCUJ_B13_DesktopProgressReadsWithoutStartingWriter(t *testing.T) {
+	env := newCUJEnv(t)
+	a := &desktopProgressAgent{}
+	env.engine.agent = a
+	RegisterAgent("stub", func(map[string]any) (Agent, error) { return a, nil })
+	if err := env.engine.registerThreadNotification("test:alice", t.TempDir(), "thread"); err != nil {
+		t.Fatal(err)
+	}
+	env.userSends("alice", "/progress thread")
+	text := strings.Join(env.plat.getSent(), "\n")
+	if a.calls != 1 || !strings.Contains(text, "240") || !strings.Contains(text, "rough") || !strings.Contains(text, "Already-generated report") {
+		t.Fatal("missing read-only report", text)
+	}
+	env.userSends("bob", "/progress thread")
+	if a.calls != 1 {
+		t.Fatal("wrong destination read progress")
+	}
+	env.engine.SetDisabledCommands([]string{"progress"})
+	env.userSends("alice", "/progress thread")
+	if a.calls != 1 || !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "disabled") {
+		t.Fatal("disabled query did not fail visibly")
+	}
+	if env.engine.sendWorkDirForSession("test:alice") != "" {
+		t.Fatal("mobile session switched")
+	}
+	if got, err := env.engine.desktopProgressText("thread", json.RawMessage(`{"live":false,"status":"running","remaining_seconds":10}`)); err != nil || strings.Contains(got, "10 s") {
+		t.Fatal("saved history claimed live ETA", got, err)
+	}
+	got, err := env.engine.desktopProgressText("thread", json.RawMessage(`{"live":true,"status":"running","elapsed_seconds":120,"remaining_seconds":240,"plan":[{"step":"Check","status":"completed"},{"step":"Fix","status":"pending"}],"pending":[{"request_id":"key","answerable":false}]}`))
+	if err != nil || strings.Contains(got, "/answer") || strings.Contains(got, "240 s") || !strings.Contains(got, "acceptance unknown") {
+		t.Fatal("unknown answer allowed replay or ETA", got, err)
+	}
 }
