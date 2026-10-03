@@ -169,9 +169,10 @@ func (e *Engine) desktopProgressText(id string, data json.RawMessage) (string, e
 	lines := []string{e.i18n.Tf(MsgDesktopProgressReport, id, e.i18n.T(source), e.i18n.T(status), report.Elapsed, estimate)}
 	for _, step := range report.Plan {
 		mark := "○"
-		if step.Status == "completed" {
+		switch step.Status {
+		case "completed":
 			mark = "✓"
-		} else if step.Status == "in_progress" {
+		case "in_progress":
 			mark = "▶"
 		}
 		lines = append(lines, mark+" "+step.Step)
