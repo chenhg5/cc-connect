@@ -49,6 +49,9 @@ type acpSession struct {
 	// updated whenever SetLiveMode succeeds or the server announces a
 	// mode change via session/update.
 	modesMu        sync.RWMutex
+	usageMu        sync.RWMutex
+	lastUsage      core.ContextUsage
+	haveUsage      bool
 	availableModes []acpModeInfo
 	currentMode    string
 
@@ -372,12 +375,55 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	}
 	s.cacheToolCallInput(params)
 	s.maybeAbsorbCurrentModeUpdate(params)
+	s.maybeAbsorbUsageUpdate(params)
 	sid := s.currentACPSessionID()
 	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
 	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
 	for _, ev := range mapSessionUpdate(sid, params) {
 		s.emit(ev)
 	}
+}
+
+// maybeAbsorbUsageUpdate watches session/update notifications for
+// `usage_update` (opencode extension: {"used": N, "size": M}) and records
+// real context usage for the reply footer / auto-compress heuristics.
+func (s *acpSession) maybeAbsorbUsageUpdate(params json.RawMessage) {
+	var wrap struct {
+		Update json.RawMessage `json:"update"`
+	}
+	if json.Unmarshal(params, &wrap) != nil || len(wrap.Update) == 0 {
+		return
+	}
+	var head struct {
+		Kind string `json:"sessionUpdate"`
+	}
+	if json.Unmarshal(wrap.Update, &head) != nil || head.Kind != "usage_update" {
+		return
+	}
+	var u struct {
+		Used int `json:"used"`
+		Size int `json:"size"`
+	}
+	if json.Unmarshal(wrap.Update, &u) != nil {
+		return
+	}
+	s.usageMu.Lock()
+	s.lastUsage.UsedTokens = u.Used
+	s.lastUsage.ContextWindow = u.Size
+	s.haveUsage = true
+	s.usageMu.Unlock()
+}
+
+// GetContextUsage implements core.ContextUsageReporter with real figures
+// captured from usage_update + session/prompt responses.
+func (s *acpSession) GetContextUsage() *core.ContextUsage {
+	s.usageMu.RLock()
+	defer s.usageMu.RUnlock()
+	if !s.haveUsage {
+		return nil
+	}
+	cu := s.lastUsage
+	return &cu
 }
 
 // maybeAbsorbCurrentModeUpdate watches session/update notifications
@@ -621,6 +667,27 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 		return fmt.Errorf("acp: session/prompt: %w", err)
 	}
 	slog.Debug("acp: session/prompt response", "session_id", sid, "response_len", len(res), "response", string(res))
+
+	// Absorb per-turn usage (esp. cachedReadTokens) into the context snapshot.
+	var pr struct {
+		Usage struct {
+			InputTokens      int `json:"inputTokens"`
+			OutputTokens     int `json:"outputTokens"`
+			TotalTokens      int `json:"totalTokens"`
+			CachedReadTokens int `json:"cachedReadTokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(res, &pr) == nil && (pr.Usage.InputTokens > 0 || pr.Usage.TotalTokens > 0) {
+		s.usageMu.Lock()
+		if pr.Usage.CachedReadTokens > 0 {
+			s.lastUsage.CachedInputTokens = pr.Usage.CachedReadTokens
+		}
+		s.lastUsage.InputTokens = pr.Usage.InputTokens
+		s.lastUsage.OutputTokens = pr.Usage.OutputTokens
+		s.lastUsage.TotalTokens = pr.Usage.TotalTokens
+		s.haveUsage = true
+		s.usageMu.Unlock()
+	}
 
 	// Text was streamed via session/update; engine aggregates EventText.
 	s.emit(core.Event{
