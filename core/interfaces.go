@@ -559,6 +559,14 @@ type AgentSessionCanceller interface {
 	CancelTurn() error
 }
 
+// AgentTurnCanceller interrupts exactly the supplied turn, never a newer turn.
+type AgentTurnCanceller interface {
+	CancelExpectedTurn(turnID string) error
+}
+
+// ErrAgentTurnBusy means the input was not accepted and may be retried later.
+var ErrAgentTurnBusy = errors.New("agent turn is busy")
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.
@@ -709,4 +717,70 @@ const (
 // updating the visual status of a preview card header.
 type PreviewStatusUpdater interface {
 	SetPreviewStatus(previewHandle any, status CardStatus)
+}
+
+// AgentSessionAttacher opts into an externally owned, live session runtime.
+// Attachment must not send a prompt or modify the existing session's settings.
+// Ordinary subprocess agents do not implement this interface.
+type AgentSessionAttacher interface {
+	AttachSession(context.Context, string) (AgentSession, error)
+}
+
+type AgentRuntimeState struct {
+	SessionID string
+	TurnID    string
+	Connected bool
+	CanSteer  bool
+}
+
+// SharedAgentSession emits events continuously, including turns initiated by
+// other clients. Close detaches only this connection; it must never stop the
+// external runtime, answer pending requests or interrupt a turn.
+type SharedAgentSession interface {
+	AgentSession
+	RuntimeState() AgentRuntimeState
+}
+
+// AgentTurnSender returns the authoritative turn ID even when the daemon
+// publishes its result before the start response reaches this client.
+type AgentTurnSender interface {
+	SendTurn(prompt, messageID string, images []ImageAttachment, files []FileAttachment) (string, error)
+}
+
+type AgentSessionSteerer interface {
+	Steer(expectedTurnID, text string) error
+}
+
+// AgentAutoSteer opts into sending ordinary messages to an active shared turn.
+// False queues messages until that turn finishes, regardless of its origin.
+// Without this capability the engine retains its existing queue/busy behavior.
+type AgentAutoSteer interface {
+	AutoSteerBusyMessages() bool
+}
+
+type BackgroundTerminal struct {
+	ID      string
+	Command string
+	Cwd     string
+}
+
+type AgentBackgroundTerminals interface {
+	ListBackgroundTerminals(context.Context) ([]BackgroundTerminal, error)
+	TerminateBackgroundTerminal(context.Context, string) error
+}
+
+// DefaultSettingsAgent changes creation defaults without reconfiguring an
+// attached shared runtime. Settings commands must preserve its observer/history.
+type DefaultSettingsAgent interface {
+	DefaultSettingsOnly() bool
+}
+
+type AgentRuntimeSettings struct {
+	Model, ReasoningEffort, Provider string
+	ApprovalPolicy, Sandbox          string
+}
+
+// AgentRuntimeSettingsReader obtains authoritative settings without overrides.
+type AgentRuntimeSettingsReader interface {
+	ReadRuntimeSettings(context.Context) (AgentRuntimeSettings, error)
 }

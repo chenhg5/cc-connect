@@ -31,8 +31,11 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2795,4 +2798,566 @@ type reasoningJourneyPlatform struct {
 
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
+}
+
+// CUJ: connect to externally started work, answer its questions, and detach.
+// Request-bound buttons remain safe when another client resolves an approval.
+func TestCUJ_C7_SharedExternalApprovalQuestionsAndDetach(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.send("/attach first")
+	env.await("Attached to session first")
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "session-grant", ToolName: "Permissions", ToolInput: "read project files", ToolInputRaw: map[string]any{"reason": "Need project files", "cwd": "/project"}, Decisions: []string{"allow", "allow_session", "deny"}})
+	env.await("Reason: Need project files")
+	env.await("Working directory: /project")
+	env.send(env.button(env.e.i18n.T(MsgSharedAllowSession)))
+	env.await("decision: allow_session")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "policy-grant", ToolName: "Bash", ToolInput: "git status", Decisions: []string{"allow", "allow_similar", "cancel"}, DecisionDetails: map[string]string{"allow_similar": `["git","status"]`}})
+	env.await("Allow similar commands: `[\"git\",\"status\"]`")
+	env.send(env.button(env.e.i18n.T(MsgSharedAllowSimilar)))
+	env.await("decision: allow_similar")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "print external marker", Decisions: []string{"allow", "cancel"}})
+	env.await("print external marker")
+	if strings.Contains(strings.ToLower(env.visible()), "allow all") {
+		t.Fatal("shared approval advertises an unsupported persistent decision")
+	}
+	staleAllow := env.button(env.e.i18n.T(MsgPermBtnAllow))
+	as.emit(Event{Type: EventPermissionResolved, RequestID: "approval"})
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "questions", ToolName: "AskUserQuestion", Questions: []UserQuestion{
+		{ID: "choice", Question: "Same question?", Options: []UserQuestionOption{{Label: "A"}, {Label: "B"}}},
+		{ID: "detail", Question: "Same question?", IsOther: true, Options: []UserQuestionOption{{Label: "A"}, {Label: "B"}}},
+	}})
+	env.await("(1/2) Same question?")
+	env.send(staleAllow)
+	env.await(env.e.i18n.T(MsgSharedStaleRequest))
+	env.send(env.button("A"))
+	env.await("(2/2) Same question?")
+	env.send("Other text")
+	env.await("answers by stable ID: map[choice:[A] detail:[Other text]]")
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+}
+
+func TestCUJ_C7_SharedApprovalAndQueueSurviveWorkspaceIdleTimeout(t *testing.T) {
+	env, a := newSharedCompatEnv(t)
+	ws := setupSharedWorkspace(t, env)
+	env.send("LOCAL LONG TASK")
+	first := awaitSharedCompatCall(t, a)
+	ageSharedWorkspace(ws)
+	env.e.reapIdleWorkspaces()
+	first.session.emit(Event{Type: EventPermissionRequest, TurnID: first.turn, RequestID: "approval", ToolName: "Bash", ToolInput: "LOCAL APPROVAL WAIT", Decisions: []string{"allow_session", "allow_similar", "network_allow", "cancel"}})
+	env.await("LOCAL APPROVAL WAIT")
+	env.send("KEEP QUEUED TASK")
+	env.await(env.e.i18n.Tf(MsgSharedDecisionHint, "allow_session / allow_similar / network_allow / cancel"))
+	ageSharedWorkspace(ws)
+	env.e.reapIdleWorkspaces()
+	env.send("network_allow")
+	env.await(env.e.i18n.T(MsgSharedResponseSent))
+	env.send("KEEP QUEUED TASK")
+	env.await(env.e.i18n.T(MsgMessageQueued))
+	ageSharedWorkspace(ws)
+	env.e.reapIdleWorkspaces()
+	first.finish("LOCAL TASK COMPLETED")
+	env.await("LOCAL TASK COMPLETED")
+	next := awaitSharedCompatCall(t, a)
+	if next.prompt != "KEEP QUEUED TASK" {
+		t.Fatalf("queued task lost: %q", next.prompt)
+	}
+	next.finish("QUEUED TASK COMPLETED")
+	env.await("QUEUED TASK COMPLETED")
+	waitSharedWorkspaceIdle(t, ws)
+	ageSharedWorkspace(ws)
+	env.e.reapIdleWorkspaces()
+	if next.session.Alive() {
+		t.Fatal("completed idle workspace observer was not detached")
+	}
+}
+
+func TestCUJ_C7_SharedExternalToolOutputStaysInToolResult(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.send("/attach first")
+	env.await("Attached to session first")
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventTurnStarted, TurnID: "external"})
+	as.emit(Event{Type: EventToolUse, TurnID: "external", ToolName: "Bash", ToolInput: "inspect configuration"})
+	as.emit(Event{Type: EventToolOutput, TurnID: "external", ItemID: "command", Content: "RAW-EXTERNAL-STDOUT"})
+	as.emit(Event{Type: EventToolResult, TurnID: "external", ToolName: "Bash", ToolResult: "RAW-EXTERNAL-STDOUT", ToolStatus: "completed"})
+	as.emit(Event{Type: EventText, TurnID: "external", Content: "INSPECTION DONE"})
+	as.emit(Event{Type: EventResult, TurnID: "external", Content: "INSPECTION DONE", Done: true})
+	env.await("INSPECTION DONE")
+	count := 0
+	for _, text := range env.p.getSent() {
+		if text == "RAW-EXTERNAL-STDOUT" {
+			t.Fatal("stdout delivered as standalone assistant body")
+		}
+		if strings.Contains(text, "RAW-EXTERNAL-STDOUT") {
+			count++
+		}
+	}
+	if count < 1 {
+		t.Fatal("tool output missing from progress/result")
+	}
+	env.send("/history 10")
+	env.await("History (last 1)")
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+}
+
+func TestCUJ_C7_SharedLiveToolOutputPreservesAsyncQuestion(t *testing.T) {
+	p := &observedToolOutputPlatform{toolOutputRichPlatform: toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}}
+	a := &sharedTestAgent{}
+	e := NewEngine("test", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+	defer e.Stop()
+	e.display.CardMode, e.display.ToolMessages = "rich", true
+	send := func(text string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: text, ReplyCtx: "reply"})
+	}
+	await := func(text string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(strings.Join(p.getSent(), "\n"), text) {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("missing visible %q: %v", text, p.getSent())
+	}
+	send("/attach first")
+	await("Attached to session first")
+	as := a.connection("first")
+	turn := as.RuntimeState().TurnID
+	as.emit(Event{Type: EventTurnStarted, TurnID: turn})
+	as.emit(Event{Type: EventText, TurnID: turn, ItemID: "question", Content: "ASYNC QUESTION REMAINS", Metadata: map[string]any{"phase": "commentary", "delivery": "async"}})
+	as.emit(Event{Type: EventToolUse, TurnID: turn, ItemID: "cmd", ToolName: "Bash", ToolInput: "long command"})
+	as.emit(Event{Type: EventToolOutput, TurnID: turn, ItemID: "cmd", ToolName: "Bash", Content: "LIVE-ONE"})
+	as.emit(Event{Type: EventToolOutput, TurnID: turn, ItemID: "cmd", ToolName: "Bash", Content: "-TWO"})
+	await(`"Result":"LIVE-ONE-TWO"`)
+	await("ASYNC QUESTION REMAINS")
+	// Assert live visibility before emitting any completion notification.
+	for _, message := range p.getSent() {
+		if message == "LIVE-ONE" || message == "-TWO" || message == "LIVE-ONE-TWO" {
+			t.Fatal("tool delta appeared as standalone assistant text")
+		}
+	}
+	as.emit(Event{Type: EventToolResult, TurnID: turn, ItemID: "cmd", ToolName: "Bash", ToolResult: "COMPLETED OUTPUT", ToolStatus: "completed"})
+	as.emit(Event{Type: EventText, TurnID: turn, Content: "TASK DONE"})
+	as.emit(Event{Type: EventResult, TurnID: turn, Content: "TASK DONE", Done: true})
+	await("COMPLETED OUTPUT")
+	await("TASK DONE")
+	send("/history 10")
+	await("History (last 1)")
+	send("/detach")
+	await(e.i18n.T(MsgSharedDetached))
+}
+
+func TestCUJ_C7_SharedForegroundQueueHistoryAndDetach(t *testing.T) {
+	env, agent := newSharedCompatEnv(t)
+	env.send("FIRST QUESTION")
+	first := awaitSharedCompatCall(t, agent)
+	env.send("SECOND QUESTION")
+	first.finish("FIRST ANSWER")
+	second := awaitSharedCompatCall(t, agent)
+	second.finish("SECOND ANSWER")
+	env.await("SECOND ANSWER")
+	env.send("/history 10")
+	env.await("FIRST QUESTION")
+	env.await("FIRST ANSWER")
+	env.await("SECOND QUESTION")
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+}
+
+func TestCUJ_C7_SharedOrdinaryReplySteersExternalTurn(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.e.agent = &autoSteerTestAgent{env.a, true}
+	env.send("/attach first")
+	env.await("Attached to session first")
+	env.send("answer the asynchronous question")
+	env.await("STEER observed: answer the asynchronous question")
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "blocking", Questions: []UserQuestion{{ID: "q", Question: "BLOCKING QUESTION"}}})
+	env.await("BLOCKING QUESTION")
+	env.send("blocking answer")
+	env.await("answers by stable ID: map[q:[blocking answer]]")
+	if strings.Contains(env.visible(), "STEER observed: blocking answer") {
+		t.Fatal("blocking answer was steered")
+	}
+	env.send("/stop")
+	env.await("interrupted")
+	env.send("ordinary reply after turn finished")
+	env.await("RECOVERY on first")
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+}
+
+func TestCUJ_C7_SharedOrdinaryReplySteersForegroundTurn(t *testing.T) {
+	env, agent := newSharedCompatEnv(t)
+	env.e.agent = &autoSteerCompatAgent{agent}
+	env.send("FIRST TASK")
+	first := awaitSharedCompatCall(t, agent)
+	env.send("INSERT INTO FIRST TASK")
+	env.await(env.e.i18n.T(MsgSharedSteerAccepted))
+	first.finish("FIRST ANSWER")
+	env.await("FIRST ANSWER")
+	env.send("NEXT TASK")
+	next := awaitSharedCompatCall(t, agent)
+	if next.prompt != "NEXT TASK" {
+		t.Fatalf("steered message queued into another turn: %q", next.prompt)
+	}
+	next.finish("NEXT ANSWER")
+	env.await("NEXT ANSWER")
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+}
+
+func TestCUJ_C7_SharedOrdinaryReplyQueuesExternalTurn(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.e.agent = &autoSteerTestAgent{env.a, false}
+	env.send("/attach first")
+	env.await("Attached to session first")
+	env.send("plain message while CLI is running")
+	env.await(env.e.i18n.T(MsgMessageQueued))
+	env.send("/steer explicit insertion")
+	env.await("STEER observed: explicit insertion")
+	as := env.a.connection("first")
+	as.mu.Lock()
+	as.turn = ""
+	as.mu.Unlock()
+	as.emit(Event{Type: EventResult, Content: "EXTERNAL TASK FINISHED", Done: true})
+	env.await("EXTERNAL TASK FINISHED")
+	env.await("RECOVERY on first")
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+}
+
+func TestCUJ_C7_SharedExternalQueueClearedByControls(t *testing.T) {
+	for _, command := range []string{"/stop", "/detach", "/switch second"} {
+		t.Run(command, func(t *testing.T) {
+			env, a := newSharedCompatEnv(t)
+			env.e.agent = &queuedExternalAgent{a}
+			env.send("/attach first")
+			env.await("Attached to session first")
+			env.send("OLD QUEUED TASK")
+			env.await(env.e.i18n.T(MsgMessageQueued))
+			env.send(command)
+			if command == "/stop" {
+				env.await("session stopped")
+			} else {
+				env.await("session reset")
+			}
+			if command == "/switch second" {
+				env.await("Attached to session second")
+				as := a.connection("second")
+				as.mu.Lock()
+				as.turn = ""
+				as.mu.Unlock()
+				as.emit(Event{Type: EventResult, Content: "SECOND THREAD FINISHED", Done: true})
+				env.await("SECOND THREAD FINISHED")
+			} else if command == "/detach" {
+				env.await(env.e.i18n.T(MsgSharedDetached))
+			}
+			select {
+			case c := <-a.calls:
+				t.Fatalf("discarded queued task started after %s: %q", command, c.prompt)
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestCUJ_C7_SharedToolSendFollowsAttachmentAndStopsAfterDetach(t *testing.T) {
+	env := newSharedTestEnv(t)
+	api := &APIServer{engines: map[string]*Engine{"shared": env.e}}
+	toolSend := func(thread, text string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(SendRequest{AgentSessionID: thread, Message: text})
+		w := httptest.NewRecorder()
+		api.handleSend(w, httptest.NewRequest(http.MethodPost, "/send", strings.NewReader(string(body))))
+		return w
+	}
+	env.send("/attach first")
+	env.await("Attached to session first")
+	if w := toolSend("first", "TOOL FROM FIRST"); w.Code != http.StatusOK {
+		t.Fatal(w.Body.String())
+	}
+	env.await("TOOL FROM FIRST")
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+	if w := toolSend("first", "MUST NOT DELIVER"); w.Code != http.StatusBadRequest {
+		t.Fatal(w.Body.String())
+	}
+	env.send("/attach second")
+	env.await("Attached to session second")
+	if w := toolSend("second", "TOOL FROM SECOND"); w.Code != http.StatusOK {
+		t.Fatal(w.Body.String())
+	}
+	env.await("TOOL FROM SECOND")
+	if strings.Contains(env.visible(), "MUST NOT DELIVER") {
+		t.Fatal("detached thread sent to a new conversation")
+	}
+}
+
+// CUJ: live selection begins observing immediately; failed attachment and
+// failed interruption preserve the current session and its event reader.
+func TestCUJ_B13_SharedSwitchAndControlFailurePreserveObserver(t *testing.T) {
+	t.Run("text command", func(t *testing.T) {
+		env := newSharedTestEnv(t)
+		env.a.failInterrupt = true
+		env.send("/switch 1")
+		env.await("Attached to session first")
+		as := env.a.connection("first")
+		as.emit(Event{Type: EventText, Content: "LIVE first", Metadata: map[string]any{"phase": "commentary"}})
+		env.await("LIVE first")
+		env.send("/attach bad")
+		env.await("simulated attach failure")
+		env.send("/stop")
+		env.await("simulated interrupt failure")
+		env.send("/steer keep observing")
+		env.await("STEER observed: keep observing")
+		env.send("/detach")
+		env.await(env.e.i18n.T(MsgSharedDetached))
+	})
+	t.Run("session list button attaches and failed switch preserves observer", func(t *testing.T) {
+		env := newSharedTestEnv(t)
+		saved := env.e.sessions.SwitchToAgentSession("test:user", "first", env.a.Name(), "First")
+		saved.AddHistory("assistant", "PRESERVED CARD HISTORY")
+		env.e.sessions.SwitchToAgentSession("test:user", "second", env.a.Name(), "Second")
+		env.send("/session")
+		env.await("First")
+		action := env.button("#1")
+		card := env.e.handleCardNav(action, "test:user")
+		if card == nil {
+			t.Fatal("switch button did not redraw the card")
+		}
+		env.await("Attached to session first")
+		as := env.a.connection("first")
+		if as == nil {
+			t.Fatal("session list button did not attach")
+		}
+		as.emit(Event{Type: EventText, Content: "LIVE FROM CARD ATTACH", Metadata: map[string]any{"phase": "commentary"}})
+		env.await("LIVE FROM CARD ATTACH")
+		env.send("/steer continue from button")
+		env.await("STEER observed: continue from button")
+		env.send("/history 10")
+		env.await("PRESERVED CARD HISTORY")
+		env.a.mu.Lock()
+		env.a.failResume = true
+		env.a.mu.Unlock()
+		env.e.handleCardNav("act:/switch 2", "test:user")
+		env.await("simulated attach failure")
+		as.emit(Event{Type: EventResult, TurnID: "active-first", Content: "LIVE AFTER FAILED CARD SWITCH", Done: true})
+		env.await("LIVE AFTER FAILED CARD SWITCH")
+		env.send("/detach")
+		env.await(env.e.i18n.T(MsgSharedDetached))
+	})
+}
+
+// CUJ: interrupt ends a turn without closing its observer; background command
+// cleanup is a distinct user action, and the same session accepts new work.
+func TestCUJ_C8_SharedInterruptBackgroundCleanupAndRecovery(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.send("/attach first")
+	env.await("Attached to session first")
+	env.send("/steer adjusted task")
+	env.await("STEER observed: adjusted task")
+	env.send("/stop")
+	env.await(env.e.i18n.Tf(MsgSharedInterruptedCount, 1))
+	env.send("/terminals list")
+	env.await("terminal-first: print ticks")
+	env.send("/terminals stop terminal-first")
+	env.await(env.e.i18n.T(MsgSharedTerminalStopped))
+	env.send("next task")
+	env.await("RECOVERY on first")
+	env.send("/history 10")
+	env.await("next task")
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+}
+
+// Batch cleanup removes the listed background terminals while live steering
+// and interruption remain usable on the same attached turn.
+func TestCUJ_C8_SharedStopAllPreservesActiveTurn(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.send("/attach first")
+	env.await("Attached to session first")
+	as := env.a.connection("first")
+	// Observe an external turn through the common foreground presentation loop.
+	as.emit(Event{Type: EventTurnStarted, TurnID: "active-first"})
+	as.mu.Lock()
+	as.terminals = []BackgroundTerminal{{ID: "one", Command: "first background"}, {ID: "two", Command: "second background"}}
+	as.mu.Unlock()
+	env.send("/terminals")
+	env.await("one: first background")
+	env.await("two: second background")
+	env.send("/terminals stop all")
+	env.await(env.e.i18n.Tf(MsgSharedTerminalsStopped, 2))
+	env.send("/terminals")
+	env.await(env.e.i18n.T(MsgSharedNoTerminals))
+	env.send("/steer continue working")
+	env.await("STEER observed: continue working")
+	env.send("/stop")
+	env.await(env.e.i18n.Tf(MsgSharedInterruptedCount, 0))
+	env.send("next task after cleanup")
+	env.await("RECOVERY on first")
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+}
+
+// Default-setting commands must not detach a shared runtime or discard its
+// history. Queries show server settings separately from creation defaults.
+func TestCUJ_C7_SharedSettingsPreserveLiveConversation(t *testing.T) {
+	env, _, as := newSharedSettingsEnv(t)
+	env.send("/model switch new-model")
+	env.await("New-thread defaults updated")
+	env.send("/reasoning high")
+	env.send("/mode yolo")
+	env.send("/provider switch new-provider")
+	env.send("/provider current")
+	env.await("Model: server-model · Reasoning: medium · Provider: server-provider")
+	env.await("Model: new-model · Reasoning: high · Mode: yolo · Provider: new-provider")
+	as.emit(Event{Type: EventText, Content: "LIVE AFTER DEFAULT CHANGES", Metadata: map[string]any{"phase": "commentary"}})
+	env.await("LIVE AFTER DEFAULT CHANGES")
+	env.send("/history 10")
+	env.await("KEEP HISTORY")
+	env.send("/steer still same turn")
+	env.await("STEER observed: still same turn")
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+}
+
+func TestCUJ_B3_SharedHistoryShowsDaemonTimes(t *testing.T) {
+	env, a, _ := newSharedSettingsEnv(t)
+	timestamp := time.Date(2026, 10, 2, 10, 23, 45, 0, time.UTC)
+	env.e.agent = &sharedCompatHistoryAgent{sharedSettingsTestAgent: a, history: []HistoryEntry{
+		{Role: "user", Content: "TIMED DAEMON QUESTION", Timestamp: timestamp},
+		{Role: "assistant", Content: "TIMED DAEMON ANSWER", Timestamp: timestamp.Add(time.Minute)},
+		{Role: "assistant", Content: "OLD MESSAGE WITHOUT TIME"},
+	}}
+	env.send("/history")
+	env.await("TIMED DAEMON QUESTION")
+	env.await("[" + timestamp.Local().Format("15:04:05") + "]")
+	env.await("[" + timestamp.Add(time.Minute).Local().Format("15:04:05") + "]")
+	env.await("[" + env.e.i18n.T(MsgHistoryTimeUnknown) + "]")
+	env.send("/history 10")
+	env.await("History (last 3)")
+	if strings.Contains(env.visible(), "[00:00:00]") {
+		t.Fatal("history displayed fabricated midnight")
+	}
+	env.send("/steer keep attached after history")
+	env.await("STEER observed: keep attached after history")
+}
+
+// An external asynchronous question remains actionable while tools continue;
+// card callbacks never become blocking RPC answers or input to a switched thread.
+func TestCUJ_C7_SharedAsyncQuestionCardSteersWhileWorking(t *testing.T) {
+	p := &observedAsyncCardPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+	a := &sharedTestAgent{}
+	e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+	defer e.Stop()
+	e.display.ToolMessages = true
+	send := func(text string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", MessageID: text, ReplyCtx: "reply", Content: text})
+	}
+	send("/attach first")
+	waitAsyncVisible(t, p, "Attached to session first")
+	as := a.connection("first")
+	as.emit(Event{Type: EventText, TurnID: "active-first", ItemID: "q", Content: "QUESTION TEXT RETAINED", Questions: []UserQuestion{{Question: "Database?", Options: []UserQuestionOption{{Label: "SQLite"}, {Label: "PostgreSQL"}}}, {Question: "Extra preference?"}}, Metadata: map[string]any{"phase": "commentary", "delivery": "async"}})
+	waitAsyncVisible(t, p, "Asynchronous question")
+	waitAsyncVisible(t, p, "QUESTION TEXT RETAINED")
+	waitAsyncVisible(t, p, "Extra preference?")
+	action := asyncCardAction(t, p, "SQLite")
+	as.emit(Event{Type: EventToolResult, TurnID: "active-first", ItemID: "tool", ToolName: "Bash", ToolResult: "TOOLS KEEP RUNNING", ToolStatus: "completed"})
+	waitAsyncVisible(t, p, "TOOLS KEEP RUNNING")
+	send(action)
+	waitAsyncVisible(t, p, "STEER observed: Database?: SQLite")
+	send(action)
+	waitAsyncVisible(t, p, e.i18n.T(MsgSharedStaleRequest))
+	staleAction := asyncCardAction(t, p, "PostgreSQL")
+	send("/attach second")
+	waitAsyncVisible(t, p, "Attached to session second")
+	send(staleAction)
+	send("/detach")
+	waitAsyncVisible(t, p, e.i18n.T(MsgSharedDetached))
+	for _, text := range p.getSent() {
+		if strings.Contains(text, "STEER observed: Database?: PostgreSQL") {
+			t.Fatal("old card answered another session")
+		}
+	}
+	as.mu.Lock()
+	replies := len(as.responses)
+	as.mu.Unlock()
+	if replies != 0 {
+		t.Fatal("async question used blocking permission RPC")
+	}
+}
+
+func TestCUJ_C7_SharedRuntimeNoticeDoesNotEndTask(t *testing.T) {
+	p := &observedAsyncCardPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+	a := &sharedTestAgent{}
+	e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+	defer e.Stop()
+	send := func(text string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", MessageID: text, ReplyCtx: "reply", Content: text})
+	}
+	send("/attach first")
+	waitAsyncVisible(t, p, "Attached to session first")
+	as := a.connection("first")
+	as.emit(Event{Type: EventNotice, Notice: &AgentNotice{Kind: "usage_limit", Code: "rate_limit_reached", Usage: &UsageReport{Buckets: []UsageBucket{{Name: "limited-model", LimitReached: true, Windows: []UsageWindow{{UsedPercent: 100, ResetAtUnix: 2000000000}}}}}}})
+	waitAsyncVisible(t, p, "Model usage limit reached")
+	waitAsyncVisible(t, p, "limited-model")
+	waitAsyncVisible(t, p, "Resets at:")
+	as.emit(Event{Type: EventNotice, TurnID: "active-first", Notice: &AgentNotice{Kind: "retry", Message: "RETRY NOTICE"}})
+	waitAsyncVisible(t, p, "The service will retry")
+	send("/steer continue after retry")
+	waitAsyncVisible(t, p, "STEER observed: continue after retry")
+	send("/detach")
+	waitAsyncVisible(t, p, e.i18n.T(MsgSharedDetached))
+	// Advisory cards must not advertise an ineffective current-turn model switch.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, card := range p.sentCards {
+		for _, element := range card.Elements {
+			if _, ok := element.(CardActions); ok {
+				t.Fatal("notice contains unsupported decision buttons")
+			}
+		}
+	}
+}
+
+func TestCUJ_C7_SharedReplyStreamsBeforeCompletion(t *testing.T) {
+	p := &observedTextStreamPlatform{observedToolOutputPlatform: observedToolOutputPlatform{toolOutputRichPlatform: toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}}}
+	a := &sharedTestAgent{}
+	e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+	defer e.Stop()
+	e.display.CardMode = "rich"
+	e.display.ToolMessages = true
+	send := func(text string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", ReplyCtx: "reply", Content: text, MessageID: text})
+	}
+	send("/attach first")
+	waitTextStreamVisible(t, p, "Attached to session first")
+	as := a.connection("first")
+	as.emit(Event{Type: EventText, TurnID: "active-first", ItemID: "answer", Content: "回复开头正文", Metadata: map[string]any{"phase": "final_answer", "text_delta": true}})
+	waitTextStreamVisible(t, p, "LIVE-BODY 回复开头正文")
+	second := strings.Repeat("这是生成中的正文。", 6)
+	as.emit(Event{Type: EventText, TurnID: "active-first", ItemID: "answer", Content: second, Metadata: map[string]any{"phase": "final_answer", "text_delta": true}})
+	waitTextStreamVisible(t, p, "LIVE-BODY 回复开头正文"+second)
+	// Completion is withheld until both previews are visible to the user.
+	send("/steer keep going")
+	waitTextStreamVisible(t, p, e.i18n.T(MsgSharedSteerAccepted))
+	as.mu.Lock()
+	as.turn = ""
+	as.mu.Unlock()
+	full := "回复开头正文" + second + "最终结尾"
+	as.emit(Event{Type: EventText, TurnID: "active-first", ItemID: "answer", Content: "最终结尾"})
+	as.emit(Event{Type: EventResult, TurnID: "active-first", Content: full, Done: true})
+	waitTextStreamVisible(t, p, "最终结尾")
+	send("/history 2")
+	waitTextStreamVisible(t, p, full)
+	send("/detach")
+	waitTextStreamVisible(t, p, e.i18n.T(MsgSharedDetached))
+	_, streams, _, _ := p.snapshot()
+	if len(streams) < 3 || streams[len(streams)-1] != full {
+		t.Fatalf("not streamed or duplicate final response: %v", streams)
+	}
 }
