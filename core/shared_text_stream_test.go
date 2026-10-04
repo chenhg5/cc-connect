@@ -19,7 +19,11 @@ func (p *observedTextStreamPlatform) StreamRichCardText(ctx context.Context, han
 func TestSharedTextSnapshotReplacesOnlyItsItemAndKeepsPunctuation(t *testing.T) {
 	p := &toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
 	e := NewEngine("shared", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
 	e.display.CardMode = "rich"
 	session := e.sessions.GetOrCreateActive("test:user")
 	state := &interactiveState{agentSession: newControllableSession("thread"), platform: p, replyCtx: "reply"}
@@ -65,7 +69,11 @@ func (*unsupportedTextStreamPlatform) StreamRichCardText(context.Context, any, s
 func TestSharedUnsupportedTextStreamingFallsBackBeforeTurnCompletion(t *testing.T) {
 	p := &unsupportedTextStreamPlatform{toolOutputRichPlatform: toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}}
 	e := NewEngine("shared", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
 	e.display.CardMode = "rich"
 	session := e.sessions.GetOrCreateActive("test:user")
 	state := &interactiveState{agentSession: newControllableSession("thread"), platform: p, replyCtx: "reply"}

@@ -118,7 +118,7 @@ func (e *Engine) startSharedReader(state *interactiveState, as SharedAgentSessio
 				if !replayed {
 					tail.observe(event, e.display.ToolMaxLen)
 				}
-				if tail.done && !isSharedToolEvent(event) && !(replayed && event.Type == EventResult) {
+				if tail.done && !isSharedToolEvent(event) && (!replayed || event.Type != EventResult) {
 					// A late start/text/completion cannot resurrect a completed turn,
 					// regardless of replay/live channel selection order.
 					continue
@@ -247,9 +247,10 @@ func (e *Engine) handleSharedEvent(state *interactiveState, as SharedAgentSessio
 		}
 		e.noteUserTurnCompleted(state)
 	case EventRuntimeStatus:
-		if event.Content == "reconnecting" {
+		switch event.Content {
+		case "reconnecting":
 			e.send(p, reply, e.i18n.T(MsgSharedReconnecting))
-		} else if event.Content == "connected" {
+		case "connected":
 			e.send(p, reply, e.i18n.T(MsgSharedReconnected))
 		}
 	case EventError:

@@ -11,7 +11,11 @@ func TestCUJ_C7_LateToolOutputDoesNotSplitNextSteeredReply(t *testing.T) {
 	p := &observedTextStreamPlatform{observedToolOutputPlatform: observedToolOutputPlatform{toolOutputRichPlatform: toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}}}
 	a := &sharedTestAgent{}
 	e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
-	defer e.Stop()
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
 	e.display.CardMode, e.display.ToolMessages = "rich", true
 	send := func(text string) {
 		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: text, ReplyCtx: "reply"})
@@ -138,7 +142,11 @@ func TestCUJ_C7_BindingBufferKeepsForeignDeltasInCard(t *testing.T) {
 	base := &sharedCompatAgent{calls: make(chan sharedCompatCall, 8)}
 	a := &delayedBindingAgent{sharedCompatAgent: base, release: make(chan struct{})}
 	e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
-	defer e.Stop()
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
 	e.display.CardMode = "rich"
 	send := func(text string) {
 		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: text, ReplyCtx: "reply"})

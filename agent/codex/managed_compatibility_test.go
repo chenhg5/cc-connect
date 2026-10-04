@@ -116,7 +116,11 @@ func TestManagedItemConversionPreservesTurnAndExternalUserInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer as.Close()
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Errorf("Close cleanup: %v", err)
+		}
+	}()
 	user := awaitManagedEvent(t, as, core.EventUserMessage)
 	tool := awaitManagedEvent(t, as, core.EventToolResult)
 	if user.Content != "CLI QUESTION" || user.TurnID != "external-turn" || tool.TurnID != "external-turn" || tool.ItemID != "tool" {

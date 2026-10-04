@@ -31,7 +31,7 @@ func (a *sharedCompatAgent) StartSession(ctx context.Context, id string) (AgentS
 		id = fmt.Sprintf("thread-%d", a.seq)
 	}
 	a.mu.Unlock()
-	as, err := a.sharedTestAgent.AttachSession(ctx, id)
+	as, err := a.AttachSession(ctx, id)
 	if err != nil {
 		return nil, err
 	}

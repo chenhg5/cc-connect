@@ -81,7 +81,11 @@ func TestManagedDaemonWarningsAndRetryNoticesDoNotCompleteTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer as.Close()
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Errorf("Close cleanup: %v", err)
+		}
+	}()
 	for _, kind := range []string{"warning", "retry", "model_rerouted"} {
 		event := awaitManagedEvent(t, as, core.EventNotice)
 		if event.Notice.Kind != kind {

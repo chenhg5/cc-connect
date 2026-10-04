@@ -87,7 +87,8 @@ func (e *Engine) renderSharedToolTail(state *interactiveState, tail *sharedToolT
 	}
 	// Existing plain/legacy behavior remains structured tool progress. Live
 	// stdout must never be treated as assistant prose or added to history.
-	if event.Type == EventToolResult {
+	switch event.Type {
+	case EventToolResult:
 		result := event.ToolResult
 		if result == "" {
 			result = event.Content
@@ -96,7 +97,7 @@ func (e *Engine) renderSharedToolTail(state *interactiveState, tail *sharedToolT
 		if text != "" {
 			e.sendForWorkspace(p, reply, text, workspace)
 		}
-	} else if event.Type == EventToolUse {
+	case EventToolUse:
 		e.sendForWorkspace(p, reply, "🔧 "+event.ToolName+"\n"+truncateIf(event.ToolInput, e.display.ToolMaxLen), workspace)
 	}
 }

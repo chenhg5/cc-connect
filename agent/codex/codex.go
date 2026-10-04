@@ -103,7 +103,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	if cmd == "" {
 		cmd = strings.TrimSpace(os.Getenv("CODEX_CLI_PATH"))
 	}
-	if _, err := resolveCodexExecutable(cmd); err != nil && !(transport == "managed_daemon" && daemon.socket != "") {
+	if _, err := resolveCodexExecutable(cmd); err != nil && (transport != "managed_daemon" || daemon.socket == "") {
 		return nil, fmt.Errorf("codex: CLI lookup failed (set cmd or install with npm install -g @openai/codex): %w", err)
 	}
 

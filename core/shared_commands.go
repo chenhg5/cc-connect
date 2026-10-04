@@ -180,7 +180,7 @@ func (e *Engine) sharedTerminalsCommand(p Platform, msg *Message, as SharedAgent
 		}
 		return
 	}
-	if len(args) > 0 && !(len(args) == 1 && args[0] == "list") {
+	if len(args) > 0 && (len(args) != 1 || args[0] != "list") {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSharedTerminalsUsage))
 		return
 	}

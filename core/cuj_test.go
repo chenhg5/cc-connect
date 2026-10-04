@@ -2907,7 +2907,11 @@ func TestCUJ_C7_SharedLiveToolOutputPreservesAsyncQuestion(t *testing.T) {
 	p := &observedToolOutputPlatform{toolOutputRichPlatform: toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}}
 	a := &sharedTestAgent{}
 	e := NewEngine("test", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
-	defer e.Stop()
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
 	e.display.CardMode, e.display.ToolMessages = "rich", true
 	send := func(text string) {
 		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: text, ReplyCtx: "reply"})
@@ -3046,7 +3050,8 @@ func TestCUJ_C7_SharedExternalQueueClearedByControls(t *testing.T) {
 			} else {
 				env.await("session reset")
 			}
-			if command == "/switch second" {
+			switch command {
+			case "/switch second":
 				env.await("Attached to session second")
 				as := a.connection("second")
 				as.mu.Lock()
@@ -3054,7 +3059,7 @@ func TestCUJ_C7_SharedExternalQueueClearedByControls(t *testing.T) {
 				as.mu.Unlock()
 				as.emit(Event{Type: EventResult, Content: "SECOND THREAD FINISHED", Done: true})
 				env.await("SECOND THREAD FINISHED")
-			} else if command == "/detach" {
+			case "/detach":
 				env.await(env.e.i18n.T(MsgSharedDetached))
 			}
 			select {
@@ -3253,7 +3258,11 @@ func TestCUJ_C7_SharedAsyncQuestionCardSteersWhileWorking(t *testing.T) {
 	p := &observedAsyncCardPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
 	a := &sharedTestAgent{}
 	e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
-	defer e.Stop()
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
 	e.display.ToolMessages = true
 	send := func(text string) {
 		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", MessageID: text, ReplyCtx: "reply", Content: text})
@@ -3295,7 +3304,11 @@ func TestCUJ_C7_SharedRuntimeNoticeDoesNotEndTask(t *testing.T) {
 	p := &observedAsyncCardPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
 	a := &sharedTestAgent{}
 	e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
-	defer e.Stop()
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
 	send := func(text string) {
 		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", MessageID: text, ReplyCtx: "reply", Content: text})
 	}
@@ -3328,7 +3341,11 @@ func TestCUJ_C7_SharedReplyStreamsBeforeCompletion(t *testing.T) {
 	p := &observedTextStreamPlatform{observedToolOutputPlatform: observedToolOutputPlatform{toolOutputRichPlatform: toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}}}
 	a := &sharedTestAgent{}
 	e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
-	defer e.Stop()
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
 	e.display.CardMode = "rich"
 	e.display.ToolMessages = true
 	send := func(text string) {

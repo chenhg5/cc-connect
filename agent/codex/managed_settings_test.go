@@ -47,7 +47,11 @@ func TestManagedRuntimeSettingsQueryDoesNotOverrideSettingsOrActiveTurn(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer as.Close()
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Errorf("Close cleanup: %v", err)
+		}
+	}()
 	settings, err := as.(core.AgentRuntimeSettingsReader).ReadRuntimeSettings(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +95,11 @@ func TestManagedDefaultsConfigureNewThreadWithoutWritingDaemonCredentials(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer as.Close()
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Errorf("Close cleanup: %v", err)
+		}
+	}()
 	params := <-created
 	if params["model"] != "future-model" || params["modelProvider"] != "configured-in-daemon" || params["sandbox"] != "workspace-write" || params["approvalPolicy"] != "never" || params["config"].(map[string]any)["model_reasoning_effort"] != "high" {
 		t.Fatalf("creation defaults not applied: %v", params)
