@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -41,7 +42,11 @@ func managedFixture(t *testing.T, handler func(*websocket.Conn)) string {
 			t.Error(err)
 			return
 		}
-		defer ws.Close()
+		defer func() {
+			if err := ws.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("Close cleanup: %v", err)
+			}
+		}()
 		_ = ws.SetReadDeadline(time.Now().Add(8 * time.Second))
 		handler(ws)
 	})}
@@ -228,7 +233,11 @@ func TestManagedRequestsPreserveTypedIDsChoicesAndStableQuestionIDs(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer as.Close()
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Errorf("Close cleanup: %v", err)
+		}
+	}()
 	approval := awaitManagedEvent(t, as, core.EventPermissionRequest)
 	question := awaitManagedEvent(t, as, core.EventPermissionRequest)
 	if approval.RequestID != "n:12" || question.RequestID != "s:12" || len(approval.Decisions) != 2 {
@@ -301,7 +310,11 @@ func TestManagedSteerInterruptLiveOutputAndExternalResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer as.Close()
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Errorf("Close cleanup: %v", err)
+		}
+	}()
 	awaitManagedEvent(t, as, core.EventPermissionRequest)
 	resolved := awaitManagedEvent(t, as, core.EventPermissionResolved)
 	if resolved.RequestID != "n:9" {

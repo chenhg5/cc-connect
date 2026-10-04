@@ -38,7 +38,11 @@ func TestSharedToolOutputDoesNotLeakAsAssistantText(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			p := &toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
 			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-			defer e.Stop()
+			defer func() {
+				if err := e.Stop(); err != nil {
+					t.Errorf("Stop cleanup: %v", err)
+				}
+			}()
 			e.display.CardMode, e.display.ToolMessages = mode, true
 			session := e.sessions.GetOrCreateActive("test:user")
 			as := newControllableSession("thread")
@@ -96,7 +100,11 @@ func TestLiveToolOutputUsesItemIDsAndFinalResult(t *testing.T) {
 func TestSharedRichToolOutputIsVisibleBeforeCompletionAndKeepsAsyncText(t *testing.T) {
 	p := &toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
 	e.display.CardMode, e.display.ToolMessages = "rich", true
 	session := e.sessions.GetOrCreateActive("test:user")
 	as := newControllableSession("thread")

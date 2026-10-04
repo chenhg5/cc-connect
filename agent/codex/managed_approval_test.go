@@ -76,7 +76,11 @@ func TestManagedSendDoesNotInjectApplicationContextOrOverrideThread(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer as.Close()
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Errorf("Close cleanup: %v", err)
+		}
+	}()
 	sender := as.(core.AgentTurnSender)
 	if _, err := sender.SendTurn("hello", "message", nil, nil); err != nil {
 		t.Fatal(err)

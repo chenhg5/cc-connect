@@ -27,7 +27,11 @@ func TestManagedAsyncTextAndToolOutputRemainDistinct(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer as.Close()
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Errorf("Close cleanup: %v", err)
+		}
+	}()
 	text := awaitManagedEvent(t, as, core.EventText)
 	if text.Metadata["delivery"] != "async" || len(text.Questions) != 1 || text.Questions[0].Question != "Choose direction" || text.ItemID != "question" || text.Content != "ASYNC QUESTION TEXT" || text.Metadata["phase"] != "commentary" {
 		t.Fatalf("async text lost or classified as tool output: %+v", text)

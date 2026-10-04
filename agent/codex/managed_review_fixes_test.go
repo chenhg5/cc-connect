@@ -47,7 +47,11 @@ func TestManagedReconnectRecoversCompletedTurnOnce(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer as.Close()
+			defer func() {
+				if err := as.Close(); err != nil {
+					t.Errorf("Close cleanup: %v", err)
+				}
+			}()
 			var result core.Event
 			results := 0
 			for {
@@ -157,7 +161,11 @@ func TestManagedReconnectRecoversWithoutActiveTurn(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer as.Close()
+			defer func() {
+				if err := as.Close(); err != nil {
+					t.Errorf("Close cleanup: %v", err)
+				}
+			}()
 			result := awaitManagedEvent(t, as, core.EventResult)
 			if result.Content != "OFFLINE ANSWER" || result.TurnID != "old" || !result.Done {
 				t.Fatalf("lost completion: %+v", result)
@@ -215,7 +223,11 @@ func TestManagedReconnectDoesNotGuessUnfinishedTurnState(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer as.Close()
+		defer func() {
+			if err := as.Close(); err != nil {
+				t.Errorf("Close cleanup: %v", err)
+			}
+		}()
 		event := awaitManagedEvent(t, as, core.EventError)
 		if event.Error == nil {
 			t.Fatal("lost turn was silently accepted")

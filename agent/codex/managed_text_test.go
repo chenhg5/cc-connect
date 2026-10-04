@@ -42,7 +42,11 @@ func TestManagedAgentTextStreamsBeforeCompletionWithoutDuplicating(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer as.Close()
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Errorf("Close cleanup: %v", err)
+		}
+	}()
 	var preview strings.Builder
 	for _, chunk := range []string{"中文开头", "...", "后续正文"} {
 		event := awaitManagedEvent(t, as, core.EventText)

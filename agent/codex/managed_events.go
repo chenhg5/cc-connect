@@ -24,7 +24,7 @@ func (s *managedSession) handleMessage(m daemonMessage) error {
 	if err := json.Unmarshal(m.Params, &scope); err != nil {
 		return err
 	}
-	if scope.ThreadID != s.CurrentSessionID() && !(m.Method == "warning" && scope.ThreadID == "") {
+	if scope.ThreadID != s.CurrentSessionID() && (m.Method != "warning" || scope.ThreadID != "") {
 		return nil
 	}
 	if len(m.ID) > 0 {
