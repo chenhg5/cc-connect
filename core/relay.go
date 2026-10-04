@@ -190,10 +190,11 @@ func (rm *RelayManager) ListBoundBots(chatID, selfProject string) map[string]str
 
 // RelayRequest is the payload for a relay send.
 type RelayRequest struct {
-	From       string `json:"from"`        // source project name
-	To         string `json:"to"`          // target project name
-	SessionKey string `json:"session_key"` // source session key (contains platform + chatID)
-	Message    string `json:"message"`
+	AgentSessionID string `json:"agent_session_id,omitempty"`
+	From           string `json:"from"`        // source project name
+	To             string `json:"to"`          // target project name
+	SessionKey     string `json:"session_key"` // source session key (contains platform + chatID)
+	Message        string `json:"message"`
 }
 
 // RelayResponse is the result of a relay send.

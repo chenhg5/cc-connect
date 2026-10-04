@@ -254,6 +254,7 @@ const (
 	MsgListPageHint              MsgKey = "list_page_hint"
 	MsgListSwitchHint            MsgKey = "list_switch_hint"
 	MsgListError                 MsgKey = "list_error"
+	MsgHistoryTimeUnknown        MsgKey = "history_time_unknown"
 	MsgHistoryEmpty              MsgKey = "history_empty"
 	MsgHistoryReadFailed         MsgKey = "history_read_failed"
 	MsgNameUsage                 MsgKey = "name_usage"
@@ -701,6 +702,371 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgDefaultSettingsScope: {
+		LangEnglish:            "Changes apply only when creating a new thread. Attached threads keep their runtime settings, connection and history.",
+		LangChinese:            "更改仅在新建 thread 时生效。已接入 thread 保留原运行配置、连接和历史。",
+		LangTraditionalChinese: "變更僅在新建 thread 時生效。已接入 thread 保留原執行配置、連線和歷史。",
+		LangJapanese:           "変更は新規スレッドの作成時にのみ適用されます。接続中のスレッドの設定・接続・履歴は保持されます。",
+		LangSpanish:            "Los cambios solo se aplican al crear un hilo nuevo. El hilo conectado conserva su configuración, conexión e historial.",
+	},
+	MsgDefaultSettingsSaved: {
+		LangEnglish:            "New-thread defaults updated; attached thread unchanged.",
+		LangChinese:            "已更新新建 thread 的默认配置；已接入 thread 未更改。",
+		LangTraditionalChinese: "已更新新建 thread 的預設配置；已接入 thread 未變更。",
+		LangJapanese:           "新規スレッドの既定値を更新しました。接続中のスレッドは変更されません。",
+		LangSpanish:            "Se actualizaron los valores para hilos nuevos; el hilo conectado sigue igual.",
+	},
+	MsgDefaultSettingsRuntime: {
+		LangEnglish:            "Attached thread (reported by server):\nModel: %s · Reasoning: %s · Provider: %s\nApproval: %s · Sandbox: %s",
+		LangChinese:            "已接入 thread（服务端返回）：\n模型：%s · 推理强度：%s · Provider：%s\n审批：%s · 沙箱：%s",
+		LangTraditionalChinese: "已接入 thread（伺服器回傳）：\n模型：%s · 推理強度：%s · Provider：%s\n審批：%s · 沙箱：%s",
+		LangJapanese:           "接続中のスレッド（サーバーの設定）：\nモデル: %s · 推論: %s · Provider: %s\n承認: %s · サンドボックス: %s",
+		LangSpanish:            "Hilo conectado (según el servidor):\nModelo: %s · Razonamiento: %s · Provider: %s\nAprobación: %s · Sandbox: %s",
+	},
+	MsgDefaultSettingsConfigured: {
+		LangEnglish:            "New-thread defaults (CC Connect):\nModel: %s · Reasoning: %s · Mode: %s · Provider: %s",
+		LangChinese:            "新建 thread 默认配置（CC Connect）：\n模型：%s · 推理强度：%s · 模式：%s · Provider：%s",
+		LangTraditionalChinese: "新建 thread 預設配置（CC Connect）：\n模型：%s · 推理強度：%s · 模式：%s · Provider：%s",
+		LangJapanese:           "新規スレッドの既定値（CC Connect）：\nモデル: %s · 推論: %s · モード: %s · Provider: %s",
+		LangSpanish:            "Valores para hilos nuevos (CC Connect):\nModelo: %s · Razonamiento: %s · Modo: %s · Provider: %s",
+	},
+	MsgDefaultSettingsUnknown: {
+		LangEnglish:            "server default / not reported",
+		LangChinese:            "服务端默认／未返回",
+		LangTraditionalChinese: "伺服器預設／未回傳",
+		LangJapanese:           "サーバー既定値／未報告",
+		LangSpanish:            "predeterminado del servidor / no informado",
+	},
+	MsgDefaultSettingsNotAttached: {
+		LangEnglish:            "No attached runtime; only new-thread defaults are shown.",
+		LangChinese:            "尚未接入运行会话；以下仅为新建 thread 默认配置。",
+		LangTraditionalChinese: "尚未接入執行會話；以下僅為新建 thread 預設配置。",
+		LangJapanese:           "実行中のスレッドへの接続がありません。新規スレッドの既定値のみを表示します。",
+		LangSpanish:            "No hay un hilo conectado; solo se muestran los valores para hilos nuevos.",
+	},
+	MsgDefaultSettingsReadFailed: {
+		LangEnglish:            "Could not read the attached thread settings: %s",
+		LangChinese:            "无法读取已接入 thread 的运行配置：%s",
+		LangTraditionalChinese: "無法讀取已接入 thread 的執行配置：%s",
+		LangJapanese:           "接続中のスレッド設定を取得できませんでした: %s",
+		LangSpanish:            "No se pudo leer la configuración del hilo conectado: %s",
+	},
+	MsgDefaultProviderHint: {
+		LangEnglish:            "The provider must already be configured in the daemon. CC Connect saves the selection for new threads; it does not install provider credentials or environment into the daemon.",
+		LangChinese:            "Provider 必须已在 daemon 中配置。CC Connect 保存新建 thread 的选择，不向 daemon 写入 provider 凭据或环境。",
+		LangTraditionalChinese: "Provider 必須已在 daemon 中配置。CC Connect 儲存新建 thread 的選擇，不向 daemon 寫入 provider 憑證或環境。",
+		LangJapanese:           "Provider は daemon 側で設定済みである必要があります。CC Connect は新規スレッド用の選択を保存し、daemon の認証情報や環境を変更しません。",
+		LangSpanish:            "El provider debe estar configurado en el daemon. CC Connect guarda la selección para hilos nuevos; no instala credenciales ni variables en el daemon.",
+	},
+	MsgDefaultSettingsSelect: {
+		LangEnglish:            "Select a default for new threads",
+		LangChinese:            "选择新建 thread 的默认值",
+		LangTraditionalChinese: "選擇新建 thread 的預設值",
+		LangJapanese:           "新規スレッドの既定値を選択",
+		LangSpanish:            "Elegir un valor para hilos nuevos",
+	},
+	MsgSharedHelp: {
+		LangEnglish:            "Shared runtime: /attach <id|index> · /detach · /steer <text> · /stop · /terminals · /terminals stop <id|all>. /detach disconnects this client; /stop interrupts the active turn. Background commands need explicit termination. Model/mode/provider changes apply to newly created threads.",
+		LangChinese:            "共享运行时：/attach <id|序号> · /detach · /steer <内容> · /stop · /terminals · /terminals stop <id|all>。/detach 断开本客户端；/stop 中断当前 turn。后台命令需显式终止。模型/模式/provider 的更改用于新建 thread。",
+		LangTraditionalChinese: "共享執行環境：/attach <id|序號> · /detach · /steer <內容> · /stop · /terminals · /terminals stop <id|all>。/detach 中斷本客戶端連線；/stop 中斷目前 turn。背景命令需明確終止。模型/模式/provider 的變更用於新建 thread。",
+		LangJapanese:           "共有ランタイム: /attach <id|番号> · /detach · /steer <内容> · /stop · /terminals · /terminals stop <id|all>。/detach はこのクライアントを切断し、/stop は現在のターンを中断します。バックグラウンドコマンドは明示的な終了が必要です。モデル・モード・provider の変更は新規スレッドに適用されます。",
+		LangSpanish:            "Runtime compartido: /attach <id|índice> · /detach · /steer <texto> · /stop · /terminals · /terminals stop <id|all>. /detach desconecta este cliente; /stop interrumpe el turno activo. Los comandos en segundo plano requieren terminación explícita. Los cambios de modelo, modo y provider se aplican a hilos nuevos.",
+	},
+	MsgSharedApprovalReason: {
+		LangEnglish:            "Reason: %s",
+		LangChinese:            "原因：%s",
+		LangTraditionalChinese: "原因：%s",
+		LangJapanese:           "理由: %s",
+		LangSpanish:            "Motivo: %s",
+	},
+	MsgSharedApprovalCwd: {
+		LangEnglish:            "Working directory: %s",
+		LangChinese:            "工作目录：%s",
+		LangTraditionalChinese: "工作目錄：%s",
+		LangJapanese:           "作業ディレクトリ: %s",
+		LangSpanish:            "Directorio de trabajo: %s",
+	},
+	MsgSharedAllowSession: {
+		LangEnglish:            "Allow for this session",
+		LangChinese:            "允许本会话后续相似请求",
+		LangTraditionalChinese: "允許本會話後續相似請求",
+		LangJapanese:           "このセッションで許可",
+		LangSpanish:            "Permitir durante esta sesión",
+	},
+	MsgSharedAllowSimilar: {
+		LangEnglish:            "Allow similar commands",
+		LangChinese:            "允许相似命令",
+		LangTraditionalChinese: "允許相似命令",
+		LangJapanese:           "同様のコマンドを許可",
+		LangSpanish:            "Permitir comandos similares",
+	},
+	MsgSharedNetworkAllow: {
+		LangEnglish:            "Allow this host in future",
+		LangChinese:            "允许后续访问此主机",
+		LangTraditionalChinese: "允許後續存取此主機",
+		LangJapanese:           "このホストへの今後のアクセスを許可",
+		LangSpanish:            "Permitir este host en el futuro",
+	},
+	MsgSharedNetworkDeny: {
+		LangEnglish:            "Deny this host in future",
+		LangChinese:            "拒绝后续访问此主机",
+		LangTraditionalChinese: "拒絕後續存取此主機",
+		LangJapanese:           "このホストへの今後のアクセスを拒否",
+		LangSpanish:            "Denegar este host en el futuro",
+	},
+	MsgSharedPermissionPrompt: {
+		LangEnglish:            "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n```\n%s\n```",
+		LangChinese:            "⚠️ **审批请求**\n\nAgent 请求使用 **%s**：\n\n```\n%s\n```",
+		LangTraditionalChinese: "⚠️ **審批請求**\n\nAgent 請求使用 **%s**：\n\n```\n%s\n```",
+		LangJapanese:           "⚠️ **承認リクエスト**\n\nAgent が **%s** の使用を要求しています：\n\n```\n%s\n```",
+		LangSpanish:            "⚠️ **Solicitud de permiso**\n\nEl agente solicita usar **%s**:\n\n```\n%s\n```",
+	},
+	MsgSharedUnsupported: {
+		LangEnglish:            "This session does not support shared runtime controls.",
+		LangChinese:            "此会话不支持共享运行时操作。",
+		LangTraditionalChinese: "此會話不支援共享執行環境操作。",
+		LangJapanese:           "このセッションは共有ランタイム操作に対応していません。",
+		LangSpanish:            "Esta sesión no admite controles del entorno compartido.",
+	},
+	MsgSharedBusy: {
+		LangEnglish:            "A turn is running. Use /steer <message> to adjust it, or /stop to interrupt it.",
+		LangChinese:            "任务正在运行。用 /steer <消息> 调整，或 /stop 中断。",
+		LangTraditionalChinese: "任務正在執行。用 /steer <訊息> 調整，或 /stop 中斷。",
+		LangJapanese:           "実行中です。/steer <メッセージ> で調整、/stop で中断できます。",
+		LangSpanish:            "Hay un turno activo. Usa /steer <mensaje> para ajustarlo o /stop para interrumpirlo.",
+	},
+	MsgSharedSteerTextOnly: {
+		LangEnglish:            "An active turn accepts text steering only. Send text, or resend attachments after the turn finishes.",
+		LangChinese:            "运行中的任务目前仅支持文本 steer。请发送文本，或等任务结束后重新发送附件。",
+		LangTraditionalChinese: "執行中的任務目前僅支援文字 steer。請傳送文字，或等任務結束後重新傳送附件。",
+		LangJapanese:           "実行中のターンへの steer はテキストのみ対応しています。テキストを送るか、終了後に添付ファイルを再送してください。",
+		LangSpanish:            "Un turno activo solo admite steer de texto. Envía texto o vuelve a enviar los archivos cuando termine el turno.",
+	},
+	MsgSharedInterruptedCount: {
+		LangEnglish:            "Turn interrupted. Background commands still running: %d. Use /terminals to inspect or /terminals stop all to stop them.",
+		LangChinese:            "任务已中断。当前仍有 %d 个后台命令运行。用 /terminals 查看，或 /terminals stop all 全部停止。",
+		LangTraditionalChinese: "任務已中斷。目前仍有 %d 個背景命令執行。用 /terminals 查看，或 /terminals stop all 全部停止。",
+		LangJapanese:           "ターンを中断しました。実行中のバックグラウンドコマンド: %d 件。/terminals で確認、/terminals stop all で全件停止できます。",
+		LangSpanish:            "Turno interrumpido. Comandos en segundo plano aún activos: %d. Usa /terminals para verlos o /terminals stop all para detenerlos.",
+	},
+	MsgSharedInterrupted: {
+		LangEnglish:            "Turn interrupted. Background commands may still be running; inspect /terminals.",
+		LangChinese:            "任务已中断。后台命令可能仍在运行，可用 /terminals 查看。",
+		LangTraditionalChinese: "任務已中斷。背景命令可能仍在執行，可用 /terminals 查看。",
+		LangJapanese:           "ターンを中断しました。バックグラウンドのコマンドは /terminals で確認できます。",
+		LangSpanish:            "Turno interrumpido. Puede haber comandos en segundo plano; consulta /terminals.",
+	},
+	MsgSharedReconnecting: {
+		LangEnglish:            "Connection lost; reconnecting to the same session.",
+		LangChinese:            "连接断开，正在重连同一会话。",
+		LangTraditionalChinese: "連線中斷，正在重新連線至同一會話。",
+		LangJapanese:           "接続が切れました。同じセッションに再接続中です。",
+		LangSpanish:            "Conexión perdida; reconectando a la misma sesión.",
+	},
+	MsgSharedReconnected: {
+		LangEnglish:            "Reconnected to the same session.",
+		LangChinese:            "已重连同一会话。",
+		LangTraditionalChinese: "已重新連線至同一會話。",
+		LangJapanese:           "同じセッションに再接続しました。",
+		LangSpanish:            "Reconectado a la misma sesión.",
+	},
+	MsgSharedCancelDecision: {
+		LangEnglish:            "Cancel turn",
+		LangChinese:            "取消本轮",
+		LangTraditionalChinese: "取消本輪",
+		LangJapanese:           "ターンをキャンセル",
+		LangSpanish:            "Cancelar turno",
+	},
+	MsgSharedDecisionHint: {
+		LangEnglish:            "Reply with one of: %s.",
+		LangChinese:            "回复以下决策之一：%s。",
+		LangTraditionalChinese: "回覆以下決策之一：%s。",
+		LangJapanese:           "次のいずれかで返信してください：%s。",
+		LangSpanish:            "Responde con una de estas opciones: %s.",
+	},
+	MsgSharedAsyncTitle: {
+		LangEnglish:            "Asynchronous question",
+		LangChinese:            "异步提问",
+		LangTraditionalChinese: "非同步提問",
+		LangJapanese:           "非同期の質問",
+		LangSpanish:            "Pregunta asíncrona",
+	},
+	MsgSharedAsyncHint: {
+		LangEnglish:            "The task continues while you answer. Buttons send via steer to this turn. For a custom answer, send: %s <answer>. Plain replies follow your steer/queue setting. This card expires when the turn ends or you detach/switch sessions.",
+		LangChinese:            "任务仍在继续执行。按钮答案通过 steer 插入本轮任务。自由回答请发送：%s <答案>。普通回复遵循 steer/queue 配置。本轮结束或断开、切换会话后卡片失效。",
+		LangTraditionalChinese: "任務仍在繼續執行。按鈕答案透過 steer 插入本輪任務。自由回答請傳送：%s <答案>。一般回覆遵循 steer/queue 設定。本輪結束或中斷、切換對話後卡片失效。",
+		LangJapanese:           "回答中もタスクは続行します。ボタンはこのターンへ steer で送信します。自由回答：%s <回答>。通常の返信は steer/queue 設定に従います。ターン終了、切断、会話切替で無効になります。",
+		LangSpanish:            "La tarea continúa. Los botones envían por steer a este turno. Respuesta libre: %s <respuesta>. Los mensajes normales siguen steer/queue. La tarjeta caduca al terminar el turno, desconectar o cambiar de sesión.",
+	},
+	MsgRuntimeNoticeTitle: {
+		LangEnglish:            "Runtime notice",
+		LangChinese:            "运行提醒",
+		LangTraditionalChinese: "執行提醒",
+		LangJapanese:           "実行状況のお知らせ",
+		LangSpanish:            "Aviso de ejecución",
+	},
+	MsgRuntimeUsageLimit: {
+		LangEnglish:            "Model usage limit reached",
+		LangChinese:            "模型用量已达限制",
+		LangTraditionalChinese: "模型用量已達限制",
+		LangJapanese:           "モデルの使用量制限に達しました",
+		LangSpanish:            "Límite de uso del modelo alcanzado",
+	},
+	MsgRuntimeNoticeReason: {
+		LangEnglish:            "Reason: %s",
+		LangChinese:            "原因：%s",
+		LangTraditionalChinese: "原因：%s",
+		LangJapanese:           "理由：%s",
+		LangSpanish:            "Motivo: %s",
+	},
+	MsgRuntimeUsagePercent: {
+		LangEnglish:            "Used: %d%%",
+		LangChinese:            "已使用：%d%%",
+		LangTraditionalChinese: "已使用：%d%%",
+		LangJapanese:           "使用済み：%d%%",
+		LangSpanish:            "Uso: %d%%",
+	},
+	MsgRuntimeUsageReset: {
+		LangEnglish:            "Resets at: %s",
+		LangChinese:            "重置时间：%s",
+		LangTraditionalChinese: "重設時間：%s",
+		LangJapanese:           "リセット日時：%s",
+		LangSpanish:            "Se restablece: %s",
+	},
+	MsgRuntimeUsageModelScope: {
+		LangEnglish:            "This notice does not change the model. /model currently changes the default for new threads only.",
+		LangChinese:            "此提醒不会切换模型。当前 /model 仅修改新建 thread 的默认模型。",
+		LangTraditionalChinese: "此提醒不會切換模型。目前 /model 僅修改新建 thread 的預設模型。",
+		LangJapanese:           "この通知はモデルを変更しません。現在 /model は新規スレッドの既定モデルのみ変更します。",
+		LangSpanish:            "Este aviso no cambia el modelo. /model solo cambia el predeterminado de los hilos nuevos.",
+	},
+	MsgRuntimeRetrying: {
+		LangEnglish:            "The service will retry; this notice does not end the task.",
+		LangChinese:            "服务端将自动重试；此提醒不代表任务已结束。",
+		LangTraditionalChinese: "服務端將自動重試；此提醒不代表任務已結束。",
+		LangJapanese:           "サービスは再試行します。この通知はタスクの終了を意味しません。",
+		LangSpanish:            "El servicio reintentará; este aviso no finaliza la tarea.",
+	},
+	MsgRuntimeModelRerouted: {
+		LangEnglish:            "The service rerouted the model: %s → %s.",
+		LangChinese:            "服务端已调整模型：%s → %s。",
+		LangTraditionalChinese: "服務端已調整模型：%s → %s。",
+		LangJapanese:           "サービスがモデルを変更しました：%s → %s。",
+		LangSpanish:            "El servicio cambió el modelo: %s → %s.",
+	},
+	MsgRuntimeUsageWarning: {
+		LangEnglish:            "Model usage reminder",
+		LangChinese:            "模型用量提醒",
+		LangTraditionalChinese: "模型用量提醒",
+		LangJapanese:           "モデル使用量のお知らせ",
+		LangSpanish:            "Aviso de uso del modelo",
+	},
+	MsgSharedAnswerHint: {
+		LangEnglish:            "Choose an option number or type your answer. /skip skips this request.",
+		LangChinese:            "回复选项序号或答案文本。/skip 跳过这次问答。",
+		LangTraditionalChinese: "回覆選項序號或答案文字。/skip 跳過這次問答。",
+		LangJapanese:           "選択肢の番号か回答を入力してください。/skip で質問をスキップします。",
+		LangSpanish:            "Elige un número o escribe tu respuesta. /skip omite esta solicitud.",
+	},
+	MsgSharedSkip: {
+		LangEnglish:            "Skip questions",
+		LangChinese:            "跳过问答",
+		LangTraditionalChinese: "跳過問答",
+		LangJapanese:           "質問をスキップ",
+		LangSpanish:            "Omitir preguntas",
+	},
+	MsgSharedStaleRequest: {
+		LangEnglish:            "This request or question is no longer current.",
+		LangChinese:            "此请求或问题已失效。",
+		LangTraditionalChinese: "此請求或問題已失效。",
+		LangJapanese:           "このリクエストまたは質問は無効です。",
+		LangSpanish:            "Esta solicitud o pregunta ya no está vigente.",
+	},
+	MsgSharedResponseSent: {
+		LangEnglish:            "Response sent. The runtime decides the outcome if another client also responds.",
+		LangChinese:            "回复已发送；若其他客户端同时回复，由运行时决定结果。",
+		LangTraditionalChinese: "回覆已送出；若其他客戶端同時回覆，由執行環境決定結果。",
+		LangJapanese:           "回答を送信しました。同時回答の結果はランタイムが決定します。",
+		LangSpanish:            "Respuesta enviada. El entorno decide el resultado si otro cliente también responde.",
+	},
+	MsgSharedAttachUsage: {
+		LangEnglish:            "Usage: /attach <session number or thread ID>.",
+		LangChinese:            "用法：/attach <会话序号或 thread ID>。",
+		LangTraditionalChinese: "用法：/attach <會話序號或 thread ID>。",
+		LangJapanese:           "使い方：/attach <番号または thread ID>。",
+		LangSpanish:            "Uso: /attach <número de sesión o ID de thread>.",
+	},
+	MsgSharedAttached: {
+		LangEnglish:            "Attached to session %s.",
+		LangChinese:            "已接入会话 %s。",
+		LangTraditionalChinese: "已接入會話 %s。",
+		LangJapanese:           "セッション %s に接続しました。",
+		LangSpanish:            "Conectado a la sesión %s.",
+	},
+	MsgSharedNotAttached: {
+		LangEnglish:            "Attach a session first with /attach or /switch.",
+		LangChinese:            "先用 /attach 或 /switch 接入会话。",
+		LangTraditionalChinese: "先用 /attach 或 /switch 接入會話。",
+		LangJapanese:           "先に /attach または /switch でセッションに接続してください。",
+		LangSpanish:            "Primero conecta una sesión con /attach o /switch.",
+	},
+	MsgSharedDetached: {
+		LangEnglish:            "Detached. The shared session continues running.",
+		LangChinese:            "已断开连接，共享会话继续运行。",
+		LangTraditionalChinese: "已中斷連線，共享會話繼續執行。",
+		LangJapanese:           "接続を解除しました。共有セッションは実行を続けます。",
+		LangSpanish:            "Desconectado. La sesión compartida sigue ejecutándose.",
+	},
+	MsgSharedSteerUsage: {
+		LangEnglish:            "Usage: /steer <message>.",
+		LangChinese:            "用法：/steer <消息>。",
+		LangTraditionalChinese: "用法：/steer <訊息>。",
+		LangJapanese:           "使い方：/steer <メッセージ>。",
+		LangSpanish:            "Uso: /steer <mensaje>.",
+	},
+	MsgSharedSteerAccepted: {
+		LangEnglish:            "Adjustment accepted for the current turn.",
+		LangChinese:            "当前任务已接收调整指示。",
+		LangTraditionalChinese: "目前任務已接收調整指示。",
+		LangJapanese:           "現在のターンが調整を受け付けました。",
+		LangSpanish:            "El turno actual aceptó el ajuste.",
+	},
+	MsgSharedTerminalStopped: {
+		LangEnglish:            "Background command stopped.",
+		LangChinese:            "后台命令已停止。",
+		LangTraditionalChinese: "背景命令已停止。",
+		LangJapanese:           "バックグラウンドのコマンドを停止しました。",
+		LangSpanish:            "Comando en segundo plano detenido.",
+	},
+	MsgSharedTerminalsUsage: {
+		LangEnglish:            "Use /terminals list, /terminals stop <ID>, or /terminals stop all (current thread only).",
+		LangChinese:            "使用 /terminals list 查看，/terminals stop <ID> 停止指定后台命令，/terminals stop all 停止当前 thread 的所有后台命令。",
+		LangTraditionalChinese: "使用 /terminals list 查看，/terminals stop <ID> 停止指定背景命令，/terminals stop all 停止目前 thread 的所有背景命令。",
+		LangJapanese:           "/terminals list で一覧、/terminals stop <ID> で個別停止、/terminals stop all で現在のスレッドの全バックグラウンドコマンドを停止できます。",
+		LangSpanish:            "Usa /terminals list, /terminals stop <ID> o /terminals stop all (solo el hilo actual).",
+	},
+	MsgSharedTerminalsStopped: {
+		LangEnglish:            "Stopped %d background commands in the current thread.",
+		LangChinese:            "已停止当前 thread 的 %d 个后台命令。",
+		LangTraditionalChinese: "已停止目前 thread 的 %d 個背景命令。",
+		LangJapanese:           "現在のスレッドのバックグラウンドコマンドを %d 件停止しました。",
+		LangSpanish:            "Se detuvieron %d comandos en segundo plano del hilo actual.",
+	},
+	MsgSharedTerminalsStopPartial: {
+		LangEnglish:            "Stopped %d background commands; %d could not be stopped:",
+		LangChinese:            "已停止 %d 个后台命令，%d 个未能停止：",
+		LangTraditionalChinese: "已停止 %d 個背景命令，%d 個未能停止：",
+		LangJapanese:           "バックグラウンドコマンドを %d 件停止しました。%d 件は停止できませんでした：",
+		LangSpanish:            "Se detuvieron %d comandos en segundo plano; %d no se pudieron detener:",
+	},
+	MsgSharedNoTerminals: {
+		LangEnglish:            "No background commands are running.",
+		LangChinese:            "没有正在运行的后台命令。",
+		LangTraditionalChinese: "沒有正在執行的背景命令。",
+		LangJapanese:           "実行中のバックグラウンドコマンドはありません。",
+		LangSpanish:            "No hay comandos en segundo plano en ejecución.",
+	},
+
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
@@ -1508,6 +1874,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 取得會話列表失敗: %v",
 		LangJapanese:           "❌ セッション一覧の取得に失敗しました: %v",
 		LangSpanish:            "❌ Error al listar sesiones: %v",
+	},
+	MsgHistoryTimeUnknown: {
+		LangEnglish:            "time unknown",
+		LangChinese:            "时间未知",
+		LangTraditionalChinese: "時間未知",
+		LangJapanese:           "時刻不明",
+		LangSpanish:            "hora desconocida",
 	},
 	MsgHistoryEmpty: {
 		LangEnglish:            "No history in current session.",
@@ -4582,3 +4955,71 @@ func (i *I18n) Tf(key MsgKey, args ...interface{}) string {
 	template := i.T(key)
 	return fmt.Sprintf(template, args...)
 }
+
+const (
+	MsgSharedHelp                 MsgKey = "shared_help"
+	MsgSharedApprovalReason       MsgKey = "shared_approval_reason"
+	MsgSharedApprovalCwd          MsgKey = "shared_approval_cwd"
+	MsgSharedAllowSession         MsgKey = "shared_allow_session"
+	MsgSharedAllowSimilar         MsgKey = "shared_allow_similar"
+	MsgSharedNetworkAllow         MsgKey = "shared_network_allow"
+	MsgSharedNetworkDeny          MsgKey = "shared_network_deny"
+	MsgSharedPermissionPrompt     MsgKey = "shared_permissionprompt"
+	MsgSharedUnsupported          MsgKey = "shared_unsupported"
+	MsgSharedBusy                 MsgKey = "shared_busy"
+	MsgSharedSteerTextOnly        MsgKey = "shared_steer_text_only"
+	MsgSharedInterruptedCount     MsgKey = "shared_interrupted_count"
+	MsgSharedInterrupted          MsgKey = "shared_interrupted"
+	MsgSharedReconnecting         MsgKey = "shared_reconnecting"
+	MsgSharedReconnected          MsgKey = "shared_reconnected"
+	MsgSharedCancelDecision       MsgKey = "shared_canceldecision"
+	MsgSharedDecisionHint         MsgKey = "shared_decisionhint"
+	MsgSharedAnswerHint           MsgKey = "shared_answerhint"
+	MsgSharedSkip                 MsgKey = "shared_skip"
+	MsgSharedStaleRequest         MsgKey = "shared_stalerequest"
+	MsgSharedResponseSent         MsgKey = "shared_responsesent"
+	MsgSharedAttachUsage          MsgKey = "shared_attachusage"
+	MsgSharedAttached             MsgKey = "shared_attached"
+	MsgSharedNotAttached          MsgKey = "shared_notattached"
+	MsgSharedDetached             MsgKey = "shared_detached"
+	MsgSharedSteerUsage           MsgKey = "shared_steerusage"
+	MsgSharedSteerAccepted        MsgKey = "shared_steeraccepted"
+	MsgSharedTerminalStopped      MsgKey = "shared_terminalstopped"
+	MsgSharedTerminalsUsage       MsgKey = "shared_terminalsusage"
+	MsgSharedTerminalsStopped     MsgKey = "shared_terminalsstopped"
+	MsgSharedTerminalsStopPartial MsgKey = "shared_terminalsstoppartial"
+	MsgSharedNoTerminals          MsgKey = "shared_noterminals"
+)
+
+const (
+	MsgDefaultSettingsScope       MsgKey = "default_settings_settingsscope"
+	MsgDefaultSettingsSaved       MsgKey = "default_settings_settingssaved"
+	MsgDefaultSettingsRuntime     MsgKey = "default_settings_settingsruntime"
+	MsgDefaultSettingsConfigured  MsgKey = "default_settings_settingsconfigured"
+	MsgDefaultSettingsUnknown     MsgKey = "default_settings_settingsunknown"
+	MsgDefaultSettingsNotAttached MsgKey = "default_settings_settingsnotattached"
+	MsgDefaultSettingsReadFailed  MsgKey = "default_settings_settingsreadfailed"
+	MsgDefaultProviderHint        MsgKey = "default_settings_providerhint"
+	MsgDefaultSettingsSelect      MsgKey = "default_settings_settingsselect"
+)
+
+const MsgSharedAsyncTitle MsgKey = "shared_async_title"
+const MsgSharedAsyncHint MsgKey = "shared_async_hint"
+
+const MsgRuntimeNoticeTitle MsgKey = "MsgRuntimeNoticeTitle"
+
+const MsgRuntimeUsageLimit MsgKey = "MsgRuntimeUsageLimit"
+
+const MsgRuntimeNoticeReason MsgKey = "MsgRuntimeNoticeReason"
+
+const MsgRuntimeUsagePercent MsgKey = "MsgRuntimeUsagePercent"
+
+const MsgRuntimeUsageReset MsgKey = "MsgRuntimeUsageReset"
+
+const MsgRuntimeUsageModelScope MsgKey = "MsgRuntimeUsageModelScope"
+
+const MsgRuntimeRetrying MsgKey = "MsgRuntimeRetrying"
+
+const MsgRuntimeModelRerouted MsgKey = "MsgRuntimeModelRerouted"
+
+const MsgRuntimeUsageWarning MsgKey = "runtime_usage_warning"

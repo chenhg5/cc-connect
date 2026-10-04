@@ -170,11 +170,12 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 		req.Message = strings.TrimSpace(string(data))
 	}
 	if req.Project == "" {
-		req.Project = strings.TrimSpace(os.Getenv("CC_PROJECT"))
+		req.Project = strings.TrimSpace(agentToolLegacyEnv("CC_PROJECT"))
 	}
 	if req.SessionKey == "" {
-		req.SessionKey = strings.TrimSpace(os.Getenv("CC_SESSION_KEY"))
+		req.SessionKey = strings.TrimSpace(agentToolLegacyEnv("CC_SESSION_KEY"))
 	}
+	req.AgentSessionID = agentToolSessionID(req.SessionKey)
 	if req.Message == "" {
 		req.Message = strings.Join(positional, " ")
 	}
@@ -348,8 +349,13 @@ func resolveSocketPath(dataDir string) string {
 		return filepath.Join(dataDir, "run", "api.sock")
 	}
 	// Check CC_DATA_DIR env var for custom data_dir configuration
-	if envDataDir := strings.TrimSpace(os.Getenv("CC_DATA_DIR")); envDataDir != "" {
+	if envDataDir := strings.TrimSpace(agentToolLegacyEnv("CC_DATA_DIR")); envDataDir != "" {
 		return filepath.Join(envDataDir, "run", "api.sock")
+	}
+	if agentToolSessionID("") != "" {
+		if cfg := loadSendConfigBestEffort(); cfg != nil && cfg.DataDir != "" {
+			return filepath.Join(cfg.DataDir, "run", "api.sock")
+		}
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, ".cc-connect", "run", "api.sock")

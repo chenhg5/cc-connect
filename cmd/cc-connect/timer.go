@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -112,10 +113,10 @@ func runTimerAdd(args []string) {
 
 	// Fallback to env vars
 	if project == "" {
-		project = os.Getenv("CC_PROJECT")
+		project = agentToolLegacyEnv("CC_PROJECT")
 	}
 	if sessionKey == "" {
-		sessionKey = os.Getenv("CC_SESSION_KEY")
+		sessionKey = agentToolLegacyEnv("CC_SESSION_KEY")
 	}
 
 	// Positional: <delay_or_time> <prompt...>
@@ -150,13 +151,14 @@ func runTimerAdd(args []string) {
 	}
 
 	body := map[string]any{
-		"project":     project,
-		"session_key": sessionKey,
-		"delay":       fireTime,
-		"prompt":      prompt,
-		"exec":        execCmd,
-		"description": desc,
-		"mute":        mute,
+		"agent_session_id": agentToolSessionID(sessionKey),
+		"project":          project,
+		"session_key":      sessionKey,
+		"delay":            fireTime,
+		"prompt":           prompt,
+		"exec":             execCmd,
+		"description":      desc,
+		"mute":             mute,
 	}
 	if sessionMode != "" {
 		body["session_mode"] = sessionMode
@@ -211,7 +213,7 @@ func runTimerList(args []string) {
 	}
 
 	if project == "" {
-		project = os.Getenv("CC_PROJECT")
+		project = agentToolLegacyEnv("CC_PROJECT")
 	}
 
 	sockPath := resolveSocketPath(dataDir)
@@ -220,9 +222,16 @@ func runTimerList(args []string) {
 		os.Exit(1)
 	}
 
-	url := "/timer/list"
+	query := url.Values{}
 	if project != "" {
-		url += "?project=" + project
+		query.Set("project", project)
+	}
+	if id := agentToolSessionID(agentToolLegacyEnv("CC_SESSION_KEY")); id != "" && project == "" {
+		query.Set("agent_session_id", id)
+	}
+	url := "/timer/list"
+	if len(query) > 0 {
+		url += "?" + query.Encode()
 	}
 
 	client := &http.Client{

@@ -63,6 +63,7 @@ const (
 
 // ToolStep is one summarized progress row shown in rich progress cards.
 type ToolStep struct {
+	ItemID   string       `json:"item_id,omitempty"` // stable invocation identity when available
 	Kind     ToolStepKind // progress row kind; empty means tool for backward compatibility
 	Name     string       // tool name (e.g. "Bash", "Edit")
 	Summary  string       // human-readable summary shown in the card

@@ -1704,6 +1704,38 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+# backend = "exec" # default; "app_server" enables bidirectional sessions / 默认 exec
+# app_server_transport = "stdio" # default; only applies to app_server / 仅用于 app_server
+#
+# To attach to an existing managed daemon, use both settings below.
+# 接入已有托管 daemon 时，同时设置以下两项；不会启动、停止或更新 daemon。
+# backend = "app_server"
+# app_server_transport = "managed_daemon"
+# daemon_attach_only = true # require /attach or /switch; default false permits new threads
+#                          # true 要求先选择已有 thread；默认 false 允许新建
+# daemon_socket = "/path/to/app-server-control.sock" # optional; otherwise passive CLI discovery
+#                                                  # 可选；不设置则通过 CLI 只读发现
+# daemon_reconnect_attempts = 3 # 0 disables reconnect / 0 禁用自动重连
+# daemon_enable_steer = true
+# daemon_busy_message_mode = "queue" # default: wait for the active turn to finish; "steer": insert ordinary text into it
+# daemon_busy_message_mode："steer" 将普通文本插入正在运行的任务；"queue" 等任务结束后发送；不区分 CLI/飞书发起。
+# Pending approvals/questions still consume their answers first; attachments cannot be steered.
+# daemon_enable_interrupt = true
+# daemon_enable_approvals = true
+# daemon_enable_questions = true # blocking requestUserInput
+# daemon_enable_async_questions = true # advisory questions answered through steer
+# daemon_enable_delete = true # /delete uses daemon thread/delete; false disables it
+# Managed commands: /attach <id|index>, /detach, /steer <text>, /stop,
+# /terminals, /terminals stop <id|all>; existing /list, /switch, /history also apply.
+# /delete remains available for inactive threads in work_dir (no direct rollout file writes).
+# Disable approvals/questions to leave those requests to another connected client.
+# 禁用审批/问答后，交由其他客户端处理；不会自动允许、拒绝或跳过。
+# Attached threads retain their model/provider/approval/sandbox settings.
+# model/mode/reasoning_effort/provider configure NEW threads only.
+# 接入已有 thread 保留其运行配置；上述参数仅配置新建 thread。
+# Managed transport rejects env and app_server_url: configure credentials,
+# providers and process environment in the daemon itself.
+# 托管传输不接受 env 和 app_server_url；凭据、provider 和进程环境由 daemon 配置。
 #
 # Mode options / 模式说明:
 # - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）

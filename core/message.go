@@ -449,16 +449,22 @@ type Message struct {
 type EventType string
 
 const (
-	EventText              EventType = "text"               // intermediate or final text
-	EventHookRejected      EventType = "hook_rejected"      // Stop hook rejected prior assistant text
-	EventToolUse           EventType = "tool_use"           // tool invocation info
-	EventToolResult        EventType = "tool_result"        // tool execution result
-	EventResult            EventType = "result"             // final aggregated result
-	EventError             EventType = "error"              // error occurred
-	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
-	EventUserInputRequest  EventType = "user_input_request" // non-blocking question; answer is a user message
-	EventThinking          EventType = "thinking"           // thinking/processing status
-	EventModelSwitch       EventType = "model_switch"       // agent CLI moved the turn to another model on its own (see ModelSwitch)
+	EventText               EventType = "text"                // intermediate or final text
+	EventTurnStarted        EventType = "turn_started"        // shared runtime began a scoped turn
+	EventUserMessage        EventType = "user_message"        // input from another runtime client
+	EventHookRejected       EventType = "hook_rejected"       // Stop hook rejected prior assistant text
+	EventToolUse            EventType = "tool_use"            // tool invocation info
+	EventToolResult         EventType = "tool_result"         // tool execution result
+	EventResult             EventType = "result"              // final aggregated result
+	EventError              EventType = "error"               // error occurred
+	EventPermissionRequest  EventType = "permission_request"  // agent requests permission via stdio protocol
+	EventPermissionResolved EventType = "permission_resolved" // another client or server resolved a request
+	EventToolOutput         EventType = "tool_output"         // live command output, scoped by ItemID/TurnID
+	EventNotice             EventType = "notice"              // advisory runtime notification; never completes a turn
+	EventRuntimeStatus      EventType = "runtime_status"      // shared runtime connection status
+	EventThinking           EventType = "thinking"            // thinking/processing status
+	EventUserInputRequest   EventType = "user_input_request"  // non-blocking question; answer is a user message
+	EventModelSwitch        EventType = "model_switch"        // agent CLI moved the turn to another model on its own (see ModelSwitch)
 )
 
 // ModelSwitch describes a model change the agent CLI made without being asked
@@ -481,6 +487,9 @@ type ModelSwitch struct {
 
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
+	ID          string               `json:"id,omitempty"`
+	IsOther     bool                 `json:"isOther,omitempty"`
+	IsSecret    bool                 `json:"isSecret,omitempty"`
 	Question    string               `json:"question"`
 	Header      string               `json:"header"`
 	Options     []UserQuestionOption `json:"options"`
@@ -496,6 +505,11 @@ type UserQuestionOption struct {
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
 	Type                     EventType
+	Notice                   *AgentNotice
+	TurnID                   string
+	ItemID                   string
+	Decisions                []string          // scoped permission choices, including server-offered session/policy grants
+	DecisionDetails          map[string]string // server-proposed scope/rule shown alongside a choice
 	Content                  string
 	ToolName                 string         // populated for EventToolUse, EventPermissionRequest
 	ToolInput                string         // human-readable summary of tool input
@@ -532,4 +546,15 @@ type AgentSessionInfo struct {
 	MessageCount int
 	ModifiedAt   time.Time
 	GitBranch    string
+}
+
+// AgentNotice carries service-provided information separately from model replies.
+type AgentNotice struct {
+	UsageThreshold int
+	Kind           string
+	Message        string
+	Code           string
+	Usage          *UsageReport
+	FromModel      string
+	ToModel        string
 }

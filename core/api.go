@@ -48,18 +48,19 @@ type APIServer struct {
 // the dispatch layer in engine.go. See cc-connect internal task
 // t-20260615-cqjbk1.
 type SendRequest struct {
-	Project    string            `json:"project"`
-	SessionKey string            `json:"session_key"`
-	Message    string            `json:"message"`
-	WorkDir    string            `json:"work_dir,omitempty"`
-	CWD        string            `json:"cwd,omitempty"`
-	TTSText    string            `json:"tts_text,omitempty"`
-	Images     []ImageAttachment `json:"images,omitempty"`
-	Files      []FileAttachment  `json:"files,omitempty"`
-	Audios     []FileAttachment  `json:"audios,omitempty"`
-	Videos     []FileAttachment  `json:"videos,omitempty"`
-	AtUsers    []string          `json:"at_users,omitempty"`
-	AtAll      bool              `json:"at_all,omitempty"`
+	AgentSessionID string            `json:"agent_session_id,omitempty"`
+	Project        string            `json:"project"`
+	SessionKey     string            `json:"session_key"`
+	Message        string            `json:"message"`
+	WorkDir        string            `json:"work_dir,omitempty"`
+	CWD            string            `json:"cwd,omitempty"`
+	TTSText        string            `json:"tts_text,omitempty"`
+	Images         []ImageAttachment `json:"images,omitempty"`
+	Files          []FileAttachment  `json:"files,omitempty"`
+	Audios         []FileAttachment  `json:"audios,omitempty"`
+	Videos         []FileAttachment  `json:"videos,omitempty"`
+	AtUsers        []string          `json:"at_users,omitempty"`
+	AtAll          bool              `json:"at_all,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -221,6 +222,9 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "message, tts_text, or attachment is required", http.StatusBadRequest)
 		return
 	}
+	if !s.applyAgentToolBinding(w, &req.Project, &req.SessionKey, req.AgentSessionID) {
+		return
+	}
 
 	s.mu.RLock()
 	var engine *Engine
@@ -315,17 +319,18 @@ func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 // CronAddRequest is the JSON body for POST /cron/add.
 type CronAddRequest struct {
-	Project     string `json:"project"`
-	SessionKey  string `json:"session_key"`
-	CronExpr    string `json:"cron_expr"`
-	Prompt      string `json:"prompt"`
-	Exec        string `json:"exec"`
-	WorkDir     string `json:"work_dir"`
-	Description string `json:"description"`
-	Silent      *bool  `json:"silent,omitempty"`
-	SessionMode string `json:"session_mode,omitempty"`
-	Mode        string `json:"mode,omitempty"`
-	TimeoutMins *int   `json:"timeout_mins,omitempty"`
+	AgentSessionID string `json:"agent_session_id,omitempty"`
+	Project        string `json:"project"`
+	SessionKey     string `json:"session_key"`
+	CronExpr       string `json:"cron_expr"`
+	Prompt         string `json:"prompt"`
+	Exec           string `json:"exec"`
+	WorkDir        string `json:"work_dir"`
+	Description    string `json:"description"`
+	Silent         *bool  `json:"silent,omitempty"`
+	SessionMode    string `json:"session_mode,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	TimeoutMins    *int   `json:"timeout_mins,omitempty"`
 }
 
 func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
@@ -357,6 +362,9 @@ func (s *APIServer) handleCronAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve project: use provided, or pick single engine
+	if !s.applyAgentToolBinding(w, &req.Project, &req.SessionKey, req.AgentSessionID) {
+		return
+	}
 	project := req.Project
 	if project == "" {
 		s.mu.RLock()
@@ -423,6 +431,10 @@ func (s *APIServer) handleCronList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	project := r.URL.Query().Get("project")
+	var key string
+	if !s.applyAgentToolBinding(w, &project, &key, r.URL.Query().Get("agent_session_id")) {
+		return
+	}
 	var jobs []*CronJob
 	if project != "" {
 		jobs = s.cron.Store().ListByProject(project)
@@ -570,18 +582,19 @@ func (s *APIServer) handleCronEdit(w http.ResponseWriter, r *http.Request) {
 
 // TimerAddRequest is the JSON body for POST /timer/add.
 type TimerAddRequest struct {
-	Project     string `json:"project"`
-	SessionKey  string `json:"session_key"`
-	Delay       string `json:"delay"` // relative ("2h") or absolute ISO time
-	Prompt      string `json:"prompt"`
-	Exec        string `json:"exec"`
-	WorkDir     string `json:"work_dir"`
-	Description string `json:"description"`
-	Silent      *bool  `json:"silent,omitempty"`
-	Mute        bool   `json:"mute,omitempty"`
-	SessionMode string `json:"session_mode,omitempty"`
-	Mode        string `json:"mode,omitempty"`
-	TimeoutMins *int   `json:"timeout_mins,omitempty"`
+	AgentSessionID string `json:"agent_session_id,omitempty"`
+	Project        string `json:"project"`
+	SessionKey     string `json:"session_key"`
+	Delay          string `json:"delay"` // relative ("2h") or absolute ISO time
+	Prompt         string `json:"prompt"`
+	Exec           string `json:"exec"`
+	WorkDir        string `json:"work_dir"`
+	Description    string `json:"description"`
+	Silent         *bool  `json:"silent,omitempty"`
+	Mute           bool   `json:"mute,omitempty"`
+	SessionMode    string `json:"session_mode,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	TimeoutMins    *int   `json:"timeout_mins,omitempty"`
 }
 
 func (s *APIServer) handleTimerAdd(w http.ResponseWriter, r *http.Request) {
@@ -618,6 +631,9 @@ func (s *APIServer) handleTimerAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.applyAgentToolBinding(w, &req.Project, &req.SessionKey, req.AgentSessionID) {
+		return
+	}
 	project := req.Project
 	if project == "" {
 		s.mu.RLock()
@@ -682,6 +698,10 @@ func (s *APIServer) handleTimerList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	project := r.URL.Query().Get("project")
+	var key string
+	if !s.applyAgentToolBinding(w, &project, &key, r.URL.Query().Get("agent_session_id")) {
+		return
+	}
 	var jobs []*TimerJob
 	if project != "" {
 		jobs = s.timer.Store().ListByProject(project)
@@ -770,6 +790,9 @@ func (s *APIServer) handleRelaySend(w http.ResponseWriter, r *http.Request) {
 	var req RelayRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !s.applyAgentToolBinding(w, &req.From, &req.SessionKey, req.AgentSessionID) {
 		return
 	}
 	if req.To == "" || req.Message == "" || req.SessionKey == "" {

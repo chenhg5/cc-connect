@@ -3420,6 +3420,9 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 	deadline := time.After(2 * time.Second)
 	for {
 		if got := wsAgent.EnvValue("CC_SESSION_KEY"); got != "" {
+			if marker := wsAgent.EnvValue("CC_CONNECT_SESSION_ENV"); marker != "1" {
+				t.Fatalf("owned session environment marker = %q, want 1", marker)
+			}
 			if got != msg.SessionKey {
 				t.Fatalf("CC_SESSION_KEY = %q, want %q", got, msg.SessionKey)
 			}
@@ -16927,5 +16930,21 @@ func TestProcessInteractiveEvents_ProgressUpdateFailurePreservesFinalReply(t *te
 				t.Fatalf("final card payload = %#v, want completed", payload)
 			}
 		})
+	}
+}
+
+func TestSessionListCardSwitch_PreservesExistingHistory(t *testing.T) {
+	agent := &stubListAgent{sessions: []AgentSessionInfo{{ID: "first", Summary: "First"}, {ID: "second", Summary: "Second"}}}
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	first := e.sessions.SwitchToAgentSession("test:user", "first", agent.Name(), "First")
+	first.AddHistory("user", "saved before card switch")
+	e.sessions.SwitchToAgentSession("test:user", "second", agent.Name(), "Second")
+	e.handleCardNav("act:/switch 1", "test:user")
+	active := e.sessions.GetOrCreateActive("test:user")
+	history := active.GetHistory(0)
+	if active.GetAgentSessionID() != "first" || len(history) != 1 || history[0].Content != "saved before card switch" {
+		t.Fatalf("card switch lost history: session=%s history=%v", active.GetAgentSessionID(), history)
 	}
 }

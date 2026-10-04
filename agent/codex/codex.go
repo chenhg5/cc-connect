@@ -33,22 +33,23 @@ func init() {
 //   - "full-auto": --sandbox workspace-write + approval_policy=never
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
-	workDir         string
-	model           string
-	reasoningEffort string
-	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
-	backend         string // "exec" | "app_server"
-	appServerURL    string
-	codexHome       string
-	systemPrompt    string
-	appendPrompt    string
-	cmd             string   // explicit CLI command; empty enables discovery
-	cliExtraArgs    []string // extra args parsed from cmd after the binary
-	providers       []core.ProviderConfig
-	activeIdx       int      // -1 = no provider set
-	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	sessionEnv      []string
-	mu              sync.RWMutex
+	workDir            string
+	model              string
+	reasoningEffort    string
+	mode               string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	backend            string // "exec" | "app_server"
+	appServerTransport string
+	appServerURL       string
+	codexHome          string
+	systemPrompt       string
+	appendPrompt       string
+	cmd                string   // explicit CLI command; empty enables discovery
+	cliExtraArgs       []string // extra args parsed from cmd after the binary
+	providers          []core.ProviderConfig
+	activeIdx          int      // -1 = no provider set
+	configEnv          []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	sessionEnv         []string
+	mu                 sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -66,6 +67,35 @@ func New(opts map[string]any) (core.Agent, error) {
 	appendPrompt, _ := opts["append_system_prompt"].(string)
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
+	transport, typed := opts["app_server_transport"].(string)
+	if _, exists := opts["app_server_transport"]; exists && !typed {
+		return nil, fmt.Errorf("codex: app_server_transport must be a string")
+	}
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	if transport == "" {
+		transport = "stdio"
+	}
+	if transport != "stdio" && transport != "managed_daemon" {
+		return nil, fmt.Errorf("codex: app_server_transport must be stdio or managed_daemon")
+	}
+	if transport == "managed_daemon" && backend != "app_server" {
+		return nil, fmt.Errorf("codex: managed_daemon transport requires backend=app_server")
+	}
+	if transport != "managed_daemon" {
+		for key := range opts {
+			if strings.HasPrefix(key, "daemon_") {
+				return nil, fmt.Errorf("codex: %s requires managed_daemon transport", key)
+			}
+		}
+	}
+	var daemon managedOptions
+	if transport == "managed_daemon" {
+		var err error
+		daemon, err = parseManagedOptions(opts)
+		if err != nil {
+			return nil, err
+		}
+	}
 	appServerURL = normalizeAppServerURL(appServerURL)
 
 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "")
@@ -73,7 +103,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	if cmd == "" {
 		cmd = strings.TrimSpace(os.Getenv("CODEX_CLI_PATH"))
 	}
-	if _, err := resolveCodexExecutable(cmd); err != nil {
+	if _, err := resolveCodexExecutable(cmd); err != nil && !(transport == "managed_daemon" && daemon.socket != "") {
 		return nil, fmt.Errorf("codex: CLI lookup failed (set cmd or install with npm install -g @openai/codex): %w", err)
 	}
 
@@ -94,21 +124,26 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
-	return &Agent{
-		workDir:         workDir,
-		model:           model,
-		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
-		mode:            mode,
-		backend:         backend,
-		appServerURL:    appServerURL,
-		codexHome:       strings.TrimSpace(codexHome),
-		systemPrompt:    strings.TrimSpace(systemPrompt),
-		appendPrompt:    strings.TrimSpace(appendPrompt),
-		cmd:             cmd,
-		cliExtraArgs:    cliExtraArgs,
-		configEnv:       configEnv,
-		activeIdx:       -1,
-	}, nil
+	agent := &Agent{
+		workDir:            workDir,
+		model:              model,
+		reasoningEffort:    normalizeReasoningEffort(reasoningEffort),
+		mode:               mode,
+		backend:            backend,
+		appServerURL:       appServerURL,
+		appServerTransport: transport,
+		codexHome:          strings.TrimSpace(codexHome),
+		systemPrompt:       strings.TrimSpace(systemPrompt),
+		appendPrompt:       strings.TrimSpace(appendPrompt),
+		cmd:                cmd,
+		cliExtraArgs:       cliExtraArgs,
+		configEnv:          configEnv,
+		activeIdx:          -1,
+	}
+	if transport == "managed_daemon" {
+		return &managedAgent{Agent: agent, daemon: daemon}, nil
+	}
+	return agent, nil
 }
 
 func normalizeBackend(raw string) string {
