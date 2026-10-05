@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -104,11 +105,13 @@ func daemonInstall(args []string) {
 	}
 
 	if err := daemon.SaveMeta(&daemon.Meta{
-		LogFile:     cfg.LogFile,
-		LogMaxSize:  cfg.LogMaxSize,
-		WorkDir:     cfg.WorkDir,
-		BinaryPath:  cfg.BinaryPath,
-		InstalledAt: daemon.NowISO(),
+		LogFile:        cfg.LogFile,
+		LogMaxSize:     cfg.LogMaxSize,
+		LogMaxBackups:  cfg.LogMaxBackups,
+		WorkDir:        cfg.WorkDir,
+		BinaryPath:     cfg.BinaryPath,
+		InstalledAt:    daemon.NowISO(),
+		StartWithCodex: cfg.StartWithCodex,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save metadata: %v\n", err)
 	}
@@ -159,6 +162,11 @@ func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {
 			force = true
 		case arg == "--no-capture-secrets":
 			cfg.NoCaptureSecrets = true
+		case arg == "--with-codex":
+			if runtime.GOOS != "windows" {
+				return daemon.Config{}, false, fmt.Errorf("--with-codex is only supported on Windows")
+			}
+			cfg.StartWithCodex = true
 		case arg == "--log-file":
 			value, next, err := daemonInstallFlagValue(args, i, "--log-file")
 			if err != nil {
@@ -334,6 +342,9 @@ func daemonStatus() {
 	}
 
 	statusStr := "Stopped"
+	if st.Supervising {
+		statusStr = "Waiting / restarting"
+	}
 	if st.Running {
 		statusStr = "Running"
 	}
@@ -344,6 +355,9 @@ func daemonStatus() {
 	}
 
 	if meta, err := daemon.LoadMeta(); err == nil {
+		if meta.StartWithCodex {
+			fmt.Println("  Startup:   With Codex desktop")
+		}
 		fmt.Printf("  Log:       %s\n", meta.LogFile)
 		fmt.Printf("  WorkDir:   %s\n", meta.WorkDir)
 		if t, err := time.Parse(time.RFC3339, meta.InstalledAt); err == nil {
@@ -469,6 +483,7 @@ Commands:
   logs        View log output
 
 Install flags:
+  --with-codex          Windows: plugin startup; stop when Codex desktop closes
   --config PATH         Path to config.toml (uses its parent as work dir)
   --log-file PATH       Log file path (default: ~/.cc-connect/logs/cc-connect.log)
   --log-max-size N      Max log file size in MB (default: 10)

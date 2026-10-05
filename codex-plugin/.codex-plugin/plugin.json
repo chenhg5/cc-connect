@@ -1,0 +1,7 @@
+{
+  "name": "cc-connect",
+  "version": "0.1.0",
+  "description": "Connect messaging platforms while Codex desktop is open.",
+  "mcpServers": "./.mcp.json",
+  "license": "MIT"
+}

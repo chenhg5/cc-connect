@@ -3,8 +3,22 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+func TestParseDaemonInstallArgs_WithCodex(t *testing.T) {
+	cfg, _, err := parseDaemonInstallArgs([]string{"--with-codex", "--force"})
+	if runtime.GOOS != "windows" {
+		if err == nil {
+			t.Fatal("--with-codex must be rejected outside Windows")
+		}
+		return
+	}
+	if err != nil || !cfg.StartWithCodex {
+		t.Fatalf("parse --with-codex: cfg=%+v, err=%v", cfg, err)
+	}
+}
 
 func TestParseDaemonInstallArgs_ConfigSetsWorkDir(t *testing.T) {
 	cfg, force, err := parseDaemonInstallArgs([]string{"--config", "/tmp/example/config.toml"})
@@ -101,9 +115,10 @@ func TestParseDaemonInstallArgs_NoCaptureSecretsFlagAndEnvCombine(t *testing.T) 
 }
 
 func TestParseDaemonInstallArgs_WorkDirOverridesConfig(t *testing.T) {
+	overrideDir := filepath.Join(t.TempDir(), "override")
 	cfg, force, err := parseDaemonInstallArgs([]string{
 		"--config", "/tmp/example/config.toml",
-		"--work-dir", "/tmp/override",
+		"--work-dir", overrideDir,
 		"--force",
 	})
 	if err != nil {
@@ -113,7 +128,7 @@ func TestParseDaemonInstallArgs_WorkDirOverridesConfig(t *testing.T) {
 		t.Fatalf("force = false, want true")
 	}
 
-	want := filepath.Clean("/tmp/override")
+	want := filepath.Clean(overrideDir)
 	if cfg.WorkDir != want {
 		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, want)
 	}

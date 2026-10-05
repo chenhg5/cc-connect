@@ -414,6 +414,7 @@ type Message struct {
 	UserName     string
 	ChatName     string // human-readable chat/group name (optional)
 	Content      string
+	Language     Language            // resolved before normalization; card callbacks may supply their original locale
 	Images       []ImageAttachment   // attached images (if any)
 	Files        []FileAttachment    // attached files (if any)
 	Audio        *AudioAttachment    // voice message (if any)

@@ -648,6 +648,8 @@ Notes:
 
 ## 📚 Documentation
 
+- [Documentation index](docs/README.md) — Usage, updates, troubleshooting, and technical handoff
+
 - [Usage Guide](docs/usage.md) — Complete feature documentation
 - [INSTALL.md](INSTALL.md) — AI-agent-friendly installation guide
 - [config.example.toml](config.example.toml) — Configuration template

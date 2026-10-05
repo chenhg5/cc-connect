@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cc-connect": {
+      "command": "cc-connect-plugin",
+      "args": [],
+      "startup_timeout_sec": 30
+    }
+  }
+}

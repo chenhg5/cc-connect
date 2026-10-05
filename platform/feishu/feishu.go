@@ -820,6 +820,9 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	if chatID == "" {
 		chatID = userID
 	}
+	cardLang, _ := event.Event.Action.Value["language"].(string)
+	lang := core.NormalizeLanguageString(cardLang)
+
 	sessionKey := p.sessionKeyFromCardAction(chatID, userID, event.Event.Action.Value)
 
 	// nav: / act: — synchronous card update
@@ -845,7 +848,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		if p.cardNavHandler != nil {
 			done := make(chan *core.Card, 1)
 			go func() {
-				done <- p.cardNavHandler(actionVal, sessionKey)
+				done <- p.cardNavHandler(core.LocalizedCardAction(actionVal, lang), sessionKey)
 			}()
 
 			select {
@@ -935,6 +938,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 		go p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey,
+			Language:   lang,
 			Platform:   p.platformName,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
@@ -970,6 +974,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		go p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey,
+			Language:   lang,
 			Platform:   p.platformName,
 			UserID:     userID,
 			UserName:   p.resolveUserName(userID),
@@ -7016,15 +7021,22 @@ func sanitizeCardMarkdownForCard(text string) string {
 	return sanitizeCardMarkdownSegmentsForCard([]string{text})[0]
 }
 
-func richStepDisplayName(step core.ToolStep) string {
+func richStepDisplayName(step core.ToolStep, locale ...core.Language) string {
+	i18n := richI18n(locale...)
 	if step.Kind == core.ToolStepKindThinking {
-		return "Thinking"
+		return i18n.T(core.MsgRichReasoning)
 	}
-	return buildToolDisplay(step.Name, step.Summary).Title
+	title := buildToolDisplay(step.Name, step.Summary).Title
+	key := core.MsgKey("rich_tool_" + strings.NewReplacer(" ", "_", "/", "_", "-", "_").Replace(strings.ToLower(title)))
+	if translated := i18n.T(key); translated != string(key) {
+		return translated
+	}
+	return title
 }
 
-func richStepBody(step core.ToolStep) string {
-	name := richStepDisplayName(step)
+func richStepBody(step core.ToolStep, locale ...core.Language) string {
+	i18n := richI18n(locale...)
+	name := richStepDisplayName(step, locale...)
 	summary := buildToolDisplay(step.Name, step.Summary).Detail
 	if summary == "" {
 		summary = name
@@ -7037,16 +7049,16 @@ func richStepBody(step core.ToolStep) string {
 	var statusParts []string
 	status := strings.TrimSpace(step.Status)
 	if status != "" {
-		statusParts = append(statusParts, "status: "+status)
+		statusParts = append(statusParts, strings.ToLower(i18n.T(core.MsgToolResultFmtStatus))+": "+richStatusLabel(status, i18n))
 	} else if step.Success != nil {
 		if *step.Success {
-			statusParts = append(statusParts, "status: ok")
+			statusParts = append(statusParts, strings.ToLower(i18n.T(core.MsgToolResultFmtStatus))+": "+i18n.T(core.MsgToolResultFmtOk))
 		} else {
-			statusParts = append(statusParts, "status: failed")
+			statusParts = append(statusParts, strings.ToLower(i18n.T(core.MsgToolResultFmtStatus))+": "+i18n.T(core.MsgRichFailed))
 		}
 	}
 	if step.ExitCode != nil {
-		statusParts = append(statusParts, fmt.Sprintf("exit: %d", *step.ExitCode))
+		statusParts = append(statusParts, fmt.Sprintf("%s: %d", strings.ToLower(i18n.T(core.MsgToolResultFmtExit)), *step.ExitCode))
 	}
 	if len(statusParts) > 0 {
 		lines = append(lines, strings.Join(statusParts, " | "))
@@ -7078,6 +7090,8 @@ func buildCardJSONWithStatus(content string, status core.CardStatus) string {
 		template = "green"
 	case core.CardStatusError:
 		template = "red"
+	case core.CardStatusStopped:
+		template = "orange"
 	}
 	card := map[string]any{
 		"schema": "2.0",
@@ -7119,22 +7133,22 @@ func richLaneTitle(label string, count int) string {
 	return label
 }
 
-func richStepRowContent(step core.ToolStep) string {
-	body := richStepBody(step)
+func richStepRowContent(step core.ToolStep, locale ...core.Language) string {
+	body := richStepBody(step, locale...)
 	if step.Kind == core.ToolStepKindThinking {
 		return body
 	}
-	name := richStepDisplayName(step)
+	name := richStepDisplayName(step, locale...)
 	if body == name || strings.HasPrefix(body, name+"\n") {
 		return body
 	}
 	return name + "\n" + body
 }
 
-func richStepElement(step core.ToolStep) map[string]any {
+func richStepElement(step core.ToolStep, locale ...core.Language) map[string]any {
 	text := map[string]any{
 		"tag":       "plain_text",
-		"content":   richStepRowContent(step),
+		"content":   richStepRowContent(step, locale...),
 		"text_size": "notation",
 	}
 	elem := map[string]any{
@@ -7162,7 +7176,8 @@ func richPlaceholderElement(text string) map[string]any {
 	}
 }
 
-func richPanelElements(steps []core.ToolStep, emptyText string) []map[string]any {
+func richPanelElements(steps []core.ToolStep, emptyText string, locale ...core.Language) []map[string]any {
+	i18n := richI18n(locale...)
 	if len(steps) == 0 {
 		return []map[string]any{richPlaceholderElement(emptyText)}
 	}
@@ -7175,10 +7190,10 @@ func richPanelElements(steps []core.ToolStep, emptyText string) []map[string]any
 	}
 	elements := make([]map[string]any, 0, len(visible)+1)
 	if hidden > 0 {
-		elements = append(elements, richPlaceholderElement(fmt.Sprintf("... %d earlier steps hidden", hidden)))
+		elements = append(elements, richPlaceholderElement(i18n.Tf(core.MsgRichHidden, hidden)))
 	}
 	for _, step := range visible {
-		elements = append(elements, richStepElement(step))
+		elements = append(elements, richStepElement(step, locale...))
 	}
 	return elements
 }
@@ -7203,8 +7218,8 @@ const maxRichCardJSONBytes = 28000
 // buildRichCard renders a Card 2.0 "single-card" turn with collapsible
 // reasoning/tool panels, streaming markdown body, status-colored header, and a
 // pre-composed multi-line statusFooter (engine-owned, includes elapsed).
-func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, locale ...core.Language) string {
+	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter, locale...)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
 		return buildCardJSONWithStatus(markdown, status)
@@ -7226,7 +7241,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		{perLane: 3, textLen: 80},
 	} {
 		compactSteps := compactRichStepsForCardSize(steps, limit.perLane, limit.textLen)
-		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter)
+		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter, locale...)
 		if err == nil && len(compact) <= maxRichCardJSONBytes {
 			slog.Debug("feishu: rich card exceeded size limit, compacted panels",
 				"original_size", len(b),
@@ -7240,31 +7255,32 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 
 	fallbackMarkdown := markdown
 	if strings.TrimSpace(fallbackMarkdown) == "" {
-		fallbackMarkdown = compactRichFallbackMarkdown(steps)
+		fallbackMarkdown = compactRichFallbackMarkdown(steps, locale...)
 	}
 	slog.Debug("feishu: rich card exceeds size limit, fallback to compact markdown card", "size", len(b))
 	return buildCardJSONWithStatus(fallbackMarkdown, status)
 }
 
-func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) ([]byte, error) {
+func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, locale ...core.Language) ([]byte, error) {
+	i18n := richI18n(locale...)
 	reasoningSteps, toolSteps := splitRichStepsByLane(steps)
 	panelMaps := make([]map[string]any, 0, 2)
 	if len(reasoningSteps) > 0 {
 		panelMaps = append(panelMaps, buildRichPanel(
-			richLaneTitle("Reasoning", len(reasoningSteps)),
+			richLaneTitle(i18n.T(core.MsgRichReasoning), len(reasoningSteps)),
 			streaming,
-			richPanelElements(reasoningSteps, "Thinking..."),
+			richPanelElements(reasoningSteps, i18n.T(core.MsgRichThinking), locale...),
 		))
 	}
 	if len(toolSteps) > 0 {
 		panelMaps = append(panelMaps, buildRichPanel(
-			richLaneTitle("Tools", len(toolSteps)),
+			richLaneTitle(i18n.T(core.MsgRichTools), len(toolSteps)),
 			streaming,
-			richPanelElements(toolSteps, "No tool steps"),
+			richPanelElements(toolSteps, i18n.T(core.MsgRichNoTools), locale...),
 		))
 	}
 	if len(panelMaps) == 0 && streaming {
-		panelMaps = append(panelMaps, buildRichPanel("Reasoning", true, richPanelElements(nil, "Thinking...")))
+		panelMaps = append(panelMaps, buildRichPanel(i18n.T(core.MsgRichReasoning), true, richPanelElements(nil, i18n.T(core.MsgRichThinking), locale...)))
 	}
 
 	markdownMap := map[string]any{
@@ -7307,17 +7323,20 @@ func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markd
 
 	// Header template color follows status.
 	headerTemplate := "blue"
-	headerTitle := pickThinkingVerb()
+	headerTitle := i18n.T(core.MsgRichWorking)
 	switch status {
 	case core.CardStatusDone:
 		headerTemplate = "green"
-		headerTitle = "Done"
+		headerTitle = i18n.T(core.MsgRichDone)
 	case core.CardStatusError:
 		headerTemplate = "red"
-		headerTitle = "Error"
+		headerTitle = i18n.T(core.MsgRichError)
+	case core.CardStatusStopped:
+		headerTemplate = "orange"
+		headerTitle = i18n.T(core.MsgRichStopped)
 	case core.CardStatusThinking, core.CardStatusWorking:
 		headerTemplate = "blue"
-		headerTitle = pickThinkingVerb()
+		headerTitle = i18n.T(core.MsgRichWorking)
 	}
 
 	card := map[string]any{
@@ -7382,14 +7401,15 @@ func compactRichText(s string, maxRunes int) string {
 	return string(rs[:maxRunes]) + "..."
 }
 
-func compactRichFallbackMarkdown(steps []core.ToolStep) string {
+func compactRichFallbackMarkdown(steps []core.ToolStep, locale ...core.Language) string {
+	i18n := richI18n(locale...)
 	compactSteps := compactRichStepsForCardSize(steps, 3, 120)
 	if len(compactSteps) == 0 {
 		return ""
 	}
-	lines := []string{"Card content is large; showing recent activity:"}
+	lines := []string{i18n.T(core.MsgRichLarge)}
 	for _, step := range compactSteps {
-		line := strings.TrimSpace(richStepRowContent(step))
+		line := strings.TrimSpace(richStepRowContent(step, locale...))
 		if line == "" {
 			continue
 		}
@@ -7470,4 +7490,29 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	if !resp.Success() {
 		slog.Debug("feishu: set preview status patch failed", "code", resp.Code, "msg", resp.Msg)
 	}
+}
+
+func richI18n(locale ...core.Language) *core.I18n {
+	lang := core.LangEnglish
+	if len(locale) > 0 {
+		lang = locale[0]
+	}
+	return core.NewI18n(lang)
+}
+
+func richStatusLabel(status string, i18n *core.I18n) string {
+	switch status {
+	case "completed":
+		return i18n.T(core.MsgRichCompleted)
+	case "failed":
+		return i18n.T(core.MsgRichFailed)
+	case "in_progress":
+		return i18n.T(core.MsgRichRunning)
+	default:
+		return status
+	}
+}
+
+func (p *Platform) BuildRichCardLocalized(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, language core.Language) string {
+	return buildRichCard(status, title, steps, markdown, streaming, statusFooter, language)
 }

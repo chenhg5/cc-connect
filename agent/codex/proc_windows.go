@@ -21,6 +21,8 @@ func prepareCmdForKill(cmd *exec.Cmd) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP
+	cmd.SysProcAttr.CreationFlags |= 0x08000000 // CREATE_NO_WINDOW
+	cmd.SysProcAttr.HideWindow = true
 }
 
 func forceKillCmd(cmd *exec.Cmd) error {
@@ -28,6 +30,7 @@ func forceKillCmd(cmd *exec.Cmd) error {
 		return nil
 	}
 	killCmd := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
+	prepareCmdForKill(killCmd)
 	output, err := killCmd.CombinedOutput()
 	if err == nil {
 		return nil

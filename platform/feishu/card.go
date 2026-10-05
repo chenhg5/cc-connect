@@ -88,8 +88,13 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 // renderCardMap converts a core.Card into the Feishu Interactive Card map
 // using the v1 format. Used both for message API (via renderCard) and
 // callback responses (CardActionTriggerResponse).
-func renderCardMap(card *core.Card, sessionKey string) map[string]any {
-	result := map[string]any{
+func renderCardMap(card *core.Card, sessionKey string) (result map[string]any) {
+	defer func() {
+		if card != nil && card.Language != core.LangAuto {
+			stampCardLanguage(result, string(card.Language))
+		}
+	}()
+	result = map[string]any{
 		"config": map[string]any{
 			"wide_screen_mode": true,
 		},
@@ -461,4 +466,29 @@ func renderCard(card *core.Card, sessionKey string) string {
 		return `{"config":{"wide_screen_mode":true},"elements":[]}`
 	}
 	return string(b)
+}
+
+// Language travels with the card so canonical button commands do not switch it.
+func stampCardLanguage(value any, lang string) {
+	switch node := value.(type) {
+	case map[string]any:
+		if _, ok := node["action"]; ok {
+			node["language"] = lang
+		}
+		for _, child := range node {
+			stampCardLanguage(child, lang)
+		}
+	case map[string]string:
+		if _, ok := node["action"]; ok {
+			node["language"] = lang
+		}
+	case []map[string]any:
+		for _, child := range node {
+			stampCardLanguage(child, lang)
+		}
+	case []any:
+		for _, child := range node {
+			stampCardLanguage(child, lang)
+		}
+	}
 }

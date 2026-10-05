@@ -46,6 +46,29 @@ cc-connect feishu bind --project my-project --app cli_xxx:sec_xxx
 
 ---
 
+## 整轮单卡展示
+
+在目标 `[[projects]]` 下添加以下配置，启用已有富卡片模式：
+
+```toml
+[projects.display]
+card_mode = "rich"
+```
+
+一轮正常长度的任务复用一张卡，工具步骤、执行状态和回复正文持续更新。
+执行期间展开工具区，正常完成后自动收起，正文保持可见。工具区显示最近
+10 个步骤，长内容按已有配置截断，超长正文按现有逻辑分卡。
+
+先备份 `config.toml`，待当前任务完成后执行 `cc-connect daemon restart`。
+若飞书卡片发送或更新失败，可将 `card_mode` 改回 `"legacy"` 并重启。
+
+Windows 下若正文中文正常、工具输出的中文路径却出现 `�`，先检查命令执行
+环境的编码。可安装 [UTF-8 PowerShell 包装程序](../tools/windows-utf8-shell/README.md)。
+它在后台启动环境中生效，不依赖模型执行 `OutputEncoding` 设置；旧卡片中的
+乱码无法自动恢复。
+
+---
+
 ## 第一步：创建飞书企业自建应用
 
 ### 1.1 进入飞书开放平台

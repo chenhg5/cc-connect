@@ -8,6 +8,36 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+func TestCardCallbacks_CarryOriginalLanguage(t *testing.T) {
+	card := core.NewCard().Buttons(core.PrimaryBtn("帮助", "nav:/help sessions")).Build()
+	card.Language = core.LangChinese
+	jsonText := renderCard(card, "test:alice")
+	if !strings.Contains(jsonText, `"language":"zh"`) || !strings.Contains(jsonText, `"action":"nav:/help sessions"`) {
+		t.Fatalf("callback lost original language: %s", jsonText)
+	}
+}
+
+func TestRichCard_TemplateLanguageAndFinalCollapse(t *testing.T) {
+	for _, tc := range []struct {
+		lang                 core.Language
+		done, tools, command string
+	}{
+		{core.LangChinese, "已完成", "工具 (1)", "检查文件"},
+		{core.LangEnglish, "Done", "Tools (1)", "Inspect files"},
+	} {
+		cardText := buildRichCard(core.CardStatusDone, "", []core.ToolStep{{Name: "Bash", Summary: "pwd", Status: "completed", Result: "中文路径", Done: true}}, "done", false, "footer", tc.lang)
+		for _, want := range []string{tc.done, tc.tools, tc.command, "中文路径", `"expanded":false`} {
+			if !strings.Contains(cardText, want) {
+				t.Errorf("%s missing %q: %s", tc.lang, want, cardText)
+			}
+		}
+	}
+	stopped := buildRichCard(core.CardStatusStopped, "", nil, "", false, "", core.LangChinese)
+	if !strings.Contains(stopped, "已停止") || !strings.Contains(stopped, `"template":"orange"`) {
+		t.Fatal(stopped)
+	}
+}
+
 func decodeRenderedCard(t *testing.T, card *core.Card) map[string]any {
 	t.Helper()
 

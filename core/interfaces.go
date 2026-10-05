@@ -683,6 +683,7 @@ const (
 	CardStatusWorking  CardStatus = "working"  // blue
 	CardStatusDone     CardStatus = "done"     // green
 	CardStatusError    CardStatus = "error"    // red
+	CardStatusStopped  CardStatus = "stopped"  // orange
 )
 
 // PreviewStatusUpdater is an optional interface for platforms that support

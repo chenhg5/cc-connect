@@ -90,6 +90,12 @@ type RichCardSupporter interface {
 	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string
 }
 
+// LocalizedRichCardSupporter renders a turn using the initiating message's
+// locale without changing shared platform state.
+type LocalizedRichCardSupporter interface {
+	BuildRichCardLocalized(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string, language Language) string
+}
+
 // RichCardMarkdownResolver is an optional interface for platforms that need to
 // pre-process rich-card markdown before it is rendered or streamed.
 //

@@ -36,13 +36,15 @@ type Config struct {
 	// keychain / `secret-tool` / EnvironmentFile= set this to keep token
 	// values out of the service manager files on disk.
 	NoCaptureSecrets bool
+	StartWithCodex   bool // Windows: plugin starts the daemon; closing Codex stops it
 }
 
 type Status struct {
-	Installed bool
-	Running   bool
-	PID       int
-	Platform  string // "systemd", "launchd", "schtasks"
+	Installed   bool
+	Running     bool
+	Supervising bool // Windows launcher is active, even while its child is not running
+	PID         int
+	Platform    string // "systemd", "launchd", "schtasks"
 }
 
 type Manager interface {
@@ -75,12 +77,13 @@ func DefaultDataDir() string {
 // etc. can locate the log file without parsing service definitions.
 
 type Meta struct {
-	LogFile       string `json:"log_file"`
-	LogMaxSize    int64  `json:"log_max_size"`
-	LogMaxBackups int    `json:"log_max_backups"`
-	WorkDir       string `json:"work_dir"`
-	BinaryPath    string `json:"binary_path"`
-	InstalledAt   string `json:"installed_at"`
+	LogFile        string `json:"log_file"`
+	LogMaxSize     int64  `json:"log_max_size"`
+	LogMaxBackups  int    `json:"log_max_backups"`
+	WorkDir        string `json:"work_dir"`
+	BinaryPath     string `json:"binary_path"`
+	InstalledAt    string `json:"installed_at"`
+	StartWithCodex bool   `json:"start_with_codex,omitempty"`
 }
 
 func metaPath() string {

@@ -100,7 +100,7 @@ type appServerRateLimitSnapshot struct {
 }
 
 type appServerRateLimitWindow struct {
-	UsedPercent        int   `json:"usedPercent"`
+	UsedPercent        *int  `json:"usedPercent"`
 	WindowDurationMins int   `json:"windowDurationMins"`
 	ResetsAt           int64 `json:"resetsAt"`
 }
@@ -183,9 +183,10 @@ type appServerSession struct {
 	currentTurn  string
 	preambleSent bool
 
-	runtimeMu sync.RWMutex
-	usage     *core.UsageReport
-	context   *core.ContextUsage
+	runtimeMu      sync.RWMutex
+	usage          *core.UsageReport
+	usageFetchedAt time.Time
+	context        *core.ContextUsage
 }
 
 const (
@@ -282,6 +283,7 @@ func (s *appServerSession) connect() error {
 	}
 	args = append(append([]string(nil), s.cliExtraArgs...), args...)
 	cmd := exec.CommandContext(s.ctx, bin, args...)
+	prepareCmdForKill(cmd)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {
@@ -463,6 +465,7 @@ func (s *appServerSession) storeUsage(report *core.UsageReport) {
 	s.runtimeMu.Lock()
 	defer s.runtimeMu.Unlock()
 	s.usage = cloneUsageReport(report)
+	s.usageFetchedAt = time.Now()
 }
 
 func (s *appServerSession) storeContextUsage(usage *core.ContextUsage) {
@@ -947,10 +950,14 @@ func (s *appServerSession) GetReasoningEffort() string {
 }
 
 func (s *appServerSession) GetUsage(ctx context.Context) (*core.UsageReport, error) {
+	s.runtimeMu.RLock()
+	fresh := !s.usageFetchedAt.IsZero() && time.Since(s.usageFetchedAt) < 30*time.Second
+	cached := cloneUsageReport(s.usage)
+	s.runtimeMu.RUnlock()
+	if fresh && cached != nil {
+		return cached, nil
+	}
 	if err := s.refreshUsage(ctx); err != nil {
-		if cached := s.cachedUsage(); cached != nil {
-			return cached, nil
-		}
 		return nil, err
 	}
 	if cached := s.cachedUsage(); cached != nil {
@@ -977,7 +984,7 @@ func (s *appServerSession) Close() error {
 		s.stdin = nil
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+		_ = forceKillCmd(s.cmd)
 	}
 	s.procMu.Unlock()
 
@@ -1435,10 +1442,10 @@ func appServerBucketName(snapshot appServerRateLimitSnapshot) string {
 
 func appServerUsageWindows(snapshot appServerRateLimitSnapshot) []core.UsageWindow {
 	var windows []core.UsageWindow
-	if snapshot.Primary != nil {
+	if snapshot.Primary != nil && snapshot.Primary.UsedPercent != nil {
 		windows = append(windows, appServerUsageWindow("Primary", snapshot.Primary))
 	}
-	if snapshot.Secondary != nil {
+	if snapshot.Secondary != nil && snapshot.Secondary.UsedPercent != nil {
 		windows = append(windows, appServerUsageWindow("Secondary", snapshot.Secondary))
 	}
 	return windows
@@ -1454,7 +1461,7 @@ func appServerUsageWindow(name string, window *appServerRateLimitWindow) core.Us
 	}
 	return core.UsageWindow{
 		Name:              name,
-		UsedPercent:       window.UsedPercent,
+		UsedPercent:       *window.UsedPercent,
 		WindowSeconds:     window.WindowDurationMins * 60,
 		ResetAfterSeconds: resetAfter,
 		ResetAtUnix:       window.ResetsAt,

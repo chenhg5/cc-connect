@@ -5,6 +5,7 @@ Complete guide to using cc-connect features.
 ## Table of Contents
 
 - [Session Management](#session-management)
+- [Localized Commands](#localized-commands)
 - [Permission Modes](#permission-modes)
 - [API Provider Management](#api-provider-management)
 - [Model Selection](#model-selection)
@@ -26,6 +27,22 @@ Complete guide to using cc-connect features.
 - [Configuration Reference](#configuration-reference)
 
 ---
+
+## Localized Commands
+
+Built-in command names accept English, Simplified Chinese, Traditional Chinese,
+Japanese, and Spanish aliases. English commands remain valid. `/lang zh` (or
+`/语言 中文`) pins the reply/help language and saves the setting. Use
+`language = "auto"` (or an empty value) for automatic matching; `/lang auto`
+restores it. Detection never saves a fixed language over auto. Language is
+resolved from the original input before aliases and quotes; command arguments
+do not participate, so `/help D:/中文目录` stays English. Each queued message and
+running task retains its locale even when another chat sends a different-language
+command. Feishu buttons inherit the card's locale. Project-level fixed language
+overrides the global setting. Examples: `/帮助` = `/help`, `/模型` = `/model`, `/推理 ultra` =
+`/reasoning ultra`, and `/暂停` = `/stop`. Use help in your language for the full list.
+Arguments such as model IDs, reasoning levels, and subcommands retain their existing
+values. All aliases use the same permission checks as their English commands.
 
 ## Session Management
 
@@ -1287,3 +1304,34 @@ tunneled through it.
 
 Full reference: [docs/telegram.md](./telegram.md#21-optional-use-a-proxy).
 This option was added in PR #389.
+
+
+## Windows Codex plugin launcher
+
+Keep `cc-connect-plugin.exe` beside `cc-connect.exe`. Build the companion launcher before installing a Windows daemon:
+
+```powershell
+go build -ldflags '-s -w -H windowsgui' -o cc-connect-plugin.exe ./tools/windows-plugin-launcher
+```
+
+The MCP definition starts `cc-connect-plugin`, with no extra `codex-plugin` argument. It forwards stdio and exit codes without creating a console. Ordinary CLI use is unchanged. Reload the installed plugin after changing its definition: Codex uses a cached copy. A client disconnect closes its bridge process; other chats keep sharing the daemon while Codex desktop remains open.
+
+Windows Task Scheduler also uses the companion GUI launcher to start its supervisor without a console. Update both EXEs and reinstall the daemon to replace the old task action; changing the MCP definition alone does not update it. If the UTF-8 shell is installed, rerun its installer to retain the daemon PATH prefix.
+
+## Task footer and account quotas
+
+Example numbers are illustrative:
+
+```text
+⏱ Elapsed 11.6s
+runtime-model · xhigh · in 127.2k out 5 cr 124.7k
+ctx 127.2k/258.4k (49%)
+5h used 34% · reset 10-04 22:30 UTC+08:00 · wk used 29%
+D:/work/project
+```
+
+Model, reasoning effort and context capacity come from the running session. Token counts represent the latest request, not a cumulative turn. Cache reads are already included in input; do not add them again or interpret counts as money.
+
+Quota percentages are account usage, separate from context usage. The current Codex app-server rate-limit API and notifications provide 5-hour/7-day windows. Reset timestamps use the host's local time with an explicit UTC offset. Raw quota data is cached for 30 seconds; reads have a 1.5-second timeout. Missing percentages, unknown windows and data past its reset time are hidden. API details: [official app-server documentation](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt).
+
+Existing `reply_footer`, `show_context_indicator` and `show_workdir_indicator` toggles remain. In Feishu rich mode, the tool panel stays expanded while running and collapses on completion, error or stop. The latest-10-step and long-content limits remain. See the [documentation index](README.md) for troubleshooting and handoff.

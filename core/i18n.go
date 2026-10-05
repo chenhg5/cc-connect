@@ -2,6 +2,8 @@ package core
 
 import (
 	"fmt"
+	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -142,14 +144,7 @@ func (i *I18n) DetectAndSet(text string) {
 		return
 	}
 	i.detected = detected
-	saveFunc := i.saveFunc
 	i.mu.Unlock()
-
-	if saveFunc != nil {
-		if err := saveFunc(detected); err != nil {
-			fmt.Printf("failed to save language: %v\n", err)
-		}
-	}
 }
 
 func (i *I18n) currentLang() Language {
@@ -183,15 +178,49 @@ func (i *I18n) IsZhLike() bool {
 // SetLang overrides the language (disabling auto-detect).
 func (i *I18n) SetLang(lang Language) {
 	i.mu.Lock()
-	defer i.mu.Unlock()
 	i.lang = lang
 	i.detected = ""
+	save := i.saveFunc
+	i.mu.Unlock()
+	if save != nil {
+		if err := save(lang); err != nil {
+			slog.Warn("failed to save language", "error", err)
+		}
+	}
 }
 
 // Message keys
 type MsgKey string
 
 const (
+	MsgRichStopped               MsgKey = "rich_stopped"
+	MsgRichDone                  MsgKey = "rich_done"
+	MsgRichError                 MsgKey = "rich_error"
+	MsgRichWorking               MsgKey = "rich_working"
+	MsgRichReasoning             MsgKey = "rich_reasoning"
+	MsgRichThinking              MsgKey = "rich_thinking"
+	MsgRichTools                 MsgKey = "rich_tools"
+	MsgRichNoTools               MsgKey = "rich_notools"
+	MsgRichHidden                MsgKey = "rich_hidden"
+	MsgRichLarge                 MsgKey = "rich_large"
+	MsgRichCompleted             MsgKey = "rich_completed"
+	MsgRichFailed                MsgKey = "rich_failed"
+	MsgRichRunning               MsgKey = "rich_running"
+	MsgFooterModel               MsgKey = "footer_model"
+	MsgFooterEffort              MsgKey = "footer_effort"
+	MsgFooterInput               MsgKey = "footer_input"
+	MsgFooterOutput              MsgKey = "footer_output"
+	MsgFooterCacheRead           MsgKey = "footer_cacheread"
+	MsgFooterCacheWrite          MsgKey = "footer_cachewrite"
+	MsgFooterTokens              MsgKey = "footer_tokens"
+	MsgFooterContext             MsgKey = "footer_context"
+	MsgFooterFiveHour            MsgKey = "footer_fivehour"
+	MsgFooterWeek                MsgKey = "footer_week"
+	MsgFooterReset               MsgKey = "footer_reset"
+	MsgFooterQuota               MsgKey = "footer_quota"
+	MsgFooterWorkDir             MsgKey = "footer_workdir"
+	MsgFooterElapsed             MsgKey = "footer_elapsed"
+	MsgFooterRunning             MsgKey = "footer_running"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
@@ -247,6 +276,8 @@ const (
 	MsgHelpToolsSection          MsgKey = "help_tools_section"
 	MsgHelpSystemSection         MsgKey = "help_system_section"
 	MsgHelpTip                   MsgKey = "help_tip"
+	MsgPluginDaemonRequired      MsgKey = "plugin_daemon_required"
+	MsgDaemonStatus              MsgKey = "daemon_status"
 	MsgListTitle                 MsgKey = "list_title"
 	MsgListTitlePaged            MsgKey = "list_title_paged"
 	MsgListEmpty                 MsgKey = "list_empty"
@@ -695,6 +726,457 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgKey("rich_tool_load_skill"): {
+		LangEnglish:            "Load skill",
+		LangChinese:            "加载技能",
+		LangTraditionalChinese: "載入技能",
+		LangJapanese:           "スキル読込",
+		LangSpanish:            "Cargar habilidad",
+	},
+	MsgKey("rich_tool_read"): {
+		LangEnglish:            "Read",
+		LangChinese:            "读取",
+		LangTraditionalChinese: "讀取",
+		LangJapanese:           "読取",
+		LangSpanish:            "Leer",
+	},
+	MsgKey("rich_tool_edit"): {
+		LangEnglish:            "Edit",
+		LangChinese:            "编辑",
+		LangTraditionalChinese: "編輯",
+		LangJapanese:           "編集",
+		LangSpanish:            "Editar",
+	},
+	MsgKey("rich_tool_search_tools"): {
+		LangEnglish:            "Search tools",
+		LangChinese:            "搜索工具",
+		LangTraditionalChinese: "搜尋工具",
+		LangJapanese:           "ツール検索",
+		LangSpanish:            "Buscar herramientas",
+	},
+	MsgKey("rich_tool_search_web"): {
+		LangEnglish:            "Search web",
+		LangChinese:            "搜索网页",
+		LangTraditionalChinese: "搜尋網頁",
+		LangJapanese:           "ウェブ検索",
+		LangSpanish:            "Buscar web",
+	},
+	MsgKey("rich_tool_fetch_web_page"): {
+		LangEnglish:            "Fetch web page",
+		LangChinese:            "读取网页",
+		LangTraditionalChinese: "讀取網頁",
+		LangJapanese:           "ページ取得",
+		LangSpanish:            "Obtener página",
+	},
+	MsgKey("rich_tool_search_text"): {
+		LangEnglish:            "Search text",
+		LangChinese:            "搜索文本",
+		LangTraditionalChinese: "搜尋文字",
+		LangJapanese:           "テキスト検索",
+		LangSpanish:            "Buscar texto",
+	},
+	MsgKey("rich_tool_search_files"): {
+		LangEnglish:            "Search files",
+		LangChinese:            "搜索文件",
+		LangTraditionalChinese: "搜尋檔案",
+		LangJapanese:           "ファイル検索",
+		LangSpanish:            "Buscar archivos",
+	},
+	MsgKey("rich_tool_command_i_o"): {
+		LangEnglish:            "Command I/O",
+		LangChinese:            "命令输入输出",
+		LangTraditionalChinese: "命令輸入輸出",
+		LangJapanese:           "コマンド入出力",
+		LangSpanish:            "E/S de comando",
+	},
+	MsgKey("rich_tool_run_command"): {
+		LangEnglish:            "Run command",
+		LangChinese:            "执行命令",
+		LangTraditionalChinese: "執行命令",
+		LangJapanese:           "コマンド実行",
+		LangSpanish:            "Ejecutar comando",
+	},
+	MsgKey("rich_tool_browser"): {
+		LangEnglish:            "Browser",
+		LangChinese:            "浏览器",
+		LangTraditionalChinese: "瀏覽器",
+		LangJapanese:           "ブラウザー",
+		LangSpanish:            "Navegador",
+	},
+	MsgKey("rich_tool_run_sub_agent"): {
+		LangEnglish:            "Run sub-agent",
+		LangChinese:            "运行子任务",
+		LangTraditionalChinese: "執行子任務",
+		LangJapanese:           "サブエージェント実行",
+		LangSpanish:            "Ejecutar subagente",
+	},
+	MsgKey("rich_tool_run_tools"): {
+		LangEnglish:            "Run tools",
+		LangChinese:            "调用工具",
+		LangTraditionalChinese: "呼叫工具",
+		LangJapanese:           "ツール実行",
+		LangSpanish:            "Ejecutar herramientas",
+	},
+	MsgKey("rich_tool_update_plan"): {
+		LangEnglish:            "Update plan",
+		LangChinese:            "更新计划",
+		LangTraditionalChinese: "更新計畫",
+		LangJapanese:           "計画更新",
+		LangSpanish:            "Actualizar plan",
+	},
+	MsgKey("rich_tool_check"): {
+		LangEnglish:            "Check",
+		LangChinese:            "检查",
+		LangTraditionalChinese: "檢查",
+		LangJapanese:           "確認",
+		LangSpanish:            "Comprobar",
+	},
+	MsgKey("rich_tool_analyze"): {
+		LangEnglish:            "Analyze",
+		LangChinese:            "分析",
+		LangTraditionalChinese: "分析",
+		LangJapanese:           "分析",
+		LangSpanish:            "Analizar",
+	},
+	MsgKey("rich_tool_mcp_tool"): {
+		LangEnglish:            "MCP tool",
+		LangChinese:            "MCP 工具",
+		LangTraditionalChinese: "MCP 工具",
+		LangJapanese:           "MCP ツール",
+		LangSpanish:            "Herramienta MCP",
+	},
+	MsgKey("rich_tool_permissions"): {
+		LangEnglish:            "Permissions",
+		LangChinese:            "权限",
+		LangTraditionalChinese: "權限",
+		LangJapanese:           "権限",
+		LangSpanish:            "Permisos",
+	},
+	MsgKey("rich_tool_computer_use"): {
+		LangEnglish:            "Computer use",
+		LangChinese:            "操作电脑",
+		LangTraditionalChinese: "操作電腦",
+		LangJapanese:           "コンピューター操作",
+		LangSpanish:            "Usar ordenador",
+	},
+	MsgKey("rich_tool_code_interpreter"): {
+		LangEnglish:            "Code interpreter",
+		LangChinese:            "代码解释器",
+		LangTraditionalChinese: "程式碼解譯器",
+		LangJapanese:           "コードインタープリター",
+		LangSpanish:            "Intérprete de código",
+	},
+	MsgKey("rich_tool_ask_user"): {
+		LangEnglish:            "Ask user",
+		LangChinese:            "询问用户",
+		LangTraditionalChinese: "詢問使用者",
+		LangJapanese:           "ユーザーへの質問",
+		LangSpanish:            "Preguntar al usuario",
+	},
+	MsgKey("rich_tool_skill_read"): {
+		LangEnglish:            "Skill Read",
+		LangChinese:            "读取技能",
+		LangTraditionalChinese: "讀取技能",
+		LangJapanese:           "スキル読取",
+		LangSpanish:            "Leer habilidad",
+	},
+	MsgKey("rich_tool_run_tests"): {
+		LangEnglish:            "Run tests",
+		LangChinese:            "运行测试",
+		LangTraditionalChinese: "執行測試",
+		LangJapanese:           "テスト実行",
+		LangSpanish:            "Ejecutar pruebas",
+	},
+	MsgKey("rich_tool_build"): {
+		LangEnglish:            "Build",
+		LangChinese:            "构建",
+		LangTraditionalChinese: "建置",
+		LangJapanese:           "ビルド",
+		LangSpanish:            "Compilar",
+	},
+	MsgKey("rich_tool_inspect_process"): {
+		LangEnglish:            "Inspect process",
+		LangChinese:            "检查进程",
+		LangTraditionalChinese: "檢查程序",
+		LangJapanese:           "プロセス確認",
+		LangSpanish:            "Inspeccionar proceso",
+	},
+	MsgKey("rich_tool_inspect_files"): {
+		LangEnglish:            "Inspect files",
+		LangChinese:            "检查文件",
+		LangTraditionalChinese: "檢查檔案",
+		LangJapanese:           "ファイル確認",
+		LangSpanish:            "Inspeccionar archivos",
+	},
+	MsgKey("rich_tool_network"): {
+		LangEnglish:            "Network",
+		LangChinese:            "网络请求",
+		LangTraditionalChinese: "網路請求",
+		LangJapanese:           "ネットワーク",
+		LangSpanish:            "Red",
+	},
+	MsgKey("rich_tool_file_operation"): {
+		LangEnglish:            "File operation",
+		LangChinese:            "文件操作",
+		LangTraditionalChinese: "檔案操作",
+		LangJapanese:           "ファイル操作",
+		LangSpanish:            "Operación de archivo",
+	},
+	MsgKey("rich_tool_wait"): {
+		LangEnglish:            "Wait",
+		LangChinese:            "等待",
+		LangTraditionalChinese: "等待",
+		LangJapanese:           "待機",
+		LangSpanish:            "Esperar",
+	},
+
+	MsgRichStopped: {
+		LangEnglish:            "Stopped",
+		LangChinese:            "已停止",
+		LangTraditionalChinese: "已停止",
+		LangJapanese:           "停止済み",
+		LangSpanish:            "Detenido",
+	},
+	MsgRichDone: {
+		LangEnglish:            "Done",
+		LangChinese:            "已完成",
+		LangTraditionalChinese: "已完成",
+		LangJapanese:           "完了",
+		LangSpanish:            "Completado",
+	},
+	MsgRichError: {
+		LangEnglish:            "Error",
+		LangChinese:            "失败",
+		LangTraditionalChinese: "失敗",
+		LangJapanese:           "エラー",
+		LangSpanish:            "Error",
+	},
+	MsgRichWorking: {
+		LangEnglish:            "Working",
+		LangChinese:            "执行中",
+		LangTraditionalChinese: "執行中",
+		LangJapanese:           "実行中",
+		LangSpanish:            "Trabajando",
+	},
+	MsgRichReasoning: {
+		LangEnglish:            "Reasoning",
+		LangChinese:            "思考",
+		LangTraditionalChinese: "思考",
+		LangJapanese:           "推論",
+		LangSpanish:            "Razonamiento",
+	},
+	MsgRichThinking: {
+		LangEnglish:            "Thinking...",
+		LangChinese:            "思考中…",
+		LangTraditionalChinese: "思考中…",
+		LangJapanese:           "思考中…",
+		LangSpanish:            "Pensando...",
+	},
+	MsgRichTools: {
+		LangEnglish:            "Tools",
+		LangChinese:            "工具",
+		LangTraditionalChinese: "工具",
+		LangJapanese:           "ツール",
+		LangSpanish:            "Herramientas",
+	},
+	MsgRichNoTools: {
+		LangEnglish:            "No tool steps",
+		LangChinese:            "暂无工具步骤",
+		LangTraditionalChinese: "暫無工具步驟",
+		LangJapanese:           "ツール操作なし",
+		LangSpanish:            "Sin herramientas",
+	},
+	MsgRichHidden: {
+		LangEnglish:            "... %d earlier steps hidden",
+		LangChinese:            "… 已隐藏此前 %d 个步骤",
+		LangTraditionalChinese: "… 已隱藏此前 %d 個步驟",
+		LangJapanese:           "… 前の %d 操作を省略",
+		LangSpanish:            "... %d pasos anteriores ocultos",
+	},
+	MsgRichLarge: {
+		LangEnglish:            "Card content is large; showing recent activity:",
+		LangChinese:            "卡片内容过长，显示最近活动：",
+		LangTraditionalChinese: "卡片內容過長，顯示最近活動：",
+		LangJapanese:           "内容が長いため最近の操作を表示：",
+		LangSpanish:            "Contenido largo; actividad reciente:",
+	},
+	MsgRichCompleted: {
+		LangEnglish:            "completed",
+		LangChinese:            "已完成",
+		LangTraditionalChinese: "已完成",
+		LangJapanese:           "完了",
+		LangSpanish:            "completado",
+	},
+	MsgRichFailed: {
+		LangEnglish:            "failed",
+		LangChinese:            "失败",
+		LangTraditionalChinese: "失敗",
+		LangJapanese:           "失敗",
+		LangSpanish:            "fallido",
+	},
+	MsgRichRunning: {
+		LangEnglish:            "in_progress",
+		LangChinese:            "执行中",
+		LangTraditionalChinese: "執行中",
+		LangJapanese:           "実行中",
+		LangSpanish:            "en curso",
+	},
+
+	MsgFooterModel: {
+		LangEnglish:            "%s",
+		LangChinese:            "模型：%s",
+		LangTraditionalChinese: "模型：%s",
+		LangJapanese:           "モデル：%s",
+		LangSpanish:            "Modelo: %s",
+	},
+	MsgFooterEffort: {
+		LangEnglish:            "%s",
+		LangChinese:            "推理：%s",
+		LangTraditionalChinese: "推理：%s",
+		LangJapanese:           "推論：%s",
+		LangSpanish:            "Razonamiento: %s",
+	},
+	MsgFooterInput: {
+		LangEnglish:            "in %s",
+		LangChinese:            "输入 %s",
+		LangTraditionalChinese: "輸入 %s",
+		LangJapanese:           "入力 %s",
+		LangSpanish:            "entrada %s",
+	},
+	MsgFooterOutput: {
+		LangEnglish:            "out %s",
+		LangChinese:            "输出 %s",
+		LangTraditionalChinese: "輸出 %s",
+		LangJapanese:           "出力 %s",
+		LangSpanish:            "salida %s",
+	},
+	MsgFooterCacheRead: {
+		LangEnglish:            "cr %s",
+		LangChinese:            "缓存命中 %s",
+		LangTraditionalChinese: "快取命中 %s",
+		LangJapanese:           "キャッシュ読取 %s",
+		LangSpanish:            "caché leída %s",
+	},
+	MsgFooterCacheWrite: {
+		LangEnglish:            "cw %s",
+		LangChinese:            "缓存写入 %s",
+		LangTraditionalChinese: "快取寫入 %s",
+		LangJapanese:           "キャッシュ書込 %s",
+		LangSpanish:            "caché escrita %s",
+	},
+	MsgFooterTokens: {
+		LangEnglish:            "%s",
+		LangChinese:            "Token：%s",
+		LangTraditionalChinese: "Token：%s",
+		LangJapanese:           "Token：%s",
+		LangSpanish:            "Tokens: %s",
+	},
+	MsgFooterContext: {
+		LangEnglish:            "ctx %s/%s (%d%%)",
+		LangChinese:            "上下文：%s / %s（已用 %d%%）",
+		LangTraditionalChinese: "上下文：%s / %s（已用 %d%%）",
+		LangJapanese:           "コンテキスト：%s / %s（使用 %d%%）",
+		LangSpanish:            "Contexto: %s / %s (usado %d%%)",
+	},
+	MsgFooterFiveHour: {
+		LangEnglish:            "5h used %d%%",
+		LangChinese:            "五小时已用 %d%%",
+		LangTraditionalChinese: "五小時已用 %d%%",
+		LangJapanese:           "5時間の使用 %d%%",
+		LangSpanish:            "5h usado %d%%",
+	},
+	MsgFooterWeek: {
+		LangEnglish:            "wk used %d%%",
+		LangChinese:            "本周已用 %d%%",
+		LangTraditionalChinese: "本週已用 %d%%",
+		LangJapanese:           "週間使用 %d%%",
+		LangSpanish:            "semana usado %d%%",
+	},
+	MsgFooterReset: {
+		LangEnglish:            " · reset %s",
+		LangChinese:            "，%s 重置",
+		LangTraditionalChinese: "，%s 重設",
+		LangJapanese:           "、%s リセット",
+		LangSpanish:            " · reinicio %s",
+	},
+	MsgFooterQuota: {
+		LangEnglish:            "%s",
+		LangChinese:            "额度：%s",
+		LangTraditionalChinese: "額度：%s",
+		LangJapanese:           "利用枠：%s",
+		LangSpanish:            "Cuota: %s",
+	},
+	MsgFooterWorkDir: {
+		LangEnglish:            "%s",
+		LangChinese:            "工作目录：%s",
+		LangTraditionalChinese: "工作目錄：%s",
+		LangJapanese:           "作業ディレクトリ：%s",
+		LangSpanish:            "Directorio: %s",
+	},
+	MsgFooterElapsed: {
+		LangEnglish:            "⏱ Elapsed %s",
+		LangChinese:            "⏱ 用时 %s",
+		LangTraditionalChinese: "⏱ 用時 %s",
+		LangJapanese:           "⏱ 経過 %s",
+		LangSpanish:            "⏱ Tiempo %s",
+	},
+	MsgFooterRunning: {
+		LangEnglish:            "⏱ Running for %s...",
+		LangChinese:            "⏱ 运行中 %s...",
+		LangTraditionalChinese: "⏱ 執行中 %s...",
+		LangJapanese:           "⏱ 実行中 %s...",
+		LangSpanish:            "⏱ Ejecutando %s...",
+	},
+	MsgKey("footer_effort_none"): {
+		LangEnglish:            "none",
+		LangChinese:            "无",
+		LangTraditionalChinese: "無",
+		LangJapanese:           "なし",
+		LangSpanish:            "ninguno",
+	},
+	MsgKey("footer_effort_minimal"): {
+		LangEnglish:            "minimal",
+		LangChinese:            "最低",
+		LangTraditionalChinese: "最低",
+		LangJapanese:           "最小",
+		LangSpanish:            "mínimo",
+	},
+	MsgKey("footer_effort_low"): {
+		LangEnglish:            "low",
+		LangChinese:            "低",
+		LangTraditionalChinese: "低",
+		LangJapanese:           "低",
+		LangSpanish:            "bajo",
+	},
+	MsgKey("footer_effort_medium"): {
+		LangEnglish:            "medium",
+		LangChinese:            "中",
+		LangTraditionalChinese: "中",
+		LangJapanese:           "中",
+		LangSpanish:            "medio",
+	},
+	MsgKey("footer_effort_high"): {
+		LangEnglish:            "high",
+		LangChinese:            "高",
+		LangTraditionalChinese: "高",
+		LangJapanese:           "高",
+		LangSpanish:            "alto",
+	},
+	MsgKey("footer_effort_xhigh"): {
+		LangEnglish:            "xhigh",
+		LangChinese:            "极高",
+		LangTraditionalChinese: "極高",
+		LangJapanese:           "非常に高い",
+		LangSpanish:            "muy alto",
+	},
+	MsgKey("footer_effort_max"): {
+		LangEnglish:            "max",
+		LangChinese:            "最高",
+		LangTraditionalChinese: "最高",
+		LangJapanese:           "最大",
+		LangSpanish:            "máximo",
+	},
+
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
@@ -1453,6 +1935,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "提示：命令支持前綴匹配，如 /pro l = /provider list",
 		LangJapanese:           "ヒント：コマンドはプレフィックスマッチに対応、例: /pro l = /provider list",
 		LangSpanish:            "Consejo: Los comandos admiten coincidencia por prefijo, ej. /pro l = /provider list",
+	},
+	MsgPluginDaemonRequired: {
+		LangEnglish:            "Install the plugin daemon first: cc-connect daemon install --with-codex --force",
+		LangChinese:            "请先安装插件后台启动器：cc-connect daemon install --with-codex --force",
+		LangTraditionalChinese: "請先安裝外掛背景啟動器：cc-connect daemon install --with-codex --force",
+		LangJapanese:           "プラグインのバックグラウンド起動を先に設定してください: cc-connect daemon install --with-codex --force",
+		LangSpanish:            "Instala primero el daemon del plugin: cc-connect daemon install --with-codex --force",
+	},
+	MsgDaemonStatus: {
+		LangEnglish:            "Check the cc-connect background connection status",
+		LangChinese:            "查看 cc-connect 后台连接状态",
+		LangTraditionalChinese: "查看 cc-connect 背景連線狀態",
+		LangJapanese:           "cc-connect のバックグラウンド接続状態を確認",
+		LangSpanish:            "Consultar el estado de la conexión de cc-connect",
 	},
 	MsgListTitle: {
 		LangEnglish:            "**%s Sessions** (%d)\n\n",
@@ -4509,22 +5005,114 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the rela
 	},
 }
 
+// Command names are independent of the selected reply language: users can
+// mix localized and English commands without changing the command's identity.
+var localizedCommandNames = map[string]map[Language]string{
+	"new":       {LangChinese: "新建", LangTraditionalChinese: "新建", LangJapanese: "新規", LangSpanish: "nuevo"},
+	"list":      {LangChinese: "列表", LangTraditionalChinese: "清單", LangJapanese: "一覧", LangSpanish: "lista"},
+	"switch":    {LangChinese: "切换", LangTraditionalChinese: "切換", LangJapanese: "切替", LangSpanish: "cambiar"},
+	"name":      {LangChinese: "命名", LangTraditionalChinese: "命名", LangJapanese: "名前", LangSpanish: "nombre"},
+	"current":   {LangChinese: "当前", LangTraditionalChinese: "目前", LangJapanese: "現在", LangSpanish: "actual"},
+	"status":    {LangChinese: "状态", LangTraditionalChinese: "狀態", LangJapanese: "状態", LangSpanish: "estado"},
+	"usage":     {LangChinese: "用量", LangTraditionalChinese: "用量", LangJapanese: "使用量", LangSpanish: "uso"},
+	"history":   {LangChinese: "历史", LangTraditionalChinese: "歷史", LangJapanese: "履歴", LangSpanish: "historial"},
+	"allow":     {LangChinese: "授权", LangTraditionalChinese: "授權", LangJapanese: "許可", LangSpanish: "permitir"},
+	"model":     {LangChinese: "模型", LangTraditionalChinese: "模型", LangJapanese: "モデル", LangSpanish: "modelo"},
+	"reasoning": {LangChinese: "推理", LangTraditionalChinese: "推理", LangJapanese: "推論", LangSpanish: "razonamiento"},
+	"mode":      {LangChinese: "模式", LangTraditionalChinese: "模式", LangJapanese: "モード", LangSpanish: "modo"},
+	"lang":      {LangChinese: "语言", LangTraditionalChinese: "語言", LangJapanese: "言語", LangSpanish: "idioma"},
+	"quiet":     {LangChinese: "静默", LangTraditionalChinese: "靜默", LangJapanese: "静音", LangSpanish: "silencio"},
+	"provider":  {LangChinese: "服务商", LangTraditionalChinese: "服務商", LangJapanese: "プロバイダー", LangSpanish: "proveedor"},
+	"memory":    {LangChinese: "记忆", LangTraditionalChinese: "記憶", LangJapanese: "記憶", LangSpanish: "memoria"},
+	"cron":      {LangChinese: "定时", LangTraditionalChinese: "排程", LangJapanese: "定期", LangSpanish: "programar"},
+	"timer":     {LangChinese: "提醒", LangTraditionalChinese: "提醒", LangJapanese: "リマインダー", LangSpanish: "recordatorio"},
+	"heartbeat": {LangChinese: "心跳", LangTraditionalChinese: "心跳", LangJapanese: "ハートビート", LangSpanish: "latido"},
+	"compress":  {LangChinese: "压缩", LangTraditionalChinese: "壓縮", LangJapanese: "圧縮", LangSpanish: "comprimir"},
+	"stop":      {LangChinese: "停止", LangTraditionalChinese: "停止", LangJapanese: "停止", LangSpanish: "detener"},
+	"cancel":    {LangChinese: "取消", LangTraditionalChinese: "取消", LangJapanese: "キャンセル", LangSpanish: "cancelar"},
+	"help":      {LangChinese: "帮助", LangTraditionalChinese: "幫助", LangJapanese: "ヘルプ", LangSpanish: "ayuda"},
+	"version":   {LangChinese: "版本", LangTraditionalChinese: "版本", LangJapanese: "バージョン", LangSpanish: "versión"},
+	"commands":  {LangChinese: "命令", LangTraditionalChinese: "命令", LangJapanese: "コマンド", LangSpanish: "comandos"},
+	"skills":    {LangChinese: "技能", LangTraditionalChinese: "技能", LangJapanese: "スキル", LangSpanish: "habilidades"},
+	"config":    {LangChinese: "配置", LangTraditionalChinese: "設定", LangJapanese: "設定", LangSpanish: "configuración"},
+	"doctor":    {LangChinese: "诊断", LangTraditionalChinese: "診斷", LangJapanese: "診断", LangSpanish: "diagnóstico"},
+	"upgrade":   {LangChinese: "升级", LangTraditionalChinese: "升級", LangJapanese: "更新", LangSpanish: "actualizar"},
+	"restart":   {LangChinese: "重启", LangTraditionalChinese: "重啟", LangJapanese: "再起動", LangSpanish: "reiniciar"},
+	"alias":     {LangChinese: "别名", LangTraditionalChinese: "別名", LangJapanese: "別名", LangSpanish: "alias"},
+	"delete":    {LangChinese: "删除", LangTraditionalChinese: "刪除", LangJapanese: "削除", LangSpanish: "eliminar"},
+	"bind":      {LangChinese: "绑定", LangTraditionalChinese: "綁定", LangJapanese: "接続", LangSpanish: "vincular"},
+	"search":    {LangChinese: "搜索", LangTraditionalChinese: "搜尋", LangJapanese: "検索", LangSpanish: "buscar"},
+	"shell":     {LangChinese: "终端", LangTraditionalChinese: "終端", LangJapanese: "シェル", LangSpanish: "terminal"},
+	"show":      {LangChinese: "查看", LangTraditionalChinese: "檢視", LangJapanese: "表示", LangSpanish: "mostrar"},
+	"dir":       {LangChinese: "目录", LangTraditionalChinese: "目錄", LangJapanese: "ディレクトリ", LangSpanish: "directorio"},
+	"tts":       {LangChinese: "语音", LangTraditionalChinese: "語音", LangJapanese: "音声", LangSpanish: "voz"},
+	"workspace": {LangChinese: "工作区", LangTraditionalChinese: "工作區", LangJapanese: "ワークスペース", LangSpanish: "espacio"},
+	"whoami":    {LangChinese: "我的身份", LangTraditionalChinese: "我的身分", LangJapanese: "自分", LangSpanish: "identidad"},
+	"web":       {LangChinese: "网页", LangTraditionalChinese: "網頁", LangJapanese: "ウェブ", LangSpanish: "web"},
+	"diff":      {LangChinese: "差异", LangTraditionalChinese: "差異", LangJapanese: "差分", LangSpanish: "diferencias"},
+	"ps":        {LangChinese: "补充", LangTraditionalChinese: "補充", LangJapanese: "補足", LangSpanish: "añadir"},
+}
+
+func (i *I18n) CommandName(command string) string {
+	if name := localizedCommandNames[command][i.CurrentLang()]; name != "" {
+		return name
+	}
+	return command
+}
+
+func normalizeLocalizedCommand(content string) string {
+	if !strings.HasPrefix(content, "/") {
+		return content
+	}
+	end := strings.IndexAny(content, " \t\r\n")
+	if end < 0 {
+		end = len(content)
+	}
+	name := strings.ToLower(content[1:end])
+	if name == "暂停" || name == "暫停" {
+		return "/stop" + content[end:]
+	}
+	for command, translations := range localizedCommandNames {
+		for _, translation := range translations {
+			if name == translation {
+				return "/" + command + content[end:]
+			}
+		}
+	}
+	return content
+}
+
+var helpCommandPattern = regexp.MustCompile("(?m)(^|[\\s`])/[a-z]+")
+
+func localizeHelp(key MsgKey, text string, lang Language) string {
+	if key != MsgHelp && key != MsgHelpTip {
+		return text
+	}
+	return helpCommandPattern.ReplaceAllStringFunc(text, func(match string) string {
+		start := strings.LastIndex(match, "/")
+		if name := localizedCommandNames[match[start+1:]][lang]; name != "" {
+			return match[:start+1] + name
+		}
+		return match
+	})
+}
+
 func (i *I18n) T(key MsgKey) string {
 	i.mu.RLock()
 	lang := i.currentLang()
 	i.mu.RUnlock()
 	if msg, ok := messages[key]; ok {
 		if translated, ok := msg[lang]; ok {
-			return translated
+			return localizeHelp(key, translated, lang)
 		}
 		// Fallback: zh-TW → zh → en
 		if lang == LangTraditionalChinese {
 			if translated, ok := msg[LangChinese]; ok {
-				return translated
+				return localizeHelp(key, translated, lang)
 			}
 		}
 		if msg[LangEnglish] != "" {
-			return msg[LangEnglish]
+			return localizeHelp(key, msg[LangEnglish], lang)
 		}
 	}
 	return string(key)

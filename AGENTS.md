@@ -1,5 +1,7 @@
 # CC-Connect Development Guide
 
+Start with [the documentation index](docs/README.md), [handoff](docs/handoff.zh-CN.md), [troubleshooting](docs/troubleshooting.zh-CN.md), and [CHANGELOG](CHANGELOG.md) before changing Windows plugin, locale, or status footer behavior.
+
 ## Project Overview
 
 CC-Connect is a bridge that connects AI coding agents (Claude Code, Codex, Gemini CLI, Cursor, etc.) with messaging platforms (Feishu/Lark, Telegram, Discord, Slack, DingTalk, WeChat Work, QQ, LINE). Users interact with their coding agent through their preferred messaging app.

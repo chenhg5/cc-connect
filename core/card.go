@@ -9,6 +9,7 @@ import (
 // platform-specific cards (Feishu Interactive Card, Telegram message, etc.)
 // or degraded to plain text for platforms without card support.
 type Card struct {
+	Language Language // locale inherited by interactive callbacks
 	Header   *CardHeader
 	Elements []CardElement
 }

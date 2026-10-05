@@ -36,8 +36,8 @@ func TestAppServerSession_HandleRateLimitsUpdatedCachesUsage(t *testing.T) {
 		RateLimits: appServerRateLimitSnapshot{
 			LimitID:   "codex",
 			PlanType:  "pro",
-			Primary:   &appServerRateLimitWindow{UsedPercent: 25, WindowDurationMins: 15, ResetsAt: 1730947200},
-			Secondary: &appServerRateLimitWindow{UsedPercent: 42, WindowDurationMins: 60, ResetsAt: 1730950800},
+			Primary:   &appServerRateLimitWindow{UsedPercent: usagePercent(25), WindowDurationMins: 15, ResetsAt: 1730947200},
+			Secondary: &appServerRateLimitWindow{UsedPercent: usagePercent(42), WindowDurationMins: 60, ResetsAt: 1730950800},
 			Credits:   &appServerCreditsSnapshot{HasCredits: true, Unlimited: false},
 		},
 	})
@@ -233,19 +233,19 @@ func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 		RateLimits: appServerRateLimitSnapshot{
 			LimitID:  "legacy",
 			PlanType: "team",
-			Primary:  &appServerRateLimitWindow{UsedPercent: 99, WindowDurationMins: 15},
+			Primary:  &appServerRateLimitWindow{UsedPercent: usagePercent(99), WindowDurationMins: 15},
 		},
 		RateLimitsByLimitID: map[string]appServerRateLimitSnapshot{
 			"codex": {
 				LimitID:   "codex",
 				LimitName: "Codex",
 				PlanType:  "team",
-				Primary:   &appServerRateLimitWindow{UsedPercent: 10, WindowDurationMins: 15},
+				Primary:   &appServerRateLimitWindow{UsedPercent: usagePercent(10), WindowDurationMins: 15},
 			},
 			"codex_other": {
 				LimitID:  "codex_other",
 				PlanType: "team",
-				Primary:  &appServerRateLimitWindow{UsedPercent: 20, WindowDurationMins: 60},
+				Primary:  &appServerRateLimitWindow{UsedPercent: usagePercent(20), WindowDurationMins: 60},
 			},
 		},
 	})
@@ -505,21 +505,45 @@ func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
 
 func TestAppServerListenURL(t *testing.T) {
 	cases := map[string]string{
-		"":                       "",
-		"  ":                     "",
-		"stdio://":               "",
-		"stdio":                  "",
-		"ws://127.0.0.1:3845":    "ws://127.0.0.1:3845",
-		"ws://localhost:9000":    "ws://localhost:9000",
-		"ws://127.0.0.1:3845 ":   "ws://127.0.0.1:3845",
-		" stdio ":                 "",
-		" stdio:// ":               "",
-		"STDIO":                    "",
-		"STDIO://":                 "",
+		"":                     "",
+		"  ":                   "",
+		"stdio://":             "",
+		"stdio":                "",
+		"ws://127.0.0.1:3845":  "ws://127.0.0.1:3845",
+		"ws://localhost:9000":  "ws://localhost:9000",
+		"ws://127.0.0.1:3845 ": "ws://127.0.0.1:3845",
+		" stdio ":              "",
+		" stdio:// ":           "",
+		"STDIO":                "",
+		"STDIO://":             "",
 	}
 	for in, want := range cases {
 		if got := appServerListenURL(in); got != want {
 			t.Errorf("appServerListenURL(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func usagePercent(n int) *int { return &n }
+
+func TestAppServerQuota_MissingPercentageDoesNotBecomeZero(t *testing.T) {
+	var response appServerRateLimitsResponse
+	if err := json.Unmarshal([]byte(`{"rateLimits":{"primary":{"windowDurationMins":300},"secondary":{"usedPercent":0,"windowDurationMins":10080}}}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	report := mapAppServerRateLimits(response)
+	if len(report.Buckets) != 1 || len(report.Buckets[0].Windows) != 1 || report.Buckets[0].Windows[0].WindowSeconds != 604800 {
+		t.Fatalf("missing percentage displayed as zero: %#v", report)
+	}
+}
+
+func TestAppServerQuota_StaleCacheIsNotReturnedOnFailure(t *testing.T) {
+	s := &appServerSession{}
+	s.storeUsage(&core.UsageReport{Buckets: []core.UsageBucket{{Windows: []core.UsageWindow{{WindowSeconds: 18000, UsedPercent: 25}}}}})
+	s.usageFetchedAt = time.Now().Add(-31 * time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if report, err := s.GetUsage(ctx); err == nil || report != nil {
+		t.Fatalf("stale cache returned: %#v %v", report, err)
 	}
 }

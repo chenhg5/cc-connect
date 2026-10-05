@@ -44,10 +44,9 @@ func TestRotatingWriter(t *testing.T) {
 }
 
 func TestMetaSaveLoad(t *testing.T) {
-	origHome := os.Getenv("HOME")
 	dir := t.TempDir()
-	os.Setenv("HOME", dir)
-	defer os.Setenv("HOME", origHome)
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 
 	m := &Meta{
 		LogFile:       "/tmp/test.log",
@@ -55,7 +54,7 @@ func TestMetaSaveLoad(t *testing.T) {
 		LogMaxBackups: 3,
 		WorkDir:       "/tmp",
 		BinaryPath:    "/usr/local/bin/cc-connect",
-		InstalledAt:  NowISO(),
+		InstalledAt:   NowISO(),
 	}
 
 	if err := SaveMeta(m); err != nil {

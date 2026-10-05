@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 const (
@@ -20,6 +21,7 @@ const (
 
 var runPowerShell = func(script string) (string, error) {
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", strictPowerShell(script))
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000} // CREATE_NO_WINDOW
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
@@ -40,6 +42,13 @@ func newPlatformManager() (Manager, error) {
 func (*schtasksManager) Platform() string { return "schtasks" }
 
 func (m *schtasksManager) Install(cfg Config) error {
+	launcherPath := filepath.Join(filepath.Dir(cfg.BinaryPath), "cc-connect-plugin.exe")
+	if _, err := os.Stat(launcherPath); err != nil {
+		return fmt.Errorf("Windows daemon requires %s alongside cc-connect.exe: %w", launcherPath, err)
+	}
+	if err := stopWindowsTask(); err != nil {
+		return fmt.Errorf("stop existing task: %w", err)
+	}
 	if err := os.MkdirAll(DefaultDataDir(), 0755); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
@@ -61,11 +70,8 @@ func (m *schtasksManager) Install(cfg Config) error {
 		return fmt.Errorf("chmod task script: %w", err)
 	}
 
-	if err := stopWindowsTask(); err != nil {
-		slog.Warn("schtasks: stop existing task failed", "error", err)
-	}
 	if err := deleteWindowsTask(); err != nil {
-		if windowsTaskMatchesAction(scriptPath) {
+		if !cfg.StartWithCodex && windowsTaskMatchesAction(scriptPath, launcherPath) {
 			if err := m.Start(); err != nil {
 				return fmt.Errorf("start existing task: %w", err)
 			}
@@ -74,7 +80,7 @@ func (m *schtasksManager) Install(cfg Config) error {
 		return err
 	}
 
-	if err := createWindowsTask(scriptPath); err != nil {
+	if err := createWindowsTask(scriptPath, launcherPath, cfg.StartWithCodex); err != nil {
 		return err
 	}
 
@@ -86,7 +92,7 @@ func (m *schtasksManager) Install(cfg Config) error {
 
 func (*schtasksManager) Uninstall() error {
 	if err := stopWindowsTask(); err != nil {
-		slog.Warn("schtasks: stop task failed", "error", err)
+		return fmt.Errorf("stop task: %w", err)
 	}
 	if err := deleteWindowsTask(); err != nil {
 		return err
@@ -110,7 +116,7 @@ func (*schtasksManager) Stop() error {
 
 func (*schtasksManager) Restart() error {
 	if err := stopWindowsTask(); err != nil {
-		slog.Warn("schtasks: stop before restart failed", "error", err)
+		return fmt.Errorf("stop before restart: %w", err)
 	}
 	return startWindowsTask()
 }
@@ -122,15 +128,21 @@ func (*schtasksManager) Status() (*Status, error) {
 $task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
 if ($null -eq $task) { exit 1 }
 Write-Output $task.State
-`, powerShellLiteral(windowsTaskName)))
+%s
+if ($null -ne $child) { Write-Output $child.Id }
+`, powerShellLiteral(windowsTaskName), windowsManagedChildScript()))
 	if err != nil {
 		return st, nil
 	}
 	st.Installed = true
 
-	taskStatus := strings.TrimSpace(out)
-	if strings.EqualFold(taskStatus, "Running") {
-		st.Running = true
+	fields := strings.Fields(out)
+	if len(fields) > 0 && strings.EqualFold(fields[0], "Running") {
+		st.Supervising = true
+		if len(fields) > 1 {
+			st.PID, _ = strconv.Atoi(fields[1])
+			st.Running = st.PID > 0
+		}
 	}
 	return st, nil
 }
@@ -139,40 +151,65 @@ func windowsTaskScriptPath() string {
 	return filepath.Join(DefaultDataDir(), windowsScriptName)
 }
 
-func windowsTaskAction(scriptPath string) string {
-	return fmt.Sprintf(`powershell.exe %s`, windowsTaskActionArgs(scriptPath))
+func windowsProcessStatePath() string {
+	return filepath.Join(DefaultDataDir(), "daemon-process.json")
+}
+
+// Validate both image and start time before using a saved PID, which Windows may reuse.
+func windowsManagedChildScript() string {
+	return fmt.Sprintf(`
+$child = $null
+if (Test-Path -LiteralPath %s) {
+    try {
+        $state = Get-Content -LiteralPath %s -Raw | ConvertFrom-Json
+        $child = Get-Process -Id $state.pid -ErrorAction Stop
+        if ($child.Path -ine $state.binary_path -or $child.StartTime.ToUniversalTime().Ticks -ne [long]$state.start_ticks) { $child = $null }
+    } catch { $child = $null }
+}
+`, powerShellLiteral(windowsProcessStatePath()), powerShellLiteral(windowsProcessStatePath()))
+}
+
+func windowsTaskAction(scriptPath, launcherPath string) string {
+	return fmt.Sprintf(`"%s" %s`, launcherPath, windowsTaskActionArgs(scriptPath))
 }
 
 func windowsTaskActionArgs(scriptPath string) string {
-	return fmt.Sprintf(`-WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%s"`, scriptPath)
+	return fmt.Sprintf(`--supervisor "%s"`, scriptPath)
 }
 
-func createWindowsTask(scriptPath string) error {
+func createWindowsTask(scriptPath, launcherPath string, startWithCodex bool) error {
+	trigger, triggerArg := "", ""
+	if !startWithCodex {
+		trigger = "$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user"
+		triggerArg = "-Trigger $trigger"
+	}
 	out, err := runPowerShell(fmt.Sprintf(`
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument %s
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName %s -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-`, powerShellLiteral(windowsTaskActionArgs(scriptPath)), powerShellLiteral(windowsTaskName)))
+$action = New-ScheduledTaskAction -Execute %s -Argument %s
+$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+%s
+$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName %s -Action $action %s -Principal $principal -Settings $settings -Force | Out-Null
+`, powerShellLiteral(launcherPath), powerShellLiteral(windowsTaskActionArgs(scriptPath)), trigger, powerShellLiteral(windowsTaskName), triggerArg))
 	if err != nil {
 		return fmt.Errorf("register scheduled task: %s (%w)", out, err)
 	}
 	return nil
 }
 
-func windowsTaskMatchesAction(scriptPath string) bool {
+func windowsTaskMatchesAction(scriptPath, launcherPath string) bool {
 	out, err := runPowerShell(fmt.Sprintf(`
 $task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
 if ($null -eq $task) { exit 1 }
 $expectedArgs = %s
 foreach ($action in $task.Actions) {
-	if (($action.Execute -ieq 'powershell.exe') -and ($action.Arguments -eq $expectedArgs)) {
+	if (($action.Execute -ieq %s) -and ($action.Arguments -eq $expectedArgs)) {
 		Write-Output 'true'
 		exit 0
 	}
 }
 exit 1
-`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskActionArgs(scriptPath))))
+`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskActionArgs(scriptPath)), powerShellLiteral(launcherPath)))
 	return err == nil && strings.EqualFold(strings.TrimSpace(out), "true")
 }
 
@@ -182,6 +219,7 @@ func buildWindowsTaskScript(cfg Config) string {
 	writePowerShellEnv(&sb, "CC_LOG_FILE", cfg.LogFile)
 	writePowerShellEnv(&sb, "CC_LOG_MAX_SIZE", strconv.FormatInt(cfg.LogMaxSize, 10))
 	writePowerShellEnv(&sb, "CC_LOG_MAX_BACKUPS", strconv.Itoa(cfg.LogMaxBackups))
+	writePowerShellEnv(&sb, "CC_DAEMON_WINDOWS_SUPERVISED", "1")
 	if cfg.EnvPATH != "" {
 		writePowerShellEnv(&sb, "PATH", cfg.EnvPATH)
 	}
@@ -204,13 +242,72 @@ func buildWindowsTaskScript(cfg Config) string {
 			writePowerShellEnv(&sb, key, value)
 		}
 	}
+	fmt.Fprintf(&sb, "$statePath = %s\r\n$binary = %s\r\n", powerShellLiteral(windowsProcessStatePath()), powerShellLiteral(cfg.BinaryPath))
+	sb.WriteString(`
+function Write-SupervisorLog($message) {
+    $line = [Text.Encoding]::UTF8.GetBytes("$(Get-Date -Format o) windows supervisor: $message` + "`r`n" + `")
+    $log = [IO.File]::Open($env:CC_LOG_FILE, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+    try { $log.Write($line, 0, $line.Length) } finally { $log.Dispose() }
+}
+$process = $null
+try {
+`)
 	fmt.Fprintf(&sb, "Set-Location -LiteralPath %s\r\n", powerShellLiteral(cfg.WorkDir))
-	sb.WriteString("while ($true) {\r\n")
-	fmt.Fprintf(&sb, "  & %s\r\n", powerShellLiteral(cfg.BinaryPath))
-	sb.WriteString("  $exitCode = $LASTEXITCODE\r\n")
-	sb.WriteString("  if ($exitCode -eq 0) { exit 0 }\r\n")
-	sb.WriteString("  Start-Sleep -Seconds 10\r\n")
-	sb.WriteString("}\r\n")
+	if cfg.StartWithCodex {
+		sb.WriteString(`
+$sessionId = (Get-Process -Id $PID).SessionId
+function Find-CodexDesktop {
+    Get-Process -Name ChatGPT,Codex -ErrorAction SilentlyContinue | Where-Object {
+        $_.SessionId -eq $sessionId -and $_.MainWindowHandle -ne 0 -and [Diagnostics.FileVersionInfo]::GetVersionInfo($_.Path).ProductName -eq 'Codex'
+    } | Select-Object -First 1
+}
+`)
+	}
+	sb.WriteString("$basePath = $env:PATH\r\nwhile ($true) {\r\n")
+	if cfg.StartWithCodex {
+		sb.WriteString(`
+    if ($null -eq (Find-CodexDesktop)) { Write-SupervisorLog 'Codex desktop closed; stopping'; exit 0 }
+    $codexExe = Get-ChildItem -Path "$env:LOCALAPPDATA\OpenAI\Codex\bin\*\codex.exe" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($codexExe) { $env:PATH = $codexExe.DirectoryName + ';' + $basePath }
+`)
+	}
+	sb.WriteString(`
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $binary
+    $start.WorkingDirectory = (Get-Location).Path
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $process = [System.Diagnostics.Process]::Start($start)
+    @{ pid = $process.Id; binary_path = $binary; start_ticks = $process.StartTime.ToUniversalTime().Ticks } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+`)
+	if cfg.StartWithCodex {
+		sb.WriteString(`
+    while (-not $process.WaitForExit(1000)) {
+        if ($null -eq (Find-CodexDesktop)) { Write-SupervisorLog 'Codex desktop closed; stopping'; exit 0 }
+    }
+`)
+	} else {
+		sb.WriteString("    $process.WaitForExit()\r\n")
+	}
+	sb.WriteString(`
+    $exitCode = $process.ExitCode
+    Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+    $process.Dispose()
+    $process = $null
+    if ($exitCode -eq 0) { exit 0 }
+    Write-SupervisorLog "cc-connect exited with code $exitCode; restarting in 10 seconds"
+    Start-Sleep -Seconds 10
+}
+} catch {
+    Write-SupervisorLog $_.Exception.Message
+    exit 1
+} finally {
+    if ($null -ne $process -and -not $process.HasExited) {
+        & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F | Out-Null
+    }
+    Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+}
+`)
 	return sb.String()
 }
 
@@ -228,9 +325,15 @@ func stopWindowsTask() error {
 	out, err := runPowerShell(fmt.Sprintf(`
 $task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
 if ($null -eq $task) { exit 0 }
+%s
 if ($task.State -eq 'Running') {
 	Stop-ScheduledTask -TaskName %s
 }
+if ($null -ne $child -and -not $child.HasExited) {
+    & "$env:SystemRoot\System32\taskkill.exe" /PID $child.Id /T /F | Out-Null
+    if ($LASTEXITCODE -ne 0 -and -not $child.HasExited) { Write-Error 'failed to stop cc-connect process tree'; exit 1 }
+}
+Remove-Item -LiteralPath %s -Force -ErrorAction SilentlyContinue
 for ($i = 0; $i -lt 20; $i++) {
 	$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
 	if ($null -eq $task -or $task.State -ne 'Running') { exit 0 }
@@ -238,7 +341,7 @@ for ($i = 0; $i -lt 20; $i++) {
 }
 Write-Error 'scheduled task did not stop within timeout'
 exit 1
-`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName)))
+`, powerShellLiteral(windowsTaskName), windowsManagedChildScript(), powerShellLiteral(windowsTaskName), powerShellLiteral(windowsProcessStatePath()), powerShellLiteral(windowsTaskName)))
 	if err != nil {
 		return fmt.Errorf("stop scheduled task: %s (%w)", out, err)
 	}

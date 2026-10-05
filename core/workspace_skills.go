@@ -49,11 +49,12 @@ func (e *Engine) skillsForMessage(p Platform, msg *Message) (*SkillRegistry, err
 	return e.loadSkillsForAgent(agent)
 }
 
-func (e *Engine) skillsCardForSession(sessionKey string) *Card {
+func (e *Engine) skillsCardForSession(sessionKey string, locale ...*I18n) *Card {
+	i18n := e.localI18n(locale...)
 	p := e.platformForName(extractPlatformName(sessionKey))
 	registry, err := e.skillsForMessage(p, &Message{SessionKey: sessionKey, Platform: p.Name()})
 	if err != nil {
-		return e.simpleCard(e.i18n.T(MsgCardTitleSkills), "purple", e.i18n.Tf(MsgWsResolutionError, err))
+		return e.simpleCard(i18n.T(MsgCardTitleSkills), "purple", i18n.Tf(MsgWsResolutionError, err))
 	}
-	return e.renderSkillsCard(registry)
+	return e.renderSkillsCard(registry, i18n)
 }

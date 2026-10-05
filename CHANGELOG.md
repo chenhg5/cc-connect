@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add an optional Windows Codex desktop plugin lifecycle: initialize starts a reusable supervised daemon, desktop exit stops its managed process tree, and individual MCP disconnections preserve other clients.
+- Start the Windows plugin and scheduled supervisor through a companion GUI launcher; create backend and Codex child processes without console windows, and allow shared supervisor/backend log writes.
+- Add an optional UTF-8 PowerShell wrapper for Windows Codex tools, preserving sandbox behavior, standard streams and exit codes without allocating visible console windows.
+- Localize command aliases and resolve automatic language from original input; preserve per-message, queued-task and card-button language snapshots without persisting auto-detected language.
+- Localize rich-card states and completion footers; report runtime model/effort, latest-request tokens, real context capacity and available five-hour/weekly used quota with local reset time, and retain partial results on interruption.
+- Add Windows process/encoding and locale/card regression coverage, a documentation index, troubleshooting and technical handoff guides. Windows daemon installation now requires `cc-connect-plugin.exe` beside the main executable.
+
 ## v1.5.1-beta.1 (2026-08-28)
 
 Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability, Claude Code /compact, Codex reasoning, and Cursor image attachments. See `changelogs/v1.5.1-beta.1.md` for the full contributor list.

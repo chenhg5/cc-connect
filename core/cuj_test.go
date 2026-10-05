@@ -1841,6 +1841,27 @@ func TestCUJ_F3_LangSwitchChangesReplyLanguage(t *testing.T) {
 	}
 }
 
+func TestCUJ_F3_LocalizedCommandsKeepPermissionsAndEnglish(t *testing.T) {
+	env := newCUJEnv(t)
+	env.userSends("localized", "/语言 中文")
+	if !strings.Contains(env.lastSent(), "中文") {
+		t.Fatalf("language command did not switch replies: %s", env.lastSent())
+	}
+	env.userSends("localized", "/帮助")
+	if !strings.Contains(env.lastSent(), "/模型") {
+		t.Fatalf("help did not show localized commands: %s", env.lastSent())
+	}
+	env.userSends("localized", "/终端 echo forbidden")
+	if !strings.Contains(env.lastSent(), env.engine.i18n.Tf(MsgAdminRequired, "/shell")) {
+		t.Fatalf("localized shell bypassed admin restriction: %s", env.lastSent())
+	}
+	env.userSends("localized", "/lang en")
+	env.userSends("localized", "/help")
+	if !strings.Contains(env.lastSent(), "/model") {
+		t.Fatalf("English commands no longer work: %s", env.lastSent())
+	}
+}
+
 // CUJ-F4 · Config hot-reload: SetBannedWords after engine running takes effect.
 func TestCUJ_F4_HotReloadBannedWordsTakesEffect(t *testing.T) {
 	env := newCUJEnv(t)
