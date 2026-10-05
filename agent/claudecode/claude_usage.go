@@ -9,10 +9,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -26,7 +28,35 @@ const (
 	claudeUsagePollInterval         = 100 * time.Millisecond
 	claudeUsageStableFor            = 450 * time.Millisecond
 	claudeUsageActionGap            = 250 * time.Millisecond
+	// claudeUsageCleanupWait bounds each cleanup step (waiting for the process / reader to exit).
+	// The engine runs /usage synchronously inside the platform receive loop, so every second
+	// spent here is a second the bot cannot receive messages.
+	claudeUsageCleanupWait = 1 * time.Second
+	// claudeUsageDialogRetry is how long to wait for the screen to react to a dialog key before retrying.
+	claudeUsageDialogRetry = 1 * time.Second
+	// claudeUsageMaxDialogResponses caps dialog keystrokes so an unrecognised UI cannot loop forever.
+	claudeUsageMaxDialogResponses = 8
+	// claudeUsageSettleMax treats the screen as settled after this long even if it keeps changing (spinners).
+	claudeUsageSettleMax = 3 * time.Second
 )
+
+// claudeUsageProbeDir returns the working directory for the /usage probe.
+// A stable cache directory means the folder-trust dialog only appears once, and each probe
+// no longer adds a random temp-dir project entry to ~/.claude.json.
+// Falls back to a one-off temp dir (removed afterwards) when no cache dir is available.
+func claudeUsageProbeDir() (dir string, cleanup func(), err error) {
+	if cacheDir, cerr := os.UserCacheDir(); cerr == nil {
+		dir = filepath.Join(cacheDir, "cc-connect", "claude-usage-probe")
+		if mkErr := os.MkdirAll(dir, 0o700); mkErr == nil {
+			return dir, func() {}, nil
+		}
+	}
+	dir, err = os.MkdirTemp("", "cc-connect-claude-usage-*")
+	if err != nil {
+		return "", nil, err
+	}
+	return dir, func() { _ = os.RemoveAll(dir) }, nil
+}
 
 var (
 	claudeUsagePercentRe    = regexp.MustCompile(`(?i)\b(\d{1,3})\s*%\s*used\b`)
@@ -37,9 +67,9 @@ var (
 )
 
 type claudeUsageProbeState struct {
-	promptResponses int
-	sentWake        bool
-	sentUsage       bool
+	dialogResponses int
+	sentUsage       bool // typed "/usage" into the input box (without Enter)
+	sentEnter       bool // saw "/usage" echoed in the input box and pressed Enter
 	sentEnterRetry  bool
 	sentUsageRetry  bool
 	lastActionAt    time.Time
@@ -62,19 +92,28 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	probeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	workDir, err := os.MkdirTemp("", "cc-connect-claude-usage-*")
+	workDir, cleanupDir, err := claudeUsageProbeDir()
 	if err != nil {
-		return "", fmt.Errorf("claudecode: create usage temp dir: %w", err)
+		return "", fmt.Errorf("claudecode: create usage probe dir: %w", err)
 	}
-	defer os.RemoveAll(workDir)
+	defer cleanupDir()
 
 	args := []string{
 		"--tools", "",
 		"--permission-mode", "plan",
 		"--no-chrome",
+		// Only use MCP servers from --mcp-config (none given): the probe does not start the
+		// user's configured MCP servers, which is faster and leaves no grandchild processes.
+		"--strict-mcp-config",
 	}
 	cmd := exec.CommandContext(probeCtx, "claude", args...)
 	cmd.Dir = workDir
+	// CommandContext's default cancel is SIGKILL, which can corrupt ~/.claude.json if claude is
+	// writing it. Send SIGTERM to the process group instead (pty.Start uses Setsid, so claude leads
+	// its own group); WaitDelay then kills it and closes pipes, so a grandchild holding stderr
+	// cannot keep Wait blocked.
+	cmd.Cancel = func() error { return signalProcessGroup(cmd, syscall.SIGTERM) }
+	cmd.WaitDelay = claudeUsageCleanupWait
 
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	env = append(env, "DISABLE_TELEMETRY=true")
@@ -84,8 +123,9 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	}
 	cmd.Env = env
 
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	// exec copies stderr from its own goroutine while the probe loop reads it every tick.
+	stderr := &lockedBuffer{}
+	cmd.Stderr = stderr
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 40, Cols: 120})
 	if err != nil {
@@ -119,25 +159,44 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 		}
 	}()
 
+	// readerExited records whether the main loop already received from readDone. readDone is
+	// written exactly once; the old deferred `<-readDone` blocked forever after the loop had
+	// consumed it, freezing the caller (and with it the whole platform receive loop).
+	readerExited := false
+
 	defer func() {
+		// Order: let claude exit gracefully, close the pty, then wait (bounded) for the reader.
+		// Every step is bounded: leaking a reader goroutine is better than hanging the caller.
+		cancel()
+		select {
+		case <-processDone:
+		case <-time.After(2 * claudeUsageCleanupWait):
+			slog.Warn("claudeSession: usage probe did not exit after SIGTERM + WaitDelay")
+		}
+		// When WaitDelay expires exec only SIGKILLs claude itself; grandchildren that ignore
+		// SIGTERM would survive. Always kill the whole group (ESRCH is ignored if it is gone).
+		if err := forceKillCmd(cmd); err != nil {
+			slog.Warn("claudeSession: kill usage probe process group", "error", err)
+		}
+		select {
+		case <-processDone:
+		case <-time.After(claudeUsageCleanupWait):
+			slog.Warn("claudeSession: usage probe process did not exit after kill")
+		}
 		if err := ptmx.Close(); err != nil {
 			slog.Warn("claudeSession: close ptmx", "error", err)
 		}
-		cancel()
-		// Wait for reader goroutine to finish so it is never leaked.
-		<-readDone
-		select {
-		case <-processDone:
-		case <-time.After(2 * time.Second):
-			if cmd.Process != nil {
-				if err := cmd.Process.Kill(); err != nil {
-					slog.Warn("claudeSession: kill process", "error", err)
-				}
+		// On macOS a child may inherit the pty slave, so Read may not return right after Close.
+		if !readerExited {
+			select {
+			case <-readDone:
+			case <-time.After(claudeUsageCleanupWait):
+				slog.Warn("claudeSession: usage probe reader still blocked; leaking goroutine")
 			}
-			<-processDone
 		}
 	}()
 
+	probeStart := time.Now()
 	ticker := time.NewTicker(claudeUsagePollInterval)
 	defer ticker.Stop()
 
@@ -146,6 +205,7 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 		lastScreen  string
 		lastChange  = time.Now()
 		usageScreen string
+		readCh      = readDone
 	)
 
 	for {
@@ -158,11 +218,16 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 				return "", screenErr
 			}
 			return "", fmt.Errorf("claudecode: timed out waiting for Claude Code /usage panel: %w", probeCtx.Err())
-		case err := <-readDone:
+		case err := <-readCh:
+			readerExited = true
+			// Disable this case (a nil channel blocks forever) and keep waiting for processDone.
+			// readDone itself is left untouched for the reader goroutine and the deferred cleanup.
+			readCh = nil
 			if err != nil {
 				return "", fmt.Errorf("claudecode: read Claude Code /usage output: %w", err)
 			}
 		case <-processDone:
+			slog.Debug("claudecode: usage probe process exited", "screen_tail", claudeUsageScreenTail(normalizeClaudeUsageText(terminal.String())))
 			if usageScreen != "" {
 				return usageScreen, nil
 			}
@@ -179,10 +244,9 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 				lastScreen = screen
 				lastChange = time.Now()
 			}
+			// Refresh the snapshot on every ready tick: the panel renders in chunks.
 			if usageReady(lastScreen) {
-				if usageScreen == "" {
-					usageScreen = lastScreen
-				}
+				usageScreen = lastScreen
 			}
 			if screenErr := detectClaudeUsageOutputError(lastScreen, stderr.String()); screenErr != nil {
 				return "", screenErr
@@ -190,7 +254,13 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 			if usageScreen != "" && time.Since(lastChange) >= claudeUsageStableFor {
 				return usageScreen, nil
 			}
-			if action := nextClaudeUsageProbeAction(lastScreen, &state, time.Now()); action != "" {
+			// No blind keys before the UI has rendered: an early Enter sits in the input buffer and
+			// is consumed by the trust dialog as soon as it appears, selecting the default "No, exit".
+			settled := lastScreen != "" &&
+				(time.Since(lastChange) >= claudeUsageStableFor || time.Since(probeStart) >= claudeUsageSettleMax)
+			screenChanged := lastChange.After(state.lastActionAt)
+			if action := nextClaudeUsageProbeAction(lastScreen, &state, time.Now(), settled, screenChanged); action != "" {
+				slog.Debug("claudecode: usage probe input", "action", fmt.Sprintf("%q", action), "screen_tail", claudeUsageScreenTail(lastScreen))
 				if _, err := io.WriteString(ptmx, action); err != nil {
 					return "", fmt.Errorf("claudecode: write Claude Code /usage probe input: %w", err)
 				}
@@ -205,73 +275,251 @@ func (a *Agent) usageProbeEnv() []string {
 	return a.runtimeEnvLocked()
 }
 
-func nextClaudeUsageProbeAction(screen string, state *claudeUsageProbeState, now time.Time) string {
+// nextClaudeUsageProbeAction decides what to type into claude next. Rules:
+//   - only type when positively at the Claude Code input box (REPL);
+//   - answer the folder-trust dialog by cursor position (it only trusts the fixed probe dir);
+//   - press Esc on any other dialog (promos, default-mode nudges, telemetry, ...);
+//   - send nothing on unrecognised screens: failing this probe beats choosing for the user.
+//
+// Background: the old code pressed Enter blindly. On Claude Code 2.1.289 that accepted the
+// default "Yes" of "Make auto mode your default permission mode?" and rewrote the user's
+// ~/.claude/settings.json.
+//
+// settled: the screen has rendered and is stable. screenChanged: the screen changed since the
+// last keystroke (prevents acting twice on a stale frame).
+func nextClaudeUsageProbeAction(screen string, state *claudeUsageProbeState, now time.Time, settled, screenChanged bool) string {
 	if now.Sub(state.lastActionAt) < claudeUsageActionGap {
 		return ""
 	}
-
-	if action := promptActionForScreen(screen); action != "" && state.promptResponses < 6 {
-		state.promptResponses++
-		state.lastActionAt = now
-		return action
-	}
-
+	// The panel is up: any key could close it.
 	if usageReady(screen) {
 		return ""
 	}
 
-	if !state.sentWake {
-		state.sentWake = true
-		state.lastActionAt = now
-		return "\r"
+	lower := strings.ToLower(screen)
+	firstKey := state.lastActionAt.IsZero()
+	// Esc / arrow keys: allowed once the screen changed, or after claudeUsageDialogRetry without a
+	// change. Keep that interval above Claude Code's double-Esc window (~800ms), otherwise two Escs
+	// open the rewind menu.
+	retryTurn := (firstKey || screenChanged || now.Sub(state.lastActionAt) >= claudeUsageDialogRetry) &&
+		state.dialogResponses < claudeUsageMaxDialogResponses
+	// Enter: only after the screen actually changed. An unchanged screen may mean the previous Enter
+	// was accepted but not yet redrawn; a repeated Enter would land on whatever gets focus next
+	// (e.g. a promo dialog that pops up right after).
+	enterTurn := (firstKey || screenChanged) && state.dialogResponses < claudeUsageMaxDialogResponses
+
+	if isTrustDialog(lower) {
+		action := trustDialogAction(lower)
+		if (action == "\r" && enterTurn) || (action != "" && action != "\r" && retryTurn) {
+			state.dialogResponses++
+			state.lastActionAt = now
+			return action
+		}
+		return ""
 	}
 
+	// Until Enter is pressed (including after typing /usage): Esc any dialog.
+	if !state.sentEnter && hasDialog(lower) {
+		if retryTurn {
+			state.dialogResponses++
+			state.lastActionAt = now
+			return "\x1b"
+		}
+		return ""
+	}
+
+	// Step 1: type "/usage" without Enter. If a dialog pops up right before, the letters are
+	// ignored by the selection list and never echo into the input box, so step 2 never fires.
 	if !state.sentUsage {
+		if !settled || replInput(lower) != "" || !isREPLReady(lower) {
+			return ""
+		}
 		state.sentUsage = true
 		state.usageSentAt = now
 		state.lastActionAt = now
-		return "/usage\r"
+		return "/usage"
 	}
 
-	if !state.sentEnterRetry && now.Sub(state.usageSentAt) >= 900*time.Millisecond {
+	input := replInput(lower)
+
+	// Step 2: press Enter only once "/usage" is visibly in the input box and no dialog is shown.
+	if !state.sentEnter {
+		switch {
+		case strings.HasPrefix(input, "/usage") && screenChanged:
+			state.sentEnter = true
+			state.lastActionAt = now
+			return "\r"
+		case input == "" && isREPLReady(lower) && !state.sentUsageRetry && now.Sub(state.lastActionAt) >= 1500*time.Millisecond:
+			// A dialog swallowed the letters and was dismissed with Esc; the input is empty, so
+			// retype once. Ctrl+U first, in case the echo was merely slow (avoids "/usage/usage").
+			state.sentUsageRetry = true
+			state.lastActionAt = now
+			return "\x15/usage"
+		}
+		return ""
+	}
+
+	// Enter was pressed. The loading panel also shows an "Esc to cancel" footer, so stay quiet;
+	// only recover when the screen is still at the input box (the command did not run).
+	if hasDialog(lower) || !replLinePresent(lower) {
+		return ""
+	}
+	switch {
+	case strings.HasPrefix(input, "/usage") && screenChanged && !state.sentEnterRetry && now.Sub(state.lastActionAt) >= 900*time.Millisecond:
+		// The command is still in the input box (Enter was likely eaten by the completion menu):
+		// press Enter again. Requires screenChanged; the menu closing changes the screen anyway.
 		state.sentEnterRetry = true
 		state.lastActionAt = now
 		return "\r"
-	}
-
-	if !state.sentUsageRetry && now.Sub(state.usageSentAt) >= 1500*time.Millisecond {
+	case input == "" && isREPLReady(lower) && !state.sentUsageRetry && now.Sub(state.lastActionAt) >= 1500*time.Millisecond:
+		// Input is empty but no panel appeared: go through type -> confirm -> Enter again.
 		state.sentUsageRetry = true
+		state.sentEnter = false
 		state.lastActionAt = now
-		return "/usage\r"
-	}
-
-	return ""
-}
-
-func promptActionForScreen(screen string) string {
-	lower := strings.ToLower(screen)
-	if lower == "" {
-		return ""
-	}
-	if strings.Contains(lower, "quick safety check") || strings.Contains(lower, "yes, i trust this folder") {
-		return "\r"
-	}
-	if (strings.Contains(lower, "telemetry") || strings.Contains(lower, "help improve") || strings.Contains(lower, "usage data")) &&
-		(strings.Contains(lower, "2. no") || strings.Contains(lower, "2. disable") || strings.Contains(lower, "2. don't")) {
-		return "\x1b[B\r"
-	}
-	if strings.Contains(lower, "enter to confirm") && !usageReady(lower) {
-		return "\r"
+		return "\x15/usage"
 	}
 	return ""
 }
 
+// hasDialog reports whether a selection or confirmation dialog is on screen.
+func hasDialog(lowerScreen string) bool {
+	if isSelectionDialog(lowerScreen) {
+		return true
+	}
+	// Dialog-specific footers only; phrases like "to navigate" also appear in REPL tips.
+	for _, footer := range []string{"enter to confirm", "esc to cancel"} {
+		if strings.Contains(lowerScreen, footer) {
+			return true
+		}
+	}
+	return false
+}
+
+// isREPLReady reports whether the Claude Code input box is shown: a ❯ input line plus the
+// status bar below it or the welcome banner.
+func isREPLReady(lowerScreen string) bool {
+	if !replLinePresent(lowerScreen) {
+		return false
+	}
+	return strings.Contains(lowerScreen, "shift+tab to cycle") ||
+		strings.Contains(lowerScreen, "for shortcuts") ||
+		strings.Contains(lowerScreen, "claude code v")
+}
+
+// replLinePresent / replInput: the input line looks like `❯`, `❯ try "…"` (placeholder) or
+// `❯ /usage` (typed).
+func replLinePresent(lowerScreen string) bool {
+	_, ok := findREPLLine(lowerScreen)
+	return ok
+}
+
+// replInput returns the typed input; "" for an empty box or a placeholder.
+func replInput(lowerScreen string) string {
+	input, _ := findREPLLine(lowerScreen)
+	return input
+}
+
+func findREPLLine(lowerScreen string) (string, bool) {
+	for _, line := range strings.Split(lowerScreen, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "❯") {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "❯"))
+		if !isREPLInputText(rest) {
+			continue
+		}
+		if strings.HasPrefix(rest, "/") {
+			return rest, true
+		}
+		return "", true
+	}
+	return "", false
+}
+
+// isREPLInputText reports whether the text after ❯ looks like the input line: empty, a
+// placeholder (try "…") or a typed slash command.
+func isREPLInputText(rest string) bool {
+	return rest == "" || strings.HasPrefix(rest, "try \"") || strings.HasPrefix(rest, "/")
+}
+
+// isSelectionDialog reports whether a ❯-highlighted option is on screen ("❯ Yes, …", "❯ 1. …").
+// The input line does not count; any other ❯ line is treated as a selection (prefer an extra Esc).
+func isSelectionDialog(lowerScreen string) bool {
+	for _, line := range strings.Split(lowerScreen, "\n") {
+		trimmed := strings.TrimSpace(line)
+		idx := strings.Index(trimmed, "❯")
+		if idx < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(trimmed[idx+len("❯"):])
+		if idx == 0 && isREPLInputText(rest) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// trustDialogAction answers the folder-trust dialog based on which option the ❯ cursor is on.
+// Older Claude Code preselected "Yes, proceed"; since 2.1.x the default is "No, exit", so a
+// blind Enter makes claude quit. Move down when on no/exit, press Enter once on yes/trust.
+func trustDialogAction(lowerScreen string) string {
+	for _, line := range strings.Split(lowerScreen, "\n") {
+		trimmed := strings.TrimSpace(line)
+		idx := strings.Index(trimmed, "❯")
+		if idx < 0 {
+			continue
+		}
+		option := strings.TrimSpace(trimmed[idx+len("❯"):])
+		// Stale dialog text may sit above the REPL input line; never treat that line as an option.
+		if idx == 0 && isREPLInputText(option) {
+			continue
+		}
+		// Match whole words / prefixes so "notification" or "yesterday" do not match.
+		words := strings.FieldsFunc(option, func(r rune) bool {
+			return r == ' ' || r == ',' || r == '.' || r == '\t'
+		})
+		for _, w := range words {
+			switch {
+			case w == "yes" || strings.HasPrefix(w, "trust"):
+				return "\r"
+			case w == "no" || w == "exit":
+				return "\x1b[B"
+			}
+		}
+	}
+	// Cursor not found (options not rendered yet): wait for the next frame. A blind Enter would
+	// pick "No, exit" on current versions.
+	return ""
+}
+
+// claudeUsageScreenTail returns the last few screen lines for debug logging.
+func claudeUsageScreenTail(screen string) string {
+	lines := strings.Split(screen, "\n")
+	if len(lines) > 8 {
+		lines = lines[len(lines)-8:]
+	}
+	return strings.Join(lines, " ⏎ ")
+}
+
+// isTrustDialog reports whether the folder-trust dialog is on screen.
+func isTrustDialog(lowerScreen string) bool {
+	return strings.Contains(lowerScreen, "quick safety check") ||
+		strings.Contains(lowerScreen, "yes, i trust this folder") ||
+		strings.Contains(lowerScreen, "do you trust the files in this folder")
+}
+
+// usageReady reports whether the /usage panel has rendered enough to parse. It asks the parser
+// instead of counting "% used": the panel renders in chunks and blocks such as Extra usage also
+// carry percentages, so counting accepted half-loaded panels ("missing usage percentage").
 func usageReady(screen string) bool {
 	lower := strings.ToLower(screen)
-	return strings.Contains(lower, "current session") &&
-		strings.Contains(lower, "current week") &&
-		strings.Contains(lower, "resets") &&
-		claudeUsagePercentRe.MatchString(screen)
+	if !strings.Contains(lower, "current session") || !strings.Contains(lower, "current week") {
+		return false
+	}
+	_, err := parseClaudeUsageReport(screen, time.Now())
+	return err == nil
 }
 
 func normalizeClaudeUsageText(raw string) string {
@@ -453,6 +701,24 @@ func detectClaudeUsageOutputError(screen, stderr string) error {
 	}
 }
 
+// lockedBuffer is a bytes.Buffer safe for exec's copy goroutine (writer) and the probe loop (reader).
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 type claudeUsageTerminal struct {
 	mu    sync.RWMutex
 	lines [][]rune
@@ -573,6 +839,14 @@ func (t *claudeUsageTerminal) applyCSI(params string, final byte) {
 				t.col = 0
 			}
 		}
+	case 'G':
+		// CHA: move to column n (1-based). Claude Code 2.1.x (Ink) uses it instead of spaces between
+		// words; without it the screen renders as "Quicksafetycheck" and all matching/parsing fails.
+		col := parseCSIInt(params, 1) - 1
+		if col < 0 {
+			col = 0
+		}
+		t.col = col
 	case 'H', 'f':
 		row, col := parseCSICursor(params)
 		if row < 0 {
@@ -584,9 +858,21 @@ func (t *claudeUsageTerminal) applyCSI(params string, final byte) {
 		t.row, t.col = row, col
 		t.ensureRow(t.row)
 	case 'J':
-		if params == "2" || params == "" {
+		switch params {
+		case "", "0":
+			// ED 0: erase from the cursor to the end of the screen (previously treated as a full clear).
+			t.ensureRow(t.row)
+			if t.row < len(t.lines) {
+				if t.col < len(t.lines[t.row]) {
+					t.lines[t.row] = t.lines[t.row][:t.col]
+				}
+				t.lines = t.lines[:t.row+1]
+			}
+		case "2":
 			t.lines = [][]rune{nil}
 			t.row, t.col = 0, 0
+		case "3":
+			// ED 3 only clears scrollback, which this emulator does not keep.
 		}
 	case 'K':
 		t.ensureRow(t.row)
