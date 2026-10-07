@@ -1876,6 +1876,8 @@ var leadingMentionRegexp = regexp.MustCompile(`^\s*@[^\s@]+\s+`)
 
 // bypassCardForGroupAt reports whether streaming-card delivery should be skipped
 // so a group reply can be sent as a text message with a clickable @-mention.
+// When it returns true, CreateStreamingCard reports an error so the engine falls
+// back to its normal Send() path, which builds the text @-mention.
 func (p *Platform) bypassCardForGroupAt(rc replyContext) bool {
 	return p.atGroups && rc.isGroup
 }
@@ -1886,6 +1888,9 @@ func (p *Platform) bypassCardForGroupAt(rc replyContext) bool {
 // same id is present in at.atUserIds (text msgtype only — markdown and
 // ActionCard render an @ as plain text). A leading "@name" prefix injected
 // upstream is dropped first so the mention is not duplicated.
+//
+// It intentionally strips only ONE leading mention (the upstream-injected
+// "@<name>"); see extractAtUserIds for full @userId extraction.
 func mentionText(content, staffID string) string {
 	if staffID == "" {
 		return content
