@@ -150,6 +150,7 @@ type Platform struct {
 	groupOnly                  bool
 	groupReplyAll              bool
 	skipWhenMentionOthers      bool
+	groupReplyAllChats         map[string]struct{}
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
@@ -350,6 +351,48 @@ func New(opts map[string]any) (core.Platform, error) {
 	return newPlatform("feishu", lark.FeishuBaseUrl, opts)
 }
 
+// parseGroupReplyAllChats parses the optional comma-separated chat allowlist
+// used to bypass the Feishu @mention gate for selected group chats. TOML
+// arrays are accepted as well so callers can use either a compact string or
+// an explicit list.
+func parseGroupReplyAllChats(raw any) (map[string]struct{}, error) {
+	if raw == nil {
+		return nil, nil
+	}
+
+	var values []string
+	switch typed := raw.(type) {
+	case string:
+		values = strings.Split(typed, ",")
+	case []string:
+		values = typed
+	case []any:
+		values = make([]string, 0, len(typed))
+		for i, value := range typed {
+			text, ok := value.(string)
+			if !ok {
+				return nil, fmt.Errorf("entry %d must be a string, got %T", i, value)
+			}
+			values = append(values, text)
+		}
+	default:
+		return nil, fmt.Errorf("must be a comma-separated string or string array, got %T", raw)
+	}
+
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		chatID := strings.TrimSpace(value)
+		if chatID == "" {
+			continue
+		}
+		result[chatID] = struct{}{}
+	}
+	if len(result) == 0 {
+		return nil, nil
+	}
+	return result, nil
+}
+
 func newPlatform(name, domain string, opts map[string]any) (core.Platform, error) {
 	appID, _ := opts["app_id"].(string)
 	appSecret, _ := opts["app_secret"].(string)
@@ -387,6 +430,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	skipWhenMentionOthers, _ := opts["skip_when_mention_others"].(bool)
+	groupReplyAllChats, err := parseGroupReplyAllChats(opts["group_reply_all_chats"])
+	if err != nil {
+		return nil, fmt.Errorf("%s: invalid group_reply_all_chats: %w", name, err)
+	}
 	// require_mention = false is equivalent to group_reply_all = true:
 	// both mean "respond to all group messages without needing an @mention".
 	if v, ok := opts["require_mention"].(bool); ok && !v {
@@ -541,6 +588,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
 		skipWhenMentionOthers:      skipWhenMentionOthers,
+		groupReplyAllChats:         groupReplyAllChats,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
@@ -575,6 +623,17 @@ func (p *Platform) Name() string { return p.platformName }
 func (p *Platform) ProgressStyle() string { return p.progressStyle }
 
 func (p *Platform) SupportsProgressCardPayload() bool { return true }
+
+// groupReplyAllForChat reports whether an unmentioned message from chatID
+// should bypass the local @mention gate. A non-empty per-chat list takes
+// precedence over the legacy platform-wide group_reply_all switch.
+func (p *Platform) groupReplyAllForChat(chatID string) bool {
+	if len(p.groupReplyAllChats) > 0 {
+		_, ok := p.groupReplyAllChats[strings.TrimSpace(chatID)]
+		return ok
+	}
+	return p.groupReplyAll
+}
 
 func (p *Platform) tag() string { return p.platformName }
 
@@ -1810,6 +1869,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	if msg.ChatType != nil {
 		chatType = *msg.ChatType
 	}
+	groupReplyAllForChat := p.groupReplyAllForChat(chatID)
 	mentionCount := len(msg.Mentions)
 	slog.Debug(p.tag()+": inbound message",
 		"message_id", messageID,
@@ -1819,8 +1879,9 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		"thread_id", stringValue(msg.ThreadId),
 		"parent_id", stringValue(msg.ParentId),
 		"mentions", mentionCount,
-		"group_reply_all", p.groupReplyAll,
 		"skip_when_mention_others", p.skipWhenMentionOthers,
+		"group_reply_all", groupReplyAllForChat,
+		"group_reply_all_chats", len(p.groupReplyAllChats),
 		"thread_isolation", p.threadIsolation,
 	)
 
@@ -1836,7 +1897,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// that explicitly mention someone else. An empty botOpenID is deliberately
 	// fail-closed here: enabling this option while bot discovery is unavailable
 	// drops all mentioned group messages rather than letting this bot compete.
-	if shouldSkipMentionedOthers(chatType, p.groupReplyAll, p.skipWhenMentionOthers, len(msg.Mentions), botMentioned) {
+	if shouldSkipMentionedOthers(chatType, groupReplyAllForChat, p.skipWhenMentionOthers, len(msg.Mentions), botMentioned) {
 		slog.Debug(p.tag()+": skipping group message that mentions others only",
 			"chat_id", chatID, "message_id", messageID)
 		return nil
@@ -1847,7 +1908,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// existing mention filter and before allow_from: the chat controls whether
 	// cc-connect may observe the conversation, while allow_from controls who may
 	// trigger an agent turn.
-	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" &&
+	if p.groupChatHistoryShare && chatType == "group" && !groupReplyAllForChat && botOpenID != "" &&
 		!botMentioned && !atEveryone && isGroupHistoryMessageType(msgType) {
 		if !core.AllowList(p.allowChat, chatID) {
 			slog.Debug(p.tag()+": group history ignored for unauthorized chat", "chat_id", chatID)
@@ -1866,7 +1927,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// rest of the process lifetime. We now consult both flags: when
 	// the filter is degraded we fail closed (drop the message) and
 	// emit a periodic warning, instead of failing open.
-	if chatType == "group" && !p.groupReplyAll && filterActive {
+	if chatType == "group" && !groupReplyAllForChat && filterActive {
 		if !botMentioned {
 			switch {
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
@@ -1940,7 +2001,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 	var groupHistoryCtx groupHistoryContext
-	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" && (botMentioned || atEveryone) {
+	if p.groupChatHistoryShare && chatType == "group" && !groupReplyAllForChat && botOpenID != "" && (botMentioned || atEveryone) {
 		scope := p.groupHistoryScope(msg, chatID)
 		if p.isGroupHistoryNewCommand(msgType, content, mentions) {
 			p.resetGroupHistory(scope)

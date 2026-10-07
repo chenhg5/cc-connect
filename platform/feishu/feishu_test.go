@@ -1785,21 +1785,25 @@ func TestOnMessageSkipWhenMentionOthers(t *testing.T) {
 		{"private no mention", "p2p", "hello", nil, "hello", "hello"},
 	}
 	configs := []struct {
-		name       string
-		all        bool
-		skip       bool
-		alias      bool
-		unknownBot bool
-		want       [7]bool
+		name         string
+		all          bool
+		skip         bool
+		alias        bool
+		unknownBot   bool
+		selectedChat bool
+		want         [7]bool
 	}{
-		{"reply all skip on", true, true, false, false, [7]bool{false, true, true, true, true, true, true}},
-		{"reply all skip off", true, false, false, false, [7]bool{true, true, true, true, true, true, true}},
-		{"mention required skip on", false, true, false, false, [7]bool{false, true, true, false, false, true, true}},
-		{"mention required skip off", false, false, false, false, [7]bool{false, true, true, false, false, true, true}},
-		{"require mention false skip on", false, true, true, false, [7]bool{false, true, true, true, true, true, true}},
-		{"require mention false skip off", false, false, true, false, [7]bool{true, true, true, true, true, true, true}},
-		{"unknown identity skip on", true, true, false, true, [7]bool{false, false, false, true, true, true, true}},
-		{"unknown identity skip off", true, false, false, true, [7]bool{true, true, true, true, true, true, true}},
+		{"reply all skip on", true, true, false, false, false, [7]bool{false, true, true, true, true, true, true}},
+		{"reply all skip off", true, false, false, false, false, [7]bool{true, true, true, true, true, true, true}},
+		{"mention required skip on", false, true, false, false, false, [7]bool{false, true, true, false, false, true, true}},
+		{"mention required skip off", false, false, false, false, false, [7]bool{false, true, true, false, false, true, true}},
+		{"require mention false skip on", false, true, true, false, false, [7]bool{false, true, true, true, true, true, true}},
+		{"require mention false skip off", false, false, true, false, false, [7]bool{true, true, true, true, true, true, true}},
+		{"unknown identity skip on", true, true, false, true, false, [7]bool{false, false, false, true, true, true, true}},
+		{"unknown identity skip off", true, false, false, true, false, [7]bool{true, true, true, true, true, true, true}},
+		{"selected chat skip on", false, true, false, false, true, [7]bool{false, true, true, true, true, true, true}},
+		{"selected chat skip off", false, false, false, false, true, [7]bool{true, true, true, true, true, true, true}},
+		{"selected chat unknown identity", false, true, false, true, true, [7]bool{false, false, false, true, true, true, true}},
 	}
 
 	for _, cfg := range configs {
@@ -1816,6 +1820,9 @@ func TestOnMessageSkipWhenMentionOthers(t *testing.T) {
 						"app_secret":               "test-secret",
 						"group_reply_all":          cfg.all,
 						"skip_when_mention_others": cfg.skip,
+					}
+					if cfg.selectedChat {
+						opts["group_reply_all_chats"] = []string{"oc_chat"}
 					}
 					if cfg.alias {
 						opts["require_mention"] = false
