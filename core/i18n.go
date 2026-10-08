@@ -360,8 +360,15 @@ const (
 	MsgMemoryAdded        MsgKey = "memory_added"
 	MsgMemoryAddFailed    MsgKey = "memory_add_failed"
 	MsgMemoryAddUsage     MsgKey = "memory_add_usage"
-	MsgUsageNotSupported  MsgKey = "usage_not_supported"
-	MsgUsageFetchFailed   MsgKey = "usage_fetch_failed"
+
+	MsgUsageNotSupported    MsgKey = "usage_not_supported"
+	MsgUsageFetchFailed     MsgKey = "usage_fetch_failed"
+	MsgUsageResetIn         MsgKey = "usage_reset_in"
+	MsgUsageResetAt         MsgKey = "usage_reset_at"
+	MsgUsageResetSoon       MsgKey = "usage_reset_soon"
+	MsgUsageResetDue        MsgKey = "usage_reset_due"
+	MsgUsageResetsAvailable MsgKey = "usage_resets_available"
+	MsgUsageResetExpires    MsgKey = "usage_reset_expires"
 
 	// Inline strings previously hardcoded in engine.go
 	MsgStatusMode             MsgKey = "status_mode"
@@ -2779,6 +2786,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 寫入記憶檔案失敗: %v",
 		LangJapanese:           "❌ メモリファイルの書き込みに失敗しました: %v",
 		LangSpanish:            "❌ Error al escribir archivo de memoria: %v",
+	},
+	MsgUsageResetsAvailable: {
+		LangEnglish:            "Available quota resets: %d",
+		LangChinese:            "可用限额重置次数：%d",
+		LangTraditionalChinese: "可用限額重置次數：%d",
+		LangJapanese:           "利用可能な上限リセット回数: %d",
+		LangSpanish:            "Restablecimientos de cuota disponibles: %d",
+	},
+	MsgUsageResetExpires: {
+		LangEnglish:            "Expires: %s",
+		LangChinese:            "到期：%s",
+		LangTraditionalChinese: "到期：%s",
+		LangJapanese:           "有効期限: %s",
+		LangSpanish:            "Caduca: %s",
+	},
+	MsgUsageResetIn: {
+		LangEnglish:            "in %s",
+		LangChinese:            "%s后",
+		LangTraditionalChinese: "%s後",
+		LangJapanese:           "%s後",
+		LangSpanish:            "en %s",
+	},
+	MsgUsageResetAt: {
+		LangEnglish:            "At: %s",
+		LangChinese:            "时间：%s",
+		LangTraditionalChinese: "時間：%s",
+		LangJapanese:           "日時: %s",
+		LangSpanish:            "Fecha: %s",
+	},
+	MsgUsageResetSoon: {
+		LangEnglish:            "within 1 minute",
+		LangChinese:            "1分钟内",
+		LangTraditionalChinese: "1分鐘內",
+		LangJapanese:           "1分以内",
+		LangSpanish:            "en menos de 1 minuto",
+	},
+	MsgUsageResetDue: {
+		LangEnglish:            "due now",
+		LangChinese:            "已到重置时间",
+		LangTraditionalChinese: "已到重置時間",
+		LangJapanese:           "リセット時刻に到達",
+		LangSpanish:            "ahora",
 	},
 	MsgUsageNotSupported: {
 		LangEnglish:            "Current agent does not support `/usage`.",

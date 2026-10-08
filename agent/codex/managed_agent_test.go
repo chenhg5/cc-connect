@@ -70,6 +70,100 @@ func TestManagedUsageReadsDaemonWithoutLocalCredentials(t *testing.T) {
 	}
 }
 
+func TestManagedUsage_PreservesFiveHourLimitBeforeModelWeeklyLimit(t *testing.T) {
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			return map[string]any{
+				"rateLimits": map[string]any{"limitId": "codex", "planType": "plus"},
+				"rateLimitsByLimitId": map[string]any{
+					"base_model_inference": map[string]any{
+						"limitId": "base_model_inference", "limitName": "model-reserve",
+						"primary": map[string]any{"usedPercent": 33, "windowDurationMins": 10080, "resetsAt": 2000000000},
+					},
+					"codex": map[string]any{
+						"limitId": "codex", "planType": "plus",
+						"primary":   map[string]any{"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 2000000000},
+						"secondary": map[string]any{"usedPercent": 42, "windowDurationMins": 10080, "resetsAt": 2000000001},
+					},
+				},
+			}, true
+		})
+	})
+	a := fixtureManagedAgent(t, socket, t.TempDir(), nil)
+	report, err := a.GetUsage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Plan != "plus" || len(report.Buckets) != 2 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	// /usage and the reply footer use the first bucket as the main quota.
+	first := report.Buckets[0]
+	if first.Name != "codex" || len(first.Windows) != 2 {
+		t.Fatalf("account quotas hidden behind model weekly limit: %+v", first)
+	}
+	for i, want := range []struct {
+		seconds, used int
+		reset         int64
+	}{{18000, 10, 2000000000}, {604800, 42, 2000000001}} {
+		got := first.Windows[i]
+		if got.WindowSeconds != want.seconds || got.UsedPercent != want.used || got.ResetAtUnix != want.reset {
+			t.Fatalf("window %d = %+v, want %+v", i, got, want)
+		}
+	}
+	if report.Buckets[1].Name != "model-reserve" {
+		t.Fatalf("additional model quota lost: %+v", report.Buckets)
+	}
+}
+
+func TestManagedUsage_IncludesReserveAndResetCreditExpiry(t *testing.T) {
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			return json.RawMessage(`{
+				"rateLimits":{"limitId":"codex","planType":"plus"},
+				"rateLimitsByLimitId":{
+					"codex":{"limitId":"codex","primary":{"usedPercent":8,"windowDurationMins":300}},
+					"base_model_inference":{"limitName":"gpt-reserve","primary":{"usedPercent":36,"windowDurationMins":10080,"resetsAt":2000000000}}
+				},
+				"rateLimitResetCredits":{"availableCount":3,"credits":[
+					{"status":"available","expiresAt":2000000002},
+					{"status":"used","expiresAt":1999999999},
+					{"status":"expired","expiresAt":1999999998},
+					{"status":"available","expiresAt":2000000001},
+					{"status":"available","expiresAt":null}
+				]}
+			}`), true
+		})
+	})
+	a := fixtureManagedAgent(t, socket, t.TempDir(), nil)
+	report, err := a.GetUsage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Buckets) != 2 || report.Buckets[1].Name != "gpt-reserve" {
+		t.Fatalf("missing reserve quota: %+v", report)
+	}
+	window := report.Buckets[1].Windows[0]
+	if window.ResetAtUnix != 2000000000 || window.WindowSeconds != 604800 || window.UsedPercent != 36 {
+		t.Fatalf("incorrect reserve window: %+v", window)
+	}
+	credits := report.ResetCredits
+	if credits == nil || credits.AvailableCount != 3 || len(credits.Credits) != 3 {
+		t.Fatalf("missing available reset credits: %+v", credits)
+	}
+	for i, want := range []int64{2000000001, 2000000002, 0} {
+		if credits.Credits[i].ExpiresAtUnix != want {
+			t.Fatalf("expiry %d = %d, want %d", i, credits.Credits[i].ExpiresAtUnix, want)
+		}
+	}
+	clone := cloneUsageReport(report)
+	clone.ResetCredits.AvailableCount = 0
+	clone.ResetCredits.Credits[0].ExpiresAtUnix = 1
+	if report.ResetCredits.AvailableCount != 3 || report.ResetCredits.Credits[0].ExpiresAtUnix != 2000000001 {
+		t.Fatal("reset credits shared between cached report and clone")
+	}
+}
+
 func TestManagedDeleteUsesScopedDaemonAPIAndHonorsDisable(t *testing.T) {
 	for _, test := range []struct {
 		name                                 string
