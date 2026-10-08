@@ -2313,6 +2313,18 @@ app_secret = "your-feishu-app-secret"
 # 需要安装：本地已安装 agy 命令 (参考 https://antigravity.google/docs/cli-overview)
 # Antigravity CLI uses `agy -p` under the hood.
 # Antigravity CLI 底层使用 `agy -p` 命令。
+# Headless mode cannot interactively approve tools that require confirmation.
+# Tools may be auto-denied with a stderr notice even when agy exits 0.
+# Prefer scoped permissions.allow rules in ~/.gemini/antigravity-cli/settings.json.
+# For trusted unattended workloads, explicitly set mode = "yolo" below to avoid
+# approval blocking. This approves ALL tools, including shell commands and file
+# writes; use only with trusted prompts and an appropriately isolated workspace.
+# The default is not changed automatically, and chat approval buttons cannot be
+# assumed to override the current official CLI's headless permission policy.
+# 无头模式无法交互确认权限；工具可能被拒绝但 agy 仍退出 0。优先配置精确 allow-list。
+# 可信的无人值守任务可显式设置 mode = "yolo"，但它会批准所有命令和文件写入。
+# 不会自动修改默认权限；当前官方 CLI 的无头权限策略不能保证由聊天按钮覆盖。
+# Official reference: https://antigravity.google/docs/cli/headless/
 #
 # [[projects]]
 # name = "my-antigravity-project"
@@ -2327,7 +2339,7 @@ app_secret = "your-feishu-app-secret"
 # timeout_mins = 30  # Timeout per conversation turn (minutes) / 每次对话超时时间（分钟）
 #
 # Mode options / 模式说明:
-# - "default":   Prompt for approval on each tool use / 每次工具调用都需要确认
+# - "default":   Respect CLI permissions; headless confirmation may be denied / 遵循 CLI 权限，无头确认可能被拒绝
 # - "yolo":      Auto-approve all tool calls (--dangerously-skip-permissions) / 自动批准所有工具调用
 # - "plan":      Read-only plan mode with terminal sandbox constraints (--sandbox) / 只读沙箱规划模式
 #
