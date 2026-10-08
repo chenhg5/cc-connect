@@ -748,6 +748,7 @@ type pendingPermission struct {
 	CurrentQuestion int            // index of the question currently being asked
 	Resolved        chan struct{}  // closed when user responds
 	resolveOnce     sync.Once
+	card            *permissionCardState // optional; only shared approvals with editable cards
 }
 
 func (s *interactiveState) stopSignal() <-chan struct{} {

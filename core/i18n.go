@@ -989,6 +989,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "回答を送信しました。同時回答の結果はランタイムが決定します。",
 		LangSpanish:            "Respuesta enviada. El entorno decide el resultado si otro cliente también responde.",
 	},
+	MsgSharedRequestResolved: {
+		LangEnglish:            "Request handled or no longer pending",
+		LangChinese:            "请求已处理或已结束",
+		LangTraditionalChinese: "請求已處理或已結束",
+		LangJapanese:           "リクエストは処理済み、または終了しました",
+		LangSpanish:            "Solicitud atendida o finalizada",
+	},
 	MsgSharedAttachUsage: {
 		LangEnglish:            "Usage: /attach <session number or thread ID>.",
 		LangChinese:            "用法：/attach <会话序号或 thread ID>。",
@@ -4978,6 +4985,7 @@ const (
 	MsgSharedSkip                 MsgKey = "shared_skip"
 	MsgSharedStaleRequest         MsgKey = "shared_stalerequest"
 	MsgSharedResponseSent         MsgKey = "shared_responsesent"
+	MsgSharedRequestResolved      MsgKey = "shared_requestresolved"
 	MsgSharedAttachUsage          MsgKey = "shared_attachusage"
 	MsgSharedAttached             MsgKey = "shared_attached"
 	MsgSharedNotAttached          MsgKey = "shared_notattached"

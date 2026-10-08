@@ -2803,6 +2803,35 @@ func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHand
 // CUJ: connect to externally started work, answer its questions, and detach.
 // Request-bound buttons remain safe when another client resolves an approval.
 func TestCUJ_C7_SharedExternalApprovalQuestionsAndDetach(t *testing.T) {
+	t.Run("PermissionCardUpdatesInPlace", func(t *testing.T) {
+		env, p := newSharedTrackedPermissionEnv(t)
+		as := env.a.connection("first")
+		as.emit(Event{Type: EventPermissionRequest, RequestID: "card-approval", ToolName: "Bash", ToolInput: "USER CARD CONTEXT", Decisions: []string{"allow_session", "cancel"}})
+		env.await("USER CARD CONTEXT")
+		env.send(env.button(env.e.i18n.T(MsgSharedAllowSession)))
+		awaitTrackedPermissionUpdate(t, p)
+		env.send("/detach")
+		env.await(env.e.i18n.T(MsgSharedDetached))
+		visible := strings.Join(p.getSent(), "\n")
+		if !strings.Contains(visible, "✅ "+env.e.i18n.T(MsgSharedAllowSession)) || !strings.Contains(visible, "USER CARD CONTEXT") || strings.Contains(visible, env.e.i18n.T(MsgSharedResponseSent)) {
+			t.Fatalf("user-visible permission result = %s", visible)
+		}
+	})
+	t.Run("ExternalPermissionCardUpdatesInPlace", func(t *testing.T) {
+		env, p := newSharedTrackedPermissionEnv(t)
+		as := env.a.connection("first")
+		as.emit(Event{Type: EventPermissionRequest, RequestID: "external", ToolName: "Bash", ToolInput: "EXTERNAL USER CARD", Decisions: []string{"allow", "cancel"}})
+		env.await("EXTERNAL USER CARD")
+		env.send("/status")
+		as.emit(Event{Type: EventPermissionResolved, RequestID: "external"})
+		awaitTrackedPermissionUpdate(t, p)
+		env.send("/detach")
+		env.await(env.e.i18n.T(MsgSharedDetached))
+		visible := strings.Join(p.getSent(), "\n")
+		if !strings.Contains(visible, env.e.i18n.T(MsgSharedRequestResolved)) || !strings.Contains(visible, "EXTERNAL USER CARD") {
+			t.Fatalf("user-visible external completion = %s", visible)
+		}
+	})
 	env := newSharedTestEnv(t)
 	env.send("/attach first")
 	env.await("Attached to session first")
