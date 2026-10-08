@@ -149,3 +149,27 @@ func TestSharedRichToolOutputIsVisibleBeforeCompletionAndKeepsAsyncText(t *testi
 
 // Keep the embedded preview implementation visible to interface assertions.
 var _ PreviewStarter = (*toolOutputRichPlatform)(nil)
+
+func TestSharedLegacyCompletedToolDoesNotReturnToInProgress(t *testing.T) {
+	for _, final := range []string{"FINAL A", ""} {
+		t.Run("result="+final, func(t *testing.T) {
+			env := newSharedTestEnv(t)
+			env.e.display.CardMode = "legacy"
+			env.send("/attach first")
+			env.await("Attached to session first")
+			as := env.a.connection("first")
+			as.emit(Event{Type: EventToolOutput, TurnID: "active-first", ItemID: "a", ToolName: "Bash", Content: "STALE A LIVE"})
+			env.await("STALE A LIVE")
+			before := strings.Count(strings.Join(env.p.getSent(), "\n"), "STALE A LIVE")
+			as.emit(Event{Type: EventToolResult, TurnID: "active-first", ItemID: "a", ToolName: "Bash", ToolResult: final, ToolStatus: "completed"})
+			as.emit(Event{Type: EventToolOutput, TurnID: "active-first", ItemID: "b", ToolName: "Bash", Content: "B LIVE"})
+			env.await("B LIVE")
+			after := strings.Count(strings.Join(env.p.getSent(), "\n"), "STALE A LIVE")
+			if after != before {
+				t.Fatalf("completed A resent with B: %s", env.visible())
+			}
+			as.emit(Event{Type: EventResult, TurnID: "active-first", Content: "TOOLS FINAL", Done: true})
+			env.await("TOOLS FINAL")
+		})
+	}
+}

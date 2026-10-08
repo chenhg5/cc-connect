@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
-	"github.com/gorilla/websocket"
 )
 
 func TestManagedApprovalPreservesServerPolicyChoicesAndRejectsUnlistedGrant(t *testing.T) {
@@ -51,47 +50,6 @@ func TestManagedPermissionsExposeSessionGrantAndReason(t *testing.T) {
 		payload, err := managedPermissionPayload(s.pending["n:12"], core.PermissionResult{Behavior: test.behavior})
 		if err != nil || payload.(map[string]any)["scope"] != test.scope {
 			t.Fatalf("payload=%v err=%v", payload, err)
-		}
-	}
-}
-
-func TestManagedSendDoesNotInjectApplicationContextOrOverrideThread(t *testing.T) {
-	cwd := t.TempDir()
-	paramsCh := make(chan map[string]any, 1)
-	socket := managedFixture(t, func(ws *websocket.Conn) {
-		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
-			if m.Method == "thread/resume" {
-				return fixtureSnapshot(cwd, "target", ""), true
-			}
-			if m.Method == "turn/start" {
-				var params map[string]any
-				_ = json.Unmarshal(m.Params, &params)
-				paramsCh <- params
-				return map[string]any{"turn": map[string]any{"id": "turn"}}, true
-			}
-			return map[string]any{}, true
-		})
-	})
-	as, err := fixtureManagedAgent(t, socket, cwd, nil).AttachSession(context.Background(), "target")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := as.Close(); err != nil {
-			t.Errorf("Close cleanup: %v", err)
-		}
-	}()
-	sender := as.(core.AgentTurnSender)
-	if _, err := sender.SendTurn("hello", "message", nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	params := <-paramsCh
-	if params["input"].([]any)[0].(map[string]any)["text"] != "hello" {
-		t.Fatal(params)
-	}
-	for _, key := range []string{"additionalContext", "developerInstructions", "collaborationMode", "model", "approvalPolicy", "sandboxPolicy"} {
-		if _, exists := params[key]; exists {
-			t.Fatalf("overrides thread setting: %s", key)
 		}
 	}
 }

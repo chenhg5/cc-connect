@@ -166,3 +166,33 @@ func TestSharedAutoSteerAttachmentsAreNotSilentlyDropped(t *testing.T) {
 		})
 	}
 }
+
+type busyRetryAgent struct{ *sharedCompatAgent }
+
+func (a *busyRetryAgent) StartSession(ctx context.Context, id string) (AgentSession, error) {
+	as, err := a.sharedCompatAgent.StartSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &busyRetrySession{sharedCompatSession: as.(*sharedCompatSession)}, nil
+}
+
+type busyRetrySession struct {
+	*sharedCompatSession
+	rejected bool
+}
+
+func (s *busyRetrySession) SendTurn(prompt, id string, images []ImageAttachment, files []FileAttachment) (string, error) {
+	s.mu.Lock()
+	reject := prompt == "RETRY QUEUED INPUT" && !s.rejected
+	if reject {
+		s.rejected = true
+		s.turn = "racing-cli-turn"
+	}
+	s.mu.Unlock()
+	if reject {
+		s.emit(Event{Type: EventRuntimeStatus, Content: "connected"})
+		return "", ErrAgentTurnBusy
+	}
+	return s.sharedCompatSession.SendTurn(prompt, id, images, files)
+}

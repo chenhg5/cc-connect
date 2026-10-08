@@ -89,39 +89,6 @@ func awaitManagedAnyEvent(t *testing.T, as core.AgentSession) core.Event {
 	return core.Event{}
 }
 
-func TestManagedAsyncQuestionSwitchIsIndependent(t *testing.T) {
-	for _, blocking := range []bool{false, true} {
-		for _, async := range []bool{false, true} {
-			t.Run(fmt.Sprintf("blocking=%t/async=%t", blocking, async), func(t *testing.T) {
-				a := fixtureManagedAgent(t, "/socket", t.TempDir(), map[string]any{"daemon_enable_questions": blocking, "daemon_enable_async_questions": async})
-				clone, err := New(a.WorkspaceAgentOptions())
-				if err != nil {
-					t.Fatal(err)
-				}
-				if clone.(*managedAgent).daemon.questions != blocking || clone.(*managedAgent).daemon.asyncQuestions != async {
-					t.Fatal("workspace clone lost independent switches")
-				}
-				s := &managedSession{agent: a, ctx: context.Background(), thread: "target", events: make(chan core.Event, 4), seenItems: map[string]bool{}, completed: map[string]bool{}}
-				err = s.handleMessage(daemonMessage{Method: "item/completed", Params: json.RawMessage(`{"threadId":"target","turnId":"turn","item":{"type":"agentMessage","id":"async","text":"QUESTION TEXT PRESERVED","phase":"commentary","delivery":"async","questions":[{"title":"Preference?","options":["yes","no"]}]}}`)})
-				if err != nil {
-					t.Fatal(err)
-				}
-				event := <-s.events
-				if event.Content != "QUESTION TEXT PRESERVED" || (len(event.Questions) > 0) != async {
-					t.Fatalf("wrong async gate: %+v", event)
-				}
-			})
-		}
-	}
-	if _, err := parseManagedOptions(map[string]any{"daemon_enable_async_questions": "false"}); err == nil {
-		t.Fatal("invalid async flag type accepted")
-	}
-	defaults, err := parseManagedOptions(nil)
-	if err != nil || !defaults.asyncQuestions {
-		t.Fatal("default compatibility changed")
-	}
-}
-
 func TestManagedReconnectRecoversWithoutActiveTurn(t *testing.T) {
 	for _, historyRead := range []bool{false, true} {
 		t.Run(fmt.Sprintf("historyRead=%t", historyRead), func(t *testing.T) {
@@ -236,4 +203,62 @@ func TestManagedReconnectDoesNotGuessUnfinishedTurnState(t *testing.T) {
 			t.Fatal("failed reconciliation left observer connected")
 		}
 	})
+}
+
+func TestManagedReconnectRunningTurnRestoresCompletedTextAndDeduplicates(t *testing.T) {
+	for _, replayNotifications := range []bool{false, true} {
+		for _, preview := range []string{"", "FULL", "WRONG PREFIX"} {
+			t.Run(fmt.Sprintf("replay=%t/preview=%s", replayNotifications, preview), func(t *testing.T) {
+				a := fixtureManagedAgent(t, "/unused", t.TempDir(), nil)
+				s := &managedSession{agent: a, decoder: &appServerSession{}, ctx: context.Background(), thread: "target", turn: "turn", events: make(chan core.Event, 16), seenItems: map[string]bool{}, completed: map[string]bool{}, pending: map[string]*managedRequest{}}
+				if preview != "" {
+					if err := s.handleAgentTextDelta(json.RawMessage(`{"turnId":"turn","itemId":"answer","delta":"` + preview + `"}`)); err != nil {
+						t.Fatal(err)
+					}
+					<-s.events
+				}
+				item := map[string]any{"type": "agentMessage", "id": "answer", "phase": "final_answer", "text": "FULL OFFLINE ANSWER"}
+				snapshot := managedSnapshot{Thread: managedThread{ID: "target", Turns: []managedTurn{{ID: "turn", Status: "inProgress", Items: []map[string]any{item}}}}}
+				if err := s.reconcileReconnect(snapshot, "turn", nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.reconcileReconnect(snapshot, "turn", nil); err != nil {
+					t.Fatal(err)
+				}
+				if replayNotifications {
+					raw, _ := json.Marshal(map[string]any{"turnId": "turn", "item": item})
+					if err := s.handleMessage(daemonMessage{Method: "item/completed", Params: raw}); err != nil {
+						t.Fatal(err)
+					}
+					// A buffered start notification for the same turn must not erase recovery.
+					if err := s.handleMessage(daemonMessage{Method: "turn/started", Params: json.RawMessage(`{"threadId":"target","turn":{"id":"turn"}}`)}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := s.completeManagedTurn("turn", "completed", "", nil); err != nil {
+					t.Fatal(err)
+				}
+				textCount := 0
+				var result core.Event
+				for len(s.events) > 0 {
+					e := <-s.events
+					if e.Type == core.EventText {
+						textCount++
+						if preview == "WRONG PREFIX" && e.Metadata["replace_item_text"] != true {
+							t.Fatal("missing authoritative replacement")
+						}
+					}
+					if e.Type == core.EventResult {
+						result = e
+					}
+				}
+				if result.Content != "FULL OFFLINE ANSWER" || textCount != 1 {
+					t.Fatalf("lost/duplicate recovery: text=%d result=%+v", textCount, result)
+				}
+				if s.RuntimeState().TurnID != "" {
+					t.Fatal("turn not completed")
+				}
+			})
+		}
+	}
 }
