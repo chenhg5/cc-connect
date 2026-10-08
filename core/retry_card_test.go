@@ -9,53 +9,58 @@ import (
 	"time"
 )
 
-// recordingStreamingCardPlatform counts the streaming cards a turn opens and
+// retryCardTestPlatform counts the streaming cards a turn opens and
 // keeps the last one, so a test can tell one card per turn from one per attempt.
-type recordingStreamingCardPlatform struct {
+type retryCardTestPlatform struct {
 	stubPlatformEngine
 	mu      sync.Mutex
 	creates int
-	cards   []*recordingStreamingCard
+	cards   []*retryTestCard
 }
 
-func (p *recordingStreamingCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+func (p *retryCardTestPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.creates++
-	c := &recordingStreamingCard{}
+	c := &retryTestCard{}
 	p.cards = append(p.cards, c)
 	return c, nil
 }
 
-func (p *recordingStreamingCardPlatform) cardCount() int {
+func (p *retryCardTestPlatform) cardCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.creates
 }
 
-type recordingStreamingCard struct {
+type retryTestCard struct {
 	mu        sync.Mutex
 	updates   []string
 	finalized []string
 }
 
-func (c *recordingStreamingCard) Update(_ context.Context, content string) error {
+func (c *retryTestCard) Update(_ context.Context, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.updates = append(c.updates, content)
 	return nil
 }
 
-func (c *recordingStreamingCard) Finalize(_ context.Context, content string) error {
+func (c *retryTestCard) Finalize(_ context.Context, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.finalized = append(c.finalized, content)
 	return nil
 }
 
-func (c *recordingStreamingCard) Failed() bool { return false }
+func (c *retryTestCard) Failed() bool { return false }
 
-func (c *recordingStreamingCard) snapshot() (updates, finalized []string) {
+// SupportsStreamingCardPayload makes the card render structured panels (as the
+// Feishu card does) where the platform offers them, so tool-panel entries keep
+// their text; it is a harmless extra method where panels do not exist.
+func (c *retryTestCard) SupportsStreamingCardPayload() bool { return true }
+
+func (c *retryTestCard) snapshot() (updates, finalized []string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.updates...), append([]string(nil), c.finalized...)
@@ -126,7 +131,7 @@ func shortRetryPolicy(t *testing.T, maxAttempts int) {
 // instead of every attempt opening a card of its own.
 func TestProcessInteractiveTurnWithRetry_RetryStaysInOneStreamingCard(t *testing.T) {
 	shortRetryPolicy(t, 3)
-	p := &recordingStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	p := &retryCardTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	sessionKey := "test:user1"
 	session := e.sessions.GetOrCreateActive(sessionKey)
@@ -152,8 +157,13 @@ func TestProcessInteractiveTurnWithRetry_RetryStaysInOneStreamingCard(t *testing
 	if !noticed {
 		t.Fatalf("card updates = %q, want the retry notice as a tool entry of the card", updates)
 	}
-	if len(finalized) != 1 || !strings.Contains(finalized[0], "ok after retry") {
-		t.Fatalf("finalized = %q, want the card closed once with the retried answer", finalized)
+	if len(finalized) != 1 {
+		t.Fatalf("finalized = %q, want the card closed exactly once", finalized)
+	}
+	// Depending on the card design the answer is part of the card or sent right
+	// after it (panel cards keep the process, the answer follows as a message).
+	if !strings.Contains(finalized[0]+strings.Join(p.getSent(), "\n"), "ok after retry") {
+		t.Fatalf("finalized = %q, sent = %q, want the retried answer delivered", finalized, p.getSent())
 	}
 	if strings.Contains(strings.Join(finalized, ""), "Retrying") == false {
 		t.Fatalf("final card %q lost the retry notice entry", finalized)
@@ -246,7 +256,7 @@ func TestProcessInteractiveTurnWithRetry_StopDuringRetryClosesTheCard(t *testing
 		RetriableErrorMaxAttempts = oldMaxAttempts
 	})
 
-	p := &recordingStreamingCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	p := &retryCardTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	sessionKey := "test:user1"
 	session := e.sessions.GetOrCreateActive(sessionKey)
