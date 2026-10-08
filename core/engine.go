@@ -9728,18 +9728,58 @@ func formatUsageReport(report *UsageReport, lang Language) string {
 }
 
 func formatUsageBlocks(report *UsageReport, lang Language) string {
-	primary, secondary := selectUsageWindows(report)
-	var sections []string
-	if primary != nil {
-		sections = append(sections, formatUsageBlock(lang, primary))
-	}
-	if secondary != nil {
-		sections = append(sections, formatUsageBlock(lang, secondary))
-	}
+	sections := formatUsageSections(report, lang)
 	if len(sections) == 0 {
 		return ""
 	}
 	return "\n\n" + strings.Join(sections, "\n\n")
+}
+
+func formatUsageSections(report *UsageReport, lang Language) []string {
+	var sections []string
+	main := true
+	for _, bucket := range report.Buckets {
+		if len(bucket.Windows) == 0 {
+			continue
+		}
+		if main {
+			primary, secondary := selectUsageWindows(&UsageReport{Buckets: []UsageBucket{bucket}})
+			for _, window := range []*UsageWindow{primary, secondary} {
+				if window != nil {
+					sections = append(sections, formatUsageBlock(lang, window))
+				}
+			}
+			main = false
+			continue
+		}
+		for i := range bucket.Windows {
+			block := formatUsageBlock(lang, &bucket.Windows[i])
+			if bucket.Name != "" {
+				block = bucket.Name + " · " + block
+			}
+			sections = append(sections, block)
+		}
+	}
+	if credits := report.ResetCredits; credits != nil {
+		i18n := NewI18n(lang)
+		var lines []string
+		lines = append(lines, i18n.Tf(MsgUsageResetsAvailable, credits.AvailableCount))
+		for i, credit := range credits.Credits {
+			expires := "-"
+			if credit.ExpiresAtUnix > 0 {
+				expires = formatUsageTimestamp(credit.ExpiresAtUnix)
+			}
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, i18n.Tf(MsgUsageResetExpires, expires)))
+		}
+		sections = append(sections, strings.Join(lines, "\n"))
+	}
+	return sections
+}
+
+func formatUsageTimestamp(unix int64) string {
+	// Include the deployment's UTC offset so recipients can interpret
+	// the timestamp on any platform.
+	return time.Unix(unix, 0).In(time.Local).Format("2006-01-02 15:04 (UTC-07:00)")
 }
 
 func accountDisplay(report *UsageReport) string {
@@ -9802,40 +9842,57 @@ func formatUsageBlock(lang Language, window *UsageWindow) string {
 	}
 	var sb strings.Builder
 	sb.WriteString(usageWindowLabel(lang, window.WindowSeconds))
-	sb.WriteString("\n")
+	sb.WriteString(" · ")
 	sb.WriteString(usageRemainingLabel(lang))
 	sb.WriteString(usageColon(lang))
 	sb.WriteString(fmt.Sprintf("%d%%", remaining))
 	sb.WriteString("\n")
 	sb.WriteString(usageResetLabel(lang))
 	sb.WriteString(usageColon(lang))
-	sb.WriteString(formatUsageResetTime(lang, window.ResetAfterSeconds))
+	reset := formatUsageResetTime(lang, window.ResetAfterSeconds)
+	if window.ResetAfterSeconds <= 0 && window.ResetAtUnix > 0 {
+		reset = NewI18n(lang).T(MsgUsageResetDue)
+	}
+	sb.WriteString(reset)
+	if window.ResetAtUnix > 0 {
+		sb.WriteString("\n")
+		at := formatUsageTimestamp(window.ResetAtUnix)
+		sb.WriteString(NewI18n(lang).Tf(MsgUsageResetAt, at))
+	}
 	return sb.String()
 }
 
 func (e *Engine) renderUsageCard(report *UsageReport) *Card {
 	lang := e.i18n.CurrentLang()
-	return NewCard().
-		Title(usageCardTitle(lang), "indigo").
-		Markdown(strings.TrimSpace(formatUsageReport(report, lang))).
-		Buttons(e.cardBackButton()).
-		Build()
+	card := NewCard().Title(usageCardTitle(lang), "indigo")
+	if report == nil {
+		card.Markdown(usageUnavailableText(lang))
+	} else {
+		card.Markdown(usageAccountLabel(lang) + accountDisplay(report))
+		for _, section := range formatUsageSections(report, lang) {
+			lines := strings.SplitN(section, "\n", 2)
+			content := "**" + lines[0] + "**"
+			if len(lines) > 1 {
+				content += "\n" + lines[1]
+			}
+			card.Divider().Markdown(content)
+		}
+	}
+	return card.Buttons(e.cardBackButton()).Build()
 }
 
 func formatUsageResetTime(lang Language, resetAfterSeconds int) string {
 	if resetAfterSeconds <= 0 {
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			return "-"
-		case LangJapanese:
-			return "-"
-		case LangSpanish:
-			return "-"
-		default:
-			return "-"
-		}
+		return "-"
 	}
-	return formatDurationI18n(time.Duration(resetAfterSeconds)*time.Second, lang)
+	if resetAfterSeconds < 60 {
+		return NewI18n(lang).T(MsgUsageResetSoon)
+	}
+	duration := formatDurationI18n(time.Duration(resetAfterSeconds)*time.Second, lang)
+	if lang == LangTraditionalChinese {
+		duration = strings.NewReplacer("小时", "小時", "分钟", "分鐘").Replace(duration)
+	}
+	return NewI18n(lang).Tf(MsgUsageResetIn, duration)
 }
 
 func usageAccountLabel(lang Language) string {

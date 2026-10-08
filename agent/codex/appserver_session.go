@@ -87,6 +87,15 @@ type errorNotification struct {
 type appServerRateLimitsResponse struct {
 	RateLimits          appServerRateLimitSnapshot            `json:"rateLimits"`
 	RateLimitsByLimitID map[string]appServerRateLimitSnapshot `json:"rateLimitsByLimitId"`
+	ResetCredits        *appServerResetCredits                `json:"rateLimitResetCredits"`
+}
+
+type appServerResetCredits struct {
+	AvailableCount int `json:"availableCount"`
+	Credits        []struct {
+		Status    string `json:"status"`
+		ExpiresAt int64  `json:"expiresAt"`
+	} `json:"credits"`
 }
 
 type appServerRateLimitSnapshot struct {
@@ -1455,7 +1464,7 @@ func appServerToolSuccess(status string, exitCode *int) bool {
 }
 
 func mapAppServerRateLimits(payload appServerRateLimitsResponse) *core.UsageReport {
-	report := &core.UsageReport{Provider: "codex"}
+	report := &core.UsageReport{Provider: "codex", ResetCredits: mapAppServerResetCredits(payload.ResetCredits)}
 
 	var snapshots []appServerRateLimitSnapshot
 	if len(payload.RateLimitsByLimitID) > 0 {
@@ -1464,7 +1473,16 @@ func mapAppServerRateLimits(payload appServerRateLimitsResponse) *core.UsageRepo
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
+		// The legacy snapshot identifies the account's main quota. Keep its
+		// detailed bucket first for /usage and the reply footer, rather than
+		// an alphabetically earlier model quota that may only expose a week.
+		if main, ok := payload.RateLimitsByLimitID[payload.RateLimits.LimitID]; ok {
+			snapshots = append(snapshots, main)
+		}
 		for _, key := range keys {
+			if key == payload.RateLimits.LimitID {
+				continue
+			}
 			snapshots = append(snapshots, payload.RateLimitsByLimitID[key])
 		}
 	} else if payload.RateLimits.LimitID != "" || payload.RateLimits.Primary != nil || payload.RateLimits.Secondary != nil || payload.RateLimits.Credits != nil {
@@ -1506,6 +1524,23 @@ func mapAppServerRateLimits(payload appServerRateLimitsResponse) *core.UsageRepo
 	}
 
 	return report
+}
+
+func mapAppServerResetCredits(payload *appServerResetCredits) *core.UsageResetCredits {
+	if payload == nil {
+		return nil
+	}
+	credits := &core.UsageResetCredits{AvailableCount: payload.AvailableCount}
+	for _, credit := range payload.Credits {
+		if strings.EqualFold(credit.Status, "available") {
+			credits.Credits = append(credits.Credits, core.UsageResetCredit{ExpiresAtUnix: credit.ExpiresAt})
+		}
+	}
+	sort.SliceStable(credits.Credits, func(i, j int) bool {
+		a, b := credits.Credits[i].ExpiresAtUnix, credits.Credits[j].ExpiresAtUnix
+		return a > 0 && (b <= 0 || a < b)
+	})
+	return credits
 }
 
 func appServerBucketName(snapshot appServerRateLimitSnapshot) string {
@@ -1563,6 +1598,11 @@ func cloneUsageReport(report *core.UsageReport) *core.UsageReport {
 	if report.Credits != nil {
 		credits := *report.Credits
 		cloned.Credits = &credits
+	}
+	if report.ResetCredits != nil {
+		credits := *report.ResetCredits
+		credits.Credits = append([]core.UsageResetCredit(nil), credits.Credits...)
+		cloned.ResetCredits = &credits
 	}
 	return &cloned
 }

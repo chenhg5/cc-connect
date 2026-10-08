@@ -486,13 +486,26 @@ type UsageReporter interface {
 
 // UsageReport is a provider-neutral quota snapshot returned by UsageReporter.
 type UsageReport struct {
-	Provider  string
-	AccountID string
-	UserID    string
-	Email     string
-	Plan      string
-	Buckets   []UsageBucket
-	Credits   *UsageCredits
+	Provider     string
+	AccountID    string
+	UserID       string
+	Email        string
+	Plan         string
+	Buckets      []UsageBucket
+	Credits      *UsageCredits
+	ResetCredits *UsageResetCredits
+}
+
+// UsageResetCredits describes available quota resets and their expiry dates.
+// A nil value means the provider did not report reset credits.
+type UsageResetCredits struct {
+	AvailableCount int
+	Credits        []UsageResetCredit
+}
+
+// UsageResetCredit describes the expiry of one available quota reset.
+type UsageResetCredit struct {
+	ExpiresAtUnix int64
 }
 
 // UsageBucket groups one logical quota, such as standard requests or code review.
