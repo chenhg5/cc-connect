@@ -275,6 +275,10 @@ func (e *Engine) addSharedPending(state *interactiveState, event Event) {
 	}
 	pending := &pendingPermission{RequestID: event.RequestID, ActionToken: base64.RawURLEncoding.EncodeToString(nonce), Decisions: event.Decisions, DecisionDetails: event.DecisionDetails, ToolName: event.ToolName, ToolInput: event.ToolInputRaw, InputPreview: event.ToolInput, Questions: event.Questions, Resolved: make(chan struct{})}
 	state.mu.Lock()
+	if _, ok := state.platform.(CardMessageUpdater); ok && len(event.Questions) == 0 {
+		// Initialize before publishing pending; the pointer stays immutable.
+		pending.card = &permissionCardState{}
+	}
 	if state.pending != nil && state.pending.RequestID == event.RequestID {
 		state.mu.Unlock()
 		return
@@ -303,7 +307,9 @@ func (e *Engine) resolveSharedPending(state *interactiveState, id string) {
 	state.mu.Lock()
 	delete(state.sharedRequests, id)
 	var next *pendingPermission
+	var resolved *pendingPermission
 	if state.pending != nil && state.pending.RequestID == id {
+		resolved = state.pending
 		state.pending.resolve()
 		state.pending = nil
 		if len(state.sharedPending) > 0 {
@@ -326,12 +332,16 @@ func (e *Engine) resolveSharedPending(state *interactiveState, id string) {
 	if f != nil {
 		f.route(Event{Type: EventPermissionResolved, RequestID: id})
 	}
+	if resolved != nil {
+		e.resolveSharedPermissionCard(resolved)
+	}
 	if next != nil {
 		e.sendSharedPrompt(state, next)
 	}
 }
 
 func (e *Engine) sendSharedPrompt(state *interactiveState, pending *pendingPermission) {
+	original := pending
 	state.mu.Lock()
 	p, reply := state.platform, state.replyCtx
 	snapshot := pendingPermission{
@@ -350,30 +360,13 @@ func (e *Engine) sendSharedPrompt(state *interactiveState, pending *pendingPermi
 		e.sendSharedQuestionPrompt(p, reply, pending)
 		return
 	}
-	text := e.i18n.Tf(MsgSharedPermissionPrompt, pending.ToolName, truncateIf(pending.InputPreview, e.display.ToolMaxLen))
-	if reason, _ := pending.ToolInput["reason"].(string); reason != "" && reason != pending.InputPreview {
-		text += "\n\n" + e.i18n.Tf(MsgSharedApprovalReason, reason)
-	}
-	if cwd, _ := pending.ToolInput["cwd"].(string); cwd != "" {
-		text += "\n\n" + e.i18n.Tf(MsgSharedApprovalCwd, cwd)
-	}
-	labels := map[string]MsgKey{"allow": MsgPermBtnAllow, "deny": MsgPermBtnDeny, "cancel": MsgSharedCancelDecision, "allow_session": MsgSharedAllowSession, "allow_similar": MsgSharedAllowSimilar, "network_allow": MsgSharedNetworkAllow, "network_deny": MsgSharedNetworkDeny}
+	text := e.sharedPermissionBody(pending)
 	buttons := []ButtonOption{}
-	cardButtons := []CardButton{}
+	var cardButtons []CardButton
 	for _, decision := range pending.Decisions {
-		base := decision
-		if _, ok := labels[base]; !ok {
-			if i := strings.LastIndex(base, "_"); i >= 0 {
-				base = base[:i]
-			}
-		}
-		key, ok := labels[base]
+		label, ok := e.sharedDecisionLabel(decision)
 		if !ok {
 			continue
-		}
-		label := e.i18n.T(key)
-		if details := pending.DecisionDetails[decision]; details != "" {
-			text += "\n\n" + label + ": `" + details + "`"
 		}
 		action := "cmd:/decision " + pending.ActionToken + " " + decision
 		buttons = append(buttons, ButtonOption{Text: label, Data: action})
@@ -387,7 +380,8 @@ func (e *Engine) sendSharedPrompt(state *interactiveState, pending *pendingPermi
 		}
 	}
 	if supportsCards(p) {
-		e.sendWithCard(p, reply, NewCard().Title(e.i18n.T(MsgPermCardTitle), "orange").Markdown(text).Buttons(cardButtons...).Note(e.i18n.Tf(MsgSharedDecisionHint, strings.Join(pending.Decisions, " / "))).Build())
+		card := NewCard().Title(e.i18n.T(MsgPermCardTitle), "orange").Markdown(text).Buttons(cardButtons...).Note(e.i18n.Tf(MsgSharedDecisionHint, strings.Join(pending.Decisions, " / "))).Build()
+		e.sendSharedPermissionCard(p, reply, original, card)
 		return
 	}
 	e.send(p, reply, text+"\n"+e.i18n.Tf(MsgSharedDecisionHint, strings.Join(pending.Decisions, " / ")))
@@ -498,7 +492,7 @@ func (e *Engine) respondSharedDecision(p Platform, msg *Message, state *interact
 	}
 	state.mu.Lock()
 	as := state.agentSession
-	current := state.pending == pending
+	current := state.pending == pending && len(pending.Questions) == 0
 	state.mu.Unlock()
 	if as == nil || !current {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSharedStaleRequest))
@@ -508,8 +502,11 @@ func (e *Engine) respondSharedDecision(p Platform, msg *Message, state *interact
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
+	e.updateSharedPermissionCard(pending, decision)
 	e.resolveSharedPending(state, pending.RequestID)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSharedResponseSent))
+	if !pending.card.wasUpdated() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSharedResponseSent))
+	}
 }
 
 func (e *Engine) answerSharedQuestion(p Platform, msg *Message, state *interactiveState, pending *pendingPermission, token string, index int, content string) {
