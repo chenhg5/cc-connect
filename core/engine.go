@@ -6627,9 +6627,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			var statusFooter string
 			var legacyStatusFooter string
 			if !isSilent {
-				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
+				footerUsage := replyFooterSessionContextUsage(state.agentSession)
+				footerContext := replyFooterContextText(footerUsage, e.i18n)
 				if e.showContextIndicator {
-					if sdkPlausible {
+					if footerContext == "" && footerUsage != nil && footerUsage.UsedTokens > 0 {
+						// The agent reports its real context load but no window (OpenCode).
+						// The result's InputTokens add up the prompt of every step in the
+						// turn, so they overstate the context — a 28k conversation showed
+						// 100% after a tool-heavy turn, even right after a compaction.
+						footerContext = contextIndicatorText(footerUsage.UsedTokens)
+					} else if sdkPlausible {
 						if text := contextIndicatorText(event.InputTokens); text != "" {
 							footerContext = text
 						}
