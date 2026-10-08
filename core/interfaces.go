@@ -674,6 +674,23 @@ type ChannelNameResolver interface {
 // StreamingCard represents an active streaming card that aggregates
 // an entire agent turn (tool calls, thinking, text) into a single
 // updatable message.
+// ContinueAfterErrorAgent is implemented by agents whose session keeps the
+// conversation — including the tool calls already executed — across a failed
+// turn. A retriable error that arrives after the turn produced observable
+// events cannot safely replay the original prompt (the commands would run
+// again); such an agent is instead asked to continue from where it stopped.
+type ContinueAfterErrorAgent interface {
+	// ContinueAfterErrorPrompt is the prompt sent to resume the interrupted
+	// turn. An empty string disables continuing.
+	ContinueAfterErrorPrompt() string
+}
+
+// DefaultContinueAfterErrorPrompt is the resume prompt agents can return from
+// ContinueAfterErrorPrompt.
+const DefaultContinueAfterErrorPrompt = "The previous response was interrupted by a temporary upstream error. " +
+	"Continue the task from where it stopped. Do not repeat steps that already completed; " +
+	"check the current state first if unsure."
+
 type StreamingCard interface {
 	// Update replaces the card content with the given markdown.
 	// Implementations should throttle calls internally.
