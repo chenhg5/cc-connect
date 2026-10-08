@@ -60,6 +60,10 @@ type fakeOpencodeServer struct {
 	// rejectResyncLimit makes the message-list request fail when it carries a
 	// limit, the way a server that predates the parameter answers it.
 	rejectResyncLimit atomic.Bool
+	// summarizeBodys records POST /session/{id}/summarize (compaction) calls;
+	// failSummarize makes the next one fail.
+	summarizeBodys []map[string]any
+	failSummarize  atomic.Bool
 }
 
 // fakePermissionReply is one recorded answer to a permission request.
@@ -128,6 +132,19 @@ func (f *fakeOpencodeServer) handleSession(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	switch {
+	case strings.HasSuffix(path, "/summarize"):
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.summarizeBodys = append(f.summarizeBodys, body)
+		f.mu.Unlock()
+		if f.failSummarize.CompareAndSwap(true, false) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"name":"UnknownError","data":{"message":"compaction failed"}}`))
+			return
+		}
+		writeJSONResponse(w, true)
 	case strings.HasSuffix(path, "/abort"):
 		f.mu.Lock()
 		f.abortCalls++
@@ -271,6 +288,12 @@ func (f *fakeOpencodeServer) emit(payload map[string]any) {
 		default:
 		}
 	}
+}
+
+func (f *fakeOpencodeServer) summarizeCalls() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.summarizeBodys...)
 }
 
 func (f *fakeOpencodeServer) releaseTurn() {

@@ -658,6 +658,55 @@ func (srv *opencodeServer) sendMessage(ctx context.Context, sessionID string, pa
 	return srv.do(ctx, http.MethodPost, "/session/"+url.PathEscape(sessionID)+"/message", body, &out)
 }
 
+// compactPrompt is the command the engine sends to compress the context (the
+// agent's CompressCommand). The server transport must not post it as a chat
+// message: OpenCode's HTTP API treats message text literally, so the model would
+// just answer "/compact" and the conversation would stay as large as it was.
+const compactPrompt = "/compact"
+
+// isCompactPrompt reports whether a prompt is the compress command itself.
+func isCompactPrompt(prompt string) bool {
+	return strings.TrimSpace(prompt) == compactPrompt
+}
+
+// summarizeSession compacts a conversation the way OpenCode's /compact does:
+// POST /session/{id}/summarize with the model that writes the summary. The
+// request returns once the compaction is over; its progress arrives on the event
+// stream like any other turn.
+func (srv *opencodeServer) summarizeSession(ctx context.Context, sessionID string, model map[string]any) error {
+	if model == nil {
+		return errors.New("opencode: no provider/model to compact the conversation with")
+	}
+	body := map[string]any{"providerID": model["providerID"], "modelID": model["modelID"]}
+	var out any
+	return srv.do(ctx, http.MethodPost, "/session/"+url.PathEscape(sessionID)+"/summarize", body, &out)
+}
+
+// lastAssistantModel returns the provider/model of the newest assistant message
+// in a conversation, for a session that runs on OpenCode's default model (no
+// model configured in cc-connect) and still has to name one to compact.
+func (srv *opencodeServer) lastAssistantModel(ctx context.Context, sessionID, directory string) map[string]any {
+	msgs, err := srv.listMessagesLimited(ctx, sessionID, directory, 20)
+	if err != nil {
+		return nil
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		info, _ := msgs[i]["info"].(map[string]any)
+		if info == nil {
+			continue
+		}
+		if role, _ := info["role"].(string); role != "assistant" {
+			continue
+		}
+		provider, _ := info["providerID"].(string)
+		modelID, _ := info["modelID"].(string)
+		if provider != "" && modelID != "" {
+			return map[string]any{"providerID": provider, "modelID": modelID}
+		}
+	}
+	return nil
+}
+
 func (srv *opencodeServer) abortSession(ctx context.Context, sessionID string) error {
 	return srv.do(ctx, http.MethodPost, "/session/"+url.PathEscape(sessionID)+"/abort", map[string]any{}, nil)
 }
@@ -1031,6 +1080,16 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 		return errors.New("session is closed")
 	}
 
+	// The compress command compacts the conversation through OpenCode's own API
+	// instead of being posted as chat text. It still runs as a turn, so the engine
+	// gets exactly one result and drains its queued messages afterwards.
+	compact := isCompactPrompt(prompt) && len(images) == 0 && len(files) == 0
+	if compact && s.CurrentSessionID() == "" {
+		// No conversation yet, so there is nothing to compact.
+		s.sendEvent(core.Event{Type: core.EventResult, Done: true})
+		return nil
+	}
+
 	if len(files) > 0 {
 		filePaths := core.SaveFilesToDisk(s.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
@@ -1130,6 +1189,14 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 		// the final assistant message). Events arrive over the SSE stream in
 		// parallel; a supplement posted mid-turn additionally extends the turn
 		// that is already running.
+		if compact {
+			model := parseProviderScopedModel(s.model)
+			if model == nil {
+				model = srv.lastAssistantModel(s.inner.ctx, sessionID, s.workDir)
+			}
+			done <- srv.summarizeSession(s.inner.ctx, sessionID, model)
+			return
+		}
 		err := srv.sendMessage(s.inner.ctx, sessionID, parts, s.agentName, s.model)
 		if isSessionMissing(err) {
 			slog.Warn("opencode server session: stored session no longer exists, starting a fresh one",
@@ -1155,6 +1222,12 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 			if err == nil {
 				s.ensureTurnResult(gen)
 			}
+		}
+		if compact && err != nil {
+			// A Send error makes the engine abandon the compress without draining
+			// the messages queued meanwhile; an error event lets it go on with them.
+			s.emitError(err)
+			return nil
 		}
 		// The engine surfaces Send errors itself, so no extra event here —
 		// mirroring the run transport.

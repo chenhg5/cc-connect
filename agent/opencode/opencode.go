@@ -639,7 +639,7 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 
 // -- ContextCompressor --
 
-func (a *Agent) CompressCommand() string { return "/compact" }
+func (a *Agent) CompressCommand() string { return compactPrompt }
 
 // -- MemoryFileProvider --
 
