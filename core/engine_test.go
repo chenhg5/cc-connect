@@ -2292,6 +2292,48 @@ func TestProcessInteractiveEvents_AppendsContextIndicatorInsideReplyFooter(t *te
 	}
 }
 
+// OpenCode reports the real context load (UsedTokens) but not the window. The
+// result's InputTokens sum the prompt of every step of a tool-heavy turn and
+// overstate it (233k for a 28k conversation), so the footer must use UsedTokens.
+func TestProcessInteractiveEvents_ContextIndicatorPrefersReportedUsageWithoutWindow(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	workDir := filepath.Join(homeDir, "code", "proj")
+	agent := &stubReplyFooterAgent{
+		stubModelModeAgent: stubModelModeAgent{model: "gpt-6.1-sol"},
+		workDir:            workDir,
+	}
+	p := &stubPlatformEngine{n: "telegram"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetReplyFooterEnabled(true)
+
+	sessionKey := "telegram:user-footer-reported-usage"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-footer-reported-usage")
+	agentSession.contextUsage = &ContextUsage{UsedTokens: 28000}
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-footer-reported-usage",
+		agent:        agent,
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventResult, Content: "answer", InputTokens: 233000, Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-footer-reported-usage", time.Now(), nil, nil, state.replyCtx, 0)
+
+	sent := p.getSent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %#v, want one final reply", sent)
+	}
+	want := "answer\n\n*[ctx: ~14%] · gpt-6.1-sol · " + compactReplyFooterPath(workDir) + "*"
+	if sent[0] != want {
+		t.Fatalf("final reply = %q, want %q (UsedTokens, not the turn's summed InputTokens)", sent[0], want)
+	}
+}
+
 func TestProcessInteractiveEvents_ToolSegmentsKeepFinalFooter(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
