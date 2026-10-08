@@ -551,8 +551,26 @@ type queuedMessage struct {
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
+// retryCardCarry hands the streaming card of a failed attempt to the next
+// retry attempt, so a turn that is retried stays in one card: the retry notice
+// becomes an entry of the card's tool panel and the retry continues below it,
+// instead of every attempt opening (and abandoning) a card of its own.
+type retryCardCarry struct {
+	streamCard StreamingCard
+	toolCalls  []cardToolEntry
+	thinking   string
+	answer     string
+	toolCount  int
+	// handedOff is set by the retry loop once the next attempt will take the
+	// card over; the failed attempt must then leave it open.
+	handedOff bool
+}
+
 type interactiveState struct {
 	agentSession AgentSession
+	// retryCarry is the streaming card a failed attempt hands to the next
+	// retry attempt (see retryCardCarry). Guarded by mu.
+	retryCarry *retryCardCarry
 	// busySession is the core.Session whose busy lock guards the in-flight
 	// turn. Set by getOrCreateInteractiveStateWith so /stop can release the
 	// lock after tearing the turn down (#1830).
@@ -4151,6 +4169,8 @@ type interactiveRetryTurn struct {
 	// (text, tool use/result, permission) before the retriable error, so the
 	// turn must fail conservatively instead of replaying the prompt.
 	sawSideEffects bool
+	// carry is the attempt's streaming card, reused by the next attempt.
+	carry *retryCardCarry
 }
 
 func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, promptContent string, msgID string, images []ImageAttachment, files []FileAttachment, replyCtx any, turnStart time.Time, logSessionKey string, contentLen int, lockGen uint64) {
@@ -4163,6 +4183,15 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 	defer func() {
 		if stopTyping != nil {
 			stopTyping()
+		}
+		// A card handed to a retry attempt that never started (stop, agent
+		// gone) must not leak into the next, unrelated turn: close it.
+		state.mu.Lock()
+		leftover := state.retryCarry
+		state.retryCarry = nil
+		state.mu.Unlock()
+		if leftover != nil && leftover.streamCard != nil {
+			_ = leftover.streamCard.Finalize(e.ctx, buildCardContent(leftover.thinking, leftover.toolCalls, leftover.answer))
 		}
 	}()
 
@@ -4228,6 +4257,21 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 			replyCtx = retryTurn.replyCtx
 			logSessionKey = retryTurn.logSessionKey
 			contentLen = retryTurn.contentLen
+		}
+
+		if retryTurn != nil && retryTurn.kind.IsRetriable() && retryTurn.sawSideEffects {
+			// The attempt already ran tools or produced output, so replaying the
+			// prompt could repeat side effects. An agent that keeps the
+			// conversation across the failure is asked to continue instead.
+			if cont := e.continueAfterErrorPrompt(state); cont != "" {
+				slog.Warn("retriable agent error after observable events; continuing the turn instead of replaying the prompt",
+					"error", retryTurn.err, "kind", retryTurn.kind, "session", logSessionKey)
+				promptContent = cont
+				images = nil
+				files = nil
+				contentLen = len(cont)
+				retryTurn.sawSideEffects = false
+			}
 		}
 
 		if retryTurn == nil || !retryTurn.kind.IsRetriable() || retryTurn.sawSideEffects {
@@ -4304,10 +4348,32 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 			}
 			return
 		}
+		if retryTurn.carry != nil {
+			// The next attempt takes the card over and keeps updating it.
+			retryTurn.carry.handedOff = true
+			state.mu.Lock()
+			state.retryCarry = retryTurn.carry
+			state.mu.Unlock()
+		}
 		if retryTurn.finalizeNotice != nil {
 			retryTurn.finalizeNotice(ProgressCardStateCompleted, CardStatusDone)
 		}
 	}
+}
+
+// continueAfterErrorPrompt returns the resume prompt of the session's agent when
+// it can continue an interrupted turn (ContinueAfterErrorAgent), or "".
+func (e *Engine) continueAfterErrorPrompt(state *interactiveState) string {
+	state.mu.Lock()
+	agent := state.agent
+	state.mu.Unlock()
+	if agent == nil {
+		agent = e.agent
+	}
+	if c, ok := agent.(ContinueAfterErrorAgent); ok {
+		return strings.TrimSpace(c.ContinueAfterErrorPrompt())
+	}
+	return ""
 }
 
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
@@ -5585,7 +5651,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
-	if scp, ok := state.platform.(StreamingCardPlatform); ok {
+	if carry := state.retryCarry; carry != nil {
+		// A retry attempt continues in the failed attempt's card.
+		state.retryCarry = nil
+		if carry.streamCard != nil && !carry.streamCard.Failed() {
+			streamCard = carry.streamCard
+			cardToolCalls = carry.toolCalls
+			cardThinkingText = carry.thinking
+			cardAnswerText.WriteString(carry.answer)
+			toolCount = carry.toolCount
+			slog.Info("streaming card reused for retry attempt", "session", sessionKey)
+		}
+	}
+	if scp, ok := state.platform.(StreamingCardPlatform); ok && streamCard == nil {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
 			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
 		} else {
@@ -6935,12 +7013,29 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				slog.Warn("agent retriable error", "error", event.Error, "kind", event.ErrorKind, "session_key", sessionKey)
 				var lastRetryNotice string
+				var carry *retryCardCarry
+				if streamCard != nil && !streamCard.Failed() {
+					carry = &retryCardCarry{streamCard: streamCard, toolCalls: cardToolCalls,
+						thinking: cardThinkingText, answer: cardAnswerText.String(), toolCount: toolCount}
+				}
 				notifyRetry := func(notice string) bool {
 					notice = strings.TrimSpace(notice)
 					if notice == "" {
 						return false
 					}
 					lastRetryNotice = notice
+					if carry != nil {
+						// The notice is an entry of the turn card's tool panel; the
+						// retry continues in the same card.
+						carry.toolCount++
+						carry.toolCalls = append(carry.toolCalls, cardToolEntry{
+							Index: carry.toolCount,
+							Name:  "自动重试",
+							Input: notice,
+						})
+						_ = carry.streamCard.Update(e.ctx, buildCardContent(carry.thinking, carry.toolCalls, carry.answer))
+						return true
+					}
 					state.mu.Lock()
 					progressNotice := state.progressNotice
 					state.mu.Unlock()
@@ -6967,6 +7062,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return sp.updateStatusFooter(CardStatusWorking, notice)
 				}
 				finalizeRetryNotice := func(progressState ProgressCardState, cardStatus CardStatus) {
+					if carry != nil && !carry.handedOff {
+						// The turn ends here (stop, shutdown, retries exhausted or no
+						// retry): close the card instead of leaving it "in progress".
+						_ = carry.streamCard.Finalize(e.ctx, buildCardContent(carry.thinking, carry.toolCalls, carry.answer))
+					}
 					if hasRichCard && cardMessageID != nil {
 						if updater, ok := p.(MessageUpdater); ok {
 							if cardStatus == "" {
@@ -7002,6 +7102,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				retryTurn.notify = notifyRetry
 				retryTurn.finalizeNotice = finalizeRetryNotice
 				retryTurn.sawSideEffects = sawSideEffects
+				retryTurn.carry = carry
 				return retryTurn
 			}
 			cp.Finalize(ProgressCardStateFailed)
