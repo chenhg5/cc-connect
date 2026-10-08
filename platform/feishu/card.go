@@ -8,8 +8,6 @@ import (
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
-	lark "github.com/larksuite/oapi-sdk-go/v3"
-	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -36,20 +34,8 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 
 // SendCard sends a structured card as a new message to the chat.
 func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
-	rc, ok := rctx.(replyContext)
-	if !ok {
-		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
-	}
-	if rc.chatID == "" {
-		return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
-	}
-
-	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
-		return p.ReplyCard(ctx, rctx, card)
-	}
-
-	cardJSON := renderCard(card, rc.sessionKey)
-	return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
+	_, err := p.sendCard(ctx, rctx, card)
+	return err
 }
 
 // RefreshCard updates a previously rendered card in-place using the Patch API.
@@ -64,25 +50,52 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 		return fmt.Errorf("%s: no tracked card messageID for session %q", p.tag(), sessionKey)
 	}
 
-	cardJSON := renderCard(card, sessionKey)
-	req := larkim.NewPatchMessageReqBuilder().
-		MessageId(msgID).
-		Body(larkim.NewPatchMessageReqBodyBuilder().
-			Content(cardJSON).
-			Build()).
-		Build()
-	return p.withTransientRetry(ctx, "refresh card", func() error {
-		return p.withFreshTenantAccessTokenRetry(ctx, "refresh card", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Message.Patch(ctx, req, options...)
-			if err != nil {
-				return fmt.Errorf("%s: refresh card: %w", p.tag(), err)
-			}
-			if !resp.Success() {
-				return fmt.Errorf("%s: refresh card code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-			}
-			return nil
-		})
-	})
+	return p.patchCardMessage(ctx, msgID, renderCard(card, sessionKey))
+}
+
+type cardMessageHandle struct {
+	messageID  string
+	sessionKey string
+}
+
+// SendCardWithHandle records the new message ID, not the trigger message or the
+// last clicked card. Daemon notifications can then update this exact approval.
+func (p *interactivePlatform) SendCardWithHandle(ctx context.Context, rctx any, card *core.Card) (any, error) {
+	handle, err := p.sendCard(ctx, rctx, card)
+	if err != nil {
+		return nil, err
+	}
+	if handle.messageID == "" {
+		return nil, fmt.Errorf("%s: tracked card response missing message ID", p.tag())
+	}
+	return handle, nil
+}
+
+func (p *interactivePlatform) sendCard(ctx context.Context, rctx any, card *core.Card) (cardMessageHandle, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return cardMessageHandle{}, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if rc.chatID == "" {
+		return cardMessageHandle{}, fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
+	}
+	cardJSON := renderCard(card, rc.sessionKey)
+	var messageID string
+	var err error
+	if p.shouldReplyInThread(rc) && p.shouldUseThreadOrReplyAPI(rc) {
+		messageID, err = p.replyMessageWithID(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	} else {
+		messageID, err = p.createMessageWithID(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
+	}
+	return cardMessageHandle{messageID: messageID, sessionKey: rc.sessionKey}, err
+}
+
+func (p *interactivePlatform) UpdateCard(ctx context.Context, handle any, card *core.Card) error {
+	h, ok := handle.(cardMessageHandle)
+	if !ok || h.messageID == "" {
+		return fmt.Errorf("%s: invalid card message handle", p.tag())
+	}
+	return p.patchCardMessage(ctx, h.messageID, renderCard(card, h.sessionKey))
 }
 
 // renderCardMap converts a core.Card into the Feishu Interactive Card map

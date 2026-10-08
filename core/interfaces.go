@@ -334,6 +334,14 @@ type CardRefresher interface {
 	RefreshCard(ctx context.Context, sessionKey string, card *Card) error
 }
 
+// CardMessageUpdater identifies cards at send time so asynchronous events can
+// replace the exact message even when no user has clicked it. Handles are
+// opaque to core and belong to the platform that returned them.
+type CardMessageUpdater interface {
+	SendCardWithHandle(ctx context.Context, replyCtx any, card *Card) (any, error)
+	UpdateCard(ctx context.Context, handle any, card *Card) error
+}
+
 // PlatformLifecycleHandler receives readiness state transitions from async
 // recoverable platforms.
 type PlatformLifecycleHandler interface {
