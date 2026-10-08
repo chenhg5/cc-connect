@@ -1,11 +1,15 @@
 package feishu
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 )
 
 func decodeRenderedCard(t *testing.T, card *core.Card) map[string]any {
@@ -310,5 +314,79 @@ func TestBuildCardJSONWithStatusFooter_EmptyFooterFallsThrough(t *testing.T) {
 	// whitespace-only footer also falls through
 	if got := buildCardJSONWithStatusFooter(body, "   \n  "); got != b {
 		t.Errorf("whitespace footer should fall through to buildCardJSON")
+	}
+}
+
+func TestTrackedPermissionCard_UpdatesSentMessageWithoutClick(t *testing.T) {
+	for _, thread := range []bool{false, true} {
+		name := "chat"
+		if thread {
+			name = "thread"
+		}
+		t.Run(name, func(t *testing.T) {
+			var patchedPath string
+			var patchedContent string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+					writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "test-token"})
+				case r.Method == http.MethodPost:
+					wantPath := "/open-apis/im/v1/messages"
+					if thread {
+						wantPath += "/om_trigger/reply"
+					}
+					if r.URL.Path != wantPath {
+						t.Errorf("send path = %q, want %q", r.URL.Path, wantPath)
+					}
+					writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"message_id": "om_permission"}})
+				case r.Method == http.MethodPatch:
+					patchedPath = r.URL.Path
+					var body struct {
+						Content string `json:"content"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					patchedContent = body.Content
+					writeJSON(t, w, map[string]any{"code": 0})
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer srv.Close()
+			base := &Platform{
+				platformName: "feishu", threadIsolation: thread,
+				client: lark.NewClient("cli_card_handle_"+name, "test-secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+				// A more recent click must not redirect this update.
+				cardActionMsgIDs: map[string]string{"feishu:chat:user": "om_other_card"},
+			}
+			p := &interactivePlatform{Platform: base}
+			sessionKey := "feishu:chat:user"
+			if thread {
+				sessionKey = "feishu:chat:root:om_trigger"
+			}
+			handle, err := p.SendCardWithHandle(context.Background(), replyContext{messageID: "om_trigger", chatID: "oc_chat", sessionKey: sessionKey}, core.NewCard().Markdown("pending").Build())
+			if err != nil {
+				t.Fatal(err)
+			}
+			resolved := core.NewCard().Title("Request handled", "grey").Markdown("original context").Build()
+			if err := p.UpdateCard(context.Background(), handle, resolved); err != nil {
+				t.Fatal(err)
+			}
+			if patchedPath != "/open-apis/im/v1/messages/om_permission" {
+				t.Fatalf("updated %q instead of the sent permission card", patchedPath)
+			}
+			if patchedContent != renderCard(resolved, sessionKey) {
+				t.Fatalf("patched content = %s", patchedContent)
+			}
+		})
+	}
+}
+
+func TestTrackedPermissionCard_RejectsInvalidHandle(t *testing.T) {
+	p := &interactivePlatform{Platform: &Platform{platformName: "feishu"}}
+	if err := p.UpdateCard(context.Background(), "om_untracked", core.NewCard().Build()); err == nil {
+		t.Fatal("accepted a handle that was not returned by tracked send")
 	}
 }
