@@ -389,3 +389,184 @@ func TestSharedInterruptedMessageReportsBackgroundCountAndPreservesUnknown(t *te
 		})
 	}
 }
+
+func TestSharedPending_TextAcceptsOfferedDecisionsBeforeAliases(t *testing.T) {
+	for _, tc := range []struct{ reply, decision string }{
+		{"allow_session", "allow_session"}, {"allow_similar", "allow_similar"},
+		{"network_allow", "network_allow"}, {"network_deny", "network_deny"},
+		{"cancel", "cancel"}, {"取消", "cancel"}, {" ALLOW_SESSION ", "allow_session"},
+		{"yes", "allow"}, {"no", "deny"},
+	} {
+		t.Run(tc.reply, func(t *testing.T) {
+			env := newSharedTestEnv(t)
+			plain := &stubPlatformEngine{n: "test"}
+			send := func(text string) {
+				env.e.ReceiveMessage(plain, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: text, ReplyCtx: "reply"})
+			}
+			send("/attach first")
+			as := env.a.connection("first")
+			as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "TEXT APPROVAL", Decisions: []string{"allow", "deny", "allow_session", "allow_similar", "network_allow", "network_deny", "cancel"}})
+			waitSharedPlainText(t, plain, "TEXT APPROVAL")
+			send(tc.reply)
+			waitSharedPlainText(t, plain, env.e.i18n.T(MsgSharedResponseSent))
+			as.mu.Lock()
+			defer as.mu.Unlock()
+			if len(as.responses) != 1 || as.responses[0].Behavior != tc.decision {
+				t.Fatalf("reply %q submitted %+v; want %q", tc.reply, as.responses, tc.decision)
+			}
+		})
+	}
+}
+
+func TestSharedPending_CancelWithoutOfferedCancelDoesNotDeny(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.send("/attach first")
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "NO CANCEL", Decisions: []string{"allow", "deny"}})
+	env.await("NO CANCEL")
+	env.send("cancel")
+	env.await(env.e.i18n.Tf(MsgSharedDecisionHint, "allow / deny"))
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.responses) != 0 || !as.pending["approval"] {
+		t.Fatalf("unsupported cancellation submitted a decision: %+v", as.responses)
+	}
+}
+
+func waitSharedPlainText(t *testing.T, p *stubPlatformEngine, text string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(strings.Join(p.getSent(), "\n"), text) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("missing text %q in %v", text, p.getSent())
+}
+
+type sharedCompatCall struct {
+	session      *sharedCompatSession
+	turn, prompt string
+	images       []ImageAttachment
+	files        []FileAttachment
+}
+
+type sharedCompatAgent struct {
+	sharedTestAgent
+	calls chan sharedCompatCall
+	seq   int
+}
+
+func (a *sharedCompatAgent) StartSession(ctx context.Context, id string) (AgentSession, error) {
+	a.mu.Lock()
+	a.seq++
+	if id == "" {
+		id = fmt.Sprintf("thread-%d", a.seq)
+	}
+	a.mu.Unlock()
+	as, err := a.AttachSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	s := as.(*sharedTestSession)
+	s.mu.Lock()
+	s.turn = ""
+	s.mu.Unlock()
+	return &sharedCompatSession{sharedTestSession: s, calls: a.calls}, nil
+}
+
+type sharedCompatSession struct {
+	*sharedTestSession
+	calls chan sharedCompatCall
+	seq   int
+}
+
+func (s *sharedCompatSession) SendTurn(prompt, _ string, images []ImageAttachment, files []FileAttachment) (string, error) {
+	s.mu.Lock()
+	s.seq++
+	id := fmt.Sprintf("turn-%d", s.seq)
+	s.turn = id
+	s.mu.Unlock()
+	s.calls <- sharedCompatCall{session: s, turn: id, prompt: prompt, images: images, files: files}
+	return id, nil
+}
+
+func (c sharedCompatCall) finish(text string) {
+	c.session.mu.Lock()
+	c.session.turn = ""
+	c.session.mu.Unlock()
+	c.session.emit(Event{Type: EventText, TurnID: c.turn, Content: text, Metadata: map[string]any{"phase": "final_answer"}})
+	c.session.emit(Event{Type: EventResult, TurnID: c.turn, Content: text, Done: true})
+}
+
+func newSharedCompatEnv(t *testing.T) (*sharedTestEnv, *sharedCompatAgent) {
+	env := newSharedTestEnv(t)
+	a := &sharedCompatAgent{calls: make(chan sharedCompatCall, 16)}
+	env.e.agent = a
+	return env, a
+}
+
+func awaitSharedCompatCall(t *testing.T, a *sharedCompatAgent) sharedCompatCall {
+	t.Helper()
+	select {
+	case c := <-a.calls:
+		return c
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn not started")
+		return sharedCompatCall{}
+	}
+}
+
+func TestSharedPendingQuestionPausesIdleTimeout(t *testing.T) {
+	env, a := newSharedCompatEnv(t)
+	env.e.eventIdleTimeout = 100 * time.Millisecond
+	env.send("question")
+	call := awaitSharedCompatCall(t, a)
+	call.session.emit(Event{Type: EventPermissionRequest, TurnID: call.turn, RequestID: "wait", Questions: []UserQuestion{{ID: "q", Question: "WAIT FOR ANSWER", Options: []UserQuestionOption{{Label: "A"}}}}})
+	env.await("WAIT FOR ANSWER")
+	time.Sleep(150 * time.Millisecond)
+	if strings.Contains(env.visible(), "timed out") {
+		t.Fatalf("human wait triggered idle timeout: %s", env.visible())
+	}
+	env.send(env.button("A"))
+	call.finish("AFTER HUMAN ANSWER")
+	env.await("AFTER HUMAN ANSWER")
+}
+
+func TestSharedIdleResetDoesNotDetachExternallyActiveThread(t *testing.T) {
+	env, _, as := newSharedSettingsEnv(t)
+	env.e.resetOnIdle = time.Minute
+	s := env.e.sessions.GetOrCreateActive("test:user")
+	s.mu.Lock()
+	s.LastUserActivity = time.Now().Add(-time.Hour)
+	s.ExplicitActivatedAt = time.Time{}
+	s.mu.Unlock()
+	env.send("ordinary input during CLI turn")
+	env.await(env.e.i18n.T(MsgSharedBusy))
+	assertSharedSettingsPreserved(t, env, as)
+}
+
+func TestSharedLateToolNeverInterruptsAnotherTurn(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.e.eventIdleTimeout = 100 * time.Millisecond
+	env.e.maxTurnTime = 150 * time.Millisecond
+	env.send("/attach first")
+	env.await("Attached to session first")
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventResult, TurnID: "active-first", Content: "OLD TURN FINISHED", Done: true})
+	env.await("OLD TURN FINISHED")
+	as.mu.Lock()
+	as.turn = "next-turn"
+	as.mu.Unlock()
+	as.emit(Event{Type: EventToolResult, TurnID: "active-first", ItemID: "late", ToolName: "Bash", ToolResult: "LATE TOOL FINISHED", ToolStatus: "completed"})
+	env.await("LATE TOOL FINISHED")
+	time.Sleep(250 * time.Millisecond)
+	env.send("/steer after late tool")
+	env.await("STEER observed: after late tool")
+	if strings.Contains(env.visible(), "timed out") || strings.Contains(env.visible(), "maximum time") {
+		t.Fatalf("late tool restarted task timers: %s", env.visible())
+	}
+	env.send("/detach")
+	env.await(env.e.i18n.T(MsgSharedDetached))
+}

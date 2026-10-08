@@ -3407,3 +3407,309 @@ func TestCUJ_C7_SharedReplyStreamsBeforeCompletion(t *testing.T) {
 		t.Fatalf("not streamed or duplicate final response: %v", streams)
 	}
 }
+
+func TestCUJ_C7_LateToolOutputDoesNotSplitNextSteeredReply(t *testing.T) {
+	p := &observedTextStreamPlatform{observedToolOutputPlatform: observedToolOutputPlatform{toolOutputRichPlatform: toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}}}
+	a := &sharedTestAgent{}
+	e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
+	e.display.CardMode, e.display.ToolMessages = "rich", true
+	send := func(text string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: text, ReplyCtx: "reply"})
+	}
+	await := func(text string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(strings.Join(p.getSent(), "\n"), text) {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("missing visible %q: %v", text, p.getSent())
+	}
+	send("/attach first")
+	await("Attached to session first")
+	as := a.connection("first")
+	old := as.RuntimeState().TurnID
+	as.emit(Event{Type: EventTurnStarted, TurnID: old})
+	as.emit(Event{Type: EventToolUse, TurnID: old, ItemID: "a", ToolName: "Bash", ToolInput: "old Python 1"})
+	send("/steer hi")
+	as.emit(Event{Type: EventResult, TurnID: old, Content: "FIRST TURN FINAL", Done: true})
+	await("FIRST TURN FINAL")
+	// Commands outlive the model turn and continue alongside a new CLI turn.
+	as.mu.Lock()
+	as.turn = "next-turn"
+	as.mu.Unlock()
+	as.emit(Event{Type: EventToolResult, TurnID: old, ItemID: "a", ToolName: "Bash", ToolResult: "OLD PYTHON 1 RESULT", ToolStatus: "completed"})
+	as.emit(Event{Type: EventToolUse, TurnID: old, ItemID: "b", ToolName: "Bash", ToolInput: "old Python 2"})
+	as.emit(Event{Type: EventTurnStarted, TurnID: "next-turn"})
+	as.emit(Event{Type: EventText, TurnID: "next-turn", ItemID: "body", Content: "明", Metadata: map[string]any{"phase": "commentary", "text_delta": true}})
+	as.emit(Event{Type: EventText, TurnID: "next-turn", ItemID: "body", Content: "白，我会继续运行当前打印任务，并收集全部输出", Metadata: map[string]any{"phase": "commentary", "text_delta": true}})
+	await("LIVE-BODY 明白，我会继续运行当前打印任务")
+	as.emit(Event{Type: EventToolOutput, TurnID: old, ItemID: "b", ToolName: "Bash", Content: "TAIL-LIVE"})
+	as.emit(Event{Type: EventToolOutput, TurnID: old, ItemID: "b", ToolName: "Bash", Content: "-MORE"})
+	await(`"Result":"TAIL-LIVE-MORE"`)
+	send("/steer hi again")
+	as.emit(Event{Type: EventToolUse, TurnID: "next-turn", ItemID: "c", ToolName: "Bash", ToolInput: "current Python"})
+	as.emit(Event{Type: EventToolResult, TurnID: "next-turn", ItemID: "c", ToolName: "Bash", ToolResult: "CURRENT PYTHON RESULT", ToolStatus: "completed"})
+	as.emit(Event{Type: EventResult, TurnID: "next-turn", Content: "SECOND TURN FINAL", Done: true})
+	await("SECOND TURN FINAL")
+	// The old tool completes even after the next answer. It must update only
+	// the old tool card; assistant history must contain neither tool result.
+	as.emit(Event{Type: EventToolResult, TurnID: old, ItemID: "b", ToolName: "Bash", ToolResult: "OLD PYTHON 2 RESULT", ToolStatus: "completed"})
+	await("OLD PYTHON 2 RESULT")
+	await("CURRENT PYTHON RESULT")
+	for _, msg := range p.getSent() {
+		if msg == "明" || strings.HasPrefix(msg, "白，我会") {
+			t.Fatalf("delta leaked as standalone text: %q", msg)
+		}
+		if strings.Contains(msg, "OLD PYTHON") || strings.Contains(msg, "CURRENT PYTHON RESULT") {
+			if !strings.HasPrefix(msg, "TOOL-CARD ") {
+				t.Fatalf("tool output escaped panel: %q", msg)
+			}
+		}
+	}
+	send("/history 10")
+	await("History (last")
+	send("/detach")
+	await(e.i18n.T(MsgSharedDetached))
+}
+
+func TestCUJ_C7_BindingBufferKeepsForeignDeltasInCard(t *testing.T) {
+	p := &observedTextStreamPlatform{observedToolOutputPlatform: observedToolOutputPlatform{toolOutputRichPlatform: toolOutputRichPlatform{stubRichCardSilentPlatform: stubRichCardSilentPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}}}
+	base := &sharedCompatAgent{calls: make(chan sharedCompatCall, 8)}
+	a := &delayedBindingAgent{sharedCompatAgent: base, release: make(chan struct{})}
+	e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+	defer func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("Stop cleanup: %v", err)
+		}
+	}()
+	e.display.CardMode = "rich"
+	send := func(text string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: text, ReplyCtx: "reply"})
+	}
+	await := func(text string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(strings.Join(p.getSent(), "\n"), text) {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("missing visible %q: %v", text, p.getSent())
+	}
+	send("local task")
+	call := awaitSharedCompatCall(t, base)
+	call.session.emit(Event{Type: EventTurnStarted, TurnID: "foreign"})
+	call.session.emit(Event{Type: EventText, TurnID: "foreign", Content: "FOREIGN PREFIX ", Metadata: map[string]any{"phase": "commentary", "text_delta": true}})
+	call.session.emit(Event{Type: EventText, TurnID: "foreign", Content: "FOREIGN LONG TAIL INCREMENT", Metadata: map[string]any{"phase": "commentary", "text_delta": true}})
+	// Reader-order barrier before releasing the SendTurn response.
+	call.session.emit(Event{Type: EventRuntimeStatus, Content: "connected"})
+	await(e.i18n.T(MsgSharedReconnected))
+	close(a.release)
+	await("LIVE-BODY FOREIGN PREFIX FOREIGN LONG TAIL INCREMENT")
+	call.session.emit(Event{Type: EventResult, TurnID: "foreign", Content: "FOREIGN FINAL", Done: true})
+	call.finish("LOCAL FINAL")
+	await("LOCAL FINAL")
+	send("next local task")
+	next := awaitSharedCompatCall(t, base)
+	next.finish("NEXT LOCAL FINAL")
+	await("NEXT LOCAL FINAL")
+	send("/history 10")
+	await("History (last")
+	for _, msg := range p.getSent() {
+		if msg == "FOREIGN PREFIX " || msg == "FOREIGN LONG TAIL INCREMENT" {
+			t.Fatalf("unbound event escaped card: %q", msg)
+		}
+	}
+}
+
+func TestCUJ_C7_RecoveredResultWaitsForNewCLITurnBeforeDrainingQueue(t *testing.T) {
+	env, a := newSharedCompatEnv(t)
+	env.e.agent = &queuedExternalAgent{a}
+	env.send("local work")
+	first := awaitSharedCompatCall(t, a)
+	env.send("KEEP THIS QUEUED")
+	env.await(env.e.i18n.T(MsgMessageQueued))
+	as := first.session
+	as.mu.Lock()
+	as.turn = "new-cli-turn"
+	as.mu.Unlock()
+	as.emit(Event{Type: EventResult, TurnID: first.turn, Content: "RECOVERED LOCAL RESULT", Done: true, Metadata: map[string]any{"result_authoritative": true}})
+	env.await("RECOVERED LOCAL RESULT")
+	select {
+	case c := <-a.calls:
+		t.Fatalf("queued input sent into active CLI turn: %+v", c)
+	case <-time.After(120 * time.Millisecond):
+	}
+	as.mu.Lock()
+	as.turn = ""
+	as.mu.Unlock()
+	as.emit(Event{Type: EventResult, TurnID: "new-cli-turn", Content: "CLI FINAL", Done: true})
+	queued := awaitSharedCompatCall(t, a)
+	if queued.prompt != "KEEP THIS QUEUED" {
+		t.Fatalf("lost queued input: %q", queued.prompt)
+	}
+	queued.finish("QUEUED INPUT EXECUTED")
+	env.await("QUEUED INPUT EXECUTED")
+	env.send("/history 10")
+	env.await("KEEP THIS QUEUED")
+}
+
+// A busy retry is held locally while the shared foreground waits for the
+// current CLI turn to finish.  /stop must discard that retained retry too;
+// otherwise the message can execute after the user has been told it stopped.
+func TestCUJ_C7_StopCancelsRetainedBusyRetry(t *testing.T) {
+	env, a := newSharedCompatEnv(t)
+	env.e.agent = &busyRetryAgent{a}
+	env.send("local work")
+	first := awaitSharedCompatCall(t, a)
+	env.send("RETRY QUEUED INPUT")
+	env.await(env.e.i18n.T(MsgMessageQueued))
+	first.finish("FIRST FINAL")
+	env.await(env.e.i18n.T(MsgSharedReconnected))
+	env.send("/stop")
+	env.await(env.e.i18n.T(MsgExecutionStopped))
+	select {
+	case c := <-a.calls:
+		c.finish("UNWANTED")
+		t.Fatalf("/stop executed retained queued input after reporting stopped: %q", c.prompt)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestCUJ_C7_CompletedReplayDoesNotRestartTimeouts(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.e.eventIdleTimeout = 80 * time.Millisecond
+	env.e.maxTurnTime = 120 * time.Millisecond
+	env.send("/attach first")
+	env.await("Attached to session first")
+	as := env.a.connection("first")
+	env.send("/steer before reconnect")
+	env.await("STEER observed: before reconnect")
+	as.emit(Event{Type: EventResult, TurnID: "active-first", Content: "OLD FINAL", Done: true})
+	env.await("OLD FINAL")
+	as.mu.Lock()
+	as.turn = "new-cli-turn"
+	as.mu.Unlock()
+	env.e.interactiveMu.Lock()
+	state := env.e.interactiveStates["test:user"]
+	env.e.interactiveMu.Unlock()
+	state.mu.Lock()
+	replay := state.sharedReplayEvents
+	state.mu.Unlock()
+	replay <- Event{Type: EventTurnStarted, TurnID: "active-first"}
+	replay <- Event{Type: EventText, TurnID: "active-first", Content: "STALE REPLAY BODY", Metadata: map[string]any{"phase": "commentary"}}
+	time.Sleep(240 * time.Millisecond)
+	env.send("/steer after replay")
+	env.await("STEER observed: after replay")
+	visible := env.visible()
+	if strings.Contains(visible, "STALE REPLAY BODY") || strings.Contains(visible, "timed out") || strings.Contains(visible, "maximum time") {
+		t.Fatalf("completed replay resurrected presentation: %s", visible)
+	}
+	env.send("/detach")
+	env.await("Detached")
+}
+
+func TestCUJ_C7_BusySendRetryPreservesQueueAndHistory(t *testing.T) {
+	env, a := newSharedCompatEnv(t)
+	env.e.agent = &busyRetryAgent{a}
+	env.send("local work")
+	first := awaitSharedCompatCall(t, a)
+	env.send("RETRY QUEUED INPUT")
+	env.await(env.e.i18n.T(MsgMessageQueued))
+	first.finish("FIRST FINAL")
+	env.await(env.e.i18n.T(MsgSharedReconnected))
+	select {
+	case c := <-a.calls:
+		t.Fatalf("busy input accepted too early: %+v", c)
+	case <-time.After(100 * time.Millisecond):
+	}
+	first.session.mu.Lock()
+	first.session.turn = ""
+	first.session.mu.Unlock()
+	first.session.emit(Event{Type: EventResult, TurnID: "racing-cli-turn", Content: "CLI DONE", Done: true})
+	next := awaitSharedCompatCall(t, a)
+	if next.prompt != "RETRY QUEUED INPUT" {
+		t.Fatalf("lost busy input: %q", next.prompt)
+	}
+	next.finish("RETRY SUCCEEDED")
+	env.await("RETRY SUCCEEDED")
+	env.send("/history 10")
+	env.await("History (last")
+	history := env.e.sessions.GetOrCreateActive("test:user").GetHistory(100)
+	count := 0
+	for _, item := range history {
+		if item.Role == "user" && item.Content == "RETRY QUEUED INPUT" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("retry duplicated user history: %+v", history)
+	}
+	if strings.Contains(env.visible(), "agent turn is busy") {
+		t.Fatal("retryable rejection surfaced as failure")
+	}
+}
+
+func TestCUJ_C7_LateApprovalSurvivesPresentationTimeout(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.e.eventIdleTimeout = 120 * time.Millisecond
+	env.e.maxTurnTime = 180 * time.Millisecond
+	env.send("/attach first")
+	env.await("Attached to session first")
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, TurnID: "active-first", RequestID: "late", ToolName: "Bash", ToolInput: "WAITING-APPROVAL"})
+	env.await("WAITING-APPROVAL")
+	// The presentation is only created after the already displayed approval.
+	as.emit(Event{Type: EventToolOutput, TurnID: "active-first", ItemID: "parallel", ToolName: "Bash", Content: "PARALLEL LIVE"})
+	env.await("PARALLEL LIVE")
+	time.Sleep(360 * time.Millisecond)
+	env.send("/steer still waiting")
+	env.await("STEER observed: still waiting")
+	if strings.Contains(env.visible(), "timed out") || strings.Contains(env.visible(), "interrupted") {
+		t.Fatalf("approval wait cancelled task: %s", env.visible())
+	}
+	as.emit(Event{Type: EventPermissionResolved, TurnID: "active-first", RequestID: "late"})
+	// Human wait must not consume the max-turn budget on resolution.
+	as.emit(Event{Type: EventText, TurnID: "active-first", Content: "CONTINUED AFTER APPROVAL", Metadata: map[string]any{"phase": "commentary"}})
+	time.Sleep(30 * time.Millisecond)
+	as.emit(Event{Type: EventResult, TurnID: "active-first", Content: "APPROVAL FINAL", Done: true})
+	env.await("APPROVAL FINAL")
+	env.send("/history")
+	env.await("APPROVAL FINAL")
+	env.send("/detach")
+	env.await("Detached")
+	if strings.Contains(env.visible(), "timed out") {
+		t.Fatalf("resolution triggered overdue timer: %s", env.visible())
+	}
+}
+
+func TestCUJ_C7_RecoveredTerminalResultDrainsQueue(t *testing.T) {
+	env, a := newSharedCompatEnv(t)
+	env.e.display.ToolMessages = false
+	env.send("first work")
+	first := awaitSharedCompatCall(t, a)
+	first.session.emit(Event{Type: EventText, TurnID: first.turn, Content: "INCOMPLETE BEFORE DISCONNECT", Metadata: map[string]any{"phase": "final_answer"}})
+	env.send("queued work")
+	// Model adapter emits only the reconciled EventResult, without a text event.
+	first.session.mu.Lock()
+	first.session.turn = ""
+	first.session.mu.Unlock()
+	first.session.emit(Event{Type: EventResult, TurnID: first.turn, Content: "RECOVERED ANSWER", Done: true, Metadata: map[string]any{"result_authoritative": true}})
+	second := awaitSharedCompatCall(t, a)
+	if second.prompt != "queued work" {
+		t.Fatalf("wrong queued request: %q", second.prompt)
+	}
+	second.finish("QUEUE FINISHED")
+	env.await("QUEUE FINISHED")
+	env.send("/history")
+	env.await("RECOVERED ANSWER")
+}
