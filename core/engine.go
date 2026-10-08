@@ -564,7 +564,7 @@ type retryCardCarry struct {
 	streamCard StreamingCard
 	toolCalls  []cardToolEntry
 	thinking   string
-	answer     string
+	stepTexts  []string // step narration folded into the thinking panel
 	toolCount  int
 	// handedOff is set by the retry loop once the next attempt will take the
 	// card over; the failed attempt must then leave it open.
@@ -4197,7 +4197,7 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 		state.retryCarry = nil
 		state.mu.Unlock()
 		if leftover != nil && leftover.streamCard != nil {
-			_ = leftover.streamCard.Finalize(e.ctx, buildCardContent(leftover.thinking, leftover.toolCalls, leftover.answer))
+			_ = leftover.streamCard.Finalize(e.ctx, e.streamingCardContentFor(leftover.streamCard, leftover.thinking, leftover.stepTexts, leftover.toolCalls, "", true))
 		}
 	}()
 
@@ -5832,10 +5832,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
-	var cardToolCalls []cardToolEntry  // track tool calls for card content
-	var cardThinkingText string        // latest thinking text
-	var cardStepTexts []string         // intermediate step text (opencode per-step updates) folded into the thinking panel
-	var cardAnswerText strings.Builder // accumulated answer text
+	var cardToolCalls []cardToolEntry // track tool calls for card content
+	var cardThinkingText string       // latest thinking text
+	var cardStepTexts []string        // intermediate step text (opencode per-step updates) folded into the thinking panel
 
 	if carry := state.retryCarry; carry != nil {
 		// A retry attempt continues in the failed attempt's card.
@@ -5844,7 +5843,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			streamCard = carry.streamCard
 			cardToolCalls = carry.toolCalls
 			cardThinkingText = carry.thinking
-			cardAnswerText.WriteString(carry.answer)
+			cardStepTexts = carry.stepTexts
 			toolCount = carry.toolCount
 			slog.Info("streaming card reused for retry attempt", "session", sessionKey)
 		}
@@ -7298,7 +7297,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				var carry *retryCardCarry
 				if streamCard != nil && !streamCard.Failed() {
 					carry = &retryCardCarry{streamCard: streamCard, toolCalls: cardToolCalls,
-						thinking: cardThinkingText, answer: cardAnswerText.String(), toolCount: toolCount}
+						thinking: cardThinkingText, stepTexts: cardStepTexts, toolCount: toolCount}
 				}
 				notifyRetry := func(notice string) bool {
 					notice = strings.TrimSpace(notice)
@@ -7315,7 +7314,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							Name:  "自动重试",
 							Input: notice,
 						})
-						_ = carry.streamCard.Update(e.ctx, e.streamingCardContentFor(carry.streamCard, carry.thinking, nil, carry.toolCalls, carry.answer, false))
+						_ = carry.streamCard.Update(e.ctx, e.streamingCardContentFor(carry.streamCard, carry.thinking, carry.stepTexts, carry.toolCalls, "", false))
 						return true
 					}
 					state.mu.Lock()
@@ -7347,7 +7346,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if carry != nil && !carry.handedOff {
 						// The turn ends here (stop, shutdown, retries exhausted or no
 						// retry): close the card instead of leaving it "in progress".
-						_ = carry.streamCard.Finalize(e.ctx, e.streamingCardContentFor(carry.streamCard, carry.thinking, nil, carry.toolCalls, carry.answer, true))
+						_ = carry.streamCard.Finalize(e.ctx, e.streamingCardContentFor(carry.streamCard, carry.thinking, carry.stepTexts, carry.toolCalls, "", true))
 					}
 					if hasRichCard && cardMessageID != nil {
 						if updater, ok := p.(MessageUpdater); ok {
