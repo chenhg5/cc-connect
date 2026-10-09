@@ -6200,6 +6200,14 @@ type toolDisplay struct {
 	Detail    string
 }
 
+// Long tool inputs (a heredoc'd Python script, a large patch) would otherwise
+// fill a card with hundreds of lines. Card details keep the head of such
+// values and say how much was left out.
+const (
+	maxToolDetailLines = 15
+	maxToolDetailRunes = 1500
+)
+
 var toolDescriptors = []toolDescriptor{
 	{
 		Aliases:         []string{"skill"},
@@ -6470,14 +6478,21 @@ func buildToolDisplay(toolName, detail string) toolDisplay {
 	}
 
 	rawDetail := strings.TrimSpace(detail)
+	structured := false
 	if desc != nil {
 		if extracted := extractToolDetailFromJSON(rawDetail, *desc); extracted != "" {
+			// Long fields are already capped one by one, keeping short ones
+			// such as cwd/timeout/filePath visible.
 			rawDetail = extracted
+			structured = true
 		} else if extracted := extractToolDetailFromSummary(rawDetail, *desc); extracted != "" {
 			rawDetail = extracted
 		}
 	}
 	cleanDetail := sanitizeToolDetail(sanitizer, rawDetail)
+	if !structured {
+		cleanDetail = truncateToolDetail(cleanDetail)
+	}
 	if desc != nil && desc.Title == "Read" && isSkillPathValue(cleanDetail) {
 		title = "Skill Read"
 	}
@@ -6564,7 +6579,11 @@ func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
 			var details []string
 			for _, key := range desc.DetailKeys {
 				if value := extractScalarText(params[key]); value != "" {
-					details = append(details, key+": "+sanitizeToolDetail(desc.Sanitizer, value))
+					value = sanitizeToolDetail(desc.Sanitizer, value)
+					if isLongToolDetailKey(key) {
+						value = truncateToolDetail(value)
+					}
+					details = append(details, key+": "+value)
 				}
 			}
 			if len(details) > 0 {
@@ -6592,6 +6611,40 @@ func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
 		}
 	}
 	return ""
+}
+
+// isLongToolDetailKey reports the tool-input fields that can run to hundreds of
+// lines: commands/scripts and patch bodies.
+func isLongToolDetailKey(key string) bool {
+	switch key {
+	case "cmd", "command", "script", "patchText", "patch_text":
+		return true
+	default:
+		return false
+	}
+}
+
+// truncateToolDetail keeps the first maxToolDetailLines lines (and at most
+// maxToolDetailRunes runes) of a tool detail and notes how much was dropped.
+func truncateToolDetail(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	lines := strings.Split(value, "\n")
+	note := ""
+	if len(lines) > maxToolDetailLines {
+		note = fmt.Sprintf("… (+%d more lines)", len(lines)-maxToolDetailLines)
+		lines = lines[:maxToolDetailLines]
+	}
+	kept := strings.Join(lines, "\n")
+	if runes := []rune(kept); len(runes) > maxToolDetailRunes {
+		kept = string(runes[:maxToolDetailRunes])
+		if note == "" {
+			note = "… (truncated)"
+		}
+	}
+	if note == "" {
+		return value
+	}
+	return strings.TrimRight(kept, "\n") + "\n" + note
 }
 
 func extractScalarText(value any) string {
