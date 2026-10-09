@@ -247,14 +247,67 @@ func (a *managedAgent) GetSessionHistory(ctx context.Context, id string, limit i
 	var response struct {
 		Thread managedThread `json:"thread"`
 	}
-	if err := rpc.request(ctx, "thread/read", map[string]any{"threadId": id, "includeTurns": true}, &response); err != nil {
-		return nil, err
+	if err := rpc.request(ctx, "thread/read", map[string]any{"threadId": id, "includeTurns": false}, &response); err != nil {
+		return nil, fmt.Errorf("codex daemon history metadata: %w", err)
 	}
-	if !sameManagedCwd(a.GetWorkDir(), response.Thread.Cwd) {
+	if response.Thread.ID != id || !sameManagedCwd(a.GetWorkDir(), response.Thread.Cwd) {
 		return nil, fmt.Errorf("codex daemon history is outside configured work_dir")
 	}
+	return readManagedHistory(ctx, rpc, id, limit)
+}
+
+// Oversample message limits because some turns have no displayable history.
+// Even unlimited history uses bounded pages rather than full thread hydration.
+func readManagedHistory(ctx context.Context, rpc *daemonRPC, id string, limit int) ([]core.HistoryEntry, error) {
+	pageSize := 50
+	if limit > 0 && limit < pageSize/2 {
+		pageSize = 2 * limit
+	}
+	var pages [][]core.HistoryEntry
+	count := 0
+	cursor := ""
+	seen := map[string]bool{}
+	for {
+		var page struct {
+			Data       []managedTurn `json:"data"`
+			NextCursor *string       `json:"nextCursor"`
+		}
+		params := map[string]any{"threadId": id, "limit": pageSize, "sortDirection": "desc", "itemsView": "full"}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		if err := rpc.request(ctx, "thread/turns/list", params, &page); err != nil {
+			return nil, fmt.Errorf("codex daemon history page: %w", err)
+		}
+		// Reverse newest-first turns, preserving item order within each turn.
+		for i, j := 0, len(page.Data)-1; i < j; i, j = i+1, j-1 {
+			page.Data[i], page.Data[j] = page.Data[j], page.Data[i]
+		}
+		entries := managedTurnsHistory(page.Data)
+		pages = append(pages, entries)
+		count += len(entries)
+		if (limit > 0 && count >= limit) || page.NextCursor == nil || *page.NextCursor == "" {
+			break
+		}
+		cursor = *page.NextCursor
+		if seen[cursor] {
+			return nil, fmt.Errorf("codex daemon thread/turns/list repeated cursor")
+		}
+		seen[cursor] = true
+	}
+	entries := make([]core.HistoryEntry, 0, count)
+	for i := len(pages) - 1; i >= 0; i-- {
+		entries = append(entries, pages[i]...)
+	}
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries, nil
+}
+
+func managedTurnsHistory(turns []managedTurn) []core.HistoryEntry {
 	var entries []core.HistoryEntry
-	for _, turn := range response.Thread.Turns {
+	for _, turn := range turns {
 		for _, item := range turn.Items {
 			kind, _ := item["type"].(string)
 			text, _ := item["text"].(string)
@@ -289,10 +342,7 @@ func (a *managedAgent) GetSessionHistory(ctx context.Context, id string, limit i
 			}
 		}
 	}
-	if limit > 0 && len(entries) > limit {
-		entries = entries[len(entries)-limit:]
-	}
-	return entries, nil
+	return entries
 }
 
 func (a *managedAgent) DeleteSession(ctx context.Context, id string) error {

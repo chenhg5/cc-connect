@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -231,17 +233,24 @@ func TestManagedHistoryPreservesTurnTimestamps(t *testing.T) {
 	const completed int64 = 1790934365
 	socket := managedFixture(t, func(ws *websocket.Conn) {
 		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
-			if m.Method != "thread/read" {
+			if m.Method == "thread/read" {
+				return map[string]any{"thread": map[string]any{"id": "target", "cwd": cwd}}, true
+			}
+			if m.Method != "thread/turns/list" {
 				t.Errorf("unexpected history method %s", m.Method)
 			}
-			return map[string]any{"thread": map[string]any{"id": "target", "cwd": cwd, "turns": []any{
+			turns := []any{
 				map[string]any{"id": "done", "startedAt": started, "completedAt": completed, "items": []any{
 					map[string]any{"type": "userMessage", "content": []any{map[string]any{"text": "question"}}},
 					map[string]any{"type": "agentMessage", "text": "answer"},
 				}},
 				map[string]any{"id": "active", "startedAt": completed + 1, "completedAt": nil, "items": []any{map[string]any{"type": "agentMessage", "text": "working"}}},
 				map[string]any{"id": "old", "items": []any{map[string]any{"type": "agentMessage", "text": "unknown time"}}},
-			}}}, true
+			}
+			for i, j := 0, len(turns)-1; i < j; i, j = i+1, j-1 {
+				turns[i], turns[j] = turns[j], turns[i]
+			}
+			return map[string]any{"data": turns}, true
 		})
 	})
 	a := fixtureManagedAgent(t, socket, cwd, nil)
@@ -398,5 +407,166 @@ func TestDaemonDiscoveryIsPassive(t *testing.T) {
 	socket, err := discoverDaemon(context.Background(), binary, nil, nil)
 	if err != nil || socket != "/reported/socket" {
 		t.Fatalf("discovery %q %v", socket, err)
+	}
+}
+
+func TestManagedHistory_PaginatesBeforeTrimming(t *testing.T) {
+	for _, limit := range []int{3, 0, 1000} {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			cwd := t.TempDir()
+			var pages atomic.Int32
+			socket := managedFixture(t, func(ws *websocket.Conn) {
+				fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+					var params map[string]any
+					_ = json.Unmarshal(m.Params, &params)
+					if params["threadId"] != "target" {
+						t.Errorf("unscoped history request: %s", m.Params)
+					}
+					if m.Method == "thread/read" {
+						if params["includeTurns"] != false {
+							t.Error("history requested full hydration instead of pagination")
+						}
+						return map[string]any{"thread": map[string]any{"id": "target", "cwd": cwd}}, true
+					}
+					if m.Method != "thread/turns/list" {
+						t.Errorf("unexpected method: %s", m.Method)
+					}
+					wantSize := float64(50)
+					if limit == 3 {
+						wantSize = 6
+					}
+					if params["limit"] != wantSize || params["sortDirection"] != "desc" || params["itemsView"] != "full" {
+						t.Errorf("wrong pagination controls: %s", m.Params)
+					}
+					turn := func(text string) any {
+						return map[string]any{"items": []any{map[string]any{"type": "agentMessage", "text": text}}}
+					}
+					switch pages.Add(1) {
+					case 1:
+						if params["cursor"] != nil {
+							t.Error("first page has cursor")
+						}
+						// Tool-only and blank turns must not count toward the history limit.
+						return map[string]any{"data": []any{turn("newest"), turn(""), map[string]any{"items": []any{map[string]any{"type": "commandExecution"}}}}, "nextCursor": "older"}, true
+					case 2:
+						if params["cursor"] != "older" {
+							t.Error("missing continuation cursor")
+						}
+						return map[string]any{"data": []any{turn("middle"), turn("oldest")}, "nextCursor": "ancient"}, true
+					default:
+						if params["cursor"] != "ancient" {
+							t.Error("wrong final cursor")
+						}
+						return map[string]any{"data": []any{turn("ancient")}}, true
+					}
+				})
+			})
+			a := fixtureManagedAgent(t, socket, cwd, nil)
+			history, err := a.GetSessionHistory(context.Background(), "target", limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"ancient", "oldest", "middle", "newest"}
+			wantPages := int32(3)
+			if limit == 3 {
+				want = want[1:]
+				wantPages = 2
+			}
+			if len(history) != len(want) {
+				t.Fatalf("history=%v", history)
+			}
+			for i, text := range want {
+				if history[i].Content != text {
+					t.Fatalf("history[%d]=%q want %q", i, history[i].Content, text)
+				}
+			}
+			if pages.Load() != wantPages {
+				t.Fatalf("pages=%d want %d", pages.Load(), wantPages)
+			}
+		})
+	}
+}
+
+func TestManagedHistory_RejectsRepeatedCursorAndOtherWorkspace(t *testing.T) {
+	for _, otherWorkspace := range []bool{false, true} {
+		t.Run(fmt.Sprintf("otherWorkspace=%t", otherWorkspace), func(t *testing.T) {
+			cwd := t.TempDir()
+			var pages atomic.Int32
+			socket := managedFixture(t, func(ws *websocket.Conn) {
+				fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+					if m.Method == "thread/read" {
+						path := cwd
+						if otherWorkspace {
+							path += "/other"
+						}
+						return map[string]any{"thread": map[string]any{"id": "target", "cwd": path}}, true
+					}
+					pages.Add(1)
+					return map[string]any{"data": []any{}, "nextCursor": "repeat"}, true
+				})
+			})
+			a := fixtureManagedAgent(t, socket, cwd, nil)
+			history, err := a.GetSessionHistory(context.Background(), "target", 0)
+			if err == nil || history != nil {
+				t.Fatalf("history=%v err=%v", history, err)
+			}
+			if otherWorkspace {
+				if pages.Load() != 0 {
+					t.Fatal("read history outside workspace")
+				}
+			} else if !strings.Contains(err.Error(), "repeated cursor") {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestManagedHistory_TotalHistoryExceedsWebSocketLimit(t *testing.T) {
+	cwd := t.TempDir()
+	// Each page fits the 32 MiB transport limit; combined history does not.
+	text := strings.Repeat("x", 17*1024*1024)
+	var pages atomic.Int32
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			if m.Method == "thread/read" {
+				return map[string]any{"thread": map[string]any{"id": "target", "cwd": cwd}}, true
+			}
+			page := map[string]any{"data": []any{map[string]any{"items": []any{map[string]any{"type": "agentMessage", "text": text}}}}}
+			if pages.Add(1) == 1 {
+				page["nextCursor"] = "older"
+			}
+			return page, true
+		})
+	})
+	a := fixtureManagedAgent(t, socket, cwd, nil)
+	history, err := a.GetSessionHistory(context.Background(), "target", 2)
+	if err != nil || len(history) != 2 {
+		t.Fatalf("entries=%d err=%v", len(history), err)
+	}
+	for _, entry := range history {
+		if entry.Content != text {
+			t.Fatal("large history entry was truncated")
+		}
+	}
+}
+
+func TestManagedHistory_TrimsWithinTurnPreservingItemOrder(t *testing.T) {
+	cwd := t.TempDir()
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			if m.Method == "thread/read" {
+				return map[string]any{"thread": map[string]any{"id": "target", "cwd": cwd}}, true
+			}
+			return map[string]any{"data": []any{map[string]any{"items": []any{
+				map[string]any{"type": "userMessage", "content": []any{map[string]any{"text": "question"}}},
+				map[string]any{"type": "agentMessage", "text": "working"},
+				map[string]any{"type": "agentMessage", "text": "answer"},
+			}}}}, true
+		})
+	})
+	a := fixtureManagedAgent(t, socket, cwd, nil)
+	history, err := a.GetSessionHistory(context.Background(), "target", 2)
+	if err != nil || len(history) != 2 || history[0].Content != "working" || history[1].Content != "answer" {
+		t.Fatalf("history=%v err=%v", history, err)
 	}
 }
