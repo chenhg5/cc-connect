@@ -130,14 +130,6 @@ codex app-server daemon version
 
 CC-Connect 作为服务运行时，应在服务账号及其环境下检查 daemon 发现结果，不能只看终端中的结果。若 daemon 使用自定义 `CODEX_HOME`，请在服务环境或 Agent 的 `codex_home` 选项中设置相同值。显式指定 `daemon_socket` 会跳过自动发现，但服务账号仍需有权限访问该 socket。
 
-SSH 主机需要持久管理时，优先使用 Codex 自带命令：
-
-```sh
-codex app-server daemon bootstrap
-```
-
-`bootstrap` 安装持久化本地管理并修改主机的 daemon 设置，应作为明确的主机配置步骤单独执行。CC-Connect 不会执行它。本地 socket 共享不需要 `--remote-control`。使用 systemd 或 launchd 的部署，应检查当前 Codex 版本安装的管理方式及登录、启动行为；单独运行 tmux 不提供开机启动或进程监管。
-
 daemon 退出后，CC-Connect 最多重试 `daemon_reconnect_attempts` 次连接，不会重新启动 daemon。设置为 `0` 时断线后关闭观察连接，不重试。需单独恢复 daemon，再重新 attach。`/detach` 或停止 CC-Connect 都不会停止 daemon。
 
 需要主动停止 daemon 时执行 `codex app-server daemon stop`。`restart` 和 `update` 可能中断其他客户端的共享任务，应安排在没有活跃轮次时操作。凭据和 Provider 应在 daemon 启动前配置；客户端共享 daemon 启动时继承的环境。
