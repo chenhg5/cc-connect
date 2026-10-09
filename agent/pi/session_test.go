@@ -2,7 +2,11 @@ package pi
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -274,76 +278,146 @@ func TestBuildJSONArgs_ReturnsFreshSlice(t *testing.T) {
 	}
 }
 
-// ── sendRPC prompt composition (Issue #1723) ───────────────────
+// ── sendRPC image payload (Issue #1723 follow-up) ──────────────
+//
+// pi expands @<path> only for CLI argv — processFileArguments is called
+// from the CLI initial-message path — and it refuses @file arguments
+// outright when running as `--mode rpc`:
+//
+//	Error: @file arguments are not supported in RPC mode
+//
+// So the @<path>-in-message-text approach added for json mode never loaded
+// an image over RPC: the model saw a path string instead of a visual input.
+// RPC mode carries images in the prompt command's dedicated `images` field
+// (ImageContent: type/data/mimeType). These tests pin that payload shape.
 
-func TestComposeRPCPrompt_NoAttachmentsKeepsPrompt(t *testing.T) {
-	// When there are no attachments, sendRPC must not append an empty
-	// "Attachments:" header that would confuse the model.
-	got := composeRPCPrompt("just a plain question", nil)
-	if got != "just a plain question" {
-		t.Errorf("prompt mutated: got %q", got)
+func TestBuildRPCImages_NoImagesReturnsNil(t *testing.T) {
+	// A text-only prompt must not grow an empty `images` array, so the RPC
+	// command stays byte-compatible with senders that predate attachments.
+	if got := buildRPCImages(nil); got != nil {
+		t.Errorf("expected nil for no images, got %v", got)
 	}
 }
 
-func TestComposeRPCPrompt_AttachmentsGetAtPathRefs(t *testing.T) {
-	// Same root cause as the json-mode bug, different fix surface:
-	// pi RPC reads attachments out of the message text via @<path>
-	// references, so the prompt must include them without inlining
-	// raw bytes.
-	paths := []string{"/tmp/a.png", "/tmp/b.pdf"}
-	got := composeRPCPrompt("what is in these", paths)
+func TestBuildRPCImages_ShapeIsImageContent(t *testing.T) {
+	raw := append([]byte("\x89PNG\r\n\x1a\n"), []byte("PAYLOAD-MARKER")...)
+	got := buildRPCImages([]core.ImageAttachment{{
+		MimeType: "image/png",
+		Data:     raw,
+		FileName: "shot.png",
+	}})
 
-	if !strings.Contains(got, "@/tmp/a.png") || !strings.Contains(got, "@/tmp/b.pdf") {
-		t.Errorf("prompt missing @<path> refs: %q", got)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 image entry, got %d", len(got))
 	}
-	if !strings.HasPrefix(got, "what is in these") {
-		t.Errorf("original prompt text lost: %q", got)
+	e := got[0]
+	if e["type"] != "image" {
+		t.Errorf("type: got %q, want %q", e["type"], "image")
 	}
-}
-
-func TestComposeRPCPrompt_PreservesAttachmentOrder(t *testing.T) {
-	// Order matters: pi loads attachments in the order they appear in
-	// the message. Reordering would break the visual sequence for
-	// multi-image messages.
-	paths := []string{"/tmp/first.png", "/tmp/second.png", "/tmp/third.png"}
-	got := composeRPCPrompt("p", paths)
-
-	prev := -1
-	for _, p := range paths {
-		idx := strings.Index(got, "@"+p)
-		if idx == -1 {
-			t.Fatalf("missing @%s in prompt %q", p, got)
-		}
-		if idx <= prev {
-			t.Errorf("attachments not in order: %s came after previous", p)
-		}
-		prev = idx
+	if e["mimeType"] != "image/png" {
+		t.Errorf("mimeType: got %q, want %q", e["mimeType"], "image/png")
+	}
+	if e["data"] != base64.StdEncoding.EncodeToString(raw) {
+		t.Errorf("data is not the base64 of the raw bytes: %q", e["data"])
+	}
+	// Issue #1723 root cause: bytes must never reach the model as plain
+	// text. Base64 output must not contain the literal marker.
+	if strings.Contains(e["data"], "PAYLOAD-MARKER") {
+		t.Errorf("raw bytes leaked into the payload unencoded: %q", e["data"])
 	}
 }
 
-func TestComposeRPCPrompt_DoesNotInlineAttachmentBytes(t *testing.T) {
-	// Same regression guard as buildJSONArgs: a recognizable byte
-	// sequence saved to disk must never be inlined into the message.
-	marker := []byte("SECRET-INLINE-MARKER-9B7C")
-	tmp := t.TempDir()
-	imgPath := tmp + "/leak.png"
-	if err := writeBytes(imgPath, marker); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	got := composeRPCPrompt("describe", []string{imgPath})
+func TestBuildRPCImages_PreservesOrder(t *testing.T) {
+	// pi loads the images in array order; the visual sequence of a
+	// multi-image message depends on it.
+	png := append([]byte("\x89PNG\r\n\x1a\n"), []byte("first")...)
+	jpg := append([]byte("\xff\xd8\xff"), []byte("second")...)
+	got := buildRPCImages([]core.ImageAttachment{
+		{MimeType: "image/png", Data: png},
+		{MimeType: "image/jpeg", Data: jpg},
+	})
 
-	if strings.Contains(got, string(marker)) {
-		t.Errorf("attachment bytes were inlined into the rpc prompt: %q", got)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(got))
+	}
+	if got[0]["data"] != base64.StdEncoding.EncodeToString(png) {
+		t.Error("entry 0 is not the first image")
+	}
+	if got[1]["data"] != base64.StdEncoding.EncodeToString(jpg) {
+		t.Error("entry 1 is not the second image")
 	}
 }
 
-func TestComposeRPCPrompt_AcceptsNULInOriginalPrompt(t *testing.T) {
-	// Issue #1723 echo: a NUL in the user's prompt must not be
-	// dropped or crash the composer.
-	prompt := "hi\x00there"
-	got := composeRPCPrompt(prompt, []string{"/tmp/x.png"})
-	if !strings.Contains(got, "hi\x00there") {
-		t.Errorf("NUL stripped from prompt: %q", got)
+func TestBuildRPCImages_SkipsEntriesWithoutBytes(t *testing.T) {
+	// pi discards an ImageContent with an empty base64 payload; dropping it
+	// here keeps the reported image count honest.
+	got := buildRPCImages([]core.ImageAttachment{
+		{MimeType: "image/png", FileName: "empty.png"},
+		{MimeType: "image/png", Data: []byte("\x89PNG\r\n\x1a\nreal")},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("expected 1 entry after skipping the empty one, got %d", len(got))
+	}
+}
+
+func TestBuildRPCImages_AcceptsNULInImageBytes(t *testing.T) {
+	// Issue #1723 echo: image bytes contain NUL. In json mode that used to
+	// crash execve; over RPC they must survive base64 encoding intact.
+	raw := append([]byte("\x89PNG\r\n\x1a\n"), []byte("a\x00b\x00c")...)
+	got := buildRPCImages([]core.ImageAttachment{{MimeType: "image/png", Data: raw}})
+
+	if len(got) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(got))
+	}
+	decoded, err := base64.StdEncoding.DecodeString(got[0]["data"])
+	if err != nil {
+		t.Fatalf("data is not valid base64: %v", err)
+	}
+	if !bytes.Equal(decoded, raw) {
+		t.Error("NUL bytes did not round-trip through the RPC payload")
+	}
+}
+
+func TestRPCImageMimeType_ResolutionOrder(t *testing.T) {
+	png := []byte("\x89PNG\r\n\x1a\n")
+	jpg := []byte("\xff\xd8\xff")
+	gif := []byte("GIF89a")
+	webp := []byte("RIFF\x00\x00\x00\x00WEBP")
+	bmp := []byte("BM\x00\x00")
+
+	cases := []struct {
+		name string
+		img  core.ImageAttachment
+		want string
+	}{
+		// A declared type pi can inline directly is trusted as-is.
+		{"declared png", core.ImageAttachment{MimeType: "image/png", Data: png}, "image/png"},
+		// Aliases and parameters are normalized.
+		{"jpg alias", core.ImageAttachment{MimeType: "image/jpg", Data: jpg}, "image/jpeg"},
+		{"uppercase", core.ImageAttachment{MimeType: "IMAGE/PNG", Data: png}, "image/png"},
+		{"media type params", core.ImageAttachment{MimeType: "image/png; charset=binary", Data: png}, "image/png"},
+		// A missing declared type falls back to the magic bytes, so pi's
+		// decoder never gets bytes that contradict the declared type.
+		{"empty sniffs png", core.ImageAttachment{Data: png}, "image/png"},
+		{"empty sniffs jpeg", core.ImageAttachment{Data: jpg}, "image/jpeg"},
+		{"empty sniffs gif", core.ImageAttachment{Data: gif}, "image/gif"},
+		{"empty sniffs webp", core.ImageAttachment{Data: webp}, "image/webp"},
+		// The magic bytes win when they contradict the declared type, so pi's
+		// decoder never gets bytes that disagree with the declared media type.
+		{"wrong declared type", core.ImageAttachment{MimeType: "image/png", Data: jpg}, "image/jpeg"},
+		// Types pi cannot inline keep their declared media type so pi's own
+		// converter can decode and re-encode them.
+		{"unsupported but declared", core.ImageAttachment{MimeType: "image/bmp", Data: bmp}, "image/bmp"},
+		// Nothing to go on at all: pi's converter still gets a shot.
+		{"unknown everything", core.ImageAttachment{Data: []byte("not an image")}, "image/png"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rpcImageMimeType(tc.img); got != tc.want {
+				t.Errorf("rpcImageMimeType: got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -496,9 +570,10 @@ func TestPromptWithFileRefs_LargeNonImageFileDoesNotInline(t *testing.T) {
 // ── Image vs file separation (Issue #1767) ───────────────────
 //
 // These tests pin the contract that Send() splits image attachments
-// from non-image attachments and hands only the image paths to
-// buildJSONArgs / composeRPCPrompt as @<path> argv entries. They use
-// the helpers directly (buildJSONArgs + composeRPCPrompt + a fake
+// from non-image attachments, hands only the image paths to
+// buildJSONArgs as @<path> argv entries (json mode) and carries them as
+// base64 ImageContent over RPC. They use the helpers directly
+// (buildJSONArgs + buildRPCImages + a fake
 // caller's separation logic) because Send() itself spawns a pi
 // subprocess and is tested via the helpers.
 
@@ -549,21 +624,25 @@ func TestBuildJSONArgs_OnlyImageAtFilesBecomeAtPath(t *testing.T) {
 	}
 }
 
-func TestComposeRPCPrompt_OnlyImagesBecomeAtPathRefs(t *testing.T) {
-	// RPC-mode twin of TestBuildJSONArgs_OnlyImageAtFilesBecomeAtPath.
-	imagePaths := []string{"/tmp/img1.png"}
+func TestRPCMessage_NonImageFilesNeverBecomeAtPathRefs(t *testing.T) {
+	// Issue #1767, RPC twin of TestBuildJSONArgs_OnlyImageAtFilesBecomeAtPath.
+	// Non-image attachments travel as a plain-text "Files saved locally"
+	// trailer. Images no longer use @<path> over RPC at all, so nothing
+	// routed through the message text may be @-prefixed.
 	nonImagePaths := []string{"/tmp/notes.txt"}
-	got := composeRPCPrompt(promptWithFileRefs("look", nonImagePaths), imagePaths)
+	message := promptWithFileRefs("look", nonImagePaths)
 
-	if !strings.Contains(got, "@"+imagePaths[0]) {
-		t.Errorf("image @<path> ref missing: %q", got)
+	if strings.Contains(message, "@"+nonImagePaths[0]) {
+		t.Errorf("non-image path must NOT be @-prefixed in the RPC message: %q", message)
 	}
-	if strings.Contains(got, "@"+nonImagePaths[0]) {
-		t.Errorf("non-image path must NOT be @-prefixed in RPC prompt: %q", got)
+	if !strings.Contains(message, nonImagePaths[0]) {
+		t.Errorf("non-image path reference missing from message: %q", message)
 	}
-	// Non-image path appears as plain text reference.
-	if !strings.Contains(got, nonImagePaths[0]) {
-		t.Errorf("non-image path reference missing from prompt: %q", got)
+	// The stale @<path> "Attachments:" header must not be emitted either:
+	// pi never expands those over RPC, so it would just be noise in the
+	// text the model reads.
+	if strings.Contains(message, "Attachments:") {
+		t.Errorf("stale @<path> Attachments header in RPC message: %q", message)
 	}
 }
 
@@ -615,5 +694,222 @@ func TestSaveImagesToDisk_DoesNotConsumeFileSlots(t *testing.T) {
 	}
 	if !strings.HasSuffix(paths[0], ".png") {
 		t.Errorf("image path missing .png suffix: %q", paths[0])
+	}
+}
+
+// ── sendRPC wire payload (Issue #1723 follow-up) ──────────────
+//
+// Wire-level check: the exact bytes cc-connect writes to pi's stdin must
+// carry the images in the prompt command's `images` field, and must contain
+// neither an "@<path>" reference nor any unencoded image byte. These go
+// through the real writeRPCCommand path (only the child process is fake) so
+// a future refactor cannot reintroduce the inlining bug behind the
+// pure-function helpers.
+
+type captureWriteCloser struct {
+	buf bytes.Buffer
+}
+
+func (c *captureWriteCloser) Write(p []byte) (int, error) { return c.buf.Write(p) }
+func (c *captureWriteCloser) Close() error                { return nil }
+
+func TestSendRPC_WritesImagesAsImageContent(t *testing.T) {
+	raw := append([]byte("\x89PNG\r\n\x1a\n"), []byte("RAW-IMAGE-BYTES")...)
+	capture := &captureWriteCloser{}
+	s := &piSession{
+		workDir:  t.TempDir(),
+		rpc:      true,
+		rpcStdin: capture,
+		events:   make(chan core.Event, 8),
+	}
+
+	if err := s.sendRPC("what is this?", []core.ImageAttachment{{
+		MimeType: "image/png",
+		Data:     raw,
+		FileName: "shot.png",
+	}}, nil); err != nil {
+		t.Fatalf("sendRPC: %v", err)
+	}
+
+	line := strings.TrimSpace(capture.buf.String())
+	if line == "" {
+		t.Fatal("nothing was written to pi's stdin")
+	}
+	if strings.ContainsAny(line, "\n\r") {
+		t.Errorf("RPC command must be a single JSONL line: %q", line)
+	}
+
+	var cmd struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+		Images  []struct {
+			Type     string `json:"type"`
+			Data     string `json:"data"`
+			MimeType string `json:"mimeType"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal([]byte(line), &cmd); err != nil {
+		t.Fatalf("command is not valid JSON: %v", err)
+	}
+
+	if cmd.Type != "prompt" {
+		t.Errorf("type: got %q, want %q", cmd.Type, "prompt")
+	}
+	if cmd.Message != "what is this?" {
+		t.Errorf("message: got %q, want %q", cmd.Message, "what is this?")
+	}
+	// The exact regression that motivated this change: rpc mode used to
+	// append an "@<path>" list to the message text, which pi never expands
+	// over RPC, so the image was silently dropped.
+	if strings.Contains(cmd.Message, "@") {
+		t.Errorf("message still carries an @<path> reference: %q", cmd.Message)
+	}
+
+	if len(cmd.Images) != 1 {
+		t.Fatalf("expected 1 image entry, got %d", len(cmd.Images))
+	}
+	if cmd.Images[0].Type != "image" {
+		t.Errorf("images[0].type: got %q, want %q", cmd.Images[0].Type, "image")
+	}
+	if cmd.Images[0].MimeType != "image/png" {
+		t.Errorf("images[0].mimeType: got %q, want %q", cmd.Images[0].MimeType, "image/png")
+	}
+	if cmd.Images[0].Data != base64.StdEncoding.EncodeToString(raw) {
+		t.Error("images[0].data is not the base64 of the raw bytes")
+	}
+	// Issue #1723 root cause: the bytes themselves must never cross the
+	// wire as literal text.
+	if strings.Contains(line, "RAW-IMAGE-BYTES") {
+		t.Error("raw image bytes leaked into the RPC command unencoded")
+	}
+}
+
+func TestSendRPC_OmitsImagesFieldForTextOnlyPrompt(t *testing.T) {
+	// A prompt with no attachments must stay byte-compatible with senders
+	// that predate the images field. `"images": null` would also be legal
+	// for pi, but emitting the key at all is noise in the JSONL stream.
+	capture := &captureWriteCloser{}
+	s := &piSession{
+		workDir:  t.TempDir(),
+		rpc:      true,
+		rpcStdin: capture,
+		events:   make(chan core.Event, 8),
+	}
+
+	if err := s.sendRPC("plain question", nil, nil); err != nil {
+		t.Fatalf("sendRPC: %v", err)
+	}
+
+	line := strings.TrimSpace(capture.buf.String())
+	if strings.Contains(line, "images") {
+		t.Errorf("text-only prompt must not carry an images field: %q", line)
+	}
+}
+
+func TestSendRPC_NonImageFilesStayOutOfImagesField(t *testing.T) {
+	// Issue #1767, wire-level: non-image attachments are plain-text path
+	// references. They must never be promoted to ImageContent.
+	capture := &captureWriteCloser{}
+	s := &piSession{
+		workDir:  t.TempDir(),
+		rpc:      true,
+		rpcStdin: capture,
+		events:   make(chan core.Event, 8),
+	}
+
+	if err := s.sendRPC("look", nil, []string{"/tmp/notes.txt"}); err != nil {
+		t.Fatalf("sendRPC: %v", err)
+	}
+
+	var cmd struct {
+		Message string            `json:"message"`
+		Images  []json.RawMessage `json:"images"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(capture.buf.String())), &cmd); err != nil {
+		t.Fatalf("command is not valid JSON: %v", err)
+	}
+	if len(cmd.Images) != 0 {
+		t.Errorf("non-image file was promoted to ImageContent: %v", cmd.Images)
+	}
+	if !strings.Contains(cmd.Message, "/tmp/notes.txt") {
+		t.Errorf("non-image path reference missing from message: %q", cmd.Message)
+	}
+}
+
+// ── Regression: RPC prompt must carry image content (#1724 gap) ──
+//
+// Pre-fix behaviour, in order of history:
+//   - before #1724: Send() inlined the raw image bytes into the prompt text
+//   - after #1724:  Send() appended "Attachments:\n@<path>" to the prompt text
+//
+// Both reach the model as text, because pi expands @<path> only for CLI argv
+// (processFileArguments runs on the CLI initial-message path) and rejects
+// @file arguments outright in RPC mode. So the image was never loaded as a
+// visual input in rpc mode.
+//
+// This asserts on the bytes Send() actually writes to pi's stdin. It goes
+// through Send() rather than sendRPC() on purpose: Send's signature is
+// unchanged by the fix, so the regression fails on the pre-fix code without
+// any compile-time mismatch masking it.
+func TestSend_RPCPromptCarriesImageContent(t *testing.T) {
+	raw := append([]byte("\x89PNG\r\n\x1a\n"), []byte("REGRESSION-IMAGE-BYTES")...)
+	capture := &captureWriteCloser{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := &piSession{
+		workDir:   t.TempDir(),
+		attachDir: filepath.Join(t.TempDir(), "attachments"),
+		rpc:       true,
+		rpcStdin:  capture,
+		events:    make(chan core.Event, 8),
+		ctx:       ctx,
+	}
+	s.alive.Store(true)
+
+	if err := s.Send("what is this?", "msg-1", []core.ImageAttachment{{
+		MimeType: "image/png",
+		Data:     raw,
+		FileName: "shot.png",
+	}}, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	line := strings.TrimSpace(capture.buf.String())
+	if line == "" {
+		t.Fatal("Send wrote nothing to pi's stdin")
+	}
+
+	var cmd struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+		Images  []struct {
+			Type     string `json:"type"`
+			Data     string `json:"data"`
+			MimeType string `json:"mimeType"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal([]byte(line), &cmd); err != nil {
+		t.Fatalf("command is not valid JSON: %v", err)
+	}
+
+	// Pre-fix code handed the model an attachment list in the message text
+	// instead of an image, which is the whole bug.
+	if strings.Contains(cmd.Message, "Attachments:") || strings.Contains(cmd.Message, "@/") {
+		t.Errorf("RPC message still routes the image through @<path> text: %q", cmd.Message)
+	}
+	if strings.Contains(cmd.Message, "--- shot.png ---") || strings.Contains(line, "REGRESSION-IMAGE-BYTES") {
+		t.Errorf("raw image bytes were inlined into the RPC command: %q", line)
+	}
+
+	if len(cmd.Images) != 1 {
+		t.Fatalf("RPC prompt must carry the image as ImageContent; got %d entries (message=%q)", len(cmd.Images), cmd.Message)
+	}
+	if cmd.Images[0].Type != "image" || cmd.Images[0].MimeType != "image/png" {
+		t.Errorf("unexpected ImageContent: %+v", cmd.Images[0])
+	}
+	if cmd.Images[0].Data != base64.StdEncoding.EncodeToString(raw) {
+		t.Error("ImageContent.data is not the base64 of the raw image bytes")
 	}
 }
