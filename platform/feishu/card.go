@@ -462,3 +462,152 @@ func renderCard(card *core.Card, sessionKey string) string {
 	}
 	return string(b)
 }
+
+// SendAskQuestionCard renders an AskUserQuestion prompt as a Feishu card with
+// schema 2.0, combining option buttons with a free-form text input:
+//   - option buttons use a behaviors callback whose value reuses the legacy
+//     "askq:<qIdx>:<optIdx>" action contract, so the existing onCardAction
+//     askq path (and its confirmation card) works unchanged;
+//   - the input lives in a form whose form_submit button puts the typed text
+//     into the "answer" field; onCardAction forwards that text as the user's
+//     answer (resolved by the engine's resolveAskQuestionAnswer free-form path).
+//
+// Every interactive element carries an opaque one-time token minted for the
+// exact originating session (rc.sessionKey, including its thread identity
+// under thread_isolation) and this question batch. onCardAction claims the
+// token before dispatching, so answers always route back to the session the
+// question was asked in, and a stale, replayed or superseded card is rejected
+// instead of silently answering whatever is pending now.
+func (p *interactivePlatform) SendAskQuestionCard(ctx context.Context, rctx any, texts core.AskQuestionCardTexts, q core.UserQuestion, qIdx int) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if rc.chatID == "" {
+		return fmt.Errorf("%s: chatID is empty, cannot send ask-question card", p.tag())
+	}
+	if rc.sessionKey == "" {
+		return fmt.Errorf("%s: sessionKey is empty, cannot bind ask-question card", p.tag())
+	}
+	token := p.askq.mint(rc.sessionKey, rc.chatID, qIdx, q.Question, "", texts.ExpiredNotice, texts.TooLongNotice)
+	cardJSON, err := json.Marshal(buildAskQuestionCard2(texts, q, qIdx, rc.sessionKey, token))
+	if err != nil {
+		return fmt.Errorf("%s: marshal ask-question card: %w", p.tag(), err)
+	}
+	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
+		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, string(cardJSON))
+	}
+	return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, string(cardJSON), "send ask-question card")
+}
+
+// buildAskQuestionCard2 builds the Feishu card schema 2.0 map for an
+// AskUserQuestion prompt: option buttons (behaviors callback reusing the
+// legacy "askq:<qIdx>:<optIdx>" value contract) plus a free-form input whose
+// form_submit puts the typed text into the "answer" field. All user-facing
+// strings come pre-localized in texts; the token binds every element to one
+// claimable answer.
+func buildAskQuestionCard2(texts core.AskQuestionCardTexts, q core.UserQuestion, qIdx int, sessionKey, token string) map[string]any {
+
+	elements := []map[string]any{
+		{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": texts.Body}},
+	}
+	for i, opt := range q.Options {
+		btnType := "default"
+		if i == 0 {
+			btnType = "primary"
+		}
+		value := map[string]any{
+			"action":        fmt.Sprintf("askq:%d:%d", qIdx, i+1),
+			"askq_label":    opt.Label,
+			"askq_question": q.Question,
+			"askq_token":    token,
+		}
+		if sessionKey != "" {
+			value["session_key"] = sessionKey
+		}
+		elements = append(elements, map[string]any{
+			"tag":  "button",
+			"name": fmt.Sprintf("askq_opt_%d", i+1),
+			"text": plainText(opt.Label),
+			"type": btnType,
+			"size": "medium",
+			"behaviors": []map[string]any{
+				{"type": "callback", "value": value},
+			},
+		})
+	}
+	// The form_submit button carries the same identity the option buttons do,
+	// so a free-form answer is bound to the originating session and is
+	// claimable exactly once — without it, the callback would be attributed to
+	// whatever chat/user clicked it, and under thread_isolation the answer
+	// landed in the wrong session while the card still showed success.
+	submitValue := map[string]any{
+		"action":        "askq_text",
+		"askq_token":    token,
+		"askq_question": q.Question,
+	}
+	if sessionKey != "" {
+		submitValue["session_key"] = sessionKey
+	}
+	elements = append(elements,
+		map[string]any{"tag": "hr"},
+		map[string]any{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": texts.Note}},
+		map[string]any{
+			"tag":  "form",
+			"name": "askq_answer_form",
+			"elements": []map[string]any{
+				{
+					"tag":            "input",
+					"name":           "answer",
+					"placeholder":    plainText(texts.InputPlaceholder),
+					"label":          plainText(texts.InputLabel),
+					"label_position": "top",
+					"max_length":     askqMaxAnswerRunes,
+				},
+				{
+					"tag":         "button",
+					"action_type": "form_submit",
+					"name":        "submit",
+					"text":        plainText(texts.SubmitLabel),
+					"type":        "primary",
+					"size":        "medium",
+					"behaviors": []map[string]any{
+						{"type": "callback", "value": submitValue},
+					},
+				},
+			},
+		},
+	)
+
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"update_multi": true},
+		"header": map[string]any{
+			"title":    plainText(texts.Title),
+			"template": "blue",
+		},
+		"body": map[string]any{"elements": elements},
+	}
+	return card
+}
+
+// simpleCard2 builds a minimal Feishu card schema 2.0 with a colored header
+// and one markdown element. Callback responses for actions triggered on a
+// schema 2.0 card must themselves be schema 2.0 — a v1 response card is
+// rejected by Feishu with error 200830.
+func simpleCard2(title, markdown, color string) map[string]any {
+	if color == "" {
+		color = "blue"
+	}
+	return map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"update_multi": true},
+		"header": map[string]any{
+			"title":    plainText(title),
+			"template": color,
+		},
+		"body": map[string]any{"elements": []map[string]any{
+			{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": markdown}},
+		}},
+	}
+}
