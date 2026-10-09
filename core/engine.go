@@ -484,15 +484,15 @@ type Engine struct {
 	workspaceInitAllowLocalPaths bool
 	workspaceBindings            *WorkspaceBindingManager
 	workspacePool                *workspacePool
-	// workspaceFpMu/workspaceFpLocks serialize the git fingerprint window per
-	// workspace, so a turn's Changed flag cannot be polluted by concurrent turns
-	// (foreground-foreground or foreground-background) in the same directory.
-	workspaceFpMu    sync.Mutex
-	workspaceFpLocks map[string]*sync.Mutex        // workdir -> fingerprint window lock
-	initFlows        map[string]*workspaceInitFlow // workspace channel key → init state
-	initFlowsMu      sync.Mutex
-	sendWorkDirMu    sync.RWMutex
-	sendWorkDirs     map[string]string // sessionKey → work_dir assigned by send --cwd
+	// workspaceFpMu/workspaceFpWins track the open git fingerprint windows
+	// per workspace, so a turn whose window overlapped another turn's in the
+	// same directory does not report the other turn's edits as its own.
+	workspaceFpMu   sync.Mutex
+	workspaceFpWins map[string]*fingerprintWindows // workdir -> open windows
+	initFlows       map[string]*workspaceInitFlow  // workspace channel key → init state
+	initFlowsMu     sync.Mutex
+	sendWorkDirMu   sync.RWMutex
+	sendWorkDirs    map[string]string // sessionKey → work_dir assigned by send --cwd
 
 	// Terminal observation (--observe)
 	observeEnabled    bool
@@ -5883,16 +5883,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 	state.mu.Unlock()
 
-	// Serialize the git fingerprint window per workspace: hold the lock from
-	// baseline sampling through the finalized emit so concurrent turns in the
-	// same directory (other sessions / background reader) cannot pollute this
-	// turn's Changed flag. Queued messages processed later in this call share
-	// the same window and re-sample their own baseline (see the queued branch).
-	fpLock := e.workspaceFingerprintLock(hookWorkspace)
-	if fpLock != nil {
-		fpLock.Lock()
-		defer fpLock.Unlock()
-	}
+	// Open this turn's git fingerprint window. It must not wait for other turns
+	// in the same directory: a turn holds its window for as long as it runs, and
+	// waiting here parked this turn's whole event loop (card created, not one
+	// event handled) behind another chat's turn. Overlapping windows are
+	// detected instead and reported conservatively (see fingerprintWindow).
+	// Queued messages processed later in this call open their own window (see
+	// the queued branch).
+	fpWindow := e.openFingerprintWindow(hookWorkspace)
+	defer func() { fpWindow.close() }()
 
 	// Record the workspace git state at the start of this turn so post-reply
 	// hooks can tell whether this turn actually changed the working tree.
@@ -7180,7 +7179,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Source:     "agent.final_reply",
 					Internal:   false,
 					ReplyKind:  replyKind,
-					Changed:    fingerprintChanged(turnStartGitFingerprint, workspaceGitFingerprint(e.ctx, hookWorkspace)),
+					Changed:    fpWindow.finish(e.ctx, turnStartGitFingerprint),
 					Content:    fullResponse,
 				})
 			}
@@ -7297,7 +7296,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Re-sample the turn baseline before this queued message's agent
 				// turn starts: earlier queued messages may have changed the tree,
 				// and this message's Changed flag must not inherit their edits.
-				// The fingerprint window lock is already held for this call.
+				// The queued message is a turn of its own, so it gets its own
+				// fingerprint window too.
+				fpWindow.close()
+				fpWindow = e.openFingerprintWindow(hookWorkspace)
 				turnStartGitFingerprint = workspaceGitFingerprint(e.ctx, hookWorkspace)
 
 				state.mu.Lock()
@@ -13728,26 +13730,115 @@ func fingerprintChanged(start, end string) bool {
 	return start != "" && end != "" && start != end
 }
 
-// workspaceFingerprintLock returns the per-workspace mutex that serializes git
-// fingerprint windows for workDir (nil when workDir is empty — no workspace, no
-// fingerprint, nothing to protect). The lock is held from baseline sampling
-// through the end-of-turn sampling so no other turn in the same directory can
-// interleave its own changes into this turn's fingerprint delta.
-func (e *Engine) workspaceFingerprintLock(workDir string) *sync.Mutex {
+// fingerprintWindows counts the fingerprint windows open in one workspace.
+// epoch moves whenever a window opens while another one is open, so every window
+// that was open at that moment can tell it overlapped another turn.
+type fingerprintWindows struct {
+	open  int
+	epoch uint64
+}
+
+// fingerprintWindow is one turn's span between its baseline scan and its
+// end-of-turn scan. Turns in the same directory run concurrently (chats bound to
+// one repo share the working tree), so a delta measured across a window that
+// overlapped another turn may contain that turn's edits; such a window reports
+// Changed=false, the same conservative answer as a failed scan. A nil window
+// (no workspace) behaves like a plain fingerprint comparison.
+type fingerprintWindow struct {
+	e          *Engine
+	dir        string
+	epoch      uint64
+	overlapped bool
+	closed     bool
+}
+
+// openFingerprintWindow opens a fingerprint window for workDir without waiting
+// for other turns (nil when workDir is empty).
+func (e *Engine) openFingerprintWindow(workDir string) *fingerprintWindow {
 	if workDir == "" {
 		return nil
 	}
 	e.workspaceFpMu.Lock()
 	defer e.workspaceFpMu.Unlock()
-	if e.workspaceFpLocks == nil {
-		e.workspaceFpLocks = make(map[string]*sync.Mutex)
+	if e.workspaceFpWins == nil {
+		e.workspaceFpWins = make(map[string]*fingerprintWindows)
 	}
-	m, ok := e.workspaceFpLocks[workDir]
-	if !ok {
-		m = &sync.Mutex{}
-		e.workspaceFpLocks[workDir] = m
+	ws := e.workspaceFpWins[workDir]
+	if ws == nil {
+		ws = &fingerprintWindows{}
+		e.workspaceFpWins[workDir] = ws
 	}
-	return m
+	ws.open++
+	w := &fingerprintWindow{e: e, dir: workDir}
+	if ws.open > 1 {
+		ws.epoch++
+		w.overlapped = true
+	}
+	w.epoch = ws.epoch
+	return w
+}
+
+// closeLocked closes the window and records whether it overlapped another one.
+// The caller holds e.workspaceFpMu.
+func (w *fingerprintWindow) closeLocked() {
+	if w.closed {
+		return
+	}
+	w.closed = true
+	ws := w.e.workspaceFpWins[w.dir]
+	if ws == nil {
+		return
+	}
+	if ws.epoch != w.epoch {
+		w.overlapped = true
+	}
+	if ws.open--; ws.open <= 0 {
+		delete(w.e.workspaceFpWins, w.dir)
+	}
+}
+
+// close ends the window without a result (turn stopped, failed, or already
+// finished). Safe on a nil or closed window.
+func (w *fingerprintWindow) close() {
+	if w == nil {
+		return
+	}
+	w.e.workspaceFpMu.Lock()
+	defer w.e.workspaceFpMu.Unlock()
+	w.closeLocked()
+}
+
+// finish takes the end-of-turn scan, closes the window and reports whether this
+// turn changed the working tree: false when a scan failed or the window
+// overlapped another turn in the same directory.
+func (w *fingerprintWindow) finish(ctx context.Context, start string) bool {
+	if w == nil {
+		return false
+	}
+	end := workspaceGitFingerprint(ctx, w.dir)
+	w.e.workspaceFpMu.Lock()
+	w.closeLocked()
+	overlapped := w.overlapped
+	w.e.workspaceFpMu.Unlock()
+	if overlapped {
+		if changed := fingerprintChanged(start, end); changed {
+			slog.Info("message.finalized: workspace also used by a concurrent turn; reporting changed=false",
+				"workspace", w.dir)
+		}
+		return false
+	}
+	return fingerprintChanged(start, end)
+}
+
+// openFingerprintWindowCount returns how many fingerprint windows are open for
+// workDir (tests use it to wait for a turn's baseline scan).
+func (e *Engine) openFingerprintWindowCount(workDir string) int {
+	e.workspaceFpMu.Lock()
+	defer e.workspaceFpMu.Unlock()
+	if ws := e.workspaceFpWins[workDir]; ws != nil {
+		return ws.open
+	}
+	return 0
 }
 
 func (e *Engine) renderCardForPlatform(p Platform, card *Card) *Card {

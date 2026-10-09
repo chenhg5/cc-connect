@@ -1182,21 +1182,9 @@ func TestProcessInteractiveEvents_FailedEndScanIsNotReportedAsChanged(t *testing
 		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "msg-1", time.Now(), nil, nil, state.replyCtx, 0)
 	}()
 
-	// Wait until the turn holds the fingerprint window lock (baseline sampled),
+	// Wait until the turn opened its fingerprint window (baseline sampled),
 	// then destroy the workspace so the end-of-turn scan fails.
-	fpLock := e.workspaceFingerprintLock(dir)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if !fpLock.TryLock() {
-			time.Sleep(500 * time.Millisecond)
-			break
-		}
-		fpLock.Unlock()
-		if time.Now().After(deadline) {
-			t.Fatal("engine goroutine did not acquire the fingerprint lock")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitFingerprintWindows(t, e, dir, 1)
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -1481,7 +1469,7 @@ func TestProcessInteractiveEvents_EmptyReplyDoesNotEmitFinalizedHook(t *testing.
 // Timeline (synchronous engine call driven by a helper goroutine):
 //  1. turnStart baseline A captured (clean tree)
 //  2. engine goroutine then blocks on events; test writes file x (strictly
-//     after A — see the fingerprint-lock wait below) → first EventResult emits
+//     after A — see the fingerprint-window wait below) → first EventResult emits
 //     changed=true
 //  3. queued branch drains stale events and re-samples baseline B (tree now
 //     contains x)
@@ -1541,22 +1529,10 @@ func TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline(t *testing.T) {
 		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "msg-1", time.Now(), nil, nil, state.replyCtx, 0)
 	}()
 
-	// Wait until the engine goroutine holds the fingerprint window lock
-	// (baseline A is sampled right after acquisition), plus a settle window for
-	// the git scan itself, so the tree change below lands strictly after A.
-	fpLock := e.workspaceFingerprintLock(dir)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if !fpLock.TryLock() {
-			time.Sleep(500 * time.Millisecond)
-			break
-		}
-		fpLock.Unlock()
-		if time.Now().After(deadline) {
-			t.Fatal("engine goroutine did not acquire the fingerprint lock")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Wait until the engine goroutine opened its fingerprint window (baseline A
+	// is sampled right after), plus a settle window for the git scan itself, so
+	// the tree change below lands strictly after A.
+	waitFingerprintWindows(t, e, dir, 1)
 	if err := os.WriteFile(filepath.Join(dir, "x.txt"), []byte("change"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -1566,7 +1542,7 @@ func TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline(t *testing.T) {
 	// let the queued branch finish its stale-event drain and baseline re-sample
 	// before queuing EventResult #2 — feeding it earlier would get it dropped by
 	// drainEvents and the second turn would never start.
-	deadline = time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(firstEmitMarker); err == nil {
 			time.Sleep(300 * time.Millisecond)
@@ -1601,12 +1577,28 @@ func TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline(t *testing.T) {
 	}
 }
 
-// TestWorkspaceFingerprintLock_SerializesConcurrentTurns verifies that
-// concurrent turns in the same workspace serialize their git fingerprint
-// windows: the second turn's Changed flag must not be polluted by the first
-// turn's edits. Without the per-workspace lock the second turn could sample its
-// baseline before the first turn's change and then report changed=true.
-func TestWorkspaceFingerprintLock_SerializesConcurrentTurns(t *testing.T) {
+// waitFingerprintWindows waits until n fingerprint windows are open for dir,
+// plus a settle window for the baseline git scan that follows the open, so a
+// tree change made afterwards lands strictly after the baseline.
+func waitFingerprintWindows(t *testing.T, e *Engine, dir string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for e.openFingerprintWindowCount(dir) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("fingerprint windows open = %d, want %d", e.openFingerprintWindowCount(dir), n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+}
+
+// TestWorkspaceFingerprintWindow_ConcurrentTurnsDoNotBlock pins two things for
+// turns of different chats bound to the same directory:
+//   - the second turn runs while the first is still open (it used to wait for
+//     the first turn's whole window, so its card sat with no events at all);
+//   - neither turn reports the other's edits as its own: overlapping windows
+//     report Changed=false.
+func TestWorkspaceFingerprintWindow_ConcurrentTurnsDoNotBlock(t *testing.T) {
 	dir := t.TempDir()
 	runGit := func(args ...string) {
 		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
@@ -1655,32 +1647,22 @@ func TestWorkspaceFingerprintLock_SerializesConcurrentTurns(t *testing.T) {
 		defer close(done1)
 		e.processInteractiveEvents(state1, session1, e.sessions, "feishu:chat:u1", "t1", time.Now(), nil, nil, state1.replyCtx, 0)
 	}()
-	// Wait until turn 1 holds the fingerprint window lock, then start turn 2 —
-	// it must block on the lock instead of sampling concurrently with turn 1.
-	// Once the lock is held we still wait for the git scan itself to settle
-	// (baseline A is sampled right after lock acquisition; `git status` takes a
-	// few tens of ms), so the tree change below lands strictly after A.
-	fpLock := e.workspaceFingerprintLock(dir)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if !fpLock.TryLock() {
-			time.Sleep(500 * time.Millisecond)
-			break
-		}
-		fpLock.Unlock()
-		if time.Now().After(deadline) {
-			t.Fatal("turn 1 did not acquire the fingerprint lock")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitFingerprintWindows(t, e, dir, 1)
 	go func() {
 		defer close(done2)
 		e.processInteractiveEvents(state2, session2, e.sessions, "feishu:chat:u2", "t2", time.Now(), nil, nil, state2.replyCtx, 0)
 	}()
+	waitFingerprintWindows(t, e, dir, 2)
 
-	// Turn 1 modifies the tree, then completes.
+	// Turn 1 edits the tree but keeps running; turn 2 must still finish.
 	if err := os.WriteFile(filepath.Join(dir, "y.txt"), []byte("change"), 0600); err != nil {
 		t.Fatal(err)
+	}
+	state2.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "two", Done: true}
+	select {
+	case <-done2:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn 2 blocked behind turn 1 in the same workspace")
 	}
 	state1.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "one", Done: true}
 	select {
@@ -1689,16 +1671,8 @@ func TestWorkspaceFingerprintLock_SerializesConcurrentTurns(t *testing.T) {
 		t.Fatal("turn 1 did not finish")
 	}
 
-	// Turn 2 makes no further change; its Changed must be false.
-	state2.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "two", Done: true}
-	select {
-	case <-done2:
-	case <-time.After(5 * time.Second):
-		t.Fatal("turn 2 did not finish")
-	}
-
 	var ev1, ev2 HookEvent
-	deadline = time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for ev1.Event == "" || ev2.Event == "" {
 		select {
 		case ev := <-hookEvents:
@@ -1711,11 +1685,67 @@ func TestWorkspaceFingerprintLock_SerializesConcurrentTurns(t *testing.T) {
 			t.Fatal("finalized events not received")
 		}
 	}
-	if !ev1.Changed {
-		t.Errorf("turn 1 changed = false, want true (it modified the tree)")
-	}
 	if ev2.Changed {
-		t.Errorf("turn 2 changed = true, want false (fingerprint window must be serialized per workspace)")
+		t.Errorf("turn 2 changed = true, want false (the edit was turn 1's)")
+	}
+	if ev1.Changed {
+		t.Errorf("turn 1 changed = true, want false (its window overlapped turn 2's, so the delta cannot be attributed)")
+	}
+	if n := e.openFingerprintWindowCount(dir); n != 0 {
+		t.Errorf("open fingerprint windows after both turns = %d, want 0", n)
+	}
+}
+
+// TestFingerprintWindow_OverlapDetection covers the window bookkeeping: a window
+// that never overlapped reports the real delta, one that overlapped (either
+// side, either order) reports false, and a window opened after the others
+// closed is clean again.
+func TestFingerprintWindow_OverlapDetection(t *testing.T) {
+	e := NewEngine("p", &stubAgent{}, nil, "", LangEnglish)
+	dir := t.TempDir()
+	overlapped := func(w *fingerprintWindow) bool {
+		e.workspaceFpMu.Lock()
+		defer e.workspaceFpMu.Unlock()
+		w.closeLocked()
+		return w.overlapped
+	}
+
+	solo := e.openFingerprintWindow(dir)
+	if overlapped(solo) {
+		t.Fatal("a lone window must not be marked overlapped")
+	}
+
+	a := e.openFingerprintWindow(dir)
+	b := e.openFingerprintWindow(dir) // opens while a is open
+	if !overlapped(a) {
+		t.Error("a window that was open when another opened must be marked overlapped")
+	}
+	c := e.openFingerprintWindow(dir) // opens while b is still open
+	if !overlapped(b) || !overlapped(c) {
+		t.Error("windows opened while another was open must be marked overlapped")
+	}
+	if n := e.openFingerprintWindowCount(dir); n != 0 {
+		t.Fatalf("open windows = %d, want 0", n)
+	}
+
+	later := e.openFingerprintWindow(dir)
+	if overlapped(later) {
+		t.Error("a window opened after the others closed must be clean")
+	}
+
+	other := e.openFingerprintWindow(dir)
+	elsewhere := e.openFingerprintWindow(t.TempDir())
+	if overlapped(other) || overlapped(elsewhere) {
+		t.Error("windows in different workspaces must not affect each other")
+	}
+
+	var none *fingerprintWindow
+	none.close()
+	if none.finish(context.Background(), "x") {
+		t.Error("a nil window reports no change")
+	}
+	if e.openFingerprintWindow("") != nil {
+		t.Error("no workspace, no window")
 	}
 }
 
