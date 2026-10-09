@@ -117,14 +117,6 @@ codex app-server daemon version
 
 When CC-Connect runs as a service, check discovery under the service account and environment rather than only in your terminal. If the daemon uses a custom `CODEX_HOME`, set the same value in the service environment or the agent's `codex_home` option. An explicit `daemon_socket` bypasses discovery, but the service account must still be able to access that socket.
 
-For durable management on an SSH host, prefer Codex's built-in command:
-
-```sh
-codex app-server daemon bootstrap
-```
-
-`bootstrap` installs durable local management and changes the host's daemon setup. Run it as an explicit host setup step, rather than from CC-Connect startup. Local socket sharing does not require `--remote-control`. For systemd or launchd deployments, check the management installed by your Codex version and its login/boot behavior; a tmux session alone does not provide boot startup or process supervision.
-
 If the daemon exits, CC-Connect retries the connection up to `daemon_reconnect_attempts` times, but does not restart the daemon. With `0`, the observer closes after disconnection without retrying. Restore the daemon separately, then attach again. `/detach` and stopping CC-Connect leave the daemon running.
 
 Use `codex app-server daemon stop` when intentionally stopping the daemon. `restart` and `update` can interrupt work shared by other clients, so schedule them outside active turns. Configure credentials and providers before starting the daemon; clients share its startup environment.
