@@ -954,15 +954,20 @@ func parseStepTokens(part map[string]any) *core.ContextUsage {
 
 // GetContextUsage implements core.ContextUsageReporter so the reply footer
 // shows real token counts (out/in/cr) for opencode turns, matching the
-// claude/codex footer behavior. ContextWindow is unknown to the opencode
-// adapter, so the ctx-% section is omitted.
+// claude/codex footer behavior. OpenCode does not report the context window, so
+// it is looked up in OpenCode's models catalogue for the session's model; when
+// that is unknown the ctx-% section falls back to the engine's estimate.
 func (s *opencodeSession) GetContextUsage() *core.ContextUsage {
 	s.usageMu.RLock()
-	defer s.usageMu.RUnlock()
 	if s.usage == nil {
+		s.usageMu.RUnlock()
 		return nil
 	}
 	cp := *s.usage
+	s.usageMu.RUnlock()
+	if cp.ContextWindow <= 0 {
+		cp.ContextWindow = opencodeContextWindow(s.model)
+	}
 	return &cp
 }
 
