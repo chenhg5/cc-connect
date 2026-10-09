@@ -1,5 +1,9 @@
 package core
 
+// Agent tool requests can identify an attached session instead of supplying
+// project/chat routing parameters. This file resolves that ID to a unique live
+// shared connection; it does not grant access or select a most-recent session.
+
 import (
 	"fmt"
 	"net/http"

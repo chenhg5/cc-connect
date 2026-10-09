@@ -40,7 +40,7 @@ func (e *Engine) showSharedAsyncQuestions(state *interactiveState, as SharedAgen
 	// Bound memory without silently replacing still visible, actionable cards.
 	if len(state.sharedAsyncQuestions)+len(event.Questions) > 64 {
 		state.mu.Unlock()
-		slog.Warn("shared async question limit reached")
+		slog.Warn("shared async question limit reached", "project", e.name, "thread_id", runtime.SessionID, "turn_id", event.TurnID, "item_id", event.ItemID)
 		return
 	}
 	p, reply := state.platform, state.replyCtx

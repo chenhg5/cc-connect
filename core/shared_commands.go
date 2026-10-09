@@ -263,7 +263,7 @@ func (e *Engine) sharedSwitchCardAction(args, sessionKey string) *Card {
 		if err == nil {
 			err = fmt.Errorf("session has no reply platform")
 		}
-		slog.Warn("shared session card switch failed", "error", err)
+		slog.Warn("shared session card switch failed", "project", e.name, "session_key", sessionKey, "error", err)
 		return NewCard().Markdown(e.i18n.Tf(MsgError, err)).Build()
 	}
 	msg := &Message{SessionKey: sessionKey, Platform: target.platform.Name(), UserID: extractUserID(sessionKey), ReplyCtx: target.replyCtx}

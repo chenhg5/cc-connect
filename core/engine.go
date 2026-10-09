@@ -6882,7 +6882,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if len(routedEvents) > 0 {
 				if pendingSend != nil {
 					if err := <-pendingSend; err != nil {
-						slog.Warn("shared send completed with error", "error", err)
+						slog.Warn("shared send completed with error", "project", e.name, "session_key", sessionKey, "error", err)
 					}
 				}
 				return
@@ -11351,7 +11351,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		e.interactiveMu.Unlock()
 		if canceller, ok := sharedSession.(AgentSessionCanceller); ok {
 			if err := canceller.CancelTurn(); err != nil {
-				slog.Warn("shared turn interrupt failed", "error", err)
+				slog.Warn("shared turn interrupt failed", "project", e.name, "session_key", sessionKey, "error", err)
 				return false
 			}
 			return true
