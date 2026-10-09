@@ -376,7 +376,7 @@ func (e *Engine) sendSharedPrompt(state *interactiveState, pending *pendingPermi
 		if err := bs.SendWithButtons(e.ctx, reply, text, [][]ButtonOption{buttons}); err == nil {
 			return
 		} else {
-			slog.Warn("shared permission buttons", "error", err)
+			slog.Warn("shared permission buttons", "project", e.name, "platform", p.Name(), "request_id", pending.RequestID, "error", err)
 		}
 	}
 	if supportsCards(p) {
@@ -417,7 +417,7 @@ func (e *Engine) sendSharedQuestionPrompt(p Platform, reply any, pending *pendin
 		if err := bs.SendWithButtons(e.ctx, reply, text, rows); err == nil {
 			return
 		} else {
-			slog.Warn("shared question buttons", "error", err)
+			slog.Warn("shared question buttons", "project", e.name, "platform", p.Name(), "request_id", pending.RequestID, "error", err)
 		}
 	}
 	if supportsCards(p) {

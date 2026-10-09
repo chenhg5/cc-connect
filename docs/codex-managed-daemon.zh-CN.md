@@ -1,5 +1,7 @@
 # Codex 托管 daemon 使用指南
 
+[English](codex-managed-daemon.md)
+
 本文说明如何接入已有 Codex managed daemon 及管理共享会话。完整配置示例见 [config.example.toml](../config.example.toml)。
 
 ## 1. Codex 托管 daemon 共享会话
@@ -32,7 +34,7 @@ daemon_enable_delete = true
 | `app_server_transport` | `"stdio"` | App Server 传输方式；托管 daemon 使用 `"managed_daemon"`。 |
 | `daemon_attach_only` | `false` | 为 `true` 时必须先通过 `/attach` 或 `/switch` 选择已有 thread，不能自动创建新 thread。 |
 | `daemon_socket` | 未设置 | daemon 控制 socket。未设置时通过 Codex CLI 进行只读发现。 |
-| `daemon_reconnect_attempts` | `3` | 断线后的自动重连次数；设置为 `0` 关闭自动重连。 |
+| `daemon_reconnect_attempts` | `3` | 断线后的重试次数；`0` 完全关闭自动重连，但仍需要首次连接成功。 |
 | `daemon_enable_steer` | `true` | 是否允许通过 `/steer` 向运行中的 turn 注入文本。 |
 | `daemon_busy_message_mode` | `"queue"` | 忙碌时普通文本的处理方式：`queue` 等当前 turn 结束，`steer` 插入当前 turn。 |
 | `daemon_enable_interrupt` | `true` | 是否启用停止当前 turn 的能力。 |
@@ -91,9 +93,58 @@ app_server_url = "stdio://"
 
 多工作区中的共享轮次（包括外部终端发起的轮次）及人工审批等待会计入工作区活动，任务结束或断开观察连接后释放活动计数，避免空闲回收中断进行中的任务。
 
-## 3. 注意事项
+`/history [n]` 从最新 turn 开始分页读取，转换为有效消息后返回最近 `n` 条，并保持时间顺序；不足时继续翻页。不限制数量时也逐页读取。单个超大页面仍可能超过 WebSocket 的 32 MiB 消息上限。
+
+## 3. 共享会话的推理展示
+
+共享 thread 发出的推理事件也可能显示在连接的聊天中，包括由 CLI 或 IDE 发起的轮次。CC-Connect 沿用 `thinking_messages` 展示设置（默认 `true`），托管模式不改变默认值。
+
+要在全部 CC-Connect 聊天中隐藏推理，配置：
+
+```toml
+[display]
+thinking_messages = false
+```
+
+只针对某个项目关闭时，将以下表放在该项目的 `[[projects]]` 条目内：
+
+```toml
+[projects.display]
+thinking_messages = false
+```
+
+也可通过 `/quiet` 隐藏推理和工具进度，同时保留助手回复。这些设置只影响 CC-Connect 展示，不会关闭模型推理，也不会改变其他 daemon 客户端收到的事件。启用推理展示时，应考虑连接的聊天中有哪些读者。
+
+## 4. daemon 生命周期与长期运行
+
+以下命令已按 Codex CLI 0.161.0 核对；其他版本请先查看 `codex app-server daemon --help`。通用 App Server 协议见 [OpenAI 官方文档](https://learn.chatgpt.com/docs/app-server)。
+
+启动 CC-Connect 前，使用与交互式 Codex 客户端相同的系统账号和 `CODEX_HOME`，分别执行：
+
+```sh
+codex app-server daemon start
+codex app-server daemon version
+```
+
+`start` 在需要时启动后台 daemon；`version` 以 JSON 返回状态、版本和 `socketPath`，也是 CC-Connect 的只读发现命令。可以将报告的 socket 路径填入 `daemon_socket`，或省略该项自动发现。符合条件的交互式 Codex 会话可能已经启动后台服务，此时先用 `version` 检查。
+
+SSH 主机需要持久管理时，优先使用 Codex 自带命令：
+
+```sh
+codex app-server daemon bootstrap
+```
+
+`bootstrap` 安装持久化本地管理并修改主机的 daemon 设置，应作为明确的主机配置步骤单独执行。CC-Connect 不会执行它。本地 socket 共享不需要 `--remote-control`。使用 systemd 或 launchd 的部署，应检查当前 Codex 版本安装的管理方式及登录、启动行为；单独运行 tmux 不提供开机启动或进程监管。
+
+daemon 退出后，CC-Connect 最多重试 `daemon_reconnect_attempts` 次连接，不会重新启动 daemon。设置为 `0` 时断线后关闭观察连接，不重试。需单独恢复 daemon，再重新 attach。`/detach` 或停止 CC-Connect 都不会停止 daemon。
+
+需要主动停止 daemon 时执行 `codex app-server daemon stop`。`restart` 和 `update` 可能中断其他客户端的共享任务，应安排在没有活跃轮次时操作。凭据和 Provider 应在 daemon 启动前配置；客户端共享 daemon 启动时继承的环境。
+
+## 5. 注意事项
 
 1. `/attach`、`/steer`、审批和问答命令需要当前 Agent 支持对应的托管会话能力；不支持时会返回能力不可用。
 2. `daemon_attach_only = true` 适合只管理已有 Codex 工作；需要让 cc-connect 创建新 thread 时应设为 `false`。
 3. `daemon_busy_message_mode = "steer"` 只适用于可 steer 的普通文本；待处理审批/问答会优先消费对应答案，附件不能通过 steer 注入。
 4. `daemon_socket`、Provider 和凭据应与实际运行 daemon 的环境保持一致。
+
+5. CC-Connect 拒绝连接继承的 `CODEX_THREAD_ID` 所标识的 thread。这是启动当前进程的 Codex thread，拒绝它是为避免自我控制循环；其他正在运行的 thread 仍可接入。

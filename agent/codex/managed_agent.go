@@ -148,6 +148,8 @@ func (a *managedAgent) StartSession(ctx context.Context, id string) (core.AgentS
 }
 
 func (a *managedAgent) AttachSession(ctx context.Context, id string) (core.AgentSession, error) {
+	// CODEX_THREAD_ID identifies the Codex thread that launched this process.
+	// Refuse self-attachment to avoid feeding its output/control back into itself.
 	if strings.TrimSpace(id) == "" || id == core.ContinueSession || id == os.Getenv("CODEX_THREAD_ID") {
 		return nil, fmt.Errorf("codex daemon refuses an empty, implicit or current agent thread ID")
 	}

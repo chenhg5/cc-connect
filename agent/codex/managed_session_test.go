@@ -9,13 +9,63 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/gorilla/websocket"
 )
+
+func TestManagedReconnect_ZeroAttemptsClosesObserverWithoutRetry(t *testing.T) {
+	cwd := t.TempDir()
+	var connections atomic.Int32
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		connections.Add(1)
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			if m.Method != "thread/resume" {
+				t.Errorf("unexpected RPC %s", m.Method)
+			}
+			if err := ws.WriteJSON(map[string]any{"id": m.ID, "result": fixtureSnapshot(cwd, "target", "")}); err != nil {
+				t.Error(err)
+			}
+			_ = ws.Close()
+			return nil, false
+		})
+	})
+	as, err := fixtureManagedAgent(t, socket, cwd, map[string]any{"daemon_reconnect_attempts": 0}).AttachSession(context.Background(), "target")
+	if err != nil {
+		t.Fatalf("zero retries must still permit the initial connection: %v", err)
+	}
+	s := as.(*managedSession)
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Errorf("Close cleanup: %v", err)
+		}
+	}()
+	select {
+	case <-s.done:
+	case <-time.After(4 * time.Second):
+		t.Fatal("observer did not close after disconnect with retries disabled")
+	}
+	if connections.Load() != 1 {
+		t.Fatalf("connections=%d, want only the initial connection", connections.Load())
+	}
+	if s.RuntimeState().Connected || s.Alive() {
+		t.Fatal("disconnected observer remains active")
+	}
+	foundError := false
+	for event := range as.Events() {
+		if event.Type == core.EventError && event.Error != nil && strings.Contains(event.Error.Error(), "reconnection disabled") {
+			foundError = true
+		}
+	}
+	if !foundError {
+		t.Fatal("missing terminal disconnection error")
+	}
+}
 
 func TestManagedSendDoesNotInjectApplicationContextOrOverrideThread(t *testing.T) {
 	cwd := t.TempDir()

@@ -224,6 +224,7 @@ func (s *managedSession) runLoop(rpc *daemonRPC) {
 }
 
 func (s *managedSession) reconnect() (*daemonRPC, error) {
+	// Zero disables all reconnect attempts; the initial connection is separate.
 	last := fmt.Errorf("reconnection disabled")
 	s.mu.Lock()
 	expectedTurn := s.turn
