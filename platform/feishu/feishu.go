@@ -6564,17 +6564,7 @@ func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
 	if text == "" || len(desc.ParamKeys) == 0 {
 		return ""
 	}
-	candidates := []string{text}
-	if start := strings.Index(text, "{"); start >= 0 {
-		if end := strings.LastIndex(text, "}"); end >= start {
-			candidates = append(candidates, text[start:end+1])
-		}
-	}
-	for _, candidate := range candidates {
-		var params map[string]any
-		if err := json.Unmarshal([]byte(candidate), &params); err != nil {
-			continue
-		}
+	for _, params := range toolInputObjects(text) {
 		if len(desc.DetailKeys) > 0 {
 			var details []string
 			for _, key := range desc.DetailKeys {
@@ -6613,6 +6603,27 @@ func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
 	return ""
 }
 
+// toolInputObjects parses a tool input that is either a JSON object or text
+// wrapping one (a markdown fence, a label in front of it). The wrapped object is
+// decoded from its first "{" up to where the object ends, rather than sliced to
+// the last "}" in the text, which picks the wrong brace when the trailing text
+// contains one of its own.
+func toolInputObjects(text string) []map[string]any {
+	var whole map[string]any
+	if err := json.Unmarshal([]byte(text), &whole); err == nil {
+		return []map[string]any{whole}
+	}
+	start := strings.Index(text, "{")
+	if start < 0 {
+		return nil
+	}
+	var embedded map[string]any
+	if err := json.NewDecoder(strings.NewReader(text[start:])).Decode(&embedded); err != nil {
+		return nil
+	}
+	return []map[string]any{embedded}
+}
+
 // isLongToolDetailKey reports the tool-input fields that can run to hundreds of
 // lines: commands/scripts and patch bodies.
 func isLongToolDetailKey(key string) bool {
@@ -6631,14 +6642,14 @@ func truncateToolDetail(value string) string {
 	lines := strings.Split(value, "\n")
 	note := ""
 	if len(lines) > maxToolDetailLines {
-		note = fmt.Sprintf("… (+%d more lines)", len(lines)-maxToolDetailLines)
+		note = fmt.Sprintf("(+%d more lines)", len(lines)-maxToolDetailLines)
 		lines = lines[:maxToolDetailLines]
 	}
 	kept := strings.Join(lines, "\n")
 	if runes := []rune(kept); len(runes) > maxToolDetailRunes {
 		kept = string(runes[:maxToolDetailRunes])
 		if note == "" {
-			note = "… (truncated)"
+			note = "(truncated)"
 		}
 	}
 	if note == "" {

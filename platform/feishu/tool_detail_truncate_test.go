@@ -27,7 +27,7 @@ func TestBuildToolDisplay_CapsLongCommandButKeepsOtherFields(t *testing.T) {
 	if !strings.Contains(got, "line-15\n") || strings.Contains(got, "line-16") {
 		t.Fatalf("want the first %d lines only: %q", maxToolDetailLines, got)
 	}
-	for _, want := range []string{"… (+85 more lines)", "cwd: /tmp/project", "timeout: 120000"} {
+	for _, want := range []string{"(+85 more lines)", "cwd: /tmp/project", "timeout: 120000"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("detail %q does not contain %q", got, want)
 		}
@@ -45,7 +45,7 @@ func TestBuildToolDisplay_CapsLongStructuredBashCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := buildToolDisplay("Bash", string(input)).Detail
-	if !strings.Contains(got, "… (+287 more lines)") || strings.Contains(got, "line-15\n") {
+	if !strings.Contains(got, "(+287 more lines)") || strings.Contains(got, "line-15\n") {
 		t.Fatalf("detail = %q, want the script capped at %d lines", got, maxToolDetailLines)
 	}
 	if !strings.Contains(got, "description: patch the file") {
@@ -55,10 +55,10 @@ func TestBuildToolDisplay_CapsLongStructuredBashCommand(t *testing.T) {
 
 func TestBuildToolDisplay_CapsLongSingleLineByRunes(t *testing.T) {
 	got := buildToolDisplay("bash", strings.Repeat("界", maxToolDetailRunes+100)).Detail
-	if !strings.HasSuffix(got, "\n… (truncated)") {
+	if !strings.HasSuffix(got, "\n(truncated)") {
 		t.Fatalf("want a rune cap note: %q", got)
 	}
-	if n := len([]rune(strings.TrimSuffix(got, "\n… (truncated)"))); n != maxToolDetailRunes {
+	if n := len([]rune(strings.TrimSuffix(got, "\n(truncated)"))); n != maxToolDetailRunes {
 		t.Fatalf("kept runes = %d, want %d", n, maxToolDetailRunes)
 	}
 }
@@ -70,7 +70,7 @@ func TestBuildToolDisplay_CapsLongPatchText(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := buildToolDisplay("apply_patch", string(input)).Detail
-	if !strings.Contains(got, "filePath: /repo/main.go") || !strings.Contains(got, "… (+185 more lines)") || strings.Contains(got, "line-16") {
+	if !strings.Contains(got, "filePath: /repo/main.go") || !strings.Contains(got, "(+185 more lines)") || strings.Contains(got, "line-16") {
 		t.Fatalf("detail = %q, want the file path and a capped patch", got)
 	}
 }
@@ -91,5 +91,37 @@ func TestBuildToolDisplay_CappedCommandKeepsItsClassification(t *testing.T) {
 	got := buildToolDisplay("Bash", "go test ./...\n"+numberedLines(50))
 	if got.Title != "Run tests" {
 		t.Fatalf("title = %q, want Run tests", got.Title)
+	}
+}
+
+// A path parameter that is really a URL with a credential in its query string
+// (or a bare "?token=..." suffix) must not reach the card in clear text.
+func TestBuildToolDisplay_RedactsSecretsInPathQueries(t *testing.T) {
+	for _, path := range []string{
+		"https://user:pw@example.com/file.txt?token=abc123&page=2",
+		"/tmp/report.csv?api_key=abc123",
+	} {
+		input, err := json.Marshal(map[string]any{"filePath": path, "limit": 50})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := buildToolDisplay("read", string(input)).Detail
+		if strings.Contains(got, "abc123") || strings.Contains(got, "pw@") {
+			t.Fatalf("secret leaked for %q: %q", path, got)
+		}
+		if !strings.Contains(got, "redacted") || !strings.Contains(got, "limit: 50") {
+			t.Fatalf("want the redacted path and the other fields for %q: %q", path, got)
+		}
+	}
+}
+
+// Input wrapped in text whose tail has a "}" of its own: the object is decoded
+// where it ends instead of being sliced to the last brace (which failed to parse
+// and lost every parameter).
+func TestBuildToolDisplay_WrappedInputWithTrailingBrace(t *testing.T) {
+	input := "```json\n{\"filePath\": \"/repo/main.go\", \"offset\": 10}\n```\nnote: see {details}"
+	got := buildToolDisplay("read", input).Detail
+	if !strings.Contains(got, "filePath: /repo/main.go") || !strings.Contains(got, "offset: 10") {
+		t.Fatalf("detail = %q, want the wrapped object's parameters", got)
 	}
 }
