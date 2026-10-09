@@ -128,6 +128,8 @@ codex app-server daemon version
 
 `start` 在需要时启动后台 daemon；`version` 以 JSON 返回状态、版本和 `socketPath`，也是 CC-Connect 的只读发现命令。可以将报告的 socket 路径填入 `daemon_socket`，或省略该项自动发现。符合条件的交互式 Codex 会话可能已经启动后台服务，此时先用 `version` 检查。
 
+CC-Connect 作为服务运行时，应在服务账号及其环境下检查 daemon 发现结果，不能只看终端中的结果。若 daemon 使用自定义 `CODEX_HOME`，请在服务环境或 Agent 的 `codex_home` 选项中设置相同值。显式指定 `daemon_socket` 会跳过自动发现，但服务账号仍需有权限访问该 socket。
+
 SSH 主机需要持久管理时，优先使用 Codex 自带命令：
 
 ```sh
