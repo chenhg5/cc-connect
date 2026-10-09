@@ -568,16 +568,9 @@ type interactiveState struct {
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
 	stopped                  bool
-	turnCancelled            bool // set when a graceful ACP CancelTurn aborted the live turn
-	sharedAsyncQuestions     map[string]*sharedAsyncQuestion
-	sharedRequests           map[string]Event  // authoritative pending requests for shared presentation
-	sharedRuntime            *interactiveState // presentation reads pending state from its owner
-	sharedTurnID             string
-	sharedPending            []*pendingPermission
-	sharedForeground         *sharedForeground
-	sharedStopGeneration     uint64     // incremented by /stop to cancel retained foreground retries
-	sharedReplayEvents       chan Event // foreign events buffered while SendTurn binds its ID
-	sharedSessionKey         string
+	turnCancelled            bool                     // set when a graceful ACP CancelTurn aborted the live turn
+	shared                   sharedSessionState       // persistent observer state, protected by mu
+	sharedPresentation       *sharedPresentationState // set once for turn views; nil for ordinary sessions
 	pending                  *pendingPermission
 	pendingUserInput         *pendingUserInput
 	pendingMessages          []queuedMessage // messages queued while session was busy
@@ -4637,7 +4630,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 		state.agentSession = nil
 		closePlatform = state.platform
 		closeReplyCtx = state.replyCtx
-		sharedSourceKey = state.sharedSessionKey
+		sharedSourceKey = state.shared.sessionKey
 		if state.agentSessionIdleCancel != nil {
 			state.agentSessionIdleCancel()
 			state.agentSessionIdleCancel = nil
@@ -5671,7 +5664,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case err := <-pendingSend:
 			pendingSend = nil
 			if err != nil {
-				if state.sharedRuntime != nil && errors.Is(err, ErrAgentTurnBusy) {
+				if state.sharedPresentation != nil && errors.Is(err, ErrAgentTurnBusy) {
 					sp.discard()
 					return // Shared queue retains this unaccepted input for retry.
 				}
@@ -5693,7 +5686,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			continue
 		case <-idleCh:
-			if state.sharedRuntime != nil && !sharedPresentationIsCurrent(state) {
+			if state.sharedPresentation != nil && !sharedPresentationIsCurrent(state) {
 				sp.discard()
 				return
 			}
@@ -5718,7 +5711,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-turnDeadlineCh:
-			if state.sharedRuntime != nil && !sharedPresentationIsCurrent(state) {
+			if state.sharedPresentation != nil && !sharedPresentationIsCurrent(state) {
 				sp.discard()
 				return
 			}
@@ -11225,9 +11218,9 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 			state.mu.Lock()
 			as, shared := state.agentSession.(SharedAgentSession)
 			if shared {
-				state.sharedStopGeneration++
-				if state.sharedForeground != nil {
-					state.sharedForeground.cancel()
+				state.shared.stopGeneration++
+				if state.shared.foreground != nil {
+					state.shared.foreground.cancel()
 				}
 			}
 			state.mu.Unlock()

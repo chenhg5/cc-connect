@@ -11,6 +11,19 @@ import (
 	"time"
 )
 
+// sharedSessionState belongs to the persistent observer, not a turn's view.
+// Its zero value is usable, including for ordinary sessions that never attach
+// to a shared runtime. All fields are protected by the owner's interactiveState.mu.
+type sharedSessionState struct {
+	asyncQuestions map[string]*sharedAsyncQuestion
+	requests       map[string]Event // authoritative pending requests for all views
+	pending        []*pendingPermission
+	foreground     *sharedForeground
+	stopGeneration uint64     // /stop invalidates retained foreground retries
+	replayEvents   chan Event // reader consumes foreign events buffered during SendTurn
+	sessionKey     string
+}
+
 // Shared runtimes keep one event consumer across both local and externally
 // initiated turns. They never enter the subprocess foreground/unsolicited
 // handoff, which drains queued events and auto-denies background approvals.
@@ -26,7 +39,7 @@ func (e *Engine) startSharedReader(state *interactiveState, as SharedAgentSessio
 	state.unsolicitedDone = done
 	state.eventsNeedResync = false
 	replayEvents := make(chan Event, 128)
-	state.sharedReplayEvents = replayEvents
+	state.shared.replayEvents = replayEvents
 	state.mu.Unlock()
 	activity := e.sharedWorkspaceActivity(state, sessions)
 	activity.observe(as.RuntimeState(), Event{})
@@ -71,7 +84,7 @@ func (e *Engine) startSharedReader(state *interactiveState, as SharedAgentSessio
 			}
 			if !ok {
 				state.mu.Lock()
-				f := state.sharedForeground
+				f := state.shared.foreground
 				state.mu.Unlock()
 				if f != nil {
 					f.route(Event{Type: EventError, Error: fmt.Errorf("shared observer disconnected")})
@@ -98,7 +111,7 @@ func (e *Engine) startSharedReader(state *interactiveState, as SharedAgentSessio
 				e.handleSharedEvent(state, as, session, sessions, event)
 				if event.Type != EventRuntimeStatus {
 					state.mu.Lock()
-					f := state.sharedForeground
+					f := state.shared.foreground
 					state.mu.Unlock()
 					if f != nil {
 						f.route(event)
@@ -149,7 +162,7 @@ func (e *Engine) startSharedReader(state *interactiveState, as SharedAgentSessio
 				e.showSharedAsyncQuestions(state, as, event)
 			}
 			state.mu.Lock()
-			f := state.sharedForeground
+			f := state.shared.foreground
 			state.mu.Unlock()
 			if f != nil && f.route(event) {
 				continue
@@ -190,7 +203,7 @@ func (e *Engine) startSharedReader(state *interactiveState, as SharedAgentSessio
 
 func (e *Engine) handleSharedEvent(state *interactiveState, as SharedAgentSession, session *Session, sessions *SessionManager, event Event) {
 	state.mu.Lock()
-	p, reply, sessionKey := state.platform, state.replyCtx, state.sharedSessionKey
+	p, reply, sessionKey := state.platform, state.replyCtx, state.shared.sessionKey
 	state.mu.Unlock()
 	switch event.Type {
 	case EventText:
@@ -263,10 +276,10 @@ func (e *Engine) handleSharedEvent(state *interactiveState, as SharedAgentSessio
 
 func (e *Engine) addSharedPending(state *interactiveState, event Event) {
 	state.mu.Lock()
-	if state.sharedRequests == nil {
-		state.sharedRequests = map[string]Event{}
+	if state.shared.requests == nil {
+		state.shared.requests = map[string]Event{}
 	}
-	state.sharedRequests[event.RequestID] = event
+	state.shared.requests[event.RequestID] = event
 	state.mu.Unlock()
 	nonce := make([]byte, 12)
 	if _, err := rand.Read(nonce); err != nil {
@@ -283,7 +296,7 @@ func (e *Engine) addSharedPending(state *interactiveState, event Event) {
 		state.mu.Unlock()
 		return
 	}
-	for _, queued := range state.sharedPending {
+	for _, queued := range state.shared.pending {
 		if queued.RequestID == event.RequestID {
 			state.mu.Unlock()
 			return
@@ -293,9 +306,9 @@ func (e *Engine) addSharedPending(state *interactiveState, event Event) {
 	if show {
 		state.pending = pending
 	} else {
-		state.sharedPending = append(state.sharedPending, pending)
+		state.shared.pending = append(state.shared.pending, pending)
 	}
-	p, sessionKey := state.platform, state.sharedSessionKey
+	p, sessionKey := state.platform, state.shared.sessionKey
 	state.mu.Unlock()
 	e.hooks.Emit(HookEvent{Event: HookEventPermissionRequested, SessionKey: sessionKey, Platform: p.Name(), Content: event.ToolInput})
 	if show {
@@ -305,29 +318,29 @@ func (e *Engine) addSharedPending(state *interactiveState, event Event) {
 
 func (e *Engine) resolveSharedPending(state *interactiveState, id string) {
 	state.mu.Lock()
-	delete(state.sharedRequests, id)
+	delete(state.shared.requests, id)
 	var next *pendingPermission
 	var resolved *pendingPermission
 	if state.pending != nil && state.pending.RequestID == id {
 		resolved = state.pending
 		state.pending.resolve()
 		state.pending = nil
-		if len(state.sharedPending) > 0 {
-			next = state.sharedPending[0]
-			state.sharedPending = state.sharedPending[1:]
+		if len(state.shared.pending) > 0 {
+			next = state.shared.pending[0]
+			state.shared.pending = state.shared.pending[1:]
 			state.pending = next
 		}
 	}
-	kept := state.sharedPending[:0]
-	for _, pending := range state.sharedPending {
+	kept := state.shared.pending[:0]
+	for _, pending := range state.shared.pending {
 		if pending.RequestID == id {
 			pending.resolve()
 		} else {
 			kept = append(kept, pending)
 		}
 	}
-	state.sharedPending = kept
-	f := state.sharedForeground
+	state.shared.pending = kept
+	f := state.shared.foreground
 	state.mu.Unlock()
 	if f != nil {
 		f.route(Event{Type: EventPermissionResolved, RequestID: id})

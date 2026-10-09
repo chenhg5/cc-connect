@@ -12,7 +12,7 @@ func (e *Engine) waitSharedTurnReady(state *interactiveState, as SharedAgentSess
 	defer ticker.Stop()
 	for {
 		state.mu.Lock()
-		valid := state.agentSession == as && !state.stopped && state.sharedStopGeneration == generation
+		valid := state.agentSession == as && !state.stopped && state.shared.stopGeneration == generation
 		state.mu.Unlock()
 		if !valid || !as.Alive() || e.ctx.Err() != nil {
 			return false

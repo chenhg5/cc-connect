@@ -26,19 +26,19 @@ func (e *Engine) showSharedAsyncQuestions(state *interactiveState, as SharedAgen
 		return
 	}
 	state.mu.Lock()
-	if state.sharedAsyncQuestions == nil {
-		state.sharedAsyncQuestions = map[string]*sharedAsyncQuestion{}
+	if state.shared.asyncQuestions == nil {
+		state.shared.asyncQuestions = map[string]*sharedAsyncQuestion{}
 	}
-	for token, q := range state.sharedAsyncQuestions {
+	for token, q := range state.shared.asyncQuestions {
 		if q.turnID != event.TurnID {
-			delete(state.sharedAsyncQuestions, token)
+			delete(state.shared.asyncQuestions, token)
 		} else if q.itemID == event.ItemID {
 			state.mu.Unlock()
 			return
 		}
 	}
 	// Bound memory without silently replacing still visible, actionable cards.
-	if len(state.sharedAsyncQuestions)+len(event.Questions) > 64 {
+	if len(state.shared.asyncQuestions)+len(event.Questions) > 64 {
 		state.mu.Unlock()
 		slog.Warn("shared async question limit reached", "project", e.name, "thread_id", runtime.SessionID, "turn_id", event.TurnID, "item_id", event.ItemID)
 		return
@@ -57,7 +57,7 @@ func (e *Engine) showSharedAsyncQuestions(state *interactiveState, as SharedAgen
 			return
 		}
 		token := base64.RawURLEncoding.EncodeToString(nonce)
-		state.sharedAsyncQuestions[token] = &sharedAsyncQuestion{turnID: event.TurnID, itemID: event.ItemID, threadID: runtime.SessionID, question: q}
+		state.shared.asyncQuestions[token] = &sharedAsyncQuestion{turnID: event.TurnID, itemID: event.ItemID, threadID: runtime.SessionID, question: q}
 		prompts = append(prompts, prompt{token, q})
 	}
 	state.mu.Unlock()
@@ -98,7 +98,7 @@ func (e *Engine) answerSharedAsyncQuestion(p Platform, msg *Message, state *inte
 	}
 	runtime := as.RuntimeState()
 	state.mu.Lock()
-	q := state.sharedAsyncQuestions[args[0]]
+	q := state.shared.asyncQuestions[args[0]]
 	if q == nil || q.responding || q.answered || q.turnID != runtime.TurnID || q.threadID != runtime.SessionID || !runtime.Connected {
 		state.mu.Unlock()
 		stale()

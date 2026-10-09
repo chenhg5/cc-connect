@@ -45,7 +45,7 @@ func (s *APIServer) bindAgentToolRequest(project, sessionKey, agentSessionID str
 		engine.interactiveMu.Unlock()
 		for _, state := range states {
 			state.mu.Lock()
-			as, key, stopped := state.agentSession, state.sharedSessionKey, state.stopped
+			as, key, stopped := state.agentSession, state.shared.sessionKey, state.stopped
 			state.mu.Unlock()
 			shared, ok := as.(SharedAgentSession)
 			if !ok || stopped || key == "" || !shared.Alive() {

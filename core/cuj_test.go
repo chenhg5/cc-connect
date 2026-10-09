@@ -3603,7 +3603,7 @@ func TestCUJ_C7_CompletedReplayDoesNotRestartTimeouts(t *testing.T) {
 	state := env.e.interactiveStates["test:user"]
 	env.e.interactiveMu.Unlock()
 	state.mu.Lock()
-	replay := state.sharedReplayEvents
+	replay := state.shared.replayEvents
 	state.mu.Unlock()
 	replay <- Event{Type: EventTurnStarted, TurnID: "active-first"}
 	replay <- Event{Type: EventText, TurnID: "active-first", Content: "STALE REPLAY BODY", Metadata: map[string]any{"phase": "commentary"}}

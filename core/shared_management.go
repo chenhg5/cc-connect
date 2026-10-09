@@ -49,7 +49,7 @@ func (e *Engine) switchSharedManagementSession(sourceKey, targetID string) (*Ses
 		return nil, err
 	}
 	e.cleanupInteractiveState(key)
-	state := &interactiveState{agentSession: as, busySession: s, agent: agent, platform: target.platform, replyCtx: target.replyCtx, sharedSessionKey: sourceKey, eventsNeedResync: false}
+	state := &interactiveState{agentSession: as, busySession: s, agent: agent, platform: target.platform, replyCtx: target.replyCtx, shared: sharedSessionState{sessionKey: sourceKey}, eventsNeedResync: false}
 	e.interactiveMu.Lock()
 	e.interactiveStates[key] = state
 	e.interactiveMu.Unlock()
