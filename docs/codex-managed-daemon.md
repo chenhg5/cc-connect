@@ -115,6 +115,8 @@ codex app-server daemon version
 
 `start` starts the background daemon if needed. `version` reports status, versions and `socketPath` as JSON; this is also CC-Connect's passive discovery command. Use the reported socket path for `daemon_socket`, or omit the option to discover it. An eligible interactive Codex session may already have started the background server; check `version` first in that case.
 
+When CC-Connect runs as a service, check discovery under the service account and environment rather than only in your terminal. If the daemon uses a custom `CODEX_HOME`, set the same value in the service environment or the agent's `codex_home` option. An explicit `daemon_socket` bypasses discovery, but the service account must still be able to access that socket.
+
 For durable management on an SSH host, prefer Codex's built-in command:
 
 ```sh
