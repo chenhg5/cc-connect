@@ -17,6 +17,7 @@ func TestManagedReconnectRecoversCompletedTurnOnce(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			cwd := t.TempDir()
 			var connections atomic.Int32
+			attached := make(chan struct{})
 			socket := managedFixture(t, func(ws *websocket.Conn) {
 				connection := connections.Add(1)
 				fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
@@ -26,6 +27,8 @@ func TestManagedReconnectRecoversCompletedTurnOnce(t *testing.T) {
 					}
 					if connection == 1 {
 						_ = ws.WriteJSON(map[string]any{"id": m.ID, "result": fixtureSnapshot(cwd, "target", "old-turn")})
+						// Disconnect only after the initial attach has consumed its reply.
+						<-attached
 						_ = ws.Close()
 						return nil, false
 					}
@@ -44,6 +47,7 @@ func TestManagedReconnectRecoversCompletedTurnOnce(t *testing.T) {
 				})
 			})
 			as, err := fixtureManagedAgent(t, socket, cwd, map[string]any{"daemon_reconnect_attempts": 1}).AttachSession(context.Background(), "target")
+			close(attached)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -94,6 +98,7 @@ func TestManagedReconnectRecoversWithoutActiveTurn(t *testing.T) {
 		t.Run(fmt.Sprintf("historyRead=%t", historyRead), func(t *testing.T) {
 			cwd := t.TempDir()
 			var connections, reads atomic.Int32
+			attached := make(chan struct{})
 			snapshot := fixtureSnapshot(cwd, "target", "")
 			snapshot["thread"].(map[string]any)["turns"] = []any{map[string]any{"id": "old", "status": "completed", "items": []any{map[string]any{"type": "agentMessage", "text": "OFFLINE ANSWER", "phase": "final_answer"}}}}
 			socket := managedFixture(t, func(ws *websocket.Conn) {
@@ -103,6 +108,8 @@ func TestManagedReconnectRecoversWithoutActiveTurn(t *testing.T) {
 					case "thread/resume":
 						if connection == 1 {
 							_ = ws.WriteJSON(map[string]any{"id": m.ID, "result": fixtureSnapshot(cwd, "target", "old")})
+							// Disconnect only after the initial attach has consumed its reply.
+							<-attached
 							_ = ws.Close()
 							return nil, false
 						}
@@ -125,6 +132,7 @@ func TestManagedReconnectRecoversWithoutActiveTurn(t *testing.T) {
 				})
 			})
 			as, err := fixtureManagedAgent(t, socket, cwd, map[string]any{"daemon_reconnect_attempts": 1}).AttachSession(context.Background(), "target")
+			close(attached)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,6 +175,7 @@ func TestManagedReconnectDoesNotGuessUnfinishedTurnState(t *testing.T) {
 	})
 	t.Run("missing from history", func(t *testing.T) {
 		var connections atomic.Int32
+		attached := make(chan struct{})
 		socket := managedFixture(t, func(ws *websocket.Conn) {
 			connection := connections.Add(1)
 			fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
@@ -174,6 +183,8 @@ func TestManagedReconnectDoesNotGuessUnfinishedTurnState(t *testing.T) {
 				case "thread/resume":
 					if connection == 1 {
 						_ = ws.WriteJSON(map[string]any{"id": m.ID, "result": fixtureSnapshot(cwd, "target", "old")})
+						// Disconnect only after the initial attach has consumed its reply.
+						<-attached
 						_ = ws.Close()
 						return nil, false
 					}
@@ -187,6 +198,7 @@ func TestManagedReconnectDoesNotGuessUnfinishedTurnState(t *testing.T) {
 			})
 		})
 		as, err := fixtureManagedAgent(t, socket, cwd, map[string]any{"daemon_reconnect_attempts": 1}).AttachSession(context.Background(), "target")
+		close(attached)
 		if err != nil {
 			t.Fatal(err)
 		}

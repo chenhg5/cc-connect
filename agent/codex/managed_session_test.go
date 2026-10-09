@@ -22,6 +22,7 @@ import (
 func TestManagedReconnect_ZeroAttemptsClosesObserverWithoutRetry(t *testing.T) {
 	cwd := t.TempDir()
 	var connections atomic.Int32
+	attached := make(chan struct{})
 	socket := managedFixture(t, func(ws *websocket.Conn) {
 		connections.Add(1)
 		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
@@ -31,11 +32,14 @@ func TestManagedReconnect_ZeroAttemptsClosesObserverWithoutRetry(t *testing.T) {
 			if err := ws.WriteJSON(map[string]any{"id": m.ID, "result": fixtureSnapshot(cwd, "target", "")}); err != nil {
 				t.Error(err)
 			}
+			// Exercise a disconnect after attach, not a failed initial handshake.
+			<-attached
 			_ = ws.Close()
 			return nil, false
 		})
 	})
 	as, err := fixtureManagedAgent(t, socket, cwd, map[string]any{"daemon_reconnect_attempts": 0}).AttachSession(context.Background(), "target")
+	close(attached)
 	if err != nil {
 		t.Fatalf("zero retries must still permit the initial connection: %v", err)
 	}
