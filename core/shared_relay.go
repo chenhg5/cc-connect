@@ -30,7 +30,7 @@ func (e *Engine) handleSharedRelay(ctx context.Context, agent Agent, sessions *S
 	state := e.getOrCreateInteractiveStateWith(relayKey, target.platform, target.replyCtx, session, sessions, override, sourceKey)
 	state.mu.Lock()
 	as, _ := state.agentSession.(SharedAgentSession)
-	state.sharedSessionKey = sourceKey
+	state.shared.sessionKey = sourceKey
 	state.mu.Unlock()
 	if as == nil {
 		session.Unlock(gen)
@@ -43,7 +43,7 @@ func (e *Engine) handleSharedRelay(ctx context.Context, agent Agent, sessions *S
 	lifetime, cancel := context.WithCancel(e.ctx)
 	f := &sharedForeground{ctx: lifetime, cancel: cancel, events: make(chan Event, 128)}
 	state.mu.Lock()
-	state.sharedForeground = f
+	state.shared.foreground = f
 	state.mu.Unlock()
 	cleanup := func() { cancel(); e.cleanupInteractiveState(relayKey, state); session.Unlock(gen) }
 	e.startSharedReader(state, as, session, sessions, relayKey)
@@ -128,7 +128,7 @@ func (e *Engine) sharedRequestForSource(sourceKey, token string) (*interactiveSt
 	for _, state := range e.interactiveStates {
 		state.mu.Lock()
 		as, ok := state.agentSession.(SharedAgentSession)
-		match := ok && state.sharedSessionKey == sourceKey && state.pending != nil && (token == "" || state.pending.ActionToken == token)
+		match := ok && state.shared.sessionKey == sourceKey && state.pending != nil && (token == "" || state.pending.ActionToken == token)
 		state.mu.Unlock()
 		if match {
 			if found != nil {

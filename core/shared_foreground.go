@@ -93,9 +93,9 @@ func (e *Engine) processSharedMessageWith(p Platform, msg *Message, session *Ses
 	state := e.getOrCreateInteractiveStateWith(key, p, msg.ReplyCtx, session, sessions, override, msg.SessionKey)
 	state.mu.Lock()
 	as, _ := state.agentSession.(SharedAgentSession)
-	generation := state.sharedStopGeneration
+	generation := state.shared.stopGeneration
 	state.workspaceDir = workspace
-	state.sharedSessionKey = msg.SessionKey
+	state.shared.sessionKey = msg.SessionKey
 	state.mu.Unlock()
 	if as == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
@@ -157,18 +157,18 @@ func (e *Engine) runSharedForeground(state *interactiveState, as SharedAgentSess
 	state.platform, state.replyCtx = p, msg.ReplyCtx
 	state.fromVoice, state.currentMessageID = msg.FromVoice, msg.MessageID
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
-	state.sharedForeground = f
+	state.shared.foreground = f
 	state.mu.Unlock()
 	state.stopSignal()
 	state.mu.Lock()
-	view := &interactiveState{agentSession: as, agent: state.agent, platform: p, replyCtx: msg.ReplyCtx, workspaceDir: state.workspaceDir, stopCh: state.stopCh, eventsNeedResync: false, sharedRuntime: state, fromVoice: msg.FromVoice, currentTurnUserMessageTimeMs: msg.UserMessageTimeMs}
+	view := &interactiveState{agentSession: as, agent: state.agent, platform: p, replyCtx: msg.ReplyCtx, workspaceDir: state.workspaceDir, stopCh: state.stopCh, eventsNeedResync: false, sharedPresentation: &sharedPresentationState{runtime: state}, fromVoice: msg.FromVoice, currentTurnUserMessageTimeMs: msg.UserMessageTimeMs}
 	state.mu.Unlock()
 	f.parent, f.view = state, view
 	defer func() {
 		cancel()
 		state.mu.Lock()
-		if state.sharedForeground == f {
-			state.sharedForeground = nil
+		if state.shared.foreground == f {
+			state.shared.foreground = nil
 			// A muted scheduled turn must not mute the persistent observer.
 			if _, muted := p.(*mutePlatform); muted {
 				if previous, ok := oldPlatform.(*mutePlatform); ok {
@@ -205,10 +205,10 @@ func (e *Engine) runSharedForeground(state *interactiveState, as SharedAgentSess
 		f.sendErr = err
 		f.mu.Unlock()
 		view.mu.Lock()
-		view.sharedTurnID = id
+		view.sharedPresentation.turnID = id
 		view.mu.Unlock()
 		state.mu.Lock()
-		replayEvents := state.sharedReplayEvents
+		replayEvents := state.shared.replayEvents
 		state.mu.Unlock()
 		for _, event := range f.bind(id) {
 			// Foreign/late events must use the same per-turn presentation router,
@@ -246,7 +246,7 @@ func (e *Engine) startSharedExternalPresentation(state *interactiveState, as Sha
 	f := &sharedForeground{ctx: ctx, cancel: cancel, events: make(chan Event, 128), bound: true, turnID: turnID}
 	state.stopSignal()
 	state.mu.Lock()
-	view := &interactiveState{agentSession: as, agent: state.agent, platform: state.platform, replyCtx: state.replyCtx, workspaceDir: state.workspaceDir, stopCh: state.stopCh, eventsNeedResync: false, sharedRuntime: state, sharedTurnID: turnID}
+	view := &interactiveState{agentSession: as, agent: state.agent, platform: state.platform, replyCtx: state.replyCtx, workspaceDir: state.workspaceDir, stopCh: state.stopCh, eventsNeedResync: false, sharedPresentation: &sharedPresentationState{runtime: state, turnID: turnID}}
 	state.mu.Unlock()
 	var ws *workspaceState
 	if view.workspaceDir != "" && e.workspacePool != nil {

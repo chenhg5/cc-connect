@@ -57,7 +57,7 @@ func TestSharedAsyncQuestionFreeTextRetriesAndDeduplicates(t *testing.T) {
 	}
 	state.mu.Lock()
 	var token string
-	for k := range state.sharedAsyncQuestions {
+	for k := range state.shared.asyncQuestions {
 		token = k
 	}
 	pending := state.pending
@@ -117,7 +117,7 @@ func TestSharedAsyncQuestionForegroundCardDoesNotWaitForToolBoundary(t *testing.
 	defer cancel()
 	f := &sharedForeground{ctx: ctx, cancel: cancel, events: make(chan Event, 4), bound: true, turnID: "active-first"}
 	state.mu.Lock()
-	state.sharedForeground = f
+	state.shared.foreground = f
 	state.mu.Unlock()
 	as.emit(Event{Type: EventText, TurnID: "active-first", ItemID: "q", Questions: []UserQuestion{{Question: "Foreground free question?"}}, Metadata: map[string]any{"delivery": "async"}})
 	env.await("Foreground free question?")
@@ -131,7 +131,7 @@ func TestSharedAsyncQuestionForegroundCardDoesNotWaitForToolBoundary(t *testing.
 	}
 	state.mu.Lock()
 	var token string
-	for k := range state.sharedAsyncQuestions {
+	for k := range state.shared.asyncQuestions {
 		token = k
 	}
 	state.mu.Unlock()
