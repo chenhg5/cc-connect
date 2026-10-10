@@ -383,6 +383,7 @@ type Message struct {
 	LegacyChannelKey string
 	ReplyCtx         any    // platform-specific context needed for replying
 	FromVoice        bool   // true if message originated from voice transcription
+	Mentioned        bool   // maomao fork: user explicitly @-mentioned the bot (input to the gate)
 	ModeOverride     string // if set, temporarily override agent permission mode for this message
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission

@@ -489,6 +489,11 @@ type ProjectConfig struct {
 	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
 	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`
+	// GateURL (maomao fork): fast-brain gate consulted for every user message.
+	// It answers reply / insert / silent; empty disables the gate.
+	GateURL string `toml:"gate_url,omitempty"`
+	// GateTimeoutMs bounds the gate call; on timeout or error the message is replied to.
+	GateTimeoutMs int `toml:"gate_timeout_ms,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who

@@ -704,6 +704,7 @@ func main() {
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
 		}
+		engine.SetGate(proj.GateURL, proj.GateTimeoutMs)
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 		engine.SetResetOnIdle(resetIdle)
 		if defaulted {
@@ -1786,6 +1787,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
+	engine.SetGate(proj.GateURL, proj.GateTimeoutMs)
 	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 	engine.SetResetOnIdle(resetIdle)
 	if defaulted {

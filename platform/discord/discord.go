@@ -628,8 +628,12 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			p.cacheBotRoleIDForGuild(s, m.GuildID, nil)
 			botRoleID = p.botRoleIDForGuild(m.GuildID)
 		}
+		mentioned := isDiscordBotMention(m, p.botID, botRoleID, p.respondToAtEveryoneAndHere)
+		if mentioned && m.GuildID != "" && p.isGroupReplyAllGuild(m.GuildID) {
+			m.Content = stripDiscordMentionWithRole(m.Content, p.botID, botRoleID)
+		}
 		if m.GuildID != "" && !p.isGroupReplyAllGuild(m.GuildID) {
-			if !isDiscordBotMention(m, p.botID, botRoleID, p.respondToAtEveryoneAndHere) {
+			if !mentioned {
 				slog.Debug("discord: ignoring guild message without bot mention", "channel", m.ChannelID)
 				return
 			}
@@ -678,6 +682,7 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
 			Content: m.Content, Images: images, Files: files, Audio: audio, ReplyCtx: rctx,
+			Mentioned: mentioned,
 		}
 		msg.ChatName, _ = p.ResolveChannelName(m.ChannelID)
 		p.dispatchMessage(msg)
