@@ -70,6 +70,20 @@ type RelayGroupVisibilityTarget interface {
 	RelayGroupVisibilityKey(callerSessionKey string) (groupSessionKey string, ok bool)
 }
 
+// ChannelScopedSessionKey is an optional interface for platforms whose session
+// keys encode a per-thread channel scope, such as a Feishu topic or a Discord
+// thread. Such platforms can bind one workspace per thread, and the binding key
+// must carry that scope.
+//
+// Core cannot parse platform-private session-key layouts, so platforms convert
+// their own format via this interface. Implementations return the channel scope
+// WITHOUT the platform name — core prepends it. Returning ("", false) makes
+// core fall back to its generic parsing, which keeps the chat-level key and is
+// correct for platforms without per-thread scoping.
+type ChannelScopedSessionKey interface {
+	ChannelKeyFromSessionKey(sessionKey string) (channelKey string, ok bool)
+}
+
 // MessageRecallDetector is an optional interface for platforms that can check
 // whether the message targeted by a reply context was recalled/deleted.
 type MessageRecallDetector interface {

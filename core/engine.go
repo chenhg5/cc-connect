@@ -3080,7 +3080,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		resolvedWorkspace = forcedWorkDir
 	} else if e.multiWorkspace {
 		channelID := effectiveChannelID(msg)
-		channelKey := effectiveWorkspaceChannelKey(msg)
+		channelKey := e.effectiveWorkspaceChannelKey(msg)
 		workspace, channelName, err := e.resolveWorkspace(p, channelID)
 		if err != nil {
 			slog.Error("workspace resolution failed", "err", err)
@@ -7133,7 +7133,7 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 
 func (e *Engine) handleWorkspaceCommand(p Platform, msg *Message, args []string) {
 	channelID := effectiveChannelID(msg)
-	channelKey := effectiveWorkspaceChannelKey(msg)
+	channelKey := e.effectiveWorkspaceChannelKey(msg)
 	projectKey := "project:" + e.name
 	resolveChannelName := func() func() string {
 		resolved := false
@@ -7399,14 +7399,43 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	}
 }
 
-// applySessionFilter conditionally filters agent sessions based on the
-// filter_external_sessions config. When disabled (default), all sessions are
-// returned. When enabled, only sessions tracked by cc-connect are shown.
-func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager) []AgentSessionInfo {
-	if !e.filterExternalSessions {
+// applySessionFilter narrows agent sessions to those the given sessionKey may
+// see and switch to.
+//
+// filter_external_sessions governs whether sessions created by direct CLI use
+// are shown at all; when enabled only sessions cc-connect tracks remain.
+//
+// In multi-workspace mode several topics can share one workspace, and the
+// SessionManager is per-workspace (getOrCreateWorkspaceAgent), so the agent
+// reports every session in that directory. Without narrowing by sessionKey a
+// topic would list — and /switch or /delete — sessions belonging to another
+// topic. filterOwnedSessions cannot do this: it takes the union of all session
+// IDs, and its "empty means pass through" escape hatch keeps the filter inert
+// until every session has a tracked ID.
+//
+// Outside multi-workspace mode the agent's list is returned unchanged.
+func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager, sessionKey string) []AgentSessionInfo {
+	if e.filterExternalSessions {
+		sessions = filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
+	}
+	if !e.multiWorkspace || sm == nil || sessionKey == "" {
 		return sessions
 	}
-	return filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
+	// A nil map means the store predates ID tracking, so ownership cannot be
+	// established and passing everything through is the only safe answer.
+	owners := sm.AgentSessionOwners()
+	if owners == nil {
+		return sessions
+	}
+	filtered := make([]AgentSessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		// Drop sessions another conversation owns; keep our own and unowned
+		// ones (created directly through the CLI, which records no owner).
+		if owner, taken := owners[s.ID]; !taken || owner == sessionKey {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
 }
 
 // filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
@@ -7444,7 +7473,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 			return
 		}
-		agentSessions = e.applySessionFilter(agentSessions, sessions)
+		agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
 		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
@@ -7541,7 +7570,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
 
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
@@ -7631,7 +7660,7 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 		}
 	}
 	if e.multiWorkspace {
-		channelKey := effectiveWorkspaceChannelKey(msg)
+		channelKey := e.effectiveWorkspaceChannelKey(msg)
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 			return normalizeWorkspacePath(b.Workspace)
 		}
@@ -8588,7 +8617,7 @@ func (e *Engine) cmdDiff(p Platform, msg *Message, raw string) {
 	// Resolve working directory (same pattern as cmdShell)
 	var workDir string
 	if e.multiWorkspace {
-		channelKey := effectiveWorkspaceChannelKey(msg)
+		channelKey := e.effectiveWorkspaceChannelKey(msg)
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 			workDir = normalizeWorkspacePath(b.Workspace)
 		}
@@ -8889,7 +8918,7 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchError), err))
 		return
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
 
 	type searchResult struct {
 		id           string
@@ -8983,7 +9012,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 			return
 		}
-		agentSessions = e.applySessionFilter(agentSessions, sessions)
+		agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
 		if idx > len(agentSessions) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx))
 			return
@@ -12842,7 +12871,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if err != nil || len(agentSessions) == 0 {
 			return
 		}
-		agentSessions = e.applySessionFilter(agentSessions, sessions)
+		agentSessions = e.applySessionFilter(agentSessions, sessions, sessionKey)
 		matched := e.matchSession(agentSessions, sessions, args)
 		if matched == nil {
 			return
@@ -13015,7 +13044,7 @@ func (e *Engine) renderDeleteModeCard(sessionKey string) *Card {
 	if err != nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", err.Error())
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	agentSessions = e.applySessionFilter(agentSessions, sessions, sessionKey)
 	dm := e.getDeleteModeState(sessionKey)
 	if dm == nil {
 		return e.simpleCard(e.i18n.T(MsgDeleteModeTitle), "red", e.i18n.T(MsgDeleteUsage))
@@ -13384,7 +13413,7 @@ func (e *Engine) submitDeleteModeSelection(sessionKey string, selectedIDs map[st
 	if err != nil {
 		return []string{e.i18n.Tf(MsgError, err)}
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	agentSessions = e.applySessionFilter(agentSessions, sessions, sessionKey)
 	seen := make(map[string]struct{}, len(agentSessions))
 	lines := make([]string, 0, len(selectedIDs))
 	for i := range agentSessions {
@@ -13596,7 +13625,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	agentSessions = e.applySessionFilter(agentSessions, sessions, sessionKey)
 	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
@@ -15952,7 +15981,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
 
 	prefix := strings.TrimSpace(args[0])
 	if isExplicitDeleteBatchArg(prefix) {
@@ -16803,6 +16832,26 @@ func extractWorkspaceChannelKey(sessionKey string) string {
 	return workspaceChannelKey(extractPlatformName(sessionKey), extractChannelID(sessionKey))
 }
 
+// extractWorkspaceChannelKey resolves the workspace binding key for a sessionKey,
+// asking the originating platform first when it can describe its own key layout.
+//
+// The generic parse cannot recover a per-thread scope: a Feishu thread session key
+// is "<platform>:<chatID>:root:<rootID>" and extractChannelID returns only the
+// chat ID, so every thread in one chat collapses onto the same binding key. Core
+// must not hardcode platform-private markers such as "root:", so platforms opt in
+// through ChannelScopedSessionKey.
+func (e *Engine) extractWorkspaceChannelKey(sessionKey string) string {
+	platformName := extractPlatformName(sessionKey)
+	if e != nil {
+		if scoped, ok := e.platformForName(platformName).(ChannelScopedSessionKey); ok {
+			if channelKey, ok := scoped.ChannelKeyFromSessionKey(sessionKey); ok && channelKey != "" {
+				return workspaceChannelKey(platformName, channelKey)
+			}
+		}
+	}
+	return workspaceChannelKey(platformName, extractChannelID(sessionKey))
+}
+
 // effectiveChannelID returns the channel identifier from a Message.
 // It prefers the platform-provided ChannelKey (e.g. "chatID:threadID" for forum topics)
 // and falls back to parsing the session key.
@@ -16814,11 +16863,11 @@ func effectiveChannelID(msg *Message) string {
 }
 
 // effectiveWorkspaceChannelKey returns the workspace binding key from a Message.
-func effectiveWorkspaceChannelKey(msg *Message) string {
+func (e *Engine) effectiveWorkspaceChannelKey(msg *Message) string {
 	if msg.ChannelKey != "" {
 		return workspaceChannelKey(msg.Platform, msg.ChannelKey)
 	}
-	return extractWorkspaceChannelKey(msg.SessionKey)
+	return e.extractWorkspaceChannelKey(msg.SessionKey)
 }
 
 // migrateLegacyWorkspaceBindings moves bindings from a platform-provided
@@ -16859,7 +16908,7 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
 	channelID := effectiveChannelID(msg)
-	channelKey := effectiveWorkspaceChannelKey(msg)
+	channelKey := e.effectiveWorkspaceChannelKey(msg)
 	if channelKey == "" || channelID == "" {
 		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
@@ -16888,9 +16937,19 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions
 	}
-	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+	if channelKey := e.extractWorkspaceChannelKey(sessionKey); channelKey != "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
+			workspace := normalizeWorkspacePath(b.Workspace)
+			// Resolve through workspaceContext so a /dir inside the topic is
+			// honoured: multi-workspace /dir records a per-interactive-key
+			// override (dirApply) rather than rebinding the channel, and only
+			// resolveChannelWorkDir applies it. Reading the binding directly
+			// would pin the topic to its workspace and silently drop the
+			// override, leaving /status and /dir disagreeing with the agent.
+			if wsAgent, wsSessions, _, _, err := e.workspaceContext(workspace, sessionKey); err == nil && wsAgent != nil {
+				return wsAgent, wsSessions
+			}
+			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
 				return wsAgent, wsSessions
 			}
 		}
@@ -17025,7 +17084,7 @@ func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
 	if _, ok := e.interactiveStates[sessionKey]; ok {
 		return sessionKey
 	}
-	if channelKey := extractWorkspaceChannelKey(sessionKey); channelKey != "" {
+	if channelKey := e.extractWorkspaceChannelKey(sessionKey); channelKey != "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 			return normalizeWorkspacePath(b.Workspace) + ":" + sessionKey
 		}
@@ -17180,7 +17239,7 @@ func (e *Engine) resolveWorkspace(p Platform, channelID string) (string, string,
 // handleWorkspaceInitFlow manages the conversational workspace setup.
 // Returns true if the message was consumed by the init flow.
 func (e *Engine) handleWorkspaceInitFlow(p Platform, msg *Message, channelName string) bool {
-	channelKey := effectiveWorkspaceChannelKey(msg)
+	channelKey := e.effectiveWorkspaceChannelKey(msg)
 
 	e.initFlowsMu.Lock()
 	flow, exists := e.initFlows[channelKey]

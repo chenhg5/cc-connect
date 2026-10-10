@@ -4604,6 +4604,33 @@ func isThreadSessionKey(sessionKey string) bool {
 	return ok
 }
 
+// ChannelKeyFromSessionKey implements core.ChannelScopedSessionKey.
+//
+// With thread_isolation enabled, makeSessionKey (feishu.go:4099) encodes an
+// isolated thread — a topic, or a group-chat thread — as
+// "feishu:<chatID>:root:<rootID>", while workspace bindings are keyed
+// "feishu:<chatID>:topic:<rootID>" (populateWorkspaceChannelKeys,
+// feishu.go:1270). Core's generic parse keeps only the chat ID, which would
+// collapse every thread in a chat onto one binding, so the layout is declared
+// here instead of being hardcoded in core.
+//
+// The returned value omits the platform name; core prepends it.
+func (p *Platform) ChannelKeyFromSessionKey(sessionKey string) (string, bool) {
+	if !p.threadIsolation {
+		return "", false
+	}
+	// Four segments: <platform>:<chatID>:root|thread:<rootID>.
+	parts := strings.SplitN(sessionKey, ":", 4)
+	if len(parts) != 4 || parts[0] != p.platformName || parts[1] == "" {
+		return "", false
+	}
+	rootID, ok := parseThreadRootID(parts[2] + ":" + parts[3])
+	if !ok {
+		return "", false
+	}
+	return parts[1] + ":topic:" + rootID, true
+}
+
 // feishuPreviewHandle stores the message ID for an editable preview message.
 // Card 2.0 path needs mu/status/lastContent to let SetPreviewStatus patch
 // the header color without re-rendering the whole card.
