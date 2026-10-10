@@ -42,7 +42,13 @@ type acpModesBlock struct {
 type acpInitializeResult struct {
 	ProtocolVersion   int `json:"protocolVersion"`
 	AgentCapabilities struct {
-		LoadSession         bool `json:"loadSession"`
+		LoadSession        bool `json:"loadSession"`
+		PromptCapabilities struct {
+			// The agent advertises inline image prompts here. ACP defines
+			// this as a required member of promptCapabilities, so a
+			// missing field means the agent did not claim image support.
+			Image bool `json:"image"`
+		} `json:"promptCapabilities"`
 		SessionCapabilities struct {
 			// ACP advertises capabilities as objects (possibly empty);
 			// treat "field present" as "supported" regardless of contents.

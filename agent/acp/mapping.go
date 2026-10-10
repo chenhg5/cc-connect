@@ -1,12 +1,31 @@
 package acp
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// maxToolResultImageBytes bounds one tool-result image. The ACP payload is
+// base64 inside JSON, so a malformed or unexpected blob must not be decoded
+// into memory without limit.
+const maxToolResultImageBytes = 32 << 20
+
+// acpContentBlock is an ACP content block. Vendor bridges (DeepSeek Harness
+// among them) wrap it once more as `{type:"content", content:{...}}`, so both
+// the text and the optional inline image live under the inner object.
+type acpContentBlock struct {
+	Type    string `json:"type"`
+	Content struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Data     string `json:"data"`
+		MimeType string `json:"mimeType"`
+	} `json:"content"`
+}
 
 // mapSessionUpdate turns one ACP session/update payload into zero or more core events.
 func mapSessionUpdate(sessionID string, params json.RawMessage) []core.Event {
@@ -146,16 +165,10 @@ func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
 
 func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 	var u struct {
-		Title      string `json:"title"`
-		ToolCallID string `json:"toolCallId"`
-		Status     string `json:"status"`
-		Content    []struct {
-			Type    string `json:"type"`
-			Content struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"content"`
+		Title      string            `json:"title"`
+		ToolCallID string            `json:"toolCallId"`
+		Status     string            `json:"status"`
+		Content    []acpContentBlock `json:"content"`
 	}
 	if err := json.Unmarshal(update, &u); err != nil {
 		return nil
@@ -172,7 +185,12 @@ func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 
 	switch {
 	case st == "completed" || st == "failed":
-		if body == "" && st == "completed" {
+		// A terminal update is the only point at which the image bytes are
+		// both present and final, so this is where they are carried out. The
+		// text may legitimately be empty (metadata-only result) and the image
+		// must still travel.
+		images := extractToolCallImages(u.Content)
+		if body == "" && st == "completed" && len(images) == 0 {
 			return nil
 		}
 		if st == "failed" && body == "" {
@@ -183,6 +201,7 @@ func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 			ToolName:  toolLabel,
 			Content:   truncateRunes(body, 800),
 			SessionID: sessionID,
+			Images:    images,
 		}}
 	case st == "in_progress" || st == "pending":
 		// Stream intermediate tool output to IM (ACP allows content while not terminal).
@@ -208,13 +227,7 @@ func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 	}
 }
 
-func extractToolCallContentText(blocks []struct {
-	Type    string `json:"type"`
-	Content struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
-}) string {
+func extractToolCallContentText(blocks []acpContentBlock) string {
 	var b strings.Builder
 	for _, c := range blocks {
 		if c.Content.Text != "" {
@@ -225,6 +238,42 @@ func extractToolCallContentText(blocks []struct {
 		}
 	}
 	return b.String()
+}
+
+// extractToolCallImages decodes image content carried inside a tool result.
+//
+// DeepSeek Harness commits a picture by putting its bytes in the tool result as
+// `{type:"content", content:{type:"image", data:<base64>, mimeType}}`. Nothing
+// downstream can render that from the text form, so an inline image block here
+// means "show the user this picture" and the bytes are carried out as-is.
+//
+// Admission does not depend on the tool name. A `tool_call_update` frame does
+// not necessarily repeat the tool's title — DeepSeek Harness omits it entirely —
+// so gating on a name silently dropped the image. The type/size/base64 checks
+// below are the real gate.
+func extractToolCallImages(blocks []acpContentBlock) []core.ImageAttachment {
+	var out []core.ImageAttachment
+	for _, c := range blocks {
+		if !strings.EqualFold(strings.TrimSpace(c.Content.Type), "image") {
+			continue
+		}
+		if !acpInlineImageMimeTypes[normalizeImageMimeType(c.Content.MimeType)] {
+			continue
+		}
+		if c.Content.Data == "" || len(c.Content.Data) > maxToolResultImageBytes {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(c.Content.Data)
+		if err != nil || len(raw) == 0 {
+			slog.Debug("acp: tool result image is not decodable base64", "error", err)
+			continue
+		}
+		out = append(out, core.ImageAttachment{
+			MimeType: normalizeImageMimeType(c.Content.MimeType),
+			Data:     raw,
+		})
+	}
+	return out
 }
 
 // mapSessionUpdateFallback handles unknown sessionUpdate values (vendor extensions

@@ -1233,6 +1233,144 @@ func TestCUJ_A3_ImageReachesAgent(t *testing.T) {
 	}
 }
 
+// cujImagePlatform records the images the USER receives, so a journey can
+// assert on them with the same discipline as p.getSent(). The engine calls
+// SendImage from its own goroutine, and stubPlatformEngine guards only its text
+// buffer, so the media buffer needs a mutex of its own under -race.
+type cujImagePlatform struct {
+	*stubPlatformEngine
+	mu     sync.Mutex
+	images []ImageAttachment
+}
+
+func (p *cujImagePlatform) SendImage(_ context.Context, _ any, img ImageAttachment) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.images = append(p.images, ImageAttachment{
+		MimeType: img.MimeType,
+		FileName: img.FileName,
+		Data:     append([]byte(nil), img.Data...),
+	})
+	return nil
+}
+
+func (p *cujImagePlatform) getImages() []ImageAttachment {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]ImageAttachment, len(p.images))
+	copy(out, p.images)
+	return out
+}
+
+// CUJ-A9 · A picture an agent produced *inside a tool result* reaches the user
+// on the ordinary conversation path (not only during /compress).
+//
+// SPOTLIGHT: an agent that renders an image — DeepSeek Harness's read_image
+// commits the bytes into the tool result — used to report success while the
+// user saw nothing but prose. Three actions pin the user-visible outcome:
+// a result with text and an image, a result with an image and no text at all
+// (the case a text gate silently drops), and a result with neither (which must
+// not invent a picture).
+func TestCUJ_A9_ToolResultImageReachesUser(t *testing.T) {
+	plat := &cujImagePlatform{stubPlatformEngine: &stubPlatformEngine{n: "test"}}
+	agent := &cujAgent{}
+	e := NewEngine("test", agent, []Platform{plat}, t.TempDir()+"/sessions.json", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+
+	send := func(text string) {
+		t.Helper()
+		e.ReceiveMessage(plat, &Message{
+			SessionKey: "test:ada", Platform: "test", MessageID: "msg-" + text,
+			UserID: "ada", UserName: "ada", Content: text, ReplyCtx: "ctx",
+		})
+	}
+	awaitImages := func(reason string, want int) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if len(plat.getImages()) >= want {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("%s: user received %d image(s), want %d", reason, len(plat.getImages()), want)
+	}
+	awaitReply := func(reason, want string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			for _, s := range plat.getSent() {
+				if strings.Contains(s, want) {
+					return
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("%s: user never saw %q (sent: %v)", reason, want, plat.getSent())
+	}
+	session := func() *cujAgentSession {
+		t.Helper()
+		agent.mu.Lock()
+		defer agent.mu.Unlock()
+		if len(agent.sessions) == 0 {
+			t.Fatal("agent session was never started")
+		}
+		return agent.sessions[0]
+	}
+
+	// User action 1: ask for a chart. The agent answers with a tool result that
+	// carries both prose and the picture.
+	first := []byte("\x89PNG\r\n\x1a\n first chart bytes")
+	agent.setNextSessionEvents([]Event{
+		{
+			Type: EventToolResult, ToolName: "read_image", Content: "<path>chart.png</path>",
+			Images: []ImageAttachment{{MimeType: "image/png", FileName: "chart.png", Data: first}},
+		},
+		{Type: EventResult, Content: "here is the chart", Done: true},
+	}, 0)
+	send("read the chart")
+	awaitImages("action 1", 1)
+	awaitReply("action 1", "here is the chart")
+
+	// User action 2: the agent renders another picture with no accompanying
+	// text. The bytes are the whole result, so a text gate would drop them.
+	second := []byte("\x89PNG\r\n\x1a\n second chart bytes")
+	sess := session()
+	sess.mu.Lock()
+	sess.pendingEvents = []Event{
+		{Type: EventToolResult, ToolName: "read_image", Images: []ImageAttachment{{MimeType: "image/png", FileName: "second.png", Data: second}}},
+		{Type: EventResult, Content: "second picture", Done: true},
+	}
+	sess.mu.Unlock()
+	send("and another")
+	awaitImages("action 2", 2)
+	awaitReply("action 2", "second picture")
+
+	// User action 3: a tool result with neither text nor image must not produce
+	// a phantom attachment.
+	sess.mu.Lock()
+	sess.pendingEvents = []Event{
+		{Type: EventToolResult, ToolName: "grep", Content: "3 matches"},
+		{Type: EventResult, Content: "no picture this time", Done: true},
+	}
+	sess.mu.Unlock()
+	send("now text only")
+	awaitReply("action 3", "no picture this time")
+
+	got := plat.getImages()
+	if len(got) != 2 {
+		t.Fatalf("user received %d images after three actions, want 2: %+v", len(got), got)
+	}
+	for i, want := range [][]byte{first, second} {
+		if !bytes.Equal(got[i].Data, want) {
+			t.Errorf("image %d bytes = %q, want %q", i+1, got[i].Data, want)
+		}
+		if got[i].MimeType != "image/png" {
+			t.Errorf("image %d mime = %q, want image/png", i+1, got[i].MimeType)
+		}
+	}
+}
+
 // CUJ-A4 · User sends voice → without STT configured, user gets a clear
 // "voice not enabled" message (the actual STT branch is covered by
 // platform-specific tests).

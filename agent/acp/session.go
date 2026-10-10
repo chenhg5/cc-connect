@@ -3,6 +3,7 @@ package acp
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,6 +52,12 @@ type acpSession struct {
 	modesMu        sync.RWMutex
 	availableModes []acpModeInfo
 	currentMode    string
+
+	// imagePromptsEnabled mirrors the server's advertised
+	// `agentCapabilities.promptCapabilities.image` from the initialize
+	// handshake. ACP only admits inline image blocks when the agent said
+	// it supports them, so Send must consult this rather than assume.
+	imagePromptsEnabled atomic.Bool
 
 	callbacks sessionCallbacks // may be nil (tests, integration harness)
 }
@@ -186,10 +193,13 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		return fmt.Errorf("acp: parse initialize result: %w", err)
 	}
 	listSupported := len(initOut.AgentCapabilities.SessionCapabilities.List) > 0
+	imagePrompts := initOut.AgentCapabilities.PromptCapabilities.Image
+	s.imagePromptsEnabled.Store(imagePrompts)
 	slog.Debug("acp: initialized",
 		"protocol", initOut.ProtocolVersion,
 		"load_session", initOut.AgentCapabilities.LoadSession,
 		"list_sessions", listSupported,
+		"image_prompts", imagePrompts,
 	)
 	if s.callbacks != nil {
 		s.callbacks.reportListSupported(listSupported)
@@ -597,8 +607,15 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 
 	filePaths := core.SaveFilesToDisk(s.workDir, messageID, files)
 	prompt = core.AppendFileRefs(prompt, filePaths)
-	if len(images) > 0 {
-		prompt = s.appendImageRefs(prompt, images)
+
+	// ACP agents that advertise `promptCapabilities.image` want the picture
+	// itself, as an inline base64 image block. Falling back to "here is a
+	// path on disk" throws away the pixel data: the model then has to shell
+	// out to read the file, which costs a tool round-trip and loses detail.
+	// Agents that do not advertise it keep the old path-based behaviour.
+	inlineImages, leftover := splitInlineImages(images, s.imagePromptsEnabled.Load())
+	if len(leftover) > 0 {
+		prompt = s.appendImageRefs(prompt, leftover)
 	}
 
 	sid := s.currentACPSessionID()
@@ -606,15 +623,37 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 		return fmt.Errorf("acp: no agent session id")
 	}
 
-	promptBlocks := []any{
-		map[string]any{"type": "text", "text": prompt},
+	promptBlocks := make([]any, 0, 1+len(inlineImages))
+	if prompt != "" {
+		promptBlocks = append(promptBlocks, map[string]any{"type": "text", "text": prompt})
+	}
+	for _, img := range inlineImages {
+		promptBlocks = append(promptBlocks, map[string]any{
+			"type": "image",
+			// Send the normalized mimeType, not the raw one: the transport
+			// validated the normalized form, and agents (including DeepSeek
+			// Harness) reject a block whose mimeType is not exactly one of
+			// the lowercase canonicals.
+			"mimeType": normalizeImageMimeType(img.MimeType),
+			"data":     base64.StdEncoding.EncodeToString(img.Data),
+		})
+	}
+	// ACP rejects a prompt whose content is empty; "User sent image(s)." is
+	// the same placeholder the path-based fallback uses.
+	if len(promptBlocks) == 0 {
+		promptBlocks = append(promptBlocks, map[string]any{"type": "text", "text": "User sent image(s)."})
 	}
 	params := map[string]any{
 		"sessionId": sid,
 		"prompt":    promptBlocks,
 	}
 
-	slog.Debug("acp: sending session/prompt", "session_id", sid, "prompt_len", len(prompt))
+	slog.Debug("acp: sending session/prompt",
+		"session_id", sid,
+		"prompt_len", len(prompt),
+		"inline_images", len(inlineImages),
+		"path_images", len(leftover),
+	)
 	res, err := s.tr.call(s.ctx, "session/prompt", params)
 	if err != nil {
 		s.emit(core.Event{Type: core.EventError, Error: err})
@@ -629,6 +668,47 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 		Done:      true,
 	})
 	return nil
+}
+
+// acpInlineImageMimeTypes are the raster types the ACP image block accepts.
+// Any image outside this set is handed to the agent as a path instead, since
+// sending a mimeType the agent cannot decode would fail the whole prompt.
+var acpInlineImageMimeTypes = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/webp": true,
+	"image/gif":  true,
+}
+
+// normalizeImageMimeType is the single narrowing applied before an image is
+// either validated or put on the wire. Sending the raw value while validating
+// the normalized one would let `IMAGE/PNG` through validation and then fail
+// the whole prompt at the agent, so both sides must use this.
+func normalizeImageMimeType(mimeType string) string {
+	return strings.ToLower(strings.TrimSpace(mimeType))
+}
+
+// splitInlineImages partitions user images into those that can travel as ACP
+// image blocks and those that must fall back to a file path.
+//
+// The ACP image block requires an explicit, decodable mimeType and non-empty
+// canonical base64 data, so an image we cannot describe is downgraded rather
+// than risk rejecting the entire prompt set.
+func splitInlineImages(images []core.ImageAttachment, enabled bool) (inline, fallback []core.ImageAttachment) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+	if !enabled {
+		return nil, images
+	}
+	for _, img := range images {
+		if acpInlineImageMimeTypes[normalizeImageMimeType(img.MimeType)] && len(img.Data) > 0 {
+			inline = append(inline, img)
+		} else {
+			fallback = append(fallback, img)
+		}
+	}
+	return inline, fallback
 }
 
 func (s *acpSession) appendImageRefs(prompt string, images []core.ImageAttachment) string {
