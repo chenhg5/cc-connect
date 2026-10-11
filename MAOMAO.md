@@ -30,8 +30,17 @@ for @-mentions in `group_reply_all` guilds.
 ## Example gate
 
 `contrib/gate/gate.py` (macOS / Apple Silicon, `uv run contrib/gate/gate.py`): deterministic rules first
-(@-mention, questions, pure acknowledgements, link bursts), then a local Qwen3.5-4B (MLX) reads the
-probabilities of three options (~30 ms). Every decision is logged as JSONL for tuning.
+(@-mention, @-ing someone else, questions, pure acknowledgements, link bursts), then a local Qwen3.5-4B (MLX)
+reads the probabilities of three options (~30 ms on M5 Max). Every decision is logged as JSONL for tuning
+(`GATE_LOG`, default `~/.cc-connect/gate.jsonl`); model decisions also log `option_mass` (how much of the
+full-vocabulary probability lands on A/B/C — ~0.9 normally, low means the prompt is off) and raw `logprobs`.
+Model: `GATE_MODEL` (HF repo id or local path).
+
+The model part lives in `contrib/gate/scorer.py`: a fixed prefix + variable input, one forward pass, read
+single-token options. The prefix's KV / linear-attention state is computed once and copied per call, so
+only the ~40-token suffix is recomputed (Qwen3.5's linear-attention state can't be trimmed, so this
+"continue from a saved point" is the only way to reuse it). Tests: `uv run contrib/gate/test_scorer.py`
+(cached vs. full recompute, cache not polluted across inputs, option/length validation).
 
 ## Build
 
