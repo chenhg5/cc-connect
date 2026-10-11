@@ -494,6 +494,9 @@ type ProjectConfig struct {
 	GateURL string `toml:"gate_url,omitempty"`
 	// GateTimeoutMs bounds the gate call; on timeout or error the message is replied to.
 	GateTimeoutMs int `toml:"gate_timeout_ms,omitempty"`
+	// GateFallback is the action used when the gate errors or times out (default "reply";
+	// sub agents that only speak when @-ed should use "context").
+	GateFallback string `toml:"gate_fallback,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who

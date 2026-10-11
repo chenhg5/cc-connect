@@ -7,9 +7,11 @@ package core
 //   - "insert": supplementary info. Busy → written straight into the running turn (mid-turn
 //               injection, like typing while Claude Code works). Idle → sent as a turn that may
 //               answer NO_REPLY.
+//   - "context": like silent, but attachments don't force a turn (they are noted as text). For
+//               sub agents that hear every message but only speak when @-ed (main + subs setup).
 //   - "reply":  the user wants an answer. Busy → also injected into the running turn, whose
 //               final reply then covers it. Idle → normal turn.
-// Any gate error or timeout falls back to "reply", so the bot never goes deaf.
+// Any gate error or timeout falls back to gate_fallback (default "reply", so the bot never goes deaf).
 
 import (
 	"bytes"
@@ -28,6 +30,8 @@ const insertNote = "（以下是补充信息，不是提问。若它不改变你
 type gateState struct {
 	url      string
 	timeout  time.Duration
+	fallback string // action on gate error/timeout
+	inject   bool   // agent folds mid-turn input into the running turn (claudecode only)
 	mu       sync.Mutex
 	buf      map[string][]string // interactiveKey → silent messages not yet delivered
 	held     map[string]*heldMsg // interactiveKey → burst being collected while idle
@@ -38,6 +42,9 @@ type gateState struct {
 // and people often send a few lines in a row. When idle, a message is held burstWindow
 // (attachment-only: attachmentHold) and anything arriving meanwhile joins it, so a burst
 // becomes one turn instead of a turn plus an injection that ends up answered twice.
+// maxBuffered caps the silent buffer; subs hear every message and may stay quiet for a long time.
+const maxBuffered = 30
+
 const (
 	burstWindow    = 1500 * time.Millisecond
 	attachmentHold = 3 * time.Second
@@ -63,8 +70,9 @@ type gateResponse struct {
 	Reason string `json:"reason"`
 }
 
-// SetGate enables the gate; an empty url disables it.
-func (e *Engine) SetGate(url string, timeoutMs int) {
+// SetGate enables the gate; an empty url disables it. fallback is the action used when the gate
+// errors or times out ("" = "reply").
+func (e *Engine) SetGate(url string, timeoutMs int, fallback string) {
 	if url == "" {
 		e.gate = nil
 		return
@@ -72,8 +80,17 @@ func (e *Engine) SetGate(url string, timeoutMs int) {
 	if timeoutMs <= 0 {
 		timeoutMs = 3000
 	}
-	e.gate = &gateState{url: url, timeout: time.Duration(timeoutMs) * time.Millisecond, buf: map[string][]string{}, held: map[string]*heldMsg{}, released: map[*Message]bool{}}
-	slog.Info("gate enabled", "url", url, "timeout_ms", timeoutMs)
+	switch fallback {
+	case "reply", "insert", "silent", "context":
+	default:
+		fallback = "reply"
+	}
+	// Only Claude Code merges stdin input into the running turn; codex exec would start a second
+	// process, so other agents get busy inserts as a queued turn instead.
+	inject := e.agent != nil && e.agent.Name() == "claudecode"
+	e.gate = &gateState{url: url, timeout: time.Duration(timeoutMs) * time.Millisecond, fallback: fallback, inject: inject,
+		buf: map[string][]string{}, held: map[string]*heldMsg{}, released: map[*Message]bool{}}
+	slog.Info("gate enabled", "url", url, "timeout_ms", timeoutMs, "fallback", fallback, "mid_turn_inject", inject)
 }
 
 func (g *gateState) decide(ctx context.Context, req gateRequest) gateResponse {
@@ -82,23 +99,23 @@ func (g *gateState) decide(ctx context.Context, req gateRequest) gateResponse {
 	defer cancel()
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, g.url, bytes.NewReader(body))
 	if err != nil {
-		return gateResponse{Action: "reply", Reason: "gate request: " + err.Error()}
+		return gateResponse{Action: g.fallback, Reason: "gate request: " + err.Error()}
 	}
 	hreq.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(hreq)
 	if err != nil {
-		return gateResponse{Action: "reply", Reason: "gate unreachable: " + err.Error()}
+		return gateResponse{Action: g.fallback, Reason: "gate unreachable: " + err.Error()}
 	}
 	defer resp.Body.Close()
 	var out gateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusOK {
-		return gateResponse{Action: "reply", Reason: fmt.Sprintf("gate bad response: %d %v", resp.StatusCode, err)}
+		return gateResponse{Action: g.fallback, Reason: fmt.Sprintf("gate bad response: %d %v", resp.StatusCode, err)}
 	}
 	switch out.Action {
-	case "reply", "insert", "silent":
+	case "reply", "insert", "silent", "context":
 		return out
 	}
-	return gateResponse{Action: "reply", Reason: "gate unknown action " + out.Action}
+	return gateResponse{Action: g.fallback, Reason: "gate unknown action " + out.Action}
 }
 
 // applyGate runs the gate for msg. It returns true when the message has been fully handled
@@ -154,9 +171,19 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	if dec.Action == "silent" && (len(msg.Images) > 0 || len(msg.Files) > 0) {
 		dec.Action = "insert"
 	}
+	if dec.Action == "context" {
+		dec.Action = "silent"
+		if n := len(msg.Images) + len(msg.Files); n > 0 {
+			msg.Content = strings.TrimSpace(msg.Content + fmt.Sprintf("（附了 %d 个图片/文件）", n))
+		}
+	}
 	if dec.Action == "silent" {
 		g.mu.Lock()
-		g.buf[interactiveKey] = append(g.buf[interactiveKey], msg.Content)
+		b := append(g.buf[interactiveKey], msg.Content)
+		if len(b) > maxBuffered {
+			b = b[len(b)-maxBuffered:]
+		}
+		g.buf[interactiveKey] = b
 		g.mu.Unlock()
 		return true
 	}
@@ -170,7 +197,7 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	if strings.TrimSpace(inject) == "" {
 		inject = "（补充附件，和刚才的消息是一起发的）"
 	}
-	if busy && e.injectIntoRunningTurn(interactiveKey, inject, msg.Images, msg.Files) {
+	if busy && g.inject && e.injectIntoRunningTurn(interactiveKey, inject, msg.Images, msg.Files) {
 		g.mu.Lock()
 		g.buf[interactiveKey] = g.buf[interactiveKey][len(buffered):]
 		g.mu.Unlock()
