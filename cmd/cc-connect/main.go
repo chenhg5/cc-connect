@@ -705,6 +705,7 @@ func main() {
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
 		}
 		engine.SetGate(proj.GateURL, proj.GateTimeoutMs, proj.GateFallback)
+		engine.SetTeam(proj.TeamStatusDir, proj.TeamName, proj.TeamStatusInject)
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 		engine.SetResetOnIdle(resetIdle)
 		if defaulted {
@@ -1788,6 +1789,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
 	engine.SetGate(proj.GateURL, proj.GateTimeoutMs, proj.GateFallback)
+	engine.SetTeam(proj.TeamStatusDir, proj.TeamName, proj.TeamStatusInject)
 	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 	engine.SetResetOnIdle(resetIdle)
 	if defaulted {

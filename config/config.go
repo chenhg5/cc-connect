@@ -497,6 +497,13 @@ type ProjectConfig struct {
 	// GateFallback is the action used when the gate errors or times out (default "reply";
 	// sub agents that only speak when @-ed should use "context").
 	GateFallback string `toml:"gate_fallback,omitempty"`
+	// TeamStatusDir (maomao fork): write this project's busy/idle sessions to <dir>/<project>.json
+	// so teammates can see them. Empty disables the status board.
+	TeamStatusDir string `toml:"team_status_dir,omitempty"`
+	// TeamName is this project's display name in the team status (default: project name).
+	TeamName string `toml:"team_name,omitempty"`
+	// TeamStatusInject prepends the other projects' status to each turn (for the main bot).
+	TeamStatusInject bool `toml:"team_status_inject,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who

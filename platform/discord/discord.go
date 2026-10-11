@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -630,6 +631,9 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			slog.Debug("discord: message from unauthorized user", "user", m.Author.ID)
 			return
 		}
+		if !fromBot {
+			resetBotHops(m.ChannelID) // a person spoke: bots may hand off again
+		}
 
 		// In guild channels, only respond when the bot is @mentioned (unless group_reply_all).
 		// Check both user mentions and role mentions (Discord auto-creates a managed role
@@ -640,10 +644,15 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			botRoleID = p.botRoleIDForGuild(m.GuildID)
 		}
 		mentioned := isDiscordBotMention(m, p.botID, botRoleID, p.respondToAtEveryoneAndHere)
-		// Only an explicit <@me> in the text counts; reply pings ("↪ 已插入" quoting a message)
-		// and role/everyone mentions from bots are ignored.
-		if fromBot && !strings.Contains(m.Content, "<@"+p.botID+">") && !strings.Contains(m.Content, "<@!"+p.botID+">") {
-			return
+		if fromBot {
+			// Only an explicit <@me> in the text counts; reply pings ("↪ 已插入" quoting a message)
+			// and role/everyone mentions from bots are ignored. Everything else a teammate says
+			// arrives as listen-only context (core never starts a turn from it).
+			mentioned = strings.Contains(m.Content, "<@"+p.botID+">") || strings.Contains(m.Content, "<@!"+p.botID+">")
+			if isBotNotice(m.Content) {
+				return
+			}
+			m.ReferencedMessage = nil // its quote is already in the channel history
 		}
 		if mentioned && m.GuildID != "" && p.isGroupReplyAllGuild(m.GuildID) {
 			m.Content = stripDiscordMentionWithRole(m.Content, p.botID, botRoleID)
@@ -687,9 +696,6 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			return
 		}
 
-		// maomao fork: a bot (橘) handing off doesn't carry the user's images; pick up the
-		// images people posted in this channel in the last few minutes so this bot sees them too.
-
 		// Prepend the replied-to message's content and images so the agent has context.
 		if m.ReferencedMessage != nil {
 			m.Content, images = applyReferencedMessage(m.ReferencedMessage, m.Content, images, downloadURL)
@@ -701,10 +707,11 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
 			Content: m.Content, Images: images, Files: files, Audio: audio, ReplyCtx: rctx,
-			Mentioned: mentioned,
+			Mentioned: mentioned, FromBot: fromBot,
 		}
 		msg.ChatName, _ = p.ResolveChannelName(m.ChannelID)
 		if fromBot {
+			msg.Content = "【" + discordDisplayName(m) + "】" + cleanBotText(m.Content, m.Mentions)
 			p.holdBotMessage(s, m, msg, downloadURL)
 			return
 		}
@@ -1629,6 +1636,7 @@ func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCrea
 		b.parts = append(b.parts, msg.Content)
 		b.msg.Images = append(b.msg.Images, msg.Images...)
 		b.msg.ReplyCtx = msg.ReplyCtx
+		b.msg.Mentioned = b.msg.Mentioned || msg.Mentioned
 		b.timer.Reset(botBurstWindow)
 		return
 	}
@@ -1648,9 +1656,85 @@ func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCrea
 			return
 		}
 		b.msg.Content = strings.Join(kept, "\n\n")
-		// The sender's text doesn't carry the user's images; pick up the recent ones.
-		b.msg.Images = append(recentHumanImages(s, b.first, download), b.msg.Images...)
+		if b.msg.Mentioned && !takeBotHop(m.ChannelID) {
+			slog.Info("discord: bot handoff limit reached, delivering as context", "channel", m.ChannelID, "from", m.Author.ID)
+			b.msg.Mentioned = false
+		}
+		if b.msg.Mentioned {
+			// The sender's text doesn't carry the user's images; pick up the recent ones.
+			b.msg.Images = append(recentHumanImages(s, b.first, download), b.msg.Images...)
+		}
 		p.dispatchMessage(b.msg)
 	})
 	p.botBursts[key] = b
+}
+
+// maxBotHops caps bot→bot @-handoffs in one channel between two human messages (maomao fork).
+// Beyond it a bot's @ is delivered as context only, so two bots can't @ each other forever.
+// Shared by every bot (Platform) in this process.
+const maxBotHops = 3
+
+var (
+	botHopsMu sync.Mutex
+	botHops   = map[string]int{} // channelID → handoffs since the last human message
+)
+
+func resetBotHops(channelID string) {
+	botHopsMu.Lock()
+	delete(botHops, channelID)
+	botHopsMu.Unlock()
+}
+
+// takeBotHop counts one handoff in channelID; false when the limit is already used up.
+func takeBotHop(channelID string) bool {
+	botHopsMu.Lock()
+	defer botHopsMu.Unlock()
+	if botHops[channelID] >= maxBotHops {
+		return false
+	}
+	botHops[channelID]++
+	return true
+}
+
+// isBotNotice reports cc-connect's own status lines (queue notices, session/errors, insert
+// acks) that carry nothing a teammate should read.
+func isBotNotice(content string) bool {
+	c := strings.TrimSpace(content)
+	for _, prefix := range []string{"📬", "✅", "❌", "↪", "⏳", "⚠️", "🔄", "⏹"} {
+		if strings.HasPrefix(c, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// botFooter matches the model/usage footer cc-connect appends ("*model · ... ~/dir*").
+var botFooter = regexp.MustCompile(`(?s)\n+\*[^*\n]*·[^*]*\*\s*$`)
+
+// cleanBotText strips the usage footer and turns <@id> into @name so a teammate's message reads
+// like chat.
+func cleanBotText(content string, mentions []*discordgo.User) string {
+	content = botFooter.ReplaceAllString(content, "")
+	for _, u := range mentions {
+		if u == nil {
+			continue
+		}
+		name := u.GlobalName
+		if name == "" {
+			name = u.Username
+		}
+		content = strings.ReplaceAll(content, "<@"+u.ID+">", "@"+name)
+		content = strings.ReplaceAll(content, "<@!"+u.ID+">", "@"+name)
+	}
+	return strings.TrimSpace(content)
+}
+
+func discordDisplayName(m *discordgo.MessageCreate) string {
+	if m.Member != nil && m.Member.Nick != "" {
+		return m.Member.Nick
+	}
+	if m.Author.GlobalName != "" {
+		return m.Author.GlobalName
+	}
+	return m.Author.Username
 }

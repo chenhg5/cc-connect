@@ -123,7 +123,19 @@ func (g *gateState) decide(ctx context.Context, req gateRequest) gateResponse {
 // rewritten msg.Content (buffered context prepended, insert note) for the normal turn.
 func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interactiveKey string) bool {
 	g := e.gate
+	if msg.FromBot && !msg.Mentioned {
+		// A teammate talking to someone else: only listen. Never start a turn from it, gate or
+		// not, so bots can't chain each other into a loop.
+		if g != nil {
+			g.bufferContext(interactiveKey, msg)
+		}
+		slog.Info("gate: teammate context", "session", msg.SessionKey, "from", msg.UserName, "len", len(msg.Content))
+		return true
+	}
 	if g == nil || msg.IsPermissionResponse {
+		if !msg.IsPermissionResponse {
+			e.teamNoteTurn(msg, session)
+		}
 		return false
 	}
 	busy := session.Busy()
@@ -172,21 +184,14 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		dec.Action = "insert"
 	}
 	if dec.Action == "context" {
-		dec.Action = "silent"
-		if n := len(msg.Images) + len(msg.Files); n > 0 {
-			msg.Content = strings.TrimSpace(msg.Content + fmt.Sprintf("（附了 %d 个图片/文件）", n))
-		}
-	}
-	if dec.Action == "silent" {
-		g.mu.Lock()
-		b := append(g.buf[interactiveKey], msg.Content)
-		if len(b) > maxBuffered {
-			b = b[len(b)-maxBuffered:]
-		}
-		g.buf[interactiveKey] = b
-		g.mu.Unlock()
+		g.bufferContext(interactiveKey, msg)
 		return true
 	}
+	if dec.Action == "silent" {
+		g.buffer(interactiveKey, msg.Content)
+		return true
+	}
+	e.teamNoteTurn(msg, session)
 
 	content := msg.Content
 	if len(buffered) > 0 {
@@ -211,8 +216,33 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	if dec.Action == "insert" {
 		content = insertNote + "\n" + content
 	}
+	if sum := e.teamSummary(msg.SessionKey); sum != "" {
+		content = sum + "\n\n" + content
+	}
 	msg.Content = content
 	return false
+}
+
+// buffer keeps text for the next turn of interactiveKey (capped at maxBuffered).
+func (g *gateState) buffer(interactiveKey, text string) {
+	g.mu.Lock()
+	b := append(g.buf[interactiveKey], text)
+	if len(b) > maxBuffered {
+		b = b[len(b)-maxBuffered:]
+	}
+	g.buf[interactiveKey] = b
+	g.mu.Unlock()
+}
+
+// bufferContext buffers msg as listen-only context; attachments become a note.
+func (g *gateState) bufferContext(interactiveKey string, msg *Message) {
+	text := msg.Content
+	if n := len(msg.Images) + len(msg.Files); n > 0 {
+		text = strings.TrimSpace(text + fmt.Sprintf("（附了 %d 个图片/文件）", n))
+	}
+	if text != "" {
+		g.buffer(interactiveKey, text)
+	}
 }
 
 // injectIntoRunningTurn writes text (and any attachments) to the live agent's stdin while a

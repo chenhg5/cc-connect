@@ -411,6 +411,7 @@ type Engine struct {
 	agentSessionIdleSeq          atomic.Uint64
 	maxQueuedMessages            int
 	gate                         *gateState // maomao fork: fast-brain gate (nil = off)
+	team                         *teamState // maomao fork: team status board (nil = off)
 	dirHistory                   *DirHistory
 	baseWorkDir                  string
 	projectState                 *ProjectStateStore

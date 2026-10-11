@@ -1777,3 +1777,41 @@ func basePlatformFor(t *testing.T, pAny core.Platform) *Platform {
 	}
 }
 
+func TestBotHopsLimitAndReset(t *testing.T) {
+	ch := "hops-test"
+	resetBotHops(ch)
+	for i := 0; i < maxBotHops; i++ {
+		if !takeBotHop(ch) {
+			t.Fatalf("hop %d should be allowed", i+1)
+		}
+	}
+	if takeBotHop(ch) {
+		t.Fatal("hop beyond the limit should be refused")
+	}
+	if !takeBotHop("other-channel") {
+		t.Fatal("limit is per channel")
+	}
+	resetBotHops(ch)
+	if !takeBotHop(ch) {
+		t.Fatal("a human message should reset the count")
+	}
+}
+
+func TestCleanBotTextAndNotices(t *testing.T) {
+	in := "好了 <@1472561359660253256> 你来\n\n*gpt-6.1-sol · high · 剩余 99% · ~/im-bridge/longniang*"
+	got := cleanBotText(in, []*discordgo.User{{ID: "1472561359660253256", Username: "龙娘"}})
+	if got != "好了 @龙娘 你来" {
+		t.Fatalf("got %q", got)
+	}
+	if cleanBotText("*强调* 一下", nil) != "*强调* 一下" {
+		t.Fatal("inline emphasis is not a footer")
+	}
+	for _, n := range []string{"📬 消息已收到，将在当前任务完成后处理。", "✅ 新会话已创建", "❌ 错误: x", "↪ 已插入"} {
+		if !isBotNotice(n) {
+			t.Errorf("%q should be a notice", n)
+		}
+	}
+	if isBotNotice("本龙在呢") {
+		t.Error("chat is not a notice")
+	}
+}
