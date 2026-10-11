@@ -5068,8 +5068,13 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					fullResponse = strings.Join(textParts, "")
 				}
 
-				if fullResponse != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
+				// Honour the agent's silent-reply marker here too. The foreground
+				// turn path strips NO_REPLY before delivering; this background path
+				// relayed the raw response instead, so a turn that resolved to a bare
+				// marker reached the chat as a literal "NO_REPLY" message.
+				relayText := unsolicitedRelayText(fullResponse, textParts)
+				if relayText != "" {
+					for _, chunk := range SplitMessageCodeFenceAware(relayText, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
 				}
@@ -5109,7 +5114,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 				slog.Info("unsolicited turn complete",
 					"session", sessionKey,
-					"response_len", len(fullResponse))
+					"response_len", len(fullResponse),
+					"silent", fullResponse != "" && relayText == "")
 
 			case EventPermissionRequest:
 				// If approveAll (/yolo) is set, grant the request. Otherwise
@@ -17483,6 +17489,27 @@ func stripTrailingSilent(text string) (string, bool) {
 		return text, false
 	}
 	return strings.TrimRight(stripped, " \t\r\n"), true
+}
+
+// unsolicitedRelayText returns the text a background (unsolicited) turn should
+// relay, applying the same NO_REPLY semantics as the foreground turn path: a bare
+// marker suppresses the send entirely, and a trailing marker is stripped off an
+// otherwise-visible response. The reader never streams EventText chunks, so when
+// the response resolves to a bare marker but the turn did emit visible chunks
+// before it (the dominant shape for agents that put the marker in the result
+// alone), those chunks are relayed rather than dropped.
+func unsolicitedRelayText(result string, textParts []string) string {
+	text := result
+	if isSilentReply(text) {
+		text = strings.Join(textParts, "")
+		if isSilentReply(text) {
+			return ""
+		}
+	}
+	if stripped, ok := stripTrailingSilent(text); ok {
+		text = stripped
+	}
+	return strings.TrimSpace(text)
 }
 
 // couldBeSilentPrefix reports whether the trimmed text is still a case-insensitive

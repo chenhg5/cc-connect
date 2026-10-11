@@ -14323,6 +14323,114 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	}
 }
 
+// TestUnsolicitedReader_SuppressesSilentReply verifies that a background turn
+// resolving to the agent's silent-reply marker stays silent on the platform. The
+// foreground turn path strips NO_REPLY, but this reader used to relay the raw
+// response, so a bare marker arrived in the chat as a literal "NO_REPLY" message.
+func TestUnsolicitedReader_SuppressesSilentReply(t *testing.T) {
+	cases := []struct {
+		name      string
+		textParts []string
+		result    string
+		wantSent  string // "" means nothing may be relayed
+		wantHist  string // history keeps the original response, marker included
+	}{
+		{
+			name:     "bare marker",
+			result:   "NO_REPLY",
+			wantSent: "",
+			wantHist: "NO_REPLY",
+		},
+		{
+			name:     "bare marker with surrounding whitespace",
+			result:   "  \nNO_REPLY\n",
+			wantSent: "",
+			wantHist: "  \nNO_REPLY\n",
+		},
+		{
+			name:      "marker in the result alone, text already emitted as chunks",
+			textParts: []string{"Chrome 在 9223 上起来了，", "改前那版正在编译。\n"},
+			result:    "NO_REPLY",
+			wantSent:  "Chrome 在 9223 上起来了，改前那版正在编译。",
+			wantHist:  "NO_REPLY",
+		},
+		{
+			name:      "marker in the chunks alone",
+			textParts: []string{"NO_REPLY"},
+			result:    "",
+			wantSent:  "",
+			wantHist:  "NO_REPLY",
+		},
+		{
+			name:     "trailing marker keeps the content",
+			result:   "仓库状态看完了，工作区干净。\nNO_REPLY",
+			wantSent: "仓库状态看完了，工作区干净。",
+			wantHist: "仓库状态看完了，工作区干净。\nNO_REPLY",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			sess := newControllableSession("unsol-silent")
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			defer func() { _ = e.Stop() }()
+
+			sessions := e.sessions
+			session := sessions.GetOrCreateActive("test:ch1:u1")
+
+			state := &interactiveState{
+				agentSession: sess,
+				platform:     p,
+				replyCtx:     "ctx",
+			}
+			iKey := "test:ch1:u1"
+			e.interactiveMu.Lock()
+			e.interactiveStates[iKey] = state
+			e.interactiveMu.Unlock()
+
+			e.startUnsolicitedReader(state, session, sessions, iKey, "")
+			defer e.stopUnsolicitedReader(state)
+
+			for _, part := range tc.textParts {
+				sess.events <- Event{Type: EventText, Content: part}
+			}
+			sess.events <- Event{Type: EventResult, Content: tc.result, Done: true}
+
+			if tc.wantSent == "" {
+				// The reader relays as soon as it sees EventResult, so an empty
+				// platform after a grace period means the send was suppressed.
+				if sent := waitForPlatformSend(p, 1, 500*time.Millisecond); len(sent) != 0 {
+					t.Fatalf("silent background turn relayed to platform: %v", sent)
+				}
+			} else {
+				sent := waitForPlatformSend(p, 1, 5*time.Second)
+				if len(sent) == 0 {
+					t.Fatalf("expected %q relayed to platform, got nothing", tc.wantSent)
+				}
+				if !strings.Contains(sent[0], tc.wantSent) {
+					t.Errorf("relayed %q, want it to contain %q", sent[0], tc.wantSent)
+				}
+				for _, s := range sent {
+					if strings.Contains(s, "NO_REPLY") {
+						t.Errorf("relayed text still carries the marker: %q", s)
+					}
+				}
+			}
+
+			// History keeps the original response so the agent retains context of
+			// its own silent-reply decision, matching the foreground turn path.
+			hist := session.GetHistory(1)
+			if len(hist) != 1 {
+				t.Fatalf("expected 1 history entry, got %d", len(hist))
+			}
+			if hist[0].Content != tc.wantHist {
+				t.Errorf("history recorded %q, want the original %q", hist[0].Content, tc.wantHist)
+			}
+		})
+	}
+}
+
 // TestUnsolicitedReader_ResetsIdleCloseOnEventResult verifies the P1-C P1-1
 // fix: an unsolicited EventResult must re-arm the per-session idle close
 // timer. Before the fix, the idle timer was only scheduled at the end of
