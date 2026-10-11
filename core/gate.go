@@ -30,6 +30,17 @@ type gateState struct {
 	timeout time.Duration
 	mu      sync.Mutex
 	buf     map[string][]string // interactiveKey → silent messages not yet delivered
+	held    map[string]*heldMsg // interactiveKey → attachment-only message waiting for its text
+}
+
+// Discord (and most IM clients) send "image + caption" as two messages a few hundred ms
+// apart. An attachment-only message is held this long so the caption that follows joins it
+// in one turn, instead of starting a turn on a bare image and injecting the question later.
+const attachmentHold = 3 * time.Second
+
+type heldMsg struct {
+	msg   *Message
+	timer *time.Timer
 }
 
 type gateRequest struct {
@@ -56,7 +67,7 @@ func (e *Engine) SetGate(url string, timeoutMs int) {
 	if timeoutMs <= 0 {
 		timeoutMs = 3000
 	}
-	e.gate = &gateState{url: url, timeout: time.Duration(timeoutMs) * time.Millisecond, buf: map[string][]string{}}
+	e.gate = &gateState{url: url, timeout: time.Duration(timeoutMs) * time.Millisecond, buf: map[string][]string{}, held: map[string]*heldMsg{}}
 	slog.Info("gate enabled", "url", url, "timeout_ms", timeoutMs)
 }
 
@@ -94,7 +105,31 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		return false
 	}
 	busy := session.Busy()
+
 	g.mu.Lock()
+	if h := g.held[interactiveKey]; h != nil && h.msg != msg {
+		// A message arrived while an attachment waits: merge the attachments into it.
+		h.timer.Stop()
+		delete(g.held, interactiveKey)
+		msg.Images = append(h.msg.Images, msg.Images...)
+		msg.Files = append(h.msg.Files, msg.Files...)
+	} else if h == nil && !busy && strings.TrimSpace(msg.Content) == "" && (len(msg.Images) > 0 || len(msg.Files) > 0) {
+		h := &heldMsg{msg: msg}
+		h.timer = time.AfterFunc(attachmentHold, func() {
+			g.mu.Lock()
+			still := g.held[interactiveKey] == h
+			g.mu.Unlock()
+			if still {
+				e.handleMessage(p, msg) // nothing followed: process the attachment alone
+			}
+		})
+		g.held[interactiveKey] = h
+		g.mu.Unlock()
+		slog.Info("gate: holding attachment for its caption", "session", msg.SessionKey)
+		return true
+	} else if h != nil {
+		delete(g.held, interactiveKey) // timer re-dispatch of the held message itself
+	}
 	buffered := append([]string(nil), g.buf[interactiveKey]...)
 	g.mu.Unlock()
 
