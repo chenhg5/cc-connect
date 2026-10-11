@@ -47,6 +47,7 @@ type progressPlatform struct {
 type Platform struct {
 	token                      string
 	allowFrom                  string
+	allowBots                  string // maomao fork: bot user IDs whose @-mentions of this bot are accepted
 	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
 	progressStyle              string
 	groupReplyAllGuilds        []string // guild IDs where groupReplyAll is active; "*" = all guilds
@@ -83,6 +84,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		return nil, fmt.Errorf("discord: token is required")
 	}
 	allowFrom, _ := opts["allow_from"].(string)
+	allowBots, _ := opts["allow_bots"].(string)
 	core.CheckAllowFrom("discord", allowFrom)
 	guildID, _ := opts["guild_id"].(string)
 	var groupReplyAllGuilds []string
@@ -131,6 +133,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	base := &Platform{
 		token:                      token,
 		allowFrom:                  allowFrom,
+		allowBots:                  allowBots,
 		guildID:                    guildID,
 		progressStyle:              progressStyle,
 		groupReplyAllGuilds:        groupReplyAllGuilds,
@@ -608,14 +611,20 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			return
 		}
 
-		if m.Author.Bot || m.Author.ID == p.botID {
+		if m.Author.ID == p.botID {
+			return
+		}
+		// maomao fork: other bots get through only if listed in allow_bots, and only when
+		// they @ this bot (checked below), so bots can hand work to each other without loops.
+		fromBot := m.Author.Bot
+		if fromBot && (p.allowBots == "" || !core.AllowList(p.allowBots, m.Author.ID)) {
 			return
 		}
 		if core.IsOldMessage(m.Timestamp) {
 			slog.Debug("discord: ignoring old message after restart", "timestamp", m.Timestamp)
 			return
 		}
-		if !core.AllowList(p.allowFrom, m.Author.ID) {
+		if !fromBot && !core.AllowList(p.allowFrom, m.Author.ID) {
 			slog.Debug("discord: message from unauthorized user", "user", m.Author.ID)
 			return
 		}
@@ -629,6 +638,9 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			botRoleID = p.botRoleIDForGuild(m.GuildID)
 		}
 		mentioned := isDiscordBotMention(m, p.botID, botRoleID, p.respondToAtEveryoneAndHere)
+		if fromBot && !isDiscordBotMention(m, p.botID, botRoleID, false) {
+			return
+		}
 		if mentioned && m.GuildID != "" && p.isGroupReplyAllGuild(m.GuildID) {
 			m.Content = stripDiscordMentionWithRole(m.Content, p.botID, botRoleID)
 		}
