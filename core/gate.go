@@ -26,17 +26,22 @@ import (
 const insertNote = "（以下是补充信息，不是提问。若它不改变你之前的结论、也无需动作，只回复 NO_REPLY；否则简短回应。）"
 
 type gateState struct {
-	url     string
-	timeout time.Duration
-	mu      sync.Mutex
-	buf     map[string][]string // interactiveKey → silent messages not yet delivered
-	held    map[string]*heldMsg // interactiveKey → attachment-only message waiting for its text
+	url      string
+	timeout  time.Duration
+	mu       sync.Mutex
+	buf      map[string][]string // interactiveKey → silent messages not yet delivered
+	held     map[string]*heldMsg // interactiveKey → burst being collected while idle
+	released map[*Message]bool   // bursts handed back to handleMessage by their timer
 }
 
-// Discord (and most IM clients) send "image + caption" as two messages a few hundred ms
-// apart. An attachment-only message is held this long so the caption that follows joins it
-// in one turn, instead of starting a turn on a bare image and injecting the question later.
-const attachmentHold = 3 * time.Second
+// Discord (and most IM clients) split "image + caption" into two messages, in either order,
+// and people often send a few lines in a row. When idle, a message is held burstWindow
+// (attachment-only: attachmentHold) and anything arriving meanwhile joins it, so a burst
+// becomes one turn instead of a turn plus an injection that ends up answered twice.
+const (
+	burstWindow    = 1500 * time.Millisecond
+	attachmentHold = 3 * time.Second
+)
 
 type heldMsg struct {
 	msg   *Message
@@ -67,7 +72,7 @@ func (e *Engine) SetGate(url string, timeoutMs int) {
 	if timeoutMs <= 0 {
 		timeoutMs = 3000
 	}
-	e.gate = &gateState{url: url, timeout: time.Duration(timeoutMs) * time.Millisecond, buf: map[string][]string{}, held: map[string]*heldMsg{}}
+	e.gate = &gateState{url: url, timeout: time.Duration(timeoutMs) * time.Millisecond, buf: map[string][]string{}, held: map[string]*heldMsg{}, released: map[*Message]bool{}}
 	slog.Info("gate enabled", "url", url, "timeout_ms", timeoutMs)
 }
 
@@ -107,28 +112,33 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	busy := session.Busy()
 
 	g.mu.Lock()
-	if h := g.held[interactiveKey]; h != nil && h.msg != msg {
-		// A message arrived while an attachment waits: merge the attachments into it.
-		h.timer.Stop()
-		delete(g.held, interactiveKey)
-		msg.Images = append(h.msg.Images, msg.Images...)
-		msg.Files = append(h.msg.Files, msg.Files...)
-	} else if h == nil && !busy && strings.TrimSpace(msg.Content) == "" && (len(msg.Images) > 0 || len(msg.Files) > 0) {
+	if g.released[msg] {
+		delete(g.released, msg) // the burst's timer handed it back: process normally
+	} else if h := g.held[interactiveKey]; h != nil {
+		// Same burst: fold this message into the held one and wait a bit longer.
+		h.msg.Content = strings.TrimSpace(h.msg.Content + "\n" + msg.Content)
+		h.msg.Images = append(h.msg.Images, msg.Images...)
+		h.msg.Files = append(h.msg.Files, msg.Files...)
+		h.msg.Mentioned = h.msg.Mentioned || msg.Mentioned
+		h.timer.Reset(burstWindow)
+		g.mu.Unlock()
+		return true
+	} else if !busy {
+		window := burstWindow
+		if strings.TrimSpace(msg.Content) == "" && (len(msg.Images) > 0 || len(msg.Files) > 0) {
+			window = attachmentHold
+		}
 		h := &heldMsg{msg: msg}
-		h.timer = time.AfterFunc(attachmentHold, func() {
+		h.timer = time.AfterFunc(window, func() {
 			g.mu.Lock()
-			still := g.held[interactiveKey] == h
+			delete(g.held, interactiveKey)
+			g.released[h.msg] = true
 			g.mu.Unlock()
-			if still {
-				e.handleMessage(p, msg) // nothing followed: process the attachment alone
-			}
+			e.handleMessage(p, h.msg)
 		})
 		g.held[interactiveKey] = h
 		g.mu.Unlock()
-		slog.Info("gate: holding attachment for its caption", "session", msg.SessionKey)
 		return true
-	} else if h != nil {
-		delete(g.held, interactiveKey) // timer re-dispatch of the held message itself
 	}
 	buffered := append([]string(nil), g.buf[interactiveKey]...)
 	g.mu.Unlock()

@@ -62,7 +62,9 @@ type Platform struct {
 	botRoleIDs                 sync.Map // guildID -> bot managed role ID
 	readyCh                    chan struct{}
 	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
-	seenInteractions           sync.Map // interaction ID dedup: prevents duplicate slash/button events
+	botBurstMu                 sync.Mutex
+	botBursts                  map[string]*botBurst // maomao fork: channel+bot → handoff being collected
+	seenInteractions           sync.Map             // interaction ID dedup: prevents duplicate slash/button events
 	self                       core.Platform
 
 	mu               sync.RWMutex
@@ -638,7 +640,9 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			botRoleID = p.botRoleIDForGuild(m.GuildID)
 		}
 		mentioned := isDiscordBotMention(m, p.botID, botRoleID, p.respondToAtEveryoneAndHere)
-		if fromBot && !isDiscordBotMention(m, p.botID, botRoleID, false) {
+		// Only an explicit <@me> in the text counts; reply pings ("↪ 已插入" quoting a message)
+		// and role/everyone mentions from bots are ignored.
+		if fromBot && !strings.Contains(m.Content, "<@"+p.botID+">") && !strings.Contains(m.Content, "<@!"+p.botID+">") {
 			return
 		}
 		if mentioned && m.GuildID != "" && p.isGroupReplyAllGuild(m.GuildID) {
@@ -685,9 +689,6 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 
 		// maomao fork: a bot (橘) handing off doesn't carry the user's images; pick up the
 		// images people posted in this channel in the last few minutes so this bot sees them too.
-		if fromBot {
-			images = append(recentHumanImages(s, m, downloadURL), images...)
-		}
 
 		// Prepend the replied-to message's content and images so the agent has context.
 		if m.ReferencedMessage != nil {
@@ -703,6 +704,10 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			Mentioned: mentioned,
 		}
 		msg.ChatName, _ = p.ResolveChannelName(m.ChannelID)
+		if fromBot {
+			p.holdBotMessage(s, m, msg, downloadURL)
+			return
+		}
 		p.dispatchMessage(msg)
 	})
 
@@ -1597,4 +1602,55 @@ func recentHumanImages(s *discordgo.Session, m *discordgo.MessageCreate, downloa
 		}
 	}
 	return images
+}
+
+// botBurst collects one bot's @-messages to this bot for a few seconds (maomao fork). A bot's
+// answer often arrives as several messages (progress card, then one or more replies); handled
+// one by one they start a turn each and the rest get "queued" notices.
+type botBurst struct {
+	msg   *core.Message
+	ids   []string
+	parts []string
+	first *discordgo.MessageCreate
+	timer *time.Timer
+}
+
+const botBurstWindow = 4 * time.Second
+
+func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCreate, msg *core.Message, download func(string) ([]byte, error)) {
+	key := m.ChannelID + ":" + m.Author.ID
+	p.botBurstMu.Lock()
+	defer p.botBurstMu.Unlock()
+	if p.botBursts == nil {
+		p.botBursts = map[string]*botBurst{}
+	}
+	if b := p.botBursts[key]; b != nil {
+		b.ids = append(b.ids, m.ID)
+		b.parts = append(b.parts, msg.Content)
+		b.msg.Images = append(b.msg.Images, msg.Images...)
+		b.msg.ReplyCtx = msg.ReplyCtx
+		b.timer.Reset(botBurstWindow)
+		return
+	}
+	b := &botBurst{msg: msg, ids: []string{m.ID}, parts: []string{msg.Content}, first: m}
+	b.timer = time.AfterFunc(botBurstWindow, func() {
+		p.botBurstMu.Lock()
+		delete(p.botBursts, key)
+		p.botBurstMu.Unlock()
+		// Drop messages the sender deleted meanwhile (e.g. a progress card replaced by the answer).
+		var kept []string
+		for i, id := range b.ids {
+			if _, err := s.ChannelMessage(m.ChannelID, id); err == nil {
+				kept = append(kept, b.parts[i])
+			}
+		}
+		if len(kept) == 0 {
+			return
+		}
+		b.msg.Content = strings.Join(kept, "\n\n")
+		// The sender's text doesn't carry the user's images; pick up the recent ones.
+		b.msg.Images = append(recentHumanImages(s, b.first, download), b.msg.Images...)
+		p.dispatchMessage(b.msg)
+	})
+	p.botBursts[key] = b
 }
