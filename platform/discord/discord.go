@@ -49,6 +49,8 @@ type Platform struct {
 	token                      string
 	allowFrom                  string
 	allowBots                  string // maomao fork: bot user IDs whose @-mentions of this bot are accepted
+	teamLead                   string // maomao fork: bot ID of the team lead; sub-vs-sub ping-pong is escalated to it
+	botName                    string // maomao fork: this bot's username, for escalation notes
 	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
 	progressStyle              string
 	groupReplyAllGuilds        []string // guild IDs where groupReplyAll is active; "*" = all guilds
@@ -88,6 +90,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	allowFrom, _ := opts["allow_from"].(string)
 	allowBots, _ := opts["allow_bots"].(string)
+	teamLead, _ := opts["team_lead_bot"].(string)
 	core.CheckAllowFrom("discord", allowFrom)
 	guildID, _ := opts["guild_id"].(string)
 	var groupReplyAllGuilds []string
@@ -137,6 +140,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		token:                      token,
 		allowFrom:                  allowFrom,
 		allowBots:                  allowBots,
+		teamLead:                   teamLead,
 		guildID:                    guildID,
 		progressStyle:              progressStyle,
 		groupReplyAllGuilds:        groupReplyAllGuilds,
@@ -584,6 +588,8 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		p.botID = r.User.ID
 		p.appID = r.User.ID
+		p.botName = r.User.Username
+		teamPlatforms.Store(r.User.ID, p) // maomao fork: lets a sub hand an escalation to the lead
 		slog.Info("discord: connected", "bot", r.User.Username+"#"+r.User.Discriminator)
 		// Signal readiness before guild role lookups so RegisterCommands
 		// is not blocked by slow API calls when there are many guilds.
@@ -711,7 +717,11 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 		}
 		msg.ChatName, _ = p.ResolveChannelName(m.ChannelID)
 		if fromBot {
-			msg.Content = "【" + discordDisplayName(m) + "】" + cleanBotText(m.Content, m.Mentions)
+			text := cleanBotText(m.Content, m.Mentions)
+			if text == "" && len(images) == 0 && len(files) == 0 {
+				return // e.g. a footer-only chunk of a long reply
+			}
+			msg.Content = "【" + discordDisplayName(m) + "】" + text
 			p.holdBotMessage(s, m, msg, downloadURL)
 			return
 		}
@@ -1656,9 +1666,8 @@ func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCrea
 			return
 		}
 		b.msg.Content = strings.Join(kept, "\n\n")
-		if b.msg.Mentioned && !takeBotHop(m.ChannelID) {
-			slog.Info("discord: bot handoff limit reached, delivering as context", "channel", m.ChannelID, "from", m.Author.ID)
-			b.msg.Mentioned = false
+		if b.msg.Mentioned {
+			p.applyHandoffPolicy(s, b.first, b.msg)
 		}
 		if b.msg.Mentioned {
 			// The sender's text doesn't carry the user's images; pick up the recent ones.
@@ -1669,38 +1678,141 @@ func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCrea
 	p.botBursts[key] = b
 }
 
-// maxBotHops caps bot→bot @-handoffs in one channel between two human messages (maomao fork).
-// Beyond it a bot's @ is delivered as context only, so two bots can't @ each other forever.
-// Shared by every bot (Platform) in this process.
-const maxBotHops = 3
+// Bot→bot handoff policy (maomao fork), shared by every bot (Platform) in this process.
+// Counters live per channel and reset when a human speaks there.
+//   - maxBotHops: fuse against runaway chains — beyond it a bot's @ is only context and the
+//     channel gets one notice asking the human to step in. Not a coordination tool.
+//   - maxPairBounces: two subs @-ing each other back and forth this many times without settling
+//     → the next @ goes to the team lead (the main bot) with a summary, and the lead decides.
+//     Rounds between the lead and a sub are the lead deciding already; they are only annotated.
+const (
+	maxBotHops       = 20
+	maxPairBounces   = 3
+	handoffRecentMax = 6
+	handoffRecentLen = 300
+)
+
+type handoffVerdict int
+
+const (
+	handoffDeliver handoffVerdict = iota
+	handoffCapped
+	handoffEscalate
+)
+
+type handoffDecision struct {
+	verdict   handoffVerdict
+	rounds    int      // consecutive back-and-forth rounds of this pair, this one included
+	recent    []string // the pair's recent messages (escalation summary)
+	capNotice bool     // first time the fuse blows in this channel
+}
+
+type channelHandoffs struct {
+	hops       int
+	pair       [2]string
+	lastFrom   string
+	bounces    int
+	recent     []string
+	capNoticed bool
+}
 
 var (
-	botHopsMu sync.Mutex
-	botHops   = map[string]int{} // channelID → handoffs since the last human message
+	handoffMu     sync.Mutex
+	handoffs      = map[string]*channelHandoffs{} // channelID →
+	teamPlatforms sync.Map                        // botID → *Platform
 )
 
 func resetBotHops(channelID string) {
-	botHopsMu.Lock()
-	delete(botHops, channelID)
-	botHopsMu.Unlock()
+	handoffMu.Lock()
+	delete(handoffs, channelID)
+	handoffMu.Unlock()
 }
 
-// takeBotHop counts one handoff in channelID; false when the limit is already used up.
-func takeBotHop(channelID string) bool {
-	botHopsMu.Lock()
-	defer botHopsMu.Unlock()
-	if botHops[channelID] >= maxBotHops {
-		return false
+// noteHandoff records that bot `from` @-ed bot `to` in channelID with text, and says what to do.
+func noteHandoff(channelID, from, to, lead, text string) handoffDecision {
+	handoffMu.Lock()
+	defer handoffMu.Unlock()
+	st := handoffs[channelID]
+	if st == nil {
+		st = &channelHandoffs{}
+		handoffs[channelID] = st
 	}
-	botHops[channelID]++
-	return true
+	st.hops++
+	if st.hops > maxBotHops {
+		d := handoffDecision{verdict: handoffCapped, capNotice: !st.capNoticed}
+		st.capNoticed = true
+		return d
+	}
+	pair := [2]string{from, to}
+	if from > to {
+		pair = [2]string{to, from}
+	}
+	if pair == st.pair && st.lastFrom == to {
+		st.bounces++
+	} else {
+		st.pair, st.bounces, st.recent = pair, 1, nil
+	}
+	st.lastFrom = from
+	if r := []rune(text); len(r) > handoffRecentLen {
+		text = string(r[:handoffRecentLen]) + "…"
+	}
+	st.recent = append(st.recent, text)
+	if len(st.recent) > handoffRecentMax {
+		st.recent = st.recent[len(st.recent)-handoffRecentMax:]
+	}
+	d := handoffDecision{verdict: handoffDeliver, rounds: st.bounces}
+	if lead != "" && from != lead && to != lead && st.bounces > maxPairBounces {
+		d.verdict, d.recent = handoffEscalate, st.recent
+		st.pair, st.bounces, st.recent = [2]string{}, 0, nil
+	}
+	return d
+}
+
+// applyHandoffPolicy runs noteHandoff for a teammate's @ to this bot and adjusts msg: it may
+// become context only (fuse, or escalated to the lead), or carry a round counter for the lead.
+func (p *Platform) applyHandoffPolicy(s *discordgo.Session, m *discordgo.MessageCreate, msg *core.Message) {
+	d := noteHandoff(m.ChannelID, m.Author.ID, p.botID, p.teamLead, msg.Content)
+	switch d.verdict {
+	case handoffCapped:
+		slog.Info("discord: bot handoff fuse blown, delivering as context", "channel", m.ChannelID, "from", m.Author.ID)
+		msg.Mentioned = false
+		if d.capNotice {
+			if _, err := s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("⏸ bot 之间已经连续接力 %d 次，先停一下，等你发话。", maxBotHops)); err != nil {
+				slog.Warn("discord: handoff fuse notice failed", "error", err)
+			}
+		}
+	case handoffEscalate:
+		msg.Mentioned = false
+		lead, _ := teamPlatforms.Load(p.teamLead)
+		lp, _ := lead.(*Platform)
+		if lp == nil {
+			slog.Warn("discord: ping-pong escalation: lead bot not in this process", "lead", p.teamLead)
+			return
+		}
+		slog.Info("discord: sub ping-pong escalated to lead", "channel", m.ChannelID, "from", m.Author.ID, "to", p.botID)
+		note := fmt.Sprintf("【系统】%s 和 %s 在本频道已经来回 %d 轮还没定下来，转给你拍板：直接定方案并 @ 她们执行，或者让她们继续，或者问用户。最近几轮：\n%s",
+			discordDisplayName(m), p.botName, maxPairBounces, strings.Join(d.recent, "\n"))
+		esc := &core.Message{
+			SessionKey: lp.makeSessionKey(m.ChannelID, m.Author.ID), Platform: "discord",
+			ChannelID: m.ChannelID, MessageID: m.ID, UserID: m.Author.ID, UserName: m.Author.Username,
+			Content: note, ReplyCtx: replyContext{channelID: m.ChannelID, messageID: m.ID},
+			Mentioned: true, FromBot: true,
+		}
+		esc.ChatName, _ = lp.ResolveChannelName(m.ChannelID)
+		lp.dispatchMessage(esc)
+	case handoffDeliver:
+		if p.botID == p.teamLead && d.rounds >= maxPairBounces {
+			msg.Content = fmt.Sprintf("（系统：这是你和%s在本频道连续第 %d 轮来回。该拍板就拍板，拿不准就问用户。）\n%s",
+				discordDisplayName(m), d.rounds, msg.Content)
+		}
+	}
 }
 
 // isBotNotice reports cc-connect's own status lines (queue notices, session/errors, insert
 // acks) that carry nothing a teammate should read.
 func isBotNotice(content string) bool {
 	c := strings.TrimSpace(content)
-	for _, prefix := range []string{"📬", "✅", "❌", "↪", "⏳", "⚠️", "🔄", "⏹"} {
+	for _, prefix := range []string{"📬", "✅", "❌", "↪", "⏳", "⚠️", "🔄", "⏹", "⏸"} {
 		if strings.HasPrefix(c, prefix) {
 			return true
 		}
@@ -1709,7 +1821,7 @@ func isBotNotice(content string) bool {
 }
 
 // botFooter matches the model/usage footer cc-connect appends ("*model · ... ~/dir*").
-var botFooter = regexp.MustCompile(`(?s)\n+\*[^*\n]*·[^*]*\*\s*$`)
+var botFooter = regexp.MustCompile(`(?s)(?:^|\n+)\*[^*\n]*·[^*]*\*\s*$`)
 
 // cleanBotText strips the usage footer and turns <@id> into @name so a teammate's message reads
 // like chat.

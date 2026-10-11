@@ -1777,23 +1777,65 @@ func basePlatformFor(t *testing.T, pAny core.Platform) *Platform {
 	}
 }
 
-func TestBotHopsLimitAndReset(t *testing.T) {
-	ch := "hops-test"
+func TestHandoffPolicy(t *testing.T) {
+	const lead, long, jing = "lead", "long", "jing"
+	ch := "handoff-test"
 	resetBotHops(ch)
-	for i := 0; i < maxBotHops; i++ {
-		if !takeBotHop(ch) {
-			t.Fatalf("hop %d should be allowed", i+1)
+	// Lead ↔ sub rounds are never escalated, only counted.
+	for i := 1; i <= 5; i++ {
+		from, to := lead, long
+		if i%2 == 0 {
+			from, to = long, lead
+		}
+		d := noteHandoff(ch, from, to, lead, "x")
+		if d.verdict != handoffDeliver || d.rounds != i {
+			t.Fatalf("lead round %d: %+v", i, d)
 		}
 	}
-	if takeBotHop(ch) {
-		t.Fatal("hop beyond the limit should be refused")
-	}
-	if !takeBotHop("other-channel") {
-		t.Fatal("limit is per channel")
-	}
+	// Sub ↔ sub: the (maxPairBounces+1)th bounce goes to the lead, with the recent messages.
 	resetBotHops(ch)
-	if !takeBotHop(ch) {
-		t.Fatal("a human message should reset the count")
+	for i := 1; i <= maxPairBounces; i++ {
+		from, to := long, jing
+		if i%2 == 0 {
+			from, to = jing, long
+		}
+		if d := noteHandoff(ch, from, to, lead, "msg"); d.verdict != handoffDeliver {
+			t.Fatalf("bounce %d escalated too early", i)
+		}
+	}
+	d := noteHandoff(ch, jing, long, lead, "last")
+	if d.verdict != handoffEscalate || len(d.recent) != maxPairBounces+1 || d.recent[len(d.recent)-1] != "last" {
+		t.Fatalf("expected escalation, got %+v", d)
+	}
+	if d := noteHandoff(ch, long, jing, lead, "again"); d.verdict != handoffDeliver || d.rounds != 1 {
+		t.Fatalf("pair count should restart after escalation: %+v", d)
+	}
+	// A third bot breaking in restarts the pair count.
+	noteHandoff(ch, jing, long, lead, "a")
+	if d := noteHandoff(ch, "cat", long, lead, "b"); d.rounds != 1 {
+		t.Fatalf("new pair should start at 1: %+v", d)
+	}
+	// Fuse: beyond maxBotHops everything is context; the notice fires once.
+	resetBotHops(ch)
+	notices := 0
+	for i := 0; i < maxBotHops+3; i++ {
+		d := noteHandoff(ch, lead, long, lead, "x")
+		if i < maxBotHops && d.verdict != handoffDeliver {
+			t.Fatalf("hop %d blocked before the fuse", i+1)
+		}
+		if i >= maxBotHops && d.verdict != handoffCapped {
+			t.Fatalf("hop %d passed the fuse", i+1)
+		}
+		if d.capNotice {
+			notices++
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("fuse notice fired %d times", notices)
+	}
+	resetBotHops(ch) // a human spoke
+	if d := noteHandoff(ch, lead, long, lead, "x"); d.verdict != handoffDeliver {
+		t.Fatal("human message should reset the fuse")
 	}
 }
 
@@ -1802,6 +1844,12 @@ func TestCleanBotTextAndNotices(t *testing.T) {
 	got := cleanBotText(in, []*discordgo.User{{ID: "1472561359660253256", Username: "龙娘"}})
 	if got != "好了 @龙娘 你来" {
 		t.Fatalf("got %q", got)
+	}
+	if got := cleanBotText("*claude-opus-5-5 · out 156 · in 2 cw 10.0k · ctx 12%\n~/im-bridge/claude*", nil); got != "" {
+		t.Fatalf("footer-only chunk should be empty, got %q", got)
+	}
+	if got := cleanBotText("一条鱼压在我身上。\n\n*claude-opus-5-5 · out 257 · ctx 12%\n~/im-bridge/claude*", nil); got != "一条鱼压在我身上。" {
+		t.Fatalf("multi-line footer not stripped: %q", got)
 	}
 	if cleanBotText("*强调* 一下", nil) != "*强调* 一下" {
 		t.Fatal("inline emphasis is not a footer")
