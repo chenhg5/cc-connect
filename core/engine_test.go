@@ -14735,6 +14735,183 @@ func (s *permRecordingSession) RespondPermission(_ string, res PermissionResult)
 	return nil
 }
 
+// TestUnsolicitedReader_DeniesPermissionOncePerTurn pins both halves of the
+// background-permission fix. A background turn has no user to consult, so every
+// request is denied — but a blocked agent retries, and warning once per request
+// piled one ⚠️ on the chat per retry (18 in a single observed turn). The warning
+// must go out once per turn, with the total reported when the turn ends, and
+// every decision must still be answered.
+func TestUnsolicitedReader_DeniesPermissionOncePerTurn(t *testing.T) {
+	newDenySession := func(id string) *permRecordingSession {
+		// NOTE: constructed inline rather than copying a *controllableAgentSession,
+		// which carries an atomic.Bool and must not be copied by value.
+		return &permRecordingSession{
+			controllableAgentSession: controllableAgentSession{
+				sessionID: id,
+				alive:     true,
+				events:    make(chan Event, 8),
+				closed:    make(chan struct{}),
+			},
+		}
+	}
+	// Responses are dispatched from a detached goroutine per request, so the
+	// recorder is polled rather than read straight after the turn ends.
+	waitForPermCalls := func(t *testing.T, s *permRecordingSession, want int) {
+		t.Helper()
+		deadline := time.After(2 * time.Second)
+		for {
+			s.mu.Lock()
+			calls := s.permCalls
+			s.mu.Unlock()
+			if calls >= want {
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatalf("timed out waiting for %d permission responses, got %d", want, calls)
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}
+	setup := func(t *testing.T, key string, sess *permRecordingSession, approveAll bool) (*stubPlatformEngine, *Session) {
+		t.Helper()
+		p := &stubPlatformEngine{n: "test"}
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+		t.Cleanup(func() { _ = e.Stop() })
+
+		state := &interactiveState{
+			agentSession: sess,
+			platform:     p,
+			replyCtx:     "ctx",
+			approveAll:   approveAll,
+		}
+		e.interactiveMu.Lock()
+		e.interactiveStates[key] = state
+		e.interactiveMu.Unlock()
+
+		session := e.sessions.GetOrCreateActive(key)
+		e.startUnsolicitedReader(state, session, e.sessions, key, "")
+		t.Cleanup(func() { e.stopUnsolicitedReader(state) })
+		return p, session
+	}
+
+	t.Run("many denials warn once and report the total", func(t *testing.T) {
+		sess := newDenySession("unsol-deny-many")
+		p, _ := setup(t, "test:deny:u1", sess, false)
+
+		for i, tool := range []string{"Bash", "Bash", "Bash", "PowerShell", "Read"} {
+			sess.events <- Event{
+				Type:      EventPermissionRequest,
+				RequestID: fmt.Sprintf("req-%d", i),
+				ToolName:  tool,
+			}
+		}
+		sess.events <- Event{Type: EventResult, Content: "被权限挡住了。", Done: true}
+
+		// Ask for one more message than expected so the call doubles as a
+		// quiescence wait: five requests must not produce five warnings, and
+		// the summary must not repeat per request.
+		sent := waitForPlatformSend(p, 4, 500*time.Millisecond)
+		if len(sent) != 3 {
+			t.Fatalf("platform messages = %d, want 3 (one warning, one summary, one response): %v", len(sent), sent)
+		}
+		if !strings.Contains(sent[0], "auto-denied") || !strings.Contains(sent[0], "`Bash`") {
+			t.Errorf("first message should be the single warning, naming the first denied tool, got %q", sent[0])
+		}
+		if !strings.Contains(sent[1], "5 tool requests") {
+			t.Errorf("second message should total the five denials, got %q", sent[1])
+		}
+		if !strings.Contains(sent[1], "Bash×3, PowerShell, Read") {
+			t.Errorf("summary should break the denials down by tool in first-seen order, got %q", sent[1])
+		}
+		if !strings.Contains(sent[2], "被权限挡住了") {
+			t.Errorf("third message should relay the turn response, got %q", sent[2])
+		}
+
+		waitForPermCalls(t, sess, 5)
+	})
+
+	t.Run("a single denial sends no summary", func(t *testing.T) {
+		sess := newDenySession("unsol-deny-one")
+		p, _ := setup(t, "test:deny:u2", sess, false)
+
+		sess.events <- Event{Type: EventPermissionRequest, RequestID: "req-1", ToolName: "Read"}
+		sess.events <- Event{Type: EventResult, Content: "看完了。", Done: true}
+
+		sent := waitForPlatformSend(p, 3, 500*time.Millisecond)
+		if len(sent) != 2 {
+			t.Fatalf("platform messages = %d, want 2 (one warning, one response): %v", len(sent), sent)
+		}
+		if !strings.Contains(sent[0], "auto-denied") {
+			t.Errorf("first message should be the denial warning, got %q", sent[0])
+		}
+		if !strings.Contains(sent[1], "看完了") {
+			t.Errorf("second message should relay the turn response, got %q", sent[1])
+		}
+		for _, s := range sent {
+			if strings.Contains(s, "tool requests") {
+				t.Errorf("a single denial must not produce a summary: %q", s)
+			}
+		}
+
+		waitForPermCalls(t, sess, 1)
+	})
+
+	t.Run("approve-all grants without warning", func(t *testing.T) {
+		sess := newDenySession("unsol-approve-all")
+		p, _ := setup(t, "test:deny:u3", sess, true)
+
+		sess.events <- Event{Type: EventPermissionRequest, RequestID: "req-1", ToolName: "Bash"}
+		sess.events <- Event{Type: EventResult, Content: "干完了。", Done: true}
+
+		sent := waitForPlatformSend(p, 2, 500*time.Millisecond)
+		if len(sent) != 1 {
+			t.Fatalf("platform messages = %d, want 1 (the response alone): %v", len(sent), sent)
+		}
+		if !strings.Contains(sent[0], "干完了") {
+			t.Errorf("relayed %q, want the turn response", sent[0])
+		}
+
+		waitForPermCalls(t, sess, 1)
+		sess.mu.Lock()
+		behavior := sess.lastPermResult.Behavior
+		sess.mu.Unlock()
+		if behavior != "allow" {
+			t.Errorf("behavior = %q, want allow", behavior)
+		}
+	})
+}
+
+// TestSummarizeDeniedTools covers the breakdown rendering, including the
+// first-seen ordering that makes the tool the agent got stuck on lead.
+func TestSummarizeDeniedTools(t *testing.T) {
+	cases := []struct {
+		name  string
+		tools []string
+		want  string
+	}{
+		{name: "empty", tools: nil, want: ""},
+		{name: "single", tools: []string{"Bash"}, want: "Bash"},
+		{
+			name:  "repeated tools collapse with a count",
+			tools: []string{"Bash", "Bash", "Bash", "PowerShell", "Read"},
+			want:  "Bash×3, PowerShell, Read",
+		},
+		{
+			name:  "interleaved repeats keep first-seen order",
+			tools: []string{"Read", "Bash", "Read"},
+			want:  "Read×2, Bash",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := summarizeDeniedTools(tc.tools); got != tc.want {
+				t.Errorf("summarizeDeniedTools(%v) = %q, want %q", tc.tools, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestEventsNeedResync_DefaultTrue verifies that new interactiveState
 // constructors set eventsNeedResync to true.
 func TestEventsNeedResync_DefaultTrue(t *testing.T) {
