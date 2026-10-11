@@ -156,7 +156,11 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		content = "（之前没回复的消息，按时间顺序）\n" + strings.Join(buffered, "\n") + "\n\n（最新）\n" + content
 	}
 
-	if busy && len(msg.Images) == 0 && len(msg.Files) == 0 && e.injectIntoRunningTurn(interactiveKey, content) {
+	inject := content
+	if strings.TrimSpace(inject) == "" {
+		inject = "（补充附件，和刚才的消息是一起发的）"
+	}
+	if busy && e.injectIntoRunningTurn(interactiveKey, inject, msg.Images, msg.Files) {
 		g.mu.Lock()
 		g.buf[interactiveKey] = g.buf[interactiveKey][len(buffered):]
 		g.mu.Unlock()
@@ -174,9 +178,10 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	return false
 }
 
-// injectIntoRunningTurn writes text to the live agent's stdin while a turn is in flight.
+// injectIntoRunningTurn writes text (and any attachments) to the live agent's stdin while a
+// turn is in flight; covers "text first, image 300ms later" splits too.
 // Claude Code folds it into the current turn (one result), exactly like typing mid-turn.
-func (e *Engine) injectIntoRunningTurn(interactiveKey, content string) bool {
+func (e *Engine) injectIntoRunningTurn(interactiveKey, content string, images []ImageAttachment, files []FileAttachment) bool {
 	e.interactiveMu.Lock()
 	state := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
@@ -189,7 +194,7 @@ func (e *Engine) injectIntoRunningTurn(interactiveKey, content string) bool {
 	if as == nil || !as.Alive() {
 		return false
 	}
-	if err := as.Send(content, "", nil, nil); err != nil {
+	if err := as.Send(content, "", images, files); err != nil {
 		slog.Warn("gate: mid-turn inject failed", "error", err)
 		return false
 	}

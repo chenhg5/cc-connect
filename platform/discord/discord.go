@@ -683,6 +683,12 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			return
 		}
 
+		// maomao fork: a bot (橘) handing off doesn't carry the user's images; pick up the
+		// images people posted in this channel in the last few minutes so this bot sees them too.
+		if fromBot {
+			images = append(recentHumanImages(s, m, downloadURL), images...)
+		}
+
 		// Prepend the replied-to message's content and images so the agent has context.
 		if m.ReferencedMessage != nil {
 			m.Content, images = applyReferencedMessage(m.ReferencedMessage, m.Content, images, downloadURL)
@@ -1569,4 +1575,26 @@ func applyReferencedMessage(ref *discordgo.Message, content string, images []cor
 		}
 	}
 	return content, images
+}
+
+// recentHumanImages returns images attached by non-bot users to the last few messages before
+// m in the same channel, posted within the last 10 minutes (maomao fork, bot handoff).
+func recentHumanImages(s *discordgo.Session, m *discordgo.MessageCreate, download func(string) ([]byte, error)) []core.ImageAttachment {
+	msgs, err := s.ChannelMessages(m.ChannelID, 10, m.ID, "", "")
+	if err != nil {
+		slog.Warn("discord: fetch recent messages for handoff failed", "channel", m.ChannelID, "error", err)
+		return nil
+	}
+	var images []core.ImageAttachment
+	for _, old := range msgs { // newest first
+		if old.Author == nil || old.Author.Bot || time.Since(old.Timestamp) > 10*time.Minute {
+			continue
+		}
+		imgs, _, _ := classifyAttachments(old.Attachments, download)
+		images = append(imgs, images...)
+		if len(images) >= 4 {
+			break
+		}
+	}
+	return images
 }
