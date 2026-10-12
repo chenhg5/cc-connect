@@ -234,6 +234,8 @@ func (p *stubThrottledProgressPlatform) ProgressUpdateInterval() time.Duration {
 }
 
 func TestCompactProgressWriter_ThrottlesRapidUpdates(t *testing.T) {
+	defer func(old int) { progressCardMaxEntries = old }(progressCardMaxEntries)
+	progressCardMaxEntries = 10 // upstream multi-line card behavior
 	p := &stubThrottledProgressPlatform{
 		stubCompactProgressPlatform: stubCompactProgressPlatform{
 			stubPlatformEngine: stubPlatformEngine{n: "discord"},

@@ -353,7 +353,6 @@ func readCodexCachedModels() []core.ModelOption {
 	return parseCodexModelsJSON(b)
 }
 
-
 // parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
 // or models_cache.json) into a deduplicated, filtered slice of ModelOption.
 // It is shared by readCodexCachedModels and readCodexModelCatalog.
@@ -398,7 +397,6 @@ func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	}
 	return models
 }
-
 
 // readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
 // model_catalog_json setting, then reads and parses that JSON file.
@@ -812,3 +810,7 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 			DescZh: "跳过所有审批和沙箱（危险）"},
 	}
 }
+
+// SupportsMidTurnInput reports whether Send during a running turn is folded into that turn.
+// Only the app-server backend can (turn/steer); codex exec would start a second process.
+func (a *Agent) SupportsMidTurnInput() bool { return a.backend == "app_server" }

@@ -1701,6 +1701,8 @@ func TestProcessInteractiveEvents_CompactProgressCoalescesThinkingAndToolUse(t *
 }
 
 func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
+	defer func(old int) { progressCardMaxEntries = old }(progressCardMaxEntries)
+	progressCardMaxEntries = 10 // upstream multi-line card behavior
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 		style:              "card",
@@ -1836,6 +1838,8 @@ func TestProcessInteractiveEvents_FinalReplyRemainsRawWhenReferencesDisabled(t *
 }
 
 func TestProcessInteractiveEvents_CardProgressUsesStructuredPayloadWhenSupported(t *testing.T) {
+	defer func(old int) { progressCardMaxEntries = old }(progressCardMaxEntries)
+	progressCardMaxEntries = 10 // upstream multi-line card behavior
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 		style:              "card",

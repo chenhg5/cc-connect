@@ -481,6 +481,22 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 		})
 	}
 
+	// maomao fork: a turn is in flight → fold the input into it (turn/steer) instead of
+	// starting a second turn, like typing while Codex works. Falls back to turn/start when
+	// the turn ended in between.
+	s.stateMu.Lock()
+	running := s.currentTurn
+	s.stateMu.Unlock()
+	if running != "" {
+		steer := map[string]any{"threadId": threadID, "input": input, "expectedTurnId": running}
+		var steerResp map[string]any
+		if err := s.request("turn/steer", steer, &steerResp); err == nil {
+			return nil
+		} else {
+			slog.Info("codex app-server turn/steer failed, starting a new turn", "error", err)
+		}
+	}
+
 	params := map[string]any{
 		"threadId": threadID,
 		"input":    input,

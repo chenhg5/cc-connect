@@ -85,9 +85,12 @@ func (e *Engine) SetGate(url string, timeoutMs int, fallback string) {
 	default:
 		fallback = "reply"
 	}
-	// Only Claude Code merges stdin input into the running turn; codex exec would start a second
-	// process, so other agents get busy inserts as a queued turn instead.
+	// Claude Code merges stdin input into the running turn, Codex app-server via turn/steer;
+	// codex exec would start a second process, so other agents get busy inserts as a queued turn.
 	inject := e.agent != nil && e.agent.Name() == "claudecode"
+	if m, ok := e.agent.(interface{ SupportsMidTurnInput() bool }); ok && m.SupportsMidTurnInput() {
+		inject = true
+	}
 	e.gate = &gateState{url: url, timeout: time.Duration(timeoutMs) * time.Millisecond, fallback: fallback, inject: inject,
 		buf: map[string][]string{}, held: map[string]*heldMsg{}, released: map[*Message]bool{}}
 	slog.Info("gate enabled", "url", url, "timeout_ms", timeoutMs, "fallback", fallback, "mid_turn_inject", inject)

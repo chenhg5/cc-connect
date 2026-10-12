@@ -63,6 +63,9 @@ type ProgressCardPayload struct {
 	Entries   []string            `json:"entries,omitempty"` // legacy fallback
 	Items     []ProgressCardEntry `json:"items,omitempty"`   // ordered typed events
 	Truncated bool                `json:"truncated"`
+	// maomao fork: one-line progress — tool steps so far and seconds since the turn started.
+	Steps      int `json:"steps,omitempty"`
+	ElapsedSec int `json:"elapsed_sec,omitempty"`
 }
 
 // BuildProgressCardPayload encodes progress entries into a transport string.
@@ -91,6 +94,10 @@ func BuildProgressCardPayload(entries []string, truncated bool) string {
 
 // BuildProgressCardPayloadV2 encodes ordered typed progress events.
 func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent string, lang Language, state ProgressCardState) string {
+	return buildProgressCardPayload(items, truncated, agent, lang, state, 0, 0)
+}
+
+func buildProgressCardPayload(items []ProgressCardEntry, truncated bool, agent string, lang Language, state ProgressCardState, steps, elapsedSec int) string {
 	cleaned := make([]ProgressCardEntry, 0, len(items))
 	for _, item := range items {
 		text := strings.TrimSpace(item.Text)
@@ -117,12 +124,14 @@ func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent
 		state = ProgressCardStateRunning
 	}
 	payload := ProgressCardPayload{
-		Version:   2,
-		Agent:     strings.TrimSpace(agent),
-		Lang:      string(lang),
-		State:     state,
-		Items:     cleaned,
-		Truncated: truncated,
+		Version:    2,
+		Agent:      strings.TrimSpace(agent),
+		Lang:       string(lang),
+		State:      state,
+		Items:      cleaned,
+		Truncated:  truncated,
+		Steps:      steps,
+		ElapsedSec: elapsedSec,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -227,6 +236,8 @@ type compactProgressWriter struct {
 	truncated  bool
 	lastSent   string
 	maxEntries int
+	steps      int
+	startedAt  time.Time
 
 	// Throttle message edits to avoid platform rate limits (e.g. Discord ~5 edits/5s).
 	minUpdateInterval time.Duration
@@ -292,6 +303,9 @@ func SuppressStandaloneToolResultEvent(p Platform) bool {
 	return progressStyleForPlatform(p) == progressStyleLegacy
 }
 
+// progressCardMaxEntries — maomao fork: the card shows one refreshed line, like a progress bar (upstream 10).
+var progressCardMaxEntries = 1
+
 func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, agentName string, lang Language, transform func(string) string) *compactProgressWriter {
 	w := &compactProgressWriter{
 		ctx:        ctx,
@@ -302,7 +316,8 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 		state:      ProgressCardStateRunning,
 		agentName:  normalizeProgressAgentLabel(agentName),
 		lang:       lang,
-		maxEntries: 4, // maomao fork: keep the progress card short (was 10)
+		maxEntries: progressCardMaxEntries,
+		startedAt:  time.Now(),
 	}
 	if throttler, ok := p.(ProgressUpdateThrottler); ok {
 		w.minUpdateInterval = throttler.ProgressUpdateInterval()
@@ -410,6 +425,9 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 
 	switch w.style {
 	case progressStyleCard:
+		if item.Kind == ProgressEntryToolUse {
+			w.steps++
+		}
 		w.items = append(w.items, item)
 		w.entries = append(w.entries, fallback)
 		truncated := false
@@ -425,7 +443,7 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		}
 		w.truncated = truncated
 		if w.usePayload {
-			w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
+			w.content = w.payload()
 			if w.content == "" {
 				slog.Warn("progress writer: failed to build structured payload", "platform", w.platform.Name())
 				w.failed = true
@@ -507,7 +525,7 @@ func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
 		return true
 	}
 	w.state = state
-	w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
+	w.content = w.payload()
 	if w.content == "" || w.content == w.lastSent {
 		return w.content != ""
 	}
@@ -556,4 +574,9 @@ func trimCompactProgressText(s string, maxRunes int) string {
 	rs := []rune(s)
 	tail := strings.TrimLeft(string(rs[len(rs)-maxRunes:]), "\n")
 	return "…\n" + tail
+}
+
+func (w *compactProgressWriter) payload() string {
+	return buildProgressCardPayload(w.items, w.truncated, w.agentName, w.lang, w.state,
+		w.steps, int(time.Since(w.startedAt).Seconds()))
 }

@@ -63,6 +63,9 @@ func buildDiscordProgressDescription(payload *core.ProgressCardPayload) string {
 		return " "
 	}
 	items := discordProgressItems(payload)
+	if payload.Steps > 0 || payload.ElapsedSec > 0 {
+		return buildDiscordProgressBarLine(payload, items)
+	}
 	lines := make([]string, 0, len(items)+1)
 	if payload.Truncated {
 		lines = append(lines, "ℹ️ "+discordProgressLatestOnlyText(payload.Lang))
@@ -374,4 +377,28 @@ func trimDiscordRunes(s string, maxRunes int) string {
 		return string(rs[:1])
 	}
 	return string(rs[:maxRunes-1]) + "…"
+}
+
+// buildDiscordProgressBarLine renders the maomao one-line card: "第 12 步 · 3分20秒 · 🔧 Bash — …".
+// The card is edited in place, so it reads like a progress bar instead of a growing log.
+func buildDiscordProgressBarLine(payload *core.ProgressCardPayload, items []core.ProgressCardEntry) string {
+	zh := normalizeDiscordProgressLang(payload.Lang) == "zh"
+	sec := payload.ElapsedSec
+	var head string
+	if zh {
+		head = fmt.Sprintf("第 %d 步 · ", payload.Steps)
+		if sec >= 60 {
+			head += fmt.Sprintf("%d分%02d秒", sec/60, sec%60)
+		} else {
+			head += fmt.Sprintf("%d秒", sec)
+		}
+	} else {
+		head = fmt.Sprintf("step %d · %dm%02ds", payload.Steps, sec/60, sec%60)
+	}
+	if payload.State == core.ProgressCardStateRunning && len(items) > 0 {
+		if line := buildDiscordProgressLine(items[len(items)-1], payload.Lang); line != "" {
+			return trimDiscordRunes(head+" · "+line, maxDiscordProgressLineLen+40)
+		}
+	}
+	return head
 }
