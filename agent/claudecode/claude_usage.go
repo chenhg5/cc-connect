@@ -101,7 +101,13 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 
 	terminal := newClaudeUsageTerminal()
 	readDone := make(chan error, 1)
+	// readerExited is closed when the reader goroutine returns. The main loop
+	// may already have consumed readDone (pty EOF before the process exits),
+	// so cleanup must not wait on readDone again — that deadlocked the reply
+	// footer and hung the whole turn (maomao fork, 2026-10-12).
+	readerExited := make(chan struct{})
 	go func() {
+		defer close(readerExited)
 		buf := make([]byte, 4096)
 		for {
 			n, err := ptmx.Read(buf)
@@ -125,7 +131,7 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 		}
 		cancel()
 		// Wait for reader goroutine to finish so it is never leaked.
-		<-readDone
+		<-readerExited
 		select {
 		case <-processDone:
 		case <-time.After(2 * time.Second):

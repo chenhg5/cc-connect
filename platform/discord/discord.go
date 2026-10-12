@@ -1355,7 +1355,15 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 		return func() {}
 	}
 
-	_ = p.session.ChannelTyping(channelID)
+	// maomao fork: Stop() nils p.session; a turn draining during shutdown
+	// used to panic here (2026-10-12 11:22).
+	p.mu.Lock()
+	session := p.session
+	p.mu.Unlock()
+	if session == nil {
+		return func() {}
+	}
+	_ = session.ChannelTyping(channelID)
 
 	done := make(chan struct{})
 	go func() {
@@ -1374,7 +1382,7 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 				slog.Warn("discord: typing indicator hit max duration, stopping", "channel", channelID, "max", maxTypingDuration)
 				return
 			case <-ticker.C:
-				_ = p.session.ChannelTyping(channelID)
+				_ = session.ChannelTyping(channelID)
 			}
 		}
 	}()
