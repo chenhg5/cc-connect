@@ -148,6 +148,11 @@ func (g *gateState) decide(ctx context.Context, req gateRequest) gateResponse {
 // rewritten msg.Content (buffered context prepended, insert note) for the normal turn.
 func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interactiveKey string) bool {
 	g := e.gate
+	if msg.FromBot && !msg.Mentioned && e.isTeamLead() && isBotErrorNotice(msg.Content) {
+		// maomao fork: a teammate reporting a failure is the lead's job, not background chatter.
+		msg.Mentioned = true
+		msg.Content = "（队友 " + msg.UserName + " 报错了。你是负责人：查原因，告诉用户，必要时换人接手）\n" + msg.Content
+	}
 	if msg.FromBot && !msg.Mentioned {
 		// A teammate talking to someone else: only listen. Never start a turn from it, gate or
 		// not, so bots can't chain each other into a loop.
@@ -174,6 +179,7 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		h.msg.Images = append(h.msg.Images, msg.Images...)
 		h.msg.Files = append(h.msg.Files, msg.Files...)
 		h.msg.Mentioned = h.msg.Mentioned || msg.Mentioned
+		h.msg.SeenUpToID = msg.MessageID
 		h.timer.Reset(burstWindow)
 		g.mu.Unlock()
 		return true
@@ -220,10 +226,26 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	}
 	e.teamNoteTurn(msg, session)
 
+	if busy && g.inject {
+		if idle := e.turnIdleFor(interactiveKey); idle >= deadTurnAfter {
+			// maomao fork: don't pretend to deliver into a turn that has stopped moving.
+			// The message stays in the channel; backfill hands it to the next turn
+			// (so it must not be marked seen).
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("⚠️ 当前这一轮已经 %d 分钟没有动静，可能卡住了，这条没插进去；发 /new 可重置", int(idle.Minutes())))
+			return true
+		}
+	}
 	content := msg.Content
-	if len(buffered) > 0 {
+	if back, ok := e.channelBackfill(p, msg, session); ok {
+		// The channel itself is the record: it covers the gate buffer and also
+		// what the buffer never saw (downtime, restarts, dropped messages).
+		if back != "" {
+			content = back + "\n\n（最新，回这条）\n" + content
+		}
+	} else if len(buffered) > 0 {
 		content = "（之前没回复的消息，按时间顺序）\n" + strings.Join(buffered, "\n") + "\n\n（最新）\n" + content
 	}
+	markSeen(session, msg)
 
 	inject := content
 	if strings.TrimSpace(inject) == "" {
@@ -242,6 +264,9 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	g.mu.Unlock()
 	if dec.Action == "insert" {
 		content = insertNote + "\n" + content
+	}
+	if c := e.turnContext(msg.SessionKey, msg.Content); c != "" {
+		content = c + "\n\n" + content
 	}
 	if sum := e.teamSummary(msg.SessionKey); sum != "" {
 		content = sum + "\n\n" + content
@@ -294,4 +319,133 @@ func (e *Engine) injectIntoRunningTurn(interactiveKey, content string, images []
 	}
 	slog.Info("gate: injected into running turn", "interactive_key", interactiveKey, "len", len(content))
 	return true
+}
+
+// deadTurnAfter is how long a running turn may go without agent events before
+// mid-turn inserts are refused (matches the stuck-turn watchdog).
+var deadTurnAfter = 10 * time.Minute
+
+// turnIdleFor returns how long the running turn of interactiveKey has had no agent event.
+func (e *Engine) turnIdleFor(interactiveKey string) time.Duration {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return 0
+	}
+	last := state.lastEventAt.Load()
+	if last == 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, last))
+}
+
+// isBotErrorNotice reports whether a teammate message is an error report.
+func isBotErrorNotice(text string) bool {
+	t := strings.TrimSpace(text)
+	return strings.HasPrefix(t, "❌") || strings.HasPrefix(t, "⚠️")
+}
+
+// ---- maomao fork: middle and long context layers (served by the gate process) ----
+
+type gateContextResponse struct {
+	Summary string `json:"summary"`
+	Wiki    []struct {
+		Path string `json:"path"`
+		Desc string `json:"desc"`
+	} `json:"wiki"`
+}
+
+// endpoint returns the gate URL with its path replaced (query dropped).
+func (g *gateState) endpoint(path string) string {
+	base := g.url
+	if i := strings.Index(base, "?"); i >= 0 {
+		base = base[:i]
+	}
+	if i := strings.LastIndex(base, "/"); i > len("http://") {
+		base = base[:i]
+	}
+	return base + path
+}
+
+func (g *gateState) post(ctx context.Context, path string, req any, out any) error {
+	body, _ := json.Marshal(req)
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, g.endpoint(path), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	hreq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(hreq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// turnContext returns the channel's progress summary and matching wiki pages as a
+// block to put before the user's message ("" when the gate has nothing or is down).
+func (e *Engine) turnContext(sessionKey, text string) string {
+	g := e.gate
+	if g == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(e.ctx, 2*time.Second)
+	defer cancel()
+	var out gateContextResponse
+	if err := g.post(ctx, "/context", map[string]string{"key": sessionKey, "text": text}, &out); err != nil {
+		slog.Warn("gate: context fetch failed", "session", sessionKey, "error", err)
+		return ""
+	}
+	var b strings.Builder
+	if s := strings.TrimSpace(out.Summary); s != "" {
+		b.WriteString("（本频道进展总结，跨会话、重启都保留；以频道记录为准，有冲突时信频道）\n")
+		b.WriteString(s)
+	}
+	if len(out.Wiki) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString("（可能相关的 wiki 页，需要时去读）")
+		for _, w := range out.Wiki {
+			b.WriteString("\n- " + w.Path + " — " + w.Desc)
+		}
+	}
+	return b.String()
+}
+
+// reportTurn hands a finished turn to the gate so it can update the channel summary.
+func (e *Engine) reportTurn(sessionKey, user, reply string) {
+	g := e.gate
+	if g == nil || strings.TrimSpace(reply) == "" || isSilentReply(reply) {
+		return
+	}
+	bot := e.name
+	if e.team != nil && e.team.name != "" {
+		bot = e.team.name
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
+		defer cancel()
+		if err := g.post(ctx, "/turn", map[string]string{"key": sessionKey, "bot": bot, "user": user, "reply": reply}, nil); err != nil {
+			slog.Warn("gate: turn report failed", "session", sessionKey, "error", err)
+		}
+	}()
+}
+
+// lastUserEntry returns the newest user entry in the session history.
+func lastUserEntry(session *Session) string {
+	h := session.GetHistory(4)
+	for i := len(h) - 1; i >= 0; i-- {
+		if h[i].Role == "user" {
+			return h[i].Content
+		}
+	}
+	return ""
 }

@@ -580,3 +580,8 @@ func (w *compactProgressWriter) payload() string {
 	return buildProgressCardPayload(w.items, w.truncated, w.agentName, w.lang, w.state,
 		w.steps, int(time.Since(w.startedAt).Seconds()))
 }
+
+// Active reports whether this writer renders progress in place (maomao fork).
+func (w *compactProgressWriter) Active() bool {
+	return w != nil && w.enabled && !w.failed
+}

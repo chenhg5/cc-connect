@@ -245,3 +245,9 @@ func roundDur(d time.Duration) string {
 		return fmt.Sprintf("%.1f 小时", d.Hours())
 	}
 }
+
+// isTeamLead reports whether this project is the team lead (the one that reads
+// the others' status; maomao fork).
+func (e *Engine) isTeamLead() bool {
+	return e.team != nil && e.team.inject
+}

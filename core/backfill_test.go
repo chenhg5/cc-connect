@@ -1,0 +1,175 @@
+package core
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+type historyPlatform struct {
+	stubPlatformEngine
+	history []ChannelHistoryMessage
+	err     error
+}
+
+func (p *historyPlatform) ChannelHistory(_, beforeID string, limit int) ([]ChannelHistoryMessage, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	var out []ChannelHistoryMessage
+	for _, m := range p.history {
+		if snowflakeAfter(beforeID, m.ID) {
+			out = append(out, m)
+		}
+	}
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out, nil
+}
+
+func TestSnowflakeAfter(t *testing.T) {
+	if !snowflakeAfter("1559180740195778622", "1559180470745301053") {
+		t.Fatal("later id should be after")
+	}
+	if snowflakeAfter("999", "1000") {
+		t.Fatal("shorter id is older")
+	}
+}
+
+func TestChannelBackfill_ShowsMissedMessagesInOrder(t *testing.T) {
+	now := time.Now()
+	p := &historyPlatform{history: []ChannelHistoryMessage{
+		{ID: "100", Author: "zuiho", Content: "旧的，看过了", Time: now},
+		{ID: "101", Author: "zuiho", Content: "感觉不太行，开多个职业思考一下", Time: now},
+		{ID: "102", Author: "橘", IsBot: true, IsSelf: true, Content: "我自己的回复", Time: now},
+		{ID: "103", Author: "龙娘", IsBot: true, Content: "❌ 错误: 启动 Agent 会话失败", Time: now},
+		{ID: "104", Author: "zuiho", Content: "", Time: now},
+	}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	session := e.sessions.GetOrCreateActive("discord:c1")
+	session.SetLastSeenMsgID("100")
+
+	msg := &Message{ChannelID: "c1", MessageID: "105", Content: "你看看"}
+	got, ok := e.channelBackfill(p, msg, session)
+	if !ok {
+		t.Fatal("backfill should succeed")
+	}
+	if strings.Contains(got, "旧的") || strings.Contains(got, "我自己的回复") {
+		t.Fatalf("seen and own messages must be skipped:\n%s", got)
+	}
+	i, j := strings.Index(got, "感觉不太行"), strings.Index(got, "龙娘（bot）: ❌")
+	if i < 0 || j < 0 || i > j {
+		t.Fatalf("missed messages missing or out of order:\n%s", got)
+	}
+	if !strings.Contains(got, "（空消息或只有附件）") {
+		t.Fatalf("empty message should be shown:\n%s", got)
+	}
+
+	markSeen(session, msg)
+	if session.GetLastSeenMsgID() != "105" {
+		t.Fatalf("last seen = %q, want 105", session.GetLastSeenMsgID())
+	}
+	msg.SeenUpToID = "107"
+	markSeen(session, msg)
+	if session.GetLastSeenMsgID() != "107" {
+		t.Fatalf("folded burst should advance last seen, got %q", session.GetLastSeenMsgID())
+	}
+}
+
+func TestChannelBackfill_FirstTurnUsesRecentWindow(t *testing.T) {
+	p := &historyPlatform{history: []ChannelHistoryMessage{
+		{ID: "100", Author: "zuiho", Content: "昨天的", Time: time.Now().Add(-24 * time.Hour)},
+		{ID: "101", Author: "zuiho", Content: "刚才的", Time: time.Now().Add(-time.Minute)},
+	}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	session := e.sessions.GetOrCreateActive("discord:c1")
+	got, ok := e.channelBackfill(p, &Message{ChannelID: "c1", MessageID: "102"}, session)
+	if !ok || strings.Contains(got, "昨天的") || !strings.Contains(got, "刚才的") {
+		t.Fatalf("ok=%v got:\n%s", ok, got)
+	}
+}
+
+func TestChannelBackfill_UnsupportedPlatformFallsBack(t *testing.T) {
+	p := &stubPlatformEngine{n: "x"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	session := e.sessions.GetOrCreateActive("x:c1")
+	if _, ok := e.channelBackfill(p, &Message{ChannelID: "c1", MessageID: "1"}, session); ok {
+		t.Fatal("platform without history must report ok=false")
+	}
+}
+
+func TestIsBotErrorNotice(t *testing.T) {
+	for _, s := range []string{"❌ 错误: 启动 Agent 会话失败", " ⚠️ 这一轮卡住"} {
+		if !isBotErrorNotice(s) {
+			t.Errorf("%q should be an error notice", s)
+		}
+	}
+	if isBotErrorNotice("本龙在呢") {
+		t.Error("chat is not an error notice")
+	}
+}
+
+func TestTurnIdleFor(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "x"}}, "", LangEnglish)
+	defer e.Stop()
+	st := &interactiveState{}
+	st.lastEventAt.Store(time.Now().Add(-11 * time.Minute).UnixNano())
+	e.interactiveMu.Lock()
+	e.interactiveStates["k"] = st
+	e.interactiveMu.Unlock()
+	if got := e.turnIdleFor("k"); got < deadTurnAfter {
+		t.Fatalf("idle = %v, want >= %v", got, deadTurnAfter)
+	}
+	if got := e.turnIdleFor("missing"); got != 0 {
+		t.Fatalf("missing state idle = %v", got)
+	}
+}
+
+func TestGateContextAndTurnReport(t *testing.T) {
+	var gotTurn map[string]string
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/context":
+			_, _ = w.Write([]byte(`{"summary":"## 正在做\n修龙娘","wiki":[{"path":"~/wiki/bots/im-bridge.md","desc":"cc-connect"}]}`))
+		case "/turn":
+			_ = json.NewDecoder(r.Body).Decode(&gotTurn)
+			_, _ = w.Write([]byte(`{}`))
+			close(done)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "x"}}, "", LangEnglish)
+	defer e.Stop()
+	e.SetGate(srv.URL+"/decide?bot=longniang", 1000, "reply")
+	if ep := e.gate.endpoint("/context"); ep != srv.URL+"/context" {
+		t.Fatalf("endpoint = %q", ep)
+	}
+	c := e.turnContext("discord:c1", "龙娘怎么了")
+	if !strings.Contains(c, "修龙娘") || !strings.Contains(c, "~/wiki/bots/im-bridge.md") {
+		t.Fatalf("context block:\n%s", c)
+	}
+
+	e.reportTurn("discord:c1", "NO_REPLY", "NO_REPLY") // silent: not reported
+	e.reportTurn("discord:c1", "你看看", "查到了")
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn not reported")
+	}
+	if gotTurn["key"] != "discord:c1" || gotTurn["reply"] != "查到了" {
+		t.Fatalf("turn report = %v", gotTurn)
+	}
+	_ = context.Background()
+}

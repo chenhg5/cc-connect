@@ -1854,9 +1854,14 @@ func TestCleanBotTextAndNotices(t *testing.T) {
 	if cleanBotText("*强调* 一下", nil) != "*强调* 一下" {
 		t.Fatal("inline emphasis is not a footer")
 	}
-	for _, n := range []string{"📬 消息已收到，将在当前任务完成后处理。", "✅ 新会话已创建", "❌ 错误: x", "↪ 已插入"} {
+	for _, n := range []string{"📬 消息已收到，将在当前任务完成后处理。", "✅ 新会话已创建", "↪ 已插入"} {
 		if !isBotNotice(n) {
 			t.Errorf("%q should be a notice", n)
+		}
+	}
+	for _, n := range []string{"❌ 错误: 启动 Agent 会话失败", "⚠️ 这一轮卡住超过 10 分钟"} {
+		if isBotNotice(n) {
+			t.Errorf("%q is an error report and must reach the lead", n)
 		}
 	}
 	if isBotNotice("本龙在呢") {

@@ -559,6 +559,11 @@ type interactiveState struct {
 	// cleared to false only after a clean EventResult.
 	eventsNeedResync bool
 
+	// maomao fork: why the agent session failed to start (shown to the user),
+	// and when the running turn last received an agent event (dead-turn check).
+	startErr    string
+	lastEventAt atomic.Int64
+
 	// lastCompletedUserMessageTimeMs is the max platform user-message create time
 	// (ms) for which an agent turn has finished with EventResult.
 	lastCompletedUserMessageTimeMs int64
@@ -3745,11 +3750,17 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.currentMessageID = msg.MessageID
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
+	state.lastEventAt.Store(time.Now().UnixNano())
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
 
 	if state.agentSession == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+		text := e.i18n.T(MsgFailedToStartAgentSession)
+		if state.startErr != "" {
+			// maomao fork: say why, so whoever reads it can act.
+			text += "：" + truncateRunes(state.startErr, 200)
+		}
+		e.reply(p, msg.ReplyCtx, text)
 		return
 	}
 	e.cancelAgentSessionIdleClose(state)
@@ -4134,6 +4145,8 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
 					"session_key", sessionKey, "elapsed", startElapsed)
+				// maomao fork: never lose context silently.
+				go e.send(p, replyCtx, "⚠️ 旧会话恢复失败，已改开新会话；之前的上下文靠频道记录和进展总结补回")
 			}
 		}
 		if err != nil {
@@ -4144,7 +4157,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				Platform:   p.Name(),
 				Error:      fmt.Sprintf("failed to start session: %v", err),
 			})
-			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true, startErr: err.Error()}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
 			e.interactiveStates[sessionKey] = state
@@ -4669,6 +4682,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// any unsolicited AddHistory.
 				session.AddHistory("assistant", fullResponse)
 				sessions.Save()
+				e.reportTurn(sessionKey, "（后台任务完成后的自发回复）", fullResponse)
 
 				// Reset for potential subsequent unsolicited turn.
 				textParts = nil
@@ -4879,6 +4893,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if !ok {
 				goto channelClosed
 			}
+			state.lastEventAt.Store(time.Now().UnixNano())
 		case err := <-pendingSend:
 			pendingSend = nil
 			if err != nil {
@@ -5193,6 +5208,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
+				// maomao fork: with an in-place progress card, narration between
+				// tool calls ("Now my own file.") goes into the card, not the chat.
+				if cp.Active() && len(textParts) > segmentStart {
+					if segment := strings.TrimSpace(strings.Join(textParts[segmentStart:], "")); segment != "" && !isSilentReply(segment) {
+						if sp.canPreview() {
+							sp.discard()
+						}
+						cp.Append(segment)
+					}
+					segmentStart = len(textParts)
+					silentHold = false
+				}
 				// Flush accumulated text segment before tool display
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
@@ -5667,6 +5694,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			fullResponse = cleanResponse
 
 			turnDuration := time.Since(turnStart)
+			if !isSilent {
+				e.reportTurn(sessionKey, lastUserEntry(session), fullResponse)
+			}
 			slog.Info("turn complete",
 				"session", session.ID,
 				"agent_session", session.GetAgentSessionID(),

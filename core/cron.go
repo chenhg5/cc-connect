@@ -691,7 +691,9 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 
 	if !ok {
 		slog.Error("cron: project not found", "job", job.ID, "project", job.Project, "manual", manual)
-		cs.store.MarkRun(job.ID, fmt.Errorf("project %q not found", job.Project))
+		err := fmt.Errorf("project %q not found", job.Project)
+		cs.store.MarkRun(job.ID, err)
+		cs.notifyFailure(job, err)
 		return
 	}
 
@@ -718,6 +720,7 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 
 	if err != nil {
 		slog.Error("cron: job failed", "id", job.ID, "manual", manual, "error", err)
+		cs.notifyFailure(job, err)
 	} else {
 		slog.Info("cron: job completed", "id", job.ID, "manual", manual)
 	}
@@ -964,4 +967,36 @@ func padZero(s string) string {
 		return "0" + s
 	}
 	return s
+}
+
+// notifyFailure tells the job's chat that it failed (maomao fork: failures used to
+// be log-only, so a missed daily digest went unnoticed). Uses the job's own
+// engine, or any engine whose platform can reach the session when the project
+// is missing.
+func (cs *CronScheduler) notifyFailure(job *CronJob, err error) {
+	if job.SessionKey == "" {
+		return
+	}
+	name := job.Description
+	if name == "" {
+		name = truncateStr(job.Prompt, 30)
+	}
+	text := fmt.Sprintf("⚠️ 定时任务「%s」失败：%s", name, truncateStr(err.Error(), 200))
+	cs.mu.RLock()
+	engines := make([]*Engine, 0, len(cs.engines)+1)
+	if e, ok := cs.engines[job.Project]; ok {
+		engines = append(engines, e)
+	}
+	for p, e := range cs.engines {
+		if p != job.Project {
+			engines = append(engines, e)
+		}
+	}
+	cs.mu.RUnlock()
+	for _, e := range engines {
+		if sendErr := e.SendToSession(job.SessionKey, text); sendErr == nil {
+			return
+		}
+	}
+	slog.Warn("cron: could not notify failure", "job", job.ID)
 }

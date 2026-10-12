@@ -120,7 +120,10 @@ func normalizeBackend(raw string) string {
 func normalizeAppServerURL(raw string) string {
 	url := strings.TrimSpace(raw)
 	if url == "" {
-		return "ws://127.0.0.1:3845"
+		// maomao fork: the session only speaks JSON-RPC over stdio. A ws default
+		// makes newer codex listen on the socket and ignore stdin, so initialize
+		// times out (2026-10-12, both codex subs dead after the steer rollout).
+		return "stdio://"
 	}
 	if strings.EqualFold(url, "stdio") {
 		return "stdio://"

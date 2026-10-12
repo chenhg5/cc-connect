@@ -385,6 +385,7 @@ type Message struct {
 	FromVoice        bool   // true if message originated from voice transcription
 	Mentioned        bool   // maomao fork: user explicitly @-mentioned the bot (input to the gate)
 	FromBot          bool   // maomao fork: sent by a teammate bot; without Mentioned it is context only
+	SeenUpToID       string // maomao fork: newest message folded into this one (gate burst), for channel backfill
 	ModeOverride     string // if set, temporarily override agent permission mode for this message
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission

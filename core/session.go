@@ -39,6 +39,10 @@ type Session struct {
 	// processes an actual incoming user message. It is used by reset_on_idle_mins
 	// so that automated activity cannot prevent idle session rotation.
 	LastUserActivity time.Time `json:"last_user_activity,omitempty"`
+	// LastSeenMsgID is the newest platform message this session has been shown
+	// (maomao fork, channel backfill). Persisted so a restart still knows what
+	// the agent missed while cc-connect was down.
+	LastSeenMsgID string `json:"last_seen_msg_id,omitempty"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
@@ -120,6 +124,18 @@ func (s *Session) SetAgentInfo(agentSessionID, agentType, name string) {
 }
 
 // GetAgentSessionID atomically reads the agent session ID.
+func (s *Session) GetLastSeenMsgID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LastSeenMsgID
+}
+
+func (s *Session) SetLastSeenMsgID(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastSeenMsgID = id
+}
+
 func (s *Session) GetAgentSessionID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

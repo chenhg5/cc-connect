@@ -699,7 +699,12 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 		images, files, audio := classifyAttachments(m.Attachments, downloadURL)
 
 		if m.Content == "" && len(images) == 0 && len(files) == 0 && audio == nil && m.ReferencedMessage == nil {
-			return
+			if !mentioned || fromBot {
+				return
+			}
+			// maomao fork: a bare @ means "look at what's going on" — keep it so the
+			// turn starts and the channel backfill shows the context.
+			m.Content = "（只 @ 了你，没写内容：看上面的频道消息判断要你做什么；看不出来就问）"
 		}
 
 		// Prepend the replied-to message's content and images so the agent has context.
@@ -1394,6 +1399,44 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 // maxTypingDuration caps how long one turn keeps the typing indicator alive.
 var maxTypingDuration = 30 * time.Minute
 
+// ChannelHistory implements core.ChannelHistoryReader (maomao fork, channel backfill).
+func (p *Platform) ChannelHistory(channelID, beforeID string, limit int) ([]core.ChannelHistoryMessage, error) {
+	s := p.session
+	if s == nil {
+		return nil, fmt.Errorf("discord: channel history: not connected")
+	}
+	msgs, err := s.ChannelMessages(channelID, limit, beforeID, "", "")
+	if err != nil {
+		return nil, fmt.Errorf("discord: channel history: %w", err)
+	}
+	out := make([]core.ChannelHistoryMessage, 0, len(msgs))
+	for i := len(msgs) - 1; i >= 0; i-- { // API returns newest first
+		m := msgs[i]
+		if m.Author == nil {
+			continue
+		}
+		text := m.ContentWithMentionsReplaced()
+		if m.ReferencedMessage != nil && m.ReferencedMessage.Author != nil {
+			q := []rune(m.ReferencedMessage.Content)
+			if len(q) > 40 {
+				q = append(q[:40], '…')
+			}
+			text = "[回复 " + m.ReferencedMessage.Author.Username + "：" + string(q) + "] " + text
+		}
+		if text == "" && len(m.Embeds) > 0 {
+			continue // progress cards and other embeds-only notices
+		}
+		if n := len(m.Attachments); n > 0 {
+			text = strings.TrimSpace(text + fmt.Sprintf("（附了 %d 个图片/文件）", n))
+		}
+		out = append(out, core.ChannelHistoryMessage{
+			ID: m.ID, Author: m.Author.Username, IsBot: m.Author.Bot,
+			IsSelf: m.Author.ID == p.botID, Content: text, Time: m.Timestamp,
+		})
+	}
+	return out, nil
+}
+
 func (p *Platform) ResolveChannelName(channelID string) (string, error) {
 	if cached, ok := p.channelNameCache.Load(channelID); ok {
 		return cached.(string), nil
@@ -1830,7 +1873,8 @@ func (p *Platform) applyHandoffPolicy(s *discordgo.Session, m *discordgo.Message
 // acks) that carry nothing a teammate should read.
 func isBotNotice(content string) bool {
 	c := strings.TrimSpace(content)
-	for _, prefix := range []string{"📬", "✅", "❌", "↪", "⏳", "⚠️", "🔄", "⏹", "⏸"} {
+	// ❌ and ⚠️ are not filtered (maomao fork): a teammate's error must reach the lead.
+	for _, prefix := range []string{"📬", "✅", "↪", "⏳", "🔄", "⏹", "⏸"} {
 		if strings.HasPrefix(c, prefix) {
 			return true
 		}
