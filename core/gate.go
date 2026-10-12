@@ -63,6 +63,28 @@ type gateRequest struct {
 	HasImages  bool     `json:"has_images"`
 	HasFiles   bool     `json:"has_files"`
 	Buffered   []string `json:"buffered"`
+	// LastReply is the tail of this bot's last answer in the session, so the gate can tell
+	// "可以" answering its question from idle chatter. LastReplyAge is seconds since then.
+	LastReply    string `json:"last_reply,omitempty"`
+	LastReplyAge int    `json:"last_reply_age_s,omitempty"`
+}
+
+const lastReplyMaxRunes = 600
+
+// lastReply returns the tail of the session's latest assistant message and its age in seconds.
+func lastReply(session *Session) (string, int) {
+	h := session.GetHistory(4)
+	for i := len(h) - 1; i >= 0; i-- {
+		if h[i].Role != "assistant" {
+			continue
+		}
+		r := []rune(strings.TrimSpace(h[i].Content))
+		if len(r) > lastReplyMaxRunes {
+			r = r[len(r)-lastReplyMaxRunes:]
+		}
+		return string(r), int(time.Since(h[i].Timestamp).Seconds())
+	}
+	return "", 0
 }
 
 type gateResponse struct {
@@ -175,9 +197,11 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	buffered := append([]string(nil), g.buf[interactiveKey]...)
 	g.mu.Unlock()
 
+	last, lastAge := lastReply(session)
 	dec := g.decide(e.ctx, gateRequest{
 		SessionKey: msg.SessionKey, Content: msg.Content, Mentioned: msg.Mentioned, Busy: busy,
 		HasImages: len(msg.Images) > 0, HasFiles: len(msg.Files) > 0, Buffered: buffered,
+		LastReply: last, LastReplyAge: lastAge,
 	})
 	slog.Info("gate decision", "session", msg.SessionKey, "action", dec.Action, "busy", busy,
 		"mentioned", msg.Mentioned, "buffered", len(buffered), "reason", dec.Reason)
