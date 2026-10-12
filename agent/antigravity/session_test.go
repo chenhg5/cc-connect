@@ -289,7 +289,7 @@ func TestAntigravitySession_ReportsHeadlessExitFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			if err := s.Send("test", "", nil, nil); err != nil {
 				t.Fatal(err)
 			}
