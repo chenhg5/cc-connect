@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -342,6 +343,81 @@ func TestSessionContextForKey_SharedBinding(t *testing.T) {
 	}
 	if got := e.workspacePool.Get(normalizeWorkspacePath(wsDir)); got == nil || got.agent == nil || got.sessions == nil {
 		t.Fatal("expected workspace pool entry to be created for shared binding")
+	}
+}
+
+func TestGetOrCreateWorkspaceAgent_InvalidatesStaleSessionIDs(t *testing.T) {
+	baseDir := t.TempDir()
+	dataDir := t.TempDir()
+	sessionPath := filepath.Join(dataDir, "sessions.json")
+	bindingPath := filepath.Join(dataDir, "bindings.json")
+	agentName := "test-multiworkspace-invalidate-agent"
+
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		return &namedTestAgent{name: agentName}, nil
+	})
+
+	e := NewEngine("test", &namedTestAgent{name: agentName}, nil, sessionPath, LangEnglish)
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	workspaceDir := normalizeWorkspacePath(filepath.Join(baseDir, "workspace"))
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h := sha256.Sum256([]byte(workspaceDir))
+	workspaceSessionPath := filepath.Join(dataDir, fmt.Sprintf("%s_ws_%x.json", e.name, h[:4]))
+	t.Cleanup(func() {
+		_ = os.Remove(workspaceSessionPath)
+	})
+
+	store := NewSessionManager(workspaceSessionPath)
+	stale := store.GetOrCreateActive("feishu:channel1:user1")
+	stale.SetAgentSessionID("old-claudecode-session", "claudecode")
+	keep := store.NewSession("feishu:channel1:user1", "keep")
+	keep.SetAgentSessionID("keep-opencode-session", agentName)
+	store.Save()
+
+	agent, sessions, err := e.getOrCreateWorkspaceAgent(workspaceDir)
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent: %v", err)
+	}
+	if agent == nil || sessions == nil {
+		t.Fatalf("expected workspace agent and session manager, got agent=%v sessions=%v", agent, sessions)
+	}
+
+	loadedStale := sessions.FindByID(stale.ID)
+	if loadedStale == nil {
+		t.Fatalf("stale session %q not loaded", stale.ID)
+	}
+	if got := loadedStale.AgentSessionID; got != "" {
+		t.Fatalf("stale session id = %q, want cleared", got)
+	}
+	if got := loadedStale.AgentType; got != agentName {
+		t.Fatalf("stale session agent type = %q, want %q", got, agentName)
+	}
+
+	loadedKeep := sessions.FindByID(keep.ID)
+	if loadedKeep == nil {
+		t.Fatalf("kept session %q not loaded", keep.ID)
+	}
+	if got := loadedKeep.AgentSessionID; got != "keep-opencode-session" {
+		t.Fatalf("kept session id = %q, want preserved", got)
+	}
+	if got := loadedKeep.AgentType; got != agentName {
+		t.Fatalf("kept session agent type = %q, want %q", got, agentName)
+	}
+
+	reloaded := NewSessionManager(workspaceSessionPath)
+	reloadedStale := reloaded.FindByID(stale.ID)
+	if reloadedStale == nil {
+		t.Fatalf("stale session %q not persisted", stale.ID)
+	}
+	if got := reloadedStale.AgentSessionID; got != "" {
+		t.Fatalf("persisted stale session id = %q, want cleared", got)
+	}
+	if got := reloadedStale.AgentType; got != agentName {
+		t.Fatalf("persisted stale session agent type = %q, want %q", got, agentName)
 	}
 }
 

@@ -390,6 +390,78 @@ func TestHandleMsgCallback_StripsBotMention(t *testing.T) {
 	}
 }
 
+func TestHandleMsgCallback_SeparatesQuotedTextFromCurrentInstruction(t *testing.T) {
+	p, captured := newCapturedWSPlatform()
+	p.botID = "robot01"
+
+	body := wsMsgCallbackBody{
+		MsgID:      "msg_quote",
+		ChatID:     "grp1",
+		ChatType:   "group",
+		MsgType:    "text",
+		AibotID:    "robot01",
+		CreateTime: time.Now().Unix(),
+		Quote: &wsQuoteBlock{
+			MsgType: "text",
+			Text: &struct {
+				Content string `json:"content"`
+			}{Content: "请检查这段旧代码"},
+		},
+	}
+	body.From.UserID = "u1"
+	body.Text.Content = "@Robot01 修复这个问题"
+
+	p.handleMsgCallback(wsCallbackFrame(t, "req_quote", body))
+
+	select {
+	case msg := <-captured:
+		if got, want := msg.Content, "修复这个问题"; got != want {
+			t.Fatalf("Content = %q, want %q", got, want)
+		}
+		if got, want := msg.ExtraContent, "[Quoted message]:\n请检查这段旧代码\n\n"; got != want {
+			t.Fatalf("ExtraContent = %q, want %q", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler not called")
+	}
+}
+
+func TestHandleMsgCallback_MentionOnlyWithQuoteStillDispatches(t *testing.T) {
+	p, captured := newCapturedWSPlatform()
+	p.botID = "robot01"
+
+	body := wsMsgCallbackBody{
+		MsgID:      "msg_quote_mention_only",
+		ChatID:     "grp1",
+		ChatType:   "group",
+		MsgType:    "text",
+		AibotID:    "robot01",
+		CreateTime: time.Now().Unix(),
+		Quote: &wsQuoteBlock{
+			MsgType: "text",
+			Text: &struct {
+				Content string `json:"content"`
+			}{Content: "总结这段内容"},
+		},
+	}
+	body.From.UserID = "u1"
+	body.Text.Content = "@Robot01"
+
+	p.handleMsgCallback(wsCallbackFrame(t, "req_quote_mention_only", body))
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "" {
+			t.Fatalf("Content = %q, want empty current instruction", msg.Content)
+		}
+		if got, want := msg.ExtraContent, "[Quoted message]:\n总结这段内容\n\n"; got != want {
+			t.Fatalf("ExtraContent = %q, want %q", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler not called")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ReconstructReplyCtx
 // ---------------------------------------------------------------------------
@@ -1022,5 +1094,50 @@ func TestNewWebSocket_ValidConfig(t *testing.T) {
 	ws := p.(*WSPlatform)
 	if ws.botID != "aibTest" || ws.secret != "secretXYZ" || ws.allowFrom != "user1,user2" {
 		t.Fatalf("unexpected config: botID=%s secret=%s allowFrom=%s", ws.botID, ws.secret, ws.allowFrom)
+	}
+}
+
+func TestNewWebSocket_DefaultWSEndpoint(t *testing.T) {
+	p, err := newWebSocket(map[string]any{
+		"bot_id":     "aibTest",
+		"bot_secret": "secretXYZ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := p.(*WSPlatform)
+	if ws.wsURL != wsEndpoint {
+		t.Fatalf("expected default wsURL %q, got %q", wsEndpoint, ws.wsURL)
+	}
+}
+
+func TestNewWebSocket_CustomWSEndpoint(t *testing.T) {
+	const custom = "wss://corp.example.com:85/im_openws?bizid=1"
+	p, err := newWebSocket(map[string]any{
+		"bot_id":     "aibTest",
+		"bot_secret": "secretXYZ",
+		"ws_url":     custom,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := p.(*WSPlatform)
+	if ws.wsURL != custom {
+		t.Fatalf("expected custom wsURL %q, got %q", custom, ws.wsURL)
+	}
+}
+
+func TestNewWebSocket_BlankWSEndpointFallsBack(t *testing.T) {
+	p, err := newWebSocket(map[string]any{
+		"bot_id":     "aibTest",
+		"bot_secret": "secretXYZ",
+		"ws_url":     "   ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := p.(*WSPlatform)
+	if ws.wsURL != wsEndpoint {
+		t.Fatalf("expected blank ws_url to fall back to %q, got %q", wsEndpoint, ws.wsURL)
 	}
 }

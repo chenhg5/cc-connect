@@ -304,6 +304,131 @@ func TestDispatchMessageKeepsMentionOnlyQuotedText(t *testing.T) {
 	}
 }
 
+// TestOnMessageThreadIsolationBootstrapsExistingThreadContext covers the case
+// where a thread root was posted without mentioning the bot. The root is not
+// dispatched, so the first later @bot reply must fetch the parent/root once
+// instead of assuming the new thread session already contains that context.
+func TestOnMessageThreadIsolationBootstrapsExistingThreadContext(t *testing.T) {
+	const (
+		appID        = "cli_thread_bootstrap"
+		appSecret    = "secret-thread-bootstrap"
+		botOpenID    = "ou_bot"
+		userOpenID   = "ou_user"
+		chatID       = "oc_chat"
+		rootMsgID    = "om_root"
+		triggerMsgID = "om_trigger"
+	)
+
+	got := make(chan *core.Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+rootMsgID:
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"msg_type":  "post",
+							"parent_id": "",
+							"sender": map[string]any{
+								"id":          "ou_root_author",
+								"sender_type": "user",
+							},
+							"body": map[string]any{
+								"content": `{"title":"环境信息","content":[[{"tag":"text","text":"审核 PBS: yingshi_video_i2v_input-text-cn"}]]}`,
+							},
+						},
+					},
+				},
+			})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/contact/v3/users/"):
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/chats/"):
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:    "feishu",
+		domain:          srv.URL,
+		appID:           appID,
+		appSecret:       appSecret,
+		botOpenID:       botOpenID,
+		threadIsolation: true,
+		dedup:           &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+
+	chatType := "group"
+	senderType := "user"
+	msgType := "text"
+	content := `{"text":"@_user_1 看看这个"}`
+	createTime := strconv.FormatInt(time.Now().Add(time.Second).UnixMilli(), 10)
+	threadID := "omt_thread"
+
+	err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: strPtr(userOpenID)},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   strPtr(triggerMsgID),
+				RootId:      strPtr(rootMsgID),
+				ThreadId:    &threadID,
+				ChatId:      strPtr(chatID),
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+				Mentions: []*larkim.MentionEvent{
+					{
+						Key:  strPtr("@_user_1"),
+						Id:   &larkim.UserId{OpenId: strPtr(botOpenID)},
+						Name: strPtr("Bot"),
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case msg := <-got:
+		if msg.SessionKey != "feishu:"+chatID+":root:"+rootMsgID {
+			t.Fatalf("SessionKey = %q, want thread root session", msg.SessionKey)
+		}
+		if msg.Content != "看看这个" {
+			t.Fatalf("Content = %q, want trigger text", msg.Content)
+		}
+		if !strings.Contains(msg.ExtraContent, "审核 PBS: yingshi_video_i2v_input-text-cn") {
+			t.Fatalf("ExtraContent = %q, want existing thread root content", msg.ExtraContent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for bootstrapped thread message")
+	}
+}
+
 func TestOnMessageRepliesToUnauthorizedMention(t *testing.T) {
 	const appID = "cli_unauthorized"
 	const appSecret = "secret-unauthorized"
@@ -394,6 +519,94 @@ func TestOnMessageRepliesToUnauthorizedMention(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for unauthorized reply")
+	}
+}
+
+func TestOnMessageDropsUnauthorizedOverheardGroupMessage(t *testing.T) {
+	const appID = "cli_unauthorized_silent"
+	const appSecret = "secret-unauthorized-silent"
+	const botOpenID = "ou_bot"
+	const userOpenID = "ou_blocked"
+
+	replyBodies := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/reply"):
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read reply body: %v", err)
+			}
+			replyBodies <- string(body)
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{"message_id": "om_reply_ok"},
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:  "feishu",
+		domain:        srv.URL,
+		appID:         appID,
+		appSecret:     appSecret,
+		allowFrom:     "ou_allowed",
+		botOpenID:     botOpenID,
+		groupReplyAll: true,
+		dedup:         &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(core.Platform, *core.Message) {
+			t.Fatal("handler should not run for unauthorized sender")
+		},
+	}
+
+	// A group message with no @bot mention: the platform only sees it because
+	// group_reply_all is enabled. Unauthorized senders must be dropped
+	// silently here — replying would announce the rejection for every single
+	// message in the chat.
+	chatType := "group"
+	msgType := "text"
+	senderType := "user"
+	content := `{"text":"hello"}`
+	createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	err := p.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: stringPtr(userOpenID)},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_unauthorized_silent"),
+				ChatId:      stringPtr("oc_group"),
+				ChatType:    &chatType,
+				MessageType: &msgType,
+				Content:     &content,
+				CreateTime:  &createTime,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("onMessage() error = %v", err)
+	}
+
+	select {
+	case got := <-replyBodies:
+		t.Fatalf("unexpected reply to overheard unauthorized message: %q", got)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
@@ -889,6 +1102,42 @@ func TestExtractPostPlainText_CodeBlock(t *testing.T) {
 	}
 }
 
+// TestExtractPostPlainText_HrTag is a regression test for issue #508
+// (related #470/#472). Lark posts use the `hr` element to mark a
+// horizontal rule boundary between sections of a quoted post; the
+// extractor must surface it as a standalone `---` so the agent
+// understands the section break instead of silently dropping it.
+func TestExtractPostPlainText_HrTag(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "hr_alone",
+			content: `{"content":[[{"tag":"hr"}]]}`,
+			want:    "---",
+		},
+		{
+			name:    "hr_after_text",
+			content: `{"content":[[{"tag":"text","text":"before"},{"tag":"hr"},{"tag":"text","text":"after"}]]}`,
+			want:    "before\n---\nafter",
+		},
+		{
+			name:    "hr_between_paragraphs",
+			content: `{"content":[[{"tag":"text","text":"first"}],[{"tag":"hr"}],[{"tag":"text","text":"second"}]]}`,
+			want:    "first\n---\nsecond",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractPostPlainText(tc.content); got != tc.want {
+				t.Errorf("extractPostPlainText(%q) = %q, want %q", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
 func strPtr(s string) *string { return &s }
 
 func TestStripMentions(t *testing.T) {
@@ -1036,7 +1285,9 @@ func TestMarkAndIsActiveThreadSession(t *testing.T) {
 
 	t.Run("thread isolation disabled is no-op", func(t *testing.T) {
 		p := &Platform{threadIsolation: false}
-		p.markThreadSessionActive(threadKey)
+		if p.markThreadSessionActive(threadKey) {
+			t.Fatal("disabled thread isolation must not report activation")
+		}
 		if p.isActiveThreadSession(threadKey) {
 			t.Fatal("expected no-op when thread_isolation is off")
 		}
@@ -1044,7 +1295,9 @@ func TestMarkAndIsActiveThreadSession(t *testing.T) {
 
 	t.Run("non-thread sessionKey is ignored", func(t *testing.T) {
 		p := &Platform{threadIsolation: true}
-		p.markThreadSessionActive(directKey)
+		if p.markThreadSessionActive(directKey) {
+			t.Fatal("non-thread session must not report activation")
+		}
 		if p.isActiveThreadSession(directKey) {
 			t.Fatal("expected non-thread sessionKey to be ignored")
 		}
@@ -1055,9 +1308,14 @@ func TestMarkAndIsActiveThreadSession(t *testing.T) {
 		if p.isActiveThreadSession(threadKey) {
 			t.Fatal("thread should not be active before mark")
 		}
-		p.markThreadSessionActive(threadKey)
+		if !p.markThreadSessionActive(threadKey) {
+			t.Fatal("first mark should report activation")
+		}
 		if !p.isActiveThreadSession(threadKey) {
 			t.Fatal("thread should be active after mark")
+		}
+		if p.markThreadSessionActive(threadKey) {
+			t.Fatal("subsequent mark must not report a second activation")
 		}
 	})
 }
@@ -1924,4 +2182,248 @@ func TestFlushImageBatchesEmptySafe(t *testing.T) {
 	}
 	// Should not panic, should not block.
 	p.flushImageBatches()
+}
+
+// TestFlushImageBatchForSession verifies the per-session flush helper added
+// for #1686 P1-B. When a non-image message (text/audio/file/post/media/...)
+// arrives for the same session that has a pending image batch, the batch
+// must be dispatched BEFORE the new message so core/engine's create_time
+// watermark does not drop the image as stale.
+func TestFlushImageBatchForSession(t *testing.T) {
+	const appID = "cli_per_session"
+	const appSecret = "secret-per-session"
+	const imageKey = "img_per_session"
+
+	imageBytes := []byte{0x89, 'P', 'N', 'G', 'F', '\r', '\n', 0x1a, '\n'}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.HasSuffix(r.URL.Path, "/resources/"+imageKey):
+			w.Header().Set("Content-Type", "image/png")
+			if _, err := w.Write(imageBytes); err != nil {
+				t.Fatalf("write image: %v", err)
+			}
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success", "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	received := make(chan *core.Message, 2)
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		dedup:        &core.MessageDedup{},
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+		imageBatch: make(map[string]*imageBatchEntry),
+	}
+
+	sessionKey := "feishu:oc_per_session:ou_user"
+
+	// Buffer a single image for the session. Use a long batch window so the
+	// timer doesn't fire on its own before we exercise the flush path.
+	p.imageBatchWindow = 5 * time.Second
+	p.bufferImage(sessionKey, &imageBatchEntry{
+		sessionKey:   sessionKey,
+		userID:       "ou_user",
+		chatName:     "oc_per_session",
+		rctx:         replyContext{messageID: "om_per_session", chatID: "oc_per_session", sessionKey: sessionKey},
+		images:       []core.ImageAttachment{{MimeType: "image/png", Data: imageBytes}},
+		messageIDs:   []string{"om_per_session"},
+		createTimeMs: 1710000000000,
+	})
+
+	// Confirm the batch is buffered.
+	p.imageBatchMu.Lock()
+	if len(p.imageBatch) != 1 {
+		p.imageBatchMu.Unlock()
+		t.Fatalf("imageBatch size = %d before flush, want 1", len(p.imageBatch))
+	}
+	p.imageBatchMu.Unlock()
+
+	// Flush only this session. The image must be dispatched synchronously.
+	p.flushImageBatchForSession(sessionKey)
+
+	p.imageBatchMu.Lock()
+	batchSize := len(p.imageBatch)
+	p.imageBatchMu.Unlock()
+	if batchSize != 0 {
+		t.Fatalf("imageBatch size = %d after flushImageBatchForSession, want 0", batchSize)
+	}
+
+	select {
+	case msg := <-received:
+		if len(msg.Images) != 1 {
+			t.Fatalf("flushed message has %d images, want 1", len(msg.Images))
+		}
+		if msg.SessionKey != sessionKey {
+			t.Errorf("flushed message session = %q, want %q", msg.SessionKey, sessionKey)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("flushImageBatchForSession did not synchronously dispatch the batch")
+	}
+}
+
+// TestFlushImageBatchForSession_NoBatchIsSafe verifies the per-session flush
+// helper is a safe no-op when nothing is buffered for that session (the
+// common case for sessions that only ever send text).
+func TestFlushImageBatchForSession_NoBatchIsSafe(t *testing.T) {
+	p := &Platform{
+		platformName: "feishu",
+		imageBatch:   make(map[string]*imageBatchEntry),
+	}
+	// No panic, no block, no entries changed.
+	p.flushImageBatchForSession("feishu:oc_empty:ou_user")
+	p.flushImageBatchForSession("") // empty session key is also a safe no-op
+	if n := len(p.imageBatch); n != 0 {
+		t.Fatalf("imageBatch size = %d, want 0", n)
+	}
+}
+
+// --- Issue #1884: top-level files[] of a rich-text (post) message ------
+
+func TestParsePostFiles_FlatFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	raw := `{"title":"","content":[[{"tag":"text","text":"按这个表里的字段,重新填充"}]],"files":[{"file_key":"file_v3_0015o_b1621303","file_name":"Huidive -询盘跟进表.xlsx","is_folder":false}]}`
+	got := p.parsePostFiles(raw)
+	if len(got) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(got))
+	}
+	if got[0].FileKey != "file_v3_0015o_b1621303" {
+		t.Fatalf("FileKey = %q, want file_v3_0015o_b1621303", got[0].FileKey)
+	}
+	if got[0].FileName != "Huidive -询盘跟进表.xlsx" {
+		t.Fatalf("FileName = %q, want Huidive -询盘跟进表.xlsx", got[0].FileName)
+	}
+	if got[0].IsFolder {
+		t.Fatal("IsFolder = true, want false")
+	}
+}
+
+func TestParsePostFiles_LangKeyedFormat(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	raw := `{"zh_cn":{"title":"","content":[[{"tag":"text","text":"看这个"}]],"files":[{"file_key":"file_lang_k","file_name":"LANG.pdf"}]}}`
+	got := p.parsePostFiles(raw)
+	if len(got) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(got))
+	}
+	if got[0].FileKey != "file_lang_k" {
+		t.Fatalf("FileKey = %q, want file_lang_k", got[0].FileKey)
+	}
+	if got[0].FileName != "LANG.pdf" {
+		t.Fatalf("FileName = %q, want LANG.pdf", got[0].FileName)
+	}
+}
+
+func TestParsePostFiles_NoFiles(t *testing.T) {
+	p := &Platform{platformName: "feishu"}
+	raw := `{"title":"","content":[[{"tag":"text","text":"just text, no files"}]]}`
+	if got := p.parsePostFiles(raw); len(got) != 0 {
+		t.Fatalf("len(files) = %d, want 0", len(got))
+	}
+}
+
+func TestDispatchMessagePostWithFiles(t *testing.T) {
+	const appID = "cli_post_files"
+	const appSecret = "secret-post-files"
+	const messageID = "om_post_files"
+	const fileKey = "file_v3_0015o_post"
+	fileBytes := []byte("fake-xlsx-bytes-here")
+
+	got := make(chan *core.Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+messageID+"/resources/"+fileKey:
+			if r.URL.Query().Get("type") != "file" {
+				t.Fatalf("resource type = %q, want file", r.URL.Query().Get("type"))
+			}
+			if _, err := w.Write(fileBytes); err != nil {
+				t.Fatalf("write file: %v", err)
+			}
+		case strings.HasPrefix(r.URL.Path, "/open-apis/contact/v3/users/"):
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/chats/"):
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+
+	content := `{"title":"","content":[[{"tag":"text","text":"按这个表里的字段,重新填充"}]],"files":[{"file_key":"` + fileKey + `","file_name":"Huidive -询盘跟进表.xlsx","is_folder":false}]}`
+	p.dispatchMessage(
+		context.Background(),
+		"post",
+		content,
+		nil,
+		messageID,
+		"feishu:oc_chat:ou_user",
+		"ou_user",
+		"oc_chat",
+		replyContext{messageID: messageID, sessionKey: "feishu:oc_chat:ou_user"},
+		"",
+		0,
+	)
+
+	select {
+	case msg := <-got:
+		if msg.Content != "按这个表里的字段,重新填充" {
+			t.Fatalf("Content = %q, want 按这个表里的字段,重新填充", msg.Content)
+		}
+		if len(msg.Files) != 1 {
+			t.Fatalf("len(Files) = %d, want 1", len(msg.Files))
+		}
+		if msg.Files[0].FileName != "Huidive -询盘跟进表.xlsx" {
+			t.Fatalf("Files[0].FileName = %q, want Huidive -询盘跟进表.xlsx", msg.Files[0].FileName)
+		}
+		if string(msg.Files[0].Data) != string(fileBytes) {
+			t.Fatal("Files[0].Data did not match downloaded resource bytes")
+		}
+		if msg.Files[0].MimeType == "" {
+			t.Fatal("Files[0].MimeType is empty; detectMimeType should populate it")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatched message")
+	}
 }

@@ -93,6 +93,26 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Full Auto | `full-auto` | Auto-approve with sandbox |
 | YOLO | `yolo` | Bypass all approvals and sandbox |
 
+### Codex CLI discovery on macOS
+
+The Codex adapter resolves its executable in this order:
+
+1. The project `cmd` option (including the deprecated `cli_path` / `command` aliases).
+2. `CODEX_CLI_PATH` from the environment that starts cc-connect, when no command is configured.
+3. An executable `codex` on that process's `PATH`.
+4. On macOS, `/Applications/ChatGPT.app`, then `/Applications/Codex.app`. Within each app, the current `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` layout is checked before the legacy `Contents/Resources/codex` layout.
+
+Desktop discovery handles a missing PATH command or a broken PATH symlink. An explicit command or `CODEX_CLI_PATH` must be executable; an invalid override reports an error. Discovery is repeated before each CLI process starts so an app update can change the bundled layout. Linux and Windows continue to use the configured command or PATH.
+
+Both `exec` and `app_server`, runtime configuration reads, skill queries, and `/doctor` use this selection. Use the array form for paths containing spaces or additional CLI arguments:
+
+```toml
+[projects.agent.options]
+cmd = ["/path with spaces/codex", "--profile", "work"]
+```
+
+This runs the bundled CLI using the existing Codex adapter. Desktop-only tools and shared-thread locking have separate requirements; see [Desktop backend discussion #651](https://github.com/chenhg5/cc-connect/issues/651) and [thread writer conflict #1909](https://github.com/chenhg5/cc-connect/issues/1909).
+
 ### Cursor Agent Modes
 
 | Mode | Config Value | Behavior |

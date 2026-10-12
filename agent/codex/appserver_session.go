@@ -141,6 +141,8 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
+	cliBin         string
+	cliExtraArgs   []string
 	url            string
 	workDir        string
 	model          string
@@ -191,9 +193,11 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
+		cliBin:           cliBin,
+		cliExtraArgs:     append([]string(nil), cliExtraArgs...),
 		url:              url,
 		workDir:          workDir,
 		model:            model,
@@ -234,10 +238,31 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 	return s, nil
 }
 
+// appServerListenURL returns the --listen value for the spawn. A stdio
+// transport ("stdio" / "stdio://", case-insensitive, matching
+// normalizeAppServerURL's EqualFold handling) must not open a listener:
+// on codex 0.152+ any --listen value switches the app-server to serve the
+// protocol over the listener only, leaving stdio unresponsive and timing
+// out every initialize (see #1781).
+func appServerListenURL(url string) string {
+	listenURL := strings.TrimSpace(url)
+	if strings.EqualFold(listenURL, "stdio://") || strings.EqualFold(listenURL, "stdio") {
+		return ""
+	}
+	return listenURL
+}
+
 func (s *appServerSession) connect() error {
 	args := []string{"app-server"}
-	if strings.TrimSpace(s.url) != "" {
-		args = append(args, "--listen", strings.TrimSpace(s.url))
+	// With url "stdio://" the session speaks JSON-RPC over the stdio pipes.
+	// Pass no --listen flag in that case: on codex 0.152+ a --listen value
+	// (including ws://) switches the app-server to serve the protocol over
+	// the listener only, leaving stdio unresponsive and causing every
+	// initialize request to time out (see #1781). --listen stdio:// is kept
+	// for explicitness on older codex versions where it is a no-op, but a
+	// bare stdio transport should simply not open a listener.
+	if listenURL := appServerListenURL(s.url); listenURL != "" {
+		args = append(args, "--listen", listenURL)
 	}
 	if model := strings.TrimSpace(s.model); model != "" {
 		args = append(args, "-c", fmt.Sprintf("model=%q", model))
@@ -251,7 +276,12 @@ func (s *appServerSession) connect() error {
 	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
 	}
-	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	bin, err := resolveCodexExecutable(s.cliBin)
+	if err != nil {
+		return fmt.Errorf("codex app-server resolve CLI: %w", err)
+	}
+	args = append(append([]string(nil), s.cliExtraArgs...), args...)
+	cmd := exec.CommandContext(s.ctx, bin, args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {
@@ -1126,7 +1156,18 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.completeTurn()
+			if strings.EqualFold(strings.TrimSpace(notif.Turn.Status), "failed") || notif.Turn.Error != nil {
+				errMsg := ""
+				if notif.Turn.Error != nil {
+					errMsg = strings.TrimSpace(notif.Turn.Error.Message)
+				}
+				if errMsg == "" {
+					errMsg = "turn failed (no details)"
+				}
+				s.failTurn(fmt.Errorf("%s", errMsg))
+			} else {
+				s.completeTurn()
+			}
 		}
 
 	case "thread/status/changed":
@@ -1518,6 +1559,18 @@ func (s *appServerSession) completeTurn() {
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+}
+
+func (s *appServerSession) failTurn(err error) {
+	s.stateMu.Lock()
+	if s.currentTurn == "" {
+		s.stateMu.Unlock()
+		return
+	}
+	s.currentTurn = ""
+	s.pendingMsgs = s.pendingMsgs[:0]
+	s.stateMu.Unlock()
+	s.emitError(err)
 }
 
 func (s *appServerSession) flushPendingAsThinking() {

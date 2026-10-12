@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -35,7 +36,8 @@ func init() {
 //   - "default": standard mode (non-interactive `--prompt` auto-approves tools)
 //   - "yolo":    auto-approve all tool calls
 //   - "plan":    read-only plan mode
-//   - "quiet":   alias for --quiet (print + text + final-message-only)
+//   - "quiet":   final-message-only; uses --quiet on legacy kimi-cli, local
+//     event suppression on the Kimi Code CLI (which dropped --quiet, #1561)
 type Agent struct {
 	workDir      string
 	model        string
@@ -50,6 +52,8 @@ type Agent struct {
 	flagSupport  kimiFlagSupport // detected once at New() via `kimi --help`
 	mu           sync.RWMutex
 }
+
+var _ core.HistoryProvider = (*Agent)(nil)
 
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
@@ -135,6 +139,13 @@ func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.model = model
+	// Workspace-scoped model changes are intentionally not persisted through
+	// core's provider save callback. Keep the active provider's in-memory model
+	// in sync so StartSession does not overwrite the selection with its old
+	// value on the next turn.
+	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
+		a.providers[a.activeIdx].Model = model
+	}
 	slog.Info("kimi: model changed", "model", model)
 }
 
@@ -154,12 +165,94 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
+	if models := a.discoverModels(ctx); len(models) > 0 {
+		return models
+	}
 	return []core.ModelOption{
 		{Name: "kimi-k2-0711-preview", Desc: "Kimi K2 (most capable)"},
 		{Name: "kimi-k2-0711", Desc: "Kimi K2"},
 		{Name: "kimi-k2-5-preview", Desc: "Kimi K2.5 (balanced)"},
 		{Name: "kimi-k2-5", Desc: "Kimi K2.5"},
 	}
+}
+
+type kimiModelDiscoverySnapshot struct {
+	cmd       string
+	extraArgs []string
+	workDir   string
+	env       []string
+}
+
+func (a *Agent) modelDiscoverySnapshot() kimiModelDiscoverySnapshot {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	env := append([]string(nil), a.configEnv...)
+	env = append(env, a.providerEnvLocked()...)
+	env = append(env, a.sessionEnv...)
+	return kimiModelDiscoverySnapshot{
+		cmd:       a.cmd,
+		extraArgs: append([]string(nil), a.cliExtraArgs...),
+		workDir:   a.workDir,
+		env:       env,
+	}
+}
+
+// discoverModels asks Kimi Code for the same model aliases shown by its own
+// model picker. The command output also contains provider configuration, so it
+// is decoded into a narrow struct and is never logged.
+func (a *Agent) discoverModels(ctx context.Context) []core.ModelOption {
+	snapshot := a.modelDiscoverySnapshot()
+	if snapshot.cmd == "" {
+		return nil
+	}
+
+	args := append(snapshot.extraArgs, "provider", "list", "--json")
+	cmd := exec.CommandContext(ctx, snapshot.cmd, args...)
+	cmd.Dir = snapshot.workDir
+	if len(snapshot.env) > 0 {
+		cmd.Env = append(os.Environ(), snapshot.env...)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		slog.Debug("kimi: model discovery failed", "error", err)
+		return nil
+	}
+
+	models, err := parseKimiModels(out)
+	if err != nil {
+		slog.Debug("kimi: parse model discovery output failed", "error", err)
+		return nil
+	}
+	return models
+}
+
+func parseKimiModels(data []byte) ([]core.ModelOption, error) {
+	var catalog struct {
+		Models map[string]struct {
+			DisplayName string `json:"displayName"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		return nil, fmt.Errorf("decode provider list: %w", err)
+	}
+
+	models := make([]core.ModelOption, 0, len(catalog.Models))
+	for alias, model := range catalog.Models {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			continue
+		}
+		desc := strings.TrimSpace(model.DisplayName)
+		if desc == alias {
+			desc = ""
+		}
+		models = append(models, core.ModelOption{Name: alias, Desc: desc})
+	}
+	sort.Slice(models, func(i, j int) bool {
+		return models[i].Name < models[j].Name
+	})
+	return models, nil
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
@@ -191,11 +284,50 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	return listKimiSessions(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	return listKimiSessions(workDir, a.storageEnv()...)
+}
+
+// GetSessionHistory reads the transcript produced by either the legacy
+// kimi-cli or the current Kimi Code CLI.
+func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
+	sessionDir := findKimiSessionDir(sessionID, a.storageEnv()...)
+	if sessionDir == "" {
+		return nil, fmt.Errorf("kimi: session not found: %s", sessionID)
+	}
+
+	contextPath := filepath.Join(sessionDir, "context.jsonl")
+	entries, err := readKimiHistoryFile(contextPath, readKimiContextHistory)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("kimi: read legacy session history: %w", err)
+	}
+	if len(entries) == 0 {
+		wirePath := filepath.Join(sessionDir, "agents", "main", "wire.jsonl")
+		entries, err = readKimiHistoryFile(wirePath, readKimiWireHistory)
+		if err != nil {
+			return nil, fmt.Errorf("kimi: read session history: %w", err)
+		}
+	}
+
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries, nil
+}
+
+func readKimiHistoryFile(path string, parse func(io.Reader) ([]core.HistoryEntry, error)) ([]core.HistoryEntry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return parse(f)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
-	path := findKimiSessionDir(sessionID)
+	path := findKimiSessionDir(sessionID, a.storageEnv()...)
 	if path == "" {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
@@ -325,51 +457,71 @@ func (a *Agent) providerEnvLocked() []string {
 
 // ── Session listing ─────────────────────────────────────────────
 
-func kimiSessionsBaseDir() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(homeDir, ".kimi", "sessions")
+func (a *Agent) storageEnv() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	env := append([]string(nil), a.configEnv...)
+	env = append(env, a.providerEnvLocked()...)
+	return append(env, a.sessionEnv...)
 }
 
-func listKimiSessions(workDir string) ([]core.AgentSessionInfo, error) {
+// kimiSessionsBaseDirs returns the session storage roots of both CLI
+// flavors. Legacy kimi-cli uses ~/.kimi/sessions; Kimi Code uses
+// $KIMI_CODE_HOME/sessions or ~/.kimi-code/sessions by default (#1561).
+func kimiSessionsBaseDirs(extraEnv ...string) []string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	codeHome := os.Getenv("KIMI_CODE_HOME")
+	for _, entry := range extraEnv {
+		if value, ok := strings.CutPrefix(entry, "KIMI_CODE_HOME="); ok {
+			codeHome = value
+		}
+	}
+	if codeHome == "" {
+		codeHome = filepath.Join(homeDir, ".kimi-code")
+	}
+	return []string{
+		filepath.Join(homeDir, ".kimi", "sessions"),
+		filepath.Join(codeHome, "sessions"),
+	}
+}
+
+func listKimiSessions(workDir string, extraEnv ...string) ([]core.AgentSessionInfo, error) {
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		absWorkDir = workDir
 	}
 
-	sessionsBase := kimiSessionsBaseDir()
-	if sessionsBase == "" {
-		return nil, nil
-	}
-
-	entries, err := os.ReadDir(sessionsBase)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("kimi: read sessions dir: %w", err)
-	}
-
 	var sessions []core.AgentSessionInfo
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		projectDir := filepath.Join(sessionsBase, entry.Name())
-		sessionEntries, err := os.ReadDir(projectDir)
+	for _, sessionsBase := range kimiSessionsBaseDirs(extraEnv...) {
+		entries, err := os.ReadDir(sessionsBase)
 		if err != nil {
-			continue
-		}
-		for _, se := range sessionEntries {
-			if !se.IsDir() {
+			if os.IsNotExist(err) {
 				continue
 			}
-			sessionDir := filepath.Join(projectDir, se.Name())
-			info := parseKimiSessionDir(sessionDir, absWorkDir)
-			if info != nil {
-				sessions = append(sessions, *info)
+			return nil, fmt.Errorf("kimi: read sessions dir: %w", err)
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			projectDir := filepath.Join(sessionsBase, entry.Name())
+			sessionEntries, err := os.ReadDir(projectDir)
+			if err != nil {
+				continue
+			}
+			for _, se := range sessionEntries {
+				if !se.IsDir() {
+					continue
+				}
+				sessionDir := filepath.Join(projectDir, se.Name())
+				info := parseKimiSessionDir(sessionDir, absWorkDir)
+				if info != nil {
+					sessions = append(sessions, *info)
+				}
 			}
 		}
 	}
@@ -381,6 +533,297 @@ func listKimiSessions(workDir string) ([]core.AgentSessionInfo, error) {
 	return sessions, nil
 }
 
+// parseKimiTranscript counts a session's conversation messages and extracts a
+// summary from its transcript file. The legacy kimi-cli writes the transcript
+// to context.jsonl; the Kimi Code CLI instead stores it at
+// agents/main/wire.jsonl (#1561). We read whichever exists so /list does not
+// report 0 messages for modern sessions (review feedback on #1564).
+func parseKimiTranscript(sessionDir string) (msgCount int, summary string) {
+	contextPath := filepath.Join(sessionDir, "context.jsonl")
+	if f, err := os.Open(contextPath); err == nil {
+		defer func() { _ = f.Close() }()
+		msgCount, summary = countContextJSONL(f)
+	}
+	if msgCount == 0 {
+		// Kimi Code CLI fallback — no context.jsonl, so count from wire.jsonl.
+		wirePath := filepath.Join(sessionDir, "agents", "main", "wire.jsonl")
+		if f, err := os.Open(wirePath); err == nil {
+			defer func() { _ = f.Close() }()
+			m, s := countWireJSONL(f)
+			if m > msgCount {
+				msgCount = m
+			}
+			if summary == "" {
+				summary = s
+			}
+		}
+	}
+	return msgCount, summary
+}
+
+// countContextJSONL parses a legacy kimi-cli context.jsonl transcript,
+// counting user/assistant messages and taking the first user text as summary.
+func countContextJSONL(f io.Reader) (msgCount int, summary string) {
+	msgCount, summary, err := countKimiJSONL(f, false)
+	if err != nil {
+		slog.Warn("kimi: count context.jsonl", "error", err)
+	}
+	return msgCount, summary
+}
+
+// countWireJSONL parses a Kimi Code CLI agents/main/wire.jsonl transcript.
+// Each line is an event such as
+//
+//	{"type":"context.append_message","message":{"role":"user","content":...},
+//	 "origin":{"kind":"user",...}}
+//
+// We count only user-side turns rather than every appended event, which would
+// also include tool results and streamed assistant chunks. Current Kimi Code
+// versions put origin under message and encode content as an array, while
+// older versions used a top-level origin and string content.
+func countWireJSONL(f io.Reader) (msgCount int, summary string) {
+	msgCount, summary, err := countKimiJSONL(f, true)
+	if err != nil {
+		slog.Warn("kimi: count wire.jsonl", "error", err)
+	}
+	return msgCount, summary
+}
+
+// countKimiJSONL only retains the count and first user prompt. Session listing
+// must not materialize every assistant response just to show a message count.
+func countKimiJSONL(r io.Reader, wire bool) (msgCount int, summary string, err error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), 10*1024*1024)
+	for scanner.Scan() {
+		var raw struct {
+			Type    string          `json:"type"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+			Origin  json.RawMessage `json:"origin"`
+			Message struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+				Origin  json.RawMessage `json:"origin"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+		role, content := raw.Role, raw.Content
+		if wire {
+			if raw.Type != "context.append_message" || raw.Message.Role != "user" {
+				continue
+			}
+			if !isKimiUserOrigin(raw.Origin, raw.Message.Origin) {
+				continue
+			}
+			role, content = raw.Message.Role, raw.Message.Content
+		} else if role != "user" && role != "assistant" {
+			continue
+		}
+		text := extractKimiText(content)
+		if text == "" {
+			continue
+		}
+		msgCount++
+		if role == "user" && summary == "" {
+			summary = text
+		}
+	}
+	return msgCount, summary, scanner.Err()
+}
+
+// Older wire records omit origin; in that case the user role is the only
+// available signal. Current records identify injected prompts explicitly.
+func isKimiUserOrigin(topLevel, nested json.RawMessage) bool {
+	origin := nested
+	if len(origin) == 0 || string(origin) == "null" {
+		origin = topLevel
+	}
+	if len(origin) == 0 || string(origin) == "null" {
+		return true
+	}
+	var value struct {
+		Kind string `json:"kind"`
+	}
+	if json.Unmarshal(origin, &value) != nil {
+		return false
+	}
+	switch value.Kind {
+	case "user", "user-slash", "user_slash":
+		return true
+	default:
+		return false
+	}
+}
+
+func readKimiContextHistory(r io.Reader) ([]core.HistoryEntry, error) {
+	var entries []core.HistoryEntry
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), 10*1024*1024)
+	for scanner.Scan() {
+		var raw struct {
+			Role      string          `json:"role"`
+			Content   json.RawMessage `json:"content"`
+			Timestamp json.RawMessage `json:"timestamp"`
+			Time      json.RawMessage `json:"time"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+		if raw.Role != "user" && raw.Role != "assistant" {
+			continue
+		}
+		content := extractKimiText(raw.Content)
+		if content == "" {
+			continue
+		}
+		timestamp := parseKimiTimestamp(raw.Timestamp)
+		if timestamp.IsZero() {
+			timestamp = parseKimiTimestamp(raw.Time)
+		}
+		entries = append(entries, core.HistoryEntry{
+			Role:      raw.Role,
+			Content:   content,
+			Timestamp: timestamp,
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan context.jsonl: %w", err)
+	}
+	return entries, nil
+}
+
+func readKimiWireHistory(r io.Reader) ([]core.HistoryEntry, error) {
+	var entries []core.HistoryEntry
+	var assistantTurnID string
+	var assistantText strings.Builder
+	var assistantTimestamp time.Time
+
+	flushAssistant := func() {
+		content := strings.TrimSpace(assistantText.String())
+		if content != "" {
+			entries = append(entries, core.HistoryEntry{
+				Role:      "assistant",
+				Content:   content,
+				Timestamp: assistantTimestamp,
+			})
+		}
+		assistantTurnID = ""
+		assistantText.Reset()
+		assistantTimestamp = time.Time{}
+	}
+
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), 10*1024*1024)
+	for scanner.Scan() {
+		var raw struct {
+			Type    string          `json:"type"`
+			Time    json.RawMessage `json:"time"`
+			Origin  json.RawMessage `json:"origin"`
+			Message struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+				Origin  json.RawMessage `json:"origin"`
+			} `json:"message"`
+			Event struct {
+				Type   string `json:"type"`
+				TurnID string `json:"turnId"`
+				Part   struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"part"`
+			} `json:"event"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+
+		switch raw.Type {
+		case "context.append_message":
+			if raw.Message.Role != "user" && raw.Message.Role != "assistant" {
+				continue
+			}
+			if raw.Message.Role == "user" && !isKimiUserOrigin(raw.Origin, raw.Message.Origin) {
+				continue
+			}
+			content := extractKimiText(raw.Message.Content)
+			if content == "" {
+				continue
+			}
+			flushAssistant()
+			entries = append(entries, core.HistoryEntry{
+				Role:      raw.Message.Role,
+				Content:   content,
+				Timestamp: parseKimiTimestamp(raw.Time),
+			})
+		case "context.append_loop_event":
+			if raw.Event.Type != "content.part" || raw.Event.Part.Type != "text" || raw.Event.Part.Text == "" {
+				continue
+			}
+			if assistantText.Len() > 0 && raw.Event.TurnID != assistantTurnID {
+				flushAssistant()
+			}
+			if assistantText.Len() == 0 {
+				assistantTurnID = raw.Event.TurnID
+				assistantTimestamp = parseKimiTimestamp(raw.Time)
+			}
+			assistantText.WriteString(raw.Event.Part.Text)
+		}
+	}
+	flushAssistant()
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan wire.jsonl: %w", err)
+	}
+	return entries, nil
+}
+
+func extractKimiText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return strings.TrimSpace(text)
+	}
+
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+			texts = append(texts, strings.TrimSpace(part.Text))
+		}
+	}
+	return strings.Join(texts, "\n")
+}
+
+func parseKimiTimestamp(raw json.RawMessage) time.Time {
+	if len(raw) == 0 {
+		return time.Time{}
+	}
+
+	var millis int64
+	if json.Unmarshal(raw, &millis) == nil {
+		return time.UnixMilli(millis)
+	}
+
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return time.Time{}
+	}
+	if timestamp, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return timestamp
+	}
+	return time.Time{}
+}
+
 func parseKimiSessionDir(sessionDir, filterWorkDir string) *core.AgentSessionInfo {
 	statePath := filepath.Join(sessionDir, "state.json")
 	stateData, err := os.ReadFile(statePath)
@@ -388,15 +831,37 @@ func parseKimiSessionDir(sessionDir, filterWorkDir string) *core.AgentSessionInf
 		return nil
 	}
 
+	// Legacy kimi-cli stores custom_title; Kimi Code uses title and records
+	// the working directory as cwd (formerly workDir).
 	var state struct {
 		CustomTitle string `json:"custom_title"`
+		Title       string `json:"title"`
 		Archived    bool   `json:"archived"`
+		WorkDir     string `json:"workDir"`
+		CWD         string `json:"cwd"`
 	}
 	if json.Unmarshal(stateData, &state) != nil {
 		return nil
 	}
 	if state.Archived {
 		return nil
+	}
+
+	// The Kimi Code CLI records the session's cwd, so unlike the legacy
+	// flavor (which stores no cwd and is always listed) we can honor the
+	// caller's workDir filter for it.
+	workDir := state.CWD
+	if workDir == "" {
+		workDir = state.WorkDir
+	}
+	if workDir != "" && filterWorkDir != "" {
+		absStateDir, err := filepath.Abs(workDir)
+		if err != nil {
+			absStateDir = workDir
+		}
+		if absStateDir != filterWorkDir {
+			return nil
+		}
 	}
 
 	sessionID := filepath.Base(sessionDir)
@@ -406,34 +871,13 @@ func parseKimiSessionDir(sessionDir, filterWorkDir string) *core.AgentSessionInf
 		return nil
 	}
 
-	msgCount := 0
-	summary := ""
-	contextPath := filepath.Join(sessionDir, "context.jsonl")
-	if f, err := os.Open(contextPath); err == nil {
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 256*1024), 256*1024)
-		for scanner.Scan() {
-			var entry struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			}
-			if json.Unmarshal(scanner.Bytes(), &entry) != nil {
-				continue
-			}
-			if entry.Role == "user" || entry.Role == "assistant" {
-				msgCount++
-				if entry.Role == "user" && entry.Content != "" && summary == "" {
-					summary = strings.TrimSpace(entry.Content)
-				}
-			}
-		}
-	}
-
-	_ = filterWorkDir // Kimi does not store cwd in session metadata; list all sessions.
+	msgCount, summary := parseKimiTranscript(sessionDir)
 
 	if summary == "" {
 		summary = state.CustomTitle
+	}
+	if summary == "" {
+		summary = state.Title
 	}
 	if utf8.RuneCountInString(summary) > 60 {
 		summary = string([]rune(summary)[:60]) + "..."
@@ -447,31 +891,28 @@ func parseKimiSessionDir(sessionDir, filterWorkDir string) *core.AgentSessionInf
 	}
 }
 
-func findKimiSessionDir(sessionID string) string {
-	sessionsBase := kimiSessionsBaseDir()
-	if sessionsBase == "" {
-		return ""
-	}
-
-	entries, err := os.ReadDir(sessionsBase)
-	if err != nil {
-		return ""
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		projectDir := filepath.Join(sessionsBase, entry.Name())
-		sessionEntries, err := os.ReadDir(projectDir)
+func findKimiSessionDir(sessionID string, extraEnv ...string) string {
+	for _, sessionsBase := range kimiSessionsBaseDirs(extraEnv...) {
+		entries, err := os.ReadDir(sessionsBase)
 		if err != nil {
 			continue
 		}
-		for _, se := range sessionEntries {
-			if !se.IsDir() {
+		for _, entry := range entries {
+			if !entry.IsDir() {
 				continue
 			}
-			if se.Name() == sessionID {
-				return filepath.Join(projectDir, se.Name())
+			projectDir := filepath.Join(sessionsBase, entry.Name())
+			sessionEntries, err := os.ReadDir(projectDir)
+			if err != nil {
+				continue
+			}
+			for _, se := range sessionEntries {
+				if !se.IsDir() {
+					continue
+				}
+				if se.Name() == sessionID {
+					return filepath.Join(projectDir, se.Name())
+				}
 			}
 		}
 	}

@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const (
@@ -128,33 +127,22 @@ func (*launchdManager) Stop() error {
 }
 
 func (*launchdManager) Restart() error {
+	if _, target, _, ok := loadedLaunchdTarget(); ok {
+		// bootout also kills commands launched by the daemon. A single
+		// kickstart transaction lets launchd replace the running service even
+		// when the restart request originates from one of its own sessions.
+		if out, err := runLaunchctl("kickstart", "-kp", target); err != nil {
+			return fmt.Errorf("restart kickstart: %s (%w)", out, err)
+		}
+		return nil
+	}
+
 	domain := preferredLaunchdDomain()
-	if loadedDomain, _, _, ok := loadedLaunchdTarget(); ok && domain != launchdGUIDomain() {
-		domain = loadedDomain
+	if out, err := runLaunchctl("bootstrap", domain, launchdPlistPath()); err != nil {
+		return fmt.Errorf("restart bootstrap: %s (%w)", out, err)
 	}
-	target := launchdTarget(domain)
-	bootoutLaunchdTargets()
-
-	plistPath := launchdPlistPath()
-
-	// launchd bootout is asynchronous; retry bootstrap with backoff
-	// to avoid "Bootstrap failed: 5" race condition.
-	var out string
-	var err error
-	for i := 0; i < 3; i++ {
-		if i > 0 {
-			time.Sleep(500 * time.Millisecond)
-		}
-		out, err = runLaunchctl("bootstrap", domain, plistPath)
-		if err == nil {
-			break
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("restart: %s (%w)", out, err)
-	}
-	if _, err := runLaunchctl("kickstart", "-kp", target); err != nil {
-		return fmt.Errorf("restart kickstart: %w", err)
+	if out, err := runLaunchctl("kickstart", "-kp", launchdTarget(domain)); err != nil {
+		return fmt.Errorf("restart kickstart: %s (%w)", out, err)
 	}
 	return nil
 }
@@ -257,6 +245,7 @@ var templateOwnedEnvKeys = map[string]struct{}{
 	"CC_LOG_FILE":     {},
 	"CC_LOG_MAX_SIZE": {},
 	"PATH":            {},
+	"HOME":            {},
 }
 
 // renderEnvExtraPlist returns the serialized key/value pairs (without the
@@ -302,6 +291,17 @@ func buildPlist(cfg Config) string {
 		envPATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 	}
 	envExtra := renderEnvExtraPlist(cfg.EnvExtra)
+	// HOME: launchd LaunchAgents run under the user's uid, but the HOME
+	// env var is not always populated (especially when bootstrapped via
+	// `launchctl bootstrap gui/...`). Without HOME, os.UserHomeDir()
+	// returns an error inside the daemon and any subprocess it spawns;
+	// config.Load then falls back to a relative data_dir which agents
+	// (cd'd into work_dir) resolve to <work_dir>/.cc-connect instead of
+	// <HOME>/.cc-connect.
+	homeEntry := ""
+	if cfg.HomeDir != "" {
+		homeEntry = fmt.Sprintf("\t\t<key>HOME</key>\n\t\t<string>%s</string>\n", xmlEscape(cfg.HomeDir))
+	}
 	// User-supplied paths can legitimately contain XML-special characters
 	// ('&', '<', '>', '"', '\''). Without escaping, `launchctl bootstrap`
 	// rejects the plist with a parse error and daemon install fails. The
@@ -341,13 +341,12 @@ func buildPlist(cfg Config) string {
 		<string>%d</string>
 		<key>PATH</key>
 		<string>%s</string>
-%s	</dict>
+%s%s	</dict>
 	<key>StandardOutPath</key>
 	<string>/dev/null</string>
 	<key>StandardErrorPath</key>
 	<string>/dev/null</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), envExtra)
+`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), homeEntry, envExtra)
 }
-

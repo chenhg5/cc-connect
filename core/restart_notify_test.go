@@ -260,3 +260,72 @@ func TestRestartNotify_NilNotifyIgnored(t *testing.T) {
 		t.Error("nil notify should not occupy the pending slot")
 	}
 }
+
+// panickingRestartStub wraps restartNotifyStub and panics on Send. Used by
+// TestRestartNotify_PanicInSendRecovered to exercise the defer-recover added
+// to runPendingRestartNotify for #1686 P1-A.
+type panickingRestartStub struct {
+	*restartNotifyStub
+}
+
+// markReady forwards to the embedded restartNotifyStub.markReady but registers
+// the OUTER *panickingRestartStub with the engine, not the embedded
+// *restartNotifyStub. Otherwise lookupReadyPlatform returns the inner stub
+// (which does not panic on Send) and the test never exercises the recover path.
+func (p *panickingRestartStub) markReady(t *testing.T, e *Engine) {
+	t.Helper()
+	inner := p.restartNotifyStub
+	if !inner.ready.CompareAndSwap(false, true) {
+		return
+	}
+	e.OnPlatformReady(p) // pass the OUTER stub so Send dispatches to our panic
+}
+
+func (p *panickingRestartStub) Send(_ context.Context, _ any, _ string) error {
+	panic("simulated platform Send panic for #1686 P1-A test")
+}
+
+// TestRestartNotify_PanicInSendRecovered verifies that a panic inside
+// runPendingRestartNotify's dispatch path (e.g. a platform adapter panicking
+// in Send during ReconstructReplyCtx / Send) is caught by the new
+// defer-recover and does NOT crash the cc-connect process. Before #1686 P1-A,
+// this kind of panic would propagate up and kill the daemon because no
+// higher-level recover() existed in the restart-notify goroutine.
+//
+// We assert by waiting for the fired channel to close: the deferred
+// close(firedCh) at the top of runPendingRestartNotify runs after recover
+// handles the panic, so its closure is proof the goroutine exited cleanly.
+func TestRestartNotify_PanicInSendRecovered(t *testing.T) {
+	plat := &panickingRestartStub{restartNotifyStub: &restartNotifyStub{name: "telegram"}}
+	engine := NewEngine("test", &stubAgent{}, []Platform{plat}, "", LangEnglish)
+	plat.markReady(t, engine)
+
+	engine.SetPendingRestartNotify(&RestartRequest{
+		Platform:   "telegram",
+		SessionKey: "session-panic-1",
+	})
+
+	// Pull the fired channel out of the engine so we can wait for the
+	// goroutine to finish, instead of polling on ConsumePendingRestartNotify
+	// (which races with the panic-time clearPendingRestart path).
+	e := engine
+	e.pendingRestartMu.Lock()
+	firedCh := e.pendingRestartFiredCh
+	e.pendingRestartMu.Unlock()
+	if firedCh == nil {
+		t.Fatal("expected SetPendingRestartNotify to register a fired channel")
+	}
+
+	select {
+	case <-firedCh:
+		// firedCh closed → goroutine exited cleanly → panic was recovered.
+	case <-time.After(2 * time.Second):
+		t.Fatal("restart notify goroutine did not finish within 2s after Send panic; recover likely missing")
+	}
+
+	// Engine must still be usable after a recovered panic — no shared state
+	// corruption.
+	if got := plat.sentTexts(); len(got) != 0 {
+		t.Fatalf("a panicking stub should never record a successful send, got %v", got)
+	}
+}
