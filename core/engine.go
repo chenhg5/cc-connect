@@ -4268,18 +4268,25 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 			contentLen = retryTurn.contentLen
 		}
 
-		if retryTurn != nil && retryTurn.kind.IsRetriable() && retryTurn.sawSideEffects {
+		if retryTurn != nil && retryTurn.kind.IsRetriable() && (retryTurn.sawSideEffects || e.promptKeptOnError(state)) {
 			// The attempt already ran tools or produced output, so replaying the
-			// prompt could repeat side effects. An agent that keeps the
-			// conversation across the failure is asked to continue instead.
+			// prompt could repeat side effects; or the agent already recorded the
+			// prompt, so replaying would duplicate it (images included). An agent
+			// that keeps the conversation across the failure continues instead.
 			if cont := e.continueAfterErrorPrompt(state); cont != "" {
-				slog.Warn("retriable agent error after observable events; continuing the turn instead of replaying the prompt",
-					"error", retryTurn.err, "kind", retryTurn.kind, "session", logSessionKey)
+				progressed := retryTurn.sawSideEffects
+				slog.Warn("retriable agent error; continuing the turn instead of replaying the prompt",
+					"error", retryTurn.err, "kind", retryTurn.kind, "session", logSessionKey, "after_events", progressed)
 				promptContent = cont
 				images = nil
 				files = nil
 				contentLen = len(cont)
 				retryTurn.sawSideEffects = false
+				if progressed {
+					// The attempt made progress, so the upstream had recovered: this
+					// failure starts a new streak and the retry count starts over.
+					attempt = 1
+				}
 			}
 		}
 
@@ -4320,12 +4327,17 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 
 		delay := RetriableErrorDelay(attempt)
 		slog.Warn("retrying agent turn after retriable error", "error", retryErr, "kind", retryKind, "session", logSessionKey, "attempt", attempt, "max_attempts", maxAttempts, "delay", delay)
-		if attempt == 1 || attempt%5 == 0 {
-			state.mu.Lock()
-			p := state.platform
-			state.mu.Unlock()
-			notice := fmt.Sprintf(e.i18n.T(MsgRetriableAgentError), delay.Round(time.Second), attempt+1, maxAttempts)
-			if retryTurn.notify == nil || !retryTurn.notify(notice) {
+		// attempt counts the failed sends of the current streak, so the retry
+		// about to run is retry number attempt (the first send is not a retry).
+		retryNo, maxRetries := attempt, maxAttempts-1
+		notice := fmt.Sprintf(e.i18n.T(MsgRetriableAgentError), delay.Round(time.Second), retryNo, maxRetries)
+		if retryTurn.notify == nil || !retryTurn.notify(notice) {
+			// Without a card each notice is a chat message of its own: keep
+			// those to the first retry and every fifth one.
+			if retryNo == 1 || retryNo%5 == 0 {
+				state.mu.Lock()
+				p := state.platform
+				state.mu.Unlock()
 				e.send(p, replyCtx, notice)
 			}
 		}
@@ -4392,6 +4404,20 @@ func (e *Engine) continueAfterErrorPrompt(state *interactiveState) string {
 		return strings.TrimSpace(c.ContinueAfterErrorPrompt())
 	}
 	return ""
+}
+
+// promptKeptOnError reports whether the session's agent has already recorded the
+// prompt in its conversation when it reports a retriable error
+// (PromptKeptOnErrorAgent).
+func (e *Engine) promptKeptOnError(state *interactiveState) bool {
+	state.mu.Lock()
+	agent := state.agent
+	state.mu.Unlock()
+	if agent == nil {
+		agent = e.agent
+	}
+	k, ok := agent.(PromptKeptOnErrorAgent)
+	return ok && k.PromptKeptOnRetriableError()
 }
 
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.

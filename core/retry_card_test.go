@@ -290,3 +290,216 @@ func TestProcessInteractiveTurnWithRetry_StopDuringRetryClosesTheCard(t *testing
 		t.Fatal("retry card hand-off leaked past a stopped turn")
 	}
 }
+
+// scriptedRetrySession answers each Send with the next step of its script:
+// "fail" is an immediate retriable error, "progress-fail" runs a tool and then
+// hits a retriable error, anything else completes the turn.
+type scriptedRetrySession struct {
+	sessionID string
+	events    chan Event
+	script    []string
+	mu        sync.Mutex
+	sends     int
+	prompts   []string
+	images    []int
+}
+
+func newScriptedRetrySession(id string, script ...string) *scriptedRetrySession {
+	return &scriptedRetrySession{sessionID: id, events: make(chan Event, 16), script: script}
+}
+
+func (s *scriptedRetrySession) Send(prompt string, _ string, images []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
+	step := "ok"
+	if s.sends < len(s.script) {
+		step = s.script[s.sends]
+	}
+	s.sends++
+	s.prompts = append(s.prompts, prompt)
+	s.images = append(s.images, len(images))
+	s.mu.Unlock()
+	overloaded := Event{Type: EventError, Error: errors.New("APIError: Our servers are currently overloaded. Please try again later."), ErrorKind: ErrorKindOverloaded}
+	switch step {
+	case "fail":
+		s.events <- overloaded
+	case "progress-fail":
+		s.events <- Event{Type: EventToolUse, ToolName: "shell", ToolInput: "echo hi"}
+		s.events <- Event{Type: EventToolResult, ToolName: "shell", ToolResult: "hi"}
+		s.events <- overloaded
+	default:
+		s.events <- Event{Type: EventResult, Content: "ok after retry", Done: true}
+	}
+	return nil
+}
+
+func (s *scriptedRetrySession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *scriptedRetrySession) Events() <-chan Event                                 { return s.events }
+func (s *scriptedRetrySession) CurrentSessionID() string                             { return s.sessionID }
+func (s *scriptedRetrySession) Alive() bool                                          { return true }
+func (s *scriptedRetrySession) Close() error                                         { close(s.events); return nil }
+func (s *scriptedRetrySession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+// retryNoticesIn returns the distinct "(retry N/M)" markers of a card's final
+// content in order of appearance.
+func retryNoticesIn(content string) []string {
+	var got []string
+	for _, part := range strings.Split(content, "(retry ")[1:] {
+		if end := strings.Index(part, ")"); end > 0 {
+			got = append(got, part[:end])
+		}
+	}
+	return got
+}
+
+// The first failure is the first retry, and every retry adds its own entry to
+// the card instead of only the first and every fifth one.
+func TestProcessInteractiveTurnWithRetry_EveryRetryIsANumberedCardEntry(t *testing.T) {
+	shortRetryPolicy(t, 5)
+	p := &retryCardTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newScriptedRetrySession("s1", "fail", "fail", "fail")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1", eventsNeedResync: true}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
+
+	if got := agentSession.sendCount(); got != 4 {
+		t.Fatalf("sendCount = %d, want 4 (three retries)", got)
+	}
+	_, finalized := p.cards[0].snapshot()
+	if len(finalized) != 1 {
+		t.Fatalf("finalized = %q, want the card closed once", finalized)
+	}
+	got := strings.Join(retryNoticesIn(finalized[0]), ",")
+	if got != "1/4,2/4,3/4" {
+		t.Fatalf("retry entries = %q, want 1/4,2/4,3/4 in %q", got, finalized[0])
+	}
+}
+
+// An attempt that made progress (ran tools) before failing proves the upstream
+// recovered, so the retry count starts over instead of draining the budget of
+// the whole turn.
+func TestProcessInteractiveTurnWithRetry_ProgressResetsTheRetryCount(t *testing.T) {
+	shortRetryPolicy(t, 3)
+	p := &retryCardTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	agent := &continueStubAgent{prompt: "CONTINUE-FROM-HERE"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newScriptedRetrySession("s1", "fail", "progress-fail", "fail")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1", eventsNeedResync: true}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
+
+	if got := agentSession.sendCount(); got != 4 {
+		t.Fatalf("sendCount = %d, want 4: progress must reset the count so the turn is not exhausted", got)
+	}
+	for _, msg := range p.getSent() {
+		if strings.Contains(msg, "overloaded") && !strings.Contains(msg, "retry") {
+			t.Fatalf("sent %q: the turn must not fail", msg)
+		}
+	}
+	_, finalized := p.cards[0].snapshot()
+	got := strings.Join(retryNoticesIn(finalized[len(finalized)-1]), ",")
+	if got != "1/2,1/2,2/2" {
+		t.Fatalf("retry entries = %q, want 1/2,1/2,2/2 in %q", got, finalized)
+	}
+}
+
+// Without a card the notice is a separate chat message, so it stays throttled
+// to the first retry and every fifth one.
+func TestProcessInteractiveTurnWithRetry_MessageNoticesStayThrottled(t *testing.T) {
+	shortRetryPolicy(t, 6)
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newScriptedRetrySession("s1", "fail", "fail", "fail", "fail", "fail")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1", eventsNeedResync: true}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
+
+	var notices []string
+	for _, msg := range p.getSent() {
+		notices = append(notices, retryNoticesIn(msg)...)
+	}
+	if got := strings.Join(notices, ","); got != "1/5,5/5" {
+		t.Fatalf("message notices = %q, want 1/5,5/5; sent = %q", got, p.getSent())
+	}
+}
+
+func (s *scriptedRetrySession) sent() (prompts []string, images []int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.prompts...), append([]int(nil), s.images...)
+}
+
+// promptKeptStubAgent can resume a turn and records the prompt in its
+// conversation before a retriable error can happen (as OpenCode does).
+type promptKeptStubAgent struct {
+	continueStubAgent
+}
+
+func (a *promptKeptStubAgent) PromptKeptOnRetriableError() bool { return true }
+
+// An agent that already recorded the prompt when the error arrived is asked to
+// continue, even though the failed attempt produced nothing: replaying would
+// add the prompt and its images to the conversation once more per retry.
+func TestProcessInteractiveTurnWithRetry_KeptPromptIsContinuedNotReplayed(t *testing.T) {
+	shortRetryPolicy(t, 5)
+	p := &stubPlatformEngine{n: "test"}
+	agent := &promptKeptStubAgent{continueStubAgent{prompt: "CONTINUE-FROM-HERE"}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newScriptedRetrySession("s1", "fail", "fail")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1", eventsNeedResync: true}
+	e.interactiveStates[sessionKey] = state
+	images := []ImageAttachment{{MimeType: "image/jpeg", Data: []byte("jpeg")}}
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "look at this", "m1", images, nil, "ctx-1", time.Now(), sessionKey, len("look at this"), 0)
+
+	prompts, imageCounts := agentSession.sent()
+	if strings.Join(prompts, "|") != "look at this|CONTINUE-FROM-HERE|CONTINUE-FROM-HERE" {
+		t.Fatalf("prompts = %q, want the original prompt once, then continue prompts", prompts)
+	}
+	if imageCounts[0] != 1 || imageCounts[1] != 0 || imageCounts[2] != 0 {
+		t.Fatalf("images per send = %v, want the images only with the original prompt", imageCounts)
+	}
+	var notices []string
+	for _, msg := range p.getSent() {
+		notices = append(notices, retryNoticesIn(msg)...)
+	}
+	// Failures without progress keep counting: continuing is not a success.
+	if got := strings.Join(notices, ","); got != "1/4" {
+		t.Fatalf("message notices = %q, want 1/4 (the second retry is throttled, not reset)", got)
+	}
+}
+
+// An agent that can resume but does not promise the prompt was recorded keeps
+// the replay: continuing would lose a prompt the conversation never saw.
+func TestProcessInteractiveTurnWithRetry_ResumableAgentStillReplaysUnkeptPrompt(t *testing.T) {
+	shortRetryPolicy(t, 3)
+	p := &stubPlatformEngine{n: "test"}
+	agent := &continueStubAgent{prompt: "CONTINUE-FROM-HERE"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newScriptedRetrySession("s1", "fail")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1", eventsNeedResync: true}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
+
+	if prompts, _ := agentSession.sent(); strings.Join(prompts, "|") != "hello|hello" {
+		t.Fatalf("prompts = %q, want the original prompt replayed", prompts)
+	}
+}
