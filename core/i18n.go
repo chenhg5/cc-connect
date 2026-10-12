@@ -868,11 +868,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "❌ Error: %v",
 	},
 	MsgRetriableAgentError: {
-		LangEnglish:            "⚠️ Upstream model is busy or rate-limited. Retrying in %s (attempt %d/%d).",
-		LangChinese:            "⚠️ 上游模型繁忙或限流，将在 %s 后自动重试（第 %d/%d 次）。",
-		LangTraditionalChinese: "⚠️ 上游模型繁忙或限流，將在 %s 後自動重試（第 %d/%d 次）。",
-		LangJapanese:           "⚠️ 上流モデルが混雑またはレート制限中です。%s 後に自動再試行します（%d/%d 回目）。",
-		LangSpanish:            "⚠️ El modelo upstream está ocupado o limitado. Reintentando en %s (intento %d/%d).",
+		LangEnglish:            "⚠️ Upstream model is busy or rate-limited. Retrying in %s (retry %d/%d).",
+		LangChinese:            "⚠️ 上游模型繁忙或限流，将在 %s 后进行第 %d/%d 次重试。",
+		LangTraditionalChinese: "⚠️ 上游模型繁忙或限流，將在 %s 後進行第 %d/%d 次重試。",
+		LangJapanese:           "⚠️ 上流モデルが混雑またはレート制限中です。%s 後に再試行します（再試行 %d/%d 回目）。",
+		LangSpanish:            "⚠️ El modelo upstream está ocupado o limitado. Reintentando en %s (reintento %d/%d).",
 	},
 	MsgBackgroundAutoDenied: {
 		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",
