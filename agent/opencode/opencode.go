@@ -36,7 +36,7 @@ type Agent struct {
 	cliExtraArgs         []string    // extra args from cmd after the binary name
 	configEnv            []string    // env vars from [projects.agent.options.env]
 	agentName            string      // passed as --agent to opencode (for plugin-defined agents)
-	agentList            []AgentInfo // cached full `opencode agent list` result (incl. subagents) for SetAgent validation
+	agentList            []AgentInfo // cached full agent enumeration result (incl. subagents) for SetAgent validation
 	providers            []core.ProviderConfig
 	activeIdx            int
 	sessionEnv           []string
@@ -629,7 +629,8 @@ func (a *Agent) GetAgent() string {
 }
 
 // AvailableAgents enumerates switchable agents (primary/all mode) via
-// `opencode agent list` and caches the full result for SetAgent validation.
+// `opencode debug agents` (v2) or `opencode agent list` (v1) and caches the
+// full result for SetAgent validation.
 // A nil result means enumeration failed; callers degrade gracefully.
 func (a *Agent) AvailableAgents(ctx context.Context) []core.AgentInfo {
 	agents, err := listAgents(ctx, a.cmd, a.workDir)
@@ -651,8 +652,9 @@ func (a *Agent) AvailableAgents(ctx context.Context) []core.AgentInfo {
 	return out
 }
 
-// internalAgentNames are built-in hidden agents that appear in `opencode
-// agent list` but cannot be selected as a primary agent.
+// internalAgentNames are built-in hidden agents that appear in the CLI's
+// agent enumeration (v1 `opencode agent list`, v2 `opencode debug agents`)
+// but cannot be selected as a primary agent.
 func isInternalAgentName(name string) bool {
 	switch name {
 	case "compaction", "title", "summary":

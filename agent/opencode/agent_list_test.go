@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 // realOpencodeAgentListSample mirrors the actual `opencode agent list`
@@ -276,5 +278,186 @@ func TestNew_WithConfiguredAgentStillConstructs(t *testing.T) {
 		if agent == nil {
 			t.Fatalf("New(agent=%q) returned nil agent", configured)
 		}
+	}
+}
+
+// realOpencodeDebugAgentsSample mirrors the actual `opencode debug agents`
+// output format of OpenCode v2 (verified on the dev machine): a JSON array
+// of agent objects carrying id/name/mode/hidden plus large system-prompt
+// fields. compaction/title/summary/goal-verify are hidden internal agents;
+// explore/general are subagents.
+const realOpencodeDebugAgentsSample = `[
+  {"id":"brainstorm","name":"brainstorm","mode":"all","hidden":false,"description":"requirements brainstorming"},
+  {"id":"build","name":"Build","mode":"primary","hidden":false,"description":"build agent"},
+  {"id":"compaction","name":"Compaction","mode":"primary","hidden":true},
+  {"id":"explore","name":"Explore","mode":"subagent","hidden":false,"description":"codebase exploration"},
+  {"id":"general","name":"General","mode":"subagent","hidden":false,"description":"general research"},
+  {"id":"goal","name":"goal","mode":"primary","hidden":false,"description":"goal agent"},
+  {"id":"goal-verify","name":"goal-verify","mode":"subagent","hidden":true,"description":"goal verification"},
+  {"id":"plan","name":"Plan","mode":"primary","hidden":false,"description":"plan agent"},
+  {"id":"summary","name":"Summary","mode":"primary","hidden":true},
+  {"id":"title","name":"Title","mode":"primary","hidden":true}
+]`
+
+// writeFakeOpencodeBin writes a temporary shell script acting as a fake
+// opencode CLI. debugAgentsJSON is printed for `debug agents` (v2 layout)
+// and agentListLines for `agent list` (v1 layout). An empty string or empty
+// slice makes the corresponding command exit 1, simulating a CLI version
+// that does not support it.
+func writeFakeOpencodeBin(t *testing.T, debugAgentsJSON string, agentListLines []string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	name := filepath.Join(tmpDir, "fake-opencode")
+
+	var body strings.Builder
+	body.WriteString("#!/bin/sh\n")
+
+	body.WriteString("if [ \"$1\" = \"debug\" ] && [ \"$2\" = \"agents\" ]; then\n")
+	if debugAgentsJSON == "" {
+		body.WriteString("  exit 1\n")
+	} else {
+		body.WriteString("  cat <<'__EOF__'\n")
+		body.WriteString(debugAgentsJSON)
+		body.WriteString("\n__EOF__\n  exit 0\n")
+	}
+	body.WriteString("fi\n")
+
+	body.WriteString("if [ \"$1\" = \"agent\" ] && [ \"$2\" = \"list\" ]; then\n")
+	if len(agentListLines) == 0 {
+		body.WriteString("  exit 1\n")
+	} else {
+		for _, line := range agentListLines {
+			fmt.Fprintf(&body, "  printf '%%s\\n' '%s'\n", line)
+		}
+		body.WriteString("  exit 0\n")
+	}
+	body.WriteString("fi\n")
+
+	body.WriteString("exit 1\n")
+
+	if err := os.WriteFile(name, []byte(body.String()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+func TestParseDebugAgentsOutput_V2Sample(t *testing.T) {
+	got, err := parseDebugAgentsOutput(realOpencodeDebugAgentsSample)
+	if err != nil {
+		t.Fatalf("parseDebugAgentsOutput() error = %v", err)
+	}
+	want := []AgentInfo{
+		{Name: "brainstorm", Mode: AgentModeAll},
+		{Name: "build", Mode: AgentModePrimary},
+		{Name: "explore", Mode: AgentModeSubagent},
+		{Name: "general", Mode: AgentModeSubagent},
+		{Name: "goal", Mode: AgentModePrimary},
+		{Name: "plan", Mode: AgentModePrimary},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseDebugAgentsOutput() = %+v, want %+v", got, want)
+	}
+}
+
+func TestParseDebugAgentsOutput_InvalidJSON(t *testing.T) {
+	if _, err := parseDebugAgentsOutput(realOpencodeAgentListSample); err == nil {
+		t.Fatal("parseDebugAgentsOutput(v1 text output) error = nil, want failure")
+	}
+}
+
+func TestParseDebugAgentsOutput_SkipsUnknownModeAndEmptyNames(t *testing.T) {
+	got, err := parseDebugAgentsOutput(`[
+	  {"id":"","name":"","mode":"primary"},
+	  {"id":"weird","name":"Weird","mode":"mystery"},
+	  {"id":"ok","name":"OK","mode":"primary"}
+	]`)
+	if err != nil {
+		t.Fatalf("parseDebugAgentsOutput() error = %v", err)
+	}
+	want := []AgentInfo{{Name: "ok", Mode: AgentModePrimary}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseDebugAgentsOutput() = %+v, want %+v", got, want)
+	}
+}
+
+func TestListAgents_PrefersV2DebugAgentsJSON(t *testing.T) {
+	// Both layouts respond; the v2 JSON must win.
+	bin := writeFakeOpencodeBin(t, realOpencodeDebugAgentsSample, strings.Split(realOpencodeAgentListSample, "\n"))
+	got, err := listAgents(context.Background(), bin, t.TempDir())
+	if err != nil {
+		t.Fatalf("listAgents() error = %v", err)
+	}
+	want := []AgentInfo{
+		{Name: "brainstorm", Mode: AgentModeAll},
+		{Name: "build", Mode: AgentModePrimary},
+		{Name: "explore", Mode: AgentModeSubagent},
+		{Name: "general", Mode: AgentModeSubagent},
+		{Name: "goal", Mode: AgentModePrimary},
+		{Name: "plan", Mode: AgentModePrimary},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listAgents() = %+v, want v2 JSON result %+v", got, want)
+	}
+}
+
+func TestListAgents_FallsBackToV1AgentList(t *testing.T) {
+	// `debug agents` unsupported (v1 CLI); the text layout must be used.
+	bin := writeFakeOpencodeBin(t, "", strings.Split(realOpencodeAgentListSample, "\n"))
+	got, err := listAgents(context.Background(), bin, t.TempDir())
+	if err != nil {
+		t.Fatalf("listAgents() error = %v", err)
+	}
+	want := []AgentInfo{
+		{Name: "build", Mode: AgentModePrimary},
+		{Name: "explore", Mode: AgentModeSubagent},
+		{Name: "general", Mode: AgentModeSubagent},
+		{Name: "plan", Mode: AgentModePrimary},
+		{Name: "brainstorm", Mode: AgentModeAll},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listAgents() = %+v, want v1 fallback result %+v", got, want)
+	}
+}
+
+func TestAgentSwitcher_V2EnumerationDrivesSetAgent(t *testing.T) {
+	bin := writeFakeOpencodeBin(t, realOpencodeDebugAgentsSample, nil)
+	a := &Agent{cmd: bin, workDir: t.TempDir()}
+
+	agents := a.AvailableAgents(context.Background())
+	want := []core.AgentInfo{
+		{Name: "brainstorm", Mode: "all"},
+		{Name: "build", Mode: "primary"},
+		{Name: "goal", Mode: "primary"},
+		{Name: "plan", Mode: "primary"},
+	}
+	if !reflect.DeepEqual(agents, want) {
+		t.Fatalf("AvailableAgents() = %+v, want %+v", agents, want)
+	}
+
+	if err := a.SetAgent("goal"); err != nil {
+		t.Fatalf("SetAgent(goal) error: %v", err)
+	}
+	if err := a.SetAgent("goal-verify"); err == nil {
+		t.Fatal("SetAgent(goal-verify) error = nil, want rejection of hidden subagent")
+	}
+	if err := a.SetAgent("explore"); err == nil {
+		t.Fatal("SetAgent(explore) error = nil, want rejection of subagent")
+	}
+}
+
+func TestValidateConfiguredAgent_V2Enumeration(t *testing.T) {
+	a := &Agent{cmd: writeFakeOpencodeBin(t, realOpencodeDebugAgentsSample, nil), workDir: t.TempDir()}
+
+	if problem, _ := a.ValidateConfiguredAgent("build"); problem != "" {
+		t.Fatalf("ValidateConfiguredAgent(build) problem = %q, want none", problem)
+	}
+
+	problem, available := a.ValidateConfiguredAgent("compaction")
+	if problem == "" {
+		t.Fatal("ValidateConfiguredAgent(compaction) problem is empty, want hidden-agent warning")
+	}
+	want := []string{"brainstorm", "build", "goal", "plan"}
+	if !reflect.DeepEqual(available, want) {
+		t.Fatalf("ValidateConfiguredAgent(compaction) available = %v, want %v", available, want)
 	}
 }

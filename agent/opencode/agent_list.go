@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -10,11 +11,12 @@ import (
 	"time"
 )
 
-// agentListTimeout bounds a single `opencode agent list` subprocess call.
-// Mirrors the timeout used by model discovery.
+// agentListTimeout bounds a single agent enumeration subprocess call
+// (`opencode debug agents` on v2, `opencode agent list` on v1). Mirrors the
+// timeout used by model discovery.
 const agentListTimeout = 10 * time.Second
 
-// AgentMode is the mode reported for an agent by `opencode agent list`.
+// AgentMode is the mode reported for an agent by the CLI's agent enumeration.
 type AgentMode string
 
 const (
@@ -23,18 +25,20 @@ const (
 	AgentModeAll      AgentMode = "all"
 )
 
-// AgentInfo describes a single agent reported by `opencode agent list`.
+// AgentInfo describes a single agent reported by the CLI's agent enumeration
+// (`opencode debug agents` on OpenCode v2, `opencode agent list` on v1).
 type AgentInfo struct {
 	Name string
 	Mode AgentMode
 }
 
-// agentListLineRe matches a non-indented agent header line from
+// agentListLineRe matches a non-indented agent header line from the v1
 // `opencode agent list` output, e.g. "build (primary)".
 var agentListLineRe = regexp.MustCompile(`^(\S+) \((primary|subagent|all)\)$`)
 
-// hiddenAgentNames are opencode internal agents that appear in `opencode
-// agent list` (marked primary) but cannot be selected as a main agent.
+// hiddenAgentNames are opencode internal agents that appear in the v1
+// `opencode agent list` output (marked primary) but cannot be selected as a
+// main agent. On v2 the same agents are flagged hidden by `debug agents`.
 var hiddenAgentNames = map[string]struct{}{
 	"compaction": {},
 	"title":      {},
@@ -46,17 +50,67 @@ var hiddenAgentNames = map[string]struct{}{
 // "validation skipped" instead of a false "agent invalid" verdict.
 const agentValidationSkippedPrefix = "validation skipped: "
 
-// listAgents runs `opencode agent list` in workDir and parses the output
-// into AgentInfo entries. Internal hidden agents (compaction/title/summary)
-// are excluded; subagent-mode entries are kept so callers can distinguish
-// "exists but is a subagent" from "does not exist". The command is bounded
-// by agentListTimeout. An error is returned when the command fails or no
-// agent line could be parsed (zero matches), so callers degrade gracefully
-// instead of misreporting invalid configuration.
+// debugAgentEntry mirrors one entry of the JSON array printed by
+// `opencode debug agents` (OpenCode v2). Only the fields used for agent
+// selection are decoded; the per-agent system prompts and request overrides
+// in the same objects are large and irrelevant here.
+type debugAgentEntry struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Mode   string `json:"mode"`
+	Hidden bool   `json:"hidden"`
+}
+
+// listAgents enumerates the agents available to the configured CLI, trying
+// the command layout of each OpenCode major version:
+//
+//   - OpenCode v2: `opencode debug agents` prints a JSON array.
+//   - OpenCode v1: `opencode agent list` prints "<name> (<mode>)" headers.
+//
+// The v2 layout is tried first and the v1 layout is used as a fallback. An
+// error is returned when both fail or neither yields parsable entries, so
+// callers degrade gracefully instead of misreporting invalid configuration.
+// The enumeration is bounded by agentListTimeout.
 func listAgents(ctx context.Context, cmd, workDir string) ([]AgentInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, agentListTimeout)
 	defer cancel()
 
+	debugAgents, debugErr := listAgentsDebugJSON(ctx, cmd, workDir)
+	if debugErr == nil {
+		return debugAgents, nil
+	}
+
+	listedAgents, listErr := listAgentsText(ctx, cmd, workDir)
+	if listErr == nil {
+		return listedAgents, nil
+	}
+
+	return nil, fmt.Errorf("opencode: debug agents: %v; opencode: agent list: %w", debugErr, listErr)
+}
+
+// listAgentsDebugJSON runs `opencode debug agents` (OpenCode v2) in workDir
+// and parses its JSON output.
+func listAgentsDebugJSON(ctx context.Context, cmd, workDir string) ([]AgentInfo, error) {
+	c := exec.CommandContext(ctx, cmd, "debug", "agents")
+	c.Dir = workDir
+	out, err := c.Output()
+	if err != nil {
+		return nil, fmt.Errorf("opencode: debug agents: %w", err)
+	}
+
+	agents, err := parseDebugAgentsOutput(string(out))
+	if err != nil {
+		return nil, err
+	}
+	if len(agents) == 0 {
+		return nil, fmt.Errorf("opencode: debug agents: no agent entries in output")
+	}
+	return agents, nil
+}
+
+// listAgentsText runs `opencode agent list` (OpenCode v1) in workDir and
+// parses its text output.
+func listAgentsText(ctx context.Context, cmd, workDir string) ([]AgentInfo, error) {
 	c := exec.CommandContext(ctx, cmd, "agent", "list")
 	c.Dir = workDir
 	out, err := c.Output()
@@ -71,9 +125,46 @@ func listAgents(ctx context.Context, cmd, workDir string) ([]AgentInfo, error) {
 	return agents, nil
 }
 
-// parseAgentListOutput parses `opencode agent list` output: agent header
-// lines are "<name> (<mode>)", followed by an indented permission JSON
-// block that is skipped. Lines that do not match the header format are
+// parseDebugAgentsOutput parses the JSON array emitted by `opencode debug
+// agents` (v2). Entries flagged hidden, carrying no usable name, or with an
+// unknown mode are skipped; the hidden v2 agents (compaction/title/summary/
+// goal-verify) are the equivalents of hiddenAgentNames on v1. The agent ID
+// is preferred over the display name because `--agent`/SetAgent accept IDs.
+func parseDebugAgentsOutput(out string) ([]AgentInfo, error) {
+	var entries []debugAgentEntry
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		return nil, fmt.Errorf("opencode: debug agents: parse JSON: %w", err)
+	}
+
+	agents := make([]AgentInfo, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Hidden {
+			continue
+		}
+		name := strings.TrimSpace(entry.ID)
+		if name == "" {
+			name = strings.TrimSpace(entry.Name)
+		}
+		if name == "" {
+			continue
+		}
+		if _, hidden := hiddenAgentNames[name]; hidden {
+			continue
+		}
+		mode := AgentMode(entry.Mode)
+		switch mode {
+		case AgentModePrimary, AgentModeSubagent, AgentModeAll:
+		default:
+			continue
+		}
+		agents = append(agents, AgentInfo{Name: name, Mode: mode})
+	}
+	return agents, nil
+}
+
+// parseAgentListOutput parses `opencode agent list` output (v1): agent
+// header lines are "<name> (<mode>)", followed by an indented permission
+// JSON block that is skipped. Lines that do not match the header format are
 // ignored; a non-empty header line list is always returned.
 func parseAgentListOutput(out string) []AgentInfo {
 	var agents []AgentInfo
