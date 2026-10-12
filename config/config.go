@@ -678,9 +678,15 @@ func load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// LoadPermissive loads the config file and performs all validation except the
-// "at least one platform per project" check. Use this for commands (like
-// `cc-connect web`) that should work even before platforms are configured.
+// LoadPermissive loads the config file and performs all validation except two
+// structural checks: a config may have no [[projects]] entries, and a project
+// may have no [[projects.platforms]]. Use this for commands (like
+// `cc-connect web`) that should work before the first project or platform has
+// been configured.
+//
+// Note this does not change what the serving process accepts: the bridge
+// itself still uses Load and additionally refuses to start with zero
+// projects (see the guard in cmd/cc-connect/main.go).
 func LoadPermissive(path string) (*Config, error) {
 	cfg, err := load(path)
 	if err != nil {
@@ -1060,9 +1066,11 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 	return "legacy"
 }
 
-// validatePermissive is like validate but skips the "at least one platform"
-// requirement so that commands like `cc-connect web` can operate on agent-only
-// configs before platforms have been set up.
+// validatePermissive is like validate but skips the two structural-count
+// checks: "at least one [[projects]] entry" and "at least one
+// [[projects.platforms]] per project". Commands like `cc-connect web` use it
+// so they can operate on a config that has no projects yet, or projects with
+// agents but no platforms.
 func (c *Config) validatePermissive() error {
 	return c.validateInternal(true)
 }
