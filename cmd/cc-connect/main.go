@@ -1318,6 +1318,8 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	handleDumpSignal() // maomao fork: `kill -USR1 <pid>` logs goroutine stacks (unix only)
+
 	var restartReq *core.RestartRequest
 	select {
 	case <-sigCh:

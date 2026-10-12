@@ -4853,10 +4853,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
+	var handlingSince atomic.Int64 // maomao fork: when the current event's handling began; 0 = waiting
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go e.watchStuckTurn(watchDone, &handlingSince, sessionKey, state)
 	for {
 		var event Event
 		var ok bool
 
+		handlingSince.Store(0)
 		select {
 		case <-stopCh:
 			sp.discard()
@@ -4952,6 +4957,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 		}
 
+		handlingSince.Store(time.Now().UnixNano())
 		if state.isStopped() {
 			sp.discard()
 			state.mu.Lock()
@@ -5485,7 +5491,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				idleTimer.Stop()
 			}
 
+			handlingSince.Store(0) // waiting on the user is not a stuck handler
 			<-pending.Resolved
+			handlingSince.Store(time.Now().UnixNano())
 			slog.Info("permission resolved", "request_id", event.RequestID)
 
 			// The stream preview was frozen+detached when this permission

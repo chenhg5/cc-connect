@@ -302,7 +302,7 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 		state:      ProgressCardStateRunning,
 		agentName:  normalizeProgressAgentLabel(agentName),
 		lang:       lang,
-		maxEntries: 10,
+		maxEntries: 4, // maomao fork: keep the progress card short (was 10)
 	}
 	if throttler, ok := p.(ProgressUpdateThrottler); ok {
 		w.minUpdateInterval = throttler.ProgressUpdateInterval()

@@ -53,6 +53,14 @@ type claudeSession struct {
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
 
+	// maomao fork: an API error (e.g. usage limit) ends the turn; if the CLI
+	// never follows it with a result event, apiErrTimer synthesizes one so the
+	// turn (typing, busy flag) cannot hang. apiErrFired drops the late real one.
+	apiErrMu     sync.Mutex
+	apiErrTimer  *time.Timer
+	apiErrFired  bool
+	apiErrClosed bool // events channel closed; guarded by apiErrMu
+
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
 	// SIGTERM and then SIGKILL. Default: 120s to match claude-mem's
@@ -530,6 +538,13 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 			}
 		}
 	}
+	cs.apiErrMu.Lock()
+	cs.apiErrClosed = true // the fallback timer must not send after close
+	if cs.apiErrTimer != nil {
+		cs.apiErrTimer.Stop()
+		cs.apiErrTimer = nil
+	}
+	cs.apiErrMu.Unlock()
 	close(cs.events)
 	close(cs.done)
 }
@@ -645,10 +660,71 @@ func parseClaudeUsage(usage map[string]any) (input, output, cacheCreation, cache
 	return
 }
 
+// apiErrorResultGrace is how long to wait for the CLI's own result event after
+// an API error message before synthesizing one (maomao fork).
+var apiErrorResultGrace = 10 * time.Second
+
+// armAPIErrorFallback is called when an assistant event carries an API error.
+func (cs *claudeSession) armAPIErrorFallback(raw map[string]any) {
+	var text string
+	if msg, ok := raw["message"].(map[string]any); ok {
+		if arr, ok := msg["content"].([]any); ok {
+			for _, it := range arr {
+				if m, ok := it.(map[string]any); ok {
+					if t, _ := m["text"].(string); t != "" {
+						text += t
+					}
+				}
+			}
+		}
+	}
+	errKind, _ := raw["error"].(string)
+	slog.Warn("claudeSession: API error message, arming result fallback", "error", errKind, "text", text)
+	cs.apiErrMu.Lock()
+	defer cs.apiErrMu.Unlock()
+	if cs.apiErrTimer != nil {
+		cs.apiErrTimer.Stop()
+	}
+	cs.apiErrTimer = time.AfterFunc(apiErrorResultGrace, func() {
+		// Hold apiErrMu while sending so finishReadLoop cannot close the
+		// channel underneath us; the events buffer makes this non-blocking
+		// in practice, and ctx/closed bound the wait otherwise.
+		cs.apiErrMu.Lock()
+		defer cs.apiErrMu.Unlock()
+		cs.apiErrTimer = nil
+		if cs.apiErrClosed {
+			return
+		}
+		cs.apiErrFired = true
+		slog.Warn("claudeSession: no result after API error, synthesizing turn end", "error", errKind)
+		select {
+		case cs.events <- core.Event{Type: core.EventResult, Content: text, SessionID: cs.CurrentSessionID(), Done: true}:
+		case <-cs.ctx.Done():
+		}
+	})
+}
+
+// takeAPIErrorFallback disarms the fallback when the real result arrives and
+// reports whether the fallback already ended this turn (drop the result then).
+func (cs *claudeSession) takeAPIErrorFallback() (alreadyFired bool) {
+	cs.apiErrMu.Lock()
+	defer cs.apiErrMu.Unlock()
+	if cs.apiErrTimer != nil {
+		cs.apiErrTimer.Stop()
+		cs.apiErrTimer = nil
+	}
+	alreadyFired = cs.apiErrFired
+	cs.apiErrFired = false
+	return alreadyFired
+}
+
 func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
 		return
+	}
+	if isErr, _ := raw["is_api_error_message"].(bool); isErr {
+		defer cs.armAPIErrorFallback(raw)
 	}
 
 	// Capture per-sub-call input/cache values to drive the reply footer's
@@ -791,6 +867,10 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 }
 
 func (cs *claudeSession) handleResult(raw map[string]any) {
+	if !isCompactionResult(raw) && cs.takeAPIErrorFallback() {
+		slog.Info("claudeSession: dropping late result, turn already ended by API error fallback")
+		return
+	}
 	var content string
 	if result, ok := raw["result"].(string); ok {
 		content = result
@@ -944,6 +1024,7 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
 	}
+	cs.takeAPIErrorFallback() // new turn: a stale fallback must not end it
 
 	if len(images) == 0 && len(files) == 0 {
 		return cs.writeJSON(map[string]any{

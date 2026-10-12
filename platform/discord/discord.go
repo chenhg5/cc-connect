@@ -1361,11 +1361,17 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	go func() {
 		ticker := time.NewTicker(8 * time.Second)
 		defer ticker.Stop()
+		limit := time.NewTimer(maxTypingDuration)
+		defer limit.Stop()
 		for {
 			select {
 			case <-done:
 				return
 			case <-ctx.Done():
+				return
+			case <-limit.C:
+				// maomao fork: a hung turn must not show "typing" forever.
+				slog.Warn("discord: typing indicator hit max duration, stopping", "channel", channelID, "max", maxTypingDuration)
 				return
 			case <-ticker.C:
 				_ = p.session.ChannelTyping(channelID)
@@ -1373,8 +1379,12 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 		}
 	}()
 
-	return func() { close(done) }
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }
+
+// maxTypingDuration caps how long one turn keeps the typing indicator alive.
+var maxTypingDuration = 30 * time.Minute
 
 func (p *Platform) ResolveChannelName(channelID string) (string, error) {
 	if cached, ok := p.channelNameCache.Load(channelID); ok {

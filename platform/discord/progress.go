@@ -12,7 +12,7 @@ import (
 const (
 	maxDiscordEmbedTitleLen     = 256
 	maxDiscordProgressDescLen   = 3500
-	maxDiscordProgressLineLen   = 220
+	maxDiscordProgressLineLen   = 80 // maomao fork: one short line per step (was 220)
 	maxDiscordProgressFooterLen = 512
 )
 
