@@ -1454,7 +1454,7 @@ func TestProcessInteractiveTurnWithRetry_RichCardNoticeUpdatesCard(t *testing.T)
 		}
 	}
 	rendered := strings.Join(append(p.getPreviewStarts(), p.getPreviewEdits()...), "\n")
-	if !strings.Contains(rendered, "Retrying in") || !strings.Contains(rendered, "attempt 2/2") {
+	if !strings.Contains(rendered, "Retrying in") || !strings.Contains(rendered, "retry 1/1") {
 		t.Fatalf("rich card updates should contain retry notice, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "rich status=done") {
@@ -1516,7 +1516,7 @@ func TestProcessInteractiveTurnWithRetry_ProgressCardNoticeUpdatesCard(t *testin
 			sawCompleted = true
 		}
 		for _, item := range payload.Items {
-			if item.Kind == ProgressEntryToolUse && item.Tool == "自动重试" && strings.Contains(item.Text, "Retrying in") && strings.Contains(item.Text, "attempt 2/2") {
+			if item.Kind == ProgressEntryToolUse && item.Tool == "自动重试" && strings.Contains(item.Text, "Retrying in") && strings.Contains(item.Text, "retry 1/1") {
 				sawRetry = true
 			}
 		}

@@ -667,6 +667,16 @@ type ContinueAfterErrorAgent interface {
 	ContinueAfterErrorPrompt() string
 }
 
+// PromptKeptOnErrorAgent is implemented by agents that report a retriable error
+// only after the prompt was recorded in the conversation (OpenCode stores the
+// user message before it calls the model). Replaying the prompt would add it —
+// images included — to the conversation once more on every retry, so when the
+// agent can also continue (ContinueAfterErrorAgent) the engine continues the
+// turn instead, even if the failed attempt produced nothing yet.
+type PromptKeptOnErrorAgent interface {
+	PromptKeptOnRetriableError() bool
+}
+
 // DefaultContinueAfterErrorPrompt is the resume prompt agents can return from
 // ContinueAfterErrorPrompt.
 const DefaultContinueAfterErrorPrompt = "The previous response was interrupted by a temporary upstream error. " +
