@@ -461,3 +461,54 @@ func TestValidateConfiguredAgent_V2Enumeration(t *testing.T) {
 		t.Fatalf("ValidateConfiguredAgent(compaction) available = %v, want %v", available, want)
 	}
 }
+
+// writeColdDebugAgentsBin simulates the OpenCode v2 cold-directory behavior:
+// the first `debug agents` call for a directory prints "[]" and subsequent
+// calls print sampleJSON.
+func writeColdDebugAgentsBin(t *testing.T, sampleJSON string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	name := filepath.Join(tmpDir, "fake-opencode")
+	counter := filepath.Join(tmpDir, "calls")
+
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "debug" ] && [ "$2" = "agents" ]; then
+  N=$(cat %q 2>/dev/null || echo 0)
+  echo $((N + 1)) > %q
+  if [ "$N" = "0" ]; then
+    printf '[]\n'
+    exit 0
+  fi
+  cat <<'__EOF__'
+%s
+__EOF__
+  exit 0
+fi
+exit 1
+`, counter, counter, sampleJSON)
+
+	if err := os.WriteFile(name, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+func TestListAgents_DebugAgentsColdDirectoryRetry(t *testing.T) {
+	// First call returns [] (cold directory), retry returns the full list.
+	bin := writeColdDebugAgentsBin(t, realOpencodeDebugAgentsSample)
+	got, err := listAgents(context.Background(), bin, t.TempDir())
+	if err != nil {
+		t.Fatalf("listAgents() error = %v", err)
+	}
+	if len(got) != 6 || got[1].Name != "build" {
+		t.Fatalf("listAgents() = %+v, want v2 JSON result after cold-directory retry", got)
+	}
+}
+
+func TestListAgents_DebugAgentsAlwaysEmptyIsError(t *testing.T) {
+	// Valid JSON but zero entries on both calls and no v1 layout: failure.
+	bin := writeFakeOpencodeBin(t, "[]", nil)
+	if _, err := listAgents(context.Background(), bin, t.TempDir()); err == nil {
+		t.Fatal("listAgents() error = nil, want failure when every layout yields no agents")
+	}
+}

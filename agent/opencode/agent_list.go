@@ -89,8 +89,31 @@ func listAgents(ctx context.Context, cmd, workDir string) ([]AgentInfo, error) {
 }
 
 // listAgentsDebugJSON runs `opencode debug agents` (OpenCode v2) in workDir
-// and parses its JSON output.
+// and parses its JSON output. OpenCode v2 answers with an empty array on the
+// first call for a directory the background service has not loaded yet
+// (observed on v2.0.26: a cold directory returns [] once and the full list on
+// the immediate second call), so one retry is performed before giving up.
 func listAgentsDebugJSON(ctx context.Context, cmd, workDir string) ([]AgentInfo, error) {
+	agents, err := runDebugAgentsOnce(ctx, cmd, workDir)
+	if err != nil {
+		return nil, err
+	}
+	if len(agents) == 0 {
+		agents, err = runDebugAgentsOnce(ctx, cmd, workDir)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(agents) == 0 {
+		return nil, fmt.Errorf("opencode: debug agents: no agent entries in output")
+	}
+	return agents, nil
+}
+
+// runDebugAgentsOnce runs a single `opencode debug agents` call and parses
+// the JSON output. A valid empty result is returned as an empty slice with a
+// nil error so the caller can decide whether to retry.
+func runDebugAgentsOnce(ctx context.Context, cmd, workDir string) ([]AgentInfo, error) {
 	c := exec.CommandContext(ctx, cmd, "debug", "agents")
 	c.Dir = workDir
 	out, err := c.Output()
@@ -98,14 +121,7 @@ func listAgentsDebugJSON(ctx context.Context, cmd, workDir string) ([]AgentInfo,
 		return nil, fmt.Errorf("opencode: debug agents: %w", err)
 	}
 
-	agents, err := parseDebugAgentsOutput(string(out))
-	if err != nil {
-		return nil, err
-	}
-	if len(agents) == 0 {
-		return nil, fmt.Errorf("opencode: debug agents: no agent entries in output")
-	}
-	return agents, nil
+	return parseDebugAgentsOutput(string(out))
 }
 
 // listAgentsText runs `opencode agent list` (OpenCode v1) in workDir and
