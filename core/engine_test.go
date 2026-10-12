@@ -8684,7 +8684,15 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			for time.Now().Before(deadline) {
 				sent := platform.getSent()
 				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
-					return
+					// 后台 runJob 发完消息后还会 MarkRun 写盘（AtomicWriteFile
+					// rename 会往 crons 目录写入新目录项）。必须等 LastRun 落定
+					// 再返回，否则 t.TempDir() 清理与 rename 竞争会报
+					// "RemoveAll cleanup: directory not empty"（CI run
+					// 38205166517 复现；cronJobRunStatus 与 MarkRun 共用
+					// store.mu，返回 lastRunSet 时 save() 必定已完成）。
+					if found, lastRunSet, _ := cronJobRunStatus(store, job.ID); found && lastRunSet {
+						return
+					}
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
