@@ -13975,6 +13975,41 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	}
 }
 
+// TestUnsolicitedReader_SuppressesNoReply verifies that a background turn
+// ending in a bare NO_REPLY is not relayed, and a trailing marker is stripped.
+func TestUnsolicitedReader_SuppressesNoReply(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-silent")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch1:u1")
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	iKey := "test:ch1:u1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = state
+	e.interactiveMu.Unlock()
+
+	e.startUnsolicitedReader(state, session, sessions, iKey, "")
+	defer e.stopUnsolicitedReader(state)
+
+	sess.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+	sess.events <- Event{Type: EventResult, Content: "task done\nNO_REPLY", Done: true}
+
+	waitForPlatformSend(p, 1, 5*time.Second)
+	time.Sleep(200 * time.Millisecond)
+	sent := p.getSent()
+	for _, s := range sent {
+		if strings.Contains(s, "NO_REPLY") {
+			t.Fatalf("NO_REPLY marker leaked to platform: %v", sent)
+		}
+	}
+	if len(sent) != 1 || !strings.Contains(sent[0], "task done") {
+		t.Fatalf("expected exactly the stripped second reply, got %v", sent)
+	}
+}
+
 // TestUnsolicitedReader_ResetsIdleCloseOnEventResult verifies the P1-C P1-1
 // fix: an unsolicited EventResult must re-arm the per-session idle close
 // timer. Before the fix, the idle timer was only scheduled at the end of

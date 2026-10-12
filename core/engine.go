@@ -4645,6 +4645,15 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					fullResponse = strings.Join(textParts, "")
 				}
 
+				// Honour the NO_REPLY marker here too: background task
+				// notifications often end in a bare NO_REPLY, which must not
+				// be relayed to the chat as literal text.
+				if isSilentReply(fullResponse) {
+					fullResponse = ""
+				} else if stripped, ok := stripTrailingSilent(fullResponse); ok {
+					fullResponse = stripped
+				}
+
 				if fullResponse != "" {
 					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
