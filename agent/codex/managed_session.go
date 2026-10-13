@@ -75,6 +75,7 @@ type managedSession struct {
 	noticeKeys         map[string]string
 	textStreams        map[string]*managedTextStream
 	seenItems          map[string]bool
+	fileChanges        map[string]string // proposed file changes, keyed by turn/item
 	finalText          []string
 	preamble           string
 	decoder            *appServerSession // reuse transport-independent item/usage conversion only
@@ -82,7 +83,7 @@ type managedSession struct {
 
 func newManagedSession(ctx context.Context, a *managedAgent, id string) (*managedSession, error) {
 	lifetime, cancel := context.WithCancel(ctx)
-	s := &managedSession{agent: a, ctx: lifetime, cancel: cancel, events: make(chan core.Event, 256), done: make(chan struct{}), pending: map[string]*managedRequest{}, completed: map[string]bool{}, seenItems: map[string]bool{}, canInput: true}
+	s := &managedSession{agent: a, ctx: lifetime, cancel: cancel, events: make(chan core.Event, 256), done: make(chan struct{}), pending: map[string]*managedRequest{}, completed: map[string]bool{}, seenItems: map[string]bool{}, fileChanges: map[string]string{}, canInput: true}
 	s.decoder = &appServerSession{ctx: lifetime, events: make(chan core.Event, 64)}
 	rpc, err := a.openRPC(lifetime)
 	if err != nil {
@@ -159,6 +160,18 @@ func (s *managedSession) applySnapshot(snapshot managedSnapshot, expected string
 	for _, turn := range snapshot.Thread.Turns {
 		if turn.Status == "inProgress" {
 			s.turn = turn.ID
+			for _, item := range turn.Items {
+				if kind, _ := item["type"].(string); kind == "fileChange" {
+					if itemID, _ := item["id"].(string); itemID != "" {
+						if s.fileChanges == nil {
+							s.fileChanges = map[string]string{}
+						}
+						if preview := appServerFileChangePreview(item["changes"]); preview != "" {
+							s.fileChanges[turn.ID+"/"+itemID] = preview
+						}
+					}
+				}
+			}
 		}
 	}
 	if previousTurn != s.turn {

@@ -173,6 +173,38 @@ func TestManagedSteerInterruptLiveOutputAndExternalResolution(t *testing.T) {
 	}
 }
 
+func TestManagedPatchApproval_ShowsProposedChangesWithoutReason(t *testing.T) {
+	s := &managedSession{
+		agent:       &managedAgent{daemon: managedOptions{approvals: true}},
+		ctx:         context.Background(),
+		thread:      "target",
+		events:      make(chan core.Event, 8),
+		pending:     map[string]*managedRequest{},
+		seenItems:   map[string]bool{},
+		fileChanges: map[string]string{},
+		decoder:     &appServerSession{events: make(chan core.Event, 8)},
+	}
+	started := daemonMessage{Method: "item/started", Params: json.RawMessage(`{"threadId":"target","turnId":"turn","item":{"id":"patch-1","type":"fileChange","status":"inProgress","changes":[{"path":"core/example.go","kind":"update","diff":"@@ -1 +1 @@\n-old\n+new"}]}}`)}
+	if err := s.handleItem(started); err != nil {
+		t.Fatal(err)
+	}
+	approval := daemonMessage{ID: json.RawMessage(`9`), Method: "item/fileChange/requestApproval", Params: json.RawMessage(`{"threadId":"target","turnId":"turn","itemId":"patch-1"}`)}
+	if err := s.handleRequest(approval); err != nil {
+		t.Fatal(err)
+	}
+	for len(s.events) > 0 {
+		event := <-s.events
+		if event.Type != core.EventPermissionRequest {
+			continue
+		}
+		if event.ToolName != "Patch" || !strings.Contains(event.ToolInput, "core/example.go") || !strings.Contains(event.ToolInput, "+new") {
+			t.Fatalf("patch approval omitted proposed changes: %+v", event)
+		}
+		return
+	}
+	t.Fatal("missing patch approval event")
+}
+
 func TestManagedAsyncTextAndToolOutputRemainDistinct(t *testing.T) {
 	cwd := t.TempDir()
 	socket := managedFixture(t, func(ws *websocket.Conn) {

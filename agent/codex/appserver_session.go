@@ -1557,6 +1557,38 @@ func appServerJSON(v any) string {
 	return s
 }
 
+// appServerFileChangePreview uses the proposed edits from item/started.
+// The later fileChange approval request normally contains only itemId and an
+// optional reason, so rendering that request alone hides what will be changed.
+func appServerFileChangePreview(raw any) string {
+	changes, ok := raw.([]any)
+	if !ok {
+		return ""
+	}
+	var parts []string
+	for _, entry := range changes {
+		change, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		path, _ := change["path"].(string)
+		kind, _ := change["kind"].(string)
+		diff, _ := change["diff"].(string)
+		if path == "" && diff == "" {
+			continue
+		}
+		part := strings.TrimSpace(kind + " " + path)
+		if diff != "" {
+			part += "\n" + truncate(strings.TrimSpace(diff), 1200)
+		}
+		parts = append(parts, part)
+		if len(parts) == 16 {
+			break
+		}
+	}
+	return truncate(strings.Join(parts, "\n\n"), 3000)
+}
+
 func toInt(v any) (int, bool) {
 	switch n := v.(type) {
 	case float64:
