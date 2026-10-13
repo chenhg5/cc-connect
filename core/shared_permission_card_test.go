@@ -274,6 +274,44 @@ func TestSharedPermissionCard_DecisionUpdatesInPlace(t *testing.T) {
 	}
 }
 
+func TestSharedPermissionCard_ClickReturnsAcceptedDecisionCard(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "CALLBACK APPROVAL", Decisions: []string{"allow"}})
+	env.await("CALLBACK APPROVAL")
+	result := make(chan *Card, 1)
+	env.e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: env.button(env.e.i18n.T(MsgPermBtnAllow)), ReplyCtx: "reply", CardActionResult: func(card *Card) { result <- card }})
+	select {
+	case card := <-result:
+		if card.Header.Color != "green" || len(sharedPermissionButtons(card)) != 0 || !strings.Contains(card.RenderText(), "CALLBACK APPROVAL") {
+			t.Fatalf("callback card = %+v", card)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("accepted approval did not return callback card")
+	}
+	if update := awaitTrackedPermissionUpdate(t, p); update.card.Header.Color != "green" {
+		t.Fatalf("tracked card update = %+v", update)
+	}
+}
+
+func TestSharedPermissionCard_CallbackSuccessDoesNotSendConfirmationWhenPatchFails(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	p.updateErr = fmt.Errorf("simulated patch failure")
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "CALLBACK PATCH FAILURE", Decisions: []string{"allow"}})
+	env.await("CALLBACK PATCH FAILURE")
+	result := make(chan *Card, 1)
+	env.e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: env.button(env.e.i18n.T(MsgPermBtnAllow)), ReplyCtx: "reply", CardActionResult: func(card *Card) { result <- card }})
+	select {
+	case <-result:
+	case <-time.After(3 * time.Second):
+		t.Fatal("accepted approval did not return callback card")
+	}
+	if strings.Contains(strings.Join(p.getSent(), "\n"), env.e.i18n.T(MsgSharedResponseSent)) {
+		t.Fatal("successful callback sent a separate confirmation message")
+	}
+}
+
 func TestSharedPermissionCard_StaleAndFailedDecisionsNeverShowSuccess(t *testing.T) {
 	env, p := newSharedTrackedPermissionEnv(t)
 	as := env.a.connection("first")
