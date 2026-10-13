@@ -145,5 +145,9 @@ func (e *Engine) answerSharedAsyncQuestion(p Platform, msg *Message, state *inte
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
+	if msg.CardActionResult != nil {
+		msg.CardActionResult(NewCard().Title(e.i18n.T(MsgSharedSteerAccepted), "green").Markdown(q.question.Question).Markdown("**→ " + answer + "**").Build())
+		return
+	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSharedSteerAccepted))
 }

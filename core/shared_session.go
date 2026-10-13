@@ -515,9 +515,12 @@ func (e *Engine) respondSharedDecision(p Platform, msg *Message, state *interact
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
+	if msg.CardActionResult != nil {
+		msg.CardActionResult(e.sharedResolvedPermissionCard(pending, decision))
+	}
 	e.updateSharedPermissionCard(pending, decision)
 	e.resolveSharedPending(state, pending.RequestID)
-	if !pending.card.wasUpdated() {
+	if msg.CardActionResult == nil && !pending.card.wasUpdated() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSharedResponseSent))
 	}
 }

@@ -79,6 +79,37 @@ func TestSharedAsyncQuestionFreeTextRetriesAndDeduplicates(t *testing.T) {
 	env.await(env.e.i18n.T(MsgSharedStaleRequest))
 }
 
+func TestSharedAsyncQuestion_ClickUpdatesCardWithoutConfirmationMessage(t *testing.T) {
+	env := newSharedTestEnv(t)
+	env.send("/attach first")
+	env.await("Attached to session first")
+	as := env.a.connection("first")
+	env.e.interactiveMu.Lock()
+	state := env.e.interactiveStates["test:user"]
+	env.e.interactiveMu.Unlock()
+	env.e.showSharedAsyncQuestions(state, as, Event{Type: EventText, ItemID: "question", TurnID: "active-first", Questions: []UserQuestion{{Question: "Choose database?", Options: []UserQuestionOption{{Label: "SQLite"}}}}})
+	env.await("Choose database?")
+	var token string
+	state.mu.Lock()
+	for key := range state.shared.asyncQuestions {
+		token = key
+	}
+	state.mu.Unlock()
+	result := make(chan *Card, 1)
+	env.e.ReceiveMessage(env.p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: "/async-answer " + token + " option 1", ReplyCtx: "reply", CardActionResult: func(card *Card) { result <- card }})
+	select {
+	case card := <-result:
+		if card.Header.Color != "green" || !strings.Contains(card.RenderText(), "SQLite") {
+			t.Fatalf("answer callback card = %+v", card)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("accepted async answer did not return callback card")
+	}
+	if strings.Contains(strings.Join(env.p.getSent(), "\n"), env.e.i18n.T(MsgSharedSteerAccepted)) {
+		t.Fatal("answer click sent a separate confirmation message")
+	}
+}
+
 func TestSharedAsyncQuestionMalformedAndUnscopedCannotCreateCards(t *testing.T) {
 	env := newSharedTestEnv(t)
 	env.send("/attach first")

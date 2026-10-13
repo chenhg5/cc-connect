@@ -968,7 +968,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
 
-		go p.dispatchCoreMessage(&core.Message{
+		msg := &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
@@ -976,7 +976,39 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			ChatName:   p.resolveChatName(chatID),
 			Content:    cmdText,
 			ReplyCtx:   rctx,
-		})
+		}
+		// Shared approvals and async questions can report success through the
+		// action callback. Returning the card here makes the clicked card update
+		// reliably even when the message Patch API races with Feishu's callback.
+		if strings.HasPrefix(cmdText, "/decision ") || strings.HasPrefix(cmdText, "/async-answer ") {
+			result := make(chan *core.Card, 1)
+			msg.CardActionResult = func(card *core.Card) { result <- card }
+			go p.dispatchCoreMessage(msg)
+			select {
+			case card := <-result:
+				return &callback.CardActionTriggerResponse{Card: &callback.Card{Type: "raw", Data: renderCardMap(card, sessionKey)}}, nil
+			case <-time.After(2 * time.Second):
+				// The core action may still succeed after the callback deadline.
+				// Patch this exact card when it does, especially for async questions.
+				go func() {
+					select {
+					case card := <-result:
+						if messageID != "" {
+							ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+							defer cancel()
+							if err := p.patchCardMessage(ctx, messageID, renderCard(card, sessionKey)); err != nil {
+								slog.Warn(p.tag()+": delayed action card update failed", "action", cmdText, "error", err)
+							}
+						}
+					case <-time.After(15 * time.Second):
+					}
+				}()
+				// A non-nil response also tells the shared connection that this
+				// platform handled the action; another sibling must not replay it.
+				return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: "⏳ Loading... / 加载中..."}}, nil
+			}
+		}
+		go p.dispatchCoreMessage(msg)
 
 		if ac, ok := event.Event.Action.Value["after_click"].(map[string]any); ok {
 			if title, _ := ac["title"].(string); title != "" {
