@@ -1140,6 +1140,97 @@ func TestBuildRichCard_UsesCodexRuntimeToolDescriptors(t *testing.T) {
 	}
 }
 
+func TestBuildRichCard_ToolsCollapsedWithLatestPreview(t *testing.T) {
+	latestSummary := "latest-command " + strings.Repeat("查看文件", 80) + "\nsecond line"
+	steps := []core.ToolStep{
+		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "older-command", Result: "older-output"},
+		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: latestSummary, Result: "full-tool-output", Status: "completed", Done: true},
+		{Kind: core.ToolStepKindThinking, Summary: "later reasoning"},
+	}
+	for _, tc := range []struct {
+		name      string
+		status    core.CardStatus
+		streaming bool
+	}{
+		{"working", core.CardStatusWorking, true},
+		{"done", core.CardStatusDone, false},
+		{"error", core.CardStatusError, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cardJSON := buildRichCard(tc.status, "", steps, "answer", tc.streaming, "")
+			panels := collectCardPanels(t, cardJSON)
+			if len(panels) != 2 {
+				t.Fatalf("want reasoning and tools panels, got %#v", panels)
+			}
+			tools := panels[1]
+			if tools["expanded"] != false {
+				t.Fatalf("tools should default to collapsed, got %#v", tools["expanded"])
+			}
+			for _, want := range []string{"older-command", "latest-command", strings.Repeat("查看文件", 80), "full-tool-output", "completed"} {
+				if !panelContains(t, tools, want) {
+					t.Fatalf("expandable tools panel should retain %q", want)
+				}
+			}
+
+			var card struct {
+				Body struct {
+					Elements []map[string]any `json:"elements"`
+				} `json:"body"`
+			}
+			if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+				t.Fatal(err)
+			}
+			var previews []map[string]any
+			for _, elem := range card.Body.Elements {
+				if elem["tag"] == "div" {
+					previews = append(previews, elem)
+				}
+			}
+			if len(previews) != 1 {
+				t.Fatalf("want exactly one visible tool preview, got %#v", previews)
+			}
+			preview := previews[0]["text"].(map[string]any)["content"].(string)
+			if !strings.Contains(preview, "latest-command") || !strings.HasSuffix(preview, "...") {
+				t.Fatalf("preview should show truncated latest tool summary, got %q", preview)
+			}
+			if len([]rune(preview)) > 103 || strings.ContainsAny(preview, "\r\n") {
+				t.Fatalf("preview should be a short single line, got %q", preview)
+			}
+			for _, unwanted := range []string{"older-command", "full-tool-output", "completed", "later reasoning"} {
+				if strings.Contains(preview, unwanted) {
+					t.Fatalf("preview should not contain %q: %q", unwanted, preview)
+				}
+			}
+			if previews[0]["icon"] == nil {
+				t.Fatal("tool preview should include the tool icon")
+			}
+		})
+	}
+}
+
+func TestRichToolPreviewElement_SummaryOnlyAndSanitized(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		step core.ToolStep
+		want string
+	}{
+		{"empty summary", core.ToolStep{Name: "Bash", Result: "hidden-output"}, "Run command"},
+		{"multiline summary", core.ToolStep{Name: "custom_tool", Summary: "first line\r\n  second line\t", Result: "hidden-output"}, "first line second line"},
+		{"URL redaction", core.ToolStep{Name: "web_fetch", Summary: "https://example.com/docs?token=secret", Result: "hidden-output"}, "example.com/docs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			elem := richToolPreviewElement(tc.step)
+			content := elem["text"].(map[string]any)["content"].(string)
+			if !strings.Contains(content, tc.want) {
+				t.Fatalf("preview = %q, want %q", content, tc.want)
+			}
+			if strings.ContainsAny(content, "\r\n\t") || strings.Contains(content, "hidden-output") || strings.Contains(content, "secret") {
+				t.Fatalf("preview should contain only a sanitized single-line summary: %q", content)
+			}
+		})
+	}
+}
+
 func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 	code := 0
 	success := true
