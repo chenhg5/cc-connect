@@ -157,6 +157,16 @@ func (s *managedSession) handleItem(m daemonMessage) error {
 	id, _ := p.Item["id"].(string)
 	kind, _ := p.Item["type"].(string)
 	if m.Method == "item/started" {
+		if kind == "fileChange" && id != "" {
+			if preview := appServerFileChangePreview(p.Item["changes"]); preview != "" {
+				s.mu.Lock()
+				if s.fileChanges == nil {
+					s.fileChanges = map[string]string{}
+				}
+				s.fileChanges[p.TurnID+"/"+id] = preview
+				s.mu.Unlock()
+			}
+		}
 		if kind == "agentMessage" {
 			s.startAgentText(p.TurnID, id, p.Item)
 			return nil
@@ -166,6 +176,9 @@ func (s *managedSession) handleItem(m daemonMessage) error {
 		return nil
 	}
 	s.mu.Lock()
+	if kind == "fileChange" && id != "" {
+		delete(s.fileChanges, p.TurnID+"/"+id)
+	}
 	seen := s.seenItems[id]
 	if id != "" {
 		s.seenItems[id] = true
@@ -290,6 +303,11 @@ func (s *managedSession) completeManagedTurn(turnID, status, errorText string, r
 			ids = append(ids, id)
 		}
 	}
+	for key := range s.fileChanges {
+		if strings.HasPrefix(key, turnID+"/") {
+			delete(s.fileChanges, key)
+		}
+	}
 	if len(s.seenItems) > 4096 {
 		s.seenItems = map[string]bool{}
 	}
@@ -343,7 +361,18 @@ func (s *managedSession) handleRequest(m daemonMessage) error {
 		event.ToolInput, _ = params["command"].(string)
 		if m.Method == "item/fileChange/requestApproval" {
 			event.ToolName = "Patch"
-			event.ToolInput, _ = params["reason"].(string)
+			reason, _ := params["reason"].(string)
+			itemID, _ := params["itemId"].(string)
+			s.mu.Lock()
+			preview := s.fileChanges[turn+"/"+itemID]
+			s.mu.Unlock()
+			event.ToolInput = preview
+			if event.ToolInput == "" {
+				event.ToolInput = reason
+			}
+			if event.ToolInput == "" {
+				event.ToolInput = appServerJSON(params)
+			}
 		}
 		event.Decisions = managedApprovalChoices(params, request)
 		event.DecisionDetails = map[string]string{}
