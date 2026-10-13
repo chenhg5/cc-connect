@@ -2025,6 +2025,23 @@ func TestProcessInteractiveEvents_RichCardShowsThinkingContent(t *testing.T) {
 	}
 }
 
+func TestMergeRichToolResult_PreservesRecentOutputAfterTruncation(t *testing.T) {
+	for _, useContent := range []bool{false, true} {
+		output := strings.Repeat("older output\n", 100) + "最近一行\n最新一行"
+		event := Event{ToolName: "Bash", ToolResult: output, ToolStatus: "completed"}
+		if useContent {
+			event.ToolResult, event.Content = "", output
+		}
+		steps := mergeRichToolResult([]ToolStep{{Name: "Bash", Summary: "command"}}, event, truncateIf(output, 50), 50)
+		if !strings.HasSuffix(steps[0].ResultTail, "最近一行\n最新一行") || len([]rune(steps[0].ResultTail)) > defaultToolMaxLen {
+			t.Fatalf("recent output should retain a bounded Unicode tail, got %q", steps[0].ResultTail)
+		}
+		if strings.Contains(steps[0].Result, "最新一行") {
+			t.Fatal("test requires the panel summary to be head-truncated")
+		}
+	}
+}
+
 func TestProcessInteractiveEvents_RichCardCoalescesToolResult(t *testing.T) {
 	p := &stubCompactProgressPlatform{
 		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
