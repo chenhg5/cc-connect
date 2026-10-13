@@ -7150,6 +7150,26 @@ func richStepElement(step core.ToolStep) map[string]any {
 	return elem
 }
 
+// richToolPreviewElement keeps only the latest tool's sanitized summary visible
+// outside the collapsed history. Results remain inside the tools panel.
+func richToolPreviewElement(step core.ToolStep) map[string]any {
+	display := buildToolDisplay(step.Name, step.Summary)
+	content := display.Title
+	if display.Detail != "" && display.Detail != display.Title {
+		content += ": " + display.Detail
+	}
+	content = strings.Join(strings.Fields(content), " ")
+	return map[string]any{
+		"tag": "div",
+		"text": map[string]any{
+			"tag":       "plain_text",
+			"content":   compactRichText(content, 100),
+			"text_size": "notation",
+		},
+		"icon": map[string]any{"tag": "standard_icon", "token": display.IconToken},
+	}
+}
+
 func richPlaceholderElement(text string) map[string]any {
 	return map[string]any{
 		"tag": "div",
@@ -7248,23 +7268,24 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 
 func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) ([]byte, error) {
 	reasoningSteps, toolSteps := splitRichStepsByLane(steps)
-	panelMaps := make([]map[string]any, 0, 2)
+	activityElements := make([]map[string]any, 0, 3)
 	if len(reasoningSteps) > 0 {
-		panelMaps = append(panelMaps, buildRichPanel(
+		activityElements = append(activityElements, buildRichPanel(
 			richLaneTitle("Reasoning", len(reasoningSteps)),
 			streaming,
 			richPanelElements(reasoningSteps, "Thinking..."),
 		))
 	}
 	if len(toolSteps) > 0 {
-		panelMaps = append(panelMaps, buildRichPanel(
+		activityElements = append(activityElements, buildRichPanel(
 			richLaneTitle("Tools", len(toolSteps)),
-			streaming,
+			false,
 			richPanelElements(toolSteps, "No tool steps"),
 		))
+		activityElements = append(activityElements, richToolPreviewElement(toolSteps[len(toolSteps)-1]))
 	}
-	if len(panelMaps) == 0 && streaming {
-		panelMaps = append(panelMaps, buildRichPanel("Reasoning", true, richPanelElements(nil, "Thinking...")))
+	if len(activityElements) == 0 && streaming {
+		activityElements = append(activityElements, buildRichPanel("Reasoning", true, richPanelElements(nil, "Thinking...")))
 	}
 
 	markdownMap := map[string]any{
@@ -7292,13 +7313,7 @@ func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markd
 		}
 	}
 
-	var elements []map[string]any
-	if len(panelMaps) > 0 {
-		elements = append(elements, panelMaps...)
-		elements = append(elements, markdownMap)
-	} else {
-		elements = append(elements, markdownMap)
-	}
+	elements := append(activityElements, markdownMap)
 	if len(footerElements) > 0 {
 		// Insert a horizontal separator between body and footer so the boundary is clear.
 		elements = append(elements, map[string]any{"tag": "hr"})
