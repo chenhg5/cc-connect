@@ -28,7 +28,7 @@ func runRelay(args []string) {
 
 func runRelaySend(args []string) {
 	var from, to, sessionKey, message, dataDir string
-	async := false
+	async, live := false, false
 
 	var positional []string
 	for i := 0; i < len(args); i++ {
@@ -60,6 +60,8 @@ func runRelaySend(args []string) {
 			}
 		case "--async":
 			async = true
+		case "--live":
+			live = true
 		case "--help", "-h":
 			printRelaySendUsage()
 			return
@@ -99,11 +101,12 @@ func runRelaySend(args []string) {
 		os.Exit(1)
 	}
 
-	payload, _ := json.Marshal(map[string]string{
+	payload, _ := json.Marshal(map[string]any{
 		"from":        from,
 		"to":          to,
 		"session_key": sessionKey,
 		"message":     message,
+		"live":        live,
 	})
 
 	endpoint := "/relay/send"
@@ -160,6 +163,7 @@ Options:
   -s, --session-key <key>    Session key (auto-detected from CC_SESSION_KEY env)
   -m, --message <text>       Message to send
       --async                Queue the relay and return immediately
+      --live                 Show the target agent's progress in the group
       --data-dir <path>      Data directory (default: ~/.cc-connect)
   -h, --help                 Show this help
 
