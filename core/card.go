@@ -9,8 +9,9 @@ import (
 // platform-specific cards (Feishu Interactive Card, Telegram message, etc.)
 // or degraded to plain text for platforms without card support.
 type Card struct {
-	Header   *CardHeader
-	Elements []CardElement
+	Header       *CardHeader
+	Elements     []CardElement
+	RichMarkdown bool // request the platform's richer markdown renderer when available
 }
 
 // CardHeader is the optional colored title bar of a card.
@@ -25,7 +26,10 @@ type CardElement interface {
 }
 
 // CardMarkdown renders markdown-formatted text.
-type CardMarkdown struct{ Content string }
+type CardMarkdown struct {
+	Content string
+	Diff    bool // Content contains a unified diff preview
+}
 
 // CardDivider renders a horizontal rule.
 type CardDivider struct{}
@@ -130,10 +134,25 @@ func (b *CardBuilder) Title(title, color string) *CardBuilder {
 	return b
 }
 
+// RichMarkdown requests rendering that supports inline code in card markdown.
+func (b *CardBuilder) RichMarkdown() *CardBuilder {
+	b.card.RichMarkdown = true
+	return b
+}
+
 // Markdown appends a markdown text element.
 func (b *CardBuilder) Markdown(content string) *CardBuilder {
 	if content != "" {
 		b.card.Elements = append(b.card.Elements, CardMarkdown{Content: content})
+	}
+	return b
+}
+
+// Diff appends a patch preview. Renderers may present its files and changed
+// lines with richer styling; other platforms can display the fenced diff.
+func (b *CardBuilder) Diff(content string) *CardBuilder {
+	if content != "" {
+		b.card.Elements = append(b.card.Elements, CardMarkdown{Content: "```diff\n" + content + "\n```", Diff: true})
 	}
 	return b
 }

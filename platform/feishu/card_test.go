@@ -22,6 +22,44 @@ func decodeRenderedCard(t *testing.T, card *core.Card) map[string]any {
 	return got
 }
 
+func TestRenderCardMap_PermissionCommandUsesInlineCodeSchema(t *testing.T) {
+	command := "/bin/bash -lc ls"
+	buttons := []core.CardButton{
+		core.PrimaryBtn("Allow", "cmd:/decision token allow"),
+		core.DefaultBtn("Cancel", "cmd:/decision token cancel"),
+	}
+	card := core.NewCard().RichMarkdown().Title("Permission Request", "orange").
+		Markdown("**Bash**: `" + command + "`").Buttons(buttons...).Build()
+	got := renderCardMap(card, "feishu:thread")
+	if got["schema"] != "2.0" {
+		t.Fatalf("schema = %v, want 2.0 so inline code renders", got["schema"])
+	}
+	body := got["body"].(map[string]any)
+	elements := body["elements"].([]map[string]any)
+	if len(elements) != 2 || elements[0]["content"] != "**Bash**: `"+command+"`" {
+		t.Fatalf("inline command changed: %#v", elements)
+	}
+	if elements[1]["tag"] != "column_set" {
+		t.Fatalf("v2 buttons must use columns: %#v", elements[1])
+	}
+	columns := elements[1]["columns"].([]map[string]any)
+	if len(columns) != len(buttons) {
+		t.Fatalf("columns = %d, want %d", len(columns), len(buttons))
+	}
+	for i, want := range buttons {
+		button := columns[i]["elements"].([]map[string]any)[0]
+		value := button["value"].(map[string]string)
+		if button["tag"] != "button" || value["action"] != want.Value || value["session_key"] != "feishu:thread" {
+			t.Fatalf("button %d lost callback: %#v", i, button)
+		}
+	}
+	resolved := core.NewCard().RichMarkdown().Title("Allow", "green").Markdown("**Bash**: `" + command + "`").Build()
+	updated := renderCardMap(resolved, "feishu:thread")
+	if updated["schema"] != "2.0" || len(updated["body"].(map[string]any)["elements"].([]map[string]any)) != 1 {
+		t.Fatalf("resolved card lost inline code schema: %#v", updated)
+	}
+}
+
 func TestRenderCardMap_EqualColumnsActionsUseColumnSet(t *testing.T) {
 	buttons := []core.CardButton{
 		core.PrimaryBtn("Session Management", "nav:/help session"),

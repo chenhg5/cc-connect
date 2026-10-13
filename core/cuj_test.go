@@ -2558,6 +2558,21 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 // CUJ: connect to externally started work, answer its questions, and detach.
 // Request-bound buttons remain safe when another client resolves an approval.
 func TestCUJ_C7_SharedExternalApprovalQuestionsAndDetach(t *testing.T) {
+	t.Run("PatchDiffRemainsVisibleAfterDecision", func(t *testing.T) {
+		env, p := newSharedTrackedPermissionEnv(t)
+		as := env.a.connection("first")
+		preview := "update /project/core/card.go\n@@ -1 +1 @@\n-old\n+new"
+		as.emit(Event{Type: EventPermissionRequest, RequestID: "patch", ToolName: "Patch", ToolInput: preview, Decisions: []string{"allow", "cancel"}})
+		env.await("/project/core/card.go")
+		env.send(env.button(env.e.i18n.T(MsgPermBtnAllow)))
+		awaitTrackedPermissionUpdate(t, p)
+		env.send("/detach")
+		env.await(env.e.i18n.T(MsgSharedDetached))
+		visible := strings.Join(p.getSent(), "\n")
+		if !strings.Contains(visible, "```diff\n"+preview) || !strings.Contains(visible, "✅ "+env.e.i18n.T(MsgPermBtnAllow)) {
+			t.Fatalf("patch approval lost changed lines or final decision: %s", visible)
+		}
+	})
 	t.Run("PermissionCardUpdatesInPlace", func(t *testing.T) {
 		env, p := newSharedTrackedPermissionEnv(t)
 		as := env.a.connection("first")
