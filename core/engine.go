@@ -11025,9 +11025,10 @@ func (e *Engine) SendToSession(sessionKey, message string) error {
 
 // SendOptions controls optional behavior for external send callers.
 type SendOptions struct {
-	WorkDir string
-	AtUsers []string
-	AtAll   bool
+	WorkDir   string
+	AtUsers   []string
+	AtAll     bool
+	FromAgent bool // maomao fork: the session's own agent sent it (AgentReplyMarker)
 }
 
 func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment, atUsers []string, atAll bool) error {
@@ -11048,6 +11049,9 @@ func (e *Engine) SendToSessionWithOptions(sessionKey, message string, images []I
 	state, p, replyCtx, err := e.resolveOutboundSessionTarget(sessionKey, len(images) > 0 || len(files) > 0)
 	if err != nil {
 		return err
+	}
+	if opts.FromAgent {
+		replyCtx = markAgentReply(p, replyCtx)
 	}
 
 	if message == "" && len(images) == 0 && len(files) == 0 {

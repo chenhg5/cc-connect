@@ -60,6 +60,9 @@ type SendRequest struct {
 	Videos     []FileAttachment  `json:"videos,omitempty"`
 	AtUsers    []string          `json:"at_users,omitempty"`
 	AtAll      bool              `json:"at_all,omitempty"`
+	// FromAgent: sent by the agent of this very session (maomao fork), so the
+	// post carries the agent's own text and backfill need not show it again.
+	FromAgent bool `json:"from_agent,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -253,7 +256,7 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		workDir = req.CWD
 	}
 	if req.Message != "" || len(req.Images) > 0 || len(req.Files) > 0 {
-		if err := engine.SendToSessionWithOptions(req.SessionKey, req.Message, req.Images, req.Files, SendOptions{WorkDir: workDir, AtUsers: req.AtUsers, AtAll: req.AtAll}); err != nil {
+		if err := engine.SendToSessionWithOptions(req.SessionKey, req.Message, req.Images, req.Files, SendOptions{WorkDir: workDir, AtUsers: req.AtUsers, AtAll: req.AtAll, FromAgent: req.FromAgent}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

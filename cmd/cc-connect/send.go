@@ -175,6 +175,11 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	if req.SessionKey == "" {
 		req.SessionKey = strings.TrimSpace(os.Getenv("CC_SESSION_KEY"))
 	}
+	// maomao fork: posting into the agent's own session (the env cc-connect
+	// gives every agent it starts) means the agent wrote this text itself.
+	envKey := strings.TrimSpace(os.Getenv("CC_SESSION_KEY"))
+	envProject := strings.TrimSpace(os.Getenv("CC_PROJECT"))
+	req.FromAgent = envKey != "" && req.SessionKey == envKey && (req.Project == "" || req.Project == envProject)
 	if req.Message == "" {
 		req.Message = strings.Join(positional, " ")
 	}

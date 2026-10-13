@@ -71,3 +71,28 @@ func TestAgentOutputIsMarkedOnStreamedTurn(t *testing.T) {
 		}
 	}
 }
+
+func TestSendToSessionMarksOnlyAgentSends(t *testing.T) {
+	p := &markingPlatform{}
+	p.n = "discord"
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	e.interactiveStates["discord:c1"] = &interactiveState{platform: p, replyCtx: "ctx-1"}
+	if err := e.SendToSessionWithOptions("discord:c1", "from agent", nil, nil, SendOptions{FromAgent: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.SendToSessionWithOptions("discord:c1", "from script", nil, nil, SendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	p.ctxMu.Lock()
+	defer p.ctxMu.Unlock()
+	if len(p.sends) != 2 {
+		t.Fatalf("sends = %#v", p.sends)
+	}
+	if _, ok := p.sends[0].(agentMarked); !ok {
+		t.Fatal("the agent's own cc-connect send must be marked")
+	}
+	if _, ok := p.sends[1].(agentMarked); ok {
+		t.Fatal("a script's send must not be marked")
+	}
+}
