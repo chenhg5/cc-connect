@@ -397,7 +397,7 @@ func main() {
 
 		workDir, _ := proj.Agent.Options["work_dir"].(string)
 		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
-		effectiveWorkDir := applyProjectStateOverride(proj.Name, agent, workDir, projectState)
+		effectiveWorkDir := applyProjectStateOverrideForMode(proj.Name, agent, workDir, projectState, proj.Mode == "multi-workspace")
 		startInitialRefreshIfReady(agent, providerWiring)
 		sessionFile := sessionStorePath(cfg.DataDir, proj.Name, effectiveWorkDir)
 
@@ -1505,8 +1505,27 @@ func projectStatePath(dataDir, projectName string) string {
 }
 
 func applyProjectStateOverride(projectName string, agent core.Agent, configuredWorkDir string, store *core.ProjectStateStore) string {
+	return applyProjectStateOverrideForMode(projectName, agent, configuredWorkDir, store, false)
+}
+
+// applyProjectStateOverrideForMode applies a project-wide work_dir_override
+// recorded by /dir.
+//
+// In single-workspace mode the project has one agent and one directory, so the
+// override is applied to it. In multi-workspace mode the directory is resolved
+// per topic from the binding table and each workspace gets its own agent, so a
+// leftover project-wide override is ignored: pushing it onto the global agent
+// would shadow every binding and make /status report one directory for all
+// topics.
+func applyProjectStateOverrideForMode(projectName string, agent core.Agent, configuredWorkDir string, store *core.ProjectStateStore, multiWorkspace bool) string {
 	effectiveWorkDir := configuredWorkDir
 	if store == nil {
+		return effectiveWorkDir
+	}
+
+	if override := store.WorkDirOverride(); override != "" && multiWorkspace {
+		slog.Info("project_state: ignoring project-wide work_dir override in multi-workspace mode; directories come from workspace bindings",
+			"project", projectName, "work_dir", override)
 		return effectiveWorkDir
 	}
 
