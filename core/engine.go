@@ -5618,6 +5618,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// including this turn's assistant reply before it is appended to history).
 			if e.autoCompressEnabled && e.autoCompressMaxTokens > 0 {
 				estimate := contextEstimate
+				// 文本估算不含工具输出，远低于真实值（橘 272k 时估算才几万）；有真实用量就取大者。
+				if u := replyFooterSessionContextUsage(state.agentSession); u != nil && u.UsedTokens > estimate {
+					estimate = u.UsedTokens
+				}
 				now := time.Now()
 				state.mu.Lock()
 				last := state.lastAutoCompressAt

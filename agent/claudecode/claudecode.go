@@ -283,6 +283,8 @@ func normalizeEffort(raw string) string {
 		return "medium"
 	case "high":
 		return "high"
+	case "xhigh":
+		return "xhigh"
 	case "max":
 		return "max"
 	default:
