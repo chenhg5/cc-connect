@@ -7150,8 +7150,8 @@ func richStepElement(step core.ToolStep) map[string]any {
 	return elem
 }
 
-// richToolPreviewElement keeps only the latest tool's sanitized summary visible
-// outside the collapsed history. Results remain inside the tools panel.
+// richToolPreviewElement shows the latest call, its state, and up to two recent
+// output lines outside the collapsed history. The panel retains the full detail.
 func richToolPreviewElement(step core.ToolStep) map[string]any {
 	display := buildToolDisplay(step.Name, step.Summary)
 	content := display.Title
@@ -7159,11 +7159,42 @@ func richToolPreviewElement(step core.ToolStep) map[string]any {
 		content += ": " + display.Detail
 	}
 	content = strings.Join(strings.Fields(content), " ")
+	state := "⏳"
+	status := strings.TrimSpace(step.Status)
+	running := strings.EqualFold(status, "running") || strings.EqualFold(status, "in_progress") || strings.EqualFold(status, "pending")
+	failed := (step.Success != nil && !*step.Success) || (step.ExitCode != nil && *step.ExitCode != 0)
+	for _, value := range []string{"failed", "error", "cancelled", "canceled"} {
+		failed = failed || strings.EqualFold(status, value)
+	}
+	if failed {
+		state = "❌"
+	} else if !running && (step.Done || (step.Success != nil && *step.Success) || strings.EqualFold(status, "completed") || strings.EqualFold(status, "success")) {
+		state = "✅"
+	}
+	if status != "" {
+		state += " " + compactRichText(strings.Join(strings.Fields(sanitizeGenericToolText(status)), " "), 30)
+	}
+	lines := []string{state + " · " + compactRichText(content, 100)}
+	var output []string
+	result := step.ResultTail
+	if result == "" {
+		result = step.Result
+	}
+	result = strings.ReplaceAll(sanitizeGenericToolText(result), "\r", "\n")
+	for _, line := range strings.Split(result, "\n") {
+		if line = strings.Join(strings.Fields(line), " "); line != "" {
+			output = append(output, compactRichText(line, 100))
+		}
+	}
+	if len(output) > 2 {
+		output = output[len(output)-2:]
+	}
+	lines = append(lines, output...)
 	return map[string]any{
 		"tag": "div",
 		"text": map[string]any{
 			"tag":       "plain_text",
-			"content":   compactRichText(content, 100),
+			"content":   strings.Join(lines, "\n"),
 			"text_size": "notation",
 		},
 		"icon": map[string]any{"tag": "standard_icon", "token": display.IconToken},

@@ -1190,13 +1190,13 @@ func TestBuildRichCard_ToolsCollapsedWithLatestPreview(t *testing.T) {
 				t.Fatalf("want exactly one visible tool preview, got %#v", previews)
 			}
 			preview := previews[0]["text"].(map[string]any)["content"].(string)
-			if !strings.Contains(preview, "latest-command") || !strings.HasSuffix(preview, "...") {
+			if !strings.Contains(preview, "latest-command") || !strings.HasSuffix(strings.Split(preview, "\n")[0], "...") {
 				t.Fatalf("preview should show truncated latest tool summary, got %q", preview)
 			}
-			if len([]rune(preview)) > 103 || strings.ContainsAny(preview, "\r\n") {
-				t.Fatalf("preview should be a short single line, got %q", preview)
+			if len(strings.Split(preview, "\n")) != 2 || !strings.Contains(preview, "✅ completed") || !strings.HasSuffix(preview, "full-tool-output") {
+				t.Fatalf("preview should show state and latest output, got %q", preview)
 			}
-			for _, unwanted := range []string{"older-command", "full-tool-output", "completed", "later reasoning"} {
+			for _, unwanted := range []string{"older-command", "older-output", "later reasoning"} {
 				if strings.Contains(preview, unwanted) {
 					t.Fatalf("preview should not contain %q: %q", unwanted, preview)
 				}
@@ -1208,15 +1208,88 @@ func TestBuildRichCard_ToolsCollapsedWithLatestPreview(t *testing.T) {
 	}
 }
 
-func TestRichToolPreviewElement_SummaryOnlyAndSanitized(t *testing.T) {
+func TestRichToolPreviewElement_StateAndRecentResultLines(t *testing.T) {
+	zero, nonzero := 0, 1
+	ok, failed := true, false
+	for _, tc := range []struct {
+		name   string
+		step   core.ToolStep
+		state  string
+		output []string
+	}{
+		{"running", core.ToolStep{}, "⏳", nil},
+		{"preserved tail", core.ToolStep{Done: true, Result: "head-truncated...", ResultTail: "old\nrecent\nnewest"}, "✅", []string{"recent", "newest"}},
+		{"running output", core.ToolStep{Done: true, Status: "running", Result: "old\nrecent\nnewest\n"}, "⏳ running", []string{"recent", "newest"}},
+		{"completed", core.ToolStep{Done: true, Status: "completed", Result: "first\r\n\r\nsecond\r\nthird\n"}, "✅ completed", []string{"second", "third"}},
+		{"no output", core.ToolStep{Done: true}, "✅", nil},
+		{"success", core.ToolStep{Success: &ok, ExitCode: &zero}, "✅", nil},
+		{"failure flag", core.ToolStep{Done: true, Success: &failed}, "❌", nil},
+		{"failed exit", core.ToolStep{Done: true, ExitCode: &nonzero, Result: "error detail"}, "❌", []string{"error detail"}},
+		{"failed status", core.ToolStep{Done: true, Status: "FAILED"}, "❌ FAILED", nil},
+		{"cancelled", core.ToolStep{Status: "cancelled"}, "❌ cancelled", nil},
+		{"sanitized result", core.ToolStep{Done: true, Result: "access_token=secret\nlast\tline"}, "✅", []string{"access_token=[redacted]", "last line"}},
+		{"long unicode output", core.ToolStep{Done: true, Result: strings.Repeat("结果", 100)}, "✅", []string{strings.Repeat("结果", 50) + "..."}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.step.Name = "Bash"
+			tc.step.Summary = "echo hi"
+			elem := richToolPreviewElement(tc.step)
+			content := elem["text"].(map[string]any)["content"].(string)
+			lines := strings.Split(content, "\n")
+			if !strings.HasPrefix(lines[0], tc.state+" · ") || !strings.Contains(lines[0], "echo hi") {
+				t.Fatalf("preview state/call = %q, want %q and call summary", content, tc.state)
+			}
+			if len(lines) > 3 || strings.ContainsAny(content, "\r\t") || strings.Contains(content, "secret") {
+				t.Fatalf("preview should contain at most two sanitized output lines: %q", content)
+			}
+			if strings.Join(lines[1:], "\n") != strings.Join(tc.output, "\n") {
+				t.Fatalf("preview output = %q, want %q", lines[1:], tc.output)
+			}
+		})
+	}
+}
+
+func TestBuildRichCard_PreviewUpdatesFromRunningToResultToNextCall(t *testing.T) {
+	steps := []core.ToolStep{{Name: "Bash", Summary: "first-command"}}
+	preview := func() string {
+		var card struct {
+			Body struct {
+				Elements []map[string]any `json:"elements"`
+			} `json:"body"`
+		}
+		if err := json.Unmarshal([]byte(buildRichCard(core.CardStatusWorking, "", steps, "", true, "")), &card); err != nil {
+			t.Fatal(err)
+		}
+		for _, elem := range card.Body.Elements {
+			if elem["tag"] == "div" {
+				return elem["text"].(map[string]any)["content"].(string)
+			}
+		}
+		t.Fatal("missing visible tool preview")
+		return ""
+	}
+	if got := preview(); !strings.HasPrefix(got, "⏳") || strings.Contains(got, "\n") {
+		t.Fatalf("running preview = %q", got)
+	}
+	steps[0].Done, steps[0].Status, steps[0].Result = true, "completed", "older\nrecent\nnewest"
+	if got := preview(); !strings.HasPrefix(got, "✅ completed") || !strings.HasSuffix(got, "\nrecent\nnewest") {
+		t.Fatalf("completed preview = %q", got)
+	}
+	steps = append(steps, core.ToolStep{Name: "Bash", Summary: "second-command"})
+	if got := preview(); !strings.HasPrefix(got, "⏳") || !strings.Contains(got, "second-command") || strings.Contains(got, "newest") {
+		t.Fatalf("next call preview = %q", got)
+	}
+}
+
+func TestRichToolPreviewElement_SummarySanitized(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		step core.ToolStep
 		want string
 	}{
-		{"empty summary", core.ToolStep{Name: "Bash", Result: "hidden-output"}, "Run command"},
-		{"multiline summary", core.ToolStep{Name: "custom_tool", Summary: "first line\r\n  second line\t", Result: "hidden-output"}, "first line second line"},
-		{"URL redaction", core.ToolStep{Name: "web_fetch", Summary: "https://example.com/docs?token=secret", Result: "hidden-output"}, "example.com/docs"},
+		{"empty summary", core.ToolStep{Name: "Bash"}, "Run command"},
+		{"multiline summary", core.ToolStep{Name: "custom_tool", Summary: "first line\r\n  second line\t"}, "first line second line"},
+		{"URL redaction", core.ToolStep{Name: "web_fetch", Summary: "https://example.com/docs?token=secret"}, "example.com/docs"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			elem := richToolPreviewElement(tc.step)
@@ -1224,7 +1297,7 @@ func TestRichToolPreviewElement_SummaryOnlyAndSanitized(t *testing.T) {
 			if !strings.Contains(content, tc.want) {
 				t.Fatalf("preview = %q, want %q", content, tc.want)
 			}
-			if strings.ContainsAny(content, "\r\n\t") || strings.Contains(content, "hidden-output") || strings.Contains(content, "secret") {
+			if strings.ContainsAny(content, "\r\n\t") || strings.Contains(content, "secret") {
 				t.Fatalf("preview should contain only a sanitized single-line summary: %q", content)
 			}
 		})
