@@ -138,12 +138,14 @@ func TestTurnIdleFor(t *testing.T) {
 }
 
 func TestGateContextAndTurnReport(t *testing.T) {
+	summaryText := "## 正在做\n修龙娘"
 	var gotTurn map[string]string
 	done := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/context":
-			_, _ = w.Write([]byte(`{"summary":"## 正在做\n修龙娘","wiki":[{"path":"~/wiki/bots/im-bridge.md","desc":"cc-connect"}]}`))
+			b, _ := json.Marshal(map[string]any{"summary": summaryText, "wiki": []map[string]string{{"path": "~/wiki/bots/im-bridge.md", "desc": "cc-connect"}}})
+			_, _ = w.Write(b)
 		case "/turn":
 			_ = json.NewDecoder(r.Body).Decode(&gotTurn)
 			_, _ = w.Write([]byte(`{}`))
@@ -173,6 +175,11 @@ func TestGateContextAndTurnReport(t *testing.T) {
 	sess.ResetTurnCtx()
 	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "修龙娘") || !strings.Contains(c, "im-bridge.md") {
 		t.Fatalf("after compaction:\n%s", c)
+	}
+	// The summary changed: only the new entry goes out.
+	summaryText = "## 正在做\n修龙娘\n## 已完成\n修好 gate"
+	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "修好 gate") || strings.Contains(c, "修龙娘") || !strings.Contains(c, "## 已完成") {
+		t.Fatalf("summary delta:\n%s", c)
 	}
 	// --resume forked a new id: same conversation, nothing resent.
 	sess.SetAgentSessionID("a2", "claudecode")

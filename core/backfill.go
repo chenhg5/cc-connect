@@ -27,6 +27,13 @@ type ChannelHistoryMessage struct {
 	Time     time.Time
 }
 
+// TurnReplyMarker is implemented by platforms that track which posts came from
+// agent turns (maomao fork): it marks a reply context built without a
+// triggering message (a cron --agent job) as one.
+type TurnReplyMarker interface {
+	MarkTurnReply(replyCtx any) any
+}
+
 // ChannelHistoryReader is implemented by platforms that can read channel history.
 // It returns up to limit messages posted before beforeID, oldest first.
 type ChannelHistoryReader interface {
@@ -36,7 +43,7 @@ type ChannelHistoryReader interface {
 const (
 	backfillFetchLimit   = 50
 	backfillFirstWindow  = 3 * time.Hour // no last-seen mark yet: how far back to look
-	backfillMaxMsgRunes  = 600
+	backfillMaxMsgRunes  = 2000          // a Discord post at most: a cron digest must not lose its second half
 	backfillMaxTotalRune = 8000
 )
 

@@ -1,24 +1,52 @@
 package discord
 
 import (
+	"encoding/json"
+	"log/slog"
+	"os"
 	"sync"
 
 	"github.com/bwmarrin/discordgo"
 )
 
-// maomao fork: which of this bot's posts came out of a turn the agent ran for a
-// channel message. Channel backfill skips exactly those (the agent wrote them
-// and has them in its session) and shows every other post under this bot's
-// name: cron --exec output, split chunks of it, relay answers, restart notices.
-// A turn for a channel message replies with a replyContext carrying that
-// message's ID; cron, relay and API sends build one without it.
+// maomao fork: which of this bot's posts came out of an agent turn. Channel
+// backfill skips exactly those (the agent wrote them and has them in its
+// session) and shows every other post under this bot's name: cron --exec
+// output and its split chunks, relay answers, restart notices. A turn for a
+// channel message replies with a replyContext carrying that message's ID; a
+// cron --agent turn gets one marked by MarkTurnReply; cron --exec, relay and
+// API sends carry neither. Kept on disk so a restart does not hand the last
+// turn's replies back to the agent.
 
 const turnSentPerChannel = 500
 
 type turnSentLog struct {
 	mu    sync.Mutex
+	path  string
 	ids   map[string]struct{}
 	order map[string][]string // per channel, oldest first, for eviction
+}
+
+func (l *turnSentLog) load(path string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.path = path
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var order map[string][]string
+	if err := json.Unmarshal(raw, &order); err != nil {
+		slog.Warn("discord: turn-sent log unreadable", "path", path, "error", err)
+		return
+	}
+	l.order = order
+	l.ids = map[string]struct{}{}
+	for _, ids := range order {
+		for _, id := range ids {
+			l.ids[id] = struct{}{}
+		}
+	}
 }
 
 func (l *turnSentLog) add(channelID, id string) {
@@ -38,6 +66,21 @@ func (l *turnSentLog) add(channelID, id string) {
 		o = o[1:]
 	}
 	l.order[channelID] = o
+	l.saveLocked()
+}
+
+func (l *turnSentLog) saveLocked() {
+	if l.path == "" {
+		return
+	}
+	raw, _ := json.Marshal(l.order)
+	tmp := l.path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err == nil {
+		err = os.Rename(tmp, l.path)
+		if err != nil {
+			slog.Warn("discord: save turn-sent log", "error", err)
+		}
+	}
 }
 
 func (l *turnSentLog) has(id string) bool {
@@ -47,10 +90,19 @@ func (l *turnSentLog) has(id string) bool {
 	return ok
 }
 
-// noteTurnSent records sent when rc belongs to a turn for a channel message.
+// noteTurnSent records sent when rc belongs to an agent turn.
 func (p *Platform) noteTurnSent(rc replyContext, sent *discordgo.Message) {
-	if rc.messageID == "" || sent == nil || sent.ID == "" {
+	if (rc.messageID == "" && !rc.turn) || sent == nil || sent.ID == "" {
 		return
 	}
 	p.turnSent.add(sent.ChannelID, sent.ID)
+}
+
+// MarkTurnReply implements core.TurnReplyMarker.
+func (p *Platform) MarkTurnReply(replyCtx any) any {
+	if rc, ok := replyCtx.(replyContext); ok {
+		rc.turn = true
+		return rc
+	}
+	return replyCtx
 }

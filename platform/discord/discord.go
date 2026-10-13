@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ type replyContext struct {
 	channelID string
 	messageID string
 	threadID  string
+	turn      bool // maomao fork: an agent turn without a triggering message (cron --agent)
 }
 
 // interactionReplyCtx handles Discord slash command (Application Command)
@@ -150,6 +152,10 @@ func New(opts map[string]any) (core.Platform, error) {
 		threadIsolation:            threadIsolation,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		proxyURL:                   proxyU,
+	}
+	if dir, _ := opts["cc_data_dir"].(string); dir != "" {
+		project, _ := opts["cc_project"].(string)
+		base.turnSent.load(filepath.Join(dir, "discord_turn_sent_"+project+".json"))
 	}
 	if progressStyle == "compact" || progressStyle == "card" {
 		wrapped := &progressPlatform{Platform: base}

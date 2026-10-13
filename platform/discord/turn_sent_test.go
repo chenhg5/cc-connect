@@ -28,3 +28,17 @@ func TestTurnSentLogEvictsOldest(t *testing.T) {
 		t.Fatal("oldest id should be evicted at the cap")
 	}
 }
+
+func TestTurnSentSurvivesRestartAndMarksCronTurns(t *testing.T) {
+	path := t.TempDir() + "/ts.json"
+	p := &Platform{}
+	p.turnSent.load(path)
+	rc := p.MarkTurnReply(replyContext{channelID: "c"}).(replyContext) // cron --agent turn
+	p.noteTurnSent(rc, &discordgo.Message{ID: "r9", ChannelID: "c"})
+
+	q := &Platform{}
+	q.turnSent.load(path)
+	if !q.turnSent.has("r9") {
+		t.Fatal("ids must survive a restart")
+	}
+}

@@ -1571,6 +1571,11 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 	}
 
+	// maomao fork: what this turn posts is the agent's own text; tell the
+	// platform so channel backfill does not hand it back to the agent.
+	if m, ok := targetPlatform.(TurnReplyMarker); ok {
+		replyCtx = m.MarkTurnReply(replyCtx)
+	}
 	msg := &Message{
 		SessionKey:   sessionKey,
 		Platform:     platformName,
@@ -1579,6 +1584,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		Content:      content,
 		ReplyCtx:     replyCtx,
 		ModeOverride: job.Mode,
+		// maomao fork: a routine turn also gets the summary/wiki/team blocks.
+		TurnCtx:      true,
+		TurnCtxQuery: content,
 	}
 
 	// Resolve workspace-specific agent and sessions for multi-workspace mode.

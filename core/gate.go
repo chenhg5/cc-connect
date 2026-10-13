@@ -403,15 +403,21 @@ func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 		return ""
 	}
 	summary := strings.TrimSpace(out.Summary)
+	summaryHead := "（本频道进展总结，跨会话、重启都保留；以频道记录为准，有冲突时信频道）\n"
 	var wiki []string
 	session.UpdateTurnCtx(func(t *TurnCtxSent) {
-		if summary != "" {
-			if t.Summary {
-				summary = ""
-			} else {
-				t.Summary = true
-			}
+		if summary == "" {
+			return
 		}
+		lines := summaryLines(summary)
+		if t.Summary {
+			// The context has an earlier version: send only the new entries.
+			summary = summaryDelta(t.SummaryLines, lines)
+			summaryHead = "（本频道进展总结有更新，下面是新增或改动的条目）\n"
+		}
+		t.Summary, t.SummaryLines = true, lines
+	})
+	session.UpdateTurnCtx(func(t *TurnCtxSent) {
 		for _, w := range out.Wiki {
 			if !slices.Contains(t.Wiki, w.Path) {
 				t.Wiki = append(t.Wiki, w.Path)
@@ -421,7 +427,7 @@ func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 	})
 	var b strings.Builder
 	if summary != "" {
-		b.WriteString("（本频道进展总结，跨会话、重启都保留；以频道记录为准，有冲突时信频道）\n")
+		b.WriteString(summaryHead)
 		b.WriteString(summary)
 	}
 	if len(wiki) > 0 {
@@ -445,6 +451,42 @@ func (e *Engine) withTurnBlocks(session *Session, sessionKey, query, content str
 		content = sum + "\n\n" + content
 	}
 	return content
+}
+
+func summaryLines(summary string) []string {
+	var out []string
+	for _, l := range strings.Split(summary, "\n") {
+		if l = strings.TrimRight(l, " "); strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// summaryDelta returns the entries of cur not in prev, each under its "## "
+// section heading ("" when nothing is new).
+func summaryDelta(prev, cur []string) string {
+	seen := make(map[string]bool, len(prev))
+	for _, l := range prev {
+		seen[l] = true
+	}
+	var b strings.Builder
+	heading, headingDone := "", false
+	for _, l := range cur {
+		if strings.HasPrefix(l, "#") {
+			heading, headingDone = l, false
+			continue
+		}
+		if seen[l] {
+			continue
+		}
+		if heading != "" && !headingDone {
+			b.WriteString(heading + "\n")
+			headingDone = true
+		}
+		b.WriteString(l + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // teamBlock returns the teammate status when it changed since the agent's
