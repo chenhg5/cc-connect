@@ -512,6 +512,9 @@ func summaryDelta(prev, cur []string) (delta string, full bool) {
 			if strings.TrimSpace(strings.TrimLeft(l, "-* ")) == "无" {
 				continue
 			}
+			if strings.Contains(h, "已完成") {
+				continue // the summarizer trims old history there; nothing changed
+			}
 			gone = append(gone, strings.TrimPrefix(h, "## ")+"："+strings.TrimLeft(l, "-* "))
 		}
 	}
