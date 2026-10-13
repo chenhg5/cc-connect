@@ -1,0 +1,17 @@
+<h1 seq="auto">交互设计稿 · 可点击原型 v0.2</h1>
+<p>这一部分是可操作的界面稿。点击顶部场景切换总览、执行、异常、角色接入、验收和暂停；卡片里的展开、停止、恢复和重试按钮均可体验。所有数据及操作仅用于演示，不连接真实项目。</p>
+<p>建议先点“查看任务 → 展开执行详情”，再试“暂停项目 → 恢复项目 → 查看任务”：恢复项目后，原任务应仍保持停止。</p>
+<html5-block path="@./index.html"/>
+<p>如果当前客户端没有加载交互区域，可以下载下面的 HTML 文件，在浏览器中打开；无需安装依赖。下方同时提供静态预览图。</p>
+<source path="@./index.html" name="CC-Connect-交互设计稿-v0.2.html"/>
+<h2 seq="auto">项目总览：问题、分工与下一步</h2>
+<img path="@./previews/01-overview.png" width="1000" caption="总览把需要你处理的问题放在前面，再展示每个成员正在做什么。"/>
+<h2 seq="auto">同一任务的缩略与展开</h2>
+<img path="@./previews/02-task-collapsed.png" width="1000" caption="缩略：当前工作、最近完成、下一步、真实进展时间及派工原因直接可见。"/>
+<img path="@./previews/02-task-expanded.png" width="1000" caption="展开：同一张卡片显示计划、关键记录与执行环境，不另建任务。"/>
+<h2 seq="auto">异常与角色接入</h2>
+<img path="@./previews/03-blocked.png" width="1000" caption="异常：说明原因、影响、处理人和下一步；切换配置不会被误显示成执行恢复。"/>
+<img path="@./previews/04-role.png" width="1000" caption="角色接入：明确已经完成哪些阶段，卡在哪一步，复用现有 Bot。"/>
+<h2 seq="auto">手机端布局</h2>
+<img path="@./previews/05-mobile.png" width="390" caption="手机端：同一信息结构单列排列，可在卡片内查看和处理。"/>
+<p>原型已在本地浏览器检查六个场景、折叠、模型设置后重试、角色接入、验收、任务停止及项目恢复，未发现脚本错误或手机端横向溢出。飞书文档内嵌区域的最终显示以当前客户端为准；它是交互设计稿，不是已实现的线上卡片。</p>

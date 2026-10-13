@@ -1,0 +1,198 @@
+<!doctype html>
+<!--
+交互评审稿 v0.14.4。沿用用户截图的白底、引用回复、灰色命令线及蓝色按钮。
+所有人物、命令、输出、进度与 @ 都是浏览器中的模拟数据；不连接团队或执行命令。
+正式方案：每条命令用交互容器+一个 markdown 组件承载点击；详情内完整命令和结果合并展示。
+本独立演示把样例记录保存在 JS 中，按 12 行模拟分页，不代表飞书的实际字节预算。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>执行卡 · 可点击交互稿</title>
+<style>
+:root{--blue:#3370ff;--blue-soft:#edf3ff;--ink:#1f2329;--muted:#646a73;--line:#e5e6eb;--bg:#f5f6f8;--green:#1d8f5c;--red:#d83931;--mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}
+*{box-sizing:border-box}body{margin:0;background:#f8f9fb;color:var(--ink);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}button{font:inherit;cursor:pointer;color:inherit;background:white;border:1px solid var(--line);border-radius:6px;min-height:36px;padding:5px 12px;transition:background .15s,border-color .15s}button:hover{background:#f5f7fa;border-color:#b4bdce}button:focus-visible,a:focus-visible{outline:3px solid #99b8ff;outline-offset:3px}button:disabled{color:#a6abb3;cursor:default;background:#f9fafb;border-color:var(--line)}a{color:var(--blue)}button.active{color:var(--blue);background:var(--blue-soft);border-color:#c5d6ff}button.primary{background:var(--blue);color:white;border-color:var(--blue)}button.primary:hover{background:#245bdb}.topbar{border-bottom:1px solid var(--line);background:#fff;padding:18px max(24px,calc((100vw - 1180px)/2));display:flex;align-items:center;justify-content:space-between;gap:15px}.brand{font-size:15px;font-weight:650;display:flex;gap:12px;align-items:center}.brand-mark{background:var(--blue);color:white;width:28px;height:28px;display:grid;place-items:center;border-radius:7px;font:600 16px var(--mono)}.version{color:#8f959e;font:12px var(--mono);padding-left:12px;border-left:1px solid var(--line)}.demo{color:var(--muted);font-size:12px}.intro{max-width:1180px;margin:32px auto 22px;padding:0 24px}.eyebrow{font-size:12px;color:var(--blue);font-weight:600;letter-spacing:.07em}h1{font-size:29px;letter-spacing:-.7px;font-weight:650;margin:6px 0 7px;line-height:1.4}.intro p{color:var(--muted);margin:0;font-size:14px}.workspace{max-width:1180px;margin:auto;padding:0 24px 32px;display:grid;grid-template-columns:minmax(0,1fr) 236px;gap:24px;align-items:start}.stage{min-width:0}.switcher{display:flex;gap:4px;margin-bottom:14px;flex-wrap:wrap}.switcher button{border:none;background:transparent;min-height:40px;padding:6px 11px;font-size:13px}.switcher button.active{background:#eaf0ff;color:#235fdc}.chat{border:1px solid #dddfe6;border-radius:12px;background:#f3f4f6;box-shadow:0 4px 20px #202d4910;overflow:hidden;max-width:840px;margin:0 auto;transition:max-width .2s}.chat.mobile{max-width:390px}.chat-head{display:flex;gap:10px;align-items:center;background:white;padding:15px 19px;border-bottom:1px solid var(--line)}.group-avatar{width:35px;height:35px;border-radius:9px;background:#eaf1ff;color:var(--blue);display:grid;place-items:center;font-size:20px;font-weight:500}.chat-title{font-weight:600}.chat-sub{font-size:11px;color:#8f959e}.chat-head .label{margin-left:auto;font-size:11px;border:1px solid var(--line);padding:1px 7px;border-radius:4px;color:var(--muted);white-space:nowrap}.feed{padding:18px 20px 26px;min-height:515px}.date{text-align:center;color:#8f959e;font-size:11px;margin:0 0 18px}.message{display:flex;gap:10px;margin:0 0 20px;align-items:flex-start;min-width:0}.avatar{width:32px;height:32px;flex:0 0 32px;border-radius:8px;background:#dbe7ff;color:#3263b9;display:grid;place-items:center;font-size:14px;font-weight:650}.avatar.user{background:#e8e1fa;color:#7759a6}.avatar.member{background:#e0eee8;color:#35785e}.message-main{min-width:0;flex:1}.sender{font-size:12px;color:var(--muted);margin:-3px 0 5px;display:flex;align-items:center;gap:7px}.sender .bot-tag{font-size:9px;color:#8a919c;border:1px solid #d4d7de;border-radius:3px;padding:0 3px;line-height:1.5}.sender time{font-size:10px;color:#969ca7}.bubble{display:inline-block;background:white;border:1px solid #e0e2e8;border-radius:0 9px 9px 9px;padding:10px 13px;max-width:100%;overflow-wrap:anywhere}.mention{color:#2864dc;background:#f0f4fe;border-radius:3px;padding:1px 3px}.card{background:white;border:1px solid #e0e2e8;border-radius:0 9px 9px 9px;overflow:hidden}.quote{margin:14px 15px 0;color:#8b9099;font-size:12px;border-left:3px solid #c9cdd4;padding-left:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.6}.card-body{padding:13px 15px 15px}.card-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:#8b9099;margin-bottom:9px}.run-state{display:flex;gap:5px;align-items:center;color:var(--blue);font-size:12px;white-space:nowrap}.dot{width:6px;height:6px;border-radius:50%;background:currentColor}.summary-copy{margin:0 0 17px;font-size:14px;line-height:1.75}.tool{border-left:3px solid #d8dce3;padding:0 0 0 10px;margin:0 0 17px}.tool:last-child{margin-bottom:0}.tool-line{font:12px/1.7 var(--mono);color:var(--muted);overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}.tool-line strong{font:600 13px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#535a66}.status-icon{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;color:white;background:var(--green);font:600 11px sans-serif;border-radius:3px;margin-right:6px;vertical-align:1px}.status-icon.fail{background:var(--red)}.status-icon.running{background:var(--blue)}.tool-meta{color:#969ca6;font-size:11px;margin:5px 0 8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tool-meta .failure{color:var(--red)}.tool-actions{display:flex;gap:8px}.tool-actions button{font-size:12px;min-height:31px;padding:3px 10px;color:#4e5969;background:#fff}.tool-actions button:first-child{color:#2d66d9}.card-foot{padding:10px 15px;background:#fafbfc;border-top:1px solid #eff0f3;color:#9096a0;font-size:11px;display:flex;justify-content:space-between;gap:10px}.card-foot .live{color:#4775c7}.detail-head{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:12px}.back{padding:3px 0;min-height:33px;color:var(--blue);border:none;background:transparent;font-size:12px}.back:hover{background:transparent}.detail-title{margin:0 0 3px;font-size:15px;font-weight:600}.detail-meta{color:#8b919c;font-size:11px;display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}.tab-row{display:flex;gap:7px;border-bottom:1px solid var(--line);margin-bottom:12px}.tab-row button{border:none;border-radius:0;min-height:37px;background:transparent;font-size:12px;position:relative;padding:6px 12px}.tab-row button.active{color:var(--blue)}.tab-row button.active:after{content:"";position:absolute;height:2px;background:var(--blue);bottom:-1px;left:10px;right:10px}.codebox{background:#f6f7f9;border:1px solid #e7e9ed;border-radius:6px;overflow:hidden}.code-cap{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 11px;border-bottom:1px solid #e7e9ed;color:#8a919b;font:10px/1.6 var(--mono)}pre{margin:0;padding:13px 12px;min-height:130px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:12px/1.8 var(--mono);color:#48505c;tab-size:2}pre.failure-output{color:#794345}.pager{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:12px;font-size:11px;color:#8b919c}.pager button{font-size:12px;min-height:33px;padding:4px 11px}.detail-hint{font-size:11px;color:#969ca7;margin:10px 0 0}.update-hint{background:#eef4ff;color:#416cb5;border-radius:5px;padding:8px 10px;margin-top:11px;font-size:11px;display:flex;align-items:center;justify-content:space-between;gap:7px}.update-hint button{font-size:11px;min-height:30px;border-color:#cbdcff;color:var(--blue);white-space:nowrap}.composer{background:#fff;border-top:1px solid var(--line);padding:13px 18px;color:#a1a7b0;font-size:12px;display:flex;justify-content:space-between;gap:12px}.composer span:last-child{font-size:11px;color:#b5bac2}.review{padding-top:54px}.review-section{margin:0 0 25px;padding-bottom:23px;border-bottom:1px solid var(--line)}.review h2{font-size:12px;letter-spacing:.02em;margin:0 0 12px;color:#444d5b;font-weight:650}.review p{font-size:12px;color:#7d8490;line-height:1.8;margin:9px 0}.steps{display:flex;flex-direction:column;gap:12px}.step{display:flex;gap:9px;color:#9299a5;font-size:12px;align-items:center}.step .num{font:10px var(--mono);width:21px;height:21px;border:1px solid #d8dce5;border-radius:50%;display:grid;place-items:center;flex-shrink:0}.step.current{color:var(--blue)}.step.current .num{background:var(--blue);border-color:var(--blue);color:white}.current-view{margin-top:14px;font-size:11px;background:#edf3ff;color:#4e72b4;padding:8px 10px;border-radius:5px}.review .controls{display:flex;flex-wrap:wrap;gap:6px}.review button{font-size:12px;min-height:36px}.review .action-wide{width:100%;text-align:left;margin-top:7px;display:flex;align-items:center;justify-content:space-between}.review .action-wide span{color:#9aa5b8}.review .smallnote{font-size:11px;color:#959ca8;line-height:1.8}.tips-bottom{max-width:1180px;margin:0 auto 25px;padding:0 24px;color:#9ba1ab;font-size:11px}.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);color:white;background:#273345;box-shadow:0 5px 20px #1b284126;max-width:calc(100vw - 40px);padding:10px 18px;border-radius:8px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s;z-index:50}.toast.show{opacity:1}.card-flash{animation:arrive .45s ease-out}@keyframes arrive{from{opacity:.4;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}.chat.mobile .feed{padding:16px 11px}.chat.mobile .message{gap:7px}.chat.mobile .avatar{width:27px;height:27px;flex-basis:27px;font-size:12px}.chat.mobile .card-body{padding:12px}.chat.mobile .quote{margin:12px 12px 0}.chat.mobile .card-heading{font-size:11px}.chat.mobile .tool-actions button{min-height:40px}.chat.mobile .pager button{min-height:40px}.chat.mobile .composer{padding:12px;font-size:11px}.chat.mobile .composer span:last-child{display:none}
+@media(max-width:850px){.workspace{grid-template-columns:minmax(0,1fr) 205px;gap:16px}.intro{margin-top:25px}.feed{padding:16px 12px}.review{padding-top:99px}}@media(max-width:700px){.topbar{padding:14px 16px}.demo{display:none}.intro{margin:23px auto 18px;padding:0 16px}h1{font-size:24px}.intro p{font-size:13px}.workspace{padding:0 12px 24px;display:flex;flex-direction:column;gap:20px}.stage{width:100%}.switcher{gap:1px}.switcher button{font-size:12px;padding:6px 8px;min-height:44px}.chat{border-radius:9px}.chat-head{padding:12px}.feed{padding:16px 10px}.message{gap:7px}.avatar{width:26px;height:26px;flex-basis:26px;font-size:12px}.card-body{padding:12px}.quote{margin:12px 12px 0}.tool-actions button,.pager button,.tab-row button,.back{min-height:44px}.tool-actions{gap:6px}.tool-actions button{padding:5px 9px}.tool-line{font-size:11px}.tool-line strong{font-size:12px}.composer{padding:12px}.composer span:last-child{display:none}.review{width:100%;padding:0 5px;display:grid;grid-template-columns:1fr 1fr;gap:15px}.review-section{margin:0;padding-bottom:12px}.review-section:last-child{grid-column:1/-1}.review button{min-height:44px}.detail-meta{gap:8px}.tips-bottom{padding:0 17px}.card-foot{padding:10px 12px}.card-heading{gap:6px;font-size:11px}.run-state{font-size:11px}.pager{gap:5px}.pager button{padding:4px 8px}pre{font-size:11px}.chat-head .label{font-size:10px}.detail-title{font-size:14px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+.summary-footer{align-items:center}.summary-footer button{color:var(--blue);font-size:12px;white-space:nowrap}.record-nav{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 15px;padding:8px 0 12px;border-bottom:1px solid var(--line)}.record-nav button{font-size:12px;min-height:35px;padding:4px 9px}.record-nav span{font-size:11px;color:#8b919c;white-space:nowrap}.single-page{margin:10px 0 0;font-size:11px;color:#8b919c;text-align:right}.tool{margin-bottom:13px}.tool-meta{margin-bottom:0}@media(max-width:700px){.record-nav button,.summary-footer button{min-height:44px}.summary-footer{flex-wrap:wrap}.summary-footer button{margin-left:auto}.record-nav{gap:5px}.record-nav button{padding:4px 7px}}
+.controls-heading{margin-top:22px!important}.entry-options{gap:7px!important}.entry-options button{font-size:11px}.tool.tool-click{display:block;width:100%;text-align:left;border:0;border-left:3px solid #d8dce3;background:transparent;border-radius:0;padding:5px 9px 6px 10px;position:relative}.tool.tool-click:hover{background:#f1f5ff;border-left-color:var(--blue)}.tool-click .tool-line{color:#42608e}.tool-click .tool-line strong{color:#386ac7}.tool.with-action{display:flex;align-items:center;gap:10px;padding-top:5px;padding-bottom:6px}.tool-copy{flex:1;min-width:0}.tiny-detail{flex:none;color:var(--blue);font-size:11px;min-height:28px;padding:2px 9px;background:white}.summary-footer .entry-instruction{color:#547cc8}.tool-click .tool-meta{display:flex}.tool-click .tool-line{display:-webkit-box}@media(max-width:700px){.tiny-detail{min-height:44px;min-width:44px;padding:3px 8px}.tool.with-action{gap:6px}.tool-copy .tool-line{font-size:10px}.entry-options button{min-height:44px}.controls-heading{margin-top:18px!important}}
+
+.channel-switch{display:flex;gap:7px;margin-bottom:12px}.channel-switch button{font-size:12px}.unread{display:inline-block;min-width:17px;margin-left:5px;padding:0 4px;background:#d83931;color:white;border-radius:9px;font-size:10px}.wait-panel{margin:14px 15px 0;padding:12px;border:1px solid #f1dfb7;border-radius:6px;background:#fffbf2;font-size:12px;overflow-wrap:anywhere}.wait-panel h3{font-size:13px;margin:0 0 5px;color:#8b5d13}.wait-panel p{margin:5px 0}.wait-panel.resolved{background:#f2f8f5;border-color:#d5e8dc}.wait-panel.resolved h3{color:#287849}.wait-panel.denied{background:#fff4f3;border-color:#edd6d4}.wait-panel.denied h3{color:#ad453e}.wait-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.wait-actions button{font-size:12px}.wait-panel label{display:block;margin-top:10px;color:#676b73}.wait-panel textarea{display:block;width:100%;resize:vertical;min-height:62px;margin:6px 0;padding:8px;border:1px solid #d6d9df;border-radius:5px;font:inherit;font-size:12px;line-height:1.6;background:white;color:var(--ink)}.wait-panel textarea:focus-visible{outline:2px solid #99b8ff}.wait-note{color:#8b919c;font-size:11px}.private-bubble{display:block;max-width:480px}.private-bubble h3{margin:0;font-size:14px}.private-bubble p{font-size:13px;margin:7px 0}.private-bubble .private-meta{font-size:11px;color:#9096a0}.private-bubble button{margin-top:8px;color:var(--blue);font-size:12px}.empty-private{padding:80px 20px;text-align:center;color:#8f959e;font-size:13px}.empty-private strong{display:block;color:#596374;font-weight:500;margin-bottom:8px}.result-message .bubble{display:block}.result-message .quote{margin:0 0 10px}.result-message h3{margin:0 0 7px;font-size:14px}.result-message p{font-size:13px;margin:6px 0}.result-message button{font-size:12px;color:var(--blue);margin-top:9px}.channel-switch button.active{background:var(--blue-soft)}@media(max-width:700px){.wait-panel{margin:12px 12px 0}.wait-actions button,.private-bubble button,.channel-switch button{min-height:44px}.review-section{min-width:0}.private-bubble{max-width:100%}}
+</style>
+</head>
+<body>
+<header class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">&gt;_</span>执行卡 · 交互稿<span class="version">v0.14.4</span></div><div class="demo">可点击原型 · 全部为模拟数据</div></header>
+<section class="intro"><div class="eyebrow">普通引用回复 / 按需查看详情</div><h1>群里看摘要，点开看完整过程。</h1><p>过程留在群内；需要你补充或授权时，私聊提醒并带你回到原执行卡。</p></section>
+<main class="workspace">
+  <section class="stage" aria-label="飞书群聊交互原型">
+    <nav class="switcher" aria-label="演示场景">
+      <button type="button" data-scenario="manager" class="active" aria-pressed="true">管理者处理</button><button type="button" data-scenario="member" aria-pressed="false">成员接单</button><button type="button" data-scenario="review" aria-pressed="false">管理者验收</button><button type="button" data-scenario="long" aria-pressed="false">长任务续卡</button>
+    </nav>
+    <nav class="channel-switch" aria-label="切换演示会话"><button type="button" data-channel="group" class="active" aria-pressed="true">项目协作群</button><button type="button" data-channel="private" aria-pressed="false">管理者 · 私聊 <span id="dm-count"></span></button></nav>
+    <div class="chat" id="chat"><header class="chat-head"><div class="group-avatar" aria-hidden="true">#</div><div><div class="chat-title">项目协作群</div><div class="chat-sub">管理者与成员 · 群主聊天</div></div><span class="label">交互演示</span></header><div class="feed" id="feed"></div><footer class="composer"><span>原型仅演示卡片操作</span><span>所有 @ 和命令均为模拟</span></footer></div>
+  </section>
+  <aside class="review" aria-label="原型说明和演示控制">
+    <section class="review-section"><h2>点击体验</h2><div class="steps"><div class="step current" data-step="summary"><span class="num">1</span>截断预览，快速看进度</div><div class="step" data-step="detail"><span class="num">2</span>进入详情，切换命令</div><div class="step" data-step="page"><span class="num">3</span>命令与结果整体翻页</div><div class="step" data-step="return"><span class="num">4</span>返回最新执行摘要</div></div><div class="current-view" id="current-view" aria-live="polite">当前显示：执行摘要</div></section>
+    <section class="review-section"><h2>入口样式</h2><div class="controls entry-options"><button type="button" data-entry-mode="row" class="active" aria-pressed="true">点击命令 · 推荐</button><button type="button" data-entry-mode="button" aria-pressed="false">行尾小按钮</button></div><p id="entry-description">整条命令均可点击，直接进入该命令详情。</p><h2 class="controls-heading">演示控制</h2><div class="controls"><button type="button" id="desktop" class="active" aria-pressed="true">桌面</button><button type="button" id="mobile" aria-pressed="false">窄屏</button></div><button type="button" class="action-wide" id="progress">模拟新增进度 <span>＋</span></button><button type="button" class="action-wide" id="split">模拟续发第二张卡 <span>↳</span></button><button type="button" class="action-wide" id="reset">重置本场景 <span>↺</span></button><p class="smallnote">先打开详情，再模拟新增进度：详情页会保持，返回摘要后看到最新记录。</p></section>
+    <section class="review-section"><h2>需要你处理时</h2><button type="button" class="action-wide" id="need-input">模拟需要补充 <span>?</span></button><button type="button" class="action-wide" id="need-permission">模拟需要授权 <span>→</span></button><button type="button" class="action-wide" id="finish-task">模拟任务结束 <span>✓</span></button><p>补充、授权在原卡处理。切换「管理者 · 私聊」查看提醒，再点「查看执行卡」回群处理。</p><p class="smallnote">每项待办只提醒一次；私聊不带命令或日志。最终结果单独回复在群里。</p></section>
+    <section class="review-section"><h2>这次方案的边界</h2><p>推荐方案每条命令由可点击区域和文本组成。详情把完整命令、执行结果按顺序合并展示，不再切换两个面板。</p><p>群卡是共享视图：正式版中，一个人翻页，其他人看到的卡片也会更新。</p><p class="smallnote">本稿用固定行数模拟分页。正式实现按飞书卡片体积和组件数量计算；点详情只读取记录。</p></section>
+  </aside>
+</main>
+<footer class="tips-bottom">本页为 HTML 交互模拟，非线上执行卡。按钮不执行命令、不派发任务、不发送消息。</footer><div class="toast" id="toast" role="status"></div>
+<script>
+'use strict';
+const scenarioInfo = {
+ manager:{from:'你',fromClass:'user',trigger:'请调整执行记录的展示方式，每条命令都能查看完整命令和结果。',mention:'管理者',actor:'管理者',actorClass:'',quote:'回复 你：请调整执行记录的展示方式，每条命令都能查看完整命令和结果。',intro:'我先核对消息回复和卡片渲染逻辑，再验证完整命令与执行结果的查看流程。',task:'T001 · 展示方式调整'},
+ member:{from:'管理者',fromClass:'',trigger:'T001：实现普通引用回复与命令详情分页，保留完整执行记录。完成后把结果发回给我。',mention:'成员 Jordan',actor:'成员 Jordan',actorClass:'member',quote:'回复 管理者：T001 实现普通引用回复与命令详情分页，保留完整执行记录。',intro:'已接到 T001。我会沿用该任务的上下文，先检查渲染逻辑，再验证详情与摘要之间的切换。',task:'T001 · 成员执行'},
+ review:{from:'成员 Jordan',fromClass:'member',trigger:'T001 已提交：普通回复和详情分页已完成，请核对命令输出与验证结果。',mention:'管理者',actor:'管理者',actorClass:'',quote:'回复 成员 Jordan：T001 已提交，普通回复和详情分页已完成。',intro:'收到这轮交付。我正在核对实现与验证证据，确认长输出翻页后能够返回执行摘要。',task:'T001 · 交付验收'},
+ long:{from:'你',fromClass:'user',trigger:'请调整执行记录的展示方式，每条命令都能查看完整命令和结果。',mention:'管理者',actor:'管理者',actorClass:'',quote:'回复 你：请调整执行记录的展示方式，每条命令都能查看完整命令和结果。',intro:'已检查回复逻辑与详情分页。前一段执行记录已保留，后续检查继续回复这条指令。',task:'T001 · 展示方式调整'}
+};
+function records(){return [
+ {id:'CMD-001',title:'检查回复与渲染逻辑',status:'success',duration:'0.2 秒',exit:0,command:"rg -n --glob '*.go' 'ReplyInThread|buildExecutionCard|command_execution|renderToolResult' core platform/feishu",output:'platform/feishu/reply.go:48: ReplyInThread: false\nplatform/feishu/card.go:126: buildExecutionCard(records)\nplatform/feishu/card.go:184: renderToolResult(record)\ncore/events.go:76: case "command_execution":\n\n搜索完成，共 4 处匹配。\n[演示输出]'},
+ {id:'CMD-002',title:'检查结果分页',status:'fail',duration:'1.8 秒',exit:1,command:"go test ./platform/feishu \\\n  -run 'TestExecutionCard_DetailPagination|TestExecutionCard_ReturnToSummary|TestExecutionCard_QuotedReply' \\\n  -count=1 \\\n  -v",output:[
+ '=== RUN   TestExecutionCard_DetailPagination','    page 1: lines 1–12','    page 2: lines 13–24','    page 3: lines 25–36','    checking: first page has no previous page','    checking: next page replaces the current content','    checking: output order is preserved','    checking: UTF-8 boundary is preserved','    checking: last page has no next page','--- PASS: TestExecutionCard_DetailPagination (0.01s)','=== RUN   TestExecutionCard_ReturnToSummary','    checking: incoming progress does not replace detail',
+ '    checking: summary reflects the latest run state','    expected: records = 4','    actual:   records = 3','    error: summary did not refresh after new progress','--- FAIL: TestExecutionCard_ReturnToSummary (0.01s)','=== RUN   TestExecutionCard_QuotedReply','    checking: reply_in_thread = false','    checking: reply parent stays unchanged','    checking: continuation uses the same parent','    checking: detail clicks do not send messages','--- PASS: TestExecutionCard_QuotedReply (0.01s)','',
+ 'FAIL','FAIL  example/platform/feishu  1.803s','','检查结果：','  通过：详情分页、普通引用回复','  失败：新进度到达后，返回摘要未显示最新记录','','下一步：修正返回时的摘要读取逻辑，再次验证。','','进程退出码：1','[以上测试名称、时长与输出均为演示数据]'].join('\n')},
+ {id:'CMD-003',title:'重新验证摘要刷新',status:'running',duration:'执行中',exit:null,command:"go test ./core ./platform/feishu \\\n  -run 'TestExecutionCard_ReturnToSummary|TestExecutionCard_ProgressWhileViewingDetails' \\\n  -count=1 -v",output:'=== RUN   TestExecutionCard_ReturnToSummary\n    checking latest execution records...\n\n命令仍在运行，以上为当前已产生的输出。\n[演示输出]'}
+ ];}
+const extraRecord={id:'CMD-004',title:'检查卡片容量',status:'success',duration:'0.4 秒',exit:0,command:"go test ./platform/feishu -run 'TestExecutionCard_Capacity|TestExecutionCard_Continuation' -count=1 -v",output:'=== RUN   TestExecutionCard_Capacity\n--- PASS: TestExecutionCard_Capacity (0.00s)\n=== RUN   TestExecutionCard_Continuation\n--- PASS: TestExecutionCard_Continuation (0.00s)\nPASS\n\n容量检查与续卡检查通过。\n[演示输出]'};
+const continuationRecord={id:'CMD-005',title:'验证回复链路',status:'running',duration:'执行中',exit:null,command:"go test ./core -run 'TestTaskHandoff_QuotedReplies|TestTaskHandoff_MentionReceiver' -count=1 -v",output:'=== RUN   TestTaskHandoff_QuotedReplies\n    checking manager → member handoff...\n    checking member → manager delivery...\n\n验证仍在进行，暂无最终退出码。\n[演示输出]'};
+const perPage=12;
+let entryMode='row';
+let channel='group',gate=null,notifications=[],taskDone=false,gateSequence=0;
+let scenario='manager',items=records(),segments=[],progressAdded=false,toastTimer,viewFocus='summary';
+const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll(s));
+const escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function icon(status){return '<span class="status-icon '+(status==='fail'?'fail':status==='running'?'running':'')+'" aria-hidden="true">'+(status==='fail'?'×':status==='running'?'···':'✓')+'</span>';}
+function statusText(r){return r.status==='running'?'运行中':r.status==='fail'?'未通过':'已完成';}
+function segment(ids,number){return {ids,number,view:'summary',record:null,page:0,snapshot:null,updated:false};}
+function start(name){channel='group';gate=null;notifications=[];taskDone=false;gateSequence=0;scenario=name;items=records();progressAdded=false;segments=[segment(items.map(r=>r.id),1)];viewFocus='summary';if(name==='long')addContinuation(false);render();}
+function message(sender,cls,time,inner,isBot=true){return '<article class="message"><div class="avatar '+cls+'" aria-hidden="true">'+escape(sender==='你'?'你':sender.startsWith('成员')?'J':'管')+'</div><div class="message-main"><div class="sender">'+escape(sender)+(isBot?'<span class="bot-tag">机器人</span>':'')+'<time>'+time+'</time></div>'+inner+'</div></article>';}
+function recordBlock(r){
+ const content='<span class="tool-line">'+icon(r.status)+'<strong>command_execution</strong> — '+escape(r.command.replace(/\n/g,' '))+'</span><span class="tool-meta"><span class="'+(r.status==='fail'?'failure':'')+'">'+statusText(r)+'</span><span>·</span><span>'+escape(r.duration)+'</span></span>';
+ const label='查看 '+r.title+' 的命令和结果';
+ return entryMode==='row'?'<button type="button" class="tool tool-click" data-open="'+r.id+'" aria-label="'+escape(label)+'">'+content+'</button>':'<section class="tool with-action"><div class="tool-copy">'+content+'</div><button type="button" class="tiny-detail" data-open="'+r.id+'" aria-label="'+escape(label)+'">详情</button></section>';
+}
+function summary(s){const info=scenarioInfo[scenario];const active=s.ids.some(id=>items.find(r=>r.id===id).status==='running');const frozen=s.number<segments.length;return '<div class="card-body"><div class="card-heading"><span>'+info.task+' · 执行记录 '+s.number+'</span><span class="run-state" style="color:'+(frozen?'#9299a5':active?'#3370ff':'#1d8f5c')+'"><span class="dot"></span>'+(frozen?'已续至下一张':taskDone?'已完成':gate?.state==='pending'?(gate.kind==='input'?'等待补充':'等待授权'):gate?.state==='denied'?'操作已暂停':active?'进行中':'本段已完成')+'</span></div><p class="summary-copy">'+escape(s.number===1?info.intro:'继续核对消息交接链路。此前的命令和结果仍可在上一张卡中查看。')+'</p>'+s.ids.map(id=>recordBlock(items.find(r=>r.id===id))).join('')+'</div><footer class="card-foot summary-footer"><span>'+s.ids.length+' 条命令 · '+(frozen?'本段已保留':progressAdded?'已更新':'刚刚更新')+'</span><span class="entry-instruction">'+(entryMode==='row'?'点击命令查看详情':'点击行尾「详情」')+'</span></footer>';}
+function detail(s){
+ const r=s.snapshot;const recordIndex=s.ids.indexOf(s.record);
+ const text='完整命令\n'+r.command+'\n\n执行结果'+(r.status==='running'?' · 当前输出':'')+'\n'+(r.output||'命令运行中，尚未产生输出。');
+ const lines=text.split('\n');const pages=Math.ceil(lines.length/perPage);
+ s.page=Math.min(Math.max(s.page,0),pages-1);const startLine=s.page*perPage;
+ const body=lines.slice(startLine,startLine+perPage).join('\n');
+ return '<div class="card-body"><div class="detail-head"><button type="button" class="back" data-back="true">← 返回执行摘要</button></div>'+(s.ids.length>1?'<div class="record-nav" aria-label="切换命令"><button type="button" data-record-step="-1" '+(recordIndex===0?'disabled':'')+'>← 上一条命令</button><span>命令 '+(recordIndex+1)+' / '+s.ids.length+'</span><button type="button" data-record-step="1" '+(recordIndex===s.ids.length-1?'disabled':'')+'>下一条命令 →</button></div>':'')+'<h3 class="detail-title">'+icon(r.status)+escape(r.title)+'</h3><div class="detail-meta"><span>'+statusText(r)+'</span><span>'+escape(r.duration)+'</span><span>'+(r.exit===null?'暂无退出码':'退出码 '+r.exit)+'</span></div><div class="codebox"><div class="code-cap"><span>命令与执行结果'+(r.status==='running'?' · 阅读快照':'')+'</span><span>行 '+(startLine+1)+'–'+Math.min(startLine+perPage,lines.length)+'</span></div><pre>'+escape(body)+'</pre></div>'+(pages>1?'<div class="pager"><button type="button" data-page="-1" '+(s.page===0?'disabled':'')+'>← 上一页</button><span>第 '+(s.page+1)+' / '+pages+' 页</span><button type="button" data-page="1" '+(s.page===pages-1?'disabled':'')+'>下一页 →</button></div>':'<div class="single-page">命令和当前结果已全部显示</div>')+(s.updated?'<div class="update-hint"><span>有新的执行进度，当前阅读位置已保留。</span><button type="button" data-refresh="true">更新详情</button></div>':'')+'<p class="detail-hint">命令与结果连续阅读 · 群内共享视图</p></div><footer class="card-foot"><span>执行记录 '+s.number+' · 当前只显示这一页</span><span>摘要已保留</span></footer>';
+}
+function gatePanel(s){
+ if(s.number!==segments.length)return '';
+ if(taskDone)return '<section class="wait-panel resolved"><h3>任务已结束</h3><p>最终结果已单独回复在群里，当前阅读位置已保留。</p><button type="button" data-show-result="true">查看最终结果</button></section>';
+ if(!gate)return '';
+ if(gate.state==='resolved')return '<section class="wait-panel resolved"><h3>'+(gate.kind==='input'?'已收到补充':'已授权本次操作')+'</h3><p>'+escape(gate.answer)+'</p><p class="wait-note">继续原任务。</p></section>';
+ if(gate.state==='denied')return '<section class="wait-panel denied"><h3>已拒绝本次操作</h3><p>发布步骤已暂停，现有交互稿和执行记录保留。</p><p class="wait-note">可在群里补充新的处理要求。</p></section>';
+ const content=gate.kind==='input'
+  ? '<h3>等待你补充</h3><p>本次验收需要覆盖哪些客户端？</p><div class="wait-actions"><button type="button" data-answer="桌面端">桌面端</button><button type="button" data-answer="移动端">移动端</button><button type="button" data-answer="桌面端和移动端">两者都要</button></div><form id="supplement-form"><label for="supplement">或补充具体要求</label><textarea id="supplement" name="supplement" required placeholder="例如：重点检查移动端长命令换行">'+escape(gate.draft||'')+'</textarea><div class="wait-actions"><button type="submit">提交补充</button></div></form>'
+  : '<h3>等待你授权</h3><p><strong>操作：</strong>将已确认的交互稿发布到测试环境。</p><p><strong>范围：</strong>仅本任务的一次发布，更新测试预览页面；不涉及生产环境。</p><div class="wait-actions"><button type="button" class="primary" data-decision="allow">同意本次</button><button type="button" data-decision="deny">拒绝</button></div>';
+ return '<section class="wait-panel" tabindex="-1" aria-label="待处理事项">'+content+'<p class="wait-note">已模拟发送私聊提醒 · 在这张执行卡内处理</p></section>';
+}
+function finalReply(){
+ if(!taskDone)return '';
+ const info=scenarioInfo[scenario];
+ return '<div class="result-message" id="final-result" tabindex="-1">'+message('管理者','','10:30','<div class="bubble"><div class="quote">'+escape(info.quote)+'</div><h3>本轮已完成 · 结果示例</h3><p>交互稿已包含命令详情、原卡补充与授权、私聊提醒返回群卡的流程。</p><p>已检查原型的翻页、返回和等待状态；正式消息发送、授权与命令执行尚未接入。</p><button type="button" data-locate-card="true">查看执行记录</button></div>')+'</div>';
+}
+function privateFeed(){
+ if(!notifications.length)return '<div class="empty-private"><strong>暂时没有待处理提醒</strong>在右侧模拟需要补充或授权，即可查看私聊效果。</div>';
+ return '<div class="date">管理者与你 · 模拟私聊</div>'+notifications.map(n=>message('管理者','','10:27','<div class="bubble private-bubble"><div class="private-meta">来自 项目协作群 · '+escape(scenarioInfo[scenario].task)+'</div><h3>'+(n.kind==='input'?'需要你补充信息':'有一项操作等待授权')+'</h3><p>'+(n.kind==='input'?'请确认本次验收的客户端范围。':'请确认是否发布本次交互稿到测试环境。')+'</p><p class="private-meta">'+(n.state==='pending'?'等待处理':n.state==='denied'?'已拒绝':'已处理')+' · 问题和操作入口保留在群内执行卡</p><button type="button" data-locate-card="true">'+(n.state==='pending'?'查看执行卡 →':'查看当前执行卡 →')+'</button></div>')).join('');
+}
+function render(){
+ const info=scenarioInfo[scenario];
+ $('#feed').innerHTML=channel==='private'?privateFeed():'<div class="date">今天 10:24 · 演示数据</div>'+message(info.from,info.fromClass,'10:24','<div class="bubble"><span class="mention">@'+escape(info.mention)+'</span> '+escape(info.trigger)+'</div>',info.from!=='你')+segments.map(s=>message(info.actor,info.actorClass,s.number===1?'10:24':'10:26','<div class="card" data-segment="'+s.number+'"><div class="quote">'+escape(info.quote)+'</div>'+gatePanel(s)+(s.view==='summary'?summary(s):detail(s))+'</div>')).join('')+finalReply();
+ $('.chat-title').textContent=channel==='private'?'管理者':'项目协作群';
+ $('.chat-sub').textContent=channel==='private'?'与你的私聊 · 待处理事项提醒':'管理者与成员 · 群主聊天';
+ $('.group-avatar').textContent=channel==='private'?'管':'#';
+ const unread=notifications.filter(n=>!n.read).length;
+ $('#dm-count').innerHTML=unread?'<span class="unread">'+unread+'</span>':'';
+ $$('[data-channel]').forEach(b=>{b.classList.toggle('active',b.dataset.channel===channel);b.setAttribute('aria-pressed',String(b.dataset.channel===channel));});
+ $$('[data-scenario]').forEach(b=>{b.classList.toggle('active',b.dataset.scenario===scenario);b.setAttribute('aria-pressed',String(b.dataset.scenario===scenario));});
+ const waiting=gate?.state==='pending'||gate?.state==='denied';
+ $('#split').disabled=segments.length>1||waiting||taskDone;
+ $('#progress').disabled=progressAdded||waiting||taskDone;
+ $('#need-input').disabled=waiting||taskDone;
+ $('#need-permission').disabled=waiting||taskDone;
+ $('#finish-task').disabled=waiting||taskDone;
+ updateGuide();
+}
+function requestAction(kind){
+ if(taskDone||gate?.state==='pending'||gate?.state==='denied')return;
+ gate={id:++gateSequence,kind,state:'pending',draft:''};
+ notifications.push({id:gate.id,kind,state:'pending',read:channel==='private'});
+ render();announce('已模拟发送私聊提醒；请切换「管理者 · 私聊」查看。');
+}
+function resolveAction(answer,denied=false){
+ if(!gate||gate.state!=='pending')return;
+ gate.state=denied?'denied':'resolved';gate.answer=answer;
+ const n=notifications.find(n=>n.id===gate.id);if(n)n.state=gate.state;
+ render();$('.wait-panel')?.setAttribute('tabindex','-1');$('.wait-panel')?.focus({preventScroll:true});
+ announce(denied?'已模拟拒绝；该操作保持暂停。':'已模拟处理；继续原任务。');
+}
+function locateCard(){
+ channel='group';render();
+ const card=$('[data-segment="'+segments.length+'"]');
+ const target=card.querySelector('.wait-panel')||card;
+ target.setAttribute('tabindex','-1');target.focus();
+}
+function finishTask(){
+ if(taskDone||gate?.state==='pending'||gate?.state==='denied')return;
+ if(!progressAdded)addProgress();
+ items.filter(r=>r.status==='running').forEach(r=>Object.assign(r,{status:'success',duration:'2.1 秒',exit:0,output:'PASS\n验证通过。\n[演示输出]'}));
+ segments.forEach(s=>{if(s.view==='detail')s.updated=true;});
+ taskDone=true;render();announce('任务结束，最终结果已单独回复在群里。');
+}
+
+function updateGuide(){if(channel==='private'){$$('[data-step]').forEach(x=>x.classList.remove('current'));$('#current-view').textContent='当前显示：管理者私聊 · 点击提醒返回原卡';return;}const open=segments.find(s=>s.view==='detail');const key=open?(open.page>0?'page':'detail'):viewFocus;$$('[data-step]').forEach(x=>x.classList.toggle('current',x.dataset.step===key));$('#current-view').textContent=open?'当前显示：'+open.snapshot.title+' · '+'命令与结果'+' · 第 '+(open.page+1)+' 页':'当前显示：'+(key==='return'?'最新执行摘要':'执行摘要')+(segments.length>1?' · 2 张普通回复卡':'');}
+function announce(text){$('#toast').textContent=text;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),2600);}
+function addProgress(){if(progressAdded||taskDone||gate?.state==='pending'||gate?.state==='denied')return;progressAdded=true;const running=items.find(r=>r.id==='CMD-003');Object.assign(running,{status:'success',duration:'2.1 秒',exit:0,output:'=== RUN   TestExecutionCard_ReturnToSummary\n--- PASS: TestExecutionCard_ReturnToSummary (0.01s)\n=== RUN   TestExecutionCard_ProgressWhileViewingDetails\n--- PASS: TestExecutionCard_ProgressWhileViewingDetails (0.01s)\nPASS\n\n返回摘要显示最新记录；阅读详情期间不被进度更新打断。\n[演示输出]'});items.push({...extraRecord});segments[segments.length-1].ids.push(extraRecord.id);segments.forEach(s=>{if(s.view==='detail')s.updated=true;});render();announce('已模拟新增进度；打开的详情页保持不变。');}
+function addContinuation(showToast=true){if(segments.length>1||taskDone||gate?.state==='pending'||gate?.state==='denied')return;const r=items.find(r=>r.id==='CMD-003');if(r.status==='running')Object.assign(r,{status:'success',duration:'2.1 秒',exit:0,output:'PASS\n摘要刷新与详情阅读检查通过。\n[演示输出]'});segments.forEach(s=>{if(s.view==='detail')s.updated=true;});items.push({...continuationRecord});segments.push(segment([continuationRecord.id],2));if(showToast){render();announce('已模拟容量不足：新增普通回复，仍引用同一条指令。');}}
+function openRecord(s,id){s.record=id;s.page=0;s.snapshot={...items.find(r=>r.id===id)};s.updated=false;}
+$('#feed').addEventListener('click',e=>{
+ const b=e.target.closest('button');if(!b||b.disabled)return;
+ if(b.dataset.locateCard){locateCard();return;}
+ if(b.dataset.showResult){$('#final-result')?.focus();return;}
+ if(b.dataset.answer){resolveAction(b.dataset.answer);return;}
+ if(b.dataset.decision){resolveAction(b.dataset.decision==='allow'?'仅授权本任务的一次测试环境发布。':'已拒绝本次发布。',b.dataset.decision==='deny');return;}
+ if(b.type==='submit')return;
+ const host=b.closest('[data-segment]');if(!host)return;
+ const s=segments.find(x=>x.number===Number(host.dataset.segment));
+ if(b.dataset.open){s.view='detail';openRecord(s,b.dataset.open);viewFocus='detail';}
+ else if(b.dataset.recordStep){const i=s.ids.indexOf(s.record)+Number(b.dataset.recordStep);if(i<0||i>=s.ids.length)return;openRecord(s,s.ids[i]);}
+ else if(b.dataset.back){s.view='summary';s.updated=false;viewFocus='return';}
+ else if(b.dataset.page){s.page+=Number(b.dataset.page);}
+ else if(b.dataset.refresh){s.snapshot={...items.find(r=>r.id===s.record)};s.updated=false;}
+ render();const card=$('[data-segment="'+s.number+'"]');let focus;
+ if(b.dataset.open)focus=card.querySelector('[data-back]');
+ else if(b.dataset.back)focus=card.querySelector('[data-open="'+s.record+'"]');
+ else if(b.dataset.recordStep)focus=card.querySelector('[data-record-step="'+b.dataset.recordStep+'"]:not(:disabled)')||card.querySelector('[data-back]');
+ else if(b.dataset.page)focus=card.querySelector('[data-page="'+b.dataset.page+'"]:not(:disabled)')||card.querySelector('[data-back]');
+ else focus=card.querySelector('[data-back]');
+ if(focus)focus.focus({preventScroll:true});
+});
+$$('[data-scenario]').forEach(b=>b.addEventListener('click',()=>start(b.dataset.scenario)));
+$('#progress').addEventListener('click',addProgress);$('#split').addEventListener('click',()=>addContinuation());$('#reset').addEventListener('click',()=>{start(scenario);announce('已重置本场景。');});
+for(const id of ['desktop','mobile'])$('#'+id).addEventListener('click',()=>{$('#chat').classList.toggle('mobile',id==='mobile');for(const key of ['desktop','mobile']){$('#'+key).classList.toggle('active',id===key);$('#'+key).setAttribute('aria-pressed',String(id===key));}});
+$$('[data-entry-mode]').forEach(b=>b.addEventListener('click',()=>{
+ entryMode=b.dataset.entryMode;
+ $$('[data-entry-mode]').forEach(x=>{x.classList.toggle('active',x.dataset.entryMode===entryMode);x.setAttribute('aria-pressed',String(x.dataset.entryMode===entryMode));});
+ $('#entry-description').textContent=entryMode==='row'?'整条命令均可点击，直接进入该命令详情。':'每条命令末尾一个「详情」按钮，进入同一详情页。';
+ render();
+}));
+$$('[data-channel]').forEach(b=>b.addEventListener('click',()=>{channel=b.dataset.channel;if(channel==='private')notifications.forEach(n=>n.read=true);render();}));
+$('#need-input').addEventListener('click',()=>requestAction('input'));
+$('#need-permission').addEventListener('click',()=>requestAction('permission'));
+$('#finish-task').addEventListener('click',finishTask);
+$('#feed').addEventListener('input',e=>{if(e.target.id==='supplement'&&gate?.state==='pending')gate.draft=e.target.value;});
+$('#feed').addEventListener('submit',e=>{if(e.target.id!=='supplement-form')return;e.preventDefault();const answer=$('#supplement').value.trim();if(!answer){$('#supplement').setCustomValidity('请补充具体要求，或选择上方选项。');$('#supplement').reportValidity();return;}resolveAction(answer);});
+$('#feed').addEventListener('input',e=>{if(e.target.id==='supplement')e.target.setCustomValidity('');});
+start('manager');
+</script>
+</body>
+</html>
