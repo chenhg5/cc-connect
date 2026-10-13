@@ -8,6 +8,7 @@ import "log/slog"
 type sharedPresentationState struct {
 	runtime *interactiveState
 	turnID  string
+	done    <-chan struct{} // presentation cancellation must release its session lock
 }
 
 func sharedPresentationIsCurrent(view *interactiveState) bool {
