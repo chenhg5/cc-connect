@@ -1787,7 +1787,7 @@ func TestHandoffPolicy(t *testing.T) {
 		if i%2 == 0 {
 			from, to = long, lead
 		}
-		d := noteHandoff(ch, from, to, lead, "x")
+		d := noteHandoff(ch, from, to, lead, "x", false)
 		if d.verdict != handoffDeliver || d.rounds != i {
 			t.Fatalf("lead round %d: %+v", i, d)
 		}
@@ -1799,27 +1799,27 @@ func TestHandoffPolicy(t *testing.T) {
 		if i%2 == 0 {
 			from, to = jing, long
 		}
-		if d := noteHandoff(ch, from, to, lead, "msg"); d.verdict != handoffDeliver {
+		if d := noteHandoff(ch, from, to, lead, "msg", false); d.verdict != handoffDeliver {
 			t.Fatalf("bounce %d escalated too early", i)
 		}
 	}
-	d := noteHandoff(ch, jing, long, lead, "last")
+	d := noteHandoff(ch, jing, long, lead, "last", false)
 	if d.verdict != handoffEscalate || len(d.recent) != maxPairBounces+1 || d.recent[len(d.recent)-1] != "last" {
 		t.Fatalf("expected escalation, got %+v", d)
 	}
-	if d := noteHandoff(ch, long, jing, lead, "again"); d.verdict != handoffDeliver || d.rounds != 1 {
+	if d := noteHandoff(ch, long, jing, lead, "again", false); d.verdict != handoffDeliver || d.rounds != 1 {
 		t.Fatalf("pair count should restart after escalation: %+v", d)
 	}
 	// A third bot breaking in restarts the pair count.
-	noteHandoff(ch, jing, long, lead, "a")
-	if d := noteHandoff(ch, "cat", long, lead, "b"); d.rounds != 1 {
+	noteHandoff(ch, jing, long, lead, "a", false)
+	if d := noteHandoff(ch, "cat", long, lead, "b", false); d.rounds != 1 {
 		t.Fatalf("new pair should start at 1: %+v", d)
 	}
 	// Fuse: beyond maxBotHops everything is context; the notice fires once.
 	resetBotHops(ch)
 	notices := 0
 	for i := 0; i < maxBotHops+3; i++ {
-		d := noteHandoff(ch, lead, long, lead, "x")
+		d := noteHandoff(ch, lead, long, lead, "x", false)
 		if i < maxBotHops && d.verdict != handoffDeliver {
 			t.Fatalf("hop %d blocked before the fuse", i+1)
 		}
@@ -1834,7 +1834,7 @@ func TestHandoffPolicy(t *testing.T) {
 		t.Fatalf("fuse notice fired %d times", notices)
 	}
 	resetBotHops(ch) // a human spoke
-	if d := noteHandoff(ch, lead, long, lead, "x"); d.verdict != handoffDeliver {
+	if d := noteHandoff(ch, lead, long, lead, "x", false); d.verdict != handoffDeliver {
 		t.Fatal("human message should reset the fuse")
 	}
 }

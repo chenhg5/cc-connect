@@ -36,3 +36,47 @@ func TestMarkSelfMention(t *testing.T) {
 		}
 	}
 }
+
+func TestNameCalled(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"行了橘，别贫了", true},
+		{"橘 你看这个", true},
+		{"橘？", true},
+		{"那橘你呢", false}, // name inside a sentence: not addressed
+		{"橘说得对", false},
+		{"跟橘的审美一样圆", false},
+		{"Claude橘：你来", true},
+		{"```\n橘，\n```", false}, // code block
+		{"龙娘，你来", false},
+	}
+	for _, c := range cases {
+		if got := nameCalled(c.text, "Claude橘"); got != c.want {
+			t.Errorf("nameCalled(%q) = %v, want %v", c.text, got, c.want)
+		}
+	}
+}
+
+func TestNoteHandoff_NameCallChatCap(t *testing.T) {
+	ch := "chat-cap"
+	resetBotHops(ch)
+	defer resetBotHops(ch)
+	for i := 0; i < maxNameCallHops; i++ {
+		from, to := "a", "b"
+		if i%2 == 1 {
+			from, to = to, from
+		}
+		if d := noteHandoff(ch, from, to, "lead", "x", true); d.verdict != handoffDeliver {
+			t.Fatalf("hop %d: verdict %v, want deliver", i+1, d.verdict)
+		}
+	}
+	if d := noteHandoff(ch, "a", "b", "lead", "x", true); d.verdict != handoffChatEnd {
+		t.Fatalf("name call past cap: verdict %v, want chat end", d.verdict)
+	}
+	// an explicit @ still goes through until the fuse
+	if d := noteHandoff(ch, "b", "a", "lead", "x", false); d.verdict != handoffDeliver {
+		t.Fatalf("explicit @ past chat cap: verdict %v, want deliver", d.verdict)
+	}
+}

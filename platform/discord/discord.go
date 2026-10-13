@@ -726,8 +726,13 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			if text == "" && len(images) == 0 && len(files) == 0 {
 				return // e.g. a footer-only chunk of a long reply
 			}
+			// maomao fork: a teammate calling this bot by name ("行了橘，…") counts like an @, so
+			// chat between bots can go on; it stops earlier than @ handoffs (maxNameCallHops).
+			atMention := msg.Mentioned
+			nameCall := !atMention && nameCalled(text, p.botName)
+			msg.Mentioned = atMention || nameCall
 			msg.Content = "【" + discordDisplayName(m) + "】" + text
-			p.holdBotMessage(s, m, msg, downloadURL)
+			p.holdBotMessage(s, m, msg, downloadURL, atMention, nameCall)
 			return
 		}
 		p.dispatchMessage(msg)
@@ -1694,11 +1699,13 @@ type botBurst struct {
 	parts []string
 	first *discordgo.MessageCreate
 	timer *time.Timer
+	// atMention: some part carried a real <@me>; nameCall: some part only called me by name.
+	atMention, nameCall bool
 }
 
 const botBurstWindow = 4 * time.Second
 
-func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCreate, msg *core.Message, download func(string) ([]byte, error)) {
+func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCreate, msg *core.Message, download func(string) ([]byte, error), atMention, nameCall bool) {
 	key := m.ChannelID + ":" + m.Author.ID
 	p.botBurstMu.Lock()
 	defer p.botBurstMu.Unlock()
@@ -1711,10 +1718,12 @@ func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCrea
 		b.msg.Images = append(b.msg.Images, msg.Images...)
 		b.msg.ReplyCtx = msg.ReplyCtx
 		b.msg.Mentioned = b.msg.Mentioned || msg.Mentioned
+		b.atMention = b.atMention || atMention
+		b.nameCall = b.nameCall || nameCall
 		b.timer.Reset(botBurstWindow)
 		return
 	}
-	b := &botBurst{msg: msg, ids: []string{m.ID}, parts: []string{msg.Content}, first: m}
+	b := &botBurst{msg: msg, ids: []string{m.ID}, parts: []string{msg.Content}, first: m, atMention: atMention, nameCall: nameCall}
 	b.timer = time.AfterFunc(botBurstWindow, func() {
 		p.botBurstMu.Lock()
 		delete(p.botBursts, key)
@@ -1731,7 +1740,7 @@ func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCrea
 		}
 		b.msg.Content = strings.Join(kept, "\n\n")
 		if b.msg.Mentioned {
-			p.applyHandoffPolicy(s, b.first, b.msg)
+			p.applyHandoffPolicy(s, b.first, b.msg, b.nameCall && !b.atMention)
 		}
 		if b.msg.Mentioned {
 			// The sender's text doesn't carry the user's images; pick up the recent ones.
@@ -1751,6 +1760,7 @@ func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCrea
 //     Rounds between the lead and a sub are the lead deciding already; they are only annotated.
 const (
 	maxBotHops       = 20
+	maxNameCallHops  = 6 // bot chat by name only (no @) ends after this many hops without a human
 	maxPairBounces   = 3
 	handoffRecentMax = 6
 	handoffRecentLen = 300
@@ -1762,6 +1772,7 @@ const (
 	handoffDeliver handoffVerdict = iota
 	handoffCapped
 	handoffEscalate
+	handoffChatEnd // a name call past maxNameCallHops: context only, no notice
 )
 
 type handoffDecision struct {
@@ -1793,7 +1804,8 @@ func resetBotHops(channelID string) {
 }
 
 // noteHandoff records that bot `from` @-ed bot `to` in channelID with text, and says what to do.
-func noteHandoff(channelID, from, to, lead, text string) handoffDecision {
+// nameCall marks a handoff by name only (no @), which stops earlier, at maxNameCallHops.
+func noteHandoff(channelID, from, to, lead, text string, nameCall bool) handoffDecision {
 	handoffMu.Lock()
 	defer handoffMu.Unlock()
 	st := handoffs[channelID]
@@ -1806,6 +1818,9 @@ func noteHandoff(channelID, from, to, lead, text string) handoffDecision {
 		d := handoffDecision{verdict: handoffCapped, capNotice: !st.capNoticed}
 		st.capNoticed = true
 		return d
+	}
+	if nameCall && st.hops > maxNameCallHops {
+		return handoffDecision{verdict: handoffChatEnd}
 	}
 	pair := [2]string{from, to}
 	if from > to {
@@ -1825,7 +1840,8 @@ func noteHandoff(channelID, from, to, lead, text string) handoffDecision {
 		st.recent = st.recent[len(st.recent)-handoffRecentMax:]
 	}
 	d := handoffDecision{verdict: handoffDeliver, rounds: st.bounces}
-	if lead != "" && from != lead && to != lead && st.bounces > maxPairBounces {
+	// chat by name is not a dispute to settle: only @ ping-pong goes to the lead
+	if !nameCall && lead != "" && from != lead && to != lead && st.bounces > maxPairBounces {
 		d.verdict, d.recent = handoffEscalate, st.recent
 		st.pair, st.bounces, st.recent = [2]string{}, 0, nil
 	}
@@ -1834,9 +1850,12 @@ func noteHandoff(channelID, from, to, lead, text string) handoffDecision {
 
 // applyHandoffPolicy runs noteHandoff for a teammate's @ to this bot and adjusts msg: it may
 // become context only (fuse, or escalated to the lead), or carry a round counter for the lead.
-func (p *Platform) applyHandoffPolicy(s *discordgo.Session, m *discordgo.MessageCreate, msg *core.Message) {
-	d := noteHandoff(m.ChannelID, m.Author.ID, p.botID, p.teamLead, msg.Content)
+func (p *Platform) applyHandoffPolicy(s *discordgo.Session, m *discordgo.MessageCreate, msg *core.Message, nameCall bool) {
+	d := noteHandoff(m.ChannelID, m.Author.ID, p.botID, p.teamLead, msg.Content, nameCall)
 	switch d.verdict {
+	case handoffChatEnd:
+		slog.Info("discord: bot name-call chat cap reached, delivering as context", "channel", m.ChannelID, "from", m.Author.ID)
+		msg.Mentioned = false
 	case handoffCapped:
 		slog.Info("discord: bot handoff fuse blown, delivering as context", "channel", m.ChannelID, "from", m.Author.ID)
 		msg.Mentioned = false

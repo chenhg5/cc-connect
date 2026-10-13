@@ -91,3 +91,39 @@ func markSelfMention(text, botID, botRoleID, name string) string {
 	}
 	return strings.TrimSpace(text)
 }
+
+var codeFenceRe = regexp.MustCompile("(?s)```.*?```")
+
+// nameCalled reports whether a teammate's text addresses this bot by name without an @:
+// the name followed by vocative punctuation ("行了橘，…", "橘？"), or opening a line followed
+// by a space. A name inside a sentence ("橘说得对", "那橘你呢") is only talk about her.
+func nameCalled(text, botName string) bool {
+	if botName == "" {
+		return false
+	}
+	text = codeFenceRe.ReplaceAllString(text, "")
+	names := []string{botName}
+	if short := strings.TrimLeftFunc(botName, func(r rune) bool { return r < unicode.MaxASCII }); short != "" && short != botName {
+		names = append(names, short)
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		for _, name := range names {
+			for i := strings.Index(line, name); i >= 0; {
+				rest := []rune(line[i+len(name):])
+				if len(rest) > 0 && strings.ContainsRune("，,：:！!？?、～~", rest[0]) {
+					return true
+				}
+				if i == 0 && (len(rest) == 0 || unicode.IsSpace(rest[0])) {
+					return true
+				}
+				j := strings.Index(line[i+len(name):], name)
+				if j < 0 {
+					break
+				}
+				i += len(name) + j
+			}
+		}
+	}
+	return false
+}
