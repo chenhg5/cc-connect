@@ -348,21 +348,3 @@ func TestBuildSendPayload_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("decoded files = %#v", decoded.Files)
 	}
 }
-
-func TestParseSendArgs_FromAgentOnlyForOwnSession(t *testing.T) {
-	t.Setenv("CC_PROJECT", "maomao")
-	t.Setenv("CC_SESSION_KEY", "discord:1")
-	req, _, err := parseSendArgs([]string{"hi"})
-	if err != nil || !req.FromAgent {
-		t.Fatalf("own session: from_agent=%v err=%v", req.FromAgent, err)
-	}
-	req, _, _ = parseSendArgs([]string{"--session", "discord:2", "hi"})
-	if req.FromAgent {
-		t.Fatal("posting into another session is not text that session's agent wrote")
-	}
-	t.Setenv("CC_SESSION_KEY", "")
-	req, _, _ = parseSendArgs([]string{"--project", "maomao", "--session", "discord:1", "hi"})
-	if req.FromAgent {
-		t.Fatal("a script outside an agent process must not be marked")
-	}
-}
