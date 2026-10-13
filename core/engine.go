@@ -4877,8 +4877,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			slog.Info("streaming card created for turn", "session", sessionKey)
 		}
 	}
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	// maomao fork: previews and the progress card carry agent output (AgentReplyMarker).
+	sp := newStreamPreview(e.streamPreview, state.platform, markAgentReply(state.platform, state.replyCtx), e.ctx, workspaceRenderer)
+	cp := newCompactProgressWriter(e.ctx, state.platform, markAgentReply(state.platform, state.replyCtx), e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
@@ -5349,7 +5350,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
 						if !SuppressStandaloneToolResultEvent(p) {
-							e.sendRaw(p, replyCtx, resultMsg)
+							e.sendRaw(p, markAgentReply(p, replyCtx), resultMsg)
 						}
 					}
 				}
@@ -5550,7 +5551,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			if isAskQuestion {
-				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+				e.sendAskQuestionPrompt(p, markAgentReply(p, replyCtx), event.Questions, 0)
 			} else {
 				permLimit := e.display.ToolMaxLen
 				if permLimit > 0 {
@@ -5897,7 +5898,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if segmentStart < len(textParts) {
 					unsent := strings.Join(textParts[segmentStart:], "")
 					if unsent != "" {
-						if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, unsent, statusFooter, sendWorkspaceWithError) {
+						if !sendChunksWithStatusFooter(e.ctx, p, markAgentReply(p, replyCtx), unsent, statusFooter, sendWorkspaceWithError) {
 							return
 						}
 					}
@@ -5906,7 +5907,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				sp.discard()
 				metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse))
 				if metaOnly != "" || statusFooter != "" {
-					if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, metaOnly, statusFooter, sendWorkspaceWithError) {
+					if !sendChunksWithStatusFooter(e.ctx, p, markAgentReply(p, replyCtx), metaOnly, statusFooter, sendWorkspaceWithError) {
 						return
 					}
 				}
@@ -5915,7 +5916,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse), "footer_len", len(statusFooter))
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "footer_len", len(statusFooter))
-				if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, fullResponse, statusFooter, sendWorkspaceWithError) {
+				if !sendChunksWithStatusFooter(e.ctx, p, markAgentReply(p, replyCtx), fullResponse, statusFooter, sendWorkspaceWithError) {
 					return
 				}
 			}
@@ -6064,8 +6065,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				sp = newStreamPreview(e.streamPreview, queued.platform, markAgentReply(queued.platform, queued.replyCtx), e.ctx, queuedRenderer)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, markAgentReply(queued.platform, queued.replyCtx), e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
 				// Reset streaming card state for the next turn
 				streamCard = nil
