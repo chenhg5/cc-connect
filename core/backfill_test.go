@@ -46,7 +46,7 @@ func TestChannelBackfill_ShowsMissedMessagesInOrder(t *testing.T) {
 	p := &historyPlatform{history: []ChannelHistoryMessage{
 		{ID: "100", Author: "zuiho", Content: "旧的，看过了", Time: now},
 		{ID: "101", Author: "zuiho", Content: "感觉不太行，开多个职业思考一下", Time: now},
-		{ID: "102", Author: "橘", IsBot: true, IsSelf: true, Content: "我自己的回复", Time: now},
+		{ID: "102", Author: "橘", IsBot: true, IsSelf: true, FromTurn: true, Content: "我自己的回复", Time: now},
 		{ID: "103", Author: "橘", IsBot: true, IsSelf: true, Content: "⏰ ✅ `digest trending`\n\n⭐ GitHub Trending：rsa 工具上榜", Time: now},
 		{ID: "104", Author: "龙娘", IsBot: true, Content: "❌ 错误: 启动 Agent 会话失败", Time: now},
 		{ID: "105", Author: "zuiho", Content: "", Time: now},
@@ -64,7 +64,7 @@ func TestChannelBackfill_ShowsMissedMessagesInOrder(t *testing.T) {
 	if strings.Contains(got, "旧的") || strings.Contains(got, "我自己的回复") {
 		t.Fatalf("seen and own messages must be skipped:\n%s", got)
 	}
-	if !strings.Contains(got, "rsa 工具上榜") {
+	if !strings.Contains(got, "橘（你这个账号") || !strings.Contains(got, "rsa 工具上榜") {
 		t.Fatalf("this bot's cron output never reached the agent and must be shown:\n%s", got)
 	}
 	i, j := strings.Index(got, "感觉不太行"), strings.Index(got, "龙娘（bot）: ❌")

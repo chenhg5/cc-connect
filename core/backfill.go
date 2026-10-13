@@ -15,12 +15,16 @@ import (
 
 // ChannelHistoryMessage is one message read back from a platform channel.
 type ChannelHistoryMessage struct {
-	ID      string
-	Author  string
-	IsBot   bool
-	IsSelf  bool // sent by this bot
-	Content string
-	Time    time.Time
+	ID     string
+	Author string
+	IsBot  bool
+	IsSelf bool // sent by this bot
+	// FromTurn: posted by an agent turn for a channel message (maomao fork).
+	// The agent has these in its session; any other post under this bot's
+	// name (cron --exec output, relay answers) never went through it.
+	FromTurn bool
+	Content  string
+	Time     time.Time
 }
 
 // ChannelHistoryReader is implemented by platforms that can read channel history.
@@ -70,8 +74,11 @@ func (e *Engine) channelBackfill(p Platform, msg *Message, session *Session) (st
 			truncated = false
 			continue
 		}
-		if m.IsSelf && !strings.HasPrefix(strings.TrimSpace(m.Content), cronPostPrefix) {
-			continue // the agent's own replies and status lines: already in its session
+		if m.FromTurn {
+			// Only what the agent's own turns posted. Skipping every post under
+			// this bot's name hid the 10:30 trending digest (a --exec cron job),
+			// and "rsa" was then misread (2026-10-13).
+			continue
 		}
 		text := strings.TrimSpace(m.Content)
 		if text == "" {
@@ -81,7 +88,10 @@ func (e *Engine) channelBackfill(p Platform, msg *Message, session *Session) (st
 			text = string(r[:backfillMaxMsgRunes]) + "…"
 		}
 		who := m.Author
-		if m.IsBot {
+		switch {
+		case m.IsSelf:
+			who += "（你这个账号，但不是你在会话里写的，如定时任务输出）"
+		case m.IsBot:
 			who += "（bot）"
 		}
 		lines = append(lines, fmt.Sprintf("[%s] %s: %s", m.Time.Local().Format("15:04"), who, text))
@@ -107,12 +117,6 @@ func (e *Engine) channelBackfill(p Platform, msg *Message, session *Session) (st
 	}
 	return head + "\n" + strings.Join(lines[start:], "\n"), true
 }
-
-// cronPostPrefix starts every post cc-connect itself makes for a cron or timer
-// job. Those go out under this bot's name without passing through the agent's
-// session (a --exec job's output above all), so backfill keeps them: the 10:30
-// trending digest was skipped and "rsa" was then misread (2026-10-13).
-const cronPostPrefix = "⏰"
 
 // markSeen records msg as the newest message this session has seen.
 func markSeen(session *Session, msg *Message) {

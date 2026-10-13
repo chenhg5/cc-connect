@@ -46,6 +46,7 @@ type progressPlatform struct {
 }
 
 type Platform struct {
+	turnSent                   turnSentLog // maomao fork: see turn_sent.go
 	token                      string
 	allowFrom                  string
 	allowBots                  string // maomao fork: bot user IDs whose @-mentions of this bot are accepted
@@ -1065,16 +1066,18 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 	content = linkTeamMentions(content, p.botID)
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
+		var sent *discordgo.Message
 		var err error
 		if rc.useThreadChannel() || rc.messageID == "" {
-			_, err = p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
+			sent, err = p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
 		} else {
 			ref := &discordgo.MessageReference{MessageID: rc.messageID}
-			_, err = p.session.ChannelMessageSendReply(rc.channelID, chunk, ref)
+			sent, err = p.session.ChannelMessageSendReply(rc.channelID, chunk, ref)
 		}
 		if err != nil {
 			return fmt.Errorf("discord: send: %w", err)
 		}
+		p.noteTurnSent(rc, sent)
 	}
 	return nil
 }
@@ -1083,10 +1086,11 @@ func (p *Platform) sendChannel(rc replyContext, content string) error {
 	content = linkTeamMentions(content, p.botID)
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
-		_, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
+		sent, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
 		if err != nil {
 			return fmt.Errorf("discord: send: %w", err)
 		}
+		p.noteTurnSent(rc, sent)
 	}
 	return nil
 }
@@ -1137,12 +1141,13 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		}
 		return nil
 	case replyContext:
-		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
+		sent, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
 			Files: []*discordgo.File{newFile()},
 		})
 		if err != nil {
 			return fmt.Errorf("discord: send image: %w", err)
 		}
+		p.noteTurnSent(rc, sent)
 		return nil
 	default:
 		return fmt.Errorf("discord: SendImage: invalid reply context type %T", rctx)
@@ -1193,12 +1198,13 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		}
 		return nil
 	case replyContext:
-		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
+		sent, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
 			Files: []*discordgo.File{newFile()},
 		})
 		if err != nil {
 			return fmt.Errorf("discord: send file: %w", err)
 		}
+		p.noteTurnSent(rc, sent)
 		return nil
 	default:
 		return fmt.Errorf("discord: SendFile: invalid reply context type %T", rctx)
@@ -1256,13 +1262,14 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 		}
 		return nil
 	case replyContext:
-		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
+		sent, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
 			Content:    content,
 			Components: components,
 		})
 		if err != nil {
 			return fmt.Errorf("discord: send channel buttons: %w", err)
 		}
+		p.noteTurnSent(rc, sent)
 		return nil
 	default:
 		return core.ErrNotSupported
@@ -1326,6 +1333,9 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	sent, err := p.session.ChannelMessageSendComplex(channelID, msg)
 	if err != nil {
 		return nil, fmt.Errorf("discord: send preview: %w", err)
+	}
+	if rc, ok := rctx.(replyContext); ok {
+		p.noteTurnSent(rc, sent)
 	}
 	return &discordPreviewHandle{channelID: channelID, messageID: sent.ID}, nil
 }
@@ -1439,7 +1449,7 @@ func (p *Platform) ChannelHistory(channelID, beforeID string, limit int) ([]core
 		}
 		out = append(out, core.ChannelHistoryMessage{
 			ID: m.ID, Author: m.Author.Username, IsBot: m.Author.Bot,
-			IsSelf: m.Author.ID == p.botID, Content: text, Time: m.Timestamp,
+			IsSelf: m.Author.ID == p.botID, FromTurn: p.turnSent.has(m.ID), Content: text, Time: m.Timestamp,
 		})
 	}
 	return out, nil
