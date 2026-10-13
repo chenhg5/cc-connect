@@ -35,6 +35,30 @@ type blockedInterruptAgent struct {
 	cancelled, release chan struct{}
 }
 
+// Simulate an interrupt RPC that succeeds while the completion notification
+// arrives late or is lost. The runtime is idle, but no EventResult is emitted.
+type noCompletionInterruptAgent struct{ *sharedCompatAgent }
+
+func (a *noCompletionInterruptAgent) AttachSession(ctx context.Context, id string) (AgentSession, error) {
+	as, err := a.sharedTestAgent.AttachSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &noCompletionInterruptSession{sharedCompatSession: &sharedCompatSession{sharedTestSession: as.(*sharedTestSession), calls: a.calls}}, nil
+}
+
+type noCompletionInterruptSession struct{ *sharedCompatSession }
+
+func (s *noCompletionInterruptSession) CancelTurn() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turn == "" {
+		return fmt.Errorf("no active turn")
+	}
+	s.turn = ""
+	return nil
+}
+
 func (a *blockedInterruptAgent) AttachSession(ctx context.Context, id string) (AgentSession, error) {
 	as, err := a.queuedExternalAgent.AttachSession(ctx, id)
 	if err != nil {

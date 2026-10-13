@@ -114,6 +114,9 @@ func (e *Engine) processSharedMessageWith(p Platform, msg *Message, session *Ses
 			continue // This input was not accepted. Retain it across the new turn.
 		}
 		state.mu.Lock()
+		// /stop discards messages queued before the interrupt. Messages queued
+		// after it belong to the next turn and must still be drained here.
+		generation = state.shared.stopGeneration
 		if state.stopped || !as.Alive() {
 			state.mu.Unlock()
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("shared observer detached"))
@@ -161,7 +164,7 @@ func (e *Engine) runSharedForeground(state *interactiveState, as SharedAgentSess
 	state.mu.Unlock()
 	state.stopSignal()
 	state.mu.Lock()
-	view := &interactiveState{agentSession: as, agent: state.agent, platform: p, replyCtx: msg.ReplyCtx, workspaceDir: state.workspaceDir, stopCh: state.stopCh, eventsNeedResync: false, sharedPresentation: &sharedPresentationState{runtime: state}, fromVoice: msg.FromVoice, currentTurnUserMessageTimeMs: msg.UserMessageTimeMs}
+	view := &interactiveState{agentSession: as, agent: state.agent, platform: p, replyCtx: msg.ReplyCtx, workspaceDir: state.workspaceDir, stopCh: state.stopCh, eventsNeedResync: false, sharedPresentation: &sharedPresentationState{runtime: state, done: ctx.Done()}, fromVoice: msg.FromVoice, currentTurnUserMessageTimeMs: msg.UserMessageTimeMs}
 	state.mu.Unlock()
 	f.parent, f.view = state, view
 	defer func() {
@@ -246,7 +249,7 @@ func (e *Engine) startSharedExternalPresentation(state *interactiveState, as Sha
 	f := &sharedForeground{ctx: ctx, cancel: cancel, events: make(chan Event, 128), bound: true, turnID: turnID}
 	state.stopSignal()
 	state.mu.Lock()
-	view := &interactiveState{agentSession: as, agent: state.agent, platform: state.platform, replyCtx: state.replyCtx, workspaceDir: state.workspaceDir, stopCh: state.stopCh, eventsNeedResync: false, sharedPresentation: &sharedPresentationState{runtime: state, turnID: turnID}}
+	view := &interactiveState{agentSession: as, agent: state.agent, platform: state.platform, replyCtx: state.replyCtx, workspaceDir: state.workspaceDir, stopCh: state.stopCh, eventsNeedResync: false, sharedPresentation: &sharedPresentationState{runtime: state, turnID: turnID, done: ctx.Done()}}
 	state.mu.Unlock()
 	var ws *workspaceState
 	if view.workspaceDir != "" && e.workspacePool != nil {
