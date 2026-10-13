@@ -70,8 +70,8 @@ func (e *Engine) channelBackfill(p Platform, msg *Message, session *Session) (st
 			truncated = false
 			continue
 		}
-		if m.IsSelf {
-			continue // the agent already has its own replies
+		if m.IsSelf && !strings.HasPrefix(strings.TrimSpace(m.Content), cronPostPrefix) {
+			continue // the agent's own replies and status lines: already in its session
 		}
 		text := strings.TrimSpace(m.Content)
 		if text == "" {
@@ -107,6 +107,12 @@ func (e *Engine) channelBackfill(p Platform, msg *Message, session *Session) (st
 	}
 	return head + "\n" + strings.Join(lines[start:], "\n"), true
 }
+
+// cronPostPrefix starts every post cc-connect itself makes for a cron or timer
+// job. Those go out under this bot's name without passing through the agent's
+// session (a --exec job's output above all), so backfill keeps them: the 10:30
+// trending digest was skipped and "rsa" was then misread (2026-10-13).
+const cronPostPrefix = "⏰"
 
 // markSeen records msg as the newest message this session has seen.
 func markSeen(session *Session, msg *Message) {

@@ -1546,7 +1546,18 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	if job.IsShellJob() {
-		return e.executeCronShell(effectivePlatform, replyCtx, job)
+		var output string
+		err := e.executeCronShell(effectivePlatform, replyCtx, job, &output)
+		if !job.Mute && strings.TrimSpace(output) != "" {
+			// maomao fork: the output went to the channel but not through the
+			// agent, so the channel summary would never hear of it.
+			desc := job.Description
+			if desc == "" {
+				desc = truncateStr(job.Exec, 40)
+			}
+			e.reportTurn(runSessionKey, "（定时任务："+desc+"）", truncateStr(output, 3000))
+		}
+		return err
 	}
 
 	content := job.Prompt
@@ -2031,7 +2042,7 @@ func cronRunTitle(job *CronJob) string {
 }
 
 // executeCronShell runs a shell command for a cron job and sends the output.
-func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error {
+func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob, out *string) error {
 	workDir := job.WorkDir
 	if workDir == "" {
 		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
@@ -2071,6 +2082,11 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 
 	var mu sync.Mutex
 	var buf bytes.Buffer
+	defer func() { // the output the job produced, for the caller (maomao fork)
+		mu.Lock()
+		*out = buf.String()
+		mu.Unlock()
+	}()
 	doneCh := make(chan struct{})
 
 	readPipe := func(r io.Reader) {

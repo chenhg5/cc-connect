@@ -47,21 +47,25 @@ func TestChannelBackfill_ShowsMissedMessagesInOrder(t *testing.T) {
 		{ID: "100", Author: "zuiho", Content: "旧的，看过了", Time: now},
 		{ID: "101", Author: "zuiho", Content: "感觉不太行，开多个职业思考一下", Time: now},
 		{ID: "102", Author: "橘", IsBot: true, IsSelf: true, Content: "我自己的回复", Time: now},
-		{ID: "103", Author: "龙娘", IsBot: true, Content: "❌ 错误: 启动 Agent 会话失败", Time: now},
-		{ID: "104", Author: "zuiho", Content: "", Time: now},
+		{ID: "103", Author: "橘", IsBot: true, IsSelf: true, Content: "⏰ ✅ `digest trending`\n\n⭐ GitHub Trending：rsa 工具上榜", Time: now},
+		{ID: "104", Author: "龙娘", IsBot: true, Content: "❌ 错误: 启动 Agent 会话失败", Time: now},
+		{ID: "105", Author: "zuiho", Content: "", Time: now},
 	}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	defer e.Stop()
 	session := e.sessions.GetOrCreateActive("discord:c1")
 	session.SetLastSeenMsgID("100")
 
-	msg := &Message{ChannelID: "c1", MessageID: "105", Content: "你看看"}
+	msg := &Message{ChannelID: "c1", MessageID: "106", Content: "你看看"}
 	got, ok := e.channelBackfill(p, msg, session)
 	if !ok {
 		t.Fatal("backfill should succeed")
 	}
 	if strings.Contains(got, "旧的") || strings.Contains(got, "我自己的回复") {
 		t.Fatalf("seen and own messages must be skipped:\n%s", got)
+	}
+	if !strings.Contains(got, "rsa 工具上榜") {
+		t.Fatalf("this bot's cron output never reached the agent and must be shown:\n%s", got)
 	}
 	i, j := strings.Index(got, "感觉不太行"), strings.Index(got, "龙娘（bot）: ❌")
 	if i < 0 || j < 0 || i > j {
@@ -72,8 +76,8 @@ func TestChannelBackfill_ShowsMissedMessagesInOrder(t *testing.T) {
 	}
 
 	markSeen(session, msg)
-	if session.GetLastSeenMsgID() != "105" {
-		t.Fatalf("last seen = %q, want 105", session.GetLastSeenMsgID())
+	if session.GetLastSeenMsgID() != "106" {
+		t.Fatalf("last seen = %q, want 106", session.GetLastSeenMsgID())
 	}
 	msg.SeenUpToID = "107"
 	markSeen(session, msg)
