@@ -1576,11 +1576,6 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 	}
 
-	// maomao fork: what this turn posts is the agent's own text; tell the
-	// platform so channel backfill does not hand it back to the agent.
-	if m, ok := targetPlatform.(TurnReplyMarker); ok {
-		replyCtx = m.MarkTurnReply(replyCtx)
-	}
 	msg := &Message{
 		SessionKey:   sessionKey,
 		Platform:     platformName,
@@ -4708,7 +4703,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 				if fullResponse != "" {
 					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
+						e.send(p, markAgentReply(p, replyCtx), chunk)
 					}
 				}
 
@@ -4859,11 +4854,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	workspaceRenderer := func(content string) string {
 		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
 	}
+	// sendWorkspace* deliver the agent's own output (text, thinking, tool
+	// lines); maomao fork: the reply context is marked so backfill skips them.
 	sendWorkspace := func(p Platform, replyCtx any, content string) {
-		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
+		e.sendForWorkspace(p, markAgentReply(p, replyCtx), content, workspaceDir)
 	}
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
-		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+		return e.sendWithErrorForWorkspace(p, markAgentReply(p, replyCtx), content, workspaceDir)
 	}
 
 	// Streaming card: aggregate entire turn into a single updatable card.
@@ -5097,7 +5094,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
-						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+						handle, err := starter.SendPreviewStart(e.ctx, markAgentReply(p, replyCtx), card)
 						if err != nil {
 							slog.Debug("rich card: failed to create initial thinking card", "platform", p.Name(), "error", err)
 						} else {
@@ -5184,7 +5181,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
-						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+						handle, err := starter.SendPreviewStart(e.ctx, markAgentReply(p, replyCtx), card)
 						if err != nil {
 							slog.Debug("rich card: failed to create initial tool card", "platform", p.Name(), "error", err)
 						} else {
@@ -5326,7 +5323,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						if cardMessageID == nil {
 							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 							if starter, ok := p.(PreviewStarter); ok {
-								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+								handle, err := starter.SendPreviewStart(e.ctx, markAgentReply(p, replyCtx), card)
 								if err != nil {
 									slog.Debug("rich card: failed to create tool-result card", "platform", p.Name(), "error", err)
 								} else {
@@ -5395,7 +5392,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							if cardMessageID == nil && !silentHold {
 								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 								if starter, ok := p.(PreviewStarter); ok {
-									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+									handle, err := starter.SendPreviewStart(e.ctx, markAgentReply(p, replyCtx), card)
 									if err != nil {
 										slog.Debug("rich card: failed to create initial text card", "platform", p.Name(), "error", err)
 									} else {
@@ -5419,7 +5416,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							if cardMessageID == nil {
 								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 								if starter, ok := p.(PreviewStarter); ok {
-									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
+									handle, err := starter.SendPreviewStart(e.ctx, markAgentReply(p, replyCtx), card)
 									if err != nil {
 										slog.Debug("rich card: failed to create deferred text card", "platform", p.Name(), "error", err)
 									} else {
@@ -5872,14 +5869,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if updater, ok := p.(MessageUpdater); ok {
 						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
 							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
-							if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
+							if err := p.Send(e.ctx, markAgentReply(p, replyCtx), finalCard); err != nil {
 								slog.Error("failed to send rich card reply", "error", err)
 								return
 							}
 						}
 					}
 				} else {
-					if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
+					if err := p.Send(e.ctx, markAgentReply(p, replyCtx), finalCard); err != nil {
 						slog.Error("failed to send rich card reply", "error", err)
 						return
 					}
@@ -5887,7 +5884,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				for _, overflow := range parts[1:] {
 					overflowBody := resolveRichCardMarkdown(overflow, true)
 					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "", nil, overflowBody, false, richStatusFooter)
-					if err := p.Send(e.ctx, replyCtx, overflowCard); err != nil {
+					if err := p.Send(e.ctx, markAgentReply(p, replyCtx), overflowCard); err != nil {
 						slog.Error("failed to send overflow rich card", "error", err)
 						return
 					}

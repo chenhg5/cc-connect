@@ -19,19 +19,28 @@ type ChannelHistoryMessage struct {
 	Author string
 	IsBot  bool
 	IsSelf bool // sent by this bot
-	// FromTurn: posted by an agent turn for a channel message (maomao fork).
+	// FromTurn: carries the agent's own text (maomao fork, AgentReplyMarker).
 	// The agent has these in its session; any other post under this bot's
-	// name (cron --exec output, relay answers) never went through it.
+	// name (cron --exec output, relay answers, status lines) never went through it.
 	FromTurn bool
 	Content  string
 	Time     time.Time
 }
 
-// TurnReplyMarker is implemented by platforms that track which posts came from
-// agent turns (maomao fork): it marks a reply context built without a
-// triggering message (a cron --agent job) as one.
-type TurnReplyMarker interface {
-	MarkTurnReply(replyCtx any) any
+// AgentReplyMarker is implemented by platforms that track which posts carry
+// the agent's own text (maomao fork). The engine marks the reply context of
+// every send that delivers agent output; status lines, errors and command
+// replies go out unmarked, so channel backfill still shows them to the agent.
+type AgentReplyMarker interface {
+	MarkAgentReply(replyCtx any) any
+}
+
+// markAgentReply marks replyCtx as carrying agent output when p supports it.
+func markAgentReply(p Platform, replyCtx any) any {
+	if m, ok := p.(AgentReplyMarker); ok {
+		return m.MarkAgentReply(replyCtx)
+	}
+	return replyCtx
 }
 
 // ChannelHistoryReader is implemented by platforms that can read channel history.

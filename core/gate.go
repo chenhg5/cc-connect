@@ -479,9 +479,17 @@ func summaryDelta(prev, cur []string) (delta string, full bool) {
 		set := map[string]bool{}
 		heading := ""
 		for _, l := range lines {
-			if strings.HasPrefix(l, "#") {
+			if strings.HasPrefix(l, "## ") {
+				// Match sections by name only: the summarizer sometimes drops the
+				// "（…）" note, which must not read as a whole section replaced.
 				heading = l
+				if i := strings.IndexAny(l, "（("); i > 0 {
+					heading = strings.TrimSpace(l[:i])
+				}
 				continue
+			}
+			if strings.TrimSpace(strings.TrimLeft(l, "-* ")) == "无" {
+				continue // an empty section is not an entry
 			}
 			k := heading + "\x00" + l
 			keys = append(keys, k)
@@ -509,9 +517,6 @@ func summaryDelta(prev, cur []string) (delta string, full bool) {
 	for _, k := range prevKeys {
 		if !curSet[k] {
 			h, l, _ := strings.Cut(k, "\x00")
-			if strings.TrimSpace(strings.TrimLeft(l, "-* ")) == "无" {
-				continue
-			}
 			if strings.Contains(h, "已完成") {
 				continue // the summarizer trims old history there; nothing changed
 			}
@@ -527,7 +532,7 @@ func summaryDelta(prev, cur []string) (delta string, full bool) {
 	if changed+len(gone) == 0 {
 		return "", false
 	}
-	if 2*changed > len(curKeys) {
+	if 2*(changed+len(gone)) > len(curKeys)+len(gone) {
 		return "", true
 	}
 	return strings.TrimRight(b.String(), "\n"), false

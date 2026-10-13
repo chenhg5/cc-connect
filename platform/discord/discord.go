@@ -30,7 +30,7 @@ type replyContext struct {
 	channelID string
 	messageID string
 	threadID  string
-	turn      bool // maomao fork: an agent turn without a triggering message (cron --agent)
+	agent     bool // maomao fork: this send carries the agent's own text (core.AgentReplyMarker)
 }
 
 // interactionReplyCtx handles Discord slash command (Application Command)
@@ -41,6 +41,23 @@ type interactionReplyCtx struct {
 	channelID   string
 	mu          sync.Mutex
 	firstDone   bool
+	// maomao fork: an agent-output copy (MarkAgentReply) points at the original,
+	// which keeps the "first reply edits the deferred response" state for both.
+	parent *interactionReplyCtx
+	agent  bool
+}
+
+// takeFirst reports whether this is the first reply for the interaction.
+func (rc *interactionReplyCtx) takeFirst() bool {
+	root := rc
+	if rc.parent != nil {
+		root = rc.parent
+	}
+	root.mu.Lock()
+	defer root.mu.Unlock()
+	first := !root.firstDone
+	root.firstDone = true
+	return first
 }
 
 type progressPlatform struct {
@@ -1042,28 +1059,25 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 	content = linkTeamMentions(content, p.botID)
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
-		ictx.mu.Lock()
-		first := !ictx.firstDone
-		if first {
-			ictx.firstDone = true
-		}
-		ictx.mu.Unlock()
+		first := ictx.takeFirst()
 
+		var sent *discordgo.Message
 		var err error
 		if first {
 			c := chunk
-			_, err = p.session.InteractionResponseEdit(ictx.interaction, &discordgo.WebhookEdit{Content: &c})
+			sent, err = p.session.InteractionResponseEdit(ictx.interaction, &discordgo.WebhookEdit{Content: &c})
 		} else {
-			_, err = p.session.FollowupMessageCreate(ictx.interaction, true, &discordgo.WebhookParams{Content: chunk})
+			sent, err = p.session.FollowupMessageCreate(ictx.interaction, true, &discordgo.WebhookParams{Content: chunk})
 		}
 
 		if err != nil {
 			slog.Warn("discord: interaction response failed, falling back to channel message", "error", err)
-			_, err = p.session.ChannelMessageSend(ictx.channelID, chunk)
+			sent, err = p.session.ChannelMessageSend(ictx.channelID, chunk)
 			if err != nil {
 				return fmt.Errorf("discord: send fallback: %w", err)
 			}
 		}
+		p.noteInteractionSent(ictx, sent)
 	}
 	return nil
 }
@@ -1119,32 +1133,29 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
-		rc.mu.Lock()
-		first := !rc.firstDone
-		if first {
-			rc.firstDone = true
-		}
-		rc.mu.Unlock()
+		first := rc.takeFirst()
 
+		var sent *discordgo.Message
 		var err error
 		if first {
-			_, err = p.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
+			sent, err = p.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
 				Files: []*discordgo.File{newFile()},
 			})
 		} else {
-			_, err = p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+			sent, err = p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
 				Files: []*discordgo.File{newFile()},
 			})
 		}
 		if err != nil {
 			slog.Warn("discord: interaction image failed, falling back to channel message", "error", err)
-			_, err = p.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
+			sent, err = p.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
 				Files: []*discordgo.File{newFile()},
 			})
 			if err != nil {
 				return fmt.Errorf("discord: send image fallback: %w", err)
 			}
 		}
+		p.noteInteractionSent(rc, sent)
 		return nil
 	case replyContext:
 		sent, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
@@ -1176,32 +1187,29 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 
 	switch rc := rctx.(type) {
 	case *interactionReplyCtx:
-		rc.mu.Lock()
-		first := !rc.firstDone
-		if first {
-			rc.firstDone = true
-		}
-		rc.mu.Unlock()
+		first := rc.takeFirst()
 
+		var sent *discordgo.Message
 		var err error
 		if first {
-			_, err = p.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
+			sent, err = p.session.InteractionResponseEdit(rc.interaction, &discordgo.WebhookEdit{
 				Files: []*discordgo.File{newFile()},
 			})
 		} else {
-			_, err = p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+			sent, err = p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
 				Files: []*discordgo.File{newFile()},
 			})
 		}
 		if err != nil {
 			slog.Warn("discord: interaction file failed, falling back to channel message", "error", err)
-			_, err = p.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
+			sent, err = p.session.ChannelMessageSendComplex(rc.channelID, &discordgo.MessageSend{
 				Files: []*discordgo.File{newFile()},
 			})
 			if err != nil {
 				return fmt.Errorf("discord: send file fallback: %w", err)
 			}
 		}
+		p.noteInteractionSent(rc, sent)
 		return nil
 	case replyContext:
 		sent, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
@@ -1259,13 +1267,14 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 		if err := p.sendInteraction(rc, content); err != nil {
 			return err
 		}
-		_, err := p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+		sent, err := p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
 			Content:    content,
 			Components: components,
 		})
 		if err != nil {
 			return fmt.Errorf("discord: send button followup: %w", err)
 		}
+		p.noteInteractionSent(rc, sent)
 		return nil
 	case replyContext:
 		sent, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
@@ -1340,8 +1349,11 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	if err != nil {
 		return nil, fmt.Errorf("discord: send preview: %w", err)
 	}
-	if rc, ok := rctx.(replyContext); ok {
+	switch rc := rctx.(type) {
+	case replyContext:
 		p.noteTurnSent(rc, sent)
+	case *interactionReplyCtx:
+		p.noteInteractionSent(rc, sent)
 	}
 	return &discordPreviewHandle{channelID: channelID, messageID: sent.ID}, nil
 }

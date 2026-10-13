@@ -9,14 +9,13 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-// maomao fork: which of this bot's posts came out of an agent turn. Channel
-// backfill skips exactly those (the agent wrote them and has them in its
-// session) and shows every other post under this bot's name: cron --exec
-// output and its split chunks, relay answers, restart notices. A turn for a
-// channel message replies with a replyContext carrying that message's ID; a
-// cron --agent turn gets one marked by MarkTurnReply; cron --exec, relay and
-// API sends carry neither. Kept on disk so a restart does not hand the last
-// turn's replies back to the agent.
+// maomao fork: which of this bot's posts carry the agent's own text. Channel
+// backfill skips exactly those (the agent has them in its session) and shows
+// every other post under this bot's name: cron --exec output and its split
+// chunks, relay answers, restart notices, errors, "↪ 已插入" and command
+// replies. The engine marks the reply context of each send that delivers
+// agent output (core.AgentReplyMarker); everything else goes out unmarked.
+// Kept on disk so a restart does not hand the last turn's replies back.
 
 const turnSentPerChannel = 500
 
@@ -90,19 +89,41 @@ func (l *turnSentLog) has(id string) bool {
 	return ok
 }
 
-// noteTurnSent records sent when rc belongs to an agent turn.
+// noteTurnSent records sent when it carries agent output.
 func (p *Platform) noteTurnSent(rc replyContext, sent *discordgo.Message) {
-	if (rc.messageID == "" && !rc.turn) || sent == nil || sent.ID == "" {
+	if rc.agent {
+		p.recordAgentPost(sent)
+	}
+}
+
+func (p *Platform) noteInteractionSent(rc *interactionReplyCtx, sent *discordgo.Message) {
+	if rc != nil && rc.agent {
+		p.recordAgentPost(sent)
+	}
+}
+
+func (p *Platform) recordAgentPost(sent *discordgo.Message) {
+	if sent == nil || sent.ID == "" {
 		return
 	}
 	p.turnSent.add(sent.ChannelID, sent.ID)
 }
 
-// MarkTurnReply implements core.TurnReplyMarker.
-func (p *Platform) MarkTurnReply(replyCtx any) any {
-	if rc, ok := replyCtx.(replyContext); ok {
-		rc.turn = true
+// MarkAgentReply implements core.AgentReplyMarker.
+func (p *Platform) MarkAgentReply(replyCtx any) any {
+	switch rc := replyCtx.(type) {
+	case replyContext:
+		rc.agent = true
 		return rc
+	case *interactionReplyCtx:
+		if rc.agent {
+			return rc
+		}
+		root := rc
+		if rc.parent != nil {
+			root = rc.parent
+		}
+		return &interactionReplyCtx{interaction: rc.interaction, channelID: rc.channelID, parent: root, agent: true}
 	}
 	return replyCtx
 }

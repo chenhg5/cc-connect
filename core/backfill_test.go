@@ -186,6 +186,13 @@ func TestGateContextAndTurnReport(t *testing.T) {
 	if !strings.Contains(c, "## 已完成\n修龙娘") || !strings.Contains(c, "已移除") || !strings.Contains(c, "正在做：修龙娘") || strings.Contains(c, "修好 gate") {
 		t.Fatalf("summary delta:\n%s", c)
 	}
+	// A heading that loses its "（…）" note is the same section.
+	summaryText = "## 正在做\n无\n## 已完成（最近的在前）\n修好 gate\n修好补拉\n修好卡死\n修龙娘"
+	if c := e.turnContext(sess, "discord:c1", "x"); c != "" {
+		t.Fatalf("heading note change resent:\n%s", c)
+	}
+	summaryText = "## 正在做\n无\n## 已完成\n修好 gate\n修好补拉\n修好卡死\n修龙娘"
+	_ = e.turnContext(sess, "discord:c1", "x")
 	// Trimming old history from 已完成 is not news.
 	summaryText = "## 正在做\n无\n## 已完成\n修好 gate\n修好补拉\n修龙娘"
 	if c := e.turnContext(sess, "discord:c1", "x"); c != "" {
@@ -218,4 +225,17 @@ func TestGateContextAndTurnReport(t *testing.T) {
 		t.Fatalf("turn report = %v", gotTurn)
 	}
 	_ = context.Background()
+}
+
+func TestSummaryDeltaCountsRemovals(t *testing.T) {
+	prev := []string{"## 答应了还没做", "- a", "- b", "- c", "- d", "## 正在做", "- x"}
+	cur := []string{"## 答应了还没做", "无", "## 正在做", "- x", "- y"}
+	if _, full := summaryDelta(prev, cur); !full {
+		t.Fatal("4 removals + 1 new out of 6 should send the whole summary")
+	}
+	cur = []string{"## 答应了还没做", "- a", "- b", "- c", "- d", "## 正在做", "- x", "- y"}
+	d, full := summaryDelta(prev, cur)
+	if full || d != "## 正在做\n- y" {
+		t.Fatalf("delta = %q full=%v", d, full)
+	}
 }
