@@ -104,6 +104,43 @@ func TestSharedPermissionCard_TextDecisionDoesNotDuplicateUpdatedCard(t *testing
 	}
 }
 
+func TestSharedPermissionCard_CompactBodyKeepsApprovalDetails(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "compact", ToolName: "Bash", ToolInput: "git commit -m 'fix'", ToolInputRaw: map[string]any{"reason": "Finish the reviewed change", "cwd": "/project"}, Decisions: []string{"allow", "allow_similar", "cancel"}, DecisionDetails: map[string]string{"allow_similar": `["git","commit"]`}})
+	env.await("Finish the reviewed change")
+	p.mu.Lock()
+	card := p.sentCards[0]
+	p.mu.Unlock()
+	if card.Header.Title != env.e.i18n.T(MsgPermCardTitle) {
+		t.Fatalf("wrong card title: %+v", card.Header)
+	}
+	if len(card.Elements) != 2 {
+		t.Fatalf("expected one compact body and buttons without a redundant note: %+v", card.Elements)
+	}
+	body, ok := card.Elements[0].(CardMarkdown)
+	if !ok {
+		t.Fatalf("missing markdown body: %+v", card.Elements[0])
+	}
+	for _, want := range []string{"**Bash**: `git commit -m 'fix'`", "Reason: Finish the reviewed change", "Working directory: /project", "Allow similar commands: `[\"git\",\"commit\"]`"} {
+		if !strings.Contains(body.Content, want) {
+			t.Fatalf("compact card lost %q: %q", want, body.Content)
+		}
+	}
+	if strings.Contains(body.Content, "Permission Request") || strings.Contains(body.Content, "\n\n") {
+		t.Fatalf("card repeats its title or has blank paragraphs: %q", body.Content)
+	}
+	env.send(env.button(env.e.i18n.T(MsgPermBtnAllow)))
+	updated := awaitTrackedPermissionUpdate(t, p).card
+	if updated.Header.Color != "green" || len(updated.Elements) != 1 {
+		t.Fatalf("resolved card lost compact layout: %+v", updated)
+	}
+	resolvedBody := updated.Elements[0].(CardMarkdown).Content
+	if resolvedBody != body.Content {
+		t.Fatalf("resolved card changed approval details: %q", resolvedBody)
+	}
+}
+
 func TestSharedPermissionCard_UpdateFailurePreservesTextConfirmation(t *testing.T) {
 	env, p := newSharedTrackedPermissionEnv(t)
 	p.updateErr = fmt.Errorf("simulated card update failure")
