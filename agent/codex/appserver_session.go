@@ -1086,6 +1086,10 @@ func (s *appServerSession) waitLoop() {
 	if s.ctx.Err() == nil && err != nil {
 		slog.Warn("codex app-server exited unexpectedly", "error", err)
 		s.emitError(fmt.Errorf("codex app-server exited: %w", err))
+	} else if s.ctx.Err() == nil {
+		// maomao fork: a clean exit mid-turn sends no turn/completed; without an
+		// event the engine waits forever (2026-10-13, 龙娘 stuck ~1h).
+		s.failRunningTurn("codex app-server exited mid-turn")
 	}
 	s.alive.Store(false)
 	if err == nil {
@@ -1568,6 +1572,19 @@ func (s *appServerSession) emit(event core.Event) {
 	default:
 		slog.Warn("codex appserver: event channel full, dropping event", "type", event.Type)
 	}
+}
+
+// failRunningTurn ends an in-flight turn with an error event; no-op when idle.
+func (s *appServerSession) failRunningTurn(reason string) {
+	s.stateMu.Lock()
+	running := s.currentTurn != ""
+	s.currentTurn = ""
+	s.stateMu.Unlock()
+	if !running {
+		return
+	}
+	slog.Warn("codex app-server: turn ended without turn/completed", "reason", reason)
+	s.emitError(errors.New(reason))
 }
 
 func (s *appServerSession) emitError(err error) {

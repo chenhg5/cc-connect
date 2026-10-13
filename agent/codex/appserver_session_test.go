@@ -451,3 +451,19 @@ func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
 		}
 	}
 }
+
+func TestAppServerSession_FailRunningTurnEmitsOnlyWhenBusy(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4)}
+	s.failRunningTurn("idle")
+	if len(s.events) != 0 {
+		t.Fatalf("idle session emitted %d events", len(s.events))
+	}
+	s.currentTurn = "turn-1"
+	s.failRunningTurn("exited mid-turn")
+	if len(s.events) != 1 {
+		t.Fatalf("busy session emitted %d events, want 1", len(s.events))
+	}
+	if ev := <-s.events; ev.Type != core.EventError || s.currentTurn != "" {
+		t.Fatalf("event = %+v, currentTurn = %q", ev, s.currentTurn)
+	}
+}
