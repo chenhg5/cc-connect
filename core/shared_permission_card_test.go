@@ -115,6 +115,9 @@ func TestSharedPermissionCard_CompactBodyKeepsApprovalDetails(t *testing.T) {
 	if card.Header.Title != env.e.i18n.T(MsgPermCardTitle) {
 		t.Fatalf("wrong card title: %+v", card.Header)
 	}
+	if !card.RichMarkdown {
+		t.Fatal("permission card must request inline-code-capable markdown")
+	}
 	if len(card.Elements) != 2 {
 		t.Fatalf("expected one compact body and buttons without a redundant note: %+v", card.Elements)
 	}
@@ -135,9 +138,41 @@ func TestSharedPermissionCard_CompactBodyKeepsApprovalDetails(t *testing.T) {
 	if updated.Header.Color != "green" || len(updated.Elements) != 1 {
 		t.Fatalf("resolved card lost compact layout: %+v", updated)
 	}
+	if !updated.RichMarkdown {
+		t.Fatal("resolved permission card must keep inline-code-capable markdown")
+	}
 	resolvedBody := updated.Elements[0].(CardMarkdown).Content
 	if resolvedBody != body.Content {
 		t.Fatalf("resolved card changed approval details: %q", resolvedBody)
+	}
+}
+
+func TestSharedPermissionCard_PatchDiffPreviewKeepsFilesAndDecision(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	as := env.a.connection("first")
+	preview := "update /project/core/card.go\n@@ -1 +1 @@\n-old\n+new\n\nadd /project/core/new.go\n@@ -0,0 +1 @@\n+package core"
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "patch-diff", ToolName: "Patch", ToolInput: preview, ToolInputRaw: map[string]any{"reason": "Review file changes"}, Decisions: []string{"allow", "cancel"}})
+	env.await("Review file changes")
+	p.mu.Lock()
+	card := p.sentCards[0]
+	p.mu.Unlock()
+	if len(card.Elements) != 4 || !card.RichMarkdown {
+		t.Fatalf("patch card should have heading, diff, reason, actions: %+v", card)
+	}
+	diff, ok := card.Elements[1].(CardMarkdown)
+	if !ok || !diff.Diff || !strings.Contains(diff.Content, preview) {
+		t.Fatalf("patch preview not preserved: %+v", card.Elements[1])
+	}
+	if !strings.Contains(card.RenderText(), "Review file changes") {
+		t.Fatalf("reason missing from card fallback: %s", card.RenderText())
+	}
+	env.send(env.button(env.e.i18n.T(MsgPermBtnAllow)))
+	resolved := awaitTrackedPermissionUpdate(t, p).card
+	if resolved.Header.Color != "green" || len(resolved.Elements) != 3 {
+		t.Fatalf("resolved patch card lost diff: %+v", resolved)
+	}
+	if body, ok := resolved.Elements[1].(CardMarkdown); !ok || !body.Diff || body.Content != diff.Content {
+		t.Fatalf("resolved patch preview changed: %+v", resolved.Elements[1])
 	}
 }
 

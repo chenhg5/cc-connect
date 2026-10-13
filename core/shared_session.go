@@ -393,7 +393,7 @@ func (e *Engine) sendSharedPrompt(state *interactiveState, pending *pendingPermi
 		}
 	}
 	if supportsCards(p) {
-		card := NewCard().Title(e.i18n.T(MsgPermCardTitle), "orange").Markdown(e.sharedPermissionCardBody(pending)).Buttons(cardButtons...).Build()
+		card := e.sharedPermissionCardBuilder(pending).Title(e.i18n.T(MsgPermCardTitle), "orange").Buttons(cardButtons...).Build()
 		e.sendSharedPermissionCard(p, reply, original, card)
 		return
 	}
