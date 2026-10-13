@@ -5413,6 +5413,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		events = routedEvents[0]
 	}
 	stopCh := state.stopSignal()
+	var presentationDone <-chan struct{}
+	if state.sharedPresentation != nil {
+		presentationDone = state.sharedPresentation.done
+	}
 	for {
 		var event Event
 		var ok bool
@@ -5422,6 +5426,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			flushToolOutput()
 			continue // A UI refresh is not a daemon event or idle heartbeat.
 		case <-stopCh:
+			sp.discard()
+			return
+		case <-presentationDone:
 			sp.discard()
 			return
 		case event, ok = <-events:

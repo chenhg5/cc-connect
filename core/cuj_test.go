@@ -2961,6 +2961,28 @@ func TestCUJ_C8_SharedInterruptBackgroundCleanupAndRecovery(t *testing.T) {
 	env.await("next task")
 	env.send("/detach")
 	env.await(env.e.i18n.T(MsgSharedDetached))
+
+	t.Run("stop releases the session when completion is delayed", func(t *testing.T) {
+		env, a := newSharedCompatEnv(t)
+		env.e.agent = &noCompletionInterruptAgent{sharedCompatAgent: a}
+		env.send("/attach first")
+		env.await("Attached to session first")
+		env.send("/stop") // End the turn inherited from the attached thread.
+		env.await(env.e.i18n.T(MsgExecutionStopped))
+		env.send("first task")
+		first := awaitSharedCompatCall(t, a)
+		if first.prompt == "" {
+			t.Fatal("first task was not sent")
+		}
+		env.send("/stop")
+		env.send("next task")
+		second := awaitSharedCompatCall(t, a)
+		if second.prompt == "" || second.turn == first.turn {
+			t.Fatalf("new task did not start after stop: %+v", second)
+		}
+		second.finish("RECOVERED AFTER STOP")
+		env.await("RECOVERED AFTER STOP")
+	})
 }
 
 // Batch cleanup removes the listed background terminals while live steering
