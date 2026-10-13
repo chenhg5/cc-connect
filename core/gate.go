@@ -554,13 +554,18 @@ func (e *Engine) teamBlock(session *Session, sessionKey string) string {
 
 // reportTurn hands a finished turn to the gate so it can update the channel summary.
 func (e *Engine) reportTurn(sessionKey, user, reply string) {
-	g := e.gate
-	if g == nil || strings.TrimSpace(reply) == "" || isSilentReply(reply) {
-		return
-	}
 	bot := e.name
 	if e.team != nil && e.team.name != "" {
 		bot = e.team.name
+	}
+	e.reportTurnAs(sessionKey, bot, user, reply)
+}
+
+// reportTurnAs is reportTurn with the speaker named explicitly.
+func (e *Engine) reportTurnAs(sessionKey, bot, user, reply string) {
+	g := e.gate
+	if g == nil || strings.TrimSpace(reply) == "" || isSilentReply(reply) {
+		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)

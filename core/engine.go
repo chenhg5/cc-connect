@@ -1555,7 +1555,12 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 			if desc == "" {
 				desc = truncateStr(job.Exec, 40)
 			}
-			e.reportTurn(runSessionKey, "（定时任务："+desc+"）", truncateStr(output, 3000))
+			who := e.name
+			if e.team != nil && e.team.name != "" {
+				who = e.team.name
+			}
+			// Not the agent's words: say so, or the summary credits the bot.
+			e.reportTurnAs(runSessionKey, "定时任务（脚本输出，用"+who+"的账号发出，"+who+"本人没参与）", "（定时任务："+desc+"）", truncateStr(output, 3000))
 		}
 		return err
 	}
