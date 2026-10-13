@@ -661,7 +661,7 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 			m.ReferencedMessage = nil // its quote is already in the channel history
 		}
 		if mentioned && m.GuildID != "" && p.isGroupReplyAllGuild(m.GuildID) {
-			m.Content = stripDiscordMentionWithRole(m.Content, p.botID, botRoleID)
+			m.Content = markSelfMention(m.Content, p.botID, botRoleID, p.botName)
 		}
 		if m.GuildID != "" && !p.isGroupReplyAllGuild(m.GuildID) {
 			if !mentioned {

@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -70,4 +71,23 @@ func replaceMentions(content string, alias map[string]string) string {
 		parts[i] = b.String()
 	}
 	return strings.Join(parts, "```")
+}
+
+var otherMentionRe = regexp.MustCompile(`<@[!&]?\d+>|@everyone|@here`)
+
+// markSelfMention removes this bot's own mention, as upstream does, unless the message also
+// addresses someone else. Then the own mention becomes "@name(你)": with it stripped, a message
+// that @-ed two bots read as "@ the other one" and the agent stayed silent (maomao fork).
+func markSelfMention(text, botID, botRoleID, name string) string {
+	stripped := stripDiscordMentionWithRole(text, botID, botRoleID)
+	if !otherMentionRe.MatchString(stripped) {
+		return stripped
+	}
+	self := "@" + name + "(你)"
+	text = strings.ReplaceAll(text, "<@!"+botID+">", self)
+	text = strings.ReplaceAll(text, "<@"+botID+">", self)
+	if botRoleID != "" {
+		text = strings.ReplaceAll(text, "<@&"+botRoleID+">", self)
+	}
+	return strings.TrimSpace(text)
 }
