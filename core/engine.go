@@ -484,6 +484,8 @@ type Engine struct {
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
+	relayStoppedMu    sync.Mutex
+	relayStopped      map[string]bool
 
 	// Teardown tracking. A session's state is removed from interactiveStates
 	// as soon as /stop is issued, but its OS process can live on for up to
@@ -789,6 +791,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		skills:                NewSkillRegistry(),
 		aliases:               make(map[string]string),
 		interactiveStates:     make(map[string]*interactiveState),
+		relayStopped:          make(map[string]bool),
 		closingSessions:       make(map[string]chan struct{}),
 		unsafeResume:          make(map[string]bool),
 		sendWorkDirs:          make(map[string]string),
@@ -10850,10 +10853,74 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 				return
 			}
 		}
+		if platform, chatID, err := parseSessionKeyParts(msg.SessionKey); err == nil {
+			if n := e.stopRelayTurns(platform, chatID); n > 0 {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelayExecutionStopped))
+				return
+			}
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+}
+
+// stopRelayTurns stops live relay turns running in the current group. Relay
+// turns use "<platform>:<chatID>#relay:<source-project>" so they do not share
+// the user's own interactive session key.
+func (e *Engine) stopRelayTurns(platform, chatID string) int {
+	if platform == "" || chatID == "" {
+		return 0
+	}
+	tail := platform + ":" + chatID + "#relay:"
+	prefixed := ":" + tail
+	e.interactiveMu.Lock()
+	var keys []string
+	for k := range e.interactiveStates {
+		if strings.HasPrefix(k, tail) || isWorkspacePrefixedKey(k, prefixed) {
+			keys = append(keys, k)
+		}
+	}
+	e.interactiveMu.Unlock()
+	stopped := 0
+	for _, k := range keys {
+		if e.stopInteractiveSessionSilently(k) {
+			e.relayStoppedMu.Lock()
+			if e.relayStopped == nil {
+				e.relayStopped = make(map[string]bool)
+			}
+			e.relayStopped[k] = true
+			e.relayStoppedMu.Unlock()
+			stopped++
+		}
+	}
+	return stopped
+}
+
+func (e *Engine) clearRelayStopped(key string) {
+	e.relayStoppedMu.Lock()
+	delete(e.relayStopped, key)
+	e.relayStoppedMu.Unlock()
+}
+
+func (e *Engine) takeRelayStopped(key string) bool {
+	e.relayStoppedMu.Lock()
+	stopped := e.relayStopped[key]
+	delete(e.relayStopped, key)
+	e.relayStoppedMu.Unlock()
+	return stopped
+}
+
+// isWorkspacePrefixedCronKey reports whether key is "<workspaceDir>:<base>#cron:"
+// for the given "<base>#cron:" tail, and workspaceDir actually looks like a path.
+// Requiring a path separator keeps a chat key that merely ends with "base" (for
+// example base "user1" against "feishu:ch:user1#cron:x") from matching.
+func isWorkspacePrefixedKey(key, tail string) bool {
+	i := strings.Index(key, tail)
+	if i <= 0 {
+		return false
+	}
+	return strings.ContainsAny(key[:i], `/\`)
 }
 
 // cmdCancel stops the current execution and starts a fresh session.
@@ -16563,36 +16630,116 @@ func (e *Engine) platformForName(name string) Platform {
 }
 
 func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey string) (Agent, *SessionManager, string, error) {
+	agent, sessions, relaySessionKey, _, err := e.relayContextForSourceSessionKeyWithWorkspace(fromProject, sourceSessionKey)
+	return agent, sessions, relaySessionKey, err
+}
+
+func (e *Engine) relayContextForSourceSessionKeyWithWorkspace(fromProject, sourceSessionKey string) (Agent, *SessionManager, string, string, error) {
 	platformName, chatID, err := parseSessionKeyParts(sourceSessionKey)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("invalid source session key: %w", err)
+		return nil, nil, "", "", fmt.Errorf("invalid source session key: %w", err)
 	}
 
 	relaySessionKey := relayConversationKey(fromProject, platformName, chatID)
 	if !e.multiWorkspace || e.workspaceBindings == nil {
-		return e.agent, e.sessions, relaySessionKey, nil
+		return e.agent, e.sessions, relaySessionKey, "", nil
 	}
 
 	channelKey := workspaceChannelKey(platformName, chatID)
 	workspace, _, err := e.resolveWorkspace(e.platformForName(platformName), chatID)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("resolve relay workspace: %w", err)
+		return nil, nil, "", "", fmt.Errorf("resolve relay workspace: %w", err)
 	}
 	if workspace == "" {
 		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); b != nil && !usable {
-			return nil, nil, "", fmt.Errorf("workspace binding unavailable for source channel %q", channelKey)
+			return nil, nil, "", "", fmt.Errorf("workspace binding unavailable for source channel %q", channelKey)
 		}
-		return nil, nil, "", fmt.Errorf("no workspace binding for source channel %q", channelKey)
+		return nil, nil, "", "", fmt.Errorf("no workspace binding for source channel %q", channelKey)
 	}
 
 	agent, sessions, err := e.getOrCreateWorkspaceAgent(workspace)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("get relay workspace agent: %w", err)
+		return nil, nil, "", "", fmt.Errorf("get relay workspace agent: %w", err)
 	}
 	if ws := e.workspacePool.Get(workspace); ws != nil {
 		ws.Touch()
 	}
-	return agent, sessions, relaySessionKey, nil
+	return agent, sessions, relaySessionKey, workspace, nil
+}
+
+func waitForRelaySessionLock(ctx context.Context, session *Session) (uint64, error) {
+	for {
+		if lockGen, ok := session.TryLock(); ok {
+			return lockGen, nil
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// HandleRelayLive injects a relay message through the normal interactive path.
+// Unlike HandleRelay, this renders the target turn's progress to the target
+// platform and waits without the relay response timeout.
+func (e *Engine) HandleRelayLive(ctx context.Context, fromProject, sourceSessionKey, message string) (string, error) {
+	platformName, chatID, err := parseSessionKeyParts(sourceSessionKey)
+	if err != nil {
+		return "", fmt.Errorf("invalid source session key: %w", err)
+	}
+	agent, sessions, relaySessionKey, workspaceDir, err := e.relayContextForSourceSessionKeyWithWorkspace(fromProject, sourceSessionKey)
+	if err != nil {
+		return "", err
+	}
+	platform := e.platformForName(platformName)
+	rc, ok := platform.(ReplyContextReconstructor)
+	if !ok {
+		return "", fmt.Errorf("platform %q does not support relay progress", platformName)
+	}
+	replyCtx, err := rc.ReconstructReplyCtx(platformName + ":" + chatID)
+	if err != nil {
+		return "", fmt.Errorf("reconstruct relay reply context: %w", err)
+	}
+
+	session := sessions.GetOrCreateActive(relaySessionKey)
+	lockGen, err := waitForRelaySessionLock(ctx, session)
+	if err != nil {
+		return "", err
+	}
+
+	iKey := platformName + ":" + chatID + "#relay:" + fromProject
+	if workspaceDir != "" {
+		iKey = workspaceDir + ":" + iKey
+	}
+	e.clearRelayStopped(iKey)
+	msg := &Message{
+		SessionKey: platformName + ":" + chatID,
+		Platform:   platformName,
+		UserID:     "relay:" + fromProject,
+		UserName:   fromProject,
+		Content:    message,
+		ReplyCtx:   replyCtx,
+	}
+	prevHistLen := session.HistoryLen()
+	e.processInteractiveMessageWith(platform, msg, session, agent, sessions, iKey, workspaceDir, sourceSessionKey, lockGen)
+	stopped := e.takeRelayStopped(iKey)
+	e.cleanupInteractiveState(iKey)
+	if session.HistoryLen() < prevHistLen+2 {
+		if stopped {
+			return "", fmt.Errorf("relay live: stopped")
+		}
+		return "", fmt.Errorf("relay live: no response (execution failed; see group card)")
+	}
+	history := session.GetHistory(1)
+	if len(history) == 0 || history[0].Role != "assistant" || strings.TrimSpace(history[0].Content) == "" {
+		return "", fmt.Errorf("relay live: empty response")
+	}
+	return history[0].Content, nil
 }
 
 // HandleRelay processes a relay message synchronously: starts or resumes a
@@ -16604,6 +16751,19 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 		return "", err
 	}
 	session := sessions.GetOrCreateActive(relaySessionKey)
+	lockGen, err := waitForRelaySessionLock(ctx, session)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", fmt.Errorf("relay session is occupied by another task: %w", err)
+		}
+		return "", err
+	}
+	lockHeld := true
+	defer func() {
+		if lockHeld {
+			session.Unlock(lockGen)
+		}
+	}()
 
 	if inj, ok := agent.(SessionEnvInjector); ok {
 		envVars := []string{
@@ -16716,7 +16876,8 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 			// Relay timed out. Let the agent finish its turn in the
 			// background so the session state is saved cleanly and the
 			// session remains resumable for the next relay call.
-			go e.drainRelaySession(agentSession, session, sessions, agent.Name(), relaySessionKey)
+			lockHeld = false
+			go e.drainRelaySession(agentSession, session, sessions, agent.Name(), relaySessionKey, lockGen)
 			return e.relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
 		}
 	}
@@ -16763,9 +16924,10 @@ func (e *Engine) relayPartialResponseOrError(ctxErr error, textParts []string, f
 // agent finish its current turn (saving the session ID for future resumption),
 // auto-approves any permission requests, and then closes the session. A 10-minute
 // safety timeout prevents the goroutine from leaking if the agent hangs.
-func (e *Engine) drainRelaySession(agentSession AgentSession, session *Session, sessions *SessionManager, agentName, relaySessionKey string) {
+func (e *Engine) drainRelaySession(agentSession AgentSession, session *Session, sessions *SessionManager, agentName, relaySessionKey string, lockGen uint64) {
 	timer := time.NewTimer(10 * time.Minute)
 	defer timer.Stop()
+	defer session.Unlock(lockGen)
 
 	for {
 		select {

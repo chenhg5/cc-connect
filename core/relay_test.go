@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -504,6 +505,285 @@ func TestRelayManager_VisibilityNoneSuppressesGroupEcho(t *testing.T) {
 	if len(targetSent) != 0 {
 		t.Fatalf("target sent = %#v, want no relay response echo", targetSent)
 	}
+}
+
+func TestRelayManager_LiveUsesInteractivePathWithoutResponseEcho(t *testing.T) {
+	sourcePlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	targetPlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{sourcePlatform}, "", LangEnglish)
+	targetAgent := &sessionEnvRecordingAgent{session: newResultAgentSession("live response")}
+	targetEngine := NewEngine("target", targetAgent, []Platform{targetPlatform}, "", LangEnglish)
+
+	rm := NewRelayManager("")
+	rm.Bind("feishu", "chat-1", map[string]string{"source": "source-bot", "target": "target-bot"})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	result, err := rm.Send(context.Background(), RelayRequest{
+		From:       "source",
+		To:         "target",
+		SessionKey: "feishu:chat-1:user-1",
+		Message:    "run live",
+		Live:       true,
+	})
+	if err != nil {
+		t.Fatalf("RelayManager.Send() error = %v", err)
+	}
+	if result == nil || result.Response != "live response" {
+		t.Fatalf("response = %#v, want live response", result)
+	}
+	if got := sourcePlatform.getSent(); len(got) != 1 {
+		t.Fatalf("source visibility = %#v, want request only", got)
+	}
+	for _, got := range targetPlatform.getSent() {
+		if strings.Contains(got, "[target-bot]") {
+			t.Fatalf("live relay sent duplicate response visibility: %#v", targetPlatform.getSent())
+		}
+	}
+	if got := targetAgent.EnvValue("CC_SESSION_KEY"); got != "feishu:chat-1:user-1" {
+		t.Fatalf("CC_SESSION_KEY = %q, want source session key", got)
+	}
+}
+
+func TestRelayManager_LiveIgnoresConfiguredRelayTimeout(t *testing.T) {
+	sourcePlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	targetPlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{sourcePlatform}, "", LangEnglish)
+	targetSession := newControllableSession("live-timeout-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession}, []Platform{targetPlatform}, "", LangEnglish)
+	rm := NewRelayManager("")
+	rm.SetTimeout(20 * time.Millisecond)
+	rm.Bind("feishu", "chat-1", map[string]string{"source": "s", "target": "t"})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := rm.Send(context.Background(), RelayRequest{
+			From: "source", To: "target", SessionKey: "feishu:chat-1:user", Message: "slow", Live: true,
+		})
+		done <- err
+	}()
+
+	time.Sleep(60 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("live relay returned before agent response: %v", err)
+	default:
+	}
+	targetSession.events <- Event{Type: EventResult, Content: "after timeout", Done: true}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("live relay error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("live relay did not finish after response")
+	}
+}
+
+func TestRelayManager_RelayWaitsForLiveRelaySession(t *testing.T) {
+	sourcePlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	targetPlatform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{sourcePlatform}, "", LangEnglish)
+	liveSession := newControllableSession("live-session")
+	plainSession := newControllableSession("plain-session")
+	var startsMu sync.Mutex
+	starts := 0
+	targetAgent := &controllableAgent{startSessionFn: func(context.Context, string) (AgentSession, error) {
+		startsMu.Lock()
+		defer startsMu.Unlock()
+		starts++
+		if starts == 1 {
+			return liveSession, nil
+		}
+		return plainSession, nil
+	}}
+	targetEngine := NewEngine("target", targetAgent, []Platform{targetPlatform}, "", LangEnglish)
+	rm := NewRelayManager("")
+	rm.SetTimeout(time.Second)
+	rm.Bind("feishu", "chat-1", map[string]string{"source": "s", "target": "t"})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	liveDone := make(chan error, 1)
+	go func() {
+		_, err := rm.Send(context.Background(), RelayRequest{
+			From: "source", To: "target", SessionKey: "feishu:chat-1:user", Message: "live", Live: true,
+		})
+		liveDone <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+
+	plainDone := make(chan error, 1)
+	go func() {
+		_, err := rm.Send(context.Background(), RelayRequest{
+			From: "source", To: "target", SessionKey: "feishu:chat-1:user", Message: "plain",
+		})
+		plainDone <- err
+	}()
+	select {
+	case err := <-plainDone:
+		t.Fatalf("plain relay ran while live relay held session: %v", err)
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	liveSession.events <- Event{Type: EventResult, Content: "live done", Done: true}
+	select {
+	case err := <-liveDone:
+		if err != nil {
+			t.Fatalf("live relay error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("live relay did not finish")
+	}
+
+	plainSession.events <- Event{Type: EventResult, Content: "plain done", Done: true}
+	select {
+	case err := <-plainDone:
+		if err != nil {
+			t.Fatalf("plain relay error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("plain relay did not start after live relay")
+	}
+}
+
+func TestHandleRelayLockTimeoutExplainsBusySession(t *testing.T) {
+	e := newTestEngine()
+	session := e.sessions.GetOrCreateActive("relay:source:feishu:chat-1")
+	lockGen, ok := session.TryLock()
+	if !ok {
+		t.Fatal("failed to occupy relay session")
+	}
+	defer session.Unlock(lockGen)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := e.HandleRelay(ctx, "source", "feishu:chat-1:user", "hello")
+	if err == nil || !strings.Contains(err.Error(), "occupied by another task") {
+		t.Fatalf("HandleRelay() error = %v, want busy-session explanation", err)
+	}
+}
+
+func TestHandleRelayLive_MultiWorkspaceUsesBoundWorkspace(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "relay-ws")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	platform := &relayWorkspacePlatform{
+		relayVisibilityPlatform: relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "mock"}},
+		names:                   map[string]string{"C42": "relay-ws"},
+	}
+	e := NewEngine("target", &sessionEnvRecordingAgent{session: newResultAgentSession("workspace response")}, []Platform{platform}, "", LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	normalized := normalizeWorkspacePath(wsDir)
+	ws := e.workspacePool.GetOrCreate(normalized)
+	ws.agent = &sessionEnvRecordingAgent{session: newResultAgentSession("workspace response")}
+	ws.sessions = NewSessionManager("")
+
+	resp, err := e.HandleRelayLive(context.Background(), "source", "mock:C42:U1", "hello")
+	if err != nil {
+		t.Fatalf("HandleRelayLive() error = %v", err)
+	}
+	if resp != "workspace response" {
+		t.Fatalf("response = %q, want workspace response", resp)
+	}
+	workspaceAgent := ws.agent.(*sessionEnvRecordingAgent)
+	if got := workspaceAgent.EnvValue("CC_SESSION_KEY"); got != "mock:C42:U1" {
+		t.Fatalf("workspace CC_SESSION_KEY = %q", got)
+	}
+	if got := e.sessions.ActiveSessionID("relay:source:mock:C42"); got != "" {
+		t.Fatalf("global relay session should be unused, got %q", got)
+	}
+}
+
+func TestHandleRelayLive_MultiWorkspaceRequiresWorkspaceBinding(t *testing.T) {
+	e := NewEngine("target", &stubAgent{}, nil, "", LangEnglish)
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"))
+
+	_, err := e.HandleRelayLive(context.Background(), "source", "mock:missing:user", "hello")
+	if err == nil || !strings.Contains(err.Error(), "no workspace binding") {
+		t.Fatalf("HandleRelayLive() error = %v, want missing workspace binding", err)
+	}
+}
+
+func TestStopRelayTurnsOnlyStopsMatchingChatIncludingWorkspacePrefix(t *testing.T) {
+	e := NewEngine("target", &stubAgent{}, nil, "", LangEnglish)
+	matching := newControllableSession("matching")
+	workspaceMatching := newControllableSession("workspace-matching")
+	otherChat := newControllableSession("other-chat")
+	e.interactiveMu.Lock()
+	e.interactiveStates["feishu:chat-1#relay:source"] = &interactiveState{agentSession: matching}
+	workspaceKey := "/tmp/workspace:feishu:chat-1#relay:other"
+	e.interactiveStates[workspaceKey] = &interactiveState{agentSession: workspaceMatching}
+	e.interactiveStates["feishu:chat-2#relay:source"] = &interactiveState{agentSession: otherChat}
+	e.interactiveMu.Unlock()
+
+	if got := e.stopRelayTurns("feishu", "chat-1"); got != 2 {
+		t.Fatalf("stopped = %d, want 2", got)
+	}
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	if e.interactiveStates["feishu:chat-1#relay:source"] != nil || e.interactiveStates[workspaceKey] != nil {
+		t.Fatal("matching relay states were not removed")
+	}
+	if e.interactiveStates["feishu:chat-2#relay:source"] == nil {
+		t.Fatal("relay state for another chat was stopped")
+	}
+}
+
+func TestHandleRelayLiveDistinguishesAgentFailureFromStop(t *testing.T) {
+	platform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	session := &relayErrorAfterSendSession{controllableAgentSession: newControllableSession("failed-live-session")}
+	e := NewEngine("target", &controllableAgent{nextSession: session}, []Platform{platform}, "", LangEnglish)
+	e.SetEventIdleTimeout(100 * time.Millisecond)
+
+	_, err := e.HandleRelayLive(context.Background(), "source", "feishu:chat-1:user", "hello")
+	if err == nil || !strings.Contains(err.Error(), "execution failed") {
+		t.Fatalf("HandleRelayLive() error = %v, want execution failure", err)
+	}
+	if strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("agent failure was misreported as stopped: %v", err)
+	}
+}
+
+type relayErrorAfterSendSession struct {
+	*controllableAgentSession
+}
+
+func (s *relayErrorAfterSendSession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.events <- Event{Type: EventError, Error: errors.New("upstream unavailable")}
+	return nil
+}
+
+func TestCmdStopStopsRelayTaskAfterOwnAndCronFallbacks(t *testing.T) {
+	platform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("target", &stubAgent{}, []Platform{platform}, "", LangEnglish)
+	session := newControllableSession("relay-stop-session")
+	e.interactiveMu.Lock()
+	e.interactiveStates["feishu:chat-1#relay:source"] = &interactiveState{agentSession: session}
+	e.interactiveMu.Unlock()
+
+	e.cmdStop(platform, &Message{SessionKey: "feishu:chat-1:user", ReplyCtx: "ctx"})
+	sent := platform.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgRelayExecutionStopped) {
+		t.Fatalf("stop response = %v, want relay stop message", sent)
+	}
+}
+
+type relayWorkspacePlatform struct {
+	relayVisibilityPlatform
+	names map[string]string
+}
+
+func (p *relayWorkspacePlatform) ResolveChannelName(channelID string) (string, error) {
+	name, ok := p.names[channelID]
+	if !ok {
+		return "", fmt.Errorf("unknown channel %s", channelID)
+	}
+	return name, nil
 }
 
 func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
