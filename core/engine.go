@@ -10664,7 +10664,7 @@ func (e *Engine) takeRelayStopped(key string) bool {
 	return stopped
 }
 
-// isWorkspacePrefixedCronKey reports whether key is "<workspaceDir>:<base>#cron:"
+// isWorkspacePrefixedKey reports whether key is prefixed by a workspace path
 // for the given "<base>#cron:" tail, and workspaceDir actually looks like a path.
 // Requiring a path separator keeps a chat key that merely ends with "base" (for
 // example base "user1" against "feishu:ch:user1#cron:x") from matching.
