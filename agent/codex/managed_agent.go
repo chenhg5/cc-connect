@@ -221,7 +221,11 @@ func (a *managedAgent) ListSessions(ctx context.Context) ([]core.AgentSessionInf
 		}
 		for _, thread := range page.Data {
 			if sameManagedCwd(cwd, thread.Cwd) && !managedSubagent(thread.Source) {
-				result = append(result, core.AgentSessionInfo{ID: thread.ID, Summary: thread.Preview, ModifiedAt: time.Unix(thread.UpdatedAt, 0)})
+				summary := strings.TrimSpace(thread.Name)
+				if summary == "" {
+					summary = thread.Preview
+				}
+				result = append(result, core.AgentSessionInfo{ID: thread.ID, Summary: summary, ModifiedAt: time.Unix(thread.UpdatedAt, 0)})
 			}
 		}
 		if page.NextCursor == nil || *page.NextCursor == "" {

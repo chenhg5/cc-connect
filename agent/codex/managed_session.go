@@ -26,6 +26,7 @@ type managedTurn struct {
 type managedThread struct {
 	ID                   string          `json:"id"`
 	Cwd                  string          `json:"cwd"`
+	Name                 string          `json:"name"`
 	Preview              string          `json:"preview"`
 	Source               json.RawMessage `json:"source"`
 	CanAcceptDirectInput *bool           `json:"canAcceptDirectInput"`
