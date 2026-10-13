@@ -98,10 +98,12 @@ func (p *interactivePlatform) UpdateCard(ctx context.Context, handle any, card *
 	return p.patchCardMessage(ctx, h.messageID, renderCard(card, h.sessionKey))
 }
 
-// renderCardMap converts a core.Card into the Feishu Interactive Card map
-// using the v1 format. Used both for message API (via renderCard) and
-// callback responses (CardActionTriggerResponse).
+// renderCardMap converts a core.Card into the Feishu Interactive Card map.
+// Used both for message API (via renderCard) and callback responses.
 func renderCardMap(card *core.Card, sessionKey string) map[string]any {
+	if card != nil && card.RichMarkdown {
+		return renderRichMarkdownCardMap(card, sessionKey)
+	}
 	result := map[string]any{
 		"config": map[string]any{
 			"wide_screen_mode": true,
@@ -269,6 +271,58 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	}
 
 	result["elements"] = elements
+	return result
+}
+
+// renderRichMarkdownCardMap uses schema 2.0 so inline code renders as code,
+// while preserving button callback values on permission cards.
+func renderRichMarkdownCardMap(card *core.Card, sessionKey string) map[string]any {
+	elements := make([]map[string]any, 0, len(card.Elements))
+	result := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"width_mode": "default", "update_multi": true},
+	}
+	if card.Header != nil && card.Header.Title != "" {
+		color := card.Header.Color
+		if color == "" {
+			color = "blue"
+		}
+		result["header"] = map[string]any{"title": plainText(card.Header.Title), "template": color}
+	}
+	for _, elem := range card.Elements {
+		switch e := elem.(type) {
+		case core.CardMarkdown:
+			content := e.Content
+			if e.Diff {
+				content = renderApprovalDiff(content)
+			}
+			elements = append(elements, map[string]any{"tag": "markdown", "content": sanitizeCardMarkdownForCard(content)})
+		case core.CardActions:
+			columns := make([]map[string]any, 0, len(e.Buttons))
+			for _, btn := range e.Buttons {
+				btnType := btn.Type
+				if btnType == "" {
+					btnType = "default"
+				}
+				value := map[string]string{"action": btn.Value}
+				if sessionKey != "" {
+					value["session_key"] = sessionKey
+				}
+				for key, val := range btn.Extra {
+					value[key] = val
+				}
+				button := map[string]any{"tag": "button", "text": plainText(btn.Text), "type": btnType, "value": value}
+				columns = append(columns, map[string]any{
+					"tag": "column", "width": "auto", "vertical_align": "center",
+					"elements": []map[string]any{button},
+				})
+			}
+			if len(columns) > 0 {
+				elements = append(elements, map[string]any{"tag": "column_set", "columns": columns})
+			}
+		}
+	}
+	result["body"] = map[string]any{"elements": elements}
 	return result
 }
 

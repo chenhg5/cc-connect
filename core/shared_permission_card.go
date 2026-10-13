@@ -67,7 +67,12 @@ func (e *Engine) sharedPermissionCardBody(pending *pendingPermission) string {
 	} else {
 		input = "`" + input + "`"
 	}
-	lines := []string{e.i18n.Tf(MsgSharedPermissionCardTool, pending.ToolName, input)}
+	lines := append([]string{e.i18n.Tf(MsgSharedPermissionCardTool, pending.ToolName, input)}, e.sharedPermissionCardDetails(pending)...)
+	return strings.Join(lines, "\n")
+}
+
+func (e *Engine) sharedPermissionCardDetails(pending *pendingPermission) []string {
+	var lines []string
 	if reason, _ := pending.ToolInput["reason"].(string); reason != "" && reason != pending.InputPreview {
 		lines = append(lines, e.i18n.Tf(MsgSharedApprovalReason, reason))
 	}
@@ -81,12 +86,25 @@ func (e *Engine) sharedPermissionCardBody(pending *pendingPermission) string {
 			}
 		}
 	}
-	return strings.Join(lines, "\n")
+	return lines
+}
+
+func (e *Engine) sharedPermissionCardBuilder(pending *pendingPermission) *CardBuilder {
+	b := NewCard().RichMarkdown()
+	preview := strings.TrimSpace(truncateIf(pending.InputPreview, e.display.ToolMaxLen))
+	if pending.ToolName == "Patch" && strings.Contains(preview, "@@ ") {
+		b.Markdown("**Patch**").Diff(preview)
+		if details := e.sharedPermissionCardDetails(pending); len(details) > 0 {
+			b.Markdown(strings.Join(details, "\n"))
+		}
+		return b
+	}
+	return b.Markdown(e.sharedPermissionCardBody(pending))
 }
 
 func (e *Engine) sharedResolvedPermissionCard(pending *pendingPermission, decision string) *Card {
 	if decision == "" {
-		return NewCard().Title(e.i18n.T(MsgSharedRequestResolved), "grey").Markdown(e.sharedPermissionCardBody(pending)).Build()
+		return e.sharedPermissionCardBuilder(pending).Title(e.i18n.T(MsgSharedRequestResolved), "grey").Build()
 	}
 	label, _ := e.sharedDecisionLabel(decision)
 	icon, color := "✅ ", "green"
@@ -95,7 +113,7 @@ func (e *Engine) sharedResolvedPermissionCard(pending *pendingPermission, decisi
 	} else if decision == "cancel" {
 		icon, color = "⏹ ", "grey"
 	}
-	return NewCard().Title(icon+label, color).Markdown(e.sharedPermissionCardBody(pending)).Build()
+	return e.sharedPermissionCardBuilder(pending).Title(icon+label, color).Build()
 }
 
 func (e *Engine) sendSharedPermissionCard(p Platform, reply any, pending *pendingPermission, card *Card) {
