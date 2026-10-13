@@ -131,6 +131,7 @@ type Platform struct {
 	allowChat                  string
 	groupOnly                  bool
 	groupReplyAll              bool
+	skipWhenMentionOthers      bool
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
@@ -367,6 +368,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowChat, _ := opts["allow_chat"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	skipWhenMentionOthers, _ := opts["skip_when_mention_others"].(bool)
 	// require_mention = false is equivalent to group_reply_all = true:
 	// both mean "respond to all group messages without needing an @mention".
 	if v, ok := opts["require_mention"].(bool); ok && !v {
@@ -486,6 +488,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		allowChat:                  allowChat,
 		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
+		skipWhenMentionOthers:      skipWhenMentionOthers,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
@@ -1759,6 +1762,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		"parent_id", stringValue(msg.ParentId),
 		"mentions", mentionCount,
 		"group_reply_all", p.groupReplyAll,
+		"skip_when_mention_others", p.skipWhenMentionOthers,
 		"thread_isolation", p.threadIsolation,
 	)
 
@@ -1769,6 +1773,16 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	filterActive := botOpenID != "" || p.IsGroupFilterDegraded()
 	botMentioned := botOpenID != "" && isBotMentioned(msg.Mentions, botOpenID)
 	atEveryone := p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all")
+
+	// When group_reply_all is enabled, optionally let another bot own messages
+	// that explicitly mention someone else. An empty botOpenID is deliberately
+	// fail-closed here: enabling this option while bot discovery is unavailable
+	// drops all mentioned group messages rather than letting this bot compete.
+	if shouldSkipMentionedOthers(chatType, p.groupReplyAll, p.skipWhenMentionOthers, len(msg.Mentions), botMentioned) {
+		slog.Debug(p.tag()+": skipping group message that mentions others only",
+			"chat_id", chatID, "message_id", messageID)
+		return nil
+	}
 
 	// With history sharing enabled, observe ordinary text/post messages only
 	// after the chat-level allow list has admitted the chat. Do this before the
@@ -1893,6 +1907,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx)
 
 	return nil
+}
+
+func shouldSkipMentionedOthers(chatType string, groupReplyAll, skipWhenMentionOthers bool, mentionCount int, botMentioned bool) bool {
+	return chatType == "group" && groupReplyAll && skipWhenMentionOthers && mentionCount > 0 && !botMentioned
 }
 
 func (p *Platform) replyUnauthorizedAccess(ctx context.Context, rctx replyContext) {
