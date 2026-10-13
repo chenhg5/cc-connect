@@ -17,6 +17,49 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func TestManagedListSessions_PrefersThreadNameOverPreview(t *testing.T) {
+	for _, tc := range []struct {
+		label    string
+		name     any
+		omitName bool
+		want     string
+	}{
+		{label: "named", name: "修复登录问题", want: "修复登录问题"},
+		{label: "trimmed", name: "  修复登录问题  ", want: "修复登录问题"},
+		{label: "empty", name: "", want: "First user message"},
+		{label: "whitespace", name: " \t\n", want: "First user message"},
+		{label: "null", name: nil, want: "First user message"},
+		{label: "missing", omitName: true, want: "First user message"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			cwd := t.TempDir()
+			socket := managedFixture(t, func(ws *websocket.Conn) {
+				fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+					if m.Method != "thread/list" {
+						t.Errorf("unexpected RPC method: %s", m.Method)
+						return nil, true
+					}
+					thread := map[string]any{"id": "thread-named", "cwd": cwd, "source": "vscode", "preview": "First user message", "updatedAt": 2000000000}
+					if !tc.omitName {
+						thread["name"] = tc.name
+					}
+					return map[string]any{"data": []any{thread}, "nextCursor": nil}, true
+				})
+			})
+			a := fixtureManagedAgent(t, socket, cwd, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			sessions, err := a.ListSessions(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sessions) != 1 || sessions[0].Summary != tc.want {
+				t.Fatalf("ListSessions() = %+v, want summary %q", sessions, tc.want)
+			}
+		})
+	}
+}
+
 func TestManagedBusyMessageModeConfigAndWorkspaceClone(t *testing.T) {
 	for _, mode := range []string{"queue", "steer"} {
 		a := fixtureManagedAgent(t, "/socket", t.TempDir(), map[string]any{"daemon_busy_message_mode": mode})
