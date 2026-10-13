@@ -269,6 +269,47 @@ func TestSessionCommands_NewAndSwitchRoundTrip(t *testing.T) {
 	_ = p
 }
 
+// The /list card button routes through executeCardAction rather than cmdSwitch.
+// Both must behave the same: switching back to a known agent session must not
+// wipe the recorded history, or /status and /history report zero messages
+// right after a successful switch.
+//
+// cmdSwitch documents this constraint at its SwitchToAgentSession call.
+func TestSessionCommands_CardSwitchPreservesHistory(t *testing.T) {
+	e, p, _, shared := newScopedEngine(t)
+	bindScopedTopic(e, "om_root_a", shared)
+
+	_, sessions := e.sessionContextForKey(topicKeyA)
+	if sessions == nil {
+		t.Fatal("expected a session manager")
+	}
+
+	// Build the state a /list card switch would encounter: a session with
+	// recorded history, then a second session that became active.
+	first := sessions.GetOrCreateActive(topicKeyA)
+	first.SetAgentSessionID("sess-a1", "channel-scope-agent")
+	first.AddHistory("user", "A1 第一句")
+	first.AddHistory("assistant", "A1 回答")
+	sessions.Save()
+
+	sessions.NewSession(topicKeyA, "a2")
+	second := sessions.GetOrCreateActive(topicKeyA)
+	second.SetAgentSessionID("sess-a2", "channel-scope-agent")
+	sessions.Save()
+
+	// "act:/switch 1" is what the /list card button sends.
+	e.executeCardAction("/switch", "1", topicKeyA)
+
+	active := sessions.GetOrCreateActive(topicKeyA)
+	if active.GetAgentSessionID() != "sess-a1" {
+		t.Fatalf("after card /switch active session = %q, want sess-a1", active.GetAgentSessionID())
+	}
+	if hist := active.GetHistory(10); len(hist) == 0 || !strings.Contains(hist[0].Content, "A1") {
+		t.Fatalf("history after card /switch = %v, want A1 content preserved", hist)
+	}
+	_ = p
+}
+
 // Two topics sharing one directory must not see each other's sessions.
 func TestSessionCommands_TwoTopicsListOwnSessions(t *testing.T) {
 	e, _, _, shared := newScopedEngine(t)

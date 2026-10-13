@@ -12877,8 +12877,12 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		e.cleanupInteractiveState(interactiveKey)
-		session := sessions.SwitchToAgentSession(sessionKey, matched.ID, agent.Name(), matched.Summary)
-		session.ClearHistory()
+		// Same constraint as cmdSwitch: switching to a known agent session
+		// returns the existing Session, whose History still reflects the
+		// original conversation. Clearing it makes /status and /history report
+		// zero messages right after a successful card switch. A fresh Session
+		// already has nil History, so leaving it alone is a no-op there.
+		sessions.SwitchToAgentSession(sessionKey, matched.ID, agent.Name(), matched.Summary)
 
 	case "/dir":
 		fields := strings.Fields(args)
