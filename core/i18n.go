@@ -822,6 +822,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "⚠️ **承認リクエスト**\n\nAgent が **%s** の使用を要求しています：\n\n```\n%s\n```",
 		LangSpanish:            "⚠️ **Solicitud de permiso**\n\nEl agente solicita usar **%s**:\n\n```\n%s\n```",
 	},
+	MsgSharedPermissionCardTool: {
+		LangEnglish:            "**%s**: %s",
+		LangChinese:            "**%s**：%s",
+		LangTraditionalChinese: "**%s**：%s",
+		LangJapanese:           "**%s**: %s",
+		LangSpanish:            "**%s**: %s",
+	},
 	MsgSharedUnsupported: {
 		LangEnglish:            "This session does not support shared runtime controls.",
 		LangChinese:            "此会话不支持共享运行时操作。",
@@ -4973,6 +4980,7 @@ const (
 	MsgSharedNetworkAllow         MsgKey = "shared_network_allow"
 	MsgSharedNetworkDeny          MsgKey = "shared_network_deny"
 	MsgSharedPermissionPrompt     MsgKey = "shared_permissionprompt"
+	MsgSharedPermissionCardTool   MsgKey = "shared_permission_card_tool"
 	MsgSharedUnsupported          MsgKey = "shared_unsupported"
 	MsgSharedBusy                 MsgKey = "shared_busy"
 	MsgSharedSteerTextOnly        MsgKey = "shared_steer_text_only"
