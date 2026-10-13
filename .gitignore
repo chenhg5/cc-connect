@@ -153,3 +153,4 @@ credentials/
 
 .codex
 cc-connect-new
+core/test_ws_*.json

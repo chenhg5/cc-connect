@@ -176,9 +176,14 @@ func TestGateContextAndTurnReport(t *testing.T) {
 	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "修龙娘") || !strings.Contains(c, "im-bridge.md") {
 		t.Fatalf("after compaction:\n%s", c)
 	}
-	// The summary changed: only the new entry goes out.
-	summaryText = "## 正在做\n修龙娘\n## 已完成\n修好 gate"
-	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "修好 gate") || strings.Contains(c, "修龙娘") || !strings.Contains(c, "## 已完成") {
+	// The summary changed: only the new entry goes out, plus what was removed.
+	summaryText = "## 正在做\n修龙娘\n## 已完成\n修好 gate\n修好补拉\n修好卡死"
+	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "总结已大改") {
+		t.Fatalf("mostly new summary should be sent whole:\n%s", c)
+	}
+	summaryText = "## 正在做\n无\n## 已完成\n修好 gate\n修好补拉\n修好卡死\n修龙娘"
+	c = e.turnContext(sess, "discord:c1", "x")
+	if !strings.Contains(c, "## 已完成\n修龙娘") || !strings.Contains(c, "已移除") || !strings.Contains(c, "正在做：修龙娘") || strings.Contains(c, "修好 gate") {
 		t.Fatalf("summary delta:\n%s", c)
 	}
 	// --resume forked a new id: same conversation, nothing resent.

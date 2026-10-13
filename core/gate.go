@@ -411,9 +411,15 @@ func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 		}
 		lines := summaryLines(summary)
 		if t.Summary {
-			// The context has an earlier version: send only the new entries.
-			summary = summaryDelta(t.SummaryLines, lines)
-			summaryHead = "（本频道进展总结有更新，下面是新增或改动的条目）\n"
+			// The context has an earlier version: send what changed, or the
+			// whole summary when most of it did.
+			delta, full := summaryDelta(t.SummaryLines, lines)
+			if full {
+				summaryHead = "（本频道进展总结已大改，以这一版为准，替换你之前看到的版本）\n"
+			} else {
+				summary = delta
+				summaryHead = "（本频道进展总结有变化：下面是新增或改动的条目，以及已移除的条目）\n"
+			}
 		}
 		t.Summary, t.SummaryLines = true, lines
 	})
@@ -463,30 +469,65 @@ func summaryLines(summary string) []string {
 	return out
 }
 
-// summaryDelta returns the entries of cur not in prev, each under its "## "
-// section heading ("" when nothing is new).
-func summaryDelta(prev, cur []string) string {
-	seen := make(map[string]bool, len(prev))
-	for _, l := range prev {
-		seen[l] = true
+// summaryDelta returns what changed from prev to cur: entries new in their
+// section (under its "## " heading) and entries that are gone, matched by
+// section + exact text. full is true when so much changed that the whole
+// summary is cheaper to read than a delta ("" when nothing changed).
+func summaryDelta(prev, cur []string) (delta string, full bool) {
+	key := func(lines []string) ([]string, map[string]bool) {
+		var keys []string
+		set := map[string]bool{}
+		heading := ""
+		for _, l := range lines {
+			if strings.HasPrefix(l, "#") {
+				heading = l
+				continue
+			}
+			k := heading + "\x00" + l
+			keys = append(keys, k)
+			set[k] = true
+		}
+		return keys, set
 	}
+	prevKeys, prevSet := key(prev)
+	curKeys, curSet := key(cur)
 	var b strings.Builder
-	heading, headingDone := "", false
-	for _, l := range cur {
-		if strings.HasPrefix(l, "#") {
-			heading, headingDone = l, false
+	changed, lastHeading := 0, ""
+	for _, k := range curKeys {
+		if prevSet[k] {
 			continue
 		}
-		if seen[l] {
-			continue
-		}
-		if heading != "" && !headingDone {
-			b.WriteString(heading + "\n")
-			headingDone = true
+		changed++
+		h, l, _ := strings.Cut(k, "\x00")
+		if h != lastHeading && h != "" {
+			b.WriteString(h + "\n")
+			lastHeading = h
 		}
 		b.WriteString(l + "\n")
 	}
-	return strings.TrimRight(b.String(), "\n")
+	var gone []string
+	for _, k := range prevKeys {
+		if !curSet[k] {
+			h, l, _ := strings.Cut(k, "\x00")
+			if strings.TrimSpace(strings.TrimLeft(l, "-* ")) == "无" {
+				continue
+			}
+			gone = append(gone, strings.TrimPrefix(h, "## ")+"："+strings.TrimLeft(l, "-* "))
+		}
+	}
+	if len(gone) > 0 {
+		b.WriteString("已移除（做完、取消或挪到别处）：\n")
+		for _, g := range gone {
+			b.WriteString("- " + g + "\n")
+		}
+	}
+	if changed+len(gone) == 0 {
+		return "", false
+	}
+	if 2*changed > len(curKeys) {
+		return "", true
+	}
+	return strings.TrimRight(b.String(), "\n"), false
 }
 
 // teamBlock returns the teammate status when it changed since the agent's
