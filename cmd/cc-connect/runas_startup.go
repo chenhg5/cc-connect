@@ -40,17 +40,21 @@ func runRunAsUserStartupChecks(ctx context.Context, cfg *config.Config) error {
 	}
 	var pendingProjects []pending
 	var allUsers []string
-	for _, proj := range cfg.Projects {
+	for _, proj := range cfg.RuntimeProjects() {
 		if proj.RunAsUser == "" {
 			continue
 		}
 		allUsers = append(allUsers, proj.RunAsUser)
 	}
-	for _, proj := range cfg.Projects {
+	for _, proj := range cfg.RuntimeProjects() {
 		if proj.RunAsUser == "" {
 			continue
 		}
-		wd, _ := proj.Agent.Options["work_dir"].(string)
+		effective, err := cfg.EffectiveProject(proj)
+		if err != nil {
+			return err
+		}
+		wd, _ := effective.Agent.Options["work_dir"].(string)
 		pendingProjects = append(pendingProjects, pending{
 			project:    proj.Name,
 			runAsUser:  proj.RunAsUser,

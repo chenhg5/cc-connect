@@ -9,8 +9,11 @@ import (
 // platform-specific cards (Feishu Interactive Card, Telegram message, etc.)
 // or degraded to plain text for platforms without card support.
 type Card struct {
-	Header   *CardHeader
-	Elements []CardElement
+	DecisionToken string // opaque native question response reference; no command interpolation
+	Header        *CardHeader
+	Elements      []CardElement
+	Form          *CardForm
+	Reusable      bool // navigation panel whose pages replace the same message
 }
 
 // CardHeader is the optional colored title bar of a card.
@@ -232,6 +235,12 @@ func (c *Card) RenderText() string {
 		sb.WriteString("**")
 		sb.WriteString(c.Header.Title)
 		sb.WriteString("**\n\n")
+	}
+	if c.Form != nil {
+		for _, field := range c.Form.Fields {
+			fmt.Fprintf(&sb, "%s: %s\n", field.Label, strings.Join(field.Defaults, ", "))
+		}
+		sb.WriteString("\n")
 	}
 
 	for _, elem := range c.Elements {

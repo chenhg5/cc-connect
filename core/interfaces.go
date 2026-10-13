@@ -310,6 +310,11 @@ type CardNavigable interface {
 	SetCardNavigationHandler(h CardNavigationHandler)
 }
 
+// CardLocalizer lets callback replies use the engine's current UI language.
+type CardLocalizer interface {
+	SetCardLanguageProvider(func() Language)
+}
+
 // CardRefresher is an optional interface for platforms that can update a
 // previously rendered card in-place after the original callback has returned.
 // This is used when async operations (e.g. delete-mode deletion) need to
@@ -681,6 +686,7 @@ type CardStatus string
 const (
 	CardStatusThinking CardStatus = "thinking" // grey
 	CardStatusWorking  CardStatus = "working"  // blue
+	CardStatusStopped  CardStatus = "stopped"  // grey
 	CardStatusDone     CardStatus = "done"     // green
 	CardStatusError    CardStatus = "error"    // red
 )
@@ -689,4 +695,13 @@ const (
 // updating the visual status of a preview card header.
 type PreviewStatusUpdater interface {
 	SetPreviewStatus(previewHandle any, status CardStatus)
+}
+
+// RuntimeConfigurable discovers session-advertised settings and applies a
+// validated selection before the UI reports success. Categories are model,
+// thought_level and mode. SetRuntimeConfig preserves the last acknowledged
+// preferences on failure. These preferences can be applied to resumed sessions.
+type RuntimeConfigurable interface {
+	PrepareRuntimeConfig(context.Context) error
+	SetRuntimeConfig(ctx context.Context, category, value string) error
 }

@@ -23,6 +23,15 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
+	p.rememberCardChatType(rc)
+	if rc.cardUpdate != nil {
+		card = p.cardWithReturn(card, rc.cardUpdate.command)
+		if err := p.refreshCardTarget(ctx, rc.cardUpdate, rc.sessionKey, card); err == nil {
+			return nil
+		} else {
+			slog.Warn(p.tag()+": card update failed; sending replacement", "error", err)
+		}
+	}
 
 	cardJSON := renderCard(card, rc.sessionKey)
 	if !p.shouldUseThreadOrReplyAPI(rc) {
@@ -44,7 +53,7 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 		return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
 	}
 
-	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
+	if rc.cardUpdate != nil || p.shouldReplyInThread(rc) {
 		return p.ReplyCard(ctx, rctx, card)
 	}
 
@@ -64,7 +73,9 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 		return fmt.Errorf("%s: no tracked card messageID for session %q", p.tag(), sessionKey)
 	}
 
-	cardJSON := renderCard(card, sessionKey)
+	panel := *card
+	panel.Reusable = true
+	cardJSON := renderCard(&panel, sessionKey)
 	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(msgID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
@@ -85,10 +96,21 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 	})
 }
 
-// renderCardMap converts a core.Card into the Feishu Interactive Card map
-// using the v1 format. Used both for message API (via renderCard) and
-// callback responses (CardActionTriggerResponse).
+// Reusable panels and forms share schema 2.0 throughout navigation: Feishu
+// rejects downgrading a message from schema 2.0 back to 1.0 (error 200830).
+// Keep standalone legacy cards unchanged.
 func renderCardMap(card *core.Card, sessionKey string) map[string]any {
+	if card != nil && card.Form != nil {
+		return renderFormCard(card, sessionKey)
+	}
+	result := renderLegacyCardMap(card, sessionKey)
+	if card != nil && card.Reusable {
+		return upgradePanelCard(result)
+	}
+	return result
+}
+
+func renderLegacyCardMap(card *core.Card, sessionKey string) map[string]any {
 	result := map[string]any{
 		"config": map[string]any{
 			"wide_screen_mode": true,
@@ -96,6 +118,10 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	}
 	if card == nil {
 		return result
+	}
+	if card.Reusable {
+		result["config"].(map[string]any)["update_multi"] = true
+		result["config"].(map[string]any)["enable_forward"] = false
 	}
 
 	if card.Header != nil && card.Header.Title != "" {
@@ -132,6 +158,9 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 					btnType = "default"
 				}
 				valMap := map[string]string{"action": btn.Value}
+				if card.Reusable {
+					valMap["reuse_card"] = "true"
+				}
 				if sessionKey != "" {
 					valMap["session_key"] = sessionKey
 				}
@@ -183,6 +212,9 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 				btnType = "default"
 			}
 			valMap := map[string]string{"action": e.BtnValue}
+			if card.Reusable {
+				valMap["reuse_card"] = "true"
+			}
 			if sessionKey != "" {
 				valMap["session_key"] = sessionKey
 			}
@@ -233,8 +265,12 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 				"placeholder": plainText(e.Placeholder),
 				"options":     options,
 			}
-			if sessionKey != "" {
-				selectElem["value"] = map[string]string{"session_key": sessionKey}
+			if sessionKey != "" || card.Reusable {
+				value := map[string]string{"session_key": sessionKey}
+				if card.Reusable {
+					value["reuse_card"] = "true"
+				}
+				selectElem["value"] = value
 			}
 			if e.InitValue != "" {
 				selectElem["initial_option"] = e.InitValue
@@ -363,7 +399,7 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 			},
 		},
 	}
-	if cancelText != "" {
+	if cancelText != "" && !card.Reusable {
 		buttonColumns = append(buttonColumns, map[string]any{
 			"tag":            "column",
 			"width":          "auto",
@@ -390,6 +426,14 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 		"name":     "delete_mode_form",
 		"elements": formElements,
 	})
+	if cancelText != "" && card.Reusable {
+		// Schema 2.0 form buttons must submit/reset. Cancel navigates away,
+		// so keep it outside the form, like other panel Back buttons.
+		elements = append(elements, map[string]any{
+			"tag": "button", "text": plainText(cancelText), "type": "default",
+			"value": map[string]string{"action": "act:/delete-mode cancel"},
+		})
+	}
 
 	for _, row := range navRows {
 		actions := make([]map[string]any, 0, len(row.Buttons))

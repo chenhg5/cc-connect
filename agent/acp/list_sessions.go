@@ -44,6 +44,7 @@ type acpInitializeResult struct {
 	AgentCapabilities struct {
 		LoadSession         bool `json:"loadSession"`
 		SessionCapabilities struct {
+			AdditionalDirectories json.RawMessage `json:"additionalDirectories,omitempty"`
 			// ACP advertises capabilities as objects (possibly empty);
 			// treat "field present" as "supported" regardless of contents.
 			List json.RawMessage `json:"list,omitempty"`

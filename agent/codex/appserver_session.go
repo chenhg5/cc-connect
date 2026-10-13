@@ -41,18 +41,20 @@ type initResponse struct {
 }
 
 type threadStartResponse struct {
-	Cwd             string  `json:"cwd"`
-	Model           string  `json:"model"`
-	ReasoningEffort *string `json:"reasoningEffort"`
+	Sandbox         json.RawMessage `json:"sandbox"`
+	Cwd             string          `json:"cwd"`
+	Model           string          `json:"model"`
+	ReasoningEffort *string         `json:"reasoningEffort"`
 	Thread          struct {
 		ID string `json:"id"`
 	} `json:"thread"`
 }
 
 type threadResumeResponse struct {
-	Cwd             string  `json:"cwd"`
-	Model           string  `json:"model"`
-	ReasoningEffort *string `json:"reasoningEffort"`
+	Sandbox         json.RawMessage `json:"sandbox"`
+	Cwd             string          `json:"cwd"`
+	Model           string          `json:"model"`
+	ReasoningEffort *string         `json:"reasoningEffort"`
 	Thread          struct {
 		ID string `json:"id"`
 	} `json:"thread"`
@@ -141,6 +143,8 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
+	sandboxNetwork *bool
+	additionalDirs []string
 	cliBin         string
 	cliExtraArgs   []string
 	url            string
@@ -180,10 +184,14 @@ type appServerSession struct {
 
 	stateMu      sync.Mutex
 	pendingMsgs  []string
+	publicMsgs   map[string]*publicMessage
+	finalAnswer  string
 	currentTurn  string
+	lastTurnID   string
 	preambleSent bool
 
 	runtimeMu sync.RWMutex
+	sandbox   json.RawMessage
 	usage     *core.UsageReport
 	context   *core.ContextUsage
 }
@@ -193,10 +201,11 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, sandboxNetwork *bool, additionalDirs ...string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		cliBin:           cliBin,
+		additionalDirs:   append([]string(nil), additionalDirs...),
 		cliExtraArgs:     append([]string(nil), cliExtraArgs...),
 		url:              url,
 		workDir:          workDir,
@@ -213,7 +222,15 @@ func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []stri
 		cancel:           cancel,
 		pending:          make(map[int64]chan rpcResponseEnvelope),
 		pendingApprovals: make(map[string]chan core.PermissionResult),
-		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
+		// A resumed thread can predate the current role, roster or delegation
+		// tools. Send the current configuration once per runtime connection.
+	}
+	if additionalDirs != nil {
+		s.additionalDirs = append([]string{}, additionalDirs...)
+	}
+	if sandboxNetwork != nil {
+		allowed := *sandboxNetwork
+		s.sandboxNetwork = &allowed
 	}
 	s.alive.Store(true)
 
@@ -332,7 +349,6 @@ func (s *appServerSession) initialize() error {
 			"experimentalApi": true,
 			"optOutNotificationMethods": []string{
 				"command/exec/outputDelta",
-				"item/agentMessage/delta",
 				"item/plan/delta",
 				"item/fileChange/outputDelta",
 				"item/reasoning/summaryTextDelta",
@@ -365,6 +381,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 			return fmt.Errorf("codex app-server resume returned empty thread id")
 		}
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
+		s.applyThreadSandbox(resp.Sandbox)
 		s.threadID.Store(resp.Thread.ID)
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
 		return nil
@@ -378,6 +395,7 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		return fmt.Errorf("codex app-server start returned empty thread id")
 	}
 	s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
+	s.applyThreadSandbox(resp.Sandbox)
 	s.threadID.Store(resp.Thread.ID)
 	slog.Info("codex app-server thread started", "thread_id", resp.Thread.ID)
 	return nil
@@ -387,6 +405,17 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
+		"cwd":                    s.workDir,
+	}
+	config := map[string]any{}
+	if s.additionalDirs != nil {
+		config["sandbox_workspace_write.writable_roots"] = append([]string{}, s.additionalDirs...)
+	}
+	if s.sandboxNetwork != nil {
+		config["sandbox_workspace_write.network_access"] = *s.sandboxNetwork
+	}
+	if len(config) > 0 {
+		params["config"] = config
 	}
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
@@ -421,6 +450,24 @@ func (s *appServerSession) applyThreadRuntimeState(workDir, model string, effort
 		s.model = m
 	}
 	s.effort = normalizeRuntimeReasoningEffort(stringValue(effort))
+}
+
+// A restored turn can retain an older policy even after thread/resume resolves
+// updated config. Send the server-confirmed policy on each turn, preserving its
+// complete read/write/network restrictions instead of inventing broader access.
+func (s *appServerSession) applyThreadSandbox(policy json.RawMessage) {
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	s.sandbox = append(json.RawMessage(nil), policy...)
+}
+
+func (s *appServerSession) threadSandbox() json.RawMessage {
+	s.runtimeMu.RLock()
+	defer s.runtimeMu.RUnlock()
+	if len(s.sandbox) == 0 || string(s.sandbox) == "null" {
+		return nil // Older servers can omit this field; retain their defaults.
+	}
+	return append(json.RawMessage(nil), s.sandbox...)
 }
 
 func (s *appServerSession) refreshUsage(ctx context.Context) error {
@@ -524,6 +571,9 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	if approval, _ := appServerModeSettings(s.mode); approval != "" {
 		params["approvalPolicy"] = approval
 	}
+	if sandbox := s.threadSandbox(); sandbox != nil {
+		params["sandboxPolicy"] = sandbox
+	}
 
 	var resp turnStartResponse
 	if err := s.request("turn/start", params, &resp); err != nil {
@@ -534,8 +584,7 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	}
 
 	s.stateMu.Lock()
-	s.currentTurn = resp.Turn.ID
-	s.pendingMsgs = s.pendingMsgs[:0]
+	s.beginTurnLocked(resp.Turn.ID)
 	s.stateMu.Unlock()
 
 	return nil
@@ -637,9 +686,10 @@ func (s *appServerSession) handleApprovalRequest(rawID json.RawMessage, method s
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
+	s.flushPendingProgress()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
+		ExpiresAt:    time.Now().Add(5 * time.Minute),
 		RequestID:    requestID,
 		ToolName:     toolName,
 		ToolInput:    toolInput,
@@ -684,9 +734,10 @@ func (s *appServerSession) handlePermissionsApproval(rawID json.RawMessage, para
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
+	s.flushPendingProgress()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
+		ExpiresAt:    time.Now().Add(5 * time.Minute),
 		RequestID:    requestID,
 		ToolName:     "Permissions",
 		ToolInput:    appServerJSON(params),
@@ -752,9 +803,10 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
+	s.flushPendingProgress()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
+		ExpiresAt:    time.Now().Add(5 * time.Minute),
 		RequestID:    requestID,
 		ToolName:     "AskUserQuestion",
 		ToolInput:    appServerJSON(rawInput),
@@ -1135,10 +1187,34 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
 			s.stateMu.Lock()
-			s.currentTurn = notif.Turn.ID
-			s.pendingMsgs = s.pendingMsgs[:0]
+			s.beginTurnLocked(notif.Turn.ID)
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
+		}
+
+	case "item/agentMessage/delta":
+		var notif struct {
+			TurnID string `json:"turnId"`
+			ItemID string `json:"itemId"`
+			Delta  string `json:"delta"`
+		}
+		if json.Unmarshal(paramsRaw, &notif) == nil {
+			s.handlePublicDelta(notif.TurnID, notif.ItemID, notif.Delta)
+		}
+
+	case "item/commandExecution/outputDelta":
+		var notif struct {
+			TurnID string `json:"turnId"`
+			ItemID string `json:"itemId"`
+			Delta  string `json:"delta"`
+		}
+		if json.Unmarshal(paramsRaw, &notif) == nil && notif.Delta != "" {
+			s.stateMu.Lock()
+			active := s.currentTurn != "" && (notif.TurnID == "" || notif.TurnID == s.currentTurn)
+			s.stateMu.Unlock()
+			if active {
+				s.emit(core.Event{Type: core.EventToolResult, ToolID: notif.ItemID, ToolName: "Bash", ToolResult: notif.Delta, ToolStatus: "in_progress", ToolResultDelta: true})
+			}
 		}
 
 	case "item/started":
@@ -1204,43 +1280,51 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 
 func (s *appServerSession) handleItemStarted(item map[string]any) {
 	itemType, _ := item["type"].(string)
+	toolID, _ := item["id"].(string)
 	if itemType == "" {
 		return
 	}
 
 	switch itemType {
-	case "agentMessage", "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction":
+	case "agentMessage":
+		s.startPublicMessage(item)
+		return
+	case "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction":
 		return
 	}
 
-	s.flushPendingAsThinking()
+	s.flushPendingProgress()
+	s.stateMu.Lock()
+	s.finalAnswer = ""
+	s.stateMu.Unlock()
 
 	switch itemType {
 	case "commandExecution":
 		command, _ := item["command"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: command})
+		s.emit(core.Event{Type: core.EventToolUse, ToolID: toolID, ToolName: "Bash", ToolInput: command})
 
 	case "mcpToolCall":
 		server, _ := item["server"].(string)
 		tool, _ := item["tool"].(string)
 		name := strings.Trim(strings.Join([]string{server, tool}, ":"), ":")
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "MCP", ToolInput: name + "\n" + appServerJSON(item["arguments"])})
+		s.emit(core.Event{Type: core.EventToolUse, ToolID: toolID, ToolName: "MCP", ToolInput: name + "\n" + appServerJSON(item["arguments"])})
 
 	case "webSearch":
 		query, _ := item["query"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "WebSearch", ToolInput: query})
+		s.emit(core.Event{Type: core.EventToolUse, ToolID: toolID, ToolName: "WebSearch", ToolInput: query})
 
 	case "dynamicToolCall":
 		tool, _ := item["tool"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
+		s.emit(core.Event{Type: core.EventToolUse, ToolID: toolID, ToolName: tool, ToolInput: appServerJSON(item["arguments"])})
 
 	case "fileChange":
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
+		s.emit(core.Event{Type: core.EventToolUse, ToolID: toolID, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
 	}
 }
 
 func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	itemType, _ := item["type"].(string)
+	toolID, _ := item["id"].(string)
 	if itemType == "" {
 		return
 	}
@@ -1253,17 +1337,16 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		}
 
 	case "agentMessage":
-		text, _ := item["text"].(string)
-		if strings.TrimSpace(text) != "" {
-			s.stateMu.Lock()
-			s.pendingMsgs = append(s.pendingMsgs, text)
-			s.stateMu.Unlock()
-		}
+		s.completePublicMessage(item)
 
+	case "fileChange":
+		status, _ := item["status"].(string)
+		success := appServerToolSuccess(status, nil)
+		s.emit(core.Event{Type: core.EventToolResult, ToolID: toolID, ToolName: "Patch", ToolResult: appServerJSON(item["changes"]), ToolStatus: status, ToolSuccess: &success})
 	case "commandExecution":
 		command, _ := item["command"].(string)
 		status, _ := item["status"].(string)
-		output, _ := item["aggregatedOutput"].(string)
+		output, hasOutput := item["aggregatedOutput"].(string)
 		exitCode, hasExitCode := toInt(item["exitCode"])
 		var exitCodePtr *int
 		if hasExitCode {
@@ -1271,13 +1354,14 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		}
 		success := appServerToolSuccess(status, exitCodePtr)
 		s.emit(core.Event{
-			Type:         core.EventToolResult,
-			ToolName:     "Bash",
-			ToolInput:    command,
-			ToolResult:   truncate(strings.TrimSpace(output), 500),
-			ToolStatus:   strings.TrimSpace(status),
-			ToolExitCode: exitCodePtr,
-			ToolSuccess:  &success,
+			Type: core.EventToolResult, ToolID: toolID,
+			ToolName:          "Bash",
+			ToolInput:         command,
+			ToolResult:        output,
+			ToolStatus:        strings.TrimSpace(status),
+			ToolExitCode:      exitCodePtr,
+			ToolSuccess:       &success,
+			ToolResultPresent: hasOutput,
 		})
 
 	case "mcpToolCall":
@@ -1289,9 +1373,9 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		}
 		success := appServerToolSuccess(status, nil)
 		s.emit(core.Event{
-			Type:        core.EventToolResult,
+			Type: core.EventToolResult, ToolID: toolID,
 			ToolName:    tool,
-			ToolResult:  truncate(strings.TrimSpace(result), 500),
+			ToolResult:  result,
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
 		})
@@ -1299,9 +1383,9 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	case "webSearch":
 		query, _ := item["query"].(string)
 		s.emit(core.Event{
-			Type:       core.EventToolResult,
+			Type: core.EventToolResult, ToolID: toolID,
 			ToolName:   "WebSearch",
-			ToolResult: truncate(strings.TrimSpace(query), 500),
+			ToolResult: query,
 		})
 
 	case "dynamicToolCall":
@@ -1310,9 +1394,9 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		result := appServerDynamicToolText(item["contentItems"])
 		success := appServerToolSuccess(status, nil)
 		s.emit(core.Event{
-			Type:        core.EventToolResult,
+			Type: core.EventToolResult, ToolID: toolID,
 			ToolName:    tool,
-			ToolResult:  truncate(strings.TrimSpace(result), 500),
+			ToolResult:  result,
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
 		})
@@ -1556,9 +1640,10 @@ func (s *appServerSession) completeTurn() {
 		return
 	}
 	s.currentTurn = ""
+	answer := s.finalAnswer
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
-	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+	s.emit(core.Event{Type: core.EventResult, Content: answer, SessionID: s.CurrentSessionID(), Done: true})
 }
 
 func (s *appServerSession) failTurn(err error) {
@@ -1569,11 +1654,13 @@ func (s *appServerSession) failTurn(err error) {
 	}
 	s.currentTurn = ""
 	s.pendingMsgs = s.pendingMsgs[:0]
+	s.publicMsgs = nil
+	s.finalAnswer = ""
 	s.stateMu.Unlock()
 	s.emitError(err)
 }
 
-func (s *appServerSession) flushPendingAsThinking() {
+func (s *appServerSession) flushPendingProgress() {
 	s.stateMu.Lock()
 	msgs := append([]string(nil), s.pendingMsgs...)
 	s.pendingMsgs = s.pendingMsgs[:0]
@@ -1581,7 +1668,7 @@ func (s *appServerSession) flushPendingAsThinking() {
 
 	for _, text := range msgs {
 		if strings.TrimSpace(text) != "" {
-			s.emit(core.Event{Type: core.EventThinking, Content: text})
+			s.emit(core.Event{Type: core.EventProgress, Content: text})
 		}
 	}
 }
@@ -1600,10 +1687,13 @@ func (s *appServerSession) flushPendingAsText() {
 }
 
 func (s *appServerSession) emit(event core.Event) {
+	var done <-chan struct{}
+	if s.ctx != nil {
+		done = s.ctx.Done()
+	}
 	select {
 	case s.events <- event:
-	default:
-		slog.Warn("codex appserver: event channel full, dropping event", "type", event.Type)
+	case <-done:
 	}
 }
 

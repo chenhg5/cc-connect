@@ -34,6 +34,9 @@ func init() {
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
 	workDir         string
+	additionalDirs  []string
+	sandboxRoots    []string
+	sandboxNetwork  *bool
 	model           string
 	reasoningEffort string
 	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
@@ -94,8 +97,18 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
-	return &Agent{
+	additional, err := core.ProjectAdditionalDirectoriesOption(opts)
+	if err != nil {
+		return nil, err
+	}
+	sandboxRoots, sandboxNetwork, err := sandboxAccessOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	a := &Agent{
 		workDir:         workDir,
+		sandboxRoots:    sandboxRoots,
+		sandboxNetwork:  sandboxNetwork,
 		model:           model,
 		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
 		mode:            mode,
@@ -108,7 +121,13 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliExtraArgs:    cliExtraArgs,
 		configEnv:       configEnv,
 		activeIdx:       -1,
-	}, nil
+	}
+	if additional != nil {
+		if err := a.ConfigureProjectDirectories(workDir, additional); err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
 }
 
 func normalizeBackend(raw string) string {
@@ -497,7 +516,16 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	systemPrompt := a.systemPrompt
 	appendPrompt := a.appendPrompt
 	cliBin := a.cmd
-	cliExtraArgs := a.cliExtraArgs
+	cliExtraArgs := append([]string(nil), a.cliExtraArgs...)
+	additionalDirs := append([]string(nil), a.additionalDirs...)
+	if a.additionalDirs != nil {
+		additionalDirs = append([]string{}, a.additionalDirs...)
+	}
+	additionalDirs = mergeSandboxRoots(additionalDirs, a.sandboxRoots)
+	sandboxNetwork := a.sandboxNetwork
+	if a.sandboxNetwork != nil {
+		cliExtraArgs = append(cliExtraArgs, "-c", fmt.Sprintf("sandbox_workspace_write.network_access=%t", *a.sandboxNetwork))
+	}
 	workDir := a.workDir
 	// Order matters for MergeEnv override semantics (later wins):
 	//   1. configEnv — static env from [projects.agent.options.env]
@@ -526,13 +554,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt, sandboxNetwork, additionalDirs...)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
+	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt, additionalDirs...)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -585,6 +613,18 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 		"mode":    a.mode,
 		"backend": a.backend,
 	}
+	if a.sandboxRoots != nil {
+		opts["sandbox_writable_roots"] = append([]string{}, a.sandboxRoots...)
+	}
+	if a.sandboxNetwork != nil {
+		opts["sandbox_network_access"] = *a.sandboxNetwork
+	}
+	if a.systemPrompt != "" {
+		opts["system_prompt"] = a.systemPrompt
+	}
+	if a.appendPrompt != "" {
+		opts["append_system_prompt"] = a.appendPrompt
+	}
 	if a.cmd != "" {
 		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)
 	}
@@ -599,6 +639,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome
+	}
+	if a.additionalDirs != nil {
+		opts["additional_dirs"] = append([]string{}, a.additionalDirs...)
 	}
 	return opts
 }

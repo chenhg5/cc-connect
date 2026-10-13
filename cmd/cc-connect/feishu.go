@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -65,12 +66,15 @@ type tenantTokenResponse struct {
 }
 
 type registrationClient struct {
+	ctx     context.Context
 	baseURL string
 	http    *http.Client
 	debug   bool
 }
 
 type registrationFlowOptions struct {
+	Context        context.Context
+	OnVerification func(string) error
 	TimeoutSeconds int
 	QRImagePath    string
 	Debug          bool
@@ -532,14 +536,24 @@ func validateAppCredentialsAgainstBase(baseURL, appID, appSecret string) (bool, 
 }
 
 func runRegistrationFlow(opts registrationFlowOptions) (*registrationFlowResult, error) {
-	if opts.TimeoutSeconds <= 0 {
-		opts.TimeoutSeconds = 600
-	}
-	client := &registrationClient{
+	return runRegistrationFlowWithClient(opts, &registrationClient{
 		baseURL: accountsFeishuBaseURL,
 		http:    &http.Client{Timeout: 15 * time.Second},
 		debug:   opts.Debug,
+	})
+}
+
+func runRegistrationFlowWithClient(opts registrationFlowOptions, client *registrationClient) (*registrationFlowResult, error) {
+	if opts.TimeoutSeconds <= 0 {
+		opts.TimeoutSeconds = 600
 	}
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(opts.TimeoutSeconds)*time.Second)
+	defer cancel()
+	client.ctx = ctx
 
 	var initRes registrationInitResponse
 	if err := client.registrationCall("init", nil, &initRes); err != nil {
@@ -556,7 +570,7 @@ func runRegistrationFlow(opts registrationFlowOptions) (*registrationFlowResult,
 	beginParams := map[string]string{
 		"archetype":         "PersonalAgent",
 		"auth_method":       "client_secret",
-		"request_user_info": "open_id",
+		"request_user_info": "open_id tenant_brand",
 	}
 	if err := client.registrationCall("begin", beginParams, &beginRes); err != nil {
 		return nil, fmt.Errorf("begin failed: %w", err)
@@ -568,14 +582,20 @@ func runRegistrationFlow(opts registrationFlowOptions) (*registrationFlowResult,
 		return nil, fmt.Errorf("incomplete onboarding response")
 	}
 
-	fmt.Println("请使用飞书/Lark 手机 App 扫码完成机器人创建与授权：")
-	fmt.Printf("URL: %s\n\n", beginRes.VerificationURIComplete)
-	tryPrintTerminalQRCode(beginRes.VerificationURIComplete)
-	if opts.QRImagePath != "" {
-		if err := saveQRCodeImage(beginRes.VerificationURIComplete, opts.QRImagePath); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to save QR image: %v\n", err)
-		} else {
-			fmt.Printf("QR code saved to: %s\n\n", opts.QRImagePath)
+	if opts.OnVerification != nil {
+		if err := opts.OnVerification(beginRes.VerificationURIComplete); err != nil {
+			return nil, err
+		}
+	} else {
+		fmt.Println("请使用飞书/Lark 手机 App 扫码完成机器人创建与授权：")
+		fmt.Printf("URL: %s\n\n", beginRes.VerificationURIComplete)
+		tryPrintTerminalQRCode(beginRes.VerificationURIComplete)
+		if opts.QRImagePath != "" {
+			if err := saveQRCodeImage(beginRes.VerificationURIComplete, opts.QRImagePath); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to save QR image: %v\n", err)
+			} else {
+				fmt.Printf("QR code saved to: %s\n\n", opts.QRImagePath)
+			}
 		}
 	}
 
@@ -612,7 +632,7 @@ func runRegistrationFlow(opts registrationFlowOptions) (*registrationFlowResult,
 			}
 		}
 
-		if pollRes.ClientID != "" && pollRes.ClientSecret != "" {
+		if pollRes.Error == "" && pollRes.ClientID != "" && pollRes.ClientSecret != "" {
 			return &registrationFlowResult{
 				AppID:       pollRes.ClientID,
 				AppSecret:   pollRes.ClientSecret,
@@ -635,7 +655,13 @@ func runRegistrationFlow(opts registrationFlowOptions) (*registrationFlowResult,
 			}
 		}
 
-		time.Sleep(time.Duration(interval) * time.Second)
+		timer := time.NewTimer(time.Duration(interval) * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
 
 	return nil, fmt.Errorf("timed out waiting for QR onboarding result")
@@ -648,7 +674,11 @@ func (c *registrationClient) registrationCall(action string, params map[string]s
 		form.Set(k, v)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/oauth/v1/app/registration", strings.NewReader(form.Encode()))
+	ctx := c.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/oauth/v1/app/registration", strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -665,7 +695,8 @@ func (c *registrationClient) registrationCall(action string, params map[string]s
 		return err
 	}
 	if c.debug {
-		fmt.Fprintf(os.Stderr, "[debug] registration action=%s status=%d body=%s\n", action, resp.StatusCode, strings.TrimSpace(string(body)))
+		// Registration responses contain client secrets and device grants.
+		fmt.Fprintf(os.Stderr, "[debug] registration action=%s status=%d\n", action, resp.StatusCode)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("decode response: %w", err)

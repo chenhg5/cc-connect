@@ -1,0 +1,66 @@
+# Optional Team metadata on top of ordinary cc-connect runtime configuration.
+# Recommended for new apps: cc-connect-team team init --agent codex
+# Existing apps can keep their [[projects]], adding only [[teams]].
+data_dir = "~/.cc-connect-team/data"
+language = "zh"
+
+[[projects]]
+name = "manager-main"
+admin_from = "${FEISHU_OWNER_OPEN_ID}"
+bot_owner_id = "${FEISHU_OWNER_OPEN_ID}"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+backend = "app_server" # required for returning interactive approvals to Codex
+mode = "suggest"
+work_dir = "~/Workspace"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "${FEISHU_APP_ID}"
+app_secret = "${FEISHU_APP_SECRET}"
+allow_from = "${FEISHU_OWNER_OPEN_ID}"
+group_only = false
+single_card_reply = true # progress and approvals update one process card
+separate_final_card = true # publish the conclusion in its own card
+
+[[teams]]
+auto_coordinate = true
+id = "default"
+manager = "manager-main"
+[[teams.members]]
+bot = "manager-main" # references projects.name, not a role or backend
+role = "manager"
+prompt = "使用中文沟通；根据任务选择必要成员，并核验实际执行结果。"
+
+# New project => new Feishu group, with the manager automatically included.
+# In manager chat:
+# /project create shop /absolute/path/to/shop
+# Group -> project -> workspace/session mapping is persisted automatically.
+# No /workspace switch, /bind or /project use is needed for ordinary use.
+# New bot (in a private chat with the manager):
+# /team bot create developer-a developer codex
+# /team bot create reviewer-a reviewer claudecode
+# /team bot create tester-a tester trae
+# Each QR registration creates its own bot app, auto-binds the scanning owner,
+# saves ordinary runtime configuration, joins the Team and starts connecting.
+# Existing members: /team members -> Modify (in manager private chat).
+# Role/backend/prompt changes require a service restart.
+# Supported roles: manager / planner / developer / tester / reviewer.
+# Claude Code runtime uses agent.type="claudecode", mode="default".
+# Trae runtime uses agent.type="acp", cmd="traecli",
+# args=["--permission-mode", "default", "acp", "serve"].
+# Native configuration and /help commands remain available.
+
+# 多目录项目优先在项目群 /help → 项目设置 → 修改代码目录 中设置。
+# Codex / Trae ACP 静态 agent.options 也支持：
+# additional_dirs = ["/absolute/path/to/backend", "/absolute/path/to/shared"]
+# Codex full-auto keeps the sandbox. If runtime tools need a credential cache
+# or network, configure these explicitly under projects.agent.options:
+# sandbox_writable_roots = ["/home/your-user/.local/share/lark-cli"]
+# sandbox_network_access = true
+# Runtime roots stay separate from source directories; approval mode is
+# unchanged. Use absolute paths. Defaults grant no additional access.
+# Trae 自定义包装命令（可执行文件名不是 traecli）须显式设置：
+# project_directory_mode = "trae"
+# ACP 服务还必须声明 sessionCapabilities.additionalDirectories。

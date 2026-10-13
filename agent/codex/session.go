@@ -24,6 +24,7 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
+	additionalDirs []string
 	workDir        string
 	model          string
 	effort         string
@@ -34,6 +35,7 @@ type codexSession struct {
 	cliExtraArgs   []string // extra args from cmd, prepended before exec args
 	extraEnv       []string
 	promptPreamble string
+	preambleSent   atomic.Bool
 	events         chan core.Event
 	threadID       atomic.Value // stores string — Codex thread_id
 	ctx            context.Context
@@ -88,11 +90,12 @@ func prependCodexPromptPreamble(prompt string, preamble string) string {
 	return "Before answering, follow these project-level instructions for this cc-connect session. They are not user content.\n\n" + preamble + "\n\n---\n\nUser message:\n" + prompt
 }
 
-func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string, systemPrompt string, appendPrompt string) (*codexSession, error) {
+func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string, systemPrompt string, appendPrompt string, additionalDirs ...string) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
 		workDir:        workDir,
+		additionalDirs: append([]string(nil), additionalDirs...),
 		model:          model,
 		effort:         effort,
 		mode:           mode,
@@ -106,6 +109,9 @@ func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, 
 		ctx:            sessionCtx,
 		cancel:         cancel,
 		cmds:           make(map[*exec.Cmd]struct{}),
+	}
+	if additionalDirs != nil {
+		cs.additionalDirs = append([]string{}, additionalDirs...)
 	}
 	cs.alive.Store(true)
 
@@ -146,7 +152,9 @@ func (cs *codexSession) Send(prompt string, messageID string, images []core.Imag
 	}
 
 	isResume := cs.CurrentSessionID() != ""
-	if !isResume {
+	// The retained thread may contain an older role/configuration. Reapply
+	// current instructions on the first turn of each runtime session.
+	if !cs.preambleSent.Load() {
 		prompt = prependCodexPromptPreamble(prompt, cs.promptPreamble)
 	}
 	args := cs.buildExecArgs(prompt, imagePaths)
@@ -181,6 +189,7 @@ func (cs *codexSession) Send(prompt string, messageID string, images []core.Imag
 		return fmt.Errorf("codexSession: start: %w", err)
 	}
 	cs.addCmd(cmd)
+	cs.preambleSent.Store(true)
 
 	cs.wg.Add(1)
 	go cs.readLoop(cmd, stdout, &stderrBuf)
@@ -267,6 +276,10 @@ func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []stri
 		}
 	}
 
+	if cs.additionalDirs != nil {
+		roots, _ := json.Marshal(cs.additionalDirs)
+		args = append(args, "-c", "sandbox_workspace_write.writable_roots="+string(roots))
+	}
 	if cs.model != "" {
 		args = append(args, "--model", cs.model)
 	}
@@ -456,8 +469,8 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	}
 }
 
-// flushPendingAsThinking emits all buffered agent_messages as EventThinking.
-func (cs *codexSession) flushPendingAsThinking() {
+// flushPendingProgress emits all buffered agent_messages as EventThinking.
+func (cs *codexSession) flushPendingProgress() {
 	if cs.ctx.Err() != nil {
 		return
 	}
@@ -465,7 +478,7 @@ func (cs *codexSession) flushPendingAsThinking() {
 		if cs.ctx.Err() != nil {
 			return
 		}
-		evt := core.Event{Type: core.EventThinking, Content: text}
+		evt := core.Event{Type: core.EventProgress, Content: text}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -515,8 +528,8 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 		return
 	}
 
-	// Any non-message item is a tool use; flush pending messages as thinking first.
-	cs.flushPendingAsThinking()
+	// Any non-message item is a tool use; flush public progress messages first.
+	cs.flushPendingProgress()
 
 	switch itemType {
 	case "command_execution":

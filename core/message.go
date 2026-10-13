@@ -405,15 +405,21 @@ type LocationAttachment struct {
 
 // Message represents a unified incoming message from any platform.
 type Message struct {
-	SessionKey   string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
-	Platform     string
-	MessageID    string // platform message ID for tracing
-	Recalled     bool   // true for platform message recall/delete events targeting MessageID
-	ChannelID    string
-	UserID       string
-	UserName     string
-	ChatName     string // human-readable chat/group name (optional)
-	Content      string
+	teamEpoch     uint64 // generation of a trusted project dispatch/report
+	teamInternal  bool   // trusted engine-originated report/task, never parsed as approval
+	SessionKey    string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
+	Platform      string
+	MessageID     string // platform message ID for tracing
+	Recalled      bool   // true for platform message recall/delete events targeting MessageID
+	ChannelID     string
+	LiteralAnswer bool // native form free text, not an option index
+	UserID        string
+	UserName      string
+	ChatName      string // human-readable chat/group name (optional)
+	Content       string
+	// FormValues is populated only by a platform after validating an issued form.
+	// Values remain structured; they must never be interpolated into commands.
+	FormValues   map[string][]string
 	Images       []ImageAttachment   // attached images (if any)
 	Files        []FileAttachment    // attached files (if any)
 	Audio        *AudioAttachment    // voice message (if any)
@@ -438,6 +444,8 @@ type Message struct {
 	// "allow"/"deny" typed by a real user must NOT set this flag — they
 	// continue to flow through the regular message handler.
 	IsPermissionResponse bool
+	// PermissionToken binds a query-card callback to one pending question.
+	PermissionToken string
 	// UserMessageTimeMs is the platform message creation time in Unix milliseconds
 	// when known (e.g. Feishu im.message.message_received create_time). Used to
 	// drop late redeliveries that reuse a new message_id but an older create_time
@@ -449,6 +457,8 @@ type Message struct {
 type EventType string
 
 const (
+	EventProgress          EventType = "progress"
+	EventPlan              EventType = "plan"
 	EventText              EventType = "text"               // intermediate or final text
 	EventHookRejected      EventType = "hook_rejected"      // Stop hook rejected prior assistant text
 	EventToolUse           EventType = "tool_use"           // tool invocation info
@@ -475,6 +485,14 @@ type UserQuestionOption struct {
 
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
+	TextID                   string    // public message identity; EventProgress with an ID is a cumulative snapshot
+	ToolUpdate               bool      // partial tool state: omitted status/output leave existing values unchanged
+	ToolResultPresent        bool      // distinguishes an explicitly empty result from an omitted result
+	ToolResultDelta          bool      // result text appends to the previous output instead of replacing it
+	ExpiresAt                time.Time // optional deadline for a human decision
+	Progress                 *RuntimeProgress
+	Plan                     []ProgressStep
+	ToolID                   string
 	Type                     EventType
 	Content                  string
 	ToolName                 string         // populated for EventToolUse, EventPermissionRequest

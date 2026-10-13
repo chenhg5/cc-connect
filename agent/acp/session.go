@@ -1,7 +1,6 @@
 package acp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,20 +22,29 @@ import (
 const toolInputCacheMaxEntries = 1000
 
 type acpSession struct {
-	workDir string
-	events  chan core.Event
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	alive   atomic.Bool
+	queue          *queueDiagnostics
+	eventsMu       sync.RWMutex
+	eventsClosed   bool
+	additionalDirs []string
+	workDir        string
+	events         chan core.Event
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	alive          atomic.Bool
 
-	cmd *exec.Cmd
-	tr  *transport
+	cmd    *exec.Cmd
+	tr     *transport
+	stderr stderrDiagnostics
 
 	acpSessMu sync.RWMutex
 	acpSessID string
 
 	sendMu sync.Mutex
+	// Sent once per ACP connection, including a resumed session. Marked only
+	// after a successful prompt RPC, so a failed first turn can be retried.
+	promptPreamble string
+	preambleSent   bool
 
 	permMu   sync.Mutex
 	permByID map[string]permState
@@ -52,7 +60,14 @@ type acpSession struct {
 	availableModes []acpModeInfo
 	currentMode    string
 
-	callbacks sessionCallbacks // may be nil (tests, integration harness)
+	configMu           sync.RWMutex
+	configOptions      []configOption
+	configOptionsKnown bool
+	legacyModels       *modelsBlock
+	closeOnce          sync.Once
+	initializing       atomic.Bool
+	callbacks          sessionCallbacks // may be nil (tests, integration harness)
+	nativeNamer        func(context.Context, string, string) error
 }
 
 type permState struct {
@@ -65,14 +80,20 @@ type permState struct {
 // adding optional knobs (initialMode, callbacks) and would otherwise
 // break every call site each time.
 type acpSessionConfig struct {
-	command         string
-	args            []string
-	extraEnv        []string
-	workDir         string
-	resumeSessionID string
-	authMethod      string
-	initialMode     string           // if non-empty, applied via session/set_mode after session/new
-	callbacks       sessionCallbacks // may be nil
+	queueDiagnostics bool
+	additionalDirs   []string
+	command          string
+	args             []string
+	extraEnv         []string
+	workDir          string
+	resumeSessionID  string
+	authMethod       string
+	initialMode      string           // if non-empty, applied via session/set_mode after session/new
+	callbacks        sessionCallbacks // may be nil
+	promptPreamble   string
+	initialModel     string
+	initialReasoning string
+	handshakeContext context.Context
 }
 
 func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, error) {
@@ -83,14 +104,20 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &acpSession{
-		workDir:       absWorkDir,
-		events:        make(chan core.Event, 128),
-		ctx:           sessionCtx,
-		cancel:        cancel,
-		permByID:      make(map[string]permState),
-		toolInputByID: make(map[string]string),
-		acpSessID:     cfg.resumeSessionID,
-		callbacks:     cfg.callbacks,
+		additionalDirs: append([]string(nil), cfg.additionalDirs...),
+		workDir:        absWorkDir,
+		events:         make(chan core.Event, 128),
+		ctx:            sessionCtx,
+		cancel:         cancel,
+		permByID:       make(map[string]permState),
+		toolInputByID:  make(map[string]string),
+		acpSessID:      cfg.resumeSessionID,
+		callbacks:      cfg.callbacks,
+		promptPreamble: cfg.promptPreamble,
+		nativeNamer:    traeSessionNamer(cfg.command, cfg.args, cfg.extraEnv, absWorkDir),
+	}
+	if cfg.additionalDirs != nil {
+		s.additionalDirs = append([]string{}, cfg.additionalDirs...)
 	}
 	s.alive.Store(true)
 
@@ -108,8 +135,24 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		cancel()
 		return nil, fmt.Errorf("acp: stdout pipe: %w", err)
 	}
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = io.MultiWriter(&stderrBuf, os.Stderr)
+	cmd.Stderr = io.MultiWriter(&s.stderr, os.Stderr)
+	if cfg.queueDiagnostics {
+		cmd.Env = queueDiagnosticEnv(cmd.Env)
+		s.queue = &queueDiagnostics{downstream: cmd.Stderr, emit: func(ev core.Event) {
+			// Diagnostics must never block the stderr pipe (or the ACP server).
+			s.eventsMu.RLock()
+			defer s.eventsMu.RUnlock()
+			if s.eventsClosed || s.ctx.Err() != nil {
+				return
+			}
+			select {
+			case s.events <- ev:
+			case <-s.ctx.Done():
+			default:
+			}
+		}}
+		cmd.Stderr = s.queue
+	}
 
 	s.cmd = cmd
 	s.tr = newTransport(stdout, stdin, s.onNotification, s.onServerRequest)
@@ -124,8 +167,8 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		defer s.wg.Done()
 		s.tr.readLoop(sessionCtx)
 		waitErr := cmd.Wait()
-		if waitErr != nil {
-			msg := stderrBuf.String()
+		if waitErr != nil && sessionCtx.Err() == nil {
+			msg := s.stderr.String()
 			if msg != "" {
 				slog.Error("acp: process exited", "error", waitErr, "stderr", msg)
 				s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", strings.TrimSpace(msg))})
@@ -136,7 +179,20 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		s.alive.Store(false)
 	}()
 
-	if err := s.handshake(cfg.resumeSessionID, cfg.authMethod); err != nil {
+	initCtx := cfg.handshakeContext
+	if initCtx == nil {
+		initCtx = sessionCtx
+	}
+	initCtx, initCancel := context.WithTimeout(initCtx, 15*time.Second)
+	defer initCancel()
+	s.initializing.Store(true)
+	if err := s.handshake(initCtx, cfg.resumeSessionID, cfg.authMethod); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+
+	s.initializing.Store(false)
+	if err := s.applyPreferences(initCtx, cfg.initialModel, cfg.initialReasoning); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
@@ -148,6 +204,18 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 	// is worse UX for a non-critical control.
 	if strings.TrimSpace(cfg.initialMode) != "" {
 		if ok := s.SetLiveMode(cfg.initialMode); !ok {
+			if len(s.additionalDirs) > 0 {
+				// Trae hides the picker for customized profiles, but set_mode
+				// preserves additionalDirectories. Do not drop an explicit mode.
+				if _, err := s.tr.call(initCtx, "session/set_mode", map[string]any{"sessionId": s.currentACPSessionID(), "modeId": cfg.initialMode}); err != nil {
+					_ = s.Close()
+					return nil, fmt.Errorf("acp: apply project permission mode: %w", err)
+				}
+				s.modesMu.Lock()
+				s.currentMode = cfg.initialMode
+				s.modesMu.Unlock()
+				return s, nil
+			}
 			slog.Warn("acp: initial mode could not be applied",
 				"mode", cfg.initialMode,
 				"session_id", s.currentACPSessionID(),
@@ -161,7 +229,7 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 // handshake runs initialize → optional authenticate → session/load or
 // session/new, and caches any modes the server advertises so
 // SetLiveMode / PermissionModes can answer correctly.
-func (s *acpSession) handshake(resumeSessionID string, authMethod string) error {
+func (s *acpSession) handshake(ctx context.Context, resumeSessionID string, authMethod string) error {
 	initParams := map[string]any{
 		"protocolVersion": 1,
 		"clientCapabilities": map[string]any{
@@ -176,7 +244,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 			"version": "1.0.0",
 		},
 	}
-	res, err := s.tr.call(s.ctx, "initialize", initParams)
+	res, err := s.tr.call(ctx, "initialize", initParams)
 	if err != nil {
 		return fmt.Errorf("acp: initialize: %w", err)
 	}
@@ -184,6 +252,9 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	var initOut acpInitializeResult
 	if err := json.Unmarshal(res, &initOut); err != nil {
 		return fmt.Errorf("acp: parse initialize result: %w", err)
+	}
+	if len(s.additionalDirs) > 0 && (len(initOut.AgentCapabilities.SessionCapabilities.AdditionalDirectories) == 0 || string(initOut.AgentCapabilities.SessionCapabilities.AdditionalDirectories) == "null") {
+		return fmt.Errorf("acp: server does not advertise sessionCapabilities.additionalDirectories; upgrade the ACP executable before using multiple directories")
 	}
 	listSupported := len(initOut.AgentCapabilities.SessionCapabilities.List) > 0
 	slog.Debug("acp: initialized",
@@ -196,7 +267,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	}
 
 	if strings.TrimSpace(authMethod) != "" {
-		if _, err := s.tr.call(s.ctx, "authenticate", map[string]any{
+		if _, err := s.tr.call(ctx, "authenticate", map[string]any{
 			"methodId": authMethod,
 		}); err != nil {
 			return fmt.Errorf("acp: authenticate (%s): %w", authMethod, err)
@@ -211,18 +282,20 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 			"cwd":        s.workDir,
 			"mcpServers": []any{},
 		}
-		loadRes, err := s.tr.call(s.ctx, "session/load", loadParams)
+		if s.additionalDirs != nil {
+			loadParams["additionalDirectories"] = s.additionalDirs
+		}
+		loadRes, err := s.tr.call(ctx, "session/load", loadParams)
 		if err != nil {
 			slog.Warn("acp: session/load failed, starting new session", "error", err)
 		} else {
-			var lr struct {
-				SessionID string         `json:"sessionId"`
-				Modes     *acpModesBlock `json:"modes"`
-			}
-			if json.Unmarshal(loadRes, &lr) == nil && lr.SessionID != "" {
+			var lr sessionConfigResult
+			if json.Unmarshal(loadRes, &lr) == nil {
+				if lr.SessionID == "" {
+					lr.SessionID = resumeSessionID
+				}
 				s.setACPSessionID(lr.SessionID)
-				s.absorbModes(lr.Modes)
-				return nil
+				return s.absorbSessionConfig(lr)
 			}
 		}
 	}
@@ -231,14 +304,14 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		"cwd":        s.workDir,
 		"mcpServers": []any{},
 	}
-	newRes, err := s.tr.call(s.ctx, "session/new", newParams)
+	if s.additionalDirs != nil {
+		newParams["additionalDirectories"] = s.additionalDirs
+	}
+	newRes, err := s.tr.call(ctx, "session/new", newParams)
 	if err != nil {
 		return fmt.Errorf("acp: session/new: %w", err)
 	}
-	var sn struct {
-		SessionID string         `json:"sessionId"`
-		Modes     *acpModesBlock `json:"modes"`
-	}
+	var sn sessionConfigResult
 	if err := json.Unmarshal(newRes, &sn); err != nil {
 		return fmt.Errorf("acp: parse session/new: %w", err)
 	}
@@ -246,8 +319,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		return fmt.Errorf("acp: session/new: empty sessionId")
 	}
 	s.setACPSessionID(sn.SessionID)
-	s.absorbModes(sn.Modes)
-	return nil
+	return s.absorbSessionConfig(sn)
 }
 
 // absorbModes copies a modes block into the session's cache and fans
@@ -284,6 +356,9 @@ func (s *acpSession) currentACPSessionID() string {
 // CurrentMode returns the ACP modeId most recently applied or reported
 // for this session. Empty when the server never sent a modes block.
 func (s *acpSession) CurrentMode() string {
+	if option, ok := s.option("mode"); ok {
+		return option.CurrentValue
+	}
 	s.modesMu.RLock()
 	defer s.modesMu.RUnlock()
 	return s.currentMode
@@ -301,6 +376,13 @@ func (s *acpSession) CurrentMode() string {
 // (devin acp in 2026.4.9) silently accepts unknown modeIds without
 // any error, so a server-only check would let typos go undetected.
 func (s *acpSession) SetLiveMode(mode string) bool {
+	option, ok := s.option("mode")
+	if !ok {
+		return false
+	}
+	if option.ID != "" {
+		return s.setConfig(s.ctx, "mode", mode) == nil
+	}
 	if !s.alive.Load() {
 		return false
 	}
@@ -316,7 +398,9 @@ func (s *acpSession) SetLiveMode(mode string) bool {
 		)
 		return false
 	}
-	if _, err := s.tr.call(s.ctx, "session/set_mode", map[string]any{
+	ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
+	defer cancel()
+	if _, err := s.tr.call(ctx, "session/set_mode", map[string]any{
 		"sessionId": sid,
 		"modeId":    modeID,
 	}); err != nil {
@@ -370,11 +454,15 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 		slog.Debug("acp: notification", "method", method)
 		return
 	}
+	s.absorbConfigUpdate(params)
 	s.cacheToolCallInput(params)
 	s.maybeAbsorbCurrentModeUpdate(params)
 	sid := s.currentACPSessionID()
 	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
 	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
+	if s.initializing.Load() {
+		return
+	} // session/load history is already held by the engine.
 	for _, ev := range mapSessionUpdate(sid, params) {
 		s.emit(ev)
 	}
@@ -578,6 +666,11 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 }
 
 func (s *acpSession) emit(ev core.Event) {
+	s.eventsMu.RLock()
+	defer s.eventsMu.RUnlock()
+	if s.eventsClosed || s.ctx.Err() != nil {
+		return
+	}
 	if ev.SessionID == "" {
 		ev.SessionID = s.currentACPSessionID()
 	}
@@ -594,6 +687,11 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
+	s.stderr.beginTurn()
+	if s.queue != nil {
+		s.queue.begin()
+		defer s.queue.end()
+	}
 
 	filePaths := core.SaveFilesToDisk(s.workDir, messageID, files)
 	prompt = core.AppendFileRefs(prompt, filePaths)
@@ -604,6 +702,9 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 	sid := s.currentACPSessionID()
 	if sid == "" {
 		return fmt.Errorf("acp: no agent session id")
+	}
+	if !s.preambleSent && s.promptPreamble != "" {
+		prompt = s.promptPreamble + "\n\n---\n\nUser message:\n" + prompt
 	}
 
 	promptBlocks := []any{
@@ -617,9 +718,11 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 	slog.Debug("acp: sending session/prompt", "session_id", sid, "prompt_len", len(prompt))
 	res, err := s.tr.call(s.ctx, "session/prompt", params)
 	if err != nil {
+		err = s.stderr.promptError(s.ctx, err)
 		s.emit(core.Event{Type: core.EventError, Error: err})
 		return fmt.Errorf("acp: session/prompt: %w", err)
 	}
+	s.preambleSent = true
 	slog.Debug("acp: session/prompt response", "session_id", sid, "response_len", len(res), "response", string(res))
 
 	// Text was streamed via session/update; engine aggregates EventText.
@@ -725,22 +828,27 @@ func (s *acpSession) Alive() bool {
 }
 
 func (s *acpSession) Close() error {
-	s.alive.Store(false)
-	s.cancel()
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-	}
-	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		close(s.events)
-	case <-time.After(8 * time.Second):
-		slog.Warn("acp: close timed out waiting for I/O loop")
-	}
+	s.closeOnce.Do(func() {
+		s.alive.Store(false)
+		s.cancel()
+		if s.cmd != nil && s.cmd.Process != nil {
+			_ = s.cmd.Process.Kill()
+		}
+		done := make(chan struct{})
+		go func() {
+			s.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			s.eventsMu.Lock()
+			s.eventsClosed = true
+			close(s.events)
+			s.eventsMu.Unlock()
+		case <-time.After(8 * time.Second):
+			slog.Warn("acp: close timed out waiting for I/O loop")
+		}
+	})
 	return nil
 }
 

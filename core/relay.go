@@ -105,6 +105,9 @@ func (rm *RelayManager) AddToBind(platform, chatID, projectName string) {
 		rm.bindings[chatID] = binding
 	}
 
+	if binding.Bots[projectName] == projectName {
+		return
+	}
 	binding.Bots[projectName] = projectName
 	slog.Info("relay: project added to binding", "chat_id", chatID, "project", projectName, "bots", binding.Bots)
 	rm.saveLocked()
@@ -209,11 +212,38 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	}
 
 	rm.mu.RLock()
-	binding := rm.bindings[chatID]
+	var binding *RelayBinding
+	if saved := rm.bindings[chatID]; saved != nil {
+		binding = &RelayBinding{Platform: saved.Platform, ChatID: saved.ChatID, Bots: make(map[string]string)}
+		for bot, name := range saved.Bots {
+			binding.Bots[bot] = name
+		}
+	}
 	targetEngine := rm.engines[req.To]
 	sourceEngine := rm.engines[req.From]
 	visibility := rm.visibility
 	rm.mu.RUnlock()
+
+	// Team membership is already persisted at group creation. Resolve it even
+	// before the first inbound message and do not require a manual /bind.
+	if targetEngine != nil {
+		project, err := targetEngine.teamProject(req.SessionKey)
+		if err != nil {
+			return nil, fmt.Errorf("relay: %w", err)
+		}
+		if project != nil {
+			if sourceEngine == nil || !stringSliceContains(project.Bots, req.From) {
+				return nil, fmt.Errorf("relay: sender is not a project member")
+			}
+			if sourceEngine.teamReports || targetEngine.teamReports {
+				return nil, fmt.Errorf("relay: coordinated projects require the manager's team dispatch command, which preserves interactive approval; members report results automatically")
+			}
+			binding = &RelayBinding{Platform: platform, ChatID: chatID, Bots: make(map[string]string)}
+			for _, bot := range project.Bots {
+				binding.Bots[bot] = bot
+			}
+		}
+	}
 
 	if binding == nil {
 		return nil, fmt.Errorf("relay: no binding for this chat. Use /bind <project> first")

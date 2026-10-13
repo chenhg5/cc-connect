@@ -92,6 +92,10 @@ type Config struct {
 	Providers          []ProviderConfig        `toml:"providers"`                      // global shared providers
 	ProviderPresetsURL string                  `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
 	Projects           []ProjectConfig         `toml:"projects"`
+	Teams              []TeamConfig            `toml:"teams,omitempty"`
+	AgentProfiles      []AgentProfile          `toml:"agent_profiles,omitempty"`
+	Bots               []BotConfig             `toml:"bots,omitempty"`
+	BusinessProjects   []BusinessProjectConfig `toml:"business_projects,omitempty"`
 	Commands           []CommandConfig         `toml:"commands"`     // global custom slash commands
 	Aliases            []AliasConfig           `toml:"aliases"`      // global command aliases
 	BannedWords        []string                `toml:"banned_words"` // messages containing any of these words are blocked
@@ -489,10 +493,18 @@ type ReferenceConfig struct {
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
-	Name    string `toml:"name"`
-	Mode    string `toml:"mode,omitempty"`     // "" or "multi-workspace"
-	BaseDir string `toml:"base_dir,omitempty"` // parent dir for workspaces
-	SkipGit *bool  `toml:"skip_git,omitempty"`
+	SessionDataDir    string `toml:"session_data_dir,omitempty"`
+	ID                string `toml:"id,omitempty"`
+	Role              string `toml:"role,omitempty"`
+	Prompt            string `toml:"prompt,omitempty"`
+	ContextProjectID  string `toml:"-"`
+	AgentProfile      string `toml:"agent_profile,omitempty"`
+	BotOwnerClaimHash string `toml:"bot_owner_claim_hash,omitempty"`
+	BotOwnerID        string `toml:"bot_owner_id,omitempty"`
+	Name              string `toml:"name"`
+	Mode              string `toml:"mode,omitempty"`     // "" or "multi-workspace"
+	BaseDir           string `toml:"base_dir,omitempty"` // parent dir for workspaces
+	SkipGit           *bool  `toml:"skip_git,omitempty"`
 	// WorkspaceInitAllowLocalPaths allows /workspace init and the conversational
 	// init flow to bind existing local directories. Default false keeps init
 	// limited to git URLs; use /workspace bind or /workspace route for explicit
@@ -718,6 +730,18 @@ func expandHomeInConfig(cfg *Config) {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return
+	}
+	for i := range cfg.BusinessProjects {
+		for j := range cfg.BusinessProjects[i].Directories {
+			d := &cfg.BusinessProjects[i].Directories[j]
+			d.Path = expandLeadingHome(d.Path, home)
+		}
+	}
+	for i := range cfg.Bots {
+		b := &cfg.Bots[i]
+		if s, ok := b.Agent.Options["work_dir"].(string); ok {
+			b.Agent.Options["work_dir"] = expandLeadingHome(s, home)
+		}
 	}
 	for i := range cfg.Projects {
 		proj := &cfg.Projects[i]
@@ -1072,6 +1096,15 @@ func (c *Config) validate() error {
 }
 
 func (c *Config) validateInternal(permissive bool) error {
+	if err := c.validateTeams(); err != nil {
+		return err
+	}
+	if err := c.validateBots(); err != nil {
+		return err
+	}
+	if err := c.validateAgentProfiles(); err != nil {
+		return err
+	}
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err
 	}
@@ -1088,11 +1121,16 @@ func (c *Config) validateInternal(permissive bool) error {
 	default:
 		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
 	}
-	if len(c.Projects) == 0 {
+	if len(c.RuntimeProjects()) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
 	}
-	for i, proj := range c.Projects {
+	for i, proj := range c.RuntimeProjects() {
 		prefix := fmt.Sprintf("projects[%d]", i)
+		var err error
+		proj, err = c.EffectiveProject(proj)
+		if err != nil {
+			return err
+		}
 		if proj.Name == "" {
 			return fmt.Errorf("config: %s.name is required", prefix)
 		}
@@ -1461,6 +1499,9 @@ func (cfg *Config) ResolveProviderRefs() {
 		globalByName[p.Name] = p
 	}
 	for i := range cfg.Projects {
+		if cfg.Projects[i].AgentProfile != "" {
+			continue // Resolved by EffectiveProject after its backend is known.
+		}
 		refs := cfg.Projects[i].Agent.ProviderRefs
 		if len(refs) == 0 {
 			continue

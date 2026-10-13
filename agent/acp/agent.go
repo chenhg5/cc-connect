@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,20 +20,32 @@ func init() {
 
 // Agent runs an ACP (Agent Client Protocol) agent subprocess over stdio JSON-RPC.
 type Agent struct {
-	workDir      string
-	cmd          string
-	cliExtraArgs []string // extra args from cmd, prepended before args
-	args         []string
-	staticEnv    map[string]string
-	extraEnv     []string
-	sessionEnv   []string
-	authMethod   string // optional, e.g. "cursor_login" for Cursor CLI (see authenticate RPC)
-	displayName  string // optional, for doctor (default "ACP")
+	workDir              string
+	additionalDirs       []string
+	projectDirectoryMode string
+	queueDiagnostics     bool
+	cmd                  string
+	cliExtraArgs         []string // extra args from cmd, prepended before args
+	args                 []string
+	staticEnv            map[string]string
+	extraEnv             []string
+	sessionEnv           []string
+	authMethod           string // optional, e.g. "cursor_login" for Cursor CLI (see authenticate RPC)
+	displayName          string // optional, for doctor (default "ACP")
+	systemPrompt         string
+	appendPrompt         string
 
 	// mode is the pending permission mode to apply to new sessions.
 	// When set, StartSession applies it via session/set_mode right after
 	// session/new. Empty means "use whatever the agent selects by default".
-	mode string
+	mode            string
+	model           string
+	reasoning       string
+	configSessionMu sync.Mutex
+	configSession   *acpSession
+	configStopped   bool
+	catalogMu       sync.RWMutex
+	catalog         map[string]configOption
 
 	// listUnsupported caches a negative result after we probe the agent
 	// for sessionCapabilities.list once. Eliminates spawn cost on
@@ -45,9 +58,9 @@ type Agent struct {
 	// handshake so that future PermissionModes() calls can reflect the
 	// actual modes this specific ACP agent offers (rather than a
 	// hard-coded fallback that may not match).
-	modesMu       sync.RWMutex
-	modesCache    []core.PermissionModeInfo
-	modesCurrent  string
+	modesMu      sync.RWMutex
+	modesCache   []core.PermissionModeInfo
+	modesCurrent string
 
 	mu sync.RWMutex
 }
@@ -93,18 +106,46 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	mode, _ := opts["mode"].(string)
 	mode = strings.TrimSpace(mode)
+	model, _ := opts["model"].(string)
+	reasoning, _ := opts["reasoning_effort"].(string)
+	systemPrompt, _ := opts["system_prompt"].(string)
+	appendPrompt, _ := opts["append_system_prompt"].(string)
 
-	return &Agent{
-		workDir:     workDir,
-		cmd:          cmdStr,
-		cliExtraArgs: cliExtraArgs,
-		args:        args,
-		staticEnv:   staticEnv,
-		extraEnv:    extra,
-		authMethod:  authMethod,
-		displayName: displayName,
-		mode:        mode,
-	}, nil
+	additional, err := core.ProjectAdditionalDirectoriesOption(opts)
+	if err != nil {
+		return nil, err
+	}
+	directoryMode, _ := opts["project_directory_mode"].(string)
+	if directoryMode != "" && directoryMode != "trae" {
+		return nil, fmt.Errorf("unknown project_directory_mode %q", directoryMode)
+	}
+	queueEnabled := directoryMode == "trae" || strings.Contains(strings.ToLower(filepath.Base(cmdStr)), "trae")
+	if v, ok := opts["queue_diagnostics"].(bool); ok {
+		queueEnabled = v
+	}
+	a := &Agent{
+		queueDiagnostics:     queueEnabled,
+		projectDirectoryMode: directoryMode,
+		workDir:              workDir,
+		cmd:                  cmdStr,
+		cliExtraArgs:         cliExtraArgs,
+		args:                 args,
+		staticEnv:            staticEnv,
+		extraEnv:             extra,
+		authMethod:           authMethod,
+		displayName:          displayName,
+		mode:                 mode,
+		model:                strings.TrimSpace(model),
+		reasoning:            strings.TrimSpace(reasoning),
+		systemPrompt:         strings.TrimSpace(systemPrompt),
+		appendPrompt:         strings.TrimSpace(appendPrompt),
+	}
+	if len(additional) > 0 || (additional != nil && a.SupportsProjectDirectories()) {
+		if err := a.ConfigureProjectDirectories(workDir, additional); err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
 }
 
 func envMapFromOpts(opts map[string]any) map[string]string {
@@ -181,6 +222,7 @@ func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	a.workDir = dir
 	a.mu.Unlock()
+	a.invalidateConfig()
 	slog.Info("acp: work_dir changed", "work_dir", dir)
 }
 
@@ -195,7 +237,27 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	defer a.mu.RUnlock()
 
 	opts := map[string]any{
-		"cmd": a.cmd,
+		"cmd":                    append([]string{a.cmd}, a.cliExtraArgs...),
+		"project_directory_mode": a.projectDirectoryMode,
+		"queue_diagnostics":      a.queueDiagnostics,
+	}
+	if len(a.cliExtraArgs) == 0 {
+		opts["cmd"] = a.cmd
+	}
+	if a.model != "" {
+		opts["model"] = a.model
+	}
+	if a.reasoning != "" {
+		opts["reasoning_effort"] = a.reasoning
+	}
+	if a.mode != "" {
+		opts["mode"] = a.mode
+	}
+	if a.systemPrompt != "" {
+		opts["system_prompt"] = a.systemPrompt
+	}
+	if a.appendPrompt != "" {
+		opts["append_system_prompt"] = a.appendPrompt
 	}
 	if len(a.args) > 0 {
 		opts["args"] = append([]string(nil), a.args...)
@@ -213,39 +275,93 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	if a.displayName != "" {
 		opts["display_name"] = a.displayName
 	}
+	if a.additionalDirs != nil {
+		opts["additional_dirs"] = append([]string{}, a.additionalDirs...)
+	}
 	return opts
 }
 
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
-	a.sessionEnv = env
+	changed := !slices.Equal(a.sessionEnv, env)
+	a.sessionEnv = append([]string(nil), env...)
 	a.mu.Unlock()
+	if changed {
+		a.invalidateConfig()
+	}
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	a.configSessionMu.Lock()
+	if a.configStopped {
+		a.configSessionMu.Unlock()
+		return nil, fmt.Errorf("acp: agent is stopped")
+	}
+	if sessionID == "" && a.configSession != nil && a.configSession.Alive() {
+		s := a.configSession
+		a.configSession = nil
+		a.configSessionMu.Unlock()
+		cfg := a.sessionConfig(sessionID)
+		if err := s.applyPreferences(ctx, cfg.initialModel, cfg.initialReasoning); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+		if cfg.initialMode != "" && s.CurrentMode() != cfg.initialMode && !s.SetLiveMode(cfg.initialMode) {
+			slog.Warn("acp: initial mode could not be applied", "mode", cfg.initialMode)
+		}
+		stop := context.AfterFunc(ctx, s.cancel)
+		context.AfterFunc(s.ctx, func() { stop() })
+		return s, nil
+	}
+	a.configSessionMu.Unlock()
+	return newACPSession(ctx, a.sessionConfig(sessionID))
+}
+
+func (a *Agent) sessionConfig(sessionID string) acpSessionConfig {
 	a.mu.RLock()
+	queueEnabled := a.queueDiagnostics
 	command := a.cmd
 	allArgs := append(append([]string{}, a.cliExtraArgs...), a.args...)
 	workDir := a.workDir
+	additionalDirs := append([]string(nil), a.additionalDirs...)
+	if a.additionalDirs != nil {
+		additionalDirs = append([]string{}, a.additionalDirs...)
+	}
 	authMethod := a.authMethod
 	pendingMode := a.mode
+	model, reasoning := a.model, a.reasoning
 	extra := append([]string(nil), a.extraEnv...)
 	extra = append(extra, a.sessionEnv...)
+	prompt := buildPromptPreamble(a.systemPrompt, a.appendPrompt)
 	a.mu.RUnlock()
 
-	return newACPSession(ctx, acpSessionConfig{
-		command:         command,
-		args:            allArgs,
-		extraEnv:        extra,
-		workDir:         workDir,
-		resumeSessionID: sessionID,
-		authMethod:      authMethod,
-		initialMode:     pendingMode,
-		callbacks:       a,
-	})
+	return acpSessionConfig{
+		queueDiagnostics: queueEnabled,
+		command:          command,
+		args:             allArgs,
+		extraEnv:         extra,
+		workDir:          workDir,
+		additionalDirs:   additionalDirs,
+		resumeSessionID:  sessionID,
+		authMethod:       authMethod,
+		initialMode:      pendingMode,
+		initialModel:     model,
+		initialReasoning: reasoning,
+		callbacks:        a,
+		promptPreamble:   prompt,
+	}
 }
 
-func (a *Agent) Stop() error { return nil }
+func (a *Agent) Stop() error {
+	a.configSessionMu.Lock()
+	defer a.configSessionMu.Unlock()
+	a.configStopped = true
+	if a.configSession != nil {
+		_ = a.configSession.Close()
+		a.configSession = nil
+	}
+	return nil
+}
 
 // -- AgentDoctorInfo --
 

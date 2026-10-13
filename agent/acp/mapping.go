@@ -118,6 +118,7 @@ func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
 	var u struct {
 		ToolCallID string          `json:"toolCallId"`
 		Title      string          `json:"title"`
+		Name       string          `json:"name"`
 		Kind       string          `json:"kind"`
 		Status     string          `json:"status"`
 		RawInput   json.RawMessage `json:"rawInput"`
@@ -125,30 +126,46 @@ func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
 	if err := json.Unmarshal(update, &u); err != nil {
 		return nil
 	}
-	toolName := u.Title
+	toolName := u.Name
+	if toolName == "" {
+		toolName = u.Title
+	}
 	if toolName == "" {
 		toolName = u.Kind
 	}
 	if toolName == "" {
 		toolName = "tool"
 	}
+	var rawInput map[string]any
+	_ = json.Unmarshal(u.RawInput, &rawInput)
 	toolInput := summarizeACPToolInput(u.Kind, u.RawInput)
 	if toolInput == "" {
 		toolInput = u.Title
 	}
-	return []core.Event{{
-		Type:      core.EventToolUse,
-		ToolName:  toolName,
-		ToolInput: toolInput,
-		SessionID: sessionID,
+	events := []core.Event{{
+		Type:         core.EventToolUse,
+		ToolName:     toolName,
+		ToolID:       u.ToolCallID,
+		Metadata:     map[string]any{"tool_kind": u.Kind},
+		ToolInput:    toolInput,
+		ToolInputRaw: rawInput,
+		SessionID:    sessionID,
 	}}
+	// Some agents deliver a completed call in its initial report.
+	if result := mapToolCallUpdate(sessionID, update); len(result) > 0 && (result[0].ToolResultPresent || u.Status == "completed" || u.Status == "failed") {
+		events = append(events, result...)
+	}
+	return events
 }
 
 func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 	var u struct {
-		Title      string `json:"title"`
-		ToolCallID string `json:"toolCallId"`
-		Status     string `json:"status"`
+		Title      string          `json:"title"`
+		ToolCallID string          `json:"toolCallId"`
+		Status     string          `json:"status"`
+		Kind       string          `json:"kind"`
+		RawInput   json.RawMessage `json:"rawInput"`
+		RawOutput  json.RawMessage `json:"rawOutput"`
 		Content    []struct {
 			Type    string `json:"type"`
 			Content struct {
@@ -157,7 +174,7 @@ func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 			} `json:"content"`
 		} `json:"content"`
 	}
-	if err := json.Unmarshal(update, &u); err != nil {
+	if json.Unmarshal(update, &u) != nil {
 		return nil
 	}
 	toolLabel := u.Title
@@ -168,44 +185,26 @@ func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 		toolLabel = "tool"
 	}
 	body := extractToolCallContentText(u.Content)
+	present := u.Content != nil
+	if len(u.RawOutput) > 0 && string(u.RawOutput) != "null" && !present {
+		present = true
+		if json.Unmarshal(u.RawOutput, &body) != nil {
+			body = string(u.RawOutput)
+		}
+	}
+	var input map[string]any
+	_ = json.Unmarshal(u.RawInput, &input)
 	st := strings.ToLower(strings.TrimSpace(u.Status))
-
-	switch {
-	case st == "completed" || st == "failed":
-		if body == "" && st == "completed" {
-			return nil
-		}
-		if st == "failed" && body == "" {
-			body = "(failed)"
-		}
-		return []core.Event{{
-			Type:      core.EventToolResult,
-			ToolName:  toolLabel,
-			Content:   truncateRunes(body, 800),
-			SessionID: sessionID,
-		}}
-	case st == "in_progress" || st == "pending":
-		// Stream intermediate tool output to IM (ACP allows content while not terminal).
-		if body == "" {
-			return nil
-		}
-		return []core.Event{{
-			Type:      core.EventToolResult,
-			ToolName:  toolLabel,
-			Content:   truncateRunes(body, 800),
-			SessionID: sessionID,
-		}}
-	default:
-		if body != "" {
-			return []core.Event{{
-				Type:      core.EventToolResult,
-				ToolName:  toolLabel,
-				Content:   truncateRunes(body, 800),
-				SessionID: sessionID,
-			}}
-		}
+	if st == "" && !present && len(input) == 0 {
 		return nil
 	}
+	return []core.Event{{
+		Type: core.EventToolResult, ToolName: toolLabel, ToolID: u.ToolCallID,
+		ToolStatus: st, Content: body, SessionID: sessionID,
+		ToolUpdate: true, ToolResultPresent: present,
+		ToolInputRaw: input, ToolInput: summarizeACPToolInput(u.Kind, u.RawInput),
+		Metadata: map[string]any{"tool_kind": u.Kind},
+	}}
 }
 
 func extractToolCallContentText(blocks []struct {
@@ -232,7 +231,7 @@ func extractToolCallContentText(blocks []struct {
 func mapSessionUpdateFallback(sessionID string, kind string, update json.RawMessage) []core.Event {
 	// Some agents may send reasoning as a dedicated discriminator; map to EventThinking.
 	switch strings.ToLower(kind) {
-	case "reasoning", "reasoning_chunk", "thinking", "agent_thinking_chunk":
+	case "reasoning", "reasoning_chunk", "thinking", "agent_thinking_chunk", "agent_thought_chunk":
 		var u struct {
 			Content struct {
 				Type string `json:"type"`
@@ -325,22 +324,11 @@ func mapPlan(sessionID string, update json.RawMessage) []core.Event {
 	if err := json.Unmarshal(update, &u); err != nil || len(u.Entries) == 0 {
 		return nil
 	}
-	var b strings.Builder
-	for i, e := range u.Entries {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		line := e.Content
-		if e.Status != "" {
-			line = "[" + e.Status + "] " + line
-		}
-		b.WriteString(line)
+	var steps []core.ProgressStep
+	for _, entry := range u.Entries {
+		steps = append(steps, core.ProgressStep{Step: entry.Content, Status: entry.Status})
 	}
-	return []core.Event{{
-		Type:      core.EventThinking,
-		Content:   b.String(),
-		SessionID: sessionID,
-	}}
+	return []core.Event{{Type: core.EventPlan, Plan: steps, SessionID: sessionID}}
 }
 
 func truncateRunes(s string, maxRunes int) string {

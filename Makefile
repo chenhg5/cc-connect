@@ -77,6 +77,15 @@ _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 
 .PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-performance pre-test lint release release-all web
 
+# Team is an additive capability; retain the regular plugin and Web surface.
+TEAM_TAGS := agent_team
+.PHONY: build-team test-team
+build-team:
+	go build -tags '$(TEAM_TAGS)' -ldflags "$(LDFLAGS)" -o $(DIST)/cc-connect-team $(CMD)
+
+test-team:
+	go test -tags '$(TEAM_TAGS)' ./core ./config ./agent/codex ./agent/claudecode ./agent/acp ./platform/feishu ./cmd/cc-connect
+
 web:
 	@if [ ! -d web/node_modules ]; then cd web && npm install; fi
 	cd web && npm run build

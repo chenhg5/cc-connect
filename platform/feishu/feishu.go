@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -107,6 +108,11 @@ func init() {
 }
 
 type replyContext struct {
+	forceChatReply   bool // quoted source visible in main chat, never a thread reply
+	decisionToken    string
+	cardUpdate       *cardUpdateTarget
+	chatType         string
+	senderType       string
 	messageID        string
 	chatID           string
 	sessionKey       string
@@ -116,6 +122,11 @@ type replyContext struct {
 }
 
 type Platform struct {
+	privateReminderMu          sync.Mutex
+	registerDecisionReply      func(string, core.DecisionReplyRoute)
+	lookupDecisionReply        func(string, string) (core.DecisionReplyRoute, bool)
+	decisionReplies            sync.Map // reminder message ID -> immutable task/request association
+	resultAttachments          sync.Map // successful large-result file uploads, keyed by handoff
 	mu                         sync.RWMutex
 	platformName               string
 	domain                     string
@@ -123,6 +134,12 @@ type Platform struct {
 	appSecret                  string
 	progressStyle              string
 	useInteractiveCard         bool
+	singleQueryCard            bool
+	separateFinalCard          bool
+	queryCardsMu               sync.Mutex
+	queryCards                 map[string]*queryCard
+	queryCardStateDir          string
+	labels                     *personalLabelClient
 	self                       core.Platform
 	reactionEmoji              string
 	ackEmoji                   string
@@ -131,6 +148,8 @@ type Platform struct {
 	allowChat                  string
 	groupOnly                  bool
 	groupReplyAll              bool
+	groupMessagePolicy         func(string, string) core.GroupMessagePolicy
+	taskThreadResolver         func(string, string) bool
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
@@ -144,6 +163,12 @@ type Platform struct {
 	wsClient         *larkws.Client
 	handler          core.MessageHandler
 	cardNavHandler   core.CardNavigationHandler
+	cardLanguage     func() core.Language
+	cardUpdateMu     sync.Mutex
+	cardUpdates      map[string]*cardUpdateTarget
+	formMu           sync.Mutex
+	forms            map[string]*pendingCardForm
+	cardChatTypes    sync.Map // verified chat metadata remembered when sending a card
 	cancel           context.CancelFunc
 	dedup            *core.MessageDedup
 	botOpenID        string
@@ -506,6 +531,17 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		resourceChunkSize:          resourceChunkSize,
 		resourceMaxBytes:           defaultResourceMaxBytes,
 	}
+	base.singleQueryCard, _ = opts["single_card_reply"].(bool)
+	base.queryCardStateDir = queryCardStateDir(opts, domain, appID)
+	if dataDir, _ := opts["cc_data_dir"].(string); dataDir != "" {
+		accounts := "https://accounts.feishu.cn"
+		if name == "lark" {
+			accounts = "https://accounts.larksuite.com"
+		}
+		base.labels = &personalLabelClient{app: appID, secret: appSecret, base: domain, accounts: accounts, dir: filepath.Join(dataDir, "personal-label-auth"), http: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}
+	}
+	base.separateFinalCard, _ = opts["separate_final_card"].(bool)
+	base.singleQueryCard = base.singleQueryCard || base.separateFinalCard
 	if !useInteractiveCard {
 		base.self = base
 		return base, nil
@@ -762,8 +798,26 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 // Three prefixes are supported:
 //   - nav:/xxx   — render a card page and update the original card in-place
 //   - act:/xxx   — execute an action, then render and update the card in-place
-//   - cmd:/xxx   — legacy: dispatch as a user command (sends a new message)
+//   - cmd:/xxx   — dispatch as a user command; reusable panels update in place
 func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+	// Reject non-owned callbacks before acknowledging asynchronous work so a
+	// shared connection can continue routing the event to its owning platform.
+	if event == nil || event.Event == nil || event.Event.Action == nil || event.Event.Operator == nil {
+		return nil, nil
+	}
+	if ctx := event.Event.Context; ctx != nil && ctx.OpenChatID != "" && !core.AllowList(p.allowChat, ctx.OpenChatID) {
+		return nil, nil
+	}
+	if user := event.Event.Operator.OpenID; user == "" || !core.AllowList(p.allowFrom, user) {
+		return nil, nil
+	}
+	if executionCallbackID(event) != "" {
+		return p.onExecutionCardAction(event)
+	}
+	return p.handleCardAction(event)
+}
+
+func (p *Platform) handleCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 	if event.Event == nil || event.Event.Action == nil {
 		return nil, nil
 	}
@@ -821,9 +875,55 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		chatID = userID
 	}
 	sessionKey := p.sessionKeyFromCardAction(chatID, userID, event.Event.Action.Value)
+	if strings.HasPrefix(actionVal, "query_page:") || strings.HasPrefix(actionVal, "exec:") {
+		var err error
+		if strings.HasPrefix(actionVal, "exec:") {
+			err = p.navigateExecution(actionVal, chatID, messageID, userID, event.Event.Action.FormValue)
+		} else {
+			err = p.pageQueryCard(actionVal, chatID, messageID)
+		}
+		if err != nil {
+			key := core.MsgQueryPageFailed
+			if errors.Is(err, errQueryCardExpired) {
+				key = core.MsgQueryPageExpired
+			}
+			if errors.Is(err, errQueryCardBusy) {
+				key = core.MsgQueryPageBusy
+			}
+			return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "warning", Content: p.cardI18n().T(key)}}, nil
+		}
+		return nil, nil
+	}
+	queryAction := event.Event.Action.Value["query_card"] == "true"
+	permissionToken, _ := event.Event.Action.Value["permission_token"].(string)
+	if queryAction && permissionToken == "" {
+		return nil, nil
+	}
+	if queryAction {
+		if id, _ := event.Event.Action.Value["execution_card"].(string); id != "" {
+			resolved, err := p.captureExecutionDecision(id, chatID, messageID, userID, permissionToken, event.Event.Action.FormValue)
+			if err != nil {
+				key := core.MsgQueryPageFailed
+				if errors.Is(err, errQueryCardExpired) {
+					key = core.MsgDecisionExpired
+				}
+				if errors.Is(err, errQueryCardBusy) {
+					key = core.MsgQueryPageBusy
+				}
+				return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "warning", Content: p.cardI18n().T(key)}}, nil
+			}
+			sessionKey = resolved
+		}
+	}
+	if strings.HasPrefix(event.Event.Action.Name, cardFormSubmitPrefix) || strings.HasPrefix(event.Event.Action.Name, cardFormDraftPrefix) {
+		return p.submitCardForm(event, userID, chatID, messageID)
+	}
 
+	// Leaving a form invalidates its submission reference without submitting it.
+	p.invalidateNavigatedForm(event, userID, chatID)
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
+		target := p.beginCardUpdate(messageID, strings.TrimPrefix(strings.TrimPrefix(actionVal, "nav:"), "act:"))
 		if messageID != "" {
 			p.cardActionMsgMu.Lock()
 			if p.cardActionMsgIDs == nil {
@@ -850,11 +950,11 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 			select {
 			case card := <-done:
-				if card != nil {
+				if card != nil && (target == nil || target.active.Load()) {
 					return &callback.CardActionTriggerResponse{
 						Card: &callback.Card{
 							Type: "raw",
-							Data: renderCardMap(card, sessionKey),
+							Data: renderPanelCardMap(card, sessionKey),
 						},
 					}, nil
 				}
@@ -862,6 +962,17 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				go func() {
 					card := <-done
 					if card == nil {
+						return
+					}
+					if target != nil && !target.active.Load() {
+						return
+					}
+					if updater, ok := p.self.(interface {
+						refreshCardTarget(context.Context, *cardUpdateTarget, string, *core.Card) error
+					}); ok && target != nil {
+						if err := updater.refreshCardTarget(context.Background(), target, sessionKey, card); err != nil {
+							slog.Warn(p.tag()+": async card refresh failed", "action", actionVal, "err", err)
+						}
 						return
 					}
 					if refresher, ok := p.self.(core.CardRefresher); ok {
@@ -886,6 +997,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return nil, nil
 	}
 
+	if event.Event.Action.Name == "cc_question_submit" && queryAction {
+		answer, ok := event.Event.Action.FormValue["answer"].(string)
+		if !ok || strings.TrimSpace(answer) == "" {
+			return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "warning", Content: p.cardI18n().T(core.MsgExecEmptyAnswer)}}, nil
+		}
+		go p.dispatchCoreMessage(&core.Message{SessionKey: sessionKey, Platform: p.platformName, UserID: userID, ChannelID: chatID, Content: answer, LiteralAnswer: true, IsPermissionResponse: true, PermissionToken: permissionToken, ReplyCtx: replyContext{chatID: chatID, sessionKey: sessionKey, messageID: messageID}})
+		return nil, nil
+	}
 	// perm: — permission response with in-place card update
 	if strings.HasPrefix(actionVal, "perm:") {
 		var responseText string
@@ -910,7 +1029,14 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			Content:              responseText,
 			ReplyCtx:             rctx,
 			IsPermissionResponse: true,
+			PermissionToken:      permissionToken,
+			ChannelID:            chatID,
 		})
+		// The event loop owns the query card. An inline callback replacement
+		// could arrive after the next streamed update and erase the answer.
+		if queryAction {
+			return nil, nil
+		}
 
 		permLabel, _ := event.Event.Action.Value["perm_label"].(string)
 		permColor, _ := event.Event.Action.Value["perm_color"].(string)
@@ -925,7 +1051,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
-				Data: renderCardMap(cb.Build(), sessionKey),
+				Data: renderPanelCardMap(cb.Build(), sessionKey),
 			},
 		}, nil
 	}
@@ -934,14 +1060,20 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	if strings.HasPrefix(actionVal, "askq:") {
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 		go p.dispatchCoreMessage(&core.Message{
-			SessionKey: sessionKey,
-			Platform:   p.platformName,
-			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
-			Content:    actionVal,
-			ReplyCtx:   rctx,
+			SessionKey:           sessionKey,
+			Platform:             p.platformName,
+			UserID:               userID,
+			UserName:             p.resolveUserName(userID),
+			ChatName:             p.resolveChatName(chatID),
+			Content:              actionVal,
+			ReplyCtx:             rctx,
+			IsPermissionResponse: queryAction,
+			PermissionToken:      permissionToken,
+			ChannelID:            chatID,
 		})
+		if queryAction {
+			return nil, nil
+		}
 
 		answerLabel, _ := event.Event.Action.Value["askq_label"].(string)
 		askqQuestion, _ := event.Event.Action.Value["askq_question"].(string)
@@ -956,7 +1088,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
-				Data: renderCardMap(cb.Build(), sessionKey),
+				Data: renderPanelCardMap(cb.Build(), sessionKey),
 			},
 		}, nil
 	}
@@ -965,6 +1097,16 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	if strings.HasPrefix(actionVal, "cmd:") {
 		cmdText := strings.TrimPrefix(actionVal, "cmd:")
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		if _, hasReplacement := event.Event.Action.Value["after_click"]; !hasReplacement && event.Event.Action.Value["reuse_card"] == "true" {
+			rctx.cardUpdate = p.beginCardUpdate(messageID, cmdText)
+		}
+		// Opening a creation form from Help may reuse only server-observed chat
+		// metadata. Never trust a private-chat flag supplied by a card callback.
+		if cmdText == "/team permissions" || strings.HasPrefix(cmdText, "/team permissions ") || cmdText == "/team bot create" || cmdText == "/team labels" || strings.HasPrefix(cmdText, "/team labels ") {
+			if chatType, ok := p.cardChatTypes.Load(chatID); ok {
+				rctx.chatType, rctx.senderType = chatType.(string), "user"
+			}
+		}
 
 		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
 
@@ -996,7 +1138,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				return &callback.CardActionTriggerResponse{
 					Card: &callback.Card{
 						Type: "raw",
-						Data: renderCardMap(cb.Build(), sessionKey),
+						Data: renderPanelCardMap(cb.Build(), sessionKey),
 					},
 				}, nil
 			}
@@ -1498,6 +1640,9 @@ func (p *Platform) groupHistoryScope(msg *larkim.EventMessage, chatID string) st
 	if chatID == "" {
 		return ""
 	}
+	if msg != nil && p.taskThreadResolver != nil && stringValue(msg.RootId) != "" && p.taskThreadResolver(chatID, stringValue(msg.RootId)) {
+		return "thread:" + chatID + ":" + stringValue(msg.RootId)
+	}
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
 		if rootID := stringValue(msg.RootId); rootID != "" {
 			return "thread:" + chatID + ":" + rootID
@@ -1761,9 +1906,39 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// Pre-compute sessionKey so the @bot filter below can consult the active
 	// thread set; sessionKey is also used downstream for dispatch.
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
+	decision, decisionReply := p.findDecisionReply(chatID, stringValue(msg.ParentId), stringValue(msg.RootId))
+	if decisionReply {
+		if decision.foreign || decision.user != userID {
+			return nil
+		}
+		sessionKey = decision.session
+	}
 	botOpenID := p.getBotOpenID()
+	// Team messages are delivered exactly once by the coordinator after the
+	// mentioned IM message is persisted. Ignore its asynchronous IM echo.
+	if chatType == "group" && p.taskThreadResolver != nil && p.taskThreadResolver(chatID, "") && (senderType == "app" || senderType == "bot" || userID == botOpenID) {
+		return nil
+	}
 	filterActive := botOpenID != "" || p.IsGroupFilterDegraded()
+	groupReplyAll := p.groupReplyAll || decisionReply
 	botMentioned := botOpenID != "" && isBotMentioned(msg.Mentions, botOpenID)
+	if chatType == "group" && p.groupMessagePolicy != nil {
+		policy := p.groupMessagePolicy(sessionKey, userID)
+		// Check before reply-all, decision replies, @all, and active attachment
+		// threads can admit a message. Unknown bot identity also fails closed.
+		if policy.RequireMention && !botMentioned {
+			slog.Debug(p.tag()+": project group message requires direct bot mention", "chat_id", chatID)
+			return nil
+		}
+		if policy.DefaultReceiver {
+			// Runtime-owned results arrive through the coordinator, not IM echoes.
+			if senderType != "user" || userID == botOpenID {
+				return nil
+			}
+			groupReplyAll = groupReplyAll || len(msg.Mentions) == 0
+		}
+	}
+
 	atEveryone := p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all")
 
 	// With history sharing enabled, observe ordinary text/post messages only
@@ -1771,7 +1946,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// existing mention filter and before allow_from: the chat controls whether
 	// cc-connect may observe the conversation, while allow_from controls who may
 	// trigger an agent turn.
-	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" &&
+	if p.groupChatHistoryShare && chatType == "group" && !groupReplyAll && botOpenID != "" &&
 		!botMentioned && !atEveryone && isGroupHistoryMessageType(msgType) {
 		if !core.AllowList(p.allowChat, chatID) {
 			slog.Debug(p.tag()+": group history ignored for unauthorized chat", "chat_id", chatID)
@@ -1790,7 +1965,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// rest of the process lifetime. We now consult both flags: when
 	// the filter is degraded we fail closed (drop the message) and
 	// emit a periodic warning, instead of failing open.
-	if chatType == "group" && !p.groupReplyAll && filterActive {
+	if chatType == "group" && !groupReplyAll && filterActive {
 		if !botMentioned {
 			switch {
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
@@ -1857,9 +2032,12 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
 
-	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, chatType: chatType, senderType: senderType}
+	if decisionReply {
+		rctx.decisionToken = decision.token
+	}
 	var groupHistoryCtx groupHistoryContext
-	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" && (botMentioned || atEveryone) {
+	if p.groupChatHistoryShare && chatType == "group" && !groupReplyAll && botOpenID != "" && (botMentioned || atEveryone) {
 		scope := p.groupHistoryScope(msg, chatID)
 		if p.isGroupHistoryNewCommand(msgType, content, mentions) {
 			p.resetGroupHistory(scope)
@@ -1929,11 +2107,16 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 	// exception: earlier unmentioned messages were never dispatched to the
 	// agent, so bootstrap its context from the parent/root reply chain once.
 	var quoted quotedMessage
-	if parentID != "" && (!p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread) {
+	if rctx.decisionToken == "" && parentID != "" && (!p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread) {
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
 	historyText := p.formatGroupHistory(groupHistoryCtx)
 	dispatchCore := func(msg *core.Message) {
+		if rctx.decisionToken != "" && !strings.HasPrefix(strings.TrimSpace(msg.Content), "/") {
+			msg.IsPermissionResponse = true
+			msg.PermissionToken = rctx.decisionToken
+			msg.ChannelID = chatID
+		}
 		if historyText != "" {
 			msg.ExtraContent = joinFeishuExtraContent(historyText, msg.ExtraContent)
 			msg.OnAccepted = groupHistoryCtx.onAccepted
@@ -2828,7 +3011,7 @@ func extractPostPlainText(content string) string {
 				} else if elem.Text != "" {
 					line = append(line, elem.Text)
 				}
-			case "markdown":
+			case "markdown", "md":
 				if elem.Text != "" {
 					line = append(line, elem.Text)
 				}
@@ -3317,6 +3500,9 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
+	if handled, err := p.replyCardText(ctx, rc, content); handled {
+		return err
+	}
 
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
@@ -3336,7 +3522,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	if p.shouldUseThreadOrReplyAPI(rc) {
+	if rc.cardUpdate != nil || p.shouldUseThreadOrReplyAPI(rc) {
 		return p.Reply(ctx, rctx, content)
 	}
 
@@ -3355,6 +3541,12 @@ func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, 
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if rc.cardUpdate != nil {
+		if strings.TrimSpace(footer) != "" {
+			content += "\n\n" + footer
+		}
+		return p.Reply(ctx, rctx, content)
 	}
 	// Resolve mentions first so we can detect whether a real @mention is
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
@@ -4097,6 +4289,9 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 // TODO: Session-key derivation and reply-thread behavior are split across multiple code paths here.
 // Should revisit thread/root handling without changing thread_isolation=false behavior.
 func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
+	if msg != nil && p.taskThreadResolver != nil && stringValue(msg.RootId) != "" && p.taskThreadResolver(chatID, stringValue(msg.RootId)) {
+		return p.TaskConversationKey(chatID, stringValue(msg.RootId))
+	}
 	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
 		rootID := stringValue(msg.RootId)
 		if rootID == "" {
@@ -4125,10 +4320,10 @@ func (p *Platform) sessionKeyFromCardAction(chatID, userID string, value map[str
 }
 
 func (p *Platform) shouldReplyInThread(rc replyContext) bool {
-	if rc.messageID == "" {
+	if rc.messageID == "" || rc.forceChatReply || p.isTaskThread(rc) {
 		return false
 	}
-	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
+	return (p.threadIsolation || p.isTaskThread(rc)) && isThreadSessionKey(rc.sessionKey)
 }
 
 // shouldUseThreadOrReplyAPI is true when we should call Im.Message.Reply (optionally with ReplyInThread).
@@ -4136,7 +4331,7 @@ func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
-	return !p.noReplyToTrigger
+	return rc.forceChatReply || !p.noReplyToTrigger || p.isTaskThread(rc)
 }
 
 func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, msgType, content string) error {
@@ -4152,6 +4347,8 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 		Content(content)
 	if p.shouldReplyInThread(rc) {
 		body.ReplyInThread(true)
+	} else if rc.forceChatReply || p.isTaskThread(rc) {
+		body.ReplyInThread(false)
 	}
 	return body.Build()
 }
@@ -5787,7 +5984,7 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 					lang := elem.Language
 					textParts = append(textParts, "```"+lang+"\n"+elem.Text+"\n```")
 				}
-			case "markdown":
+			case "markdown", "md":
 				if elem.Text != "" {
 					textParts = append(textParts, elem.Text)
 				}

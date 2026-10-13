@@ -103,6 +103,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/cron/exec", s.handleCronExec)
 	s.mux.HandleFunc("/cron/run", s.handleCronExec)
 	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
+	s.mux.HandleFunc("/team/action", s.handleTeamAction)
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
 	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
 
@@ -117,6 +118,11 @@ func (s *APIServer) RegisterEngine(name string, e *Engine) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.engines[name] = e
+	// Agent control commands must reach this listener, even when session
+	// history lives in a separate per-bot/project namespace.
+	if s.socketPath != "" {
+		e.SetDataDir(filepath.Dir(filepath.Dir(s.socketPath)))
+	}
 	if s.relay != nil {
 		s.relay.RegisterEngine(name, e)
 	}
@@ -830,4 +836,29 @@ func (s *APIServer) handleRelayBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiJSON(w, http.StatusOK, binding)
+}
+
+func (s *APIServer) handleTeamAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req TeamActionRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	e := s.engines[req.From]
+	s.mu.RUnlock()
+	if e == nil {
+		http.Error(w, "manager not found", http.StatusNotFound)
+		return
+	}
+	result, err := e.RunTeamAction(r.Context(), req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	apiJSON(w, http.StatusOK, map[string]string{"result": result})
 }

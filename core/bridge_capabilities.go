@@ -79,6 +79,14 @@ func (e *Engine) GetBridgePublishedCommands() []bridgePublishedCommand {
 		})
 	}
 
+	for _, command := range e.managementCommands() {
+		if disabledCmds[command.Command] {
+			continue
+		}
+		seen[command.Command] = true
+		commands = append(commands, bridgePublishedCommand{Name: command.Command, Description: command.Description, Source: bridgeCommandSourceBuiltin, ArgsMode: bridgeCommandArgsModeText})
+	}
+
 	customCommands := e.commands.ListAll()
 	sort.Slice(customCommands, func(i, j int) bool {
 		return strings.ToLower(customCommands[i].Name) < strings.ToLower(customCommands[j].Name)

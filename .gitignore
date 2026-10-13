@@ -40,6 +40,7 @@ vendor/
 config.toml
 config.*.toml
 !config.example.toml
+!config.agent-team.example.toml
 .env
 *.local.toml
 
@@ -48,6 +49,9 @@ config.*.toml
 
 # CC-Connect runtime state
 .cc-connect/
+
+# Local snapshots downloaded while reviewing design documents
+doc-fetch-resources/
 
 # npm / pnpm (for npm package distribution and web admin)
 .npmrc

@@ -31,6 +31,8 @@ package core
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -40,6 +42,44 @@ import (
 	"testing"
 	"time"
 )
+
+// CUJ: no workspace binding is needed to provision an identity. Only a private
+// admin request starts registration, duplicate requests do not create another
+// app, and cancellation leaves ordinary /new session behavior available.
+func TestCUJ_Bot1_CreateCancelAndNewSession(t *testing.T) {
+	e, p, calls, finished := newBotCreationCUJ(t)
+	send := func(user, content, ctx string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:" + user, UserID: user, Content: content, ReplyCtx: ctx})
+	}
+	send("visitor", "/new bot developer", "private-user")
+	awaitBotText(t, p, "admin")
+	send("owner", "/new bot developer", "group-user")
+	awaitBotText(t, p, e.i18n.T(MsgBotPrivateOnly))
+	send("owner", "/new bot developer", "private-user")
+	awaitBotText(t, p, "https://example.invalid/register")
+	send("owner", "/new bot another", "private-user")
+	awaitBotText(t, p, e.i18n.T(MsgBotBusy))
+	if calls.Load() != 1 {
+		t.Fatalf("registrations=%d", calls.Load())
+	}
+	send("owner", "/new bot cancel", "private-user")
+	awaitBotText(t, p, e.i18n.T(MsgBotCancelled))
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("cancel did not reach registration")
+	}
+
+	// Existing session creation remains functional outside multi-workspace init.
+	env := newCUJEnv(t)
+	t.Cleanup(func() { env.engine.Stop() })
+	env.userSends("owner", "/new first")
+	env.userSends("owner", "/new second")
+	env.userSends("owner", "/current")
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "second") {
+		t.Fatal("/new no longer creates named sessions")
+	}
+}
 
 // CUJ: submit work during slow startup, queue a follow-up while the agent is
 // working, then check status. Both messages have receipts before either answer;
@@ -103,7 +143,7 @@ type cujAgent struct {
 
 func (a *cujAgent) Name() string { return "cuj" }
 
-func (a *cujAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+func (a *cujAgent) StartSession(_ context.Context, resumeID string) (AgentSession, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.failStartCount > 0 {
@@ -116,6 +156,7 @@ func (a *cujAgent) StartSession(_ context.Context, _ string) (AgentSession, erro
 	}
 	a.nextID++
 	s := newCUJAgentSession()
+	s.resumeID = resumeID
 	a.sessions = append(a.sessions, s)
 	s.pendingEvents = a.nextSessionEvents
 	s.pendingDelayMs = a.nextSessionDelayMs
@@ -133,9 +174,10 @@ func (a *cujAgent) Stop() error { return nil }
 // Tests can set reply (and optionally toolEvent) before each Send to drive
 // scenarios like "agent calls tool", "agent returns error", "agent succeeds".
 type cujAgentSession struct {
-	events chan Event
-	closed atomic_bool
-	mu     sync.Mutex
+	resumeID string
+	events   chan Event
+	closed   atomic_bool
+	mu       sync.Mutex
 
 	// per-call control: tests set these BEFORE driving the engine
 	reply   string // what to send back as EventResult
@@ -689,6 +731,26 @@ type startSessionError struct{ msg string }
 func (e *startSessionError) Error() string { return e.msg }
 
 func TestCUJ_G1_LLMFailureSurfacesErrorToUser(t *testing.T) {
+	t.Run("repository policy explains required action and allows explicit retry", func(t *testing.T) {
+		env := newCUJEnv(t)
+		defer env.engine.Stop()
+		env.engine.i18n.SetLang(LangChinese)
+		env.agent.setNextSessionEvents([]Event{{Type: EventError, Error: &AgentDiagnosticError{Key: MsgModelRepositoryPolicyDenied, Cause: errors.New("Internal error")}}}, 0)
+		env.userSends("policy", "run verification")
+		want := env.engine.i18n.T(MsgModelRepositoryPolicyDenied)
+		env.waitFor("actionable error", 2*time.Second, func() bool { return strings.Contains(strings.Join(env.plat.getSent(), "\n"), want) })
+		if strings.Contains(strings.Join(env.plat.getSent(), "\n"), "Internal error") {
+			t.Fatal("generic RPC error hid the recovery action")
+		}
+		awaitQuery(t, func() bool { return !env.activeSession("test:policy").Busy() })
+		env.userSends("policy", "/status")
+		env.plat.clearSent()
+		env.userSends("policy", "retry after selecting an approved model")
+		env.waitFor("explicit retry answer", 2*time.Second, func() bool { return strings.Contains(strings.Join(env.plat.getSent(), "\n"), "ok") })
+		if strings.Contains(strings.Join(env.plat.getSent(), "\n"), "4037") {
+			t.Fatal("previous failure leaked into a successful retry")
+		}
+	})
 	plat := &stubPlatformEngine{n: "test"}
 	agent := &failingAgent{}
 	agent.failNext.Set(true)
@@ -2550,4 +2612,1252 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 	e.ReceiveMessage(p, skillMessage(p.Name(), "a", "/skills"))
 	sent := p.getSent()
 	assertWorkspaceSkills(t, sent[len(sent)-1], "b", "a")
+}
+
+// CUJ: one bot works on two projects sharing a directory, returns to each one's
+// history, and resumes the selection and history after a process restart.
+func TestCUJ_Project1_SwitchAndRestartPreserveIndependentHistory(t *testing.T) {
+	dir := t.TempDir()
+	env := newProjectCUJ(t, dir, "dev")
+	env.userSends("u", "/project use a")
+	env.userSends("u", "private project A input")
+	env.waitFor("A result", time.Second, func() bool { return strings.Contains(strings.Join(env.plat.getSent(), "\n"), "finished-a") })
+	env.userSends("u", "/project use b")
+	env.userSends("u", "private project B input")
+	env.waitFor("B result", time.Second, func() bool { return strings.Contains(strings.Join(env.plat.getSent(), "\n"), "finished-b") })
+	check := func(want, avoid string) {
+		env.plat.clearSent()
+		env.userSends("u", "/history")
+		env.waitFor("history", time.Second, func() bool { return len(env.plat.getSent()) > 0 })
+		out := strings.Join(env.plat.getSent(), "\n")
+		if !strings.Contains(out, want) || strings.Contains(out, avoid) {
+			t.Fatalf("cross-project history: %s", out)
+		}
+	}
+	check("project B input", "project A input")
+	env.userSends("u", "/project use a")
+	check("project A input", "project B input")
+	if err := env.engine.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	env = newProjectCUJ(t, dir, "dev")
+	defer env.engine.Stop()
+	check("project A input", "project B input")
+	env.userSends("u", "/project use b")
+	check("project B input", "project A input")
+	env.plat.clearSent()
+	env.userSends("u", "continue project B")
+	env.waitFor("B resumed", time.Second, func() bool { return strings.Contains(strings.Join(env.plat.getSent(), "\n"), "finished-b") })
+	r := env.engine.projectRouter
+	r.mu.Lock()
+	native := r.children["b"].agent.(*projectCUJAgent)
+	r.mu.Unlock()
+	native.mu.Lock()
+	defer native.mu.Unlock()
+	if len(native.resumes) != 1 || native.resumes[0] != "native-dev-b" {
+		t.Fatalf("wrong native session resumed: %v", native.resumes)
+	}
+}
+
+func TestCUJ_Project2_BotsAndUsersHaveIndependentSelections(t *testing.T) {
+	dir := t.TempDir()
+	one := newProjectCUJ(t, dir, "one")
+	two := newProjectCUJ(t, dir, "two")
+	defer one.engine.Stop()
+	defer two.engine.Stop()
+	one.userSends("alice", "/project use a")
+	one.userSends("alice", "private alice-a")
+	one.userSends("bob", "/project use b")
+	one.userSends("bob", "private bob-b")
+	two.userSends("alice", "/project use a")
+	two.userSends("alice", "private other-bot-a")
+	for _, tc := range []struct {
+		e                 *cujEnv
+		user, want, avoid string
+	}{
+		{one, "alice", "alice-a", "other-bot-a"}, {one, "bob", "bob-b", "alice-a"}, {two, "alice", "other-bot-a", "alice-a"},
+	} {
+		tc.e.waitFor("result", time.Second, func() bool { return strings.Contains(strings.Join(tc.e.plat.getSent(), "\n"), "finished-") })
+		tc.e.plat.clearSent()
+		tc.e.userSends(tc.user, "/history")
+		out := strings.Join(tc.e.plat.getSent(), "\n")
+		if !strings.Contains(out, tc.want) || strings.Contains(out, tc.avoid) {
+			t.Fatalf("wrong context: %s", out)
+		}
+	}
+}
+
+func TestCUJ_Project3_SwitchDuringTurnKeepsOriginalHistory(t *testing.T) {
+	env := newProjectCUJ(t, t.TempDir(), "dev")
+	defer env.engine.Stop()
+	r := env.engine.projectRouter
+	original := r.factory
+	r.factory = func(bp BusinessProject) (*Engine, error) {
+		child, err := original(bp)
+		if err == nil && bp.ID == "a" {
+			child.agent.(*projectCUJAgent).inner.nextSessionDelayMs = 100
+		}
+		return child, err
+	}
+	env.userSends("u", "/project use a")
+	env.userSends("u", "slow project A input")
+	env.userSends("u", "/project use b")
+	env.userSends("u", "/new B stays empty")
+	env.waitFor("A finishes after switch", time.Second, func() bool { return strings.Contains(strings.Join(env.plat.getSent(), "\n"), "finished-a") })
+	env.plat.clearSent()
+	env.userSends("u", "/history")
+	if strings.Contains(strings.Join(env.plat.getSent(), "\n"), "slow project A input") {
+		t.Fatal("late A result entered B history")
+	}
+	env.userSends("u", "/project use a")
+	env.plat.clearSent()
+	env.userSends("u", "/history")
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "slow project A input") {
+		t.Fatal("A history lost during switch")
+	}
+}
+
+// CUJ: a legacy initialized manager must be claimed privately before any project
+// lookup or agent work; the owner can then use the independent control session.
+func TestCUJ_Project4_ManagerPairingBeforeProjectSelection(t *testing.T) {
+	p := &botCreationTestPlatform{&stubPlatformEngine{n: "test"}}
+	e := NewEngine("manager-main", &cujAgent{}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	defer e.Stop()
+	r, err := NewProjectRouter("manager-main", true, nil, "", func(BusinessProject) (*Engine, error) {
+		t.Fatal("no project should be instantiated")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetProjectRouter(r)
+	token := "one-time-private-setup-token"
+	hash := sha256.Sum256([]byte(token))
+	e.SetBotOwnership(hex.EncodeToString(hash[:]), "", func(string) error { return nil })
+	send := func(user, content, scope string, want string) {
+		p.clearSent()
+		e.ReceiveMessage(p, &Message{Platform: p.Name(), UserID: user, SessionKey: "test:" + user, Content: content, ReplyCtx: scope})
+		out := strings.Join(p.getSent(), "\n")
+		if !strings.Contains(out, want) || strings.Contains(out, token) {
+			t.Fatalf("unexpected reply: %s", out)
+		}
+	}
+	send("owner", "/project list", "private-user", e.i18n.T(MsgBotUnclaimed))
+	send("owner", "/new claim "+token, "group-user", e.i18n.T(MsgBotUnclaimed))
+	send("owner", "/new claim invalid", "private-user", e.i18n.T(MsgBotClaimInvalid))
+	send("owner", "/new claim "+token, "private-user", e.i18n.T(MsgBotClaimed))
+	send("stranger", "/project list", "private-user", e.i18n.T(MsgBotOwnerRequired))
+	send("owner", "/project list", "private-user", e.i18n.T(MsgProjectUsage))
+	send("owner", "/new manager-control", "private-user", "manager-control")
+	send("owner", "/new claim "+token, "private-user", e.i18n.T(MsgBotClaimInvalid))
+}
+
+// CUJ: after QR registration the scanner can use the manager immediately;
+// arriving first gives other users no ownership, including after a restart.
+func TestCUJ_Project5_AutomaticallyOwnedManager(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	for restart := 0; restart < 2; restart++ {
+		p := &botCreationTestPlatform{&stubPlatformEngine{n: "test"}}
+		e := NewEngine("manager-main", &cujAgent{}, []Platform{p}, path, LangEnglish)
+		r, err := NewProjectRouter("manager-main", true, nil, "", func(BusinessProject) (*Engine, error) {
+			t.Fatal("no project should be instantiated")
+			return nil, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.SetProjectRouter(r)
+		e.SetBotOwnership("", "scanner", nil)
+		e.SetAdminFrom("scanner")
+		send := func(user, content, want string) {
+			p.clearSent()
+			e.ReceiveMessage(p, &Message{Platform: p.Name(), UserID: user, SessionKey: "test:" + user, Content: content, ReplyCtx: "private-user"})
+			out := strings.Join(p.getSent(), "\n")
+			if !strings.Contains(out, want) || strings.Contains(out, e.i18n.T(MsgBotUnclaimed)) {
+				t.Fatalf("unexpected reply: %s", out)
+			}
+		}
+		send("first-stranger", "/project list", e.i18n.T(MsgBotOwnerRequired))
+		send("scanner", "/project list", e.i18n.T(MsgProjectUsage))
+		send("scanner", "/new ready-control", "ready-control")
+		send("scanner", "/new claim anything", e.i18n.T(MsgBotClaimInvalid))
+		send("parent-app-id", "/new takeover", e.i18n.T(MsgBotOwnerRequired))
+		e.Stop()
+	}
+}
+
+// Team projects use ordinary commands and group routing, without a project
+// selection step or the experimental v2 command allowlist.
+// Forms are an alternate input surface, never an authorization bypass.
+func TestCUJ_TeamForms_SubmissionRechecksManagementPermissions(t *testing.T) {
+	for _, tc := range []struct{ name, command, field, input string }{
+		{"project", "/project create", "id", "shop"},
+		{"team", "/team members dev", "role", "reviewer"},
+		{"team", "/team labels save", "bot_labels", "ofg_bot"},
+		{"team", "/team permissions dev", "bot", "dev"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, p := teamTestEngine(t, t.TempDir(), "manager")
+			defer e.Stop()
+			handler := func(_ context.Context, _ Platform, msg *Message, _ []string) (string, error) {
+				if msg.FormValues == nil {
+					return "Form opened: " + tc.name, nil
+				}
+				return "Saved: " + msg.FormValues[tc.field][0], nil
+			}
+			if tc.name == "project" {
+				e.SetProjectCommand(handler)
+			} else {
+				e.SetTeamProjects(e.teamProjects, handler)
+			}
+			send := func(user string, values map[string][]string, want string) {
+				p.clearSent()
+				e.ReceiveMessage(p, &Message{UserID: user, SessionKey: "test:private:" + user, Content: tc.command, ReplyCtx: "private", FormValues: values})
+				teamReply(t, p, want)
+			}
+			values := map[string][]string{tc.field: {tc.input}}
+			send("owner", nil, "Form opened")
+			e.SetDisabledCommands([]string{tc.name})
+			send("owner", values, "disabled")
+			e.SetDisabledCommands(nil)
+			send("stranger", values, "admin")
+			send("owner", values, "Saved: "+tc.input)
+			p.clearSent()
+			teamSend(e, p, "private", "/model")
+			teamReply(t, p, "gpt-4.1-mini")
+		})
+	}
+}
+
+func TestCUJ_Team1_GroupRoutingPreservesNativeCommands(t *testing.T) {
+	dir := t.TempDir()
+	e, p := teamTestEngine(t, dir, "manager")
+	for _, step := range []struct{ group, command, want string }{
+		{"private", "/model", "gpt-4.1-mini"},
+		{"group-a", "/model switch gpt-4.1", "gpt-4.1"},
+		{"group-b", "/model", "gpt-4.1-mini"},
+		{"group-a", "/model", "Current model: gpt-4.1"},
+		{"group-a", "/workspace", dir},
+		{"group-b", "/help", "/model"},
+	} {
+		p.clearSent()
+		teamSend(e, p, step.group, step.command)
+		teamReply(t, p, step.want)
+		if strings.Contains(strings.Join(p.getSent(), "\n"), "disabled") {
+			t.Fatal("native command blocked")
+		}
+	}
+	e.Stop()
+	restored, rp := teamTestEngine(t, dir, "manager")
+	defer restored.Stop()
+	teamSend(restored, rp, "group-a", "/model")
+	teamReply(t, rp, "Current model: gpt-4.1")
+}
+
+func TestCUJ_Team2_HelpSeparatesTeamsProjectsAndWorkspaces(t *testing.T) {
+	e, p := teamTestEngine(t, t.TempDir(), "manager")
+	defer e.Stop()
+	e.SetTeamProjects(e.teamProjects, func(context.Context, Platform, *Message, []string) (string, error) {
+		return e.i18n.T(MsgTeamChatUsage), nil
+	})
+	e.SetProjectCommand(func(_ context.Context, _ Platform, _ *Message, args []string) (string, error) {
+		if len(args) == 0 {
+			return e.i18n.T(MsgProjectGroupUsage), nil
+		}
+		if args[0] == "list" {
+			return "Projects: shop", nil
+		}
+		return "Project request: " + strings.Join(args, " | "), nil
+	})
+	for _, step := range []struct{ command, want, absent string }{
+		{"/help", "/project create", ""},
+		{"/team", "/team bot create", "/project create"},
+		{"/project", "/project create", "/team bot create"},
+		{"/project list", "Projects: shop", ""},
+		{"/team projects", "Projects: shop", ""},
+		{`/team project create shop "/tmp/shop repo"`, "create | shop | /tmp/shop repo", ""},
+		{"/workspace", e.baseWorkDir, "/project create"},
+	} {
+		p.clearSent()
+		group := "private"
+		if step.command == "/workspace" {
+			group = "group-a"
+		}
+		teamSend(e, p, group, step.command)
+		teamReply(t, p, step.want)
+		got := p.getSent()
+		if len(got) != 1 || (step.absent != "" && strings.Contains(got[0], step.absent)) {
+			t.Fatalf("%s: expected one response with separate responsibilities, got %v", step.command, got)
+		}
+		if step.command == "/help" && (!strings.Contains(got[0], "/model") || !strings.Contains(got[0], "/team bot create") || !strings.Contains(got[0], "/team labels") || !strings.Contains(got[0], "/team permissions")) {
+			t.Fatalf("help lost existing commands: %v", got)
+		}
+	}
+}
+
+func TestCUJ_Team3_ProjectSettingsUnifiesDirectoryAndModelControls(t *testing.T) {
+	e, _, p := projectSettingsEngines(t)
+	next := t.TempDir()
+	for _, step := range []struct{ command, want string }{
+		{"/project settings", "Scope: current project group"},
+		{"/workspace", "Scope: current project group"},
+		{"/project directory " + next, "Project settings saved"},
+		{"/dir", next},
+		{"/project bot", "Inherited from bot default"},
+		{"/model switch gpt-4.1", "gpt-4.1"},
+		{"/project bot", "Current project override"},
+		{"/project model reset", "Inherited from bot default"},
+		{"/project name Shop", "Project settings · Shop"},
+	} {
+		p.clearSent()
+		teamSend(e, p, "group-a", step.command)
+		teamReply(t, p, step.want)
+		if len(p.getSent()) != 1 {
+			t.Fatalf("%s produced multiple settings replies: %v", step.command, p.getSent())
+		}
+	}
+	p.clearSent()
+	teamSend(e, p, "group-b", "/workspace")
+	teamReply(t, p, e.baseWorkDir)
+	if strings.Contains(strings.Join(p.getSent(), "\n"), next) {
+		t.Fatal("directory crossed project groups")
+	}
+}
+
+type cujHelpPanelPlatform struct{ stubCardPlatform }
+
+func TestCUJ_Team5_HelpEditsAndRemovesAdditionalDirectories(t *testing.T) {
+	e, _, _ := directorySettingsEngines(t)
+	p := &directoryFormPlatform{cujHelpPanelPlatform: cujHelpPanelPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}}
+	send := func(command string, values map[string][]string) {
+		p.clearSent()
+		e.ReceiveMessage(p, &Message{Platform: "test", ChannelKey: "group-a", SessionKey: "test:group-a:owner", UserID: "owner", Content: command, FormValues: values, ReplyCtx: "ctx"})
+	}
+	send("/help", nil)
+	teamReply(t, &p.stubPlatformEngine, "cc-connect")
+	send("/project settings", nil)
+	teamReply(t, &p.stubPlatformEngine, "Scope: current project group")
+	send("/project directory", nil)
+	teamReply(t, &p.stubPlatformEngine, "primary working directory")
+	if len(p.forms) != 1 {
+		t.Fatal("no editable form")
+	}
+	extra := t.TempDir()
+	command := p.forms[0].Form.Command
+	send(command, map[string][]string{"primary": {e.baseWorkDir}, "additional": {extra}})
+	teamReply(t, &p.stubPlatformEngine, "Project settings saved")
+	teamReply(t, &p.stubPlatformEngine, extra)
+	send(command, map[string][]string{"primary": {extra}})
+	teamReply(t, &p.stubPlatformEngine, e.i18n.T(MsgFormExpired))
+	send("/project directory", nil)
+	send(p.forms[len(p.forms)-1].Form.Command, map[string][]string{"primary": {e.baseWorkDir}, "additional": {}})
+	teamReply(t, &p.stubPlatformEngine, "Project settings saved")
+	send("/project settings", nil)
+	teamReply(t, &p.stubPlatformEngine, e.baseWorkDir)
+	if strings.Contains(strings.Join(p.getSent(), "\n"), extra) {
+		t.Fatal("removed directory still displayed")
+	}
+}
+
+func (p *cujHelpPanelPlatform) ReplyCard(ctx context.Context, rc any, card *Card) error {
+	if err := p.stubCardPlatform.ReplyCard(ctx, rc, card); err != nil {
+		return err
+	}
+	return p.stubPlatformEngine.Reply(ctx, rc, card.RenderText())
+}
+
+func TestCUJ_Team4_HelpAndProjectSettingsKeepReturnNavigation(t *testing.T) {
+	e, _, _ := projectSettingsEngines(t)
+	e.SetTeamProjects(e.teamProjects, func(context.Context, Platform, *Message, []string) (string, error) { return "", nil })
+	p := &cujHelpPanelPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+	e.OnPlatformReady(p)
+	for _, step := range []struct{ command, want, back string }{
+		{"/help", "cc-connect", "nav:/help project"},
+		{"/project settings", "Scope: current project group", "nav:/help project"},
+		{"/project bot", "Inherited from bot default", "cmd:/project settings"},
+		{"/project settings", "Scope: current project group", "nav:/help project"},
+		{"/help", "cc-connect", "nav:/help team"},
+	} {
+		p.clearSent()
+		e.ReceiveMessage(p, &Message{Platform: "test", SessionKey: "test:group-a:owner", ChannelKey: "group-a", UserID: "owner", Content: step.command, ReplyCtx: "ctx"})
+		teamReply(t, &p.stubPlatformEngine, step.want)
+		if len(p.getSent()) != 1 {
+			t.Fatalf("%s should show one page: %v", step.command, p.getSent())
+		}
+		p.mu.Lock()
+		card := p.repliedCards[len(p.repliedCards)-1]
+		p.mu.Unlock()
+		if _, ok := findCardAction(card, step.back); !ok {
+			t.Fatalf("%s is missing return/section navigation %s: %s", step.command, step.back, card.RenderText())
+		}
+		if !card.Reusable {
+			t.Fatalf("%s lost panel metadata while rendering", step.command)
+		}
+	}
+}
+
+// Model/effort options arrive at runtime. Opening settings before any chat,
+// switching models, rejecting a setting and returning to history are one user
+// journey, for text commands as well as the separate card navigation tests.
+func TestCUJ_ACP1_RuntimeConfigBeforeChatAndHistory(t *testing.T) {
+	e, a := newRuntimeConfigEngine(t)
+	p := &stubPlatformEngine{n: "test"}
+	send := func(command, want string) {
+		t.Helper()
+		p.clearSent()
+		e.ReceiveMessage(p, &Message{SessionKey: "test:alice", UserID: "alice", Content: command, ReplyCtx: "alice"})
+		if got := strings.Join(p.getSent(), "\n"); !strings.Contains(got, want) {
+			t.Fatalf("%s: want %q, got %q", command, want, got)
+		}
+	}
+	send("/model", "smart")
+	send("/reasoning", "low")
+	send("/mode", e.i18n.T(MsgModeNotSupported))
+	// Seed a previous conversation to check user-visible history after settings.
+	s := e.sessions.GetOrCreateActive("test:alice")
+	s.AddHistory("user", "remember this conversation")
+	s.SetAgentSessionID("existing", "smart")
+	send("/reasoning high", "high")
+	send("/history", "remember this conversation")
+	send("/model switch fast", "fast")
+	send("/reasoning", e.i18n.T(MsgReasoningNotSupported))
+	send("/model switch denied", "selection denied")
+	send("/model", "fast")
+	send("/history", "remember this conversation")
+	if a.GetModel() != "fast" {
+		t.Fatal("rejected selection became effective")
+	}
+}
+
+func TestCUJ_ACP2_SettingsAndChatShareEnvironment(t *testing.T) {
+	e, _ := newRuntimeConfigEngine(t)
+	p := &stubPlatformEngine{n: "test"}
+	send := func(content string) {
+		e.ReceiveMessage(p, &Message{Platform: "test", SessionKey: "test:alice", UserID: "alice", Content: content, ReplyCtx: "alice"})
+	}
+	send("/model")
+	if text := strings.Join(p.getSent(), "\n"); !strings.Contains(text, "smart") {
+		t.Fatal(text)
+	}
+	p.clearSent()
+	send("hello after settings")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(strings.Join(p.getSent(), "\n"), "ok") {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if text := strings.Join(p.getSent(), "\n"); !strings.Contains(text, "ok") {
+		t.Fatalf("could not chat with prepared settings: %s", text)
+	}
+	p.clearSent()
+	send("/history")
+	if text := strings.Join(p.getSent(), "\n"); !strings.Contains(text, "hello after settings") {
+		t.Fatal(text)
+	}
+}
+
+func TestCUJ_QueryCard_QuestionsRejectStaleButtons(t *testing.T) {
+	p := &queryTestPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+	a := &cujAgent{}
+	questions := []UserQuestion{{Question: "First question", Options: []UserQuestionOption{{Label: "First"}}}, {Question: "Second question", Options: []UserQuestionOption{{Label: "Second"}}}}
+	a.setNextSessionEvents([]Event{{Type: EventPermissionRequest, ToolName: "AskUserQuestion", RequestID: "one", Questions: questions}, {Type: EventResult, Content: "Finished questions", Done: true}}, 0)
+	e := NewEngine("test", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+	defer e.Stop()
+	send := func(content, token string, callback bool) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", UserID: "user", Platform: "test", Content: content, ReplyCtx: "ctx", PermissionToken: token, IsPermissionResponse: callback})
+	}
+	send("ask questions", "", false)
+	token := func() string {
+		cs := p.snapshots()
+		if len(cs) != 1 {
+			return ""
+		}
+		_, prompt, _ := cs[0].snapshot()
+		if prompt == nil {
+			return ""
+		}
+		for _, el := range prompt.Elements {
+			if row, ok := el.(CardActions); ok && len(row.Buttons) > 0 {
+				return row.Buttons[0].Extra["permission_token"]
+			}
+		}
+		return ""
+	}
+	awaitQuery(t, func() bool { return token() != "" })
+	first := token()
+	send("askq:0:1", "", true) // old legacy button cannot answer this prompt
+	if token() != first {
+		t.Fatal("legacy button advanced question")
+	}
+	send("askq:0:1", first, true)
+	awaitQuery(t, func() bool { return token() != "" && token() != first })
+	second := token()
+	send("askq:0:1", first, true) // duplicate click from the preceding question
+	if token() != second {
+		t.Fatal("stale button answered next question")
+	}
+	send("askq:1:1", second, true)
+	awaitQuery(t, func() bool { _, _, done := p.snapshots()[0].snapshot(); return done })
+	if got := p.getSent(); len(got) != 0 {
+		t.Fatalf("question flow added messages: %v", got)
+	}
+	if len(p.snapshots()) != 1 {
+		t.Fatal("questions created extra cards")
+	}
+}
+
+func TestCUJ_QueryCard_ApprovalAndNextQuery(t *testing.T) {
+	for _, decision := range []string{"allow", "deny"} {
+		t.Run(decision, func(t *testing.T) {
+			p := &queryTestPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+			a := &cujAgent{}
+			a.setNextSessionEvents([]Event{{Type: EventText, Content: "Before approval"}, {Type: EventToolUse, ToolName: "Bash", ToolInput: "test"}, {Type: EventPermissionRequest, RequestID: "req", ToolName: "Bash", ToolInput: "test"}, {Type: EventText, Content: "After approval"}, {Type: EventResult, Content: "Final answer", Done: true}}, 0)
+			e := NewEngine("test", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+			defer e.Stop()
+			send := func(text string) {
+				e.ReceiveMessage(p, &Message{SessionKey: "test:user", UserID: "user", Platform: "test", Content: text, ReplyCtx: "ctx"})
+			}
+			send("first task")
+			awaitQuery(t, func() bool {
+				cs := p.snapshots()
+				if len(cs) != 1 {
+					return false
+				}
+				_, prompt, _ := cs[0].snapshot()
+				return prompt != nil
+			})
+			send(decision)
+			awaitQuery(t, func() bool { _, _, done := p.snapshots()[0].snapshot(); return done })
+			awaitQuery(t, func() bool { return !e.sessions.GetOrCreateActive("test:user").Busy() })
+			send("second task")
+			awaitQuery(t, func() bool {
+				cs := p.snapshots()
+				if len(cs) != 2 {
+					return false
+				}
+				_, _, done := cs[1].snapshot()
+				return done
+			})
+			if got := p.getSent(); len(got) != 0 {
+				t.Fatalf("extra messages: %v", got)
+			}
+			p.mu.Lock()
+			extra := len(p.sentCards) + len(p.repliedCards)
+			p.mu.Unlock()
+			if extra != 0 {
+				t.Fatalf("extra cards: %d", extra)
+			}
+			text, _, _ := p.snapshots()[0].snapshot()
+			if !strings.Contains(text, "Final answer") {
+				t.Fatalf("final missing: %s", text)
+			}
+		})
+	}
+}
+
+func TestCUJ_QueryCard_QueuedRequestsKeepSeparateCards(t *testing.T) {
+	for _, split := range []bool{false, true} {
+		t.Run(fmt.Sprint(split), func(t *testing.T) {
+			p := &queryTestPlatform{split: split, stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+			a := &cujAgent{}
+			a.setNextSessionEvents([]Event{{Type: EventText, Content: "Working"}, {Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}, {Type: EventToolResult, ToolName: "Bash", ToolResult: "workspace"}, {Type: EventResult, Content: "First answer", Done: true}}, 100)
+			e := NewEngine("test", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+			defer e.Stop()
+			e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ToolMessages: true, CardMode: "rich"})
+			send := func(text string) {
+				e.ReceiveMessage(p, &Message{SessionKey: "test:user", UserID: "user", Platform: "test", Content: text, ReplyCtx: "ctx"})
+			}
+			send("first request")
+			awaitQuery(t, func() bool { return len(p.snapshots()) == 1 })
+			send("second request")
+			send("third request")
+			awaitQuery(t, func() bool {
+				cs := p.snapshots()
+				want := 3
+				if split {
+					want = 6
+				}
+				if len(cs) != want {
+					return false
+				}
+				_, _, done := cs[len(cs)-1].snapshot()
+				return done
+			})
+			if got := p.getSent(); len(got) != 0 {
+				t.Fatalf("queue/progress created extra messages: %v", got)
+			}
+			first, _, _ := p.snapshots()[0].snapshot()
+			if !strings.Contains(first, "workspace") || strings.Contains(first, "First answer") == split {
+				t.Fatalf("first query lost answer or tool result: %s", first)
+			}
+			next := 1
+			if split {
+				answer, _, _ := p.snapshots()[1].snapshot()
+				if answer != "First answer" {
+					t.Fatalf("bad queued first answer: %q", answer)
+				}
+				next = 2
+			}
+			for _, c := range p.snapshots()[next:] {
+				text, _, _ := c.snapshot()
+				if strings.Contains(text, "First answer") || strings.Contains(text, "workspace") {
+					t.Fatalf("old content leaked to new request: %s", text)
+				}
+			}
+
+		})
+	}
+}
+
+// Ask -> approve -> ask again. Each completed request has a process card and
+// an answer card whose first content is the conclusion, never tool history.
+func TestCUJ_QueryCard_SeparateFinalAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		toolsVisible bool
+		result       string
+	}{{true, "Conclusion first"}, {false, "Conclusion first"}, {true, ""}, {false, ""}, {true, "Conclusion first\n" + strings.Repeat("long answer line\n", 800)}} {
+		t.Run(fmt.Sprintf("%t/resultLength=%d", tc.toolsVisible, len(tc.result)), func(t *testing.T) {
+			p := &queryTestPlatform{split: true, stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+			a := &cujAgent{}
+			a.setNextSessionEvents([]Event{
+				{Type: EventText, Content: "Interim update"},
+				{Type: EventThinking, Content: "Plan summary"},
+				{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"},
+				{Type: EventPermissionRequest, RequestID: "one", ToolName: "Bash", ToolInput: "pwd"},
+				{Type: EventText, Content: "Conclusion first"},
+				{Type: EventResult, Content: tc.result, Done: true},
+			}, 0)
+			e := NewEngine("test", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+			defer e.Stop()
+			e.SetDisplayConfig(DisplayCfg{ThinkingMessages: true, ToolMessages: tc.toolsVisible})
+			send := func(content string) {
+				e.ReceiveMessage(p, &Message{SessionKey: "test:user", UserID: "user", Platform: "test", Content: content, ReplyCtx: "ctx"})
+			}
+			send("first task")
+			awaitQuery(t, func() bool {
+				cs := p.snapshots()
+				if len(cs) != 1 {
+					return false
+				}
+				_, prompt, _ := cs[0].snapshot()
+				return prompt != nil
+			})
+			send("allow")
+			awaitQuery(t, func() bool { return len(p.snapshots()) == 2 })
+			process, prompt, done := p.snapshots()[0].snapshot()
+			answer, _, answerDone := p.snapshots()[1].snapshot()
+			if !done || !answerDone || prompt != nil || strings.Contains(process, "Conclusion first") || !strings.Contains(process, "Plan summary") || !strings.Contains(process, "Interim update") {
+				t.Fatalf("incorrect process card: %s", process)
+			}
+			if !strings.HasPrefix(answer, "Conclusion first") || strings.Contains(answer, "Interim update") || strings.Contains(answer, "Plan summary") || strings.Contains(answer, "pwd") {
+				t.Fatalf("answer buried in process: %s", answer)
+			}
+			if tc.result != "" && answer != strings.TrimSpace(tc.result) {
+				t.Fatal("long conclusion was truncated before reaching the platform")
+			}
+			awaitQuery(t, func() bool { return !e.sessions.GetOrCreateActive("test:user").Busy() })
+			send("second task")
+			awaitQuery(t, func() bool { return len(p.snapshots()) == 4 })
+			secondProcess, _, _ := p.snapshots()[2].snapshot()
+			secondAnswer, _, _ := p.snapshots()[3].snapshot()
+			if secondProcess != "" || secondAnswer != "ok" {
+				t.Fatalf("next request mixed with previous process: %q / %q", secondProcess, secondAnswer)
+			}
+			if got := p.getSent(); len(got) != 0 {
+				t.Fatalf("extra messages: %v", got)
+			}
+		})
+	}
+}
+
+// User assigns work -> member reports -> user requests a fix -> manager receives
+// the failure -> user asks for status. Member outputs do not need IM mentions.
+func TestCUJ_TeamCoordination_ManagerReceivesMemberResults(t *testing.T) {
+	manager, dev, mp, dp, agent, store := coordinatorFixture(t)
+	send := func(e *Engine, p Platform, text string) {
+		e.ReceiveMessage(p, &Message{Platform: "test", SessionKey: "test:group:owner", UserID: "owner", ReplyCtx: "ctx", Content: text})
+	}
+	send(manager, mp, "coordinate this project")
+	awaitQuery(t, func() bool { return len(mp.snapshots()) == 2 })
+	agent.setNextSessionEvents([]Event{{Type: EventResult, Content: "Plan saved in docs/plan.md; ready for development", Done: true}}, 0)
+	send(dev, dp, "prepare the plan")
+	awaitQuery(t, func() bool { return len(mp.snapshots()) == 4 })
+	awaitQuery(t, func() bool { return !dev.sessions.GetOrCreateActive("test:group:owner").Busy() })
+	agent.mu.Lock()
+	session := agent.sessions[0]
+	agent.mu.Unlock()
+	session.mu.Lock()
+	session.nextEventOverride = &Event{Type: EventError, Error: fmt.Errorf("build fails: missing dependency")}
+	session.mu.Unlock()
+	send(dev, dp, "implement the plan")
+	awaitQuery(t, func() bool { return len(mp.snapshots()) == 6 })
+	awaitQuery(t, func() bool { return !manager.sessions.GetOrCreateActive("test:group:owner").Busy() })
+	send(manager, mp, "what is blocking progress?")
+	awaitQuery(t, func() bool { return len(mp.snapshots()) == 8 })
+	ma := manager.agent.(*coordinationAgent).cujAgent
+	ma.mu.Lock()
+	ms := ma.sessions[0]
+	ma.mu.Unlock()
+	prompts := strings.Join(ms.getSentPrompts(), "\n")
+	if !strings.Contains(prompts, "docs/plan.md") || !strings.Contains(prompts, "missing dependency") || !strings.Contains(prompts, `"status":"failed"`) {
+		t.Fatalf("manager missing member reports: %s", prompts)
+	}
+	all, _ := store.All()
+	if all["project"].Reports["dev"].Status != "failed" {
+		t.Fatal("manager status lost failure")
+	}
+}
+
+// Project visibility controls must work without waking an agent or restarting
+// already stopped work, including after explicit resume.
+func TestCUJ_Workflow1_OverviewCompactPauseResume(t *testing.T) {
+	env := newCUJEnv(t)
+	t.Cleanup(func() { env.engine.Stop() })
+	e, p := env.engine, env.plat
+	store := NewTeamProjectStore(filepath.Join(t.TempDir(), "projects.json"))
+	if err := store.Put(TeamProject{ID: "workflow", Name: "Login repair", Goal: "Restore login", Platform: p.Name(), ChatID: "group", Manager: e.name, Bots: []string{e.name}, Directories: []string{t.TempDir()}, State: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	e.SetTeamProjects(store, nil)
+	e.SetAdminFrom("owner")
+	send := func(content string) {
+		e.ReceiveMessage(p, &Message{Platform: p.Name(), SessionKey: p.Name() + ":group:owner", ChannelID: "group", UserID: "owner", Content: content, ReplyCtx: "ctx"})
+	}
+	send("/project board")
+	if got := strings.Join(p.getSent(), "\n"); !strings.Contains(got, "Restore login") {
+		t.Fatalf("overview missing goal: %s", got)
+	}
+	send("/project display compact")
+	send("/project pause")
+	send("continue development")
+	got := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(got, "paused") || !strings.Contains(got, "compact") {
+		t.Fatalf("controls not visible: %s", got)
+	}
+	send("/project resume")
+	send("/project board")
+	got = strings.Join(p.getSent(), "\n")
+	if !strings.Contains(got, "not been dispatched again") {
+		t.Fatalf("resume semantics hidden: %s", got)
+	}
+	restored, _ := NewTeamProjectStore(store.path).All()
+	if restored["workflow"].Paused || restored["workflow"].DisplayMode != "compact" {
+		t.Fatal("settings did not persist")
+	}
+}
+
+// Start a queued request -> inspect local status -> stop it. Neither control
+// requires the model to leave its queue; queue data stays on the original card.
+func TestCUJ_Progress1_QueueStatusAndStopWithoutModelResponse(t *testing.T) {
+	p := &queryTestPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+	a := &cujAgent{}
+	a.setNextSessionEvents([]Event{{Type: EventProgress, Progress: &RuntimeProgress{Phase: "waiting_model", QueuePosition: 452}}}, 0)
+	e := NewEngine("test", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+	defer e.Stop()
+	send := func(s string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", UserID: "user", Platform: "test", Content: s, ReplyCtx: "ctx"})
+	}
+	send("fix login")
+	awaitQuery(t, func() bool {
+		cs := p.snapshots()
+		if len(cs) != 1 {
+			return false
+		}
+		cs[0].mu.Lock()
+		defer cs[0].mu.Unlock()
+		return strings.Contains(cs[0].notice, "452")
+	})
+	send("/status")
+	awaitQuery(t, func() bool {
+		p.stubCardPlatform.mu.Lock()
+		defer p.stubCardPlatform.mu.Unlock()
+		for _, c := range p.repliedCards {
+			if strings.Contains(c.RenderText(), "452") {
+				return true
+			}
+		}
+		return false
+	})
+	send("/stop")
+	awaitQuery(t, func() bool {
+		cs := p.snapshots()
+		if len(cs) != 1 {
+			return false
+		}
+		_, _, done := cs[0].snapshot()
+		return done
+	})
+	if len(p.snapshots()) != 1 {
+		t.Fatal("queue updates created extra streaming cards")
+	}
+}
+
+// User journey: instruction -> visible dispatch -> rework in the task thread ->
+// answer the surfaced question, preserving both rounds of public output.
+func TestCUJ_T1_TeamThreadReworkAndHumanReply(t *testing.T) {
+	manager, dev, mp, dp, agent, store := coordinatorFixture(t)
+	managerPlatform := &threadCUJPlatform{coordinationPlatform: mp, role: "manager"}
+	memberPlatform := &threadCUJPlatform{coordinationPlatform: dp, role: "dev"}
+	manager.platforms = []Platform{managerPlatform}
+	dev.platforms = []Platform{memberPlatform}
+	manager.SetTeamCoordination(true, true, nil)
+	dev.SetTeamCoordination(true, false, nil)
+	manager.ReceiveMessage(managerPlatform, &Message{Platform: "test", SessionKey: "test:group", MessageID: "instruction", UserID: "owner", Content: "Fix the bug", ReplyCtx: "test:group"})
+	awaitQuery(t, func() bool {
+		cards := mp.snapshots()
+		if len(cards) == 0 {
+			return false
+		}
+		_, _, done := cards[0].snapshot()
+		return done
+	})
+	managerPlatform.queryTestPlatform.mu.Lock()
+	root := managerPlatform.roots[0]
+	managerPlatform.queryTestPlatform.mu.Unlock()
+	if root != "test:group:root:instruction" {
+		t.Fatalf("manager output escaped instruction thread: %s", root)
+	}
+	setTeamNextTurnEvents(agent, []Event{{Type: EventProgress, Content: "Inspecting source"}, {Type: EventToolUse, ToolName: "Bash", ToolID: "cmd", ToolInput: "go test ./..."}, {Type: EventToolResult, ToolID: "cmd", ToolName: "Bash", ToolResult: "PASS"}, {Type: EventResult, Content: "Original first result", Done: true}}, 0)
+	if _, err := manager.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: root, Action: "dispatch", To: "dev", Title: "Fix bug", Deliverable: "Patch and tests", Message: "Fix the bug"}); err != nil {
+		t.Fatal(err)
+	}
+	awaitQuery(t, func() bool {
+		cards := dp.snapshots()
+		if len(cards) == 0 {
+			return false
+		}
+		_, _, done := cards[0].snapshot()
+		return done && strings.Contains(strings.Join(dp.getSent(), "\n"), "@manager Original first result")
+	})
+	if !strings.Contains(strings.Join(mp.getSent(), "\n"), "@dev") {
+		t.Fatal("no visible assigned task")
+	}
+	first, _, _ := dp.snapshots()[0].snapshot()
+	if !strings.Contains(first, "Inspecting source") || !strings.Contains(first, "go test ./...") || !strings.Contains(first, "PASS") {
+		t.Fatal("native progress/tools missing")
+	}
+	if strings.Contains(first, "Original first result") {
+		t.Fatal("result duplicated inside process thread")
+	}
+	awaitQuery(t, func() bool {
+		managerPlatform.queryTestPlatform.mu.Lock()
+		defer managerPlatform.queryTestPlatform.mu.Unlock()
+		return stringSliceContains(managerPlatform.roots, "test:group:root:result-dev-1")
+	})
+	awaitQuery(t, func() bool { all, _ := store.All(); return all["project"].Tasks["T001"].Status == "submitted" })
+	// A human asks the manager for rework in the group. The manager's
+	// dispatch produces a fresh group handoff for the same durable task.
+	manager.ReceiveMessage(managerPlatform, &Message{Platform: "test", SessionKey: "test:group", MessageID: "rework-request", UserID: "owner", Content: "T001 needs the missed edge case fixed", ReplyCtx: "test:group"})
+	setTeamNextTurnEvents(agent, []Event{{Type: EventPermissionRequest, RequestID: "ask", ToolName: "AskUserQuestion", Questions: []UserQuestion{{Question: "Which environment?"}}}, {Type: EventResult, Content: "Original rework result", Done: true}}, 0)
+	if _, err := manager.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group:root:rework-request", Action: "dispatch", TaskID: "T001", To: "dev", Message: "Fix the missed edge case"}); err != nil {
+		t.Fatal(err)
+	}
+	managerPlatform.queryTestPlatform.mu.Lock()
+	assignments := append([]cujTaskMessage(nil), managerPlatform.assignments...)
+	managerPlatform.queryTestPlatform.mu.Unlock()
+	if len(assignments) != 2 || assignments[1].root != "" || assignments[1].to != "dev" || !strings.Contains(assignments[1].content, "T001") || !strings.Contains(assignments[1].content, "Fix the missed edge case") {
+		t.Fatalf("rework was not a visible group handoff: %+v", assignments)
+	}
+
+	var reminder *queryTestCard
+	awaitQuery(t, func() bool {
+		memberPlatform.queryTestPlatform.mu.Lock()
+		defer memberPlatform.queryTestPlatform.mu.Unlock()
+		if len(memberPlatform.reminders) == 0 {
+			return false
+		}
+		reminder = memberPlatform.reminders[0]
+		_, prompt, _ := reminder.snapshot()
+		return prompt != nil
+	})
+	_, prompt, _ := reminder.snapshot()
+	if !strings.Contains(prompt.RenderText(), "Which environment?") {
+		t.Fatal("original question not surfaced")
+	}
+	dev.ReceiveMessage(memberPlatform, &Message{Platform: "test", SessionKey: "test:group:root:task-message-2", UserID: "owner", ChannelID: "group", Content: "staging", ReplyCtx: "test:group:root:task-message-2", IsPermissionResponse: true, PermissionToken: prompt.DecisionToken, LiteralAnswer: true})
+	awaitQuery(t, func() bool {
+		cards := dp.snapshots()
+		if len(cards) < 2 {
+			return false
+		}
+		_, _, done := cards[1].snapshot()
+		return done && strings.Contains(strings.Join(dp.getSent(), "\n"), "@manager Original rework result")
+	})
+	after, _, _ := dp.snapshots()[0].snapshot()
+	if after != first {
+		t.Fatal("rework overwrote original execution")
+	}
+	awaitQuery(t, func() bool {
+		managerPlatform.queryTestPlatform.mu.Lock()
+		defer managerPlatform.queryTestPlatform.mu.Unlock()
+		return stringSliceContains(managerPlatform.roots, "test:group:root:result-dev-2")
+	})
+	if got := memberPlatform.handoffs(); len(got) != 2 || got[0].content != "Original first result" || got[1].content != "Original rework result" {
+		t.Fatalf("rewritten or duplicated handoff: %+v", got)
+	}
+	for _, result := range managerPlatform.handoffs() {
+		if result.to != "" {
+			t.Fatalf("ordinary manager result must not notify the requester with an @: %+v", result)
+		}
+	}
+	// A later direct human rework is already a group message; it must not
+	// create a second manager assignment or resume either old process thread.
+	awaitQuery(t, func() bool { all, _ := store.All(); return all["project"].Tasks["T001"].Status == "submitted" })
+	setTeamNextTurnEvents(agent, []Event{{Type: EventProgress, Content: "Checking the direct group correction"}, {Type: EventResult, Content: "Direct group rework result", Done: true}}, 0)
+	direct := func() *Message {
+		return &Message{Platform: "test", SessionKey: "test:group", MessageID: "human-rework", UserID: "owner", ChannelID: "group", Content: "T001 rework: verify the final branch", ReplyCtx: "test:group"}
+	}
+	dev.ReceiveMessage(memberPlatform, direct())
+	dev.ReceiveMessage(memberPlatform, direct())
+	awaitQuery(t, func() bool { return len(memberPlatform.handoffs()) == 3 })
+	awaitQuery(t, func() bool {
+		cards := dp.snapshots()
+		if len(cards) < 3 {
+			return false
+		}
+		_, _, done := cards[2].snapshot()
+		return done
+	})
+	agent.mu.Lock()
+	lastSession := agent.sessions[len(agent.sessions)-1]
+	agent.mu.Unlock()
+	if prompt := strings.Join(lastSession.getSentPrompts(), "\n"); !strings.Contains(prompt, "Original rework result") || !strings.Contains(prompt, "task-message-2") {
+		t.Fatalf("new thread lost prior deliverables: %s", prompt)
+	}
+	memberPlatform.queryTestPlatform.mu.Lock()
+	defer memberPlatform.queryTestPlatform.mu.Unlock()
+	if len(memberPlatform.roots) != 3 || memberPlatform.roots[0] != "test:group:root:task-message-1" || memberPlatform.roots[1] != "test:group:root:task-message-2" || memberPlatform.roots[2] != "test:group:root:human-rework" {
+		t.Fatalf("process did not follow its own incoming handoff: %+v", memberPlatform.roots)
+	}
+}
+
+// CUJ-T2: one member retains context through distinct tasks, with manager-owned
+// plans and group-visible decisions. Mock only the model and message sender.
+func TestCUJ_T2_MemberContextAndSerialPlannedWork(t *testing.T) {
+	m, d, mp, dp, a, s := coordinatorFixture(t)
+	pm := &threadCUJPlatform{coordinationPlatform: mp, role: "manager"}
+	pd := &threadCUJPlatform{coordinationPlatform: dp, role: "dev"}
+	m.platforms = []Platform{pm}
+	d.platforms = []Platform{pd}
+	m.SetTeamCoordination(true, true, nil)
+	d.SetTeamCoordination(true, false, nil)
+	m.ReceiveMessage(pm, &Message{Platform: "test", SessionKey: "test:group", MessageID: "start", UserID: "owner", Content: "Implement A, then implement B", ReplyCtx: "test:group"})
+	awaitQuery(t, func() bool { return len(pm.handoffs()) > 0 })
+	setTeamNextTurnEvents(a, []Event{{Type: EventPermissionRequest, RequestID: "ask-a", ToolName: "AskUserQuestion", Questions: []UserQuestion{{Question: "Which A behavior?"}}}}, 0)
+	if _, err := m.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group:root:start", Action: "dispatch", To: "dev", Title: "A", Deliverable: "A output", Message: "Implement A"}); err != nil {
+		t.Fatal(err)
+	}
+	awaitQuery(t, func() bool { all, _ := s.All(); return all["project"].Tasks["T001"].Status == "waiting_input" })
+	if _, err := m.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group:root:start", Action: "plan", To: "dev", Title: "B", Deliverable: "B output", Message: "Implement B using A", DependsOn: []string{"T001"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group:root:start", Action: "dispatch", TaskID: "T002"}); err == nil {
+		t.Fatal("waiting question released B")
+	}
+	pm.queryTestPlatform.mu.Lock()
+	count := len(pm.assignments)
+	pm.queryTestPlatform.mu.Unlock()
+	if count != 1 || strings.Contains(strings.Join(pm.getSent(), "\n"), "@dev T002") {
+		t.Fatal("future task leaked into group before member became ready")
+	}
+	// User action 2: answer in the actual A thread. An old thread cannot answer it.
+	d.ReceiveMessage(pd, &Message{Platform: "test", SessionKey: "test:group:root:task-message-1", MessageID: "answer-a", UserID: "owner", Content: "Keep A data", ReplyCtx: "test:group:root:task-message-1"})
+	a.mu.Lock()
+	native := a.sessions[0]
+	a.mu.Unlock()
+	native.events <- Event{Type: EventResult, Content: "A implemented; data retained", Done: true}
+	awaitQuery(t, func() bool { all, _ := s.All(); return all["project"].Tasks["T001"].Status == "submitted" })
+	if _, err := m.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group:root:start", Action: "dispatch", TaskID: "T002"}); err == nil {
+		t.Fatal("submitted result unlocked dependency")
+	}
+	if _, err := m.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group:root:start", Action: "accept", TaskID: "T001", Evidence: "Read A artifact and checked tests"}); err != nil {
+		t.Fatal(err)
+	}
+	setTeamNextTurnEvents(a, []Event{{Type: EventProgress, Content: "Continuing with the established A implementation"}, {Type: EventResult, Content: "B implemented using A", Done: true}}, 0)
+	if _, err := m.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group:root:start", Action: "dispatch", TaskID: "T002"}); err != nil {
+		t.Fatal(err)
+	}
+	awaitQuery(t, func() bool { return len(pd.handoffs()) == 2 })
+	if got := pd.handoffs(); got[0].content != "A implemented; data retained" || got[1].content != "B implemented using A" {
+		t.Fatalf("wrong results %+v", got)
+	}
+	pd.queryTestPlatform.mu.Lock()
+	roots := append([]string(nil), pd.roots...)
+	pd.queryTestPlatform.mu.Unlock()
+	if len(roots) != 2 || roots[0] == roots[1] {
+		t.Fatal("distinct tasks did not get distinct process threads")
+	}
+	a.mu.Lock()
+	processCount := len(a.sessions)
+	a.mu.Unlock()
+	if processCount != 1 || len(native.getSentPrompts()) != 2 {
+		t.Fatal("distinct tasks reset member context")
+	}
+	// User action 3: a fresh instruction gets its own process location while the
+	// manager also retains the original instruction and both incoming reports.
+	m.ReceiveMessage(pm, &Message{Platform: "test", SessionKey: "test:group", MessageID: "followup", UserID: "owner", Content: "Summarize both deliverables", ReplyCtx: "test:group"})
+	awaitQuery(t, func() bool {
+		pm.queryTestPlatform.mu.Lock()
+		defer pm.queryTestPlatform.mu.Unlock()
+		return stringSliceContains(pm.roots, "test:group:root:followup")
+	})
+	ma := m.agent.(*coordinationAgent).cujAgent
+	ma.mu.Lock()
+	managerCount := len(ma.sessions)
+	ma.mu.Unlock()
+	if managerCount != 1 {
+		t.Fatal("manager context reset between incoming results")
+	}
+}
+
+// CUJ-T3: discover project ending, review/cancel, confirm, then inspect the
+// archived work. Waiting decisions and future tasks cannot restart execution.
+func TestCUJ_T3_EndRoundKeepsGroupAndMemberContext(t *testing.T) {
+	m, d, mp, dp, a, s := coordinatorFixture(t)
+	pm := &threadCUJPlatform{coordinationPlatform: mp, role: "manager"}
+	pd := &threadCUJPlatform{coordinationPlatform: dp, role: "dev"}
+	m.platforms, d.platforms = []Platform{pm}, []Platform{pd}
+	m.SetAdminFrom("owner")
+	setTeamNextTurnEvents(a, []Event{{Type: EventPermissionRequest, RequestID: "end-question", ToolName: "AskUserQuestion", Questions: []UserQuestion{{Question: "Choose behavior"}}}}, 0)
+	if _, err := m.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group", Action: "dispatch", To: "dev", Title: "A", Message: "Implement A", Deliverable: "code"}); err != nil {
+		t.Fatal(err)
+	}
+	awaitQuery(t, func() bool { all, _ := s.All(); return all["project"].Tasks["T001"].Status == "waiting_input" })
+	if _, err := m.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group", Action: "plan", To: "dev", Title: "B", Message: "Implement B", Deliverable: "tests"}); err != nil {
+		t.Fatal(err)
+	}
+	send := func(user, body string) {
+		m.ReceiveMessage(pm, &Message{Platform: "test", SessionKey: "test:group", MessageID: GenerateToken(8), UserID: user, Content: body, ReplyCtx: "test:group"})
+	}
+	lastCard := func() *Card {
+		mp.stubCardPlatform.mu.Lock()
+		defer mp.stubCardPlatform.mu.Unlock()
+		cards := mp.sentCards
+		if len(cards) == 0 {
+			return nil
+		}
+		return cards[len(cards)-1]
+	}
+	send("owner", "/project tasks")
+	if c := lastCard(); c == nil || !strings.Contains(c.RenderText(), "End this round") {
+		t.Fatal("end entry not discoverable")
+	}
+	send("owner", "/project finish")
+	preview := lastCard()
+	if preview == nil || !strings.Contains(preview.RenderText(), "Active/waiting: 1") || !strings.Contains(preview.RenderText(), "Unassigned plans: 1") {
+		t.Fatal("missing impact preview")
+	}
+	var confirm string
+	for _, el := range preview.Elements {
+		if actions, ok := el.(CardActions); ok {
+			for _, b := range actions.Buttons {
+				if strings.HasPrefix(b.Value, "cmd:/project finish confirm ") {
+					confirm = strings.TrimPrefix(b.Value, "cmd:")
+				}
+			}
+		}
+	}
+	if confirm == "" {
+		t.Fatal("missing confirm button")
+	}
+	// The cancel button only returns to the task overview.
+	send("owner", "/project tasks")
+	all, _ := s.All()
+	if all["project"].State != "ready" {
+		t.Fatal("preview/cancel ended work")
+	}
+	send("outsider", confirm)
+	if !strings.Contains(strings.Join(mp.getSent(), "\n"), m.i18n.Tf(MsgAdminRequired, "/project")) {
+		t.Fatal("unauthorized user did not see a rejection")
+	}
+	all, _ = s.All()
+	if all["project"].State != "ready" {
+		t.Fatal("unauthorized ending")
+	}
+	d.interactiveMu.Lock()
+	var pending *pendingPermission
+	for _, state := range d.interactiveStates {
+		state.mu.Lock()
+		pending = state.pending
+		state.mu.Unlock()
+		if pending != nil {
+			break
+		}
+	}
+	d.interactiveMu.Unlock()
+	if pending == nil {
+		t.Fatal("expected a waiting request")
+	}
+	send("owner", confirm)
+	awaitQuery(t, func() bool {
+		c := lastCard()
+		return c != nil && strings.Contains(c.RenderText(), m.i18n.T(MsgRoundEnded))
+	})
+
+	awaitQuery(t, func() bool { a.mu.Lock(); defer a.mu.Unlock(); return len(a.sessions) == 1 && !a.sessions[0].Alive() })
+	pending.mu.Lock()
+	expired := pending.Expired
+	pending.mu.Unlock()
+	if !expired {
+		t.Fatal("waiting decision remained valid")
+	}
+	send("owner", "/project resume")
+	if c := lastCard(); c == nil || !strings.Contains(c.RenderText(), m.i18n.T(MsgRoundIdle)) {
+		t.Fatal("no idle feedback for resume")
+	}
+	d.ReceiveMessage(pd, &Message{Platform: "test", SessionKey: "test:group:root:task-message-1", UserID: "owner", Content: "allow", IsPermissionResponse: true, ReplyCtx: "test:group"})
+	if _, err := m.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group", Action: "dispatch", TaskID: "T002"}); err == nil {
+		t.Fatal("ended plan dispatched")
+	}
+	beforeLate := len(pm.handoffs())
+	if _, err := m.deliverWorkflowResult(context.Background(), pm, "test:group", "late", "late manager result", nil); err == nil || len(pm.handoffs()) != beforeLate {
+		t.Fatal("late result escaped ended project")
+	}
+	send("owner", "/project history round 1")
+	if c := lastCard(); c == nil || !strings.Contains(c.RenderText(), "T001") || !strings.Contains(c.RenderText(), "T002") || !strings.Contains(c.RenderText(), "Cancelled") {
+		t.Fatal("ended history not readable")
+	}
+	oldKey := d.modelSessionKey("test:group:root:task-message-1")
+	newMessageID := GenerateToken(8)
+	newManagerKey := pm.TaskConversationKey("group", newMessageID)
+	m.ReceiveMessage(pm, &Message{Platform: "test", SessionKey: "test:group", MessageID: newMessageID, UserID: "owner", Content: "Start another task", ReplyCtx: "test:group"})
+	awaitQuery(t, func() bool {
+		all, _ := s.All()
+		return all["project"].Round == 2 && all["project"].ManagerContexts[newManagerKey].Round == 2
+	})
+	send("owner", "/project dashboard")
+	if c := lastCard(); c == nil || !strings.Contains(c.RenderText(), "Start another task") || strings.Contains(c.RenderText(), "T001") {
+		t.Fatal("current round includes old tasks")
+	}
+	send("owner", "/project pause round 1")
+	all, _ = s.All()
+	if all["project"].Paused {
+		t.Fatal("old pause action affected new round")
+	}
+	setTeamNextTurnEvents(a, []Event{{Type: EventText, Content: "round two artifact"}, {Type: EventResult, Content: "round two artifact"}}, 0)
+	// The coordinator dispatches from the new instruction's routed context.
+	// A bare group key can belong to an archived, asynchronous report turn.
+	if _, err := m.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: newManagerKey, Action: "dispatch", To: "dev", Title: "C", Message: "Implement C", Deliverable: "code"}); err != nil {
+		t.Fatal(err)
+	}
+	awaitQuery(t, func() bool { a.mu.Lock(); defer a.mu.Unlock(); return len(a.sessions) == 2 })
+	a.mu.Lock()
+	resumed := a.sessions[1].resumeID
+	a.mu.Unlock()
+	if resumed != "cuj-agent-session" || oldKey != d.modelSessionKey("test:group:root:task-message-2") {
+		t.Fatal("new round reset member context", resumed)
+	}
+	send("owner", "/project history round 1")
+	if c := lastCard(); c == nil || !strings.Contains(c.RenderText(), "T001") {
+		t.Fatal("new work hid history")
+	}
+
+}
+
+// Regression: dashboard was unknown and board silently updated a distant cached card.
+func TestCUJ_T4_DashboardAlwaysRepliesAtCurrentRequest(t *testing.T) {
+	m, _, mp, _, _, store := coordinatorFixture(t)
+	m.SetAdminFrom("owner")
+	p := &threadCUJPlatform{coordinationPlatform: mp, role: "manager"}
+	m.platforms = []Platform{p}
+	store.mutateProject("project", func(p *TeamProject) error { p.BoardMessageID = "old-panel"; return nil })
+	for _, command := range []string{"/project dashboard", "/project dashboard", "/project board", "/project history", "/project dashboard"} {
+		mp.stubCardPlatform.mu.Lock()
+		before := len(mp.sentCards)
+		mp.stubCardPlatform.mu.Unlock()
+		m.ReceiveMessage(p, &Message{Platform: "test", UserID: "owner", SessionKey: "test:group", MessageID: GenerateToken(8), Content: command, ReplyCtx: "current"})
+		mp.stubCardPlatform.mu.Lock()
+		cards := append([]*Card(nil), mp.sentCards...)
+		mp.stubCardPlatform.mu.Unlock()
+		if len(cards) != before+1 || !cards[len(cards)-1].Reusable {
+			t.Fatalf("%s failed to produce a reusable current panel", command)
+		}
+	}
+}
+
+// Instruction -> private reminder -> reject a foreign user's response ->
+// answer on the original execution card -> reject authorization -> final result.
+func TestCUJ_T8_PrivateReminderAndOriginalCardDecision(t *testing.T) {
+	manager, dev, mp, dp, agent, _ := coordinatorFixture(t)
+	managerPlatform := &privateCUJPlatform{&threadCUJPlatform{coordinationPlatform: mp, role: "manager"}}
+	memberPlatform := &privateCUJPlatform{&threadCUJPlatform{coordinationPlatform: dp, role: "dev"}}
+	manager.platforms, dev.platforms = []Platform{managerPlatform}, []Platform{memberPlatform}
+	manager.SetTeamCoordination(true, true, nil)
+	dev.SetTeamCoordination(true, false, nil)
+	manager.ReceiveMessage(managerPlatform, &Message{Platform: "test", SessionKey: "test:group", MessageID: "instruction", UserID: "owner", Content: "Check the deployment", ReplyCtx: "test:group"})
+	awaitQuery(t, func() bool {
+		cs := mp.snapshots()
+		if len(cs) == 0 {
+			return false
+		}
+		_, _, done := cs[0].snapshot()
+		return done
+	})
+	setTeamNextTurnEvents(agent, []Event{
+		{Type: EventProgress, Content: "Check target before any operation"},
+		{Type: EventPermissionRequest, RequestID: "ask", ToolName: "AskUserQuestion", Questions: []UserQuestion{{Question: "Which deployment target?"}}},
+		{Type: EventPermissionRequest, RequestID: "deploy", ToolName: "Bash", ToolInput: "deploy staging"},
+		{Type: EventResult, Content: "Deployment was declined; no deployment performed.", Done: true},
+	}, 0)
+	if _, err := manager.RunTeamAction(context.Background(), TeamActionRequest{SessionKey: "test:group:root:instruction", Action: "dispatch", To: "dev", Title: "Check deploy", Deliverable: "Result", Message: "Check target"}); err != nil {
+		t.Fatal(err)
+	}
+	var prompt *Card
+	awaitQuery(t, func() bool {
+		cs := dp.snapshots()
+		if len(cs) == 0 {
+			return false
+		}
+		_, prompt, _ = cs[0].snapshot()
+		return prompt != nil && strings.Contains(strings.Join(mp.getSent(), "\n"), "DM owner:")
+	})
+	if !strings.Contains(strings.Join(dp.getSent(), "\n"), "ON_CARD") || strings.Contains(strings.Join(dp.getSent(), "\n"), "DM owner:") {
+		t.Fatal("request moved to DM or reminder sent by member")
+	}
+	for _, s := range mp.getSent() {
+		if strings.HasPrefix(s, "DM ") && strings.Contains(s, "Which deployment target?") {
+			t.Fatal("private reminder leaked full question")
+		}
+	}
+	send := func(user, answer, token string, literal bool) {
+		dev.ReceiveMessage(memberPlatform, &Message{Platform: "test", SessionKey: "test:group:root:task-message-1", UserID: user, ChannelID: "group", Content: answer, ReplyCtx: "test:group:root:task-message-1", IsPermissionResponse: true, PermissionToken: token, LiteralAnswer: literal})
+	}
+	oldToken := prompt.DecisionToken
+	send("stranger", "production", oldToken, true)
+	_, still, _ := dp.snapshots()[0].snapshot()
+	if still == nil || still.DecisionToken != oldToken {
+		t.Fatal("foreign user changed the pending request")
+	}
+	send("member-owner", "staging", oldToken, true)
+	awaitQuery(t, func() bool {
+		_, prompt, _ = dp.snapshots()[0].snapshot()
+		return prompt != nil && strings.Contains(prompt.RenderText(), "deploy staging")
+	})
+	if len(dp.snapshots()) != 1 {
+		t.Fatal("request/approval created another execution card")
+	}
+	approvalToken := ""
+	for _, el := range prompt.Elements {
+		if row, ok := el.(CardActions); ok {
+			for _, b := range row.Buttons {
+				approvalToken = b.Extra["permission_token"]
+			}
+		}
+	}
+	send("member-owner", "allow", oldToken, false)
+	_, still, _ = dp.snapshots()[0].snapshot()
+	if still == nil {
+		t.Fatal("old question response authorized another operation")
+	}
+	send("member-owner", "deny", approvalToken, false)
+	awaitQuery(t, func() bool {
+		return strings.Contains(strings.Join(dp.getSent(), "\n"), "@manager Deployment was declined;")
+	})
+	if got := memberPlatform.handoffs(); len(got) != 1 {
+		t.Fatalf("final delivery count=%d", len(got))
+	}
+	for _, s := range mp.getSent() {
+		if strings.HasPrefix(s, "DM ") && strings.Contains(s, "deploy staging") {
+			t.Fatal("private approval reminder leaked command")
+		}
+	}
 }

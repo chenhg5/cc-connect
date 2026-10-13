@@ -372,28 +372,30 @@ const snapshotVersion = 1
 
 // sessionSnapshot is the JSON-serializable state of the SessionManager.
 type sessionSnapshot struct {
-	Sessions       map[string]*Session  `json:"sessions"`
-	ActiveSession  map[string]string    `json:"active_session"`
-	UserSessions   map[string][]string  `json:"user_sessions"`
-	Counter        int64                `json:"counter"`
-	SessionNames   map[string]string    `json:"session_names,omitempty"`    // agent session ID → custom name
-	UserMeta       map[string]*UserMeta `json:"user_meta,omitempty"`        // sessionKey → display info
-	PastIDTracking bool                 `json:"past_id_tracking,omitempty"` // true once PastAgentSessionIDs is supported
-	LegacyData     bool                 `json:"legacy_data,omitempty"`      // true while pre-fix sessions exist
-	Version        int                  `json:"version,omitempty"`          // schema version for migration detection
+	ConversationScopes map[string]string    `json:"conversation_scopes,omitempty"`
+	Sessions           map[string]*Session  `json:"sessions"`
+	ActiveSession      map[string]string    `json:"active_session"`
+	UserSessions       map[string][]string  `json:"user_sessions"`
+	Counter            int64                `json:"counter"`
+	SessionNames       map[string]string    `json:"session_names,omitempty"`    // agent session ID → custom name
+	UserMeta           map[string]*UserMeta `json:"user_meta,omitempty"`        // sessionKey → display info
+	PastIDTracking     bool                 `json:"past_id_tracking,omitempty"` // true once PastAgentSessionIDs is supported
+	LegacyData         bool                 `json:"legacy_data,omitempty"`      // true while pre-fix sessions exist
+	Version            int                  `json:"version,omitempty"`          // schema version for migration detection
 }
 
 // SessionManager supports multiple named sessions per user with active-session tracking.
 // It can persist state to a JSON file and reload on startup.
 type SessionManager struct {
-	mu            sync.RWMutex
-	sessions      map[string]*Session
-	activeSession map[string]string
-	userSessions  map[string][]string
-	sessionNames  map[string]string    // agent session ID → custom name
-	userMeta      map[string]*UserMeta // sessionKey → display info
-	counter       int64
-	storePath     string // empty = no persistence
+	conversationScopes map[string]string
+	mu                 sync.RWMutex
+	sessions           map[string]*Session
+	activeSession      map[string]string
+	userSessions       map[string][]string
+	sessionNames       map[string]string    // agent session ID → custom name
+	userMeta           map[string]*UserMeta // sessionKey → display info
+	counter            int64
+	storePath          string // empty = no persistence
 
 	// legacyData is true when sessions were loaded from a snapshot that
 	// predates PastAgentSessionIDs tracking. In this state, many sessions
@@ -430,6 +432,7 @@ func (sm *SessionManager) nextID() string {
 func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	userKey = sm.conversationKeyLocked(userKey)
 
 	if sid, ok := sm.activeSession[userKey]; ok {
 		if s, ok := sm.sessions[sid]; ok {
@@ -444,6 +447,7 @@ func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 func (sm *SessionManager) NewSession(userKey, name string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	userKey = sm.conversationKeyLocked(userKey)
 	s := sm.createLocked(userKey, name)
 	sm.saveLocked()
 	return s
@@ -455,6 +459,7 @@ func (sm *SessionManager) NewSession(userKey, name string) *Session {
 func (sm *SessionManager) NewSideSession(userKey, name string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	userKey = sm.conversationKeyLocked(userKey)
 	id := sm.nextID()
 	now := time.Now()
 	s := &Session{
@@ -487,6 +492,7 @@ func (sm *SessionManager) createLocked(userKey, name string) *Session {
 func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	userKey = sm.conversationKeyLocked(userKey)
 
 	for _, sid := range sm.userSessions[userKey] {
 		s := sm.sessions[sid]
@@ -507,6 +513,7 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, summary string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	userKey = sm.conversationKeyLocked(userKey)
 
 	for _, sid := range sm.userSessions[userKey] {
 		s := sm.sessions[sid]
@@ -534,6 +541,7 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 func (sm *SessionManager) ListSessions(userKey string) []*Session {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	userKey = sm.conversationKeyLocked(userKey)
 
 	ids := sm.userSessions[userKey]
 	out := make([]*Session, 0, len(ids))
@@ -548,6 +556,7 @@ func (sm *SessionManager) ListSessions(userKey string) []*Session {
 func (sm *SessionManager) ActiveSessionID(userKey string) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	userKey = sm.conversationKeyLocked(userKey)
 	return sm.activeSession[userKey]
 }
 
@@ -578,6 +587,7 @@ func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) 
 	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	sessionKey = sm.conversationKeyLocked(sessionKey)
 	meta, ok := sm.userMeta[sessionKey]
 	if !ok {
 		meta = &UserMeta{}
@@ -595,6 +605,7 @@ func (sm *SessionManager) UpdateUserMeta(sessionKey, userName, chatName string) 
 func (sm *SessionManager) GetUserMeta(sessionKey string) *UserMeta {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	sessionKey = sm.conversationKeyLocked(sessionKey)
 	m := sm.userMeta[sessionKey]
 	if m == nil {
 		return nil
@@ -779,15 +790,16 @@ func (sm *SessionManager) saveLocked() {
 	}
 
 	snap := sessionSnapshot{
-		Sessions:       snapSessions,
-		ActiveSession:  sm.activeSession,
-		UserSessions:   sm.userSessions,
-		Counter:        sm.counter,
-		SessionNames:   sm.sessionNames,
-		UserMeta:       sm.userMeta,
-		PastIDTracking: true,
-		LegacyData:     sm.legacyData,
-		Version:        snapshotVersion,
+		ConversationScopes: sm.conversationScopes,
+		Sessions:           snapSessions,
+		ActiveSession:      sm.activeSession,
+		UserSessions:       sm.userSessions,
+		Counter:            sm.counter,
+		SessionNames:       sm.sessionNames,
+		UserMeta:           sm.userMeta,
+		PastIDTracking:     true,
+		LegacyData:         sm.legacyData,
+		Version:            snapshotVersion,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -816,6 +828,7 @@ func (sm *SessionManager) load() {
 		slog.Error("session: failed to unmarshal", "path", sm.storePath, "error", err)
 		return
 	}
+	sm.conversationScopes = snap.ConversationScopes
 	sm.sessions = snap.Sessions
 	sm.activeSession = snap.ActiveSession
 	sm.userSessions = snap.UserSessions

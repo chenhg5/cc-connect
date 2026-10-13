@@ -10,6 +10,118 @@ import (
 type Language string
 
 const (
+	MsgModelRepositoryPolicyDenied MsgKey = "MsgModelRepositoryPolicyDenied"
+	MsgTeamRoleCreationContext     MsgKey = "MsgTeamRoleCreationContext"
+	MsgTeamRoleAuthorize           MsgKey = "MsgTeamRoleAuthorize"
+	MsgTeamRoleReasonRequired      MsgKey = "MsgTeamRoleReasonRequired"
+	MsgTeamRoleProvisionFailed     MsgKey = "MsgTeamRoleProvisionFailed"
+	MsgTeamRoleMembershipFailed    MsgKey = "MsgTeamRoleMembershipFailed"
+	MsgRolePermissionsApplyFailed  MsgKey = "MsgRolePermissionsApplyFailed"
+	MsgRolePermissionsReady        MsgKey = "MsgRolePermissionsReady"
+	MsgRolePermissionsPending      MsgKey = "MsgRolePermissionsPending"
+	MsgRolePermissionsSubmitted    MsgKey = "MsgRolePermissionsSubmitted"
+	MsgRolePermissionsUnknown      MsgKey = "MsgRolePermissionsUnknown"
+	MsgRolePermissionsUser         MsgKey = "MsgRolePermissionsUser"
+	MsgRolePermissionsUsage        MsgKey = "MsgRolePermissionsUsage"
+	MsgRolePermissionsCreationHint MsgKey = "MsgRolePermissionsCreationHint"
+
+	MsgLabelTitle        MsgKey = "MsgLabelTitle"
+	MsgLabelHint         MsgKey = "MsgLabelHint"
+	MsgLabelNew          MsgKey = "MsgLabelNew"
+	MsgLabelNewHint      MsgKey = "MsgLabelNewHint"
+	MsgLabelAuthNeeded   MsgKey = "MsgLabelAuthNeeded"
+	MsgLabelWrongUser    MsgKey = "MsgLabelWrongUser"
+	MsgLabelBusy         MsgKey = "MsgLabelBusy"
+	MsgLabelFailed       MsgKey = "MsgLabelFailed"
+	MsgLabelUnsupported  MsgKey = "MsgLabelUnsupported"
+	MsgLabelPrivate      MsgKey = "MsgLabelPrivate"
+	MsgLabelAuthorize    MsgKey = "MsgLabelAuthorize"
+	MsgLabelAuthorized   MsgKey = "MsgLabelAuthorized"
+	MsgLabelUsage        MsgKey = "MsgLabelUsage"
+	MsgLabelAuthReady    MsgKey = "MsgLabelAuthReady"
+	MsgLabelAuthButton   MsgKey = "MsgLabelAuthButton"
+	MsgLabelRetry        MsgKey = "MsgLabelRetry"
+	MsgLabelPending      MsgKey = "MsgLabelPending"
+	MsgLabelSave         MsgKey = "MsgLabelSave"
+	MsgLabelBots         MsgKey = "MsgLabelBots"
+	MsgLabelProjects     MsgKey = "MsgLabelProjects"
+	MsgLabelSaved        MsgKey = "MsgLabelSaved"
+	MsgLabelSelection    MsgKey = "MsgLabelSelection"
+	MsgLabelCreationHint MsgKey = "MsgLabelCreationHint"
+	MsgLabelWelcome      MsgKey = "MsgLabelWelcome"
+	MsgLabelApplied      MsgKey = "MsgLabelApplied"
+	MsgLabelText         MsgKey = "MsgLabelText"
+)
+
+const (
+	MsgRoundIdle                     MsgKey = "MsgRoundIdle"
+	MsgRoundEnding                   MsgKey = "MsgRoundEnding"
+	MsgRoundEnded                    MsgKey = "MsgRoundEnded"
+	MsgRoundArchived                 MsgKey = "MsgRoundArchived"
+	MsgRoundStopFailed               MsgKey = "MsgRoundStopFailed"
+	MsgRoundRetry                    MsgKey = "MsgRoundRetry"
+	MsgRoundCurrent                  MsgKey = "MsgRoundCurrent"
+	MsgDashboardRefresh              MsgKey = "MsgDashboardRefresh"
+	MsgDashboardHistory              MsgKey = "MsgDashboardHistory"
+	MsgDashboardCurrent              MsgKey = "MsgDashboardCurrent"
+	MsgDashboardNew                  MsgKey = "MsgDashboardNew"
+	MsgDashboardUpdated              MsgKey = "MsgDashboardUpdated"
+	MsgDashboardFailed               MsgKey = "MsgDashboardFailed"
+	MsgDashboardCounts               MsgKey = "MsgDashboardCounts"
+	MsgDashboardPage                 MsgKey = "MsgDashboardPage"
+	MsgDashboardPending              MsgKey = "MsgDashboardPending"
+	MsgDashboardHistoryEntry         MsgKey = "MsgDashboardHistoryEntry"
+	MsgDashboardNoHistory            MsgKey = "MsgDashboardNoHistory"
+	MsgDashboardPrevious             MsgKey = "MsgDashboardPrevious"
+	MsgDashboardNext                 MsgKey = "MsgDashboardNext"
+	MsgDashboardRoundRecords         MsgKey = "MsgDashboardRoundRecords"
+	MsgDashboardTopic                MsgKey = "MsgDashboardTopic"
+	MsgDashboardLinkFailed           MsgKey = "MsgDashboardLinkFailed"
+	MsgRoundPause                    MsgKey = "MsgRoundPause"
+	MsgRoundResume                   MsgKey = "MsgRoundResume"
+	MsgWorkflowBoard                 MsgKey = "MsgWorkflowBoard"
+	MsgWorkflowSummary               MsgKey = "MsgWorkflowSummary"
+	MsgWorkflowTask                  MsgKey = "MsgWorkflowTask"
+	MsgProjectFinish                 MsgKey = "MsgProjectFinish"
+	MsgProjectStatusEnded            MsgKey = "MsgProjectStatusEnded"
+	MsgProjectEnded                  MsgKey = "MsgProjectEnded"
+	MsgProjectFinishPreview          MsgKey = "MsgProjectFinishPreview"
+	MsgProjectFinishConsequences     MsgKey = "MsgProjectFinishConsequences"
+	MsgProjectFinishConfirm          MsgKey = "MsgProjectFinishConfirm"
+	MsgProjectFinishCancel           MsgKey = "MsgProjectFinishCancel"
+	MsgProjectFinishChanged          MsgKey = "MsgProjectFinishChanged"
+	MsgProjectFinishTextCommand      MsgKey = "MsgProjectFinishTextCommand"
+	MsgProjectEndedAt                MsgKey = "MsgProjectEndedAt"
+	MsgWorkflowHelp                  MsgKey = "MsgWorkflowHelp"
+	MsgWorkflowPaused                MsgKey = "MsgWorkflowPaused"
+	MsgWorkflowResumed               MsgKey = "MsgWorkflowResumed"
+	MsgWorkflowProgress              MsgKey = "MsgWorkflowProgress"
+	MsgWorkflowMissing               MsgKey = "MsgWorkflowMissing"
+	MsgWorkflowLogs                  MsgKey = "MsgWorkflowLogs"
+	MsgWorkflowEmpty                 MsgKey = "MsgWorkflowEmpty"
+	MsgWorkflowCurrent               MsgKey = "MsgWorkflowCurrent"
+	MsgWorkflowSaved                 MsgKey = "MsgWorkflowSaved"
+	MsgWorkflowSubmitted             MsgKey = "MsgWorkflowSubmitted"
+	MsgWorkflowThread                MsgKey = "MsgWorkflowThread"
+	MsgWorkflowStatusActive          MsgKey = "MsgWorkflowStatusActive"
+	MsgWorkflowStatusPaused          MsgKey = "MsgWorkflowStatusPaused"
+	MsgWorkflowStatusPlanned         MsgKey = "MsgWorkflowStatusPlanned"
+	MsgWorkflowStatusCancelled       MsgKey = "MsgWorkflowStatusCancelled"
+	MsgWorkflowStatusQueued          MsgKey = "MsgWorkflowStatusQueued"
+	MsgWorkflowStatusRunning         MsgKey = "MsgWorkflowStatusRunning"
+	MsgWorkflowStatusWaitingApproval MsgKey = "MsgWorkflowStatusWaitingApproval"
+	MsgWorkflowStatusWaitingInput    MsgKey = "MsgWorkflowStatusWaitingInput"
+	MsgWorkflowStatusSubmitted       MsgKey = "MsgWorkflowStatusSubmitted"
+	MsgWorkflowStatusAccepted        MsgKey = "MsgWorkflowStatusAccepted"
+	MsgWorkflowStatusFailed          MsgKey = "MsgWorkflowStatusFailed"
+	MsgWorkflowStatusBlocked         MsgKey = "MsgWorkflowStatusBlocked"
+	MsgWorkflowStatusStopped         MsgKey = "MsgWorkflowStatusStopped"
+	MsgWorkflowStatusInterrupted     MsgKey = "MsgWorkflowStatusInterrupted"
+)
+
+const MsgProjectCallbackUnsupported MsgKey = "project_callback_unsupported"
+
+const (
 	LangAuto               Language = "" // auto-detect from user messages
 	LangEnglish            Language = "en"
 	LangChinese            Language = "zh"
@@ -193,6 +305,51 @@ type MsgKey string
 
 const (
 	MsgStarting                  MsgKey = "starting"
+	MsgQueryDone                 MsgKey = "query_done"
+	MsgQueryFailed               MsgKey = "query_failed"
+	MsgQueryLatestPage           MsgKey = "query_latest_page"
+	MsgQueryProcess              MsgKey = "query_process"
+	MsgQueryAnswer               MsgKey = "query_answer"
+	MsgQueryPageExpired          MsgKey = "query_page_expired"
+	MsgQueryPageFailed           MsgKey = "query_page_failed"
+	MsgQueryPageBusy             MsgKey = "query_page_busy"
+	MsgQueryRestored             MsgKey = "query_restored"
+	MsgQuerySuperseded           MsgKey = "query_superseded"
+	MsgDecisionDeadline          MsgKey = "decision_deadline"
+	MsgWorkflowReworkInvalid     MsgKey = "workflow_rework_invalid"
+	MsgWorkflowReworkTitle       MsgKey = "workflow_rework_title"
+	MsgWorkflowReworkInGroup     MsgKey = "workflow_rework_in_group"
+	MsgWorkflowResultFile        MsgKey = "workflow_result_file"
+	MsgDecisionAnswer            MsgKey = "decision_answer"
+	MsgDecisionSubmit            MsgKey = "decision_submit"
+	MsgDecisionExpired           MsgKey = "decision_expired"
+	MsgExecEmptyAnswer           MsgKey = "exec_empty_answer"
+	MsgExecHistory               MsgKey = "exec_history"
+	MsgExecReadArchive           MsgKey = "exec_read_archive"
+	MsgExecArchived              MsgKey = "exec_archived"
+	MsgExecRunning               MsgKey = "exec_running"
+	MsgExecDone                  MsgKey = "exec_done"
+	MsgExecFailed                MsgKey = "exec_failed"
+	MsgExecStopped               MsgKey = "exec_stopped"
+	MsgExecExitCode              MsgKey = "exec_exit_code"
+	MsgExecFullExplanation       MsgKey = "exec_full_explanation"
+	MsgExecBack                  MsgKey = "exec_back"
+	MsgExecPrevious              MsgKey = "exec_previous"
+	MsgExecNext                  MsgKey = "exec_next"
+	MsgExecRefreshCurrent        MsgKey = "exec_refresh_current"
+	MsgExecRefresh               MsgKey = "exec_refresh"
+	MsgExecNoOutput              MsgKey = "exec_no_output"
+	MsgExecNeedsInput            MsgKey = "exec_needs_input"
+	MsgExecNeedsApproval         MsgKey = "exec_needs_approval"
+	MsgExecReminderFailed        MsgKey = "exec_reminder_failed"
+	MsgExecRetryReminder         MsgKey = "exec_retry_reminder"
+	MsgExecOpenOriginal          MsgKey = "exec_open_original"
+	MsgExecSummaryHint           MsgKey = "exec_summary_hint"
+	MsgExecCommandLabel          MsgKey = "exec_command_label"
+	MsgExecOutputLabel           MsgKey = "exec_output_label"
+	MsgNativeExecutionFile       MsgKey = "native_execution_file"
+	MsgNativeExecutionBuffering  MsgKey = "native_execution_buffering"
+	MsgQueryDeliveryIncomplete   MsgKey = "query_delivery_incomplete"
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
 	MsgToolResult                MsgKey = "tool_result"
@@ -215,6 +372,10 @@ const (
 	MsgToolAuthNotSupported      MsgKey = "tool_auth_not_supported"
 	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
+	MsgProjectUsage              MsgKey = "project_usage"
+	MsgProjectSelected           MsgKey = "project_selected"
+	MsgProjectRequired           MsgKey = "project_required"
+	MsgProjectCleared            MsgKey = "project_cleared"
 	MsgError                     MsgKey = "error"
 	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
@@ -341,6 +502,7 @@ const (
 	MsgModelNotSupported     MsgKey = "model_not_supported"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
+	MsgAgentConfigFailed     MsgKey = "agent_config_failed"
 	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
 
 	MsgCompressNotSupported MsgKey = "compress_not_supported"
@@ -694,7 +856,1353 @@ const (
 	MsgAgentRelayToolPrompt MsgKey = "agent_relay_tool_prompt"
 )
 
+const (
+	MsgBotUsage                    MsgKey = "bot_usage"
+	MsgBotPrivateOnly              MsgKey = "bot_privateonly"
+	MsgBotUnsupported              MsgKey = "bot_unsupported"
+	MsgBotBusy                     MsgKey = "bot_busy"
+	MsgBotCancelled                MsgKey = "bot_cancelled"
+	MsgBotAuthorize                MsgKey = "bot_authorize"
+	MsgBotFailed                   MsgKey = "bot_failed"
+	MsgBotExists                   MsgKey = "bot_exists"
+	MsgBotReady                    MsgKey = "bot_ready"
+	MsgBotSavedOffline             MsgKey = "bot_savedoffline"
+	MsgBotSaveFailed               MsgKey = "bot_savefailed"
+	MsgBotUnclaimed                MsgKey = "bot_unclaimed"
+	MsgBotClaimInvalid             MsgKey = "bot_claiminvalid"
+	MsgBotClaimed                  MsgKey = "bot_claimed"
+	MsgBotOwnerRequired            MsgKey = "bot_ownerrequired"
+	MsgTeamUsage                   MsgKey = "team_usage"
+	MsgTeamInitScan                MsgKey = "team_init_scan"
+	MsgTeamInitReady               MsgKey = "team_init_ready"
+	MsgTeamInitStarting            MsgKey = "team_init_starting"
+	MsgTeamInitNoStart             MsgKey = "team_init_no_start"
+	MsgTeamInitAutoReady           MsgKey = "team_init_auto_ready"
+	MsgBotAutoReady                MsgKey = "bot_auto_ready"
+	MsgBotAutoSavedOffline         MsgKey = "bot_auto_saved_offline"
+	MsgBotRegistrationOwnerMissing MsgKey = "bot_registration_owner_missing"
+)
+
+const (
+	MsgTeamUnavailable      MsgKey = "MsgTeamUnavailable"
+	MsgTeamProjectPending   MsgKey = "MsgTeamProjectPending"
+	MsgTeamManagerOnly      MsgKey = "MsgTeamManagerOnly"
+	MsgTeamGroupUnsupported MsgKey = "MsgTeamGroupUnsupported"
+	MsgTeamProjects         MsgKey = "MsgTeamProjects"
+	MsgTeamProjectReady     MsgKey = "MsgTeamProjectReady"
+	MsgTeamChatUsage        MsgKey = "MsgTeamChatUsage"
+)
+
+const MsgTeamMemberSaved MsgKey = "team_member_saved"
+
+const (
+	MsgFormModify            MsgKey = "MsgFormModify"
+	MsgBotProfileEditTitle   MsgKey = "MsgBotProfileEditTitle"
+	MsgBotProfileEditHint    MsgKey = "MsgBotProfileEditHint"
+	MsgBotAuthorizeAutomatic MsgKey = "MsgBotAuthorizeAutomatic"
+	MsgBotNameReadFailed     MsgKey = "MsgBotNameReadFailed"
+)
+
+const (
+	MsgTeamMembersTitle          MsgKey = "MsgTeamMembersTitle"
+	MsgTeamMemberEdit            MsgKey = "MsgTeamMemberEdit"
+	MsgTeamMemberFormTitle       MsgKey = "MsgTeamMemberFormTitle"
+	MsgTeamMemberFormHint        MsgKey = "MsgTeamMemberFormHint"
+	MsgTeamMemberNotFound        MsgKey = "MsgTeamMemberNotFound"
+	MsgTeamMemberFormUnsupported MsgKey = "MsgTeamMemberFormUnsupported"
+	MsgFormSave                  MsgKey = "MsgFormSave"
+	MsgFormBotIDHint             MsgKey = "MsgFormBotIDHint"
+)
+
+const (
+	MsgFormBotTitle      MsgKey = "MsgFormBotTitle"
+	MsgFormProjectTitle  MsgKey = "MsgFormProjectTitle"
+	MsgFormBotName       MsgKey = "MsgFormBotName"
+	MsgFormIDHint        MsgKey = "MsgFormIDHint"
+	MsgFormRole          MsgKey = "MsgFormRole"
+	MsgFormBackend       MsgKey = "MsgFormBackend"
+	MsgFormPrompt        MsgKey = "MsgFormPrompt"
+	MsgFormProjectName   MsgKey = "MsgFormProjectName"
+	MsgFormDirectory     MsgKey = "MsgFormDirectory"
+	MsgFormMembers       MsgKey = "MsgFormMembers"
+	MsgFormGoal          MsgKey = "MsgFormGoal"
+	MsgFormCreate        MsgKey = "MsgFormCreate"
+	MsgFormBotHint       MsgKey = "MsgFormBotHint"
+	MsgFormProjectHint   MsgKey = "MsgFormProjectHint"
+	MsgFormInvalidField  MsgKey = "MsgFormInvalidField"
+	MsgFormExpired       MsgKey = "MsgFormExpired"
+	MsgFormSubmitted     MsgKey = "MsgFormSubmitted"
+	MsgFormRoleManager   MsgKey = "MsgFormRoleManager"
+	MsgFormRolePlanner   MsgKey = "MsgFormRolePlanner"
+	MsgFormRoleDeveloper MsgKey = "MsgFormRoleDeveloper"
+	MsgFormRoleTester    MsgKey = "MsgFormRoleTester"
+	MsgFormRoleReviewer  MsgKey = "MsgFormRoleReviewer"
+)
+
+const (
+	MsgHelpTeamSection    MsgKey = "help_team_section"
+	MsgHelpProjectSection MsgKey = "help_project_section"
+	MsgProjectGroupUsage  MsgKey = "project_group_usage"
+	MsgProjectCLIUsage    MsgKey = "project_cli_usage"
+	MsgProjectManagerOnly MsgKey = "project_manager_only"
+)
+
+const (
+	MsgProjectSettingsTitle          MsgKey = "MsgProjectSettingsTitle"
+	MsgProjectSettingsBody           MsgKey = "MsgProjectSettingsBody"
+	MsgProjectDirectoryScope         MsgKey = "MsgProjectDirectoryScope"
+	MsgProjectEditInfo               MsgKey = "MsgProjectEditInfo"
+	MsgProjectPrimaryDirectory       MsgKey = "MsgProjectPrimaryDirectory"
+	MsgProjectAdditionalDirectories  MsgKey = "MsgProjectAdditionalDirectories"
+	MsgProjectDirectoriesUnsupported MsgKey = "MsgProjectDirectoriesUnsupported"
+	MsgProjectDirectoriesHelp        MsgKey = "MsgProjectDirectoriesHelp"
+	MsgProjectEditDirectory          MsgKey = "MsgProjectEditDirectory"
+	MsgProjectViewMembers            MsgKey = "MsgProjectViewMembers"
+	MsgProjectBotSettings            MsgKey = "MsgProjectBotSettings"
+	MsgProjectSettingsUsage          MsgKey = "MsgProjectSettingsUsage"
+	MsgProjectGroupRequired          MsgKey = "MsgProjectGroupRequired"
+	MsgProjectBusy                   MsgKey = "MsgProjectBusy"
+	MsgProjectDirectoryConflict      MsgKey = "MsgProjectDirectoryConflict"
+	MsgProjectSettingsSaved          MsgKey = "MsgProjectSettingsSaved"
+	MsgProjectMembersBody            MsgKey = "MsgProjectMembersBody"
+	MsgProjectModelInherited         MsgKey = "MsgProjectModelInherited"
+	MsgProjectModelOverride          MsgKey = "MsgProjectModelOverride"
+	MsgProjectBotSettingsBody        MsgKey = "MsgProjectBotSettingsBody"
+	MsgProjectChangeModel            MsgKey = "MsgProjectChangeModel"
+	MsgProjectResetModel             MsgKey = "MsgProjectResetModel"
+	MsgProjectSharedSettings         MsgKey = "MsgProjectSharedSettings"
+)
+
+const MsgProjectModelScope MsgKey = "project_model_scope"
+const MsgProjectModelChanged MsgKey = "project_model_changed"
+
+const (
+	MsgProgressQueue      MsgKey = "progress_queue"
+	MsgProgressResponse   MsgKey = "progress_response"
+	MsgProgressResponding MsgKey = "progress_responding"
+	MsgProgressTool       MsgKey = "progress_tool"
+	MsgProgressTiming     MsgKey = "progress_timing"
+	MsgProgressPosition   MsgKey = "progress_position"
+	MsgProgressPlan       MsgKey = "progress_plan"
+	MsgProgressNext       MsgKey = "progress_next"
+	MsgProgressNoPlan     MsgKey = "progress_noplan"
+	MsgProgressReview     MsgKey = "progress_review"
+	MsgProgressRecent     MsgKey = "progress_recent"
+	MsgProgressSummary    MsgKey = "progress_summary"
+	MsgProgressQueueSlow  MsgKey = "progress_queueslow"
+	MsgProgressSilent     MsgKey = "progress_silent"
+	MsgProgressControls   MsgKey = "progress_controls"
+	MsgProgressOwner      MsgKey = "progress_owner"
+)
+
+const (
+	MsgProgressRead       MsgKey = "progress_read"
+	MsgProgressEdit       MsgKey = "progress_edit"
+	MsgProgressSearch     MsgKey = "progress_search"
+	MsgProgressTest       MsgKey = "progress_test"
+	MsgProgressBuild      MsgKey = "progress_build"
+	MsgProgressCommand    MsgKey = "progress_command"
+	MsgProgressPlanning   MsgKey = "progress_planning"
+	MsgProgressNoCurrent  MsgKey = "progress_nocurrent"
+	MsgProgressFinishStep MsgKey = "progress_finishstep"
+)
+
+const (
+	MsgProgressBrief    MsgKey = "progress_brief"
+	MsgProgressExpand   MsgKey = "progress_expand"
+	MsgProgressFoldHint MsgKey = "progress_foldhint"
+	MsgProgressFullPlan MsgKey = "progress_fullplan"
+)
+
 var messages = map[MsgKey]map[Language]string{
+	MsgProgressBrief:                 {LangEnglish: "Status: %s · elapsed: %s", LangChinese: "状态：%s · 已用时 %s", LangTraditionalChinese: "狀態：%s · 已用時 %s", LangJapanese: "状態: %s · 経過: %s", LangSpanish: "Estado: %s · duración: %s"},
+	MsgProgressExpand:                {LangEnglish: "Execution details · click to expand/collapse", LangChinese: "执行详情 · 点击展开 / 收起", LangTraditionalChinese: "執行詳情 · 點擊展開 / 收起", LangJapanese: "実行詳細 · クリックで開閉", LangSpanish: "Detalles · clic para expandir/contraer"},
+	MsgProgressFoldHint:              {LangEnglish: "Execution details are folded below. Click to view.", LangChinese: "执行详情已折叠，点击下方查看。", LangTraditionalChinese: "執行詳情已摺疊，點擊下方查看。", LangJapanese: "実行詳細は折りたたまれています。クリックで表示。", LangSpanish: "Los detalles están contraídos. Haz clic para verlos."},
+	MsgProgressFullPlan:              {LangEnglish: "Execution plan", LangChinese: "执行计划", LangTraditionalChinese: "執行計畫", LangJapanese: "実行計画", LangSpanish: "Plan de ejecución"},
+	MsgProgressRead:                  {LangEnglish: "Reading files", LangChinese: "读取文件", LangTraditionalChinese: "讀取檔案", LangJapanese: "ファイル読み取り", LangSpanish: "Leer archivos"},
+	MsgProgressEdit:                  {LangEnglish: "Editing files", LangChinese: "修改文件", LangTraditionalChinese: "修改檔案", LangJapanese: "ファイル編集", LangSpanish: "Editar archivos"},
+	MsgProgressSearch:                {LangEnglish: "Searching code or information", LangChinese: "检索代码或资料", LangTraditionalChinese: "檢索程式碼或資料", LangJapanese: "コード・情報検索", LangSpanish: "Buscar código o información"},
+	MsgProgressTest:                  {LangEnglish: "Running test command", LangChinese: "运行测试命令", LangTraditionalChinese: "執行測試命令", LangJapanese: "テストコマンド実行", LangSpanish: "Ejecutar pruebas"},
+	MsgProgressBuild:                 {LangEnglish: "Running build command", LangChinese: "运行构建命令", LangTraditionalChinese: "執行建置命令", LangJapanese: "ビルドコマンド実行", LangSpanish: "Ejecutar compilación"},
+	MsgProgressCommand:               {LangEnglish: "Running command", LangChinese: "执行命令", LangTraditionalChinese: "執行命令", LangJapanese: "コマンド実行", LangSpanish: "Ejecutar comando"},
+	MsgProgressPlanning:              {LangEnglish: "Updating execution plan", LangChinese: "更新执行计划", LangTraditionalChinese: "更新執行計畫", LangJapanese: "実行計画更新", LangSpanish: "Actualizar plan"},
+	MsgProgressNoCurrent:             {LangEnglish: "No current step reported", LangChinese: "未报告当前步骤", LangTraditionalChinese: "未回報目前步驟", LangJapanese: "現在のステップ未報告", LangSpanish: "Paso actual no indicado"},
+	MsgProgressFinishStep:            {LangEnglish: "Finish the current plan step", LangChinese: "完成当前计划步骤", LangTraditionalChinese: "完成目前計畫步驟", LangJapanese: "現在のステップを完了", LangSpanish: "Terminar el paso actual"},
+	MsgProgressQueue:                 {LangEnglish: "Waiting in model queue", LangChinese: "模型服务排队中", LangTraditionalChinese: "模型服務排隊中", LangJapanese: "モデルの順番待ち", LangSpanish: "En cola del modelo"},
+	MsgProgressResponse:              {LangEnglish: "Waiting for model response", LangChinese: "等待模型响应", LangTraditionalChinese: "等待模型回應", LangJapanese: "モデル応答待ち", LangSpanish: "Esperando respuesta del modelo"},
+	MsgProgressResponding:            {LangEnglish: "Preparing response", LangChinese: "正在整理回复", LangTraditionalChinese: "正在整理回覆", LangJapanese: "回答を作成中", LangSpanish: "Preparando respuesta"},
+	MsgProgressTool:                  {LangEnglish: "Executing tool", LangChinese: "工具执行中", LangTraditionalChinese: "工具執行中", LangJapanese: "ツール実行中", LangSpanish: "Ejecutando herramienta"},
+	MsgProgressTiming:                {LangEnglish: "Stage: %s · stage elapsed: %s · total: %s\nLast work update: %s ago · last agent event: %s ago", LangChinese: "阶段：%s · 本阶段已用 %s · 总用时 %s\n距上次工作进展：%s · 距最后执行事件：%s", LangTraditionalChinese: "階段：%s · 本階段已用 %s · 總用時 %s\n距上次工作進展：%s · 距最後執行事件：%s", LangJapanese: "段階: %s · 経過: %s · 合計: %s\n最後の進捗から: %s · 最後のイベントから: %s", LangSpanish: "Etapa: %s · duración: %s · total: %s\nÚltimo avance hace: %s · último evento hace: %s"},
+	MsgProgressPosition:              {LangEnglish: "Latest reported queue position: %d (not an ETA)", LangChinese: "最近上报排队位置：%d（不代表剩余时间）", LangTraditionalChinese: "最近回報排隊位置：%d（不代表剩餘時間）", LangJapanese: "最後に通知された待機順位: %d（残り時間ではありません）", LangSpanish: "Última posición recibida: %d (sin tiempo estimado)"},
+	MsgProgressPlan:                  {LangEnglish: "Plan: %d/%d steps reported complete · current: %s", LangChinese: "计划：已报告完成 %d/%d 步 · 当前：%s", LangTraditionalChinese: "計畫：已回報完成 %d/%d 步 · 目前：%s", LangJapanese: "計画: %d/%d 完了報告 · 現在: %s", LangSpanish: "Plan: %d/%d pasos terminados según agente · actual: %s"},
+	MsgProgressNext:                  {LangEnglish: "Next: %s", LangChinese: "下一步：%s", LangTraditionalChinese: "下一步：%s", LangJapanese: "次: %s", LangSpanish: "Siguiente: %s"},
+	MsgProgressNoPlan:                {LangEnglish: "No execution plan reported yet", LangChinese: "尚未上报执行计划", LangTraditionalChinese: "尚未回報執行計畫", LangJapanese: "実行計画は未報告です", LangSpanish: "Aún no se ha recibido un plan"},
+	MsgProgressReview:                {LangEnglish: "No pending plan step; delivery still needs review", LangChinese: "无待办计划步骤，交付仍需验收", LangTraditionalChinese: "無待辦計畫步驟，交付仍需驗收", LangJapanese: "未完了の計画なし。成果物の確認が必要です", LangSpanish: "Sin pasos pendientes; entrega pendiente de revisión"},
+	MsgProgressRecent:                {LangEnglish: "Recent tool results (not task acceptance): %s", LangChinese: "最近工具结果（不等于任务验收）：%s", LangTraditionalChinese: "最近工具結果（不等於任務驗收）：%s", LangJapanese: "最近のツール結果（タスク承認ではありません）: %s", LangSpanish: "Resultados recientes (no aceptación de tarea): %s"},
+	MsgProgressSummary:               {LangEnglish: "Latest public update: %s", LangChinese: "最近进展说明：%s", LangTraditionalChinese: "最近進展說明：%s", LangJapanese: "最新の公開更新: %s", LangSpanish: "Última actualización pública: %s"},
+	MsgProgressQueueSlow:             {LangEnglish: "Queue wait exceeded 5 minutes. You can keep waiting, or stop and select another model. No automatic reassignment.", LangChinese: "排队已超过 5 分钟。可继续等待，或停止后切换模型；不会自动重复派工。", LangTraditionalChinese: "排隊已超過 5 分鐘。可繼續等待，或停止後切換模型；不會自動重複派工。", LangJapanese: "待機が5分を超えました。待機継続、または停止してモデル変更が可能です。自動再割当はしません。", LangSpanish: "Más de 5 minutos en cola. Puedes esperar o detener y cambiar modelo. Sin reasignación automática."},
+	MsgProgressSilent:                {LangEnglish: "No new agent event for 2 minutes. Status is unconfirmed; the process may still be running.", LangChinese: "超过 2 分钟未收到新执行事件，当前进展待确认；进程可能仍在运行。", LangTraditionalChinese: "超過 2 分鐘未收到新執行事件，目前進展待確認；程序可能仍在執行。", LangJapanese: "2分間新しいイベントがありません。進捗は未確認で、処理は継続中の可能性があります。", LangSpanish: "Sin eventos nuevos durante 2 minutos. Progreso sin confirmar; el proceso puede seguir activo."},
+	MsgProgressControls:              {LangEnglish: "/status: current run · /stop: stop this conversation\n/project board: project overview · /project pause: stop all project work", LangChinese: "/status 查看当前执行 · /stop 停止本会话\n/project board 查看项目总览 · /project pause 停止整个项目", LangTraditionalChinese: "/status 查看目前執行 · /stop 停止本會話\n/project board 查看專案總覽 · /project pause 停止整個專案", LangJapanese: "/status: 状態 · /stop: この会話を停止\n/project board: 概要 · /project pause: プロジェクト全体を停止", LangSpanish: "/status: estado · /stop: detener conversación\n/project board: resumen · /project pause: detener proyecto"},
+	MsgProgressOwner:                 {LangEnglish: "Owner: %s\nExpected deliverable: %s", LangChinese: "负责人：%s\n预期交付：%s", LangTraditionalChinese: "負責人：%s\n預期交付：%s", LangJapanese: "担当: %s\n成果物: %s", LangSpanish: "Responsable: %s\nEntrega esperada: %s"},
+	MsgRoundIdle:                     {LangEnglish: "Waiting for a new instruction. Mention the manager in this group to start another round; member context and history are retained.", LangChinese: "等待新指令。在本群 @ 管理者即可开始下一轮，成员上下文和历史保留。", LangTraditionalChinese: "等待新指令。在本群 @ 管理者即可開始下一輪，成員上下文和歷史保留。", LangJapanese: "次の指示を待っています。このグループで管理者にメンションすると次の作業を開始します。コンテキストと履歴は保持されます。", LangSpanish: "Esperando instrucciones. Menciona al gestor en este grupo para iniciar otra ronda; se conserva el contexto y el historial."},
+	MsgRoundEnding:                   {LangEnglish: "Ending this round; waiting for member processes to stop. New work has not started.", LangChinese: "正在结束本轮，等待成员执行端停止；尚未开始新任务。", LangTraditionalChinese: "正在結束本輪，等待成員執行端停止；尚未開始新任務。", LangJapanese: "このラウンドを終了中です。メンバーの停止を待っています。", LangSpanish: "Finalizando esta ronda; esperando la parada de los miembros. No se ha iniciado trabajo nuevo."},
+	MsgRoundEnded:                    {LangEnglish: "Round ended. Ending does not mean all tasks were accepted.", LangChinese: "本轮已结束。结束不代表所有任务都已验收。", LangTraditionalChinese: "本輪已結束。結束不代表所有任務都已驗收。", LangJapanese: "ラウンド終了。全タスクの検収完了を意味しません。", LangSpanish: "Ronda finalizada. No significa que todas las tareas estén aceptadas."},
+	MsgRoundArchived:                 {LangEnglish: "This message belongs to an earlier round. Send a new instruction mentioning the manager in the group.", LangChinese: "这条消息属于已结束的轮次，请在群里另发新指令 @ 管理者。", LangTraditionalChinese: "這條訊息屬於已結束的輪次，請在群裡另發新指令 @ 管理者。", LangJapanese: "過去のラウンドです。グループで管理者宛てに新しい指示を送ってください。", LangSpanish: "Este mensaje pertenece a una ronda anterior. Envía nuevas instrucciones al gestor en el grupo."},
+	MsgRoundStopFailed:               {LangEnglish: "Could not confirm member shutdown: %s. This round remains blocked; review and retry ending.", LangChinese: "尚未确认成员停止：%s。本轮仍禁止派工，请检查后重试结束。", LangTraditionalChinese: "尚未確認成員停止：%s。本輪仍禁止派工，請檢查後重試結束。", LangJapanese: "メンバーの停止を確認できません：%s。新規作業はブロックされています。再試行してください。", LangSpanish: "No se pudo confirmar la parada: %s. El trabajo sigue bloqueado; revisa y reintenta."},
+	MsgRoundRetry:                    {LangEnglish: "Review and retry", LangChinese: "查看并重试", LangTraditionalChinese: "查看並重試", LangJapanese: "確認して再試行", LangSpanish: "Revisar y reintentar"},
+	MsgRoundCurrent:                  {LangEnglish: "Round %d · %s", LangChinese: "第 %d 轮 · %s", LangTraditionalChinese: "第 %d 輪 · %s", LangJapanese: "ラウンド %d · %s", LangSpanish: "Ronda %d · %s"},
+	MsgDashboardRefresh:              {LangEnglish: "Refresh panel", LangChinese: "刷新面板", LangTraditionalChinese: "重新整理面板", LangJapanese: "更新", LangSpanish: "Actualizar panel"},
+	MsgDashboardHistory:              {LangEnglish: "Round history", LangChinese: "历史轮次", LangTraditionalChinese: "歷史輪次", LangJapanese: "履歴", LangSpanish: "Historial"},
+	MsgDashboardCurrent:              {LangEnglish: "Current tasks", LangChinese: "当前任务", LangTraditionalChinese: "目前任務", LangJapanese: "現在のタスク", LangSpanish: "Tareas actuales"},
+	MsgDashboardNew:                  {LangEnglish: "Write a new instruction", LangChinese: "写新指令", LangTraditionalChinese: "寫新指令", LangJapanese: "新しい指示", LangSpanish: "Nueva instrucción"},
+	MsgDashboardUpdated:              {LangEnglish: "Updated: %s", LangChinese: "更新时间：%s", LangTraditionalChinese: "更新時間：%s", LangJapanese: "更新日時：%s", LangSpanish: "Actualizado: %s"},
+	MsgDashboardFailed:               {LangEnglish: "Could not refresh the panel: %s. No new state was loaded; retry.", LangChinese: "面板刷新失败：%s。尚未获取最新状态，请重试。", LangTraditionalChinese: "面板重新整理失敗：%s。尚未取得最新狀態，請重試。", LangJapanese: "更新できませんでした：%s。最新状態は未取得です。再試行してください。", LangSpanish: "No se pudo actualizar: %s. No hay datos nuevos; reintenta."},
+	MsgDashboardCounts:               {LangEnglish: "Accepted %d · Active/waiting %d · Unassigned %d · Other unaccepted %d", LangChinese: "已验收 %d · 执行或等待 %d · 尚未派发 %d · 其他未验收 %d", LangTraditionalChinese: "已驗收 %d · 執行或等待 %d · 尚未派發 %d · 其他未驗收 %d", LangJapanese: "検収済 %d · 実行/待機 %d · 未割当 %d · その他未検収 %d", LangSpanish: "Aceptadas %d · Activas/en espera %d · Sin asignar %d · Otras sin aceptar %d"},
+	MsgDashboardPage:                 {LangEnglish: "Page %d/%d", LangChinese: "第 %d/%d 页", LangTraditionalChinese: "第 %d/%d 頁", LangJapanese: "ページ %d/%d", LangSpanish: "Página %d/%d"},
+	MsgDashboardPending:              {LangEnglish: "Needs your decision: %s", LangChinese: "需要你处理：%s", LangTraditionalChinese: "需要你處理：%s", LangJapanese: "確認が必要：%s", LangSpanish: "Requiere tu decisión: %s"},
+	MsgDashboardHistoryEntry:         {LangEnglish: "Round %d · %s\nEnded: %s · By: %s", LangChinese: "第 %d 轮 · %s\n结束时间：%s · 操作者：%s", LangTraditionalChinese: "第 %d 輪 · %s\n結束時間：%s · 操作者：%s", LangJapanese: "ラウンド %d · %s\n終了：%s · 操作者：%s", LangSpanish: "Ronda %d · %s\nFinalizada: %s · Por: %s"},
+	MsgDashboardNoHistory:            {LangEnglish: "No ended rounds yet.", LangChinese: "尚无已结束轮次。", LangTraditionalChinese: "尚無已結束輪次。", LangJapanese: "終了したラウンドはありません。", LangSpanish: "Todavía no hay rondas finalizadas."},
+	MsgDashboardPrevious:             {LangEnglish: "Previous page", LangChinese: "上一页", LangTraditionalChinese: "上一頁", LangJapanese: "前へ", LangSpanish: "Anterior"},
+	MsgDashboardNext:                 {LangEnglish: "Next page", LangChinese: "下一页", LangTraditionalChinese: "下一頁", LangJapanese: "次へ", LangSpanish: "Siguiente"},
+	MsgDashboardRoundRecords:         {LangEnglish: "View records", LangChinese: "查看记录", LangTraditionalChinese: "查看記錄", LangJapanese: "記録を表示", LangSpanish: "Ver registros"},
+	MsgDashboardTopic:                {LangEnglish: "Open source thread", LangChinese: "打开来源话题", LangTraditionalChinese: "開啟來源話題", LangJapanese: "元のスレッド", LangSpanish: "Abrir conversación"},
+	MsgDashboardLinkFailed:           {LangEnglish: "Could not load the source link: %s", LangChinese: "来源话题链接获取失败：%s", LangTraditionalChinese: "來源話題連結取得失敗：%s", LangJapanese: "リンクを取得できません：%s", LangSpanish: "No se pudo obtener el enlace: %s"},
+	MsgRoundPause:                    {LangEnglish: "Pause this round", LangChinese: "暂停本轮", LangTraditionalChinese: "暫停本輪", LangJapanese: "ラウンドを一時停止", LangSpanish: "Pausar ronda"},
+	MsgRoundResume:                   {LangEnglish: "Resume this round", LangChinese: "恢复本轮", LangTraditionalChinese: "恢復本輪", LangJapanese: "ラウンドを再開", LangSpanish: "Reanudar ronda"},
+	MsgWorkflowBoard:                 {LangEnglish: "Project overview · %s", LangChinese: "项目总览 · %s", LangTraditionalChinese: "專案總覽 · %s", LangJapanese: "プロジェクト概要 · %s", LangSpanish: "Resumen del proyecto · %s"},
+	MsgWorkflowSummary:               {LangEnglish: "Goal: %s\nState: %s · Display: %s\nTasks: %d · Accepted: %d\n\n%s", LangChinese: "目标：%s\n状态：%s · 显示：%s\n任务：%d · 已验收：%d\n\n%s", LangTraditionalChinese: "目標：%s\n狀態：%s · 顯示：%s\n任務：%d · 已驗收：%d\n\n%s", LangJapanese: "目標: %s\n状態: %s · 表示: %s\nタスク: %d · 承認済: %d\n\n%s", LangSpanish: "Objetivo: %s\nEstado: %s · Vista: %s\nTareas: %d · Aceptadas: %d\n\n%s"},
+	MsgWorkflowTask:                  {LangEnglish: "Owner: %s\nWhy now: %s\nExpected deliverable: %s\nDependencies: %s\nStatus: %s\nUpdated: %s\n\n%s", LangChinese: "负责人：%s\n派工原因：%s\n预期交付：%s\n前置任务：%s\n状态：%s\n更新时间：%s\n\n%s", LangTraditionalChinese: "負責人：%s\n派工原因：%s\n預期交付：%s\n前置任務：%s\n狀態：%s\n更新時間：%s\n\n%s", LangJapanese: "担当: %s\n割当理由: %s\n成果物: %s\n依存タスク: %s\n状態: %s\n更新: %s\n\n%s", LangSpanish: "Responsable: %s\nMotivo: %s\nEntrega esperada: %s\nDependencias: %s\nEstado: %s\nActualizado: %s\n\n%s"},
+	MsgProjectFinish:                 {LangEnglish: "End this round", LangChinese: "结束本轮任务", LangTraditionalChinese: "結束本輪任務", LangJapanese: "このラウンドを終了", LangSpanish: "Finalizar esta ronda"},
+	MsgProjectStatusEnded:            {LangEnglish: "Ended", LangChinese: "已结束", LangTraditionalChinese: "已結束", LangJapanese: "終了済み", LangSpanish: "Finalizado"},
+	MsgProjectEnded:                  {LangEnglish: "Project ended. New tasks, rework and resume are disabled. Deliverables and history remain available via /project board and /project tasks. Ending does not mean all tasks were accepted.", LangChinese: "项目已结束，不再接收新任务或返工，不能通过恢复继续。交付和历史记录保留，可用 /project board 和 /project tasks 查看。结束不代表所有任务都已验收。", LangTraditionalChinese: "專案已結束，不再接收新任務或返工，不能透過恢復繼續。交付及歷史保留，可用 /project board 和 /project tasks 查看。結束不代表所有任務已驗收。", LangJapanese: "プロジェクトは終了しました。新規タスク、手直し、再開はできません。成果物と履歴は /project board、/project tasks で確認できます。終了は全タスクの検収を意味しません。", LangSpanish: "Proyecto finalizado. No admite nuevas tareas, revisiones ni reanudación. Entregables e historial disponibles en /project board y /project tasks. Finalizar no significa que todas las tareas estén aceptadas."},
+	MsgProjectFinishPreview:          {LangEnglish: "Project: %s\nAccepted: %d/%d · Active/waiting: %d · Unassigned plans: %d · Other unaccepted: %d", LangChinese: "项目：%s\n已验收：%d/%d · 执行或等待中：%d · 尚未派发：%d · 其他未验收：%d", LangTraditionalChinese: "專案：%s\n已驗收：%d/%d · 執行或等待中：%d · 尚未派發：%d · 其他未驗收：%d", LangJapanese: "プロジェクト：%s\n検収済み：%d/%d · 実行/待機中：%d · 未割当：%d · その他未検収：%d", LangSpanish: "Proyecto: %s\nAceptadas: %d/%d · Activas/en espera: %d · Sin asignar: %d · Otras sin aceptar: %d"},
+	MsgProjectFinishConsequences:     {LangEnglish: "Stop this round's members and queued input, expire pending questions/approvals and cancel unassigned plans. Results keep their acceptance states. The group, project settings and member context remain. Send a new instruction in this group after stopping completes.", LangChinese: "停止本轮所有成员执行及排队输入，关闭待回答/审批请求，取消未派发待办。结果保留原验收状态。群、项目设置与成员上下文保留，停止完成后直接在本群发送新指令。", LangTraditionalChinese: "停止本輪所有成員執行及排隊輸入，關閉待回答/審批請求，取消未派發待辦。結果保留原驗收狀態。群、專案設定與成員上下文保留，停止完成後直接在本群發送新指令。", LangJapanese: "今回の実行と入力待ちを停止し、質問・承認待ちと未割当予定を無効化します。成果物、検収状態、グループ、設定、コンテキストは保持されます。停止後、このグループで新しい指示を送れます。", LangSpanish: "Detiene esta ronda y sus entradas en cola, caduca preguntas/aprobaciones y cancela planes sin asignar. Se conservan resultados, grupo, ajustes y contexto. Tras la parada, envía nuevas instrucciones aquí."},
+	MsgProjectFinishConfirm:          {LangEnglish: "Confirm end of round", LangChinese: "确认结束本轮", LangTraditionalChinese: "確認結束本輪", LangJapanese: "ラウンド終了を確認", LangSpanish: "Confirmar fin de ronda"},
+	MsgProjectFinishCancel:           {LangEnglish: "Keep this round open", LangChinese: "暂不结束", LangTraditionalChinese: "暫不結束", LangJapanese: "終了しない", LangSpanish: "Mantener ronda abierta"},
+	MsgProjectFinishChanged:          {LangEnglish: "Project work changed since the preview. Review the updated state before confirming.", LangChinese: "项目任务状态已变化，请查看最新情况后重新确认。", LangTraditionalChinese: "專案任務狀態已變更，請查看最新情況後重新確認。", LangJapanese: "確認後にタスク状態が変わりました。最新の状態を確認してください。", LangSpanish: "El estado ha cambiado. Revisa los datos actuales antes de confirmar."},
+	MsgProjectFinishTextCommand:      {LangEnglish: "Text confirmation: %s", LangChinese: "文字确认命令：%s", LangTraditionalChinese: "文字確認指令：%s", LangJapanese: "テキストで確認：%s", LangSpanish: "Confirmación por texto: %s"},
+	MsgProjectEndedAt:                {LangEnglish: "Ended at: %s", LangChinese: "结束时间：%s", LangTraditionalChinese: "結束時間：%s", LangJapanese: "終了日時：%s", LangSpanish: "Finalizado el: %s"},
+	MsgWorkflowHelp:                  {LangEnglish: "/project dashboard (board) · /project tasks\n/project task T001 · /project task T001 logs\n/project display compact|standard|debug\n/project pause · /project resume · /project finish\nProgress refreshes every 15s: stage, plan, next step and wait reason. /status checks the current run; /stop stops this conversation.\nPause stops all project members and queued work. Resume enables new requests; it does not replay stopped tasks.", LangChinese: "/project dashboard（或 board）：项目面板 · /project tasks：任务清单\n/project task T001：任务详情 · /project task T001 logs：工具日志\n/project display compact|standard|debug：简洁/标准/调试\n/project pause：暂停整个项目 · /project resume：恢复接收任务\n/project finish：结束本轮任务（需确认）\n任务卡每 15 秒更新阶段、计划、下一步和等待原因。/status 查看当前执行；/stop 停止本会话。\n暂停会停止所有成员及排队任务；恢复不会自动重派已停止的任务。", LangTraditionalChinese: "/project dashboard（board）：專案面板 · /project tasks：任務清單\n/project task T001：詳情 · /project task T001 logs：工具日誌\n/project display compact|standard|debug：簡潔/標準/除錯\n/project pause：暫停專案 · /project resume：恢復接收\n/project finish：結束本輪（需確認）\n任務卡每 15 秒更新階段、計畫和等待原因。/status 查看執行；/stop 停止本會話。\n恢復不會自動重派已停止的任務。", LangJapanese: "/project dashboard (board) · /project tasks\n/project task T001 · /project task T001 logs\n/project display compact|standard|debug\n/project pause · /project resume · /project finish\n進捗は15秒ごとに更新。/status で確認、/stop でこの会話を停止。\n一時停止は全メンバーを停止します。再開は停止済みタスクを再実行しません。", LangSpanish: "/project dashboard (board) · /project tasks\n/project task T001 · /project task T001 logs\n/project display compact|standard|debug\n/project pause · /project resume · /project finish\nProgreso cada 15s. /status consulta la ejecución; /stop detiene esta conversación.\nPausar detiene todos los miembros. Reanudar no repite tareas detenidas."},
+	MsgWorkflowPaused:                {LangEnglish: "Project paused. Use /project resume to enable new work.", LangChinese: "项目已暂停。使用 /project resume 后才能接收新任务。", LangTraditionalChinese: "專案已暫停。使用 /project resume 恢復接收新任務。", LangJapanese: "プロジェクトは一時停止中です。/project resume で再開します。", LangSpanish: "Proyecto pausado. Usa /project resume para habilitar trabajo."},
+	MsgWorkflowResumed:               {LangEnglish: "Project resumed; stopped tasks have not been dispatched again.", LangChinese: "项目已恢复接收任务，已停止的任务不会自动重派。", LangTraditionalChinese: "專案已恢復接收任務，已停止的任務不會自動重派。", LangJapanese: "新しいタスクを受付中。停止済みタスクは再実行されません。", LangSpanish: "Proyecto habilitado; no se han repetido tareas detenidas."},
+	MsgWorkflowProgress:              {LangEnglish: "%s\nStatus: %s\nTool operations: %d\n%s", LangChinese: "%s\n状态：%s\n工具操作：%d 次\n%s", LangTraditionalChinese: "%s\n狀態：%s\n工具操作：%d 次\n%s", LangJapanese: "%s\n状態: %s\nツール操作: %d\n%s", LangSpanish: "%s\nEstado: %s\nOperaciones: %d\n%s"},
+	MsgWorkflowMissing:               {LangEnglish: "Not specified", LangChinese: "未填写", LangTraditionalChinese: "未填寫", LangJapanese: "未指定", LangSpanish: "Sin especificar"},
+	MsgWorkflowLogs:                  {LangEnglish: "Tool log · %s (bounded, excludes internal reasoning). Use /project task %s logs to download.", LangChinese: "工具日志 · %s（限量保留，不含模型内部推理）。使用 /project task %s logs 下载。", LangTraditionalChinese: "工具日誌 · %s（限量保留，不含模型內部推理）。使用 /project task %s logs 下載。", LangJapanese: "ツールログ · %s（上限あり、内部推論なし）。/project task %s logs で取得。", LangSpanish: "Registro · %s (limitado, sin razonamiento interno). /project task %s logs para descargar."},
+	MsgWorkflowEmpty:                 {LangEnglish: "No tasks assigned.", LangChinese: "尚未派工。", LangTraditionalChinese: "尚未派工。", LangJapanese: "割当済みタスクはありません。", LangSpanish: "No hay tareas asignadas."},
+	MsgWorkflowCurrent:               {LangEnglish: "Current operation: %s", LangChinese: "当前操作：%s", LangTraditionalChinese: "目前操作：%s", LangJapanese: "現在の操作: %s", LangSpanish: "Operación actual: %s"},
+	MsgWorkflowSaved:                 {LangEnglish: "Display mode saved: %s. Applies to subsequent turns.", LangChinese: "显示模式已设为 %s，下次执行生效。", LangTraditionalChinese: "顯示模式已設為 %s，下次執行生效。", LangJapanese: "表示モードを %s に保存。次のターンから適用。", LangSpanish: "Vista guardada: %s. Se aplica al siguiente turno."},
+	MsgWorkflowSubmitted:             {LangEnglish: "Submitted for review; acceptance is still pending.", LangChinese: "已提交交付，等待管理者验收。", LangTraditionalChinese: "已提交交付，等待管理者驗收。", LangJapanese: "成果物を提出済み。承認待ちです。", LangSpanish: "Entrega enviada; pendiente de aceptación."},
+	MsgWorkflowThread:                {LangEnglish: "Open task", LangChinese: "查看任务", LangTraditionalChinese: "查看任務", LangJapanese: "タスクを開く", LangSpanish: "Abrir tarea"},
+	MsgWorkflowStatusActive:          {LangEnglish: "Active", LangChinese: "运行中", LangTraditionalChinese: "執行中", LangJapanese: "実行中", LangSpanish: "Activo"},
+	MsgWorkflowStatusPaused:          {LangEnglish: "Paused", LangChinese: "已暂停", LangTraditionalChinese: "已暫停", LangJapanese: "一時停止", LangSpanish: "Pausado"},
+	MsgWorkflowStatusPlanned:         {LangEnglish: "Planned · not assigned", LangChinese: "待安排·尚未派发", LangTraditionalChinese: "待安排·尚未派發", LangJapanese: "計画済み・未割当", LangSpanish: "Planificada · sin asignar"},
+	MsgWorkflowStatusCancelled:       {LangEnglish: "Cancelled", LangChinese: "已取消", LangTraditionalChinese: "已取消", LangJapanese: "キャンセル済み", LangSpanish: "Cancelada"},
+	MsgWorkflowStatusQueued:          {LangEnglish: "Queued", LangChinese: "已派工·待开始", LangTraditionalChinese: "已派工·待開始", LangJapanese: "開始待ち", LangSpanish: "En cola"},
+	MsgWorkflowStatusRunning:         {LangEnglish: "Running", LangChinese: "执行中", LangTraditionalChinese: "執行中", LangJapanese: "実行中", LangSpanish: "En ejecución"},
+	MsgWorkflowStatusWaitingApproval: {LangEnglish: "Awaiting approval", LangChinese: "等待审批", LangTraditionalChinese: "等待審批", LangJapanese: "承認待ち", LangSpanish: "Esperando aprobación"},
+	MsgWorkflowStatusWaitingInput:    {LangEnglish: "Awaiting input", LangChinese: "等待补充信息", LangTraditionalChinese: "等待補充資訊", LangJapanese: "入力待ち", LangSpanish: "Esperando información"},
+	MsgWorkflowStatusSubmitted:       {LangEnglish: "Submitted · review needed", LangChinese: "已提交·待验收", LangTraditionalChinese: "已提交·待驗收", LangJapanese: "提出済み・確認待ち", LangSpanish: "Entregada · pendiente de revisión"},
+	MsgWorkflowStatusAccepted:        {LangEnglish: "Accepted", LangChinese: "已验收", LangTraditionalChinese: "已驗收", LangJapanese: "承認済み", LangSpanish: "Aceptada"},
+	MsgWorkflowStatusFailed:          {LangEnglish: "Failed", LangChinese: "失败·需处理", LangTraditionalChinese: "失敗·需處理", LangJapanese: "失敗・要対応", LangSpanish: "Fallida"},
+	MsgWorkflowStatusBlocked:         {LangEnglish: "Blocked", LangChinese: "阻塞", LangTraditionalChinese: "阻塞", LangJapanese: "ブロック中", LangSpanish: "Bloqueada"},
+	MsgWorkflowStatusStopped:         {LangEnglish: "Stopped", LangChinese: "已停止", LangTraditionalChinese: "已停止", LangJapanese: "停止済み", LangSpanish: "Detenida"},
+	MsgWorkflowStatusInterrupted:     {LangEnglish: "Interrupted", LangChinese: "已中断", LangTraditionalChinese: "已中斷", LangJapanese: "中断", LangSpanish: "Interrumpida"},
+
+	MsgQueryDone:       {LangEnglish: "Completed", LangChinese: "已完成", LangTraditionalChinese: "已完成", LangJapanese: "完了", LangSpanish: "Completado"},
+	MsgQueryFailed:     {LangEnglish: "Failed", LangChinese: "执行失败", LangTraditionalChinese: "執行失敗", LangJapanese: "失敗", LangSpanish: "Error"},
+	MsgQueryLatestPage: {LangEnglish: "Latest page", LangChinese: "最新一页", LangTraditionalChinese: "最新一頁", LangJapanese: "最新ページ", LangSpanish: "Última página"},
+	MsgQueryProcess:    {LangEnglish: "Execution progress", LangChinese: "执行进度", LangTraditionalChinese: "執行進度", LangJapanese: "実行状況", LangSpanish: "Progreso de ejecución"},
+	MsgQueryAnswer:     {LangEnglish: "Conclusion", LangChinese: "结论", LangTraditionalChinese: "結論", LangJapanese: "結論", LangSpanish: "Conclusión"},
+	MsgRolePermissionsApplyFailed: {
+		LangEnglish:            "Role %s: permissions were checked, but automatic application could not finish. Confirm them here or retry from /team permissions:\n%s",
+		LangChinese:            "角色 %s：权限已检查，但自动申请未完成。可通过以下入口确认，或从 /team permissions 重试：\n%s",
+		LangTraditionalChinese: "角色 %s：權限已檢查，但自動申請未完成。可透過以下入口確認，或從 /team permissions 重試：\n%s",
+		LangJapanese:           "ロール %s：権限の確認は完了しましたが、自動申請できませんでした。以下で確認するか /team permissions から再試行してください：\n%s",
+		LangSpanish:            "Rol %s: permisos comprobados, pero la solicitud automática no terminó. Confirma aquí o reintenta desde /team permissions:\n%s",
+	},
+
+	MsgRolePermissionsReady: {
+		LangEnglish:            "Role %s: required application permissions are active.",
+		LangChinese:            "角色 %s：所需应用权限已生效。",
+		LangTraditionalChinese: "角色 %s：所需應用權限已生效。",
+		LangJapanese:           "ロール %s：必要なアプリ権限は有効です。",
+		LangSpanish:            "Rol %s: los permisos necesarios están activos.",
+	},
+	MsgRolePermissionsPending: {
+		LangEnglish:            "Role %s: missing permissions were selected automatically. Confirm them here, then recheck with /team permissions:\n%s",
+		LangChinese:            "角色 %s：已自动选好缺失权限，请打开以下入口批量确认，完成后用 /team permissions 复查：\n%s",
+		LangTraditionalChinese: "角色 %s：已自動選好缺少的權限，請開啟以下入口批次確認，完成後用 /team permissions 複查：\n%s",
+		LangJapanese:           "ロール %s：不足する権限を選択しました。以下で確認後、/team permissions で再確認してください：\n%s",
+		LangSpanish:            "Rol %s: permisos faltantes seleccionados. Confírmalos aquí y comprueba con /team permissions:\n%s",
+	},
+	MsgRolePermissionsSubmitted: {
+		LangEnglish:            "Role %s: an administrator permission request was submitted; it is not yet granted. Confirm any remaining permissions here:\n%s",
+		LangChinese:            "角色 %s：已提交管理员权限申请，尚未生效。仍需确认的权限入口：\n%s",
+		LangTraditionalChinese: "角色 %s：已提交管理員權限申請，尚未生效。仍需確認的權限入口：\n%s",
+		LangJapanese:           "ロール %s：管理者に権限を申請しました。承認待ちです。残りの権限はこちら：\n%s",
+		LangSpanish:            "Rol %s: solicitud enviada al administrador, aún pendiente. Confirma los permisos restantes aquí:\n%s",
+	},
+	MsgRolePermissionsUnknown: {
+		LangEnglish:            "Role %s: permissions could not be verified. The bot is saved; review its default permissions here or retry /team permissions:\n%s",
+		LangChinese:            "角色 %s：暂时无法核验权限，Bot 已保存。可在以下入口确认默认权限，或用 /team permissions 重试：\n%s",
+		LangTraditionalChinese: "角色 %s：暫時無法核驗權限，Bot 已儲存。可在以下入口確認預設權限，或用 /team permissions 重試：\n%s",
+		LangJapanese:           "ロール %s：権限を確認できませんでした。Bot は保存済みです。以下で確認するか /team permissions で再試行してください：\n%s",
+		LangSpanish:            "Rol %s: no se pudieron verificar los permisos. Bot guardado. Revisa aquí o reintenta /team permissions:\n%s",
+	},
+	MsgRolePermissionsUser: {
+		LangEnglish:            "To use personal labels, authorize your account if not already authorized: /team labels in the manager private chat.",
+		LangChinese:            "个人标签需本人授权；尚未授权时，请在管理者私聊使用 /team labels。",
+		LangTraditionalChinese: "個人標籤需本人授權；尚未授權時，請在管理者私聊使用 /team labels。",
+		LangJapanese:           "個人ラベルは管理者との個別チャットで /team labels を実行して承認してください。",
+		LangSpanish:            "Las etiquetas personales requieren tu autorización en el chat privado del gestor: /team labels.",
+	},
+	MsgRolePermissionsUsage: {
+		LangEnglish:            "Use /team permissions [bot] in the manager private chat.",
+		LangChinese:            "请在管理者私聊使用 /team permissions [bot]。",
+		LangTraditionalChinese: "請在管理者私聊使用 /team permissions [bot]。",
+		LangJapanese:           "管理者との個別チャットで /team permissions [bot] を使用してください。",
+		LangSpanish:            "Usa /team permissions [bot] en el chat privado del gestor.",
+	},
+	MsgRolePermissionsCreationHint: {
+		LangEnglish:            "Creation automatically checks and requests permissions for the selected role. You confirm permissions that require approval; personal OAuth is separate.",
+		LangChinese:            "创建时自动检查并申请所选角色的默认权限；需审批的权限由你确认，个人身份授权单独完成。",
+		LangTraditionalChinese: "建立時自動檢查並申請所選角色的預設權限；需審批的權限由你確認，個人身分授權另行完成。",
+		LangJapanese:           "作成時にロールの権限を確認・申請します。承認が必要な権限はご確認ください。個人認証は別途必要です。",
+		LangSpanish:            "Al crear se comprueban y solicitan los permisos del rol. Tú confirmas los que requieran aprobación; OAuth personal es independiente.",
+	},
+
+	"team permissions": {LangEnglish: "Role permissions", LangChinese: "角色权限", LangTraditionalChinese: "角色權限", LangJapanese: "ロールの権限", LangSpanish: "Permisos del rol"},
+
+	MsgLabelTitle: {
+		LangEnglish:            "Label settings",
+		LangChinese:            "标签设置",
+		LangTraditionalChinese: "標籤設定",
+		LangJapanese:           "ラベル設定",
+		LangSpanish:            "Ajustes de etiquetas",
+	},
+
+	MsgLabelHint: {
+		LangEnglish:            "Labels belong to your conversation list. Save defaults for future bots and project groups; existing conversations are unchanged.",
+		LangChinese:            "标签只影响你自己的会话列表。默认值用于以后新建的 Bot 和任务群，已有会话保持原状。",
+		LangTraditionalChinese: "標籤只影響你自己的會話列表。預設值用於以後新建的 Bot 和任務群，已有會話保持原狀。",
+		LangJapanese:           "ラベルは自分の会話一覧に適用されます。今後作成する Bot とプロジェクトグループの既定値を保存します。",
+		LangSpanish:            "Las etiquetas pertenecen a tu lista de conversaciones. Los valores guardados se aplican a futuros bots y grupos.",
+	},
+
+	MsgLabelNew: {
+		LangEnglish:            "New labels (one per line)",
+		LangChinese:            "新建标签（每行一个）",
+		LangTraditionalChinese: "新建標籤（每行一個）",
+		LangJapanese:           "新しいラベル（1 行に 1 つ）",
+		LangSpanish:            "Etiquetas nuevas (una por línea)",
+	},
+
+	MsgLabelNewHint: {
+		LangEnglish:            "Leave blank to add no new label; matching names are reused.",
+		LangChinese:            "留空表示不新建；同名标签会复用。",
+		LangTraditionalChinese: "留空表示不新建；同名標籤會復用。",
+		LangJapanese:           "空欄なら追加なし。同名のラベルは再利用します。",
+		LangSpanish:            "Vacío para no crear; se reutilizan nombres existentes.",
+	},
+
+	MsgLabelAuthNeeded: {
+		LangEnglish:            "User authorization is required. In private chat with the manager, open /team labels and authorize.",
+		LangChinese:            "需要用户身份授权。请私聊管理者，打开 /team labels 后授权。",
+		LangTraditionalChinese: "需要使用者身分授權。請私聊管理者，打開 /team labels 後授權。",
+		LangJapanese:           "ユーザー認証が必要です。管理 Bot の個別チャットで /team labels を開いて認証してください。",
+		LangSpanish:            "Se requiere autorización de usuario. Abre /team labels en privado con el administrador.",
+	},
+
+	MsgLabelWrongUser: {
+		LangEnglish:            "The authorized account does not match the requester. Use your own account.",
+		LangChinese:            "授权账号与发起人不一致，请使用你自己的账号授权。",
+		LangTraditionalChinese: "授權帳號與發起人不一致，請使用你自己的帳號授權。",
+		LangJapanese:           "認証したアカウントが依頼者と異なります。自分のアカウントを使用してください。",
+		LangSpanish:            "La cuenta autorizada no coincide con el solicitante. Usa tu propia cuenta.",
+	},
+
+	MsgLabelBusy: {
+		LangEnglish:            "Label settings or authorization are in progress. Try again after they finish.",
+		LangChinese:            "标签设置或授权正在进行，请完成后重试。",
+		LangTraditionalChinese: "標籤設定或授權正在進行，請完成後重試。",
+		LangJapanese:           "ラベル設定または認証中です。完了後に再試行してください。",
+		LangSpanish:            "La configuración o autorización está en curso. Reintenta al terminar.",
+	},
+
+	MsgLabelFailed: {
+		LangEnglish:            "Label operation failed (%s). Check user scopes im:feed_group_v1:read and im:feed_group_v1:write; retry in /team labels.",
+		LangChinese:            "标签操作失败（%s）。请检查用户身份权限 im:feed_group_v1:read、im:feed_group_v1:write，并在 /team labels 重试。",
+		LangTraditionalChinese: "標籤操作失敗（%s）。請檢查使用者身分權限 im:feed_group_v1:read、im:feed_group_v1:write，並在 /team labels 重試。",
+		LangJapanese:           "ラベル操作失敗（%s）。ユーザー権限 im:feed_group_v1:read / im:feed_group_v1:write を確認し /team labels で再試行してください。",
+		LangSpanish:            "Error de etiquetas (%s). Revisa permisos de usuario im:feed_group_v1:read e im:feed_group_v1:write; reintenta en /team labels.",
+	},
+
+	MsgLabelUnsupported: {
+		LangEnglish:            "This platform does not support personal labels.",
+		LangChinese:            "当前平台不支持个人会话标签。",
+		LangTraditionalChinese: "目前平台不支援個人會話標籤。",
+		LangJapanese:           "このプラットフォームは個人ラベルに未対応です。",
+		LangSpanish:            "Esta plataforma no admite etiquetas personales.",
+	},
+
+	MsgLabelPrivate: {
+		LangEnglish:            "Open /team labels in private chat with the manager to configure or authorize your personal labels.",
+		LangChinese:            "请在与管理者的私聊中打开 /team labels，配置和授权个人标签。",
+		LangTraditionalChinese: "請在與管理者的私聊中打開 /team labels，設定和授權個人標籤。",
+		LangJapanese:           "管理 Bot の個別チャットで /team labels を開き、設定・認証してください。",
+		LangSpanish:            "Abre /team labels en privado con el administrador para configurar y autorizar.",
+	},
+
+	MsgLabelAuthorize: {
+		LangEnglish:            "Open this link to authorize your conversation labels:\n%s\nWaiting for authorization…",
+		LangChinese:            "请打开以下链接授权管理会话标签：\n%s\n正在等待你完成授权…",
+		LangTraditionalChinese: "請打開以下連結授權管理會話標籤：\n%s\n正在等待你完成授權…",
+		LangJapanese:           "会話ラベルの管理を許可してください：\n%s\n認証を待っています…",
+		LangSpanish:            "Abre este enlace para autorizar las etiquetas:\n%s\nEsperando autorización…",
+	},
+
+	MsgLabelAuthorized: {
+		LangEnglish:            "Authorization saved. Open /team labels to choose defaults or retry pending assignments.",
+		LangChinese:            "授权已保存。打开 /team labels 选择默认标签或重试待添加的标签。",
+		LangTraditionalChinese: "授權已保存。打開 /team labels 選擇預設標籤或重試待添加的標籤。",
+		LangJapanese:           "認証を保存しました。/team labels で既定値を選ぶか保留分を再試行してください。",
+		LangSpanish:            "Autorización guardada. Abre /team labels para configurar o reintentar pendientes.",
+	},
+
+	MsgLabelUsage: {
+		LangEnglish:            "/team labels — settings\n/team labels authorize — authorize in private chat\n/team labels retry — retry label assignments only",
+		LangChinese:            "/team labels：标签设置\n/team labels authorize：私聊授权\n/team labels retry：仅重试标签添加",
+		LangTraditionalChinese: "/team labels：標籤設定\n/team labels authorize：私聊授權\n/team labels retry：僅重試標籤添加",
+		LangJapanese:           "/team labels — 設定\n/team labels authorize — 個別認証\n/team labels retry — ラベルのみ再試行",
+		LangSpanish:            "/team labels — ajustes\n/team labels authorize — autorizar en privado\n/team labels retry — reintentar etiquetas",
+	},
+
+	MsgLabelAuthReady: {
+		LangEnglish:            "User authorization saved",
+		LangChinese:            "用户身份已授权",
+		LangTraditionalChinese: "使用者身分已授權",
+		LangJapanese:           "ユーザー認証済み",
+		LangSpanish:            "Usuario autorizado",
+	},
+
+	MsgLabelAuthButton: {
+		LangEnglish:            "Authorize labels",
+		LangChinese:            "授权标签管理",
+		LangTraditionalChinese: "授權標籤管理",
+		LangJapanese:           "ラベル管理を認証",
+		LangSpanish:            "Autorizar etiquetas",
+	},
+
+	MsgLabelRetry: {
+		LangEnglish:            "Retry pending labels",
+		LangChinese:            "重试待添加标签",
+		LangTraditionalChinese: "重試待添加標籤",
+		LangJapanese:           "保留ラベルを再試行",
+		LangSpanish:            "Reintentar pendientes",
+	},
+
+	MsgLabelPending: {
+		LangEnglish:            "Pending labels for %s: %s. Creation is preserved; /team labels retry will only retry labeling.",
+		LangChinese:            "%s 的标签待添加：%s。已保留创建结果；/team labels retry 只重试标签。",
+		LangTraditionalChinese: "%s 的標籤待添加：%s。已保留建立結果；/team labels retry 只重試標籤。",
+		LangJapanese:           "%s のラベルは保留中：%s。作成済みの対象は保持されます。/team labels retry でラベルだけ再試行できます。",
+		LangSpanish:            "Etiquetas pendientes para %s: %s. Se conserva lo creado; /team labels retry solo reintenta etiquetas.",
+	},
+
+	MsgLabelSave: {
+		LangEnglish:            "Save defaults",
+		LangChinese:            "保存默认设置",
+		LangTraditionalChinese: "保存預設設定",
+		LangJapanese:           "既定値を保存",
+		LangSpanish:            "Guardar valores",
+	},
+
+	MsgLabelBots: {
+		LangEnglish:            "New bot labels",
+		LangChinese:            "新建 Bot 的标签",
+		LangTraditionalChinese: "新建 Bot 的標籤",
+		LangJapanese:           "新規 Bot のラベル",
+		LangSpanish:            "Etiquetas de bots nuevos",
+	},
+
+	MsgLabelProjects: {
+		LangEnglish:            "New project group labels",
+		LangChinese:            "新建任务群的标签",
+		LangTraditionalChinese: "新建任務群的標籤",
+		LangJapanese:           "新規プロジェクトグループのラベル",
+		LangSpanish:            "Etiquetas de grupos nuevos",
+	},
+
+	MsgLabelSaved: {
+		LangEnglish:            "Default labels saved. New names will be created or reused when a conversation is labeled.",
+		LangChinese:            "默认标签已保存。给新会话添加标签时会创建或复用填写的标签名。",
+		LangTraditionalChinese: "預設標籤已保存。給新會話添加標籤時會建立或復用填寫的標籤名。",
+		LangJapanese:           "既定のラベルを保存しました。会話への追加時にラベル名を作成または再利用します。",
+		LangSpanish:            "Valores guardados. Los nombres se crearán o reutilizarán al etiquetar una conversación.",
+	},
+
+	MsgLabelSelection: {
+		LangEnglish:            "Labels for this creation",
+		LangChinese:            "本次创建的标签",
+		LangTraditionalChinese: "本次建立的標籤",
+		LangJapanese:           "今回のラベル",
+		LangSpanish:            "Etiquetas para esta creación",
+	},
+
+	MsgLabelCreationHint: {
+		LangEnglish:            "Defaults come from /team labels. Clear selections and new names to skip labeling this time.",
+		LangChinese:            "默认值来自 /team labels。清空选择和新标签名称，即可取消本次自动添加。",
+		LangTraditionalChinese: "預設值來自 /team labels。清空選擇和新標籤名稱，即可取消本次自動添加。",
+		LangJapanese:           "既定値は /team labels で設定します。選択と新規名を空にすると今回は追加しません。",
+		LangSpanish:            "Valores de /team labels. Vacía selecciones y nombres nuevos para omitir etiquetas esta vez.",
+	},
+
+	MsgLabelWelcome: {
+		LangEnglish:            "Your bot is ready. This conversation was opened for your selected labels.",
+		LangChinese:            "Bot 已创建，此会话用于归入你选择的标签。",
+		LangTraditionalChinese: "Bot 已建立，此會話用於歸入你選擇的標籤。",
+		LangJapanese:           "Bot を作成しました。選択したラベルに追加するため、この会話を開きました。",
+		LangSpanish:            "Bot creado. Esta conversación se abrió para añadirla a tus etiquetas elegidas.",
+	},
+
+	MsgLabelApplied: {
+		LangEnglish:            "Labels added to your conversation list.",
+		LangChinese:            "已添加到你会话列表中的标签。",
+		LangTraditionalChinese: "已添加到你會話列表中的標籤。",
+		LangJapanese:           "会話一覧のラベルに追加しました。",
+		LangSpanish:            "Etiquetas añadidas a tu lista de conversaciones.",
+	},
+
+	MsgLabelText: {
+		LangEnglish:            "%s",
+		LangChinese:            "%s",
+		LangTraditionalChinese: "%s",
+		LangJapanese:           "%s",
+		LangSpanish:            "%s",
+	},
+
+	"team labels": {
+		LangEnglish:            "Label settings",
+		LangChinese:            "标签设置",
+		LangTraditionalChinese: "標籤設定",
+		LangJapanese:           "ラベル設定",
+		LangSpanish:            "Ajustes de etiquetas",
+	},
+
+	MsgQueryPageExpired:         {LangEnglish: "Pagination data is no longer available. Ask the bot to show the result again.", LangChinese: "此卡的分页数据已失效，请让机器人重新展示结果。", LangTraditionalChinese: "此卡的分頁資料已失效，請讓機器人重新顯示結果。", LangJapanese: "ページデータが失効しました。ボットに結果の再表示を依頼してください。", LangSpanish: "Los datos de paginación ya no están disponibles. Pide al bot que muestre el resultado de nuevo."},
+	MsgQueryPageFailed:          {LangEnglish: "Could not change page. Please try again.", LangChinese: "翻页更新失败，请重试。", LangTraditionalChinese: "翻頁更新失敗，請重試。", LangJapanese: "ページの更新に失敗しました。再試行してください。", LangSpanish: "No se pudo cambiar de página. Inténtalo de nuevo."},
+	MsgQueryPageBusy:            {LangEnglish: "The card is updating. Please try again shortly.", LangChinese: "卡片正在更新，请稍后再点一次。", LangTraditionalChinese: "卡片正在更新，請稍後再點一次。", LangJapanese: "カードを更新中です。少し待って再試行してください。", LangSpanish: "La tarjeta se está actualizando. Inténtalo en unos instantes."},
+	MsgDecisionDeadline:         {LangEnglish: "Valid until %s. No response never grants authorization.", LangChinese: "有效至 %s；未回答不会视为授权。", LangTraditionalChinese: "有效至 %s；未回答不會視為授權。", LangJapanese: "有効期限：%s。無回答は許可と見なしません。", LangSpanish: "Válida hasta %s. La ausencia de respuesta nunca autoriza la acción."},
+	MsgWorkflowReworkInvalid:    {LangEnglish: "Include one task ID assigned to this member. Only the original requester or project owner can request rework directly; otherwise ask the manager in the group.", LangChinese: "请注明一项属于该成员的任务编号。直接返工需由原请求人或项目负责人发起；其他情况请在群里 @ 管理者处理。", LangTraditionalChinese: "請註明一項屬於該成員的任務編號。直接返工需由原請求人或專案負責人發起；其他情況請在群組 @ 管理者處理。", LangJapanese: "この担当者のタスク ID を一つ指定してください。直接の再作業依頼は元の依頼者または責任者のみ可能です。それ以外はグループの管理者に依頼してください。", LangSpanish: "Indica una tarea de este miembro. Solo el solicitante original o el propietario pueden pedir una revisión directamente; en otros casos contacta al responsable en el grupo."},
+	MsgWorkflowReworkTitle:      {LangEnglish: "%s · Rework (attempt %d)", LangChinese: "%s · 返工（第 %d 轮）", LangTraditionalChinese: "%s · 返工（第 %d 輪）", LangJapanese: "%s · 再作業（%d 回目）", LangSpanish: "%s · Revisión (intento %d)"},
+	MsgWorkflowReworkInGroup:    {LangEnglish: "This is an earlier task thread. Send rework in the main group, mentioning the manager and including the task ID.", LangChinese: "这是之前一轮的任务话题。请在群主聊天 @ 管理者，带上任务编号提出返工。", LangTraditionalChinese: "這是之前一輪的任務話題。請在群主聊天 @ 管理者，附上任務編號提出返工。", LangJapanese: "これは以前の作業スレッドです。グループで管理者をメンションし、タスク ID と再作業内容を送信してください。", LangSpanish: "Este es un hilo de un intento anterior. Solicita la revisión en el grupo mencionando al responsable e indicando el ID de tarea."},
+	MsgWorkflowResultFile:       {LangEnglish: "The complete result is in the group file: %s", LangChinese: "完整结果已保存为群内文件：%s", LangTraditionalChinese: "完整結果已儲存為群組檔案：%s", LangJapanese: "完全な結果はグループのファイルに保存しました：%s", LangSpanish: "El resultado completo está en el archivo del grupo: %s"},
+	MsgDecisionAnswer:           {LangEnglish: "Your answer", LangChinese: "补充回答", LangTraditionalChinese: "補充回答", LangJapanese: "回答", LangSpanish: "Tu respuesta"},
+	MsgDecisionSubmit:           {LangEnglish: "Submit answer", LangChinese: "提交回答", LangTraditionalChinese: "提交回答", LangJapanese: "回答を送信", LangSpanish: "Enviar respuesta"},
+	MsgDecisionExpired:          {LangEnglish: "This request expired or execution stopped. No authorization was granted; these controls are inactive.", LangChinese: "请求已过期或任务已停止，未授予权限，此处操作已失效。", LangTraditionalChinese: "請求已過期或任務已停止，未授予權限，此處操作已失效。", LangJapanese: "要求が期限切れか実行が停止しました。権限は付与されず、操作は無効です。", LangSpanish: "La solicitud caducó o se detuvo la ejecución. No se concedió autorización; los controles están inactivos."},
+	MsgExecEmptyAnswer:          {LangEnglish: "Enter an answer before submitting.", LangChinese: "请填写回答后再提交。", LangTraditionalChinese: "請填寫回答後再提交。", LangJapanese: "回答を入力してから送信してください。", LangSpanish: "Escribe una respuesta antes de enviarla."},
+	MsgExecHistory:              {LangEnglish: "Execution history", LangChinese: "执行历史", LangTraditionalChinese: "執行歷史", LangJapanese: "実行履歴", LangSpanish: "Historial de ejecución"},
+	MsgExecReadArchive:          {LangEnglish: "Read saved details", LangChinese: "查看留存详情", LangTraditionalChinese: "查看留存詳情", LangJapanese: "保存済みの詳細", LangSpanish: "Ver detalles guardados"},
+	MsgExecArchived:             {LangEnglish: "Saved execution details. Read-only; prior approval controls are inactive.", LangChinese: "留存的执行详情，仅供阅读，历史授权操作已失效。", LangTraditionalChinese: "留存的執行詳情，僅供閱讀，歷史授權操作已失效。", LangJapanese: "保存済みの実行詳細です。閲覧専用で、以前の許可操作は無効です。", LangSpanish: "Detalles guardados, solo lectura. Los controles de autorización anteriores están inactivos."},
+	MsgExecRunning:              {LangEnglish: "Running", LangChinese: "执行中", LangTraditionalChinese: "執行中", LangJapanese: "実行中", LangSpanish: "En curso"},
+	MsgExecDone:                 {LangEnglish: "Completed", LangChinese: "已完成", LangTraditionalChinese: "已完成", LangJapanese: "完了", LangSpanish: "Completado"},
+	MsgExecFailed:               {LangEnglish: "Failed", LangChinese: "失败", LangTraditionalChinese: "失敗", LangJapanese: "失敗", LangSpanish: "Error"},
+	MsgExecStopped:              {LangEnglish: "Stopped", LangChinese: "已停止", LangTraditionalChinese: "已停止", LangJapanese: "停止", LangSpanish: "Detenido"},
+	MsgExecExitCode:             {LangEnglish: "Exit code %d", LangChinese: "退出码 %d", LangTraditionalChinese: "結束碼 %d", LangJapanese: "終了コード %d", LangSpanish: "Código de salida %d"},
+	MsgExecFullExplanation:      {LangEnglish: "Read full explanation", LangChinese: "查看完整说明", LangTraditionalChinese: "查看完整說明", LangJapanese: "説明をすべて表示", LangSpanish: "Ver explicación completa"},
+	MsgExecBack:                 {LangEnglish: "Back to progress", LangChinese: "返回执行进度", LangTraditionalChinese: "返回執行進度", LangJapanese: "進捗に戻る", LangSpanish: "Volver al progreso"},
+	MsgExecPrevious:             {LangEnglish: "Previous command", LangChinese: "上一条命令", LangTraditionalChinese: "上一條命令", LangJapanese: "前のコマンド", LangSpanish: "Comando anterior"},
+	MsgExecNext:                 {LangEnglish: "Next command", LangChinese: "下一条命令", LangTraditionalChinese: "下一條命令", LangJapanese: "次のコマンド", LangSpanish: "Siguiente comando"},
+	MsgExecRefreshCurrent:       {LangEnglish: "Refresh", LangChinese: "刷新", LangTraditionalChinese: "重新整理", LangJapanese: "更新", LangSpanish: "Actualizar"},
+	MsgExecRefresh:              {LangEnglish: "New progress · refresh", LangChinese: "有新进度 · 刷新", LangTraditionalChinese: "有新進度 · 重新整理", LangJapanese: "新しい進捗 · 更新", LangSpanish: "Nuevo progreso · actualizar"},
+	MsgExecNoOutput:             {LangEnglish: "No output yet", LangChinese: "尚无输出", LangTraditionalChinese: "尚無輸出", LangJapanese: "出力はまだありません", LangSpanish: "Todavía no hay salida"},
+	MsgExecNeedsInput:           {LangEnglish: "Your input is needed on the execution card.", LangChinese: "执行卡需要你补充信息。", LangTraditionalChinese: "執行卡需要你補充資訊。", LangJapanese: "実行カードで追加情報が必要です。", LangSpanish: "La tarjeta de ejecución necesita tu respuesta."},
+	MsgExecNeedsApproval:        {LangEnglish: "An operation on the execution card needs your authorization.", LangChinese: "执行卡有一项操作需要你授权。", LangTraditionalChinese: "執行卡有一項操作需要你授權。", LangJapanese: "実行カードの操作に許可が必要です。", LangSpanish: "Una operación en la tarjeta necesita tu autorización."},
+	MsgExecReminderFailed:       {LangEnglish: "Private reminder not delivered. Handle this request here or retry the reminder.", LangChinese: "私聊提醒未送达，可在此处理或重试提醒。", LangTraditionalChinese: "私聊提醒未送達，可在此處理或重試提醒。", LangJapanese: "個別通知が未送信です。ここで処理するか再試行してください。", LangSpanish: "Aviso privado no entregado. Responde aquí o reintenta el aviso."},
+	MsgExecRetryReminder:        {LangEnglish: "Retry private reminder", LangChinese: "重试私聊提醒", LangTraditionalChinese: "重試私聊提醒", LangJapanese: "個別通知を再送信", LangSpanish: "Reintentar aviso privado"},
+	MsgExecOpenOriginal:         {LangEnglish: "Open execution card", LangChinese: "返回原执行卡", LangTraditionalChinese: "返回原執行卡", LangJapanese: "元の実行カードを開く", LangSpanish: "Abrir tarjeta de ejecución"},
+	MsgExecSummaryHint:          {LangEnglish: "%d commands · Click a command for details", LangChinese: "%d 条命令 · 点击命令查看详情", LangTraditionalChinese: "%d 條命令 · 點擊命令查看詳情", LangJapanese: "%d 件のコマンド · クリックして詳細を表示", LangSpanish: "%d comandos · Haz clic para ver detalles"},
+	MsgExecCommandLabel:         {LangEnglish: "Full command", LangChinese: "完整命令", LangTraditionalChinese: "完整命令", LangJapanese: "完全なコマンド", LangSpanish: "Comando completo"},
+	MsgExecOutputLabel:          {LangEnglish: "Execution output", LangChinese: "执行结果", LangTraditionalChinese: "執行結果", LangJapanese: "実行結果", LangSpanish: "Resultado de ejecución"},
+	MsgNativeExecutionFile:      {LangEnglish: "Complete output in this thread: %s", LangChinese: "完整内容已保存在本话题文件：%s", LangTraditionalChinese: "完整內容已儲存在本話題檔案：%s", LangJapanese: "完全な出力はこのスレッドのファイルにあります：%s", LangSpanish: "Contenido completo en el archivo de este hilo: %s"},
+	MsgNativeExecutionBuffering: {LangEnglish: "Receiving a large output; the complete file will follow in this thread.", LangChinese: "正在接收较长内容，完成后将完整文件发送到本话题。", LangTraditionalChinese: "正在接收較長內容，完成後將完整檔案傳送到本話題。", LangJapanese: "長い出力を受信中です。完了後、このスレッドに完全なファイルを送信します。", LangSpanish: "Recibiendo contenido extenso; el archivo completo se enviará a este hilo."},
+	MsgQueryDeliveryIncomplete:  {LangEnglish: "Some answer content could not be delivered because creating continuation cards failed. Please retry later.", LangChinese: "续卡发送失败，部分结论尚未送达，请稍后重试。", LangTraditionalChinese: "續卡傳送失敗，部分結論尚未送達，請稍後重試。", LangJapanese: "続きのカードを送信できず、回答の一部が未配信です。後でもう一度お試しください。", LangSpanish: "No se pudieron enviar las tarjetas siguientes; falta parte de la respuesta. Inténtelo de nuevo más tarde."},
+	MsgQuerySuperseded:          {LangEnglish: "Earlier output retained for reference. See the updated result.", LangChinese: "此前输出保留供回看，请以更新后的结果为准。", LangTraditionalChinese: "先前輸出保留供回看，請以更新後的結果為準。", LangJapanese: "以前の出力を参照用に保存しています。更新後の結果をご確認ください。", LangSpanish: "Salida anterior conservada como referencia. Consulte el resultado actualizado."},
+	MsgQueryRestored:            {LangEnglish: "Content saved before the service restarted. This card is for viewing only; previous approval controls are inactive.", LangChinese: "这是服务重启前保存的内容，仅供查看；原审批按钮已失效。", LangTraditionalChinese: "這是服務重新啟動前儲存的內容，僅供查看；原審批按鈕已失效。", LangJapanese: "サービス再起動前に保存された閲覧用の内容です。以前の承認ボタンは無効です。", LangSpanish: "Contenido guardado antes de reiniciar el servicio, solo para consulta. Los controles de aprobación anteriores están inactivos."},
+	MsgProjectModelScope: {
+		LangEnglish:            "Scope: this bot in the current project only. Use /project bot to view the model source and restore the bot default.",
+		LangChinese:            "作用范围：当前 Bot 在此项目中的会话。/project bot 可查看模型来源并恢复 Bot 默认值。",
+		LangTraditionalChinese: "作用範圍：目前 Bot 在此專案中的會話。/project bot 可查看模型來源並恢復 Bot 預設值。",
+		LangJapanese:           "対象：現在のプロジェクトのこの Bot のみ。/project bot で設定元の確認とデフォルトの復元ができます。",
+		LangSpanish:            "Ámbito: este bot en el proyecto actual. /project bot muestra el origen y permite restaurar el modelo del bot.",
+	},
+	MsgProjectModelChanged: {
+		LangEnglish:            "Model switched to `%s` for this bot in the current project only.",
+		LangChinese:            "模型已切换为 `%s`，仅影响当前 Bot 在此项目中的会话。",
+		LangTraditionalChinese: "模型已切換為 `%s`，僅影響目前 Bot 在此專案中的會話。",
+		LangJapanese:           "現在のプロジェクトのこの Bot のモデルを `%s` に変更しました。",
+		LangSpanish:            "Modelo cambiado a `%s` solo para este bot en el proyecto actual.",
+	},
+	MsgProjectSettingsTitle: {
+		LangEnglish:            "Project settings · %s",
+		LangChinese:            "项目设置 · %s",
+		LangTraditionalChinese: "專案設定 · %s",
+		LangJapanese:           "プロジェクト設定 · %s",
+		LangSpanish:            "Configuración del proyecto · %s",
+	},
+	MsgProjectSettingsBody: {
+		LangEnglish:            "Scope: current project group\nProject: %s\nGoal: %s\nTeam: %s\nManager: %s\nMembers: %s\nCode directories:\n%s",
+		LangChinese:            "作用范围：当前项目群\n项目 ID：%s\n项目目标：%s\n所属团队：%s\n管理者：%s\n参与成员：%s\n代码目录：\n%s",
+		LangTraditionalChinese: "作用範圍：目前專案群\n專案 ID：%s\n專案目標：%s\n所屬團隊：%s\n管理者：%s\n參與成員：%s\n程式碼目錄：\n%s",
+		LangJapanese:           "対象：現在のプロジェクトグループ\nID：%s\n目的：%s\nチーム：%s\n管理者：%s\nメンバー：%s\nコードディレクトリ：\n%s",
+		LangSpanish:            "Ámbito: grupo del proyecto actual\nProyecto: %s\nObjetivo: %s\nEquipo: %s\nAdministrador: %s\nMiembros: %s\nDirectorios de código:\n%s",
+	},
+	MsgProjectDirectoryScope: {
+		LangEnglish:            "All project bots use these directories. Changing directories or the goal starts a new context; previous history stays saved.",
+		LangChinese:            "所有参与 Bot 共用此项目目录配置。修改目录范围或目标后开启新上下文，原历史保留。",
+		LangTraditionalChinese: "所有參與 Bot 共用此專案目錄設定。修改目錄範圍或目標後開啟新上下文，原歷史保留。",
+		LangJapanese:           "全メンバーに共通のディレクトリ設定です。ディレクトリや目的を変更すると新しいコンテキストになります。履歴は保存されます。",
+		LangSpanish:            "Los bots comparten estos directorios. Cambiar los directorios u objetivo inicia un contexto nuevo y conserva el historial anterior.",
+	},
+	MsgProjectEditInfo: {
+		LangEnglish:            "Edit project info",
+		LangChinese:            "编辑项目信息",
+		LangTraditionalChinese: "編輯專案資訊",
+		LangJapanese:           "プロジェクト情報を編集",
+		LangSpanish:            "Editar información",
+	},
+	MsgProjectPrimaryDirectory: {
+		LangEnglish:            "Primary directory",
+		LangChinese:            "主工作目录",
+		LangTraditionalChinese: "主工作目錄",
+		LangJapanese:           "主ディレクトリ",
+		LangSpanish:            "Directorio principal",
+	},
+	MsgProjectAdditionalDirectories: {
+		LangEnglish:            "Additional directories (one absolute path per line)",
+		LangChinese:            "附加目录（每行一个绝对路径）",
+		LangTraditionalChinese: "附加目錄（每行一個絕對路徑）",
+		LangJapanese:           "追加ディレクトリ（絶対パスを1行に1つ）",
+		LangSpanish:            "Directorios adicionales (una ruta absoluta por línea)",
+	},
+	MsgProjectDirectoriesUnsupported: {
+		LangEnglish:            "Bot %s is unavailable or its backend does not support multiple project directories.",
+		LangChinese:            "Bot %s 未就绪，或其后端不支持项目多目录。",
+		LangTraditionalChinese: "Bot %s 尚未就緒，或其後端不支援專案多目錄。",
+		LangJapanese:           "Bot %s が未起動か、複数ディレクトリに非対応です。",
+		LangSpanish:            "El bot %s no está disponible o no admite varios directorios.",
+	},
+	MsgProjectDirectoriesHelp: {
+		LangEnglish:            "Set one primary working directory and any additional directories. Use existing absolute paths; leave additional directories empty to remove them. Approval mode stays unchanged. Text commands: /project directory <primary>; /project directories add <path>; /project directories remove <additional path>; /project directories clear.",
+		LangChinese:            "设置一个主工作目录和多个附加目录。请填写已有目录的绝对路径；清空附加目录可移除全部附加目录，审批模式保持原设置。文字命令：/project directory <主目录>；/project directories add <路径>；/project directories remove <附加路径>；/project directories clear。",
+		LangTraditionalChinese: "設定一個主工作目錄及多個附加目錄。請填寫現有目錄的絕對路徑；清空附加目錄可移除所有附加目錄，審批模式保持原設定。文字指令：/project directory <主目錄>；/project directories add <路徑>；/project directories remove <附加路徑>；/project directories clear。",
+		LangJapanese:           "主ディレクトリと追加ディレクトリを既存の絶対パスで設定します。追加欄を空にすると削除します。承認モードは維持されます。コマンド：/project directory <主パス>、/project directories add <パス>、/project directories remove <追加パス>、/project directories clear。",
+		LangSpanish:            "Define un directorio principal y rutas absolutas adicionales existentes. Vacía el campo adicional para quitarlas. Se mantiene el modo de aprobación. Comandos: /project directory <principal>; /project directories add <ruta>; /project directories remove <ruta adicional>; /project directories clear.",
+	},
+	MsgProjectEditDirectory: {
+		LangEnglish:            "Change code directory",
+		LangChinese:            "修改代码目录",
+		LangTraditionalChinese: "修改程式碼目錄",
+		LangJapanese:           "コードディレクトリを変更",
+		LangSpanish:            "Cambiar directorio",
+	},
+	MsgProjectViewMembers: {
+		LangEnglish:            "View members",
+		LangChinese:            "查看成员",
+		LangTraditionalChinese: "查看成員",
+		LangJapanese:           "メンバーを表示",
+		LangSpanish:            "Ver miembros",
+	},
+	MsgProjectBotSettings: {
+		LangEnglish:            "Bot settings",
+		LangChinese:            "Bot 设置",
+		LangTraditionalChinese: "Bot 設定",
+		LangJapanese:           "Bot 設定",
+		LangSpanish:            "Configuración del bot",
+	},
+	MsgProjectSettingsUsage: {
+		LangEnglish:            "In this project group:\n/project settings\n/project name <name>\n/project goal <goal>\n/project directory\n/project directories add|remove <path>\n/project directories clear\n/project directory <existing absolute directory>\n/project bot\n/project model reset\n/workspace and /dir open these same settings. Extra code directories remain unchanged.",
+		LangChinese:            "在当前项目群中使用：\n/project settings：查看项目设置\n/project name <项目名称>\n/project goal <项目目标>\n/project directory\n/project directories add|remove <path>\n/project directories clear\n/project directory <已有目录的绝对路径>\n/project bot：查看当前 Bot 设置\n/project model reset：恢复 Bot 默认模型\n/workspace、/dir 打开同一设置。修改主目录时，附加目录保持不变。",
+		LangTraditionalChinese: "在目前專案群中使用：\n/project settings：查看專案設定\n/project name <專案名稱>\n/project goal <專案目標>\n/project directory\n/project directories add|remove <path>\n/project directories clear\n/project directory <現有目錄的絕對路徑>\n/project bot：查看目前 Bot 設定\n/project model reset：恢復 Bot 預設模型\n/workspace、/dir 開啟相同設定。修改主目錄時，附加目錄保持不變。",
+		LangJapanese:           "このプロジェクトグループで：\n/project settings\n/project name <名前>\n/project goal <目的>\n/project directory\n/project directories add|remove <path>\n/project directories clear\n/project directory <既存ディレクトリの絶対パス>\n/project bot\n/project model reset\n/workspace と /dir も同じ設定を開きます。追加ディレクトリは変わりません。",
+		LangSpanish:            "En el grupo actual:\n/project settings\n/project name <nombre>\n/project goal <objetivo>\n/project directory\n/project directories add|remove <path>\n/project directories clear\n/project directory <directorio absoluto existente>\n/project bot\n/project model reset\n/workspace y /dir abren la misma configuración. Los directorios adicionales no cambian.",
+	},
+	MsgProjectGroupRequired: {
+		LangEnglish:            "Open the project group to configure it. Use /project list to find your projects.",
+		LangChinese:            "请进入对应项目群修改设置。使用 /project list 查看项目。",
+		LangTraditionalChinese: "請進入對應專案群修改設定。使用 /project list 查看專案。",
+		LangJapanese:           "対象のプロジェクトグループで設定してください。/project list で一覧を確認できます。",
+		LangSpanish:            "Abre el grupo del proyecto para configurarlo. Usa /project list para ver tus proyectos.",
+	},
+	MsgProjectBusy: {
+		LangEnglish:            "A bot is working on this project. Finish or stop its task before changing settings.",
+		LangChinese:            "此项目有 Bot 正在处理任务。请等待完成或停止任务后再修改设置。",
+		LangTraditionalChinese: "此專案有 Bot 正在處理任務。請等待完成或停止任務後再修改設定。",
+		LangJapanese:           "このプロジェクトで Bot が作業中です。完了または停止してから設定を変更してください。",
+		LangSpanish:            "Un bot está trabajando en este proyecto. Termina o detén la tarea antes de cambiar la configuración.",
+	},
+	MsgProjectDirectoryConflict: {
+		LangEnglish:            "Directory settings conflict. Project directory: %s\nLegacy directories:\n%s\nChoose explicitly with /project directory <absolute directory>.",
+		LangChinese:            "目录配置存在冲突。项目目录：%s\n原有覆盖目录：\n%s\n请用 /project directory <绝对目录> 明确选择一次。",
+		LangTraditionalChinese: "目錄設定存在衝突。專案目錄：%s\n原有覆寫目錄：\n%s\n請用 /project directory <絕對目錄> 明確選擇一次。",
+		LangJapanese:           "ディレクトリ設定が競合しています。プロジェクト：%s\n従来の設定：\n%s\n/project directory <絶対パス> で選択してください。",
+		LangSpanish:            "Conflicto de directorios. Proyecto: %s\nDirectorios anteriores:\n%s\nElige con /project directory <directorio absoluto>.",
+	},
+	MsgProjectSettingsSaved: {
+		LangEnglish:            "Project settings saved.",
+		LangChinese:            "项目设置已保存。",
+		LangTraditionalChinese: "專案設定已儲存。",
+		LangJapanese:           "プロジェクト設定を保存しました。",
+		LangSpanish:            "Configuración del proyecto guardada.",
+	},
+	MsgProjectMembersBody: {
+		LangEnglish:            "Manager: %s\nProject members: %s\n/team members shows team roles. Team role changes affect all projects of that bot.",
+		LangChinese:            "管理者：%s\n当前项目成员：%s\n/team members 查看团队身份。团队身份修改会影响该 Bot 参与的所有项目。",
+		LangTraditionalChinese: "管理者：%s\n目前專案成員：%s\n/team members 查看團隊身分。團隊身分修改會影響該 Bot 參與的所有專案。",
+		LangJapanese:           "管理者：%s\nプロジェクトメンバー：%s\n/team members で役割を確認できます。役割変更は Bot の全プロジェクトに適用されます。",
+		LangSpanish:            "Administrador: %s\nMiembros del proyecto: %s\n/team members muestra los roles. Cambiar un rol afecta a todos los proyectos del bot.",
+	},
+	MsgProjectModelInherited: {
+		LangEnglish:            "Inherited from bot default",
+		LangChinese:            "继承 Bot 默认值",
+		LangTraditionalChinese: "繼承 Bot 預設值",
+		LangJapanese:           "Bot のデフォルトを継承",
+		LangSpanish:            "Heredado del bot",
+	},
+	MsgProjectModelOverride: {
+		LangEnglish:            "Current project override",
+		LangChinese:            "当前项目覆盖",
+		LangTraditionalChinese: "目前專案覆寫",
+		LangJapanese:           "現在のプロジェクト設定",
+		LangSpanish:            "Valor del proyecto actual",
+	},
+	MsgProjectBotSettingsBody: {
+		LangEnglish:            "Bot: %s\nBackend: %s\nModel: %s\nSource: %s\nModel changes here affect this bot in the current project only.",
+		LangChinese:            "Bot：%s\n执行平台：%s\n模型：%s\n来源：%s\n在这里修改模型，仅影响当前 Bot 在此项目中的会话。",
+		LangTraditionalChinese: "Bot：%s\n執行平台：%s\n模型：%s\n來源：%s\n在此修改模型，僅影響目前 Bot 在此專案中的會話。",
+		LangJapanese:           "Bot：%s\n実行環境：%s\nモデル：%s\n設定元：%s\nモデル変更は現在のプロジェクトのこの Bot のみに適用されます。",
+		LangSpanish:            "Bot: %s\nMotor: %s\nModelo: %s\nOrigen: %s\nEl modelo solo cambia para este bot en el proyecto actual.",
+	},
+	MsgProjectChangeModel: {
+		LangEnglish:            "Change project model",
+		LangChinese:            "修改当前项目模型",
+		LangTraditionalChinese: "修改目前專案模型",
+		LangJapanese:           "プロジェクトのモデルを変更",
+		LangSpanish:            "Cambiar modelo del proyecto",
+	},
+	MsgProjectResetModel: {
+		LangEnglish:            "Restore bot default",
+		LangChinese:            "恢复 Bot 默认值",
+		LangTraditionalChinese: "恢復 Bot 預設值",
+		LangJapanese:           "Bot のデフォルトに戻す",
+		LangSpanish:            "Restaurar valor del bot",
+	},
+	MsgProjectSharedSettings: {
+		LangEnglish:            "Shared bot settings: account, backend and team role affect all projects of this bot. Configure them in the manager private chat or existing bot configuration.",
+		LangChinese:            "Bot 共享设置：账号、执行平台、团队身份会影响该 Bot 的所有项目。请在管理者私聊或原有 Bot 配置中修改。",
+		LangTraditionalChinese: "Bot 共用設定：帳號、執行平台、團隊身分會影響該 Bot 的所有專案。請在管理者私聊或原有 Bot 設定中修改。",
+		LangJapanese:           "共有設定：アカウント、実行環境、チームの役割は全プロジェクトに適用されます。管理者との個別チャットまたは Bot 設定で変更してください。",
+		LangSpanish:            "Configuración compartida: cuenta, motor y rol afectan a todos los proyectos del bot. Cámbialos en el chat privado del administrador o en la configuración del bot.",
+	},
+	"project settings": {
+		LangEnglish:            "View settings for the current project group",
+		LangChinese:            "查看当前项目群的统一设置",
+		LangTraditionalChinese: "查看目前專案群的統一設定",
+		LangJapanese:           "現在のプロジェクト設定を表示",
+		LangSpanish:            "Ver configuración del proyecto actual",
+	},
+
+	MsgHelpTeamSection: {
+		LangEnglish:            "Team Management",
+		LangChinese:            "团队管理",
+		LangTraditionalChinese: "團隊管理",
+		LangJapanese:           "チーム管理",
+		LangSpanish:            "Gestión del equipo",
+	},
+	MsgHelpProjectSection: {
+		LangEnglish:            "Project Management",
+		LangChinese:            "项目管理",
+		LangTraditionalChinese: "專案管理",
+		LangJapanese:           "プロジェクト管理",
+		LangSpanish:            "Gestión de proyectos",
+	},
+	"team": {
+		LangEnglish:            "Manage bots and their roles",
+		LangChinese:            "管理 Bot 成员与身份",
+		LangTraditionalChinese: "管理 Bot 成員與身分",
+		LangJapanese:           "Bot と役割を管理",
+		LangSpanish:            "Gestionar bots y roles",
+	},
+	"project": {
+		LangEnglish:            "Manage projects and project groups",
+		LangChinese:            "管理项目与项目群",
+		LangTraditionalChinese: "管理專案與專案群",
+		LangJapanese:           "プロジェクトとグループを管理",
+		LangSpanish:            "Gestionar proyectos y grupos",
+	},
+	"team members": {
+		LangEnglish:            "View members and configure identities",
+		LangChinese:            "查看成员并配置身份",
+		LangTraditionalChinese: "查看成員並設定身分",
+		LangJapanese:           "メンバーの確認と役割・指示の設定",
+		LangSpanish:            "Ver miembros y configurar identidades",
+	},
+	"team bot create": {
+		LangEnglish:            "Create a bot and configure its role and backend (private chat)",
+		LangChinese:            "私聊扫码创建 Bot，配置角色与执行平台",
+		LangTraditionalChinese: "私聊掃碼建立 Bot，設定角色與執行平台",
+		LangJapanese:           "個別チャットで Bot を作成し役割と実行環境を設定",
+		LangSpanish:            "Crear bot, rol y motor en un chat privado",
+	},
+	"project list": {
+		LangEnglish:            "List projects and their groups",
+		LangChinese:            "查看项目及对应群聊",
+		LangTraditionalChinese: "查看專案及對應群聊",
+		LangJapanese:           "プロジェクトとグループを一覧表示",
+		LangSpanish:            "Ver proyectos y sus grupos",
+	},
+	"project create": {
+		LangEnglish:            "Create a project group with its manager and working directory",
+		LangChinese:            "创建项目群，关联管理者、成员和工作目录",
+		LangTraditionalChinese: "建立專案群，關聯管理者、成員與工作目錄",
+		LangJapanese:           "管理者と作業ディレクトリを含むプロジェクトを作成",
+		LangSpanish:            "Crear proyecto con administrador y directorio de trabajo",
+	},
+	MsgProjectManagerOnly: {
+		LangEnglish:            "Use the manager bot for project changes.",
+		LangChinese:            "请通过管理者 Bot 创建或修改项目。",
+		LangTraditionalChinese: "請透過管理者 Bot 建立或修改專案。",
+		LangJapanese:           "プロジェクトの変更は管理者 Bot で行ってください。",
+		LangSpanish:            "Usa el bot administrador para crear o modificar proyectos.",
+	},
+	MsgProjectGroupUsage: {
+		LangEnglish:            "/project list — list projects\n/project create <id> <absolute-directory[,directory]> [bot,bot] [goal]\nEach project has its own group including the manager. Workspace is the code directory; the group selects it automatically.",
+		LangChinese:            "/project list：查看项目\n/project create <项目ID> <绝对目录[,目录]> [bot,bot] [项目说明]\n每个项目有独立群聊，自动包含管理者。Workspace 表示代码工作目录，由所在项目群自动选择。",
+		LangTraditionalChinese: "/project list：查看專案\n/project create <專案ID> <絕對目錄[,目錄]> [bot,bot] [專案說明]\n每個專案有獨立群聊，自動包含管理者。Workspace 表示程式碼工作目錄，由所在專案群自動選擇。",
+		LangJapanese:           "/project list — プロジェクト一覧\n/project create <id> <絶対パス[,パス]> [bot,bot] [目的]\n各プロジェクトに管理者を含む専用グループを作成します。Workspace はコードの作業ディレクトリで、グループから自動選択されます。",
+		LangSpanish:            "/project list — ver proyectos\n/project create <id> <ruta-absoluta[,ruta]> [bot,bot] [objetivo]\nCada proyecto tiene un grupo con su administrador. Workspace es el directorio de código, elegido automáticamente por el grupo.",
+	},
+	MsgProjectCLIUsage: {
+		LangEnglish:            "Project management:\n  project --config <config.toml> --manager <bot> list\n  project --config <config.toml> --manager <bot> create <id> <absolute-directory> [bot,bot] [goal]",
+		LangChinese:            "项目管理：\n  project --config <config.toml> --manager <bot> list\n  project --config <config.toml> --manager <bot> create <项目ID> <绝对目录> [bot,bot] [项目说明]",
+		LangTraditionalChinese: "專案管理：\n  project --config <config.toml> --manager <bot> list\n  project --config <config.toml> --manager <bot> create <專案ID> <絕對目錄> [bot,bot] [專案說明]",
+		LangJapanese:           "プロジェクト管理：\n  project --config <config.toml> --manager <bot> list\n  project --config <config.toml> --manager <bot> create <id> <絶対パス> [bot,bot] [目的]",
+		LangSpanish:            "Gestión de proyectos:\n  project --config <config.toml> --manager <bot> list\n  project --config <config.toml> --manager <bot> create <id> <ruta-absoluta> [bot,bot] [objetivo]",
+	},
+
+	MsgTeamMembersTitle: {
+		LangEnglish:            "Members",
+		LangChinese:            "成员",
+		LangTraditionalChinese: "成員",
+		LangJapanese:           "メンバー",
+		LangSpanish:            "Miembros",
+	},
+	MsgTeamMemberEdit: {
+		LangEnglish:            "Modify",
+		LangChinese:            "修改",
+		LangTraditionalChinese: "修改",
+		LangJapanese:           "変更",
+		LangSpanish:            "Modificar",
+	},
+	MsgTeamMemberFormTitle: {
+		LangEnglish:            "Edit identity: %s",
+		LangChinese:            "配置身份：%s",
+		LangTraditionalChinese: "設定身分：%s",
+		LangJapanese:           "役割・指示を編集: %s",
+		LangSpanish:            "Editar identidad: %s",
+	},
+	MsgTeamMemberFormHint: {
+		LangEnglish:            "Changes apply to this bot in all its projects after a service restart. The team manager keeps the Manager role.",
+		LangChinese:            "修改适用于该 Bot 参与的所有项目，保存后重启服务生效。团队管理者的角色固定为管理者。",
+		LangTraditionalChinese: "修改適用於該 Bot 參與的所有專案，儲存後重啟服務生效。團隊管理者的角色固定為管理者。",
+		LangJapanese:           "変更はサービス再起動後、この Bot の全プロジェクトに適用されます。チーム管理者の役割は固定です。",
+		LangSpanish:            "Los cambios se aplican a todos los proyectos de este bot al reiniciar el servicio. El administrador del equipo conserva su rol.",
+	},
+	MsgTeamMemberNotFound: {
+		LangEnglish:            "This bot is no longer a member of this team. Reopen Members.",
+		LangChinese:            "当前团队中找不到该 Bot，请重新打开 Members。",
+		LangTraditionalChinese: "目前團隊中找不到該 Bot，請重新開啟 Members。",
+		LangJapanese:           "この Bot はチームに存在しません。メンバー一覧を開き直してください。",
+		LangSpanish:            "Este bot no pertenece al equipo. Vuelve a abrir Miembros.",
+	},
+	MsgTeamMemberFormUnsupported: {
+		LangEnglish:            "This platform does not support identity forms. Use Members on a platform with form support.",
+		LangChinese:            "当前平台不支持身份表单，请在支持表单的平台通过 Members 配置。",
+		LangTraditionalChinese: "目前平台不支援身分表單，請在支援表單的平台透過 Members 設定。",
+		LangJapanese:           "このプラットフォームは編集フォームに対応していません。対応するプラットフォームでメンバー一覧を開いてください。",
+		LangSpanish:            "Esta plataforma no admite formularios de identidad. Usa Miembros en una plataforma compatible.",
+	},
+	MsgFormSave: {
+		LangEnglish:            "Save",
+		LangChinese:            "保存",
+		LangTraditionalChinese: "儲存",
+		LangJapanese:           "保存",
+		LangSpanish:            "Guardar",
+	},
+	MsgFormBotIDHint: {
+		LangEnglish:            "Choose a unique internal name, such as developer-a, for team and project references. This is not the Feishu App ID or the bot display name.",
+		LangChinese:            "给 Bot 起一个唯一的内部名称，例如 developer-a，团队和项目通过它引用 Bot。这里不是飞书 App ID，也不是飞书中展示的机器人名称。",
+		LangTraditionalChinese: "為 Bot 取一個唯一的內部名稱，例如 developer-a，團隊與專案透過它引用 Bot。這不是飛書 App ID，也不是飛書中顯示的機器人名稱。",
+		LangJapanese:           "developer-a など、チームやプロジェクトから参照する一意の内部名を指定します。Feishu App ID や Bot の表示名とは別です。",
+		LangSpanish:            "Elige un nombre interno único, como developer-a, para identificar al bot en equipos y proyectos. Es distinto del App ID de Feishu y del nombre visible del bot.",
+	},
+	MsgFormModify: {
+		LangEnglish:            "Modify",
+		LangChinese:            "修改",
+		LangTraditionalChinese: "修改",
+		LangJapanese:           "変更",
+		LangSpanish:            "Modificar",
+	},
+	MsgBotProfileEditTitle: {
+		LangEnglish:            "Modify bot",
+		LangChinese:            "修改 Bot",
+		LangTraditionalChinese: "修改 Bot",
+		LangJapanese:           "Bot を変更",
+		LangSpanish:            "Modificar bot",
+	},
+	MsgBotProfileEditHint: {
+		LangEnglish:            "The Feishu name is read-only. Role, backend and instructions take effect across its projects after a service restart. The team manager keeps the Manager role.",
+		LangChinese:            "飞书名称仅展示，不可在此修改。角色、执行后端和身份说明保存后重启服务生效，适用于该 Bot 的所有项目。管理者角色固定。",
+		LangTraditionalChinese: "飛書名稱僅供顯示，無法在此修改。角色、執行後端與身分說明儲存後重啟服務生效，適用於該 Bot 的所有專案。管理者角色固定。",
+		LangJapanese:           "Feishu の名前は表示専用です。役割・実行環境・指示はサービス再起動後、全プロジェクトに適用されます。管理者の役割は固定です。",
+		LangSpanish:            "El nombre de Feishu es de solo lectura. El rol, motor e instrucciones se aplican a todos sus proyectos tras reiniciar el servicio. El rol del administrador es fijo.",
+	},
+	MsgModelRepositoryPolicyDenied: {
+		LangEnglish:            "The selected model is not allowed for this repository's classification (4037). Select an organization-approved model supporting L4 repositories before retrying. Waiting or repeatedly retrying will not resolve this restriction.",
+		LangChinese:            "所选模型不支持当前仓库的密级（错误码 4037）。请切换到组织批准、支持 L4 仓库的模型后再重试。单纯等待或重复重试无法解除此限制。",
+		LangTraditionalChinese: "所選模型不支援目前儲存庫的密級（錯誤碼 4037）。請切換至組織核准、支援 L4 儲存庫的模型後再重試。單純等待或重複重試無法解除此限制。",
+		LangJapanese:           "選択したモデルはこのリポジトリの機密区分に対応していません（4037）。組織が承認した L4 対応モデルに切り替えてから再試行してください。待機や繰り返しの再試行では解決しません。",
+		LangSpanish:            "El modelo seleccionado no está permitido para la clasificación de este repositorio (4037). Selecciona un modelo aprobado por la organización que admita repositorios L4 antes de reintentar. Esperar o repetir la solicitud no elimina esta restricción.",
+	},
+	MsgTeamRoleCreationContext: {
+		LangEnglish:            "Project: %s (%s)\nRequested role: %s\nExecution backend: %s\nReason and expected deliverable: %s",
+		LangChinese:            "所属项目：%s（%s）\n拟创建角色：%s\n执行后端：%s\n创建原因与预期交付：%s",
+		LangTraditionalChinese: "所屬專案：%s（%s）\n擬建立角色：%s\n執行後端：%s\n建立原因與預期交付：%s",
+		LangJapanese:           "プロジェクト：%s（%s）\n作成する役割：%s\n実行環境：%s\n作成理由と期待する成果物：%s",
+		LangSpanish:            "Proyecto: %s (%s)\nRol solicitado: %s\nMotor: %s\nMotivo y entrega esperada: %s",
+	},
+	MsgTeamRoleAuthorize: {
+		LangEnglish:            "No existing bot with this role can be reused in this team. Open the link to register a new Feishu bot; choose its display name on the registration page. The service will request the role's messaging, group access and card permissions. After authorization, permission checks and startup succeed, it will join the project's existing group and become available for task assignment. Only continue if the purpose above is correct; no authorization means no new bot joins the project. This link expires after 10 minutes.\n%s",
+		LangChinese:            "当前团队没有可复用的同角色 Bot。请打开链接注册新的飞书 Bot，并在注册页设置它的显示名称。系统会按角色申请消息收发、群访问和卡片相关权限；完成授权、权限核验和启动后，该 Bot 会加入上述项目现有群，等待管理者派工。请核对以上用途后再授权；不授权则不会有新 Bot 加入项目。链接等待时间为 10 分钟。\n%s",
+		LangTraditionalChinese: "目前團隊沒有可重用的同角色 Bot。請開啟連結註冊新的飛書 Bot，並在註冊頁設定顯示名稱。系統會依角色申請訊息收發、群組存取與卡片相關權限；授權、權限核驗及啟動成功後，Bot 會加入上述專案現有群組，等待管理者派工。請確認以上用途後再授權；不授權就不會有新 Bot 加入專案。連結等待時間為 10 分鐘。\n%s",
+		LangJapanese:           "チーム内に再利用できる同じ役割の Bot がありません。リンクから新しい Feishu Bot を登録し、登録画面で表示名を設定してください。役割に応じたメッセージ・グループアクセス・カード権限が申請されます。認証、権限確認、起動の成功後、既存のプロジェクトグループに参加してタスク割り当てを待ちます。上記の用途を確認してから認証してください。認証しなければ新しい Bot はプロジェクトに参加しません。待機時間は 10 分です。\n%s",
+		LangSpanish:            "El equipo no tiene un bot de este rol que se pueda reutilizar. Abre el enlace para registrar uno nuevo en Feishu y elegir su nombre. Se solicitarán permisos de mensajes, acceso a grupos y tarjetas según el rol. Tras autorizar, verificar permisos e iniciar, se unirá al grupo existente del proyecto y podrá recibir tareas. Autoriza solo si el propósito indicado es correcto; sin autorización no se añadirá un bot al proyecto. La espera caduca en 10 minutos.\n%s",
+	},
+	MsgTeamRoleReasonRequired: {
+		LangEnglish:            "Creating a new role requires --reason (1–2000 characters): explain why it is needed, its concrete task and expected deliverable to the owner.",
+		LangChinese:            "新建角色必须提供 --reason（1–2000 字），向所有者说明为什么需要该角色、具体任务和预期交付。",
+		LangTraditionalChinese: "建立角色必須提供 --reason（1–2000 字），向所有者說明需要該角色的原因、具體任務與預期交付。",
+		LangJapanese:           "新しい役割には --reason（1〜2000 文字）が必要です。必要な理由、具体的なタスク、期待する成果物を所有者に説明してください。",
+		LangSpanish:            "Crear un rol requiere --reason (1–2000 caracteres): explica al propietario por qué es necesario, su tarea concreta y la entrega esperada.",
+	},
+	MsgTeamRoleMembershipFailed: {
+		LangEnglish:            "Project group membership confirmation failed for bot %s (application %s)",
+		LangChinese:            "Bot %s（应用 %s）的项目群入群确认失败",
+		LangTraditionalChinese: "Bot %s（應用程式 %s）的專案群組加入確認失敗",
+		LangJapanese:           "Bot %s（アプリ %s）のプロジェクトグループ参加確認に失敗しました",
+		LangSpanish:            "No se pudo confirmar la pertenencia al grupo del proyecto del bot %s (aplicación %s)",
+	},
+	MsgTeamRoleProvisionFailed: {
+		LangEnglish:            "This role was not confirmed ready in the project. Registration may have expired, or authorization, permissions, startup or group admission may have failed. The manager has been notified; wait for a new request with its reason before authorizing again.",
+		LangChinese:            "该角色尚未在项目中就绪。可能是注册等待超时，或授权、权限核验、启动、入群环节未完成。已通知管理者处理；再次授权前，请以附有原因的新请求为准。",
+		LangTraditionalChinese: "該角色尚未在專案中就緒。可能是註冊等待逾時，或授權、權限核驗、啟動、入群環節未完成。已通知管理者處理；再次授權前，請以附有原因的新請求為準。",
+		LangJapanese:           "この役割はプロジェクトで準備完了になっていません。登録待機の期限切れ、認証・権限確認・起動・参加の未完了が考えられます。管理者に通知しました。再認証は理由を含む新しい依頼を確認してから行ってください。",
+		LangSpanish:            "No se confirmó que este rol esté listo en el proyecto. El registro puede haber caducado o pueden faltar autorización, permisos, inicio o admisión al grupo. Se notificó al administrador; espera una nueva solicitud con su motivo antes de autorizar otra vez.",
+	},
+	MsgBotAuthorizeAutomatic: {
+		LangEnglish:            "Open the link to complete the Feishu bot registration.\n%s",
+		LangChinese:            "请打开链接，完成飞书 Bot 注册。\n%s",
+		LangTraditionalChinese: "請開啟連結，完成飛書 Bot 註冊。\n%s",
+		LangJapanese:           "リンクを開いて Feishu Bot の登録を完了してください。\n%s",
+		LangSpanish:            "Abre el enlace para completar el registro del bot en Feishu.\n%s",
+	},
+	MsgBotNameReadFailed: {
+		LangEnglish:            "The Feishu name could not be verified. Reopen Members later to refresh it.",
+		LangChinese:            "暂时未能核验飞书名称，稍后重新打开 Members 刷新。",
+		LangTraditionalChinese: "暫時未能核驗飛書名稱，稍後重新開啟 Members 重新整理。",
+		LangJapanese:           "Feishu の名前を確認できませんでした。後で一覧を開き直してください。",
+		LangSpanish:            "No se pudo verificar el nombre de Feishu. Vuelve a abrir Miembros más tarde.",
+	},
+	MsgFormBotTitle: {
+		LangEnglish:            "Create bot",
+		LangChinese:            "创建 Bot",
+		LangTraditionalChinese: "建立 Bot",
+		LangJapanese:           "Bot を作成",
+		LangSpanish:            "Crear bot",
+	},
+	MsgFormProjectTitle: {
+		LangEnglish:            "Create project",
+		LangChinese:            "创建项目",
+		LangTraditionalChinese: "建立專案",
+		LangJapanese:           "プロジェクトを作成",
+		LangSpanish:            "Crear proyecto",
+	},
+	MsgFormBotName: {
+		LangEnglish:            "Bot name in Feishu (read-only)",
+		LangChinese:            "Bot 飞书名称（只读）",
+		LangTraditionalChinese: "Bot 飛書名稱（唯讀）",
+		LangJapanese:           "Feishu の Bot 名（表示専用）",
+		LangSpanish:            "Nombre del bot en Feishu (solo lectura)",
+	},
+	MsgFormIDHint: {
+		LangEnglish:            "Lowercase letters, digits, - or _; e.g. developer-a",
+		LangChinese:            "小写字母、数字、- 或 _，例如 developer-a",
+		LangTraditionalChinese: "小寫字母、數字、- 或 _，例如 developer-a",
+		LangJapanese:           "小文字・数字・-・_（例: developer-a）",
+		LangSpanish:            "Minúsculas, números, - o _; p. ej. developer-a",
+	},
+	MsgFormRole: {
+		LangEnglish:            "Role",
+		LangChinese:            "角色",
+		LangTraditionalChinese: "角色",
+		LangJapanese:           "役割",
+		LangSpanish:            "Rol",
+	},
+	MsgFormBackend: {
+		LangEnglish:            "Execution backend",
+		LangChinese:            "执行后端",
+		LangTraditionalChinese: "執行後端",
+		LangJapanese:           "実行環境",
+		LangSpanish:            "Motor de ejecución",
+	},
+	MsgFormPrompt: {
+		LangEnglish:            "Additional instructions (optional)",
+		LangChinese:            "身份说明（选填）",
+		LangTraditionalChinese: "身分說明（選填）",
+		LangJapanese:           "追加の指示（任意）",
+		LangSpanish:            "Instrucciones adicionales (opcional)",
+	},
+	MsgFormProjectName: {
+		LangEnglish:            "Project name (also used as the group name)",
+		LangChinese:            "项目名称（同时作为群名）",
+		LangTraditionalChinese: "專案名稱（同時作為群組名稱）",
+		LangJapanese:           "プロジェクト名（グループ名にも使用）",
+		LangSpanish:            "Nombre del proyecto (también del grupo)",
+	},
+	MsgFormDirectory: {
+		LangEnglish:            "Project directory (absolute path)",
+		LangChinese:            "项目目录（绝对路径）",
+		LangTraditionalChinese: "專案目錄（絕對路徑）",
+		LangJapanese:           "プロジェクトディレクトリ（絶対パス）",
+		LangSpanish:            "Directorio del proyecto (ruta absoluta)",
+	},
+	MsgFormMembers: {
+		LangEnglish:            "Other members (optional)",
+		LangChinese:            "其他成员（可选）",
+		LangTraditionalChinese: "其他成員（可選）",
+		LangJapanese:           "追加メンバー（任意）",
+		LangSpanish:            "Otros miembros (opcional)",
+	},
+	MsgFormGoal: {
+		LangEnglish:            "Project goal (optional)",
+		LangChinese:            "项目目标（选填）",
+		LangTraditionalChinese: "專案目標（選填）",
+		LangJapanese:           "プロジェクトの目的（任意）",
+		LangSpanish:            "Objetivo del proyecto (opcional)",
+	},
+	MsgFormCreate: {
+		LangEnglish:            "Create",
+		LangChinese:            "创建",
+		LangTraditionalChinese: "建立",
+		LangJapanese:           "作成",
+		LangSpanish:            "Crear",
+	},
+	MsgFormBotHint: {
+		LangEnglish:            "Choose a role and backend; identity instructions are optional. After submitting, complete the Feishu registration to configure and start the bot automatically.",
+		LangChinese:            "选择角色和执行后端，身份说明选填。提交后完成飞书扫码注册，随后自动配置并启动 Bot。",
+		LangTraditionalChinese: "選擇角色與執行後端，身分說明選填。提交後完成飛書掃碼註冊，隨後自動設定並啟動 Bot。",
+		LangJapanese:           "役割と実行環境を選択します。指示の入力は任意です。送信後に Feishu の登録を完了すると、Bot を自動で設定・起動します。",
+		LangSpanish:            "Elige un rol y un motor; las instrucciones son opcionales. Tras enviar, completa el registro en Feishu para configurar e iniciar el bot automáticamente.",
+	},
+	MsgFormProjectHint: {
+		LangEnglish:            "Manager %s is always included. Other team members are selected by default; you can change the selection.",
+		LangChinese:            "管理者 %s 自动加入。其他团队成员默认选中，可按需调整。",
+		LangTraditionalChinese: "管理者 %s 自動加入。其他團隊成員預設選取，可依需調整。",
+		LangJapanese:           "管理者 %s は必ず参加します。他のメンバーは初期選択済みで変更できます。",
+		LangSpanish:            "El administrador %s siempre participa. Los demás miembros están preseleccionados y puedes cambiarlos.",
+	},
+	MsgFormInvalidField: {
+		LangEnglish:            "Check the field: %s",
+		LangChinese:            "请检查字段：%s",
+		LangTraditionalChinese: "請檢查欄位：%s",
+		LangJapanese:           "入力を確認してください: %s",
+		LangSpanish:            "Revisa el campo: %s",
+	},
+	MsgFormExpired: {
+		LangEnglish:            "This form has expired or was already submitted. Open a new form.",
+		LangChinese:            "此表单已失效或已提交，请重新打开表单。",
+		LangTraditionalChinese: "此表單已失效或已提交，請重新開啟表單。",
+		LangJapanese:           "フォームは期限切れまたは送信済みです。開き直してください。",
+		LangSpanish:            "El formulario caducó o ya se envió. Abre uno nuevo.",
+	},
+	MsgFormSubmitted: {
+		LangEnglish:            "Submitted. Please wait for the result.",
+		LangChinese:            "已提交，请等待处理结果。",
+		LangTraditionalChinese: "已提交，請等待處理結果。",
+		LangJapanese:           "送信しました。結果をお待ちください。",
+		LangSpanish:            "Enviado. Espera el resultado.",
+	},
+	MsgFormRoleManager: {
+		LangEnglish:            "Manager",
+		LangChinese:            "管理者",
+		LangTraditionalChinese: "管理者",
+		LangJapanese:           "管理者",
+		LangSpanish:            "Administrador",
+	},
+	MsgFormRolePlanner: {
+		LangEnglish:            "Planner",
+		LangChinese:            "规划者",
+		LangTraditionalChinese: "規劃者",
+		LangJapanese:           "計画担当",
+		LangSpanish:            "Planificador",
+	},
+	MsgFormRoleDeveloper: {
+		LangEnglish:            "Developer",
+		LangChinese:            "开发者",
+		LangTraditionalChinese: "開發者",
+		LangJapanese:           "開発担当",
+		LangSpanish:            "Desarrollador",
+	},
+	MsgFormRoleTester: {
+		LangEnglish:            "Tester",
+		LangChinese:            "测试者",
+		LangTraditionalChinese: "測試者",
+		LangJapanese:           "テスト担当",
+		LangSpanish:            "Probador",
+	},
+	MsgFormRoleReviewer: {
+		LangEnglish:            "Reviewer",
+		LangChinese:            "审查者",
+		LangTraditionalChinese: "審查者",
+		LangJapanese:           "レビュー担当",
+		LangSpanish:            "Revisor",
+	},
+	MsgTeamMemberSaved: {
+		LangEnglish:            "Bot settings saved. Restart the service to apply role, backend and instructions.",
+		LangChinese:            "Bot 配置已保存，重启服务后应用角色、执行后端和身份说明。",
+		LangTraditionalChinese: "Bot 設定已儲存，重啟服務後套用角色、執行後端與身分說明。",
+		LangJapanese:           "Bot 設定を保存しました。役割・実行環境・指示を適用するにはサービスを再起動してください。",
+		LangSpanish:            "Configuración guardada. Reinicia el servicio para aplicar rol, motor e instrucciones.",
+	},
+
+	MsgTeamUnavailable: {
+		LangEnglish:            "This bot has no Team configuration.",
+		LangChinese:            "当前 Bot 未配置 Team。",
+		LangTraditionalChinese: "目前 Bot 未設定 Team。",
+		LangJapanese:           "この Bot に Team 設定がありません。",
+		LangSpanish:            "Este bot no tiene configuración de Team.",
+	},
+	MsgTeamProjectPending: {
+		LangEnglish:            "Project group setup is incomplete. Ask the manager to retry the creation command.",
+		LangChinese:            "项目群尚未配置完成，请让管理者重试创建命令。",
+		LangTraditionalChinese: "專案群尚未設定完成，請讓管理者重試建立命令。",
+		LangJapanese:           "プロジェクトの設定は未完了です。管理者に作成の再試行を依頼してください。",
+		LangSpanish:            "La configuración del grupo está incompleta. Pide al administrador que reintente.",
+	},
+	MsgTeamManagerOnly: {
+		LangEnglish:            "Use the manager bot for Team changes.",
+		LangChinese:            "请通过管理者 Bot 修改 Team。",
+		LangTraditionalChinese: "請透過管理者 Bot 修改 Team。",
+		LangJapanese:           "Team の変更は管理者 Bot で行ってください。",
+		LangSpanish:            "Usa el bot administrador para modificar el Team.",
+	},
+	MsgTeamGroupUnsupported: {
+		LangEnglish:            "This platform does not support project group creation.",
+		LangChinese:            "当前平台未接入项目建群。",
+		LangTraditionalChinese: "目前平台未支援專案建群。",
+		LangJapanese:           "このプラットフォームではグループ作成に対応していません。",
+		LangSpanish:            "Esta plataforma no admite crear grupos de proyecto.",
+	},
+	MsgTeamProjects: {
+		LangEnglish:            "Project groups:",
+		LangChinese:            "项目群：",
+		LangTraditionalChinese: "專案群：",
+		LangJapanese:           "プロジェクトグループ：",
+		LangSpanish:            "Grupos de proyecto:",
+	},
+	MsgTeamProjectReady: {
+		LangEnglish:            "Project %s is ready: %s",
+		LangChinese:            "项目 %s 已就绪，进入项目群：%s",
+		LangTraditionalChinese: "專案 %s 已就緒，進入專案群：%s",
+		LangJapanese:           "プロジェクト %s の準備ができました：%s",
+		LangSpanish:            "El proyecto %s está listo: %s",
+	},
+	MsgTeamChatUsage: {
+		LangEnglish:            "/team permissions — Role permissions\n/team labels — Label settings\n/team members — view members and edit identities using forms\n/team bot create — open a creation form in private chat\n/team bot create <name> <role> <codex|claudecode|trae> [instructions]",
+		LangChinese:            "/team permissions — 角色权限\n/team labels — 标签设置\n/team members：查看成员，通过表单配置身份\n/team bot create：在私聊打开创建表单\n/team bot create <名称> <角色> <codex|claudecode|trae> [身份说明]",
+		LangTraditionalChinese: "/team permissions — 角色權限\n/team labels — 標籤設定\n/team members：查看成員，透過表單設定身分\n/team bot create：在私聊開啟建立表單\n/team bot create <名稱> <角色> <codex|claudecode|trae> [身分說明]",
+		LangJapanese:           "/team permissions — ロールの権限\n/team labels — ラベル設定\n/team members — メンバー一覧と役割・指示の編集フォーム\n/team bot create — 個別チャットで作成フォームを開く\n/team bot create <名前> <役割> <codex|claudecode|trae> [指示]",
+		LangSpanish:            "/team permissions — Permisos del rol\n/team labels — Ajustes de etiquetas\n/team members — ver miembros y editar identidades mediante formularios\n/team bot create — abrir formulario en chat privado\n/team bot create <nombre> <rol> <codex|claudecode|trae> [instrucciones]",
+	},
+
+	MsgTeamInitAutoReady: {
+		LangEnglish:            "Manager Bot configuration saved: %s\nThe scanning account is automatically bound as administrator. Open the bot after the service connects: %s\nYou can chat directly; no pairing command is needed.",
+		LangChinese:            "管理者 Bot 配置已保存：%s\n已自动将扫码账号绑定为管理员。服务连接成功后打开机器人：%s\n直接开始对话即可，无需发送认领命令。",
+		LangTraditionalChinese: "管理者 Bot 設定已儲存：%s\n已自動將掃碼帳號綁定為管理員。服務連線成功後開啟機器人：%s\n直接開始對話即可，無須傳送認領指令。",
+		LangJapanese:           "管理ボット設定を保存しました：%s\nスキャンしたアカウントを管理者に自動登録しました。サービス接続後にボットを開いてください：%s\n登録コマンドなしで会話を始められます。",
+		LangSpanish:            "Configuración guardada: %s\nLa cuenta que escaneó el código ya es administradora. Abre el bot cuando se conecte el servicio: %s\nPuedes conversar directamente, sin comando de vinculación.",
+	},
+	MsgBotAutoReady: {
+		LangEnglish:            "Bot %s was saved and its connection started. The scanning account is its administrator. Open %s to chat directly.",
+		LangChinese:            "机器人 %s 已保存并启动连接，扫码账号已自动绑定为管理员。打开 %s 即可直接对话。",
+		LangTraditionalChinese: "機器人 %s 已儲存並啟動連線，掃碼帳號已自動綁定為管理員。開啟 %s 即可直接對話。",
+		LangJapanese:           "ボット %s を保存し接続を開始しました。スキャンしたアカウントが管理者です。%s を開いて会話できます。",
+		LangSpanish:            "Se guardó el bot %s y se inició su conexión. La cuenta que escaneó es administradora. Abre %s para conversar.",
+	},
+	MsgBotAutoSavedOffline: {
+		LangEnglish:            "Bot %s and its administrator were saved, but the connection failed. Fix the connection and restart cc-connect without creating another app. Bot: %s",
+		LangChinese:            "机器人 %s 和管理员绑定已保存，但连接启动失败。排除连接问题后重启 cc-connect 即可，无需重复创建或认领。机器人：%s",
+		LangTraditionalChinese: "機器人 %s 與管理員綁定已儲存，但連線啟動失敗。排除連線問題後重啟 cc-connect 即可，無須重複建立或認領。機器人：%s",
+		LangJapanese:           "ボット %s と管理者を保存しましたが、接続できません。接続問題を解決して cc-connect を再起動してください。再作成や登録は不要です。ボット：%s",
+		LangSpanish:            "Se guardaron el bot %s y su administrador, pero falló la conexión. Soluciona la conexión y reinicia cc-connect sin crear otra aplicación. Bot: %s",
+	},
+	MsgBotRegistrationOwnerMissing: {
+		LangEnglish:            "The app registration returned no valid scanning user identity. The registration result is saved, but the bot was not activated. No first-message ownership or manual claim was enabled; do not create a duplicate app.",
+		LangChinese:            "应用注册未返回有效的扫码用户身份。注册结果已保存，机器人未启用；不会让首个发消息的人自动成为管理员，也未启用手动认领。请勿重复创建应用。",
+		LangTraditionalChinese: "應用註冊未回傳有效的掃碼使用者身分。註冊結果已儲存，機器人未啟用；不會讓首個傳訊息的人自動成為管理員，也未啟用手動認領。請勿重複建立應用。",
+		LangJapanese:           "登録結果に有効なスキャンユーザーの情報がありません。結果は保存済みですが、ボットは有効化していません。最初の送信者の自動登録や手動登録は行いません。アプリを重複作成しないでください。",
+		LangSpanish:            "El registro no devolvió una identidad válida de quien escaneó. Se guardó el resultado, pero no se activó el bot. No se habilitó la vinculación al primer remitente ni la manual. No crees otra aplicación.",
+	},
+	MsgTeamUsage: {
+		LangEnglish:            "Agent Team setup:\n  team init --agent <codex|claudecode|trae> --work-dir <directory> [--config <new.toml>]\n  team status\n  team plan --to <bot> --title <title> --deliverable <output> --message <task> [--depends-on T001]\n  team dispatch --task-id T002\n  team cancel --task-id T002\n  team dispatch --to <bot> --title <title> --deliverable <output> --message <task>\n  team ensure-role --role tester --backend codex --reason <task-and-deliverable>\n  team adopt --input <v2.toml> --output <new.toml>\n  team migrate --input <old.toml> --output <new.toml>\nInit creates a manager Bot via QR authorization and starts the service. Use --no-start for configuration only; no manual App Key is needed. Use team init --help for options.",
+		LangChinese:            "Agent Team 配置：\n  team init --agent <codex|claudecode|trae> --work-dir <目录> [--config <新配置.toml>]\n  team status\n  team plan --to <bot> --title <title> --deliverable <output> --message <task> [--depends-on T001]\n  team dispatch --task-id T002\n  team cancel --task-id T002\n  team dispatch --to <bot> --title <title> --deliverable <output> --message <task>\n  team ensure-role --role tester --backend codex --reason <task-and-deliverable>\n  team adopt --input <v2.toml> --output <new.toml>\n  team migrate --input <旧配置.toml> --output <新配置.toml>\ninit 通过扫码授权创建管理者 Bot 并自动启动服务；--no-start 可仅保存配置，无需手填 App Key。更多选项见 team init --help。",
+		LangTraditionalChinese: "Agent Team 設定：\n  team init --agent <codex|claudecode|trae> --work-dir <目錄> [--config <新設定.toml>]\n  team status\n  team plan --to <bot> --title <title> --deliverable <output> --message <task> [--depends-on T001]\n  team dispatch --task-id T002\n  team cancel --task-id T002\n  team dispatch --to <bot> --title <title> --deliverable <output> --message <task>\n  team ensure-role --role tester --backend codex --reason <task-and-deliverable>\n  team adopt --input <v2.toml> --output <new.toml>\n  team migrate --input <舊設定.toml> --output <新設定.toml>\ninit 透過掃碼授權建立管理者 Bot 並自動啟動服務；--no-start 可僅儲存設定，無須手填 App Key。更多選項見 team init --help。",
+		LangJapanese:           "Agent Team 設定：\n  team init --agent <codex|claudecode|trae> --work-dir <ディレクトリ> [--config <new.toml>]\n  team status\n  team plan --to <bot> --title <title> --deliverable <output> --message <task> [--depends-on T001]\n  team dispatch --task-id T002\n  team cancel --task-id T002\n  team dispatch --to <bot> --title <title> --deliverable <output> --message <task>\n  team ensure-role --role tester --backend codex --reason <task-and-deliverable>\n  team adopt --input <v2.toml> --output <new.toml>\n  team migrate --input <old.toml> --output <new.toml>\ninit は QR 認証で管理ボットを作成し、サービスを起動します。設定のみ保存するには --no-start を指定します。App Key の手入力は不要です。詳細は team init --help。",
+		LangSpanish:            "Configuración de Agent Team:\n  team init --agent <codex|claudecode|trae> --work-dir <directorio> [--config <new.toml>]\n  team status\n  team plan --to <bot> --title <title> --deliverable <output> --message <task> [--depends-on T001]\n  team dispatch --task-id T002\n  team cancel --task-id T002\n  team dispatch --to <bot> --title <title> --deliverable <output> --message <task>\n  team ensure-role --role tester --backend codex --reason <task-and-deliverable>\n  team adopt --input <v2.toml> --output <new.toml>\n  team migrate --input <old.toml> --output <new.toml>\ninit crea un bot administrador mediante autorización QR e inicia el servicio, sin introducir App Key. Usa --no-start para guardar solo la configuración. Consulta team init --help.",
+	},
+	MsgTeamInitScan: {
+		LangEnglish:            "Scan with Feishu/Lark to create and authorize your manager Bot:\n%s",
+		LangChinese:            "请使用飞书/Lark 扫码，完成管理者 Bot 的创建和授权：\n%s",
+		LangTraditionalChinese: "請使用飛書/Lark 掃碼，完成管理者 Bot 的建立和授權：\n%s",
+		LangJapanese:           "Feishu/Lark でスキャンし、管理ボットを作成・認証してください：\n%s",
+		LangSpanish:            "Escanea con Feishu/Lark para crear y autorizar tu bot administrador:\n%s",
+	},
+	MsgTeamInitReady: {
+		LangEnglish:            "Manager Bot configuration saved: %s\nOpen the bot after the service connects: %s\nSend this one-time command in a private chat with the bot to bind your account as its administrator:\n/new claim %s\nThis is needed only once, not after every restart. No manual open_id or business project is needed. If messages do not arrive, check the app publication status and availability.",
+		LangChinese:            "管理者 Bot 配置已保存：%s\n服务连接成功后打开机器人：%s\n在与该机器人的私聊中发送以下一次性命令，将你的账号绑定为管理员：\n/new claim %s\n只需首次认领，重启后不用重复；无需手填 open_id，也无需先创建业务项目。如收不到消息，请核验应用发布状态和可用范围。",
+		LangTraditionalChinese: "管理者 Bot 設定已儲存：%s\n服務連線成功後開啟機器人：%s\n在與該機器人的私聊中傳送以下一次性指令，將你的帳號綁定為管理員：\n/new claim %s\n只需首次認領，重新啟動後不必重複；無須手填 open_id，也無須先建立業務專案。若收不到訊息，請檢查應用發布狀態與可用範圍。",
+		LangJapanese:           "管理ボット設定を保存しました：%s\nサービス接続後にボットを開いてください：%s\n個人チャットで次のワンタイムコマンドを送信し、管理者アカウントを紐付けてください：\n/new claim %s\n初回のみ必要で、再起動後は不要です。open_id の入力や業務プロジェクトは不要です。受信できない場合はアプリの公開状態と利用範囲を確認してください。",
+		LangSpanish:            "Configuración guardada: %s\nAbre el bot cuando se conecte el servicio: %s\nEnvía este comando de un solo uso en un chat privado para vincular tu cuenta como administrador:\n/new claim %s\nSolo hace falta la primera vez, no tras reiniciar. No necesitas introducir open_id ni crear un proyecto. Si no llegan mensajes, comprueba la publicación y disponibilidad de la aplicación.",
+	},
+	MsgTeamInitStarting: {
+		LangEnglish:            "Starting the service automatically in this terminal. Keep it open; press Ctrl+C to stop.",
+		LangChinese:            "正在自动启动服务。请保持当前终端运行；按 Ctrl+C 停止。",
+		LangTraditionalChinese: "正在自動啟動服務。請保持目前終端執行；按 Ctrl+C 停止。",
+		LangJapanese:           "このターミナルでサービスを自動起動します。開いたままにしてください。Ctrl+C で停止します。",
+		LangSpanish:            "Iniciando el servicio automáticamente en esta terminal. Mantenla abierta; pulsa Ctrl+C para detenerlo.",
+	},
+	MsgTeamInitNoStart: {
+		LangEnglish:            "Configuration only (--no-start). Start this binary later with --config pointing to the saved file.",
+		LangChinese:            "已按 --no-start 仅保存配置。稍后使用当前程序加 --config 指向上述配置文件启动。",
+		LangTraditionalChinese: "已依 --no-start 僅儲存設定。稍後使用目前程式加 --config 指向上述設定檔啟動。",
+		LangJapanese:           "--no-start により設定のみ保存しました。後で --config に保存先を指定して起動してください。",
+		LangSpanish:            "Solo se guardó la configuración (--no-start). Inicia el programa después con --config apuntando al archivo guardado.",
+	},
+	MsgBotUsage: {
+		LangEnglish:            "Use /new bot <name> (1–48 lowercase letters, digits, - or _), or /new bot cancel.",
+		LangChinese:            "用 /new bot <名称> 创建机器人（1–48 位小写字母、数字、- 或 _）；用 /new bot cancel 取消。",
+		LangTraditionalChinese: "用 /new bot <名稱> 建立機器人（1–48 位小寫字母、數字、- 或 _）；用 /new bot cancel 取消。",
+		LangJapanese:           "/new bot <名前>（1～48文字の英小文字・数字・-・_）で作成、/new bot cancel で中止します。",
+		LangSpanish:            "Usa /new bot <nombre> (1–48 letras minúsculas, números, - o _), o /new bot cancel.",
+	},
+	MsgBotPrivateOnly: {
+		LangEnglish:            "Create bots in a private chat with me; registration links must stay private.",
+		LangChinese:            "请在与我的私聊中创建机器人，创建链接仅在私聊发送。",
+		LangTraditionalChinese: "請在與我的私聊中建立機器人，建立連結僅在私聊傳送。",
+		LangJapanese:           "ボットの作成は私との個人チャットで行ってください。",
+		LangSpanish:            "Crea bots en un chat privado conmigo; el enlace debe mantenerse privado.",
+	},
+	MsgBotUnsupported: {
+		LangEnglish:            "Bot creation is unavailable on this platform.",
+		LangChinese:            "当前平台暂不支持在聊天中创建机器人。",
+		LangTraditionalChinese: "目前平台暫不支援在聊天中建立機器人。",
+		LangJapanese:           "このプラットフォームではチャットからボットを作成できません。",
+		LangSpanish:            "Esta plataforma no permite crear bots desde el chat.",
+	},
+	MsgBotBusy: {
+		LangEnglish:            "A bot creation is already pending. Finish it or use /new bot cancel.",
+		LangChinese:            "已有一个机器人正在创建，请先完成或用 /new bot cancel 取消。",
+		LangTraditionalChinese: "已有一個機器人正在建立，請先完成或用 /new bot cancel 取消。",
+		LangJapanese:           "作成処理が進行中です。完了するか /new bot cancel で中止してください。",
+		LangSpanish:            "Ya hay una creación pendiente. Complétala o usa /new bot cancel.",
+	},
+	MsgBotCancelled: {
+		LangEnglish:            "Bot creation cancellation requested. A bot already created on the platform is not deleted.",
+		LangChinese:            "已请求取消创建；如果飞书端已经创建成功，不会删除该机器人。",
+		LangTraditionalChinese: "已請求取消建立；如果平台端已經建立成功，不會刪除該機器人。",
+		LangJapanese:           "作成の中止を要求しました。既に作成済みのボットは削除されません。",
+		LangSpanish:            "Se solicitó cancelar. No se eliminará un bot ya creado en la plataforma.",
+	},
+	MsgBotAuthorize: {
+		LangEnglish:            "Open this link in the mobile app to create and authorize bot %s (expires in about 10 minutes):\n%s\nYou can continue chatting while waiting.",
+		LangChinese:            "请在手机飞书/Lark 中打开此链接，创建并授权机器人 %s（约 10 分钟有效）：\n%s\n等待期间可以继续聊天。",
+		LangTraditionalChinese: "請在手機飛書/Lark 中開啟此連結，建立並授權機器人 %s（約 10 分鐘有效）：\n%s\n等待期間可以繼續聊天。",
+		LangJapanese:           "モバイルアプリでリンクを開き、ボット %s を作成・承認してください（約10分有効）：\n%s\n待機中も会話できます。",
+		LangSpanish:            "Abre este enlace en la aplicación móvil para crear y autorizar el bot %s (unos 10 minutos):\n%s\nPuedes seguir conversando.",
+	},
+	MsgBotFailed: {
+		LangEnglish:            "Bot creation failed or expired. No existing identity was replaced. Retry /new bot <name>.",
+		LangChinese:            "机器人创建失败或超时，未替换已有身份。可重试 /new bot <名称>。",
+		LangTraditionalChinese: "機器人建立失敗或逾時，未替換已有身分。可重試 /new bot <名稱>。",
+		LangJapanese:           "作成に失敗したか期限切れです。既存のボットは変更されていません。/new bot <名前> で再試行できます。",
+		LangSpanish:            "La creación falló o caducó. No se sustituyó ninguna identidad. Reintenta /new bot <nombre>.",
+	},
+	MsgBotExists: {
+		LangEnglish:            "That bot name already exists or is being created. Choose another name.",
+		LangChinese:            "该机器人名称已存在或正在创建，请换一个名称。",
+		LangTraditionalChinese: "該機器人名稱已存在或正在建立，請換一個名稱。",
+		LangJapanese:           "その名前は既に存在するか作成中です。別の名前を選んでください。",
+		LangSpanish:            "Ese nombre ya existe o está en proceso de creación. Elige otro.",
+	},
+	MsgBotReady: {
+		LangEnglish:            "Bot %s has been saved and its connection started. Open %s and send this one-time command privately:\n/new claim %s\nThen it can chat with you and create other bots.",
+		LangChinese:            "机器人 %s 已保存并启动连接。打开 %s，在与新机器人的私聊中发送一次性绑定命令：\n/new claim %s\n绑定后即可聊天和继续创建机器人。",
+		LangTraditionalChinese: "機器人 %s 已儲存並啟動連線。開啟 %s，在與新機器人的私聊中傳送一次性綁定命令：\n/new claim %s\n綁定後即可聊天和繼續建立機器人。",
+		LangJapanese:           "ボット %s を保存し接続を開始しました。%s を開き、個人チャットで次の一度限りのコマンドを送信してください：\n/new claim %s\n登録後に会話やボットの作成ができます。",
+		LangSpanish:            "Se guardó el bot %s y se inició su conexión. Abre %s y envía en privado este comando de un solo uso:\n/new claim %s\nDespués podrás conversar y crear otros bots.",
+	},
+	MsgBotSavedOffline: {
+		LangEnglish:            "Bot %s was saved, but its connection could not start. Restart cc-connect after fixing the connection; do not create a duplicate. Open %s and keep this private pairing command:\n/new claim %s",
+		LangChinese:            "机器人 %s 已保存，但连接启动失败。排除连接问题后重启 cc-connect 即可，无需重复创建。打开 %s，并保管好私聊绑定命令：\n/new claim %s",
+		LangTraditionalChinese: "機器人 %s 已儲存，但連線啟動失敗。排除連線問題後重啟 cc-connect 即可，無需重複建立。開啟 %s，並保管好私聊綁定命令：\n/new claim %s",
+		LangJapanese:           "ボット %s は保存済みですが接続できません。接続問題を解決して cc-connect を再起動してください。再作成は不要です。%s を開き、この登録コマンドを保管してください：\n/new claim %s",
+		LangSpanish:            "El bot %s se guardó pero no pudo conectarse. Soluciona la conexión y reinicia cc-connect sin crear otro. Abre %s y conserva este comando privado:\n/new claim %s",
+	},
+	MsgBotSaveFailed: {
+		LangEnglish:            "Could not save the identity configuration. Retry after fixing config permissions.",
+		LangChinese:            "无法保存身份配置，请修复配置文件权限后重试。",
+		LangTraditionalChinese: "無法儲存身分設定，請修復設定檔權限後重試。",
+		LangJapanese:           "設定を保存できません。設定ファイルの権限を確認してください。",
+		LangSpanish:            "No se pudo guardar la configuración. Revisa los permisos y reintenta.",
+	},
+	MsgBotUnclaimed: {
+		LangEnglish:            "This bot is awaiting owner binding. Send the /new claim command provided by the creating bot in a private chat.",
+		LangChinese:            "该机器人尚未绑定管理员，请在私聊中发送创建机器人提供的 /new claim 命令。",
+		LangTraditionalChinese: "該機器人尚未綁定管理員，請在私聊中傳送建立機器人提供的 /new claim 命令。",
+		LangJapanese:           "所有者の登録待ちです。作成元のボットから受け取った /new claim コマンドを個人チャットで送信してください。",
+		LangSpanish:            "Este bot espera la vinculación del propietario. Envía en privado el comando /new claim del bot creador.",
+	},
+	MsgBotClaimInvalid: {
+		LangEnglish:            "Invalid pairing code. Use the command provided by the creating bot.",
+		LangChinese:            "绑定码无效，请使用创建机器人提供的完整命令。",
+		LangTraditionalChinese: "綁定碼無效，請使用建立機器人提供的完整命令。",
+		LangJapanese:           "登録コードが無効です。作成元から受け取ったコマンドを使用してください。",
+		LangSpanish:            "Código de vinculación inválido. Usa el comando del bot creador.",
+	},
+	MsgBotClaimed: {
+		LangEnglish:            "Owner bound. You can now chat, or create another bot with /new bot <name>.",
+		LangChinese:            "管理员绑定成功。现在可以聊天，或用 /new bot <名称> 创建其他机器人。",
+		LangTraditionalChinese: "管理員綁定成功。現在可以聊天，或用 /new bot <名稱> 建立其他機器人。",
+		LangJapanese:           "所有者を登録しました。会話、または /new bot <名前> で別のボットを作成できます。",
+		LangSpanish:            "Propietario vinculado. Ya puedes conversar o crear otro bot con /new bot <nombre>.",
+	},
+	MsgBotOwnerRequired: {
+		LangEnglish:            "This bot currently accepts messages only from its bound owner.",
+		LangChinese:            "该机器人当前仅接受已绑定管理员的消息。",
+		LangTraditionalChinese: "該機器人目前僅接受已綁定管理員的訊息。",
+		LangJapanese:           "現在このボットは登録済み所有者からのメッセージのみ受け付けます。",
+		LangSpanish:            "Este bot solo acepta mensajes de su propietario vinculado.",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
@@ -852,6 +2360,41 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 工具 `%s` 已預授權。將在下次會話生效。",
 		LangJapanese:           "✅ ツール `%s` を事前許可しました。次のセッションから有効になります。",
 		LangSpanish:            "✅ Herramienta `%s` pre-autorizada. Se aplicará en la próxima sesión.",
+	},
+	MsgProjectUsage: {
+		LangEnglish:            "Projects: /project list | /project use <id> | /project clear",
+		LangChinese:            "项目：/project list 查看；/project use <id> 切换；/project clear 返回未选择状态",
+		LangTraditionalChinese: "專案：/project list 查看；/project use <id> 切換；/project clear 清除選擇",
+		LangJapanese:           "プロジェクト: /project list | /project use <id> | /project clear",
+		LangSpanish:            "Proyectos: /project list | /project use <id> | /project clear",
+	},
+	MsgProjectSelected: {
+		LangEnglish:            "Active project: %s. Its independent context is ready.",
+		LangChinese:            "已切换到项目 %s，使用该项目的独立上下文。",
+		LangTraditionalChinese: "已切換至專案 %s，使用該專案的獨立上下文。",
+		LangJapanese:           "プロジェクト %s の独立したコンテキストを使用します。",
+		LangSpanish:            "Proyecto activo: %s. Se usa su contexto independiente.",
+	},
+	MsgProjectRequired: {
+		LangEnglish:            "Select a project with /project use <id>. Use /project list to see available projects.",
+		LangChinese:            "请先用 /project use <id> 选择项目；/project list 查看可用项目。",
+		LangTraditionalChinese: "請先用 /project use <id> 選擇專案；/project list 查看可用專案。",
+		LangJapanese:           "/project use <id> でプロジェクトを選択してください。",
+		LangSpanish:            "Selecciona un proyecto con /project use <id>.",
+	},
+	MsgProjectCleared: {
+		LangEnglish:            "Project selection cleared. Existing project contexts are preserved.",
+		LangChinese:            "已清除项目选择，各项目的上下文仍然保留。",
+		LangTraditionalChinese: "已清除專案選擇，各專案的上下文仍然保留。",
+		LangJapanese:           "選択を解除しました。各プロジェクトのコンテキストは保持されます。",
+		LangSpanish:            "Selección borrada. Los contextos de los proyectos se conservan.",
+	},
+	MsgProjectCallbackUnsupported: {
+		LangEnglish:            "Project card callbacks are not available yet. Select the project and respond using text.",
+		LangChinese:            "项目卡片回调尚未接通，请选择对应项目后用文字处理。",
+		LangTraditionalChinese: "專案卡片回呼尚未接通，請選擇對應專案後用文字處理。",
+		LangJapanese:           "プロジェクトを選択してテキストで応答してください。",
+		LangSpanish:            "Selecciona el proyecto y responde por texto.",
 	},
 	MsgError: {
 		LangEnglish:            "❌ Error: %v",
@@ -1037,7 +2580,7 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgHelp: {
 		LangEnglish: "📖 Available Commands\n\n" +
-			"/new [name]\n  Start a new session\n\n" +
+			"/new [name]\n  Start a new session\n/new bot <name>\n  Create a bot (private chat, admin only)\n\n" +
 			"/list\n  List agent sessions\n\n" +
 			"/search <keyword>\n  Search sessions by name or ID\n\n" +
 			"/switch <number>\n  Resume a session by its list number\n\n" +
@@ -1081,7 +2624,7 @@ var messages = map[MsgKey]map[Language]string{
 			"Agent skills: auto-discovered from .claude/skills/<name>/SKILL.md etc.\n\n" +
 			"Permission modes: default / edit / plan / yolo",
 		LangChinese: "📖 可用命令\n\n" +
-			"/new [名称]\n  创建新会话\n\n" +
+			"/new [名称]\n  创建新会话\n/new bot <名称>\n  创建机器人（管理员私聊）\n\n" +
 			"/list\n  列出 Agent 会话列表\n\n" +
 			"/search <关键词>\n  搜索会话名称或 ID\n\n" +
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
@@ -1125,7 +2668,7 @@ var messages = map[MsgKey]map[Language]string{
 			"Agent Skills：自动发现自 .claude/skills/<name>/SKILL.md 等目录。\n\n" +
 			"权限模式：default / edit / plan / yolo",
 		LangTraditionalChinese: "📖 可用命令\n\n" +
-			"/new [名稱]\n  建立新會話\n\n" +
+			"/new [名稱]\n  建立新會話\n/new bot <名稱>\n  建立機器人（管理員私聊）\n\n" +
 			"/list\n  列出 Agent 會話列表\n\n" +
 			"/search <關鍵詞>\n  搜尋會話名稱或 ID\n\n" +
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
@@ -1168,7 +2711,7 @@ var messages = map[MsgKey]map[Language]string{
 			"Agent Skills：自動發現自 .claude/skills/<name>/SKILL.md 等目錄。\n\n" +
 			"權限模式：default / edit / plan / yolo",
 		LangJapanese: "📖 利用可能なコマンド\n\n" +
-			"/new [名前]\n  新しいセッションを開始\n\n" +
+			"/new [名前]\n  新しいセッションを開始\n/new bot <名前>\n  ボットを作成（管理者の個人チャット）\n\n" +
 			"/list\n  エージェントセッション一覧\n\n" +
 			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
 			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
@@ -1210,7 +2753,7 @@ var messages = map[MsgKey]map[Language]string{
 			"エージェントスキル: .claude/skills/<name>/SKILL.md などから自動検出。\n\n" +
 			"権限モード: default / edit / plan / yolo",
 		LangSpanish: "📖 Comandos disponibles\n\n" +
-			"/new [nombre]\n  Iniciar una nueva sesión\n\n" +
+			"/new [nombre]\n  Iniciar una nueva sesión\n/new bot <nombre>\n  Crear bot (chat privado, administrador)\n\n" +
 			"/list\n  Listar sesiones del agente\n\n" +
 			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
 			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
@@ -2316,6 +3859,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "推理強度已切換為 `%s`，新會話將使用此設定。",
 		LangJapanese:           "推論強度を `%s` に切り替えました。新しいセッションで使用されます。",
 		LangSpanish:            "Esfuerzo de razonamiento cambiado a `%s`. Las nuevas sesiones usarán esta configuración.",
+	},
+	MsgAgentConfigFailed: {
+		LangEnglish:            "Could not read or update agent settings: %s",
+		LangChinese:            "读取或修改 Agent 配置失败：%s",
+		LangTraditionalChinese: "讀取或修改 Agent 設定失敗：%s",
+		LangJapanese:           "エージェント設定の取得または変更に失敗しました: %s",
+		LangSpanish:            "No se pudo leer o cambiar la configuración del agente: %s",
 	},
 	MsgReasoningNotSupported: {
 		LangEnglish:            "This agent does not support reasoning effort switching.",

@@ -202,11 +202,13 @@ type providerWiringResult struct {
 	canStartInitialRefresh    bool
 }
 
-var topLevelCommandHandlers = map[string]func([]string){
+var topLevelCommandHandlers = withOptionalPlatformCommands(map[string]func([]string){
 	"config-example": func(_ []string) {
 		fmt.Print(ccconnect.ConfigExampleTOML)
 	},
-	"config": runConfig,
+	"config":  runConfig,
+	"team":    runTeam,
+	"project": runProject,
 	"update": func(_ []string) {
 		runUpdate()
 	},
@@ -223,12 +225,10 @@ var topLevelCommandHandlers = map[string]func([]string){
 	"agent-sid": runAgentSID,
 	"daemon":    runDaemon,
 	"feishu":    runFeishu,
-	"tuitui":    runTuiTui,
 	"weixin":    runWeixin,
-	"yuanbao":   runYuanbao,
 	"doctor":    runDoctor,
 	"web":       runWeb,
-}
+})
 
 func main() {
 	// Agy hooks require stdout to contain only the final JSON decision. Handle
@@ -337,7 +337,7 @@ func main() {
 	config.ConfigPath = configPath
 	slog.Info("config loaded", "path", configPath)
 
-	if len(cfg.Projects) == 0 {
+	if len(cfg.RuntimeProjects()) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
 		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
 		fmt.Fprintln(os.Stderr, "  cc-connect init")
@@ -355,10 +355,46 @@ func main() {
 		os.Exit(1)
 	}
 
-	engines := make([]*core.Engine, 0, len(cfg.Projects))
-	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
+	engines := make([]*core.Engine, 0, len(cfg.RuntimeProjects()))
+	effectiveWorkDirs := make([]string, 0, len(cfg.RuntimeProjects()))
 
-	for _, proj := range cfg.Projects {
+	botStarts := make(chan botStartRequest)
+	botCtx, stopBotCreation := context.WithCancel(context.Background())
+	botCreator := newChatBotCreator(configPath, cfg.DataDir, botCtx, botStarts)
+	teamProjects := newTeamProjectService(configPath, cfg.DataDir)
+	teamProjects.creator = botCreator
+	botCreator.beforeCreate = teamProjects.prepareBotLabels
+	botCreator.afterSave = teamProjects.labelCreatedBot
+	var createRuntime func(*config.Config, config.ProjectConfig, []core.Platform) (*core.Engine, string, error)
+	createRuntime = func(cfg *config.Config, proj config.ProjectConfig, shared []core.Platform) (*core.Engine, string, error) {
+		baseConfig, rawProject := cfg, proj
+		var err error
+		proj, err = cfg.EffectiveProject(proj)
+		if err != nil {
+			return nil, "", err
+		}
+
+		if proj.ID != "" {
+			var businessProject *core.BusinessProject
+			for i := range cfg.BusinessProjects {
+				if cfg.BusinessProjects[i].ID == proj.ContextProjectID {
+					businessProject = &cfg.BusinessProjects[i]
+					break
+				}
+			}
+			contextDir, err := botContextDataDir(cfg.DataDir, proj, businessProject)
+			if err != nil {
+				return nil, "", err
+			}
+			scoped := *cfg
+			scoped.DataDir = contextDir
+			cfg = &scoped
+		}
+		if proj.SessionDataDir != "" {
+			scoped := *cfg
+			scoped.DataDir = proj.SessionDataDir
+			cfg = &scoped
+		}
 		// Inject project-level run_as_user / run_as_env into the agent's
 		// opts map so agents that support isolation can pick them up
 		// without needing their own top-level config plumbing.
@@ -371,16 +407,42 @@ func main() {
 				proj.Agent.Options["run_as_env"] = proj.RunAsEnv
 			}
 		}
+		if team, _ := baseConfig.TeamForBot(proj.Name); team != nil && team.Manager == proj.Name {
+			exe, _ := os.Executable()
+			quote := func(v string) string { return "'" + strings.ReplaceAll(v, "'", "'\"'\"'") + "'" }
+			extra, _ := proj.Agent.Options["append_system_prompt"].(string)
+			proj.Agent.Options["append_system_prompt"] = extra + "\nWhen the user asks to create a project, use this local command with their requested directory and member IDs: " + quote(exe) + " project --config " + quote(configPath) + " --manager " + quote(proj.Name) + " create <project-id> <absolute-directory> [bot,bot] [goal]. The command creates and binds a project group including its manager. Report the returned group link. Do not claim completion without a successful command. Use the same project ID to retry incomplete setup."
+		}
 		agent, err := core.CreateAgent(proj.Agent.Type, buildAgentOptions(cfg.DataDir, proj))
 		if err != nil {
 			slog.Error("failed to create agent", "project", proj.Name, "error", err)
-			os.Exit(1)
+			return nil, "", err
 		}
 
 		providerWiring := wireAgentProviders(agent, proj.Agent)
 
 		var platforms []core.Platform
+		var builtEngine *core.Engine
+		constructed := false
+		defer func() {
+			if constructed {
+				return
+			}
+			if builtEngine != nil {
+				if err := builtEngine.Stop(); err != nil {
+					slog.Warn("incomplete engine cleanup failed", "project", proj.Name)
+				}
+			} else if err := agent.Stop(); err != nil {
+				slog.Warn("incomplete agent cleanup failed", "project", proj.Name)
+			}
+		}()
+		if shared != nil {
+			platforms = shared
+		}
 		for _, pc := range proj.Platforms {
+			if shared != nil {
+				break
+			}
 			opts := make(map[string]any, len(pc.Options)+2)
 			for k, v := range pc.Options {
 				opts[k] = v
@@ -390,7 +452,7 @@ func main() {
 			p, err := core.CreatePlatform(pc.Type, opts)
 			if err != nil {
 				slog.Error("failed to create platform", "project", proj.Name, "type", pc.Type, "error", err)
-				os.Exit(1)
+				return nil, "", err
 			}
 			platforms = append(platforms, p)
 		}
@@ -400,6 +462,11 @@ func main() {
 		effectiveWorkDir := applyProjectStateOverride(proj.Name, agent, workDir, projectState)
 		startInitialRefreshIfReady(agent, providerWiring)
 		sessionFile := sessionStorePath(cfg.DataDir, proj.Name, effectiveWorkDir)
+		if proj.ID != "" {
+			if err := core.ValidateProjectSessionStore(sessionFile); err != nil {
+				return nil, "", err
+			}
+		}
 
 		// Parse language setting
 		var lang core.Language
@@ -419,6 +486,10 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
+		if shared != nil {
+			engine.SetSharedPlatforms()
+		}
+		builtEngine = engine
 		// Wire display settings including show_context_indicator and reply_footer
 		// Global [display] config can be overridden by project-level settings
 		_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, &proj)
@@ -433,7 +504,8 @@ func main() {
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
-		engine.SetDataDir(cfg.DataDir)
+		// Context/session storage is scoped; the control API is service-wide.
+		engine.SetDataDir(baseConfig.DataDir)
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
@@ -444,7 +516,7 @@ func main() {
 			}
 			if err := os.MkdirAll(baseDir, 0o755); err != nil {
 				slog.Error("failed to create base_dir", "path", baseDir, "err", err)
-				continue
+				return nil, "", err
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
@@ -485,7 +557,7 @@ func main() {
 		if observeEnabled {
 			if obsChan == "" {
 				slog.Error("observe: channel is required (use --observe-channel or set channel in [projects.observe])")
-				os.Exit(1)
+				return nil, "", fmt.Errorf("observe: channel is required")
 			}
 			hasSlack := false
 			for _, p := range platforms {
@@ -971,8 +1043,91 @@ func main() {
 			return fmt.Sprintf("http://localhost:%d", port)
 		})
 
+		engine.SetBotCreationFunc(botCreator.handler(proj.Name))
+		engine.SetBotOwnership(proj.BotOwnerClaimHash, proj.BotOwnerID, func(userID string) error {
+			if err := config.ClaimBotIdentity(proj.Name, proj.BotOwnerClaimHash, userID); err != nil {
+				return err
+			}
+			if err := cleanupTeamInitReceipt(configPath, proj.Name); err != nil {
+				slog.Warn("could not remove completed team setup receipt", "bot", proj.Name)
+			}
+			if err := os.Remove(botCreator.recordPath(proj.Name)); err != nil && !os.IsNotExist(err) {
+				slog.Warn("could not remove completed bot registration", "project", proj.Name)
+			}
+			return nil
+		})
+
+		if proj.ID != "" && proj.ContextProjectID == "" {
+			router, err := core.NewProjectRouter(proj.ID, proj.Role == "manager", baseConfig.BusinessProjects,
+				filepath.Join(baseConfig.DataDir, "contexts", proj.ID, "selection.json"),
+				func(bp core.BusinessProject) (*core.Engine, error) {
+					for _, root := range bp.Directories {
+						stat, err := os.Stat(root.Path)
+						if err != nil {
+							return nil, err
+						}
+						if !stat.IsDir() {
+							return nil, fmt.Errorf("project path is not a directory: %s", root.Path)
+						}
+					}
+					childProject := config.BotProjectRuntime(rawProject, bp)
+					child, _, err := createRuntime(baseConfig, childProject, platforms)
+					return child, err
+				})
+			if err != nil {
+				return nil, "", err
+			}
+			engine.SetProjectRouter(router)
+		}
+		if proj.ContextProjectID != "" {
+			for _, bp := range baseConfig.BusinessProjects {
+				if bp.ID != proj.ContextProjectID {
+					continue
+				}
+				var additional []string
+				for _, root := range bp.Directories {
+					if root.ID != bp.PrimaryDirectory {
+						additional = append(additional, root.Path)
+					}
+				}
+				if len(additional) > 0 {
+					directories, ok := agent.(core.ProjectDirectoryConfigurer)
+					if !ok {
+						return nil, "", fmt.Errorf("backend %s does not support multiple project directories", agent.Name())
+					}
+					if err := directories.ConfigureProjectDirectories(bp.WorkDir(), additional); err != nil {
+						return nil, "", err
+					}
+				}
+			}
+		}
+		if team, _ := baseConfig.TeamForBot(proj.Name); team != nil {
+			if proj.Mode != "multi-workspace" {
+				engine.SetMultiWorkspace(workDir, filepath.Join(baseConfig.DataDir, "workspace_bindings.json"))
+			}
+			engine.SetTeamProjects(teamProjects.store, teamProjects.handler(proj.Name))
+			engine.SetProjectCommand(teamProjects.projectHandler(proj.Name))
+			engine.SetTeamManagerCheck(teamProjects.checkManager)
+			for _, member := range team.Members {
+				teamProjects.store.SetMemberLabel(member.Bot, memberDisplayName(member)+" · "+member.Role)
+				teamProjects.store.SetMemberDisplayName(member.Bot, memberDisplayName(member))
+			}
+			engine.SetTeamCoordination(team.AutoCoordinate, team.Manager == proj.Name, teamProjects.ensureRole)
+		}
+		constructed = true
+		return engine, effectiveWorkDir, nil
+	}
+	createEngine := func(cfg *config.Config, proj config.ProjectConfig) (*core.Engine, string, error) {
+		return createRuntime(cfg, proj, nil)
+	}
+	for _, proj := range cfg.RuntimeProjects() {
+		engine, workDir, err := createEngine(cfg, proj)
+		if err != nil {
+			slog.Error("failed to create project", "project", proj.Name, "error", err)
+			os.Exit(1)
+		}
 		engines = append(engines, engine)
-		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
+		effectiveWorkDirs = append(effectiveWorkDirs, workDir)
 	}
 
 	// Start cron scheduler
@@ -990,7 +1145,7 @@ func main() {
 			cronSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
 		}
 		for i, e := range engines {
-			cronSched.RegisterEngine(cfg.Projects[i].Name, e)
+			cronSched.RegisterEngine(cfg.RuntimeProjects()[i].Name, e)
 			e.SetCronScheduler(cronSched)
 		}
 	}
@@ -1010,14 +1165,14 @@ func main() {
 			timerSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
 		}
 		for i, e := range engines {
-			timerSched.RegisterEngine(cfg.Projects[i].Name, e)
+			timerSched.RegisterEngine(cfg.RuntimeProjects()[i].Name, e)
 			e.SetTimerScheduler(timerSched)
 		}
 	}
 
 	// Start heartbeat scheduler
 	heartbeatSched := core.NewHeartbeatScheduler(cfg.DataDir)
-	for i, proj := range cfg.Projects {
+	for i, proj := range cfg.RuntimeProjects() {
 		hbCfg := buildHeartbeatConfig(proj.Heartbeat)
 		if hbCfg.Enabled {
 			heartbeatSched.Register(proj.Name, hbCfg, engines[i], effectiveWorkDirs[i])
@@ -1026,10 +1181,12 @@ func main() {
 	}
 
 	var startErrors []error
-	for _, e := range engines {
+	for i, e := range engines {
 		if err := e.Start(); err != nil {
 			slog.Warn("engine start partially failed (some platforms may be unavailable)", "error", err)
 			startErrors = append(startErrors, err)
+		} else {
+			botCreator.markStarted(cfg.RuntimeProjects()[i].Name)
 		}
 	}
 	// Only exit if ALL engines failed to start
@@ -1075,8 +1232,8 @@ func main() {
 			os.Exit(1)
 		}
 		for i, e := range engines {
-			bp := bridgeSrv.NewPlatform(cfg.Projects[i].Name)
-			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
+			bp := bridgeSrv.NewPlatform(cfg.RuntimeProjects()[i].Name)
+			bridgeSrv.RegisterEngine(cfg.RuntimeProjects()[i].Name, e, bp)
 			e.AddPlatform(bp)
 		}
 		bridgeSrv.Start()
@@ -1095,7 +1252,7 @@ func main() {
 		}
 		webhookSrv = core.NewWebhookServer(port, cfg.Webhook.Token, path)
 		for i, e := range engines {
-			webhookSrv.RegisterEngine(cfg.Projects[i].Name, e)
+			webhookSrv.RegisterEngine(cfg.RuntimeProjects()[i].Name, e)
 		}
 		webhookSrv.Start()
 	}
@@ -1109,7 +1266,7 @@ func main() {
 		}
 		mgmtSrv = core.NewManagementServer(port, cfg.Management.Token, cfg.Management.CORSOrigins)
 		for i, e := range engines {
-			mgmtSrv.RegisterEngine(cfg.Projects[i].Name, e)
+			mgmtSrv.RegisterEngine(cfg.RuntimeProjects()[i].Name, e)
 		}
 		if cronSched != nil {
 			mgmtSrv.SetCronScheduler(cronSched)
@@ -1291,14 +1448,14 @@ func main() {
 		dirHistory := core.NewDirHistory(cfg.DataDir)
 
 		for i, e := range engines {
-			apiSrv.RegisterEngine(cfg.Projects[i].Name, e)
+			apiSrv.RegisterEngine(cfg.RuntimeProjects()[i].Name, e)
 			e.SetRelayManager(relayMgr)
 			e.SetDirHistory(dirHistory)
 
 			// Ensure initial work_dir is in history
 			if initWorkDir := effectiveWorkDirs[i]; initWorkDir != "" {
-				if !dirHistory.Contains(cfg.Projects[i].Name, initWorkDir) {
-					dirHistory.Add(cfg.Projects[i].Name, initWorkDir)
+				if !dirHistory.Contains(cfg.RuntimeProjects()[i].Name, initWorkDir) {
+					dirHistory.Add(cfg.RuntimeProjects()[i].Name, initWorkDir)
 				}
 			}
 		}
@@ -1329,12 +1486,42 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	var restartReq *core.RestartRequest
-	select {
-	case <-sigCh:
-	case req := <-core.RestartCh:
-		restartReq = &req
-		slog.Info("restart requested via /restart command", "session", req.SessionKey, "platform", req.Platform)
+mainLoop:
+	for {
+		select {
+		case <-sigCh:
+			break mainLoop
+		case req := <-core.RestartCh:
+			restartReq = &req
+			slog.Info("restart requested via /restart command", "session", req.SessionKey, "platform", req.Platform)
+			break mainLoop
+		case req := <-botStarts:
+			err := startCreatedBot(req, configPath, createEngine, func(name string, engine *core.Engine, workDir string) {
+				engines = append(engines, engine)
+				if cronSched != nil {
+					cronSched.RegisterEngine(name, engine)
+					engine.SetCronScheduler(cronSched)
+				}
+				if timerSched != nil {
+					timerSched.RegisterEngine(name, engine)
+					engine.SetTimerScheduler(timerSched)
+				}
+				engine.SetHeartbeatScheduler(heartbeatSched)
+				if mgmtSrv != nil {
+					mgmtSrv.RegisterEngine(name, engine)
+				}
+				if webhookSrv != nil {
+					webhookSrv.RegisterEngine(name, engine)
+				}
+				if apiSrv != nil {
+					apiSrv.RegisterEngine(name, engine)
+					engine.SetRelayManager(apiSrv.RelayManager())
+				}
+			})
+			req.done <- err
+		}
 	}
+	stopBotCreation()
 
 	slog.Info("shutting down...")
 	if mgmtSrv != nil {
@@ -1676,6 +1863,14 @@ Commands:
     new              Force QR onboarding to create a new bot
     bind             Bind existing app_id/app_secret
 
+  team               Configure Agent Team Bots
+    init             Create the manager via QR authorization and start the service
+    migrate          Export legacy AgentProfile configuration as Bots
+
+  project            Manage project groups and their code workspaces
+    list             List projects (--config, --manager before the action)
+    create           Create a project group with its manager and selected bots
+
   tuitui             Access TuiTui history, posts, and attachments
     messages         Read chat history
     search           Search chat history
@@ -1750,15 +1945,20 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Find the matching project
 	var proj *config.ProjectConfig
-	for i := range cfg.Projects {
-		if cfg.Projects[i].Name == projName {
-			proj = &cfg.Projects[i]
+	for i := range cfg.RuntimeProjects() {
+		if cfg.RuntimeProjects()[i].Name == projName {
+			proj = &cfg.RuntimeProjects()[i]
 			break
 		}
 	}
 	if proj == nil {
 		return nil, fmt.Errorf("project %q not found in config", projName)
 	}
+	effective, err := cfg.EffectiveProject(*proj)
+	if err != nil {
+		return nil, err
+	}
+	proj = &effective
 
 	// Reload display config (includes legacy quiet → display mapping)
 	mode, tm, tool, tmlen, toollen, showCtx, showFooter, hideAgentFooter := config.EffectiveDisplay(cfg, proj)

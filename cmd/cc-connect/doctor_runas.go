@@ -74,20 +74,25 @@ func runDoctorUserIsolation(args []string) {
 	}
 	var targets []pending
 	var allUsers []string
-	for _, proj := range cfg.Projects {
+	for _, proj := range cfg.RuntimeProjects() {
 		if proj.RunAsUser == "" {
 			continue
 		}
 		allUsers = append(allUsers, proj.RunAsUser)
 	}
-	for _, proj := range cfg.Projects {
+	for _, proj := range cfg.RuntimeProjects() {
 		if proj.RunAsUser == "" {
 			continue
 		}
 		if *projectFilter != "" && proj.Name != *projectFilter {
 			continue
 		}
-		wd, _ := proj.Agent.Options["work_dir"].(string)
+		effective, err := cfg.EffectiveProject(proj)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		wd, _ := effective.Agent.Options["work_dir"].(string)
 		targets = append(targets, pending{
 			project:   proj.Name,
 			runAsUser: proj.RunAsUser,
