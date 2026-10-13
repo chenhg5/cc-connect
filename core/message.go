@@ -386,7 +386,11 @@ type Message struct {
 	Mentioned        bool   // maomao fork: user explicitly @-mentioned the bot (input to the gate)
 	FromBot          bool   // maomao fork: sent by a teammate bot; without Mentioned it is context only
 	SeenUpToID       string // maomao fork: newest message folded into this one (gate burst), for channel backfill
-	ModeOverride     string // if set, temporarily override agent permission mode for this message
+	// maomao fork: the gate asks for the per-turn context blocks; they are added
+	// right before the send, once the agent process for this turn is known.
+	TurnCtx      bool
+	TurnCtxQuery string // the user's own words, for wiki matching
+	ModeOverride string // if set, temporarily override agent permission mode for this message
 	// IsPermissionResponse is set by inline-button / card-action paths in
 	// platforms when a synthesized message is forwarded as a permission
 	// decision (e.g. Telegram handleCallbackQuery for perm:allow/deny,
@@ -454,6 +458,10 @@ type Event struct {
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 }
+
+// MetaContextCompacted marks an Event (Metadata key, bool) reporting that the
+// agent compacted its context (maomao fork).
+const MetaContextCompacted = "context_compacted"
 
 // HistoryEntry is one turn in a conversation.
 type HistoryEntry struct {

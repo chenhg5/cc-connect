@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -265,12 +266,7 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	if dec.Action == "insert" {
 		content = insertNote + "\n" + content
 	}
-	if c := e.turnContext(msg.SessionKey, msg.Content); c != "" {
-		content = c + "\n\n" + content
-	}
-	if sum := e.teamSummary(msg.SessionKey); sum != "" {
-		content = sum + "\n\n" + content
-	}
+	msg.TurnCtx, msg.TurnCtxQuery = true, msg.Content
 	msg.Content = content
 	return false
 }
@@ -391,7 +387,10 @@ func (g *gateState) post(ctx context.Context, path string, req any, out any) err
 
 // turnContext returns the channel's progress summary and matching wiki pages as a
 // block to put before the user's message ("" when the gate has nothing or is down).
-func (e *Engine) turnContext(sessionKey, text string) string {
+// Each block goes into an agent context once: the summary on the first turn after
+// a new session or a compaction, a wiki page the first time it matches. Repeating
+// them every turn filled long sessions with dozens of near-identical copies.
+func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 	g := e.gate
 	if g == nil {
 		return ""
@@ -403,21 +402,71 @@ func (e *Engine) turnContext(sessionKey, text string) string {
 		slog.Warn("gate: context fetch failed", "session", sessionKey, "error", err)
 		return ""
 	}
+	summary := strings.TrimSpace(out.Summary)
+	var wiki []string
+	session.UpdateTurnCtx(func(t *TurnCtxSent) {
+		if summary != "" {
+			if t.Summary {
+				summary = ""
+			} else {
+				t.Summary = true
+			}
+		}
+		for _, w := range out.Wiki {
+			if !slices.Contains(t.Wiki, w.Path) {
+				t.Wiki = append(t.Wiki, w.Path)
+				wiki = append(wiki, "\n- "+w.Path+" — "+w.Desc)
+			}
+		}
+	})
 	var b strings.Builder
-	if s := strings.TrimSpace(out.Summary); s != "" {
+	if summary != "" {
 		b.WriteString("（本频道进展总结，跨会话、重启都保留；以频道记录为准，有冲突时信频道）\n")
-		b.WriteString(s)
+		b.WriteString(summary)
 	}
-	if len(out.Wiki) > 0 {
+	if len(wiki) > 0 {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
 		b.WriteString("（可能相关的 wiki 页，需要时去读）")
-		for _, w := range out.Wiki {
-			b.WriteString("\n- " + w.Path + " — " + w.Desc)
-		}
+		b.WriteString(strings.Join(wiki, ""))
 	}
 	return b.String()
+}
+
+// withTurnBlocks puts the teammate status, progress summary and wiki pages the
+// agent's context does not hold yet before content. Called right before the
+// send, so a message that never reaches the agent marks nothing as sent.
+func (e *Engine) withTurnBlocks(session *Session, sessionKey, query, content string) string {
+	if c := e.turnContext(session, sessionKey, query); c != "" {
+		content = c + "\n\n" + content
+	}
+	if sum := e.teamBlock(session, sessionKey); sum != "" {
+		content = sum + "\n\n" + content
+	}
+	return content
+}
+
+// teamBlock returns the teammate status when it changed since the agent's
+// context last got it (maomao fork).
+func (e *Engine) teamBlock(session *Session, sessionKey string) string {
+	if !e.isTeamLead() {
+		return ""
+	}
+	sum, key := e.teamSummary(sessionKey)
+	if sum == "" {
+		sum = "（队友状态，系统自动附上，不用回应）\n现在都没有在忙或刚做完的事"
+	}
+	send := false
+	session.UpdateTurnCtx(func(t *TurnCtxSent) {
+		if t.Team != key {
+			t.Team, send = key, true
+		}
+	})
+	if !send {
+		return ""
+	}
+	return sum
 }
 
 // reportTurn hands a finished turn to the gate so it can update the channel summary.

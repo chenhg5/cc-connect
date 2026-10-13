@@ -43,7 +43,7 @@ func TestTeamSummary(t *testing.T) {
 		{Key: "discord:111:9", Busy: true, Since: now},
 	}})
 
-	got := e.teamSummary("discord:111:727")
+	got, _ := e.teamSummary("discord:111:727")
 	for _, want := range []string{"龙娘：在本频道忙了 3 分钟 「修 bug」", "龙娘：2 分钟前在#dev做完 「写测试」"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("summary missing %q:\n%s", want, got)
@@ -57,8 +57,63 @@ func TestTeamSummary(t *testing.T) {
 	}
 
 	e.team.inject = false
-	if e.teamSummary("discord:111") != "" {
+	if got, _ := e.teamSummary("discord:111"); got != "" {
 		t.Error("inject off should give no summary")
+	}
+}
+
+func TestTeamBlockOnlyWhenBoardChanges(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEngine()
+	e.name = "maomao"
+	e.team = &teamState{dir: dir, name: "橘", inject: true, seen: map[string]*teamSession{}}
+	now := time.Now()
+	write := func(task string, since time.Time) {
+		writeTeamFile(t, dir, teamFile{Project: "longniang", Name: "龙娘", Updated: time.Now(), Sessions: []teamEntry{
+			{Key: "discord:111", Chat: "general", Task: task, Busy: true, Since: since},
+		}})
+	}
+	s := &Session{AgentSessionID: "a1"}
+	write("修 bug", now.Add(-3*time.Minute))
+	if e.teamBlock(s, "discord:111") == "" {
+		t.Fatal("first turn should get the board")
+	}
+	write("修 bug", now.Add(-10*time.Minute)) // only the elapsed time differs
+	if got := e.teamBlock(s, "discord:111"); got != "" {
+		t.Fatalf("unchanged board resent:\n%s", got)
+	}
+	write("写测试", now)
+	if e.teamBlock(s, "discord:111") == "" {
+		t.Fatal("changed board should be sent")
+	}
+	s.ResetTurnCtx()
+	if e.teamBlock(s, "discord:111") == "" {
+		t.Fatal("board should be resent after compaction")
+	}
+	os.Remove(filepath.Join(dir, "longniang.json"))
+	if got := e.teamBlock(s, "discord:111"); !strings.Contains(got, "都没有在忙") {
+		t.Fatalf("emptied board should be reported once, got:\n%s", got)
+	}
+	if got := e.teamBlock(s, "discord:111"); got != "" {
+		t.Fatalf("empty board resent:\n%s", got)
+	}
+}
+
+func TestTurnCtxSurvivesSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.json")
+	sm := NewSessionManager(path)
+	s := sm.GetOrCreateActive("discord:1")
+	s.SetLastSeenMsgID("123")
+	s.UpdateTurnCtx(func(c *TurnCtxSent) { c.Summary = true; c.Wiki = []string{"a.md"} })
+	sm.Save()
+	s2 := NewSessionManager(path).GetOrCreateActive("discord:1")
+	if s2.GetLastSeenMsgID() != "123" {
+		t.Fatalf("last seen = %q", s2.GetLastSeenMsgID())
+	}
+	got := false
+	s2.UpdateTurnCtx(func(c *TurnCtxSent) { got = c.Summary && len(c.Wiki) == 1 })
+	if !got {
+		t.Fatal("turn ctx record lost on reload")
 	}
 }
 

@@ -189,15 +189,15 @@ func chatOf(key string) string {
 
 // teamSummary describes what the other team members are doing, for a turn in sessionKey.
 // Empty when nobody is busy or recently done.
-func (e *Engine) teamSummary(sessionKey string) string {
+func (e *Engine) teamSummary(sessionKey string) (string, string) {
 	t := e.team
 	if t == nil || !t.inject {
-		return ""
+		return "", ""
 	}
 	files, _ := filepath.Glob(filepath.Join(t.dir, "*"+teamStatusFileExt))
 	here := chatOf(sessionKey)
 	now := time.Now()
-	var lines []string
+	var lines, keys []string
 	for _, path := range files {
 		if filepath.Base(path) == e.name+teamStatusFileExt {
 			continue
@@ -226,13 +226,16 @@ func (e *Engine) teamSummary(sessionKey string) string {
 			} else {
 				lines = append(lines, fmt.Sprintf("%s：%s前在%s做完 %s", f.Name, roundDur(now.Sub(s.DoneAt)), where, task))
 			}
+			keys = append(keys, fmt.Sprintf("%s|%s|%t|%s", f.Name, where, s.Busy, s.Task))
 		}
 	}
 	if len(lines) == 0 {
-		return ""
+		return "", ""
 	}
 	sort.Strings(lines)
-	return "（队友状态，系统自动附上，不用回应）\n" + strings.Join(lines, "\n")
+	sort.Strings(keys)
+	// The key leaves out elapsed times so an unchanged board is not resent.
+	return "（队友状态，系统自动附上，不用回应）\n" + strings.Join(lines, "\n"), strings.Join(keys, "\n")
 }
 
 func roundDur(d time.Duration) string {

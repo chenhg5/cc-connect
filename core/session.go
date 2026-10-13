@@ -18,11 +18,11 @@ const ContinueSession = "__continue__"
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID                  string         `json:"id"`
-	Name                string         `json:"name"`
-	AgentSessionID      string         `json:"agent_session_id"`
-	AgentType           string         `json:"agent_type,omitempty"`
-	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	AgentSessionID      string   `json:"agent_session_id"`
+	AgentType           string   `json:"agent_type,omitempty"`
+	PastAgentSessionIDs []string `json:"past_agent_session_ids,omitempty"`
 	// ActiveProvider is the agent provider name that was active when this
 	// session last took a turn. It is restored before --resume so that a
 	// cc-connect process restart does not silently drop a user's
@@ -43,9 +43,22 @@ type Session struct {
 	// (maomao fork, channel backfill). Persisted so a restart still knows what
 	// the agent missed while cc-connect was down.
 	LastSeenMsgID string `json:"last_seen_msg_id,omitempty"`
+	// TurnCtx records which per-turn context blocks the agent's current context
+	// already holds (maomao fork), so each is sent once per context, not every turn.
+	TurnCtx *TurnCtxSent `json:"turn_ctx,omitempty"`
 
 	mu   sync.Mutex `json:"-"`
 	busy bool       `json:"-"`
+}
+
+// TurnCtxSent is what has been put into one agent context (maomao fork). It is
+// dropped whenever that context is: the agent session id is cleared or switched
+// to another conversation, or the agent compacts. A --resume that only forks a
+// new id keeps it.
+type TurnCtxSent struct {
+	Summary bool     `json:"summary,omitempty"`
+	Wiki    []string `json:"wiki,omitempty"`
+	Team    string   `json:"team,omitempty"` // teammate status key (without elapsed times)
 }
 
 func (s *Session) TryLock() bool {
@@ -117,6 +130,7 @@ func (s *Session) SetAgentInfo(agentSessionID, agentType, name string) {
 	defer s.mu.Unlock()
 	if s.AgentSessionID != agentSessionID {
 		s.recordPastAgentSessionID()
+		s.TurnCtx = nil // switched to another conversation
 	}
 	s.AgentSessionID = agentSessionID
 	s.AgentType = agentType
@@ -134,6 +148,32 @@ func (s *Session) SetLastSeenMsgID(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.LastSeenMsgID = id
+}
+
+func (t *TurnCtxSent) clone() *TurnCtxSent {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	c.Wiki = append([]string(nil), t.Wiki...)
+	return &c
+}
+
+// UpdateTurnCtx runs fn on the record for the agent's current context.
+func (s *Session) UpdateTurnCtx(fn func(*TurnCtxSent)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.TurnCtx == nil {
+		s.TurnCtx = &TurnCtxSent{}
+	}
+	fn(s.TurnCtx)
+}
+
+// ResetTurnCtx forgets what was sent: the agent's context was compacted or replaced.
+func (s *Session) ResetTurnCtx() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.TurnCtx = nil
 }
 
 func (s *Session) GetAgentSessionID() string {
@@ -212,6 +252,9 @@ func (s *Session) SetAgentSessionID(id, agentType string) {
 	defer s.mu.Unlock()
 	if s.AgentSessionID != id {
 		s.recordPastAgentSessionID()
+	}
+	if id == "" {
+		s.TurnCtx = nil // the next process starts with an empty context
 	}
 	s.AgentSessionID = id
 	s.AgentType = agentType
@@ -661,6 +704,9 @@ func (sm *SessionManager) saveLocked() {
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,
+			ActiveProvider:      s.ActiveProvider,
+			LastSeenMsgID:       s.LastSeenMsgID,
+			TurnCtx:             s.TurnCtx.clone(),
 		}
 		s.mu.Unlock()
 	}
@@ -787,6 +833,7 @@ func (sm *SessionManager) InvalidateForAgent(agentType string) {
 			s.recordPastAgentSessionID()
 			s.AgentSessionID = ""
 			s.AgentType = agentType
+			s.TurnCtx = nil
 			invalidated++
 		}
 		s.mu.Unlock()
@@ -844,7 +891,7 @@ func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult 
 	defer sm.mu.Unlock()
 
 	// Group sessions by baseChat
-	chatSessions := make(map[string][]*Session) // baseChat -> sessions
+	chatSessions := make(map[string][]*Session)  // baseChat -> sessions
 	sessionToBaseChat := make(map[string]string) // session.ID -> baseChat
 
 	for userKey, sessionIDs := range sm.userSessions {

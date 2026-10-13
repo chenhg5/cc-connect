@@ -516,6 +516,8 @@ type queuedMessage struct {
 	msgSessionKey     string // session key for extracting chat ID
 	channelKey        string // platform-provided channel identifier (preferred over sessionKey extraction)
 	userMessageTimeMs int64  // Feishu create_time ms (optional); see Message.UserMessageTimeMs
+	turnCtx           bool   // maomao fork: see Message.TurnCtx
+	turnCtxQuery      string
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -3198,6 +3200,8 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		fromVoice:         msg.FromVoice,
 		userID:            msg.UserID,
 		userName:          msg.UserName,
+		turnCtx:           msg.TurnCtx,
+		turnCtxQuery:      msg.TurnCtxQuery,
 		msgPlatform:       msg.Platform,
 		msgSessionKey:     msg.SessionKey,
 		channelKey:        msg.ChannelKey,
@@ -3815,6 +3819,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		drainEvents(state.agentSession.Events())
 	}
 
+	if msg.TurnCtx {
+		msg.Content = e.withTurnBlocks(session, msg.SessionKey, msg.TurnCtxQuery, msg.Content)
+	}
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
 	sendStart := time.Now()
@@ -4629,6 +4636,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			replyCtx := state.replyCtx
 			state.mu.Unlock()
 
+			if c, _ := event.Metadata[MetaContextCompacted].(bool); c {
+				session.ResetTurnCtx() // maomao fork
+			}
 			switch event.Type {
 			case EventText:
 				if event.Content != "" {
@@ -5030,6 +5040,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 		buildResolvedRichCard := func(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string {
 			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
+		}
+
+		// maomao fork: the agent compacted its context, so the per-turn blocks are gone.
+		if c, _ := event.Metadata[MetaContextCompacted].(bool); c {
+			session.ResetTurnCtx()
 		}
 
 		switch event.Type {
@@ -5973,6 +5988,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
+				if queued.turnCtx {
+					queued.content = e.withTurnBlocks(session, queued.msgSessionKey, queued.turnCtxQuery, queued.content)
+				}
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 				state.mu.Lock()
@@ -6292,6 +6310,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
+		if queued.turnCtx {
+			queued.content = e.withTurnBlocks(session, queued.msgSessionKey, queued.turnCtxQuery, queued.content)
+		}
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 		state.mu.Lock()
@@ -10415,6 +10436,8 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 					e.reply(p, replyCtx, e.i18n.T(MsgCompressDone))
 				}
 			}
+
+			session.ResetTurnCtx() // maomao fork: the next turn resends the context blocks
 
 			// After compress succeeds, process any queued messages instead of dropping them.
 			e.drainQueuedMessagesAfterCompress(state, session, sessions, sessionKey, unlocked)

@@ -1225,6 +1225,10 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	}
 
 	switch itemType {
+	case "contextCompaction":
+		// maomao fork: tell the engine the context was compacted.
+		s.emit(core.Event{Type: core.EventText, Metadata: map[string]any{core.MetaContextCompacted: true}})
+
 	case "reasoning":
 		text := appServerReasoningText(item)
 		if text != "" {

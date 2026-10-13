@@ -43,6 +43,14 @@ type claudeSession struct {
 	done            chan struct{}
 	alive           atomic.Bool
 
+	// maomao fork: on --resume the CLI reports background tasks the previous
+	// process left behind (system/task_notification before the first init) and
+	// answers that report with an empty, zero-turn result before it reads our
+	// message. sawInit/startupNotice let handleResult drop that result instead
+	// of ending the user's turn with "(empty response)".
+	sawInit       atomic.Bool
+	startupNotice atomic.Bool
+
 	// activeModel stores the model id reported by the CLI's init event (e.g.
 	// "claude-opus-4-7[1m]"). It may be empty if the init event hasn't
 	// carried a model field yet; callers should fall back to the Agent's
@@ -628,6 +636,21 @@ func resultSubtype(raw map[string]any) string {
 }
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
+	switch sub, _ := raw["subtype"].(string); sub {
+	case "init":
+		cs.sawInit.Store(true)
+	case "task_notification":
+		if !cs.sawInit.Load() {
+			cs.startupNotice.Store(true)
+		}
+	case "compact_boundary":
+		evt := core.Event{Type: core.EventText, Metadata: map[string]any{core.MetaContextCompacted: true}}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
+		}
+	}
 	if model, ok := raw["model"].(string); ok && model != "" {
 		cs.activeModel.Store(model)
 	}
@@ -878,6 +901,12 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
 	}
+	if !isCompactionResult(raw) && cs.startupNotice.Swap(false) {
+		if turns, _ := raw["num_turns"].(float64); turns == 0 && content == "" {
+			slog.Info("claudeSession: dropping empty result for a startup task notification")
+			return
+		}
+	}
 
 	// Compaction events arrive as `type:"result"` with `subtype:"compact"`
 	// or `subtype:"compaction"`. They are NOT turn completion — the CLI
@@ -916,11 +945,16 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.usageMu.Unlock()
 	}
 
+	var meta map[string]any
+	if isCompaction {
+		meta = map[string]any{core.MetaContextCompacted: true}
+	}
 	evt := core.Event{
 		Type:                     core.EventResult,
 		Content:                  content,
 		SessionID:                cs.CurrentSessionID(),
 		Done:                     !isCompaction,
+		Metadata:                 meta,
 		InputTokens:              inputTokens,
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: cacheCreationTokens,

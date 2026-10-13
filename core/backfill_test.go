@@ -156,9 +156,34 @@ func TestGateContextAndTurnReport(t *testing.T) {
 	if ep := e.gate.endpoint("/context"); ep != srv.URL+"/context" {
 		t.Fatalf("endpoint = %q", ep)
 	}
-	c := e.turnContext("discord:c1", "龙娘怎么了")
+	sess := &Session{AgentSessionID: "a1"}
+	c := e.turnContext(sess, "discord:c1", "龙娘怎么了")
 	if !strings.Contains(c, "修龙娘") || !strings.Contains(c, "~/wiki/bots/im-bridge.md") {
 		t.Fatalf("context block:\n%s", c)
+	}
+	// Same agent context: nothing is sent twice.
+	if c := e.turnContext(sess, "discord:c1", "龙娘怎么了"); c != "" {
+		t.Fatalf("second turn resent:\n%s", c)
+	}
+	// Compaction drops it from the agent's context: send again.
+	sess.ResetTurnCtx()
+	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "修龙娘") || !strings.Contains(c, "im-bridge.md") {
+		t.Fatalf("after compaction:\n%s", c)
+	}
+	// --resume forked a new id: same conversation, nothing resent.
+	sess.SetAgentSessionID("a2", "claudecode")
+	if c := e.turnContext(sess, "discord:c1", "x"); c != "" {
+		t.Fatalf("resume fork resent:\n%s", c)
+	}
+	// Id cleared (failed resume, /reasoning, /provider…): the next process is empty.
+	sess.SetAgentSessionID("", "claudecode")
+	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "修龙娘") {
+		t.Fatalf("after id cleared:\n%s", c)
+	}
+	// /switch to another conversation.
+	sess.SetAgentInfo("other", "claudecode", "n")
+	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "修龙娘") {
+		t.Fatalf("after switch:\n%s", c)
 	}
 
 	e.reportTurn("discord:c1", "NO_REPLY", "NO_REPLY") // silent: not reported
