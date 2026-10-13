@@ -9733,6 +9733,48 @@ func TestExecuteCardAction_ModeCleansUpWithInteractiveKey(t *testing.T) {
 	}
 }
 
+// Regression: the /list card button reaches executeCardAction, which cleared the
+// session history after switching. cmdSwitch never did, and documents why —
+// SwitchToAgentSession returns the existing Session when the agent session ID is
+// known, so wiping History makes /status and /history report zero messages right
+// after a switch that succeeded. Typing "/switch 1" kept its history; tapping the
+// same session in the card did not.
+func TestExecuteCardAction_SwitchPreservesHistory(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "sess-a1", Summary: "a1"},
+		{ID: "sess-a2", Summary: "a2"},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "feishu:channel1:user1"
+	sessions := e.sessions
+
+	// A session with recorded history, then a second session that became active —
+	// the state a /list card switch encounters.
+	first := sessions.GetOrCreateActive(sessionKey)
+	first.SetAgentSessionID("sess-a1", "stub")
+	first.AddHistory("user", "A1 first message")
+	first.AddHistory("assistant", "A1 reply")
+	sessions.Save()
+
+	sessions.NewSession(sessionKey, "a2")
+	sessions.GetOrCreateActive(sessionKey).SetAgentSessionID("sess-a2", "stub")
+	sessions.Save()
+
+	// "act:/switch 1" is what a /list card row sends.
+	_ = e.handleCardNav("act:/switch 1", sessionKey)
+
+	active := sessions.GetOrCreateActive(sessionKey)
+	if active.GetAgentSessionID() != "sess-a1" {
+		t.Fatalf("active session after card /switch = %q, want sess-a1", active.GetAgentSessionID())
+	}
+	hist := active.GetHistory(10)
+	if len(hist) == 0 || !strings.Contains(hist[0].Content, "A1") {
+		t.Fatalf("history after card /switch = %v, want the A1 conversation preserved", hist)
+	}
+}
+
 // ===========================================================================
 // P0 Beta release tests
 // ===========================================================================
