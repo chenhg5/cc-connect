@@ -32,6 +32,19 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 	return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
 }
 
+// SendRichCard sends an already-rendered Card 2.0 payload as an interactive
+// card, following Send's reply-versus-new-message routing.
+func (p *interactivePlatform) SendRichCard(ctx context.Context, rctx any, renderedCard string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, renderedCard)
+	}
+	return p.sendNewMessageToChat(ctx, rc, larkim.MsgTypeInteractive, renderedCard)
+}
+
 // SendCard sends a structured card as a new message to the chat.
 func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
 	_, err := p.sendCard(ctx, rctx, card)
