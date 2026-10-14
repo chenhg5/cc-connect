@@ -242,3 +242,15 @@ func TestManagedAsyncTextAndToolOutputRemainDistinct(t *testing.T) {
 		t.Fatalf("final tool result lost identity: %+v", result)
 	}
 }
+
+func TestManagedError_PreservesTurnScope(t *testing.T) {
+	s := &managedSession{ctx: context.Background(), thread: "target", events: make(chan core.Event, 1)}
+	notification := daemonMessage{Method: "error", Params: json.RawMessage(`{"threadId":"target","turnId":"old-turn","willRetry":false,"error":{"message":"failed"}}`)}
+	if err := s.handleMessage(notification); err != nil {
+		t.Fatal(err)
+	}
+	event := <-s.events
+	if event.Type != core.EventError || event.TurnID != "old-turn" || event.Error == nil {
+		t.Fatalf("error lost turn scope: %+v", event)
+	}
+}
