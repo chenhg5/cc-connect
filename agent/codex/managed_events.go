@@ -143,7 +143,7 @@ func (s *managedSession) handleMessage(m daemonMessage) error {
 			s.emitManagedNotice("retry:"+p.TurnID, p.TurnID, &core.AgentNotice{Kind: "retry", Message: p.Error.Message})
 		}
 		if p.Error.Message != "" && !p.WillRetry {
-			s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("codex managed: %s", p.Error.Message)})
+			s.emit(core.Event{Type: core.EventError, TurnID: p.TurnID, Error: fmt.Errorf("codex managed: %s", p.Error.Message)})
 		}
 	}
 	return nil
