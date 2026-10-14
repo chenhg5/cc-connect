@@ -10419,6 +10419,8 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				if m.Name == current {
 					marker = "> "
 				}
+				// Same Alias/Desc split as the card: providers set Alias,
+				// fallbackModels() sets Desc.
 				var line string
 				if m.Alias != "" {
 					line = fmt.Sprintf("%s%d. %s - %s\n", marker, i+1, m.Alias, m.Name)
@@ -13964,6 +13966,9 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 		sb.WriteString(e.i18n.Tf(MsgModelCurrent, current))
 	}
 
+	// Alias is set by the configured-providers path (config.toml models);
+	// fallbackModels() leaves it empty and carries the resolved backend in
+	// Desc instead.
 	var opts []CardSelectOption
 	initVal := ""
 	for i, m := range models {

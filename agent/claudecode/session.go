@@ -257,6 +257,10 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
+// The ultracode settings file is written once per process. ccDataDir is fixed
+// at construction and has no setter, so one path is valid for every spawn —
+// and the first call's result, including a failure, is cached for the life of
+// the process.
 var (
 	ultracodeSettingsOnce sync.Once
 	ultracodeSettingsPath string
