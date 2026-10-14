@@ -123,6 +123,7 @@ type Platform struct {
 	appSecret                  string
 	progressStyle              string
 	useInteractiveCard         bool
+	keepFinalReplyInPlace      bool
 	self                       core.Platform
 	reactionEmoji              string
 	ackEmoji                   string
@@ -317,6 +318,10 @@ type interactivePlatform struct {
 	*Platform
 }
 
+func (p *interactivePlatform) FinalReplyAfterApproval() bool {
+	return !p.keepFinalReplyInPlace
+}
+
 type richCardImageUpload struct {
 	done chan struct{}
 }
@@ -422,6 +427,17 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
 	}
+	finalReplyPosition := "latest_after_approval"
+	if raw, exists := opts["final_reply_position"]; exists {
+		value, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s: final_reply_position must be a string", name)
+		}
+		finalReplyPosition = strings.ToLower(strings.TrimSpace(value))
+		if finalReplyPosition != "latest_after_approval" && finalReplyPosition != "in_place" {
+			return nil, fmt.Errorf("%s: final_reply_position must be latest_after_approval or in_place", name)
+		}
+	}
 
 	imageBatchWindow := defaultImageBatchWindow
 	if raw, ok := opts["image_batch_window_ms"]; ok {
@@ -479,6 +495,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
+		keepFinalReplyInPlace:      finalReplyPosition == "in_place",
 		reactionEmoji:              reactionEmoji,
 		ackEmoji:                   ackEmoji,
 		doneEmoji:                  doneEmoji,

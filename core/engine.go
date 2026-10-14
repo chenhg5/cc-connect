@@ -5477,6 +5477,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var lastRichCardUpdate time.Time
 	var lastRichCardLen int
 	var cardMessageID any
+	approvalAfterRichCard := false
 	var partialText string
 	var toolOutputTimer *time.Timer
 	var toolOutputCh <-chan time.Time
@@ -6305,6 +6306,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			e.showAsyncUserInput(state, p, replyCtx, event)
 
 		case EventPermissionRequest:
+			if hasRichCard && cardMessageID != nil {
+				approvalAfterRichCard = true
+			}
 			if len(routedEvents) > 0 {
 				routedPending[event.RequestID] = true
 				pausePresentationTimers()
@@ -6765,7 +6769,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				finalBody := resolveRichCardMarkdown(parts[0], true)
 				finalCard := richCardSupporter.BuildRichCard(CardStatusDone, "", toolSteps, finalBody, false, richStatusFooter)
-				if cardMessageID != nil {
+				sentLatest := approvalAfterRichCard && strings.TrimSpace(finalBody) != "" && e.sendLatestRichFinal(p, replyCtx, cardMessageID, finalCard, richCardSupporter)
+				if !sentLatest && cardMessageID != nil {
 					// Forced final flush via cardkit-v1 streaming text update before
 					// flipping status to Done via full-card Patch. The throttle in the
 					// EventText path may have skipped the last <200ms / <20 chars; this
@@ -6786,7 +6791,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							}
 						}
 					}
-				} else {
+				} else if !sentLatest {
 					if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
 						slog.Error("failed to send rich card reply", "error", err)
 						return
@@ -6977,6 +6982,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// turn's cardID, overwriting that card's body with the new turn's
 				// content. Same risk for partialText/toolSteps leaking across turns.
 				cardMessageID = nil
+				approvalAfterRichCard = false
 				toolSteps = nil
 				partialText = ""
 				lastRichCardUpdate = time.Time{}
@@ -12999,7 +13005,7 @@ func (e *Engine) renderCardForPlatformWorkspace(p Platform, card *Card, workspac
 	if card == nil {
 		return nil
 	}
-	out := &Card{RichMarkdown: card.RichMarkdown}
+	out := &Card{RichMarkdown: card.RichMarkdown, CollapsedDetailsTitle: card.CollapsedDetailsTitle}
 	if card.Header != nil {
 		h := *card.Header
 		out.Header = &h

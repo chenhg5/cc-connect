@@ -31,6 +31,31 @@ func TestNew_DefaultsToInteractivePlatform(t *testing.T) {
 	}
 }
 
+func TestNew_FinalReplyPosition(t *testing.T) {
+	for _, position := range []string{"", "latest_after_approval", "in_place", "invalid"} {
+		t.Run(position, func(t *testing.T) {
+			opts := map[string]any{"app_id": "cli_xxx", "app_secret": "secret"}
+			if position != "" {
+				opts["final_reply_position"] = position
+			}
+			p, err := New(opts)
+			if position == "invalid" {
+				if err == nil {
+					t.Fatal("invalid position accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, ok := p.(core.ApprovalFinalReplyPlatform)
+			if !ok || policy.FinalReplyAfterApproval() != (position != "in_place") {
+				t.Fatalf("incorrect policy for %q", position)
+			}
+		})
+	}
+}
+
 func TestNew_CanDisableInteractiveCards(t *testing.T) {
 	p, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": false})
 	if err != nil {
