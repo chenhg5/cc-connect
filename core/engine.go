@@ -7701,9 +7701,10 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 // IDs, and its "empty means pass through" escape hatch keeps the filter inert
 // until every session has a tracked ID.
 //
-// Outside multi-workspace mode the agent's list is returned unchanged.
+// Outside multi-workspace mode only the configured scheduler and external
+// session filters apply.
 func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager, sessionKey string) []AgentSessionInfo {
-	if e.hideSchedulerSessions {
+	if e.hideSchedulerSessions && sm != nil {
 		sessions = filterHiddenSessions(sessions, sm.BackgroundAgentSessionIDs())
 	}
 	if e.filterExternalSessions {
