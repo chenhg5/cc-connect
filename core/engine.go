@@ -10573,7 +10573,7 @@ func (e *Engine) subagentChoices(sub SubagentModelSwitcher, models []ModelOption
 			marker = "> "
 			label = "▶ " + label
 		}
-		sb.WriteString(fmt.Sprintf("%s%d. %s\n", marker, i+2, m.Name))
+		fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+2, m.Name)
 		row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/subagent switch %d", i+1)})
 		if len(row) >= 3 {
 			buttons = append(buttons, row)
