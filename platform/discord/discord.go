@@ -30,7 +30,8 @@ type replyContext struct {
 	channelID string
 	messageID string
 	threadID  string
-	agent     bool // maomao fork: this send carries the agent's own text (core.AgentReplyMarker)
+	agent     bool   // maomao fork: this send carries the agent's own text (core.AgentReplyMarker)
+	lead      string // maomao fork: the team lead @-ed this sub to start the turn; the reply goes back to it
 }
 
 // interactionReplyCtx handles Discord slash command (Application Command)
@@ -66,6 +67,7 @@ type progressPlatform struct {
 
 type Platform struct {
 	turnSent                   turnSentLog // maomao fork: see turn_sent.go
+	leadReturned               sync.Map    // maomao fork: trigger message ID → time the reply was routed back to the lead
 	token                      string
 	allowFrom                  string
 	allowBots                  string // maomao fork: bot user IDs whose @-mentions of this bot are accepted
@@ -702,6 +704,9 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 
 		sessionKey := p.makeSessionKey(m.ChannelID, m.Author.ID)
 		rctx := replyContext{channelID: m.ChannelID, messageID: m.ID}
+		if fromBot && mentioned && p.teamLead != "" && p.teamLead != p.botID && m.Author.ID == p.teamLead {
+			rctx.lead = p.teamLead
+		}
 		// channelKey pins workspace binding to the parent channel even when
 		// thread_isolation rewrites SessionKey to a thread ID. Without it,
 		// effectiveChannelID() would extract the thread ID from SessionKey
@@ -1084,6 +1089,7 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 
 func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 	content = linkTeamMentions(content, p.botID)
+	content = p.returnToLead(rc, content)
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		var sent *discordgo.Message
@@ -1104,6 +1110,7 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 
 func (p *Platform) sendChannel(rc replyContext, content string) error {
 	content = linkTeamMentions(content, p.botID)
+	content = p.returnToLead(rc, content)
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		sent, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
