@@ -2572,8 +2572,8 @@ func TestRichCardTypewriterPreservesWorkingPanels(t *testing.T) {
 			t.Fatalf("wrong animation flag: %s", data)
 		}
 		elements := card["body"].(map[string]any)["elements"].([]any)
-		if elements[0].(map[string]any)["expanded"] != working {
-			t.Fatalf("animation changed tool panel state: %s", data)
+		if elements[0].(map[string]any)["expanded"] != false {
+			t.Fatalf("typewriter card should keep tools collapsed: %s", data)
 		}
 		if !strings.Contains(data, "BODY INCREMENT") || !strings.Contains(data, "TOOL OUTPUT") || !strings.Contains(data, "FOOTER") {
 			t.Fatal("card lost content")
