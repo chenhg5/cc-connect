@@ -10409,6 +10409,8 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				sb.WriteString("\n")
 			}
 			sb.WriteString("\n")
+			sb.WriteString(e.i18n.T(MsgMainModelLabel))
+			sb.WriteString("\n")
 			sb.WriteString(e.i18n.T(MsgModelListTitle))
 			var buttons [][]ButtonOption
 			var row []ButtonOption
@@ -10447,10 +10449,26 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			}
 			sb.WriteString("\n")
 			sb.WriteString(e.i18n.T(MsgModelUsage))
+
+			// Subagent model: same numbered-list pattern, one command deeper.
+			// Platforms without a second selector still get it as text + buttons.
+			if sub, ok := agent.(SubagentModelSwitcher); ok {
+				sb.WriteString("\n")
+				sb.WriteString(e.i18n.T(MsgSubagentSelectPlaceholder))
+				sb.WriteString("\n")
+				subButtons, subText := e.subagentChoices(sub, models)
+				sb.WriteString(subText)
+				buttons = append(buttons, subButtons...)
+			}
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
 		e.replyWithCard(p, msg.ReplyCtx, e.renderModelCard(msg.SessionKey))
+		return
+	}
+
+	if strings.EqualFold(strings.TrimSpace(args[0]), "subagent") {
+		e.cmdSubagent(p, msg, args[1:], agent)
 		return
 	}
 
@@ -10521,6 +10539,92 @@ func modelSwitchNeedsLookup(input string) bool {
 		return true
 	}
 	return !strings.Contains(input, "/")
+}
+
+// subagentChoices renders the subagent-model options as a numbered list plus
+// one button row, for platforms without a card. The first entry clears the
+// override so the CLI inherits the main model.
+func (e *Engine) subagentChoices(sub SubagentModelSwitcher, models []ModelOption) ([][]ButtonOption, string) {
+	cur := sub.GetSubagentModel()
+
+	var sb strings.Builder
+	inheritLabel := e.i18n.T(MsgSubagentInherit)
+	if cur == "" {
+		sb.WriteString("> ")
+	} else {
+		sb.WriteString("  ")
+	}
+	sb.WriteString("1. " + inheritLabel + "\n")
+
+	inheritBtn := ButtonOption{Text: inheritLabel, Data: "cmd:/subagent inherit"}
+	if cur == "" {
+		inheritBtn.Text = "▶ " + inheritBtn.Text
+	}
+	buttons := [][]ButtonOption{{inheritBtn}}
+
+	var row []ButtonOption
+	for i, m := range models {
+		label := m.Name
+		if m.Alias != "" {
+			label = m.Alias
+		}
+		marker := "  "
+		if m.Name == cur {
+			marker = "> "
+			label = "▶ " + label
+		}
+		sb.WriteString(fmt.Sprintf("%s%d. %s\n", marker, i+2, m.Name))
+		row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/subagent switch %d", i+1)})
+		if len(row) >= 3 {
+			buttons = append(buttons, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		buttons = append(buttons, row)
+	}
+	return buttons, sb.String()
+}
+
+// cmdSubagent handles "/model subagent [<n>|inherit]" on platforms without a
+// card, mirroring the selector the card renders.
+func (e *Engine) cmdSubagent(p Platform, msg *Message, args []string, agent Agent) {
+	sub, ok := agent.(SubagentModelSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelNotSupported))
+		return
+	}
+	switcher, ok := agent.(ModelSwitcher)
+	if !ok {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgModelNotSupported))
+		return
+	}
+
+	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+	defer cancel()
+	models := switcher.AvailableModels(fetchCtx)
+
+	if len(args) == 0 {
+		buttons, text := e.subagentChoices(sub, models)
+		e.replyWithButtons(p, msg.ReplyCtx, text, buttons)
+		return
+	}
+
+	if strings.EqualFold(strings.TrimSpace(args[0]), "inherit") {
+		sub.SetSubagentModel("")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSubagentInherit))
+		return
+	}
+
+	n, err := strconv.Atoi(strings.TrimSpace(args[0]))
+	if err != nil || n < 1 || n > len(models) {
+		buttons, text := e.subagentChoices(sub, models)
+		e.replyWithButtons(p, msg.ReplyCtx, text, buttons)
+		return
+	}
+	target := models[n-1].Name
+	sub.SetSubagentModel(target)
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgModelChanged), target))
 }
 
 func parseModelSwitchArgs(args []string) (string, bool) {

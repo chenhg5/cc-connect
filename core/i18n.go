@@ -2559,10 +2559,10 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Modelos disponibles:\n",
 	},
 	MsgModelUsage: {
-		LangEnglish:            "Usage: `/model switch <number>` or `/model switch <model_name>`",
-		LangChinese:            "用法: `/model switch <序号>` 或 `/model switch <模型名>`",
-		LangTraditionalChinese: "用法: `/model switch <序號>` 或 `/model switch <模型名>`",
-		LangJapanese:           "使い方: `/model switch <番号>` または `/model switch <モデル名>`",
+		LangEnglish:            "Usage: `/model switch <number>` or `/model switch <model_name>`; subagent: `/model subagent <number|inherit>`",
+		LangChinese:            "用法: `/model switch <序号>` 或 `/model switch <模型名>`；subagent: `/model subagent <序号|inherit>`",
+		LangTraditionalChinese: "用法: `/model switch <序號>` 或 `/model switch <模型名>`；subagent: `/model subagent <序號|inherit>`",
+		LangJapanese:           "使い方: `/model switch <番号>` または `/model switch <モデル名>`、サブエージェント: `/model subagent <番号|inherit>`",
 		LangSpanish:            "Uso: `/model switch <número>` o `/model switch <nombre_modelo>`",
 	},
 	MsgReasoningDefault: {
