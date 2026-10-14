@@ -82,29 +82,44 @@ func (s *blockedInterruptSession) CancelTurn() error {
 }
 
 func TestSharedStop_ClearsQueueBeforeInterruptCompletes(t *testing.T) {
-	env, a := newSharedCompatEnv(t)
-	agent := &blockedInterruptAgent{queuedExternalAgent: &queuedExternalAgent{a}, cancelled: make(chan struct{}), release: make(chan struct{})}
-	env.e.agent = agent
-	defer close(agent.release)
-	env.send("/attach first")
-	env.await("Attached to session first")
-	env.send("MUST NOT RUN AFTER STOP")
-	env.await(env.e.i18n.T(MsgMessageQueued))
-	go env.send("/stop")
-	select {
-	case <-agent.cancelled:
-	case <-time.After(3 * time.Second):
-		t.Fatal("interrupt was not called")
+	for _, entry := range []string{"text", "card", "silent"} {
+		t.Run(entry, func(t *testing.T) {
+			env, a := newSharedCompatEnv(t)
+			agent := &blockedInterruptAgent{queuedExternalAgent: &queuedExternalAgent{a}, cancelled: make(chan struct{}), release: make(chan struct{})}
+			env.e.agent = agent
+			defer close(agent.release)
+			env.send("/attach first")
+			env.await("Attached to session first")
+			env.send("MUST NOT RUN AFTER STOP")
+			env.await(env.e.i18n.T(MsgMessageQueued))
+			go func() {
+				switch entry {
+				case "text":
+					env.send("/stop")
+				case "card":
+					env.e.executeCardAction("/stop", "", "test:user")
+				case "silent":
+					env.e.stopInteractiveSessionSilently("test:user")
+				}
+			}()
+			select {
+			case <-agent.cancelled:
+			case <-time.After(3 * time.Second):
+				t.Fatal("interrupt was not called")
+			}
+			// The runtime is idle while interrupt's response is withheld. The queue
+			// must already be discarded, rather than executing in that interval.
+			select {
+			case c := <-a.calls:
+				c.finish("UNWANTED QUEUED RESULT")
+				t.Fatalf("queued input executed during stop: %q", c.prompt)
+			case <-time.After(120 * time.Millisecond):
+			}
+			if entry != "silent" {
+				env.await("session stopped")
+			}
+		})
 	}
-	// The runtime is idle while interrupt's response is withheld. The queue
-	// must already be discarded, rather than executing in that interval.
-	select {
-	case c := <-a.calls:
-		c.finish("UNWANTED QUEUED RESULT")
-		t.Fatalf("queued input executed during stop: %q", c.prompt)
-	case <-time.After(120 * time.Millisecond):
-	}
-	env.await("session stopped")
 }
 
 func TestSharedExternalQueueRetainsFIFOAndMedia(t *testing.T) {
