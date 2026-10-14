@@ -10632,14 +10632,11 @@ func (e *Engine) cmdSubagent(p Platform, msg *Message, args []string, agent Agen
 }
 
 // resetSessionForEnvChange drops the agent session so the next turn spawns with
-// the new environment. CLAUDE_CODE_SUBAGENT_MODEL is read at spawn time, and a
-// live session keeps its original env — the same reason /reasoning resets.
+// the new environment. CLAUDE_CODE_SUBAGENT_MODEL is read at spawn time and a
+// live session keeps its original env; closing the session is what the main
+// model switch does too. History is kept — only the process is replaced.
 func (e *Engine) resetSessionForEnvChange(sessionKey string) {
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
-	s := e.sessions.GetOrCreateActive(sessionKey)
-	s.SetAgentSessionID("", "")
-	s.ClearHistory()
-	e.sessions.Save()
 }
 
 func parseModelSwitchArgs(args []string) (string, bool) {
@@ -13101,9 +13098,6 @@ func (e *Engine) handleSubagentCardAction(args, sessionKey string) *Card {
 
 	sub.SetSubagentModel(target)
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
-	active := sessions.GetOrCreateActive(sessionKey)
-	active.SetAgentSessionID("", "")
-	active.ClearHistory()
 	sessions.Save()
 	return e.renderModelCard(sessionKey)
 }
