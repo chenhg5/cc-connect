@@ -10,15 +10,25 @@ import (
 
 type approvalFinalTestPlatform struct {
 	stubRichCardSilentPlatform
-	enabled bool
-	sendErr error
+	enabled        bool
+	sendErr        error
+	plainSendCalls int
+	richCards      []string
 }
 
 func (p *approvalFinalTestPlatform) FinalReplyAfterApproval() bool { return p.enabled }
 func (p *approvalFinalTestPlatform) Send(ctx context.Context, reply any, content string) error {
+	p.plainSendCalls++
 	if p.sendErr != nil {
 		return p.sendErr
 	}
+	return p.stubPlatformEngine.Send(ctx, reply, content)
+}
+func (p *approvalFinalTestPlatform) SendRichCard(ctx context.Context, reply any, content string) error {
+	if p.sendErr != nil {
+		return p.sendErr
+	}
+	p.richCards = append(p.richCards, content)
 	return p.stubPlatformEngine.Send(ctx, reply, content)
 }
 
@@ -63,6 +73,9 @@ func TestRichFinal_ApprovalMovesAnswerToLatestWithoutLosingPreviewOnFailure(t *t
 			sent := strings.Join(p.getSent(), "\n")
 			if strings.Contains(sent, "FINAL ANSWER") != tc.latest {
 				t.Fatalf("latest answer = %q, want latest %v", sent, tc.latest)
+			}
+			if tc.latest && (len(p.richCards) != 1 || !strings.Contains(p.richCards[0], "rich:status=done") || p.plainSendCalls != 0) {
+				t.Fatalf("latest reply did not use rich-card sender: cards=%v plain sends=%d", p.richCards, p.plainSendCalls)
 			}
 			if tc.silent {
 				return

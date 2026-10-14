@@ -10,6 +10,7 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 func decodeRenderedCard(t *testing.T, card *core.Card) map[string]any {
@@ -49,6 +50,54 @@ func TestRenderCard_ResolvedApprovalCollapsesDetails(t *testing.T) {
 	}
 	if !strings.Contains(card.RenderText(), "inspect files") {
 		t.Fatal("text fallback lost details")
+	}
+}
+
+func TestSendRichCard_UsesInteractiveMessageType(t *testing.T) {
+	for _, reply := range []bool{false, true} {
+		t.Run(map[bool]string{false: "new message", true: "reply"}[reply], func(t *testing.T) {
+			wantPath := "/open-apis/im/v1/messages"
+			if reply {
+				wantPath += "/om_trigger/reply"
+			}
+			const rendered = `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"final answer"}]}}`
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+					writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "test-token"})
+					return
+				}
+				if r.Method != http.MethodPost || r.URL.Path != wantPath {
+					t.Errorf("request = %s %s, want POST %s", r.Method, r.URL.Path, wantPath)
+					writeJSON(t, w, map[string]any{"code": 0})
+					return
+				}
+				var body struct {
+					MsgType string `json:"msg_type"`
+					Content string `json:"content"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if body.MsgType != larkim.MsgTypeInteractive || body.Content != rendered {
+					t.Errorf("sent message = type %q content %q", body.MsgType, body.Content)
+				}
+				writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"message_id": "om_latest"}})
+			}))
+			defer srv.Close()
+			base := &Platform{
+				platformName: "feishu",
+				client:       lark.NewClient("cli_rich_send", "test-secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+			}
+			p := &interactivePlatform{Platform: base}
+			rc := replyContext{chatID: "oc_chat"}
+			if reply {
+				rc.messageID = "om_trigger"
+			}
+			if err := p.SendRichCard(context.Background(), rc, rendered); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

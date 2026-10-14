@@ -9,7 +9,11 @@ func (e *Engine) sendLatestRichFinal(p Platform, replyCtx, previewHandle any, fi
 	if !ok || !policy.FinalReplyAfterApproval() || previewHandle == nil {
 		return false
 	}
-	if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
+	sender, ok := p.(RichCardSender)
+	if !ok {
+		return false
+	}
+	if err := sender.SendRichCard(e.ctx, replyCtx, finalCard); err != nil {
 		slog.Warn("send latest final reply failed; completing existing preview", "platform", p.Name(), "error", err)
 		return false
 	}
