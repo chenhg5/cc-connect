@@ -354,3 +354,22 @@ func TestCompactProgressWriter_SizerKeepsRecentStepsAndHidesThinking(t *testing.
 		}
 	}
 }
+
+func TestCompactProgressWriter_HiddenThinkingNeverFallsBackWhenCardFailed(t *testing.T) {
+	p := &sizedCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "discord"},
+			style:              "card",
+			supportPayload:     true,
+		},
+		hide: true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "cc", LangChinese, nil)
+	w.failed = true
+	if ok := w.AppendEvent(ProgressEntryThinking, "secret plan", "", "secret plan"); !ok {
+		t.Fatal("hidden thinking must be swallowed even after the card failed")
+	}
+	if ok := w.Append("narration"); ok {
+		t.Fatal("other entries should still fall back once the card failed")
+	}
+}

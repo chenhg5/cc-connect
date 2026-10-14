@@ -405,11 +405,13 @@ func (w *compactProgressWriter) AppendEvent(kind ProgressCardEntryKind, text str
 
 // AppendStructured appends one structured progress event and updates the in-place message.
 func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallback string) bool {
-	if !w.enabled || w.failed {
-		return false
-	}
+	// Hidden thinking is dropped before anything else, so a failed or disabled
+	// card never hands it back to the caller to post in chat.
 	if w.hideThink && item.Kind == ProgressEntryThinking {
 		return true
+	}
+	if !w.enabled || w.failed {
+		return false
 	}
 	text := strings.TrimSpace(item.Text)
 	fallback = strings.TrimSpace(fallback)
