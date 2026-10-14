@@ -383,7 +383,7 @@ func (a *managedAgent) DeleteSession(ctx context.Context, id string) error {
 
 func (a *managedAgent) WorkspaceAgentOptions() map[string]any {
 	a.mu.RLock()
-	opts := a.Agent.workspaceAgentOptionsLocked()
+	opts := a.workspaceAgentOptionsLocked()
 	if a.approvalMode != "" {
 		opts["approval_mode"] = a.approvalMode
 	}
