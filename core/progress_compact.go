@@ -66,6 +66,8 @@ type ProgressCardPayload struct {
 	// maomao fork: one-line progress — tool steps so far and seconds since the turn started.
 	Steps      int `json:"steps,omitempty"`
 	ElapsedSec int `json:"elapsed_sec,omitempty"`
+	// maomao fork: set when the bot is configured for a multi-line card (ProgressCardSizer).
+	LineLen int `json:"line_len,omitempty"`
 }
 
 // BuildProgressCardPayload encodes progress entries into a transport string.
@@ -94,10 +96,10 @@ func BuildProgressCardPayload(entries []string, truncated bool) string {
 
 // BuildProgressCardPayloadV2 encodes ordered typed progress events.
 func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent string, lang Language, state ProgressCardState) string {
-	return buildProgressCardPayload(items, truncated, agent, lang, state, 0, 0)
+	return buildProgressCardPayload(items, truncated, agent, lang, state, 0, 0, 0)
 }
 
-func buildProgressCardPayload(items []ProgressCardEntry, truncated bool, agent string, lang Language, state ProgressCardState, steps, elapsedSec int) string {
+func buildProgressCardPayload(items []ProgressCardEntry, truncated bool, agent string, lang Language, state ProgressCardState, steps, elapsedSec, lineLen int) string {
 	cleaned := make([]ProgressCardEntry, 0, len(items))
 	for _, item := range items {
 		text := strings.TrimSpace(item.Text)
@@ -132,6 +134,7 @@ func buildProgressCardPayload(items []ProgressCardEntry, truncated bool, agent s
 		Truncated:  truncated,
 		Steps:      steps,
 		ElapsedSec: elapsedSec,
+		LineLen:    lineLen,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -236,6 +239,8 @@ type compactProgressWriter struct {
 	truncated  bool
 	lastSent   string
 	maxEntries int
+	lineLen    int
+	hideThink  bool
 	steps      int
 	startedAt  time.Time
 
@@ -322,6 +327,13 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 	if throttler, ok := p.(ProgressUpdateThrottler); ok {
 		w.minUpdateInterval = throttler.ProgressUpdateInterval()
 	}
+	if sizer, ok := p.(ProgressCardSizer); ok {
+		if n := sizer.ProgressCardEntries(); n > 1 {
+			w.maxEntries = n
+			w.lineLen = sizer.ProgressCardLineLen()
+		}
+		w.hideThink = sizer.ProgressCardHideThinking()
+	}
 	if w.style != progressStyleCompact && w.style != progressStyleCard {
 		slog.Debug("progress writer disabled: unsupported style", "platform", p.Name(), "style", w.style)
 		return w
@@ -395,6 +407,9 @@ func (w *compactProgressWriter) AppendEvent(kind ProgressCardEntryKind, text str
 func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallback string) bool {
 	if !w.enabled || w.failed {
 		return false
+	}
+	if w.hideThink && item.Kind == ProgressEntryThinking {
+		return true
 	}
 	text := strings.TrimSpace(item.Text)
 	fallback = strings.TrimSpace(fallback)
@@ -578,7 +593,7 @@ func trimCompactProgressText(s string, maxRunes int) string {
 
 func (w *compactProgressWriter) payload() string {
 	return buildProgressCardPayload(w.items, w.truncated, w.agentName, w.lang, w.state,
-		w.steps, int(time.Since(w.startedAt).Seconds()))
+		w.steps, int(time.Since(w.startedAt).Seconds()), w.lineLen)
 }
 
 // Active reports whether this writer renders progress in place (maomao fork).

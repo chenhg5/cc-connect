@@ -76,6 +76,9 @@ type Platform struct {
 	botName                    string // maomao fork: this bot's username, for escalation notes
 	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
 	progressStyle              string
+	cardEntries                int
+	cardLineLen                int
+	cardHideThinking           bool
 	groupReplyAllGuilds        []string // guild IDs where groupReplyAll is active; "*" = all guilds
 	shareSessionInChannel      bool
 	threadIsolation            bool
@@ -146,6 +149,15 @@ func New(opts map[string]any) (core.Platform, error) {
 		}
 	}
 
+	// maomao fork: progress_card_entries > 1 turns the one-line card into a list of
+	// recent steps that stays after the turn; progress_line_len caps each line.
+	cardEntries := intOpt(opts["progress_card_entries"])
+	cardLineLen := intOpt(opts["progress_line_len"])
+	if cardLineLen <= 0 {
+		cardLineLen = maxDiscordProgressLineLen
+	}
+	cardHideThinking, _ := opts["progress_hide_thinking"].(bool)
+
 	var proxyU *url.URL
 	if proxyStr, _ := opts["proxy"].(string); proxyStr != "" {
 		u, err := url.Parse(proxyStr)
@@ -166,6 +178,9 @@ func New(opts map[string]any) (core.Platform, error) {
 		teamLead:                   teamLead,
 		guildID:                    guildID,
 		progressStyle:              progressStyle,
+		cardEntries:                cardEntries,
+		cardLineLen:                cardLineLen,
+		cardHideThinking:           cardHideThinking,
 		groupReplyAllGuilds:        groupReplyAllGuilds,
 		shareSessionInChannel:      shareSessionInChannel,
 		readyCh:                    make(chan struct{}),
@@ -217,6 +232,23 @@ func (p *progressPlatform) ProgressStyle() string {
 
 func (p *progressPlatform) SupportsProgressCardPayload() bool {
 	return p.ProgressStyle() == "card"
+}
+
+func (p *progressPlatform) ProgressCardEntries() int       { return p.cardEntries }
+func (p *progressPlatform) ProgressCardLineLen() int       { return p.cardLineLen }
+func (p *progressPlatform) ProgressCardHideThinking() bool { return p.cardHideThinking }
+
+// intOpt reads a TOML integer option (int64 from the decoder; int in tests).
+func intOpt(v any) int {
+	switch n := v.(type) {
+	case int64:
+		return int(n)
+	case int:
+		return n
+	case float64:
+		return int(n)
+	}
+	return 0
 }
 
 func (p *Platform) isGroupReplyAllGuild(guildID string) bool {

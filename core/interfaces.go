@@ -328,6 +328,16 @@ type ProgressUpdateThrottler interface {
 	ProgressUpdateInterval() time.Duration
 }
 
+// ProgressCardSizer — maomao fork: per-bot progress card size. Entries > 1
+// keeps a list of recent steps (kept after the turn ends) instead of a single
+// refreshed line; LineLen caps each line; HideThinking leaves thinking events
+// out of the card.
+type ProgressCardSizer interface {
+	ProgressCardEntries() int
+	ProgressCardLineLen() int
+	ProgressCardHideThinking() bool
+}
+
 // ButtonOption represents a clickable inline button.
 type ButtonOption struct {
 	Text string // display text on the button

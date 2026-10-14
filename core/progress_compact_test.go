@@ -313,3 +313,44 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 		t.Fatalf("tool result text = %q, want raw %q", got, raw)
 	}
 }
+
+type sizedCardPlatform struct {
+	stubCompactProgressPlatform
+	hide bool
+}
+
+func (p *sizedCardPlatform) ProgressCardEntries() int       { return 4 }
+func (p *sizedCardPlatform) ProgressCardLineLen() int       { return 200 }
+func (p *sizedCardPlatform) ProgressCardHideThinking() bool { return p.hide }
+
+func TestCompactProgressWriter_SizerKeepsRecentStepsAndHidesThinking(t *testing.T) {
+	p := &sizedCardPlatform{
+		stubCompactProgressPlatform: stubCompactProgressPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "discord"},
+			style:              "card",
+			supportPayload:     true,
+		},
+		hide: true,
+	}
+	w := newCompactProgressWriter(context.Background(), p, "ctx", "cc", LangChinese, nil)
+	if ok := w.AppendEvent(ProgressEntryThinking, "secret plan", "", "secret plan"); !ok {
+		t.Fatal("hidden thinking should be swallowed, not fall back to chat")
+	}
+	for _, s := range []string{"a", "b", "c", "d", "e"} {
+		w.Append(s)
+	}
+	w.Finalize(ProgressCardStateCompleted)
+	edits := p.getPreviewEdits()
+	payload, ok := ParseProgressCardPayload(edits[len(edits)-1])
+	if !ok {
+		t.Fatal("final edit is not a payload")
+	}
+	if payload.LineLen != 200 || len(payload.Items) != 4 || payload.Items[0].Text != "b" {
+		t.Fatalf("payload = %+v, want the last 4 steps with line_len 200", payload)
+	}
+	for _, it := range payload.Items {
+		if strings.Contains(it.Text, "secret") {
+			t.Fatal("thinking leaked into the card")
+		}
+	}
+}

@@ -63,6 +63,9 @@ func buildDiscordProgressDescription(payload *core.ProgressCardPayload) string {
 		return " "
 	}
 	items := discordProgressItems(payload)
+	if payload.LineLen > 0 {
+		return buildDiscordProgressList(payload, items)
+	}
 	if payload.Steps > 0 || payload.ElapsedSec > 0 {
 		return buildDiscordProgressBarLine(payload, items)
 	}
@@ -105,19 +108,43 @@ func discordProgressItems(payload *core.ProgressCardPayload) []core.ProgressCard
 }
 
 func buildDiscordProgressLine(item core.ProgressCardEntry, lang string) string {
+	return buildDiscordProgressLineN(item, lang, maxDiscordProgressLineLen)
+}
+
+func buildDiscordProgressLineN(item core.ProgressCardEntry, lang string, lineLen int) string {
 	text := compactDiscordProgressText(item.Text)
+	n := lineLen - 2
 	switch item.Kind {
 	case core.ProgressEntryThinking:
-		return "💭 " + trimDiscordRunes(text, maxDiscordProgressLineLen-2)
+		return "💭 " + trimDiscordRunes(text, n)
 	case core.ProgressEntryToolUse:
-		return "🔧 " + trimDiscordRunes(buildDiscordToolUseSummary(item, lang), maxDiscordProgressLineLen-2)
+		return "🔧 " + trimDiscordRunes(buildDiscordToolUseSummary(item, lang), n)
 	case core.ProgressEntryToolResult:
-		return "🧾 " + trimDiscordRunes(buildDiscordToolResultSummary(item, lang), maxDiscordProgressLineLen-2)
+		return "🧾 " + trimDiscordRunes(buildDiscordToolResultSummary(item, lang), n)
 	case core.ProgressEntryError:
-		return "❌ " + trimDiscordRunes(text, maxDiscordProgressLineLen-2)
+		return "❌ " + trimDiscordRunes(text, n)
 	default:
-		return "• " + trimDiscordRunes(text, maxDiscordProgressLineLen-2)
+		return "• " + trimDiscordRunes(text, n)
 	}
+}
+
+// buildDiscordProgressList — maomao fork: the step/time head plus the recent
+// steps, one per line. Unlike the one-line bar it stays after the turn ends,
+// so words said mid-run are not wiped.
+func buildDiscordProgressList(payload *core.ProgressCardPayload, items []core.ProgressCardEntry) string {
+	lines := []string{buildDiscordProgressBarLine(&core.ProgressCardPayload{
+		Lang: payload.Lang, Steps: payload.Steps, ElapsedSec: payload.ElapsedSec,
+	}, nil)}
+	for _, item := range items {
+		if line := buildDiscordProgressLineN(item, payload.Lang, payload.LineLen); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	desc := trimDiscordRunes(strings.Join(lines, "\n"), maxDiscordProgressDescLen)
+	if strings.TrimSpace(desc) == "" {
+		return " "
+	}
+	return desc
 }
 
 func buildDiscordToolUseSummary(item core.ProgressCardEntry, lang string) string {
