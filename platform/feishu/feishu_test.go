@@ -2557,7 +2557,8 @@ func TestStreamingConfigPartialOverride(t *testing.T) {
 }
 
 func TestRichCardTypewriterPreservesWorkingPanels(t *testing.T) {
-	p := &Platform{}
+	p := &Platform{streamingConfig: map[string]any{"print_step": map[string]any{"default": 2}}}
+	baseline := &Platform{}
 	for _, working := range []bool{true, false} {
 		status := core.CardStatusWorking
 		if !working {
@@ -2572,8 +2573,16 @@ func TestRichCardTypewriterPreservesWorkingPanels(t *testing.T) {
 			t.Fatalf("wrong animation flag: %s", data)
 		}
 		elements := card["body"].(map[string]any)["elements"].([]any)
-		if elements[0].(map[string]any)["expanded"] != false {
-			t.Fatalf("typewriter card should keep tools collapsed: %s", data)
+		// Typewriter settings must preserve the renderer's panel behavior.
+		// The default layout can evolve independently of this configuration.
+		baselineData := baseline.BuildRichCard(status, "", []core.ToolStep{{Kind: core.ToolStepKindTool, Name: "Bash", Result: "TOOL OUTPUT", Done: !working}}, "BODY INCREMENT", working, "FOOTER")
+		var baselineCard map[string]any
+		if err := json.Unmarshal([]byte(baselineData), &baselineCard); err != nil {
+			t.Fatal(err)
+		}
+		baselineElements := baselineCard["body"].(map[string]any)["elements"].([]any)
+		if elements[0].(map[string]any)["expanded"] != baselineElements[0].(map[string]any)["expanded"] {
+			t.Fatalf("typewriter settings changed tool panel state: %s", data)
 		}
 		if !strings.Contains(data, "BODY INCREMENT") || !strings.Contains(data, "TOOL OUTPUT") || !strings.Contains(data, "FOOTER") {
 			t.Fatal("card lost content")
