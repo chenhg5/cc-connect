@@ -48,3 +48,12 @@ func TestRenderApprovalDiff_UnknownPreviewFallsBackToCodeBlock(t *testing.T) {
 		t.Fatalf("unknown preview = %q, want original code block", got)
 	}
 }
+
+func TestRenderApprovalDiff_PreservesMoveTarget(t *testing.T) {
+	got := renderApprovalDiff("```diff\nupdate old.go → new.go\n@@ -1 +1 @@\n-old\n+new\n```")
+	for _, want := range []string{"📄 `old.go → new.go`", "<text_tag color='blue'>update</text_tag>", "<text_tag color='green'>+</text_tag> `new`"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rename preview missing %q: %s", want, got)
+		}
+	}
+}

@@ -1573,6 +1573,12 @@ func appServerFileChangePreview(raw any) string {
 		}
 		path, _ := change["path"].(string)
 		kind, _ := change["kind"].(string)
+		if details, ok := change["kind"].(map[string]any); ok {
+			kind, _ = details["type"].(string)
+			if target, _ := details["move_path"].(string); target != "" {
+				path += " → " + target
+			}
+		}
 		diff, _ := change["diff"].(string)
 		if path == "" && diff == "" {
 			continue
