@@ -2576,13 +2576,16 @@ func TestCUJ_C7_SharedExternalApprovalQuestionsAndDetach(t *testing.T) {
 	t.Run("PermissionCardUpdatesInPlace", func(t *testing.T) {
 		env, p := newSharedTrackedPermissionEnv(t)
 		as := env.a.connection("first")
-		as.emit(Event{Type: EventPermissionRequest, RequestID: "card-approval", ToolName: "Bash", ToolInput: "USER CARD CONTEXT", Decisions: []string{"allow_session", "cancel"}})
+		as.emit(Event{Type: EventPermissionRequest, RequestID: "card-approval", ToolName: "Bash", ToolInput: "USER CARD CONTEXT", ToolInputRaw: map[string]any{"reason": "Keep approval details readable"}, Decisions: []string{"allow", "allow_session", "cancel"}})
 		env.await("USER CARD CONTEXT")
 		env.send(env.button(env.e.i18n.T(MsgSharedAllowSession)))
 		awaitTrackedPermissionUpdate(t, p)
 		env.send("/detach")
 		env.await(env.e.i18n.T(MsgSharedDetached))
 		visible := strings.Join(p.getSent(), "\n")
+		if !strings.Contains(visible, "**Reason**: Keep approval details readable") {
+			t.Fatalf("permission reason label lost its emphasis: %s", visible)
+		}
 		if !strings.Contains(visible, "✅ "+env.e.i18n.T(MsgSharedAllowSession)) || !strings.Contains(visible, "USER CARD CONTEXT") || strings.Contains(visible, env.e.i18n.T(MsgSharedResponseSent)) {
 			t.Fatalf("user-visible permission result = %s", visible)
 		}
@@ -2607,7 +2610,7 @@ func TestCUJ_C7_SharedExternalApprovalQuestionsAndDetach(t *testing.T) {
 	env.await("Attached to session first")
 	as := env.a.connection("first")
 	as.emit(Event{Type: EventPermissionRequest, RequestID: "session-grant", ToolName: "Permissions", ToolInput: "read project files", ToolInputRaw: map[string]any{"reason": "Need project files", "cwd": "/project"}, Decisions: []string{"allow", "allow_session", "deny"}})
-	env.await("Reason: Need project files")
+	env.await("**Reason**: Need project files")
 	env.await("Working directory: /project")
 	env.send(env.button(env.e.i18n.T(MsgSharedAllowSession)))
 	env.await("decision: allow_session")

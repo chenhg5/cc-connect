@@ -42,6 +42,33 @@ func (e *Engine) sharedDecisionLabel(decision string) (string, bool) {
 	return e.i18n.T(key), true
 }
 
+// Keep short, one-time actions compact while giving wider grants a full row.
+// This avoids squeezing long approval labels into mobile-width columns.
+func (e *Engine) sharedPermissionButtonRows(pending *pendingPermission) [][]CardButton {
+	var short []CardButton
+	var rows [][]CardButton
+	for _, decision := range pending.Decisions {
+		label, ok := e.sharedDecisionLabel(decision)
+		if !ok {
+			continue
+		}
+		button := DefaultBtn(label, "cmd:/decision "+pending.ActionToken+" "+decision)
+		switch decision {
+		case "allow", "deny", "cancel":
+			short = append(short, button)
+		default:
+			rows = append(rows, []CardButton{button})
+		}
+	}
+	var compact [][]CardButton
+	for len(short) > 0 {
+		n := min(2, len(short))
+		compact = append(compact, short[:n])
+		short = short[n:]
+	}
+	return append(compact, rows...)
+}
+
 func (e *Engine) sharedPermissionBody(pending *pendingPermission) string {
 	text := e.i18n.Tf(MsgSharedPermissionPrompt, pending.ToolName, truncateIf(pending.InputPreview, e.display.ToolMaxLen))
 	if reason, _ := pending.ToolInput["reason"].(string); reason != "" && reason != pending.InputPreview {
@@ -76,7 +103,7 @@ func (e *Engine) sharedPermissionCardBody(pending *pendingPermission) string {
 
 func (e *Engine) sharedPermissionCardReason(pending *pendingPermission) string {
 	if reason, _ := pending.ToolInput["reason"].(string); reason != "" && reason != pending.InputPreview {
-		return e.i18n.Tf(MsgSharedApprovalReason, reason)
+		return e.i18n.Tf(MsgSharedApprovalReasonCard, reason)
 	}
 	return ""
 }

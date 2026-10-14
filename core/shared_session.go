@@ -374,27 +374,28 @@ func (e *Engine) sendSharedPrompt(state *interactiveState, pending *pendingPermi
 		return
 	}
 	text := e.sharedPermissionBody(pending)
-	buttons := []ButtonOption{}
-	var cardButtons []CardButton
-	for _, decision := range pending.Decisions {
-		label, ok := e.sharedDecisionLabel(decision)
-		if !ok {
-			continue
+	rows := e.sharedPermissionButtonRows(pending)
+	if bs, ok := p.(InlineButtonSender); ok && len(rows) > 0 {
+		var buttons [][]ButtonOption
+		for _, row := range rows {
+			var options []ButtonOption
+			for _, button := range row {
+				options = append(options, ButtonOption{Text: button.Text, Data: button.Value})
+			}
+			buttons = append(buttons, options)
 		}
-		action := "cmd:/decision " + pending.ActionToken + " " + decision
-		buttons = append(buttons, ButtonOption{Text: label, Data: action})
-		cardButtons = append(cardButtons, CardButton{Text: label, Value: action, Type: "default"})
-	}
-	if bs, ok := p.(InlineButtonSender); ok && len(buttons) > 0 {
-		if err := bs.SendWithButtons(e.ctx, reply, text, [][]ButtonOption{buttons}); err == nil {
+		if err := bs.SendWithButtons(e.ctx, reply, text, buttons); err == nil {
 			return
 		} else {
 			slog.Warn("shared permission buttons", "project", e.name, "platform", p.Name(), "request_id", pending.RequestID, "error", err)
 		}
 	}
 	if supportsCards(p) {
-		card := e.sharedPermissionCardBuilder(pending).Title(e.i18n.T(MsgPermCardTitle), "orange").Buttons(cardButtons...).Build()
-		e.sendSharedPermissionCard(p, reply, original, card)
+		card := e.sharedPermissionCardBuilder(pending).Title(e.i18n.T(MsgPermCardTitle), "orange")
+		for _, row := range rows {
+			card.ButtonsEqual(row...)
+		}
+		e.sendSharedPermissionCard(p, reply, original, card.Build())
 		return
 	}
 	e.send(p, reply, text+"\n"+e.i18n.Tf(MsgSharedDecisionHint, strings.Join(pending.Decisions, " / ")))

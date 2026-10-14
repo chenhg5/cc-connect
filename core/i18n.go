@@ -948,6 +948,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "理由: %s",
 		LangSpanish:            "Motivo: %s",
 	},
+	MsgSharedApprovalReasonCard: {
+		LangEnglish:            "**Reason**: %s",
+		LangChinese:            "**原因**：%s",
+		LangTraditionalChinese: "**原因**：%s",
+		LangJapanese:           "**理由**: %s",
+		LangSpanish:            "**Motivo**: %s",
+	},
 	MsgSharedApprovalCwd: {
 		LangEnglish:            "Working directory: %s",
 		LangChinese:            "工作目录：%s",
@@ -5142,6 +5149,7 @@ func (i *I18n) Tf(key MsgKey, args ...interface{}) string {
 const (
 	MsgSharedHelp                 MsgKey = "shared_help"
 	MsgSharedApprovalReason       MsgKey = "shared_approval_reason"
+	MsgSharedApprovalReasonCard   MsgKey = "shared_approval_reason_card"
 	MsgSharedApprovalCwd          MsgKey = "shared_approval_cwd"
 	MsgSharedAllowSession         MsgKey = "shared_allow_session"
 	MsgSharedAllowSimilar         MsgKey = "shared_allow_similar"
