@@ -297,6 +297,10 @@ func renderRichMarkdownCardMap(card *core.Card, sessionKey string) map[string]an
 				content = renderApprovalDiff(content)
 			}
 			elements = append(elements, map[string]any{"tag": "markdown", "content": sanitizeCardMarkdownForCard(content)})
+		case core.CardNote:
+			elements = append(elements, map[string]any{
+				"tag": "markdown", "content": sanitizeCardMarkdownForCard(e.Text), "text_size": "notation",
+			})
 		case core.CardActions:
 			columns := make([]map[string]any, 0, len(e.Buttons))
 			for _, btn := range e.Buttons {

@@ -2612,7 +2612,7 @@ func TestCUJ_C7_SharedExternalApprovalQuestionsAndDetach(t *testing.T) {
 	env.send(env.button(env.e.i18n.T(MsgSharedAllowSession)))
 	env.await("decision: allow_session")
 	as.emit(Event{Type: EventPermissionRequest, RequestID: "policy-grant", ToolName: "Bash", ToolInput: "git status", Decisions: []string{"allow", "allow_similar", "cancel"}, DecisionDetails: map[string]string{"allow_similar": `["git","status"]`}})
-	env.await("Allow similar commands: `[\"git\",\"status\"]`")
+	env.await("Allow similar commands: [\"git\",\"status\"]")
 	env.send(env.button(env.e.i18n.T(MsgSharedAllowSimilar)))
 	env.await("decision: allow_similar")
 	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "print external marker", Decisions: []string{"allow", "cancel"}})

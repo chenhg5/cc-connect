@@ -118,16 +118,28 @@ func TestSharedPermissionCard_CompactBodyKeepsApprovalDetails(t *testing.T) {
 	if !card.RichMarkdown {
 		t.Fatal("permission card must request inline-code-capable markdown")
 	}
-	if len(card.Elements) != 2 {
-		t.Fatalf("expected one compact body and buttons without a redundant note: %+v", card.Elements)
+	if len(card.Elements) != 3 {
+		t.Fatalf("expected body, small metadata, and buttons: %+v", card.Elements)
 	}
 	body, ok := card.Elements[0].(CardMarkdown)
 	if !ok {
 		t.Fatalf("missing markdown body: %+v", card.Elements[0])
 	}
-	for _, want := range []string{"**Bash**: `git commit -m 'fix'`", "Reason: Finish the reviewed change", "Working directory: /project", "Allow similar commands: `[\"git\",\"commit\"]`"} {
+	for _, want := range []string{"**Bash**: `git commit -m 'fix'`", "Reason: Finish the reviewed change"} {
 		if !strings.Contains(body.Content, want) {
 			t.Fatalf("compact card lost %q: %q", want, body.Content)
+		}
+	}
+	if strings.Contains(body.Content, "Working directory:") || strings.Contains(body.Content, "Allow similar commands:") {
+		t.Fatalf("secondary metadata stayed in main body: %q", body.Content)
+	}
+	metadata, ok := card.Elements[1].(CardNote)
+	if !ok {
+		t.Fatalf("secondary metadata is not a small note: %+v", card.Elements[1])
+	}
+	for _, want := range []string{"Working directory: /project", "Allow similar commands: [\"git\",\"commit\"]"} {
+		if !strings.Contains(metadata.Text, want) {
+			t.Fatalf("small note lost %q: %q", want, metadata.Text)
 		}
 	}
 	if strings.Contains(body.Content, "Permission Request") || strings.Contains(body.Content, "\n\n") {
@@ -135,7 +147,7 @@ func TestSharedPermissionCard_CompactBodyKeepsApprovalDetails(t *testing.T) {
 	}
 	env.send(env.button(env.e.i18n.T(MsgPermBtnAllow)))
 	updated := awaitTrackedPermissionUpdate(t, p).card
-	if updated.Header.Color != "green" || len(updated.Elements) != 1 {
+	if updated.Header.Color != "green" || len(updated.Elements) != 2 {
 		t.Fatalf("resolved card lost compact layout: %+v", updated)
 	}
 	if !updated.RichMarkdown {
@@ -144,6 +156,9 @@ func TestSharedPermissionCard_CompactBodyKeepsApprovalDetails(t *testing.T) {
 	resolvedBody := updated.Elements[0].(CardMarkdown).Content
 	if resolvedBody != body.Content {
 		t.Fatalf("resolved card changed approval details: %q", resolvedBody)
+	}
+	if resolvedNote, ok := updated.Elements[1].(CardNote); !ok || resolvedNote.Text != metadata.Text {
+		t.Fatalf("resolved card lost small metadata: %+v", updated.Elements[1])
 	}
 }
 
