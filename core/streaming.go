@@ -91,6 +91,12 @@ type RichCardSupporter interface {
 	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string
 }
 
+// RichCardSender sends a platform-rendered card payload as a native card
+// message. The payload must come from the matching RichCardSupporter.
+type RichCardSender interface {
+	SendRichCard(ctx context.Context, replyCtx any, renderedCard string) error
+}
+
 // RichCardMarkdownResolver is an optional interface for platforms that need to
 // pre-process rich-card markdown before it is rendered or streamed.
 //
