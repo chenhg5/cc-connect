@@ -2866,6 +2866,15 @@ func TestCUJ_C7_SharedExternalQueueClearedByControls(t *testing.T) {
 				t.Fatalf("discarded queued task started after %s: %q", command, c.prompt)
 			case <-time.After(100 * time.Millisecond):
 			}
+			if command == "/stop" {
+				env.send("NEW TASK AFTER STOP")
+				next := awaitSharedCompatCall(t, a)
+				if next.prompt != "NEW TASK AFTER STOP" {
+					t.Fatalf("old queued input replaced the new task: %q", next.prompt)
+				}
+				next.finish("NEW TASK COMPLETED")
+				env.await("NEW TASK COMPLETED")
+			}
 		})
 	}
 }

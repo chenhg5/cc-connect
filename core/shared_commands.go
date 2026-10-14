@@ -270,3 +270,26 @@ func (e *Engine) sharedSwitchCardAction(args, sessionKey string) *Card {
 	e.cmdSwitch(target.platform, msg, strings.Fields(args))
 	return e.renderListCardSafe(sessionKey, 1)
 }
+
+// All stop entrypoints invalidate retained input before interrupting: the runtime
+// may become idle (and wake a queue drainer) before the interrupt RPC returns.
+func (e *Engine) stopSharedTurn(state *interactiveState, as SharedAgentSession, notifyQueued bool) error {
+	state.mu.Lock()
+	state.shared.stopGeneration++
+	if state.shared.foreground != nil {
+		state.shared.foreground.cancel()
+	}
+	state.mu.Unlock()
+	canceller, ok := as.(AgentSessionCanceller)
+	if !ok {
+		return fmt.Errorf("%s", e.i18n.T(MsgSharedUnsupported))
+	}
+	if notifyQueued {
+		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session stopped"))
+	} else {
+		state.mu.Lock()
+		state.pendingMessages = nil
+		state.mu.Unlock()
+	}
+	return canceller.CancelTurn()
+}

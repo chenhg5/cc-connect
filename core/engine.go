@@ -10930,25 +10930,12 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 		if state != nil {
 			state.mu.Lock()
 			as, shared := state.agentSession.(SharedAgentSession)
-			if shared {
-				state.shared.stopGeneration++
-				if state.shared.foreground != nil {
-					state.shared.foreground.cancel()
-				}
-			}
 			state.mu.Unlock()
 			if shared {
-				if canceller, ok := as.(AgentSessionCanceller); ok {
-					// Interrupt can make the runtime idle before its RPC returns.
-					// Discard queued input before the drain can observe that state.
-					e.notifyDroppedQueuedMessages(state, fmt.Errorf("session stopped"))
-					if err := canceller.CancelTurn(); err != nil {
-						e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-					} else {
-						e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
-					}
+				if err := e.stopSharedTurn(state, as, true); err != nil {
+					e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 				} else {
-					e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSharedUnsupported))
+					e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
 				}
 				return
 			}
@@ -11055,14 +11042,11 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	state.mu.Unlock()
 	if shared {
 		e.interactiveMu.Unlock()
-		if canceller, ok := sharedSession.(AgentSessionCanceller); ok {
-			if err := canceller.CancelTurn(); err != nil {
-				slog.Warn("shared turn interrupt failed", "project", e.name, "session_key", sessionKey, "error", err)
-				return false
-			}
-			return true
+		if err := e.stopSharedTurn(state, sharedSession, notifyQueued); err != nil {
+			slog.Warn("shared turn interrupt failed", "project", e.name, "session_key", sessionKey, "error", err)
+			return false
 		}
-		return false
+		return true
 	}
 	// Stop unsolicited reader before touching state to avoid races.
 	e.stopUnsolicitedReader(state)
