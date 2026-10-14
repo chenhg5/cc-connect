@@ -60,6 +60,25 @@ func TestRenderCardMap_PermissionCommandUsesInlineCodeSchema(t *testing.T) {
 	}
 }
 
+func TestRenderCardMap_PermissionMetadataUsesNotationText(t *testing.T) {
+	card := core.NewCard().RichMarkdown().Title("Permission Request", "orange").
+		Markdown("**Bash**: `ls`").
+		Note("Working directory: /project\nAllow similar commands: [\"ls\"]").
+		Buttons(core.PrimaryBtn("Allow", "cmd:/decision token allow")).Build()
+	got := renderCardMap(card, "feishu:thread")
+	elements := got["body"].(map[string]any)["elements"].([]map[string]any)
+	if len(elements) != 3 || elements[1]["tag"] != "markdown" || elements[1]["text_size"] != "notation" {
+		t.Fatalf("metadata is not small notation text: %#v", elements)
+	}
+	if elements[1]["content"] != "Working directory: /project\nAllow similar commands: [\"ls\"]" {
+		t.Fatalf("metadata content changed: %#v", elements[1])
+	}
+	button := elements[2]["columns"].([]map[string]any)[0]["elements"].([]map[string]any)[0]
+	if button["value"].(map[string]string)["action"] != "cmd:/decision token allow" {
+		t.Fatalf("permission button lost callback: %#v", button)
+	}
+}
+
 func TestRenderCardMap_EqualColumnsActionsUseColumnSet(t *testing.T) {
 	buttons := []core.CardButton{
 		core.PrimaryBtn("Session Management", "nav:/help session"),

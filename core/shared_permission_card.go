@@ -67,26 +67,33 @@ func (e *Engine) sharedPermissionCardBody(pending *pendingPermission) string {
 	} else {
 		input = "`" + input + "`"
 	}
-	lines := append([]string{e.i18n.Tf(MsgSharedPermissionCardTool, pending.ToolName, input)}, e.sharedPermissionCardDetails(pending)...)
+	lines := []string{e.i18n.Tf(MsgSharedPermissionCardTool, pending.ToolName, input)}
+	if reason := e.sharedPermissionCardReason(pending); reason != "" {
+		lines = append(lines, reason)
+	}
 	return strings.Join(lines, "\n")
 }
 
-func (e *Engine) sharedPermissionCardDetails(pending *pendingPermission) []string {
-	var lines []string
+func (e *Engine) sharedPermissionCardReason(pending *pendingPermission) string {
 	if reason, _ := pending.ToolInput["reason"].(string); reason != "" && reason != pending.InputPreview {
-		lines = append(lines, e.i18n.Tf(MsgSharedApprovalReason, reason))
+		return e.i18n.Tf(MsgSharedApprovalReason, reason)
 	}
+	return ""
+}
+
+func (e *Engine) sharedPermissionCardMetadata(pending *pendingPermission) string {
+	var lines []string
 	if cwd, _ := pending.ToolInput["cwd"].(string); cwd != "" {
 		lines = append(lines, e.i18n.Tf(MsgSharedApprovalCwd, cwd))
 	}
 	for _, decision := range pending.Decisions {
 		if label, ok := e.sharedDecisionLabel(decision); ok {
 			if details := pending.DecisionDetails[decision]; details != "" {
-				lines = append(lines, label+": `"+details+"`")
+				lines = append(lines, label+": "+details)
 			}
 		}
 	}
-	return lines
+	return strings.Join(lines, "\n")
 }
 
 func (e *Engine) sharedPermissionCardBuilder(pending *pendingPermission) *CardBuilder {
@@ -94,12 +101,13 @@ func (e *Engine) sharedPermissionCardBuilder(pending *pendingPermission) *CardBu
 	preview := strings.TrimSpace(truncateIf(pending.InputPreview, e.display.ToolMaxLen))
 	if pending.ToolName == "Patch" && strings.Contains(preview, "@@ ") {
 		b.Markdown("**Patch**").Diff(preview)
-		if details := e.sharedPermissionCardDetails(pending); len(details) > 0 {
-			b.Markdown(strings.Join(details, "\n"))
+		if reason := e.sharedPermissionCardReason(pending); reason != "" {
+			b.Markdown(reason)
 		}
-		return b
+	} else {
+		b.Markdown(e.sharedPermissionCardBody(pending))
 	}
-	return b.Markdown(e.sharedPermissionCardBody(pending))
+	return b.Note(e.sharedPermissionCardMetadata(pending))
 }
 
 func (e *Engine) sharedResolvedPermissionCard(pending *pendingPermission, decision string) *Card {

@@ -231,6 +231,8 @@ func (env *sharedTestEnv) visible() string {
 			switch text := element.(type) {
 			case CardMarkdown:
 				sent = append(sent, text.Content)
+			case CardNote:
+				sent = append(sent, text.Text)
 			case CardListItem:
 				sent = append(sent, text.Text)
 			}
