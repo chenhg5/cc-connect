@@ -1546,23 +1546,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	if job.IsShellJob() {
-		var output string
-		err := e.executeCronShell(effectivePlatform, replyCtx, job, &output)
-		if !job.Mute && strings.TrimSpace(output) != "" {
-			// maomao fork: the output went to the channel but not through the
-			// agent, so the channel summary would never hear of it.
-			desc := job.Description
-			if desc == "" {
-				desc = truncateStr(job.Exec, 40)
-			}
-			who := e.name
-			if e.team != nil && e.team.name != "" {
-				who = e.team.name
-			}
-			// Not the agent's words: say so, or the summary credits the bot.
-			e.reportTurnAs(runSessionKey, "定时任务（脚本输出，用"+who+"的账号发出，"+who+"本人没参与）", "（定时任务："+desc+"）", truncateStr(output, 3000))
-		}
-		return err
+		return e.executeCronShell(effectivePlatform, replyCtx, job)
 	}
 
 	content := job.Prompt
@@ -2050,7 +2034,7 @@ func cronRunTitle(job *CronJob) string {
 }
 
 // executeCronShell runs a shell command for a cron job and sends the output.
-func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob, out *string) error {
+func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error {
 	workDir := job.WorkDir
 	if workDir == "" {
 		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
@@ -2090,11 +2074,6 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob, out *s
 
 	var mu sync.Mutex
 	var buf bytes.Buffer
-	defer func() { // the output the job produced, for the caller (maomao fork)
-		mu.Lock()
-		*out = buf.String()
-		mu.Unlock()
-	}()
 	doneCh := make(chan struct{})
 
 	readPipe := func(r io.Reader) {
@@ -4716,7 +4695,6 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// any unsolicited AddHistory.
 				session.AddHistory("assistant", fullResponse)
 				sessions.Save()
-				e.reportTurn(sessionKey, "（后台任务完成后的自发回复）", fullResponse)
 
 				// Reset for potential subsequent unsolicited turn.
 				textParts = nil
@@ -5740,9 +5718,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			fullResponse = cleanResponse
 
 			turnDuration := time.Since(turnStart)
-			if !isSilent {
-				e.reportTurn(sessionKey, lastUserEntry(session), fullResponse)
-			}
 			slog.Info("turn complete",
 				"session", session.ID,
 				"agent_session", session.GetAgentSessionID(),

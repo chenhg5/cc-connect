@@ -104,14 +104,14 @@ func TestTurnCtxSurvivesSave(t *testing.T) {
 	sm := NewSessionManager(path)
 	s := sm.GetOrCreateActive("discord:1")
 	s.SetLastSeenMsgID("123")
-	s.UpdateTurnCtx(func(c *TurnCtxSent) { c.Summary = true; c.Wiki = []string{"a.md"} })
+	s.UpdateTurnCtx(func(c *TurnCtxSent) { c.Wiki = []string{"a.md"} })
 	sm.Save()
 	s2 := NewSessionManager(path).GetOrCreateActive("discord:1")
 	if s2.GetLastSeenMsgID() != "123" {
 		t.Fatalf("last seen = %q", s2.GetLastSeenMsgID())
 	}
 	got := false
-	s2.UpdateTurnCtx(func(c *TurnCtxSent) { got = c.Summary && len(c.Wiki) == 1 })
+	s2.UpdateTurnCtx(func(c *TurnCtxSent) { got = len(c.Wiki) == 1 })
 	if !got {
 		t.Fatal("turn ctx record lost on reload")
 	}

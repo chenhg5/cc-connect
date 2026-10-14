@@ -1,7 +1,6 @@
 package core
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -137,22 +136,14 @@ func TestTurnIdleFor(t *testing.T) {
 	}
 }
 
-func TestGateContextAndTurnReport(t *testing.T) {
-	summaryText := "## 正在做\n修龙娘"
-	var gotTurn map[string]string
-	done := make(chan struct{})
+func TestGateContextWiki(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/context":
-			b, _ := json.Marshal(map[string]any{"summary": summaryText, "wiki": []map[string]string{{"path": "~/wiki/bots/im-bridge.md", "desc": "cc-connect"}}})
-			_, _ = w.Write(b)
-		case "/turn":
-			_ = json.NewDecoder(r.Body).Decode(&gotTurn)
-			_, _ = w.Write([]byte(`{}`))
-			close(done)
-		default:
+		if r.URL.Path != "/context" {
 			http.NotFound(w, r)
+			return
 		}
+		b, _ := json.Marshal(map[string]any{"wiki": []map[string]string{{"path": "~/wiki/bots/im-bridge.md", "desc": "cc-connect"}}})
+		_, _ = w.Write(b)
 	}))
 	defer srv.Close()
 
@@ -163,79 +154,31 @@ func TestGateContextAndTurnReport(t *testing.T) {
 		t.Fatalf("endpoint = %q", ep)
 	}
 	sess := &Session{AgentSessionID: "a1"}
-	c := e.turnContext(sess, "discord:c1", "龙娘怎么了")
-	if !strings.Contains(c, "修龙娘") || !strings.Contains(c, "~/wiki/bots/im-bridge.md") {
+	if c := e.turnContext(sess, "discord:c1", "龙娘怎么了"); !strings.Contains(c, "~/wiki/bots/im-bridge.md") || strings.Contains(c, "进展总结") {
 		t.Fatalf("context block:\n%s", c)
 	}
 	// Same agent context: nothing is sent twice.
 	if c := e.turnContext(sess, "discord:c1", "龙娘怎么了"); c != "" {
 		t.Fatalf("second turn resent:\n%s", c)
 	}
-	// Compaction drops it from the agent's context: send again.
-	sess.ResetTurnCtx()
-	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "修龙娘") || !strings.Contains(c, "im-bridge.md") {
-		t.Fatalf("after compaction:\n%s", c)
-	}
-	// The summary changed: only the new entry goes out, plus what was removed.
-	summaryText = "## 正在做\n修龙娘\n## 已完成\n修好 gate\n修好补拉\n修好卡死"
-	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "总结已大改") {
-		t.Fatalf("mostly new summary should be sent whole:\n%s", c)
-	}
-	summaryText = "## 正在做\n无\n## 已完成\n修好 gate\n修好补拉\n修好卡死\n修龙娘"
-	c = e.turnContext(sess, "discord:c1", "x")
-	if !strings.Contains(c, "## 已完成\n修龙娘") || !strings.Contains(c, "已移除") || !strings.Contains(c, "正在做：修龙娘") || strings.Contains(c, "修好 gate") {
-		t.Fatalf("summary delta:\n%s", c)
-	}
-	// A heading that loses its "（…）" note is the same section.
-	summaryText = "## 正在做\n无\n## 已完成（最近的在前）\n修好 gate\n修好补拉\n修好卡死\n修龙娘"
-	if c := e.turnContext(sess, "discord:c1", "x"); c != "" {
-		t.Fatalf("heading note change resent:\n%s", c)
-	}
-	summaryText = "## 正在做\n无\n## 已完成\n修好 gate\n修好补拉\n修好卡死\n修龙娘"
-	_ = e.turnContext(sess, "discord:c1", "x")
-	// Trimming old history from 已完成 is not news.
-	summaryText = "## 正在做\n无\n## 已完成\n修好 gate\n修好补拉\n修龙娘"
-	if c := e.turnContext(sess, "discord:c1", "x"); c != "" {
-		t.Fatalf("history trim resent:\n%s", c)
-	}
 	// --resume forked a new id: same conversation, nothing resent.
 	sess.SetAgentSessionID("a2", "claudecode")
 	if c := e.turnContext(sess, "discord:c1", "x"); c != "" {
 		t.Fatalf("resume fork resent:\n%s", c)
 	}
+	// Compaction drops it from the agent's context: send again.
+	sess.ResetTurnCtx()
+	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "im-bridge.md") {
+		t.Fatalf("after compaction:\n%s", c)
+	}
 	// Id cleared (failed resume, /reasoning, /provider…): the next process is empty.
 	sess.SetAgentSessionID("", "claudecode")
-	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "修龙娘") {
+	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "im-bridge.md") {
 		t.Fatalf("after id cleared:\n%s", c)
 	}
 	// /switch to another conversation.
 	sess.SetAgentInfo("other", "claudecode", "n")
-	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "修龙娘") {
+	if c := e.turnContext(sess, "discord:c1", "x"); !strings.Contains(c, "im-bridge.md") {
 		t.Fatalf("after switch:\n%s", c)
-	}
-
-	e.reportTurn("discord:c1", "NO_REPLY", "NO_REPLY") // silent: not reported
-	e.reportTurn("discord:c1", "你看看", "查到了")
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("turn not reported")
-	}
-	if gotTurn["key"] != "discord:c1" || gotTurn["reply"] != "查到了" {
-		t.Fatalf("turn report = %v", gotTurn)
-	}
-	_ = context.Background()
-}
-
-func TestSummaryDeltaCountsRemovals(t *testing.T) {
-	prev := []string{"## 答应了还没做", "- a", "- b", "- c", "- d", "## 正在做", "- x"}
-	cur := []string{"## 答应了还没做", "无", "## 正在做", "- x", "- y"}
-	if _, full := summaryDelta(prev, cur); !full {
-		t.Fatal("4 removals + 1 new out of 6 should send the whole summary")
-	}
-	cur = []string{"## 答应了还没做", "- a", "- b", "- c", "- d", "## 正在做", "- x", "- y"}
-	d, full := summaryDelta(prev, cur)
-	if full || d != "## 正在做\n- y" {
-		t.Fatalf("delta = %q full=%v", d, full)
 	}
 }

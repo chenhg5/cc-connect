@@ -345,8 +345,7 @@ func isBotErrorNotice(text string) bool {
 // ---- maomao fork: middle and long context layers (served by the gate process) ----
 
 type gateContextResponse struct {
-	Summary string `json:"summary"`
-	Wiki    []struct {
+	Wiki []struct {
 		Path string `json:"path"`
 		Desc string `json:"desc"`
 	} `json:"wiki"`
@@ -385,11 +384,9 @@ func (g *gateState) post(ctx context.Context, path string, req any, out any) err
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// turnContext returns the channel's progress summary and matching wiki pages as a
-// block to put before the user's message ("" when the gate has nothing or is down).
-// Each block goes into an agent context once: the summary on the first turn after
-// a new session or a compaction, a wiki page the first time it matches. Repeating
-// them every turn filled long sessions with dozens of near-identical copies.
+// turnContext returns the wiki pages matching this message as a block to put
+// before it ("" when the gate has nothing or is down). Each page goes into an
+// agent context once.
 func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 	g := e.gate
 	if g == nil {
@@ -402,27 +399,7 @@ func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 		slog.Warn("gate: context fetch failed", "session", sessionKey, "error", err)
 		return ""
 	}
-	summary := strings.TrimSpace(out.Summary)
-	summaryHead := "（本频道进展总结，跨会话、重启都保留；以频道记录为准，有冲突时信频道）\n"
 	var wiki []string
-	session.UpdateTurnCtx(func(t *TurnCtxSent) {
-		if summary == "" {
-			return
-		}
-		lines := summaryLines(summary)
-		if t.Summary {
-			// The context has an earlier version: send what changed, or the
-			// whole summary when most of it did.
-			delta, full := summaryDelta(t.SummaryLines, lines)
-			if full {
-				summaryHead = "（本频道进展总结已大改，以这一版为准，替换你之前看到的版本）\n"
-			} else {
-				summary = delta
-				summaryHead = "（本频道进展总结有变化：下面是新增或改动的条目，以及已移除的条目）\n"
-			}
-		}
-		t.Summary, t.SummaryLines = true, lines
-	})
 	session.UpdateTurnCtx(func(t *TurnCtxSent) {
 		for _, w := range out.Wiki {
 			if !slices.Contains(t.Wiki, w.Path) {
@@ -431,22 +408,13 @@ func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 			}
 		}
 	})
-	var b strings.Builder
-	if summary != "" {
-		b.WriteString(summaryHead)
-		b.WriteString(summary)
+	if len(wiki) == 0 {
+		return ""
 	}
-	if len(wiki) > 0 {
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
-		}
-		b.WriteString("（可能相关的 wiki 页，需要时去读）")
-		b.WriteString(strings.Join(wiki, ""))
-	}
-	return b.String()
+	return "（可能相关的 wiki 页，需要时去读）" + strings.Join(wiki, "")
 }
 
-// withTurnBlocks puts the teammate status, progress summary and wiki pages the
+// withTurnBlocks puts the teammate status and wiki pages the
 // agent's context does not hold yet before content. Called right before the
 // send, so a message that never reaches the agent marks nothing as sent.
 func (e *Engine) withTurnBlocks(session *Session, sessionKey, query, content string) string {
@@ -457,85 +425,6 @@ func (e *Engine) withTurnBlocks(session *Session, sessionKey, query, content str
 		content = sum + "\n\n" + content
 	}
 	return content
-}
-
-func summaryLines(summary string) []string {
-	var out []string
-	for _, l := range strings.Split(summary, "\n") {
-		if l = strings.TrimRight(l, " "); strings.TrimSpace(l) != "" {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
-// summaryDelta returns what changed from prev to cur: entries new in their
-// section (under its "## " heading) and entries that are gone, matched by
-// section + exact text. full is true when so much changed that the whole
-// summary is cheaper to read than a delta ("" when nothing changed).
-func summaryDelta(prev, cur []string) (delta string, full bool) {
-	key := func(lines []string) ([]string, map[string]bool) {
-		var keys []string
-		set := map[string]bool{}
-		heading := ""
-		for _, l := range lines {
-			if strings.HasPrefix(l, "## ") {
-				// Match sections by name only: the summarizer sometimes drops the
-				// "（…）" note, which must not read as a whole section replaced.
-				heading = l
-				if i := strings.IndexAny(l, "（("); i > 0 {
-					heading = strings.TrimSpace(l[:i])
-				}
-				continue
-			}
-			if strings.TrimSpace(strings.TrimLeft(l, "-* ")) == "无" {
-				continue // an empty section is not an entry
-			}
-			k := heading + "\x00" + l
-			keys = append(keys, k)
-			set[k] = true
-		}
-		return keys, set
-	}
-	prevKeys, prevSet := key(prev)
-	curKeys, curSet := key(cur)
-	var b strings.Builder
-	changed, lastHeading := 0, ""
-	for _, k := range curKeys {
-		if prevSet[k] {
-			continue
-		}
-		changed++
-		h, l, _ := strings.Cut(k, "\x00")
-		if h != lastHeading && h != "" {
-			b.WriteString(h + "\n")
-			lastHeading = h
-		}
-		b.WriteString(l + "\n")
-	}
-	var gone []string
-	for _, k := range prevKeys {
-		if !curSet[k] {
-			h, l, _ := strings.Cut(k, "\x00")
-			if strings.Contains(h, "已完成") {
-				continue // the summarizer trims old history there; nothing changed
-			}
-			gone = append(gone, strings.TrimPrefix(h, "## ")+"："+strings.TrimLeft(l, "-* "))
-		}
-	}
-	if len(gone) > 0 {
-		b.WriteString("已移除（做完、取消或挪到别处）：\n")
-		for _, g := range gone {
-			b.WriteString("- " + g + "\n")
-		}
-	}
-	if changed+len(gone) == 0 {
-		return "", false
-	}
-	if 2*(changed+len(gone)) > len(curKeys)+len(gone) {
-		return "", true
-	}
-	return strings.TrimRight(b.String(), "\n"), false
 }
 
 // teamBlock returns the teammate status when it changed since the agent's
@@ -558,39 +447,4 @@ func (e *Engine) teamBlock(session *Session, sessionKey string) string {
 		return ""
 	}
 	return sum
-}
-
-// reportTurn hands a finished turn to the gate so it can update the channel summary.
-func (e *Engine) reportTurn(sessionKey, user, reply string) {
-	bot := e.name
-	if e.team != nil && e.team.name != "" {
-		bot = e.team.name
-	}
-	e.reportTurnAs(sessionKey, bot, user, reply)
-}
-
-// reportTurnAs is reportTurn with the speaker named explicitly.
-func (e *Engine) reportTurnAs(sessionKey, bot, user, reply string) {
-	g := e.gate
-	if g == nil || strings.TrimSpace(reply) == "" || isSilentReply(reply) {
-		return
-	}
-	go func() {
-		ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
-		defer cancel()
-		if err := g.post(ctx, "/turn", map[string]string{"key": sessionKey, "bot": bot, "user": user, "reply": reply}, nil); err != nil {
-			slog.Warn("gate: turn report failed", "session", sessionKey, "error", err)
-		}
-	}()
-}
-
-// lastUserEntry returns the newest user entry in the session history.
-func lastUserEntry(session *Session) string {
-	h := session.GetHistory(4)
-	for i := len(h) - 1; i >= 0; i-- {
-		if h[i].Role == "user" {
-			return h[i].Content
-		}
-	}
-	return ""
 }
