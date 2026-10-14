@@ -184,7 +184,7 @@ func TestManagedPatchApproval_ShowsProposedChangesWithoutReason(t *testing.T) {
 		fileChanges: map[string]string{},
 		decoder:     &appServerSession{events: make(chan core.Event, 8)},
 	}
-	started := daemonMessage{Method: "item/started", Params: json.RawMessage(`{"threadId":"target","turnId":"turn","item":{"id":"patch-1","type":"fileChange","status":"inProgress","changes":[{"path":"core/example.go","kind":"update","diff":"@@ -1 +1 @@\n-old\n+new"}]}}`)}
+	started := daemonMessage{Method: "item/started", Params: json.RawMessage(`{"threadId":"target","turnId":"turn","item":{"id":"patch-1","type":"fileChange","status":"inProgress","changes":[{"path":"core/example.go","kind":{"type":"update","move_path":"core/renamed.go"},"diff":"@@ -1 +1 @@\n-old\n+new"}]}}`)}
 	if err := s.handleItem(started); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestManagedPatchApproval_ShowsProposedChangesWithoutReason(t *testing.T) {
 		if event.Type != core.EventPermissionRequest {
 			continue
 		}
-		if event.ToolName != "Patch" || !strings.Contains(event.ToolInput, "core/example.go") || !strings.Contains(event.ToolInput, "+new") {
+		if event.ToolName != "Patch" || !strings.Contains(event.ToolInput, "update core/example.go → core/renamed.go") || !strings.Contains(event.ToolInput, "+new") {
 			t.Fatalf("patch approval omitted proposed changes: %+v", event)
 		}
 		return
