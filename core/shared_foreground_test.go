@@ -79,6 +79,36 @@ func TestSharedForegroundRoutesOnlyAcknowledgedTurn(t *testing.T) {
 	}
 }
 
+func TestSharedForeground_StaleTurnErrorDoesNotEndCurrentTurn(t *testing.T) {
+	for _, buffered := range []bool{false, true} {
+		t.Run(fmt.Sprint("buffered=", buffered), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f := &sharedForeground{ctx: ctx, cancel: cancel, events: make(chan Event, 4)}
+			oldError := Event{Type: EventError, TurnID: "old-turn", Error: fmt.Errorf("old turn failed")}
+			if buffered {
+				f.route(oldError)
+				external := f.bind("current-turn")
+				if len(external) != 1 || external[0].TurnID != "old-turn" {
+					t.Fatalf("stale error was consumed: %+v", external)
+				}
+			} else {
+				f.bind("current-turn")
+				if f.route(oldError) {
+					t.Fatal("stale error routed into current turn")
+				}
+			}
+			result := Event{Type: EventResult, TurnID: "current-turn", Content: "CURRENT ANSWER", Done: true}
+			if !f.route(result) {
+				t.Fatal("stale error terminated current presentation")
+			}
+			if got := <-f.events; got.Type != EventResult || got.Content != result.Content {
+				t.Fatalf("current answer lost: %+v", got)
+			}
+		})
+	}
+}
+
 type sharedCompatTTS struct{ calls chan string }
 
 type sharedCompatAudioPlatform struct {
