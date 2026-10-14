@@ -12823,6 +12823,9 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	if prefix == "act" && cmd == "/model" {
 		return e.handleModelCardAction(args, sessionKey)
 	}
+	if prefix == "act" && cmd == "/subagent" {
+		return e.handleSubagentCardAction(args, sessionKey)
+	}
 
 	if prefix == "act" {
 		e.executeCardAction(cmd, args, sessionKey)
@@ -12937,6 +12940,49 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 	}
 
 	return e.renderModelSwitchResultCard(resolved, err)
+}
+
+// handleSubagentCardAction applies a subagent-model choice from the /model card.
+// "inherit" clears the override so the CLI falls back to the main model.
+func (e *Engine) handleSubagentCardAction(args, sessionKey string) *Card {
+	agent, sessions := e.sessionContextForKey(sessionKey)
+	sub, ok := agent.(SubagentModelSwitcher)
+	if !ok {
+		return e.renderModelCard(sessionKey)
+	}
+
+	fields := strings.Fields(args)
+	if len(fields) != 2 {
+		return e.renderModelCard(sessionKey)
+	}
+
+	var target string
+	switch fields[0] {
+	case "inherit":
+		target = ""
+	case "switch":
+		n, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return e.renderModelCard(sessionKey)
+		}
+		switcher, ok := agent.(ModelSwitcher)
+		if !ok {
+			return e.renderModelCard(sessionKey)
+		}
+		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
+		models := switcher.AvailableModels(fetchCtx)
+		cancel()
+		if n < 1 || n > len(models) {
+			return e.renderModelCard(sessionKey)
+		}
+		target = models[n-1].Name
+	default:
+		return e.renderModelCard(sessionKey)
+	}
+
+	sub.SetSubagentModel(target)
+	sessions.Save()
+	return e.renderModelCard(sessionKey)
 }
 
 func (e *Engine) persistWorkspaceModelOverride(interactiveKey, sessionKey string, agent Agent, model string) {
@@ -13815,8 +13861,34 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 
 	cb := NewCard().Title(e.i18n.T(MsgCardTitleModel), "indigo").
 		Markdown(sb.String()).
-		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal).
-		Buttons(e.cardBackButton())
+		Markdown(e.i18n.T(MsgMainModelLabel)).
+		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal)
+
+	// Subagent model selector: only for agents that support it. Options are
+	// "inherit" (empty value -> CLI default) plus the same model list.
+	if sub, ok := agent.(SubagentModelSwitcher); ok {
+		subOpts := []CardSelectOption{{
+			Text:  e.i18n.T(MsgSubagentInherit),
+			Value: "act:/subagent inherit",
+		}}
+		cur := sub.GetSubagentModel()
+		subInit := subOpts[0].Value
+		for i, m := range models {
+			label := m.Name
+			if m.Alias != "" {
+				label = m.Alias + " - " + m.Name
+			}
+			v := fmt.Sprintf("act:/subagent switch %d", i+1)
+			subOpts = append(subOpts, CardSelectOption{Text: label, Value: v})
+			if m.Name == cur {
+				subInit = v
+			}
+		}
+		cb = cb.Markdown(e.i18n.T(MsgSubagentSelectPlaceholder)).
+			Select(e.i18n.T(MsgSubagentSelectPlaceholder), subOpts, subInit)
+	}
+
+	cb = cb.Buttons(e.cardBackButton())
 	cb.Note(e.i18n.T(MsgModelUsage))
 	return cb.Build()
 }

@@ -384,6 +384,9 @@ const (
 
 	MsgModeUsage                 MsgKey = "mode_usage"
 	MsgLangSelectPlaceholder     MsgKey = "lang_select_placeholder"
+	MsgMainModelLabel            MsgKey = "main_model_label"
+	MsgSubagentSelectPlaceholder MsgKey = "subagent_select_placeholder"
+	MsgSubagentInherit           MsgKey = "subagent_inherit"
 	MsgModelSelectPlaceholder    MsgKey = "model_select_placeholder"
 	MsgModeSelectPlaceholder     MsgKey = "mode_select_placeholder"
 	MsgProviderSelectPlaceholder MsgKey = "provider_select_placeholder"
@@ -2593,6 +2596,18 @@ var messages = map[MsgKey]map[Language]string{
 	MsgLangSelectPlaceholder: {
 		LangEnglish: "Select language", LangChinese: "选择语言", LangTraditionalChinese: "選擇語言",
 		LangJapanese: "言語を選択", LangSpanish: "Seleccionar idioma",
+	},
+	MsgMainModelLabel: {
+		LangEnglish: "**Main model**", LangChinese: "**主模型**", LangTraditionalChinese: "**主模型**",
+		LangJapanese: "**メインモデル**", LangSpanish: "**Modelo principal**",
+	},
+	MsgSubagentSelectPlaceholder: {
+		LangEnglish: "**Subagent model**", LangChinese: "**Subagent 模型**", LangTraditionalChinese: "**Subagent 模型**",
+		LangJapanese: "**サブエージェントモデル**", LangSpanish: "**Modelo de subagente**",
+	},
+	MsgSubagentInherit: {
+		LangEnglish: "Inherit main model", LangChinese: "跟随主模型", LangTraditionalChinese: "跟隨主模型",
+		LangJapanese: "メインモデルを継承", LangSpanish: "Heredar modelo principal",
 	},
 	MsgModelSelectPlaceholder: {
 		LangEnglish: "Select model", LangChinese: "选择模型", LangTraditionalChinese: "選擇模型",
