@@ -801,6 +801,11 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 	content := `{"text":"hello from group root"}`
 	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
 
+	// This test exercises routing, not remote Contact/Chat API lookups.
+	// Keep asynchronous dispatch independent of external API latency.
+	ip.userNameCache.Store(openID, "Test user")
+	ip.chatNameCache.Store(chatID, "Test group")
+
 	msgCh := make(chan *core.Message, 1)
 	ip.handler = func(_ core.Platform, msg *core.Message) {
 		msgCh <- msg
