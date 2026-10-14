@@ -75,6 +75,7 @@ type managedSession struct {
 	pending            map[string]*managedRequest
 	completed          map[string]bool
 	usageWarningLevels map[string]int
+	usageNoticeResets  map[string]int64
 	usageSnapshots     map[string]managedUsageSnapshot
 	noticeKeys         map[string]string
 	textStreams        map[string]*managedTextStream
