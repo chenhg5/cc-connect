@@ -26,6 +26,10 @@ func (e *Engine) handleDefaultSettingsCommand(p Platform, msg *Message, command 
 	if err != nil || !defaultSettingsOnly(agent) {
 		return false
 	}
+	if command == "mode" && len(args) > 0 && strings.EqualFold(args[0], "current") {
+		e.cmdCurrentPermissionMode(p, msg, key, args[1:])
+		return true
+	}
 	// Provider catalog management still uses the existing config-only flow.
 	if command == "provider" && len(args) > 0 {
 		sub := matchSubCommand(strings.ToLower(args[0]), []string{"list", "add", "remove", "switch", "current", "clear", "reset", "none"})
@@ -43,6 +47,11 @@ func (e *Engine) handleDefaultSettingsCommand(p Platform, msg *Message, command 
 	if changed {
 		card.Elements = append([]CardElement{CardMarkdown{Content: e.i18n.T(MsgDefaultSettingsSaved)}}, card.Elements...)
 	}
+	e.replySettingsCard(p, msg, card)
+	return true
+}
+
+func (e *Engine) replySettingsCard(p Platform, msg *Message, card *Card) {
 	if supportsCards(p) {
 		e.replyWithCard(p, msg.ReplyCtx, card)
 	} else {
@@ -53,10 +62,16 @@ func (e *Engine) handleDefaultSettingsCommand(p Platform, msg *Message, command 
 					buttons = append(buttons, []ButtonOption{{Text: option.Text, Data: strings.Replace(option.Value, "act:", "cmd:", 1)}})
 				}
 			}
+			if actions, ok := element.(CardActions); ok {
+				for _, button := range actions.Buttons {
+					if button.Value == "nav:/mode current" || button.Value == "nav:/mode" {
+						buttons = append(buttons, []ButtonOption{{Text: button.Text, Data: strings.Replace(button.Value, "nav:", "cmd:", 1)}})
+					}
+				}
+			}
 		}
 		e.replyWithButtons(p, msg.ReplyCtx, card.RenderText(), buttons)
 	}
-	return true
 }
 
 // Text commands and in-place card actions share validation and persistence.
@@ -71,11 +86,31 @@ func (e *Engine) applyDefaultSetting(agent Agent, sessionKey, key, command strin
 	case "reasoning":
 		return e.applyDefaultReasoning(agent, args)
 	case "mode":
+		if strings.EqualFold(args[0], "approval") {
+			return e.applyDefaultApproval(agent, args[1:])
+		}
 		return e.applyDefaultMode(agent, args)
 	case "provider":
 		return e.applyDefaultProvider(agent, args)
 	}
 	return false, nil
+}
+
+func (e *Engine) applyDefaultApproval(agent Agent, args []string) (bool, error) {
+	sw, ok := agent.(ApprovalDefaultSwitcher)
+	if !ok {
+		return false, fmt.Errorf("%s", e.i18n.T(MsgModeNotSupported))
+	}
+	if len(args) == 1 {
+		target := strings.ToLower(args[0])
+		for _, option := range sw.ApprovalModes() {
+			if option.Key == target {
+				sw.SetApprovalMode(target)
+				return true, nil
+			}
+		}
+	}
+	return false, fmt.Errorf("%s", e.i18n.T(MsgNewApprovalUsage))
 }
 
 func (e *Engine) applyDefaultModel(agent Agent, sessionKey, key string, args []string) (bool, error) {
@@ -235,6 +270,9 @@ func (e *Engine) defaultSettingsSummary(agent Agent, sessionKey string) string {
 		}
 	}
 	text += "\n\n" + e.i18n.Tf(MsgDefaultSettingsConfigured, value(model), value(effort), value(mode), value(provider)) + "\n\n" + e.i18n.T(MsgDefaultSettingsScope)
+	if sw, ok := agent.(ApprovalDefaultSwitcher); ok {
+		text += "\n" + e.i18n.Tf(MsgNewApprovalState, sw.GetApprovalMode())
+	}
 	return text
 }
 
@@ -277,11 +315,15 @@ func (e *Engine) renderDefaultSettingsCard(agent Agent, sessionKey, command stri
 			usage = e.reasoningUsage(sw.AvailableReasoningEfforts())
 		}
 	case "mode":
+		card.Buttons(PrimaryBtn(e.i18n.T(MsgCurrentModeTitle), "nav:/mode current"))
 		if sw, ok := agent.(ModeSwitcher); ok {
 			for _, mode := range sw.PermissionModes() {
 				label := mode.Name
 				if e.i18n.IsZhLike() {
 					label = mode.NameZh
+				}
+				if mode.NameKey != "" {
+					label = e.i18n.T(mode.NameKey)
 				}
 				action := "act:/mode " + mode.Key
 				opts = append(opts, CardSelectOption{Text: label, Value: action})
@@ -290,6 +332,7 @@ func (e *Engine) renderDefaultSettingsCard(agent Agent, sessionKey, command stri
 				}
 			}
 			usage = e.modeUsageText(sw.PermissionModes())
+			usage += "\n" + e.i18n.T(MsgCurrentModeUsage)
 		}
 	case "provider":
 		if sw, ok := agent.(ProviderSwitcher); ok {
@@ -309,6 +352,20 @@ func (e *Engine) renderDefaultSettingsCard(agent Agent, sessionKey, command stri
 	}
 	if len(opts) > 0 {
 		card.Select(e.i18n.T(MsgDefaultSettingsSelect), opts, selected)
+	}
+	if command == "mode" {
+		if sw, ok := agent.(ApprovalDefaultSwitcher); ok {
+			var approvalOptions []CardSelectOption
+			approvalSelected := ""
+			for _, option := range sw.ApprovalModes() {
+				action := "act:/mode approval " + option.Key
+				approvalOptions = append(approvalOptions, CardSelectOption{Text: e.i18n.T(option.NameKey), Value: action})
+				if option.Key == sw.GetApprovalMode() {
+					approvalSelected = action
+				}
+			}
+			card.Markdown(e.i18n.T(MsgNewApprovalHint)).Select(e.i18n.T(MsgNewApprovalTitle), approvalOptions, approvalSelected).Note(e.i18n.T(MsgNewApprovalUsage))
+		}
 	}
 	card.Buttons(e.cardBackButton()).Note(usage)
 	return card.Build()
