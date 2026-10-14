@@ -118,14 +118,14 @@ func TestSharedPermissionCard_CompactBodyKeepsApprovalDetails(t *testing.T) {
 	if !card.RichMarkdown {
 		t.Fatal("permission card must request inline-code-capable markdown")
 	}
-	if len(card.Elements) != 3 {
-		t.Fatalf("expected body, small metadata, and buttons: %+v", card.Elements)
+	if len(card.Elements) != 4 {
+		t.Fatalf("expected body, small metadata, short actions and full-width grant: %+v", card.Elements)
 	}
 	body, ok := card.Elements[0].(CardMarkdown)
 	if !ok {
 		t.Fatalf("missing markdown body: %+v", card.Elements[0])
 	}
-	for _, want := range []string{"**Bash**: `git commit -m 'fix'`", "Reason: Finish the reviewed change"} {
+	for _, want := range []string{"**Bash**: `git commit -m 'fix'`", "**Reason**: Finish the reviewed change"} {
 		if !strings.Contains(body.Content, want) {
 			t.Fatalf("compact card lost %q: %q", want, body.Content)
 		}
@@ -159,6 +159,68 @@ func TestSharedPermissionCard_CompactBodyKeepsApprovalDetails(t *testing.T) {
 	}
 	if resolvedNote, ok := updated.Elements[1].(CardNote); !ok || resolvedNote.Text != metadata.Text {
 		t.Fatalf("resolved card lost small metadata: %+v", updated.Elements[1])
+	}
+}
+
+func TestSharedPermissionCard_ReasonOnlyBoldsLabel(t *testing.T) {
+	env := newSharedTestEnv(t)
+	for _, tc := range []struct {
+		lang             Language
+		label, separator string
+	}{
+		{LangEnglish, "Reason", ": "}, {LangChinese, "原因", "："},
+		{LangTraditionalChinese, "原因", "："}, {LangJapanese, "理由", ": "}, {LangSpanish, "Motivo", ": "},
+	} {
+		env.e.i18n.SetLang(tc.lang)
+		reason := "Read project files before applying the change"
+		got := env.e.sharedPermissionCardReason(&pendingPermission{InputPreview: "git status", ToolInput: map[string]any{"reason": reason}})
+		want := "**" + tc.label + "**" + tc.separator + reason
+		if got != want {
+			t.Errorf("%s reason=%q, want %q", tc.lang, got, want)
+		}
+	}
+}
+
+func TestSharedPermissionCard_LongApprovalLabelsUseFullWidthRows(t *testing.T) {
+	for _, lang := range []Language{LangEnglish, LangChinese} {
+		t.Run(string(lang), func(t *testing.T) {
+			env, p := newSharedTrackedPermissionEnv(t)
+			env.e.i18n.SetLang(lang)
+			as := env.a.connection("first")
+			as.emit(Event{Type: EventPermissionRequest, RequestID: "mobile-approval", ToolName: "Bash", ToolInput: "MOBILE APPROVAL", Decisions: []string{"allow", "allow_similar", "allow_session", "cancel"}})
+			env.await("MOBILE APPROVAL")
+			p.mu.Lock()
+			card := p.sentCards[0]
+			p.mu.Unlock()
+			var rows []CardActions
+			for _, element := range card.Elements {
+				if row, ok := element.(CardActions); ok {
+					rows = append(rows, row)
+				}
+			}
+			if len(rows) != 3 || len(rows[0].Buttons) != 2 || len(rows[1].Buttons) != 1 || len(rows[2].Buttons) != 1 {
+				t.Fatalf("approval buttons squeezed together: %+v", rows)
+			}
+			for _, row := range rows {
+				if row.Layout != CardActionLayoutEqualColumns {
+					t.Fatal("approval row must fill available width")
+				}
+			}
+			if rows[1].Buttons[0].Text != env.e.i18n.T(MsgSharedAllowSimilar) || rows[2].Buttons[0].Text != env.e.i18n.T(MsgSharedAllowSession) {
+				t.Fatal("grant label shortened or reordered")
+			}
+			env.send(env.button(env.e.i18n.T(MsgSharedAllowSession)))
+			updated := awaitTrackedPermissionUpdate(t, p)
+			if len(sharedPermissionButtons(updated.card)) != 0 {
+				t.Fatal("resolved approval retained active buttons")
+			}
+			as.mu.Lock()
+			count := len(as.responses)
+			as.mu.Unlock()
+			if count != 1 {
+				t.Fatal("approval callback did not resolve exactly once")
+			}
+		})
 	}
 }
 
