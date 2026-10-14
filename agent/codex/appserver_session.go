@@ -81,8 +81,26 @@ type itemNotification struct {
 	Item     map[string]any `json:"item"`
 }
 
+// errorNotification is codex's `error` notification: {error: TurnError, willRetry, ...}.
+// The top-level Message is kept for older app-server builds.
 type errorNotification struct {
-	Message string `json:"message"`
+	Error *struct {
+		Message           string `json:"message"`
+		AdditionalDetails string `json:"additionalDetails"`
+	} `json:"error"`
+	WillRetry bool   `json:"willRetry"`
+	Message   string `json:"message"`
+}
+
+func (n errorNotification) text() string {
+	if n.Error == nil {
+		return strings.TrimSpace(n.Message)
+	}
+	msg := strings.TrimSpace(n.Error.Message)
+	if d := strings.TrimSpace(n.Error.AdditionalDetails); d != "" && !strings.Contains(msg, d) {
+		msg = strings.TrimSpace(msg + "\n" + d)
+	}
+	return msg
 }
 
 type appServerRateLimitsResponse struct {
@@ -1146,6 +1164,12 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			// maomao fork: a failed turn (e.g. usage_limit_exceeded) used to end
+			// as an empty reply; surface its error instead.
+			if notif.Turn.Status == "failed" && notif.Turn.Error != nil && strings.TrimSpace(notif.Turn.Error.Message) != "" {
+				s.failRunningTurn(strings.TrimSpace(notif.Turn.Error.Message))
+				return
+			}
 			s.completeTurn()
 		}
 
@@ -1175,9 +1199,19 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 
 	case "error":
 		var notif errorNotification
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && strings.TrimSpace(notif.Message) != "" {
-			s.emitError(fmt.Errorf("%s", notif.Message))
+		if err := json.Unmarshal(paramsRaw, &notif); err != nil {
+			return
 		}
+		msg := notif.text()
+		if msg == "" {
+			return
+		}
+		if notif.WillRetry {
+			slog.Warn("codex app-server: transient error, codex will retry", "error", msg)
+			return
+		}
+		// Ends the turn so the turn/completed that follows is a no-op.
+		s.failRunningTurn(msg)
 	}
 }
 
@@ -1578,7 +1612,8 @@ func (s *appServerSession) emit(event core.Event) {
 	}
 }
 
-// failRunningTurn ends an in-flight turn with an error event; no-op when idle.
+// failRunningTurn ends an in-flight turn with an error event; no-op when idle,
+// so a turn that reports its error twice (error + failed turn/completed) emits once.
 func (s *appServerSession) failRunningTurn(reason string) {
 	s.stateMu.Lock()
 	running := s.currentTurn != ""
@@ -1587,7 +1622,7 @@ func (s *appServerSession) failRunningTurn(reason string) {
 	if !running {
 		return
 	}
-	slog.Warn("codex app-server: turn ended without turn/completed", "reason", reason)
+	slog.Warn("codex app-server: turn failed", "reason", reason)
 	s.emitError(errors.New(reason))
 }
 

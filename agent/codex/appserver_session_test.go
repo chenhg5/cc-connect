@@ -467,3 +467,36 @@ func TestAppServerSession_FailRunningTurnEmitsOnlyWhenBusy(t *testing.T) {
 		t.Fatalf("event = %+v, currentTurn = %q", ev, s.currentTurn)
 	}
 }
+
+func TestAppServerSession_ErrorNotificationSurfacesNestedMessage(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4), currentTurn: "turn-1"}
+	s.handleNotification("error", json.RawMessage(`{"error":{"message":"You've hit your usage limit. Try again at 4:13 AM.","codexErrorInfo":"usageLimitExceeded"},"willRetry":false,"threadId":"t","turnId":"turn-1"}`))
+	// The failed turn/completed that follows must not emit a second event.
+	s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"t","turn":{"id":"turn-1","status":"failed","error":{"message":"You've hit your usage limit. Try again at 4:13 AM."}}}`))
+	if len(s.events) != 1 {
+		t.Fatalf("emitted %d events, want 1", len(s.events))
+	}
+	ev := <-s.events
+	if ev.Type != core.EventError || ev.Error == nil || !strings.Contains(ev.Error.Error(), "usage limit") {
+		t.Fatalf("event = %+v", ev)
+	}
+}
+
+func TestAppServerSession_ErrorNotificationIgnoresRetry(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4), currentTurn: "turn-1"}
+	s.handleNotification("error", json.RawMessage(`{"error":{"message":"Reconnecting... 1/5"},"willRetry":true}`))
+	if len(s.events) != 0 || s.currentTurn != "turn-1" {
+		t.Fatalf("retryable error emitted %d events, currentTurn=%q", len(s.events), s.currentTurn)
+	}
+}
+
+func TestAppServerSession_FailedTurnCompletedEmitsError(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4), currentTurn: "turn-1"}
+	s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"t","turn":{"id":"turn-1","status":"failed","error":{"message":"usage limit"}}}`))
+	if len(s.events) != 1 {
+		t.Fatalf("emitted %d events, want 1", len(s.events))
+	}
+	if ev := <-s.events; ev.Type != core.EventError {
+		t.Fatalf("event = %+v", ev)
+	}
+}
