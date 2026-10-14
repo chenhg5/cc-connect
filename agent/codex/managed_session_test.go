@@ -181,6 +181,93 @@ func TestManagedRuntimeSettingsQueryDoesNotOverrideSettingsOrActiveTurn(t *testi
 	}
 }
 
+func TestManagedNewThread_OmittedModePreservesDaemonPermissionDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		opts         map[string]any
+		clone        bool
+		wantSandbox  string
+		wantApproval string
+		wantProfile  string
+		wantReviewer string
+		reset        bool
+	}{
+		{name: "omitted"},
+		{name: "empty", opts: map[string]any{"mode": ""}},
+		{name: "whitespace", opts: map[string]any{"mode": "  "}},
+		{name: "workspace clone", clone: true},
+		{name: "explicit default", opts: map[string]any{"mode": "default"}},
+		{name: "reset to default", reset: true},
+		{name: "ask-for-approval", opts: map[string]any{"mode": "ask-for-approval"}, wantProfile: ":workspace", wantApproval: "on-request", wantReviewer: "user"},
+		{name: "approve-for-me", opts: map[string]any{"mode": "approve-for-me"}, clone: true, wantProfile: ":workspace", wantApproval: "on-request", wantReviewer: "auto_review"},
+		{name: "full-access", opts: map[string]any{"mode": "full-access"}, wantProfile: ":danger-full-access", wantApproval: "never", wantReviewer: "user"},
+		{name: "read-only", opts: map[string]any{"mode": "read-only"}, wantProfile: ":read-only", wantApproval: "on-request", wantReviewer: "user"},
+		{name: "explicit suggest", opts: map[string]any{"mode": "suggest"}, wantSandbox: "read-only", wantApproval: "on-request"},
+		{name: "explicit full-auto", opts: map[string]any{"mode": "full-auto"}, wantSandbox: "workspace-write", wantApproval: "never"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd := t.TempDir()
+			created := make(chan map[string]any, 1)
+			socket := managedFixture(t, func(ws *websocket.Conn) {
+				fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+					if m.Method != "thread/start" {
+						t.Errorf("unexpected method %s", m.Method)
+						return nil, false
+					}
+					var params map[string]any
+					if err := json.Unmarshal(m.Params, &params); err != nil {
+						t.Error(err)
+					}
+					created <- params
+					return fixtureSnapshot(cwd, "new-thread", ""), true
+				})
+			})
+			a := fixtureManagedAgent(t, socket, cwd, tc.opts)
+			if tc.reset {
+				a.SetMode("full-auto")
+				a.SetMode("default")
+			}
+			if tc.clone {
+				opts := a.WorkspaceAgentOptions()
+				opts["work_dir"] = cwd
+				cloned, err := New(opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a = cloned.(*managedAgent)
+			}
+			as, err := a.StartSession(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := as.Close(); err != nil {
+					t.Errorf("Close cleanup: %v", err)
+				}
+			}()
+			params := <-created
+			if tc.wantProfile != "" {
+				if params["permissions"] != tc.wantProfile || params["approvalPolicy"] != tc.wantApproval || params["approvalsReviewer"] != tc.wantReviewer {
+					t.Errorf("TUI preset settings not applied: %v", params)
+				}
+				for _, key := range []string{"sandbox", "sandboxPolicy"} {
+					if _, exists := params[key]; exists {
+						t.Errorf("profile cannot be combined with %s", key)
+					}
+				}
+			} else if tc.wantSandbox == "" {
+				for _, key := range []string{"sandbox", "sandboxPolicy", "permissions", "approvalPolicy", "approvalsReviewer"} {
+					if _, exists := params[key]; exists {
+						t.Errorf("omitted mode overrides daemon default: %s=%v", key, params[key])
+					}
+				}
+			} else if params["sandbox"] != tc.wantSandbox || params["approvalPolicy"] != tc.wantApproval || params["approvalsReviewer"] != "user" {
+				t.Errorf("explicit mode settings not applied: %v", params)
+			}
+		})
+	}
+}
+
 func TestManagedDefaultsConfigureNewThreadWithoutWritingDaemonCredentials(t *testing.T) {
 	cwd, home := t.TempDir(), t.TempDir()
 	created := make(chan map[string]any, 1)

@@ -90,6 +90,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	var daemon managedOptions
 	if transport == "managed_daemon" {
+		// An omitted mode must not override the daemon's permission defaults.
+		// Owned exec/stdio backends retain their existing suggest default.
+		rawMode, _ := opts["mode"].(string)
+		mode = normalizeManagedMode(rawMode)
 		var err error
 		daemon, err = parseManagedOptions(opts)
 		if err != nil {
@@ -141,7 +145,25 @@ func New(opts map[string]any) (core.Agent, error) {
 		activeIdx:          -1,
 	}
 	if transport == "managed_daemon" {
-		return &managedAgent{Agent: agent, daemon: daemon}, nil
+		approvalMode := ""
+		if raw, exists := opts["approval_mode"]; exists {
+			value, ok := raw.(string)
+			if !ok {
+				return nil, fmt.Errorf("codex: approval_mode must be a string")
+			}
+			approvalMode = strings.ToLower(strings.TrimSpace(value))
+			switch approvalMode {
+			case "", "default":
+				approvalMode = ""
+			case "request", "auto-review":
+			default:
+				return nil, fmt.Errorf("codex: approval_mode must be default, request or auto-review")
+			}
+		}
+		return &managedAgent{Agent: agent, daemon: daemon, approvalMode: approvalMode}, nil
+	}
+	if _, exists := opts["approval_mode"]; exists {
+		return nil, fmt.Errorf("codex: approval_mode requires managed_daemon transport")
 	}
 	return agent, nil
 }
@@ -615,6 +637,11 @@ func (a *Agent) GetMode() string {
 func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	return a.workspaceAgentOptionsLocked()
+}
+
+// Caller holds a.mu, including when exporting managed permission overrides.
+func (a *Agent) workspaceAgentOptionsLocked() map[string]any {
 
 	opts := map[string]any{
 		"mode":    a.mode,

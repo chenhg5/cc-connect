@@ -12900,6 +12900,16 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	if isSettingsCommand(cmd) {
 		agent, _ := e.sessionContextForKey(sessionKey)
 		if defaultSettingsOnly(agent) {
+			if cmd == "/mode" {
+				fields := strings.Fields(args)
+				if len(fields) > 0 && strings.EqualFold(fields[0], "current") {
+					var targets []string
+					if prefix == "act" {
+						targets = fields[1:]
+					}
+					return e.currentPermissionModeCard(e.interactiveKeyForSessionKey(sessionKey), targets)
+				}
+			}
 			if prefix == "act" {
 				return e.defaultSettingsCardAction(cmd, args, sessionKey)
 			}

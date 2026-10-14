@@ -232,6 +232,27 @@ const (
 	MsgQuietGlobalOff            MsgKey = "quiet_global_off"
 	MsgModeChanged               MsgKey = "mode_changed"
 	MsgModeNotSupported          MsgKey = "mode_not_supported"
+	MsgApprovalInherit           MsgKey = "approval_inherit"
+	MsgNewApprovalState          MsgKey = "new_approval_state"
+	MsgNewApprovalTitle          MsgKey = "new_approval_title"
+	MsgNewApprovalHint           MsgKey = "new_approval_hint"
+	MsgNewApprovalUsage          MsgKey = "new_approval_usage"
+	MsgPermissionPresets         MsgKey = "permission_presets"
+	MsgApprovalOnlyTitle         MsgKey = "approval_only_title"
+	MsgApprovalOnlyHint          MsgKey = "approval_only_hint"
+	MsgApprovalOnlyUsage         MsgKey = "approval_only_usage"
+	MsgCurrentModeTitle          MsgKey = "current_mode_title"
+	MsgModeDefaultsButton        MsgKey = "mode_defaults_button"
+	MsgCurrentModeUsage          MsgKey = "current_mode_usage"
+	MsgCurrentModeSaved          MsgKey = "current_mode_saved"
+	MsgCurrentModeBusy           MsgKey = "current_mode_busy"
+	MsgCurrentModeReadFailed     MsgKey = "current_mode_read_failed"
+	MsgCurrentModeState          MsgKey = "current_mode_state"
+	MsgPermDefault               MsgKey = "permission_preset_default"
+	MsgPermAsk                   MsgKey = "permission_preset_ask"
+	MsgPermAutoReview            MsgKey = "permission_preset_auto_review"
+	MsgPermFullAccess            MsgKey = "permission_preset_full_access"
+	MsgPermReadOnly              MsgKey = "permission_preset_read_only"
 	MsgSessionRestarting         MsgKey = "session_restarting"
 	MsgSessionNotStarted         MsgKey = "session_not_started"
 	MsgUntitled                  MsgKey = "untitled"
@@ -703,6 +724,153 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgNewApprovalState: {
+		LangEnglish:            "New-session approval override: %s",
+		LangChinese:            "新会话审批覆盖：%s",
+		LangTraditionalChinese: "新對話審批覆蓋：%s",
+		LangJapanese:           "新規セッションの承認設定: %s",
+		LangSpanish:            "Ajuste de aprobación para sesiones nuevas: %s",
+	},
+	MsgApprovalInherit: {
+		LangEnglish:            "Follow preset / daemon",
+		LangChinese:            "跟随完整预设 / daemon",
+		LangTraditionalChinese: "跟隨完整預設 / daemon",
+		LangJapanese:           "プリセット / daemon に従う",
+		LangSpanish:            "Seguir el preajuste / daemon",
+	},
+	MsgNewApprovalTitle: {
+		LangEnglish:            "Approval workflow for new sessions",
+		LangChinese:            "新会话默认审批流程",
+		LangTraditionalChinese: "新對話預設審批流程",
+		LangJapanese:           "新規セッションの承認フロー",
+		LangSpanish:            "Flujo de aprobación para sesiones nuevas",
+	},
+	MsgNewApprovalHint: {
+		LangEnglish:            "This approval override applies only to new sessions and keeps the selected profile. Selecting a full /mode preset clears it. Follow preset / daemon removes only this override.",
+		LangChinese:            "此审批覆盖仅用于新建会话，保留所选 profile。重新选择完整 /mode 预设会清除此覆盖。“跟随完整预设 / daemon”仅撤销审批覆盖。",
+		LangTraditionalChinese: "此審批覆蓋僅用於新建對話，保留所選 profile。重新選擇完整 /mode 預設會清除此覆蓋。「跟隨完整預設 / daemon」僅撤銷審批覆蓋。",
+		LangJapanese:           "この承認設定は新規セッション専用で、選択したプロファイルを保持します。/mode プリセットを選び直すと解除されます。「プリセット / daemon に従う」は承認設定のみ解除します。",
+		LangSpanish:            "Este ajuste solo se aplica a sesiones nuevas y conserva el perfil elegido. Elegir un preajuste completo /mode lo elimina. Seguir el preajuste / daemon elimina solo este ajuste.",
+	},
+	MsgNewApprovalUsage: {
+		LangEnglish:            "Use `/mode approval request|auto-review|default` to configure approval defaults for new sessions.",
+		LangChinese:            "使用 `/mode approval request|auto-review|default` 设置新会话审批默认值。",
+		LangTraditionalChinese: "使用 `/mode approval request|auto-review|default` 設定新對話審批預設值。",
+		LangJapanese:           "`/mode approval request|auto-review|default` で新規セッションの承認設定を指定します。",
+		LangSpanish:            "Usa `/mode approval request|auto-review|default` para configurar la aprobación de sesiones nuevas.",
+	},
+	MsgPermissionPresets: {
+		LangEnglish:            "Full permission presets",
+		LangChinese:            "完整权限预设",
+		LangTraditionalChinese: "完整權限預設",
+		LangJapanese:           "権限プリセット全体",
+		LangSpanish:            "Preajustes completos de permisos",
+	},
+	MsgApprovalOnlyTitle: {
+		LangEnglish:            "Approval workflow for current session",
+		LangChinese:            "当前会话审批流程",
+		LangTraditionalChinese: "目前對話審批流程",
+		LangJapanese:           "現在のセッションの承認フロー",
+		LangSpanish:            "Flujo de aprobación de la sesión actual",
+	},
+	MsgApprovalOnlyHint: {
+		LangEnglish:            "Only change approval routing: keep the current permission profile and sandbox, and use on-request approvals.",
+		LangChinese:            "仅切换审批流程：保留当前权限 profile 和沙箱，审批策略设为 on-request。",
+		LangTraditionalChinese: "僅切換審批流程：保留目前權限 profile 和沙箱，審批策略設為 on-request。",
+		LangJapanese:           "承認フローのみ変更します。現在の権限プロファイルとサンドボックスを保持し、承認方針を on-request に設定します。",
+		LangSpanish:            "Cambia solo el flujo de aprobación: conserva el perfil y el sandbox actuales y usa la política on-request.",
+	},
+	MsgApprovalOnlyUsage: {
+		LangEnglish:            "Use `/mode current approval request` or `/mode current approval auto-review` to change only the approval workflow.",
+		LangChinese:            "使用 `/mode current approval request` 或 `/mode current approval auto-review` 仅切换审批流程。",
+		LangTraditionalChinese: "使用 `/mode current approval request` 或 `/mode current approval auto-review` 僅切換審批流程。",
+		LangJapanese:           "`/mode current approval request` または `/mode current approval auto-review` で承認フローのみ変更できます。",
+		LangSpanish:            "Usa `/mode current approval request` o `/mode current approval auto-review` para cambiar solo el flujo de aprobación.",
+	},
+	MsgCurrentModeTitle: {
+		LangEnglish:            "Current session permissions",
+		LangChinese:            "当前会话权限",
+		LangTraditionalChinese: "目前對話權限",
+		LangJapanese:           "現在のセッションの権限",
+		LangSpanish:            "Permisos de la sesión actual",
+	},
+	MsgModeDefaultsButton: {
+		LangEnglish:            "New-session defaults",
+		LangChinese:            "新会话默认配置",
+		LangTraditionalChinese: "新對話預設設定",
+		LangJapanese:           "新規セッションの既定設定",
+		LangSpanish:            "Valores predeterminados de sesiones nuevas",
+	},
+	MsgCurrentModeUsage: {
+		LangEnglish:            "Use `/mode current` to view current permissions, or `/mode current <name>` to update them. `default` applies only to new threads.",
+		LangChinese:            "使用 `/mode current` 查看当前权限，或 `/mode current <名称>` 修改当前权限。`default` 仅用于新建 thread。",
+		LangTraditionalChinese: "使用 `/mode current` 查看目前權限，或 `/mode current <名稱>` 修改目前權限。`default` 僅用於新建 thread。",
+		LangJapanese:           "`/mode current` で現在の権限を確認し、`/mode current <名前>` で変更します。`default` は新規スレッド専用です。",
+		LangSpanish:            "Usa `/mode current` para ver los permisos actuales o `/mode current <nombre>` para cambiarlos. `default` solo se aplica a hilos nuevos.",
+	},
+	MsgCurrentModeSaved: {
+		LangEnglish:            "Current thread permissions updated. New-thread defaults are unchanged.",
+		LangChinese:            "当前 thread 权限已更新，新建 thread 默认配置未变。",
+		LangTraditionalChinese: "目前 thread 權限已更新，新建 thread 預設設定未變。",
+		LangJapanese:           "現在のスレッドの権限を更新しました。新規スレッドの既定設定は変更していません。",
+		LangSpanish:            "Permisos del hilo actual actualizados. Los valores predeterminados para hilos nuevos no han cambiado.",
+	},
+	MsgCurrentModeBusy: {
+		LangEnglish:            "Wait for the current turn and pending approvals to finish before changing its permissions.",
+		LangChinese:            "请等待当前轮次和待处理审批结束后再修改权限。",
+		LangTraditionalChinese: "請等待目前輪次和待處理審批結束後再修改權限。",
+		LangJapanese:           "現在のターンと承認待ちが終了してから権限を変更してください。",
+		LangSpanish:            "Espera a que terminen el turno actual y las aprobaciones pendientes antes de cambiar los permisos.",
+	},
+	MsgCurrentModeReadFailed: {
+		LangEnglish:            "Permissions update accepted, but reading the resulting server settings failed: %v. Use `/mode current` to check again.",
+		LangChinese:            "权限更新已被接受，但读取服务端更新后的设置失败：%v。请用 `/mode current` 再次确认。",
+		LangTraditionalChinese: "權限更新已被接受，但讀取伺服器更新後的設定失敗：%v。請用 `/mode current` 再次確認。",
+		LangJapanese:           "権限更新は受け付けられましたが、更新後の設定を取得できませんでした: %v。`/mode current` で再確認してください。",
+		LangSpanish:            "Se aceptó la actualización, pero no se pudo leer la configuración resultante: %v. Comprueba de nuevo con `/mode current`.",
+	},
+	MsgCurrentModeState: {
+		LangEnglish:            "Current thread permissions (reported by server):\nProfile: %s · Approval: %s · Reviewer: %s · Sandbox: %s",
+		LangChinese:            "当前 thread 权限（服务端返回）：\nProfile：%s · 审批：%s · 审批者：%s · 沙箱：%s",
+		LangTraditionalChinese: "目前 thread 權限（伺服器回傳）：\nProfile：%s · 審批：%s · 審批者：%s · 沙箱：%s",
+		LangJapanese:           "現在のスレッドの権限（サーバーの設定）:\nプロファイル: %s · 承認: %s · 審査者: %s · サンドボックス: %s",
+		LangSpanish:            "Permisos del hilo actual (según el servidor):\nPerfil: %s · Aprobación: %s · Revisor: %s · Sandbox: %s",
+	},
+	MsgPermDefault: {
+		LangEnglish:            "Follow daemon defaults",
+		LangChinese:            "跟随 daemon 默认配置",
+		LangTraditionalChinese: "跟隨 daemon 預設設定",
+		LangJapanese:           "daemon の既定設定に従う",
+		LangSpanish:            "Usar valores predeterminados del daemon",
+	},
+	MsgPermAsk: {
+		LangEnglish:            "Ask for approval",
+		LangChinese:            "请求用户审批",
+		LangTraditionalChinese: "請求使用者審批",
+		LangJapanese:           "承認を求める",
+		LangSpanish:            "Pedir aprobación",
+	},
+	MsgPermAutoReview: {
+		LangEnglish:            "Approve for me",
+		LangChinese:            "代我审批",
+		LangTraditionalChinese: "代我審批",
+		LangJapanese:           "自動で承認を審査",
+		LangSpanish:            "Aprobar por mí",
+	},
+	MsgPermFullAccess: {
+		LangEnglish:            "Full Access",
+		LangChinese:            "完全访问",
+		LangTraditionalChinese: "完整存取",
+		LangJapanese:           "フルアクセス",
+		LangSpanish:            "Acceso completo",
+	},
+	MsgPermReadOnly: {
+		LangEnglish:            "Read Only",
+		LangChinese:            "只读",
+		LangTraditionalChinese: "唯讀",
+		LangJapanese:           "読み取り専用",
+		LangSpanish:            "Solo lectura",
+	},
 	MsgDefaultSettingsScope: {
 		LangEnglish:            "Changes apply only when creating a new thread. Attached threads keep their runtime settings, connection and history.",
 		LangChinese:            "更改仅在新建 thread 时生效。已接入 thread 保留原运行配置、连接和历史。",

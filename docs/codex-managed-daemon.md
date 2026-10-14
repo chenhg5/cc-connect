@@ -43,6 +43,54 @@ daemon_enable_delete = true
 
 Managed mode rejects `env` and `app_server_url`. Configure credentials, providers and process environment in the daemon. Attached threads retain their own model, provider, approval and sandbox settings; `model`, `mode`, `reasoning_effort` and `provider` configure new threads only.
 
+For new threads, omitting `mode`, setting it to an empty string or setting `mode = "default"` inherits the daemon's effective permission defaults, including its sandbox/permission profile, approval policy and reviewer. CC-Connect sends no overrides for these settings. An explicit `mode` such as `suggest` or `full-auto` still applies CC-Connect's mode mapping. `CODEX_HOME/config.toml` is shared Codex configuration, not a TUI-only file. The daemon uses the `CODEX_HOME` and configuration layers selected at its own startup; CC-Connect's `codex_home` does not reconfigure an already-running daemon.
+
+### Permission presets
+
+Managed `/mode` combines Codex TUI permission presets with the existing CC-Connect presets; `/model` remains a model picker. `/mode default` clears permission overrides for future new threads.
+
+| Mode | Permission profile / sandbox | Approval policy | Reviewer |
+|---|---|---|---|
+| `default` | Inherit | Inherit | Inherit |
+| `ask-for-approval` | `:workspace` | `on-request` | `user` |
+| `approve-for-me` | `:workspace` | `on-request` | `auto_review` |
+| `full-access` | `:danger-full-access` | `never` | `user` |
+| `read-only` | `:read-only` | `on-request` | `user` |
+| `suggest` | `read-only` sandbox | `on-request` | `user` |
+| `auto-edit` / `full-auto` | `workspace-write` sandbox | `never` | `user` |
+| `yolo` | `danger-full-access` sandbox | `never` | `user` |
+
+The new TUI presets use experimental daemon `permissions` / `approvalsReviewer` fields verified against Codex 0.162.1. Automatic review also requires the appropriate daemon feature and managed policy. Listing a preset does not guarantee it is allowed; server rejections are reported when creating the thread. This list contains built-in presets, not dynamically loaded custom named profiles. Changes apply only to new threads. Attached threads, owned stdio/exec backends and other agents retain their existing behavior.
+
+
+### Current-thread permissions
+
+Click **Current session permissions** in the `/mode` popup to open the current-thread preset picker. Selecting a preset refreshes the same card with actual server settings. **New-session defaults** returns to the creation-default menu. Inline-button platforms expose the same navigation.
+
+`/mode` and `/mode <preset>` continue to configure new-thread defaults only. To explicitly update the attached thread:
+
+```text
+/mode current                    # Read actual permissions and show switch buttons
+/mode current ask-for-approval    # Route approvals to the user
+/mode current approve-for-me      # Route approvals to automatic review
+/mode current read-only           # Select read-only permissions
+```
+
+This calls `thread/settings/update` for subsequent turns and reads the server settings back. It does not recreate the thread or change creation defaults. Other clients sharing this thread, including CLI and IDE clients, use the updated settings too. Changes are rejected while a turn or pending approval is active; retry when idle. `default` omits overrides when creating a thread; it is not a reset operation for an existing thread, so `/mode current default` is rejected. The four TUI presets and legacy CC-Connect presets are supported. Server rejections are surfaced. If an update is accepted but verification fails, the response asks you to query again rather than reporting verified success.
+
+### Independent approval workflow
+
+The **Approval workflow** picker in **Current session permissions** offers manual approvals (`request`) and automatic review (`auto-review`). It updates only `approvalPolicy = on-request` and the reviewer, omitting profile/sandbox overrides to retain custom profiles. Text commands: `/mode current approval request` and `/mode current approval auto-review`.
+
+The `/mode` defaults popup has a separate **Approval workflow for new sessions** picker, also available through `/mode approval request|auto-review|default`. It does not modify the attached thread. Precedence is:
+
+1. Apply the full `mode` preset on creation; `mode = "default"` leaves daemon permission defaults intact.
+2. Apply a separate approval override, if selected, setting `on-request` and the reviewer without replacing the profile.
+3. Selecting a full `/mode <preset>` clears the previous separate approval override so the complete preset takes effect. `/mode default` clears both overrides.
+4. `/mode approval default` clears only the separate approval override, restoring the preset's approvals, or daemon approvals when the full mode is `default`.
+
+Configuration supports `approval_mode = "request"` or `"auto-review"` for managed_daemon only. Omission, an empty string or `"default"` adds no approval override. When `mode` and `approval_mode` are both configured, the latter overrides approvals in the order above. Whether approvals are requested still depends on the active profile and operation.
+
 ### Existing stdio configurations
 
 Existing configurations need no migration:

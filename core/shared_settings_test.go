@@ -14,6 +14,43 @@ type sharedSettingsTestAgent struct {
 	provider            string
 }
 
+type sharedPermissionPresetTestAgent struct{ *sharedSettingsTestAgent }
+
+func (a *sharedPermissionPresetTestAgent) PermissionModes() []PermissionModeInfo {
+	return append([]PermissionModeInfo{
+		{Key: "default", NameKey: MsgPermDefault},
+		{Key: "ask-for-approval", NameKey: MsgPermAsk},
+		{Key: "approve-for-me", NameKey: MsgPermAutoReview},
+		{Key: "full-access", NameKey: MsgPermFullAccess},
+		{Key: "read-only", NameKey: MsgPermReadOnly},
+	}, a.sharedSettingsTestAgent.PermissionModes()...)
+}
+
+func TestDefaultModeCard_LocalizesPermissionPresets(t *testing.T) {
+	env, a, _ := newSharedSettingsEnv(t)
+	agent := &sharedPermissionPresetTestAgent{a}
+	for _, lang := range []Language{LangEnglish, LangChinese, LangTraditionalChinese, LangJapanese, LangSpanish} {
+		env.e.i18n.SetLang(lang)
+		card := env.e.renderDefaultSettingsCard(agent, "test:user", "mode")
+		found := map[string]string{}
+		for _, element := range card.Elements {
+			if row, ok := element.(CardSelect); ok {
+				for _, option := range row.Options {
+					found[option.Value] = option.Text
+				}
+			}
+		}
+		for _, mode := range agent.PermissionModes() {
+			if mode.NameKey != "" {
+				want := env.e.i18n.T(mode.NameKey)
+				if got := found["act:/mode "+mode.Key]; got != want || want == string(mode.NameKey) {
+					t.Errorf("%s mode %s label=%q, want %q", lang, mode.Key, got, want)
+				}
+			}
+		}
+	}
+}
+
 func (*sharedSettingsTestAgent) DefaultSettingsOnly() bool { return true }
 func (a *sharedSettingsTestAgent) SetModel(v string)       { a.mu.Lock(); defer a.mu.Unlock(); a.model = v }
 func (a *sharedSettingsTestAgent) GetModel() string        { a.mu.Lock(); defer a.mu.Unlock(); return a.model }

@@ -45,6 +45,53 @@ daemon_enable_delete = true
 
 托管模式不接受 `env` 和 `app_server_url`；凭据、Provider 和进程环境需要在 daemon 中配置。接入已有 thread 时，该 thread 自身的 model、Provider、审批策略和 sandbox 设置会保留；`model`、`mode`、`reasoning_effort`、`provider` 只用于新建 thread。
 
+新建 thread 时，省略 `mode`、设为空字符串或设为 `"default"` 会跟随 daemon 的有效权限默认值，包括 sandbox/权限 profile、审批策略和审批者；CC-Connect 不发送这些覆盖参数。只有显式设置 `mode`（例如 `suggest`、`full-auto`）时才应用 CC-Connect 的模式映射。`CODEX_HOME/config.toml` 是 Codex 的共享配置，并非 TUI 专用；daemon 使用其启动时选择的 `CODEX_HOME` 和配置层，CC-Connect 的 `codex_home` 不会重新配置已经运行的 daemon。
+
+### 权限预设菜单
+
+托管模式的 `/mode` 同时提供 Codex TUI 的权限预设和原有 CC-Connect 预设，`/model` 仍只负责模型选择。`/mode default` 可撤销此前选择的权限覆盖，恢复新建 thread 跟随 daemon 默认配置。
+
+| mode | 权限 profile / sandbox | 审批策略 | 审批者 |
+|---|---|---|---|
+| `default` | 不覆盖 | 不覆盖 | 不覆盖 |
+| `ask-for-approval` | `:workspace` | `on-request` | `user` |
+| `approve-for-me` | `:workspace` | `on-request` | `auto_review` |
+| `full-access` | `:danger-full-access` | `never` | `user` |
+| `read-only` | `:read-only` | `on-request` | `user` |
+| `suggest` | `read-only` sandbox | `on-request` | `user` |
+| `auto-edit` / `full-auto` | `workspace-write` sandbox | `never` | `user` |
+| `yolo` | `danger-full-access` sandbox | `never` | `user` |
+
+新增 TUI 预设使用 daemon 的实验性 `permissions` / `approvalsReviewer` 协议（已核对 Codex 0.162.1）。自动审批还需 daemon 启用相应功能且满足管理策略；菜单列出预设不代表当前 daemon 一定允许使用，服务端拒绝会在新建 thread 时报告错误。列表目前包含内置预设，不动态加载自定义命名 profile。选择只影响新建 thread，不修改已接入的共享 thread；旧 stdio/exec 后端和其他 agent 的菜单保持原样。
+
+### 当前会话权限
+
+在 `/mode` 弹窗点击“当前会话权限”可打开当前会话的预设选择框；选择后原卡片会刷新为服务端返回的实际权限。点击“新会话默认配置”返回默认值菜单。内联按钮平台也提供相同导航入口。
+
+`/mode` 和 `/mode <预设>` 保持只设置新建 thread 默认值的语义。显式修改已接入 thread 请使用：
+
+```text
+/mode current                    # 读取当前实际权限并展示切换按钮
+/mode current ask-for-approval    # 当前 thread 改为用户审批
+/mode current approve-for-me      # 当前 thread 改为自动审查
+/mode current read-only           # 当前 thread 改为只读
+```
+
+当前会话切换通过 `thread/settings/update` 更新后续轮次设置，再读取服务端状态确认结果；不重建 thread，不改变新建默认值。共享 thread 的 CLI、IDE 等其他客户端也会使用更新后的权限。当前轮次或待处理审批尚未结束时拒绝修改，请在空闲后重试。`default` 是新建时省略覆盖参数，不是已有 thread 的重置操作，因此 `/mode current default` 不接受；当前切换支持四个 TUI 预设及旧 CC-Connect 预设。服务端拒绝会显示错误；更新被接受但读取验证失败时会提示再次查询，避免误报已确认成功。
+
+### 独立审批流程
+
+“当前会话权限”弹窗内的“审批流程”选择框提供用户审批 (`request`) 和自动审查 (`auto-review`)。它只更新 `approvalPolicy = on-request` 与审批者，不发送 profile / sandbox 覆盖，因而保留当前自定义 profile。命令方式：`/mode current approval request` 或 `/mode current approval auto-review`。
+
+`/mode` 默认值弹窗另有“新会话默认审批流程”，也可用 `/mode approval request|auto-review|default` 设置。它不修改当前会话。规则为：
+
+1. 新建会话先应用完整 `mode` 预设；`mode = "default"` 时不覆盖 daemon 的权限默认值。
+2. 若单独设置了审批覆盖，再覆盖审批策略为 `on-request` 和所选审批者，保留 profile。
+3. 重新选择完整 `/mode <预设>` 时清除之前的单独审批覆盖，使完整预设全部生效；`/mode default` 同时撤销两种覆盖。
+4. `/mode approval default` 只撤销单独审批覆盖，恢复完整预设的审批设置；完整预设为 `default` 时恢复 daemon 的审批默认值。
+
+配置也支持 `approval_mode = "request"` 或 `"auto-review"`（仅 managed_daemon）；省略、留空或 `"default"` 不额外覆盖审批。若配置同时设置 `mode` 和 `approval_mode`，后者按上述顺序覆盖审批设置。是否触发审批仍取决于当前 profile 和具体操作。
+
 ### 旧 stdio 配置兼容
 
 原有配置无需迁移，仍可使用：

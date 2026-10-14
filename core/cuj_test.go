@@ -3058,6 +3058,70 @@ func TestCUJ_C7_SharedSettingsPreserveLiveConversation(t *testing.T) {
 	env.await("STEER observed: still same turn")
 	env.send("/detach")
 	env.await(env.e.i18n.T(MsgSharedDetached))
+
+	t.Run("permission presets and daemon defaults", func(t *testing.T) {
+		env, a, as := newSharedSettingsEnv(t)
+		env.e.agent = &sharedPermissionPresetTestAgent{a}
+		env.send("/mode")
+		for _, label := range []string{"`default`", "`ask-for-approval`", "`approve-for-me`", "`full-access`", "`read-only`", "`suggest`", "`yolo`"} {
+			env.await(label)
+		}
+		env.send("/mode approve-for-me")
+		env.await("Mode: approve-for-me")
+		env.send("/mode yolo")
+		env.await("Mode: yolo")
+		env.send("/mode default")
+		env.await("Mode: default")
+		env.await("Approval: on-request · Sandbox: read-only")
+		as.emit(Event{Type: EventText, Content: "LIVE AFTER PERMISSION DEFAULT RESET", Metadata: map[string]any{"phase": "commentary"}})
+		env.await("LIVE AFTER PERMISSION DEFAULT RESET")
+		env.send("/history 10")
+		env.await("KEEP HISTORY")
+	})
+
+	t.Run("current permission changes preserve creation defaults and conversation", func(t *testing.T) {
+		env, as := newSharedPermissionEnv(t)
+		env.send("/mode current")
+		env.await("Profile: :read-only · Approval: on-request · Reviewer: user")
+		env.send("/mode current approve-for-me")
+		env.await("Current thread permissions updated. New-thread defaults are unchanged.")
+		env.await("Profile: :workspace · Approval: on-request · Reviewer: auto_review")
+		env.send("/mode")
+		env.await("Mode: suggest")
+		env.send("/mode full-access")
+		env.await("Mode: full-access")
+		env.send("/mode current")
+		env.await("Reviewer: auto_review · Sandbox: workspace-write")
+		as.emit(Event{Type: EventText, Content: "LIVE AFTER CURRENT PERMISSION CHANGE", Metadata: map[string]any{"phase": "commentary"}})
+		env.await("LIVE AFTER CURRENT PERMISSION CHANGE")
+		env.send("/history 10")
+		env.await("KEEP HISTORY")
+	})
+
+	t.Run("approval routing preserves custom profile and respects default precedence", func(t *testing.T) {
+		env, as := newSharedPermissionEnv(t)
+		as.mu.Lock()
+		as.settings.PermissionProfile = "custom-network"
+		as.settings.Sandbox = "workspace-write"
+		as.mu.Unlock()
+		env.send("/mode current approval auto-review")
+		env.await("Profile: custom-network · Approval: on-request · Reviewer: auto_review · Sandbox: workspace-write")
+		env.send("/mode approval request")
+		env.await("New-session approval override: request")
+		env.await("Mode: suggest")
+		env.send("/mode full-access")
+		env.await("Mode: full-access")
+		env.await("New-session approval override: default")
+		env.send("/mode approval auto-review")
+		env.await("New-session approval override: auto-review")
+		env.send("/mode approval default")
+		env.send("/mode current approval request")
+		env.await("Profile: custom-network · Approval: on-request · Reviewer: user · Sandbox: workspace-write")
+		env.send("/mode")
+		env.await("Mode: full-access")
+		env.send("/history 10")
+		env.await("KEEP HISTORY")
+	})
 }
 
 func TestCUJ_B3_SharedHistoryShowsDaemonTimes(t *testing.T) {

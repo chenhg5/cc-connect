@@ -656,11 +656,12 @@ type StartupWarner interface {
 
 // PermissionModeInfo describes a permission mode for display.
 type PermissionModeInfo struct {
-	Key    string
-	Name   string
-	NameZh string
-	Desc   string
-	DescZh string
+	Key     string
+	NameKey MsgKey // optional localized label; empty preserves legacy Name/NameZh rendering
+	Name    string
+	NameZh  string
+	Desc    string
+	DescZh  string
 }
 
 // BotCommandInfo represents a command for bot menu registration (e.g. Telegram setMyCommands).
@@ -777,8 +778,31 @@ type DefaultSettingsAgent interface {
 }
 
 type AgentRuntimeSettings struct {
-	Model, ReasoningEffort, Provider string
-	ApprovalPolicy, Sandbox          string
+	Model, ReasoningEffort, Provider     string
+	ApprovalPolicy, Sandbox              string
+	PermissionProfile, ApprovalsReviewer string
+}
+
+// SessionPermissionSwitcher explicitly changes permissions on the attached
+// session, independently of the agent's new-session defaults.
+type SessionPermissionSwitcher interface {
+	CurrentPermissionModes() []PermissionModeInfo
+	SetCurrentPermissionMode(context.Context, string) error
+}
+
+// SessionApprovalSwitcher changes approval routing without changing the
+// session's permission profile or new-session defaults.
+type SessionApprovalSwitcher interface {
+	CurrentApprovalModes() []PermissionModeInfo
+	SetCurrentApprovalMode(context.Context, string) error
+}
+
+// ApprovalDefaultSwitcher controls a separate approval override for new sessions.
+// Selecting a complete permission preset clears this override.
+type ApprovalDefaultSwitcher interface {
+	ApprovalModes() []PermissionModeInfo
+	SetApprovalMode(string)
+	GetApprovalMode() string
 }
 
 // AgentRuntimeSettingsReader obtains authoritative settings without overrides.

@@ -34,11 +34,15 @@ type managedThread struct {
 	Turns                []managedTurn   `json:"turns"`
 }
 type managedSnapshot struct {
-	Thread          managedThread   `json:"thread"`
-	Cwd             string          `json:"cwd"`
-	Model           string          `json:"model"`
-	ModelProvider   string          `json:"modelProvider"`
-	ApprovalPolicy  json.RawMessage `json:"approvalPolicy"`
+	Thread                  managedThread   `json:"thread"`
+	Cwd                     string          `json:"cwd"`
+	Model                   string          `json:"model"`
+	ModelProvider           string          `json:"modelProvider"`
+	ApprovalPolicy          json.RawMessage `json:"approvalPolicy"`
+	ApprovalsReviewer       string          `json:"approvalsReviewer"`
+	ActivePermissionProfile *struct {
+		ID string `json:"id"`
+	} `json:"activePermissionProfile"`
 	Sandbox         json.RawMessage `json:"sandbox"`
 	ReasoningEffort *string         `json:"reasoningEffort"`
 }
@@ -118,8 +122,15 @@ func (a *managedAgent) newThreadParams() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	cwd, _ := filepath.Abs(a.workDir)
-	approval, sandbox := appServerModeSettings(a.mode)
-	params := map[string]any{"cwd": cwd, "approvalPolicy": approval, "approvalsReviewer": "user", "sandbox": sandbox}
+	params := map[string]any{"cwd": cwd}
+	applyManagedModeParams(params, a.mode)
+	if a.approvalMode != "" {
+		params["approvalPolicy"] = "on-request"
+		params["approvalsReviewer"] = "user"
+		if a.approvalMode == "auto-review" {
+			params["approvalsReviewer"] = "auto_review"
+		}
+	}
 	model := core.GetProviderModel(a.providers, a.activeIdx, a.model)
 	if model != "" {
 		params["model"] = model
@@ -327,6 +338,10 @@ func (s *managedSession) ReadRuntimeSettings(ctx context.Context) (core.AgentRun
 		return core.AgentRuntimeSettings{}, fmt.Errorf("codex managed settings returned an out-of-scope thread")
 	}
 	settings := core.AgentRuntimeSettings{Model: snapshot.Model, Provider: snapshot.ModelProvider}
+	settings.ApprovalsReviewer = snapshot.ApprovalsReviewer
+	if snapshot.ActivePermissionProfile != nil {
+		settings.PermissionProfile = snapshot.ActivePermissionProfile.ID
+	}
 	if snapshot.ReasoningEffort != nil {
 		settings.ReasoningEffort = *snapshot.ReasoningEffort
 	}

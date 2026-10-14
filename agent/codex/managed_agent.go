@@ -94,7 +94,8 @@ func parseManagedOptions(opts map[string]any) (managedOptions, error) {
 // optional interface set and stdio process lifecycle are unchanged.
 type managedAgent struct {
 	*Agent
-	daemon managedOptions
+	daemon       managedOptions
+	approvalMode string // protected by Agent.mu; empty follows mode/daemon defaults
 }
 
 func (*managedAgent) DefaultSettingsOnly() bool { return true }
@@ -381,7 +382,12 @@ func (a *managedAgent) DeleteSession(ctx context.Context, id string) error {
 }
 
 func (a *managedAgent) WorkspaceAgentOptions() map[string]any {
-	opts := a.Agent.WorkspaceAgentOptions()
+	a.mu.RLock()
+	opts := a.Agent.workspaceAgentOptionsLocked()
+	if a.approvalMode != "" {
+		opts["approval_mode"] = a.approvalMode
+	}
+	a.mu.RUnlock()
 	opts["app_server_transport"] = "managed_daemon"
 	if a.daemon.socket != "" {
 		opts["daemon_socket"] = a.daemon.socket
