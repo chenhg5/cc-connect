@@ -101,7 +101,7 @@ func (p *interactivePlatform) UpdateCard(ctx context.Context, handle any, card *
 // renderCardMap converts a core.Card into the Feishu Interactive Card map.
 // Used both for message API (via renderCard) and callback responses.
 func renderCardMap(card *core.Card, sessionKey string) map[string]any {
-	if card != nil && card.RichMarkdown {
+	if card != nil && (card.RichMarkdown || card.CollapsedDetailsTitle != "") {
 		return renderRichMarkdownCardMap(card, sessionKey)
 	}
 	result := map[string]any{
@@ -325,6 +325,9 @@ func renderRichMarkdownCardMap(card *core.Card, sessionKey string) map[string]an
 				elements = append(elements, map[string]any{"tag": "column_set", "columns": columns})
 			}
 		}
+	}
+	if card.CollapsedDetailsTitle != "" {
+		elements = []map[string]any{buildRichPanel(card.CollapsedDetailsTitle, false, elements)}
 	}
 	result["body"] = map[string]any{"elements": elements}
 	return result

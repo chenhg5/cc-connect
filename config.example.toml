@@ -1065,6 +1065,8 @@ type = "feishu"
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
 # domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
+# final_reply_position = "latest_after_approval" # Send final answer after interleaved approvals; "in_place" keeps the original message
+#                           # 审批插入后将最终回复发到最新位置；in_place 保持原消息位置
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
@@ -1135,6 +1137,7 @@ app_secret = "your-feishu-app-secret"
 # callback_path = "/feishu/webhook"  # Webhook callback path / Webhook 回调路径
 # encrypt_key = ""               # Event encrypt key (optional) / 事件加密密钥（可选）
 # enable_feishu_card = true
+# final_reply_position = "latest_after_approval" # "in_place" keeps the original reply / in_place 保持原回复位置
 # allow_from = "*"
 # reaction_emoji = "OnIt"
 # done_emoji = "none"

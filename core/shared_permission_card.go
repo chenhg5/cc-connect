@@ -138,8 +138,9 @@ func (e *Engine) sharedPermissionCardBuilder(pending *pendingPermission) *CardBu
 }
 
 func (e *Engine) sharedResolvedPermissionCard(pending *pendingPermission, decision string) *Card {
+	b := e.sharedPermissionCardBuilder(pending).CollapsedDetails(e.i18n.Tf(MsgApprovalDetails, pending.ToolName))
 	if decision == "" {
-		return e.sharedPermissionCardBuilder(pending).Title(e.i18n.T(MsgSharedRequestResolved), "grey").Build()
+		return b.Title(e.i18n.T(MsgSharedRequestResolved), "grey").Build()
 	}
 	label, _ := e.sharedDecisionLabel(decision)
 	icon, color := "✅ ", "green"
@@ -148,7 +149,7 @@ func (e *Engine) sharedResolvedPermissionCard(pending *pendingPermission, decisi
 	} else if decision == "cancel" {
 		icon, color = "⏹ ", "grey"
 	}
-	return e.sharedPermissionCardBuilder(pending).Title(icon+label, color).Build()
+	return b.Title(icon+label, color).Build()
 }
 
 func (e *Engine) sendSharedPermissionCard(p Platform, reply any, pending *pendingPermission, card *Card) {

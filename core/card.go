@@ -9,9 +9,10 @@ import (
 // platform-specific cards (Feishu Interactive Card, Telegram message, etc.)
 // or degraded to plain text for platforms without card support.
 type Card struct {
-	Header       *CardHeader
-	Elements     []CardElement
-	RichMarkdown bool // request the platform's richer markdown renderer when available
+	Header                *CardHeader
+	Elements              []CardElement
+	RichMarkdown          bool   // request the platform's richer markdown renderer when available
+	CollapsedDetailsTitle string // optionally wrap the body in a closed details panel; text fallback retains the body
 }
 
 // CardHeader is the optional colored title bar of a card.
@@ -137,6 +138,13 @@ func (b *CardBuilder) Title(title, color string) *CardBuilder {
 // RichMarkdown requests rendering that supports inline code in card markdown.
 func (b *CardBuilder) RichMarkdown() *CardBuilder {
 	b.card.RichMarkdown = true
+	return b
+}
+
+// CollapsedDetails keeps the body's content available while reducing its
+// initial height on platforms with collapsible panels.
+func (b *CardBuilder) CollapsedDetails(title string) *CardBuilder {
+	b.card.CollapsedDetailsTitle = title
 	return b
 }
 

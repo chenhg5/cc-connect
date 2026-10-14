@@ -2558,6 +2558,52 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 // CUJ: connect to externally started work, answer its questions, and detach.
 // Request-bound buttons remain safe when another client resolves an approval.
 func TestCUJ_C7_SharedExternalApprovalQuestionsAndDetach(t *testing.T) {
+	t.Run("FinalAnswerAppearsAfterApproval", func(t *testing.T) {
+		p := &approvalFinalTestPlatform{enabled: true}
+		p.n = "test"
+		a := &sharedTestAgent{}
+		e := NewEngine("shared", a, []Platform{p}, t.TempDir()+"/sessions.json", LangEnglish)
+		t.Cleanup(func() { _ = e.Stop() })
+		e.display.CardMode = "rich"
+		send := func(text string) {
+			e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", ReplyCtx: "reply", Content: text, MessageID: text})
+		}
+		waitVisible := func(text string) {
+			t.Helper()
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				if strings.Contains(strings.Join(p.getSent(), "\n"), text) {
+					return
+				}
+				time.Sleep(time.Millisecond * 5)
+			}
+			t.Fatalf("missing visible message %q: %v", text, p.getSent())
+		}
+		send("/attach first")
+		waitVisible("Attached to session first")
+		as := a.connection("first")
+		as.emit(Event{Type: EventText, TurnID: "active-first", Content: "I am checking project files before answering."})
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			starts, _, _, _ := p.snapshot()
+			if len(starts) > 0 {
+				break
+			}
+			time.Sleep(time.Millisecond * 5)
+		}
+		as.emit(Event{Type: EventPermissionRequest, TurnID: "active-first", RequestID: "approval", ToolName: "Bash", ToolInput: "APPROVAL BEFORE FINAL", Decisions: []string{"allow", "cancel"}})
+		waitVisible("APPROVAL BEFORE FINAL")
+		send("allow")
+		as.emit(Event{Type: EventPermissionResolved, TurnID: "active-first", RequestID: "approval"})
+		as.emit(Event{Type: EventResult, TurnID: "active-first", Content: "LATEST FINAL ANSWER", Done: true})
+		waitVisible("LATEST FINAL ANSWER")
+		visible := strings.Join(p.getSent(), "\n")
+		if strings.LastIndex(visible, "LATEST FINAL ANSWER") < strings.LastIndex(visible, "APPROVAL BEFORE FINAL") {
+			t.Fatalf("final answer stayed above approval: %s", visible)
+		}
+		send("/detach")
+		waitVisible(e.i18n.T(MsgSharedDetached))
+	})
 	t.Run("PatchDiffRemainsVisibleAfterDecision", func(t *testing.T) {
 		env, p := newSharedTrackedPermissionEnv(t)
 		as := env.a.connection("first")
@@ -2579,7 +2625,10 @@ func TestCUJ_C7_SharedExternalApprovalQuestionsAndDetach(t *testing.T) {
 		as.emit(Event{Type: EventPermissionRequest, RequestID: "card-approval", ToolName: "Bash", ToolInput: "USER CARD CONTEXT", ToolInputRaw: map[string]any{"reason": "Keep approval details readable"}, Decisions: []string{"allow", "allow_session", "cancel"}})
 		env.await("USER CARD CONTEXT")
 		env.send(env.button(env.e.i18n.T(MsgSharedAllowSession)))
-		awaitTrackedPermissionUpdate(t, p)
+		update := awaitTrackedPermissionUpdate(t, p)
+		if update.card.CollapsedDetailsTitle == "" || len(sharedPermissionButtons(update.card)) != 0 {
+			t.Fatal("resolved approval must offer collapsed details without live decision buttons")
+		}
 		env.send("/detach")
 		env.await(env.e.i18n.T(MsgSharedDetached))
 		visible := strings.Join(p.getSent(), "\n")

@@ -241,6 +241,8 @@ const (
 	MsgApprovalOnlyTitle         MsgKey = "approval_only_title"
 	MsgApprovalOnlyHint          MsgKey = "approval_only_hint"
 	MsgApprovalOnlyUsage         MsgKey = "approval_only_usage"
+	MsgApprovalDetails           MsgKey = "approval_details"
+	MsgFinalReplyLatest          MsgKey = "final_reply_latest"
 	MsgCurrentModeTitle          MsgKey = "current_mode_title"
 	MsgModeDefaultsButton        MsgKey = "mode_defaults_button"
 	MsgCurrentModeUsage          MsgKey = "current_mode_usage"
@@ -724,6 +726,20 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgApprovalDetails: {
+		LangEnglish:            "%s · Approval details",
+		LangChinese:            "%s · 审批详情",
+		LangTraditionalChinese: "%s · 審批詳情",
+		LangJapanese:           "%s · 承認の詳細",
+		LangSpanish:            "%s · Detalles de aprobación",
+	},
+	MsgFinalReplyLatest: {
+		LangEnglish:            "Completed. The final answer is in the latest reply below.",
+		LangChinese:            "已完成，最终答案见下方最新回复。",
+		LangTraditionalChinese: "已完成，最終答案見下方最新回覆。",
+		LangJapanese:           "完了しました。最終回答は下の最新の返信をご覧ください。",
+		LangSpanish:            "Completado. La respuesta final está en el último mensaje de abajo.",
+	},
 	MsgNewApprovalState: {
 		LangEnglish:            "New-session approval override: %s",
 		LangChinese:            "新会话审批覆盖：%s",

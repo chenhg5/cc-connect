@@ -705,6 +705,12 @@ type StreamingCardPlatform interface {
 	CreateStreamingCard(ctx context.Context, replyCtx any) (StreamingCard, error)
 }
 
+// ApprovalFinalReplyPlatform requests a fresh final answer when approval
+// messages were emitted after the current rich reply preview began.
+type ApprovalFinalReplyPlatform interface {
+	FinalReplyAfterApproval() bool
+}
+
 // CardStatus represents the visual status of a card header.
 type CardStatus string
 

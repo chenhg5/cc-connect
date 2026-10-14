@@ -22,6 +22,36 @@ func decodeRenderedCard(t *testing.T, card *core.Card) map[string]any {
 	return got
 }
 
+func TestRenderCard_ResolvedApprovalCollapsesDetails(t *testing.T) {
+	card := core.NewCard().RichMarkdown().Title("Approved", "green").
+		CollapsedDetails("Bash · Approval details").Markdown("**Bash**: `ls`").
+		Markdown("**Reason**: inspect files").Note("Working directory: /project").Build()
+	got := decodeRenderedCard(t, card)
+	if got["schema"] != "2.0" {
+		t.Fatalf("schema = %v", got["schema"])
+	}
+	els := got["body"].(map[string]any)["elements"].([]any)
+	if len(els) != 1 {
+		t.Fatalf("body = %#v", els)
+	}
+	panel := els[0].(map[string]any)
+	if panel["tag"] != "collapsible_panel" || panel["expanded"] != false {
+		t.Fatalf("details not collapsed: %#v", panel)
+	}
+	if panel["header"].(map[string]any)["title"].(map[string]any)["content"] != card.CollapsedDetailsTitle {
+		t.Fatal("missing details title")
+	}
+	nested, _ := json.Marshal(panel["elements"])
+	for _, want := range []string{"`ls`", "inspect files", "/project"} {
+		if !strings.Contains(string(nested), want) {
+			t.Fatalf("details lost %q: %s", want, nested)
+		}
+	}
+	if !strings.Contains(card.RenderText(), "inspect files") {
+		t.Fatal("text fallback lost details")
+	}
+}
+
 func TestRenderCardMap_PermissionCommandUsesInlineCodeSchema(t *testing.T) {
 	command := "/bin/bash -lc ls"
 	buttons := []core.CardButton{
