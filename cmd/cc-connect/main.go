@@ -704,6 +704,7 @@ func main() {
 			}
 			engine.SetAutoCompressConfig(true, maxTokens, minGap)
 		}
+		wireColdCacheFresh(engine, proj)
 		engine.SetGate(proj.GateURL, proj.GateTimeoutMs, proj.GateFallback)
 		engine.SetTeam(proj.TeamStatusDir, proj.TeamName, proj.TeamStatusInject)
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
@@ -1790,6 +1791,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
+	wireColdCacheFresh(engine, *proj)
 	engine.SetGate(proj.GateURL, proj.GateTimeoutMs, proj.GateFallback)
 	engine.SetTeam(proj.TeamStatusDir, proj.TeamName, proj.TeamStatusInject)
 	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
@@ -2089,4 +2091,25 @@ func derefInt(v *int) int {
 		return 0
 	}
 	return *v
+}
+
+// wireColdCacheFresh applies [projects.cold_cache_fresh] (maomao fork).
+func wireColdCacheFresh(engine *core.Engine, proj config.ProjectConfig) {
+	c := proj.ColdCacheFresh
+	if c.Enabled == nil || !*c.Enabled {
+		engine.SetColdCacheFresh(false, 0, 0)
+		return
+	}
+	idle, minTokens := 60, 80000
+	if c.IdleMins != nil && *c.IdleMins > 0 {
+		idle = *c.IdleMins
+	}
+	if c.MinTokens != nil && *c.MinTokens > 0 {
+		minTokens = *c.MinTokens
+	}
+	if t := proj.AgentSessionIdleTimeoutMins; t != nil && *t > idle {
+		slog.Warn("cold_cache_fresh: idle_mins is below agent_session_idle_timeout_mins; a still-running process is reused without the check",
+			"project", proj.Name, "idle_mins", idle, "agent_session_idle_timeout_mins", *t)
+	}
+	engine.SetColdCacheFresh(true, time.Duration(idle)*time.Minute, minTokens)
 }

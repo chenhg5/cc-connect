@@ -452,6 +452,15 @@ type AutoCompressConfig struct {
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
 }
 
+// ColdCacheFreshConfig (maomao fork): when resuming would re-read a big context
+// whose prompt cache has expired, start a fresh agent session instead and hand
+// over the old transcript's compaction summary and recent dialogue.
+type ColdCacheFreshConfig struct {
+	Enabled   *bool `toml:"enabled,omitempty"`    // default false
+	IdleMins  *int  `toml:"idle_mins,omitempty"`  // minutes since the last reply (default 60); checked only when the agent process starts, so keep it >= agent_session_idle_timeout_mins
+	MinTokens *int  `toml:"min_tokens,omitempty"` // context size worth leaving (default 80000)
+}
+
 // ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
 type ObserveConfig struct {
 	Enabled bool   `toml:"enabled"`
@@ -477,11 +486,12 @@ type ProjectConfig struct {
 	// init flow to bind existing local directories. Default false keeps init
 	// limited to git URLs; use /workspace bind or /workspace route for explicit
 	// local bindings.
-	WorkspaceInitAllowLocalPaths *bool              `toml:"workspace_init_allow_local_paths,omitempty"`
-	Agent                        AgentConfig        `toml:"agent"`
-	Platforms                    []PlatformConfig   `toml:"platforms"`
-	Heartbeat                    HeartbeatConfig    `toml:"heartbeat"`
-	AutoCompress                 AutoCompressConfig `toml:"auto_compress"`
+	WorkspaceInitAllowLocalPaths *bool                `toml:"workspace_init_allow_local_paths,omitempty"`
+	Agent                        AgentConfig          `toml:"agent"`
+	Platforms                    []PlatformConfig     `toml:"platforms"`
+	Heartbeat                    HeartbeatConfig      `toml:"heartbeat"`
+	AutoCompress                 AutoCompressConfig   `toml:"auto_compress"`
+	ColdCacheFresh               ColdCacheFreshConfig `toml:"cold_cache_fresh"`
 	// ResetOnIdleMins automatically rotates to a new cc-connect session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.

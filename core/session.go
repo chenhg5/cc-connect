@@ -46,9 +46,15 @@ type Session struct {
 	// TurnCtx records which per-turn context blocks the agent's current context
 	// already holds (maomao fork), so each is sent once per context, not every turn.
 	TurnCtx *TurnCtxSent `json:"turn_ctx,omitempty"`
+	// HandoffFrom is the agent session a fresh context should inherit from on
+	// its first turn (maomao fork): set by /new, a cold-cache fresh start or a
+	// failed resume, cleared once the handoff is sent.
+	HandoffFrom   string `json:"handoff_from,omitempty"`
+	HandoffReason string `json:"handoff_reason,omitempty"`
 
-	mu   sync.Mutex `json:"-"`
-	busy bool       `json:"-"`
+	mu           sync.Mutex `json:"-"`
+	busy         bool       `json:"-"`
+	handoffTaken [2]string  // taken by a turn not yet sent (maomao fork)
 }
 
 // TurnCtxSent is what has been put into one agent context (maomao fork). It is
@@ -706,6 +712,8 @@ func (sm *SessionManager) saveLocked() {
 			ActiveProvider:      s.ActiveProvider,
 			LastSeenMsgID:       s.LastSeenMsgID,
 			TurnCtx:             s.TurnCtx.clone(),
+			HandoffFrom:         s.HandoffFrom,
+			HandoffReason:       s.HandoffReason,
 		}
 		s.mu.Unlock()
 	}

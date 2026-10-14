@@ -420,7 +420,11 @@ type Engine struct {
 	autoCompressEnabled   bool
 	autoCompressMaxTokens int
 	autoCompressMinGap    time.Duration
-	resetOnIdle           time.Duration
+	// Cold-cache fresh start (maomao fork, see handoff.go)
+	coldFreshEnabled   bool
+	coldFreshIdle      time.Duration
+	coldFreshMinTokens int
+	resetOnIdle        time.Duration
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
@@ -3841,10 +3845,13 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	sendDone := make(chan error, 1)
 	go func() {
 		if as == nil {
+			session.SettleHandoff(false)
 			sendDone <- fmt.Errorf("agent session became nil")
 			return
 		}
-		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+		err := as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+		session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
+		sendDone <- err
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
@@ -4117,6 +4124,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// (cc-connect internal task t-20260614-qp7xnl).
 	restoreActiveProviderFromSession(agent, session)
 
+	if notice := e.freshOnColdCache(agent, session); notice != "" {
+		sessions.Save()
+		go e.send(p, replyCtx, notice)
+	}
+
 	// Resume only when we have a concrete saved agent session ID. If the session
 	// is unbound, force a fresh start instead of attaching to whichever CLI
 	// conversation happens to be "latest" in this workspace.
@@ -4148,6 +4160,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			// Clear the stale session ID so CompareAndSetAgentSessionID can
 			// write the new ID, matching the relay fallback at line 12640.
 			session.SetAgentSessionID("", agent.Name())
+			_, canHandoff := agent.(SessionHandoffReader)
+			if canHandoff {
+				session.SetHandoffFrom(startSessionID, "旧会话恢复失败")
+			}
 			sessions.Save()
 			startAt = time.Now()
 			agentSession, err = agent.StartSession(e.ctx, "")
@@ -4156,7 +4172,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				slog.Info("fresh session started after resume failure",
 					"session_key", sessionKey, "elapsed", startElapsed)
 				// maomao fork: never lose context silently.
-				go e.send(p, replyCtx, "⚠️ 旧会话恢复失败，已改开新会话；之前的上下文靠频道记录和进展总结补回")
+				notice := "⚠️ 旧会话恢复失败，已改开新会话；之前的上下文靠频道记录补回"
+				if canHandoff {
+					notice = "⚠️ 旧会话恢复失败，已改开新会话；带上旧会话的压缩摘要和最近对话，再加频道记录补回"
+				}
+				go e.send(p, replyCtx, notice)
 			}
 		}
 		if err != nil {
@@ -6002,10 +6022,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				nextSend := make(chan error, 1)
 				go func() {
 					if as == nil {
+						session.SettleHandoff(false)
 						nextSend <- fmt.Errorf("agent session became nil")
 						return
 					}
-					nextSend <- as.Send(queuedPrompt, queued.messageID, queued.images, queued.files)
+					err := as.Send(queuedPrompt, queued.messageID, queued.images, queued.files)
+					session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
+					nextSend <- err
 				}()
 				pendingSend = nextSend
 
@@ -6321,6 +6344,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
 		state.mu.Unlock()
 		if as == nil || !as.Alive() {
+			session.SettleHandoff(false)
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
@@ -6333,10 +6357,13 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		sendDone := make(chan error, 1)
 		go func() {
 			if as == nil {
+				session.SettleHandoff(false)
 				sendDone <- fmt.Errorf("agent session became nil")
 				return
 			}
-			sendDone <- as.Send(prompt, queued.messageID, queued.images, queued.files)
+			err := as.Send(prompt, queued.messageID, queued.images, queued.files)
+			session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
+			sendDone <- err
 		}()
 
 		var stopTyping func()
@@ -6939,6 +6966,8 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 
 	// Clear old session's agent session ID so it cannot be resumed
 	old := sessions.GetOrCreateActive(msg.SessionKey)
+	oldAgentID := old.GetAgentSessionID()
+	pendingFrom, pendingReason := old.TakeHandoffFrom() // /new twice before a turn
 	old.SetAgentSessionID("", "")
 	old.ClearHistory()
 	sessions.Save()
@@ -6947,7 +6976,18 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	if len(args) > 0 {
 		name = strings.Join(args, " ")
 	}
-	sessions.NewSession(msg.SessionKey, name)
+	fresh := sessions.NewSession(msg.SessionKey, name)
+	// maomao fork: the fresh context inherits the old transcript's tail. The
+	// channel backfill keeps its own window: a message marked seen may never
+	// have reached the old context (dropped from the queue by this /new).
+	if _, ok := e.agent.(SessionHandoffReader); ok {
+		if oldAgentID != "" && oldAgentID != ContinueSession {
+			fresh.SetHandoffFrom(oldAgentID, "用户发了 /new")
+		} else if pendingFrom != "" {
+			fresh.SetHandoffFrom(pendingFrom, pendingReason)
+		}
+		sessions.Save()
+	}
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 	} else {

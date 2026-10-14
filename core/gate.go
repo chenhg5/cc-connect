@@ -414,10 +414,13 @@ func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 	return "（可能相关的 wiki 页，需要时去读）" + strings.Join(wiki, "")
 }
 
-// withTurnBlocks puts the teammate status and wiki pages the
+// withTurnBlocks puts the teammate status, wiki pages and handoff the
 // agent's context does not hold yet before content. Called right before the
 // send, so a message that never reaches the agent marks nothing as sent.
 func (e *Engine) withTurnBlocks(session *Session, sessionKey, query, content string) string {
+	if c := e.handoffBlock(session); c != "" {
+		content = c + "\n\n" + content
+	}
 	if c := e.turnContext(session, sessionKey, query); c != "" {
 		content = c + "\n\n" + content
 	}
