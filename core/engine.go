@@ -10556,7 +10556,7 @@ func (e *Engine) subagentChoices(sub SubagentModelSwitcher, models []ModelOption
 	}
 	sb.WriteString("1. " + inheritLabel + "\n")
 
-	inheritBtn := ButtonOption{Text: inheritLabel, Data: "cmd:/subagent inherit"}
+	inheritBtn := ButtonOption{Text: inheritLabel, Data: "cmd:/model subagent inherit"}
 	if cur == "" {
 		inheritBtn.Text = "▶ " + inheritBtn.Text
 	}
@@ -10574,7 +10574,7 @@ func (e *Engine) subagentChoices(sub SubagentModelSwitcher, models []ModelOption
 			label = "▶ " + label
 		}
 		fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+2, m.Name)
-		row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/subagent switch %d", i+1)})
+		row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model subagent switch %d", i+1)})
 		if len(row) >= 3 {
 			buttons = append(buttons, row)
 			row = nil
@@ -10612,6 +10612,7 @@ func (e *Engine) cmdSubagent(p Platform, msg *Message, args []string, agent Agen
 
 	if strings.EqualFold(strings.TrimSpace(args[0]), "inherit") {
 		sub.SetSubagentModel("")
+		e.resetSessionForEnvChange(msg.SessionKey)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSubagentInherit))
 		return
 	}
@@ -10624,7 +10625,19 @@ func (e *Engine) cmdSubagent(p Platform, msg *Message, args []string, agent Agen
 	}
 	target := models[n-1].Name
 	sub.SetSubagentModel(target)
+	e.resetSessionForEnvChange(msg.SessionKey)
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgModelChanged), target))
+}
+
+// resetSessionForEnvChange drops the agent session so the next turn spawns with
+// the new environment. CLAUDE_CODE_SUBAGENT_MODEL is read at spawn time, and a
+// live session keeps its original env — the same reason /reasoning resets.
+func (e *Engine) resetSessionForEnvChange(sessionKey string) {
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
+	s := e.sessions.GetOrCreateActive(sessionKey)
+	s.SetAgentSessionID("", "")
+	s.ClearHistory()
+	e.sessions.Save()
 }
 
 func parseModelSwitchArgs(args []string) (string, bool) {
@@ -13085,6 +13098,10 @@ func (e *Engine) handleSubagentCardAction(args, sessionKey string) *Card {
 	}
 
 	sub.SetSubagentModel(target)
+	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(sessionKey))
+	active := sessions.GetOrCreateActive(sessionKey)
+	active.SetAgentSessionID("", "")
+	active.ClearHistory()
 	sessions.Save()
 	return e.renderModelCard(sessionKey)
 }
@@ -13965,7 +13982,7 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 
 	cb := NewCard().Title(e.i18n.T(MsgCardTitleModel), "indigo").
 		Markdown(sb.String()).
-		Markdown(e.i18n.T(MsgMainModelLabel)).
+		Markdown("**"+e.i18n.T(MsgMainModelLabel)+"**").
 		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal)
 
 	// Subagent model selector: only for agents that support it. Options are
@@ -13988,7 +14005,7 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 				subInit = v
 			}
 		}
-		cb = cb.Markdown(e.i18n.T(MsgSubagentSelectPlaceholder)).
+		cb = cb.Markdown("**"+e.i18n.T(MsgSubagentSelectPlaceholder)+"**").
 			Select(e.i18n.T(MsgSubagentSelectPlaceholder), subOpts, subInit)
 	}
 

@@ -2598,12 +2598,12 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese: "言語を選択", LangSpanish: "Seleccionar idioma",
 	},
 	MsgMainModelLabel: {
-		LangEnglish: "**Main model**", LangChinese: "**主模型**", LangTraditionalChinese: "**主模型**",
-		LangJapanese: "**メインモデル**", LangSpanish: "**Modelo principal**",
+		LangEnglish: "Main model", LangChinese: "主模型", LangTraditionalChinese: "主模型",
+		LangJapanese: "メインモデル", LangSpanish: "Modelo principal",
 	},
 	MsgSubagentSelectPlaceholder: {
-		LangEnglish: "**Subagent model**", LangChinese: "**Subagent 模型**", LangTraditionalChinese: "**Subagent 模型**",
-		LangJapanese: "**サブエージェントモデル**", LangSpanish: "**Modelo de subagente**",
+		LangEnglish: "Subagent model", LangChinese: "Subagent 模型", LangTraditionalChinese: "Subagent 模型",
+		LangJapanese: "サブエージェントモデル", LangSpanish: "Modelo de subagente",
 	},
 	MsgSubagentInherit: {
 		LangEnglish: "Inherit main model", LangChinese: "跟随主模型", LangTraditionalChinese: "跟隨主模型",

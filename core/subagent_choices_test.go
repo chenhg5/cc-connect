@@ -22,7 +22,7 @@ func TestSubagentChoicesInheritFirst(t *testing.T) {
 	if len(buttons) == 0 || len(buttons[0]) == 0 {
 		t.Fatal("no buttons returned")
 	}
-	if got := buttons[0][0].Data; got != "cmd:/subagent inherit" {
+	if got := buttons[0][0].Data; got != "cmd:/model subagent inherit" {
 		t.Errorf("first button data = %q, want the inherit command", got)
 	}
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
@@ -48,7 +48,7 @@ func TestSubagentChoicesMarksCurrent(t *testing.T) {
 	var sonnetBtn ButtonOption
 	for _, row := range buttons {
 		for _, b := range row {
-			if b.Data == "cmd:/subagent switch 2" {
+			if b.Data == "cmd:/model subagent switch 2" {
 				sonnetBtn = b
 			}
 		}
