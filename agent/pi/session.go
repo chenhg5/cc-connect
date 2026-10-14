@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -333,10 +334,6 @@ func (s *piSession) Send(msg string, messageID string, images []core.ImageAttach
 	}
 	cleanAttachments(attachDir)
 
-	// Issue #1723: images are passed via pi's @<path> argv / message-text
-	// mechanism. pi's processImage loads them as visual inputs and the
-	// bytes never enter our prompt text.
-	//
 	// Issue #1767: non-image files are NOT passed via @<path>. pi's
 	// processFileArguments reads every @<path> file's full UTF-8 contents
 	// and inlines them into the prompt the model sees. For a >~1MB text
@@ -345,17 +342,24 @@ func (s *piSession) Send(msg string, messageID string, images []core.ImageAttach
 	// to disk and tell the model where they live via a plain path
 	// reference; pi's own file-reading tools will load only the bytes the
 	// model actually needs.
-	var imageAtFiles []string
-	if len(images) > 0 {
-		imageAtFiles = append(imageAtFiles, saveImagesToDisk(attachDir, images)...)
-	}
 	var filePaths []string
 	if len(files) > 0 {
 		filePaths = append(filePaths, saveFilesToDisk(attachDir, files)...)
 	}
 
+	// Issue #1723 follow-up: the two transports carry images differently.
+	// json mode passes @<path> argv entries, which pi's processFileArguments
+	// expands into real visual inputs, so the bytes have to exist on disk.
+	// RPC mode sends them inline in the prompt command's `images` field and
+	// never reads the file back, so writing it there would only duplicate
+	// the payload. See sendRPC for why @<path> cannot be used over RPC.
 	if s.rpc {
-		return s.sendRPC(msg, imageAtFiles, filePaths)
+		return s.sendRPC(msg, images, filePaths)
+	}
+
+	var imageAtFiles []string
+	if len(images) > 0 {
+		imageAtFiles = append(imageAtFiles, saveImagesToDisk(attachDir, images)...)
 	}
 	return s.sendJSON(msg, imageAtFiles, filePaths)
 }
@@ -468,25 +472,132 @@ func (s *piSession) writeRPCCommand(cmd map[string]any) error {
 // Events are read asynchronously by readLoopRPC, including agent_end which
 // triggers EventResult.
 //
-// Issue #1723: image paths are embedded into the message text as
-// @<path> references (pi's standard mechanism, parsed the same way as in
-// json mode). The rpc stdin pipe doesn't crash on NUL bytes, but the
-// model still needs to load the images from disk — embedding raw bytes
-// in the message field would give the model text-shaped garbage instead
-// of a real visual input.
+// Issue #1723 follow-up: images are NOT passed as "@<path>" references in
+// rpc mode. pi expands @<path> only for CLI argv — processFileArguments is
+// called from the CLI initial-message path — and it refuses @file arguments
+// outright when running as `--mode rpc`:
+//
+//	Error: @file arguments are not supported in RPC mode
+//
+// A "@<path>" line in the RPC message text therefore reached the model as
+// literal text and the image was never loaded: rpc=true silently degraded
+// to "here is a path string" instead of a visual input. The RPC protocol
+// takes images in a dedicated `images` field instead — each entry is an
+// ImageContent {type, data (base64), mimeType} — which is exactly what pi's
+// own RpcClient.prompt(message, images) sends.
 //
 // Issue #1767: filePaths (non-image attachments) are NOT @<path>'d.
 // pi's processFileArguments would inline their full UTF-8 contents into
 // the message text the model sees; we append a plain "Files saved
 // locally, please read them: …" trailer instead so pi's own file
 // tools load only what the model actually needs.
-func (s *piSession) sendRPC(prompt string, imageAtFiles []string, filePaths []string) error {
+func (s *piSession) sendRPC(prompt string, images []core.ImageAttachment, filePaths []string) error {
+	message := promptWithFileRefs(prompt, filePaths)
 	cmd := map[string]any{
 		"type":    "prompt",
-		"message": composeRPCPrompt(promptWithFileRefs(prompt, filePaths), imageAtFiles),
+		"message": message,
 	}
-	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
+	rpcImages := buildRPCImages(images)
+	if len(rpcImages) > 0 {
+		cmd["images"] = rpcImages
+	}
+	// Log the payload actually being sent: on the attachment path the
+	// message text is only half the command — the base64 images are the
+	// other half, and usually the much larger one.
+	slog.Debug("piSession: sending RPC prompt",
+		"message_bytes", len(message),
+		"images", len(rpcImages),
+		"encoded_image_bytes", encodedImageBytes(rpcImages))
 	return s.writeRPCCommand(cmd)
+}
+
+// buildRPCImages converts inbound image attachments into the ImageContent
+// entries pi's RPC "prompt" command expects:
+//
+//	{"type":"image","data":"<base64>","mimeType":"image/png"}
+//
+// Entries with no bytes are dropped — pi discards an empty base64 payload
+// anyway, and dropping them here keeps the reported image count honest.
+// The declared media type is only trusted when pi can inline it directly;
+// see rpcImageMimeType for the resolution order.
+//
+// Pulled out of sendRPC so the RPC attachment contract is unit-testable
+// without a live pi process — the same reason buildJSONArgs exists for
+// json mode.
+func buildRPCImages(images []core.ImageAttachment) []map[string]string {
+	if len(images) == 0 {
+		return nil
+	}
+	out := make([]map[string]string, 0, len(images))
+	for _, img := range images {
+		if len(img.Data) == 0 {
+			slog.Warn("piSession: skipping RPC image with no bytes", "file", img.FileName)
+			continue
+		}
+		out = append(out, map[string]string{
+			"type":     "image",
+			"data":     base64.StdEncoding.EncodeToString(img.Data),
+			"mimeType": rpcImageMimeType(img),
+		})
+	}
+	return out
+}
+
+// encodedImageBytes reports the total base64 size of an already-built
+// ImageContent list. Logging only.
+func encodedImageBytes(entries []map[string]string) int {
+	total := 0
+	for _, e := range entries {
+		total += len(e["data"])
+	}
+	return total
+}
+
+// rpcImageMimeType picks the media type to declare for an RPC image.
+//
+// The magic bytes are ground truth: pi inlines image/png, image/jpeg,
+// image/webp and image/gif directly and hands every other type to its own
+// converter, so declaring a type whose bytes do not match it would make
+// pi's decoder fail. We therefore sniff first and only fall back to the
+// declared type when the bytes are inconclusive — which is also what keeps
+// formats pi can convert but not inline (e.g. image/bmp) working: they keep
+// their declared media type and reach pi's converter intact.
+func rpcImageMimeType(img core.ImageAttachment) string {
+	if mt := sniffImageMimeType(img.Data); mt != "" {
+		return mt
+	}
+	if declared := normalizeImageMimeType(img.MimeType); declared != "" {
+		return declared
+	}
+	return "image/png"
+}
+
+// normalizeImageMimeType lowercases a media type, drops any parameters
+// ("image/png; charset=binary" → "image/png") and folds the image/jpg
+// alias onto the canonical image/jpeg.
+func normalizeImageMimeType(mimeType string) string {
+	base := strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
+	if base == "image/jpg" {
+		return "image/jpeg"
+	}
+	return base
+}
+
+// sniffImageMimeType identifies an image type from its magic bytes. It
+// mirrors pi's supported inline list exactly, so anything returned here is
+// guaranteed to be inlinable.
+func sniffImageMimeType(data []byte) string {
+	switch {
+	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
+		return "image/png"
+	case bytes.HasPrefix(data, []byte("\xff\xd8\xff")):
+		return "image/jpeg"
+	case bytes.HasPrefix(data, []byte("GIF87a")), bytes.HasPrefix(data, []byte("GIF89a")):
+		return "image/gif"
+	case len(data) >= 12 && bytes.Equal(data[0:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")):
+		return "image/webp"
+	}
+	return ""
 }
 
 // promptWithFileRefs appends a plain-text trailer that tells the model
@@ -507,37 +618,6 @@ func promptWithFileRefs(prompt string, filePaths []string) string {
 		return prompt
 	}
 	return prompt + "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
-}
-
-// composeRPCPrompt builds the rpc-mode message text, appending
-// "@<path>" references for any attachments. Pulled out of sendRPC so
-// the Issue #1723 attachment refactor is unit-testable without a live
-// rpc process.
-//
-// The format is stable on purpose:
-//   - a blank line separates the user's text from the attachment list
-//   - "Attachments:" header mirrors pi's CLI help so users see
-//     consistent wording whether they invoke the binary directly or
-//     via cc-connect
-//   - each @<path> is on its own line in the same order as atFiles
-//
-// When atFiles is empty the original prompt is returned unchanged —
-// we do NOT emit an empty "Attachments:" header, because an
-// assistant model could interpret that as a request to attach
-// something.
-func composeRPCPrompt(prompt string, atFiles []string) string {
-	if len(atFiles) == 0 {
-		return prompt
-	}
-	var b strings.Builder
-	b.WriteString(prompt)
-	b.WriteString("\n\nAttachments:\n")
-	for _, f := range atFiles {
-		b.WriteString("@")
-		b.WriteString(f)
-		b.WriteByte('\n')
-	}
-	return b.String()
 }
 
 // ── Event Handling (shared by both modes) ───────────────────
