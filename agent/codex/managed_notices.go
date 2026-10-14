@@ -140,11 +140,11 @@ func (s *managedSession) handleUsageUpdate(raw json.RawMessage) error {
 				}
 			}
 		}
+		s.mu.Lock()
 		windowKey := key
 		for _, window := range report.Buckets[0].Windows {
-			windowKey += fmt.Sprintf("/%d", window.ResetAtUnix)
+			windowKey += fmt.Sprintf("/%d", s.usageNoticeResetLocked("usage:"+key, window))
 		}
-		s.mu.Lock()
 		if s.usageWarningLevels == nil {
 			s.usageWarningLevels = map[string]int{}
 		}
@@ -171,18 +171,18 @@ func (s *managedSession) emitManagedNotice(key, turnID string, notice *core.Agen
 	if notice.Message == "" && notice.Usage == nil && notice.ToModel == "" {
 		return
 	}
-	// ResetAfterSeconds and changing percentages must not turn one exhausted
-	// quota window into repeated alerts. Recovery explicitly clears its key.
+	// ResetAfterSeconds, changing percentages, and reset timestamp jitter must
+	// not turn one quota cycle into repeated alerts. Recovery clears its key.
+	s.mu.Lock()
 	signature := fmt.Sprint(notice.UsageThreshold) + notice.Kind + notice.Code + notice.Message + notice.FromModel + notice.ToModel
 	if notice.Usage != nil {
 		for _, bucket := range notice.Usage.Buckets {
 			signature += bucket.Name
 			for _, window := range bucket.Windows {
-				signature += fmt.Sprintf("/%d", window.ResetAtUnix)
+				signature += fmt.Sprintf("/%d", s.usageNoticeResetLocked(key, window))
 			}
 		}
 	}
-	s.mu.Lock()
 	if s.noticeKeys == nil {
 		s.noticeKeys = map[string]string{}
 	}
@@ -196,6 +196,29 @@ func (s *managedSession) emitManagedNotice(key, turnID string, notice *core.Agen
 	s.noticeKeys[key] = signature
 	s.mu.Unlock()
 	s.emit(core.Event{Type: core.EventNotice, TurnID: turnID, Notice: notice})
+}
+
+// Caller holds s.mu. Quota reset timestamps can differ by a second between
+// daemon updates. Anchor nearby timestamps to the same notification cycle,
+// rather than rounding into buckets that still split adjacent boundary seconds.
+// The report and usage cache retain the actual latest timestamp.
+func (s *managedSession) usageNoticeResetLocked(key string, window core.UsageWindow) int64 {
+	if window.ResetAtUnix <= 0 {
+		return window.ResetAtUnix
+	}
+	if s.usageNoticeResets == nil {
+		s.usageNoticeResets = map[string]int64{}
+	}
+	windowKey := fmt.Sprintf("%s/%s/%d", key, window.Name, window.WindowSeconds)
+	const resetJitterSeconds = 60
+	if previous, ok := s.usageNoticeResets[windowKey]; ok && window.ResetAtUnix >= previous-resetJitterSeconds && window.ResetAtUnix <= previous+resetJitterSeconds {
+		return previous
+	}
+	if len(s.usageNoticeResets) >= 256 {
+		s.usageNoticeResets = map[string]int64{}
+	}
+	s.usageNoticeResets[windowKey] = window.ResetAtUnix
+	return window.ResetAtUnix
 }
 
 func usageBelowWarning(report *core.UsageReport) bool {

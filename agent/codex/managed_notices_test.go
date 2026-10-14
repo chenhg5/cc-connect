@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -114,5 +115,54 @@ func TestManagedUsageWarningThresholdsDoNotSpam(t *testing.T) {
 		if event.Notice.Kind != "usage_warning" || event.Notice.UsageThreshold != threshold {
 			t.Fatalf("wrong warning: %+v", event.Notice)
 		}
+	}
+}
+
+func TestManagedUsageNotices_ResetTimestampJitterDoesNotRepeat(t *testing.T) {
+	for _, percent := range []int{61, 100} {
+		t.Run(fmt.Sprint(percent), func(t *testing.T) {
+			s := &managedSession{ctx: context.Background(), events: make(chan core.Event, 20), decoder: &appServerSession{}}
+			update := func(used int, reset int64) {
+				t.Helper()
+				raw, err := json.Marshal(map[string]any{"rateLimits": map[string]any{
+					"limitId":   "codex",
+					"primary":   map[string]any{"usedPercent": 7, "resetsAt": 2000000000, "windowDurationMins": 300},
+					"secondary": map[string]any{"usedPercent": used, "resetsAt": reset, "windowDurationMins": 10080},
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := s.handleUsageUpdate(raw); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Real daemon notifications alternate between adjacent reset seconds.
+			// Include a rounding boundary so fixed time buckets cannot hide the bug.
+			for _, reset := range []int64{2000000039, 2000000040, 2000000039, 2000000040} {
+				update(percent, reset)
+			}
+			if got := len(s.events); got != 1 {
+				t.Fatalf("same quota cycle emitted %d notices after reset timestamp jitter, want 1", got)
+			}
+			if got := s.decoder.cachedUsage().Buckets[0].Windows[1].ResetAtUnix; got != 2000000040 {
+				t.Fatalf("usage cache lost the latest reset timestamp: %d", got)
+			}
+			if percent < 100 {
+				update(75, 2000000039)
+				if got := len(s.events); got != 2 {
+					t.Fatalf("higher usage threshold should still alert, got %d notices", got)
+				}
+			}
+			before := len(s.events)
+			update(7, 2000000040)
+			update(percent, 2000000040)
+			if got := len(s.events); got != before+1 {
+				t.Fatalf("recovery must rearm notices: got %d, want %d", got, before+1)
+			}
+			update(percent, 2000000040+10080*60)
+			if got := len(s.events); got != before+2 {
+				t.Fatalf("new quota cycle must alert: got %d, want %d", got, before+2)
+			}
+		})
 	}
 }
