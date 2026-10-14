@@ -109,6 +109,15 @@ func (p *Platform) recordAgentPost(sent *discordgo.Message) {
 	p.turnSent.add(sent.ChannelID, sent.ID)
 }
 
+// MarkFinalReply implements core.FinalReplyMarker.
+func (p *Platform) MarkFinalReply(replyCtx any) any {
+	if rc, ok := replyCtx.(replyContext); ok {
+		rc.agent, rc.final = true, true
+		return rc
+	}
+	return replyCtx
+}
+
 // MarkAgentReply implements core.AgentReplyMarker.
 func (p *Platform) MarkAgentReply(replyCtx any) any {
 	switch rc := replyCtx.(type) {

@@ -7,13 +7,14 @@ import (
 
 // maomao fork: when the team lead @-s a sub to hand it work, the sub's answer must reach the
 // lead even if the model forgets to write <@lead> (2026-10-14: 龙娘 finished a task with
-// "交橘验收" and no @, so 橘 only saw it as context). The first agent post of that turn gets
-// <@lead> prepended; the normal bot→bot path (burst, handoff fuse, gate) does the rest.
+// "交橘验收" and no @, so 橘 only saw it as context). The turn's final answer gets <@lead>
+// prepended (interim posts don't, so the lead isn't woken mid-task); the normal bot→bot path
+// (burst, handoff fuse, gate) does the rest.
 
 const leadReturnTTL = 24 * time.Hour
 
 func (p *Platform) returnToLead(rc replyContext, content string) string {
-	if !rc.agent || rc.lead == "" || rc.messageID == "" || strings.TrimSpace(content) == "" {
+	if !rc.final || rc.lead == "" || rc.messageID == "" || strings.TrimSpace(content) == "" {
 		return content
 	}
 	now := time.Now()
@@ -30,4 +31,17 @@ func (p *Platform) returnToLead(rc replyContext, content string) string {
 		return content
 	}
 	return "<@" + rc.lead + "> " + content
+}
+
+// keepLead is the reply context for a burst of the lead's messages merged into one turn: the
+// latest message's, but still marked as lead-dispatched if any part of the burst @-ed this sub.
+func keepLead(prev, next any) any {
+	n, ok := next.(replyContext)
+	if !ok || n.lead != "" {
+		return next
+	}
+	if pr, ok := prev.(replyContext); ok && pr.lead != "" {
+		n.lead = pr.lead
+	}
+	return n
 }

@@ -5870,14 +5870,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if updater, ok := p.(MessageUpdater); ok {
 						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
 							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
-							if err := p.Send(e.ctx, markAgentReply(p, replyCtx), finalCard); err != nil {
+							if err := p.Send(e.ctx, markFinalReply(p, replyCtx), finalCard); err != nil {
 								slog.Error("failed to send rich card reply", "error", err)
 								return
 							}
 						}
 					}
 				} else {
-					if err := p.Send(e.ctx, markAgentReply(p, replyCtx), finalCard); err != nil {
+					if err := p.Send(e.ctx, markFinalReply(p, replyCtx), finalCard); err != nil {
 						slog.Error("failed to send rich card reply", "error", err)
 						return
 					}
@@ -5898,7 +5898,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if segmentStart < len(textParts) {
 					unsent := strings.Join(textParts[segmentStart:], "")
 					if unsent != "" {
-						if !sendChunksWithStatusFooter(e.ctx, p, markAgentReply(p, replyCtx), unsent, statusFooter, sendWorkspaceWithError) {
+						if !sendChunksWithStatusFooter(e.ctx, p, markFinalReply(p, replyCtx), unsent, statusFooter, sendWorkspaceWithError) {
 							return
 						}
 					}
@@ -5907,7 +5907,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				sp.discard()
 				metaOnly := strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse))
 				if metaOnly != "" || statusFooter != "" {
-					if !sendChunksWithStatusFooter(e.ctx, p, markAgentReply(p, replyCtx), metaOnly, statusFooter, sendWorkspaceWithError) {
+					if !sendChunksWithStatusFooter(e.ctx, p, markFinalReply(p, replyCtx), metaOnly, statusFooter, sendWorkspaceWithError) {
 						return
 					}
 				}
@@ -5916,7 +5916,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Debug("EventResult: finalized via stream preview", "response_len", len(fullResponse), "footer_len", len(statusFooter))
 			} else {
 				slog.Debug("EventResult: sending via p.Send (preview inactive or failed)", "response_len", len(fullResponse), "footer_len", len(statusFooter))
-				if !sendChunksWithStatusFooter(e.ctx, p, markAgentReply(p, replyCtx), fullResponse, statusFooter, sendWorkspaceWithError) {
+				if !sendChunksWithStatusFooter(e.ctx, p, markFinalReply(p, replyCtx), fullResponse, statusFooter, sendWorkspaceWithError) {
 					return
 				}
 			}

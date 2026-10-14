@@ -32,6 +32,7 @@ type replyContext struct {
 	threadID  string
 	agent     bool   // maomao fork: this send carries the agent's own text (core.AgentReplyMarker)
 	lead      string // maomao fork: the team lead @-ed this sub to start the turn; the reply goes back to it
+	final     bool   // maomao fork: this send carries the turn's final answer (core.FinalReplyMarker)
 }
 
 // interactionReplyCtx handles Discord slash command (Application Command)
@@ -704,9 +705,6 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 
 		sessionKey := p.makeSessionKey(m.ChannelID, m.Author.ID)
 		rctx := replyContext{channelID: m.ChannelID, messageID: m.ID}
-		if fromBot && mentioned && p.teamLead != "" && p.teamLead != p.botID && m.Author.ID == p.teamLead {
-			rctx.lead = p.teamLead
-		}
 		// channelKey pins workspace binding to the parent channel even when
 		// thread_isolation rewrites SessionKey to a thread ID. Without it,
 		// effectiveChannelID() would extract the thread ID from SessionKey
@@ -723,6 +721,10 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 				rctx = threadCtx
 				channelKey = parentChannelID
 			}
+		}
+
+		if fromBot && mentioned && p.teamLead != "" && p.teamLead != p.botID && m.Author.ID == p.teamLead {
+			rctx.lead = p.teamLead
 		}
 
 		images, files, audio := classifyAttachments(m.Attachments, downloadURL)
@@ -1751,7 +1753,7 @@ func (p *Platform) holdBotMessage(s *discordgo.Session, m *discordgo.MessageCrea
 		b.ids = append(b.ids, m.ID)
 		b.parts = append(b.parts, msg.Content)
 		b.msg.Images = append(b.msg.Images, msg.Images...)
-		b.msg.ReplyCtx = msg.ReplyCtx
+		b.msg.ReplyCtx = keepLead(b.msg.ReplyCtx, msg.ReplyCtx)
 		b.msg.Mentioned = b.msg.Mentioned || msg.Mentioned
 		b.atMention = b.atMention || atMention
 		b.nameCall = b.nameCall || nameCall

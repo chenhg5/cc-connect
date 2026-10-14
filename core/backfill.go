@@ -35,6 +35,21 @@ type AgentReplyMarker interface {
 	MarkAgentReply(replyCtx any) any
 }
 
+// FinalReplyMarker is implemented by platforms that treat a turn's final answer differently from
+// its interim posts (maomao fork: a sub's final answer to lead-dispatched work pings the lead).
+type FinalReplyMarker interface {
+	MarkFinalReply(replyCtx any) any
+}
+
+// markFinalReply marks replyCtx as carrying the turn's final answer (and agent output).
+func markFinalReply(p Platform, replyCtx any) any {
+	replyCtx = markAgentReply(p, replyCtx)
+	if m, ok := p.(FinalReplyMarker); ok {
+		return m.MarkFinalReply(replyCtx)
+	}
+	return replyCtx
+}
+
 // markAgentReply marks replyCtx as carrying agent output when p supports it.
 func markAgentReply(p Platform, replyCtx any) any {
 	if m, ok := p.(AgentReplyMarker); ok {
