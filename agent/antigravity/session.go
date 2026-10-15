@@ -36,6 +36,7 @@ type antigravitySession struct {
 	wg               sync.WaitGroup
 	alive            atomic.Bool
 	permissionBridge *agyPermissionBridge
+	cachedUsage      func() *core.UsageReport // account quota view from the Agent (maomao fork)
 }
 
 func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
@@ -376,4 +377,14 @@ func (as *antigravitySession) Close() error {
 		slog.Warn("antigravitySession: close timed out")
 	}
 	return nil
+}
+
+// CachedUsage implements core.CachedUsageReporter (maomao fork). It never
+// waits on the network: it returns the Agent's last quota snapshot and lets
+// the Agent refresh it in the background.
+func (s *antigravitySession) CachedUsage() *core.UsageReport {
+	if s.cachedUsage == nil {
+		return nil
+	}
+	return s.cachedUsage()
 }

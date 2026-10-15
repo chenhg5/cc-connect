@@ -137,6 +137,15 @@ func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error) {
 	return nil, ctx.Err()
 }
 
+// CachedUsage returns the last quota snapshot without waiting (nil before the
+// first fetch lands) and starts a background refresh if none is running.
+func (a *Agent) CachedUsage() *core.UsageReport {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // never wait: a cold start returns nil now and fills the cache for the next reply
+	r, _ := a.GetUsage(ctx)
+	return r
+}
+
 func (q *quotaState) refresh(cmd, model string, done chan struct{}) {
 	ctx, cancel := context.WithTimeout(context.Background(), antigravityQuotaFetchTimeout)
 	defer cancel()

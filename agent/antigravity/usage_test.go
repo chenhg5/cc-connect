@@ -245,3 +245,16 @@ func TestGetUsage_WarmCacheReturnsImmediately(t *testing.T) {
 	}
 	t.Fatalf("background refresh never landed: %+v", r.Buckets[0].Windows)
 }
+
+func TestSessionCachedUsageNeverWaits(t *testing.T) {
+	s := &antigravitySession{}
+	if s.CachedUsage() != nil {
+		t.Fatal("session without a quota view must report nil")
+	}
+	want := &core.UsageReport{Buckets: []core.UsageBucket{{Name: "x"}}}
+	s.cachedUsage = func() *core.UsageReport { return want }
+	var _ core.CachedUsageReporter = s
+	if s.CachedUsage() != want {
+		t.Fatal("session must pass through the agent's cached quota")
+	}
+}

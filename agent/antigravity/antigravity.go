@@ -221,7 +221,14 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newAntigravitySession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout)
+	s, err := newAntigravitySession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout)
+	if err != nil {
+		return nil, err
+	}
+	// maomao fork: the reply footer reads quota from the session (CachedUsage);
+	// agy's account quota lives on the Agent, so hand the session a view of it.
+	s.cachedUsage = a.CachedUsage
+	return s, nil
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
