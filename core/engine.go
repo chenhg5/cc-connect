@@ -425,6 +425,9 @@ type Engine struct {
 	coldFreshIdle      time.Duration
 	coldFreshMinTokens int
 	resetOnIdle        time.Duration
+	// Per-session model overrides (maomao fork, see session_models.go)
+	sessionModelsMu sync.RWMutex
+	sessionModels   map[string]string
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
@@ -4103,6 +4106,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 		inj.SetSessionEnv(envVars)
 	}
+	e.applySessionModel(agent, ccKey)
 
 	// Inject platform-specific formatting instructions into the agent's system prompt.
 	// Clear the prompt first so instructions from a previous platform don't leak
@@ -15944,6 +15948,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 		}
 		inj.SetSessionEnv(envVars)
 	}
+	e.applySessionModel(agent, relaySessionKey)
 
 	// Use the engine context (not the relay timeout context) so that the
 	// agent process is not killed when the relay deadline fires. The relay

@@ -3474,3 +3474,18 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestLoad_ParsesSessionModels(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithResetOnIdleFixture+`
+[projects.session_models]
+"discord:1560168728325529721" = "gpt-6-luna"
+`)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	got := cfg.Projects[0].SessionModels
+	if len(got) != 1 || got["discord:1560168728325529721"] != "gpt-6-luna" {
+		t.Fatalf("session_models = %#v", got)
+	}
+}

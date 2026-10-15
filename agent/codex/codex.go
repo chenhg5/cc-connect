@@ -48,6 +48,7 @@ type Agent struct {
 	activeIdx       int      // -1 = no provider set
 	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv      []string
+	sessionModel    string // per-session override from [projects.session_models]; "" = default
 	mu              sync.RWMutex
 }
 
@@ -462,6 +463,14 @@ func (a *Agent) SetSessionEnv(env []string) {
 	a.sessionEnv = env
 }
 
+// SetSessionModel sets the model the next StartSession uses instead of the
+// agent model ("" = agent model). The engine calls it before each start.
+func (a *Agent) SetSessionModel(model string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionModel = strings.TrimSpace(model)
+}
+
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
@@ -488,6 +497,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			model = m
 		}
 		baseURL = a.providers[a.activeIdx].BaseURL
+	}
+	if a.sessionModel != "" {
+		model = a.sessionModel
 	}
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()

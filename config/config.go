@@ -492,6 +492,11 @@ type ProjectConfig struct {
 	Heartbeat                    HeartbeatConfig      `toml:"heartbeat"`
 	AutoCompress                 AutoCompressConfig   `toml:"auto_compress"`
 	ColdCacheFresh               ColdCacheFreshConfig `toml:"cold_cache_fresh"`
+	// SessionModels (maomao fork) maps a cc-connect session key (e.g.
+	// "discord:<channel id>") to the model that session runs on; sessions not
+	// listed use the agent's model. Only agents implementing
+	// core.SessionModelInjector (codex) honor it.
+	SessionModels map[string]string `toml:"session_models,omitempty"`
 	// ResetOnIdleMins automatically rotates to a new cc-connect session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.

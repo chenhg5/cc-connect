@@ -64,6 +64,14 @@ type SessionEnvInjector interface {
 	SetSessionEnv(env []string)
 }
 
+// SessionModelInjector is an optional interface for agents that can start a
+// session on a model other than the agent-wide default. The engine calls it
+// right before every StartSession with the model mapped to that session key in
+// [projects.session_models], or "" for the agent default (maomao fork).
+type SessionModelInjector interface {
+	SetSessionModel(model string)
+}
+
 // FormattingInstructionProvider is an optional interface for platforms that
 // provide platform-specific formatting instructions for the agent system prompt
 // (e.g., Slack mrkdwn vs standard Markdown).
