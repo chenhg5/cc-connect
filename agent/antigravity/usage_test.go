@@ -157,9 +157,14 @@ func TestGetUsage_RefreshesTokenAndFetchesQuota(t *testing.T) {
 	if r.Provider != "antigravity" || r.Buckets[0].Name != "Gemini Models" {
 		t.Fatalf("report = %+v", r)
 	}
-	// Second call reuses the in-memory token (no new refresh needed).
+	// Second call answers from cache and refreshes in the background,
+	// reusing the in-memory token (the token server would reject "old").
 	if _, err := a.GetUsage(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for quotaCalls.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
 	}
 	if quotaCalls.Load() != 2 {
 		t.Errorf("quota calls = %d, want 2", quotaCalls.Load())
@@ -181,4 +186,62 @@ func TestGoogleClientSecretRegexShape(t *testing.T) {
 	if !re.MatchString("GOCSPX-" + strings.Repeat("Z", googleClientSecretBody)) {
 		t.Fatal("regex rejects a well-formed secret")
 	}
+}
+
+// Once a report is cached, GetUsage must answer at once and refresh in the
+// background, so only the cold start ever waits on the network.
+func TestGetUsage_WarmCacheReturnsImmediately(t *testing.T) {
+	home := t.TempDir()
+	cliDir := filepath.Join(home, ".gemini", "antigravity-cli")
+	os.MkdirAll(filepath.Join(cliDir, "cache"), 0o700)
+	os.WriteFile(filepath.Join(cliDir, "cache", "default_project_id.txt"), []byte("p"), 0o600)
+	tokFile, _ := json.Marshal(map[string]any{
+		"token": map[string]string{"access_token": "live", "expiry": time.Now().Add(time.Hour).Format(time.RFC3339Nano)},
+	})
+	os.WriteFile(filepath.Join(cliDir, "antigravity-oauth-token"), tokFile, 0o600)
+
+	release := make(chan struct{})
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			io.WriteString(w, sampleQuotaSummary) // 5h remaining 0.9401266
+			return
+		}
+		<-release // later fetches are slow
+		io.WriteString(w, strings.Replace(sampleQuotaSummary, "0.9401266", "0.5", 1))
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	a := &Agent{cmd: "agy", model: "gemini-3.8-flash-high", activeIdx: -1}
+	a.quota.homeDir = home
+	a.quota.quotaURL = srv.URL
+
+	if _, err := a.GetUsage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	r, err := a.GetUsage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("warm call waited %v for the network", d)
+	}
+	if got := r.Buckets[0].Windows[1].UsedPercent; got != 6 {
+		t.Errorf("warm call 5h used = %d, want cached 6", got)
+	}
+	release <- struct{}{}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		r, _ = a.GetUsage(context.Background())
+		if r.Buckets[0].Windows[1].UsedPercent == 50 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("background refresh never landed: %+v", r.Buckets[0].Windows)
 }

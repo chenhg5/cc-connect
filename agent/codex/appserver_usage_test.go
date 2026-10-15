@@ -56,3 +56,29 @@ func TestMergeUsage_SparseUpdateKeepsOtherWindow(t *testing.T) {
 		t.Errorf("windows = %+v", w)
 	}
 }
+
+// The session-start read names the bucket (limitName) while rolling updates
+// carry only limitId; they must land in the same bucket.
+func TestMergeUsage_MatchesByLimitIDNotName(t *testing.T) {
+	s := &appServerSession{}
+	s.storeUsage(mapAppServerRateLimits(decodeRateLimits(t, `{"rateLimitsByLimitId":{"codex":{"limitId":"codex","limitName":"Codex","primary":{"usedPercent":9,"windowDurationMins":300},"secondary":{"usedPercent":41,"windowDurationMins":10080},"planType":"plus"}}}`)))
+	s.mergeUsage(mapAppServerRateLimits(decodeRateLimits(t, `{"rateLimits":{"limitId":"codex","primary":{"usedPercent":15,"windowDurationMins":300},"secondary":{"usedPercent":43,"windowDurationMins":10080}}}`)))
+	r := s.CachedUsage()
+	if r == nil || len(r.Buckets) != 1 {
+		t.Fatalf("want one bucket, got %+v", r)
+	}
+	b := r.Buckets[0]
+	if b.ID != "codex" || b.Name != "Codex" {
+		t.Errorf("bucket id/name = %q/%q", b.ID, b.Name)
+	}
+	if b.Windows[0].UsedPercent != 15 || b.Windows[1].UsedPercent != 43 {
+		t.Errorf("windows not updated: %+v", b.Windows)
+	}
+}
+
+func TestMapAppServerRateLimits_ByLimitIDKeyFillsID(t *testing.T) {
+	r := mapAppServerRateLimits(decodeRateLimits(t, `{"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":1,"windowDurationMins":300}}}}`))
+	if len(r.Buckets) != 1 || r.Buckets[0].ID != "codex" {
+		t.Fatalf("buckets = %+v", r.Buckets)
+	}
+}

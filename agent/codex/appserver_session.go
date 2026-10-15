@@ -1397,7 +1397,11 @@ func mapAppServerRateLimits(payload appServerRateLimitsResponse) *core.UsageRepo
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			snapshots = append(snapshots, payload.RateLimitsByLimitID[key])
+			snapshot := payload.RateLimitsByLimitID[key]
+			if strings.TrimSpace(snapshot.LimitID) == "" {
+				snapshot.LimitID = key
+			}
+			snapshots = append(snapshots, snapshot)
 		}
 	} else if payload.RateLimits.LimitID != "" || payload.RateLimits.Primary != nil || payload.RateLimits.Secondary != nil || payload.RateLimits.Credits != nil {
 		snapshots = append(snapshots, payload.RateLimits)
@@ -1430,6 +1434,7 @@ func mapAppServerRateLimits(payload appServerRateLimitsResponse) *core.UsageRepo
 		}
 
 		report.Buckets = append(report.Buckets, core.UsageBucket{
+			ID:           strings.TrimSpace(snapshot.LimitID),
 			Name:         appServerBucketName(snapshot),
 			Allowed:      !limitReached,
 			LimitReached: limitReached,

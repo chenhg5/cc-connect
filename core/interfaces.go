@@ -537,6 +537,9 @@ type UsageReport struct {
 
 // UsageBucket groups one logical quota, such as standard requests or code review.
 type UsageBucket struct {
+	// ID is the provider's stable bucket id (e.g. Codex limitId), used to
+	// merge updates; Name is for display and may be absent in some updates.
+	ID           string
 	Name         string
 	Allowed      bool
 	LimitReached bool

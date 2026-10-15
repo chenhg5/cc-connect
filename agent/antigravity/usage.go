@@ -83,10 +83,11 @@ type quotaState struct {
 	now        func() time.Time
 }
 
-// GetUsage implements core.UsageReporter. The fetch runs in the background
-// with its own timeout; if ctx expires first we return the last good report
-// (if any) and the fetch still fills the cache for the next call. Call rate
-// is bounded by the engine's reply-footer usage cache.
+// GetUsage implements core.UsageReporter. Every call starts (or joins) one
+// background fetch with its own timeout. With a cached report it returns
+// that immediately (stale by at most one call); only a cold start waits, up
+// to ctx, and a fetch that outlives ctx still fills the cache. Call rate is
+// bounded by the engine's reply-footer usage cache.
 func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error) {
 	a.mu.RLock()
 	usingProvider := a.activeIdx >= 0 && a.activeIdx < len(a.providers)
@@ -110,8 +111,16 @@ func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error) {
 		q.inflight = done
 		go q.refresh(cmd, model, done)
 	}
+	if q.report != nil {
+		// Warm cache: answer now, the refresh above lands for the next call,
+		// so a reply never waits on the network once we have a snapshot.
+		cached := cloneReport(q.report)
+		q.mu.Unlock()
+		return cached, nil
+	}
 	q.mu.Unlock()
 
+	// Cold start: wait for the first fetch, bounded by ctx.
 	select {
 	case <-done:
 	case <-ctx.Done():

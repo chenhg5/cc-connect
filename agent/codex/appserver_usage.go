@@ -47,19 +47,16 @@ func mergeUsageReports(base, update *core.UsageReport) *core.UsageReport {
 		merged.Credits = &credits
 	}
 	for _, ub := range update.Buckets {
-		idx := -1
-		for i := range merged.Buckets {
-			if merged.Buckets[i].Name == ub.Name {
-				idx = i
-				break
-			}
-		}
+		idx := matchUsageBucket(merged.Buckets, ub)
 		if idx < 0 {
 			ub.Windows = append([]core.UsageWindow(nil), ub.Windows...)
 			merged.Buckets = append(merged.Buckets, ub)
 			continue
 		}
 		dst := &merged.Buckets[idx]
+		if dst.ID == "" {
+			dst.ID = ub.ID
+		}
 		for _, uw := range ub.Windows {
 			replaced := false
 			for j := range dst.Windows {
@@ -83,4 +80,31 @@ func mergeUsageReports(base, update *core.UsageReport) *core.UsageReport {
 		dst.Allowed = !limitReached
 	}
 	return merged
+}
+
+// matchUsageBucket finds the cached bucket an update belongs to. Codex
+// limitId is the stable key: the initial account/rateLimits/read may carry a
+// limitName ("display name") while rolling updates carry only limitId, so
+// matching on the display name would append a second, never-updated bucket.
+// Name is only a fallback when either side lacks an id.
+func matchUsageBucket(buckets []core.UsageBucket, update core.UsageBucket) int {
+	if update.ID != "" {
+		for i := range buckets {
+			if buckets[i].ID == update.ID {
+				return i
+			}
+		}
+		for i := range buckets {
+			if buckets[i].ID == "" && buckets[i].Name == update.Name {
+				return i
+			}
+		}
+		return -1
+	}
+	for i := range buckets {
+		if buckets[i].Name == update.Name {
+			return i
+		}
+	}
+	return -1
 }
