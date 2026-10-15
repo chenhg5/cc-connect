@@ -21,7 +21,7 @@ func (p *historyPlatform) ChannelHistory(_, beforeID string, limit int) ([]Chann
 	}
 	var out []ChannelHistoryMessage
 	for _, m := range p.history {
-		if snowflakeAfter(beforeID, m.ID) {
+		if beforeID == "" || snowflakeAfter(beforeID, m.ID) {
 			out = append(out, m)
 		}
 	}
@@ -82,6 +82,29 @@ func TestChannelBackfill_ShowsMissedMessagesInOrder(t *testing.T) {
 	markSeen(session, msg)
 	if session.GetLastSeenMsgID() != "107" {
 		t.Fatalf("folded burst should advance last seen, got %q", session.GetLastSeenMsgID())
+	}
+}
+
+func TestCronChannelBackfill_ReadsUpToNewestAndMarksSeen(t *testing.T) {
+	now := time.Now()
+	p := &historyPlatform{history: []ChannelHistoryMessage{
+		{ID: "100", Author: "zuiho", Content: "看过了", Time: now},
+		{ID: "101", Author: "鲸鱼娘", IsBot: true, Content: "注册邮箱被拦了好几次", Time: now},
+	}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	session := e.sessions.GetOrCreateActive("discord:c1")
+	session.SetLastSeenMsgID("100")
+
+	got := e.cronChannelBackfill(p, "discord:c1", session)
+	if strings.Contains(got, "看过了") || !strings.Contains(got, "鲸鱼娘（bot）: 注册邮箱被拦了好几次") {
+		t.Fatalf("cron turn should see what was said since last seen:\n%s", got)
+	}
+	if session.GetLastSeenMsgID() != "101" {
+		t.Fatalf("last seen = %q, want 101", session.GetLastSeenMsgID())
+	}
+	if again := e.cronChannelBackfill(p, "discord:c1", session); again != "" {
+		t.Fatalf("nothing new, want empty, got:\n%s", again)
 	}
 }
 

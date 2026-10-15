@@ -1654,6 +1654,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 	e.teamNoteTurn(msg, session) // maomao fork: scheduled turns show on the team status board too
+	if back := e.cronChannelBackfill(targetPlatform, sessionKey, session); back != "" {
+		msg.Content = back + "\n\n（定时任务，回这条）\n" + msg.Content
+	}
 
 	iKey := sessionKey
 	if workspaceDir != "" {
@@ -1852,6 +1855,9 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 	e.teamNoteTurn(msg, session) // maomao fork: scheduled turns show on the team status board too
+	if back := e.cronChannelBackfill(targetPlatform, sessionKey, session); back != "" {
+		msg.Content = back + "\n\n（定时任务，回这条）\n" + msg.Content
+	}
 
 	iKey := sessionKey
 	if workspaceDir != "" {

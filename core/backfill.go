@@ -83,14 +83,42 @@ func snowflakeAfter(a, b string) bool {
 // (between its last-seen mark and msg), and ok=false when the platform cannot
 // read history or the read failed — callers then fall back to the gate buffer.
 func (e *Engine) channelBackfill(p Platform, msg *Message, session *Session) (string, bool) {
-	r, ok := p.(ChannelHistoryReader)
-	if !ok || msg.ChannelID == "" || msg.MessageID == "" {
+	if msg.MessageID == "" {
 		return "", false
 	}
-	msgs, err := r.ChannelHistory(msg.ChannelID, msg.MessageID, backfillFetchLimit)
+	back, _, ok := e.channelBackfillBefore(p, msg.ChannelID, msg.MessageID, session)
+	return back, ok
+}
+
+// cronChannelBackfill is channelBackfill for a scheduled turn, which has no triggering message:
+// it reads up to the newest post in the channel and marks it seen. Without it a cron turn never
+// sees what was just said in its channel (2026-10-15: the bots coming home at 19:00 could not
+// hear each other, so nobody could answer what the one before had run into).
+func (e *Engine) cronChannelBackfill(p Platform, sessionKey string, session *Session) string {
+	back, newest, ok := e.channelBackfillBefore(p, extractChannelID(sessionKey), "", session)
+	if !ok {
+		return ""
+	}
+	if newest != "" {
+		markSeen(session, &Message{MessageID: newest})
+	}
+	return back
+}
+
+// channelBackfillBefore formats the messages before beforeID ("" = up to the newest) that the
+// session has not seen; newest is the ID of the newest message read.
+func (e *Engine) channelBackfillBefore(p Platform, channelID, beforeID string, session *Session) (back, newest string, ok bool) {
+	r, ok := p.(ChannelHistoryReader)
+	if !ok || channelID == "" {
+		return "", "", false
+	}
+	msgs, err := r.ChannelHistory(channelID, beforeID, backfillFetchLimit)
 	if err != nil {
-		slog.Warn("backfill: read channel history failed", "channel", msg.ChannelID, "error", err)
-		return "", false
+		slog.Warn("backfill: read channel history failed", "channel", channelID, "error", err)
+		return "", "", false
+	}
+	if len(msgs) > 0 {
+		newest = msgs[len(msgs)-1].ID
 	}
 	lastSeen := session.GetLastSeenMsgID()
 	var lines []string
@@ -128,7 +156,7 @@ func (e *Engine) channelBackfill(p Platform, msg *Message, session *Session) (st
 		lines = append(lines, fmt.Sprintf("[%s] %s: %s", m.Time.Local().Format("15:04"), who, text))
 	}
 	if len(lines) == 0 {
-		return "", true
+		return "", newest, true
 	}
 	// Keep the newest messages when over budget.
 	total := 0
@@ -146,7 +174,7 @@ func (e *Engine) channelBackfill(p Platform, msg *Message, session *Session) (st
 	if truncated {
 		head = "（频道里你上次看到之后的消息，按时间顺序；更早的还有，没列出来，需要时去翻）"
 	}
-	return head + "\n" + strings.Join(lines[start:], "\n"), true
+	return head + "\n" + strings.Join(lines[start:], "\n"), newest, true
 }
 
 // markSeen records msg as the newest message this session has seen.
