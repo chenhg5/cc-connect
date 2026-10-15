@@ -90,6 +90,9 @@ func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	if !contains(args, "--verbose") {
 		t.Fatalf("expected configured extra args, got: %v", args)
 	}
+	if !contains(args, "--output-format") || !contains(args, "stream-json") {
+		t.Fatalf("expected stream-json output, got: %v", args)
+	}
 	if contains(args, "-m") || contains(args, "--model") {
 		t.Fatalf("did not expect model flags in args, got: %v", args)
 	}
@@ -251,6 +254,71 @@ func TestSendDoesNotHoldStdinOpen(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timeout waiting for agy process to receive stdin EOF")
 		}
+	}
+}
+
+// A fresh session learns the conversation id from agy's own stream-json
+// output and resumes it on the next turn.
+func TestSendLearnsConversationIDFromStream(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	cmdPath := filepath.Join(dir, "fake-agy.sh")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> " + argsPath + "\necho '---' >> " + argsPath + "\n" +
+		`echo '{"event":"init","conversation_id":"conv-1","init":{}}'` + "\n" +
+		`echo '{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"hel"}}'` + "\n" +
+		`echo '{"event":"step_update","step_update":{"conversation_id":"conv-1","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"lo\\n"}}'` + "\n" +
+		`echo '{"event":"result","result":{"conversation_id":"conv-1","status":"SUCCESS","response":"hello\\n"}}'` + "\n"
+	if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, dir, "", "yolo", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	turn := func(prompt string) (text, sid, resultSID string) {
+		if err := s.Send(prompt, "", nil, nil); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case ev := <-s.Events():
+				switch ev.Type {
+				case core.EventText:
+					text += ev.Content
+					if ev.SessionID != "" {
+						sid = ev.SessionID
+					}
+				case core.EventError:
+					t.Fatalf("unexpected error: %v", ev.Error)
+				case core.EventResult:
+					return text, sid, ev.SessionID
+				}
+			case <-deadline:
+				t.Fatal("timeout")
+			}
+		}
+	}
+	text, sid, resultSID := turn("first")
+	if text != "hello\n" || sid != "conv-1" || resultSID != "conv-1" {
+		t.Fatalf("first turn: text=%q sid=%q result=%q", text, sid, resultSID)
+	}
+	if _, sid, _ := turn("second"); sid != "" {
+		t.Errorf("second turn re-announced the same id %q", sid)
+	}
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := strings.Split(string(data), "---\n")
+	if strings.Contains(runs[0], "--conversation") {
+		t.Errorf("first turn should not resume: %q", runs[0])
+	}
+	if !strings.Contains(runs[1], "--conversation\nconv-1\n") {
+		t.Errorf("second turn should resume conv-1: %q", runs[1])
 	}
 }
 
