@@ -7264,11 +7264,17 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 			parts = append(parts, effort)
 			hasStatus = true
 		}
-		if contextFirst {
-			// Already added before model so "[ctx]" stays on the same footer line.
-		} else if contextLeft != "" {
-			parts = append(parts, contextLeft)
-			hasStatus = true
+		if contextFirst || contextLeft != "" {
+			if !contextFirst {
+				// contextFirst: already added before model so "[ctx]" stays on the same footer line.
+				parts = append(parts, contextLeft)
+				hasStatus = true
+			}
+			// Quota rides along only when the session already holds it
+			// (no network); agents without CachedUsage are unchanged.
+			if quota := replyFooterCachedQuotaText(session, e.i18n); quota != "" {
+				parts = append(parts, quota)
+			}
 		} else if usage := e.replyFooterUsageText(session, agent); usage != "" {
 			parts = append(parts, usage)
 			hasStatus = true
@@ -7317,6 +7323,9 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 		model := replyFooterModel(session, agent)
 		effort := replyFooterReasoningEffort(session, agent)
 		if line := buildClaudeStatusLineFooter(model, effort, usage); line != "" {
+			if quota := replyFooterCachedQuotaText(session, e.i18n); quota != "" {
+				line += " · " + quota
+			}
 			lines = append(lines, line)
 		} else if fallback := e.replyFooterUsageText(session, agent); fallback != "" {
 			// fallback for non-claudecode agents that still expose UsageReporter
@@ -7500,6 +7509,9 @@ func (e *Engine) replyFooterUsageText(session AgentSession, agent Agent) string 
 	ctx, cancel := context.WithTimeout(e.ctx, replyFooterUsageTimeout)
 	defer cancel()
 
+	if text := replyFooterCachedQuotaText(session, e.i18n); text != "" {
+		return text
+	}
 	if session != nil {
 		if reporter, ok := session.(UsageReporter); ok {
 			if report, err := reporter.GetUsage(ctx); err == nil {
@@ -7533,22 +7545,89 @@ func (e *Engine) replyFooterUsageText(session AgentSession, agent Agent) string 
 	return text
 }
 
+// replyFooterCachedQuotaText formats the quota a session already holds
+// (CachedUsageReporter). It never does I/O, so it is safe to call on every
+// reply. Returns "" when the session has no such data.
+func replyFooterCachedQuotaText(session AgentSession, i18n *I18n) string {
+	if session == nil {
+		return ""
+	}
+	reporter, ok := session.(CachedUsageReporter)
+	if !ok {
+		return ""
+	}
+	return formatReplyFooterUsage(reporter.CachedUsage(), i18n)
+}
+
+// formatReplyFooterUsage renders the quota segment of the reply footer:
+//
+//	zh: "5h 剩 94% · 周 92%"   en: "5h 94% left · wk 92%"
+//
+// The first window carries the "left" wording; a following window (weekly)
+// shows only its label and percent. Returns "" without a usable window.
 func formatReplyFooterUsage(report *UsageReport, i18n *I18n) string {
 	if report == nil || i18n == nil {
 		return ""
 	}
-	window, _ := selectUsageWindows(report)
-	if window == nil {
+	primary, secondary := selectUsageWindows(report)
+	var windows []*UsageWindow
+	for _, w := range []*UsageWindow{primary, secondary} {
+		if w != nil {
+			windows = append(windows, w)
+		}
+	}
+	if len(windows) == 0 {
 		return ""
 	}
-	remaining := 100 - window.UsedPercent
-	if remaining < 0 {
-		remaining = 0
+	lang := i18n.CurrentLang()
+	parts := make([]string, 0, len(windows))
+	for i, w := range windows {
+		remaining := 100 - w.UsedPercent // percent scale
+		if remaining < 0 {
+			remaining = 0
+		}
+		if remaining > 100 { // percent scale
+			remaining = 100 // percent scale
+		}
+		label := usageWindowShortLabel(lang, w.WindowSeconds)
+		switch {
+		case label == "":
+			parts = append(parts, i18n.Tf(MsgReplyFooterRemaining, remaining))
+		case i == 0:
+			parts = append(parts, i18n.Tf(MsgReplyFooterQuotaRemaining, label, remaining))
+		default:
+			parts = append(parts, fmt.Sprintf("%s %d%%", label, remaining))
+		}
 	}
-	if remaining > 100 {
-		remaining = 100
+	return strings.Join(parts, " · ")
+}
+
+// usageWindowShortLabel is the compact footer label for a quota window
+// ("5h", "周"/"wk", or "<n>h"/"<n>d" for other whole-hour windows).
+func usageWindowShortLabel(lang Language, seconds int) string {
+	const hour = 3600     // seconds per hour
+	const day = 24 * hour // seconds per day
+	const week = 7 * day  // seconds per week (604800, same as selectUsageWindows)
+	switch {
+	case seconds <= 0:
+		return ""
+	case seconds == week:
+		switch lang {
+		case LangChinese:
+			return "周"
+		case LangTraditionalChinese, LangJapanese:
+			return "週"
+		case LangSpanish:
+			return "sem"
+		default:
+			return "wk"
+		}
+	case seconds%day == 0:
+		return fmt.Sprintf("%dd", seconds/day)
+	case seconds%hour == 0:
+		return fmt.Sprintf("%dh", seconds/hour)
 	}
-	return i18n.Tf(MsgReplyFooterRemaining, remaining)
+	return ""
 }
 
 func replyFooterSessionContextUsage(session AgentSession) *ContextUsage {
@@ -7733,6 +7812,9 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 			formatStatusTokenCount(usage.CacheCreationInputTokens),
 			formatStatusTokenCount(usage.CachedInputTokens)))
 		line1Parts = append(line1Parts, fmt.Sprintf("ctx %d%%", pct))
+		if quota := replyFooterCachedQuotaText(session, e.i18n); quota != "" {
+			line1Parts = append(line1Parts, quota)
+		}
 		line1 = strings.Join(line1Parts, " · ")
 	}
 

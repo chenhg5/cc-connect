@@ -2194,6 +2194,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "残り %d%%",
 		LangSpanish:            "%d%% restante",
 	},
+	MsgReplyFooterQuotaRemaining: {
+		LangEnglish:            "%s %d%% left",
+		LangChinese:            "%s 剩 %d%%",
+		LangTraditionalChinese: "%s 剩 %d%%",
+		LangJapanese:           "%s 残り %d%%",
+		LangSpanish:            "%s %d%% restante",
+	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",
 		LangChinese:            "当前模型: %s",
@@ -4219,3 +4226,7 @@ func (i *I18n) Tf(key MsgKey, args ...interface{}) string {
 	template := i.T(key)
 	return fmt.Sprintf(template, args...)
 }
+
+// MsgReplyFooterQuotaRemaining renders "<window> <n>% left" for the first
+// quota window in the reply footer (see formatReplyFooterUsage).
+const MsgReplyFooterQuotaRemaining MsgKey = "reply_footer_quota_remaining"

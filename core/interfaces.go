@@ -516,6 +516,14 @@ type UsageReporter interface {
 	GetUsage(ctx context.Context) (*UsageReport, error)
 }
 
+// CachedUsageReporter is an optional interface for running agent sessions
+// that already receive quota snapshots as part of normal turns (e.g. Codex
+// app-server rate-limit notifications). CachedUsage must not do I/O; the
+// reply footer appends it next to the context line on every reply.
+type CachedUsageReporter interface {
+	CachedUsage() *UsageReport
+}
+
 // UsageReport is a provider-neutral quota snapshot returned by UsageReporter.
 type UsageReport struct {
 	Provider  string

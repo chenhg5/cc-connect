@@ -41,6 +41,7 @@ type Agent struct {
 	activeIdx    int
 	sessionEnv   []string
 	mu           sync.RWMutex
+	quota        quotaState // account quota cache, see usage.go
 }
 
 func New(opts map[string]any) (core.Agent, error) {

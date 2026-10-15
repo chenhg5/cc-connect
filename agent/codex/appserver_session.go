@@ -1188,7 +1188,7 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "account/rateLimits/updated":
 		var notif appServerRateLimitsResponse
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.storeUsage(mapAppServerRateLimits(notif))
+			s.mergeUsage(mapAppServerRateLimits(notif))
 		}
 
 	case "thread/tokenUsage/updated":
