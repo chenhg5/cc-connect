@@ -1810,6 +1810,20 @@ func TestHandoffPolicy(t *testing.T) {
 	if d := noteHandoff(ch, long, jing, lead, "again", false); d.verdict != handoffDeliver || d.rounds != 1 {
 		t.Fatalf("pair count should restart after escalation: %+v", d)
 	}
+	// 后宅 allows more bounces before the lead is called in.
+	resetBotHops(houzhaiChannelID)
+	for i := 1; i <= houzhaiPairBounces; i++ {
+		from, to := long, jing
+		if i%2 == 0 {
+			from, to = jing, long
+		}
+		if d := noteHandoff(houzhaiChannelID, from, to, lead, "msg", false); d.verdict != handoffDeliver {
+			t.Fatalf("houzhai bounce %d escalated too early: %+v", i, d)
+		}
+	}
+	if d := noteHandoff(houzhaiChannelID, long, jing, lead, "last", false); d.verdict != handoffEscalate {
+		t.Fatalf("houzhai: expected escalation after %d bounces, got %+v", houzhaiPairBounces, d)
+	}
 	// A third bot breaking in restarts the pair count.
 	noteHandoff(ch, jing, long, lead, "a", false)
 	if d := noteHandoff(ch, "cat", long, lead, "b", false); d.rounds != 1 {
