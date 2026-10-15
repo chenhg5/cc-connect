@@ -415,11 +415,17 @@ func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 }
 
 // withTurnBlocks puts the teammate status, wiki pages and handoff the
-// agent's context does not hold yet before content. Called right before the
-// send, so a message that never reaches the agent marks nothing as sent.
-func (e *Engine) withTurnBlocks(session *Session, sessionKey, query, content string) string {
+// agent's context does not hold yet before content. Called right before every
+// send of a turn, so a message that never reaches the agent marks nothing as
+// sent. The handoff goes with whatever turn comes first after a fresh start
+// (user, cron, timer or queued); teammate status and wiki pages only with
+// turnCtx messages.
+func (e *Engine) withTurnBlocks(session *Session, sessionKey, query, content string, turnCtx bool) string {
 	if c := e.handoffBlock(session); c != "" {
 		content = c + "\n\n" + content
+	}
+	if !turnCtx {
+		return content
 	}
 	if c := e.turnContext(session, sessionKey, query); c != "" {
 		content = c + "\n\n" + content

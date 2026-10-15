@@ -386,8 +386,9 @@ type Message struct {
 	Mentioned        bool   // maomao fork: user explicitly @-mentioned the bot (input to the gate)
 	FromBot          bool   // maomao fork: sent by a teammate bot; without Mentioned it is context only
 	SeenUpToID       string // maomao fork: newest message folded into this one (gate burst), for channel backfill
-	// maomao fork: the gate asks for the per-turn context blocks; they are added
-	// right before the send, once the agent process for this turn is known.
+	// maomao fork: the gate asks for the per-turn context blocks (teammate
+	// status, wiki pages); they are added right before the send, once the agent
+	// process for this turn is known. A pending handoff goes either way.
 	TurnCtx      bool
 	TurnCtxQuery string // the user's own words, for wiki matching
 	ModeOverride string // if set, temporarily override agent permission mode for this message

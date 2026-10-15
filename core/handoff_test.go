@@ -1,6 +1,9 @@
 package core
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -100,17 +103,61 @@ func TestCmdNewHandsOffOldSession(t *testing.T) {
 		t.Fatalf("fresh session should backfill its own window, last seen = %q", s.GetLastSeenMsgID())
 	}
 	// A send that fails puts the handoff back for the next turn.
-	if c := e.withTurnBlocks(s, "discord:c1", "x", "你好"); !strings.Contains(c, "] 修 gate") {
+	if c := e.withTurnBlocks(s, "discord:c1", "x", "你好", true); !strings.Contains(c, "] 修 gate") {
 		t.Fatalf("first turn:\n%s", c)
 	}
 	s.SettleHandoff(false)
-	if c := e.withTurnBlocks(s, "discord:c1", "x", "你好"); !strings.Contains(c, "] 修 gate") || !strings.HasSuffix(c, "你好") {
+	if c := e.withTurnBlocks(s, "discord:c1", "x", "你好", true); !strings.Contains(c, "] 修 gate") || !strings.HasSuffix(c, "你好") {
 		t.Fatalf("retried turn:\n%s", c)
 	}
 	s.SettleHandoff(true)
 	s.SettleHandoff(false) // a later failure must not resend it
-	if c := e.withTurnBlocks(s, "discord:c1", "x", "你好"); c != "你好" {
+	if c := e.withTurnBlocks(s, "discord:c1", "x", "你好", true); c != "你好" {
 		t.Fatalf("after delivery:\n%s", c)
+	}
+}
+
+// A timer message (TurnCtx unset) that opens the fresh context still carries
+// the handoff, but not the teammate status or wiki pages.
+func TestHandoffWithoutTurnCtx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := json.Marshal(map[string]any{"wiki": []map[string]string{{"path": "~/wiki/bots/im-bridge.md", "desc": "cc-connect"}}})
+		_, _ = w.Write(b)
+	}))
+	defer srv.Close()
+	a := &handoffStubAgent{handoffs: map[string]*SessionHandoff{
+		"old": {Path: "/x/old.jsonl", Tail: []HistoryEntry{{Role: "user", Content: "修 gate"}}},
+	}}
+	e := NewEngine("test", a, []Platform{&stubPlatformEngine{n: "x"}}, "", LangEnglish)
+	defer e.Stop()
+	e.SetGate(srv.URL+"/decide?bot=maomao", 1000, "reply")
+	dir := t.TempDir()
+	e.team = &teamState{dir: dir, name: "橘", inject: true, seen: map[string]*teamSession{}}
+	writeTeamFile(t, dir, teamFile{Project: "longniang", Name: "龙娘", Updated: time.Now(), Sessions: []teamEntry{
+		{Key: "discord:111", Chat: "general", Task: "修 bug", Busy: true, Since: time.Now()},
+	}})
+
+	s := &Session{}
+	s.SetHandoffFrom("old", "缓存已过期")
+	noBlocks := func(c string) bool {
+		return !strings.Contains(c, "im-bridge.md") && !strings.Contains(c, "龙娘")
+	}
+	c := e.withTurnBlocks(s, "discord:111", "", "定时提醒", false)
+	if !strings.Contains(c, "] 修 gate") || !strings.HasSuffix(c, "定时提醒") || !noBlocks(c) {
+		t.Fatalf("timer turn:\n%s", c)
+	}
+	// Send failed: the next turn, timer or not, carries it again.
+	s.SettleHandoff(false)
+	if c := e.withTurnBlocks(s, "discord:111", "", "定时提醒", false); !strings.Contains(c, "] 修 gate") || !noBlocks(c) {
+		t.Fatalf("retried timer turn:\n%s", c)
+	}
+	s.SettleHandoff(true)
+	if c := e.withTurnBlocks(s, "discord:111", "", "定时提醒", false); c != "定时提醒" {
+		t.Fatalf("after delivery:\n%s", c)
+	}
+	// The timer turns marked no wiki page or board as sent.
+	if c := e.withTurnBlocks(s, "discord:111", "x", "你好", true); strings.Contains(c, "] 修 gate") || noBlocks(c) {
+		t.Fatalf("first turnCtx turn:\n%s", c)
 	}
 }
 
