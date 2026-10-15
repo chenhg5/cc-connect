@@ -180,6 +180,7 @@ func (cs *codexSession) Send(prompt string, messageID string, images []core.Imag
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("codexSession: start: %w", err)
 	}
+	attachCmdToKillJob(cmd)
 	cs.addCmd(cmd)
 
 	cs.wg.Add(1)
@@ -713,11 +714,10 @@ func loadCodexRuntimeConfig(ctx context.Context, cliBin string, cliExtraArgs []s
 	if err := cmd.Start(); err != nil {
 		return "", "", fmt.Errorf("runtime config start app-server: %w", err)
 	}
+	attachCmdToKillJob(cmd)
 	defer func() {
 		_ = stdin.Close()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+		_ = forceKillCmd(cmd)
 		_ = cmd.Wait()
 	}()
 

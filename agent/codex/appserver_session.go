@@ -283,6 +283,7 @@ func (s *appServerSession) connect() error {
 	args = append(append([]string(nil), s.cliExtraArgs...), args...)
 	cmd := exec.CommandContext(s.ctx, bin, args...)
 	cmd.Dir = s.workDir
+	prepareCmdForKill(cmd)
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {
 		env = append(env, "CODEX_HOME="+s.codexHome)
@@ -306,6 +307,7 @@ func (s *appServerSession) connect() error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("codex app-server start: %w", err)
 	}
+	attachCmdToKillJob(cmd)
 
 	s.procMu.Lock()
 	s.cmd = cmd
@@ -976,8 +978,8 @@ func (s *appServerSession) Close() error {
 		_ = s.stdin.Close()
 		s.stdin = nil
 	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+	if s.cmd != nil {
+		_ = forceKillCmd(s.cmd)
 	}
 	s.procMu.Unlock()
 
@@ -1738,8 +1740,8 @@ func (s *appServerSession) abortTransport() {
 		_ = s.stdin.Close()
 		s.stdin = nil
 	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+	if s.cmd != nil {
+		_ = forceKillCmd(s.cmd)
 	}
 	s.procMu.Unlock()
 }
