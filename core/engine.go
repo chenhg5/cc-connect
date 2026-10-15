@@ -1623,6 +1623,11 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
+		// maomao fork: scheduled turns show on the team status board too; a side session gets its own
+		// key so it does not replace the main session's entry.
+		teamMsg := *msg
+		teamMsg.SessionKey = runSessionKey + "#cron:" + session.ID
+		e.teamNoteTurn(&teamMsg, session)
 		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
 		if workspaceDir != "" {
 			iKey = workspaceDir + ":" + iKey
@@ -1645,6 +1650,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	if !session.TryLock() {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
+	e.teamNoteTurn(msg, session) // maomao fork: scheduled turns show on the team status board too
 
 	iKey := sessionKey
 	if workspaceDir != "" {
@@ -1824,6 +1830,11 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		if !session.TryLock() {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
+		// maomao fork: scheduled turns show on the team status board too; a side session gets its own
+		// key so it does not replace the main session's entry.
+		teamMsg := *msg
+		teamMsg.SessionKey = runSessionKey + "#timer:" + session.ID
+		e.teamNoteTurn(&teamMsg, session)
 		iKey := fmt.Sprintf("%s#timer:%s", runSessionKey, session.ID)
 		if workspaceDir != "" {
 			iKey = workspaceDir + ":" + iKey
@@ -1837,6 +1848,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	if !session.TryLock() {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
+	e.teamNoteTurn(msg, session) // maomao fork: scheduled turns show on the team status board too
 
 	iKey := sessionKey
 	if workspaceDir != "" {
