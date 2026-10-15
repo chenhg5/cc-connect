@@ -322,6 +322,53 @@ func TestSendLearnsConversationIDFromStream(t *testing.T) {
 	}
 }
 
+// A failed turn reports agy's status together with its stderr, and a
+// process killed mid-line does not leak the cut-off JSON into the reply.
+func TestFailedResultReportsStatusAndStderr(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	cmdPath := filepath.Join(dir, "fake-agy.sh")
+	script := "#!/bin/sh\n" +
+		`echo '{"event":"init","conversation_id":"conv-2","init":{}}'` + "\n" +
+		`echo 'quota exhausted' >&2` + "\n" +
+		`echo '{"event":"result","result":{"conversation_id":"conv-2","status":"ERROR"}}'` + "\n" +
+		`printf '{"event":"step_update","step_update":{"step_type":"agent_re'` + "\n"
+	if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, dir, "", "yolo", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("hi", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var text, errMsg string
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events():
+			switch ev.Type {
+			case core.EventText:
+				text += ev.Content
+			case core.EventError:
+				errMsg = ev.Error.Error()
+			case core.EventResult:
+				if text != "" {
+					t.Errorf("text = %q, want nothing", text)
+				}
+				if !strings.Contains(errMsg, "ERROR") || !strings.Contains(errMsg, "quota exhausted") {
+					t.Errorf("error = %q, want status and stderr", errMsg)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timeout")
+		}
+	}
+}
+
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if strings.TrimSpace(x) == want {

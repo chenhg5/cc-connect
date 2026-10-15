@@ -181,6 +181,9 @@ func TestParseStreamLine(t *testing.T) {
 	if !ok || ev.Error == nil || !strings.Contains(ev.Error.Error(), "ERROR") {
 		t.Errorf("failed result: %+v %v", ev, ok)
 	}
+	if _, ok := s.parseStreamLine([]byte(`{"event":"step_update","step_update":{"step_type":"agent_re`)); ok {
+		t.Error("a cut-off JSON line should be dropped, not sent as text")
+	}
 	ev, ok = s.parseStreamLine([]byte("plain text\n"))
 	if !ok || ev.Content != "plain text\n" {
 		t.Errorf("plain line: %+v %v", ev, ok)

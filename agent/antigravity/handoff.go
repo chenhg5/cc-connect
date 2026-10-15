@@ -102,7 +102,8 @@ func (a *Agent) ReadSessionHandoff(sessionID string) (*core.SessionHandoff, erro
 }
 
 func readHandoffDB(path string) (*core.SessionHandoff, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	// busy_timeout: review request (coordinator, 2026-10-15) suggested 1000 ms.
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(1000)")
 	if err != nil {
 		return nil, err
 	}

@@ -226,8 +226,11 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 
 		sid := as.CurrentSessionID()
 		if err != nil || resultErr != "" {
+			// A failed result names the status; stderr says why.
 			msg := strings.TrimSpace(stderrBuf.String())
-			if msg == "" {
+			if resultErr != "" && msg != "" {
+				msg = resultErr + ": " + msg
+			} else if resultErr != "" {
 				msg = resultErr
 			}
 			if msg != "" {
@@ -295,13 +298,19 @@ type agyStreamLine struct {
 }
 
 // parseStreamLine turns one stdout line into the event core sees. Reply text
-// is what text mode prints: every agent_response delta. A non-JSON line is
-// passed on as text. A failed result comes back as EventError for readLoop
-// to report after the process exits.
+// is what text mode prints: every agent_response delta. A line not starting
+// with "{" is passed on as text; a "{" line that does not parse (the last,
+// cut-off line of a killed process) is dropped. A failed result comes back
+// as EventError for readLoop to report after the process exits.
 func (as *antigravitySession) parseStreamLine(line []byte) (core.Event, bool) {
-	var l agyStreamLine
-	if json.Unmarshal(bytes.TrimSpace(line), &l) != nil || l.Event == "" {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("{")) {
 		return core.Event{Type: core.EventText, Content: string(line)}, true
+	}
+	var l agyStreamLine
+	if err := json.Unmarshal(trimmed, &l); err != nil {
+		slog.Warn("antigravitySession: dropping unparsable stream-json line", "error", err, "bytes", len(trimmed))
+		return core.Event{}, false
 	}
 	switch l.Event {
 	case "init":
