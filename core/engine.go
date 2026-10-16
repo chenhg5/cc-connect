@@ -6695,6 +6695,20 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 		steps[idx].Summary = truncateIf(strings.TrimSpace(event.ToolInput), maxLen)
 	}
 	steps[idx].Result = result
+	// Preserve recent output separately: result may already be head-truncated
+	// by ToolMaxLen, while compact live previews need the end of the output.
+	recent := strings.TrimSpace(event.ToolResult)
+	if recent == "" {
+		recent = strings.TrimSpace(event.Content)
+	}
+	if recent == "" {
+		recent = result
+	}
+	runes := []rune(recent)
+	if len(runes) > defaultToolMaxLen {
+		recent = string(runes[len(runes)-defaultToolMaxLen:])
+	}
+	steps[idx].ResultTail = recent
 	steps[idx].Status = strings.TrimSpace(event.ToolStatus)
 	steps[idx].ExitCode = event.ToolExitCode
 	steps[idx].Success = event.ToolSuccess
