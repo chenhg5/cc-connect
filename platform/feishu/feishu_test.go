@@ -1525,6 +1525,176 @@ func TestNewPlatform_RequireMentionTrueDoesNotForceGroupReplyAll(t *testing.T) {
 	}
 }
 
+func TestOnMessageSkipWhenMentionOthers(t *testing.T) {
+	botMention := &larkim.MentionEvent{
+		Key: strPtr("@_user_1"), Id: &larkim.UserId{OpenId: strPtr("ou_bot")}, Name: strPtr("Bot"),
+	}
+	otherMention := &larkim.MentionEvent{
+		Key: strPtr("@_user_2"), Id: &larkim.UserId{OpenId: strPtr("ou_other")}, Name: strPtr("Other"),
+	}
+	scenarios := []struct {
+		name           string
+		chatType       string
+		text           string
+		mentions       []*larkim.MentionEvent
+		wantContent    string
+		unknownContent string
+	}{
+		{"other only", "group", "@_user_2 hello", []*larkim.MentionEvent{otherMention}, "@Other hello", "@Other hello"},
+		{"self only", "group", "@_user_1 hello", []*larkim.MentionEvent{botMention}, "hello", "@Bot hello"},
+		{"both", "group", "@_user_1 @_user_2 hello", []*larkim.MentionEvent{botMention, otherMention}, "@Other hello", "@Bot @Other hello"},
+		{"no mention", "group", "hello", nil, "hello", "hello"},
+		// Feishu represents @all in content, with an empty Mentions list.
+		{"all", "group", "@_all hello", nil, "@_all hello", "@_all hello"},
+		{"private other", "p2p", "@_user_2 hello", []*larkim.MentionEvent{otherMention}, "@Other hello", "@Other hello"},
+		{"private no mention", "p2p", "hello", nil, "hello", "hello"},
+	}
+	configs := []struct {
+		name       string
+		all        bool
+		skip       bool
+		alias      bool
+		unknownBot bool
+		want       [7]bool
+	}{
+		{"reply all skip on", true, true, false, false, [7]bool{false, true, true, true, true, true, true}},
+		{"reply all skip off", true, false, false, false, [7]bool{true, true, true, true, true, true, true}},
+		{"mention required skip on", false, true, false, false, [7]bool{false, true, true, false, false, true, true}},
+		{"mention required skip off", false, false, false, false, [7]bool{false, true, true, false, false, true, true}},
+		{"require mention false skip on", false, true, true, false, [7]bool{false, true, true, true, true, true, true}},
+		{"require mention false skip off", false, false, true, false, [7]bool{true, true, true, true, true, true, true}},
+		{"unknown identity skip on", true, true, false, true, [7]bool{false, false, false, true, true, true, true}},
+		{"unknown identity skip off", true, false, false, true, [7]bool{true, true, true, true, true, true, true}},
+	}
+
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			for i, tc := range scenarios {
+				t.Run(tc.name, func(t *testing.T) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						t.Errorf("unexpected API request: %s %s", r.Method, r.URL.Path)
+						http.Error(w, "unexpected API request", http.StatusInternalServerError)
+					}))
+					defer srv.Close()
+					opts := map[string]any{
+						"app_id":                   "cli_skip_mentions",
+						"app_secret":               "test-secret",
+						"group_reply_all":          cfg.all,
+						"skip_when_mention_others": cfg.skip,
+					}
+					if cfg.alias {
+						opts["require_mention"] = false
+					}
+					platform, err := newPlatform("feishu", srv.URL, opts)
+					if err != nil {
+						t.Fatalf("newPlatform() error = %v", err)
+					}
+					p := extractBasePlatform(platform)
+					if p == nil {
+						t.Fatal("expected a Feishu platform")
+					}
+					p.client = lark.NewClient("cli_skip_mentions", "test-secret",
+						lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
+					if !cfg.unknownBot {
+						p.botOpenID = "ou_bot"
+					}
+					p.userNameCache.Store("ou_user", "User")
+					p.chatNameCache.Store("oc_chat", "Chat")
+					received := make(chan *core.Message, 1)
+					p.handler = func(_ core.Platform, msg *core.Message) { received <- msg }
+					content, err := json.Marshal(map[string]string{"text": tc.text})
+					if err != nil {
+						t.Fatalf("marshal content: %v", err)
+					}
+					event := &larkim.P2MessageReceiveV1{
+						Event: &larkim.P2MessageReceiveV1Data{
+							Sender: &larkim.EventSender{
+								SenderId: &larkim.UserId{OpenId: strPtr("ou_user")}, SenderType: strPtr("user"),
+							},
+							Message: &larkim.EventMessage{
+								MessageId: strPtr("om_skip_mentions"), ChatId: strPtr("oc_chat"),
+								ChatType: strPtr(tc.chatType), MessageType: strPtr("text"),
+								Content: strPtr(string(content)), Mentions: tc.mentions,
+								CreateTime: strPtr(strconv.FormatInt(time.Now().Add(time.Second).UnixMilli(), 10)),
+							},
+						},
+					}
+					if err := p.onMessage(context.Background(), event); err != nil {
+						t.Fatalf("onMessage() error = %v", err)
+					}
+					if !cfg.want[i] {
+						select {
+						case msg := <-received:
+							t.Fatalf("filtered message reached handler: %+v", msg)
+						case <-time.After(300 * time.Millisecond):
+						}
+						return
+					}
+					select {
+					case msg := <-received:
+						wantContent := tc.wantContent
+						if cfg.unknownBot {
+							wantContent = tc.unknownContent
+						}
+						if msg.Content != wantContent {
+							t.Errorf("Content = %q, want %q", msg.Content, wantContent)
+						}
+						if msg.MessageID != "om_skip_mentions" || msg.SessionKey != "feishu:oc_chat:ou_user" || msg.UserID != "ou_user" {
+							t.Errorf("unexpected dispatched message identity: %+v", msg)
+						}
+					case <-time.After(2 * time.Second):
+						t.Fatal("timed out waiting for handler dispatch")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestShouldSkipMentionedOthers(t *testing.T) {
+	tests := []struct {
+		name       string
+		chatType   string
+		all        bool
+		skip       bool
+		mentions   int
+		botMention bool
+		want       bool
+	}{
+		{"group mentions other", "group", true, true, 1, false, true},
+		{"group mentions bot", "group", true, true, 1, true, false},
+		{"group mentions both", "group", true, true, 2, true, false},
+		{"group no mention", "group", true, true, 0, false, false},
+		{"all message has no mention", "group", true, true, 0, false, false},
+		{"option disabled", "group", true, false, 1, false, false},
+		{"group reply all disabled", "group", false, true, 1, false, false},
+		{"private chat", "p2p", true, true, 1, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSkipMentionedOthers(tc.chatType, tc.all, tc.skip, tc.mentions, tc.botMention); got != tc.want {
+				t.Fatalf("shouldSkipMentionedOthers() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewPlatform_SkipWhenMentionOthers(t *testing.T) {
+	p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":                   "cli_test",
+		"app_secret":               "secret",
+		"group_reply_all":          true,
+		"skip_when_mention_others": true,
+	})
+	if err != nil {
+		t.Fatalf("newPlatform error: %v", err)
+	}
+	fp := extractBasePlatform(p)
+	if fp == nil || !fp.skipWhenMentionOthers {
+		t.Fatal("skip_when_mention_others should be enabled")
+	}
+}
+
 func newTestPlatform(mentionMap map[string]string, resolveMentions bool, members map[string]string) *Platform {
 	p := &Platform{
 		resolveMentions: resolveMentions,
