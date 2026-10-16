@@ -457,6 +457,14 @@ type ReasoningEffortSwitcher interface {
 	AvailableReasoningEfforts() []string
 }
 
+// SubagentModelSwitcher is an optional interface for agents whose subagent
+// (Task tool) model can be set independently of the main session model.
+// An empty model means "inherit the main model".
+type SubagentModelSwitcher interface {
+	SetSubagentModel(model string)
+	GetSubagentModel() string
+}
+
 // ModelOption describes a selectable model.
 type ModelOption struct {
 	Name  string // model identifier passed to CLI
