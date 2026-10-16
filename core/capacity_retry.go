@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 )
@@ -42,7 +43,7 @@ func (e *Engine) capacityStartCooldown() time.Duration {
 	e.capMu.Lock()
 	defer e.capMu.Unlock()
 	d := capacityCooldownBase
-	for i := 0; i < e.capRound && d < 1<<40; i++ { // guard against overflow only
+	for i := 0; i < e.capRound && d <= math.MaxInt64/2; i++ { // guard against overflow only
 		d *= 2
 	}
 	e.capRound++
@@ -58,18 +59,11 @@ func (e *Engine) capacityReset() {
 }
 
 // runTurnWithCapacityRetry runs one turn: send + event loop, re-sending up to
-// capacityAttempts times while the turn fails with a capacity error. When it
-// gives up, or when a cooldown is already running, it hands the message to
-// defer_ to be re-delivered after the cooldown. send must tolerate a nil
-// session (return an error).
-func (e *Engine) runTurnWithCapacityRetry(state *interactiveState, session *Session, sessions *SessionManager, key, msgID string, turnStart time.Time, stopTyping func(), replyCtx any, send func(as AgentSession) error, defer_ func(wait time.Duration, cooling bool)) {
-	if wait := e.capacityWait(); wait > 0 {
-		if stopTyping != nil {
-			stopTyping()
-		}
-		defer_(wait, true)
-		return
-	}
+// capacityAttempts times while the turn fails with a capacity error. When all
+// fail it starts a cooldown and hands the message to giveUp. Callers check for
+// a running cooldown themselves, before building the prompt. send must
+// tolerate a nil session (return an error).
+func (e *Engine) runTurnWithCapacityRetry(state *interactiveState, session *Session, sessions *SessionManager, key, msgID string, turnStart time.Time, stopTyping func(), replyCtx any, send func(as AgentSession) error, giveUp func(wait time.Duration)) {
 	for attempt := 1; ; attempt++ {
 		state.mu.Lock()
 		as := state.agentSession
@@ -99,26 +93,69 @@ func (e *Engine) runTurnWithCapacityRetry(state *interactiveState, session *Sess
 	}
 	d := e.capacityStartCooldown()
 	slog.Warn("model at capacity after retries, cooling down", "session_key", key, "cooldown", d)
-	defer_(d, false)
+	giveUp(d)
 }
 
-// scheduleCapacityRedelivery tells the user and re-delivers msg once the
-// cooldown ends, the same way an incoming message is dispatched (after the gate).
-func (e *Engine) scheduleCapacityRedelivery(p Platform, msg Message, agent Agent, sessions *SessionManager, interactiveKey, workspaceDir string, wait time.Duration, cooling bool) {
+// isScheduledSideKey reports whether an interactive key belongs to a cron or
+// timer side session (new-per-run). Those are cleaned up right after their
+// run, so a capacity failure there is left to the scheduler, not re-delivered.
+func isScheduledSideKey(key string) bool {
+	return strings.Contains(key, "#cron:") || strings.Contains(key, "#timer:")
+}
+
+// deferForCapacity tells the user and, unless msg ran in a cron/timer side
+// session, re-delivers it once the cooldown ends, the same way an incoming
+// message is dispatched (after the gate). cooling = the cooldown was already
+// running when msg came in (vs. msg itself failed capacityAttempts times).
+func (e *Engine) deferForCapacity(p Platform, msg Message, agent Agent, sessions *SessionManager, interactiveKey, workspaceDir string, wait time.Duration, cooling bool) {
 	mins := int((wait + time.Minute - 1) / time.Minute)
+	if isScheduledSideKey(interactiveKey) {
+		e.send(p, msg.ReplyCtx, fmt.Sprintf("⏳ 模型满载（at capacity），这次定时任务跳过；冷却还剩 %d 分钟。", mins))
+		return
+	}
 	if cooling {
 		e.send(p, msg.ReplyCtx, fmt.Sprintf("⏳ 模型满载冷却中，这条 %d 分钟后再处理。", mins))
 	} else {
 		e.send(p, msg.ReplyCtx, fmt.Sprintf("⏳ 模型满载（at capacity），连试 %d 次都失败，冷却 %d 分钟后自动重试这条。", capacityAttempts, mins))
 	}
 	msg.UserMessageTimeMs = 0 // a re-delivery is never "stale"
-	time.AfterFunc(wait, func() {
-		if e.ctx.Err() != nil {
-			return
-		}
-		m := msg
-		e.redeliverMessage(p, &m, agent, sessions, interactiveKey, workspaceDir)
-	})
+	redeliver := func() { e.redeliverMessage(p, &msg, agent, sessions, interactiveKey, workspaceDir) }
+	e.capMu.Lock()
+	e.capPending = append(e.capPending, redeliver)
+	arm := !e.capArmed
+	e.capArmed = true
+	e.capMu.Unlock()
+	if arm {
+		time.AfterFunc(wait, e.flushCapacityPending)
+	}
+}
+
+// flushCapacityPending re-delivers everything deferred by the cooldown, in the
+// order it was deferred: the first one takes the session, the rest queue
+// behind it.
+func (e *Engine) flushCapacityPending() {
+	e.capMu.Lock()
+	pending := e.capPending
+	e.capPending = nil
+	e.capArmed = false
+	e.capMu.Unlock()
+	if e.ctx.Err() != nil {
+		return
+	}
+	for _, redeliver := range pending {
+		redeliver()
+	}
+}
+
+// capacityCoolingUntil is the end of the running cooldown (zero = none), for
+// the team status board so schedulers can hold off.
+func (e *Engine) capacityCoolingUntil() time.Time {
+	e.capMu.Lock()
+	defer e.capMu.Unlock()
+	if time.Now().Before(e.capUntil) {
+		return e.capUntil
+	}
+	return time.Time{}
 }
 
 // redeliverMessage mirrors the tail of message dispatch: run now if the

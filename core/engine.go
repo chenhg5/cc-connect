@@ -430,6 +430,8 @@ type Engine struct {
 	capMu           sync.Mutex
 	capUntil        time.Time
 	capRound        int
+	capPending      []func() // messages to re-deliver when the cooldown ends, in order
+	capArmed        bool     // a flush timer is pending
 	sessionModelsMu sync.RWMutex
 	sessionModels   map[string]string
 	// Per-session base-instruction files (maomao fork, see session_models.go)
@@ -3855,37 +3857,44 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		drainEvents(state.agentSession.Events())
 	}
 
-	msg.Content = e.withTurnBlocks(session, msg.SessionKey, msg.TurnCtxQuery, msg.Content, msg.TurnCtx)
-	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+	// maomao fork: while the model cools down after "at capacity", the message waits
+	// for the cooldown instead of reaching the agent. Checked before withTurnBlocks so
+	// nothing (wiki pages, team status, handoff) is marked sent for an unsent message.
+	if wait := e.capacityWait(); wait > 0 {
+		e.deferForCapacity(p, origMsg, agent, sessions, interactiveKey, workspaceDir, wait, true)
+	} else {
+		msg.Content = e.withTurnBlocks(session, msg.SessionKey, msg.TurnCtxQuery, msg.Content, msg.TurnCtx)
+		promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
-	sendStart := time.Now()
-	state.mu.Lock()
-	state.currentMessageID = msg.MessageID
-	state.fromVoice = msg.FromVoice
-	state.sideText = ""
-	state.mu.Unlock()
+		sendStart := time.Now()
+		state.mu.Lock()
+		state.currentMessageID = msg.MessageID
+		state.fromVoice = msg.FromVoice
+		state.sideText = ""
+		state.mu.Unlock()
 
-	// Run Send concurrently with processInteractiveEvents. Some agents block inside
-	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
-	// EventPermissionRequest while blocked — the event loop must run in parallel.
-	// The agent session is captured under lock per attempt inside runTurnWithCapacityRetry.
-	e.runTurnWithCapacityRetry(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, msg.ReplyCtx,
-		func(as AgentSession) error {
-			if as == nil {
-				session.SettleHandoff(false)
-				return fmt.Errorf("agent session became nil")
-			}
-			err := as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
-			session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
-			return err
-		},
-		func(wait time.Duration, cooling bool) {
-			e.scheduleCapacityRedelivery(p, origMsg, agent, sessions, interactiveKey, workspaceDir, wait, cooling)
-		})
-	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
-		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
+		// Run Send concurrently with processInteractiveEvents. Some agents block inside
+		// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
+		// EventPermissionRequest while blocked — the event loop must run in parallel.
+		// The agent session is captured under lock per attempt inside runTurnWithCapacityRetry.
+		e.runTurnWithCapacityRetry(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, msg.ReplyCtx,
+			func(as AgentSession) error {
+				if as == nil {
+					session.SettleHandoff(false)
+					return fmt.Errorf("agent session became nil")
+				}
+				err := as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+				session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
+				return err
+			},
+			func(wait time.Duration) {
+				e.deferForCapacity(p, origMsg, agent, sessions, interactiveKey, workspaceDir, wait, false)
+			})
+		if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
+			slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
+		}
+		stopTyping = nil // ownership transferred; prevent defer from double-stopping
 	}
-	stopTyping = nil // ownership transferred; prevent defer from double-stopping
 
 	// Start unsolicited reader and arm the idle close timer BEFORE draining
 	// queued messages. drainPendingMessages releases the session lock, and
@@ -6006,7 +6015,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					"dropped", droppedStale,
 				)
 			}
-			if len(state.pendingMessages) > 0 {
+			// maomao fork: during a capacity cooldown leave the queue to the drain loop, which defers it.
+			if len(state.pendingMessages) > 0 && e.capacityWait() == 0 {
 				queued := state.pendingMessages[0]
 				raw := queued // maomao fork: raw copy (content not yet expanded), put back if this turn hits capacity
 				chainedQueued = &raw
@@ -6379,6 +6389,11 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		e.i18n.DetectAndSet(queued.content)
 		rawQueued := queued // maomao fork: re-delivered as-is after a capacity cooldown
+		if wait := e.capacityWait(); wait > 0 {
+			// Before withTurnBlocks: an unsent message must not mark anything sent.
+			e.deferForCapacity(queued.platform, queuedToMessage(rawQueued), state.agent, sessions, sessionKey, state.workspaceDir, wait, true)
+			continue
+		}
 		queued.content = e.withTurnBlocks(session, queued.msgSessionKey, queued.turnCtxQuery, queued.content, queued.turnCtx)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
@@ -6412,8 +6427,8 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 				session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
 				return err
 			},
-			func(wait time.Duration, cooling bool) {
-				e.scheduleCapacityRedelivery(queued.platform, queuedToMessage(rawQueued), state.agent, sessions, sessionKey, state.workspaceDir, wait, cooling)
+			func(wait time.Duration) {
+				e.deferForCapacity(queued.platform, queuedToMessage(rawQueued), state.agent, sessions, sessionKey, state.workspaceDir, wait, false)
 			})
 	}
 }

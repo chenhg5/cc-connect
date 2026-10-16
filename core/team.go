@@ -61,6 +61,9 @@ type teamFile struct {
 	Name     string      `json:"name"`
 	Updated  time.Time   `json:"updated"`
 	Sessions []teamEntry `json:"sessions"`
+	// CoolingUntil (maomao fork): the bot's model is cooling down after "at
+	// capacity" until then; schedulers (outing-tick) hold off.
+	CoolingUntil time.Time `json:"cooling_until,omitzero"`
 }
 
 // SetTeam enables the status board for this project. dir == "" disables it.
@@ -159,7 +162,11 @@ func (e *Engine) runTeamWriter() {
 		}
 		t.mu.Unlock()
 		sort.Slice(f.Sessions, func(i, j int) bool { return f.Sessions[i].Key < f.Sessions[j].Key })
-		body, _ := json.Marshal(f.Sessions)
+		f.CoolingUntil = e.capacityCoolingUntil().Truncate(time.Second) // whole seconds: outing-tick parses it with Python fromisoformat
+		body, _ := json.Marshal(struct {
+			S []teamEntry
+			C time.Time
+		}{f.Sessions, f.CoolingUntil})
 		if string(body) == string(last) && now.Sub(lastWrite) < teamHeartbeat {
 			continue
 		}
