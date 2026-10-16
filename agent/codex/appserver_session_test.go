@@ -500,3 +500,27 @@ func TestAppServerSession_FailedTurnCompletedEmitsError(t *testing.T) {
 		t.Fatalf("event = %+v", ev)
 	}
 }
+
+func TestAppServerSession_IgnoresOtherThreads(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4), currentTurn: "turn-1"}
+	s.threadID.Store("own")
+	// codex's memory consolidation thread in the same process: its message and idle are not ours.
+	s.handleNotification("item/completed", json.RawMessage(`{"threadId":"memory","turnId":"m1","item":{"type":"agentMessage","id":"x","text":"Raw memories/rollouts map to these durable groups"}}`))
+	s.handleNotification("thread/status/changed", json.RawMessage(`{"threadId":"memory","status":{"type":"idle"}}`))
+	if len(s.events) != 0 || s.currentTurn != "turn-1" {
+		t.Fatalf("foreign thread leaked: %d events, currentTurn=%q", len(s.events), s.currentTurn)
+	}
+	// Our own thread still completes the turn.
+	s.handleNotification("thread/status/changed", json.RawMessage(`{"threadId":"own","status":{"type":"idle"}}`))
+	if s.currentTurn != "" {
+		t.Fatalf("own idle did not complete the turn: currentTurn=%q", s.currentTurn)
+	}
+}
+
+func TestAppServerSession_NoThreadYetPassesAll(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4), currentTurn: "turn-1"}
+	s.handleNotification("thread/status/changed", json.RawMessage(`{"threadId":"any","status":{"type":"idle"}}`))
+	if s.currentTurn != "" {
+		t.Fatalf("before our thread id is known nothing should be dropped: currentTurn=%q", s.currentTurn)
+	}
+}

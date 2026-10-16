@@ -1145,6 +1145,19 @@ func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
 }
 
 func (s *appServerSession) handleNotification(method string, paramsRaw json.RawMessage) {
+	// maomao fork: one app-server process can run more than our thread — codex's memory
+	// consolidation runs as its own thread in the same process. Its items used to be relayed
+	// as this bot's reply, and its idle status ended our turn early (2026-10-16 龙娘 posted
+	// her memory summary in 后宅 after an empty reply).
+	var scope struct {
+		ThreadID string `json:"threadId"`
+	}
+	if json.Unmarshal(paramsRaw, &scope) == nil && scope.ThreadID != "" {
+		if own := s.CurrentSessionID(); own != "" && scope.ThreadID != own {
+			slog.Debug("codex app-server: ignoring another thread's notification", "method", method, "thread_id", scope.ThreadID)
+			return
+		}
+	}
 	switch method {
 	case "turn/started":
 		var notif turnNotification
