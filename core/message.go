@@ -495,6 +495,15 @@ type Event struct {
 	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
+
+	// Images carries raster output an agent produced *inside a tool result*
+	// and wants the user to receive. A tool result is otherwise text, so
+	// without this an agent that renders a picture (DeepSeek Harness's
+	// read_image commits the bytes into the tool result) would report
+	// success while the user sees nothing but prose. Delivery is
+	// side-channel: the engine sends each image on its own so it never has
+	// to be encoded into the text stream.
+	Images []ImageAttachment // populated for EventToolResult when the result carried image content
 }
 
 // HistoryEntry is one turn in a conversation.

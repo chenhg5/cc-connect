@@ -5661,6 +5661,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			// Images a tool committed travel on their own channel and
+			// independently of the tool-message display settings: a result can
+			// carry image bytes and no meaningful text, so this must not sit
+			// behind the text check below. The /compress drain serves the same
+			// events and does the same thing.
+			e.sendEventImages(p, replyCtx, event.Images)
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -10936,6 +10942,12 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 				textParts = append(textParts, event.Content)
 			}
 		case EventToolResult:
+			// Images a tool committed are delivered on their own channel and
+			// independently of the text: a result can carry image bytes and no
+			// meaningful text, so this must not sit behind a text check.
+			if !auto {
+				e.sendEventImages(p, replyCtx, event.Images)
+			}
 			if !auto {
 				out := strings.TrimSpace(event.Content)
 				if out == "" {
@@ -11615,6 +11627,39 @@ func (e *Engine) SendToSessionWithOptions(sessionKey, message string, images []I
 		}
 	}
 	return nil
+}
+
+// sendEventImages delivers images an agent produced inside a tool result.
+//
+// This is deliberately separate from the text stream: an image has no text
+// representation, so folding it into the answer would either drop the bytes or
+// paste base64 into the chat. Failures are logged rather than returned because
+// the tool call itself succeeded — the user still gets the tool's text, and a
+// platform without ImageSender (or with attachment send-back off) must not
+// turn a successful turn into an error.
+func (e *Engine) sendEventImages(p Platform, replyCtx any, images []ImageAttachment) {
+	if len(images) == 0 {
+		return
+	}
+	if !e.attachmentSendEnabled {
+		slog.Debug("tool-result images dropped: attachment send is disabled", "count", len(images))
+		return
+	}
+	imageSender, ok := p.(ImageSender)
+	if !ok {
+		slog.Debug("tool-result images dropped: platform has no ImageSender", "platform", p.Name(), "count", len(images))
+		return
+	}
+	for _, img := range images {
+		if err := e.waitOutgoing(p); err != nil {
+			slog.Warn("tool-result image: wait for outgoing slot failed", "platform", p.Name(), "error", err)
+			return
+		}
+		if err := imageSender.SendImage(e.ctx, replyCtx, img); err != nil {
+			slog.Warn("tool-result image: send failed", "platform", p.Name(), "error", err)
+			return
+		}
+	}
 }
 
 type sendTarget struct {
