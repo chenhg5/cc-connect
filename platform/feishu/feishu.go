@@ -4113,15 +4113,21 @@ func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID strin
 }
 
 func (p *Platform) sessionKeyFromCardAction(chatID, userID string, value map[string]any) string {
-	if value != nil {
-		if sessionKey, _ := value["session_key"].(string); sessionKey != "" {
-			return sessionKey
+	base := fmt.Sprintf("%s:%s", p.tag(), chatID)
+	if p.threadIsolation && value != nil {
+		// Thread cards carry the root ID. Keep it only within the authenticated
+		// chat; never let a card payload choose another chat's session key.
+		if key, _ := value["session_key"].(string); strings.HasPrefix(key, base+":root:") {
+			return key
 		}
 	}
 	if p.shareSessionInChannel {
-		return fmt.Sprintf("%s:%s", p.tag(), chatID)
+		return base
 	}
-	return fmt.Sprintf("%s:%s:%s", p.tag(), chatID, userID)
+	// In ordinary per-user mode, the card value is not an authority. Group
+	// members can click someone else's visible card, so bind to the actual
+	// operator instead of its original creator's embedded session_key.
+	return base + ":" + userID
 }
 
 func (p *Platform) shouldReplyInThread(rc replyContext) bool {

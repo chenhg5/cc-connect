@@ -401,10 +401,11 @@ type Engine struct {
 	bannedWords []string
 	bannedMu    sync.RWMutex
 
-	disabledCmds map[string]bool
-	adminFrom    string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
-	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
-	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
+	disabledCmds          map[string]bool
+	adminFrom             string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
+	sessionAdminCrossUser bool             // explicit opt-in; admin_from alone does not grant transcript access
+	userRoles             *UserRoleManager // nil = legacy mode (no per-user policies)
+	userRolesMu           sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
 	rateLimiter         *RateLimiter
 	outgoingRL          *OutgoingRateLimiter
@@ -453,10 +454,11 @@ type Engine struct {
 	showWorkdirIndicator bool
 	replyFooterEnabled   bool
 
-	// When true, /list etc. only show sessions tracked by cc-connect,
-	// hiding sessions created by direct CLI usage in the same work_dir.
-	// Default false = show all sessions.
+	// Retained for config compatibility. Session commands always enforce
+	// per-conversation ownership regardless of this legacy option.
 	filterExternalSessions bool
+	sharedSessionMu        sync.RWMutex
+	sharedSessionPlatforms map[string]bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
 	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
@@ -1038,6 +1040,37 @@ func (e *Engine) SetFilterExternalSessions(v bool) {
 	e.filterExternalSessions = v
 }
 
+// SetSharedSessionCommandPlatforms disables cross-session commands on
+// platforms configured to share one SessionKey between multiple people.
+func (e *Engine) SetSharedSessionCommandPlatforms(names []string) {
+	shared := make(map[string]bool, len(names))
+	for _, name := range names {
+		shared[name] = true
+	}
+	e.sharedSessionMu.Lock()
+	e.sharedSessionPlatforms = shared
+	e.sharedSessionMu.Unlock()
+}
+
+func (e *Engine) sharedSessionCommandsDisabled(platform, sessionKey string) bool {
+	if platform == "" {
+		platform = extractPlatformName(sessionKey)
+	}
+	e.sharedSessionMu.RLock()
+	disabled := e.sharedSessionPlatforms[platform]
+	e.sharedSessionMu.RUnlock()
+	return disabled
+}
+
+func isCrossSessionCommand(cmd string) bool {
+	switch cmd {
+	case "list", "switch", "history", "delete", "search", "name", "current", "delete-mode":
+		return true
+	default:
+		return false
+	}
+}
+
 func (e *Engine) SetWebSetupFunc(fn func() (int, string, bool, error)) { e.webSetupFunc = fn }
 func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webStatusFunc = fn }
 
@@ -1262,6 +1295,24 @@ func (e *Engine) SetAdminFrom(adminFrom string) {
 			"Set admin_from in config to enable them, or use disabled_commands to hide them.",
 			"project", e.name)
 	}
+}
+
+// SetSessionAdminCrossUser enables cross-user session commands for users in
+// admin_from. It is off by default and never grants access to untracked IDs.
+func (e *Engine) SetSessionAdminCrossUser(enabled bool) {
+	e.userRolesMu.Lock()
+	e.sessionAdminCrossUser = enabled
+	e.userRolesMu.Unlock()
+}
+
+func (e *Engine) sessionAdminCrossUserAllowed(userID string) bool {
+	if userID == "" {
+		return false
+	}
+	e.userRolesMu.RLock()
+	enabled := e.sessionAdminCrossUser
+	e.userRolesMu.RUnlock()
+	return enabled && e.isAdmin(userID)
 }
 
 // privilegedCommands are commands that require admin_from authorization.
@@ -3185,6 +3236,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
+	if !e.activeSessionVisible(sessions, msg.SessionKey, msg.UserID, session) {
+		// An old /switch may have bound this conversation to another user's
+		// agent transcript. Never resume it for an ordinary message.
+		slog.Warn("active agent session ownership is ambiguous; starting a private session",
+			"project", e.name, "session_key", msg.SessionKey)
+		e.cleanupInteractiveState(interactiveKey)
+		session = sessions.NewSession(msg.SessionKey, "")
+	}
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
 	// Ensure an interactiveState entry exists before taking the session lock.
 	// Without this, concurrent messages can observe the session as busy during
@@ -6992,6 +7051,10 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCommandDisabled), "/"+cmdID))
 		return true
 	}
+	if isCrossSessionCommand(cmdID) && e.sharedSessionCommandsDisabled(msg.Platform, msg.SessionKey) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionCommandsShared))
+		return true
+	}
 
 	if cmdID != "" && isPrivilegedCommandInvocation(cmdID, args) && !e.isAdmin(msg.UserID) {
 		slog.Info("audit: command_blocked",
@@ -7410,43 +7473,34 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	}
 }
 
-// applySessionFilter narrows agent sessions to those the given sessionKey may
-// see and switch to.
-//
-// filter_external_sessions governs whether sessions created by direct CLI use
-// are shown at all; when enabled only sessions cc-connect tracks remain.
-//
-// In multi-workspace mode several topics can share one workspace, and the
-// SessionManager is per-workspace (getOrCreateWorkspaceAgent), so the agent
-// reports every session in that directory. Without narrowing by sessionKey a
-// topic would list — and /switch or /delete — sessions belonging to another
-// topic. filterOwnedSessions cannot do this: it takes the union of all session
-// IDs, and its "empty means pass through" escape hatch keeps the filter inert
-// until every session has a tracked ID.
-//
-// Outside multi-workspace mode the agent's list is returned unchanged.
+// applySessionFilter is the fail-closed boundary for session commands and
+// cards. The agent may list every transcript in a shared work_dir, but only
+// IDs uniquely tracked under this conversation may cross into a command.
 func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager, sessionKey string) []AgentSessionInfo {
-	if e.filterExternalSessions {
-		sessions = filterOwnedSessions(sessions, sm.KnownAgentSessionIDs())
+	return e.applySessionFilterForUser(sessions, sm, sessionKey, "")
+}
+
+func (e *Engine) applySessionFilterForUser(sessions []AgentSessionInfo, sm *SessionManager, sessionKey, userID string) []AgentSessionInfo {
+	if sm == nil || sessionKey == "" {
+		return nil
 	}
-	if !e.multiWorkspace || sm == nil || sessionKey == "" {
-		return sessions
-	}
-	// A nil map means the store predates ID tracking, so ownership cannot be
-	// established and passing everything through is the only safe answer.
-	owners := sm.AgentSessionOwners()
-	if owners == nil {
-		return sessions
-	}
+	admin := e.sessionAdminCrossUserAllowed(userID)
+	visible := sm.VisibleAgentSessionIDs(sessionKey, admin)
 	filtered := make([]AgentSessionInfo, 0, len(sessions))
 	for _, s := range sessions {
-		// Drop sessions another conversation owns; keep our own and unowned
-		// ones (created directly through the CLI, which records no owner).
-		if owner, taken := owners[s.ID]; !taken || owner == sessionKey {
+		if _, ok := visible[s.ID]; ok {
 			filtered = append(filtered, s)
 		}
 	}
 	return filtered
+}
+
+func (e *Engine) activeSessionVisible(sm *SessionManager, sessionKey, userID string, s *Session) bool {
+	id := s.GetAgentSessionID()
+	if id == "" {
+		return true
+	}
+	return sm.AgentSessionIDVisible(sessionKey, id, e.sessionAdminCrossUserAllowed(userID))
 }
 
 // filterOwnedSessions removes agent sessions that are not tracked by cc-connect's
@@ -7478,13 +7532,15 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	if !supportsCards(p) {
+	// Cross-user admin access is a text-command privilege. A card action has
+	// no authenticated user ID at this layer, so keep cards strictly per-user.
+	if !supportsCards(p) || e.sessionAdminCrossUserAllowed(msg.UserID) {
 		agentSessions, err := agent.ListSessions(e.ctx)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 			return
 		}
-		agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
+		agentSessions = e.applySessionFilterForUser(agentSessions, sessions, msg.SessionKey, msg.UserID)
 		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
@@ -7581,7 +7637,7 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
+	agentSessions = e.applySessionFilterForUser(agentSessions, sessions, msg.SessionKey, msg.UserID)
 
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
@@ -7599,7 +7655,15 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	// original conversation; wiping it makes /history return empty after a
 	// /switch round-trip. When SwitchToAgentSession creates a fresh Session
 	// (no prior match), History is already nil, so preserving is a no-op.
-	_ = sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
+	if e.sessionAdminCrossUserAllowed(msg.UserID) {
+		if _, owned := sessions.VisibleAgentSessionIDs(msg.SessionKey, false)[matched.ID]; !owned {
+			sessions.SwitchToBorrowedAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
+		} else {
+			sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
+		}
+	} else {
+		sessions.SwitchToAgentSession(msg.SessionKey, matched.ID, agent.Name(), matched.Summary)
+	}
 
 	shortID := matched.ID
 	if len(shortID) > 12 {
@@ -8929,7 +8993,7 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchError), err))
 		return
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
+	agentSessions = e.applySessionFilterForUser(agentSessions, sessions, msg.SessionKey, msg.UserID)
 
 	type searchResult struct {
 		id           string
@@ -9023,7 +9087,7 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 			return
 		}
-		agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
+		agentSessions = e.applySessionFilterForUser(agentSessions, sessions, msg.SessionKey, msg.UserID)
 		if idx > len(agentSessions) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx))
 			return
@@ -9033,6 +9097,10 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 	} else {
 		// /name <name...> → current session
 		session := sessions.GetOrCreateActive(msg.SessionKey)
+		if !e.activeSessionVisible(sessions, msg.SessionKey, msg.UserID, session) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionOwnershipUnknown))
+			return
+		}
 		targetID = session.GetAgentSessionID()
 		if targetID == "" {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNameNoSession))
@@ -9064,6 +9132,10 @@ func (e *Engine) cmdCurrent(p Platform, msg *Message) {
 			return
 		}
 		s := sessions.GetOrCreateActive(msg.SessionKey)
+		if !e.activeSessionVisible(sessions, msg.SessionKey, msg.UserID, s) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionOwnershipUnknown))
+			return
+		}
 		agentID := s.GetAgentSessionID()
 		if agentID == "" {
 			agentID = e.i18n.T(MsgSessionNotStarted)
@@ -9081,6 +9153,10 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		agent, sessions, _, err := e.commandContext(p, msg)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+			return
+		}
+		if !e.activeSessionVisible(sessions, msg.SessionKey, msg.UserID, sessions.GetOrCreateActive(msg.SessionKey)) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionOwnershipUnknown))
 			return
 		}
 		platNames := make([]string, len(e.platforms))
@@ -9502,6 +9578,9 @@ func (e *Engine) renderDirCardSafe(sessionKey string, page int) *Card {
 
 func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
+	if !e.activeSessionVisible(sessions, sessionKey, userID, sessions.GetOrCreateActive(sessionKey)) {
+		return e.simpleCard(e.i18n.T(MsgSessionOwnershipUnknown), "red", e.i18n.T(MsgSessionOwnershipUnknown))
+	}
 	platNames := make([]string, len(e.platforms))
 	var degraded []string
 	for i, pl := range e.platforms {
@@ -9679,6 +9758,10 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 		return
 	}
 	s := sessions.GetOrCreateActive(msg.SessionKey)
+	if !e.activeSessionVisible(sessions, msg.SessionKey, msg.UserID, s) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionOwnershipUnknown))
+		return
+	}
 	n := 10
 	if v, err := strconv.Atoi(args[0]); err == nil && v > 0 {
 		n = v
@@ -12535,6 +12618,9 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		cmd = body[:i]
 		args = strings.TrimSpace(body[i+1:])
 	}
+	if isCrossSessionCommand(strings.TrimPrefix(cmd, "/")) && e.sharedSessionCommandsDisabled("", sessionKey) {
+		return e.simpleCard(e.i18n.T(MsgSessionCommandsShared), "red", e.i18n.T(MsgSessionCommandsShared))
+	}
 
 	if prefix == "act" && cmd == "/model" {
 		return e.handleModelCardAction(args, sessionKey)
@@ -13840,6 +13926,9 @@ func (e *Engine) currentSessionDisplayName(agent Agent, sessions *SessionManager
 func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
+	if !e.activeSessionVisible(sessions, sessionKey, "", s) {
+		return e.simpleCard(e.i18n.T(MsgCardTitleCurrentSession), "red", e.i18n.T(MsgSessionOwnershipUnknown))
+	}
 	agentID := s.GetAgentSessionID()
 	if agentID == "" {
 		agentID = e.i18n.T(MsgSessionNotStarted)
@@ -13856,6 +13945,9 @@ func (e *Engine) renderCurrentCard(sessionKey string) *Card {
 func (e *Engine) renderHistoryCard(sessionKey string) *Card {
 	agent, sessions := e.sessionContextForKey(sessionKey)
 	s := sessions.GetOrCreateActive(sessionKey)
+	if !e.activeSessionVisible(sessions, sessionKey, "", s) {
+		return e.simpleCard(e.i18n.T(MsgCardTitleHistory), "red", e.i18n.T(MsgSessionOwnershipUnknown))
+	}
 	entries := s.GetHistory(10)
 
 	agentSID := s.GetAgentSessionID()
@@ -15996,7 +16088,7 @@ func (e *Engine) cmdDelete(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		return
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
+	agentSessions = e.applySessionFilterForUser(agentSessions, sessions, msg.SessionKey, msg.UserID)
 
 	prefix := strings.TrimSpace(args[0])
 	if isExplicitDeleteBatchArg(prefix) {
@@ -16127,6 +16219,9 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 
 	// Prevent deleting the currently active session
 	_, sessions := e.sessionContextForKey(msg.SessionKey)
+	if _, ok := sessions.VisibleAgentSessionIDs(msg.SessionKey, e.sessionAdminCrossUserAllowed(msg.UserID))[matched.ID]; !ok {
+		return e.i18n.T(MsgSessionOwnershipUnknown)
+	}
 	activeSession := sessions.GetOrCreateActive(msg.SessionKey)
 	if activeSession.GetAgentSessionID() == matched.ID {
 		return e.i18n.T(MsgDeleteActiveDenied)

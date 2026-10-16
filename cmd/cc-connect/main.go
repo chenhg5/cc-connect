@@ -431,6 +431,8 @@ func main() {
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
+		engine.SetSessionAdminCrossUser(proj.SessionAdminCrossUser)
+		engine.SetSharedSessionCommandPlatforms(sharedSessionCommandPlatforms(proj.Platforms))
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
 		engine.SetDataDir(cfg.DataDir)
@@ -1752,6 +1754,27 @@ func setupLogger(level string, w io.Writer) {
 	})))
 }
 
+// sharedSessionCommandPlatforms identifies configurations where a SessionKey
+// can represent multiple people. Until per-person ownership exists for these
+// modes, cross-session commands are unavailable on the entire platform.
+func sharedSessionCommandPlatforms(platforms []config.PlatformConfig) []string {
+	var names []string
+	for _, platform := range platforms {
+		opts := platform.Options
+		shared, _ := opts["share_session_in_channel"].(bool)
+		thread, _ := opts["thread_isolation"].(bool)
+		scope, _ := opts["session_scope"].(string)
+		scope = strings.TrimSpace(strings.ToLower(scope))
+		if platform.Type == "googlechat" && scope == "" {
+			scope = "space" // Google Chat's default is shared.
+		}
+		if shared || thread || (scope != "" && scope != "user") {
+			names = append(names, platform.Type)
+		}
+	}
+	return names
+}
+
 // reloadConfig re-reads config.toml and applies hot-reloadable settings
 // (display, providers, commands) to the given engine.
 func reloadConfig(configPath, projName string, engine *core.Engine) (*core.ConfigReloadResult, error) {
@@ -1854,6 +1877,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload filter_external_sessions
 	engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
+	engine.SetSessionAdminCrossUser(proj.SessionAdminCrossUser)
+	engine.SetSharedSessionCommandPlatforms(sharedSessionCommandPlatforms(proj.Platforms))
 
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {

@@ -250,6 +250,8 @@ const (
 	MsgListTitle                 MsgKey = "list_title"
 	MsgListTitlePaged            MsgKey = "list_title_paged"
 	MsgListEmpty                 MsgKey = "list_empty"
+	MsgSessionCommandsShared     MsgKey = "session_commands_shared"
+	MsgSessionOwnershipUnknown   MsgKey = "session_ownership_unknown"
 	MsgListMore                  MsgKey = "list_more"
 	MsgListPageHint              MsgKey = "list_page_hint"
 	MsgListSwitchHint            MsgKey = "list_switch_hint"
@@ -1474,6 +1476,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "未找到此項目的會話。",
 		LangJapanese:           "このプロジェクトのセッションが見つかりません。",
 		LangSpanish:            "No se encontraron sesiones para este proyecto.",
+	},
+	MsgSessionCommandsShared: {
+		LangEnglish:            "Session history commands are unavailable in shared-channel mode.",
+		LangChinese:            "共享频道模式下无法使用会话历史命令。",
+		LangTraditionalChinese: "共享頻道模式下無法使用會話歷史命令。",
+		LangJapanese:           "共有チャンネルモードではセッション履歴コマンドを使用できません。",
+		LangSpanish:            "Los comandos del historial de sesiones no están disponibles en el modo de canal compartido.",
+	},
+	MsgSessionOwnershipUnknown: {
+		LangEnglish:            "This session's ownership cannot be verified. Use /new to start a private session.",
+		LangChinese:            "无法确认此会话的归属。请使用 /new 开始私人会话。",
+		LangTraditionalChinese: "無法確認此會話的歸屬。請使用 /new 開始私人會話。",
+		LangJapanese:           "このセッションの所有者を確認できません。/new で個人用セッションを開始してください。",
+		LangSpanish:            "No se puede verificar quién posee esta sesión. Usa /new para iniciar una sesión privada.",
 	},
 	MsgListMore: {
 		LangEnglish:            "\n... and %d more\n",
