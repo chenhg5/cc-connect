@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,7 +24,8 @@ func init() {
 	core.RegisterAgent("cursor", New)
 }
 
-// Agent drives the Cursor Agent CLI (`agent`) using --print --output-format stream-json.
+// Agent drives the Cursor Agent CLI (`cursor-agent`, also aliased as `agent`)
+// using --print --output-format stream-json.
 //
 // Modes (maps to Cursor agent CLI flags):
 //   - "default":  default permissions (ask permission for tools)
@@ -43,6 +45,31 @@ type Agent struct {
 	mu           sync.RWMutex
 }
 
+// cursorBinaryCandidates lists the names the Cursor Agent CLI installs under.
+// The installer puts `cursor-agent` on PATH and also aliases it as `agent`;
+// the bare `agent` alias is not guaranteed to exist (notably on Windows), so
+// discovery must try both rather than assume it.
+var cursorBinaryCandidates = []string{"cursor-agent", "agent"}
+
+// errNoCursorCLI reports that no Cursor Agent CLI installation was found.
+var errNoCursorCLI = errors.New(
+	`no Cursor Agent CLI found in PATH (looked for "cursor-agent", "agent"); ` +
+		`install it with: curl https://cursor.com/install -fsSL | bash ` +
+		`(Windows: irm 'https://cursor.com/install?win32=true' | iex)`)
+
+// resolveCursorBinary discovers the Cursor Agent CLI for configs that do not
+// set `cmd`. Explicit commands are never second-guessed: a typo must fail
+// loudly rather than silently select a different installation (same rule the
+// codex agent follows).
+func resolveCursorBinary() (string, error) {
+	for _, name := range cursorBinaryCandidates {
+		if _, err := exec.LookPath(name); err == nil {
+			return name, nil
+		}
+	}
+	return "", errNoCursorCLI
+}
+
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
@@ -51,9 +78,18 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
-	cmd, extraArgs := core.ParseCmdOpts(opts, "agent")
+	// An empty default lets an unset `cmd` fall through to discovery below,
+	// while an explicit `cmd` is honoured verbatim.
+	cmd, extraArgs := core.ParseCmdOpts(opts, "")
+	if cmd == "" {
+		resolved, err := resolveCursorBinary()
+		if err != nil {
+			return nil, fmt.Errorf("cursor: %w", err)
+		}
+		cmd = resolved
+	}
 	if _, err := exec.LookPath(cmd); err != nil {
-		return nil, fmt.Errorf("cursor: %q CLI not found in PATH, install with: npm i -g @anthropic-ai/cursor-agent (or from Cursor IDE settings)", cmd)
+		return nil, fmt.Errorf("cursor: %q CLI not found in PATH: %w; install the Cursor Agent CLI or set cmd in [projects.agent.options]", cmd, err)
 	}
 
 	return &Agent{
@@ -81,7 +117,14 @@ func normalizeMode(raw string) string {
 }
 
 func (a *Agent) Name() string           { return "cursor" }
-func (a *Agent) CLIBinaryName() string  { return "agent" }
+// CLIBinaryName reports the binary actually in use, so `doctor` does not
+// claim "agent" for installations that only ship the `cursor-agent` name.
+func (a *Agent) CLIBinaryName() string {
+	if a.cmd != "" {
+		return a.cmd
+	}
+	return "agent"
+}
 func (a *Agent) CLIDisplayName() string { return "Cursor Agent" }
 
 func (a *Agent) SetWorkDir(dir string) {
