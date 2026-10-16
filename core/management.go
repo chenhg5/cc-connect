@@ -28,6 +28,8 @@ type ProjectSettingsUpdate struct {
 	AgentType            *string
 	ShowContextIndicator *bool
 	ShowWorkdirIndicator *bool
+	ShowUsage5h          *bool
+	ShowUsageWeek        *bool
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
@@ -148,10 +150,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -415,9 +417,9 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 				info := ph.PlatformHealth()
 				if info.Degraded {
 					entry := map[string]any{
-						"name":    info.Name,
-						"reason":  info.DegradedReason,
-						"since":   info.DegradedSince,
+						"name":   info.Name,
+						"reason": info.DegradedReason,
+						"since":  info.DegradedSince,
 					}
 					degradedEntries = append(degradedEntries, entry)
 				}
@@ -752,6 +754,8 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 			AgentType            *string           `json:"agent_type"`
 			ShowContextIndicator *bool             `json:"show_context_indicator"`
 			ShowWorkdirIndicator *bool             `json:"show_workdir_indicator"`
+			ShowUsage5h          *bool             `json:"show_usage_5h"`
+			ShowUsageWeek        *bool             `json:"show_usage_week"`
 			ReplyFooter          *bool             `json:"reply_footer"`
 			InjectSender         *bool             `json:"inject_sender"`
 			PlatformAllowFrom    map[string]string `json:"platform_allow_from"`
@@ -835,6 +839,12 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 		if body.ShowContextIndicator != nil {
 			e.SetShowContextIndicator(*body.ShowContextIndicator)
 		}
+		if body.ShowUsage5h != nil {
+			e.SetShowUsage5h(*body.ShowUsage5h)
+		}
+		if body.ShowUsageWeek != nil {
+			e.SetShowUsageWeek(*body.ShowUsageWeek)
+		}
 		if body.ShowWorkdirIndicator != nil {
 			e.SetShowWorkdirIndicator(*body.ShowWorkdirIndicator)
 		}
@@ -875,6 +885,8 @@ func (m *ManagementServer) handleProjectDetail(w http.ResponseWriter, r *http.Re
 				AgentType:            body.AgentType,
 				ShowContextIndicator: body.ShowContextIndicator,
 				ShowWorkdirIndicator: body.ShowWorkdirIndicator,
+				ShowUsage5h:          body.ShowUsage5h,
+				ShowUsageWeek:        body.ShowUsageWeek,
 				ReplyFooter:          body.ReplyFooter,
 				InjectSender:         body.InjectSender,
 				PlatformAllowFrom:    body.PlatformAllowFrom,
@@ -2118,10 +2130,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep

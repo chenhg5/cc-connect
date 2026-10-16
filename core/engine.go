@@ -111,7 +111,7 @@ type RestartRequest struct {
 }
 
 type replyFooterUsageCache struct {
-	text      string
+	report    *UsageReport
 	fetchedAt time.Time
 }
 
@@ -446,11 +446,14 @@ type Engine struct {
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
+	//   quota segments — 5h/week remaining % (independent, opt-in)
 	//   line 2 — workspace directory                       (gated by showWorkdirIndicator)
 	// replyFooterEnabled is the master toggle: when false, no footer is emitted
 	// regardless of the per-line flags.
 	showContextIndicator bool
 	showWorkdirIndicator bool
+	showUsage5h          atomic.Bool
+	showUsageWeek        atomic.Bool
 	replyFooterEnabled   bool
 
 	// When true, /list etc. only show sessions tracked by cc-connect,
@@ -7719,10 +7722,14 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 		} else if contextLeft != "" {
 			parts = append(parts, contextLeft)
 			hasStatus = true
-		} else if usage := e.replyFooterUsageText(session, agent); usage != "" {
+		} else if usage := e.replyFooterLegacyUsageText(session, agent); usage != "" {
 			parts = append(parts, usage)
 			hasStatus = true
 		}
+	}
+	if quota := e.replyFooterQuotaText(session, agent); quota != "" {
+		parts = append(parts, quota)
+		hasStatus = true
 	}
 	if e.showWorkdirIndicator {
 		if dir := replyFooterWorkDir(session, agent, workspaceDir); dir != "" {
@@ -7768,7 +7775,7 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 		effort := replyFooterReasoningEffort(session, agent)
 		if line := buildClaudeStatusLineFooter(model, effort, usage); line != "" {
 			lines = append(lines, line)
-		} else if fallback := e.replyFooterUsageText(session, agent); fallback != "" {
+		} else if fallback := e.replyFooterLegacyUsageText(session, agent); fallback != "" {
 			// fallback for non-claudecode agents that still expose UsageReporter
 			parts := []string{}
 			if model != "" {
@@ -7779,6 +7786,14 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 			}
 			parts = append(parts, fallback)
 			lines = append(lines, strings.Join(parts, " · "))
+		}
+	}
+
+	if quota := e.replyFooterQuotaText(session, agent); quota != "" {
+		if len(lines) > 1 {
+			lines[len(lines)-1] += " · " + quota
+		} else {
+			lines = append(lines, quota)
 		}
 	}
 
@@ -7947,40 +7962,45 @@ func replyFooterReasoningEffort(session AgentSession, agent Agent) string {
 }
 
 func (e *Engine) replyFooterUsageText(session AgentSession, agent Agent) string {
+	return formatReplyFooterUsage(e.replyFooterUsageReport(session, agent), e.i18n)
+}
+
+// Explicit quota segments replace the unlabeled legacy "N% left" fallback.
+func (e *Engine) replyFooterLegacyUsageText(session AgentSession, agent Agent) string {
+	if e.showUsage5h.Load() || e.showUsageWeek.Load() {
+		return ""
+	}
+	return e.replyFooterUsageText(session, agent)
+}
+
+func (e *Engine) replyFooterUsageReport(session AgentSession, agent Agent) *UsageReport {
 	ctx, cancel := context.WithTimeout(e.ctx, replyFooterUsageTimeout)
 	defer cancel()
-
 	if session != nil {
 		if reporter, ok := session.(UsageReporter); ok {
 			if report, err := reporter.GetUsage(ctx); err == nil {
-				return formatReplyFooterUsage(report, e.i18n)
+				return report
 			}
 		}
 	}
-
 	reporter, ok := agent.(UsageReporter)
 	if !ok {
-		return ""
+		return nil
 	}
-
 	e.replyFooterMu.Lock()
 	cached := e.replyFooterUsage
 	e.replyFooterMu.Unlock()
 	if !cached.fetchedAt.IsZero() && time.Since(cached.fetchedAt) < replyFooterUsageCacheTTL {
-		return cached.text
+		return cached.report
 	}
-
-	text := ""
-	if report, err := reporter.GetUsage(ctx); err == nil {
-		text = formatReplyFooterUsage(report, e.i18n)
-	} else if !cached.fetchedAt.IsZero() {
-		text = cached.text
+	report, err := reporter.GetUsage(ctx)
+	if err != nil {
+		report = cached.report
 	}
-
 	e.replyFooterMu.Lock()
-	e.replyFooterUsage = replyFooterUsageCache{text: text, fetchedAt: time.Now()}
+	e.replyFooterUsage = replyFooterUsageCache{report: report, fetchedAt: time.Now()}
 	e.replyFooterMu.Unlock()
-	return text
+	return report
 }
 
 func formatReplyFooterUsage(report *UsageReport, i18n *I18n) string {
@@ -8192,6 +8212,13 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 			formatStatusTokenCount(usage.CachedInputTokens)))
 		line1Parts = append(line1Parts, fmt.Sprintf("ctx %d%%", pct))
 		line1 = strings.Join(line1Parts, " · ")
+	}
+
+	if quota := e.replyFooterQuotaText(session, agent); quota != "" {
+		if line1 != "" {
+			line1 += " · "
+		}
+		line1 += quota
 	}
 
 	var line2 string
