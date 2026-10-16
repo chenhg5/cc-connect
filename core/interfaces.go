@@ -72,6 +72,14 @@ type SessionModelInjector interface {
 	SetSessionModel(model string)
 }
 
+// SessionInstructionsInjector is an optional interface for agents whose
+// built-in base instructions can be replaced per session. The engine calls it
+// right before every StartSession with the file mapped to that session key in
+// [projects.session_instructions], or "" for the built-in prompt (maomao fork).
+type SessionInstructionsInjector interface {
+	SetSessionInstructionsFile(path string)
+}
+
 // FormattingInstructionProvider is an optional interface for platforms that
 // provide platform-specific formatting instructions for the agent system prompt
 // (e.g., Slack mrkdwn vs standard Markdown).

@@ -36,6 +36,12 @@ func TestHelperFakeAppServer(t *testing.T) {
 		result := map[string]any{}
 		switch req.Method {
 		case "thread/start", "thread/resume":
+			if f := os.Getenv("CODEX_FAKE_THREAD_FILE"); f != "" {
+				b, _ := json.Marshal(map[string]any{"method": req.Method, "params": req.Params})
+				w, _ := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+				_, _ = w.Write(append(b, '\n'))
+				_ = w.Close()
+			}
 			result = map[string]any{"thread": map[string]any{"id": "thread-1"}, "model": req.Params["model"]}
 		case "turn/start":
 			b, _ := json.Marshal(req.Params)

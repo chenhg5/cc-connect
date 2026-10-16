@@ -169,6 +169,9 @@ type appServerSession struct {
 	extraEnv       []string
 	codexHome      string
 	promptPreamble string
+	// baseInstructions replaces codex's built-in base instructions on
+	// thread/start and thread/resume; "" keeps the built-in prompt.
+	baseInstructions string
 
 	events chan core.Event
 
@@ -209,7 +212,15 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, instructionsFile string) (*appServerSession, error) {
+	var baseInstructions string
+	if instructionsFile != "" {
+		b, err := os.ReadFile(instructionsFile)
+		if err != nil {
+			return nil, fmt.Errorf("codex: read session instructions %s: %w", instructionsFile, err)
+		}
+		baseInstructions = strings.TrimSpace(string(b))
+	}
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
@@ -222,6 +233,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		extraEnv:         append([]string(nil), extraEnv...),
 		codexHome:        strings.TrimSpace(codexHome),
 		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		baseInstructions: baseInstructions,
 		events:           make(chan core.Event, 128),
 		ctx:              sessionCtx,
 		cancel:           cancel,
@@ -378,6 +390,9 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	}
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
+	}
+	if s.baseInstructions != "" {
+		params["baseInstructions"] = s.baseInstructions
 	}
 	if approval, sandbox := appServerModeSettings(s.mode); approval != "" {
 		params["approvalPolicy"] = approval

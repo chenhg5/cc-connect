@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -50,5 +51,42 @@ func TestSessionModels_AppliedPerSessionKeyBeforeStart(t *testing.T) {
 		if agent.started[i] != want[i] {
 			t.Fatalf("session %d started with model %q, want %q (all: %q)", i, agent.started[i], want[i], agent.started)
 		}
+	}
+}
+
+type sessionInstrRecordingAgent struct {
+	stubAgent
+	mu      sync.Mutex
+	current string
+	started []string
+}
+
+func (a *sessionInstrRecordingAgent) SetSessionInstructionsFile(path string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.current = path
+}
+
+func (a *sessionInstrRecordingAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.started = append(a.started, a.current)
+	return &stubAgentSession{}, nil
+}
+
+func TestSessionInstructions_AppliedPerSessionKeyBeforeStart(t *testing.T) {
+	p := &stubPlatformEngine{n: "discord"}
+	agent := &sessionInstrRecordingAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetSessionInstructions(map[string]string{
+		" discord:houzhai ": " /p/persona.md ",
+		"discord:blank":     "  ",
+	})
+	for _, key := range []string{"discord:houzhai", "discord:work", "discord:blank"} {
+		e.getOrCreateInteractiveStateWith(key, p, "ctx", &Session{}, e.sessions, nil, "")
+	}
+	want := []string{"/p/persona.md", "", ""}
+	if strings.Join(agent.started, "|") != strings.Join(want, "|") {
+		t.Fatalf("started with %q, want %q", agent.started, want)
 	}
 }

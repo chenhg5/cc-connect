@@ -497,6 +497,12 @@ type ProjectConfig struct {
 	// listed use the agent's model. Only agents implementing
 	// core.SessionModelInjector (codex) honor it.
 	SessionModels map[string]string `toml:"session_models,omitempty"`
+	// SessionInstructions (maomao fork) maps a session key to a file whose
+	// text replaces the agent's built-in base instructions for that session
+	// (codex: model_instructions_file / thread baseInstructions). Sessions not
+	// listed keep the built-in prompt. Only core.SessionInstructionsInjector
+	// agents (codex) honor it.
+	SessionInstructions map[string]string `toml:"session_instructions,omitempty"`
 	// ResetOnIdleMins automatically rotates to a new cc-connect session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.

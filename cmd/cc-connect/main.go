@@ -706,6 +706,7 @@ func main() {
 		}
 		wireColdCacheFresh(engine, proj)
 		engine.SetSessionModels(proj.SessionModels)
+		engine.SetSessionInstructions(proj.SessionInstructions)
 		engine.SetGate(proj.GateURL, proj.GateTimeoutMs, proj.GateFallback)
 		engine.SetTeam(proj.TeamStatusDir, proj.TeamName, proj.TeamStatusInject)
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
@@ -1794,6 +1795,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	}
 	wireColdCacheFresh(engine, *proj)
 	engine.SetSessionModels(proj.SessionModels)
+	engine.SetSessionInstructions(proj.SessionInstructions)
 	engine.SetGate(proj.GateURL, proj.GateTimeoutMs, proj.GateFallback)
 	engine.SetTeam(proj.TeamStatusDir, proj.TeamName, proj.TeamStatusInject)
 	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)

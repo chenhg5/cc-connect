@@ -49,6 +49,7 @@ type Agent struct {
 	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv      []string
 	sessionModel    string // per-session override from [projects.session_models]; "" = default
+	sessionInstr    string // per-session base-instructions file from [projects.session_instructions]; "" = built-in
 	mu              sync.RWMutex
 }
 
@@ -471,6 +472,14 @@ func (a *Agent) SetSessionModel(model string) {
 	a.sessionModel = strings.TrimSpace(model)
 }
 
+// SetSessionInstructionsFile sets the file whose text replaces codex's
+// built-in base instructions for the next StartSession ("" = built-in).
+func (a *Agent) SetSessionInstructionsFile(path string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sessionInstr = strings.TrimSpace(path)
+}
+
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
@@ -501,6 +510,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	if a.sessionModel != "" {
 		model = a.sessionModel
 	}
+	instrFile := a.sessionInstr
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
 
@@ -514,13 +524,17 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt, instrFile)
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
+	cs, err := newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
+	if err == nil {
+		cs.instructionsFile = instrFile
+	}
+	return cs, err
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

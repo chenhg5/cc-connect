@@ -39,3 +39,38 @@ func (e *Engine) applySessionModel(agent Agent, sessionKey string) {
 		inj.SetSessionModel(e.sessionModelFor(sessionKey))
 	}
 }
+
+// ---- maomao fork: per-session base instructions ----
+//
+// [projects.session_instructions] maps a session key to a file that replaces
+// the agent's built-in base instructions, so a chat-only channel can drop the
+// coding-agent prompt while work channels keep it. Same per-start injection as
+// the session model. Shares sessionModelsMu.
+
+// SetSessionInstructions replaces the session key → instructions file map.
+// Blank keys and values are dropped.
+func (e *Engine) SetSessionInstructions(m map[string]string) {
+	clean := make(map[string]string, len(m))
+	for k, v := range m {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k != "" && v != "" {
+			clean[k] = v
+		}
+	}
+	e.sessionModelsMu.Lock()
+	e.sessionInstructions = clean
+	e.sessionModelsMu.Unlock()
+}
+
+// applySessionInstructions tells the agent which instructions file the next
+// StartSession uses ("" = built-in), so an override never leaks across sessions.
+func (e *Engine) applySessionInstructions(agent Agent, sessionKey string) {
+	inj, ok := agent.(SessionInstructionsInjector)
+	if !ok {
+		return
+	}
+	e.sessionModelsMu.RLock()
+	path := e.sessionInstructions[sessionKey]
+	e.sessionModelsMu.RUnlock()
+	inj.SetSessionInstructionsFile(path)
+}
