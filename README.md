@@ -446,6 +446,7 @@ cc-connect update           # Stable
 cc-connect update --pre     # Include pre-releases
 ```
 
+If you enable the webhook or Management API, review the [token migration guide](docs/security-empty-token-migration.md) before upgrading. Enabled endpoints with an empty token now fail at startup unless explicitly configured for local-only insecure mode.
 
 ## 📊 Support Matrix
 
