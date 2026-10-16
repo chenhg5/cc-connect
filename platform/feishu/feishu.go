@@ -206,9 +206,14 @@ type Platform struct {
 	// message) caused the first (oldest create_time) image to be dropped by
 	// core/engine's create_time watermark (PR #1168), so only N-1 images were
 	// ever delivered to the agent (issue #1395).
-	imageBatchMu     sync.Mutex
-	imageBatch       map[string]*imageBatchEntry
-	imageBatchWindow time.Duration // quiet period before flushing a batch; 0 means use defaultImageBatchWindow
+	imageBatchMu           sync.Mutex
+	imageBatch             map[string]*imageBatchEntry
+	imageBatchWindow       time.Duration // quiet period before flushing a batch; 0 means use defaultImageBatchWindow
+	inboundCoalesceWindow  time.Duration
+	inboundDispatchMu      sync.Mutex // serialize timer delivery with immediate commands
+	inboundCoalesceMu      sync.Mutex
+	inboundCoalesce        map[string]*inboundBatch
+	inboundCoalesceStopped bool
 
 	// resourceDownloadHTTP is the bare HTTP client used to download message
 	// resources directly from Feishu with HTTP Range requests. The larkim SDK's
@@ -435,6 +440,15 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		imageBatchWindow = time.Duration(ms) * time.Millisecond
 	}
 
+	inboundCoalesceWindow := time.Duration(0)
+	if raw, ok := opts["inbound_coalesce_window_ms"]; ok {
+		ms, err := coerceMilliseconds(raw)
+		if err != nil || ms < 0 || ms > 60000 {
+			return nil, fmt.Errorf("%s: inbound_coalesce_window_ms must be an integer from 0 to 60000", name)
+		}
+		inboundCoalesceWindow = time.Duration(ms) * time.Millisecond
+	}
+
 	// resource_chunk_size_bytes: byte size for each Range request when chunked-
 	// downloading Feishu message resources (issue #1741). The larkim SDK does
 	// not expose Range headers, so for resources above ~2 MiB a plain GET
@@ -502,6 +516,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		mentionMap:                 mentionMap,
 		imageBatch:                 make(map[string]*imageBatchEntry),
 		imageBatchWindow:           imageBatchWindow,
+		inboundCoalesceWindow:      inboundCoalesceWindow,
 		resourceDownloadHTTP:       &http.Client{Timeout: 60 * time.Second},
 		resourceChunkSize:          resourceChunkSize,
 		resourceMaxBytes:           defaultResourceMaxBytes,
@@ -559,6 +574,9 @@ func (p *Platform) KeepPreviewOnFinish() bool {
 }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
+	p.inboundCoalesceMu.Lock()
+	p.inboundCoalesceStopped = false
+	p.inboundCoalesceMu.Unlock()
 	p.mu.Lock()
 	p.handler = handler
 	p.mu.Unlock()
@@ -1212,6 +1230,17 @@ func isMessageWithdrawnError(err error) bool {
 }
 
 func (p *Platform) dispatchCoreMessage(msg *core.Message) {
+	if p.inboundCoalesceWindow > 0 && msg != nil {
+		p.inboundDispatchMu.Lock()
+		defer p.inboundDispatchMu.Unlock()
+		p.populateWorkspaceChannelKeys(msg)
+		p.coalesceInboundMessage(msg)
+		return
+	}
+	p.deliverCoreMessage(msg)
+}
+
+func (p *Platform) deliverCoreMessage(msg *core.Message) {
 	h := p.getHandler()
 	if msg == nil || h == nil {
 		return
@@ -5566,6 +5595,7 @@ func (p *Platform) Stop() error {
 	}
 	// Flush any pending image batches so buffered images aren't lost on shutdown.
 	p.flushImageBatches()
+	p.flushInboundCoalesced()
 	return nil
 }
 
