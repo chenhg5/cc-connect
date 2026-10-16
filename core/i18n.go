@@ -192,6 +192,14 @@ func (i *I18n) SetLang(lang Language) {
 type MsgKey string
 
 const (
+	MsgDesktopRequest            MsgKey = "desktop_request"
+	MsgDesktopUsage              MsgKey = "desktop_usage"
+	MsgDesktopUnknown            MsgKey = "desktop_unknown"
+	MsgDesktopError              MsgKey = "desktop_error"
+	MsgDesktopQueued             MsgKey = "desktop_queued"
+	MsgDesktopAccepted           MsgKey = "desktop_accepted"
+	MsgDesktopCompleted          MsgKey = "desktop_completed"
+	MsgDesktopProgress           MsgKey = "desktop_progress"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
@@ -695,6 +703,62 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgDesktopRequest: {
+		LangEnglish:            "⏸ Codex needs your input\nUUID: %s\nRequest: %s\n\n%s\n\n/answer %s %s <answer>",
+		LangChinese:            "⏸ Codex 等待回答\nUUID：%s\n请求：%s\n\n%s\n\n/answer %s %s <答案>",
+		LangTraditionalChinese: "⏸ Codex 等待回答\nUUID：%s\n請求：%s\n\n%s\n\n/answer %s %s <答案>",
+		LangJapanese:           "⏸ Codex が入力を待っています\nUUID: %s\nリクエスト: %s\n\n%s\n\n/answer %s %s <回答>",
+		LangSpanish:            "⏸ Codex necesita tu respuesta\nUUID: %s\nSolicitud: %s\n\n%s\n\n/answer %s %s <respuesta>",
+	},
+	MsgDesktopUsage: {
+		LangEnglish:            "Usage: /reply UUID [--queue|--now] <instruction> or /answer UUID REQUEST <answer>",
+		LangChinese:            "用法：/reply UUID [--queue|--now] <指令> 或 /answer UUID 请求ID <答案>",
+		LangTraditionalChinese: "用法：/reply UUID [--queue|--now] <指令> 或 /answer UUID 請求ID <答案>",
+		LangJapanese:           "使い方: /reply UUID [--queue|--now] <指示> または /answer UUID REQUEST <回答>",
+		LangSpanish:            "Uso: /reply UUID [--queue|--now] <instrucción> o /answer UUID REQUEST <respuesta>",
+	},
+	MsgDesktopUnknown: {
+		LangEnglish:            "UUID has not been notified to this destination.",
+		LangChinese:            "此 UUID 尚未通知到当前接收端。",
+		LangTraditionalChinese: "此 UUID 尚未通知到目前接收端。",
+		LangJapanese:           "この宛先に通知された UUID ではありません。",
+		LangSpanish:            "Este UUID no se ha notificado a este destino.",
+	},
+	MsgDesktopError: {
+		LangEnglish:            "Desktop request failed: %s",
+		LangChinese:            "桌面请求失败：%s",
+		LangTraditionalChinese: "桌面請求失敗：%s",
+		LangJapanese:           "デスクトップへの要求に失敗: %s",
+		LangSpanish:            "Error de solicitud al escritorio: %s",
+	},
+	MsgDesktopQueued: {
+		LangEnglish:            "Queued for the desktop conversation; it will run when idle.",
+		LangChinese:            "已加入续接队列，桌面空闲后执行。",
+		LangTraditionalChinese: "已加入續接佇列，桌面空閒後執行。",
+		LangJapanese:           "キューに追加しました。デスクトップが空いたら実行します。",
+		LangSpanish:            "En cola; se ejecutará cuando la conversación quede libre.",
+	},
+	MsgDesktopAccepted: {
+		LangEnglish:            "Accepted by the existing desktop conversation.",
+		LangChinese:            "桌面原对话已接受。",
+		LangTraditionalChinese: "桌面原對話已接受。",
+		LangJapanese:           "既存のデスクトップ会話が受け付けました。",
+		LangSpanish:            "Aceptado por la conversación existente del escritorio.",
+	},
+	MsgDesktopCompleted: {
+		LangEnglish:            "✅ Codex reply completed\nUUID: %s\n\n%s\n\n/reply %[1]s --queue <instruction>\n/reply %[1]s --now <instruction>",
+		LangChinese:            "✅ Codex 回复完成\nUUID：%s\n\n%s\n\n/reply %[1]s --queue <instruction>\n/reply %[1]s --now <instruction>",
+		LangTraditionalChinese: "✅ Codex 回覆完成\nUUID：%s\n\n%s\n\n/reply %[1]s --queue <instruction>\n/reply %[1]s --now <instruction>",
+		LangJapanese:           "✅ Codex の返信が完了\nUUID: %s\n\n%s\n\n/reply %[1]s --queue <instruction>\n/reply %[1]s --now <instruction>",
+		LangSpanish:            "✅ Respuesta de Codex completada\nUUID: %s\n\n%s\n\n/reply %[1]s --queue <instruction>\n/reply %[1]s --now <instruction>",
+	},
+	MsgDesktopProgress: {
+		LangEnglish:            "📣 Codex progress update\nUUID: %s\n\n%s",
+		LangChinese:            "📣 Codex 阶段性汇报\nUUID：%s\n\n%s",
+		LangTraditionalChinese: "📣 Codex 階段進度\nUUID：%s\n\n%s",
+		LangJapanese:           "📣 Codex 進捗報告\nUUID: %s\n\n%s",
+		LangSpanish:            "📣 Progreso de Codex\nUUID: %s\n\n%s",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
@@ -1043,6 +1107,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/switch <number>\n  Resume a session by its list number\n\n" +
 			"/delete <number>|1,2,3|3-7|1,3-5,8\n  Delete sessions by list number(s)\n\n" +
 			"/name [number] <text>\n  Name a session for easy identification\n\n" +
+			"/reply UUID [--queue|--now] <instruction> | /answer UUID REQUEST <answer>\n  Continue a notified desktop conversation / answer its request\n\n" +
 			"/current\n  Show current active session\n\n" +
 			"/history [n]\n  Show last n messages (default 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
@@ -1087,6 +1152,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/switch <序号>\n  按列表序号切换会话\n\n" +
 			"/delete <序号>|1,2,3|3-7|1,3-5,8\n  按列表序号批量/单个删除会话\n\n" +
 			"/name [序号] <名称>\n  给会话命名，方便识别\n\n" +
+			"/reply UUID [--queue|--now] <instruction> | /answer UUID REQUEST <answer>\n  继续已通知的桌面对话 / 回答其请求\n\n" +
 			"/current\n  查看当前活跃会话\n\n" +
 			"/history [n]\n  查看最近 n 条消息（默认 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
@@ -1131,6 +1197,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/switch <序號>\n  按列表序號切換會話\n\n" +
 			"/delete <序號>|1,2,3|3-7|1,3-5,8\n  按列表序號批量/單筆刪除會話\n\n" +
 			"/name [序號] <名稱>\n  為會話命名，方便辨識\n\n" +
+			"/reply UUID [--queue|--now] <instruction> | /answer UUID REQUEST <answer>\n  繼續已通知的桌面對話 / 回答請求\n\n" +
 			"/current\n  查看當前活躍會話\n\n" +
 			"/history [n]\n  查看最近 n 條訊息（預設 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
@@ -1173,6 +1240,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/switch <番号>\n  リスト番号でセッションを切り替え\n\n" +
 			"/delete <番号>|1,2,3|3-7|1,3-5,8\n  リスト番号でセッションを単体/複数削除\n\n" +
 			"/name [番号] <名前>\n  セッションに名前を付ける\n\n" +
+			"/reply UUID [--queue|--now] <instruction> | /answer UUID REQUEST <answer>\n  通知済みのデスクトップ会話を継続 / 質問に回答\n\n" +
 			"/current\n  現在のアクティブセッションを表示\n\n" +
 			"/history [n]\n  直近 n 件のメッセージを表示（デフォルト 10）\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
@@ -1215,6 +1283,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/switch <número>\n  Reanudar sesión por su número en la lista\n\n" +
 			"/delete <número>|1,2,3|3-7|1,3-5,8\n  Eliminar una o varias sesiones por número de lista\n\n" +
 			"/name [número] <texto>\n  Nombrar una sesión para fácil identificación\n\n" +
+			"/reply UUID [--queue|--now] <instruction> | /answer UUID REQUEST <answer>\n  Continuar una conversación notificada / responder a su solicitud\n\n" +
 			"/current\n  Mostrar sesión activa actual\n\n" +
 			"/history [n]\n  Mostrar últimos n mensajes (por defecto 10)\n\n" +
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
