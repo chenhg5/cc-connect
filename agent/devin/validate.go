@@ -56,7 +56,7 @@ func (a *Agent) sessionOptionValues() []string {
 	if a == nil || a.Agent == nil {
 		return nil
 	}
-	live := a.Agent.SessionModelOptions()
+	live := a.SessionModelOptions()
 	if len(live) == 0 {
 		return nil
 	}

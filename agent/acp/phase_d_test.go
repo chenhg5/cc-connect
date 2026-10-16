@@ -102,7 +102,7 @@ func TestSetConfigOptionErrorIsWarned(t *testing.T) {
 			if json.Unmarshal(sc.Bytes(), &req) != nil || len(req.ID) == 0 {
 				continue
 			}
-			fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"Invalid value 'swe-2-high' for config option 'model'","data":"rejected"}}`+"\n", req.ID)
+			_, _ = fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"Invalid value 'swe-2-high' for config option 'model'","data":"rejected"}}`+"\n", req.ID)
 		}
 	}()
 	s.applyInitialModel("swe-2-high")
@@ -176,10 +176,10 @@ func TestDispatchPrompt_CompactionWaits(t *testing.T) {
 		}
 		go func() {
 			time.Sleep(40 * time.Millisecond)
-			fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"started"}}`+"\n")
-			fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session-id","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Context compacted"}}}}`+"\n")
+			_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"started"}}`+"\n")
+			_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session-id","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Context compacted"}}}}`+"\n")
 			time.Sleep(20 * time.Millisecond)
-			fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"completed"}}`+"\n")
+			_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"completed"}}`+"\n")
 		}()
 		return `{"stopReason":"end_turn"}`, ""
 	})
@@ -221,10 +221,10 @@ func TestDispatchPrompt_CompactionTextAfterCompleted(t *testing.T) {
 		}
 		go func() {
 			time.Sleep(30 * time.Millisecond)
-			fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"started"}}`+"\n")
-			fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"completed"}}`+"\n")
+			_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"started"}}`+"\n")
+			_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"completed"}}`+"\n")
 			time.Sleep(200 * time.Millisecond)
-			fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session-id","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Context compacted"}}}}`+"\n")
+			_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session-id","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Context compacted"}}}}`+"\n")
 		}()
 		return `{"stopReason":"end_turn"}`, ""
 	})
@@ -256,9 +256,9 @@ func TestDispatchPrompt_CompactionFailed(t *testing.T) {
 		}
 		go func() {
 			time.Sleep(30 * time.Millisecond)
-			fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"started"}}`+"\n")
+			_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"started"}}`+"\n")
 			time.Sleep(20 * time.Millisecond)
-			fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"failed"}}`+"\n")
+			_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"failed"}}`+"\n")
 		}()
 		return `{"stopReason":"end_turn"}`, ""
 	})

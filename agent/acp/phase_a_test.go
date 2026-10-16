@@ -146,8 +146,8 @@ func TestDeleteSessionOnTransport(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go tr.readLoop(ctx)
-	defer wResp.Close()
-	defer rReq.Close()
+	defer func() { _ = wResp.Close() }()
+	defer func() { _ = rReq.Close() }()
 
 	go func() {
 		sc := bufio.NewScanner(rReq)
@@ -163,10 +163,10 @@ func TestDeleteSessionOnTransport(t *testing.T) {
 				continue
 			}
 			if req.Method != "session/delete" || req.Params.SessionID != "sid-1" {
-				fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"no"}}`+"\n", req.ID)
+				_, _ = fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"no"}}`+"\n", req.ID)
 				return
 			}
-			fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"result":{}}`+"\n", req.ID)
+			_, _ = fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"result":{}}`+"\n", req.ID)
 			return
 		}
 	}()
@@ -382,8 +382,8 @@ func loadHistoryFromScript(t *testing.T, grace time.Duration, lateChunk bool) []
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
-		wResp.Close()
-		rReq.Close()
+		_ = wResp.Close()
+		_ = rReq.Close()
 	})
 	go tr.readLoop(ctx)
 
@@ -397,14 +397,14 @@ func loadHistoryFromScript(t *testing.T, grace time.Duration, lateChunk bool) []
 		}
 		_ = json.Unmarshal(sc.Bytes(), &req)
 		writeUpdate := func(kind, text string) {
-			fmt.Fprintf(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":%q,"content":{"type":"text","text":%q}}}}`+"\n", kind, text)
+			_, _ = fmt.Fprintf(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sid","update":{"sessionUpdate":%q,"content":{"type":"text","text":%q}}}}`+"\n", kind, text)
 		}
 		writeUpdate("user_message_chunk", "hel")
 		writeUpdate("user_message_chunk", "lo")
 		writeUpdate("agent_thought_chunk", "secret")
 		writeUpdate("tool_call", "nope")
 		writeUpdate("agent_message_chunk", "answer")
-		fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"result":{}}`+"\n", req.ID)
+		_, _ = fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"result":{}}`+"\n", req.ID)
 		if lateChunk {
 			time.Sleep(30 * time.Millisecond)
 			writeUpdate("user_message_chunk", "later")
@@ -420,10 +420,10 @@ func loadHistoryFromScript(t *testing.T, grace time.Duration, lateChunk bool) []
 func TestNotifications_ConfigUsageTitleAndVendor(t *testing.T) {
 	agent := &Agent{}
 	s, wResp, _ := newTestSession(t, agent)
-	fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"text":"leak"}}`+"\n")
-	fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"config_option_update","text":"leak","configOptions":[{"id":"model","category":"model","currentValue":"swe-1-7-lightning-medium","options":[{"value":"swe-1-7-lightning-medium","name":"SWE"}]}]}}}`+"\n")
-	fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"session_info_update","title":"Hello","text":"leak"}}}`+"\n")
-	fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"usage_update","used":10,"size":20,"text":"leak","_meta":{"cognition.ai/inputTokens":4}}}}`+"\n")
+	_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"text":"leak"}}`+"\n")
+	_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"config_option_update","text":"leak","configOptions":[{"id":"model","category":"model","currentValue":"swe-1-7-lightning-medium","options":[{"value":"swe-1-7-lightning-medium","name":"SWE"}]}]}}}`+"\n")
+	_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"session_info_update","title":"Hello","text":"leak"}}}`+"\n")
+	_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"usage_update","used":10,"size":20,"text":"leak","_meta":{"cognition.ai/inputTokens":4}}}}`+"\n")
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -744,7 +744,7 @@ func scriptACP(t *testing.T, rReq *io.PipeReader, wResp *io.PipeWriter, handle s
 			}
 			result, errMsg := handle(req.Method, req.Params)
 			if errMsg != "" {
-				fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":%q}}`+"\n", req.ID, errMsg)
+				_, _ = fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":%q}}`+"\n", req.ID, errMsg)
 				continue
 			}
 			if result == "" {
@@ -754,7 +754,7 @@ func scriptACP(t *testing.T, rReq *io.PipeReader, wResp *io.PipeWriter, handle s
 			if json.Compact(&compact, []byte(result)) == nil {
 				result = compact.String()
 			}
-			fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"result":%s}`+"\n", req.ID, result)
+			_, _ = fmt.Fprintf(wResp, `{"jsonrpc":"2.0","id":%s,"result":%s}`+"\n", req.ID, result)
 		}
 	}()
 }
