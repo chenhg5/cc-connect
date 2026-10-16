@@ -429,7 +429,7 @@ type Engine struct {
 	sessionModelsMu sync.RWMutex
 	sessionModels   map[string]string
 	// Per-session base-instruction files (maomao fork, see session_models.go)
-	sessionInstructions map[string]string
+	sessionInstructions map[string]sessionInstructions
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)

@@ -26,27 +26,26 @@ func TestSessionInstructions_ThreadParamsCarryFileText(t *testing.T) {
 	t.Setenv("CODEX_FAKE_TURN_FILE", filepath.Join(t.TempDir(), "turns.jsonl"))
 	t.Setenv("CODEX_FAKE_THREAD_FILE", threads)
 
-	instr := filepath.Join(t.TempDir(), "persona.md")
-	if err := os.WriteFile(instr, []byte("\n你是龙娘。\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	ag, err := New(map[string]any{"work_dir": t.TempDir(), "backend": "app_server"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := ag.(*Agent)
 
-	start := func(file, resumeID string) {
-		a.SetSessionInstructionsFile(file)
+	start := func(text, resumeID string) {
+		a.SetSessionInstructions("/p/persona.md", text)
+		if text == "" {
+			a.SetSessionInstructions("", "")
+		}
 		s, err := a.StartSession(context.Background(), resumeID)
 		if err != nil {
 			t.Fatalf("StartSession: %v", err)
 		}
 		_ = s.Close()
 	}
-	start(instr, "")         // mapped, new thread
-	start(instr, "thread-9") // mapped, resumed thread
-	start("", "")            // not mapped: built-in prompt
+	start("你是龙娘。", "")         // mapped, new thread
+	start("你是龙娘。", "thread-9") // mapped, resumed thread
+	start("", "")              // not mapped: built-in prompt
 
 	b, err := os.ReadFile(threads)
 	if err != nil {
@@ -75,12 +74,6 @@ func TestSessionInstructions_ThreadParamsCarryFileText(t *testing.T) {
 		}
 	}
 
-	// A missing file fails the start instead of silently using the coding prompt.
-	a.SetSessionInstructionsFile(filepath.Join(t.TempDir(), "missing.md"))
-	if s, err := a.StartSession(context.Background(), ""); err == nil {
-		_ = s.Close()
-		t.Fatal("StartSession with missing instructions file: want error")
-	}
 }
 
 func TestSessionInstructions_ExecArgs(t *testing.T) {

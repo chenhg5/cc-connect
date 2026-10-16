@@ -212,15 +212,7 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, instructionsFile string) (*appServerSession, error) {
-	var baseInstructions string
-	if instructionsFile != "" {
-		b, err := os.ReadFile(instructionsFile)
-		if err != nil {
-			return nil, fmt.Errorf("codex: read session instructions %s: %w", instructionsFile, err)
-		}
-		baseInstructions = strings.TrimSpace(string(b))
-	}
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, baseInstructions string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,

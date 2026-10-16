@@ -1104,6 +1104,32 @@ func (c *Config) validateInternal(permissive bool) error {
 		if err := validateDisplayConfig(prefix+".display", proj.Display); err != nil {
 			return err
 		}
+		for key, path := range proj.SessionInstructions {
+			if err := validateSessionInstructionsFile(path); err != nil {
+				return fmt.Errorf("config: %s.session_instructions[%q]: %w", prefix, key, err)
+			}
+		}
+	}
+	return nil
+}
+
+// validateSessionInstructionsFile rejects a session_instructions entry whose
+// file is not an absolute path to a readable, non-empty file, so a bad entry
+// fails the load instead of failing (and unbinding) sessions at start time.
+func validateSessionInstructionsFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("must be an absolute path, got %q", path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return fmt.Errorf("%s is empty", path)
 	}
 	return nil
 }

@@ -75,9 +75,10 @@ type SessionModelInjector interface {
 // SessionInstructionsInjector is an optional interface for agents whose
 // built-in base instructions can be replaced per session. The engine calls it
 // right before every StartSession with the file mapped to that session key in
-// [projects.session_instructions], or "" for the built-in prompt (maomao fork).
+// [projects.session_instructions] and its text (read at config load), or ""
+// for both to keep the built-in prompt (maomao fork).
 type SessionInstructionsInjector interface {
-	SetSessionInstructionsFile(path string)
+	SetSessionInstructions(path, text string)
 }
 
 // FormattingInstructionProvider is an optional interface for platforms that

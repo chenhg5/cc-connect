@@ -1,6 +1,10 @@
 package core
 
-import "strings"
+import (
+	"log/slog"
+	"os"
+	"strings"
+)
 
 // ---- maomao fork: per-session model overrides ----
 //
@@ -45,32 +49,42 @@ func (e *Engine) applySessionModel(agent Agent, sessionKey string) {
 // [projects.session_instructions] maps a session key to a file that replaces
 // the agent's built-in base instructions, so a chat-only channel can drop the
 // coding-agent prompt while work channels keep it. Same per-start injection as
-// the session model. Shares sessionModelsMu.
+// the session model. The text is read here, at config load, so a file that
+// disappears later cannot fail a session start. Shares sessionModelsMu.
 
-// SetSessionInstructions replaces the session key → instructions file map.
-// Blank keys and values are dropped.
+type sessionInstructions struct{ path, text string }
+
+// SetSessionInstructions replaces the session key → instructions file map,
+// reading each file now. Blank entries are dropped; config validation already
+// rejects unreadable files, so a read error here is only logged.
 func (e *Engine) SetSessionInstructions(m map[string]string) {
-	clean := make(map[string]string, len(m))
+	clean := make(map[string]sessionInstructions, len(m))
 	for k, v := range m {
 		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
-		if k != "" && v != "" {
-			clean[k] = v
+		if k == "" || v == "" {
+			continue
 		}
+		b, err := os.ReadFile(v)
+		if err != nil {
+			slog.Error("session_instructions: read failed, session keeps built-in prompt", "session_key", k, "file", v, "error", err)
+			continue
+		}
+		clean[k] = sessionInstructions{path: v, text: strings.TrimSpace(string(b))}
 	}
 	e.sessionModelsMu.Lock()
 	e.sessionInstructions = clean
 	e.sessionModelsMu.Unlock()
 }
 
-// applySessionInstructions tells the agent which instructions file the next
-// StartSession uses ("" = built-in), so an override never leaks across sessions.
+// applySessionInstructions tells the agent which instructions the next
+// StartSession uses (empty = built-in), so an override never leaks across sessions.
 func (e *Engine) applySessionInstructions(agent Agent, sessionKey string) {
 	inj, ok := agent.(SessionInstructionsInjector)
 	if !ok {
 		return
 	}
 	e.sessionModelsMu.RLock()
-	path := e.sessionInstructions[sessionKey]
+	si := e.sessionInstructions[sessionKey]
 	e.sessionModelsMu.RUnlock()
-	inj.SetSessionInstructionsFile(path)
+	inj.SetSessionInstructions(si.path, si.text)
 }

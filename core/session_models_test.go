@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -61,10 +63,10 @@ type sessionInstrRecordingAgent struct {
 	started []string
 }
 
-func (a *sessionInstrRecordingAgent) SetSessionInstructionsFile(path string) {
+func (a *sessionInstrRecordingAgent) SetSessionInstructions(path, text string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.current = path
+	a.current = path + "=" + text
 }
 
 func (a *sessionInstrRecordingAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
@@ -78,14 +80,22 @@ func TestSessionInstructions_AppliedPerSessionKeyBeforeStart(t *testing.T) {
 	p := &stubPlatformEngine{n: "discord"}
 	agent := &sessionInstrRecordingAgent{}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	persona := filepath.Join(t.TempDir(), "persona.md")
+	if err := os.WriteFile(persona, []byte("\n你是龙娘。\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	e.SetSessionInstructions(map[string]string{
-		" discord:houzhai ": " /p/persona.md ",
+		" discord:houzhai ": " " + persona + " ",
 		"discord:blank":     "  ",
 	})
+	// The text is held from load time: deleting the file later changes nothing.
+	if err := os.Remove(persona); err != nil {
+		t.Fatal(err)
+	}
 	for _, key := range []string{"discord:houzhai", "discord:work", "discord:blank"} {
 		e.getOrCreateInteractiveStateWith(key, p, "ctx", &Session{}, e.sessions, nil, "")
 	}
-	want := []string{"/p/persona.md", "", ""}
+	want := []string{persona + "=你是龙娘。", "=", "="}
 	if strings.Join(agent.started, "|") != strings.Join(want, "|") {
 		t.Fatalf("started with %q, want %q", agent.started, want)
 	}
