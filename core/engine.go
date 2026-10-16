@@ -426,6 +426,10 @@ type Engine struct {
 	coldFreshMinTokens int
 	resetOnIdle        time.Duration
 	// Per-session model overrides (maomao fork, see session_models.go)
+	// Model-at-capacity cooldown (maomao fork, see capacity_retry.go)
+	capMu           sync.Mutex
+	capUntil        time.Time
+	capRound        int
 	sessionModelsMu sync.RWMutex
 	sessionModels   map[string]string
 	// Per-session base-instruction files (maomao fork, see session_models.go)
@@ -532,6 +536,7 @@ type queuedMessage struct {
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession             AgentSession
+	capacityFailed           bool // maomao fork: last turn failed with "model at capacity"
 	platform                 Platform
 	replyCtx                 any
 	currentMessageID         string
@@ -3750,6 +3755,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 
 	turnStart := time.Now()
+	origMsg := *msg // maomao fork: re-delivered as-is after a capacity cooldown
 
 	e.i18n.DetectAndSet(msg.Content)
 	session.AddHistory("user", msg.Content)
@@ -3857,25 +3863,25 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.currentMessageID = msg.MessageID
 	state.fromVoice = msg.FromVoice
 	state.sideText = ""
-	as := state.agentSession // capture under lock to avoid race with cleanup
 	state.mu.Unlock()
 
 	// Run Send concurrently with processInteractiveEvents. Some agents block inside
 	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
-	sendDone := make(chan error, 1)
-	go func() {
-		if as == nil {
-			session.SettleHandoff(false)
-			sendDone <- fmt.Errorf("agent session became nil")
-			return
-		}
-		err := as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
-		session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
-		sendDone <- err
-	}()
-
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
+	// The agent session is captured under lock per attempt inside runTurnWithCapacityRetry.
+	e.runTurnWithCapacityRetry(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, msg.ReplyCtx,
+		func(as AgentSession) error {
+			if as == nil {
+				session.SettleHandoff(false)
+				return fmt.Errorf("agent session became nil")
+			}
+			err := as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+			session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
+			return err
+		},
+		func(wait time.Duration, cooling bool) {
+			e.scheduleCapacityRedelivery(p, origMsg, agent, sessions, interactiveKey, workspaceDir, wait, cooling)
+		})
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
@@ -4831,6 +4837,7 @@ var agentErrorHandlers = []agentErrorHandler{
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
+	var chainedQueued *queuedMessage // maomao fork: queued message chained into this loop, if any
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -6001,6 +6008,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if len(state.pendingMessages) > 0 {
 				queued := state.pendingMessages[0]
+				raw := queued // maomao fork: raw copy (content not yet expanded), put back if this turn hits capacity
+				chainedQueued = &raw
 				state.pendingMessages = state.pendingMessages[1:]
 				remainingQueue := len(state.pendingMessages)
 				state.platform = queued.platform
@@ -6173,14 +6182,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Platform:   p.Name(),
 					Error:      event.Error.Error(),
 				})
-				userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
-				for _, h := range agentErrorHandlers {
-					if strings.Contains(errMsg, h.contains) {
-						userMsg = e.i18n.T(h.msgKey)
-						break
+				if isModelCapacityError(errMsg) {
+					// maomao fork: retried / cooled down by runTurnWithCapacityRetry, which tells the user.
+					// A queued message chained into this loop goes back to the queue head,
+					// so the drain loop retries it (not the turn this loop started with).
+					state.mu.Lock()
+					if chainedQueued != nil {
+						state.pendingMessages = append([]queuedMessage{*chainedQueued}, state.pendingMessages...)
+					} else {
+						state.capacityFailed = true
 					}
+					state.mu.Unlock()
+				} else {
+					userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
+					for _, h := range agentErrorHandlers {
+						if strings.Contains(errMsg, h.contains) {
+							userMsg = e.i18n.T(h.msgKey)
+							break
+						}
+					}
+					e.send(p, replyCtx, userMsg)
 				}
-				e.send(p, replyCtx, userMsg)
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
@@ -6356,6 +6378,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.mu.Unlock()
 
 		e.i18n.DetectAndSet(queued.content)
+		rawQueued := queued // maomao fork: re-delivered as-is after a capacity cooldown
 		queued.content = e.withTurnBlocks(session, queued.msgSessionKey, queued.turnCtxQuery, queued.content, queued.turnCtx)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
@@ -6373,25 +6396,25 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		session.AddHistory("user", queued.content)
 
-		sendDone := make(chan error, 1)
-		go func() {
-			if as == nil {
-				session.SettleHandoff(false)
-				sendDone <- fmt.Errorf("agent session became nil")
-				return
-			}
-			err := as.Send(prompt, queued.messageID, queued.images, queued.files)
-			session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
-			sendDone <- err
-		}()
-
 		var stopTyping func()
 		if ti, ok := queued.platform.(TypingIndicator); ok {
 			stopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx)
+		e.runTurnWithCapacityRetry(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, queued.replyCtx,
+			func(as AgentSession) error {
+				if as == nil {
+					session.SettleHandoff(false)
+					return fmt.Errorf("agent session became nil")
+				}
+				err := as.Send(prompt, queued.messageID, queued.images, queued.files)
+				session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
+				return err
+			},
+			func(wait time.Duration, cooling bool) {
+				e.scheduleCapacityRedelivery(queued.platform, queuedToMessage(rawQueued), state.agent, sessions, sessionKey, state.workspaceDir, wait, cooling)
+			})
 	}
 }
 
