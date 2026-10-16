@@ -3863,8 +3863,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if wait := e.capacityWait(); wait > 0 {
 		e.deferForCapacity(p, origMsg, agent, sessions, interactiveKey, workspaceDir, wait, true)
 	} else {
-		msg.Content = e.withTurnBlocks(session, msg.SessionKey, msg.TurnCtxQuery, msg.Content, msg.TurnCtx)
-		promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
+		// Local copy, not msg.Content: the caller may still read *msg (data race).
+		content := e.withTurnBlocks(session, msg.SessionKey, msg.TurnCtxQuery, msg.Content, msg.TurnCtx)
+		promptContent := e.buildSenderPrompt(content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
 		sendStart := time.Now()
 		state.mu.Lock()
@@ -3891,7 +3892,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 				e.deferForCapacity(p, origMsg, agent, sessions, interactiveKey, workspaceDir, wait, false)
 			})
 		if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
-			slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
+			slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(content))
 		}
 		stopTyping = nil // ownership transferred; prevent defer from double-stopping
 	}
