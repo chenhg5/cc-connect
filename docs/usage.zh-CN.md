@@ -113,6 +113,8 @@ cmd = ["/path with spaces/codex", "--profile", "work"]
 
 ### Cursor Agent 模式
 
+不设置 `cmd` 时，cc-connect 先查找 `PATH` 中的 `cursor-agent`，再查找旧别名 `agent`。显式配置的 `cmd` 原样使用，找不到时会报错。此发现修复不会自动添加 `--trust`，工作区信任仍由 Cursor CLI 控制。确认工作区可信且明确要跳过提示时，可自行配置 `cmd = "cursor-agent --trust"`。
+
 | 模式 | 配置值 | 行为 |
 |------|--------|------|
 | 默认 | `default` | 工具调用前询问 |

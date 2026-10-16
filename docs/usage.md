@@ -115,9 +115,11 @@ This runs the bundled CLI using the existing Codex adapter. Desktop-only tools a
 
 ### Cursor Agent Modes
 
+When `cmd` is unset, cc-connect looks for `cursor-agent` on `PATH`, then the older `agent` alias. An explicit `cmd` is used as given and reports an error if unavailable. This discovery change does not add `--trust`; the Cursor CLI still controls workspace trust. If you have verified a workspace and deliberately want to skip its trust prompt, set `cmd = "cursor-agent --trust"` explicitly.
+
 | Mode | Config Value | Behavior |
 |------|-------------|----------|
-| Default | `default` | Trust workspace, ask before tools |
+| Default | `default` | Keep the CLI's workspace trust policy; ask before tools |
 | Force (YOLO) | `force` / `yolo` | Auto-approve all |
 | Plan | `plan` | Read-only analysis |
 | Ask | `ask` | Q&A style, read-only |
