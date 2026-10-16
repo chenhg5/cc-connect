@@ -502,10 +502,29 @@ cc-connect update --pre     # 含预发布版本
 ```
 /new [名称]            创建新会话
 /list                  列出所有会话
+/tasks [关键词]          查找跨工作目录的最近会话（支持的 Agent）
+/goto <序号>            继续最近一次 /tasks 列表中的会话
 /switch <id>           切换会话
 /current               查看当前会话
 /dir [路径|reset]      查看、切换或重置工作目录
 ```
+
+`/list` 和 `/switch` 仍只针对当前工作目录。跨目录路由默认关闭，并且只允许
+`admin_from` 中的管理员使用。对于支持全局会话查找的 Agent（目前为 Codex），
+需要显式配置允许访问的根目录：
+
+```toml
+[[projects]]
+admin_from = "你的用户ID"
+global_session_routing = true
+global_session_roots = ["D:\\projects"]
+```
+
+启用后，`/tasks` 只会显示规范化工作目录位于允许根目录内的最近 15 个会话。
+可以用 `/tasks <关键词>` 按标题、目录或 ID 搜索，再用 `/goto <序号>` 继续会话。
+`/goto` 使用当前聊天独立的工作区上下文，不会修改项目的全局工作目录，也不会
+影响其他聊天。编号按聊天和用户隔离并仅保存在内存中；cc-connect 重启后请重新
+发送 `/tasks`。多工作区模式下请使用独立的工作区路由，不支持这两个命令。
 
 项目配置也可以开启“长时间空闲后自动切到新会话”：
 

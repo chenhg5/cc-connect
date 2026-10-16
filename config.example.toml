@@ -802,6 +802,16 @@ name = "my-backend"
 # 设置 admin_from = "*" 将授予所有已允许的用户对主机的完整 shell 访问权限。
 # 仅在个人单用户部署中使用此配置，确保所有允许的用户均可信任。
 # admin_from = "*"
+#
+# Cross-directory session routing is disabled by default. It is always
+# admin-only and requires one or more existing roots. Session work directories
+# are canonicalized before containment checks, so symlinks cannot escape the
+# allowlist. /goto changes only the requesting chat's workspace context.
+# 跨目录会话路由默认关闭，始终仅限管理员使用，并且必须配置至少一个已存在的根目录。
+# 会话工作目录会先解析为规范路径再做边界检查，符号链接无法绕过白名单；/goto 只会
+# 修改当前聊天的工作区上下文。
+# global_session_routing = true
+# global_session_roots = ["/path/to/projects"]
 
 # Multi-user mode — per-user rate limits and role-based command ACL
 # 多用户模式 — 按用户速率限制和基于角色的命令权限控制

@@ -603,6 +603,306 @@ func (a *stubWorkDirAgent) GetWorkDir() string {
 	return a.workDir
 }
 
+type stubGlobalTaskAgent struct {
+	stubWorkDirAgent
+	sessions []AgentSessionInfo
+}
+
+func (a *stubGlobalTaskAgent) ListAllSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return append([]AgentSessionInfo(nil), a.sessions...), nil
+}
+
+type namedStubGlobalTaskAgent struct {
+	stubGlobalTaskAgent
+	name string
+}
+
+func (a *namedStubGlobalTaskAgent) Name() string { return a.name }
+
+func TestTasksAndGotoRouteAcrossWorkDirs(t *testing.T) {
+	root := t.TempDir()
+	alpha := filepath.Join(root, "alpha")
+	beta := filepath.Join(root, "beta")
+	for _, dir := range []string{alpha, beta} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agentName := "test-global-session-routing"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		workDir, _ := opts["work_dir"].(string)
+		return &namedStubWorkDirAgent{
+			stubWorkDirAgent: stubWorkDirAgent{workDir: workDir},
+			name:             agentName,
+		}, nil
+	})
+	agent := &namedStubGlobalTaskAgent{
+		name: agentName,
+		stubGlobalTaskAgent: stubGlobalTaskAgent{
+			stubWorkDirAgent: stubWorkDirAgent{workDir: alpha},
+			sessions: []AgentSessionInfo{
+				{ID: "alpha-session-id", Summary: "Alpha login fix", WorkDir: alpha, ModifiedAt: time.Now()},
+				{ID: "beta-session-id", Summary: "Beta refactor", WorkDir: beta, ModifiedAt: time.Now().Add(-time.Hour)},
+			},
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	e.SetAdminFrom("admin")
+	e.SetGlobalSessionRouting(true, []string{root})
+	msg := &Message{SessionKey: "test:user", UserID: "admin", ReplyCtx: "ctx"}
+
+	if !e.handleCommand(p, msg, "/tasks beta") {
+		t.Fatal("/tasks was not handled as a built-in command")
+	}
+	replies := p.getSent()
+	if len(replies) != 1 || !strings.Contains(replies[0], "Beta refactor") || strings.Contains(replies[0], "Alpha login fix") {
+		t.Fatalf("unexpected /tasks reply: %#v", replies)
+	}
+
+	p.clearSent()
+	if !e.handleCommand(p, msg, "/goto 1") {
+		t.Fatal("/goto was not handled as a built-in command")
+	}
+	if got := agent.GetWorkDir(); got != alpha {
+		t.Fatalf("shared agent work dir = %q, want unchanged %q", got, alpha)
+	}
+	if got := e.sendWorkDirForSession(msg.SessionKey); !pathsEqual(got, beta) {
+		t.Fatalf("chat work dir = %q, want %q", got, beta)
+	}
+	_, targetSessions, err := e.getOrCreateWorkspaceAgent(beta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := targetSessions.GetOrCreateActive(msg.SessionKey).GetAgentSessionID(); got != "beta-session-id" {
+		t.Fatalf("agent session = %q, want beta-session-id", got)
+	}
+	if replies = p.getSent(); len(replies) != 1 || !strings.Contains(replies[0], beta) {
+		t.Fatalf("unexpected /goto reply: %#v", replies)
+	}
+}
+
+func TestListGlobalTasksSortsAndDeduplicates(t *testing.T) {
+	root := t.TempDir()
+	dirs := make([]string, 4)
+	for i := range dirs {
+		dirs[i] = filepath.Join(root, fmt.Sprintf("dir-%d", i))
+		if err := os.MkdirAll(dirs[i], 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := t.TempDir()
+	agent := &stubGlobalTaskAgent{sessions: []AgentSessionInfo{
+		{ID: "older", Summary: "Older task", WorkDir: dirs[0], ModifiedAt: time.Unix(100, 0)},
+		{ID: "newer", Summary: "Newer task", WorkDir: dirs[1], ModifiedAt: time.Unix(300, 0)},
+		{ID: "older", Summary: "Duplicate task", WorkDir: dirs[2], ModifiedAt: time.Unix(200, 0)},
+		{ID: "missing-work-dir", Summary: "Invalid task", ModifiedAt: time.Unix(400, 0)},
+		{ID: "outside", Summary: "Secret task", WorkDir: outside, ModifiedAt: time.Unix(500, 0)},
+	}}
+	canonicalRoot, err := canonicalExistingDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := listGlobalTasks(context.Background(), agent, []string{canonicalRoot}, "")
+	if err != nil {
+		t.Fatalf("listGlobalTasks() error: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("listGlobalTasks() returned %d sessions, want 2", len(sessions))
+	}
+	if sessions[0].ID != "newer" || sessions[1].Summary != "Duplicate task" {
+		t.Fatalf("listGlobalTasks() order = %#v, want newer then most recent older", sessions)
+	}
+}
+
+func TestTaskRoutesAreScopedPerChat(t *testing.T) {
+	e := &Engine{}
+	e.saveTaskRoutes("chat-a", "user-a", []AgentSessionInfo{{ID: "session-a"}})
+	e.saveTaskRoutes("chat-b", "user-b", []AgentSessionInfo{{ID: "session-b"}})
+
+	if got := e.loadTaskRoutes("chat-a", "user-a"); len(got) != 1 || got[0].ID != "session-a" {
+		t.Fatalf("chat-a routes = %#v, want session-a", got)
+	}
+	if got := e.loadTaskRoutes("chat-b", "user-b"); len(got) != 1 || got[0].ID != "session-b" {
+		t.Fatalf("chat-b routes = %#v, want session-b", got)
+	}
+	if got := e.loadTaskRoutes("chat-a", "user-b"); len(got) != 0 {
+		t.Fatalf("user-b saw user-a routes: %#v", got)
+	}
+}
+
+func TestTasksRejectsUnsupportedAndMultiWorkspaceAgents(t *testing.T) {
+	tests := []struct {
+		name           string
+		agent          Agent
+		multiWorkspace bool
+		want           string
+	}{
+		{name: "unsupported agent", agent: &stubAgent{}, want: "does not support"},
+		{name: "multi-workspace", agent: &stubGlobalTaskAgent{}, multiWorkspace: true, want: "multi-workspace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			p := &stubPlatformEngine{n: "test"}
+			e := NewEngine("test", tt.agent, []Platform{p}, "", LangEnglish)
+			e.SetGlobalSessionRouting(true, []string{root})
+			e.multiWorkspace = tt.multiWorkspace
+			msg := &Message{SessionKey: "test:user", ReplyCtx: "ctx"}
+
+			e.cmdTasks(p, msg, nil)
+			replies := p.getSent()
+			if len(replies) != 1 || !strings.Contains(replies[0], tt.want) {
+				t.Fatalf("/tasks reply = %#v, want text containing %q", replies, tt.want)
+			}
+		})
+	}
+}
+
+func TestGotoRejectsMissingOrStaleTaskNumber(t *testing.T) {
+	root := t.TempDir()
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubGlobalTaskAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetGlobalSessionRouting(true, []string{root})
+	msg := &Message{SessionKey: "test:user", ReplyCtx: "ctx"}
+
+	e.cmdGoto(p, msg, []string{"1"})
+	replies := p.getSent()
+	if len(replies) != 1 || !strings.Contains(replies[0], "Invalid or expired") {
+		t.Fatalf("/goto reply = %#v, want invalid or expired task number", replies)
+	}
+}
+
+func TestGlobalSessionRoutingAuthorizationFailsWithoutMetadata(t *testing.T) {
+	root := t.TempDir()
+	secretDir := filepath.Join(root, "secret-project")
+	if err := os.MkdirAll(secretDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agent := &stubGlobalTaskAgent{sessions: []AgentSessionInfo{{
+		ID: "secret-session-id", Summary: "secret session title", WorkDir: secretDir, ModifiedAt: time.Now(),
+	}}}
+
+	tests := []struct {
+		name    string
+		enabled bool
+		admin   string
+		userID  string
+		want    string
+	}{
+		{name: "admin but feature disabled", admin: "admin", userID: "admin", want: "disabled"},
+		{name: "feature enabled but non-admin", enabled: true, admin: "admin", userID: "stranger", want: "admin privilege"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+			e.SetAdminFrom(tt.admin)
+			e.SetGlobalSessionRouting(tt.enabled, []string{root})
+			msg := &Message{SessionKey: "test:chat", UserID: tt.userID, ReplyCtx: "ctx"}
+
+			if !e.handleCommand(p, msg, "/tasks") {
+				t.Fatal("/tasks was not handled")
+			}
+			replies := p.getSent()
+			if len(replies) != 1 || !strings.Contains(strings.ToLower(replies[0]), tt.want) {
+				t.Fatalf("reply = %#v, want text containing %q", replies, tt.want)
+			}
+			for _, secret := range []string{"secret-session-id", "secret session title", "secret-project"} {
+				if strings.Contains(replies[0], secret) {
+					t.Fatalf("unauthorized reply leaked %q: %q", secret, replies[0])
+				}
+			}
+		})
+	}
+}
+
+func TestGlobalSessionRoutingTwoIdentityIsolation(t *testing.T) {
+	root := t.TempDir()
+	alpha := filepath.Join(root, "alpha")
+	beta := filepath.Join(root, "beta")
+	for _, dir := range []string{alpha, beta} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	agentName := "test-global-session-two-identities"
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		workDir, _ := opts["work_dir"].(string)
+		return &namedStubWorkDirAgent{
+			stubWorkDirAgent: stubWorkDirAgent{workDir: workDir},
+			name:             agentName,
+		}, nil
+	})
+	baseAgent := &namedStubGlobalTaskAgent{
+		name: agentName,
+		stubGlobalTaskAgent: stubGlobalTaskAgent{
+			stubWorkDirAgent: stubWorkDirAgent{workDir: alpha},
+			sessions: []AgentSessionInfo{{
+				ID: "beta-session-id", Summary: "Beta refactor", WorkDir: beta, ModifiedAt: time.Now(),
+			}},
+		},
+	}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", baseAgent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetAdminFrom("admin-a,admin-b")
+	e.SetGlobalSessionRouting(true, []string{root})
+	a := &Message{SessionKey: "test:chat-a", UserID: "admin-a", ReplyCtx: "ctx-a"}
+	b := &Message{SessionKey: "test:chat-b", UserID: "admin-b", ReplyCtx: "ctx-b"}
+
+	e.handleCommand(p, a, "/tasks beta")
+	p.clearSent()
+	e.handleCommand(p, b, "/goto 1")
+	if replies := p.getSent(); len(replies) != 1 || !strings.Contains(replies[0], "Invalid or expired") {
+		t.Fatalf("identity B reused identity A's route: %#v", replies)
+	}
+
+	p.clearSent()
+	e.handleCommand(p, a, "/goto 1")
+	if got := e.sendWorkDirForSession(a.SessionKey); !pathsEqual(got, beta) {
+		t.Fatalf("identity A work dir = %q, want %q", got, beta)
+	}
+	if got := e.sendWorkDirForSession(b.SessionKey); got != "" {
+		t.Fatalf("identity B work dir mutated to %q", got)
+	}
+	agentA, sessionsA, _, workspaceA, err := e.commandContextWithWorkspace(p, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentB, sessionsB, _, workspaceB, err := e.commandContextWithWorkspace(p, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agentA == baseAgent || sessionsA == e.sessions || !pathsEqual(workspaceA, beta) {
+		t.Fatalf("identity A did not route to isolated beta workspace")
+	}
+	if agentB != baseAgent || sessionsB != e.sessions || workspaceB != "" {
+		t.Fatalf("identity B context changed: agent=%T workspace=%q", agentB, workspaceB)
+	}
+	if got := baseAgent.GetWorkDir(); got != alpha {
+		t.Fatalf("global work dir changed to %q, want %q", got, alpha)
+	}
+}
+
+func TestPathWithinRootsRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(root, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	canonicalRoot, err := canonicalExistingDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical, ok := pathWithinRoots(link, []string{canonicalRoot}); ok {
+		t.Fatalf("symlink escape accepted as %q", canonical)
+	}
+}
+
 type namedStubWorkDirAgent struct {
 	stubWorkDirAgent
 	name string
