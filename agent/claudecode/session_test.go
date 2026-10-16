@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -850,6 +851,38 @@ func TestHandleUserEmitsToolResult(t *testing.T) {
 				t.Fatal("timeout waiting for EventToolResult — handleUser dropped the tool_result")
 			}
 		})
+	}
+}
+
+func TestHandleUserToolResultPreservesUTF8AtTruncation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{events: make(chan core.Event, 1), ctx: ctx}
+	cs.alive.Store(true)
+	// A 500-byte cut lands inside the three-byte character.
+	result := strings.Repeat("a", 499) + "中" + "tail"
+	cs.handleUser(map[string]any{
+		"message": map[string]any{
+			"content": []any{map[string]any{
+				"type": "tool_result", "content": result,
+			}},
+		},
+	})
+
+	select {
+	case event := <-cs.events:
+		if event.Type != core.EventToolResult {
+			t.Fatalf("event type = %q, want %q", event.Type, core.EventToolResult)
+		}
+		if !utf8.ValidString(event.ToolResult) {
+			t.Fatalf("tool result is not valid UTF-8: %q", event.ToolResult)
+		}
+		if want := strings.Repeat("a", 499) + "..."; event.ToolResult != want {
+			t.Fatalf("tool result = %q, want %q", event.ToolResult, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for tool result")
 	}
 }
 

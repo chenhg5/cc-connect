@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // ccPermissionHookEntry represents one PermissionRequest hook entry from
@@ -43,15 +44,15 @@ type ccHookDecision struct {
 // hookContext carries the session context needed to build hook stdin.
 // Fields mirror Claude Code's PermissionRequest hook input spec.
 type hookContext struct {
-	sessionID          string
-	toolName           string
-	toolInput          map[string]any
-	cwd                string
-	permissionMode     string
-	transcriptPath     string
-	permissionSuggestions []any // nil = omit from stdin
-	agentID            string // empty = omit
-	agentType          string // empty = omit
+	sessionID             string
+	toolName              string
+	toolInput             map[string]any
+	cwd                   string
+	permissionMode        string
+	transcriptPath        string
+	permissionSuggestions []any  // nil = omit from stdin
+	agentID               string // empty = omit
+	agentType             string // empty = omit
 }
 
 // ccPermissionHookRunner reads and executes Claude Code PermissionRequest
@@ -338,10 +339,15 @@ func buildHookStdin(hctx hookContext) map[string]any {
 	return m
 }
 
-// truncateStr truncates s to maxLen characters, appending "..." if truncated.
+// truncateStr truncates s to at most maxLen bytes without splitting a UTF-8
+// character, appending "..." if truncated.
 func truncateStr(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	cut := maxLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
