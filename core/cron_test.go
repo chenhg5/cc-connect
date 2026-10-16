@@ -1290,3 +1290,61 @@ func mustParseStandardForTest(t *testing.T, expr string) cron.Schedule {
 	}
 	return s
 }
+
+func TestSharedCronWaitsForResultAndPreservesSideSessionIsolation(t *testing.T) {
+	for _, mode := range []string{"reuse", "new_per_run"} {
+		t.Run(mode, func(t *testing.T) {
+			env, a := newSharedCompatEnv(t)
+			active := env.e.sessions.GetOrCreateActive("test:user")
+			active.AddHistory("user", "MAIN HISTORY")
+			done := make(chan error, 1)
+			go func() {
+				done <- env.e.ExecuteCronJob(&CronJob{ID: "compat", SessionKey: "test:user", Prompt: "CRON TASK", SessionMode: mode})
+			}()
+			call := awaitSharedCompatCall(t, a)
+			select {
+			case err := <-done:
+				t.Fatalf("returned before completion: %v", err)
+			default:
+			}
+			if mode == "new_per_run" && active.HistoryLen() != 1 {
+				t.Fatal("cron modified main conversation")
+			}
+			call.finish("CRON RESULT")
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("cron did not complete")
+			}
+			env.await("CRON RESULT")
+			if mode == "new_per_run" && active.HistoryLen() != 1 {
+				t.Fatal("cron result entered main history")
+			}
+		})
+	}
+}
+
+func TestSharedMutedCronDoesNotMuteObserver(t *testing.T) {
+	env, a := newSharedCompatEnv(t)
+	env.send("initial")
+	first := awaitSharedCompatCall(t, a)
+	first.finish("INITIAL RESULT")
+	env.await("INITIAL RESULT")
+	done := make(chan error, 1)
+	go func() {
+		done <- env.e.ExecuteCronJob(&CronJob{ID: "muted", SessionKey: "test:user", Prompt: "MUTED TASK", Mute: true})
+	}()
+	call := awaitSharedCompatCall(t, a)
+	call.finish("MUTED RESULT")
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(env.visible(), "MUTED RESULT") {
+		t.Fatal("muted task delivered")
+	}
+	call.session.emit(Event{Type: EventText, Content: "EXTERNAL VISIBLE", Metadata: map[string]any{"phase": "commentary"}})
+	env.await("EXTERNAL VISIBLE")
+}

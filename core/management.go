@@ -148,10 +148,10 @@ type GlobalProviderInfo struct {
 		Model string `json:"model"`
 		Alias string `json:"alias,omitempty"`
 	} `json:"models,omitempty"`
-	Endpoints       map[string]string              `json:"endpoints,omitempty"`
-	AgentModels     map[string]string              `json:"agent_models,omitempty"`
-	AgentModelLists map[string][]GlobalModelEntry   `json:"agent_model_lists,omitempty"`
-	Codex           *GlobalCodexConfig              `json:"codex,omitempty"`
+	Endpoints       map[string]string             `json:"endpoints,omitempty"`
+	AgentModels     map[string]string             `json:"agent_models,omitempty"`
+	AgentModelLists map[string][]GlobalModelEntry `json:"agent_model_lists,omitempty"`
+	Codex           *GlobalCodexConfig            `json:"codex,omitempty"`
 }
 
 // GlobalModelEntry is a model entry inside AgentModelLists.
@@ -415,9 +415,9 @@ func (m *ManagementServer) handleStatus(w http.ResponseWriter, r *http.Request) 
 				info := ph.PlatformHealth()
 				if info.Degraded {
 					entry := map[string]any{
-						"name":    info.Name,
-						"reason":  info.DegradedReason,
-						"since":   info.DegradedSince,
+						"name":   info.Name,
+						"reason": info.DegradedReason,
+						"since":  info.DegradedSince,
 					}
 					degradedEntries = append(degradedEntries, entry)
 				}
@@ -1242,7 +1242,11 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 				histLimit = n
 			}
 		}
-		hist := s.GetHistory(histLimit)
+		hist, historyErr := e.historyForSession(e.agent, s, histLimit)
+		if historyErr != nil {
+			mgmtError(w, http.StatusBadGateway, historyErr.Error())
+			return
+		}
 
 		histJSON := make([]map[string]any, len(hist))
 		for i, h := range hist {
@@ -1314,6 +1318,14 @@ func (m *ManagementServer) handleProjectSessionSwitch(w http.ResponseWriter, r *
 		mgmtError(w, http.StatusBadRequest, "session_key and session_id are required")
 		return
 	}
+	if _, shared := e.agent.(AgentSessionAttacher); shared {
+		if s, err := e.switchSharedManagementSession(body.SessionKey, body.SessionID); err != nil {
+			mgmtError(w, http.StatusBadRequest, err.Error())
+		} else {
+			mgmtJSON(w, http.StatusOK, map[string]any{"message": "active session switched", "active_session_id": s.ID})
+		}
+		return
+	}
 	s, err := e.sessions.SwitchSession(body.SessionKey, body.SessionID)
 	if err != nil {
 		mgmtError(w, http.StatusNotFound, err.Error())
@@ -1367,6 +1379,14 @@ func (m *ManagementServer) handleProjectProviders(w http.ResponseWriter, r *http
 			action = parts[1]
 		}
 		if action == "activate" && r.Method == http.MethodPost {
+			if defaultSettingsOnly(e.agent) {
+				if _, err := e.applyDefaultProvider(e.agent, []string{"switch", provName}); err != nil {
+					mgmtError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				mgmtJSON(w, http.StatusOK, map[string]any{"active_provider": provName, "message": e.i18n.T(MsgDefaultSettingsSaved), "scope": "new_threads"})
+				return
+			}
 			if !ps.SetActiveProvider(provName) {
 				mgmtError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %s", provName))
 				return
@@ -1581,6 +1601,10 @@ func (m *ManagementServer) handleProjectModel(w http.ResponseWriter, r *http.Req
 	model, err := e.switchModel(body.Model)
 	if err != nil {
 		mgmtError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if defaultSettingsOnly(e.agent) {
+		mgmtJSON(w, http.StatusOK, map[string]any{"model": model, "message": e.i18n.T(MsgDefaultSettingsSaved), "scope": "new_threads"})
 		return
 	}
 	mgmtJSON(w, http.StatusOK, map[string]any{
@@ -2118,10 +2142,10 @@ func (m *ManagementServer) handleCCSwitchProviders(w http.ResponseWriter, r *htt
 // applying per-agent-type overrides for base_url, model, and models.
 func resolveGlobalProviderForAgent(g GlobalProviderInfo, agentType string) ProviderConfig {
 	pc := ProviderConfig{
-		Name:   g.Name,
-		APIKey: g.APIKey,
+		Name:    g.Name,
+		APIKey:  g.APIKey,
 		BaseURL: g.BaseURL,
-		Model:  g.Model,
+		Model:   g.Model,
 	}
 	if ep, ok := g.Endpoints[agentType]; ok && ep != "" {
 		pc.BaseURL = ep

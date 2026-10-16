@@ -420,7 +420,10 @@ type Message struct {
 	Location     *LocationAttachment // geographical location (if any)
 	ExtraContent string              // platform-enriched content (e.g. location text, reply quote) prepended for the agent
 	OnAccepted   func()              // called once when the engine accepts this message for an agent turn
-	ChannelKey   string              // platform-provided channel identifier for workspace binding (optional)
+	// CardActionResult returns a card for a platform button callback after the
+	// action succeeds. It is nil for ordinary messages and other platforms.
+	CardActionResult func(*Card)
+	ChannelKey       string // platform-provided channel identifier for workspace binding (optional)
 	// LegacyChannelKey is the platform-provided channel identifier used by an
 	// older workspace-binding scope. When both keys are set, multi-workspace
 	// routing atomically migrates the legacy binding to ChannelKey.
@@ -449,18 +452,27 @@ type Message struct {
 type EventType string
 
 const (
-	EventText              EventType = "text"               // intermediate or final text
-	EventHookRejected      EventType = "hook_rejected"      // Stop hook rejected prior assistant text
-	EventToolUse           EventType = "tool_use"           // tool invocation info
-	EventToolResult        EventType = "tool_result"        // tool execution result
-	EventResult            EventType = "result"             // final aggregated result
-	EventError             EventType = "error"              // error occurred
-	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
-	EventThinking          EventType = "thinking"           // thinking/processing status
+	EventText               EventType = "text"                // intermediate or final text
+	EventTurnStarted        EventType = "turn_started"        // shared runtime began a scoped turn
+	EventUserMessage        EventType = "user_message"        // input from another runtime client
+	EventHookRejected       EventType = "hook_rejected"       // Stop hook rejected prior assistant text
+	EventToolUse            EventType = "tool_use"            // tool invocation info
+	EventToolResult         EventType = "tool_result"         // tool execution result
+	EventResult             EventType = "result"              // final aggregated result
+	EventError              EventType = "error"               // error occurred
+	EventPermissionRequest  EventType = "permission_request"  // agent requests permission via stdio protocol
+	EventPermissionResolved EventType = "permission_resolved" // another client or server resolved a request
+	EventToolOutput         EventType = "tool_output"         // live command output, scoped by ItemID/TurnID
+	EventNotice             EventType = "notice"              // advisory runtime notification; never completes a turn
+	EventRuntimeStatus      EventType = "runtime_status"      // shared runtime connection status
+	EventThinking           EventType = "thinking"            // thinking/processing status
 )
 
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
+	ID          string               `json:"id,omitempty"`
+	IsOther     bool                 `json:"isOther,omitempty"`
+	IsSecret    bool                 `json:"isSecret,omitempty"`
 	Question    string               `json:"question"`
 	Header      string               `json:"header"`
 	Options     []UserQuestionOption `json:"options"`
@@ -476,6 +488,11 @@ type UserQuestionOption struct {
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
 	Type                     EventType
+	Notice                   *AgentNotice
+	TurnID                   string
+	ItemID                   string
+	Decisions                []string          // scoped permission choices, including server-offered session/policy grants
+	DecisionDetails          map[string]string // server-proposed scope/rule shown alongside a choice
 	Content                  string
 	ToolName                 string         // populated for EventToolUse, EventPermissionRequest
 	ToolInput                string         // human-readable summary of tool input
@@ -511,4 +528,15 @@ type AgentSessionInfo struct {
 	MessageCount int
 	ModifiedAt   time.Time
 	GitBranch    string
+}
+
+// AgentNotice carries service-provided information separately from model replies.
+type AgentNotice struct {
+	UsageThreshold int
+	Kind           string
+	Message        string
+	Code           string
+	Usage          *UsageReport
+	FromModel      string
+	ToModel        string
 }

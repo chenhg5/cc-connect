@@ -91,6 +91,10 @@ reset_on_idle_mins = 60
 | 全自动 | `full-auto` | 自动通过 + 沙箱保护 |
 | YOLO | `yolo` | 跳过所有审批 |
 
+### Codex 托管 daemon 共享会话
+
+需要与 CLI 或 IDE 共享正在运行的 Codex thread 时，参见 [托管 daemon 使用指南](codex-managed-daemon.zh-CN.md)，了解显式启用配置、`/attach`、`/detach`、审批、推理展示和 daemon 生命周期。
+
 ### macOS 上的 Codex CLI 查找
 
 Codex 适配器按以下顺序选择可执行文件：

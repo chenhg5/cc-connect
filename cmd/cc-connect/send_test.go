@@ -56,6 +56,7 @@ func TestParseSendArgs_RequiresMessageOrAttachment(t *testing.T) {
 }
 
 func TestParseSendArgs_UsesSessionEnvFallback(t *testing.T) {
+	t.Setenv("CC_CONNECT_SESSION_ENV", "1")
 	t.Setenv("CC_PROJECT", "demo")
 	t.Setenv("CC_SESSION_KEY", "telegram:123:456")
 
@@ -183,6 +184,7 @@ func TestParseSendArgs_AudioVideoFileMixed_StaySeparate(t *testing.T) {
 }
 
 func TestParseSendArgs_TTSOnly(t *testing.T) {
+	t.Setenv("CC_CONNECT_SESSION_ENV", "1")
 	t.Setenv("CC_PROJECT", "demo")
 	t.Setenv("CC_SESSION_KEY", "telegram:123:456")
 

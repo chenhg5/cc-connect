@@ -8,8 +8,6 @@ import (
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
-	lark "github.com/larksuite/oapi-sdk-go/v3"
-	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -34,22 +32,23 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 	return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
 }
 
-// SendCard sends a structured card as a new message to the chat.
-func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
+// SendRichCard sends an already-rendered Card 2.0 payload as an interactive
+// card, following Send's reply-versus-new-message routing.
+func (p *interactivePlatform) SendRichCard(ctx context.Context, rctx any, renderedCard string) error {
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
-	if rc.chatID == "" {
-		return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, renderedCard)
 	}
+	return p.sendNewMessageToChat(ctx, rc, larkim.MsgTypeInteractive, renderedCard)
+}
 
-	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
-		return p.ReplyCard(ctx, rctx, card)
-	}
-
-	cardJSON := renderCard(card, rc.sessionKey)
-	return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
+// SendCard sends a structured card as a new message to the chat.
+func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
+	_, err := p.sendCard(ctx, rctx, card)
+	return err
 }
 
 // RefreshCard updates a previously rendered card in-place using the Patch API.
@@ -64,31 +63,60 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 		return fmt.Errorf("%s: no tracked card messageID for session %q", p.tag(), sessionKey)
 	}
 
-	cardJSON := renderCard(card, sessionKey)
-	req := larkim.NewPatchMessageReqBuilder().
-		MessageId(msgID).
-		Body(larkim.NewPatchMessageReqBodyBuilder().
-			Content(cardJSON).
-			Build()).
-		Build()
-	return p.withTransientRetry(ctx, "refresh card", func() error {
-		return p.withFreshTenantAccessTokenRetry(ctx, "refresh card", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Message.Patch(ctx, req, options...)
-			if err != nil {
-				return fmt.Errorf("%s: refresh card: %w", p.tag(), err)
-			}
-			if !resp.Success() {
-				return fmt.Errorf("%s: refresh card code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
-			}
-			return nil
-		})
-	})
+	return p.patchCardMessage(ctx, msgID, renderCard(card, sessionKey))
 }
 
-// renderCardMap converts a core.Card into the Feishu Interactive Card map
-// using the v1 format. Used both for message API (via renderCard) and
-// callback responses (CardActionTriggerResponse).
+type cardMessageHandle struct {
+	messageID  string
+	sessionKey string
+}
+
+// SendCardWithHandle records the new message ID, not the trigger message or the
+// last clicked card. Daemon notifications can then update this exact approval.
+func (p *interactivePlatform) SendCardWithHandle(ctx context.Context, rctx any, card *core.Card) (any, error) {
+	handle, err := p.sendCard(ctx, rctx, card)
+	if err != nil {
+		return nil, err
+	}
+	if handle.messageID == "" {
+		return nil, fmt.Errorf("%s: tracked card response missing message ID", p.tag())
+	}
+	return handle, nil
+}
+
+func (p *interactivePlatform) sendCard(ctx context.Context, rctx any, card *core.Card) (cardMessageHandle, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return cardMessageHandle{}, fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if rc.chatID == "" {
+		return cardMessageHandle{}, fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
+	}
+	cardJSON := renderCard(card, rc.sessionKey)
+	var messageID string
+	var err error
+	if p.shouldReplyInThread(rc) && p.shouldUseThreadOrReplyAPI(rc) {
+		messageID, err = p.replyMessageWithID(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	} else {
+		messageID, err = p.createMessageWithID(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
+	}
+	return cardMessageHandle{messageID: messageID, sessionKey: rc.sessionKey}, err
+}
+
+func (p *interactivePlatform) UpdateCard(ctx context.Context, handle any, card *core.Card) error {
+	h, ok := handle.(cardMessageHandle)
+	if !ok || h.messageID == "" {
+		return fmt.Errorf("%s: invalid card message handle", p.tag())
+	}
+	return p.patchCardMessage(ctx, h.messageID, renderCard(card, h.sessionKey))
+}
+
+// renderCardMap converts a core.Card into the Feishu Interactive Card map.
+// Used both for message API (via renderCard) and callback responses.
 func renderCardMap(card *core.Card, sessionKey string) map[string]any {
+	if card != nil && (card.RichMarkdown || card.CollapsedDetailsTitle != "") {
+		return renderRichMarkdownCardMap(card, sessionKey)
+	}
 	result := map[string]any{
 		"config": map[string]any{
 			"wide_screen_mode": true,
@@ -256,6 +284,65 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	}
 
 	result["elements"] = elements
+	return result
+}
+
+// renderRichMarkdownCardMap uses schema 2.0 so inline code renders as code,
+// while preserving button callback values on permission cards.
+func renderRichMarkdownCardMap(card *core.Card, sessionKey string) map[string]any {
+	elements := make([]map[string]any, 0, len(card.Elements))
+	result := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"width_mode": "default", "update_multi": true},
+	}
+	if card.Header != nil && card.Header.Title != "" {
+		color := card.Header.Color
+		if color == "" {
+			color = "blue"
+		}
+		result["header"] = map[string]any{"title": plainText(card.Header.Title), "template": color}
+	}
+	for _, elem := range card.Elements {
+		switch e := elem.(type) {
+		case core.CardMarkdown:
+			content := e.Content
+			if e.Diff {
+				content = renderApprovalDiff(content)
+			}
+			elements = append(elements, map[string]any{"tag": "markdown", "content": sanitizeCardMarkdownForCard(content)})
+		case core.CardNote:
+			elements = append(elements, map[string]any{
+				"tag": "markdown", "content": sanitizeCardMarkdownForCard(e.Text), "text_size": "notation",
+			})
+		case core.CardActions:
+			columns := make([]map[string]any, 0, len(e.Buttons))
+			for _, btn := range e.Buttons {
+				btnType := btn.Type
+				if btnType == "" {
+					btnType = "default"
+				}
+				value := map[string]string{"action": btn.Value}
+				if sessionKey != "" {
+					value["session_key"] = sessionKey
+				}
+				for key, val := range btn.Extra {
+					value[key] = val
+				}
+				button := map[string]any{"tag": "button", "text": plainText(btn.Text), "type": btnType, "value": value}
+				columns = append(columns, map[string]any{
+					"tag": "column", "width": "auto", "vertical_align": "center",
+					"elements": []map[string]any{button},
+				})
+			}
+			if len(columns) > 0 {
+				elements = append(elements, map[string]any{"tag": "column_set", "columns": columns})
+			}
+		}
+	}
+	if card.CollapsedDetailsTitle != "" {
+		elements = []map[string]any{buildRichPanel(card.CollapsedDetailsTitle, false, elements)}
+	}
+	result["body"] = map[string]any{"elements": elements}
 	return result
 }
 

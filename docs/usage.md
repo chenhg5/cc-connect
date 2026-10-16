@@ -93,6 +93,10 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Full Auto | `full-auto` | Auto-approve with sandbox |
 | YOLO | `yolo` | Bypass all approvals and sandbox |
 
+### Codex managed daemon shared sessions
+
+To share a live Codex thread with CLI or IDE clients, see the [managed daemon guide](codex-managed-daemon.md). It covers opt-in configuration, `/attach`, `/detach`, approvals, thinking visibility and daemon lifecycle.
+
 ### Codex CLI discovery on macOS
 
 The Codex adapter resolves its executable in this order:

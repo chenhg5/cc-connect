@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -656,7 +657,17 @@ func TestMgmt_CronExecByID(t *testing.T) {
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(platform.getSent()) >= 4 {
-			return
+			// The visible reply precedes MarkRun's final store write. Wait
+			// for that write before TempDir cleanup removes the cron files.
+			store.mu.Lock()
+			completed := true
+			for _, stored := range store.jobs {
+				completed = completed && !stored.LastRun.IsZero()
+			}
+			store.mu.Unlock()
+			if completed {
+				return
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -3110,4 +3121,27 @@ func TestMgmt_ProjectWorkspaces_BindRejectsPathOutsideBaseDir(t *testing.T) {
 	if !strings.Contains(r.Error, "escapes base_dir") {
 		t.Fatalf("error = %q, want escapes base_dir", r.Error)
 	}
+}
+
+func TestSharedManagementProviderPreservesThreadAndHistory(t *testing.T) {
+	env, _, as := newSharedSettingsEnv(t)
+	w := httptest.NewRecorder()
+	(&ManagementServer{}).handleProjectProviders(w, httptest.NewRequest("POST", "/providers/new-provider/activate", nil), env.e, "new-provider/activate")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "new_threads") {
+		t.Fatalf("response: %d %s", w.Code, w.Body)
+	}
+	assertSharedSettingsPreserved(t, env, as)
+	as.emit(Event{Type: EventText, Content: "OBSERVATION STILL LIVE", Metadata: map[string]any{"phase": "commentary"}})
+	env.await("OBSERVATION STILL LIVE")
+}
+
+func TestSharedManagementProviderSaveFailurePreservesDefaults(t *testing.T) {
+	env, a, as := newSharedSettingsEnv(t)
+	env.e.providerSaveFunc = func(string) error { return fmt.Errorf("disk full") }
+	w := httptest.NewRecorder()
+	(&ManagementServer{}).handleProjectProviders(w, httptest.NewRequest("POST", "/", nil), env.e, "new-provider/activate")
+	if w.Code == 200 || a.GetActiveProvider().Name != "default-provider" {
+		t.Fatal("failed save applied provider")
+	}
+	assertSharedSettingsPreserved(t, env, as)
 }

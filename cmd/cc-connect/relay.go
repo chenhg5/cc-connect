@@ -66,10 +66,10 @@ func runRelaySend(args []string) {
 	}
 
 	if from == "" {
-		from = os.Getenv("CC_PROJECT")
+		from = agentToolLegacyEnv("CC_PROJECT")
 	}
 	if sessionKey == "" {
-		sessionKey = os.Getenv("CC_SESSION_KEY")
+		sessionKey = agentToolLegacyEnv("CC_SESSION_KEY")
 	}
 	if message == "" && len(positional) > 0 {
 		if to == "" && len(positional) >= 2 {
@@ -85,7 +85,7 @@ func runRelaySend(args []string) {
 		printRelaySendUsage()
 		os.Exit(1)
 	}
-	if sessionKey == "" {
+	if sessionKey == "" && agentToolSessionID(sessionKey) == "" {
 		fmt.Fprintln(os.Stderr, "Error: session key is required (set CC_SESSION_KEY or use --session-key)")
 		os.Exit(1)
 	}
@@ -97,10 +97,11 @@ func runRelaySend(args []string) {
 	}
 
 	payload, _ := json.Marshal(map[string]string{
-		"from":        from,
-		"to":          to,
-		"session_key": sessionKey,
-		"message":     message,
+		"agent_session_id": agentToolSessionID(sessionKey),
+		"from":             from,
+		"to":               to,
+		"session_key":      sessionKey,
+		"message":          message,
 	})
 
 	resp, err := apiPost(sockPath, "/relay/send", payload)

@@ -334,6 +334,14 @@ type CardRefresher interface {
 	RefreshCard(ctx context.Context, sessionKey string, card *Card) error
 }
 
+// CardMessageUpdater identifies cards at send time so asynchronous events can
+// replace the exact message even when no user has clicked it. Handles are
+// opaque to core and belong to the platform that returned them.
+type CardMessageUpdater interface {
+	SendCardWithHandle(ctx context.Context, replyCtx any, card *Card) (any, error)
+	UpdateCard(ctx context.Context, handle any, card *Card) error
+}
+
 // PlatformLifecycleHandler receives readiness state transitions from async
 // recoverable platforms.
 type PlatformLifecycleHandler interface {
@@ -472,13 +480,26 @@ type UsageReporter interface {
 
 // UsageReport is a provider-neutral quota snapshot returned by UsageReporter.
 type UsageReport struct {
-	Provider  string
-	AccountID string
-	UserID    string
-	Email     string
-	Plan      string
-	Buckets   []UsageBucket
-	Credits   *UsageCredits
+	Provider     string
+	AccountID    string
+	UserID       string
+	Email        string
+	Plan         string
+	Buckets      []UsageBucket
+	Credits      *UsageCredits
+	ResetCredits *UsageResetCredits
+}
+
+// UsageResetCredits describes available quota resets and their expiry dates.
+// A nil value means the provider did not report reset credits.
+type UsageResetCredits struct {
+	AvailableCount int
+	Credits        []UsageResetCredit
+}
+
+// UsageResetCredit describes the expiry of one available quota reset.
+type UsageResetCredit struct {
+	ExpiresAtUnix int64
 }
 
 // UsageBucket groups one logical quota, such as standard requests or code review.
@@ -552,6 +573,14 @@ type ContextCompressor interface {
 type AgentSessionCanceller interface {
 	CancelTurn() error
 }
+
+// AgentTurnCanceller interrupts exactly the supplied turn, never a newer turn.
+type AgentTurnCanceller interface {
+	CancelExpectedTurn(turnID string) error
+}
+
+// ErrAgentTurnBusy means the input was not accepted and may be retried later.
+var ErrAgentTurnBusy = errors.New("agent turn is busy")
 
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
@@ -641,11 +670,12 @@ type StartupWarner interface {
 
 // PermissionModeInfo describes a permission mode for display.
 type PermissionModeInfo struct {
-	Key    string
-	Name   string
-	NameZh string
-	Desc   string
-	DescZh string
+	Key     string
+	NameKey MsgKey // optional localized label; empty preserves legacy Name/NameZh rendering
+	Name    string
+	NameZh  string
+	Desc    string
+	DescZh  string
 }
 
 // BotCommandInfo represents a command for bot menu registration (e.g. Telegram setMyCommands).
@@ -689,6 +719,12 @@ type StreamingCardPlatform interface {
 	CreateStreamingCard(ctx context.Context, replyCtx any) (StreamingCard, error)
 }
 
+// ApprovalFinalReplyPlatform requests a fresh final answer when approval
+// messages were emitted after the current rich reply preview began.
+type ApprovalFinalReplyPlatform interface {
+	FinalReplyAfterApproval() bool
+}
+
 // CardStatus represents the visual status of a card header.
 type CardStatus string
 
@@ -703,4 +739,93 @@ const (
 // updating the visual status of a preview card header.
 type PreviewStatusUpdater interface {
 	SetPreviewStatus(previewHandle any, status CardStatus)
+}
+
+// AgentSessionAttacher opts into an externally owned, live session runtime.
+// Attachment must not send a prompt or modify the existing session's settings.
+// Ordinary subprocess agents do not implement this interface.
+type AgentSessionAttacher interface {
+	AttachSession(context.Context, string) (AgentSession, error)
+}
+
+type AgentRuntimeState struct {
+	SessionID string
+	TurnID    string
+	Connected bool
+	CanSteer  bool
+}
+
+// SharedAgentSession emits events continuously, including turns initiated by
+// other clients. Close detaches only this connection; it must never stop the
+// external runtime, answer pending requests or interrupt a turn.
+type SharedAgentSession interface {
+	AgentSession
+	RuntimeState() AgentRuntimeState
+}
+
+// AgentTurnSender returns the authoritative turn ID even when the daemon
+// publishes its result before the start response reaches this client.
+type AgentTurnSender interface {
+	SendTurn(prompt, messageID string, images []ImageAttachment, files []FileAttachment) (string, error)
+}
+
+type AgentSessionSteerer interface {
+	Steer(expectedTurnID, text string) error
+}
+
+// AgentAutoSteer opts into sending ordinary messages to an active shared turn.
+// False queues messages until that turn finishes, regardless of its origin.
+// Without this capability the engine retains its existing queue/busy behavior.
+type AgentAutoSteer interface {
+	AutoSteerBusyMessages() bool
+}
+
+type BackgroundTerminal struct {
+	ID      string
+	Command string
+	Cwd     string
+}
+
+type AgentBackgroundTerminals interface {
+	ListBackgroundTerminals(context.Context) ([]BackgroundTerminal, error)
+	TerminateBackgroundTerminal(context.Context, string) error
+}
+
+// DefaultSettingsAgent changes creation defaults without reconfiguring an
+// attached shared runtime. Settings commands must preserve its observer/history.
+type DefaultSettingsAgent interface {
+	DefaultSettingsOnly() bool
+}
+
+type AgentRuntimeSettings struct {
+	Model, ReasoningEffort, Provider     string
+	ApprovalPolicy, Sandbox              string
+	PermissionProfile, ApprovalsReviewer string
+}
+
+// SessionPermissionSwitcher explicitly changes permissions on the attached
+// session, independently of the agent's new-session defaults.
+type SessionPermissionSwitcher interface {
+	CurrentPermissionModes() []PermissionModeInfo
+	SetCurrentPermissionMode(context.Context, string) error
+}
+
+// SessionApprovalSwitcher changes approval routing without changing the
+// session's permission profile or new-session defaults.
+type SessionApprovalSwitcher interface {
+	CurrentApprovalModes() []PermissionModeInfo
+	SetCurrentApprovalMode(context.Context, string) error
+}
+
+// ApprovalDefaultSwitcher controls a separate approval override for new sessions.
+// Selecting a complete permission preset clears this override.
+type ApprovalDefaultSwitcher interface {
+	ApprovalModes() []PermissionModeInfo
+	SetApprovalMode(string)
+	GetApprovalMode() string
+}
+
+// AgentRuntimeSettingsReader obtains authoritative settings without overrides.
+type AgentRuntimeSettingsReader interface {
+	ReadRuntimeSettings(context.Context) (AgentRuntimeSettings, error)
 }

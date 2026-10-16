@@ -526,3 +526,32 @@ func TestTimerStore_FilePath(t *testing.T) {
 		t.Errorf("timers directory not created: %v", err)
 	}
 }
+
+func TestSharedTimerWaitsForResultInSideSession(t *testing.T) {
+	env, a := newSharedCompatEnv(t)
+	active := env.e.sessions.GetOrCreateActive("test:user")
+	active.AddHistory("user", "MAIN HISTORY")
+	done := make(chan error, 1)
+	go func() {
+		done <- env.e.ExecuteTimerJob(&TimerJob{ID: "compat", SessionKey: "test:user", Prompt: "TIMER TASK", SessionMode: "new_per_run"})
+	}()
+	call := awaitSharedCompatCall(t, a)
+	select {
+	case err := <-done:
+		t.Fatalf("returned before completion: %v", err)
+	default:
+	}
+	call.finish("TIMER RESULT")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timer did not complete")
+	}
+	env.await("TIMER RESULT")
+	if active.HistoryLen() != 1 {
+		t.Fatal("timer modified main history")
+	}
+}

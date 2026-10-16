@@ -1068,6 +1068,8 @@ type = "feishu"
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
 # domain = "https://open.feishu.cn"  # Optional runtime API/WebSocket base URL override / 可选：运行时 API/WebSocket 域名覆盖
+# final_reply_position = "latest_after_approval" # Send final answer after interleaved approvals; "in_place" keeps the original message
+#                           # 审批插入后将最终回复发到最新位置；in_place 保持原消息位置
 # enable_feishu_card = true  # Enable Feishu interactive cards (default: true); set false to force plain-text replies
 #                              # 启用飞书交互式卡片（默认 true）；设为 false 时强制回退纯文本回复
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
@@ -1138,6 +1140,7 @@ app_secret = "your-feishu-app-secret"
 # callback_path = "/feishu/webhook"  # Webhook callback path / Webhook 回调路径
 # encrypt_key = ""               # Event encrypt key (optional) / 事件加密密钥（可选）
 # enable_feishu_card = true
+# final_reply_position = "latest_after_approval" # "in_place" keeps the original reply / in_place 保持原回复位置
 # allow_from = "*"
 # reaction_emoji = "OnIt"
 # done_emoji = "none"
@@ -1700,6 +1703,50 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+# backend = "exec" # default; "app_server" enables bidirectional sessions / 默认 exec
+# app_server_transport = "stdio" # default; only applies to app_server / 仅用于 app_server
+#
+# To attach to an existing managed daemon, use both settings below.
+# cc-connect never starts, stops, restarts or updates the daemon.
+# Guide: docs/codex-managed-daemon.md / 中文：docs/codex-managed-daemon.zh-CN.md
+# 接入已有托管 daemon 时，同时设置以下两项；不会启动、停止或更新 daemon。
+# backend = "app_server"
+# app_server_transport = "managed_daemon"
+# daemon_attach_only = true # require /attach or /switch; default false permits new threads
+#                          # true 要求先选择已有 thread；默认 false 允许新建
+# daemon_socket = "/path/to/app-server-control.sock" # optional; otherwise passive CLI discovery
+#                                                  # 可选；不设置则通过 CLI 只读发现
+# daemon_reconnect_attempts = 3 # retries after disconnect; 0 means no retries (initial connection still required)
+#                               # 断线后重试次数；0 完全禁用重连，仍需要首次连接成功
+# daemon_enable_steer = true # allow /steer for the active turn / 允许向当前轮次插入文本
+# daemon_busy_message_mode = "queue" # default: wait for the active turn to finish; "steer": insert ordinary text into it
+# Busy handling applies to turns started by any client (CLI, IDE or chat).
+# 忙碌策略对任何客户端发起的任务生效；steer 插入普通文本，queue 等任务结束。
+# Pending approvals/questions still consume their answers first; attachments cannot be steered.
+# 待处理审批/问答优先接收答案；附件不能通过 steer 注入。
+# daemon_enable_interrupt = true # allow /stop to interrupt the active turn / 允许停止当前轮次
+# daemon_enable_approvals = true # handle approvals in cc-connect / 在 cc-connect 中处理工具审批
+# daemon_enable_questions = true # blocking requestUserInput / 接收阻塞式问答
+# daemon_enable_async_questions = true # advisory questions answered through steer / 接收通过 steer 回答的异步提示
+# daemon_enable_delete = true # /delete uses daemon thread/delete; false disables it
+#                             # 通过 daemon 删除 thread；false 禁用删除
+# Managed commands: /attach <id|index>, /detach, /steer <text>, /stop,
+# /terminals, /terminals stop <id|all>; existing /list, /switch, /history also apply.
+# /delete remains available for inactive threads in work_dir (no direct rollout file writes).
+# 托管命令：/attach、/detach、/steer、/stop、/terminals；/list、/switch、/history 继续可用。
+# /delete 仅删除 work_dir 中不活跃的 thread，不直接修改历史文件。
+# Disable approvals/questions to leave those requests to another connected client.
+# Disabling does not auto-allow, deny or skip requests.
+# 禁用审批/问答后，交由其他客户端处理；不会自动允许、拒绝或跳过。
+# Attached threads retain their model/provider/approval/sandbox settings.
+# model/mode/reasoning_effort/provider configure NEW threads only.
+# 接入已有 thread 保留其运行配置；上述参数仅配置新建 thread。
+# Managed transport rejects env and app_server_url: configure credentials,
+# providers and process environment in the daemon itself.
+# 托管传输不接受 env 和 app_server_url；凭据、provider 和进程环境由 daemon 配置。
+# Shared reasoning events also follow [display].thinking_messages (default true).
+# Set it to false globally or in [projects.display] to hide them in chat; other clients are unaffected.
+# 共享 thread 的推理事件也受 thinking_messages 控制（默认 true）；全局或项目设为 false 可隐藏聊天中的推理，不影响其他客户端。
 #
 # Mode options / 模式说明:
 # - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）

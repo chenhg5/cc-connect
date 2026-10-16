@@ -31,6 +31,31 @@ func TestNew_DefaultsToInteractivePlatform(t *testing.T) {
 	}
 }
 
+func TestNew_FinalReplyPosition(t *testing.T) {
+	for _, position := range []string{"", "latest_after_approval", "in_place", "invalid"} {
+		t.Run(position, func(t *testing.T) {
+			opts := map[string]any{"app_id": "cli_xxx", "app_secret": "secret"}
+			if position != "" {
+				opts["final_reply_position"] = position
+			}
+			p, err := New(opts)
+			if position == "invalid" {
+				if err == nil {
+					t.Fatal("invalid position accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, ok := p.(core.ApprovalFinalReplyPlatform)
+			if !ok || policy.FinalReplyAfterApproval() != (position != "in_place") {
+				t.Fatalf("incorrect policy for %q", position)
+			}
+		})
+	}
+}
+
 func TestNew_CanDisableInteractiveCards(t *testing.T) {
 	p, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": false})
 	if err != nil {
@@ -2308,6 +2333,66 @@ func TestCmdAction_WithAfterClick_DispatchesAndReturnsCard(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected command to be dispatched")
+	}
+}
+
+func TestCmdAction_SharedInteractiveResultUpdatesClickedCard(t *testing.T) {
+	for _, command := range []string{"/decision token allow", "/async-answer token option 1"} {
+		t.Run(command, func(t *testing.T) {
+			platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ip := platformAny.(*interactivePlatform)
+			seen := make(chan string, 1)
+			ip.handler = func(_ core.Platform, msg *core.Message) {
+				seen <- msg.Content
+				if msg.CardActionResult == nil {
+					t.Error("shared card click has no result callback")
+					return
+				}
+				msg.CardActionResult(core.NewCard().Title("✅ Accepted", "green").Markdown("Done").Build())
+			}
+			resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+				Operator: &callback.Operator{OpenID: "ou_user1"},
+				Action:   &callback.CallBackAction{Value: map[string]any{"action": "cmd:" + command}},
+				Context:  &callback.Context{OpenChatID: "oc_chat1", OpenMessageID: "om_card1"},
+			}})
+			if err != nil || resp == nil || resp.Card == nil {
+				t.Fatalf("callback response = %#v, err = %v", resp, err)
+			}
+			data := resp.Card.Data.(map[string]any)
+			header := data["header"].(map[string]any)
+			if header["template"] != "green" || header["title"].(map[string]any)["content"] != "✅ Accepted" {
+				t.Fatalf("callback card header = %#v", header)
+			}
+			if got := <-seen; got != command {
+				t.Fatalf("dispatched command = %q, want %q", got, command)
+			}
+		})
+	}
+}
+
+func TestCmdAction_SharedInteractiveTimeoutClaimsCallback(t *testing.T) {
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ip := platformAny.(*interactivePlatform)
+	seen := make(chan struct{}, 1)
+	ip.handler = func(_ core.Platform, _ *core.Message) { seen <- struct{}{} }
+	resp, err := ip.onCardAction(&callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Operator: &callback.Operator{OpenID: "ou_user1"},
+		Action:   &callback.CallBackAction{Value: map[string]any{"action": "cmd:/decision token allow"}},
+		Context:  &callback.Context{OpenChatID: "oc_chat1", OpenMessageID: "om_card1"},
+	}})
+	if err != nil || resp == nil || resp.Toast == nil || resp.Card != nil {
+		t.Fatalf("timeout response = %#v, err = %v; want a toast that claims the callback", resp, err)
+	}
+	select {
+	case <-seen:
+	default:
+		t.Fatal("timed-out callback did not dispatch the command")
 	}
 }
 
