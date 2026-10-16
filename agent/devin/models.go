@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,10 +13,18 @@ import (
 )
 
 const (
-	modelsListTimeout    = 20 * time.Second
-	modelsPrewarmTimeout = 60 * time.Second
-	modelsCacheTTL       = 10 * time.Minute
+	// modelsFetchTimeout is the background catalog budget. Callers never
+	// cancel it; a cold `devin models list` can take well over a minute.
+	modelsFetchTimeout = 150 * time.Second
+	modelsCacheTTL     = 6 * time.Hour
 )
+
+// modelsRunnerDefault runs when an agent has no injected runner.
+// Tests replace it so New's prewarm never executes the real devin binary.
+var modelsRunnerDefault ModelsRunner = runDevinModelsList
+
+// modelsCacheDir overrides os.UserCacheDir()/cc-connect. Tests set a temp dir.
+var modelsCacheDir string
 
 type devinFamily struct {
 	FamilyLabel string         `json:"family_label"`
@@ -30,11 +37,12 @@ type devinFamily struct {
 // catalogFamily is the cached models-list entry used to resolve slugs,
 // aliases, and labels onto advertised ACP option values.
 type catalogFamily struct {
-	Label    string
-	UID      string
-	Slug     string
-	Aliases  []string
-	Variants []string
+	Label     string
+	UID       string
+	Slug      string
+	Aliases   []string
+	Variants  []string
+	Preferred string
 }
 
 type devinVariant struct {
@@ -42,108 +50,30 @@ type devinVariant struct {
 	Label    string `json:"label"`
 }
 
-// AvailableModels asks `devin models list --format json` (or models_cmd)
-// and caches a successful result for 10 minutes. The binary is `devin`
-// on PATH unless models_cmd is set; the ACP wrapper cmd is not used.
-// On failure the embedded ACP list is returned: last session's
-// configOptions, then the configured "models" option.
+// AvailableModels returns the cached Devin catalog when one exists,
+// including a stale disk cache. A refresh runs in the background and
+// is not awaited. With no catalog, the caller waits only until ctx
+// ends, then the latest ACP model options are used, then the
+// configured "models" list.
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
-	if a != nil && a.Agent != nil {
-		if live := a.Agent.SessionModelOptions(); len(live) > 0 {
-			return a.annotateLiveModels(live)
-		}
-	}
-	if cached, ok := a.cachedModels(); ok {
-		return cached
-	}
-	if done := a.prewarmInFlight(); done != nil {
-		if !waitPrewarm(ctx, done) {
-			return a.fallbackModels(ctx)
-		}
-		if cached, ok := a.cachedModels(); ok {
-			return cached
-		}
-		return a.fallbackModels(ctx)
-	}
-	opts, err := a.fetchModels(ctx, modelsListTimeout)
-	if err != nil {
-		slog.Warn("devin: models list failed", "error", err)
-		return a.fallbackModels(ctx)
-	}
-	return opts
-}
-
-// startModelsPrewarm runs models list once, in the background, for up
-// to a minute. Later StartSession calls do not start another fetch.
-func (a *Agent) startModelsPrewarm() {
-	a.prewarmOnce.Do(func() {
-		done := make(chan struct{})
-		a.mu.Lock()
-		a.prewarmDone = done
-		a.mu.Unlock()
-		go a.runModelsPrewarm(done)
-	})
-}
-
-func (a *Agent) runModelsPrewarm(done chan struct{}) {
-	defer close(done)
-	ctx, cancel := context.WithTimeout(context.Background(), modelsPrewarmTimeout)
-	defer cancel()
-	if _, err := a.fetchModels(ctx, modelsPrewarmTimeout); err != nil {
-		slog.Debug("devin: models prewarm failed", "error", err)
-	}
-}
-
-func (a *Agent) prewarmInFlight() <-chan struct{} {
-	a.mu.RLock()
-	done := a.prewarmDone
-	a.mu.RUnlock()
-	if done == nil {
+	if a == nil {
 		return nil
 	}
-	select {
-	case <-done:
-		return nil
-	default:
-		return done
+	a.loadDiskIfEmpty()
+	if opts, ok := a.cachedModelsFresh(); ok {
+		return opts
 	}
-}
-
-func waitPrewarm(ctx context.Context, done <-chan struct{}) bool {
-	select {
-	case <-done:
-		return true
-	default:
+	if opts, ok := a.cachedModelsAny(); ok {
+		a.refreshCatalog()
+		return opts
 	}
-	select {
-	case <-done:
-		return true
-	case <-ctx.Done():
-		select {
-		case <-done:
-			return true
-		default:
-			return false
+	done := a.refreshCatalog()
+	if waitFetch(ctx, done) {
+		if opts, ok := a.cachedModelsAny(); ok {
+			return opts
 		}
 	}
-}
-
-func (a *Agent) fetchModels(ctx context.Context, timeout time.Duration) ([]core.ModelOption, error) {
-	if cached, ok := a.cachedModels(); ok {
-		return cached, nil
-	}
-	listCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	out, err := a.modelsRunner()(listCtx, a.modelsBinary(), a.modelsEnv())
-	if err != nil {
-		return nil, err
-	}
-	opts, families, err := parseDevinModels(out)
-	if err != nil {
-		return nil, err
-	}
-	a.storeModels(opts, families)
-	return cloneModels(opts), nil
+	return a.fallbackModels(ctx)
 }
 
 // annotateLiveModels keeps the session's settable model ids and adds
@@ -188,17 +118,20 @@ func (a *Agent) fallbackModels(ctx context.Context) []core.ModelOption {
 	if a == nil || a.Agent == nil {
 		return nil
 	}
-	return a.Agent.AvailableModels(ctx)
+	return a.annotateLiveModels(a.Agent.AvailableModels(ctx))
 }
 
 func (a *Agent) modelsRunner() ModelsRunner {
 	a.mu.RLock()
 	run := a.modelsRun
 	a.mu.RUnlock()
-	if run == nil {
-		return runDevinModelsList
+	if run != nil {
+		return run
 	}
-	return run
+	if modelsRunnerDefault != nil {
+		return modelsRunnerDefault
+	}
+	return runDevinModelsList
 }
 
 func (a *Agent) modelsBinary() string {
@@ -224,10 +157,19 @@ func (a *Agent) modelsEnv() []string {
 	return core.MergeEnv(os.Environ(), extra)
 }
 
-func (a *Agent) cachedModels() ([]core.ModelOption, bool) {
+func (a *Agent) cachedModelsFresh() ([]core.ModelOption, bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if len(a.modelsCache) == 0 || time.Since(a.modelsCachedAt) >= modelsCacheTTL {
+		return nil, false
+	}
+	return cloneModels(a.modelsCache), true
+}
+
+func (a *Agent) cachedModelsAny() ([]core.ModelOption, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if len(a.modelsCache) == 0 {
 		return nil, false
 	}
 	return cloneModels(a.modelsCache), true
@@ -296,11 +238,12 @@ func catalogFromFamily(family devinFamily) (catalogFamily, bool) {
 		}
 	}
 	return catalogFamily{
-		Label:    strings.TrimSpace(family.FamilyLabel),
-		UID:      strings.TrimSpace(family.FamilyUID),
-		Slug:     strings.TrimSpace(family.Slug),
-		Aliases:  aliases,
-		Variants: variants,
+		Label:     strings.TrimSpace(family.FamilyLabel),
+		UID:       strings.TrimSpace(family.FamilyUID),
+		Slug:      strings.TrimSpace(family.Slug),
+		Aliases:   aliases,
+		Variants:  variants,
+		Preferred: preferredVariant(family.Variants),
 	}, true
 }
 

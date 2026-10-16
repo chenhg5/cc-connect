@@ -509,3 +509,14 @@ func modelOptionsFromLegacy(block *acpModelsBlock) []core.ModelOption {
 	}
 	return out
 }
+
+// GetReasoningEffort reports the thought_level the agent advertises for this
+// session, so the reply footer reflects what actually runs (the configured
+// effort may have been rejected for the current model). Empty when unknown.
+func (s *acpSession) GetReasoningEffort() string {
+	opt, ok := s.thoughtLevelOption()
+	if !ok {
+		return ""
+	}
+	return opt.CurrentValue.String()
+}

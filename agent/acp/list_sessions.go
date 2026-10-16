@@ -75,8 +75,11 @@ func (a *Agent) probeSpawn(ctx context.Context, cwd string, onNotif rpcNotifyHan
 			slog.Debug("acp-probe: notification", "method", method)
 		}
 	}
-	allArgs := append(append([]string{}, a.cliExtraArgs...), a.args...)
-	cmd := exec.CommandContext(ctx, a.cmd, allArgs...)
+	bin, allArgs := a.cmd, append(append([]string{}, a.cliExtraArgs...), a.args...)
+	if a.ProbeCommand != "" {
+		bin, allArgs = a.ProbeCommand, append([]string{}, a.ProbeArgs...)
+	}
+	cmd := exec.CommandContext(ctx, bin, allArgs...)
 	cmd.Dir = cwd
 	cmd.Env = core.MergeEnv(os.Environ(), a.extraEnv)
 
@@ -92,7 +95,7 @@ func (a *Agent) probeSpawn(ctx context.Context, cwd string, onNotif rpcNotifyHan
 	cmd.Stderr = io.MultiWriter(&stderrBuf)
 
 	if err := cmd.Start(); err != nil {
-		return nil, nil, nil, fmt.Errorf("acp: probe start %s: %w", a.cmd, err)
+		return nil, nil, nil, fmt.Errorf("acp: probe start %s: %w", bin, err)
 	}
 
 	// The server-request handler needs to reference `tr` itself in order

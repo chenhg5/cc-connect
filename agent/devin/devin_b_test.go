@@ -107,6 +107,41 @@ func TestNew_ModeNormalAndStaticModes(t *testing.T) {
 	}
 }
 
+func TestMain(m *testing.M) {
+	modelsRunnerDefault = func(context.Context, string, []string) ([]byte, error) {
+		return nil, errors.New("devin models list disabled in tests")
+	}
+	dir, err := os.MkdirTemp("", "devin-models-cache-")
+	if err != nil {
+		panic(err)
+	}
+	modelsCacheDir = dir
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+func isolateModelCache(t *testing.T) {
+	t.Helper()
+	prev := modelsCacheDir
+	modelsCacheDir = t.TempDir()
+	t.Cleanup(func() { modelsCacheDir = prev })
+}
+
+func waitModelsIdle(t *testing.T, a *Agent) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if a.fetchInFlight() == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("models fetch still in flight")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestParseDevinModels(t *testing.T) {
 	opts, families, err := parseDevinModels([]byte(modelsFixture))
 	if err != nil {
@@ -150,6 +185,7 @@ func TestAvailableModels_RunnerCacheAndFallback(t *testing.T) {
 	if _, err := exec.LookPath("true"); err != nil {
 		t.Skip("true not in PATH")
 	}
+	isolateModelCache(t)
 	a, err := New(map[string]any{
 		"command": "true",
 		"models":  []any{map[string]any{"model": "configured", "alias": "c"}},
@@ -159,6 +195,7 @@ func TestAvailableModels_RunnerCacheAndFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent := a.(*Agent)
+	waitModelsIdle(t, agent)
 	var calls int
 	var gotBin string
 	var sawXDG bool
@@ -187,13 +224,13 @@ func TestAvailableModels_RunnerCacheAndFallback(t *testing.T) {
 		t.Fatalf("cache missed, calls=%d", calls)
 	}
 
-	agent.modelsCachedAt = agent.modelsCachedAt.Add(-modelsCacheTTL)
+	agent.modelsCachedAt = agent.modelsCachedAt.Add(-modelsCacheTTL - time.Second)
 	agent.modelsRun = func(context.Context, string, []string) ([]byte, error) {
 		return nil, errors.New("offline")
 	}
-	fallback := agent.AvailableModels(context.Background())
-	if len(fallback) != 1 || fallback[0].Name != "configured" {
-		t.Fatalf("configured fallback = %#v", fallback)
+	stale := agent.AvailableModels(context.Background())
+	if len(stale) != 2 || stale[0].Name != "swe-2-medium" {
+		t.Fatalf("stale catalog = %#v", stale)
 	}
 
 	custom, err := New(map[string]any{
@@ -218,6 +255,7 @@ func TestModelsPrewarm_WaitsOnlyUntilCallerDeadline(t *testing.T) {
 	if _, err := exec.LookPath("true"); err != nil {
 		t.Skip("true not in PATH")
 	}
+	isolateModelCache(t)
 	a, err := New(map[string]any{
 		"command": "true",
 		"models":  []any{map[string]any{"model": "configured"}},
@@ -226,34 +264,30 @@ func TestModelsPrewarm_WaitsOnlyUntilCallerDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent := a.(*Agent)
+	waitModelsIdle(t, agent)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
 	agent.modelsRun = func(ctx context.Context, _ string, _ []string) ([]byte, error) {
 		if calls.Add(1) == 1 {
 			deadline, ok := ctx.Deadline()
-			if !ok || time.Until(deadline) < 45*time.Second {
-				return nil, errors.New("prewarm context is not the 60s budget")
+			if !ok || time.Until(deadline) < 120*time.Second {
+				return nil, errors.New("catalog fetch is not the 150s budget")
 			}
 			close(started)
 			<-release
 		}
 		return []byte(modelsFixture), nil
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, _ = agent.StartSession(ctx, "")
-	}()
+	short, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	began := time.Now()
+	got := agent.AvailableModels(short)
+	cancel()
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
-		t.Fatal("prewarm did not start")
+		t.Fatal("catalog fetch did not start")
 	}
-	short, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
-	defer cancel()
-	began := time.Now()
-	got := agent.AvailableModels(short)
 	if time.Since(began) > time.Second {
 		t.Fatal("AvailableModels waited past its deadline")
 	}
@@ -270,15 +304,13 @@ func TestModelsPrewarm_WaitsOnlyUntilCallerDeadline(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("prewarmed models = %#v", got)
+			t.Fatalf("cached models = %#v", got)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	ctx, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel2()
-	_, _ = agent.StartSession(ctx, "")
+	_ = agent.AvailableModels(context.Background())
 	if calls.Load() != 1 {
-		t.Fatalf("prewarm ran %d times", calls.Load())
+		t.Fatalf("catalog fetch ran %d times", calls.Load())
 	}
 }
 
@@ -379,30 +411,87 @@ func TestReasoningEffort(t *testing.T) {
 	}
 }
 
-func TestAvailableModels_PrefersAdvertisedOptions(t *testing.T) {
+func TestAvailableModels_CatalogBeforeSessionOptions(t *testing.T) {
 	if _, err := exec.LookPath("true"); err != nil {
 		t.Skip("true not in PATH")
 	}
+	isolateModelCache(t)
 	a, err := New(map[string]any{"command": "true"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	agent := a.(*Agent)
-	agent.modelsRun = func(context.Context, string, []string) ([]byte, error) {
-		t.Fatal("live options must not fetch the catalog")
-		return nil, nil
-	}
-	_, families, err := parseDevinModels([]byte(modelsFixture))
+	waitModelsIdle(t, agent)
+	opts, families, err := parseDevinModels([]byte(modelsFixture))
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent.mu.Lock()
-	agent.families = families
-	agent.mu.Unlock()
-	agent.RememberModelOptions("swe-2-high", []core.ModelOption{{Name: "swe-2-high", Desc: "SWE-2"}, {Name: "adaptive", Desc: "Adaptive"}})
+	agent.storeModels(opts, families)
+	agent.modelsRun = func(context.Context, string, []string) ([]byte, error) {
+		t.Fatal("fresh catalog must not fetch")
+		return nil, nil
+	}
+	agent.RememberModelOptions("swe-2-high", []core.ModelOption{
+		{Name: "swe-2-high", Desc: "SWE-2"},
+		{Name: "adaptive", Desc: "Adaptive"},
+	})
 	got := agent.AvailableModels(context.Background())
-	if len(got) != 2 || got[0].Name != "swe-2-high" || got[0].Desc != "SWE-2" || got[0].Alias != "swe-2" || got[1].Alias != "" {
-		t.Fatalf("live models = %#v", got)
+	if len(got) != 2 || got[0].Name != "swe-2-medium" || got[1].Alias != "opus" {
+		t.Fatalf("catalog = %#v", got)
+	}
+
+	agent.mu.Lock()
+	agent.modelsCache = nil
+	agent.families = nil
+	agent.modelsCachedAt = time.Time{}
+	agent.mu.Unlock()
+	agent.modelsRun = func(context.Context, string, []string) ([]byte, error) {
+		return nil, errors.New("offline")
+	}
+	got = agent.AvailableModels(context.Background())
+	if len(got) != 2 || got[0].Name != "swe-2-high" || got[0].Alias != "" || got[1].Name != "adaptive" {
+		t.Fatalf("session fallback = %#v", got)
+	}
+}
+
+func TestDiskCache_StaleLoadsImmediately(t *testing.T) {
+	if _, err := exec.LookPath("true"); err != nil {
+		t.Skip("true not in PATH")
+	}
+	dir := t.TempDir()
+	prev := modelsCacheDir
+	modelsCacheDir = dir
+	t.Cleanup(func() { modelsCacheDir = prev })
+	bin, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	xdg := filepath.Join(t.TempDir(), "xdg")
+	path := catalogFilePath(bin, xdg, dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(modelsFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-modelsCacheTTL - time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(map[string]any{
+		"command":    "true",
+		"models_cmd": "true",
+		"models":     []any{map[string]any{"model": "configured"}},
+		"env":        map[string]string{"XDG_CONFIG_HOME": xdg},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	got := a.(*Agent).AvailableModels(ctx)
+	if len(got) != 2 || got[0].Name != "swe-2-medium" {
+		t.Fatalf("disk catalog = %#v", got)
 	}
 }
 
@@ -485,5 +574,36 @@ func TestWorkspaceOptionsRoundTrip(t *testing.T) {
 	}
 	if opts["models_cmd"] != "devin" {
 		t.Fatalf("models_cmd = %#v", opts["models_cmd"])
+	}
+}
+
+// TestNew_WrapperCmdProbesRealDevin: when cmd is a wrapper script, probes must
+// go straight to the real `devin acp` so a slow wrapper preflight cannot make
+// /list, /history or /delete time out.
+func TestNew_WrapperCmdProbesRealDevin(t *testing.T) {
+	devinPath, err := exec.LookPath("devin")
+	if err != nil {
+		t.Skip("devin not in PATH")
+	}
+	a, err := New(map[string]any{"command": "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.(*Agent).ProbeCommand; got != devinPath {
+		t.Fatalf("ProbeCommand = %q, want %q", got, devinPath)
+	}
+	d, err := New(map[string]any{"command": devinPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d.(*Agent).ProbeCommand; got != "" {
+		t.Fatalf("ProbeCommand = %q, want empty when cmd is devin itself", got)
+	}
+	w, err := New(map[string]any{"cmd": "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := w.(*Agent).ProbeCommand; got != devinPath {
+		t.Fatalf("cmd= wrapper: ProbeCommand = %q, want %q", got, devinPath)
 	}
 }

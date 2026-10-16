@@ -68,6 +68,12 @@ type Agent struct {
 	// until a session advertises a thought_level option.
 	FallbackReasoningEfforts []string
 
+	// ProbeCommand, when set, replaces cmd (and cliExtraArgs/args) for the
+	// short-lived probe processes behind session/list, history and delete.
+	// Wrappers use it so a slow wrapper start-up cannot time out probes.
+	ProbeCommand string
+	ProbeArgs    []string
+
 	// reasoningEffort is the configured effort applied to future
 	// sessions. It is not the thought_level the last session reported.
 	reasoningEffort string

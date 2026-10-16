@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -123,5 +124,15 @@ func TestWorkspaceAgentOptions(t *testing.T) {
 	}
 	if got, _ := opts["display_name"].(string); got != "Copilot ACP" {
 		t.Fatalf("display_name = %q, want Copilot ACP", got)
+	}
+}
+
+// TestProbeSpawn_UsesProbeCommand guards the production bug where probes
+// (session/list, history, delete) spawned a slow wrapper `cmd` and timed out.
+func TestProbeSpawn_UsesProbeCommand(t *testing.T) {
+	a := &Agent{cmd: "true", ProbeCommand: "/nonexistent/acp-probe-bin", ProbeArgs: []string{"acp"}}
+	_, _, _, err := a.probeSpawn(context.Background(), t.TempDir(), nil)
+	if err == nil || !strings.Contains(err.Error(), "/nonexistent/acp-probe-bin") {
+		t.Fatalf("probeSpawn err = %v, want it to start ProbeCommand", err)
 	}
 }

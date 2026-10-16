@@ -298,3 +298,20 @@ func readEvent(t *testing.T, s *acpSession) core.Event {
 		return core.Event{}
 	}
 }
+
+// TestSessionGetReasoningEffort_ReportsLiveThoughtLevel: the reply footer must
+// show the effort the agent actually runs with. In production, switching to a
+// model without "high" kept showing "effort:high" while Devin ran "medium".
+func TestSessionGetReasoningEffort_ReportsLiveThoughtLevel(t *testing.T) {
+	s, _, _ := newTestSession(t, nil)
+	if got := s.GetReasoningEffort(); got != "" {
+		t.Fatalf("before options: %q, want empty", got)
+	}
+	s.absorbConfigOptions([]acpConfigOption{{
+		ID: "thought_level", Category: "thought_level", CurrentValue: "medium",
+		Options: []acpConfigOptionChoice{{Value: "medium"}, {Value: "max"}},
+	}})
+	if got := s.GetReasoningEffort(); got != "medium" {
+		t.Fatalf("GetReasoningEffort = %q, want medium", got)
+	}
+}

@@ -24,6 +24,8 @@ package devin
 
 import (
 	"context"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +42,7 @@ func init() {
 // the assertions below fail if a promoted or overridden method disappears.
 var (
 	_ core.ModelSwitcher           = (*Agent)(nil)
+	_ core.ModelValidator          = (*Agent)(nil)
 	_ core.ReasoningEffortSwitcher = (*Agent)(nil)
 	_ core.MemoryFileProvider      = (*Agent)(nil)
 	_ core.SkillProvider           = (*Agent)(nil)
@@ -70,20 +73,17 @@ type Agent struct {
 	modelsCachedAt time.Time
 	families       []catalogFamily
 
-	prewarmOnce sync.Once
-	prewarmDone chan struct{}
+	fetchDone chan struct{}
+	diskOnce  sync.Once
 }
 
 // ModelsRunner returns stdout of `models list --format json`.
 // binary is the models CLI (default "devin" on PATH), not the ACP wrapper.
 type ModelsRunner func(ctx context.Context, binary string, env []string) ([]byte, error)
 
-// StartSession begins a model-list prewarm, then opens the ACP session.
-// The engine's AvailableModels budget is shorter than a cold
-// `devin models list`, so the fetch starts here and later callers wait
-// only until their own deadline.
+// StartSession keeps the catalog refresh running, then opens the ACP session.
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
-	a.startModelsPrewarm()
+	a.prewarmModels()
 	return a.Agent.StartSession(ctx, sessionID)
 }
 
@@ -129,9 +129,11 @@ func New(opts map[string]any) (core.Agent, error) {
 	agent.FallbackReasoningEfforts = append([]string(nil), devinEfforts...)
 	agent.CompactCommand = "/compact"
 	agent.ModelValueResolver = agent.resolveModelValue
+	agent.setProbeCommand(opts)
 	if rawEffort != "" {
 		agent.SetReasoningEffort(rawEffort)
 	}
+	agent.prewarmModels()
 	return agent, nil
 }
 
@@ -228,4 +230,24 @@ func envMap(v any) map[string]string {
 	default:
 		return nil
 	}
+}
+
+// setProbeCommand points ACP probes at the real `devin acp` when cmd is a
+// wrapper (e.g. a script that runs a slow model preflight before starting
+// ACP). Probes only list/load/delete sessions and need no wrapper setup.
+func (a *Agent) setProbeCommand(opts map[string]any) {
+	cmd, _ := core.ParseCmdOpts(opts, "")
+	real := a.modelsBinary()
+	if !filepath.IsAbs(real) {
+		return
+	}
+	resolved := cmd
+	if path, err := exec.LookPath(cmd); err == nil {
+		resolved = path
+	}
+	if resolved == real {
+		return
+	}
+	a.ProbeCommand = real
+	a.ProbeArgs = []string{"acp"}
 }

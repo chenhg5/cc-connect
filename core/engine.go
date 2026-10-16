@@ -10130,6 +10130,13 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 
+	if len(args) == 1 {
+		arg := strings.TrimSpace(args[0])
+		if strings.EqualFold(arg, "list") || strings.EqualFold(arg, "ls") {
+			args = nil
+		}
+	}
+
 	if len(args) == 0 {
 		if !supportsCards(p) {
 			fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
@@ -10285,6 +10292,10 @@ func (e *Engine) switchModel(target string) (string, error) {
 // When persistConfig is true, config-backed model/provider changes are saved so
 // reloads keep the new default. Workspace-scoped runtime switches pass false.
 func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bool) (string, error) {
+	target, err := e.canonicalizeModel(agent, target)
+	if err != nil {
+		return "", err
+	}
 	switcher, ok := agent.(ModelSwitcher)
 	if !ok {
 		return target, nil
@@ -10330,6 +10341,29 @@ func (e *Engine) switchModelOnAgent(agent Agent, target string, persistConfig bo
 	switcher.SetModel(target)
 	providerSwitcher.SetActiveProvider(active.Name)
 	return target, nil
+}
+
+// canonicalizeModel asks a ModelValidator to accept or rewrite a free-form
+// model name. Agents that do not implement the interface keep the name.
+func (e *Engine) canonicalizeModel(agent Agent, target string) (string, error) {
+	validator, ok := agent.(ModelValidator)
+	if !ok || validator == nil {
+		return target, nil
+	}
+	parent := e.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	canonical, err := validator.ValidateModel(ctx, target)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(canonical) == "" {
+		return target, nil
+	}
+	return canonical, nil
 }
 
 func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
