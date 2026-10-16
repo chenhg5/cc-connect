@@ -41,6 +41,7 @@ type ManagementServer struct {
 	port        int
 	token       string
 	corsOrigins []string
+	insecure    bool
 	server      *http.Server
 	startedAt   time.Time
 
@@ -77,10 +78,34 @@ type ManagementServer struct {
 
 // NewManagementServer creates a new management API server.
 func NewManagementServer(port int, token string, corsOrigins []string) *ManagementServer {
+	return newManagementServer(port, token, corsOrigins, false)
+}
+
+// NewManagementServerInsecure creates a ManagementServer that allows running
+// without a token. This should only be used for local development.
+func NewManagementServerInsecure(port int, token string, corsOrigins []string) *ManagementServer {
+	return newManagementServer(port, token, corsOrigins, true)
+}
+
+func newManagementServer(port int, token string, corsOrigins []string, insecure bool) *ManagementServer {
+	// Validate security settings, mirroring the bridge server's policy: the
+	// management API exposes raw configuration, tokens, and scheduled
+	// command execution, so an empty token must be an explicit, informed
+	// choice, not a silent default.
+	if token == "" && !insecure {
+		slog.Error("management: token is required when insecure mode is not enabled",
+			"help", "set management.token in config, or use insecure=true for local development only")
+		return nil
+	}
+	if insecure && token == "" {
+		slog.Warn("management: running in INSECURE mode without authentication - only use for local development!")
+	}
+
 	return &ManagementServer{
 		port:        port,
 		token:       token,
 		corsOrigins: corsOrigins,
+		insecure:    insecure,
 		engines:     make(map[string]*Engine),
 		startedAt:   time.Now(),
 	}
@@ -202,8 +227,15 @@ func (m *ManagementServer) Start() {
 	mux := http.NewServeMux()
 	handler := m.buildHandler(mux)
 
+	// Insecure (no-token) mode is documented as local-development-only, so
+	// bind loopback-only rather than trusting that every operator who sets
+	// insecure=true also runs on a network no one else can reach.
+	host := ""
+	if m.insecure {
+		host = "127.0.0.1"
+	}
 	m.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", m.port),
+		Addr:    fmt.Sprintf("%s:%d", host, m.port),
 		Handler: handler,
 	}
 	go func() {
