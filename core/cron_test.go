@@ -839,3 +839,45 @@ func TestCronScheduler_UpdateJob_EnabledNonBoolPreservesSchedule(t *testing.T) {
 		t.Fatalf("stored job state should be unchanged on validation error, got %+v", stored)
 	}
 }
+
+// timeout_mins=0 means "no limit": the exec context must not get a deadline
+// (regression: it used to fall back to 60s and kill long jobs like the dinner script).
+func TestScheduledShellContext_NoLimitHasNoDeadline(t *testing.T) {
+	zero := 0
+	cron := &CronJob{TimeoutMins: &zero}
+	timer := &TimerJob{TimeoutMins: &zero}
+	for name, timeout := range map[string]time.Duration{
+		"cron":  cron.ExecutionTimeout(),
+		"timer": timer.ExecutionTimeout(),
+	} {
+		ctx, cancel := scheduledShellContext(context.Background(), timeout)
+		if dl, ok := ctx.Deadline(); ok {
+			t.Errorf("%s timeout_mins=0: got deadline in %v, want none", name, time.Until(dl).Round(time.Second))
+		}
+		cancel()
+		if ctx.Err() == nil {
+			t.Errorf("%s: cancel did not cancel the context", name)
+		}
+	}
+}
+
+func TestScheduledShellContext_KeepsConfiguredAndDefaultTimeouts(t *testing.T) {
+	five := 5
+	cases := map[string]time.Duration{
+		"nil (default 30m)": (&CronJob{}).ExecutionTimeout(),
+		"5 minutes":         (&CronJob{TimeoutMins: &five}).ExecutionTimeout(),
+	}
+	want := map[string]time.Duration{"nil (default 30m)": 30 * time.Minute, "5 minutes": 5 * time.Minute}
+	for name, timeout := range cases {
+		ctx, cancel := scheduledShellContext(context.Background(), timeout)
+		dl, ok := ctx.Deadline()
+		cancel()
+		if !ok {
+			t.Fatalf("%s: no deadline", name)
+		}
+		got := time.Until(dl)
+		if got > want[name] || got < want[name]-time.Minute {
+			t.Errorf("%s: deadline in %v, want ~%v", name, got, want[name])
+		}
+	}
+}

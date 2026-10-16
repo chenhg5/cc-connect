@@ -1889,6 +1889,15 @@ func timerRunTitle(job *TimerJob) string {
 	return truncateStr(job.Prompt, 40)
 }
 
+// scheduledShellContext returns the context for a cron/timer exec job.
+// timeout comes from CronJob/TimerJob.ExecutionTimeout(): 0 means no limit.
+func scheduledShellContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
 // executeTimerShell runs a shell command for a timer job and sends the output.
 func (e *Engine) executeTimerShell(p Platform, replyCtx any, job *TimerJob) error {
 	workDir := job.WorkDir
@@ -1901,14 +1910,9 @@ func (e *Engine) executeTimerShell(p Platform, replyCtx any, job *TimerJob) erro
 		workDir, _ = os.Getwd()
 	}
 
-	timeout := job.ExecutionTimeout()
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
-
 	cmdLabel := truncateStr(job.Exec, 60)
 
-	ctx, cancel := context.WithTimeout(e.ctx, timeout)
+	ctx, cancel := scheduledShellContext(e.ctx, job.ExecutionTimeout())
 	defer cancel()
 
 	var shellCmd *exec.Cmd
@@ -2079,14 +2083,9 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 		workDir, _ = os.Getwd()
 	}
 
-	timeout := job.ExecutionTimeout()
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
-
 	cmdLabel := truncateStr(job.Exec, 60)
 
-	ctx, cancel := context.WithTimeout(e.ctx, timeout)
+	ctx, cancel := scheduledShellContext(e.ctx, job.ExecutionTimeout())
 	defer cancel()
 
 	shellCmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, job.Exec)
