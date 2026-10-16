@@ -146,7 +146,7 @@ func (e *Engine) channelBackfillBefore(p Platform, channelID, beforeID string, s
 		if r := []rune(text); len(r) > backfillMaxMsgRunes {
 			text = string(r[:backfillMaxMsgRunes]) + "…"
 		}
-		text += cachedVideoNotes(m.Content) // maomao fork: already-parsed video links carry their result path
+		text += e.mediaNoteFor(m.ID) // maomao fork: a parsed video link carries its result path
 		who := m.Author
 		switch {
 		case m.IsSelf:

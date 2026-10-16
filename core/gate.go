@@ -35,6 +35,7 @@ type gateState struct {
 	inject   bool   // agent folds mid-turn input into the running turn (claudecode only)
 	mu       sync.Mutex
 	buf      map[string][]string // interactiveKey → silent messages not yet delivered
+	gbuf     map[string][]string // maomao fork: the same messages as the user wrote them (no media notes), for the gate
 	held     map[string]*heldMsg // interactiveKey → burst being collected while idle
 	released map[*Message]bool   // bursts handed back to handleMessage by their timer
 }
@@ -176,6 +177,9 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		delete(g.released, msg) // the burst's timer handed it back: process normally
 	} else if h := g.held[interactiveKey]; h != nil {
 		// Same burst: fold this message into the held one and wait a bit longer.
+		if h.msg.userTextSet || msg.userTextSet {
+			h.msg.userText, h.msg.userTextSet = strings.TrimSpace(userTextOf(h.msg)+"\n"+userTextOf(msg)), true
+		}
 		h.msg.Content = strings.TrimSpace(h.msg.Content + "\n" + msg.Content)
 		h.msg.Images = append(h.msg.Images, msg.Images...)
 		h.msg.Files = append(h.msg.Files, msg.Files...)
@@ -202,12 +206,13 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		return true
 	}
 	buffered := append([]string(nil), g.buf[interactiveKey]...)
+	gateBuffered := append([]string(nil), g.gbuf[interactiveKey]...)
 	g.mu.Unlock()
 
 	last, lastAge := lastReply(session)
 	dec := g.decide(e.ctx, gateRequest{
-		SessionKey: msg.SessionKey, Content: withoutMediaNote(msg), Mentioned: msg.Mentioned, Busy: busy,
-		HasImages: len(msg.Images) > 0, HasFiles: len(msg.Files) > 0, Buffered: buffered,
+		SessionKey: msg.SessionKey, Content: userTextOf(msg), Mentioned: msg.Mentioned, Busy: busy,
+		HasImages: len(msg.Images) > 0, HasFiles: len(msg.Files) > 0, Buffered: gateBuffered,
 		LastReply: last, LastReplyAge: lastAge,
 	})
 	slog.Info("gate decision", "session", msg.SessionKey, "action", dec.Action, "busy", busy,
@@ -222,7 +227,7 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		return true
 	}
 	if dec.Action == "silent" {
-		g.buffer(interactiveKey, msg.Content)
+		g.buffer(interactiveKey, msg.Content, userTextOf(msg))
 		return true
 	}
 	e.teamNoteTurn(msg, session)
@@ -254,42 +259,59 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	}
 	if busy && g.inject && e.injectIntoRunningTurn(interactiveKey, inject, msg.Images, msg.Files) {
 		g.mu.Lock()
-		g.buf[interactiveKey] = g.buf[interactiveKey][len(buffered):]
+		g.dropBuffered(interactiveKey, len(buffered))
 		g.mu.Unlock()
 		e.reply(p, msg.ReplyCtx, "↪ 已插入")
 		return true
 	}
 
 	g.mu.Lock()
-	g.buf[interactiveKey] = g.buf[interactiveKey][len(buffered):]
+	g.dropBuffered(interactiveKey, len(buffered))
 	g.mu.Unlock()
 	if dec.Action == "insert" {
 		content = insertNote + "\n" + content
 	}
-	msg.TurnCtx, msg.TurnCtxQuery = true, msg.Content
+	msg.TurnCtx, msg.TurnCtxQuery = true, userTextOf(msg)
 	msg.Content = content
 	return false
 }
 
-// buffer keeps text for the next turn of interactiveKey (capped at maxBuffered).
-func (g *gateState) buffer(interactiveKey, text string) {
+// buffer keeps text for the next turn of interactiveKey (capped at maxBuffered); gateText is the
+// same message as the user wrote it, which is what the gate sees in Buffered.
+func (g *gateState) buffer(interactiveKey, text, gateText string) {
 	g.mu.Lock()
+	if g.gbuf == nil {
+		g.gbuf = map[string][]string{}
+	}
 	b := append(g.buf[interactiveKey], text)
+	gb := append(g.gbuf[interactiveKey], gateText)
 	if len(b) > maxBuffered {
 		b = b[len(b)-maxBuffered:]
 	}
-	g.buf[interactiveKey] = b
+	if len(gb) > maxBuffered {
+		gb = gb[len(gb)-maxBuffered:]
+	}
+	g.buf[interactiveKey], g.gbuf[interactiveKey] = b, gb
 	g.mu.Unlock()
+}
+
+// dropBuffered removes the first n buffered messages (delivered with this turn). Caller holds g.mu.
+func (g *gateState) dropBuffered(interactiveKey string, n int) {
+	g.buf[interactiveKey] = g.buf[interactiveKey][min(n, len(g.buf[interactiveKey])):]
+	if g.gbuf != nil {
+		g.gbuf[interactiveKey] = g.gbuf[interactiveKey][min(n, len(g.gbuf[interactiveKey])):]
+	}
 }
 
 // bufferContext buffers msg as listen-only context; attachments become a note.
 func (g *gateState) bufferContext(interactiveKey string, msg *Message) {
-	text := msg.Content
+	text, gateText := msg.Content, userTextOf(msg)
 	if n := len(msg.Images) + len(msg.Files); n > 0 {
-		text = strings.TrimSpace(text + fmt.Sprintf("（附了 %d 个图片/文件）", n))
+		note := fmt.Sprintf("（附了 %d 个图片/文件）", n)
+		text, gateText = strings.TrimSpace(text+note), strings.TrimSpace(gateText+note)
 	}
 	if text != "" {
-		g.buffer(interactiveKey, text)
+		g.buffer(interactiveKey, text, gateText)
 	}
 }
 

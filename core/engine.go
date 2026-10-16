@@ -411,11 +411,18 @@ type Engine struct {
 	agentSessionIdleSeq          atomic.Uint64
 	maxQueuedMessages            int
 	gate                         *gateState // maomao fork: fast-brain gate (nil = off)
-	mediaLocks                   sync.Map   // maomao fork: interactiveKey → *sync.Mutex, see prepareMedia
 	team                         *teamState // maomao fork: team status board (nil = off)
 	dirHistory                   *DirHistory
 	baseWorkDir                  string
 	projectState                 *ProjectStateStore
+
+	// maomao fork: media library (media.go) — per-session ordering locks, removed when unused,
+	// and the notes of recent video messages for channel backfill (capped at mediaNoteKeep).
+	mediaLockMu  sync.Mutex
+	mediaLockMap map[string]*mediaLockEntry
+	mediaNoteMu  sync.Mutex
+	mediaNotes   map[string]string
+	mediaNoteIDs []string
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -2338,6 +2345,9 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 }
 
 func (e *Engine) Start() error {
+	if mediaEnabled {
+		registerMediaEngine(e) // maomao fork: media library, see media.go
+	}
 	var startErrs []error
 	readyCount := 0
 	pendingCount := 0
