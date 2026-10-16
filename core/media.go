@@ -117,11 +117,24 @@ func ArchiveAttachments(paths []string) {
 	if !mediaEnabled || len(paths) == 0 {
 		return
 	}
-	go archiveAttachments(append([]string(nil), paths...))
+	// Read the settings here, not in the goroutine: it outlives this call (and, in tests, the
+	// settings), so it must not touch the package variables afterwards.
+	run, limit := runMediaArchive, attachTimeout
+	paths = append([]string(nil), paths...)
+	attachInFlight.Add(1)
+	go func() {
+		defer attachInFlight.Done()
+		archiveAttachments(paths, run, limit)
+	}()
 }
 
-func archiveAttachments(paths []string) {
-	ctx, cancel := withLimit(context.Background(), attachTimeout)
+// attachInFlight counts running archiveAttachments goroutines (tests wait on it).
+var attachInFlight sync.WaitGroup
+
+// archiveAttachments waits for a slot and runs mediaarchive; slot wait and run share one limit,
+// so a job ends (archived, failed or given up) within limit of being queued.
+func archiveAttachments(paths []string, run func(context.Context, []string) (string, string, error), limit time.Duration) {
+	ctx, cancel := withLimit(context.Background(), limit)
 	defer cancel()
 	select {
 	case attachSlots <- struct{}{}:
@@ -130,7 +143,7 @@ func archiveAttachments(paths []string) {
 		slog.Error("mediaarchive: no free slot within the timeout, attachments not archived", "paths", paths)
 		return
 	}
-	_, stderr, err := runMediaArchive(ctx, paths)
+	_, stderr, err := run(ctx, paths)
 	if err != nil {
 		slog.Error("mediaarchive: attachments not archived", "paths", paths, "error", err, "stderr", lastLine(stderr))
 		return
@@ -264,7 +277,7 @@ func (e *Engine) parseVideo(ctx context.Context, msg *Message, link videoLink) v
 			run = &watchvidRun{done: make(chan struct{})}
 			videoRunning[link.Key] = run
 			slog.Info("watchvid: start", "project", e.name, "key", link.Key, "url", link.URL, "msg_id", msg.MessageID)
-			go execWatchvid(e.ctx, run, link) // engine shutdown also kills it
+			go execWatchvid(e.ctx, run, link, runWatchvid, watchvidTimeout) // engine shutdown also kills it
 		}
 		if mk != "" {
 			videoByMsg[mk] = &msgVideo{channel: mediaChannel(msg), msgID: msg.MessageID, run: run, consumed: map[*Engine]bool{e: true}}
@@ -280,10 +293,12 @@ func (e *Engine) parseVideo(ctx context.Context, msg *Message, link videoLink) v
 	}
 }
 
-func execWatchvid(parent context.Context, run *watchvidRun, link videoLink) {
-	ctx, cancel := withLimit(parent, watchvidTimeout)
+// execWatchvid gets the runner and limit from its caller (see ArchiveAttachments for why).
+func execWatchvid(parent context.Context, run *watchvidRun, link videoLink,
+	runner func(context.Context, string) (string, string, error), limit time.Duration) {
+	ctx, cancel := withLimit(parent, limit)
 	defer cancel()
-	stdout, stderr, err := runWatchvid(ctx, link.URL)
+	stdout, stderr, err := runner(ctx, link.URL)
 	idx := lastLine(stdout)
 	var res videoResult
 	switch {
@@ -414,10 +429,17 @@ func (e *Engine) acquireMediaLock(ctx context.Context, key string) (release func
 
 // ── message ──────────────────────────────────────────────────
 
-// prepareMedia parses the video links in a user message (one watchvid result per message and
+// beginMedia parses the video links in a user message (one watchvid result per message and
 // link, shared by all bots) and appends the result paths; it also notes when attachments can't be
 // archived. Blocks while watchvid runs, at most watchvidTimeout.
-func (e *Engine) prepareMedia(msg *Message, key string) {
+//
+// Ordering: a message waits here while an earlier message of the same session is prepared. A
+// message with video links keeps the session's turn until the caller calls the returned release
+// after the gate has taken it — otherwise a follow-up (「你们看看」) released at the same moment
+// could reach the gate first and the burst would read in the wrong order. Messages without links
+// release at once, so they add no wait for anyone.
+func (e *Engine) beginMedia(msg *Message, key string) (release func()) {
+	release = func() {}
 	if !mediaEnabled || msg.FromBot || msg.mediaDone {
 		return
 	}
@@ -427,8 +449,12 @@ func (e *Engine) prepareMedia(msg *Message, key string) {
 
 	ctx, cancel := withLimit(e.ctx, watchvidTimeout)
 	defer cancel()
-	if release, ok := e.acquireMediaLock(ctx, key); ok {
-		defer release()
+	if rel, ok := e.acquireMediaLock(ctx, key); ok {
+		if len(links) > 0 {
+			release = rel
+		} else {
+			defer rel()
+		}
 	} else {
 		slog.Warn("media: gave up waiting for the previous video message in this session", "project", e.name, "session", msg.SessionKey)
 	}
@@ -450,6 +476,7 @@ func (e *Engine) prepareMedia(msg *Message, key string) {
 	msg.userText, msg.userTextSet = msg.Content, true
 	msg.Content += "\n\n" + note
 	e.rememberMediaNote(msg.MessageID, note)
+	return
 }
 
 // userTextOf is what the user wrote, without media notes — the gate's input.

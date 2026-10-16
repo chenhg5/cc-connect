@@ -25,6 +25,7 @@ func withMedia(t *testing.T, run func(ctx context.Context, link string) (string,
 	mediaNASMounted = func() bool { return mounted == nil || mounted.Load() }
 	resetVideoState()
 	t.Cleanup(func() {
+		waitVideoRuns(t)
 		mediaEnabled, runWatchvid, mediaNASMounted, mediaNASRoot, watchvidTimeout = oldEnabled, oldRun, oldMounted, oldRoot, oldTimeout
 		resetVideoState()
 	})
@@ -38,11 +39,25 @@ func resetVideoState() {
 	videoMu.Unlock()
 }
 
+// waitVideoRuns waits until no watchvid run is in flight.
+func waitVideoRuns(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		if r, _ := videoStateSize(); r == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("watchvid run still in flight")
+}
+
 func videoStateSize() (running, byMsg int) {
 	videoMu.Lock()
 	defer videoMu.Unlock()
 	return len(videoRunning), len(videoByMsg)
 }
+
+// prepareMedia is beginMedia with the session released right away (the gate step is not under test).
+func (e *Engine) prepareMedia(msg *Message, key string) { e.beginMedia(msg, key)() }
 
 func newMediaEngine(name string) *Engine { return &Engine{ctx: context.Background(), name: name} }
 
@@ -276,9 +291,10 @@ func TestPrepareMediaKeepsOrder(t *testing.T) {
 	var mu sync.Mutex
 	done := make(chan struct{}, 2)
 	add := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock(); done <- struct{}{} }
-	go func() { e.prepareMedia(&Message{Content: "https://b23.tv/I4TDkg4"}, "s"); add("link") }()
+	// add stands for the gate step, which runs before release (see handleMessage)
+	go func() { r := e.beginMedia(&Message{Content: "https://b23.tv/I4TDkg4"}, "s"); add("link"); r() }()
 	time.Sleep(30 * time.Millisecond)
-	go func() { e.prepareMedia(&Message{Content: "你们看看"}, "s"); add("follow-up") }()
+	go func() { r := e.beginMedia(&Message{Content: "你们看看"}, "s"); add("follow-up"); r() }()
 	time.Sleep(30 * time.Millisecond)
 	close(release)
 	<-done
@@ -378,11 +394,15 @@ func TestGateSeesUserTextOnly(t *testing.T) {
 	}
 }
 
-// Attachment archiving: at most cap(attachSlots) runs at once, each bounded by attachTimeout;
-// failures are only logged.
+// Attachment archiving: at most cap(attachSlots) runs at once; every job ends within
+// attachTimeout of being queued — run to the timeout, or given up while waiting for a slot
+// (logged); failures are only logged.
 func TestArchiveAttachmentsBounded(t *testing.T) {
 	oldEnabled, oldRun, oldTimeout := mediaEnabled, runMediaArchive, attachTimeout
-	t.Cleanup(func() { mediaEnabled, runMediaArchive, attachTimeout = oldEnabled, oldRun, oldTimeout })
+	t.Cleanup(func() {
+		attachInFlight.Wait() // no archive goroutine may outlive the test's settings
+		mediaEnabled, runMediaArchive, attachTimeout = oldEnabled, oldRun, oldTimeout
+	})
 	mediaEnabled = true
 	attachTimeout = 300 * time.Millisecond
 	var cur, peak, calls, timedOut atomic.Int32
@@ -400,17 +420,22 @@ func TestArchiveAttachmentsBounded(t *testing.T) {
 		timedOut.Add(1)
 		return "", "hung", ctx.Err()
 	}
-	for i := 0; i < 12; i++ {
+	const jobs = 12
+	start := time.Now()
+	for i := 0; i < jobs; i++ {
 		ArchiveAttachments([]string{"/x/" + strconv.Itoa(i)})
 	}
-	time.Sleep(time.Second)
+	attachInFlight.Wait()
+	if d := time.Since(start); d > attachTimeout+500*time.Millisecond {
+		t.Fatalf("jobs took %v, limit %v", d, attachTimeout)
+	}
 	if p := peak.Load(); p > int32(cap(attachSlots)) || p == 0 {
 		t.Fatalf("peak concurrency = %d, cap %d", p, cap(attachSlots))
 	}
-	if cur.Load() != 0 {
-		t.Fatal("runs still alive after the timeout")
+	if c := calls.Load(); c < int32(cap(attachSlots)) || c > jobs {
+		t.Fatalf("runs = %d", c)
 	}
-	if calls.Load() != timedOut.Load() {
+	if calls.Load() != timedOut.Load() || cur.Load() != 0 {
 		t.Fatal("a run did not end at the timeout")
 	}
 }

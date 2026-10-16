@@ -3069,11 +3069,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	// maomao fork: video links → watchvid once, result paths appended (media library).
-	e.prepareMedia(msg, interactiveKey)
+	// Released once the gate has taken the message, so a follow-up can't overtake it.
+	releaseMedia := e.beginMedia(msg, interactiveKey)
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
-	if e.applyGate(p, msg, session, interactiveKey) {
+	gated := e.applyGate(p, msg, session, interactiveKey)
+	releaseMedia()
+	if gated {
 		return
 	}
 	// Ensure an interactiveState entry exists before taking the session lock.

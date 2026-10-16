@@ -387,7 +387,7 @@ type Message struct {
 	Mentioned        bool   // maomao fork: user explicitly @-mentioned the bot (input to the gate)
 	FromBot          bool   // maomao fork: sent by a teammate bot; without Mentioned it is context only
 	SeenUpToID       string // maomao fork: newest message folded into this one (gate burst), for channel backfill
-	mediaDone        bool   // maomao fork: prepareMedia already ran (a held gate burst re-enters handleMessage)
+	mediaDone        bool   // maomao fork: beginMedia already ran (a held gate burst re-enters handleMessage)
 	userText         string // maomao fork: Content before media notes were appended — the gate's input
 	userTextSet      bool   // maomao fork: userText is set (see userTextOf)
 	// maomao fork: the gate asks for the per-turn context blocks (teammate
