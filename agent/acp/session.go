@@ -30,6 +30,13 @@ type acpSession struct {
 	wg      sync.WaitGroup
 	alive   atomic.Bool
 
+	// replaying is true while session/load is in flight. The agent replays the
+	// whole history as session/update notifications before answering; those
+	// are absorbed for state but not emitted, because nothing drains events
+	// until StartSession returns and a long replay would fill the bounded
+	// channel and block the transport read loop (deadlocking the load).
+	replaying atomic.Bool
+
 	cmd *exec.Cmd
 	tr  *transport
 
@@ -274,6 +281,8 @@ func (s *acpSession) openOrCreateSession(resumeSessionID string, loadSupported b
 // sessionId is still a success: some agents (Devin) return modes and
 // configOptions only, and the id we asked to load stays in effect.
 func (s *acpSession) tryLoadSession(resumeSessionID string) bool {
+	s.replaying.Store(true)
+	defer s.replaying.Store(false)
 	loadRes, err := s.tr.call(s.ctx, "session/load", map[string]any{
 		"sessionId":  resumeSessionID,
 		"cwd":        canonicalCwd(s.workDir),
@@ -455,6 +464,9 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	s.maybeAbsorbUsageUpdate(params)
 	sid := s.currentACPSessionID()
 	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
+	if s.replaying.Load() {
+		return
+	}
 	for _, ev := range mapSessionUpdate(sid, params) {
 		s.emit(ev)
 	}
