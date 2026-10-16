@@ -461,6 +461,14 @@ type ColdCacheFreshConfig struct {
 	MinTokens *int  `toml:"min_tokens,omitempty"` // context size worth leaving (default 80000)
 }
 
+// ImageFreshConfig (maomao fork): once the images in a session's context add
+// up to max_mb of base64, start a fresh agent session on the next message and
+// hand over the old transcript's text (no images). Off unless enabled.
+type ImageFreshConfig struct {
+	Enabled *bool    `toml:"enabled,omitempty"` // default false
+	MaxMB   *float64 `toml:"max_mb,omitempty"`  // base64 MB of images in the context (default 3)
+}
+
 // ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
 type ObserveConfig struct {
 	Enabled bool   `toml:"enabled"`
@@ -492,6 +500,7 @@ type ProjectConfig struct {
 	Heartbeat                    HeartbeatConfig      `toml:"heartbeat"`
 	AutoCompress                 AutoCompressConfig   `toml:"auto_compress"`
 	ColdCacheFresh               ColdCacheFreshConfig `toml:"cold_cache_fresh"`
+	ImageFresh                   ImageFreshConfig     `toml:"image_fresh"`
 	// SessionModels (maomao fork) maps a cc-connect session key (e.g.
 	// "discord:<channel id>") to the model that session runs on; sessions not
 	// listed use the agent's model. Only agents implementing

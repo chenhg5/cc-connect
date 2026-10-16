@@ -23,6 +23,7 @@ type SessionHandoff struct {
 	CompactSummary string         // newest compaction summary ("" when never compacted)
 	CompactedAt    time.Time      // when that summary was written
 	Tail           []HistoryEntry // user/assistant text after that summary, oldest first
+	ImageBytes     int            // base64 bytes of the images still in the context (re-sent every request)
 }
 
 // SessionHandoffReader is implemented by agents whose transcripts can be read.
@@ -69,6 +70,37 @@ func (e *Engine) freshOnColdCache(agent Agent, session *Session) string {
 	session.SetAgentSessionID("", agent.Name())
 	session.SetHandoffFrom(id, reason)
 	return "♻️ " + reason + "：开新会话，带上旧会话的压缩摘要和最近对话"
+}
+
+// SetImageFresh configures starting a fresh session (with a handoff) once the
+// images in a session's context add up to maxBytes of base64.
+func (e *Engine) SetImageFresh(enabled bool, maxBytes int) {
+	e.imageFreshEnabled = enabled
+	e.imageFreshMaxBytes = maxBytes
+}
+
+// freshOnImageBloat clears the session's agent ID when the images in its
+// context have grown past the limit: the provider re-reads all of them on
+// every step, so each step gets slow. Records the old session as the handoff
+// source. Returns the notice for the channel ("" when nothing changes).
+func (e *Engine) freshOnImageBloat(agent Agent, session *Session) string {
+	if !e.imageFreshEnabled || e.imageFreshMaxBytes <= 0 {
+		return ""
+	}
+	id := session.GetAgentSessionID()
+	r, ok := agent.(SessionHandoffReader)
+	if id == "" || id == ContinueSession || !ok {
+		return ""
+	}
+	h, err := r.ReadSessionHandoff(id)
+	if err != nil || h.ImageBytes < e.imageFreshMaxBytes {
+		return ""
+	}
+	reason := fmt.Sprintf("上下文里的图片累计约 %.1f MB，每一步都要重发", float64(h.ImageBytes)/1e6)
+	slog.Info("image bloat: starting fresh with handoff", "old_agent_session", id, "image_bytes", h.ImageBytes)
+	session.SetAgentSessionID("", agent.Name())
+	session.SetHandoffFrom(id, reason)
+	return "♻️ " + reason + "：开新会话，带上旧会话的压缩摘要和最近对话（不带图）"
 }
 
 // handoffBlock renders the handoff a fresh context gets on its first turn.

@@ -2,6 +2,7 @@ package codex
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,6 +100,11 @@ func (p *handoffParser) add(l *rolloutLine) {
 	default:
 		return
 	}
+	if l.Type == "response_item" {
+		// Images ride in user messages and in tool outputs (view_image) as
+		// data URLs; every later request re-sends them.
+		p.h.ImageBytes += imageDataBytes(l.Payload)
+	}
 	var pl rolloutPayload
 	if json.Unmarshal(l.Payload, &pl) != nil {
 		return
@@ -111,6 +117,9 @@ func (p *handoffParser) add(l *rolloutLine) {
 		h.CompactSummary = cleanCompactSummary(pl.Message)
 		h.CompactedAt = l.Timestamp
 		h.Tail, p.inReply = nil, false
+		// The compacted history is a text summary; the images before it are
+		// no longer re-sent.
+		h.ImageBytes = 0
 		// Codex records no post-compaction size: the token_count it writes
 		// right after reports 0 input tokens. The next reply sets the real one.
 		h.ContextTokens = 0
@@ -197,6 +206,34 @@ func isHarnessText(text string) bool {
 		}
 	}
 	return false
+}
+
+// imageDataBytes counts the base64 characters of the data-URL images in a
+// rollout payload.
+func imageDataBytes(payload []byte) int {
+	const marker = ";base64,"
+	n := 0
+	for {
+		i := bytes.Index(payload, []byte(marker))
+		if i < 0 {
+			return n
+		}
+		head := payload[:i]
+		payload = payload[i+len(marker):]
+		if j := bytes.LastIndex(head, []byte("data:")); j < 0 || !bytes.HasPrefix(head[j:], []byte("data:image/")) {
+			continue
+		}
+		k := 0
+		for k < len(payload) && isBase64Char(payload[k]) {
+			k++
+		}
+		n += k
+		payload = payload[k:]
+	}
+}
+
+func isBase64Char(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '='
 }
 
 // compactSummaryLead ends the preamble Codex puts before a compaction summary.

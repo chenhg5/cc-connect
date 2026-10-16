@@ -112,3 +112,28 @@ func TestReadSessionHandoffFindsRollout(t *testing.T) {
 		t.Fatal("missing thread should fail")
 	}
 }
+
+func TestParseHandoffCountsImageBytes(t *testing.T) {
+	img := strings.Repeat("iVBO", 250) // 1000 base64 chars
+	lines := append([]string{}, handoffFixture...) // the fixture's user image: 4 chars
+	lines = append(lines,
+		`{"timestamp":"2026-10-13T18:21:00.000Z","ordinal":70,"type":"response_item","payload":{"type":"function_call_output","call_id":"c2","output":[{"type":"input_image","image_url":"data:image/png;base64,`+img+`"}]}}`,
+		`{"timestamp":"2026-10-13T18:21:01.000Z","ordinal":71,"type":"response_item","payload":{"type":"function_call_output","call_id":"c3","output":"no image here; base64,abcd is plain text"}}`,
+	)
+	h, err := parseHandoff(strings.NewReader(strings.Join(lines, "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.ImageBytes != 1004 {
+		t.Fatalf("image bytes = %d, want 1004", h.ImageBytes)
+	}
+	// A compaction replaces the history with text: its images stop counting.
+	lines = append(lines, `{"timestamp":"2026-10-13T18:30:00.000Z","ordinal":80,"type":"compacted","payload":{"message":"摘要","replacement_history":[]}}`)
+	h, err = parseHandoff(strings.NewReader(strings.Join(lines, "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.ImageBytes != 0 {
+		t.Fatalf("after compaction image bytes = %d, want 0", h.ImageBytes)
+	}
+}

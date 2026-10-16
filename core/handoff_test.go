@@ -63,6 +63,37 @@ func TestFreshOnColdCache(t *testing.T) {
 	}
 }
 
+func TestFreshOnImageBloat(t *testing.T) {
+	a := &handoffStubAgent{handoffs: map[string]*SessionHandoff{
+		// recent and small in tokens: the cold-cache rule keeps it, the image rule must not
+		"heavy": {Path: "/x/heavy.jsonl", LastActivity: time.Now().Add(-time.Minute), ContextTokens: 60000, ImageBytes: 8_300_000},
+		"light": {LastActivity: time.Now().Add(-time.Minute), ContextTokens: 60000, ImageBytes: 1_000_000},
+	}}
+	e := NewEngine("test", a, []Platform{&stubPlatformEngine{n: "x"}}, "", LangEnglish)
+	defer e.Stop()
+	e.SetColdCacheFresh(true, time.Hour, 80000)
+
+	s := &Session{AgentSessionID: "heavy"}
+	if n := e.freshOnImageBloat(a, s); n != "" || s.GetAgentSessionID() != "heavy" {
+		t.Fatalf("disabled but got %q", n)
+	}
+	e.SetImageFresh(true, 3_000_000)
+	light := &Session{AgentSessionID: "light"}
+	if n := e.freshOnImageBloat(a, light); n != "" || light.GetAgentSessionID() != "light" {
+		t.Fatalf("light: should resume, got %q", n)
+	}
+	n := e.freshOnImageBloat(a, s)
+	if !strings.Contains(n, "8.3 MB") {
+		t.Fatalf("notice = %q", n)
+	}
+	if s.GetAgentSessionID() != "" || s.HandoffFrom != "heavy" {
+		t.Fatalf("agent id %q handoff %q", s.GetAgentSessionID(), s.HandoffFrom)
+	}
+	if b := e.handoffBlock(s); !strings.Contains(b, "/x/heavy.jsonl") || !strings.Contains(b, "图片") {
+		t.Fatalf("handoff block:\n%s", b)
+	}
+}
+
 func TestFormatHandoffKeepsNewestWithinBudget(t *testing.T) {
 	h := &SessionHandoff{Path: "/p.jsonl", CompactSummary: "压缩摘要"}
 	for i := 0; i < 20; i++ {

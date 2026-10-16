@@ -424,6 +424,9 @@ type Engine struct {
 	coldFreshEnabled   bool
 	coldFreshIdle      time.Duration
 	coldFreshMinTokens int
+	// Image-bloat fresh start (maomao fork, see handoff.go)
+	imageFreshEnabled  bool
+	imageFreshMaxBytes int
 	resetOnIdle        time.Duration
 	// Per-session model overrides (maomao fork, see session_models.go)
 	// Model-at-capacity cooldown (maomao fork, see capacity_retry.go)
@@ -4081,6 +4084,19 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// If wantID is empty (/new, cleared session) but the process already has
 		// a concrete ID, reusing would keep --resume context — recycle (#238).
 		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
+		if !needRecycle && currentID != "" && currentID == wantID {
+			// maomao fork: the live process has piled up images; recycle it
+			// into a fresh context with a handoff.
+			agent := e.agent
+			if agentOverride != nil {
+				agent = agentOverride
+			}
+			if notice := e.freshOnImageBloat(agent, session); notice != "" {
+				sessions.Save()
+				go e.send(p, replyCtx, notice)
+				wantID, needRecycle = "", true
+			}
+		}
 		if !needRecycle {
 			return state
 		}
@@ -4163,6 +4179,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	restoreActiveProviderFromSession(agent, session)
 
 	if notice := e.freshOnColdCache(agent, session); notice != "" {
+		sessions.Save()
+		go e.send(p, replyCtx, notice)
+	}
+	if notice := e.freshOnImageBloat(agent, session); notice != "" {
 		sessions.Save()
 		go e.send(p, replyCtx, notice)
 	}
