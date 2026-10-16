@@ -2066,7 +2066,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		})
 
 	case "post":
-		textParts, images := p.parsePostContent(messageID, content)
+		textParts, images := p.parsePostContent(messageID, content, mentions...)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
 		// Top-level files[] of a rich-text post message were silently dropped
 		// before #1884 — the user could attach a file alongside text and the
@@ -5755,17 +5755,17 @@ type postLang struct {
 // parsePostContent handles both formats of feishu post content:
 // 1. {"title":"...", "content":[[...]]}  (receive event)
 // 2. {"zh_cn":{"title":"...", "content":[[...]]}}  (some SDK versions)
-func (p *Platform) parsePostContent(messageID, raw string) ([]string, []core.ImageAttachment) {
+func (p *Platform) parsePostContent(messageID, raw string, mentions ...*larkim.MentionEvent) ([]string, []core.ImageAttachment) {
 	// try flat format first
 	var flat postLang
 	if err := json.Unmarshal([]byte(raw), &flat); err == nil && flat.Content != nil {
-		return p.extractPostParts(messageID, &flat)
+		return p.extractPostParts(messageID, &flat, mentions...)
 	}
 	// try language-keyed format
 	var langMap map[string]postLang
 	if err := json.Unmarshal([]byte(raw), &langMap); err == nil {
 		for _, lang := range langMap {
-			return p.extractPostParts(messageID, &lang)
+			return p.extractPostParts(messageID, &lang, mentions...)
 		}
 	}
 	slog.Error(p.tag()+": failed to parse post content", "raw", raw)
@@ -5790,7 +5790,7 @@ func (p *Platform) parsePostFiles(raw string) []postFile {
 	return nil
 }
 
-func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string, []core.ImageAttachment) {
+func (p *Platform) extractPostParts(messageID string, post *postLang, mentions ...*larkim.MentionEvent) ([]string, []core.ImageAttachment) {
 	var textParts []string
 	var images []core.ImageAttachment
 	if post.Title != "" {
@@ -5819,7 +5819,7 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 					textParts = append(textParts, elem.Text)
 				}
 			case "at":
-				if p.getBotOpenID() != "" && elem.UserId == p.getBotOpenID() {
+				if isPostBotMention(elem.UserId, p.getBotOpenID(), mentions) {
 					continue
 				}
 				switch {
@@ -5843,6 +5843,24 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 		}
 	}
 	return textParts, images
+}
+
+// Rich-text events can use a mention placeholder rather than an OpenID in an
+// at element. Resolve its identity before rendering it as a display name.
+func isPostBotMention(userID, botOpenID string, mentions []*larkim.MentionEvent) bool {
+	if botOpenID == "" {
+		return false
+	}
+	if userID == botOpenID {
+		return true
+	}
+	for _, mention := range mentions {
+		if mention != nil && mention.Key != nil && *mention.Key == userID &&
+			mention.Id != nil && mention.Id.OpenId != nil && *mention.Id.OpenId == botOpenID {
+			return true
+		}
+	}
+	return false
 }
 
 // onBotMenu handles bot custom menu click events. When a menu item's
