@@ -2067,32 +2067,11 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 
 	case "post":
 		textParts, images := p.parsePostContent(messageID, content)
+		files, notices := p.downloadPostFiles(messageID, content, strings.Join(textParts, "\n"))
+		textParts = append(textParts, notices...)
+		files = append(files, p.downloadQuotedFiles(ctx, p.filterQuotedFilesForUser(quoted.files, mentions, userID))...)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
-		// Top-level files[] of a rich-text post message were silently dropped
-		// before #1884 — the user could attach a file alongside text and the
-		// bot would only ever see the text. Reuse the existing file download
-		// helper to pull each non-folder attachment and surface it to the agent.
-		var postFiles []core.FileAttachment
-		for _, pf := range p.parsePostFiles(content) {
-			if pf.FileKey == "" || pf.IsFolder {
-				continue
-			}
-			fileData, err := p.downloadResource(messageID, pf.FileKey, "file")
-			if err != nil {
-				slog.Error(p.tag()+": download post file failed",
-					"error", err,
-					"file_key", pf.FileKey,
-					"file_name", pf.FileName,
-				)
-				continue
-			}
-			postFiles = append(postFiles, core.FileAttachment{
-				MimeType: detectMimeType(fileData),
-				Data:     fileData,
-				FileName: pf.FileName,
-			})
-		}
-		if text == "" && historyText == "" && len(images) == 0 && len(postFiles) == 0 && quoted.text == "" && len(quoted.images) == 0 {
+		if text == "" && historyText == "" && len(images) == 0 && len(files) == 0 && quoted.text == "" && len(quoted.images) == 0 {
 			return
 		}
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
@@ -2101,7 +2080,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...), Files: postFiles,
+			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...), Files: files,
 			ReplyCtx:          rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
@@ -2609,6 +2588,15 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 		textParts, postImages := p.parsePostContent(messageID, content)
 		text = replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 		images = postImages
+		// Keep post files lazy, with the same mention/sender privacy gates as standalone quoted files.
+		for _, file := range p.parsePostFiles(content) {
+			if file.FileKey != "" && !file.IsFolder {
+				files = append(files, quotedFileMeta{fileKey: file.FileKey, fileName: file.FileName, messageID: messageID, senderID: item.Sender.ID})
+			}
+		}
+		if text == "" && len(files) > 0 {
+			text = "[file]"
+		}
 		if text == "" && len(images) > 0 {
 			text = "[image]"
 		}
@@ -3261,6 +3249,9 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 
 		case "post":
 			textParts, postImages := p.parsePostContent(msgID, content)
+			postAttachments, notices := p.downloadPostFiles(msgID, content, strings.Join(textParts, "\n"))
+			*files = append(*files, postAttachments...)
+			textParts = append(textParts, notices...)
 			*images = append(*images, postImages...)
 			text := replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 			if text != "" {
