@@ -218,6 +218,7 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string) {
 	defer as.wg.Done()
 	resultErr := ""
+	replied := false // the turn already streamed reply text
 	defer func() {
 		for _, f := range tempFiles {
 			_ = os.Remove(f)
@@ -236,8 +237,14 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			}
 			if msg != "" {
 				slog.Error("antigravitySession: process failed", "error", err, "stderr", msg)
+				// core drops a turn's text on EventError, so once agy has
+				// written the reply, deliver it and put the error under it.
+				ev := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", msg)}
+				if replied {
+					ev = core.Event{Type: core.EventText, Content: "\n\n⚠️ " + msg}
+				}
 				select {
-				case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", msg)}:
+				case as.events <- ev:
 				case <-as.ctx.Done():
 				}
 			}
@@ -262,7 +269,11 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			ev, ok := as.parseStreamLine(line)
 			if ok && ev.Type == core.EventError {
 				resultErr = ev.Error.Error()
+				slog.Warn("antigravitySession: failed result", "line", string(bytes.TrimSpace(line)))
 			} else if ok {
+				if ev.Content != "" {
+					replied = true
+				}
 				select {
 				case as.events <- ev:
 				case <-as.ctx.Done():

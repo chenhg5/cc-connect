@@ -369,6 +369,50 @@ func TestFailedResultReportsStatusAndStderr(t *testing.T) {
 	}
 }
 
+// A turn that wrote its reply and then ended with a failed status keeps the
+// reply and shows the error under it instead of losing the reply.
+func TestFailedResultAfterReplyKeepsReply(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	cmdPath := filepath.Join(dir, "fake-agy.sh")
+	script := "#!/bin/sh\n" +
+		`echo '{"event":"init","conversation_id":"conv-3","init":{}}'` + "\n" +
+		`echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"逛完了"}}'` + "\n" +
+		`echo 'root agent idle; waiting up to 30m0s for 1 background task(s)' >&2` + "\n" +
+		`echo '{"event":"result","result":{"conversation_id":"conv-3","status":"ERROR"}}'` + "\n"
+	if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, dir, "", "yolo", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("hi", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events():
+			switch ev.Type {
+			case core.EventText:
+				text += ev.Content
+			case core.EventError:
+				t.Fatalf("got EventError %v, want the reply kept", ev.Error)
+			case core.EventResult:
+				if !strings.HasPrefix(text, "逛完了") || !strings.Contains(text, "ERROR") || !strings.Contains(text, "background task") {
+					t.Errorf("text = %q, want reply then status and stderr", text)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timeout")
+		}
+	}
+}
+
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if strings.TrimSpace(x) == want {
