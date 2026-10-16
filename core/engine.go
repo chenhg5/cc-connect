@@ -411,6 +411,7 @@ type Engine struct {
 	agentSessionIdleSeq          atomic.Uint64
 	maxQueuedMessages            int
 	gate                         *gateState // maomao fork: fast-brain gate (nil = off)
+	mediaLocks                   sync.Map   // maomao fork: interactiveKey → *sync.Mutex, see prepareMedia
 	team                         *teamState // maomao fork: team status board (nil = off)
 	dirHistory                   *DirHistory
 	baseWorkDir                  string
@@ -3056,6 +3057,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if e.discardStaleUserMessageIfNeeded(interactiveKey, msg) {
 		return
 	}
+
+	// maomao fork: video links → watchvid once, result paths appended (media library).
+	e.prepareMedia(msg, interactiveKey)
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)

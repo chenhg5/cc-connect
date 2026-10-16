@@ -112,6 +112,7 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 			fileRefs = append(fileRefs, fpath)
 		}
 	}
+	core.ArchiveAttachments(append(append([]string(nil), imageRefs...), fileRefs...)) // maomao fork: NAS media library
 
 	chatID := as.CurrentSessionID()
 	isResume := chatID != ""

@@ -206,7 +206,7 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 
 	last, lastAge := lastReply(session)
 	dec := g.decide(e.ctx, gateRequest{
-		SessionKey: msg.SessionKey, Content: msg.Content, Mentioned: msg.Mentioned, Busy: busy,
+		SessionKey: msg.SessionKey, Content: withoutMediaNote(msg), Mentioned: msg.Mentioned, Busy: busy,
 		HasImages: len(msg.Images) > 0, HasFiles: len(msg.Files) > 0, Buffered: buffered,
 		LastReply: last, LastReplyAge: lastAge,
 	})

@@ -572,6 +572,7 @@ func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachm
 		}
 		imagePaths = append(imagePaths, fpath)
 	}
+	core.ArchiveAttachments(imagePaths) // maomao fork: straight to the NAS media library
 
 	if strings.TrimSpace(prompt) == "" {
 		prompt = "Please analyze the attached image(s)."

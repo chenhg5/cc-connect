@@ -1021,6 +1021,11 @@ func main() {
 		engines[i].SetHeartbeatScheduler(heartbeatSched)
 	}
 
+	// maomao fork: video links → watchvid once, attachments → NAS media library (off if the scripts are missing).
+	if home, err := os.UserHomeDir(); err == nil {
+		core.EnableMediaLibrary(home)
+	}
+
 	var startErrors []error
 	for _, e := range engines {
 		if err := e.Start(); err != nil {

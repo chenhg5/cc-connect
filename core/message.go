@@ -212,6 +212,7 @@ func SaveFilesToDisk(workDir, messageID string, files []FileAttachment) []string
 		paths = append(paths, fpath)
 		slog.Debug("SaveFilesToDisk: file saved", "path", fpath, "name", f.FileName, "mime", f.MimeType, "size", len(f.Data))
 	}
+	ArchiveAttachments(paths) // maomao fork: straight to the NAS media library
 	return paths
 }
 
@@ -386,6 +387,8 @@ type Message struct {
 	Mentioned        bool   // maomao fork: user explicitly @-mentioned the bot (input to the gate)
 	FromBot          bool   // maomao fork: sent by a teammate bot; without Mentioned it is context only
 	SeenUpToID       string // maomao fork: newest message folded into this one (gate burst), for channel backfill
+	mediaDone        bool   // maomao fork: prepareMedia already ran (a held gate burst re-enters handleMessage)
+	mediaNote        string // maomao fork: what prepareMedia appended to Content (kept out of the gate's input)
 	// maomao fork: the gate asks for the per-turn context blocks (teammate
 	// status, wiki pages); they are added right before the send, once the agent
 	// process for this turn is known. A pending handoff goes either way.

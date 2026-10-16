@@ -1101,6 +1101,8 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 		})
 	}
 
+	core.ArchiveAttachments(savedPaths) // maomao fork: straight to the NAS media library
+
 	// Save files to disk so Claude Code can read them
 	filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
 
