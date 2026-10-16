@@ -116,6 +116,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # reaction_emoji = "OnIt"      # 可选：agent 处理期间的临时表情，结束后移除
 # done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # image_batch_window_ms = 500  # 可选：连续多图合批窗口（默认 500ms，详见下文）
+# card_hook_dir = ""          # 可选：卡片按钮本地钩子目录（点击即同步执行脚本，stdout 作为替换卡片）
 ```
 
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
@@ -124,6 +125,9 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 > 在 multi-workspace 模式下，`thread_isolation = true` 也会让每个话题独立绑定 workspace；在话题内执行 `/workspace bind <name>` 不会影响同群的其他话题。已有的群级 binding 会保留为默认值，由尚未显式绑定的话题继承，因此回退到旧版本时仍可使用。
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
 > `domain` 只影响运行时 API / WebSocket 请求地址；CLI `setup/new/bind` 的引导域名仍然使用内置默认值。
+
+> `card_hook_dir` 非空时，按钮 value 里带 `hook` 的点击会**同步**执行该目录下的脚本：完整 value JSON 走 stdin，stdout 为 JSON 对象则立即作为替换卡片返回（不经 agent）。脚本还能从环境变量 `CC_CARD_HOOK_OPERATOR_OPEN_ID` / `CC_CARD_HOOK_CHAT_ID` / `CC_CARD_HOOK_MESSAGE_ID` 等读到「谁点的、在哪条消息」—— 按钮 value 本身答不出这两件事。任何失败（脚本不存在 / 超时 / 输出非 JSON）都自动回退正常派发。
+
 > `ack_emoji = "Get"` 会在消息通过校验、被引擎接受处理或成功入队后异步添加确认表情，无需等待模型启动或前一轮结束。它表示“请求已接收”，会在完成、失败或取消后保留，不表示模型已开始执行或任务已成功。现有 `reaction_emoji`（默认 `"OnIt"`）仍表示实际处理，`done_emoji` 表示完成；若 `ack_emoji` 与 `reaction_emoji` 相同，该表情由接收确认保留，不再作为临时状态移除。
 > 确认默认关闭；不配置、空值或 `"none"` 保持原有行为。权限或 @ 过滤、重复/过时消息、满队列拒绝、已处理的命令与无用户消息的定时任务不会产生确认。确认从引擎接受消息时开始；若后续消息仍在等待已有的会话启动锁，也会等待接受决定。表情 API 采用 5 秒超时的异步尽力请求，失败不影响模型处理；发送前的附件下载、消息解析以及多图合批仍需先完成，多图批次确认在最后一条（批次的主消息）上。
 > **English:** Optional `ack_emoji = "Get"` adds a persistent receipt asynchronously once the engine accepts a message for processing or queueing, before waiting for agent startup/execution. It confirms acceptance, not execution or success, and survives completion/failure/cancellation. Omitted, empty or `"none"` keeps existing behavior. Processing (`reaction_emoji`) and completion (`done_emoji`) remain independent; if receipt and processing use the same emoji, the receipt owns it and typing cleanup does not remove it. Rejected/duplicate/stale messages, handled commands and synthetic scheduled work are not acknowledged. The receipt begins at engine acceptance; subsequent messages waiting on the existing session-startup lock still wait for admission. Receipt API calls have a five-second timeout and never block processing. Parsing/media preparation and image batching precede acceptance; a merged image batch acknowledges its newest canonical message.
