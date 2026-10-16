@@ -89,6 +89,24 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestBuildExecArgs_GPT61SolHighNewAndResume(t *testing.T) {
+	for _, sessionID := range []string{"", "existing-thread"} {
+		t.Run("session="+sessionID, func(t *testing.T) {
+			cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "gpt-6.1-sol", "high", "full-auto", sessionID, "", nil, "", "", "")
+			if err != nil {
+				t.Fatalf("newCodexSession: %v", err)
+			}
+			args := cs.buildExecArgs("hello", nil)
+			if !containsSequence(args, []string{"--model", "gpt-6.1-sol"}) {
+				t.Fatalf("model was not passed to Codex: %v", args)
+			}
+			if !containsSequence(args, []string{"-c", `model_reasoning_effort="high"`}) {
+				t.Fatalf("reasoning effort was not passed to Codex: %v", args)
+			}
+		})
+	}
+}
+
 func TestBuildExecArgs_IncludesBaseURL(t *testing.T) {
 	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "https://custom.api.example.com", nil, "", "", "")
 	if err != nil {

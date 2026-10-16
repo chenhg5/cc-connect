@@ -242,10 +242,14 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 
 func defaultCodexModels() []core.ModelOption {
 	return []core.ModelOption{
-		{Name: "gpt-5.6-sol", Desc: "GPT-5.6 Sol (strongest for complex Codex work)"},
+		{Name: "gpt-6.1-sol", Desc: "GPT-6.1 Sol (latest Sol model)"},
+		{Name: "gpt-6-astra", Desc: "GPT-6 Astra"},
+		{Name: "gpt-6-sol", Desc: "GPT-6 Sol"},
+		{Name: "gpt-6-luna", Desc: "GPT-6 Luna"},
+		{Name: "gpt-5.6-sol", Desc: "GPT-5.6 Sol (previous generation)"},
 		{Name: "gpt-5.6-terra", Desc: "GPT-5.6 Terra (balanced everyday Codex work)"},
 		{Name: "gpt-5.6-luna", Desc: "GPT-5.6 Luna (fast, efficient GPT-5.6 model)"},
-		{Name: "gpt-5.6", Desc: "GPT-5.6 (recommended Codex model family default)"},
+		{Name: "gpt-5.6", Desc: "GPT-5.6 (previous model family)"},
 		{Name: "gpt-5.5", Desc: "GPT-5.5 (previous frontier Codex model)"},
 		{Name: "gpt-5.4", Desc: "GPT-5.4 (frontier Codex model)"},
 		{Name: "gpt-5.4-mini", Desc: "GPT-5.4 Mini (fast Codex model)"},
