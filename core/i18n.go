@@ -681,6 +681,7 @@ const (
 	MsgWsInitInvalidTarget      MsgKey = "ws_init_invalid_target"
 	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
 	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
+	MsgBackgroundAutoDeniedSum  MsgKey = "background_auto_denied_summary"
 
 	// Agent system-prompt tool sections (Issue #1655). These are appended
 	// to the agent's own system prompt by core/interfaces.go AgentSystemPromptForLang
@@ -861,11 +862,18 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "❌ Error: %v",
 	},
 	MsgBackgroundAutoDenied: {
-		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",
-		LangChinese:            "⚠️ 后台任务请求使用工具 `%s` 的权限，但已自动拒绝（当前无活跃会话）。请发送消息或使用 `/yolo` 授权后续请求。",
-		LangTraditionalChinese: "⚠️ 後台任務請求使用工具 `%s` 的權限，但已自動拒絕（目前無活躍會話）。請發送訊息或使用 `/yolo` 授權後續請求。",
-		LangJapanese:           "⚠️ バックグラウンドタスクがツール `%s` の権限を要求しましたが、自動的に拒否されました（アクティブなユーザーターンなし）。メッセージを送信するか `/yolo` を使用して今後のリクエストを承認してください。",
-		LangSpanish:            "⚠️ Una tarea en segundo plano solicitó permiso para `%s` pero se denegó automáticamente (sin turno de usuario activo). Envía un mensaje o usa `/yolo` para aprobar solicitudes futuras.",
+		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/mode yolo` to approve future requests.",
+		LangChinese:            "⚠️ 后台任务请求使用工具 `%s` 的权限，但已自动拒绝（当前无活跃会话）。请发送消息或使用 `/mode yolo` 授权后续请求。",
+		LangTraditionalChinese: "⚠️ 後台任務請求使用工具 `%s` 的權限，但已自動拒絕（目前無活躍會話）。請發送訊息或使用 `/mode yolo` 授權後續請求。",
+		LangJapanese:           "⚠️ バックグラウンドタスクがツール `%s` の権限を要求しましたが、自動的に拒否されました（アクティブなユーザーターンなし）。メッセージを送信するか `/mode yolo` を使用して今後のリクエストを承認してください。",
+		LangSpanish:            "⚠️ Una tarea en segundo plano solicitó permiso para `%s` pero se denegó automáticamente (sin turno de usuario activo). Envía un mensaje o usa `/mode yolo` para aprobar solicitudes futuras.",
+	},
+	MsgBackgroundAutoDeniedSum: {
+		LangEnglish:            "⚠️ %d tool requests were auto-denied in this background turn (%s).",
+		LangChinese:            "⚠️ 本次后台回合共 %d 次工具请求被自动拒绝（%s）。",
+		LangTraditionalChinese: "⚠️ 本次後台回合共 %d 次工具請求被自動拒絕（%s）。",
+		LangJapanese:           "⚠️ このバックグラウンドターンでは %d 件のツールリクエストが自動的に拒否されました（%s）。",
+		LangSpanish:            "⚠️ Se denegaron automáticamente %d solicitudes de herramientas en este turno en segundo plano (%s).",
 	},
 	MsgSessionNotFound: {
 		LangEnglish:            "⚠️ Session expired. Use /new to start a fresh conversation.",
