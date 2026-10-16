@@ -474,6 +474,7 @@ type Engine struct {
 	initFlowsMu                  sync.Mutex
 	sendWorkDirMu                sync.RWMutex
 	sendWorkDirs                 map[string]string // sessionKey → work_dir assigned by send --cwd
+	desktopThreads               sync.Map          // (destination, notified thread) → workspace
 
 	// Terminal observation (--observe)
 	observeEnabled    bool
