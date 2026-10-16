@@ -16427,17 +16427,13 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 				saveRelaySessionID(event.SessionID, false)
 			}
 		case EventToolResult:
-			out := strings.TrimSpace(event.Content)
-			if out == "" {
-				out = strings.TrimSpace(event.ToolResult)
-			}
-			if out != "" {
-				tn := strings.TrimSpace(event.ToolName)
-				if tn == "" {
-					tn = "tool"
-				}
-				textParts = append(textParts, fmt.Sprintf(e.i18n.T(MsgToolResult), tn, out)+"\n\n")
-			}
+			// Tool output is intermediate state, not an answer. It is
+			// deliberately NOT accumulated into textParts: on the timeout
+			// path textParts is handed back to the caller verbatim, so a
+			// tool dump would be billed into the caller's context — and
+			// re-billed on every later turn of that session.
+			slog.Debug("relay: tool result (not relayed)",
+				"from", fromProject, "to", e.name, "tool", event.ToolName)
 		case EventResult:
 			// Use agentSession.CurrentSessionID() for the same reason as above.
 			if currentID := agentSession.CurrentSessionID(); currentID != "" {
@@ -16471,7 +16467,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 			// background so the session state is saved cleanly and the
 			// session remains resumable for the next relay call.
 			go e.drainRelaySession(agentSession, session, sessions, agent.Name(), relaySessionKey)
-			return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
+			return e.relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
 		}
 	}
 
@@ -16479,7 +16475,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	agentSession.Close()
 
 	if ctx.Err() != nil {
-		return relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
+		return e.relayPartialResponseOrError(ctx.Err(), textParts, fromProject, e.name)
 	}
 
 	if len(textParts) > 0 {
@@ -16488,19 +16484,29 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	return "", fmt.Errorf("relay: agent process exited without response")
 }
 
-func relayPartialResponseOrError(ctxErr error, textParts []string, fromProject, toProject string) (string, error) {
-	if len(textParts) == 0 {
+// relayPartialNoticeMaxRunes bounds the partial text handed back to the caller
+// when a relay times out. Tool output never reaches textParts (see
+// HandleRelay), so this only ever caps assistant prose.
+const relayPartialNoticeMaxRunes = 2000
+
+// relayPartialResponseOrError reports a relay that hit its deadline before the
+// target agent produced a final EventResult. The partial text is wrapped in an
+// explicit timeout notice: without one the caller cannot tell a truncated
+// fragment from a real answer, and silently treats it as the answer.
+func (e *Engine) relayPartialResponseOrError(ctxErr error, textParts []string, fromProject, toProject string) (string, error) {
+	partial := strings.TrimSpace(strings.Join(textParts, ""))
+	if partial == "" {
 		return "", ctxErr
 	}
+	partial = truncateRelay(partial, relayPartialNoticeMaxRunes)
 
-	resp := strings.Join(textParts, "")
 	slog.Warn("relay: context done before final result; returning partial response",
 		"from", fromProject,
 		"to", toProject,
 		"error", ctxErr,
-		"response_len", len(resp),
+		"response_len", len(partial),
 	)
-	return resp, nil
+	return fmt.Sprintf(e.i18n.T(MsgRelayPartial), partial), nil
 }
 
 // drainRelaySession runs in a goroutine after a relay timeout. It lets the

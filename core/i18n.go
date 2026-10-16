@@ -574,6 +574,7 @@ const (
 	MsgRelaySetupOK       MsgKey = "relay_setup_ok"
 	MsgRelaySetupExists   MsgKey = "relay_setup_exists"
 	MsgRelaySetupNoMemory MsgKey = "relay_setup_no_memory"
+	MsgRelayPartial       MsgKey = "relay_partial_response"
 	MsgSetupNative        MsgKey = "setup_native"
 	MsgCronSetupOK        MsgKey = "cron_setup_ok"
 
@@ -3475,6 +3476,13 @@ var messages = map[MsgKey]map[Language]string{
 	MsgRelayBound: {
 		LangEnglish: "Current relay binding: %s",
 		LangChinese: "当前中继绑定: %s",
+	},
+	MsgRelayPartial: {
+		LangEnglish:            "⏳ The other bot is still working — this relay timed out before it produced a final answer.\n\nPartial output so far:\n---\n%s",
+		LangChinese:            "⏳ 对方仍在运行 —— 本次中继在它给出最终结果前超时了。\n\n目前的片段输出：\n---\n%s",
+		LangTraditionalChinese: "⏳ 對方仍在執行 —— 本次中繼在它給出最終結果前逾時了。\n\n目前的片段輸出：\n---\n%s",
+		LangJapanese:           "⏳ 相手はまだ実行中です —— 最終結果が出る前に中継がタイムアウトしました。\n\n現時点の部分的な出力：\n---\n%s",
+		LangSpanish:            "⏳ El otro bot sigue trabajando: este relay agotó el tiempo antes de dar una respuesta final.\n\nSalida parcial hasta ahora:\n---\n%s",
 	},
 	MsgRelayUsage: {
 		LangEnglish: "Usage:\n  /bind <project>  — bind with another bot in this group\n  /bind remove     — remove binding\n  /bind            — show current binding\n\n<project> is the project name from config.toml [[projects]].",

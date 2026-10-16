@@ -385,11 +385,65 @@ func TestHandleRelay_ReturnsPartialOnTimeout(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("HandleRelay() error = %v, want nil", got.err)
 	}
-	if got.resp != "partial response" {
-		t.Fatalf("HandleRelay() response = %q, want %q", got.resp, "partial response")
+	// The partial text is wrapped in an explicit timeout notice, so the caller
+	// can tell a truncated fragment from a real answer.
+	if !strings.Contains(got.resp, "partial response") {
+		t.Fatalf("HandleRelay() response = %q, want it to carry the partial text", got.resp)
+	}
+	if !strings.Contains(got.resp, "---") {
+		t.Fatalf("HandleRelay() response = %q, want the timeout notice around the partial text", got.resp)
 	}
 
 	// Wait for the background drain goroutine to close the session.
+	select {
+	case <-session.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background drain goroutine did not close the session")
+	}
+}
+
+// TestHandleRelay_TimeoutExcludesToolResults is the regression test for the
+// relay timeout path leaking the target agent's tool output back to the caller.
+// Every EventToolResult used to be appended to textParts, and on timeout
+// textParts is handed back verbatim — so a turn that ran past the deadline
+// returned the whole tool log as if it were the answer. That blob then sat in
+// the caller's context and was re-billed on every later turn of its session.
+func TestHandleRelay_TimeoutExcludesToolResults(t *testing.T) {
+	e := newTestEngine()
+	session := newControllableSession("relay-session")
+	e.agent = &controllableAgent{nextSession: session}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	type relayResult struct {
+		resp string
+		err  error
+	}
+	done := make(chan relayResult, 1)
+	go func() {
+		resp, err := e.HandleRelay(ctx, "source", "test:chat-1:user", "hello")
+		done <- relayResult{resp: resp, err: err}
+	}()
+
+	const toolDump = "TOOL-OUTPUT-MUST-NOT-BE-RELAYED"
+	session.events <- Event{Type: EventToolResult, ToolName: "Bash", Content: toolDump, SessionID: "relay-session"}
+	session.events <- Event{Type: EventText, Content: "working on it", SessionID: "relay-session"}
+	time.Sleep(40 * time.Millisecond)
+	session.events <- Event{Type: EventThinking, Content: "still working"}
+	session.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("HandleRelay() error = %v, want nil", got.err)
+	}
+	if strings.Contains(got.resp, toolDump) {
+		t.Fatalf("HandleRelay() leaked tool output to the caller: %q", got.resp)
+	}
+	if !strings.Contains(got.resp, "working on it") {
+		t.Fatalf("HandleRelay() response = %q, want the assistant text preserved", got.resp)
+	}
+
 	select {
 	case <-session.closed:
 	case <-time.After(2 * time.Second):
