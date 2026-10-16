@@ -790,7 +790,7 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 				return // e.g. a footer-only chunk of a long reply
 			}
 			// maomao fork: a teammate calling this bot by name ("行了橘，…") counts like an @, so
-			// chat between bots can go on; it stops earlier than @ handoffs (maxNameCallHops).
+			// chat between bots can go on; outside 后宅 it stops earlier than @ handoffs (maxNameCallHops).
 			atMention := msg.Mentioned
 			nameCall := !atMention && nameCalled(text, p.botName)
 			msg.Mentioned = atMention || nameCall
@@ -1833,18 +1833,11 @@ const (
 	maxPairBounces   = 3
 	handoffRecentMax = 6
 	handoffRecentLen = 300
-	// 后宅 is the family chat, not a dispute: two subs may go back and forth longer before the
-	// lead is called in (user 2026-10-15 agreed to 橘's「只给后宅放宽到比如 8 轮」).
-	houzhaiChannelID   = "1559559262529790063"
-	houzhaiPairBounces = 8
+	// 后宅 is the family chat, not a dispute: chat there is not cut short by the name-call cap
+	// or sent to the lead after a few rounds (user 2026-10-16「后宅允许继续」). Only the
+	// maxBotHops fuse still applies.
+	houzhaiChannelID = "1559559262529790063"
 )
-
-func pairBounceLimit(channelID string) int {
-	if channelID == houzhaiChannelID {
-		return houzhaiPairBounces
-	}
-	return maxPairBounces
-}
 
 type handoffVerdict int
 
@@ -1884,7 +1877,7 @@ func resetBotHops(channelID string) {
 }
 
 // noteHandoff records that bot `from` @-ed bot `to` in channelID with text, and says what to do.
-// nameCall marks a handoff by name only (no @), which stops earlier, at maxNameCallHops.
+// nameCall marks a handoff by name only (no @), which stops earlier, at maxNameCallHops (not in 后宅).
 func noteHandoff(channelID, from, to, lead, text string, nameCall bool) handoffDecision {
 	handoffMu.Lock()
 	defer handoffMu.Unlock()
@@ -1899,7 +1892,8 @@ func noteHandoff(channelID, from, to, lead, text string, nameCall bool) handoffD
 		st.capNoticed = true
 		return d
 	}
-	if nameCall && st.hops > maxNameCallHops {
+	houzhai := channelID == houzhaiChannelID
+	if nameCall && !houzhai && st.hops > maxNameCallHops {
 		return handoffDecision{verdict: handoffChatEnd}
 	}
 	pair := [2]string{from, to}
@@ -1921,7 +1915,7 @@ func noteHandoff(channelID, from, to, lead, text string, nameCall bool) handoffD
 	}
 	d := handoffDecision{verdict: handoffDeliver, rounds: st.bounces}
 	// chat by name is not a dispute to settle: only @ ping-pong goes to the lead
-	if !nameCall && lead != "" && from != lead && to != lead && st.bounces > pairBounceLimit(channelID) {
+	if !nameCall && !houzhai && lead != "" && from != lead && to != lead && st.bounces > maxPairBounces {
 		d.verdict, d.recent = handoffEscalate, st.recent
 		st.pair, st.bounces, st.recent = [2]string{}, 0, nil
 	}
@@ -1954,7 +1948,7 @@ func (p *Platform) applyHandoffPolicy(s *discordgo.Session, m *discordgo.Message
 		}
 		slog.Info("discord: sub ping-pong escalated to lead", "channel", m.ChannelID, "from", m.Author.ID, "to", p.botID)
 		note := fmt.Sprintf("【系统】%s 和 %s 在本频道已经来回 %d 轮还没定下来，转给你拍板：直接定方案并 @ 她们执行，或者让她们继续，或者问用户。最近几轮：\n%s",
-			discordDisplayName(m), p.botName, pairBounceLimit(m.ChannelID), strings.Join(d.recent, "\n"))
+			discordDisplayName(m), p.botName, maxPairBounces, strings.Join(d.recent, "\n"))
 		esc := &core.Message{
 			SessionKey: lp.makeSessionKey(m.ChannelID, m.Author.ID), Platform: "discord",
 			ChannelID: m.ChannelID, MessageID: m.ID, UserID: m.Author.ID, UserName: m.Author.Username,
@@ -1964,7 +1958,7 @@ func (p *Platform) applyHandoffPolicy(s *discordgo.Session, m *discordgo.Message
 		esc.ChatName, _ = lp.ResolveChannelName(m.ChannelID)
 		lp.dispatchMessage(esc)
 	case handoffDeliver:
-		if p.botID == p.teamLead && d.rounds >= maxPairBounces {
+		if p.botID == p.teamLead && m.ChannelID != houzhaiChannelID && d.rounds >= maxPairBounces {
 			msg.Content = fmt.Sprintf("（系统：这是你和%s在本频道连续第 %d 轮来回。该拍板就拍板，拿不准就问用户。）\n%s",
 				discordDisplayName(m), d.rounds, msg.Content)
 		}

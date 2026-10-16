@@ -1810,19 +1810,21 @@ func TestHandoffPolicy(t *testing.T) {
 	if d := noteHandoff(ch, long, jing, lead, "again", false); d.verdict != handoffDeliver || d.rounds != 1 {
 		t.Fatalf("pair count should restart after escalation: %+v", d)
 	}
-	// 后宅 allows more bounces before the lead is called in.
-	resetBotHops(houzhaiChannelID)
-	for i := 1; i <= houzhaiPairBounces; i++ {
-		from, to := long, jing
-		if i%2 == 0 {
-			from, to = jing, long
+	// 后宅: neither @ ping-pong nor chat by name is cut short before the fuse.
+	for _, nameCall := range []bool{false, true} {
+		resetBotHops(houzhaiChannelID)
+		for i := 1; i <= maxBotHops; i++ {
+			from, to := long, jing
+			if i%2 == 0 {
+				from, to = jing, long
+			}
+			if d := noteHandoff(houzhaiChannelID, from, to, lead, "msg", nameCall); d.verdict != handoffDeliver {
+				t.Fatalf("houzhai (nameCall=%v) hop %d cut short: %+v", nameCall, i, d)
+			}
 		}
-		if d := noteHandoff(houzhaiChannelID, from, to, lead, "msg", false); d.verdict != handoffDeliver {
-			t.Fatalf("houzhai bounce %d escalated too early: %+v", i, d)
+		if d := noteHandoff(houzhaiChannelID, long, jing, lead, "last", nameCall); d.verdict != handoffCapped {
+			t.Fatalf("houzhai (nameCall=%v): fuse should still blow after %d hops, got %+v", nameCall, maxBotHops, d)
 		}
-	}
-	if d := noteHandoff(houzhaiChannelID, long, jing, lead, "last", false); d.verdict != handoffEscalate {
-		t.Fatalf("houzhai: expected escalation after %d bounces, got %+v", houzhaiPairBounces, d)
 	}
 	// A third bot breaking in restarts the pair count.
 	noteHandoff(ch, jing, long, lead, "a", false)
