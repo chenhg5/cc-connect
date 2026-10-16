@@ -7908,6 +7908,11 @@ func formatElapsed(d time.Duration, streaming bool, lang Language) string {
 }
 
 func replyFooterModel(session AgentSession, agent Agent) string {
+	if reporter, ok := session.(ModelDisplayNameReporter); ok {
+		if name := strings.TrimSpace(reporter.GetModelDisplayName()); name != "" {
+			return name
+		}
+	}
 	if session != nil {
 		if getter, ok := session.(interface{ GetModel() string }); ok {
 			if model := strings.TrimSpace(getter.GetModel()); model != "" {

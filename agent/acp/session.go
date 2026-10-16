@@ -73,8 +73,10 @@ type acpSession struct {
 
 	// compactCommand is the agent's compress prompt, in addition to "/compact".
 	compactCommand string
-	compactMu      sync.Mutex
-	compactStatus  string
+	// showModelDisplayName enables GetModelDisplayName (set by wrappers).
+	showModelDisplayName bool
+	compactMu            sync.Mutex
+	compactStatus        string
 
 	// lastUpdate is the time of the newest session/update for this
 	// session. updateNotify wakes a compaction quiet-wait.
@@ -110,6 +112,7 @@ type acpSessionConfig struct {
 	initialEffort   string // configured reasoning effort, applied after the model
 	modelResolver   func(input string, optionValues []string) (value string, impliedEffort string)
 	compactCommand  string
+	showModelName   bool
 	modeAliases     map[string]string
 	callbacks       sessionCallbacks // may be nil
 }
@@ -119,19 +122,20 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &acpSession{
-		workDir:        absWorkDir,
-		events:         make(chan core.Event, 128),
-		ctx:            sessionCtx,
-		cancel:         cancel,
-		permByID:       make(map[string]permState),
-		toolInputByID:  make(map[string]string),
-		toolNameByID:   make(map[string]string),
-		acpSessID:      cfg.resumeSessionID,
-		callbacks:      cfg.callbacks,
-		modeAliases:    cloneModeAliases(cfg.modeAliases),
-		modelResolver:  cfg.modelResolver,
-		compactCommand: cfg.compactCommand,
-		updateNotify:   make(chan struct{}, 1),
+		workDir:              absWorkDir,
+		events:               make(chan core.Event, 128),
+		ctx:                  sessionCtx,
+		cancel:               cancel,
+		permByID:             make(map[string]permState),
+		toolInputByID:        make(map[string]string),
+		toolNameByID:         make(map[string]string),
+		acpSessID:            cfg.resumeSessionID,
+		callbacks:            cfg.callbacks,
+		modeAliases:          cloneModeAliases(cfg.modeAliases),
+		modelResolver:        cfg.modelResolver,
+		compactCommand:       cfg.compactCommand,
+		showModelDisplayName: cfg.showModelName,
+		updateNotify:         make(chan struct{}, 1),
 	}
 	s.alive.Store(true)
 

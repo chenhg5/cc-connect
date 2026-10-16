@@ -520,3 +520,25 @@ func (s *acpSession) GetReasoningEffort() string {
 	}
 	return opt.CurrentValue.String()
 }
+
+// GetModelDisplayName returns the agent's display name for the current model
+// option value (e.g. "Claude Opus 5.5" for "claude-opus-5-5-medium"). Only
+// enabled when the wrapper sets ShowModelDisplayName; empty otherwise.
+func (s *acpSession) GetModelDisplayName() string {
+	if !s.showModelDisplayName {
+		return ""
+	}
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	opt, ok := findModelConfigOption(s.configOptions)
+	if !ok {
+		return ""
+	}
+	current := opt.CurrentValue.String()
+	for _, c := range opt.Options {
+		if c.Value == current {
+			return strings.TrimSpace(c.Name)
+		}
+	}
+	return ""
+}

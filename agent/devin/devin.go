@@ -128,6 +128,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	agent.FallbackReasoningEfforts = append([]string(nil), devinEfforts...)
 	agent.CompactCommand = "/compact"
+	agent.ShowModelDisplayName = true
 	agent.ModelValueResolver = agent.resolveModelValue
 	agent.setProbeCommand(opts)
 	if rawEffort != "" {

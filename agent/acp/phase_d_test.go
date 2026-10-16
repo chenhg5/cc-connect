@@ -315,3 +315,20 @@ func TestSessionGetReasoningEffort_ReportsLiveThoughtLevel(t *testing.T) {
 		t.Fatalf("GetReasoningEffort = %q, want medium", got)
 	}
 }
+
+// TestSessionModelDisplayName: the display name comes from the model option
+// choice matching currentValue, and only when the wrapper opts in.
+func TestSessionModelDisplayName(t *testing.T) {
+	s, _, _ := newTestSession(t, nil)
+	s.absorbConfigOptions([]acpConfigOption{{
+		ID: "model", Category: "model", CurrentValue: "claude-opus-5-5-medium",
+		Options: []acpConfigOptionChoice{{Value: "adaptive", Name: "Adaptive"}, {Value: "claude-opus-5-5-medium", Name: "Claude Opus 5.5"}},
+	}})
+	if got := s.GetModelDisplayName(); got != "" {
+		t.Fatalf("display name without opt-in = %q, want empty", got)
+	}
+	s.showModelDisplayName = true
+	if got := s.GetModelDisplayName(); got != "Claude Opus 5.5" {
+		t.Fatalf("display name = %q, want Claude Opus 5.5", got)
+	}
+}

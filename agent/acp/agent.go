@@ -74,6 +74,10 @@ type Agent struct {
 	ProbeCommand string
 	ProbeArgs    []string
 
+	// ShowModelDisplayName makes sessions report the model option's display
+	// name (e.g. "Claude Opus 5.5") for the reply footer instead of its id.
+	ShowModelDisplayName bool
+
 	// reasoningEffort is the configured effort applied to future
 	// sessions. It is not the thought_level the last session reported.
 	reasoningEffort string
@@ -125,16 +129,17 @@ type sessionCallbacks interface {
 // Ensure *Agent satisfies the optional core interfaces Phase A adds,
 // plus the callback surface sessions use to publish discoveries.
 var (
-	_ sessionCallbacks             = (*Agent)(nil)
-	_ core.ModelSwitcher           = (*Agent)(nil)
-	_ core.ReasoningEffortSwitcher = (*Agent)(nil)
-	_ core.StartupWarner           = (*acpSession)(nil)
-	_ core.SessionDeleter          = (*Agent)(nil)
-	_ core.HistoryProvider         = (*Agent)(nil)
-	_ core.SessionIDValidator      = (*Agent)(nil)
-	_ core.SessionTitleProvider    = (*Agent)(nil)
-	_ core.ContextUsageReporter    = (*acpSession)(nil)
-	_ core.UsageSourceReporter     = (*acpSession)(nil)
+	_ sessionCallbacks              = (*Agent)(nil)
+	_ core.ModelSwitcher            = (*Agent)(nil)
+	_ core.ReasoningEffortSwitcher  = (*Agent)(nil)
+	_ core.StartupWarner            = (*acpSession)(nil)
+	_ core.SessionDeleter           = (*Agent)(nil)
+	_ core.HistoryProvider          = (*Agent)(nil)
+	_ core.SessionIDValidator       = (*Agent)(nil)
+	_ core.SessionTitleProvider     = (*Agent)(nil)
+	_ core.ContextUsageReporter     = (*acpSession)(nil)
+	_ core.UsageSourceReporter      = (*acpSession)(nil)
+	_ core.ModelDisplayNameReporter = (*acpSession)(nil)
 )
 
 // New builds an acp agent from project options.
@@ -339,6 +344,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	pendingEffort := a.reasoningEffort
 	resolver := a.ModelValueResolver
 	compactCommand := a.CompactCommand
+	showModelName := a.ShowModelDisplayName
 	pendingAliases := cloneModeAliases(a.modeAliases)
 	extra := append([]string(nil), a.extraEnv...)
 	extra = append(extra, a.sessionEnv...)
@@ -356,6 +362,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		initialEffort:   pendingEffort,
 		modelResolver:   resolver,
 		compactCommand:  compactCommand,
+		showModelName:   showModelName,
 		modeAliases:     pendingAliases,
 		callbacks:       a,
 	})
