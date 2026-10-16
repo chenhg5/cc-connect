@@ -116,6 +116,10 @@ func newWorkspaceSkillsEngine(t *testing.T, p Platform) (*Engine, string, string
 	}
 	writeWorkspaceSkill(t, global, "global-skill", "Global instructions")
 	writeWorkspaceSkill(t, global, "shared-skill", "Wrong global instructions")
+	// Resolve after creation so callers compare the same path the engine
+	// stores (macOS /var -> /private/var).
+	a = normalizeWorkspacePath(a)
+	b = normalizeWorkspacePath(b)
 	name := "workspace-skills-" + t.Name()
 	RegisterAgent(name, func(opts map[string]any) (Agent, error) {
 		return &workspaceSkillAgent{name: name, workDir: opts["work_dir"].(string), global: global}, nil

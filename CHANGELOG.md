@@ -20,6 +20,7 @@ Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability,
 ## Unreleased
 
 ### Added
+- **Devin**: mode aliases (`normal` / `default` / `code` map to `accept-edits`), model listing via `devin models list` (`models_cmd` when `cmd` is a wrapper), model and reasoning-effort switching through ACP `configOptions` / `thought_level` (unknown values surface as a startup warning), context usage, session delete/history/titles, symlink-safe cwd, native image prompts, `AGENTS.md` memory paths, skill directories, and `/compact`.
 - **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
 - **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)
 - **cloud_web platform**: 新增 self-hosted IM Gateway 作为 first-class platform 接入 (CWIP v1 协议,支持 websocket / long_poll / gateway 3 种 transport,完整 inbound/outbound + capability negotiation + graceful degradation)。 详见 docs/cloud-web.md + #1282。

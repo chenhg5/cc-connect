@@ -207,6 +207,38 @@ func TestPickPermissionOptionID(t *testing.T) {
 	if pickPermissionOptionID(false, opts) != "r" {
 		t.Fatal("deny")
 	}
+
+	devin := []permissionOption{
+		{OptionID: "allow_once", Name: "Allow", Kind: "allow_once"},
+		{OptionID: "allow_session", Name: "Yes, allow `seq` commands (this session)", Kind: "allow_always"},
+		{OptionID: "allow_always", Name: "Yes, always allow `seq` commands in `work`", Kind: "allow_always"},
+		{OptionID: "allow_always_global", Name: "Yes, always allow `seq` commands in all projects", Kind: "allow_always"},
+		{OptionID: "switch_bypass", Name: "Yes, switch to bypass mode", Kind: "allow_always"},
+		{OptionID: "reject_once", Name: "Reject", Kind: "reject_once"},
+	}
+	if pickPermissionOptionID(true, devin) != "allow_once" || pickPermissionOptionID(false, devin) != "reject_once" {
+		t.Fatalf("devin allow=%s deny=%s", pickPermissionOptionID(true, devin), pickPermissionOptionID(false, devin))
+	}
+	reversed := reverseOptions(devin)
+	if pickPermissionOptionID(true, reversed) != "allow_once" || pickPermissionOptionID(false, reversed) != "reject_once" {
+		t.Fatalf("reversed allow=%s deny=%s", pickPermissionOptionID(true, reversed), pickPermissionOptionID(false, reversed))
+	}
+	broadFirst := []permissionOption{
+		{OptionID: "switch_bypass", Name: "Yes, switch to bypass mode", Kind: "allow_always"},
+		{OptionID: "allow_always_global", Name: "everywhere", Kind: "allow_always"},
+		{OptionID: "allow_session", Name: "this session", Kind: "allow_always"},
+	}
+	if pickPermissionOptionID(true, broadFirst) != "allow_session" {
+		t.Fatalf("broad-first allow = %s", pickPermissionOptionID(true, broadFirst))
+	}
+}
+
+func reverseOptions(in []permissionOption) []permissionOption {
+	out := append([]permissionOption(nil), in...)
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
 }
 
 func TestBuildPermissionResult(t *testing.T) {
