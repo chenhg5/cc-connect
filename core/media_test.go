@@ -34,8 +34,8 @@ func withMedia(t *testing.T, run func(ctx context.Context, link string) (string,
 func resetVideoState() {
 	videoMu.Lock()
 	videoRunning = map[string]*watchvidRun{}
-	videoByMsg = map[string]*msgVideo{}
-	mediaEngines = map[*Engine]bool{}
+	videoByMsg = map[string]*watchvidRun{}
+	videoMsgOrder = nil
 	videoMu.Unlock()
 }
 
@@ -55,9 +55,6 @@ func videoStateSize() (running, byMsg int) {
 	defer videoMu.Unlock()
 	return len(videoRunning), len(videoByMsg)
 }
-
-// prepareMedia is beginMedia with the session released right away (the gate step is not under test).
-func (e *Engine) prepareMedia(msg *Message, key string) { e.beginMedia(msg, key)() }
 
 func newMediaEngine(name string) *Engine { return &Engine{ctx: context.Background(), name: name} }
 
@@ -107,15 +104,12 @@ func TestVideoOncePerMessageAndCleanup(t *testing.T) {
 		return okRun(&runs)(ctx, link)
 	}, nil)
 	bots := []*Engine{newMediaEngine("maomao"), newMediaEngine("longniang"), newMediaEngine("jingyu"), newMediaEngine("caihongmao")}
-	for _, e := range bots {
-		registerMediaEngine(e)
-	}
 	msgs := make([]*Message, len(bots))
 	var wg sync.WaitGroup
 	for i, e := range bots {
 		msgs[i] = &Message{Content: "https://b23.tv/I4TDkg4", MessageID: "1000", ChannelID: "c"}
 		wg.Add(1)
-		go func(e *Engine, m *Message) { defer wg.Done(); e.prepareMedia(m, "discord:c") }(e, msgs[i])
+		go func(e *Engine, m *Message) { defer wg.Done(); e.prepareMedia(m) }(e, msgs[i])
 	}
 	time.Sleep(50 * time.Millisecond)
 	close(release)
@@ -128,30 +122,66 @@ func TestVideoOncePerMessageAndCleanup(t *testing.T) {
 			t.Errorf("bot %d got no path: %q", i, m.Content)
 		}
 	}
-	if r, b := videoStateSize(); r != 0 || b != 0 {
-		t.Fatalf("state not released: running=%d byMsg=%d", r, b)
-	}
-	for _, e := range bots {
-		if len(e.mediaLockMap) != 0 {
-			t.Fatalf("%s: session locks not released: %d", e.name, len(e.mediaLockMap))
-		}
+	if r, b := videoStateSize(); r != 0 || b != 1 {
+		t.Fatalf("running=%d byMsg=%d, want 0 and 1", r, b)
 	}
 }
 
-// A bot that never gets a message must not pin its result: being past it in the channel counts.
-func TestVideoByMsgReleasedWhenBotsMoveOn(t *testing.T) {
-	var runs atomic.Int32
-	withMedia(t, okRun(&runs), nil)
-	a, b := newMediaEngine("a"), newMediaEngine("b")
-	registerMediaEngine(a)
-	registerMediaEngine(b)
-	a.prepareMedia(&Message{Content: "https://b23.tv/I4TDkg4", MessageID: "1000", ChannelID: "c"}, "k")
-	if _, n := videoStateSize(); n != 1 {
-		t.Fatalf("result for b dropped too early (%d)", n)
+// Per-message results are kept FIFO, at most videoKeep finished ones; a running one is never evicted.
+func TestVideoByMsgFIFO(t *testing.T) {
+	release := make(chan struct{})
+	withMedia(t, func(ctx context.Context, link string) (string, string, error) {
+		if strings.Contains(link, "slow") {
+			<-release
+		}
+		return nasIndex + "\n", "", nil
+	}, nil)
+	e := newMediaEngine("a")
+	slowDone := make(chan struct{})
+	go func() {
+		e.prepareMedia(&Message{Content: "https://b23.tv/slow", MessageID: "1", ChannelID: "c"})
+		close(slowDone)
+	}()
+	time.Sleep(30 * time.Millisecond)
+	for i := 0; i < videoKeep+10; i++ {
+		e.prepareMedia(&Message{Content: "https://b23.tv/v" + strconv.Itoa(i), MessageID: strconv.Itoa(100 + i), ChannelID: "c"})
 	}
-	b.prepareMedia(&Message{Content: "later", MessageID: "1001", ChannelID: "c"}, "k")
-	if _, n := videoStateSize(); n != 0 {
-		t.Fatalf("result kept after every bot moved on (%d)", n)
+	videoMu.Lock()
+	_, slowKept := videoByMsg["|c|1|b23:slow"]
+	n := len(videoByMsg)
+	_, oldestKept := videoByMsg["|c|100|b23:v0"]
+	videoMu.Unlock()
+	if !slowKept {
+		t.Fatal("running result evicted")
+	}
+	if n != videoKeep || oldestKept {
+		t.Fatalf("kept %d (want %d), oldest finished kept=%v", n, videoKeep, oldestKept)
+	}
+	close(release)
+	<-slowDone
+	e.prepareMedia(&Message{Content: "https://b23.tv/next", MessageID: "999", ChannelID: "c"})
+	videoMu.Lock()
+	_, slowKept = videoByMsg["|c|1|b23:slow"]
+	n = len(videoByMsg)
+	videoMu.Unlock()
+	if slowKept || n != videoKeep {
+		t.Fatalf("after it finished: slow kept=%v, size=%d", slowKept, n)
+	}
+}
+
+// The share key includes platform and channel: the same message ID elsewhere is a new message.
+func TestVideoShareKeyHasChannel(t *testing.T) {
+	var runs atomic.Int32
+	withMedia(t, func(context.Context, string) (string, string, error) {
+		runs.Add(1)
+		return "", "dead link\n", errors.New("exit status 1")
+	}, nil)
+	e := newMediaEngine("a")
+	e.prepareMedia(&Message{Content: "https://b23.tv/x", MessageID: "7", ChannelID: "c1", Platform: "discord"})
+	e.prepareMedia(&Message{Content: "https://b23.tv/x", MessageID: "7", ChannelID: "c2", Platform: "discord"})
+	e.prepareMedia(&Message{Content: "https://b23.tv/x", MessageID: "7", ChannelID: "c1", Platform: "telegram"})
+	if runs.Load() != 3 {
+		t.Fatalf("runs = %d, want 3", runs.Load())
 	}
 }
 
@@ -163,12 +193,9 @@ func TestVideoFailureSharedPerMessage(t *testing.T) {
 		return "", "[watchvid] 短链没有跳转\n", errors.New("exit status 1")
 	}, nil)
 	bots := []*Engine{newMediaEngine("a"), newMediaEngine("b"), newMediaEngine("c"), newMediaEngine("d")}
-	for _, e := range bots {
-		registerMediaEngine(e)
-	}
 	for _, e := range bots { // one after another: the first has failed before the others start
 		m := &Message{Content: "https://b23.tv/x", MessageID: "2000", ChannelID: "c"}
-		e.prepareMedia(m, "k")
+		e.prepareMedia(m)
 		if !strings.Contains(m.Content, "短链没有跳转") {
 			t.Fatalf("%s: failure not reported: %q", e.name, m.Content)
 		}
@@ -176,7 +203,7 @@ func TestVideoFailureSharedPerMessage(t *testing.T) {
 	if n := runs.Load(); n != 1 {
 		t.Fatalf("one message ran watchvid %d times, want 1", n)
 	}
-	bots[0].prepareMedia(&Message{Content: "https://b23.tv/x", MessageID: "2001", ChannelID: "c"}, "k")
+	bots[0].prepareMedia(&Message{Content: "https://b23.tv/x", MessageID: "2001", ChannelID: "c"})
 	if n := runs.Load(); n != 2 {
 		t.Fatalf("next message did not retry (%d runs)", n)
 	}
@@ -197,20 +224,20 @@ func TestVideoNoteFollowsMountState(t *testing.T) {
 	}, &mounted)
 	e := newMediaEngine("maomao")
 	m1 := &Message{Content: "https://b23.tv/I4TDkg4", MessageID: "3000", ChannelID: "c"}
-	e.prepareMedia(m1, "k")
+	e.prepareMedia(m1)
 	if strings.Contains(m1.Content, nasMissingNote) || !strings.Contains(m1.Content, "已存进媒体库") {
 		t.Fatalf("mounted: %q", m1.Content)
 	}
 	mounted.Store(false)
 	m2 := &Message{Content: "https://b23.tv/I4TDkg4", MessageID: "3001", ChannelID: "c",
 		Images: []ImageAttachment{{MimeType: "image/png"}}}
-	e.prepareMedia(m2, "k")
+	e.prepareMedia(m2)
 	if !strings.Contains(m2.Content, tmp) || strings.Count(m2.Content, nasMissingNote) != 2 || strings.Contains(m2.Content, "已存进媒体库") {
 		t.Fatalf("unmounted (video + attachment notes): %q", m2.Content)
 	}
 	mounted.Store(true)
 	m3 := &Message{Content: "https://b23.tv/I4TDkg4", MessageID: "3002", ChannelID: "c"}
-	e.prepareMedia(m3, "k")
+	e.prepareMedia(m3)
 	if strings.Contains(m3.Content, nasMissingNote) {
 		t.Fatalf("remounted, still says not stored: %q", m3.Content)
 	}
@@ -219,38 +246,53 @@ func TestVideoNoteFollowsMountState(t *testing.T) {
 	}
 }
 
-// watchvid hangs: the message goes on with a failure note after the timeout, the next message in
-// the session is not stuck behind it, and the shared state is released.
+// watchvid hangs: the message goes on with a failure note after the timeout; later links in the
+// same message are not started; a plain message in the session is not delayed meanwhile.
 func TestVideoTimeout(t *testing.T) {
+	var runs atomic.Int32
 	withMedia(t, func(ctx context.Context, link string) (string, string, error) {
+		runs.Add(1)
 		<-ctx.Done()
 		return "", "", errors.New("killed: " + ctx.Err().Error())
 	}, nil)
 	watchvidTimeout = 100 * time.Millisecond
 	e := newMediaEngine("maomao")
 	start := time.Now()
-	m := &Message{Content: "https://b23.tv/I4TDkg4", MessageID: "4000", ChannelID: "c"}
+	m := &Message{Content: "https://b23.tv/first https://b23.tv/second", MessageID: "4000", ChannelID: "c"}
 	done := make(chan struct{})
-	go func() { e.prepareMedia(m, "k"); close(done) }()
+	go func() { e.prepareMedia(m); close(done) }()
 	time.Sleep(20 * time.Millisecond)
-	follow := &Message{Content: "你们看看", MessageID: "4001", ChannelID: "c"}
-	e.prepareMedia(follow, "k")
+	plain := &Message{Content: "你们看看", MessageID: "4001", ChannelID: "c"}
+	t0 := time.Now()
+	e.prepareMedia(plain)
+	if d := time.Since(t0); d > 20*time.Millisecond {
+		t.Fatalf("plain message waited %v", d)
+	}
 	<-done
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("took %v", d)
 	}
-	if !strings.Contains(m.Content, "失败") {
-		t.Fatalf("no failure note: %q", m.Content)
+	if !strings.Contains(m.Content, "失败") || !strings.Contains(m.Content, "没有解析：https://b23.tv/second") {
+		t.Fatalf("notes: %q", m.Content)
 	}
-	if follow.Content != "你们看看" {
-		t.Fatalf("follow-up changed: %q", follow.Content)
+	if plain.Content != "你们看看" {
+		t.Fatalf("plain message changed: %q", plain.Content)
 	}
-	time.Sleep(50 * time.Millisecond)
-	if r, _ := videoStateSize(); r != 0 {
-		t.Fatal("running entry kept after timeout")
+	waitVideoRuns(t)
+	if runs.Load() != 1 {
+		t.Fatalf("watchvid started %d times, want 1 (second link must not start after the timeout)", runs.Load())
 	}
-	if len(e.mediaLockMap) != 0 {
-		t.Fatal("session lock kept")
+}
+
+// Nothing new is started once the caller's context is done.
+func TestParseVideoNoStartAfterCancel(t *testing.T) {
+	var runs atomic.Int32
+	withMedia(t, okRun(&runs), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := newMediaEngine("a").parseVideo(ctx, &Message{MessageID: "1"}, videoLink{"https://b23.tv/x", "b23:x"})
+	if r.Err == "" || runs.Load() != 0 {
+		t.Fatalf("res=%+v runs=%d", r, runs.Load())
 	}
 }
 
@@ -279,47 +321,19 @@ func TestRunProcessGroupKillsChildren(t *testing.T) {
 	}
 }
 
-// A message right after a video link waits for the parse instead of overtaking it.
-func TestPrepareMediaKeepsOrder(t *testing.T) {
-	release := make(chan struct{})
-	withMedia(t, func(ctx context.Context, link string) (string, string, error) {
-		<-release
-		return nasIndex + "\n", "", nil
-	}, nil)
-	e := newMediaEngine("maomao")
-	var order []string
-	var mu sync.Mutex
-	done := make(chan struct{}, 2)
-	add := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock(); done <- struct{}{} }
-	// add stands for the gate step, which runs before release (see handleMessage)
-	go func() { r := e.beginMedia(&Message{Content: "https://b23.tv/I4TDkg4"}, "s"); add("link"); r() }()
-	time.Sleep(30 * time.Millisecond)
-	go func() { r := e.beginMedia(&Message{Content: "你们看看"}, "s"); add("follow-up"); r() }()
-	time.Sleep(30 * time.Millisecond)
-	close(release)
-	<-done
-	<-done
-	if len(order) != 2 || order[0] != "link" {
-		t.Fatalf("order = %v", order)
-	}
-	if len(e.mediaLockMap) != 0 {
-		t.Fatal("session lock kept")
-	}
-}
-
 func TestPrepareMediaSkips(t *testing.T) {
 	var runs atomic.Int32
 	withMedia(t, okRun(&runs), nil)
 	e := newMediaEngine("maomao")
 	msg := &Message{Content: "看看 https://b23.tv/I4TDkg4", MessageID: "5000"}
-	e.prepareMedia(msg, "s")
+	e.prepareMedia(msg)
 	before := msg.Content
-	e.prepareMedia(msg, "s") // a held gate burst re-enters handleMessage
+	e.prepareMedia(msg) // a held gate burst re-enters handleMessage
 	if msg.Content != before {
 		t.Fatal("note appended twice")
 	}
 	bot := &Message{Content: "【龙娘】https://b23.tv/I4TDkg4", FromBot: true}
-	e.prepareMedia(bot, "s")
+	e.prepareMedia(bot)
 	if bot.Content != "【龙娘】https://b23.tv/I4TDkg4" {
 		t.Fatal("bot message changed")
 	}
@@ -361,9 +375,9 @@ func TestGateSeesUserTextOnly(t *testing.T) {
 	s := &Session{}
 
 	a := &Message{SessionKey: "discord:c", Content: "看这个 https://b23.tv/I4TDkg4"}
-	e.prepareMedia(a, "k")
+	e.prepareMedia(a)
 	b := &Message{SessionKey: "discord:c", Content: "你们看看"}
-	e.prepareMedia(b, "k")
+	e.prepareMedia(b)
 	// burst: a is held, b folds into it
 	e.gate.held["k"] = &heldMsg{msg: a, timer: time.NewTimer(time.Hour)}
 	if !e.applyGate(nil, b, s, "k") {
@@ -394,55 +408,98 @@ func TestGateSeesUserTextOnly(t *testing.T) {
 	}
 }
 
-// Attachment archiving: at most cap(attachSlots) runs at once; every job ends within
-// attachTimeout of being queued — run to the timeout, or given up while waiting for a slot
-// (logged); failures are only logged.
-func TestArchiveAttachmentsBounded(t *testing.T) {
-	oldEnabled, oldRun, oldTimeout := mediaEnabled, runMediaArchive, attachTimeout
+// Attachment archiving never blocks the caller and holds at most attachQueueLen waiting jobs:
+// one worker, the rest dropped with a log line.
+func TestArchiveAttachmentsQueueBounded(t *testing.T) {
+	oldEnabled, oldRun := mediaEnabled, runMediaArchive
 	t.Cleanup(func() {
-		attachInFlight.Wait() // no archive goroutine may outlive the test's settings
-		mediaEnabled, runMediaArchive, attachTimeout = oldEnabled, oldRun, oldTimeout
+		attachInFlight.Wait() // no job may outlive the test's settings
+		mediaEnabled, runMediaArchive = oldEnabled, oldRun
 	})
 	mediaEnabled = true
-	attachTimeout = 300 * time.Millisecond
-	var cur, peak, calls, timedOut atomic.Int32
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	var runs, cur, peak atomic.Int32
 	runMediaArchive = func(ctx context.Context, paths []string) (string, string, error) {
-		calls.Add(1)
+		runs.Add(1)
 		n := cur.Add(1)
-		for {
-			p := peak.Load()
-			if n <= p || peak.CompareAndSwap(p, n) {
-				break
-			}
+		if n > peak.Load() {
+			peak.Store(n)
 		}
 		defer cur.Add(-1)
-		<-ctx.Done() // hangs until the timeout
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return "", "", nil
+	}
+	if !ArchiveAttachments([]string{"/x/first"}) {
+		t.Fatal("first job not queued")
+	}
+	<-started // the worker holds the first job
+	t0 := time.Now()
+	for i := 0; i < attachQueueLen; i++ {
+		if !ArchiveAttachments([]string{"/x/" + strconv.Itoa(i)}) {
+			t.Fatalf("job %d dropped with room in the queue", i)
+		}
+	}
+	if ArchiveAttachments([]string{"/x/overflow"}) {
+		t.Fatal("job queued beyond attachQueueLen")
+	}
+	if d := time.Since(t0); d > 50*time.Millisecond {
+		t.Fatalf("enqueue blocked for %v", d)
+	}
+	close(release)
+	attachInFlight.Wait()
+	if runs.Load() != int32(attachQueueLen)+1 || peak.Load() != 1 {
+		t.Fatalf("runs=%d peak=%d", runs.Load(), peak.Load())
+	}
+}
+
+// Each job is bounded by attachTimeout.
+func TestArchiveAttachmentsTimeout(t *testing.T) {
+	oldEnabled, oldRun, oldTimeout := mediaEnabled, runMediaArchive, attachTimeout
+	t.Cleanup(func() {
+		attachInFlight.Wait()
+		mediaEnabled, runMediaArchive, attachTimeout = oldEnabled, oldRun, oldTimeout
+	})
+	mediaEnabled, attachTimeout = true, 100*time.Millisecond
+	var timedOut atomic.Int32
+	runMediaArchive = func(ctx context.Context, paths []string) (string, string, error) {
+		<-ctx.Done()
 		timedOut.Add(1)
 		return "", "hung", ctx.Err()
 	}
-	const jobs = 12
 	start := time.Now()
-	for i := 0; i < jobs; i++ {
+	for i := 0; i < 3; i++ {
 		ArchiveAttachments([]string{"/x/" + strconv.Itoa(i)})
 	}
 	attachInFlight.Wait()
-	if d := time.Since(start); d > attachTimeout+500*time.Millisecond {
-		t.Fatalf("jobs took %v, limit %v", d, attachTimeout)
+	if d := time.Since(start); d > 2*time.Second || timedOut.Load() != 3 {
+		t.Fatalf("took %v, timed out %d", d, timedOut.Load())
 	}
-	if p := peak.Load(); p > int32(cap(attachSlots)) || p == 0 {
-		t.Fatalf("peak concurrency = %d, cap %d", p, cap(attachSlots))
+}
+
+// The attachment hold window is the same whether or not a NAS note was appended.
+func TestHoldWindowIgnoresMediaNote(t *testing.T) {
+	var mounted atomic.Bool
+	withMedia(t, func(context.Context, string) (string, string, error) { return "", "", nil }, &mounted)
+	for _, m := range []bool{true, false} {
+		mounted.Store(m)
+		msg := &Message{Images: []ImageAttachment{{MimeType: "image/png"}}}
+		newMediaEngine("a").prepareMedia(msg)
+		if got := holdWindow(msg); got != attachmentHold {
+			t.Fatalf("mounted=%v: window %v, want %v (content %q)", m, got, attachmentHold, msg.Content)
+		}
 	}
-	if c := calls.Load(); c < int32(cap(attachSlots)) || c > jobs {
-		t.Fatalf("runs = %d", c)
-	}
-	if calls.Load() != timedOut.Load() || cur.Load() != 0 {
-		t.Fatal("a run did not end at the timeout")
+	if holdWindow(&Message{Content: "hi", Images: []ImageAttachment{{}}}) != burstWindow {
+		t.Fatal("captioned attachment should use the burst window")
 	}
 }
 
 func TestMediaOffByDefault(t *testing.T) {
 	msg := &Message{Content: "https://b23.tv/I4TDkg4"}
-	newMediaEngine("x").prepareMedia(msg, "s")
+	newMediaEngine("x").prepareMedia(msg)
 	if msg.Content != "https://b23.tv/I4TDkg4" || mediaEnabled {
 		t.Fatal("media library must be off unless EnableMediaLibrary is called")
 	}

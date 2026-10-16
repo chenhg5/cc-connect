@@ -42,9 +42,14 @@ var (
 	// attachTimeout bounds one `mediaarchive attach`. Source: its commit_wiki runs git pull and push
 	// with 180 s each over two routes (proxy, direct) = 720 s worst case, plus the NAS copy: 15 min.
 	attachTimeout = 15 * time.Minute
-	// attachSlots caps concurrent `mediaarchive attach` runs. Source: the four bots each save the same
-	// attachment at once (4 runs per message); mediaarchive serialises on a file lock anyway.
-	attachSlots = make(chan struct{}, 4)
+	// attachQueueLen bounds the attachment jobs waiting for the worker; when full the job is
+	// dropped with a log line and the message goes on. Source: the four bots each save the same
+	// attachment at once (4 jobs per message); room for 4 such messages back to back = 16 (the
+	// "4 messages" is our choice).
+	attachQueueLen = 16
+	// videoKeep is how many per-message video results are kept (FIFO; running ones are never
+	// evicted). Source: same cap as the gate's silent buffer, maxBuffered (30).
+	videoKeep = maxBuffered
 	// mediaNoteKeep caps the remembered per-message notes for channel backfill; same cap as the gate's
 	// silent buffer (maxBuffered), which is what backfill replaces.
 	mediaNoteKeep = maxBuffered
@@ -110,45 +115,55 @@ func EnableMediaLibrary(home string) {
 	slog.Info("media library on", "watchvid", wv, "mediaarchive", ma, "nas", mediaNASRoot)
 }
 
-// ArchiveAttachments archives attachment files an agent session has just saved to disk.
-// Runs in the background with at most cap(attachSlots) runs at once, each bounded by
-// attachTimeout; failures are only logged. A no-op when the media library is off.
-func ArchiveAttachments(paths []string) {
+// ArchiveAttachments queues attachment files an agent session has just saved to disk for
+// `mediaarchive attach`. One worker runs the jobs in order (mediaarchive serialises on a file lock
+// anyway), each bounded by attachTimeout; when attachQueueLen jobs are already waiting the job is
+// dropped and logged. Never blocks; failures are only logged. Returns whether the job was queued.
+func ArchiveAttachments(paths []string) bool {
 	if !mediaEnabled || len(paths) == 0 {
-		return
+		return false
 	}
-	// Read the settings here, not in the goroutine: it outlives this call (and, in tests, the
-	// settings), so it must not touch the package variables afterwards.
-	run, limit := runMediaArchive, attachTimeout
-	paths = append([]string(nil), paths...)
+	attachOnce.Do(func() {
+		attachQueue = make(chan attachJob, attachQueueLen)
+		go attachWorker(attachQueue)
+	})
+	// The settings are read here, not in the worker (which outlives the call and, in tests, the settings).
+	job := attachJob{paths: append([]string(nil), paths...), run: runMediaArchive, limit: attachTimeout}
 	attachInFlight.Add(1)
-	go func() {
-		defer attachInFlight.Done()
-		archiveAttachments(paths, run, limit)
-	}()
+	select {
+	case attachQueue <- job:
+		return true
+	default:
+		attachInFlight.Done()
+		slog.Error("mediaarchive: queue full, attachments not archived", "paths", paths, "queue", attachQueueLen)
+		return false
+	}
 }
 
-// attachInFlight counts running archiveAttachments goroutines (tests wait on it).
-var attachInFlight sync.WaitGroup
+type attachJob struct {
+	paths []string
+	run   func(context.Context, []string) (string, string, error)
+	limit time.Duration
+}
 
-// archiveAttachments waits for a slot and runs mediaarchive; slot wait and run share one limit,
-// so a job ends (archived, failed or given up) within limit of being queued.
-func archiveAttachments(paths []string, run func(context.Context, []string) (string, string, error), limit time.Duration) {
-	ctx, cancel := withLimit(context.Background(), limit)
-	defer cancel()
-	select {
-	case attachSlots <- struct{}{}:
-		defer func() { <-attachSlots }()
-	case <-ctx.Done():
-		slog.Error("mediaarchive: no free slot within the timeout, attachments not archived", "paths", paths)
-		return
+var (
+	attachOnce     sync.Once
+	attachQueue    chan attachJob
+	attachInFlight sync.WaitGroup // queued + running jobs (tests wait on it)
+)
+
+func attachWorker(q <-chan attachJob) {
+	for job := range q {
+		ctx, cancel := withLimit(context.Background(), job.limit)
+		_, stderr, err := job.run(ctx, job.paths)
+		cancel()
+		if err != nil {
+			slog.Error("mediaarchive: attachments not archived", "paths", job.paths, "error", err, "stderr", lastLine(stderr))
+		} else {
+			slog.Info("mediaarchive: attachments archived", "paths", job.paths)
+		}
+		attachInFlight.Done()
 	}
-	_, stderr, err := run(ctx, paths)
-	if err != nil {
-		slog.Error("mediaarchive: attachments not archived", "paths", paths, "error", err, "stderr", lastLine(stderr))
-		return
-	}
-	slog.Info("mediaarchive: attachments archived", "paths", paths)
 }
 
 // ── video links ──────────────────────────────────────────────
@@ -237,50 +252,47 @@ func (r *watchvidRun) finished() bool {
 	}
 }
 
-// msgVideo is the result for one video link in one platform message, shared by every bot that
-// gets that message — failures too, so a dead link is tried once per message, not once per bot.
-// A later message with the same link starts a new run (watchvid itself returns at once when the
-// NAS entry exists), so the note always reflects the NAS state at that time.
-type msgVideo struct {
-	channel, msgID string
-	run            *watchvidRun
-	consumed       map[*Engine]bool // bots that took the result or are past this message
-}
-
 var (
 	videoMu      sync.Mutex
 	videoRunning = map[string]*watchvidRun{} // link key → running watchvid; removed when it ends
-	videoByMsg   = map[string]*msgVideo{}    // msgID|link key → result; removed once every bot is past it
-	mediaEngines = map[*Engine]bool{}        // bots that get user messages (registered in Start, one per project)
+	// videoByMsg: platform|channel|message ID|link key → that message's run (failures too), so
+	// every bot handling the same message shares one result and a dead link is tried once per
+	// message. The next message with the link runs watchvid again (it returns at once when the
+	// NAS entry exists), so each note reflects the NAS state at that time. Kept FIFO, at most
+	// videoKeep finished entries; running entries are never evicted.
+	videoByMsg    = map[string]*watchvidRun{}
+	videoMsgOrder []string
 )
 
 // parseVideo returns the watchvid result for link in msg. Bots handling the same message share one
-// result; concurrent messages with the same link share one running watchvid. Waiting stops at ctx.
+// result; concurrent messages with the same link share one running watchvid. Waiting stops at ctx,
+// and nothing new is started once ctx is done.
 func (e *Engine) parseVideo(ctx context.Context, msg *Message, link videoLink) videoResult {
 	videoMu.Lock()
-	var run *watchvidRun
 	mk := ""
 	if msg.MessageID != "" {
-		mk = msg.MessageID + "|" + link.Key
-		if mv := videoByMsg[mk]; mv != nil {
-			run = mv.run
-			mv.consumed[e] = true
-			slog.Info("watchvid: shared (same message)", "project", e.name, "key", link.Key, "msg_id", msg.MessageID, "finished", run.finished())
-			gcVideoByMsgLocked()
-		}
+		mk = strings.Join([]string{msg.Platform, mediaChannel(msg), msg.MessageID, link.Key}, "|")
 	}
-	if run == nil {
-		if r := videoRunning[link.Key]; r != nil {
-			run = r
+	run := videoByMsg[mk]
+	if run != nil {
+		slog.Info("watchvid: shared (same message)", "project", e.name, "key", link.Key, "msg_id", msg.MessageID, "finished", run.finished())
+	} else {
+		if run = videoRunning[link.Key]; run != nil {
 			slog.Info("watchvid: shared (already running)", "project", e.name, "key", link.Key)
 		} else {
+			if ctx.Err() != nil {
+				videoMu.Unlock()
+				return videoResult{Err: fmt.Sprintf("等待超时（%s），没有开始解析", ctxLimit(ctx))}
+			}
 			run = &watchvidRun{done: make(chan struct{})}
 			videoRunning[link.Key] = run
 			slog.Info("watchvid: start", "project", e.name, "key", link.Key, "url", link.URL, "msg_id", msg.MessageID)
 			go execWatchvid(e.ctx, run, link, runWatchvid, watchvidTimeout) // engine shutdown also kills it
 		}
 		if mk != "" {
-			videoByMsg[mk] = &msgVideo{channel: mediaChannel(msg), msgID: msg.MessageID, run: run, consumed: map[*Engine]bool{e: true}}
+			videoByMsg[mk] = run
+			videoMsgOrder = append(videoMsgOrder, mk)
+			evictVideoByMsgLocked()
 		}
 	}
 	videoMu.Unlock()
@@ -293,7 +305,25 @@ func (e *Engine) parseVideo(ctx context.Context, msg *Message, link videoLink) v
 	}
 }
 
-// execWatchvid gets the runner and limit from its caller (see ArchiveAttachments for why).
+// evictVideoByMsgLocked drops the oldest finished per-message results beyond videoKeep.
+func evictVideoByMsgLocked() {
+	over := len(videoMsgOrder) - videoKeep
+	if over <= 0 {
+		return
+	}
+	kept := videoMsgOrder[:0]
+	for _, k := range videoMsgOrder {
+		if over > 0 && videoByMsg[k].finished() {
+			delete(videoByMsg, k)
+			over--
+			continue
+		}
+		kept = append(kept, k)
+	}
+	videoMsgOrder = kept
+}
+
+// execWatchvid gets the runner and limit from its caller (read before the goroutine starts).
 func execWatchvid(parent context.Context, run *watchvidRun, link videoLink,
 	runner func(context.Context, string) (string, string, error), limit time.Duration) {
 	ctx, cancel := withLimit(parent, limit)
@@ -320,7 +350,7 @@ func execWatchvid(parent context.Context, run *watchvidRun, link videoLink,
 	if videoRunning[link.Key] == run {
 		delete(videoRunning, link.Key)
 	}
-	gcVideoByMsgLocked()
+	evictVideoByMsgLocked()
 	videoMu.Unlock()
 }
 
@@ -329,46 +359,6 @@ func mediaChannel(msg *Message) string {
 		return msg.ChannelID
 	}
 	return msg.SessionKey
-}
-
-// registerMediaEngine counts e among the bots a per-message result is kept for (Engine.Start).
-func registerMediaEngine(e *Engine) {
-	videoMu.Lock()
-	mediaEngines[e] = true
-	videoMu.Unlock()
-}
-
-// videoPassed records that bot e is handling msg: per-message results of earlier messages in the
-// same channel are no longer needed by e. Finished results every bot is past are dropped.
-func (e *Engine) videoPassed(msg *Message) {
-	videoMu.Lock()
-	defer videoMu.Unlock()
-	mediaEngines[e] = true
-	ch := mediaChannel(msg)
-	for _, mv := range videoByMsg {
-		if mv.channel == ch && msg.MessageID != "" && snowflakeAfter(msg.MessageID, mv.msgID) {
-			mv.consumed[e] = true
-		}
-	}
-	gcVideoByMsgLocked()
-}
-
-func gcVideoByMsgLocked() {
-	for k, mv := range videoByMsg {
-		if !mv.run.finished() {
-			continue
-		}
-		all := true
-		for eng := range mediaEngines {
-			if !mv.consumed[eng] {
-				all = false
-				break
-			}
-		}
-		if all {
-			delete(videoByMsg, k)
-		}
-	}
 }
 
 const nasMissingNote = "NAS 没挂，这条没存"
@@ -387,83 +377,36 @@ func videoNote(link videoLink, r videoResult) string {
 		link.URL, r.Index, dir, filepath.Base(dir))
 }
 
-// ── per-session ordering ─────────────────────────────────────
-
-type mediaLockEntry struct {
-	ch   chan struct{} // holds one token while a message of this session is being prepared
-	refs int
-}
-
-// acquireMediaLock serialises media preparation per session, so a message sent right after a
-// video link (「你们看看」) does not overtake it while watchvid runs. The entry is removed when
-// nobody holds or waits for it. ok=false: ctx ended while waiting.
-func (e *Engine) acquireMediaLock(ctx context.Context, key string) (release func(), ok bool) {
-	e.mediaLockMu.Lock()
-	if e.mediaLockMap == nil {
-		e.mediaLockMap = map[string]*mediaLockEntry{}
-	}
-	ent := e.mediaLockMap[key]
-	if ent == nil {
-		ent = &mediaLockEntry{ch: make(chan struct{}, 1)}
-		e.mediaLockMap[key] = ent
-	}
-	ent.refs++
-	e.mediaLockMu.Unlock()
-
-	drop := func() {
-		e.mediaLockMu.Lock()
-		ent.refs--
-		if ent.refs == 0 {
-			delete(e.mediaLockMap, key)
-		}
-		e.mediaLockMu.Unlock()
-	}
-	select {
-	case ent.ch <- struct{}{}:
-		return func() { <-ent.ch; drop() }, true
-	case <-ctx.Done():
-		drop()
-		return nil, false
-	}
-}
-
 // ── message ──────────────────────────────────────────────────
 
-// beginMedia parses the video links in a user message (one watchvid result per message and
+// prepareMedia parses the video links in a user message (one watchvid result per message and
 // link, shared by all bots) and appends the result paths; it also notes when attachments can't be
-// archived. Blocks while watchvid runs, at most watchvidTimeout.
-//
-// Ordering: a message waits here while an earlier message of the same session is prepared. A
-// message with video links keeps the session's turn until the caller calls the returned release
-// after the gate has taken it — otherwise a follow-up (「你们看看」) released at the same moment
-// could reach the gate first and the burst would read in the wrong order. Messages without links
-// release at once, so they add no wait for anyone.
-func (e *Engine) beginMedia(msg *Message, key string) (release func()) {
-	release = func() {}
+// archived. Only messages with links wait (at most watchvidTimeout); others touch no shared
+// state and add no wait. No ordering between messages: a follow-up may reach the gate first.
+func (e *Engine) prepareMedia(msg *Message) {
 	if !mediaEnabled || msg.FromBot || msg.mediaDone {
 		return
 	}
 	msg.mediaDone = true
-	e.videoPassed(msg)
 	links := findVideoLinks(msg.Content)
-
-	ctx, cancel := withLimit(e.ctx, watchvidTimeout)
-	defer cancel()
-	if rel, ok := e.acquireMediaLock(ctx, key); ok {
-		if len(links) > 0 {
-			release = rel
-		} else {
-			defer rel()
-		}
-	} else {
-		slog.Warn("media: gave up waiting for the previous video message in this session", "project", e.name, "session", msg.SessionKey)
-	}
-
 	var notes []string
-	for _, l := range links {
-		r := e.parseVideo(ctx, msg, l)
-		notes = append(notes, videoNote(l, r))
-		slog.Info("media: video note added", "project", e.name, "session", msg.SessionKey, "key", l.Key, "index", r.Index, "error", r.Err)
+	if len(links) > 0 {
+		ctx, cancel := withLimit(e.ctx, watchvidTimeout)
+		defer cancel()
+		for i, l := range links {
+			if ctx.Err() != nil {
+				var rest []string
+				for _, r := range links[i:] {
+					rest = append(rest, r.URL)
+				}
+				notes = append(notes, fmt.Sprintf("（解析超时（%s），这些链接没有解析：%s）", ctxLimit(ctx), strings.Join(rest, " ")))
+				slog.Warn("media: timeout, links left unparsed", "project", e.name, "session", msg.SessionKey, "count", len(rest))
+				break
+			}
+			r := e.parseVideo(ctx, msg, l)
+			notes = append(notes, videoNote(l, r))
+			slog.Info("media: video note added", "project", e.name, "session", msg.SessionKey, "key", l.Key, "index", r.Index, "error", r.Err)
+		}
 	}
 	if (len(msg.Images) > 0 || len(msg.Files) > 0) && !mediaNASMounted() {
 		notes = append(notes, "（"+nasMissingNote+"：这条消息的附件没存进媒体库。）")
@@ -476,7 +419,6 @@ func (e *Engine) beginMedia(msg *Message, key string) (release func()) {
 	msg.userText, msg.userTextSet = msg.Content, true
 	msg.Content += "\n\n" + note
 	e.rememberMediaNote(msg.MessageID, note)
-	return
 }
 
 // userTextOf is what the user wrote, without media notes — the gate's input.

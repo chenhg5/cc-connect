@@ -416,10 +416,8 @@ type Engine struct {
 	baseWorkDir                  string
 	projectState                 *ProjectStateStore
 
-	// maomao fork: media library (media.go) — per-session ordering locks, removed when unused,
-	// and the notes of recent video messages for channel backfill (capped at mediaNoteKeep).
-	mediaLockMu  sync.Mutex
-	mediaLockMap map[string]*mediaLockEntry
+	// maomao fork: media library (media.go) — notes of recent video messages for channel
+	// backfill (capped at mediaNoteKeep).
 	mediaNoteMu  sync.Mutex
 	mediaNotes   map[string]string
 	mediaNoteIDs []string
@@ -2345,9 +2343,6 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 }
 
 func (e *Engine) Start() error {
-	if mediaEnabled {
-		registerMediaEngine(e) // maomao fork: media library, see media.go
-	}
 	var startErrs []error
 	readyCount := 0
 	pendingCount := 0
@@ -3069,14 +3064,11 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	// maomao fork: video links → watchvid once, result paths appended (media library).
-	// Released once the gate has taken the message, so a follow-up can't overtake it.
-	releaseMedia := e.beginMedia(msg, interactiveKey)
+	e.prepareMedia(msg)
 
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	sessions.UpdateUserMeta(msg.SessionKey, msg.UserName, msg.ChatName)
-	gated := e.applyGate(p, msg, session, interactiveKey)
-	releaseMedia()
-	if gated {
+	if e.applyGate(p, msg, session, interactiveKey) {
 		return
 	}
 	// Ensure an interactiveState entry exists before taking the session lock.

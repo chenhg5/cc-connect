@@ -52,6 +52,15 @@ const (
 	attachmentHold = 3 * time.Second
 )
 
+// holdWindow is how long an idle message is held for its burst: longer for attachments without
+// text. Judged on what the user wrote, so a media note (e.g. NAS not mounted) doesn't shorten it.
+func holdWindow(msg *Message) time.Duration {
+	if strings.TrimSpace(userTextOf(msg)) == "" && (len(msg.Images) > 0 || len(msg.Files) > 0) {
+		return attachmentHold
+	}
+	return burstWindow
+}
+
 type heldMsg struct {
 	msg   *Message
 	timer *time.Timer
@@ -189,10 +198,7 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		g.mu.Unlock()
 		return true
 	} else if !busy {
-		window := burstWindow
-		if strings.TrimSpace(msg.Content) == "" && (len(msg.Images) > 0 || len(msg.Files) > 0) {
-			window = attachmentHold
-		}
+		window := holdWindow(msg)
 		h := &heldMsg{msg: msg}
 		h.timer = time.AfterFunc(window, func() {
 			g.mu.Lock()
