@@ -62,8 +62,12 @@ var codexSessionCloseTimeout = 8 * time.Second
 var codexSessionForceKillWait = 2 * time.Second
 var codexRuntimeConfigCacheTTL = 5 * time.Second
 var codexRuntimeConfigTimeout = 1500 * time.Millisecond
-var codexContextUsageRetryDelay = 50 * time.Millisecond
-var codexContextUsageRetryCount = 4
+// Codex persists its rollout JSONL asynchronously.  In practice the final
+// `turn.completed` event can arrive before the trailing token_count has been
+// flushed to disk, so keep polling for a short bounded window before building
+// the final reply footer.  The common path returns on the first read.
+var codexContextUsageRetryDelay = 100 * time.Millisecond
+var codexContextUsageRetryCount = 20
 
 func buildCodexPromptPreamble(systemPrompt string, appendPrompt string) string {
 	var sections []string

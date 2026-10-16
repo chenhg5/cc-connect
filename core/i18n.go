@@ -332,6 +332,9 @@ const (
 
 	MsgStatusTitle           MsgKey = "status_title"
 	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
+	MsgRichStatusEffort      MsgKey = "rich_status_effort"
+	MsgRichStatusElapsed     MsgKey = "rich_status_elapsed"
+	MsgRichStatusContext     MsgKey = "rich_status_context"
 	MsgModelCurrent          MsgKey = "model_current"
 	MsgModelChanged          MsgKey = "model_changed"
 	MsgModelChangeFailed     MsgKey = "model_change_failed"
@@ -2253,6 +2256,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "剩餘 %d%%",
 		LangJapanese:           "残り %d%%",
 		LangSpanish:            "%d%% restante",
+	},
+	MsgRichStatusEffort: {
+		LangEnglish:            "💪 Effort %s",
+		LangChinese:            "💪 强度 %s",
+		LangTraditionalChinese: "💪 強度 %s",
+		LangJapanese:           "💪 強度 %s",
+		LangSpanish:            "💪 Intensidad %s",
+	},
+	MsgRichStatusElapsed: {
+		LangEnglish:            "⌛ Elapsed %s",
+		LangChinese:            "⌛ 耗时 %s",
+		LangTraditionalChinese: "⌛ 耗時 %s",
+		LangJapanese:           "⌛ 経過 %s",
+		LangSpanish:            "⌛ Duración %s",
+	},
+	MsgRichStatusContext: {
+		LangEnglish:            "📝 Context %s/%s · %s (%d%%)",
+		LangChinese:            "📝 上下文 %s/%s · %s (%d%%)",
+		LangTraditionalChinese: "📝 上下文 %s/%s · %s (%d%%)",
+		LangJapanese:           "📝 コンテキスト %s/%s · %s (%d%%)",
+		LangSpanish:            "📝 Contexto %s/%s · %s (%d%%)",
 	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",
