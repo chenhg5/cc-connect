@@ -160,3 +160,12 @@ credentials/
 
 .codex
 cc-connect-new
+
+
+# APM dependencies
+apm_modules/
+.opencode/
+openspec/
+.agents/
+apm.yml
+apm.lock.yaml

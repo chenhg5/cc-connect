@@ -1922,7 +1922,7 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Requires: OpenCode CLI — https://github.com/opencode-ai/opencode
+# Requires: OpenCode CLI — https://opencode.ai/download
 # 需要安装：OpenCode CLI
 # Uses `opencode run --format json` under the hood.
 # 底层使用 `opencode run --format json` 命令。
@@ -1939,10 +1939,18 @@ app_secret = "your-feishu-app-secret"
 #
 # Mode options / 模式说明:
 # - "default": Standard mode / 标准模式
-# - "yolo":    Auto-approve all tool calls / 自动批准所有工具调用
+# - "yolo":    Auto-approve all tool calls (--auto) / 自动批准所有工具调用
 #
 # Optional: pass --agent to opencode (for plugin-defined agents) / 可选：传递 --agent 给 opencode（适用于插件定义的 agent）
 # agent = "Sisyphus - Ultraworker"
+#
+# Runtime agent switching / 运行时切换 agent:
+# The `/agent` command in chat views and switches the agent at runtime and
+# persists the selection here. Only primary/all-mode agents can be switched
+# to; subagents and internal agents (compaction/title/summary) are rejected.
+# 聊天中可用 `/agent` 命令运行时查看/切换 agent，切换结果会持久化到此配置。
+# 仅 primary/all 模式的 agent 可切换；subagent 与内部 agent
+# (compaction/title/summary) 会被拒绝。
 #
 # Optional: specify a model (provider/model format) / 可选：指定模型
 # model = "anthropic/claude-sonnet-4-20250514"
