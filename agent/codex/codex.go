@@ -39,6 +39,8 @@ type Agent struct {
 	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
 	backend         string // "exec" | "app_server"
 	appServerURL    string
+	desktopHelper   []string
+	desktopStateDir string
 	codexHome       string
 	systemPrompt    string
 	appendPrompt    string
@@ -68,6 +70,16 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
 
+	helper, helperArgs := core.ParseCmdOpts(map[string]any{"cmd": opts["desktop_helper"]}, "")
+	desktopStateDir, _ := opts["desktop_state_dir"].(string)
+	if desktopStateDir != "" && !filepath.IsAbs(desktopStateDir) {
+		return nil, fmt.Errorf("desktop_state_dir must be absolute")
+	}
+	var desktopHelper []string
+	if helper != "" {
+		desktopHelper = append([]string{helper}, helperArgs...)
+	}
+
 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "")
 
 	if cmd == "" {
@@ -95,6 +107,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
+		desktopHelper:   desktopHelper,
+		desktopStateDir: desktopStateDir,
 		workDir:         workDir,
 		model:           model,
 		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
@@ -599,6 +613,12 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome
+	}
+	if len(a.desktopHelper) > 0 {
+		opts["desktop_helper"] = append([]string(nil), a.desktopHelper...)
+	}
+	if a.desktopStateDir != "" {
+		opts["desktop_state_dir"] = a.desktopStateDir
 	}
 	return opts
 }
