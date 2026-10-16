@@ -186,9 +186,11 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		return fmt.Errorf("acp: parse initialize result: %w", err)
 	}
 	listSupported := len(initOut.AgentCapabilities.SessionCapabilities.List) > 0
+	resumeSupported := len(initOut.AgentCapabilities.SessionCapabilities.Resume) > 0
 	slog.Debug("acp: initialized",
 		"protocol", initOut.ProtocolVersion,
 		"load_session", initOut.AgentCapabilities.LoadSession,
+		"resume_session", resumeSupported,
 		"list_sessions", listSupported,
 	)
 	if s.callbacks != nil {
@@ -204,24 +206,51 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		slog.Debug("acp: authenticated", "method_id", authMethod)
 	}
 
-	wantResume := resumeSessionID != "" && resumeSessionID != core.ContinueSession
-	if wantResume && initOut.AgentCapabilities.LoadSession {
-		loadParams := map[string]any{
-			"sessionId":  resumeSessionID,
-			"cwd":        s.workDir,
-			"mcpServers": []any{},
+	// Resume the persisted session when the identifier is a real one and
+	// the server advertises a way to do it. ACP offers two optional
+	// capabilities: `session/load` (loadSession) and `session/resume`
+	// (sessionCapabilities.resume). Servers are free to implement only
+	// the latter, so prefer the newer `session/resume` and fall back to
+	// `session/load`; a server advertising neither is simply started
+	// fresh. Resuming by a new session id would silently drop the
+	// conversation, so this must not degrade to `session/new` while a
+	// resume capability is still on the table.
+	if resumeSessionID != "" && resumeSessionID != core.ContinueSession {
+		var resumeMethod string
+		switch {
+		case resumeSupported:
+			resumeMethod = "session/resume"
+		case initOut.AgentCapabilities.LoadSession:
+			resumeMethod = "session/load"
 		}
-		loadRes, err := s.tr.call(s.ctx, "session/load", loadParams)
-		if err != nil {
-			slog.Warn("acp: session/load failed, starting new session", "error", err)
-		} else {
-			var lr struct {
-				SessionID string         `json:"sessionId"`
-				Modes     *acpModesBlock `json:"modes"`
-			}
-			if json.Unmarshal(loadRes, &lr) == nil && lr.SessionID != "" {
-				s.setACPSessionID(lr.SessionID)
-				s.absorbModes(lr.Modes)
+		if resumeMethod != "" {
+			resumeRes, err := s.tr.call(s.ctx, resumeMethod, map[string]any{
+				"sessionId":  resumeSessionID,
+				"cwd":        s.workDir,
+				"mcpServers": []any{},
+			})
+			if err != nil {
+				slog.Warn("acp: session resume failed, starting new session",
+					"method", resumeMethod, "error", err)
+			} else {
+				var rr struct {
+					SessionID string         `json:"sessionId"`
+					Modes     *acpModesBlock `json:"modes"`
+				}
+				_ = json.Unmarshal(resumeRes, &rr)
+				// A successful resume acknowledges the id we asked for.
+				// Servers may echo it back, but some (e.g. servers that
+				// only return configOptions) omit it - adopting the
+				// requested id is the correct reading either way. Without
+				// this, a server that returns no sessionId would never be
+				// resumed and the conversation would be silently replaced
+				// by a fresh session.
+				resumedID := rr.SessionID
+				if resumedID == "" {
+					resumedID = resumeSessionID
+				}
+				s.setACPSessionID(resumedID)
+				s.absorbModes(rr.Modes)
 				return nil
 			}
 		}
