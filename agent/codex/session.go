@@ -24,26 +24,29 @@ import (
 // codexSession manages a multi-turn Codex conversation.
 // First Send() uses `codex exec`, subsequent ones use `codex exec resume <threadID>`.
 type codexSession struct {
-	workDir        string
-	model          string
-	effort         string
-	mode           string
-	baseURL        string   // provider base URL; passed as -c openai_base_url=<url>
-	modelProvider  string   // Codex model_provider name; passed as -c model_provider=<name>
-	cmd            string   // CLI binary, default "codex"
-	cliExtraArgs   []string // extra args from cmd, prepended before exec args
-	extraEnv       []string
-	promptPreamble string
-	events         chan core.Event
-	threadID       atomic.Value // stores string — Codex thread_id
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
-	alive          atomic.Bool
-	turnInFlight   atomic.Bool
-	closeOnce      sync.Once
-	cmdMu          sync.Mutex
-	cmds           map[*exec.Cmd]struct{}
+	workDir                string
+	model                  string
+	effort                 string
+	mode                   string
+	baseURL                string   // provider base URL; passed as -c openai_base_url=<url>
+	modelProvider          string   // Codex model_provider name; passed as -c model_provider=<name>
+	cmd                    string   // CLI binary, default "codex"
+	cliExtraArgs           []string // extra args from cmd, prepended before exec args
+	extraEnv               []string
+	promptPreamble         string
+	goalAutoContinue       bool
+	goalContinuationPrompt string
+	goalContinuationLimit  int
+	events                 chan core.Event
+	threadID               atomic.Value // stores string — Codex thread_id
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	wg                     sync.WaitGroup
+	alive                  atomic.Bool
+	turnInFlight           atomic.Bool
+	closeOnce              sync.Once
+	cmdMu                  sync.Mutex
+	cmds                   map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
 
@@ -56,6 +59,8 @@ type codexSession struct {
 	contextMu    sync.RWMutex
 	contextUsage *core.ContextUsage
 	sessionFile  string
+	goalStatus   string
+	goalKnown    bool
 }
 
 var codexSessionCloseTimeout = 8 * time.Second
@@ -88,24 +93,39 @@ func prependCodexPromptPreamble(prompt string, preamble string) string {
 	return "Before answering, follow these project-level instructions for this cc-connect session. They are not user content.\n\n" + preamble + "\n\n---\n\nUser message:\n" + prompt
 }
 
-func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string, systemPrompt string, appendPrompt string) (*codexSession, error) {
+func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string, systemPrompt string, appendPrompt string, goalOpts ...goalContinuationOptions) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
+	goalAutoContinue := false
+	goalContinuationPrompt := "Continue toward the active goal and stop when it is complete."
+	// Zero means unlimited; a positive value enables an explicit safety cap.
+	goalContinuationLimit := 0
+	if len(goalOpts) > 0 {
+		opt := goalOpts[0]
+		goalAutoContinue = opt.Enabled
+		if prompt := strings.TrimSpace(opt.Prompt); prompt != "" {
+			goalContinuationPrompt = prompt
+		}
+		goalContinuationLimit = opt.Limit
+	}
 
 	cs := &codexSession{
-		workDir:        workDir,
-		model:          model,
-		effort:         effort,
-		mode:           mode,
-		baseURL:        baseURL,
-		modelProvider:  modelProvider,
-		cmd:            cliBin,
-		cliExtraArgs:   cliExtraArgs,
-		extraEnv:       extraEnv,
-		promptPreamble: buildCodexPromptPreamble(systemPrompt, appendPrompt),
-		events:         make(chan core.Event, 64),
-		ctx:            sessionCtx,
-		cancel:         cancel,
-		cmds:           make(map[*exec.Cmd]struct{}),
+		workDir:                workDir,
+		model:                  model,
+		effort:                 effort,
+		mode:                   mode,
+		baseURL:                baseURL,
+		modelProvider:          modelProvider,
+		cmd:                    cliBin,
+		cliExtraArgs:           cliExtraArgs,
+		extraEnv:               extraEnv,
+		promptPreamble:         buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		goalAutoContinue:       goalAutoContinue,
+		goalContinuationPrompt: goalContinuationPrompt,
+		goalContinuationLimit:  goalContinuationLimit,
+		events:                 make(chan core.Event, 64),
+		ctx:                    sessionCtx,
+		cancel:                 cancel,
+		cmds:                   make(map[*exec.Cmd]struct{}),
 	}
 	cs.alive.Store(true)
 
@@ -322,8 +342,10 @@ func codexImageExt(mime string) string {
 func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer cs.wg.Done()
 	defer func() {
-		defer cs.turnInFlight.Store(false)
 		defer cs.removeCmd(cmd)
+		if !cs.goalAutoContinue {
+			defer cs.turnInFlight.Store(false)
+		}
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
@@ -427,7 +449,13 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		cs.handleItemCompleted(raw)
 
 	case "turn.completed":
+		if cs.goalAutoContinue {
+			cs.turnInFlight.Store(false)
+		}
 		cs.refreshContextUsageFromRollout()
+		if cs.goalAutoContinue {
+			cs.refreshGoalStatusFromRollout()
+		}
 		cs.flushPendingAsText()
 		evt := core.Event{Type: core.EventResult, SessionID: cs.CurrentSessionID(), Done: true}
 		select {
@@ -437,6 +465,9 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		}
 
 	case "turn.failed":
+		if cs.goalAutoContinue {
+			cs.turnInFlight.Store(false)
+		}
 		errMsg := ""
 		if errObj, ok := raw["error"].(map[string]any); ok {
 			errMsg, _ = errObj["message"].(string)

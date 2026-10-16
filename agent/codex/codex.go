@@ -33,22 +33,25 @@ func init() {
 //   - "full-auto": --sandbox workspace-write + approval_policy=never
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
-	workDir         string
-	model           string
-	reasoningEffort string
-	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
-	backend         string // "exec" | "app_server"
-	appServerURL    string
-	codexHome       string
-	systemPrompt    string
-	appendPrompt    string
-	cmd             string   // explicit CLI command; empty enables discovery
-	cliExtraArgs    []string // extra args parsed from cmd after the binary
-	providers       []core.ProviderConfig
-	activeIdx       int      // -1 = no provider set
-	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	sessionEnv      []string
-	mu              sync.RWMutex
+	workDir                string
+	model                  string
+	reasoningEffort        string
+	mode                   string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	backend                string // "exec" | "app_server"
+	appServerURL           string
+	codexHome              string
+	systemPrompt           string
+	appendPrompt           string
+	goalAutoContinue       bool
+	goalContinuationPrompt string
+	goalContinuationLimit  int
+	cmd                    string   // explicit CLI command; empty enables discovery
+	cliExtraArgs           []string // extra args parsed from cmd after the binary
+	providers              []core.ProviderConfig
+	activeIdx              int      // -1 = no provider set
+	configEnv              []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	sessionEnv             []string
+	mu                     sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -64,6 +67,16 @@ func New(opts map[string]any) (core.Agent, error) {
 	codexHome, _ := opts["codex_home"].(string)
 	systemPrompt, _ := opts["system_prompt"].(string)
 	appendPrompt, _ := opts["append_system_prompt"].(string)
+	goalAutoContinue, _ := opts["goal_auto_continue"].(bool)
+	goalContinuationPrompt, _ := opts["goal_continuation_prompt"].(string)
+	// Zero means unlimited; a positive value enables an explicit safety cap.
+	goalContinuationLimit, err := parseGoalContinuationLimit(opts["goal_max_continuations"])
+	if err != nil {
+		return nil, err
+	}
+	if goalAutoContinue && goalContinuationLimit == 0 {
+		slog.Warn("codex goal: unlimited automatic continuation enabled; set goal_max_continuations to a positive value to cap turns")
+	}
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
@@ -95,20 +108,48 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:         workDir,
-		model:           model,
-		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
-		mode:            mode,
-		backend:         backend,
-		appServerURL:    appServerURL,
-		codexHome:       strings.TrimSpace(codexHome),
-		systemPrompt:    strings.TrimSpace(systemPrompt),
-		appendPrompt:    strings.TrimSpace(appendPrompt),
-		cmd:             cmd,
-		cliExtraArgs:    cliExtraArgs,
-		configEnv:       configEnv,
-		activeIdx:       -1,
+		workDir:                workDir,
+		model:                  model,
+		reasoningEffort:        normalizeReasoningEffort(reasoningEffort),
+		mode:                   mode,
+		backend:                backend,
+		appServerURL:           appServerURL,
+		codexHome:              strings.TrimSpace(codexHome),
+		systemPrompt:           strings.TrimSpace(systemPrompt),
+		appendPrompt:           strings.TrimSpace(appendPrompt),
+		goalAutoContinue:       goalAutoContinue,
+		goalContinuationPrompt: strings.TrimSpace(goalContinuationPrompt),
+		goalContinuationLimit:  goalContinuationLimit,
+		cmd:                    cmd,
+		cliExtraArgs:           cliExtraArgs,
+		configEnv:              configEnv,
+		activeIdx:              -1,
 	}, nil
+}
+
+func parseGoalContinuationLimit(value any) (int, error) {
+	var n int
+	switch v := value.(type) {
+	case nil:
+		return 0, nil
+	case int:
+		n = v
+	case int64:
+		n = int(v)
+	case uint64:
+		n = int(v)
+	case float64:
+		n = int(v)
+		if float64(n) != v {
+			return 0, fmt.Errorf("codex: goal_max_continuations must be a non-negative integer")
+		}
+	default:
+		return 0, fmt.Errorf("codex: goal_max_continuations must be a non-negative integer")
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("codex: goal_max_continuations must be a non-negative integer")
+	}
+	return n, nil
 }
 
 func normalizeBackend(raw string) string {
@@ -496,6 +537,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	codexHome := a.codexHome
 	systemPrompt := a.systemPrompt
 	appendPrompt := a.appendPrompt
+	goalAutoContinue, goalPrompt, goalLimit := a.goalAutoContinue, a.goalContinuationPrompt, a.goalContinuationLimit
 	cliBin := a.cmd
 	cliExtraArgs := a.cliExtraArgs
 	workDir := a.workDir
@@ -532,7 +574,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
 	}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
+	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt, goalContinuationOptions{Enabled: goalAutoContinue, Prompt: goalPrompt, Limit: goalLimit})
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -599,6 +641,15 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome
+	}
+	if a.goalAutoContinue {
+		opts["goal_auto_continue"] = true
+	}
+	if a.goalContinuationPrompt != "" {
+		opts["goal_continuation_prompt"] = a.goalContinuationPrompt
+	}
+	if a.goalContinuationLimit > 0 {
+		opts["goal_max_continuations"] = a.goalContinuationLimit
 	}
 	return opts
 }

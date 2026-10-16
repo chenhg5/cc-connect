@@ -155,3 +155,26 @@ func TestIsCodexChatModel(t *testing.T) {
 		})
 	}
 }
+
+func TestGoalContinuationOptionsRoundTrip(t *testing.T) {
+	original := &Agent{goalAutoContinue: true, goalContinuationPrompt: "carry on", goalContinuationLimit: 7, cmd: "true"}
+	a, err := New(original.WorkspaceAgentOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := a.(*Agent)
+	if !got.goalAutoContinue || got.goalContinuationPrompt != "carry on" || got.goalContinuationLimit != 7 {
+		t.Fatal("workspace snapshot lost goal options")
+	}
+	for _, value := range []any{nil, 0, int64(0)} {
+		n, err := parseGoalContinuationLimit(value)
+		if err != nil || n != 0 {
+			t.Fatal("zero/unset should be unlimited")
+		}
+	}
+	for _, value := range []any{-1, "3", 1.5} {
+		if _, err := parseGoalContinuationLimit(value); err == nil {
+			t.Fatalf("accepted invalid cap %v", value)
+		}
+	}
+}

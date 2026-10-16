@@ -519,6 +519,16 @@ type UsageSourceReporter interface {
 	GetUsageSource() string
 }
 
+// GoalContinuationProvider is an optional capability for sessions that can
+// observe a persisted goal and request an internal continuation.
+// Unknown status must be reported as known=false. A zero limit is unlimited.
+type GoalContinuationProvider interface {
+	GoalContinuationEnabled() bool
+	GoalStatus() (status string, known bool)
+	GoalContinuationPrompt() string
+	GoalContinuationLimit() int
+}
+
 // ContextUsage describes runtime context consumption for the active session.
 type ContextUsage struct {
 	// UsedTokens is the current token load to compare against ContextWindow when

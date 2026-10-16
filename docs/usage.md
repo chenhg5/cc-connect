@@ -93,6 +93,23 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Full Auto | `full-auto` | Auto-approve with sandbox |
 | YOLO | `yolo` | Bypass all approvals and sandbox |
 
+### Experimental Codex Goal continuation
+
+For `type = "codex"` with the default `exec` backend, enable automatic continuation of an existing native Codex Goal:
+
+```toml
+[projects.agent.options]
+goal_auto_continue = true
+# Optional: omit or use 0 for unlimited continuations per user turn.
+goal_max_continuations = 3
+# Optional internal prompt (Codex exec rejects empty stdin).
+goal_continuation_prompt = "Continue toward the active goal and stop when it is complete."
+```
+
+After a successful turn, cc-connect reads the latest recognized Goal snapshot from the Codex rollout. Only `active` starts another turn. Queued user messages take priority; internal continuation prompts do not appear in cc-connect user history. `/stop`, failed turns, terminal statuses, and unreadable state stop continuation.
+
+This experimental option uses version-sensitive rollout records, including native Goal events and serialized Goal tool-result snapshots. A snapshot can lag a Goal changed in another client; changes absent from the rollout cannot be detected. It creates no Goals and adds no `/goal` chat command. It applies only to the exec backend; app-server continuation is owned by Codex. Unlimited continuation can consume tokens until the observed status changes, so configure a positive cap when desired.
+
 ### Codex CLI discovery on macOS
 
 The Codex adapter resolves its executable in this order:
