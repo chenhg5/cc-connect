@@ -4989,6 +4989,12 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 	var textParts []string
 	var toolsUsed []string
+	// Per-turn record of background permission denials. A single background turn
+	// can emit many requests (a blocked agent retries every tool call), so
+	// warning once per request floods the chat: the first denial of a turn sends
+	// the prompt and the rest are counted, then reported once when the turn ends.
+	var deniedTools []string
+	var deniedWarned bool
 
 	for {
 		select {
@@ -5006,6 +5012,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					slog.Warn("unsolicited reader: agent channel closed mid-turn",
 						"session", sessionKey,
 						"tools_used", toolsUsed,
+						"perm_denied", len(deniedTools),
 						"text_fragments", len(textParts))
 				}
 				state.mu.Lock()
@@ -5079,8 +5086,24 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					fullResponse = strings.Join(textParts, "")
 				}
 
-				if fullResponse != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
+				// Report the turn's denial total ahead of the response, so the
+				// scale of what was blocked reads as context for the account
+				// that follows instead of as a trailing footnote. The first
+				// denial already sent its own prompt mid-turn; skip the summary
+				// there, since it would only repeat it.
+				if len(deniedTools) > 1 {
+					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDeniedSum),
+						len(deniedTools), summarizeDeniedTools(deniedTools)))
+				}
+				deniedCount := len(deniedTools)
+
+				// Honour the agent's silent-reply marker here too. The foreground
+				// turn path strips NO_REPLY before delivering; this background path
+				// relayed the raw response instead, so a turn that resolved to a bare
+				// marker reached the chat as a literal "NO_REPLY" message.
+				relayText := unsolicitedRelayText(fullResponse, textParts)
+				if relayText != "" {
+					for _, chunk := range SplitMessageCodeFenceAware(relayText, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
 				}
@@ -5099,6 +5122,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				textParts = nil
 				toolsUsed = nil
 				turnActive = false
+				deniedTools = nil
+				deniedWarned = false
 				if workspaceDir != "" && e.workspacePool != nil {
 					if ws := e.workspacePool.Get(workspaceDir); ws != nil {
 						ws.EndTurn()
@@ -5120,10 +5145,12 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 				slog.Info("unsolicited turn complete",
 					"session", sessionKey,
-					"response_len", len(fullResponse))
+					"response_len", len(fullResponse),
+					"silent", fullResponse != "" && relayText == "",
+					"perm_denied", deniedCount)
 
 			case EventPermissionRequest:
-				// If approveAll (/yolo) is set, grant the request. Otherwise
+				// If approveAll (/mode yolo) is set, grant the request. Otherwise
 				// deny — there is no active user turn to consult — and notify
 				// the user on the platform so a silently blocked background
 				// task is not invisible. RespondPermission may make a slow
@@ -5139,6 +5166,10 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
 				}
 				reqID := event.RequestID
+				toolName := event.ToolName
+				if toolName == "" {
+					toolName = "(unknown)"
+				}
 				respondCtx := ctx // capture current unsolicited reader context
 				go func() {
 					// Run in a goroutine to keep reader iterations fast, but honour
@@ -5155,12 +5186,27 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 						}
 					}
 				}()
-				if !autoApprove {
-					toolName := event.ToolName
-					if toolName == "" {
-						toolName = "(unknown)"
+
+				// Log every decision on this path. Both branches are authorization
+				// outcomes that the log used to omit entirely, which left a blocked
+				// background task with no trace at all.
+				if autoApprove {
+					slog.Info("unsolicited: permission auto-approved",
+						"session", sessionKey,
+						"request_id", reqID,
+						"tool", toolName)
+				} else {
+					deniedTools = append(deniedTools, toolName)
+					slog.Warn("unsolicited: permission auto-denied",
+						"session", sessionKey,
+						"request_id", reqID,
+						"tool", toolName,
+						"reason", "no active user turn",
+						"turn_denials", len(deniedTools))
+					if !deniedWarned {
+						deniedWarned = true
+						e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
 					}
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
 				}
 
 			case EventError:
@@ -5175,6 +5221,29 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			}
 		}
 	}
+}
+
+// summarizeDeniedTools renders the tool names denied during one background turn
+// as a compact breakdown ("Bash×14, Read×1"), preserving first-seen order so the
+// tool the agent got stuck on leads.
+func summarizeDeniedTools(tools []string) string {
+	counts := make(map[string]int, len(tools))
+	order := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if counts[tool] == 0 {
+			order = append(order, tool)
+		}
+		counts[tool]++
+	}
+	parts := make([]string, 0, len(order))
+	for _, tool := range order {
+		if n := counts[tool]; n > 1 {
+			parts = append(parts, fmt.Sprintf("%s×%d", tool, n))
+		} else {
+			parts = append(parts, tool)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 type agentErrorHandler struct {
@@ -5868,7 +5937,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			if autoApprove && !isAskQuestion {
-				slog.Debug("auto-approving (approve-all)", "request_id", event.RequestID, "tool", event.ToolName)
+				// Info, not Debug: this is an authorization decision, and with the
+				// prompt suppressed it was the only thing distinguishing an
+				// approve-all turn from a turn that never asked.
+				slog.Info("auto-approving (approve-all)", "request_id", event.RequestID, "tool", event.ToolName)
 				_ = state.agentSession.RespondPermission(event.RequestID, PermissionResult{
 					Behavior:     "allow",
 					UpdatedInput: event.ToolInputRaw,
@@ -17557,6 +17629,27 @@ func stripTrailingSilent(text string) (string, bool) {
 		return text, false
 	}
 	return strings.TrimRight(stripped, " \t\r\n"), true
+}
+
+// unsolicitedRelayText returns the text a background (unsolicited) turn should
+// relay, applying the same NO_REPLY semantics as the foreground turn path: a bare
+// marker suppresses the send entirely, and a trailing marker is stripped off an
+// otherwise-visible response. The reader never streams EventText chunks, so when
+// the response resolves to a bare marker but the turn did emit visible chunks
+// before it (the dominant shape for agents that put the marker in the result
+// alone), those chunks are relayed rather than dropped.
+func unsolicitedRelayText(result string, textParts []string) string {
+	text := result
+	if isSilentReply(text) {
+		text = strings.Join(textParts, "")
+		if strings.TrimSpace(text) == "" || isSilentReply(text) {
+			return ""
+		}
+	}
+	if stripped, ok := stripTrailingSilent(text); ok {
+		return stripped
+	}
+	return text
 }
 
 // couldBeSilentPrefix reports whether the trimmed text is still a case-insensitive
