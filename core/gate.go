@@ -34,10 +34,11 @@ type gateState struct {
 	fallback string // action on gate error/timeout
 	inject   bool   // agent folds mid-turn input into the running turn (claudecode only)
 	mu       sync.Mutex
-	buf      map[string][]string // interactiveKey → silent messages not yet delivered
-	gbuf     map[string][]string // maomao fork: the same messages as the user wrote them (no media notes), for the gate
-	held     map[string]*heldMsg // interactiveKey → burst being collected while idle
-	released map[*Message]bool   // bursts handed back to handleMessage by their timer
+	buf      map[string][]string    // interactiveKey → silent messages not yet delivered
+	gbuf     map[string][]string    // maomao fork: the same messages as the user wrote them (no media notes), for the gate
+	imgs     map[string][]bufImages // maomao fork: images of each buffered message (parallel to buf), sent with the next turn
+	held     map[string]*heldMsg    // interactiveKey → burst being collected while idle
+	released map[*Message]bool      // bursts handed back to handleMessage by their timer
 }
 
 // Discord (and most IM clients) split "image + caption" into two messages, in either order,
@@ -59,6 +60,31 @@ func holdWindow(msg *Message) time.Duration {
 		return attachmentHold
 	}
 	return burstWindow
+}
+
+// bufImages are the images of one buffered message and where they came from, so the turn that
+// delivers them can say which earlier message carried them (maomao fork).
+type bufImages struct {
+	who, at string
+	images  []ImageAttachment
+}
+
+// bufferedImages returns the images of buffered entries, oldest first, and a note naming the
+// messages that carried them ("" when none).
+func bufferedImages(entries []bufImages) ([]ImageAttachment, string) {
+	var images []ImageAttachment
+	var parts []string
+	for _, b := range entries {
+		if len(b.images) == 0 {
+			continue
+		}
+		images = append(images, b.images...)
+		parts = append(parts, fmt.Sprintf("%s %s %d 张", b.at, b.who, len(b.images)))
+	}
+	if len(images) == 0 {
+		return nil, ""
+	}
+	return images, "（之前没回复的消息里的图已附上，按时间顺序排在本条图片前面：" + strings.Join(parts, "；") + "）"
 }
 
 type heldMsg struct {
@@ -213,6 +239,7 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 	}
 	buffered := append([]string(nil), g.buf[interactiveKey]...)
 	gateBuffered := append([]string(nil), g.gbuf[interactiveKey]...)
+	ctxImages, ctxImgNote := bufferedImages(g.imgs[interactiveKey][:min(len(buffered), len(g.imgs[interactiveKey]))])
 	g.mu.Unlock()
 
 	last, lastAge := lastReply(session)
@@ -233,7 +260,7 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		return true
 	}
 	if dec.Action == "silent" {
-		g.buffer(interactiveKey, msg.Content, userTextOf(msg))
+		g.buffer(interactiveKey, msg.Content, userTextOf(msg), bufImages{})
 		return true
 	}
 	e.teamNoteTurn(msg, session)
@@ -258,6 +285,12 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		content = "（之前没回复的消息，按时间顺序）\n" + strings.Join(buffered, "\n") + "\n\n（最新）\n" + content
 	}
 	markSeen(session, msg)
+	if len(ctxImages) > 0 {
+		// maomao fork: images of messages this agent only listened to go with this turn as
+		// images; the buffer and channel backfill keep just a "（附了 N 个图片/文件）" note.
+		content = ctxImgNote + "\n" + content
+		msg.Images = append(ctxImages, msg.Images...)
+	}
 
 	inject := content
 	if strings.TrimSpace(inject) == "" {
@@ -284,20 +317,28 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 
 // buffer keeps text for the next turn of interactiveKey (capped at maxBuffered); gateText is the
 // same message as the user wrote it, which is what the gate sees in Buffered.
-func (g *gateState) buffer(interactiveKey, text, gateText string) {
+// img holds the message's images (zero value: none); it is capped together with the text.
+func (g *gateState) buffer(interactiveKey, text, gateText string, img bufImages) {
 	g.mu.Lock()
 	if g.gbuf == nil {
 		g.gbuf = map[string][]string{}
 	}
+	if g.imgs == nil {
+		g.imgs = map[string][]bufImages{}
+	}
 	b := append(g.buf[interactiveKey], text)
 	gb := append(g.gbuf[interactiveKey], gateText)
+	ib := append(g.imgs[interactiveKey], img)
 	if len(b) > maxBuffered {
 		b = b[len(b)-maxBuffered:]
 	}
 	if len(gb) > maxBuffered {
 		gb = gb[len(gb)-maxBuffered:]
 	}
-	g.buf[interactiveKey], g.gbuf[interactiveKey] = b, gb
+	if len(ib) > maxBuffered {
+		ib = ib[len(ib)-maxBuffered:]
+	}
+	g.buf[interactiveKey], g.gbuf[interactiveKey], g.imgs[interactiveKey] = b, gb, ib
 	g.mu.Unlock()
 }
 
@@ -307,9 +348,13 @@ func (g *gateState) dropBuffered(interactiveKey string, n int) {
 	if g.gbuf != nil {
 		g.gbuf[interactiveKey] = g.gbuf[interactiveKey][min(n, len(g.gbuf[interactiveKey])):]
 	}
+	if g.imgs != nil {
+		g.imgs[interactiveKey] = g.imgs[interactiveKey][min(n, len(g.imgs[interactiveKey])):]
+	}
 }
 
-// bufferContext buffers msg as listen-only context; attachments become a note.
+// bufferContext buffers msg as listen-only context; attachments become a note, and images are
+// also kept to go with the next turn (maomao fork: files still only as the note).
 func (g *gateState) bufferContext(interactiveKey string, msg *Message) {
 	text, gateText := msg.Content, userTextOf(msg)
 	if n := len(msg.Images) + len(msg.Files); n > 0 {
@@ -317,7 +362,7 @@ func (g *gateState) bufferContext(interactiveKey string, msg *Message) {
 		text, gateText = strings.TrimSpace(text+note), strings.TrimSpace(gateText+note)
 	}
 	if text != "" {
-		g.buffer(interactiveKey, text, gateText)
+		g.buffer(interactiveKey, text, gateText, bufImages{who: msg.UserName, at: time.Now().Format("15:04"), images: msg.Images})
 	}
 }
 
