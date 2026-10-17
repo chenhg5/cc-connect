@@ -51,6 +51,10 @@ type acpSession struct {
 	toolInputMu   sync.Mutex
 	toolInputByID map[string]string // toolCallId -> summarized tool input
 	toolNameByID  map[string]string // toolCallId -> title or kind from tool_call
+	// toolResultByID holds the last tool output emitted per toolCallId so the
+	// same output repeated by later updates (e.g. Devin's terminal preview and
+	// exit update) is not shown twice.
+	toolResultByID map[string]string
 
 	// modesMu guards availableModes and currentMode. Both fields are
 	// populated on handshake (session/new or session/load response) and
@@ -467,7 +471,11 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	if s.replaying.Load() {
 		return
 	}
-	for _, ev := range mapSessionUpdate(sid, params) {
+	events := mapSessionUpdate(sid, params)
+	if kind, update, _ := peekSessionUpdate(params); kind == "tool_call_update" {
+		events = s.refineToolUpdateEvents(update, events)
+	}
+	for _, ev := range events {
 		s.emit(ev)
 	}
 }
@@ -522,6 +530,7 @@ func (s *acpSession) evictToolInputCacheIfNeededLocked() {
 		}
 		delete(s.toolInputByID, k)
 		delete(s.toolNameByID, k)
+		delete(s.toolResultByID, k)
 	}
 	for k := range s.toolNameByID {
 		if len(s.toolNameByID) <= target {
@@ -529,6 +538,7 @@ func (s *acpSession) evictToolInputCacheIfNeededLocked() {
 		}
 		delete(s.toolNameByID, k)
 		delete(s.toolInputByID, k)
+		delete(s.toolResultByID, k)
 	}
 }
 
@@ -936,4 +946,37 @@ func summarizeACPToolInput(kind string, raw json.RawMessage) string {
 	}
 	b, _ := json.MarshalIndent(m, "", "  ")
 	return string(b)
+}
+
+// refineToolUpdateEvents names tool results from tool_call_update with the
+// title cached from the originating tool_call (updates usually omit it, which
+// made the raw toolCallId show up as the tool name) and drops a result whose
+// output repeats the last one emitted for the same tool call.
+func (s *acpSession) refineToolUpdateEvents(update json.RawMessage, events []core.Event) []core.Event {
+	var u struct {
+		ToolCallID string `json:"toolCallId"`
+	}
+	if json.Unmarshal(update, &u) != nil || u.ToolCallID == "" {
+		return events
+	}
+	s.toolInputMu.Lock()
+	defer s.toolInputMu.Unlock()
+	if s.toolResultByID == nil {
+		s.toolResultByID = make(map[string]string)
+	}
+	name := s.toolNameByID[u.ToolCallID]
+	out := events[:0]
+	for _, ev := range events {
+		if ev.Type == core.EventToolResult {
+			if name != "" && (ev.ToolName == u.ToolCallID || ev.ToolName == "tool") {
+				ev.ToolName = name
+			}
+			if s.toolResultByID[u.ToolCallID] == ev.Content {
+				continue
+			}
+			s.toolResultByID[u.ToolCallID] = ev.Content
+		}
+		out = append(out, ev)
+	}
+	return out
 }
