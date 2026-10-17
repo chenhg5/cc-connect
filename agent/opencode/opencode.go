@@ -558,6 +558,12 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 
 // -- ContextCompressor --
 
+// ContinueAfterErrorPrompt implements core.ContinueAfterErrorAgent: an
+// OpenCode session keeps the turn's messages and executed tool calls after a
+// failed turn ("Our servers are currently overloaded" mid-turn), so the engine
+// resumes it instead of reporting the error or replaying the prompt.
+func (a *Agent) ContinueAfterErrorPrompt() string { return core.DefaultContinueAfterErrorPrompt }
+
 func (a *Agent) CompressCommand() string { return "/compact" }
 
 // -- MemoryFileProvider --
