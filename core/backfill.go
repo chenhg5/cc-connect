@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,6 +42,7 @@ type ChannelHistoryAttachment struct {
 	ContentType string
 	Width       int // > 0 with Height for images whose ContentType is empty
 	Height      int
+	Size        int // bytes as the platform reports it (0 = unknown): picks images before downloading
 }
 
 // isImage mirrors the Discord classifier for live messages (classifyAttachments).
@@ -109,7 +112,7 @@ func (e *Engine) channelBackfill(p Platform, msg *Message, session *Session) (st
 		return "", nil, false
 	}
 	from := session.GetLastSeenMsgID()
-	back, images, _, ok := e.channelBackfillBefore(p, msg.ChannelID, msg.MessageID, session)
+	back, images, _, ok := e.channelBackfillBefore(p, msg.ChannelID, msg.MessageID, session, msg.Images)
 	if ok {
 		msg.BackfillFrom, msg.BackfillRan = from, true
 	}
@@ -123,8 +126,10 @@ func (e *Engine) channelBackfill(p Platform, msg *Message, session *Session) (st
 // maomao fork: it now edits msg itself, so the images of those posts go with the turn
 // (2026-10-17: "他每次都要看到之前的消息").
 func (e *Engine) cronChannelBackfill(p Platform, sessionKey string, session *Session, msg *Message) {
+	session.backfillMu.Lock() // see Session.backfillMu
+	defer session.backfillMu.Unlock()
 	from := session.GetLastSeenMsgID()
-	back, images, newest, ok := e.channelBackfillBefore(p, extractChannelID(sessionKey), "", session)
+	back, images, newest, ok := e.channelBackfillBefore(p, extractChannelID(sessionKey), "", session, msg.Images)
 	if !ok {
 		return
 	}
@@ -139,9 +144,9 @@ func (e *Engine) cronChannelBackfill(p Platform, sessionKey string, session *Ses
 }
 
 // channelBackfillBefore formats the messages before beforeID ("" = up to the newest) that the
-// session has not seen, with the images of the messages it shows; newest is the ID of the
-// newest message read.
-func (e *Engine) channelBackfillBefore(p Platform, channelID, beforeID string, session *Session) (back string, images []ImageAttachment, newest string, ok bool) {
+// session has not seen, with the images of the messages it shows (together with own, the
+// turn's own images, kept under imageContextBudget); newest is the ID of the newest message read.
+func (e *Engine) channelBackfillBefore(p Platform, channelID, beforeID string, session *Session, own []ImageAttachment) (back string, images []ImageAttachment, newest string, ok bool) {
 	r, ok := p.(ChannelHistoryReader)
 	if !ok || channelID == "" {
 		return "", nil, "", false
@@ -201,10 +206,9 @@ func (e *Engine) channelBackfillBefore(p Platform, channelID, beforeID string, s
 		start--
 	}
 	// maomao fork: only the lines that are shown bring their attachments.
-	for i := start; i < len(lines); i++ {
-		note, imgs := e.backfillAttachments(shown[i])
-		lines[i] += note
-		images = append(images, imgs...)
+	notes, images := e.backfillAttachments(shown[start:], e.imageContextBudget()-imagesBase64(own))
+	for i, n := range notes {
+		lines[start+i] += n
 	}
 	head := "（频道里你上次看到之后的消息，按时间顺序；这是真实记录，先读它再回答）"
 	if truncated {
@@ -246,44 +250,137 @@ var backfillDownload = func(u string) ([]byte, error) {
 	return data, nil
 }
 
-// backfillAttachments downloads the attachments of a backfilled message (maomao fork,
-// 2026-10-17: a bot that was not called never saw the photos posted before it was @-ed).
-// Images are returned to go with the turn; other files are saved where the agent saves
-// live attachments (SaveFilesToDisk) and named by path. Failures are written into the note
-// and never stop the turn.
-func (e *Engine) backfillAttachments(m ChannelHistoryMessage) (string, []ImageAttachment) {
+// backfillAttachments handles the attachments of the backfilled messages ms (maomao fork,
+// 2026-10-17: a bot that was not called never saw the photos posted before it was @-ed) and
+// returns one note per message plus the images, in channel order. Images are downloaded at
+// once, together, and kept newest first while they stay under budget (base64 bytes, the unit
+// image_fresh counts in); the rest are named as left out. Other files (a PDF, a video) are
+// saved in the background where the agent saves live attachments (SaveFilesToDisk), so a big
+// file never holds up the turn; the note names the directory. Failures go into the note and
+// never stop the turn.
+func (e *Engine) backfillAttachments(ms []ChannelHistoryMessage, budget int) ([]string, []ImageAttachment) {
+	picked := downloadImages(ms, budget)
+	workDir := e.attachmentWorkDir()
+	notes := make([]string, len(ms))
 	var images []ImageAttachment
-	var notes []string
-	for _, a := range m.Attachments {
-		data, err := backfillDownload(a.URL)
-		if a.isImage() {
-			if err != nil {
-				slog.Warn("backfill: download image failed", "msg", m.ID, "file", a.FileName, "error", err)
-				notes = append(notes, fmt.Sprintf("附图 %s 下载失败（%v），需要时让人重发", a.FileName, err))
+	for i, m := range ms {
+		var parts []string
+		pk := picked[i]
+		if len(pk.images) > 0 {
+			parts = append(parts, fmt.Sprintf("附图 %d 张（已随本条附上）", len(pk.images)))
+			images = append(images, pk.images...)
+		}
+		if pk.over > 0 {
+			parts = append(parts, fmt.Sprintf("%d 张图片未附上（超出图片预算）", pk.over))
+		}
+		for _, f := range pk.failed {
+			parts = append(parts, "附图 "+f+"，需要时让人重发")
+		}
+		for _, a := range m.Attachments {
+			if a.isImage() {
 				continue
 			}
-			images = append(images, ImageAttachment{MimeType: a.ContentType, Data: data, FileName: a.FileName})
+			dir := saveInBackground(workDir, m.ID, a)
+			parts = append(parts, fmt.Sprintf("附件 %s 正在后台下载到 %s（没有这个文件就是下载失败）", a.FileName, dir))
+		}
+		if len(parts) > 0 {
+			notes[i] = "（" + strings.Join(parts, "；") + "）"
+		}
+	}
+	return notes, images
+}
+
+// msgImages is what downloadImages got for one message.
+type msgImages struct {
+	images []ImageAttachment
+	over   int      // left out: over the budget
+	failed []string // "name 下载失败（error）"
+}
+
+// downloadImages fetches the images of msgs (oldest first) concurrently — at most the
+// backfillFetchLimit posts of one history read, so no separate cap — keeping the newest while
+// their base64 total stays under budget. The platform's announced size picks them before the
+// download; the real size is checked after it.
+func downloadImages(msgs []ChannelHistoryMessage, budget int) []msgImages {
+	out := make([]msgImages, len(msgs))
+	type job struct {
+		i    int
+		a    ChannelHistoryAttachment
+		data []byte
+		err  error
+	}
+	var jobs []*job // newest first
+	used, full := 0, false
+	for i := len(msgs) - 1; i >= 0; i-- {
+		atts := msgs[i].Attachments
+		for j := len(atts) - 1; j >= 0; j-- {
+			a := atts[j]
+			if !a.isImage() {
+				continue
+			}
+			if full || used+base64Len(a.Size) >= budget {
+				full = true
+				out[i].over++
+				continue
+			}
+			used += base64Len(a.Size)
+			jobs = append(jobs, &job{i: i, a: a})
+		}
+	}
+	var wg sync.WaitGroup
+	for _, jb := range jobs {
+		wg.Add(1)
+		go func(jb *job) {
+			defer wg.Done()
+			jb.data, jb.err = backfillDownload(jb.a.URL)
+		}(jb)
+	}
+	wg.Wait()
+	used, full = 0, false
+	for _, jb := range jobs {
+		if jb.err != nil {
+			slog.Warn("backfill: download image failed", "file", jb.a.FileName, "error", jb.err)
+			out[jb.i].failed = append([]string{fmt.Sprintf("%s 下载失败（%v）", jb.a.FileName, jb.err)}, out[jb.i].failed...)
 			continue
 		}
+		n := base64Len(len(jb.data))
+		if full || used+n >= budget {
+			full = true
+			out[jb.i].over++
+			continue
+		}
+		used += n
+		out[jb.i].images = append([]ImageAttachment{{MimeType: jb.a.ContentType, Data: jb.data, FileName: jb.a.FileName}}, out[jb.i].images...)
+	}
+	return out
+}
+
+// saveInBackground downloads a non-image attachment into the message's attachments directory
+// (SaveFilesToDisk layout) without waiting for it, and returns that directory.
+func saveInBackground(workDir, msgID string, a ChannelHistoryAttachment) string {
+	abs, err := filepath.Abs(workDir)
+	if err != nil {
+		abs = workDir
+	}
+	dir := filepath.Join(abs, ".cc-connect", "attachments", filepath.Base(msgID)) + string(filepath.Separator)
+	go func() {
+		data, err := backfillDownload(a.URL)
 		if err != nil {
-			slog.Warn("backfill: download file failed", "msg", m.ID, "file", a.FileName, "error", err)
-			notes = append(notes, fmt.Sprintf("附件 %s 下载失败（%v）", a.FileName, err))
-			continue
+			slog.Warn("backfill: download file failed", "msg", msgID, "file", a.FileName, "error", err)
+			return
 		}
-		paths := SaveFilesToDisk(e.attachmentWorkDir(), m.ID, []FileAttachment{{MimeType: a.ContentType, Data: data, FileName: a.FileName}})
-		if len(paths) == 0 {
-			notes = append(notes, fmt.Sprintf("附件 %s 保存失败", a.FileName))
-			continue
-		}
-		notes = append(notes, fmt.Sprintf("附件 %s 已存到 %s", a.FileName, paths[0]))
+		SaveFilesToDisk(workDir, msgID, []FileAttachment{{MimeType: a.ContentType, Data: data, FileName: a.FileName}})
+	}()
+	return dir
+}
+
+// imagesBase64 is the base64 size of imgs.
+func imagesBase64(imgs []ImageAttachment) int {
+	n := 0
+	for _, img := range imgs {
+		n += base64Len(len(img.Data))
 	}
-	if len(images) > 0 {
-		notes = append([]string{fmt.Sprintf("附图 %d 张（已随本条附上）", len(images))}, notes...)
-	}
-	if len(notes) == 0 {
-		return "", nil
-	}
-	return "（" + strings.Join(notes, "；") + "）", images
+	return n
 }
 
 // attachmentWorkDir is where the agent's live attachments go (its work_dir), so backfilled
@@ -334,9 +431,11 @@ func base64Len(n int) int { return (n + 2) / 3 * 4 }
 // forgot the photos it had just looked at (2026-10-17, user: "他每次都要看到之前的消息的呀，
 // 就是可能这长中短，近期的一个消息"). It re-reads the posts before the ones this turn's backfill
 // already covered, within backfillFirstWindow, and attaches their images newest first while
-// the context stays under imageContextBudget (minus the images this turn already carries), so
-// the images alone never trigger the next renewal. Text is not repeated: the handoff has it.
-// Runs only for turns whose channel backfill ran, so it knows where that backfill started.
+// the context stays under imageContextBudget (minus the images this turn already carries).
+// Posts an earlier fresh context already got back are not re-attached again: otherwise every
+// renewal refills the context to the limit and the next image renews it once more (review of
+// b76a9370). Text is not repeated: the handoff has it. Runs only for turns whose channel
+// backfill ran, so it knows where that backfill started.
 func (e *Engine) freshContextImages(p Platform, session *Session, msg *Message, already []ImageAttachment) (string, []ImageAttachment) {
 	if !session.TakeFreshContext() || !msg.BackfillRan || msg.BackfillFrom == "" {
 		return "", nil // no backfill, or it already covered the whole window
@@ -354,63 +453,39 @@ func (e *Engine) freshContextImages(p Platform, session *Session, msg *Message, 
 		slog.Warn("fresh context: read channel history failed", "channel", channelID, "error", err)
 		return "", nil
 	}
-	budget := e.imageContextBudget()
-	for _, img := range already {
-		budget -= base64Len(len(img.Data))
-	}
-	type picked struct {
-		m    ChannelHistoryMessage
-		imgs []ImageAttachment
-	}
-	var got []picked // newest first
-	used, failed, full := 0, 0, false
-	for i := len(msgs) - 1; i >= 0 && !full; i-- {
-		m := msgs[i]
-		if time.Since(m.Time) > backfillFirstWindow {
-			break
+	doneUpTo := session.freshImagesDoneUpTo(msg.BackfillFrom)
+	var cand []ChannelHistoryMessage // oldest first
+	for _, m := range msgs {
+		if time.Since(m.Time) > backfillFirstWindow || snowflakeAfter(m.ID, msg.BackfillFrom) {
+			continue // too old, or this turn's backfill already brought it
 		}
-		if snowflakeAfter(m.ID, msg.BackfillFrom) {
-			continue // this turn's backfill already brought it
+		if doneUpTo != "" && !snowflakeAfter(m.ID, doneUpTo) {
+			continue // an earlier fresh context already got it back
 		}
-		var imgs []ImageAttachment
-		for j := len(m.Attachments) - 1; j >= 0; j-- {
-			a := m.Attachments[j]
-			if !a.isImage() {
-				continue
-			}
-			data, err := backfillDownload(a.URL)
-			if err != nil {
-				slog.Warn("fresh context: download image failed", "msg", m.ID, "file", a.FileName, "error", err)
-				failed++
-				continue
-			}
-			if used+base64Len(len(data)) >= budget {
-				full = true
-				break
-			}
-			used += base64Len(len(data))
-			imgs = append([]ImageAttachment{{MimeType: a.ContentType, Data: data, FileName: a.FileName}}, imgs...)
-		}
-		if len(imgs) > 0 {
-			got = append(got, picked{m, imgs})
-		}
+		cand = append(cand, m)
 	}
-	if len(got) == 0 && failed == 0 {
-		return "", nil
-	}
+	picked := downloadImages(cand, e.imageContextBudget()-imagesBase64(already))
 	var images []ImageAttachment
 	var where []string
-	for i := len(got) - 1; i >= 0; i-- {
-		images = append(images, got[i].imgs...)
-		where = append(where, fmt.Sprintf("%s%d 张", historyPrefix(got[i].m), len(got[i].imgs)))
+	over, failed := 0, 0
+	for i, pk := range picked {
+		over += pk.over
+		failed += len(pk.failed)
+		if len(pk.images) > 0 {
+			images = append(images, pk.images...)
+			where = append(where, fmt.Sprintf("%s%d 张", historyPrefix(cand[i]), len(pk.images)))
+		}
+	}
+	if len(images) == 0 && failed == 0 {
+		return "", nil
 	}
 	note := fmt.Sprintf("（新会话：旧会话里看过的频道图片补回 %d 张，已随本条附上，按时间顺序：%s", len(images), strings.Join(where, "；"))
-	if full {
-		note += "；更早的图没附，太多会拖慢每一步"
+	if over > 0 {
+		note += fmt.Sprintf("；更早的 %d 张图片未附上（超出图片预算）", over)
 	}
 	if failed > 0 {
 		note += fmt.Sprintf("；%d 张下载失败", failed)
 	}
-	slog.Info("fresh context: re-attached recent channel images", "session", msg.SessionKey, "images", len(images), "base64_bytes", used, "failed", failed)
+	slog.Info("fresh context: re-attached recent channel images", "session", msg.SessionKey, "images", len(images), "base64_bytes", imagesBase64(images), "over", over, "failed", failed)
 	return note + "）", images
 }

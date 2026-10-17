@@ -248,6 +248,7 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		}
 	}
 	content := msg.Content
+	session.backfillMu.Lock() // maomao fork: read and mark seen as one step (Session.backfillMu)
 	if back, images, ok := e.channelBackfill(p, msg, session); ok {
 		// The channel itself is the record: it covers the gate buffer and also
 		// what the buffer never saw (downtime, restarts, dropped messages).
@@ -261,6 +262,7 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		content = "（之前没回复的消息，按时间顺序）\n" + strings.Join(buffered, "\n") + "\n\n（最新）\n" + content
 	}
 	markSeen(session, msg)
+	session.backfillMu.Unlock()
 
 	inject := content
 	if strings.TrimSpace(inject) == "" {

@@ -61,9 +61,9 @@ func newImgCaptureSession() *imgCaptureSession {
 
 func (s *imgCaptureSession) Send(prompt, id string, images []ImageAttachment, files []FileAttachment) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.images = append(s.images, images)
 	s.prompts = append(s.prompts, prompt)
-	s.mu.Unlock()
 	return s.resultAgentSession.Send(prompt, id, images, files)
 }
 
@@ -129,14 +129,17 @@ func TestBackfillImages_CalledTurnGetsListenedImage(t *testing.T) {
 	if got := imageData(msg.Images); strings.Join(got, ",") != "CAT,OWN" {
 		t.Fatalf("turn images = %v, want the listened photo first, then the message's own", got)
 	}
-	for _, want := range []string{"附图 1 张（已随本条附上）", "gone.png 下载失败", "a.pdf 已存到 "} {
+	for _, want := range []string{"附图 1 张（已随本条附上）", "gone.png 下载失败", "a.pdf 正在后台下载到 "} {
 		if !strings.Contains(msg.Content, want) {
 			t.Fatalf("content lacks %q:\n%s", want, msg.Content)
 		}
 	}
 	saved := dir + "/.cc-connect/attachments/102/a.pdf"
-	if b, err := os.ReadFile(saved); err != nil || string(b) != "%PDF" || !strings.Contains(msg.Content, saved) {
-		t.Fatalf("pdf not saved at %s (err %v):\n%s", saved, err, msg.Content)
+	if !strings.Contains(msg.Content, dir+"/.cc-connect/attachments/102/") {
+		t.Fatalf("pdf directory not named:\n%s", msg.Content)
+	}
+	if b := waitFile(t, saved); string(b) != "%PDF" {
+		t.Fatalf("pdf at %s = %q", saved, b)
 	}
 }
 
@@ -258,10 +261,155 @@ func TestBackfillImages_FreshContextGetsRecentImages(t *testing.T) {
 	if total >= e.imageContextBudget() {
 		t.Fatalf("images total %d base64 bytes, must stay under %d", total, e.imageContextBudget())
 	}
-	if !strings.Contains(prompts[0], "旧会话里看过的频道图片补回 2 张") || !strings.Contains(prompts[0], "更早的图没附") {
+	if !strings.Contains(prompts[0], "旧会话里看过的频道图片补回 2 张") || !strings.Contains(prompts[0], "更早的 1 张图片未附上（超出图片预算）") {
 		t.Fatalf("fresh turn text:\n%s", prompts[0])
 	}
 	if s.TakeFreshContext() {
 		t.Fatal("fresh-context images must be attached once")
+	}
+}
+
+// waitFile waits for a file saved in the background.
+func waitFile(t *testing.T, path string) []byte {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
+			return b
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never appeared", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Review 1: the first turn of a session (no last-seen mark) reads 3 hours of posts; their
+// images stay under the image_fresh limit, newest kept, the rest named as left out.
+func TestBackfillImages_FirstWindowCapped(t *testing.T) {
+	big := bytes.Repeat([]byte{'x'}, 1_200_000) // 1.6 MB as base64
+	srv := attachmentServer(t, map[string][]byte{"a": append([]byte("A"), big...), "b": append([]byte("B"), big...), "c": append([]byte("C"), big...)})
+	now := time.Now()
+	img := func(name string, size int) []ChannelHistoryAttachment {
+		return []ChannelHistoryAttachment{{URL: srv.URL + "/" + name, FileName: name, ContentType: "image/png", Size: size}}
+	}
+	p := &historyPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}, history: []ChannelHistoryMessage{
+		{ID: "101", Author: "zuiho", Time: now, Attachments: img("a", 1_200_001)},
+		{ID: "102", Author: "zuiho", Time: now, Attachments: img("b", 0)}, // size unknown: checked after download
+		{ID: "103", Author: "zuiho", Time: now, Attachments: img("c", 1_200_001)},
+	}}
+	e, _, _ := newImgEngine(t, p)
+	s := e.sessions.GetOrCreateActive("discord:c1") // no last-seen mark
+	msg := &Message{SessionKey: "discord:c1", ChannelID: "c1", MessageID: "104", Content: "看看"}
+	back, images, ok := e.channelBackfill(p, msg, s)
+	if !ok || len(images) != 1 || images[0].Data[0] != 'C' {
+		t.Fatalf("ok=%v images=%d, want only the newest", ok, len(images))
+	}
+	if strings.Count(back, "1 张图片未附上（超出图片预算）") != 2 || !strings.Contains(back, "附图 1 张（已随本条附上）") {
+		t.Fatalf("backfill text:\n%s", back)
+	}
+}
+
+// Review 2: a second renewal does not re-attach what the first one already brought back, so
+// the fresh context is not refilled to the limit every time.
+func TestBackfillImages_FreshContextDoesNotRecarry(t *testing.T) {
+	srv := attachmentServer(t, map[string][]byte{"b": []byte("B"), "c": []byte("C")})
+	now := time.Now()
+	p := &historyPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}, history: []ChannelHistoryMessage{
+		{ID: "101", Author: "zuiho", Time: now, Attachments: []ChannelHistoryAttachment{{URL: srv.URL + "/b", FileName: "b", ContentType: "image/png"}}},
+		{ID: "103", Author: "zuiho", Time: now, Attachments: []ChannelHistoryAttachment{{URL: srv.URL + "/c", FileName: "c", ContentType: "image/png"}}},
+	}}
+	e, _, _ := newImgEngine(t, p)
+	s := e.sessions.GetOrCreateActive("discord:c1")
+	first := &Message{SessionKey: "discord:c1", ChannelID: "c1", MessageID: "102", BackfillRan: true, BackfillFrom: "101"}
+	s.MarkFreshContext()
+	if _, imgs := e.freshContextImages(p, s, first, nil); strings.Join(imageData(imgs), ",") != "B" {
+		t.Fatalf("first renewal = %v", imageData(imgs))
+	}
+	s.SettleHandoff(true)
+	second := &Message{SessionKey: "discord:c1", ChannelID: "c1", MessageID: "104", BackfillRan: true, BackfillFrom: "103"}
+	s.MarkFreshContext()
+	if _, imgs := e.freshContextImages(p, s, second, nil); strings.Join(imageData(imgs), ",") != "C" {
+		t.Fatalf("second renewal = %v, want only the image after the first renewal", imageData(imgs))
+	}
+}
+
+// Review 3: images download together, and a big file never holds up the turn.
+func TestBackfillImages_DownloadsDoNotSerialize(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/video.mp4" {
+			<-release
+		} else {
+			time.Sleep(300 * time.Millisecond)
+		}
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer srv.Close()
+	defer close(release)
+	now := time.Now()
+	var atts []ChannelHistoryAttachment
+	for _, n := range []string{"1", "2", "3", "4", "5"} {
+		atts = append(atts, ChannelHistoryAttachment{URL: srv.URL + "/" + n, FileName: n, ContentType: "image/png"})
+	}
+	atts = append(atts, ChannelHistoryAttachment{URL: srv.URL + "/video.mp4", FileName: "video.mp4", ContentType: "video/mp4"})
+	p := &historyPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}, history: []ChannelHistoryMessage{
+		{ID: "100", Author: "zuiho", Time: now},
+		{ID: "101", Author: "zuiho", Time: now, Attachments: atts},
+	}}
+	e, _, _ := newImgEngine(t, p)
+	s := e.sessions.GetOrCreateActive("discord:c1")
+	s.SetLastSeenMsgID("100")
+	start := time.Now()
+	back, images, _ := e.channelBackfill(p, &Message{ChannelID: "c1", MessageID: "102"}, s)
+	if took := time.Since(start); took > time.Second || len(images) != 5 {
+		t.Fatalf("took %v for %d images (5 x 300 ms one by one would be 1.5 s; the video must not be waited for)", took, len(images))
+	}
+	if !strings.Contains(back, "video.mp4 正在后台下载到") {
+		t.Fatalf("text:\n%s", back)
+	}
+}
+
+// Review 4: two messages handled at the same time while busy deliver the earlier photo once.
+func TestBackfillImages_ConcurrentMessagesDeliverOnce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = w.Write([]byte("CAT"))
+	}))
+	defer srv.Close()
+	now := time.Now()
+	p := &historyPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}, history: []ChannelHistoryMessage{
+		{ID: "100", Author: "zuiho", Time: now},
+		{ID: "101", Author: "zuiho", Time: now, Attachments: []ChannelHistoryAttachment{{URL: srv.URL + "/cat", FileName: "cat", ContentType: "image/png"}}},
+		{ID: "102", Author: "zuiho", Content: "看", Time: now},
+		{ID: "103", Author: "zuiho", Content: "看看", Time: now},
+	}}
+	e, _, _ := newImgEngine(t, p)
+	e.SetGate(replyWhenMentioned(t).URL, 2000, "reply")
+	e.gate.inject = true
+	running := newImgCaptureSession()
+	e.interactiveMu.Lock()
+	e.interactiveStates["k"] = &interactiveState{agentSession: running}
+	e.interactiveMu.Unlock()
+	s := e.sessions.GetOrCreateActive("discord:c1")
+	s.SetLastSeenMsgID("100")
+	s.TryLock() // busy
+
+	var wg sync.WaitGroup
+	for _, id := range []string{"102", "103"} {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			e.applyGate(p, &Message{SessionKey: "discord:c1", ChannelID: "c1", MessageID: id, UserName: "zuiho", Content: "看", Mentioned: true}, s, "k")
+		}(id)
+	}
+	wg.Wait()
+	imgs, _ := running.sent()
+	n := 0
+	for _, batch := range imgs {
+		n += len(batch)
+	}
+	if len(imgs) != 2 || n != 1 {
+		t.Fatalf("sends=%d images=%d, want the photo delivered once", len(imgs), n)
 	}
 }

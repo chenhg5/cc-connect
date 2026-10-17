@@ -1522,7 +1522,7 @@ func historyAttachments(atts []*discordgo.MessageAttachment) []core.ChannelHisto
 			continue
 		}
 		out = append(out, core.ChannelHistoryAttachment{
-			URL: a.URL, FileName: a.Filename, ContentType: a.ContentType, Width: a.Width, Height: a.Height,
+			URL: a.URL, FileName: a.Filename, ContentType: a.ContentType, Width: a.Width, Height: a.Height, Size: a.Size,
 		})
 	}
 	return out

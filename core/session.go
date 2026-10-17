@@ -57,6 +57,12 @@ type Session struct {
 	handoffTaken [2]string  // taken by a turn not yet sent (maomao fork)
 	freshCtx     bool       // maomao fork: agent started without resume; see freshContextImages
 	freshTaken   bool       // freshCtx taken by a turn not yet sent
+	// maomao fork: posts up to freshDoneUpTo already went to an earlier fresh context
+	// (freshContextImages); freshDonePending replaces it once the turn is sent.
+	freshDoneUpTo, freshDonePending string
+	// backfillMu makes reading the channel since last seen and marking it seen one step, so
+	// two messages arriving together do not both deliver the same posts and images (maomao fork).
+	backfillMu sync.Mutex
 }
 
 // TurnCtxSent is what has been put into one agent context (maomao fork). It is

@@ -278,7 +278,19 @@ func (s *Session) SettleHandoff(delivered bool) {
 	if !delivered && s.freshTaken {
 		s.freshCtx = true // maomao fork: the fresh-context images too (freshContextImages)
 	}
-	s.freshTaken = false
+	if delivered && s.freshDonePending != "" {
+		s.freshDoneUpTo = s.freshDonePending
+	}
+	s.freshTaken, s.freshDonePending = false, ""
+}
+
+// freshImagesDoneUpTo returns the newest post whose images an earlier fresh context already
+// got back, and records upTo to take its place once this turn is sent (SettleHandoff).
+func (s *Session) freshImagesDoneUpTo(upTo string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.freshDonePending = upTo
+	return s.freshDoneUpTo
 }
 
 // MarkFreshContext records that the agent process was started without resuming, so the next
