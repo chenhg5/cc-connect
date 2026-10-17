@@ -11,14 +11,14 @@ import (
 // start a fresh session instead of resuming the wrong one.
 type validatingAgent struct {
 	controllableAgent
-	validateFunc func(ctx context.Context, sessionID string) bool
+	validateFunc func(ctx context.Context, sessionID, cwd string) bool
 }
 
-func (a *validatingAgent) ValidateSessionID(ctx context.Context, sessionID string) bool {
+func (a *validatingAgent) ValidateSessionID(ctx context.Context, sessionID, cwd string) bool {
 	if a.validateFunc == nil {
 		return true // default: trust whatever ID the Session has
 	}
-	return a.validateFunc(ctx, sessionID)
+	return a.validateFunc(ctx, sessionID, cwd)
 }
 
 var _ SessionIDValidator = (*validatingAgent)(nil)
@@ -32,7 +32,7 @@ func TestIssue599_InvalidSessionIDClearedBeforeResume(t *testing.T) {
 	sess := newControllableSession("fresh-id")
 	agent := &validatingAgent{
 		controllableAgent: controllableAgent{nextSession: sess},
-		validateFunc: func(_ context.Context, sessionID string) bool {
+		validateFunc: func(_ context.Context, sessionID, cwd string) bool {
 			// Reject whatever ID the Session carries — simulate a
 			// cross-project leak.
 			return false
@@ -65,7 +65,7 @@ func TestIssue599_ValidSessionIDPreserved(t *testing.T) {
 	sess := newControllableSession("resumed-id")
 	agent := &validatingAgent{
 		controllableAgent: controllableAgent{nextSession: sess},
-		validateFunc: func(_ context.Context, _ string) bool {
+		validateFunc: func(_ context.Context, _, _ string) bool {
 			return true
 		},
 	}
