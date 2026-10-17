@@ -2177,6 +2177,24 @@ func TestMgmt_ProjectPatch_DisabledCommands(t *testing.T) {
 	}
 }
 
+func TestMgmt_ProjectPatch_FooterQuotaSettings(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	var saved ProjectSettingsUpdate
+	mgmt.SetSaveProjectSettings(func(_ string, update ProjectSettingsUpdate) error { saved = update; return nil })
+	for _, tc := range []struct{ five, week bool }{{true, false}, {false, true}} {
+		r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{"show_usage_5h": tc.five, "show_usage_week": tc.week})
+		if !r.OK {
+			t.Fatalf("quota patch failed: %s", r.Error)
+		}
+		if e.showUsage5h.Load() != tc.five || e.showUsageWeek.Load() != tc.week {
+			t.Fatal("quota flags not applied")
+		}
+		if saved.ShowUsage5h == nil || *saved.ShowUsage5h != tc.five || saved.ShowUsageWeek == nil || *saved.ShowUsageWeek != tc.week {
+			t.Fatal("quota flags not passed to persistence")
+		}
+	}
+}
+
 func TestMgmt_ProjectPatch_AdminFrom(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
 	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
