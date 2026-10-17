@@ -1,9 +1,24 @@
 package core
 
 import (
+	"strings"
 	"sync"
 	"testing"
 )
+
+func TestMsgReasoningDefaultAgentAgnostic(t *testing.T) {
+	for lang, text := range messages[MsgReasoningDefault] {
+		if strings.Contains(strings.ToLower(text), "codex") {
+			t.Fatalf("%s still names Codex: %s", lang, text)
+		}
+		if text == "" {
+			t.Fatalf("%s is empty", lang)
+		}
+	}
+	if !strings.Contains(messages[MsgReasoningDefault][LangEnglish], "agent default") {
+		t.Fatal(messages[MsgReasoningDefault][LangEnglish])
+	}
+}
 
 func TestI18n_DefaultLanguage(t *testing.T) {
 	i := NewI18n(LangEnglish)
@@ -59,7 +74,7 @@ func TestI18n_AllKeysHaveEnglish(t *testing.T) {
 
 func TestDetectLanguage(t *testing.T) {
 	tests := []struct {
-		text    string
+		text     string
 		wantLang Language
 	}{
 		// Japanese Hiragana

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,11 +41,15 @@ type acpModesBlock struct {
 type acpInitializeResult struct {
 	ProtocolVersion   int `json:"protocolVersion"`
 	AgentCapabilities struct {
-		LoadSession         bool `json:"loadSession"`
+		LoadSession        bool `json:"loadSession"`
+		PromptCapabilities struct {
+			Image bool `json:"image"`
+		} `json:"promptCapabilities"`
 		SessionCapabilities struct {
 			// ACP advertises capabilities as objects (possibly empty);
 			// treat "field present" as "supported" regardless of contents.
-			List json.RawMessage `json:"list,omitempty"`
+			List   json.RawMessage `json:"list,omitempty"`
+			Delete json.RawMessage `json:"delete,omitempty"`
 		} `json:"sessionCapabilities"`
 	} `json:"agentCapabilities"`
 }
@@ -66,9 +69,17 @@ type acpSessionListEntry struct {
 // probeSpawn launches `<cmd> <args...>`, sets up a JSON-RPC transport
 // and starts its readLoop. The caller owns the returned `teardown`
 // func and must invoke it to reap the child process.
-func (a *Agent) probeSpawn(ctx context.Context, cwd string) (*transport, *bytes.Buffer, func(), error) {
-	allArgs := append(append([]string{}, a.cliExtraArgs...), a.args...)
-	cmd := exec.CommandContext(ctx, a.cmd, allArgs...)
+func (a *Agent) probeSpawn(ctx context.Context, cwd string, onNotif rpcNotifyHandler) (*transport, *bytes.Buffer, func(), error) {
+	if onNotif == nil {
+		onNotif = func(method string, _ json.RawMessage) {
+			slog.Debug("acp-probe: notification", "method", method)
+		}
+	}
+	bin, allArgs := a.cmd, append(append([]string{}, a.cliExtraArgs...), a.args...)
+	if a.ProbeCommand != "" {
+		bin, allArgs = a.ProbeCommand, append([]string{}, a.ProbeArgs...)
+	}
+	cmd := exec.CommandContext(ctx, bin, allArgs...)
 	cmd.Dir = cwd
 	cmd.Env = core.MergeEnv(os.Environ(), a.extraEnv)
 
@@ -84,7 +95,7 @@ func (a *Agent) probeSpawn(ctx context.Context, cwd string) (*transport, *bytes.
 	cmd.Stderr = io.MultiWriter(&stderrBuf)
 
 	if err := cmd.Start(); err != nil {
-		return nil, nil, nil, fmt.Errorf("acp: probe start %s: %w", a.cmd, err)
+		return nil, nil, nil, fmt.Errorf("acp: probe start %s: %w", bin, err)
 	}
 
 	// The server-request handler needs to reference `tr` itself in order
@@ -93,9 +104,7 @@ func (a *Agent) probeSpawn(ctx context.Context, cwd string) (*transport, *bytes.
 	// uninitialised copy.
 	var tr *transport
 	tr = newTransport(stdout, stdin,
-		func(method string, _ json.RawMessage) {
-			slog.Debug("acp-probe: notification", "method", method)
-		},
+		onNotif,
 		func(_ string, id json.RawMessage, _ json.RawMessage) {
 			_ = tr.respondError(id, -32601, "probe: method not implemented")
 		},
@@ -185,19 +194,13 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 		return nil, nil
 	}
 
-	a.mu.RLock()
-	workDir := a.workDir
-	a.mu.RUnlock()
-	absWorkDir, err := filepath.Abs(workDir)
-	if err != nil {
-		absWorkDir = workDir
-	}
+	absWorkDir := a.canonicalWorkDir()
 
 	probeCtx, cancel := context.WithTimeout(ctx, listSessionsProbeTimeout)
 	defer cancel()
 
 	started := time.Now()
-	tr, stderrBuf, teardown, err := a.probeSpawn(probeCtx, absWorkDir)
+	tr, stderrBuf, teardown, err := a.probeSpawn(probeCtx, absWorkDir, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -210,9 +213,9 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 		}
 		return nil, err
 	}
-	if len(init.AgentCapabilities.SessionCapabilities.List) == 0 {
+	a.noteCapabilities(init)
+	if !sessionListSupported(init) {
 		slog.Info("acp: session/list unsupported by agent, caching for fast-path", "command", a.cmd)
-		a.listUnsupported.Store(true)
 		return nil, nil
 	}
 
@@ -224,6 +227,7 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 		a.listUnsupported.Store(true)
 		return nil, nil
 	}
+	a.rememberTitles(entries)
 	out := convertSessionList(entries, absWorkDir)
 	slog.Info("acp: session/list completed",
 		"total_entries", len(entries),
@@ -242,7 +246,9 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 func convertSessionList(entries []acpSessionListEntry, cwdFilter string) []core.AgentSessionInfo {
 	out := make([]core.AgentSessionInfo, 0, len(entries))
 	for _, e := range entries {
-		if cwdFilter != "" && e.Cwd != "" && !strings.EqualFold(filepath.Clean(e.Cwd), filepath.Clean(cwdFilter)) {
+		// Compare symlink-resolved paths. /tmp and /private/tmp are the
+		// same directory on macOS; a raw string compare drops real sessions.
+		if cwdFilter != "" && e.Cwd != "" && !sameCwd(e.Cwd, cwdFilter) {
 			continue
 		}
 		info := core.AgentSessionInfo{
@@ -257,6 +263,16 @@ func convertSessionList(entries []acpSessionListEntry, cwdFilter string) []core.
 		out = append(out, info)
 	}
 	return out
+}
+
+func wrapProbeStderr(err error, stderrBuf *bytes.Buffer) error {
+	if err == nil || stderrBuf == nil {
+		return err
+	}
+	if msg := strings.TrimSpace(stderrBuf.String()); msg != "" {
+		return fmt.Errorf("%w (stderr: %s)", err, truncateForLog(msg, 200))
+	}
+	return err
 }
 
 func truncateForLog(s string, n int) string {

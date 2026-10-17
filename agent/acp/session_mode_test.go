@@ -277,13 +277,48 @@ func TestProbeListSessions_parsesSessions(t *testing.T) {
 // fakeCallbacks captures reportModes / reportListSupported invocations
 // so tests can assert on them deterministically.
 type fakeCallbacks struct {
-	mu         sync.Mutex
-	modes      []acpModesBlock
-	listCalls  []bool
+	mu           sync.Mutex
+	modes        []acpModesBlock
+	listCalls    []bool
+	deleteCalls  []bool
+	modelCurrent string
+	modelOptions []core.ModelOption
+	titles       map[string]string
 }
 
-func (f *fakeCallbacks) reportModes(b acpModesBlock)       { f.mu.Lock(); f.modes = append(f.modes, b); f.mu.Unlock() }
-func (f *fakeCallbacks) reportListSupported(supported bool) { f.mu.Lock(); f.listCalls = append(f.listCalls, supported); f.mu.Unlock() }
+func (f *fakeCallbacks) reportModes(b acpModesBlock) {
+	f.mu.Lock()
+	f.modes = append(f.modes, b)
+	f.mu.Unlock()
+}
+func (f *fakeCallbacks) reportListSupported(supported bool) {
+	f.mu.Lock()
+	f.listCalls = append(f.listCalls, supported)
+	f.mu.Unlock()
+}
+func (f *fakeCallbacks) reportDeleteSupported(supported bool) {
+	f.mu.Lock()
+	f.deleteCalls = append(f.deleteCalls, supported)
+	f.mu.Unlock()
+}
+func (f *fakeCallbacks) reportModelOptions(current string, options []core.ModelOption) {
+	f.mu.Lock()
+	f.modelCurrent = current
+	f.modelOptions = append([]core.ModelOption(nil), options...)
+	f.mu.Unlock()
+}
+func (f *fakeCallbacks) reportThoughtLevel(string, []string) {}
+
+func (f *fakeCallbacks) reportModeDescriptions(map[string]string) {}
+
+func (f *fakeCallbacks) reportSessionTitle(sessionID, title string) {
+	f.mu.Lock()
+	if f.titles == nil {
+		f.titles = map[string]string{}
+	}
+	f.titles[sessionID] = title
+	f.mu.Unlock()
+}
 func (f *fakeCallbacks) lastModes() (acpModesBlock, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -306,6 +341,8 @@ func newTestSession(t *testing.T, cb sessionCallbacks) (*acpSession, *io.PipeWri
 		events:        make(chan core.Event, 32),
 		permByID:      make(map[string]permState),
 		toolInputByID: make(map[string]string),
+		toolNameByID:  make(map[string]string),
+		updateNotify:  make(chan struct{}, 1),
 		callbacks:     cb,
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -381,6 +418,38 @@ func TestSession_SetLiveMode_success(t *testing.T) {
 	}
 	if last.CurrentModeID != "plan" {
 		t.Fatalf("callback currentModeId = %q, want plan", last.CurrentModeID)
+	}
+}
+
+func TestSession_SetLiveMode_ModeAlias(t *testing.T) {
+	s, wResp, rReq := newTestSession(t, nil)
+	s.modeAliases = map[string]string{"normal": "accept-edits"}
+	s.absorbModes(&acpModesBlock{
+		CurrentModeID: "ask",
+		AvailableModes: []acpModeInfo{
+			{ID: "accept-edits", Name: "Code"},
+			{ID: "ask", Name: "Ask"},
+		},
+	})
+	var got string
+	go scriptACP(t, rReq, wResp, func(method string, params json.RawMessage) (string, string) {
+		if method != "session/set_mode" {
+			return "", "unexpected " + method
+		}
+		var body struct {
+			ModeID string `json:"modeId"`
+		}
+		if err := json.Unmarshal(params, &body); err != nil {
+			return "", err.Error()
+		}
+		got = body.ModeID
+		return `{}`, ""
+	})
+	if !s.SetLiveMode("normal") {
+		t.Fatal("alias normal should apply accept-edits")
+	}
+	if got != "accept-edits" || s.CurrentMode() != "accept-edits" {
+		t.Fatalf("modeId=%q current=%q", got, s.CurrentMode())
 	}
 }
 

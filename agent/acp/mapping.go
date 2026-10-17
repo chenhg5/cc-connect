@@ -43,7 +43,14 @@ func mapSessionUpdate(sessionID string, params json.RawMessage) []core.Event {
 	case "user_message_chunk":
 		// History replay during session/load — suppress to avoid echoing user input.
 		return nil
+	case "available_commands_update", "config_option_update", "session_info_update", "usage_update", "current_mode_update":
+		// Consumed by the session (when useful) and never shown as chat text.
+		return nil
 	default:
+		// Vendor methods such as "_cognition.ai/compaction" must not leak.
+		if strings.HasPrefix(head.SessionUpdate, "_") {
+			return nil
+		}
 		// Optional vendor / future ACP shapes — best-effort text extraction.
 		return mapSessionUpdateFallback(sid, head.SessionUpdate, wrap.Update)
 	}
@@ -56,62 +63,43 @@ func mapSessionUpdate(sessionID string, params json.RawMessage) []core.Event {
 // - Alternative: {"text": "..."} (top-level text field)
 // - Alternative: {"content": "..."} (content as string)
 func mapAgentMessageChunk(sessionID string, update json.RawMessage) []core.Event {
-	// Try standard ACP format first
+	text := acpMessageText(update)
+	if text == "" {
+		slog.Debug("acp: mapAgentMessageChunk: unknown format", "update", string(update))
+		return nil
+	}
+	return []core.Event{{
+		Type:      core.EventText,
+		Content:   text,
+		SessionID: sessionID,
+	}}
+}
+
+// acpMessageText extracts human-readable text from an ACP message chunk.
+// It accepts the standard content block plus a few vendor shapes.
+func acpMessageText(update json.RawMessage) string {
 	var u struct {
 		Content struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
-	}
-	if err := json.Unmarshal(update, &u); err == nil && u.Content.Text != "" {
-		return []core.Event{{
-			Type:      core.EventText,
-			Content:   u.Content.Text,
-			SessionID: sessionID,
-		}}
-	}
-
-	// Try alternative format: content.text without type field
-	var alt1 struct {
-		Content struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(update, &alt1); err == nil && alt1.Content.Text != "" {
-		return []core.Event{{
-			Type:      core.EventText,
-			Content:   alt1.Content.Text,
-			SessionID: sessionID,
-		}}
-	}
-
-	// Try alternative format: top-level text field
-	var alt2 struct {
 		Text string `json:"text"`
 	}
-	if err := json.Unmarshal(update, &alt2); err == nil && alt2.Text != "" {
-		return []core.Event{{
-			Type:      core.EventText,
-			Content:   alt2.Text,
-			SessionID: sessionID,
-		}}
+	if err := json.Unmarshal(update, &u); err == nil {
+		if u.Content.Text != "" {
+			return u.Content.Text
+		}
+		if u.Text != "" {
+			return u.Text
+		}
 	}
-
-	// Try alternative format: content as string
-	var alt3 struct {
+	var asString struct {
 		Content string `json:"content"`
 	}
-	if err := json.Unmarshal(update, &alt3); err == nil && alt3.Content != "" {
-		return []core.Event{{
-			Type:      core.EventText,
-			Content:   alt3.Content,
-			SessionID: sessionID,
-		}}
+	if err := json.Unmarshal(update, &asString); err == nil && asString.Content != "" {
+		return asString.Content
 	}
-
-	// Log unknown format for debugging
-	slog.Debug("acp: mapAgentMessageChunk: unknown format", "update", string(update))
-	return nil
+	return ""
 }
 
 func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
@@ -366,17 +354,13 @@ func pickPermissionOptionID(allow bool, options []permissionOption) string {
 		return ""
 	}
 	if allow {
-		for _, o := range options {
-			if strings.Contains(strings.ToLower(o.Kind), "allow") {
-				return o.OptionID
-			}
-		}
-		for _, o := range options {
-			if strings.Contains(strings.ToLower(o.Name), "allow") {
-				return o.OptionID
-			}
+		if id := pickAllowOptionID(options); id != "" {
+			return id
 		}
 		return options[0].OptionID
+	}
+	if id := optionIDByKind(options, "reject_once"); id != "" {
+		return id
 	}
 	for _, o := range options {
 		if strings.Contains(strings.ToLower(o.Kind), "reject") || strings.Contains(strings.ToLower(o.Kind), "deny") {
@@ -389,6 +373,55 @@ func pickPermissionOptionID(allow bool, options []permissionOption) string {
 		}
 	}
 	return options[len(options)-1].OptionID
+}
+
+// pickAllowOptionID prefers a one-shot allow. PermissionResult cannot
+// tell a single allow from allow-all, so both stay on this path.
+// Session-scoped and global options are only used when nothing narrower exists.
+func pickAllowOptionID(options []permissionOption) string {
+	if id := optionIDByKind(options, "allow_once"); id != "" {
+		return id
+	}
+	for _, o := range options {
+		id := strings.ToLower(strings.TrimSpace(o.OptionID))
+		if id == "allow_once" || id == "allow" {
+			return o.OptionID
+		}
+	}
+	var firstAllow string
+	for _, o := range options {
+		if !optionLooksAllow(o) {
+			continue
+		}
+		if firstAllow == "" {
+			firstAllow = o.OptionID
+		}
+		if strings.Contains(strings.ToLower(o.Kind), "allow") && !optionIsBroadAllow(o) {
+			return o.OptionID
+		}
+	}
+	return firstAllow
+}
+
+func optionIDByKind(options []permissionOption, kind string) string {
+	for _, o := range options {
+		if strings.EqualFold(strings.TrimSpace(o.Kind), kind) {
+			return o.OptionID
+		}
+	}
+	return ""
+}
+
+func optionLooksAllow(o permissionOption) bool {
+	kind := strings.ToLower(o.Kind)
+	name := strings.ToLower(o.Name)
+	id := strings.ToLower(o.OptionID)
+	return strings.Contains(kind, "allow") || strings.Contains(name, "allow") || strings.Contains(id, "allow")
+}
+
+func optionIsBroadAllow(o permissionOption) bool {
+	blob := strings.ToLower(o.OptionID + " " + o.Name)
+	return strings.Contains(blob, "bypass") || strings.Contains(blob, "global")
 }
 
 func buildPermissionResult(allow bool, optionID string) map[string]any {

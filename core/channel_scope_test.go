@@ -84,13 +84,18 @@ const (
 func newScopedEngine(t *testing.T) (*Engine, *stubPlatformEngine, *scopedKeyPlatform, string) {
 	t.Helper()
 	baseDir := t.TempDir()
-	shared := normalizeWorkspacePath(filepath.Join(baseDir, "repo-shared"))
-	other := normalizeWorkspacePath(filepath.Join(baseDir, "repo-other"))
-	for _, dir := range []string{shared, other} {
+	sharedRaw := filepath.Join(baseDir, "repo-shared")
+	otherRaw := filepath.Join(baseDir, "repo-other")
+	for _, dir := range []string{sharedRaw, otherRaw} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+	// Normalize after the directories exist. On macOS /var is a symlink to
+	// /private/var; EvalSymlinks fails on a missing path and would leave the
+	// unresolved form, which then disagrees with the engine's later resolve.
+	shared := normalizeWorkspacePath(sharedRaw)
+	other := normalizeWorkspacePath(otherRaw)
 
 	sessionsByWorkDir := map[string][]AgentSessionInfo{
 		shared: {

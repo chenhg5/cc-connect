@@ -2041,13 +2041,45 @@ app_secret = "your-feishu-app-secret"
 # work_dir = "/path/to/your/code"
 # # Optional: override only if the `devin` binary is at a non-standard path.
 # # Always use an absolute path when running under launchd / systemd where
-# # $PATH is minimal (e.g. ~/.local/bin may not be included).
+# # $PATH is minimal (e.g. ~/.local/bin may not be included). A wrapper script
+# # is fine here; model listing still calls `devin` on PATH unless models_cmd
+# # is set.
+# # 可选：仅当 devin 不在默认 PATH 时覆盖。launchd / systemd 下请写绝对路径。
+# # cmd 可以是包装脚本；模型列表默认仍调用 PATH 上的 devin，除非设置 models_cmd。
 # # cmd = "/Users/me/.local/bin/devin"
 # #
-# # Optional: initial permission mode applied to new sessions via
-# # session/set_mode. Valid ids: normal, ask, plan, accept-edits, bypass.
-# # 可选：新会话的初始权限模式。合法值：normal / ask / plan / accept-edits / bypass
+# # Optional: initial permission mode for new sessions (session/set_mode).
+# # Canonical ids: accept-edits, ask, plan, bypass.
+# # Aliases: normal/default/code/auto/edit -> accept-edits; readonly -> ask;
+# # yolo/dangerous/full-auto/bypassPermissions -> bypass. "normal" matches
+# # existing configs.
+# # 可选：新会话的初始权限模式。规范 id：accept-edits / ask / plan / bypass。
+# # 别名：normal、default、code、auto、edit 映射到 accept-edits；readonly 映射到 ask；
+# # yolo、dangerous、full-auto、bypassPermissions 映射到 bypass。已有配置里的 normal 可用。
 # # mode = "normal"
+# #
+# # Optional: model applied on the next session via ACP configOptions, plus
+# # reasoning effort applied via the "thought_level" option (allowed values
+# # depend on the model, typically low/medium/high/xhigh/max). Variant ids such
+# # as "claude-opus-5-5-high" or family aliases such as "opus" are resolved to
+# # the advertised model option; a suffix implies the effort unless
+# # reasoning_effort is set. Unknown values are reported to the chat, not applied.
+# # 可选：下一会话使用的模型（通过 ACP configOptions 设置）与推理力度（通过
+# # thought_level 选项设置，可选值随模型而定）。"claude-opus-5-5-high" 这类变体或
+# # "opus" 这类别名会解析为 Devin 公布的模型选项，后缀隐含力度（reasoning_effort 优先）。
+# # 无法识别的值会在会话开始时提示，不会静默生效。
+# # model = "swe-2-medium"
+# # reasoning_effort = "medium"
+# #
+# # Optional: binary for `models list` when cmd is a wrapper. Default: devin.
+# # 可选：cmd 是包装脚本时，用哪个可执行文件跑 models list。默认 devin。
+# # models_cmd = "devin"
+# #
+# # Features / 能力: live mode switch, model list, reasoning effort, /compact,
+# # session list/delete/history, AGENTS.md memory, skills under
+# # .devin/skills, .agents/skills, .windsurf/skills and $XDG_CONFIG_HOME/devin/skills.
+# # 支持实时切换模式、模型列表、推理力度、/compact、会话列表/删除/历史、
+# # AGENTS.md 记忆，以及上述目录中的 skills。
 # #
 # # Optional: Windsurf Enterprise API key (overrides `devin auth login`).
 # # 可选：Windsurf 企业版 API Key（优先级高于 `devin auth login` 的本地凭证）。

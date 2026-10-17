@@ -449,6 +449,19 @@ type ModelSwitcher interface {
 	AvailableModels(ctx context.Context) []ModelOption
 }
 
+// ModelDisplayNameReporter is an optional interface for running agent sessions
+// whose model id is not human-friendly (e.g. Devin's "claude-opus-5-5-medium"
+// for "Claude Opus 5.5"). The reply footer shows the display name when non-empty.
+type ModelDisplayNameReporter interface {
+	GetModelDisplayName() string
+}
+
+// ModelValidator lets an agent reject or canonicalize a model name before
+// /model switches to it.
+type ModelValidator interface {
+	ValidateModel(ctx context.Context, model string) (string, error)
+}
+
 // ReasoningEffortSwitcher is an optional interface for agents that support
 // runtime switching of reasoning effort.
 type ReasoningEffortSwitcher interface {
