@@ -392,6 +392,8 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	if fallback == "" {
 		fallback = text
 	}
+	text = NormalizeOutgoingContent(text)
+	fallback = NormalizeOutgoingContent(fallback)
 	switch item.Kind {
 	case ProgressEntryThinking, ProgressEntryError, ProgressEntryInfo:
 		if w.transform != nil {
