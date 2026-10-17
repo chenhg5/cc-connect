@@ -1339,6 +1339,26 @@ func TestCommandConfig_AddAndRemove(t *testing.T) {
 	}
 }
 
+func TestCommandConfig_ParsesExecTimeout(t *testing.T) {
+	writeTestConfig(t, baseConfigTOML+`
+[[commands]]
+name = "review"
+exec = "/usr/local/data/system/ai-review/review-command.sh"
+timeout = 300
+`)
+
+	cfg, err := LoadPermissive(ConfigPath)
+	if err != nil {
+		t.Fatalf("LoadPermissive() error: %v", err)
+	}
+	if len(cfg.Commands) != 1 {
+		t.Fatalf("commands = %#v, want one command", cfg.Commands)
+	}
+	if got := cfg.Commands[0].Timeout; got != 300 {
+		t.Fatalf("command timeout = %d, want 300", got)
+	}
+}
+
 func TestAliasConfig_AddAndRemove(t *testing.T) {
 	writeTestConfig(t, baseConfigTOML)
 
