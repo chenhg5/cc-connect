@@ -46,7 +46,15 @@ func testManagementServer(t *testing.T, token string) (*ManagementServer, *httpt
 	e := NewEngine("test-project", agent, nil, "", LangEnglish)
 	e.sessions = sm
 
-	mgmt := NewManagementServer(0, token, nil)
+	var mgmt *ManagementServer
+	if token == "" {
+		// Exercising the no-token path requires the explicit insecure opt-in;
+		// NewManagementServer alone now fails closed (returns nil) for an
+		// empty token, matching the fix for the empty-token auth bypass.
+		mgmt = NewManagementServerInsecure(0, token, nil)
+	} else {
+		mgmt = NewManagementServer(0, token, nil)
+	}
 	mgmt.RegisterEngine("test-project", e)
 
 	mux := http.NewServeMux()
@@ -221,7 +229,13 @@ func TestMgmt_NoAuthRequired(t *testing.T) {
 
 	r := mgmtGet(t, ts.URL+"/api/v1/status", "")
 	if !r.OK {
-		t.Fatalf("expected success without token when no token configured, got: %s", r.Error)
+		t.Fatalf("expected success without token when insecure mode is explicitly enabled, got: %s", r.Error)
+	}
+}
+
+func TestMgmt_EmptyTokenWithoutInsecureFailsClosed(t *testing.T) {
+	if NewManagementServer(0, "", nil) != nil {
+		t.Fatal("expected NewManagementServer to return nil for an empty token without insecure opt-in")
 	}
 }
 
@@ -731,7 +745,7 @@ func TestMgmt_CronExecByID_ProjectMissingIsBadRequest(t *testing.T) {
 }
 
 func TestMgmt_CORS(t *testing.T) {
-	mgmt := NewManagementServer(0, "", []string{"http://localhost:3000"})
+	mgmt := NewManagementServerInsecure(0, "", []string{"http://localhost:3000"})
 	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
 
 	mux := http.NewServeMux()
@@ -756,7 +770,7 @@ func TestMgmt_CORS(t *testing.T) {
 }
 
 func TestMgmt_BridgeWebSocketPathProxiesToBridgeServer(t *testing.T) {
-	mgmt := NewManagementServer(0, "", []string{"*"})
+	mgmt := NewManagementServerInsecure(0, "", []string{"*"})
 	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
 	mgmt.SetBridgeServer(NewBridgeServer(9810, "bridge-secret", "/bridge/ws", []string{"*"}))
 
@@ -781,7 +795,7 @@ func TestMgmt_BridgeWebSocketPathProxiesToBridgeServer(t *testing.T) {
 }
 
 func TestMgmt_BridgeWebSocketPathWorksWhenBridgeServerSetAfterHandlerBuild(t *testing.T) {
-	mgmt := NewManagementServer(0, "", []string{"*"})
+	mgmt := NewManagementServerInsecure(0, "", []string{"*"})
 	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
 
 	mux := http.NewServeMux()
@@ -1114,7 +1128,7 @@ func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 
 	t.Run("feishu", func(t *testing.T) {
-		mgmt := NewManagementServer(0, "", nil)
+		mgmt := NewManagementServerInsecure(0, "", nil)
 		called := false
 		mgmt.SetSetupFeishuSave(func(req FeishuSetupSaveRequest) error {
 			called = true
@@ -1139,7 +1153,7 @@ func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
 	})
 
 	t.Run("weixin", func(t *testing.T) {
-		mgmt := NewManagementServer(0, "", nil)
+		mgmt := NewManagementServerInsecure(0, "", nil)
 		called := false
 		mgmt.SetSetupWeixinSave(func(req WeixinSetupSaveRequest) error {
 			called = true
@@ -2978,7 +2992,7 @@ func TestMgmt_CCSwitchProviders_MethodNotAllowed(t *testing.T) {
 // pointer dereference`. handleSetupWeixinBegin already validated this same
 // field; this test pins the symmetric handling here.
 func TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL(t *testing.T) {
-	mgmt := NewManagementServer(0, "", nil)
+	mgmt := NewManagementServerInsecure(0, "", nil)
 
 	for _, bad := range []string{"://", "://malformed", "%zz"} {
 		body := map[string]any{
