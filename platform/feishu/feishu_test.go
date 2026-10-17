@@ -744,14 +744,17 @@ func TestExtractPostParts_TextOnly(t *testing.T) {
 		},
 	}
 	texts, images := p.extractPostParts("", post)
-	if len(texts) != 4 {
-		t.Fatalf("expected 4 text parts, got %d", len(texts))
+	if len(texts) != 3 {
+		t.Fatalf("expected 3 text parts, got %d", len(texts))
 	}
 	if texts[0] != "标题" {
 		t.Errorf("expected title '标题', got %q", texts[0])
 	}
-	if texts[1] != "第一行" {
-		t.Errorf("expected '第一行', got %q", texts[1])
+	if texts[1] != "第一行接着" {
+		t.Errorf("expected '第一行接着', got %q", texts[1])
+	}
+	if texts[2] != "第二行" {
+		t.Errorf("second paragraph = %q", texts[2])
 	}
 	if len(images) != 0 {
 		t.Errorf("expected 0 images, got %d", len(images))

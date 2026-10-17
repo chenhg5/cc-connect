@@ -5797,11 +5797,21 @@ func (p *Platform) extractPostParts(messageID string, post *postLang) ([]string,
 		textParts = append(textParts, post.Title)
 	}
 	for _, line := range post.Content {
+		lastWasText := false
 		for _, elem := range line {
+			if elem.Tag != "text" {
+				lastWasText = false
+			}
 			switch elem.Tag {
 			case "text":
 				if elem.Text != "" {
-					textParts = append(textParts, elem.Text)
+					// Adjacent text nodes belong to the same paragraph.
+					if lastWasText {
+						textParts[len(textParts)-1] += elem.Text
+					} else {
+						textParts = append(textParts, elem.Text)
+					}
+					lastWasText = true
 				}
 			case "a":
 				if elem.Text != "" && elem.Href != "" {
