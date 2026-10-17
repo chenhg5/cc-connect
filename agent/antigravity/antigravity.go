@@ -232,37 +232,59 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("antigravity: cannot determine home dir: %w", err)
 	}
-	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", antigravityProjectSlug(a.workDir), "chats")
-	entries, err := os.ReadDir(chatsDir)
-	if err != nil {
-		return fmt.Errorf("session file not found: %s", sessionID)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
-		}
-		fpath := filepath.Join(chatsDir, entry.Name())
-		file, err := os.Open(fpath)
-		if err != nil {
-			continue
-		}
 
-		scanner := bufio.NewScanner(file)
-		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		if scanner.Scan() {
-			var sf struct {
-				SessionID string `json:"sessionId"`
-			}
-			if json.Unmarshal([]byte(scanner.Text()), &sf) == nil && sf.SessionID == sessionID {
-				_ = file.Close()
-				return os.Remove(fpath)
+	deleted := false
+
+	// Check ~/.gemini/antigravity-cli/brain/<sessionID>
+	brainPath := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain", sessionID)
+	if _, err := os.Stat(brainPath); err == nil {
+		if err := os.RemoveAll(brainPath); err == nil {
+			deleted = true
+		}
+	}
+
+	// Check ~/.gemini/antigravity-cli/conversations/<sessionID>.*
+	convsDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "conversations")
+	if entries, err := os.ReadDir(convsDir); err == nil {
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), sessionID) {
+				_ = os.Remove(filepath.Join(convsDir, entry.Name()))
+				deleted = true
 			}
 		}
-		if err := scanner.Err(); err != nil {
+	}
+
+	// Check legacy ~/.gemini/tmp/<slug>/chats/
+	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", antigravityProjectSlug(a.workDir), "chats")
+	if entries, err := os.ReadDir(chatsDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+				continue
+			}
+			fpath := filepath.Join(chatsDir, entry.Name())
+			file, err := os.Open(fpath)
+			if err != nil {
+				continue
+			}
+			scanner := bufio.NewScanner(file)
+			scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+			if scanner.Scan() {
+				var sf struct {
+					SessionID string `json:"sessionId"`
+				}
+				if json.Unmarshal([]byte(scanner.Text()), &sf) == nil && sf.SessionID == sessionID {
+					_ = file.Close()
+					_ = os.Remove(fpath)
+					deleted = true
+					break
+				}
+			}
 			_ = file.Close()
-			continue
 		}
-		_ = file.Close()
+	}
+
+	if deleted {
+		return nil
 	}
 	return fmt.Errorf("session file not found: %s", sessionID)
 }
@@ -463,102 +485,167 @@ func listAntigravitySessions(workDir string) ([]core.AgentSessionInfo, error) {
 		return nil, fmt.Errorf("antigravity: cannot determine home dir: %w", err)
 	}
 
-	slug := antigravityProjectSlug(workDir)
-	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
+	sessionMap := make(map[string]core.AgentSessionInfo)
 
-	entries, err := os.ReadDir(chatsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+	// 1. Read ~/.gemini/antigravity-cli/cache/conversation_metadata.json
+	metaPath := filepath.Join(homeDir, ".gemini", "antigravity-cli", "cache", "conversation_metadata.json")
+	if data, err := os.ReadFile(metaPath); err == nil {
+		var meta struct {
+			Conversations map[string]struct {
+				Summary struct {
+					ID        string    `json:"ID"`
+					Title     string    `json:"Title"`
+					Preview   string    `json:"Preview"`
+					NumSteps  int       `json:"NumSteps"`
+					UpdatedAt time.Time `json:"UpdatedAt"`
+				} `json:"summary"`
+				IsInternal       bool      `json:"is_internal"`
+				LastModifiedTime time.Time `json:"last_modified_time"`
+			} `json:"conversations"`
 		}
-		return nil, fmt.Errorf("antigravity: read chats dir: %w", err)
+		if json.Unmarshal(data, &meta) == nil {
+			for id, conv := range meta.Conversations {
+				if conv.IsInternal || id == "" {
+					continue
+				}
+				summary := conv.Summary.Preview
+				if summary == "" {
+					summary = conv.Summary.Title
+				}
+				if summary == "" {
+					summary = id
+				}
+				if utf8.RuneCountInString(summary) > 60 {
+					summary = string([]rune(summary)[:60]) + "..."
+				}
+				modTime := conv.LastModifiedTime
+				if modTime.IsZero() {
+					modTime = conv.Summary.UpdatedAt
+				}
+				sessionMap[id] = core.AgentSessionInfo{
+					ID:           id,
+					Summary:      summary,
+					MessageCount: conv.Summary.NumSteps,
+					ModifiedAt:   modTime,
+				}
+			}
+		}
 	}
 
-	var sessions []core.AgentSessionInfo
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
+	// 2. Scan ~/.gemini/antigravity-cli/brain/ for session directories
+	brainDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
+	if entries, err := os.ReadDir(brainDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			id := entry.Name()
+			if _, exists := sessionMap[id]; exists {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			sessionMap[id] = core.AgentSessionInfo{
+				ID:           id,
+				Summary:      id,
+				MessageCount: 1,
+				ModifiedAt:   info.ModTime(),
+			}
 		}
+	}
 
-		fpath := filepath.Join(chatsDir, entry.Name())
-		file, err := os.Open(fpath)
-		if err != nil {
-			continue
-		}
-
-		var sf sessionFile
-		var summary string
-		msgCount := 0
-		hasUserMsg := false
-
-		scanner := bufio.NewScanner(file)
-		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		lineNum := 0
-		for scanner.Scan() {
-			line := scanner.Text()
-			if line == "" {
+	// 3. Scan legacy ~/.gemini/tmp/<slug>/chats/
+	slug := antigravityProjectSlug(workDir)
+	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
+	if entries, err := os.ReadDir(chatsDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 				continue
 			}
 
-			if lineNum == 0 {
-				if err := json.Unmarshal([]byte(line), &sf); err != nil || sf.SessionID == "" {
-					break
+			fpath := filepath.Join(chatsDir, entry.Name())
+			file, err := os.Open(fpath)
+			if err != nil {
+				continue
+			}
+
+			var sf sessionFile
+			var summary string
+			msgCount := 0
+			hasUserMsg := false
+
+			scanner := bufio.NewScanner(file)
+			scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+			lineNum := 0
+			for scanner.Scan() {
+				line := scanner.Text()
+				if line == "" {
+					continue
 				}
-				lineNum++
-				continue
-			}
 
-			var sl sessionLine
-			if json.Unmarshal([]byte(line), &sl) == nil {
-				if sl.Set != nil && !sl.Set.LastUpdated.IsZero() {
-					sf.LastUpdated = sl.Set.LastUpdated
-				} else if sl.Type != "" {
-					msgCount++
-					if sl.Type == "user" {
-						hasUserMsg = true
-						if summary == "" && len(sl.Content) > 0 {
-							text := strings.TrimSpace(sl.Content[0].Text)
-							for _, chunk := range strings.Split(text, "\n") {
-								chunk = strings.TrimSpace(chunk)
-								if chunk != "" {
-									summary = chunk
-									break
+				if lineNum == 0 {
+					if err := json.Unmarshal([]byte(line), &sf); err != nil || sf.SessionID == "" {
+						break
+					}
+					lineNum++
+					continue
+				}
+
+				var sl sessionLine
+				if json.Unmarshal([]byte(line), &sl) == nil {
+					if sl.Set != nil && !sl.Set.LastUpdated.IsZero() {
+						sf.LastUpdated = sl.Set.LastUpdated
+					} else if sl.Type != "" {
+						msgCount++
+						if sl.Type == "user" {
+							hasUserMsg = true
+							if summary == "" && len(sl.Content) > 0 {
+								text := strings.TrimSpace(sl.Content[0].Text)
+								for _, chunk := range strings.Split(text, "\n") {
+									chunk = strings.TrimSpace(chunk)
+									if chunk != "" {
+										summary = chunk
+										break
+									}
 								}
 							}
 						}
 					}
 				}
+				lineNum++
 			}
-			lineNum++
-		}
-		if err := scanner.Err(); err != nil {
 			_ = file.Close()
-			continue
-		}
-		_ = file.Close()
 
-		if sf.SessionID == "" || sf.Kind == "subagent" || !hasUserMsg {
-			continue
-		}
+			if sf.SessionID == "" || sf.Kind == "subagent" || !hasUserMsg {
+				continue
+			}
 
-		if summary == "" {
-			summary = sf.SessionID
-		}
-		if utf8.RuneCountInString(summary) > 60 {
-			summary = string([]rune(summary)[:60]) + "..."
-		}
+			if summary == "" {
+				summary = sf.SessionID
+			}
+			if utf8.RuneCountInString(summary) > 60 {
+				summary = string([]rune(summary)[:60]) + "..."
+			}
 
-		modTime := sf.LastUpdated
-		if modTime.IsZero() {
-			modTime = sf.StartTime
-		}
+			modTime := sf.LastUpdated
+			if modTime.IsZero() {
+				modTime = sf.StartTime
+			}
 
-		sessions = append(sessions, core.AgentSessionInfo{
-			ID:           sf.SessionID,
-			Summary:      summary,
-			MessageCount: msgCount,
-			ModifiedAt:   modTime,
-		})
+			sessionMap[sf.SessionID] = core.AgentSessionInfo{
+				ID:           sf.SessionID,
+				Summary:      summary,
+				MessageCount: msgCount,
+				ModifiedAt:   modTime,
+			}
+		}
+	}
+
+	var sessions []core.AgentSessionInfo
+	for _, info := range sessionMap {
+		sessions = append(sessions, info)
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
