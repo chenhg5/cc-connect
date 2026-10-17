@@ -29,15 +29,15 @@ func (c OutgoingRateLimitCfg) effectiveBurst() int {
 // the rate budget allows the send.
 type OutgoingRateLimiter struct {
 	mu        sync.Mutex
-	buckets   map[string]*tokenBucket            // key = platform name
+	buckets   map[string]*tokenBucket // key = platform name
 	defaults  OutgoingRateLimitCfg
-	overrides map[string]OutgoingRateLimitCfg     // per-platform overrides
+	overrides map[string]OutgoingRateLimitCfg // per-platform overrides
 }
 
 type tokenBucket struct {
 	tokens     float64
 	maxTokens  float64
-	refillRate float64   // tokens per second
+	refillRate float64 // tokens per second
 	lastRefill time.Time
 }
 

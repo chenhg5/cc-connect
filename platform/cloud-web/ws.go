@@ -27,11 +27,11 @@ type wsTransport struct {
 	name    string
 	project string
 
-	mu        sync.RWMutex
-	caps      map[string]bool
-	conn      *websocket.Conn
-	writeMu   sync.Mutex
-	cancel    context.CancelFunc
+	mu             sync.RWMutex
+	caps           map[string]bool
+	conn           *websocket.Conn
+	writeMu        sync.Mutex
+	cancel         context.CancelFunc
 	onInbound      inboundHandler
 	onConnected    func()
 	onDisconnected func(error)

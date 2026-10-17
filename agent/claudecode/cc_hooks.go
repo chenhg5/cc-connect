@@ -43,15 +43,15 @@ type ccHookDecision struct {
 // hookContext carries the session context needed to build hook stdin.
 // Fields mirror Claude Code's PermissionRequest hook input spec.
 type hookContext struct {
-	sessionID          string
-	toolName           string
-	toolInput          map[string]any
-	cwd                string
-	permissionMode     string
-	transcriptPath     string
-	permissionSuggestions []any // nil = omit from stdin
-	agentID            string // empty = omit
-	agentType          string // empty = omit
+	sessionID             string
+	toolName              string
+	toolInput             map[string]any
+	cwd                   string
+	permissionMode        string
+	transcriptPath        string
+	permissionSuggestions []any  // nil = omit from stdin
+	agentID               string // empty = omit
+	agentType             string // empty = omit
 }
 
 // ccPermissionHookRunner reads and executes Claude Code PermissionRequest

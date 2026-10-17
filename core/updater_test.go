@@ -23,7 +23,7 @@ func TestSemverCompare(t *testing.T) {
 		{"v1.0.0-beta.1", "v1.0.0-beta.1", 0},
 
 		// different pre-release prefixes
-		{"v1.0.0-rc.1", "v1.0.0-beta.1", 1},  // "rc" > "beta" lexicographically
+		{"v1.0.0-rc.1", "v1.0.0-beta.1", 1}, // "rc" > "beta" lexicographically
 		{"v1.0.0-alpha.1", "v1.0.0-beta.1", -1},
 
 		// without 'v' prefix
