@@ -52,6 +52,14 @@ type acpSession struct {
 	availableModes []acpModeInfo
 	currentMode    string
 
+	// promptInFlight tracks active session/prompt RPCs. Text chunks that
+	// arrive while no prompt is in flight belong to background work (kimi
+	// acp runs /compact asynchronously and reports "Compaction completed"
+	// long after the /compact prompt's turn has ended) — they get a
+	// synthetic EventResult so the engine's unsolicited reader relays them
+	// to the platform instead of buffering them until the next turn.
+	promptInFlight atomic.Int32
+
 	callbacks sessionCallbacks // may be nil (tests, integration harness)
 }
 
@@ -375,8 +383,20 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	sid := s.currentACPSessionID()
 	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
 	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
+	hasVisible := false
 	for _, ev := range mapSessionUpdate(sid, params) {
+		if ev.Type == core.EventText && ev.Content != "" {
+			hasVisible = true
+		}
 		s.emit(ev)
+	}
+	// Out-of-turn text (background work reporting after its turn ended —
+	// e.g. kimi acp's "Compaction completed" chunk) would otherwise sit in
+	// the events buffer until the next foreground turn drains and drops it
+	// as stale. Close it with a synthetic result so the unsolicited reader
+	// relays it immediately.
+	if hasVisible && s.promptInFlight.Load() == 0 {
+		s.emit(core.Event{Type: core.EventResult, SessionID: sid, Done: true})
 	}
 }
 
@@ -615,19 +635,25 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 	}
 
 	slog.Debug("acp: sending session/prompt", "session_id", sid, "prompt_len", len(prompt))
+	s.promptInFlight.Add(1)
 	res, err := s.tr.call(s.ctx, "session/prompt", params)
 	if err != nil {
+		s.promptInFlight.Add(-1)
 		s.emit(core.Event{Type: core.EventError, Error: err})
 		return fmt.Errorf("acp: session/prompt: %w", err)
 	}
 	slog.Debug("acp: session/prompt response", "session_id", sid, "response_len", len(res), "response", string(res))
 
 	// Text was streamed via session/update; engine aggregates EventText.
+	// Keep the in-flight mark until after EventResult is queued so a text
+	// chunk racing in from the read loop is not mistaken for out-of-turn
+	// background output.
 	s.emit(core.Event{
 		Type:      core.EventResult,
 		SessionID: sid,
 		Done:      true,
 	})
+	s.promptInFlight.Add(-1)
 	return nil
 }
 
