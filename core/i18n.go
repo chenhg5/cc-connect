@@ -451,12 +451,18 @@ const (
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
-	MsgAskQuestionTitle     MsgKey = "ask_question_title"
-	MsgAskQuestionNote      MsgKey = "ask_question_note"
-	MsgAskQuestionNoteMulti MsgKey = "ask_question_note_multi"
-	MsgAskQuestionMulti     MsgKey = "ask_question_multi"
-	MsgAskQuestionPrompt    MsgKey = "ask_question_prompt"
-	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
+	MsgAskQuestionTitle               MsgKey = "ask_question_title"
+	MsgAskQuestionNote                MsgKey = "ask_question_note"
+	MsgAskQuestionNoteMulti           MsgKey = "ask_question_note_multi"
+	MsgAskQuestionNoteFreeform        MsgKey = "ask_question_note_freeform"
+	MsgAskQuestionFreeformPlaceholder MsgKey = "ask_question_freeform_placeholder"
+	MsgAskQuestionFreeformLabel       MsgKey = "ask_question_freeform_label"
+	MsgAskQuestionFreeformSubmit      MsgKey = "ask_question_freeform_submit"
+	MsgAskqCardExpired                MsgKey = "askq_card_expired"
+	MsgAskqCardTooLong                MsgKey = "askq_card_too_long"
+	MsgAskQuestionMulti               MsgKey = "ask_question_multi"
+	MsgAskQuestionPrompt              MsgKey = "ask_question_prompt"
+	MsgAskQuestionAnswered            MsgKey = "ask_question_answered"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -2794,6 +2800,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "請回覆逗號分隔的選項編號（如 1,3）或直接輸入你的回答",
 		LangJapanese:           "カンマ区切りの番号（例: 1,3）で返信するか、直接回答を入力してください",
 		LangSpanish:            "Responda con los números de opción separados por comas (ej. 1,3) o escriba su respuesta",
+	},
+	MsgAskQuestionNoteFreeform: {
+		LangEnglish:            "None of the options fit? Type your answer in the input box below — it is passed back to the agent as-is",
+		LangChinese:            "选项不合适？直接在下方输入框输入你的想法，会原样作为回答传回",
+		LangTraditionalChinese: "選項不合適？直接在下方輸入框輸入你的想法，會原樣作為回答傳回",
+		LangJapanese:           "選択肢が合わない場合は、下の入力欄に直接回答を入力してください（そのまま agent に渡されます）",
+		LangSpanish:            "¿Ninguna opción encaja? Escribe tu respuesta en el cuadro de abajo; se pasa al agente tal cual",
+	},
+	MsgAskQuestionFreeformPlaceholder: {
+		LangEnglish:            "Type your answer…",
+		LangChinese:            "输入你的想法…",
+		LangTraditionalChinese: "輸入你的想法…",
+		LangJapanese:           "回答を入力…",
+		LangSpanish:            "Escribe tu respuesta…",
+	},
+	MsgAskQuestionFreeformLabel: {
+		LangEnglish:            "Free-form answer",
+		LangChinese:            "自由回答",
+		LangTraditionalChinese: "自由回答",
+		LangJapanese:           "自由入力",
+		LangSpanish:            "Respuesta libre",
+	},
+	MsgAskQuestionFreeformSubmit: {
+		LangEnglish:            "Send",
+		LangChinese:            "发送",
+		LangTraditionalChinese: "發送",
+		LangJapanese:           "送信",
+		LangSpanish:            "Enviar",
+	},
+	MsgAskqCardExpired: {
+		LangEnglish:            "This question has already been answered or is no longer active",
+		LangChinese:            "该问题已被回答或已失效",
+		LangTraditionalChinese: "該問題已被回答或已失效",
+		LangJapanese:           "この質問はすでに回答済みか、無効になっています",
+		LangSpanish:            "Esta pregunta ya fue respondida o ya no está activa",
+	},
+	MsgAskqCardTooLong: {
+		LangEnglish:            "Answer exceeds the 500-character limit and was not sent. Shorten it and submit again",
+		LangChinese:            "回答超过 500 字上限，未发送。请精简后重新提交",
+		LangTraditionalChinese: "回答超過 500 字上限，未發送。請精簡後重新提交",
+		LangJapanese:           "回答が500字の上限を超えているため送信されませんでした。短くして再送信してください",
+		LangSpanish:            "La respuesta supera el límite de 500 caracteres y no se envió. Acórtala y envíala de nuevo",
 	},
 	MsgAskQuestionMulti: {
 		LangEnglish:            " (multiple selections allowed, separate with commas)",
