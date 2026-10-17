@@ -1164,6 +1164,8 @@ app_secret = "your-feishu-app-secret"
 #                                 # Agent 完成回复后添加的表情回复（如 "🥳Done"）；设为 "none" 可禁用
 # card_final_preview_message = false # After an AI Card turn, send a separate Markdown summary
 #                                    # AI 卡片完成后额外发送一条普通 Markdown 摘要，用于刷新会话列表预览
+# at_mention_groups = false # Use text msgtype for group replies so @userId mentions are clickable (DingTalk only highlights @ in text); default false keeps markdown/card behavior
+#                           # 群回复改用 text 消息类型以携带可点击的 @ 提及（DingTalk 仅在 text msgtype 中高亮 @），默认 false 保持原有 markdown/卡片行为
 
 # WPS Xiezuo / WPS 协作 (uncomment to enable / 取消注释以启用)
 # 1. Create a WPS Open Platform app and enable event WebSocket delivery

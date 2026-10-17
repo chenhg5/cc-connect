@@ -95,6 +95,12 @@ type Platform struct {
 	cardFinalPreviewMessage bool
 	degradeUntil            time.Time
 	degradeMu               sync.Mutex
+
+	// atGroups enables clickable group @-mentions. When true, group replies are
+	// delivered as text messages (DingTalk only highlights @ in text msgtype,
+	// never in markdown/AI cards) carrying the asker's userId both inline and in
+	// at.atUserIds. Default false keeps the existing markdown/card behaviour.
+	atGroups bool
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -157,6 +163,9 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	cardFinalPreviewMessage, _ := opts["card_final_preview_message"].(bool)
 
+	// Group clickable @-mention (default off = unchanged behaviour).
+	atGroups, _ := opts["at_mention_groups"].(bool)
+
 	return &Platform{
 		clientID:                clientID,
 		clientSecret:            clientSecret,
@@ -171,6 +180,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		cardTemplateKey:         cardTemplateKey,
 		cardThrottleMs:          cardThrottleMs,
 		cardFinalPreviewMessage: cardFinalPreviewMessage,
+		atGroups:                atGroups,
 	}, nil
 }
 
@@ -954,6 +964,15 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if rc.proactive || rc.sessionWebhook == "" {
 		return p.sendProactiveMessage(ctx, rc, content)
 	}
+	// Group clickable @-mention: deliver as text (only text highlights @ in
+	// DingTalk). Fall back to the original markdown path on any failure.
+	if p.atGroups && rc.isGroup && rc.senderStaffId != "" {
+		if err := p.ReplyWithAt(ctx, rctx, mentionText(content, rc.senderStaffId), []string{rc.senderStaffId}, false); err != nil {
+			slog.Warn("dingtalk: group text @-reply failed, falling back to markdown", "error", err)
+		} else {
+			return nil
+		}
+	}
 	return p.Reply(ctx, rctx, content)
 }
 
@@ -1148,6 +1167,12 @@ func (p *Platform) CreateStreamingCard(ctx context.Context, replyCtx any) (core.
 	rc, ok := replyCtx.(replyContext)
 	if !ok {
 		return nil, fmt.Errorf("dingtalk: invalid reply context type %T", replyCtx)
+	}
+	if p.bypassCardForGroupAt(rc) {
+		// Group @-mention replies must go out as text (see mentionText); returning
+		// an error here makes the engine fall back to the normal message path
+		// (p.Send), where the text @-mention is produced.
+		return nil, fmt.Errorf("dingtalk: group at-mention bypasses streaming card")
 	}
 	return p.createAICard(ctx, rc)
 }
@@ -1793,6 +1818,39 @@ func extractAtUserIds(content string) []string {
 		}
 	}
 	return ids
+}
+
+// leadingMentionRegexp matches a single leading "@token" mention followed by
+// whitespace, e.g. the "@<sender name>" prefix injected upstream by the ACP
+// filter (acp-filter.js).
+var leadingMentionRegexp = regexp.MustCompile(`^\s*@[^\s@]+\s+`)
+
+// bypassCardForGroupAt reports whether streaming-card delivery should be skipped
+// so a group reply can be sent as a text message with a clickable @-mention.
+// When it returns true, CreateStreamingCard reports an error so the engine falls
+// back to its normal Send() path, which builds the text @-mention.
+func (p *Platform) bypassCardForGroupAt(rc replyContext) bool {
+	return p.atGroups && rc.isGroup
+}
+
+// mentionText formats reply content for a clickable DingTalk group @-mention.
+//
+// DingTalk highlights an @ only when the text body contains "@<userId>" AND the
+// same id is present in at.atUserIds (text msgtype only — markdown and
+// ActionCard render an @ as plain text). A leading "@name" prefix injected
+// upstream is dropped first so the mention is not duplicated.
+//
+// It intentionally strips only ONE leading mention (the upstream-injected
+// "@<name>"); see extractAtUserIds for full @userId extraction.
+func mentionText(content, staffID string) string {
+	if staffID == "" {
+		return content
+	}
+	body := leadingMentionRegexp.ReplaceAllString(content, "")
+	if strings.TrimSpace(body) == "" {
+		return "@" + staffID
+	}
+	return "@" + staffID + " " + body
 }
 
 // preprocessDingTalkMarkdown adapts content for DingTalk's markdown renderer:
