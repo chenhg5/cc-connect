@@ -51,6 +51,10 @@ type claudeSession struct {
 	sawInit       atomic.Bool
 	startupNotice atomic.Bool
 
+	// maomao fork: background tasks still running (see bgtasks.go).
+	bgTasks        atomic.Int32
+	bgTasksEndedAt atomic.Int64 // unix nanos when the count last dropped to 0
+
 	// activeModel stores the model id reported by the CLI's init event (e.g.
 	// "claude-opus-4-7[1m]"). It may be empty if the init event hasn't
 	// carried a model field yet; callers should fall back to the Agent's
@@ -643,6 +647,8 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 		if !cs.sawInit.Load() {
 			cs.startupNotice.Store(true)
 		}
+	case "background_tasks_changed":
+		cs.handleBackgroundTasksChanged(raw)
 	case "compact_boundary":
 		evt := core.Event{Type: core.EventText, Metadata: map[string]any{core.MetaContextCompacted: true}}
 		select {

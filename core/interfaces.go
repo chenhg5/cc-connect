@@ -683,6 +683,15 @@ type WorkspaceAgentOptionSnapshotter interface {
 	WorkspaceAgentOptions() map[string]any
 }
 
+// BackgroundTaskReporter is an optional interface for agent sessions that can
+// run background tasks inside the agent process (maomao fork). running is the
+// number still running; lastEndedAt is when the count last dropped to zero
+// (zero time if it never did). The agent-session idle close is deferred while
+// running > 0 and restarts its full timeout from lastEndedAt.
+type BackgroundTaskReporter interface {
+	BackgroundTasks() (running int, lastEndedAt time.Time)
+}
+
 // LiveModeSwitcher is an optional interface for running agent sessions that can
 // apply a mode change immediately without restarting the process.
 type LiveModeSwitcher interface {

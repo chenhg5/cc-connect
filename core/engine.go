@@ -4427,12 +4427,18 @@ func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interac
 		cancel()
 		return
 	}
+	e.armAgentSessionIdleTimerLocked(sessionKey, state, ctx, cancel, token, timeout, timeout)
+	state.mu.Unlock()
+}
+
+// armAgentSessionIdleTimerLocked stores cancel/token on state and starts the
+// timer goroutine. Caller holds state.mu.
+func (e *Engine) armAgentSessionIdleTimerLocked(sessionKey string, state *interactiveState, ctx context.Context, cancel context.CancelFunc, token uint64, wait, timeout time.Duration) {
 	state.agentSessionIdleCancel = cancel
 	state.agentSessionIdleToken = token
-	state.mu.Unlock()
 
 	go func() {
-		timer := time.NewTimer(timeout)
+		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
@@ -4442,6 +4448,27 @@ func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interac
 
 		e.cleanupInteractiveStateForIdleToken(sessionKey, state, token, timeout)
 	}()
+}
+
+// agentSessionIdleDeferral reports how much longer the idle close must wait
+// because of background tasks inside the agent process (maomao fork): a full
+// timeout while any is running (re-checked then), or the rest of the timeout
+// counted from when the last one ended. 0 means close now.
+func agentSessionIdleDeferral(agentSession AgentSession, timeout time.Duration) (time.Duration, int) {
+	r, ok := agentSession.(BackgroundTaskReporter)
+	if !ok {
+		return 0, 0
+	}
+	running, lastEndedAt := r.BackgroundTasks()
+	if running > 0 {
+		return timeout, running
+	}
+	if !lastEndedAt.IsZero() {
+		if left := timeout - time.Since(lastEndedAt); left > 0 {
+			return left, 0
+		}
+	}
+	return 0, 0
 }
 
 func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected *interactiveState, token uint64, timeout time.Duration) {
@@ -4463,6 +4490,22 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 		len(state.pendingMessages) > 0 {
 		state.mu.Unlock()
 		e.interactiveMu.Unlock()
+		return
+	}
+	if wait, running := agentSessionIdleDeferral(state.agentSession, timeout); wait > 0 {
+		// maomao fork: closing now would kill a background task and lose its
+		// completion notification. Re-arm under the same lock so a turn that
+		// starts afterwards cancels the new timer like any other.
+		oldCancel := state.agentSessionIdleCancel
+		ctx, cancel := context.WithCancel(e.ctx)
+		e.armAgentSessionIdleTimerLocked(sessionKey, state, ctx, cancel, e.agentSessionIdleSeq.Add(1), wait, timeout)
+		state.mu.Unlock()
+		e.interactiveMu.Unlock()
+		if oldCancel != nil {
+			oldCancel()
+		}
+		slog.Info("agent session idle timeout: deferred for background tasks",
+			"session_key", sessionKey, "running", running, "wait", wait)
 		return
 	}
 	agentSession = state.agentSession
