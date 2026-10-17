@@ -46,6 +46,7 @@ cc-connect 完整功能使用指南。
 | `/show <引用>` | 按引用查看文件、目录或代码片段 |
 | `/allow <工具名>` | 预授权工具 |
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
+| `/fast [on|off]` | 查看或切换 Codex Fast 模式（`service_tier`）|
 | `/mode [名称]` | 查看或切换权限模式 |
 | `/stop` | 停止当前执行 |
 | `/help` | 显示可用命令 |
@@ -83,6 +84,20 @@ reset_on_idle_mins = 60
 | YOLO | `bypassPermissions` / `yolo` | 全部自动通过 |
 
 ### Codex 模式
+
+Codex Fast 模式与推理强度相互独立。可以在 `[projects.agent.options]`
+中通过 `service_tier = "fast"`（或 `"default"`）设置项目默认值，也可以在聊天中切换：
+
+```text
+/fast       # 查看当前状态
+/fast on    # 使用 service_tier="fast"
+/fast off   # 使用 service_tier="default"
+```
+
+切换后，下一条消息会重启 Agent 进程，但保留 Codex 对话 ID 并恢复现有对话。
+Fast 模式是否可用取决于模型、账号和 Provider。未配置 `service_tier` 时，cc-connect
+会继承 Codex 自身的配置。非多工作区模式下，该设置是项目级默认值，
+会影响项目中的所有用户；多工作区模式会按工作区分别保存。
 
 | 模式 | 配置值 | 行为 |
 |------|--------|------|

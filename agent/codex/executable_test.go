@@ -152,6 +152,7 @@ func TestDesktopCLIProcess(t *testing.T) {
 	if len(args) < 2 {
 		os.Exit(20)
 	}
+	recordFastModeFixture(fastModeFixtureRecord{Args: args})
 	if args[1] == "exec" {
 		fmt.Println(`{"type":"thread.started","thread_id":"fixture-thread"}`)
 		fmt.Println(`{"type":"item.completed","item":{"type":"agent_message","text":"desktop CLI reply"}}`)
@@ -164,8 +165,9 @@ func TestDesktopCLIProcess(t *testing.T) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		var req struct {
-			ID     any    `json:"id"`
-			Method string `json:"method"`
+			ID     any            `json:"id"`
+			Method string         `json:"method"`
+			Params map[string]any `json:"params"`
 		}
 		if json.Unmarshal(scanner.Bytes(), &req) != nil {
 			os.Exit(22)
@@ -173,6 +175,7 @@ func TestDesktopCLIProcess(t *testing.T) {
 		if req.ID == nil {
 			continue
 		}
+		recordFastModeFixture(fastModeFixtureRecord{Method: req.Method, Params: req.Params})
 		var result any = map[string]any{}
 		switch req.Method {
 		case "config/read":
