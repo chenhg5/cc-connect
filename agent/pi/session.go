@@ -620,6 +620,36 @@ func (s *piSession) handleEvent(raw map[string]any) {
 			}
 		}
 
+	case "agent_settled":
+		// Pi 0.85.x introduced agent_settled as the authoritative terminal
+		// "agent will not continue running" signal. Older agent_end can
+		// still fire mid-retry (with willRetry=true) and even when it
+		// doesn't, agent_settled is the canonical end-of-turn marker.
+		//
+		// Treat agent_settled as equivalent to agent_end with willRetry=false:
+		// flush pendingErr, then emit EventResult for both modes. The "both
+		// modes" part is intentional — unlike agent_end, where json mode
+		// relies on process exit to emit EventResult, reporter evidence
+		// (issue #1863) shows that on pi 0.85.x json mode the process can
+		// stay alive after agent_settled (e.g. when pi keeps the process
+		// around to handle queued follow-ups), so the engine would otherwise
+		// never see Done:true and the session would stay busy until /stop.
+		//
+		// Duplicate EventResult when both agent_end and agent_settled close
+		// the same turn is safe for the same reason as compaction_end below:
+		// processInteractiveEvents only sends a platform message when
+		// fullResponse has accumulated text in the second pass, which is
+		// empty for a re-emitted terminal; the only side effect is a
+		// redundant ws.BeginTurn/EndTurn pair, accepted as belt-and-suspenders.
+		if s.pendingErr != "" {
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", s.pendingErr)}
+			s.pendingErr = ""
+			s.safeSendEvent(evt)
+		}
+		sid := s.CurrentSessionID()
+		evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+		s.safeSendEvent(evt)
+
 	case "compaction_start":
 		// Pi fires this when ctx.compact() begins (slash command or
 		// turn_end threshold). The active extension typically notifies the
@@ -686,7 +716,38 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	// Informational — no events produced
 	case "agent_start", "turn_start", "turn_end", "message_start", "extension_error":
 	default:
-		slog.Debug("piSession: unrecognized event type", "type", eventType, "raw", raw)
+		// WARN (not DEBUG): silently dropping unknown pi events has masked
+		// terminal signals before (see issue #1863 — agent_settled was
+		// unrecognized and dropped for months). At minimum surface the
+		// event name so reporters and operators can spot a stale adapter
+		// without having to flip log levels first.
+		slog.Warn("piSession: unrecognized event type", "type", eventType, "raw", raw)
+	}
+}
+
+// safeSendEvent pushes evt onto s.events with the standard
+// ctx-cancellation fallback, AND recovers from "send on closed channel"
+// panics. The bare `select { case s.events <- evt: case <-s.ctx.Done(): }`
+// pattern panics if s.events has been closed while handleEvent was still
+// running. In production, Close() drains wg.Wait() before close(s.events),
+// so the panic is not reachable today — but agent_settled can now arrive
+// on a long-lived RPC session right after Close() begins, so we guard
+// defensively: an event that nobody can receive is not worth crashing
+// the readLoop over.
+func (s *piSession) safeSendEvent(evt core.Event) {
+	defer func() {
+		// Defensive: only "send on closed channel" is expected. Anything
+		// else is a real bug — re-raise.
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && err.Error() == "send on closed channel" {
+				return
+			}
+			panic(r)
+		}
+	}()
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
 	}
 }
 
