@@ -241,6 +241,13 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 // quotes of an `Environment="KEY=VALUE"` directive. Per systemd.exec(5),
 // backslashes and double quotes need escaping; literal newlines and tabs
 // must be encoded as `\n` / `\t` so the unit file remains a single line.
+//
+// `%` is escaped to `%%` as well. systemd expands specifiers in Environment=
+// values, so a literal `%` in a path is not inert: `%Q` (or any other
+// unknown specifier) makes the unit invalid, and `%n` silently expands to
+// the unit name — which would point HOME at a directory that does not
+// exist. A home directory is a plausible place for a `%`, so it must
+// survive verbatim.
 func escapeSystemdEnvValue(v string) string {
 	var b strings.Builder
 	b.Grow(len(v))
@@ -256,6 +263,8 @@ func escapeSystemdEnvValue(v string) string {
 			b.WriteString(`\r`)
 		case '\t':
 			b.WriteString(`\t`)
+		case '%':
+			b.WriteString(`%%`)
 		default:
 			b.WriteRune(r)
 		}
