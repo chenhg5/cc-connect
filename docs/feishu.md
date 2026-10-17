@@ -319,6 +319,32 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 
 ---
 
+## Card 2.0 流式卡片的打字效果
+
+使用 Card 2.0 富卡片时，可以在飞书或 Lark 的平台选项中分别配置打字间隔、每次显示的字符数和刷新策略。三个选项都可省略，也可只设置其中一个；未设置的选项不写入卡片 JSON，由飞书使用其默认值。以下 `50 ms` 仅作调参示例，不表示 CC-Connect 设置了默认间隔；希望保留飞书默认效果时，无需填写这三项。
+
+```toml
+# 全局启用 Card 2.0 富卡片；也可在对应项目的 [projects.display] 中设置
+[display]
+card_mode = "rich"
+
+# 将以下配置加入已有的飞书或 Lark 平台选项
+[projects.platforms.options]
+print_frequency_ms = 50
+print_step = 2
+print_strategy = "fast"
+```
+
+| 配置项 | 取值 | 作用 |
+|---|---|---|
+| `print_frequency_ms` | 整数，`20–1000` ms | 客户端文字上屏间隔，值越小，打字动画越快。 |
+| `print_step` | 整数，`1–1000` | 每次上屏的字符数，值越大，每次显示越多。 |
+| `print_strategy` | `"fast"` 或 `"delay"` | `fast` 在新文字到达时快速显示积压文字；`delay` 将文字排队按打字节奏显示。 |
+
+策略字符串会去除首尾空格且不区分大小写；数字选项必须是整数，不接受字符串或小数。非法配置会在平台初始化时报错，并指出对应字段。这些选项控制客户端的显示动画，不改变模型生成速度或 CC-Connect 向飞书发送更新的频率；长连接与 Webhook 模式均适用。它们只在流式富卡片中生成 `streaming_config`，卡片完成后省略该字段，超大卡片压缩时仍保留配置。
+
+---
+
 ## Mention 功能
 
 开启 `resolve_mentions = true` 后，机器人发出的消息中 `@显示名` 会自动替换为飞书原生 at 标签。
