@@ -421,3 +421,27 @@ func contains(xs []string, want string) bool {
 	}
 	return false
 }
+
+// A tool step is reported once, from its ACTIVE line, so core sees activity
+// while agy runs tools; the DONE line for the same step yields nothing.
+// Lines are from agy 1.4.0 stream-json output.
+func TestParseStreamLineToolStep(t *testing.T) {
+	as := &antigravitySession{}
+	active := `{"event":"step_update","step_update":{"conversation_id":"978fd8b4-758b-4db4-ba69-5e2d5909c70f","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"sleep 3 \u0026\u0026 ls /tmp/agytest"}}}}`
+	done := `{"event":"step_update","step_update":{"conversation_id":"978fd8b4-758b-4db4-ba69-5e2d5909c70f","step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","duration_seconds":3.168968,"tool_info":{"name":"run_command","parameters":{"CommandLine":"sleep 3 \u0026\u0026 ls /tmp/agytest"},"output":"err.txt\t\tstream.jsonl\r\n"}}}`
+
+	ev, ok := as.parseStreamLine([]byte(active + "\n"))
+	if !ok {
+		t.Fatal("ACTIVE tool line produced no event")
+	}
+	if ev.Type != core.EventToolUse || ev.ToolName != "run_command" || ev.Content != "" {
+		t.Fatalf("ACTIVE tool line: got %+v", ev)
+	}
+	if want := `{"CommandLine":"sleep 3 \u0026\u0026 ls /tmp/agytest"}`; ev.ToolInput != want {
+		t.Errorf("ToolInput = %q, want %q", ev.ToolInput, want)
+	}
+
+	if ev, ok := as.parseStreamLine([]byte(done + "\n")); ok {
+		t.Errorf("DONE tool line should produce no event, got %+v", ev)
+	}
+}

@@ -295,14 +295,21 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 	}
 }
 
-// agyStreamLine is one line of agy --output-format stream-json (agy 1.3.5):
-// "init" first, then "step_update" per step, then "result".
+// agyStreamLine is one line of agy --output-format stream-json (agy 1.3.5,
+// checked again on 1.4.0): "init" first, then "step_update" per step, then
+// "result". A tool step comes twice with the same step_index: "ACTIVE" with
+// its parameters, then "DONE" with its output as well.
 type agyStreamLine struct {
 	Event          string `json:"event"`
 	ConversationID string `json:"conversation_id"`
 	StepUpdate     *struct {
 		StepType  string `json:"step_type"`
+		State     string `json:"state"`
 		TextDelta string `json:"text_delta"`
+		ToolName  string `json:"tool_name"`
+		ToolInfo  *struct {
+			Parameters json.RawMessage `json:"parameters"`
+		} `json:"tool_info"`
 	} `json:"step_update"`
 	Result *struct {
 		ConversationID string `json:"conversation_id"`
@@ -311,7 +318,10 @@ type agyStreamLine struct {
 }
 
 // parseStreamLine turns one stdout line into the event core sees. Reply text
-// is what text mode prints: every agent_response delta. A line not starting
+// is what text mode prints: every agent_response delta. Each tool step is
+// passed on once, when it starts, as EventToolUse; besides showing progress
+// this keeps core's idle timer from killing a turn that runs tools for longer
+// than idle_timeout_mins without writing text. A line not starting
 // with "{" is passed on as text; a "{" line that does not parse (the last,
 // cut-off line of a killed process) is dropped. A failed result comes back
 // as EventError for readLoop to report after the process exits.
@@ -335,8 +345,21 @@ func (as *antigravitySession) parseStreamLine(line []byte) (core.Event, bool) {
 			return core.Event{Type: core.EventText, SessionID: id}, true
 		}
 	case "step_update":
-		if u := l.StepUpdate; u != nil && u.StepType == "agent_response" && u.TextDelta != "" {
+		u := l.StepUpdate
+		if u == nil {
+			break
+		}
+		if u.StepType == "agent_response" && u.TextDelta != "" {
 			return core.Event{Type: core.EventText, Content: u.TextDelta}, true
+		}
+		// The DONE line repeats the step; reporting it too would show the
+		// tool twice.
+		if u.StepType == "tool" && u.State == "ACTIVE" {
+			input := ""
+			if u.ToolInfo != nil && len(u.ToolInfo.Parameters) > 0 {
+				input = string(u.ToolInfo.Parameters)
+			}
+			return core.Event{Type: core.EventToolUse, ToolName: u.ToolName, ToolInput: input}, true
 		}
 	case "result":
 		if r := l.Result; r != nil && r.Status != "" && r.Status != "SUCCESS" {
