@@ -24,11 +24,13 @@ import (
 // A single instance is created globally; each project engine receives a
 // lightweight BridgePlatform handle that delegates to this server.
 type BridgeServer struct {
+	bind        string
 	port        int
 	token       string
 	path        string
 	corsOrigins []string
-	insecure    bool // allow running without token (local dev only)
+	insecure    bool   // allow running without token (local dev only)
+	listenAddr  string // resolved listener address, set by Start
 	server      *http.Server
 
 	mu       sync.RWMutex
@@ -153,16 +155,26 @@ type bridgeAudioData struct {
 }
 
 func NewBridgeServer(port int, token, path string, corsOrigins []string) *BridgeServer {
-	return newBridgeServer(port, token, path, corsOrigins, false)
+	return newBridgeServer("", port, token, path, corsOrigins, false)
+}
+
+// NewBridgeServerWithBind creates a BridgeServer on the specified interface.
+func NewBridgeServerWithBind(bind string, port int, token, path string, corsOrigins []string) *BridgeServer {
+	return newBridgeServer(bind, port, token, path, corsOrigins, false)
 }
 
 // NewBridgeServerInsecure creates a BridgeServer that allows running without token.
 // This should only be used for local development.
 func NewBridgeServerInsecure(port int, token, path string, corsOrigins []string) *BridgeServer {
-	return newBridgeServer(port, token, path, corsOrigins, true)
+	return newBridgeServer("", port, token, path, corsOrigins, true)
 }
 
-func newBridgeServer(port int, token, path string, corsOrigins []string, insecure bool) *BridgeServer {
+// NewBridgeServerInsecureWithBind creates an insecure BridgeServer on the specified interface.
+func NewBridgeServerInsecureWithBind(bind string, port int, token, path string, corsOrigins []string) *BridgeServer {
+	return newBridgeServer(bind, port, token, path, corsOrigins, true)
+}
+
+func newBridgeServer(bind string, port int, token, path string, corsOrigins []string, insecure bool) *BridgeServer {
 	if port <= 0 {
 		port = 9810
 	}
@@ -180,10 +192,19 @@ func newBridgeServer(port int, token, path string, corsOrigins []string, insecur
 		return nil
 	}
 	if insecure && token == "" {
-		slog.Warn("bridge: running in INSECURE mode without authentication - only use for local development!")
+		if isLoopbackBind(bind) {
+			slog.Warn("bridge: running in INSECURE mode without authentication - only use for local development!",
+				"bind", normalizeBind(bind))
+		} else {
+			// Start rejects this: an unauthenticated listener must never leave loopback.
+			slog.Error("bridge: insecure mode without a token is only allowed on loopback",
+				"bind", normalizeBind(bind),
+				"help", "set bridge.token, or bind to "+defaultLoopbackBind)
+		}
 	}
 
 	return &BridgeServer{
+		bind:        normalizeBind(bind),
 		port:        port,
 		token:       token,
 		path:        path,
@@ -210,8 +231,15 @@ func (bs *BridgeServer) RegisterEngine(projectName string, engine *Engine, bp *B
 	bs.engines[projectName] = &bridgeEngineRef{engine: engine, platform: bp}
 }
 
-// Start launches the HTTP/WebSocket server.
-func (bs *BridgeServer) Start() {
+// Start validates the listen configuration, binds the socket synchronously and
+// then serves in the background. Bind failures and unauthenticated non-loopback
+// exposure are returned to the caller instead of only being logged from a
+// goroutine after startup already reported success.
+func (bs *BridgeServer) Start() error {
+	if err := checkRemoteBindAuth("bridge", bs.bind, bs.token); err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(bs.path, bs.handleWS)
 
@@ -219,15 +247,58 @@ func (bs *BridgeServer) Start() {
 	mux.HandleFunc("/bridge/sessions", bs.corsHTTP(bs.authHTTP(bs.handleSessions)))
 	mux.HandleFunc("/bridge/sessions/", bs.corsHTTP(bs.authHTTP(bs.handleSessionRoutes)))
 
-	addr := fmt.Sprintf(":%d", bs.port)
+	ln, addr, err := listenTCP(bs.bind, bs.port)
+	if err != nil {
+		return fmt.Errorf("bridge: %w", err)
+	}
+	bs.listenAddr = ln.Addr().String()
 	bs.server = &http.Server{Addr: addr, Handler: mux}
 
+	if !isLoopbackBind(bs.bind) {
+		bs.warnRemoteExposure(ln.Addr().String())
+	}
+
 	go func() {
-		slog.Info("bridge: server started", "addr", addr, "path", bs.path)
-		if err := bs.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := bs.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("bridge: server error", "error", err)
 		}
 	}()
+	slog.Info("bridge: server started", "addr", bs.listenAddr, "scope", bindScope(bs.bind), "path", bs.path)
+	return nil
+}
+
+// warnRemoteExposure logs the specific risks of a non-loopback bridge listener.
+// A token is required for such a bind, but insecure mode additionally disables
+// the WebSocket origin check, and a wildcard CORS origin widens the browser
+// surface — both deserve a targeted warning rather than a generic one.
+func (bs *BridgeServer) warnRemoteExposure(addr string) {
+	reasons := make([]string, 0, 2)
+	if bs.insecure {
+		reasons = append(reasons, "insecure=true disables the WebSocket origin check")
+	}
+	for _, o := range bs.corsOrigins {
+		if o == "*" {
+			reasons = append(reasons, "cors_origins=[\"*\"] allows any browser origin")
+			break
+		}
+	}
+	fields := []any{
+		"addr", addr,
+		"scope", bindScope(bs.bind),
+		"help", "the bridge WebSocket and REST API are reachable from the network; preserve the token and change bind/port (restart required) if this was unintended",
+	}
+	if len(reasons) > 0 {
+		fields = append(fields, "risks", strings.Join(reasons, "; "))
+		slog.Warn("bridge: listening on a non-loopback address in an unsafe configuration", fields...)
+		return
+	}
+	slog.Warn("bridge: listening on a non-loopback address", fields...)
+}
+
+// Addr returns the resolved listener address after a successful Start, or the
+// empty string when the server has not started.
+func (bs *BridgeServer) Addr() string {
+	return bs.listenAddr
 }
 
 // corsHTTP wraps a handler with CORS headers. OPTIONS preflight is handled directly.
