@@ -56,7 +56,11 @@ func TestCUJ_A10_FooterQuotaToggles(t *testing.T) {
 	env.engine.SetReplyFooterEnabled(true)
 	env.engine.SetShowUsage5h(true)
 	env.engine.SetShowUsageWeek(true)
-	defer env.engine.Stop()
+	defer func() {
+		if err := env.engine.Stop(); err != nil {
+			t.Errorf("stop engine: %v", err)
+		}
+	}()
 	chat := func(prompt, want string) string {
 		env.t.Helper()
 		before := len(env.plat.getSent())
