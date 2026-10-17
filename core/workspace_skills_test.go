@@ -286,7 +286,11 @@ func TestSkills_ScheduledJobsUseExecutionWorkspace(t *testing.T) {
 				plain := &stubPlatformEngine{n: "feishu"}
 				p := &cujReplyCtxPlatform{stubPlatformEngine: plain}
 				e, a, b := newWorkspaceSkillsEngine(t, p)
-				workDir, wantDir, wantBody := "", a, "Instructions a"
+				// A workspace resolved through a binding reaches the agent in
+				// normalized form (forward slashes on Windows). A cron/timer
+				// work_dir override is not a workspace key and is passed
+				// through as given, so it keeps the host separator.
+				workDir, wantDir, wantBody := "", normalizeWorkspacePath(a), "Instructions a"
 				if override {
 					workDir, wantDir, wantBody = b, b, "Instructions b"
 				}
