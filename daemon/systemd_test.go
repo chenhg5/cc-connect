@@ -196,3 +196,59 @@ func TestUnitFileMode_Is0600(t *testing.T) {
 		t.Errorf("mode = %o, want 0600", info.Mode().Perm())
 	}
 }
+
+// TestBuildUnit_IncludesConfigPath pins the CC_CONFIG hand-off: ExecStart
+// passes no --config flag, so an explicit config path installed via
+// `daemon install --config <path>` reaches the daemon only through the
+// environment. Without this line a non-"config.toml" filename would
+// silently resolve to ~/.cc-connect/config.toml at startup.
+func TestBuildUnit_IncludesConfigPath(t *testing.T) {
+	mgr := &systemdManager{system: false}
+	out := mgr.buildUnit(Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/opt/myapp",
+		ConfigPath: "/opt/myapp/app.toml",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+	})
+	if !strings.Contains(out, `Environment="CC_CONFIG=/opt/myapp/app.toml"`) {
+		t.Errorf("expected CC_CONFIG in unit; got:\n%s", out)
+	}
+}
+
+// TestBuildUnit_OmitsConfigPathWhenEmpty mirrors the HOME case: no
+// --config means no CC_CONFIG line, so the daemon keeps its normal
+// ./config.toml -> ~/.cc-connect/config.toml lookup.
+func TestBuildUnit_OmitsConfigPathWhenEmpty(t *testing.T) {
+	mgr := &systemdManager{system: false}
+	out := mgr.buildUnit(Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+	})
+	if strings.Contains(out, "CC_CONFIG") {
+		t.Errorf("CC_CONFIG should not appear when ConfigPath is empty:\n%s", out)
+	}
+}
+
+// TestBuildUnit_EnvExtraConfigDoesNotOverrideTemplate pins template
+// ownership: an EnvExtra capture of CC_CONFIG must not shadow the path
+// the user explicitly passed to `daemon install --config`.
+func TestBuildUnit_EnvExtraConfigDoesNotOverrideTemplate(t *testing.T) {
+	mgr := &systemdManager{system: false}
+	out := mgr.buildUnit(Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/opt/myapp",
+		ConfigPath: "/opt/myapp/app.toml",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvExtra:   map[string]string{"CC_CONFIG": "/should-not-override.toml"},
+	})
+	if strings.Contains(out, "/should-not-override.toml") {
+		t.Errorf("EnvExtra CC_CONFIG leaked past template ownership:\n%s", out)
+	}
+	if !strings.Contains(out, `Environment="CC_CONFIG=/opt/myapp/app.toml"`) {
+		t.Errorf("expected explicit ConfigPath to survive; got:\n%s", out)
+	}
+}

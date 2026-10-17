@@ -23,6 +23,7 @@ const (
 type Config struct {
 	BinaryPath    string
 	WorkDir       string
+	ConfigPath    string // explicit config file path; WorkingDirectory is what actually selects the config at runtime
 	HomeDir       string // captured HOME so subprocesses can resolve ~/… paths (issue: relative data_dir fallback)
 	LogFile       string
 	LogMaxSize    int64

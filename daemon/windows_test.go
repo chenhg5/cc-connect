@@ -200,3 +200,78 @@ func TestSchtasksInstall_RewritesExistingScript(t *testing.T) {
 		t.Errorf("reinstalled script is missing the captured env value:\n%s", written)
 	}
 }
+
+// TestBuildWindowsTaskScript_IncludesConfigPath pins the CC_CONFIG hand-off
+// on Windows. The scheduled task launches the binary with no --config
+// argument; Set-Location only pins the working directory, which selects the
+// right file only when it happens to be named config.toml. An explicit
+// `daemon install --config <path>` reaches the daemon solely through this
+// environment variable.
+func TestBuildWindowsTaskScript_IncludesConfigPath(t *testing.T) {
+	cfg := Config{
+		BinaryPath: `C:\cc\cc-connect.exe`,
+		WorkDir:    `C:\Users\me\ccapp`,
+		ConfigPath: `C:\Users\me\ccapp\ccapp.toml`,
+		LogFile:    `C:\Users\me\ccapp\cc-connect.log`,
+		LogMaxSize: 1024,
+	}
+	script := buildWindowsTaskScript(cfg)
+	if !strings.Contains(script, `$env:CC_CONFIG = 'C:\Users\me\ccapp\ccapp.toml'`) {
+		t.Fatalf("script should include CC_CONFIG; got:\n%s", script)
+	}
+}
+
+// TestBuildWindowsTaskScript_OmitsConfigPathWhenEmpty ensures no
+// $env:CC_CONFIG assignment is emitted when the caller passed no --config.
+func TestBuildWindowsTaskScript_OmitsConfigPathWhenEmpty(t *testing.T) {
+	cfg := Config{
+		BinaryPath: `C:\cc\cc-connect.exe`,
+		WorkDir:    `C:\Users\me\ccapp`,
+		LogFile:    `C:\Users\me\ccapp\cc-connect.log`,
+		LogMaxSize: 1024,
+	}
+	script := buildWindowsTaskScript(cfg)
+	if strings.Contains(script, "CC_CONFIG") {
+		t.Fatalf("script should omit CC_CONFIG when ConfigPath empty; got:\n%s", script)
+	}
+}
+
+// TestBuildWindowsTaskScript_EnvExtraConfigDoesNotOverrideTemplate mirrors
+// the guarantee the systemd and launchd backends make: an env capture must
+// not shadow the config path the user passed to `daemon install --config`.
+func TestBuildWindowsTaskScript_EnvExtraConfigDoesNotOverrideTemplate(t *testing.T) {
+	cfg := Config{
+		BinaryPath: `C:\cc\cc-connect.exe`,
+		WorkDir:    `C:\Users\me\ccapp`,
+		ConfigPath: `C:\Users\me\ccapp\ccapp.toml`,
+		LogFile:    `C:\Users\me\ccapp\cc-connect.log`,
+		LogMaxSize: 1024,
+		EnvExtra:   map[string]string{"CC_CONFIG": `C:\should-not-override.toml`},
+	}
+	script := buildWindowsTaskScript(cfg)
+	if strings.Contains(script, "should-not-override") {
+		t.Fatalf("EnvExtra CC_CONFIG leaked past template ownership:\n%s", script)
+	}
+	if !strings.Contains(script, `$env:CC_CONFIG = 'C:\Users\me\ccapp\ccapp.toml'`) {
+		t.Fatalf("expected explicit ConfigPath to survive; got:\n%s", script)
+	}
+}
+
+// TestBuildWindowsTaskScript_ConfigPathEscapesQuotes covers a path with a
+// single quote, which PowerShell would otherwise terminate early.
+func TestBuildWindowsTaskScript_ConfigPathEscapesQuotes(t *testing.T) {
+	cfg := Config{
+		BinaryPath: `C:\cc\cc-connect.exe`,
+		WorkDir:    `C:\Users\me\ccapp`,
+		ConfigPath: `C:\Users\o'brien\ccapp.toml`,
+		LogFile:    `C:\log`,
+		LogMaxSize: 1024,
+	}
+	script := buildWindowsTaskScript(cfg)
+	if strings.Contains(script, `'C:\Users\o'brien\ccapp.toml'`) {
+		t.Fatalf("unescaped single quote would break the PowerShell line:\n%s", script)
+	}
+	if !strings.Contains(script, `o''brien`) {
+		t.Fatalf("expected doubled single quote; got:\n%s", script)
+	}
+}

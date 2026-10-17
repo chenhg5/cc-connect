@@ -990,14 +990,23 @@ func TestCronScheduler_SleepRecovery_PastDueFiresImmediately(t *testing.T) {
 	}
 	entry.nextRun = time.Now().Add(-8 * time.Hour)
 	cs.mu.Unlock()
+
+	// Sample the baseline BEFORE signalling. runLoop is a separate
+	// goroutine: if it wins the race it delivers the job's messages
+	// before we read the count, and a baseline sampled afterwards
+	// already includes them — so waiting for count > baseline+1 could
+	// never be satisfied, and the test would burn its whole deadline
+	// and fail even though the job fired correctly.
+	startSent := len(platform.getSent())
 	cs.signalWakeUp()
 
 	// Should fire within maxCronTimerSpan (30s) of the wake-up signal,
 	// not 8 hours from now (the naive pre-fix behavior).
 	deadline := time.Now().Add(maxCronTimerSpan + 5*time.Second)
-	startSent := len(platform.getSent())
 	for time.Now().Before(deadline) {
-		if len(platform.getSent()) > startSent+1 {
+		// The job produces more than one message (progress + result);
+		// any increase past the pre-signal baseline proves it ran.
+		if len(platform.getSent()) > startSent {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)

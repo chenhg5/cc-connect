@@ -189,6 +189,18 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestConfigValidatePermissive_ZeroProjects(t *testing.T) {
+	// validatePermissive must allow a config with no [[projects]] entries:
+	// the web setup flow runs against exactly this shape and creates the
+	// first project through the UI. Strict validate() still rejects it.
+	if err := (&Config{}).validatePermissive(); err != nil {
+		t.Errorf("validatePermissive() with zero projects = %v, want nil", err)
+	}
+	if err := (&Config{}).validate(); err == nil {
+		t.Error("validate() with zero projects = nil, want error")
+	}
+}
+
 func TestRunAsEnv_RejectsDangerousVars(t *testing.T) {
 	dangerous := []string{"PATH", "path", "LD_PRELOAD", "HOME", "USER", "SHELL", "SUDO_USER", "SUDO_COMMAND", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"}
 	for _, v := range dangerous {
