@@ -558,6 +558,26 @@ func cronJobRunStatus(store *CronStore, id string) (found bool, lastRunSet bool,
 	return false, false, ""
 }
 
+type cronRunResult struct {
+	id  string
+	err error
+}
+
+func awaitCronRun(t *testing.T, completed <-chan cronRunResult, id string) {
+	t.Helper()
+	select {
+	case result := <-completed:
+		if result.id != id {
+			t.Fatalf("completed cron job %q, want %q", result.id, id)
+		}
+		if result.err != nil {
+			t.Fatalf("cron job %q failed: %v", id, result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("cron job %q did not complete persistence", id)
+	}
+}
+
 func TestCronJob_ExecutionTimeout(t *testing.T) {
 	j := &CronJob{}
 	if got := j.ExecutionTimeout(); got != defaultCronJobTimeout {
@@ -950,18 +970,13 @@ func TestCronScheduler_SleepRecovery_PastDueFiresImmediately(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	platform := &stubCronReplyTargetPlatform{
-		stubPlatformEngine: stubPlatformEngine{n: "discord"},
-	}
-	agentSession := newResultAgentSession("recovered")
-	agent := &resultAgent{session: agentSession}
-
-	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
-	defer e.cancel()
-
 	cs := NewCronScheduler(store)
-	e.cronScheduler = cs
-	cs.RegisterEngine("test", e)
+	dispatched := make(chan string, 1)
+	cs.dispatchJob = func(job *CronJob, manual bool) {
+		if !manual {
+			dispatched <- job.ID
+		}
+	}
 
 	job := &CronJob{
 		ID:         "recover",
@@ -988,21 +1003,26 @@ func TestCronScheduler_SleepRecovery_PastDueFiresImmediately(t *testing.T) {
 		cs.mu.Unlock()
 		t.Fatal("entry missing")
 	}
-	entry.nextRun = time.Now().Add(-8 * time.Hour)
+	backdated := time.Now().Add(-8 * time.Hour)
+	entry.nextRun = backdated
 	cs.mu.Unlock()
 	cs.signalWakeUp()
 
-	// Should fire within maxCronTimerSpan (30s) of the wake-up signal,
-	// not 8 hours from now (the naive pre-fix behavior).
-	deadline := time.Now().Add(maxCronTimerSpan + 5*time.Second)
-	startSent := len(platform.getSent())
-	for time.Now().Before(deadline) {
-		if len(platform.getSent()) > startSent+1 {
-			return
+	select {
+	case id := <-dispatched:
+		if id != job.ID {
+			t.Fatalf("dispatched job %q, want %q", id, job.ID)
 		}
-		time.Sleep(50 * time.Millisecond)
+	case <-time.After(maxCronTimerSpan + 5*time.Second):
+		t.Fatal("past-due job was not dispatched after wake-up")
 	}
-	t.Fatalf("past-due job did not fire within %v after wake-up signal", maxCronTimerSpan+5*time.Second)
+	cs.Stop() // joins fireDueJobs, including the schedule advancement
+	cs.mu.RLock()
+	prevRun, nextRun := entry.prevRun, entry.nextRun
+	cs.mu.RUnlock()
+	if !prevRun.Equal(backdated) || !nextRun.After(backdated) {
+		t.Fatalf("schedule did not advance: prev=%v next=%v backdated=%v", prevRun, nextRun, backdated)
+	}
 }
 
 // TestCronScheduler_AddJobDuringRunWakesLoop verifies that AddJob called
@@ -1238,7 +1258,15 @@ func TestCronScheduler_MultipleJobsAllFire(t *testing.T) {
 	cs := NewCronScheduler(store)
 
 	const n = 3
+	dispatched := make(map[string]int, n)
+	cs.dispatchJob = func(job *CronJob, manual bool) {
+		if manual {
+			t.Errorf("scheduled job %q dispatched as manual", job.ID)
+		}
+		dispatched[job.ID]++
+	}
 	ids := make([]string, n)
+	priorRuns := make(map[string]time.Time, n)
 	for i := 0; i < n; i++ {
 		job := &CronJob{
 			ID:         fmt.Sprintf("multi%d", i),
@@ -1254,30 +1282,36 @@ func TestCronScheduler_MultipleJobsAllFire(t *testing.T) {
 		}
 		ids[i] = job.ID
 
+		priorRuns[job.ID] = time.Now().Add(-time.Hour)
 		cs.entries[job.ID] = &cronEntry{
 			jobID:    job.ID,
 			schedule: mustParseStandardForTest(t, job.CronExpr),
-			nextRun:  time.Now().Add(-time.Hour),
+			nextRun:  priorRuns[job.ID],
 		}
 	}
 
-	// Fire directly. fireDueJobs calls store.Get + runJob, both of which
-	// short-circuit when the engine is nil (no engine registered for the
-	// project). The nextRun advancement we care about happens after.
+	// Fire directly so dispatch and schedule advancement are both observed
+	// without involving Engine execution or a platform reply.
+	beforeFire := time.Now()
 	cs.fireDueJobs()
 
 	// Every entry's nextRun should now be in the future (the schedule
 	// has been advanced past the past-due state).
-	now := time.Now()
 	for _, id := range ids {
+		if dispatched[id] != 1 {
+			t.Errorf("job %s dispatched %d times, want 1", id, dispatched[id])
+		}
 		cs.mu.RLock()
 		e, ok := cs.entries[id]
 		cs.mu.RUnlock()
 		if !ok {
 			t.Fatalf("entry %s missing after fireDueJobs", id)
 		}
-		if !e.nextRun.After(now) {
-			t.Errorf("entry %s: nextRun = %v, want > %v after fireDueJobs", id, e.nextRun, now)
+		if !e.prevRun.Equal(priorRuns[id]) {
+			t.Errorf("entry %s: prevRun=%v, want %v", id, e.prevRun, priorRuns[id])
+		}
+		if !e.nextRun.After(beforeFire) || !e.nextRun.After(e.prevRun) {
+			t.Errorf("entry %s: prevRun=%v nextRun=%v, want advancement past %v", id, e.prevRun, e.nextRun, beforeFire)
 		}
 	}
 }

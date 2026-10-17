@@ -160,6 +160,7 @@ type cujAgentSession struct {
 	// observed
 	sentPrompts []string
 	sentImages  [][]ImageAttachment
+	sentFiles   [][]FileAttachment
 	closeCount  int
 }
 
@@ -180,10 +181,16 @@ func newCUJAgentSession() *cujAgentSession {
 	}
 }
 
-func (s *cujAgentSession) Send(prompt string, _ string, images []ImageAttachment, _ []FileAttachment) error {
+func (s *cujAgentSession) Send(prompt string, _ string, images []ImageAttachment, files []FileAttachment) error {
 	s.mu.Lock()
 	s.sentPrompts = append(s.sentPrompts, prompt)
 	s.sentImages = append(s.sentImages, cloneCUJImages(images))
+	fileCopy := make([]FileAttachment, len(files))
+	for i, file := range files {
+		fileCopy[i] = file
+		fileCopy[i].Data = append([]byte(nil), file.Data...)
+	}
+	s.sentFiles = append(s.sentFiles, fileCopy)
 	reply := s.reply
 	delay := s.delayMs
 	override := s.nextEventOverride
@@ -264,6 +271,12 @@ func (s *cujAgentSession) getSentImages() [][]ImageAttachment {
 		out[i] = cloneCUJImages(images)
 	}
 	return out
+}
+
+func (s *cujAgentSession) getSentFiles() [][]FileAttachment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]FileAttachment(nil), s.sentFiles...)
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,10 +1279,13 @@ func TestCUJ_A4_VoiceMessageWithoutSTTSurfacesClearMessage(t *testing.T) {
 
 // CUJ-A5 · User uploads file → engine routes it to the agent.
 func TestCUJ_A5_FileReachesAgent(t *testing.T) {
-	plat := &stubPlatformEngine{n: "test"}
-	agent := &cujAgent{}
+	const finalReply = "file-f1-complete"
+	replies := make(chan string, 8)
+	plat := &stubPlatformEngine{n: "test", sentNotify: replies}
+	agent := &cujAgent{nextSessionEvents: []Event{{Type: EventResult, Content: finalReply, Done: true}}}
 	dir := t.TempDir()
 	e := NewEngine("test", agent, []Platform{plat}, dir+"/sessions.json", LangEnglish)
+	e.SetReplyFooterEnabled(false)
 
 	msg := &Message{
 		SessionKey: "test:file", Platform: "test", MessageID: "f1",
@@ -1282,17 +1298,24 @@ func TestCUJ_A5_FileReachesAgent(t *testing.T) {
 
 	deadline := time.After(2 * time.Second)
 	for {
-		agent.mu.Lock()
-		n := len(agent.sessions)
-		agent.mu.Unlock()
-		if n > 0 {
-			return
-		}
 		select {
+		case reply := <-replies:
+			if reply != finalReply {
+				continue
+			}
+			agent.mu.Lock()
+			sessions := append([]*cujAgentSession(nil), agent.sessions...)
+			agent.mu.Unlock()
+			if len(sessions) != 1 {
+				t.Fatalf("got %d agent sessions, want 1", len(sessions))
+			}
+			files := sessions[0].getSentFiles()
+			if len(files) != 1 || len(files[0]) != 1 || files[0][0].FileName != "note.txt" || files[0][0].MimeType != "text/plain" || string(files[0][0].Data) != "hello world" {
+				t.Fatalf("agent Send files = %#v, want note.txt with uploaded bytes", files)
+			}
+			return
 		case <-deadline:
-			t.Fatal("agent never received the message with file attachment")
-		default:
-			time.Sleep(10 * time.Millisecond)
+			t.Fatal("file turn's final reply was not sent")
 		}
 	}
 }
