@@ -38,7 +38,7 @@ func runTimer(args []string) {
 }
 
 func runTimerAdd(args []string) {
-	var project, sessionKey, delay, atTime, prompt, execCmd, desc, dataDir, sessionMode string
+	var project, sessionKey, delay, atTime, prompt, execCmd, desc, dataDir, sessionMode, configPath string
 	var timeoutMins *int
 	var mute bool
 
@@ -84,6 +84,11 @@ func runTimerAdd(args []string) {
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
 			}
 		case "--session-mode":
 			if i+1 < len(args) {
@@ -143,9 +148,10 @@ func runTimerAdd(args []string) {
 		os.Exit(1)
 	}
 
+	dataDir = resolveDataDir(dataDir, configPath)
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		printSocketNotFound(os.Stderr, dataDir, configPath, sockPath)
 		os.Exit(1)
 	}
 
@@ -194,7 +200,7 @@ func runTimerAdd(args []string) {
 }
 
 func runTimerList(args []string) {
-	var project, dataDir string
+	var project, dataDir, configPath string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--project", "-p":
@@ -207,6 +213,11 @@ func runTimerList(args []string) {
 				i++
 				dataDir = args[i]
 			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
+			}
 		}
 	}
 
@@ -214,9 +225,10 @@ func runTimerList(args []string) {
 		project = os.Getenv("CC_PROJECT")
 	}
 
+	dataDir = resolveDataDir(dataDir, configPath)
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		printSocketNotFound(os.Stderr, dataDir, configPath, sockPath)
 		os.Exit(1)
 	}
 
@@ -284,7 +296,7 @@ func runTimerList(args []string) {
 }
 
 func runTimerDel(args []string) {
-	var dataDir string
+	var dataDir, configPath string
 	var id string
 
 	for i := 0; i < len(args); i++ {
@@ -293,6 +305,11 @@ func runTimerDel(args []string) {
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
 			}
 		default:
 			id = args[i]
@@ -304,9 +321,10 @@ func runTimerDel(args []string) {
 		os.Exit(1)
 	}
 
+	dataDir = resolveDataDir(dataDir, configPath)
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		printSocketNotFound(os.Stderr, dataDir, configPath, sockPath)
 		os.Exit(1)
 	}
 
@@ -328,7 +346,7 @@ func runTimerDel(args []string) {
 }
 
 func runTimerInfo(args []string) {
-	var dataDir, id string
+	var dataDir, configPath, id string
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -336,6 +354,11 @@ func runTimerInfo(args []string) {
 			if i+1 < len(args) {
 				i++
 				dataDir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
 			}
 		default:
 			id = args[i]
@@ -348,9 +371,10 @@ func runTimerInfo(args []string) {
 		os.Exit(1)
 	}
 
+	dataDir = resolveDataDir(dataDir, configPath)
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		printSocketNotFound(os.Stderr, dataDir, configPath, sockPath)
 		os.Exit(1)
 	}
 
@@ -416,6 +440,7 @@ Options:
       --timeout-mins <n>     Max minutes to wait per run (0 = no limit; default 30)
       --mute                 Suppress all messages (start + result)
       --data-dir <path>      Data directory (default: ~/.cc-connect)
+      --config <path>        Config file used by the running daemon (Issue #1719)
   -h, --help                 Show this help
 
 Examples:

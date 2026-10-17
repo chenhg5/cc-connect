@@ -66,7 +66,7 @@ type SendRequest struct {
 func NewAPIServer(dataDir string) (*APIServer, error) {
 	sockDir := filepath.Join(dataDir, "run")
 	if err := os.MkdirAll(sockDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create run dir: %w", err)
+		return nil, fmt.Errorf("create run dir %q: %w", sockDir, err)
 	}
 	sockPath := filepath.Join(sockDir, "api.sock")
 
@@ -75,11 +75,11 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
-		return nil, fmt.Errorf("listen unix socket: %w", err)
+		return nil, fmt.Errorf("listen unix socket %q: %w", sockPath, err)
 	}
 	if err := os.Chmod(sockPath, 0o600); err != nil {
 		_ = listener.Close()
-		return nil, fmt.Errorf("chmod socket: %w", err)
+		return nil, fmt.Errorf("chmod socket %q: %w", sockPath, err)
 	}
 
 	s := &APIServer{
@@ -111,6 +111,13 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 
 func (s *APIServer) SocketPath() string {
 	return s.socketPath
+}
+
+// SocketDir returns the directory containing the Unix socket (e.g.
+// <dataDir>/run). Exposed so CLI subcommands can build an accurate
+// diagnostic when the server's socket is missing. See issue #1719.
+func (s *APIServer) SocketDir() string {
+	return filepath.Dir(s.socketPath)
 }
 
 func (s *APIServer) RegisterEngine(name string, e *Engine) {
