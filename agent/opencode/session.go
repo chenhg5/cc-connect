@@ -376,23 +376,21 @@ func extractToolInput(state map[string]any) string {
 	if state == nil {
 		return ""
 	}
-	// Prefer title as a concise description (e.g. "List files in current directory")
-	if title, ok := state["title"].(string); ok && title != "" {
-		return title
-	}
 	switch input := state["input"].(type) {
 	case string:
 		return input
 	case map[string]any:
-		// Use "description" or "command" fields if available
-		if desc, ok := input["description"].(string); ok && desc != "" {
-			return desc
-		}
-		if cmd, ok := input["command"].(string); ok && cmd != "" {
-			return cmd
-		}
+		// Preserve structured input for downstream card renderers. They apply
+		// their own allowlist and redaction; reducing this to title/command here
+		// loses useful fields such as grep include/path and read offset/limit.
+		// The size cap prevents an unusually large tool payload from flooding cards.
 		b, _ := json.Marshal(input)
-		return truncate(string(b), 200)
+		return truncate(string(b), 2000)
+	}
+	// Fall back to the human-readable title only when the event has no structured
+	// input to preserve.
+	if title, ok := state["title"].(string); ok && title != "" {
+		return title
 	}
 	return ""
 }
