@@ -275,4 +275,29 @@ func (s *Session) SettleHandoff(delivered bool) {
 		s.HandoffFrom, s.HandoffReason = s.handoffTaken[0], s.handoffTaken[1]
 	}
 	s.handoffTaken = [2]string{}
+	if !delivered && s.freshTaken {
+		s.freshCtx = true // maomao fork: the fresh-context images too (freshContextImages)
+	}
+	s.freshTaken = false
+}
+
+// MarkFreshContext records that the agent process was started without resuming, so the next
+// turn's context holds none of the channel's earlier images (maomao fork, freshContextImages).
+func (s *Session) MarkFreshContext() {
+	s.mu.Lock()
+	s.freshCtx = true
+	s.mu.Unlock()
+}
+
+// TakeFreshContext returns and clears the fresh-context mark; SettleHandoff puts it back when
+// the turn carrying it was not sent.
+func (s *Session) TakeFreshContext() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := s.freshCtx
+	s.freshCtx = false
+	if f {
+		s.freshTaken = true
+	}
+	return f
 }

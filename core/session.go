@@ -55,6 +55,8 @@ type Session struct {
 	mu           sync.Mutex `json:"-"`
 	busy         bool       `json:"-"`
 	handoffTaken [2]string  // taken by a turn not yet sent (maomao fork)
+	freshCtx     bool       // maomao fork: agent started without resume; see freshContextImages
+	freshTaken   bool       // freshCtx taken by a turn not yet sent
 }
 
 // TurnCtxSent is what has been put into one agent context (maomao fork). It is

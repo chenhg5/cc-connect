@@ -2104,11 +2104,6 @@ func derefInt(v *int) int {
 	return *v
 }
 
-// defaultImageFreshMB is an estimate, not a measured knee. Source (jingyu on
-// the relay, 2026-10-16/17 rollouts): with 8.3 MB of images in the context
-// each step took 90-130 s; with 3.4 MB, 8-20 s; with none, 16-25 s.
-const defaultImageFreshMB = 3.0
-
 // wireImageFresh applies [projects.image_fresh] (maomao fork).
 func wireImageFresh(engine *core.Engine, proj config.ProjectConfig) {
 	c := proj.ImageFresh
@@ -2116,7 +2111,7 @@ func wireImageFresh(engine *core.Engine, proj config.ProjectConfig) {
 		engine.SetImageFresh(false, 0)
 		return
 	}
-	mb := defaultImageFreshMB
+	mb := core.DefaultImageFreshMB // source: see its comment in core/backfill.go
 	if c.MaxMB != nil && *c.MaxMB > 0 {
 		mb = *c.MaxMB
 	}

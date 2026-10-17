@@ -1672,9 +1672,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 	e.teamNoteTurn(msg, session) // maomao fork: scheduled turns show on the team status board too
-	if back := e.cronChannelBackfill(targetPlatform, sessionKey, session); back != "" {
-		msg.Content = back + "\n\n（定时任务，回这条）\n" + msg.Content
-	}
+	e.cronChannelBackfill(targetPlatform, sessionKey, session, msg)
 
 	iKey := sessionKey
 	if workspaceDir != "" {
@@ -1873,9 +1871,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 	e.teamNoteTurn(msg, session) // maomao fork: scheduled turns show on the team status board too
-	if back := e.cronChannelBackfill(targetPlatform, sessionKey, session); back != "" {
-		msg.Content = back + "\n\n（定时任务，回这条）\n" + msg.Content
-	}
+	e.cronChannelBackfill(targetPlatform, sessionKey, session, msg)
 
 	iKey := sessionKey
 	if workspaceDir != "" {
@@ -3875,7 +3871,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		e.deferForCapacity(p, origMsg, agent, sessions, interactiveKey, workspaceDir, wait, true)
 	} else {
 		// Local copy, not msg.Content: the caller may still read *msg (data race).
-		content := e.withTurnBlocks(session, msg.SessionKey, msg.TurnCtxQuery, msg.Content, msg.TurnCtx)
+		content := msg.Content
+		images := msg.Images
+		if note, imgs := e.freshContextImages(p, session, msg, images); note != "" {
+			// maomao fork: first turn of a fresh context gets the recent channel images back.
+			content = note + "\n\n" + content
+			images = append(imgs, images...)
+		}
+		content = e.withTurnBlocks(session, msg.SessionKey, msg.TurnCtxQuery, content, msg.TurnCtx)
 		promptContent := e.buildSenderPrompt(content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
 		sendStart := time.Now()
@@ -3895,7 +3898,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 					session.SettleHandoff(false)
 					return fmt.Errorf("agent session became nil")
 				}
-				err := as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+				err := as.Send(promptContent, msg.MessageID, images, msg.Files)
 				session.SettleHandoff(err == nil) // maomao fork: put an undelivered handoff back
 				return err
 			},
@@ -4215,6 +4218,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 	}
 	isResume := startSessionID != ""
+	startedFresh := !isResume // maomao fork: see MarkFreshContext below
 	startAt := time.Now()
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
@@ -4235,6 +4239,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			startAt = time.Now()
 			agentSession, err = agent.StartSession(e.ctx, "")
 			startElapsed = time.Since(startAt)
+			startedFresh = true
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
 					"session_key", sessionKey, "elapsed", startElapsed)
@@ -4291,6 +4296,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		}
 	}
 
+	if startedFresh {
+		// maomao fork: the new context holds none of the channel's earlier images;
+		// the first turn re-attaches the recent ones (freshContextImages).
+		session.MarkFreshContext()
+	}
 	newState := &interactiveState{
 		agentSession:     agentSession,
 		platform:         p,

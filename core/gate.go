@@ -248,12 +248,15 @@ func (e *Engine) applyGate(p Platform, msg *Message, session *Session, interacti
 		}
 	}
 	content := msg.Content
-	if back, ok := e.channelBackfill(p, msg, session); ok {
+	if back, images, ok := e.channelBackfill(p, msg, session); ok {
 		// The channel itself is the record: it covers the gate buffer and also
 		// what the buffer never saw (downtime, restarts, dropped messages).
 		if back != "" {
 			content = back + "\n\n（最新，回这条）\n" + content
 		}
+		// maomao fork: the images of those posts go first, in channel order, before this
+		// message's own (for a new turn and for mid-turn injection alike).
+		msg.Images = append(images, msg.Images...)
 	} else if len(buffered) > 0 {
 		content = "（之前没回复的消息，按时间顺序）\n" + strings.Join(buffered, "\n") + "\n\n（最新）\n" + content
 	}

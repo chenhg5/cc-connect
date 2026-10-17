@@ -1500,18 +1500,32 @@ func (p *Platform) ChannelHistory(channelID, beforeID string, limit int) ([]core
 			}
 			text = "[回复 " + m.ReferencedMessage.Author.Username + "：" + string(q) + "] " + text
 		}
-		if text == "" && len(m.Embeds) > 0 {
+		if text == "" && len(m.Attachments) == 0 && len(m.Embeds) > 0 {
 			continue // progress cards and other embeds-only notices
-		}
-		if n := len(m.Attachments); n > 0 {
-			text = strings.TrimSpace(text + fmt.Sprintf("（附了 %d 个图片/文件）", n))
 		}
 		out = append(out, core.ChannelHistoryMessage{
 			ID: m.ID, Author: m.Author.Username, IsBot: m.Author.Bot,
 			IsSelf: m.Author.ID == p.botID, FromTurn: p.turnSent.has(m.ID), Content: text, Time: m.Timestamp,
+			Attachments: historyAttachments(m.Attachments),
 		})
 	}
 	return out, nil
+}
+
+// historyAttachments lists a post's attachments for channel backfill (maomao fork); core
+// downloads only those of the posts it shows (2026-10-17: history used to say only
+// "（附了 N 个图片/文件）", so a bot never saw photos posted before it was @-ed).
+func historyAttachments(atts []*discordgo.MessageAttachment) []core.ChannelHistoryAttachment {
+	var out []core.ChannelHistoryAttachment
+	for _, a := range atts {
+		if a == nil {
+			continue
+		}
+		out = append(out, core.ChannelHistoryAttachment{
+			URL: a.URL, FileName: a.Filename, ContentType: a.ContentType, Width: a.Width, Height: a.Height,
+		})
+	}
+	return out
 }
 
 func (p *Platform) ResolveChannelName(channelID string) (string, error) {
