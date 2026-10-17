@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1289,4 +1291,144 @@ func mustParseStandardForTest(t *testing.T, expr string) cron.Schedule {
 		t.Fatalf("cron.ParseStandard(%q) failed: %v", expr, err)
 	}
 	return s
+}
+
+// TestCronTimeout_StopsOnlyExactRun is the regression test for two concurrent
+// cron runs under the same SessionKey: only the run that timed out may be
+// cancelled, the sibling run must survive. The previous prefix-scan fix stopped
+// both.
+func TestCronTimeout_StopsOnlyExactRun(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: &stubAgentSession{}}, nil, "", LangEnglish)
+	defer e.cancel()
+
+	p := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	base := "discord:channel-1:user-1"
+	timedOut := base + "#cron:s1"
+	sibling := base + "#cron:s2"
+	e.interactiveMu.Lock()
+	e.interactiveStates[timedOut] = &interactiveState{platform: p, replyCtx: "ctx", eventsNeedResync: true}
+	e.interactiveStates[sibling] = &interactiveState{platform: p, replyCtx: "ctx", eventsNeedResync: true}
+	e.interactiveMu.Unlock()
+
+	if !stopCronRun(e, CronRunHandle{TurnKey: timedOut, RunSessionKey: base}) {
+		t.Fatal("stopCronRun returned false for the timed-out run")
+	}
+
+	e.interactiveMu.Lock()
+	_, timedOutAlive := e.interactiveStates[timedOut]
+	_, siblingAlive := e.interactiveStates[sibling]
+	e.interactiveMu.Unlock()
+	if timedOutAlive {
+		t.Error("timed-out run's state still present")
+	}
+	if !siblingAlive {
+		t.Error("sibling cron run under the same SessionKey was stopped")
+	}
+}
+
+// TestCronTimeout_WorkDirRunDoesNotStopInteractiveTurn covers the second gate
+// blocker: in multi-workspace mode the run key is
+// "<workDir>:<sessionKey>#cron:<sid>", which the old bare-key prefix scan
+// missed. It then fell back to the bare session key and stopped an unrelated
+// interactive turn instead. The exact run handle stops the run and leaves the
+// interactive turn alone.
+func TestCronTimeout_WorkDirRunDoesNotStopInteractiveTurn(t *testing.T) {
+	e := NewEngine("test", &resultAgent{session: &stubAgentSession{}}, nil, "", LangEnglish)
+	defer e.cancel()
+
+	p := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "slack"},
+	}
+	base := "slack:C1:U1"
+	runKey := "/ws/project:" + base + "#cron:s7"
+	interactiveKey := base
+	e.interactiveMu.Lock()
+	e.interactiveStates[runKey] = &interactiveState{platform: p, replyCtx: "ctx", eventsNeedResync: true}
+	e.interactiveStates[interactiveKey] = &interactiveState{platform: p, replyCtx: "ctx", eventsNeedResync: true}
+	e.interactiveMu.Unlock()
+
+	handle := CronRunHandle{TurnKey: runKey, RunSessionKey: base, WorkspaceDir: "/ws/project"}
+	if !stopCronRun(e, handle) {
+		t.Fatal("stopCronRun returned false for the workspace-prefixed run")
+	}
+
+	e.interactiveMu.Lock()
+	_, runAlive := e.interactiveStates[runKey]
+	_, interactiveAlive := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if runAlive {
+		t.Error("workspace-prefixed cron run state still present")
+	}
+	if !interactiveAlive {
+		t.Error("unrelated interactive turn on the bare session key was stopped")
+	}
+}
+
+// blockingCronSession is an agent session whose turn blocks (it never emits an
+// EventResult) until Close is called. Liveness is atomic so a turn loop reading
+// Alive() does not race the engine's async Close under -race.
+type blockingCronSession struct {
+	events chan Event
+	alive  atomic.Bool
+	once   sync.Once
+}
+
+func newBlockingCronSession() *blockingCronSession {
+	s := &blockingCronSession{events: make(chan Event, 1)}
+	s.alive.Store(true)
+	return s
+}
+
+func (s *blockingCronSession) Send(string, string, []ImageAttachment, []FileAttachment) error {
+	return nil
+}
+func (s *blockingCronSession) RespondPermission(string, PermissionResult) error { return nil }
+func (s *blockingCronSession) Events() <-chan Event                             { return s.events }
+func (s *blockingCronSession) CurrentSessionID() string                         { return "cron-block" }
+func (s *blockingCronSession) Alive() bool                                      { return s.alive.Load() }
+func (s *blockingCronSession) Close() error {
+	s.once.Do(func() {
+		s.alive.Store(false)
+		close(s.events)
+	})
+	return nil
+}
+
+// TestExecuteCronRun_TimeoutCancelsRunAndUnwinds drives the real timeout wiring
+// end to end: a blocking agent turn times out, its exact turn is cancelled from
+// the handle carried out of run creation, and the run goroutine unwinds within
+// the bounded wait (asserted by elapsed << cronStopWait).
+func TestExecuteCronRun_TimeoutCancelsRunAndUnwinds(t *testing.T) {
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	e := NewEngine("test", &resultAgent{session: newBlockingCronSession()}, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	job := &CronJob{ID: "job-timeout", SessionKey: "discord:channel-1:user-1", Prompt: "long task"}
+
+	start := time.Now()
+	err := executeCronRun(e, job, 100*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("executeCronRun() error = %v, want timeout", err)
+	}
+	if elapsed >= cronStopWait {
+		t.Fatalf("executeCronRun() waited %v; the run goroutine never unwound", elapsed)
+	}
+
+	e.interactiveMu.Lock()
+	var live int
+	for k := range e.interactiveStates {
+		if strings.Contains(k, "#cron:") {
+			live++
+		}
+	}
+	e.interactiveMu.Unlock()
+	if live != 0 {
+		t.Errorf("cron turn states still live after timeout: %d", live)
+	}
 }
