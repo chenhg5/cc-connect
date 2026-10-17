@@ -1150,6 +1150,9 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "item/completed":
 		var notif itemNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			if notif.Item["delivery"] == "async" && notif.ThreadID != "" && notif.ThreadID != s.CurrentSessionID() {
+				return
+			}
 			s.handleItemCompleted(notif.Item)
 		}
 
@@ -1253,6 +1256,9 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		}
 
 	case "agentMessage":
+		if s.handleAsyncUserInput(item) {
+			return
+		}
 		text, _ := item["text"].(string)
 		if strings.TrimSpace(text) != "" {
 			s.stateMu.Lock()
