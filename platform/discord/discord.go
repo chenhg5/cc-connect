@@ -33,6 +33,7 @@ type replyContext struct {
 	agent     bool   // maomao fork: this send carries the agent's own text (core.AgentReplyMarker)
 	lead      string // maomao fork: the team lead @-ed this sub to start the turn; the reply goes back to it
 	final     bool   // maomao fork: this send carries the turn's final answer (core.FinalReplyMarker)
+	notice    bool   // maomao fork: this send is a cc-connect notice (core.SystemNoticeMarker); see aux_channels.go
 }
 
 // interactionReplyCtx handles Discord slash command (Application Command)
@@ -71,10 +72,11 @@ type Platform struct {
 	leadReturned               sync.Map    // maomao fork: trigger message ID → time the reply was routed back to the lead
 	token                      string
 	allowFrom                  string
-	allowBots                  string // maomao fork: bot user IDs whose @-mentions of this bot are accepted
-	teamLead                   string // maomao fork: bot ID of the team lead; sub-vs-sub ping-pong is escalated to it
-	botName                    string // maomao fork: this bot's username, for escalation notes
-	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
+	allowBots                  string            // maomao fork: bot user IDs whose @-mentions of this bot are accepted
+	teamLead                   string            // maomao fork: bot ID of the team lead; sub-vs-sub ping-pong is escalated to it
+	botName                    string            // maomao fork: this bot's username, for escalation notes
+	auxChannels                map[string]string // maomao fork: main channel ID → log channel ID; see aux_channels.go
+	guildID                    string            // optional: per-guild registration (instant) vs global (up to 1h propagation)
 	progressStyle              string
 	cardEntries                int
 	cardLineLen                int
@@ -158,6 +160,13 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	cardHideThinking, _ := opts["progress_hide_thinking"].(bool)
 
+	// maomao fork: aux_channels moves progress cards, the sub-agent table and
+	// cc-connect notices out of the listed main channels (see aux_channels.go).
+	auxChannels, err := parseAuxChannels(opts["aux_channels"])
+	if err != nil {
+		return nil, err
+	}
+
 	var proxyU *url.URL
 	if proxyStr, _ := opts["proxy"].(string); proxyStr != "" {
 		u, err := url.Parse(proxyStr)
@@ -181,6 +190,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		cardEntries:                cardEntries,
 		cardLineLen:                cardLineLen,
 		cardHideThinking:           cardHideThinking,
+		auxChannels:                auxChannels,
 		groupReplyAllGuilds:        groupReplyAllGuilds,
 		shareSessionInChannel:      shareSessionInChannel,
 		readyCh:                    make(chan struct{}),
@@ -1118,6 +1128,7 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 }
 
 func (p *Platform) sendChannelReply(rc replyContext, content string) error {
+	rc = p.redirectNotice(rc) // maomao fork: cc-connect notices go to the log channel when there is one
 	content = linkTeamMentions(content, p.botID)
 	content = p.returnToLead(rc, content)
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
@@ -1139,6 +1150,7 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 }
 
 func (p *Platform) sendChannel(rc replyContext, content string) error {
+	rc = p.redirectNotice(rc) // maomao fork: cc-connect notices go to the log channel when there is one
 	content = linkTeamMentions(content, p.botID)
 	content = p.returnToLead(rc, content)
 	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
@@ -1380,6 +1392,10 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	default:
 		return nil, fmt.Errorf("discord: invalid reply context type %T", rctx)
 	}
+	// maomao fork: the progress card and the sub-agent table go to the log channel
+	// when the target channel has one; the handle keeps that channel, so the
+	// edits and the delete follow it (see aux_channels.go).
+	channelID = p.previewChannelFor(channelID, content)
 
 	msg := buildDiscordPreviewMessage(content)
 	sent, err := p.session.ChannelMessageSendComplex(channelID, msg)

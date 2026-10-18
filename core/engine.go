@@ -1576,7 +1576,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 					desc = truncateStr(job.Prompt, 40)
 				}
 			}
-			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+			e.send(targetPlatform, markSystemNotice(targetPlatform, replyCtx), fmt.Sprintf("⏰ %s", desc)) // maomao fork: a notice, not the result
 		}
 	}
 
@@ -1802,7 +1802,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 					desc = truncateStr(job.Prompt, 40)
 				}
 			}
-			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+			e.send(targetPlatform, markSystemNotice(targetPlatform, replyCtx), fmt.Sprintf("⏰ %s", desc)) // maomao fork: a notice, not the result
 		}
 	}
 
@@ -4239,7 +4239,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			}
 			if notice := e.freshOnImageBloat(agent, session); notice != "" {
 				sessions.Save()
-				go e.send(p, replyCtx, notice)
+				go e.send(p, markSystemNotice(p, replyCtx), notice)
 				wantID, needRecycle = "", true
 			}
 		}
@@ -4326,11 +4326,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	if notice := e.freshOnColdCache(agent, session); notice != "" {
 		sessions.Save()
-		go e.send(p, replyCtx, notice)
+		go e.send(p, markSystemNotice(p, replyCtx), notice)
 	}
 	if notice := e.freshOnImageBloat(agent, session); notice != "" {
 		sessions.Save()
-		go e.send(p, replyCtx, notice)
+		go e.send(p, markSystemNotice(p, replyCtx), notice)
 	}
 
 	// Resume only when we have a concrete saved agent session ID. If the session

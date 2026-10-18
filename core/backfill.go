@@ -82,6 +82,24 @@ func markAgentReply(p Platform, replyCtx any) any {
 	return replyCtx
 }
 
+// SystemNoticeMarker is implemented by platforms that post cc-connect's own
+// notices somewhere other than the agent's text (maomao fork: Discord
+// aux_channels). The engine marks the reply context of the ♻️ new-session
+// notice, the ⏰ cron/timer start notice and the ⏳ capacity cooldown notices;
+// everything else (agent output, cron/timer results, errors, command replies)
+// goes out unmarked and stays where it is.
+type SystemNoticeMarker interface {
+	MarkSystemNotice(replyCtx any) any
+}
+
+// markSystemNotice marks replyCtx as carrying a cc-connect notice when p supports it.
+func markSystemNotice(p Platform, replyCtx any) any {
+	if m, ok := p.(SystemNoticeMarker); ok {
+		return m.MarkSystemNotice(replyCtx)
+	}
+	return replyCtx
+}
+
 // ChannelHistoryReader is implemented by platforms that can read channel history.
 // It returns up to limit messages posted before beforeID, oldest first.
 type ChannelHistoryReader interface {

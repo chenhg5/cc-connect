@@ -1304,6 +1304,10 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，cc-connect 会在支持 thread 的 Discord 频道内按 thread 隔离会话
 # progress_style = "legacy"  # Progress rendering: legacy | compact | card / 进度展示方式：legacy | compact | card
 #                            # card = one editable Discord embed progress card / card = 单条可编辑的 Discord 嵌入式进度卡
+# aux_channels = { "123456789012345678" = "234567890123456789" }  # maomao fork: main channel ID → log channel ID / 主频道 ID → 日志频道 ID
+#                            # The progress card, the sub-agent table and cc-connect notices (♻️ new session, ⏰ cron start, ⏳ capacity cooldown)
+#                            # posted for a listed main channel go to its log channel; replies and cron/timer results stay. Unlisted channels are unchanged.
+#                            # 列出的主频道：进度卡片、子进程表、♻️/⏰/⏳ 通知进日志频道，正文和结果留在主频道；没列的频道照旧
 # reply_hud = false  # If true, append final-reply HUD line (model/context/tokens) in Discord only
 #                    # 设为 true 时，仅在 Discord 最终回复末尾附加 HUD（模型/上下文/tokens）
 # respond_to_at_everyone_and_here = false  # If true, treat @everyone/@here as a direct mention so the bot responds

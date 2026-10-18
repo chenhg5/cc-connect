@@ -43,6 +43,8 @@ team_name = "龙娘"
 allow_bots = "<the other bots' IDs>"   # teammates' messages: @ me → turn; otherwise listen-only context
 team_lead_bot = "<main bot ID>"        # two subs @-ing each other > 3 rounds → escalated to the lead
 share_session_in_channel = true        # one session per channel, so context reaches the same session
+aux_channels = { "<main channel ID>" = "<log channel ID>" }  # progress card, sub-agent table and ♻️/⏰/⏳ notices of
+                                       # that main channel go to its log channel; replies and results stay (unlisted channels: unchanged)
 ```
 
 - Extra gate action `context`: like `silent`, but attachments may be silenced too (noted as text).
