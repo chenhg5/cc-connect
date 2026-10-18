@@ -1671,16 +1671,25 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	session := sessions.GetOrCreateActive(sessionKey)
+	iKey := sessionKey
+	if workspaceDir != "" {
+		iKey = workspaceDir + ":" + sessionKey
+	}
 	if !session.TryLock() {
+		// maomao fork: a job that fires while the channel's turn is running waits in the same
+		// queue as a user message and runs when that turn ends, instead of being dropped
+		// (2026-10-19: 13 of 54 scheduled runs were dropped as "is busy"; user: "我这没看到").
+		// Its reply goes to the channel through the queued turn; the job counts as run from here,
+		// so the empty-response check below does not apply to it.
+		if e.queueScheduledTurn(effectivePlatform, msg, session, sessions, iKey, agent, workspaceDir) {
+			slog.Info("cron: session busy, job queued after current turn", "id", job.ID, "session", sessionKey)
+			return nil
+		}
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 	e.teamNoteTurn(msg, session) // maomao fork: scheduled turns show on the team status board too
 	e.cronChannelBackfill(targetPlatform, sessionKey, session, msg)
 
-	iKey := sessionKey
-	if workspaceDir != "" {
-		iKey = workspaceDir + ":" + sessionKey
-	}
 	prevHistLen := session.HistoryLen()
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	// Same empty-response detection as the useNewSession path above.
@@ -1870,18 +1879,32 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 
 	session := sessions.GetOrCreateActive(sessionKey)
+	iKey := sessionKey
+	if workspaceDir != "" {
+		iKey = workspaceDir + ":" + sessionKey
+	}
 	if !session.TryLock() {
+		// maomao fork: queued behind the running turn like a cron job (see ExecuteCronJob).
+		if e.queueScheduledTurn(effectivePlatform, msg, session, sessions, iKey, agent, workspaceDir) {
+			slog.Info("timer: session busy, job queued after current turn", "id", job.ID, "session", sessionKey)
+			return nil
+		}
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 	e.teamNoteTurn(msg, session) // maomao fork: scheduled turns show on the team status board too
 	e.cronChannelBackfill(targetPlatform, sessionKey, session, msg)
 
-	iKey := sessionKey
-	if workspaceDir != "" {
-		iKey = workspaceDir + ":" + sessionKey
-	}
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	return nil
+}
+
+// queueScheduledTurn queues a cron/timer turn whose session is busy behind the running turn,
+// through the same queue a user message uses. The new_per_run paths never get here: each run
+// takes a fresh side session (NewSideSession), which no one else holds, so its TryLock succeeds.
+func (e *Engine) queueScheduledTurn(p Platform, msg *Message, session *Session, sessions *SessionManager, iKey string, agent Agent, workspaceDir string) bool {
+	// Same as the user-message path: a turn that is still starting has no state to queue into yet.
+	e.ensureInteractiveStateForQueueing(iKey, p, msg.ReplyCtx)
+	return e.queueForBusySession(p, msg, session, sessions, iKey, agent, workspaceDir)
 }
 
 func timerRunTitle(job *TimerJob) string {
@@ -3084,14 +3107,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
-		if e.queueMessageForBusySession(p, msg, interactiveKey) {
-			// Race guard: the drain loop in processInteractiveMessageWith may
-			// have just finished (session unlocked) between our TryLock failure
-			// and the queue append. Re-try TryLock — if it succeeds, no one is
-			// draining the queue so we must start a processor ourselves.
-			if session.TryLock() {
-				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
-			}
+		if e.queueForBusySession(p, msg, session, sessions, interactiveKey, agent, resolvedWorkspace) {
 			return
 		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
@@ -3271,6 +3287,23 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"queue_depth", queueDepth,
 	)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	return true
+}
+
+// queueForBusySession queues msg behind the turn running on session (see
+// queueMessageForBusySession) and makes sure someone drains it. Returns false
+// when the message could not be queued.
+func (e *Engine) queueForBusySession(p Platform, msg *Message, session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir string) bool {
+	if !e.queueMessageForBusySession(p, msg, interactiveKey) {
+		return false
+	}
+	// Race guard: the drain loop in processInteractiveMessageWith may
+	// have just finished (session unlocked) between our TryLock failure
+	// and the queue append. Re-try TryLock — if it succeeds, no one is
+	// draining the queue so we must start a processor ourselves.
+	if session.TryLock() {
+		go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, workspaceDir)
+	}
 	return true
 }
 
