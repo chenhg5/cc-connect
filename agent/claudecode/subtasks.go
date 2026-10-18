@@ -33,8 +33,12 @@ type subTaskTable struct {
 	// its message the final edit, and a late notification can still land.
 	prev      []core.SubTask
 	prevIndex map[string]int
-	changed   chan struct{}
-	closed    bool
+	// Background tasks a sub-agent started itself and that have not ended yet,
+	// by sub-agent task_id (children) and by child task_id (childOf).
+	children map[string]map[string]bool
+	childOf  map[string]string
+	changed  chan struct{}
+	closed   bool
 }
 
 func (t *subTaskTable) ch() chan struct{} {
@@ -82,16 +86,27 @@ func (cs *claudeSession) handleSubTaskEvent(sub string, raw map[string]any) {
 	defer t.mu.Unlock()
 
 	if sub == "task_started" {
+		if owned, _ := raw["owned_by_subagent"].(bool); owned {
+			t.trackChildLocked(id, raw)
+			return
+		}
 		if typ, _ := raw["task_type"].(string); typ != "local_agent" {
 			return
 		}
-		if owned, _ := raw["owned_by_subagent"].(bool); owned {
+		// A sub-agent resuming after waiting for its own background work gets
+		// a new task_started with the same task_id: keep its row (and its
+		// first start time) instead of opening a new table.
+		if row := t.rowLocked(id); row != nil {
+			if row.Status != core.SubTaskRunning {
+				row.Status, row.EndedAt = core.SubTaskRunning, time.Time{}
+				t.notifyLocked()
+			}
 			return
 		}
 		// A new batch after every earlier row finished starts a new table.
 		allDone := true
 		for _, r := range t.tasks {
-			if r.Running() {
+			if r.Live() {
 				allDone = false
 				break
 			}
@@ -104,9 +119,6 @@ func (cs *claudeSession) handleSubTaskEvent(sub string, raw map[string]any) {
 		}
 		if t.index == nil {
 			t.index = map[string]int{}
-		}
-		if _, dup := t.index[id]; dup {
-			return
 		}
 		desc, _ := raw["description"].(string)
 		bg, _ := raw["is_backgrounded"].(bool)
@@ -122,13 +134,13 @@ func (cs *claudeSession) handleSubTaskEvent(sub string, raw map[string]any) {
 		return
 	}
 
-	var row *core.SubTask
-	if i, ok := t.index[id]; ok {
-		row = &t.tasks[i]
-	} else if i, ok := t.prevIndex[id]; ok {
-		row = &t.prev[i]
-	} else {
-		return // not a sub-agent row (e.g. a Bash task)
+	if parent, ok := t.childOf[id]; ok {
+		t.endChildLocked(sub, id, parent, raw)
+		return
+	}
+	row := t.rowLocked(id)
+	if row == nil {
+		return // not a sub-agent row (e.g. a main-agent Bash task)
 	}
 	switch sub {
 	case "task_progress":
@@ -144,12 +156,12 @@ func (cs *claudeSession) handleSubTaskEvent(sub string, raw map[string]any) {
 	case "task_updated":
 		patch, _ := raw["patch"].(map[string]any)
 		st, _ := patch["status"].(string)
-		if !row.Running() || !finishSubTask(row, st) {
+		if !row.Live() || !t.finishLocked(row, st) {
 			return
 		}
 	case "task_notification":
 		st, _ := raw["status"].(string)
-		changed := row.Running() && finishSubTask(row, st)
+		changed := row.Live() && t.finishLocked(row, st)
 		if s, _ := raw["summary"].(string); s != "" {
 			if first := firstSentence(s); first != row.Summary {
 				row.Summary = first
@@ -163,6 +175,82 @@ func (cs *claudeSession) handleSubTaskEvent(sub string, raw map[string]any) {
 		return
 	}
 	t.notifyLocked()
+}
+
+func (t *subTaskTable) rowLocked(id string) *core.SubTask {
+	if i, ok := t.index[id]; ok {
+		return &t.tasks[i]
+	}
+	if i, ok := t.prevIndex[id]; ok {
+		return &t.prev[i]
+	}
+	return nil
+}
+
+// trackChildLocked records a background task a sub-agent started itself
+// (owned_by_subagent, is_backgrounded, parent_task_id = the sub-agent).
+func (t *subTaskTable) trackChildLocked(id string, raw map[string]any) {
+	parent, _ := raw["parent_task_id"].(string)
+	bg, _ := raw["is_backgrounded"].(bool)
+	if parent == "" || !bg {
+		return
+	}
+	if t.children == nil {
+		t.children, t.childOf = map[string]map[string]bool{}, map[string]string{}
+	}
+	if t.children[parent] == nil {
+		t.children[parent] = map[string]bool{}
+	}
+	t.children[parent][id] = true
+	t.childOf[id] = parent
+}
+
+// endChildLocked forgets a child once the CLI reports it ended.
+func (t *subTaskTable) endChildLocked(sub, id, parent string, raw map[string]any) {
+	st, _ := raw["status"].(string)
+	if sub == "task_updated" {
+		patch, _ := raw["patch"].(map[string]any)
+		st, _ = patch["status"].(string)
+	} else if sub != "task_notification" {
+		return
+	}
+	if !isTerminalStatus(st) {
+		return
+	}
+	delete(t.childOf, id)
+	if kids := t.children[parent]; kids != nil {
+		delete(kids, id)
+		if len(kids) == 0 {
+			delete(t.children, parent)
+		}
+	}
+}
+
+// finishLocked applies a terminal CLI status. claude 2.1.302 also reports a
+// sub-agent "completed" when it only stopped to wait for background work it
+// started itself (testdata/subagent_waits_own_bg.jsonl): while such a child is
+// still running the row becomes waiting, and the CLI resumes the same task_id
+// with a new task_started once the child ends.
+func (t *subTaskTable) finishLocked(row *core.SubTask, st string) bool {
+	if !isTerminalStatus(st) {
+		return false
+	}
+	if st == "completed" && len(t.children[row.ID]) > 0 {
+		if row.Status == core.SubTaskWaiting {
+			return false
+		}
+		row.Status = core.SubTaskWaiting
+		return true
+	}
+	return finishSubTask(row, st)
+}
+
+func isTerminalStatus(st string) bool {
+	switch st {
+	case "completed", "failed", "error", "stopped", "killed", "cancelled":
+		return true
+	}
+	return false
 }
 
 // finishSubTask applies a terminal CLI status; false when st is not terminal.
@@ -192,7 +280,7 @@ func (cs *claudeSession) closeSubTasks() {
 	}
 	changed := false
 	for i := range t.tasks {
-		if t.tasks[i].Running() {
+		if t.tasks[i].Live() {
 			t.tasks[i].Status = core.SubTaskStopped
 			t.tasks[i].EndedAt = time.Now()
 			changed = true

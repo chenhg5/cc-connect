@@ -59,3 +59,14 @@ func TestDiscordSubTaskTableOnlyOnCardStyle(t *testing.T) {
 		t.Fatal("compact style should not")
 	}
 }
+
+func TestDiscordSubTaskRowWaitingOnOwnBackgroundWork(t *testing.T) {
+	start := time.Unix(1792318365, 0)
+	row := buildDiscordSubTaskRow(core.SubTask{ID: "a", Description: "后台分两次等自己的 sleep", Background: true,
+		Status: core.SubTaskWaiting, StartedAt: start, Step: "Running Sleep 25s then print a", Summary: "第一条已在后台运行，等待完成通知。"}, true)
+	t.Logf("\n%s", row)
+	want := "⏳ 后台 · 后台分两次等自己的 sleep · 开始于 <t:1792318365:R>\n　└ 等自己的后台任务 — 第一条已在后台运行，等待完成通知。"
+	if row != want {
+		t.Fatalf("row = %q\nwant  %q", row, want)
+	}
+}

@@ -20,7 +20,10 @@ import (
 type SubTaskStatus string
 
 const (
-	SubTaskRunning   SubTaskStatus = "running"
+	SubTaskRunning SubTaskStatus = "running"
+	// SubTaskWaiting: the sub-agent stopped to wait for its own background work
+	// and will resume when that finishes (not done yet).
+	SubTaskWaiting   SubTaskStatus = "waiting"
 	SubTaskCompleted SubTaskStatus = "completed"
 	SubTaskFailed    SubTaskStatus = "failed"
 	SubTaskStopped   SubTaskStatus = "stopped"
@@ -38,8 +41,12 @@ type SubTask struct {
 	EndedAt     time.Time     `json:"ended_at,omitempty"`
 }
 
-// Running reports whether the sub-agent has not finished yet.
+// Running reports whether the sub-agent is working right now.
 func (t SubTask) Running() bool { return t.Status == SubTaskRunning }
+
+// Live reports whether the sub-agent has not finished yet: running, or
+// waiting for its own background work.
+func (t SubTask) Live() bool { return t.Status == SubTaskRunning || t.Status == SubTaskWaiting }
 
 // SubTaskReporter is an optional interface for agent sessions that run
 // sub-agents (maomao fork). SubTasks returns the current table and its
@@ -239,7 +246,7 @@ func (e *Engine) runSubTaskTable(state *interactiveState, r SubTaskReporter, sta
 			_, tasks, _ := r.SubTasks()
 			now := time.Now()
 			for i := range tasks {
-				if tasks[i].Running() {
+				if tasks[i].Live() {
 					tasks[i].Status, tasks[i].EndedAt = SubTaskStopped, now
 				}
 			}

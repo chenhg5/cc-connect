@@ -28,7 +28,7 @@ func buildDiscordSubTaskEmbed(payload *core.SubTaskTablePayload) *discordgo.Mess
 	running, failed := 0, 0
 	rows := make([]string, 0, len(payload.Tasks))
 	for _, t := range payload.Tasks {
-		if t.Running() {
+		if t.Live() {
 			running++
 		} else if t.Status == core.SubTaskFailed {
 			failed++
@@ -55,6 +55,9 @@ func buildDiscordSubTaskEmbed(payload *core.SubTaskTablePayload) *discordgo.Mess
 //	🔄 前台 · <描述> · 开始于 <t:…:R>
 //	　└ <当前那一步 / 结束总结第一句>
 //
+// A sub-agent waiting for its own background work shows ⏳ and
+// "等自己的后台任务 — <它停下时说的话>"; its time still counts from the first start.
+//
 // A running row's time is a Discord timestamp (<t:unix:R>), which the client
 // keeps counting by itself, so "跑了多久" moves without editing the message.
 func buildDiscordSubTaskRow(t core.SubTask, zh bool) string {
@@ -66,6 +69,8 @@ func buildDiscordSubTaskRow(t core.SubTask, zh bool) string {
 		icon = "❌"
 	case core.SubTaskStopped:
 		icon = "⏹️"
+	case core.SubTaskWaiting:
+		icon = "⏳"
 	}
 	kind := "fg"
 	if zh {
@@ -79,7 +84,7 @@ func buildDiscordSubTaskRow(t core.SubTask, zh bool) string {
 	}
 	var when string
 	switch {
-	case t.Running() && !t.StartedAt.IsZero():
+	case t.Live() && !t.StartedAt.IsZero():
 		if zh {
 			when = fmt.Sprintf("开始于 <t:%d:R>", t.StartedAt.Unix())
 		} else {
@@ -98,6 +103,16 @@ func buildDiscordSubTaskRow(t core.SubTask, zh bool) string {
 	detail := t.Step
 	if !t.Running() && t.Summary != "" {
 		detail = t.Summary
+	}
+	if t.Status == core.SubTaskWaiting {
+		wait := "waiting for its own background task"
+		if zh {
+			wait = "等自己的后台任务"
+		}
+		if detail = compactDiscordProgressText(detail); detail != "" {
+			wait += " — " + detail
+		}
+		detail = wait
 	}
 	if detail = compactDiscordProgressText(detail); detail != "" {
 		head += "\n　└ " + trimDiscordRunes(detail, maxDiscordProgressLineLen)

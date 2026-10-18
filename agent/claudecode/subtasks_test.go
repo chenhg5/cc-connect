@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -207,5 +208,66 @@ func TestSubAgentMessagesAreNotMainEvents(t *testing.T) {
 	got := cs.GetContextUsage()
 	if mainCtx == nil || got == nil || got.CacheCreationInputTokens == 16617 || got.CacheCreationInputTokens == 1390 {
 		t.Fatalf("context usage taken from a sub-agent call: before=%+v after=%+v", mainCtx, got)
+	}
+}
+
+// Real-run regression (2026-10-18): a background sub-agent that starts its own
+// run_in_background Bash and stops to wait for it. Recorded from claude 2.1.302
+// in stream-json input mode (testdata/subagent_waits_own_bg.jsonl): the CLI
+// reports the agent completed (task_updated + task_notification) while its
+// Bash child is still running, then resumes it with a new task_started for the
+// same task_id once the child finishes — twice — and only the third
+// completion, with no child left, is the real end.
+func TestSubTasks_WaitingOnOwnBackgroundWork(t *testing.T) {
+	f, err := os.Open("testdata/subagent_waits_own_bg.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var lines []string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for sc.Scan() {
+		lines = append(lines, sc.Text())
+	}
+	const id = "a3d5a86186c41d4f2"
+	cs := newReplaySession(t)
+	var started time.Time
+	pos := 0
+	// at replays through fixture line upto (0-based, inclusive) and checks the row.
+	at := func(upto int, want core.SubTaskStatus) core.SubTask {
+		t.Helper()
+		for ; pos <= upto; pos++ {
+			cs.handleReadLoopLine(lines[pos])
+		}
+		gen, tasks, _ := cs.SubTasks()
+		if gen != 1 || len(tasks) != 1 {
+			t.Fatalf("line %d: gen=%d rows=%+v, want the one original row (no new table)", upto, gen, tasks)
+		}
+		r := tasks[0]
+		if r.ID != id || r.Status != want {
+			t.Fatalf("line %d: row = %+v, want status %s", upto, r, want)
+		}
+		if started.IsZero() {
+			started = r.StartedAt
+		} else if !r.StartedAt.Equal(started) {
+			t.Fatalf("line %d: started_at moved to %v, want the first start %v", upto, r.StartedAt, started)
+		}
+		return r
+	}
+	at(13, core.SubTaskRunning)      // first Bash (background) running
+	r := at(20, core.SubTaskWaiting) // "completed" while its Bash child runs
+	if r.Summary != "第一条已在后台运行，等待完成通知。" || !r.EndedAt.IsZero() {
+		t.Fatalf("waiting row = %+v", r)
+	}
+	at(37, core.SubTaskRunning) // resumed: task_started, same task_id
+	at(39, core.SubTaskRunning)
+	if r := at(49, core.SubTaskWaiting); r.Summary != "第一条的输出是 a。" {
+		t.Fatalf("second wait row = %+v", r)
+	}
+	at(60, core.SubTaskRunning)                 // resumed again
+	r = at(len(lines)-1, core.SubTaskCompleted) // real end: no child left
+	if r.Summary != "两条后台命令都跑完了,退出码都是 0。" || r.EndedAt.IsZero() {
+		t.Fatalf("final row = %+v", r)
 	}
 }
