@@ -159,16 +159,21 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
-	url            string
-	workDir        string
-	model          string
-	effort         string
-	mode           string
-	baseURL        string
-	modelProvider  string
-	extraEnv       []string
-	codexHome      string
-	promptPreamble string
+	url           string
+	workDir       string
+	model         string
+	effort        string
+	mode          string
+	baseURL       string
+	modelProvider string
+	extraEnv      []string
+	codexHome     string
+	// permissionProfile, when set, is sent as config.default_permissions on
+	// thread/start and thread/resume instead of the mode's sandbox, because an
+	// explicit sandbox overrides the profile (2026-10-18 test: with
+	// sandbox=workspace-write the jingyu profile's denied secrets.env was readable).
+	permissionProfile string
+	promptPreamble    string
 	// baseInstructions replaces codex's built-in base instructions on
 	// thread/start and thread/resume; "" keeps the built-in prompt.
 	baseInstructions string
@@ -212,26 +217,27 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, baseInstructions string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, permissionProfile string, systemPrompt string, appendPrompt string, baseInstructions string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
-		url:              url,
-		workDir:          workDir,
-		model:            model,
-		effort:           effort,
-		mode:             mode,
-		baseURL:          baseURL,
-		modelProvider:    modelProvider,
-		extraEnv:         append([]string(nil), extraEnv...),
-		codexHome:        strings.TrimSpace(codexHome),
-		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
-		baseInstructions: baseInstructions,
-		events:           make(chan core.Event, 128),
-		ctx:              sessionCtx,
-		cancel:           cancel,
-		pending:          make(map[int64]chan rpcResponseEnvelope),
-		pendingApprovals: make(map[string]chan core.PermissionResult),
-		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
+		url:               url,
+		workDir:           workDir,
+		model:             model,
+		effort:            effort,
+		mode:              mode,
+		baseURL:           baseURL,
+		modelProvider:     modelProvider,
+		extraEnv:          append([]string(nil), extraEnv...),
+		codexHome:         strings.TrimSpace(codexHome),
+		permissionProfile: strings.TrimSpace(permissionProfile),
+		promptPreamble:    buildCodexPromptPreamble(systemPrompt, appendPrompt),
+		baseInstructions:  baseInstructions,
+		events:            make(chan core.Event, 128),
+		ctx:               sessionCtx,
+		cancel:            cancel,
+		pending:           make(map[int64]chan rpcResponseEnvelope),
+		pendingApprovals:  make(map[string]chan core.PermissionResult),
+		preambleSent:      resumeID != "" && resumeID != core.ContinueSession,
 	}
 	s.alive.Store(true)
 
@@ -388,9 +394,12 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	}
 	if approval, sandbox := appServerModeSettings(s.mode); approval != "" {
 		params["approvalPolicy"] = approval
-		if sandbox != "" {
+		if sandbox != "" && s.permissionProfile == "" {
 			params["sandbox"] = sandbox
 		}
+	}
+	if s.permissionProfile != "" {
+		params["config"] = map[string]any{"default_permissions": s.permissionProfile}
 	}
 	return params
 }
