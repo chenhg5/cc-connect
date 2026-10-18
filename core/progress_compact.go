@@ -243,6 +243,7 @@ type compactProgressWriter struct {
 	hideThink  bool
 	steps      int
 	startedAt  time.Time
+	waitShown  bool // maomao fork: the last item is the "等子 agent" line
 
 	// Throttle message edits to avoid platform rate limits (e.g. Discord ~5 edits/5s).
 	minUpdateInterval time.Duration
@@ -413,6 +414,7 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	if !w.enabled || w.failed {
 		return false
 	}
+	w.waitShown = false
 	text := strings.TrimSpace(item.Text)
 	fallback = strings.TrimSpace(fallback)
 	if text == "" && fallback == "" {
@@ -527,6 +529,25 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	w.lastSent = w.content
 	w.lastUpdateAt = time.Now()
 	return true
+}
+
+// ShowSubAgentWait — maomao fork: while the turn waits for a foreground
+// sub-agent, keep one "等子 agent：…" line as the newest item, replacing it in
+// place on every refresh, so the elapsed time and the sub-agent's current step
+// keep moving instead of the card stopping at "🔧 Agent".
+func (w *compactProgressWriter) ShowSubAgentWait(text string) bool {
+	if !w.enabled || w.failed || w.style != progressStyleCard {
+		return false
+	}
+	if w.waitShown && len(w.items) > 0 {
+		w.items = w.items[:len(w.items)-1]
+		if len(w.entries) > 0 {
+			w.entries = w.entries[:len(w.entries)-1]
+		}
+	}
+	ok := w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryInfo, Text: text}, text)
+	w.waitShown = ok
+	return ok
 }
 
 // Finalize updates card progress state (running/completed/failed) without

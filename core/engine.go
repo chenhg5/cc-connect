@@ -577,6 +577,9 @@ type interactiveState struct {
 	unsolicitedCancel context.CancelFunc // nil when no reader is running
 	unsolicitedDone   chan struct{}      // closed when the reader goroutine exits
 
+	// maomao fork: agent session whose sub-agent table updater is running.
+	subTableFor AgentSession
+
 	// agentSessionIdleCancel 取消当前会话的 idle 关闭计时器。
 	agentSessionIdleCancel context.CancelFunc
 	agentSessionIdleToken  uint64
@@ -5032,6 +5035,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
+
+	// maomao fork: sub-agent table, and the progress card kept alive while the
+	// turn waits for a foreground sub-agent (refreshed at the card's own edit
+	// interval).
+	e.ensureSubTaskTable(state)
+	var subWaitTick <-chan time.Time
+	subReporter, hasSubReporter := state.agentSession.(SubTaskReporter)
+	if hasSubReporter && cp.Active() && cp.minUpdateInterval > 0 {
+		t := time.NewTicker(cp.minUpdateInterval)
+		defer t.Stop()
+		subWaitTick = t.C
+	}
+
 	var handlingSince atomic.Int64 // maomao fork: when the current event's handling began; 0 = waiting
 	watchDone := make(chan struct{})
 	defer close(watchDone)
@@ -5050,6 +5066,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				goto channelClosed
 			}
 			state.lastEventAt.Store(time.Now().UnixNano())
+		case <-subWaitTick:
+			if t, ok := foregroundSubTask(subReporter); ok {
+				cp.ShowSubAgentWait(subAgentWaitText(e.i18n.IsZhLike(), t))
+			}
+			continue
 		case err := <-pendingSend:
 			pendingSend = nil
 			if err != nil {

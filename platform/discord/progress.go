@@ -17,6 +17,11 @@ const (
 )
 
 func buildDiscordPreviewMessage(content string) *discordgo.MessageSend {
+	if table, ok := core.ParseSubTaskTablePayload(content); ok {
+		return &discordgo.MessageSend{
+			Embeds: []*discordgo.MessageEmbed{buildDiscordSubTaskEmbed(table)},
+		}
+	}
 	if payload, ok := core.ParseProgressCardPayload(content); ok {
 		return &discordgo.MessageSend{
 			Embeds: []*discordgo.MessageEmbed{buildDiscordProgressEmbed(payload)},
@@ -29,6 +34,11 @@ func buildDiscordPreviewMessage(content string) *discordgo.MessageSend {
 
 func buildDiscordPreviewEdit(channelID, messageID, content string) *discordgo.MessageEdit {
 	edit := discordgo.NewMessageEdit(channelID, messageID)
+	if table, ok := core.ParseSubTaskTablePayload(content); ok {
+		edit.SetContent("")
+		edit.SetEmbeds([]*discordgo.MessageEmbed{buildDiscordSubTaskEmbed(table)})
+		return edit
+	}
 	if payload, ok := core.ParseProgressCardPayload(content); ok {
 		edit.SetContent("")
 		edit.SetEmbeds([]*discordgo.MessageEmbed{buildDiscordProgressEmbed(payload)})

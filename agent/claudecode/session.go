@@ -55,6 +55,9 @@ type claudeSession struct {
 	bgTasks        atomic.Int32
 	bgTasksEndedAt atomic.Int64 // unix nanos when the count last dropped to 0
 
+	// maomao fork: sub-agent table (see subtasks.go).
+	subTasks subTaskTable
+
 	// activeModel stores the model id reported by the CLI's init event (e.g.
 	// "claude-opus-4-7[1m]"). It may be empty if the init event hasn't
 	// carried a model field yet; callers should fall back to the Agent's
@@ -557,6 +560,7 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 		cs.apiErrTimer = nil
 	}
 	cs.apiErrMu.Unlock()
+	cs.closeSubTasks()
 	close(cs.events)
 	close(cs.done)
 }
@@ -647,6 +651,9 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 		if !cs.sawInit.Load() {
 			cs.startupNotice.Store(true)
 		}
+		cs.handleSubTaskEvent(sub, raw)
+	case "task_started", "task_progress", "task_updated":
+		cs.handleSubTaskEvent(sub, raw)
 	case "background_tasks_changed":
 		cs.handleBackgroundTasksChanged(raw)
 	case "compact_boundary":
