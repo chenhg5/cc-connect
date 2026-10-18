@@ -121,6 +121,14 @@ func (a *Agent) fallbackModels(ctx context.Context) []core.ModelOption {
 	return a.annotateLiveModels(a.Agent.AvailableModels(ctx))
 }
 
+// SetModelsRunner is the supported injection point for wrappers and tests.
+// The runner is stored under a.mu, the same lock modelsRunner reads.
+func (a *Agent) SetModelsRunner(run ModelsRunner) {
+	a.mu.Lock()
+	a.modelsRun = run
+	a.mu.Unlock()
+}
+
 func (a *Agent) modelsRunner() ModelsRunner {
 	a.mu.RLock()
 	run := a.modelsRun

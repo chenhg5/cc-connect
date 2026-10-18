@@ -60,9 +60,14 @@ type Agent struct {
 	ModelValueResolver func(input string, optionValues []string) (value string, impliedEffort string)
 
 	// CompactCommand is the prompt that should wait for vendor
-	// compaction before the turn result is emitted. "/compact" always
-	// waits; this field adds the agent's own compress command.
+	// compaction before the turn result is emitted. "/compact" is always
+	// included; this field adds the agent's own compress command.
+	// Waiting is skipped when CompactionNotifyMethod is empty.
 	CompactCommand string
+
+	// CompactionNotifyMethod is the vendor notification that reports async context compaction
+	// progress ({"status":"started"|"completed"|"failed"}). Empty disables compaction tracking.
+	CompactionNotifyMethod string
 
 	// FallbackReasoningEfforts is used by AvailableReasoningEfforts
 	// until a session advertises a thought_level option.
@@ -147,8 +152,10 @@ var (
 // Optional: options["args"], options["env"], options["auth_method"],
 // options["display_name"], options["mode"], options["mode_aliases"],
 // options["model"], options["models"] (provider-style {model, alias}
-// or {name, desc} entries). mode_aliases values rewrite mode before it
-// is stored, so "normal" can be saved as "accept-edits".
+// or {name, desc} entries), options["compact_command"],
+// options["compaction_notify_method"]. mode_aliases values rewrite mode
+// before it is stored, so "normal" can be saved as "accept-edits".
+// An empty compaction_notify_method disables compaction tracking.
 func New(opts map[string]any) (core.Agent, error) {
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
@@ -184,22 +191,25 @@ func New(opts map[string]any) (core.Agent, error) {
 	effort = strings.TrimSpace(effort)
 	compact, _ := opts["compact_command"].(string)
 	compact = strings.TrimSpace(compact)
+	notify, _ := opts["compaction_notify_method"].(string)
+	notify = strings.TrimSpace(notify)
 
 	return &Agent{
-		workDir:          workDir,
-		cmd:              cmdStr,
-		cliExtraArgs:     cliExtraArgs,
-		args:             args,
-		staticEnv:        staticEnv,
-		extraEnv:         extra,
-		authMethod:       authMethod,
-		displayName:      displayName,
-		mode:             mode,
-		modeAliases:      aliases,
-		model:            model,
-		reasoningEffort:  effort,
-		CompactCommand:   compact,
-		configuredModels: parseConfiguredModels(opts["models"]),
+		workDir:                workDir,
+		cmd:                    cmdStr,
+		cliExtraArgs:           cliExtraArgs,
+		args:                   args,
+		staticEnv:              staticEnv,
+		extraEnv:               extra,
+		authMethod:             authMethod,
+		displayName:            displayName,
+		mode:                   mode,
+		modeAliases:            aliases,
+		model:                  model,
+		reasoningEffort:        effort,
+		CompactCommand:         compact,
+		CompactionNotifyMethod: notify,
+		configuredModels:       parseConfiguredModels(opts["models"]),
 	}, nil
 }
 
@@ -318,6 +328,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	if a.CompactCommand != "" {
 		opts["compact_command"] = a.CompactCommand
 	}
+	if a.CompactionNotifyMethod != "" {
+		opts["compaction_notify_method"] = a.CompactionNotifyMethod
+	}
 	if len(a.modeAliases) > 0 {
 		opts["mode_aliases"] = cloneModeAliases(a.modeAliases)
 	}
@@ -344,6 +357,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	pendingEffort := a.reasoningEffort
 	resolver := a.ModelValueResolver
 	compactCommand := a.CompactCommand
+	compactionNotify := a.CompactionNotifyMethod
 	showModelName := a.ShowModelDisplayName
 	pendingAliases := cloneModeAliases(a.modeAliases)
 	extra := append([]string(nil), a.extraEnv...)
@@ -351,20 +365,21 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.RUnlock()
 
 	return newACPSession(ctx, acpSessionConfig{
-		command:         command,
-		args:            allArgs,
-		extraEnv:        extra,
-		workDir:         workDir,
-		resumeSessionID: sessionID,
-		authMethod:      authMethod,
-		initialMode:     pendingMode,
-		initialModel:    pendingModel,
-		initialEffort:   pendingEffort,
-		modelResolver:   resolver,
-		compactCommand:  compactCommand,
-		showModelName:   showModelName,
-		modeAliases:     pendingAliases,
-		callbacks:       a,
+		command:                command,
+		args:                   allArgs,
+		extraEnv:               extra,
+		workDir:                workDir,
+		resumeSessionID:        sessionID,
+		authMethod:             authMethod,
+		initialMode:            pendingMode,
+		initialModel:           pendingModel,
+		initialEffort:          pendingEffort,
+		modelResolver:          resolver,
+		compactCommand:         compactCommand,
+		compactionNotifyMethod: compactionNotify,
+		showModelName:          showModelName,
+		modeAliases:            pendingAliases,
+		callbacks:              a,
 	})
 }
 

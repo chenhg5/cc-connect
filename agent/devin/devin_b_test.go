@@ -199,7 +199,7 @@ func TestAvailableModels_RunnerCacheAndFallback(t *testing.T) {
 	var calls int
 	var gotBin string
 	var sawXDG bool
-	agent.modelsRun = func(_ context.Context, binary string, env []string) ([]byte, error) {
+	agent.SetModelsRunner(func(_ context.Context, binary string, env []string) ([]byte, error) {
 		calls++
 		gotBin = binary
 		for _, e := range env {
@@ -208,7 +208,7 @@ func TestAvailableModels_RunnerCacheAndFallback(t *testing.T) {
 			}
 		}
 		return []byte(modelsFixture), nil
-	}
+	})
 	got := agent.AvailableModels(context.Background())
 	if calls != 1 || len(got) != 2 || got[0].Name != "swe-2-medium" || got[1].Alias != "opus" {
 		t.Fatalf("calls=%d models=%#v", calls, got)
@@ -225,9 +225,9 @@ func TestAvailableModels_RunnerCacheAndFallback(t *testing.T) {
 	}
 
 	agent.modelsCachedAt = agent.modelsCachedAt.Add(-modelsCacheTTL - time.Second)
-	agent.modelsRun = func(context.Context, string, []string) ([]byte, error) {
+	agent.SetModelsRunner(func(context.Context, string, []string) ([]byte, error) {
 		return nil, errors.New("offline")
-	}
+	})
 	stale := agent.AvailableModels(context.Background())
 	if len(stale) != 2 || stale[0].Name != "swe-2-medium" {
 		t.Fatalf("stale catalog = %#v", stale)
@@ -241,10 +241,10 @@ func TestAvailableModels_RunnerCacheAndFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	var customBin string
-	custom.(*Agent).modelsRun = func(_ context.Context, binary string, _ []string) ([]byte, error) {
+	custom.(*Agent).SetModelsRunner(func(_ context.Context, binary string, _ []string) ([]byte, error) {
 		customBin = binary
 		return []byte(`{"families":[]}`), nil
-	}
+	})
 	_ = custom.(*Agent).AvailableModels(context.Background())
 	if customBin != "devin-models-cmd-missing-xyz" {
 		t.Fatalf("models_cmd binary = %q", customBin)
@@ -268,7 +268,7 @@ func TestModelsPrewarm_WaitsOnlyUntilCallerDeadline(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
-	agent.modelsRun = func(ctx context.Context, _ string, _ []string) ([]byte, error) {
+	agent.SetModelsRunner(func(ctx context.Context, _ string, _ []string) ([]byte, error) {
 		if calls.Add(1) == 1 {
 			deadline, ok := ctx.Deadline()
 			if !ok || time.Until(deadline) < 120*time.Second {
@@ -278,7 +278,7 @@ func TestModelsPrewarm_WaitsOnlyUntilCallerDeadline(t *testing.T) {
 			<-release
 		}
 		return []byte(modelsFixture), nil
-	}
+	})
 	short, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	began := time.Now()
 	got := agent.AvailableModels(short)
@@ -401,6 +401,9 @@ func TestReasoningEffort(t *testing.T) {
 	if live.CompactCommand != "/compact" {
 		t.Fatalf("compact = %q", live.CompactCommand)
 	}
+	if live.CompactionNotifyMethod != "_cognition.ai/compaction" {
+		t.Fatalf("compaction notify = %q", live.CompactionNotifyMethod)
+	}
 	live.SetReasoningEffort("max")
 	if live.GetReasoningEffort() != "max" {
 		t.Fatalf("effort = %q", live.GetReasoningEffort())
@@ -427,10 +430,10 @@ func TestAvailableModels_CatalogBeforeSessionOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent.storeModels(opts, families)
-	agent.modelsRun = func(context.Context, string, []string) ([]byte, error) {
+	agent.SetModelsRunner(func(context.Context, string, []string) ([]byte, error) {
 		t.Fatal("fresh catalog must not fetch")
 		return nil, nil
-	}
+	})
 	agent.RememberModelOptions("swe-2-high", []core.ModelOption{
 		{Name: "swe-2-high", Desc: "SWE-2"},
 		{Name: "adaptive", Desc: "Adaptive"},
@@ -445,9 +448,9 @@ func TestAvailableModels_CatalogBeforeSessionOptions(t *testing.T) {
 	agent.families = nil
 	agent.modelsCachedAt = time.Time{}
 	agent.mu.Unlock()
-	agent.modelsRun = func(context.Context, string, []string) ([]byte, error) {
+	agent.SetModelsRunner(func(context.Context, string, []string) ([]byte, error) {
 		return nil, errors.New("offline")
-	}
+	})
 	got = agent.AvailableModels(context.Background())
 	if len(got) != 2 || got[0].Name != "swe-2-high" || got[0].Alias != "" || got[1].Name != "adaptive" {
 		t.Fatalf("session fallback = %#v", got)
@@ -574,6 +577,12 @@ func TestWorkspaceOptionsRoundTrip(t *testing.T) {
 	}
 	if opts["models_cmd"] != "devin" {
 		t.Fatalf("models_cmd = %#v", opts["models_cmd"])
+	}
+	if opts["compaction_notify_method"] != "_cognition.ai/compaction" {
+		t.Fatalf("compaction_notify_method = %#v", opts["compaction_notify_method"])
+	}
+	if got.CompactionNotifyMethod != "_cognition.ai/compaction" {
+		t.Fatalf("clone notify = %q", got.CompactionNotifyMethod)
 	}
 }
 

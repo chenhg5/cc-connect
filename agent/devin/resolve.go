@@ -243,6 +243,7 @@ func canonicalForFamily(fam catalogFamily, options []string, suffix string) stri
 	return pickMatchedOption(hits, suffix)
 }
 
+// Families with an empty/blank label are intentionally rendered by slug, then uid.
 func familyLabel(fam catalogFamily) string {
 	if s := strings.TrimSpace(fam.Slug); s != "" {
 		return s

@@ -331,10 +331,14 @@ func (s *acpSession) setConfigOption(sid, configID, value string) error {
 		s.absorbConfigOptions(parsed.ConfigOptions)
 		return nil
 	}
+	slog.Debug("acp: set_config_option response had no configOptions; assuming value applied",
+		"config_id", configID, "value", value)
 	s.noteConfigValue(configID, value)
 	return nil
 }
 
+// noteConfigValue is the fallback for agents whose session/set_config_option
+// response omits configOptions. The normal path is absorbConfigOptions(parsed.ConfigOptions).
 func (s *acpSession) noteConfigValue(configID, value string) {
 	value = strings.TrimSpace(value)
 	s.configMu.Lock()

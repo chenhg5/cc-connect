@@ -35,6 +35,9 @@ type acpSession struct {
 	// are absorbed for state but not emitted, because nothing drains events
 	// until StartSession returns and a long replay would fill the bounded
 	// channel and block the transport read loop (deadlocking the load).
+	// It currently only guards tryLoadSession (session/load). Any future
+	// resume-style call that makes the agent replay history (e.g.
+	// session/resume) must set it too.
 	replaying atomic.Bool
 
 	cmd *exec.Cmd
@@ -84,6 +87,9 @@ type acpSession struct {
 
 	// compactCommand is the agent's compress prompt, in addition to "/compact".
 	compactCommand string
+	// compactionNotifyMethod is the vendor notification that reports async
+	// compaction progress. Empty disables compaction tracking.
+	compactionNotifyMethod string
 	// showModelDisplayName enables GetModelDisplayName (set by wrappers).
 	showModelDisplayName bool
 	compactMu            sync.Mutex
@@ -112,20 +118,21 @@ type permState struct {
 // adding optional knobs (initialMode, callbacks) and would otherwise
 // break every call site each time.
 type acpSessionConfig struct {
-	command         string
-	args            []string
-	extraEnv        []string
-	workDir         string
-	resumeSessionID string
-	authMethod      string
-	initialMode     string // if non-empty, applied via session/set_mode after session/new
-	initialModel    string // configured model, applied after initialMode
-	initialEffort   string // configured reasoning effort, applied after the model
-	modelResolver   func(input string, optionValues []string) (value string, impliedEffort string)
-	compactCommand  string
-	showModelName   bool
-	modeAliases     map[string]string
-	callbacks       sessionCallbacks // may be nil
+	command                string
+	args                   []string
+	extraEnv               []string
+	workDir                string
+	resumeSessionID        string
+	authMethod             string
+	initialMode            string // if non-empty, applied via session/set_mode after session/new
+	initialModel           string // configured model, applied after initialMode
+	initialEffort          string // configured reasoning effort, applied after the model
+	modelResolver          func(input string, optionValues []string) (value string, impliedEffort string)
+	compactCommand         string
+	compactionNotifyMethod string
+	showModelName          bool
+	modeAliases            map[string]string
+	callbacks              sessionCallbacks // may be nil
 }
 
 func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, error) {
@@ -133,20 +140,21 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &acpSession{
-		workDir:              absWorkDir,
-		events:               make(chan core.Event, 128),
-		ctx:                  sessionCtx,
-		cancel:               cancel,
-		permByID:             make(map[string]permState),
-		toolInputByID:        make(map[string]string),
-		toolNameByID:         make(map[string]string),
-		acpSessID:            cfg.resumeSessionID,
-		callbacks:            cfg.callbacks,
-		modeAliases:          cloneModeAliases(cfg.modeAliases),
-		modelResolver:        cfg.modelResolver,
-		compactCommand:       cfg.compactCommand,
-		showModelDisplayName: cfg.showModelName,
-		updateNotify:         make(chan struct{}, 1),
+		workDir:                absWorkDir,
+		events:                 make(chan core.Event, 128),
+		ctx:                    sessionCtx,
+		cancel:                 cancel,
+		permByID:               make(map[string]permState),
+		toolInputByID:          make(map[string]string),
+		toolNameByID:           make(map[string]string),
+		acpSessID:              cfg.resumeSessionID,
+		callbacks:              cfg.callbacks,
+		modeAliases:            cloneModeAliases(cfg.modeAliases),
+		modelResolver:          cfg.modelResolver,
+		compactCommand:         cfg.compactCommand,
+		compactionNotifyMethod: cfg.compactionNotifyMethod,
+		showModelDisplayName:   cfg.showModelName,
+		updateNotify:           make(chan struct{}, 1),
 	}
 	s.alive.Store(true)
 
@@ -447,7 +455,7 @@ func matchACPModeID(input string, modes []acpModeInfo) string {
 }
 
 func (s *acpSession) onNotification(method string, params json.RawMessage) {
-	if method == compactionMethod {
+	if notify := strings.TrimSpace(s.compactionNotifyMethod); notify != "" && method == notify {
 		s.noteCompaction(params)
 		return
 	}

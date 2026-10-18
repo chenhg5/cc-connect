@@ -2,8 +2,10 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -170,6 +172,7 @@ func TestPermission_DevinEditableCommand(t *testing.T) {
 func TestDispatchPrompt_CompactionWaits(t *testing.T) {
 	s, wResp, rReq := newTestSession(t, nil)
 	s.compactCommand = "/compress"
+	s.compactionNotifyMethod = "_cognition.ai/compaction"
 	go scriptACP(t, rReq, wResp, func(method string, _ json.RawMessage) (string, string) {
 		if method != "session/prompt" {
 			return "", "unexpected " + method
@@ -215,6 +218,7 @@ func TestDispatchPrompt_CompactionWaits(t *testing.T) {
 
 func TestDispatchPrompt_CompactionTextAfterCompleted(t *testing.T) {
 	s, wResp, rReq := newTestSession(t, nil)
+	s.compactionNotifyMethod = "_cognition.ai/compaction"
 	go scriptACP(t, rReq, wResp, func(method string, _ json.RawMessage) (string, string) {
 		if method != "session/prompt" {
 			return "", "unexpected " + method
@@ -250,6 +254,7 @@ func TestDispatchPrompt_CompactionTextAfterCompleted(t *testing.T) {
 
 func TestDispatchPrompt_CompactionFailed(t *testing.T) {
 	s, wResp, rReq := newTestSession(t, nil)
+	s.compactionNotifyMethod = "_cognition.ai/compaction"
 	go scriptACP(t, rReq, wResp, func(method string, _ json.RawMessage) (string, string) {
 		if method != "session/prompt" {
 			return "", "unexpected " + method
@@ -285,6 +290,121 @@ func TestDispatchPrompt_CompactionFailed(t *testing.T) {
 	}
 	if !sawErr {
 		t.Fatal("missing compaction error")
+	}
+}
+
+func TestDispatchPrompt_EmptyCompactionMethodDoesNotWait(t *testing.T) {
+	s, wResp, rReq := newTestSession(t, nil)
+	if s.compactionNotifyMethod != "" {
+		t.Fatal("generic session must start with compaction tracking disabled")
+	}
+	go scriptACP(t, rReq, wResp, func(method string, _ json.RawMessage) (string, string) {
+		if method != "session/prompt" {
+			return "", "unexpected " + method
+		}
+		_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"started","text":"leak"}}`+"\n")
+		return `{"stopReason":"end_turn"}`, ""
+	})
+	started := time.Now()
+	if err := s.Send("/compact", "m", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if waited := time.Since(started); waited > 500*time.Millisecond {
+		t.Fatalf("empty compaction method waited %s", waited)
+	}
+	if got := s.currentCompaction(); got != "" {
+		t.Fatalf("compaction status = %q, want empty", got)
+	}
+	select {
+	case ev := <-s.events:
+		if ev.Type != core.EventResult {
+			t.Fatalf("event = %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing result")
+	}
+	select {
+	case ev := <-s.events:
+		t.Fatalf("vendor compaction notification leaked %+v", ev)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestDispatchPrompt_CompactionTimeoutEndsTurn(t *testing.T) {
+	prevCap := compactionDoneTimeout
+	compactionDoneTimeout = 40 * time.Millisecond
+	t.Cleanup(func() { compactionDoneTimeout = prevCap })
+
+	var buf bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+
+	s, wResp, rReq := newTestSession(t, nil)
+	s.compactionNotifyMethod = "_cognition.ai/compaction"
+	go scriptACP(t, rReq, wResp, func(method string, _ json.RawMessage) (string, string) {
+		if method != "session/prompt" {
+			return "", "unexpected " + method
+		}
+		go func() {
+			time.Sleep(15 * time.Millisecond)
+			_, _ = fmt.Fprint(wResp, `{"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":{"status":"started"}}`+"\n")
+		}()
+		return `{"stopReason":"end_turn"}`, ""
+	})
+	if err := s.Send("/compact", "m", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var sawErr, sawResult bool
+	deadline := time.After(2 * time.Second)
+	for !sawResult {
+		select {
+		case ev := <-s.events:
+			if ev.Type == core.EventError {
+				sawErr = true
+			}
+			if ev.Type == core.EventResult {
+				sawResult = true
+			}
+		case <-deadline:
+			t.Fatal("missing result")
+		}
+	}
+	if sawErr {
+		t.Fatal("timeout must not surface a compaction error")
+	}
+	logText := buf.String()
+	if !strings.Contains(logText, "acp: compaction did not finish before timeout; ending turn") {
+		t.Fatalf("log = %q", logText)
+	}
+	if !strings.Contains(logText, "session_id=test-session-id") || !strings.Contains(logText, "waited=40ms") {
+		t.Fatalf("log = %q", logText)
+	}
+}
+
+func TestCompactionNotifyMethod_RoundTrip(t *testing.T) {
+	a, err := New(map[string]any{"command": "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := a.(*Agent)
+	if agent.CompactionNotifyMethod != "" {
+		t.Fatalf("default method = %q", agent.CompactionNotifyMethod)
+	}
+	if _, ok := agent.WorkspaceAgentOptions()["compaction_notify_method"]; ok {
+		t.Fatal("empty method was snapshotted")
+	}
+	agent.CompactionNotifyMethod = "_cognition.ai/compaction"
+	snap := agent.WorkspaceAgentOptions()
+	if snap["compaction_notify_method"] != "_cognition.ai/compaction" {
+		t.Fatalf("snapshot = %#v", snap["compaction_notify_method"])
+	}
+	clone, err := New(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clone.(*Agent).CompactionNotifyMethod != "_cognition.ai/compaction" {
+		t.Fatalf("round-trip = %q", clone.(*Agent).CompactionNotifyMethod)
 	}
 }
 

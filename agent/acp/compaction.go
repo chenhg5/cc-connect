@@ -3,21 +3,23 @@ package acp
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
 
-const compactionMethod = "_cognition.ai/compaction"
-
 const (
 	compactionStartTimeout = 3 * time.Second
-	compactionDoneTimeout  = 3 * time.Minute
 	compactionPoll         = 50 * time.Millisecond
 	compactionQuiet        = 750 * time.Millisecond
 	compactionQuietCap     = 5 * time.Second
 )
+
+// compactionDoneTimeout caps the wait after compaction has started.
+// Tests shorten it to cover the timeout path.
+var compactionDoneTimeout = 3 * time.Minute
 
 func (s *acpSession) isCompactPrompt(prompt string) bool {
 	prompt = strings.TrimSpace(prompt)
@@ -67,17 +69,26 @@ func (s *acpSession) currentCompaction() string {
 
 // waitForCompaction holds EventResult until a /compact turn finishes.
 // session/prompt returns immediately; the summary text arrives later.
+// An empty compactionNotifyMethod skips the wait entirely.
 func (s *acpSession) waitForCompaction(prompt string) {
+	if strings.TrimSpace(s.compactionNotifyMethod) == "" {
+		return
+	}
 	if !s.isCompactPrompt(prompt) {
 		return
 	}
 	if !s.waitCompaction(compactionStartTimeout, compactionBegun) {
 		return
 	}
-	status := s.waitCompactionStatus(compactionDoneTimeout)
+	doneCap := compactionDoneTimeout
+	status := s.waitCompactionStatus(doneCap)
 	if status == "completed" || status == "failed" {
 		// The summary chunk can arrive after the terminal status.
 		s.waitUntilQuiet(compactionQuiet, compactionQuietCap)
+	} else if status == "started" {
+		slog.Warn("acp: compaction did not finish before timeout; ending turn",
+			"session_id", s.currentACPSessionID(),
+			"waited", doneCap.String())
 	}
 	if status == "failed" {
 		s.emit(core.Event{Type: core.EventError, Error: errors.New("acp: context compaction failed")})

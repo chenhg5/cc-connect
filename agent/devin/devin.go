@@ -67,7 +67,8 @@ type Agent struct {
 	env       map[string]string
 
 	// modelsRun executes `models list --format json`. Nil uses the
-	// real Devin binary. Tests inject a runner and never exec devin.
+	// real Devin binary. Wrappers and tests inject a runner through
+	// SetModelsRunner and never exec devin.
 	modelsRun      ModelsRunner
 	modelsCache    []core.ModelOption
 	modelsCachedAt time.Time
@@ -128,6 +129,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	agent.FallbackReasoningEfforts = append([]string(nil), devinEfforts...)
 	agent.CompactCommand = "/compact"
+	agent.CompactionNotifyMethod = "_cognition.ai/compaction"
 	agent.ShowModelDisplayName = true
 	agent.ModelValueResolver = agent.resolveModelValue
 	agent.setProbeCommand(opts)
