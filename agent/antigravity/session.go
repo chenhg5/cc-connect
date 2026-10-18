@@ -114,9 +114,6 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	}
 	core.ArchiveAttachments(append(append([]string(nil), imageRefs...), fileRefs...)) // maomao fork: NAS media library
 
-	chatID := as.CurrentSessionID()
-	isResume := chatID != ""
-
 	// Attach image and file references to prompt
 	fullPrompt := prompt
 	if len(imageRefs) > 0 {
@@ -131,14 +128,51 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 		}
 		fullPrompt += "\n\n[Attached files saved at: " + strings.Join(fileRefs, ", ") + "]"
 	}
+	if strings.TrimSpace(as.model) != "" {
+		slog.Warn("antigravitySession: model is configured but ignored because agy does not support --model yet", "model", as.model)
+	}
+	return as.launch(agyTurn{fullPrompt: fullPrompt, tempFiles: append(imageRefs, fileRefs...)})
+}
+
+// agyTurn is one user turn, kept so the turn can be launched a second time.
+type agyTurn struct {
+	fullPrompt string   // prompt with attachment references, as first sent
+	tempFiles  []string // attachments; removed when the turn is over, not per process
+	retried    bool     // this launch is the one auth retry
+}
+
+// agyAuthRetryPrompt continues a turn that agy dropped because its login
+// token expired mid-turn (agy 1.4.0 does not refresh it in a running process,
+// google-antigravity/antigravity-cli#1091; a new process does).
+const agyAuthRetryPrompt = "上一步因为登录令牌过期被中断了（不是你的问题），请接着把刚才没做完的事做完。"
+
+// isAgyAuthExpired reports whether a failed turn's message is agy's expired
+// login token error, e.g. "UNAUTHENTICATED (code 401): Request had invalid
+// authentication credentials" (cc-connect.log, 2026-10-17/18).
+func isAgyAuthExpired(msg string) bool {
+	return strings.Contains(msg, "UNAUTHENTICATED") || strings.Contains(msg, "code 401")
+}
+
+// launch starts one agy process for the turn and hands it to readLoop, which
+// finishes the turn (or launches the retry). On error nothing was started.
+func (as *antigravitySession) launch(t agyTurn) error {
+	chatID := as.CurrentSessionID()
+	isResume := chatID != ""
+	prompt := t.fullPrompt
+	if t.retried && isResume {
+		// The conversation already holds the user's message and whatever
+		// agy did before the 401, so ask it to go on instead of sending the
+		// message a second time. Without a conversation id agy never got as
+		// far as "init", so nothing of this turn is stored and the original
+		// prompt is resent (its attachments are still on disk).
+		prompt = agyAuthRetryPrompt
+	}
+
 	agyConfigDir := ""
 	if as.permissionBridge != nil {
 		agyConfigDir = as.permissionBridge.AgyConfigDir()
 	}
-	args := as.buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, fullPrompt)
-	if strings.TrimSpace(as.model) != "" {
-		slog.Warn("antigravitySession: model is configured but ignored because agy does not support --model yet", "model", as.model)
-	}
+	args := as.buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, prompt)
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -155,7 +189,7 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 		}
 	}()
 
-	slog.Debug("antigravitySession: launching", "resume", isResume, "args", core.RedactArgs(args))
+	slog.Debug("antigravitySession: launching", "resume", isResume, "retry", t.retried, "args", core.RedactArgs(args))
 	cmd := exec.CommandContext(ctx, as.cmd, args...)
 	cmd.WaitDelay = 1 * time.Second
 	cmd.Dir = as.workDir
@@ -186,7 +220,7 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	as.wg.Add(1)
 	go func() {
 		defer cancel()
-		as.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, fileRefs...))
+		as.readLoop(ctx, cmd, stdout, &stderrBuf, t)
 	}()
 
 	return nil
@@ -216,28 +250,49 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	return args
 }
 
-func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string) {
+func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, t agyTurn) {
+	// Runs last, so a retry launched below is counted before this one is done.
 	defer as.wg.Done()
 	resultErr := ""
-	replied := false // the turn already streamed reply text
+	replied := false    // the turn already streamed reply text
+	readFailed := false // a read error was already reported to core
 	defer func() {
-		for _, f := range tempFiles {
-			_ = os.Remove(f)
-		}
-
 		err := cmd.Wait()
 
-		sid := as.CurrentSessionID()
 		if err != nil || resultErr != "" {
 			// A failed result names the status; stderr says why.
-			msg := strings.TrimSpace(stderrBuf.String())
+			stderr := strings.TrimSpace(stderrBuf.String())
+			msg := stderr
 			if resultErr != "" && msg != "" {
 				msg = resultErr + ": " + msg
 			} else if resultErr != "" {
 				msg = resultErr
 			}
-			if msg != "" {
-				slog.Error("antigravitySession: process failed", "error", err, "stderr", msg)
+			switch {
+			case msg == "":
+			case replied && err == nil && stderr == "":
+				// agy keeps the last failed step of a conversation and
+				// reports status ERROR (exit 0, nothing on stderr) on every
+				// later turn of it, though the turn itself succeeded:
+				// cc-connect.log 2026-10-17 17:30-19:09, result lines carry
+				// the earlier 401 with a cumulative duration_seconds, and
+				// the agy cli log shows only "step 211 ... CANCELED" again.
+				slog.Warn("antigravitySession: ignoring stale failed status after a reply", "status", resultErr)
+			case !replied && !t.retried && !readFailed && ctx.Err() == nil && as.ctx.Err() == nil && isAgyAuthExpired(msg):
+				// The login token expired mid-turn; a new agy process
+				// refreshes it. Retry once in place of the error and leave
+				// the attachments and the turn's EventResult to the retry.
+				slog.Warn("antigravitySession: login token expired mid-turn, retrying once", "error", err, "stderr", msg, "session_id", as.CurrentSessionID())
+				next := t
+				next.retried = true
+				lerr := as.launch(next)
+				if lerr == nil {
+					return
+				}
+				msg += "\n(retry failed to start: " + lerr.Error() + ")"
+				fallthrough
+			default:
+				slog.Error("antigravitySession: process failed", "error", err, "stderr", msg, "retried", t.retried)
 				// core drops a turn's text on EventError, so once agy has
 				// written the reply, deliver it and put the error under it.
 				ev := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", msg)}
@@ -251,7 +306,12 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			}
 		}
 
+		for _, f := range t.tempFiles {
+			_ = os.Remove(f)
+		}
+
 		// Finalize turn.
+		sid := as.CurrentSessionID()
 		select {
 		case as.events <- core.Event{Type: core.EventResult, SessionID: sid, Done: true}:
 		case <-as.ctx.Done():
@@ -285,6 +345,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		if err != nil {
 			if err != io.EOF && !strings.Contains(err.Error(), "file already closed") {
 				slog.Error("antigravitySession: read error", "error", err)
+				readFailed = true
 				select {
 				case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}:
 				case <-as.ctx.Done():

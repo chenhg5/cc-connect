@@ -2,6 +2,7 @@ package antigravity
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -443,5 +444,219 @@ func TestParseStreamLineToolStep(t *testing.T) {
 
 	if ev, ok := as.parseStreamLine([]byte(done + "\n")); ok {
 		t.Errorf("DONE tool line should produce no event, got %+v", ev)
+	}
+}
+
+// fakeAgyRuns writes a fake agy that runs body[n] on its n-th launch (0-based)
+// and logs each launch's args, then "---", to <dir>/args.
+func fakeAgyRuns(t *testing.T, dir string, bodies ...string) (cmdPath, argsPath string) {
+	t.Helper()
+	argsPath = filepath.Join(dir, "args")
+	countPath := filepath.Join(dir, "count")
+	cmdPath = filepath.Join(dir, "fake-agy.sh")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> " + argsPath + "\necho '---' >> " + argsPath + "\n" +
+		"n=$(cat " + countPath + " 2>/dev/null || echo 0)\necho $((n+1)) > " + countPath + "\ncase $n in\n"
+	for i, b := range bodies {
+		script += fmt.Sprintf("%d)\n%s\n;;\n", i, b)
+	}
+	script += "esac\n"
+	if err := os.WriteFile(cmdPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return cmdPath, argsPath
+}
+
+// agyRuns splits the args log into one entry per launch.
+func agyRuns(t *testing.T, argsPath string) []string {
+	t.Helper()
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := strings.Split(string(data), "---\n")
+	return runs[:len(runs)-1]
+}
+
+type turnEvents struct {
+	text    string
+	errs    []string
+	results int
+}
+
+// collectTurn reads events until the first EventResult, then keeps reading
+// briefly so a second EventResult (a turn finished twice) would be seen.
+func collectTurn(t *testing.T, s *antigravitySession) turnEvents {
+	t.Helper()
+	var te turnEvents
+	deadline := time.After(10 * time.Second)
+	var grace <-chan time.Time
+	for {
+		select {
+		case ev := <-s.Events():
+			switch ev.Type {
+			case core.EventText:
+				te.text += ev.Content
+			case core.EventError:
+				te.errs = append(te.errs, ev.Error.Error())
+			case core.EventResult:
+				te.results++
+				if grace == nil {
+					grace = time.After(300 * time.Millisecond)
+				}
+			}
+		case <-grace:
+			return te
+		case <-deadline:
+			t.Fatalf("timeout; got %+v", te)
+		}
+	}
+}
+
+const (
+	agy401Stderr = `echo 'error: UNAUTHENTICATED (code 401): Request had invalid authentication credentials.' >&2`
+	agy401Result = `echo '{"event":"result","result":{"conversation_id":"conv-a","status":"ERROR","response":"","error":"UNAUTHENTICATED (code 401)"}}'` + "\nexit 3"
+	agyInitA     = `echo '{"event":"init","conversation_id":"conv-a","init":{}}'`
+)
+
+// An expired login token before any reply text is retried once in the same
+// conversation; the group sees only the retry's reply and no error.
+func TestAuthExpiredWithoutReplyRetriesOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	cmdPath, argsPath := fakeAgyRuns(t, dir,
+		agyInitA+"\n"+agy401Stderr+"\n"+agy401Result,
+		agyInitA+"\n"+`echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"续上了"}}'`+"\n"+
+			`echo '{"event":"result","result":{"conversation_id":"conv-a","status":"SUCCESS"}}'`,
+	)
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, dir, "", "yolo", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("去逛逛", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	te := collectTurn(t, s)
+	if len(te.errs) != 0 || te.text != "续上了" || te.results != 1 {
+		t.Fatalf("got %+v, want only the retry's reply and one result", te)
+	}
+	runs := agyRuns(t, argsPath)
+	if len(runs) != 2 {
+		t.Fatalf("launches = %d, want 2", len(runs))
+	}
+	if !strings.Contains(runs[1], "--conversation\nconv-a\n") || !strings.Contains(runs[1], agyAuthRetryPrompt) {
+		t.Errorf("retry should continue conv-a with the retry prompt: %q", runs[1])
+	}
+}
+
+// A retry that hits the same error reports it once and is not retried again.
+func TestAuthExpiredRetryFailsReportsOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	fail := agyInitA + "\n" + agy401Stderr + "\n" + agy401Result
+	cmdPath, argsPath := fakeAgyRuns(t, dir, fail, fail, fail)
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, dir, "", "yolo", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("hi", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	te := collectTurn(t, s)
+	if len(te.errs) != 1 || !strings.Contains(te.errs[0], "UNAUTHENTICATED") || te.results != 1 || te.text != "" {
+		t.Fatalf("got %+v, want one 401 error and one result", te)
+	}
+	if n := len(agyRuns(t, argsPath)); n != 2 {
+		t.Fatalf("launches = %d, want 2", n)
+	}
+}
+
+// Once reply text is out, a 401 is not retried (that would repeat the reply);
+// the error goes under the reply as before.
+func TestAuthExpiredAfterReplyDoesNotRetry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	cmdPath, argsPath := fakeAgyRuns(t, dir,
+		agyInitA+"\n"+`echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"写了一半"}}'`+"\n"+agy401Stderr+"\n"+agy401Result,
+		`echo '{"event":"result","result":{"conversation_id":"conv-a","status":"SUCCESS"}}'`,
+	)
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, dir, "", "yolo", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("hi", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	te := collectTurn(t, s)
+	if len(te.errs) != 0 || !strings.HasPrefix(te.text, "写了一半") || !strings.Contains(te.text, "⚠️") || !strings.Contains(te.text, "UNAUTHENTICATED") || te.results != 1 {
+		t.Fatalf("got %+v, want reply with the error under it", te)
+	}
+	if n := len(agyRuns(t, argsPath)); n != 1 {
+		t.Fatalf("launches = %d, want 1", n)
+	}
+}
+
+// Without a conversation id the retry resends the original prompt, with its
+// attachment still on disk, as a fresh conversation.
+func TestAuthExpiredBeforeInitResendsPrompt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	attachDir := filepath.Join(dir, ".cc-connect", "attachments")
+	cmdPath, argsPath := fakeAgyRuns(t, dir,
+		agy401Stderr+"\n"+agy401Result,
+		"ls "+attachDir+" >> "+filepath.Join(dir, "args")+"\n"+agyInitA+"\n"+
+			`echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"看过了"}}'`+"\n"+
+			`echo '{"event":"result","result":{"conversation_id":"conv-a","status":"SUCCESS"}}'`,
+	)
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, dir, "", "yolo", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("看看这个", "", nil, []core.FileAttachment{{FileName: "note.txt", Data: []byte("x")}}); err != nil {
+		t.Fatal(err)
+	}
+	te := collectTurn(t, s)
+	if len(te.errs) != 0 || te.text != "看过了" || te.results != 1 {
+		t.Fatalf("got %+v, want only the retry's reply", te)
+	}
+	data, _ := os.ReadFile(argsPath)
+	runs := strings.Split(string(data), "---\n")
+	if len(runs) < 3 {
+		t.Fatalf("args log = %q, want two launches", data)
+	}
+	if strings.Contains(runs[1], "--conversation") || !strings.Contains(runs[1], "看看这个") || !strings.Contains(runs[1], "[Attached files saved at:") {
+		t.Errorf("retry should resend the original prompt fresh: %q", runs[1])
+	}
+	if !strings.Contains(runs[2], "note.txt") {
+		t.Errorf("attachment gone during the retry: %q", runs[2])
+	}
+	if _, err := os.Stat(filepath.Join(attachDir, "note.txt")); !os.IsNotExist(err) {
+		t.Errorf("attachment not removed after the turn: %v", err)
+	}
+}
+
+// agy repeats a conversation's last failure as status ERROR on later turns
+// that succeed (exit 0, empty stderr); such a reply gets no warning.
+func TestStaleFailedStatusAfterReplyIsDropped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	cmdPath, _ := fakeAgyRuns(t, dir,
+		agyInitA+"\n"+`echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"好的"}}'`+"\n"+
+			`echo '{"event":"result","result":{"conversation_id":"conv-a","status":"ERROR","response":"好的","error":"UNAUTHENTICATED (code 401)"}}'`,
+	)
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, dir, "", "yolo", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("hi", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	te := collectTurn(t, s)
+	if len(te.errs) != 0 || te.text != "好的" || te.results != 1 {
+		t.Fatalf("got %+v, want the reply alone", te)
 	}
 }
