@@ -25,12 +25,16 @@ import (
 // channel.
 
 type subTaskTable struct {
-	mu      sync.Mutex
-	gen     uint64
-	tasks   []core.SubTask
-	index   map[string]int
-	changed chan struct{}
-	closed  bool
+	mu    sync.Mutex
+	gen   uint64
+	tasks []core.SubTask
+	index map[string]int
+	// The previous batch (generation gen-1), kept so the engine can still give
+	// its message the final edit, and a late notification can still land.
+	prev      []core.SubTask
+	prevIndex map[string]int
+	changed   chan struct{}
+	closed    bool
 }
 
 func (t *subTaskTable) ch() chan struct{} {
@@ -52,11 +56,11 @@ func (t *subTaskTable) notifyLocked() {
 }
 
 // SubTasks implements core.SubTaskReporter.
-func (cs *claudeSession) SubTasks() (uint64, []core.SubTask) {
+func (cs *claudeSession) SubTasks() (uint64, []core.SubTask, []core.SubTask) {
 	t := &cs.subTasks
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.gen, append([]core.SubTask(nil), t.tasks...)
+	return t.gen, append([]core.SubTask(nil), t.tasks...), append([]core.SubTask(nil), t.prev...)
 }
 
 // SubTasksChanged implements core.SubTaskReporter.
@@ -94,6 +98,7 @@ func (cs *claudeSession) handleSubTaskEvent(sub string, raw map[string]any) {
 		}
 		if allDone {
 			t.gen++
+			t.prev, t.prevIndex = t.tasks, t.index
 			t.tasks = nil
 			t.index = map[string]int{}
 		}
@@ -117,11 +122,14 @@ func (cs *claudeSession) handleSubTaskEvent(sub string, raw map[string]any) {
 		return
 	}
 
-	i, ok := t.index[id]
-	if !ok {
+	var row *core.SubTask
+	if i, ok := t.index[id]; ok {
+		row = &t.tasks[i]
+	} else if i, ok := t.prevIndex[id]; ok {
+		row = &t.prev[i]
+	} else {
 		return // not a sub-agent row (e.g. a Bash task)
 	}
-	row := &t.tasks[i]
 	switch sub {
 	case "task_progress":
 		if !row.Running() {

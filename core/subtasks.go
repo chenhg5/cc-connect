@@ -45,10 +45,13 @@ func (t SubTask) Running() bool { return t.Status == SubTaskRunning }
 // sub-agents (maomao fork). SubTasks returns the current table and its
 // generation: the generation changes when a new batch starts after every row of
 // the previous one had finished, and the engine then posts a fresh message
-// instead of editing the old one far up the channel. SubTasksChanged is
-// signalled (coalesced) on every change and closed when the session ends.
+// instead of editing the old one far up the channel. previous is the final
+// state of batch generation-1 (nil if none), so the engine can still give the
+// old message its last edit when that edit was throttled at the switch.
+// SubTasksChanged is signalled (coalesced) on every change and closed when the
+// session ends.
 type SubTaskReporter interface {
-	SubTasks() (generation uint64, tasks []SubTask)
+	SubTasks() (generation uint64, tasks []SubTask, previous []SubTask)
 	SubTasksChanged() <-chan struct{}
 }
 
@@ -94,7 +97,7 @@ func ParseSubTaskTablePayload(content string) (*SubTaskTablePayload, bool) {
 // foregroundSubTask returns the most recently started foreground sub-agent that
 // is still running: the one the main turn is waiting for.
 func foregroundSubTask(r SubTaskReporter) (SubTask, bool) {
-	_, tasks := r.SubTasks()
+	_, tasks, _ := r.SubTasks()
 	for i := len(tasks) - 1; i >= 0; i-- {
 		if t := tasks[i]; !t.Background && t.Running() {
 			return t, true
@@ -161,34 +164,50 @@ func (e *Engine) runSubTaskTable(state *interactiveState, r SubTaskReporter, sta
 		gen      uint64
 		lastSent string
 		lastAt   time.Time
-		timer    *time.Timer
-		timerC   <-chan time.Time
+		// The previous batch's message, kept until its final state is shown.
+		prevHandle any
+		prevGen    uint64
+		prevSent   string
+		timer      *time.Timer
+		timerC     <-chan time.Time
 	)
 	defer func() {
 		if timer != nil {
 			timer.Stop()
 		}
 	}()
-	call := func() (context.Context, context.CancelFunc) {
-		return context.WithTimeout(e.ctx, compactProgressAPITimeout)
+	lang := func() Language { return e.i18n.CurrentLang() }
+	edit := func(ctx context.Context, h any, content string) bool {
+		if err := updater.UpdateMessage(ctx, h, content); err != nil {
+			slog.Warn("subtask table: edit failed", "error", err)
+			return false
+		}
+		return true
 	}
-	flush := func() {
-		g, tasks := r.SubTasks()
+	flush := func(ctx context.Context) {
+		g, tasks, prev := r.SubTasks()
+		if g != gen && handle != nil {
+			prevHandle, prevGen, prevSent = handle, gen, lastSent
+			handle, lastSent = nil, ""
+		}
+		gen = g
+		// Final state of the previous batch: its last edit may have been
+		// throttled when the next batch started.
+		if prevHandle != nil && prevGen+1 == g && len(prev) > 0 {
+			if c := BuildSubTaskTablePayload(lang(), prev); c != "" && c != prevSent && edit(ctx, prevHandle, c) {
+				prevSent = c
+			}
+		}
 		if len(tasks) == 0 {
 			return
 		}
-		if g != gen {
-			gen, handle, lastSent = g, nil, ""
-		}
-		content := BuildSubTaskTablePayload(e.i18n.CurrentLang(), tasks)
+		content := BuildSubTaskTablePayload(lang(), tasks)
 		if content == "" || content == lastSent {
 			return
 		}
 		state.mu.Lock()
 		p, replyCtx := state.platform, state.replyCtx
 		state.mu.Unlock()
-		ctx, cancel := call()
-		defer cancel()
 		if handle == nil {
 			h, err := starter.SendPreviewStart(ctx, markAgentReply(p, replyCtx), content)
 			if err != nil || h == nil {
@@ -196,16 +215,39 @@ func (e *Engine) runSubTaskTable(state *interactiveState, r SubTaskReporter, sta
 				return
 			}
 			handle = h
-		} else if err := updater.UpdateMessage(ctx, handle, content); err != nil {
-			slog.Warn("subtask table: edit failed", "error", err)
+		} else if !edit(ctx, handle, content) {
 			return
 		}
 		lastSent, lastAt = content, time.Now()
+	}
+	flushNow := func() {
+		ctx, cancel := context.WithTimeout(e.ctx, compactProgressAPITimeout)
+		defer cancel()
+		flush(ctx)
 	}
 	for {
 		closed := false
 		select {
 		case <-e.ctx.Done():
+			// Engine stopping (restart): the agent process dies with it, so one
+			// last edit marks rows still running as stopped instead of leaving
+			// the table at 🔄. e.ctx is already cancelled; bound the call with
+			// the progress card's API timeout.
+			if handle == nil {
+				return
+			}
+			_, tasks, _ := r.SubTasks()
+			now := time.Now()
+			for i := range tasks {
+				if tasks[i].Running() {
+					tasks[i].Status, tasks[i].EndedAt = SubTaskStopped, now
+				}
+			}
+			if c := BuildSubTaskTablePayload(lang(), tasks); c != "" && c != lastSent {
+				ctx, cancel := context.WithTimeout(context.Background(), compactProgressAPITimeout)
+				edit(ctx, handle, c)
+				cancel()
+			}
 			return
 		case _, ok := <-changed:
 			if !ok {
@@ -216,7 +258,7 @@ func (e *Engine) runSubTaskTable(state *interactiveState, r SubTaskReporter, sta
 			timerC = nil
 		}
 		if closed {
-			flush() // last state (rows the dead process left are "stopped")
+			flushNow() // last state (rows the dead process left are "stopped")
 			return
 		}
 		if wait := interval - time.Since(lastAt); handle != nil && wait > 0 {
@@ -231,6 +273,6 @@ func (e *Engine) runSubTaskTable(state *interactiveState, r SubTaskReporter, sta
 			}
 			continue
 		}
-		flush()
+		flushNow()
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -41,7 +42,7 @@ func newReplaySession(t *testing.T) *claudeSession {
 
 func rowByID(t *testing.T, cs *claudeSession, id string) core.SubTask {
 	t.Helper()
-	_, tasks := cs.SubTasks()
+	_, tasks, _ := cs.SubTasks()
 	for _, r := range tasks {
 		if r.ID == id {
 			return r
@@ -63,7 +64,7 @@ func TestSubTasks_ReplayForegroundAndBackground(t *testing.T) {
 	for _, l := range lines[:28] {
 		cs.handleReadLoopLine(l)
 	}
-	gen, tasks := cs.SubTasks()
+	gen, tasks, _ := cs.SubTasks()
 	if gen != 1 || len(tasks) != 2 {
 		t.Fatalf("gen=%d rows=%+v, want 2 rows (inner Bash tasks are not rows)", gen, tasks)
 	}
@@ -78,7 +79,7 @@ func TestSubTasks_ReplayForegroundAndBackground(t *testing.T) {
 	for _, l := range lines[28:] {
 		cs.handleReadLoopLine(l)
 	}
-	_, tasks = cs.SubTasks()
+	_, tasks, _ = cs.SubTasks()
 	if len(tasks) != 2 {
 		t.Fatalf("rows = %+v, want 2", tasks)
 	}
@@ -133,7 +134,7 @@ func TestSubTasks_NewBatchAndClose(t *testing.T) {
 		t.Fatalf("row = %+v", r)
 	}
 	cs.handleReadLoopLine(`{"type":"system","subtype":"task_started","task_id":"x2","task_type":"local_agent","description":"two"}`)
-	gen, tasks := cs.SubTasks()
+	gen, tasks, _ := cs.SubTasks()
 	if gen != 2 || len(tasks) != 1 || tasks[0].ID != "x2" {
 		t.Fatalf("gen=%d rows=%+v, want a fresh table with x2", gen, tasks)
 	}
@@ -156,5 +157,55 @@ func TestFirstSentence(t *testing.T) {
 		if got := firstSentence(in); got != want {
 			t.Errorf("firstSentence(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Review fix 3: the sub-agents' own assistant/user messages (parent_tool_use_id
+// set) are not the main agent's events: replaying the fixture, the main agent
+// keeps only its two Agent calls, their two tool results and its own text, and
+// the context stats stay the main agent's.
+func TestSubAgentMessagesAreNotMainEvents(t *testing.T) {
+	lines := fixtureLines(t)
+	cs := newReplaySession(t)
+	for _, l := range lines[:10] { // up to the main agent's second Agent call
+		cs.handleReadLoopLine(l)
+	}
+	mainCtx := cs.GetContextUsage()
+	for _, l := range lines[10:] {
+		cs.handleReadLoopLine(l)
+	}
+	close(cs.events)
+	var tools []string
+	var texts []string
+	results := 0
+	for ev := range cs.events {
+		switch ev.Type {
+		case core.EventToolUse:
+			tools = append(tools, ev.ToolName)
+		case core.EventToolResult:
+			results++
+		case core.EventText:
+			if ev.Content != "" {
+				texts = append(texts, ev.Content)
+			}
+		}
+	}
+	if len(tools) != 2 || tools[0] != "Agent" || tools[1] != "Agent" {
+		t.Fatalf("tool uses = %v, want only the main agent's two Agent calls", tools)
+	}
+	if results != 2 {
+		t.Fatalf("tool results = %d, want 2 (the two Agent calls)", results)
+	}
+	for _, s := range texts {
+		if strings.HasPrefix(s, "两条命令已按先 a 后 b 的顺序依次运行,没有并行。\n\n1.") {
+			t.Fatalf("background sub-agent's final report leaked as main text: %q", s)
+		}
+	}
+	if len(texts) != 2 {
+		t.Fatalf("texts = %q, want the main agent's two replies", texts)
+	}
+	got := cs.GetContextUsage()
+	if mainCtx == nil || got == nil || got.CacheCreationInputTokens == 16617 || got.CacheCreationInputTokens == 1390 {
+		t.Fatalf("context usage taken from a sub-agent call: before=%+v after=%+v", mainCtx, got)
 	}
 }

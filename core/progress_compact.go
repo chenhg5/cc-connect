@@ -243,7 +243,9 @@ type compactProgressWriter struct {
 	hideThink  bool
 	steps      int
 	startedAt  time.Time
-	waitShown  bool // maomao fork: the last item is the "等子 agent" line
+	// maomao fork: the "等子 agent" line currently in items/entries ("" = none).
+	waitText     string
+	waitFallback string
 
 	// Throttle message edits to avoid platform rate limits (e.g. Discord ~5 edits/5s).
 	minUpdateInterval time.Duration
@@ -414,7 +416,6 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	if !w.enabled || w.failed {
 		return false
 	}
-	w.waitShown = false
 	text := strings.TrimSpace(item.Text)
 	fallback = strings.TrimSpace(fallback)
 	if text == "" && fallback == "" {
@@ -461,16 +462,8 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 			truncated = true
 		}
 		w.truncated = truncated
-		if w.usePayload {
-			w.content = w.payload()
-			if w.content == "" {
-				slog.Warn("progress writer: failed to build structured payload", "platform", w.platform.Name())
-				w.failed = true
-				return false
-			}
-		} else {
-			w.content = renderCardProgressMarkdownFallback(w.entries, truncated)
-			w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
+		if !w.renderCard() {
+			return false
 		}
 	default:
 		if w.content == "" {
@@ -480,7 +473,27 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 		}
 		w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
 	}
+	return w.push()
+}
 
+// renderCard rebuilds w.content from the card items/entries.
+func (w *compactProgressWriter) renderCard() bool {
+	if w.usePayload {
+		w.content = w.payload()
+		if w.content == "" {
+			slog.Warn("progress writer: failed to build structured payload", "platform", w.platform.Name())
+			w.failed = true
+			return false
+		}
+		return true
+	}
+	w.content = renderCardProgressMarkdownFallback(w.entries, w.truncated)
+	w.content = trimCompactProgressText(w.content, compactProgressMaxChars)
+	return true
+}
+
+// push sends or edits the message with w.content (throttled edits).
+func (w *compactProgressWriter) push() bool {
 	if w.content == w.lastSent {
 		return true
 	}
@@ -532,22 +545,59 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 }
 
 // ShowSubAgentWait — maomao fork: while the turn waits for a foreground
-// sub-agent, keep one "等子 agent：…" line as the newest item, replacing it in
-// place on every refresh, so the elapsed time and the sub-agent's current step
-// keep moving instead of the card stopping at "🔧 Agent".
+// sub-agent, keep one "等子 agent：…" line as the newest item, replacing it on
+// every refresh, so the elapsed time and the sub-agent's current step keep
+// moving instead of the card stopping at "🔧 Agent". Any earlier wait line is
+// removed first, wherever other steps have pushed it.
 func (w *compactProgressWriter) ShowSubAgentWait(text string) bool {
 	if !w.enabled || w.failed || w.style != progressStyleCard {
 		return false
 	}
-	if w.waitShown && len(w.items) > 0 {
-		w.items = w.items[:len(w.items)-1]
-		if len(w.entries) > 0 {
-			w.entries = w.entries[:len(w.entries)-1]
+	w.removeWaitLine()
+	ok := w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryInfo, Text: text}, text)
+	if ok && len(w.items) > 0 && len(w.entries) > 0 {
+		w.waitText = w.items[len(w.items)-1].Text
+		w.waitFallback = w.entries[len(w.entries)-1]
+	}
+	return ok
+}
+
+// ClearSubAgentWait removes the wait line once no foreground sub-agent runs.
+func (w *compactProgressWriter) ClearSubAgentWait() bool {
+	if !w.enabled || w.failed || w.style != progressStyleCard || w.handle == nil {
+		return false
+	}
+	if w.waitText != "" {
+		w.removeWaitLine()
+		if !w.renderCard() {
+			return false
+		}
+	} else if w.content == w.lastSent {
+		return true
+	}
+	// Also retries an edit the throttle held back on an earlier tick.
+	return w.push()
+}
+
+func (w *compactProgressWriter) removeWaitLine() {
+	if w.waitText == "" {
+		return
+	}
+	items := w.items[:0]
+	for _, it := range w.items {
+		if !(it.Kind == ProgressEntryInfo && it.Text == w.waitText) {
+			items = append(items, it)
 		}
 	}
-	ok := w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryInfo, Text: text}, text)
-	w.waitShown = ok
-	return ok
+	w.items = items
+	entries := w.entries[:0]
+	for _, en := range w.entries {
+		if en != w.waitFallback {
+			entries = append(entries, en)
+		}
+	}
+	w.entries = entries
+	w.waitText, w.waitFallback = "", ""
 }
 
 // Finalize updates card progress state (running/completed/failed) without

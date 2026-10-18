@@ -754,7 +754,20 @@ func (cs *claudeSession) takeAPIErrorFallback() (alreadyFired bool) {
 	return alreadyFired
 }
 
+// isSubAgentMessage reports whether an assistant/user event belongs to a
+// sub-agent rather than the main agent (maomao fork). claude 2.1.302 streams the
+// sub-agents' own messages with parent_tool_use_id set to the Agent call
+// (testdata/subagents_fg_bg.jsonl); their progress reaches the channel through
+// the sub-agent table (task_progress), not as main-agent events.
+func isSubAgentMessage(raw map[string]any) bool {
+	id, _ := raw["parent_tool_use_id"].(string)
+	return id != ""
+}
+
 func (cs *claudeSession) handleAssistant(raw map[string]any) {
+	if isSubAgentMessage(raw) {
+		return
+	}
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
 		return
@@ -848,6 +861,9 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 }
 
 func (cs *claudeSession) handleUser(raw map[string]any) {
+	if isSubAgentMessage(raw) {
+		return
+	}
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
 		return

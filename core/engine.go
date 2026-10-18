@@ -5069,6 +5069,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case <-subWaitTick:
 			if t, ok := foregroundSubTask(subReporter); ok {
 				cp.ShowSubAgentWait(subAgentWaitText(e.i18n.IsZhLike(), t))
+			} else {
+				cp.ClearSubAgentWait()
 			}
 			continue
 		case err := <-pendingSend:
