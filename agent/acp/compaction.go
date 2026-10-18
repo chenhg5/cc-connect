@@ -82,10 +82,11 @@ func (s *acpSession) waitForCompaction(prompt string) {
 	}
 	doneCap := compactionDoneTimeout
 	status := s.waitCompactionStatus(doneCap)
-	if status == "completed" || status == "failed" {
+	switch status {
+	case "completed", "failed":
 		// The summary chunk can arrive after the terminal status.
 		s.waitUntilQuiet(compactionQuiet, compactionQuietCap)
-	} else if status == "started" {
+	case "started":
 		slog.Warn("acp: compaction did not finish before timeout; ending turn",
 			"session_id", s.currentACPSessionID(),
 			"waited", doneCap.String())
