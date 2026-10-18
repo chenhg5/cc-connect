@@ -64,6 +64,9 @@ func (e *Engine) capacityReset() {
 // a running cooldown themselves, before building the prompt. send must
 // tolerate a nil session (return an error).
 func (e *Engine) runTurnWithCapacityRetry(state *interactiveState, session *Session, sessions *SessionManager, key, msgID string, turnStart time.Time, stopTyping func(), replyCtx any, send func(as AgentSession) error, giveUp func(wait time.Duration)) {
+	// maomao fork: the mode override set for this turn (setTurnMode) holds across its capacity
+	// retries and the queued turns chained into it, each of which sets its own; it ends here.
+	defer e.restoreTurnMode(state)
 	for attempt := 1; ; attempt++ {
 		state.mu.Lock()
 		as := state.agentSession
@@ -172,6 +175,7 @@ func (e *Engine) redeliverMessage(p Platform, msg *Message, agent Agent, session
 		return
 	}
 	slog.Info("capacity re-delivery", "session_key", msg.SessionKey)
+	e.startScheduledTurn(msg, session) // maomao fork: a re-delivered cron/timer turn, as when it ran
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
 }
 
@@ -192,5 +196,8 @@ func queuedToMessage(q queuedMessage) Message {
 		SessionKey:   q.msgSessionKey,
 		ChannelKey:   q.channelKey,
 		ModeOverride: q.modeOverride,
+		// maomao fork: a queued cron/timer turn stays one through a capacity re-delivery.
+		scheduledFrom:       q.scheduledFrom,
+		scheduledBackfilled: q.scheduledBackfilled,
 	}
 }

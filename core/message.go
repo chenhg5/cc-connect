@@ -415,6 +415,12 @@ type Message struct {
 	// drop late redeliveries that reuse a new message_id but an older create_time
 	// than a message already processed. Zero means unset (no ordering hint).
 	UserMessageTimeMs int64
+
+	// maomao fork: set on a cron/timer turn to its unmuted platform, so a capacity re-delivery
+	// stays a scheduled turn (team note; backfill unless scheduledBackfilled). See
+	// Engine.startScheduledTurn.
+	scheduledFrom       Platform
+	scheduledBackfilled bool
 }
 
 // EventType distinguishes different kinds of agent output.

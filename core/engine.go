@@ -546,12 +546,15 @@ type queuedMessage struct {
 	// maomao fork: set for a queued cron/timer turn to its unmuted platform. When the turn starts
 	// it gets the same team note and channel backfill as a cron/timer turn run directly.
 	scheduledFrom Platform
+	// maomao fork: the backfill is already in content (a capacity re-delivery must not redo it).
+	scheduledBackfilled bool
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession             AgentSession
-	capacityFailed           bool // maomao fork: last turn failed with "model at capacity"
+	modeRestore              func() // maomao fork: undoes the running turn's mode override (setTurnMode); guarded by mu
+	capacityFailed           bool   // maomao fork: last turn failed with "model at capacity"
 	platform                 Platform
 	replyCtx                 any
 	currentMessageID         string
@@ -1694,8 +1697,9 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
-	e.teamNoteTurn(msg, session) // maomao fork: scheduled turns show on the team status board too
-	e.cronChannelBackfill(targetPlatform, sessionKey, session, msg)
+	// maomao fork: scheduled turns show on the team status board too, and see the channel.
+	msg.scheduledFrom = targetPlatform
+	e.startScheduledTurn(msg, session)
 
 	prevHistLen := session.HistoryLen()
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
@@ -1901,8 +1905,9 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		}
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
-	e.teamNoteTurn(msg, session) // maomao fork: scheduled turns show on the team status board too
-	e.cronChannelBackfill(targetPlatform, sessionKey, session, msg)
+	// maomao fork: scheduled turns show on the team status board too, and see the channel.
+	msg.scheduledFrom = targetPlatform
+	e.startScheduledTurn(msg, session)
 
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	return nil
@@ -1927,9 +1932,45 @@ func (e *Engine) startScheduledQueuedTurn(q *queuedMessage, session *Session) {
 		return
 	}
 	m := queuedToMessage(*q)
-	e.teamNoteTurn(&m, session)
-	e.cronChannelBackfill(q.scheduledFrom, q.msgSessionKey, session, &m)
-	q.content, q.images = m.Content, m.Images
+	e.startScheduledTurn(&m, session)
+	q.content, q.images, q.scheduledBackfilled = m.Content, m.Images, m.scheduledBackfilled
+}
+
+// startScheduledTurn is startScheduledQueuedTurn for a Message (a cron/timer turn re-delivered
+// after a capacity cooldown). The backfill runs once per job run: after it the posts are marked
+// seen and live in msg.Content, which every re-delivery carries, as gate.go does for user messages.
+func (e *Engine) startScheduledTurn(msg *Message, session *Session) {
+	if msg.scheduledFrom == nil {
+		return
+	}
+	e.teamNoteTurn(msg, session)
+	if !msg.scheduledBackfilled {
+		e.cronChannelBackfill(msg.scheduledFrom, msg.SessionKey, session, msg)
+		msg.scheduledBackfilled = true
+	}
+}
+
+// setTurnMode ends the previous turn's mode override, if any, and applies mode for the turn
+// about to start (maomao fork: a cron/timer job's mode must not carry over to the queued
+// messages chained after it).
+func (e *Engine) setTurnMode(state *interactiveState, as AgentSession, mode string) {
+	e.restoreTurnMode(state)
+	if restore := e.applyLiveModeOverride(as, mode); restore != nil {
+		state.mu.Lock()
+		state.modeRestore = restore
+		state.mu.Unlock()
+	}
+}
+
+// restoreTurnMode switches back to the default mode if a turn's override is still on.
+func (e *Engine) restoreTurnMode(state *interactiveState) {
+	state.mu.Lock()
+	restore := state.modeRestore
+	state.modeRestore = nil
+	state.mu.Unlock()
+	if restore != nil {
+		restore()
+	}
 }
 
 // applyLiveModeOverride switches the live agent session to mode and returns the function that
@@ -3281,6 +3322,9 @@ const (
 // cron/timer job can tell "queued" from "turned away" (maomao fork). scheduledFrom is set for a
 // cron/timer turn (see queuedMessage.scheduledFrom).
 func (e *Engine) enqueueForBusySession(p Platform, msg *Message, interactiveKey string, scheduledFrom Platform) queueOutcome {
+	if scheduledFrom == nil {
+		scheduledFrom = msg.scheduledFrom // a re-delivered cron/timer turn (deferForCapacity)
+	}
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	if !hasState || state == nil {
@@ -3316,23 +3360,24 @@ func (e *Engine) enqueueForBusySession(p Platform, msg *Message, interactiveKey 
 		return queueRejected // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
-		messageID:         msg.MessageID,
-		platform:          p,
-		replyCtx:          msg.ReplyCtx,
-		content:           msg.Content,
-		images:            msg.Images,
-		files:             msg.Files,
-		fromVoice:         msg.FromVoice,
-		userID:            msg.UserID,
-		userName:          msg.UserName,
-		turnCtx:           msg.TurnCtx,
-		turnCtxQuery:      msg.TurnCtxQuery,
-		modeOverride:      msg.ModeOverride,
-		scheduledFrom:     scheduledFrom,
-		msgPlatform:       msg.Platform,
-		msgSessionKey:     msg.SessionKey,
-		channelKey:        msg.ChannelKey,
-		userMessageTimeMs: msg.UserMessageTimeMs,
+		messageID:           msg.MessageID,
+		platform:            p,
+		replyCtx:            msg.ReplyCtx,
+		content:             msg.Content,
+		images:              msg.Images,
+		files:               msg.Files,
+		fromVoice:           msg.FromVoice,
+		userID:              msg.UserID,
+		userName:            msg.UserName,
+		turnCtx:             msg.TurnCtx,
+		turnCtxQuery:        msg.TurnCtxQuery,
+		modeOverride:        msg.ModeOverride,
+		scheduledFrom:       scheduledFrom,
+		scheduledBackfilled: msg.scheduledBackfilled,
+		msgPlatform:         msg.Platform,
+		msgSessionKey:       msg.SessionKey,
+		channelKey:          msg.ChannelKey,
+		userMessageTimeMs:   msg.UserMessageTimeMs,
 	})
 	runMessageAccepted(msg)
 	queueDepth := len(state.pendingMessages)
@@ -3921,10 +3966,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 
 	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").
-	// Defer restores only when SetLiveMode succeeds for the override.
-	if restore := e.applyLiveModeOverride(state.agentSession, msg.ModeOverride); restore != nil {
-		defer restore()
-	}
+	// maomao fork: it lasts for this message's turn only; a queued message chained after it gets
+	// its own mode (setTurnMode in processInteractiveEvents), and the deferred restore is the
+	// fallback for an early return.
+	e.setTurnMode(state, state.agentSession, msg.ModeOverride)
+	defer e.restoreTurnMode(state)
 
 	// Start typing indicator if platform supports it.
 	// Ownership is transferred to processInteractiveEvents which manages
@@ -5017,14 +5063,6 @@ var agentErrorHandlers = []agentErrorHandler{
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
 	var chainedQueued *queuedMessage // maomao fork: queued message chained into this loop, if any
-	// maomao fork: a chained cron/timer turn's mode override holds until this loop ends, as it does
-	// for the rest of processInteractiveMessageWith when the turn runs directly.
-	var restoreMode func()
-	defer func() {
-		if restoreMode != nil {
-			restoreMode()
-		}
-	}()
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -6251,15 +6289,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 
 				e.startScheduledQueuedTurn(&queued, session)
+				// maomao fork: a capacity retry re-sends it with this backfill, not before it
+				// (the backfill already marked those posts seen).
+				*chainedQueued = queued
 				queued.content = e.withTurnBlocks(session, queued.msgSessionKey, queued.turnCtxQuery, queued.content, queued.turnCtx)
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 				state.mu.Lock()
 				as := state.agentSession // capture under lock to avoid race with cleanup
 				state.mu.Unlock()
-				if restore := e.applyLiveModeOverride(as, queued.modeOverride); restore != nil && restoreMode == nil {
-					restoreMode = restore
-				}
+				// The previous turn's mode ends with that turn; this one runs in its own.
+				e.setTurnMode(state, as, queued.modeOverride)
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -6597,6 +6637,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			continue
 		}
 		e.startScheduledQueuedTurn(&queued, session)
+		rawQueued = queued // maomao fork: re-delivered with its backfill (those posts are marked seen now)
 		queued.content = e.withTurnBlocks(session, queued.msgSessionKey, queued.turnCtxQuery, queued.content, queued.turnCtx)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
@@ -6620,7 +6661,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		restoreMode := e.applyLiveModeOverride(as, queued.modeOverride)
+		e.setTurnMode(state, as, queued.modeOverride) // restored when runTurnWithCapacityRetry returns
 		e.runTurnWithCapacityRetry(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, queued.replyCtx,
 			func(as AgentSession) error {
 				if as == nil {
@@ -6634,9 +6675,6 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			func(wait time.Duration) {
 				e.deferForCapacity(queued.platform, queuedToMessage(rawQueued), state.agent, sessions, sessionKey, state.workspaceDir, wait, false)
 			})
-		if restoreMode != nil {
-			restoreMode()
-		}
 	}
 }
 
