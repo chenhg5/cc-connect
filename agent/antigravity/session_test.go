@@ -512,8 +512,13 @@ func collectTurn(t *testing.T, s *antigravitySession) turnEvents {
 	}
 }
 
+// agy401StderrText is agy 1.4.0's real stderr for an expired login token
+// (cc-connect.log 2026-10-18 16:00).
+const agy401StderrText = `error: UNAUTHENTICATED (code 401): Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.
+AGY_ERROR: {"short_error":"UNAUTHENTICATED (code 401): Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.","status":"UNAUTHENTICATED","error_code":401,"code_kind":"http","retryable":false,"error_id":"7968a269-8f35-4d93-8c60-8c085c9f7190-759"}`
+
 const (
-	agy401Stderr = `echo 'error: UNAUTHENTICATED (code 401): Request had invalid authentication credentials.' >&2`
+	agy401Stderr = "cat >&2 <<'EOF'\n" + agy401StderrText + "\nEOF"
 	agy401Result = `echo '{"event":"result","result":{"conversation_id":"conv-a","status":"ERROR","response":"","error":"UNAUTHENTICATED (code 401)"}}'` + "\nexit 3"
 	agyInitA     = `echo '{"event":"init","conversation_id":"conv-a","init":{}}'`
 )
@@ -658,5 +663,75 @@ func TestStaleFailedStatusAfterReplyIsDropped(t *testing.T) {
 	te := collectTurn(t, s)
 	if len(te.errs) != 0 || te.text != "好的" || te.results != 1 {
 		t.Fatalf("got %+v, want the reply alone", te)
+	}
+}
+
+func TestIsAgyAuthExpired(t *testing.T) {
+	if !isAgyAuthExpired(agy401StderrText) {
+		t.Error("real 401 stderr not recognized")
+	}
+	for _, s := range []string{
+		"",
+		"error: UNAUTHENTICATED (code 401): Request had invalid authentication credentials.",
+		`AGY_ERROR: {"status":"RESOURCE_EXHAUSTED","error_code":429}`,
+		"quota exhausted; see code 401 docs",
+	} {
+		if isAgyAuthExpired(s) {
+			t.Errorf("isAgyAuthExpired(%q) = true", s)
+		}
+	}
+}
+
+// Only a stale ERROR status is dropped; another failed status after a reply
+// (exit 0, empty stderr) still shows under the reply.
+func TestCanceledStatusAfterReplyStillWarns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	cmdPath, _ := fakeAgyRuns(t, dir,
+		agyInitA+"\n"+`echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"好的"}}'`+"\n"+
+			`echo '{"event":"result","result":{"conversation_id":"conv-a","status":"CANCELED"}}'`,
+	)
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, dir, "", "yolo", "", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("hi", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	te := collectTurn(t, s)
+	if len(te.errs) != 0 || !strings.HasPrefix(te.text, "好的") || !strings.Contains(te.text, "⚠️") || !strings.Contains(te.text, "CANCELED") {
+		t.Fatalf("got %+v, want the reply with the CANCELED status under it", te)
+	}
+}
+
+// A resumed session whose failed process never reported "init" resends the
+// original prompt, still into the known conversation.
+func TestAuthExpiredWithoutInitResendsPromptInConversation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	cmdPath, argsPath := fakeAgyRuns(t, dir,
+		agy401Stderr+"\n"+agy401Result,
+		`echo '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"收到"}}'`+"\n"+
+			`echo '{"event":"result","result":{"conversation_id":"conv-a","status":"SUCCESS"}}'`,
+	)
+	s, err := newAntigravitySession(context.Background(), cmdPath, nil, dir, "", "yolo", "conv-a", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Send("第二个问题", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	te := collectTurn(t, s)
+	if len(te.errs) != 0 || te.text != "收到" || te.results != 1 {
+		t.Fatalf("got %+v, want only the retry's reply", te)
+	}
+	runs := agyRuns(t, argsPath)
+	if len(runs) != 2 {
+		t.Fatalf("launches = %d, want 2", len(runs))
+	}
+	if !strings.Contains(runs[1], "--conversation\nconv-a\n") || !strings.Contains(runs[1], "第二个问题") || strings.Contains(runs[1], agyAuthRetryPrompt) {
+		t.Errorf("retry should resend the original prompt into conv-a: %q", runs[1])
 	}
 }

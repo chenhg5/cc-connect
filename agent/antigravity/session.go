@@ -139,6 +139,9 @@ type agyTurn struct {
 	fullPrompt string   // prompt with attachment references, as first sent
 	tempFiles  []string // attachments; removed when the turn is over, not per process
 	retried    bool     // this launch is the one auth retry
+	// continueConv: the failed launch got agy's "init", so the conversation
+	// holds this turn's message and the retry asks agy to go on with it.
+	continueConv bool
 }
 
 // agyAuthRetryPrompt continues a turn that agy dropped because its login
@@ -146,11 +149,28 @@ type agyTurn struct {
 // google-antigravity/antigravity-cli#1091; a new process does).
 const agyAuthRetryPrompt = "上一步因为登录令牌过期被中断了（不是你的问题），请接着把刚才没做完的事做完。"
 
-// isAgyAuthExpired reports whether a failed turn's message is agy's expired
-// login token error, e.g. "UNAUTHENTICATED (code 401): Request had invalid
-// authentication credentials" (cc-connect.log, 2026-10-17/18).
-func isAgyAuthExpired(msg string) bool {
-	return strings.Contains(msg, "UNAUTHENTICATED") || strings.Contains(msg, "code 401")
+// isAgyAuthExpired reports whether agy's stderr names an expired login token:
+// a line `AGY_ERROR: {..., "status":"UNAUTHENTICATED", "error_code":401, ...}`
+// (cc-connect.log 2026-10-18 16:00).
+func isAgyAuthExpired(stderr string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "AGY_ERROR:")
+		if !ok {
+			continue
+		}
+		var e struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(rest)), &e) == nil && e.Status == "UNAUTHENTICATED" {
+			return true
+		}
+	}
+	return false
+}
+
+// agyStatusError is readLoop's message for a result with a non-SUCCESS status.
+func agyStatusError(status string) string {
+	return "agy turn ended with status " + status
 }
 
 // launch starts one agy process for the turn and hands it to readLoop, which
@@ -159,12 +179,13 @@ func (as *antigravitySession) launch(t agyTurn) error {
 	chatID := as.CurrentSessionID()
 	isResume := chatID != ""
 	prompt := t.fullPrompt
-	if t.retried && isResume {
+	if t.retried && t.continueConv && isResume {
 		// The conversation already holds the user's message and whatever
 		// agy did before the 401, so ask it to go on instead of sending the
-		// message a second time. Without a conversation id agy never got as
-		// far as "init", so nothing of this turn is stored and the original
-		// prompt is resent (its attachments are still on disk).
+		// message a second time. If the failed process never reported
+		// "init", agy did not take the turn in, so the original prompt is
+		// resent (its attachments are still on disk), into the same
+		// conversation when there is one.
 		prompt = agyAuthRetryPrompt
 	}
 
@@ -254,6 +275,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 	// Runs last, so a retry launched below is counted before this one is done.
 	defer as.wg.Done()
 	resultErr := ""
+	sawInit := false    // this process reported "init"
 	replied := false    // the turn already streamed reply text
 	readFailed := false // a read error was already reported to core
 	defer func() {
@@ -270,7 +292,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			}
 			switch {
 			case msg == "":
-			case replied && err == nil && stderr == "":
+			case resultErr == agyStatusError("ERROR") && replied && err == nil && stderr == "":
 				// agy keeps the last failed step of a conversation and
 				// reports status ERROR (exit 0, nothing on stderr) on every
 				// later turn of it, though the turn itself succeeded:
@@ -278,13 +300,14 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 				// the earlier 401 with a cumulative duration_seconds, and
 				// the agy cli log shows only "step 211 ... CANCELED" again.
 				slog.Warn("antigravitySession: ignoring stale failed status after a reply", "status", resultErr)
-			case !replied && !t.retried && !readFailed && ctx.Err() == nil && as.ctx.Err() == nil && isAgyAuthExpired(msg):
+			case !replied && !t.retried && !readFailed && ctx.Err() == nil && as.ctx.Err() == nil && isAgyAuthExpired(stderr):
 				// The login token expired mid-turn; a new agy process
 				// refreshes it. Retry once in place of the error and leave
 				// the attachments and the turn's EventResult to the retry.
 				slog.Warn("antigravitySession: login token expired mid-turn, retrying once", "error", err, "stderr", msg, "session_id", as.CurrentSessionID())
 				next := t
 				next.retried = true
+				next.continueConv = sawInit
 				lerr := as.launch(next)
 				if lerr == nil {
 					return
@@ -327,6 +350,14 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			if !sawInit {
+				// parseStreamLine passes "init" on only for a new id, so
+				// look at the event name here; "init" is the first line.
+				var head struct {
+					Event string `json:"event"`
+				}
+				sawInit = json.Unmarshal(bytes.TrimSpace(line), &head) == nil && head.Event == "init"
+			}
 			ev, ok := as.parseStreamLine(line)
 			if ok && ev.Type == core.EventError {
 				resultErr = ev.Error.Error()
@@ -424,7 +455,7 @@ func (as *antigravitySession) parseStreamLine(line []byte) (core.Event, bool) {
 		}
 	case "result":
 		if r := l.Result; r != nil && r.Status != "" && r.Status != "SUCCESS" {
-			return core.Event{Type: core.EventError, Error: fmt.Errorf("agy turn ended with status %s", r.Status)}, true
+			return core.Event{Type: core.EventError, Error: fmt.Errorf("%s", agyStatusError(r.Status))}, true
 		}
 	}
 	return core.Event{}, false
