@@ -164,10 +164,7 @@ func (e *Engine) redeliverMessage(p Platform, msg *Message, agent Agent, session
 	session := sessions.GetOrCreateActive(msg.SessionKey)
 	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
 	if !session.TryLock() {
-		if e.queueMessageForBusySession(p, msg, interactiveKey) {
-			if session.TryLock() {
-				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, workspaceDir)
-			}
+		if e.queueForBusySession(p, msg, session, sessions, interactiveKey, agent, workspaceDir, nil) != queueUnavailable {
 			return
 		}
 		slog.Warn("capacity re-delivery: session busy and queue unavailable, dropping", "session_key", msg.SessionKey)
@@ -194,5 +191,6 @@ func queuedToMessage(q queuedMessage) Message {
 		Platform:     q.msgPlatform,
 		SessionKey:   q.msgSessionKey,
 		ChannelKey:   q.channelKey,
+		ModeOverride: q.modeOverride,
 	}
 }

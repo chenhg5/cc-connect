@@ -2,7 +2,9 @@ package core
 
 import (
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // A cron/timer job that fires while its channel's turn is running must wait in the queue and
@@ -106,8 +108,8 @@ func TestQueueScheduledTurn_TurnEndedMeanwhile_DrainsOrphan(t *testing.T) {
 	session.Unlock() // the running turn has just ended
 
 	msg := &Message{SessionKey: key, Platform: "discord", UserID: "timer", UserName: "timer", Content: "late job", ReplyCtx: "rctx"}
-	if !e.queueScheduledTurn(p, msg, session, e.sessions, key, e.agent, "") {
-		t.Fatal("queueScheduledTurn() = false, want queued")
+	if got := e.queueScheduledTurn(p, p, msg, session, e.sessions, key, e.agent, ""); got != queueAccepted {
+		t.Fatalf("queueScheduledTurn() = %v, want queueAccepted", got)
 	}
 	waitFor(t, "orphaned queued job delivered", func() bool {
 		for _, s := range p.getSent() {
@@ -117,4 +119,171 @@ func TestQueueScheduledTurn_TurnEndedMeanwhile_DrainsOrphan(t *testing.T) {
 		}
 		return false
 	})
+}
+
+type modeRecordingResultSession struct {
+	*resultAgentSession
+	modes []string
+}
+
+func (s *modeRecordingResultSession) SetLiveMode(m string) bool {
+	s.modes = append(s.modes, m)
+	return true
+}
+
+// A queued cron turn gets, when it starts (not when it is queued), what a direct one gets: the
+// channel posts it has not seen with the "（定时任务，回这条）" marker, the team status note, and
+// the job's permission mode (restored afterwards).
+func TestExecuteCronJob_BusyQueued_BackfillTeamNoteAndModeAtStart(t *testing.T) {
+	now := time.Now()
+	p := &cronHistoryPlatform{historyPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}, history: []ChannelHistoryMessage{
+		{ID: "100", Author: "zuiho", Content: "看过了", Time: now},
+		{ID: "101", Author: "zuiho", Content: "排队前的新消息", Time: now},
+	}}}
+	as := &modeRecordingResultSession{resultAgentSession: newResultAgentSession("cron done")}
+	e := NewEngine("test", &resultAgent{session: as}, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	e.SetTeam(t.TempDir(), "maomao", false)
+
+	key := "discord:c1"
+	session, state := busySessionWithLiveState(t, e, p, key, as)
+	session.SetLastSeenMsgID("100")
+
+	job := &CronJob{ID: "c1", SessionKey: key, Prompt: "回家", Mode: "bypassPermissions"}
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob() = %v, want nil (queued)", err)
+	}
+	if len(as.modes) != 0 {
+		t.Fatalf("mode switched at queue time: %v", as.modes)
+	}
+	// Posted while the job waited: the backfill runs when the turn starts, so it sees this too.
+	p.history = append(p.history, ChannelHistoryMessage{ID: "102", Author: "龙娘", IsBot: true, Content: "排队期间的消息", Time: now})
+
+	if !e.drainPendingMessages(state, session, e.sessions, key) {
+		t.Fatal("drainPendingMessages did not unlock the session")
+	}
+	if len(as.sentPrompts) != 1 {
+		t.Fatalf("agent prompts = %#v, want 1", as.sentPrompts)
+	}
+	prompt := as.sentPrompts[0]
+	for _, want := range []string{"排队前的新消息", "排队期间的消息", "（定时任务，回这条）", "回家"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("queued cron prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+	if session.GetLastSeenMsgID() != "102" {
+		t.Fatalf("last seen = %q, want 102", session.GetLastSeenMsgID())
+	}
+	if strings.Join(as.modes, ",") != "bypassPermissions,default" {
+		t.Fatalf("live modes = %v, want job mode then default", as.modes)
+	}
+	e.team.mu.Lock()
+	ts := e.team.seen[key]
+	e.team.mu.Unlock()
+	if ts == nil || !strings.Contains(ts.task, "回家") {
+		t.Fatalf("team note = %#v, want the cron task", ts)
+	}
+}
+
+type modeRecordingQueuingSession struct {
+	*queuingAgentSession
+	mu    sync.Mutex
+	modes []string
+}
+
+func (s *modeRecordingQueuingSession) SetLiveMode(m string) bool {
+	s.mu.Lock()
+	s.modes = append(s.modes, m)
+	s.mu.Unlock()
+	return true
+}
+
+// Same, for a scheduled turn chained into the running turn's event loop.
+func TestProcessInteractiveEvents_ChainedScheduledTurn_BackfillAndMode(t *testing.T) {
+	now := time.Now()
+	p := &cronHistoryPlatform{historyPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}, history: []ChannelHistoryMessage{
+		{ID: "100", Author: "zuiho", Content: "看过了", Time: now},
+		{ID: "101", Author: "zuiho", Content: "前一轮期间的消息", Time: now},
+	}}}
+	sess := &modeRecordingQueuingSession{queuingAgentSession: newQueuingSession("qs-sched")}
+	e := NewEngine("test", &controllableAgent{nextSession: sess.queuingAgentSession}, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+
+	key := "discord:c1"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetLastSeenMsgID("100")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx-turn1",
+		pendingMessages: []queuedMessage{{
+			platform: p, replyCtx: "ctx-timer", content: "到点检查", userID: "timer", userName: "timer",
+			msgPlatform: "discord", msgSessionKey: key, modeOverride: "plan", scheduledFrom: p,
+		}},
+	}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+
+	go func() {
+		sess.events <- Event{Type: EventResult, Content: "response1", Done: true}
+		waitFor(t, "queued scheduled turn sent", func() bool {
+			sess.sendMu.Lock()
+			defer sess.sendMu.Unlock()
+			return len(sess.sendCalls) > 0
+		})
+		sess.events <- Event{Type: EventResult, Content: "response2", Done: true}
+	}()
+	sendDone := make(chan error, 1)
+	sendDone <- nil
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg1", time.Now(), nil, sendDone, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("processInteractiveEvents did not complete in time")
+	}
+
+	sess.sendMu.Lock()
+	sent := append([]string(nil), sess.sendCalls...)
+	sess.sendMu.Unlock()
+	if len(sent) != 1 || !strings.Contains(sent[0], "前一轮期间的消息") || !strings.Contains(sent[0], "（定时任务，回这条）") {
+		t.Fatalf("chained scheduled prompt = %#v, want backfill with marker", sent)
+	}
+	sess.mu.Lock()
+	modes := strings.Join(sess.modes, ",")
+	sess.mu.Unlock()
+	if modes != "plan,default" {
+		t.Fatalf("live modes = %q, want plan,default", modes)
+	}
+}
+
+// A full queue turns the job away: it fails the old way ("job failed", last_error), muted or not,
+// instead of being recorded as run. The user-message path still treats it as handled.
+func TestScheduledJob_BusyQueueFull_Fails(t *testing.T) {
+	p := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+	as := newResultAgentSession("unused")
+	e := NewEngine("test", &resultAgent{session: as}, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	e.maxQueuedMessages = 1
+
+	key := "discord:channel-1:user-1"
+	_, state := busySessionWithLiveState(t, e, p, key, as)
+	state.pendingMessages = []queuedMessage{{platform: p, content: "already waiting"}}
+
+	if err := e.ExecuteTimerJob(&TimerJob{ID: "t-full", SessionKey: key, Prompt: "x", Mute: true}); err == nil || !strings.Contains(err.Error(), "queue is full") {
+		t.Fatalf("muted timer on a full queue: err = %v, want queue-full error", err)
+	}
+	if err := e.ExecuteCronJob(&CronJob{ID: "c-full", SessionKey: key, Prompt: "y"}); err == nil || !strings.Contains(err.Error(), "queue is full") {
+		t.Fatalf("cron on a full queue: err = %v, want queue-full error", err)
+	}
+	if n := len(state.pendingMessages); n != 1 {
+		t.Fatalf("queue depth = %d, want 1 (nothing added)", n)
+	}
+	if !e.queueMessageForBusySession(p, &Message{SessionKey: key, Content: "user msg", ReplyCtx: "r"}, key) {
+		t.Fatal("user message on a full queue should still count as handled")
+	}
 }

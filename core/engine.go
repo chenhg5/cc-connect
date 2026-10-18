@@ -542,6 +542,10 @@ type queuedMessage struct {
 	userMessageTimeMs int64  // Feishu create_time ms (optional); see Message.UserMessageTimeMs
 	turnCtx           bool   // maomao fork: see Message.TurnCtx
 	turnCtxQuery      string
+	modeOverride      string // maomao fork: see Message.ModeOverride (cron/timer job.Mode)
+	// maomao fork: set for a queued cron/timer turn to its unmuted platform. When the turn starts
+	// it gets the same team note and channel backfill as a cron/timer turn run directly.
+	scheduledFrom Platform
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
@@ -1681,9 +1685,12 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		// (2026-10-19: 13 of 54 scheduled runs were dropped as "is busy"; user: "我这没看到").
 		// Its reply goes to the channel through the queued turn; the job counts as run from here,
 		// so the empty-response check below does not apply to it.
-		if e.queueScheduledTurn(effectivePlatform, msg, session, sessions, iKey, agent, workspaceDir) {
+		switch e.queueScheduledTurn(effectivePlatform, targetPlatform, msg, session, sessions, iKey, agent, workspaceDir) {
+		case queueAccepted:
 			slog.Info("cron: session busy, job queued after current turn", "id", job.ID, "session", sessionKey)
 			return nil
+		case queueRejected:
+			return fmt.Errorf("session %q is busy and its queue is full", sessionKey)
 		}
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
@@ -1885,9 +1892,12 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 	if !session.TryLock() {
 		// maomao fork: queued behind the running turn like a cron job (see ExecuteCronJob).
-		if e.queueScheduledTurn(effectivePlatform, msg, session, sessions, iKey, agent, workspaceDir) {
+		switch e.queueScheduledTurn(effectivePlatform, targetPlatform, msg, session, sessions, iKey, agent, workspaceDir) {
+		case queueAccepted:
 			slog.Info("timer: session busy, job queued after current turn", "id", job.ID, "session", sessionKey)
 			return nil
+		case queueRejected:
+			return fmt.Errorf("session %q is busy and its queue is full", sessionKey)
 		}
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
@@ -1901,10 +1911,46 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 // queueScheduledTurn queues a cron/timer turn whose session is busy behind the running turn,
 // through the same queue a user message uses. The new_per_run paths never get here: each run
 // takes a fresh side session (NewSideSession), which no one else holds, so its TryLock succeeds.
-func (e *Engine) queueScheduledTurn(p Platform, msg *Message, session *Session, sessions *SessionManager, iKey string, agent Agent, workspaceDir string) bool {
+// p is where replies go (muted for a muted job); target is the real platform, for the backfill.
+func (e *Engine) queueScheduledTurn(p, target Platform, msg *Message, session *Session, sessions *SessionManager, iKey string, agent Agent, workspaceDir string) queueOutcome {
 	// Same as the user-message path: a turn that is still starting has no state to queue into yet.
 	e.ensureInteractiveStateForQueueing(iKey, p, msg.ReplyCtx)
-	return e.queueForBusySession(p, msg, session, sessions, iKey, agent, workspaceDir)
+	return e.queueForBusySession(p, msg, session, sessions, iKey, agent, workspaceDir, target)
+}
+
+// startScheduledQueuedTurn gives a queued cron/timer turn, as it starts, what ExecuteCronJob /
+// ExecuteTimerJob give one they run directly: the team status note, and the channel posts it
+// has not seen with the "（定时任务，回这条）" marker (cronChannelBackfill; 2026-10-17 user:
+// "他每次都要看到之前的消息"). A no-op for a user message.
+func (e *Engine) startScheduledQueuedTurn(q *queuedMessage, session *Session) {
+	if q.scheduledFrom == nil {
+		return
+	}
+	m := queuedToMessage(*q)
+	e.teamNoteTurn(&m, session)
+	e.cronChannelBackfill(q.scheduledFrom, q.msgSessionKey, session, &m)
+	q.content, q.images = m.Content, m.Images
+}
+
+// applyLiveModeOverride switches the live agent session to mode and returns the function that
+// switches it back to the agent's default; nil when mode is empty or the switch did not happen.
+func (e *Engine) applyLiveModeOverride(as AgentSession, mode string) (restore func()) {
+	if mode == "" || as == nil {
+		return nil
+	}
+	switcher, ok := as.(LiveModeSwitcher)
+	if !ok || !switcher.SetLiveMode(mode) {
+		return nil
+	}
+	return func() {
+		defaultMode := "default"
+		if ma, ok := e.agent.(interface{ GetMode() string }); ok {
+			if m := ma.GetMode(); m != "" {
+				defaultMode = m
+			}
+		}
+		switcher.SetLiveMode(defaultMode)
+	}
 }
 
 func timerRunTitle(job *TimerJob) string {
@@ -3107,7 +3153,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
-		if e.queueForBusySession(p, msg, session, sessions, interactiveKey, agent, resolvedWorkspace) {
+		if e.queueForBusySession(p, msg, session, sessions, interactiveKey, agent, resolvedWorkspace, nil) != queueUnavailable {
 			return
 		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
@@ -3219,11 +3265,27 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 // the event loop sends it after the current turn's EventResult is received.
 // Returns true if the message was successfully queued, false otherwise.
 func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string) bool {
+	return e.enqueueForBusySession(p, msg, interactiveKey, nil) != queueUnavailable
+}
+
+// queueOutcome is what enqueueForBusySession did with a message (maomao fork).
+type queueOutcome int
+
+const (
+	queueUnavailable queueOutcome = iota // no live state to queue into; the caller handles the message
+	queueAccepted                        // appended to the queue
+	queueRejected                        // handled but not queued: stale, or the queue is full (user was told)
+)
+
+// enqueueForBusySession is queueMessageForBusySession with the outcome spelled out, so a
+// cron/timer job can tell "queued" from "turned away" (maomao fork). scheduledFrom is set for a
+// cron/timer turn (see queuedMessage.scheduledFrom).
+func (e *Engine) enqueueForBusySession(p Platform, msg *Message, interactiveKey string, scheduledFrom Platform) queueOutcome {
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	if !hasState || state == nil {
 		e.interactiveMu.Unlock()
-		return false
+		return queueUnavailable
 	}
 	// Keep interactiveMu until state.mu is held. Otherwise a starting session can
 	// replace a placeholder state between lookup and queue append, losing the
@@ -3235,7 +3297,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	// Allow queueing when agentSession is nil (session is starting up,
 	// issue #565). Only reject if the session was established and died.
 	if state.agentSession != nil && !state.agentSession.Alive() {
-		return false
+		return queueUnavailable
 	}
 
 	// Only queue metadata — do NOT send to agent stdin yet.
@@ -3246,12 +3308,12 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
 		snap := userMessageWatermarkSnapshotLocked(state)
 		e.logStaleUserMessageDropped("reject_before_queue", msg, interactiveKey, snap)
-		return true
+		return queueRejected
 	}
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
-		return true // handled: queue-full reply sent
+		return queueRejected // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
 		messageID:         msg.MessageID,
@@ -3265,6 +3327,8 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		userName:          msg.UserName,
 		turnCtx:           msg.TurnCtx,
 		turnCtxQuery:      msg.TurnCtxQuery,
+		modeOverride:      msg.ModeOverride,
+		scheduledFrom:     scheduledFrom,
 		msgPlatform:       msg.Platform,
 		msgSessionKey:     msg.SessionKey,
 		channelKey:        msg.ChannelKey,
@@ -3287,15 +3351,15 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"queue_depth", queueDepth,
 	)
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
-	return true
+	return queueAccepted
 }
 
 // queueForBusySession queues msg behind the turn running on session (see
-// queueMessageForBusySession) and makes sure someone drains it. Returns false
-// when the message could not be queued.
-func (e *Engine) queueForBusySession(p Platform, msg *Message, session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir string) bool {
-	if !e.queueMessageForBusySession(p, msg, interactiveKey) {
-		return false
+// enqueueForBusySession) and makes sure someone drains it.
+func (e *Engine) queueForBusySession(p Platform, msg *Message, session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir string, scheduledFrom Platform) queueOutcome {
+	outcome := e.enqueueForBusySession(p, msg, interactiveKey, scheduledFrom)
+	if outcome == queueUnavailable {
+		return outcome
 	}
 	// Race guard: the drain loop in processInteractiveMessageWith may
 	// have just finished (session unlocked) between our TryLock failure
@@ -3304,7 +3368,7 @@ func (e *Engine) queueForBusySession(p Platform, msg *Message, session *Session,
 	if session.TryLock() {
 		go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, workspaceDir)
 	}
-	return true
+	return outcome
 }
 
 // ensureInteractiveStateForQueueing creates a placeholder interactiveState
@@ -3858,20 +3922,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").
 	// Defer restores only when SetLiveMode succeeds for the override.
-	if msg.ModeOverride != "" {
-		if switcher, ok := state.agentSession.(LiveModeSwitcher); ok {
-			if switcher.SetLiveMode(msg.ModeOverride) {
-				defer func() {
-					defaultMode := "default"
-					if ma, ok := e.agent.(interface{ GetMode() string }); ok {
-						if m := ma.GetMode(); m != "" {
-							defaultMode = m
-						}
-					}
-					switcher.SetLiveMode(defaultMode)
-				}()
-			}
-		}
+	if restore := e.applyLiveModeOverride(state.agentSession, msg.ModeOverride); restore != nil {
+		defer restore()
 	}
 
 	// Start typing indicator if platform supports it.
@@ -4965,6 +5017,14 @@ var agentErrorHandlers = []agentErrorHandler{
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
 	var chainedQueued *queuedMessage // maomao fork: queued message chained into this loop, if any
+	// maomao fork: a chained cron/timer turn's mode override holds until this loop ends, as it does
+	// for the rest of processInteractiveMessageWith when the turn runs directly.
+	var restoreMode func()
+	defer func() {
+		if restoreMode != nil {
+			restoreMode()
+		}
+	}()
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -6190,12 +6250,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
+				e.startScheduledQueuedTurn(&queued, session)
 				queued.content = e.withTurnBlocks(session, queued.msgSessionKey, queued.turnCtxQuery, queued.content, queued.turnCtx)
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 				state.mu.Lock()
 				as := state.agentSession // capture under lock to avoid race with cleanup
 				state.mu.Unlock()
+				if restore := e.applyLiveModeOverride(as, queued.modeOverride); restore != nil && restoreMode == nil {
+					restoreMode = restore
+				}
 
 				nextSend := make(chan error, 1)
 				go func() {
@@ -6532,6 +6596,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			e.deferForCapacity(queued.platform, queuedToMessage(rawQueued), state.agent, sessions, sessionKey, state.workspaceDir, wait, true)
 			continue
 		}
+		e.startScheduledQueuedTurn(&queued, session)
 		queued.content = e.withTurnBlocks(session, queued.msgSessionKey, queued.turnCtxQuery, queued.content, queued.turnCtx)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
@@ -6555,6 +6620,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
+		restoreMode := e.applyLiveModeOverride(as, queued.modeOverride)
 		e.runTurnWithCapacityRetry(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, queued.replyCtx,
 			func(as AgentSession) error {
 				if as == nil {
@@ -6568,6 +6634,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			func(wait time.Duration) {
 				e.deferForCapacity(queued.platform, queuedToMessage(rawQueued), state.agent, sessions, sessionKey, state.workspaceDir, wait, false)
 			})
+		if restoreMode != nil {
+			restoreMode()
+		}
 	}
 }
 
