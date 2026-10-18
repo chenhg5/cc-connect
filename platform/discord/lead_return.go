@@ -9,7 +9,7 @@ import (
 // lead even if the model forgets to write <@lead> (2026-10-14: 龙娘 finished a task with
 // "交橘验收" and no @, so 橘 only saw it as context). The turn's final answer gets <@lead>
 // prepended (interim posts don't, so the lead isn't woken mid-task); the normal bot→bot path
-// (burst, handoff fuse, gate) does the rest. Known gaps (fall back to the persona's own @): a
+// (burst, gate) does the rest. Known gaps (fall back to the persona's own @): a
 // turn whose text all went out as interim segments sends no final post, and a degraded stream
 // preview finished by in-place edit never creates a message.
 
