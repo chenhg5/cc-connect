@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -31,16 +31,20 @@ func init() {
 //   - "plan":     --mode plan (read-only analysis)
 //   - "ask":      --mode ask (Q&A style, read-only)
 type Agent struct {
-	workDir      string
-	model        string
-	mode         string
-	cmd          string   // CLI binary name, default "agent"
-	cliExtraArgs []string // extra args from cmd after the binary name
-	configEnv    []string // env vars from [projects.agent.options.env]
-	providers    []core.ProviderConfig
-	activeIdx    int
-	sessionEnv   []string
-	mu           sync.RWMutex
+	workDir         string
+	model           string
+	modelPinned     bool // SetModel overrides the active provider default
+	reasoningEffort string
+	mode            string
+	cmd             string   // CLI binary name, default "agent"
+	cliExtraArgs    []string // extra args from cmd after the binary name
+	configEnv       []string // env vars from [projects.agent.options.env]
+	providers       []core.ProviderConfig
+	activeIdx       int
+	sessionEnv      []string
+	modelsCache     []core.ModelOption
+	modelsGen       uint64 // bumped when CLI identity/config changes
+	mu              sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -49,21 +53,23 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir = "."
 	}
 	model, _ := opts["model"].(string)
+	effort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 	cmd, extraArgs := core.ParseCmdOpts(opts, "agent")
 	if _, err := exec.LookPath(cmd); err != nil {
-		return nil, fmt.Errorf("cursor: %q CLI not found in PATH, install with: npm i -g @anthropic-ai/cursor-agent (or from Cursor IDE settings)", cmd)
+		return nil, fmt.Errorf("cursor: %q CLI not found in PATH, install from https://cursor.com/docs/cli/installation", cmd)
 	}
 
 	return &Agent{
-		workDir:      workDir,
-		model:        model,
-		mode:         mode,
-		cmd:          cmd,
-		cliExtraArgs: extraArgs,
-		configEnv:    core.ParseConfigEnv(opts),
-		activeIdx:    -1,
+		workDir:         workDir,
+		model:           model,
+		reasoningEffort: normalizeCursorEffort(effort),
+		mode:            mode,
+		cmd:             cmd,
+		cliExtraArgs:    extraArgs,
+		configEnv:       core.ParseConfigEnv(opts),
+		activeIdx:       -1,
 	}, nil
 }
 
@@ -88,6 +94,7 @@ func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.workDir = dir
+	a.bumpModelsGenLocked()
 	slog.Info("cursor: work_dir changed", "work_dir", dir)
 }
 
@@ -101,13 +108,18 @@ func (a *Agent) SetModel(model string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.model = model
+	a.modelPinned = true
+	id := parseCursorModel(model)
+	if strings.EqualFold(strings.TrimSpace(model), "auto") {
+		a.reasoningEffort = ""
+	} else if id.effort != "" {
+		a.reasoningEffort = id.effort
+	}
 	slog.Info("cursor: model changed", "model", model)
 }
 
 func (a *Agent) GetModel() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
+	return a.launchModel(context.Background())
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -116,82 +128,15 @@ func (a *Agent) configuredModels() []core.ModelOption {
 	return core.GetProviderModels(a.providers, a.activeIdx)
 }
 
-func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
-	if models := a.configuredModels(); len(models) > 0 {
-		return models
-	}
-	a.mu.RLock()
-	cmd := a.cmd
-	extraEnv := a.providerEnvLocked()
-	extraEnv = append(extraEnv, a.sessionEnv...)
-	a.mu.RUnlock()
-
-	if models := fetchModelsFromAgentCLI(ctx, cmd, extraEnv); len(models) > 0 {
-		return models
-	}
-	return cursorFallbackModels()
-}
-
-// fetchModelsFromAgentCLI runs `agent models` and parses the output.
-// Output format: "model-id - Display Name  (current)" or "model-id - Display Name"
-func fetchModelsFromAgentCLI(ctx context.Context, cmd string, extraEnv []string) []core.ModelOption {
-	c := exec.CommandContext(ctx, cmd, "models")
-	c.Env = append(os.Environ(), extraEnv...)
-	out, err := c.Output()
-	if err != nil {
-		slog.Debug("cursor: agent models failed", "error", err)
-		return nil
-	}
-
-	var models []core.ModelOption
-	seen := make(map[string]struct{})
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || line == "Available models" || strings.HasPrefix(line, "Tip:") {
-			continue
-		}
-		idx := strings.Index(line, " - ")
-		if idx < 0 {
-			continue
-		}
-		name := strings.TrimSpace(line[:idx])
-		desc := strings.TrimSpace(line[idx+3:])
-		if name == "" {
-			continue
-		}
-		// Remove trailing markers like "(current)", "(default)"
-		desc = strings.TrimSuffix(desc, " (current)")
-		desc = strings.TrimSuffix(desc, " (default)")
-		desc = strings.TrimSpace(desc)
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		models = append(models, core.ModelOption{Name: name, Desc: desc})
-	}
-	sort.Slice(models, func(i, j int) bool { return models[i].Name < models[j].Name })
-	return models
-}
-
-func cursorFallbackModels() []core.ModelOption {
-	return []core.ModelOption{
-		{Name: "claude-sonnet-4-20250514", Desc: "Claude Sonnet 4"},
-		{Name: "claude-opus-4-20250514", Desc: "Claude Opus 4"},
-		{Name: "gpt-4o", Desc: "GPT-4o"},
-		{Name: "gemini-2.5-pro", Desc: "Gemini 2.5 Pro"},
-		{Name: "cursor-small", Desc: "Cursor Small (fast)"},
-	}
-}
-
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sessionEnv = env
+	a.bumpModelsGenLocked()
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.RLock()
-	model := a.model
 	mode := a.mode
 	cmd := a.cmd
 	extraArgs := append([]string{}, a.cliExtraArgs...)
@@ -199,14 +144,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
-	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
-		if m := a.providers[a.activeIdx].Model; m != "" {
-			model = m
-		}
-	}
 	a.mu.RUnlock()
 
-	return newCursorSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv)
+	return newCursorSession(ctx, cmd, extraArgs, workDir, a.launchModel(ctx), mode, sessionID, extraEnv)
 }
 
 // ListSessions reads sessions from Cursor Agent CLI chat storage.
@@ -218,12 +158,7 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("cursor: cannot determine home dir: %w", err)
-	}
-	workDir := a.GetWorkDir()
-	dir, err := findCursorSessionDir(homeDir, workDir, sessionID)
+	dir, err := a.safeSessionDir(sessionID)
 	if err != nil {
 		return err
 	}
@@ -287,6 +222,7 @@ func (a *Agent) SetProviders(providers []core.ProviderConfig) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.providers = providers
+	a.bumpModelsGenLocked()
 }
 
 func (a *Agent) SetActiveProvider(name string) bool {
@@ -294,12 +230,16 @@ func (a *Agent) SetActiveProvider(name string) bool {
 	defer a.mu.Unlock()
 	if name == "" {
 		a.activeIdx = -1
+		a.modelPinned = false
+		a.bumpModelsGenLocked()
 		slog.Info("cursor: provider cleared")
 		return true
 	}
 	for i, p := range a.providers {
 		if p.Name == name {
 			a.activeIdx = i
+			a.modelPinned = false
+			a.bumpModelsGenLocked()
 			slog.Info("cursor: provider switched", "provider", name)
 			return true
 		}
@@ -378,29 +318,32 @@ func cursorChatsBaseDirs(homeDir string) []string {
 }
 
 func workspaceChatsDirs(homeDir, workDir string) []string {
-	hash := workspaceHash(workDir)
-	var dirs []string
-	for _, base := range cursorChatsBaseDirs(homeDir) {
-		dir := filepath.Join(base, hash)
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			dirs = append(dirs, dir)
-		}
-	}
-	return dirs
+	return cursorCandidateChatDirs(homeDir, workDir)
 }
 
 func findCursorSessionDir(homeDir, workDir, sessionID string) (string, error) {
+	if err := rejectUnsafeSessionID(sessionID); err != nil {
+		return "", err
+	}
+	var last error
 	for _, chatsDir := range workspaceChatsDirs(homeDir, workDir) {
 		dir := filepath.Join(chatsDir, sessionID)
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			return dir, nil
+		if err := sessionDirWithinWorkspace(chatsDir, dir); err != nil {
+			if !os.IsNotExist(err) {
+				last = err
+			}
+			continue
 		}
+		return dir, nil
 	}
-	return "", fmt.Errorf("session not found: %s", sessionID)
+	if last != nil {
+		return "", last
+	}
+	return "", fmt.Errorf("cursor: session not found: %s", sessionID)
 }
 
 func listCursorSessions(workDir string) ([]core.AgentSessionInfo, error) {
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := cursorUserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cursor: cannot determine home dir: %w", err)
 	}
@@ -425,17 +368,16 @@ func listCursorSessions(workDir string) ([]core.AgentSessionInfo, error) {
 				continue
 			}
 			sessionID := entry.Name()
-			dbPath := filepath.Join(chatsDir, sessionID, "store.db")
-			if _, err := os.Stat(dbPath); err != nil {
+			sessionDir := filepath.Join(chatsDir, sessionID)
+			if err := sessionDirWithinWorkspace(chatsDir, sessionDir); err != nil {
 				continue
 			}
+			dbPath := filepath.Join(sessionDir, "store.db")
 
-			info, err := entry.Info()
-			if err != nil {
-				continue
+			var meta cursorMeta
+			if decoded, err := readCursorMeta(context.Background(), dbPath); err == nil {
+				meta = decoded
 			}
-
-			meta := readSessionMeta(dbPath)
 			msgCount, firstUserMsg := countSessionMessages(dbPath, meta.RootBlobID)
 
 			summary := cursorSessionSummary(meta.Name, firstUserMsg, sessionID)
@@ -444,7 +386,7 @@ func listCursorSessions(workDir string) ([]core.AgentSessionInfo, error) {
 				ID:           sessionID,
 				Summary:      summary,
 				MessageCount: msgCount,
-				ModifiedAt:   info.ModTime(),
+				ModifiedAt:   cursorSessionActivityTime(dbPath),
 			}
 			if existing, ok := byID[sessionID]; !ok || candidate.ModifiedAt.After(existing.ModifiedAt) {
 				byID[sessionID] = candidate
@@ -464,52 +406,35 @@ func listCursorSessions(workDir string) ([]core.AgentSessionInfo, error) {
 	return sessions, nil
 }
 
-// sessionMeta holds metadata extracted from a Cursor chat store.db.
-type sessionMeta struct {
-	AgentID    string
-	Name       string
-	Mode       string
-	RootBlobID string
+// cursorSessionActivityTime is the store.db mtime, or a newer nonempty
+// store.db-wal mtime. Directory mtime is ignored: a read that creates an
+// empty WAL sidecar updates the directory but not the conversation. Symlink
+// sidecars and zero-length WAL files are ignored.
+func cursorSessionActivityTime(dbPath string) time.Time {
+	latest, ok := regularFileMtime(dbPath)
+	if !ok {
+		return time.Time{}
+	}
+	if wal, ok := nonemptyRegularMtime(dbPath + "-wal"); ok && wal.After(latest) {
+		return wal
+	}
+	return latest
 }
 
-// readSessionMeta reads the meta table from store.db without importing database/sql.
-// The meta value at key "0" is already a hex-encoded JSON string in the TEXT column,
-// so we read it directly (no extra hex() wrapping) and decode once.
-func readSessionMeta(dbPath string) sessionMeta {
-	sqliteBin, err := exec.LookPath("sqlite3")
-	if err != nil {
-		return sessionMeta{}
+func regularFileMtime(path string) (time.Time, bool) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return time.Time{}, false
 	}
+	return info.ModTime(), true
+}
 
-	out, err := exec.Command(sqliteBin, dbPath,
-		"SELECT value FROM meta WHERE key='0' LIMIT 1;",
-	).Output()
-	if err != nil {
-		return sessionMeta{}
+func nonemptyRegularMtime(path string) (time.Time, bool) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() == 0 {
+		return time.Time{}, false
 	}
-
-	hexStr := strings.TrimSpace(string(out))
-	if hexStr == "" {
-		return sessionMeta{}
-	}
-
-	decoded, err := hex.DecodeString(hexStr)
-	if err != nil {
-		// Fallback: value might be raw JSON (not hex-encoded) in some versions
-		decoded = []byte(hexStr)
-	}
-
-	var m struct {
-		AgentID    string `json:"agentId"`
-		Name       string `json:"name"`
-		Mode       string `json:"mode"`
-		RootBlobID string `json:"latestRootBlobId"`
-	}
-	if json.Unmarshal(decoded, &m) != nil {
-		return sessionMeta{}
-	}
-
-	return sessionMeta{AgentID: m.AgentID, Name: m.Name, Mode: m.Mode, RootBlobID: m.RootBlobID}
+	return info.ModTime(), true
 }
 
 var cursorUserQueryRE = regexp.MustCompile(`(?is)<user_query>\s*(.*?)\s*</user_query>`)
@@ -579,110 +504,50 @@ func extractCursorUserSummary(content any) string {
 	return text
 }
 
-// countSessionMessages reads the root blob from store.db and counts conversation
-// messages. It also returns the first user message text as a summary fallback.
-// The root blob uses a protobuf-like encoding where field 1 (tag 0x0a, length 0x20)
-// entries are 32-byte SHA-256 references to child message blobs.
+// countSessionMessages counts visible user and assistant turns from the full
+// root blob. It uses the same child-ref walk and history filter as
+// GetSessionHistory, with no 8KB prefix and no 80-message sample.
 func countSessionMessages(dbPath, rootBlobID string) (int, string) {
-	if rootBlobID == "" {
+	if !blobIDHex(rootBlobID) {
 		return 0, ""
 	}
-	sqliteBin, err := exec.LookPath("sqlite3")
+	rootHex, err := runSQLite(context.Background(), dbPath, fmt.Sprintf(
+		"SELECT hex(data) FROM blobs WHERE id='%s' LIMIT 1;", rootBlobID,
+	))
 	if err != nil {
 		return 0, ""
 	}
-
-	// Read root blob header (first ~8KB is enough for counting refs)
-	out, err := exec.Command(sqliteBin, dbPath,
-		fmt.Sprintf("SELECT hex(substr(data,1,8192)) FROM blobs WHERE id='%s' LIMIT 1;", rootBlobID),
-	).Output()
-	if err != nil {
-		return 0, ""
-	}
-	rootHex := strings.TrimSpace(string(out))
-	rootBytes, err := hex.DecodeString(rootHex)
+	rootBytes, err := hex.DecodeString(strings.TrimSpace(string(rootHex)))
 	if err != nil || len(rootBytes) == 0 {
 		return 0, ""
 	}
-
-	// Count field-1 entries (0x0a 0x20 + 32-byte hash)
-	var childIDs []string
-	i := 0
-	for i+33 < len(rootBytes) && rootBytes[i] == 0x0a && rootBytes[i+1] == 0x20 {
-		childIDs = append(childIDs, hex.EncodeToString(rootBytes[i+2:i+34]))
-		i += 34
-	}
-	if len(childIDs) == 0 {
+	childIDs, err := cursorRootChildIDs(rootBytes)
+	if err != nil || len(childIDs) == 0 {
 		return 0, ""
 	}
-
-	// Read the first few children to find the first real user message for summary,
-	// and count roles to determine message count (excluding system).
-	msgCount := 0
-	var firstUserMsg string
-	limit := len(childIDs)
-	if limit > 80 {
-		limit = 80
-	}
-
-	// Build a single query to read multiple children
-	var ids []string
-	for _, cid := range childIDs[:limit] {
-		ids = append(ids, "'"+cid+"'")
-	}
-	query := fmt.Sprintf(
-		"SELECT id, data FROM blobs WHERE id IN (%s);",
-		strings.Join(ids, ","),
-	)
-	blobOut, err := exec.Command(sqliteBin, "-separator", "|", dbPath, query).Output()
+	blobs, err := readBlobHexBatched(context.Background(), dbPath, childIDs)
 	if err != nil {
-		// Fallback: estimate from child count minus 1 (system message)
-		if len(childIDs) > 1 {
-			return len(childIDs) - 1, ""
-		}
 		return 0, ""
 	}
-
-	roleCount := make(map[string]int)
-	blobMap := make(map[string][]byte)
-	for _, line := range strings.Split(string(blobOut), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	count := 0
+	firstUser := ""
+	for _, id := range childIDs {
+		rawHex, ok := blobs[id]
+		if !ok || rawHex == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 2)
-		if len(parts) != 2 {
+		raw, err := hex.DecodeString(rawHex)
+		if err != nil || len(raw) == 0 || raw[0] != '{' {
 			continue
 		}
-		blobMap[parts[0]] = []byte(parts[1])
-	}
-
-	for _, cid := range childIDs[:limit] {
-		raw, ok := blobMap[cid]
-		if !ok || len(raw) == 0 {
+		entry, ok := historyEntryFromBlob(raw)
+		if !ok {
 			continue
 		}
-		var msg struct {
-			Role    string `json:"role"`
-			Content any    `json:"content"`
-		}
-		if json.Unmarshal(raw, &msg) != nil {
-			continue
-		}
-		roleCount[msg.Role]++
-		if msg.Role == "user" && firstUserMsg == "" {
-			if summary := extractCursorUserSummary(msg.Content); summary != "" {
-				firstUserMsg = summary
-			}
+		count++
+		if entry.Role == "user" && firstUser == "" {
+			firstUser = entry.Content
 		}
 	}
-
-	msgCount = roleCount["user"] + roleCount["assistant"]
-	if limit < len(childIDs) {
-		// Extrapolate for remaining children
-		total := len(childIDs)
-		msgCount = msgCount * total / limit
-	}
-
-	return msgCount, firstUserMsg
+	return count, firstUser
 }

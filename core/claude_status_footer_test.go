@@ -228,6 +228,28 @@ func (a *stubFooterAgent) GetModel() string           { return a.model }
 func (a *stubFooterAgent) GetReasoningEffort() string { return a.effort }
 func (a *stubFooterAgent) GetWorkDir() string         { return a.workDir }
 
+type stubModelDisplaySession struct {
+	*controllableAgentSession
+	displayName string
+}
+
+func (s *stubModelDisplaySession) GetModelDisplayName() string { return s.displayName }
+
+func TestReplyFooterModelPrefersSessionDisplayName(t *testing.T) {
+	agent := &stubFooterAgent{model: "agent-default"}
+	session := &stubModelDisplaySession{
+		controllableAgentSession: &controllableAgentSession{model: "grok-4.7-high"},
+		displayName:              "Grok 4.7 High",
+	}
+	if got := replyFooterModel(session, agent); got != "Grok 4.7 High" {
+		t.Fatalf("footer model = %q, want display name", got)
+	}
+	session.displayName = "  "
+	if got := replyFooterModel(session, agent); got != "grok-4.7-high" {
+		t.Fatalf("footer model = %q, want session model fallback", got)
+	}
+}
+
 // newLegacyFooterEngine returns an Engine with all three footer flags on,
 // suitable for invoking buildReplyFooter directly against the legacy single-
 // line footer path.

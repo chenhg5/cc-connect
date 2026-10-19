@@ -1593,8 +1593,8 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project 2: Using Cursor Agent / 项目 2：使用 Cursor Agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Requires: Cursor Agent CLI (`agent`) — install via Cursor IDE or `npm i -g @anthropic-ai/cursor-agent`
-# 需要安装：Cursor Agent CLI (`agent`) — 通过 Cursor IDE 或 npm 安装
+# Requires: Cursor Agent CLI (`agent`) — https://cursor.com/docs/cli/installation
+# 需要安装：Cursor Agent CLI (`agent`) — https://cursor.com/docs/cli/installation
 # Uses `agent --print --output-format stream-json` under the hood.
 # 底层使用 `agent --print --output-format stream-json` 命令。
 
@@ -1619,7 +1619,22 @@ app_secret = "your-feishu-app-secret"
 # - "ask":     Q&A style, read-only / 问答风格，只读
 #
 # Optional: specify a model / 可选：指定模型
-# model = "claude-sonnet-4-20250514"
+# model = "grok-4.7"
+# reasoning_effort = "high"
+# Constructor model grok-4.7 with reasoning_effort high launches the advertised
+# id grok-4.7-high (GetModel and the next session agree). This agent selects
+# advertised suffix ids, including -thinking before or after the effort and
+# -fast. It does not send bracket parameters. Some other families document
+# bracket options in CLI help; Grok rejects grok-4.7[effort=high].
+# /effort only lists suffixes advertised for the current family. auto and
+# models with no effort siblings have no effort choices. The reported effort
+# is the suffix of the model that will actually launch.
+# /model takes a full CLI id, display name, or configured alias (exact or
+# case-insensitive). A short prefix that matches several ids, such as "grok",
+# is rejected as ambiguous. An id that already names an effort, such as
+# grok-4.7-high, replaces a previous /effort. Switching provider drops that
+# pin so the new provider default is used. A model set with /model overrides
+# the active provider's default until the next provider switch.
 #
 # [[projects.platforms]]
 # type = "feishu"
@@ -2073,7 +2088,7 @@ app_secret = "your-feishu-app-secret"
 # 针对 Devin 建议直接使用上面的 type = "devin"；下面的 type = "acp" 主要给其他
 # 通用 ACP 工具使用。
 
-# --- Example: Cursor Agent CLI (npm: @anthropic-ai/cursor-agent) ---
+# --- Example: Cursor Agent CLI (`agent`; https://cursor.com/docs/cli/installation) ---
 # [[projects]]
 # name = "cursor-acp"
 #

@@ -1,0 +1,11 @@
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"BEFORE"}]},"session_id":"s1","timestamp_ms":1}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"_"}]},"session_id":"s1","timestamp_ms":1}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"TOOL"}]},"session_id":"s1","timestamp_ms":1}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"BEFORE_TOOL"}]},"session_id":"s1","model_call_id":"call-1","timestamp_ms":2}
+{"type":"tool_call","subtype":"started","call_id":"t1","tool_call":{"shellToolCall":{"args":{"command":"pwd"}}}}
+{"type":"tool_call","subtype":"completed","call_id":"t1","tool_call":{"shellToolCall":{"args":{"command":"pwd"},"result":{"success":{"stdout":"/tmp\n","exitCode":0}}}}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"AFTER"}]},"session_id":"s1","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"_"}]},"session_id":"s1","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"TOOL"}]},"session_id":"s1","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"AFTER_TOOL"}]},"session_id":"s1"}
+{"type":"result","subtype":"success","is_error":false,"result":"BEFORE_TOOLAFTER_TOOL","session_id":"s1"}

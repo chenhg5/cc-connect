@@ -44,6 +44,34 @@ type cursorSession struct {
 
 	pendingMu sync.Mutex
 	pending   *pendingInteractionQuery // most recent unresolved interaction_query/request
+
+	// turnMu guards turnRunning, the WaitGroup Add, and events close so Send
+	// cannot race Close's Wait (Add after Wait) or start a second process.
+	turnMu       sync.Mutex
+	turnRunning  bool
+	eventsClosed bool
+
+	// terminal is set when this turn has emitted EventResult or EventError.
+	terminal atomic.Bool
+
+	// deferTerminal is set by readLoop so a result is published only after
+	// the turn is released. Direct handleResult calls (unit tests) emit immediately.
+	deferTerminal atomic.Bool
+	resultMu      sync.Mutex
+	stashedResult *core.Event
+
+	closeOnce  sync.Once
+	turnGen    uint64
+	pendingGen uint64
+	wgDoneGen  uint64
+
+	modelDisplay atomic.Value // string from system/init "model"
+
+	toolMu   sync.Mutex
+	toolSeen map[string]uint8 // bits: toolStarted, toolCompleted
+
+	textMu          sync.Mutex
+	streamedPartial strings.Builder // timestamped assistant deltas this turn
 }
 
 // pendingInteractionQuery holds the info needed to write a response back to Cursor.
@@ -101,16 +129,13 @@ func (cs *cursorSession) Send(prompt string, messageID string, images []core.Ima
 		filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
-	if !cs.alive.Load() {
-		return fmt.Errorf("session is closed")
-	}
-
 	chatID := cs.CurrentSessionID()
 	isResume := chatID != ""
 
 	args := append(append([]string{}, cs.extraArgs...),
 		"--print",
 		"--output-format", "stream-json",
+		"--stream-partial-output",
 	)
 
 	switch cs.mode {
@@ -132,7 +157,26 @@ func (cs *cursorSession) Send(prompt string, messageID string, images []core.Ima
 
 	slog.Debug("cursorSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
-	cmd := exec.CommandContext(cs.ctx, cs.cmd, args...)
+	cs.turnMu.Lock()
+	if !cs.alive.Load() {
+		cs.turnMu.Unlock()
+		return fmt.Errorf("session is closed")
+	}
+	if cs.turnRunning {
+		cs.turnMu.Unlock()
+		return fmt.Errorf("cursorSession: turn already in progress")
+	}
+	cs.turnGen++
+	gen := cs.turnGen
+	cs.turnRunning = true
+	cs.terminal.Store(false)
+	cs.wg.Add(1)
+	cs.turnMu.Unlock()
+
+	cs.resetTurnState()
+
+	cmd := exec.Command(cs.cmd, args...)
+	prepareCmdForKill(cmd)
 	cmd.Dir = cs.workDir
 	env := os.Environ()
 	if len(cs.extraEnv) > 0 {
@@ -142,6 +186,7 @@ func (cs *cursorSession) Send(prompt string, messageID string, images []core.Ima
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		cs.finishTurn()
 		return fmt.Errorf("cursorSession: stdout pipe: %w", err)
 	}
 
@@ -149,6 +194,7 @@ func (cs *cursorSession) Send(prompt string, messageID string, images []core.Ima
 	// Without a connected stdin, Cursor gets EOF and auto-rejects all permission requests.
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		cs.finishTurn()
 		return fmt.Errorf("cursorSession: stdin pipe: %w", err)
 	}
 
@@ -157,6 +203,7 @@ func (cs *cursorSession) Send(prompt string, messageID string, images []core.Ima
 
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
+		cs.finishTurn()
 		return fmt.Errorf("cursorSession: start: %w", err)
 	}
 
@@ -164,37 +211,91 @@ func (cs *cursorSession) Send(prompt string, messageID string, images []core.Ima
 	cs.stdin = stdin
 	cs.stdinMu.Unlock()
 
-	cs.wg.Add(1)
-	go cs.readLoop(cmd, stdout, &stderrBuf)
+	procDone := make(chan struct{})
+	go func() {
+		select {
+		case <-cs.ctx.Done():
+			_ = forceKillCmd(cmd)
+		case <-procDone:
+		}
+	}()
+
+	go cs.readLoop(cmd, stdout, &stderrBuf, stdin, gen, procDone)
 
 	return nil
 }
 
-func (cs *cursorSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
-	defer cs.wg.Done()
-	defer func() {
-		// Close stdin so Cursor knows the input stream is finished.
+func (cs *cursorSession) resetTurnState() {
+	cs.thinkingBuf.Reset()
+	cs.resultMu.Lock()
+	cs.stashedResult = nil
+	cs.resultMu.Unlock()
+	cs.toolMu.Lock()
+	cs.toolSeen = nil
+	cs.toolMu.Unlock()
+	cs.textMu.Lock()
+	cs.streamedPartial.Reset()
+	cs.textMu.Unlock()
+	cs.clearPending()
+}
+
+// releaseTurn drops this generation's process state. A newer Send may already
+// own stdin and turnRunning; those must not be cleared by the old process.
+func (cs *cursorSession) releaseTurn(gen uint64, stdin io.WriteCloser) {
+	if stdin != nil {
 		cs.stdinMu.Lock()
-		if cs.stdin != nil {
-			_ = cs.stdin.Close()
+		if cs.stdin == stdin {
 			cs.stdin = nil
 		}
 		cs.stdinMu.Unlock()
-	}()
-	defer func() {
-		if err := cmd.Wait(); err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			if stderrMsg != "" {
-				slog.Error("cursorSession: process failed", "error", err, "stderr", stderrMsg)
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				select {
-				case cs.events <- evt:
-				case <-cs.ctx.Done():
-					return
-				}
-			}
+		_ = stdin.Close()
+	}
+	cs.pendingMu.Lock()
+	if cs.pendingGen == gen {
+		cs.pending = nil
+	}
+	cs.pendingMu.Unlock()
+	cs.turnMu.Lock()
+	if cs.turnGen == gen && cs.turnRunning {
+		cs.turnRunning = false
+	}
+	cs.turnMu.Unlock()
+}
+
+// finishWait balances Send's wg.Add. It runs after the terminal event is
+// published so Close cannot close the events channel mid-send.
+func (cs *cursorSession) finishWait(gen uint64) {
+	cs.turnMu.Lock()
+	defer cs.turnMu.Unlock()
+	if cs.wgDoneGen == gen {
+		return
+	}
+	cs.wgDoneGen = gen
+	cs.wg.Done()
+}
+
+// finishTurn is the pre-start failure path (no generation yet).
+func (cs *cursorSession) finishTurn() {
+	cs.turnMu.Lock()
+	gen := cs.turnGen
+	cs.turnMu.Unlock()
+	cs.releaseTurn(gen, nil)
+	cs.finishWait(gen)
+}
+
+func (cs *cursorSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, stdin io.WriteCloser, gen uint64, procDone chan struct{}) {
+	defer close(procDone)
+	cs.deferTerminal.Store(true)
+	released := false
+	release := func() {
+		if released {
+			return
 		}
-	}()
+		released = true
+		cs.releaseTurn(gen, stdin)
+	}
+	defer cs.finishWait(gen)
+	defer release()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -214,17 +315,90 @@ func (cs *cursorSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf
 		}
 
 		cs.handleEvent(raw)
-	}
-
-	if err := scanner.Err(); err != nil {
-		slog.Error("cursorSession: scanner error", "error", err)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
-		select {
-		case cs.events <- evt:
-		case <-cs.ctx.Done():
-			return
+		if cs.terminal.Load() {
+			// Stop reading so a delayed process exit cannot hold the next Send.
+			break
 		}
 	}
+
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		slog.Error("cursorSession: scanner error", "error", scanErr)
+		// Unblock a child stuck writing a too-long line before Wait.
+		_ = stdout.Close()
+		_ = forceKillCmd(cmd)
+	}
+
+	// Drop the stdout pipe before Wait so a child blocked on write, or a
+	// scanner that already stopped, cannot stall reaping.
+	_ = stdout.Close()
+
+	cs.resultMu.Lock()
+	stashed := cs.stashedResult
+	cs.stashedResult = nil
+	cs.resultMu.Unlock()
+	if stashed != nil {
+		// Publish only after this turn no longer owns turnRunning/stdin,
+		// so the engine can Send the next turn while this process exits.
+		// Close stdout so a descendant still holding the pipe cannot stall Wait.
+		_ = stdout.Close()
+		release()
+		cs.emit(*stashed)
+		if err := cmd.Wait(); err != nil {
+			stderrMsg := strings.TrimSpace(stderrBuf.String())
+			slog.Warn("cursorSession: process exited after terminal event", "error", err, "stderr", truncateStr(stderrMsg, 200))
+		}
+		return
+	}
+
+	exitErr := cmd.Wait()
+	release()
+	if cs.terminal.Load() {
+		return
+	}
+	if scanErr != nil && cs.ctx.Err() == nil {
+		cs.emitTerminal(core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", scanErr)})
+		return
+	}
+	if exitErr != nil {
+		stderrMsg := strings.TrimSpace(stderrBuf.String())
+		if stderrMsg == "" {
+			if cs.ctx.Err() != nil {
+				stderrMsg = "cursor session cancelled"
+			} else {
+				stderrMsg = exitErr.Error()
+			}
+		}
+		slog.Error("cursorSession: process failed with no result", "error", exitErr, "stderr", truncateStr(stderrMsg, 200))
+		cs.emitTerminal(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)})
+		return
+	}
+	if cs.ctx.Err() != nil {
+		cs.emitTerminal(core.Event{Type: core.EventError, Error: fmt.Errorf("cursor session cancelled")})
+		return
+	}
+	slog.Warn("cursorSession: process exited with no result event")
+	cs.emitTerminal(core.Event{Type: core.EventError, Error: fmt.Errorf("cursor session ended without a result")})
+}
+
+func (cs *cursorSession) emit(evt core.Event) {
+	cs.turnMu.Lock()
+	closed := cs.eventsClosed
+	cs.turnMu.Unlock()
+	if closed {
+		return
+	}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+	}
+}
+
+func (cs *cursorSession) emitTerminal(evt core.Event) {
+	if !cs.terminal.CompareAndSwap(false, true) {
+		return
+	}
+	cs.emit(evt)
 }
 
 func (cs *cursorSession) handleEvent(raw map[string]any) {
@@ -258,18 +432,36 @@ func (cs *cursorSession) handleEvent(raw map[string]any) {
 }
 
 func (cs *cursorSession) handleSystem(raw map[string]any) {
+	subtype, _ := raw["subtype"].(string)
+	if model := cursorModelDisplay(raw); model != "" && (subtype == "" || subtype == "init") {
+		cs.modelDisplay.Store(model)
+		slog.Debug("cursorSession: model", "model", model)
+	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.chatID.Store(sid)
 		slog.Debug("cursorSession: session init", "session_id", sid)
+		cs.emit(core.Event{Type: core.EventText, SessionID: sid, Content: ""})
+	}
+}
 
-		model, _ := raw["model"].(string)
-		evt := core.Event{Type: core.EventText, SessionID: sid, Content: "", ToolName: model}
-		select {
-		case cs.events <- evt:
-		case <-cs.ctx.Done():
-			return
+func cursorModelDisplay(raw map[string]any) string {
+	switch m := raw["model"].(type) {
+	case string:
+		return strings.TrimSpace(m)
+	case map[string]any:
+		if s, ok := m["display_name"].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+		if s, ok := m["name"].(string); ok {
+			return strings.TrimSpace(s)
 		}
 	}
+	return ""
+}
+
+func (cs *cursorSession) GetModelDisplayName() string {
+	v, _ := cs.modelDisplay.Load().(string)
+	return v
 }
 
 func (cs *cursorSession) handleThinking(raw map[string]any) {
@@ -283,12 +475,7 @@ func (cs *cursorSession) handleThinking(raw map[string]any) {
 		text := cs.thinkingBuf.String()
 		cs.thinkingBuf.Reset()
 		if text != "" {
-			evt := core.Event{Type: core.EventThinking, Content: text}
-			select {
-			case cs.events <- evt:
-			case <-cs.ctx.Done():
-				return
-			}
+			cs.emit(core.Event{Type: core.EventThinking, Content: text})
 		}
 	}
 }
@@ -302,22 +489,56 @@ func (cs *cursorSession) handleAssistant(raw map[string]any) {
 	if !ok {
 		return
 	}
+	var blocks []string
 	for _, contentItem := range contentArr {
 		item, ok := contentItem.(map[string]any)
 		if !ok {
 			continue
 		}
 		contentType, _ := item["type"].(string)
-		if contentType == "text" {
-			if text, ok := item["text"].(string); ok && text != "" {
-				evt := core.Event{Type: core.EventText, Content: text}
-				select {
-				case cs.events <- evt:
-				case <-cs.ctx.Done():
-					return
-				}
-			}
+		if contentType != "text" {
+			continue
 		}
+		text, _ := item["text"].(string)
+		if text == "" {
+			continue
+		}
+		blocks = append(blocks, text)
+	}
+	if len(blocks) == 0 {
+		return
+	}
+	// Real --stream-partial-output deltas have timestamp_ms and no model_call_id.
+	// A completed assistant snapshot may still carry timestamp_ms when it also
+	// has model_call_id (intermediate, before a tool) or neither field (final).
+	_, hasTS := raw["timestamp_ms"]
+	callID, _ := raw["model_call_id"].(string)
+	if hasTS && callID == "" {
+		for _, text := range blocks {
+			cs.textMu.Lock()
+			cs.streamedPartial.WriteString(text)
+			cs.textMu.Unlock()
+			cs.emit(core.Event{Type: core.EventText, Content: text})
+		}
+		return
+	}
+	joined := strings.Join(blocks, "")
+	cs.textMu.Lock()
+	prev := cs.streamedPartial.String()
+	cs.streamedPartial.Reset()
+	cs.textMu.Unlock()
+	if prev != "" && joined == prev {
+		return
+	}
+	if prev != "" && strings.HasPrefix(joined, prev) {
+		suffix := strings.TrimPrefix(joined, prev)
+		if suffix != "" {
+			cs.emit(core.Event{Type: core.EventText, Content: suffix})
+		}
+		return
+	}
+	for _, text := range blocks {
+		cs.emit(core.Event{Type: core.EventText, Content: text})
 	}
 }
 
@@ -328,22 +549,80 @@ func (cs *cursorSession) handleToolCall(raw map[string]any) {
 		return
 	}
 
+	key := toolCallKey(raw, tc)
+	name, input := extractToolInfo(tc)
+
 	if subtype == "started" {
-		name, input := extractToolInfo(tc)
-		if name != "" {
-			evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: input}
-			select {
-			case cs.events <- evt:
-			case <-cs.ctx.Done():
-				return
-			}
+		if name == "" || !cs.markTool(key, 1) {
+			return
+		}
+		cs.emit(core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: input})
+		return
+	}
+	if subtype == "completed" {
+		if !cs.markTool(key, 2) {
+			return
+		}
+		content, status, success, exitCode := extractToolResult(tc)
+		if name == "" {
+			name, _ = extractToolInfo(tc)
+		}
+		slog.Debug("cursorSession: tool completed", "tool", name)
+		cs.emit(core.Event{
+			Type:         core.EventToolResult,
+			ToolName:     name,
+			ToolResult:   truncateStr(content, 2000),
+			Content:      truncateStr(content, 2000),
+			ToolStatus:   status,
+			ToolExitCode: exitCode,
+			ToolSuccess:  success,
+		})
+	}
+}
+
+// markTool records a tool phase. phase 1 is start, 2 is completion.
+// Repeated events for the same stable id are dropped. An empty key means the
+// call has no id and must not be collapsed with another identical call.
+func (cs *cursorSession) markTool(key string, phase uint8) bool {
+	if key == "" {
+		return true
+	}
+	cs.toolMu.Lock()
+	defer cs.toolMu.Unlock()
+	if cs.toolSeen == nil {
+		cs.toolSeen = make(map[string]uint8)
+	}
+	prev := cs.toolSeen[key]
+	if prev >= phase {
+		return false
+	}
+	cs.toolSeen[key] = phase
+	return true
+}
+
+func toolCallKey(raw, tc map[string]any) string {
+	if id := firstStringID(raw, "call_id", "tool_call_id", "toolCallId"); id != "" {
+		return id
+	}
+	for _, v := range tc {
+		child, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		if id := firstStringID(child, "toolCallId", "tool_call_id", "call_id"); id != "" {
+			return id
 		}
 	}
-	// "completed" tool_call events contain results; we log but don't emit to chat
-	if subtype == "completed" {
-		name, _ := extractToolInfo(tc)
-		slog.Debug("cursorSession: tool completed", "tool", name)
+	return ""
+}
+
+func firstStringID(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if id, ok := m[k].(string); ok && id != "" {
+			return id
+		}
 	}
+	return ""
 }
 
 func (cs *cursorSession) handleInteractionQuery(raw map[string]any) {
@@ -382,25 +661,30 @@ func (cs *cursorSession) handleInteractionQuery(raw map[string]any) {
 	}
 
 	// Store pending query so RespondPermission can write the right response.
+	cs.turnMu.Lock()
+	gen := cs.turnGen
+	cs.turnMu.Unlock()
 	cs.pendingMu.Lock()
 	cs.pending = &pendingInteractionQuery{id: queryID, queryType: queryType}
+	cs.pendingGen = gen
 	cs.pendingMu.Unlock()
 
 	// Build a stable requestID that the engine passes back to RespondPermission.
 	requestID := fmt.Sprintf("%s:%d", queryType, queryID)
 
 	slog.Info("cursorSession: permission request", "request_id", requestID, "tool", toolName)
-	evt := core.Event{
+	cs.emit(core.Event{
 		Type:      core.EventPermissionRequest,
 		RequestID: requestID,
 		ToolName:  toolName,
 		ToolInput: inputStr,
-	}
-	select {
-	case cs.events <- evt:
-	case <-cs.ctx.Done():
-		return
-	}
+	})
+}
+
+func (cs *cursorSession) clearPending() {
+	cs.pendingMu.Lock()
+	cs.pending = nil
+	cs.pendingMu.Unlock()
 }
 
 // writeInteractionResponse writes a Cursor interaction_query response JSON line to the
@@ -560,6 +844,81 @@ func extractToolInput(toolName string, call map[string]any) string {
 	return string(b)
 }
 
+func extractToolResult(tc map[string]any) (content, status string, success *bool, exitCode *int) {
+	status = "completed"
+	for _, key := range []string{"shellToolCall", "readToolCall", "editToolCall", "writeToolCall", "listToolCall", "searchToolCall", "grepToolCall", "globToolCall", "webFetchToolCall"} {
+		call, ok := tc[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		return toolResultFromCall(call)
+	}
+	if result, ok := tc["result"]; ok {
+		return toolResultValue(result)
+	}
+	return "", status, nil, nil
+}
+
+func toolResultFromCall(call map[string]any) (content, status string, success *bool, exitCode *int) {
+	if result, ok := call["result"]; ok {
+		return toolResultValue(result)
+	}
+	return "", "completed", nil, nil
+}
+
+func toolResultValue(result any) (content, status string, success *bool, exitCode *int) {
+	status = "completed"
+	switch r := result.(type) {
+	case string:
+		ok := true
+		return r, status, &ok, nil
+	case map[string]any:
+		if successMap, ok := r["success"].(map[string]any); ok {
+			s := true
+			return toolResultText(successMap), "completed", &s, intFromAny(successMap["exitCode"])
+		}
+		for _, failKey := range []string{"error", "failure", "rejected"} {
+			fail, ok := r[failKey].(map[string]any)
+			if !ok {
+				continue
+			}
+			s := false
+			st := "failed"
+			if failKey == "rejected" {
+				st = "rejected"
+			}
+			return toolResultText(fail), st, &s, intFromAny(fail["exitCode"])
+		}
+		s := true
+		return toolResultText(r), status, &s, intFromAny(r["exitCode"])
+	default:
+		return "", status, nil, nil
+	}
+}
+
+func toolResultText(m map[string]any) string {
+	var parts []string
+	for _, k := range []string{"stdout", "output", "content", "text", "diffString", "message", "error", "reason", "stderr"} {
+		if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func intFromAny(v any) *int {
+	switch n := v.(type) {
+	case float64:
+		i := int(n)
+		return &i
+	case int:
+		i := n
+		return &i
+	default:
+		return nil
+	}
+}
+
 func (cs *cursorSession) handleResult(raw map[string]any) {
 	var content string
 	if result, ok := raw["result"].(string); ok {
@@ -568,6 +927,24 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.chatID.Store(sid)
 	}
+
+	isError, _ := raw["is_error"].(bool)
+	if !isError {
+		if sub, _ := raw["subtype"].(string); strings.EqualFold(sub, "error") {
+			isError = true
+		}
+	}
+	if isError {
+		msg := strings.TrimSpace(content)
+		if msg == "" {
+			msg = "cursor result error"
+		}
+		cs.noteTerminal(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", msg), Content: msg, SessionID: cs.CurrentSessionID()})
+		return
+	}
+
+	// Result text is the final answer. Assistant snapshots already emitted
+	// EventText; this does not emit another text event.
 	// Cursor emits a `usage` block on the result event with camelCase keys
 	// (inputTokens / outputTokens / cacheReadTokens / cacheWriteTokens).
 	// Without this, the engine's turn-complete log always reports 0 tokens
@@ -577,7 +954,7 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 	if usage, ok := raw["usage"].(map[string]any); ok {
 		inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens = parseCursorUsage(usage)
 	}
-	evt := core.Event{
+	cs.noteTerminal(core.Event{
 		Type:                     core.EventResult,
 		Content:                  content,
 		SessionID:                cs.CurrentSessionID(),
@@ -586,12 +963,25 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 		OutputTokens:             outputTokens,
 		CacheReadInputTokens:     cacheReadTokens,
 		CacheCreationInputTokens: cacheWriteTokens,
-	}
-	select {
-	case cs.events <- evt:
-	case <-cs.ctx.Done():
+	})
+}
+
+// noteTerminal records the single terminal event. readLoop publishes it after
+// releasing the turn; other callers publish immediately.
+func (cs *cursorSession) noteTerminal(evt core.Event) {
+	if !cs.terminal.CompareAndSwap(false, true) {
 		return
 	}
+	if cs.deferTerminal.Load() {
+		cs.resultMu.Lock()
+		if cs.stashedResult == nil {
+			copied := evt
+			cs.stashedResult = &copied
+		}
+		cs.resultMu.Unlock()
+		return
+	}
+	cs.emit(evt)
 }
 
 // parseCursorUsage extracts token counts from a Cursor result event's `usage`
@@ -653,19 +1043,29 @@ func (cs *cursorSession) Alive() bool {
 }
 
 func (cs *cursorSession) Close() error {
-	cs.alive.Store(false)
-	cs.cancel()
-	done := make(chan struct{})
-	go func() {
-		cs.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		close(cs.events)
-	case <-time.After(8 * time.Second):
-		slog.Warn("cursorSession: close timed out, abandoning wg.Wait")
-	}
+	cs.closeOnce.Do(func() {
+		cs.turnMu.Lock()
+		cs.alive.Store(false)
+		cs.cancel()
+		cs.turnMu.Unlock()
+		cs.clearPending()
+		done := make(chan struct{})
+		go func() {
+			cs.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			cs.turnMu.Lock()
+			if !cs.eventsClosed {
+				cs.eventsClosed = true
+				close(cs.events)
+			}
+			cs.turnMu.Unlock()
+		case <-time.After(8 * time.Second):
+			slog.Warn("cursorSession: close timed out, abandoning wg.Wait")
+		}
+	})
 	return nil
 }
 

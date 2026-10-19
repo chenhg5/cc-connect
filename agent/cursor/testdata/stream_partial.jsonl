@@ -1,0 +1,20 @@
+{"type":"system","subtype":"init","session_id":"s1","model":"Grok 4.7  Low"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ABCDEF"}]},"session_id":"s1","timestamp_ms":1}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"GHI"}]},"session_id":"s1","timestamp_ms":1}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"JKLM"}]},"session_id":"s1","timestamp_ms":2}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"NOP"}]},"session_id":"s1","timestamp_ms":2}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"QR"}]},"session_id":"s1","timestamp_ms":2}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ST"}]},"session_id":"s1","timestamp_ms":2}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"UVW"}]},"session_id":"s1","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"XYZ"}]},"session_id":"s1","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"\n"}]},"session_id":"s1","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ABCDEF"}]},"session_id":"s1","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"GHI"}]},"session_id":"s1","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"JKLM"}]},"session_id":"s1","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"NOP"}]},"session_id":"s1","timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"QR"}]},"session_id":"s1","timestamp_ms":4}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ST"}]},"session_id":"s1","timestamp_ms":4}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"UVW"}]},"session_id":"s1","timestamp_ms":4}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"XYZ"}]},"session_id":"s1","timestamp_ms":4}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ABCDEFGHIJKLMNOPQRSTUVWXYZ\nABCDEFGHIJKLMNOPQRSTUVWXYZ"}]},"session_id":"s1"}
+{"type":"result","subtype":"success","is_error":false,"result":"ABCDEFGHIJKLMNOPQRSTUVWXYZ\nABCDEFGHIJKLMNOPQRSTUVWXYZ","session_id":"s1","usage":{"inputTokens":11347,"outputTokens":53,"cacheReadTokens":5888,"cacheWriteTokens":0}}

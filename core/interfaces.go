@@ -449,6 +449,12 @@ type ModelSwitcher interface {
 	AvailableModels(ctx context.Context) []ModelOption
 }
 
+// ModelDisplayNameReporter optionally provides a human-readable model name
+// for the reply footer when a session's model ID is less descriptive.
+type ModelDisplayNameReporter interface {
+	GetModelDisplayName() string
+}
+
 // ReasoningEffortSwitcher is an optional interface for agents that support
 // runtime switching of reasoning effort.
 type ReasoningEffortSwitcher interface {

@@ -81,9 +81,10 @@ func TestCUJ_A8_ImmediateReceiptsDuringStartupAndQueue(t *testing.T) {
 // per StartSession call. Tests can mutate cujAgentSession.reply between
 // turns to simulate different agent responses.
 type cujAgent struct {
-	mu       sync.Mutex
-	sessions []*cujAgentSession
-	nextID   int
+	mu               sync.Mutex
+	sessions         []*cujAgentSession
+	nextID           int
+	modelDisplayName string
 
 	// failStartCount lets tests simulate "agent process won't start" — the
 	// next N StartSession calls return failStartErr. Set both > 0 to use.
@@ -116,6 +117,7 @@ func (a *cujAgent) StartSession(_ context.Context, _ string) (AgentSession, erro
 	}
 	a.nextID++
 	s := newCUJAgentSession()
+	s.modelDisplayName = a.modelDisplayName
 	a.sessions = append(a.sessions, s)
 	s.pendingEvents = a.nextSessionEvents
 	s.pendingDelayMs = a.nextSessionDelayMs
@@ -133,9 +135,10 @@ func (a *cujAgent) Stop() error { return nil }
 // Tests can set reply (and optionally toolEvent) before each Send to drive
 // scenarios like "agent calls tool", "agent returns error", "agent succeeds".
 type cujAgentSession struct {
-	events chan Event
-	closed atomic_bool
-	mu     sync.Mutex
+	events           chan Event
+	closed           atomic_bool
+	mu               sync.Mutex
+	modelDisplayName string
 
 	// per-call control: tests set these BEFORE driving the engine
 	reply   string // what to send back as EventResult
@@ -161,6 +164,12 @@ type cujAgentSession struct {
 	sentPrompts []string
 	sentImages  [][]ImageAttachment
 	closeCount  int
+}
+
+func (s *cujAgentSession) GetModelDisplayName() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.modelDisplayName
 }
 
 // atomic_bool is intentionally lowercase to avoid clash with stdlib atomic.Bool
@@ -2068,6 +2077,26 @@ func TestCUJ_I5_LocalReferencesPreserveReplyContent(t *testing.T) {
 		})
 		env.waitFor("reference reply", 2*time.Second, func() bool { return env.sentContains(reply.want) })
 		env.waitFor("turn finished", 2*time.Second, func() bool { return !engine.sessions.GetOrCreateActive("feishu:reader").Busy() })
+	}
+}
+
+// CUJ-I6: across several replies, the user sees the running session's
+// human-readable model name in the footer.
+func TestCUJ_I6_SessionModelDisplayNameInReplyFooter(t *testing.T) {
+	env := newCUJEnv(t)
+	env.agent.modelDisplayName = "Grok 4.7 High"
+	env.engine.SetReplyFooterEnabled(true)
+	env.engine.SetShowContextIndicator(true)
+
+	for _, prompt := range []string{"first question", "second question", "third question"} {
+		env.plat.clearSent()
+		env.userSends("footer", prompt)
+		env.waitFor("model display name in reply footer", 2*time.Second, func() bool {
+			return env.sentContains("Grok 4.7 High")
+		})
+		env.waitFor("turn finished", 2*time.Second, func() bool {
+			return !env.engine.sessions.GetOrCreateActive("test:footer").Busy()
+		})
 	}
 }
 
