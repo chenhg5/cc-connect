@@ -73,6 +73,7 @@ type Platform struct {
 	token                      string
 	allowFrom                  string
 	allowBots                  string            // maomao fork: bot user IDs whose @-mentions of this bot are accepted
+	allowBotsFile              *allowBotsFile    // maomao fork: more allowed bot/webhook IDs, one per line; see allow_bots_file.go
 	teamLead                   string            // maomao fork: bot ID of the team lead; sub-vs-sub ping-pong is escalated to it
 	botName                    string            // maomao fork: this bot's username, for escalation notes
 	auxChannels                map[string]string // maomao fork: main channel ID → log channel ID; see aux_channels.go
@@ -118,6 +119,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 	allowFrom, _ := opts["allow_from"].(string)
 	allowBots, _ := opts["allow_bots"].(string)
+	allowBotsFilePath, _ := opts["allow_bots_file"].(string)
 	teamLead, _ := opts["team_lead_bot"].(string)
 	core.CheckAllowFrom("discord", allowFrom)
 	guildID, _ := opts["guild_id"].(string)
@@ -184,6 +186,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		token:                      token,
 		allowFrom:                  allowFrom,
 		allowBots:                  allowBots,
+		allowBotsFile:              newAllowBotsFile(allowBotsFilePath),
 		teamLead:                   teamLead,
 		guildID:                    guildID,
 		progressStyle:              progressStyle,
@@ -692,10 +695,10 @@ func (p *Platform) buildSession() (*discordgo.Session, error) {
 		if m.Author.ID == p.botID {
 			return
 		}
-		// maomao fork: other bots get through only if listed in allow_bots, and only when
-		// they @ this bot (checked below), so bots can hand work to each other without loops.
+		// maomao fork: other bots get through only if listed in allow_bots or allow_bots_file,
+		// and only when they @ this bot (checked below), so bots can hand work to each other without loops.
 		fromBot := m.Author.Bot
-		if fromBot && (p.allowBots == "" || !core.AllowList(p.allowBots, m.Author.ID)) {
+		if fromBot && !p.botAllowed(m.Author.ID) {
 			return
 		}
 		if core.IsOldMessage(m.Timestamp) {

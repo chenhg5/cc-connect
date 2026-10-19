@@ -41,6 +41,8 @@ team_name = "龙娘"
 
 [projects.platforms.options]       # discord, every bot
 allow_bots = "<the other bots' IDs>"   # teammates' messages: @ me → turn; otherwise listen-only context
+allow_bots_file = "~/path/allow.txt"   # more allowed bot/webhook IDs, one per line (# comments); re-read on
+                                       # change, no restart. role-household appends the webhooks it creates here
 team_lead_bot = "<main bot ID>"        # two subs @-ing each other > 3 rounds → escalated to the lead
 share_session_in_channel = true        # one session per channel, so context reaches the same session
 aux_channels = { "<main channel ID>" = "<log channel ID>" }  # progress card, sub-agent table and ♻️/⏰/⏳ notices of
