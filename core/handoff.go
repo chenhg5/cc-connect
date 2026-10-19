@@ -146,24 +146,35 @@ func (e *Engine) retryFreshOnPromptTooLong(p Platform, msg Message, errMsg strin
 	sessions.Save()
 	e.send(p, markSystemNotice(p, msg.ReplyCtx), notice)
 
-	old.mu.Lock()
-	queued := old.pendingMessages
-	old.pendingMessages = nil
-	old.mu.Unlock()
 	var agentOverride Agent
 	if agent != e.agent {
 		agentOverride = agent
 	}
+	if testHookBeforePromptTooLongRecycle != nil {
+		testHookBeforePromptTooLongRecycle()
+	}
 	// The cleared agent session ID makes this recycle the old agent process.
 	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
-	state.mu.Lock()
-	state.pendingMessages = append(queued, state.pendingMessages...)
-	state.mu.Unlock()
+	if state != old {
+		// The old state is out of the map now, so nothing more can queue into it
+		// (enqueueForBusySession looks it up under interactiveMu); move its queue.
+		old.mu.Lock()
+		queued := old.pendingMessages
+		old.pendingMessages = nil
+		old.mu.Unlock()
+		state.mu.Lock()
+		state.pendingMessages = append(queued, state.pendingMessages...)
+		state.mu.Unlock()
+	}
 
 	msg.freshRetried = true
 	e.processInteractiveMessageWith(p, &msg, session, agent, sessions, interactiveKey, workspaceDir, ccSessionKey)
 	return true
 }
+
+// testHookBeforePromptTooLongRecycle, when set by a test, runs just before the
+// old state is recycled (to queue a message into it at that moment).
+var testHookBeforePromptTooLongRecycle func()
 
 // takePromptTooLong returns and clears the last turn's prompt-too-long error
 // ("" = none) and, when the failed turn was a queued message chained into the

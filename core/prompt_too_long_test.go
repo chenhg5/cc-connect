@@ -199,3 +199,22 @@ func TestPromptTooLong_CronJobRerun(t *testing.T) {
 		t.Fatalf("channel:\n%s", out)
 	}
 }
+
+// A message queued into the old state while the session is being replaced is
+// carried to the new session, not lost with the old state.
+func TestPromptTooLong_MessageQueuedDuringRecycleKept(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e, a := newTooLongEngine(t, p, "long", "again", "late")
+	testHookBeforePromptTooLongRecycle = func() {
+		e.handleMessage(p, &Message{SessionKey: "test:c1", Platform: "test", UserID: "u", UserName: "u", Content: "msgLate", ReplyCtx: "ctx"})
+	}
+	t.Cleanup(func() { testHookBeforePromptTooLongRecycle = nil })
+
+	e.handleMessage(p, &Message{SessionKey: "test:c1", Platform: "test", UserID: "u", UserName: "u", Content: "hello", ReplyCtx: "ctx"})
+	waitFor(t, "late message answered", func() bool { return strings.Contains(joined(p), "reply:late") })
+
+	sent, by, _ := a.snapshot()
+	if len(sent) != 3 || !strings.HasSuffix(sent[1], "hello") || !strings.HasSuffix(sent[2], "msgLate") || by[2] != "s2" {
+		t.Fatalf("sends = %q on %q, want hello on s1, then hello and msgLate on s2", sent, by)
+	}
+}
