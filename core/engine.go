@@ -5598,6 +5598,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			// maomao fork: images piled up inside this turn; interrupt it the way an
+			// idle timeout does (close the agent session) and leave a fresh session
+			// with a handoff for the next message. The turn is not re-run.
+			if notice := e.freshOnImageBloatMidTurn(replyAgent, session); notice != "" {
+				sessions.Save()
+				cp.Finalize(ProgressCardStateFailed)
+				sp.discard()
+				e.send(p, markSystemNotice(p, replyCtx), notice)
+				e.cleanupInteractiveState(sessionKey, state)
+				return
+			}
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {

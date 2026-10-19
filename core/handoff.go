@@ -84,23 +84,52 @@ func (e *Engine) SetImageFresh(enabled bool, maxBytes int) {
 // every step, so each step gets slow. Records the old session as the handoff
 // source. Returns the notice for the channel ("" when nothing changes).
 func (e *Engine) freshOnImageBloat(agent Agent, session *Session) string {
-	if !e.imageFreshEnabled || e.imageFreshMaxBytes <= 0 {
+	id, imageBytes := e.imageBloat(agent, session)
+	if id == "" {
 		return ""
+	}
+	reason := fmt.Sprintf("上下文里的图片累计约 %.1f MB，每一步都要重发", float64(imageBytes)/1e6)
+	slog.Info("image bloat: starting fresh with handoff", "old_agent_session", id, "image_bytes", imageBytes)
+	session.SetAgentSessionID("", agent.Name())
+	session.SetHandoffFrom(id, reason)
+	return "♻️ " + reason + "：开新会话，带上旧会话的压缩摘要和最近对话（不带图）"
+}
+
+// freshOnImageBloatMidTurn is freshOnImageBloat for a running turn, checked
+// after each tool result (maomao fork): one turn that keeps viewing images can
+// pass the provider's prompt limit before the next turn's check runs (jingyu,
+// 2026-10-19: "prompt is too long: 1309618 tokens > 1048576 maximum"). Same
+// limit, same count. Clears the agent ID and records the handoff source; the
+// caller interrupts the turn and does not re-run it. Returns the notice for the
+// channel ("" when nothing changes).
+func (e *Engine) freshOnImageBloatMidTurn(agent Agent, session *Session) string {
+	id, imageBytes := e.imageBloat(agent, session)
+	if id == "" {
+		return ""
+	}
+	mb := float64(imageBytes) / 1e6
+	slog.Info("image bloat mid-turn: interrupting, starting fresh with handoff", "old_agent_session", id, "image_bytes", imageBytes)
+	session.SetAgentSessionID("", agent.Name())
+	session.SetHandoffFrom(id, fmt.Sprintf("这一轮图片累计约 %.1f MB，超过上限，已打断", mb))
+	return fmt.Sprintf("♻️ 这一轮图片累计约 %.1f MB，超过上限，已打断并换新会话（不带图）。接着说就行", mb)
+}
+
+// imageBloat returns the session's agent ID and the base64 bytes of the images
+// in its context when they have reached the image_fresh limit ("" otherwise).
+func (e *Engine) imageBloat(agent Agent, session *Session) (string, int) {
+	if !e.imageFreshEnabled || e.imageFreshMaxBytes <= 0 {
+		return "", 0
 	}
 	id := session.GetAgentSessionID()
 	r, ok := agent.(SessionHandoffReader)
 	if id == "" || id == ContinueSession || !ok {
-		return ""
+		return "", 0
 	}
 	h, err := r.ReadSessionHandoff(id)
 	if err != nil || h.ImageBytes < e.imageFreshMaxBytes {
-		return ""
+		return "", 0
 	}
-	reason := fmt.Sprintf("上下文里的图片累计约 %.1f MB，每一步都要重发", float64(h.ImageBytes)/1e6)
-	slog.Info("image bloat: starting fresh with handoff", "old_agent_session", id, "image_bytes", h.ImageBytes)
-	session.SetAgentSessionID("", agent.Name())
-	session.SetHandoffFrom(id, reason)
-	return "♻️ " + reason + "：开新会话，带上旧会话的压缩摘要和最近对话（不带图）"
+	return id, h.ImageBytes
 }
 
 // isPromptTooLongError matches the provider's context-overflow turn failure, e.g.

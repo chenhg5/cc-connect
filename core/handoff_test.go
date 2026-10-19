@@ -215,3 +215,78 @@ func TestFormatHandoffDropsStaleBlocks(t *testing.T) {
 		t.Fatalf("stripped = %q", got)
 	}
 }
+
+// A turn that keeps viewing images is interrupted after the tool result that
+// takes the context past the image_fresh limit (maomao fork).
+func TestImageBloatMidTurnInterrupts(t *testing.T) {
+	run := func(t *testing.T, enabled bool, imageBytes int) (*Engine, *stubPlatformEngine, *Session, *controllableAgentSession) {
+		a := &handoffStubAgent{handoffs: map[string]*SessionHandoff{
+			"s1": {Path: "/x/s1.jsonl", ImageBytes: imageBytes},
+		}}
+		p := &stubPlatformEngine{n: "x"}
+		e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+		t.Cleanup(func() { _ = e.Stop() })
+		e.SetImageFresh(enabled, 2_000_000)
+		key := "x:c1"
+		session := e.sessions.GetOrCreateActive(key)
+		session.SetAgentSessionID("s1", a.Name())
+		as := newControllableSession("s1")
+		state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx", agent: a}
+		e.interactiveStates[key] = state
+		as.events <- Event{Type: EventToolUse, ToolName: "ViewImage", ToolInput: "/tmp/a.png"}
+		as.events <- Event{Type: EventToolResult, ToolName: "ViewImage", ToolResult: "/tmp/a.png"}
+		as.events <- Event{Type: EventResult, Content: "看完了", Done: true}
+		e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx")
+		return e, p, session, as
+	}
+
+	t.Run("over limit", func(t *testing.T) {
+		e, p, s, as := run(t, true, 2_900_000)
+		select {
+		case <-as.closed: // the turn was interrupted: its agent session is closed
+		default:
+			t.Fatal("agent session not closed")
+		}
+		if _, ok := e.interactiveStates["x:c1"]; ok {
+			t.Fatal("interactive state kept")
+		}
+		if s.GetAgentSessionID() != "" || s.HandoffFrom != "s1" {
+			t.Fatalf("agent id %q handoff %q", s.GetAgentSessionID(), s.HandoffFrom)
+		}
+		want := "♻️ 这一轮图片累计约 2.9 MB，超过上限，已打断并换新会话（不带图）。接着说就行"
+		sent := p.getSent()
+		if len(sent) == 0 || sent[len(sent)-1] != want {
+			t.Fatalf("sent = %#v", sent)
+		}
+		// Not re-run: the turn's final reply was never read and nothing new started.
+		if strings.Contains(strings.Join(sent, "\n"), "看完了") || len(e.interactiveStates) != 0 {
+			t.Fatalf("turn continued or re-ran: sent %#v states %d", sent, len(e.interactiveStates))
+		}
+		if b := e.handoffBlock(s); !strings.Contains(b, "/x/s1.jsonl") || !strings.Contains(b, "已打断") {
+			t.Fatalf("handoff block:\n%s", b)
+		}
+	})
+	for _, c := range []struct {
+		name       string
+		enabled    bool
+		imageBytes int
+	}{{"under limit", true, 1_000_000}, {"image_fresh off", false, 9_000_000}} {
+		t.Run(c.name, func(t *testing.T) {
+			e, p, s, as := run(t, c.enabled, c.imageBytes)
+			select {
+			case <-as.closed:
+				t.Fatal("agent session closed")
+			default:
+			}
+			if s.GetAgentSessionID() != "s1" || s.HandoffFrom != "" {
+				t.Fatalf("agent id %q handoff %q", s.GetAgentSessionID(), s.HandoffFrom)
+			}
+			if _, ok := e.interactiveStates["x:c1"]; !ok {
+				t.Fatal("interactive state dropped")
+			}
+			if got := strings.Join(p.getSent(), "\n"); !strings.Contains(got, "看完了") || strings.Contains(got, "♻️") {
+				t.Fatalf("sent = %q", got)
+			}
+		})
+	}
+}
