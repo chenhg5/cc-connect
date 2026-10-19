@@ -206,6 +206,9 @@ type appServerSession struct {
 	pendingMsgs  []string
 	currentTurn  string
 	preambleSent bool
+	// maomao fork: command line of each running commandExecution item, so a
+	// write_stdin (terminalInteraction) can say which process it talks to.
+	execCommands map[string]string
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
@@ -1191,6 +1194,20 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 			s.handleItemCompleted(notif.Item)
 		}
 
+	case "item/commandExecution/terminalInteraction":
+		// maomao fork: write_stdin (incl. an empty poll) into a running process
+		// sends only this, no item/started. Without an event here a long
+		// interactive session (python -i, a browser REPL) looked idle to the
+		// engine's watchdog and got killed (2026-10-19 外出 15:49/16:08/16:43).
+		var notif struct {
+			ItemID    string `json:"itemId"`
+			ProcessID string `json:"processId"`
+			Stdin     string `json:"stdin"`
+		}
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			s.handleTerminalInteraction(notif.ItemID, notif.ProcessID, notif.Stdin)
+		}
+
 	case "turn/completed":
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
@@ -1261,6 +1278,14 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	switch itemType {
 	case "commandExecution":
 		command, _ := item["command"].(string)
+		if id, _ := item["id"].(string); id != "" {
+			s.stateMu.Lock()
+			if s.execCommands == nil {
+				s.execCommands = make(map[string]string)
+			}
+			s.execCommands[id] = command
+			s.stateMu.Unlock()
+		}
 		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: command})
 
 	case "mcpToolCall":
@@ -1279,7 +1304,45 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 
 	case "fileChange":
 		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Patch", ToolInput: appServerJSON(item["changes"])})
+
+	// maomao fork: tool items that used to be dropped silently; each is
+	// activity the engine's idle watchdog must see.
+	case "imageView":
+		path, _ := item["path"].(string)
+		s.emit(core.Event{Type: core.EventToolUse, ToolName: "ViewImage", ToolInput: path})
+
+	case "imageGeneration":
+		prompt, _ := item["revisedPrompt"].(string)
+		s.emit(core.Event{Type: core.EventToolUse, ToolName: "ImageGen", ToolInput: prompt})
+
+	case "sleep":
+		ms, _ := toInt(item["durationMs"])
+		s.emit(core.Event{Type: core.EventToolUse, ToolName: "Sleep", ToolInput: (time.Duration(ms) * time.Millisecond).String()})
+
+	case "collabAgentToolCall":
+		tool, _ := item["tool"].(string)
+		prompt, _ := item["prompt"].(string)
+		s.emit(core.Event{Type: core.EventToolUse, ToolName: strings.TrimSuffix("Agent:"+tool, ":"), ToolInput: prompt})
 	}
+}
+
+// handleTerminalInteraction reports a write_stdin into a running command. An
+// empty stdin is a poll for more output.
+func (s *appServerSession) handleTerminalInteraction(itemID, processID, stdin string) {
+	s.flushPendingAsThinking()
+	s.stateMu.Lock()
+	command := s.execCommands[itemID]
+	s.stateMu.Unlock()
+	if command == "" {
+		command = "process " + processID
+	}
+	input := strings.TrimRight(stdin, "\r\n")
+	if input == "" {
+		input = "(poll) " + command
+	} else {
+		input += "\n# -> " + command
+	}
+	s.emit(core.Event{Type: core.EventToolUse, ToolName: "WriteStdin", ToolInput: input})
 }
 
 func (s *appServerSession) handleItemCompleted(item map[string]any) {
@@ -1309,6 +1372,11 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 
 	case "commandExecution":
 		command, _ := item["command"].(string)
+		if id, _ := item["id"].(string); id != "" {
+			s.stateMu.Lock()
+			delete(s.execCommands, id)
+			s.stateMu.Unlock()
+		}
 		status, _ := item["status"].(string)
 		output, _ := item["aggregatedOutput"].(string)
 		exitCode, hasExitCode := toInt(item["exitCode"])
@@ -1363,6 +1431,26 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
 		})
+
+	case "imageView":
+		path, _ := item["path"].(string)
+		success := true
+		s.emit(core.Event{Type: core.EventToolResult, ToolName: "ViewImage", ToolResult: path, ToolSuccess: &success})
+
+	case "imageGeneration":
+		status, _ := item["status"].(string)
+		result, _ := item["savedPath"].(string)
+		if failure := appServerJSON(item["failure"]); result == "" && strings.TrimSpace(failure) != "" {
+			result = failure
+		}
+		success := appServerToolSuccess(status, nil)
+		s.emit(core.Event{Type: core.EventToolResult, ToolName: "ImageGen", ToolResult: truncate(strings.TrimSpace(result), 500), ToolStatus: strings.TrimSpace(status), ToolSuccess: &success})
+
+	case "collabAgentToolCall":
+		tool, _ := item["tool"].(string)
+		status, _ := item["status"].(string)
+		success := appServerToolSuccess(status, nil)
+		s.emit(core.Event{Type: core.EventToolResult, ToolName: strings.TrimSuffix("Agent:"+tool, ":"), ToolStatus: strings.TrimSpace(status), ToolSuccess: &success})
 	}
 }
 
