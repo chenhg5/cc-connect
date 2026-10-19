@@ -278,3 +278,16 @@ func (hm *HookManager) Hooks() []HookConfig {
 	copy(out, hm.hooks)
 	return out
 }
+
+// triggerExtra is the message.sent Extra naming the platform message(s) that started this
+// reply's turn (maomao fork). A hook receiver that posted a message itself (e.g. a webhook
+// with ?wait=true) can match the reply to it exactly instead of guessing by channel.
+// Each turn runs exactly one user message (queued messages run as their own turns), so
+// the list has one ID; it is a list so a future merged turn can name all of them.
+// Empty msgID (cron, heartbeat, relay) → nil, the field is omitted.
+func triggerExtra(msgID string) map[string]any {
+	if msgID == "" {
+		return nil
+	}
+	return map[string]any{"trigger_message_ids": []string{msgID}}
+}

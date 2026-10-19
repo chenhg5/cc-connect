@@ -6003,6 +6003,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					SessionKey: sessionKey,
 					Platform:   p.Name(),
 					Content:    baseResponse,
+					Extra:      triggerExtra(msgID),
 				})
 			}
 
@@ -6542,6 +6543,7 @@ channelClosed:
 			SessionKey: sessionKey,
 			Platform:   p.Name(),
 			Content:    fullResponse,
+			Extra:      triggerExtra(msgID),
 		})
 
 		if toolCount > 0 && segmentStart > 0 {
