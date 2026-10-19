@@ -209,6 +209,7 @@ const (
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
 	MsgMessageQueued             MsgKey = "message_queued"
+	MsgMessageQueuedQuestionOpen MsgKey = "message_queued_question_open"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
 	MsgCurrentTools              MsgKey = "current_tools"
 	MsgCurrentSession            MsgKey = "current_session"
@@ -451,12 +452,19 @@ const (
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
-	MsgAskQuestionTitle     MsgKey = "ask_question_title"
-	MsgAskQuestionNote      MsgKey = "ask_question_note"
-	MsgAskQuestionNoteMulti MsgKey = "ask_question_note_multi"
-	MsgAskQuestionMulti     MsgKey = "ask_question_multi"
-	MsgAskQuestionPrompt    MsgKey = "ask_question_prompt"
-	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
+	MsgAskQuestionTitle               MsgKey = "ask_question_title"
+	MsgAskQuestionNote                MsgKey = "ask_question_note"
+	MsgAskQuestionNoteMulti           MsgKey = "ask_question_note_multi"
+	MsgAskQuestionNoteFreeform        MsgKey = "ask_question_note_freeform"
+	MsgAskQuestionFreeformPlaceholder MsgKey = "ask_question_freeform_placeholder"
+	MsgAskQuestionFreeformLabel       MsgKey = "ask_question_freeform_label"
+	MsgAskQuestionFreeformSubmit      MsgKey = "ask_question_freeform_submit"
+	MsgAskqCardExpired                MsgKey = "askq_card_expired"
+	MsgAskqCardTooLong                MsgKey = "askq_card_too_long"
+	MsgAskQuestionMulti               MsgKey = "ask_question_multi"
+	MsgAskQuestionPrompt              MsgKey = "ask_question_prompt"
+	MsgAskQuestionAnswered            MsgKey = "ask_question_answered"
+	MsgAskQuestionStale               MsgKey = "ask_question_stale"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -797,6 +805,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏳ 上一個請求仍在處理中。使用 `/ps <訊息>` 可向正在執行的任務追加補充資訊。",
 		LangJapanese:           "⏳ 前のリクエストを処理中です。`/ps <メッセージ>` で実行中のタスクに補足情報を送れます。",
 		LangSpanish:            "⏳ La solicitud anterior aún se está procesando. Use `/ps <mensaje>` para enviar un P.S. a la tarea en curso.",
+	},
+	MsgMessageQueuedQuestionOpen: {
+		LangEnglish:            "📬 Message received. It was not taken as the answer to the question card above: answer there by tapping an option or typing in its box. This message will be handled after the current task; to tell the agent now, send /ps <text>.",
+		LangChinese:            "📬 消息已收到，但没有当作上面问题卡片的回答：请在卡片里点选项或在输入框里填写。这条消息会在当前任务结束后处理；想现在就告诉 agent，发 /ps 内容。",
+		LangTraditionalChinese: "📬 訊息已收到，但沒有當作上面問題卡片的回答：請在卡片裡點選項或在輸入框裡填寫。這則訊息會在目前任務結束後處理；想現在就告訴 agent，傳 /ps 內容。",
+		LangJapanese:           "📬 メッセージを受け取りましたが、上の質問カードへの回答としては扱っていません。カードで選択肢を押すか入力欄に回答してください。このメッセージは現在のタスク終了後に処理します。今すぐエージェントに伝えるには /ps <内容> を送ってください。",
+		LangSpanish:            "📬 Mensaje recibido. No se tomó como respuesta a la tarjeta de pregunta de arriba: responde allí pulsando una opción o escribiendo en su cuadro. Este mensaje se procesará cuando termine la tarea actual; para decírselo al agente ahora, envía /ps <texto>.",
 	},
 	MsgMessageQueued: {
 		LangEnglish:            "📬 Message received — will process after the current task finishes.",
@@ -2795,6 +2810,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "カンマ区切りの番号（例: 1,3）で返信するか、直接回答を入力してください",
 		LangSpanish:            "Responda con los números de opción separados por comas (ej. 1,3) o escriba su respuesta",
 	},
+	MsgAskQuestionNoteFreeform: {
+		LangEnglish:            "None of the options fit? Type your answer in the input box below — it is passed back to the agent as-is. Messages sent in the chat are not taken as the answer",
+		LangChinese:            "选项不合适？直接在下方输入框输入你的想法，会原样作为回答传回。在聊天框里发的消息不会当作回答",
+		LangTraditionalChinese: "選項不合適？直接在下方輸入框輸入你的想法，會原樣作為回答傳回。在聊天框裡發的訊息不會當作回答",
+		LangJapanese:           "選択肢が合わない場合は、下の入力欄に直接回答を入力してください（そのまま agent に渡されます）。チャットに送ったメッセージは回答として扱われません",
+		LangSpanish:            "¿Ninguna opción encaja? Escribe tu respuesta en el cuadro de abajo; se pasa al agente tal cual. Los mensajes enviados en el chat no se toman como respuesta",
+	},
+	MsgAskQuestionFreeformPlaceholder: {
+		LangEnglish:            "Type your answer…",
+		LangChinese:            "输入你的想法…",
+		LangTraditionalChinese: "輸入你的想法…",
+		LangJapanese:           "回答を入力…",
+		LangSpanish:            "Escribe tu respuesta…",
+	},
+	MsgAskQuestionFreeformLabel: {
+		LangEnglish:            "Free-form answer",
+		LangChinese:            "自由回答",
+		LangTraditionalChinese: "自由回答",
+		LangJapanese:           "自由入力",
+		LangSpanish:            "Respuesta libre",
+	},
+	MsgAskQuestionFreeformSubmit: {
+		LangEnglish:            "Send",
+		LangChinese:            "发送",
+		LangTraditionalChinese: "發送",
+		LangJapanese:           "送信",
+		LangSpanish:            "Enviar",
+	},
+	MsgAskqCardExpired: {
+		LangEnglish:            "This question has already been answered or is no longer active",
+		LangChinese:            "该问题已被回答或已失效",
+		LangTraditionalChinese: "該問題已被回答或已失效",
+		LangJapanese:           "この質問はすでに回答済みか、無効になっています",
+		LangSpanish:            "Esta pregunta ya fue respondida o ya no está activa",
+	},
+	MsgAskqCardTooLong: {
+		LangEnglish:            "Answer exceeds the 500-character limit and was not sent. Shorten it and submit again",
+		LangChinese:            "回答超过 500 字上限，未发送。请精简后重新提交",
+		LangTraditionalChinese: "回答超過 500 字上限，未發送。請精簡後重新提交",
+		LangJapanese:           "回答が500字の上限を超えているため送信されませんでした。短くして再送信してください",
+		LangSpanish:            "La respuesta supera el límite de 500 caracteres y no se envió. Acórtala y envíala de nuevo",
+	},
 	MsgAskQuestionMulti: {
 		LangEnglish:            " (multiple selections allowed, separate with commas)",
 		LangChinese:            "（可多选，用逗号分隔）",
@@ -2815,6 +2872,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "已回答",
 		LangJapanese:           "回答済み",
 		LangSpanish:            "Respondido",
+	},
+	MsgAskQuestionStale: {
+		LangEnglish:            "⚠️ That question was already answered or is no longer active, so this answer was not sent to the agent.",
+		LangChinese:            "⚠️ 这个问题已经回答过了或已失效，这次的回答没有发给 agent。",
+		LangTraditionalChinese: "⚠️ 這個問題已經回答過了或已失效，這次的回答沒有發給 agent。",
+		LangJapanese:           "⚠️ この質問は回答済みか無効になっているため、この回答はエージェントに送信されませんでした。",
+		LangSpanish:            "⚠️ Esa pregunta ya se respondió o ya no está activa, así que esta respuesta no se envió al agente.",
 	},
 	MsgCommandsTitle: {
 		LangEnglish:            "🔧 **Custom Commands** (%d)\n\n",

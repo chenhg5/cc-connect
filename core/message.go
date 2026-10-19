@@ -438,6 +438,11 @@ type Message struct {
 	// "allow"/"deny" typed by a real user must NOT set this flag — they
 	// continue to flow through the regular message handler.
 	IsPermissionResponse bool
+	// IsAskQuestionAnswer is set by platforms when the message is an answer
+	// given inside an AskUserQuestion card (an option tap or the card's own
+	// text box). When a question was sent as such a card, only these answers
+	// resolve it; ordinary chat messages take the normal path instead.
+	IsAskQuestionAnswer bool
 	// UserMessageTimeMs is the platform message creation time in Unix milliseconds
 	// when known (e.g. Feishu im.message.message_received create_time). Used to
 	// drop late redeliveries that reuse a new message_id but an older create_time

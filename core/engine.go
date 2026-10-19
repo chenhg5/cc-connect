@@ -726,8 +726,12 @@ type pendingPermission struct {
 	Questions       []UserQuestion // non-nil for AskUserQuestion
 	Answers         map[int]string // collected answers keyed by question index
 	CurrentQuestion int            // index of the question currently being asked
-	Resolved        chan struct{}  // closed when user responds
-	resolveOnce     sync.Once
+	// CardAnswerOnly is true when the current question was sent as a card
+	// with its own answer box, so chat messages are not read as answers.
+	// Guarded by the owning interactiveState's mu.
+	CardAnswerOnly bool
+	Resolved       chan struct{} // closed when user responds
+	resolveOnce    sync.Once
 }
 
 func (s *interactiveState) stopSignal() <-chan struct{} {
@@ -3459,7 +3463,11 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	queuedKey := MsgMessageQueued
+	if state.pending != nil && state.pending.CardAnswerOnly {
+		queuedKey = MsgMessageQueuedQuestionOpen
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.T(queuedKey))
 	return true
 }
 
@@ -3612,9 +3620,28 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 				"session", msg.SessionKey, "content", content)
 			return true
 		}
+		// Same for an AskUserQuestion option click that arrives after its
+		// question was answered some other way (e.g. by a chat message), or
+		// after a restart: forwarding "askq:0:1" as user input would queue
+		// it for the agent as literal text.
+		if _, _, ok := parseAskQuestionCallback(content); ok || msg.IsAskQuestionAnswer {
+			e.dropStaleAskQuestionCallback(p, msg, content)
+			return true
+		}
 		return false
 	}
 found:
+
+	// An answer from an AskUserQuestion card is never a permission decision,
+	// and a tap on an earlier question's card must not answer the question
+	// being asked now.
+	qIdx, hasQIdx, isOptionTap := parseAskQuestionCallback(content)
+	if isOptionTap || msg.IsAskQuestionAnswer {
+		if len(pending.Questions) == 0 || (hasQIdx && qIdx != pending.CurrentQuestion) {
+			e.dropStaleAskQuestionCallback(p, msg, content)
+			return true
+		}
+	}
 
 	// AskUserQuestion: interpret user response as an answer, not a permission decision
 	if len(pending.Questions) > 0 {
@@ -3623,6 +3650,18 @@ found:
 		// not be accepted as answers — otherwise the tool gets empty answers
 		// within ~500ms before the user has a chance to respond (#1086).
 		if strings.TrimSpace(content) == "" {
+			return false
+		}
+
+		// When the question went out as a card with its own answer box, only
+		// an answer given in that card counts. A chat message sent meanwhile
+		// may be about something else entirely (a reply to an earlier message,
+		// a new instruction), so it takes the normal path instead of being
+		// read as the answer.
+		state.mu.Lock()
+		cardAnswerOnly := pending.CardAnswerOnly
+		state.mu.Unlock()
+		if cardAnswerOnly && !isOptionTap && !msg.IsAskQuestionAnswer {
 			return false
 		}
 
@@ -3639,7 +3678,10 @@ found:
 		if curIdx+1 < len(pending.Questions) {
 			pending.CurrentQuestion = curIdx + 1
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
-			e.sendAskQuestionPrompt(p, msg.ReplyCtx, pending.Questions, curIdx+1)
+			cardAnswerOnly := e.sendAskQuestionPrompt(p, msg.ReplyCtx, pending.Questions, curIdx+1)
+			state.mu.Lock()
+			pending.CardAnswerOnly = cardAnswerOnly
+			state.mu.Unlock()
 			return true
 		}
 
@@ -3724,6 +3766,40 @@ func (e *Engine) lookupPending(iKey string) (*interactiveState, *pendingPermissi
 	pending := state.pending
 	state.mu.Unlock()
 	return state, pending
+}
+
+// parseAskQuestionCallback recognizes the value an AskUserQuestion option
+// button sends back: "askq:qIdx:optIdx", or the legacy "askq:optIdx".
+// hasQIdx reports whether the question index was present. ok is false for
+// anything else, including free text that merely starts with "askq:".
+func parseAskQuestionCallback(content string) (qIdx int, hasQIdx bool, ok bool) {
+	rest, found := strings.CutPrefix(strings.TrimSpace(content), "askq:")
+	if !found {
+		return 0, false, false
+	}
+	parts := strings.Split(rest, ":")
+	for _, part := range parts {
+		if n, err := strconv.Atoi(part); err != nil || n < 0 {
+			return 0, false, false
+		}
+	}
+	switch len(parts) {
+	case 1:
+		return 0, false, true
+	case 2:
+		qIdx, _ = strconv.Atoi(parts[0])
+		return qIdx, true, true
+	}
+	return 0, false, false
+}
+
+// dropStaleAskQuestionCallback tells the user that an option click arrived
+// for a question that is no longer waiting for an answer, instead of passing
+// the click on to the agent.
+func (e *Engine) dropStaleAskQuestionCallback(p Platform, msg *Message, content string) {
+	slog.Info("dropping stale ask-question callback",
+		"session", msg.SessionKey, "content", content)
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAskQuestionStale))
 }
 
 // resolveAskQuestionAnswer converts user input into answer text.
@@ -5913,7 +5989,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			if isAskQuestion {
-				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+				cardAnswerOnly := e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+				state.mu.Lock()
+				pending.CardAnswerOnly = cardAnswerOnly
+				state.mu.Unlock()
 			} else {
 				permLimit := e.display.ToolMaxLen
 				if permLimit > 0 {
@@ -12160,8 +12239,10 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 }
 
 // sendAskQuestionPrompt renders one question (by index) from the AskUserQuestion list.
-// qIdx is the 0-based index of the question to display.
-func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []UserQuestion, qIdx int) {
+// qIdx is the 0-based index of the question to display. It reports whether the
+// question went out as a card with its own answer box, in which case only
+// answers given in that card should resolve it.
+func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []UserQuestion, qIdx int) (cardAnswerOnly bool) {
 	if qIdx >= len(questions) {
 		return
 	}
@@ -12171,6 +12252,37 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 	titleSuffix := ""
 	if total > 1 {
 		titleSuffix = fmt.Sprintf(" (%d/%d)", qIdx+1, total)
+	}
+
+	// Try native rich ask-question card (Feishu schema 2.0: option buttons +
+	// free-form input in one card). Single-select only — for multiSelect,
+	// buttons would resolve on the first click and prevent selecting multiple.
+	if !q.MultiSelect {
+		if aqs, ok := p.(AskQuestionCardSender); ok {
+			body := "**" + q.Question + "**\n\n"
+			for i, opt := range q.Options {
+				body += fmt.Sprintf("%d. **%s**", i+1, opt.Label)
+				if opt.Description != "" {
+					body += " — " + opt.Description
+				}
+				body += "\n"
+			}
+			err := aqs.SendAskQuestionCard(context.Background(), replyCtx, AskQuestionCardTexts{
+				Title:            e.i18n.T(MsgAskQuestionTitle) + titleSuffix,
+				Body:             body,
+				Note:             e.i18n.T(MsgAskQuestionNoteFreeform),
+				InputPlaceholder: e.i18n.T(MsgAskQuestionFreeformPlaceholder),
+				InputLabel:       e.i18n.T(MsgAskQuestionFreeformLabel),
+				SubmitLabel:      e.i18n.T(MsgAskQuestionFreeformSubmit),
+				ExpiredNotice:    e.i18n.T(MsgAskqCardExpired),
+				TooLongNotice:    e.i18n.T(MsgAskqCardTooLong),
+			}, q, qIdx)
+			if err == nil {
+				return true
+			}
+			slog.Debug("sendAskQuestionPrompt: native card unavailable, falling back",
+				"platform", p.Name(), "error", err)
+		}
 	}
 
 	// Try card (Feishu/Lark)
@@ -12290,6 +12402,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 	}
 	sb.WriteString(fmt.Sprintf("\n%s", e.i18n.T(MsgAskQuestionNote)))
 	e.send(p, replyCtx, sb.String())
+	return false
 }
 
 // waitOutgoing blocks on the per-platform outgoing rate limiter when enabled.
