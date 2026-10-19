@@ -553,8 +553,10 @@ type queuedMessage struct {
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	agentSession             AgentSession
-	modeRestore              func() // maomao fork: undoes the running turn's mode override (setTurnMode); guarded by mu
-	capacityFailed           bool   // maomao fork: last turn failed with "model at capacity"
+	modeRestore              func()         // maomao fork: undoes the running turn's mode override (setTurnMode); guarded by mu
+	capacityFailed           bool           // maomao fork: last turn failed with "model at capacity"
+	promptTooLong            string         // maomao fork: last turn's "prompt is too long" error (takePromptTooLong)
+	promptTooLongQueued      *queuedMessage // maomao fork: the chained queued message that turn was, if any
 	platform                 Platform
 	replyCtx                 any
 	currentMessageID         string
@@ -3912,7 +3914,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	origMsg := *msg // maomao fork: re-delivered as-is after a capacity cooldown
 
 	e.i18n.DetectAndSet(msg.Content)
-	session.AddHistory("user", msg.Content)
+	if !msg.freshRetried { // maomao fork: a prompt-too-long re-run is already in the history
+		session.AddHistory("user", msg.Content)
+	}
 	// Persist user message immediately so crashes between user input and
 	// assistant reply don't lose it (the assistant-side Save below depends
 	// on the turn completing without a process crash).
@@ -4043,6 +4047,17 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(content))
 		}
 		stopTyping = nil // ownership transferred; prevent defer from double-stopping
+		// maomao fork: the provider refused the prompt as too long; re-run on a fresh session.
+		if errMsg, q := state.takePromptTooLong(); errMsg != "" {
+			retryP, retry := p, origMsg
+			if q != nil {
+				retryP, retry = q.platform, queuedToMessage(*q)
+			}
+			if e.retryFreshOnPromptTooLong(retryP, retry, errMsg, state, session, sessions, agent, interactiveKey, workspaceDir, ccSessionKey) {
+				unlocked = true
+				return
+			}
+		}
 	}
 
 	// Start unsolicited reader and arm the idle close timer BEFORE draining
@@ -6445,6 +6460,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						state.capacityFailed = true
 					}
 					state.mu.Unlock()
+				} else if isPromptTooLongError(errMsg) {
+					// maomao fork: the caller of runTurnWithCapacityRetry re-runs it on a fresh
+					// session (retryFreshOnPromptTooLong), or reports the error if it cannot.
+					state.mu.Lock()
+					state.promptTooLong, state.promptTooLongQueued = errMsg, nil
+					if chainedQueued != nil {
+						q := *chainedQueued
+						state.promptTooLongQueued = &q
+					}
+					state.mu.Unlock()
 				} else {
 					userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
 					for _, h := range agentErrorHandlers {
@@ -6675,6 +6700,15 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			func(wait time.Duration) {
 				e.deferForCapacity(queued.platform, queuedToMessage(rawQueued), state.agent, sessions, sessionKey, state.workspaceDir, wait, false)
 			})
+		// maomao fork: the provider refused the prompt as too long; re-run on a fresh session.
+		if errMsg, q := state.takePromptTooLong(); errMsg != "" {
+			if q != nil {
+				rawQueued = *q
+			}
+			if e.retryFreshOnPromptTooLong(rawQueued.platform, queuedToMessage(rawQueued), errMsg, state, session, sessions, state.agent, sessionKey, state.workspaceDir, rawQueued.msgSessionKey) {
+				return true
+			}
+		}
 	}
 }
 

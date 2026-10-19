@@ -103,6 +103,79 @@ func (e *Engine) freshOnImageBloat(agent Agent, session *Session) string {
 	return "♻️ " + reason + "：开新会话，带上旧会话的压缩摘要和最近对话（不带图）"
 }
 
+// isPromptTooLongError matches the provider's context-overflow turn failure, e.g.
+// new-api/DeepSeek's 400 {"code":11115,"msg":"prompt is too long: 1227574 tokens > 1048576 maximum"}
+// (jingyu, 2026-10-19). Resuming that session can only fail the same way.
+func isPromptTooLongError(msg string) bool {
+	return strings.Contains(msg, "prompt is too long")
+}
+
+// freshOnPromptTooLong clears the session's agent ID after the provider refused
+// its prompt as too long, and records the old session as the handoff source.
+// Returns the notice for the channel ("" when there is no session to replace).
+func (e *Engine) freshOnPromptTooLong(agent Agent, session *Session) string {
+	id := session.GetAgentSessionID()
+	if id == "" || id == ContinueSession {
+		return ""
+	}
+	reason := "上下文超过模型上限（prompt is too long）"
+	slog.Info("prompt too long: starting fresh with handoff", "old_agent_session", id)
+	session.SetAgentSessionID("", agent.Name())
+	if _, ok := agent.(SessionHandoffReader); !ok {
+		return "♻️ " + reason + "：开新会话重跑这条，之前的上下文靠频道记录补回"
+	}
+	session.SetHandoffFrom(id, reason)
+	return "♻️ " + reason + "：开新会话，带上旧会话的压缩摘要和最近对话（不带图），重跑这条"
+}
+
+// retryFreshOnPromptTooLong handles a turn that failed with errMsg because the
+// prompt was too long: it starts a fresh session with a handoff and runs msg
+// again on it, once. The queue waiting behind the turn moves to the new
+// session. Must be called with the session locked; returns true when the
+// re-run took over the lock (the caller must not unlock or drain). A re-run
+// that fails again, or a session that cannot be replaced, gets the usual error.
+func (e *Engine) retryFreshOnPromptTooLong(p Platform, msg Message, errMsg string, old *interactiveState, session *Session, sessions *SessionManager, agent Agent, interactiveKey, workspaceDir, ccSessionKey string) bool {
+	notice := ""
+	if !msg.freshRetried {
+		notice = e.freshOnPromptTooLong(agent, session)
+	}
+	if notice == "" {
+		e.send(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), errMsg))
+		return false
+	}
+	sessions.Save()
+	e.send(p, markSystemNotice(p, msg.ReplyCtx), notice)
+
+	old.mu.Lock()
+	queued := old.pendingMessages
+	old.pendingMessages = nil
+	old.mu.Unlock()
+	var agentOverride Agent
+	if agent != e.agent {
+		agentOverride = agent
+	}
+	// The cleared agent session ID makes this recycle the old agent process.
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state.mu.Lock()
+	state.pendingMessages = append(queued, state.pendingMessages...)
+	state.mu.Unlock()
+
+	msg.freshRetried = true
+	e.processInteractiveMessageWith(p, &msg, session, agent, sessions, interactiveKey, workspaceDir, ccSessionKey)
+	return true
+}
+
+// takePromptTooLong returns and clears the last turn's prompt-too-long error
+// ("" = none) and, when the failed turn was a queued message chained into the
+// event loop, that message.
+func (s *interactiveState) takePromptTooLong() (string, *queuedMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	errMsg, q := s.promptTooLong, s.promptTooLongQueued
+	s.promptTooLong, s.promptTooLongQueued = "", nil
+	return errMsg, q
+}
+
 // handoffBlock renders the handoff a fresh context gets on its first turn.
 func (e *Engine) handoffBlock(session *Session) string {
 	id, reason := session.TakeHandoffFrom()

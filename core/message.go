@@ -421,6 +421,9 @@ type Message struct {
 	// Engine.startScheduledTurn.
 	scheduledFrom       Platform
 	scheduledBackfilled bool
+	// maomao fork: this is the one re-run of a turn the provider refused as too long, on a
+	// fresh session (retryFreshOnPromptTooLong); its user entry is already in the history.
+	freshRetried bool
 }
 
 // EventType distinguishes different kinds of agent output.
