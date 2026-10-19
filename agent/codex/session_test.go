@@ -1074,8 +1074,12 @@ func TestClose_ForceKillsProcessStillRunningAfterTurnCompleted(t *testing.T) {
 	waitForThreadID(t, cs, "thread-overlap")
 	waitForDoneResult(t, cs.Events())
 
-	if err := cs.Send("second", "", nil, nil); err == nil || !strings.Contains(err.Error(), "turn already in progress") {
-		t.Fatalf("Send(second) error = %v, want turn already in progress", err)
+	followup := make(chan error, 1)
+	go func() { followup <- cs.Send("second", "", nil, nil) }()
+	select {
+	case err := <-followup:
+		t.Fatalf("Send(second) returned before the first process exited: %v", err)
+	case <-time.After(50 * time.Millisecond):
 	}
 	waitForFileLines(t, startsFile, 1)
 
@@ -1085,6 +1089,14 @@ func TestClose_ForceKillsProcessStillRunningAfterTurnCompleted(t *testing.T) {
 	}
 	if elapsed := time.Since(closeStarted); elapsed > time.Second {
 		t.Fatalf("Close took too long after force killing tracked process: %v", elapsed)
+	}
+	select {
+	case err := <-followup:
+		if err != context.Canceled {
+			t.Fatalf("Send(second) after Close = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not unblock the waiting follow-up")
 	}
 
 	select {
