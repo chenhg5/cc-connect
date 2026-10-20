@@ -17,16 +17,19 @@ type boardPlatform struct {
 	stubCompactProgressPlatform
 	interval time.Duration
 
-	bmu    sync.Mutex
-	nextID int
-	posts  []string            // board payloads posted (one per new message)
-	postCh []string            // channel of each post
-	postID []string            // message ID of each post
-	edits  map[string][]string // message ID → payloads edited onto it
-	pins   []string            // message IDs pin was attempted on
-	pinErr error
-	gone   map[string]bool // message IDs that no longer exist
-	found  string          // FindChannelBoard result
+	bmu       sync.Mutex
+	nextID    int
+	posts     []string            // board payloads posted (one per new message)
+	postCh    []string            // channel of each post
+	postID    []string            // message ID of each post
+	edits     map[string][]string // message ID → payloads edited onto it
+	pins      []string            // message IDs pin was attempted on
+	pinErr    error
+	gone      map[string]bool // message IDs that no longer exist
+	failEdits int             // the next this many edits fail (network down)
+	block     chan struct{}   // when set, Post/Edit wait for it (or ctx) first
+	editTries int             // edit calls, failed ones included
+	found     string          // FindChannelBoard result
 }
 
 func newBoardPlatform() *boardPlatform {
@@ -44,7 +47,25 @@ func newBoardPlatform() *boardPlatform {
 
 func (p *boardPlatform) ProgressUpdateInterval() time.Duration { return p.interval }
 
-func (p *boardPlatform) PostChannelBoard(_ context.Context, ch, content string) (string, error) {
+func (p *boardPlatform) wait(ctx context.Context) error {
+	p.bmu.Lock()
+	b := p.block
+	p.bmu.Unlock()
+	if b == nil {
+		return nil
+	}
+	select {
+	case <-b:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *boardPlatform) PostChannelBoard(ctx context.Context, ch, content string) (string, error) {
+	if err := p.wait(ctx); err != nil {
+		return "", err
+	}
 	p.bmu.Lock()
 	defer p.bmu.Unlock()
 	p.nextID++
@@ -55,11 +76,19 @@ func (p *boardPlatform) PostChannelBoard(_ context.Context, ch, content string) 
 	return id, nil
 }
 
-func (p *boardPlatform) EditChannelBoard(_ context.Context, _, id, content string) error {
+func (p *boardPlatform) EditChannelBoard(ctx context.Context, _, id, content string) error {
+	if err := p.wait(ctx); err != nil {
+		return err
+	}
 	p.bmu.Lock()
 	defer p.bmu.Unlock()
+	p.editTries++
 	if p.gone[id] {
 		return fmt.Errorf("%w: 10008", ErrChannelBoardGone)
+	}
+	if p.failEdits > 0 {
+		p.failEdits--
+		return errors.New("dial tcp: i/o timeout")
 	}
 	p.edits[id] = append(p.edits[id], content)
 	return nil
@@ -497,4 +526,128 @@ func TestChannelBoard_SubEngineStopMarksStopped(t *testing.T) {
 		b := p.latest(t)
 		return b != nil && len(b.Running) == 0 && len(b.Done) == 1 && b.Done[0].Outcome == BoardDoneStopped && b.Done[0].Bot == "longniang"
 	})
+}
+
+// The last change's edit fails and nothing else happens in the channel: the
+// worker retries (with backoff) until the board shows the last state.
+func TestChannelBoard_FailedEditIsRetried(t *testing.T) {
+	h := newChannelBoardHub()
+	p := newBoardPlatform()
+	e := newBoardEngine(t, h, "maomao", p)
+	e.SetChannelBoard(true)
+	seq := h.beginTurn(e, "discord:c1", "活")
+	waitBoard(t, "posted", func() bool { n, _, _ := p.counts(); return n == 1 })
+	p.bmu.Lock()
+	p.failEdits = 2
+	p.bmu.Unlock()
+	h.endTurn(e, "discord:c1", seq, BoardDoneCompleted) // the last change
+	waitBoard(t, "retried edit lands", func() bool {
+		b := p.latest(t)
+		return b != nil && len(b.Running) == 0 && len(b.Done) == 1
+	})
+	p.bmu.Lock()
+	tries := p.editTries
+	p.bmu.Unlock()
+	if tries != 3 {
+		t.Fatalf("edit tries = %d, want 2 failed + 1 ok", tries)
+	}
+	h.mu.Lock()
+	backoff := h.channels["c1"].backoff
+	h.mu.Unlock()
+	if backoff != 0 {
+		t.Fatalf("backoff not reset after success: %v", backoff)
+	}
+}
+
+// A held row (capacity cooldown) whose message waits in the queue is listed
+// once, under "排着队的"; when the queue is dropped it ends as failed.
+func TestChannelBoard_HeldRowQueuedThenDropped(t *testing.T) {
+	h := newChannelBoardHub()
+	p := newBoardPlatform()
+	e := newBoardEngine(t, h, "maomao", p)
+	e.SetChannelBoard(true)
+	key := "discord:c1"
+	state := &interactiveState{platform: p, turnDesc: "整理看板"}
+	e.interactiveStates[key] = state
+	ref := e.boardBegin(state, key)
+	ref.hold()
+	state.mu.Lock()
+	state.pendingMessages = []queuedMessage{{messageID: "m1", boardDesc: "整理看板", platform: p}}
+	state.mu.Unlock()
+	b := h.render("c1")
+	if len(b.Running) != 0 || len(b.Queued) != 1 || b.Queued[0].Desc != "整理看板" {
+		t.Fatalf("held+queued shown twice or not at all: running=%+v queued=%+v", b.Running, b.Queued)
+	}
+	e.notifyDroppedQueuedMessages(state, errors.New("agent session ended"))
+	waitBoard(t, "failed row", func() bool {
+		b := p.latest(t)
+		return b != nil && len(b.Running) == 0 && len(b.Queued) == 0 && len(b.Done) == 1 && b.Done[0].Outcome == BoardDoneFailed
+	})
+
+	// Stale drop (drain paths call boardDropped): same end.
+	ref2 := e.boardBegin(state, key)
+	ref2.hold()
+	e.boardDropped(key, []string{"别的", "整理看板"})
+	waitBoard(t, "second failed row", func() bool { b := p.latest(t); return b != nil && len(b.Done) == 2 && len(b.Running) == 0 })
+	// A drop of other messages leaves a held row alone.
+	ref3 := e.boardBegin(state, key)
+	ref3.hold()
+	e.boardDropped(key, []string{"别的"})
+	h.mu.Lock()
+	tr := h.turns["maomao\x00"+key]
+	h.mu.Unlock()
+	if tr == nil || !tr.held {
+		t.Fatal("unrelated drop ended the held row")
+	}
+}
+
+// Shutdown with Discord unreachable: all channels share one deadline (in
+// parallel), instead of one timeout per channel.
+func TestChannelBoard_ShutdownSharesOneDeadline(t *testing.T) {
+	h := newChannelBoardHub()
+	h.shutdownTimeout = 300 * time.Millisecond
+	p := newBoardPlatform()
+	e := newBoardEngine(t, h, "maomao", p)
+	e.SetChannelBoard(true)
+	for _, ch := range []string{"c1", "c2", "c3", "c4"} {
+		h.beginTurn(e, "discord:"+ch, "活 "+ch)
+	}
+	waitBoard(t, "4 boards", func() bool { n, _, _ := p.counts(); return n == 4 })
+	p.bmu.Lock()
+	p.block = make(chan struct{}) // Discord down: calls hang until their ctx ends
+	p.bmu.Unlock()
+	start := time.Now()
+	h.shutdown(e)
+	if d := time.Since(start); d > 2*h.shutdownTimeout {
+		t.Fatalf("shutdown took %v for 4 channels, want about one deadline (%v)", d, h.shutdownTimeout)
+	}
+}
+
+// Shutdown while a worker is posting: it waits for that post, then makes its
+// last edit on the same message (no second board).
+func TestChannelBoard_ShutdownWaitsForWorker(t *testing.T) {
+	h := newChannelBoardHub()
+	p := newBoardPlatform()
+	p.block = make(chan struct{})
+	e := newBoardEngine(t, h, "maomao", p)
+	e.SetChannelBoard(true)
+	h.beginTurn(e, "discord:c1", "长活")
+	time.Sleep(5 * p.interval) // the worker is now inside PostChannelBoard
+	done := make(chan struct{})
+	go func() { h.shutdown(e); close(done) }()
+	time.Sleep(5 * p.interval)
+	select {
+	case <-done:
+		t.Fatal("shutdown did not wait for the worker's post")
+	default:
+	}
+	close(p.block)
+	<-done
+	posts, edits, _ := p.counts()
+	if posts != 1 || edits != 1 {
+		t.Fatalf("posts=%d edits=%d, want one board and its last edit", posts, edits)
+	}
+	if b := p.latest(t); b == nil || len(b.Done) != 1 || b.Done[0].Outcome != BoardDoneStopped {
+		t.Fatalf("last edit = %+v", b)
+	}
 }

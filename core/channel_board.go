@@ -178,6 +178,7 @@ type boardChannel struct {
 	working    bool
 	lastSent   string
 	pinRetried bool
+	backoff    time.Duration // wait before retrying a failed send (0 = none failed)
 }
 
 // channelBoardHub is process-wide: every engine reports to it, the writer
@@ -189,16 +190,21 @@ type channelBoardHub struct {
 	poster   ChannelBoardPoster
 	path     string
 	window   time.Duration
-	ctx      context.Context
+	ctx      context.Context // cancelled = workers stop waiting (disable, shutdown)
 	cancel   context.CancelFunc
-	seq      uint64
-	turns    map[string]*boardTurn // engine name + "\x00" + interactive key
-	channels map[string]*boardChannel
-	now      func() time.Time
+	workers  sync.WaitGroup // running channel workers (shutdown waits for them)
+	stopping bool           // shutdown under way: no new workers
+	// shutdownTimeout bounds the whole shutdown (tests shorten it).
+	shutdownTimeout time.Duration
+	seq             uint64
+	turns           map[string]*boardTurn // engine name + "\x00" + interactive key
+	channels        map[string]*boardChannel
+	now             func() time.Time
 }
 
 func newChannelBoardHub() *channelBoardHub {
-	return &channelBoardHub{turns: map[string]*boardTurn{}, channels: map[string]*boardChannel{}, now: time.Now}
+	return &channelBoardHub{turns: map[string]*boardTurn{}, channels: map[string]*boardChannel{}, now: time.Now,
+		shutdownTimeout: compactProgressAPITimeout}
 }
 
 // defaultChannelBoard is shared by all engines of the process (the four bots
@@ -300,7 +306,7 @@ func (h *channelBoardHub) disableLocked() {
 	if h.cancel != nil {
 		h.cancel()
 	}
-	h.writer, h.poster, h.cancel, h.ctx = nil, nil, nil, nil
+	h.writer, h.poster, h.cancel, h.ctx, h.stopping = nil, nil, nil, nil, false
 	h.turns = map[string]*boardTurn{}
 	h.channels = map[string]*boardChannel{}
 }
@@ -448,7 +454,7 @@ func (h *channelBoardHub) touchKey(key string) {
 func (h *channelBoardHub) touch(ch string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.writer == nil || ch == "" {
+	if h.writer == nil || h.stopping || ch == "" {
 		return
 	}
 	c := h.channelLocked(ch)
@@ -457,24 +463,36 @@ func (h *channelBoardHub) touch(ch string) {
 		return
 	}
 	c.working = true
+	h.workers.Add(1)
 	go h.work(h.ctx, ch)
 }
 
+// channelBoardRetryMax caps the backoff between retries of a failed send.
+// 来源：代码审查建议，2026-10-21（失败重试，窗口逐次翻倍，封顶 1 分钟）。
+const channelBoardRetryMax = time.Minute
+
 func (h *channelBoardHub) work(ctx context.Context, ch string) {
+	defer h.workers.Done()
+	stop := func() {
+		h.mu.Lock()
+		if c := h.channels[ch]; c != nil {
+			c.working = false
+		}
+		h.mu.Unlock()
+	}
 	for {
 		h.mu.Lock()
-		window := h.window
+		wait := h.window
+		if c := h.channels[ch]; c != nil && c.backoff > 0 {
+			wait = c.backoff
+		}
 		h.mu.Unlock()
-		if window > 0 {
-			t := time.NewTimer(window)
+		if wait > 0 {
+			t := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
 				t.Stop()
-				h.mu.Lock()
-				if c := h.channels[ch]; c != nil {
-					c.working = false
-				}
-				h.mu.Unlock()
+				stop()
 				return
 			case <-t.C:
 			}
@@ -482,6 +500,9 @@ func (h *channelBoardHub) work(ctx context.Context, ch string) {
 		h.mu.Lock()
 		c := h.channels[ch]
 		if c == nil || ctx.Err() != nil {
+			if c != nil {
+				c.working = false
+			}
 			h.mu.Unlock()
 			return
 		}
@@ -491,17 +512,45 @@ func (h *channelBoardHub) work(ctx context.Context, ch string) {
 			return
 		}
 		c.dirty = false
+		window := h.window
 		h.mu.Unlock()
-		callCtx, cancel := context.WithTimeout(ctx, compactProgressAPITimeout)
-		h.sync(callCtx, ch, nil)
+		// The call is not tied to ctx: a send already under way finishes (a
+		// cancelled POST could have been delivered without us learning its ID);
+		// shutdown waits for it before its own last edit.
+		callCtx, cancel := context.WithTimeout(context.Background(), compactProgressAPITimeout)
+		ok := h.sync(callCtx, ch, nil)
 		cancel()
+		h.mu.Lock()
+		if c := h.channels[ch]; c != nil {
+			if ok {
+				c.backoff = 0
+			} else {
+				// Retry even if nothing else changes in the channel: the merge
+				// window, doubled on every failure, at most channelBoardRetryMax.
+				c.dirty = true
+				switch {
+				case c.backoff == 0:
+					c.backoff = window
+				case c.backoff < channelBoardRetryMax:
+					c.backoff *= 2
+				}
+				if c.backoff > channelBoardRetryMax {
+					c.backoff = channelBoardRetryMax
+				}
+				if c.backoff <= 0 { // no merge window: retry on the next change
+					c.dirty = false
+				}
+			}
+		}
+		h.mu.Unlock()
 	}
 }
 
 // sync renders the channel's board and sends it: edit the known message,
 // else find or post one (and pin it). override, when set, changes the payload
-// before it is sent (shutdown drops sub-agents).
-func (h *channelBoardHub) sync(ctx context.Context, ch string, override func(*ChannelBoardPayload)) {
+// before it is sent (shutdown drops sub-agents). It reports whether the board
+// now shows this content (false = a send failed; the caller retries).
+func (h *channelBoardHub) sync(ctx context.Context, ch string, override func(*ChannelBoardPayload)) bool {
 	payload := h.render(ch)
 	if override != nil {
 		override(&payload)
@@ -512,7 +561,7 @@ func (h *channelBoardHub) sync(ctx context.Context, ch string, override func(*Ch
 	c := h.channels[ch]
 	if poster == nil || c == nil || content == "" || content == c.lastSent {
 		h.mu.Unlock()
-		return
+		return true
 	}
 	id, pinned, pinRetried := c.MessageID, c.Pinned, c.pinRetried
 	h.mu.Unlock()
@@ -531,8 +580,7 @@ func (h *channelBoardHub) sync(ctx context.Context, ch string, override func(*Ch
 			id, pinned, pinRetried = "", false, false
 		} else if err != nil {
 			slog.Warn("channel board: edit failed", "channel", ch, "message", id, "error", err)
-			h.markDirty(ch)
-			return
+			return false
 		}
 	}
 	posted := false
@@ -540,8 +588,7 @@ func (h *channelBoardHub) sync(ctx context.Context, ch string, override func(*Ch
 		newID, err := poster.PostChannelBoard(ctx, ch, content)
 		if err != nil || newID == "" {
 			slog.Warn("channel board: post failed", "channel", ch, "error", err)
-			h.markDirty(ch)
-			return
+			return false
 		}
 		id, posted = newID, true
 	}
@@ -566,16 +613,7 @@ func (h *channelBoardHub) sync(ctx context.Context, ch string, override func(*Ch
 		}
 	}
 	h.mu.Unlock()
-}
-
-// markDirty forgets the last sent content after a failed send, so the
-// channel's next change sends again.
-func (h *channelBoardHub) markDirty(ch string) {
-	h.mu.Lock()
-	if c := h.channels[ch]; c != nil {
-		c.lastSent = ""
-	}
-	h.mu.Unlock()
+	return true
 }
 
 // render builds the channel's board from the hub (running turns, done list)
@@ -604,15 +642,28 @@ func (h *channelBoardHub) render(ch string) ChannelBoardPayload {
 		out.Lang = string(writer.i18n.CurrentLang())
 	}
 	sort.Slice(turns, func(i, j int) bool { return turns[i].startedAt.Before(turns[j].startedAt) })
+	states := map[*Engine][]boardStateInfo{}
+	queuedDesc := map[string]bool{} // engine name + key + desc of queued messages
+	for _, e := range sources {
+		states[e] = e.boardStates(ch)
+		for _, s := range states[e] {
+			for _, q := range s.queued {
+				queuedDesc[e.name+"\x00"+s.key+"\x00"+q] = true
+			}
+		}
+	}
 	rowOf := map[string]int{} // engine name + key → index in Running
 	for _, t := range turns {
+		if t.held && queuedDesc[t.engine.name+"\x00"+t.key+"\x00"+t.desc] {
+			continue // re-sent after a capacity cooldown and waiting in the queue: listed there
+		}
 		rowOf[t.engine.name+"\x00"+t.key] = len(out.Running)
 		out.Running = append(out.Running, BoardRunning{Bot: t.engine.boardName(), Desc: t.desc, Step: t.step, StartedAt: t.startedAt})
 	}
 	byName := map[string]*Engine{}
 	for _, e := range sources {
 		byName[e.name] = e
-		for _, s := range e.boardStates(ch) {
+		for _, s := range states[e] {
 			if len(s.subs) > 0 {
 				i, ok := rowOf[e.name+"\x00"+s.key]
 				if !ok { // main turn over, background sub-agents still working
@@ -748,6 +799,7 @@ func (h *channelBoardHub) shutdown(e *Engine) {
 		h.mu.Unlock()
 		return
 	}
+	h.stopping = true // no new workers from here (WaitGroup below)
 	now := h.now()
 	var chans []string
 	for k, t := range h.turns {
@@ -762,28 +814,49 @@ func (h *channelBoardHub) shutdown(e *Engine) {
 	}
 	h.saveLocked()
 	if h.cancel != nil {
-		h.cancel() // stop the workers; the last edit is made here
+		h.cancel() // workers stop waiting; one already sending finishes that send
 	}
 	h.mu.Unlock()
-	seen := map[string]bool{}
-	for _, ch := range chans {
-		if seen[ch] {
-			continue
-		}
-		seen[ch] = true
-		ctx, cancel := context.WithTimeout(context.Background(), compactProgressAPITimeout)
-		h.sync(ctx, ch, func(p *ChannelBoardPayload) {
-			// Sub-agents die with the process too.
-			kept := p.Running[:0]
-			for _, r := range p.Running {
-				r.Subs = nil
-				if r.Desc != "" || r.Step != nil {
-					kept = append(kept, r)
-				}
+
+	// One deadline for the whole shutdown, 沿用 the progress card's API timeout
+	// (compactProgressAPITimeout), so a Discord outage delays a restart by at
+	// most that, whatever the number of channels.
+	ctx, cancel := context.WithTimeout(context.Background(), h.shutdownTimeout)
+	defer cancel()
+	// Wait for workers first: a POST still under way would otherwise race the
+	// last edit below and could post a second board.
+	idle := make(chan struct{})
+	go func() { h.workers.Wait(); close(idle) }()
+	select {
+	case <-idle:
+	case <-ctx.Done():
+		slog.Warn("channel board: workers still sending at shutdown; skipping the last edit")
+	}
+	if ctx.Err() == nil {
+		seen := map[string]bool{}
+		var wg sync.WaitGroup
+		for _, ch := range chans {
+			if seen[ch] {
+				continue
 			}
-			p.Running = kept
-		})
-		cancel()
+			seen[ch] = true
+			wg.Add(1)
+			go func(ch string) {
+				defer wg.Done()
+				h.sync(ctx, ch, func(p *ChannelBoardPayload) {
+					// Sub-agents die with the process too.
+					kept := p.Running[:0]
+					for _, r := range p.Running {
+						r.Subs = nil
+						if r.Desc != "" || r.Step != nil {
+							kept = append(kept, r)
+						}
+					}
+					p.Running = kept
+				})
+			}(ch)
+		}
+		wg.Wait()
 	}
 	h.mu.Lock()
 	if h.writer == e {
@@ -822,6 +895,33 @@ func (h *channelBoardHub) endHeld(e *Engine, key, outcome string) {
 	seq := t.seq
 	h.mu.Unlock()
 	h.endTurn(e, key, seq, outcome)
+}
+
+// boardDropped: queued messages of key were dropped (stale, or the session
+// ended). A held row for one of them ends as failed — it will not be re-sent —
+// and the queue on the board shrinks. Safe under state.mu (hub lock only).
+func (e *Engine) boardDropped(key string, descs []string) {
+	h := e.board
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	t := h.turns[e.name+"\x00"+key]
+	end := uint64(0)
+	if t != nil && t.held {
+		for _, d := range descs {
+			if d == t.desc {
+				end = t.seq
+				break
+			}
+		}
+	}
+	h.mu.Unlock()
+	if end != 0 {
+		h.endTurn(e, key, end, BoardDoneFailed)
+	} else {
+		h.touchKey(key)
+	}
 }
 
 // boardEndHeld: see channelBoardHub.endHeld.
@@ -869,6 +969,7 @@ func (e *Engine) boardBegin(state *interactiveState, key string) *boardTurnRef {
 	}
 	state.mu.Lock()
 	state.boardChannel = boardChannelOf(key)
+	state.boardKey = key
 	state.mu.Unlock()
 	return &boardTurnRef{h: h, e: e, key: key, seq: seq}
 }

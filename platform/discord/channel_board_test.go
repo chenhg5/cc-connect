@@ -106,3 +106,29 @@ func TestChannelBoard_NotConnected(t *testing.T) {
 		t.Fatal("find without session")
 	}
 }
+
+// The board calls read the session under p.mu (Stop and reconnects replace it).
+func TestChannelBoard_SessionReadUnderLock(t *testing.T) {
+	p := &Platform{}
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			p.mu.Lock()
+			p.session = nil
+			p.mu.Unlock()
+		}
+	}()
+	content := core.BuildChannelBoardPayload(core.ChannelBoardPayload{})
+	for i := 0; i < 200; i++ {
+		_, _ = p.PostChannelBoard(t.Context(), "c", content)
+		_ = p.EditChannelBoard(t.Context(), "c", "m", content)
+		_ = p.PinChannelBoard(t.Context(), "c", "m")
+		_, _, _ = p.FindChannelBoard(t.Context(), "c")
+	}
+	close(stop)
+}

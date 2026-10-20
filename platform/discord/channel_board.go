@@ -24,6 +24,14 @@ const channelBoardMarker = "cc-board"
 
 var _ core.ChannelBoardPoster = (*Platform)(nil)
 
+// boardSession reads the session under p.mu: Stop() and reconnects replace it
+// (same as StartTyping).
+func (p *Platform) boardSession() *discordgo.Session {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.session
+}
+
 func noMentions() *discordgo.MessageAllowedMentions {
 	return &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}
 }
@@ -38,7 +46,7 @@ func channelBoardEmbed(content string) (*discordgo.MessageEmbed, error) {
 
 // PostChannelBoard implements core.ChannelBoardPoster.
 func (p *Platform) PostChannelBoard(ctx context.Context, channelID, content string) (string, error) {
-	s := p.session
+	s := p.boardSession()
 	if s == nil {
 		return "", fmt.Errorf("discord: not connected")
 	}
@@ -58,7 +66,7 @@ func (p *Platform) PostChannelBoard(ctx context.Context, channelID, content stri
 // EditChannelBoard implements core.ChannelBoardPoster. A deleted message is
 // reported as core.ErrChannelBoardGone.
 func (p *Platform) EditChannelBoard(ctx context.Context, channelID, messageID, content string) error {
-	s := p.session
+	s := p.boardSession()
 	if s == nil {
 		return fmt.Errorf("discord: not connected")
 	}
@@ -82,7 +90,7 @@ func (p *Platform) EditChannelBoard(ctx context.Context, channelID, messageID, c
 // PinChannelBoard implements core.ChannelBoardPoster (needs Manage Messages /
 // Pin Messages in the channel).
 func (p *Platform) PinChannelBoard(ctx context.Context, channelID, messageID string) error {
-	s := p.session
+	s := p.boardSession()
 	if s == nil {
 		return fmt.Errorf("discord: not connected")
 	}
@@ -105,7 +113,7 @@ func (p *Platform) PinChannelBoard(ctx context.Context, channelID, messageID str
 // the board marker, among the pinned messages, then the latest page of the
 // channel (one request each).
 func (p *Platform) FindChannelBoard(ctx context.Context, channelID string) (string, bool, error) {
-	s := p.session
+	s := p.boardSession()
 	if s == nil {
 		return "", false, fmt.Errorf("discord: not connected")
 	}

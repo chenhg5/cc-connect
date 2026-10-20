@@ -596,6 +596,7 @@ type interactiveState struct {
 	// the Discord channel its board row is in (channel_board.go).
 	turnDesc     string
 	boardChannel string
+	boardKey     string // interactive key of the board row
 
 	// agentSessionIdleCancel 取消当前会话的 idle 关闭计时器。
 	agentSessionIdleCancel context.CancelFunc
@@ -6311,11 +6312,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// for the next turn instead of returning.
 			state.mu.Lock()
 			droppedStale := 0
+			var staleDescs []string // maomao fork: channel task board
 			for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+				staleDescs = append(staleDescs, state.pendingMessages[0].boardDesc)
 				state.pendingMessages = state.pendingMessages[1:]
 				droppedStale++
 			}
 			if droppedStale > 0 {
+				e.boardDropped(sessionKey, staleDescs)
 				slog.Info("dropped stale queued user messages after completed turn",
 					"session", sessionKey,
 					"dropped", droppedStale,
@@ -6678,7 +6682,15 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	state.mu.Lock()
 	remaining := state.pendingMessages
 	state.pendingMessages = nil
+	boardKey := state.boardKey
 	state.mu.Unlock()
+	if len(remaining) > 0 && boardKey != "" { // maomao fork: channel task board
+		descs := make([]string, 0, len(remaining))
+		for _, q := range remaining {
+			descs = append(descs, q.boardDesc)
+		}
+		e.boardDropped(boardKey, descs)
+	}
 	for _, q := range remaining {
 		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
 	}
@@ -6697,11 +6709,14 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			return true
 		}
 		droppedStale := 0
+		var staleDescs []string // maomao fork: channel task board
 		for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+			staleDescs = append(staleDescs, state.pendingMessages[0].boardDesc)
 			state.pendingMessages = state.pendingMessages[1:]
 			droppedStale++
 		}
 		if droppedStale > 0 {
+			e.boardDropped(sessionKey, staleDescs)
 			slog.Info("dropped stale queued user messages while draining",
 				"session", sessionKey,
 				"dropped", droppedStale,
