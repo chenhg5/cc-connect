@@ -20,6 +20,44 @@ func TestRelayManager_DefaultTimeout(t *testing.T) {
 	}
 }
 
+func TestPrepareRelaySessionPolicy(t *testing.T) {
+	sessions := NewSessionManager("")
+	session := sessions.GetOrCreateActive("relay:test")
+	session.SetAgentSessionID("existing", "stub")
+	agent := &stubAgent{}
+
+	e := NewEngine("target", agent, nil, "", LangEnglish)
+	e.SetRelaySessionPolicy("reuse", 0)
+	e.prepareRelaySession(session, sessions, agent, "relay:key")
+	if got := session.GetAgentSessionID(); got != "existing" {
+		t.Fatalf("reuse cleared agent session ID: %q", got)
+	}
+
+	e.SetRelaySessionPolicy("fresh", 0)
+	e.prepareRelaySession(session, sessions, agent, "relay:key")
+	if got := session.GetAgentSessionID(); got != "" {
+		t.Fatalf("fresh kept agent session ID: %q", got)
+	}
+
+	session.SetAgentSessionID("recent", "stub")
+	session.mu.Lock()
+	session.UpdatedAt = time.Now()
+	session.mu.Unlock()
+	e.SetRelaySessionPolicy("reuse", time.Hour)
+	e.prepareRelaySession(session, sessions, agent, "relay:key")
+	if got := session.GetAgentSessionID(); got != "recent" {
+		t.Fatalf("non-expired reset cleared agent session ID: %q", got)
+	}
+
+	session.mu.Lock()
+	session.UpdatedAt = time.Now().Add(-2 * time.Hour)
+	session.mu.Unlock()
+	e.prepareRelaySession(session, sessions, agent, "relay:key")
+	if got := session.GetAgentSessionID(); got != "" {
+		t.Fatalf("expired reset kept agent session ID: %q", got)
+	}
+}
+
 func TestRelayManager_RelayContextHonorsConfiguredTimeout(t *testing.T) {
 	rm := NewRelayManager("")
 	rm.SetTimeout(3 * time.Second)
