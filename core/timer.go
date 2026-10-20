@@ -339,6 +339,7 @@ func (ts *TimerScheduler) AddJob(job *TimerJob) error {
 	if err := ts.store.Add(job); err != nil {
 		return err
 	}
+	defer ts.boardTouch(job) // maomao fork: channel task board
 	delay := time.Until(job.ScheduledAt)
 	if delay <= 0 {
 		// Already due — fire immediately
@@ -351,6 +352,7 @@ func (ts *TimerScheduler) AddJob(job *TimerJob) error {
 }
 
 func (ts *TimerScheduler) RemoveJob(id string) bool {
+	defer ts.boardTouch(ts.store.Get(id)) // maomao fork: channel task board
 	ts.mu.Lock()
 	if t, ok := ts.timers[id]; ok {
 		t.Stop()
@@ -362,6 +364,17 @@ func (ts *TimerScheduler) RemoveJob(id string) bool {
 	removed := ts.store.Remove(id)
 	ts.mu.Unlock()
 	return removed
+}
+
+// boardTouch (maomao fork) refreshes the channel task board of the job's channel.
+func (ts *TimerScheduler) boardTouch(job *TimerJob) {
+	if job == nil {
+		return
+	}
+	ts.mu.RLock()
+	e := ts.engines[job.Project]
+	ts.mu.RUnlock()
+	boardTouchJob(e, job.SessionKey)
 }
 
 func (ts *TimerScheduler) SetMute(id string, mute bool) bool {
@@ -426,6 +439,7 @@ func (ts *TimerScheduler) executeJob(jobID string) {
 	}
 
 	ts.store.MarkFired(jobID, err)
+	boardTouchJob(engine, job.SessionKey) // maomao fork: off the channel task board's queue
 
 	if err != nil {
 		slog.Error("timer: job failed", "id", jobID, "error", err)

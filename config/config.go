@@ -534,6 +534,10 @@ type ProjectConfig struct {
 	TeamName string `toml:"team_name,omitempty"`
 	// TeamStatusInject prepends the other projects' status to each turn (for the main bot).
 	TeamStatusInject bool `toml:"team_status_inject,omitempty"`
+	// ChannelBoard (maomao fork): this project's Discord bot posts, pins and edits one
+	// "频道任务看板" per channel, covering every bot of the process (core/channel_board.go).
+	// Default off.
+	ChannelBoard bool `toml:"channel_board,omitempty"`
 	// MemoryIndex (maomao fork): the bot's own wiki MEMORY.md, put before the first turn of every fresh agent
 	// context (Claude Code loads its auto-memory itself; Codex/Antigravity bots need this). Empty disables it.
 	MemoryIndex string `toml:"memory_index,omitempty"`

@@ -1518,6 +1518,9 @@ func (p *Platform) ChannelHistory(channelID, beforeID string, limit int) ([]core
 		if text == "" && len(m.Attachments) == 0 && len(m.Embeds) > 0 {
 			continue // progress cards and other embeds-only notices
 		}
+		if m.Type == discordgo.MessageTypeChannelPinnedMessage {
+			continue // maomao fork: "pinned a message" notice (channel task board)
+		}
 		out = append(out, core.ChannelHistoryMessage{
 			ID: m.ID, Author: m.Author.Username, IsBot: m.Author.Bot,
 			IsSelf: m.Author.ID == p.botID, FromTurn: p.turnSent.has(m.ID), Content: text, Time: m.Timestamp,

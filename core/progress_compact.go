@@ -243,6 +243,9 @@ type compactProgressWriter struct {
 	hideThink  bool
 	steps      int
 	startedAt  time.Time
+	// maomao fork: called with every item the card shows (the channel task
+	// board's "当前步骤"); nil = none.
+	onStep func(ProgressCardEntry)
 	// maomao fork: the "等子 agent" line currently in items/entries ("" = none).
 	waitText     string
 	waitFallback string
@@ -442,6 +445,9 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	item.Text = text
 	item.Tool = strings.TrimSpace(item.Tool)
 	item.Status = strings.TrimSpace(item.Status)
+	if w.onStep != nil {
+		w.onStep(item)
+	}
 
 	switch w.style {
 	case progressStyleCard:

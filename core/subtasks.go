@@ -261,6 +261,7 @@ func (e *Engine) runSubTaskTable(state *interactiveState, r SubTaskReporter, sta
 				closed = true
 				changed = nil
 			}
+			e.boardTouchState(state) // maomao fork: sub-agents are rows on the channel task board
 		case <-timerC:
 			timerC = nil
 		}

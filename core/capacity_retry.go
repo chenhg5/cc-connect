@@ -114,6 +114,7 @@ func (e *Engine) deferForCapacity(p Platform, msg Message, agent Agent, sessions
 	mins := int((wait + time.Minute - 1) / time.Minute)
 	if isScheduledSideKey(interactiveKey) {
 		e.send(p, markSystemNotice(p, msg.ReplyCtx), fmt.Sprintf("⏳ 模型满载（at capacity），这次定时任务跳过；冷却还剩 %d 分钟。", mins))
+		e.boardEndHeld(interactiveKey, BoardDoneFailed) // maomao fork: not re-sent
 		return
 	}
 	if cooling {
@@ -171,6 +172,7 @@ func (e *Engine) redeliverMessage(p Platform, msg *Message, agent Agent, session
 			return
 		}
 		slog.Warn("capacity re-delivery: session busy and queue unavailable, dropping", "session_key", msg.SessionKey)
+		e.boardEndHeld(interactiveKey, BoardDoneFailed) // maomao fork: not re-sent
 		e.send(p, msg.ReplyCtx, "⚠️ 冷却后重试这条时会话忙且排不上队，这条没能重试。")
 		return
 	}
@@ -199,5 +201,6 @@ func queuedToMessage(q queuedMessage) Message {
 		// maomao fork: a queued cron/timer turn stays one through a capacity re-delivery.
 		scheduledFrom:       q.scheduledFrom,
 		scheduledBackfilled: q.scheduledBackfilled,
+		boardLabel:          q.boardDesc, // maomao fork: keeps the board text through a re-delivery
 	}
 }
