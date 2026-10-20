@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -528,11 +529,34 @@ wait
 	case <-time.After(2 * time.Second):
 		t.Fatal("events channel not closed")
 	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("grandchild %d still running", pid)
+}
+
+func processAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || proc.Signal(syscall.Signal(0)) != nil {
+		return false
 	}
-	if err := proc.Signal(syscall.Signal(0)); err == nil {
-		t.Fatalf("grandchild %d still running", pid)
+	if runtime.GOOS == "linux" {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if os.IsNotExist(err) {
+			return false
+		}
+		if err == nil {
+			// A killed orphan can remain as a zombie until its adoptive parent
+			// reaps it. PID 0-signalling succeeds, but it cannot execute work.
+			end := strings.LastIndexByte(string(stat), ')')
+			if end >= 0 && len(stat) > end+2 && stat[end+2] == 'Z' {
+				return false
+			}
+		}
 	}
+	return true
 }

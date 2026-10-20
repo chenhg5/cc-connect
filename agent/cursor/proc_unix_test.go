@@ -90,10 +90,6 @@ func readPIDs(path string) []int {
 	return pids
 }
 
-func processAlive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
-}
-
 func waitPIDs(t *testing.T, path string, n int) []int {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

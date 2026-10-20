@@ -212,7 +212,11 @@ func (cs *cursorSession) Send(prompt string, messageID string, images []core.Ima
 	cs.stdinMu.Unlock()
 
 	procDone := make(chan struct{})
+	// Close waits for the process-tree kill as well as readLoop. Otherwise the
+	// root can exit and release the turn before detached tool children are killed.
+	cs.wg.Add(1)
 	go func() {
+		defer cs.wg.Done()
 		select {
 		case <-cs.ctx.Done():
 			_ = forceKillCmd(cmd)
