@@ -164,8 +164,7 @@ func TestSafeSessionDir_SymlinkTraversalAndWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	linkID := "dddddddd-dddd-dddd-dddd-dddddddddddd"
-	link := filepath.Join(filepath.Dir(db), "..", linkID)
-	link = filepath.Join(filepath.Dir(filepath.Dir(db)), linkID)
+	link := filepath.Join(filepath.Dir(filepath.Dir(db)), linkID)
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +724,11 @@ func createEmptyDB(t *testing.T, db string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sqlDB.Close()
+	defer func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close fixture database: %v", err)
+		}
+	}()
 	if _, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS blobs (id TEXT PRIMARY KEY, data BLOB);`); err != nil {
 		t.Fatal(err)
@@ -738,7 +741,11 @@ func writeMeta(t *testing.T, db, name string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sqlDB.Close()
+	defer func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close fixture database: %v", err)
+		}
+	}()
 	payload, _ := json.Marshal(map[string]string{
 		"name":             name,
 		"latestRootBlobId": strings.Repeat("ab", 32),
@@ -756,9 +763,12 @@ func writeRootAndBlobs(t *testing.T, db string, msgs []fixtureMsg, interleave bo
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sqlDB.Close()
+	defer func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close fixture database: %v", err)
+		}
+	}()
 	var root []byte
-	var ids []string
 	for i, msg := range msgs {
 		body, err := json.Marshal(map[string]any{"role": msg.Role, "content": msg.Content})
 		if err != nil {
@@ -766,7 +776,6 @@ func writeRootAndBlobs(t *testing.T, db string, msgs []fixtureMsg, interleave bo
 		}
 		sum := md5.Sum(body)
 		id := hex.EncodeToString(sum[:]) + hex.EncodeToString(sum[:])
-		ids = append(ids, id)
 		if _, err := sqlDB.Exec(`INSERT OR REPLACE INTO blobs(id, data) VALUES(?, ?)`, id, body); err != nil {
 			t.Fatal(err)
 		}

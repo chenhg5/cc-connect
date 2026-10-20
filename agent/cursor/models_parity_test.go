@@ -48,7 +48,11 @@ func TestLaunchModel_EffortMappingAndProviderOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		if err := sess.Close(); err != nil {
+			t.Errorf("close session: %v", err)
+		}
+	}()
 	if sess.(*cursorSession).model != a.GetModel() {
 		t.Fatalf("StartSession model %q != GetModel %q", sess.(*cursorSession).model, a.GetModel())
 	}
@@ -67,7 +71,11 @@ func TestLaunchModel_EffortMappingAndProviderOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess2.Close()
+	defer func() {
+		if err := sess2.Close(); err != nil {
+			t.Errorf("close second session: %v", err)
+		}
+	}()
 	if sess2.(*cursorSession).model != "grok-4.7-high" {
 		t.Fatalf("StartSession after SetModel = %q", sess2.(*cursorSession).model)
 	}
@@ -175,7 +183,11 @@ func TestNew_ReasoningEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		if err := sess.Close(); err != nil {
+			t.Errorf("close session: %v", err)
+		}
+	}()
 	if sess.(*cursorSession).model != "grok-4.7-high" {
 		t.Fatalf("constructor StartSession model = %q", sess.(*cursorSession).model)
 	}
@@ -227,7 +239,11 @@ func TestEffortDisplayAndModelOverridesEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sess.Close()
+	defer func() {
+		if err := sess.Close(); err != nil {
+			t.Errorf("close session: %v", err)
+		}
+	}()
 	if sess.(*cursorSession).model != "grok-4.7-high" {
 		t.Fatalf("launch after SetModel = %q", sess.(*cursorSession).model)
 	}
