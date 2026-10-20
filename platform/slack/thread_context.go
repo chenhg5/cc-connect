@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -403,7 +404,7 @@ func formatThreadHistory(window threadWindow, self threadSelf, resolveName func(
 	}
 	for i, m := range history {
 		role, name := threadMessageRole(m, self, resolveName)
-		fmt.Fprintf(&b, "[%d] %s (%s):\n%s\n\n", i+1, name, role, truncateMessage(neutralizeFence(messageText(m))))
+		fmt.Fprintf(&b, "[%d] %s (%s):\n%s\n\n", i+1, name, role, truncateMessage(neutralizeMarkers(messageText(m))))
 	}
 	b.WriteString("--- end of quoted thread history ---\n\n")
 	return b.String()
@@ -452,21 +453,25 @@ func threadMessageRole(m slack.Message, self threadSelf, resolveName func(string
 	return role, name
 }
 
-// neutralizeFence keeps quoted text from impersonating the frame around it. The
-// delimiters are the only thing telling the agent where third-party text stops,
-// and a participant can type them.
-func neutralizeFence(s string) string {
-	if !strings.Contains(s, "---") {
+// neutralizeMarkers keeps quoted text from impersonating the frame around it:
+// the "---" fences and the "[N] name (role):" header that opens each message.
+// They are the only thing telling the agent where third-party text stops and
+// who said what, and a participant can type both — a forged header could
+// otherwise claim to be this bot's own "assistant" turn.
+func neutralizeMarkers(s string) string {
+	if !strings.Contains(s, "---") && !strings.Contains(s, "[") {
 		return s
 	}
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "---") {
+		if strings.HasPrefix(strings.TrimSpace(line), "---") || quotedHeaderPattern.MatchString(line) {
 			lines[i] = " " + line
 		}
 	}
 	return strings.Join(lines, "\n")
 }
+
+var quotedHeaderPattern = regexp.MustCompile(`^\s*\[\d+\]`)
 
 // messageText is the text of a message as a reader would see it. `text` is
 // empty far more often than it looks: an alert posted by an integration puts
@@ -575,7 +580,7 @@ func (p *Platform) displayNameResolver(ctx context.Context) func(string) string 
 	}
 }
 
-// self reports the identity Start learned from auth.test, if it got one.
+// self reports the identity learned from auth.test, once it has landed.
 func (p *Platform) self() threadSelf {
 	p.selfMu.RLock()
 	defer p.selfMu.RUnlock()

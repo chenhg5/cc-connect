@@ -133,7 +133,7 @@ func (c *slackStreamingCard) retireCard(ctx context.Context) {
 		return
 	}
 	if _, _, err := c.client.DeleteMessageContext(ctx, c.channel, c.ts); err != nil {
-		slog.Debug("slack: could not retire the streaming card after oversize finalize (leaving it in place)",
+		slog.Warn("slack: could not retire the streaming card after oversize finalize (leaving it in place)",
 			"error", err, "ts", c.ts)
 		return
 	}
