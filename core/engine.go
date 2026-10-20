@@ -457,6 +457,8 @@ type Engine struct {
 	// processInteractiveEvents.
 	autoCompressAllowHeuristic bool
 	resetOnIdle                time.Duration
+	relaySessionMode           string
+	relaySessionReset          time.Duration
 
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
@@ -1035,6 +1037,58 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 		return
 	}
 	e.resetOnIdle = d
+}
+
+// SetRelaySessionPolicy configures how relay turns select their agent session.
+// Empty mode is treated as reuse; a non-positive reset duration disables the
+// age-based rotation.
+func (e *Engine) SetRelaySessionPolicy(mode string, resetAfter time.Duration) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "fresh":
+		e.relaySessionMode = "fresh"
+	default:
+		e.relaySessionMode = "reuse"
+	}
+	if resetAfter > 0 {
+		e.relaySessionReset = resetAfter
+	} else {
+		e.relaySessionReset = 0
+	}
+}
+
+// prepareRelaySession applies the relay-only session policy while the relay
+// session lock is held. Clearing the ID also makes the live path recycle any
+// idle agent process that still belongs to the old conversation.
+func (e *Engine) prepareRelaySession(session *Session, sessions *SessionManager, agent Agent, relaySessionKey string) {
+	if session == nil || sessions == nil || agent == nil {
+		return
+	}
+	mode := e.relaySessionMode
+	if mode == "" {
+		mode = "reuse"
+	}
+	reason := ""
+	switch {
+	case mode == "fresh":
+		reason = "mode"
+	case e.relaySessionReset > 0 && session.GetAgentSessionID() != "":
+		updated := session.GetUpdatedAt()
+		if !updated.IsZero() && time.Since(updated) >= e.relaySessionReset {
+			reason = "idle"
+		}
+	}
+	if reason == "" {
+		return
+	}
+	slog.Info("relay: starting fresh agent session",
+		"relay_key", relaySessionKey,
+		"mode", mode,
+		"reason", reason,
+	)
+	if session.GetAgentSessionID() != "" {
+		session.SetAgentSessionID("", agent.Name())
+		sessions.Save()
+	}
 }
 
 // SetAgentSessionIdleTimeout 配置单轮正常结束后的 live agent 空闲关闭时间。
@@ -18122,6 +18176,7 @@ func (e *Engine) HandleRelayLive(ctx context.Context, fromProject, sourceSession
 	if err != nil {
 		return "", err
 	}
+	e.prepareRelaySession(session, sessions, agent, relaySessionKey)
 
 	iKey := platformName + ":" + chatID + "#relay:" + fromProject
 	if workspaceDir != "" {
@@ -18169,6 +18224,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 		}
 		return "", err
 	}
+	e.prepareRelaySession(session, sessions, agent, relaySessionKey)
 	lockHeld := true
 	defer func() {
 		if lockHeld {

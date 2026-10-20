@@ -746,6 +746,11 @@ func main() {
 			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 		}
+		relayReset := 0
+		if proj.RelaySessionResetMins != nil {
+			relayReset = *proj.RelaySessionResetMins
+		}
+		engine.SetRelaySessionPolicy(proj.RelaySessionMode, time.Duration(relayReset)*time.Minute)
 		if proj.AgentSessionIdleTimeoutMins != nil {
 			mins := *proj.AgentSessionIdleTimeoutMins
 			if mins <= 0 {
@@ -1844,6 +1849,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
 			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
 	}
+	relayReset := 0
+	if proj.RelaySessionResetMins != nil {
+		relayReset = *proj.RelaySessionResetMins
+	}
+	engine.SetRelaySessionPolicy(proj.RelaySessionMode, time.Duration(relayReset)*time.Minute)
 	if proj.AgentSessionIdleTimeoutMins != nil {
 		mins := *proj.AgentSessionIdleTimeoutMins
 		if mins <= 0 {
