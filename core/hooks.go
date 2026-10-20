@@ -21,6 +21,9 @@ const (
 	HookEventMessageSent        HookEventType = "message.sent"
 	HookEventSessionStarted     HookEventType = "session.started"
 	HookEventSessionEnded       HookEventType = "session.ended"
+	// HookEventAgentClosed (maomao fork): the agent process of a session was closed (idle close, /new, renewal,
+	// shutdown) — what Claude Code's own SessionEnd hook sees; env CC_HOOK_AGENT_SESSION_ID names the agent session.
+	HookEventAgentClosed        HookEventType = "agent.closed"
 	HookEventCronTriggered      HookEventType = "cron.triggered"
 	HookEventTimerTriggered     HookEventType = "timer.triggered"
 	HookEventPermissionRequested HookEventType = "permission.requested"
@@ -263,6 +266,9 @@ func eventToEnv(e HookEvent) []string {
 	}
 	if e.Error != "" {
 		env = append(env, "CC_HOOK_ERROR="+e.Error)
+	}
+	if id, ok := e.Extra["agent_session_id"].(string); ok && id != "" {
+		env = append(env, "CC_HOOK_AGENT_SESSION_ID="+id)
 	}
 	return env
 }

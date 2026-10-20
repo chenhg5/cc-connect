@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -384,6 +385,14 @@ type gateContextResponse struct {
 	} `json:"wiki"`
 }
 
+// bot returns the gate URL's ?bot= value ("" for the main bot).
+func (g *gateState) bot() string {
+	if u, err := url.Parse(g.url); err == nil {
+		return u.Query().Get("bot")
+	}
+	return ""
+}
+
 // endpoint returns the gate URL with its path replaced (query dropped).
 func (g *gateState) endpoint(path string) string {
 	base := g.url
@@ -428,7 +437,8 @@ func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 	ctx, cancel := context.WithTimeout(e.ctx, 2*time.Second)
 	defer cancel()
 	var out gateContextResponse
-	if err := g.post(ctx, "/context", map[string]string{"key": sessionKey, "text": text}, &out); err != nil {
+	// bot: the gate_url's ?bot= (a sub); ctxsvc then searches her own wiki first (maomao fork, 2026-10-20)
+	if err := g.post(ctx, "/context", map[string]string{"key": sessionKey, "text": text, "bot": g.bot()}, &out); err != nil {
 		slog.Warn("gate: context fetch failed", "session", sessionKey, "error", err)
 		return ""
 	}
@@ -455,6 +465,9 @@ func (e *Engine) turnContext(session *Session, sessionKey, text string) string {
 // turnCtx messages.
 func (e *Engine) withTurnBlocks(session *Session, sessionKey, query, content string, turnCtx bool) string {
 	if c := e.handoffBlock(session); c != "" {
+		content = c + "\n\n" + content
+	}
+	if c := e.memoryBlock(session); c != "" { // before the handoff: the index, then what the old context did
 		content = c + "\n\n" + content
 	}
 	if !turnCtx {

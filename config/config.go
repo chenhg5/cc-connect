@@ -534,6 +534,9 @@ type ProjectConfig struct {
 	TeamName string `toml:"team_name,omitempty"`
 	// TeamStatusInject prepends the other projects' status to each turn (for the main bot).
 	TeamStatusInject bool `toml:"team_status_inject,omitempty"`
+	// MemoryIndex (maomao fork): the bot's own wiki MEMORY.md, put before the first turn of every fresh agent
+	// context (Claude Code loads its auto-memory itself; Codex/Antigravity bots need this). Empty disables it.
+	MemoryIndex string `toml:"memory_index,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who

@@ -295,6 +295,7 @@ func stamp(t time.Time) string {
 var staleBlocks = []struct{ head, end string }{
 	{"（队友状态", "\n\n"},
 	{"（可能相关的 wiki 页", "\n\n"},
+	{memoryIndexHead, "\n\n"}, // a fresh context's MEMORY.md (memoryBlock)
 	{handoffHead, handoffEnd}, // an earlier handoff
 	{"（本频道进展总结", ""},          // removed 2026-10-14; still in older transcripts
 }
@@ -391,6 +392,10 @@ func (s *Session) SettleHandoff(delivered bool) {
 	if !delivered && s.freshTaken {
 		s.freshCtx = true // maomao fork: the fresh-context images too (freshContextImages)
 	}
+	if !delivered && s.memTaken {
+		s.memCtx = true // maomao fork: and the MEMORY.md block (memoryBlock)
+	}
+	s.memTaken = false
 	if delivered && s.freshDonePending != "" {
 		s.freshDoneUpTo = s.freshDonePending
 	}
@@ -411,6 +416,7 @@ func (s *Session) freshImagesDoneUpTo(upTo string) string {
 func (s *Session) MarkFreshContext() {
 	s.mu.Lock()
 	s.freshCtx = true
+	s.memCtx = true // and its MEMORY.md (memoryBlock; only when memory_index is set)
 	s.mu.Unlock()
 }
 

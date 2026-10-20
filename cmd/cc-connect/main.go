@@ -710,6 +710,7 @@ func main() {
 		engine.SetSessionInstructions(proj.SessionInstructions)
 		engine.SetGate(proj.GateURL, proj.GateTimeoutMs, proj.GateFallback)
 		engine.SetTeam(proj.TeamStatusDir, proj.TeamName, proj.TeamStatusInject)
+		engine.SetMemoryIndex(proj.MemoryIndex)
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 		engine.SetResetOnIdle(resetIdle)
 		if defaulted {
@@ -1805,6 +1806,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	engine.SetSessionInstructions(proj.SessionInstructions)
 	engine.SetGate(proj.GateURL, proj.GateTimeoutMs, proj.GateFallback)
 	engine.SetTeam(proj.TeamStatusDir, proj.TeamName, proj.TeamStatusInject)
+	engine.SetMemoryIndex(proj.MemoryIndex)
 	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 	engine.SetResetOnIdle(resetIdle)
 	if defaulted {

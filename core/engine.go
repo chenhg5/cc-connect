@@ -412,6 +412,7 @@ type Engine struct {
 	maxQueuedMessages            int
 	gate                         *gateState // maomao fork: fast-brain gate (nil = off)
 	team                         *teamState // maomao fork: team status board (nil = off)
+	memoryIndex                  string     // maomao fork: MEMORY.md for fresh contexts (memoryindex.go; "" = off)
 	dirHistory                   *DirHistory
 	baseWorkDir                  string
 	projectState                 *ProjectStateStore
@@ -4719,6 +4720,11 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 
 	slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
 	closeStart := time.Now()
+	agentID := agentSession.CurrentSessionID()
+	// maomao fork: tell hooks once the process is gone (sub bots export + ingest their wiki here, like 橘's
+	// SessionEnd hook; user 2026-10-20 「让他们和你一样的待遇，不要区分」)
+	defer e.hooks.Emit(HookEvent{Event: HookEventAgentClosed, SessionKey: sessionKey,
+		Extra: map[string]any{"agent_session_id": agentID}})
 
 	done := make(chan struct{})
 	go func() {
