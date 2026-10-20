@@ -854,6 +854,17 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 		s.usageMu.Unlock()
 	}
 
+	if reason != "" && reason != "stop" && reason != "tool-calls" {
+		s.resultSent.Store(true)
+		err := fmt.Errorf("opencode turn truncated (finish reason: %s)", reason)
+		evt := core.Event{Type: core.EventError, Error: err, SessionID: s.CurrentSessionID()}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+		return
+	}
+
 	if reason == "stop" {
 		s.sendEventResult(strings.Join(texts, "\n"))
 		return
