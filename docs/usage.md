@@ -64,6 +64,21 @@ The next normal message after a long idle period starts in a fresh session autom
 
 To restore the previous behavior of always continuing, set `reset_on_idle_mins = 0`.
 
+Relay sessions use the same agent conversation by default. To start each relay
+request in a fresh agent conversation, or rotate a relay conversation after a
+period of inactivity, configure the project-level options below:
+
+```toml
+[[projects]]
+name = "docs"
+relay_session_mode = "fresh"       # "reuse" (default) or "fresh"
+relay_session_reset_mins = 120      # 0 or unset disables age-based rotation
+```
+
+When either rule rotates a relay session, cc-connect clears the saved agent
+session ID before starting the next relay turn. Both normal and `--live` relay
+requests use the same policy.
+
 ### Model switch preserves history
 
 `/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.
