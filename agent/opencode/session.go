@@ -487,6 +487,17 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
+	if reason != "" && reason != "stop" && reason != "tool-calls" {
+		s.resultSent.Store(true)
+		err := fmt.Errorf("opencode turn truncated (finish reason: %s)", reason)
+		evt := core.Event{Type: core.EventError, Error: err, SessionID: s.CurrentSessionID()}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+		return
+	}
+
 	if reason == "stop" {
 		s.sendEventResult()
 	}

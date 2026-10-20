@@ -208,6 +208,25 @@ func TestHandleStepToolCallsNoEventResult(t *testing.T) {
 	}
 }
 
+func TestHandleStepFinishLengthSendsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{
+		events: make(chan core.Event, 1),
+		ctx:    ctx,
+	}
+
+	s.handleStepFinish(map[string]any{"part": map[string]any{"reason": "length"}})
+
+	event := <-s.events
+	if event.Type != core.EventError || event.Error == nil {
+		t.Fatalf("event = %+v, want EventError", event)
+	}
+	if !strings.Contains(event.Error.Error(), "finish reason: length") {
+		t.Errorf("error = %q, want finish reason", event.Error)
+	}
+}
+
 // TestHandleStepDuplicateEventResultPrevented verifies that calling
 // handleStepFinish multiple times with reason="stop" only sends one
 // EventResult, preventing duplicate completion signals to the engine.

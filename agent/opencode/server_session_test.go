@@ -72,6 +72,26 @@ type fakePermissionReply struct {
 	reply     string
 }
 
+func TestServerDispatchPart_TruncatedStepEmitsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &serverSession{
+		inner:     &opencodeSession{events: make(chan core.Event, 1), ctx: ctx},
+		seenParts: make(map[string]struct{}),
+		partText:  make(map[string]int),
+	}
+
+	s.dispatchPart(map[string]any{"type": "step-finish", "reason": "length"})
+
+	event := <-s.inner.events
+	if event.Type != core.EventError || event.Error == nil {
+		t.Fatalf("event = %+v, want EventError", event)
+	}
+	if !strings.Contains(event.Error.Error(), "finish reason: length") {
+		t.Errorf("error = %q, want finish reason", event.Error)
+	}
+}
+
 func newFakeOpencodeServer(t *testing.T) *fakeOpencodeServer {
 	f := &fakeOpencodeServer{t: t, releaseMessage: make(chan struct{}, 8)}
 	mux := http.NewServeMux()
