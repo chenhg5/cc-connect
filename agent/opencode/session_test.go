@@ -212,6 +212,42 @@ func TestHandleStepToolCallsNoEventResult(t *testing.T) {
 	}
 }
 
+func TestHandleStepFinishLengthSendsErrorWithoutResult(t *testing.T) {
+	jsonData := `{"type":"step_finish","part":{"reason":"length"}}`
+
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &opencodeSession{
+		events:    make(chan core.Event, 2),
+		ctx:       ctx,
+		stepTexts: []string{"partial answer"},
+	}
+	s.handleStepFinish(raw)
+	s.sendEventResult("")
+
+	var events []core.Event
+	for len(s.events) > 0 {
+		events = append(events, <-s.events)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want partial text and one error", events)
+	}
+	if events[0].Type != core.EventText || events[0].Content != "partial answer" {
+		t.Fatalf("first event = %+v, want flushed partial text", events[0])
+	}
+	if events[1].Type != core.EventError || events[1].Error == nil {
+		t.Fatalf("second event = %+v, want EventError", events[1])
+	}
+	if !strings.Contains(events[1].Error.Error(), "finish reason: length") {
+		t.Errorf("error = %q, want finish reason", events[1].Error)
+	}
+}
+
 // TestHandleStepDuplicateEventResultPrevented verifies that calling
 // handleStepFinish multiple times with reason="stop" only sends one
 // EventResult, preventing duplicate completion signals to the engine.

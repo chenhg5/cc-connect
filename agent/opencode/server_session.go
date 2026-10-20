@@ -1927,6 +1927,13 @@ func (s *serverSession) dispatchPart(part map[string]any) {
 				"reason", reason, "tokens", part["tokens"])
 			return
 		}
+		if reason != "" && reason != "tool-calls" {
+			// Keep abnormal finish reasons on the same error path as the run
+			// transport. handleStepFinish marks the turn ended so the idle
+			// fallback cannot turn a truncation into an empty success.
+			s.inner.handleStepFinish(map[string]any{"part": part})
+			return
+		}
 		// Intermediate step: flush its narration as progress, exactly like the run
 		// transport does. Buffered step text is only delivered by this call, so
 		// skipping it would lose the answer entirely.

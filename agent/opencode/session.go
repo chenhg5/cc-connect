@@ -858,18 +858,37 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 		s.sendEventResult(strings.Join(texts, "\n"))
 		return
 	}
-	for _, text := range texts {
-		if text == "" {
-			continue
+	if reason != "" && reason != "tool-calls" {
+		for _, text := range texts {
+			if text == "" {
+				continue
+			}
+			s.emitStepText(text)
 		}
-		evt := core.Event{Type: core.EventText, Content: text, SessionID: s.CurrentSessionID()}
+		s.resultSent.Store(true)
+		err := fmt.Errorf("opencode turn truncated (finish reason: %s)", reason)
+		evt := core.Event{Type: core.EventError, Error: err, ErrorKind: opencodeErrorKind(err.Error()), SessionID: s.CurrentSessionID()}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
-			return
 		}
+		return
+	}
+	for _, text := range texts {
+		s.emitStepText(text)
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
+}
+
+func (s *opencodeSession) emitStepText(text string) {
+	if text == "" {
+		return
+	}
+	evt := core.Event{Type: core.EventText, Content: text, SessionID: s.CurrentSessionID()}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	}
 }
 
 func (s *opencodeSession) sendEventResult(content string) {

@@ -72,6 +72,46 @@ type fakePermissionReply struct {
 	reply     string
 }
 
+func TestServerDispatchPart_TruncatedStepEmitsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &serverSession{
+		inner:     &opencodeSession{events: make(chan core.Event, 1), ctx: ctx},
+		seenParts: make(map[string]struct{}),
+		partText:  make(map[string]int),
+	}
+	s.dispatchPart(map[string]any{"type": "step-finish", "reason": "length"})
+
+	select {
+	case event := <-s.inner.events:
+		if event.Type != core.EventError || event.Error == nil {
+			t.Fatalf("event = %+v, want EventError", event)
+		}
+		if !strings.Contains(event.Error.Error(), "finish reason: length") {
+			t.Errorf("error = %q, want finish reason", event.Error)
+		}
+	default:
+		t.Fatal("expected truncated step error")
+	}
+}
+
+func TestServerDispatchPart_StopOnlyStoresFinalStep(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &serverSession{
+		inner:     &opencodeSession{events: make(chan core.Event, 1), ctx: ctx},
+		seenParts: make(map[string]struct{}),
+		partText:  make(map[string]int),
+	}
+	s.dispatchPart(map[string]any{"type": "step-finish", "reason": "stop"})
+	if len(s.inner.events) != 0 {
+		t.Fatalf("stop dispatched events = %d, want 0", len(s.inner.events))
+	}
+	if s.finalStep.Load() == nil {
+		t.Fatal("stop step was not retained for idle-time flush")
+	}
+}
+
 func newFakeOpencodeServer(t *testing.T) *fakeOpencodeServer {
 	f := &fakeOpencodeServer{t: t, releaseMessage: make(chan struct{}, 8)}
 	mux := http.NewServeMux()
