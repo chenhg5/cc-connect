@@ -59,7 +59,7 @@ type Platform struct {
 	// strings and a time.Time. See thread_context.go.
 	bootstrappedThreads sync.Map
 	lastBootstrapSweep  atomic.Int64 // last expiry sweep, unix nano
-	// selfBotID / selfUserID come from auth.test at Start and tell a quoted
+	// selfBotID / selfUserID come from auth.test after Start and tell a quoted
 	// message written by THIS bot apart from one written by another app.
 	selfMu           sync.RWMutex
 	selfBotID        string
@@ -179,11 +179,12 @@ func threadRootTS(threadTS, msgTS string) string {
 }
 
 // learnSelfIdentity asks Slack who this token is, so a thread transcript can
-// label the bot's own past messages as the agent's own output. Best effort:
-// without it every bot message in a quoted thread reads as a third party,
-// which is noisier but never wrong in the dangerous direction.
-func (p *Platform) learnSelfIdentity() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// label the bot's own past messages as the agent's own output. Best effort and
+// run off the Start path: until it lands, and if it fails, every bot message in
+// a quoted thread reads as a third party, which is noisier but never wrong in
+// the dangerous direction.
+func (p *Platform) learnSelfIdentity(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	auth, err := p.client.AuthTestContext(ctx)
 	if err != nil {
@@ -206,10 +207,11 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		slack.OptionAppLevelToken(p.appToken),
 	)
 	p.socket = socketmode.New(p.client)
-	p.learnSelfIdentity()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
+
+	go p.learnSelfIdentity(ctx)
 
 	go func() {
 		for {
