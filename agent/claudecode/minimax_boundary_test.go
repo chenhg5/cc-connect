@@ -29,7 +29,11 @@ func TestMiniMaxModelHandoffPreservesExplicitSelection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer session.Close()
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Errorf("close mock session: %v", err)
+				}
+			})
 			cs := session.(*claudeSession)
 			if !strings.Contains(strings.Join(cs.cmd.Args, " "), "--model "+model) {
 				t.Fatalf("selected model missing from subprocess: %v", cs.cmd.Args)
