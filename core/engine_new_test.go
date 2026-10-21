@@ -168,7 +168,19 @@ func testIssue600ReceiveMessageDuringNew(t *testing.T, workspace bool, closeMode
 			if len(oldState.pendingMessages) != 0 {
 				t.Fatal("reset retained the old queued message")
 			}
-			assertNewCommandVisible(t, p, "session reset")
+			// Resolving the permission also wakes the old event loop, which
+			// can report the dropped queue before cleanup does. Either path
+			// must notify the sender that the queued message will not run.
+			notified := false
+			for _, message := range p.getSent() {
+				if strings.Contains(message, e.i18n.Tf(MsgError, "session reset")) ||
+					strings.Contains(message, e.i18n.Tf(MsgError, "agent session ended")) {
+					notified = true
+				}
+			}
+			if !notified {
+				t.Fatalf("queued message was dropped without notifying its sender: %v", p.getSent())
+			}
 		}
 
 		send("new question")
@@ -354,4 +366,203 @@ func TestIssue600_BridgeNewKeepsFreshSession(t *testing.T) {
 	readUntil("fresh answer")
 	send("/history")
 	readUntil("new question")
+}
+
+// Blocking platform sends can delay reset before the old process's Close is
+// reached. Keep the old final reply blocked too, so its event loop cannot take
+// the queued message away from cleanup while the reset notification is paused.
+type newCommandBlockingNotificationPlatform struct {
+	*stubPlatformEngine
+	oldReplyStarted  chan struct{}
+	releaseOldReply  chan struct{}
+	resetStarted     chan struct{}
+	releaseReset     chan struct{}
+	oldReplyOnce     sync.Once
+	resetOnce        sync.Once
+	releaseOldOnce   sync.Once
+	releaseResetOnce sync.Once
+}
+
+func (p *newCommandBlockingNotificationPlatform) Send(ctx context.Context, replyCtx any, content string) error {
+	if strings.Contains(content, "old answer") {
+		p.oldReplyOnce.Do(func() { close(p.oldReplyStarted) })
+		<-p.releaseOldReply
+	}
+	if strings.Contains(content, "session reset") {
+		p.resetOnce.Do(func() { close(p.resetStarted) })
+		<-p.releaseReset
+	}
+	return p.stubPlatformEngine.Send(ctx, replyCtx, content)
+}
+
+func (p *newCommandBlockingNotificationPlatform) release() {
+	p.releaseOldOnce.Do(func() { close(p.releaseOldReply) })
+	p.releaseResetOnce.Do(func() { close(p.releaseReset) })
+}
+
+func TestIssue600_NewWaitsForTeardownBeforeCloseStarts(t *testing.T) {
+	testIssue600ReceiveMessageBeforeCloseStarts(t)
+}
+
+func testIssue600ReceiveMessageBeforeCloseStarts(t *testing.T) {
+	t.Helper()
+	synctest.Test(t, func(t *testing.T) {
+		p := &newCommandBlockingNotificationPlatform{
+			stubPlatformEngine: &stubPlatformEngine{n: "test"},
+			oldReplyStarted:    make(chan struct{}), releaseOldReply: make(chan struct{}),
+			resetStarted: make(chan struct{}), releaseReset: make(chan struct{}),
+		}
+		oldProcess := newCommandSession("old-agent")
+		newProcess := &receiptAgentSession{queuingAgentSession: newQueuingSession("new-agent")}
+		starts := make(chan string, 4)
+		agent := &controllableAgent{startSessionFn: func(_ context.Context, id string) (AgentSession, error) {
+			starts <- id
+			if len(starts) == 1 {
+				return oldProcess, nil
+			}
+			return newProcess, nil
+		}}
+		e := NewEngine("issue600", agent, []Platform{p}, "", LangEnglish)
+		defer func() {
+			p.release()
+			oldProcess.release()
+			e.cancel()
+			synctest.Wait()
+			_ = oldProcess.receiptAgentSession.Close()
+			_ = newProcess.Close()
+		}()
+		const key = "test:chat:user"
+		send := func(content string) {
+			e.ReceiveMessage(p, &Message{
+				Platform: p.Name(), SessionKey: key, ChannelID: "chat", UserID: "user",
+				MessageID: content, Content: content, ReplyCtx: "ctx",
+			})
+		}
+		send("old question")
+		synctest.Wait()
+		send("queued before reset")
+		oldProcess.events <- Event{Type: EventResult, Content: "old answer", Done: true}
+		<-p.oldReplyStarted
+		newDone := make(chan struct{})
+		go func() {
+			send("/new fresh")
+			close(newDone)
+		}()
+		<-p.resetStarted
+		synctest.Wait()
+		select {
+		case <-oldProcess.closeStarted:
+			t.Fatal("fixture did not pause cleanup before the old Close")
+		default:
+		}
+
+		send("new question")
+		synctest.Wait()
+		send("new follow-up")
+		synctest.Wait()
+		if len(starts) != 1 {
+			t.Fatal("new agent started while reset notification was blocked, before old Close began")
+		}
+		assertNewCommandPrompts(t, newProcess)
+		assertNewCommandPrompts(t, oldProcess.receiptAgentSession, "old question")
+
+		p.release()
+		<-oldProcess.closeStarted
+		synctest.Wait()
+		assertNewCommandPrompts(t, newProcess)
+		oldProcess.release()
+		<-newDone
+		synctest.Wait()
+		assertNewCommandPrompts(t, newProcess, "new question")
+		newProcess.events <- Event{Type: EventResult, Content: "fresh answer", Done: true}
+		synctest.Wait()
+		assertNewCommandPrompts(t, newProcess, "new question", "new follow-up")
+		newProcess.events <- Event{Type: EventResult, Content: "fresh follow-up answer", Done: true}
+		synctest.Wait()
+		assertNewCommandVisible(t, p.stubPlatformEngine, "fresh follow-up answer")
+	})
+}
+
+func TestIssue600_OverlappingNewKeepsTeardownBlocked(t *testing.T) {
+	testIssue600OverlappingNew(t)
+}
+
+func testIssue600OverlappingNew(t *testing.T) {
+	t.Helper()
+	synctest.Test(t, func(t *testing.T) {
+		p := &stubPlatformEngine{n: "test"}
+		oldProcess := newCommandSession("old-agent")
+		newProcess := &receiptAgentSession{queuingAgentSession: newQueuingSession("new-agent")}
+		starts := make(chan string, 4)
+		agent := &controllableAgent{startSessionFn: func(_ context.Context, id string) (AgentSession, error) {
+			starts <- id
+			if len(starts) == 1 {
+				return oldProcess, nil
+			}
+			return newProcess, nil
+		}}
+		e := NewEngine("issue600", agent, []Platform{p}, "", LangEnglish)
+		defer func() {
+			oldProcess.release()
+			e.cancel()
+			synctest.Wait()
+			_ = oldProcess.receiptAgentSession.Close()
+			_ = newProcess.Close()
+		}()
+		const key = "test:chat:user"
+		send := func(content string) {
+			e.ReceiveMessage(p, &Message{
+				Platform: p.Name(), SessionKey: key, ChannelID: "chat", UserID: "user",
+				MessageID: content, Content: content, ReplyCtx: "ctx",
+			})
+		}
+		send("old question")
+		synctest.Wait()
+		firstResetDone := make(chan struct{})
+		go func() {
+			send("/new first")
+			close(firstResetDone)
+		}()
+		<-oldProcess.closeStarted
+		synctest.Wait()
+		firstSession := e.sessions.GetOrCreateActive(key)
+
+		// A second reset has no live agent of its own to close. Completing it
+		// must preserve the first reset's still-running process teardown.
+		send("/new latest")
+		synctest.Wait()
+		latestSession := e.sessions.GetOrCreateActive(key)
+		if latestSession == firstSession {
+			t.Fatal("second /new did not publish its own active session")
+		}
+		assertNewCommandVisible(t, p, "latest")
+		send("latest question")
+		synctest.Wait()
+		if len(starts) != 1 {
+			t.Fatal("second /new cleared the first reset's teardown barrier before old Close returned")
+		}
+		assertNewCommandPrompts(t, newProcess)
+		assertNewCommandPrompts(t, oldProcess.receiptAgentSession, "old question")
+
+		oldProcess.release()
+		<-firstResetDone
+		synctest.Wait()
+		assertNewCommandPrompts(t, newProcess, "latest question")
+		if e.sessions.GetOrCreateActive(key) != latestSession {
+			t.Fatal("first reset completion replaced the latest active session")
+		}
+		newProcess.events <- Event{Type: EventResult, Content: "latest answer", Done: true}
+		synctest.Wait()
+		assertNewCommandVisible(t, p, "latest answer")
+		p.clearSent()
+		send("/history")
+		synctest.Wait()
+		assertNewCommandVisible(t, p, "latest question")
+		assertNewCommandVisible(t, p, "latest answer")
+		for _, message := range p.getSent() {
+			if strings.Contains(message, "old question") {
+				t.Fatalf("latest session history contains the old conversation: %s", message)
+			}
+		}
+	})
 }

@@ -1391,6 +1391,8 @@ func TestCUJ_B1_NewCreatesIndependentSession(t *testing.T) {
 	t.Run("issue600_message_during_blocked_close", func(t *testing.T) {
 		testIssue600ReceiveMessageDuringNew(t, false, "success", false)
 	})
+	t.Run("issue600_message_before_close_starts", testIssue600ReceiveMessageBeforeCloseStarts)
+	t.Run("issue600_overlapping_new", testIssue600OverlappingNew)
 
 	env := newCUJEnv(t)
 	key := "test:b1"
