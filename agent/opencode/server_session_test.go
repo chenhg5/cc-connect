@@ -708,6 +708,39 @@ func TestServerSession_CloseAbortsRunningTurn(t *testing.T) {
 	f.releaseTurn()
 }
 
+func TestServerSession_CloseTimeoutDoesNotCloseEvents(t *testing.T) {
+	oldTimeout := opencodeServerStopTimeout
+	opencodeServerStopTimeout = 5 * time.Millisecond
+	t.Cleanup(func() { opencodeServerStopTimeout = oldTimeout })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	inner := &opencodeSession{
+		events: make(chan core.Event, 1),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	inner.alive.Store(true)
+	s := &serverSession{
+		inner:     inner,
+		sseCancel: func() {},
+	}
+
+	// Simulate an SSE reader that ignores cancellation past the shutdown grace
+	// period. The channel must remain open so a late producer cannot panic.
+	s.wg.Add(1)
+	if err := s.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	select {
+	case _, ok := <-inner.events:
+		if !ok {
+			t.Fatal("events channel was closed after stream shutdown timed out")
+		}
+	default:
+	}
+	s.wg.Done()
+}
+
 func TestParseProviderScopedModel(t *testing.T) {
 	cases := []struct {
 		in       string

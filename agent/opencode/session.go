@@ -536,6 +536,14 @@ func (s *opencodeSession) Alive() bool {
 }
 
 func (s *opencodeSession) Close() error {
+	s.closeInternal(true)
+	return nil
+}
+
+// closeInternal cancels the session and waits for its workers. Server transport
+// closes the shared event channel only after its own stream worker has stopped;
+// closing it here would race a server-side event sender that outlives this wait.
+func (s *opencodeSession) closeInternal(closeEvents bool) bool {
 	s.alive.Store(false)
 	s.cancel()
 	done := make(chan struct{})
@@ -545,11 +553,14 @@ func (s *opencodeSession) Close() error {
 	}()
 	select {
 	case <-done:
-		close(s.events)
+		if closeEvents {
+			close(s.events)
+		}
+		return true
 	case <-time.After(8 * time.Second):
 		slog.Warn("opencodeSession: close timed out, abandoning wg.Wait")
+		return false
 	}
-	return nil
 }
 
 func truncate(s string, maxRunes int) string {

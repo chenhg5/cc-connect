@@ -64,7 +64,6 @@ const (
 	// opencodeServerIdleTTLDisabled marks a project that turned idle recycling
 	// off: released servers then live until the daemon stops or replaces them.
 	opencodeServerIdleTTLDisabled = time.Duration(-1)
-	opencodeServerStopTimeout     = 5 * time.Second
 	// streamReadyTimeout bounds how long a turn waits for the event stream before
 	// posting its prompt.
 	streamReadyTimeout = 3 * time.Second
@@ -72,6 +71,10 @@ const (
 	// messages (a page of text is plenty for start failures).
 	opencodeServerLogTail = 8 * 1024
 )
+
+// opencodeServerStopTimeout is a variable so shutdown tests can shorten the
+// grace period without waiting five seconds.
+var opencodeServerStopTimeout = 5 * time.Second
 
 // opencodeServeConfig describes the `opencode serve` process backing one
 // workspace.
@@ -2425,10 +2428,12 @@ func (s *serverSession) close() error {
 		close(done)
 	}()
 	deadline := time.After(opencodeServerStopTimeout)
+	streamStopped := false
 waitLoop:
 	for {
 		select {
 		case <-done:
+			streamStopped = true
 			break waitLoop
 		case <-time.After(50 * time.Millisecond):
 			s.drainEvents()
@@ -2438,17 +2443,25 @@ waitLoop:
 		}
 	}
 
-	// Stop accepting further events, then let the inner session close the
-	// channel. Senders outside the SSE goroutine (Send error reporting) are
-	// serialized behind the same flag, so they cannot hit a closed channel.
+	// Stop accepting further events before cancelling the inner session. If the
+	// stream did not stop within the grace period, keep the channel open: the SSE
+	// worker may still be sending directly through the inner session, and a
+	// closed channel would turn a slow shutdown into a daemon-wide panic.
 	s.eventMu.Lock()
 	s.eventsClosed = true
 	s.eventMu.Unlock()
 
-	err := s.inner.Close()
+	innerStopped := s.inner.closeInternal(false)
+	if streamStopped && innerStopped {
+		// All producers have exited. The eventMu lock also excludes the
+		// serverSession.sendEvent path while the channel is closed.
+		s.eventMu.Lock()
+		close(s.inner.events)
+		s.eventMu.Unlock()
+	}
 
 	// Drop the reference the running turn holds, if any. Close during a turn is
 	// what /stop and the idle reaper do.
 	s.releaseCurrentTurn()
-	return err
+	return nil
 }
