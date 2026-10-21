@@ -326,6 +326,72 @@ func TestRelayManager_DefaultVisibilityEchoesFullMessages(t *testing.T) {
 	}
 }
 
+func TestRelayManager_GroupEchoOmitsToolResults(t *testing.T) {
+	for _, visibility := range []string{"", RelayVisibilityFull, RelayVisibilitySummary, RelayVisibilityNone} {
+		t.Run("visibility="+visibility, func(t *testing.T) {
+			p := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+			s := newControllableSession("tool-response-session")
+			e := NewEngine("target", &controllableAgent{nextSession: s}, []Platform{p}, "", LangEnglish)
+			rm := NewRelayManager("")
+			rm.SetVisibility(visibility)
+			rm.RegisterEngine("target", e)
+			rm.Bind("test", "chat-1", map[string]string{"source": "source-bot", "target": "target-bot"})
+			toolOutput := strings.Repeat("RAW_TOOL_OUTPUT\n", 500)
+			s.events <- Event{Type: EventToolResult, ToolName: "run_command", ToolResult: toolOutput}
+			s.events <- Event{Type: EventText, Content: "final answer"}
+			s.events <- Event{Type: EventResult, Done: true}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			resp, err := rm.Send(ctx, RelayRequest{From: "source", To: "target", SessionKey: "test:chat-1:user", Message: "review"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(resp.Response, strings.TrimSpace(toolOutput)) || !strings.Contains(resp.Response, "final answer") {
+				t.Fatal("caller lost tool output or agent response")
+			}
+			sent := p.getSent()
+			if visibility == RelayVisibilityNone {
+				if len(sent) != 0 {
+					t.Fatal("hidden relay sent group messages")
+				}
+				return
+			}
+			want := "[target-bot] final answer"
+			if visibility == RelayVisibilitySummary {
+				want = "[target-bot] relay response ready (12 chars)"
+			}
+			if len(sent) != 1 || sent[0] != want {
+				t.Fatalf("group echo included tool output or lost answer: %d messages", len(sent))
+			}
+		})
+	}
+}
+
+func TestRelayManager_CanceledCallerHidesToolOnlyPartialEcho(t *testing.T) {
+	p := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	s := newControllableSession("tool-only-session")
+	e := NewEngine("target", &controllableAgent{nextSession: s}, []Platform{p}, "", LangEnglish)
+	rm := NewRelayManager("")
+	rm.RegisterEngine("target", e)
+	rm.Bind("test", "chat-1", map[string]string{"source": "source-bot", "target": "target-bot"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.events <- Event{Type: EventToolResult, ToolName: "run_command", ToolResult: "raw tool output"}
+	resp, err := rm.Send(ctx, RelayRequest{From: "source", To: "target", SessionKey: "test:chat-1:user", Message: "review"})
+	s.events <- Event{Type: EventResult, Content: "final answer", Done: true}
+	select {
+	case <-s.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background relay did not finish")
+	}
+	if err != nil || resp == nil || !strings.Contains(resp.Response, "raw tool output") {
+		t.Fatalf("partial response = %+v, error = %v", resp, err)
+	}
+	if len(p.getSent()) != 0 {
+		t.Fatal("tool-only partial response was echoed to the group")
+	}
+}
+
 func TestRelayManager_VisibilitySummarySuppressesBodies(t *testing.T) {
 	resp, sourceSent, targetSent := runRelayVisibilityScenario(t, RelayVisibilitySummary)
 
