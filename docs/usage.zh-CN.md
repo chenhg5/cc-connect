@@ -169,7 +169,7 @@ alias = "haiku"
 name = "minimax"
 api_key = "your-minimax-api-key"
 base_url = "https://api.minimax.io/v1"
-model = "MiniMax-M3"
+model = "MiniMax-M3.1-Flash"
 
 # Bedrock、Vertex 等
 [[projects.agent.providers]]

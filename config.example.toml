@@ -68,7 +68,7 @@ level = "info" # debug, info, warn, error
 # api_key = "${MINIMAXI_API_KEY}"
 # base_url = "https://api.minimaxi.chat/v1"
 # agent_types = ["codex"]
-# model = "MiniMax-M3"
+# model = "MiniMax-M3.1-Flash"
 
 # [[providers]]
 # name = "dashscope"
@@ -849,14 +849,17 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 #
 # # MiniMax — OpenAI-compatible provider with 1M context window
 # # MiniMax — 兼容 OpenAI 接口的大模型，支持 1M 超长上下文
-# # Models: MiniMax-M3 (latest), MiniMax-M2.7 (512K context), MiniMax-M2.7-highspeed
+# # Models: MiniMax-M3.1-Flash (latest, 1M context), MiniMax-M3 (512K context), MiniMax-M2.7 (192K context)
 # # Docs: https://platform.minimaxi.com
 # [[projects.agent.providers]]
 # name = "minimax"
 # api_key = "your-minimax-api-key"
 # base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M3"
+# model = "MiniMax-M3.1-Flash"
 # thinking = "disabled"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M3.1-Flash"
+# alias = "m31flash"
 # [[projects.agent.providers.models]]
 # model = "MiniMax-M3"
 # alias = "m3"
@@ -1381,7 +1384,7 @@ app_secret = "your-feishu-app-secret"
 # name = "minimax"
 # api_key = "your-minimax-api-key"
 # base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M3"
+# model = "MiniMax-M3.1-Flash"
 #
 # [[projects.platforms]]
 # type = "telegram"
