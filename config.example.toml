@@ -106,7 +106,7 @@ level = "info" # debug, info, warn, error
 # api_key = "${MINIMAXI_API_KEY}"
 # base_url = "https://api.minimaxi.chat/v1"
 # agent_types = ["codex"]
-# model = "MiniMax-M3.1-Flash"
+# model = "MiniMax-M2.7"
 
 # [[providers]]
 # name = "dashscope"
@@ -994,7 +994,7 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 #
 # # MiniMax — OpenAI-compatible agent provider with 1M context window
 # # MiniMax — 兼容 OpenAI 接口的大模型 Agent provider，支持 1M 超长上下文
-# # Models: MiniMax-M3.1-Flash (default, 1M context), MiniMax-M3 (512K context)
+# # Models: MiniMax-M3.1-Flash (default), MiniMax-M3
 # # Docs: https://platform.minimaxi.com
 # # China-region accounts may use https://api.minimaxi.com/v1 / 中国区账号可使用 https://api.minimaxi.com/v1
 # [[projects.agent.providers]]
