@@ -319,6 +319,23 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 
 ---
 
+## 卡片消息（interactive）
+
+用户发送或转发的飞书卡片会像文本消息一样交给 Agent。cc-connect 优先通过
+`user_card_content` 读取卡片原始内容（Card 2.0 DSL，含表格、按钮链接、图片等），
+失败时回退到事件体的简化格式；无法解析的卡片不会中断会话。群聊中仍需 @机器人，
+与文本消息的准入规则一致。
+
+开启 `respond_to_at_everyone_and_here = true` 后，卡片中的 `@所有人`
+（Card 2.0 的 `"user_id":"all"`）与文本消息的 `@_all` 行为一致，会触发机器人响应。
+
+```toml
+[projects.platforms.options]
+respond_to_at_everyone_and_here = true
+```
+
+---
+
 ## Mention 功能
 
 开启 `resolve_mentions = true` 后，机器人发出的消息中 `@显示名` 会自动替换为飞书原生 at 标签。
