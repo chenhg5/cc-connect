@@ -206,6 +206,11 @@ type appServerSession struct {
 	pendingMsgs  []string
 	currentTurn  string
 	preambleSent bool
+	// maomao fork: a "prompt is too long" error codex retried during the current
+	// turn. Its retries can end on a different error (new-api's 503 "无可用渠道"
+	// once it skips the channel), so failRunningTurn reports this one instead
+	// and the engine starts a fresh session (2026-10-21 jingyu).
+	turnTooLong string
 	// maomao fork: command line of each running commandExecution item, so a
 	// write_stdin (terminalInteraction) can say which process it talks to.
 	execCommands map[string]string
@@ -557,6 +562,9 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	}
 
 	s.stateMu.Lock()
+	if s.currentTurn != resp.Turn.ID {
+		s.turnTooLong = ""
+	}
 	s.currentTurn = resp.Turn.ID
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
@@ -1176,6 +1184,9 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
 			s.stateMu.Lock()
+			if s.currentTurn != notif.Turn.ID {
+				s.turnTooLong = ""
+			}
 			s.currentTurn = notif.Turn.ID
 			s.pendingMsgs = s.pendingMsgs[:0]
 			s.stateMu.Unlock()
@@ -1255,6 +1266,13 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		}
 		if notif.WillRetry {
 			slog.Warn("codex app-server: transient error, codex will retry", "error", msg)
+			if core.IsPromptTooLongError(msg) {
+				s.stateMu.Lock()
+				if s.currentTurn != "" {
+					s.turnTooLong = msg
+				}
+				s.stateMu.Unlock()
+			}
 			return
 		}
 		// Ends the turn so the turn/completed that follows is a no-op.
@@ -1696,6 +1714,7 @@ func (s *appServerSession) completeTurn() {
 		return
 	}
 	s.currentTurn = ""
+	s.turnTooLong = ""
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
@@ -1740,12 +1759,18 @@ func (s *appServerSession) emit(event core.Event) {
 func (s *appServerSession) failRunningTurn(reason string) {
 	s.stateMu.Lock()
 	running := s.currentTurn != ""
-	s.currentTurn = ""
+	tooLong := s.turnTooLong
+	s.currentTurn, s.turnTooLong = "", ""
 	s.stateMu.Unlock()
 	if !running {
 		return
 	}
 	slog.Warn("codex app-server: turn failed", "reason", reason)
+	if tooLong != "" && !core.IsPromptTooLongError(reason) {
+		// maomao fork: the turn's real cause; see turnTooLong.
+		slog.Warn("codex app-server: turn hit prompt is too long before failing; reporting that", "too_long", tooLong)
+		reason = tooLong
+	}
 	s.emitError(errors.New(reason))
 }
 

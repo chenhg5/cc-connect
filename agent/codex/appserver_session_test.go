@@ -490,6 +490,54 @@ func TestAppServerSession_ErrorNotificationIgnoresRetry(t *testing.T) {
 	}
 }
 
+// 2026-10-21 jingyu: codex retried new-api's 400 "prompt is too long" and the
+// retries ended on a 503 "无可用渠道"; the turn must fail as prompt-too-long so
+// the engine starts a fresh session.
+const (
+	tooLongRetryNotif = `{"error":{"message":"Reconnecting... 1/5\n{\"error\":{\"message\":\"{\\\"code\\\":11115,\\\"msg\\\":\\\"prompt is too long: 1194310 tokens \\\\u003e 1048576 maximum\\\"}\"}}"},"willRetry":true}`
+	noChannel503      = `unexpected status 503 Service Unavailable: 分组 auto 下模型 deepseek-v4.1-flash 无可用渠道（distributor）`
+	failed503Notif    = `{"threadId":"t","turn":{"id":"turn-1","status":"failed","error":{"message":"` + noChannel503 + `"}}}`
+)
+
+func TestAppServerSession_RetriedPromptTooLongReportedOnFailure(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4), currentTurn: "turn-1"}
+	s.handleNotification("error", json.RawMessage(tooLongRetryNotif))
+	s.handleNotification("error", json.RawMessage(`{"error":{"message":"Reconnecting... 2/5\n`+noChannel503+`"},"willRetry":true}`))
+	s.handleNotification("turn/completed", json.RawMessage(failed503Notif))
+	if len(s.events) != 1 {
+		t.Fatalf("emitted %d events, want 1", len(s.events))
+	}
+	ev := <-s.events
+	if ev.Type != core.EventError || ev.Error == nil || !core.IsPromptTooLongError(ev.Error.Error()) {
+		t.Fatalf("event = %+v, want a prompt-too-long error", ev)
+	}
+}
+
+func TestAppServerSession_Only503NotPromptTooLong(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4), currentTurn: "turn-1"}
+	s.handleNotification("error", json.RawMessage(`{"error":{"message":"Reconnecting... 1/5\n`+noChannel503+`"},"willRetry":true}`))
+	s.handleNotification("turn/completed", json.RawMessage(failed503Notif))
+	ev := <-s.events
+	if ev.Type != core.EventError || ev.Error == nil || core.IsPromptTooLongError(ev.Error.Error()) || !strings.Contains(ev.Error.Error(), "503") {
+		t.Fatalf("event = %+v, want the 503 as is", ev)
+	}
+}
+
+// A retried too-long error in a turn that then succeeded does not leak into the next turn.
+func TestAppServerSession_PromptTooLongClearedByNextTurn(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 4), currentTurn: "turn-1"}
+	s.handleNotification("error", json.RawMessage(tooLongRetryNotif))
+	s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"t","turn":{"id":"turn-1","status":"completed"}}`))
+	if ev := <-s.events; ev.Type != core.EventResult {
+		t.Fatalf("event = %+v, want result", ev)
+	}
+	s.handleNotification("turn/started", json.RawMessage(`{"threadId":"t","turn":{"id":"turn-2"}}`))
+	s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"t","turn":{"id":"turn-2","status":"failed","error":{"message":"`+noChannel503+`"}}}`))
+	if ev := <-s.events; ev.Error == nil || core.IsPromptTooLongError(ev.Error.Error()) {
+		t.Fatalf("event = %+v, want the 503", ev)
+	}
+}
+
 func TestAppServerSession_FailedTurnCompletedEmitsError(t *testing.T) {
 	s := &appServerSession{events: make(chan core.Event, 4), currentTurn: "turn-1"}
 	s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"t","turn":{"id":"turn-1","status":"failed","error":{"message":"usage limit"}}}`))

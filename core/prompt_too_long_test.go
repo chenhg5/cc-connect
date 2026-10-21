@@ -12,6 +12,9 @@ import (
 // The provider's error as cc-connect logged it for jingyu on 2026-10-19.
 const tooLongErrText = `{"error":{"message":"{\"code\":11115,\"msg\":\"prompt is too long: 1227574 tokens > 1048576 maximum\",\"requestId\":\"x\"}"}}`
 
+// new-api's error once it skips the channel (2026-10-21 jingyu): not prompt-too-long.
+const noChannelErrText = `unexpected status 503 Service Unavailable: 分组 auto 下模型 deepseek-v4.1-flash 无可用渠道（distributor）`
+
 // tooLongAgent starts a new session (ID s1, s2, …) on every StartSession and
 // answers the sends of all its sessions from one script: "long" → the
 // too-long turn error, "hold:<x>" → wait for release, anything else → a result.
@@ -67,6 +70,8 @@ func (s *tooLongSession) Send(prompt string, _ string, _ []ImageAttachment, _ []
 	emit := func(next string) {
 		if next == "long" {
 			s.events <- Event{Type: EventError, Error: errors.New(tooLongErrText)}
+		} else if next == "503" {
+			s.events <- Event{Type: EventError, Error: errors.New(noChannelErrText)}
 		} else {
 			s.events <- Event{Type: EventResult, Content: "reply:" + next, Done: true}
 		}
@@ -154,6 +159,27 @@ func TestPromptTooLong_RerunFailsAgainNoLoop(t *testing.T) {
 	}
 	if out := joined(p); strings.Count(out, "♻️") != 1 || strings.Count(out, "11115") != 1 {
 		t.Fatalf("want one ♻️ notice and one error:\n%s", out)
+	}
+}
+
+// A plain 503 is reported as is: no fresh session, no re-run.
+func TestPromptTooLong_Only503NoRerun(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e, a := newTooLongEngine(t, p, "503", "never")
+
+	e.handleMessage(p, &Message{SessionKey: "test:c1", Platform: "test", UserID: "u", UserName: "u", Content: "hello", ReplyCtx: "ctx"})
+	waitFor(t, "503 error", func() bool { return strings.Contains(joined(p), "无可用渠道") })
+	s := e.sessions.GetOrCreateActive("test:c1")
+	waitFor(t, "session released", func() bool { return !s.Busy() })
+
+	if sent, _, starts := a.snapshot(); len(sent) != 1 || len(starts) != 1 {
+		t.Fatalf("sends = %d, starts = %d; want 1 and 1 (no re-run)", len(sent), len(starts))
+	}
+	if out := joined(p); strings.Contains(out, "♻️") {
+		t.Fatalf("503 started a fresh session:\n%s", out)
+	}
+	if id := s.GetAgentSessionID(); id != "s1" {
+		t.Fatalf("agent session = %q, want s1 kept", id)
 	}
 }
 

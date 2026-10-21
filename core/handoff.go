@@ -132,10 +132,11 @@ func (e *Engine) imageBloat(agent Agent, session *Session) (string, int) {
 	return id, h.ImageBytes
 }
 
-// isPromptTooLongError matches the provider's context-overflow turn failure, e.g.
+// IsPromptTooLongError matches the provider's context-overflow turn failure, e.g.
 // new-api/DeepSeek's 400 {"code":11115,"msg":"prompt is too long: 1227574 tokens > 1048576 maximum"}
 // (jingyu, 2026-10-19). Resuming that session can only fail the same way.
-func isPromptTooLongError(msg string) bool {
+// Exported so agents can recognise it in errors they retry internally.
+func IsPromptTooLongError(msg string) bool {
 	return strings.Contains(msg, "prompt is too long")
 }
 

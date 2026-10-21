@@ -6527,7 +6527,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						state.capacityFailed = true
 					}
 					state.mu.Unlock()
-				} else if isPromptTooLongError(errMsg) {
+				} else if IsPromptTooLongError(errMsg) {
 					// maomao fork: the caller of runTurnWithCapacityRetry re-runs it on a fresh
 					// session (retryFreshOnPromptTooLong), or reports the error if it cannot.
 					state.mu.Lock()
