@@ -4680,11 +4680,26 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 // same key wait on this registration (awaitSessionClose), so a new agent
 // process is never started while the previous one may still be alive.
 func (e *Engine) beginSessionClose(sessionKey string) func() {
+	return e.registerSessionClose(sessionKey, false)
+}
+
+// beginSessionReset guards the interval before cleanup reaches the process's
+// Close. A reset without a live process must not replace an existing teardown:
+// finishing that reset would otherwise unblock spawns while the process lives.
+func (e *Engine) beginSessionReset(sessionKey string) func() {
+	return e.registerSessionClose(sessionKey, true)
+}
+
+func (e *Engine) registerSessionClose(sessionKey string, preserveExisting bool) func() {
 	if sessionKey == "" {
 		return func() {}
 	}
-	done := make(chan struct{})
 	e.closingMu.Lock()
+	if preserveExisting && e.closingSessions[sessionKey] != nil {
+		e.closingMu.Unlock()
+		return func() {}
+	}
+	done := make(chan struct{})
 	if e.closingSessions == nil {
 		e.closingSessions = make(map[string]chan struct{})
 	}
@@ -7398,6 +7413,11 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 	oldState := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 
+	// Block spawns before publishing the new Session. Cleanup can block on
+	// reader shutdown or dropped-message notifications before it reaches Close
+	// and registers the process teardown itself.
+	finishClose := e.beginSessionReset(interactiveKey)
+
 	// Clear old session's agent session ID so it cannot be resumed
 	old := sessions.GetOrCreateActive(msg.SessionKey)
 	old.SetAgentSessionID("", "")
@@ -7413,6 +7433,7 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 
 	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
 	e.cleanupInteractiveState(interactiveKey, oldState)
+	finishClose()
 	slog.Info("cmdNew: cleanup done", "session_key", msg.SessionKey)
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
