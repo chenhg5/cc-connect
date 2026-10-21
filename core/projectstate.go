@@ -9,9 +9,10 @@ import (
 )
 
 type projectStateData struct {
-	WorkDirOverride         string            `json:"work_dir_override,omitempty"`
-	WorkspaceDirOverrides   map[string]string `json:"workspace_dir_overrides,omitempty"`
-	WorkspaceModelOverrides map[string]string `json:"workspace_model_overrides,omitempty"`
+	WorkDirOverride               string            `json:"work_dir_override,omitempty"`
+	WorkspaceDirOverrides         map[string]string `json:"workspace_dir_overrides,omitempty"`
+	WorkspaceModelOverrides       map[string]string `json:"workspace_model_overrides,omitempty"`
+	WorkspaceServiceTierOverrides map[string]string `json:"workspace_service_tier_overrides,omitempty"`
 }
 
 // ProjectStateStore persists lightweight runtime state for one project.
@@ -103,6 +104,21 @@ func (ps *ProjectStateStore) ClearWorkspaceModelOverride(workspace string) {
 	if len(ps.state.WorkspaceModelOverrides) == 0 {
 		ps.state.WorkspaceModelOverrides = nil
 	}
+}
+
+func (ps *ProjectStateStore) WorkspaceServiceTierOverride(workspace string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.state.WorkspaceServiceTierOverrides[workspace]
+}
+
+func (ps *ProjectStateStore) SetWorkspaceServiceTierOverride(workspace, tier string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceServiceTierOverrides == nil {
+		ps.state.WorkspaceServiceTierOverrides = make(map[string]string)
+	}
+	ps.state.WorkspaceServiceTierOverrides[workspace] = tier
 }
 
 func (ps *ProjectStateStore) ClearWorkDirOverride() {
