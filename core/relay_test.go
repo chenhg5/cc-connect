@@ -90,6 +90,24 @@ func TestRelayManager_RelayContextDisablesTimeoutAtZero(t *testing.T) {
 	}
 }
 
+func TestRelayManager_LiveRelayHasBoundedFallback(t *testing.T) {
+	rm := NewRelayManager("")
+	ctx, cancel := context.WithTimeout(context.Background(), relayLiveTimeout+time.Hour)
+	defer cancel()
+
+	ctx, liveCancel := rm.relayLiveContext(ctx)
+	defer liveCancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected a deadline for live relay fallback")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > relayLiveTimeout {
+		t.Fatalf("live relay deadline remaining = %v, want within (0, %v]", remaining, relayLiveTimeout)
+	}
+}
+
 // delayedVisibilityPlatform blocks the request echo for a fixed delay (or
 // until its context is canceled), so tests can prove the relay timeout covers
 // the whole job rather than only the target turn.

@@ -15,6 +15,11 @@ import (
 
 const relayTimeout = 120 * time.Second
 
+// relayLiveTimeout is a safety net for synchronous live relay callers. Live
+// turns normally end through the agent or /stop, so this is intentionally much
+// longer than relayTimeout while still preventing an unbounded CLI/API wait.
+const relayLiveTimeout = 6 * time.Hour
+
 // relayVisibilityGrace bounds the fresh context used to deliver a relay
 // response visibility receipt after the relay deadline has already expired.
 const relayVisibilityGrace = 5 * time.Second
@@ -210,11 +215,15 @@ type RelayResponse struct {
 // Send delivers a message from one bot to another and returns the response.
 func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayResponse, error) {
 	// Keep the caller's context so the response visibility receipt can still be
-	// delivered after the relay deadline fires (see below). Live relays are
-	// intentionally unbounded: their progress is visible in the target card and
-	// the user can stop the turn from the group.
+	// delivered after the relay deadline fires (see below). Live relays use a
+	// deliberately generous safety deadline; their normal termination remains
+	// the agent finishing or the user stopping the turn from the group.
 	parentCtx := ctx
-	if !req.Live {
+	if req.Live {
+		var cancel context.CancelFunc
+		ctx, cancel = rm.relayLiveContext(ctx)
+		defer cancel()
+	} else {
 		// Apply the relay timeout to the whole job — visibility request, target
 		// turn, and visibility response — so a slow pre-send cannot outlive the
 		// configured bound.
@@ -367,6 +376,10 @@ func (rm *RelayManager) relayContext(ctx context.Context) (context.Context, cont
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, timeout)
+}
+
+func (rm *RelayManager) relayLiveContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, relayLiveTimeout)
 }
 
 func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error) {
