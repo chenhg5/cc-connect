@@ -497,7 +497,7 @@ func main() {
 			if !hasSlack {
 				slog.Warn("observe requires a Slack platform; ignoring")
 			} else {
-				projectDir := resolveClaudeProjectDir(workDir)
+				projectDir := resolveClaudeProjectDir(claudeConfigDir(agent), workDir)
 				if projectDir == "" {
 					slog.Warn("observe: could not find Claude Code project directory", "workDir", workDir)
 				} else {
@@ -1553,17 +1553,38 @@ func applyProjectStateOverrideForMode(projectName string, agent core.Agent, conf
 	return override
 }
 
-// resolveClaudeProjectDir returns the Claude Code project directory for a given
-// work directory, or "" if it doesn't exist.
-func resolveClaudeProjectDir(workDir string) string {
+// claudeConfigDir returns the Claude Code config dir. Agents that know the env
+// they pass to claude (e.g. CLAUDE_CONFIG_DIR from [projects.agent.options.env])
+// report it via ClaudeConfigDir; otherwise $CLAUDE_CONFIG_DIR from the process
+// env is used, falling back to ~/.claude.
+func claudeConfigDir(agent core.Agent) string {
+	if p, ok := agent.(interface{ ClaudeConfigDir() string }); ok {
+		return p.ClaudeConfigDir()
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
+		return ""
+	}
+	dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	switch {
+	case dir == "":
+		return filepath.Join(homeDir, ".claude")
+	case dir == "~" || strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`):
+		return filepath.Join(homeDir, dir[1:])
+	}
+	return dir
+}
+
+// resolveClaudeProjectDir returns the Claude Code project directory under
+// configDir for a given work directory, or "" if it doesn't exist.
+func resolveClaudeProjectDir(configDir, workDir string) string {
+	if configDir == "" {
 		return ""
 	}
 	// Claude Code encodes paths by replacing os.PathSeparator with "-"
 	// e.g. /home/leigh/workspace/cc-connect -> -home-leigh-workspace-cc-connect
 	encoded := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
-	dir := filepath.Join(homeDir, ".claude", "projects", encoded)
+	dir := filepath.Join(configDir, "projects", encoded)
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return ""
 	}

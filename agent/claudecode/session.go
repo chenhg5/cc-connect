@@ -75,6 +75,9 @@ type claudeSession struct {
 	// Test-only seam: transcriptPath() resolves through the real
 	// ~/.claude/projects/<key>/ layout, which a unit test cannot fabricate.
 	transcriptOverride string
+	// claudeConfigDir is the config dir the claude subprocess uses (from its
+	// extra env or the process env); transcripts live under its projects/.
+	claudeConfigDir string
 
 	// ctxWindowOverride is the user-configured context window size used by
 	// the "ctx N%" indicator. When > 0 it wins over reportedCtxWindow; when
@@ -520,6 +523,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		stdin:               stdin,
 		events:              make(chan core.Event, 64),
 		workDir:             workDir,
+		claudeConfigDir:     claudeConfigHomeDir(extraEnv),
 		ctx:                 sessionCtx,
 		cancel:              cancel,
 		done:                make(chan struct{}),
@@ -1528,15 +1532,14 @@ func (cs *claudeSession) transcriptPath() string {
 	if sessionID == "" || cs.workDir == "" {
 		return ""
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	if cs.claudeConfigDir == "" {
 		return ""
 	}
 	absWorkDir, err := filepath.Abs(cs.workDir)
 	if err != nil {
 		return ""
 	}
-	projectDir := findProjectDir(homeDir, absWorkDir)
+	projectDir := findProjectDir(cs.claudeConfigDir, absWorkDir)
 	if projectDir == "" {
 		return ""
 	}

@@ -129,7 +129,7 @@ func (r *ccPermissionHookRunner) loadSettings() *ccSettings {
 
 // settingsPaths returns the settings.json paths to read, in order.
 func settingsPaths(workDir string) []string {
-	configHome := claudeConfigHomeDir()
+	configHome := claudeConfigHomeDir(nil)
 	paths := []string{
 		filepath.Join(configHome, "settings.json"),
 		filepath.Join(configHome, "settings.local.json"),

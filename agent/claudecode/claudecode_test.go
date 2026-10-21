@@ -458,7 +458,7 @@ func TestFindProjectDir_NonASCIIPath(t *testing.T) {
 	}
 
 	// Verify findProjectDir finds the directory
-	found := findProjectDir(homeDir, chineseWorkDir)
+	found := findProjectDir(filepath.Join(homeDir, ".claude"), chineseWorkDir)
 	if found != mockProjectDir {
 		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, chineseWorkDir, found, mockProjectDir)
 	}
@@ -477,7 +477,7 @@ func TestFindProjectDir_ASCIIPath(t *testing.T) {
 		t.Fatalf("failed to create mock project dir: %v", err)
 	}
 
-	found := findProjectDir(homeDir, asciiWorkDir)
+	found := findProjectDir(filepath.Join(homeDir, ".claude"), asciiWorkDir)
 	if found != mockProjectDir {
 		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, asciiWorkDir, found, mockProjectDir)
 	}
@@ -488,7 +488,7 @@ func TestFindProjectDir_NotFound(t *testing.T) {
 	// Don't create any project directories
 
 	workDir := "/Users/test/Documents/nonexistent"
-	found := findProjectDir(homeDir, workDir)
+	found := findProjectDir(filepath.Join(homeDir, ".claude"), workDir)
 	if found != "" {
 		t.Errorf("findProjectDir for nonexistent project = %q, want empty string", found)
 	}
@@ -511,7 +511,7 @@ func TestFindProjectDir_ICloudPath(t *testing.T) {
 		t.Fatalf("failed to create mock project dir: %v", err)
 	}
 
-	found := findProjectDir(homeDir, iCloudWorkDir)
+	found := findProjectDir(filepath.Join(homeDir, ".claude"), iCloudWorkDir)
 	if found != mockProjectDir {
 		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, iCloudWorkDir, found, mockProjectDir)
 	}
@@ -833,7 +833,7 @@ func TestValidateSessionIDInProject_ValidSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projectDir, sessionID+".jsonl"), []byte("{}"), 0o644); err != nil {
 		t.Fatalf("write session file: %v", err)
 	}
-	if !validateSessionIDInProject(homeDir, workDir, sessionID) {
+	if !validateSessionIDInProject(filepath.Join(homeDir, ".claude"), workDir, sessionID) {
 		t.Errorf("validateSessionIDInProject(%q, %q) = false, want true", workDir, sessionID)
 	}
 }
@@ -853,7 +853,7 @@ func TestValidateSessionIDInProject_InvalidSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projectDir, "other-session.jsonl"), []byte("{}"), 0o644); err != nil {
 		t.Fatalf("write other session file: %v", err)
 	}
-	if validateSessionIDInProject(homeDir, workDir, "abc123-def456") {
+	if validateSessionIDInProject(filepath.Join(homeDir, ".claude"), workDir, "abc123-def456") {
 		t.Errorf("validateSessionIDInProject for missing session = true, want false")
 	}
 }
@@ -873,7 +873,7 @@ func TestValidateSessionIDInProject_EmptySessionID(t *testing.T) {
 // session ID could not possibly belong to it.
 func TestValidateSessionIDInProject_ProjectDirMissing(t *testing.T) {
 	homeDir := t.TempDir()
-	if validateSessionIDInProject(homeDir, "/nonexistent/path", "some-session-id") {
+	if validateSessionIDInProject(filepath.Join(homeDir, ".claude"), "/nonexistent/path", "some-session-id") {
 		t.Error("validateSessionIDInProject for missing project dir = true, want false")
 	}
 }
@@ -903,11 +903,11 @@ func TestValidateSessionIDInProject_CrossProjectLeak(t *testing.T) {
 	}
 
 	// Project B should NOT see projectA's session.
-	if validateSessionIDInProject(homeDir, projectB, sessionID) {
+	if validateSessionIDInProject(filepath.Join(homeDir, ".claude"), projectB, sessionID) {
 		t.Error("validateSessionIDInProject leaked project A's session into project B")
 	}
 	// Sanity: project A still sees its own.
-	if !validateSessionIDInProject(homeDir, projectA, sessionID) {
+	if !validateSessionIDInProject(filepath.Join(homeDir, ".claude"), projectA, sessionID) {
 		t.Error("validateSessionIDInProject rejected project A's own session")
 	}
 }
