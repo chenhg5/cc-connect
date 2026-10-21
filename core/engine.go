@@ -3684,9 +3684,9 @@ func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, reply
 
 // drainOrphanedQueue is called when a message was queued but the drain loop
 // has already exited. It processes all pending messages in the state, similar
-// to the drain loop in processInteractiveMessageWith but as a standalone
-// goroutine.
-func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir string, lockGen uint64) {
+// to the drain loop in processInteractiveMessageWith. A foreground turn
+// handing off a recovered queue supplies the replacement it observed.
+func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir string, lockGen uint64, expected ...*interactiveState) {
 	unlocked := false
 	defer func() {
 		if !unlocked {
@@ -3695,10 +3695,10 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	}()
 
 	e.interactiveMu.Lock()
-	state, hasState := e.interactiveStates[interactiveKey]
+	state := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 
-	if !hasState || state == nil {
+	if state == nil || (len(expected) > 0 && state != expected[0]) {
 		return
 	}
 	state.mu.Lock()
@@ -3723,7 +3723,7 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 		// fresh process for the first queued message; the new state adopts
 		// the rest of the queue and drains it in order.
 		state.mu.Lock()
-		if len(state.pendingMessages) == 0 {
+		if len(state.pendingMessages) == 0 || (hasAgentSession && state.busySession != session) {
 			state.mu.Unlock()
 			return
 		}
@@ -4460,17 +4460,17 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
 	stopTyping = nil // ownership transferred; prevent defer from double-stopping
-	// An agent can die while later messages are queued. Its cleanup leaves a
-	// placeholder with those messages; restart under this same session lock.
+	// A dead agent's replacement inherits the session whose lock owns its
+	// queue. A /new replacement has a separate turn and drains its own queue.
 	e.interactiveMu.Lock()
 	replacement := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 	if replacement != nil && replacement != state {
 		replacement.mu.Lock()
-		queued := len(replacement.pendingMessages) > 0
+		queued := replacement.busySession == session && len(replacement.pendingMessages) > 0
 		replacement.mu.Unlock()
 		if queued {
-			e.drainOrphanedQueue(session, sessions, interactiveKey, agent, workspaceDir, lockGen)
+			e.drainOrphanedQueue(session, sessions, interactiveKey, agent, workspaceDir, lockGen, replacement)
 			unlocked = true
 			return
 		}
@@ -5110,11 +5110,26 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 // same key wait on this registration (awaitSessionClose), so a new agent
 // process is never started while the previous one may still be alive.
 func (e *Engine) beginSessionClose(sessionKey string) func() {
+	return e.registerSessionClose(sessionKey, false)
+}
+
+// beginSessionReset guards the interval before cleanup reaches the process's
+// Close. A reset without a live process must not replace an existing teardown:
+// finishing that reset would otherwise unblock spawns while the process lives.
+func (e *Engine) beginSessionReset(sessionKey string) func() {
+	return e.registerSessionClose(sessionKey, true)
+}
+
+func (e *Engine) registerSessionClose(sessionKey string, preserveExisting bool) func() {
 	if sessionKey == "" {
 		return func() {}
 	}
-	done := make(chan struct{})
 	e.closingMu.Lock()
+	if preserveExisting && e.closingSessions[sessionKey] != nil {
+		e.closingMu.Unlock()
+		return func() {}
+	}
+	done := make(chan struct{})
 	if e.closingSessions == nil {
 		e.closingSessions = make(map[string]chan struct{})
 	}
@@ -8221,6 +8236,11 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		previousBusy = busySession != nil && busySession.Busy()
 	}
 
+	// Block spawns before publishing the new Session. Cleanup can block on
+	// reader shutdown or dropped-message notifications before it reaches Close
+	// and registers the process teardown itself.
+	finishClose := e.beginSessionReset(interactiveKey)
+
 	// Clear old session's agent session ID so it cannot be resumed
 	old := sessions.GetOrCreateActive(msg.SessionKey)
 	old.SetAgentSessionID("", "")
@@ -8231,6 +8251,7 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 
 	slog.Info("cmdNew: cleaning up old session", "session_key", msg.SessionKey)
 	e.cleanupInteractiveState(interactiveKey, oldState)
+	finishClose()
 	slog.Info("cmdNew: cleanup done", "session_key", msg.SessionKey)
 	e.closingMu.Lock()
 	closeUnconfirmed := e.unsafeResume[interactiveKey]
