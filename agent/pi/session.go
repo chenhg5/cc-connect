@@ -20,97 +20,168 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+// ── capped stderr writer ────────────────────────────────────
+
+// cappedStderrWriter wraps a bytes.Buffer with a maximum size to prevent
+// unbounded growth from stderr output in long-running RPC sessions.
+// Writes beyond the cap are silently discarded.
+type cappedStderrWriter struct {
+	buf bytes.Buffer
+}
+
+const maxStderrSize = 64 * 1024
+
+func (w *cappedStderrWriter) Write(p []byte) (int, error) {
+	if w.buf.Len() >= maxStderrSize {
+		return len(p), nil
+	}
+	n := maxStderrSize - w.buf.Len()
+	if len(p) > n {
+		p = p[:n]
+	}
+	return w.buf.Write(p)
+}
+
+func (w *cappedStderrWriter) String() string {
+	return w.buf.String()
+}
+
 // piSession manages a multi-turn pi coding agent conversation.
-// Each Send() spawns `pi --mode json -p <prompt>`.
-// Subsequent turns use `--session <sessionID>` to resume.
+// In "json" mode (default): each Send() spawns `pi --mode json` as a one-shot
+// process. No extension_ui support, no permission forwarding.
+// In "rpc" mode: spawns a persistent `pi --mode rpc` process with stdin/stdout
+// JSONL protocol, supporting extension_ui_request/response for permissions.
 type piSession struct {
 	cmd       string
+	extraArgs []string // extra args from cmd, prepended before pi args
 	workDir   string
 	model     string
-	mode      string
-	thinking  string // reasoning effort level for --thinking flag
+	mode      string // permission mode: "default" | "yolo"
+	thinking  string
+	rpc       bool // true = persistent RPC process, false = one-shot json mode
 	extraEnv  []string
 	attachDir string
 	events    chan core.Event
-	sessionID atomic.Value // stores string
+	sessionID atomic.Value
 	ctx       context.Context
 	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	wg        sync.WaitGroup // tracks readLoopRPC goroutine (RPC mode only)
+	sendWg    sync.WaitGroup // tracks in-flight Send() calls
 	alive     atomic.Bool
 
-	thinkingBuf strings.Builder // accumulates thinking_delta chunks
+	thinkingBuf strings.Builder
+	thinkingMu  sync.Mutex
+	modelsCW    map[string]int // cached from ~/.pi/agent/models.json
+	usageMu     sync.Mutex
+	lastUsage   *core.ContextUsage
+
+	// pendingErr buffers the most recent assistant errorMessage. Pi
+	// auto-retries transient provider failures (e.g. HTTP 429 rate limits)
+	// inside the same turn and announces this via agent_end.willRetry.
+	// Surfacing such errors immediately would make the engine fail the
+	// turn while Pi is still recovering it, and the retry outcome would
+	// be dropped as stale events. Only written from handleEvent, which
+	// runs on a single goroutine per mode.
+	pendingErr string
+
+	// RPC-only fields (nil/zero when rpc=false)
+	rpcCmd     *exec.Cmd
+	rpcStdin   io.WriteCloser
+	rpcStdinMu sync.Mutex
+	stderrBuf  cappedStderrWriter
+	rpcReady   chan struct{} // closed once after handleEvent stores sessionId from the get_state probe written by startRPC
+
+	// Extension UI: maps Pi's extension_ui_request id -> cc-connect RequestID
+	extPendingMu  sync.Mutex
+	extPending    map[string]string // Pi ext_ui_id -> cc-conn RequestID
+	extPendingRev map[string]string // cc-conn RequestID -> Pi ext_ui_id
+	extMethod     map[string]string // cc-conn RequestID -> method ("confirm"|"input"|"select")
 }
 
-func newPiSession(ctx context.Context, cmd, workDir, model, mode, thinking, resumeID string, extraEnv []string) (*piSession, error) {
-	sessionCtx, cancel := context.WithCancel(ctx)
+// stateProbeID is the request id used for the get_state probe that startRPC
+// writes to Pi's stdin immediately after spawning the process. Pi's RPC
+// protocol does not push session metadata on the stdout stream — the only
+// way to learn the session id is to send {"type":"get_state"} and parse the
+// matching response. By using a fixed sentinel id we can match the response
+// unambiguously even if other commands are in flight.
+const stateProbeID = "cc-connect-state-probe"
 
+// sessionIDReady reports whether the session id has been observed on the
+// pi side and stored. Used by readLoopRPC to decide when it is safe to
+// close rpcReady so callers (newPiSession, the engine) can read
+// CurrentSessionID() without racing the startup probe.
+func (s *piSession) sessionIDReady() bool {
+	v, _ := s.sessionID.Load().(string)
+	return v != ""
+}
+
+// ── Constructor ──────────────────────────────────────────────
+
+func newPiSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, thinking string, rpc bool, resumeID string, extraEnv []string) (*piSession, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	s := &piSession{
-		cmd:      cmd,
-		workDir:  workDir,
-		model:    model,
-		mode:     mode,
-		thinking: thinking,
-		extraEnv: extraEnv,
-		attachDir: filepath.Join(workDir, ".cc-connect", "attachments",
-			fmt.Sprintf("pi_%d", time.Now().UnixNano())),
-		events: make(chan core.Event, 64),
-		ctx:    sessionCtx,
-		cancel: cancel,
+		cmd:       cmd,
+		extraArgs: extraArgs,
+		workDir:   workDir,
+		model:     model,
+		mode:      mode,
+		thinking:  thinking,
+		rpc:       rpc,
+		extraEnv:  extraEnv,
+		attachDir: filepath.Join(workDir, ".cc-connect", "attachments", fmt.Sprintf("pi_%d", time.Now().UnixNano())),
+		events:    make(chan core.Event, 64),
+		ctx:       ctx,
+		cancel:    cancel,
+		modelsCW:  loadModelsContextWindows(),
 	}
 	s.alive.Store(true)
 
-	if resumeID != "" && resumeID != core.ContinueSession {
+	if rpc {
+		s.rpcReady = make(chan struct{})
+		s.extPending = make(map[string]string)
+		s.extPendingRev = make(map[string]string)
+		s.extMethod = make(map[string]string)
+
+		if err := s.startRPC(resumeID); err != nil {
+			cancel()
+			return nil, fmt.Errorf("pi: start rpc: %w", err)
+		}
+
+		// Wait for first JSON line (indicates RPC loop is live)
+		select {
+		case <-s.rpcReady:
+		case <-time.After(30 * time.Second):
+			s.killRPC()
+			cancel()
+			return nil, fmt.Errorf("pi: rpc process did not become ready within 30s")
+		case <-ctx.Done():
+			s.killRPC()
+			return nil, fmt.Errorf("pi: context cancelled while waiting for rpc ready")
+		}
+	} else if resumeID != "" && resumeID != core.ContinueSession {
+		// JSON mode: set the session ID directly since we don't spawn a process
+		// that would emit a session event.
 		s.sessionID.Store(resumeID)
 	}
 
 	return s, nil
 }
 
-func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
-	// Keep attachments isolated per session so concurrent sessions in the same
-	// workDir cannot delete files that another Pi process still references.
-	cleanAttachments(s.attachDir)
+// ── RPC process helpers (rpc=true) ──────────────────────────
 
-	// Save all attachments to disk — pi reads them via @file syntax.
-	var atFiles []string
-	if len(images) > 0 {
-		atFiles = append(atFiles, saveImagesToDisk(s.attachDir, images)...)
+func (s *piSession) startRPC(resumeID string) error {
+	args := append(append([]string{}, s.extraArgs...), "--mode", "rpc")
+	if resumeID != "" {
+		args = append(args, "--session-id", resumeID)
 	}
-	if len(files) > 0 {
-		atFiles = append(atFiles, saveFilesToDisk(s.attachDir, files)...)
-	}
-	if !s.alive.Load() {
-		return fmt.Errorf("session is closed")
-	}
-
-	args := []string{"--mode", "json", "-p"}
-
-	sid := s.CurrentSessionID()
-	if sid != "" {
-		args = append(args, "--session", sid)
-	}
-
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
-
-	if s.mode == "yolo" {
-		args = append(args, "--auto-approve")
-	}
-
 	if s.thinking != "" {
 		args = append(args, "--thinking", s.thinking)
 	}
 
-	// Pass attachments as @file arguments
-	for _, f := range atFiles {
-		args = append(args, "@"+f)
-	}
-
-	// Append prompt as positional arg
-	args = append(args, prompt)
-
-	slog.Debug("piSession: launching", "resume", sid != "", "args", core.RedactArgs(args))
+	slog.Debug("piSession: starting RPC", "cmd", s.cmd, "args", args)
 
 	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
 	cmd.Dir = s.workDir
@@ -120,47 +191,80 @@ func (s *piSession) Send(prompt string, images []core.ImageAttachment, files []c
 	}
 	cmd.Env = env
 
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("stdin pipe: %w", err)
+	}
+	s.rpcStdin = stdinPipe
+	s.rpcCmd = cmd
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("piSession: stdout pipe: %w", err)
+		return fmt.Errorf("stdout pipe: %w", err)
 	}
+	cmd.Stderr = &s.stderrBuf
 
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	prepareCmdForKill(cmd)
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("piSession: start: %w", err)
+		return fmt.Errorf("start: %w", err)
 	}
 
 	s.wg.Add(1)
-	go s.readLoop(cmd, stdout, &stderrBuf)
+	go s.readLoopRPC(stdout)
+
+	// Pi's RPC protocol does not push a "session" event on stdout — the only
+	// way to learn the session id is to send {"type":"get_state"} and parse
+	// the matching response in handleEvent. We probe immediately after spawn
+	// so that newPiSession's wait on rpcReady only unblocks once the id has
+	// been stored. readLoopRPC closes rpcReady as soon as sessionIDReady()
+	// flips to true (which happens after handleEvent processes the response),
+	// so callers can safely read CurrentSessionID() the moment rpcReady fires.
+	//
+	// If the probe write fails, the session is unrecoverable: without the
+	// session id we cannot resume after /stop, which is the very bug we are
+	// fixing. Bail out immediately and let the caller surface the error
+	// instead of waiting for the 30s rpcReady timeout.
+	if err := s.writeRPCCommand(map[string]any{
+		"type": "get_state",
+		"id":   stateProbeID,
+	}); err != nil {
+		slog.Warn("piSession: failed to write get_state probe; aborting RPC start", "error", err)
+		s.killRPC()
+		return fmt.Errorf("piSession: write get_state probe: %w", err)
+	}
 
 	return nil
 }
 
-func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
-	defer s.wg.Done()
-	defer func() {
-		if err := cmd.Wait(); err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			if stderrMsg != "" {
-				slog.Error("piSession: process failed", "error", err, "stderr", truncStr(stderrMsg, 200))
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				select {
-				case s.events <- evt:
-				case <-s.ctx.Done():
-					return
-				}
-			}
+func (s *piSession) killRPC() {
+	if s.rpcCmd != nil && s.rpcCmd.Process != nil {
+		if err := forceKillCmd(s.rpcCmd); err != nil {
+			slog.Warn("piSession: kill rpc process", "error", err)
 		}
-	}()
+		_, _ = s.rpcCmd.Process.Wait()
+	}
+}
 
-	// Pi's JSON events are small (typically <1KB each). A 10MB Scanner buffer
-	// is more than sufficient — no need for the bufio.Reader approach used by
-	// adapters that may receive very large single-line responses.
+// readLoopRPC is the persistent RPC readLoop goroutine.
+// One instance runs for the lifetime of the RPC process.
+func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
+	defer s.wg.Done()
+	defer func() { _ = stdout.Close() }()
+
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
+	// rpcReady is closed exactly once, after handleEvent stores the session
+	// id from the get_state probe that startRPC wrote. We cannot use the
+	// first line as the trigger: the first line is usually an
+	// extension_ui_request from a running extension (plan-mode, presets,
+	// etc.) and would fire before the session id arrives, letting callers
+	// observe an empty CurrentSessionID(). handleEvent always runs before
+	// this check, so the moment we close rpcReady the id is guaranteed to
+	// be loaded — that's the same invariant the previous fix (which used
+	// the first line) tried to establish, just bound to the right event.
+	stateFetched := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -174,7 +278,16 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 		}
 
 		s.handleEvent(raw)
+
+		if !stateFetched && s.sessionIDReady() {
+			stateFetched = true
+			close(s.rpcReady)
+		}
 	}
+
+	// Process exited — reap the child and signal the engine.
+	// killRPC (now with Wait()) ensures the zombie is collected.
+	s.killRPC()
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("piSession: scanner error", "error", err)
@@ -182,35 +295,291 @@ func (s *piSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *byt
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
-			return
 		}
 	}
 
-	// Emit EventResult when the process finishes.
+	// Signal process death to the engine (unless Close() already did).
+	// Following the claudecode finishReadLoop pattern: always set alive=false,
+	// and emit EventError with the captured stderr when present.
+	// All writes to s.events happen before the deferred wg.Done(), so
+	// Close()'s wg.Wait() → close(s.events) is correctly ordered.
+	stderrMsg := strings.TrimSpace(s.stderrBuf.String())
+	if stderrMsg != "" {
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("pi: %s", stderrMsg)}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+	}
+	s.alive.Store(false)
+}
+
+// ── Send ─────────────────────────────────────────────────────
+
+// Send writes a prompt to the Pi agent.
+// In json mode (default): spawns a one-shot `pi --mode json` process.
+// In rpc mode: writes a "prompt" command to the persistent RPC process stdin.
+func (s *piSession) Send(msg string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	s.sendWg.Add(1)
+	defer s.sendWg.Done()
+
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+
+	attachDir := s.attachDir
+	if safeMessageID := sanitizePiAttachmentName(messageID); safeMessageID != "" {
+		attachDir = filepath.Join(attachDir, safeMessageID)
+	}
+	cleanAttachments(attachDir)
+
+	// Issue #1723: images are passed via pi's @<path> argv / message-text
+	// mechanism. pi's processImage loads them as visual inputs and the
+	// bytes never enter our prompt text.
+	//
+	// Issue #1767: non-image files are NOT passed via @<path>. pi's
+	// processFileArguments reads every @<path> file's full UTF-8 contents
+	// and inlines them into the prompt the model sees. For a >~1MB text
+	// attachment this can blow the model's context and trigger a 400 from
+	// the provider. Mirror the claudecode behaviour: save non-image files
+	// to disk and tell the model where they live via a plain path
+	// reference; pi's own file-reading tools will load only the bytes the
+	// model actually needs.
+	var imageAtFiles []string
+	if len(images) > 0 {
+		imageAtFiles = append(imageAtFiles, saveImagesToDisk(attachDir, images)...)
+	}
+	var filePaths []string
+	if len(files) > 0 {
+		filePaths = append(filePaths, saveFilesToDisk(attachDir, files)...)
+	}
+
+	if s.rpc {
+		return s.sendRPC(msg, imageAtFiles, filePaths)
+	}
+	return s.sendJSON(msg, imageAtFiles, filePaths)
+}
+
+// sendJSON spawns `pi --mode json -p <prompt>` as a one-shot process,
+// reads all output events, and sends them to the events channel.
+//
+// Issue #1723: image paths are passed as @<path> argv entries (Pi's
+// standard mechanism). Embedding the image bytes into -p would crash
+// execve on NUL bytes, and would also break pi's vision pipeline which
+// needs to know the file is on disk rather than be handed raw bytes.
+//
+// Issue #1767: filePaths (non-image attachments) are NOT passed as
+// @<path>. We append a plain "Files saved locally, please read them: …"
+// trailer to the prompt instead — pi's processFileArguments would
+// otherwise inline the entire UTF-8 contents into the prompt the model
+// sees, which triggers a 400 for files larger than the model's context.
+func (s *piSession) sendJSON(prompt string, imageAtFiles []string, filePaths []string) error {
+	args := buildJSONArgs(s.extraArgs, promptWithFileRefs(prompt, filePaths), s.CurrentSessionID(), s.model, s.thinking, imageAtFiles)
+
+	slog.Debug("piSession: spawning json mode", "cmd", s.cmd, "sessionID", s.CurrentSessionID())
+
+	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
+	cmd.Dir = s.workDir
+	env := os.Environ()
+	if len(s.extraEnv) > 0 {
+		env = core.MergeEnv(env, s.extraEnv)
+	}
+	cmd.Env = env
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+
+	// Read events from process output
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			slog.Debug("piSession: non-JSON line", "line", truncStr(line, 100))
+			continue
+		}
+		s.handleEvent(raw)
+	}
+
+	err = cmd.Wait()
+	if err != nil {
+		slog.Error("piSession: process error", "cmd", s.cmd, "error", err, "stderr", stderrBuf.String())
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("pi: %s: %w", strings.TrimSpace(stderrBuf.String()), err)}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+	}
+
+	// Signal turn completion. Flush a deferred terminal error first in
+	// case the process exited without a final non-retry agent_end (the
+	// agent_end handler normally flushes pendingErr already).
+	if s.pendingErr != "" {
+		errEvt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", s.pendingErr)}
+		s.pendingErr = ""
+		select {
+		case s.events <- errEvt:
+		case <-s.ctx.Done():
+		}
+	}
 	sid := s.CurrentSessionID()
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
 	}
+
+	return nil
 }
 
-// Pi NDJSON event types:
+// writeRPCCommand marshals cmd as a single JSONL line and writes it to the
+// RPC process's stdin under rpcStdinMu. Used by both sendRPC (for "prompt"
+// commands during a turn) and startRPC (for the startup "get_state" probe
+// that fetches the session id before callers are released).
+func (s *piSession) writeRPCCommand(cmd map[string]any) error {
+	b, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("piSession: marshal command: %w", err)
+	}
+	b = append(b, '\n')
+
+	s.rpcStdinMu.Lock()
+	_, err = s.rpcStdin.Write(b)
+	s.rpcStdinMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("piSession: write stdin: %w", err)
+	}
+	return nil
+}
+
+// sendRPC writes a JSON "prompt" command to the persistent RPC process stdin.
+// Events are read asynchronously by readLoopRPC, including agent_end which
+// triggers EventResult.
 //
-//	session           — session metadata with id
-//	agent_start/end   — agent lifecycle
-//	turn_start/end    — turn boundaries
-//	message_start     — beginning of user/assistant/toolResult message
-//	message_update    — streaming deltas (assistantMessageEvent sub-events)
-//	message_end       — complete message
+// Issue #1723: image paths are embedded into the message text as
+// @<path> references (pi's standard mechanism, parsed the same way as in
+// json mode). The rpc stdin pipe doesn't crash on NUL bytes, but the
+// model still needs to load the images from disk — embedding raw bytes
+// in the message field would give the model text-shaped garbage instead
+// of a real visual input.
+//
+// Issue #1767: filePaths (non-image attachments) are NOT @<path>'d.
+// pi's processFileArguments would inline their full UTF-8 contents into
+// the message text the model sees; we append a plain "Files saved
+// locally, please read them: …" trailer instead so pi's own file
+// tools load only what the model actually needs.
+func (s *piSession) sendRPC(prompt string, imageAtFiles []string, filePaths []string) error {
+	cmd := map[string]any{
+		"type":    "prompt",
+		"message": composeRPCPrompt(promptWithFileRefs(prompt, filePaths), imageAtFiles),
+	}
+	slog.Debug("piSession: sending RPC prompt", "bytes", len(prompt))
+	return s.writeRPCCommand(cmd)
+}
+
+// promptWithFileRefs appends a plain-text trailer that tells the model
+// where non-image attachments were saved on disk. Pulled out of Send()
+// so the Issue #1767 regression test can assert that the path strings
+// appear in the prompt without inlining file bytes.
+//
+// The trailer mirrors the wording cc-connect uses for the claudecode
+// agent so users see consistent phrasing across runtimes. Paths are
+// joined with ", " and wrapped in parentheses to make the boundary with
+// the original prompt text unambiguous.
+//
+// Returns prompt unchanged when filePaths is empty — we do NOT emit an
+// empty "Files saved locally" trailer because an assistant model could
+// interpret that as a request to attach something that isn't there.
+func promptWithFileRefs(prompt string, filePaths []string) string {
+	if len(filePaths) == 0 {
+		return prompt
+	}
+	return prompt + "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
+}
+
+// composeRPCPrompt builds the rpc-mode message text, appending
+// "@<path>" references for any attachments. Pulled out of sendRPC so
+// the Issue #1723 attachment refactor is unit-testable without a live
+// rpc process.
+//
+// The format is stable on purpose:
+//   - a blank line separates the user's text from the attachment list
+//   - "Attachments:" header mirrors pi's CLI help so users see
+//     consistent wording whether they invoke the binary directly or
+//     via cc-connect
+//   - each @<path> is on its own line in the same order as atFiles
+//
+// When atFiles is empty the original prompt is returned unchanged —
+// we do NOT emit an empty "Attachments:" header, because an
+// assistant model could interpret that as a request to attach
+// something.
+func composeRPCPrompt(prompt string, atFiles []string) string {
+	if len(atFiles) == 0 {
+		return prompt
+	}
+	var b strings.Builder
+	b.WriteString(prompt)
+	b.WriteString("\n\nAttachments:\n")
+	for _, f := range atFiles {
+		b.WriteString("@")
+		b.WriteString(f)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// ── Event Handling (shared by both modes) ───────────────────
+
 func (s *piSession) handleEvent(raw map[string]any) {
 	eventType, _ := raw["type"].(string)
 
 	switch eventType {
 	case "session":
+		// Kept as a defensive fallback: if a future Pi RPC build starts
+		// pushing {"type":"session",...} on stdout (mirroring its on-disk
+		// jsonl format), we capture the id. Today Pi only sends the id in
+		// response to get_state, which is handled by the "response" branch
+		// below. See stateProbeID for the full rationale.
 		if id, ok := raw["id"].(string); ok && id != "" {
 			s.sessionID.Store(id)
-			slog.Debug("piSession: session started", "session_id", id)
+		}
+
+	case "response":
+		// Startup probe response: matches the get_state request id set by
+		// startRPC. Stores sessionId so readLoopRPC can close rpcReady and
+		// the engine can persist it via the next EventResult.SessionID.
+		if id, _ := raw["id"].(string); id == stateProbeID {
+			success, _ := raw["success"].(bool)
+			if !success {
+				errMsg, _ := raw["error"].(string)
+				slog.Warn("piSession: get_state probe returned failure; session id will be empty",
+					"error", errMsg, "raw", raw)
+				break
+			}
+			data, ok := raw["data"].(map[string]any)
+			if !ok {
+				slog.Warn("piSession: get_state probe response missing data field; session id will be empty", "raw", raw)
+				break
+			}
+			sid, _ := data["sessionId"].(string)
+			if sid == "" {
+				slog.Warn("piSession: get_state probe data.sessionId is empty", "raw", raw)
+				break
+			}
+			s.sessionID.Store(sid)
+			slog.Debug("piSession: state probe stored sessionId", "sessionId", sid)
 		}
 
 	case "message_update":
@@ -219,61 +588,359 @@ func (s *piSession) handleEvent(raw map[string]any) {
 	case "message_end":
 		s.handleMessageEnd(raw)
 
-	case "agent_start", "agent_end", "turn_start", "turn_end", "message_start":
-		// Logged for debugging but no action needed.
-		slog.Debug("piSession: lifecycle event", "type", eventType)
+	case "agent_end":
+		s.handleAgentEnd(raw)
+		if willRetry, _ := raw["willRetry"].(bool); willRetry {
+			// Pi is auto-retrying a transient failure (e.g. 429) inside
+			// this turn: it emits agent_end with willRetry=true, then
+			// re-runs the agent loop and emits a fresh agent_start /
+			// agent_end cycle. Keep the turn open and wait for the
+			// retry outcome instead of closing the turn on a failure
+			// Pi is about to recover from.
+			break
+		}
+		if s.pendingErr != "" {
+			// Turn is really over and the last assistant message failed:
+			// surface the deferred error before closing the turn.
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", s.pendingErr)}
+			s.pendingErr = ""
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+		}
+		if s.rpc {
+			// RPC mode: agent_end marks turn completion; json mode relies
+			// on process exit to emit EventResult.
+			sid := s.CurrentSessionID()
+			evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+		}
 
+	case "compaction_start":
+		// Pi fires this when ctx.compact() begins (slash command or
+		// turn_end threshold). The active extension typically notifies the
+		// user directly, so we don't surface a platform-visible event here
+		// — just stop logging it as "unrecognized event type" in DEBUG.
+		slog.Debug("piSession: compaction started")
+
+	case "compaction_end":
+		// Pi fires this when ctx.compact() finishes. ctx.compact() is
+		// fire-and-forget: it never sends agent_end, because compaction
+		// runs out-of-band with the agent loop. Extensions that drive
+		// ctx.compact() (e.g. cc-connect-compact.ts, trigger-compact.ts)
+		// handle their own user feedback via stdout synth events and the
+		// normal slash-command path returns immediately.
+		//
+		// Two things happen here:
+		//
+		// 1. If pi reports an errorMessage, emit EventError. This covers
+		//    compaction paths that have no extension to surface the error
+		//    to the user (e.g. trigger-compact.ts only calls ctx.ui.notify,
+		//    which cc-connect drops in RPC mode). pi's errorMessage is
+		//    usually self-describing ("Compaction failed: Nothing to compact
+		//    (session too small)"), so we pass it through verbatim — no
+		//    additional prefix — to avoid "Error: compaction failed:
+		//    Compaction failed: ..." in the platform message.
+		//
+		// 2. Always emit EventResult. Without it, two scenarios hang
+		//    forever in processInteractiveEvents:
+		//      (a) trigger-compact: handler returns without await, so no
+		//          synthetic agent_end ever lands on stdout.
+		//      (b) cc-connect-compact: an extension that crashes, races a
+		//          kill, or simply omits the finally-synthesized agent_end
+		//          leaves the turn open.
+		//    JSON mode (json one-shot) is unaffected — process exit is the
+		//    turn-end marker there, and compaction_end has no special meaning.
+		//
+		// Duplicate EventResult (when both agent_end and compaction_end
+		// close the same turn) is safe: processInteractiveEvents only
+		// sends a message to the platform when fullResponse has accumulated
+		// text in the second pass, which is empty for out-of-band
+		// compactions. The only side effect is a redundant
+		// ws.BeginTurn/EndTurn pair, accepted as belt-and-suspenders.
+		if errMsg, _ := raw["errorMessage"].(string); errMsg != "" {
+			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+		}
+		if s.rpc {
+			sid := s.CurrentSessionID()
+			evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+		}
+
+	case "extension_ui_request":
+		if s.rpc {
+			s.handleExtensionUIRequest(raw)
+		}
+
+	// Informational — no events produced
+	case "agent_start", "turn_start", "turn_end", "message_start", "extension_error":
 	default:
-		slog.Debug("piSession: unhandled event", "type", eventType)
+		slog.Debug("piSession: unrecognized event type", "type", eventType, "raw", raw)
 	}
 }
 
-// handleMessageUpdate processes streaming deltas from pi's assistantMessageEvent.
-func (s *piSession) handleMessageUpdate(raw map[string]any) {
-	ame, _ := raw["assistantMessageEvent"].(map[string]any)
-	if ame == nil {
+func (s *piSession) handleExtensionUIRequest(raw map[string]any) {
+	id, _ := raw["id"].(string)
+	method, _ := raw["method"].(string)
+	if id == "" {
+		slog.Warn("piSession: extension_ui_request without id")
 		return
 	}
 
-	subType, _ := ame["type"].(string)
-
-	switch subType {
-	case "text_delta":
-		delta, _ := ame["delta"].(string)
-		if delta != "" {
-			evt := core.Event{Type: core.EventText, Content: delta}
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
-				return
-			}
-		}
-
-	case "thinking_delta":
-		delta, _ := ame["delta"].(string)
-		if delta != "" {
-			s.thinkingBuf.WriteString(delta)
-		}
-
-	case "thinking_end":
-		if s.thinkingBuf.Len() > 0 {
-			evt := core.Event{Type: core.EventThinking, Content: s.thinkingBuf.String()}
-			s.thinkingBuf.Reset()
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
-				return
-			}
-		}
-
-	case "toolcall_end":
-		// Extract tool name and input from the accumulated message content.
-		s.emitToolFromMessage(ame)
+	switch method {
+	case "confirm":
+		s.forwardConfirm(id, raw)
+	case "input":
+		s.forwardInput(id, raw)
+	case "select":
+		s.forwardSelect(id, raw)
+	default:
+		slog.Debug("piSession: extension_ui_request (unhandled)", "method", method)
 	}
 }
 
-// emitToolFromMessage extracts tool call info from a toolcall_end event.
+func (s *piSession) forwardConfirm(id string, raw map[string]any) {
+	title, _ := raw["title"].(string)
+	message, _ := raw["message"].(string)
+
+	requestID := fmt.Sprintf("pi_ext_%s", id)
+
+	s.extPendingMu.Lock()
+	s.extPending[id] = requestID
+	s.extPendingRev[requestID] = id
+	s.extMethod[requestID] = "confirm"
+	s.extPendingMu.Unlock()
+
+	evt := core.Event{
+		Type:      core.EventPermissionRequest,
+		RequestID: requestID,
+		ToolName:  "extension_confirm",
+		ToolInput: fmt.Sprintf("%s: %s", title, truncStr(message, 200)),
+		ToolInputRaw: map[string]any{
+			"title":   title,
+			"message": message,
+			"method":  "confirm",
+		},
+		// extension_confirm is treated as a regular permission request by
+		// the engine (Allow/Deny card), NOT an AskUserQuestion button card.
+		// Extensions use ctx.ui.confirm() to ask the user for permission on
+		// a tool call (e.g. permission-gate on Bash). Routing it through the
+		// AskUserQuestion flow produced a Yes/No question card, which
+		// doesn't match the UX of other agents' permission prompts.
+	}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+		slog.Warn("piSession: context done while forwarding confirm")
+	}
+}
+
+func (s *piSession) forwardInput(id string, raw map[string]any) {
+	title, _ := raw["title"].(string)
+	placeholder, _ := raw["placeholder"].(string)
+
+	requestID := fmt.Sprintf("pi_ext_%s", id)
+
+	s.extPendingMu.Lock()
+	s.extPending[id] = requestID
+	s.extPendingRev[requestID] = id
+	s.extMethod[requestID] = "input"
+	s.extPendingMu.Unlock()
+
+	evt := core.Event{
+		Type:      core.EventPermissionRequest,
+		RequestID: requestID,
+		ToolName:  "extension_input",
+		ToolInput: fmt.Sprintf("%s [%s]", title, placeholder),
+		ToolInputRaw: map[string]any{
+			"title":       title,
+			"placeholder": placeholder,
+			"method":      "input",
+		},
+	}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	}
+}
+
+func (s *piSession) forwardSelect(id string, raw map[string]any) {
+	title, _ := raw["title"].(string)
+	options, _ := raw["options"].([]any)
+
+	// Pi Agent sends options in either of two shapes:
+	//   - []string                         ("Red", "Green", "Blue")
+	//   - []map[string]any                 ([{label:"Red", description:"..."}])
+	// The object form carries an optional description which cc-connect's
+	// AskUserQuestion card layout renders as a full-width markdown line
+	// under each option (the long-description fix in core/engine.go). If we
+	// only accepted strings here, any object option would be silently dropped
+	// — the user's TUI sees the description, but cc-connect never forwards
+	// it to the engine, so the Feishu card renders label-only. Accept both
+	// shapes for forward compatibility.
+	userOpts := make([]core.UserQuestionOption, 0, len(options))
+	for _, opt := range options {
+		switch v := opt.(type) {
+		case string:
+			// String form: the string IS the label.
+			userOpts = append(userOpts, core.UserQuestionOption{Label: v})
+		case map[string]any:
+			// Object form: extract label + optional description. Label
+			// carries the option's value verbatim so resolveAskQuestionAnswer
+			// → result.Message maps back to the same string the extension
+			// passed in.
+			label, _ := v["label"].(string)
+			if label == "" {
+				label, _ = v["text"].(string)
+			}
+			if label == "" {
+				label, _ = v["name"].(string)
+			}
+			desc, _ := v["description"].(string)
+			if desc == "" {
+				desc, _ = v["preview"].(string)
+			}
+			if label == "" {
+				slog.Warn("piSession: option missing label in extension_select",
+					"id", id)
+				continue
+			}
+			userOpts = append(userOpts, core.UserQuestionOption{
+				Label:       label,
+				Description: desc,
+			})
+		default:
+			slog.Warn("piSession: unsupported option type in extension_select",
+				"id", id, "type", fmt.Sprintf("%T", opt))
+		}
+	}
+
+	requestID := fmt.Sprintf("pi_ext_%s", id)
+
+	s.extPendingMu.Lock()
+	s.extPending[id] = requestID
+	s.extPendingRev[requestID] = id
+	s.extMethod[requestID] = "select"
+	s.extPendingMu.Unlock()
+
+	questionText := title
+	if questionText == "" {
+		questionText = "Select an option"
+	}
+
+	// ToolInput carries a short label-only summary for the engine's tool-use
+	// stream; the rich per-option content (with descriptions) lives in the
+	// Questions field below, which cc-connect's card layout renders.
+	labelSummary := make([]string, 0, len(userOpts))
+	for _, o := range userOpts {
+		labelSummary = append(labelSummary, o.Label)
+	}
+	evt := core.Event{
+		Type:      core.EventPermissionRequest,
+		RequestID: requestID,
+		ToolName:  "extension_select",
+		ToolInput: fmt.Sprintf("%s [%s]", title, strings.Join(labelSummary, ", ")),
+		ToolInputRaw: map[string]any{
+			"title":   title,
+			"options": labelSummary,
+			"method":  "select",
+		},
+		Questions: []core.UserQuestion{{
+			Question:    questionText,
+			Header:      "Select",
+			Options:     userOpts,
+			MultiSelect: false,
+		}},
+	}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+	}
+}
+
+// ── Message event handlers ──────────────────────────────────
+
+func (s *piSession) handleMessageUpdate(raw map[string]any) {
+	msg, _ := raw["assistantMessageEvent"].(map[string]any)
+	if msg == nil {
+		return
+	}
+	msgType, _ := msg["type"].(string)
+
+	switch msgType {
+	case "text_delta":
+		delta, _ := msg["delta"].(string)
+		if delta == "" {
+			return
+		}
+		evt := core.Event{Type: core.EventText, Content: delta}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+
+	case "thinking_delta":
+		delta, _ := msg["delta"].(string)
+		if delta == "" {
+			return
+		}
+		s.thinkingMu.Lock()
+		s.thinkingBuf.WriteString(delta)
+		s.thinkingMu.Unlock()
+
+	case "thinking_end":
+		s.thinkingMu.Lock()
+		if s.thinkingBuf.Len() == 0 {
+			s.thinkingMu.Unlock()
+			return
+		}
+		evt := core.Event{Type: core.EventThinking, Content: s.thinkingBuf.String()}
+		s.thinkingBuf.Reset()
+		s.thinkingMu.Unlock()
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+
+	case "toolcall_end":
+		s.emitToolFromMessage(msg)
+	}
+}
+
 func (s *piSession) emitToolFromMessage(ame map[string]any) {
+	// pi >= 0.84.0: message_update emits only assistantMessageEvent deltas
+	// (the cumulative message and assistantMessageEvent.partial were removed
+	// to make JSON/RPC streaming output linear). toolcall_end now carries the
+	// complete toolCall object directly, so read it before falling back to
+	// the pre-0.84.0 message/partial snapshots. (toolCall has carried the
+	// same finalized block on every released pi version, so the fast path
+	// always wins; the fallback is a defensive safety net.)
+	if tc, ok := ame["toolCall"].(map[string]any); ok {
+		if itemType, _ := tc["type"].(string); itemType == "toolCall" {
+			name, _ := tc["name"].(string)
+			input := extractToolInput(tc)
+			evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: input}
+			select {
+			case s.events <- evt:
+			case <-s.ctx.Done():
+			}
+			return
+		}
+		// type != "toolCall" cannot happen on the real pi wire; fall through
+		// to the pre-0.84.0 snapshot path rather than silently dropping.
+	}
+
 	msg, _ := ame["message"].(map[string]any)
 	if msg == nil {
 		msg, _ = ame["partial"].(map[string]any)
@@ -283,7 +950,7 @@ func (s *piSession) emitToolFromMessage(ame map[string]any) {
 	}
 
 	content, _ := msg["content"].([]any)
-	idx := int(0)
+	idx := 0
 	if ci, ok := ame["contentIndex"].(float64); ok {
 		idx = int(ci)
 	}
@@ -299,20 +966,17 @@ func (s *piSession) emitToolFromMessage(ame map[string]any) {
 				select {
 				case s.events <- evt:
 				case <-s.ctx.Done():
-					return
 				}
 			}
 		}
 	}
 }
 
-// handleMessageEnd processes completed messages — particularly toolResult messages.
 func (s *piSession) handleMessageEnd(raw map[string]any) {
 	msg, _ := raw["message"].(map[string]any)
 	if msg == nil {
 		return
 	}
-
 	role, _ := msg["role"].(string)
 
 	switch role {
@@ -320,63 +984,227 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 		toolName, _ := msg["toolName"].(string)
 		content, _ := msg["content"].([]any)
 		var output string
-		for _, c := range content {
-			if item, ok := c.(map[string]any); ok {
+		if len(content) > 0 {
+			if item, ok := content[0].(map[string]any); ok {
 				if text, ok := item["text"].(string); ok {
 					output = text
-					break
 				}
 			}
 		}
-		evt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncStr(output, 500)}
+		if output == "" {
+			output = extractToolResult(msg)
+		}
+		evt := core.Event{
+			Type:     core.EventToolResult,
+			ToolName: toolName,
+			Content:  truncStr(output, 500),
+		}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
-			return
 		}
 
 	case "assistant":
-		// Check for errors
-		if errMsg, _ := msg["errorMessage"].(string); errMsg != "" {
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
-				return
-			}
+		if errMsg, ok := msg["errorMessage"].(string); ok && errMsg != "" {
+			// Defer surfacing: Pi may auto-retry this turn (announced
+			// via agent_end.willRetry). The buffered error is flushed
+			// by the agent_end handler once the turn truly ends, or by
+			// sendJSON on process exit.
+			s.pendingErr = errMsg
+		} else {
+			// A healthy assistant message supersedes any earlier error
+			// that Pi has already retried successfully.
+			s.pendingErr = ""
 		}
 	}
 }
 
-// extractToolInput pulls a concise summary from a tool call content item.
-func extractToolInput(item map[string]any) string {
-	args, _ := item["arguments"].(map[string]any)
-	if args == nil {
-		return ""
+func extractToolResult(msg map[string]any) string {
+	content, _ := msg["content"].([]any)
+	for _, c := range content {
+		if item, ok := c.(map[string]any); ok {
+			// Look for the "text" key first; fall back to any string field.
+			if text, ok := item["text"].(string); ok && text != "" {
+				return text
+			}
+			if output, ok := item["output"].(string); ok && output != "" {
+				return output
+			}
+			if content, ok := item["content"].(string); ok && content != "" {
+				return content
+			}
+		}
 	}
-	// Prefer description or command fields.
-	if desc, ok := args["description"].(string); ok && desc != "" {
-		return desc
-	}
-	if cmd, ok := args["command"].(string); ok && cmd != "" {
-		return cmd
-	}
-	if fp, ok := args["file_path"].(string); ok && fp != "" {
-		return fp
-	}
-	if pattern, ok := args["pattern"].(string); ok && pattern != "" {
-		return pattern
-	}
-	if query, ok := args["query"].(string); ok && query != "" {
-		return query
-	}
-	b, _ := json.Marshal(args)
-	return truncStr(string(b), 200)
+	return ""
 }
 
-func (s *piSession) RespondPermission(_ string, _ core.PermissionResult) error {
+func (s *piSession) handleAgentEnd(raw map[string]any) {
+	msgs, _ := raw["messages"].([]any)
+	if len(msgs) == 0 {
+		return
+	}
+
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg, _ := msgs[i].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		role, _ := msg["role"].(string)
+		if role != "assistant" {
+			continue
+		}
+		usageRaw, _ := msg["usage"].(map[string]any)
+		if usageRaw == nil {
+			continue
+		}
+
+		model, _ := msg["model"].(string)
+		inputTokens, _ := usageRaw["input"].(float64)
+		outputTokens, _ := usageRaw["output"].(float64)
+		cacheReadTokens, _ := usageRaw["cacheRead"].(float64)
+		cacheWriteTokens, _ := usageRaw["cacheWrite"].(float64)
+
+		input := int(inputTokens)
+		output := int(outputTokens)
+		cr := int(cacheReadTokens)
+		cw := int(cacheWriteTokens)
+
+		used := input + cr + cw
+		total := used + output
+		var ctxWindow int
+		if model != "" && s.modelsCW != nil {
+			if cwVal, ok := s.modelsCW[model]; ok {
+				ctxWindow = cwVal
+			}
+		}
+		if ctxWindow == 0 {
+			ctxWindow = 200_000
+		}
+
+		usage := &core.ContextUsage{
+			UsedTokens:               used,
+			TotalTokens:              total,
+			InputTokens:              input,
+			OutputTokens:             output,
+			CachedInputTokens:        cr,
+			CacheCreationInputTokens: cw,
+			ContextWindow:            ctxWindow,
+		}
+		s.usageMu.Lock()
+		s.lastUsage = usage
+		s.usageMu.Unlock()
+		return
+	}
+}
+
+// lastAskQuestionAnswer extracts the most recently collected answer from
+// UpdatedInput.answers (the shape produced by buildAskQuestionResponse).
+// extension_select / extension_confirm ride the AskUserQuestion flow, so
+// the user's choice ends up here rather than in result.Message.
+// Returns "" if the structure is missing or empty.
+func lastAskQuestionAnswer(updatedInput map[string]any) string {
+	if updatedInput == nil {
+		return ""
+	}
+	answers, _ := updatedInput["answers"].(map[string]any)
+	if answers == nil {
+		return ""
+	}
+	if len(answers) > 1 {
+		slog.Warn("piSession: unexpected multiple answers in AskUserQuestion", "count", len(answers))
+	}
+	// answers is keyed by question text, typically containing 1 entry from
+	// the AskUserQuestion flow. Return the first string value found.
+	for _, v := range answers {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// ── RespondPermission ───────────────────────────────────────
+
+func (s *piSession) RespondPermission(requestID string, result core.PermissionResult) error {
+	if !s.rpc {
+		// JSON mode: no extension_ui support
+		return nil
+	}
+
+	s.extPendingMu.Lock()
+	extID, ok := s.extPendingRev[requestID]
+	method := s.extMethod[requestID]
+	if ok {
+		delete(s.extPending, extID)
+		delete(s.extPendingRev, requestID)
+		delete(s.extMethod, requestID)
+	}
+	s.extPendingMu.Unlock()
+
+	if !ok {
+		slog.Warn("piSession: RespondPermission for unknown request", "requestID", requestID)
+		return nil
+	}
+
+	var resp map[string]any
+	switch method {
+	case "input":
+		resp = map[string]any{
+			"type": "extension_ui_response",
+			"id":   extID,
+		}
+		if result.Behavior == "allow" {
+			resp["value"] = result.Message
+		} else {
+			resp["cancelled"] = true
+		}
+	case "select":
+		resp = map[string]any{
+			"type": "extension_ui_response",
+			"id":   extID,
+		}
+		if result.Behavior == "allow" {
+			// select goes through the AskUserQuestion flow, where the user's
+			// choice lives in UpdatedInput.answers (built by
+			// buildAskQuestionResponse). Map it back to the option's value.
+			resp["value"] = lastAskQuestionAnswer(result.UpdatedInput)
+		} else {
+			resp["cancelled"] = true
+		}
+	case "confirm":
+		// extension_confirm goes through the regular permission flow, not the
+		// AskUserQuestion flow, so the engine sends plain "allow"/"deny"
+		// PermissionResults (no UpdatedInput.answers). Forward as the default
+		// case: confirmed=Behavior=="allow", else confirmed=false (pgate's
+		// ctx.ui.confirm resolves false for both "deny" and "no confirmation",
+		// which is what we want).
+		fallthrough
+	default:
+		resp = map[string]any{
+			"type":      "extension_ui_response",
+			"id":        extID,
+			"confirmed": result.Behavior == "allow",
+		}
+	}
+
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("piSession: marshal extension_ui_response: %w", err)
+	}
+	b = append(b, '\n')
+
+	slog.Debug("piSession: sending extension_ui_response", "id", extID, "behavior", result.Behavior)
+	s.rpcStdinMu.Lock()
+	_, err = s.rpcStdin.Write(b)
+	s.rpcStdinMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("piSession: write extension_ui_response: %w", err)
+	}
+
 	return nil
 }
+
+// ── AgentSession interface ──────────────────────────────────
 
 func (s *piSession) Events() <-chan core.Event {
 	return s.events
@@ -393,23 +1221,63 @@ func (s *piSession) Alive() bool {
 
 func (s *piSession) Close() error {
 	s.alive.Store(false)
+
+	// Cancel context to interrupt any in-flight Send() or readLoopRPC.
 	s.cancel()
-	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		close(s.events)
-	case <-time.After(8 * time.Second):
-		slog.Warn("piSession: close timed out, abandoning wg.Wait")
+
+	if s.rpc {
+		s.killRPC()
 	}
+
+	// Wait for all in-flight Send() calls to finish (json mode) or be
+	// interrupted by ctx cancellation (both modes). Only then are we sure
+	// no goroutine can still write to s.events.
+	s.sendWg.Wait()
+	s.wg.Wait()
+
+	close(s.events)
 	return nil
 }
 
-// cleanAttachments removes this session's attachment directory to avoid
-// accumulating files across turns.
+// ── ContextUsageReporter ─────────────────────────────────────
+
+func (s *piSession) GetContextUsage() *core.ContextUsage {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.lastUsage == nil {
+		return nil
+	}
+	u := *s.lastUsage
+	return &u
+}
+
+// buildJSONArgs assembles the argv slice for the one-shot `pi --mode json`
+// process. Pulled out of sendJSON so the @<path> attachment refactor
+// (Issue #1723) can be unit-tested without spawning a process.
+//
+// Returns a fresh slice on every call — never aliased to the caller's
+// extraArgs, since sendJSON mutates it.
+func buildJSONArgs(extraArgs []string, prompt, sessionID, model, thinking string, atFiles []string) []string {
+	args := append(append([]string{}, extraArgs...), "--mode", "json", "-p", prompt)
+	if sessionID != "" {
+		args = append(args, "--session-id", sessionID)
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if thinking != "" {
+		args = append(args, "--thinking", thinking)
+	}
+	// Issue #1723: append attachment paths as @<path> argv entries (NOT
+	// inlined into the prompt text). pi treats them as inputs to load.
+	for _, f := range atFiles {
+		args = append(args, "@"+f)
+	}
+	return args
+}
+
+// ── Attachment helpers ───────────────────────────────────────
+
 func cleanAttachments(attachDir string) {
 	if attachDir == "" {
 		return
@@ -419,22 +1287,19 @@ func cleanAttachments(attachDir string) {
 	}
 }
 
-// saveImagesToDisk saves image attachments to attachDir
-// and returns the list of absolute file paths.
-//
-// img.FileName originates from IM upload metadata and is treated as
-// untrusted: directory components are stripped (both `/` and `\`, the
-// latter so Linux strips Windows-style paths too) before joining into
-// attachDir. Without this, FileName="../../escape.png" wrote to
-// workDir/escape.png — outside the intended attachments directory.
 func saveImagesToDisk(attachDir string, images []core.ImageAttachment) []string {
+	if len(images) == 0 {
+		return nil
+	}
 	if err := os.MkdirAll(attachDir, 0o755); err != nil {
 		slog.Error("piSession: failed to create attachments dir", "error", err)
 		return nil
 	}
-
 	var paths []string
 	for i, img := range images {
+		if len(img.Data) == 0 {
+			continue
+		}
 		ext := ".png"
 		switch img.MimeType {
 		case "image/jpeg":
@@ -444,10 +1309,22 @@ func saveImagesToDisk(attachDir string, images []core.ImageAttachment) []string 
 		case "image/webp":
 			ext = ".webp"
 		}
-		fname := sanitizePiAttachmentName(img.FileName)
+
+		fname := img.FileName
 		if fname == "" {
-			fname = fmt.Sprintf("image_%d_%d%s", time.Now().UnixMilli(), i, ext)
+			fname = fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
+		} else {
+			sane := sanitizePiAttachmentName(fname)
+			if sane == "" {
+				fname = fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
+			} else {
+				if !strings.HasSuffix(sane, ext) {
+					sane = sane + ext
+				}
+				fname = sane
+			}
 		}
+
 		fpath := filepath.Join(attachDir, fname)
 		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
 			slog.Error("piSession: save image failed", "error", err)
@@ -459,12 +1336,14 @@ func saveImagesToDisk(attachDir string, images []core.ImageAttachment) []string 
 }
 
 func saveFilesToDisk(attachDir string, files []core.FileAttachment) []string {
+	if len(files) == 0 {
+		return nil
+	}
 	if err := os.MkdirAll(attachDir, 0o755); err != nil {
 		slog.Error("piSession: failed to create attachments dir", "error", err)
 		return nil
 	}
-
-	paths := make([]string, 0, len(files))
+	var paths []string
 	for i, f := range files {
 		fname := sanitizePiAttachmentName(f.FileName)
 		if fname == "" {
@@ -480,12 +1359,6 @@ func saveFilesToDisk(attachDir string, files []core.FileAttachment) []string {
 	return paths
 }
 
-// sanitizePiAttachmentName reduces a user-supplied attachment filename to a
-// safe basename for joining into an attachment directory. Strips directory
-// components (handling both `/` and `\` so an attacker can't bypass via
-// Windows-style separators on Linux), and rejects parent / current-directory
-// references so the caller's empty-name fallback can substitute a generated
-// name. Mirrors core.SaveFilesToDisk's sanitization.
 func sanitizePiAttachmentName(name string) string {
 	name = strings.ReplaceAll(name, "\\", "/")
 	name = filepath.Base(name)
@@ -495,9 +1368,41 @@ func sanitizePiAttachmentName(name string) string {
 	return name
 }
 
+// ── Utilities ────────────────────────────────────────────────
+
 func truncStr(s string, maxRunes int) string {
 	if utf8.RuneCountInString(s) <= maxRunes {
 		return s
 	}
 	return string([]rune(s)[:maxRunes]) + "..."
+}
+
+func extractToolInput(item map[string]any) string {
+	args, hasArgs := item["arguments"].(map[string]any)
+	if !hasArgs {
+		args = item
+	}
+
+	if desc, ok := args["description"].(string); ok && desc != "" {
+		return desc
+	}
+	if cmd, ok := args["command"].(string); ok && cmd != "" {
+		return cmd
+	}
+	if fp, ok := args["file_path"].(string); ok && fp != "" {
+		return fp
+	}
+	if pattern, ok := args["pattern"].(string); ok && pattern != "" {
+		return pattern
+	}
+	if query, ok := args["query"].(string); ok && query != "" {
+		return query
+	}
+
+	b, _ := json.Marshal(args)
+	s := truncStr(string(b), 200)
+	if s == "{}" {
+		return ""
+	}
+	return s
 }

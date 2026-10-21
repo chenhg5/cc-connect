@@ -6,6 +6,35 @@ import (
 	"time"
 )
 
+// i18nT is the free-function form of (*I18n).T used by AgentSystemPromptForLang.
+// It looks up the message in the same messages bundle and applies the same
+// fallback chain (zh-TW → zh → en) so behaviour stays consistent with the
+// engine-driven path. Returning the key itself on total miss matches (*I18n).T.
+//
+// Keeping this here (rather than reusing (*I18n).T) lets AgentSystemPromptForLang
+// stay a pure function that takes only a Language — callers like the Claude
+// Code agent that don't already hold an *I18n can still get a localized
+// prompt without constructing a throwaway I18n.
+func i18nT(lang Language, key MsgKey) string {
+	m, ok := messages[key]
+	if !ok {
+		return string(key)
+	}
+	if v, ok := m[lang]; ok && v != "" {
+		return v
+	}
+	// Fallback chain: zh-TW → zh → en. Mirrors (*I18n).T.
+	if lang == LangTraditionalChinese {
+		if v, ok := m[LangChinese]; ok && v != "" {
+			return v
+		}
+	}
+	if v, ok := m[LangEnglish]; ok && v != "" {
+		return v
+	}
+	return string(key)
+}
+
 // Platform abstracts a messaging platform (Feishu, DingTalk, Slack, etc.).
 type Platform interface {
 	Name() string
@@ -23,6 +52,36 @@ var ErrNotSupported = errors.New("operation not supported by this platform")
 // to send messages to users without an incoming message.
 type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
+}
+
+// RelayGroupVisibilityTarget is an optional interface for platforms that
+// want to customise the session key used when echoing relay request /
+// response messages into the group chat for visibility.  Platforms that
+// understand the concept of a thread, topic, or sub-conversation can
+// return a thread-scoped session key so the visibility echoes land in
+// the same conversation that triggered the relay; platforms without
+// such a concept simply don't implement this interface and core falls
+// back to the legacy "<platform>:<chatID>:relay" target.
+//
+// Returning (key, true) → core uses key verbatim as the group session
+// key for visibility echoes.
+// Returning ("", false) → core falls back to the legacy default.
+type RelayGroupVisibilityTarget interface {
+	RelayGroupVisibilityKey(callerSessionKey string) (groupSessionKey string, ok bool)
+}
+
+// ChannelScopedSessionKey is an optional interface for platforms whose session
+// keys encode a per-thread channel scope, such as a Feishu topic or a Discord
+// thread. Such platforms can bind one workspace per thread, and the binding key
+// must carry that scope.
+//
+// Core cannot parse platform-private session-key layouts, so platforms convert
+// their own format via this interface. Implementations return the channel scope
+// WITHOUT the platform name — core prepends it. Returning ("", false) makes
+// core fall back to its generic parsing, which keeps the chat-level key and is
+// correct for platforms without per-thread scoping.
+type ChannelScopedSessionKey interface {
+	ChannelKeyFromSessionKey(sessionKey string) (channelKey string, ok bool)
 }
 
 // MessageRecallDetector is an optional interface for platforms that can check
@@ -65,74 +124,33 @@ type PlatformPromptInjector interface {
 // AgentSystemPrompt returns the system prompt fragment that informs agents about
 // cc-connect capabilities (cron scheduling, etc.).
 // The prompt is designed to be appended to the agent's existing system prompt.
+//
+// This is a back-compat wrapper that always returns English; the underlying
+// source of truth is AgentSystemPromptForLang, which the engine and the
+// Claude Code agent call when they know the operator's configured language
+// (Issue #1655: zh + en are the first two localized tool sections).
 func AgentSystemPrompt() string {
-	return `You are running inside cc-connect, a bridge that connects you to messaging platforms.
+	return AgentSystemPromptForLang(LangEnglish)
+}
+
+// agentSystemPromptHeader is the static English preamble that introduces the
+// cc-connect bridge and the ## Available tools heading. It is not localized:
+// the preamble is infrastructure wording ("You are running inside cc-connect…")
+// rather than tool documentation, and keeping it stable across languages
+// preserves the meaning of the marker the engine searches for when refreshing
+// the prompt file across upgrades.
+const agentSystemPromptHeader = `You are running inside cc-connect, a bridge that connects you to messaging platforms.
 Your normal text responses are automatically delivered to the user — just reply normally, do NOT use cc-connect send for ordinary text replies.
 
 ## Available tools
+`
 
-### Send generated images or files back to the user
-When you generate a local image or file that should be sent to the user, use:
-
-  cc-connect send --image /absolute/path/to/image.png
-  cc-connect send --file /absolute/path/to/report.pdf
-  cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
-
-You may repeat --image / --file multiple times. Use this only for generated attachments that need to be delivered to the user.
-If you include --message, do not repeat the exact same sentence again in your normal reply, because your normal reply is also delivered automatically.
-
-### Scheduled tasks (cron)
-When the user asks you to do something on a schedule (e.g. "每天早上6点帮我总结GitHub trending"), use the Bash tool to run:
-
-  cc-connect cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task description>" --desc "<short label>"
-
-Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so you do NOT need to specify --project or --session-key.
-
-Optional flags:
-  --session-mode <mode>     reuse (default) or new-per-run (fresh session each trigger)
-  --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
-  --exec <command>          run a shell command directly instead of --prompt
-
-Examples:
-  cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
-  cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
-  cc-connect cron add --cron "*/2 * * * *" --exec "ipconfig" --session-mode new-per-run --desc "Every 2 min ipconfig"
-
-You can also list, inspect, edit, or delete cron jobs:
-  cc-connect cron list
-  cc-connect cron info <job-id> [field]
-  cc-connect cron edit <job-id> <field> <value>
-  cc-connect cron del <job-id>
-
-When changing an existing job, first run ` + "`cc-connect cron info <job-id>`" + ` to inspect the current values, then use ` + "`cron edit`" + ` for only the field(s) the user asked to change.
-Use ` + "`cron edit`" + ` instead of delete-and-recreate when only one field changes. Do not delete and recreate a job unless the user explicitly asks to replace it.
-Common editable fields:
-  cron_expr     new schedule, e.g. "0 9 * * *"
-  prompt        new task prompt (or ` + "`exec`" + ` for shell command)
-  description   short label
-  enabled       true / false  (pause without deleting)
-  mute          true / false  (silence all messages)
-  timeout_mins  integer minutes (0 = unlimited)
-Run ` + "`cc-connect cron edit --help`" + ` for the full field list.
-
-Examples:
-  cc-connect cron edit abc123 cron_expr "0 9 * * *"
-  cc-connect cron edit abc123 enabled false
-  cc-connect cron edit abc123 prompt "Updated daily summary task"
-
-### Bot-to-bot relay
-When you need to communicate with another bot (e.g. ask another AI agent a question), use:
-
-  cc-connect relay send --to <target_project> "<message>"
-
-IMPORTANT: <target_project> must be the EXACT project name from the /bind command output.
-Do NOT guess or modify the name — use it exactly as shown (e.g. "gemini", not "gemini-bot").
-
-This sends a message to the target bot and waits for its response (printed to stdout).
-The conversation is visible in the group chat and each bot maintains its own relay session.
-
-Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.
-
+// agentSystemPromptFooter is the static English closing section (silent reply
+// / NO_REPLY semantics). Like the header, it is shared infrastructure rather
+// than per-tool documentation, so it stays in English. The agent's behaviour
+// here depends on the marker being exactly ` + "`NO_REPLY`" + `; translating
+// the token would break detection.
+const agentSystemPromptFooter = `
 ### Silent reply (suppress delivery)
 If the current turn warrants no user-visible response — e.g. a scheduled trigger
 found nothing worth reporting, the incoming message was an acknowledgement that
@@ -147,6 +165,34 @@ the trailing marker before delivery:
   surrounding text).
 Use this sparingly; when in doubt, send a brief reply instead.
 `
+
+// AgentSystemPromptForLang returns the cc-connect system prompt with the
+// four user-facing tool sections (send / cron / timer / relay) rendered in
+// the given language. The header, the "## Available tools" heading, and the
+// silent-reply footer stay in English on purpose — see the comments on
+// agentSystemPromptHeader / agentSystemPromptFooter.
+//
+// If a language key is missing for one of the four tool sections (e.g. an
+// unsupported language code, or a future PR that adds a new language
+// without translating every tool yet), that section silently falls back to
+// the English version via messages[key][LangEnglish]. This matches the
+// fallback behaviour of (*I18n).T so cc-connect never refuses to start
+// because of an incomplete translation (per the owner decision in
+// doc-20260823-ws0eux).
+//
+// Pass LangEnglish for the historical English-only behaviour, which
+// AgentSystemPrompt() is a thin wrapper around.
+//
+// See Issue #1655 for the original feature request and the owner-approved
+// scope: zh + en translations on these four tools; other languages come
+// later as follow-up PRs.
+func AgentSystemPromptForLang(lang Language) string {
+	return agentSystemPromptHeader +
+		i18nT(lang, MsgAgentSendToolPrompt) +
+		"\n\n" + i18nT(lang, MsgAgentCronToolPrompt) +
+		"\n\n" + i18nT(lang, MsgAgentTimerToolPrompt) +
+		"\n\n" + i18nT(lang, MsgAgentRelayToolPrompt) +
+		agentSystemPromptFooter
 }
 
 // SystemPromptSupporter is an optional marker interface for agents that
@@ -155,6 +201,22 @@ Use this sparingly; when in doubt, send a brief reply instead.
 // memory/instruction file for relay and cron to work.
 type SystemPromptSupporter interface {
 	HasSystemPromptSupport() bool
+}
+
+// SessionIDValidator is an optional interface for agents that can validate
+// whether a stored session ID actually belongs to the current project's
+// session store. The engine uses this to prevent cross-project session
+// context leakage (issue #599): a stale ID from another project's workspace
+// would otherwise resume the wrong conversation history.
+//
+// Implementations should return false when:
+//   - the session ID is empty
+//   - the session file does not exist under the agent's per-project store
+//   - the agent cannot determine the current project directory
+//
+// The engine treats a false return as "clear the stored ID and start fresh".
+type SessionIDValidator interface {
+	ValidateSessionID(ctx context.Context, sessionID string) bool
 }
 
 // TypingIndicator is an optional interface for platforms that can show a
@@ -173,6 +235,13 @@ type TypingIndicatorDone interface {
 	AddDoneReaction(replyCtx any)
 }
 
+// AtMentionSender is an optional interface for platforms that support @mention in
+// reply messages (e.g. DingTalk). Platforms that implement this interface can
+// include @user notifications when replying in group chats.
+type AtMentionSender interface {
+	ReplyWithAt(ctx context.Context, replyCtx any, content string, atUsers []string, atAll bool) error
+}
+
 // ImageSender is an optional interface for platforms that support sending images.
 type ImageSender interface {
 	SendImage(ctx context.Context, replyCtx any, img ImageAttachment) error
@@ -186,6 +255,22 @@ type FileSender interface {
 // MessageUpdater is an optional interface for platforms that support updating messages.
 type MessageUpdater interface {
 	UpdateMessage(ctx context.Context, replyCtx any, content string) error
+}
+
+// StatusFooterSender is an optional Platform extension for sending a reply
+// with a structured per-turn status footer rendered using platform-specific
+// dim/small styling (e.g. Lark `text_size: "notation"`). Platforms that do
+// not implement it fall back to receiving the footer appended inline to the
+// content via Send/SendWithButtons/...
+type StatusFooterSender interface {
+	SendWithStatusFooter(ctx context.Context, replyCtx any, content, footer string) error
+}
+
+// StatusFooterUpdater is the streaming-preview counterpart of
+// StatusFooterSender: it patches an existing preview message with a final
+// content + structured status footer block.
+type StatusFooterUpdater interface {
+	UpdateMessageWithStatusFooter(ctx context.Context, replyCtx any, content, footer string) error
 }
 
 // ProgressStyleProvider is an optional interface for platforms that expose
@@ -286,8 +371,13 @@ type Agent interface {
 
 // AgentSession represents a running interactive agent session with a persistent process.
 type AgentSession interface {
-	// Send sends a user message (with optional images and files) to the running agent process.
-	Send(prompt string, images []ImageAttachment, files []FileAttachment) error
+	// Send sends a user message (with optional images and files) to the running
+	// agent process. messageID is the platform message ID; agents thread it
+	// into SaveFilesToDisk so attachments from different messages land in
+	// distinct per-message subdirectories (issue #1552). It may be empty for
+	// synthesized messages, in which case SaveFilesToDisk falls back to a
+	// best-effort atomic-write path that refuses to overwrite.
+	Send(prompt string, messageID string, images []ImageAttachment, files []FileAttachment) error
 	// RespondPermission sends a permission decision back to the agent process.
 	RespondPermission(requestID string, result PermissionResult) error
 	// Events returns the channel that emits agent events (kept open across turns).
@@ -421,6 +511,14 @@ type ContextUsageReporter interface {
 	GetContextUsage() *ContextUsage
 }
 
+// UsageSourceReporter is an optional refinement of ContextUsageReporter: it
+// reports where the current usage value came from. Used by auto-compress to
+// distinguish a live API-reported number ("event") from one recovered out of
+// the on-disk transcript ("transcript-recovered") in logs and diagnostics.
+type UsageSourceReporter interface {
+	GetUsageSource() string
+}
+
 // ContextUsage describes runtime context consumption for the active session.
 type ContextUsage struct {
 	// UsedTokens is the current token load to compare against ContextWindow when
@@ -429,13 +527,14 @@ type ContextUsage struct {
 	// BaselineTokens is the portion of the context window always occupied by
 	// fixed runtime/system instructions and therefore excluded from user-visible
 	// "left" calculations when the agent provides it.
-	BaselineTokens        int
-	TotalTokens           int
-	InputTokens           int
-	CachedInputTokens     int
-	OutputTokens          int
-	ReasoningOutputTokens int
-	ContextWindow         int
+	BaselineTokens           int
+	TotalTokens              int
+	InputTokens              int
+	CachedInputTokens        int // cache-read tokens (prior context retrieved from cache)
+	CacheCreationInputTokens int // cache-write tokens (new content written to cache)
+	OutputTokens             int
+	ReasoningOutputTokens    int
+	ContextWindow            int
 }
 
 // ContextCompressor is an optional interface for agents that support
@@ -446,6 +545,14 @@ type ContextCompressor interface {
 	CompressCommand() string
 }
 
+// AgentSessionCanceller is an optional interface for agent sessions that support
+// cancelling the current turn without terminating the session or its underlying
+// process. When implemented, the engine calls CancelTurn instead of Close() for
+// /stop, allowing the session to remain alive for the next user message.
+type AgentSessionCanceller interface {
+	CancelTurn() error
+}
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.
@@ -454,11 +561,23 @@ type CommandProvider interface {
 }
 
 // SkillProvider is an optional interface for agents that expose skills via
-// local directories (e.g. .claude/skills/<name>/SKILL.md). Each subdirectory
-// containing a SKILL.md is treated as a skill. Skills are project-level and
-// agent-specific — they are NOT shared across different agent types.
+// local directories (e.g. .claude/skills/<name>/SKILL.md). Only the depth-1
+// layout is recognised: each immediate subdirectory of the returned dirs
+// that contains a SKILL.md is registered as a skill. Nested SKILL.md files
+// (e.g. inside `<name>/references/...`) are treated as skill assets and
+// ignored — they match the Claude Code CLI convention (issue #1304) and
+// prevent phantom slash commands from leaking into platform command menus.
+// Skills are project-level and agent-specific — they are NOT shared across
+// different agent types.
 type SkillProvider interface {
 	SkillDirs() []string
+}
+
+// SkillCatalogProvider supplies the agent's authoritative enabled skills for
+// its current workspace. It takes precedence over directory discovery; errors
+// must not fall back to scanning directories that can contain disabled skills.
+type SkillCatalogProvider interface {
+	ListSkills(ctx context.Context) ([]*Skill, error)
 }
 
 // SessionDeleter is an optional interface for agents that support deleting sessions.
@@ -509,6 +628,15 @@ type WorkspaceAgentOptionSnapshotter interface {
 // apply a mode change immediately without restarting the process.
 type LiveModeSwitcher interface {
 	SetLiveMode(mode string) bool
+}
+
+// StartupWarner is an optional interface for agent sessions that need to surface
+// a one-time warning to the IM user at session start (e.g. when a requested
+// permission mode was silently downgraded due to OS constraints). The engine
+// sends the returned message to the IM platform immediately after starting the
+// session. Returns empty string when no warning is needed.
+type StartupWarner interface {
+	StartupWarning() string
 }
 
 // PermissionModeInfo describes a permission mode for display.

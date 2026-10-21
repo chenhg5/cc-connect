@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +42,7 @@ func (a *stubMainAgent) GetWorkDir() string {
 
 type stubMainAgentSession struct{}
 
-func (s *stubMainAgentSession) Send(string, []core.ImageAttachment, []core.FileAttachment) error {
+func (s *stubMainAgentSession) Send(string, string, []core.ImageAttachment, []core.FileAttachment) error {
 	return nil
 }
 func (s *stubMainAgentSession) RespondPermission(string, core.PermissionResult) error { return nil }
@@ -116,6 +120,33 @@ func TestApplyProjectStateOverride(t *testing.T) {
 	}
 	if agent.workDir != overrideDir {
 		t.Fatalf("agent workDir = %q, want %q", agent.workDir, overrideDir)
+	}
+}
+
+// In multi-workspace mode the working directory is decided per topic by the
+// binding table, and each workspace gets its own agent. A project-wide
+// work_dir_override left over from single-workspace mode must not be pushed
+// onto the global agent: it would shadow every binding, so /status reports the
+// same directory in all topics.
+func TestApplyProjectStateOverride_MultiWorkspaceKeepsConfiguredWorkDir(t *testing.T) {
+	baseDir := t.TempDir()
+	overrideDir := filepath.Join(t.TempDir(), "override")
+	if err := os.Mkdir(overrideDir, 0o755); err != nil {
+		t.Fatalf("mkdir override dir: %v", err)
+	}
+
+	store := core.NewProjectStateStore(filepath.Join(t.TempDir(), "projects", "demo.state.json"))
+	store.SetWorkDirOverride(overrideDir)
+
+	agent := &stubMainAgent{workDir: baseDir}
+	got := applyProjectStateOverrideForMode("demo", agent, baseDir, store, true)
+
+	if got != baseDir {
+		t.Fatalf("effective workDir = %q, want the configured %q", got, baseDir)
+	}
+	if agent.workDir != baseDir {
+		t.Fatalf("global agent workDir = %q, want %q; a project-wide override must not shadow the binding table",
+			agent.workDir, baseDir)
 	}
 }
 
@@ -289,5 +320,154 @@ func TestStartInitialRefresh_AfterProjectStateOverride(t *testing.T) {
 	}
 	if agent.workDir != overrideDir {
 		t.Fatalf("agent workDir at refresh = %q, want %q", agent.workDir, overrideDir)
+	}
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = old
+	}()
+
+	// Drain concurrently. A Windows anonymous pipe buffers only 4KB, and
+	// printUsage emits its whole help text in a single Fprintf, so reading
+	// after fn returns deadlocks as soon as that output exceeds the buffer.
+	var buf bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(&buf, r)
+		done <- err
+	}()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("copy stderr: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close reader: %v", err)
+	}
+	return buf.String()
+}
+
+func TestPrintUsage_ListsCronExecCommand(t *testing.T) {
+	out := captureStderr(t, printUsage)
+
+	if !strings.Contains(out, "Manage scheduled tasks") {
+		t.Fatalf("printUsage() output missing cron section:\n%s", out)
+	}
+	if !strings.Contains(out, "exec             Trigger a scheduled task immediately") {
+		t.Fatalf("printUsage() output missing cron exec command:\n%s", out)
+	}
+}
+
+func TestCanonicalCronSubcommand_ManualTriggerAliases(t *testing.T) {
+	for _, sub := range []string{"exec", "run", "trigger"} {
+		if got := canonicalCronSubcommand(sub); got != "exec" {
+			t.Fatalf("canonicalCronSubcommand(%q) = %q, want exec", sub, got)
+		}
+	}
+}
+
+func TestValidateNoExtraTopLevelArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name: "no extra args",
+			args: nil,
+		},
+		{
+			name:    "unknown command",
+			args:    []string{"bind", "--help"},
+			wantErr: "unknown top-level command: bind",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateNoExtraTopLevelArgs(tt.args)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateNoExtraTopLevelArgs(%v) error = %v, want nil", tt.args, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateNoExtraTopLevelArgs(%v) error = nil, want %q", tt.args, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateNoExtraTopLevelArgs(%v) error = %q, want substring %q", tt.args, err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseRootCLIOptionsGlobalFlagsBeforeSubcommand(t *testing.T) {
+	opts, err := parseRootCLIOptions([]string{"--config", "/tmp/test-config.toml", "--log-max-size", "12MB", "--log-max-backups", "7", "sessions", "list"})
+	if err != nil {
+		t.Fatalf("parseRootCLIOptions() error = %v", err)
+	}
+	if opts.configPath != "/tmp/test-config.toml" {
+		t.Fatalf("configPath = %q, want %q", opts.configPath, "/tmp/test-config.toml")
+	}
+	if opts.logMaxSize != "12MB" {
+		t.Fatalf("logMaxSize = %q, want %q", opts.logMaxSize, "12MB")
+	}
+	if opts.logMaxBackups != 7 {
+		t.Fatalf("logMaxBackups = %d, want 7", opts.logMaxBackups)
+	}
+	if opts.showVersion {
+		t.Fatal("showVersion = true, want false")
+	}
+	wantArgs := []string{"sessions", "list"}
+	if !reflect.DeepEqual(opts.args, wantArgs) {
+		t.Fatalf("args = %v, want %v", opts.args, wantArgs)
+	}
+}
+
+func TestTopLevelCommandHandlersIncludeTimerAliases(t *testing.T) {
+	for _, command := range []string{"timer", "at"} {
+		if topLevelCommandHandlers[command] == nil {
+			t.Fatalf("topLevelCommandHandlers[%q] is nil", command)
+		}
+	}
+}
+
+func TestParseRootCLIOptionsPreservesSubcommandHelp(t *testing.T) {
+	opts, err := parseRootCLIOptions([]string{"--config", "/tmp/test-config.toml", "send", "--help"})
+	if err != nil {
+		t.Fatalf("parseRootCLIOptions() error = %v", err)
+	}
+	wantArgs := []string{"send", "--help"}
+	if !reflect.DeepEqual(opts.args, wantArgs) {
+		t.Fatalf("args = %v, want %v", opts.args, wantArgs)
+	}
+}
+
+func TestParseRootCLIOptionsHelp(t *testing.T) {
+	_, err := parseRootCLIOptions([]string{"--help"})
+	if err == nil {
+		t.Fatal("parseRootCLIOptions(--help) error = nil, want flag.ErrHelp")
+	}
+	if !strings.Contains(err.Error(), flag.ErrHelp.Error()) {
+		t.Fatalf("parseRootCLIOptions(--help) error = %q, want %q", err.Error(), flag.ErrHelp.Error())
+	}
+}
+
+func TestRunTopLevelCommandUnknown(t *testing.T) {
+	if runTopLevelCommand([]string{"bind", "--help"}) {
+		t.Fatal("runTopLevelCommand() handled unknown command")
 	}
 }

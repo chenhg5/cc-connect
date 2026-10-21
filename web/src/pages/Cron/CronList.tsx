@@ -1,11 +1,11 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Clock, Plus, Trash2, Terminal, MessageSquare, Pencil, Power, X,
+  Clock, Play, Plus, Trash2, Terminal, MessageSquare, Power,
   ChevronDown,
 } from 'lucide-react';
-import { Card, Button, Badge, Modal, Input, Textarea, EmptyState } from '@/components/ui';
-import { listCronJobs, createCronJob, updateCronJob, deleteCronJob, type CronJob } from '@/api/cron';
+import { Button, Badge, Modal, Input, Textarea, EmptyState } from '@/components/ui';
+import { listCronJobs, createCronJob, updateCronJob, deleteCronJob, triggerCronJob, type CronJob } from '@/api/cron';
 import { listProjects, type ProjectSummary } from '@/api/projects';
 import { listSessions, type Session } from '@/api/sessions';
 import { formatTime, cn } from '@/lib/utils';
@@ -186,6 +186,7 @@ export default function CronList() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<JobForm>({ ...emptyForm });
   const [saving, setSaving] = useState(false);
+  const [triggeringId, setTriggeringId] = useState<string | null>(null);
   const [sessionKeys, setSessionKeys] = useState<string[]>([]);
 
   const isEdit = !!editJob;
@@ -300,6 +301,19 @@ export default function CronList() {
     }
   };
 
+  const handleTrigger = async (job: CronJob) => {
+    setTriggeringId(job.id);
+    try {
+      await triggerCronJob(job.id);
+      alert(t('cron.triggerPending'));
+      fetchData();
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setTriggeringId(null);
+    }
+  };
+
   if (loading && jobs.length === 0) {
     return <div className="flex items-center justify-center h-64 text-gray-400 animate-pulse">Loading...</div>;
   }
@@ -384,6 +398,17 @@ export default function CronList() {
                 className="absolute top-3 right-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
                 onClick={e => e.stopPropagation()}
               >
+                <button
+                  onClick={() => handleTrigger(job)}
+                  disabled={triggeringId === job.id}
+                  className={cn(
+                    'p-1.5 rounded-lg transition-colors',
+                    'text-sky-500 hover:bg-sky-50 dark:hover:bg-sky-900/20 disabled:opacity-50 disabled:cursor-wait',
+                  )}
+                  title={t('cron.trigger')}
+                >
+                  <Play size={14} />
+                </button>
                 <button
                   onClick={() => handleToggleEnabled(job)}
                   className={cn(

@@ -16,7 +16,7 @@ func TestNew_ParsesProjectEnvFromOpts(t *testing.T) {
 	// to be installed on the test runner.
 	opts := map[string]any{
 		"work_dir": t.TempDir(),
-		"cli_path": "go",
+		"cmd": "go",
 		"env": map[string]string{
 			"HTTPS_PROXY": "http://127.0.0.1:10808",
 			"HTTP_PROXY":  "http://127.0.0.1:10808",
@@ -50,7 +50,7 @@ func TestNew_ParsesProjectEnvFromOpts(t *testing.T) {
 func TestNew_ParsesProjectEnvFromMapStringAny(t *testing.T) {
 	opts := map[string]any{
 		"work_dir": t.TempDir(),
-		"cli_path": "go",
+		"cmd": "go",
 		"env": map[string]any{
 			"OPENAI_BASE_URL": "https://api.example.com/v1",
 			"CUSTOM_FLAG":     "yes",
@@ -80,7 +80,7 @@ func TestNew_ParsesProjectEnvFromMapStringAny(t *testing.T) {
 func TestNew_NoEnvOpts(t *testing.T) {
 	opts := map[string]any{
 		"work_dir": t.TempDir(),
-		"cli_path": "go",
+		"cmd": "go",
 	}
 
 	a, err := New(opts)
@@ -94,5 +94,30 @@ func TestNew_NoEnvOpts(t *testing.T) {
 
 	if len(agent.configEnv) != 0 {
 		t.Fatalf("expected 0 env vars, got %d: %v", len(agent.configEnv), agent.configEnv)
+	}
+}
+
+func TestNew_ParsesProjectPromptsFromOpts(t *testing.T) {
+	opts := map[string]any{
+		"work_dir":             t.TempDir(),
+		"cli_path":             "go",
+		"system_prompt":        "You are Linear Reporter.",
+		"append_system_prompt": "Always use linear-bug-intake.",
+	}
+
+	a, err := New(opts)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	agent := a.(*Agent)
+	agent.mu.RLock()
+	defer agent.mu.RUnlock()
+
+	if agent.systemPrompt != "You are Linear Reporter." {
+		t.Fatalf("systemPrompt = %q", agent.systemPrompt)
+	}
+	if agent.appendPrompt != "Always use linear-bug-intake." {
+		t.Fatalf("appendPrompt = %q", agent.appendPrompt)
 	}
 }

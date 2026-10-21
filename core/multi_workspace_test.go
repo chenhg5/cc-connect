@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -345,6 +346,81 @@ func TestSessionContextForKey_SharedBinding(t *testing.T) {
 	}
 }
 
+func TestGetOrCreateWorkspaceAgent_InvalidatesStaleSessionIDs(t *testing.T) {
+	baseDir := t.TempDir()
+	dataDir := t.TempDir()
+	sessionPath := filepath.Join(dataDir, "sessions.json")
+	bindingPath := filepath.Join(dataDir, "bindings.json")
+	agentName := "test-multiworkspace-invalidate-agent"
+
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		return &namedTestAgent{name: agentName}, nil
+	})
+
+	e := NewEngine("test", &namedTestAgent{name: agentName}, nil, sessionPath, LangEnglish)
+	e.SetMultiWorkspace(baseDir, bindingPath)
+
+	workspaceDir := normalizeWorkspacePath(filepath.Join(baseDir, "workspace"))
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h := sha256.Sum256([]byte(workspaceDir))
+	workspaceSessionPath := filepath.Join(dataDir, fmt.Sprintf("%s_ws_%x.json", e.name, h[:4]))
+	t.Cleanup(func() {
+		_ = os.Remove(workspaceSessionPath)
+	})
+
+	store := NewSessionManager(workspaceSessionPath)
+	stale := store.GetOrCreateActive("feishu:channel1:user1")
+	stale.SetAgentSessionID("old-claudecode-session", "claudecode")
+	keep := store.NewSession("feishu:channel1:user1", "keep")
+	keep.SetAgentSessionID("keep-opencode-session", agentName)
+	store.Save()
+
+	agent, sessions, err := e.getOrCreateWorkspaceAgent(workspaceDir)
+	if err != nil {
+		t.Fatalf("getOrCreateWorkspaceAgent: %v", err)
+	}
+	if agent == nil || sessions == nil {
+		t.Fatalf("expected workspace agent and session manager, got agent=%v sessions=%v", agent, sessions)
+	}
+
+	loadedStale := sessions.FindByID(stale.ID)
+	if loadedStale == nil {
+		t.Fatalf("stale session %q not loaded", stale.ID)
+	}
+	if got := loadedStale.AgentSessionID; got != "" {
+		t.Fatalf("stale session id = %q, want cleared", got)
+	}
+	if got := loadedStale.AgentType; got != agentName {
+		t.Fatalf("stale session agent type = %q, want %q", got, agentName)
+	}
+
+	loadedKeep := sessions.FindByID(keep.ID)
+	if loadedKeep == nil {
+		t.Fatalf("kept session %q not loaded", keep.ID)
+	}
+	if got := loadedKeep.AgentSessionID; got != "keep-opencode-session" {
+		t.Fatalf("kept session id = %q, want preserved", got)
+	}
+	if got := loadedKeep.AgentType; got != agentName {
+		t.Fatalf("kept session agent type = %q, want %q", got, agentName)
+	}
+
+	reloaded := NewSessionManager(workspaceSessionPath)
+	reloadedStale := reloaded.FindByID(stale.ID)
+	if reloadedStale == nil {
+		t.Fatalf("stale session %q not persisted", stale.ID)
+	}
+	if got := reloadedStale.AgentSessionID; got != "" {
+		t.Fatalf("persisted stale session id = %q, want cleared", got)
+	}
+	if got := reloadedStale.AgentType; got != agentName {
+		t.Fatalf("persisted stale session agent type = %q, want %q", got, agentName)
+	}
+}
+
 func TestExtractRepoName(t *testing.T) {
 	tests := []struct {
 		input string
@@ -464,6 +540,30 @@ func TestWorkspaceInitFlow_SlashCommandCleansUpExistingFlow(t *testing.T) {
 	e.initFlowsMu.Unlock()
 	if stillExists {
 		t.Error("expected init flow to be deleted after slash command, but it still exists")
+	}
+}
+
+func TestMigrateLegacyWorkspaceBindings_CopiesProjectAndSharedDefaults(t *testing.T) {
+	baseDir := t.TempDir()
+	e := newTestEngineWithMultiWorkspace(t, baseDir)
+	oldKey := workspaceChannelKey("feishu", "oc_chat")
+	newKey := workspaceChannelKey("feishu", "oc_chat:topic:om_root")
+	e.workspaceBindings.Bind("project:test", oldKey, "topic-group", "/workspace/project")
+	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, oldKey, "topic-group", "/workspace/shared")
+
+	e.migrateLegacyWorkspaceBindings(&Message{
+		Platform:         "feishu",
+		ChannelKey:       "oc_chat:topic:om_root",
+		LegacyChannelKey: "oc_chat",
+	})
+
+	for _, projectKey := range []string{"project:test", sharedWorkspaceBindingsKey} {
+		if b := e.workspaceBindings.Lookup(projectKey, oldKey); b == nil {
+			t.Fatalf("%s chat default binding was not preserved", projectKey)
+		}
+		if b := e.workspaceBindings.Lookup(projectKey, newKey); b == nil {
+			t.Fatalf("%s topic binding did not inherit the default", projectKey)
+		}
 	}
 }
 
@@ -702,5 +802,80 @@ func TestCommandContextWithWorkspace_UnboundChannelFallsBack(t *testing.T) {
 	}
 	if interactiveKey != msg.SessionKey {
 		t.Errorf("expected interactiveKey to equal sessionKey when unbound, got %q want %q", interactiveKey, msg.SessionKey)
+	}
+}
+
+// newTestEngineWithMultiWorkspaceRunAsAgent builds a multi-workspace engine
+// whose agent reports a run_as_user, exercising the OS-isolation code paths.
+func newTestEngineWithMultiWorkspaceRunAsAgent(t *testing.T, baseDir, runAsUser string) *Engine {
+	t.Helper()
+	tmpDir := t.TempDir()
+	bindingPath := filepath.Join(tmpDir, "bindings.json")
+	sessionPath := filepath.Join(tmpDir, "sessions.json")
+	agent := &runAsTestAgent{namedTestAgent: &namedTestAgent{name: "runas-lookup-agent"}, runAsUser: runAsUser}
+	e := NewEngine("test", agent, nil, sessionPath, LangEnglish)
+	e.SetMultiWorkspace(baseDir, bindingPath)
+	return e
+}
+
+// TestLookupEffectiveBinding_RunAsUserKeepsInaccessibleWorkspace is a
+// regression guard for the bug where a bound workspace was silently dropped
+// under run_as_user. The supervisor process runs as a different user than the
+// agent, so os.Stat on the target user's private workspace returns EACCES (or,
+// here, the directory simply isn't visible to the supervisor). The old code
+// treated any stat error as "directory missing" and called Unbind(),
+// permanently losing the user's /ws binding even though the agent — running as
+// the target user — could access the workspace fine.
+//
+// With isolation active, lookupEffectiveWorkspaceBinding must skip the
+// supervisor-side existence check entirely: the binding stays usable and is
+// never unbound.
+func TestLookupEffectiveBinding_RunAsUserKeepsInaccessibleWorkspace(t *testing.T) {
+	baseDir := t.TempDir()
+	// Deliberately point at a path the supervisor can't stat as existing.
+	// Under real run_as_user this is the target user's private home; here a
+	// non-existent path stands in for "stat fails from the supervisor".
+	workspace := normalizeWorkspacePath(filepath.Join(baseDir, "private", "loader"))
+
+	e := newTestEngineWithMultiWorkspaceRunAsAgent(t, baseDir, "deploybot")
+	channelID := "C-isolated"
+	channelKey := workspaceChannelKey("test", channelID)
+	e.workspaceBindings.Bind("project:test", channelKey, "loader", workspace)
+
+	b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey)
+	if b == nil {
+		t.Fatal("binding was dropped under run_as_user; expected it to survive")
+	}
+	if !usable {
+		t.Errorf("expected binding to be usable under run_as_user despite supervisor-side stat failure")
+	}
+	if b.Workspace != workspace {
+		t.Errorf("workspace = %q, want %q", b.Workspace, workspace)
+	}
+
+	// The binding must still be persisted — not Unbind()'d.
+	if got := e.workspaceBindings.Lookup("project:test", channelKey); got == nil {
+		t.Fatal("binding was unbound under run_as_user; it must be preserved")
+	}
+}
+
+// TestLookupEffectiveBinding_NoIsolationUnbindsMissing preserves the original
+// behavior when isolation is NOT active: a genuinely missing workspace
+// directory is unbound so stale bindings don't linger.
+func TestLookupEffectiveBinding_NoIsolationUnbindsMissing(t *testing.T) {
+	baseDir := t.TempDir()
+	missing := normalizeWorkspacePath(filepath.Join(baseDir, "gone"))
+
+	e := newTestEngineWithMultiWorkspaceAgent(t, baseDir) // namedTestAgent: no run_as_user
+	channelID := "C-missing"
+	channelKey := workspaceChannelKey("test", channelID)
+	e.workspaceBindings.Bind("project:test", channelKey, "gone", missing)
+
+	_, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey)
+	if usable {
+		t.Errorf("expected missing workspace to be unusable without isolation")
+	}
+	if got := e.workspaceBindings.Lookup("project:test", channelKey); got != nil {
+		t.Errorf("expected missing workspace binding to be unbound without isolation, got %+v", got)
 	}
 }

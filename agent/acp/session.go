@@ -373,6 +373,8 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	s.cacheToolCallInput(params)
 	s.maybeAbsorbCurrentModeUpdate(params)
 	sid := s.currentACPSessionID()
+	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
+	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
 	for _, ev := range mapSessionUpdate(sid, params) {
 		s.emit(ev)
 	}
@@ -392,7 +394,7 @@ func (s *acpSession) maybeAbsorbCurrentModeUpdate(params json.RawMessage) {
 		return
 	}
 	var head struct {
-		Kind     string `json:"sessionUpdate"`
+		Kind          string `json:"sessionUpdate"`
 		CurrentModeID string `json:"currentModeId"`
 	}
 	if json.Unmarshal(wrap.Update, &head) != nil {
@@ -585,7 +587,7 @@ func (s *acpSession) emit(ev core.Event) {
 	}
 }
 
-func (s *acpSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("acp: session closed")
 	}
@@ -593,7 +595,7 @@ func (s *acpSession) Send(prompt string, images []core.ImageAttachment, files []
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
-	filePaths := core.SaveFilesToDisk(s.workDir, files)
+	filePaths := core.SaveFilesToDisk(s.workDir, messageID, files)
 	prompt = core.AppendFileRefs(prompt, filePaths)
 	if len(images) > 0 {
 		prompt = s.appendImageRefs(prompt, images)
@@ -612,11 +614,13 @@ func (s *acpSession) Send(prompt string, images []core.ImageAttachment, files []
 		"prompt":    promptBlocks,
 	}
 
-	_, err := s.tr.call(s.ctx, "session/prompt", params)
+	slog.Debug("acp: sending session/prompt", "session_id", sid, "prompt_len", len(prompt))
+	res, err := s.tr.call(s.ctx, "session/prompt", params)
 	if err != nil {
 		s.emit(core.Event{Type: core.EventError, Error: err})
 		return fmt.Errorf("acp: session/prompt: %w", err)
 	}
+	slog.Debug("acp: session/prompt response", "session_id", sid, "response_len", len(res), "response", string(res))
 
 	// Text was streamed via session/update; engine aggregates EventText.
 	s.emit(core.Event{
@@ -696,6 +700,24 @@ func (s *acpSession) Events() <-chan core.Event {
 
 func (s *acpSession) CurrentSessionID() string {
 	return s.currentACPSessionID()
+}
+
+// CancelTurn sends an ACP session/cancel notification to abort the current
+// turn while keeping the session alive. The agent should cancel the active
+// LLM request and persist state, then wait for the next user message on the
+// same connection. This is used by /stop instead of Close().
+func (s *acpSession) CancelTurn() error {
+	sid := s.currentACPSessionID()
+	if sid == "" {
+		return fmt.Errorf("acp: no active session to cancel")
+	}
+	if s.tr == nil {
+		return fmt.Errorf("acp: transport not available")
+	}
+	slog.Debug("acp: cancelling current turn", "session_id", sid)
+	return s.tr.sendNotification("session/cancel", map[string]any{
+		"sessionId": sid,
+	})
 }
 
 func (s *acpSession) Alive() bool {

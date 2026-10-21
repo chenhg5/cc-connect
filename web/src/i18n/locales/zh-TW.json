@@ -56,8 +56,26 @@
       "overview": "總覽",
       "providers": "供應商",
       "heartbeat": "心跳",
-      "settings": "設定"
-    }
+      "settings": "設定",
+      "workspaces": "工作區"
+    },
+    "workspaceMode": "多工作區模式",
+    "workspaceModeHint": "在共享的基礎目錄下，將不同的聊天頻道路由到不同的工作目錄。",
+    "workspaceModeEnable": "啟用多工作區模式",
+    "workspaceModeWarning": "切換模式需要重新啟動服務。多工作區模式開啟後，單一的 work_dir 將不再使用。",
+    "workspaceBaseDir": "基礎目錄",
+    "workspaceBaseDirRequired": "啟用多工作區模式需要設定基礎目錄。",
+    "workspaceModeConfirm": "修改工作區模式需要重新啟動服務，確定繼續嗎？",
+    "workspaceBindings": "頻道綁定",
+    "workspaceNoBindings": "尚無頻道綁定到工作區。",
+    "workspaceActive": "運行中",
+    "workspaceIdle": "閒置",
+    "workspaceAddBinding": "綁定頻道",
+    "workspaceChannelKey": "頻道 Key",
+    "workspaceChannelName": "頻道名稱（可選）",
+    "workspacePath": "工作區路徑",
+    "workspaceSuggestions": "base_dir 中未綁定的目錄：",
+    "workspaceBind": "綁定"
   },
   "sessions": {
     "title": "工作階段",
@@ -114,6 +132,8 @@
     "lastRun": "上次執行",
     "lastError": "上次錯誤",
     "add": "新增工作",
+    "trigger": "立即執行",
+    "triggerPending": "已觸發，結果稍後更新。",
     "delete": "刪除",
     "noJobs": "尚無排程工作",
     "workDir": "工作目錄",
@@ -225,13 +245,25 @@
     "manualSetup": "手動設定",
     "manualHint": "{{platform}} 需要在 config.toml 中手動設定憑證，然後重新啟動服務。",
     "advancedOptions": "進階選項",
-    "unsupportedPlatform": "不支援的平台類型：{{type}}"
+    "unsupportedPlatform": "不支援的平台類型：{{type}}",
+    "cloudWeb": {
+      "urlRequiredWebsocket": "WebSocket 模式需填寫 API 基礎位址或 WebSocket 位址（至少一項）",
+      "urlRequiredLongPoll": "Long poll 模式需填寫 API 基礎位址",
+      "urlRequiredGateway": "Gateway 模式需填寫 API 基礎位址或註冊 URL（至少一項）",
+      "invalidHttpUrl": "{{field}} 必須是有效的 http(s) URL 或 host[:port]",
+      "invalidWsUrl": "WebSocket 位址必須以 ws:// 或 wss:// 開頭",
+      "publicUrlRequiredGateway": "設定註冊 URL 時必須提供公開 Webhook 位址"
+    }
   },
   "fields": {
     "botToken": "機器人 Token",
     "appToken": "App Token",
     "accessToken": "存取權杖",
     "allowFrom": "允許的使用者",
+    "groupAllowFrom": "允許的群組、團隊或頻道",
+    "groupPolicy": "群組策略",
+    "requireMention": "要求明確 @機器人",
+    "historyLimit": "未 @ 歷史筆數",
     "allowFromHintTelegram": "Telegram 使用者 ID，以逗號分隔",
     "groupReplyAll": "回覆所有群組訊息",
     "sharedGroupSession": "共享群組工作階段",
@@ -255,7 +287,18 @@
     "appSecret": "App Secret",
     "sandboxMode": "沙盒模式",
     "channelSecret": "Channel Secret",
-    "channelToken": "Channel Access Token"
+    "channelToken": "Channel Access Token",
+    "transport": "傳輸模式",
+    "longPollTimeout": "長輪詢逾時（毫秒）",
+    "listen": "監聽位址",
+    "publicUrl": "公網 Webhook URL",
+    "publicUrlHint": "供 Gateway 回呼 cc-connect 的公網位址",
+    "registerUrl": "註冊 URL",
+    "registerUrlHint": "可選：向 Gateway 註冊 Webhook 的介面位址",
+    "cloudWebWsHint": "若已填寫 base URL 可留空，預設 /cloud-web/ws",
+    "cloudWebBaseUrlHint": "long poll 必填；WebSocket 可填此項或下方 WebSocket 位址",
+    "eventsPath": "事件拉取路徑（長輪詢）",
+    "sendPath": "訊息發送路徑（出站 API）"
   },
   "chat": {
     "noChats": "尚無專案",

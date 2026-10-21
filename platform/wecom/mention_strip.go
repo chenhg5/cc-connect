@@ -1,6 +1,10 @@
 package wecom
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 // stripWeComAtMentions removes @<botId> / ＠<botId> segments so group replies like
 // "允许 @机器人" still match engine permission keywords (#98). Only affects wecom.
@@ -60,6 +64,19 @@ func removeAllEqualFold(s, sub string) string {
 	}
 }
 
+// stripLeadingDisplayMentionCommand removes any leading @-mentions before a
+// slash-command (/) or shell-bang (!) marker. WeCom's WS aibot callback does
+// not deliver structured @-mention metadata, so the bot's display name is
+// embedded directly in Text.Content. The previous implementation used
+// strings.Fields(s)[0] as the mention token, which silently failed when:
+//   - the bot's display name contains spaces (e.g. "Claude Code"),
+//   - the user @-mentions multiple parties before the command
+//     (e.g. "@张三 @机器人 /list"),
+//   - or the mention token contains punctuation other than whitespace.
+// The fix scans for the first '/' or '!' that appears at a token boundary
+// (i.e. preceded by whitespace) and treats everything before it as the
+// mention prefix. Matching at a token boundary avoids false positives on
+// things like "https://", "1/2", or display names containing those chars.
 func stripLeadingDisplayMentionCommand(s string) string {
 	if s == "" {
 		return s
@@ -67,13 +84,17 @@ func stripLeadingDisplayMentionCommand(s string) string {
 	if !strings.HasPrefix(s, "@") && !strings.HasPrefix(s, "＠") {
 		return s
 	}
-	fields := strings.Fields(s)
-	if len(fields) < 2 {
-		return s
-	}
-	rest := strings.TrimSpace(strings.TrimPrefix(s, fields[0]))
-	if strings.HasPrefix(rest, "/") || strings.HasPrefix(rest, "!") {
-		return rest
+	for i, r := range s {
+		if r != '/' && r != '!' {
+			continue
+		}
+		if i == 0 {
+			return s
+		}
+		prev, _ := utf8.DecodeLastRuneInString(s[:i])
+		if unicode.IsSpace(prev) {
+			return strings.TrimSpace(s[i:])
+		}
 	}
 	return s
 }

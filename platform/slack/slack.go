@@ -27,20 +27,39 @@ func init() {
 type replyContext struct {
 	channel   string
 	timestamp string // thread_ts for threading replies
+	msgTS     string // ts of the message that triggered this turn (reaction target)
+}
+
+// reactionTS returns the timestamp reactions should target: the triggering
+// message itself when known, otherwise the thread root. This matters in
+// threads, where the root can be an unrelated message posted days earlier by
+// someone else — the working indicator belongs on the message that summoned
+// the bot.
+func (rc replyContext) reactionTS() string {
+	if rc.msgTS != "" {
+		return rc.msgTS
+	}
+	return rc.timestamp
 }
 
 type Platform struct {
-	botToken              string
-	appToken              string
-	allowFrom             string
-	shareSessionInChannel bool
-	client                *slack.Client
-	socket                *socketmode.Client
-	handler               core.MessageHandler
-	cancel                context.CancelFunc
-	channelNameCache      map[string]string
-	channelCacheMu        sync.RWMutex
-	userNameCache         sync.Map // userID -> display name
+	botToken         string
+	appToken         string
+	allowFrom        string
+	sessionScope     string // "user" (default) | "channel" | "thread"
+	client           *slack.Client
+	socket           *socketmode.Client
+	handler          core.MessageHandler
+	cancel           context.CancelFunc
+	channelNameCache map[string]string
+	channelCacheMu   sync.RWMutex
+	userNameCache    sync.Map // userID -> display name
+	// dedup drops the second delivery of a message that Slack reports through
+	// more than one subscription. A message that @-mentions the bot arrives as
+	// BOTH an app_mention event and a message event, and the two are handled
+	// independently below; without this guard each mention starts a turn and
+	// then queues a duplicate against the still-busy session.
+	dedup core.MessageDedup
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -52,13 +71,86 @@ func New(opts map[string]any) (core.Platform, error) {
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
+	scope := normalizeSessionScope(opts["session_scope"], shareSessionInChannel)
+	if scope == "thread" {
+		slog.Warn("slack: session_scope=thread gives each Slack thread its own session; " +
+			"if your agent runtime is tmux, also set window_per_session=true — " +
+			"without it, concurrent threads share a single pane and their output will interleave")
+	}
 	return &Platform{
-		botToken:              botToken,
-		appToken:              appToken,
-		allowFrom:             allowFrom,
-		shareSessionInChannel: shareSessionInChannel,
-		channelNameCache:      make(map[string]string),
+		botToken:         botToken,
+		appToken:         appToken,
+		allowFrom:        allowFrom,
+		sessionScope:     scope,
+		channelNameCache: make(map[string]string),
 	}, nil
+}
+
+// normalizeSessionScope resolves the configured session_scope option to one of
+// "user" | "channel" | "thread". For backward compatibility, when session_scope
+// is unset, share_session_in_channel = true maps to "channel"; otherwise the
+// default is "user". Unknown values fall back to the share-derived default.
+func normalizeSessionScope(raw any, shareInChannel bool) string {
+	fallback := "user"
+	if shareInChannel {
+		fallback = "channel"
+	}
+	s, _ := raw.(string)
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "user":
+		return "user"
+	case "channel":
+		return "channel"
+	case "thread":
+		return "thread"
+	case "":
+		return fallback
+	default:
+		slog.Warn("slack: unknown session_scope, falling back", "session_scope", s, "using", fallback)
+		return fallback
+	}
+}
+
+// buildSessionKey derives the engine session key for an incoming Slack event
+// according to the configured session_scope:
+//   - "channel": one session per channel            -> slack:<channel>
+//   - "thread":  one session per thread (parent ts)  -> slack:<channel>:t:<threadTS>
+//   - "user":    one session per (channel, user)     -> slack:<channel>:<user>  (default)
+//
+// threadTS must be the thread root timestamp; pass "" when no thread context is
+// available (e.g. slash commands), in which case "thread" falls back to "user".
+func (p *Platform) buildSessionKey(channel, user, threadTS string) string {
+	switch p.sessionScope {
+	case "channel":
+		return fmt.Sprintf("slack:%s", channel)
+	case "thread":
+		if threadTS != "" {
+			return fmt.Sprintf("slack:%s:t:%s", channel, threadTS)
+		}
+		return fmt.Sprintf("slack:%s:%s", channel, user)
+	default:
+		return fmt.Sprintf("slack:%s:%s", channel, user)
+	}
+}
+
+// dedupKey identifies one Slack message. A message ts is only unique within its
+// channel, so both parts are needed. An empty ts yields an empty key, which
+// core.MessageDedup never treats as a duplicate.
+func dedupKey(channel, ts string) string {
+	if ts == "" {
+		return ""
+	}
+	return channel + ":" + ts
+}
+
+// threadRootTS returns the thread parent timestamp for an event: the existing
+// thread_ts when the message is already in a thread, otherwise the message's
+// own ts (which becomes the thread root once the bot replies in-thread).
+func threadRootTS(threadTS, msgTS string) string {
+	if threadTS != "" {
+		return threadTS
+	}
+	return msgTS
 }
 
 func (p *Platform) Name() string { return "slack" }
@@ -134,12 +226,14 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
-				var sessionKey string
-				if p.shareSessionInChannel {
-					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
-				} else {
-					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
+				if p.dedup.IsDuplicate(dedupKey(ev.Channel, ev.TimeStamp)) {
+					slog.Debug("slack: duplicate message ignored", "source", "app_mention",
+						"channel", ev.Channel, "ts", ev.TimeStamp)
+					return
 				}
+
+				threadTS := threadRootTS(ev.ThreadTimeStamp, ev.TimeStamp)
+				sessionKey := p.buildSessionKey(ev.Channel, ev.User, threadTS)
 
 				var shareFiles []slackevents.File
 				if cb, ok := data.Data.(*slackevents.EventsAPICallbackEvent); ok {
@@ -159,7 +253,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Files:     docFiles,
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: ev.TimeStamp},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS, msgTS: ev.TimeStamp},
 				}
 				p.handler(p, msg)
 
@@ -200,12 +294,18 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
-				var sessionKey string
-				if p.shareSessionInChannel {
-					sessionKey = fmt.Sprintf("slack:%s", ev.Channel)
-				} else {
-					sessionKey = fmt.Sprintf("slack:%s:%s", ev.Channel, ev.User)
+				if p.dedup.IsDuplicate(dedupKey(ev.Channel, ev.TimeStamp)) {
+					slog.Debug("slack: duplicate message ignored", "source", "message",
+						"channel", ev.Channel, "ts", ev.TimeStamp)
+					return
 				}
+
+				// Use the same timestamp the reply will be routed to
+				// (assistantOrThreadTS): thread root in a thread, the message ts
+				// for a top-level channel message, and "" for a top-level DM —
+				// so DMs fall back to the user-scoped key and stay continuous.
+				threadTS := assistantOrThreadTS(ev)
+				sessionKey := p.buildSessionKey(ev.Channel, ev.User, threadTS)
 				ts := ev.TimeStamp
 
 				images, audio, docFiles := p.processSlackFileShares(ev.Files)
@@ -220,7 +320,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					ChatName: p.resolveChannelNameForMsg(ev.Channel),
 					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: assistantOrThreadTS(ev)},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS, msgTS: ts},
 				}
 				p.handler(p, msg)
 			}
@@ -249,12 +349,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 			content += " " + cmd.Text
 		}
 
-		var sessionKey string
-		if p.shareSessionInChannel {
-			sessionKey = fmt.Sprintf("slack:%s", cmd.ChannelID)
-		} else {
-			sessionKey = fmt.Sprintf("slack:%s:%s", cmd.ChannelID, cmd.UserID)
-		}
+		sessionKey := p.buildSessionKey(cmd.ChannelID, cmd.UserID, "")
 
 		msg := &core.Message{
 			SessionKey: sessionKey, Platform: "slack",
@@ -365,7 +460,6 @@ func slackFileDisplayName(f slackevents.File) string {
 	}
 	return f.Title
 }
-
 
 // assistantOrThreadTS returns the thread_ts to use for the bot's reply.
 //
@@ -538,12 +632,19 @@ func (p *Platform) downloadSlackFile(url string) ([]byte, error) {
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
-	// slack:{channel}:{user}
+	// slack:{channel}:{user}  |  slack:{channel}:t:{threadTS}  |  slack:{channel}
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) < 2 || parts[0] != "slack" {
 		return nil, fmt.Errorf("slack: invalid session key %q", sessionKey)
 	}
-	return replyContext{channel: parts[1]}, nil
+	rc := replyContext{channel: parts[1]}
+	// Thread-scoped keys carry the thread root ts as a "t:<ts>" suffix; preserve
+	// it so proactive replies (cron, send-to-session, restart/model/delete
+	// notifications) post into the original thread instead of the channel root.
+	if len(parts) == 3 && strings.HasPrefix(parts[2], "t:") {
+		rc.timestamp = strings.TrimPrefix(parts[2], "t:")
+	}
+	return rc, nil
 }
 
 func (p *Platform) resolveUserName(userID string) string {
@@ -621,11 +722,11 @@ func (p *Platform) FormattingInstructions() string {
 // All reactions are removed when the returned stop function is called.
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(replyContext)
-	if !ok || rc.channel == "" || rc.timestamp == "" {
+	if !ok || rc.channel == "" || rc.reactionTS() == "" {
 		return func() {}
 	}
 
-	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.reactionTS()}
 	var mu sync.Mutex
 	var added []string
 

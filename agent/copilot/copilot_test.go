@@ -3,6 +3,7 @@ package copilot
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -229,7 +230,7 @@ func TestAgent_ListSessions(t *testing.T) {
 }
 
 func TestAgent_CLIBinaryName(t *testing.T) {
-	a := &Agent{cliBin: "copilot"}
+	a := &Agent{cmd: "copilot"}
 	if got := a.CLIBinaryName(); got != "copilot" {
 		t.Fatalf("CLIBinaryName() = %q, want copilot", got)
 	}
@@ -242,8 +243,107 @@ func TestAgent_CLIDisplayName(t *testing.T) {
 	}
 }
 
+func TestCopilotSkillDirs_UsesProjectAndUserRoots(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "repo", "src")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "repo", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home")
+	want := []string{
+		filepath.Join(workDir, ".github", "skills"),
+		filepath.Join(workDir, ".agents", "skills"),
+		filepath.Join(workDir, ".claude", "skills"),
+		filepath.Join(root, "repo", ".github", "skills"),
+		filepath.Join(root, "repo", ".agents", "skills"),
+		filepath.Join(root, "repo", ".claude", "skills"),
+		filepath.Join(home, ".copilot", "skills"),
+		filepath.Join(home, ".agents", "skills"),
+	}
+
+	got := copilotSkillDirs(workDir, home)
+	if len(got) != len(want) {
+		t.Fatalf("len(copilotSkillDirs()) = %d, want %d\n got=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("copilotSkillDirs()[%d] = %q, want %q\nfull=%v", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestCopilotSkillDirs_StopsProjectSearchAtHome(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := copilotSkillDirs(root, root)
+	want := []string{
+		filepath.Join(root, ".copilot", "skills"),
+		filepath.Join(root, ".agents", "skills"),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len(copilotSkillDirs()) = %d, want %d\n got=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("copilotSkillDirs()[%d] = %q, want %q\nfull=%v", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestCopilotSkillDirs_StopsAtGitWorktreeFile(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "repo", "src")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(root, "repo", ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: /tmp/main/.git/worktrees/repo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home")
+	got := copilotSkillDirs(workDir, home)
+	want := []string{
+		filepath.Join(workDir, ".github", "skills"),
+		filepath.Join(workDir, ".agents", "skills"),
+		filepath.Join(workDir, ".claude", "skills"),
+		filepath.Join(root, "repo", ".github", "skills"),
+		filepath.Join(root, "repo", ".agents", "skills"),
+		filepath.Join(root, "repo", ".claude", "skills"),
+		filepath.Join(home, ".copilot", "skills"),
+		filepath.Join(home, ".agents", "skills"),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len(copilotSkillDirs()) = %d, want %d\n got=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("copilotSkillDirs()[%d] = %q, want %q\nfull=%v", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestUniqueCopilotSkillDirs_PreservesFirstOccurrence(t *testing.T) {
+	first := filepath.Join("project", ".agents", "skills")
+	second := filepath.Join("home", ".copilot", "skills")
+	got := uniqueCopilotSkillDirs([]string{first, second, first, second})
+	want := []string{first, second}
+	if len(got) != len(want) {
+		t.Fatalf("len(uniqueCopilotSkillDirs()) = %d, want %d\n got=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("uniqueCopilotSkillDirs()[%d] = %q, want %q\nfull=%v", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestAgent_WorkspaceAgentOptions(t *testing.T) {
-	a := &Agent{mode: "bypassPermissions", model: "gpt-4o", cliBin: "copilot"}
+	a := &Agent{mode: "bypassPermissions", model: "gpt-4o", cmd: "copilot"}
 	opts := a.WorkspaceAgentOptions()
 	if opts["mode"] != "bypassPermissions" {
 		t.Fatalf("mode = %v, want bypassPermissions", opts["mode"])
@@ -251,16 +351,16 @@ func TestAgent_WorkspaceAgentOptions(t *testing.T) {
 	if opts["model"] != "gpt-4o" {
 		t.Fatalf("model = %v, want gpt-4o", opts["model"])
 	}
-	// cliBin is "copilot" (default) so cli_path should not be set
-	if _, ok := opts["cli_path"]; ok {
-		t.Fatal("cli_path should not be set for default binary name")
+	// cmd is "copilot" (default) so cmd should not be set
+	if _, ok := opts["cmd"]; ok {
+		t.Fatal("cmd should not be set for default binary name")
 	}
 
 	// Custom CLI path should be included
-	a2 := &Agent{mode: "default", cliBin: "/custom/copilot"}
+	a2 := &Agent{mode: "default", cmd: "/custom/copilot"}
 	opts2 := a2.WorkspaceAgentOptions()
-	if opts2["cli_path"] != "/custom/copilot" {
-		t.Fatalf("cli_path = %v, want /custom/copilot", opts2["cli_path"])
+	if opts2["cmd"] != "/custom/copilot" {
+		t.Fatalf("cmd = %v, want /custom/copilot", opts2["cmd"])
 	}
 }
 
@@ -270,7 +370,7 @@ func TestAgent_WorkspaceAgentOptions(t *testing.T) {
 
 // TestAgent_ListSessions_NoBinary verifies graceful nil return when binary is missing.
 func TestAgent_ListSessions_NoBinary(t *testing.T) {
-	a := &Agent{cliBin: "copilot-nonexistent-xyz", workDir: "."}
+	a := &Agent{cmd: "copilot-nonexistent-xyz", workDir: "."}
 	sessions, err := a.ListSessions(context.Background())
 	if err != nil {
 		t.Fatalf("ListSessions with missing binary returned error: %v", err)
@@ -282,7 +382,7 @@ func TestAgent_ListSessions_NoBinary(t *testing.T) {
 
 // TestAgent_DeleteSession_NoBinary verifies graceful nil return when binary is missing.
 func TestAgent_DeleteSession_NoBinary(t *testing.T) {
-	a := &Agent{cliBin: "copilot-nonexistent-xyz", workDir: "."}
+	a := &Agent{cmd: "copilot-nonexistent-xyz", workDir: "."}
 	if err := a.DeleteSession(context.Background(), "some-session-id"); err != nil {
 		t.Fatalf("DeleteSession with missing binary returned error: %v", err)
 	}
@@ -290,7 +390,7 @@ func TestAgent_DeleteSession_NoBinary(t *testing.T) {
 
 // TestAgent_DeleteSession_EmptyID verifies empty session ID returns nil immediately.
 func TestAgent_DeleteSession_EmptyID(t *testing.T) {
-	a := &Agent{cliBin: "copilot-nonexistent-xyz", workDir: "."}
+	a := &Agent{cmd: "copilot-nonexistent-xyz", workDir: "."}
 	if err := a.DeleteSession(context.Background(), ""); err != nil {
 		t.Fatalf("DeleteSession with empty ID returned error: %v", err)
 	}
@@ -309,7 +409,7 @@ func TestAgent_ListSessions_RPC(t *testing.T) {
 
 	// Point agent at the test binary itself acting as a mock copilot
 	a := &Agent{
-		cliBin:  bin,
+		cmd:     bin,
 		workDir: ".",
 	}
 
@@ -341,7 +441,7 @@ func TestAgent_DeleteSession_RPC(t *testing.T) {
 	}
 
 	a := &Agent{
-		cliBin:  bin,
+		cmd:     bin,
 		workDir: ".",
 	}
 

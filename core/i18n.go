@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -56,6 +57,38 @@ func DetectLanguage(text string) Language {
 		return LangSpanish
 	}
 	return LangEnglish
+}
+
+// NormalizeLanguageString parses a configuration string (e.g. from
+// opts["language"] or [projects].language) into a Language constant. The
+// accepted spellings mirror the ones documented in config.example.toml:
+// "en"/"english", "zh"/"chinese", "zh-TW"/"zh_TW"/"zhtw", "ja"/"japanese",
+// "es"/"spanish", and "" / "auto" for auto-detect. Unknown values return
+// LangAuto so the engine falls back to detection rather than silently
+// snapping to English — operators who set language = "klingon" should see
+// "auto" behaviour, not a hard English default they didn't ask for.
+//
+// Issue #1655 introduced this helper so the Claude Code agent (which
+// receives the language via opts["language"]) can decode the string
+// without duplicating the switch statement that cmd/cc-connect/main.go
+// uses for engine construction.
+func NormalizeLanguageString(s string) Language {
+	switch strings.ToLower(s) {
+	case "en", "english":
+		return LangEnglish
+	case "zh", "chinese":
+		return LangChinese
+	case "zh-tw", "zh_tw", "zhtw":
+		return LangTraditionalChinese
+	case "ja", "japanese":
+		return LangJapanese
+	case "es", "spanish":
+		return LangSpanish
+	case "", "auto":
+		return LangAuto
+	default:
+		return LangAuto
+	}
 }
 
 func isChinese(r rune) bool {
@@ -169,6 +202,9 @@ const (
 	MsgToolResultFmtOk           MsgKey = "tool_result_fmt_ok"
 	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
+	MsgSessionCloseFailed        MsgKey = "session_close_failed"
+	MsgSessionResumeUnsafe       MsgKey = "session_resume_unsafe"
+	MsgSessionCancelled          MsgKey = "session_cancelled"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
@@ -219,6 +255,7 @@ const (
 	MsgListSwitchHint            MsgKey = "list_switch_hint"
 	MsgListError                 MsgKey = "list_error"
 	MsgHistoryEmpty              MsgKey = "history_empty"
+	MsgHistoryReadFailed         MsgKey = "history_read_failed"
 	MsgNameUsage                 MsgKey = "name_usage"
 	MsgNameSet                   MsgKey = "name_set"
 	MsgNameNoSession             MsgKey = "name_no_session"
@@ -266,30 +303,33 @@ const (
 	MsgHeartbeatUsage        MsgKey = "heartbeat_usage"
 	MsgHeartbeatInvalidMins  MsgKey = "heartbeat_invalid_mins"
 
-	MsgCronNotAvailable MsgKey = "cron_not_available"
-	MsgCronUsage        MsgKey = "cron_usage"
-	MsgCronAddUsage     MsgKey = "cron_add_usage"
-	MsgCronAdded        MsgKey = "cron_added"
-	MsgCronAddedExec    MsgKey = "cron_added_exec"
-	MsgCronAddExecUsage MsgKey = "cron_addexec_usage"
-	MsgCronEmpty        MsgKey = "cron_empty"
-	MsgCronListTitle    MsgKey = "cron_list_title"
-	MsgCronListFooter   MsgKey = "cron_list_footer"
-	MsgCronDelUsage     MsgKey = "cron_del_usage"
-	MsgCronDeleted      MsgKey = "cron_deleted"
-	MsgCronNotFound     MsgKey = "cron_not_found"
-	MsgCronEnabled      MsgKey = "cron_enabled"
-	MsgCronDisabled     MsgKey = "cron_disabled"
-	MsgCronMuted        MsgKey = "cron_muted"
-	MsgCronUnmuted      MsgKey = "cron_unmuted"
-	MsgCronCardHint     MsgKey = "cron_card_hint"
-	MsgCronNextShort    MsgKey = "cron_next_short"
-	MsgCronLastShort    MsgKey = "cron_last_short"
-	MsgCronBtnEnable    MsgKey = "cron_btn_enable"
-	MsgCronBtnDisable   MsgKey = "cron_btn_disable"
-	MsgCronBtnMute      MsgKey = "cron_btn_mute"
-	MsgCronBtnUnmute    MsgKey = "cron_btn_unmute"
-	MsgCronBtnDelete    MsgKey = "cron_btn_delete"
+	MsgCronNotAvailable       MsgKey = "cron_not_available"
+	MsgCronUsage              MsgKey = "cron_usage"
+	MsgCronAddUsage           MsgKey = "cron_add_usage"
+	MsgCronAdded              MsgKey = "cron_added"
+	MsgCronAddedExec          MsgKey = "cron_added_exec"
+	MsgCronAddExecUsage       MsgKey = "cron_addexec_usage"
+	MsgCronEmpty              MsgKey = "cron_empty"
+	MsgCronListTitle          MsgKey = "cron_list_title"
+	MsgCronListFooter         MsgKey = "cron_list_footer"
+	MsgCronExecUsage          MsgKey = "cron_exec_usage"
+	MsgCronTriggered          MsgKey = "cron_triggered"
+	MsgCronProjectUnavailable MsgKey = "cron_project_unavailable"
+	MsgCronDelUsage           MsgKey = "cron_del_usage"
+	MsgCronDeleted            MsgKey = "cron_deleted"
+	MsgCronNotFound           MsgKey = "cron_not_found"
+	MsgCronEnabled            MsgKey = "cron_enabled"
+	MsgCronDisabled           MsgKey = "cron_disabled"
+	MsgCronMuted              MsgKey = "cron_muted"
+	MsgCronUnmuted            MsgKey = "cron_unmuted"
+	MsgCronCardHint           MsgKey = "cron_card_hint"
+	MsgCronNextShort          MsgKey = "cron_next_short"
+	MsgCronLastShort          MsgKey = "cron_last_short"
+	MsgCronBtnEnable          MsgKey = "cron_btn_enable"
+	MsgCronBtnDisable         MsgKey = "cron_btn_disable"
+	MsgCronBtnMute            MsgKey = "cron_btn_mute"
+	MsgCronBtnUnmute          MsgKey = "cron_btn_unmute"
+	MsgCronBtnDelete          MsgKey = "cron_btn_delete"
 
 	MsgStatusTitle           MsgKey = "status_title"
 	MsgReplyFooterRemaining  MsgKey = "reply_footer_remaining"
@@ -360,6 +400,7 @@ const (
 	MsgCardTitleHistoryLast      MsgKey = "card_title_history_last"
 	MsgCardTitleProvider         MsgKey = "card_title_provider"
 	MsgCardTitleCron             MsgKey = "card_title_cron"
+	MsgCardTitleTimer            MsgKey = "card_title_timer"
 	MsgCardTitleHeartbeat        MsgKey = "card_title_heartbeat"
 	MsgCardTitleCommands         MsgKey = "card_title_commands"
 	MsgCardTitleAlias            MsgKey = "card_title_alias"
@@ -372,9 +413,32 @@ const (
 	MsgListEmptySummary          MsgKey = "list_empty_summary"
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
-	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
-	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
-	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
+
+	MsgTimerNotAvailable    MsgKey = "timer_not_available"
+	MsgTimerUsage           MsgKey = "timer_usage"
+	MsgTimerAddUsage        MsgKey = "timer_add_usage"
+	MsgTimerAdded           MsgKey = "timer_added"
+	MsgTimerAddedExec       MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage    MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty           MsgKey = "timer_empty"
+	MsgTimerListTitle       MsgKey = "timer_list_title"
+	MsgTimerListFooter      MsgKey = "timer_list_footer"
+	MsgTimerDelUsage        MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage       MsgKey = "timer_mute_usage"
+	MsgTimerDeleted         MsgKey = "timer_deleted"
+	MsgTimerNotFound        MsgKey = "timer_not_found"
+	MsgTimerMuted           MsgKey = "timer_muted"
+	MsgTimerUnmuted         MsgKey = "timer_unmuted"
+	MsgTimerCardHint        MsgKey = "timer_card_hint"
+	MsgTimerBtnMute         MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute       MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete       MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel         MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel  MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix    MsgKey = "timer_failed_suffix"
+	MsgCommandsTagAgent     MsgKey = "commands_tag_agent"
+	MsgCommandsTagShell     MsgKey = "commands_tag_shell"
+	MsgUpgradeTimeoutSuffix MsgKey = "upgrade_timeout_suffix"
 
 	MsgCronScheduleLabel MsgKey = "cron_schedule_label"
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
@@ -387,11 +451,12 @@ const (
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
-	MsgAskQuestionTitle    MsgKey = "ask_question_title"
-	MsgAskQuestionNote     MsgKey = "ask_question_note"
-	MsgAskQuestionMulti    MsgKey = "ask_question_multi"
-	MsgAskQuestionPrompt   MsgKey = "ask_question_prompt"
-	MsgAskQuestionAnswered MsgKey = "ask_question_answered"
+	MsgAskQuestionTitle     MsgKey = "ask_question_title"
+	MsgAskQuestionNote      MsgKey = "ask_question_note"
+	MsgAskQuestionNoteMulti MsgKey = "ask_question_note_multi"
+	MsgAskQuestionMulti     MsgKey = "ask_question_multi"
+	MsgAskQuestionPrompt    MsgKey = "ask_question_prompt"
+	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -617,6 +682,17 @@ const (
 	MsgWsInitInvalidTarget      MsgKey = "ws_init_invalid_target"
 	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
 	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
+
+	// Agent system-prompt tool sections (Issue #1655). These are appended
+	// to the agent's own system prompt by core/interfaces.go AgentSystemPromptForLang
+	// so that operators running cc-connect with language="zh" see the
+	// send / cron / timer / relay tool documentation in their native
+	// language. Translation coverage is en + zh for this PR; additional
+	// languages fall back to en automatically.
+	MsgAgentSendToolPrompt  MsgKey = "agent_send_tool_prompt"
+	MsgAgentCronToolPrompt  MsgKey = "agent_cron_tool_prompt"
+	MsgAgentTimerToolPrompt MsgKey = "agent_timer_tool_prompt"
+	MsgAgentRelayToolPrompt MsgKey = "agent_relay_tool_prompt"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -686,6 +762,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏹ 執行已停止。",
 		LangJapanese:           "⏹ 実行を停止しました。",
 		LangSpanish:            "⏹ Ejecución detenida.",
+	},
+	MsgSessionCloseFailed: {
+		LangEnglish:            "⚠️ Warning: the stopped session's background process could not be confirmed killed. It may still be running and using its old credentials.",
+		LangChinese:            "⚠️ 警告：已停止会话的后台进程未能确认已终止，可能仍在运行并占用原有凭证。",
+		LangTraditionalChinese: "⚠️ 警告：已停止會話的後台進程未能確認已終止，可能仍在運行並佔用原有憑證。",
+		LangJapanese:           "⚠️ 警告：停止したセッションのバックグラウンドプロセスの終了を確認できませんでした。まだ実行中で、以前の認証情報を使用している可能性があります。",
+		LangSpanish:            "⚠️ Advertencia: no se pudo confirmar que el proceso en segundo plano de la sesión detenida haya finalizado. Podría seguir en ejecución usando sus credenciales anteriores.",
+	},
+	MsgSessionResumeUnsafe: {
+		LangEnglish:            "⚠️ The previous process could not be confirmed stopped, so this conversation was NOT resumed — a brand-new session was started instead (earlier context is not carried over). This avoids two agents acting on the same conversation.",
+		LangChinese:            "⚠️ 上一个进程未能确认已停止，因此没有续接原会话，已为你开启全新会话（此前上下文未带入）。这是为了避免两个智能体同时操作同一个会话。",
+		LangTraditionalChinese: "⚠️ 上一個行程未能確認已停止，因此沒有續接原會話，已為你開啟全新會話（先前上下文未帶入）。這是為了避免兩個智能體同時操作同一個會話。",
+		LangJapanese:           "⚠️ 前のプロセスの停止を確認できなかったため、会話を再開せず新しいセッションを開始しました（以前の文脈は引き継がれません）。同じ会話を2つのエージェントが操作するのを防ぐためです。",
+		LangSpanish:            "⚠️ No se pudo confirmar que el proceso anterior se detuviera, así que no se reanudó esta conversación: se inició una sesión nueva (sin el contexto anterior). Así se evita que dos agentes actúen sobre la misma conversación.",
+	},
+	MsgSessionCancelled: {
+		LangEnglish:            "Session cancelled. Ready for new instructions.",
+		LangChinese:            "会话已取消。可以继续新的对话。",
+		LangTraditionalChinese: "會話已取消。可以繼續新的對話。",
+		LangJapanese:           "セッションをキャンセルしました。新しい指示を受け付けます。",
+		LangSpanish:            "Sesion cancelada. Listo para nuevas instrucciones.",
 	},
 	MsgNoExecution: {
 		LangEnglish:            "No execution in progress.",
@@ -962,7 +1059,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <ref>\n  View a file, directory, or code snippet by reference\n\n" +
 			"/dir [path|reset]\n  Show, switch, or reset agent working directory\n\n" +
 			"/stop\n  Stop current execution\n\n" +
-			"/cron [add|list|del|enable|disable]\n  Manage scheduled tasks\n\n" +
+			"/cron [add|list|exec|del|enable|disable]\n  Manage scheduled tasks\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  Manage one-shot timers\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Manage heartbeat\n\n" +
 			"/commands [add|del]\n  Manage custom slash commands\n\n" +
 			"/alias [add|del]\n  Manage command aliases (e.g. 帮助 → /help)\n\n" +
@@ -1005,7 +1103,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/show <引用>\n  按引用查看文件、目录或代码片段\n\n" +
 			"/dir [路径|reset]\n  查看、切换或重置 Agent 工作目录\n\n" +
 			"/stop\n  停止当前执行\n\n" +
-			"/cron [add|list|del|enable|disable]\n  管理定时任务\n\n" +
+			"/cron [add|list|exec|del|enable|disable]\n  管理定时任务\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  管理一次性定时器\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自定义命令\n\n" +
 			"/alias [add|del]\n  管理命令别名（如 帮助 → /help）\n\n" +
@@ -1047,7 +1146,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell [--timeout <秒>] <命令>\n  執行 Shell 命令並返回結果（快捷方式：!命令）\n\n" +
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
 			"/stop\n  停止當前執行\n\n" +
-			"/cron [add|list|del|enable|disable]\n  管理定時任務\n\n" +
+			"/cron [add|list|exec|del|enable|disable]\n  管理定時任務\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  管理一次性定時器\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  管理心跳\n\n" +
 			"/commands [add|del]\n  管理自訂命令\n\n" +
 			"/alias [add|del]\n  管理命令別名（如 幫助 → /help）\n\n" +
@@ -1088,7 +1188,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell [--timeout <秒>] <コマンド>\n  シェルコマンドを実行して結果を返す（ショートカット：!コマンド）\n\n" +
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
 			"/stop\n  現在の実行を停止\n\n" +
-			"/cron [add|list|del|enable|disable]\n  スケジュールタスク管理\n\n" +
+			"/cron [add|list|exec|del|enable|disable]\n  スケジュールタスク管理\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  ワンショットタイマー管理\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  ハートビート管理\n\n" +
 			"/commands [add|del]\n  カスタムコマンド管理\n\n" +
 			"/alias [add|del]\n  コマンドエイリアス管理（例: ヘルプ → /help）\n\n" +
@@ -1129,7 +1230,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell [--timeout <seg>] <comando>\n  Ejecutar un comando shell y devolver la salida (atajo: !comando)\n\n" +
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
 			"/stop\n  Detener ejecución actual\n\n" +
-			"/cron [add|list|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
+			"/cron [add|list|exec|del|enable|disable]\n  Gestionar tareas programadas\n\n" +
+			"/timer [add|list|del|mute|unmute]\n  Gestionar temporizadores de uso único\n\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n  Gestionar heartbeat\n\n" +
 			"/commands [add|del]\n  Gestionar comandos personalizados\n\n" +
 			"/alias [add|del]\n  Gestionar alias de comandos (ej. ayuda → /help)\n\n" +
@@ -1247,7 +1349,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <command> — Run a shell command (! shortcut)\n" +
 			"/show <ref> — View file / directory / snippet by reference\n" +
 			"/dir [path|reset] — Show, switch, or reset work directory\n" +
-			"/cron [add|list|del|...] — Scheduled tasks\n" +
+			"/cron [add|list|exec|del|...] — Scheduled tasks\n" +
+			"/timer [add|list|del|...] — One-shot timers\n" +
 			"/commands [add|del] — Custom commands\n" +
 			"/alias [add|del] — Command aliases\n" +
 			"/skills — List agent skills\n" +
@@ -1257,7 +1360,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <命令> — 执行 Shell 命令（!快捷方式）\n" +
 			"/show <引用> — 按引用查看文件、目录或代码片段\n" +
 			"/dir [路径|reset] — 查看、切换或重置工作目录\n" +
-			"/cron [add|list|del|...] — 定时任务\n" +
+			"/cron [add|list|exec|del|...] — 定时任务\n" +
+			"/timer [add|list|del|...] — 一次性定时器\n" +
 			"/commands [add|del] — 自定义命令\n" +
 			"/alias [add|del] — 命令别名\n" +
 			"/skills — 列出 Agent Skills\n" +
@@ -1267,7 +1371,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <命令> — 執行 Shell 命令（!快捷方式）\n" +
 			"/show <引用> — 按引用查看檔案、目錄或程式碼片段\n" +
 			"/dir [路徑|reset] — 查看、切換或重置工作目錄\n" +
-			"/cron [add|list|del|...] — 定時任務\n" +
+			"/cron [add|list|exec|del|...] — 定時任務\n" +
+			"/timer [add|list|del|...] — 一次性定時器\n" +
 			"/commands [add|del] — 自訂命令\n" +
 			"/alias [add|del] — 命令別名\n" +
 			"/skills — 列出 Agent Skills\n" +
@@ -1277,7 +1382,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <コマンド> — シェルコマンド実行（!ショートカット）\n" +
 			"/show <参照> — ファイル/ディレクトリ/スニペットを参照で表示\n" +
 			"/dir [パス|reset] — 作業ディレクトリの表示/切り替え/リセット\n" +
-			"/cron [add|list|del|...] — スケジュールタスク\n" +
+			"/cron [add|list|exec|del|...] — スケジュールタスク\n" +
+			"/timer [add|list|del|...] — ワンショットタイマー\n" +
 			"/commands [add|del] — カスタムコマンド\n" +
 			"/alias [add|del] — コマンドエイリアス\n" +
 			"/skills — エージェントスキル一覧\n" +
@@ -1287,7 +1393,8 @@ var messages = map[MsgKey]map[Language]string{
 			"/shell <comando> — Ejecutar comando shell (! atajo)\n" +
 			"/show <ref> — Ver archivo/directorio/fragmento por referencia\n" +
 			"/dir [ruta|reset] — Ver, cambiar o restablecer directorio de trabajo\n" +
-			"/cron [add|list|del|...] — Tareas programadas\n" +
+			"/cron [add|list|exec|del|...] — Tareas programadas\n" +
+			"/timer [add|list|del|...] — Temporizadores de uso único\n" +
 			"/commands [add|del] — Comandos personalizados\n" +
 			"/alias [add|del] — Alias de comandos\n" +
 			"/skills — Listar skills del agente\n" +
@@ -1403,6 +1510,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "當前會話暫無歷史訊息。",
 		LangJapanese:           "現在のセッションに履歴がありません。",
 		LangSpanish:            "No hay historial en la sesión actual.",
+	},
+	MsgHistoryReadFailed: {
+		LangEnglish:            "Failed to read session history.",
+		LangChinese:            "读取会话历史失败。",
+		LangTraditionalChinese: "讀取會話歷史失敗。",
+		LangJapanese:           "セッション履歴の読み取りに失敗しました。",
+		LangSpanish:            "No se pudo leer el historial de la sesión.",
 	},
 	MsgNameUsage: {
 		LangEnglish:            "Usage:\n`/name <text>` — name the current session\n`/name <number> <text>` — name a session by list number",
@@ -1759,11 +1873,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "El programador de tareas no está disponible.",
 	},
 	MsgCronUsage: {
-		LangEnglish:            "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — write cc-connect instructions to agent memory file",
-		LangChinese:            "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 静音/取消静音\n/cron setup — 将 cc-connect 指令写入 agent 记忆文件",
-		LangTraditionalChinese: "用法：\n/cron add <分> <時> <日> <月> <週> <任務描述>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 靜音/取消靜音\n/cron setup — 將 cc-connect 指令寫入 agent 記憶檔案",
-		LangJapanese:           "使い方:\n/cron add <分> <時> <日> <月> <曜日> <タスク内容>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> ミュート/解除\n/cron setup — cc-connect の指示をエージェントのメモリファイルに書き込む",
-		LangSpanish:            "Uso:\n/cron add <min> <hora> <día> <mes> <día_semana> <tarea>\n/cron list\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — escribir las instrucciones de cc-connect en el archivo de memoria del agente",
+		LangEnglish:            "Usage:\n/cron add <min> <hour> <day> <month> <weekday> <prompt>\n/cron list\n/cron exec <id>\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — write cc-connect instructions to agent memory file",
+		LangChinese:            "用法：\n/cron add <分> <时> <日> <月> <周> <任务描述>\n/cron list\n/cron exec <id> 立即执行\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 静音/取消静音\n/cron setup — 将 cc-connect 指令写入 agent 记忆文件",
+		LangTraditionalChinese: "用法：\n/cron add <分> <時> <日> <月> <週> <任務描述>\n/cron list\n/cron exec <id> 立即執行\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> 靜音/取消靜音\n/cron setup — 將 cc-connect 指令寫入 agent 記憶檔案",
+		LangJapanese:           "使い方:\n/cron add <分> <時> <日> <月> <曜日> <タスク内容>\n/cron list\n/cron exec <id> 今すぐ実行\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id> ミュート/解除\n/cron setup — cc-connect の指示をエージェントのメモリファイルに書き込む",
+		LangSpanish:            "Uso:\n/cron add <min> <hora> <día> <mes> <día_semana> <tarea>\n/cron list\n/cron exec <id>\n/cron del <id>\n/cron enable <id> · /cron disable <id>\n/cron mute <id> · /cron unmute <id>\n/cron setup — escribir las instrucciones de cc-connect en el archivo de memoria del agente",
 	},
 	MsgCronAddUsage: {
 		LangEnglish:            "Usage: /cron add <min> <hour> <day> <month> <weekday> <prompt>\nExample: /cron add 0 6 * * * Collect GitHub trending data and send me a summary",
@@ -1794,11 +1908,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: /cron addexec <min> <hora> <día> <mes> <día_semana> <comando shell>\nEjemplo: /cron addexec 0 6 * * * df -h",
 	},
 	MsgCronEmpty: {
-		LangEnglish:            "No scheduled tasks.",
-		LangChinese:            "暂无定时任务。",
-		LangTraditionalChinese: "暫無定時任務。",
-		LangJapanese:           "スケジュールタスクはありません。",
-		LangSpanish:            "No hay tareas programadas.",
+		LangEnglish:            "No recurring tasks.\n(For one-shot reminders/delays, use /timer)",
+		LangChinese:            "暂无周期任务。\n（一次性提醒/延迟任务请用 /timer 查看）",
+		LangTraditionalChinese: "暫無週期任務。\n（一次性提醒/延遲任務請用 /timer 查看）",
+		LangJapanese:           "繰り返しタスクはありません。\n（ワンショットのリマインダーは /timer をご利用ください）",
+		LangSpanish:            "No hay tareas recurrentes.\n(Para recordatorios únicos use /timer)",
 	},
 	MsgCronListTitle: {
 		LangEnglish:            "⏰ Scheduled Tasks (%d)",
@@ -1808,11 +1922,32 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "⏰ Tareas programadas (%d)",
 	},
 	MsgCronListFooter: {
-		LangEnglish:            "`/cron del <id>` remove · `/cron enable/disable <id>` toggle · `/cron mute/unmute <id>` mute",
-		LangChinese:            "`/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
-		LangTraditionalChinese: "`/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
-		LangJapanese:           "`/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
-		LangSpanish:            "`/cron del <id>` eliminar · `/cron enable/disable <id>` activar/desactivar · `/cron mute/unmute <id>` silenciar",
+		LangEnglish:            "`/cron exec <id>` trigger now · `/cron del <id>` remove · `/cron enable/disable <id>` toggle · `/cron mute/unmute <id>` mute",
+		LangChinese:            "`/cron exec <id>` 立即触发 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
+		LangTraditionalChinese: "`/cron exec <id>` 立即觸發 · `/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
+		LangJapanese:           "`/cron exec <id>` 今すぐ実行 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
+		LangSpanish:            "`/cron exec <id>` ejecutar ahora · `/cron del <id>` eliminar · `/cron enable/disable <id>` activar/desactivar · `/cron mute/unmute <id>` silenciar",
+	},
+	MsgCronExecUsage: {
+		LangEnglish:            "Usage: /cron exec <id>",
+		LangChinese:            "用法：/cron exec <id>",
+		LangTraditionalChinese: "用法：/cron exec <id>",
+		LangJapanese:           "使い方: /cron exec <id>",
+		LangSpanish:            "Uso: /cron exec <id>",
+	},
+	MsgCronTriggered: {
+		LangEnglish:            "▶️ Cron job `%s` triggered.",
+		LangChinese:            "▶️ 定时任务 `%s` 已触发。",
+		LangTraditionalChinese: "▶️ 定時任務 `%s` 已觸發。",
+		LangJapanese:           "▶️ スケジュールタスク `%s` を実行しました。",
+		LangSpanish:            "▶️ Tarea programada `%s` ejecutada.",
+	},
+	MsgCronProjectUnavailable: {
+		LangEnglish:            "❌ This cron job cannot be triggered because its project is no longer available.",
+		LangChinese:            "❌ 该定时任务关联的项目已不可用，无法触发。",
+		LangTraditionalChinese: "❌ 該定時任務關聯的專案已不可用，無法觸發。",
+		LangJapanese:           "❌ このスケジュールタスクは、関連するプロジェクトが利用できないため実行できません。",
+		LangSpanish:            "❌ Esta tarea programada no puede ejecutarse porque su proyecto ya no está disponible.",
 	},
 	MsgCronDelUsage: {
 		LangEnglish:            "Usage: /cron del <id>",
@@ -1864,11 +1999,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "🔔 Tarea programada `%s` reactivada.",
 	},
 	MsgCronCardHint: {
-		LangEnglish:            "💡 `/cron add` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
-		LangChinese:            "💡 `/cron add` 添加 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
-		LangTraditionalChinese: "💡 `/cron add` 新增 · `/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
-		LangJapanese:           "💡 `/cron add` 追加 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
-		LangSpanish:            "💡 `/cron add` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
+		LangEnglish:            "💡 `/cron add` · `/cron exec <id>` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
+		LangChinese:            "💡 `/cron add` 添加 · `/cron exec <id>` 触发 · `/cron del <id>` 删除 · `/cron enable/disable <id>` 启停 · `/cron mute/unmute <id>` 静音",
+		LangTraditionalChinese: "💡 `/cron add` 新增 · `/cron exec <id>` 觸發 · `/cron del <id>` 刪除 · `/cron enable/disable <id>` 啟停 · `/cron mute/unmute <id>` 靜音",
+		LangJapanese:           "💡 `/cron add` 追加 · `/cron exec <id>` 実行 · `/cron del <id>` 削除 · `/cron enable/disable <id>` 切替 · `/cron mute/unmute <id>` ミュート",
+		LangSpanish:            "💡 `/cron add` · `/cron exec <id>` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",
 	},
 	MsgCronBtnEnable: {
 		LangEnglish:            "Enable",
@@ -1919,6 +2054,165 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "前回",
 		LangSpanish:            "Últ",
 	},
+
+	// ── Timer (one-shot) ──────────────────────────────────────
+
+	MsgCardTitleTimer: {
+		LangEnglish:            "One-Shot Timer",
+		LangChinese:            "一次性定时器",
+		LangTraditionalChinese: "一次性定時器",
+		LangJapanese:           "ワンショットタイマー",
+		LangSpanish:            "Temporizador único",
+	},
+	MsgTimerNotAvailable: {
+		LangEnglish:            "Timer scheduler is not available.",
+		LangChinese:            "定时器调度器未启用。",
+		LangTraditionalChinese: "定時器調度器未啟用。",
+		LangJapanese:           "タイマースケジューラは利用できません。",
+		LangSpanish:            "El programador de temporizador no está disponible.",
+	},
+	MsgTimerUsage: {
+		LangEnglish:            "Usage:\n/timer add <delay|time> <prompt>\n/timer addexec <delay|time> <command>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nDelay: 30m, 2h, 1h30m. Or absolute time: 2026-05-16T09:00\nTime without timezone uses system local time.",
+		LangChinese:            "用法：\n/timer add <延迟|时间> <任务描述>\n/timer addexec <延迟|时间> <命令>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n延迟：30m、2h、1h30m。或绝对时间：2026-05-16T09:00\n不带时区的时间按系统本地时区解析。",
+		LangTraditionalChinese: "用法：\n/timer add <延遲|時間> <任務描述>\n/timer addexec <延遲|時間> <命令>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n延遲：30m、2h、1h30m。或絕對時間：2026-05-16T09:00\n不帶時區的時間按系統本地時區解析。",
+		LangJapanese:           "使い方:\n/timer add <遅延|時刻> <タスク内容>\n/timer addexec <遅延|時刻> <コマンド>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n遅延: 30m, 2h, 1h30m。または絶対時刻: 2026-05-16T09:00\nタイムゾーンなしの時刻はシステムのローカルタイムゾーンで解釈されます。",
+		LangSpanish:            "Uso:\n/timer add <retraso|hora> <tarea>\n/timer addexec <retraso|hora> <comando>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nRetraso: 30m, 2h, 1h30m. O hora absoluta: 2026-05-16T09:00\nHora sin zona horaria usa la hora local del sistema.",
+	},
+	MsgTimerAddUsage: {
+		LangEnglish:            "Usage: /timer add <delay|time> <prompt>\nExamples:\n  /timer add 2h Check PR status\n  /timer add 2026-05-16T09:00 Morning standup reminder\nDelay: 30m, 2h, 1h30m. Time: ISO format (2026-05-16T09:00)\nTime without timezone uses system local time.",
+		LangChinese:            "用法：/timer add <延迟|时间> <任务描述>\n示例：\n  /timer add 2h 检查PR状态\n  /timer add 2026-05-16T09:00 早会提醒\n延迟：30m、2h、1h30m。时间：ISO格式（2026-05-16T09:00）\n不带时区的时间按系统本地时区解析。",
+		LangTraditionalChinese: "用法：/timer add <延遲|時間> <任務描述>\n範例：\n  /timer add 2h 檢查PR狀態\n  /timer add 2026-05-16T09:00 早會提醒\n延遲：30m、2h、1h30m。時間：ISO格式（2026-05-16T09:00）\n不帶時區的時間按系統本地時區解析。",
+		LangJapanese:           "使い方: /timer add <遅延|時刻> <タスク内容>\n例:\n  /timer add 2h PRの状態を確認\n  /timer add 2026-05-16T09:00 朝会リマインダー\n遅延: 30m, 2h, 1h30m。時刻: ISO形式（2026-05-16T09:00）\nタイムゾーンなしの時刻はシステムのローカルタイムゾーンで解釈されます。",
+		LangSpanish:            "Uso: /timer add <retraso|hora> <tarea>\nEjemplos:\n  /timer add 2h Verificar estado del PR\n  /timer add 2026-05-16T09:00 Recordatorio de reunión\nRetraso: 30m, 2h, 1h30m. Hora: formato ISO (2026-05-16T09:00)\nHora sin zona horaria usa la hora local del sistema.",
+	},
+	MsgTimerAdded: {
+		LangEnglish:            "⏰ Reminder set (one-shot)\nID: `%s`\nFires in: %s\nPrompt: %s\n(use /timer to view, /cron for recurring tasks)",
+		LangChinese:            "⏰ 提醒已设定（一次性）\nID: `%s`\n将在 %s 后触发\n内容: %s\n（用 /timer 查看，周期任务请用 /cron）",
+		LangTraditionalChinese: "⏰ 提醒已設定（一次性）\nID: `%s`\n將在 %s 後觸發\n內容: %s\n（用 /timer 查看，週期任務請用 /cron）",
+		LangJapanese:           "⏰ リマインダーを設定しました（ワンショット）\nID: `%s`\n%s 後に実行\n内容: %s\n（/timer で確認、繰り返しは /cron）",
+		LangSpanish:            "⏰ Recordatorio creado (único)\nID: `%s`\nSe ejecuta en: %s\nContenido: %s\n(use /timer para verlos, /cron para tareas recurrentes)",
+	},
+	MsgTimerAddedExec: {
+		LangEnglish:            "⏰ Shell reminder set (one-shot)\nID: `%s`\nFires in: %s\nCommand: `%s`\n(use /timer to view, /cron for recurring tasks)",
+		LangChinese:            "⏰ Shell 提醒已设定（一次性）\nID: `%s`\n将在 %s 后触发\n命令: `%s`\n（用 /timer 查看，周期任务请用 /cron）",
+		LangTraditionalChinese: "⏰ Shell 提醒已設定（一次性）\nID: `%s`\n將在 %s 後觸發\n命令: `%s`\n（用 /timer 查看，週期任務請用 /cron）",
+		LangJapanese:           "⏰ Shell リマインダーを設定しました（ワンショット）\nID: `%s`\n%s 後に実行\nコマンド: `%s`\n（/timer で確認、繰り返しは /cron）",
+		LangSpanish:            "⏰ Recordatorio shell creado (único)\nID: `%s`\nSe ejecuta en: %s\nComando: `%s`\n(use /timer para verlos, /cron para tareas recurrentes)",
+	},
+	MsgTimerAddExecUsage: {
+		LangEnglish:            "Usage: /timer addexec <delay> <shell command>\nExample: /timer addexec 30m df -h",
+		LangChinese:            "用法：/timer addexec <延迟> <shell 命令>\n示例：/timer addexec 30m df -h",
+		LangTraditionalChinese: "用法：/timer addexec <延遲> <shell 命令>\n範例：/timer addexec 30m df -h",
+		LangJapanese:           "使い方: /timer addexec <遅延> <シェルコマンド>\n例: /timer addexec 30m df -h",
+		LangSpanish:            "Uso: /timer addexec <retraso> <comando shell>\nEjemplo: /timer addexec 30m df -h",
+	},
+	MsgTimerEmpty: {
+		LangEnglish:            "No pending reminders.\n(For recurring tasks, use /cron)",
+		LangChinese:            "暂无待执行的提醒。\n（周期任务请用 /cron 查看）",
+		LangTraditionalChinese: "暫無待執行的提醒。\n（週期任務請用 /cron 查看）",
+		LangJapanese:           "保留中のリマインダーはありません。\n（繰り返しタスクは /cron をご利用ください）",
+		LangSpanish:            "No hay recordatorios pendientes.\n(Para tareas recurrentes use /cron)",
+	},
+	MsgTimerListTitle: {
+		LangEnglish:            "⏰ Pending Timers (%d)",
+		LangChinese:            "⏰ 待执行定时器 (%d)",
+		LangTraditionalChinese: "⏰ 待執行定時器 (%d)",
+		LangJapanese:           "⏰ 保留中のタイマー (%d)",
+		LangSpanish:            "⏰ Temporizadores pendientes (%d)",
+	},
+	MsgTimerListFooter: {
+		LangEnglish:            "`/timer del <id>` remove · `/timer mute/unmute <id>` mute",
+		LangChinese:            "`/timer del <id>` 删除 · `/timer mute/unmute <id>` 静音",
+		LangTraditionalChinese: "`/timer del <id>` 刪除 · `/timer mute/unmute <id>` 靜音",
+		LangJapanese:           "`/timer del <id>` 削除 · `/timer mute/unmute <id>` ミュート",
+		LangSpanish:            "`/timer del <id>` eliminar · `/timer mute/unmute <id>` silenciar",
+	},
+	MsgTimerDelUsage: {
+		LangEnglish:            "Usage: /timer del <id>",
+		LangChinese:            "用法：/timer del <id>",
+		LangTraditionalChinese: "用法：/timer del <id>",
+		LangJapanese:           "使い方: /timer del <id>",
+		LangSpanish:            "Uso: /timer del <id>",
+	},
+	MsgTimerMuteUsage: {
+		LangEnglish:            "Usage: /timer mute <id> · /timer unmute <id>",
+		LangChinese:            "用法：/timer mute <id> · /timer unmute <id>",
+		LangTraditionalChinese: "用法：/timer mute <id> · /timer unmute <id>",
+		LangJapanese:           "使い方: /timer mute <id> · /timer unmute <id>",
+		LangSpanish:            "Uso: /timer mute <id> · /timer unmute <id>",
+	},
+	MsgTimerDeleted: {
+		LangEnglish:            "✅ Timer `%s` cancelled.",
+		LangChinese:            "✅ 定时器 `%s` 已取消。",
+		LangTraditionalChinese: "✅ 定時器 `%s` 已取消。",
+		LangJapanese:           "✅ タイマー `%s` をキャンセルしました。",
+		LangSpanish:            "✅ Temporizador `%s` cancelado.",
+	},
+	MsgTimerNotFound: {
+		LangEnglish:            "❌ Timer `%s` not found.",
+		LangChinese:            "❌ 定时器 `%s` 未找到。",
+		LangTraditionalChinese: "❌ 定時器 `%s` 未找到。",
+		LangJapanese:           "❌ タイマー `%s` が見つかりません。",
+		LangSpanish:            "❌ Temporizador `%s` no encontrado.",
+	},
+	MsgTimerMuted: {
+		LangEnglish:            "🔇 Timer `%s` muted.",
+		LangChinese:            "🔇 定时器 `%s` 已静音。",
+		LangTraditionalChinese: "🔇 定時器 `%s` 已靜音。",
+		LangJapanese:           "🔇 タイマー `%s` をミュートしました。",
+		LangSpanish:            "🔇 Temporizador `%s` silenciado.",
+	},
+	MsgTimerUnmuted: {
+		LangEnglish:            "🔔 Timer `%s` unmuted.",
+		LangChinese:            "🔔 定时器 `%s` 已取消静音。",
+		LangTraditionalChinese: "🔔 定時器 `%s` 已取消靜音。",
+		LangJapanese:           "🔔 タイマー `%s` のミュートを解除しました。",
+		LangSpanish:            "🔔 Temporizador `%s` reactivado.",
+	},
+	MsgTimerCardHint: {
+		LangEnglish:            "💡 `/timer add <delay> <prompt>` · `/timer del <id>` · `/timer mute/unmute <id>`",
+		LangChinese:            "💡 `/timer add <延迟> <内容>` 添加 · `/timer del <id>` 删除 · `/timer mute/unmute <id>` 静音",
+		LangTraditionalChinese: "💡 `/timer add <延遲> <內容>` 新增 · `/timer del <id>` 刪除 · `/timer mute/unmute <id>` 靜音",
+		LangJapanese:           "💡 `/timer add <遅延> <内容>` 追加 · `/timer del <id>` 削除 · `/timer mute/unmute <id>` ミュート",
+		LangSpanish:            "💡 `/timer add <retraso> <tarea>` · `/timer del <id>` · `/timer mute/unmute <id>`",
+	},
+	MsgTimerBtnMute: {
+		LangEnglish:            "Mute",
+		LangChinese:            "静音",
+		LangTraditionalChinese: "靜音",
+		LangJapanese:           "ミュート",
+		LangSpanish:            "Silenciar",
+	},
+	MsgTimerBtnUnmute: {
+		LangEnglish:            "Unmute",
+		LangChinese:            "取消静音",
+		LangTraditionalChinese: "取消靜音",
+		LangJapanese:           "ミュート解除",
+		LangSpanish:            "Reactivar",
+	},
+	MsgTimerBtnDelete: {
+		LangEnglish:            "Cancel Timer",
+		LangChinese:            "取消定时器",
+		LangTraditionalChinese: "取消定時器",
+		LangJapanese:           "タイマーをキャンセル",
+		LangSpanish:            "Cancelar temporizador",
+	},
+	MsgTimerIDLabel: {
+		LangEnglish: "ID: %s\n", LangChinese: "ID：%s\n", LangTraditionalChinese: "ID：%s\n",
+		LangJapanese: "ID: %s\n", LangSpanish: "ID: %s\n",
+	},
+	MsgTimerScheduledLabel: {
+		LangEnglish:            "Scheduled: %s (%s remaining)\n",
+		LangChinese:            "计划: %s（剩余 %s）\n",
+		LangTraditionalChinese: "計劃: %s（剩餘 %s）\n",
+		LangJapanese:           "予定: %s（残り %s）\n",
+		LangSpanish:            "Programado: %s (%s restante)\n",
+	},
+	MsgTimerFailedSuffix: {
+		LangEnglish: " (failed: %s)", LangChinese: "（失败：%s）", LangTraditionalChinese: "（失敗：%s）",
+		LangJapanese: "（失敗: %s）", LangSpanish: " (falló: %s)",
+	},
+
 	MsgStatusTitle: {
 		LangEnglish: "cc-connect Status\n\n" +
 			"Project: %s\n" +
@@ -1976,11 +2270,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Modelo actual: %s",
 	},
 	MsgModelChanged: {
-		LangEnglish:            "Model switched to `%s`. New sessions will use this model.",
-		LangChinese:            "模型已切换为 `%s`，新会话将使用此模型。",
-		LangTraditionalChinese: "模型已切換為 `%s`，新會話將使用此模型。",
-		LangJapanese:           "モデルを `%s` に切り替えました。新しいセッションで使用されます。",
-		LangSpanish:            "Modelo cambiado a `%s`. Las nuevas sesiones usarán este modelo.",
+		LangEnglish:            "Model switched to `%s`. This session and all future sessions will use it.",
+		LangChinese:            "模型已切换为 `%s`，当前会话与后续会话均使用此模型。",
+		LangTraditionalChinese: "模型已切換為 `%s`，當前會話與後續會話均使用此模型。",
+		LangJapanese:           "モデルを `%s` に切り替えました。このセッションと今後のセッションで使用されます。",
+		LangSpanish:            "Modelo cambiado a `%s`. Esta sesión y las futuras usarán este modelo.",
 	},
 	MsgModelChangeFailed: {
 		LangEnglish:            "❌ Failed to change model: %v",
@@ -2257,11 +2551,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Niveles de razonamiento disponibles:\n",
 	},
 	MsgReasoningUsage: {
-		LangEnglish:            "Usage: `/reasoning <number>` or `/reasoning <low|medium|high|xhigh>`",
-		LangChinese:            "用法: `/reasoning <序号>` 或 `/reasoning <low|medium|high|xhigh>`",
-		LangTraditionalChinese: "用法: `/reasoning <序號>` 或 `/reasoning <low|medium|high|xhigh>`",
-		LangJapanese:           "使い方: `/reasoning <番号>` または `/reasoning <low|medium|high|xhigh>`",
-		LangSpanish:            "Uso: `/reasoning <número>` o `/reasoning <low|medium|high|xhigh>`",
+		LangEnglish:            "Usage: `/reasoning <number>` or `/reasoning <%s>`",
+		LangChinese:            "用法: `/reasoning <序号>` 或 `/reasoning <%s>`",
+		LangTraditionalChinese: "用法: `/reasoning <序號>` 或 `/reasoning <%s>`",
+		LangJapanese:           "使い方: `/reasoning <番号>` または `/reasoning <%s>`",
+		LangSpanish:            "Uso: `/reasoning <número>` o `/reasoning <%s>`",
 	},
 	MsgModeUsage: {
 		LangEnglish:            "\nUse `/mode <name>` to switch.\nAvailable: %s",
@@ -2493,6 +2787,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "若按鈕無回應，請回覆選項編號（如 1）或直接輸入你的回答",
 		LangJapanese:           "ボタンが反応しない場合は、番号（例: 1）で返信するか、直接回答を入力してください",
 		LangSpanish:            "Si los botones no responden, responda con el número de opción (ej. 1) o escriba su respuesta",
+	},
+	MsgAskQuestionNoteMulti: {
+		LangEnglish:            "Reply with comma-separated option numbers (e.g. 1,3) or type your answer",
+		LangChinese:            "请回复逗号分隔的选项编号（如 1,3）或直接输入你的回答",
+		LangTraditionalChinese: "請回覆逗號分隔的選項編號（如 1,3）或直接輸入你的回答",
+		LangJapanese:           "カンマ区切りの番号（例: 1,3）で返信するか、直接回答を入力してください",
+		LangSpanish:            "Responda con los números de opción separados por comas (ej. 1,3) o escriba su respuesta",
 	},
 	MsgAskQuestionMulti: {
 		LangEnglish:            " (multiple selections allowed, separate with commas)",
@@ -3433,11 +3734,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Detener ejecución actual",
 	},
 	MsgBuiltinCmdCron: {
-		LangEnglish:            "Manage scheduled tasks, arg: [add|list|del|enable|disable]",
-		LangChinese:            "管理定时任务，参数: [add|list|del|enable|disable]",
-		LangTraditionalChinese: "管理定時任務，參數: [add|list|del|enable|disable]",
-		LangJapanese:           "スケジュールタスク管理、引数: [add|list|del|enable|disable]",
-		LangSpanish:            "Gestionar tareas programadas, arg: [add|list|del|enable|disable]",
+		LangEnglish:            "Manage scheduled tasks, arg: [add|list|exec|del|enable|disable]",
+		LangChinese:            "管理定时任务，参数: [add|list|exec|del|enable|disable]",
+		LangTraditionalChinese: "管理定時任務，參數: [add|list|exec|del|enable|disable]",
+		LangJapanese:           "スケジュールタスク管理、引数: [add|list|exec|del|enable|disable]",
+		LangSpanish:            "Gestionar tareas programadas, arg: [add|list|exec|del|enable|disable]",
 	},
 	MsgBuiltinCmdCommands: {
 		LangEnglish:            "Manage custom slash commands, arg: [add|del]",
@@ -3958,6 +4259,261 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "`/workspace init` 未啟用本機目錄目標。請使用 git 倉庫地址，或在此專案配置 `workspace_init_allow_local_paths = true`。",
 		LangJapanese:           "`/workspace init` ではローカルディレクトリ対象が無効です。git URL を使うか、このプロジェクトで `workspace_init_allow_local_paths = true` を有効にしてください。",
 		LangSpanish:            "Los destinos de directorio local están deshabilitados para `/workspace init`. Use una URL de git o habilite `workspace_init_allow_local_paths = true` para este proyecto.",
+	},
+	MsgAgentSendToolPrompt: {
+		LangEnglish: `### Send generated images, files, or voice messages back to the user
+When you generate a local image or file that should be sent to the user, use:
+
+  cc-connect send --image /absolute/path/to/image.png
+  cc-connect send --file /absolute/path/to/report.pdf
+  cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+
+You may repeat --image / --file multiple times. Use this only for generated attachments that need to be delivered to the user.
+If you include --message, do not repeat the exact same sentence again in your normal reply, because your normal reply is also delivered automatically.
+
+When sending an audio (mp3/wav/m4a/ogg/opus) or video (mp4/mov/webm) clip that should render inline as a native voice bubble or video player — instead of as a generic file download — use the dedicated flags:
+
+  cc-connect send --audio /absolute/path/to/clip.mp3
+  cc-connect send --video /absolute/path/to/demo.mp4
+
+These render as native media on platforms that support it (e.g. Feishu voice bubbles, Telegram voice messages). cc-connect transparently transcodes audio to the platform's preferred codec (e.g. opus for Feishu). On platforms without dedicated audio/video support cc-connect automatically falls back to the file-attachment path so delivery is preserved. Do NOT downgrade the user's request to --file when they explicitly asked for audio or video.
+
+When the user explicitly asks you to synthesize speech from text, use:
+
+  cc-connect send --tts "text to speak"
+
+After cc-connect send --tts (or --audio) succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.`,
+		LangChinese: `### 把生成的图片、文件、语音消息回发给用户
+当你生成了需要发送给用户的本地图片或文件时,使用:
+
+  cc-connect send --image /absolute/path/to/image.png
+  cc-connect send --file /absolute/path/to/report.pdf
+  cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+
+可以重复使用 --image / --file。仅在需要把生成的附件投递到用户时使用这个命令。
+如果同时使用了 --message,不要在正常回复里再说一遍完全相同的句子,因为正常回复本身也会自动发送给用户。
+
+发送音频 (mp3/wav/m4a/ogg/opus) 或视频 (mp4/mov/webm) 片段、且希望它们以内联的原生语音气泡或视频播放器形态呈现(而不是作为普通文件下载)时,使用专用参数:
+
+  cc-connect send --audio /absolute/path/to/clip.mp3
+  cc-connect send --video /absolute/path/to/demo.mp4
+
+这些参数会在支持原生媒体的平台上渲染为原生形态(例如飞书的语音气泡、Telegram 的语音消息)。cc-connect 会自动把音频转码为平台偏好的编码(例如飞书的 opus)。在不支持专用音视频的平台,cc-connect 会自动回退到文件附件路径以保证投递成功。当用户明确要求 audio/video 时,不要把请求降级为 --file。
+
+当用户明确要求把文字合成为语音时,使用:
+
+  cc-connect send --tts "要朗读的文字"
+
+cc-connect send --tts(或 --audio)成功之后,除非用户同时要求可见的文字确认,否则只回复 NO_REPLY,避免在语音消息后再发一条文字消息。`,
+	},
+	MsgAgentCronToolPrompt: {
+		LangEnglish: `### Scheduled tasks: when to use /cron vs /timer
+
+cc-connect has TWO distinct scheduling commands. Picking the wrong one creates a confusing UX for the user.
+
+  ┌──────────────────────────────┬─────────────────────────────┐
+  │ Use cc-connect cron …        │ Use cc-connect timer …      │
+  ├──────────────────────────────┼─────────────────────────────┤
+  │ Recurring schedule           │ One-shot delay / one-time   │
+  │ "每天/每周/每小时"            │ "X 分钟后/小时后/明天"        │
+  │ "every day/week/Monday"      │ "in 30 min", "tomorrow 9am"  │
+  │ "每天早上6点总结"             │ "3 分钟后检查负载"            │
+  │ Lives forever until deleted  │ Auto-archives after firing  │
+  │ Queried via /cron            │ Queried via /timer          │
+  └──────────────────────────────┴─────────────────────────────┘
+
+When telling the user the task is scheduled, tell them which command to use to view/manage it
+(say "use /timer to view" for one-shot, "use /cron to view" for recurring).
+
+### Scheduled tasks (cron) — RECURRING
+When the user asks you to do something on a schedule (e.g. "每天早上6点帮我总结GitHub trending"), use the Bash tool to run:
+
+  cc-connect cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task description>" --desc "<short label>"
+
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so you do NOT need to specify --project or --session-key.
+
+Optional flags:
+  --session-mode <mode>     reuse (default) or new-per-run (fresh session each trigger)
+  --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
+  --exec <command>          run a shell command directly instead of --prompt
+
+Examples:
+  cc-connect cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos and send a summary" --desc "Daily GitHub Trending"
+  cc-connect cron add --cron "0 9 * * 1" --prompt "Generate a weekly project status report" --desc "Weekly Report"
+  cc-connect cron add --cron "*/2 * * * *" --exec "ipconfig" --session-mode new-per-run --desc "Every 2 min ipconfig"
+
+You can also list, inspect, run, edit, or delete cron jobs:
+  cc-connect cron list
+  cc-connect cron info <job-id> [field]
+  cc-connect cron exec <job-id>
+  cc-connect cron edit <job-id> <field> <value>
+  cc-connect cron del <job-id>
+
+When changing an existing job, first run ` + "`cc-connect cron info <job-id>`" + ` to inspect the current values, then use ` + "`cron edit`" + ` for only the field(s) the user asked to change.
+Use ` + "`cron exec <job-id>`" + ` to run an existing scheduled task immediately; this is different from the ` + "`--exec <command>`" + ` flag used when creating a shell-command cron job.
+Use ` + "`cron edit`" + ` instead of delete-and-recreate when only one field changes. Do not delete and recreate a job unless the user explicitly asks to replace it.
+Common editable fields:
+  cron_expr     new schedule, e.g. "0 9 * * *"
+  prompt        new task prompt (or ` + "`exec`" + ` for shell command)
+  description   short label
+  enabled       true / false  (pause without deleting)
+  mute          true / false  (silence all messages)
+  timeout_mins  integer minutes (0 = unlimited)
+Run ` + "`cc-connect cron edit --help`" + ` for the full field list.
+
+Examples:
+  cc-connect cron exec abc123
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 prompt "Updated daily summary task"`,
+		LangChinese: `### 定时任务:什么时候用 /cron,什么时候用 /timer
+
+cc-connect 有两个不同的调度命令。选错会让用户感到很困惑。
+
+  ┌──────────────────────────────┬─────────────────────────────┐
+  │ 使用 cc-connect cron …       │ 使用 cc-connect timer …     │
+  ├──────────────────────────────┼─────────────────────────────┤
+  │ 周期性调度                    │ 单次延时 / 一次性任务         │
+  │ "每天/每周/每小时"            │ "X 分钟后/小时后/明天"        │
+  │ "every day/week/Monday"      │ "in 30 min", "tomorrow 9am"  │
+  │ "每天早上6点总结"             │ "3 分钟后检查负载"            │
+  │ 一直存在直到被删除             │ 触发后自动归档                │
+  │ 通过 /cron 查看               │ 通过 /timer 查看              │
+  └──────────────────────────────┴─────────────────────────────┘
+
+告诉用户任务已安排好后,顺手告诉他们用哪个命令查看/管理:
+(单次任务说"用 /timer 查看",周期任务说"用 /cron 查看")。
+
+### 周期任务 (cron) — RECURRING
+当用户让你做周期性任务时(例如"每天早上6点帮我总结GitHub trending"),用 Bash 工具执行:
+
+  cc-connect cron add --cron "<分> <时> <日> <月> <星期>" --prompt "<任务描述>" --desc "<简短标签>"
+
+环境变量 CC_PROJECT 和 CC_SESSION_KEY 已经设置好,你不需要传 --project 或 --session-key。
+
+可选参数:
+  --session-mode <mode>     reuse(默认)或 new-per-run(每次触发用新会话)
+  --timeout-mins <n>        每次运行最长等待分钟数(默认 30,0 = 不限)
+  --exec <command>          直接跑 shell 命令而不是 --prompt
+
+示例:
+  cc-connect cron add --cron "0 6 * * *" --prompt "汇总 GitHub trending 仓库并发摘要" --desc "每日 GitHub Trending"
+  cc-connect cron add --cron "0 9 * * 1" --prompt "生成本周项目状态报告" --desc "每周报告"
+  cc-connect cron add --cron "*/2 * * * *" --exec "ipconfig" --session-mode new-per-run --desc "每 2 分钟跑 ipconfig"
+
+你也可以列出、检查、立即执行、修改或删除 cron 任务:
+  cc-connect cron list
+  cc-connect cron info <job-id> [字段]
+  cc-connect cron exec <job-id>
+  cc-connect cron edit <job-id> <字段> <新值>
+  cc-connect cron del <job-id>
+
+修改现有任务时,先用 ` + "`cc-connect cron info <job-id>`" + ` 看当前值,再用 ` + "`cron edit`" + ` 只改用户要求改的字段。
+用 ` + "`cron exec <job-id>`" + ` 立即执行已存在的调度任务;这和创建 shell 任务时用的 ` + "`--exec <command>`" + ` 参数不同。
+只有修改一个字段时,用 ` + "`cron edit`" + ` 而不是删除后重建。除非用户明确要求替换任务,不要先删再建。
+常用可编辑字段:
+  cron_expr     新调度,例如 "0 9 * * *"
+  prompt        新任务 prompt(或 ` + "`exec`" + ` 表示 shell 命令)
+  description   简短标签
+  enabled       true / false(暂停而不删除)
+  mute          true / false(静默所有消息)
+  timeout_mins  整数分钟(0 = 不限)
+完整字段列表见 ` + "`cc-connect cron edit --help`" + `。
+
+示例:
+  cc-connect cron exec abc123
+  cc-connect cron edit abc123 cron_expr "0 9 * * *"
+  cc-connect cron edit abc123 enabled false
+  cc-connect cron edit abc123 prompt "更新后的每日摘要任务"`,
+	},
+	MsgAgentTimerToolPrompt: {
+		LangEnglish: `### One-shot timers (timer) — ONE-TIME DELAY
+When the user asks you to do something AFTER A DELAY or AT A SPECIFIC FUTURE TIME
+(e.g. "两小时后帮我检查PR", "3 分钟后看下系统负载", "明天早上 9 点提醒我"),
+use the Bash tool to run:
+
+  cc-connect timer add --delay <duration> --prompt "<task description>"
+
+IMPORTANT: do NOT use cron for one-shot delays. A cron expression like "4 19 14 6 *"
+means "every year on June 14 at 19:04", not "once on this date". Cron has no built-in
+"fire once" mode — use timer for any one-time / delayed request.
+
+Duration examples: 30m, 2h, 1h30m. Or use absolute time: --at "2026-05-16T09:00"
+Absolute times without timezone (e.g. "2026-05-16T09:00") are interpreted as the
+system's local timezone. When the user says "明天早上9点", use local time.
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set.
+
+Optional flags:
+  --exec <command>          run a shell command directly instead of --prompt
+  --desc <text>             short description
+  --session-mode <mode>     reuse (default) or new-per-run (fresh session each run)
+  --timeout-mins <n>        max wait per run in minutes (default 30, 0 = unlimited)
+  --mute                    suppress all messages (start notification + result)
+
+Examples:
+  cc-connect timer add --delay 2h --prompt "Check PR status" --desc "PR check"
+  cc-connect timer add --delay 30m --exec "df -h" --desc "Disk check"
+  cc-connect timer add --at "2026-05-16T09:00" --prompt "Morning standup reminder"
+
+You can also list or cancel timers:
+  cc-connect timer list
+  cc-connect timer del <timer-id>`,
+		LangChinese: `### 一次性延时 (timer) — ONE-TIME DELAY
+当用户让你在一段延时之后或在某个未来时刻做某事时
+(例如"两小时后帮我检查PR"、"3 分钟后看下系统负载"、"明天早上 9 点提醒我"),
+用 Bash 工具执行:
+
+  cc-connect timer add --delay <时长> --prompt "<任务描述>"
+
+重要:不要用 cron 跑单次延时。形如 "4 19 14 6 *" 的 cron 表达式
+意思是"每年 6 月 14 日 19:04"而不是"这一天跑一次"。cron 没有内建"只跑一次"模式 ——
+所有一次性 / 延时任务都用 timer。
+
+时长示例:30m、2h、1h30m。或者用绝对时间:--at "2026-05-16T09:00"
+不带时区的绝对时间(例如 "2026-05-16T09:00")按系统本地时区解释。用户说"明天早上9点"时用本地时间。
+环境变量 CC_PROJECT 和 CC_SESSION_KEY 已经设置好。
+
+可选参数:
+  --exec <command>          直接跑 shell 命令而不是 --prompt
+  --desc <text>             简短描述
+  --session-mode <mode>     reuse(默认)或 new-per-run(每次跑用新会话)
+  --timeout-mins <n>        每次最长等待分钟数(默认 30,0 = 不限)
+  --mute                    静默所有消息(开始通知和结果)
+
+示例:
+  cc-connect timer add --delay 2h --prompt "检查 PR 状态" --desc "PR 检查"
+  cc-connect timer add --delay 30m --exec "df -h" --desc "磁盘检查"
+  cc-connect timer add --at "2026-05-16T09:00" --prompt "早会提醒"
+
+你也可以列出或取消 timer:
+  cc-connect timer list
+  cc-connect timer del <timer-id>`,
+	},
+	MsgAgentRelayToolPrompt: {
+		LangEnglish: `### Bot-to-bot relay
+When you need to communicate with another bot (e.g. ask another AI agent a question), use:
+
+  cc-connect relay send --to <target_project> "<message>"
+
+IMPORTANT: <target_project> must be the EXACT project name from the /bind command output.
+Do NOT guess or modify the name — use it exactly as shown (e.g. "gemini", not "gemini-bot").
+
+This sends a message to the target bot and waits for its response (printed to stdout).
+The conversation is visible in the group chat and each bot maintains its own relay session.
+
+Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.`,
+		LangChinese: `### Bot 之间转发 (relay)
+当需要和另一个 bot 通信(例如向另一个 AI agent 提问)时,使用:
+
+  cc-connect relay send --to <目标项目名> "<消息>"
+
+重要:<目标项目名> 必须是 /bind 命令输出里的 EXACT 项目名。
+不要猜测或修改名字 —— 完全照搬显示值(例如 "gemini" 而不是 "gemini-bot")。
+
+这会把消息发给目标 bot 并等待它的回复(打印到 stdout)。
+会话在群聊里可见,每个 bot 维护自己的 relay 会话。
+
+环境变量 CC_PROJECT 和 CC_SESSION_KEY 已经设置好,relay 知道用哪个群聊。`,
 	},
 }
 

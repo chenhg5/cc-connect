@@ -26,19 +26,21 @@ func init() {
 // Agent drives the Antigravity CLI (agy) in headless mode.
 //
 // Modes (maps to agy approval and sandbox flags):
-//   - "default":   standard approval mode (prompt for each tool use)
+//   - "default":   ask for each tool through the cc-connect permission bridge
 //   - "yolo":      auto-approve all tools (--dangerously-skip-permissions)
 //   - "plan":      read-only plan mode with terminal sandbox constraints (--sandbox)
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string
-	cmd        string // CLI binary name, default "agy"
-	timeout    time.Duration
-	providers  []core.ProviderConfig
-	activeIdx  int
-	sessionEnv []string
-	mu         sync.RWMutex
+	workDir      string
+	model        string
+	mode         string
+	cmd          string   // CLI binary name, default "agy"
+	cliExtraArgs []string // extra args from cmd after the binary name
+	configEnv    []string // env vars from [projects.agent.options.env]
+	timeout      time.Duration
+	providers    []core.ProviderConfig
+	activeIdx    int
+	sessionEnv   []string
+	mu           sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -49,10 +51,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
-	cmd, _ := opts["cmd"].(string)
-	if cmd == "" {
-		cmd = "agy"
-	}
+	cmd, extraArgs := core.ParseCmdOpts(opts, "agy")
 
 	var timeoutMins int64
 	switch v := opts["timeout_mins"].(type) {
@@ -77,12 +76,14 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		cmd:       cmd,
-		timeout:   timeout,
-		activeIdx: -1,
+		workDir:      workDir,
+		model:        model,
+		mode:         mode,
+		cmd:          cmd,
+		cliExtraArgs: extraArgs,
+		configEnv:    core.ParseConfigEnv(opts),
+		timeout:      timeout,
+		activeIdx:    -1,
 	}, nil
 }
 
@@ -206,9 +207,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	model := a.model
 	mode := a.mode
 	cmd := a.cmd
+	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
 	timeout := a.timeout
-	extraEnv := a.providerEnvLocked()
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
@@ -217,7 +220,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newAntigravitySession(ctx, cmd, workDir, model, mode, sessionID, extraEnv, timeout)
+	return newAntigravitySession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, timeout)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -281,7 +284,7 @@ func (a *Agent) GetMode() string {
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
-		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Prompt for approval on each tool use", DescZh: "每次工具调用都需要确认"},
+		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Ask for approval through cc-connect on each tool use", DescZh: "每次工具调用都通过 cc-connect 请求确认"},
 		{Key: "yolo", Name: "YOLO", NameZh: "全自动", Desc: "Auto-approve all tool calls", DescZh: "自动批准所有工具调用"},
 		{Key: "plan", Name: "Plan", NameZh: "规划模式", Desc: "Read-only plan mode in sandbox", DescZh: "只读沙箱规划模式"},
 	}

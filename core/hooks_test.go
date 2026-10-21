@@ -27,7 +27,7 @@ func TestNewHookManager_ValidatesConfig(t *testing.T) {
 		{Event: "error", Type: "command", Command: ""},            // missing command
 		{Event: "message.sent", Type: "http", URL: "http://ok.com"},
 	}
-	hm := NewHookManager("test", hooks)
+	hm := NewHookManager("test", hooks, "sh", "-c", "")
 	got := hm.Hooks()
 	if len(got) != 2 {
 		t.Fatalf("expected 2 valid hooks, got %d", len(got))
@@ -121,7 +121,7 @@ func TestEmit_CommandHook(t *testing.T) {
 			Async:   boolPtr(false),
 		},
 	}
-	hm := NewHookManager("test-project", hooks)
+	hm := NewHookManager("test-project", hooks, "sh", "-c", "")
 
 	hm.Emit(HookEvent{
 		Event:      HookEventMessageReceived,
@@ -151,7 +151,7 @@ func TestEmit_CommandHookEnvVars(t *testing.T) {
 			Async:   boolPtr(false),
 		},
 	}
-	hm := NewHookManager("my-proj", hooks)
+	hm := NewHookManager("my-proj", hooks, "sh", "-c", "")
 
 	hm.Emit(HookEvent{
 		Event:      HookEventMessageReceived,
@@ -219,7 +219,7 @@ func TestEmit_HTTPHook(t *testing.T) {
 			Async: boolPtr(false),
 		},
 	}
-	hm := NewHookManager("proj-1", hooks)
+	hm := NewHookManager("proj-1", hooks, "sh", "-c", "")
 
 	hm.Emit(HookEvent{
 		Event:      HookEventError,
@@ -257,7 +257,7 @@ func TestEmit_WildcardMatchesAll(t *testing.T) {
 	hooks := []HookConfig{
 		{Event: "*", Type: "http", URL: srv.URL, Async: boolPtr(false)},
 	}
-	hm := NewHookManager("proj", hooks)
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
 
 	hm.Emit(HookEvent{Event: HookEventMessageReceived})
 	hm.Emit(HookEvent{Event: HookEventSessionStarted})
@@ -280,7 +280,7 @@ func TestEmit_OnlyMatchingHooksFire(t *testing.T) {
 		{Event: "session.ended", Type: "command", Command: "touch " + matchedFile, Async: boolPtr(false)},
 		{Event: "message.received", Type: "command", Command: "touch " + unmatchedFile, Async: boolPtr(false)},
 	}
-	hm := NewHookManager("proj", hooks)
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
 
 	hm.Emit(HookEvent{Event: HookEventSessionEnded})
 
@@ -307,7 +307,7 @@ func TestEmit_AsyncDoesNotBlock(t *testing.T) {
 			Async:   boolPtr(true),
 		},
 	}
-	hm := NewHookManager("proj", hooks)
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
 
 	start := time.Now()
 	hm.Emit(HookEvent{Event: HookEventMessageReceived})
@@ -339,7 +339,7 @@ func TestEmit_SyncBlocks(t *testing.T) {
 			Async:   boolPtr(false),
 		},
 	}
-	hm := NewHookManager("proj", hooks)
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
 	hm.Emit(HookEvent{Event: HookEventMessageReceived})
 
 	// File should exist immediately after synchronous emit
@@ -352,7 +352,7 @@ func TestEmit_HTTPError_DoesNotPanic(t *testing.T) {
 	hooks := []HookConfig{
 		{Event: "error", Type: "http", URL: "http://127.0.0.1:1", Async: boolPtr(false), Timeout: 1},
 	}
-	hm := NewHookManager("proj", hooks)
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
 	// Should not panic even with connection refused
 	hm.Emit(HookEvent{Event: HookEventError, Error: "test"})
 }
@@ -367,7 +367,7 @@ func TestEmit_CommandTimeout(t *testing.T) {
 			Timeout: 1,
 		},
 	}
-	hm := NewHookManager("proj", hooks)
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
 
 	start := time.Now()
 	hm.Emit(HookEvent{Event: HookEventMessageReceived})
@@ -456,7 +456,7 @@ func TestHookManager_ProjectSet(t *testing.T) {
 
 	hm := NewHookManager("special-project", []HookConfig{
 		{Event: "*", Type: "http", URL: srv.URL, Async: boolPtr(false)},
-	})
+	}, "sh", "-c", "")
 
 	hm.Emit(HookEvent{Event: HookEventMessageReceived})
 
@@ -502,7 +502,7 @@ func TestEmit_MultipleHooksSameEvent(t *testing.T) {
 		{Event: "error", Type: "http", URL: srv.URL, Async: boolPtr(false)},
 		{Event: "error", Type: "http", URL: srv.URL, Async: boolPtr(false)},
 	}
-	hm := NewHookManager("proj", hooks)
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
 	hm.Emit(HookEvent{Event: HookEventError})
 
 	if count.Load() != 3 {
@@ -523,7 +523,7 @@ func TestEmit_TimestampAutoFilled(t *testing.T) {
 
 	hm := NewHookManager("proj", []HookConfig{
 		{Event: "*", Type: "http", URL: srv.URL, Async: boolPtr(false)},
-	})
+	}, "sh", "-c", "")
 
 	before := time.Now()
 	hm.Emit(HookEvent{Event: HookEventMessageReceived})

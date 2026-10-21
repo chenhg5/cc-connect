@@ -32,7 +32,12 @@ type Agent struct {
 	pollMs          int
 	stripInputBlock bool     // strip the ───/❯/─── input area block from output
 	stripPatterns   []string // per-line regex patterns to strip from output
-	mu              sync.RWMutex
+	// windowPerSession, when true, gives each cc-connect session its own tmux
+	// window (and thus its own init_command/agent instance) instead of sharing
+	// the single session:pane target. Required for true per-session isolation
+	// (e.g. session_scope = "thread" on the platform).
+	windowPerSession bool
+	mu               sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -114,22 +119,25 @@ func New(opts map[string]any) (core.Agent, error) {
 		stripPatterns = []string{`⏵⏵.*\(shift\+tab to cycle\)`}
 	}
 
+	windowPerSession, _ := opts["window_per_session"].(bool)
+
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return nil, fmt.Errorf("tmux: 'tmux' not found in PATH")
 	}
 
 	return &Agent{
-		sessionName:     sessionName,
-		pane:            pane,
-		workDir:         workDir,
-		autoCreate:      autoCreate,
-		shell:           shell,
-		initCmd:         initCmd,
-		startupWaitMs:   startupWaitMs,
-		promptPat:       promptPat,
-		pollMs:          pollMs,
-		stripInputBlock: stripInputBlock,
-		stripPatterns:   stripPatterns,
+		sessionName:      sessionName,
+		pane:             pane,
+		workDir:          workDir,
+		autoCreate:       autoCreate,
+		shell:            shell,
+		initCmd:          initCmd,
+		startupWaitMs:    startupWaitMs,
+		promptPat:        promptPat,
+		pollMs:           pollMs,
+		stripInputBlock:  stripInputBlock,
+		stripPatterns:    stripPatterns,
+		windowPerSession: windowPerSession,
 	}, nil
 }
 
@@ -150,11 +158,17 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	stripPatterns := a.stripPatterns
 	a.mu.RUnlock()
 
-	// When workDir is a real path (set via SetWorkDir in multi-workspace mode, or
-	// configured directly), use a dedicated tmux window named after the directory so
-	// each workspace gets its own Claude Code instance.  Otherwise fall back to the
-	// legacy session:pane target.
-	target, windowName := a.resolveTarget(sessionName, pane, workDir)
+	// Decide which tmux window this session drives:
+	//   - window_per_session: a dedicated window per cc-connect session (true
+	//     isolation; each gets its own init_command/agent instance).
+	//   - else, when workDir is a real path: a window named after the directory
+	//     so each workspace gets its own instance.
+	//   - else: the legacy session:pane target.
+	// windowForSession may allocate a fresh window name when sessionID is empty;
+	// the returned ID is persisted by the engine so resumes reuse the same window.
+	windowName, effectiveSessionID := a.windowForSession(sessionName, pane, workDir, sessionID)
+	sessionID = effectiveSessionID
+	target := sessionName + ":" + windowName
 
 	sessionExists := tmuxSessionExists(sessionName)
 	windowExists := sessionExists && tmuxWindowExists(target)
@@ -216,6 +230,43 @@ func (a *Agent) resolveTarget(sessionName, pane, workDir string) (target, window
 	return sessionName + ":" + pane, pane
 }
 
+// windowForSession returns the tmux window name to use for a StartSession call
+// and the effective agent session ID. When window_per_session is enabled, each
+// cc-connect session gets its own window: an existing (resumed) sessionID maps
+// back to its window, while an empty sessionID allocates a fresh window whose
+// name doubles as the agent session ID (persisted by the engine for resumes).
+// When disabled, behaviour is unchanged (per-workDir window or legacy pane).
+func (a *Agent) windowForSession(sessionName, pane, workDir, sessionID string) (windowName, effectiveID string) {
+	if a.windowPerSession {
+		if sessionID != "" {
+			return sessionID, sessionID
+		}
+		name := allocateWindowName(sessionName)
+		return name, name
+	}
+	_, windowName = a.resolveTarget(sessionName, pane, workDir)
+	return windowName, sessionID
+}
+
+// allocateWindowName returns a fresh window name not currently present in the
+// tmux session. The name is randomized (see below) so it never repeats across
+// process restarts or collides across the per-workspace Agent instances that
+// share a single tmux session in multi-workspace mode.
+func allocateWindowName(sessionName string) string {
+	for {
+		// Use a random suffix rather than a counter: counters reset to 0 on
+		// process restart and could re-hand-out "cc-1" to a brand-new
+		// conversation, which would then collide with an older session whose
+		// persisted agent ID is still "cc-1" (mixing two conversations into one
+		// window). A random name does not repeat across restarts; the existence
+		// check guards against the (astronomically rare) live collision.
+		name := "cc-" + core.GenerateToken(4)
+		if !tmuxWindowExists(sessionName + ":" + name) {
+			return name
+		}
+	}
+}
+
 // uniqueWindowName builds a tmux window name that is unique per workDir path.
 // It appends a 4-hex-char FNV hash of the full path so that directories with
 // the same basename do not collide (e.g. /repo/a/app → "app-1a2b",
@@ -250,16 +301,17 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return map[string]any{
-		"session":           a.sessionName,
-		"pane":              a.pane,
-		"auto_create":       a.autoCreate,
-		"shell":             a.shell,
-		"init_command":      a.initCmd,
-		"startup_wait_ms":   a.startupWaitMs,
-		"prompt_pattern":    a.promptPat,
-		"poll_interval_ms":  a.pollMs,
-		"strip_input_block": a.stripInputBlock,
-		"strip_patterns":    a.stripPatterns,
+		"session":            a.sessionName,
+		"pane":               a.pane,
+		"auto_create":        a.autoCreate,
+		"shell":              a.shell,
+		"init_command":       a.initCmd,
+		"startup_wait_ms":    a.startupWaitMs,
+		"prompt_pattern":     a.promptPat,
+		"poll_interval_ms":   a.pollMs,
+		"strip_input_block":  a.stripInputBlock,
+		"strip_patterns":     a.stripPatterns,
+		"window_per_session": a.windowPerSession,
 	}
 }
 

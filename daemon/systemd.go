@@ -17,6 +17,16 @@ const (
 	systemdServiceName = ServiceName + ".service"
 )
 
+// systemdTemplateOwnedEnvKeys are keys the unit template renders directly; if
+// they also appear in cfg.EnvExtra the template version wins.
+var systemdTemplateOwnedEnvKeys = map[string]struct{}{
+	"CC_LOG_FILE":        {},
+	"CC_LOG_MAX_SIZE":    {},
+	"CC_LOG_MAX_BACKUPS": {},
+	"PATH":               {},
+	"HOME":               {},
+}
+
 type systemdManager struct {
 	system bool // true = system-level (/etc/systemd/system), false = user-level (~/.config/systemd/user)
 }
@@ -59,8 +69,18 @@ func (m *systemdManager) Install(cfg Config) error {
 	}
 
 	unit := m.buildUnit(cfg)
-	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
+	// 0600: unit file may contain captured secret values (config.toml ${ENV}
+	// placeholders and any EnvDiscoverer extension output). For system-level
+	// units (/etc/systemd/system/) the file is owned by root and remains
+	// readable by root only; for user-level units under
+	// ~/.config/systemd/user it remains owner-only. WriteFile only applies
+	// perm on create, so Chmod afterwards is required to harden reinstalls
+	// of pre-existing 0644 units from earlier cc-connect versions.
+	if err := os.WriteFile(unitPath, []byte(unit), 0600); err != nil {
 		return fmt.Errorf("write unit file: %w", err)
+	}
+	if err := os.Chmod(unitPath, 0600); err != nil {
+		return fmt.Errorf("chmod unit file: %w", err)
 	}
 
 	for _, cmdArgs := range [][]string{
@@ -174,8 +194,17 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	sb.WriteString("RestartSec=10\n")
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_FILE=%s\"\n", cfg.LogFile)
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_MAX_SIZE=%d\"\n", cfg.LogMaxSize)
+	fmt.Fprintf(&sb, "Environment=\"CC_LOG_MAX_BACKUPS=%d\"\n", cfg.LogMaxBackups)
 	if cfg.EnvPATH != "" {
 		fmt.Fprintf(&sb, "Environment=\"PATH=%s\"\n", cfg.EnvPATH)
+	}
+	// HOME: systemd does not propagate HOME to system units by default.
+	// Without this line, os.UserHomeDir() fails in the daemon and any
+	// subprocess it spawns; config.Load then falls back to a relative
+	// data_dir which agents (cd'd into work_dir) resolve to the wrong
+	// place, e.g. <work_dir>/.cc-connect instead of <HOME>/.cc-connect.
+	if cfg.HomeDir != "" {
+		fmt.Fprintf(&sb, "Environment=\"HOME=%s\"\n", escapeSystemdEnvValue(cfg.HomeDir))
 	}
 	if len(cfg.EnvExtra) > 0 {
 		keys := make([]string, 0, len(cfg.EnvExtra))
@@ -184,7 +213,19 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			fmt.Fprintf(&sb, "Environment=\"%s=%s\"\n", key, cfg.EnvExtra[key])
+			if _, owned := systemdTemplateOwnedEnvKeys[key]; owned {
+				continue
+			}
+			if !isValidEnvName(key) {
+				slog.Warn("daemon: systemd: dropping invalid env name from EnvExtra",
+					"key", key)
+				continue
+			}
+			value := cfg.EnvExtra[key]
+			if value == "" {
+				continue
+			}
+			fmt.Fprintf(&sb, "Environment=\"%s=%s\"\n", key, escapeSystemdEnvValue(value))
 		}
 	}
 	sb.WriteString("\n[Install]\n")
@@ -196,7 +237,35 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	return sb.String()
 }
 
-func runSystemctl(args ...string) (string, error) {
+// escapeSystemdEnvValue prepares a value for inclusion inside the double
+// quotes of an `Environment="KEY=VALUE"` directive. Per systemd.exec(5),
+// backslashes and double quotes need escaping; literal newlines and tabs
+// must be encoded as `\n` / `\t` so the unit file remains a single line.
+func escapeSystemdEnvValue(v string) string {
+	var b strings.Builder
+	b.Grow(len(v))
+	for _, r := range v {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// runSystemctl is a var (not a func) so tests can stub it without
+// requiring a real systemctl process on the test host.
+var runSystemctl = func(args ...string) (string, error) {
 	cmd := exec.Command("systemctl", args...)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err

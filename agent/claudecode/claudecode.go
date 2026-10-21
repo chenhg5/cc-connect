@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/chenhg5/cc-connect/agent/internal/skillroots"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -35,26 +36,46 @@ func init() {
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
 	workDir          string
-	cliBin           string   // CLI binary name or path (default: "claude")
-	cliExtraArgs     []string // extra args parsed from cli_path (e.g. ["code", "-t", "foo"])
+	cmd              string   // CLI binary name (default: "claude")
+	cliExtraArgs     []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
 	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	cliArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
+	cmdArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
 	model            string
 	reasoningEffort  string // "low" | "medium" | "high" | "max"
 	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
 	allowedTools     []string
 	disallowedTools  []string
-	maxContextTokens int // optional: passed as --max-context-tokens when > 0
-	providers        []core.ProviderConfig
+	maxContextTokens    int // optional: passed as --max-context-tokens when > 0
+	contextWindowTokens int // optional: override the context-window-size heuristic used by the ctx% indicator. When <= 0, fall back to model-name heuristics.
+	providers           []core.ProviderConfig
 	activeIdx        int // -1 = no provider set
 	sessionEnv       []string
-	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey     string // Claude Code Router API key (optional)
-	systemPrompt     string // Custom system prompt to pass to Claude CLI
+	routerURL        string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	routerAPIKey     string   // Claude Code Router API key (optional)
+	systemPrompt     string   // Custom system prompt to pass to Claude CLI
+	pluginDirs       []string // Plugin directories to load via --plugin-dir (repeatable)
+
+	appendSystemPrompt string // Custom text appended to the system prompt (keeps Claude's default)
+
+	// lang is the operator's configured cc-connect language (Issue #1655).
+	// When non-empty, session spawns use the localized cc-connect system
+	// prompt for the four tool sections (send / cron / timer / relay).
+	// Empty means "use English / cc-connect default" — back-compat with
+	// callers that pre-date the language option.
+	lang core.Language
 
 	providerProxy  *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL  string              // local URL of the proxy
 	platformPrompt string              // platform-specific formatting instructions
+
+	// ccDataDir is injected by the cc-connect host (see buildAgentOptions
+	// in cmd/cc-connect/main.go). It locates the global directory where
+	// we write the shared cc-connect system prompt file (issue #1376
+	// workaround for Windows 8192-byte cmdline limit). The file at
+	// <ccDataDir>/agent-prompts/cc-connect-system.md is written once per
+	// startup and shared across all sessions that don't need per-spawn
+	// customisation. Empty value falls back to os.TempDir.
+	ccDataDir string
 
 	// spawnOpts controls OS-user isolation via run_as_user. Zero value
 	// means legacy spawn as the supervisor user. See core/runas.go.
@@ -64,41 +85,41 @@ type Agent struct {
 }
 
 var claudeProviderManagedEnvVars = map[string]struct{}{
-	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                  {},
-	"CLAUDE_CODE_USE_BEDROCK":                               {},
-	"CLAUDE_CODE_USE_VERTEX":                                {},
-	"CLAUDE_CODE_USE_FOUNDRY":                               {},
-	"ANTHROPIC_BASE_URL":                                    {},
-	"ANTHROPIC_BEDROCK_BASE_URL":                            {},
-	"ANTHROPIC_VERTEX_BASE_URL":                             {},
-	"ANTHROPIC_FOUNDRY_BASE_URL":                            {},
-	"ANTHROPIC_FOUNDRY_RESOURCE":                            {},
-	"ANTHROPIC_VERTEX_PROJECT_ID":                           {},
-	"CLOUD_ML_REGION":                                       {},
-	"ANTHROPIC_API_KEY":                                     {},
-	"ANTHROPIC_AUTH_TOKEN":                                  {},
-	"CLAUDE_CODE_OAUTH_TOKEN":                               {},
-	"AWS_BEARER_TOKEN_BEDROCK":                              {},
-	"ANTHROPIC_FOUNDRY_API_KEY":                             {},
-	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                         {},
-	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                          {},
-	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                         {},
-	"ANTHROPIC_MODEL":                                       {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                         {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":             {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                    {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES":  {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL":                          {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":              {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                     {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":   {},
+	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                 {},
+	"CLAUDE_CODE_USE_BEDROCK":                              {},
+	"CLAUDE_CODE_USE_VERTEX":                               {},
+	"CLAUDE_CODE_USE_FOUNDRY":                              {},
+	"ANTHROPIC_BASE_URL":                                   {},
+	"ANTHROPIC_BEDROCK_BASE_URL":                           {},
+	"ANTHROPIC_VERTEX_BASE_URL":                            {},
+	"ANTHROPIC_FOUNDRY_BASE_URL":                           {},
+	"ANTHROPIC_FOUNDRY_RESOURCE":                           {},
+	"ANTHROPIC_VERTEX_PROJECT_ID":                          {},
+	"CLOUD_ML_REGION":                                      {},
+	"ANTHROPIC_API_KEY":                                    {},
+	"ANTHROPIC_AUTH_TOKEN":                                 {},
+	"CLAUDE_CODE_OAUTH_TOKEN":                              {},
+	"AWS_BEARER_TOKEN_BEDROCK":                             {},
+	"ANTHROPIC_FOUNDRY_API_KEY":                            {},
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                        {},
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                         {},
+	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                        {},
+	"ANTHROPIC_MODEL":                                      {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                        {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":            {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                   {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL":                         {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":             {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                    {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":  {},
 
 	// Provider-specific base URL env vars for thinking rewrite proxy routing.
 	// These are set by cc-connect when thinking override is needed for
 	// Bedrock/Vertex/Foundry providers that don't use base_url config.
-	"ANTHROPIC_BEDROCK_PROXY_BASE_URL": {},
-	"ANTHROPIC_VERTEX_PROXY_BASE_URL":  {},
-	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL": {},
+	"ANTHROPIC_BEDROCK_PROXY_BASE_URL":                      {},
+	"ANTHROPIC_VERTEX_PROXY_BASE_URL":                       {},
+	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL":                      {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL":                        {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION":            {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":                   {},
@@ -117,23 +138,43 @@ func New(opts map[string]any) (core.Agent, error) {
 	if workDir == "" {
 		workDir = "."
 	}
-	cliBin := "claude"
-	var cliExtraArgs []string
-	if cliPath, _ := opts["cli_path"].(string); cliPath != "" {
-		// NOTE: paths containing spaces are not supported because Fields
-		// splits on whitespace. Use a symlink or wrapper script instead.
-		parts := strings.Fields(cliPath)
-		cliBin = parts[0]
-		if len(parts) > 1 {
-			cliExtraArgs = parts[1:]
+	if _, err := os.Stat(workDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("claudecode: work_dir %q does not exist", workDir)
+	}
+	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "claude")
+	cmdArgsFlag, _ := opts["cmd_args_flag"].(string)
+	if cmdArgsFlag == "" {
+		if v, ok := opts["cli_args_flag"].(string); ok && v != "" {
+			slog.Warn("DEPRECATED: 'cli_args_flag' is deprecated, use 'cmd_args_flag' instead",
+				"deprecated_key", "cli_args_flag",
+				"new_key", "cmd_args_flag",
+				"value", v)
+			cmdArgsFlag = v
 		}
 	}
-	cliArgsFlag, _ := opts["cli_args_flag"].(string)
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizePermissionMode(mode)
 	systemPrompt, _ := opts["system_prompt"].(string)
+	appendSystemPrompt, _ := opts["append_system_prompt"].(string)
+	ccDataDir, _ := opts["cc_data_dir"].(string)
+	// Issue #1655: pass the operator's configured cc-connect language into the
+	// agent so per-spawn prompts can be localized. Empty string (legacy callers)
+	// falls back to English via AgentSystemPromptForLang.
+	langRaw, _ := opts["language"].(string)
+	lang := core.NormalizeLanguageString(langRaw)
+
+	var pluginDirs []string
+	if dir, ok := opts["plugin_dir"].(string); ok && dir != "" {
+		pluginDirs = []string{dir}
+	} else if dirs, ok := opts["plugin_dir"].([]any); ok {
+		for _, d := range dirs {
+			if s, ok := d.(string); ok && s != "" {
+				pluginDirs = append(pluginDirs, s)
+			}
+		}
+	}
 
 	var allowedTools []string
 	if tools, ok := opts["allowed_tools"].([]any); ok {
@@ -169,6 +210,29 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	// context_window_tokens overrides the window used by the "ctx N%"
+	// indicator, ahead of both the value Claude Code reports in modelUsage
+	// and the model-name heuristic. Defaults to 0 (= reported value, else
+	// heuristic), accepting the same numeric types as max_context_tokens
+	// because config parsers surface integer fields through one of these
+	// shapes depending on the source (TOML → float64, programmatic → int /
+	// int64).
+	contextWindowTokens := 0
+	switch v := opts["context_window_tokens"].(type) {
+	case int:
+		if v > 0 {
+			contextWindowTokens = v
+		}
+	case int64:
+		if v > 0 {
+			contextWindowTokens = int(v)
+		}
+	case float64:
+		if v > 0 {
+			contextWindowTokens = int(v)
+		}
+	}
+
 	// Claude Code Router support
 	routerURL, _ := opts["router_url"].(string)
 	routerAPIKey, _ := opts["router_api_key"].(string)
@@ -191,8 +255,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	// skip the supervisor-side LookPath check and let spawn fail loudly
 	// at runtime if the target doesn't have claude installed.
 	if !spawnOpts.IsolationMode() {
-		if _, err := exec.LookPath(cliBin); err != nil {
-			return nil, fmt.Errorf("claudecode: %q CLI not found in PATH, please install it first", cliBin)
+		if _, err := exec.LookPath(cmd); err != nil {
+			return nil, fmt.Errorf("claudecode: %q CLI not found in PATH, please install it first", cmd)
 		}
 	}
 
@@ -211,23 +275,44 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	// Eagerly materialise the shared cc-connect-system.md at startup so
+	// the file exists on disk before the first spawn. claude reads it
+	// via --append-system-prompt-file; the lazy fallback in
+	// newClaudeSession still covers content drift (cc-connect upgrades)
+	// and the empty-ccDataDir corner case. Failure here is non-fatal —
+	// the next spawn will retry and surface the error then.
+	//
+	// Issue #1655: when the operator has set language="zh", the shared
+	// file content is the localized AgentSystemPromptForLang so the very
+	// first session (which uses the shared-file fast path) already sees
+	// the right language without waiting for the per-spawn merge.
+	if _, err := ensureSharedSystemPromptFile(ccDataDir, core.AgentSystemPromptForLang(lang)); err != nil {
+		slog.Warn("claudecode: failed to write shared system prompt file at startup; will retry on first spawn", "err", err, "cc_data_dir", ccDataDir)
+	}
+
 	return &Agent{
-		workDir:          workDir,
-		cliBin:           cliBin,
-		cliExtraArgs:     cliExtraArgs,
-		cliArgsFlag:      cliArgsFlag,
-		model:            model,
-		reasoningEffort:  normalizeEffort(reasoningEffort),
-		mode:             mode,
-		systemPrompt:     systemPrompt,
-		allowedTools:     allowedTools,
-		disallowedTools:  disallowedTools,
-		maxContextTokens: maxContextTokens,
-		configEnv:        configEnv,
-		activeIdx:        -1,
-		routerURL:        routerURL,
-		routerAPIKey:     routerAPIKey,
-		spawnOpts:        spawnOpts,
+		workDir:             workDir,
+		cmd:                 cmd,
+		cliExtraArgs:        cliExtraArgs,
+		cmdArgsFlag:         cmdArgsFlag,
+		model:               model,
+		reasoningEffort:     normalizeEffort(reasoningEffort),
+		mode:                mode,
+		systemPrompt:        systemPrompt,
+		pluginDirs:          pluginDirs,
+		allowedTools:        allowedTools,
+		disallowedTools:     disallowedTools,
+		maxContextTokens:    maxContextTokens,
+		contextWindowTokens: contextWindowTokens,
+		configEnv:           configEnv,
+		activeIdx:           -1,
+		routerURL:           routerURL,
+		routerAPIKey:        routerAPIKey,
+		spawnOpts:           spawnOpts,
+		ccDataDir:           ccDataDir,
+
+		appendSystemPrompt: appendSystemPrompt,
+		lang:               lang,
 	}, nil
 }
 
@@ -269,7 +354,7 @@ func normalizePermissionMode(raw string) string {
 }
 
 func (a *Agent) Name() string           { return "claudecode" }
-func (a *Agent) CLIBinaryName() string  { return a.cliBin }
+func (a *Agent) CLIBinaryName() string  { return a.cmd }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -330,6 +415,7 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	}
 	return []core.ModelOption{
 		{Name: "sonnet", Desc: "Claude Sonnet (balanced)"},
+		{Name: "sonnet[1m]", Desc: "Claude Sonnet (1M context)"},
 		{Name: "opus", Desc: "Claude Opus (most capable)"},
 		{Name: "opus[1m]", Desc: "Claude Opus (1M context)"},
 		{Name: "haiku", Desc: "Claude Haiku (fastest)"},
@@ -406,6 +492,50 @@ func (a *Agent) SetPlatformPrompt(prompt string) {
 	a.platformPrompt = prompt
 }
 
+// ValidateSessionID reports whether the given session ID exists in this
+// agent's per-project session store (issue #599). It is the agent-side
+// implementation of core.SessionIDValidator: when the engine is about to
+// resume a session whose stored ID was inherited from another project, the
+// engine calls this and — on a false return — clears the ID and starts a
+// fresh session instead of reloading the wrong conversation.
+func (a *Agent) ValidateSessionID(_ context.Context, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	a.mu.RLock()
+	workDir := a.workDir
+	a.mu.RUnlock()
+	return validateSessionIDInProject(homeDir, workDir, sessionID)
+}
+
+// validateSessionIDInProject checks whether sessionID has a .jsonl file
+// under the per-project directory that Claude Code derives from workDir.
+// Split out from (*Agent).ValidateSessionID so the logic can be unit
+// tested without touching the real $HOME.
+func validateSessionIDInProject(homeDir, workDir, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	if homeDir == "" || workDir == "" {
+		return false
+	}
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return false
+	}
+	projectDir := findProjectDir(homeDir, absWorkDir)
+	if projectDir == "" {
+		return false
+	}
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
+}
+
 // StartSession creates a persistent interactive Claude Code session.
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
@@ -414,10 +544,13 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disTools := make([]string, len(a.disallowedTools))
 	copy(disTools, a.disallowedTools)
 	maxTok := a.maxContextTokens
+	ctxWin := a.contextWindowTokens
 	model := a.model
 	effort := a.reasoningEffort
 	workDir := a.workDir
 	mode := a.mode
+	pluginDirs := make([]string, len(a.pluginDirs))
+	copy(pluginDirs, a.pluginDirs)
 	extraEnv := a.runtimeEnvLocked()
 
 	activeIdx := a.activeIdx
@@ -436,12 +569,17 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		"providerCount", len(a.providers))
 	platformPrompt := a.platformPrompt
 	systemPrompt := a.systemPrompt
+	appendSystemPrompt := a.appendSystemPrompt
+	// Issue #1655: agent-level language drives the localized cc-connect system
+	// prompt. Read under the mutex and pass through to newClaudeSession so the
+	// session picks up the right tool-prompt bundle at spawn time.
+	lang := a.lang
 	// When router_url is set, --verbose conflicts with --output-format stream-json
 	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cliBin, a.cliExtraArgs, a.cliArgsFlag, model, effort, sessionID, mode, systemPrompt, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
+	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, ctxWin, a.ccDataDir, lang)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
@@ -547,27 +685,48 @@ func scanSessionMeta(path string) (string, int) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
-	var summary string
+	var firstUserMessage string
+	var aiTitle string
+	var customTitle string
 	var count int
 
 	for scanner.Scan() {
 		var entry struct {
-			Type    string `json:"type"`
-			Message struct {
+			Type        string `json:"type"`
+			AITitle     string `json:"aiTitle"`
+			CustomTitle string `json:"customTitle"`
+			Message     struct {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
 		}
-		if entry.Type == "user" || entry.Type == "assistant" {
+		switch entry.Type {
+		case "ai-title":
+			if entry.AITitle != "" {
+				aiTitle = entry.AITitle
+			}
+		case "custom-title":
+			if entry.CustomTitle != "" {
+				customTitle = entry.CustomTitle
+			}
+		case "user", "assistant":
 			count++
-			if entry.Type == "user" {
+			if entry.Type == "user" && firstUserMessage == "" {
 				if s := extractStringContent(entry.Message.Content); s != "" {
-					summary = s
+					firstUserMessage = s
 				}
 			}
 		}
+	}
+
+	summary := customTitle
+	if summary == "" {
+		summary = aiTitle
+	}
+	if summary == "" {
+		summary = firstUserMessage
 	}
 	summary = stripXMLTags(summary)
 	summary = strings.TrimSpace(summary)
@@ -581,6 +740,20 @@ var xmlTagRe = regexp.MustCompile(`<[^>]+>`)
 
 func stripXMLTags(s string) string {
 	return xmlTagRe.ReplaceAllString(s, "")
+}
+
+// parseHistoryTimestamp parses an RFC3339Nano timestamp from a Claude Code
+// JSONL transcript entry and converts it to the local timezone so the wall-clock
+// time matches what `time.Now()` produces on the host (which is what AddHistory
+// in core/session.go writes for new messages). Without this conversion, history
+// fallback paths (e.g. /history in cc-connect when the local history is empty)
+// display UTC clock times instead of local clock times (issue #1780).
+func parseHistoryTimestamp(s string) (time.Time, error) {
+	ts, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return ts.Local(), nil
 }
 
 // GetSessionHistory reads the Claude Code JSONL transcript and returns user/assistant messages.
@@ -625,7 +798,7 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 			continue
 		}
 
-		ts, _ := time.Parse(time.RFC3339Nano, raw.Timestamp)
+		ts, _ := parseHistoryTimestamp(raw.Timestamp)
 		text := extractTextContent(raw.Message.Content)
 		if text == "" {
 			continue
@@ -729,7 +902,7 @@ func (a *Agent) GetRunAsEnv() []string {
 // must propagate to per-workspace agent instances created lazily by
 // core.Engine.getOrCreateWorkspaceAgent. Without this snapshot, the engine
 // constructs workspace agents from a fresh opts map and silently drops
-// every claudecode field except mode/model — so cli_path, allowed_tools,
+// every claudecode field except mode/model — so cmd, allowed_tools,
 // and friends would only take effect on the project-level agent.
 //
 // Runtime-only state (providers, sessionEnv, providerProxy, platformPrompt)
@@ -756,11 +929,11 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 		}
 		opts["env"] = envMap
 	}
-	if cliPath := snapshotCLIPath(a.cliBin, a.cliExtraArgs); cliPath != "" {
-		opts["cli_path"] = cliPath
+	if cliPath := snapshotCmdPath(a.cmd, a.cliExtraArgs); cliPath != "" {
+		opts["cmd"] = cliPath
 	}
-	if a.cliArgsFlag != "" {
-		opts["cli_args_flag"] = a.cliArgsFlag
+	if a.cmdArgsFlag != "" {
+		opts["cmd_args_flag"] = a.cmdArgsFlag
 	}
 	if a.model != "" {
 		opts["model"] = a.model
@@ -777,31 +950,37 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	if a.maxContextTokens > 0 {
 		opts["max_context_tokens"] = a.maxContextTokens
 	}
+	if a.contextWindowTokens > 0 {
+		opts["context_window_tokens"] = a.contextWindowTokens
+	}
 	if a.routerURL != "" {
 		opts["router_url"] = a.routerURL
 	}
 	if a.routerAPIKey != "" {
 		opts["router_api_key"] = a.routerAPIKey
 	}
+	if len(a.pluginDirs) > 0 {
+		opts["plugin_dir"] = stringsToAny(a.pluginDirs)
+	}
 	return opts
 }
 
-// snapshotCLIPath rebuilds the cli_path opts string from cliBin and the
+// snapshotCmdPath rebuilds the cmd opts string from cmd and the
 // extra-args tail captured at construction. Returns "" when only the
 // default "claude" binary is in use, so we don't pollute the workspace
 // opts with a redundant default.
-func snapshotCLIPath(cliBin string, cliExtraArgs []string) string {
+func snapshotCmdPath(cmd string, cliExtraArgs []string) string {
 	// Normalise empty to the default binary so we can reason about extra args.
-	if cliBin == "" {
-		cliBin = "claude"
+	if cmd == "" {
+		cmd = "claude"
 	}
-	if cliBin == "claude" && len(cliExtraArgs) == 0 {
+	if cmd == "claude" && len(cliExtraArgs) == 0 {
 		return "" // default binary, no extra args — no need to persist
 	}
 	if len(cliExtraArgs) == 0 {
-		return cliBin
+		return cmd
 	}
-	return cliBin + " " + strings.Join(cliExtraArgs, " ")
+	return cmd + " " + strings.Join(cliExtraArgs, " ")
 }
 
 // stringsToAny copies a []string into a fresh []any so it round-trips
@@ -885,12 +1064,13 @@ func (a *Agent) CommandDirs() []string {
 func (a *Agent) SkillDirs() []string {
 	a.mu.RLock()
 	workDir := a.workDir
+	pluginDirs := append([]string(nil), a.pluginDirs...)
 	a.mu.RUnlock()
 	absDir, err := filepath.Abs(workDir)
 	if err != nil {
 		absDir = workDir
 	}
-	return appendProjectClaudeSkillDirs(absDir, claudeConfigHomeDir())
+	return claudeSkillDirs(absDir, claudeConfigHomeDir(), pluginDirs)
 }
 
 // ── ContextCompressor implementation ──────────────────────────
@@ -908,13 +1088,17 @@ func claudeConfigHomeDir() string {
 	return filepath.Join(home, ".claude")
 }
 
-func appendProjectClaudeSkillDirs(workDir, configHome string) []string {
+func claudeSkillDirs(workDir, configHome string, pluginDirs []string) []string {
 	home, _ := os.UserHomeDir()
-	projectDirs := walkUpClaudeSkillDirs(workDir, home)
-	if configHome == "" {
-		return projectDirs
+	dirs := walkUpClaudeSkillDirs(workDir, home)
+	if configHome != "" {
+		dirs = append(dirs, filepath.Join(configHome, "skills"))
+		dirs = append(dirs, skillroots.Find(filepath.Join(configHome, "plugins"))...)
 	}
-	return uniqueSkillDirs(append(projectDirs, filepath.Join(configHome, "skills")))
+	for _, pluginDir := range pluginDirs {
+		dirs = append(dirs, skillroots.Find(pluginDir)...)
+	}
+	return uniqueSkillDirs(dirs)
 }
 
 func walkUpClaudeSkillDirs(workDir, home string) []string {
@@ -1342,10 +1526,12 @@ func encodeClaudeProjectKey(absPath string) string {
 	// First, normalize to forward slashes for consistent processing
 	normalized := strings.ReplaceAll(absPath, "\\", "/")
 
-	// Build the encoded key character by character
+	// Build the encoded key character by character.
+	// Claude Code replaces path separators, special punctuation, and non-ASCII
+	// characters with hyphens when deriving the project directory name.
 	var result strings.Builder
 	for _, r := range normalized {
-		if r == '/' || r == ':' || r == '_' || r == ' ' || r == '~' {
+		if r == '/' || r == ':' || r == '_' || r == ' ' || r == '~' || r == '.' || r == '@' {
 			result.WriteRune('-')
 		} else if r < 128 { // ASCII range (0-127)
 			result.WriteRune(r)

@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -121,5 +122,81 @@ func TestPowerShellLiteralEscapesSingleQuotes(t *testing.T) {
 	want := `'C:\Users\O''Brien\.cc-connect'`
 	if got != want {
 		t.Fatalf("powerShellLiteral() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildWindowsTaskScript_DropsInvalidEnvName(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "x", WorkDir: "y", LogFile: "l", LogMaxSize: 1, EnvPATH: "p",
+		EnvExtra: map[string]string{"FOO BAR": "v", "OK": "ok"},
+	}
+	script := buildWindowsTaskScript(cfg)
+	if strings.Contains(script, "FOO BAR") {
+		t.Errorf("invalid env name leaked: %s", script)
+	}
+	if !strings.Contains(script, "$env:OK = 'ok'") {
+		t.Errorf("valid env missing: %s", script)
+	}
+}
+
+func TestBuildWindowsTaskScript_DropsEmptyValue(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "x", WorkDir: "y", LogFile: "l", LogMaxSize: 1, EnvPATH: "p",
+		EnvExtra: map[string]string{"EMPTY": "", "OK": "ok"},
+	}
+	script := buildWindowsTaskScript(cfg)
+	if strings.Contains(script, "$env:EMPTY") {
+		t.Errorf("empty value should be skipped: %s", script)
+	}
+}
+
+// TestSchtasksInstall_RewritesExistingScript covers the upgrade path: a user
+// from an earlier cc-connect version may already have a task script on disk,
+// and Install must rewrite it in place instead of leaving the stale one.
+//
+// The permission half of that check cannot be asserted here. This file is
+// windows-only, and Windows ignores permission bits beyond the read-only
+// attribute, so the 0644 script seeded below reads back as 0666 and Install's
+// 0600 is unobservable. That hardening is covered where modes are real, by
+// TestInstallLaunchd_TightensExistingPlistFrom0644 and
+// TestSystemdInstall_TightensExistingUnitFrom0644.
+func TestSchtasksInstall_RewritesExistingScript(t *testing.T) {
+	t.Setenv("USERPROFILE", t.TempDir())
+
+	orig := runPowerShell
+	t.Cleanup(func() { runPowerShell = orig })
+	runPowerShell = func(script string) (string, error) { return "", nil }
+
+	if err := os.MkdirAll(DefaultDataDir(), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	scriptPath := windowsTaskScriptPath()
+	const legacyMarker = "$env:OLD = 'leftover'"
+	if err := os.WriteFile(scriptPath, []byte(legacyMarker+"\r\n"), 0o644); err != nil {
+		t.Fatalf("seed legacy script: %v", err)
+	}
+
+	mgr := &schtasksManager{}
+	cfg := Config{
+		BinaryPath: "C:\\cc.exe",
+		WorkDir:    t.TempDir(),
+		LogFile:    "C:\\cc.log",
+		LogMaxSize: 1024,
+		EnvPATH:    "C:\\bin",
+		EnvExtra:   map[string]string{"CUSTOM_TOKEN": "captured"},
+	}
+	if err := mgr.Install(cfg); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	written, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read script after Install: %v", err)
+	}
+	if strings.Contains(string(written), legacyMarker) {
+		t.Errorf("Install left the legacy script in place:\n%s", written)
+	}
+	if !strings.Contains(string(written), "captured") {
+		t.Errorf("reinstalled script is missing the captured env value:\n%s", written)
 	}
 }

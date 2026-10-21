@@ -316,6 +316,71 @@ func TestProviderEnv_BedrockNoThinking(t *testing.T) {
 	}
 }
 
+// TestClaudecode_SessionResume_PreservesActiveProvider is a regression test
+// for cc-connect internal task t-20260614-qp7xnl: after a cc-connect process
+// restart, calling SetActiveProvider with the name persisted on the session
+// must restore providerEnv (ANTHROPIC_BASE_URL / ANTHROPIC_MODEL) so that the
+// next --resume spawn does not silently send the user's switched-to model
+// to the default provider's base URL.
+func TestClaudecode_SessionResume_PreservesActiveProvider(t *testing.T) {
+	providers := []core.ProviderConfig{
+		{
+			Name:    "default-prov",
+			BaseURL: "https://default.example.com/anthropic",
+			APIKey:  "default-key",
+			Model:   "default-model",
+		},
+		{
+			Name:    "minimax",
+			BaseURL: "https://api.minimaxi.com/anthropic",
+			APIKey:  "minimax-key",
+			Model:   "MiniMax-M3",
+		},
+	}
+
+	// Step 1: simulate the user's first message after `/provider switch minimax`.
+	a1 := &Agent{providers: providers, activeIdx: -1}
+	if !a1.SetActiveProvider("minimax") {
+		t.Fatal("SetActiveProvider(minimax) returned false")
+	}
+	want := envSliceToMap(a1.providerEnvLocked())
+	if got := want["ANTHROPIC_MODEL"]; got != "MiniMax-M3" {
+		t.Fatalf("baseline ANTHROPIC_MODEL = %q, want MiniMax-M3", got)
+	}
+	if got := want["ANTHROPIC_BASE_URL"]; got != "https://api.minimaxi.com/anthropic" {
+		t.Fatalf("baseline ANTHROPIC_BASE_URL = %q, want minimax", got)
+	}
+
+	// Step 2: simulate a cc-connect process restart. agent_session_id is
+	// already on disk (carried by the engine via session.AgentSessionID), but
+	// the in-memory activeIdx is back to -1.
+	a2 := &Agent{providers: providers, activeIdx: -1}
+	gotBefore := envSliceToMap(a2.providerEnvLocked())
+	if _, hasModel := gotBefore["ANTHROPIC_MODEL"]; hasModel {
+		t.Fatalf("post-restart pre-restore should have empty providerEnv, got %v", gotBefore)
+	}
+
+	// Step 3: engine looks up session.ActiveProvider and re-binds it before
+	// calling StartSession with the saved sessionID.
+	if !a2.SetActiveProvider("minimax") {
+		t.Fatal("post-restart SetActiveProvider(minimax) returned false")
+	}
+	got := envSliceToMap(a2.providerEnvLocked())
+	if got["ANTHROPIC_MODEL"] != want["ANTHROPIC_MODEL"] {
+		t.Fatalf("post-restart ANTHROPIC_MODEL = %q, want %q", got["ANTHROPIC_MODEL"], want["ANTHROPIC_MODEL"])
+	}
+	if got["ANTHROPIC_BASE_URL"] != want["ANTHROPIC_BASE_URL"] {
+		t.Fatalf("post-restart ANTHROPIC_BASE_URL = %q, want %q", got["ANTHROPIC_BASE_URL"], want["ANTHROPIC_BASE_URL"])
+	}
+	// The model name set in providerEnv must come from the second provider
+	// (MiniMax-M3), not the first one (default-model). This is the exact
+	// inversion the bug produced — model name from minimax sent to mimo's
+	// base_url.
+	if strings.Contains(got["ANTHROPIC_BASE_URL"], "default") {
+		t.Fatalf("post-restart base URL leaked from default provider: %q", got["ANTHROPIC_BASE_URL"])
+	}
+}
+
 func TestDetectEnvOnlyProviderType(t *testing.T) {
 	tests := []struct {
 		env      map[string]string

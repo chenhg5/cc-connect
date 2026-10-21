@@ -265,3 +265,50 @@ func TestRenderCardMap_InjectsSessionKeyIntoCallbacks(t *testing.T) {
 		t.Fatalf("select session_key = %#v, want thread session key", selectValue["session_key"])
 	}
 }
+
+func TestBuildCardJSONWithStatusFooter(t *testing.T) {
+	body := "Hello world"
+	footer := "Opus 4.7 · ↑ 1 ↓ 168 · 4%\n~/path/to/ws"
+	jsonStr := buildCardJSONWithStatusFooter(body, footer)
+
+	var card map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &card); err != nil {
+		t.Fatalf("decode card json: %v", err)
+	}
+	body0 := card["body"].(map[string]any)
+	elements := body0["elements"].([]any)
+	if len(elements) != 3 {
+		t.Fatalf("expected 3 elements (body markdown, hr, footer markdown), got %d: %#v", len(elements), elements)
+	}
+	bodyEl := elements[0].(map[string]any)
+	if bodyEl["tag"] != "markdown" || bodyEl["content"] != body {
+		t.Errorf("body element = %#v, want markdown with content %q", bodyEl, body)
+	}
+	hrEl := elements[1].(map[string]any)
+	if hrEl["tag"] != "hr" {
+		t.Errorf("middle element = %#v, want hr", hrEl)
+	}
+	footerEl := elements[2].(map[string]any)
+	if footerEl["tag"] != "markdown" {
+		t.Errorf("footer tag = %v, want markdown", footerEl["tag"])
+	}
+	if footerEl["text_size"] != "notation" {
+		t.Errorf("footer text_size = %v, want \"notation\"", footerEl["text_size"])
+	}
+	if footerEl["content"] != footer {
+		t.Errorf("footer content = %q, want %q", footerEl["content"], footer)
+	}
+}
+
+func TestBuildCardJSONWithStatusFooter_EmptyFooterFallsThrough(t *testing.T) {
+	body := "Hello"
+	a := buildCardJSONWithStatusFooter(body, "")
+	b := buildCardJSON(body)
+	if a != b {
+		t.Errorf("empty footer should match buildCardJSON output\n got: %s\nwant: %s", a, b)
+	}
+	// whitespace-only footer also falls through
+	if got := buildCardJSONWithStatusFooter(body, "   \n  "); got != b {
+		t.Errorf("whitespace footer should fall through to buildCardJSON")
+	}
+}

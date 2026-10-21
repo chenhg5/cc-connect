@@ -74,17 +74,53 @@ type ToolStep struct {
 }
 
 // RichCardSupporter is an optional interface for platforms that can build
-// native rich cards combining tool steps, markdown content, and an elapsed
-// time footer. `elapsed` is measured from turn start; pass 0 to hide the
-// footer.
+// native rich cards combining tool steps, markdown content, and a multi-line
+// status footer.
+//
+// statusFooter is a pre-composed multi-line string assembled by the engine
+// (typically one line per: elapsed time, model · effort · ctx, workdir).
+// Pass empty string to hide the footer entirely. Lines are separated by '\n';
+// the platform implementation is expected to render each line as its own
+// dim-styled element so they don't visually merge with the body markdown.
+//
+// (Phase B refactor: previously took elapsed time.Duration; now the engine
+// owns elapsed-time formatting so it can apply i18n + project-level toggles
+// uniformly with the rest of the footer.)
 type RichCardSupporter interface {
-	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, elapsed time.Duration) string
+	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string
+}
+
+// RichCardMarkdownResolver is an optional interface for platforms that need to
+// pre-process rich-card markdown before it is rendered or streamed.
+//
+// Feishu uses this to turn markdown image URLs into real uploaded image keys:
+// intermediate streaming frames may return quickly without waiting for uploads,
+// while final frames may wait briefly so the completed card can embed images.
+type RichCardMarkdownResolver interface {
+	ResolveRichCardMarkdown(ctx context.Context, markdown string, final bool) string
 }
 
 // MarkdownTableSplitter is an optional interface for platforms that need
 // platform-specific markdown table chunking before final send.
 type MarkdownTableSplitter interface {
 	SplitMarkdownByTables(md string, maxTables int) []string
+}
+
+// RichCardTextStreamer is an optional interface for platforms that support
+// per-element streaming text updates on rich cards (e.g. Lark/Feishu's
+// cardkit-v1 streaming text update API). When implemented, the engine routes
+// EventText growth through StreamRichCardText instead of full-card updates,
+// giving the client a native typewriter rendering effect.
+//
+// Returns ErrNotSupported when the specific preview handle was created
+// without a streamable card entity (fallback path); the engine then falls
+// back to the standard MessageUpdater full-card update.
+type RichCardTextStreamer interface {
+	// StreamRichCardText pushes the latest fullText to the streaming-text
+	// element of the rich card identified by previewHandle. The platform
+	// implementation is responsible for serializing concurrent calls and
+	// maintaining a monotonic sequence counter per handle.
+	StreamRichCardText(ctx context.Context, previewHandle any, fullText string) error
 }
 
 // PreviewStarter is an optional interface for platforms that can initiate a
@@ -284,6 +320,50 @@ func (sp *streamPreview) freeze() {
 	sp.degraded = true
 }
 
+// unfreeze reverses a prior freeze()+detachPreview() so the preview resumes
+// streaming. After unfreeze, the next appendText() will create a NEW preview
+// message (the prior handle was detached), giving the post-interruption
+// output its own card instead of being buffered until end of turn.
+//
+// Required pairing: callers must invoke unfreeze() only after a matching
+// freeze()+detachPreview() (or an equivalent sequence that left previewMsgID
+// nil and degraded true). It is intended to be called once the user-visible
+// interruption (permission prompt, AskUserQuestion) has been resolved and
+// the agent is producing new output in the same turn.
+//
+// Why a new card: the old preview message is committed by freeze() as a
+// permanent in-place update of the pre-interruption text. Keeping a handle
+// to it would overwrite that committed message with the post-interruption
+// content. Detach+re-attach on the next appendText is what the surrounding
+// code (engine EventPermissionRequest handler) does today, and unfreeze()
+// simply restores the streamPreview's degraded state so that flow can run
+// again on the same turn.
+func (sp *streamPreview) unfreeze() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	sp.cancelTimerLocked()
+
+	// Allow appendText() to bypass the interval/MinDeltaChars throttle on
+	// the first chunk after the interruption: lastSentAt is the only gate
+	// the throttle checks, and zeroing it makes that gate fall through.
+	sp.lastSentAt = time.Time{}
+
+	// Start a fresh accumulation window so the new card is a clean slate.
+	// Without this, the dedupe in flushLocked (text == sp.lastSentText)
+	// would suppress the first send of the new card, and the new card
+	// would appear empty until enough chars accumulated to force a flush.
+	sp.fullText = ""
+	sp.lastSentText = ""
+	sp.lastSentViaUpdate = false
+	sp.pendingStatus = ""
+
+	// previewMsgID stays nil (set by the matching detachPreview()). The
+	// next flushLocked() will see nil and call SendPreviewStart, opening
+	// a fresh card.
+	sp.degraded = false
+}
+
 // discard removes the preview message when possible and disables further
 // preview updates. Call this when the caller intends to send a separate
 // non-preview message (for example after tool use or on terminal errors).
@@ -314,7 +394,13 @@ func (sp *streamPreview) discard() {
 // timer and optionally cleans up the preview message.
 // Returns true if a preview was active and the final message was sent via preview
 // (so the caller should skip sending the full response separately).
-func (sp *streamPreview) finish(finalText string) bool {
+//
+// `statusFooter` is an optional structured footer string (one or more lines)
+// that platforms implementing StatusFooterUpdater render with small/dim
+// styling separate from the body. When the platform does not implement that
+// interface and statusFooter is non-empty, finish falls back to appending the
+// footer inline to finalText before the regular UpdateMessage call.
+func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
@@ -378,14 +464,18 @@ func (sp *streamPreview) finish(finalText string) bool {
 		return false
 	}
 
-	// If the final text is identical to what was last sent via UpdateMessage,
-	// skip the redundant API call. This prevents duplicate messages on platforms
-	// (e.g. Feishu) where patching with identical content may fail.
-	// Only skip when lastSentViaUpdate is true — if the text was only sent via
-	// SendPreviewStart (first flush), we must still call UpdateMessage because
-	// it may apply different formatting (e.g. Markdown→HTML for Telegram).
-	if finalText == sp.lastSentText && sp.lastSentViaUpdate {
-		slog.Debug("stream preview finish: text unchanged since last UpdateMessage, skipping",
+	// If the final text is identical to what was last sent via UpdateMessage
+	// AND no status footer needs to be applied, skip the redundant API call.
+	// This prevents duplicate messages on platforms (e.g. Feishu) where
+	// patching with identical content may fail. We must NOT skip when a
+	// statusFooter is pending — the body may match but the footer hasn't
+	// been rendered yet, and dropping the call would silently lose it.
+	// Only skip when lastSentViaUpdate is true — if the text was only sent
+	// via SendPreviewStart (first flush), we must still call UpdateMessage
+	// because it may apply different formatting (e.g. Markdown→HTML for
+	// Telegram).
+	if finalText == sp.lastSentText && sp.lastSentViaUpdate && statusFooter == "" {
+		slog.Debug("stream preview finish: text unchanged and no footer, skipping",
 			"text_len", len(finalText))
 		return true
 	}
@@ -395,7 +485,24 @@ func (sp *streamPreview) finish(finalText string) bool {
 	// we always attempt a single final update regardless of length.
 	slog.Debug("stream preview finish: sending final UpdateMessage",
 		"text_len", len(finalText), "lastSent_len", len(sp.lastSentText),
-		"same", finalText == sp.lastSentText, "viaUpdate", sp.lastSentViaUpdate)
+		"same", finalText == sp.lastSentText, "viaUpdate", sp.lastSentViaUpdate,
+		"footer_len", len(statusFooter))
+
+	// Prefer the structured-footer path when the platform supports it, so the
+	// footer renders with small/dim styling separate from the response body.
+	if statusFooter != "" {
+		if sfu, ok := sp.platform.(StatusFooterUpdater); ok {
+			if err := sfu.UpdateMessageWithStatusFooter(sp.ctx, sp.previewMsgID, finalText, statusFooter); err == nil {
+				slog.Debug("stream preview finish: success via UpdateMessageWithStatusFooter")
+				return true
+			} else {
+				slog.Debug("stream preview finish: UpdateMessageWithStatusFooter failed, falling back", "error", err)
+			}
+		}
+		// Fallback: append inline so the footer is at least visible.
+		finalText = appendReplyFooter(finalText, statusFooter)
+	}
+
 	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, finalText); err != nil {
 		slog.Debug("stream preview finish: final update FAILED, cleaning up preview", "error", err)
 		// Update failed (e.g. text too long for platform edit API).

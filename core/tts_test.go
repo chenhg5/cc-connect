@@ -211,6 +211,26 @@ func TestMiniMaxTTS_Success(t *testing.T) {
 		if r.URL.Path != "/v1/t2a_v2" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
+		var req struct {
+			Model        string `json:"model"`
+			Text         string `json:"text"`
+			VoiceSetting struct {
+				VoiceID string  `json:"voice_id"`
+				Speed   float64 `json:"speed"`
+			} `json:"voice_setting"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Model != "speech-2.8-hd" || req.Text != "hello" {
+			t.Fatalf("unexpected model/text: %q/%q", req.Model, req.Text)
+		}
+		if req.VoiceSetting.VoiceID != "voice-test" {
+			t.Fatalf("voice_id = %q", req.VoiceSetting.VoiceID)
+		}
+		if req.VoiceSetting.Speed != 0.98 {
+			t.Fatalf("speed = %v, want 0.98", req.VoiceSetting.Speed)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		// "fake-mp3" hex-encoded
 		hexAudio := "66616b652d6d7033"
@@ -231,7 +251,7 @@ func TestMiniMaxTTS_Success(t *testing.T) {
 	defer apiServer.Close()
 
 	tts := NewMiniMaxTTS("test-key", apiServer.URL, "speech-2.8-hd", nil)
-	audio, format, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{})
+	audio, format, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{Voice: "voice-test", Speed: 0.98})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -240,6 +260,93 @@ func TestMiniMaxTTS_Success(t *testing.T) {
 	}
 	if string(audio) != "fake-mp3" {
 		t.Errorf("unexpected audio data: %q", audio)
+	}
+}
+
+// TestMiniMaxTTS_FinalStatusChunkAudioIsDropped reproduces the doubled-audio
+// bug: MiniMax T2A v2 stream protocol sends incremental audio in status=1
+// chunks and re-emits the full audio in a final status=2 trailer chunk for
+// non-stream clients. Without dedup the resulting audio plays twice.
+func TestMiniMaxTTS_FinalStatusChunkAudioIsDropped(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Incremental status=1 chunks: "hello" hex-encoded across 3 chunks.
+		for _, hexAudio := range []string{"68", "656c6c", "6f"} {
+			chunk := map[string]any{
+				"data":      map[string]any{"audio": hexAudio, "status": 1},
+				"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+			}
+			data, _ := json.Marshal(chunk)
+			if _, err := fmt.Fprintf(w, "data:%s\n\n", data); err != nil {
+				t.Errorf("write chunk: %v", err)
+			}
+		}
+		// Final status=2 chunk re-sends the full "hello" audio as trailer.
+		final := map[string]any{
+			"data":      map[string]any{"audio": "68656c6c6f", "status": 2},
+			"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+		}
+		finalData, _ := json.Marshal(final)
+		if _, err := fmt.Fprintf(w, "data:%s\n\n", finalData); err != nil {
+			t.Errorf("write final: %v", err)
+		}
+	}))
+	defer apiServer.Close()
+
+	tts := NewMiniMaxTTS("test-key", apiServer.URL, "", nil)
+	audio, _, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := string(audio), "hello"; got != want {
+		t.Errorf("audio = %q (len=%d), want %q (len=%d) — status=2 trailer was not deduplicated, audio plays twice",
+			got, len(got), want, len(want))
+	}
+}
+
+// TestMiniMaxTTS_StopsAfterFinalStatusChunk ensures any unexpected chunks
+// after status=2 are not appended (defence in depth against future server
+// changes).
+func TestMiniMaxTTS_StopsAfterFinalStatusChunk(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// status=1 with "hi" (6869)
+		chunk := map[string]any{
+			"data":      map[string]any{"audio": "6869", "status": 1},
+			"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+		}
+		data, _ := json.Marshal(chunk)
+		if _, err := fmt.Fprintf(w, "data:%s\n\n", data); err != nil {
+			t.Errorf("write chunk: %v", err)
+		}
+		// status=2 trailer with full audio
+		final := map[string]any{
+			"data":      map[string]any{"audio": "6869", "status": 2},
+			"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+		}
+		finalData, _ := json.Marshal(final)
+		if _, err := fmt.Fprintf(w, "data:%s\n\n", finalData); err != nil {
+			t.Errorf("write final: %v", err)
+		}
+		// Bogus extra chunk after final — must be ignored.
+		extra := map[string]any{
+			"data":      map[string]any{"audio": "deadbeef", "status": 1},
+			"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+		}
+		extraData, _ := json.Marshal(extra)
+		if _, err := fmt.Fprintf(w, "data:%s\n\n", extraData); err != nil {
+			t.Errorf("write extra: %v", err)
+		}
+	}))
+	defer apiServer.Close()
+
+	tts := NewMiniMaxTTS("test-key", apiServer.URL, "", nil)
+	audio, _, err := tts.Synthesize(context.Background(), "hi", TTSSynthesisOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := string(audio), "hi"; got != want {
+		t.Errorf("audio = %q, want %q — trailing chunks after status=2 were not ignored", got, want)
 	}
 }
 

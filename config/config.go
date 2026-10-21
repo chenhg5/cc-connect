@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -110,14 +111,30 @@ type Config struct {
 	Bridge             BridgeConfig            `toml:"bridge"`
 	Management         ManagementConfig        `toml:"management"`
 	Hooks              []HookConfig            `toml:"hooks"`
-	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`    // max minutes between consecutive agent events; 0 = no timeout; default 120
-	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"`   // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
+	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
+	BusyTimeoutMins    *int                    `toml:"busy_timeout_mins,omitempty"`  // minutes a dead agent's session busy lock may be held before the next message breaks it; 0 = disable; default 2
+	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
 	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
 	// setting so the reaper policy is consistent across projects; per-project
 	// configuration is intentionally not supported.
 	WorkspaceIdleTimeoutMins *int `toml:"workspace_idle_timeout_mins,omitempty"`
+	// Shell overrides the default shell used for /shell commands, cron exec,
+	// hooks, and webhook exec. On Unix the default is "sh"; on Windows it is
+	// "powershell.exe". Set to an absolute path (e.g. "/bin/zsh") to use a
+	// different shell. Supported: sh, bash, zsh, fish, cmd, powershell, pwsh.
+	Shell string `toml:"shell,omitempty"`
+	// ShellProfile is prepended to every shell command before execution. Useful
+	// for sourcing shell profiles so that user-defined functions and aliases are
+	// available. Example: "source ~/.zshrc"
+	ShellProfile string `toml:"shell_profile,omitempty"`
+	// MaxAttachmentSizeMB is the per-file size limit, in MiB, for attachments
+	// sent through `cc-connect send --file/--image/--audio/--video` and the
+	// /send API. 0 (the default) means use core.DefaultMaxAttachmentSize
+	// (50 MiB). Raise it to send larger files; the request body limit on the
+	// API side scales with this value to account for base64 expansion.
+	MaxAttachmentSizeMB int `toml:"max_attachment_size_mb,omitempty"`
 }
 
 // CronConfig controls cron job behavior.
@@ -176,14 +193,16 @@ const (
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	Mode               *string `toml:"mode"`                 // "full" (default), "compact", or "quiet"
-	CardMode           *string `toml:"card_mode"`            // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages   *bool   `toml:"thinking_messages"`    // whether thinking messages are shown; default true
-	ThinkingMaxLen     *int    `toml:"thinking_max_len"`     // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen         *int    `toml:"tool_max_len"`         // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages       *bool   `toml:"tool_messages"`        // whether tool progress messages are shown; default true
-	ShowContextIndicator *bool `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
-	ReplyFooter        *bool   `toml:"reply_footer"`         // whether Codex-like footer is shown; default true
+	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
+	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
+	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	HistoryMaxLen        *int    `toml:"history_max_len"`        // max chars per /history entry; 0 = no truncation; default 1000
+	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
+	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
+	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default false
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -238,7 +257,8 @@ type RoleConfig struct {
 
 // RelayConfig controls bot-to-bot relay behavior.
 type RelayConfig struct {
-	TimeoutSecs *int `toml:"timeout_secs"` // max seconds to wait for relay response; 0 = disabled; default 120
+	TimeoutSecs *int   `toml:"timeout_secs"`         // max seconds to wait for relay response; 0 = disabled; default 120
+	Visibility  string `toml:"visibility,omitempty"` // "full" (default), "summary", or "none" for group visibility echoes
 }
 
 // SpeechConfig configures speech-to-text for voice messages.
@@ -268,12 +288,16 @@ type SpeechConfig struct {
 
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
 type TTSConfig struct {
-	Enabled    bool   `toml:"enabled"`
-	Provider   string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
-	Voice      string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh"; for mimo: "mimo_default" / "冰糖" / "Mia" …)
-	TTSMode    string `toml:"tts_mode"`     // "voice_only" (default) | "always"
-	MaxTextLen int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
-	OpenAI     struct {
+	Enabled      bool                      `toml:"enabled"`
+	Provider     string                    `toml:"provider"`      // "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
+	Voice        string                    `toml:"voice"`         // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh"; for mimo: "mimo_default" / "冰糖" / "Mia" …)
+	VoiceID      string                    `toml:"voice_id"`      // alias for voice; useful for MiniMax voice IDs
+	Speed        float64                   `toml:"speed"`         // optional speaking speed multiplier; 0 = provider default
+	LanguageType string                    `toml:"language_type"` // optional provider-specific language hint
+	TTSMode      string                    `toml:"tts_mode"`      // "voice_only" (default) | "always"
+	MaxTextLen   int                       `toml:"max_text_len"`  // max rune count before skipping TTS; 0 = no limit
+	Agents       map[string]TTSAgentConfig `toml:"agents"`        // per-project/agent voice overrides keyed by [[projects]].name
+	OpenAI       struct {
 		APIKey  string `toml:"api_key"`
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
@@ -284,15 +308,131 @@ type TTSConfig struct {
 		Model   string `toml:"model"`
 	} `toml:"qwen"`
 	MiniMax struct {
-		APIKey  string `toml:"api_key"`
-		BaseURL string `toml:"base_url"`
-		Model   string `toml:"model"`
+		APIKey     string `toml:"api_key"`
+		BaseURL    string `toml:"base_url"`
+		Model      string `toml:"model"`
+		ConfigFile string `toml:"config_file"` // optional JSON auth file; default data_dir/config/minimax.json when api_key is empty
 	} `toml:"minimax"`
 	Mimo struct {
 		APIKey  string `toml:"api_key"`
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"mimo"`
+}
+
+// TTSAgentConfig overrides global [tts] synthesis parameters for one project.
+// Keys are project names, which map naturally to cc-connect's agent workspaces
+// (for example assistant, reviewer).
+type TTSAgentConfig struct {
+	Provider     string  `toml:"provider,omitempty"`
+	Voice        string  `toml:"voice,omitempty"`
+	VoiceID      string  `toml:"voice_id,omitempty"`
+	Speed        float64 `toml:"speed,omitempty"`
+	LanguageType string  `toml:"language_type,omitempty"`
+	MaxTextLen   *int    `toml:"max_text_len,omitempty"`
+}
+
+// ResolvedTTSConfig is the effective TTS config for a single project after
+// applying [tts.agents.<project>] overrides.
+type ResolvedTTSConfig struct {
+	Enabled      bool
+	Provider     string
+	Voice        string
+	Speed        float64
+	LanguageType string
+	TTSMode      string
+	MaxTextLen   int
+}
+
+// ResolveTTSConfigForProject returns the effective TTS settings for projectName.
+// Legacy [tts].voice remains supported; [tts].voice_id is treated as an alias
+// and takes precedence when both are set.
+func ResolveTTSConfigForProject(tts TTSConfig, projectName string) ResolvedTTSConfig {
+	res := ResolvedTTSConfig{
+		Enabled:      tts.Enabled,
+		Provider:     strings.TrimSpace(tts.Provider),
+		Voice:        firstNonEmpty(tts.VoiceID, tts.Voice),
+		Speed:        tts.Speed,
+		LanguageType: tts.LanguageType,
+		TTSMode:      tts.TTSMode,
+		MaxTextLen:   tts.MaxTextLen,
+	}
+	if tts.Agents == nil {
+		return res
+	}
+	agent, ok := tts.Agents[projectName]
+	if !ok {
+		return res
+	}
+	if v := strings.TrimSpace(agent.Provider); v != "" {
+		res.Provider = v
+	}
+	if v := firstNonEmpty(agent.VoiceID, agent.Voice); v != "" {
+		res.Voice = v
+	}
+	if agent.Speed > 0 {
+		res.Speed = agent.Speed
+	}
+	if v := strings.TrimSpace(agent.LanguageType); v != "" {
+		res.LanguageType = v
+	}
+	if agent.MaxTextLen != nil {
+		res.MaxTextLen = *agent.MaxTextLen
+	}
+	return res
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// MiniMaxLocalConfig is the JSON shape used by Agent Studio / MiniMax skills.
+type MiniMaxLocalConfig struct {
+	APIKey  string `json:"api_key"`
+	APIHost string `json:"api_host"`
+	BaseURL string `json:"base_url"`
+}
+
+// LoadMiniMaxLocalConfig reads a MiniMax JSON config without exposing secrets.
+// It returns an empty config when the file does not exist.
+func LoadMiniMaxLocalConfig(dataDir, configFile string) (MiniMaxLocalConfig, error) {
+	if strings.TrimSpace(configFile) == "" {
+		configFile = filepath.Join(dataDir, "config", "minimax.json")
+	}
+	configFile = expandUserPath(configFile)
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return MiniMaxLocalConfig{}, nil
+		}
+		return MiniMaxLocalConfig{}, fmt.Errorf("read minimax config: %w", err)
+	}
+	var cfg MiniMaxLocalConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return MiniMaxLocalConfig{}, fmt.Errorf("parse minimax config: %w", err)
+	}
+	return cfg, nil
+}
+
+func expandUserPath(path string) string {
+	// Only the current user's home shorthand is expanded; ~user paths are left
+	// unchanged to avoid platform-specific user lookup behavior.
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
 // HeartbeatConfig controls periodic heartbeat for a project.
@@ -307,10 +447,29 @@ type HeartbeatConfig struct {
 }
 
 // AutoCompressConfig controls automatic context compression for a project.
+// AutoCompressConfig controls automatic context compression.
+//
+// The name is about the *trigger*, not the timing: this fires AFTER a turn
+// completes (see the auto-compress decision block in core/engine.go), never
+// inside the agent's own loop. Agents that compact natively mid-turn — Claude
+// Code, via autoCompactWindow — act during the loop and are more timely; this is
+// for agents that have no such mechanism, or for users who want compaction at a
+// visible, predictable turn boundary.
 type AutoCompressConfig struct {
 	Enabled    *bool `toml:"enabled,omitempty"`      // default false
 	MaxTokens  *int  `toml:"max_tokens,omitempty"`   // estimated token threshold to trigger /compress
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
+	// AllowHeuristic restores deciding from the text-length heuristic when an
+	// agent that CAN report exact usage has not reported it yet. Default false:
+	// such turns make no decision and wait for the next turn, which carries the
+	// exact number. The heuristic ignores tool results and the fixed
+	// system-prompt+tools overhead, so it was measured 2.5x off (574,797
+	// estimated vs 229,783 real).
+	//
+	// This does not apply to agents with no usage reporting at all: for them the
+	// heuristic is the only mechanism that has ever existed, and removing it
+	// would silently disable auto-compress for most of cc-connect's agents.
+	AllowHeuristic bool `toml:"allow_heuristic,omitempty"`
 }
 
 // ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
@@ -347,6 +506,9 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
+	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
+	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`
 	// RunAsUser, when set, causes the agent command for this project to be
 	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
 	// provides OS-level file-system isolation from the supervisor user who
@@ -361,10 +523,15 @@ type ProjectConfig struct {
 	// (LD_PRELOAD, PATH, HOME, etc.) are rejected at config validation.
 	// Use this only for variables the target user cannot set in their profile.
 	RunAsEnv []string `toml:"run_as_env,omitempty"`
-	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
+	// ShowContextIndicator: nil/true = render the reply footer's first line
+	// (model · effort · token usage · context %); false = hide that line.
+	// Subordinate to ReplyFooter — the master footer toggle.
 	ShowContextIndicator *bool `toml:"show_context_indicator,omitempty"`
-	// ReplyFooter: nil/true = append a Codex-style footer; false = disable.
-	// (model/reasoning/usage/workdir, when available) to assistant replies.
+	// ShowWorkdirIndicator: nil/true = render the reply footer's second line
+	// (workspace directory); false = hide that line. Subordinate to ReplyFooter.
+	ShowWorkdirIndicator *bool `toml:"show_workdir_indicator,omitempty"`
+	// ReplyFooter: nil/true = render the reply footer; false = disable it
+	// entirely (the per-line indicator flags above become no-ops).
 	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
 	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
 	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
@@ -401,6 +568,10 @@ type ProjectConfig struct {
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
 	FilterExternalSessions *bool `toml:"filter_external_sessions,omitempty"`
+	// Shell overrides the global shell for this project. See Config.Shell.
+	Shell string `toml:"shell,omitempty"`
+	// ShellProfile overrides the global shell_profile for this project.
+	ShellProfile string `toml:"shell_profile,omitempty"`
 }
 
 type AgentConfig struct {
@@ -464,34 +635,68 @@ type LogConfig struct {
 	Level string `toml:"level"`
 }
 
-func Load(path string) (*Config, error) {
+// load parses, env-resolves, and wires providers in the config file but does
+// NOT validate — callers must call validate() or validatePermissive() themselves.
+func load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
-
-	cfg := &Config{
-		Log: LogConfig{Level: "info"},
-	}
+	cfg := &Config{Log: LogConfig{Level: "info"}}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	resolveEnvInConfig(cfg)
-
+	expandHomeInConfig(cfg)
 	if cfg.DataDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			cfg.DataDir = filepath.Join(home, ".cc-connect")
 		} else {
+			// HOME unset (common when systemd unit does not inject it):
+			// warn loudly, because a relative data_dir will be resolved
+			// differently by any subprocess that changes cwd — most
+			// notably the claude/codex/etc. agent processes that cd into
+			// work_dir before reading files written by the supervisor.
 			cfg.DataDir = ".cc-connect"
+			slog.Warn("config: data_dir empty and HOME unset; falling back to relative path. Set data_dir to an absolute path in config.toml, or ensure the service manager injects HOME.")
 		}
+	}
+	cfg.DataDir = expandUserPath(cfg.DataDir)
+	// Always resolve to an absolute path so a data_dir written by the
+	// supervisor is read back at the same location by agent subprocesses
+	// regardless of their working directory. Users who write a relative
+	// data_dir explicitly still get it anchored to the supervisor's cwd
+	// (the same behaviour they would see running any other CLI).
+	if abs, err := filepath.Abs(cfg.DataDir); err == nil {
+		cfg.DataDir = abs
 	}
 	cfg.AttachmentSend = strings.ToLower(strings.TrimSpace(cfg.AttachmentSend))
 	if cfg.AttachmentSend == "" {
 		cfg.AttachmentSend = "on"
 	}
-
 	cfg.ResolveProviderRefs()
+	return cfg, nil
+}
 
+// LoadPermissive loads the config file and performs all validation except the
+// "at least one platform per project" check. Use this for commands (like
+// `cc-connect web`) that should work even before platforms are configured.
+func LoadPermissive(path string) (*Config, error) {
+	cfg, err := load(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.validatePermissive(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func Load(path string) (*Config, error) {
+	cfg, err := load(path)
+	if err != nil {
+		return nil, err
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -502,6 +707,38 @@ var envPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 func resolveEnvInConfig(cfg *Config) {
 	resolveEnvValue(reflect.ValueOf(cfg))
+}
+
+// expandHomeInConfig expands a leading ~ / ~/ in path-like agent options
+// (work_dir, base_dir) to the user's home directory. Without this, a config
+// like work_dir = "~/.codex/workspace" is passed literally to exec.Cmd.Dir,
+// which fails at spawn time with a misleading "fork/exec ...: no such file
+// or directory" that points at the agent binary instead of the directory.
+func expandHomeInConfig(cfg *Config) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	for i := range cfg.Projects {
+		proj := &cfg.Projects[i]
+		proj.BaseDir = expandLeadingHome(proj.BaseDir, home)
+		if v, ok := proj.Agent.Options["work_dir"]; ok {
+			if s, ok := v.(string); ok {
+				proj.Agent.Options["work_dir"] = expandLeadingHome(s, home)
+			}
+		}
+	}
+}
+
+// expandLeadingHome expands "~" and "~/" at the start of a path to home.
+func expandLeadingHome(s, home string) string {
+	if s == "~" {
+		return home
+	}
+	if strings.HasPrefix(s, "~/") {
+		return filepath.Join(home, s[2:])
+	}
+	return s
 }
 
 func resolveEnvValue(v reflect.Value) {
@@ -650,7 +887,7 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 //  1. project-level [projects.display].<field> (highest precedence)
 //  2. global [display].<field>
 //  3. mode-derived default (compact/quiet → false, full → true)
-func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showContextIndicator, replyFooter bool) {
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showContextIndicator, replyFooter, hideAgentFooter bool) {
 	var projDisp *DisplayConfig
 	if proj != nil {
 		projDisp = proj.Display
@@ -748,7 +985,59 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		replyFooter = true
 	}
 
+	hideAgentFooter = pickBool(
+		getProjBool(func(d *DisplayConfig) *bool { return d.HideAgentFooter }),
+		cfg.Display.HideAgentFooter,
+		false,
+	)
+
 	return
+}
+
+// EffectiveHistoryMaxLen returns the per-entry /history truncation length.
+// Resolution: project [display] > global [display] > default 1000. A value
+// of 0 disables truncation.
+func EffectiveHistoryMaxLen(cfg *Config, proj *ProjectConfig) int {
+	if proj != nil && proj.Display != nil && proj.Display.HistoryMaxLen != nil {
+		return *proj.Display.HistoryMaxLen
+	}
+	if cfg != nil && cfg.Display.HistoryMaxLen != nil {
+		return *cfg.Display.HistoryMaxLen
+	}
+	return 1000
+}
+
+// EffectiveShell returns the shell binary, flag, and init command for the project.
+// Resolution: per-project > global > platform default.
+// The flag is auto-detected: "/C" for cmd, "-Command" for powershell/pwsh, "-c" for everything else.
+func EffectiveShell(cfg *Config, proj *ProjectConfig) (shell, flag, shellProfile string) {
+	s := ""
+	p := ""
+	if proj != nil {
+		s = proj.Shell
+		p = proj.ShellProfile
+	}
+	if s == "" {
+		s = cfg.Shell
+	}
+	if p == "" {
+		p = cfg.ShellProfile
+	}
+	if s == "" {
+		if runtime.GOOS == "windows" {
+			return "powershell.exe", "-Command", p
+		}
+		return "sh", "-c", p
+	}
+	base := strings.ToLower(filepath.Base(s))
+	switch {
+	case base == "cmd" || base == "cmd.exe":
+		return s, "/C", p
+	case strings.HasPrefix(base, "powershell") || strings.HasPrefix(base, "pwsh"):
+		return s, "-Command", p
+	default:
+		return s, "-c", p
+	}
 }
 
 // EffectiveCardMode returns the card rendering mode for the project: "rich" (Feishu Card 2.0)
@@ -771,7 +1060,18 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 	return "legacy"
 }
 
+// validatePermissive is like validate but skips the "at least one platform"
+// requirement so that commands like `cc-connect web` can operate on agent-only
+// configs before platforms have been set up.
+func (c *Config) validatePermissive() error {
+	return c.validateInternal(true)
+}
+
 func (c *Config) validate() error {
+	return c.validateInternal(false)
+}
+
+func (c *Config) validateInternal(permissive bool) error {
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err
 	}
@@ -782,6 +1082,11 @@ func (c *Config) validate() error {
 	}
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Relay.Visibility)) {
+	case "", "full", "summary", "none":
+	default:
+		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
@@ -794,7 +1099,7 @@ func (c *Config) validate() error {
 		if proj.Agent.Type == "" {
 			return fmt.Errorf("config: %s.agent.type is required", prefix)
 		}
-		if len(proj.Platforms) == 0 {
+		if len(proj.Platforms) == 0 && !permissive {
 			return fmt.Errorf("config: %s needs at least one [[projects.platforms]]", prefix)
 		}
 		for j, p := range proj.Platforms {
@@ -812,6 +1117,9 @@ func (c *Config) validate() error {
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
+		}
+		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
+			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)
 		}
 		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
 			return err
@@ -849,6 +1157,9 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 		default:
 			return fmt.Errorf("config: %s.card_mode must be \"legacy\" or \"rich\"", prefix)
 		}
+	}
+	if display.HistoryMaxLen != nil && *display.HistoryMaxLen < 0 {
+		return fmt.Errorf("config: %s.history_max_len must be >= 0", prefix)
 	}
 	return nil
 }
@@ -2289,6 +2600,303 @@ func SaveWeixinPlatformCredentials(opts WeixinCredentialUpdateOptions) (*WeixinC
 	}, nil
 }
 
+func firstYuanbaoPlatformIndex(platforms []PlatformConfig) int {
+	for i := range platforms {
+		t := strings.ToLower(strings.TrimSpace(platforms[i].Type))
+		if t == "yuanbao" {
+			return i
+		}
+	}
+	return -1
+}
+
+// EnsureProjectWithYuanbaoOptions controls project auto-provisioning for Yuanbao setup.
+type EnsureProjectWithYuanbaoOptions struct {
+	ProjectName      string
+	CloneFromProject string
+	WorkDir          string
+	AgentType        string
+}
+
+// EnsureProjectWithYuanbaoResult describes whether project provisioning created a new project or platform block.
+type EnsureProjectWithYuanbaoResult struct {
+	Created          bool
+	AddedPlatform    bool
+	ProjectIndex     int
+	PlatformAbsIndex int
+}
+
+// EnsureProjectWithYuanbaoPlatform ensures the target project exists and has a yuanbao platform entry.
+func EnsureProjectWithYuanbaoPlatform(opts EnsureProjectWithYuanbaoOptions) (*EnsureProjectWithYuanbaoResult, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	if ConfigPath == "" {
+		return nil, fmt.Errorf("config path not set")
+	}
+	projectName := strings.TrimSpace(opts.ProjectName)
+	if projectName == "" {
+		return nil, fmt.Errorf("project name is required")
+	}
+
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name != projectName {
+			continue
+		}
+		platformIdx := firstYuanbaoPlatformIndex(cfg.Projects[i].Platforms)
+		added := false
+		if platformIdx < 0 {
+			lines, hadTrailing := splitConfigLines(raw)
+			spans := buildRawProjectSpans(lines)
+			if i >= len(spans) {
+				return nil, fmt.Errorf("project %q located in parsed config but not raw file", projectName)
+			}
+			insertAt := spans[i].end + 1
+			block := make([]string, 0, 7)
+			if insertAt > 0 && strings.TrimSpace(lines[insertAt-1]) != "" {
+				block = append(block, "")
+			}
+			block = append(block, "[[projects.platforms]]")
+			block = append(block, `type = "yuanbao"`)
+			block = append(block, "")
+			block = append(block, "[projects.platforms.options]")
+			if insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) != "" {
+				block = append(block, "")
+			}
+			lines = insertLines(lines, insertAt, block)
+			if err := writeRawConfig(joinConfigLines(lines, hadTrailing)); err != nil {
+				return nil, err
+			}
+			platformIdx = len(cfg.Projects[i].Platforms)
+			added = true
+		}
+		return &EnsureProjectWithYuanbaoResult{
+			Created:          false,
+			AddedPlatform:    added,
+			ProjectIndex:     i,
+			PlatformAbsIndex: platformIdx,
+		}, nil
+	}
+
+	proj := ProjectConfig{
+		Name:      projectName,
+		Agent:     pickAgentTemplateForNewProject(cfg, EnsureProjectWithFeishuOptions{CloneFromProject: opts.CloneFromProject, WorkDir: opts.WorkDir, AgentType: opts.AgentType}),
+		Platforms: []PlatformConfig{{Type: "yuanbao", Options: map[string]any{}}},
+	}
+	if proj.Agent.Type == "" {
+		proj.Agent.Type = "codex"
+	}
+	if proj.Agent.Options == nil {
+		proj.Agent.Options = map[string]any{}
+	}
+	workDir := strings.TrimSpace(opts.WorkDir)
+	if workDir != "" {
+		proj.Agent.Options["work_dir"] = workDir
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
+		lines = append(lines, "")
+	}
+	lines = append(lines, "[[projects]]")
+	lines = append(lines, fmt.Sprintf("name = %s", quoteTomlString(proj.Name)))
+	lines = append(lines, "")
+	lines = append(lines, "[projects.agent]")
+	lines = append(lines, fmt.Sprintf("type = %s", quoteTomlString(proj.Agent.Type)))
+	lines = append(lines, "")
+	lines = append(lines, "[projects.agent.options]")
+	if wd, ok := proj.Agent.Options["work_dir"].(string); ok && strings.TrimSpace(wd) != "" {
+		lines = append(lines, fmt.Sprintf("work_dir = %s", quoteTomlString(wd)))
+	}
+	if mode, ok := proj.Agent.Options["mode"].(string); ok && strings.TrimSpace(mode) != "" {
+		lines = append(lines, fmt.Sprintf("mode = %s", quoteTomlString(mode)))
+	}
+	lines = append(lines, "")
+	lines = append(lines, "[[projects.platforms]]")
+	lines = append(lines, `type = "yuanbao"`)
+	lines = append(lines, "")
+	lines = append(lines, "[projects.platforms.options]")
+	if err := writeRawConfig(joinConfigLines(lines, hadTrailing)); err != nil {
+		return nil, err
+	}
+
+	return &EnsureProjectWithYuanbaoResult{
+		Created:          true,
+		AddedPlatform:    false,
+		ProjectIndex:     len(cfg.Projects),
+		PlatformAbsIndex: 0,
+	}, nil
+}
+
+// YuanbaoCredentialUpdateOptions updates credentials for a project's Yuanbao platform.
+type YuanbaoCredentialUpdateOptions struct {
+	ProjectName   string
+	PlatformIndex int    // 1-based index among yuanbao platforms; 0 = first
+	BotToken      string // "app_key:app_secret"; required
+	APIDomain     string // optional; empty = do not change
+	WSURL         string // optional; empty = do not change
+	RouteEnv      string // optional; empty = do not change
+	AllowFrom     string // optional; empty = do not change
+}
+
+// YuanbaoCredentialUpdateResult describes where credentials were written.
+type YuanbaoCredentialUpdateResult struct {
+	ProjectName      string
+	ProjectIndex     int
+	PlatformAbsIndex int
+	AllowFrom        string
+}
+
+// SaveYuanbaoPlatformCredentials updates bot_token (and optional fields)
+// for a project's Yuanbao platform.
+func SaveYuanbaoPlatformCredentials(opts YuanbaoCredentialUpdateOptions) (*YuanbaoCredentialUpdateResult, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	if ConfigPath == "" {
+		return nil, fmt.Errorf("config path not set")
+	}
+	if strings.TrimSpace(opts.ProjectName) == "" {
+		return nil, fmt.Errorf("project name is required")
+	}
+	botToken := strings.TrimSpace(opts.BotToken)
+	idx := strings.Index(botToken, ":")
+	if botToken == "" || idx <= 0 || idx >= len(botToken)-1 {
+		return nil, fmt.Errorf("bot_token is required (format: app_key:app_secret)")
+	}
+	if opts.PlatformIndex < 0 {
+		return nil, fmt.Errorf("platform index must be >= 0")
+	}
+
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	projectIdx := -1
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == opts.ProjectName {
+			projectIdx = i
+			break
+		}
+	}
+	if projectIdx < 0 {
+		return nil, fmt.Errorf("project %q not found", opts.ProjectName)
+	}
+
+	proj := &cfg.Projects[projectIdx]
+	candidates := make([]int, 0, len(proj.Platforms))
+	for i := range proj.Platforms {
+		t := strings.ToLower(strings.TrimSpace(proj.Platforms[i].Type))
+		if t == "yuanbao" {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("project %q has no yuanbao platform", opts.ProjectName)
+	}
+
+	targetPos := 0
+	if opts.PlatformIndex > 0 {
+		targetPos = opts.PlatformIndex - 1
+	}
+	if targetPos < 0 || targetPos >= len(candidates) {
+		return nil, fmt.Errorf(
+			"platform index %d out of range: project %q has %d yuanbao platform(s)",
+			opts.PlatformIndex, opts.ProjectName, len(candidates),
+		)
+	}
+
+	absIdx := candidates[targetPos]
+	platform := &proj.Platforms[absIdx]
+	if platform.Options == nil {
+		platform.Options = map[string]any{}
+	}
+
+	platform.Options["bot_token"] = botToken
+
+	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
+	if v := strings.TrimSpace(opts.AllowFrom); v != "" {
+		allowFrom = v
+		platform.Options["allow_from"] = v
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	spans := buildRawProjectSpans(lines)
+	if projectIdx >= len(spans) {
+		return nil, fmt.Errorf("project %q located in parsed config but not raw file", opts.ProjectName)
+	}
+	if absIdx >= len(spans[projectIdx].platforms) {
+		return nil, fmt.Errorf("yuanbao platform located in parsed config but not raw file")
+	}
+
+	reloadSpan := func() rawPlatformSpan {
+		spans = buildRawProjectSpans(lines)
+		return spans[projectIdx].platforms[absIdx]
+	}
+	span := reloadSpan()
+
+	if span.optionsStart < 0 {
+		insertAt := span.end + 1
+		block := make([]string, 0, 4)
+		if insertAt > 0 && strings.TrimSpace(lines[insertAt-1]) != "" {
+			block = append(block, "")
+		}
+		block = append(block, "[projects.platforms.options]")
+		if insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) != "" {
+			block = append(block, "")
+		}
+		lines = insertLines(lines, insertAt, block)
+		span = reloadSpan()
+	}
+
+	lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "bot_token", botToken)
+	span = reloadSpan()
+
+	if v := strings.TrimSpace(opts.APIDomain); v != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "api_domain", v)
+		span = reloadSpan()
+	}
+	if v := strings.TrimSpace(opts.WSURL); v != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "ws_url", v)
+		span = reloadSpan()
+	}
+	if v := strings.TrimSpace(opts.RouteEnv); v != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "route_env", v)
+		span = reloadSpan()
+	}
+	if v := strings.TrimSpace(opts.AllowFrom); v != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "allow_from", v)
+		span = reloadSpan()
+	}
+
+	if err := writeRawConfig(joinConfigLines(lines, hadTrailing)); err != nil {
+		return nil, err
+	}
+
+	return &YuanbaoCredentialUpdateResult{
+		ProjectName:      opts.ProjectName,
+		ProjectIndex:     projectIdx,
+		PlatformAbsIndex: absIdx,
+		AllowFrom:        allowFrom,
+	}, nil
+}
+
 func pickAgentTemplateForNewProject(cfg *Config, opts EnsureProjectWithFeishuOptions) AgentConfig {
 	cloneName := strings.TrimSpace(opts.CloneFromProject)
 	if cloneName != "" {
@@ -2831,9 +3439,15 @@ type ProjectSettingsUpdate struct {
 	Mode                 *string
 	AgentType            *string
 	ShowContextIndicator *bool
+	ShowWorkdirIndicator *bool
 	ReplyFooter          *bool
 	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
+	// WorkspaceMode and WorkspaceBaseDir control the project-level
+	// multi-workspace feature (ProjectConfig.Mode/BaseDir), distinct from
+	// Mode above (which is the agent permission mode, e.g. yolo/plan).
+	WorkspaceMode    *string
+	WorkspaceBaseDir *string
 }
 
 // SaveProjectSettings persists project-level settings and the global language to config.toml.
@@ -2910,6 +3524,10 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			v := *update.ShowContextIndicator
 			proj.ShowContextIndicator = &v
 		}
+		if update.ShowWorkdirIndicator != nil {
+			v := *update.ShowWorkdirIndicator
+			proj.ShowWorkdirIndicator = &v
+		}
 		if update.ReplyFooter != nil {
 			v := *update.ReplyFooter
 			proj.ReplyFooter = &v
@@ -2938,6 +3556,22 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			} else {
 				proj.Agent.Options["mode"] = mode
 			}
+		}
+		if update.WorkspaceBaseDir != nil {
+			proj.BaseDir = strings.TrimSpace(*update.WorkspaceBaseDir)
+		}
+		if update.WorkspaceMode != nil {
+			mode := strings.TrimSpace(*update.WorkspaceMode)
+			if mode == "single" {
+				mode = ""
+			}
+			if mode != "" && mode != "multi-workspace" {
+				return fmt.Errorf("invalid workspace_mode %q", mode)
+			}
+			if mode == "multi-workspace" && proj.BaseDir == "" {
+				return fmt.Errorf("workspace_base_dir is required to enable multi-workspace mode")
+			}
+			proj.Mode = mode
 		}
 		if update.PlatformAllowFrom != nil {
 			for j := range proj.Platforms {
@@ -2996,11 +3630,20 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		if p.ShowContextIndicator != nil {
 			result["show_context_indicator"] = *p.ShowContextIndicator
 		}
+		if p.ShowWorkdirIndicator != nil {
+			result["show_workdir_indicator"] = *p.ShowWorkdirIndicator
+		}
 		if p.ReplyFooter != nil {
 			result["reply_footer"] = *p.ReplyFooter
 		}
 		if p.InjectSender != nil {
 			result["inject_sender"] = *p.InjectSender
+		}
+		if strings.TrimSpace(p.Mode) != "" {
+			result["workspace_mode"] = p.Mode
+		}
+		if strings.TrimSpace(p.BaseDir) != "" {
+			result["workspace_base_dir"] = p.BaseDir
 		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {
@@ -3234,6 +3877,11 @@ func GetGlobalSettings() map[string]any {
 		result["tool_max_len"] = *cfg.Display.ToolMaxLen
 	} else {
 		result["tool_max_len"] = 500
+	}
+	if cfg.Display.HistoryMaxLen != nil {
+		result["history_max_len"] = *cfg.Display.HistoryMaxLen
+	} else {
+		result["history_max_len"] = 1000
 	}
 	// Stream preview
 	spEnabled := true

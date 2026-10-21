@@ -72,6 +72,61 @@ func TestBuildSpawnCommand_RunAsUser(t *testing.T) {
 	}
 }
 
+// TestBuildSpawnCommand_RunAsUserWithWorkDir guards the fix for the bug where
+// sudo -i runs the command from the target user's HOME, ignoring cmd.Dir, so a
+// run_as_user agent ignored its (multi-workspace) working directory. With
+// WorkDir set the command must be wrapped so it chdirs into WorkDir — passed
+// via the CC_RUNAS_CHDIR env var (added to the preserve-env allowlist), not
+// argv, so non-ASCII paths survive sudo's command re-quoting.
+func TestBuildSpawnCommand_RunAsUserWithWorkDir(t *testing.T) {
+	ctx := context.Background()
+	opts := SpawnOptions{
+		RunAsUser: "partseeker-coder",
+		WorkDir:   "/opt/shared/workspaces/设计原型界面",
+	}
+	cmd := BuildSpawnCommand(ctx, opts, "claude", "--version", "-p", "hello")
+	if cmd == nil {
+		t.Fatal("BuildSpawnCommand returned nil")
+	}
+	// The chdir env var must be on the preserve-env allowlist or it would be
+	// stripped before the wrapper can read it.
+	preserved := strings.Split(strings.TrimPrefix(cmd.Args[4], "--preserve-env="), ",")
+	if !slices.Contains(preserved, RunAsChdirEnv) {
+		t.Errorf("preserve-env missing %q; got %v", RunAsChdirEnv, preserved)
+	}
+	if cmd.Args[5] != "--" {
+		t.Fatalf("args[5] = %q, want --", cmd.Args[5])
+	}
+	// Expected wrapper: -- /bin/sh -c "cd \"$CC_RUNAS_CHDIR\" || exit 1; exec \"$@\"" sh claude --version -p hello
+	wantWrap := []string{
+		"/bin/sh", "-c",
+		"cd \"$" + RunAsChdirEnv + "\" || exit 1; exec \"$@\"",
+		"sh", "claude", "--version", "-p", "hello",
+	}
+	if !reflect.DeepEqual(cmd.Args[6:], wantWrap) {
+		t.Fatalf("wrapped argv = %v, want %v", cmd.Args[6:], wantWrap)
+	}
+	// The path itself must NOT appear in argv (it travels via env).
+	for _, a := range cmd.Args {
+		if strings.Contains(a, "设计原型界面") {
+			t.Errorf("workdir leaked into argv %q; must travel via %s env", a, RunAsChdirEnv)
+		}
+	}
+}
+
+// TestMergedAllowlist_WorkDirAddsChdirEnv asserts the chdir env var is only
+// allowlisted when WorkDir is set (no leak in the common case).
+func TestMergedAllowlist_WorkDirAddsChdirEnv(t *testing.T) {
+	withWD := SpawnOptions{RunAsUser: "u", WorkDir: "/tmp/ws"}.mergedAllowlist()
+	if !slices.Contains(withWD, RunAsChdirEnv) {
+		t.Errorf("with WorkDir: allowlist missing %q; got %v", RunAsChdirEnv, withWD)
+	}
+	noWD := SpawnOptions{RunAsUser: "u"}.mergedAllowlist()
+	if slices.Contains(noWD, RunAsChdirEnv) {
+		t.Errorf("without WorkDir: allowlist should not contain %q; got %v", RunAsChdirEnv, noWD)
+	}
+}
+
 func TestFilterEnvForSpawn_Legacy(t *testing.T) {
 	env := []string{"PATH=/usr/bin", "SECRET=top", "PWD=/tmp"}
 	got := FilterEnvForSpawn(env, SpawnOptions{})

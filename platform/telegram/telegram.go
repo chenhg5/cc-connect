@@ -110,6 +110,7 @@ type Platform struct {
 	groupReplyAll         bool
 	shareSessionInChannel bool
 	enableReactions       bool
+	progressStyle         string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
 	httpClient            *http.Client
 
 	mu                  sync.RWMutex
@@ -162,10 +163,54 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	enableReactions, _ := opts["enable_reactions"].(bool)
-	return &Platform{token: token, allowFrom: allowFrom, groupReplyAll: groupReplyAll, shareSessionInChannel: shareSessionInChannel, enableReactions: enableReactions, httpClient: httpClient}, nil
+
+	// Default to "compact" so streaming edits work out of the box. Telegram has
+	// no rich card UI, so "card" is normalized to "compact". Users can opt out
+	// via progress_style = "legacy" to restore the old "send full text once"
+	// behavior.
+	progressStyle := "compact"
+	if v, ok := opts["progress_style"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "":
+			// keep default
+		case "legacy":
+			progressStyle = "legacy"
+		case "compact", "card":
+			progressStyle = "compact"
+		default:
+			return nil, fmt.Errorf("telegram: invalid progress_style %q (want legacy, compact, or card)", v)
+		}
+	}
+
+	return &Platform{
+		token:                 token,
+		allowFrom:             allowFrom,
+		groupReplyAll:         groupReplyAll,
+		shareSessionInChannel: shareSessionInChannel,
+		enableReactions:       enableReactions,
+		progressStyle:         progressStyle,
+		httpClient:            httpClient,
+	}, nil
 }
 
 func (p *Platform) Name() string { return "telegram" }
+
+// ProgressStyle reports the streaming-progress style for this platform.
+//
+// Telegram supports MessageUpdater.UpdateMessage, so we default to "compact"
+// to enable progressive edits of long agent responses. Without this, the
+// engine falls back to legacy mode and sends the entire reply (which can be
+// 30k+ characters) in one final p.Send — users perceive it as "spinner spins
+// for minutes, then a wall of text appears".
+//
+// To restore the old single-send behavior set progress_style = "legacy" in
+// the platform options.
+func (p *Platform) ProgressStyle() string {
+	if p == nil || p.progressStyle == "" {
+		return "compact"
+	}
+	return p.progressStyle
+}
 
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.mu.Lock()
@@ -225,7 +270,43 @@ func defaultNewBot(token string, onUpdate func(context.Context, *models.Update),
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("getMe: %w", err)
 	}
+
+	// Drain pending updates before starting polling to avoid 409 Conflict.
+	// This clears any outstanding long-poll request from a previous instance.
+	drainPendingUpdates(token, httpClient)
+
 	return b, me, b.Start, nil
+}
+
+// drainPendingUpdates clears any pending updates on Telegram's side by calling
+// getUpdates with offset=-1. This terminates any outstanding long-poll request
+// from a previous bot instance, preventing 409 Conflict errors on restart.
+func drainPendingUpdates(token string, httpClient *http.Client) {
+	apiURL := "https://api.telegram.org/bot" + token + "/getUpdates?offset=-1&timeout=0"
+	client := httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		slog.Debug("telegram: drain updates request creation failed", "error", err)
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Debug("telegram: drain updates request failed", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read and discard response body to ensure connection is properly closed
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	slog.Debug("telegram: drained pending updates", "status", resp.StatusCode)
 }
 
 func (p *Platform) connectLoop(ctx context.Context) {
@@ -508,6 +589,12 @@ func (p *Platform) dispatchMessage(msg *core.Message, tgMsg *models.Message) {
 	}
 	if locText := enrichLocation(msg); locText != "" {
 		extras = append(extras, locText)
+	}
+	// Inline text_link entities: rewrite "label" → "[label](url)" so the agent
+	// receives the URL. Telegram drops the href when forwarding plain text (#1207).
+	msg.Content = enrichTextLinks(msg.Content, tgMsg.Entities)
+	if tgMsg.Caption != "" {
+		msg.Content = enrichTextLinks(msg.Content, tgMsg.CaptionEntities)
 	}
 	if len(extras) > 0 {
 		msg.ExtraContent = strings.Join(extras, "\n")
@@ -857,15 +944,16 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	}
 
 	p.handler(p, &core.Message{
-		SessionKey: sessionKey,
-		Platform:   "telegram",
-		UserID:     userID,
-		UserName:   userName,
-		ChatName:   chatName,
-		Content:    responseText,
-		MessageID:  strconv.Itoa(msgID),
-		ChannelKey: channelKey,
-		ReplyCtx:   rctx,
+		SessionKey:           sessionKey,
+		Platform:             "telegram",
+		UserID:               userID,
+		UserName:             userName,
+		ChatName:             chatName,
+		Content:              responseText,
+		MessageID:            strconv.Itoa(msgID),
+		ChannelKey:           channelKey,
+		ReplyCtx:             rctx,
+		IsPermissionResponse: true,
 	})
 }
 
@@ -967,16 +1055,25 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
+		errMsg := err.Error()
+		// Handle HTML parsing errors by falling back to plain text
+		if strings.Contains(errMsg, "can't parse") {
 			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
 				"method", "Reply",
-				"error", err.Error(),
+				"error", errMsg,
 				"html_prefix", truncateForLog(html, 200),
 				"html_len", len(html),
 			)
 			params.Text = content
 			params.ParseMode = ""
 			_, err = bot.SendMessage(ctx, params)
+		} else if strings.Contains(errMsg, "message is too long") {
+			// Handle message too long by splitting and sending as multiple messages
+			slog.Warn("telegram: message too long, splitting into chunks",
+				"method", "Reply",
+				"html_len", len(html),
+			)
+			return p.sendChunked(ctx, bot, rc, html)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: send: %w", err)
@@ -1005,16 +1102,25 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	}
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
+		errMsg := err.Error()
+		// Handle HTML parsing errors by falling back to plain text
+		if strings.Contains(errMsg, "can't parse") {
 			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
 				"method", "Send",
-				"error", err.Error(),
+				"error", errMsg,
 				"html_prefix", truncateForLog(html, 200),
 				"html_len", len(html),
 			)
 			params.Text = content
 			params.ParseMode = ""
 			_, err = bot.SendMessage(ctx, params)
+		} else if strings.Contains(errMsg, "message is too long") {
+			// Handle message too long by splitting and sending as multiple messages
+			slog.Warn("telegram: message too long, splitting into chunks",
+				"method", "Send",
+				"html_len", len(html),
+			)
+			return p.sendChunked(ctx, bot, rc, html)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: send: %w", err)
@@ -1192,16 +1298,25 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	}
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
+		errMsg := err.Error()
+		// Handle HTML parsing errors by falling back to plain text
+		if strings.Contains(errMsg, "can't parse") {
 			slog.Warn("telegram: HTML rejected by Telegram, sending as plain text",
 				"method", "SendWithButtons",
-				"error", err.Error(),
+				"error", errMsg,
 				"html_prefix", truncateForLog(html, 200),
 				"html_len", len(html),
 			)
 			params.Text = content
 			params.ParseMode = ""
 			_, err = bot.SendMessage(ctx, params)
+		} else if strings.Contains(errMsg, "message is too long") {
+			// Handle message too long: first chunk with buttons, rest without
+			slog.Warn("telegram: message too long, splitting into chunks",
+				"method", "SendWithButtons",
+				"html_len", len(html),
+			)
+			return p.sendChunkedWithButtons(ctx, bot, rc, html, rows)
 		}
 		if err != nil {
 			return fmt.Errorf("telegram: sendWithButtons: %w", err)
@@ -1320,12 +1435,24 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 
 	sent, err := bot.SendMessage(ctx, params)
 	if err != nil {
-		if strings.Contains(err.Error(), "can't parse") {
+		errMsg := err.Error()
+		// Handle HTML parsing errors by falling back to plain text
+		if strings.Contains(errMsg, "can't parse") {
 			slog.Warn("telegram: HTML rejected by Telegram, sending preview as plain text",
 				"method", "SendPreviewStart",
-				"error", err.Error(),
+				"error", errMsg,
 				"html_prefix", truncateForLog(html, 200),
 				"html_len", len(html),
+			)
+			params.Text = content
+			params.ParseMode = ""
+			sent, err = bot.SendMessage(ctx, params)
+		} else if strings.Contains(errMsg, "message is too long") {
+			// Preview messages shouldn't be chunked; fall back to plain text
+			slog.Warn("telegram: preview too long, sending as plain text",
+				"method", "SendPreviewStart",
+				"html_len", len(html),
+				"content_len", len(content),
 			)
 			params.Text = content
 			params.ParseMode = ""
@@ -1388,6 +1515,71 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 		return fmt.Errorf("telegram: edit message: %w", err)
 	}
 	slog.Debug("telegram: UpdateMessage HTML success")
+	return nil
+}
+
+// telegramMaxMessageLen is the maximum message length for Telegram.
+// Telegram's limit is 4096 characters for text messages.
+const telegramMaxMessageLen = 4096
+
+// sendChunked splits a message that's too long and sends it as multiple messages.
+// It uses SplitMessageCodeFenceAware to respect code block boundaries.
+func (p *Platform) sendChunked(ctx context.Context, bot telegramBot, rc replyContext, html string) error {
+	chunks := core.SplitMessageCodeFenceAware(html, telegramMaxMessageLen)
+	for i, chunk := range chunks {
+		params := &tgbot.SendMessageParams{
+			ChatID:          rc.chatID,
+			MessageThreadID: rc.threadID,
+			Text:            chunk,
+			ParseMode:       models.ParseModeHTML,
+		}
+		if i == 0 && rc.messageID != 0 {
+			params.ReplyParameters = &models.ReplyParameters{MessageID: rc.messageID}
+		}
+		if _, err := bot.SendMessage(ctx, params); err != nil {
+			// If HTML fails, try plain text
+			if strings.Contains(err.Error(), "can't parse") {
+				params.Text = chunk
+				params.ParseMode = ""
+				if _, err2 := bot.SendMessage(ctx, params); err2 != nil {
+					return fmt.Errorf("telegram: send chunk %d: %w", i, err2)
+				}
+			} else {
+				return fmt.Errorf("telegram: send chunk %d: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
+// sendChunkedWithButtons splits a message that's too long and sends it as multiple messages.
+// The first chunk includes the inline keyboard buttons.
+func (p *Platform) sendChunkedWithButtons(ctx context.Context, bot telegramBot, rc replyContext, html string, rows [][]models.InlineKeyboardButton) error {
+	chunks := core.SplitMessageCodeFenceAware(html, telegramMaxMessageLen)
+	for i, chunk := range chunks {
+		params := &tgbot.SendMessageParams{
+			ChatID:          rc.chatID,
+			MessageThreadID: rc.threadID,
+			Text:            chunk,
+			ParseMode:       models.ParseModeHTML,
+		}
+		// Only first chunk gets the buttons
+		if i == 0 {
+			params.ReplyMarkup = &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+		}
+		if _, err := bot.SendMessage(ctx, params); err != nil {
+			// If HTML fails, try plain text
+			if strings.Contains(err.Error(), "can't parse") {
+				params.Text = chunk
+				params.ParseMode = ""
+				if _, err2 := bot.SendMessage(ctx, params); err2 != nil {
+					return fmt.Errorf("telegram: send chunk %d: %w", i, err2)
+				}
+			} else {
+				return fmt.Errorf("telegram: send chunk %d: %w", i, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1542,6 +1734,56 @@ func extractEntityText(text string, offsetUTF16, lengthUTF16 int) string {
 		return ""
 	}
 	return string(utf16.Decode(encoded[offsetUTF16:endUTF16]))
+}
+
+// enrichTextLinks rewrites text_link entities in-place: each entity that carries
+// a URL (type "text_link") is rewritten from "label" to "[label](url)" so the
+// agent receives the full hyperlink. Plain "url" entities (bare URLs in the
+// text) are left unchanged — they are already visible. (#1207)
+func enrichTextLinks(text string, entities []models.MessageEntity) string {
+	if len(entities) == 0 || text == "" {
+		return text
+	}
+	// Work in UTF-16 code units (Telegram's coordinate system).
+	runes := []rune(text)
+	utf16Encoded := utf16.Encode(runes)
+
+	// Collect text_link replacements sorted by descending offset so we can
+	// safely apply them right-to-left without shifting earlier offsets.
+	type replacement struct {
+		start, end int // UTF-16 code unit offsets
+		url        string
+	}
+	var repls []replacement
+	for _, e := range entities {
+		if e.Type != models.MessageEntityTypeTextLink || e.URL == "" {
+			continue
+		}
+		end := e.Offset + e.Length
+		if e.Offset < 0 || e.Length <= 0 || end > len(utf16Encoded) {
+			continue
+		}
+		repls = append(repls, replacement{e.Offset, end, e.URL})
+	}
+	if len(repls) == 0 {
+		return text
+	}
+	// Sort descending by start offset for right-to-left substitution.
+	for i := 0; i < len(repls)-1; i++ {
+		for j := i + 1; j < len(repls); j++ {
+			if repls[j].start > repls[i].start {
+				repls[i], repls[j] = repls[j], repls[i]
+			}
+		}
+	}
+	// Apply substitutions on the UTF-16 slice and rebuild.
+	for _, r := range repls {
+		label := string(utf16.Decode(utf16Encoded[r.start:r.end]))
+		markdown := fmt.Sprintf("[%s](%s)", label, r.url)
+		replacement16 := utf16.Encode([]rune(markdown))
+		utf16Encoded = append(utf16Encoded[:r.start], append(replacement16, utf16Encoded[r.end:]...)...)
+	}
+	return string(utf16.Decode(utf16Encoded))
 }
 
 // sanitizeTelegramCommand converts a command name to Telegram-compatible format.

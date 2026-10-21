@@ -84,7 +84,7 @@ app_secret = "secret"
 		t.Fatalf("ResetOnIdleMins = %#v, want explicit 0", proj.ResetOnIdleMins)
 	}
 
-	mode, thinking, tools, thinkingMax, toolMax, _, _ := config.EffectiveDisplay(cfg, proj)
+	mode, thinking, tools, thinkingMax, toolMax, _, _, _ := config.EffectiveDisplay(cfg, proj)
 	if mode != config.DisplayModeFull {
 		t.Fatalf("mode = %q, want project full override", mode)
 	}
@@ -111,7 +111,7 @@ func TestReleaseConfig_DefaultsKeepAttachmentsAndFullDisplayEnabled(t *testing.T
 	if cfg.AttachmentSend != "on" {
 		t.Fatalf("AttachmentSend = %q, want default on", cfg.AttachmentSend)
 	}
-	mode, thinking, tools, _, _, _, _ := config.EffectiveDisplay(cfg, &cfg.Projects[0])
+	mode, thinking, tools, _, _, _, _, _ := config.EffectiveDisplay(cfg, &cfg.Projects[0])
 	if mode != config.DisplayModeFull || !thinking || !tools {
 		t.Fatalf("display = mode:%s thinking:%v tools:%v, want full/true/true", mode, thinking, tools)
 	}
@@ -181,7 +181,7 @@ app_secret = "secret"
 	if strings.Join(proj.DisabledCommands, ",") != "restart,shell" {
 		t.Fatalf("disabled_commands = %#v", proj.DisabledCommands)
 	}
-	mode, thinking, tools, _, _, _, _ := config.EffectiveDisplay(cfg, proj)
+	mode, thinking, tools, _, _, _, _, _ := config.EffectiveDisplay(cfg, proj)
 	if mode != config.DisplayModeQuiet || thinking || tools {
 		t.Fatalf("display = mode:%s thinking:%v tools:%v, want quiet/false/false", mode, thinking, tools)
 	}

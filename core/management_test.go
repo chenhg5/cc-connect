@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type deadlineAwareModelAgent struct {
@@ -118,6 +120,26 @@ func mgmtPost(t *testing.T, url, token string, body any) mgmtResponse {
 		t.Fatalf("decode POST response: %v", err)
 	}
 	return r
+}
+
+func mgmtPostHandler(t *testing.T, handler http.HandlerFunc, path string, body any) (mgmtResponse, int) {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			t.Fatalf("encode POST body: %v", err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &buf)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	var r mgmtResponse
+	if err := json.NewDecoder(w.Body).Decode(&r); err != nil {
+		t.Fatalf("decode POST handler response: %v", err)
+	}
+	return r, w.Code
 }
 
 func mgmtPatch(t *testing.T, url, token string, body any) mgmtResponse {
@@ -552,6 +574,162 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 	}
 }
 
+func TestMgmt_CronExecByID(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	mgmt.SetCronScheduler(cs)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("triggered from management")
+	e.platforms = []Platform{platform}
+	e.agent = &resultAgent{session: agentSession}
+	e.cronScheduler = cs
+	cs.RegisterEngine("test-project", e)
+
+	job := &CronJob{
+		ID:          "cron-run-1",
+		Project:     "test-project",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 9 * * *",
+		Prompt:      "hello",
+		Description: "Run me now",
+		Enabled:     false,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec", "tok", map[string]any{})
+	if !r.OK {
+		t.Fatalf("cron exec failed: %s", r.Error)
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		t.Fatalf("unmarshal run response: %v", err)
+	}
+	if data["status"] != "triggered" {
+		t.Fatalf("status = %v, want triggered", data["status"])
+	}
+	if data["id"] != job.ID {
+		t.Fatalf("id = %v, want %s", data["id"], job.ID)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(platform.getSent()) < 2 {
+		t.Fatalf("timed out waiting for triggered cron exec, sent=%v", platform.getSent())
+	}
+
+	aliasJob := &CronJob{
+		ID:          "cron-run-alias-1",
+		Project:     "test-project",
+		SessionKey:  "discord:channel-2:user-2",
+		CronExpr:    "0 9 * * *",
+		Prompt:      "hello alias",
+		Description: "Run alias now",
+		Enabled:     false,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(aliasJob); err != nil {
+		t.Fatal(err)
+	}
+
+	e.agent = &resultAgent{session: newResultAgentSession("triggered from management alias")}
+	alias := mgmtPost(t, ts.URL+"/api/v1/cron/"+aliasJob.ID+"/run", "tok", map[string]any{})
+	if !alias.OK {
+		t.Fatalf("cron run compatibility alias failed: %s", alias.Error)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 4 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for triggered cron run alias, sent=%v", platform.getSent())
+}
+
+func TestMgmt_CronExecByID_RejectsExtraPathSegments(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	mgmt.SetCronScheduler(cs)
+	cs.RegisterEngine("test-project", e)
+
+	job := &CronJob{
+		ID:         "cron-run-extra",
+		Project:    "test-project",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 9 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec/extra", "tok", map[string]any{})
+	if r.OK {
+		t.Fatal("expected extra cron path segment to be rejected")
+	}
+	if !strings.Contains(r.Error, "unknown cron route") {
+		t.Fatalf("error = %q, want unknown cron route", r.Error)
+	}
+}
+
+func TestMgmt_CronExecByID_ProjectMissingIsBadRequest(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	mgmt.SetCronScheduler(cs)
+	cs.RegisterEngine("test-project", e)
+
+	job := &CronJob{
+		ID:         "cron-run-missing-project",
+		Project:    "ghost",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 9 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	r := mgmtPost(t, ts.URL+"/api/v1/cron/"+job.ID+"/exec", "tok", map[string]any{})
+	if r.OK {
+		t.Fatal("expected exec to fail when project is missing")
+	}
+	if !strings.Contains(r.Error, "project") {
+		t.Fatalf("error = %q, want project error", r.Error)
+	}
+	if !strings.Contains(r.Error, "not found") {
+		t.Fatalf("error = %q, want missing project details", r.Error)
+	}
+}
+
 func TestMgmt_CORS(t *testing.T) {
 	mgmt := NewManagementServer(0, "", []string{"http://localhost:3000"})
 	mgmt.RegisterEngine("p", NewEngine("p", &stubAgent{}, nil, "", LangEnglish))
@@ -903,6 +1081,112 @@ func TestMgmt_AddPlatformToNewProject_DoesNotRequireEngine(t *testing.T) {
 	}
 	if savedPlatType != "dingtalk" {
 		t.Fatalf("saved platform type = %q, want dingtalk", savedPlatType)
+	}
+}
+
+func TestMgmt_AddPlatformToNewProject_RejectsMissingWorkDir(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+
+	called := false
+	mgmt.SetAddPlatformToProject(func(proj, platType string, opts map[string]any, workDir, agentType string) error {
+		called = true
+		return nil
+	})
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/brand-new-project/add-platform", "tok", map[string]any{
+		"type":     "dingtalk",
+		"options":  map[string]any{"client_id": "abc", "client_secret": "def"},
+		"work_dir": missing,
+	})
+	if r.OK {
+		t.Fatal("expected missing work_dir to be rejected")
+	}
+	if !strings.Contains(r.Error, "work_dir does not exist") {
+		t.Fatalf("error = %q, want work_dir does not exist", r.Error)
+	}
+	if called {
+		t.Fatal("addPlatformToProject should not be called when work_dir is invalid")
+	}
+}
+
+func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	t.Run("feishu", func(t *testing.T) {
+		mgmt := NewManagementServer(0, "", nil)
+		called := false
+		mgmt.SetSetupFeishuSave(func(req FeishuSetupSaveRequest) error {
+			called = true
+			return nil
+		})
+
+		r, code := mgmtPostHandler(t, mgmt.handleSetupFeishuSave, "/api/v1/setup/feishu/save", map[string]any{
+			"project":    "demo",
+			"app_id":     "app",
+			"app_secret": "secret",
+			"work_dir":   missing,
+		})
+		if r.OK || code != http.StatusBadRequest {
+			t.Fatalf("response ok=%v status=%d error=%q, want 400", r.OK, code, r.Error)
+		}
+		if !strings.Contains(r.Error, "work_dir does not exist") {
+			t.Fatalf("error = %q, want work_dir does not exist", r.Error)
+		}
+		if called {
+			t.Fatal("setupFeishuSave should not be called when work_dir is invalid")
+		}
+	})
+
+	t.Run("weixin", func(t *testing.T) {
+		mgmt := NewManagementServer(0, "", nil)
+		called := false
+		mgmt.SetSetupWeixinSave(func(req WeixinSetupSaveRequest) error {
+			called = true
+			return nil
+		})
+
+		r, code := mgmtPostHandler(t, mgmt.handleSetupWeixinSave, "/api/v1/setup/weixin/save", map[string]any{
+			"project":  "demo",
+			"token":    "token",
+			"work_dir": missing,
+		})
+		if r.OK || code != http.StatusBadRequest {
+			t.Fatalf("response ok=%v status=%d error=%q, want 400", r.OK, code, r.Error)
+		}
+		if !strings.Contains(r.Error, "work_dir does not exist") {
+			t.Fatalf("error = %q, want work_dir does not exist", r.Error)
+		}
+		if called {
+			t.Fatal("setupWeixinSave should not be called when work_dir is invalid")
+		}
+	})
+}
+
+func TestValidateProjectWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	got, err := validateProjectWorkDir("  " + dir + "  ")
+	if err != nil {
+		t.Fatalf("validate existing dir: %v", err)
+	}
+	if got != dir {
+		t.Fatalf("trimmed work_dir = %q, want %q", got, dir)
+	}
+
+	got, err = validateProjectWorkDir("  ")
+	if err != nil {
+		t.Fatalf("empty work_dir should be accepted: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("empty work_dir = %q, want empty", got)
+	}
+
+	file := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	if _, err := validateProjectWorkDir(file); err == nil || !strings.Contains(err.Error(), "work_dir is not a directory") {
+		t.Fatalf("file work_dir error = %v, want not a directory", err)
 	}
 }
 
@@ -1849,6 +2133,35 @@ func TestMgmt_ProjectPatch_UnknownAgentType(t *testing.T) {
 	}
 }
 
+func TestMgmt_ProjectPatch_RejectsMissingWorkDirBeforeMutation(t *testing.T) {
+	mgmt, ts, e := testManagementServer(t, "tok")
+	agent := &stubWorkDirAgent{workDir: "/existing"}
+	e.agent = agent
+
+	saveCalled := false
+	mgmt.SetSaveProjectSettings(func(projectName string, update ProjectSettingsUpdate) error {
+		saveCalled = true
+		return nil
+	})
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
+		"work_dir": missing,
+	})
+	if r.OK {
+		t.Fatal("expected missing work_dir to be rejected")
+	}
+	if !strings.Contains(r.Error, "work_dir does not exist") {
+		t.Fatalf("error = %q, want work_dir does not exist", r.Error)
+	}
+	if got := agent.GetWorkDir(); got != "/existing" {
+		t.Fatalf("work_dir mutated to %q, want original value", got)
+	}
+	if saveCalled {
+		t.Fatal("saveProjectSettings should not be called when work_dir is invalid")
+	}
+}
+
 func TestMgmt_ProjectPatch_DisabledCommands(t *testing.T) {
 	_, ts, e := testManagementServer(t, "tok")
 	r := mgmtPatch(t, ts.URL+"/api/v1/projects/test-project", "tok", map[string]any{
@@ -2695,5 +3008,106 @@ func TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("api_url=%q: status=%d, want %d (body=%s)", bad, w.Code, http.StatusBadRequest, w.Body.String())
 		}
+	}
+}
+
+func TestMgmt_ProjectWorkspaces_NotMultiWorkspace(t *testing.T) {
+	_, ts, _ := testManagementServer(t, "tok")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok")
+	if r.OK {
+		t.Fatal("expected error for project not in multi-workspace mode")
+	}
+	if !strings.Contains(r.Error, "not in multi-workspace mode") {
+		t.Fatalf("error = %q, want not in multi-workspace mode", r.Error)
+	}
+}
+
+func TestMgmt_ProjectWorkspaces_ListBindUnbind(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	baseDir := t.TempDir()
+	sub := filepath.Join(baseDir, "repo-a")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	// Initially empty, with the unbound subdirectory suggested.
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok")
+	if !r.OK {
+		t.Fatalf("list workspaces: %s", r.Error)
+	}
+	var listed struct {
+		Bindings    []map[string]any `json:"bindings"`
+		Suggestions []string         `json:"suggestions"`
+	}
+	if err := json.Unmarshal(r.Data, &listed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(listed.Bindings) != 0 {
+		t.Fatalf("bindings = %#v, want empty", listed.Bindings)
+	}
+	if len(listed.Suggestions) != 1 || !strings.HasSuffix(listed.Suggestions[0], "repo-a") {
+		t.Fatalf("suggestions = %#v, want [.../repo-a]", listed.Suggestions)
+	}
+
+	// Bind the suggested directory to a channel.
+	r = mgmtPost(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok", map[string]string{
+		"channel_key":  "slack:C123",
+		"channel_name": "repo-a-channel",
+		"workspace":    sub,
+	})
+	if !r.OK {
+		t.Fatalf("bind workspace: %s", r.Error)
+	}
+
+	r = mgmtGet(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok")
+	if !r.OK {
+		t.Fatalf("list workspaces after bind: %s", r.Error)
+	}
+	if err := json.Unmarshal(r.Data, &listed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(listed.Bindings) != 1 {
+		t.Fatalf("bindings = %#v, want 1 entry", listed.Bindings)
+	}
+	if listed.Bindings[0]["channel_key"] != "slack:C123" {
+		t.Fatalf("channel_key = %v, want slack:C123", listed.Bindings[0]["channel_key"])
+	}
+	if len(listed.Suggestions) != 0 {
+		t.Fatalf("suggestions = %#v, want empty once bound", listed.Suggestions)
+	}
+
+	// Unbind and confirm it's gone.
+	r = mgmtDelete(t, ts.URL+"/api/v1/projects/test-project/workspaces/slack:C123", "tok")
+	if !r.OK {
+		t.Fatalf("unbind workspace: %s", r.Error)
+	}
+	r = mgmtGet(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok")
+	if err := json.Unmarshal(r.Data, &listed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(listed.Bindings) != 0 {
+		t.Fatalf("bindings after unbind = %#v, want empty", listed.Bindings)
+	}
+}
+
+func TestMgmt_ProjectWorkspaces_BindRejectsPathOutsideBaseDir(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	baseDir := t.TempDir()
+	outside := t.TempDir()
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok", map[string]string{
+		"channel_key": "slack:C999",
+		"workspace":   outside,
+	})
+	if r.OK {
+		t.Fatal("expected error binding a workspace outside base_dir")
+	}
+	if !strings.Contains(r.Error, "escapes base_dir") {
+		t.Fatalf("error = %q, want escapes base_dir", r.Error)
 	}
 }

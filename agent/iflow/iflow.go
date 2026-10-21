@@ -35,6 +35,8 @@ type Agent struct {
 	model          string
 	mode           string
 	cmd            string
+	cliExtraArgs   []string // extra args from cmd after the binary name
+	configEnv      []string // env vars from [projects.agent.options.env]
 	toolTimeoutSec int
 	providers      []core.ProviderConfig
 	activeIdx      int
@@ -50,10 +52,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
-	cmd, _ := opts["cmd"].(string)
-	if cmd == "" {
-		cmd = "iflow"
-	}
+	cmd, extraArgs := core.ParseCmdOpts(opts, "iflow")
 
 	if _, err := exec.LookPath(cmd); err != nil {
 		return nil, fmt.Errorf("iflow: %q CLI not found in PATH, install with: npm i -g @iflow-ai/iflow-cli", cmd)
@@ -74,6 +73,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		model:          model,
 		mode:           mode,
 		cmd:            cmd,
+		cliExtraArgs:   extraArgs,
+		configEnv:      core.ParseConfigEnv(opts),
 		toolTimeoutSec: toolTimeoutSec,
 		activeIdx:      -1,
 	}, nil
@@ -148,9 +149,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	model := a.model
 	mode := a.mode
 	cmd := a.cmd
+	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
 	toolTimeoutSec := a.toolTimeoutSec
-	extraEnv := a.providerEnvLocked()
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
@@ -159,7 +162,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newIFlowSession(ctx, cmd, workDir, model, mode, sessionID, extraEnv, toolTimeoutSec)
+	return newIFlowSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv, toolTimeoutSec)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

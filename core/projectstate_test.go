@@ -65,3 +65,33 @@ func TestWorkspaceDirOverride(t *testing.T) {
 		t.Fatalf("WorkspaceDirOverride(%q) after clearing other workspace = %q, want %q", workspaceB, got, "/tmp/workspace-b/override")
 	}
 }
+
+func TestWorkspaceModelOverride(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "projects", "demo.state.json")
+	workspaceA := "/tmp/workspace-a"
+	workspaceB := "/tmp/workspace-b"
+
+	store := NewProjectStateStore(statePath)
+	store.SetWorkspaceModelOverride(workspaceA, "opus")
+	store.SetWorkspaceModelOverride(workspaceB, "sonnet")
+	store.Save()
+
+	reloaded := NewProjectStateStore(statePath)
+	if got := reloaded.WorkspaceModelOverride(workspaceA); got != "opus" {
+		t.Fatalf("WorkspaceModelOverride(%q) = %q, want %q", workspaceA, got, "opus")
+	}
+	if got := reloaded.WorkspaceModelOverride(workspaceB); got != "sonnet" {
+		t.Fatalf("WorkspaceModelOverride(%q) = %q, want %q", workspaceB, got, "sonnet")
+	}
+
+	reloaded.ClearWorkspaceModelOverride(workspaceA)
+	reloaded.Save()
+
+	cleared := NewProjectStateStore(statePath)
+	if got := cleared.WorkspaceModelOverride(workspaceA); got != "" {
+		t.Fatalf("WorkspaceModelOverride(%q) after clear = %q, want empty", workspaceA, got)
+	}
+	if got := cleared.WorkspaceModelOverride(workspaceB); got != "sonnet" {
+		t.Fatalf("WorkspaceModelOverride(%q) after clearing other workspace = %q, want %q", workspaceB, got, "sonnet")
+	}
+}

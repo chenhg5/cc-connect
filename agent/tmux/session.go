@@ -65,21 +65,21 @@ func newTmuxSession(ctx context.Context, target, sessionID, promptPattern string
 		stripInputBlock: stripInputBlock,
 		stripPatterns:   stripPats,
 		events:          make(chan core.Event, 128),
-		ctx:       sessCtx,
-		cancel:    cancel,
+		ctx:             sessCtx,
+		cancel:          cancel,
 	}
 	s.alive.Store(true)
 	return s, nil
 }
 
-func (s *tmuxSession) Send(prompt string, _ []core.ImageAttachment, files []core.FileAttachment) error {
+func (s *tmuxSession) Send(prompt string, messageID string, _ []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("tmux: session closed")
 	}
 
 	// Save attached files and append their paths to the prompt
 	if len(files) > 0 {
-		paths := core.SaveFilesToDisk(s.workDir, files)
+		paths := core.SaveFilesToDisk(s.workDir, messageID, files)
 		if len(paths) > 0 {
 			prompt = prompt + "\n# files: " + strings.Join(paths, ", ")
 		}
@@ -319,10 +319,13 @@ func shellQuote(s string) string {
 // cleanTUIContent removes Claude Code TUI frame lines from captured output:
 //   - horizontal separator lines made of ─ (U+2500)
 //   - bare prompt lines (❯, >, $, #, %)
+//
 // tuiInputBlockRe matches Claude Code's 3-line input area:
-//   ────────────────   (U+2500 separator line)
-//   ❯ …               (U+276F prompt, any trailing chars)
-//   ────────────────
+//
+//	────────────────   (U+2500 separator line)
+//	❯ …               (U+276F prompt, any trailing chars)
+//	────────────────
+//
 // Uses explicit Unicode codepoints and [^\n]* to be immune to invisible
 // trailing characters on the prompt line.
 var tuiInputBlockRe = regexp.MustCompile("(?m)^─+\n❯[^\n]*\n─+")

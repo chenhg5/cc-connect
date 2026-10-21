@@ -299,7 +299,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mode, tm, tool, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			mode, tm, tool, _, _, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if mode != tt.wantMode {
 				t.Fatalf("Mode = %q, want %q", mode, tt.wantMode)
 			}
@@ -412,7 +412,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, tm, tool, thinkLen, toolMaxLen, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
+			_, tm, tool, thinkLen, toolMaxLen, _, _, _ := EffectiveDisplay(&tt.cfg, &tt.proj)
 			if tm != tt.wantTM {
 				t.Errorf("ThinkingMessages = %v, want %v", tm, tt.wantTM)
 			}
@@ -429,9 +429,102 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 	}
 }
 
+func TestEffectiveHistoryMaxLen(t *testing.T) {
+	globalLen, projectLen, unlimited := 800, 1200, 0
+
+	tests := []struct {
+		name string
+		cfg  Config
+		proj ProjectConfig
+		want int
+	}{
+		{
+			name: "default",
+			cfg:  Config{},
+			proj: ProjectConfig{},
+			want: 1000,
+		},
+		{
+			name: "global display",
+			cfg: Config{
+				Display: DisplayConfig{HistoryMaxLen: &globalLen},
+			},
+			proj: ProjectConfig{},
+			want: 800,
+		},
+		{
+			name: "project display overrides global",
+			cfg: Config{
+				Display: DisplayConfig{HistoryMaxLen: &globalLen},
+			},
+			proj: ProjectConfig{
+				Display: &DisplayConfig{HistoryMaxLen: &projectLen},
+			},
+			want: 1200,
+		},
+		{
+			name: "zero disables truncation",
+			cfg: Config{
+				Display: DisplayConfig{HistoryMaxLen: &unlimited},
+			},
+			proj: ProjectConfig{},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EffectiveHistoryMaxLen(&tt.cfg, &tt.proj); got != tt.want {
+				t.Fatalf("EffectiveHistoryMaxLen() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveDisplayHideAgentFooter(t *testing.T) {
+	tru := true
+	fal := false
+
+	tests := []struct {
+		name string
+		cfg  Config
+		proj ProjectConfig
+		want bool
+	}{
+		{
+			name: "default false",
+			cfg:  Config{},
+			proj: ProjectConfig{},
+			want: false,
+		},
+		{
+			name: "global true",
+			cfg:  Config{Display: DisplayConfig{HideAgentFooter: &tru}},
+			proj: ProjectConfig{},
+			want: true,
+		},
+		{
+			name: "project overrides global",
+			cfg:  Config{Display: DisplayConfig{HideAgentFooter: &tru}},
+			proj: ProjectConfig{Display: &DisplayConfig{HideAgentFooter: &fal}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, _, _, _, _, got := EffectiveDisplay(&tt.cfg, &tt.proj)
+			if got != tt.want {
+				t.Fatalf("hideAgentFooter = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateProjectDisplayConfig(t *testing.T) {
 	mode := "verbose"
 	cardMode := "modern"
+	negativeHistoryMaxLen := -1
 
 	tests := []struct {
 		name    string
@@ -447,6 +540,11 @@ func TestValidateProjectDisplayConfig(t *testing.T) {
 			name:    "invalid project card mode",
 			display: &DisplayConfig{CardMode: &cardMode},
 			wantErr: `projects[0].display.card_mode must be "legacy" or "rich"`,
+		},
+		{
+			name:    "invalid project history max len",
+			display: &DisplayConfig{HistoryMaxLen: &negativeHistoryMaxLen},
+			wantErr: `projects[0].display.history_max_len must be >= 0`,
 		},
 	}
 
@@ -482,6 +580,84 @@ func TestLoad_DefaultsDataDir(t *testing.T) {
 	want := filepath.Join(dir, ".cc-connect")
 	if cfg.DataDir != want {
 		t.Fatalf("Load() data_dir = %q, want %q", cfg.DataDir, want)
+	}
+}
+
+// TestLoad_DataDirAbsoluteWhenExplicitlyRelative regresses the
+// "Append system prompt file not found" bug: even when a user sets
+// data_dir to a relative path in config.toml, Load must anchor it to
+// an absolute path so that agent subprocesses (which cd into
+// project.work_dir before reading system prompt files) do not resolve
+// data_dir against the child's working directory instead of the
+// supervisor's.
+func TestLoad_DataDirAbsoluteWhenExplicitlyRelative(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	body := "data_dir = \"./my-data\"\n" + baseConfigTOML
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		t.Fatalf("Load() data_dir = %q, want absolute path", cfg.DataDir)
+	}
+	if !strings.HasSuffix(cfg.DataDir, "my-data") {
+		t.Fatalf("Load() data_dir = %q, want suffix my-data", cfg.DataDir)
+	}
+}
+
+func TestLoad_DataDirExpandsCurrentUserHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	body := "data_dir = \"~/.cc-connect\"\n" + baseConfigTOML
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	want := filepath.Join(home, ".cc-connect")
+	if cfg.DataDir != want {
+		t.Fatalf("Load() data_dir = %q, want %q", cfg.DataDir, want)
+	}
+}
+
+// TestLoad_DataDirAbsoluteWhenHOMEEmpty covers the fallback path when
+// os.UserHomeDir fails. This is exercised by service managers like
+// launchd (gui/... bootstrap) and systemd (system units) that do not
+// propagate HOME. Even in that degraded state, Load must still return
+// an absolute data_dir so subprocesses do not silently write to
+// <work_dir>/.cc-connect. Windows uses USERPROFILE, which we cannot
+// reliably clear from a test.
+func TestLoad_DataDirAbsoluteWhenHOMEEmpty(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("HOME does not gate os.UserHomeDir on windows")
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(baseConfigTOML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("HOME", "")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !filepath.IsAbs(cfg.DataDir) {
+		t.Fatalf("Load() data_dir = %q, want absolute path even when HOME unset", cfg.DataDir)
 	}
 }
 
@@ -933,6 +1109,100 @@ tts_mode = "auto"
 	}
 }
 
+func TestResolveTTSConfigForProject_AgentOverrides(t *testing.T) {
+	raw := `
+[tts]
+enabled = true
+provider = "minimax"
+voice = "global-voice"
+voice_id = "global-id"
+speed = 1.1
+language_type = "Chinese"
+tts_mode = "voice_only"
+max_text_len = 200
+
+[tts.agents.assistant]
+voice_id = "Chinese (Mandarin)_Crisp_Girl"
+speed = 0.98
+max_text_len = 120
+
+[tts.agents.reviewer]
+voice = "Chinese (Mandarin)_Gentle_Senior"
+`
+	var cfg Config
+	if _, err := toml.Decode(raw, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+
+	assistant := ResolveTTSConfigForProject(cfg.TTS, "assistant")
+	if !assistant.Enabled {
+		t.Fatal("expected assistant TTS enabled")
+	}
+	if assistant.Provider != "minimax" {
+		t.Fatalf("provider = %q, want minimax", assistant.Provider)
+	}
+	if assistant.Voice != "Chinese (Mandarin)_Crisp_Girl" {
+		t.Fatalf("voice = %q", assistant.Voice)
+	}
+	if assistant.Speed != 0.98 {
+		t.Fatalf("speed = %v, want 0.98", assistant.Speed)
+	}
+	if assistant.LanguageType != "Chinese" {
+		t.Fatalf("language_type = %q, want Chinese", assistant.LanguageType)
+	}
+	if assistant.MaxTextLen != 120 {
+		t.Fatalf("max_text_len = %d, want 120", assistant.MaxTextLen)
+	}
+
+	reviewer := ResolveTTSConfigForProject(cfg.TTS, "reviewer")
+	if reviewer.Voice != "Chinese (Mandarin)_Gentle_Senior" {
+		t.Fatalf("reviewer voice = %q", reviewer.Voice)
+	}
+	if reviewer.Speed != 1.1 {
+		t.Fatalf("reviewer speed = %v, want inherited 1.1", reviewer.Speed)
+	}
+
+	unknown := ResolveTTSConfigForProject(cfg.TTS, "unknown")
+	if unknown.Voice != "global-id" {
+		t.Fatalf("unknown voice = %q, want global voice_id", unknown.Voice)
+	}
+}
+
+func TestLoadMiniMaxLocalConfig_DefaultDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgDir := filepath.Join(dataDir, "config")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "minimax.json"), []byte(`{
+  "api_key": "sk-test",
+  "api_host": "https://api.minimaxi.com"
+}`), 0o600); err != nil {
+		t.Fatalf("write minimax config: %v", err)
+	}
+
+	cfg, err := LoadMiniMaxLocalConfig(dataDir, "")
+	if err != nil {
+		t.Fatalf("LoadMiniMaxLocalConfig() error: %v", err)
+	}
+	if cfg.APIKey != "sk-test" {
+		t.Fatalf("api key not loaded")
+	}
+	if cfg.APIHost != "https://api.minimaxi.com" {
+		t.Fatalf("api_host = %q", cfg.APIHost)
+	}
+}
+
+func TestLoadMiniMaxLocalConfig_MissingFileReturnsEmpty(t *testing.T) {
+	cfg, err := LoadMiniMaxLocalConfig(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("LoadMiniMaxLocalConfig() error: %v", err)
+	}
+	if cfg != (MiniMaxLocalConfig{}) {
+		t.Fatalf("config = %#v, want empty", cfg)
+	}
+}
+
 const multiProjectConfigTOML = `# multi-project config
 [[projects]]
 name = "alpha"
@@ -1165,6 +1435,7 @@ bot_token = "token_xxx"
 const relayConfigFixture = `
 [relay]
 timeout_secs = 300
+visibility = "none"
 
 [[projects]]
 name = "alpha"
@@ -1185,6 +1456,26 @@ bot_token = "token_xxx"
 const relayConfigNegativeFixture = `
 [relay]
 timeout_secs = -1
+
+[[projects]]
+name = "alpha"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/alpha"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const relayConfigInvalidVisibilityFixture = `
+[relay]
+visibility = "verbose"
 
 [[projects]]
 name = "alpha"
@@ -1511,6 +1802,33 @@ func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesAgentSessionIdleTimeoutMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithAgentSessionIdleTimeoutFixture)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Projects[0].AgentSessionIdleTimeoutMins == nil {
+		t.Fatal("expected agent_session_idle_timeout_mins to be parsed")
+	}
+	if got := *cfg.Projects[0].AgentSessionIdleTimeoutMins; got != 45 {
+		t.Fatalf("agent_session_idle_timeout_mins = %d, want 45", got)
+	}
+}
+
+func TestLoad_RejectsNegativeAgentSessionIdleTimeoutMins(t *testing.T) {
+	configPath := writeConfigFixture(t, projectWithNegativeAgentSessionIdleTimeoutFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for negative agent_session_idle_timeout_mins")
+	}
+	if !strings.Contains(err.Error(), "agent_session_idle_timeout_mins") {
+		t.Fatalf("error = %q, want agent_session_idle_timeout_mins validation", err.Error())
+	}
+}
+
 func TestLoad_ParsesRunAsUser(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("run_as_user is only supported on Linux/macOS")
@@ -1742,6 +2060,9 @@ func TestLoadRelayTimeoutConfig(t *testing.T) {
 	if *cfg.Relay.TimeoutSecs != 300 {
 		t.Fatalf("cfg.Relay.TimeoutSecs = %d, want 300", *cfg.Relay.TimeoutSecs)
 	}
+	if cfg.Relay.Visibility != "none" {
+		t.Fatalf("cfg.Relay.Visibility = %q, want none", cfg.Relay.Visibility)
+	}
 }
 
 func TestLoadRejectsNegativeRelayTimeout(t *testing.T) {
@@ -1753,6 +2074,18 @@ func TestLoadRejectsNegativeRelayTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "relay.timeout_secs must be >= 0") {
 		t.Fatalf("error = %q, want contains %q", err.Error(), "relay.timeout_secs must be >= 0")
+	}
+}
+
+func TestLoadRejectsInvalidRelayVisibility(t *testing.T) {
+	configPath := writeConfigFixture(t, relayConfigInvalidVisibilityFixture)
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected error for invalid relay visibility, got nil")
+	}
+	if !strings.Contains(err.Error(), `relay.visibility must be "full", "summary", or "none"`) {
+		t.Fatalf("error = %q, want relay.visibility validation error", err.Error())
 	}
 }
 func writeConfigFixture(t *testing.T, content string) string {
@@ -1911,6 +2244,42 @@ const projectWithNegativeResetOnIdleFixture = `
 [[projects]]
 name = "beta"
 reset_on_idle_mins = -1
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithAgentSessionIdleTimeoutFixture = `
+[[projects]]
+name = "beta"
+agent_session_idle_timeout_mins = 45
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+work_dir = "/tmp/beta"
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+bot_token = "token_xxx"
+`
+
+const projectWithNegativeAgentSessionIdleTimeoutFixture = `
+[[projects]]
+name = "beta"
+agent_session_idle_timeout_mins = -1
 
 [projects.agent]
 type = "codex"
@@ -2474,12 +2843,14 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	patchConfigPath(t, configPath)
 
 	show := true
+	hideWorkdir := false
 	wd := "/tmp/patched"
 	mode := "yolo"
 	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
 		WorkDir:              &wd,
 		Mode:                 &mode,
 		ShowContextIndicator: &show,
+		ShowWorkdirIndicator: &hideWorkdir,
 		PlatformAllowFrom:    map[string]string{"telegram": "u1", "Feishu": "u2"},
 	})
 	if err != nil {
@@ -2497,11 +2868,67 @@ func TestSaveProjectSettings_ExtraFields(t *testing.T) {
 	if proj.ShowContextIndicator == nil || !*proj.ShowContextIndicator {
 		t.Fatalf("ShowContextIndicator = %v, want true", proj.ShowContextIndicator)
 	}
+	if proj.ShowWorkdirIndicator == nil || *proj.ShowWorkdirIndicator {
+		t.Fatalf("ShowWorkdirIndicator = %v, want false (per patch)", proj.ShowWorkdirIndicator)
+	}
 	if stringMapValue(proj.Platforms[0].Options, "allow_from") != "u1" {
 		t.Fatalf("telegram allow_from = %q, want u1", stringMapValue(proj.Platforms[0].Options, "allow_from"))
 	}
 	if stringMapValue(proj.Platforms[1].Options, "allow_from") != "u2" {
 		t.Fatalf("feishu allow_from = %q, want u2", stringMapValue(proj.Platforms[1].Options, "allow_from"))
+	}
+}
+
+func TestSaveProjectSettings_WorkspaceModeAndBaseDir(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	wsMode := "multi-workspace"
+	wsBaseDir := "/tmp/workspaces"
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{
+		WorkspaceMode:    &wsMode,
+		WorkspaceBaseDir: &wsBaseDir,
+	})
+	if err != nil {
+		t.Fatalf("SaveProjectSettings: %v", err)
+	}
+
+	cfg := readConfigFixture(t, configPath)
+	proj := cfg.Projects[0]
+	if proj.Mode != wsMode {
+		t.Fatalf("Mode = %q, want %q", proj.Mode, wsMode)
+	}
+	if proj.BaseDir != wsBaseDir {
+		t.Fatalf("BaseDir = %q, want %q", proj.BaseDir, wsBaseDir)
+	}
+
+	details := GetProjectConfigDetails("alpha")
+	if details["workspace_mode"] != wsMode {
+		t.Fatalf("workspace_mode = %v, want %q", details["workspace_mode"], wsMode)
+	}
+	if details["workspace_base_dir"] != wsBaseDir {
+		t.Fatalf("workspace_base_dir = %v, want %q", details["workspace_base_dir"], wsBaseDir)
+	}
+
+	// Switching back to single mode clears Mode but leaves BaseDir untouched.
+	single := "single"
+	if err := SaveProjectSettings("alpha", ProjectSettingsUpdate{WorkspaceMode: &single}); err != nil {
+		t.Fatalf("SaveProjectSettings (single): %v", err)
+	}
+	cfg = readConfigFixture(t, configPath)
+	if cfg.Projects[0].Mode != "" {
+		t.Fatalf("Mode = %q, want empty after switching to single", cfg.Projects[0].Mode)
+	}
+}
+
+func TestSaveProjectSettings_WorkspaceModeRequiresBaseDir(t *testing.T) {
+	configPath := writeConfigFixture(t, feishuConfigFixture)
+	patchConfigPath(t, configPath)
+
+	wsMode := "multi-workspace"
+	err := SaveProjectSettings("alpha", ProjectSettingsUpdate{WorkspaceMode: &wsMode})
+	if err == nil {
+		t.Fatal("expected error enabling multi-workspace mode without base_dir, got nil")
 	}
 }
 

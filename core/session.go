@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -14,16 +16,30 @@ import (
 // to use --continue (resume most recent session) instead of a specific session ID.
 const ContinueSession = "__continue__"
 
+// ExplicitActivationTTL is the hard ceiling for the explicit-activation
+// exemption (issue #1731). Even when a user has `/switch`-ed to a session,
+// if no real user activity has been recorded for this long, the idle reset
+// must still fire so a long-silent session cannot permanently occupy the
+// active slot.
+const ExplicitActivationTTL = 7 * 24 * time.Hour
+
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID                  string         `json:"id"`
-	Name                string         `json:"name"`
-	AgentSessionID      string         `json:"agent_session_id"`
-	AgentType           string         `json:"agent_type,omitempty"`
-	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
-	History             []HistoryEntry `json:"history"`
-	CreatedAt           time.Time      `json:"created_at"`
-	UpdatedAt           time.Time      `json:"updated_at"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	AgentSessionID      string   `json:"agent_session_id"`
+	AgentType           string   `json:"agent_type,omitempty"`
+	PastAgentSessionIDs []string `json:"past_agent_session_ids,omitempty"`
+	// ActiveProvider is the agent provider name that was active when this
+	// session last took a turn. It is restored before --resume so that a
+	// cc-connect process restart does not silently drop a user's
+	// `/provider switch` (the agent_session_id survives on disk while the
+	// in-memory active provider does not). Empty means "no explicit choice
+	// — use whatever the agent's default is".
+	ActiveProvider string         `json:"active_provider,omitempty"`
+	History        []HistoryEntry `json:"history"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
 	// LastUserActivity records when a real user message was last received.
 	// Unlike UpdatedAt (bumped by every session.Unlock including heartbeats and
 	// unsolicited agent output), this field is only updated when the engine
@@ -31,18 +47,37 @@ type Session struct {
 	// so that automated activity cannot prevent idle session rotation.
 	LastUserActivity time.Time `json:"last_user_activity,omitempty"`
 
-	mu   sync.Mutex `json:"-"`
-	busy bool       `json:"-"`
+	// ExplicitActivatedAt records when this session was last explicitly chosen
+	// by the user (via /switch, /new against an existing entry, or any other
+	// intentional selection). Issue #1731: an explicit choice should override
+	// reset_on_idle_mins, otherwise the very first message after /switch into
+	// a long-idle session is wrongly routed to a brand-new session.
+	// ExplicitActivationTTL caps how long this exemption lasts so abandoned
+	// sessions cannot permanently occupy the active slot.
+	ExplicitActivatedAt time.Time `json:"explicit_activated_at,omitempty"`
+
+	mu        sync.Mutex `json:"-"`
+	busy      bool       `json:"-"`
+	busySince time.Time  `json:"-"` // custom 2026-09-12: when the busy lock was acquired (stale-lock self-heal)
+	lockGen   uint64     `json:"-"` // custom 2026-09-12: lock generation, invalidates late unlocks after BreakStaleLock
 }
 
-func (s *Session) TryLock() bool {
+// TryLock acquires the busy lock for a new turn. It returns a generation
+// number the holder MUST pass back to Unlock/UnlockWithoutUpdate; an unlock
+// carrying a stale generation (the lock was broken and re-acquired by a newer
+// turn) is silently dropped so a late unlock can never crosstalk with the
+// next turn. A gen of 0 bypasses the check (legacy escape hatch).
+// (custom 2026-09-12: busy stale-lock self-heal)
+func (s *Session) TryLock() (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.busy {
-		return false
+		return 0, false
 	}
 	s.busy = true
-	return true
+	s.busySince = time.Now()
+	s.lockGen++
+	return s.lockGen, true
 }
 
 // Busy reports whether the session is currently locked for an in-flight turn.
@@ -53,21 +88,77 @@ func (s *Session) Busy() bool {
 	return s.busy
 }
 
-func (s *Session) Unlock() {
-	s.unlock(true)
+func (s *Session) Unlock(gen uint64) {
+	s.unlock(true, gen)
 }
 
-func (s *Session) UnlockWithoutUpdate() {
-	s.unlock(false)
+func (s *Session) UnlockWithoutUpdate(gen uint64) {
+	s.unlock(false, gen)
 }
 
-func (s *Session) unlock(update bool) {
+func (s *Session) unlock(update bool, gen uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// gen == 0 bypasses generation validation: a compatibility shim for tests
+	// written against the old bool Unlock() API. All production callers pass
+	// the gen they captured from TryLock. TODO: migrate the remaining
+	// Unlock(0) test call sites and drop this shim.
+	if gen != 0 && gen != s.lockGen {
+		// Late unlock after BreakStaleLock reassigned the lock to a newer
+		// turn: dropping it is the only safe option — applying it would clear
+		// busy underneath the new holder and let a third turn run concurrently.
+		return
+	}
 	s.busy = false
+	s.busySince = time.Time{}
 	if update {
 		s.UpdatedAt = time.Now()
 	}
+}
+
+// BreakStaleLock releases a busy lock held longer than maxHeld and bumps
+// lockGen so the previous holder's late Unlock is invalidated. The caller
+// MUST first verify the agent process is dead — a live agent's legitimate
+// long turn must never be broken. The threshold callers should use is
+// deliberately above the 120s stop-hook wait cap so a graceful stop can
+// never collide with it. (custom 2026-09-12: busy stale-lock self-heal)
+func (s *Session) BreakStaleLock(maxHeld time.Duration) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.busy || s.busySince.IsZero() {
+		return time.Time{}, false
+	}
+	if time.Since(s.busySince) > maxHeld {
+		since := s.busySince
+		s.busy = false
+		s.busySince = time.Time{}
+		s.lockGen++ // invalidate the old holder's late unlock
+		return since, true
+	}
+	return time.Time{}, false
+}
+
+// busyStaleLockMaxHeld is how long the busy lock may be held by a dead agent
+// process before the next incoming message breaks it (custom 2026-09-12).
+// Deliberately above the 120s stop-hook wait cap so a graceful stop can
+// never collide with the self-heal.
+const busyStaleLockMaxHeld = 2 * time.Minute
+
+// ForceUnlock releases the busy lock unconditionally and bumps lockGen so
+// any late Unlock from the interrupted turn is dropped. Intended for paths
+// that tear the turn's execution environment down (e.g. /stop): the lock
+// holder will never run to its own Unlock. Returns true when a held lock
+// was released (#1830).
+func (s *Session) ForceUnlock() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.busy {
+		return false
+	}
+	s.busy = false
+	s.busySince = time.Time{}
+	s.lockGen++
+	return true
 }
 
 func (s *Session) AddHistory(role, content string) {
@@ -142,6 +233,30 @@ func (s *Session) TouchUserActivity() {
 	s.LastUserActivity = time.Now()
 }
 
+// MarkExplicitlyActivated records that the user explicitly chose this session
+// (issue #1731). Use this from /switch, SwitchToAgentSession, and any other
+// path that intentionally points the dispatcher at a specific session. The
+// idle-reset decision treats ExplicitActivatedAt as the baseline for the
+// explicit-activation grace window (capped at ExplicitActivationTTL).
+func (s *Session) MarkExplicitlyActivated() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markExplicitlyActivatedLocked()
+}
+
+// markExplicitlyActivatedLocked is the lock-free internal variant for
+// callers that already hold s.mu (tests, internal invariants).
+func (s *Session) markExplicitlyActivatedLocked() {
+	s.ExplicitActivatedAt = time.Now()
+}
+
+// GetExplicitActivatedAt returns when this session was last explicitly chosen.
+func (s *Session) GetExplicitActivatedAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ExplicitActivatedAt
+}
+
 // GetLastUserActivity returns when the last real user message was received.
 // Returns zero time if no user message has been processed yet.
 func (s *Session) GetLastUserActivity() time.Time {
@@ -154,6 +269,24 @@ func (s *Session) GetUpdatedAt() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.UpdatedAt
+}
+
+// SetActiveProvider atomically records the provider name the user last
+// switched to for this session. Pass an empty string to clear the choice
+// (e.g. on `/provider clear`). Callers are expected to call
+// SessionManager.Save() afterwards so the value survives a process restart.
+func (s *Session) SetActiveProvider(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ActiveProvider = name
+}
+
+// GetActiveProvider atomically reads the provider name the user last
+// switched to for this session. Empty means "no explicit choice".
+func (s *Session) GetActiveProvider() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ActiveProvider
 }
 
 // SetAgentSessionID atomically sets the agent session ID and agent type.
@@ -359,6 +492,7 @@ func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error
 		s := sm.sessions[sid]
 		if s != nil && (s.ID == target || s.Name == target) {
 			sm.activeSession[userKey] = s.ID
+			s.MarkExplicitlyActivated()
 			sm.saveLocked()
 			return s, nil
 		}
@@ -384,6 +518,7 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 		s.mu.Unlock()
 		if aid == agentSID {
 			sm.activeSession[userKey] = s.ID
+			s.MarkExplicitlyActivated()
 			sm.saveLocked()
 			return s
 		}
@@ -391,6 +526,7 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 
 	s := sm.createLocked(userKey, summary)
 	s.SetAgentInfo(agentSID, agentName, summary)
+	s.MarkExplicitlyActivated()
 	sm.saveLocked()
 	return s
 }
@@ -509,6 +645,39 @@ func (sm *SessionManager) KnownAgentSessionIDs() map[string]struct{} {
 	return ids
 }
 
+// AgentSessionOwners maps each known agent session ID to the user key
+// (session_key) that last used it. Agent sessions created directly through the
+// CLI have no owner and are absent from the map, so callers can tell "belongs to
+// another conversation" apart from "belongs to nobody".
+//
+// Returns nil while the store predates ID tracking, matching
+// KnownAgentSessionIDs.
+func (sm *SessionManager) AgentSessionOwners() map[string]string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sm.legacyData {
+		return nil
+	}
+	owners := make(map[string]string)
+	for userKey, ids := range sm.userSessions {
+		for _, sid := range ids {
+			s, ok := sm.sessions[sid]
+			if !ok {
+				continue
+			}
+			s.mu.Lock()
+			if s.AgentSessionID != "" {
+				owners[s.AgentSessionID] = userKey
+			}
+			for _, past := range s.PastAgentSessionIDs {
+				owners[past] = userKey
+			}
+			s.mu.Unlock()
+		}
+	}
+	return owners
+}
+
 // SessionKeyMap returns a mapping from session ID to the user key (session_key) it belongs to,
 // plus active session IDs for each user key.
 func (sm *SessionManager) SessionKeyMap() (idToKey map[string]string, activeIDs map[string]bool) {
@@ -618,6 +787,11 @@ func (sm *SessionManager) saveLocked() {
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
 			UpdatedAt:           s.UpdatedAt,
+			LastUserActivity:    s.LastUserActivity,
+			// #1731: explicit-activation timestamp must survive a process
+			// restart; otherwise a /switch followed by a crash would lose the
+			// exemption and the next message after restart would be rotated.
+			ExplicitActivatedAt: s.ExplicitActivatedAt,
 		}
 		s.mu.Unlock()
 	}
@@ -751,4 +925,193 @@ func (sm *SessionManager) InvalidateForAgent(agentType string) {
 	if invalidated > 0 {
 		sm.saveLocked()
 	}
+}
+
+// ParseSessionKey extracts the base chat identifier from a sessionKey.
+// SessionKey formats:
+//   - "platform:chatID:userID" → baseChat="platform:chatID", userOrThread="userID"
+//   - "platform:chatID:root:rootID" → baseChat="platform:chatID", userOrThread="root:rootID"
+//   - "platform:chatID" → baseChat="platform:chatID", userOrThread=""
+func ParseSessionKey(sessionKey string) (platform, baseChat, userOrThread string) {
+	parts := strings.SplitN(sessionKey, ":", 4)
+	if len(parts) < 2 {
+		return sessionKey, "", ""
+	}
+	platform = parts[0]
+	if len(parts) == 2 {
+		// "platform:chatID" - shared session mode
+		return platform, sessionKey, ""
+	}
+	if len(parts) == 3 {
+		// "platform:chatID:userID" - default mode
+		return platform, platform + ":" + parts[1], parts[2]
+	}
+	// "platform:chatID:root:rootID" - thread isolation mode
+	return platform, platform + ":" + parts[1], parts[2] + ":" + parts[3]
+}
+
+// PruneResult reports the outcome of a prune operation.
+type PruneResult struct {
+	RemovedSessions []string // IDs of removed sessions
+	MergedHistory   int      // Total history entries merged
+	ChatsAffected   int      // Number of chat groups with duplicates
+}
+
+// PruneDuplicateSessions removes duplicate sessions for the same chat_id,
+// keeping only the most recently active one per base chat. History from
+// older sessions is merged into the kept session.
+//
+// This addresses the issue where the same chat_id can have multiple session
+// records due to:
+//  1. Different users sending messages (different sessionKeys)
+//  2. Thread isolation creating per-thread sessions
+//  3. Accidental duplicate creation via race conditions
+//
+// When mergeHistory=true, history entries from removed sessions are appended
+// to the kept session (sorted by timestamp). When false, only empty sessions
+// are removed.
+func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Group sessions by baseChat
+	chatSessions := make(map[string][]*Session)  // baseChat -> sessions
+	sessionToBaseChat := make(map[string]string) // session.ID -> baseChat
+
+	for userKey, sessionIDs := range sm.userSessions {
+		_, baseChat, _ := ParseSessionKey(userKey)
+		for _, sid := range sessionIDs {
+			s, ok := sm.sessions[sid]
+			if !ok || s == nil {
+				continue
+			}
+			chatSessions[baseChat] = append(chatSessions[baseChat], s)
+			sessionToBaseChat[sid] = baseChat
+		}
+	}
+
+	result := PruneResult{}
+	kept := make(map[string]*Session) // baseChat -> session to keep
+
+	// For each baseChat with multiple sessions, decide which to keep
+	for baseChat, sessions := range chatSessions {
+		if len(sessions) <= 1 {
+			continue
+		}
+		result.ChatsAffected++
+
+		// Sort by UpdatedAt descending (most recent first)
+		sort.Slice(sessions, func(i, j int) bool {
+			return sessions[i].GetUpdatedAt().After(sessions[j].GetUpdatedAt())
+		})
+
+		// Find the best session to keep
+		// Priority: most recent session with history, or most recent if none has history
+		var keep *Session
+		for _, s := range sessions {
+			s.mu.Lock()
+			hasHistory := len(s.History) > 0
+			s.mu.Unlock()
+			if hasHistory {
+				keep = s
+				break
+			}
+		}
+		// If no session has history, keep the most recent one
+		if keep == nil {
+			keep = sessions[0]
+		}
+		kept[baseChat] = keep
+
+		// Process other sessions for removal
+		for _, old := range sessions {
+			if old.ID == keep.ID {
+				continue // Skip the one we're keeping
+			}
+
+			old.mu.Lock()
+			hasHistory := len(old.History) > 0
+			oldHistoryLen := len(old.History)
+			old.mu.Unlock()
+
+			// When not merging: only remove empty sessions
+			if !mergeHistory && hasHistory {
+				continue // Keep sessions with history when not merging
+			}
+
+			// Merge history before removal
+			if mergeHistory && hasHistory {
+				keep.mu.Lock()
+				old.mu.Lock()
+				// Append old history to keep, then sort by timestamp.
+				// Use SliceStable so that entries with equal timestamps
+				// preserve their original relative order — relevant for
+				// IM platforms that timestamp at second precision.
+				keep.History = append(keep.History, old.History...)
+				sort.SliceStable(keep.History, func(i, j int) bool {
+					return keep.History[i].Timestamp.Before(keep.History[j].Timestamp)
+				})
+				result.MergedHistory += oldHistoryLen
+				old.mu.Unlock()
+				keep.mu.Unlock()
+			}
+
+			// Remove old session
+			sm.deleteByIDLocked(old.ID)
+			result.RemovedSessions = append(result.RemovedSessions, old.ID)
+
+			slog.Info("session: pruned duplicate",
+				"removed_session", old.ID,
+				"kept_session", keep.ID,
+				"base_chat", baseChat,
+				"history_merged", oldHistoryLen,
+			)
+		}
+	}
+
+	// Update activeSession: point each userKey to the kept session
+	for userKey, sessionIDs := range sm.userSessions {
+		if len(sessionIDs) == 0 {
+			continue
+		}
+		_, baseChat, _ := ParseSessionKey(userKey)
+		if keep, ok := kept[baseChat]; ok {
+			sm.activeSession[userKey] = keep.ID
+		}
+	}
+
+	if len(result.RemovedSessions) > 0 {
+		sm.saveLocked()
+		slog.Info("session: prune complete",
+			"removed", len(result.RemovedSessions),
+			"merged_history", result.MergedHistory,
+			"chats_affected", result.ChatsAffected,
+		)
+	}
+
+	return result
+}
+
+// PruneEmptySessions removes sessions with no history entries. Returns count of removed.
+func (sm *SessionManager) PruneEmptySessions() int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	removed := 0
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		isEmpty := len(s.History) == 0
+		s.mu.Unlock()
+
+		if isEmpty {
+			sm.deleteByIDLocked(s.ID)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		sm.saveLocked()
+		slog.Info("session: pruned empty sessions", "removed", removed)
+	}
+	return removed
 }

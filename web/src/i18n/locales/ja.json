@@ -5,7 +5,7 @@
     "providers": "プロバイダー",
     "sessions": "セッション",
     "chat": "チャット",
-    "cron": "Cron",
+    "cron": "スケジュールジョブ",
     "bridge": "ブリッジ",
     "skills": "スキル",
     "system": "システム"
@@ -56,8 +56,26 @@
       "overview": "概要",
       "providers": "プロバイダー",
       "heartbeat": "ハートビート",
-      "settings": "設定"
-    }
+      "settings": "設定",
+      "workspaces": "ワークスペース"
+    },
+    "workspaceMode": "マルチワークスペースモード",
+    "workspaceModeHint": "共有のベースディレクトリの下で、異なるチャットチャンネルを異なる作業ディレクトリにルーティングします。",
+    "workspaceModeEnable": "マルチワークスペースモードを有効化",
+    "workspaceModeWarning": "モードの切り替えには再起動が必要です。マルチワークスペースモードが有効な間は単一の work_dir は使用されません。",
+    "workspaceBaseDir": "ベースディレクトリ",
+    "workspaceBaseDirRequired": "マルチワークスペースモードを有効にするにはベースディレクトリが必要です。",
+    "workspaceModeConfirm": "ワークスペースモードの変更にはサービスの再起動が必要です。続行しますか？",
+    "workspaceBindings": "チャンネルの紐付け",
+    "workspaceNoBindings": "まだワークスペースに紐付けられたチャンネルはありません。",
+    "workspaceActive": "実行中",
+    "workspaceIdle": "アイドル",
+    "workspaceAddBinding": "チャンネルを紐付け",
+    "workspaceChannelKey": "チャンネルキー",
+    "workspaceChannelName": "チャンネル名（任意）",
+    "workspacePath": "ワークスペースのパス",
+    "workspaceSuggestions": "base_dir 内の未紐付けディレクトリ:",
+    "workspaceBind": "紐付け"
   },
   "sessions": {
     "title": "セッション",
@@ -114,6 +132,8 @@
     "lastRun": "最終実行",
     "lastError": "最後のエラー",
     "add": "ジョブを追加",
+    "trigger": "今すぐ実行",
+    "triggerPending": "実行を開始しました。結果はまもなく更新されます。",
     "delete": "削除",
     "noJobs": "スケジュールジョブがありません",
     "workDir": "作業ディレクトリ",
@@ -225,13 +245,25 @@
     "manualSetup": "手動設定",
     "manualHint": "{{platform}} は config.toml で認証情報を設定し、サービスを再起動してください。",
     "advancedOptions": "詳細オプション",
-    "unsupportedPlatform": "サポートされていないプラットフォーム：{{type}}"
+    "unsupportedPlatform": "サポートされていないプラットフォーム：{{type}}",
+    "cloudWeb": {
+      "urlRequiredWebsocket": "WebSocket では API ベース URL または WebSocket URL のいずれかが必要です",
+      "urlRequiredLongPoll": "Long poll では API ベース URL が必要です",
+      "urlRequiredGateway": "Gateway では API ベース URL または登録 URL のいずれかが必要です",
+      "invalidHttpUrl": "{{field}} は有効な http(s) URL または host[:port] である必要があります",
+      "invalidWsUrl": "WebSocket URL は ws:// または wss:// で始める必要があります",
+      "publicUrlRequiredGateway": "登録 URL を設定する場合は公開 Webhook URL が必須です"
+    }
   },
   "fields": {
     "botToken": "ボットトークン",
     "appToken": "アプリトークン",
     "accessToken": "アクセストークン",
     "allowFrom": "許可ユーザー",
+    "groupAllowFrom": "許可するグループ、チーム、チャンネル",
+    "groupPolicy": "グループポリシー",
+    "requireMention": "明示的なメンションを必須にする",
+    "historyLimit": "未メンション履歴の上限",
     "allowFromHintTelegram": "Telegram ユーザー ID（カンマ区切り）",
     "groupReplyAll": "すべてのグループメッセージに返信",
     "sharedGroupSession": "グループセッションを共有",
@@ -255,7 +287,18 @@
     "appSecret": "アプリシークレット",
     "sandboxMode": "サンドボックスモード",
     "channelSecret": "チャンネルシークレット",
-    "channelToken": "チャンネルアクセストークン"
+    "channelToken": "チャンネルアクセストークン",
+    "transport": "トランスポート",
+    "longPollTimeout": "ロングポーリングタイムアウト（ms）",
+    "listen": "リッスンアドレス",
+    "publicUrl": "公開 Webhook URL",
+    "publicUrlHint": "Gateway が cc-connect にコールバックする公開 URL",
+    "registerUrl": "登録 URL",
+    "registerUrlHint": "任意：Webhook を Gateway に登録するエンドポイント",
+    "cloudWebWsHint": "base URL がある場合は省略可。既定 /cloud-web/ws",
+    "cloudWebBaseUrlHint": "long poll では必須。WebSocket はここまたは下の WebSocket URL",
+    "eventsPath": "イベント取得パス（ロングポーリング）",
+    "sendPath": "送信 API パス"
   },
   "chat": {
     "noChats": "プロジェクトがありません",

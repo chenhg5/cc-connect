@@ -115,6 +115,40 @@ func (m *WorkspaceBindingManager) Bind(projectKey, channelKey, channelName, work
 	m.saveLocked()
 }
 
+// MigrateChannelKey copies an existing default binding from oldChannelKey to
+// newChannelKey. It never overwrites an existing destination and deliberately
+// preserves the default binding for other channels and older versions.
+func (m *WorkspaceBindingManager) MigrateChannelKey(projectKey, oldChannelKey, newChannelKey string) bool {
+	if oldChannelKey == "" || newChannelKey == "" || oldChannelKey == newChannelKey {
+		return false
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refreshLocked()
+
+	proj := m.bindings[projectKey]
+	if proj == nil || m.lookupLocked(projectKey, newChannelKey) != nil {
+		return false
+	}
+
+	var binding *WorkspaceBinding
+	for _, candidate := range workspaceChannelKeyCandidates(oldChannelKey) {
+		if b := proj[candidate]; b != nil {
+			binding = b
+			break
+		}
+	}
+	if binding == nil {
+		return false
+	}
+
+	inherited := *binding
+	proj[newChannelKey] = &inherited
+	m.saveLocked()
+	return true
+}
+
 func (m *WorkspaceBindingManager) Unbind(projectKey, channelKey string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

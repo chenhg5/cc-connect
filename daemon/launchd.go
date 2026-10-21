@@ -5,12 +5,13 @@ package daemon
 import (
 	"encoding/xml"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const (
@@ -52,8 +53,17 @@ func (m *launchdManager) Install(cfg Config) error {
 	bootoutLaunchdTargets()
 
 	plist := buildPlist(cfg)
-	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+	// 0600: plist may contain captured secret values (config.toml ${ENV}
+	// placeholders and any EnvDiscoverer extension output). User-only
+	// LaunchAgents path; root can still read but that is the user's own
+	// machine boundary. os.WriteFile only applies perm on create, so
+	// Chmod afterwards is required to harden reinstalls of files that
+	// pre-existed at 0644 from earlier cc-connect versions.
+	if err := os.WriteFile(plistPath, []byte(plist), 0600); err != nil {
 		return fmt.Errorf("write plist: %w", err)
+	}
+	if err := os.Chmod(plistPath, 0600); err != nil {
+		return fmt.Errorf("chmod plist: %w", err)
 	}
 
 	domain := preferredLaunchdDomain()
@@ -117,33 +127,22 @@ func (*launchdManager) Stop() error {
 }
 
 func (*launchdManager) Restart() error {
+	if _, target, _, ok := loadedLaunchdTarget(); ok {
+		// bootout also kills commands launched by the daemon. A single
+		// kickstart transaction lets launchd replace the running service even
+		// when the restart request originates from one of its own sessions.
+		if out, err := runLaunchctl("kickstart", "-kp", target); err != nil {
+			return fmt.Errorf("restart kickstart: %s (%w)", out, err)
+		}
+		return nil
+	}
+
 	domain := preferredLaunchdDomain()
-	if loadedDomain, _, _, ok := loadedLaunchdTarget(); ok && domain != launchdGUIDomain() {
-		domain = loadedDomain
+	if out, err := runLaunchctl("bootstrap", domain, launchdPlistPath()); err != nil {
+		return fmt.Errorf("restart bootstrap: %s (%w)", out, err)
 	}
-	target := launchdTarget(domain)
-	bootoutLaunchdTargets()
-
-	plistPath := launchdPlistPath()
-
-	// launchd bootout is asynchronous; retry bootstrap with backoff
-	// to avoid "Bootstrap failed: 5" race condition.
-	var out string
-	var err error
-	for i := 0; i < 3; i++ {
-		if i > 0 {
-			time.Sleep(500 * time.Millisecond)
-		}
-		out, err = runLaunchctl("bootstrap", domain, plistPath)
-		if err == nil {
-			break
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("restart: %s (%w)", out, err)
-	}
-	if _, err := runLaunchctl("kickstart", "-kp", target); err != nil {
-		return fmt.Errorf("restart kickstart: %w", err)
+	if out, err := runLaunchctl("kickstart", "-kp", launchdTarget(domain)); err != nil {
+		return fmt.Errorf("restart kickstart: %s (%w)", out, err)
 	}
 	return nil
 }
@@ -240,16 +239,74 @@ func bootoutLaunchdTargets() {
 	}
 }
 
+// templateOwnedEnvKeys are keys the plist template renders directly; if
+// they also appear in cfg.EnvExtra the template version wins.
+var templateOwnedEnvKeys = map[string]struct{}{
+	"CC_LOG_FILE":     {},
+	"CC_LOG_MAX_SIZE": {},
+	"PATH":            {},
+	"HOME":            {},
+}
+
+// renderEnvExtraPlist returns the serialized key/value pairs (without the
+// surrounding <dict> wrapper) for cfg.EnvExtra, sorted by key and with
+// invalid keys / empty values dropped. Both keys and values are XML-escaped.
+func renderEnvExtraPlist(envExtra map[string]string) string {
+	if len(envExtra) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(envExtra))
+	for k := range envExtra {
+		if _, owned := templateOwnedEnvKeys[k]; owned {
+			continue
+		}
+		if !isValidEnvName(k) {
+			slog.Warn("daemon: launchd: dropping invalid env name from EnvExtra",
+				"key", k)
+			continue
+		}
+		if envExtra[k] == "" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "\t\t<key>%s</key>\n\t\t<string>%s</string>\n",
+			xmlEscape(k), xmlEscape(envExtra[k]))
+	}
+	return b.String()
+}
+
+func xmlEscape(s string) string {
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
+
 func buildPlist(cfg Config) string {
 	envPATH := cfg.EnvPATH
 	if envPATH == "" {
 		envPATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 	}
+	envExtra := renderEnvExtraPlist(cfg.EnvExtra)
+	// HOME: launchd LaunchAgents run under the user's uid, but the HOME
+	// env var is not always populated (especially when bootstrapped via
+	// `launchctl bootstrap gui/...`). Without HOME, os.UserHomeDir()
+	// returns an error inside the daemon and any subprocess it spawns;
+	// config.Load then falls back to a relative data_dir which agents
+	// (cd'd into work_dir) resolve to <work_dir>/.cc-connect instead of
+	// <HOME>/.cc-connect.
+	homeEntry := ""
+	if cfg.HomeDir != "" {
+		homeEntry = fmt.Sprintf("\t\t<key>HOME</key>\n\t\t<string>%s</string>\n", xmlEscape(cfg.HomeDir))
+	}
 	// User-supplied paths can legitimately contain XML-special characters
 	// ('&', '<', '>', '"', '\''). Without escaping, `launchctl bootstrap`
 	// rejects the plist with a parse error and daemon install fails. The
-	// label is a hard-coded constant so it does not need escaping; LogMaxSize
-	// is an int.
+	// label is a hard-coded constant; LogMaxSize is an int; envExtra is
+	// escaped by renderEnvExtraPlist.
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -280,28 +337,16 @@ func buildPlist(cfg Config) string {
 		<string>%s</string>
 		<key>CC_LOG_MAX_SIZE</key>
 		<string>%d</string>
+		<key>CC_LOG_MAX_BACKUPS</key>
+		<string>%d</string>
 		<key>PATH</key>
 		<string>%s</string>
-	</dict>
+%s%s	</dict>
 	<key>StandardOutPath</key>
 	<string>/dev/null</string>
 	<key>StandardErrorPath</key>
 	<string>/dev/null</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, xmlEscape(envPATH))
+`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), homeEntry, envExtra)
 }
-
-// xmlEscape escapes the five XML-reserved characters in a string so it can
-// be safely embedded inside a plist <string> element.
-func xmlEscape(s string) string {
-	var b strings.Builder
-	if err := xml.EscapeText(&b, []byte(s)); err != nil {
-		// xml.EscapeText only fails when the underlying writer fails; a
-		// strings.Builder never returns a write error. Fall back to the
-		// raw value defensively rather than panicking.
-		return s
-	}
-	return b.String()
-}
-

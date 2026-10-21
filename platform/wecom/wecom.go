@@ -892,27 +892,3 @@ func (p *Platform) downloadMedia(mediaID string) ([]byte, error) {
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
 }
-
-// splitByBytes splits text by UTF-8 byte length (WeChat Work limit is 2048 bytes).
-func splitByBytes(s string, maxBytes int) []string {
-	if len(s) <= maxBytes {
-		return []string{s}
-	}
-	var parts []string
-	for len(s) > 0 {
-		end := maxBytes
-		if end > len(s) {
-			end = len(s)
-		}
-		// Avoid splitting in the middle of a UTF-8 character
-		for end > 0 && end < len(s) && s[end]>>6 == 0b10 {
-			end--
-		}
-		if end == 0 {
-			end = maxBytes
-		}
-		parts = append(parts, s[:end])
-		s = s[end:]
-	}
-	return parts
-}
