@@ -459,6 +459,12 @@ func (a *Agent) discoverModelsWithSnapshot(ctx context.Context, snapshot opencod
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	minimaxModels := core.GetMiniMaxProviderModels(a.providers, a.activeIdx)
+	a.mu.RUnlock()
+	if len(minimaxModels) > 0 {
+		return minimaxModels
+	}
 	snapshot := a.modelDiscoverySnapshot()
 	if models := a.persistentModelsForSnapshot(snapshot); len(models) > 0 {
 		a.startPersistentModelRefresh(snapshot, false)
