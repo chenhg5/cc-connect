@@ -21,7 +21,7 @@ func TestParseSendArgs_AttachmentsWithoutMessage(t *testing.T) {
 		t.Fatalf("write doc: %v", err)
 	}
 
-	req, dataDir, err := parseSendArgs([]string{"--image", imgPath, "--file", docPath})
+	req, dataDir, _, err := parseSendArgs([]string{"--image", imgPath, "--file", docPath})
 	if err != nil {
 		t.Fatalf("parseSendArgs returned error: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestParseSendArgs_AttachmentsWithoutMessage(t *testing.T) {
 }
 
 func TestParseSendArgs_RequiresMessageOrAttachment(t *testing.T) {
-	_, _, err := parseSendArgs(nil)
+	_, _, _, err := parseSendArgs(nil)
 	if err == nil {
 		t.Fatal("expected error for empty send args")
 	}
@@ -65,7 +65,7 @@ func TestParseSendArgs_UsesSessionEnvFallback(t *testing.T) {
 		t.Fatalf("write image: %v", err)
 	}
 
-	req, _, err := parseSendArgs([]string{"--image", imgPath})
+	req, _, _, err := parseSendArgs([]string{"--image", imgPath})
 	if err != nil {
 		t.Fatalf("parseSendArgs returned error: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestParseSendArgs_UsesSessionEnvFallback(t *testing.T) {
 func TestParseSendArgs_WorkDirOption(t *testing.T) {
 	workDir := t.TempDir()
 
-	req, _, err := parseSendArgs([]string{"--cwd", workDir, "--message", "please check"})
+	req, _, _, err := parseSendArgs([]string{"--cwd", workDir, "--message", "please check"})
 	if err != nil {
 		t.Fatalf("parseSendArgs returned error: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestParseSendArgs_WorkDirOption(t *testing.T) {
 		t.Fatalf("WorkDir = %q, want %q", got, workDir)
 	}
 
-	req, _, err = parseSendArgs([]string{"--work-dir", workDir, "please check"})
+	req, _, _, err = parseSendArgs([]string{"--work-dir", workDir, "please check"})
 	if err != nil {
 		t.Fatalf("parseSendArgs returned error for --work-dir: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestParseSendArgs_AudioPopulatesAudios(t *testing.T) {
 		t.Fatalf("write audio: %v", err)
 	}
 
-	req, _, err := parseSendArgs([]string{"--audio", audioPath})
+	req, _, _, err := parseSendArgs([]string{"--audio", audioPath})
 	if err != nil {
 		t.Fatalf("parseSendArgs returned error: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestParseSendArgs_VideoPopulatesVideos(t *testing.T) {
 		t.Fatalf("write video: %v", err)
 	}
 
-	req, _, err := parseSendArgs([]string{"--video", videoPath})
+	req, _, _, err := parseSendArgs([]string{"--video", videoPath})
 	if err != nil {
 		t.Fatalf("parseSendArgs returned error: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestParseSendArgs_AudioVideoFileMixed_StaySeparate(t *testing.T) {
 		}
 	}
 
-	req, _, err := parseSendArgs([]string{
+	req, _, _, err := parseSendArgs([]string{
 		"--audio", audioPath,
 		"--video", videoPath,
 		"--file", docPath,
@@ -186,7 +186,7 @@ func TestParseSendArgs_TTSOnly(t *testing.T) {
 	t.Setenv("CC_PROJECT", "demo")
 	t.Setenv("CC_SESSION_KEY", "telegram:123:456")
 
-	req, _, err := parseSendArgs([]string{"--tts", "hello voice"})
+	req, _, _, err := parseSendArgs([]string{"--tts", "hello voice"})
 	if err != nil {
 		t.Fatalf("parseSendArgs returned error: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestParseSendArgs_AudioRejectsNonAudio(t *testing.T) {
 		t.Fatalf("write doc: %v", err)
 	}
 
-	_, _, err := parseSendArgs([]string{"--audio", docPath})
+	_, _, _, err := parseSendArgs([]string{"--audio", docPath})
 	if err == nil {
 		t.Fatal("expected non-audio attachment to be rejected")
 	}

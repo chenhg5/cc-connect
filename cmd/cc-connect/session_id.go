@@ -9,7 +9,7 @@ import (
 )
 
 func runAgentSID(args []string) {
-	var project, sessionKey, dataDir string
+	var project, sessionKey, dataDir, configPath string
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -28,6 +28,11 @@ func runAgentSID(args []string) {
 				i++
 				dataDir = args[i]
 			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
+			}
 		case "--help", "-h":
 			printAgentSIDUsage()
 			return
@@ -40,7 +45,7 @@ func runAgentSID(args []string) {
 	if sessionKey == "" {
 		sessionKey = os.Getenv("CC_SESSION_KEY")
 	}
-	dataDir = resolveDataDir(dataDir)
+	dataDir = resolveDataDir(dataDir, configPath)
 
 	if project == "" {
 		fmt.Fprintln(os.Stderr, "Error: project is required (set CC_PROJECT env or use --project)")
@@ -244,7 +249,8 @@ instance is required.
 Options:
   -p, --project <name>       Project name (auto-detected from CC_PROJECT env)
   -s, --session-key <key>    Session key  (auto-detected from CC_SESSION_KEY env)
-      --data-dir <path>      Data directory (default: ~/.cc-connect)
+      --data-dir <path>      Data directory (default: ~/.cc-connect, or data_dir from --config)
+      --config <path>        Config file (use the same one as the running daemon)
   -h, --help                 Show this help
 
 Examples:
