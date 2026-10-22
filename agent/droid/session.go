@@ -224,7 +224,6 @@ func (s *droidSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *
 	defer s.wg.Done()
 	stopClosing := context.AfterFunc(s.ctx, func() { _ = stdout.Close() })
 	defer stopClosing()
-	defer stdout.Close()
 
 	var terminal *core.Event
 	scanner := bufio.NewScanner(stdout)
@@ -393,10 +392,10 @@ func (s *droidSession) Alive() bool {
 
 func (s *droidSession) Close() error {
 	s.closeOnce.Do(func() {
-		s.alive.Store(false)
 		s.cancel()
 		// Pair with beginTurn so no WaitGroup reservation can follow Wait.
 		s.mu.Lock()
+		s.alive.Store(false)
 		s.mu.Unlock()
 		s.wg.Wait()
 		close(s.events)

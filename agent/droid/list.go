@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -167,7 +168,11 @@ func scanDroidSession(path, workDir string) (sessionID string, title string, msg
 	if err != nil {
 		return "", "", 0
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("droid: close session file", "path", path, "error", err)
+		}
+	}()
 
 	var firstUser string
 	scanner := bufio.NewScanner(f)
@@ -263,7 +268,11 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 	if err != nil {
 		return nil, fmt.Errorf("droid: open session history: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("droid: close session history", "path", path, "error", err)
+		}
+	}()
 	return readDroidSessionHistory(f, limit)
 }
 
