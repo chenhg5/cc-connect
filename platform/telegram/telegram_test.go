@@ -320,6 +320,44 @@ func TestPlatformStart_InitialConnectFailureEmitsUnavailableOnceBeforeReady(t *t
 	}
 }
 
+// rateLimitedBot answers the first `limited` SendMessage calls with Telegram's 429.
+type rateLimitedBot struct {
+	*stubTelegramBot
+	limited int
+}
+
+func (b *rateLimitedBot) SendMessage(ctx context.Context, params *tgbot.SendMessageParams) (*models.Message, error) {
+	if b.limited > 0 {
+		b.limited--
+		b.mu.Lock()
+		b.sendMessageCalls++
+		b.mu.Unlock()
+		return nil, &tgbot.TooManyRequestsError{Message: "too many requests", RetryAfter: 0}
+	}
+	return b.stubTelegramBot.SendMessage(ctx, params)
+}
+
+func TestSendRetriesAfterTooManyRequests(t *testing.T) {
+	bot := &rateLimitedBot{stubTelegramBot: newStubTelegramBot(), limited: 1}
+	p := &Platform{bot: bot}
+
+	if err := p.Send(context.Background(), replyContext{chatID: 1}, "final reply"); err != nil {
+		t.Fatalf("Send after one 429: %v", err)
+	}
+	if bot.sendMessageCalls != 2 {
+		t.Fatalf("SendMessage calls = %d, want 2", bot.sendMessageCalls)
+	}
+
+	bot.limited, bot.sendMessageCalls = 100, 0
+	err := p.Reply(context.Background(), replyContext{chatID: 1, messageID: 2}, "final reply")
+	if !tgbot.IsTooManyRequestsError(errors.Unwrap(err)) {
+		t.Fatalf("Reply error = %v, want the 429 after giving up", err)
+	}
+	if bot.sendMessageCalls != maxRetryAfterAttempts+1 {
+		t.Fatalf("SendMessage calls = %d, want %d", bot.sendMessageCalls, maxRetryAfterAttempts+1)
+	}
+}
+
 func TestPlatformDisconnectedSendPathsReturnNotConnected(t *testing.T) {
 	p := &Platform{token: "token", httpClient: &http.Client{}}
 	ctx := context.Background()
@@ -1035,4 +1073,3 @@ func TestProgressStyleProviderInterface(t *testing.T) {
 		t.Fatalf("ProgressStyle() = %q, want compact", got)
 	}
 }
-

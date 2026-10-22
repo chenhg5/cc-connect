@@ -727,7 +727,30 @@ func (p *Platform) connectedBot(action string) (telegramBot, error) {
 	if p.bot == nil {
 		return nil, fmt.Errorf("telegram: %s: bot not connected", action)
 	}
-	return p.bot, nil
+	return retryAfterBot{p.bot}, nil
+}
+
+// maxRetryAfterAttempts bounds how often a message is resent after Telegram answers 429.
+const maxRetryAfterAttempts = 3
+
+// retryAfterBot resends a message after the retry_after Telegram asks for in a 429 answer,
+// so a rate-limited message (often the final reply of a turn) is delayed instead of dropped.
+type retryAfterBot struct{ telegramBot }
+
+func (b retryAfterBot) SendMessage(ctx context.Context, params *tgbot.SendMessageParams) (*models.Message, error) {
+	for attempt := 0; ; attempt++ {
+		msg, err := b.telegramBot.SendMessage(ctx, params)
+		var tooMany *tgbot.TooManyRequestsError
+		if err == nil || attempt == maxRetryAfterAttempts || !errors.As(err, &tooMany) {
+			return msg, err
+		}
+		slog.Warn("telegram: rate limited, resending", "retry_after", tooMany.RetryAfter, "attempt", attempt+1)
+		select {
+		case <-ctx.Done():
+			return msg, err
+		case <-time.After(time.Duration(tooMany.RetryAfter) * time.Second):
+		}
+	}
 }
 
 func (p *Platform) botUsername() string {
