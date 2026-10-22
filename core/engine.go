@@ -617,6 +617,10 @@ type interactiveState struct {
 	// before the next foreground turn's reply.
 	unsolicitedFlushDone chan struct{}
 
+	// subagents holds this conversation's subagent progress cards; see
+	// subagent_cards.go. Created on the first subagent event.
+	subagents *subagentCards
+
 	// agentSessionIdleCancel 取消当前会话的 idle 关闭计时器。
 	agentSessionIdleCancel context.CancelFunc
 	agentSessionIdleToken  uint64
@@ -5619,6 +5623,14 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			default:
 			}
 
+			// A subagent working past the turn that spawned it is not a turn
+			// of its own: it has its own card, and the turn that reports on
+			// it opens once the main agent is notified.
+			if event.Type == EventSubagent {
+				e.handleSubagentEvent(state, event)
+				continue
+			}
+
 			// Mark workspace active on first event.
 			if !turnActive {
 				turnActive = true
@@ -6123,6 +6135,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		switch event.Type {
 		case EventModelSwitch:
 			e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
+
+		case EventSubagent:
+			e.handleSubagentEvent(state, event)
 
 		case EventHookRejected:
 			// Claude Code emits this between a Stop-hook-rejected draft and its
