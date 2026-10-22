@@ -16,20 +16,27 @@ type cardRecorderPlatform struct {
 	cardsMu sync.Mutex
 	order   []string
 	latest  map[string]string
+	edits   map[string][]time.Time // when each card was sent or edited
+	gate    chan struct{}          // when set, sending a card waits for it
 }
 
 func (p *cardRecorderPlatform) ProgressStyle() string             { return "card" }
 func (p *cardRecorderPlatform) SupportsProgressCardPayload() bool { return true }
 
 func (p *cardRecorderPlatform) SendPreviewStart(_ context.Context, _ any, content string) (any, error) {
+	if p.gate != nil {
+		<-p.gate
+	}
 	p.cardsMu.Lock()
 	defer p.cardsMu.Unlock()
 	if p.latest == nil {
 		p.latest = make(map[string]string)
+		p.edits = make(map[string][]time.Time)
 	}
 	handle := fmt.Sprintf("card-%d", len(p.order)+1)
 	p.order = append(p.order, handle)
 	p.latest[handle] = content
+	p.edits[handle] = append(p.edits[handle], time.Now())
 	return handle, nil
 }
 
@@ -37,6 +44,7 @@ func (p *cardRecorderPlatform) UpdateMessage(_ context.Context, handle any, cont
 	p.cardsMu.Lock()
 	defer p.cardsMu.Unlock()
 	p.latest[handle.(string)] = content
+	p.edits[handle.(string)] = append(p.edits[handle.(string)], time.Now())
 	return nil
 }
 
@@ -238,5 +246,80 @@ func TestSubagentCards_DrainKeepsSubagentEvents(t *testing.T) {
 	})
 	if got, want := strings.Join(cardTexts(cards[cardA]), "\n"), "info|count 1 2 3\ninfo|✅ counted"; got != want || cards[cardA].State != ProgressCardStateCompleted {
 		t.Fatalf("card = %q (state %s), want %q completed", got, cards[cardA].State, want)
+	}
+}
+
+// TestSubagentCards_BacklogKeepsStartsAndFinishes stalls the worker on a slow
+// platform call while a chatty subagent floods it. Steps beyond the backlog
+// may be dropped, but its start and finish must get through: a lost finish
+// would leave the card running forever.
+func TestSubagentCards_BacklogKeepsStartsAndFinishes(t *testing.T) {
+	p := &cardRecorderPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, gate: make(chan struct{})}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+	state := &interactiveState{platform: p, replyCtx: "ctx"}
+
+	e.handleSubagentEvent(state, subagentEvent(SubagentEvent{ID: "a", Phase: SubagentStarted, Title: "Count to three", Kind: "general-purpose", Prompt: "count 1 2 3"}))
+	// The worker is now stuck sending card A; flood it past the backlog.
+	for i := 0; i < 2*subagentCardBacklog; i++ {
+		e.handleSubagentEvent(state, subagentEvent(SubagentEvent{ID: "a", Phase: SubagentStep, Step: ProgressCardEntry{Kind: ProgressEntryInfo, Text: fmt.Sprintf("step %d", i)}}))
+	}
+	e.handleSubagentEvent(state, subagentEvent(SubagentEvent{ID: "b", Phase: SubagentStarted, Title: "Find the config", Kind: "Explore", Prompt: "where is config.toml"}))
+	e.handleSubagentEvent(state, subagentEvent(SubagentEvent{ID: "a", Phase: SubagentFinished, Status: "completed"}))
+	e.handleSubagentEvent(state, subagentEvent(SubagentEvent{ID: "b", Phase: SubagentFinished, Status: "completed"}))
+	close(p.gate)
+
+	cards := waitForCards(t, p, func(c map[string]*ProgressCardPayload) bool {
+		return c[cardA] != nil && c[cardA].State == ProgressCardStateCompleted &&
+			c[cardB] != nil && c[cardB].State == ProgressCardStateCompleted
+	})
+	if cards[cardA] == nil || cards[cardA].State != ProgressCardStateCompleted {
+		t.Fatalf("card A = %+v, want it closed despite the flood", cards[cardA])
+	}
+	if cards[cardB] == nil || cards[cardB].State != ProgressCardStateCompleted || cardTexts(cards[cardB])[0] != "info|where is config.toml" {
+		t.Fatalf("card B = %+v, want it titled, with its task, closed", cards[cardB])
+	}
+}
+
+// TestSubagentCards_EditsStayApart checks the per-card rate limit: however
+// the steps, held-back edits and the final close fall, two edits of one card
+// are at least subagentCardInterval apart.
+func TestSubagentCards_EditsStayApart(t *testing.T) {
+	p := &cardRecorderPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+	state := &interactiveState{platform: p, replyCtx: "ctx"}
+
+	send := func(ev SubagentEvent) { e.handleSubagentEvent(state, subagentEvent(ev)) }
+	send(SubagentEvent{ID: "a", Phase: SubagentStarted, Title: "Count to three", Kind: "general-purpose", Prompt: "count 1 2 3"})
+	time.Sleep(subagentCardInterval - 10*time.Millisecond)
+	// Card B opens just before the worker's ticks line up with card A's.
+	send(SubagentEvent{ID: "b", Phase: SubagentStarted, Title: "Find the config", Kind: "Explore", Prompt: "where is config.toml"})
+	for i := 0; i < 5; i++ {
+		send(SubagentEvent{ID: "a", Phase: SubagentStep, Step: ProgressCardEntry{Kind: ProgressEntryInfo, Text: fmt.Sprintf("a %d", i)}})
+		send(SubagentEvent{ID: "b", Phase: SubagentStep, Step: ProgressCardEntry{Kind: ProgressEntryInfo, Text: fmt.Sprintf("b %d", i)}})
+		time.Sleep(300 * time.Millisecond)
+	}
+	send(SubagentEvent{ID: "a", Phase: SubagentFinished, Status: "completed"})
+	send(SubagentEvent{ID: "b", Phase: SubagentFinished, Status: "completed"})
+
+	cards := waitForCards(t, p, func(c map[string]*ProgressCardPayload) bool {
+		return c[cardA] != nil && c[cardA].State == ProgressCardStateCompleted &&
+			c[cardB] != nil && c[cardB].State == ProgressCardStateCompleted
+	})
+	if cards[cardA].State != ProgressCardStateCompleted || cards[cardB].State != ProgressCardStateCompleted {
+		t.Fatalf("cards not closed: A %s, B %s", cards[cardA].State, cards[cardB].State)
+	}
+	if got := len(cards[cardB].Items); got != 6 {
+		t.Errorf("card B has %d items, want its task and 5 steps", got)
+	}
+	p.cardsMu.Lock()
+	defer p.cardsMu.Unlock()
+	for handle, times := range p.edits {
+		for i := 1; i < len(times); i++ {
+			if gap := times[i].Sub(times[i-1]); gap < subagentCardInterval {
+				t.Errorf("card %s edited %v after its previous edit, want at least %v", handle, gap, subagentCardInterval)
+			}
+		}
 	}
 }
