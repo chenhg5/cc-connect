@@ -28,6 +28,10 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
+	// subagents maps each Agent-tool subagent seen in task_started to whether
+	// it runs in the background. Read loop only.
+	subagents map[string]bool
+
 	cmd             *exec.Cmd
 	stdin           io.WriteCloser
 	stdinMu         sync.Mutex
@@ -715,6 +719,9 @@ func resultSubtype(raw map[string]any) string {
 }
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
+	if subtype, _ := raw["subtype"].(string); strings.HasPrefix(subtype, "task_") {
+		cs.handleTask(subtype, raw)
+	}
 	if model, ok := raw["model"].(string); ok && model != "" {
 		cs.activeModel.Store(model)
 	}
@@ -1144,17 +1151,13 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	}
 }
 
-// subagentMarker prefixes what a subagent says or does, so it reads apart
-// from the main agent's own steps.
-const subagentMarker = "↳ "
-
-// handleSubagent surfaces a subagent's text, thinking and tool calls as
-// thinking/tool steps of the current turn, tagged with MetaParentToolUseID. None of it may become EventText:
-// the engine would deliver it as part of the reply. Its usage is the
-// subagent's own context window, so it must not drive the ctx indicator, and
-// its prompt and tool results stay out: the main agent's Agent tool call
-// already shows the task, and Claude Code's tool results carry no tool name
-// to pair them with the right step.
+// handleSubagent turns a subagent's text, thinking and tool calls into
+// EventSubagent steps. The engine shows each subagent on its own card, apart
+// from the turn: none of it may become EventText (it would be spliced into
+// the reply), its usage is the subagent's own context window and must not
+// drive the ctx indicator, and its prompt and tool results stay out (the
+// prompt arrives with task_started; Claude Code's tool results carry no tool
+// name to pair them with the right step).
 func (cs *claudeSession) handleSubagent(eventType, parent string, raw map[string]any) {
 	if eventType != "assistant" {
 		return
@@ -1172,35 +1175,100 @@ func (cs *claudeSession) handleSubagent(eventType, parent string, raw map[string
 		if !ok {
 			continue
 		}
-		var evt core.Event
+		var step core.ProgressCardEntry
 		switch contentType, _ := item["type"].(string); contentType {
 		case "tool_use":
 			toolName, _ := item["name"].(string)
 			if toolName == "" {
 				continue
 			}
-			evt = core.Event{Type: core.EventToolUse, ToolName: subagentMarker + toolName, ToolInput: summarizeInput(toolName, item["input"])}
+			step = core.ProgressCardEntry{Kind: core.ProgressEntryToolUse, Tool: toolName, Text: summarizeInput(toolName, item["input"])}
 		case "thinking":
 			thinking, _ := item["thinking"].(string)
 			if strings.TrimSpace(thinking) == "" {
 				continue
 			}
-			evt = core.Event{Type: core.EventThinking, Content: subagentMarker + thinking}
+			step = core.ProgressCardEntry{Kind: core.ProgressEntryThinking, Text: thinking}
 		case "text":
 			text, _ := item["text"].(string)
 			if strings.TrimSpace(text) == "" {
 				continue
 			}
-			evt = core.Event{Type: core.EventThinking, Content: subagentMarker + text}
+			step = core.ProgressCardEntry{Kind: core.ProgressEntryInfo, Text: text}
 		default:
 			continue
 		}
-		evt.Metadata = map[string]any{core.MetaParentToolUseID: parent}
-		select {
-		case cs.events <- evt:
-		case <-cs.ctx.Done():
+		if !cs.emitSubagent(core.SubagentEvent{ID: parent, Phase: core.SubagentStep, Step: step}) {
 			return
 		}
+	}
+}
+
+// handleTask follows the life of Agent-tool subagents through Claude Code's
+// task events (task_type "local_agent"; background shells and other tasks
+// are left alone). task_started opens the subagent's card, again when a
+// notification wakes it; task_notification closes it.
+func (cs *claudeSession) handleTask(subtype string, raw map[string]any) {
+	id, _ := raw["tool_use_id"].(string)
+	if id == "" {
+		return
+	}
+	switch subtype {
+	case "task_started":
+		if kind, _ := raw["task_type"].(string); kind != "local_agent" {
+			return
+		}
+		background, _ := raw["is_backgrounded"].(bool)
+		_, woken := cs.subagents[id]
+		if cs.subagents == nil {
+			cs.subagents = make(map[string]bool)
+		}
+		cs.subagents[id] = background
+		ev := core.SubagentEvent{ID: id, Phase: core.SubagentStarted, Background: background}
+		ev.Title, _ = raw["description"].(string)
+		ev.Kind, _ = raw["subagent_type"].(string)
+		if !woken {
+			// A woken subagent's prompt is the notification that woke it.
+			ev.Prompt, _ = raw["prompt"].(string)
+		}
+		cs.emitSubagent(ev)
+	case "task_notification":
+		if _, ok := cs.subagents[id]; !ok {
+			return
+		}
+		ev := core.SubagentEvent{ID: id, Phase: core.SubagentFinished}
+		ev.Status, _ = raw["status"].(string)
+		ev.Summary, _ = raw["summary"].(string)
+		cs.emitSubagent(ev)
+	}
+}
+
+// finishForegroundSubagent closes a foreground subagent's card when the
+// Agent tool call returns, in case no task_notification reports it. The
+// tool result of a background subagent only says it was launched.
+func (cs *claudeSession) finishForegroundSubagent(item map[string]any, isError bool) {
+	id, _ := item["tool_use_id"].(string)
+	if background, ok := cs.subagents[id]; !ok || background {
+		return
+	}
+	status := "completed"
+	if isError {
+		status = "failed"
+	}
+	cs.emitSubagent(core.SubagentEvent{ID: id, Phase: core.SubagentFinished, Status: status})
+}
+
+func (cs *claudeSession) emitSubagent(ev core.SubagentEvent) bool {
+	evt := core.Event{
+		Type:     core.EventSubagent,
+		Subagent: &ev,
+		Metadata: map[string]any{core.MetaParentToolUseID: ev.ID},
+	}
+	select {
+	case cs.events <- evt:
+		return true
+	case <-cs.ctx.Done():
+		return false
 	}
 }
 
@@ -1233,6 +1301,7 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 		}
 		if contentType == "tool_result" {
 			isError, _ := item["is_error"].(bool)
+			cs.finishForegroundSubagent(item, isError)
 			var result string
 			switch c := item["content"].(type) {
 			case string:
