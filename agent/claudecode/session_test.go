@@ -1510,3 +1510,60 @@ func TestHandleResultKeepsLiveAssistantUsage(t *testing.T) {
 		t.Errorf("OutputTokens = %d, want 406 (result is authoritative for output)", u.OutputTokens)
 	}
 }
+
+// TestHandleSubagentMessagesAreProgressNotAnswer feeds the stream Claude Code
+// 2.1.280 emits with CLAUDE_CODE_FORWARD_SUBAGENT_TEXT=1: the subagent's
+// prompt, thinking, text and tool calls arrive tagged with the Agent tool
+// call's id. They must show up as steps only; the reply is the main agent's
+// text alone, and the subagent's usage must not drive the ctx indicator.
+func TestHandleSubagentMessagesAreProgressNotAnswer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 16),
+		ctx:    ctx,
+	}
+	cs.alive.Store(true)
+
+	const parent = `"parent_tool_use_id":"toolu_01A2nsF31x2Pj1x3KGRaBwAB","session_id":"s"`
+	for _, line := range []string{
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01A2nsF31x2Pj1x3KGRaBwAB","name":"Agent","input":{"description":"Simple math question","subagent_type":"general-purpose","prompt":"What is 2+3?"}}]},"parent_tool_use_id":null,"session_id":"s"}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"What is 2+3? Please answer in one short sentence only."}]},` + parent + `}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Simple sum.","signature":"x"}]},` + parent + `}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_sub","name":"Bash","input":{"command":"echo $((2+3))"}}]},` + parent + `}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sub","content":"5"}]},` + parent + `}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"2+3 equals 5."}],"usage":{"input_tokens":10,"cache_creation_input_tokens":17722,"cache_read_input_tokens":0,"output_tokens":5}},` + parent + `}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01A2nsF31x2Pj1x3KGRaBwAB","content":[{"type":"text","text":"2+3 equals 5."}]}]},"parent_tool_use_id":null,"session_id":"s"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The answer is 5."}]},"parent_tool_use_id":null,"session_id":"s"}`,
+	} {
+		cs.handleReadLoopLine(line)
+	}
+
+	var got []string
+	for len(cs.events) > 0 {
+		evt := <-cs.events
+		switch evt.Type {
+		case core.EventToolUse:
+			got = append(got, "tool_use:"+evt.ToolName)
+		case core.EventToolResult:
+			got = append(got, "tool_result:"+evt.ToolResult)
+		default:
+			got = append(got, string(evt.Type)+":"+evt.Content)
+		}
+	}
+	want := []string{
+		"tool_use:Agent",
+		"thinking:↳ Simple sum.",
+		"tool_use:↳ Bash",
+		"thinking:↳ 2+3 equals 5.",
+		"tool_result:2+3 equals 5.",
+		"text:The answer is 5.",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("events =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if cs.lastUsage != nil {
+		t.Fatalf("lastUsage = %#v, want nil: subagent usage must not drive ctx", cs.lastUsage)
+	}
+}

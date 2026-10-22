@@ -648,6 +648,14 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 	eventType, _ := raw["type"].(string)
 	slog.Debug("claudeSession: event", "type", eventType)
 
+	// With CLAUDE_CODE_FORWARD_SUBAGENT_TEXT set, Claude Code also streams the
+	// messages of its subagents, tagged with the Agent tool call they belong
+	// to. They are progress, not the answer: see handleSubagent.
+	if parent, _ := raw["parent_tool_use_id"].(string); parent != "" && (eventType == "assistant" || eventType == "user") {
+		cs.handleSubagent(eventType, raw)
+		return
+	}
+
 	switch eventType {
 	case "system":
 		cs.handleSystem(raw)
@@ -1132,6 +1140,65 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 					return
 				}
 			}
+		}
+	}
+}
+
+// subagentMarker prefixes what a subagent says or does, so it reads apart
+// from the main agent's own steps.
+const subagentMarker = "↳ "
+
+// handleSubagent surfaces a subagent's text, thinking and tool calls as
+// thinking/tool steps of the current turn. None of it may become EventText:
+// the engine would deliver it as part of the reply. Its usage is the
+// subagent's own context window, so it must not drive the ctx indicator, and
+// its prompt and tool results stay out: the main agent's Agent tool call
+// already shows the task, and Claude Code's tool results carry no tool name
+// to pair them with the right step.
+func (cs *claudeSession) handleSubagent(eventType string, raw map[string]any) {
+	if eventType != "assistant" {
+		return
+	}
+	msg, ok := raw["message"].(map[string]any)
+	if !ok {
+		return
+	}
+	contentArr, ok := msg["content"].([]any)
+	if !ok {
+		return
+	}
+	for _, contentItem := range contentArr {
+		item, ok := contentItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		var evt core.Event
+		switch contentType, _ := item["type"].(string); contentType {
+		case "tool_use":
+			toolName, _ := item["name"].(string)
+			if toolName == "" {
+				continue
+			}
+			evt = core.Event{Type: core.EventToolUse, ToolName: subagentMarker + toolName, ToolInput: summarizeInput(toolName, item["input"])}
+		case "thinking":
+			thinking, _ := item["thinking"].(string)
+			if strings.TrimSpace(thinking) == "" {
+				continue
+			}
+			evt = core.Event{Type: core.EventThinking, Content: subagentMarker + thinking}
+		case "text":
+			text, _ := item["text"].(string)
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			evt = core.Event{Type: core.EventThinking, Content: subagentMarker + text}
+		default:
+			continue
+		}
+		select {
+		case cs.events <- evt:
+		case <-cs.ctx.Done():
+			return
 		}
 	}
 }
