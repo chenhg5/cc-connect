@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -25,19 +26,21 @@ func init() {
 // Agent drives the Cursor Agent CLI (`agent`) using --print --output-format stream-json.
 //
 // Modes (maps to Cursor agent CLI flags):
-//   - "default":  --trust only (ask permission for tools)
-//   - "force":    --trust --force (auto-approve tools unless explicitly denied)
-//   - "plan":     --trust --mode plan (read-only analysis)
-//   - "ask":      --trust --mode ask (Q&A style, read-only)
+//   - "default":  default permissions (ask permission for tools)
+//   - "force":    --force (auto-approve tools unless explicitly denied)
+//   - "plan":     --mode plan (read-only analysis)
+//   - "ask":      --mode ask (Q&A style, read-only)
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string
-	cmd        string // CLI binary name, default "agent"
-	providers  []core.ProviderConfig
-	activeIdx  int
-	sessionEnv []string
-	mu         sync.RWMutex
+	workDir      string
+	model        string
+	mode         string
+	cmd          string   // CLI binary name, default "agent"
+	cliExtraArgs []string // extra args from cmd after the binary name
+	configEnv    []string // env vars from [projects.agent.options.env]
+	providers    []core.ProviderConfig
+	activeIdx    int
+	sessionEnv   []string
+	mu           sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -48,20 +51,19 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
-	cmd, _ := opts["cmd"].(string)
-	if cmd == "" {
-		cmd = "agent"
-	}
+	cmd, extraArgs := core.ParseCmdOpts(opts, "agent")
 	if _, err := exec.LookPath(cmd); err != nil {
 		return nil, fmt.Errorf("cursor: %q CLI not found in PATH, install with: npm i -g @anthropic-ai/cursor-agent (or from Cursor IDE settings)", cmd)
 	}
 
 	return &Agent{
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		cmd:       cmd,
-		activeIdx: -1,
+		workDir:      workDir,
+		model:        model,
+		mode:         mode,
+		cmd:          cmd,
+		cliExtraArgs: extraArgs,
+		configEnv:    core.ParseConfigEnv(opts),
+		activeIdx:    -1,
 	}, nil
 }
 
@@ -78,7 +80,6 @@ func normalizeMode(raw string) string {
 	}
 }
 
-
 func (a *Agent) Name() string           { return "cursor" }
 func (a *Agent) CLIBinaryName() string  { return "agent" }
 func (a *Agent) CLIDisplayName() string { return "Cursor Agent" }
@@ -91,8 +92,8 @@ func (a *Agent) SetWorkDir(dir string) {
 }
 
 func (a *Agent) GetWorkDir() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.workDir
 }
 
@@ -104,8 +105,8 @@ func (a *Agent) SetModel(model string) {
 }
 
 func (a *Agent) GetModel() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return core.GetProviderModel(a.providers, a.activeIdx, a.model)
 }
 
@@ -119,11 +120,11 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
-	a.mu.Lock()
+	a.mu.RLock()
 	cmd := a.cmd
 	extraEnv := a.providerEnvLocked()
 	extraEnv = append(extraEnv, a.sessionEnv...)
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
 	if models := fetchModelsFromAgentCLI(ctx, cmd, extraEnv); len(models) > 0 {
 		return models
@@ -189,25 +190,31 @@ func (a *Agent) SetSessionEnv(env []string) {
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
-	a.mu.Lock()
+	a.mu.RLock()
 	model := a.model
 	mode := a.mode
 	cmd := a.cmd
-	extraEnv := a.providerEnvLocked()
+	extraArgs := append([]string{}, a.cliExtraArgs...)
+	workDir := a.workDir
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
 		}
 	}
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
-	return newCursorSession(ctx, cmd, a.workDir, model, mode, sessionID, extraEnv)
+	return newCursorSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv)
 }
 
-// ListSessions reads sessions from ~/.cursor/chats/<workspace_hash>/.
+// ListSessions reads sessions from Cursor Agent CLI chat storage.
+// The CLI may store chats under ~/.cursor/chats or ~/.config/Cursor/chats
+// depending on XDG_CONFIG_HOME and platform; all known locations are scanned.
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	return listCursorSessions(a.workDir)
+	workDir := a.GetWorkDir()
+	return listCursorSessions(workDir)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
@@ -215,10 +222,10 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("cursor: cannot determine home dir: %w", err)
 	}
-	hash := workspaceHash(a.workDir)
-	dir := filepath.Join(homeDir, ".cursor", "chats", hash, sessionID)
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return fmt.Errorf("session not found: %s", sessionID)
+	workDir := a.GetWorkDir()
+	dir, err := findCursorSessionDir(homeDir, workDir, sessionID)
+	if err != nil {
+		return err
 	}
 	return os.RemoveAll(dir)
 }
@@ -228,13 +235,20 @@ func (a *Agent) Stop() error { return nil }
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	workDir := a.GetWorkDir()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
-	dirs := []string{filepath.Join(absDir, ".claude", "skills")}
+	dirs := []string{
+		filepath.Join(absDir, ".cursor", "skills"),
+		filepath.Join(absDir, ".claude", "skills"),
+	}
 	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".claude", "skills"))
+		dirs = append(dirs,
+			filepath.Join(home, ".cursor", "skills"),
+			filepath.Join(home, ".claude", "skills"),
+		)
 	}
 	return dirs
 }
@@ -253,8 +267,8 @@ func (a *Agent) SetMode(mode string) {
 }
 
 func (a *Agent) GetMode() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.mode
 }
 
@@ -294,8 +308,8 @@ func (a *Agent) SetActiveProvider(name string) bool {
 }
 
 func (a *Agent) GetActiveProvider() *core.ProviderConfig {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
 		return nil
 	}
@@ -304,8 +318,8 @@ func (a *Agent) GetActiveProvider() *core.ProviderConfig {
 }
 
 func (a *Agent) ListProviders() []core.ProviderConfig {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	result := make([]core.ProviderConfig, len(a.providers))
 	copy(result, a.providers)
 	return result
@@ -338,60 +352,109 @@ func workspaceHash(workDir string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// cursorChatsBaseDirs returns candidate Cursor Agent CLI chat roots, in priority order.
+// When XDG_CONFIG_HOME is set the CLI stores under $XDG_CONFIG_HOME/Cursor/chats;
+// otherwise it may use ~/.config/Cursor/chats or the legacy ~/.cursor/chats.
+func cursorChatsBaseDirs(homeDir string) []string {
+	var dirs []string
+	seen := make(map[string]struct{})
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		dirs = append(dirs, path)
+	}
+
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		add(filepath.Join(xdg, "Cursor", "chats"))
+	}
+	add(filepath.Join(homeDir, ".config", "Cursor", "chats"))
+	add(filepath.Join(homeDir, ".cursor", "chats"))
+	return dirs
+}
+
+func workspaceChatsDirs(homeDir, workDir string) []string {
+	hash := workspaceHash(workDir)
+	var dirs []string
+	for _, base := range cursorChatsBaseDirs(homeDir) {
+		dir := filepath.Join(base, hash)
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
+}
+
+func findCursorSessionDir(homeDir, workDir, sessionID string) (string, error) {
+	for _, chatsDir := range workspaceChatsDirs(homeDir, workDir) {
+		dir := filepath.Join(chatsDir, sessionID)
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("session not found: %s", sessionID)
+}
+
 func listCursorSessions(workDir string) ([]core.AgentSessionInfo, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cursor: cannot determine home dir: %w", err)
 	}
 
-	hash := workspaceHash(workDir)
-	chatsDir := filepath.Join(homeDir, ".cursor", "chats", hash)
-
-	entries, err := os.ReadDir(chatsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("cursor: read chats dir: %w", err)
+	chatsDirs := workspaceChatsDirs(homeDir, workDir)
+	if len(chatsDirs) == 0 {
+		return nil, nil
 	}
 
-	var sessions []core.AgentSessionInfo
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		sessionID := entry.Name()
-		dbPath := filepath.Join(chatsDir, sessionID, "store.db")
-		if _, err := os.Stat(dbPath); err != nil {
-			continue
-		}
-
-		info, err := entry.Info()
+	byID := make(map[string]core.AgentSessionInfo)
+	for _, chatsDir := range chatsDirs {
+		entries, err := os.ReadDir(chatsDir)
 		if err != nil {
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("cursor: read chats dir %s: %w", chatsDir, err)
 		}
 
-		meta := readSessionMeta(dbPath)
-		msgCount, firstUserMsg := countSessionMessages(dbPath, meta.RootBlobID)
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			sessionID := entry.Name()
+			dbPath := filepath.Join(chatsDir, sessionID, "store.db")
+			if _, err := os.Stat(dbPath); err != nil {
+				continue
+			}
 
-		summary := meta.Name
-		if summary == "" || summary == "New Agent" {
-			if firstUserMsg != "" {
-				summary = firstUserMsg
-			} else {
-				summary = sessionID[:12] + "..."
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			meta := readSessionMeta(dbPath)
+			msgCount, firstUserMsg := countSessionMessages(dbPath, meta.RootBlobID)
+
+			summary := cursorSessionSummary(meta.Name, firstUserMsg, sessionID)
+
+			candidate := core.AgentSessionInfo{
+				ID:           sessionID,
+				Summary:      summary,
+				MessageCount: msgCount,
+				ModifiedAt:   info.ModTime(),
+			}
+			if existing, ok := byID[sessionID]; !ok || candidate.ModifiedAt.After(existing.ModifiedAt) {
+				byID[sessionID] = candidate
 			}
 		}
-		if utf8.RuneCountInString(summary) > 60 {
-			summary = string([]rune(summary)[:60]) + "..."
-		}
+	}
 
-		sessions = append(sessions, core.AgentSessionInfo{
-			ID:           sessionID,
-			Summary:      summary,
-			MessageCount: msgCount,
-			ModifiedAt:   info.ModTime(),
-		})
+	sessions := make([]core.AgentSessionInfo, 0, len(byID))
+	for _, s := range byID {
+		sessions = append(sessions, s)
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
@@ -447,6 +510,73 @@ func readSessionMeta(dbPath string) sessionMeta {
 	}
 
 	return sessionMeta{AgentID: m.AgentID, Name: m.Name, Mode: m.Mode, RootBlobID: m.RootBlobID}
+}
+
+var cursorUserQueryRE = regexp.MustCompile(`(?is)<user_query>\s*(.*?)\s*</user_query>`)
+
+func cursorSessionSummary(metaName, firstUserMsg, sessionID string) string {
+	summary := strings.TrimSpace(metaName)
+	if summary == "" || strings.EqualFold(summary, "New Agent") {
+		summary = strings.TrimSpace(firstUserMsg)
+	}
+	if summary == "" {
+		if len(sessionID) > 12 {
+			summary = sessionID[:12] + "..."
+		} else {
+			summary = sessionID
+		}
+	}
+	if utf8.RuneCountInString(summary) > 60 {
+		summary = string([]rune(summary)[:60]) + "..."
+	}
+	return summary
+}
+
+func cursorMessageContentText(content any) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []any:
+		var parts []string
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, " ")
+	default:
+		return ""
+	}
+}
+
+func extractCursorUserSummary(content any) string {
+	text := strings.TrimSpace(cursorMessageContentText(content))
+	if text == "" {
+		return ""
+	}
+
+	if m := cursorUserQueryRE.FindStringSubmatch(text); len(m) == 2 {
+		if query := strings.TrimSpace(m[1]); query != "" {
+			return query
+		}
+	}
+
+	lower := strings.ToLower(text)
+	if strings.HasPrefix(lower, "<user_info>") ||
+		strings.HasPrefix(lower, "<open_and_recently_viewed_files>") ||
+		strings.HasPrefix(lower, "<attached_files>") ||
+		strings.HasPrefix(lower, "<agent_transcripts>") {
+		return ""
+	}
+
+	if strings.HasPrefix(text, "<") {
+		return ""
+	}
+	return text
 }
 
 // countSessionMessages reads the root blob from store.db and counts conversation
@@ -541,15 +671,8 @@ func countSessionMessages(dbPath, rootBlobID string) (int, string) {
 		}
 		roleCount[msg.Role]++
 		if msg.Role == "user" && firstUserMsg == "" {
-			if s, ok := msg.Content.(string); ok {
-				s = strings.TrimSpace(s)
-				// Skip injected context (XML tags, conversation summaries, etc.)
-				if len(s) > 0 && !strings.HasPrefix(s, "<") && !strings.HasPrefix(s, "[") && !strings.HasPrefix(s, "{") {
-					if utf8.RuneCountInString(s) > 50 {
-						s = string([]rune(s)[:50]) + "..."
-					}
-					firstUserMsg = s
-				}
+			if summary := extractCursorUserSummary(msg.Content); summary != "" {
+				firstUserMsg = summary
 			}
 		}
 	}

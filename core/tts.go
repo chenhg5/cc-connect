@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -30,11 +31,13 @@ type TTSSynthesisOpts struct {
 
 // TTSCfg holds TTS configuration for the engine (mirrors SpeechCfg).
 type TTSCfg struct {
-	Enabled    bool
-	Provider   string
-	Voice      string // default voice used when TTSSynthesisOpts.Voice is empty
-	TTS        TextToSpeech
-	MaxTextLen int // max rune count before skipping TTS; 0 = no limit
+	Enabled      bool
+	Provider     string
+	Voice        string  // default voice used when TTSSynthesisOpts.Voice is empty
+	LanguageType string  // optional provider-specific language hint
+	Speed        float64 // speaking speed multiplier; 0 = provider default
+	TTS          TextToSpeech
+	MaxTextLen   int // max rune count before skipping TTS; 0 = no limit
 
 	mu      sync.RWMutex
 	ttsMode string // "voice_only" (default) | "always"
@@ -58,8 +61,26 @@ func (c *TTSCfg) SetTTSMode(mode string) {
 }
 
 // AudioSender is implemented by platforms that support sending voice/audio messages.
+//
+// `format` is the lowercase short format hint extracted from the filename
+// extension or MIME type (e.g. "mp3", "ogg", "opus", "m4a"). Platforms
+// that need a specific codec (Feishu requires opus) are expected to
+// transcode internally; format is only an input hint.
 type AudioSender interface {
 	SendAudio(ctx context.Context, replyCtx any, audio []byte, format string) error
+}
+
+// VideoSender is implemented by platforms that can render a native
+// inline video bubble for an outbound clip rather than a generic file
+// download. Engine code falls back to FileSender when a platform does
+// not implement this interface.
+//
+// `format` is the lowercase short format hint (e.g. "mp4", "mov",
+// "webm"). Implementations are free to transcode to the platform's
+// preferred codec; on Feishu mp4/H.264 has the broadest playback
+// support so non-mp4 inputs may render with reduced compatibility.
+type VideoSender interface {
+	SendVideo(ctx context.Context, replyCtx any, video []byte, format string, fileName string) error
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -101,12 +122,15 @@ func (q *QwenTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	}
 	reqBody := map[string]any{
 		"model": q.Model,
-		"input": map[string]any{
-			"text":          text,
-			"voice":         voice,
-			"language_type": opts.LanguageType,
-		},
 	}
+	input := map[string]any{
+		"text":  text,
+		"voice": voice,
+	}
+	if opts.LanguageType != "" {
+		input["language_type"] = opts.LanguageType
+	}
+	reqBody["input"] = input
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, "", fmt.Errorf("qwen tts: marshal request: %w", err)
@@ -261,7 +285,7 @@ type MiniMaxTTS struct {
 // NewMiniMaxTTS creates a new MiniMaxTTS instance.
 func NewMiniMaxTTS(apiKey, baseURL, model string, client *http.Client) *MiniMaxTTS {
 	if baseURL == "" {
-		baseURL = "https://api.minimax.io"
+		baseURL = "https://api.minimaxi.com"
 	}
 	if model == "" {
 		model = "speech-2.8-hd"
@@ -289,9 +313,9 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 	}
 
 	reqBody := map[string]any{
-		"model":        m.Model,
-		"text":         text,
-		"stream":       true,
+		"model":  m.Model,
+		"text":   text,
+		"stream": true,
 		"voice_setting": map[string]any{
 			"voice_id": voice,
 			"speed":    speed,
@@ -359,6 +383,13 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 		if chunk.BaseResp.StatusCode != 0 {
 			return nil, "", fmt.Errorf("minimax tts API error %d: %s", chunk.BaseResp.StatusCode, chunk.BaseResp.StatusMsg)
 		}
+		// MiniMax T2A v2 stream protocol: status=1 carries incremental audio
+		// chunks; the final status=2 chunk re-sends the full audio as a
+		// trailer for non-stream clients. Appending the trailer doubles the
+		// audio length and makes the spoken text play twice, so skip it.
+		if chunk.Data.Status == 2 {
+			break
+		}
 		if chunk.Data.Audio != "" {
 			audioBytes, err := hex.DecodeString(chunk.Data.Audio)
 			if err != nil {
@@ -374,6 +405,123 @@ func (m *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts TTSSynthe
 		return nil, "", fmt.Errorf("minimax tts: no audio data received")
 	}
 	return audioBuf.Bytes(), "mp3", nil
+}
+
+// ──────────────────────────────────────────────────────────────
+// MimoTTS — Xiaomi MiMo-V2.5-TTS implementation
+// ──────────────────────────────────────────────────────────────
+
+// MimoTTS implements TextToSpeech using the Xiaomi MiMo-V2.5-TTS API,
+// which is shaped like OpenAI chat completions: the synthesis text rides
+// on an assistant message and audio bytes come back base64-encoded inside
+// choices[0].message.audio.data.
+//
+// Docs: https://platform.xiaomimimo.com/#/docs/usage-guide/speech-synthesis
+type MimoTTS struct {
+	APIKey  string
+	BaseURL string
+	Model   string
+	Client  *http.Client
+}
+
+// NewMimoTTS creates a new MimoTTS instance.
+func NewMimoTTS(apiKey, baseURL, model string, client *http.Client) *MimoTTS {
+	if baseURL == "" {
+		baseURL = "https://api.xiaomimimo.com/v1"
+	}
+	if model == "" {
+		model = "mimo-v2.5-tts"
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	return &MimoTTS{
+		APIKey:  apiKey,
+		BaseURL: baseURL,
+		Model:   model,
+		Client:  client,
+	}
+}
+
+// Synthesize calls MiMo /chat/completions and returns the decoded WAV bytes.
+func (m *MimoTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesisOpts) ([]byte, string, error) {
+	voice := opts.Voice
+	if voice == "" {
+		voice = "mimo_default"
+	}
+
+	// Per MiMo docs: synthesis text MUST live on an assistant message; the
+	// user message is optional for built-in-voice mode but required for
+	// voicedesign. Sending an empty user content stays valid across all
+	// three model variants.
+	reqBody := map[string]any{
+		"model": m.Model,
+		"messages": []map[string]any{
+			{"role": "user", "content": ""},
+			{"role": "assistant", "content": text},
+		},
+		"audio": map[string]any{
+			"format": "wav",
+			"voice":  voice,
+		},
+	}
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, "", fmt.Errorf("mimo tts: marshal request: %w", err)
+	}
+
+	url := strings.TrimRight(m.BaseURL, "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, "", fmt.Errorf("mimo tts: create request: %w", err)
+	}
+	// MiMo authenticates via "api-key" header, not "Authorization: Bearer".
+	req.Header.Set("api-key", m.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := m.Client.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("mimo tts: request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("mimo tts: read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("mimo tts API %d: %s", resp.StatusCode, body)
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Audio struct {
+					Data string `json:"data"`
+				} `json:"audio"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error *struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    any    `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, "", fmt.Errorf("mimo tts: parse response: %w", err)
+	}
+	if result.Error != nil && result.Error.Message != "" {
+		return nil, "", fmt.Errorf("mimo tts API error: %s", result.Error.Message)
+	}
+	if len(result.Choices) == 0 || result.Choices[0].Message.Audio.Data == "" {
+		return nil, "", fmt.Errorf("mimo tts: empty audio data in response")
+	}
+
+	audio, err := base64.StdEncoding.DecodeString(result.Choices[0].Message.Audio.Data)
+	if err != nil {
+		return nil, "", fmt.Errorf("mimo tts: decode audio base64: %w", err)
+	}
+	return audio, "wav", nil
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -426,7 +574,7 @@ func (e *EspeakTTS) Synthesize(ctx context.Context, text string, opts TTSSynthes
 
 	// Execute espeak command
 	// Use Output() instead of CombinedOutput() to avoid mixing stderr warnings with audio data
-	cmd := exec.Command(e.Path, args...)
+	cmd := exec.CommandContext(ctx, e.Path, args...)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, "", fmt.Errorf("espeak: voice=%s text=%q: %w", voice, text, err)
@@ -486,7 +634,7 @@ func (p *PicoTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 	}
 
 	// Execute pico2wave command
-	cmd := exec.Command(p.Path, args...)
+	cmd := exec.CommandContext(ctx, p.Path, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, "", fmt.Errorf("pico2wave: voice=%s text=%q: %w, output: %s", voice, text, err, string(output))
@@ -512,6 +660,7 @@ func (p *PicoTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 // EdgeTTS implements TextToSpeech using Microsoft Edge's free TTS API.
 // This uses the edge-tts CLI command under the hood.
 type EdgeTTS struct {
+	Path  string // path to edge-tts executable (empty = "edge-tts")
 	Voice string // default voice (e.g. "zh-CN-XiaoxiaoNeural")
 }
 
@@ -550,7 +699,11 @@ func (e *EdgeTTS) Synthesize(ctx context.Context, text string, opts TTSSynthesis
 		"--write-media", tmpPath,
 	}
 
-	cmd := exec.CommandContext(ctx, "edge-tts", args...)
+	path := e.Path
+	if path == "" {
+		path = "edge-tts"
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, "", fmt.Errorf("edge-tts: voice=%s text=%q: %w, output: %s", voice, text, err, string(output))

@@ -7,12 +7,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
+	"github.com/BurntSushi/toml"
+
+	"github.com/chenhg5/cc-connect/agent/internal/skillroots"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -22,18 +24,29 @@ func init() {
 
 // Agent drives OpenAI Codex CLI using `codex exec --json`.
 //
-// Modes (maps to codex exec flags):
-//   - "suggest":   default, no special flags (safe commands only)
-//   - "auto-edit": --full-auto (sandbox-protected auto execution)
-//   - "full-auto": --full-auto (sandbox-protected auto execution)
+// `codex exec` has no approval IPC, so approvals are not interactive on the
+// exec backend. To get interactive approvals, switch to backend="app_server".
+//
+// Modes on the exec backend (maps to codex exec flags):
+//   - "suggest":   --sandbox read-only       + approval_policy=never (no prompts)
+//   - "auto-edit": --sandbox workspace-write + approval_policy=never (alias of full-auto)
+//   - "full-auto": --sandbox workspace-write + approval_policy=never
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
 	workDir         string
 	model           string
 	reasoningEffort string
 	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	backend         string // "exec" | "app_server"
+	appServerURL    string
+	codexHome       string
+	systemPrompt    string
+	appendPrompt    string
+	cmd             string   // explicit CLI command; empty enables discovery
+	cliExtraArgs    []string // extra args parsed from cmd after the binary
 	providers       []core.ProviderConfig
-	activeIdx       int // -1 = no provider set
+	activeIdx       int      // -1 = no provider set
+	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv      []string
 	mu              sync.RWMutex
 }
@@ -46,10 +59,39 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
+	backend, _ := opts["backend"].(string)
+	appServerURL, _ := opts["app_server_url"].(string)
+	codexHome, _ := opts["codex_home"].(string)
+	systemPrompt, _ := opts["system_prompt"].(string)
+	appendPrompt, _ := opts["append_system_prompt"].(string)
 	mode = normalizeMode(mode)
+	backend = normalizeBackend(backend)
+	appServerURL = normalizeAppServerURL(appServerURL)
 
-	if _, err := exec.LookPath("codex"); err != nil {
-		return nil, fmt.Errorf("codex: 'codex' CLI not found in PATH, install with: npm install -g @openai/codex")
+	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "")
+
+	if cmd == "" {
+		cmd = strings.TrimSpace(os.Getenv("CODEX_CLI_PATH"))
+	}
+	if _, err := resolveCodexExecutable(cmd); err != nil {
+		return nil, fmt.Errorf("codex: CLI lookup failed (set cmd or install with npm install -g @openai/codex): %w", err)
+	}
+
+	// Parse project-level env from opts["env"] (set via [projects.agent.options.env] in config.toml).
+	// Stored separately from runtime sessionEnv so SetSessionEnv calls cannot overwrite it.
+	// MergeEnv semantics ensure these override any same-named keys inherited from os.Environ()
+	// when the codex subprocess is spawned (e.g. user-scoped HTTPS_PROXY leaking into the agent).
+	var configEnv []string
+	if envMap, ok := opts["env"].(map[string]string); ok {
+		for k, v := range envMap {
+			configEnv = append(configEnv, k+"="+v)
+		}
+	} else if envMap, ok := opts["env"].(map[string]any); ok {
+		for k, v := range envMap {
+			if s, ok := v.(string); ok {
+				configEnv = append(configEnv, k+"="+s)
+			}
+		}
 	}
 
 	return &Agent{
@@ -57,8 +99,40 @@ func New(opts map[string]any) (core.Agent, error) {
 		model:           model,
 		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
 		mode:            mode,
+		backend:         backend,
+		appServerURL:    appServerURL,
+		codexHome:       strings.TrimSpace(codexHome),
+		systemPrompt:    strings.TrimSpace(systemPrompt),
+		appendPrompt:    strings.TrimSpace(appendPrompt),
+		cmd:             cmd,
+		cliExtraArgs:    cliExtraArgs,
+		configEnv:       configEnv,
 		activeIdx:       -1,
 	}, nil
+}
+
+func normalizeBackend(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "app-server", "app_server", "appserver", "ws":
+		return "app_server"
+	default:
+		return "exec"
+	}
+}
+
+func normalizeAppServerURL(raw string) string {
+	url := strings.TrimSpace(raw)
+	if url == "" {
+		// Default to the stdio transport: cc-connect's app_server backend
+		// speaks JSON-RPC over the stdio pipes, and on codex 0.152+ a ws://
+		// --listen value leaves stdio unresponsive (see #1781). Users who
+		// need a WebSocket listener can still set app_server_url explicitly.
+		return "stdio://"
+	}
+	if strings.EqualFold(url, "stdio") {
+		return "stdio://"
+	}
+	return url
 }
 
 func normalizeMode(raw string) string {
@@ -78,14 +152,22 @@ func normalizeReasoningEffort(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
 		return ""
+	case "none", "off", "disabled", "disable":
+		return "none"
+	case "minimal", "min":
+		return "minimal"
 	case "low":
 		return "low"
 	case "medium", "med":
 		return "medium"
 	case "high":
 		return "high"
-	case "xhigh", "x-high", "very-high":
+	case "xhigh", "x-high", "extra-high", "extra_high", "very-high":
 		return "xhigh"
+	case "max", "maximum":
+		return "max"
+	case "ultra":
+		return "ultra"
 	default:
 		return ""
 	}
@@ -133,7 +215,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "xhigh"}
+	return []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -143,6 +225,9 @@ func (a *Agent) configuredModels() []core.ModelOption {
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	if models := readCodexModelCatalog(); len(models) > 0 {
+		return models
+	}
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}
@@ -152,7 +237,19 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := readCodexCachedModels(); len(models) > 0 {
 		return models
 	}
+	return defaultCodexModels()
+}
+
+func defaultCodexModels() []core.ModelOption {
 	return []core.ModelOption{
+		{Name: "gpt-5.6-sol", Desc: "GPT-5.6 Sol (strongest for complex Codex work)"},
+		{Name: "gpt-5.6-terra", Desc: "GPT-5.6 Terra (balanced everyday Codex work)"},
+		{Name: "gpt-5.6-luna", Desc: "GPT-5.6 Luna (fast, efficient GPT-5.6 model)"},
+		{Name: "gpt-5.6", Desc: "GPT-5.6 (recommended Codex model family default)"},
+		{Name: "gpt-5.5", Desc: "GPT-5.5 (previous frontier Codex model)"},
+		{Name: "gpt-5.4", Desc: "GPT-5.4 (frontier Codex model)"},
+		{Name: "gpt-5.4-mini", Desc: "GPT-5.4 Mini (fast Codex model)"},
+		{Name: "gpt-5.3-codex-spark", Desc: "GPT-5.3 Codex Spark (fast text-only iteration)"},
 		{Name: "o4-mini", Desc: "O4 Mini (fast reasoning)"},
 		{Name: "o3", Desc: "O3 (most capable reasoning)"},
 		{Name: "gpt-4.1", Desc: "GPT-4.1 (balanced)"},
@@ -162,11 +259,53 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	}
 }
 
-var openaiChatModels = map[string]bool{
-	"o4-mini": true, "o3": true, "o3-mini": true, "o1": true, "o1-mini": true,
-	"gpt-4.1": true, "gpt-4.1-mini": true, "gpt-4.1-nano": true,
-	"gpt-4o": true, "gpt-4o-mini": true,
-	"codex-mini-latest": true,
+// nonChatSubstrings identifies non chat/completion modalities returned by
+// GET /v1/models that must not appear in the codex /model chooser.
+var nonChatSubstrings = []string{
+	"embedding", "whisper", "tts", "moderation", "dall-e",
+	"realtime", "transcribe", "search-preview", "image",
+	"audio-preview",
+}
+
+// isCodexChatModel reports whether an OpenAI-compatible model ID names a
+// chat/completion model that Codex CLI can drive. Used to filter the
+// /v1/models response into the /model command suggestion list.
+//
+// Rules (case-insensitive):
+//   - Reject any ID containing a non-chat modality substring (embedding,
+//     whisper, tts, dall-e, audio-preview, realtime, transcribe, moderation,
+//     image, search-preview).
+//   - Accept known chat family prefixes: gpt-*, chatgpt-*, codex-*, o1-*,
+//     o3-*, o4-*, o5-*.
+//   - Accept bare reasoning family IDs: o1 / o3 / o4 / o5.
+//
+// Uses pattern matching rather than a static allowlist so new frontier models
+// (gpt-5.x, gpt-6, o5-*, codex-*, etc.) are picked up automatically.
+func isCodexChatModel(id string) bool {
+	if id == "" {
+		return false
+	}
+	lower := strings.ToLower(id)
+	for _, s := range nonChatSubstrings {
+		if strings.Contains(lower, s) {
+			return false
+		}
+	}
+	switch {
+	case strings.HasPrefix(lower, "gpt-"),
+		strings.HasPrefix(lower, "chatgpt-"),
+		strings.HasPrefix(lower, "codex-"),
+		strings.HasPrefix(lower, "o1-"),
+		strings.HasPrefix(lower, "o3-"),
+		strings.HasPrefix(lower, "o4-"),
+		strings.HasPrefix(lower, "o5-"):
+		return true
+	}
+	switch lower {
+	case "o1", "o3", "o4", "o5":
+		return true
+	}
+	return false
 }
 
 func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
@@ -220,7 +359,7 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 
 	var models []core.ModelOption
 	for _, m := range result.Data {
-		if openaiChatModels[m.ID] {
+		if isCodexChatModel(m.ID) {
 			models = append(models, core.ModelOption{Name: m.ID})
 		}
 	}
@@ -229,19 +368,22 @@ func (a *Agent) fetchModelsFromAPI(ctx context.Context) []core.ModelOption {
 }
 
 func readCodexCachedModels() []core.ModelOption {
-	codexHome := os.Getenv("CODEX_HOME")
+	codexHome, _ := resolveCodexHome(nil)
 	if codexHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil
-		}
-		codexHome = filepath.Join(home, ".codex")
+		return nil
 	}
 	path := filepath.Join(codexHome, "models_cache.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
+	return parseCodexModelsJSON(b)
+}
+
+// parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
+// or models_cache.json) into a deduplicated, filtered slice of ModelOption.
+// It is shared by readCodexCachedModels and readCodexModelCatalog.
+func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	var payload struct {
 		Models []struct {
 			Slug           string `json:"slug"`
@@ -251,7 +393,7 @@ func readCodexCachedModels() []core.ModelOption {
 			SupportedInAPI bool   `json:"supported_in_api"`
 		} `json:"models"`
 	}
-	if err := json.Unmarshal(b, &payload); err != nil {
+	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil
 	}
 
@@ -283,6 +425,61 @@ func readCodexCachedModels() []core.ModelOption {
 	return models
 }
 
+// readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
+// model_catalog_json setting, then reads and parses that JSON file.
+// This is the authoritative source of model metadata for Codex CLI,
+// maintained by the Codex distribution itself.
+func readCodexModelCatalog() []core.ModelOption {
+	codexHome, _ := resolveCodexHome(nil)
+	if codexHome == "" {
+		return nil
+	}
+
+	// Parse CODEX_HOME/config.toml to find model_catalog_json path
+	cfgPath := filepath.Join(codexHome, "config.toml")
+	var cfg struct {
+		ModelCatalogJSON string `toml:"model_catalog_json"`
+	}
+	if _, err := toml.DecodeFile(cfgPath, &cfg); err != nil {
+		slog.Debug("codex: failed to read config.toml for model_catalog_json", "error", err)
+		return nil
+	}
+	if cfg.ModelCatalogJSON == "" {
+		return nil
+	}
+
+	// Expand ~ and resolve relative paths against CODEX_HOME
+	catalogPath := cfg.ModelCatalogJSON
+	switch {
+	case strings.HasPrefix(catalogPath, "~/"):
+		home, err := os.UserHomeDir()
+		if err != nil {
+			slog.Debug("codex: cannot resolve home dir for model_catalog_json", "error", err)
+			return nil
+		}
+		catalogPath = filepath.Join(home, catalogPath[2:])
+	case catalogPath == "~":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil
+		}
+		catalogPath = home
+	case !filepath.IsAbs(catalogPath):
+		catalogPath = filepath.Join(codexHome, catalogPath)
+	}
+
+	b, err := os.ReadFile(catalogPath)
+	if err != nil {
+		slog.Debug("codex: failed to read model_catalog_json", "path", catalogPath, "error", err)
+		return nil
+	}
+
+	models := parseCodexModelsJSON(b)
+	if models == nil {
+		slog.Debug("codex: failed to parse model_catalog_json", "path", catalogPath)
+	}
+	return models
+}
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -294,28 +491,70 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	mode := a.mode
 	model := a.model
 	reasoningEffort := a.reasoningEffort
-	extraEnv := a.providerEnvLocked()
+	backend := a.backend
+	appServerURL := a.appServerURL
+	codexHome := a.codexHome
+	systemPrompt := a.systemPrompt
+	appendPrompt := a.appendPrompt
+	cliBin := a.cmd
+	cliExtraArgs := a.cliExtraArgs
+	workDir := a.workDir
+	// Order matters for MergeEnv override semantics (later wins):
+	//   1. configEnv — static env from [projects.agent.options.env]
+	//   2. providerEnv — per-provider keys (OPENAI_API_KEY etc.)
+	//   3. sessionEnv — runtime overrides from /env or admin actions
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
+	var baseURL string
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := a.providers[a.activeIdx].Model; m != "" {
 			model = m
 		}
+		baseURL = a.providers[a.activeIdx].BaseURL
 	}
+	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
 
-	return newCodexSession(ctx, a.workDir, model, reasoningEffort, mode, sessionID, extraEnv)
+	if provName != "" {
+		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
+			slog.Warn("codex: failed to write provider config", "provider", provName, "error", err)
+		}
+		if err := ensureCodexAuth(codexHome, provAPIKey); err != nil {
+			slog.Warn("codex: failed to write auth.json", "provider", provName, "error", err)
+		}
+	}
+
+	if backend == "app_server" {
+		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+	}
+	if codexHome != "" {
+		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
+	}
+
+	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	return listCodexSessions(a.workDir)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	workDir := a.workDir
+	a.mu.RUnlock()
+	return listCodexSessions(workDir, codexHome)
 }
 
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
-	return getSessionHistory(sessionID, limit)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	return getSessionHistory(sessionID, codexHome, limit)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
-	path := findSessionFile(sessionID)
+	a.mu.RLock()
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	path := findSessionFile(sessionID, codexHome)
 	if path == "" {
 		return fmt.Errorf("session file not found: %s", sessionID)
 	}
@@ -338,35 +577,145 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	opts := map[string]any{
+		"mode":    a.mode,
+		"backend": a.backend,
+	}
+	if a.cmd != "" {
+		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)
+	}
+	if a.model != "" {
+		opts["model"] = a.model
+	}
+	if a.reasoningEffort != "" {
+		opts["reasoning_effort"] = a.reasoningEffort
+	}
+	if a.appServerURL != "" {
+		opts["app_server_url"] = a.appServerURL
+	}
+	if a.codexHome != "" {
+		opts["codex_home"] = a.codexHome
+	}
+	return opts
+}
+
 // ── SkillProvider implementation ──────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.RLock()
+	workDir := a.workDir
+	codexHome := a.codexHome
+	a.mu.RUnlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
-	dirs := []string{
-		filepath.Join(absDir, ".codex", "skills"),
-		filepath.Join(absDir, ".claude", "skills"),
-	}
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			codexHome = filepath.Join(home, ".codex")
-		}
-	}
-	if codexHome != "" {
-		dirs = append(dirs, filepath.Join(codexHome, "skills"))
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".claude", "skills"))
-	}
-	return dirs
+	return codexSkillDirs(absDir, codexHome)
 }
 
 // ── ContextCompressor implementation ──────────────────────────
 
-func (a *Agent) CompressCommand() string { return "/compact" }
+// CompressCommand returns "" because Codex native slash commands (/compact, /clear)
+// are not reliably executed in exec/resume mode — they may be treated as plain text.
+// See: https://github.com/chenhg5/cc-connect/issues/378
+func (a *Agent) CompressCommand() string { return "" }
+
+func codexSkillDirs(workDir, explicitCodexHome string) []string {
+	homeDir, _ := os.UserHomeDir()
+	codexHome := strings.TrimSpace(explicitCodexHome)
+	if codexHome == "" {
+		codexHome = strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	}
+	if codexHome == "" && homeDir != "" {
+		codexHome = filepath.Join(homeDir, ".codex")
+	}
+
+	projectDirs := walkUpCodexProjectSkillDirs(workDir, homeDir)
+	userDirs := make([]string, 0, 4)
+	if codexHome != "" {
+		userDirs = append(userDirs,
+			filepath.Join(codexHome, "skills"),
+			filepath.Join(codexHome, "skills", ".system"),
+		)
+		userDirs = append(userDirs, skillroots.Find(filepath.Join(codexHome, "plugins"))...)
+	}
+	if homeDir != "" {
+		userDirs = append(userDirs,
+			filepath.Join(homeDir, ".agents", "skills"),
+		)
+	}
+	return uniqueCodexSkillDirs(append(projectDirs, userDirs...))
+}
+
+func walkUpCodexProjectSkillDirs(workDir, homeDir string) []string {
+	current := filepath.Clean(workDir)
+	homeDir = filepath.Clean(homeDir)
+	stopAt := findCodexProjectRoot(current)
+
+	var dirs []string
+	for {
+		if homeDir != "" && sameCodexPath(current, homeDir) {
+			break
+		}
+		dirs = append(dirs,
+			filepath.Join(current, ".agents", "skills"),
+			filepath.Join(current, ".codex", "skills"),
+		)
+		if stopAt != "" && sameCodexPath(current, stopAt) {
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return uniqueCodexSkillDirs(dirs)
+}
+
+func findCodexProjectRoot(start string) string {
+	current := filepath.Clean(start)
+	for {
+		for _, marker := range []string{".git", ".jj"} {
+			if _, err := os.Stat(filepath.Join(current, marker)); err == nil {
+				return current
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func sameCodexPath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func uniqueCodexSkillDirs(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		clean := filepath.Clean(path)
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	return out
+}
 
 // ── MemoryFileProvider implementation ─────────────────────────
 
@@ -452,11 +801,48 @@ func (a *Agent) providerEnvLocked() []string {
 	return env
 }
 
+// activeProviderCodexConfig returns Codex-specific config for the active provider.
+// Returns non-empty name when the provider has codex config (wire_api, headers)
+// OR when it has a BaseURL (third-party provider needing auth.json).
+func (a *Agent) activeProviderCodexConfig() (name string, apiKey string, wireAPI string, headers map[string]string) {
+	if a.activeIdx < 0 || a.activeIdx >= len(a.providers) {
+		return
+	}
+	p := a.providers[a.activeIdx]
+	hasCodexConfig := p.CodexWireAPI != "" || len(p.CodexHTTPHeaders) > 0
+	isThirdParty := p.BaseURL != "" && p.APIKey != ""
+	if !hasCodexConfig && !isThirdParty {
+		return
+	}
+	return p.Name, p.APIKey, p.CodexWireAPI, p.CodexHTTPHeaders
+}
+
+// PermissionModes returns the supported codex permission modes.
+//
+// Behavior depends on backend:
+//   - exec backend (default): codex exec has no approval IPC, so all modes run
+//     with approval_policy=never. Sandbox tier is what controls access. The
+//     "suggest" label refers to the *intent* (read-only safety) — the CLI does
+//     not pop interactive approval prompts on this backend.
+//   - app_server backend: "suggest" enables real interactive approval requests
+//     (execCommandApproval / applyPatchApproval / permissionsApproval).
+//
+// Note: auto-edit and full-auto produce the same flags on the exec backend
+// (codex CLI has no separate "ask for shell only" mode); auto-edit is kept as
+// an alias for backward compatibility with existing user configs.
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
-		{Key: "suggest", Name: "Suggest", NameZh: "建议", Desc: "Ask permission for every tool call", DescZh: "每次工具调用都需确认"},
-		{Key: "auto-edit", Name: "Auto Edit", NameZh: "自动编辑", Desc: "Auto-approve file edits, ask for shell commands", DescZh: "自动允许文件编辑，Shell 命令需确认"},
-		{Key: "full-auto", Name: "Full Auto", NameZh: "全自动", Desc: "Auto-approve with workspace sandbox", DescZh: "自动通过（工作区沙箱）"},
-		{Key: "yolo", Name: "YOLO", NameZh: "YOLO 模式", Desc: "Bypass all approvals and sandbox", DescZh: "跳过所有审批和沙箱"},
+		{Key: "suggest", Name: "Suggest", NameZh: "建议",
+			Desc:   "Read-only sandbox; on exec backend no prompts, on app_server backend asks for every tool call",
+			DescZh: "只读沙箱；exec 后端不弹审批，app_server 后端每次工具调用都会询问"},
+		{Key: "auto-edit", Name: "Auto Edit", NameZh: "自动编辑",
+			Desc:   "Workspace-write sandbox, no approval prompts (alias of Full Auto)",
+			DescZh: "工作区可写沙箱，不弹审批（等同于全自动）"},
+		{Key: "full-auto", Name: "Full Auto", NameZh: "全自动",
+			Desc:   "Workspace-write sandbox, no approval prompts",
+			DescZh: "工作区可写沙箱，不弹审批"},
+		{Key: "yolo", Name: "YOLO", NameZh: "YOLO 模式",
+			Desc:   "Bypass all approvals and sandbox (DANGEROUS)",
+			DescZh: "跳过所有审批和沙箱（危险）"},
 	}
 }

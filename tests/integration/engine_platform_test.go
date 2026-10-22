@@ -87,11 +87,11 @@ func TestIntegration_MultiAgentSessionCoordination(t *testing.T) {
 	assert.True(t, sess2.Alive())
 
 	// Send message to agent 1
-	err = sess1.Send("Message to agent 1", nil, nil)
+	err = sess1.Send("Message to agent 1", "", nil, nil)
 	require.NoError(t, err)
 
 	// Send message to agent 2
-	err = sess2.Send("Message to agent 2", nil, nil)
+	err = sess2.Send("Message to agent 2", "", nil, nil)
 	require.NoError(t, err)
 
 	// Verify both agents received their messages
@@ -307,7 +307,7 @@ func TestIntegration_AgentPermissionFlow(t *testing.T) {
 	require.NoError(t, err)
 
 	// Send message
-	err = sess.Send("Run dangerous command", nil, nil)
+	err = sess.Send("Run dangerous command", "", nil, nil)
 	require.NoError(t, err)
 
 	// Collect events

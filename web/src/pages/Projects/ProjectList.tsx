@@ -12,9 +12,13 @@ const AGENT_OPTIONS = [
   { key: 'claudecode', label: 'Claude Code' },
   { key: 'codex', label: 'Codex' },
   { key: 'gemini', label: 'Gemini CLI' },
+  { key: 'antigravity', label: 'Antigravity CLI' },
   { key: 'cursor', label: 'Cursor' },
-  { key: 'acp', label: 'ACP' },
-  { key: 'iflow', label: 'iFlow' },
+  { key: 'droid', label: 'Droid' },
+  { key: 'devin', label: 'Devin' },
+  { key: 'copilot', label: 'Copilot (GitHub)' },
+  { key: 'acp', label: 'ACP (Generic)' },
+  { key: 'acp:openclaw', label: 'OpenClaw (ACP)' },
   { key: 'opencode', label: 'OpenCode' },
   { key: 'qoder', label: 'Qoder' },
 ];
@@ -29,7 +33,11 @@ const PLATFORM_OPTIONS: { key: string; label: string; color: string; qr?: boolea
   { key: 'wecom', label: 'WeChat Work', color: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400' },
   { key: 'qq', label: 'QQ (OneBot)', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
   { key: 'qqbot', label: 'QQ Bot (Official)', color: 'bg-cyan-50 dark:bg-cyan-900/30 text-cyan-600 dark:text-cyan-400' },
+  { key: 'yuanbao', label: 'Yuanbao', color: 'bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400' },
   { key: 'line', label: 'LINE', color: 'bg-lime-50 dark:bg-lime-900/30 text-lime-600 dark:text-lime-400' },
+  { key: 'weibo', label: 'Weibo (微博)', color: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400' },
+  { key: 'tuitui', label: 'TuiTui (推推)', color: 'bg-teal-50 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300' },
+  { key: 'cloud_web', label: 'Cloud Web (自建 IM)', color: 'bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400' },
 ];
 
 export default function ProjectList() {
@@ -105,7 +113,7 @@ export default function ProjectList() {
   }
 
   return (
-    <div className="animate-fade-in space-y-4">
+    <div className="animate-fade-in space-y-4 ">
       {/* Header */}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-900 dark:text-white">{t('projects.title')}</h2>
@@ -130,7 +138,10 @@ export default function ProjectList() {
                 </div>
                 <div className="flex flex-wrap gap-1.5 mb-3">
                   <Badge variant="info">{p.agent_type}</Badge>
-                  {p.platforms?.map((pl) => <Badge key={pl}>{pl}</Badge>)}
+                  {p.platforms?.slice(0, 3).map((pl) => <Badge key={pl}>{pl}</Badge>)}
+                  {(p.platforms?.length ?? 0) > 3 && (
+                    <Badge>+{p.platforms!.length - 3}</Badge>
+                  )}
                 </div>
                 <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 mt-auto pt-3 border-t border-gray-100 dark:border-gray-800">
                   <span>{p.sessions_count} {t('nav.sessions').toLowerCase()}</span>

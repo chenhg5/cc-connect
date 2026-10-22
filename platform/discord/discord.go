@@ -22,7 +22,7 @@ func init() {
 	core.RegisterPlatform("discord", New)
 }
 
-const maxDiscordLen = 2000
+const maxDiscordLen = 1900
 
 type replyContext struct {
 	channelID string
@@ -40,16 +40,20 @@ type interactionReplyCtx struct {
 	firstDone   bool
 }
 
+type progressPlatform struct {
+	*Platform
+}
+
 type Platform struct {
 	token                      string
 	allowFrom                  string
 	guildID                    string // optional: per-guild registration (instant) vs global (up to 1h propagation)
-	groupReplyAll              bool
+	progressStyle              string
+	groupReplyAllGuilds        []string // guild IDs where groupReplyAll is active; "*" = all guilds
 	shareSessionInChannel      bool
 	threadIsolation            bool
 	respondToAtEveryoneAndHere bool
 	proxyURL                   *url.URL
-	session                    *discordgo.Session
 	handler                    core.MessageHandler
 	botID                      string
 	appID                      string
@@ -58,7 +62,20 @@ type Platform struct {
 	readyCh                    chan struct{}
 	seenMsgs                   sync.Map // message ID dedup: prevents duplicate MessageCreate events
 	seenInteractions           sync.Map // interaction ID dedup: prevents duplicate slash/button events
+	self                       core.Platform
+
+	mu               sync.RWMutex
+	session          *discordgo.Session
+	cancel           context.CancelFunc
+	stopping         bool
+	everConnected    bool
+	lifecycleHandler core.PlatformLifecycleHandler
 }
+
+const (
+	discordInitialReconnectBackoff = 5 * time.Second
+	discordMaxReconnectBackoff     = 5 * time.Minute
+)
 
 func New(opts map[string]any) (core.Platform, error) {
 	token, _ := opts["token"].(string)
@@ -68,10 +85,35 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom("discord", allowFrom)
 	guildID, _ := opts["guild_id"].(string)
-	groupReplyAll, _ := opts["group_reply_all"].(bool)
+	var groupReplyAllGuilds []string
+	if guilds, _ := opts["group_reply_all_guilds"].(string); guilds != "" {
+		for _, g := range strings.Split(guilds, ",") {
+			if g = strings.TrimSpace(g); g != "" {
+				groupReplyAllGuilds = append(groupReplyAllGuilds, g)
+			}
+		}
+	} else if all, _ := opts["group_reply_all"].(bool); all {
+		groupReplyAllGuilds = []string{"*"}
+	}
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
+	// Default to "compact" so streaming edits work out of the box (Discord
+	// supports MessageUpdater.UpdateMessage). Users can opt back into the old
+	// "send entire reply at once" behavior with progress_style = "legacy".
+	progressStyle := "compact"
+	if v, ok := opts["progress_style"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "":
+			// keep default
+		case "legacy":
+			progressStyle = "legacy"
+		case "compact", "card":
+			progressStyle = strings.ToLower(strings.TrimSpace(v))
+		default:
+			return nil, fmt.Errorf("discord: invalid progress_style %q (want legacy, compact, or card)", v)
+		}
+	}
 
 	var proxyU *url.URL
 	if proxyStr, _ := opts["proxy"].(string); proxyStr != "" {
@@ -86,20 +128,68 @@ func New(opts map[string]any) (core.Platform, error) {
 		proxyU = u
 	}
 
-	return &Platform{
+	base := &Platform{
 		token:                      token,
 		allowFrom:                  allowFrom,
 		guildID:                    guildID,
-		groupReplyAll:              groupReplyAll,
+		progressStyle:              progressStyle,
+		groupReplyAllGuilds:        groupReplyAllGuilds,
 		shareSessionInChannel:      shareSessionInChannel,
 		readyCh:                    make(chan struct{}),
 		threadIsolation:            threadIsolation,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		proxyURL:                   proxyU,
-	}, nil
+	}
+	if progressStyle == "compact" || progressStyle == "card" {
+		wrapped := &progressPlatform{Platform: base}
+		base.self = wrapped
+		return wrapped, nil
+	}
+	base.self = base
+	return base, nil
 }
 
 func (p *Platform) Name() string { return "discord" }
+
+func (p *Platform) selfPlatform() core.Platform {
+	if p != nil && p.self != nil {
+		return p.self
+	}
+	return p
+}
+
+func (p *Platform) dispatchMessage(msg *core.Message) {
+	if p == nil || p.handler == nil {
+		return
+	}
+	p.handler(p.selfPlatform(), msg)
+}
+
+func (p *progressPlatform) ProgressStyle() string {
+	switch strings.ToLower(strings.TrimSpace(p.progressStyle)) {
+	case "", "legacy":
+		return "legacy"
+	case "compact":
+		return "compact"
+	case "card":
+		return "card"
+	default:
+		return "legacy"
+	}
+}
+
+func (p *progressPlatform) SupportsProgressCardPayload() bool {
+	return p.ProgressStyle() == "card"
+}
+
+func (p *Platform) isGroupReplyAllGuild(guildID string) bool {
+	for _, g := range p.groupReplyAllGuilds {
+		if g == "*" || g == guildID {
+			return true
+		}
+	}
+	return false
+}
 
 func (p *Platform) makeSessionKey(channelID string, userID string) string {
 	return buildSessionKey(channelID, userID, p.shareSessionInChannel)
@@ -254,17 +344,54 @@ func resolveSessionKeyForChannel(channelID, userID string, shareSessionInChannel
 	return buildSessionKey(channelID, userID, shareSessionInChannel)
 }
 
-func resolveThreadReplyContext(m *discordgo.MessageCreate, botID string, ops discordThreadOps) (string, replyContext, error) {
+// resolveParentChannelID returns the ID of the parent guild channel a message
+// or interaction belongs to, looking through threads. Returns channelID
+// unchanged when it isn't a thread or when ParentID is unavailable.
+//
+// This is the workspace-binding identity for thread-isolation mode: we want
+// `<base_dir>/<parent-channel-name>` to drive auto-bind, not `<thread-name>`.
+func resolveParentChannelID(channelID string, ops discordThreadOps) string {
+	ch, err := ops.ResolveChannel(channelID)
+	if err != nil {
+		slog.Debug("discord: resolve channel for parent lookup failed", "channel", channelID, "error", err)
+		return channelID
+	}
+	if isThreadChannelType(ch.Type) && ch.ParentID != "" {
+		return ch.ParentID
+	}
+	return channelID
+}
+
+// resolveThreadReplyContext routes a guild message into a Discord thread for
+// thread_isolation mode and returns the per-thread session key, the reply
+// context, and the parent channel ID.
+//
+// parentChannelID is the channel the thread lives under (or, for messages
+// posted directly into an existing thread, the thread's ParentID). It is
+// distinct from the thread itself: it's what callers should stamp onto
+// Message.ChannelKey so multi-workspace auto-bind keys by channel name
+// rather than thread name. Without this distinction, threads break the
+// "channel name → workspace folder" convention because Discord threads
+// have their own names that rarely match a workspace directory.
+func resolveThreadReplyContext(m *discordgo.MessageCreate, botID string, ops discordThreadOps) (string, replyContext, string, error) {
 	ch, err := ops.ResolveChannel(m.ChannelID)
 	if err != nil {
-		return "", replyContext{}, fmt.Errorf("resolve channel %s: %w", m.ChannelID, err)
+		return "", replyContext{}, "", fmt.Errorf("resolve channel %s: %w", m.ChannelID, err)
 	}
 	if isThreadChannelType(ch.Type) {
+		// Message posted directly inside an existing thread. The parent
+		// channel comes from ch.ParentID; fall back to m.ChannelID only
+		// if Discord didn't populate it (defensive — discordgo always
+		// sets ParentID for thread channels).
+		parentChannelID := ch.ParentID
+		if parentChannelID == "" {
+			parentChannelID = m.ChannelID
+		}
 		if err := ops.JoinThread(m.ChannelID); err != nil {
 			slog.Debug("discord: join existing thread failed", "thread", m.ChannelID, "error", err)
 		}
 		rc := replyContext{channelID: m.ChannelID, messageID: m.ID, threadID: m.ChannelID}
-		return buildThreadSessionKey(m.ChannelID), rc, nil
+		return buildThreadSessionKey(m.ChannelID), rc, parentChannelID, nil
 	}
 	if m.Message != nil && m.Message.Thread != nil && m.Message.Thread.ID != "" {
 		threadID := m.Message.Thread.ID
@@ -272,7 +399,7 @@ func resolveThreadReplyContext(m *discordgo.MessageCreate, botID string, ops dis
 			slog.Debug("discord: join attached thread failed", "thread", threadID, "error", err)
 		}
 		rc := replyContext{channelID: threadID, messageID: m.ID, threadID: threadID}
-		return buildThreadSessionKey(threadID), rc, nil
+		return buildThreadSessionKey(threadID), rc, m.ChannelID, nil
 	}
 	if m.Flags&discordgo.MessageFlagsHasThread != 0 {
 		threadID := m.ID
@@ -280,18 +407,18 @@ func resolveThreadReplyContext(m *discordgo.MessageCreate, botID string, ops dis
 			slog.Debug("discord: join message thread failed", "thread", threadID, "error", err)
 		}
 		rc := replyContext{channelID: threadID, messageID: m.ID, threadID: threadID}
-		return buildThreadSessionKey(threadID), rc, nil
+		return buildThreadSessionKey(threadID), rc, m.ChannelID, nil
 	}
 
 	thread, err := ops.StartThread(m.ChannelID, m.ID, threadNameForMessage(m, botID), 1440)
 	if err != nil {
-		return "", replyContext{}, fmt.Errorf("start thread for message %s: %w", m.ID, err)
+		return "", replyContext{}, "", fmt.Errorf("start thread for message %s: %w", m.ID, err)
 	}
 	if err := ops.JoinThread(thread.ID); err != nil {
 		slog.Debug("discord: join new thread failed", "thread", thread.ID, "error", err)
 	}
 	rc := replyContext{channelID: thread.ID, messageID: m.ID, threadID: thread.ID}
-	return buildThreadSessionKey(thread.ID), rc, nil
+	return buildThreadSessionKey(thread.ID), rc, m.ChannelID, nil
 }
 
 func resolveCronReplyTarget(sessionKey, title string, ops discordThreadOps) (string, replyContext, error) {
@@ -369,10 +496,10 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 		})
 	}
 
-	// Limit to 200 commands
-	if len(cmds) > 200 {
-		cmds = cmds[:200]
-		slog.Warn("discord: commands > 200, truncate")
+	// Discord allows max 100 commands per bulk overwrite (guild or global).
+	if len(cmds) > 100 {
+		slog.Warn("discord: truncating commands to Discord limit of 100", "total", len(cmds), "dropped", len(cmds)-100)
+		cmds = cmds[:100]
 	}
 
 	if len(cmds) == 0 {
@@ -398,12 +525,46 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 	return nil
 }
 
-func (p *Platform) Start(handler core.MessageHandler) error {
-	p.handler = handler
+// SetLifecycleHandler registers a handler that will be notified when the
+// Discord platform becomes ready or unavailable. Implementing this method
+// also opts the platform into Engine.Start's AsyncRecoverablePlatform path,
+// so a transient gateway error at startup no longer aborts the platform.
+func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lifecycleHandler = h
+}
 
+// Start launches the gateway connection in the background. It returns nil as
+// soon as the recovery loop is running; the caller should treat
+// OnPlatformReady as the signal that the platform is actually usable.
+//
+// Before this change Start returned the first session.Open() error directly,
+// which meant a transient proxy/network blip during cc-connect startup
+// permanently took Discord offline until manual restart (release-gate
+// 2026-06-14: "discord: open gateway: ... EOF" with no retry).
+func (p *Platform) Start(handler core.MessageHandler) error {
+	p.mu.Lock()
+	if p.stopping {
+		p.mu.Unlock()
+		return fmt.Errorf("discord: platform stopped")
+	}
+	p.handler = handler
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	p.mu.Unlock()
+
+	go p.connectLoop(ctx)
+	return nil
+}
+
+// buildSession creates a fresh discordgo session with proxy + handlers wired up.
+// It is called once per connect attempt so a session that failed mid-handshake
+// is fully discarded before the next retry.
+func (p *Platform) buildSession() (*discordgo.Session, error) {
 	session, err := discordgo.New("Bot " + p.token)
 	if err != nil {
-		return fmt.Errorf("discord: create session: %w", err)
+		return nil, fmt.Errorf("discord: create session: %w", err)
 	}
 	if p.proxyURL != nil {
 		transport := &http.Transport{Proxy: http.ProxyURL(p.proxyURL)}
@@ -411,7 +572,6 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		session.Dialer = &websocket.Dialer{Proxy: http.ProxyURL(p.proxyURL)}
 		slog.Info("discord: using proxy", "proxy", p.proxyURL.Host)
 	}
-	p.session = session
 
 	session.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
@@ -468,7 +628,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			p.cacheBotRoleIDForGuild(s, m.GuildID, nil)
 			botRoleID = p.botRoleIDForGuild(m.GuildID)
 		}
-		if m.GuildID != "" && !p.groupReplyAll {
+		if m.GuildID != "" && !p.isGroupReplyAllGuild(m.GuildID) {
 			if !isDiscordBotMention(m, p.botID, botRoleID, p.respondToAtEveryoneAndHere) {
 				slog.Debug("discord: ignoring guild message without bot mention", "channel", m.ChannelID)
 				return
@@ -483,68 +643,130 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 
 		sessionKey := p.makeSessionKey(m.ChannelID, m.Author.ID)
 		rctx := replyContext{channelID: m.ChannelID, messageID: m.ID}
+		// channelKey pins workspace binding to the parent channel even when
+		// thread_isolation rewrites SessionKey to a thread ID. Without it,
+		// effectiveChannelID() would extract the thread ID from SessionKey
+		// and multi-workspace auto-bind would try to match `<base_dir>/<thread-name>`,
+		// which never exists. Empty value falls back to SessionKey extraction
+		// (the historical, non-isolated behavior).
+		channelKey := ""
 		if p.threadIsolation && m.GuildID != "" {
-			threadSessionKey, threadCtx, err := resolveThreadReplyContext(m, p.botID, sessionThreadOps{session: p.session})
+			threadSessionKey, threadCtx, parentChannelID, err := resolveThreadReplyContext(m, p.botID, sessionThreadOps{session: p.session})
 			if err != nil {
 				slog.Warn("discord: thread isolation setup failed, falling back", "message", m.ID, "channel", m.ChannelID, "error", err)
 			} else {
 				sessionKey = threadSessionKey
 				rctx = threadCtx
+				channelKey = parentChannelID
 			}
 		}
 
-		var images []core.ImageAttachment
-		var audio *core.AudioAttachment
-		for _, att := range m.Attachments {
-			ct := strings.ToLower(att.ContentType)
-			if strings.HasPrefix(ct, "audio/") {
-				data, err := downloadURL(att.URL)
-				if err != nil {
-					slog.Error("discord: download audio failed", "url", att.URL, "error", err)
-					continue
-				}
-				format := "ogg"
-				if parts := strings.SplitN(ct, "/", 2); len(parts) == 2 {
-					format = parts[1]
-				}
-				audio = &core.AudioAttachment{
-					MimeType: ct, Data: data, Format: format,
-				}
-			} else if att.Width > 0 && att.Height > 0 {
-				data, err := downloadURL(att.URL)
-				if err != nil {
-					slog.Error("discord: download attachment failed", "url", att.URL, "error", err)
-					continue
-				}
-				images = append(images, core.ImageAttachment{
-					MimeType: att.ContentType, Data: data, FileName: att.Filename,
-				})
-			}
-		}
+		images, files, audio := classifyAttachments(m.Attachments, downloadURL)
 
-		if m.Content == "" && len(images) == 0 && audio == nil {
+		if m.Content == "" && len(images) == 0 && len(files) == 0 && audio == nil && m.ReferencedMessage == nil {
 			return
 		}
 
+		// Prepend the replied-to message's content and images so the agent has context.
+		if m.ReferencedMessage != nil {
+			m.Content, images = applyReferencedMessage(m.ReferencedMessage, m.Content, images, downloadURL)
+		}
+
 		msg := &core.Message{
-			SessionKey: sessionKey, Platform: "discord",
+			SessionKey: sessionKey, ChannelKey: channelKey, Platform: "discord",
+			ChannelID: m.ChannelID,
 			MessageID: m.ID,
 			UserID:    m.Author.ID, UserName: m.Author.Username,
-			ChatName: p.resolveChannelName(m.ChannelID),
-			Content:  m.Content, Images: images, Audio: audio, ReplyCtx: rctx,
+			Content: m.Content, Images: images, Files: files, Audio: audio, ReplyCtx: rctx,
 		}
-		p.handler(p, msg)
+		msg.ChatName, _ = p.ResolveChannelName(m.ChannelID)
+		p.dispatchMessage(msg)
 	})
 
 	session.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		p.handleInteraction(s, i)
 	})
 
-	if err := session.Open(); err != nil {
-		return fmt.Errorf("discord: open gateway: %w", err)
-	}
+	return session, nil
+}
 
-	return nil
+// connectLoop drives the Discord gateway connection with exponential-backoff
+// retry. After session.Open() succeeds once, discordgo's own logic keeps the
+// gateway alive (heartbeat + automatic reconnect on transient errors), so the
+// loop blocks on ctx.Done() and tears the session down on shutdown.
+func (p *Platform) connectLoop(ctx context.Context) {
+	backoff := discordInitialReconnectBackoff
+	attempt := 0
+
+	for {
+		if err := ctx.Err(); err != nil || p.isStopping() {
+			return
+		}
+
+		attempt++
+		session, err := p.buildSession()
+		if err == nil {
+			err = session.Open()
+		}
+
+		if err == nil {
+			p.mu.Lock()
+			p.session = session
+			p.everConnected = true
+			handler := p.lifecycleHandler
+			p.mu.Unlock()
+
+			if attempt > 1 {
+				slog.Info("discord: connected after retries", "attempts", attempt)
+			}
+			if handler != nil {
+				handler.OnPlatformReady(p.selfPlatform())
+			}
+
+			// Block until shutdown; discordgo manages reconnects internally.
+			<-ctx.Done()
+			_ = session.Close()
+			return
+		}
+
+		// Best-effort cleanup of a half-opened session.
+		if session != nil {
+			_ = session.Close()
+		}
+
+		slog.Warn("discord: connect attempt failed",
+			"attempt", attempt,
+			"backoff", backoff,
+			"error", err,
+		)
+		p.mu.RLock()
+		handler := p.lifecycleHandler
+		p.mu.RUnlock()
+		if handler != nil {
+			handler.OnPlatformUnavailable(p.selfPlatform(), err)
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		if backoff < discordMaxReconnectBackoff {
+			backoff *= 2
+			if backoff > discordMaxReconnectBackoff {
+				backoff = discordMaxReconnectBackoff
+			}
+		}
+	}
+}
+
+func (p *Platform) isStopping() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.stopping
 }
 
 // handleInteraction processes incoming Discord command and button interactions.
@@ -614,16 +836,22 @@ func (p *Platform) handleInteraction(s *discordgo.Session, i *discordgo.Interact
 
 	slog.Debug("discord: slash command", "user", userName, "command", cmdText, "channel", channelID)
 
-	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+	ops := sessionThreadOps{session: p.session}
+	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, ops)
+	channelKey := ""
+	if p.threadIsolation {
+		channelKey = resolveParentChannelID(channelID, ops)
+	}
 
 	msg := &core.Message{
-		SessionKey: sessionKey, Platform: "discord",
+		SessionKey: sessionKey, ChannelKey: channelKey, Platform: "discord",
 		MessageID: i.ID,
+		ChannelID: i.ChannelID,
 		UserID:    userID, UserName: userName,
-		ChatName: p.resolveChannelName(channelID),
-		Content:  cmdText, ReplyCtx: rctx,
+		Content: cmdText, ReplyCtx: rctx,
 	}
-	p.handler(p, msg)
+	msg.ChatName, _ = p.ResolveChannelName(channelID)
+	p.dispatchMessage(msg)
 }
 
 // replyContextForDeferredInteractionFallback builds a replyContext for slash commands
@@ -660,12 +888,12 @@ func reconstructCommand(data discordgo.ApplicationCommandInteractionData) string
 
 func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate, userID, userName string) {
 	data := i.MessageComponentData()
-	if !strings.HasPrefix(data.CustomID, "cmd:") {
+	command, isPermissionResponse, ok := discordComponentCommand(data.CustomID)
+	if !ok {
 		slog.Debug("discord: unknown component interaction", "custom_id", data.CustomID)
 		return
 	}
 
-	command := strings.TrimPrefix(data.CustomID, "cmd:")
 	origText := ""
 	if i.Message != nil {
 		origText = i.Message.Content
@@ -682,21 +910,44 @@ func (p *Platform) handleComponentInteraction(s *discordgo.Session, i *discordgo
 	}
 
 	channelID := i.ChannelID
-	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, sessionThreadOps{session: p.session})
+	ops := sessionThreadOps{session: p.session}
+	sessionKey := resolveSessionKeyForChannel(channelID, userID, p.shareSessionInChannel, p.threadIsolation, ops)
+	channelKey := ""
+	if p.threadIsolation {
+		channelKey = resolveParentChannelID(channelID, ops)
+	}
 	rc := replyContext{channelID: channelID}
 	if i.Message != nil {
 		rc.messageID = i.Message.ID
 	}
-	p.handler(p, &core.Message{
-		SessionKey: sessionKey,
-		Platform:   "discord",
-		MessageID:  i.ID,
-		UserID:     userID,
-		UserName:   userName,
-		ChatName:   p.resolveChannelName(channelID),
-		Content:    command,
-		ReplyCtx:   rc,
+	chatName, _ := p.ResolveChannelName(channelID)
+	p.dispatchMessage(&core.Message{
+		SessionKey:           sessionKey,
+		ChannelKey:           channelKey,
+		Platform:             "discord",
+		MessageID:            i.ID,
+		UserID:               userID,
+		UserName:             userName,
+		Content:              command,
+		ChatName:             chatName,
+		ReplyCtx:             rc,
+		IsPermissionResponse: isPermissionResponse,
 	})
+}
+
+func discordComponentCommand(customID string) (command string, isPermissionResponse bool, ok bool) {
+	if command, found := strings.CutPrefix(customID, "cmd:"); found && command != "" {
+		return command, false, true
+	}
+	if action, found := strings.CutPrefix(customID, "perm:"); found {
+		switch action {
+		case "allow", "deny":
+			return action, true, true
+		case "allow_all":
+			return "allow all", true, true
+		}
+	}
+	return "", false, false
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
@@ -726,7 +977,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 // mechanism. The first call edits the deferred "thinking" response; subsequent
 // calls create followup messages.
 func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) error {
-	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		ictx.mu.Lock()
 		first := !ictx.firstDone
@@ -755,7 +1006,7 @@ func (p *Platform) sendInteraction(ictx *interactionReplyCtx, content string) er
 }
 
 func (p *Platform) sendChannelReply(rc replyContext, content string) error {
-	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		var err error
 		if rc.useThreadChannel() || rc.messageID == "" {
@@ -772,7 +1023,7 @@ func (p *Platform) sendChannelReply(rc replyContext, content string) error {
 }
 
 func (p *Platform) sendChannel(rc replyContext, content string) error {
-	chunks := core.SplitMessageCodeFenceAware(content, maxDiscordLen)
+	chunks := core.SplitMessageCodeFenceAware(wrapTablesInCodeBlocks(content), maxDiscordLen)
 	for _, chunk := range chunks {
 		_, err := p.session.ChannelMessageSend(rc.targetChannelID(), chunk)
 		if err != nil {
@@ -925,10 +1176,6 @@ func buildDiscordActionRows(rows [][]core.ButtonOption) []discordgo.MessageCompo
 }
 
 func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string, buttons [][]core.ButtonOption) error {
-	rc, ok := rctx.(*interactionReplyCtx)
-	if !ok {
-		return core.ErrNotSupported
-	}
 	if len(buttons) == 0 {
 		return fmt.Errorf("discord: no buttons provided")
 	}
@@ -936,22 +1183,44 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	if len(components) == 0 {
 		return fmt.Errorf("discord: no buttons provided")
 	}
-	if err := p.sendInteraction(rc, content); err != nil {
-		return err
+
+	switch rc := rctx.(type) {
+	case *interactionReplyCtx:
+		if err := p.sendInteraction(rc, content); err != nil {
+			return err
+		}
+		_, err := p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
+			Content:    content,
+			Components: components,
+		})
+		if err != nil {
+			return fmt.Errorf("discord: send button followup: %w", err)
+		}
+		return nil
+	case replyContext:
+		_, err := p.session.ChannelMessageSendComplex(rc.targetChannelID(), &discordgo.MessageSend{
+			Content:    content,
+			Components: components,
+		})
+		if err != nil {
+			return fmt.Errorf("discord: send channel buttons: %w", err)
+		}
+		return nil
+	default:
+		return core.ErrNotSupported
 	}
-	_, err := p.session.FollowupMessageCreate(rc.interaction, true, &discordgo.WebhookParams{
-		Content:    content,
-		Components: components,
-	})
-	if err != nil {
-		return fmt.Errorf("discord: send button followup: %w", err)
-	}
-	return nil
+}
+
+func (p *progressPlatform) ProgressUpdateInterval() time.Duration {
+	return 2 * time.Second
 }
 
 var _ core.ImageSender = (*Platform)(nil)
 var _ core.FileSender = (*Platform)(nil)
 var _ core.InlineButtonSender = (*Platform)(nil)
+var _ core.ProgressStyleProvider = (*progressPlatform)(nil)
+var _ core.ProgressCardPayloadSupport = (*progressPlatform)(nil)
+var _ core.ProgressUpdateThrottler = (*progressPlatform)(nil)
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	// discord:{channelID}:{userID} or discord:{threadID}
@@ -995,10 +1264,8 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		return nil, fmt.Errorf("discord: invalid reply context type %T", rctx)
 	}
 
-	if len(content) > maxDiscordLen {
-		content = content[:maxDiscordLen]
-	}
-	sent, err := p.session.ChannelMessageSend(channelID, content)
+	msg := buildDiscordPreviewMessage(content)
+	sent, err := p.session.ChannelMessageSendComplex(channelID, msg)
 	if err != nil {
 		return nil, fmt.Errorf("discord: send preview: %w", err)
 	}
@@ -1011,10 +1278,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if !ok {
 		return fmt.Errorf("discord: invalid preview handle type %T", previewHandle)
 	}
-	if len(content) > maxDiscordLen {
-		content = content[:maxDiscordLen]
-	}
-	_, err := p.session.ChannelMessageEdit(h.channelID, h.messageID, content)
+	_, err := p.session.ChannelMessageEditComplex(buildDiscordPreviewEdit(h.channelID, h.messageID, content))
 	if err != nil {
 		return fmt.Errorf("discord: edit message: %w", err)
 	}
@@ -1067,35 +1331,38 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	return func() { close(done) }
 }
 
-// ResolveChannelName implements core.ChannelNameResolver.
 func (p *Platform) ResolveChannelName(channelID string) (string, error) {
-	name := p.resolveChannelName(channelID)
-	if name == channelID {
-		return "", fmt.Errorf("discord: channel name not found for %s", channelID)
-	}
-	return name, nil
-}
-
-func (p *Platform) resolveChannelName(channelID string) string {
 	if cached, ok := p.channelNameCache.Load(channelID); ok {
-		return cached.(string)
+		return cached.(string), nil
 	}
 	ch, err := p.session.Channel(channelID)
 	if err != nil {
 		slog.Debug("discord: resolve channel name failed", "channel", channelID, "error", err)
-		return channelID
+		return channelID, err
 	}
 	name := ch.Name
+	slog.Debug("discord: resolve channel name", "channel", channelID, "name", ch.Name)
 	if name == "" {
-		return channelID
+		return channelID, nil
 	}
 	p.channelNameCache.Store(channelID, name)
-	return name
+	return name, nil
 }
 
 func (p *Platform) Stop() error {
-	if p.session != nil {
-		return p.session.Close()
+	p.mu.Lock()
+	p.stopping = true
+	cancel := p.cancel
+	session := p.session
+	p.cancel = nil
+	p.session = nil
+	p.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if session != nil {
+		return session.Close()
 	}
 	return nil
 }
@@ -1205,6 +1472,51 @@ func (p *Platform) resolveBotRoleIDForGuild(s *discordgo.Session, guildID string
 	return "", nil
 }
 
+// classifyAttachments downloads and sorts Discord message attachments into
+// images, files, and a single voice/audio attachment based on ContentType.
+// Attachments whose ContentType is empty fall back to width/height for
+// image detection; anything unrecognized is treated as a generic file so
+// PDFs, documents, archives, etc. are not silently dropped. If multiple
+// audio attachments appear only the last successful one is kept.
+func classifyAttachments(atts []*discordgo.MessageAttachment, download func(string) ([]byte, error)) (images []core.ImageAttachment, files []core.FileAttachment, audio *core.AudioAttachment) {
+	for _, att := range atts {
+		if att == nil {
+			continue
+		}
+		ct := strings.ToLower(att.ContentType)
+		switch {
+		case strings.HasPrefix(ct, "audio/"):
+			data, err := download(att.URL)
+			if err != nil {
+				slog.Error("discord: download audio failed", "url", att.URL, "error", err)
+				continue
+			}
+			format := "ogg"
+			if parts := strings.SplitN(ct, "/", 2); len(parts) == 2 {
+				format = parts[1]
+			}
+			audio = &core.AudioAttachment{MimeType: ct, Data: data, Format: format}
+		case strings.HasPrefix(ct, "image/"), ct == "" && att.Width > 0 && att.Height > 0:
+			data, err := download(att.URL)
+			if err != nil {
+				slog.Error("discord: download image failed", "url", att.URL, "file_name", att.Filename, "error", err)
+				continue
+			}
+			images = append(images, core.ImageAttachment{MimeType: att.ContentType, Data: data, FileName: att.Filename})
+		default:
+			data, err := download(att.URL)
+			if err != nil {
+				slog.Error("discord: download file failed", "url", att.URL, "file_name", att.Filename, "error", err)
+				continue
+			}
+			files = append(files, core.FileAttachment{MimeType: att.ContentType, Data: data, FileName: att.Filename})
+		}
+	}
+	return images, files, audio
+}
+
+const maxDownloadBytes = 50 << 20 // 50 MiB
+
 func downloadURL(u string) ([]byte, error) {
 	resp, err := core.HTTPClient.Get(u)
 	if err != nil {
@@ -1214,5 +1526,30 @@ func downloadURL(u string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download %s: status %d", u, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes+1))
+}
+
+// applyReferencedMessage prepends the replied-to message's author and content
+// to content and prepends any images from the referenced message's attachments.
+// Image attachments (width > 0) are downloaded via download and prepended so the
+// agent sees them before the current message's own images.
+func applyReferencedMessage(ref *discordgo.Message, content string, images []core.ImageAttachment, download func(string) ([]byte, error)) (string, []core.ImageAttachment) {
+	author := ""
+	if ref.Author != nil {
+		author = ref.Author.Username
+	}
+	content = "[replying to " + author + ": " + ref.Content + "]\n" + content
+	for _, att := range ref.Attachments {
+		if att.Width > 0 && att.Height > 0 {
+			data, err := download(att.URL)
+			if err != nil {
+				slog.Error("discord: download referenced attachment failed", "url", att.URL, "error", err)
+				continue
+			}
+			images = append([]core.ImageAttachment{{
+				MimeType: att.ContentType, Data: data, FileName: att.Filename,
+			}}, images...)
+		}
+	}
+	return content, images
 }

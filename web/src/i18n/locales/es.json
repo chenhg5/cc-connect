@@ -2,10 +2,12 @@
   "nav": {
     "dashboard": "Panel",
     "projects": "Proyectos",
+    "providers": "Proveedores",
     "sessions": "Sesiones",
     "chat": "Chat",
-    "cron": "Cron",
+    "cron": "Tareas programadas",
     "bridge": "Puente",
+    "skills": "Habilidades",
     "system": "Sistema"
   },
   "dashboard": {
@@ -34,11 +36,17 @@
     "detail": "Detalles",
     "noProjects": "No hay proyectos configurados",
     "workDir": "Directorio de trabajo",
+    "agentType": "Tipo de agente",
+    "agentTypeChangeHint": "Cambiar el tipo de agente requiere reinicio. Los proveedores incompatibles serán eliminados.",
     "agentMode": "Modo de permisos",
     "agentSettings": "Agente",
     "generalSettings": "General",
     "showCtxIndicator": "Indicador de contexto",
     "showCtxIndicatorHint": "Mostrar el sufijo [ctx: ~N%] al final de las respuestas",
+    "replyFooter": "Pie de respuesta",
+    "replyFooterHint": "Añadir metadatos de modelo/uso al final de las respuestas",
+    "injectSender": "Inyectar remitente",
+    "injectSenderHint": "Anteponer la identidad del remitente a los mensajes enviados al agente",
     "platformAccess": "Control de acceso a plataformas",
     "deleteTitle": "Eliminar proyecto",
     "deleteConfirm": "¿Está seguro de que desea eliminar el proyecto \"{{name}}\"? Se eliminará del archivo de configuración.",
@@ -48,8 +56,26 @@
       "overview": "Resumen",
       "providers": "Proveedores",
       "heartbeat": "Latido",
-      "settings": "Ajustes"
-    }
+      "settings": "Ajustes",
+      "workspaces": "Espacios de trabajo"
+    },
+    "workspaceMode": "Modo multi-espacio",
+    "workspaceModeHint": "Enrutar diferentes canales de chat a diferentes directorios de trabajo bajo un directorio base compartido.",
+    "workspaceModeEnable": "Activar modo multi-espacio",
+    "workspaceModeWarning": "Cambiar de modo requiere reiniciar el servicio. El work_dir único no se usa mientras el modo multi-espacio esté activo.",
+    "workspaceBaseDir": "Directorio base",
+    "workspaceBaseDirRequired": "Se requiere un directorio base para activar el modo multi-espacio.",
+    "workspaceModeConfirm": "Cambiar el modo de espacio de trabajo requiere reiniciar el servicio. ¿Continuar?",
+    "workspaceBindings": "Vínculos de canal",
+    "workspaceNoBindings": "Todavía no hay canales vinculados a un espacio de trabajo.",
+    "workspaceActive": "activo",
+    "workspaceIdle": "inactivo",
+    "workspaceAddBinding": "Vincular un canal",
+    "workspaceChannelKey": "Clave de canal",
+    "workspaceChannelName": "Nombre de canal (opcional)",
+    "workspacePath": "Ruta del espacio de trabajo",
+    "workspaceSuggestions": "Directorios sin vincular en base_dir:",
+    "workspaceBind": "Vincular"
   },
   "sessions": {
     "title": "Sesiones",
@@ -86,7 +112,14 @@
     "remove": "Quitar",
     "activate": "Activar",
     "setModel": "Establecer modelo",
-    "models": "Modelos disponibles"
+    "models": "Modelos disponibles",
+    "global": "global",
+    "emptyProject": "No hay proveedores configurados para este proyecto.",
+    "emptyProjectHint": "Vincula un proveedor global o añade uno personalizado.",
+    "linkGlobal": "Vincular global",
+    "addCustom": "Añadir personalizado",
+    "allLinked": "Todos los proveedores globales ya están vinculados.",
+    "manageGlobal": "Gestionar proveedores globales"
   },
   "cron": {
     "title": "Tareas programadas",
@@ -99,6 +132,8 @@
     "lastRun": "Última ejecución",
     "lastError": "Último error",
     "add": "Añadir tarea",
+    "trigger": "Ejecutar ahora",
+    "triggerPending": "Se activó. Los resultados se actualizarán en breve.",
     "delete": "Eliminar",
     "noJobs": "No hay tareas programadas",
     "workDir": "Directorio de trabajo",
@@ -127,7 +162,8 @@
     "runCount": "Ejecuciones",
     "errorCount": "Errores",
     "skippedBusy": "Omitida (ocupado)",
-    "lastRun": "Última ejecución"
+    "lastRun": "Última ejecución",
+    "notEnabled": "El heartbeat no está configurado para este proyecto. Agregue la sección [heartbeat] en config.toml para habilitarlo."
   },
   "bridge": {
     "title": "Puente",
@@ -172,7 +208,9 @@
     "actions": "Acciones",
     "viewAll": "Ver todo",
     "optional": "opcional",
-    "confirmDelete": "¿Seguro que desea eliminar esto?"
+    "confirmDelete": "¿Seguro que desea eliminar esto?",
+    "close": "Cerrar",
+    "saving": "Guardando…"
   },
   "setup": {
     "addPlatform": "Añadir plataforma",
@@ -207,13 +245,25 @@
     "manualSetup": "Configuración manual",
     "manualHint": "Para {{platform}}, configure las credenciales en config.toml y reinicie el servicio.",
     "advancedOptions": "Opciones avanzadas",
-    "unsupportedPlatform": "Tipo de plataforma no soportado: {{type}}"
+    "unsupportedPlatform": "Tipo de plataforma no soportado: {{type}}",
+    "cloudWeb": {
+      "urlRequiredWebsocket": "WebSocket requiere URL base de API o URL de WebSocket (al menos una)",
+      "urlRequiredLongPoll": "Long poll requiere URL base de API",
+      "urlRequiredGateway": "Gateway requiere URL base de API o URL de registro (al menos una)",
+      "invalidHttpUrl": "{{field}} debe ser una URL http(s) válida o host[:puerto]",
+      "invalidWsUrl": "La URL de WebSocket debe comenzar con ws:// o wss://",
+      "publicUrlRequiredGateway": "La URL pública del webhook es obligatoria cuando se establece la URL de registro"
+    }
   },
   "fields": {
     "botToken": "Token del bot",
     "appToken": "Token de la app",
     "accessToken": "Token de acceso",
     "allowFrom": "Usuarios permitidos",
+    "groupAllowFrom": "Grupos, equipos o canales permitidos",
+    "groupPolicy": "Politica de grupos",
+    "requireMention": "Requerir mencion explicita",
+    "historyLimit": "Limite de historial sin mencion",
     "allowFromHintTelegram": "IDs de usuario de Telegram, separados por comas",
     "groupReplyAll": "Responder a todos los mensajes del grupo",
     "sharedGroupSession": "Sesión de grupo compartida",
@@ -230,13 +280,25 @@
     "callbackAesKey": "Clave AES de callback",
     "callbackAesKeyHint": "43 caracteres",
     "callbackPath": "Ruta de callback",
+    "apiBaseUrl": "URL base de API",
     "port": "Puerto",
     "wsUrl": "URL de WebSocket",
     "appId": "App ID",
     "appSecret": "App Secret",
     "sandboxMode": "Modo sandbox",
     "channelSecret": "Channel Secret",
-    "channelToken": "Channel Access Token"
+    "channelToken": "Channel Access Token",
+    "transport": "Modo de transporte",
+    "longPollTimeout": "Timeout de long polling (ms)",
+    "listen": "Dirección de escucha",
+    "publicUrl": "URL pública del webhook",
+    "publicUrlHint": "URL pública para que el Gateway llame al webhook de cc-connect",
+    "registerUrl": "URL de registro",
+    "registerUrlHint": "Opcional: endpoint para registrar el webhook en el Gateway",
+    "cloudWebWsHint": "Opcional si hay base URL; predeterminado /cloud-web/ws",
+    "cloudWebBaseUrlHint": "Obligatorio para long poll; para WebSocket, use esto o la URL de WebSocket abajo",
+    "eventsPath": "Ruta de eventos (long poll)",
+    "sendPath": "Ruta de envío (API saliente)"
   },
   "chat": {
     "noChats": "No hay proyectos",
@@ -293,8 +355,12 @@
     "idleTimeout": "Tiempo de inactividad (min)",
     "idleTimeoutHint": "Detener agente automáticamente tras N minutos de inactividad; 0 = desactivado",
     "display": "Visualización",
+    "thinkingMessages": "Mensajes de pensamiento",
+    "thinkingMessagesHint": "Mostrar u ocultar mensajes de proceso de pensamiento",
     "thinkingMaxLen": "Longitud máx. de pensamiento",
     "thinkingMaxLenHint": "Caracteres máximos para mensajes de pensamiento; 0 = sin truncar",
+    "toolMessages": "Progreso de herramientas",
+    "toolMessagesHint": "Mostrar u ocultar mensajes de progreso de herramientas",
     "toolMaxLen": "Longitud máx. de herramientas",
     "toolMaxLenHint": "Caracteres máximos para mensajes de uso de herramientas; 0 = sin truncar",
     "streamPreview": "Vista previa en tiempo real",
@@ -309,6 +375,73 @@
     "rlWindowSecsHint": "Ventana de tiempo en segundos",
     "log": "Registro",
     "logLevel": "Nivel de registro"
+  },
+  "globalProviders": {
+    "title": "Gestión de proveedores",
+    "subtitle": "Administra proveedores de API compartidos globalmente entre todos los proyectos",
+    "add": "Agregar proveedor",
+    "importCCSwitch": "Importar desde CC-Switch",
+    "edit": "Editar proveedor",
+    "empty": "No hay proveedores configurados",
+    "emptyHint": "Agrega un proveedor global o importa desde los preajustes.",
+    "deleteHint": "¿Eliminar proveedor \"{{name}}\"? Los proyectos que lo referencien perderán acceso.",
+    "noPresets": "Sin preajustes",
+    "noPresetsHint": "No se pudieron cargar los preajustes. Verifica tu conexión de red.",
+    "register": "Registrar",
+    "addPreset": "Agregar",
+    "added": "Agregado",
+    "tab": {
+      "providers": "Mis proveedores",
+      "presets": "Preajustes"
+    },
+    "form": {
+      "name": "Nombre",
+      "model": "Modelo predeterminado",
+      "modelHint": "Modelo usado al cambiar a este proveedor",
+      "models": "Modelos disponibles",
+      "modelsHint": "Modelos que los usuarios pueden cambiar con /model",
+      "agentTypes": "Tipos de agente",
+      "agentTypesHint": "Dejar vacío para todos los tipos de agente",
+      "thinkingDefault": "Predeterminado (auto)",
+      "perAgentHint": "Cada tipo de agente puede usar diferente Base URL / modelos. Configura por tipo abajo.",
+      "defaultConfig": "Predeterminado",
+      "baseUrl": "Base URL",
+      "codexWireApi": "Wire API"
+    },
+    "ccSwitch": {
+      "title": "Importar desde CC-Switch",
+      "notFound": "No se encontró la base de datos de CC-Switch. Asegúrese de que CC-Switch esté instalado.",
+      "empty": "No hay proveedores configurados en CC-Switch.",
+      "hint": "Se encontraron {{count}} proveedores en CC-Switch. Seleccione cuáles importar:",
+      "active": "activo",
+      "exists": "existente",
+      "import": "Importar ({{count}})",
+      "result": "Importación completa: {{imported}} importados, {{skipped}} omitidos."
+    }
+  },
+  "skills": {
+    "title": "Habilidades",
+    "subtitle": "Gestiona las habilidades del agente y descubre nuevas",
+    "tab": {
+      "local": "Locales",
+      "recommended": "Recomendadas"
+    },
+    "projects": "Proyectos",
+    "skillCount": "{{count}} habilidades",
+    "scanDirs": "Directorios escaneados",
+    "noSkills": "No se encontraron habilidades",
+    "noSkillsHint": "Las habilidades se cargan desde los directorios de habilidades del agente (ej. ~/.claude/skills/)",
+    "emptyProject": "No se encontraron habilidades en los directorios de este proyecto",
+    "noPresets": "No hay habilidades recomendadas",
+    "noPresetsHint": "No se pudieron cargar las recomendaciones. Verifica tu conexión a internet.",
+    "featured": "Destacadas",
+    "allSkills": "Todas",
+    "author": "Autor",
+    "source": "Fuente",
+    "download": "Descargar",
+    "free": "Gratis",
+    "freemium": "Freemium",
+    "paid": "De pago"
   },
   "theme": {
     "light": "Claro",

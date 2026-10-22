@@ -12,10 +12,12 @@ Complete guide to using cc-connect features.
 - [Feishu Setup CLI](#feishu-setup-cli)
 - [Weixin (personal) Setup CLI](#weixin-personal-setup-cli)
 - [Claude Code Router Integration](#claude-code-router-integration)
+- [Claude Code PermissionRequest Hooks](#claude-code-permissionrequest-hooks)
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
 - [Scheduled Tasks (Cron)](#scheduled-tasks-cron)
+- [Shell Configuration](#shell-configuration)
 - [Multi-Bot Relay](#multi-bot-relay)
 - [Daemon Mode](#daemon-mode)
 - [Multi-Workspace Mode](#multi-workspace-mode)
@@ -35,7 +37,7 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/list` | List all agent sessions for this project |
 | `/switch <id>` | Switch to a different session |
 | `/current` | Show current session info |
-| `/history [n]` | Show last n messages (default 10) |
+| `/history [n]` | Show last n messages (default 10; each entry follows `[display].history_max_len`, default 1000) |
 | `/usage` | Show account/model quota usage (if supported) |
 | `/provider [...]` | Manage API providers |
 | `/model [switch <alias>]` | List available models or switch by alias |
@@ -43,21 +45,28 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/allow <tool>` | Pre-allow a tool (next session) |
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
-| `/quiet` | Toggle thinking/tool progress messages |
 | `/stop` | Stop current execution |
 | `/help` | Show available commands |
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
 
-You can also configure automatic session rotation after inactivity:
+cc-connect rotates to a fresh session automatically after long inactivity:
 
 ```toml
 [[projects]]
 name = "demo"
-reset_on_idle_mins = 60
+reset_on_idle_mins = 30   # default when unset; set to 0 to disable
 ```
 
-When enabled, the next normal message after a long idle period starts in a fresh session automatically, without deleting the old session from `/list`.
+The next normal message after a long idle period starts in a fresh session automatically, without deleting the old session from `/list`.
+
+**Why this is on by default:** without idle rotation, every workspace-pool eviction (~15 min) caused the next message to resume the previous transcript via `--continue`. Over many cycles this re-ingests stale chat history (failed commands, debugging noise, abandoned tangents) and the model's attention drifts away from the original intent. Rotating after 30 minutes of user inactivity gives a clean slate when you come back to a task, while preserving the old session for `/list` and `/switch`.
+
+To restore the previous behavior of always continuing, set `reset_on_idle_mins = 0`.
+
+### Model switch preserves history
+
+`/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.
 
 ---
 
@@ -83,6 +92,26 @@ All agents support permission modes switchable at runtime via `/mode`.
 | Auto Edit | `auto-edit` | Model decides when to ask |
 | Full Auto | `full-auto` | Auto-approve with sandbox |
 | YOLO | `yolo` | Bypass all approvals and sandbox |
+
+### Codex CLI discovery on macOS
+
+The Codex adapter resolves its executable in this order:
+
+1. The project `cmd` option (including the deprecated `cli_path` / `command` aliases).
+2. `CODEX_CLI_PATH` from the environment that starts cc-connect, when no command is configured.
+3. An executable `codex` on that process's `PATH`.
+4. On macOS, `/Applications/ChatGPT.app`, then `/Applications/Codex.app`. Within each app, the current `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` layout is checked before the legacy `Contents/Resources/codex` layout.
+
+Desktop discovery handles a missing PATH command or a broken PATH symlink. An explicit command or `CODEX_CLI_PATH` must be executable; an invalid override reports an error. Discovery is repeated before each CLI process starts so an app update can change the bundled layout. Linux and Windows continue to use the configured command or PATH.
+
+Both `exec` and `app_server`, runtime configuration reads, skill queries, and `/doctor` use this selection. Use the array form for paths containing spaces or additional CLI arguments:
+
+```toml
+[projects.agent.options]
+cmd = ["/path with spaces/codex", "--profile", "work"]
+```
+
+This runs the bundled CLI using the existing Codex adapter. Desktop-only tools and shared-thread locking have separate requirements; see [Desktop backend discussion #651](https://github.com/chenhg5/cc-connect/issues/651) and [thread writer conflict #1909](https://github.com/chenhg5/cc-connect/issues/1909).
 
 ### Cursor Agent Modes
 
@@ -159,10 +188,11 @@ alias = "opus"
 model = "claude-haiku-3-5-20241022"
 alias = "haiku"
 
-# MiniMax — OpenAI-compatible, 1M context
+# MiniMax — OpenAI-compatible agent provider, 1M context
 [[projects.agent.providers]]
 name = "minimax"
 api_key = "your-minimax-api-key"
+# Use https://api.minimaxi.com/v1 for China-region accounts.
 base_url = "https://api.minimax.io/v1"
 model = "MiniMax-M2.7"
 
@@ -258,10 +288,23 @@ Switch where the next agent session starts, directly from chat.
 
 ### Behavior Notes
 
+- `/dir` is a privileged command. You must set `admin_from` under `[[projects]]` in `config.toml` before it can be used.
+- Do not put `admin_from` under `[projects.platforms.options]`, or it will be ignored.
+- Use `/whoami` or `/status` to get your current `User ID`, then place that ID into `admin_from`.
+- If you are the only user of this bot, `admin_from = "*"` also works, but it grants every allowed user privileged command access.
+- Restart `cc-connect` after updating `config.toml`.
 - Directory changes apply to the next session in the current project.
 - Relative paths are resolved from the current agent work directory.
 - Directory history is project-scoped and can be switched by index.
 - `/cd` is kept for compatibility, but `/dir` is the primary command.
+
+Example config:
+
+```toml
+[[projects]]
+name = "my-project"
+admin_from = "ou_xxx"
+```
 
 Examples:
 
@@ -270,6 +313,249 @@ Examples:
 /dir 2
 /dir -
 ```
+
+---
+
+## Running agents as a different Unix user (`run_as_user`)
+
+> **Platform support**: Linux and macOS. Not supported on Windows.
+> **Agent support**: Claude Code today. Other agents fall back to the
+> supervisor user; see the tracking issue for migration status.
+
+### What this is
+
+By default, every agent session cc-connect spawns runs as the same Unix
+user that runs `cc-connect` itself. If an agent misbehaves — reads a
+secret, overwrites a sibling repo, trashes `~/.ssh/` — it has the
+supervisor user's full file-system reach.
+
+`run_as_user` sets a per-project target Unix user. When it is set,
+cc-connect spawns that project's agent command via
+
+```
+sudo -n -iu <target-user> -- claude ...
+```
+
+The target user is a real, unprivileged Unix account that you create.
+The agent runs under that account's uid/gid, with **its own** home
+directory, shell profile, PATH, and tool credentials. File-system
+isolation is enforced by the kernel, not by hooks or allowlists.
+
+### Security guarantee and non-guarantee
+
+**This provides OS-user isolation from any file or process the target
+user cannot reach.** An agent can no longer read or clobber the
+supervisor's `~/.ssh/`, another project user's `~/.pgpass`, or a repo
+whose UNIX permissions don't grant access to the target user.
+
+**This does not automatically isolate projects from each other** if they
+share the same `run_as_user`. If you want per-project isolation, create
+a separate Unix user per project.
+
+**This is not a sandbox in the sense of Linux namespaces, seccomp, or
+container isolation.** It is strictly file-system scoping by uid.
+
+### Setup
+
+#### 1. Create the target user and install their tooling
+
+The target user needs its own copy of everything the agent touches,
+because `sudo -i` loads the *target* user's login environment — not the
+supervisor's.
+
+```bash
+sudo useradd -m -s /bin/bash partseeker-coder
+sudo -iu partseeker-coder
+
+# Install the agent CLI under the target user's PATH
+#   (for Claude Code, follow the normal install instructions)
+
+# Set up the target user's ~/.claude/
+mkdir -p ~/.claude
+# Copy or re-create:
+#   ~/.claude/settings.json     (MCP servers, hooks, model settings)
+#   ~/.claude.json              (Claude Code auth)
+#   ~/.claude/plugins/          (claude-mem and any other plugin state)
+
+exit
+```
+
+#### 2. Grant the supervisor passwordless sudo to the target
+
+Add a scoped sudoers rule. Do **not** use `NOPASSWD: ALL` for the
+supervisor — that grants the supervisor root, which is irrelevant here
+and dangerous.
+
+```
+# /etc/sudoers.d/cc-connect (install with `sudo visudo -f ...`)
+partseeker-orchestrator ALL=(partseeker-coder) NOPASSWD: ALL
+```
+
+Adjust the usernames for your setup. The rule says: *"the supervisor
+user may run any command as this specific target user, without a
+password."*
+
+#### 3. Verify the target user cannot sudo
+
+The whole point of stepping down into a target user is that the target
+cannot immediately escalate back. Verify:
+
+```bash
+sudo -n -iu partseeker-coder -- sudo -n true
+# must FAIL with "a password is required" or similar
+```
+
+If that command succeeds, cc-connect will refuse to start. Remove any
+`NOPASSWD` sudo grants for the target user first.
+
+#### 4. Make the project's `work_dir` accessible to the target user
+
+The target user needs read AND write on the project's `work_dir`. If
+the directory is owned by the supervisor, either `chown` it to the
+target, add group ownership the target is in, or apply a POSIX ACL:
+
+```bash
+sudo setfacl -R -m u:partseeker-coder:rwX /home/leigh/workspace/sandboxed-repo
+sudo setfacl -R -dm u:partseeker-coder:rwX /home/leigh/workspace/sandboxed-repo
+```
+
+cc-connect refuses to start if the target user cannot read+write the
+`work_dir` root, and warns (non-fatal) for descendant paths that look
+inaccessible.
+
+#### 5. Audit the setup before starting cc-connect
+
+```bash
+cc-connect doctor user-isolation
+```
+
+This runs the full preflight (the three go/no-go gates from
+[#496](https://github.com/chenhg5/cc-connect/issues/496)) and an
+**isolation probe**: it spawns a fixed shell script as the target user
+and reports what the target can read, what it's denied, and any
+cross-user leaks. Output goes to stdout plus a JSON report in
+`~/.cc-connect/audits/<timestamp>-<project>.json`.
+
+Exit code 0 = clean. Exit code 1 = at least one fatal problem.
+
+You can inspect the probe script itself with:
+
+```bash
+cc-connect doctor user-isolation --print-script
+```
+
+### Configuration
+
+```toml
+[[projects]]
+name = "claude-sandboxed"
+run_as_user = "partseeker-coder"
+
+# Optional: extend the default env var allowlist that crosses the sudo
+# boundary. The defaults (PATH, LANG, LC_*, TERM) are always included.
+# Only list vars the target user cannot reasonably set in their own
+# shell profile. Secrets belong in the target user's ~/.claude/settings.json
+# env block, NOT here.
+run_as_env = ["PGSSLROOTCERT", "PGSSLMODE"]
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+mode = "default"
+model = "sonnet"
+work_dir = "/home/leigh/workspace/sandboxed-repo"
+```
+
+### Environment propagation: what moves into the target user's home
+
+This is the 2am-debugging section. When you switch a project to
+`run_as_user`, the supervisor's environment is **not** forwarded across
+the sudo boundary — that's the whole point. Everything the agent needs
+has to live in the target user's home.
+
+Migration checklist:
+
+- [ ] **Agent config** — `~/.claude/settings.json` (MCP servers, hooks,
+      model settings), `~/.claude.json` (auth). Copy from the supervisor
+      or re-create from scratch.
+- [ ] **Plugin state** — `~/.claude/plugins/` — claude-mem, any other
+      Claude Code plugins.
+- [ ] **MCP server binaries** — must be on the target user's `PATH`, not
+      just the supervisor's. Either install under the target user or
+      reference full paths in `settings.json`.
+- [ ] **Postgres TLS** — `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY` belong
+      in the target user's `~/.claude/settings.json` `env` block. Their
+      referenced cert files must be readable by the target user.
+- [ ] **Claude OAuth credentials** — if you authenticate via `claude.ai`
+      (OAuth), the token lives in `~/.claude/.credentials.json`. OAuth
+      access tokens expire after a few hours and are refreshed
+      automatically by whichever Claude CLI session is running. The
+      target user's token will **not** be refreshed unless the target
+      user has an active session — which it often doesn't between
+      cc-connect spawns. The recommended fix is to symlink the target
+      user's credentials to the supervisor's file so both share one
+      token that stays fresh:
+
+      ```bash
+      # Grant target user read access via ACL (keeps 600 for everyone else)
+      setfacl -m u:<target-user>:rx ~/.claude/
+      setfacl -m u:<target-user>:r  ~/.claude/.credentials.json
+
+      # Replace the target user's credentials with a symlink
+      sudo -iu <target-user> bash -c \
+        'rm -f ~/.claude/.credentials.json && \
+         ln -s /home/<supervisor>/.claude/.credentials.json \
+               ~/.claude/.credentials.json'
+      ```
+
+      **If you use an API key** (`ANTHROPIC_API_KEY`) instead of OAuth,
+      this is not an issue — set the key in the target user's
+      `~/.claude/settings.json` `env` block and it won't expire.
+- [ ] **Credential files** — `~/.pgpass`, `~/.gitconfig`, `~/.netrc`,
+      `~/.aws/`, `~/.config/gh/`, `~/.kube/` — whichever the agent
+      actually uses. Each needs its own copy or a group-readable shared
+      copy.
+- [ ] **SSH keys** — `~/.ssh/id_ed25519` etc., if the agent runs `git
+      push` over SSH. Same story: copy or group-share.
+- [ ] **Key material under** `~/keys/` — custom directories the
+      supervisor uses need an equivalent under the target user's home
+      or a group-readable shared copy.
+- [ ] **Language toolchains** — if the agent uses `asdf`, `mise`, `nvm`,
+      `rustup`, etc., those live in `~`. The target user needs either
+      its own install or a system-wide install that both users can run.
+- [ ] **Shell profile** — `~/.profile` / `~/.bashrc` on the target user
+      needs to set `PATH` and any tool init the agent depends on. Test
+      with `sudo -iu partseeker-coder` before wiring cc-connect.
+
+After migration, run `cc-connect doctor user-isolation` again. The
+`target home` section reports which expected paths are present and
+which are missing — missing isn't necessarily wrong, but it's your
+checklist.
+
+### Opting out
+
+Remove `run_as_user` from the project entry, or set it to `""`. Legacy
+behavior (spawn as supervisor) returns on the next restart.
+
+### Failure modes and error messages
+
+- **"passwordless sudo to user X is not configured"** — step 2 of setup
+  is missing or the sudoers rule is scoped to the wrong supervisor. Fix
+  the rule, run `visudo -c` to validate syntax, then restart cc-connect.
+- **"target user X can run passwordless sudo"** — step 3 failed. The
+  error includes the output of `sudo -l` from the target context; find
+  the offending rule and remove it.
+- **"target user X cannot read AND write work_dir Y"** — step 4 failed.
+  `chown` the directory or add an ACL as shown above.
+- **"CROSS_LEAKED"** or **"SUPERVISOR_LEAKED"** in the audit — the
+  target user can read another user's secrets. Tighten the offending
+  file's permissions (usually `chmod 600 file; chown user:user file`)
+  and re-audit.
+- **"descendant scan timed out"** — non-fatal. The `work_dir` is large
+  enough that the permission walk exceeded its timeout. Run
+  `cc-connect doctor user-isolation` manually if you want the full
+  walk, or narrow the project's `work_dir`.
 
 ---
 
@@ -361,6 +647,35 @@ router_api_key = "your-secret-key"  # optional
 
 ---
 
+## Claude Code PermissionRequest Hooks
+
+If you have [PermissionRequest hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) configured in your Claude Code `settings.json`, cc-connect will respect them — matching hooks can auto-approve or deny tool requests before they reach the messaging platform.
+
+### Why hooks run twice
+
+cc-connect launches Claude Code with `--permission-prompt-tool stdio`, which means Claude Code's own hook execution output is discarded (stdout is consumed by the protocol). To make your hooks actually take effect, cc-connect reads the hook definitions from `settings.json` and **re-runs them independently**.
+
+This means your hook command is executed **twice** per permission request:
+
+1. Once by Claude Code (result discarded)
+2. Once by cc-connect (result used)
+
+### Avoiding double cost for LLM-based hooks
+
+If your hook is rule-based (e.g. "deny `rm -rf`"), running twice is harmless. But if your hook calls an LLM (like [ccgate](https://github.com/tak848/ccgate)), the first execution wastes tokens. Add this guard at the top of your hook:
+
+```bash
+#!/bin/bash
+if [ -n "$CC_CONNECT_PERMISSION_HOOK_SKIP" ]; then
+  exit 0  # cc-connect will re-run us without this flag
+fi
+# ... your actual hook logic ...
+```
+
+cc-connect sets `CC_CONNECT_PERMISSION_HOOK_SKIP=1` in the Claude Code subprocess environment. When your hook sees this variable, it's running inside Claude Code (result will be discarded) — skip the expensive work. cc-connect strips this variable when it runs the hook itself, so the second execution proceeds normally.
+
+---
+
 ## Voice Messages (Speech-to-Text)
 
 Send voice messages — cc-connect transcribes them automatically.
@@ -403,21 +718,31 @@ brew install ffmpeg
 
 Synthesize AI replies into voice messages.
 
-**Supported:** Feishu (Lark)
+**Supported:** Platforms that implement audio sending, such as Feishu/Lark, DingTalk, Telegram, Max, and Weixin.
 
 ### Configure
 
 ```toml
 [tts]
 enabled = true
-provider = "qwen"        # or "openai"
-voice = "Cherry"
+provider = "minimax"     # qwen | openai | minimax | mimo | espeak | pico | edge
+voice_id = "Chinese (Mandarin)_Crisp_Girl"
+speed = 0.98             # provider-specific range; MiniMax commonly accepts 0.5-2.0
 tts_mode = "voice_only"  # "voice_only" | "always"
 max_text_len = 0         # 0 = no limit
 
-[tts.qwen]
-api_key = "sk-xxx"
-# model = "qwen3-tts-flash"
+[tts.minimax]
+api_key = ""             # optional: falls back to data_dir/config/minimax.json
+base_url = ""            # optional: default https://api.minimaxi.com
+model = "speech-2.8-hd"
+
+[tts.agents.assistant]
+voice_id = "Chinese (Mandarin)_Crisp_Girl"
+speed = 0.98
+
+[tts.agents.reviewer]
+voice_id = "Chinese (Mandarin)_Gentle_Senior"
+speed = 0.96
 ```
 
 ### TTS Modes
@@ -431,9 +756,9 @@ Switch: `/tts always` or `/tts voice_only`
 
 ---
 
-## Image and File Send-Back
+## Image, File, and Voice Send-Back
 
-When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`.
+When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`. When the user explicitly asks for a voice message, the agent can also send synthesized speech through the same CLI.
 
 **Currently supported platforms:**
 - Feishu
@@ -456,6 +781,7 @@ or:
 These two commands write the same cc-connect instructions. Either one is enough. After that, the agent knows:
 - normal text replies should be returned normally
 - generated attachments should be sent back with `cc-connect send --image/--file`
+- requested voice messages should be sent with `cc-connect send --tts`
 
 If you have run setup before, run it again after upgrading so the instructions are refreshed to the latest version.
 
@@ -467,7 +793,7 @@ Add this to `config.toml` if you want to disable agent-driven attachment send-ba
 attachment_send = "off"
 ```
 
-The default is `on`. This switch is independent from the agent's `/mode` and only affects `cc-connect send --image/--file`.
+The default is `on`. This switch is independent from the agent's `/mode` and only affects `cc-connect send --image/--file`. Synthesized voice send-back uses the `[tts]` provider config and is controlled by TTS availability instead.
 
 ### CLI examples
 
@@ -475,28 +801,32 @@ The default is `on`. This switch is independent from the agent's `/mode` and onl
 cc-connect send --image /absolute/path/to/chart.png
 cc-connect send --file /absolute/path/to/report.pdf
 cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
+cc-connect send --tts "Hello from cc-connect"
 ```
 
 Notes:
 - `--image` is for image attachments.
 - `--file` is for any file attachment.
+- `--tts` synthesizes text and sends the generated audio through the active TTS provider.
 - `--message` is optional and sends a text note before the attachments.
 - `--image` and `--file` can both be repeated.
 - Absolute paths are recommended so the command does not depend on the agent's current working directory.
 - With `attachment_send = "off"`, image/file send-back is blocked but ordinary text replies still work.
+- Each attachment is capped at **50 MiB** by default. Configure it with `max_attachment_size_mb` (MiB) in config.toml, or override that value with the `CC_MAX_ATTACHMENT_SIZE_MB` env var (same MiB unit; takes precedence when set), e.g. `CC_MAX_ATTACHMENT_SIZE_MB=100 cc-connect send --file big.bin`.
 
 ### Typical use cases
 
 1. The agent generates a screenshot or chart and should send it directly to the user.
 2. The agent generates a PDF, Markdown export, log bundle, or patch file that should be delivered as an attachment.
 3. The agent wants to send a short status message together with one or more generated files.
+4. The user asks the agent to "send this as voice" without typing a slash command.
 
 ### Important notes
 
-- This command is for attachment delivery, not ordinary text replies.
+- This command is for generated attachment and voice delivery, not ordinary text replies.
 - The files must exist on the local machine where the agent runs.
 - There must be an active session; otherwise the command fails because cc-connect has no chat context to deliver to.
-- Platform-specific file size and file type limits still apply.
+- The target platform also enforces its own file-size/type limit at delivery; the effective per-attachment ceiling is the smaller of that limit and `max_attachment_size_mb` (a file that passes cc-connect may still be rejected by the platform).
 
 ---
 
@@ -524,6 +854,8 @@ Example:
 ```bash
 cc-connect cron add --cron "0 6 * * *" --prompt "Summarize GitHub trending" --desc "Daily Trending"
 cc-connect cron list
+cc-connect cron edit <job-id> <field> <value>   # e.g. cron_expr, prompt, enabled, mute, timeout_mins
+cc-connect cron exec <job-id>
 cc-connect cron del <job-id>
 ```
 
@@ -534,6 +866,78 @@ Optional: `--session-mode new-per-run` starts a fresh agent session on each run 
 > "Every day at 6am, summarize GitHub trending"
 
 Claude Code auto-creates the cron job. For other agents that rely on memory files, run `/cron setup` or `/bind setup` once first; both write the same instructions.
+
+---
+
+## Shell Configuration
+
+By default, cc-connect uses `sh` on Unix and `powershell.exe` on Windows for all shell execution (`/shell` commands, cron exec jobs, hooks, and webhook exec). You can override this to use a different shell.
+
+### Supported Shells
+
+| Shell | Config value | Flag |
+|-------|-------------|------|
+| sh (default on Unix) | `sh` | `-c` |
+| bash | `/bin/bash` | `-c` |
+| zsh | `/bin/zsh` | `-c` |
+| fish | `/bin/fish` | `-c` |
+| cmd (Windows) | `cmd` | `/C` |
+| PowerShell (default on Windows) | `powershell.exe` | `-Command` |
+| PowerShell Core | `pwsh` | `-Command` |
+
+The flag is auto-detected from the shell name — no manual configuration needed.
+
+### Global Configuration
+
+Set `shell` at the top level of `config.toml` to change the default for all projects:
+
+```toml
+shell = "/bin/zsh"
+```
+
+### Per-Project Override
+
+Override the shell for a specific project:
+
+```toml
+[[projects]]
+name = "my-project"
+shell = "/bin/fish"
+```
+
+### Shell Profile
+
+Use `shell_profile` to prepend a setup script to every shell command. This is useful for sourcing your shell profile so that custom functions, aliases, and environment variables are available:
+
+```toml
+shell = "/bin/zsh"
+shell_profile = "source ~/.zshrc"
+```
+
+The shell profile and the user's command are joined with a newline and passed as a single script to the shell, avoiding quoting issues. For example, `/shell echo $MY_VAR` becomes:
+
+```zsh
+source ~/.zshrc
+echo $MY_VAR
+```
+
+`shell_profile` also supports per-project override:
+
+```toml
+[[projects]]
+name = "my-project"
+shell = "/bin/fish"
+shell_profile = "source ~/.config/fish/config.fish"
+```
+
+### Affected Execution Paths
+
+The shell configuration applies to all command execution in cc-connect:
+
+- **`/shell` command** — interactive shell commands from chat
+- **Cron exec jobs** — `[[cron]]` entries with `exec` field
+- **Hooks** — `[[hooks]]` entries with `type = "command"`
+- **Webhook exec** — webhook requests with `exec` field
 
 ---
 
@@ -612,6 +1016,8 @@ type = "claudecode"
 > **Status: Beta.** This feature is available since v1.2.2-beta.5. The UI and API may change in future releases.
 
 A full-featured management UI embedded in the binary — project CRUD, session management, cron job editor, global settings, chat interface, and i18n support.
+
+When importing providers from CC-Switch in the dashboard, an import is rejected if a selected name matches multiple source providers. No providers are added in that request. Deselect the ambiguous name to import the remaining unique providers.
 
 ### Quick Setup (Chat Command)
 
@@ -765,8 +1171,121 @@ mode = "default"
 provider = "anthropic"
 
 [[projects.platforms]]
-type = "feishu"  # or dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
+type = "feishu"  # or wps-xiezuo, dingtalk, telegram, slack, discord, wecom, weixin, line, qq, qqbot
 
 [projects.platforms.options]
 # platform-specific options
 ```
+
+---
+
+## FAQ
+
+Quick answers to questions that came up repeatedly in issues and that the
+maintainers have resolved. Each entry links back to the originating issue
+or PR so you can dig further if needed.
+
+### Does cc-connect support OpenClaw? (issue #501)
+
+Yes. OpenClaw is supported via the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents). cc-connect ships an `acp` agent type that talks to any ACP-compatible CLI, including OpenClaw's `openclaw acp` subcommand.
+
+Minimal config snippet (full version is in `config.example.toml` under
+`# --- Example: OpenClaw (Gateway-backed ACP bridge) ---`):
+
+```toml
+[[projects]]
+name = "openclaw-acp"
+
+[projects.agent]
+type = "acp"
+
+[projects.agent.options]
+work_dir = "/path/to/project"
+command = "openclaw"
+args = ["acp"]
+display_name = "OpenClaw ACP"
+```
+
+**Pairing is required for remote gateways.** If you point cc-connect at a
+remote OpenClaw Gateway (`args = ["acp", "--url", "wss://..."]`) you must
+pair first or every reply comes back empty:
+
+1. Start the gateway: `openclaw acp --url wss://your-gateway:18789`
+2. In another terminal: `openclaw pair`
+3. Approve the pairing request in the OpenClaw UI
+4. Now cc-connect can talk to the authorized gateway
+
+Empty responses from OpenClaw are almost always a missing pairing step
+(issue #432). Re-run `openclaw pair` and re-approve before debugging
+anything else. Reference: <https://zhuanlan.zhihu.com/p/2005687480976970296>
+
+### Personal WeChat group chat — finding the right `chat_id` (issue #805)
+
+Personal WeChat (the `weixin` platform) supports group chats. To bind the
+bot to a specific group, set `chat_id` in `[[projects.platforms.options]]`
+to the **group chat ID**, not an individual user ID. Group chat IDs always
+end with `@chatroom`, for example:
+
+```toml
+[[projects.platforms]]
+type = "weixin"
+
+[projects.platforms.options]
+token = "ilink_bot_bearer_token"
+chat_id = "your_group_chat_id@chatroom"   # group chats end with @chatroom
+```
+
+**How to find the group chat ID:**
+
+1. Start cc-connect and let the bot be in the target group.
+2. Send any message in the group from a known allowed account.
+3. Check the cc-connect logs — the incoming `chat_id` (ending in
+   `@chatroom`) is logged at the moment the message is received. Copy
+   that value into `chat_id`.
+
+Leave `chat_id` empty (or omit the key) to respond to every chat the bot
+is in. Set it to a specific value to restrict the bot to that group or
+user only.
+
+Common pitfalls:
+
+- **"How do I add the bot to a group?"** Personal WeChat bots are added
+  by scanning the QR code *inside* the group with the linked WeChat
+  account, or by sharing the QR via the personal chat and then opening
+  it inside the target group. There is no API-side "invite bot to group"
+  call; the bot becomes a group member the same way any other WeChat
+  contact does.
+- **Bot never receives group messages** — make sure the group is bound
+  to your cc-connect instance. If `allow_from` is set, the first user
+  to message in the group is recorded; if the binding is to a
+  different user, the bot stays silent.
+- **Bot replies in private but ignores the group (or vice versa)** —
+  duplicate the `[[projects.platforms]]` block, one with `chat_id` set
+  to the group and one without, to cover both surfaces.
+
+For more on the `weixin` platform, see [docs/weixin.md](./weixin.md).
+
+### Telegram proxy / outbound restrictions (issue #245)
+
+The Telegram platform supports HTTP and SOCKS5 forward proxies directly in
+`[projects.platforms.options]`. You do not need a system-wide proxy or a
+sidecar — set the proxy per Telegram instance.
+
+```toml
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "${TELEGRAM_BOT_TOKEN}"
+proxy = "http://127.0.0.1:7890"     # or socks5://127.0.0.1:1080
+proxy_username = ""                  # leave empty if no auth
+proxy_password = ""
+```
+
+`proxy` accepts both `http://` and `socks5://` URLs. Authentication is
+optional. The proxy only affects the Telegram Bot API calls for that
+platform instance; other platforms and the management API are not
+tunneled through it.
+
+Full reference: [docs/telegram.md](./telegram.md#21-optional-use-a-proxy).
+This option was added in PR #389.

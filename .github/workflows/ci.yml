@@ -43,18 +43,27 @@ jobs:
       - name: Lint code
         run: |
           set -euo pipefail
-          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
           LINT_BIN="$(go env GOPATH)/bin/golangci-lint"
+
+          run_lint() {
+            "$LINT_BIN" run "$@" || {
+              code=$?
+              # exit code 5 = "no go files to analyze" (e.g. only non-Go files changed) — not a lint failure
+              [ "$code" -eq 5 ] && return 0
+              return "$code"
+            }
+          }
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git fetch --no-tags origin "${{ github.base_ref }}"
-            "$LINT_BIN" run --new-from-rev "origin/${{ github.base_ref }}" ./...
+            run_lint --new-from-rev "origin/${{ github.base_ref }}" ./...
           elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
-            "$LINT_BIN" run --new-from-rev "${{ github.event.before }}" ./...
+            run_lint --new-from-rev "${{ github.event.before }}" ./...
           elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-            "$LINT_BIN" run --new-from-rev "$(git rev-parse HEAD^)" ./...
+            run_lint --new-from-rev "$(git rev-parse HEAD^)" ./...
           else
-            "$LINT_BIN" run ./...
+            run_lint ./...
           fi
 
       - name: Lint GitHub workflows
@@ -98,6 +107,14 @@ jobs:
         env:
           GOPROXY: https://proxy.golang.org,direct
           GOSUMDB: sum.golang.org
+          GONOSUMDB: ""
+
+      - name: Verify module checksums
+        run: go mod verify
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+          GOSUMDB: sum.golang.org
+          GONOSUMDB: ""
 
       - name: Build
         run: go build ./...

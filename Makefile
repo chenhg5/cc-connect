@@ -3,7 +3,7 @@ MODULE     := github.com/chenhg5/cc-connect
 CMD        := ./cmd/cc-connect
 DIST       := dist
 
-VERSION    := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION := v1.5.1-beta.1
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
@@ -33,8 +33,8 @@ PLATFORMS := \
 #   make build EXCLUDE=discord,dingtalk,qq,qqbot,line
 # ---------------------------------------------------------------------------
 
-ALL_AGENTS    := acp claudecode codex cursor droid gemini iflow opencode pi qoder
-ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line
+ALL_AGENTS    := acp antigravity claudecode codex copilot cursor devin droid gemini iflow kimi opencode pi qoder reasonix tmux
+ALL_PLATFORMS := feishu telegram discord slack dingtalk wecom weixin qq qqbot line weibo max matrix webex wps-agentspace cloud_web tuitui googlechat
 ALL_EXTRAS    := web
 
 COMMA := ,
@@ -42,30 +42,38 @@ COMMA := ,
 # Compute exclusion tags from AGENTS / PLATFORMS_INCLUDE / EXCLUDE variables
 _EXCLUDE_TAGS :=
 
+# Normalize comma-separated user input into the form used by ALL_AGENTS /
+# ALL_PLATFORMS (space-separated, dashes folded to underscores). Without
+# the dash→underscore fold, an agent registered under a hyphenated name
+# (e.g. AGENTS=foo-bar with build tag `no_foo_bar`) would fail to match
+# `foo_bar` in the ALL list and silently emit `no_foo_bar` via filter-out
+# — excluding the very plugin the user asked to include.
+_normalize = $(subst -,_,$(subst $(COMMA), ,$(1)))
+
 ifdef AGENTS
-  _WANTED_AGENTS := $(subst $(COMMA), ,$(AGENTS))
+  _WANTED_AGENTS := $(call _normalize,$(AGENTS))
   _EXCLUDE_AGENTS := $(filter-out $(_WANTED_AGENTS),$(ALL_AGENTS))
   _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_AGENTS))
 endif
 
 ifdef PLATFORMS_INCLUDE
-  _WANTED_PLATFORMS := $(subst $(COMMA), ,$(PLATFORMS_INCLUDE))
+  _WANTED_PLATFORMS := $(call _normalize,$(PLATFORMS_INCLUDE))
   _EXCLUDE_PLATFORMS := $(filter-out $(_WANTED_PLATFORMS),$(ALL_PLATFORMS))
   _EXCLUDE_TAGS += $(addprefix no_,$(_EXCLUDE_PLATFORMS))
 endif
 
 ifdef EXCLUDE
-  _EXCLUDE_TAGS += $(addprefix no_,$(subst $(COMMA), ,$(EXCLUDE)))
+  _EXCLUDE_TAGS += $(addprefix no_,$(call _normalize,$(EXCLUDE)))
 endif
 
 ifdef NO_WEB
   _EXCLUDE_TAGS += no_web
 endif
 
-_BUILD_TAGS := $(strip $(_EXCLUDE_TAGS))
+_BUILD_TAGS := $(strip $(_EXCLUDE_TAGS) goolm)
 _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 
-.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-performance pre-test lint release release-all web
+.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-performance pre-test lint release release-all web
 
 web:
 	@if [ ! -d web/node_modules ]; then cd web && npm install; fi
@@ -129,6 +137,14 @@ test-release: pre-test
 	go test -parallel=2 -tags=regression ./tests/e2e/...
 	go test -bench=. -benchmem -tags=performance ./tests/performance/...
 
+# Release-local gate: deterministic release checks that do not require real IM
+# credentials, real provider accounts, or supervisor-managed services.
+test-release-local:
+	go test ./tests/release_local/...
+	go test ./config
+	go test ./core -run 'TestEngineSendToSessionWithAttachments|TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText|TestCmdList_AllSessionsVisibleAfterRepeatedNew|TestCmdList_SessionVisibleDuringAgentProcessing|TestEngine_Alias|TestEngine_BannedWords|TestEngine_DisabledCommands'
+	go test ./platform/feishu -run 'TestUserIDFromEventFallsBackToUserID|TestResolveUserNameSkipsInvalidLookupID|TestNew_CanDisableInteractiveCards'
+
 # Legacy: runs unit tests only
 test:
 	go test -v ./...
@@ -136,7 +152,7 @@ test:
 lint:
 	golangci-lint run ./...
 
-release-all: clean
+release-all: web clean
 	@mkdir -p $(DIST)
 	@$(foreach platform,$(PLATFORMS), \
 		$(eval GOOS   := $(word 1,$(subst /, ,$(platform)))) \

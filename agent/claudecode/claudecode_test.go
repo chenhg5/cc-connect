@@ -1,10 +1,57 @@
 package claudecode
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+func TestNew_ParsesRunAsUserAndRunAsEnv(t *testing.T) {
+	opts := map[string]any{
+		"work_dir":    t.TempDir(),
+		"run_as_user": "partseeker-coder",
+		"run_as_env":  []any{"PGSSLROOTCERT", "PGSSLMODE"},
+	}
+	a, err := New(opts)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	ag, ok := a.(*Agent)
+	if !ok {
+		t.Fatalf("agent is not *Agent: %T", a)
+	}
+	if ag.spawnOpts.RunAsUser != "partseeker-coder" {
+		t.Errorf("spawnOpts.RunAsUser = %q, want %q", ag.spawnOpts.RunAsUser, "partseeker-coder")
+	}
+	if got := ag.spawnOpts.EnvAllowlist; len(got) != 2 || got[0] != "PGSSLROOTCERT" || got[1] != "PGSSLMODE" {
+		t.Errorf("spawnOpts.EnvAllowlist = %v, want [PGSSLROOTCERT PGSSLMODE]", got)
+	}
+}
+
+func TestNew_RunAsUserSkipsClaudeLookPath(t *testing.T) {
+	// With run_as_user set, the supervisor's PATH lookup for "claude" is
+	// skipped because the target user's PATH is what matters. Verify that
+	// New() doesn't fail even when claude isn't on this test process's PATH.
+	opts := map[string]any{
+		"work_dir":    t.TempDir(),
+		"run_as_user": "target-that-definitely-exists",
+	}
+	// Note: this test relies on New() NOT calling exec.LookPath("claude")
+	// when run_as_user is set. If claude IS on PATH in the test env,
+	// either branch of the code returns success and the test still passes.
+	if _, err := New(opts); err != nil {
+		// The only other reason New() could fail for these opts is the
+		// LookPath check — fail loudly if that's what happened.
+		t.Errorf("New with run_as_user returned error (LookPath not skipped?): %v", err)
+	}
+	_ = core.AgentSystemPrompt // keep the core import used
+}
 
 func TestParseUserQuestions_ValidInput(t *testing.T) {
 	input := map[string]any{
@@ -217,9 +264,14 @@ func TestAgent_Name(t *testing.T) {
 }
 
 func TestAgent_CLIBinaryName(t *testing.T) {
-	a := &Agent{}
+	a := &Agent{cmd: "claude"}
 	if got := a.CLIBinaryName(); got != "claude" {
 		t.Errorf("CLIBinaryName() = %q, want %q", got, "claude")
+	}
+
+	a2 := &Agent{cmd: "my-cli"}
+	if got := a2.CLIBinaryName(); got != "my-cli" {
+		t.Errorf("CLIBinaryName() = %q, want %q", got, "my-cli")
 	}
 }
 
@@ -300,3 +352,901 @@ func TestStripXMLTags(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+
+func TestEncodeClaudeProjectKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "simple ASCII path",
+			input:    "/Users/username/Documents/project",
+			expected: "-Users-username-Documents-project",
+		},
+		{
+			name:     "path with Chinese characters",
+			input:    "/Users/username/Documents/项目文件夹",
+			expected: "-Users-username-Documents------", // 6 hyphens: 1 for "/" + 5 for Chinese chars
+		},
+		{
+			name:     "path with Japanese characters",
+			input:    "/Users/username/Documents/プロジェクト",
+			expected: "-Users-username-Documents-------", // 6 hyphens: 1 for "/" + 5 for Japanese chars
+		},
+		{
+			name:     "path with emoji",
+			input:    "/Users/username/Documents/🎉project",
+			expected: "-Users-username-Documents--project", // 2 hyphens: 1 for "/" + 1 for emoji
+		},
+		{
+			name:     "Windows path with colon",
+			input:    "C:\\Users\\username\\Documents",
+			expected: "C--Users-username-Documents",
+		},
+		{
+			name:     "path with underscore",
+			input:    "/Users/username/my_project",
+			expected: "-Users-username-my-project",
+		},
+		{
+			name:     "path with spaces",
+			input:    "/Users/username/Mobile Documents/my project",
+			expected: "-Users-username-Mobile-Documents-my-project",
+		},
+		{
+			name:     "path with tildes",
+			input:    "/Users/username/com~apple~CloudDocs/project",
+			expected: "-Users-username-com-apple-CloudDocs-project",
+		},
+		{
+			name:     "iCloud path with spaces and tildes",
+			input:    "/Users/username/Library/Mobile Documents/com~apple~CloudDocs/my project",
+			expected: "-Users-username-Library-Mobile-Documents-com-apple-CloudDocs-my-project",
+		},
+		{
+			name:     "mixed ASCII and non-ASCII",
+			input:    "/Users/username/中文folder/english文件夹",
+			expected: "-Users-username---folder-english---", // "/中文" = 3 hyphens, "/文件夹" = 4 hyphens
+		},
+		{
+			name:     "path with dots (hidden dirs and version numbers)",
+			input:    "/home/user/.nvm/versions/node/v22.22.2/lib",
+			expected: "-home-user--nvm-versions-node-v22-22-2-lib",
+		},
+		{
+			name:     "path with @ (scoped npm packages)",
+			input:    "/home/user/node_modules/@anthropic-ai/claude-code",
+			expected: "-home-user-node-modules--anthropic-ai-claude-code",
+		},
+		{
+			name:     "path with both dots and @",
+			input:    "/home/user/.local/share/@org/my.project",
+			expected: "-home-user--local-share--org-my-project",
+		},
+		{
+			name:     "empty path",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := encodeClaudeProjectKey(tt.input)
+			if got != tt.expected {
+				t.Errorf("encodeClaudeProjectKey(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFindProjectDir_NonASCIIPath(t *testing.T) {
+	// This test verifies that findProjectDir can handle non-ASCII paths
+	// by creating a mock projects directory structure
+	homeDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, "projects")
+
+	// Test case: Chinese characters in path
+	chineseWorkDir := "/Users/test/Documents/项目文件夹"
+	expectedKey := encodeClaudeProjectKey(chineseWorkDir)
+
+	// Create the mock project directory
+	mockProjectDir := filepath.Join(projectsBase, expectedKey)
+	if err := os.MkdirAll(mockProjectDir, 0755); err != nil {
+		t.Fatalf("failed to create mock project dir: %v", err)
+	}
+
+	// Verify findProjectDir finds the directory
+	found := findProjectDir(homeDir, chineseWorkDir)
+	if found != mockProjectDir {
+		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, chineseWorkDir, found, mockProjectDir)
+	}
+}
+
+func TestFindProjectDir_ASCIIPath(t *testing.T) {
+	// Verify ASCII paths still work correctly
+	homeDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, "projects")
+
+	asciiWorkDir := "/Users/test/Documents/project"
+	expectedKey := encodeClaudeProjectKey(asciiWorkDir)
+
+	mockProjectDir := filepath.Join(projectsBase, expectedKey)
+	if err := os.MkdirAll(mockProjectDir, 0755); err != nil {
+		t.Fatalf("failed to create mock project dir: %v", err)
+	}
+
+	found := findProjectDir(homeDir, asciiWorkDir)
+	if found != mockProjectDir {
+		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, asciiWorkDir, found, mockProjectDir)
+	}
+}
+
+func TestFindProjectDir_NotFound(t *testing.T) {
+	homeDir := t.TempDir()
+	// Don't create any project directories
+
+	workDir := "/Users/test/Documents/nonexistent"
+	found := findProjectDir(homeDir, workDir)
+	if found != "" {
+		t.Errorf("findProjectDir for nonexistent project = %q, want empty string", found)
+	}
+}
+
+func TestFindProjectDir_ICloudPath(t *testing.T) {
+	// Regression for issue #500: paths containing spaces and "~" (common in macOS
+	// iCloud Drive paths like "/Users/x/Library/Mobile Documents/com~apple~CloudDocs/...")
+	// must match the on-disk project key that Claude Code CLI generates, which
+	// collapses both spaces and "~" to "-".
+	homeDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, "projects")
+
+	iCloudWorkDir := "/Users/test/Library/Mobile Documents/com~apple~CloudDocs/my project"
+	// The on-disk key Claude Code CLI actually writes (spaces and "~" → "-").
+	expectedKey := "-Users-test-Library-Mobile-Documents-com-apple-CloudDocs-my-project"
+
+	mockProjectDir := filepath.Join(projectsBase, expectedKey)
+	if err := os.MkdirAll(mockProjectDir, 0755); err != nil {
+		t.Fatalf("failed to create mock project dir: %v", err)
+	}
+
+	found := findProjectDir(homeDir, iCloudWorkDir)
+	if found != mockProjectDir {
+		t.Errorf("findProjectDir(%q, %q) = %q, want %q", homeDir, iCloudWorkDir, found, mockProjectDir)
+	}
+}
+
+func TestSnapshotCLIPath(t *testing.T) {
+	cases := []struct {
+		name      string
+		cmd       string
+		extraArgs []string
+		want      string
+	}{
+		{"default-claude-skipped", "claude", nil, ""},
+		{"empty-binary-skipped", "", nil, ""},
+		{"custom-binary-only", "/usr/local/bin/claude", nil, "/usr/local/bin/claude"},
+		{"wrapper-with-args", "my-cli", []string{"code", "-t", "foo"}, "my-cli code -t foo"},
+		{"claude-with-add-dir", "claude", []string{"--add-dir", "/parent"}, "claude --add-dir /parent"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := snapshotCmdPath(tc.cmd, tc.extraArgs)
+			if got != tc.want {
+				t.Errorf("snapshotCmdPath(%q, %v) = %q, want %q", tc.cmd, tc.extraArgs, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkspaceAgentOptions_FullSnapshot(t *testing.T) {
+	// Construct an Agent directly so we don't depend on `claude` being on
+	// PATH. WorkspaceAgentOptions only reads fields that the production
+	// New() also writes; this just verifies the snapshot shape.
+	a := &Agent{
+		cmd:              "my-cli",
+		cliExtraArgs:     []string{"--add-dir", "/parent"},
+		cmdArgsFlag:      "-a",
+		model:            "claude-opus-4-7",
+		reasoningEffort:  "high",
+		mode:             "acceptEdits",
+		allowedTools:     []string{"Edit", "Read"},
+		disallowedTools:  []string{"Bash"},
+		maxContextTokens: 200000,
+		routerURL:        "http://127.0.0.1:3456",
+		routerAPIKey:     "secret",
+	}
+	got := a.WorkspaceAgentOptions()
+
+	want := map[string]any{
+		"mode":               "acceptEdits",
+		"cmd":                "my-cli --add-dir /parent",
+		"cmd_args_flag":      "-a",
+		"model":              "claude-opus-4-7",
+		"reasoning_effort":   "high",
+		"allowed_tools":      []any{"Edit", "Read"},
+		"disallowed_tools":   []any{"Bash"},
+		"max_context_tokens": 200000,
+		"router_url":         "http://127.0.0.1:3456",
+		"router_api_key":     "secret",
+	}
+	if len(got) != len(want) {
+		t.Errorf("snapshot len = %d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for k, wv := range want {
+		gv, ok := got[k]
+		if !ok {
+			t.Errorf("snapshot missing key %q", k)
+			continue
+		}
+		if !reflect.DeepEqual(gv, wv) {
+			t.Errorf("snapshot[%q] = %v (%T), want %v (%T)", k, gv, gv, wv, wv)
+		}
+	}
+}
+
+func TestWorkspaceAgentOptions_OmitsZeroValues(t *testing.T) {
+	// Default agent (only mode is always emitted, plus default cmd
+	// "claude" should be skipped by snapshotCmdPath).
+	a := &Agent{cmd: "claude", mode: "default"}
+	got := a.WorkspaceAgentOptions()
+
+	if len(got) != 1 {
+		t.Errorf("snapshot len = %d, want 1 (got=%v)", len(got), got)
+	}
+	if got["mode"] != "default" {
+		t.Errorf("snapshot[mode] = %v, want %q", got["mode"], "default")
+	}
+	for _, k := range []string{
+		"cmd", "cmd_args_flag", "model", "reasoning_effort",
+		"allowed_tools", "disallowed_tools", "max_context_tokens",
+		"router_url", "router_api_key",
+	} {
+		if _, ok := got[k]; ok {
+			t.Errorf("snapshot unexpectedly includes %q = %v", k, got[k])
+		}
+	}
+}
+
+func TestWorkspaceAgentOptions_RoundTripsThroughNew(t *testing.T) {
+	// End-to-end: snapshot → New() should reproduce every field. Use
+	// run_as_user to skip the supervisor-side LookPath check, since the
+	// fake "my-cli" binary doesn't exist on the test host's PATH.
+	//
+	// run_as_user only short-circuits LookPath on platforms where
+	// SpawnOptions.IsolationMode() can be true — i.e. Unix. On Windows
+	// it always returns false (see core/runas_windows.go), so the fake
+	// CLI would fail LookPath and New() would error out before the
+	// round-trip assertions run.
+	if runtime.GOOS == "windows" {
+		t.Skip("run_as_user-based LookPath bypass is Unix-only")
+	}
+	parent := &Agent{
+		cmd:              "my-cli",
+		cliExtraArgs:     []string{"code", "--add-dir", "/parent"},
+		cmdArgsFlag:      "-a",
+		model:            "claude-opus-4-7",
+		reasoningEffort:  "high",
+		mode:             "acceptEdits",
+		allowedTools:     []string{"Edit", "Read"},
+		disallowedTools:  []string{"Bash"},
+		maxContextTokens: 200000,
+		routerURL:        "http://127.0.0.1:3456",
+		routerAPIKey:     "secret",
+	}
+	opts := parent.WorkspaceAgentOptions()
+	opts["work_dir"] = t.TempDir()
+	opts["run_as_user"] = "skip-lookpath"
+
+	a, err := New(opts)
+	if err != nil {
+		t.Fatalf("New(snapshot) returned error: %v", err)
+	}
+	child := a.(*Agent)
+
+	if child.cmd != "my-cli" {
+		t.Errorf("cmd = %q, want %q", child.cmd, "my-cli")
+	}
+	if !reflect.DeepEqual(child.cliExtraArgs, []string{"code", "--add-dir", "/parent"}) {
+		t.Errorf("cliExtraArgs = %v, want [code --add-dir /parent]", child.cliExtraArgs)
+	}
+	if child.cmdArgsFlag != "-a" {
+		t.Errorf("cmdArgsFlag = %q, want -a", child.cmdArgsFlag)
+	}
+	if child.model != "claude-opus-4-7" {
+		t.Errorf("model = %q, want claude-opus-4-7", child.model)
+	}
+	if child.reasoningEffort != "high" {
+		t.Errorf("reasoningEffort = %q, want high", child.reasoningEffort)
+	}
+	if child.mode != "acceptEdits" {
+		t.Errorf("mode = %q, want acceptEdits", child.mode)
+	}
+	if !reflect.DeepEqual(child.allowedTools, []string{"Edit", "Read"}) {
+		t.Errorf("allowedTools = %v, want [Edit Read]", child.allowedTools)
+	}
+	if !reflect.DeepEqual(child.disallowedTools, []string{"Bash"}) {
+		t.Errorf("disallowedTools = %v, want [Bash]", child.disallowedTools)
+	}
+	if child.maxContextTokens != 200000 {
+		t.Errorf("maxContextTokens = %d, want 200000", child.maxContextTokens)
+	}
+	if child.routerURL != "http://127.0.0.1:3456" {
+		t.Errorf("routerURL = %q, want http://127.0.0.1:3456", child.routerURL)
+	}
+	if child.routerAPIKey != "secret" {
+		t.Errorf("routerAPIKey = %q, want secret", child.routerAPIKey)
+	}
+}
+
+func TestScanSessionMeta_ArrayContent(t *testing.T) {
+	// Regression test for: scanSessionMeta skips entries where content is a JSON array
+	// (e.g., assistant messages with thinking blocks, or user messages with tool results).
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "queue-operation", "operation": "start"}`,
+		`{"type": "user", "message": {"content": "Hello world"}}`,
+		`{"type": "assistant", "message": {"content": [{"type": "thinking", "text": ""}, {"type": "text", "text": "Hi there"}]}}`,
+		`{"type": "user", "message": {"content": [{"tool_use_id": "call_abc", "type": "tool_result", "content": "result data"}]}}`,
+		`{"type": "assistant", "message": {"content": "Plain text reply"}}`,
+		`{"type": "last-prompt", "lastPrompt": "test"}`,
+	}
+
+	data := ""
+	for _, line := range lines {
+		data += line + "\n"
+	}
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, count := scanSessionMeta(path)
+
+	// Expected: 2 user + 2 assistant = 4 messages
+	if count != 4 {
+		t.Errorf("scanSessionMeta count = %d, want 4 (2 user + 2 assistant, array content should not be skipped)", count)
+	}
+
+	// Summary should come from the first user message with string content (line 2)
+	if summary != "Hello world" {
+		t.Errorf("scanSessionMeta summary = %q, want %q", summary, "Hello world")
+	}
+}
+
+func TestScanSessionMeta_AITitleAndCustomTitle(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": "[cc-connect sender_id=abc] first prompt"}}`,
+		`{"type": "assistant", "message": {"content": "reply"}}`,
+		`{"type": "ai-title", "sessionId": "sess-1", "aiTitle": "查看cc-connect开机自启功能"}`,
+	}
+	data := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, count := scanSessionMeta(path)
+	if count != 2 {
+		t.Errorf("scanSessionMeta count = %d, want 2", count)
+	}
+	if summary != "查看cc-connect开机自启功能" {
+		t.Errorf("scanSessionMeta summary = %q, want ai-title", summary)
+	}
+}
+
+func TestScanSessionMeta_CustomTitleOverridesAITitle(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": "ignored fallback"}}`,
+		`{"type": "ai-title", "sessionId": "sess-1", "aiTitle": "AI generated title"}`,
+		`{"type": "custom-title", "sessionId": "sess-1", "customTitle": "User renamed title"}`,
+	}
+	data := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, _ := scanSessionMeta(path)
+	if summary != "User renamed title" {
+		t.Errorf("scanSessionMeta summary = %q, want custom-title", summary)
+	}
+}
+
+func TestScanSessionMeta_AllArrayContent(t *testing.T) {
+	// When all user messages have array content, summary should remain empty
+	// and count should still be correct.
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.jsonl")
+
+	lines := []string{
+		`{"type": "user", "message": {"content": [{"type": "tool_result", "content": "data"}]}}`,
+		`{"type": "assistant", "message": {"content": [{"type": "text", "text": "reply"}]}}`,
+	}
+
+	data := ""
+	for _, line := range lines {
+		data += line + "\n"
+	}
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write test jsonl: %v", err)
+	}
+
+	summary, count := scanSessionMeta(path)
+
+	if count != 2 {
+		t.Errorf("scanSessionMeta count = %d, want 2", count)
+	}
+	if summary != "" {
+		t.Errorf("scanSessionMeta summary = %q, want empty string when no string user content exists", summary)
+	}
+}
+
+func TestExtractStringContent(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"string", `"hello"`, "hello"},
+		{"empty", `""`, ""},
+		{"array", `[{"type": "text"}]`, ""},
+		{"object", `{"key": "val"}`, ""},
+		{"null", `null`, ""},
+		{"number", `42`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractStringContent([]byte(tt.raw))
+			if got != tt.want {
+				t.Errorf("extractStringContent(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+// ── Issue #599 — cross-project session context leakage ────────
+//
+// The original PR (#604) regressed when the engine loaded a stored
+// AgentSessionID that actually belonged to a different project's
+// workspace. The fix is to ask the agent, via core.SessionIDValidator,
+// whether the ID has a session file under THIS project's per-project
+// directory. These tests pin the helper directly.
+
+// TestValidateSessionIDInProject_ValidSession ensures a known-good
+// sessionID in the project's directory validates true.
+func TestValidateSessionIDInProject_ValidSession(t *testing.T) {
+	homeDir := t.TempDir()
+	workDir := filepath.Join(homeDir, "Documents", "myproject")
+	projectKey := encodeClaudeProjectKey(workDir)
+	projectDir := filepath.Join(homeDir, "projects", projectKey)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	sessionID := "abc123-def456"
+	if err := os.WriteFile(filepath.Join(projectDir, sessionID+".jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	if !validateSessionIDInProject(homeDir, workDir, sessionID) {
+		t.Errorf("validateSessionIDInProject(%q, %q) = false, want true", workDir, sessionID)
+	}
+}
+
+// TestValidateSessionIDInProject_InvalidSession ensures a sessionID that
+// has no file in the project's directory returns false (the engine should
+// then start fresh).
+func TestValidateSessionIDInProject_InvalidSession(t *testing.T) {
+	homeDir := t.TempDir()
+	workDir := filepath.Join(homeDir, "Documents", "myproject")
+	projectKey := encodeClaudeProjectKey(workDir)
+	projectDir := filepath.Join(homeDir, "projects", projectKey)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("create project dir: %v", err)
+	}
+	// A different session file is present, but not the one we ask about.
+	if err := os.WriteFile(filepath.Join(projectDir, "other-session.jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write other session file: %v", err)
+	}
+	if validateSessionIDInProject(homeDir, workDir, "abc123-def456") {
+		t.Errorf("validateSessionIDInProject for missing session = true, want false")
+	}
+}
+
+// TestValidateSessionIDInProject_EmptySessionID ensures the empty ID is
+// rejected outright; the engine should never try to resume an empty ID
+// anyway, but the helper must still return false defensively.
+func TestValidateSessionIDInProject_EmptySessionID(t *testing.T) {
+	if validateSessionIDInProject(t.TempDir(), "/tmp", "") {
+		t.Error("validateSessionIDInProject(empty) = true, want false")
+	}
+}
+
+// TestValidateSessionIDInProject_ProjectDirMissing ensures a workDir that
+// has no corresponding ~/.claude/projects/<key> directory returns false —
+// Claude Code has never been invoked in that workspace, so any stored
+// session ID could not possibly belong to it.
+func TestValidateSessionIDInProject_ProjectDirMissing(t *testing.T) {
+	homeDir := t.TempDir()
+	if validateSessionIDInProject(homeDir, "/nonexistent/path", "some-session-id") {
+		t.Error("validateSessionIDInProject for missing project dir = true, want false")
+	}
+}
+
+// TestValidateSessionIDInProject_CrossProjectLeak is the regression for
+// issue #599: a session ID created under project A's directory must NOT
+// validate as belonging to project B, even when B is also configured. The
+// original bug let one project silently resume another project's
+// conversation history.
+func TestValidateSessionIDInProject_CrossProjectLeak(t *testing.T) {
+	homeDir := t.TempDir()
+	projectsBase := filepath.Join(homeDir, "projects")
+
+	projectA := filepath.Join(homeDir, "work", "projectA")
+	projectB := filepath.Join(homeDir, "work", "projectB")
+	dirA := filepath.Join(projectsBase, encodeClaudeProjectKey(projectA))
+	dirB := filepath.Join(projectsBase, encodeClaudeProjectKey(projectB))
+	for _, d := range []string{dirA, dirB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("create %s: %v", d, err)
+		}
+	}
+
+	sessionID := "shared-session-id"
+	if err := os.WriteFile(filepath.Join(dirA, sessionID+".jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write session in projectA: %v", err)
+	}
+
+	// Project B should NOT see projectA's session.
+	if validateSessionIDInProject(homeDir, projectB, sessionID) {
+		t.Error("validateSessionIDInProject leaked project A's session into project B")
+	}
+	// Sanity: project A still sees its own.
+	if !validateSessionIDInProject(homeDir, projectA, sessionID) {
+		t.Error("validateSessionIDInProject rejected project A's own session")
+	}
+}
+
+// TestAgent_ImplementsSessionIDValidator is a compile-time check that the
+// production *Agent satisfies core.SessionIDValidator. If the interface
+// or its method signature drifts, this test stops compiling before the
+// regression can ship.
+func TestAgent_ImplementsSessionIDValidator(t *testing.T) {
+	var _ core.SessionIDValidator = (*Agent)(nil)
+}
+
+func TestNew_WorkDirDoesNotExist(t *testing.T) {
+	opts := map[string]any{
+		"work_dir": "/tmp/cc-connect-nonexistent-dir-that-should-not-exist",
+	}
+	_, err := New(opts)
+	if err == nil {
+		t.Fatal("expected error for non-existent work_dir, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("expected 'does not exist' in error, got: %v", err)
+	}
+}
+
+// TestParseHistoryTimestamp_ConvertsUTCToLocal is the regression test for
+// issue #1780: when reading Claude Code's JSONL transcript (which stores
+// timestamps as UTC with a trailing "Z"), the resulting HistoryEntry.Timestamp
+// must be in the local timezone so wall-clock display matches the host's
+// `time.Now()` (which is what AddHistory in core/session.go writes for new
+// messages). Without this conversion, replayed history shows times that are
+// offset by the host's UTC offset (e.g. -8h on macOS in CST).
+func TestParseHistoryTimestamp_ConvertsUTCToLocal(t *testing.T) {
+	loc := time.FixedZone("test-local", 8*3600) // +08:00, mimics China
+	prevLoc, hadPrev := lookupZoneLocation()
+	setZoneLocation(loc)
+	defer restoreZoneLocation(prevLoc, hadPrev)
+
+	input := "2026-09-02T03:10:37.436Z"
+	ts, err := parseHistoryTimestamp(input)
+	if err != nil {
+		t.Fatalf("parseHistoryTimestamp(%q) error: %v", input, err)
+	}
+
+	want := time.Date(2026, 9, 2, 11, 10, 37, 436_000_000, loc)
+	if !ts.Equal(want) {
+		t.Errorf("parseHistoryTimestamp(%q) = %v (loc=%s), want %v (loc=%s)",
+			input, ts, ts.Location(), want, want.Location())
+	}
+	if ts.Location().String() != loc.String() {
+		t.Errorf("parseHistoryTimestamp zone = %s, want %s", ts.Location(), loc)
+	}
+}
+
+// TestParseHistoryTimestamp_AlreadyLocalPreserved checks that a timestamp
+// already carrying an explicit non-UTC offset is still converted to the local
+// zone (so the wall-clock value matches local time), not left as the offset it
+// came in with.
+func TestParseHistoryTimestamp_AlreadyLocalPreserved(t *testing.T) {
+	loc := time.FixedZone("test-local", 8*3600) // +08:00
+	prevLoc, hadPrev := lookupZoneLocation()
+	setZoneLocation(loc)
+	defer restoreZoneLocation(prevLoc, hadPrev)
+
+	input := "2026-09-02T11:10:37.436+00:00" // instant expressed in UTC
+	ts, err := parseHistoryTimestamp(input)
+	if err != nil {
+		t.Fatalf("parseHistoryTimestamp(%q) error: %v", input, err)
+	}
+
+	// Same wall-clock instant in local zone.
+	want := time.Date(2026, 9, 2, 19, 10, 37, 436_000_000, loc)
+	if !ts.Equal(want) {
+		t.Errorf("parseHistoryTimestamp(%q) = %v (loc=%s), want %v (loc=%s)",
+			input, ts, ts.Location(), want, want.Location())
+	}
+}
+
+// TestParseHistoryTimestamp_InvalidInput verifies invalid RFC3339Nano strings
+// are surfaced as errors so callers can drop malformed lines instead of
+// silently using the zero time.
+func TestParseHistoryTimestamp_InvalidInput(t *testing.T) {
+	if _, err := parseHistoryTimestamp("not-a-timestamp"); err == nil {
+		t.Fatal("parseHistoryTimestamp(invalid) = nil error, want non-nil")
+	}
+}
+
+// TestParseHistoryTimestamp_WallClockMatchesTimeNow pins the invariant the
+// user-visible display relies on: parseHistoryTimestamp applied to a Claude
+// Code JSONL UTC timestamp yields the same wall-clock fields as time.Now()
+// captured in the same local zone. This guards against future regressions
+// where someone moves the parse call out of parseHistoryTimestamp or removes
+// the .Local() call.
+func TestParseHistoryTimestamp_WallClockMatchesTimeNow(t *testing.T) {
+	loc := time.FixedZone("test-local", -5*3600) // -05:00, mimics EST
+	prevLoc, hadPrev := lookupZoneLocation()
+	setZoneLocation(loc)
+	defer restoreZoneLocation(prevLoc, hadPrev)
+
+	// "now" in the simulated local zone
+	now := time.Now().In(loc)
+	utcEquivalent := now.UTC().Format(time.RFC3339Nano)
+
+	ts, err := parseHistoryTimestamp(utcEquivalent)
+	if err != nil {
+		t.Fatalf("parseHistoryTimestamp(%q) error: %v", utcEquivalent, err)
+	}
+
+	if ts.Hour() != now.Hour() || ts.Minute() != now.Minute() || ts.Second() != now.Second() {
+		t.Errorf("parseHistoryTimestamp wall clock = %02d:%02d:%02d, want %02d:%02d:%02d",
+			ts.Hour(), ts.Minute(), ts.Second(),
+			now.Hour(), now.Minute(), now.Second())
+	}
+}
+
+// TestGetSessionHistory_TimestampsAreLocal is the end-to-end regression test
+// for issue #1780: it walks the full JSONL read path and asserts that the
+// returned HistoryEntry timestamps are in the local timezone, not UTC. It
+// uses a temp HOME so findProjectDir() resolves to a known directory and
+// stamps a session file with explicit UTC timestamps.
+func TestGetSessionHistory_TimestampsAreLocal(t *testing.T) {
+	loc := time.FixedZone("test-local", 8*3600) // +08:00
+	prevLoc, hadPrev := lookupZoneLocation()
+	setZoneLocation(loc)
+	defer restoreZoneLocation(prevLoc, hadPrev)
+
+	// t.Setenv saves the original value and restores it via t.Cleanup,
+	// so we don't need a manual restore (which would need errcheck handling).
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	workDir := t.TempDir()
+	// This test exercises the agent-level fallback path (no per-project
+	// CLAUDE_CONFIG_DIR), so the mock must live under $HOME/.claude/projects.
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectKey := encodeClaudeProjectKey(workDir)
+	sessionDir := filepath.Join(projectsBase, projectKey)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessionDir: %v", err)
+	}
+
+	// Use a fixed UTC instant so the expected local-time math is trivial.
+	utcStamp := "2026-09-02T03:10:37.436Z"
+	sessionID := "ses_local_tz_regression"
+	jsonlPath := filepath.Join(sessionDir, sessionID+".jsonl")
+	jsonlContent := strings.Join([]string{
+		`{"type":"user","timestamp":"` + utcStamp + `","message":{"role":"user","content":"hello"}}`,
+		`{"type":"assistant","timestamp":"` + utcStamp + `","message":{"role":"assistant","content":[{"type":"text","text":"world"}]}}`,
+		`{"type":"file-history-snapshot","timestamp":"` + utcStamp + `","message":{"role":"user","content":""}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+
+	a := &Agent{workDir: workDir}
+
+	entries, err := a.GetSessionHistory(t.Context(), sessionID, 0)
+	if err != nil {
+		t.Fatalf("GetSessionHistory: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries len = %d, want 2 (user + assistant, file-history-snapshot filtered)", len(entries))
+	}
+
+	for i, e := range entries {
+		if e.Timestamp.Location().String() != loc.String() {
+			t.Errorf("entries[%d].Timestamp.Location() = %s, want %s",
+				i, e.Timestamp.Location(), loc)
+		}
+		if e.Timestamp.Hour() != 11 || e.Timestamp.Minute() != 10 || e.Timestamp.Second() != 37 {
+			t.Errorf("entries[%d].Timestamp wall clock = %02d:%02d:%02d, want 11:10:37 (UTC %s shifted to local +08:00)",
+				i, e.Timestamp.Hour(), e.Timestamp.Minute(), e.Timestamp.Second(), utcStamp)
+		}
+	}
+}
+
+// helpers for the timezone-sensitive parseHistoryTimestamp / GetSessionHistory
+// regression tests for issue #1780. We can't safely mutate time.Local directly
+// from a test (other goroutines may depend on it), so the helpers save/restore
+// it and confine the side effect to the test's lifetime via t.Cleanup.
+func lookupZoneLocation() (*time.Location, bool) {
+	return time.Local, time.Local != time.UTC || true // always present
+}
+func setZoneLocation(loc *time.Location) {
+	time.Local = loc
+}
+func restoreZoneLocation(prev *time.Location, _ bool) {
+	time.Local = prev
+}
+
+// TestNew_ParsesContextWindowTokens verifies that the agent stores
+// context_window_tokens from opts as the override value used by the
+// ctx% indicator. Mirrors the pattern of max_context_tokens parsing.
+//
+// We pass `run_as_user` in every case to short-circuit New()'s exec.LookPath
+// check for the "claude" binary — that check is meaningful in production
+// (warns the operator before they start a broken session) but irrelevant
+// to what we're asserting here (parser correctness), and would fail
+// under CI environments where the claude CLI is not installed.
+func TestNew_ParsesContextWindowTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		opts map[string]any
+		want int
+	}{
+		{
+			name: "int positive",
+			opts: map[string]any{"context_window_tokens": 500_000},
+			want: 500_000,
+		},
+		{
+			name: "int64 positive",
+			opts: map[string]any{"context_window_tokens": int64(800_000)},
+			want: 800_000,
+		},
+		{
+			name: "float64 positive (TOML shape)",
+			opts: map[string]any{"context_window_tokens": float64(1_000_000)},
+			want: 1_000_000,
+		},
+		{
+			name: "zero means unset (heuristic fallback)",
+			opts: map[string]any{"context_window_tokens": 0},
+			want: 0,
+		},
+		{
+			name: "negative ignored",
+			opts: map[string]any{"context_window_tokens": -1},
+			want: 0,
+		},
+		{
+			name: "missing key means unset",
+			opts: map[string]any{},
+			want: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.opts["work_dir"] = t.TempDir()
+			tc.opts["run_as_user"] = "ci-test-skip-cli-lookup"
+			a, err := New(tc.opts)
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+			ag := a.(*Agent)
+			if ag.contextWindowTokens != tc.want {
+				t.Errorf("contextWindowTokens = %d, want %d", ag.contextWindowTokens, tc.want)
+			}
+		})
+	}
+}
+
+// TestWorkspaceAgentOptions_PropagatesContextWindowTokens verifies that
+// the value reaches the per-workspace agent map. Without this, multi-
+// workspace mode would silently lose the override. See the
+// TestNew_ParsesContextWindowTokens doc comment for why run_as_user is set.
+func TestWorkspaceAgentOptions_PropagatesContextWindowTokens(t *testing.T) {
+	opts := map[string]any{
+		"work_dir":              t.TempDir(),
+		"context_window_tokens": 750_000,
+		"run_as_user":           "ci-test-skip-cli-lookup",
+	}
+	a, err := New(opts)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	ag := a.(*Agent)
+	workspaceOpts := ag.WorkspaceAgentOptions()
+	got, ok := workspaceOpts["context_window_tokens"].(int)
+	if !ok {
+		t.Fatalf("expected context_window_tokens in workspace opts as int, got %T (value=%v)",
+			workspaceOpts["context_window_tokens"], workspaceOpts["context_window_tokens"])
+	}
+	if got != 750_000 {
+		t.Errorf("workspace context_window_tokens = %d, want 750000", got)
+	}
+}
+
+// TestClaudeContextWindow covers all four paths of the heuristic + the
+// new override-wins branch (Issue #1823). Keep this table-driven so
+// future model-id additions (e.g. 2M variants) get caught immediately.
+func TestClaudeContextWindow(t *testing.T) {
+	cases := []struct {
+		name     string
+		model    string
+		override int
+		want     int
+	}{
+		{name: "empty model, no override -> 200K", model: "", override: 0, want: 200_000},
+		{name: "standard sonnet, no override -> 200K", model: "claude-sonnet-4-20250514", override: 0, want: 200_000},
+		{name: "1m variant, no override -> 1M", model: "claude-sonnet-4-20250514[1m]", override: 0, want: 1_000_000},
+		{name: "1m case-insensitive, no override -> 1M", model: "Claude-Opus-4-7[1M]", override: 0, want: 1_000_000},
+		{name: "with surrounding spaces, no override -> 200K", model: "  sonnet  ", override: 0, want: 200_000},
+
+		// Override-wins: any positive override short-circuits the heuristic.
+		{name: "override beats empty model", model: "", override: 500_000, want: 500_000},
+		{name: "override beats standard 200K", model: "claude-sonnet-4-20250514", override: 320_000, want: 320_000},
+		{name: "override beats 1M heuristic", model: "claude-opus-4-7[1m]", override: 2_000_000, want: 2_000_000},
+		{name: "zero override falls back to heuristic (1m)", model: "claude-opus-4-7[1m]", override: 0, want: 1_000_000},
+		{name: "negative override falls back to heuristic", model: "claude-sonnet-4-20250514", override: -100, want: 200_000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := claudeContextWindow(tc.model, tc.override)
+			if got != tc.want {
+				t.Errorf("claudeContextWindow(%q, %d) = %d, want %d",
+					tc.model, tc.override, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConfigHomeFromEnv_HonorsPerProjectConfigDir verifies that session-dir
+// resolution honors CLAUDE_CONFIG_DIR from the per-project env table, so
+// agents with an isolated config home find their own projects tree instead
+// of ~/.claude (regression test for /list showing empty on multi-home setups).
+func TestConfigHomeFromEnv_HonorsPerProjectConfigDir(t *testing.T) {
+	configHome := t.TempDir()
+	workDir := t.TempDir()
+
+	projectKey := encodeClaudeProjectKey(workDir)
+	sessionDir := filepath.Join(configHome, "projects", projectKey)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessionDir: %v", err)
+	}
+
+	env := []string{"PATH=/usr/bin", "CLAUDE_CONFIG_DIR=" + configHome}
+	if got := configHomeFromEnv(env); got != configHome {
+		t.Errorf("configHomeFromEnv(env) = %q, want %q", got, configHome)
+	}
+
+	if got := findProjectDir(configHomeFromEnv(env), workDir); got != sessionDir {
+		t.Errorf("findProjectDir(configHome, workDir) = %q, want %q", got, sessionDir)
+	}
+
+	// Without the variable it must fall back to ~/.claude (HOME-based).
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got, want := configHomeFromEnv(nil), filepath.Join(home, ".claude"); got != want {
+		t.Errorf("configHomeFromEnv(nil) = %q, want %q", got, want)
+	}
+}

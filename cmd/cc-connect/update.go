@@ -154,30 +154,37 @@ func runUpdate() {
 	}
 	fmt.Printf("New version available: %s → %s\n", version, label)
 
-	asset := binaryAssetName(latest)
-	url := fmt.Sprintf("%s/%s/%s", downloadBase, latest, asset)
+	// Try archive format first (tar.gz/zip), then bare binary as fallback
+	archiveAsset := archiveAssetName(latest)
+	archiveURL := fmt.Sprintf("%s/%s/%s", downloadBase, latest, archiveAsset)
 
-	fmt.Printf("Downloading %s ...\n", url)
+	fmt.Printf("Downloading %s ...\n", archiveURL)
 
-	tmpFile, err := downloadToTemp(url)
+	tmpFile, err := downloadToTemp(archiveURL)
+	needExtract := err == nil
+
 	if err != nil {
-		// Fallback: try archive format (.tar.gz or .zip)
-		archiveAsset := archiveAssetName(latest)
-		archiveURL := fmt.Sprintf("%s/%s/%s", downloadBase, latest, archiveAsset)
-		fmt.Printf("Bare binary not found, trying archive %s ...\n", archiveURL)
+		// Fallback: try bare binary format (older releases)
+		binaryAsset := binaryAssetName(latest)
+		binaryURL := fmt.Sprintf("%s/%s/%s", downloadBase, latest, binaryAsset)
+		fmt.Printf("Archive not found, trying bare binary %s ...\n", binaryURL)
 
-		archiveTmp, archiveErr := downloadToTemp(archiveURL)
-		if archiveErr != nil {
-			fmt.Fprintf(os.Stderr, "Download failed: %v\n", archiveErr)
-			os.Exit(1)
-		}
-		defer os.Remove(archiveTmp)
-
-		tmpFile, err = extractBinaryFromArchive(archiveTmp, archiveAsset)
+		tmpFile, err = downloadToTemp(binaryURL)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Extract failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Download failed: %v\n", err)
 			os.Exit(1)
 		}
+	}
+
+	if needExtract {
+		// Downloaded an archive - extract binary
+		extracted, extractErr := extractBinaryFromArchive(tmpFile, archiveAsset)
+		os.Remove(tmpFile) // clean up archive
+		if extractErr != nil {
+			fmt.Fprintf(os.Stderr, "Extract failed: %v\n", extractErr)
+			os.Exit(1)
+		}
+		tmpFile = extracted
 	}
 	defer os.Remove(tmpFile)
 

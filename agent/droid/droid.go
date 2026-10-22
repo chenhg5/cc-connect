@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -19,6 +20,8 @@ func init() {
 
 type Agent struct {
 	cmd                   string
+	cliExtraArgs          []string
+	configEnv             []string
 	workDir               string
 	model                 string
 	reasoningEffort       string
@@ -36,10 +39,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir = "."
 	}
 
-	cmd, _ := opts["cmd"].(string)
-	if cmd == "" {
-		cmd = "droid"
-	}
+	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "droid")
 
 	model, _ := opts["model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
@@ -54,15 +54,23 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, fmt.Errorf("droid: %q CLI not found in PATH", cmd)
 	}
 
-	return &Agent{
+	a := &Agent{
 		cmd:                   cmd,
+		cliExtraArgs:          cliExtraArgs,
+		configEnv:             core.ParseConfigEnv(opts),
 		workDir:               workDir,
 		model:                 model,
 		reasoningEffort:       normalizeReasoningEffort(reasoningEffort),
 		auto:                  normalizeAuto(auto),
 		skipPermissionsUnsafe: skipPermissionsUnsafe,
 		activeIdx:             -1,
-	}, nil
+	}
+	if mode, _ := opts["mode"].(string); strings.TrimSpace(mode) != "" {
+		applyModeLocked(a, mode)
+	} else if a.skipPermissionsUnsafe {
+		a.auto = ""
+	}
+	return a, nil
 }
 
 func (a *Agent) Name() string { return "droid" }
@@ -104,7 +112,7 @@ func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
 		{Name: "claude-opus-4-6", Desc: "Claude Opus 4.6"},
 		{Name: "claude-sonnet-4-6", Desc: "Claude Sonnet 4.6"},
 	}
-	custom := loadDroidCustomModels()
+	custom := a.loadDroidCustomModels()
 	if len(custom) == 0 {
 		return builtins
 	}
@@ -172,19 +180,19 @@ func (a *Agent) AvailableReasoningEfforts() []string {
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.sessionEnv = env
+	a.sessionEnv = append([]string(nil), env...)
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.RLock()
 	cmd := a.cmd
+	cliExtraArgs := append([]string(nil), a.cliExtraArgs...)
 	workDir := a.workDir
 	model := a.model
 	reasoningEffort := a.reasoningEffort
 	auto := a.auto
 	skipPermissionsUnsafe := a.skipPermissionsUnsafe
-	extraEnv := a.providerEnvLocked()
-	extraEnv = append(extraEnv, a.sessionEnv...)
+	extraEnv := a.sessionEnvLocked()
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
 		if m := strings.TrimSpace(a.providers[a.activeIdx].Model); m != "" {
 			model = m
@@ -192,7 +200,56 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.RUnlock()
 
-	return newDroidSession(ctx, cmd, workDir, model, reasoningEffort, auto, skipPermissionsUnsafe, sessionID, extraEnv)
+	return newDroidSession(ctx, cmd, cliExtraArgs, workDir, model, reasoningEffort, auto, skipPermissionsUnsafe, sessionID, extraEnv)
+}
+
+func (a *Agent) sessionEnvLocked() []string {
+	env := append([]string(nil), a.configEnv...)
+	env = append(env, a.providerEnvLocked()...)
+	return append(env, a.sessionEnv...)
+}
+
+func (a *Agent) homeDir() (string, error) {
+	key := "HOME"
+	if runtime.GOOS == "windows" {
+		key = "USERPROFILE"
+	}
+	a.mu.RLock()
+	env := a.sessionEnvLocked()
+	a.mu.RUnlock()
+	for i := len(env) - 1; i >= 0; i-- {
+		if name, value, ok := strings.Cut(env[i], "="); ok && name == key {
+			if value == "" {
+				return "", fmt.Errorf("droid: %s is empty", key)
+			}
+			return value, nil
+		}
+	}
+	return os.UserHomeDir()
+}
+
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	opts := map[string]any{
+		"model":                   a.model,
+		"reasoning_effort":        a.reasoningEffort,
+		"auto":                    a.auto,
+		"skip_permissions_unsafe": a.skipPermissionsUnsafe,
+	}
+	if a.cmd != "" {
+		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)
+	}
+	if len(a.configEnv) > 0 {
+		env := make(map[string]string, len(a.configEnv))
+		for _, entry := range a.configEnv {
+			if key, value, ok := strings.Cut(entry, "="); ok {
+				env[key] = value
+			}
+		}
+		opts["env"] = env
+	}
+	return opts
 }
 
 func (a *Agent) providerEnvLocked() []string {
@@ -218,7 +275,7 @@ func (a *Agent) providerEnvLocked() []string {
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := a.homeDir()
 	if err != nil {
 		return nil, fmt.Errorf("droid: cannot determine home dir: %w", err)
 	}
@@ -232,7 +289,7 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 }
 
 func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := a.homeDir()
 	if err != nil {
 		return fmt.Errorf("droid: cannot determine home dir: %w", err)
 	}
@@ -310,15 +367,16 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 }
 
 func (a *Agent) ProjectMemoryFile() string {
-	absDir, err := filepath.Abs(a.workDir)
+	workDir := a.GetWorkDir()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	return filepath.Join(absDir, "AGENTS.md")
 }
 
 func (a *Agent) GlobalMemoryFile() string {
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := a.homeDir()
 	if err != nil {
 		return ""
 	}
@@ -377,13 +435,14 @@ func (a *Agent) ListProviders() []core.ProviderConfig {
 }
 
 func (a *Agent) SkillDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	workDir := a.GetWorkDir()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	dirs := []string{filepath.Join(absDir, ".factory", "skills")}
 
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := a.homeDir()
 	if err != nil {
 		return dirs
 	}
@@ -419,3 +478,7 @@ var _ core.Agent = (*Agent)(nil)
 var _ core.ProviderSwitcher = (*Agent)(nil)
 var _ core.ContextCompressor = (*Agent)(nil)
 var _ core.UsageReporter = (*Agent)(nil)
+var _ core.WorkspaceAgentOptionSnapshotter = (*Agent)(nil)
+var _ core.HistoryProvider = (*Agent)(nil)
+var _ core.ModeSwitcher = (*Agent)(nil)
+var _ core.SkillProvider = (*Agent)(nil)

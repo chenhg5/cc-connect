@@ -15,8 +15,8 @@
     },
     "slash_commands": [
       {
-        "command": "/btw",
-        "description": "Send additional context to agent while it's busy",
+        "command": "/ps",
+        "description": "Send a P.S. to the running task",
         "usage_hint": "[message]",
         "should_escape": false
       },

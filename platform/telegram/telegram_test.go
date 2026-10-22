@@ -69,19 +69,19 @@ func (t *stubTypingTicker) C() <-chan time.Time {
 func (t *stubTypingTicker) Stop() {}
 
 type stubTelegramBot struct {
-	mu                    sync.Mutex
-	sendMessageCalls      int
-	sendPhotoCalls        int
-	sendDocumentCalls     int
-	sendVoiceCalls        int
-	sendAudioCalls        int
-	sendChatActionCalls   int
-	editMessageTextCalls  int
-	deleteMessageCalls    int
-	answerCallbackCalls   int
-	setMyCommandsCalls    int
-	getFileCalls          int
-	setReactionCalls      int
+	mu                   sync.Mutex
+	sendMessageCalls     int
+	sendPhotoCalls       int
+	sendDocumentCalls    int
+	sendVoiceCalls       int
+	sendAudioCalls       int
+	sendChatActionCalls  int
+	editMessageTextCalls int
+	deleteMessageCalls   int
+	answerCallbackCalls  int
+	setMyCommandsCalls   int
+	getFileCalls         int
+	setReactionCalls     int
 
 	sendErr    error
 	getFileErr error
@@ -229,7 +229,6 @@ func (b *stubTelegramBot) GetFileCallCount() int {
 	defer b.mu.Unlock()
 	return b.getFileCalls
 }
-
 
 func TestPlatformStart_RetriesInBackgroundUntilConnected(t *testing.T) {
 	var attempts atomic.Int32
@@ -593,13 +592,13 @@ func TestTruncateTelegramBotDescription_UTF8Safe(t *testing.T) {
 	if !utf8.ValidString(out) {
 		t.Fatal("invalid UTF-8 from CJK description")
 	}
-	if got, max := utf8.RuneCountInString(out), 256; got > max {
+	if got, max := utf8.RuneCountInString(out), telegramBotCommandDescriptionLimit; got > max {
 		t.Fatalf("rune count %d > %d", got, max)
 	}
 
-	long := strings.Repeat("b", 260)
+	long := strings.Repeat("b", 60)
 	out2 := truncateTelegramBotDescription(long)
-	if want := 256; utf8.RuneCountInString(out2) != want {
+	if want := telegramBotCommandDescriptionLimit; utf8.RuneCountInString(out2) != want {
 		t.Fatalf("ascii truncation: got %d runes want %d", utf8.RuneCountInString(out2), want)
 	}
 	if !utf8.ValidString(out2) {
@@ -896,7 +895,7 @@ func TestHandleMessageWithForumTopic(t *testing.T) {
 	}
 }
 
-func TestHandleMessageNonForumIgnoresThreadID(t *testing.T) {
+func TestHandleMessagePrivateTopicUsesThreadID(t *testing.T) {
 	handled := make(chan *core.Message, 1)
 	p := &Platform{
 		token:         "token",
@@ -912,14 +911,13 @@ func TestHandleMessageNonForumIgnoresThreadID(t *testing.T) {
 
 	msg := &models.Message{
 		ID:              10,
-		MessageThreadID: 55, // set but not a forum
+		MessageThreadID: 55,
 		Text:            "hello",
 		Date:            int(time.Now().Unix()),
 		From:            &models.User{ID: 7, Username: "alice"},
 		Chat: models.Chat{
 			ID:      100,
-			Type:    models.ChatTypeGroup,
-			Title:   "Test Group",
+			Type:    models.ChatTypePrivate,
 			IsForum: false,
 		},
 	}
@@ -928,12 +926,12 @@ func TestHandleMessageNonForumIgnoresThreadID(t *testing.T) {
 
 	select {
 	case got := <-handled:
-		if got.SessionKey != "telegram:100:7" {
-			t.Fatalf("SessionKey = %q, want %q (no thread)", got.SessionKey, "telegram:100:7")
+		if got.SessionKey != "telegram:100:55:7" {
+			t.Fatalf("SessionKey = %q, want %q", got.SessionKey, "telegram:100:55:7")
 		}
 		rc := got.ReplyCtx.(replyContext)
-		if rc.threadID != 0 {
-			t.Fatalf("threadID = %d, want 0", rc.threadID)
+		if rc.threadID != 55 {
+			t.Fatalf("threadID = %d, want 55", rc.threadID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("message not handled")
@@ -966,3 +964,75 @@ func newTelegramTestPlatform(t *testing.T, handler func(http.ResponseWriter, *ht
 		httpClient: server.Client(),
 	}
 }
+
+func TestNewProgressStyleDefault(t *testing.T) {
+	p, err := New(map[string]any{"token": "test-token"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tg, ok := p.(*Platform)
+	if !ok {
+		t.Fatalf("expected *Platform, got %T", p)
+	}
+	if got := tg.ProgressStyle(); got != "compact" {
+		t.Fatalf("default ProgressStyle() = %q, want %q", got, "compact")
+	}
+}
+
+func TestNewProgressStyleOptions(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    any
+		wantErr  bool
+		wantMode string
+	}{
+		{name: "explicit compact", input: "compact", wantMode: "compact"},
+		{name: "explicit legacy", input: "legacy", wantMode: "legacy"},
+		{name: "card normalized to compact", input: "card", wantMode: "compact"},
+		{name: "uppercase tolerated", input: "COMPACT", wantMode: "compact"},
+		{name: "whitespace tolerated", input: "  legacy  ", wantMode: "legacy"},
+		{name: "empty string keeps default", input: "", wantMode: "compact"},
+		{name: "invalid value rejected", input: "fancy", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := New(map[string]any{
+				"token":          "test-token",
+				"progress_style": tc.input,
+			})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for input %v, got nil", tc.input)
+				}
+				if !strings.Contains(err.Error(), "invalid progress_style") {
+					t.Fatalf("error = %q, want substring 'invalid progress_style'", err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			tg := p.(*Platform)
+			if got := tg.ProgressStyle(); got != tc.wantMode {
+				t.Fatalf("ProgressStyle() = %q, want %q", got, tc.wantMode)
+			}
+		})
+	}
+}
+
+// TestProgressStyleProviderInterface verifies *Platform satisfies the
+// core.ProgressStyleProvider interface so the engine's
+// progressStyleForPlatform() picks up our implementation rather than
+// falling back to legacy.
+func TestProgressStyleProviderInterface(t *testing.T) {
+	var p core.Platform = &Platform{progressStyle: "compact"}
+	provider, ok := p.(interface{ ProgressStyle() string })
+	if !ok {
+		t.Fatalf("*Platform does not satisfy ProgressStyle() interface")
+	}
+	if got := provider.ProgressStyle(); got != "compact" {
+		t.Fatalf("ProgressStyle() = %q, want compact", got)
+	}
+}
+

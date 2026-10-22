@@ -29,6 +29,11 @@ const (
 	defaultWeixinBotType = "3"
 	weixinQRPollTimeout  = 35 * time.Second
 	weixinMaxQRRefresh   = 3
+
+	// 微信 ilink QR 码有效期约 120 秒，在预估过期前 30 秒主动刷新，
+	// 避免用户正在扫码时 QR 码过期导致的糟糕体验。
+	weixinQREstimatedTTL       = 110 * time.Second
+	weixinQRProactiveRefreshAt = 80 * time.Second
 )
 
 type weixinBotQRResponse struct {
@@ -276,6 +281,7 @@ func runWeixinQRLoginFlow(opts weixinQRLoginOptions) (*weixinQRLoginResult, erro
 	qrKey := qrPayload.QRCode
 	refreshCount := 1
 	scannedPrinted := false
+	qrFetchedAt := time.Now() // 追踪 QR 码生成时间，用于主动刷新
 
 	for time.Now().Before(deadline) {
 		status, err := weixinPollQRStatus(ctx, opts.APIBaseURL, qrKey, opts.RouteTag, opts.Debug)
@@ -285,6 +291,37 @@ func runWeixinQRLoginFlow(opts weixinQRLoginOptions) (*weixinQRLoginResult, erro
 
 		switch status.Status {
 		case "wait", "":
+			// 主动刷新：在 QR 码预估过期前自动获取新码，避免用户扫码时 QR 过期
+			if time.Since(qrFetchedAt) > weixinQRProactiveRefreshAt && refreshCount < weixinMaxQRRefresh {
+				refreshCount++
+				fmt.Printf("\n⏳ 二维码即将过期，正在自动刷新 (%d/%d)…\n", refreshCount, weixinMaxQRRefresh)
+				newQR, err := weixinFetchBotQRCode(ctx, opts.APIBaseURL, botType, opts.RouteTag, opts.Debug)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: proactive QR refresh failed: %v\n", err)
+					// 不中断流程，继续用当前 QR 轮询
+					time.Sleep(time.Second)
+					continue
+				}
+				qrKey = newQR.QRCode
+				qrFetchedAt = time.Now()
+				scannedPrinted = false
+				newURL := strings.TrimSpace(newQR.QRCodeImgContent)
+				if newURL != "" {
+					fmt.Println("请扫描新二维码：")
+					fmt.Printf("URL: %s\n\n", newURL)
+					tryPrintTerminalQRCode(newURL)
+				}
+				// 刷新时同步更新 QR 图片文件
+				if opts.QRImage != "" {
+					if err := saveQRCodeImage(newURL, opts.QRImage); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to update QR image: %v\n", err)
+					} else {
+						fmt.Printf("QR code updated at: %s\n\n", opts.QRImage)
+					}
+				}
+				time.Sleep(time.Second)
+				continue
+			}
 			time.Sleep(time.Second)
 			continue
 		case "scaned":
@@ -305,12 +342,21 @@ func runWeixinQRLoginFlow(opts weixinQRLoginOptions) (*weixinQRLoginResult, erro
 				return nil, fmt.Errorf("refresh QR: %w", err)
 			}
 			qrKey = newQR.QRCode
+			qrFetchedAt = time.Now()
 			scannedPrinted = false
 			newURL := strings.TrimSpace(newQR.QRCodeImgContent)
 			if newURL != "" {
 				fmt.Println("请扫描新二维码：")
 				fmt.Printf("URL: %s\n\n", newURL)
 				tryPrintTerminalQRCode(newURL)
+			}
+			// 过期刷新时同步更新 QR 图片文件
+			if opts.QRImage != "" {
+				if err := saveQRCodeImage(newURL, opts.QRImage); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to update QR image: %v\n", err)
+				} else {
+					fmt.Printf("QR code updated at: %s\n\n", opts.QRImage)
+				}
 			}
 			time.Sleep(time.Second)
 			continue

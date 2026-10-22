@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
 
 func TestI18n_DefaultLanguage(t *testing.T) {
 	i := NewI18n(LangEnglish)
@@ -102,6 +105,45 @@ func TestIsChinese(t *testing.T) {
 	if isChinese('ア') {
 		t.Error("Japanese katakana 'ア' should not be Chinese")
 	}
+}
+
+// TestI18n_ConcurrentAccess is a regression test for a real data race on
+// I18n's lang/detected fields. cc-connect fans out platform message
+// handlers concurrently; each one calls DetectAndSet (writes detected),
+// while typing/reply paths call T / CurrentLang concurrently (read
+// lang/detected). Without a mutex `go test -race` flagged real races on
+// these fields. This test exercises the same access pattern under -race
+// so a future edit that drops the mutex breaks loudly instead of
+// silently re-introducing the race.
+func TestI18n_ConcurrentAccess(t *testing.T) {
+	i := NewI18n(LangAuto)
+	i.SetSaveFunc(func(Language) error { return nil })
+
+	const goroutines = 16
+	const iterations = 200
+
+	texts := []string{"hello world", "你好世界", "こんにちは", "¡Hola amigo!"}
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for n := 0; n < iterations; n++ {
+				switch (g + n) % 4 {
+				case 0:
+					i.DetectAndSet(texts[n%len(texts)])
+				case 1:
+					_ = i.T(MsgStarting)
+				case 2:
+					_ = i.CurrentLang()
+				case 3:
+					_ = i.IsZhLike()
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
 }
 
 func TestIsJapanese(t *testing.T) {

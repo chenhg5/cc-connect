@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -208,6 +211,26 @@ func TestMiniMaxTTS_Success(t *testing.T) {
 		if r.URL.Path != "/v1/t2a_v2" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
+		var req struct {
+			Model        string `json:"model"`
+			Text         string `json:"text"`
+			VoiceSetting struct {
+				VoiceID string  `json:"voice_id"`
+				Speed   float64 `json:"speed"`
+			} `json:"voice_setting"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Model != "speech-2.8-hd" || req.Text != "hello" {
+			t.Fatalf("unexpected model/text: %q/%q", req.Model, req.Text)
+		}
+		if req.VoiceSetting.VoiceID != "voice-test" {
+			t.Fatalf("voice_id = %q", req.VoiceSetting.VoiceID)
+		}
+		if req.VoiceSetting.Speed != 0.98 {
+			t.Fatalf("speed = %v, want 0.98", req.VoiceSetting.Speed)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		// "fake-mp3" hex-encoded
 		hexAudio := "66616b652d6d7033"
@@ -228,7 +251,7 @@ func TestMiniMaxTTS_Success(t *testing.T) {
 	defer apiServer.Close()
 
 	tts := NewMiniMaxTTS("test-key", apiServer.URL, "speech-2.8-hd", nil)
-	audio, format, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{})
+	audio, format, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{Voice: "voice-test", Speed: 0.98})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -237,6 +260,93 @@ func TestMiniMaxTTS_Success(t *testing.T) {
 	}
 	if string(audio) != "fake-mp3" {
 		t.Errorf("unexpected audio data: %q", audio)
+	}
+}
+
+// TestMiniMaxTTS_FinalStatusChunkAudioIsDropped reproduces the doubled-audio
+// bug: MiniMax T2A v2 stream protocol sends incremental audio in status=1
+// chunks and re-emits the full audio in a final status=2 trailer chunk for
+// non-stream clients. Without dedup the resulting audio plays twice.
+func TestMiniMaxTTS_FinalStatusChunkAudioIsDropped(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Incremental status=1 chunks: "hello" hex-encoded across 3 chunks.
+		for _, hexAudio := range []string{"68", "656c6c", "6f"} {
+			chunk := map[string]any{
+				"data":      map[string]any{"audio": hexAudio, "status": 1},
+				"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+			}
+			data, _ := json.Marshal(chunk)
+			if _, err := fmt.Fprintf(w, "data:%s\n\n", data); err != nil {
+				t.Errorf("write chunk: %v", err)
+			}
+		}
+		// Final status=2 chunk re-sends the full "hello" audio as trailer.
+		final := map[string]any{
+			"data":      map[string]any{"audio": "68656c6c6f", "status": 2},
+			"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+		}
+		finalData, _ := json.Marshal(final)
+		if _, err := fmt.Fprintf(w, "data:%s\n\n", finalData); err != nil {
+			t.Errorf("write final: %v", err)
+		}
+	}))
+	defer apiServer.Close()
+
+	tts := NewMiniMaxTTS("test-key", apiServer.URL, "", nil)
+	audio, _, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := string(audio), "hello"; got != want {
+		t.Errorf("audio = %q (len=%d), want %q (len=%d) — status=2 trailer was not deduplicated, audio plays twice",
+			got, len(got), want, len(want))
+	}
+}
+
+// TestMiniMaxTTS_StopsAfterFinalStatusChunk ensures any unexpected chunks
+// after status=2 are not appended (defence in depth against future server
+// changes).
+func TestMiniMaxTTS_StopsAfterFinalStatusChunk(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// status=1 with "hi" (6869)
+		chunk := map[string]any{
+			"data":      map[string]any{"audio": "6869", "status": 1},
+			"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+		}
+		data, _ := json.Marshal(chunk)
+		if _, err := fmt.Fprintf(w, "data:%s\n\n", data); err != nil {
+			t.Errorf("write chunk: %v", err)
+		}
+		// status=2 trailer with full audio
+		final := map[string]any{
+			"data":      map[string]any{"audio": "6869", "status": 2},
+			"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+		}
+		finalData, _ := json.Marshal(final)
+		if _, err := fmt.Fprintf(w, "data:%s\n\n", finalData); err != nil {
+			t.Errorf("write final: %v", err)
+		}
+		// Bogus extra chunk after final — must be ignored.
+		extra := map[string]any{
+			"data":      map[string]any{"audio": "deadbeef", "status": 1},
+			"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+		}
+		extraData, _ := json.Marshal(extra)
+		if _, err := fmt.Fprintf(w, "data:%s\n\n", extraData); err != nil {
+			t.Errorf("write extra: %v", err)
+		}
+	}))
+	defer apiServer.Close()
+
+	tts := NewMiniMaxTTS("test-key", apiServer.URL, "", nil)
+	audio, _, err := tts.Synthesize(context.Background(), "hi", TTSSynthesisOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := string(audio), "hi"; got != want {
+		t.Errorf("audio = %q, want %q — trailing chunks after status=2 were not ignored", got, want)
 	}
 }
 
@@ -289,6 +399,190 @@ func TestMiniMaxTTS_EmptyAudio(t *testing.T) {
 	_, _, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{})
 	if err == nil {
 		t.Fatal("expected error for empty audio data")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// MimoTTS tests
+// ──────────────────────────────────────────────────────────────
+
+func TestMimoTTS_Success(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("api-key"); got != "test-key" {
+			t.Errorf("expected api-key header 'test-key', got %q", got)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Errorf("Authorization header must not be set, got %q", auth)
+		}
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Audio struct {
+				Format string `json:"format"`
+				Voice  string `json:"voice"`
+			} `json:"audio"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if req.Model != "mimo-v2.5-tts" {
+			t.Errorf("expected model mimo-v2.5-tts, got %q", req.Model)
+		}
+		if len(req.Messages) != 2 || req.Messages[1].Role != "assistant" || req.Messages[1].Content != "你好" {
+			t.Errorf("expected assistant message with synthesis text, got %+v", req.Messages)
+		}
+		if req.Audio.Format != "wav" {
+			t.Errorf("expected audio.format wav, got %q", req.Audio.Format)
+		}
+		if req.Audio.Voice != "Chloe" {
+			t.Errorf("expected audio.voice Chloe, got %q", req.Audio.Voice)
+		}
+		// "fake-wav" base64-encoded
+		b64 := "ZmFrZS13YXY="
+		resp := map[string]any{
+			"choices": []map[string]any{
+				{
+					"message": map[string]any{
+						"audio": map[string]any{
+							"data": b64,
+						},
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer apiServer.Close()
+
+	tts := NewMimoTTS("test-key", apiServer.URL, "", nil)
+	audio, format, err := tts.Synthesize(context.Background(), "你好", TTSSynthesisOpts{Voice: "Chloe"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if format != "wav" {
+		t.Errorf("expected wav, got %q", format)
+	}
+	if string(audio) != "fake-wav" {
+		t.Errorf("unexpected audio data: %q", audio)
+	}
+}
+
+func TestMimoTTS_DefaultVoice(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Audio struct {
+				Voice string `json:"voice"`
+			} `json:"audio"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Audio.Voice != "mimo_default" {
+			t.Errorf("expected default voice mimo_default, got %q", req.Audio.Voice)
+		}
+		resp := map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"audio": map[string]any{"data": "ZmFrZQ=="}}},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer apiServer.Close()
+
+	tts := NewMimoTTS("test-key", apiServer.URL, "", nil)
+	_, _, err := tts.Synthesize(context.Background(), "hi", TTSSynthesisOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMimoTTS_APIError(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":{"message":"invalid api key"}}`))
+	}))
+	defer apiServer.Close()
+
+	tts := NewMimoTTS("bad-key", apiServer.URL, "", nil)
+	_, _, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{})
+	if err == nil {
+		t.Fatal("expected error for non-200 response")
+	}
+}
+
+func TestMimoTTS_EmptyAudio(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"audio": map[string]any{"data": ""}}},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer apiServer.Close()
+
+	tts := NewMimoTTS("test-key", apiServer.URL, "", nil)
+	_, _, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{})
+	if err == nil {
+		t.Fatal("expected error for empty audio data")
+	}
+}
+
+func TestMimoTTS_BusinessError(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"error": map[string]any{
+				"message": "quota exceeded",
+				"type":    "rate_limit",
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer apiServer.Close()
+
+	tts := NewMimoTTS("test-key", apiServer.URL, "", nil)
+	_, _, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{})
+	if err == nil {
+		t.Fatal("expected error for business error")
+	}
+}
+
+func TestMimoTTS_BadBase64(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"audio": map[string]any{"data": "!!!not-base64!!!"}}},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer apiServer.Close()
+
+	tts := NewMimoTTS("test-key", apiServer.URL, "", nil)
+	_, _, err := tts.Synthesize(context.Background(), "hello", TTSSynthesisOpts{})
+	if err == nil {
+		t.Fatal("expected error for invalid base64 audio")
+	}
+}
+
+func TestMimoTTS_Constructors(t *testing.T) {
+	tts := NewMimoTTS("k", "", "", nil)
+	if tts.BaseURL != "https://api.xiaomimimo.com/v1" {
+		t.Errorf("expected default base URL, got %q", tts.BaseURL)
+	}
+	if tts.Model != "mimo-v2.5-tts" {
+		t.Errorf("expected default model mimo-v2.5-tts, got %q", tts.Model)
+	}
+	tts = NewMimoTTS("k", "https://example.com/v1", "mimo-v2.5-tts-voicedesign", nil)
+	if tts.BaseURL != "https://example.com/v1" {
+		t.Errorf("expected custom base URL, got %q", tts.BaseURL)
+	}
+	if tts.Model != "mimo-v2.5-tts-voicedesign" {
+		t.Errorf("expected custom model, got %q", tts.Model)
 	}
 }
 
@@ -388,6 +682,9 @@ func TestPicoTTS_Constructors(t *testing.T) {
 
 func TestEdgeTTS_Constructors(t *testing.T) {
 	tts := NewEdgeTTS("")
+	if tts.Path != "" {
+		t.Errorf("expected empty default path, got %q", tts.Path)
+	}
 	if tts.Voice != "zh-CN-XiaoxiaoNeural" {
 		t.Errorf("expected default voice 'zh-CN-XiaoxiaoNeural', got %q", tts.Voice)
 	}
@@ -447,6 +744,83 @@ func TestPicoTTS_Synthesize_Integration(t *testing.T) {
 	}
 	if len(audio) == 0 {
 		t.Error("expected non-empty audio data")
+	}
+}
+
+// writeFakeTTSBinary creates a temp shell script that sleeps long enough to
+// outlive a normal test timeout. Used to verify that subprocess-based TTS
+// providers honor ctx cancellation by killing the spawned process.
+func writeFakeTTSBinary(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake TTS binary uses /bin/sh; not portable to windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fake-tts.sh")
+	script := "#!/bin/sh\nsleep 30\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tts script: %v", err)
+	}
+	return path
+}
+
+func TestEspeakTTS_HonorsContextCancellation(t *testing.T) {
+	fakePath := writeFakeTTSBinary(t)
+	tts := NewEspeakTTS(fakePath, "en")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel: a correctly wired CommandContext kills immediately.
+
+	start := time.Now()
+	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected error from cancelled context, got nil after %v", elapsed)
+	}
+	// 5s is generous: a fix using exec.CommandContext returns in well under a
+	// second; the bug (plain exec.Command) would wait the full 30s sleep.
+	if elapsed > 5*time.Second {
+		t.Fatalf("Synthesize ignored ctx cancellation, took %v (want < 5s); err=%v", elapsed, err)
+	}
+}
+
+func TestPicoTTS_HonorsContextCancellation(t *testing.T) {
+	fakePath := writeFakeTTSBinary(t)
+	tts := NewPicoTTS(fakePath, "en-US")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected error from cancelled context, got nil after %v", elapsed)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Synthesize ignored ctx cancellation, took %v (want < 5s); err=%v", elapsed, err)
+	}
+}
+
+func TestEdgeTTS_HonorsContextCancellation(t *testing.T) {
+	fakePath := writeFakeTTSBinary(t)
+	tts := NewEdgeTTS("en-US-JennyNeural")
+	tts.Path = fakePath
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel: a correctly wired CommandContext kills immediately.
+
+	start := time.Now()
+	_, _, err := tts.Synthesize(ctx, "hello", TTSSynthesisOpts{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected error from cancelled context, got nil after %v", elapsed)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Synthesize ignored ctx cancellation, took %v (want < 5s); err=%v", elapsed, err)
 	}
 }
 

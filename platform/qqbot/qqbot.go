@@ -9,10 +9,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/gorilla/websocket"
@@ -23,18 +26,26 @@ func init() {
 }
 
 const (
-	apiBaseProduction = "https://api.sgroup.qq.com"
-	apiBaseSandbox    = "https://sandbox.api.sgroup.qq.com"
-	tokenURL          = "https://bots.qq.com/app/getAppAccessToken"
-
-	// Default intent: GROUP_AND_C2C_EVENT (1 << 25)
-	defaultIntents = 1 << 25
+	// Default intents: GROUP_AT_MESSAGE_CREATE (1 << 25) | INTERACTION_CREATE (1 << 26)
+	defaultIntents = (1 << 25) | (1 << 26)
 
 	maxReconnectBackoff  = 60 * time.Second
 	maxReconnectAttempts = 30
 	tokenRefreshMargin   = 5 * time.Minute
 	messageMaxLen        = 2000
 	msgSeqTTL            = 5 * time.Minute
+	messageCacheTTL      = 7 * 24 * time.Hour
+	messageCacheMaxItems = 1000
+	quotedTextMaxRunes   = 800
+
+	// Max attachment download size (20MB), aligned with QQ Bot platform limits.
+	maxAttachmentSize = 20 * 1024 * 1024
+)
+
+var (
+	apiBaseProduction = "https://api.sgroup.qq.com"
+	apiBaseSandbox    = "https://sandbox.api.sgroup.qq.com"
+	tokenURL          = "https://bots.qq.com/app/getAppAccessToken"
 )
 
 // WebSocket opcodes for the QQ Bot gateway protocol.
@@ -59,6 +70,7 @@ type Platform struct {
 	intents               int
 	markdownSupport       bool // enable markdown messages (msg_type: 2)
 	handler               core.MessageHandler
+	ctx                   context.Context // lifetime context for the platform
 	cancel                context.CancelFunc
 
 	// OAuth2 token management
@@ -74,6 +86,7 @@ type Platform struct {
 	heartbeatMs  int
 	heartbeatOK  atomic.Bool
 	reconnecting atomic.Bool
+	connCancel   context.CancelFunc // cancels per-connection goroutines (heartbeatLoop, readLoop)
 
 	// Message dedup
 	dedup core.MessageDedup
@@ -81,6 +94,10 @@ type Platform struct {
 	// msg_seq counter per event msg_id (for multiple replies to same event)
 	msgSeqMu  sync.Mutex
 	msgSeqMap map[string]*msgSeqEntry
+
+	messageCacheMu   sync.Mutex
+	messageCache     map[string]cachedMessage
+	messageCachePath string
 }
 
 // msgSeqEntry tracks msg_seq counter with a creation timestamp for TTL eviction.
@@ -89,12 +106,43 @@ type msgSeqEntry struct {
 	createdAt time.Time
 }
 
+type cachedMessage struct {
+	Content   string    `json:"content"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // replyContext carries the information needed to reply to a QQ Bot message.
 type replyContext struct {
 	messageType string // "group" or "c2c"
 	groupOpenID string // for group messages
 	userOpenID  string // user's openid (member_openid for group, user_openid for c2c)
 	eventMsgID  string // msg_id from the incoming event, used for passive reply
+	sessionKey  string // pre-computed session key for button_data embedding and session routing
+}
+
+type quotedMessage struct {
+	Content     string       `json:"content,omitempty"`
+	Title       string       `json:"title,omitempty"`
+	Attachments []attachment `json:"attachments,omitempty"`
+}
+
+type messageReference struct {
+	MessageID         string         `json:"message_id"`
+	Content           string         `json:"content,omitempty"`
+	Title             string         `json:"title,omitempty"`
+	Message           *quotedMessage `json:"message,omitempty"`
+	ReferencedMessage *quotedMessage `json:"referenced_message,omitempty"`
+	SourceMessage     *quotedMessage `json:"source_message,omitempty"`
+}
+
+// msgTypeQuote indicates a quote (reply) message in the QQ Bot API.
+const msgTypeQuote = 103
+
+// msgElement represents a message element in QQ Bot event.
+// For quote messages (message_type=103), msg_elements[0] contains the quoted content.
+type msgElement struct {
+	Content     string       `json:"content"`
+	Attachments []attachment `json:"attachments"`
 }
 
 // New creates a new QQ Bot platform from config options.
@@ -121,6 +169,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	}
 
 	core.CheckAllowFrom("qqbot", allowFrom)
+	dataDir, _ := opts["cc_data_dir"].(string)
 	return &Platform{
 		appID:                 appID,
 		appSecret:             appSecret,
@@ -129,6 +178,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		shareSessionInChannel: shareSessionInChannel,
 		intents:               intents,
 		markdownSupport:       markdownSupport,
+		messageCachePath:      qqbotMessageCachePath(dataDir),
 	}, nil
 }
 
@@ -137,6 +187,9 @@ func (p *Platform) Name() string { return "qqbot" }
 // Start connects to the QQ Bot gateway and begins receiving events.
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
+	if err := p.loadMessageCache(); err != nil {
+		slog.Warn("qqbot: load message cache failed", "error", err)
+	}
 
 	// Get initial access token
 	if err := p.refreshToken(); err != nil {
@@ -144,6 +197,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	p.ctx = ctx
 	p.cancel = cancel
 
 	if err := p.connectGateway(ctx); err != nil {
@@ -184,7 +238,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 		return fmt.Errorf("qqbot: SendImage: invalid reply context type %T", replyCtx)
 	}
 
-	fileInfo, err := p.uploadRichMedia(rctx, 1, img.Data)
+	fileInfo, err := p.uploadRichMedia(rctx, 1, img.Data, "")
 	if err != nil {
 		return fmt.Errorf("qqbot: upload image: %w", err)
 	}
@@ -213,7 +267,7 @@ func (p *Platform) SendImage(ctx context.Context, replyCtx any, img core.ImageAt
 
 // uploadRichMedia uploads a file to QQ Bot rich media API and returns the file_info.
 // fileType: 1=image, 2=video, 3=audio, 4=file.
-func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte) (string, error) {
+func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte, fileName string) (string, error) {
 	var url string
 	switch rctx.messageType {
 	case "group":
@@ -229,6 +283,9 @@ func (p *Platform) uploadRichMedia(rctx *replyContext, fileType int, data []byte
 		"file_type":    fileType,
 		"file_data":    b64,
 		"srv_send_msg": false,
+	}
+	if fileType == 4 && fileName != "" {
+		reqBody["file_name"] = fileName
 	}
 
 	var result struct {
@@ -322,6 +379,146 @@ func (p *Platform) apiRequestJSON(method, url string, body any, result any) erro
 
 var _ core.ImageSender = (*Platform)(nil)
 
+// buttonDataPrefix is the prefix for QQ Bot keyboard button_data values.
+// Format: perm:<decision>:<session_key>
+const buttonDataPrefix = "perm:"
+
+// SendFile uploads and sends a file via QQ Bot rich media API.
+// Implements core.FileSender.
+func (p *Platform) SendFile(ctx context.Context, replyCtx any, file core.FileAttachment) error {
+	rctx, ok := replyCtx.(*replyContext)
+	if !ok {
+		return fmt.Errorf("qqbot: SendFile: invalid reply context type %T", replyCtx)
+	}
+
+	fileInfo, err := p.uploadRichMedia(rctx, 4, file.Data, file.FileName)
+	if err != nil {
+		return fmt.Errorf("qqbot: upload file: %w", err)
+	}
+
+	var url string
+	switch rctx.messageType {
+	case "group":
+		url = fmt.Sprintf("%s/v2/groups/%s/messages", p.apiBase(), rctx.groupOpenID)
+	case "c2c":
+		url = fmt.Sprintf("%s/v2/users/%s/messages", p.apiBase(), rctx.userOpenID)
+	default:
+		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
+	}
+
+	body := map[string]any{
+		"msg_type": 7,
+		"media":    map[string]any{"file_info": fileInfo},
+	}
+	if rctx.eventMsgID != "" {
+		body["msg_id"] = rctx.eventMsgID
+		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
+	}
+
+	return p.apiRequest("POST", url, body)
+}
+
+var _ core.FileSender = (*Platform)(nil)
+var _ core.InlineButtonSender = (*Platform)(nil)
+
+// SendWithButtons sends a message with QQ Bot inline keyboard buttons.
+// Implements core.InlineButtonSender.
+func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content string, buttons [][]core.ButtonOption) error {
+	rctx, ok := replyCtx.(*replyContext)
+	if !ok {
+		return fmt.Errorf("qqbot: SendWithButtons: invalid reply context type %T", replyCtx)
+	}
+
+	// Use session key from replyContext to embed in button_data
+	sessionKey := rctx.sessionKey
+	if sessionKey == "" {
+		return fmt.Errorf("qqbot: empty session key in reply context")
+	}
+
+	// Build QQ Bot keyboard rows from button options
+	var rows []map[string]any
+	for i, row := range buttons {
+		var btns []map[string]any
+		for j, btn := range row {
+			// Encode decision + session key into button_data so we can route
+			// the INTERACTION_CREATE event back to the right session.
+			// btn.Data is already "perm:allow", "perm:deny", or "perm:allow_all"
+			buttonData := btn.Data + ":" + sessionKey
+
+			btnID := fmt.Sprintf("b_%d_%d", i, j)
+			visitedLabel := "已操作"
+			style := 1 // blue
+			if strings.Contains(btn.Data, "deny") {
+				visitedLabel = "已拒绝"
+				style = 0 // grey
+			} else if strings.Contains(btn.Data, "allow_all") || strings.Contains(btn.Data, "allow all") {
+				visitedLabel = "已始终允许"
+			} else if strings.Contains(btn.Data, "allow") {
+				visitedLabel = "已允许"
+			}
+
+			btns = append(btns, map[string]any{
+				"id": btnID,
+				"render_data": map[string]any{
+					"label":         btn.Text,
+					"visited_label": visitedLabel,
+					"style":         style,
+				},
+				"action": map[string]any{
+					"type":        1, // callback
+					"data":        buttonData,
+					"permission":  map[string]int{"type": 2},
+					"click_limit": 1,
+				},
+				"group_id": "perm",
+			})
+		}
+		rows = append(rows, map[string]any{"buttons": btns})
+	}
+
+	keyboard := map[string]any{
+		"content": map[string]any{"rows": rows},
+	}
+
+	// Send message with keyboard.
+	// When markdown support is enabled, use msg_type 2 so QQ Bot
+	// properly renders the keyboard alongside markdown content.
+	msgType := 0
+	sendContent := content
+	if p.markdownSupport {
+		msgType = 2
+	}
+	body := map[string]any{
+		"msg_type": msgType,
+		"keyboard": keyboard,
+	}
+	if p.markdownSupport {
+		body["markdown"] = map[string]any{"content": sendContent}
+	} else {
+		body["content"] = sendContent
+	}
+	if rctx.eventMsgID != "" {
+		body["msg_id"] = rctx.eventMsgID
+		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
+	}
+
+	var url string
+	switch rctx.messageType {
+	case "group":
+		url = fmt.Sprintf("%s/v2/groups/%s/messages", p.apiBase(), rctx.groupOpenID)
+	case "c2c":
+		url = fmt.Sprintf("%s/v2/users/%s/messages", p.apiBase(), rctx.userOpenID)
+	default:
+		return fmt.Errorf("qqbot: unknown message type %q", rctx.messageType)
+	}
+
+	slog.Debug("qqbot: sending message with keyboard",
+		"type", rctx.messageType, "session_key", sessionKey,
+		"num_buttons", len(rows), "content_len", len(content))
+
+	return p.apiRequest("POST", url, body)
+}
+
 // Stop shuts down the platform.
 func (p *Platform) Stop() error {
 	if p.cancel != nil {
@@ -347,17 +544,20 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 			return &replyContext{
 				messageType: "group",
 				groupOpenID: parts[2],
+				sessionKey:  sessionKey,
 			}, nil
 		}
 		return &replyContext{
 			messageType: "group",
 			groupOpenID: parts[1],
 			userOpenID:  parts[2],
+			sessionKey:  sessionKey,
 		}, nil
 	}
 	return &replyContext{
 		messageType: "c2c",
 		userOpenID:  parts[1],
+		sessionKey:  sessionKey,
 	}, nil
 }
 
@@ -472,9 +672,12 @@ func (p *Platform) connectGateway(ctx context.Context) error {
 		return err
 	}
 
-	// Start heartbeat and read loop
-	go p.heartbeatLoop(ctx)
-	go p.readLoop(ctx)
+	// Start heartbeat and read loop with a per-connection context
+	// so we can cancel them cleanly on reconnect.
+	connCtx, connCancel := context.WithCancel(ctx)
+	p.connCancel = connCancel
+	go p.heartbeatLoop(connCtx)
+	go p.readLoop(connCtx)
 
 	return nil
 }
@@ -678,16 +881,25 @@ func (p *Platform) readLoop(ctx context.Context) {
 	}
 }
 
-func (p *Platform) triggerReconnect(ctx context.Context) {
+func (p *Platform) triggerReconnect(_ context.Context) {
 	if p.reconnecting.CompareAndSwap(false, true) {
 		go func() {
 			defer p.reconnecting.Store(false)
-			p.reconnectLoop(ctx)
+			// Use the platform lifetime context, NOT the per-connection context
+			// that was just canceled. The caller's ctx is a child of connCtx
+			// which connCancel() will cancel inside reconnectLoop.
+			p.reconnectLoop(p.ctx)
 		}()
 	}
 }
 
 func (p *Platform) reconnectLoop(ctx context.Context) {
+	// Cancel old heartbeatLoop/readLoop goroutines before closing the
+	// connection, so they stop promptly instead of racing with the new pair.
+	if p.connCancel != nil {
+		p.connCancel()
+	}
+
 	// Close existing connection
 	p.wsMu.Lock()
 	if p.wsConn != nil {
@@ -782,8 +994,10 @@ func (p *Platform) reconnectLoop(ctx context.Context) {
 		}
 
 		slog.Info("qqbot: reconnected successfully")
-		go p.heartbeatLoop(ctx)
-		go p.readLoop(ctx)
+		connCtx, connCancel := context.WithCancel(ctx)
+		p.connCancel = connCancel
+		go p.heartbeatLoop(connCtx)
+		go p.readLoop(connCtx)
 		return
 	}
 	slog.Error("qqbot: failed to reconnect after max attempts", "attempts", maxReconnectAttempts)
@@ -814,6 +1028,8 @@ func (p *Platform) handleDispatch(eventType string, data json.RawMessage) {
 		p.handleGroupMessage(data)
 	case "C2C_MESSAGE_CREATE":
 		p.handleC2CMessage(data)
+	case "INTERACTION_CREATE":
+		p.handleInteractionCreate(data)
 	case "RESUMED":
 		slog.Info("qqbot: session resumed successfully")
 	default:
@@ -821,14 +1037,134 @@ func (p *Platform) handleDispatch(eventType string, data json.RawMessage) {
 	}
 }
 
+// handleInteractionCreate handles inline keyboard button click events.
+// When a user clicks a button on a message with keyboard, QQ Bot dispatches
+// an INTERACTION_CREATE event. This method parses the button_data to extract
+// the permission decision and session key, then creates a synthetic message
+// so the engine can process it as a permission response.
+func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+	var d struct {
+		ID                string `json:"id"`
+		GroupOpenID       string `json:"group_openid"`
+		GroupMemberOpenID string `json:"group_member_openid"`
+		UserOpenID        string `json:"user_openid"`
+		ChatType          int    `json:"chat_type"` // 1=group, 2=c2c
+		Data              struct {
+			Type     int `json:"type"`
+			Resolved struct {
+				ButtonData string `json:"button_data"`
+				ButtonID   string `json:"button_id"`
+			} `json:"resolved"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil {
+		slog.Warn("qqbot: failed to parse interaction create event", "error", err)
+		return
+	}
+
+	if d.ID == "" {
+		return
+	}
+	slog.Debug("qqbot: INTERACTION_CREATE", "id", d.ID, "button_data", d.Data.Resolved.ButtonData)
+
+	// ACK the interaction (required by QQ Bot API to prevent "请求超时" on buttons)
+	_ = p.ackInteraction(d.ID)
+
+	// Parse button_data: perm:<decision>:<session_key>
+	buttonData := d.Data.Resolved.ButtonData
+	if !strings.HasPrefix(buttonData, buttonDataPrefix) {
+		slog.Debug("qqbot: unknown interaction button_data format", "data", buttonData)
+		return
+	}
+
+	rest := strings.TrimPrefix(buttonData, buttonDataPrefix)
+	// rest = "<decision>:<session_key>"
+	colonIdx := strings.Index(rest, ":")
+	if colonIdx < 0 {
+		slog.Warn("qqbot: invalid interaction button_data", "data", buttonData)
+		return
+	}
+	decision := rest[:colonIdx]
+	sessionKey := rest[colonIdx+1:]
+	if decision == "" || sessionKey == "" {
+		slog.Warn("qqbot: empty decision or session_key in button_data", "data", buttonData)
+		return
+	}
+
+	// Map decision to response text the engine understands
+	var responseText string
+	switch decision {
+	case "allow":
+		responseText = "allow"
+	case "deny":
+		responseText = "deny"
+	case "allow_all":
+		responseText = "allow all"
+	default:
+		slog.Warn("qqbot: unknown interaction decision", "decision", decision)
+		return
+	}
+
+	// Build reply context for sending confirmation messages
+	var rctx *replyContext
+	var userID string
+	switch d.ChatType {
+	case 1: // group
+		rctx = &replyContext{
+			messageType: "group",
+			groupOpenID: d.GroupOpenID,
+			userOpenID:  d.GroupMemberOpenID,
+			sessionKey:  sessionKey,
+		}
+		userID = d.GroupMemberOpenID
+	case 2: // c2c
+		rctx = &replyContext{
+			messageType: "c2c",
+			userOpenID:  d.UserOpenID,
+			sessionKey:  sessionKey,
+		}
+		userID = d.UserOpenID
+	default:
+		slog.Warn("qqbot: unknown interaction chat_type", "chat_type", d.ChatType)
+		return
+	}
+
+	// Create synthetic message and forward to engine as a permission response
+	msg := &core.Message{
+		SessionKey:           sessionKey,
+		Platform:             "qqbot",
+		MessageID:            d.ID,
+		UserID:               userID,
+		Content:              responseText,
+		ReplyCtx:             rctx,
+		IsPermissionResponse: true,
+	}
+
+	slog.Debug("qqbot: forwarding button click as permission response",
+		"decision", decision, "session_key", sessionKey, "chat_type", d.ChatType)
+	p.handler(p, msg)
+}
+
+// ackInteraction acknowledges an INTERACTION_CREATE event.
+// Uses the same pattern as hermes-agent: PUT /interactions/{id}
+// with JSON body {"code": 0}. Note: no /v2/ prefix for this endpoint.
+func (p *Platform) ackInteraction(interactionID string) error {
+	url := fmt.Sprintf("%s/interactions/%s", p.apiBase(), interactionID)
+	body := map[string]int{"code": 0}
+	return p.apiRequestJSON("PUT", url, body, nil)
+}
+
 func (p *Platform) handleGroupMessage(data json.RawMessage) {
 	var d struct {
-		ID          string       `json:"id"`
-		GroupOpenID string       `json:"group_openid"`
-		Content     string       `json:"content"`
-		Timestamp   string       `json:"timestamp"`
-		Attachments []attachment `json:"attachments"`
-		Author      struct {
+		ID               string            `json:"id"`
+		GroupOpenID      string            `json:"group_openid"`
+		Content          string            `json:"content"`
+		Timestamp        string            `json:"timestamp"`
+		Attachments      []attachment      `json:"attachments"`
+		MessageReference *messageReference `json:"message_reference"`
+		MessageType      *int              `json:"message_type"`
+		MsgElements      []msgElement      `json:"msg_elements"`
+		Author           struct {
 			MemberOpenID string `json:"member_openid"`
 		} `json:"author"`
 	}
@@ -860,11 +1196,16 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 
 	// Strip leading @bot mention (the official API includes it as content prefix)
 	content := stripAtMention(d.Content)
+	quotedText := p.resolveQuotedText(d.MessageReference)
+	if quotedText == "" && d.MessageType != nil && *d.MessageType == msgTypeQuote {
+		quotedText = quotedTextFromElements(d.MsgElements)
+	}
+	content = prependQuotedMessage(quotedText, content)
+	images := downloadAttachmentImages(messageImageAttachments(d.Attachments, d.MessageReference, d.MessageType, d.MsgElements))
+	files := downloadAttachmentFiles(d.Attachments)
+	p.cacheMessage(d.ID, contentOrAttachmentSummary(content, d.Attachments))
 
-	// Download image attachments
-	images := downloadAttachmentImages(d.Attachments)
-
-	if content == "" && len(images) == 0 {
+	if content == "" && len(images) == 0 && len(files) == 0 {
 		return
 	}
 
@@ -880,6 +1221,7 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		groupOpenID: d.GroupOpenID,
 		userOpenID:  d.Author.MemberOpenID,
 		eventMsgID:  d.ID,
+		sessionKey:  sessionKey,
 	}
 
 	msg := &core.Message{
@@ -891,20 +1233,24 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
 		ChatName:   d.GroupOpenID,         // group openid as fallback (no group name API)
 		Content:    content,
 		Images:     images,
+		Files:      files,
 		ReplyCtx:   rctx,
 	}
 
-	slog.Debug("qqbot: group message received", "group", d.GroupOpenID, "user", d.Author.MemberOpenID, "len", len(content), "images", len(images))
+	slog.Debug("qqbot: group message received", "group", d.GroupOpenID, "user", d.Author.MemberOpenID, "len", len(content), "images", len(images), "files", len(files))
 	p.handler(p, msg)
 }
 
 func (p *Platform) handleC2CMessage(data json.RawMessage) {
 	var d struct {
-		ID          string       `json:"id"`
-		Content     string       `json:"content"`
-		Timestamp   string       `json:"timestamp"`
-		Attachments []attachment `json:"attachments"`
-		Author      struct {
+		ID               string            `json:"id"`
+		Content          string            `json:"content"`
+		Timestamp        string            `json:"timestamp"`
+		Attachments      []attachment      `json:"attachments"`
+		MessageReference *messageReference `json:"message_reference"`
+		MessageType      *int              `json:"message_type"`
+		MsgElements      []msgElement      `json:"msg_elements"`
+		Author           struct {
 			UserOpenID string `json:"user_openid"`
 		} `json:"author"`
 	}
@@ -935,11 +1281,18 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 	}
 
 	content := strings.TrimSpace(d.Content)
+	quotedText := p.resolveQuotedText(d.MessageReference)
+	if quotedText == "" && d.MessageType != nil && *d.MessageType == msgTypeQuote {
+		quotedText = quotedTextFromElements(d.MsgElements)
+	}
+	content = prependQuotedMessage(quotedText, content)
 
-	// Download image attachments
-	images := downloadAttachmentImages(d.Attachments)
+	// Download image and file attachments
+	images := downloadAttachmentImages(messageImageAttachments(d.Attachments, d.MessageReference, d.MessageType, d.MsgElements))
+	files := downloadAttachmentFiles(d.Attachments)
+	p.cacheMessage(d.ID, contentOrAttachmentSummary(content, d.Attachments))
 
-	if content == "" && len(images) == 0 {
+	if content == "" && len(images) == 0 && len(files) == 0 {
 		return
 	}
 
@@ -949,6 +1302,7 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 		messageType: "c2c",
 		userOpenID:  d.Author.UserOpenID,
 		eventMsgID:  d.ID,
+		sessionKey:  sessionKey,
 	}
 
 	msg := &core.Message{
@@ -959,10 +1313,11 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
 		UserName:   d.Author.UserOpenID,
 		Content:    content,
 		Images:     images,
+		Files:      files,
 		ReplyCtx:   rctx,
 	}
 
-	slog.Debug("qqbot: c2c message received", "user", d.Author.UserOpenID, "len", len(content), "images", len(images))
+	slog.Debug("qqbot: c2c message received", "user", d.Author.UserOpenID, "len", len(content), "images", len(images), "files", len(files))
 	p.handler(p, msg)
 }
 
@@ -1006,7 +1361,21 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
 		body["msg_seq"] = p.nextMsgSeq(rctx.eventMsgID)
 	}
 
-	return p.apiRequest("POST", url, body)
+	var resp struct {
+		ID    string `json:"id"`
+		MsgID string `json:"msg_id"`
+	}
+	if err := p.apiRequestJSON("POST", url, body, &resp); err != nil {
+		return err
+	}
+	msgID := strings.TrimSpace(resp.ID)
+	if msgID == "" {
+		msgID = strings.TrimSpace(resp.MsgID)
+	}
+	if msgID != "" {
+		p.cacheMessage(msgID, content)
+	}
+	return nil
 }
 
 func (p *Platform) nextMsgSeq(eventMsgID string) int32 {
@@ -1118,6 +1487,47 @@ type attachment struct {
 	Filename    string `json:"filename"`
 }
 
+// messageImageAttachments combines current images with images explicitly carried
+// by this event's quoted message. It never looks up an unrelated previous message.
+func messageImageAttachments(current []attachment, ref *messageReference, messageType *int, elements []msgElement) []attachment {
+	var images []attachment
+	seen := make(map[string]struct{})
+	add := func(attachments []attachment) {
+		for _, att := range attachments {
+			if !strings.HasPrefix(att.ContentType, "image/") {
+				continue
+			}
+			url := strings.TrimSpace(att.URL)
+			if url == "" {
+				continue
+			}
+			// Match the downloader's handling of QQ URLs without a scheme.
+			if !strings.HasPrefix(url, "http") {
+				url = "https://" + url
+			}
+			if _, exists := seen[url]; exists {
+				continue
+			}
+			seen[url] = struct{}{}
+			att.URL = url
+			images = append(images, att)
+		}
+	}
+	add(current)
+	if ref != nil {
+		for _, quoted := range []*quotedMessage{ref.Message, ref.ReferencedMessage, ref.SourceMessage} {
+			if quoted != nil {
+				add(quoted.Attachments)
+			}
+		}
+	}
+	// Official QQ quote payloads place the referenced message in element zero.
+	if messageType != nil && *messageType == msgTypeQuote && len(elements) > 0 {
+		add(elements[0].Attachments)
+	}
+	return images
+}
+
 // downloadAttachmentImages downloads all image attachments and returns ImageAttachments.
 func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
 	var images []core.ImageAttachment
@@ -1138,7 +1548,12 @@ func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
 			slog.Warn("qqbot: download image failed", "url", url, "error", err)
 			continue
 		}
-		data, err := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			slog.Warn("qqbot: download image returned non-200 status", "url", url, "status", resp.StatusCode)
+			resp.Body.Close()
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentSize))
 		resp.Body.Close()
 		if err != nil {
 			slog.Warn("qqbot: read image body failed", "error", err)
@@ -1157,6 +1572,49 @@ func downloadAttachmentImages(attachments []attachment) []core.ImageAttachment {
 	return images
 }
 
+// downloadAttachmentFiles downloads all non-image file attachments and returns FileAttachments.
+func downloadAttachmentFiles(attachments []attachment) []core.FileAttachment {
+	var files []core.FileAttachment
+	for _, att := range attachments {
+		if strings.HasPrefix(att.ContentType, "image/") {
+			continue
+		}
+		url := att.URL
+		if url == "" {
+			continue
+		}
+		if !strings.HasPrefix(url, "http") {
+			url = "https://" + url
+		}
+		resp, err := core.HTTPClient.Get(url)
+		if err != nil {
+			slog.Warn("qqbot: download file failed", "url", url, "error", err)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			slog.Warn("qqbot: download file returned non-200 status", "url", url, "status", resp.StatusCode)
+			resp.Body.Close()
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentSize))
+		resp.Body.Close()
+		if err != nil {
+			slog.Warn("qqbot: read file body failed", "error", err)
+			continue
+		}
+		mime := att.ContentType
+		if mime == "" {
+			mime = http.DetectContentType(data)
+		}
+		files = append(files, core.FileAttachment{
+			MimeType: mime,
+			Data:     data,
+			FileName: att.Filename,
+		})
+	}
+	return files
+}
+
 // stripAtMention removes the leading @bot mention from group message content.
 // The official QQ Bot API prefixes GROUP_AT_MESSAGE_CREATE content with an
 // @mention tag like "<@!botid> " or sometimes just whitespace after the tag.
@@ -1169,4 +1627,207 @@ func stripAtMention(content string) string {
 		}
 	}
 	return content
+}
+
+func qqbotMessageCachePath(dataDir string) string {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return ""
+	}
+	return filepath.Join(dataDir, "run", "qqbot_message_cache.json")
+}
+
+func (p *Platform) loadMessageCache() error {
+	if p.messageCachePath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(p.messageCachePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cache := make(map[string]cachedMessage)
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return err
+	}
+	p.messageCacheMu.Lock()
+	defer p.messageCacheMu.Unlock()
+	p.messageCache = cache
+	p.purgeMessageCacheLocked(time.Now())
+	return nil
+}
+
+func (p *Platform) cacheMessage(messageID, content string) {
+	messageID = strings.TrimSpace(messageID)
+	content = strings.TrimSpace(content)
+	if messageID == "" || content == "" {
+		return
+	}
+	entry := cachedMessage{
+		Content:   truncateRunes(content, quotedTextMaxRunes),
+		UpdatedAt: time.Now(),
+	}
+	p.messageCacheMu.Lock()
+	if p.messageCache == nil {
+		p.messageCache = make(map[string]cachedMessage)
+	}
+	p.messageCache[messageID] = entry
+	p.purgeMessageCacheLocked(entry.UpdatedAt)
+	err := p.saveMessageCacheLocked()
+	p.messageCacheMu.Unlock()
+	if err != nil {
+		slog.Warn("qqbot: save message cache failed", "error", err)
+	}
+}
+
+func (p *Platform) resolveQuotedText(ref *messageReference) string {
+	if ref == nil {
+		return ""
+	}
+	if text := inlineQuotedText(ref); text != "" {
+		return text
+	}
+	messageID := strings.TrimSpace(ref.MessageID)
+	if messageID == "" {
+		return ""
+	}
+	p.messageCacheMu.Lock()
+	defer p.messageCacheMu.Unlock()
+	if p.messageCache == nil {
+		return ""
+	}
+	p.purgeMessageCacheLocked(time.Now())
+	entry, ok := p.messageCache[messageID]
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(entry.Content)
+}
+
+func (p *Platform) purgeMessageCacheLocked(now time.Time) {
+	for id, entry := range p.messageCache {
+		if now.Sub(entry.UpdatedAt) > messageCacheTTL {
+			delete(p.messageCache, id)
+		}
+	}
+	for len(p.messageCache) > messageCacheMaxItems {
+		var oldestID string
+		var oldestAt time.Time
+		for id, entry := range p.messageCache {
+			if oldestID == "" || entry.UpdatedAt.Before(oldestAt) {
+				oldestID = id
+				oldestAt = entry.UpdatedAt
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(p.messageCache, oldestID)
+	}
+}
+
+func (p *Platform) saveMessageCacheLocked() error {
+	if p.messageCachePath == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(p.messageCachePath), 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(p.messageCache)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p.messageCachePath, data, 0o644)
+}
+
+func inlineQuotedText(ref *messageReference) string {
+	if ref == nil {
+		return ""
+	}
+	parts := []string{
+		strings.TrimSpace(ref.Content),
+		quotedMessageText(ref.Message),
+		quotedMessageText(ref.ReferencedMessage),
+		quotedMessageText(ref.SourceMessage),
+		strings.TrimSpace(ref.Title),
+	}
+	var chosen string
+	for _, part := range parts {
+		if part != "" {
+			chosen = part
+			break
+		}
+	}
+	return strings.TrimSpace(chosen)
+}
+
+func quotedMessageText(msg *quotedMessage) string {
+	if msg == nil {
+		return ""
+	}
+	content := strings.TrimSpace(msg.Content)
+	if content != "" {
+		return content
+	}
+	if title := strings.TrimSpace(msg.Title); title != "" {
+		return title
+	}
+	return contentOrAttachmentSummary("", msg.Attachments)
+}
+
+// quotedTextFromElements extracts quoted message text from msg_elements[0].
+// QQ Bot sends the referenced message content in msg_elements[0] for quote messages (message_type=103).
+func quotedTextFromElements(elements []msgElement) string {
+	if len(elements) == 0 {
+		return ""
+	}
+	elem := elements[0]
+	content := strings.TrimSpace(elem.Content)
+	if content != "" {
+		return content
+	}
+	return contentOrAttachmentSummary("", elem.Attachments)
+}
+
+func prependQuotedMessage(quoted, content string) string {
+	quoted = strings.TrimSpace(quoted)
+	content = strings.TrimSpace(content)
+	if quoted == "" {
+		return content
+	}
+	if content == "" {
+		return "[引用消息]\n" + quoted
+	}
+	return "[引用消息]\n" + quoted + "\n\n" + content
+}
+
+func contentOrAttachmentSummary(content string, attachments []attachment) string {
+	content = strings.TrimSpace(content)
+	if content != "" {
+		return content
+	}
+	if len(attachments) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, att := range attachments {
+		switch {
+		case strings.HasPrefix(att.ContentType, "image/"):
+			parts = append(parts, "[图片]")
+		case strings.TrimSpace(att.Filename) != "":
+			parts = append(parts, "[附件: "+strings.TrimSpace(att.Filename)+"]")
+		default:
+			parts = append(parts, "[附件]")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func truncateRunes(s string, max int) string {
+	if max <= 0 || utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max])
 }

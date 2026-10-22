@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestSessionManager_GetOrCreateActive(t *testing.T) {
@@ -179,15 +180,85 @@ func TestSessionManager_GetOrCreateActive_Persists(t *testing.T) {
 
 func TestSession_TryLockUnlock(t *testing.T) {
 	s := &Session{}
-	if !s.TryLock() {
+	gen, ok := s.TryLock()
+	if !ok {
 		t.Error("first TryLock should succeed")
 	}
-	if s.TryLock() {
+	if _, ok := s.TryLock(); ok {
 		t.Error("second TryLock should fail")
 	}
-	s.Unlock()
-	if !s.TryLock() {
+	s.Unlock(gen)
+	if _, ok := s.TryLock(); !ok {
 		t.Error("TryLock after Unlock should succeed")
+	}
+}
+
+func TestSession_Busy(t *testing.T) {
+	s := &Session{}
+	if s.Busy() {
+		t.Error("fresh session should not be busy")
+	}
+	if _, ok := s.TryLock(); !ok {
+		t.Fatal("TryLock should succeed")
+	}
+	if !s.Busy() {
+		t.Error("session should be busy after TryLock")
+	}
+	s.Unlock(0)
+	if s.Busy() {
+		t.Error("session should not be busy after Unlock")
+	}
+}
+
+// TestSession_LateUnlockDropped verifies the generation counter: after
+// BreakStaleLock re-assigns the lock to a newer turn, the old holder's late
+// Unlock must be dropped instead of clearing the new holder's busy flag
+// (custom 2026-09-12 busy stale-lock self-heal).
+func TestSession_LateUnlockDropped(t *testing.T) {
+	s := &Session{}
+	gen1, ok := s.TryLock()
+	if !ok {
+		t.Fatal("first TryLock should succeed")
+	}
+	if _, broken := s.BreakStaleLock(0); !broken {
+		t.Fatal("BreakStaleLock(0) should break the held lock")
+	}
+	gen2, ok := s.TryLock()
+	if !ok {
+		t.Fatal("relock after break should succeed")
+	}
+	if gen1 == gen2 {
+		t.Fatal("generation should advance after a break")
+	}
+	s.Unlock(gen1) // late unlock from the old holder
+	if !s.Busy() {
+		t.Fatal("late unlock with stale gen must be dropped; new holder's busy must survive")
+	}
+	s.Unlock(gen2)
+	if s.Busy() {
+		t.Fatal("unlock with current gen should release the lock")
+	}
+}
+
+// TestSession_BreakStaleLockThreshold verifies the held-duration gate: a lock
+// held shorter than maxHeld is never broken, one held longer is.
+func TestSession_BreakStaleLockThreshold(t *testing.T) {
+	s := &Session{}
+	if _, ok := s.TryLock(); !ok {
+		t.Fatal("TryLock should succeed")
+	}
+	if _, broken := s.BreakStaleLock(time.Hour); broken {
+		t.Fatal("lock held shorter than maxHeld must not break")
+	}
+	if _, broken := s.BreakStaleLock(0); !broken {
+		t.Fatal("lock held longer than maxHeld should break")
+	}
+	if s.Busy() {
+		t.Fatal("busy must be false after break")
+	}
+	// Breaking an unlocked session is a no-op.
+	if _, broken := s.BreakStaleLock(0); broken {
+		t.Fatal("BreakStaleLock on an unlocked session must be a no-op")
 	}
 }
 
@@ -500,5 +571,634 @@ func TestSessionManager_StorePath(t *testing.T) {
 	sm2 := NewSessionManager("")
 	if got := sm2.StorePath(); got != "" {
 		t.Errorf("StorePath() empty = %q, want empty string", got)
+	}
+}
+
+func TestKnownAgentSessionIDs(t *testing.T) {
+	sm := NewSessionManager("")
+	s1 := sm.NewSession("user1", "a")
+	s1.SetAgentSessionID("uuid-aaa", "claude")
+	s2 := sm.NewSession("user1", "b")
+	s2.SetAgentSessionID("uuid-bbb", "claude")
+	sm.NewSession("user1", "c") // no agent session id
+
+	known := sm.KnownAgentSessionIDs()
+	if len(known) != 2 {
+		t.Fatalf("KnownAgentSessionIDs len = %d, want 2", len(known))
+	}
+	if _, ok := known["uuid-aaa"]; !ok {
+		t.Fatal("expected uuid-aaa in known set")
+	}
+	if _, ok := known["uuid-bbb"]; !ok {
+		t.Fatal("expected uuid-bbb in known set")
+	}
+}
+
+func TestFilterOwnedSessions_FiltersUnknown(t *testing.T) {
+	all := []AgentSessionInfo{
+		{ID: "owned-1"},
+		{ID: "external-1"},
+		{ID: "owned-2"},
+		{ID: "external-2"},
+	}
+	known := map[string]struct{}{
+		"owned-1": {},
+		"owned-2": {},
+	}
+	filtered := filterOwnedSessions(all, known)
+	if len(filtered) != 2 {
+		t.Fatalf("filterOwnedSessions len = %d, want 2", len(filtered))
+	}
+	if filtered[0].ID != "owned-1" || filtered[1].ID != "owned-2" {
+		t.Fatalf("filtered = %v, want owned-1 and owned-2", filtered)
+	}
+}
+
+func TestFilterOwnedSessions_EmptyKnownReturnsAll(t *testing.T) {
+	all := []AgentSessionInfo{
+		{ID: "session-1"},
+		{ID: "session-2"},
+	}
+	filtered := filterOwnedSessions(all, map[string]struct{}{})
+	if len(filtered) != 2 {
+		t.Fatalf("filterOwnedSessions with empty known = %d, want 2", len(filtered))
+	}
+}
+
+func TestParseSessionKey(t *testing.T) {
+	tests := []struct {
+		key          string
+		wantPlatform string
+		wantBaseChat string
+		wantUser     string
+	}{
+		{
+			key:          "feishu:oc_abc123:ou_xyz789",
+			wantPlatform: "feishu",
+			wantBaseChat: "feishu:oc_abc123",
+			wantUser:     "ou_xyz789",
+		},
+		{
+			key:          "feishu:oc_abc123",
+			wantPlatform: "feishu",
+			wantBaseChat: "feishu:oc_abc123",
+			wantUser:     "",
+		},
+		{
+			key:          "telegram:-100123:root:msg456",
+			wantPlatform: "telegram",
+			wantBaseChat: "telegram:-100123",
+			wantUser:     "root:msg456",
+		},
+		{
+			key:          "invalid",
+			wantPlatform: "invalid",
+			wantBaseChat: "",
+			wantUser:     "",
+		},
+		{
+			key:          "",
+			wantPlatform: "",
+			wantBaseChat: "",
+			wantUser:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			platform, baseChat, userOrThread := ParseSessionKey(tt.key)
+			if platform != tt.wantPlatform {
+				t.Errorf("platform = %q, want %q", platform, tt.wantPlatform)
+			}
+			if baseChat != tt.wantBaseChat {
+				t.Errorf("baseChat = %q, want %q", baseChat, tt.wantBaseChat)
+			}
+			if userOrThread != tt.wantUser {
+				t.Errorf("userOrThread = %q, want %q", userOrThread, tt.wantUser)
+			}
+		})
+	}
+}
+
+func TestPruneDuplicateSessions_NoDuplicates(t *testing.T) {
+	sm := NewSessionManager("")
+	sm.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	sm.GetOrCreateActive("feishu:oc_chat2:ou_user1") // Different chat, no duplicate
+
+	result := sm.PruneDuplicateSessions(false)
+	if len(result.RemovedSessions) != 0 {
+		t.Errorf("removed %d sessions, want 0 (no duplicates)", len(result.RemovedSessions))
+	}
+}
+
+func TestPruneDuplicateSessions_DifferentChats(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Create sessions for different chats with different users - should not be considered duplicates
+	s1 := sm.GetOrCreateActive("feishu:oc_chatA:ou_user1")
+	s2 := sm.GetOrCreateActive("feishu:oc_chatB:ou_user1") // Different chat
+
+	// Add history to both
+	s1.AddHistory("user", "msg to chatA")
+	s2.AddHistory("user", "msg to chatB")
+
+	result := sm.PruneDuplicateSessions(false)
+	if len(result.RemovedSessions) != 0 {
+		t.Errorf("removed %d sessions, want 0 (different chats)", len(result.RemovedSessions))
+	}
+
+	// Both sessions should still exist
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 should still exist")
+	}
+	if sm.FindByID(s2.ID) == nil {
+		t.Error("s2 should still exist")
+	}
+}
+
+func TestPruneDuplicateSessions_SameChatDifferentUsers(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Same chat, different users - these are "duplicates" from chat perspective
+	s1 := sm.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	s2 := sm.NewSession("feishu:oc_chat1:ou_user2", "user2-session")
+
+	// Add history
+	s1.AddHistory("user", "msg from user1")
+	s1.AddHistory("user", "another msg")
+	s2.AddHistory("user", "msg from user2")
+
+	// Make s1 newer (more recent update)
+	s1.mu.Lock()
+	s1.UpdatedAt = time.Now().Add(1 * time.Hour)
+	s1.mu.Unlock()
+
+	result := sm.PruneDuplicateSessions(true) // merge history
+
+	// Should remove one session (the older one)
+	if len(result.RemovedSessions) != 1 {
+		t.Errorf("removed %d sessions, want 1", len(result.RemovedSessions))
+	}
+
+	// s1 should be kept (more recent)
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 (more recent) should be kept")
+	}
+
+	// s2 should be removed
+	if sm.FindByID(s2.ID) != nil {
+		t.Error("s2 (older) should be removed")
+	}
+
+	// History should be merged into s1
+	keep := sm.FindByID(s1.ID)
+	history := keep.GetHistory(0)
+	if len(history) != 3 {
+		t.Errorf("merged history = %d entries, want 3", len(history))
+	}
+}
+
+func TestPruneDuplicateSessions_NoMergeKeepsHistory(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Same chat, different users
+	s1 := sm.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	s2 := sm.NewSession("feishu:oc_chat1:ou_user2", "user2-session")
+
+	// s1 has history, s2 is empty
+	s1.AddHistory("user", "msg from user1")
+
+	// Make s2 newer but empty
+	s2.mu.Lock()
+	s2.UpdatedAt = time.Now().Add(1 * time.Hour)
+	s2.mu.Unlock()
+
+	result := sm.PruneDuplicateSessions(false) // NO merge
+
+	// s2 (empty, newer) should be removed, s1 (has history, older) should be kept
+	if len(result.RemovedSessions) != 1 {
+		t.Errorf("removed %d sessions, want 1 (empty session)", len(result.RemovedSessions))
+	}
+
+	// s1 should still exist (has history)
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 (has history) should be kept")
+	}
+
+	// s2 should be removed (empty)
+	if sm.FindByID(s2.ID) != nil {
+		t.Error("s2 (empty) should be removed")
+	}
+}
+
+// TestPruneDuplicateSessions_NoMergeKeepsBothWithHistory locks down the
+// no-merge path when BOTH duplicate sessions have history. With
+// mergeHistory=false, neither session is considered "removable" (the
+// branch at session.go:700-702 skips entries where hasHistory is true
+// for the kept candidate), so both must survive the prune untouched.
+//
+// Without this test the existing TestPruneDuplicateSessions_NoMergeKeepsHistory
+// only covers the "one empty + one has history" case and would not catch
+// a regression that incorrectly drops a non-empty duplicate.
+func TestPruneDuplicateSessions_NoMergeKeepsBothWithHistory(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Same chat, different users, both with history
+	s1 := sm.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	s2 := sm.NewSession("feishu:oc_chat1:ou_user2", "user2-session")
+
+	s1.AddHistory("user", "msg from user1")
+	s2.AddHistory("user", "msg from user2")
+
+	// Make sure both are recognized as duplicates of the same chat.
+	// baseChat is derived from the user key via ParseSessionKey, not
+	// stored on the Session struct.
+	_, s1Base, _ := ParseSessionKey("feishu:oc_chat1:ou_user1")
+	_, s2Base, _ := ParseSessionKey("feishu:oc_chat1:ou_user2")
+	if s1Base != "feishu:oc_chat1" || s2Base != "feishu:oc_chat1" {
+		t.Fatalf("test setup: both sessions must share baseChat, got %q and %q",
+			s1Base, s2Base)
+	}
+
+	result := sm.PruneDuplicateSessions(false) // NO merge
+
+	if len(result.RemovedSessions) != 0 {
+		t.Errorf("removed %d sessions, want 0 (both have history, no merge)",
+			len(result.RemovedSessions))
+	}
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 (has history) should be kept when mergeHistory=false")
+	}
+	if sm.FindByID(s2.ID) == nil {
+		t.Error("s2 (has history) should be kept when mergeHistory=false")
+	}
+
+	// And the kept candidates' history must NOT be merged away
+	s1After := sm.FindByID(s1.ID)
+	s2After := sm.FindByID(s2.ID)
+	if len(s1After.History) != 1 || s1After.History[0].Content != "msg from user1" {
+		t.Errorf("s1 history was mutated: %+v", s1After.History)
+	}
+	if len(s2After.History) != 1 || s2After.History[0].Content != "msg from user2" {
+		t.Errorf("s2 history was mutated: %+v", s2After.History)
+	}
+}
+
+func TestPruneDuplicateSessions_ThreadIsolation(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Same chat, different threads
+	s1 := sm.GetOrCreateActive("feishu:oc_chat1:root:thread1")
+	s2 := sm.NewSession("feishu:oc_chat1:root:thread2", "thread2-session")
+	s3 := sm.NewSession("feishu:oc_chat1:ou_user1", "user-session")
+
+	// All have history
+	s1.AddHistory("user", "msg in thread1")
+	s2.AddHistory("user", "msg in thread2")
+	s3.AddHistory("user", "msg from user")
+
+	// Make s1 most recent
+	s1.mu.Lock()
+	s1.UpdatedAt = time.Now().Add(2 * time.Hour)
+	s1.mu.Unlock()
+
+	result := sm.PruneDuplicateSessions(true)
+
+	// Should remove 2 sessions (s2 and s3)
+	if len(result.RemovedSessions) != 2 {
+		t.Errorf("removed %d sessions, want 2", len(result.RemovedSessions))
+	}
+
+	// s1 should be kept
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 (most recent) should be kept")
+	}
+
+	// History should be merged
+	keep := sm.FindByID(s1.ID)
+	history := keep.GetHistory(0)
+	if len(history) != 3 {
+		t.Errorf("merged history = %d entries, want 3", len(history))
+	}
+}
+
+func TestPruneEmptySessions(t *testing.T) {
+	sm := NewSessionManager("")
+
+	// Create sessions
+	s1 := sm.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	s2 := sm.NewSession("feishu:oc_chat2:ou_user1", "empty-session")
+	s3 := sm.NewSession("feishu:oc_chat3:ou_user1", "another-empty")
+
+	// Only s1 has history
+	s1.AddHistory("user", "msg1")
+	s1.AddHistory("user", "msg2")
+
+	removed := sm.PruneEmptySessions()
+	if removed != 2 {
+		t.Errorf("removed %d empty sessions, want 2", removed)
+	}
+
+	// s1 should still exist
+	if sm.FindByID(s1.ID) == nil {
+		t.Error("s1 (has history) should exist")
+	}
+
+	// s2, s3 should be removed
+	if sm.FindByID(s2.ID) != nil {
+		t.Error("s2 (empty) should be removed")
+	}
+	if sm.FindByID(s3.ID) != nil {
+		t.Error("s3 (empty) should be removed")
+	}
+}
+
+func TestPruneDuplicateSessions_Persistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	sm1 := NewSessionManager(path)
+	s1 := sm1.GetOrCreateActive("feishu:oc_chat1:ou_user1")
+	s2 := sm1.NewSession("feishu:oc_chat1:ou_user2", "duplicate")
+
+	s1.AddHistory("user", "msg1")
+	s2.AddHistory("user", "msg2")
+
+	// Make s1 newer
+	s1.mu.Lock()
+	s1.UpdatedAt = time.Now().Add(1 * time.Hour)
+	s1.mu.Unlock()
+
+	result := sm1.PruneDuplicateSessions(true)
+	if len(result.RemovedSessions) != 1 {
+		t.Fatalf("removed %d, want 1", len(result.RemovedSessions))
+	}
+
+	// Reload and verify persisted state
+	sm2 := NewSessionManager(path)
+	// After prune, there should be only one session for the base chat
+	// Note: ListSessions returns sessions for a specific userKey, not base chat
+	// So we need to check AllSessions
+	all := sm2.AllSessions()
+	if len(all) != 1 {
+		t.Errorf("after reload: %d sessions, want 1", len(all))
+	}
+
+	// History should be persisted
+	history := all[0].GetHistory(0)
+	if len(history) != 2 {
+		t.Errorf("merged history after reload = %d, want 2", len(history))
+	}
+}
+
+// TestSwitchToAgentSession_PreservesOldSession locks down that switching the
+// active session to a different agent_session_id keeps the previous ID in
+// KnownAgentSessionIDs so it stays visible to /list, /switch, and
+// filterOwnedSessions. Regression test for #603 / issue #600.
+func TestSwitchToAgentSession_PreservesOldSession(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionManager(dir + "/sessions.json")
+	userKey := "user:alice"
+
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentInfo("agent-A", "claude", "session A")
+
+	known := sm.KnownAgentSessionIDs()
+	if _, ok := known["agent-A"]; !ok {
+		t.Fatal("agent-A should be in KnownAgentSessionIDs before switch")
+	}
+
+	s2 := sm.SwitchToAgentSession(userKey, "agent-B", "claude", "session B")
+	if s2.GetAgentSessionID() != "agent-B" {
+		t.Fatalf("switched session AgentSessionID = %q, want agent-B", s2.GetAgentSessionID())
+	}
+
+	known = sm.KnownAgentSessionIDs()
+	if _, ok := known["agent-A"]; !ok {
+		t.Fatal("agent-A should still be in KnownAgentSessionIDs after switch")
+	}
+	if _, ok := known["agent-B"]; !ok {
+		t.Fatal("agent-B should be in KnownAgentSessionIDs after switch")
+	}
+}
+
+func TestSwitchToAgentSession_ReusesExisting(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionManager(dir + "/sessions.json")
+	userKey := "user:bob"
+
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentInfo("agent-A", "claude", "session A")
+
+	sm.SwitchToAgentSession(userKey, "agent-B", "claude", "session B")
+
+	s3 := sm.SwitchToAgentSession(userKey, "agent-A", "claude", "session A")
+	if s3.ID != s1.ID {
+		t.Fatalf("switching back to agent-A should reuse session %s, got %s", s1.ID, s3.ID)
+	}
+}
+
+// TestSwitchToAgentSession_PreservesHistory locks down the fix for the
+// `/switch` regression: when switching back to a previously-used
+// agent_session_id, the returned Session must retain its conversation history.
+// Before the fix, cmdSwitch called session.ClearHistory() unconditionally,
+// which made /history return empty after any switch round-trip.
+func TestSwitchToAgentSession_PreservesHistory(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionManager(dir + "/sessions.json")
+	userKey := "user:carol"
+
+	// Original session with some conversation history.
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentInfo("agent-A", "claude", "Session A")
+	s1.AddHistory("user", "hello from session A")
+	s1.AddHistory("assistant", "hi! this is session A")
+
+	// Switch away to a different agent session.
+	sm.SwitchToAgentSession(userKey, "agent-B", "claude", "Session B")
+
+	// Switch back to the original agent session.
+	s3 := sm.SwitchToAgentSession(userKey, "agent-A", "claude", "Session A")
+	if s3.ID != s1.ID {
+		t.Fatalf("switching back to agent-A should reuse session %s, got %s", s1.ID, s3.ID)
+	}
+
+	got := s3.GetHistory(0)
+	if len(got) != 2 {
+		t.Fatalf("history after switch-back: got %d entries, want 2 — history was wiped (regression of cmdSwitch.ClearHistory bug)", len(got))
+	}
+	if got[0].Role != "user" || got[0].Content != "hello from session A" {
+		t.Fatalf("first history entry = (%q, %q), want (user, hello from session A)", got[0].Role, got[0].Content)
+	}
+	if got[1].Role != "assistant" || got[1].Content != "hi! this is session A" {
+		t.Fatalf("second history entry = (%q, %q), want (assistant, hi! this is session A)", got[1].Role, got[1].Content)
+	}
+}
+
+func TestPastAgentSessionIDs_ClearPreservesHistory(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("", "")
+
+	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "thread-1" {
+		t.Fatalf("PastAgentSessionIDs = %v, want [thread-1]", s.PastAgentSessionIDs)
+	}
+}
+
+func TestPastAgentSessionIDs_ReplacePreservesHistory(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("thread-2", "codex")
+
+	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "thread-1" {
+		t.Fatalf("PastAgentSessionIDs = %v, want [thread-1]", s.PastAgentSessionIDs)
+	}
+	if s.AgentSessionID != "thread-2" {
+		t.Fatalf("AgentSessionID = %q, want thread-2", s.AgentSessionID)
+	}
+}
+
+func TestPastAgentSessionIDs_NoDuplicates(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("", "")
+	s.SetAgentSessionID("thread-1", "codex")
+	s.SetAgentSessionID("", "")
+
+	if len(s.PastAgentSessionIDs) != 1 {
+		t.Fatalf("PastAgentSessionIDs has duplicates: %v", s.PastAgentSessionIDs)
+	}
+}
+
+func TestPastAgentSessionIDs_ContinueSentinelNotRecorded(t *testing.T) {
+	s := &Session{}
+	s.SetAgentSessionID(ContinueSession, "codex")
+	s.SetAgentSessionID("real-id", "codex")
+	s.SetAgentSessionID("", "")
+
+	for _, past := range s.PastAgentSessionIDs {
+		if past == ContinueSession {
+			t.Fatal("ContinueSession sentinel should not be in PastAgentSessionIDs")
+		}
+	}
+	if len(s.PastAgentSessionIDs) != 1 || s.PastAgentSessionIDs[0] != "real-id" {
+		t.Fatalf("PastAgentSessionIDs = %v, want [real-id]", s.PastAgentSessionIDs)
+	}
+}
+
+func TestKnownAgentSessionIDs_IncludesPast(t *testing.T) {
+	sm := NewSessionManager("")
+	s1 := sm.NewSession("user1", "a")
+	s1.SetAgentSessionID("thread-aaa", "codex")
+	s1.SetAgentSessionID("", "")
+
+	s2 := sm.NewSession("user1", "b")
+	s2.SetAgentSessionID("thread-bbb", "codex")
+
+	known := sm.KnownAgentSessionIDs()
+	if _, ok := known["thread-aaa"]; !ok {
+		t.Fatal("expected thread-aaa (past ID) in known set")
+	}
+	if _, ok := known["thread-bbb"]; !ok {
+		t.Fatal("expected thread-bbb (current ID) in known set")
+	}
+}
+
+// TestKnownAgentSessionIDs_ReproducesNewCommandBug simulates the exact user
+// reproduction steps: repeated /new commands progressively clear AgentSessionIDs.
+// Before the PastAgentSessionIDs fix, only the latest session would remain visible.
+func TestKnownAgentSessionIDs_ReproducesNewCommandBug(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "user:test"
+
+	agentSessions := []AgentSessionInfo{
+		{ID: "codex-thread-1"},
+		{ID: "codex-thread-2"},
+		{ID: "codex-thread-3"},
+	}
+
+	s1 := sm.GetOrCreateActive(userKey)
+	s1.SetAgentSessionID("codex-thread-1", "codex")
+
+	s1.SetAgentSessionID("", "")
+	s2 := sm.NewSession(userKey, "session 2")
+	s2.SetAgentSessionID("codex-thread-2", "codex")
+
+	s2.SetAgentSessionID("", "")
+	s3 := sm.NewSession(userKey, "session 3")
+	s3.SetAgentSessionID("codex-thread-3", "codex")
+
+	known := sm.KnownAgentSessionIDs()
+	filtered := filterOwnedSessions(agentSessions, known)
+
+	if len(filtered) != 3 {
+		t.Fatalf("filterOwnedSessions returned %d sessions, want 3 (all should be visible)\nknown IDs: %v",
+			len(filtered), known)
+	}
+}
+
+// TestKnownAgentSessionIDs_ResetAllSessionsBug simulates resetAllSessions
+// clearing all IDs (management API provider switch). Past IDs should keep
+// all sessions visible.
+func TestKnownAgentSessionIDs_ResetAllSessionsBug(t *testing.T) {
+	sm := NewSessionManager("")
+	userKey := "user:test"
+
+	s1 := sm.NewSession(userKey, "a")
+	s1.SetAgentSessionID("thread-1", "codex")
+	s2 := sm.NewSession(userKey, "b")
+	s2.SetAgentSessionID("thread-2", "codex")
+	s3 := sm.NewSession(userKey, "c")
+	s3.SetAgentSessionID("thread-3", "codex")
+
+	for _, s := range sm.AllSessions() {
+		s.SetAgentSessionID("", "")
+	}
+
+	known := sm.KnownAgentSessionIDs()
+	for _, id := range []string{"thread-1", "thread-2", "thread-3"} {
+		if _, ok := known[id]; !ok {
+			t.Fatalf("expected %s in known set after resetAllSessions, known = %v", id, known)
+		}
+	}
+
+	agentSessions := []AgentSessionInfo{
+		{ID: "thread-1"}, {ID: "thread-2"}, {ID: "thread-3"},
+	}
+	filtered := filterOwnedSessions(agentSessions, known)
+	if len(filtered) != 3 {
+		t.Fatalf("filterOwnedSessions returned %d, want 3", len(filtered))
+	}
+}
+
+// TestSession_ForceUnlock covers the /stop path release (#1830): a held lock
+// is released unconditionally, the generation is bumped so the interrupted
+// turn's late Unlock is dropped, and ForceUnlock on an unlocked session is a
+// no-op.
+func TestSession_ForceUnlock(t *testing.T) {
+	s := &Session{}
+	gen, ok := s.TryLock()
+	if !ok {
+		t.Fatal("TryLock should succeed")
+	}
+	if !s.ForceUnlock() {
+		t.Fatal("ForceUnlock on a held lock should report release")
+	}
+	if s.Busy() {
+		t.Fatal("busy must be false after ForceUnlock")
+	}
+	s.Unlock(gen) // late unlock from the interrupted turn
+	if s.Busy() {
+		t.Fatal("late unlock after ForceUnlock must not re-clear or re-hold")
+	}
+	gen2, ok := s.TryLock()
+	if !ok || gen2 == gen {
+		t.Fatal("next TryLock must succeed with a new generation")
+	}
+	if s.ForceUnlock() != true {
+		t.Fatal("second ForceUnlock on held lock should release")
+	}
+	if s.ForceUnlock() {
+		t.Fatal("ForceUnlock on an unlocked session must be a no-op (false)")
 	}
 }

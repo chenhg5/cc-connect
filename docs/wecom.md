@@ -8,8 +8,8 @@
 
 | 模式 | 优势 | 要求 |
 |------|------|------|
-| **WebSocket 长连接**（推荐） | 无需公网 URL、无需消息加解密、无需 IP 白名单 | 创建「智能机器人」 |
-| **Webhook 回调** | 支持图片/语音消息、Markdown 格式 | 公网 URL + 可信 IP |
+| **WebSocket 长连接**（推荐） | 无需公网 URL、无需消息加解密、无需 IP 白名单，支持图片接收与图片回传 | 创建「智能机器人」 |
+| **Webhook 回调** | 兼容企业微信自建应用回调模式 | 公网 URL + 可信 IP |
 
 ---
 
@@ -59,6 +59,7 @@ type = "wecom"
 mode = "websocket"
 bot_id = "your-bot-id"
 bot_secret = "your-bot-secret"
+ws_url = "wss://openws.work.weixin.qq.com"   # optional; 私有化部署时填写私有 WebSocket 地址
 allow_from = "*"
 ```
 
@@ -69,6 +70,7 @@ allow_from = "*"
 | `mode` | ✅ | 必须为 `"websocket"` |
 | `bot_id` | ✅ | 智能机器人 BotID |
 | `bot_secret` | ✅ | 智能机器人 Secret |
+| `ws_url` | ❌ | WebSocket 端点地址（默认 `wss://openws.work.weixin.qq.com`；**私有化部署**时改为你的私有地址，如 `wss://your-wecom-host:port/im_openws?bizid=<id>`） |
 | `allow_from` | ❌ | 允许的用户 ID（默认 `"*"` 允许所有） |
 
 ### 第三步：启动并验证
@@ -88,17 +90,112 @@ level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
 
 ### 技术细节
 
-- **连接地址**：`wss://openws.work.weixin.qq.com`
+- **连接地址**：默认 `wss://openws.work.weixin.qq.com`（公有云）；可通过 `ws_url` 覆盖为私有化部署地址（格式同 `wss://your-wecom-host:port/im_openws?bizid=<id>`）
 - **认证方式**：连接后发送 `aibot_subscribe`（bot_id + secret）
 - **心跳**：每 30 秒发送 `ping`
 - **自动重连**：连接断开后指数退避重连（1s → 2s → 4s → ... → 30s max）
+- **图片回传**：通过 `aibot_upload_media_*` 上传临时素材，再用 `aibot_send_msg` 发送图片
 - **限制**：同一机器人仅支持 1 个长连接；30 条/分钟、1000 条/小时
+
+---
+
+## 私有化部署（自定义 WebSocket 地址）
+
+如果你的企业微信是**私有化部署**（on-premise / 自建服务器），智能机器人的 WebSocket 端点不再是公有云的 `wss://openws.work.weixin.qq.com`，而是你公司内网或专有云中的地址。cc-connect 支持通过 `ws_url` 配置项覆盖默认端点。
+
+### 何时使用
+
+- 企业微信为**私有化部署**版本
+- 智能机器人 WebSocket 服务地址与公有云不同
+- 需要连接到内网/专有云的 `wss://your-host:port/im_openws?bizid=<id>` 端点
+
+> ⚠️ 如果你使用的是企业微信**公有云**（SaaS）服务，**不需要**配置 `ws_url`，保持默认即可。错误地填写私有化地址会导致无法连接公有云服务。
+
+### 配置方法
+
+在 `config.toml` 的 wecom 平台配置中增加 `ws_url` 项：
+
+```toml
+[[projects.platforms]]
+type = "wecom"
+
+[projects.platforms.options]
+mode = "websocket"
+bot_id = "your-bot-id"
+bot_secret = "your-bot-secret"
+# 私有化部署：填写你的私有 WebSocket 地址
+ws_url = "wss://your-wecom-host:port/im_openws?bizid=10001"
+allow_from = "*"
+```
+
+#### 配置项说明
+
+| 配置项 | 必填 | 说明 |
+|--------|------|------|
+| `ws_url` | ❌ | WebSocket 端点地址。**公有云**无需填写（默认 `wss://openws.work.weixin.qq.com`）；**私有化部署**填写你的私有地址，如 `wss://your-wecom-host:port/im_openws?bizid=<id>` |
+
+### 获取私有化 WebSocket 地址
+
+私有化部署的 WebSocket 地址通常由你的企业微信运维团队提供，一般格式为：
+
+```
+wss://<私有化域名或IP>:<端口>/im_openws?bizid=<企业/业务ID>
+```
+
+如果不确定地址，请联系企业管理员或参考企业微信私有化部署文档。
+
+### 部署步骤
+
+1. **确认私有化地址**：向企业微信运维团队索取智能机器人 WebSocket 端点地址（含 `bizid` 等参数）。
+
+2. **配置 `config.toml`**：按上方示例填写 `mode = "websocket"`、`bot_id`、`bot_secret` 及 `ws_url`。
+
+3. **网络连通性检查**：确保 cc-connect 所在服务器可访问 `ws_url` 指定的地址（内网或专有云环境需放通防火墙 / 安全组策略）。
+
+   ```bash
+   # 测试 TLS 握手连通性（替换为你的地址）
+   openssl s_client -connect your-wecom-host:port -servername your-wecom-host </dev/null
+   ```
+
+4. **启动 cc-connect**：
+
+   ```bash
+   cc-connect -config /path/to/config.toml
+   ```
+
+5. **验证连接**：日志中应出现你配置的私有化地址，并订阅成功：
+
+   ```
+   level=INFO msg="wecom-ws: connecting" endpoint=wss://your-wecom-host:port/im_openws?bizid=10001
+   level=INFO msg="wecom-ws: subscribed successfully" bot_id=your-bot-id
+   ```
+
+6. **功能测试**：在企业微信中找到机器人发送一条消息，确认能正常收发。
+
+### 注意事项
+
+- **协议**：`ws_url` 必须使用 `wss://`（TLS 加密）协议；明文 `ws://` 仅在受信任的内网测试环境使用，生产环境不建议。
+- **证书**：若私有化端点使用自签名证书，需确保 cc-connect 运行环境的 CA 信任链包含该证书，否则握手会失败。可通过系统证书库或 `SSL_CERT_FILE` / `SSL_CERT_DIR` 环境变量指定。
+- **端口**：确认端口已在防火墙 / 安全组放通，且未被其他服务占用。
+- **bizid 参数**：地址中的 `bizid` 等查询参数由私有化部署方提供，缺失或错误会导致订阅失败。
+- **回退行为**：`ws_url` 留空或仅含空白字符时，自动回退到默认公有云地址 `wss://openws.work.weixin.qq.com`，不会因配置缺省而报错。
+- **同一机器人单连接**：私有化部署同样遵循「同一机器人仅支持 1 个长连接」的限制，请勿多实例同时连接同一 `bot_id`。
+
+### 故障排查
+
+| 现象 | 可能原因 / 处理 |
+|------|----------------|
+| `dial: ... connection refused` | 地址或端口不对，或防火墙未放通 |
+| `dial: ... certificate signed by unknown authority` | 自签名证书未被信任，配置 CA 证书 |
+| `dial: ... tls: handshake failure` | 端点不支持 TLS，或协议版本不匹配；确认应使用 `wss://` |
+| 日志 `endpoint=wss://openws.work.weixin.qq.com`（非你的私有地址） | `ws_url` 未生效，检查缩进 / 拼写 / 是否在 `[projects.platforms.options]` 下 |
+| 订阅后无响应 | `bizid` 等参数错误，或 `bot_id` / `bot_secret` 与私有化部署方提供的不一致 |
 
 ---
 
 ## 模式二：Webhook 回调
 
-> 💡 如果你不需要图片/语音消息或 Markdown 格式，推荐使用上方的 WebSocket 长连接模式，配置更简单。
+> 💡 推荐优先使用上方的 WebSocket 长连接模式。只有在你已有企业微信自建应用回调部署、或需要兼容旧配置时，再使用 Webhook 回调模式。
 
 ### 前置要求
 
@@ -262,6 +359,7 @@ callback_token = "你在第三步设置的Token"
 callback_aes_key = "你在第三步获取的EncodingAESKey"
 port = "8081"
 callback_path = "/wecom/callback"
+api_base_url = "https://qyapi.weixin.qq.com"
 enable_markdown = false
 ```
 
@@ -276,6 +374,7 @@ enable_markdown = false
 | `callback_aes_key` | ✅ | 回调 EncodingAESKey（43字符） |
 | `port` | ❌ | Webhook 监听端口（默认 `8081`） |
 | `callback_path` | ❌ | Webhook 路径（默认 `/wecom/callback`） |
+| `api_base_url` | ❌ | 企业微信 API 基础地址（默认 `https://qyapi.weixin.qq.com`） |
 | `enable_markdown` | ❌ | 是否发送 Markdown 消息（默认 `false`） |
 | `proxy` | ❌ | HTTP 正向代理地址（动态 IP 场景使用） |
 
@@ -436,6 +535,7 @@ proxy = "http://vps-ip:8888"
 
 - [接入飞书](./feishu.md)
 - [接入钉钉](./dingtalk.md)
+- [接入微博](./weibo.md)
 - [接入 Telegram](./telegram.md)
 - [接入 Slack](./slack.md)
 - [接入 Discord](./discord.md)

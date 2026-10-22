@@ -9,8 +9,8 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-func loadDroidCustomModels() []core.ModelOption {
-	homeDir, err := os.UserHomeDir()
+func (a *Agent) loadDroidCustomModels() []core.ModelOption {
+	homeDir, err := a.homeDir()
 	if err != nil {
 		return nil
 	}

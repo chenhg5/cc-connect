@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,9 +10,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
+
+// DefaultMaxAttachmentSize is the default per-attachment size limit (50 MiB)
+// applied by the /send API and `cc-connect send` when max_attachment_size_mb
+// is unset. Exported so cmd/cc-connect can resolve the same default.
+const DefaultMaxAttachmentSize int64 = 50 << 20
 
 // APIServer exposes a local Unix socket API for external tools (e.g. cron jobs)
 // to send messages to active sessions.
@@ -22,17 +29,37 @@ type APIServer struct {
 	mux        *http.ServeMux
 	engines    map[string]*Engine // project name → engine
 	cron       *CronScheduler
+	timer      *TimerScheduler
 	relay      *RelayManager
-	mu         sync.RWMutex
+	// maxAttachmentBytes caps the raw size of a single attachment accepted by
+	// /send; the request body limit in handleSend is derived from it (base64
+	// expansion + envelope). Defaults to DefaultMaxAttachmentSize.
+	maxAttachmentBytes int64
+	mu                 sync.RWMutex
 }
 
 // SendRequest is the JSON body for POST /send.
+//
+// Audios and Videos are kept separate from Files so the engine can
+// dispatch them to AudioSender / VideoSender (native voice / video
+// bubble) instead of FileSender (generic file download). The fields
+// reuse FileAttachment as the wire format because audio/video clips
+// are byte blobs with a name + mime — the dedicated typing happens at
+// the dispatch layer in engine.go. See cc-connect internal task
+// t-20260615-cqjbk1.
 type SendRequest struct {
 	Project    string            `json:"project"`
 	SessionKey string            `json:"session_key"`
 	Message    string            `json:"message"`
+	WorkDir    string            `json:"work_dir,omitempty"`
+	CWD        string            `json:"cwd,omitempty"`
+	TTSText    string            `json:"tts_text,omitempty"`
 	Images     []ImageAttachment `json:"images,omitempty"`
 	Files      []FileAttachment  `json:"files,omitempty"`
+	Audios     []FileAttachment  `json:"audios,omitempty"`
+	Videos     []FileAttachment  `json:"videos,omitempty"`
+	AtUsers    []string          `json:"at_users,omitempty"`
+	AtAll      bool              `json:"at_all,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -56,10 +83,11 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	}
 
 	s := &APIServer{
-		socketPath: sockPath,
-		listener:   listener,
-		mux:        http.NewServeMux(),
-		engines:    make(map[string]*Engine),
+		socketPath:         sockPath,
+		listener:           listener,
+		mux:                http.NewServeMux(),
+		engines:            make(map[string]*Engine),
+		maxAttachmentBytes: DefaultMaxAttachmentSize,
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
@@ -68,6 +96,12 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/cron/info", s.handleCronInfo)
 	s.mux.HandleFunc("/cron/edit", s.handleCronEdit)
 	s.mux.HandleFunc("/cron/del", s.handleCronDel)
+	s.mux.HandleFunc("/timer/add", s.handleTimerAdd)
+	s.mux.HandleFunc("/timer/list", s.handleTimerList)
+	s.mux.HandleFunc("/timer/info", s.handleTimerInfo)
+	s.mux.HandleFunc("/timer/del", s.handleTimerDel)
+	s.mux.HandleFunc("/cron/exec", s.handleCronExec)
+	s.mux.HandleFunc("/cron/run", s.handleCronExec)
 	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
 	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
@@ -98,6 +132,43 @@ func (s *APIServer) RelayManager() *RelayManager {
 
 func (s *APIServer) SetCronScheduler(cs *CronScheduler) {
 	s.cron = cs
+}
+
+func (s *APIServer) SetTimerScheduler(ts *TimerScheduler) {
+	s.timer = ts
+}
+
+// SetMaxAttachmentSize overrides the per-attachment size limit (bytes) used by
+// /send. Non-positive values are ignored so the default is retained. Safe to
+// call at any time, including from the config reload path: it is guarded by
+// s.mu because handleSend reads the limit concurrently.
+func (s *APIServer) SetMaxAttachmentSize(bytes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if bytes > 0 {
+		s.maxAttachmentBytes = bytes
+	}
+}
+
+// sendBodyEnvelope is the slack added on top of the base64-expanded attachment
+// limit when sizing the /send request body: it covers the JSON envelope (field
+// names, message text, metadata) and a few sub-limit attachments.
+const sendBodyEnvelope int64 = 8 << 20 // 8 MiB
+
+// sendBodyLimit returns the maximum accepted /send request body size in bytes.
+// It is derived from the per-attachment limit to accommodate base64 expansion
+// (~4/3) plus envelope slack, falling back to DefaultMaxAttachmentSize when no
+// limit has been set (e.g. APIServer zero value in tests). Callers in hot paths
+// (handleSend) run concurrently with SetMaxAttachmentSize, so the read is
+// guarded by s.mu.
+func (s *APIServer) sendBodyLimit() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	limit := s.maxAttachmentBytes
+	if limit <= 0 {
+		limit = DefaultMaxAttachmentSize
+	}
+	return limit*4/3 + sendBodyEnvelope
 }
 
 func (s *APIServer) Start() {
@@ -135,41 +206,78 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const maxSendBody = 52 << 20 // 52 MB (slightly above max attachment to account for base64 overhead)
+	// Attachments travel base64-encoded inside the JSON body (~4/3 expansion)
+	// plus the request envelope, so size the reader to fit one max-size
+	// attachment with overhead to spare. The previous hard-coded 52 MB cap was
+	// smaller than a single 50 MB attachment after base64 encoding and would
+	// reject valid sends; deriving it from maxAttachmentBytes keeps the body
+	// limit in step with the configured attachment limit.
 	var req SendRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxSendBody)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, s.sendBodyLimit())).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Message == "" && len(req.Images) == 0 && len(req.Files) == 0 {
-		http.Error(w, "message or attachment is required", http.StatusBadRequest)
+	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
+		http.Error(w, "message, tts_text, or attachment is required", http.StatusBadRequest)
 		return
 	}
 
 	s.mu.RLock()
-	engine, ok := s.engines[req.Project]
+	var engine *Engine
+	var ok bool
+	if req.Project != "" {
+		engine, ok = s.engines[req.Project]
+	} else if len(s.engines) == 1 {
+		// No project specified and only one engine: use it by default.
+		// Do NOT silently fall back when a non-empty project name is unknown —
+		// that misroutes the message to the wrong engine. Mirrors the resolve
+		// pattern in webhook.go and handleCronAdd.
+		for _, e := range s.engines {
+			engine = e
+			ok = true
+		}
+	}
 	s.mu.RUnlock()
 
 	if !ok {
-		// If only one engine, use it by default
-		s.mu.RLock()
-		if len(s.engines) == 1 {
-			for _, e := range s.engines {
-				engine = e
-				ok = true
-			}
+		if req.Project == "" {
+			http.Error(w, "project is required (multiple projects configured)", http.StatusBadRequest)
+			return
 		}
-		s.mu.RUnlock()
-	}
-
-	if !ok {
 		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
 		return
 	}
 
-	if err := engine.SendToSessionWithAttachments(req.SessionKey, req.Message, req.Images, req.Files); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	workDir := req.WorkDir
+	if workDir == "" {
+		workDir = req.CWD
+	}
+	if req.Message != "" || len(req.Images) > 0 || len(req.Files) > 0 {
+		if err := engine.SendToSessionWithOptions(req.SessionKey, req.Message, req.Images, req.Files, SendOptions{WorkDir: workDir, AtUsers: req.AtUsers, AtAll: req.AtAll}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if len(req.Audios) > 0 {
+		if err := engine.SendAudiosToSession(req.SessionKey, req.Audios); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if len(req.Videos) > 0 {
+		if err := engine.SendVideosToSession(req.SessionKey, req.Videos); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if strings.TrimSpace(req.TTSText) != "" {
+		if err := engine.SendTTSToSession(req.SessionKey, req.TTSText); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	apiJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -354,6 +462,43 @@ func (s *APIServer) handleCronDel(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *APIServer) handleCronExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cron == nil {
+		http.Error(w, "cron scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.cron.RunJobNow(req.ID); err != nil {
+		if errors.Is(err, ErrCronJobNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	apiJSON(w, http.StatusAccepted, map[string]string{
+		"id":     req.ID,
+		"status": "triggered",
+	})
+}
+
 func (s *APIServer) handleCronInfo(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
@@ -419,6 +564,195 @@ func (s *APIServer) handleCronEdit(w http.ResponseWriter, r *http.Request) {
 	// Return updated job
 	job := s.cron.Store().Get(req.ID)
 	apiJSON(w, http.StatusOK, job)
+}
+
+// ── Timer API ─────────────────────────────────────────────────
+
+// TimerAddRequest is the JSON body for POST /timer/add.
+type TimerAddRequest struct {
+	Project     string `json:"project"`
+	SessionKey  string `json:"session_key"`
+	Delay       string `json:"delay"` // relative ("2h") or absolute ISO time
+	Prompt      string `json:"prompt"`
+	Exec        string `json:"exec"`
+	WorkDir     string `json:"work_dir"`
+	Description string `json:"description"`
+	Silent      *bool  `json:"silent,omitempty"`
+	Mute        bool   `json:"mute,omitempty"`
+	SessionMode string `json:"session_mode,omitempty"`
+	Mode        string `json:"mode,omitempty"`
+	TimeoutMins *int   `json:"timeout_mins,omitempty"`
+}
+
+func (s *APIServer) handleTimerAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.timer == nil {
+		http.Error(w, "timer scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req TimerAddRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Delay == "" {
+		http.Error(w, "delay is required (e.g. 2h, 30m, or ISO time)", http.StatusBadRequest)
+		return
+	}
+	if req.Prompt == "" && req.Exec == "" {
+		http.Error(w, "either prompt or exec is required", http.StatusBadRequest)
+		return
+	}
+	if req.Prompt != "" && req.Exec != "" {
+		http.Error(w, "prompt and exec are mutually exclusive", http.StatusBadRequest)
+		return
+	}
+
+	fireAt, err := ParseDelayOrTime(req.Delay)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	project := req.Project
+	if project == "" {
+		s.mu.RLock()
+		if len(s.engines) == 1 {
+			for name := range s.engines {
+				project = name
+			}
+		}
+		s.mu.RUnlock()
+	}
+	if project == "" {
+		http.Error(w, "project is required (multiple projects configured)", http.StatusBadRequest)
+		return
+	}
+
+	sessionKey := req.SessionKey
+	if sessionKey == "" {
+		s.mu.RLock()
+		engine := s.engines[project]
+		s.mu.RUnlock()
+		if engine != nil {
+			keys := engine.ActiveSessionKeys()
+			if len(keys) == 1 {
+				sessionKey = keys[0]
+			}
+		}
+	}
+	if sessionKey == "" {
+		http.Error(w, "session_key is required", http.StatusBadRequest)
+		return
+	}
+
+	job := &TimerJob{
+		ID:          GenerateTimerID(),
+		Project:     project,
+		SessionKey:  sessionKey,
+		ScheduledAt: fireAt,
+		Prompt:      req.Prompt,
+		Exec:        req.Exec,
+		WorkDir:     req.WorkDir,
+		Description: req.Description,
+		Silent:      req.Silent,
+		Mute:        req.Mute,
+		SessionMode: req.SessionMode,
+		Mode:        req.Mode,
+		TimeoutMins: req.TimeoutMins,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := s.timer.AddJob(job); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, job)
+}
+
+func (s *APIServer) handleTimerList(w http.ResponseWriter, r *http.Request) {
+	if s.timer == nil {
+		http.Error(w, "timer scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	project := r.URL.Query().Get("project")
+	var jobs []*TimerJob
+	if project != "" {
+		jobs = s.timer.Store().ListByProject(project)
+	} else {
+		jobs = s.timer.Store().List()
+	}
+
+	// Filter to pending only
+	var pending []*TimerJob
+	for _, j := range jobs {
+		if !j.Fired {
+			pending = append(pending, j)
+		}
+	}
+
+	apiJSON(w, http.StatusOK, pending)
+}
+
+func (s *APIServer) handleTimerInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.timer == nil {
+		http.Error(w, "timer scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	job := s.timer.Store().Get(id)
+	if job == nil {
+		http.Error(w, "timer not found", http.StatusNotFound)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, job)
+}
+
+func (s *APIServer) handleTimerDel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.timer == nil {
+		http.Error(w, "timer scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	if !s.timer.RemoveJob(req.ID) {
+		http.Error(w, "timer not found", http.StatusNotFound)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": req.ID})
 }
 
 // ── Relay API ──────────────────────────────────────────────────

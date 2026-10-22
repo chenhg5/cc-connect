@@ -29,6 +29,7 @@ import (
 func TestSmoke_ConfigLoading(t *testing.T) {
 	// Create a temporary config file
 	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
 	configPath := filepath.Join(tmpDir, "config.toml")
 
 	configContent := `
@@ -50,12 +51,14 @@ level = "info"
 	require.NoError(t, err)
 
 	// Load the config
+	oldConfigPath := config.ConfigPath
+	t.Cleanup(func() { config.ConfigPath = oldConfigPath })
 	config.ConfigPath = configPath
 	cfg, err := config.Load(configPath)
 	require.NoError(t, err)
 
 	// Verify basic config fields
-	assert.Equal(t, "~/.cc-connect", cfg.DataDir)
+	assert.Equal(t, filepath.Join(tmpDir, ".cc-connect"), cfg.DataDir)
 	assert.Len(t, cfg.Projects, 1)
 	assert.Equal(t, "test-project", cfg.Projects[0].Name)
 	assert.Equal(t, "claudecode", cfg.Projects[0].Agent.Type)
@@ -189,7 +192,7 @@ func TestSmoke_SessionManagement(t *testing.T) {
 	assert.NotEmpty(t, sessions)
 
 	// Test sending a message
-	err = session.Send("Hello", nil, nil)
+	err = session.Send("Hello", "", nil, nil)
 	require.NoError(t, err)
 
 	// Test session is still alive
@@ -218,7 +221,7 @@ func TestSmoke_SessionMessageFlow(t *testing.T) {
 	assert.Equal(t, "test-session-002", started.CurrentSessionID())
 
 	// Send message
-	err = started.Send("What is 2+2?", nil, nil)
+	err = started.Send("What is 2+2?", "", nil, nil)
 	require.NoError(t, err)
 
 	// Collect events
@@ -337,7 +340,7 @@ func TestSmoke_MessageFlow(t *testing.T) {
 	require.NoError(t, err)
 
 	// Send message to agent
-	err = session.Send("Hello agent", nil, nil)
+	err = session.Send("Hello agent", "", nil, nil)
 	require.NoError(t, err)
 
 	// Verify mock calls happened (only agent, not platform since we didn't call Name/Stop)

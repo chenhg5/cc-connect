@@ -2,13 +2,20 @@ package wecom
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/gorilla/websocket"
 )
 
 // ---------------------------------------------------------------------------
@@ -87,19 +94,142 @@ func TestSplitByBytes_ReassemblesLargeContent(t *testing.T) {
 	}
 }
 
+func TestSplitByBytes_UsesNearestParagraphBoundaryAfterSeventyPercent(t *testing.T) {
+	early := strings.Repeat("甲", 15) + "\n\n"
+	near := strings.Repeat("乙", 10) + "\n\n"
+	tail := strings.Repeat("丙", 20)
+	parts := splitByBytes(early+near+tail, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != early+near {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_IgnoresParagraphBoundaryBeforeSeventyPercent(t *testing.T) {
+	early := strings.Repeat("甲", 12) + "\n\n"
+	tail := strings.Repeat("乙", 24)
+	parts := splitByBytes(early+tail, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] == early {
+		t.Fatalf("should not split at an early paragraph boundary: %q", parts[0])
+	}
+	if strings.Join(parts, "") != early+tail {
+		t.Fatalf("reassembled content does not match original: %v", parts)
+	}
+}
+
+func TestSplitByBytes_UsesLineBoundaryAfterEightyPercent(t *testing.T) {
+	first := strings.Repeat("甲", 27) + "\n"
+	second := strings.Repeat("乙", 12)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != first {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_UsesSentenceBoundaryAfterEightyFivePercent(t *testing.T) {
+	first := strings.Repeat("前", 28) + "。"
+	second := strings.Repeat("后", 12)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != first {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_DoesNotSplitAtEnumerationComma(t *testing.T) {
+	first := strings.Repeat("甲", 15) + "、"
+	second := strings.Repeat("乙", 10)
+	parts := splitByBytes(first+second, 70)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] == first {
+		t.Fatalf("should not split at enumeration comma: %q", parts[0])
+	}
+	if strings.Join(parts, "") != first+second {
+		t.Fatalf("reassembled content does not match original: %v", parts)
+	}
+}
+
+func TestSplitByBytes_UsesSoftBoundaryOnlyAfterNinetyPercent(t *testing.T) {
+	first := strings.Repeat("甲", 30) + "，"
+	second := strings.Repeat("乙", 12)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] != first {
+		t.Fatalf("unexpected chunks: %q / %q", parts[0], parts[1])
+	}
+}
+
+func TestSplitByBytes_IgnoresSoftBoundaryBeforeNinetyPercent(t *testing.T) {
+	first := strings.Repeat("甲", 20) + "，"
+	second := strings.Repeat("乙", 20)
+	parts := splitByBytes(first+second, 100)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(parts), parts)
+	}
+	if parts[0] == first {
+		t.Fatalf("should not split at an early soft boundary: %q", parts[0])
+	}
+	if strings.Join(parts, "") != first+second {
+		t.Fatalf("reassembled content does not match original: %v", parts)
+	}
+}
+
+func TestSplitByBytes_FallsBackToHardCut(t *testing.T) {
+	input := strings.Repeat("甲", 10)
+	parts := splitByBytes(input, 10)
+	for _, part := range parts {
+		if len(part) > 10 {
+			t.Fatalf("chunk exceeds limit: %d > 10", len(part))
+		}
+	}
+	if strings.Join(parts, "") != input {
+		t.Fatalf("reassembled content does not match original: %v", parts)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleMsgCallback — chatID fallback to userID for single chats
 // ---------------------------------------------------------------------------
 
-func TestHandleMsgCallback_SingleChat_ChatIDFallback(t *testing.T) {
-	p := &WSPlatform{
-		allowFrom: "*",
-	}
-
+func newCapturedWSPlatform() (*WSPlatform, <-chan *core.Message) {
+	p := &WSPlatform{allowFrom: "*"}
 	captured := make(chan *core.Message, 1)
 	p.handler = func(_ core.Platform, msg *core.Message) {
 		captured <- msg
 	}
+	return p, captured
+}
+
+func wsCallbackFrame(t *testing.T, reqID string, body wsMsgCallbackBody) wsFrame {
+	t.Helper()
+
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal callback body: %v", err)
+	}
+	return wsFrame{
+		Cmd:     "aibot_msg_callback",
+		Headers: wsFrameHeaders{ReqID: reqID},
+		Body:    bodyBytes,
+	}
+}
+
+func TestHandleMsgCallback_SingleChat_ChatIDFallback(t *testing.T) {
+	p, captured := newCapturedWSPlatform()
 
 	body := wsMsgCallbackBody{
 		MsgID:    "msg_001",
@@ -111,14 +241,7 @@ func TestHandleMsgCallback_SingleChat_ChatIDFallback(t *testing.T) {
 	body.Text.Content = "hello"
 	body.CreateTime = time.Now().Unix()
 
-	bodyBytes, _ := json.Marshal(body)
-	frame := wsFrame{
-		Cmd:     "aibot_msg_callback",
-		Headers: wsFrameHeaders{ReqID: "req_123"},
-		Body:    bodyBytes,
-	}
-
-	p.handleMsgCallback(frame)
+	p.handleMsgCallback(wsCallbackFrame(t, "req_123", body))
 
 	select {
 	case msg := <-captured:
@@ -135,14 +258,7 @@ func TestHandleMsgCallback_SingleChat_ChatIDFallback(t *testing.T) {
 }
 
 func TestHandleMsgCallback_GroupChat_ChatIDPreserved(t *testing.T) {
-	p := &WSPlatform{
-		allowFrom: "*",
-	}
-
-	captured := make(chan *core.Message, 1)
-	p.handler = func(_ core.Platform, msg *core.Message) {
-		captured <- msg
-	}
+	p, captured := newCapturedWSPlatform()
 
 	body := wsMsgCallbackBody{
 		MsgID:    "msg_002",
@@ -154,14 +270,7 @@ func TestHandleMsgCallback_GroupChat_ChatIDPreserved(t *testing.T) {
 	body.Text.Content = "hi group"
 	body.CreateTime = time.Now().Unix()
 
-	bodyBytes, _ := json.Marshal(body)
-	frame := wsFrame{
-		Cmd:     "aibot_msg_callback",
-		Headers: wsFrameHeaders{ReqID: "req_456"},
-		Body:    bodyBytes,
-	}
-
-	p.handleMsgCallback(frame)
+	p.handleMsgCallback(wsCallbackFrame(t, "req_456", body))
 
 	select {
 	case msg := <-captured:
@@ -177,16 +286,86 @@ func TestHandleMsgCallback_GroupChat_ChatIDPreserved(t *testing.T) {
 	}
 }
 
-func TestHandleMsgCallback_StripsBotMention(t *testing.T) {
+func TestHandleMsgCallback_RepliesToUnauthorizedSender(t *testing.T) {
+	serverDone := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+		}()
+		var frame wsFrame
+		if err := conn.ReadJSON(&frame); err != nil {
+			serverDone <- err
+			return
+		}
+		var body struct {
+			Stream struct {
+				Content string `json:"content"`
+			} `json:"stream"`
+		}
+		if err := json.Unmarshal(frame.Body, &body); err != nil {
+			serverDone <- err
+			return
+		}
+		if frame.Cmd != "aibot_respond_msg" {
+			serverDone <- fmt.Errorf("cmd = %q, want aibot_respond_msg", frame.Cmd)
+			return
+		}
+		if got := body.Stream.Content; got != core.UnauthorizedAccessMessage {
+			serverDone <- fmt.Errorf("content = %q, want %q", got, core.UnauthorizedAccessMessage)
+			return
+		}
+		serverDone <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial test websocket: %v", err)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
 	p := &WSPlatform{
-		allowFrom: "*",
-		botID:     "robot01",
+		allowFrom: "allowed-user",
+		conn:      conn,
+		handler: func(core.Platform, *core.Message) {
+			t.Fatal("handler should not run for unauthorized sender")
+		},
 	}
 
-	captured := make(chan *core.Message, 1)
-	p.handler = func(_ core.Platform, msg *core.Message) {
-		captured <- msg
+	body := wsMsgCallbackBody{
+		MsgID:    "msg_unauthorized",
+		ChatID:   "chat_group",
+		ChatType: "group",
+		MsgType:  "text",
 	}
+	body.From.UserID = "blocked-user"
+	body.Text.Content = "@bot hello"
+	body.CreateTime = time.Now().Unix()
+	p.handleMsgCallback(wsCallbackFrame(t, "req_unauthorized", body))
+
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for unauthorized reply frame")
+	}
+}
+
+func TestHandleMsgCallback_StripsBotMention(t *testing.T) {
+	p, captured := newCapturedWSPlatform()
+	p.botID = "robot01"
 
 	body := wsMsgCallbackBody{
 		MsgID:    "msg_mention",
@@ -199,14 +378,7 @@ func TestHandleMsgCallback_StripsBotMention(t *testing.T) {
 	body.Text.Content = "允许 @Robot01"
 	body.CreateTime = time.Now().Unix()
 
-	bodyBytes, _ := json.Marshal(body)
-	frame := wsFrame{
-		Cmd:     "aibot_msg_callback",
-		Headers: wsFrameHeaders{ReqID: "req_m"},
-		Body:    bodyBytes,
-	}
-
-	p.handleMsgCallback(frame)
+	p.handleMsgCallback(wsCallbackFrame(t, "req_m", body))
 
 	select {
 	case msg := <-captured:
@@ -214,6 +386,78 @@ func TestHandleMsgCallback_StripsBotMention(t *testing.T) {
 			t.Fatalf("expected stripped content %q, got %q", "允许", msg.Content)
 		}
 	case <-time.After(1 * time.Second):
+		t.Fatal("handler not called")
+	}
+}
+
+func TestHandleMsgCallback_SeparatesQuotedTextFromCurrentInstruction(t *testing.T) {
+	p, captured := newCapturedWSPlatform()
+	p.botID = "robot01"
+
+	body := wsMsgCallbackBody{
+		MsgID:      "msg_quote",
+		ChatID:     "grp1",
+		ChatType:   "group",
+		MsgType:    "text",
+		AibotID:    "robot01",
+		CreateTime: time.Now().Unix(),
+		Quote: &wsQuoteBlock{
+			MsgType: "text",
+			Text: &struct {
+				Content string `json:"content"`
+			}{Content: "请检查这段旧代码"},
+		},
+	}
+	body.From.UserID = "u1"
+	body.Text.Content = "@Robot01 修复这个问题"
+
+	p.handleMsgCallback(wsCallbackFrame(t, "req_quote", body))
+
+	select {
+	case msg := <-captured:
+		if got, want := msg.Content, "修复这个问题"; got != want {
+			t.Fatalf("Content = %q, want %q", got, want)
+		}
+		if got, want := msg.ExtraContent, "[Quoted message]:\n请检查这段旧代码\n\n"; got != want {
+			t.Fatalf("ExtraContent = %q, want %q", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler not called")
+	}
+}
+
+func TestHandleMsgCallback_MentionOnlyWithQuoteStillDispatches(t *testing.T) {
+	p, captured := newCapturedWSPlatform()
+	p.botID = "robot01"
+
+	body := wsMsgCallbackBody{
+		MsgID:      "msg_quote_mention_only",
+		ChatID:     "grp1",
+		ChatType:   "group",
+		MsgType:    "text",
+		AibotID:    "robot01",
+		CreateTime: time.Now().Unix(),
+		Quote: &wsQuoteBlock{
+			MsgType: "text",
+			Text: &struct {
+				Content string `json:"content"`
+			}{Content: "总结这段内容"},
+		},
+	}
+	body.From.UserID = "u1"
+	body.Text.Content = "@Robot01"
+
+	p.handleMsgCallback(wsCallbackFrame(t, "req_quote_mention_only", body))
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "" {
+			t.Fatalf("Content = %q, want empty current instruction", msg.Content)
+		}
+		if got, want := msg.ExtraContent, "[Quoted message]:\n总结这段内容\n\n"; got != want {
+			t.Fatalf("ExtraContent = %q, want %q", got, want)
+		}
+	case <-time.After(time.Second):
 		t.Fatal("handler not called")
 	}
 }
@@ -258,63 +502,50 @@ func TestWriteAndWaitAck_SuccessfulAck(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_1"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	// Simulate receiving ack in another goroutine
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		if v, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-			v.(chan error) <- nil
-		}
+		p.dispatchAck(reqID, wsAckResult{})
 	}()
 
-	ctx := context.Background()
-	select {
-	case err := <-ch:
-		if err != nil {
-			t.Fatalf("expected nil ack error, got %v", err)
+	assertAckResult(t, ch, func(result wsAckResult) {
+		if result.err != nil {
+			t.Fatalf("expected nil ack error, got %v", result.err)
 		}
-	case <-ctx.Done():
-		t.Fatal("context cancelled unexpectedly")
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for ack")
-	}
+	})
 }
 
 func TestWriteAndWaitAck_AckWithError(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_2"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	ackErr := fmt.Errorf("wecom-ws: ack error: errcode=40001 errmsg=invalid token")
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		if v, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-			v.(chan error) <- ackErr
-		}
+		p.dispatchAck(reqID, wsAckResult{err: ackErr})
 	}()
 
-	select {
-	case err := <-ch:
-		if err == nil {
+	assertAckResult(t, ch, func(result wsAckResult) {
+		if result.err == nil {
 			t.Fatal("expected ack error, got nil")
 		}
-		if err.Error() != ackErr.Error() {
-			t.Fatalf("unexpected error: %v", err)
+		if result.err.Error() != ackErr.Error() {
+			t.Fatalf("unexpected error: %v", result.err)
 		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for ack")
-	}
+	})
 }
 
 func TestWriteAndWaitAck_Timeout(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_timeout"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	// Nobody sends ack → should timeout
@@ -338,7 +569,7 @@ func TestWriteAndWaitAck_ContextCancelled(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "send_cancel"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -368,7 +599,7 @@ func TestHandleFrame_AckDispatch(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "aibot_send_msg_1"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	errCode := 0
@@ -381,21 +612,18 @@ func TestHandleFrame_AckDispatch(t *testing.T) {
 
 	p.handleFrame(frame)
 
-	select {
-	case err := <-ch:
-		if err != nil {
-			t.Fatalf("expected nil error for successful ack, got %v", err)
+	assertAckResult(t, ch, func(result wsAckResult) {
+		if result.err != nil {
+			t.Fatalf("expected nil error for successful ack, got %v", result.err)
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("ack not dispatched")
-	}
+	})
 }
 
 func TestHandleFrame_AckDispatch_WithError(t *testing.T) {
 	p := &WSPlatform{}
 
 	reqID := "aibot_send_msg_2"
-	ch := make(chan error, 1)
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	errCode := 40001
@@ -408,11 +636,19 @@ func TestHandleFrame_AckDispatch_WithError(t *testing.T) {
 
 	p.handleFrame(frame)
 
-	select {
-	case err := <-ch:
-		if err == nil {
+	assertAckResult(t, ch, func(result wsAckResult) {
+		if result.err == nil {
 			t.Fatal("expected error for failed ack, got nil")
 		}
+	})
+}
+
+func assertAckResult(t *testing.T, ch <-chan wsAckResult, check func(wsAckResult)) {
+	t.Helper()
+
+	select {
+	case result := <-ch:
+		check(result)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("ack not dispatched")
 	}
@@ -461,6 +697,342 @@ func TestGenerateReqID_Format(t *testing.T) {
 	if id2 != "aibot_send_msg_2" {
 		t.Fatalf("expected aibot_send_msg_2, got %s", id2)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// SendImage
+// ---------------------------------------------------------------------------
+
+func TestWSPlatformSendImage_UploadsAndSendsMedia(t *testing.T) {
+	imageData := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 1, 2, 3}
+	serverDone := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		serverDone <- assertWeComWSSendImageFrames(conn, imageData)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial test websocket: %v", err)
+	}
+	defer conn.Close()
+
+	p := &WSPlatform{conn: conn}
+	go func() {
+		for {
+			var frame wsFrame
+			if err := conn.ReadJSON(&frame); err != nil {
+				return
+			}
+			p.handleFrame(frame)
+		}
+	}()
+
+	err = p.SendImage(context.Background(), wsReplyContext{chatID: "chat1", userID: "u1"}, core.ImageAttachment{
+		MimeType: "image/png",
+		Data:     imageData,
+		FileName: "chart.png",
+	})
+	if err != nil {
+		t.Fatalf("SendImage returned error: %v", err)
+	}
+
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe all expected frames")
+	}
+}
+
+func assertWeComWSSendImageFrames(conn *websocket.Conn, imageData []byte) error {
+	var initFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			Type        string `json:"type"`
+			Filename    string `json:"filename"`
+			TotalSize   int    `json:"total_size"`
+			TotalChunks int    `json:"total_chunks"`
+			MD5         string `json:"md5"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&initFrame); err != nil {
+		return fmt.Errorf("read init frame: %w", err)
+	}
+	sum := md5.Sum(imageData)
+	if initFrame.Cmd != "aibot_upload_media_init" ||
+		initFrame.Body.Type != "image" ||
+		initFrame.Body.Filename != "chart.png" ||
+		initFrame.Body.TotalSize != len(imageData) ||
+		initFrame.Body.TotalChunks != 1 ||
+		initFrame.Body.MD5 != hex.EncodeToString(sum[:]) {
+		return fmt.Errorf("unexpected init frame: %#v", initFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": initFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+		"body":    map[string]string{"upload_id": "upload-1"},
+	}); err != nil {
+		return fmt.Errorf("write init ack: %w", err)
+	}
+
+	var chunkFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			UploadID   string `json:"upload_id"`
+			ChunkIndex int    `json:"chunk_index"`
+			Base64Data string `json:"base64_data"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&chunkFrame); err != nil {
+		return fmt.Errorf("read chunk frame: %w", err)
+	}
+	if chunkFrame.Cmd != "aibot_upload_media_chunk" ||
+		chunkFrame.Body.UploadID != "upload-1" ||
+		chunkFrame.Body.ChunkIndex != 0 ||
+		chunkFrame.Body.Base64Data != base64.StdEncoding.EncodeToString(imageData) {
+		return fmt.Errorf("unexpected chunk frame: %#v", chunkFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": chunkFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+	}); err != nil {
+		return fmt.Errorf("write chunk ack: %w", err)
+	}
+
+	var finishFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			UploadID string `json:"upload_id"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&finishFrame); err != nil {
+		return fmt.Errorf("read finish frame: %w", err)
+	}
+	if finishFrame.Cmd != "aibot_upload_media_finish" || finishFrame.Body.UploadID != "upload-1" {
+		return fmt.Errorf("unexpected finish frame: %#v", finishFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": finishFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+		"body":    map[string]string{"media_id": "media-1"},
+	}); err != nil {
+		return fmt.Errorf("write finish ack: %w", err)
+	}
+
+	var sendFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			ChatID  string `json:"chatid"`
+			MsgType string `json:"msgtype"`
+			Image   struct {
+				MediaID string `json:"media_id"`
+			} `json:"image"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&sendFrame); err != nil {
+		return fmt.Errorf("read send frame: %w", err)
+	}
+	if sendFrame.Cmd != "aibot_send_msg" ||
+		sendFrame.Body.ChatID != "chat1" ||
+		sendFrame.Body.MsgType != "image" ||
+		sendFrame.Body.Image.MediaID != "media-1" {
+		return fmt.Errorf("unexpected send frame: %#v", sendFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": sendFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+	}); err != nil {
+		return fmt.Errorf("write send ack: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// SendFile
+// ---------------------------------------------------------------------------
+
+func TestWSPlatformSendFile_UploadsAndSendsMedia(t *testing.T) {
+	fileData := []byte("<html><body>hello</body></html>")
+	serverDone := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		serverDone <- assertWeComWSSendFileFrames(conn, fileData)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial test websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	p := &WSPlatform{conn: conn}
+	go func() {
+		for {
+			var frame wsFrame
+			if err := conn.ReadJSON(&frame); err != nil {
+				return
+			}
+			p.handleFrame(frame)
+		}
+	}()
+
+	err = p.SendFile(context.Background(), wsReplyContext{chatID: "chat1", userID: "u1"}, core.FileAttachment{
+		MimeType: "text/html",
+		Data:     fileData,
+		FileName: "hello.html",
+	})
+	if err != nil {
+		t.Fatalf("SendFile returned error: %v", err)
+	}
+
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe all expected frames")
+	}
+}
+
+func assertWeComWSSendFileFrames(conn *websocket.Conn, fileData []byte) error {
+	var initFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			Type        string `json:"type"`
+			Filename    string `json:"filename"`
+			TotalSize   int    `json:"total_size"`
+			TotalChunks int    `json:"total_chunks"`
+			MD5         string `json:"md5"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&initFrame); err != nil {
+		return fmt.Errorf("read init frame: %w", err)
+	}
+	sum := md5.Sum(fileData)
+	if initFrame.Cmd != "aibot_upload_media_init" ||
+		initFrame.Body.Type != "file" ||
+		initFrame.Body.Filename != "hello.html" ||
+		initFrame.Body.TotalSize != len(fileData) ||
+		initFrame.Body.TotalChunks != 1 ||
+		initFrame.Body.MD5 != hex.EncodeToString(sum[:]) {
+		return fmt.Errorf("unexpected init frame: %#v", initFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": initFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+		"body":    map[string]string{"upload_id": "upload-f1"},
+	}); err != nil {
+		return fmt.Errorf("write init ack: %w", err)
+	}
+
+	var chunkFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			UploadID   string `json:"upload_id"`
+			ChunkIndex int    `json:"chunk_index"`
+			Base64Data string `json:"base64_data"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&chunkFrame); err != nil {
+		return fmt.Errorf("read chunk frame: %w", err)
+	}
+	if chunkFrame.Cmd != "aibot_upload_media_chunk" ||
+		chunkFrame.Body.UploadID != "upload-f1" ||
+		chunkFrame.Body.ChunkIndex != 0 ||
+		chunkFrame.Body.Base64Data != base64.StdEncoding.EncodeToString(fileData) {
+		return fmt.Errorf("unexpected chunk frame: %#v", chunkFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": chunkFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+	}); err != nil {
+		return fmt.Errorf("write chunk ack: %w", err)
+	}
+
+	var finishFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			UploadID string `json:"upload_id"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&finishFrame); err != nil {
+		return fmt.Errorf("read finish frame: %w", err)
+	}
+	if finishFrame.Cmd != "aibot_upload_media_finish" || finishFrame.Body.UploadID != "upload-f1" {
+		return fmt.Errorf("unexpected finish frame: %#v", finishFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": finishFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+		"body":    map[string]string{"media_id": "media-f1"},
+	}); err != nil {
+		return fmt.Errorf("write finish ack: %w", err)
+	}
+
+	var sendFrame struct {
+		Cmd     string         `json:"cmd"`
+		Headers wsFrameHeaders `json:"headers"`
+		Body    struct {
+			ChatID  string `json:"chatid"`
+			MsgType string `json:"msgtype"`
+			File    struct {
+				MediaID string `json:"media_id"`
+			} `json:"file"`
+		} `json:"body"`
+	}
+	if err := conn.ReadJSON(&sendFrame); err != nil {
+		return fmt.Errorf("read send frame: %w", err)
+	}
+	if sendFrame.Cmd != "aibot_send_msg" ||
+		sendFrame.Body.ChatID != "chat1" ||
+		sendFrame.Body.MsgType != "file" ||
+		sendFrame.Body.File.MediaID != "media-f1" {
+		return fmt.Errorf("unexpected send frame: %#v", sendFrame)
+	}
+	if err := conn.WriteJSON(map[string]any{
+		"headers": sendFrame.Headers,
+		"errcode": 0,
+		"errmsg":  "ok",
+	}); err != nil {
+		return fmt.Errorf("write send ack: %w", err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -522,5 +1094,50 @@ func TestNewWebSocket_ValidConfig(t *testing.T) {
 	ws := p.(*WSPlatform)
 	if ws.botID != "aibTest" || ws.secret != "secretXYZ" || ws.allowFrom != "user1,user2" {
 		t.Fatalf("unexpected config: botID=%s secret=%s allowFrom=%s", ws.botID, ws.secret, ws.allowFrom)
+	}
+}
+
+func TestNewWebSocket_DefaultWSEndpoint(t *testing.T) {
+	p, err := newWebSocket(map[string]any{
+		"bot_id":     "aibTest",
+		"bot_secret": "secretXYZ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := p.(*WSPlatform)
+	if ws.wsURL != wsEndpoint {
+		t.Fatalf("expected default wsURL %q, got %q", wsEndpoint, ws.wsURL)
+	}
+}
+
+func TestNewWebSocket_CustomWSEndpoint(t *testing.T) {
+	const custom = "wss://corp.example.com:85/im_openws?bizid=1"
+	p, err := newWebSocket(map[string]any{
+		"bot_id":     "aibTest",
+		"bot_secret": "secretXYZ",
+		"ws_url":     custom,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := p.(*WSPlatform)
+	if ws.wsURL != custom {
+		t.Fatalf("expected custom wsURL %q, got %q", custom, ws.wsURL)
+	}
+}
+
+func TestNewWebSocket_BlankWSEndpointFallsBack(t *testing.T) {
+	p, err := newWebSocket(map[string]any{
+		"bot_id":     "aibTest",
+		"bot_secret": "secretXYZ",
+		"ws_url":     "   ",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ws := p.(*WSPlatform)
+	if ws.wsURL != wsEndpoint {
+		t.Fatalf("expected blank ws_url to fall back to %q, got %q", wsEndpoint, ws.wsURL)
 	}
 }

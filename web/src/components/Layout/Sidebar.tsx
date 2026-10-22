@@ -8,6 +8,8 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
+  Plug,
+  Puzzle,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
@@ -15,6 +17,8 @@ import { useState } from 'react';
 const navItems = [
   { key: 'dashboard', path: '/', icon: LayoutDashboard },
   { key: 'projects', path: '/projects', icon: FolderKanban },
+  { key: 'providers', path: '/providers', icon: Plug },
+  { key: 'skills', path: '/skills', icon: Puzzle },
   { key: 'chat', path: '/chat', icon: MessageSquare },
   { key: 'cron', path: '/cron', icon: Clock },
   { key: 'system', path: '/system', icon: Settings },
@@ -33,24 +37,21 @@ export default function Sidebar() {
         collapsed ? 'w-16' : 'w-56',
       )}
     >
-      {/* Logo */}
+      {/* Brand */}
       <div
         className={cn(
-          'flex items-center gap-3 px-4 h-14 border-b transition-colors shrink-0',
+          'flex items-center px-4 h-14 border-b transition-colors shrink-0',
           'border-gray-200/80 dark:border-white/[0.08]',
+          collapsed ? 'justify-center' : 'gap-0',
         )}
       >
-        <div
-          className={cn(
-            'w-8 h-8 rounded-xl flex items-center justify-center shrink-0',
-            'bg-gray-900/90 dark:bg-white/10 ring-1 ring-black/5 dark:ring-white/10',
-          )}
-        >
-          <div className="w-3 h-3 rounded-full bg-accent dark:shadow-[0_0_12px_rgb(var(--color-accent)/0.45)]" />
-        </div>
-        {!collapsed && (
-          <span className="font-semibold text-gray-900 dark:text-white text-sm tracking-tight">
-            CC-Connect
+        {collapsed ? (
+          <span className="text-base font-bold tracking-tighter text-gray-900 dark:text-white">
+            CC
+          </span>
+        ) : (
+          <span className="text-base font-bold tracking-tight text-gray-900 dark:text-white">
+            CC<span className="text-accent">-</span>Connect
           </span>
         )}
       </div>

@@ -1,6 +1,7 @@
 package droid
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,4 +40,22 @@ func TestLoadDroidCustomModelsFromFile(t *testing.T) {
 	if models[1].Name != "custom:model-2" || models[1].Desc != "base-2" {
 		t.Fatalf("model[1] = %+v, want id=custom:model-2 desc=base-2", models[1])
 	}
+}
+
+func TestAvailableModels_UsesConfiguredHome(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".factory")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"customModels":[{"id":"custom:isolated","displayName":"Isolated model","model":"base"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{configEnv: []string{"HOME=" + home, "USERPROFILE=" + home}}
+	for _, model := range a.AvailableModels(context.Background()) {
+		if model.Name == "custom:isolated" && model.Desc == "Isolated model" {
+			return
+		}
+	}
+	t.Fatal("custom models from the configured subprocess home are missing")
 }

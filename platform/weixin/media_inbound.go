@@ -40,7 +40,10 @@ func (p *Platform) collectInboundMedia(ctx context.Context, items []messageItem)
 	}
 	dlCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	client := p.httpClient
+	client := p.cdnHttpClient
+	if client == nil {
+		client = p.httpClient
+	}
 	base := p.cdnBaseURL
 
 	// Deduplicate identical CDN references within one message (duplicate items / retries).

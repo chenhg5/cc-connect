@@ -63,7 +63,7 @@ func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error) {
 }
 
 func (a *Agent) getUsageFromSettings() (*core.UsageReport, error) {
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := a.homeDir()
 	if err != nil {
 		return nil, fmt.Errorf("resolve home dir: %w", err)
 	}
@@ -91,6 +91,9 @@ func (a *Agent) getUsageFromSettings() (*core.UsageReport, error) {
 	})
 
 	for _, sessionFile := range files {
+		if sessionID, _, _ := scanDroidSession(sessionFile, workDir); sessionID == "" {
+			continue
+		}
 		settingsPath := strings.TrimSuffix(sessionFile, ".jsonl") + ".settings.json"
 		data, err := os.ReadFile(settingsPath)
 		if err != nil {
@@ -115,14 +118,14 @@ func (a *Agent) getUsageFromSettings() (*core.UsageReport, error) {
 func (a *Agent) runUsageCommand(ctx context.Context, cmdPrompt string) (string, error) {
 	a.mu.RLock()
 	cmdName := a.cmd
+	cliExtraArgs := append([]string(nil), a.cliExtraArgs...)
 	workDir := a.workDir
 	model := core.GetProviderModel(a.providers, a.activeIdx, a.model)
 	reasoningEffort := a.reasoningEffort
-	extraEnv := a.providerEnvLocked()
-	extraEnv = append(extraEnv, a.sessionEnv...)
+	extraEnv := a.sessionEnvLocked()
 	a.mu.RUnlock()
 
-	args := []string{"exec", "--output-format", "stream-json"}
+	args := append(cliExtraArgs, "exec", "--output-format", "stream-json")
 	if model != "" {
 		args = append(args, "--model", model)
 	}

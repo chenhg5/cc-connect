@@ -19,11 +19,14 @@ func init() {
 
 // Agent drives Qoder CLI using `qodercli -p <prompt> -f stream-json`.
 type Agent struct {
-	workDir    string
-	model      string
-	mode       string // "default" | "yolo"
-	sessionEnv []string
-	mu         sync.Mutex
+	workDir      string
+	cmd          string   // CLI binary name (default: "qodercli")
+	cliExtraArgs []string // extra args from cmd after the binary name
+	configEnv    []string // env vars from [projects.agent.options.env]
+	model        string
+	mode         string // "default" | "yolo"
+	sessionEnv   []string
+	mu           sync.Mutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -35,14 +38,18 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 
-	if _, err := exec.LookPath("qodercli"); err != nil {
-		return nil, fmt.Errorf("qoder: 'qodercli' not found in PATH, install with: curl -fsSL https://qoder.com/install | bash")
+	cmd, extraArgs := core.ParseCmdOpts(opts, "qodercli")
+	if _, err := exec.LookPath(cmd); err != nil {
+		return nil, fmt.Errorf("qoder: %q not found in PATH, install with: curl -fsSL https://qoder.com/install | bash", cmd)
 	}
 
 	return &Agent{
-		workDir: workDir,
-		model:   model,
-		mode:    mode,
+		workDir:      workDir,
+		cmd:          cmd,
+		cliExtraArgs: extraArgs,
+		configEnv:    core.ParseConfigEnv(opts),
+		model:        model,
+		mode:         mode,
 	}, nil
 }
 
@@ -56,7 +63,7 @@ func normalizeMode(raw string) string {
 }
 
 func (a *Agent) Name() string           { return "qoder" }
-func (a *Agent) CLIBinaryName() string  { return "qodercli" }
+func (a *Agent) CLIBinaryName() string  { return a.cmd }
 func (a *Agent) CLIDisplayName() string { return "Qoder" }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -105,10 +112,14 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
-	extraEnv := append([]string{}, a.sessionEnv...)
+	cmd := a.cmd
+	extraArgs := append([]string{}, a.cliExtraArgs...)
+	workDir := a.workDir
+	extraEnv := append([]string(nil), a.configEnv...)
+	extraEnv = append(extraEnv, a.sessionEnv...)
 	a.mu.Unlock()
 
-	return newQoderSession(ctx, a.workDir, model, mode, sessionID, extraEnv)
+	return newQoderSession(ctx, cmd, extraArgs, workDir, model, mode, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
@@ -142,9 +153,10 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 // ── SkillProvider ────────────────────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	workDir := a.GetWorkDir()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	dirs := []string{filepath.Join(absDir, ".claude", "skills")}
 	if home, err := os.UserHomeDir(); err == nil {
@@ -160,9 +172,10 @@ func (a *Agent) CompressCommand() string { return "/compact" }
 // ── MemoryFileProvider ───────────────────────────────────────
 
 func (a *Agent) ProjectMemoryFile() string {
-	absDir, err := filepath.Abs(a.workDir)
+	workDir := a.GetWorkDir()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
 	return filepath.Join(absDir, "AGENTS.md")
 }

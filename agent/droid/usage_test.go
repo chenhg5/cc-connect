@@ -1,6 +1,10 @@
 package droid
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseDroidUsage(t *testing.T) {
 	status := "Plan: Pro\nUser: tester@example.com\n5h usage: 23%"
@@ -60,5 +64,37 @@ func TestParseTokenUsageSettings(t *testing.T) {
 	want := "input 100, output 20, thinking 8, cache_read 40, cache_create 3"
 	if summary != want {
 		t.Fatalf("summary = %q, want %q", summary, want)
+	}
+}
+
+func TestGetUsageFromSettings_IsolatesWorkspaceAndHome(t *testing.T) {
+	home := t.TempDir()
+	workDir := t.TempDir()
+	otherWorkDir := t.TempDir()
+	a := &Agent{workDir: workDir, configEnv: []string{"HOME=" + home, "USERPROFILE=" + home}}
+	writeSession := func(dir, id string) {
+		t.Helper()
+		sessionDir := filepath.Join(home, ".factory", "sessions", droidSessionDirKeys(dir)[0])
+		if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sessionDir, id+".jsonl"), []byte(`{"type":"session_start","id":"`+id+`","cwd":"`+dir+`"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sessionDir, id+".settings.json"), []byte(`{"model":"custom:isolated","tokenUsage":{"inputTokens":100,"outputTokens":20,"thinkingTokens":8,"cacheReadTokens":40,"cacheCreationTokens":3,"factoryCredits":0.5}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSession(otherWorkDir, "other")
+	if _, err := a.getUsageFromSettings(); err == nil {
+		t.Fatal("usage must not come from another workspace")
+	}
+	writeSession(workDir, "current")
+	report, err := a.getUsageFromSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Plan != "custom:isolated | input 100, output 20, thinking 8, cache_read 40, cache_create 3" {
+		t.Fatalf("usage plan = %q", report.Plan)
 	}
 }

@@ -3,6 +3,7 @@ package wecom
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -27,6 +28,7 @@ type WSPlatform struct {
 	botID       string
 	secret      string
 	allowFrom   string
+	wsURL       string // WebSocket endpoint; defaults to wsEndpoint (公有云), 可经 ws_url 覆盖为私有化部署地址
 	conn        *websocket.Conn
 	handler     core.MessageHandler
 	ctx         context.Context
@@ -35,10 +37,15 @@ type WSPlatform struct {
 	dedup       core.MessageDedup
 	reqSeq      atomic.Int64 // monotonic counter for generating unique req_id
 	missedPong  atomic.Int32 // consecutive heartbeat acks not received
-	pendingAcks sync.Map     // req_id -> chan error, for sequential send with ack waiting
+	pendingAcks sync.Map     // req_id -> chan wsAckResult, for sequential send with ack waiting
 }
 
-const wsAckTimeout = 5 * time.Second
+const (
+	wsAckTimeout      = 5 * time.Second
+	wsMediaAckTimeout = 30 * time.Second
+)
+
+var errWSAckTimeout = errors.New("wecom-ws: ack timeout")
 
 // wsReplyContext holds the context needed to reply to a specific message.
 type wsReplyContext struct {
@@ -63,6 +70,11 @@ type wsFrame struct {
 
 type wsFrameHeaders struct {
 	ReqID string `json:"req_id"`
+}
+
+type wsAckResult struct {
+	frame wsFrame
+	err   error
 }
 
 // wsMsgCallbackBody is the body of an aibot_msg_callback frame.
@@ -113,11 +125,17 @@ func newWebSocket(opts map[string]any) (core.Platform, error) {
 		return nil, fmt.Errorf("wecom-ws: bot_id and bot_secret are required for websocket mode")
 	}
 	allowFrom, _ := opts["allow_from"].(string)
+	wsURL, _ := opts["ws_url"].(string)
+	wsURL = strings.TrimSpace(wsURL)
+	if wsURL == "" {
+		wsURL = wsEndpoint
+	}
 
 	return &WSPlatform{
 		botID:     botID,
 		secret:    secret,
 		allowFrom: allowFrom,
+		wsURL:     wsURL,
 	}, nil
 }
 
@@ -175,9 +193,9 @@ func (p *WSPlatform) connectLoop() {
 
 // runConnection dials, subscribes, and processes messages until disconnection.
 func (p *WSPlatform) runConnection() error {
-	slog.Info("wecom-ws: connecting", "endpoint", wsEndpoint)
+	slog.Info("wecom-ws: connecting", "endpoint", p.wsURL)
 
-	conn, _, err := websocket.DefaultDialer.DialContext(p.ctx, wsEndpoint, nil)
+	conn, _, err := websocket.DefaultDialer.DialContext(p.ctx, p.wsURL, nil)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -198,9 +216,9 @@ func (p *WSPlatform) runConnection() error {
 		// not guaranteed safe by the sync.Map contract.
 		var staleKeys []any
 		p.pendingAcks.Range(func(key, value any) bool {
-			if ch, ok := value.(chan error); ok {
+			if ch, ok := value.(chan wsAckResult); ok {
 				select {
-				case ch <- fmt.Errorf("wecom-ws: connection closed"):
+				case ch <- wsAckResult{err: fmt.Errorf("wecom-ws: connection closed")}:
 				default:
 				}
 			}
@@ -295,13 +313,24 @@ func (p *WSPlatform) handleFrame(frame wsFrame) {
 			} else {
 				slog.Debug("wecom-ws: reply/send ack ok", "req_id", reqID)
 			}
-			if ch, ok := p.pendingAcks.LoadAndDelete(reqID); ok {
-				ch.(chan error) <- ackErr
-			}
+			p.dispatchAck(reqID, wsAckResult{frame: frame, err: ackErr})
 		}
 	default:
 		slog.Debug("wecom-ws: unhandled cmd", "cmd", frame.Cmd)
 	}
+}
+
+func (p *WSPlatform) dispatchAck(reqID string, result wsAckResult) {
+	ch, ok := p.pendingAcks.LoadAndDelete(reqID)
+	if !ok {
+		return
+	}
+	resultCh, ok := ch.(chan wsAckResult)
+	if !ok {
+		slog.Warn("wecom-ws: unexpected ack channel type", "req_id", reqID)
+		return
+	}
+	resultCh <- result
 }
 
 func (p *WSPlatform) heartbeat(ctx context.Context, conn *websocket.Conn) {
@@ -356,23 +385,26 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 		}
 	}
 
-	if !core.AllowList(p.allowFrom, body.From.UserID) {
-		slog.Debug("wecom-ws: message from unauthorized user", "user", body.From.UserID)
-		return
-	}
-
 	chatID := body.ChatID
 	if chatID == "" {
 		chatID = body.From.UserID
 	}
-
-	sessionKey := fmt.Sprintf("wecom:%s:%s", chatID, body.From.UserID)
 	rctx := wsReplyContext{
 		reqID:    reqID,
 		chatID:   chatID,
 		chatType: body.ChatType,
 		userID:   body.From.UserID,
 	}
+
+	if !core.AllowList(p.allowFrom, body.From.UserID) {
+		slog.Debug("wecom-ws: message from unauthorized user", "user", body.From.UserID)
+		if err := p.Reply(context.Background(), rctx, core.UnauthorizedAccessMessage); err != nil {
+			slog.Warn("wecom-ws: unauthorized reply failed", "error", err)
+		}
+		return
+	}
+
+	sessionKey := fmt.Sprintf("wecom:%s:%s", chatID, body.From.UserID)
 
 	// WS mode does not provide display names; the protocol only carries userID.
 	// Name resolution would require a separate HTTP API call with corpSecret,
@@ -382,56 +414,56 @@ func (p *WSPlatform) handleMsgCallback(frame wsFrame) {
 		chatName = body.ChatID
 	}
 
-	texts, imgRefs, fileRefs := wsCollectInboundParts(&body)
+	current, quoted := wsCollectInboundParts(&body)
+	quotedContent := formatWSQuotedContent(quoted)
 
 	switch body.MsgType {
 	case "voice":
 		vt := stripWeComAtMentions(wsVoiceText(body.Voice), p.botID, body.AibotID)
-		if vt == "" && len(imgRefs) == 0 && len(fileRefs) == 0 {
+		if vt != "" {
+			current.content = append([]string{vt}, current.content...)
+		}
+		if len(current.content) == 0 && quotedContent == "" && !current.hasMedia() && !quoted.hasMedia() {
 			slog.Debug("wecom-ws: voice message with empty transcription, ignoring")
 			return
 		}
-		if len(imgRefs) > 0 || len(fileRefs) > 0 {
-			out := []string{}
-			if vt != "" {
-				out = append(out, vt)
-			}
-			out = append(out, texts...)
-			slog.Info("wecom-ws: voice + media", "user", body.From.UserID, "images", len(imgRefs), "files", len(fileRefs))
-			go p.deliverWSMediaInbound(&body, sessionKey, chatName, rctx, out, imgRefs, fileRefs)
+		if current.hasMedia() || quoted.hasMedia() {
+			slog.Info("wecom-ws: voice + media", "user", body.From.UserID, "images", len(current.images)+len(quoted.images), "files", len(current.files)+len(quoted.files))
+			go p.deliverWSMediaInbound(&body, sessionKey, chatName, rctx, current, quoted, true)
 			return
 		}
-		slog.Debug("wecom-ws: voice received (transcribed)", "user", body.From.UserID, "len", len(vt))
+		content := stripWeComAtMentions(strings.Join(current.content, "\n"), p.botID, body.AibotID)
+		slog.Debug("wecom-ws: voice received (transcribed)", "user", body.From.UserID, "len", len(content))
 		go p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
 			UserID:    body.From.UserID, UserName: body.From.UserID,
 			ChatName: chatName,
-			Content:  vt, ReplyCtx: rctx, FromVoice: true,
+			Content:  content, ExtraContent: quotedContent, ReplyCtx: rctx, FromVoice: true,
 		})
 		return
 	}
 
-	if len(imgRefs) == 0 && len(fileRefs) == 0 {
-		if len(texts) == 0 {
+	if !current.hasMedia() && !quoted.hasMedia() {
+		if len(current.content) == 0 && quotedContent == "" {
 			slog.Warn("wecom-ws: no text or media in message", "msg_type", body.MsgType, "msg_id", body.MsgID)
 			return
 		}
-		content := stripWeComAtMentions(strings.Join(texts, "\n"), p.botID, body.AibotID)
+		content := stripWeComAtMentions(strings.Join(current.content, "\n"), p.botID, body.AibotID)
 		slog.Debug("wecom-ws: text received", "user", body.From.UserID, "len", len(content))
 		go p.handler(p, &core.Message{
 			SessionKey: sessionKey, Platform: "wecom",
 			MessageID: body.MsgID,
 			UserID:    body.From.UserID, UserName: body.From.UserID,
 			ChatName: chatName,
-			Content:  content, ReplyCtx: rctx,
+			Content:  content, ExtraContent: quotedContent, ReplyCtx: rctx,
 		})
 		return
 	}
 
 	slog.Info("wecom-ws: media message", "msg_type", body.MsgType, "user", body.From.UserID,
-		"images", len(imgRefs), "files", len(fileRefs), "text_parts", len(texts))
-	go p.deliverWSMediaInbound(&body, sessionKey, chatName, rctx, texts, imgRefs, fileRefs)
+		"images", len(current.images)+len(quoted.images), "files", len(current.files)+len(quoted.files), "text_parts", len(current.content))
+	go p.deliverWSMediaInbound(&body, sessionKey, chatName, rctx, current, quoted, false)
 }
 
 // Reply sends a response message via aibot_respond_msg using the stream format.
@@ -547,23 +579,63 @@ func (p *WSPlatform) writeJSON(v any) error {
 // writeAndWaitAck sends a frame and waits for the server ack before returning.
 // Falls back to non-blocking on timeout to avoid deadlocks.
 func (p *WSPlatform) writeAndWaitAck(ctx context.Context, frame map[string]any, reqID string) error {
-	ch := make(chan error, 1)
+	return p.writeAndWaitAckWithTimeout(ctx, frame, reqID, wsAckTimeout)
+}
+
+func (p *WSPlatform) writeAndWaitAckWithTimeout(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) error {
+	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout)
+	if errors.Is(err, errWSAckTimeout) {
+		slog.Debug("wecom-ws: ack timeout, proceeding", "req_id", reqID)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return result.err
+}
+
+func (p *WSPlatform) writeAndWaitAckStrict(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) error {
+	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout)
+	if errors.Is(err, errWSAckTimeout) {
+		return fmt.Errorf("wecom-ws: ack timeout waiting for %s", reqID)
+	}
+	if err != nil {
+		return err
+	}
+	return result.err
+}
+
+func (p *WSPlatform) writeAndWaitFrameWithTimeout(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) (wsFrame, error) {
+	result, err := p.writeAndWaitResult(ctx, frame, reqID, timeout)
+	if errors.Is(err, errWSAckTimeout) {
+		return wsFrame{}, fmt.Errorf("wecom-ws: ack timeout waiting for %s", reqID)
+	}
+	if err != nil {
+		return wsFrame{}, err
+	}
+	if result.err != nil {
+		return wsFrame{}, result.err
+	}
+	return result.frame, nil
+}
+
+func (p *WSPlatform) writeAndWaitResult(ctx context.Context, frame map[string]any, reqID string, timeout time.Duration) (wsAckResult, error) {
+	ch := make(chan wsAckResult, 1)
 	p.pendingAcks.Store(reqID, ch)
 
 	if err := p.writeJSON(frame); err != nil {
 		p.pendingAcks.Delete(reqID)
-		return err
+		return wsAckResult{}, err
 	}
 
 	select {
-	case err := <-ch:
-		return err
+	case result := <-ch:
+		return result, nil
 	case <-ctx.Done():
 		p.pendingAcks.Delete(reqID)
-		return ctx.Err()
-	case <-time.After(wsAckTimeout):
+		return wsAckResult{}, ctx.Err()
+	case <-time.After(timeout):
 		p.pendingAcks.Delete(reqID)
-		slog.Debug("wecom-ws: ack timeout, proceeding", "req_id", reqID)
-		return nil
+		return wsAckResult{}, errWSAckTimeout
 	}
 }

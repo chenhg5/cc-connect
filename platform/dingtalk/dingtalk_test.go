@@ -1,10 +1,20 @@
 package dingtalk
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
+	"github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -55,7 +65,7 @@ func TestGetAccessToken_ConcurrentAccess(t *testing.T) {
 func TestGetAccessToken_MutexExists(t *testing.T) {
 	// Verify that the tokenMu mutex field exists and works
 	p := &Platform{
-		clientID:    "test_client",
+		clientID:     "test_client",
 		clientSecret: "test_secret",
 	}
 
@@ -133,4 +143,1673 @@ func TestPlatform_AccessTokenFieldsExist(t *testing.T) {
 	}
 
 	t.Log("Platform token caching fields exist and are accessible")
+}
+
+func TestNewConfiguresReactionEmoji(t *testing.T) {
+	plat, err := New(map[string]any{
+		"client_id":     "cid",
+		"client_secret": "secret",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	p := plat.(*Platform)
+	if p.reactionEmoji != "🤔Thinking" {
+		t.Fatalf("default reactionEmoji = %q, want %q", p.reactionEmoji, "🤔Thinking")
+	}
+	if p.doneEmoji != "" {
+		t.Fatalf("default doneEmoji = %q, want empty", p.doneEmoji)
+	}
+
+	plat, err = New(map[string]any{
+		"client_id":      "cid",
+		"client_secret":  "secret",
+		"reaction_emoji": "none",
+		"done_emoji":     "none",
+	})
+	if err != nil {
+		t.Fatalf("New() with disabled emoji error = %v", err)
+	}
+	p = plat.(*Platform)
+	if p.reactionEmoji != "" {
+		t.Fatalf("disabled reactionEmoji = %q, want empty", p.reactionEmoji)
+	}
+	if p.doneEmoji != "" {
+		t.Fatalf("disabled doneEmoji = %q, want empty", p.doneEmoji)
+	}
+
+	plat, err = New(map[string]any{
+		"client_id":      "cid",
+		"client_secret":  "secret",
+		"reaction_emoji": "🧠Working",
+		"done_emoji":     "🥳Done",
+	})
+	if err != nil {
+		t.Fatalf("New() with custom emoji error = %v", err)
+	}
+	p = plat.(*Platform)
+	if p.reactionEmoji != "🧠Working" || p.doneEmoji != "🥳Done" {
+		t.Fatalf("emoji config = (%q, %q), want (🧠Working, 🥳Done)", p.reactionEmoji, p.doneEmoji)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// ReconstructReplyCtx tests
+// ──────────────────────────────────────────────────────────────
+
+func TestReconstructReplyCtx_GroupSharedSession(t *testing.T) {
+	p := &Platform{}
+	rctx, err := p.ReconstructReplyCtx("dingtalk:g:conv123")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if rc.conversationId != "conv123" {
+		t.Errorf("conversationId = %q, want %q", rc.conversationId, "conv123")
+	}
+	if rc.senderStaffId != "" {
+		t.Errorf("senderStaffId = %q, want empty", rc.senderStaffId)
+	}
+	if !rc.isGroup {
+		t.Error("isGroup = false, want true for group session")
+	}
+	if !rc.proactive {
+		t.Error("proactive = false, want true")
+	}
+}
+
+func TestReconstructReplyCtx_GroupPerUserSession(t *testing.T) {
+	p := &Platform{}
+	rctx, err := p.ReconstructReplyCtx("dingtalk:g:conv123:user456")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if rc.conversationId != "conv123" {
+		t.Errorf("conversationId = %q, want %q", rc.conversationId, "conv123")
+	}
+	if rc.senderStaffId != "user456" {
+		t.Errorf("senderStaffId = %q, want %q", rc.senderStaffId, "user456")
+	}
+	if !rc.isGroup {
+		t.Error("isGroup = false, want true for group session")
+	}
+}
+
+func TestReconstructReplyCtx_DirectSession(t *testing.T) {
+	p := &Platform{}
+	rctx, err := p.ReconstructReplyCtx("dingtalk:d:conv789:user111")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if rc.conversationId != "conv789" {
+		t.Errorf("conversationId = %q, want %q", rc.conversationId, "conv789")
+	}
+	if rc.senderStaffId != "user111" {
+		t.Errorf("senderStaffId = %q, want %q", rc.senderStaffId, "user111")
+	}
+	if rc.isGroup {
+		t.Error("isGroup = true, want false for direct session")
+	}
+	if !rc.proactive {
+		t.Error("proactive = false, want true")
+	}
+}
+
+func TestReconstructReplyCtx_InvalidPrefix(t *testing.T) {
+	p := &Platform{}
+	_, err := p.ReconstructReplyCtx("telegram:g:conv123")
+	if err == nil {
+		t.Fatal("expected error for non-dingtalk prefix")
+	}
+}
+
+func TestReconstructReplyCtx_InvalidConvType(t *testing.T) {
+	p := &Platform{}
+	_, err := p.ReconstructReplyCtx("dingtalk:x:conv123")
+	if err == nil {
+		t.Fatal("expected error for invalid conversation type")
+	}
+}
+
+func TestReconstructReplyCtx_EmptyConversationId(t *testing.T) {
+	p := &Platform{}
+	_, err := p.ReconstructReplyCtx("dingtalk:g:")
+	if err == nil {
+		t.Fatal("expected error for empty conversationId")
+	}
+}
+
+func TestReconstructReplyCtx_TooFewParts(t *testing.T) {
+	p := &Platform{}
+	_, err := p.ReconstructReplyCtx("dingtalk:")
+	if err == nil {
+		t.Fatal("expected error for too few parts")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// formatReplyContent tests
+// ──────────────────────────────────────────────────────────────
+
+func TestFormatReplyContent_WithQuotedText(t *testing.T) {
+	p := &Platform{}
+	repliedContent, _ := json.Marshal(repliedTextContent{Text: "original message"})
+	richText := &richTextContent{
+		Content:    "user reply",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "text",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"original message\"\n\nuser reply"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_EmptyContent_UsesFallback(t *testing.T) {
+	p := &Platform{}
+	repliedContent, _ := json.Marshal(repliedTextContent{Text: "quoted"})
+	richText := &richTextContent{
+		Content:    "",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "text",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "fallback text")
+	expected := "引用: \"quoted\"\n\nfallback text"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_TextQuotePreservesWhitespace(t *testing.T) {
+	p := &Platform{}
+	repliedContent, _ := json.Marshal(repliedTextContent{Text: "  original message  "})
+	richText := &richTextContent{
+		Content:    "user reply",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "text",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"  original message  \"\n\nuser reply"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_NilRepliedMsg(t *testing.T) {
+	p := &Platform{}
+	richText := &richTextContent{
+		Content:    "just a message",
+		IsReplyMsg: true,
+		RepliedMsg: nil,
+	}
+	result := p.formatReplyContent(richText, "fallback")
+	if result != "just a message" {
+		t.Errorf("formatReplyContent() = %q, want %q", result, "just a message")
+	}
+}
+
+func TestFormatReplyContent_NonTextMsgType(t *testing.T) {
+	p := &Platform{}
+	richText := &richTextContent{
+		Content:    "user reply",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "image",
+			Content: json.RawMessage(`{}`),
+		},
+	}
+	result := p.formatReplyContent(richText, "fallback")
+	if result != "user reply" {
+		t.Errorf("formatReplyContent() = %q, want %q", result, "user reply")
+	}
+}
+
+func TestFormatReplyContent_WithQuotedInteractiveCardContent(t *testing.T) {
+	p := &Platform{cardTemplateKey: "content"}
+	richText := &richTextContent{
+		Content:    "user reply",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "interactiveCard",
+			Content: json.RawMessage(`{
+				"cardData": {
+					"cardParamMap": {
+						"config": "{\"autoLayout\":true}",
+						"content": "bot card answer"
+					}
+				}
+			}`),
+		},
+	}
+
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"bot card answer\"\n\nuser reply"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_WithQuotedInteractiveCardCustomTemplateKey(t *testing.T) {
+	p := &Platform{cardTemplateKey: "body"}
+	richText := &richTextContent{
+		Content:    "next question",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "interactiveCard",
+			Content: json.RawMessage(`{
+				"cardData": {
+					"cardParamMap": {
+						"content": "default content",
+						"body": "custom body content"
+					}
+				}
+			}`),
+		},
+	}
+
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"custom body content\"\n\nnext question"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_WithQuotedInteractiveCardNestedJSONEnvelope(t *testing.T) {
+	p := &Platform{cardTemplateKey: "content"}
+	richText := &richTextContent{
+		Content:    "continue",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "interactiveCard",
+			Content: json.RawMessage(`{
+				"cardData": "{\"cardParamMap\":{\"content\":\"nested card answer\"}}"
+			}`),
+		},
+	}
+
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"nested card answer\"\n\ncontinue"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_WithQuotedInteractiveCardTopLevelFallback(t *testing.T) {
+	p := &Platform{}
+	richText := &richTextContent{
+		Content:    "what next?",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "interactiveCard",
+			Content: json.RawMessage(`{
+				"title": "Run Summary",
+				"markdown": "all checks passed"
+			}`),
+		},
+	}
+
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"all checks passed\"\n\nwhat next?"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_InteractiveCardPreservesVisibleJSONContent(t *testing.T) {
+	p := &Platform{cardTemplateKey: "content"}
+	richText := &richTextContent{
+		Content:    "follow up",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "interactiveCard",
+			Content: json.RawMessage(`{
+				"cardData": {
+					"cardParamMap": {
+						"config": "{\"autoLayout\":true}",
+						"content": "{\"status\":\"ok\"}"
+					}
+				}
+			}`),
+		},
+	}
+
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"{\"status\":\"ok\"}\"\n\nfollow up"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_InteractiveCardTopLevelFallbackIgnoresCustomKey(t *testing.T) {
+	p := &Platform{cardTemplateKey: "body"}
+	richText := &richTextContent{
+		Content:    "follow up",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "interactiveCard",
+			Content: json.RawMessage(`{
+				"body": "custom top-level body",
+				"content": "top-level content"
+			}`),
+		},
+	}
+
+	result := p.formatReplyContent(richText, "fallback")
+	expected := "引用: \"top-level content\"\n\nfollow up"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_TruncatesLongQuotedInteractiveCardContent(t *testing.T) {
+	p := &Platform{cardTemplateKey: "content"}
+	longText := strings.Repeat("x", maxQuotedMessageRunes+1)
+	cardContent, err := json.Marshal(map[string]any{
+		"cardData": map[string]any{
+			"cardParamMap": map[string]string{
+				"content": longText,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal card content: %v", err)
+	}
+	richText := &richTextContent{
+		Content:    "short reply",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "interactiveCard",
+			Content: cardContent,
+		},
+	}
+
+	result := p.formatReplyContent(richText, "fallback")
+	expectedPrefix := "引用: \"" + strings.Repeat("x", maxQuotedMessageRunes) + "...\"\n\nshort reply"
+	if result != expectedPrefix {
+		t.Errorf("formatReplyContent() length = %d, want truncated output length %d", len([]rune(result)), len([]rune(expectedPrefix)))
+	}
+}
+
+func TestOnRawMessage_QuotedInteractiveCardEnrichesMessageContent(t *testing.T) {
+	var got *core.Message
+	p := &Platform{
+		cardTemplateKey: "content",
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "text",
+		"msgId": "msg-1",
+		"conversationType": "2",
+		"conversationId": "conv-1",
+		"conversationTitle": "team chat",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"text": {
+			"content": "please continue",
+			"isReplyMsg": true,
+			"repliedMsg": {
+				"msgType": "interactiveCard",
+				"content": {
+					"cardData": {
+						"cardParamMap": {
+							"content": "previous card answer"
+						}
+					}
+				}
+			}
+		}
+	}`)
+
+	if got == nil {
+		t.Fatal("handler was not called")
+	}
+	expected := "引用: \"previous card answer\"\n\nplease continue"
+	if got.Content != expected {
+		t.Errorf("message content = %q, want %q", got.Content, expected)
+	}
+}
+
+func TestOnRawMessage_IncludesReactionReplyContext(t *testing.T) {
+	var got *core.Message
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "text",
+		"msgId": "msg-reaction-1",
+		"conversationType": "2",
+		"conversationId": "conv-1",
+		"conversationTitle": "team chat",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"text": {
+			"content": "hi"
+		}
+	}`)
+
+	if got == nil {
+		t.Fatal("handler was not called")
+	}
+	if got.MessageID != "msg-reaction-1" {
+		t.Fatalf("MessageID = %q, want %q", got.MessageID, "msg-reaction-1")
+	}
+	rc, ok := got.ReplyCtx.(replyContext)
+	if !ok {
+		t.Fatalf("ReplyCtx type = %T, want replyContext", got.ReplyCtx)
+	}
+	if rc.messageID != "msg-reaction-1" {
+		t.Errorf("replyContext.messageID = %q, want %q", rc.messageID, "msg-reaction-1")
+	}
+	if rc.conversationId != "conv-1" {
+		t.Errorf("replyContext.conversationId = %q, want %q", rc.conversationId, "conv-1")
+	}
+	if rc.senderStaffId != "user-1" {
+		t.Errorf("replyContext.senderStaffId = %q, want %q", rc.senderStaffId, "user-1")
+	}
+	if !rc.isGroup {
+		t.Error("replyContext.isGroup = false, want true")
+	}
+}
+
+func TestFormatReplyContent_EmptyQuotedText(t *testing.T) {
+	p := &Platform{}
+	repliedContent, _ := json.Marshal(repliedTextContent{Text: ""})
+	richText := &richTextContent{
+		Content:    "user reply",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "text",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "fallback")
+	if result != "user reply" {
+		t.Errorf("formatReplyContent() = %q, want %q", result, "user reply")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// Proactive routing tests
+// ──────────────────────────────────────────────────────────────
+
+func TestProactiveRouting_GroupSessionUsesGroupAPI(t *testing.T) {
+	// Verify that a group session key produces a replyContext with isGroup=true,
+	// which sendProactiveMessage would route to groupMessages/send.
+	p := &Platform{}
+	rctx, err := p.ReconstructReplyCtx("dingtalk:g:conv123:user456")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if !rc.isGroup || rc.conversationId == "" {
+		t.Errorf("group routing: isGroup=%v, conversationId=%q; want isGroup=true with non-empty conversationId", rc.isGroup, rc.conversationId)
+	}
+}
+
+func TestProactiveRouting_DirectSessionUsesDirectAPI(t *testing.T) {
+	// Verify that a direct session key produces a replyContext with isGroup=false,
+	// which sendProactiveMessage would route to oToMessages/batchSend.
+	p := &Platform{}
+	rctx, err := p.ReconstructReplyCtx("dingtalk:d:conv789:user111")
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx() error = %v", err)
+	}
+	rc := rctx.(replyContext)
+	if rc.isGroup {
+		t.Error("direct routing: isGroup=true, want false for 1:1 session")
+	}
+	if rc.senderStaffId != "user111" {
+		t.Errorf("direct routing: senderStaffId=%q, want %q", rc.senderStaffId, "user111")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// extractRichText tests (from main: richText message type support)
+// ──────────────────────────────────────────────────────────────
+
+func TestExtractRichText(t *testing.T) {
+	tests := []struct {
+		name         string
+		content      interface{}
+		want         string
+		wantPictures []richTextImageDownload
+	}{
+		{
+			name:    "nil content",
+			content: nil,
+			want:    "",
+		},
+		{
+			name:    "non-map content",
+			content: "not a map",
+			want:    "",
+		},
+		{
+			name: "empty richText array",
+			content: map[string]interface{}{
+				"richText": []interface{}{},
+			},
+			want: "",
+		},
+		{
+			name: "single text element",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "Hello World"},
+				},
+			},
+			want: "Hello World",
+		},
+		{
+			name: "multiple text elements",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "Hello "},
+					map[string]interface{}{"text": "World"},
+				},
+			},
+			want: "Hello World",
+		},
+		{
+			name: "text with attrs (bold etc) — attrs ignored, text extracted",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "normal "},
+					map[string]interface{}{"text": "bold", "attrs": map[string]interface{}{"bold": true}},
+				},
+			},
+			want: "normal bold",
+		},
+		{
+			name: "mixed text and picture elements",
+			content: map[string]interface{}{
+				"richText": []interface{}{
+					map[string]interface{}{"text": "See image: "},
+					map[string]interface{}{"downloadCode": "v1-code", "pictureDownloadCode": "legacy-code"},
+					map[string]interface{}{"text": "done"},
+				},
+			},
+			want:         "See image: done",
+			wantPictures: []richTextImageDownload{{DownloadCode: "v1-code", FallbackCode: "legacy-code"}},
+		},
+		{
+			name: "missing richText key",
+			content: map[string]interface{}{
+				"other": "data",
+			},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, pictures := extractRichText(tt.content)
+			if got != tt.want {
+				t.Errorf("extractRichText() = %q, want %q", got, tt.want)
+			}
+			if !slices.Equal(pictures, tt.wantPictures) {
+				t.Errorf("extractRichText() picture codes = %v, want %v", pictures, tt.wantPictures)
+			}
+		})
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// Token expiry fallback when server returns missing/invalid expireIn
+// ──────────────────────────────────────────────────────────────
+
+// fakeAccessTokenRT serves a single canned /oauth2/accessToken response
+// regardless of the request URL — enough to exercise getAccessToken's
+// caching arithmetic without hitting the real DingTalk API.
+type fakeAccessTokenRT struct {
+	body string
+}
+
+func (f *fakeAccessTokenRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(f.body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+type dingtalkEmotionCall struct {
+	path   string
+	header string
+	body   map[string]any
+}
+
+type fakeDingTalkEmotionRT struct {
+	calls []dingtalkEmotionCall
+}
+
+type dingtalkAttachmentCall struct {
+	path string
+	body map[string]any
+}
+
+type fakeDingTalkAttachmentRT struct {
+	calls []dingtalkAttachmentCall
+}
+
+func (f *fakeDingTalkAttachmentRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host == "oapi.dingtalk.com" && req.URL.Path == "/media/upload" {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"errcode":0,"errmsg":"ok","media_id":"media-1","type":"file"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	f.calls = append(f.calls, dingtalkAttachmentCall{path: req.URL.Path, body: body})
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func TestSendFile_GroupUsesGroupMessageAPI(t *testing.T) {
+	rt := &fakeDingTalkAttachmentRT{}
+	p := &Platform{
+		robotCode:   "robot-code",
+		httpClient:  &http.Client{Transport: rt},
+		accessToken: "token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	err := p.SendFile(context.Background(), replyContext{
+		conversationId: "group-conversation",
+		senderStaffId:  "sender-id",
+		isGroup:        true,
+	}, core.FileAttachment{FileName: "report.pdf", Data: []byte("pdf")})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(rt.calls))
+	}
+	call := rt.calls[0]
+	if call.path != "/v1.0/robot/groupMessages/send" {
+		t.Fatalf("path = %q, want groupMessages/send", call.path)
+	}
+	if call.body["openConversationId"] != "group-conversation" {
+		t.Errorf("openConversationId = %v, want group-conversation", call.body["openConversationId"])
+	}
+	if _, exists := call.body["userIds"]; exists {
+		t.Errorf("group request unexpectedly contains userIds: %#v", call.body["userIds"])
+	}
+}
+
+func TestSendFile_DirectUsesOneToOneMessageAPI(t *testing.T) {
+	rt := &fakeDingTalkAttachmentRT{}
+	p := &Platform{
+		robotCode:   "robot-code",
+		httpClient:  &http.Client{Transport: rt},
+		accessToken: "token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	err := p.SendFile(context.Background(), replyContext{
+		senderStaffId: "sender-id",
+	}, core.FileAttachment{FileName: "report.pdf", Data: []byte("pdf")})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(rt.calls))
+	}
+	call := rt.calls[0]
+	if call.path != "/v1.0/robot/oToMessages/batchSend" {
+		t.Fatalf("path = %q, want oToMessages/batchSend", call.path)
+	}
+	userIDs, ok := call.body["userIds"].([]any)
+	if !ok || len(userIDs) != 1 || userIDs[0] != "sender-id" {
+		t.Errorf("userIds = %#v, want [sender-id]", call.body["userIds"])
+	}
+	if _, exists := call.body["openConversationId"]; exists {
+		t.Errorf("direct request unexpectedly contains openConversationId: %#v", call.body["openConversationId"])
+	}
+}
+
+func TestSendImage_GroupUsesGroupMessageAPI(t *testing.T) {
+	rt := &fakeDingTalkAttachmentRT{}
+	p := &Platform{
+		robotCode:   "robot-code",
+		httpClient:  &http.Client{Transport: rt},
+		accessToken: "token",
+		tokenExpiry: time.Now().Add(time.Hour),
+	}
+
+	err := p.SendImage(context.Background(), replyContext{
+		conversationId: "group-conversation",
+		senderStaffId:  "sender-id",
+		isGroup:        true,
+	}, core.ImageAttachment{FileName: "chart.png", Data: []byte("png")})
+	if err != nil {
+		t.Fatalf("SendImage() error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(rt.calls))
+	}
+	call := rt.calls[0]
+	if call.path != "/v1.0/robot/groupMessages/send" {
+		t.Fatalf("path = %q, want groupMessages/send", call.path)
+	}
+	if call.body["openConversationId"] != "group-conversation" {
+		t.Errorf("openConversationId = %v, want group-conversation", call.body["openConversationId"])
+	}
+	if _, exists := call.body["userIds"]; exists {
+		t.Errorf("group request unexpectedly contains userIds: %#v", call.body["userIds"])
+	}
+}
+
+func TestAttachmentSendRequest_GroupRequiresConversationID(t *testing.T) {
+	p := &Platform{robotCode: "robot-code"}
+
+	_, _, err := p.attachmentSendRequest(replyContext{
+		isGroup:       true,
+		senderStaffId: "sender-id",
+	}, "sampleFile", `{}`)
+	if err == nil {
+		t.Fatal("attachmentSendRequest() error = nil, want missing group conversation ID error")
+	}
+}
+
+func (f *fakeDingTalkEmotionRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Path == "/v1.0/oauth2/accessToken" {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"tok-emotion","expireIn":7200}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	f.calls = append(f.calls, dingtalkEmotionCall{
+		path:   req.URL.Path,
+		header: req.Header.Get("x-acs-dingtalk-access-token"),
+		body:   body,
+	})
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"success":true}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+func TestSendEmotionReply(t *testing.T) {
+	rt := &fakeDingTalkEmotionRT{}
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "secret",
+		robotCode:    "robot-code",
+		httpClient:   &http.Client{Transport: rt},
+	}
+
+	err := p.sendEmotion(context.Background(), replyContext{
+		messageID:      "msg-1",
+		conversationId: "conv-1",
+	}, "🤔Thinking", false)
+	if err != nil {
+		t.Fatalf("sendEmotion() error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP emotion calls = %d, want 1", len(rt.calls))
+	}
+	call := rt.calls[0]
+	if call.path != "/v1.0/robot/emotion/reply" {
+		t.Fatalf("path = %q, want /v1.0/robot/emotion/reply", call.path)
+	}
+	if call.header != "tok-emotion" {
+		t.Fatalf("access token header = %q, want tok-emotion", call.header)
+	}
+	if call.body["robotCode"] != "robot-code" {
+		t.Errorf("robotCode = %v, want robot-code", call.body["robotCode"])
+	}
+	if call.body["openMsgId"] != "msg-1" {
+		t.Errorf("openMsgId = %v, want msg-1", call.body["openMsgId"])
+	}
+	if call.body["openConversationId"] != "conv-1" {
+		t.Errorf("openConversationId = %v, want conv-1", call.body["openConversationId"])
+	}
+	if call.body["emotionType"] != float64(2) {
+		t.Errorf("emotionType = %v, want 2", call.body["emotionType"])
+	}
+	if call.body["emotionName"] != "🤔Thinking" {
+		t.Errorf("emotionName = %v, want 🤔Thinking", call.body["emotionName"])
+	}
+	textEmotion, ok := call.body["textEmotion"].(map[string]any)
+	if !ok {
+		t.Fatalf("textEmotion type = %T, want object", call.body["textEmotion"])
+	}
+	if textEmotion["emotionId"] != "2659900" {
+		t.Errorf("textEmotion.emotionId = %v, want 2659900", textEmotion["emotionId"])
+	}
+	if textEmotion["emotionName"] != "🤔Thinking" || textEmotion["text"] != "🤔Thinking" {
+		t.Errorf("textEmotion = %#v, want matching custom text emoji", textEmotion)
+	}
+	if textEmotion["backgroundId"] != "im_bg_1" {
+		t.Errorf("textEmotion.backgroundId = %v, want im_bg_1", textEmotion["backgroundId"])
+	}
+}
+
+func TestSendEmotionRecall(t *testing.T) {
+	rt := &fakeDingTalkEmotionRT{}
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "secret",
+		robotCode:    "robot-code",
+		httpClient:   &http.Client{Transport: rt},
+	}
+
+	err := p.sendEmotion(context.Background(), replyContext{
+		messageID:      "msg-1",
+		conversationId: "conv-1",
+	}, "🤔Thinking", true)
+	if err != nil {
+		t.Fatalf("sendEmotion(recall) error = %v", err)
+	}
+	if len(rt.calls) != 1 {
+		t.Fatalf("HTTP emotion calls = %d, want 1", len(rt.calls))
+	}
+	if rt.calls[0].path != "/v1.0/robot/emotion/recall" {
+		t.Fatalf("path = %q, want /v1.0/robot/emotion/recall", rt.calls[0].path)
+	}
+}
+
+func TestStartTypingAndDoneReaction(t *testing.T) {
+	rt := &fakeDingTalkEmotionRT{}
+	p := &Platform{
+		clientID:      "cid",
+		clientSecret:  "secret",
+		robotCode:     "robot-code",
+		reactionEmoji: "🤔Thinking",
+		doneEmoji:     "🥳Done",
+		httpClient:    &http.Client{Transport: rt},
+	}
+	rc := replyContext{messageID: "msg-1", conversationId: "conv-1"}
+
+	stop := p.StartTyping(context.Background(), rc)
+	stop()
+	p.AddDoneReaction(rc)
+
+	if len(rt.calls) != 3 {
+		t.Fatalf("HTTP emotion calls = %d, want 3", len(rt.calls))
+	}
+	if rt.calls[0].path != "/v1.0/robot/emotion/reply" || rt.calls[0].body["emotionName"] != "🤔Thinking" {
+		t.Fatalf("typing add call = (%s, %v), want reply 🤔Thinking", rt.calls[0].path, rt.calls[0].body["emotionName"])
+	}
+	if rt.calls[1].path != "/v1.0/robot/emotion/recall" || rt.calls[1].body["emotionName"] != "🤔Thinking" {
+		t.Fatalf("typing stop call = (%s, %v), want recall 🤔Thinking", rt.calls[1].path, rt.calls[1].body["emotionName"])
+	}
+	if rt.calls[2].path != "/v1.0/robot/emotion/reply" || rt.calls[2].body["emotionName"] != "🥳Done" {
+		t.Fatalf("done call = (%s, %v), want reply 🥳Done", rt.calls[2].path, rt.calls[2].body["emotionName"])
+	}
+}
+
+func TestOnRawMessage_RichTextForwardsInlineImage(t *testing.T) {
+	const imageBody = "fake-richtext-image"
+
+	imageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte(imageBody))
+	}))
+	defer imageSrv.Close()
+
+	rt := &dingtalkDownloadRT{
+		accessToken:      "tok-richtext-image",
+		downloadURL:      imageSrv.URL,
+		failDownloadCode: "dc-v1-image",
+	}
+
+	captured := make(chan *core.Message, 1)
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured <- msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-richtext-image-1",
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"conversationTitle": "test",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"robotCode": "robot-from-callback",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "Please inspect "},
+				{"type": "picture", "downloadCode": "dc-v1-image", "pictureDownloadCode": "dc-legacy-image"},
+				{"text": "this screenshot"}
+			]
+		}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if msg.Content != "Please inspect this screenshot" {
+			t.Fatalf("Content = %q, want rich text", msg.Content)
+		}
+		if len(msg.Images) != 1 {
+			t.Fatalf("Images len = %d, want 1", len(msg.Images))
+		}
+		if got := string(msg.Images[0].Data); got != imageBody {
+			t.Errorf("image bytes = %q, want %q", got, imageBody)
+		}
+		if msg.Images[0].MimeType != "image/png" {
+			t.Errorf("image MIME type = %q, want image/png", msg.Images[0].MimeType)
+		}
+		if rt.requestRobotCode != "robot-from-callback" {
+			t.Errorf("download robotCode = %q, want callback robotCode", rt.requestRobotCode)
+		}
+		if !slices.Equal(rt.requestDownloadCodes, []string{"dc-v1-image", "dc-legacy-image"}) {
+			t.Errorf("download codes = %v, want v1 code then legacy fallback", rt.requestDownloadCodes)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never invoked with richText image message")
+	}
+}
+
+func TestOnRawMessage_PictureMsgTypeNotDroppedAsEmptyText(t *testing.T) {
+	// Regression test for #1128: DingTalk sometimes sends msgtype="picture"
+	// for image messages. Before the fix, this fell through to the text handler,
+	// which produced an empty-content message that was silently dropped by the engine.
+	// After the fix, the message is routed to handleImageMessage instead.
+	//
+	// We cannot easily mock the full HTTP download path here. The test verifies the
+	// negative: for msgtype="picture" the handler must NOT be called with empty content.
+	// handleImageMessage may panic on the nil httpClient; we recover from that.
+	var handlerCalledWithEmptyContent bool
+
+	func() {
+		defer func() { recover() }() // handleImageMessage panics on nil httpClient — that's OK
+		p := &Platform{
+			handler: func(_ core.Platform, msg *core.Message) {
+				if msg.Content == "" && len(msg.Images) == 0 {
+					handlerCalledWithEmptyContent = true
+				}
+			},
+		}
+		p.onRawMessage(`{
+			"msgtype": "picture",
+			"msgId": "msg-pic-1",
+			"conversationType": "1",
+			"conversationId": "conv-1",
+			"conversationTitle": "test",
+			"senderStaffId": "user-1",
+			"senderNick": "Alice",
+			"sessionWebhook": "https://example.invalid/webhook",
+			"content": {"downloadCode": "some-code"}
+		}`)
+	}()
+
+	// The message is routed to handleImageMessage (which fails at download — no mock),
+	// not to the text handler. The handler must NOT be invoked with empty content.
+	if handlerCalledWithEmptyContent {
+		t.Error("msgtype=picture: handler called with empty content (image was silently dropped as text)")
+	}
+}
+
+func TestOnRawMessage_FileMsgTypeNotDroppedAsEmptyText(t *testing.T) {
+	// Regression test for #981 (file branch): DingTalk sends msgtype="file" for
+	// PDF/txt/doc attachments. Before this fix the message fell through to the
+	// text handler with empty Content and no Files attached, so the engine
+	// silently dropped the user message — agent would later reply "I did not
+	// receive a file". After the fix the message is routed to
+	// handleFileMessage, which downloads via the same messageFiles/download
+	// endpoint as images and produces a core.FileAttachment.
+	var handlerCalledWithEmptyContent bool
+
+	func() {
+		defer func() { _ = recover() }() // handleFileMessage panics on nil httpClient — that's OK
+		p := &Platform{
+			handler: func(_ core.Platform, msg *core.Message) {
+				if msg.Content == "" && len(msg.Files) == 0 && len(msg.Images) == 0 {
+					handlerCalledWithEmptyContent = true
+				}
+			},
+		}
+		p.onRawMessage(`{
+			"msgtype": "file",
+			"msgId": "msg-file-1",
+			"conversationType": "1",
+			"conversationId": "conv-1",
+			"conversationTitle": "test",
+			"senderStaffId": "user-1",
+			"senderNick": "Alice",
+			"sessionWebhook": "https://example.invalid/webhook",
+			"content": {"downloadCode": "some-code", "fileName": "report.txt", "fileSize": 1234}
+		}`)
+	}()
+
+	if handlerCalledWithEmptyContent {
+		t.Error("msgtype=file: handler called with empty content + no files (file was silently dropped as text)")
+	}
+}
+
+func TestHandleFileMessage_BuildsFileAttachmentWithName(t *testing.T) {
+	// Mocks the messageFiles/download flow end-to-end and asserts:
+	//   1. handleFileMessage parses downloadCode + fileName from content
+	//   2. it issues the access-token + download-URL + GET file chain
+	//   3. the dispatched core.Message carries Files[0] with name + bytes
+	const fileBody = "hello dingtalk file"
+	const fileName = "spec.md"
+
+	// Mock the file's actual content download (separate HTTP server).
+	fileSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/markdown")
+		_, _ = w.Write([]byte(fileBody))
+	}))
+	defer fileSrv.Close()
+
+	rt := &dingtalkDownloadRT{
+		accessToken: "tok-files",
+		downloadURL: fileSrv.URL,
+	}
+
+	captured := make(chan *core.Message, 1)
+	p := &Platform{
+		clientID:     "cid",
+		clientSecret: "csec",
+		robotCode:    "robot-1",
+		httpClient:   &http.Client{Transport: rt},
+		handler: func(_ core.Platform, msg *core.Message) {
+			captured <- msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "file",
+		"msgId": "msg-file-2",
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"conversationTitle": "test",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {"downloadCode": "dc-xyz", "fileName": "` + fileName + `", "fileSize": 19}
+	}`)
+
+	select {
+	case msg := <-captured:
+		if len(msg.Files) != 1 {
+			t.Fatalf("Files len = %d, want 1", len(msg.Files))
+		}
+		f := msg.Files[0]
+		if f.FileName != fileName {
+			t.Errorf("FileName = %q, want %q", f.FileName, fileName)
+		}
+		if string(f.Data) != fileBody {
+			t.Errorf("file bytes = %q, want %q", f.Data, fileBody)
+		}
+		if f.MimeType != "text/markdown" {
+			t.Errorf("MimeType = %q, want %q", f.MimeType, "text/markdown")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never invoked with file message")
+	}
+}
+
+// dingtalkDownloadRT mocks /v1.0/oauth2/accessToken and
+// /v1.0/robot/messageFiles/download. The latter returns downloadURL pointing
+// to a test server that serves the actual attachment body.
+type dingtalkDownloadRT struct {
+	accessToken          string
+	downloadURL          string
+	failDownloadCode     string
+	requestRobotCode     string
+	requestDownloadCodes []string
+}
+
+func (f *dingtalkDownloadRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	switch req.URL.Path {
+	case "/v1.0/oauth2/accessToken":
+		body := fmt.Sprintf(`{"accessToken":%q,"expireIn":7200}`, f.accessToken)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	case "/v1.0/robot/messageFiles/download":
+		var requestBody struct {
+			RobotCode    string `json:"robotCode"`
+			DownloadCode string `json:"downloadCode"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&requestBody)
+		f.requestRobotCode = requestBody.RobotCode
+		f.requestDownloadCodes = append(f.requestDownloadCodes, requestBody.DownloadCode)
+		if requestBody.DownloadCode == f.failDownloadCode {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader(`{"code":"unknownError","message":"未知错误"}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
+		body := fmt.Sprintf(`{"downloadUrl":%q}`, f.downloadURL)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
+	// Forward non-DingTalk-API requests to the default transport so the test
+	// can serve actual file bytes from an httptest.Server.
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+func TestGetAccessToken_ZeroExpireIn_FallsBackToDefault(t *testing.T) {
+	p := &Platform{
+		clientID:     "test_client",
+		clientSecret: "test_secret",
+		httpClient: &http.Client{
+			Transport: &fakeAccessTokenRT{body: `{"accessToken":"tok-zero","expireIn":0}`},
+		},
+	}
+
+	before := time.Now()
+	tok, err := p.getAccessToken()
+	if err != nil {
+		t.Fatalf("getAccessToken() error = %v", err)
+	}
+	if tok != "tok-zero" {
+		t.Fatalf("token = %q, want %q", tok, "tok-zero")
+	}
+
+	// Without the fallback, tokenExpiry would land at "before" (now+0s), making
+	// time.Now().Before(tokenExpiry) immediately false — every subsequent call
+	// would re-fetch a token. Assert the cache window is meaningful (>= 1h).
+	gotWindow := p.tokenExpiry.Sub(before)
+	if gotWindow < time.Hour {
+		t.Errorf("tokenExpiry window = %v from response, want >= 1h (zero-expireIn should fall back, not cache for 0s)", gotWindow)
+	}
+}
+
+func TestGetAccessToken_NegativeExpireIn_FallsBackToDefault(t *testing.T) {
+	p := &Platform{
+		clientID:     "test_client",
+		clientSecret: "test_secret",
+		httpClient: &http.Client{
+			Transport: &fakeAccessTokenRT{body: `{"accessToken":"tok-neg","expireIn":-1}`},
+		},
+	}
+
+	before := time.Now()
+	if _, err := p.getAccessToken(); err != nil {
+		t.Fatalf("getAccessToken() error = %v", err)
+	}
+	if p.tokenExpiry.Sub(before) < time.Hour {
+		t.Errorf("tokenExpiry window for expireIn=-1 = %v, want >= 1h", p.tokenExpiry.Sub(before))
+	}
+}
+
+func TestGetAccessToken_NormalExpireIn_AppliesBuffer(t *testing.T) {
+	p := &Platform{
+		clientID:     "test_client",
+		clientSecret: "test_secret",
+		httpClient: &http.Client{
+			Transport: &fakeAccessTokenRT{body: `{"accessToken":"tok-7200","expireIn":7200}`},
+		},
+	}
+
+	before := time.Now()
+	if _, err := p.getAccessToken(); err != nil {
+		t.Fatalf("getAccessToken() error = %v", err)
+	}
+	// 7200 - 300 buffer = 6900s = 115min. Allow tolerance for elapsed time.
+	gotWindow := p.tokenExpiry.Sub(before)
+	if gotWindow < 100*time.Minute || gotWindow > 116*time.Minute {
+		t.Errorf("tokenExpiry window for expireIn=7200 = %v, want ~6900s (100-116min)", gotWindow)
+	}
+}
+
+func TestOnMessageRepliesToUnauthorizedSender(t *testing.T) {
+	gotReply := make(chan string, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Markdown struct {
+				Text string `json:"text"`
+			} `json:"markdown"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode reply payload: %v", err)
+		}
+		gotReply <- payload.Markdown.Text
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{
+		allowFrom: "allowed-user",
+		handler: func(core.Platform, *core.Message) {
+			t.Fatal("handler should not run for unauthorized sender")
+		},
+	}
+
+	p.onMessage(&chatbot.BotCallbackDataModel{
+		MsgId:            "msg_unauthorized",
+		Msgtype:          "text",
+		SenderStaffId:    "blocked-user",
+		SenderNick:       "Blocked User",
+		ConversationId:   "cid_direct",
+		ConversationType: "1",
+		SessionWebhook:   sessionWebhook.URL,
+		Text:             chatbot.BotCallbackDataTextModel{Content: "hello"},
+	}, nil, "")
+
+	select {
+	case got := <-gotReply:
+		if got != core.UnauthorizedAccessMessage {
+			t.Fatalf("reply = %q, want %q", got, core.UnauthorizedAccessMessage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for unauthorized reply")
+	}
+}
+
+func TestExtractAtUserIds(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{name: "empty string", content: "", want: nil},
+		{name: "plain text no at", content: "hello world", want: nil},
+		{name: "3-digit not matched", content: "@123", want: nil},
+		{name: "4-digit match", content: "@1234", want: []string{"1234"}},
+		{name: "9-digit match", content: "@194252073", want: []string{"194252073"}},
+		{name: "18-digit match", content: "@194252073827812352", want: []string{"194252073827812352"}},
+		{name: "alphabetic no-match", content: "@user @admin", want: nil},
+		{name: "dedup", content: "@1234 @1234 @1234", want: []string{"1234"}},
+		{name: "multiple distinct", content: "@1234 @5678", want: []string{"1234", "5678"}},
+		{name: "embedded in text", content: "hello @1234 world", want: []string{"1234"}},
+		{name: "mixed valid and invalid", content: "@123 @1234 @user @567890", want: []string{"1234", "567890"}},
+		{name: "only at sign no digits", content: "@ @ @@", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractAtUserIds(tt.content)
+			if len(got) == 0 && len(tt.want) == 0 {
+				return // both nil/empty
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("extractAtUserIds(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("extractAtUserIds(%q) = %v, want %v", tt.content, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestReply_IncludesExtractedAtUserIds(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode reply payload: %v", err)
+		}
+		gotPayload <- payload
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{}
+
+	rc := replyContext{sessionWebhook: sessionWebhook.URL}
+	err := p.Reply(context.Background(), rc, "hello @12345678 world")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	select {
+	case payload := <-gotPayload:
+		at, ok := payload["at"].(map[string]any)
+		if !ok {
+			t.Fatal("expected 'at' field in payload")
+		}
+		atUserIds, ok := at["atUserIds"].([]any)
+		if !ok {
+			t.Fatal("expected 'at.atUserIds' field in payload")
+		}
+		if len(atUserIds) != 1 || atUserIds[0] != "12345678" {
+			t.Fatalf("atUserIds = %v, want [\"12345678\"]", atUserIds)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reply")
+	}
+}
+
+func TestReply_NoAtUserIdsWhenNoMention(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode reply payload: %v", err)
+		}
+		gotPayload <- payload
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{}
+
+	rc := replyContext{sessionWebhook: sessionWebhook.URL}
+	err := p.Reply(context.Background(), rc, "hello world, no mentions here")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	select {
+	case payload := <-gotPayload:
+		if _, ok := payload["at"]; ok {
+			t.Fatal("expected no 'at' field when content has no @userId")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reply")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// Card title derivation (Fixes #1269)
+// ──────────────────────────────────────────────────────────────
+
+func TestCardTitleFromContent(t *testing.T) {
+	// Long input — 30 ASCII chars. Verifies plain truncation at 20 runes.
+	longPlain := "012345678901234567890123456789"
+	if len(longPlain) != 30 {
+		t.Fatalf("longPlain fixture = %d chars, want 30", len(longPlain))
+	}
+
+	// Chinese / CJK fixture — 22 runes. Verifies []rune counting so we never
+	// split a multi-byte character mid-codepoint.
+	chinese22 := "你好世界这是一段测试中文超过二十字符测试数据"
+	if got := len([]rune(chinese22)); got != 22 {
+		t.Fatalf("chinese22 fixture = %d runes, want 22", got)
+	}
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// ── Fallback cases (#1269 acceptance: empty / pure formatting) ──
+		{"empty", "", cardTitleFallback},
+		{"whitespace only", "   \n\n  \t", cardTitleFallback},
+		{"pure bold markers", "****", cardTitleFallback},
+		{"pure heading markers", "####", cardTitleFallback},
+		{"pure italic markers", "**", cardTitleFallback},
+		{"pure emoji (fallback per spec)", "🎉🎊✨", cardTitleFallback},
+		{"empty fenced code block", "```\n```", cardTitleFallback},
+
+		// ── Plain text — return as-is (within limit) ──
+		{"short plain", "hello world", "hello world"},
+		{"plain exactly 20 runes", "01234567890123456789", "01234567890123456789"},
+
+		// ── Plain text truncation (ASCII) ──
+		{"plain 30 chars truncated to 20", longPlain, "01234567890123456789"},
+
+		// ── Markdown stripping — format removed, then first line truncated ──
+		{"bold stripped", "**hello** world", "hello world"},
+		{"italic stripped", "this is *italic* text", "this is italic text"},
+		{"heading stripped", "## My Title\nbody", "My Title"},
+		{"inline code stripped", "use `os.path.join` now", "use os.path.join now"},
+		{"link keeps text and url", "[a](b) c", "a (b) c"},
+
+		// ── First-line wins (DingTalk title is single-line) ──
+		{"first line wins", "first line\nsecond line", "first line"},
+		{"first line wins after markdown strip", "# heading\nbody", "heading"},
+		{"markdown strip keeps first non-empty line", "**bold first**\nplain second", "bold first"},
+
+		// ── Truncation respects markdown stripping (#1269: don't break markdown) ──
+		// The marker must be removed BEFORE truncation so we never cut mid-**bold**.
+		{"bold span not split", "**" + strings.Repeat("a", 25) + "**", strings.Repeat("a", 20)},
+
+		// ── Multi-byte / CJK rune counting ──
+		{"chinese 22 runes truncated to 20", chinese22, "你好世界这是一段测试中文超过二十字符测试"},
+		{"chinese under limit passes through", "你好世界", "你好世界"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cardTitleFromContent(tt.in)
+			if got != tt.want {
+				t.Errorf("cardTitleFromContent(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			// Defensive: every returned title must fit within the cap so the
+			// DingTalk chat list never sees a runaway title.
+			if got != cardTitleFallback && len([]rune(got)) > cardTitleMaxRunes {
+				t.Errorf("cardTitleFromContent(%q) returned %d runes, exceeds cap %d",
+					tt.in, len([]rune(got)), cardTitleMaxRunes)
+			}
+		})
+	}
+}
+
+// TestCardTitleFromContent_UsedInReplyPayload is a smoke test that the
+// title derivation actually flows into the `markdown.title` field of the
+// outgoing sessionWebhook payload (Reply path). It captures the POST body
+// and asserts the title no longer equals the old hardcoded "reply".
+func TestCardTitleFromContent_UsedInReplyPayload(t *testing.T) {
+	gotPayload := make(chan map[string]any, 1)
+	sessionWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			t.Errorf("decode: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		gotPayload <- p
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sessionWebhook.Close()
+
+	p := &Platform{}
+	rc := replyContext{sessionWebhook: sessionWebhook.URL}
+	if err := p.Reply(context.Background(), rc, "**Standup notes** for today — see PRs."); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	select {
+	case payload := <-gotPayload:
+		markdown, ok := payload["markdown"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload[markdown] = %T, want map[string]any", payload["markdown"])
+		}
+		title, _ := markdown["title"].(string)
+		if title == "reply" {
+			t.Errorf("title still hardcoded to %q after fix — regression of #1269", title)
+		}
+		want := "Standup notes for to"
+		if title != want {
+			t.Errorf("title = %q, want %q", title, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reply payload")
+	}
+}
+
+// TestOnRawMessage_RichTextWithReplyEnrichesContent verifies that the fix for
+// richText messages (which previously skipped quote/reply detection) now
+// calls formatReplyContent and prepends the quoted text.
+func TestOnRawMessage_RichTextWithReplyEnrichesContent(t *testing.T) {
+	var got *core.Message
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rt-reply-1",
+		"createAt": 2000000000000,
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "please check this"}
+			]
+		},
+		"text": {
+			"content": "please check this",
+			"isReplyMsg": true,
+			"repliedMsg": {
+				"msgType": "text",
+				"content": {
+					"text": "what about the bug?"
+				}
+			}
+		}
+	}`)
+
+	if got == nil {
+		t.Fatal("handler was not called for richText reply message")
+	}
+	expected := "引用: \"what about the bug?\"\n\nplease check this"
+	if got.Content != expected {
+		t.Errorf("message content = %q, want %q", got.Content, expected)
+	}
+}
+
+// TestOnRawMessage_RichTextWithoutIsReplyMsgUsesRichTextBody guards the first
+// half of the richText reply guard: a richText message whose "text" object has
+// no isReplyMsg flag must NOT be treated as a quoted/reply message.
+//
+// The fixtures deliberately give the richText array and the "text" object
+// different bodies ("from richtext array" vs "from text object"). That way an
+// unconditional formatReplyContent call (the regression this test locks out)
+// would return the "text" object body via its RepliedMsg == nil fast path,
+// producing a different string and failing the assertion.
+func TestOnRawMessage_RichTextWithoutIsReplyMsgUsesRichTextBody(t *testing.T) {
+	var got *core.Message
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rt-no-isreply-1",
+		"createAt": 2000000000000,
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "from richtext array"}
+			]
+		},
+		"text": {
+			"content": "from text object"
+		}
+	}`)
+
+	if got == nil {
+		t.Fatal("handler was not called for richText message without isReplyMsg")
+	}
+	if strings.HasPrefix(got.Content, "引用: ") {
+		t.Errorf("message content = %q, must not carry the quote prefix when isReplyMsg is absent", got.Content)
+	}
+	want := "from richtext array"
+	if got.Content != want {
+		t.Errorf("message content = %q, want %q (richText array body, guard must be skipped)", got.Content, want)
+	}
+}
+
+// TestOnRawMessage_RichTextReplyFlagWithoutRepliedMsgUsesRichTextBody covers
+// the second, half-boundary case: isReplyMsg is true but the repliedMsg field
+// is missing. This must not panic and must not be treated as a quoted message.
+//
+// As above, the two fixtures differ on purpose so that dropping the
+// "&& RepliedMsg != nil" half of the guard would surface as "from text object".
+func TestOnRawMessage_RichTextReplyFlagWithoutRepliedMsgUsesRichTextBody(t *testing.T) {
+	var got *core.Message
+	p := &Platform{
+		handler: func(_ core.Platform, msg *core.Message) {
+			got = msg
+		},
+	}
+
+	p.onRawMessage(`{
+		"msgtype": "richText",
+		"msgId": "msg-rt-flag-no-replied-1",
+		"createAt": 2000000000000,
+		"conversationType": "1",
+		"conversationId": "conv-1",
+		"senderStaffId": "user-1",
+		"senderNick": "Alice",
+		"sessionWebhook": "https://example.invalid/webhook",
+		"content": {
+			"richText": [
+				{"text": "from richtext array"}
+			]
+		},
+		"text": {
+			"content": "from text object",
+			"isReplyMsg": true
+		}
+	}`)
+
+	if got == nil {
+		t.Fatal("handler was not called for richText message with isReplyMsg but no repliedMsg")
+	}
+	if strings.HasPrefix(got.Content, "引用: ") {
+		t.Errorf("message content = %q, must not carry the quote prefix when repliedMsg is absent", got.Content)
+	}
+	want := "from richtext array"
+	if got.Content != want {
+		t.Errorf("message content = %q, want %q (richText array body, guard must require repliedMsg)", got.Content, want)
+	}
 }

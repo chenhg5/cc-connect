@@ -3,10 +3,14 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
 func TestCronStore_MuteToggle(t *testing.T) {
@@ -366,6 +370,194 @@ func TestCronStore_JobsPath(t *testing.T) {
 	}
 }
 
+func TestCronScheduler_RunJobNow_DisabledJobStillRuns(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("manual run complete")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+	scheduler.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:          "manual1",
+		Project:     "test",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "summarize activity",
+		Description: "Disabled daily summary",
+		Enabled:     false,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scheduler.RunJobNow("manual1"); err != nil {
+		t.Fatalf("RunJobNow() error = %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sent := platform.getSent()
+		if len(sent) >= 2 {
+			if sent[0] != "⏰ Disabled daily summary" {
+				t.Fatalf("sent[0] = %q, want cron start notice", sent[0])
+			}
+			if sent[1] != "manual run complete" {
+				t.Fatalf("sent[1] = %q, want final result", sent[1])
+			}
+			found, lastRunSet, lastErr := cronJobRunStatus(store, "manual1")
+			if !found {
+				t.Fatal("expected stored job")
+			}
+			if !lastRunSet {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			if lastErr != "" {
+				t.Fatalf("LastError = %q, want empty", lastErr)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for manual run messages, sent=%v", platform.getSent())
+}
+
+func TestCronScheduler_RunJobNow_NotFound(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	err = scheduler.RunJobNow("missing")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("RunJobNow() error = %v, want not found", err)
+	}
+}
+
+func TestCronScheduler_RunJobNow_ProjectMissingFailsSynchronously(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	job := &CronJob{
+		ID:         "missing-project",
+		Project:    "ghost",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 6 * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	err = scheduler.RunJobNow("missing-project")
+	if err == nil || !errors.Is(err, ErrCronProjectNotFound) || !strings.Contains(err.Error(), `"ghost"`) {
+		t.Fatalf("RunJobNow() error = %v, want missing project", err)
+	}
+}
+
+func TestCronScheduler_RunJobNow_UsesSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewCronScheduler(store)
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("snapshot complete")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = scheduler
+	scheduler.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:          "snapshot1",
+		Project:     "test",
+		SessionKey:  "discord:channel-1:user-1",
+		CronExpr:    "0 6 * * *",
+		Prompt:      "original prompt",
+		Description: "Original description",
+		Enabled:     true,
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scheduler.RunJobNow("snapshot1"); err != nil {
+		t.Fatalf("RunJobNow() error = %v", err)
+	}
+	if !store.Update("snapshot1", "prompt", "mutated prompt") {
+		t.Fatal("Update(prompt) returned false")
+	}
+	if !store.Update("snapshot1", "description", "Mutated description") {
+		t.Fatal("Update(description) returned false")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		sent := platform.getSent()
+		if len(sent) >= 2 {
+			if sent[0] != "⏰ Original description" {
+				t.Fatalf("sent[0] = %q, want original description", sent[0])
+			}
+			if len(agentSession.sentPrompts) != 1 || !strings.Contains(agentSession.sentPrompts[0], "original prompt") {
+				t.Fatalf("agent prompts = %#v, want original prompt", agentSession.sentPrompts)
+			}
+			if strings.Contains(agentSession.sentPrompts[0], "mutated prompt") {
+				t.Fatalf("agent prompt used mutated value: %#v", agentSession.sentPrompts)
+			}
+			found, lastRunSet, _ := cronJobRunStatus(store, "snapshot1")
+			if !found {
+				t.Fatal("expected stored job")
+			}
+			if !lastRunSet {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for snapshot run, sent=%v", platform.getSent())
+}
+
+func cronJobRunStatus(store *CronStore, id string) (found bool, lastRunSet bool, lastErr string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, job := range store.jobs {
+		if job.ID == id {
+			return true, !job.LastRun.IsZero(), job.LastError
+		}
+	}
+	return false, false, ""
+}
+
 func TestCronJob_ExecutionTimeout(t *testing.T) {
 	j := &CronJob{}
 	if got := j.ExecutionTimeout(); got != defaultCronJobTimeout {
@@ -440,6 +632,42 @@ func TestCronScheduler_AddJob_NegativeTimeoutMins(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for negative timeout_mins")
+	}
+}
+
+// TestCronScheduler_AddJob_EmptySessionKey verifies that AddJob refuses to
+// persist a job without a session_key. Without this guard, ExecuteCronJob
+// later fails at fire-time with `platform "" not found for session ""`,
+// leaving an unrunnable job lingering in the store.
+func TestCronScheduler_AddJob_EmptySessionKey(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		sessionKey string
+	}{
+		{"empty", ""},
+		{"whitespace", "   "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewCronStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cs := NewCronScheduler(store)
+			err = cs.AddJob(&CronJob{
+				ID: "j1", Project: "p", SessionKey: tt.sessionKey,
+				CronExpr: "0 6 * * *", Prompt: "hi",
+			})
+			if err == nil {
+				t.Fatalf("expected error for empty session_key, got nil")
+			}
+			if !strings.Contains(err.Error(), "session_key") {
+				t.Errorf("error %q should mention session_key", err.Error())
+			}
+			if jobs := store.List(); len(jobs) != 0 {
+				t.Errorf("store should be empty after rejected AddJob, got %d job(s)", len(jobs))
+			}
+		})
 	}
 }
 
@@ -564,4 +792,501 @@ func TestCronStore_ListByProject(t *testing.T) {
 	if len(list3) != 0 {
 		t.Errorf("ListByProject(nonexistent) = %d jobs, want 0", len(list3))
 	}
+}
+
+// TestCronScheduler_UpdateJob_EnabledNonBoolPreservesSchedule verifies that
+// passing a non-bool value for the "enabled" field is rejected up-front and
+// does NOT silently leave the scheduled cron entry removed. Before this fix,
+// UpdateJob removed the entry before delegating to store.Update, so a type
+// mismatch left the job marked Enabled but with no scheduled tick — the only
+// recovery was a daemon restart.
+func TestCronScheduler_UpdateJob_EnabledNonBoolPreservesSchedule(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+
+	job := &CronJob{
+		ID: "e1", Project: "p", SessionKey: "test:1:1",
+		CronExpr: "0 6 * * *", Prompt: "hi", Enabled: true,
+	}
+	if err := cs.AddJob(job); err != nil {
+		t.Fatal(err)
+	}
+
+	cs.mu.RLock()
+	_, scheduledBefore := cs.entries[job.ID]
+	cs.mu.RUnlock()
+	if !scheduledBefore {
+		t.Fatal("precondition: enabled job should be scheduled after AddJob")
+	}
+
+	// String "true" instead of bool true — what a misbehaving HTTP/management
+	// API client could send.
+	if err := cs.UpdateJob(job.ID, "enabled", "true"); err == nil {
+		t.Fatal("UpdateJob with non-bool enabled value should return an error")
+	}
+
+	cs.mu.RLock()
+	_, scheduledAfter := cs.entries[job.ID]
+	cs.mu.RUnlock()
+	if !scheduledAfter {
+		t.Fatal("schedule was removed even though update failed; job will never fire again")
+	}
+
+	stored := store.Get(job.ID)
+	if stored == nil || !stored.Enabled {
+		t.Fatalf("stored job state should be unchanged on validation error, got %+v", stored)
+	}
+}
+
+// TestCronScheduler_StartStopClean ensures Start/Stop are paired and the
+// runLoop goroutine exits promptly, leaving no leaked timer or goroutine.
+func TestCronScheduler_StartStopClean(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+	if err := cs.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		cs.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return within 2s")
+	}
+
+	// A second Stop on an already-stopped scheduler must be a no-op.
+	cs.Stop()
+}
+
+// TestCronScheduler_FiresDueJob verifies the runLoop actually fires jobs
+// whose nextRun has elapsed. This is the baseline that confirms the
+// sleep-recovery path can find work to do once the loop wakes.
+func TestCronScheduler_FiresDueJob(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("fired")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	cs := NewCronScheduler(store)
+	e.cronScheduler = cs
+	cs.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:         "due",
+		Project:    "test",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "* * * * *",
+		Prompt:     "go",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cs.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Stop()
+
+	// Backdate nextRun to stand in for "system slept past the scheduled
+	// time". The next runLoop wake-up (≤ maxCronTimerSpan) must catch up
+	// and fire the job. Order matters: do this AFTER Start so Start's
+	// own scheduleJob call doesn't overwrite nextRun back into the future.
+	cs.mu.Lock()
+	if entry, ok := cs.entries[job.ID]; ok {
+		entry.nextRun = time.Now().Add(-time.Hour)
+	} else {
+		cs.mu.Unlock()
+		t.Fatal("entry not present after Start")
+	}
+	cs.mu.Unlock()
+	cs.signalWakeUp()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, lastRunSet, _ := cronJobRunStatus(store, job.ID); lastRunSet {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("job did not fire within 2s; sent=%v", platform.getSent())
+}
+
+// TestCronScheduler_SleepRecovery_PastDueFiresImmediately exercises the
+// recovery path: when runLoop wakes and finds entries whose nextRun is in
+// the past (e.g., system just resumed from sleep), the loop fires them on
+// the same iteration without waiting for the next interval.
+//
+// We can't actually put the test process to sleep, but we can backdate
+// nextRun by a large amount — that's exactly the post-sleep state we need
+// the loop to handle.
+func TestCronScheduler_SleepRecovery_PastDueFiresImmediately(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("recovered")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	cs := NewCronScheduler(store)
+	e.cronScheduler = cs
+	cs.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:         "recover",
+		Project:    "test",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "0 6 * * *", // 6 AM daily; irrelevant — we backdate
+		Prompt:     "go",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Stop()
+
+	// Wait long enough for the loop to be in its idle wait (1 hour).
+	// Then backdate nextRun to simulate "system just woke after 8h".
+	cs.mu.Lock()
+	entry, ok := cs.entries[job.ID]
+	if !ok {
+		cs.mu.Unlock()
+		t.Fatal("entry missing")
+	}
+	entry.nextRun = time.Now().Add(-8 * time.Hour)
+	cs.mu.Unlock()
+	cs.signalWakeUp()
+
+	// Should fire within maxCronTimerSpan (30s) of the wake-up signal,
+	// not 8 hours from now (the naive pre-fix behavior).
+	deadline := time.Now().Add(maxCronTimerSpan + 5*time.Second)
+	startSent := len(platform.getSent())
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) > startSent+1 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("past-due job did not fire within %v after wake-up signal", maxCronTimerSpan+5*time.Second)
+}
+
+// TestCronScheduler_AddJobDuringRunWakesLoop verifies that AddJob called
+// while runLoop is sleeping correctly wakes the loop and starts the new
+// schedule on the next tick. Without the wakeUp signal, the loop would
+// wait out its full idle hour before noticing the new entry.
+func TestCronScheduler_AddJobDuringRunWakesLoop(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("late-add")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	cs := NewCronScheduler(store)
+	e.cronScheduler = cs
+	cs.RegisterEngine("test", e)
+
+	if err := cs.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Stop()
+
+	// Add a job that should fire "very soon" — but it's already past
+	// due, so the loop must wake up and fire it on the next tick.
+	job := &CronJob{
+		ID:         "late-add",
+		Project:    "test",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "* * * * *",
+		Prompt:     "go",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+	cs.mu.Lock()
+	cs.entries[job.ID] = &cronEntry{
+		jobID:    job.ID,
+		schedule: mustParseStandardForTest(t, job.CronExpr),
+		nextRun:  time.Now().Add(-time.Second), // already due
+	}
+	cs.mu.Unlock()
+	cs.signalWakeUp()
+
+	deadline := time.Now().Add(maxCronTimerSpan + 5*time.Second)
+	for time.Now().Before(deadline) {
+		if len(platform.getSent()) >= 2 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("late-added job did not fire within %v", maxCronTimerSpan+5*time.Second)
+}
+
+// TestCronScheduler_RemoveJobDuringRunPreventsFire verifies that calling
+// RemoveJob mid-flight removes the schedule and prevents the runLoop from
+// firing the deleted job.
+func TestCronScheduler_RemoveJobDuringRunPreventsFire(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("should-not-run")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	cs := NewCronScheduler(store)
+	e.cronScheduler = cs
+	cs.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:         "ghost",
+		Project:    "test",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "* * * * *",
+		Prompt:     "go",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-populate entries with a past-due nextRun so the loop tries to
+	// fire it on the next tick. We then call RemoveJob BEFORE Start so
+	// the loop never sees the entry.
+	cs.mu.Lock()
+	cs.entries[job.ID] = &cronEntry{
+		jobID:    job.ID,
+		schedule: mustParseStandardForTest(t, job.CronExpr),
+		nextRun:  time.Now().Add(-time.Second),
+	}
+	cs.mu.Unlock()
+
+	cs.RemoveJob(job.ID)
+
+	// After RemoveJob the entry must be gone and the store must reflect
+	// the deletion. The job no longer exists in either place, so even
+	// if the loop ran it would have nothing to schedule.
+	cs.mu.RLock()
+	_, stillThere := cs.entries[job.ID]
+	cs.mu.RUnlock()
+	if stillThere {
+		t.Fatal("RemoveJob did not remove entry from cs.entries")
+	}
+	if store.Get(job.ID) != nil {
+		t.Fatal("RemoveJob did not remove job from store")
+	}
+
+	if err := cs.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Stop()
+
+	// A short poll is enough: if the entry was removed before Start, the
+	// loop has nothing to schedule. We don't need to wait maxCronTimerSpan
+	// because the absence of an entry is a structural invariant, not a
+	// timing race. (The FiresDueJob test verifies the positive case.)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if sent := platform.getSent(); len(sent) > 0 {
+			t.Fatalf("removed job fired anyway; sent=%v", sent)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestCronScheduler_DisableJobStopsFiring verifies DisableJob removes the
+// schedule from entries and the runLoop won't fire it on subsequent ticks.
+func TestCronScheduler_DisableJobStopsFiring(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	platform := &stubCronReplyTargetPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "discord"},
+	}
+	agentSession := newResultAgentSession("should-not-run")
+	agent := &resultAgent{session: agentSession}
+
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	cs := NewCronScheduler(store)
+	e.cronScheduler = cs
+	cs.RegisterEngine("test", e)
+
+	job := &CronJob{
+		ID:         "off",
+		Project:    "test",
+		SessionKey: "discord:channel-1:user-1",
+		CronExpr:   "* * * * *",
+		Prompt:     "go",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start with a past-due entry. The loop will try to fire it on the
+	// next tick. We then call DisableJob; the loop's signal handler
+	// must drop the entry before firing it.
+	cs.mu.Lock()
+	cs.entries[job.ID] = &cronEntry{
+		jobID:    job.ID,
+		schedule: mustParseStandardForTest(t, job.CronExpr),
+		nextRun:  time.Now().Add(-time.Second),
+	}
+	cs.mu.Unlock()
+
+	if err := cs.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Stop()
+
+	if err := cs.DisableJob(job.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	cs.mu.RLock()
+	_, stillScheduled := cs.entries[job.ID]
+	cs.mu.RUnlock()
+	if stillScheduled {
+		t.Fatal("DisableJob should remove entry from cs.entries")
+	}
+
+	// Short poll: any fire would happen within ~maxCronTimerSpan, but
+	// structurally the entry is gone, so we don't need to wait the
+	// full cap. 1s is plenty for a goroutine to race ahead of us.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if sent := platform.getSent(); len(sent) > 0 {
+			t.Fatalf("disabled job fired anyway; sent=%v", sent)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestCronScheduler_MultipleJobsAllFire verifies that when several entries
+// are due at the same time (e.g., all due after a long sleep), fireDueJobs
+// iterates every entry and advances each schedule independently.
+//
+// We invoke fireDueJobs directly so the test doesn't depend on the agent
+// session plumbing (which sends the result through the engine). The check
+// we care about — every due entry's nextRun is updated — is purely a
+// scheduler-level invariant.
+func TestCronScheduler_MultipleJobsAllFire(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCronStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := NewCronScheduler(store)
+
+	const n = 3
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		job := &CronJob{
+			ID:         fmt.Sprintf("multi%d", i),
+			Project:    "test",
+			SessionKey: "test:ch1",
+			CronExpr:   "* * * * *",
+			Prompt:     "go",
+			Enabled:    true,
+			CreatedAt:  time.Now(),
+		}
+		if err := store.Add(job); err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = job.ID
+
+		cs.entries[job.ID] = &cronEntry{
+			jobID:    job.ID,
+			schedule: mustParseStandardForTest(t, job.CronExpr),
+			nextRun:  time.Now().Add(-time.Hour),
+		}
+	}
+
+	// Fire directly. fireDueJobs calls store.Get + runJob, both of which
+	// short-circuit when the engine is nil (no engine registered for the
+	// project). The nextRun advancement we care about happens after.
+	cs.fireDueJobs()
+
+	// Every entry's nextRun should now be in the future (the schedule
+	// has been advanced past the past-due state).
+	now := time.Now()
+	for _, id := range ids {
+		cs.mu.RLock()
+		e, ok := cs.entries[id]
+		cs.mu.RUnlock()
+		if !ok {
+			t.Fatalf("entry %s missing after fireDueJobs", id)
+		}
+		if !e.nextRun.After(now) {
+			t.Errorf("entry %s: nextRun = %v, want > %v after fireDueJobs", id, e.nextRun, now)
+		}
+	}
+}
+
+func mustParseStandardForTest(t *testing.T, expr string) cron.Schedule {
+	t.Helper()
+	s, err := cron.ParseStandard(expr)
+	if err != nil {
+		t.Fatalf("cron.ParseStandard(%q) failed: %v", expr, err)
+	}
+	return s
 }

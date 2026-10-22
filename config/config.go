@@ -1,15 +1,81 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
 )
+
+// validRunAsUserName is the portable-username character set plus digits.
+// POSIX does not require a specific pattern, but every mainstream Linux and
+// macOS system accepts these characters for login names. Rejecting anything
+// outside this set removes an injection vector into the sudo argv.
+func isValidRunAsUserName(name string) bool {
+	if name == "" || len(name) > 32 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		case (r == '-' || r == '.') && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+var dangerousEnvVars = map[string]bool{
+	"LD_PRELOAD":            true,
+	"LD_LIBRARY_PATH":       true,
+	"DYLD_INSERT_LIBRARIES": true,
+	"DYLD_LIBRARY_PATH":     true,
+	"PATH":                  true,
+	"HOME":                  true,
+	"USER":                  true,
+	"SHELL":                 true,
+	"SUDO_USER":             true,
+	"SUDO_COMMAND":          true,
+}
+
+func validateRunAsEnv(prefix string, envVars []string) error {
+	for _, v := range envVars {
+		name := strings.TrimSpace(v)
+		if dangerousEnvVars[strings.ToUpper(name)] {
+			return fmt.Errorf("config: %s.run_as_env must not include dangerous variable %q", prefix, name)
+		}
+	}
+	return nil
+}
+
+func validateRunAsUser(prefix, name string) error {
+	if name == "" {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("config: %s.run_as_user is only supported on Linux/macOS", prefix)
+	}
+	if name == "root" || name == "0" {
+		return fmt.Errorf("config: %s.run_as_user must not be root", prefix)
+	}
+	if !isValidRunAsUserName(name) {
+		return fmt.Errorf("config: %s.run_as_user %q contains invalid characters (allowed: a-z, A-Z, 0-9, -, _, .; must start with a letter or underscore)", prefix, name)
+	}
+	return nil
+}
 
 // configMu serializes read-modify-write cycles to prevent lost updates.
 var configMu sync.Mutex
@@ -18,33 +84,68 @@ var configMu sync.Mutex
 var ConfigPath string
 
 type Config struct {
-	DataDir           string                  `toml:"data_dir"` // session store directory, default ~/.cc-connect
-	AttachmentSend    string                  `toml:"attachment_send"`
-	Projects          []ProjectConfig         `toml:"projects"`
-	Commands          []CommandConfig         `toml:"commands"`     // global custom slash commands
-	Aliases           []AliasConfig           `toml:"aliases"`      // global command aliases
-	BannedWords       []string                `toml:"banned_words"` // messages containing any of these words are blocked
-	Log               LogConfig               `toml:"log"`
-	Language          string                  `toml:"language"` // "en" or "zh", default is "en"
-	Speech            SpeechConfig            `toml:"speech"`
-	TTS               TTSConfig               `toml:"tts"`
-	Display           DisplayConfig           `toml:"display"`
-	StreamPreview     StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
-	RateLimit         RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
-	OutgoingRateLimit OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
-	Relay             RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
-	Quiet             *bool                   `toml:"quiet,omitempty"`     // global default for quiet mode; project-level overrides this
-	Cron              CronConfig              `toml:"cron"`
-	Webhook           WebhookConfig           `toml:"webhook"`
-	Bridge            BridgeConfig            `toml:"bridge"`
-	Management        ManagementConfig        `toml:"management"`
-	IdleTimeoutMins   *int                    `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	DataDir        string `toml:"data_dir"` // session store directory, default ~/.cc-connect
+	AttachmentSend string `toml:"attachment_send"`
+	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
+	// engines behave as if those flags were false. Per-project quiet overrides when set.
+	Quiet              *bool                   `toml:"quiet,omitempty"`
+	Providers          []ProviderConfig        `toml:"providers"`                      // global shared providers
+	ProviderPresetsURL string                  `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
+	Projects           []ProjectConfig         `toml:"projects"`
+	Commands           []CommandConfig         `toml:"commands"`     // global custom slash commands
+	Aliases            []AliasConfig           `toml:"aliases"`      // global command aliases
+	BannedWords        []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Log                LogConfig               `toml:"log"`
+	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
+	Speech             SpeechConfig            `toml:"speech"`
+	TTS                TTSConfig               `toml:"tts"`
+	Display            DisplayConfig           `toml:"display"`
+	StreamPreview      StreamPreviewConfig     `toml:"stream_preview"`      // real-time streaming preview
+	InstantReply       InstantReplyConfig      `toml:"instant_reply"`       // immediate confirmation reply
+	RateLimit          RateLimitConfig         `toml:"rate_limit"`          // per-session rate limiting
+	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
+	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
+	Cron               CronConfig              `toml:"cron"`
+	Queue              QueueConfig             `toml:"queue"`
+	Webhook            WebhookConfig           `toml:"webhook"`
+	Bridge             BridgeConfig            `toml:"bridge"`
+	Management         ManagementConfig        `toml:"management"`
+	Hooks              []HookConfig            `toml:"hooks"`
+	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
+	BusyTimeoutMins    *int                    `toml:"busy_timeout_mins,omitempty"`  // minutes a dead agent's session busy lock may be held before the next message breaks it; 0 = disable; default 2
+	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
+	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
+	// (multi-workspace mode) for every engine in the process. 0 disables
+	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
+	// setting so the reaper policy is consistent across projects; per-project
+	// configuration is intentionally not supported.
+	WorkspaceIdleTimeoutMins *int `toml:"workspace_idle_timeout_mins,omitempty"`
+	// Shell overrides the default shell used for /shell commands, cron exec,
+	// hooks, and webhook exec. On Unix the default is "sh"; on Windows it is
+	// "powershell.exe". Set to an absolute path (e.g. "/bin/zsh") to use a
+	// different shell. Supported: sh, bash, zsh, fish, cmd, powershell, pwsh.
+	Shell string `toml:"shell,omitempty"`
+	// ShellProfile is prepended to every shell command before execution. Useful
+	// for sourcing shell profiles so that user-defined functions and aliases are
+	// available. Example: "source ~/.zshrc"
+	ShellProfile string `toml:"shell_profile,omitempty"`
+	// MaxAttachmentSizeMB is the per-file size limit, in MiB, for attachments
+	// sent through `cc-connect send --file/--image/--audio/--video` and the
+	// /send API. 0 (the default) means use core.DefaultMaxAttachmentSize
+	// (50 MiB). Raise it to send larger files; the request body limit on the
+	// API side scales with this value to account for base64 expansion.
+	MaxAttachmentSizeMB int `toml:"max_attachment_size_mb,omitempty"`
 }
 
 // CronConfig controls cron job behavior.
 type CronConfig struct {
 	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
 	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
+}
+
+// QueueConfig controls the per-session message queue.
+type QueueConfig struct {
+	MaxDepth *int `toml:"max_depth"` // max queued messages per session; default 5
 }
 
 // WebhookConfig controls the external HTTP webhook endpoint.
@@ -59,9 +160,20 @@ type WebhookConfig struct {
 type BridgeConfig struct {
 	Enabled     *bool    `toml:"enabled"`                // default false
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9810
-	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
+	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required unless insecure=true
 	Path        string   `toml:"path,omitempty"`         // URL path; default "/bridge/ws"
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
+	Insecure    *bool    `toml:"insecure,omitempty"`     // allow running without token (local dev only); default false
+}
+
+// HookConfig is a single event hook rule.
+type HookConfig struct {
+	Event   string `toml:"event"`             // event name or "*"
+	Type    string `toml:"type"`              // "command" or "http"
+	Command string `toml:"command,omitempty"` // shell command (type=command)
+	URL     string `toml:"url,omitempty"`     // HTTP endpoint (type=http)
+	Timeout int    `toml:"timeout,omitempty"` // seconds; 0 = default
+	Async   *bool  `toml:"async,omitempty"`   // nil = true (async by default)
 }
 
 // ManagementConfig controls the HTTP Management API for external tools.
@@ -72,11 +184,25 @@ type ManagementConfig struct {
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
 }
 
+// Display mode constants.
+const (
+	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages (default)
+	DisplayModeCompact = "compact" // hide thinking/tool, each text segment is a separate card
+	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
+)
+
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	ThinkingMaxLen *int  `toml:"thinking_max_len"` // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen     *int  `toml:"tool_max_len"`     // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages   *bool `toml:"tool_messages"`    // whether tool progress messages are shown; default true
+	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
+	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
+	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	HistoryMaxLen        *int    `toml:"history_max_len"`        // max chars per /history entry; 0 = no truncation; default 1000
+	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
+	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
+	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default false
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -86,6 +212,14 @@ type StreamPreviewConfig struct {
 	IntervalMs        *int     `toml:"interval_ms"`                  // min ms between updates; default 1500
 	MinDeltaChars     *int     `toml:"min_delta_chars"`              // min new chars before update; default 30
 	MaxChars          *int     `toml:"max_chars"`                    // max preview length; default 2000
+}
+
+// InstantReplyConfig controls the immediate confirmation reply sent when a message
+// is received, before the agent starts processing. This gives users quick feedback
+// that their message was received (e.g. "🤔 Thinking...").
+type InstantReplyConfig struct {
+	Enabled *bool  `toml:"enabled"` // default false
+	Content string `toml:"content"` // custom reply text; empty = use i18n default ("⏳ Processing...")
 }
 
 // RateLimitConfig controls per-session message rate limiting.
@@ -123,13 +257,14 @@ type RoleConfig struct {
 
 // RelayConfig controls bot-to-bot relay behavior.
 type RelayConfig struct {
-	TimeoutSecs *int `toml:"timeout_secs"` // max seconds to wait for relay response; 0 = disabled; default 120
+	TimeoutSecs *int   `toml:"timeout_secs"`         // max seconds to wait for relay response; 0 = disabled; default 120
+	Visibility  string `toml:"visibility,omitempty"` // "full" (default), "summary", or "none" for group visibility echoes
 }
 
 // SpeechConfig configures speech-to-text for voice messages.
 type SpeechConfig struct {
 	Enabled  bool   `toml:"enabled"`
-	Provider string `toml:"provider"` // "openai" | "groq" | "qwen"
+	Provider string `toml:"provider"` // "openai" | "groq" | "qwen" | "gemini"
 	Language string `toml:"language"` // e.g. "zh", "en"; empty = auto-detect
 	OpenAI   struct {
 		APIKey  string `toml:"api_key"`
@@ -145,16 +280,24 @@ type SpeechConfig struct {
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
 	} `toml:"qwen"`
+	Gemini struct {
+		APIKey string `toml:"api_key"`
+		Model  string `toml:"model"`
+	} `toml:"gemini"`
 }
 
 // TTSConfig configures text-to-speech output (mirrors SpeechConfig style).
 type TTSConfig struct {
-	Enabled    bool   `toml:"enabled"`
-	Provider   string `toml:"provider"`     // "qwen" | "openai" | "minimax" | "espeak" | "pico" | "edge"
-	Voice      string `toml:"voice"`        // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh")
-	TTSMode    string `toml:"tts_mode"`     // "voice_only" (default) | "always"
-	MaxTextLen int    `toml:"max_text_len"` // max rune count before skipping TTS; 0 = no limit
-	OpenAI     struct {
+	Enabled      bool                      `toml:"enabled"`
+	Provider     string                    `toml:"provider"`      // "qwen" | "openai" | "minimax" | "mimo" | "espeak" | "pico" | "edge"
+	Voice        string                    `toml:"voice"`         // default voice name (for edge: "zh-CN-XiaoxiaoNeural"; for pico: "zh-CN"; for espeak: "zh"; for mimo: "mimo_default" / "冰糖" / "Mia" …)
+	VoiceID      string                    `toml:"voice_id"`      // alias for voice; useful for MiniMax voice IDs
+	Speed        float64                   `toml:"speed"`         // optional speaking speed multiplier; 0 = provider default
+	LanguageType string                    `toml:"language_type"` // optional provider-specific language hint
+	TTSMode      string                    `toml:"tts_mode"`      // "voice_only" (default) | "always"
+	MaxTextLen   int                       `toml:"max_text_len"`  // max rune count before skipping TTS; 0 = no limit
+	Agents       map[string]TTSAgentConfig `toml:"agents"`        // per-project/agent voice overrides keyed by [[projects]].name
+	OpenAI       struct {
 		APIKey  string `toml:"api_key"`
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
@@ -165,10 +308,131 @@ type TTSConfig struct {
 		Model   string `toml:"model"`
 	} `toml:"qwen"`
 	MiniMax struct {
+		APIKey     string `toml:"api_key"`
+		BaseURL    string `toml:"base_url"`
+		Model      string `toml:"model"`
+		ConfigFile string `toml:"config_file"` // optional JSON auth file; default data_dir/config/minimax.json when api_key is empty
+	} `toml:"minimax"`
+	Mimo struct {
 		APIKey  string `toml:"api_key"`
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
-	} `toml:"minimax"`
+	} `toml:"mimo"`
+}
+
+// TTSAgentConfig overrides global [tts] synthesis parameters for one project.
+// Keys are project names, which map naturally to cc-connect's agent workspaces
+// (for example assistant, reviewer).
+type TTSAgentConfig struct {
+	Provider     string  `toml:"provider,omitempty"`
+	Voice        string  `toml:"voice,omitempty"`
+	VoiceID      string  `toml:"voice_id,omitempty"`
+	Speed        float64 `toml:"speed,omitempty"`
+	LanguageType string  `toml:"language_type,omitempty"`
+	MaxTextLen   *int    `toml:"max_text_len,omitempty"`
+}
+
+// ResolvedTTSConfig is the effective TTS config for a single project after
+// applying [tts.agents.<project>] overrides.
+type ResolvedTTSConfig struct {
+	Enabled      bool
+	Provider     string
+	Voice        string
+	Speed        float64
+	LanguageType string
+	TTSMode      string
+	MaxTextLen   int
+}
+
+// ResolveTTSConfigForProject returns the effective TTS settings for projectName.
+// Legacy [tts].voice remains supported; [tts].voice_id is treated as an alias
+// and takes precedence when both are set.
+func ResolveTTSConfigForProject(tts TTSConfig, projectName string) ResolvedTTSConfig {
+	res := ResolvedTTSConfig{
+		Enabled:      tts.Enabled,
+		Provider:     strings.TrimSpace(tts.Provider),
+		Voice:        firstNonEmpty(tts.VoiceID, tts.Voice),
+		Speed:        tts.Speed,
+		LanguageType: tts.LanguageType,
+		TTSMode:      tts.TTSMode,
+		MaxTextLen:   tts.MaxTextLen,
+	}
+	if tts.Agents == nil {
+		return res
+	}
+	agent, ok := tts.Agents[projectName]
+	if !ok {
+		return res
+	}
+	if v := strings.TrimSpace(agent.Provider); v != "" {
+		res.Provider = v
+	}
+	if v := firstNonEmpty(agent.VoiceID, agent.Voice); v != "" {
+		res.Voice = v
+	}
+	if agent.Speed > 0 {
+		res.Speed = agent.Speed
+	}
+	if v := strings.TrimSpace(agent.LanguageType); v != "" {
+		res.LanguageType = v
+	}
+	if agent.MaxTextLen != nil {
+		res.MaxTextLen = *agent.MaxTextLen
+	}
+	return res
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// MiniMaxLocalConfig is the JSON shape used by Agent Studio / MiniMax skills.
+type MiniMaxLocalConfig struct {
+	APIKey  string `json:"api_key"`
+	APIHost string `json:"api_host"`
+	BaseURL string `json:"base_url"`
+}
+
+// LoadMiniMaxLocalConfig reads a MiniMax JSON config without exposing secrets.
+// It returns an empty config when the file does not exist.
+func LoadMiniMaxLocalConfig(dataDir, configFile string) (MiniMaxLocalConfig, error) {
+	if strings.TrimSpace(configFile) == "" {
+		configFile = filepath.Join(dataDir, "config", "minimax.json")
+	}
+	configFile = expandUserPath(configFile)
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return MiniMaxLocalConfig{}, nil
+		}
+		return MiniMaxLocalConfig{}, fmt.Errorf("read minimax config: %w", err)
+	}
+	var cfg MiniMaxLocalConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return MiniMaxLocalConfig{}, fmt.Errorf("parse minimax config: %w", err)
+	}
+	return cfg, nil
+}
+
+func expandUserPath(path string) string {
+	// Only the current user's home shorthand is expanded; ~user paths are left
+	// unchanged to avoid platform-specific user lookup behavior.
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
 // HeartbeatConfig controls periodic heartbeat for a project.
@@ -183,38 +447,138 @@ type HeartbeatConfig struct {
 }
 
 // AutoCompressConfig controls automatic context compression for a project.
+// AutoCompressConfig controls automatic context compression.
+//
+// The name is about the *trigger*, not the timing: this fires AFTER a turn
+// completes (see the auto-compress decision block in core/engine.go), never
+// inside the agent's own loop. Agents that compact natively mid-turn — Claude
+// Code, via autoCompactWindow — act during the loop and are more timely; this is
+// for agents that have no such mechanism, or for users who want compaction at a
+// visible, predictable turn boundary.
 type AutoCompressConfig struct {
 	Enabled    *bool `toml:"enabled,omitempty"`      // default false
 	MaxTokens  *int  `toml:"max_tokens,omitempty"`   // estimated token threshold to trigger /compress
 	MinGapMins *int  `toml:"min_gap_mins,omitempty"` // minimum minutes between auto-compress runs (default 30)
+	// AllowHeuristic restores deciding from the text-length heuristic when an
+	// agent that CAN report exact usage has not reported it yet. Default false:
+	// such turns make no decision and wait for the next turn, which carries the
+	// exact number. The heuristic ignores tool results and the fixed
+	// system-prompt+tools overhead, so it was measured 2.5x off (574,797
+	// estimated vs 229,783 real).
+	//
+	// This does not apply to agents with no usage reporting at all: for them the
+	// heuristic is the only mechanism that has ever existed, and removing it
+	// would silently disable auto-compress for most of cc-connect's agents.
+	AllowHeuristic bool `toml:"allow_heuristic,omitempty"`
+}
+
+// ObserveConfig controls forwarding of native terminal Claude Code sessions to a messaging platform.
+type ObserveConfig struct {
+	Enabled bool   `toml:"enabled"`
+	Channel string `toml:"channel"`
+}
+
+// ReferenceConfig controls local file reference normalization and rendering.
+type ReferenceConfig struct {
+	NormalizeAgents []string `toml:"normalize_agents,omitempty"`
+	RenderPlatforms []string `toml:"render_platforms,omitempty"`
+	DisplayPath     string   `toml:"display_path,omitempty"`
+	MarkerStyle     string   `toml:"marker_style,omitempty"`
+	EnclosureStyle  string   `toml:"enclosure_style,omitempty"`
 }
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
-	Name         string             `toml:"name"`
-	Mode         string             `toml:"mode,omitempty"`     // "" or "multi-workspace"
-	BaseDir      string             `toml:"base_dir,omitempty"` // parent dir for workspaces
-	Agent        AgentConfig        `toml:"agent"`
-	Platforms    []PlatformConfig   `toml:"platforms"`
-	Heartbeat    HeartbeatConfig    `toml:"heartbeat"`
-	AutoCompress AutoCompressConfig `toml:"auto_compress"`
+	Name    string `toml:"name"`
+	Mode    string `toml:"mode,omitempty"`     // "" or "multi-workspace"
+	BaseDir string `toml:"base_dir,omitempty"` // parent dir for workspaces
+	SkipGit *bool  `toml:"skip_git,omitempty"`
+	// WorkspaceInitAllowLocalPaths allows /workspace init and the conversational
+	// init flow to bind existing local directories. Default false keeps init
+	// limited to git URLs; use /workspace bind or /workspace route for explicit
+	// local bindings.
+	WorkspaceInitAllowLocalPaths *bool              `toml:"workspace_init_allow_local_paths,omitempty"`
+	Agent                        AgentConfig        `toml:"agent"`
+	Platforms                    []PlatformConfig   `toml:"platforms"`
+	Heartbeat                    HeartbeatConfig    `toml:"heartbeat"`
+	AutoCompress                 AutoCompressConfig `toml:"auto_compress"`
 	// ResetOnIdleMins automatically rotates to a new cc-connect session after
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
-	// ShowContextIndicator: nil/true = append [ctx: ~N%] to assistant replies; false = hide.
-	ShowContextIndicator *bool        `toml:"show_context_indicator,omitempty"`
-	Quiet                *bool        `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
-	InjectSender         *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands     []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom            string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users                *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
+	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
+	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`
+	// RunAsUser, when set, causes the agent command for this project to be
+	// spawned under a different Unix user via `sudo -n -iu <user> --`. This
+	// provides OS-level file-system isolation from the supervisor user who
+	// runs cc-connect itself. Requires passwordless sudo to the target user
+	// and is POSIX-only. See docs/usage.md "Running agents as a different
+	// Unix user" for setup and migration.
+	RunAsUser string `toml:"run_as_user,omitempty"`
+	// RunAsEnv optionally extends the minimal environment variable allowlist
+	// that crosses the sudo boundary when RunAsUser is set. The default
+	// allowlist (LANG, LC_*, TERM) is always included; PATH is NOT preserved
+	// by default — the target user's login PATH is used. Dangerous variables
+	// (LD_PRELOAD, PATH, HOME, etc.) are rejected at config validation.
+	// Use this only for variables the target user cannot set in their profile.
+	RunAsEnv []string `toml:"run_as_env,omitempty"`
+	// ShowContextIndicator: nil/true = render the reply footer's first line
+	// (model · effort · token usage · context %); false = hide that line.
+	// Subordinate to ReplyFooter — the master footer toggle.
+	ShowContextIndicator *bool `toml:"show_context_indicator,omitempty"`
+	// ShowWorkdirIndicator: nil/true = render the reply footer's second line
+	// (workspace directory); false = hide that line. Subordinate to ReplyFooter.
+	ShowWorkdirIndicator *bool `toml:"show_workdir_indicator,omitempty"`
+	// ReplyFooter: nil/true = render the reply footer; false = disable it
+	// entirely (the per-line indicator flags above become no-ops).
+	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
+	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
+	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom        string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users            *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	// WorkspaceIdleTimeoutMinsLegacy is the deprecated per-project form of
+	// the workspace idle reaper timeout. New configs should set the top-level
+	// Config.WorkspaceIdleTimeoutMins instead. When the top-level field is
+	// unset, this legacy value is still honored (with a deprecation warning)
+	// to keep existing configs working. Will be removed in a future release.
+	WorkspaceIdleTimeoutMinsLegacy *int `toml:"workspace_idle_timeout_mins,omitempty"`
+	// Quiet is legacy per-project override; see Config.Quiet. When true and global [display]
+	// omits thinking_messages / tool_messages, those default to off for this project.
+	Quiet *bool `toml:"quiet,omitempty"`
+	// Display, when non-nil, overrides individual fields of the global [display]
+	// block for this project. Each sub-field is independently optional; unset
+	// fields fall back to the global [display] value, then to the built-in
+	// defaults. Example: enable verbose display globally but force quiet on a
+	// specific noisy project, or vice versa.
+	//
+	//   [display]
+	//   thinking_messages = true
+	//   tool_messages = true
+	//
+	//   [[projects]]
+	//   name = "noisy-project"
+	//   [projects.display]
+	//   thinking_messages = false
+	//   tool_messages = false
+	Display    *DisplayConfig  `toml:"display,omitempty"`
+	Observe    *ObserveConfig  `toml:"observe,omitempty"`
+	References ReferenceConfig `toml:"references,omitempty"`
+	// FilterExternalSessions: when true, /list only shows sessions created by
+	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
+	// Default is false (show all sessions).
+	FilterExternalSessions *bool `toml:"filter_external_sessions,omitempty"`
+	// Shell overrides the global shell for this project. See Config.Shell.
+	Shell string `toml:"shell,omitempty"`
+	// ShellProfile overrides the global shell_profile for this project.
+	ShellProfile string `toml:"shell_profile,omitempty"`
 }
 
 type AgentConfig struct {
-	Type      string           `toml:"type"`
-	Options   map[string]any   `toml:"options"`
-	Providers []ProviderConfig `toml:"providers"`
+	Type         string           `toml:"type"`
+	Options      map[string]any   `toml:"options"`
+	ProviderRefs []string         `toml:"provider_refs,omitempty"` // references to global [[providers]] by name
+	Providers    []ProviderConfig `toml:"providers"`
 }
 
 // ProviderModelConfig defines a selectable model entry for a provider,
@@ -225,13 +589,26 @@ type ProviderModelConfig struct {
 }
 
 type ProviderConfig struct {
-	Name     string                `toml:"name"`
-	APIKey   string                `toml:"api_key"`
-	BaseURL  string                `toml:"base_url,omitempty"`
-	Model    string                `toml:"model,omitempty"`
-	Models   []ProviderModelConfig `toml:"models,omitempty"`
-	Thinking string                `toml:"thinking,omitempty"`
-	Env      map[string]string     `toml:"env,omitempty"`
+	Name            string                           `toml:"name"`
+	APIKey          string                           `toml:"api_key"`
+	BaseURL         string                           `toml:"base_url,omitempty"`
+	Model           string                           `toml:"model,omitempty"`
+	Models          []ProviderModelConfig            `toml:"models,omitempty"`
+	Thinking        string                           `toml:"thinking,omitempty"`
+	Env             map[string]string                `toml:"env,omitempty"`
+	AgentTypes      []string                         `toml:"agent_types,omitempty"`       // optional: restrict to specific agent types (e.g. ["claudecode", "codex"])
+	Endpoints       map[string]string                `toml:"endpoints,omitempty"`         // per-agent-type base URL overrides (e.g. codex = "https://x/v1")
+	AgentModels     map[string]string                `toml:"agent_models,omitempty"`      // per-agent-type default model (e.g. codex = "openai/gpt-5.3-codex")
+	AgentModelLists map[string][]ProviderModelConfig `toml:"agent_model_lists,omitempty"` // per-agent-type model lists (overrides Models when matched)
+	Codex           *CodexProviderConfig             `toml:"codex,omitempty"`             // Codex-specific provider settings
+}
+
+// CodexProviderConfig holds Codex CLI-specific provider fields
+// that map to [model_providers.<name>] in Codex's own config.toml.
+type CodexProviderConfig struct {
+	EnvKey      string            `toml:"env_key,omitempty" json:"env_key,omitempty"`
+	WireAPI     string            `toml:"wire_api,omitempty" json:"wire_api,omitempty"`
+	HTTPHeaders map[string]string `toml:"http_headers,omitempty" json:"http_headers,omitempty"`
 }
 
 type PlatformConfig struct {
@@ -258,38 +635,446 @@ type LogConfig struct {
 	Level string `toml:"level"`
 }
 
-func Load(path string) (*Config, error) {
+// load parses, env-resolves, and wires providers in the config file but does
+// NOT validate — callers must call validate() or validatePermissive() themselves.
+func load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
-
-	cfg := &Config{
-		Log: LogConfig{Level: "info"},
-	}
+	cfg := &Config{Log: LogConfig{Level: "info"}}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-
+	resolveEnvInConfig(cfg)
+	expandHomeInConfig(cfg)
 	if cfg.DataDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			cfg.DataDir = filepath.Join(home, ".cc-connect")
 		} else {
+			// HOME unset (common when systemd unit does not inject it):
+			// warn loudly, because a relative data_dir will be resolved
+			// differently by any subprocess that changes cwd — most
+			// notably the claude/codex/etc. agent processes that cd into
+			// work_dir before reading files written by the supervisor.
 			cfg.DataDir = ".cc-connect"
+			slog.Warn("config: data_dir empty and HOME unset; falling back to relative path. Set data_dir to an absolute path in config.toml, or ensure the service manager injects HOME.")
 		}
+	}
+	cfg.DataDir = expandUserPath(cfg.DataDir)
+	// Always resolve to an absolute path so a data_dir written by the
+	// supervisor is read back at the same location by agent subprocesses
+	// regardless of their working directory. Users who write a relative
+	// data_dir explicitly still get it anchored to the supervisor's cwd
+	// (the same behaviour they would see running any other CLI).
+	if abs, err := filepath.Abs(cfg.DataDir); err == nil {
+		cfg.DataDir = abs
 	}
 	cfg.AttachmentSend = strings.ToLower(strings.TrimSpace(cfg.AttachmentSend))
 	if cfg.AttachmentSend == "" {
 		cfg.AttachmentSend = "on"
 	}
+	cfg.ResolveProviderRefs()
+	return cfg, nil
+}
 
+// LoadPermissive loads the config file and performs all validation except the
+// "at least one platform per project" check. Use this for commands (like
+// `cc-connect web`) that should work even before platforms are configured.
+func LoadPermissive(path string) (*Config, error) {
+	cfg, err := load(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.validatePermissive(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func Load(path string) (*Config, error) {
+	cfg, err := load(path)
+	if err != nil {
+		return nil, err
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
 }
 
+var envPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+func resolveEnvInConfig(cfg *Config) {
+	resolveEnvValue(reflect.ValueOf(cfg))
+}
+
+// expandHomeInConfig expands a leading ~ / ~/ in path-like agent options
+// (work_dir, base_dir) to the user's home directory. Without this, a config
+// like work_dir = "~/.codex/workspace" is passed literally to exec.Cmd.Dir,
+// which fails at spawn time with a misleading "fork/exec ...: no such file
+// or directory" that points at the agent binary instead of the directory.
+func expandHomeInConfig(cfg *Config) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	for i := range cfg.Projects {
+		proj := &cfg.Projects[i]
+		proj.BaseDir = expandLeadingHome(proj.BaseDir, home)
+		if v, ok := proj.Agent.Options["work_dir"]; ok {
+			if s, ok := v.(string); ok {
+				proj.Agent.Options["work_dir"] = expandLeadingHome(s, home)
+			}
+		}
+	}
+}
+
+// expandLeadingHome expands "~" and "~/" at the start of a path to home.
+func expandLeadingHome(s, home string) string {
+	if s == "~" {
+		return home
+	}
+	if strings.HasPrefix(s, "~/") {
+		return filepath.Join(home, s[2:])
+	}
+	return s
+}
+
+func resolveEnvValue(v reflect.Value) {
+	if !v.IsValid() {
+		return
+	}
+
+	switch v.Kind() {
+	case reflect.Pointer:
+		if !v.IsNil() {
+			resolveEnvValue(v.Elem())
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			resolveEnvValue(v.Field(i))
+		}
+	case reflect.String:
+		if v.CanSet() {
+			v.SetString(resolveEnvPlaceholders(v.String()))
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			elem := v.Index(i)
+			if elem.CanSet() {
+				elem.Set(resolveEnvClone(elem))
+				continue
+			}
+			resolveEnvValue(elem)
+		}
+	case reflect.Map:
+		if v.IsNil() {
+			return
+		}
+		iter := v.MapRange()
+		for iter.Next() {
+			v.SetMapIndex(iter.Key(), resolveEnvClone(iter.Value()))
+		}
+	case reflect.Interface:
+		if v.IsNil() || !v.CanSet() {
+			return
+		}
+		v.Set(resolveEnvClone(v.Elem()))
+	}
+}
+
+func resolveEnvClone(v reflect.Value) reflect.Value {
+	if !v.IsValid() {
+		return v
+	}
+
+	switch v.Kind() {
+	case reflect.String:
+		out := reflect.New(v.Type()).Elem()
+		out.SetString(resolveEnvPlaceholders(v.String()))
+		return out
+	case reflect.Pointer:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.New(v.Type().Elem())
+		out.Elem().Set(v.Elem())
+		resolveEnvValue(out.Elem())
+		return out
+	case reflect.Struct:
+		out := reflect.New(v.Type()).Elem()
+		out.Set(v)
+		resolveEnvValue(out)
+		return out
+	case reflect.Slice:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(resolveEnvClone(v.Index(i)))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(v.Type()).Elem()
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(resolveEnvClone(v.Index(i)))
+		}
+		return out
+	case reflect.Map:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.MakeMapWithSize(v.Type(), v.Len())
+		iter := v.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(iter.Key(), resolveEnvClone(iter.Value()))
+		}
+		return out
+	case reflect.Interface:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.New(v.Type()).Elem()
+		out.Set(resolveEnvClone(v.Elem()))
+		return out
+	default:
+		return v
+	}
+}
+
+func resolveEnvPlaceholders(s string) string {
+	if !strings.Contains(s, "${") {
+		return s
+	}
+	return envPlaceholderPattern.ReplaceAllStringFunc(s, func(match string) string {
+		parts := envPlaceholderPattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		val, ok := os.LookupEnv(parts[1])
+		if !ok {
+			slog.Warn("config: env var placeholder references unset variable",
+				"var", parts[1], "placeholder", match)
+		}
+		return val
+	})
+}
+
+// projectQuietEffective returns whether legacy quiet applies to this project: an explicit
+// per-project quiet overrides; otherwise the global root quiet applies.
+func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
+	if proj.Quiet != nil {
+		return *proj.Quiet
+	}
+	if cfg.Quiet != nil {
+		return *cfg.Quiet
+	}
+	return false
+}
+
+// EffectiveDisplay resolves the per-project [projects.display] override on top
+// of the global [display] block, falling back to built-in defaults.
+//
+// Resolution order for mode (thinking/tool visibility):
+//  1. Explicit [projects.display].mode wins.
+//  2. Explicit [display].mode wins.
+//  3. Legacy quiet = true (without display.mode) → "quiet".
+//  4. Default → "full".
+//
+// Resolution order for thinking_messages / tool_messages:
+//  1. project-level [projects.display].<field> (highest precedence)
+//  2. global [display].<field>
+//  3. mode-derived default (compact/quiet → false, full → true)
+func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showContextIndicator, replyFooter, hideAgentFooter bool) {
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
+	}
+
+	// Resolve mode.
+	mode = DisplayModeFull
+	if projDisp != nil && projDisp.Mode != nil {
+		mode = *projDisp.Mode
+	} else if cfg.Display.Mode != nil {
+		mode = *cfg.Display.Mode
+	} else if projectQuietEffective(cfg, proj) {
+		mode = DisplayModeQuiet
+	}
+
+	// Mode-derived defaults.
+	thinkingDefault, toolDefault := true, true
+	switch mode {
+	case DisplayModeCompact, DisplayModeQuiet:
+		thinkingDefault, toolDefault = false, false
+	}
+
+	pickBool := func(projVal, globalVal *bool, dflt bool) bool {
+		if projVal != nil {
+			return *projVal
+		}
+		if globalVal != nil {
+			return *globalVal
+		}
+		return dflt
+	}
+	pickInt := func(projVal, globalVal *int, dflt int) int {
+		if projVal != nil {
+			return *projVal
+		}
+		if globalVal != nil {
+			return *globalVal
+		}
+		return dflt
+	}
+
+	getProjBool := func(f func(*DisplayConfig) *bool) *bool {
+		if projDisp == nil {
+			return nil
+		}
+		return f(projDisp)
+	}
+	getProjInt := func(f func(*DisplayConfig) *int) *int {
+		if projDisp == nil {
+			return nil
+		}
+		return f(projDisp)
+	}
+
+	thinkingMessages = pickBool(
+		getProjBool(func(d *DisplayConfig) *bool { return d.ThinkingMessages }),
+		cfg.Display.ThinkingMessages,
+		thinkingDefault,
+	)
+	toolMessages = pickBool(
+		getProjBool(func(d *DisplayConfig) *bool { return d.ToolMessages }),
+		cfg.Display.ToolMessages,
+		toolDefault,
+	)
+	thinkingMaxLen = pickInt(
+		getProjInt(func(d *DisplayConfig) *int { return d.ThinkingMaxLen }),
+		cfg.Display.ThinkingMaxLen,
+		300,
+	)
+	toolMaxLen = pickInt(
+		getProjInt(func(d *DisplayConfig) *int { return d.ToolMaxLen }),
+		cfg.Display.ToolMaxLen,
+		500,
+	)
+
+	// ShowContextIndicator precedence: proj.ShowContextIndicator > proj.Display.ShowContextIndicator > cfg.Display.ShowContextIndicator > default true
+	if proj != nil && proj.ShowContextIndicator != nil {
+		showContextIndicator = *proj.ShowContextIndicator
+	} else if projDisp != nil && projDisp.ShowContextIndicator != nil {
+		showContextIndicator = *projDisp.ShowContextIndicator
+	} else if cfg.Display.ShowContextIndicator != nil {
+		showContextIndicator = *cfg.Display.ShowContextIndicator
+	} else {
+		showContextIndicator = true
+	}
+
+	// ReplyFooter precedence: proj.ReplyFooter > proj.Display.ReplyFooter > cfg.Display.ReplyFooter > default true
+	if proj != nil && proj.ReplyFooter != nil {
+		replyFooter = *proj.ReplyFooter
+	} else if projDisp != nil && projDisp.ReplyFooter != nil {
+		replyFooter = *projDisp.ReplyFooter
+	} else if cfg.Display.ReplyFooter != nil {
+		replyFooter = *cfg.Display.ReplyFooter
+	} else {
+		replyFooter = true
+	}
+
+	hideAgentFooter = pickBool(
+		getProjBool(func(d *DisplayConfig) *bool { return d.HideAgentFooter }),
+		cfg.Display.HideAgentFooter,
+		false,
+	)
+
+	return
+}
+
+// EffectiveHistoryMaxLen returns the per-entry /history truncation length.
+// Resolution: project [display] > global [display] > default 1000. A value
+// of 0 disables truncation.
+func EffectiveHistoryMaxLen(cfg *Config, proj *ProjectConfig) int {
+	if proj != nil && proj.Display != nil && proj.Display.HistoryMaxLen != nil {
+		return *proj.Display.HistoryMaxLen
+	}
+	if cfg != nil && cfg.Display.HistoryMaxLen != nil {
+		return *cfg.Display.HistoryMaxLen
+	}
+	return 1000
+}
+
+// EffectiveShell returns the shell binary, flag, and init command for the project.
+// Resolution: per-project > global > platform default.
+// The flag is auto-detected: "/C" for cmd, "-Command" for powershell/pwsh, "-c" for everything else.
+func EffectiveShell(cfg *Config, proj *ProjectConfig) (shell, flag, shellProfile string) {
+	s := ""
+	p := ""
+	if proj != nil {
+		s = proj.Shell
+		p = proj.ShellProfile
+	}
+	if s == "" {
+		s = cfg.Shell
+	}
+	if p == "" {
+		p = cfg.ShellProfile
+	}
+	if s == "" {
+		if runtime.GOOS == "windows" {
+			return "powershell.exe", "-Command", p
+		}
+		return "sh", "-c", p
+	}
+	base := strings.ToLower(filepath.Base(s))
+	switch {
+	case base == "cmd" || base == "cmd.exe":
+		return s, "/C", p
+	case strings.HasPrefix(base, "powershell") || strings.HasPrefix(base, "pwsh"):
+		return s, "-Command", p
+	default:
+		return s, "-c", p
+	}
+}
+
+// EffectiveCardMode returns the card rendering mode for the project: "rich" (Feishu Card 2.0)
+// or "legacy" (default plain messages). Per-project overrides global.
+func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
+	}
+	if projDisp != nil && projDisp.CardMode != nil {
+		if m := strings.ToLower(strings.TrimSpace(*projDisp.CardMode)); m == "rich" || m == "legacy" {
+			return m
+		}
+	}
+	if cfg.Display.CardMode != nil {
+		if m := strings.ToLower(strings.TrimSpace(*cfg.Display.CardMode)); m == "rich" || m == "legacy" {
+			return m
+		}
+	}
+	return "legacy"
+}
+
+// validatePermissive is like validate but skips the "at least one platform"
+// requirement so that commands like `cc-connect web` can operate on agent-only
+// configs before platforms have been set up.
+func (c *Config) validatePermissive() error {
+	return c.validateInternal(true)
+}
+
 func (c *Config) validate() error {
+	return c.validateInternal(false)
+}
+
+func (c *Config) validateInternal(permissive bool) error {
+	if err := validateDisplayConfig("display", &c.Display); err != nil {
+		return err
+	}
 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
 	case "", "on", "off":
 	default:
@@ -297,6 +1082,11 @@ func (c *Config) validate() error {
 	}
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Relay.Visibility)) {
+	case "", "full", "summary", "none":
+	default:
+		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
@@ -309,7 +1099,7 @@ func (c *Config) validate() error {
 		if proj.Agent.Type == "" {
 			return fmt.Errorf("config: %s.agent.type is required", prefix)
 		}
-		if len(proj.Platforms) == 0 {
+		if len(proj.Platforms) == 0 && !permissive {
 			return fmt.Errorf("config: %s needs at least one [[projects.platforms]]", prefix)
 		}
 		for j, p := range proj.Platforms {
@@ -328,9 +1118,110 @@ func (c *Config) validate() error {
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
 		}
+		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
+			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)
+		}
+		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
+			return err
+		}
+		if err := validateRunAsEnv(prefix, proj.RunAsEnv); err != nil {
+			return err
+		}
+		if err := validateReferenceConfig(prefix, proj.References); err != nil {
+			return err
+		}
 		if err := validateUsersConfig(prefix, proj.Users); err != nil {
 			return err
 		}
+		if err := validateDisplayConfig(prefix+".display", proj.Display); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDisplayConfig(prefix string, display *DisplayConfig) error {
+	if display == nil {
+		return nil
+	}
+	if display.Mode != nil {
+		switch *display.Mode {
+		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
+		default:
+			return fmt.Errorf("config: %s.mode must be \"full\", \"compact\", or \"quiet\"", prefix)
+		}
+	}
+	if display.CardMode != nil {
+		switch strings.ToLower(strings.TrimSpace(*display.CardMode)) {
+		case "legacy", "rich":
+		default:
+			return fmt.Errorf("config: %s.card_mode must be \"legacy\" or \"rich\"", prefix)
+		}
+	}
+	if display.HistoryMaxLen != nil && *display.HistoryMaxLen < 0 {
+		return fmt.Errorf("config: %s.history_max_len must be >= 0", prefix)
+	}
+	return nil
+}
+
+var supportedReferenceAgents = map[string]struct{}{
+	"all":        {},
+	"codex":      {},
+	"claudecode": {},
+}
+
+var supportedReferencePlatforms = map[string]struct{}{
+	"all":    {},
+	"feishu": {},
+	"weixin": {},
+}
+
+var supportedReferenceDisplayPaths = map[string]struct{}{
+	"":                 {},
+	"absolute":         {},
+	"relative":         {},
+	"basename":         {},
+	"dirname_basename": {},
+	"smart":            {},
+}
+
+var supportedReferenceMarkerStyles = map[string]struct{}{
+	"":      {},
+	"none":  {},
+	"ascii": {},
+	"emoji": {},
+}
+
+var supportedReferenceEnclosureStyles = map[string]struct{}{
+	"":          {},
+	"none":      {},
+	"bracket":   {},
+	"angle":     {},
+	"fullwidth": {},
+	"code":      {},
+}
+
+func validateReferenceConfig(prefix string, rc ReferenceConfig) error {
+	for _, v := range rc.NormalizeAgents {
+		key := strings.ToLower(strings.TrimSpace(v))
+		if _, ok := supportedReferenceAgents[key]; !ok {
+			return fmt.Errorf("config: %s.references.normalize_agents has unsupported value %q", prefix, v)
+		}
+	}
+	for _, v := range rc.RenderPlatforms {
+		key := strings.ToLower(strings.TrimSpace(v))
+		if _, ok := supportedReferencePlatforms[key]; !ok {
+			return fmt.Errorf("config: %s.references.render_platforms has unsupported value %q", prefix, v)
+		}
+	}
+	if _, ok := supportedReferenceDisplayPaths[strings.ToLower(strings.TrimSpace(rc.DisplayPath))]; !ok {
+		return fmt.Errorf("config: %s.references.display_path has unsupported value %q", prefix, rc.DisplayPath)
+	}
+	if _, ok := supportedReferenceMarkerStyles[strings.ToLower(strings.TrimSpace(rc.MarkerStyle))]; !ok {
+		return fmt.Errorf("config: %s.references.marker_style has unsupported value %q", prefix, rc.MarkerStyle)
+	}
+	if _, ok := supportedReferenceEnclosureStyles[strings.ToLower(strings.TrimSpace(rc.EnclosureStyle))]; !ok {
+		return fmt.Errorf("config: %s.references.enclosure_style has unsupported value %q", prefix, rc.EnclosureStyle)
 	}
 	return nil
 }
@@ -373,33 +1264,17 @@ func validateUsersConfig(prefix string, u *UsersConfig) error {
 }
 
 // SaveActiveProvider persists the active provider name for a project.
+// It uses surgical text editing to preserve comments and unknown fields.
 func SaveActiveProvider(projectName, providerName string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	for i := range cfg.Projects {
-		if cfg.Projects[i].Name == projectName {
-			if cfg.Projects[i].Agent.Options == nil {
-				cfg.Projects[i].Agent.Options = make(map[string]any)
-			}
-			cfg.Projects[i].Agent.Options["provider"] = providerName
-			break
-		}
-	}
-	return saveConfig(cfg)
+	return patchProjectAgentOption(projectName, "provider", providerName)
 }
 
 // SaveProviderModel persists the selected model for a provider in a project.
+// It first looks in the project's inline providers, then falls back to
+// global [[providers]] if the provider is referenced via provider_refs.
+// Uses surgical text editing to preserve comments and unknown fields.
 func SaveProviderModel(projectName, providerName, model string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -410,53 +1285,83 @@ func SaveProviderModel(projectName, providerName, model string) error {
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
 	}
+	raw := string(data)
 	cfg := &Config{}
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
 
+	projectIdx := -1
 	for i := range cfg.Projects {
-		if cfg.Projects[i].Name != projectName {
+		if cfg.Projects[i].Name == projectName {
+			projectIdx = i
+			break
+		}
+	}
+	if projectIdx < 0 {
+		return fmt.Errorf("project %q not found in config", projectName)
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	spans := buildRawProjectSpans(lines)
+	if projectIdx >= len(spans) {
+		return fmt.Errorf("project %q located in parsed config but not raw file", projectName)
+	}
+	projSpan := spans[projectIdx]
+
+	for j, prov := range cfg.Projects[projectIdx].Agent.Providers {
+		if prov.Name == providerName {
+			if j < len(projSpan.agentProviders) {
+				ps := projSpan.agentProviders[j]
+				lines = upsertTomlStringKey(lines, ps.start+1, ps.end, "model", model)
+				return writeRawConfig(joinConfigLines(lines, hadTrailing))
+			}
+			break
+		}
+	}
+
+	for _, ref := range cfg.Projects[projectIdx].Agent.ProviderRefs {
+		if ref == providerName {
+			return patchGlobalProviderField(lines, hadTrailing, cfg, providerName, "model", model)
+		}
+	}
+	return fmt.Errorf("provider %q not found in project %q", providerName, projectName)
+}
+
+func patchGlobalProviderField(lines []string, hadTrailing bool, cfg *Config, providerName, key, value string) error {
+	globalStarts := make([]int, 0, 4)
+	for i := range lines {
+		if matchTableHeader(lines[i], "[[providers]]") {
+			globalStarts = append(globalStarts, i)
+		}
+	}
+	for k, gp := range cfg.Providers {
+		if gp.Name != providerName || k >= len(globalStarts) {
 			continue
 		}
-		for j := range cfg.Projects[i].Agent.Providers {
-			if cfg.Projects[i].Agent.Providers[j].Name == providerName {
-				cfg.Projects[i].Agent.Providers[j].Model = model
-				return saveConfig(cfg)
+		gstart := globalStarts[k]
+		gend := len(lines) - 1
+		if k+1 < len(globalStarts) {
+			gend = globalStarts[k+1] - 1
+		}
+		for j := gstart + 1; j <= gend; j++ {
+			if isAnyTableHeader(lines[j]) {
+				gend = j - 1
+				break
 			}
 		}
-		return fmt.Errorf("provider %q not found in project %q", providerName, projectName)
+		lines = upsertTomlStringKey(lines, gstart+1, gend, key, value)
+		return writeRawConfig(joinConfigLines(lines, hadTrailing))
 	}
-	return fmt.Errorf("project %q not found in config", projectName)
+	return fmt.Errorf("global provider %q not found", providerName)
 }
 
 // SaveAgentModel persists the selected default model for a project's agent.
+// It uses surgical text editing to preserve comments and unknown fields.
 func SaveAgentModel(projectName, model string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-
-	for i := range cfg.Projects {
-		if cfg.Projects[i].Name != projectName {
-			continue
-		}
-		if cfg.Projects[i].Agent.Options == nil {
-			cfg.Projects[i].Agent.Options = make(map[string]any)
-		}
-		cfg.Projects[i].Agent.Options["model"] = model
-		return saveConfig(cfg)
-	}
-	return fmt.Errorf("project %q not found in config", projectName)
+	return patchProjectAgentOption(projectName, "model", model)
 }
 
 // AddProviderToConfig adds a provider to a project's agent config and saves.
@@ -495,6 +1400,8 @@ func AddProviderToConfig(projectName string, provider ProviderConfig) error {
 }
 
 // RemoveProviderFromConfig removes a provider from a project's agent config and saves.
+// For global providers referenced via provider_refs, it removes the reference
+// instead of deleting the global definition.
 func RemoveProviderFromConfig(projectName, providerName string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -512,22 +1419,195 @@ func RemoveProviderFromConfig(projectName, providerName string) error {
 
 	found := false
 	for i := range cfg.Projects {
-		if cfg.Projects[i].Name == projectName {
-			providers := cfg.Projects[i].Agent.Providers
-			for j := range providers {
-				if providers[j].Name == providerName {
-					cfg.Projects[i].Agent.Providers = append(providers[:j], providers[j+1:]...)
-					found = true
-					break
-				}
-			}
-			break
+		if cfg.Projects[i].Name != projectName {
+			continue
 		}
+		// Check inline providers
+		providers := cfg.Projects[i].Agent.Providers
+		for j := range providers {
+			if providers[j].Name == providerName {
+				cfg.Projects[i].Agent.Providers = append(providers[:j], providers[j+1:]...)
+				found = true
+				break
+			}
+		}
+		// Also remove from provider_refs if present
+		refs := cfg.Projects[i].Agent.ProviderRefs
+		for j := range refs {
+			if refs[j] == providerName {
+				cfg.Projects[i].Agent.ProviderRefs = append(refs[:j], refs[j+1:]...)
+				found = true
+				break
+			}
+		}
+		break
 	}
 	if !found {
 		return fmt.Errorf("provider %q not found in project %q", providerName, projectName)
 	}
 	return saveConfig(cfg)
+}
+
+// ResolveProviderRefs merges global [[providers]] into each project that uses
+// provider_refs. Inline [[projects.agent.providers]] entries are appended after
+// resolved refs; if an inline entry has the same name as a global one, the
+// inline entry wins (override).
+func (cfg *Config) ResolveProviderRefs() {
+	if len(cfg.Providers) == 0 {
+		return
+	}
+	globalByName := make(map[string]ProviderConfig, len(cfg.Providers))
+	for _, p := range cfg.Providers {
+		globalByName[p.Name] = p
+	}
+	for i := range cfg.Projects {
+		refs := cfg.Projects[i].Agent.ProviderRefs
+		if len(refs) == 0 {
+			continue
+		}
+		agentType := cfg.Projects[i].Agent.Type
+		inlineNames := make(map[string]bool, len(cfg.Projects[i].Agent.Providers))
+		for _, p := range cfg.Projects[i].Agent.Providers {
+			inlineNames[p.Name] = true
+		}
+		var resolved []ProviderConfig
+		for _, name := range refs {
+			if inlineNames[name] {
+				continue // inline override takes precedence
+			}
+			gp, ok := globalByName[name]
+			if !ok {
+				slog.Warn("provider ref not found in global [[providers]]", "project", cfg.Projects[i].Name, "ref", name)
+				continue
+			}
+			if len(gp.AgentTypes) > 0 && !containsString(gp.AgentTypes, agentType) {
+				slog.Debug("skipping provider: agent type mismatch", "provider", name, "project", cfg.Projects[i].Name,
+					"provider_agents", gp.AgentTypes, "project_agent", agentType)
+				continue
+			}
+			resolved = append(resolved, gp.ResolveForAgent(agentType))
+		}
+		cfg.Projects[i].Agent.Providers = append(resolved, cfg.Projects[i].Agent.Providers...)
+	}
+}
+
+// ResolveForAgent applies per-agent-type overrides (Endpoints, AgentModels,
+// AgentModelLists) to a copy of the provider and returns it.
+func (p ProviderConfig) ResolveForAgent(agentType string) ProviderConfig {
+	if ep, ok := p.Endpoints[agentType]; ok && ep != "" {
+		p.BaseURL = ep
+	}
+	if am, ok := p.AgentModels[agentType]; ok && am != "" {
+		p.Model = am
+	}
+	if aml, ok := p.AgentModelLists[agentType]; ok && len(aml) > 0 {
+		p.Models = aml
+	}
+	return p
+}
+
+func containsString(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// ── Global provider CRUD ───────────────────────────────────────
+
+// ListGlobalProviders returns the top-level [[providers]] list.
+func ListGlobalProviders() ([]ProviderConfig, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := loadLocked()
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Providers, nil
+}
+
+// AddGlobalProvider appends a provider to the top-level [[providers]] and saves.
+func AddGlobalProvider(provider ProviderConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := loadLocked()
+	if err != nil {
+		return err
+	}
+	for _, existing := range cfg.Providers {
+		if existing.Name == provider.Name {
+			return fmt.Errorf("global provider %q already exists", provider.Name)
+		}
+	}
+	cfg.Providers = append(cfg.Providers, provider)
+	return saveConfig(cfg)
+}
+
+// UpdateGlobalProvider replaces an existing global provider by name.
+func UpdateGlobalProvider(name string, provider ProviderConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := loadLocked()
+	if err != nil {
+		return err
+	}
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == name {
+			provider.Name = name // name is immutable in update
+			cfg.Providers[i] = provider
+			return saveConfig(cfg)
+		}
+	}
+	return fmt.Errorf("global provider %q not found", name)
+}
+
+// RemoveGlobalProvider removes a provider from top-level [[providers]] and
+// also strips the name from every project's provider_refs, then saves.
+func RemoveGlobalProvider(name string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := loadLocked()
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == name {
+			cfg.Providers = append(cfg.Providers[:i], cfg.Providers[i+1:]...)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("global provider %q not found", name)
+	}
+	for i := range cfg.Projects {
+		refs := cfg.Projects[i].Agent.ProviderRefs
+		for j := 0; j < len(refs); j++ {
+			if refs[j] == name {
+				cfg.Projects[i].Agent.ProviderRefs = append(refs[:j], refs[j+1:]...)
+				break
+			}
+		}
+	}
+	return saveConfig(cfg)
+}
+
+func loadLocked() (*Config, error) {
+	if ConfigPath == "" {
+		return nil, fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	return cfg, nil
 }
 
 func saveConfig(cfg *Config) error {
@@ -568,7 +1648,7 @@ func saveConfig(cfg *Config) error {
 //   - removes empty section headers (no key-value pairs between this header and the next)
 //
 // It deliberately keeps all key-value lines intact, including zero-value ones
-// (e.g. `quiet = false`, `port = 0`), because those may be explicitly set by the user.
+// (e.g. `thinking_messages = false`, `port = 0`), because those may be explicitly set by the user.
 func formatTOML(raw string) string {
 	lines := strings.Split(raw, "\n")
 
@@ -638,22 +1718,11 @@ func formatTOML(raw string) string {
 }
 
 // SaveLanguage saves the language setting to the config file.
+// Uses surgical text editing to preserve comments and unknown fields.
 func SaveLanguage(lang string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	cfg.Language = lang
-	return saveConfig(cfg)
+	return patchTopLevelField("language", lang)
 }
 
 // ListProjects returns project names from the config file.
@@ -788,49 +1857,44 @@ func RemoveAlias(name string) error {
 }
 
 // SaveDisplayConfig persists the display settings to the config file.
-func SaveDisplayConfig(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+// Uses surgical text editing to preserve comments and unknown fields.
+func SaveDisplayConfig(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
+	if mode != nil {
+		if err := patchSectionField("display", "mode", quoteTomlString(*mode)); err != nil {
+			return err
+		}
 	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
+	if thinkingMessages != nil {
+		if err := patchSectionField("display", "thinking_messages", fmt.Sprintf("%t", *thinkingMessages)); err != nil {
+			return err
+		}
 	}
 	if thinkingMaxLen != nil {
-		cfg.Display.ThinkingMaxLen = thinkingMaxLen
+		if err := patchSectionField("display", "thinking_max_len", fmt.Sprintf("%d", *thinkingMaxLen)); err != nil {
+			return err
+		}
 	}
 	if toolMaxLen != nil {
-		cfg.Display.ToolMaxLen = toolMaxLen
+		if err := patchSectionField("display", "tool_max_len", fmt.Sprintf("%d", *toolMaxLen)); err != nil {
+			return err
+		}
 	}
 	if toolMessages != nil {
-		cfg.Display.ToolMessages = toolMessages
+		if err := patchSectionField("display", "tool_messages", fmt.Sprintf("%t", *toolMessages)); err != nil {
+			return err
+		}
 	}
-	return saveConfig(cfg)
+	return nil
 }
 
 // SaveTTSMode persists the TTS mode setting to the config file.
+// Uses surgical text editing to preserve comments and unknown fields.
 func SaveTTSMode(mode string) error {
 	configMu.Lock()
 	defer configMu.Unlock()
-	if ConfigPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	data, err := os.ReadFile(ConfigPath)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-	cfg := &Config{}
-	if err := toml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("parse config: %w", err)
-	}
-	cfg.TTS.TTSMode = mode
-	return saveConfig(cfg)
+	return patchSectionField("tts", "tts_mode", quoteTomlString(mode))
 }
 
 // GetProjectProviders returns providers for a given project.
@@ -1536,6 +2600,303 @@ func SaveWeixinPlatformCredentials(opts WeixinCredentialUpdateOptions) (*WeixinC
 	}, nil
 }
 
+func firstYuanbaoPlatformIndex(platforms []PlatformConfig) int {
+	for i := range platforms {
+		t := strings.ToLower(strings.TrimSpace(platforms[i].Type))
+		if t == "yuanbao" {
+			return i
+		}
+	}
+	return -1
+}
+
+// EnsureProjectWithYuanbaoOptions controls project auto-provisioning for Yuanbao setup.
+type EnsureProjectWithYuanbaoOptions struct {
+	ProjectName      string
+	CloneFromProject string
+	WorkDir          string
+	AgentType        string
+}
+
+// EnsureProjectWithYuanbaoResult describes whether project provisioning created a new project or platform block.
+type EnsureProjectWithYuanbaoResult struct {
+	Created          bool
+	AddedPlatform    bool
+	ProjectIndex     int
+	PlatformAbsIndex int
+}
+
+// EnsureProjectWithYuanbaoPlatform ensures the target project exists and has a yuanbao platform entry.
+func EnsureProjectWithYuanbaoPlatform(opts EnsureProjectWithYuanbaoOptions) (*EnsureProjectWithYuanbaoResult, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	if ConfigPath == "" {
+		return nil, fmt.Errorf("config path not set")
+	}
+	projectName := strings.TrimSpace(opts.ProjectName)
+	if projectName == "" {
+		return nil, fmt.Errorf("project name is required")
+	}
+
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name != projectName {
+			continue
+		}
+		platformIdx := firstYuanbaoPlatformIndex(cfg.Projects[i].Platforms)
+		added := false
+		if platformIdx < 0 {
+			lines, hadTrailing := splitConfigLines(raw)
+			spans := buildRawProjectSpans(lines)
+			if i >= len(spans) {
+				return nil, fmt.Errorf("project %q located in parsed config but not raw file", projectName)
+			}
+			insertAt := spans[i].end + 1
+			block := make([]string, 0, 7)
+			if insertAt > 0 && strings.TrimSpace(lines[insertAt-1]) != "" {
+				block = append(block, "")
+			}
+			block = append(block, "[[projects.platforms]]")
+			block = append(block, `type = "yuanbao"`)
+			block = append(block, "")
+			block = append(block, "[projects.platforms.options]")
+			if insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) != "" {
+				block = append(block, "")
+			}
+			lines = insertLines(lines, insertAt, block)
+			if err := writeRawConfig(joinConfigLines(lines, hadTrailing)); err != nil {
+				return nil, err
+			}
+			platformIdx = len(cfg.Projects[i].Platforms)
+			added = true
+		}
+		return &EnsureProjectWithYuanbaoResult{
+			Created:          false,
+			AddedPlatform:    added,
+			ProjectIndex:     i,
+			PlatformAbsIndex: platformIdx,
+		}, nil
+	}
+
+	proj := ProjectConfig{
+		Name:      projectName,
+		Agent:     pickAgentTemplateForNewProject(cfg, EnsureProjectWithFeishuOptions{CloneFromProject: opts.CloneFromProject, WorkDir: opts.WorkDir, AgentType: opts.AgentType}),
+		Platforms: []PlatformConfig{{Type: "yuanbao", Options: map[string]any{}}},
+	}
+	if proj.Agent.Type == "" {
+		proj.Agent.Type = "codex"
+	}
+	if proj.Agent.Options == nil {
+		proj.Agent.Options = map[string]any{}
+	}
+	workDir := strings.TrimSpace(opts.WorkDir)
+	if workDir != "" {
+		proj.Agent.Options["work_dir"] = workDir
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
+		lines = append(lines, "")
+	}
+	lines = append(lines, "[[projects]]")
+	lines = append(lines, fmt.Sprintf("name = %s", quoteTomlString(proj.Name)))
+	lines = append(lines, "")
+	lines = append(lines, "[projects.agent]")
+	lines = append(lines, fmt.Sprintf("type = %s", quoteTomlString(proj.Agent.Type)))
+	lines = append(lines, "")
+	lines = append(lines, "[projects.agent.options]")
+	if wd, ok := proj.Agent.Options["work_dir"].(string); ok && strings.TrimSpace(wd) != "" {
+		lines = append(lines, fmt.Sprintf("work_dir = %s", quoteTomlString(wd)))
+	}
+	if mode, ok := proj.Agent.Options["mode"].(string); ok && strings.TrimSpace(mode) != "" {
+		lines = append(lines, fmt.Sprintf("mode = %s", quoteTomlString(mode)))
+	}
+	lines = append(lines, "")
+	lines = append(lines, "[[projects.platforms]]")
+	lines = append(lines, `type = "yuanbao"`)
+	lines = append(lines, "")
+	lines = append(lines, "[projects.platforms.options]")
+	if err := writeRawConfig(joinConfigLines(lines, hadTrailing)); err != nil {
+		return nil, err
+	}
+
+	return &EnsureProjectWithYuanbaoResult{
+		Created:          true,
+		AddedPlatform:    false,
+		ProjectIndex:     len(cfg.Projects),
+		PlatformAbsIndex: 0,
+	}, nil
+}
+
+// YuanbaoCredentialUpdateOptions updates credentials for a project's Yuanbao platform.
+type YuanbaoCredentialUpdateOptions struct {
+	ProjectName   string
+	PlatformIndex int    // 1-based index among yuanbao platforms; 0 = first
+	BotToken      string // "app_key:app_secret"; required
+	APIDomain     string // optional; empty = do not change
+	WSURL         string // optional; empty = do not change
+	RouteEnv      string // optional; empty = do not change
+	AllowFrom     string // optional; empty = do not change
+}
+
+// YuanbaoCredentialUpdateResult describes where credentials were written.
+type YuanbaoCredentialUpdateResult struct {
+	ProjectName      string
+	ProjectIndex     int
+	PlatformAbsIndex int
+	AllowFrom        string
+}
+
+// SaveYuanbaoPlatformCredentials updates bot_token (and optional fields)
+// for a project's Yuanbao platform.
+func SaveYuanbaoPlatformCredentials(opts YuanbaoCredentialUpdateOptions) (*YuanbaoCredentialUpdateResult, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	if ConfigPath == "" {
+		return nil, fmt.Errorf("config path not set")
+	}
+	if strings.TrimSpace(opts.ProjectName) == "" {
+		return nil, fmt.Errorf("project name is required")
+	}
+	botToken := strings.TrimSpace(opts.BotToken)
+	idx := strings.Index(botToken, ":")
+	if botToken == "" || idx <= 0 || idx >= len(botToken)-1 {
+		return nil, fmt.Errorf("bot_token is required (format: app_key:app_secret)")
+	}
+	if opts.PlatformIndex < 0 {
+		return nil, fmt.Errorf("platform index must be >= 0")
+	}
+
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	projectIdx := -1
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == opts.ProjectName {
+			projectIdx = i
+			break
+		}
+	}
+	if projectIdx < 0 {
+		return nil, fmt.Errorf("project %q not found", opts.ProjectName)
+	}
+
+	proj := &cfg.Projects[projectIdx]
+	candidates := make([]int, 0, len(proj.Platforms))
+	for i := range proj.Platforms {
+		t := strings.ToLower(strings.TrimSpace(proj.Platforms[i].Type))
+		if t == "yuanbao" {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("project %q has no yuanbao platform", opts.ProjectName)
+	}
+
+	targetPos := 0
+	if opts.PlatformIndex > 0 {
+		targetPos = opts.PlatformIndex - 1
+	}
+	if targetPos < 0 || targetPos >= len(candidates) {
+		return nil, fmt.Errorf(
+			"platform index %d out of range: project %q has %d yuanbao platform(s)",
+			opts.PlatformIndex, opts.ProjectName, len(candidates),
+		)
+	}
+
+	absIdx := candidates[targetPos]
+	platform := &proj.Platforms[absIdx]
+	if platform.Options == nil {
+		platform.Options = map[string]any{}
+	}
+
+	platform.Options["bot_token"] = botToken
+
+	allowFrom := strings.TrimSpace(stringOption(platform.Options["allow_from"]))
+	if v := strings.TrimSpace(opts.AllowFrom); v != "" {
+		allowFrom = v
+		platform.Options["allow_from"] = v
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	spans := buildRawProjectSpans(lines)
+	if projectIdx >= len(spans) {
+		return nil, fmt.Errorf("project %q located in parsed config but not raw file", opts.ProjectName)
+	}
+	if absIdx >= len(spans[projectIdx].platforms) {
+		return nil, fmt.Errorf("yuanbao platform located in parsed config but not raw file")
+	}
+
+	reloadSpan := func() rawPlatformSpan {
+		spans = buildRawProjectSpans(lines)
+		return spans[projectIdx].platforms[absIdx]
+	}
+	span := reloadSpan()
+
+	if span.optionsStart < 0 {
+		insertAt := span.end + 1
+		block := make([]string, 0, 4)
+		if insertAt > 0 && strings.TrimSpace(lines[insertAt-1]) != "" {
+			block = append(block, "")
+		}
+		block = append(block, "[projects.platforms.options]")
+		if insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) != "" {
+			block = append(block, "")
+		}
+		lines = insertLines(lines, insertAt, block)
+		span = reloadSpan()
+	}
+
+	lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "bot_token", botToken)
+	span = reloadSpan()
+
+	if v := strings.TrimSpace(opts.APIDomain); v != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "api_domain", v)
+		span = reloadSpan()
+	}
+	if v := strings.TrimSpace(opts.WSURL); v != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "ws_url", v)
+		span = reloadSpan()
+	}
+	if v := strings.TrimSpace(opts.RouteEnv); v != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "route_env", v)
+		span = reloadSpan()
+	}
+	if v := strings.TrimSpace(opts.AllowFrom); v != "" {
+		lines = upsertTomlStringKey(lines, span.optionsStart+1, span.optionsEnd, "allow_from", v)
+		span = reloadSpan()
+	}
+
+	if err := writeRawConfig(joinConfigLines(lines, hadTrailing)); err != nil {
+		return nil, err
+	}
+
+	return &YuanbaoCredentialUpdateResult{
+		ProjectName:      opts.ProjectName,
+		ProjectIndex:     projectIdx,
+		PlatformAbsIndex: absIdx,
+		AllowFrom:        allowFrom,
+	}, nil
+}
+
 func pickAgentTemplateForNewProject(cfg *Config, opts EnsureProjectWithFeishuOptions) AgentConfig {
 	cloneName := strings.TrimSpace(opts.CloneFromProject)
 	if cloneName != "" {
@@ -1546,9 +2907,15 @@ func pickAgentTemplateForNewProject(cfg *Config, opts EnsureProjectWithFeishuOpt
 		}
 	}
 	if agentType := strings.TrimSpace(opts.AgentType); agentType != "" {
+		realType, preset, _ := strings.Cut(agentType, ":")
+		agentOpts := map[string]any{}
+		if realType == "acp" && preset != "" {
+			agentOpts["command"] = preset
+			agentOpts["display_name"] = preset
+		}
 		return AgentConfig{
-			Type:    agentType,
-			Options: map[string]any{},
+			Type:    realType,
+			Options: agentOpts,
 		}
 	}
 	if len(cfg.Projects) > 0 {
@@ -1568,15 +2935,31 @@ func cloneAgentConfig(in AgentConfig) AgentConfig {
 	if len(in.Providers) > 0 {
 		out.Providers = make([]ProviderConfig, len(in.Providers))
 		for i := range in.Providers {
-			out.Providers[i] = ProviderConfig{
-				Name:     in.Providers[i].Name,
-				APIKey:   in.Providers[i].APIKey,
-				BaseURL:  in.Providers[i].BaseURL,
-				Model:    in.Providers[i].Model,
-				Models:   append([]ProviderModelConfig(nil), in.Providers[i].Models...),
-				Thinking: in.Providers[i].Thinking,
-				Env:      cloneStringMap(in.Providers[i].Env),
+			p := ProviderConfig{
+				Name:        in.Providers[i].Name,
+				APIKey:      in.Providers[i].APIKey,
+				BaseURL:     in.Providers[i].BaseURL,
+				Model:       in.Providers[i].Model,
+				Models:      append([]ProviderModelConfig(nil), in.Providers[i].Models...),
+				Thinking:    in.Providers[i].Thinking,
+				Env:         cloneStringMap(in.Providers[i].Env),
+				Endpoints:   cloneStringMap(in.Providers[i].Endpoints),
+				AgentModels: cloneStringMap(in.Providers[i].AgentModels),
 			}
+			if len(in.Providers[i].AgentModelLists) > 0 {
+				p.AgentModelLists = make(map[string][]ProviderModelConfig, len(in.Providers[i].AgentModelLists))
+				for k, v := range in.Providers[i].AgentModelLists {
+					p.AgentModelLists[k] = append([]ProviderModelConfig(nil), v...)
+				}
+			}
+			if in.Providers[i].Codex != nil {
+				p.Codex = &CodexProviderConfig{
+					EnvKey:      in.Providers[i].Codex.EnvKey,
+					WireAPI:     in.Providers[i].Codex.WireAPI,
+					HTTPHeaders: cloneStringMap(in.Providers[i].Codex.HTTPHeaders),
+				}
+			}
+			out.Providers[i] = p
 		}
 	}
 	return out
@@ -1604,10 +2987,170 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
+// patchProjectAgentOption does a surgical text-level update of a single key
+// under [projects.agent.options] for the given project. It preserves all
+// comments, unknown fields, and formatting in the config file.
+// The caller must hold configMu.
+func patchProjectAgentOption(projectName, key, value string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	projectIdx := -1
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			projectIdx = i
+			break
+		}
+	}
+	if projectIdx < 0 {
+		return fmt.Errorf("project %q not found in config", projectName)
+	}
+
+	lines, hadTrailing := splitConfigLines(raw)
+	spans := buildRawProjectSpans(lines)
+	if projectIdx >= len(spans) {
+		return fmt.Errorf("project %q located in parsed config but not raw file", projectName)
+	}
+	projSpan := spans[projectIdx]
+
+	if projSpan.agentOptionsStart < 0 {
+		// [projects.agent.options] doesn't exist; create it.
+		insertAt := projSpan.agentEnd + 1
+		if projSpan.agentStart < 0 {
+			// [projects.agent] also doesn't exist; insert after [[projects]] header + name line
+			insertAt = projSpan.start + 1
+			for ln := projSpan.start + 1; ln <= projSpan.end; ln++ {
+				if isAnyTableHeader(lines[ln]) {
+					insertAt = ln
+					break
+				}
+				insertAt = ln + 1
+			}
+			block := []string{"", "[projects.agent]", "type = \"claudecode\"", "", "[projects.agent.options]"}
+			lines = insertLines(lines, insertAt, block)
+		} else {
+			block := []string{"", "[projects.agent.options]"}
+			lines = insertLines(lines, insertAt, block)
+		}
+		spans = buildRawProjectSpans(lines)
+		projSpan = spans[projectIdx]
+	}
+
+	lines = upsertTomlStringKey(lines, projSpan.agentOptionsStart+1, projSpan.agentOptionsEnd, key, value)
+	return writeRawConfig(joinConfigLines(lines, hadTrailing))
+}
+
+// patchTopLevelField does a surgical text-level update of a single top-level
+// key in the config file. The caller must hold configMu.
+func patchTopLevelField(key, value string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	lines, hadTrailing := splitConfigLines(raw)
+
+	// Top-level keys appear before the first section header.
+	topEnd := len(lines) - 1
+	for i := range lines {
+		if isAnyTableHeader(lines[i]) {
+			topEnd = i - 1
+			break
+		}
+	}
+
+	for i := 0; i <= topEnd && i < len(lines); i++ {
+		if matchTomlStringKey(lines[i], key) {
+			lines[i] = replaceTomlStringKeyLine(lines[i], key, value)
+			return writeRawConfig(joinConfigLines(lines, hadTrailing))
+		}
+	}
+	// Key not found; insert before the first section header.
+	insertAt := topEnd + 1
+	if insertAt < 0 {
+		insertAt = 0
+	}
+	lines = insertLines(lines, insertAt, []string{fmt.Sprintf("%s = %s", key, quoteTomlString(value))})
+	return writeRawConfig(joinConfigLines(lines, hadTrailing))
+}
+
+// patchSectionField does a surgical text-level update of a single key
+// under a given [section] in the config file. The caller must hold configMu.
+func patchSectionField(section, key, tomlValue string) error {
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := string(data)
+	lines, hadTrailing := splitConfigLines(raw)
+
+	sectionStart := -1
+	sectionEnd := len(lines) - 1
+	header := "[" + section + "]"
+	for i := range lines {
+		if sectionStart < 0 && matchTableHeader(lines[i], header) {
+			sectionStart = i
+			continue
+		}
+		if sectionStart >= 0 && isAnyTableHeader(lines[i]) {
+			sectionEnd = i - 1
+			break
+		}
+	}
+
+	if sectionStart < 0 {
+		topEnd := len(lines) - 1
+		for i := range lines {
+			if isAnyTableHeader(lines[i]) {
+				topEnd = i - 1
+				break
+			}
+		}
+		insertAt := topEnd + 1
+		if insertAt < 0 {
+			insertAt = 0
+		}
+		block := []string{"", header, fmt.Sprintf("%s = %s", key, tomlValue)}
+		lines = insertLines(lines, insertAt, block)
+		return writeRawConfig(joinConfigLines(lines, hadTrailing))
+	}
+
+	lines = upsertTomlRawKey(lines, sectionStart+1, sectionEnd, key, tomlValue)
+	return writeRawConfig(joinConfigLines(lines, hadTrailing))
+}
+
 type rawProjectSpan struct {
 	start     int
 	end       int
 	platforms []rawPlatformSpan
+
+	agentStart        int // [projects.agent] header; -1 if absent
+	agentEnd          int // last line before the next header or project end
+	agentOptionsStart int // [projects.agent.options] header; -1 if absent
+	agentOptionsEnd   int // last line of agent options section
+	agentProviders    []rawProviderSpan
+}
+
+type rawProviderSpan struct {
+	start    int // [[projects.agent.providers]] header
+	end      int
+	nameLine int // line with name = "..."
 }
 
 type rawPlatformSpan struct {
@@ -1655,7 +3198,53 @@ func buildRawProjectSpans(lines []string) []rawProjectSpan {
 		if i+1 < len(projectStarts) {
 			end = projectStarts[i+1] - 1
 		}
-		span := rawProjectSpan{start: start, end: end}
+		span := rawProjectSpan{
+			start:             start,
+			end:               end,
+			agentStart:        -1,
+			agentEnd:          -1,
+			agentOptionsStart: -1,
+			agentOptionsEnd:   -1,
+		}
+
+		for ln := start + 1; ln <= end; ln++ {
+			if matchTableHeader(lines[ln], "[projects.agent]") && !matchTableHeader(lines[ln], "[projects.agent.options]") && !matchTableHeader(lines[ln], "[[projects.agent.providers]]") {
+				span.agentStart = ln
+				span.agentEnd = end
+				for j := ln + 1; j <= end; j++ {
+					if isAnyTableHeader(lines[j]) {
+						span.agentEnd = j - 1
+						break
+					}
+				}
+			}
+			if matchTableHeader(lines[ln], "[projects.agent.options]") {
+				span.agentOptionsStart = ln
+				span.agentOptionsEnd = end
+				for j := ln + 1; j <= end; j++ {
+					if isAnyTableHeader(lines[j]) {
+						span.agentOptionsEnd = j - 1
+						break
+					}
+				}
+			}
+			if matchTableHeader(lines[ln], "[[projects.agent.providers]]") {
+				provSpan := rawProviderSpan{start: ln, end: end, nameLine: -1}
+				for j := ln + 1; j <= end; j++ {
+					if isAnyTableHeader(lines[j]) {
+						provSpan.end = j - 1
+						break
+					}
+				}
+				for j := ln + 1; j <= provSpan.end; j++ {
+					if matchTomlStringKey(lines[j], "name") {
+						provSpan.nameLine = j
+						break
+					}
+				}
+				span.agentProviders = append(span.agentProviders, provSpan)
+			}
+		}
 
 		platformStarts := make([]int, 0, 2)
 		for ln := start + 1; ln <= end; ln++ {
@@ -1775,6 +3364,33 @@ func replaceTomlStringKeyLine(line, key, value string) string {
 	return updated
 }
 
+// upsertTomlRawKey is like upsertTomlStringKey but writes the value literally
+// (no quoting). Use for booleans, integers, and pre-formatted values.
+func upsertTomlRawKey(lines []string, start, end int, key, rawValue string) []string {
+	if start < 0 {
+		start = 0
+	}
+	if end >= len(lines) {
+		end = len(lines) - 1
+	}
+	for i := start; i <= end && i < len(lines); i++ {
+		if matchTomlStringKey(lines[i], key) {
+			indent := leadingWhitespace(lines[i])
+			comment := extractLineComment(lines[i])
+			lines[i] = fmt.Sprintf("%s%s = %s", indent, key, rawValue)
+			if comment != "" {
+				lines[i] += " " + comment
+			}
+			return lines
+		}
+	}
+	insertAt := end + 1
+	if insertAt < start {
+		insertAt = start
+	}
+	return insertLines(lines, insertAt, []string{fmt.Sprintf("%s = %s", key, rawValue)})
+}
+
 func quoteTomlString(value string) string {
 	return strconv.Quote(value)
 }
@@ -1816,14 +3432,22 @@ func extractLineComment(line string) string {
 
 // ProjectSettingsUpdate carries optional field updates for SaveProjectSettings.
 type ProjectSettingsUpdate struct {
-	Quiet                *bool
 	Language             *string
 	AdminFrom            *string
 	DisabledCommands     []string
 	WorkDir              *string
 	Mode                 *string
+	AgentType            *string
 	ShowContextIndicator *bool
+	ShowWorkdirIndicator *bool
+	ReplyFooter          *bool
+	InjectSender         *bool
 	PlatformAllowFrom    map[string]string
+	// WorkspaceMode and WorkspaceBaseDir control the project-level
+	// multi-workspace feature (ProjectConfig.Mode/BaseDir), distinct from
+	// Mode above (which is the agent permission mode, e.g. yolo/plan).
+	WorkspaceMode    *string
+	WorkspaceBaseDir *string
 }
 
 // SaveProjectSettings persists project-level settings and the global language to config.toml.
@@ -1851,8 +3475,44 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			continue
 		}
 		proj := &cfg.Projects[i]
-		if update.Quiet != nil {
-			proj.Quiet = update.Quiet
+		if update.AgentType != nil && *update.AgentType != proj.Agent.Type {
+			newType := *update.AgentType
+			proj.Agent.Type = newType
+			// Filter out provider_refs incompatible with the new agent type.
+			globalByName := make(map[string]ProviderConfig, len(cfg.Providers))
+			for _, p := range cfg.Providers {
+				globalByName[p.Name] = p
+			}
+			var compatible []string
+			for _, ref := range proj.Agent.ProviderRefs {
+				gp, ok := globalByName[ref]
+				if !ok {
+					continue
+				}
+				if len(gp.AgentTypes) > 0 && !containsString(gp.AgentTypes, newType) {
+					slog.Info("removing incompatible provider ref on agent type change",
+						"project", projectName, "provider", ref,
+						"provider_agents", gp.AgentTypes, "new_agent", newType)
+					continue
+				}
+				compatible = append(compatible, ref)
+			}
+			proj.Agent.ProviderRefs = compatible
+			// Clear active provider if it was removed.
+			if opts := proj.Agent.Options; opts != nil {
+				if prov, ok := opts["provider"].(string); ok && prov != "" {
+					found := false
+					for _, ref := range compatible {
+						if ref == prov {
+							found = true
+							break
+						}
+					}
+					if !found {
+						delete(opts, "provider")
+					}
+				}
+			}
 		}
 		if update.AdminFrom != nil {
 			proj.AdminFrom = *update.AdminFrom
@@ -1863,6 +3523,18 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 		if update.ShowContextIndicator != nil {
 			v := *update.ShowContextIndicator
 			proj.ShowContextIndicator = &v
+		}
+		if update.ShowWorkdirIndicator != nil {
+			v := *update.ShowWorkdirIndicator
+			proj.ShowWorkdirIndicator = &v
+		}
+		if update.ReplyFooter != nil {
+			v := *update.ReplyFooter
+			proj.ReplyFooter = &v
+		}
+		if update.InjectSender != nil {
+			v := *update.InjectSender
+			proj.InjectSender = &v
 		}
 		if update.WorkDir != nil || update.Mode != nil {
 			if proj.Agent.Options == nil {
@@ -1884,6 +3556,22 @@ func SaveProjectSettings(projectName string, update ProjectSettingsUpdate) error
 			} else {
 				proj.Agent.Options["mode"] = mode
 			}
+		}
+		if update.WorkspaceBaseDir != nil {
+			proj.BaseDir = strings.TrimSpace(*update.WorkspaceBaseDir)
+		}
+		if update.WorkspaceMode != nil {
+			mode := strings.TrimSpace(*update.WorkspaceMode)
+			if mode == "single" {
+				mode = ""
+			}
+			if mode != "" && mode != "multi-workspace" {
+				return fmt.Errorf("invalid workspace_mode %q", mode)
+			}
+			if mode == "multi-workspace" && proj.BaseDir == "" {
+				return fmt.Errorf("workspace_base_dir is required to enable multi-workspace mode")
+			}
+			proj.Mode = mode
 		}
 		if update.PlatformAllowFrom != nil {
 			for j := range proj.Platforms {
@@ -1942,6 +3630,21 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		if p.ShowContextIndicator != nil {
 			result["show_context_indicator"] = *p.ShowContextIndicator
 		}
+		if p.ShowWorkdirIndicator != nil {
+			result["show_workdir_indicator"] = *p.ShowWorkdirIndicator
+		}
+		if p.ReplyFooter != nil {
+			result["reply_footer"] = *p.ReplyFooter
+		}
+		if p.InjectSender != nil {
+			result["inject_sender"] = *p.InjectSender
+		}
+		if strings.TrimSpace(p.Mode) != "" {
+			result["workspace_mode"] = p.Mode
+		}
+		if strings.TrimSpace(p.BaseDir) != "" {
+			result["workspace_base_dir"] = p.BaseDir
+		}
 		platConfigs := make([]map[string]any, len(p.Platforms))
 		for j, plat := range p.Platforms {
 			pc := map[string]any{"type": plat.Type}
@@ -1953,9 +3656,36 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 			platConfigs[j] = pc
 		}
 		result["platform_configs"] = platConfigs
+		if len(p.Agent.ProviderRefs) > 0 {
+			result["provider_refs"] = p.Agent.ProviderRefs
+		}
 		return result
 	}
 	return nil
+}
+
+// SaveProviderRefs updates provider_refs for a project.
+func SaveProviderRefs(projectName string, refs []string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if ConfigPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	data, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	cfg := &Config{}
+	if err := toml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	for i := range cfg.Projects {
+		if cfg.Projects[i].Name == projectName {
+			cfg.Projects[i].Agent.ProviderRefs = refs
+			return saveConfig(cfg)
+		}
+	}
+	return fmt.Errorf("project %q not found", projectName)
 }
 
 // RemoveProject removes a project from the config file.
@@ -2117,26 +3847,41 @@ func GetGlobalSettings() map[string]any {
 		"attachment_send": cfg.AttachmentSend,
 		"log_level":       cfg.Log.Level,
 	}
-	if cfg.Quiet != nil {
-		result["quiet"] = *cfg.Quiet
-	} else {
-		result["quiet"] = false
-	}
 	if cfg.IdleTimeoutMins != nil {
 		result["idle_timeout_mins"] = *cfg.IdleTimeoutMins
 	} else {
 		result["idle_timeout_mins"] = 120
 	}
+	if cfg.MaxTurnTimeMins != nil {
+		result["max_turn_time_mins"] = *cfg.MaxTurnTimeMins
+	} else {
+		result["max_turn_time_mins"] = 0
+	}
 	// Display
+	if cfg.Display.ThinkingMessages != nil {
+		result["thinking_messages"] = *cfg.Display.ThinkingMessages
+	} else {
+		result["thinking_messages"] = true
+	}
 	if cfg.Display.ThinkingMaxLen != nil {
 		result["thinking_max_len"] = *cfg.Display.ThinkingMaxLen
 	} else {
 		result["thinking_max_len"] = 300
 	}
+	if cfg.Display.ToolMessages != nil {
+		result["tool_messages"] = *cfg.Display.ToolMessages
+	} else {
+		result["tool_messages"] = true
+	}
 	if cfg.Display.ToolMaxLen != nil {
 		result["tool_max_len"] = *cfg.Display.ToolMaxLen
 	} else {
 		result["tool_max_len"] = 500
+	}
+	if cfg.Display.HistoryMaxLen != nil {
+		result["history_max_len"] = *cfg.Display.HistoryMaxLen
+	} else {
+		result["history_max_len"] = 1000
 	}
 	// Stream preview
 	spEnabled := true
@@ -2160,22 +3905,30 @@ func GetGlobalSettings() map[string]any {
 		rlWindow = *cfg.RateLimit.WindowSecs
 	}
 	result["rate_limit_window_secs"] = rlWindow
+	// Queue
+	queueMax := 5
+	if cfg.Queue.MaxDepth != nil {
+		queueMax = *cfg.Queue.MaxDepth
+	}
+	result["queue_max_depth"] = queueMax
 	return result
 }
 
 // GlobalSettingsUpdate holds fields to update in global config.
 type GlobalSettingsUpdate struct {
 	Language           *string `json:"language"`
-	Quiet              *bool   `json:"quiet"`
 	AttachmentSend     *string `json:"attachment_send"`
 	LogLevel           *string `json:"log_level"`
 	IdleTimeoutMins    *int    `json:"idle_timeout_mins"`
+	ThinkingMessages   *bool   `json:"thinking_messages"`
 	ThinkingMaxLen     *int    `json:"thinking_max_len"`
+	ToolMessages       *bool   `json:"tool_messages"`
 	ToolMaxLen         *int    `json:"tool_max_len"`
 	StreamPreviewOn    *bool   `json:"stream_preview_enabled"`
 	StreamPreviewIntMs *int    `json:"stream_preview_interval_ms"`
 	RateLimitMax       *int    `json:"rate_limit_max_messages"`
 	RateLimitWindow    *int    `json:"rate_limit_window_secs"`
+	QueueMaxDepth      *int    `json:"queue_max_depth"`
 }
 
 // SaveGlobalSettings persists global settings to config.toml.
@@ -2196,9 +3949,6 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	if u.Language != nil {
 		cfg.Language = *u.Language
 	}
-	if u.Quiet != nil {
-		cfg.Quiet = u.Quiet
-	}
 	if u.AttachmentSend != nil {
 		cfg.AttachmentSend = *u.AttachmentSend
 	}
@@ -2208,8 +3958,14 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	if u.IdleTimeoutMins != nil {
 		cfg.IdleTimeoutMins = u.IdleTimeoutMins
 	}
+	if u.ThinkingMessages != nil {
+		cfg.Display.ThinkingMessages = u.ThinkingMessages
+	}
 	if u.ThinkingMaxLen != nil {
 		cfg.Display.ThinkingMaxLen = u.ThinkingMaxLen
+	}
+	if u.ToolMessages != nil {
+		cfg.Display.ToolMessages = u.ToolMessages
 	}
 	if u.ToolMaxLen != nil {
 		cfg.Display.ToolMaxLen = u.ToolMaxLen
@@ -2225,6 +3981,9 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	}
 	if u.RateLimitWindow != nil {
 		cfg.RateLimit.WindowSecs = u.RateLimitWindow
+	}
+	if u.QueueMaxDepth != nil {
+		cfg.Queue.MaxDepth = u.QueueMaxDepth
 	}
 	return saveConfig(cfg)
 }

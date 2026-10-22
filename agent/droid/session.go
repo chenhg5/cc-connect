@@ -22,6 +22,7 @@ import (
 
 type droidSession struct {
 	cmd                   string
+	cliExtraArgs          []string
 	workDir               string
 	model                 string
 	reasoningEffort       string
@@ -33,15 +34,19 @@ type droidSession struct {
 
 	sessionID atomic.Value
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	alive  atomic.Bool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mu        sync.Mutex
+	wg        sync.WaitGroup
+	inFlight  bool
+	closeOnce sync.Once
+	alive     atomic.Bool
 }
 
 func newDroidSession(
 	ctx context.Context,
 	cmd string,
+	cliExtraArgs []string,
 	workDir string,
 	model string,
 	reasoningEffort string,
@@ -54,6 +59,7 @@ func newDroidSession(
 
 	s := &droidSession{
 		cmd:                   cmd,
+		cliExtraArgs:          append([]string(nil), cliExtraArgs...),
 		workDir:               workDir,
 		model:                 model,
 		reasoningEffort:       reasoningEffort,
@@ -73,13 +79,20 @@ func newDroidSession(
 	return s, nil
 }
 
-func (s *droidSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
-	if !s.alive.Load() {
-		return fmt.Errorf("session is closed")
+func (s *droidSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	if err := s.beginTurn(); err != nil {
+		return err
 	}
+	started := false
+	defer func() {
+		if !started {
+			s.endTurn()
+			s.wg.Done()
+		}
+	}()
 
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(s.workDir, files)
+		filePaths := core.SaveFilesToDisk(s.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if len(images) > 0 {
@@ -97,6 +110,7 @@ func (s *droidSession) Send(prompt string, images []core.ImageAttachment, files 
 
 	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
 	cmd.Dir = s.workDir
+	cmd.WaitDelay = 2 * time.Second
 	if len(s.extraEnv) > 0 {
 		cmd.Env = core.MergeEnv(os.Environ(), s.extraEnv)
 	}
@@ -113,14 +127,35 @@ func (s *droidSession) Send(prompt string, images []core.ImageAttachment, files 
 		return fmt.Errorf("droidSession: start: %w", err)
 	}
 
-	s.wg.Add(1)
 	go s.readLoop(cmd, stdout, &stderrBuf)
+	started = true
 
 	return nil
 }
 
+func (s *droidSession) beginTurn() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ctx.Err(); err != nil {
+		return err
+	}
+	if s.inFlight {
+		return fmt.Errorf("droid session turn already in progress")
+	}
+	s.wg.Add(1)
+	s.inFlight = true
+	return nil
+}
+
+func (s *droidSession) endTurn() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inFlight = false
+}
+
 func (s *droidSession) buildExecArgs(prompt string) []string {
-	args := []string{"exec", "--output-format", "stream-json"}
+	args := append([]string(nil), s.cliExtraArgs...)
+	args = append(args, "exec", "--output-format", "stream-json")
 
 	if sid := s.CurrentSessionID(); sid != "" {
 		args = append(args, "--session-id", sid)
@@ -131,7 +166,7 @@ func (s *droidSession) buildExecArgs(prompt string) []string {
 	if s.reasoningEffort != "" {
 		args = append(args, "--reasoning-effort", s.reasoningEffort)
 	}
-	if s.auto != "" {
+	if s.auto != "" && !s.skipPermissionsUnsafe {
 		args = append(args, "--auto", s.auto)
 	}
 	if s.skipPermissionsUnsafe {
@@ -141,18 +176,22 @@ func (s *droidSession) buildExecArgs(prompt string) []string {
 		args = append(args, "--cwd", s.workDir)
 	}
 
-	args = append(args, prompt)
+	args = append(args, "--", prompt)
 	return args
 }
 
 func (s *droidSession) saveImages(images []core.ImageAttachment) ([]string, error) {
-	imgDir := filepath.Join(s.workDir, ".cc-connect", "images")
+	workDir, err := filepath.Abs(s.workDir)
+	if err != nil {
+		return nil, fmt.Errorf("droidSession: resolve image directory: %w", err)
+	}
+	imgDir := filepath.Join(workDir, ".cc-connect", "images")
 	if err := os.MkdirAll(imgDir, 0o755); err != nil {
 		return nil, fmt.Errorf("droidSession: create image dir: %w", err)
 	}
 
 	paths := make([]string, 0, len(images))
-	for i, img := range images {
+	for _, img := range images {
 		ext := ".png"
 		switch img.MimeType {
 		case "image/jpeg":
@@ -162,10 +201,19 @@ func (s *droidSession) saveImages(images []core.ImageAttachment) ([]string, erro
 		case "image/webp":
 			ext = ".webp"
 		}
-		name := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
-		path := filepath.Join(imgDir, name)
-		if err := os.WriteFile(path, img.Data, 0o644); err != nil {
-			return nil, fmt.Errorf("droidSession: save image: %w", err)
+		file, err := os.CreateTemp(imgDir, "img_*"+ext)
+		if err != nil {
+			return nil, fmt.Errorf("droidSession: create image: %w", err)
+		}
+		path := file.Name()
+		_, writeErr := file.Write(img.Data)
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			_ = os.Remove(path)
+			if writeErr != nil {
+				return nil, fmt.Errorf("droidSession: save image: %w", writeErr)
+			}
+			return nil, fmt.Errorf("droidSession: close image: %w", closeErr)
 		}
 		paths = append(paths, path)
 	}
@@ -174,138 +222,147 @@ func (s *droidSession) saveImages(images []core.ImageAttachment) ([]string, erro
 
 func (s *droidSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
+	stopClosing := context.AfterFunc(s.ctx, func() { _ = stdout.Close() })
+	defer stopClosing()
+	defer stdout.Close()
 
-	hasResult := false
-	defer func() {
-		if err := cmd.Wait(); err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			if stderrMsg == "" {
-				stderrMsg = err.Error()
-			}
-			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
-				return
-			}
-		}
-
-		if !hasResult {
-			evt := core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true}
-			select {
-			case s.events <- evt:
-			case <-s.ctx.Done():
-			}
-		}
-	}()
-
+	var terminal *core.Event
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "" {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-
 		var raw map[string]any
-		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			slog.Debug("droidSession: non-JSON line", "line", truncate(line, 300))
+		if err := json.Unmarshal(line, &raw); err != nil {
+			slog.Debug("droidSession: non-JSON line", "line", truncate(string(line), 300))
 			continue
 		}
-
-		if s.handleEvent(raw) {
-			hasResult = true
+		if event := s.handleEvent(raw); event != nil && (terminal == nil || terminal.Type != core.EventError) {
+			terminal = event
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
+		terminal = &core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		_ = cmd.Process.Kill()
+	}
+	if err := cmd.Wait(); err != nil && (terminal == nil || terminal.Type != core.EventError) {
+		message := strings.TrimSpace(stderrBuf.String())
+		if message == "" {
+			message = err.Error()
 		}
+		terminal = &core.Event{Type: core.EventError, Error: fmt.Errorf("droid exec: %s", message)}
+	}
+	if terminal == nil {
+		terminal = &core.Event{Type: core.EventResult, Done: true}
+	}
+	terminal.SessionID = s.CurrentSessionID()
+
+	// Release the persisted-session writer only after exit, before publishing completion.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inFlight = false
+	s.emit(*terminal)
+}
+
+func (s *droidSession) emit(event core.Event) {
+	select {
+	case s.events <- event:
+	case <-s.ctx.Done():
 	}
 }
 
-func (s *droidSession) handleEvent(raw map[string]any) bool {
-	t, _ := raw["type"].(string)
-
-	switch t {
+func (s *droidSession) handleEvent(raw map[string]any) *core.Event {
+	if sid := getString(raw, "session_id"); sid != "" {
+		s.sessionID.Store(sid)
+	}
+	event := core.Event{SessionID: s.CurrentSessionID()}
+	switch getString(raw, "type") {
 	case "system":
-		subtype, _ := raw["subtype"].(string)
-		if subtype == "init" {
-			if sid, ok := raw["session_id"].(string); ok && sid != "" {
-				s.sessionID.Store(sid)
-				evt := core.Event{Type: core.EventText, SessionID: sid}
-				select {
-				case s.events <- evt:
-				case <-s.ctx.Done():
-				}
-			}
+		if getString(raw, "subtype") != "init" {
+			return nil
 		}
-
+		event.Type = core.EventText
 	case "message":
-		role, _ := raw["role"].(string)
-		if role == "assistant" {
-			if text, ok := raw["text"].(string); ok && text != "" {
-				evt := core.Event{Type: core.EventText, Content: text}
-				select {
-				case s.events <- evt:
-				case <-s.ctx.Done():
-				}
-			}
+		if getString(raw, "role") != "assistant" {
+			return nil
 		}
-
-	case "tool_use":
-		toolName := getString(raw, "tool_name", "name")
-		input := getString(raw, "tool_input", "input")
-		if input == "" {
-			if m, ok := raw["input"].(map[string]any); ok {
-				if b, err := json.Marshal(m); err == nil {
-					input = string(b)
-				}
-			}
-		}
-		evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-		}
-
+		event.Type = core.EventText
+		event.Content = getString(raw, "text")
+	case "reasoning":
+		event.Type = core.EventThinking
+		event.Content = getString(raw, "text")
+	case "tool_call", "tool_use":
+		event.Type = core.EventToolUse
+		event.ToolName = getString(raw, "toolName", "toolId", "tool_name", "name")
+		event.ToolInput = eventValue(raw, "parameters", "tool_input", "input")
 	case "tool_result":
-		toolName := getString(raw, "tool_name", "name")
-		result := getString(raw, "result", "output")
-		evt := core.Event{Type: core.EventToolResult, ToolName: toolName, Content: truncate(result, 500)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
+		event.Type = core.EventToolResult
+		event.ToolName = getString(raw, "toolName", "toolId", "tool_name", "name")
+		event.ToolResult = eventValue(raw, "value", "result", "output")
+		failed, _ := raw["isError"].(bool)
+		if failed {
+			if detail, ok := raw["error"].(map[string]any); ok {
+				event.ToolResult = getString(detail, "message")
+			}
+			event.ToolStatus = "failed"
+		} else {
+			event.ToolStatus = "completed"
 		}
-
-	case "result":
-		content := getString(raw, "content", "text")
-		evt := core.Event{Type: core.EventResult, Content: content, SessionID: s.CurrentSessionID(), Done: true}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
+		success := !failed
+		event.ToolSuccess = &success
+	case "completion", "result":
+		event.Type = core.EventResult
+		event.Content = getString(raw, "finalText", "result", "content", "text")
+		event.Done = true
+		if usage, ok := raw["usage"].(map[string]any); ok {
+			event.InputTokens = tokenCount(usage, "input_tokens")
+			event.OutputTokens = tokenCount(usage, "output_tokens")
+			event.CacheReadInputTokens = tokenCount(usage, "cache_read_input_tokens")
+			event.CacheCreationInputTokens = tokenCount(usage, "cache_creation_input_tokens")
 		}
-		return true
-
+		failed, _ := raw["is_error"].(bool)
+		if failed || getString(raw, "subtype") == "failure" {
+			event.Type = core.EventError
+			event.Error = fmt.Errorf("droid exec: %s", event.Content)
+		}
+		return &event
 	case "error":
+		event.Type = core.EventError
 		message := getString(raw, "message")
 		if message == "" {
-			if b, err := json.Marshal(raw); err == nil {
-				message = string(b)
+			message = eventValue(raw, "error")
+		}
+		if message == "" {
+			message = "droid exec failed"
+		}
+		event.Error = fmt.Errorf("%s", message)
+		return &event
+	default:
+		return nil
+	}
+	s.emit(event)
+	return nil
+}
+
+func eventValue(raw map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok && value != nil {
+			if text, ok := value.(string); ok {
+				return text
+			}
+			if data, err := json.Marshal(value); err == nil {
+				return string(data)
 			}
 		}
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", message)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-		}
 	}
+	return ""
+}
 
-	return false
+func tokenCount(usage map[string]any, key string) int {
+	value, _ := usage[key].(float64)
+	return int(value)
 }
 
 func getString(raw map[string]any, keys ...string) string {
@@ -331,23 +388,19 @@ func (s *droidSession) CurrentSessionID() string {
 }
 
 func (s *droidSession) Alive() bool {
-	return s.alive.Load()
+	return s.alive.Load() && s.ctx.Err() == nil
 }
 
 func (s *droidSession) Close() error {
-	s.alive.Store(false)
-	s.cancel()
-	done := make(chan struct{})
-	go func() {
+	s.closeOnce.Do(func() {
+		s.alive.Store(false)
+		s.cancel()
+		// Pair with beginTurn so no WaitGroup reservation can follow Wait.
+		s.mu.Lock()
+		s.mu.Unlock()
 		s.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(8 * time.Second):
-		slog.Warn("droidSession: close timed out, abandoning wg.Wait")
-	}
-	close(s.events)
+		close(s.events)
+	})
 	return nil
 }
 

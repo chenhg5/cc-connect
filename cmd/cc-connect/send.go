@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -73,6 +74,8 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	var useStdin bool
 	var imagePaths []string
 	var filePaths []string
+	var audioPaths []string
+	var videoPaths []string
 	var positional []string
 
 	for i := 0; i < len(args); i++ {
@@ -95,6 +98,18 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 			i++
 			req.Message = args[i]
+		case "--cwd", "--work-dir":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("%s requires a value", args[i])
+			}
+			i++
+			req.WorkDir = args[i]
+		case "--tts":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("%s requires a value", args[i])
+			}
+			i++
+			req.TTSText = args[i]
 		case "--image":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("--image requires a path")
@@ -107,8 +122,33 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 			i++
 			filePaths = append(filePaths, args[i])
+		case "--audio":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--audio requires a path")
+			}
+			i++
+			audioPaths = append(audioPaths, args[i])
+		case "--video":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--video requires a path")
+			}
+			i++
+			videoPaths = append(videoPaths, args[i])
 		case "--stdin":
 			useStdin = true
+		case "--at-users":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--at-users requires a value")
+			}
+			i++
+			for _, uid := range strings.Split(args[i], ",") {
+				uid = strings.TrimSpace(uid)
+				if uid != "" {
+					req.AtUsers = append(req.AtUsers, uid)
+				}
+			}
+		case "--at-all":
+			req.AtAll = true
 		case "--data-dir":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("--data-dir requires a value")
@@ -139,28 +179,46 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 		req.Message = strings.Join(positional, " ")
 	}
 
-	images, err := loadImageAttachments(imagePaths)
+	maxAtt := resolveMaxAttachmentSize(loadSendConfigBestEffort())
+
+	images, err := loadImageAttachments(imagePaths, maxAtt)
 	if err != nil {
 		return req, "", err
 	}
-	files, err := loadFileAttachments(filePaths)
+	files, err := loadFileAttachments(filePaths, maxAtt)
+	if err != nil {
+		return req, "", err
+	}
+	audioFiles, err := loadTypedFileAttachments(audioPaths, "audio", maxAtt)
+	if err != nil {
+		return req, "", err
+	}
+	videoFiles, err := loadTypedFileAttachments(videoPaths, "video", maxAtt)
 	if err != nil {
 		return req, "", err
 	}
 	req.Images = images
+	// Keep audio / video clips on dedicated fields. Routing them through
+	// req.Files would force the engine to dispatch them via FileSender —
+	// that loses the native voice-bubble / video-bubble path on platforms
+	// that implement AudioSender / VideoSender (e.g. Feishu's ffmpeg
+	// transcode for mp3 → opus). See cc-connect internal task
+	// t-20260615-cqjbk1.
 	req.Files = files
+	req.Audios = audioFiles
+	req.Videos = videoFiles
 
-	if req.Message == "" && len(req.Images) == 0 && len(req.Files) == 0 {
-		return req, "", fmt.Errorf("message or attachment is required")
+	if req.Message == "" && req.TTSText == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
+		return req, "", fmt.Errorf("message, tts text, or attachment is required")
 	}
 
 	return req, dataDir, nil
 }
 
-func loadImageAttachments(paths []string) ([]core.ImageAttachment, error) {
+func loadImageAttachments(paths []string, maxSize int64) ([]core.ImageAttachment, error) {
 	images := make([]core.ImageAttachment, 0, len(paths))
 	for _, path := range paths {
-		data, fileName, mimeType, err := readAttachment(path)
+		data, fileName, mimeType, err := readAttachment(path, maxSize)
 		if err != nil {
 			return nil, err
 		}
@@ -172,10 +230,10 @@ func loadImageAttachments(paths []string) ([]core.ImageAttachment, error) {
 	return images, nil
 }
 
-func loadFileAttachments(paths []string) ([]core.FileAttachment, error) {
+func loadFileAttachments(paths []string, maxSize int64) ([]core.FileAttachment, error) {
 	files := make([]core.FileAttachment, 0, len(paths))
 	for _, path := range paths {
-		data, fileName, mimeType, err := readAttachment(path)
+		data, fileName, mimeType, err := readAttachment(path, maxSize)
 		if err != nil {
 			return nil, err
 		}
@@ -184,17 +242,70 @@ func loadFileAttachments(paths []string) ([]core.FileAttachment, error) {
 	return files, nil
 }
 
-const maxAttachmentSize = 50 << 20 // 50 MB
+func loadTypedFileAttachments(paths []string, mediaType string, maxSize int64) ([]core.FileAttachment, error) {
+	files := make([]core.FileAttachment, 0, len(paths))
+	for _, path := range paths {
+		data, fileName, mimeType, err := readAttachment(path, maxSize)
+		if err != nil {
+			return nil, err
+		}
+		if !attachmentMatchesMediaType(mimeType, fileName, mediaType) {
+			return nil, fmt.Errorf("%s is not %s media (detected mime: %s)", path, mediaType, mimeType)
+		}
+		files = append(files, core.FileAttachment{MimeType: mimeType, Data: data, FileName: fileName})
+	}
+	return files, nil
+}
 
-func readAttachment(path string) ([]byte, string, string, error) {
+func attachmentMatchesMediaType(mimeType, fileName, mediaType string) bool {
+	ext := strings.ToLower(filepath.Ext(fileName))
+	switch mediaType {
+	case "audio":
+		if strings.HasPrefix(mimeType, "audio/") {
+			return true
+		}
+		switch ext {
+		case ".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav":
+			return true
+		}
+	case "video":
+		if strings.HasPrefix(mimeType, "video/") {
+			return true
+		}
+		switch ext {
+		case ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm":
+			return true
+		}
+	}
+	return false
+}
+
+// loadSendConfigBestEffort loads config.toml — resolved the same way the
+// daemon resolves it — so the standalone `cc-connect send` subcommand (a
+// separate process that otherwise has no config) can honour
+// max_attachment_size_mb. Errors are ignored and nil is returned, so a missing
+// or invalid config never breaks sending; the caller then falls back to the
+// env var / default via resolveMaxAttachmentSize.
+func loadSendConfigBestEffort() *config.Config {
+	cfg, err := config.Load(resolveConfigPath(""))
+	if err != nil {
+		return nil
+	}
+	return cfg
+}
+
+// readAttachment reads a single attachment file, rejecting anything larger than
+// maxSize bytes (resolved by the caller from config/env/default). The limit is
+// enforced before the file is read into memory.
+func readAttachment(path string, maxSize int64) ([]byte, string, string, error) {
 	cleaned := filepath.Clean(path)
 
 	info, err := os.Stat(cleaned)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("read attachment %s: %w", path, err)
 	}
-	if info.Size() > maxAttachmentSize {
-		return nil, "", "", fmt.Errorf("attachment %s exceeds size limit (%d MB)", path, maxAttachmentSize>>20)
+	if info.Size() > maxSize {
+		return nil, "", "", fmt.Errorf("attachment %s exceeds size limit (%d MB)", path, maxSize>>20)
 	}
 
 	data, err := os.ReadFile(cleaned)
@@ -236,6 +347,10 @@ func resolveSocketPath(dataDir string) string {
 	if dataDir != "" {
 		return filepath.Join(dataDir, "run", "api.sock")
 	}
+	// Check CC_DATA_DIR env var for custom data_dir configuration
+	if envDataDir := strings.TrimSpace(os.Getenv("CC_DATA_DIR")); envDataDir != "" {
+		return filepath.Join(envDataDir, "run", "api.sock")
+	}
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, ".cc-connect", "run", "api.sock")
 	}
@@ -248,15 +363,25 @@ func printSendUsage() {
        cc-connect send [options] --stdin < file
        cc-connect send [options] --image <path>
        cc-connect send [options] --file <path>
+       cc-connect send [options] --audio <path>
+       cc-connect send [options] --video <path>
+       cc-connect send [options] --tts <text>
        echo "msg" | cc-connect send [options] --stdin
 
-Send a message or attachment to an active cc-connect session.
+Send a message, attachment, or synthesized voice message to an active cc-connect session.
 
 Options:
   -m, --message <text>     Message to send (preferred over positional args)
+      --cwd <path>         Start a new session in this working directory
+      --work-dir <path>    Alias for --cwd
+      --tts <text>         Synthesize text and send it as a voice/audio message
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)
+      --audio <path>       Send an audio attachment (repeatable)
+      --video <path>       Send a video attachment (repeatable)
       --stdin              Read message from stdin (best for long/special-char messages)
+      --at-users <ids>     @ user IDs, comma-separated (DingTalk)
+      --at-all             @ everyone (DingTalk)
   -p, --project <name>     Target project (optional if only one project)
   -s, --session <key>      Target session key (optional, picks first active)
       --data-dir <path>    Data directory (default: ~/.cc-connect)
@@ -267,6 +392,9 @@ Examples:
   cc-connect send -m "Build completed successfully"
   cc-connect send --message "Chart generated" --image /tmp/chart.png
   cc-connect send --file /tmp/report.pdf
+  cc-connect send --video /tmp/demo.mp4
+  cc-connect send --audio /tmp/voice.opus
+  cc-connect send --tts "Hello from cc-connect"
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
   EOF`)

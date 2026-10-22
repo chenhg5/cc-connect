@@ -5,6 +5,8 @@ import zh from './locales/zh.json';
 import zhTW from './locales/zh-TW.json';
 import ja from './locales/ja.json';
 import es from './locales/es.json';
+import ko from './locales/ko.json';
+import ru from './locales/ru.json';
 
 const saved = localStorage.getItem('cc_lang') || navigator.language.split('-')[0] || 'en';
 
@@ -15,6 +17,8 @@ i18n.use(initReactI18next).init({
     'zh-TW': { translation: zhTW },
     ja: { translation: ja },
     es: { translation: es },
+    ko: { translation: ko },
+    ru: { translation: ru },
   },
   lng: saved,
   fallbackLng: 'en',

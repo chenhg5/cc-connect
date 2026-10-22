@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,7 +30,7 @@ func runDaemon(args []string) {
 	case "stop":
 		daemonStop()
 	case "restart":
-		daemonRestart()
+		daemonRestart(args[1:])
 	case "status":
 		daemonStatus()
 	case "logs":
@@ -50,15 +51,39 @@ func daemonInstall(args []string) {
 		os.Exit(1)
 	}
 
-	if err := daemon.Resolve(&cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	// Fall back to the standard ~/.cc-connect location before resolving,
+	// so that daemon.Resolve's env capture (including ${ENV} placeholder
+	// scanning of the config file) and the installed service's
+	// WorkingDirectory are consistent with the config actually in use.
+	// This matches the lookup behavior of other subcommands (see main.go
+	// config resolution: ./config.toml first, then ~/.cc-connect/config.toml).
+	workDir := cfg.WorkDir
+	if workDir == "" {
+		if wd, gerr := os.Getwd(); gerr == nil {
+			workDir = wd
+		}
+	}
+	configPath := filepath.Join(workDir, "config.toml")
+	if _, err := os.Stat(configPath); err != nil {
+		if home, herr := os.UserHomeDir(); herr == nil {
+			homeConfig := filepath.Join(home, ".cc-connect", "config.toml")
+			if _, serr := os.Stat(homeConfig); serr == nil {
+				configPath = homeConfig
+				if cfg.WorkDir == "" {
+					cfg.WorkDir = filepath.Join(home, ".cc-connect")
+				}
+				fmt.Fprintf(os.Stderr, "Note: using config from %s\n", homeConfig)
+			}
+		}
+		if _, err := os.Stat(configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: config.toml not found in %s\n", workDir)
+			fmt.Fprintf(os.Stderr, "  Use --work-dir to specify the config directory or --config to point to the config file\n")
+			os.Exit(1)
+		}
 	}
 
-	configPath := cfg.WorkDir + "/config.toml"
-	if _, err := os.Stat(configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: config.toml not found in %s\n", cfg.WorkDir)
-		fmt.Fprintf(os.Stderr, "  Use --work-dir to specify the config directory or --config to point to the config file\n")
+	if err := daemon.Resolve(&cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -72,6 +97,16 @@ func daemonInstall(args []string) {
 	if st != nil && st.Installed && !force {
 		fmt.Fprintf(os.Stderr, "Service already installed. Use --force to reinstall.\n")
 		os.Exit(1)
+	}
+
+	// Reap any process left over from a previous install before the new task is
+	// created and started. mgr.Install stops the old task but the platform's
+	// stop does not necessarily kill the child it spawned (see reapLeftover), so
+	// without this the freshly started process could fail to take the instance
+	// lock. Uses the config path resolved just above rather than the daemon
+	// metadata, which at this point may still describe the previous install.
+	if reapLeftover(configPath) {
+		fmt.Println("Cleaned up a leftover cc-connect process.")
 	}
 
 	if err := mgr.Install(cfg); err != nil {
@@ -103,17 +138,38 @@ func daemonInstall(args []string) {
 	fmt.Println("  cc-connect daemon restart   - Restart")
 	fmt.Println("  cc-connect daemon stop      - Stop")
 	fmt.Println("  cc-connect daemon uninstall - Remove")
+
+	// Check linger for user-mode systemd
+	if strings.Contains(mgr.Platform(), "user") {
+		enabled, user := daemon.CheckLinger()
+		if !enabled {
+			fmt.Println()
+			fmt.Println("⚠️  Warning: Linger is not enabled for this user.")
+			fmt.Println("   cc-connect will stop when your last login session ends (e.g., SSH disconnect).")
+			fmt.Println("   To keep it running persistently, run:")
+			fmt.Printf("     sudo loginctl enable-linger %s\n", user)
+		}
+	}
 }
 
 func parseDaemonInstallArgs(args []string) (daemon.Config, bool, error) {
 	var cfg daemon.Config
 	var force bool
 
+	// Env-based opt-out: CC_DAEMON_NO_CAPTURE_SECRETS=1 / true / yes / on
+	// triggers --no-capture-secrets without the CLI flag, for CI / container
+	// scenarios where the global env is the right configuration surface.
+	if isTruthyEnv(os.Getenv("CC_DAEMON_NO_CAPTURE_SECRETS")) {
+		cfg.NoCaptureSecrets = true
+	}
+
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case arg == "--force":
 			force = true
+		case arg == "--no-capture-secrets":
+			cfg.NoCaptureSecrets = true
 		case arg == "--log-file":
 			value, next, err := daemonInstallFlagValue(args, i, "--log-file")
 			if err != nil {
@@ -177,6 +233,16 @@ func daemonInstallFlagValue(args []string, index int, flagName string) (string, 
 	return args[next], next, nil
 }
 
+// isTruthyEnv accepts the conventional opt-in values for boolean env vars.
+// Anything else, including "0" / "false" / "" / unset, is treated as false.
+func isTruthyEnv(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // ── uninstall ───────────────────────────────────────────────
 
 func daemonUninstall() {
@@ -197,16 +263,101 @@ func daemonUninstall() {
 		os.Exit(1)
 	}
 
+	// Must run before RemoveMeta, which is what reapLeftoverFromMeta resolves the
+	// config path from. Uninstalling stops the task but can leave the daemon
+	// process itself running (see reapLeftover) — with the task gone there would
+	// be nothing left to manage it.
+	if reapLeftoverFromMeta() {
+		fmt.Println("Cleaned up a leftover cc-connect process.")
+	}
+
 	daemon.RemoveMeta()
 	fmt.Println("cc-connect daemon uninstalled.")
 }
 
 // ── start / stop / restart ──────────────────────────────────
 
+// serviceLifecycle is the slice of daemon.Manager that the helpers below drive.
+// Narrowed to an interface so tests can substitute a fake and assert the
+// ordering those helpers exist to guarantee.
+type serviceLifecycle interface {
+	Start() error
+	Stop() error
+}
+
+// reapLeftover terminates a cc-connect process left behind by the service
+// manager, using the PID recorded in that config's instance lock file. Reports
+// whether a process was actually killed.
+//
+// Windows' Stop-ScheduledTask only kills the wrapper powershell.exe; the
+// cc-connect.exe that wrapper spawned survives as an orphan holding the
+// instance lock (config.toml.lock) and the listening ports. The wrapper is
+//
+//	while ($true) { & cc-connect.exe; if ($exitCode -eq 0) { exit 0 }; Start-Sleep 10 }
+//
+// so every subsequent start silently fails: the new process cannot take the
+// lock, reports it with fmt.Fprintf(os.Stderr, ...) — which never reaches the
+// daemon log — and exits 1, while the wrapper relaunches it every 10s forever.
+// The visible symptoms are `daemon stop` claiming success while the daemon is
+// still listening, and `daemon restart` leaving the old process in place.
+//
+// This is the same mechanism `--force` and the /restart command already use.
+func reapLeftover(configPath string) bool {
+	if configPath == "" {
+		return false
+	}
+	return KillExistingInstance(configPath)
+}
+
+// reapLeftoverFromMeta applies reapLeftover to the config recorded in the daemon
+// metadata — the only config path available to start/stop/restart, which never
+// parse one.
+func reapLeftoverFromMeta() bool {
+	meta, err := daemon.LoadMeta()
+	if err != nil || meta.WorkDir == "" {
+		return false
+	}
+	return reapLeftover(filepath.Join(meta.WorkDir, "config.toml"))
+}
+
+// stopService stops the service and then reaps. The reap has to come *after*
+// Stop: killing the child while the wrapper is still looping just makes the
+// wrapper relaunch it ten seconds later.
+func stopService(mgr serviceLifecycle, reap func() bool) error {
+	err := mgr.Stop()
+	if reap != nil && reap() {
+		fmt.Println("Cleaned up a leftover cc-connect process.")
+	}
+	return err
+}
+
+// startService reaps before starting, so the new process can take the instance
+// lock instead of exiting 1 into the wrapper's retry loop.
+func startService(mgr serviceLifecycle, reap func() bool) error {
+	if reap != nil && reap() {
+		fmt.Println("Cleaned up a leftover cc-connect process.")
+	}
+	return mgr.Start()
+}
+
+// restartService is Stop → reap → Start, expressed once so the ordering cannot
+// drift apart. Stop and Start are issued separately rather than via
+// mgr.Restart() precisely so the reap fits in between; on Windows that costs
+// nothing, since schtasksManager.Restart() is literally stopWindowsTask()
+// followed by startWindowsTask(). Reaping before the restart instead would race
+// the wrapper's 10s relaunch.
+func restartService(mgr serviceLifecycle, reap func() bool) error {
+	if err := stopService(mgr, reap); err != nil {
+		slog.Warn("daemon: stop before restart failed", "error", err)
+	}
+	// Not startService: stopService already reaped.
+	return mgr.Start()
+}
+
 func daemonStart() {
 	mgr := mustManager()
 	requireInstalled(mgr)
-	if err := mgr.Start(); err != nil {
+	if err := startService(mgr, reapLeftoverFromMeta); err != nil {
 		fmt.Fprintf(os.Stderr, "Start failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -216,17 +367,23 @@ func daemonStart() {
 func daemonStop() {
 	mgr := mustManager()
 	requireInstalled(mgr)
-	if err := mgr.Stop(); err != nil {
+	if err := stopService(mgr, reapLeftoverFromMeta); err != nil {
 		fmt.Fprintf(os.Stderr, "Stop failed: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("cc-connect daemon stopped.")
 }
 
-func daemonRestart() {
+func daemonRestart(args []string) {
+	// args is kept for backwards compatibility. --force used to be the only way
+	// to get the leftover process cleaned up; that cleanup now always runs, so
+	// the flag is redundant and is deliberately ignored.
+	_ = args
+
 	mgr := mustManager()
 	requireInstalled(mgr)
-	if err := mgr.Restart(); err != nil {
+
+	if err := restartService(mgr, reapLeftoverFromMeta); err != nil {
 		fmt.Fprintf(os.Stderr, "Restart failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -404,6 +561,12 @@ Install flags:
   --log-max-size N      Max log file size in MB (default: 10)
   --work-dir DIR        Directory containing config.toml (default: current dir)
   --force               Overwrite existing installation
+  --no-capture-secrets  Do not capture config.toml ${ENV} placeholders into
+                        the service file. Also enabled by setting
+                        CC_DAEMON_NO_CAPTURE_SECRETS=1 in the environment.
+
+Restart flags:
+  --force               Kill existing process before restarting
 
 Logs flags:
   -f, --follow          Follow log output (like tail -f)
@@ -413,5 +576,6 @@ Logs flags:
 Supported platforms:
   Linux (root)     - systemd system service (/etc/systemd/system/)
   Linux (non-root) - systemd user service (~/.config/systemd/user/)
-  macOS            - launchd LaunchAgent`)
+  macOS            - launchd LaunchAgent
+  Windows          - Task Scheduler task (schtasks)`)
 }

@@ -22,33 +22,49 @@ import (
 // cursorSession manages multi-turn conversations with the Cursor Agent CLI.
 // Each Send() launches a new `agent --print` process with --resume for continuity.
 type cursorSession struct {
-	cmd      string // CLI binary name
-	workDir  string
-	model    string
-	mode     string
-	extraEnv []string
-	events   chan core.Event
-	chatID   atomic.Value // stores string — Cursor chat/session ID
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	alive    atomic.Bool
+	cmd       string   // CLI binary name
+	extraArgs []string // extra args from cmd, prepended before agent args
+	workDir   string
+	model     string
+	mode      string
+	extraEnv  []string
+	events    chan core.Event
+	chatID    atomic.Value // stores string — Cursor chat/session ID
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	alive     atomic.Bool
 
 	thinkingBuf strings.Builder // accumulate thinking deltas
+
+	// Permission handling: each Send() creates a new process whose stdin is used
+	// to respond to interaction_query permission requests.
+	stdinMu sync.Mutex
+	stdin   io.WriteCloser // current process stdin; nil when no process is running
+
+	pendingMu sync.Mutex
+	pending   *pendingInteractionQuery // most recent unresolved interaction_query/request
 }
 
-func newCursorSession(ctx context.Context, cmd, workDir, model, mode, resumeID string, extraEnv []string) (*cursorSession, error) {
+// pendingInteractionQuery holds the info needed to write a response back to Cursor.
+type pendingInteractionQuery struct {
+	id        int    // query["id"] value from the original request
+	queryType string // e.g. "webFetchRequestQuery", "shellRequestQuery"
+}
+
+func newCursorSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string) (*cursorSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &cursorSession{
-		cmd:      cmd,
-		workDir:  workDir,
-		model:    model,
-		mode:     mode,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
+		cmd:       cmd,
+		extraArgs: extraArgs,
+		workDir:   workDir,
+		model:     model,
+		mode:      mode,
+		extraEnv:  extraEnv,
+		events:    make(chan core.Event, 64),
+		ctx:       sessionCtx,
+		cancel:    cancel,
 	}
 	cs.alive.Store(true)
 
@@ -59,12 +75,30 @@ func newCursorSession(ctx context.Context, cmd, workDir, model, mode, resumeID s
 	return cs, nil
 }
 
-func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (cs *cursorSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
-		slog.Warn("cursorSession: images not yet supported in CLI mode, ignoring")
+		// The Cursor Agent CLI has no image flag, but it can open image files
+		// from disk and see their content. So route images through the same
+		// on-disk channel as files instead of dropping them.
+		imgFiles := make([]core.FileAttachment, 0, len(images))
+		for i, im := range images {
+			name := im.FileName
+			if name == "" {
+				// Feishu image messages carry no filename — synthesise one so
+				// the file lands with a correct extension.
+				name = fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, core.ExtFromMime(im.MimeType))
+			}
+			imgFiles = append(imgFiles, core.FileAttachment{
+				MimeType: im.MimeType,
+				Data:     im.Data,
+				FileName: name,
+			})
+		}
+		imagePaths := core.SaveFilesToDisk(cs.workDir, messageID, imgFiles)
+		prompt = core.AppendImageRefs(prompt, imagePaths)
 	}
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(cs.workDir, files)
+		filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !cs.alive.Load() {
@@ -74,11 +108,10 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, file
 	chatID := cs.CurrentSessionID()
 	isResume := chatID != ""
 
-	args := []string{
+	args := append(append([]string{}, cs.extraArgs...),
 		"--print",
 		"--output-format", "stream-json",
-		"--trust",
-	}
+	)
 
 	switch cs.mode {
 	case "force":
@@ -112,12 +145,24 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, file
 		return fmt.Errorf("cursorSession: stdout pipe: %w", err)
 	}
 
+	// Set up a stdin pipe so we can write interaction_query responses back to Cursor.
+	// Without a connected stdin, Cursor gets EOF and auto-rejects all permission requests.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("cursorSession: stdin pipe: %w", err)
+	}
+
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
 		return fmt.Errorf("cursorSession: start: %w", err)
 	}
+
+	cs.stdinMu.Lock()
+	cs.stdin = stdin
+	cs.stdinMu.Unlock()
 
 	cs.wg.Add(1)
 	go cs.readLoop(cmd, stdout, &stderrBuf)
@@ -127,6 +172,15 @@ func (cs *cursorSession) Send(prompt string, images []core.ImageAttachment, file
 
 func (cs *cursorSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer cs.wg.Done()
+	defer func() {
+		// Close stdin so Cursor knows the input stream is finished.
+		cs.stdinMu.Lock()
+		if cs.stdin != nil {
+			_ = cs.stdin.Close()
+			cs.stdin = nil
+		}
+		cs.stdinMu.Unlock()
+	}()
 	defer func() {
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
@@ -304,17 +358,103 @@ func (cs *cursorSession) handleInteractionQuery(raw map[string]any) {
 		return
 	}
 
-	toolName, input := extractInteractionQueryInfo(queryType, query)
+	// query["id"] is a JSON number — decoded as float64 by Go's json package.
+	idFloat, _ := query["id"].(float64)
+	queryID := int(idFloat)
+
+	toolName, inputStr := extractInteractionQueryInfo(queryType, query)
 	if toolName == "" {
+		// Unknown query type — deny immediately to unblock Cursor.
+		cs.writeInteractionResponse(queryID, queryType, false, "unsupported query type")
 		return
 	}
 
-	evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+	// Check skipApproval flag: some queries are pre-approved by Cursor itself.
+	if skipApproval := extractSkipApproval(queryType, query); skipApproval {
+		cs.writeInteractionResponse(queryID, queryType, true, "")
+		return
+	}
+
+	// In non-default modes there is no interactive approval path; deny to unblock.
+	if cs.mode != "default" {
+		cs.writeInteractionResponse(queryID, queryType, false, "permission mode does not allow interactive approval")
+		return
+	}
+
+	// Store pending query so RespondPermission can write the right response.
+	cs.pendingMu.Lock()
+	cs.pending = &pendingInteractionQuery{id: queryID, queryType: queryType}
+	cs.pendingMu.Unlock()
+
+	// Build a stable requestID that the engine passes back to RespondPermission.
+	requestID := fmt.Sprintf("%s:%d", queryType, queryID)
+
+	slog.Info("cursorSession: permission request", "request_id", requestID, "tool", toolName)
+	evt := core.Event{
+		Type:      core.EventPermissionRequest,
+		RequestID: requestID,
+		ToolName:  toolName,
+		ToolInput: inputStr,
+	}
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
 		return
 	}
+}
+
+// writeInteractionResponse writes a Cursor interaction_query response JSON line to the
+// current process stdin.  approved=true → {"approved":{}}; false → {"rejected":{"reason":...}}.
+func (cs *cursorSession) writeInteractionResponse(queryID int, queryType string, approved bool, reason string) {
+	// Derive the response field name from the request query type.
+	// "webFetchRequestQuery" → "webFetchRequestResponse"
+	// "shellRequestQuery"   → "shellRequestResponse"
+	responseKey := strings.TrimSuffix(queryType, "Query") + "Response"
+
+	var resultValue any
+	if approved {
+		resultValue = map[string]any{"approved": map[string]any{}}
+	} else {
+		resultValue = map[string]any{"rejected": map[string]any{"reason": reason}}
+	}
+
+	resp := map[string]any{
+		"type":       "interaction_query",
+		"subtype":    "response",
+		"query_type": queryType,
+		"response": map[string]any{
+			"id":        queryID,
+			responseKey: resultValue,
+		},
+	}
+
+	b, err := json.Marshal(resp)
+	if err != nil {
+		slog.Error("cursorSession: marshal interaction response", "error", err)
+		return
+	}
+	b = append(b, '\n')
+
+	cs.stdinMu.Lock()
+	defer cs.stdinMu.Unlock()
+	if cs.stdin == nil {
+		slog.Warn("cursorSession: stdin unavailable, cannot write interaction response")
+		return
+	}
+	if _, err := cs.stdin.Write(b); err != nil {
+		slog.Warn("cursorSession: write interaction response", "error", err)
+	}
+}
+
+// extractSkipApproval returns true when Cursor marks a query as pre-approved.
+func extractSkipApproval(queryType string, query map[string]any) bool {
+	// The inner query object is nested under the queryType key.
+	inner, _ := query[queryType].(map[string]any)
+	if inner == nil {
+		return false
+	}
+	skip, _ := inner["skipApproval"].(bool)
+	return skip
 }
 
 func extractInteractionQueryInfo(queryType string, query map[string]any) (string, string) {
@@ -428,7 +568,25 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.chatID.Store(sid)
 	}
-	evt := core.Event{Type: core.EventResult, Content: content, SessionID: cs.CurrentSessionID(), Done: true}
+	// Cursor emits a `usage` block on the result event with camelCase keys
+	// (inputTokens / outputTokens / cacheReadTokens / cacheWriteTokens).
+	// Without this, the engine's turn-complete log always reports 0 tokens
+	// and the reply footer is suppressed by #701's workdir-only guard. See
+	// issue #1810.
+	var inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens int
+	if usage, ok := raw["usage"].(map[string]any); ok {
+		inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens = parseCursorUsage(usage)
+	}
+	evt := core.Event{
+		Type:                     core.EventResult,
+		Content:                  content,
+		SessionID:                cs.CurrentSessionID(),
+		Done:                     true,
+		InputTokens:              inputTokens,
+		OutputTokens:             outputTokens,
+		CacheReadInputTokens:     cacheReadTokens,
+		CacheCreationInputTokens: cacheWriteTokens,
+	}
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
@@ -436,8 +594,48 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 	}
 }
 
-// RespondPermission is a no-op — Cursor Agent permissions are handled via --trust/--force flags.
-func (cs *cursorSession) RespondPermission(_ string, _ core.PermissionResult) error {
+// parseCursorUsage extracts token counts from a Cursor result event's `usage`
+// object. The Cursor Agent CLI emits camelCase keys (inputTokens,
+// outputTokens, cacheReadTokens, cacheWriteTokens) — different from
+// Claude Code's snake_case — so this helper mirrors agent/claudecode's
+// parseClaudeUsage but uses the right field names. Returns 0 for any
+// field that is missing or not numeric, so callers can safely emit an
+// Event with partial usage (e.g. when the CLI downgrades the schema).
+func parseCursorUsage(usage map[string]any) (input, output, cacheRead, cacheWrite int) {
+	if v, ok := usage["inputTokens"].(float64); ok {
+		input = int(v)
+	}
+	if v, ok := usage["outputTokens"].(float64); ok {
+		output = int(v)
+	}
+	if v, ok := usage["cacheReadTokens"].(float64); ok {
+		cacheRead = int(v)
+	}
+	if v, ok := usage["cacheWriteTokens"].(float64); ok {
+		cacheWrite = int(v)
+	}
+	return
+}
+
+// RespondPermission writes the user's approval/denial decision back to the Cursor Agent
+// CLI via stdin.  Cursor is blocked waiting for this response when in default mode.
+func (cs *cursorSession) RespondPermission(_ string, result core.PermissionResult) error {
+	cs.pendingMu.Lock()
+	pq := cs.pending
+	cs.pending = nil
+	cs.pendingMu.Unlock()
+
+	if pq == nil {
+		// No interaction query is pending — nothing to respond to.
+		return nil
+	}
+
+	approved := result.Behavior == "allow"
+	reason := result.Message
+	if !approved && reason == "" {
+		reason = "User denied"
+	}
+	cs.writeInteractionResponse(pq.id, pq.queryType, approved, reason)
 	return nil
 }
 
@@ -464,10 +662,10 @@ func (cs *cursorSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(cs.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("cursorSession: close timed out, abandoning wg.Wait")
 	}
-	close(cs.events)
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -13,19 +14,37 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-func TestNormalizeReasoningEffort_RejectsMinimal(t *testing.T) {
-	if got := normalizeReasoningEffort("minimal"); got != "" {
-		t.Fatalf("normalizeReasoningEffort(minimal) = %q, want empty", got)
+func TestNormalizeReasoningEffort_CodexGPT56Levels(t *testing.T) {
+	tests := map[string]string{
+		"off":        "none",
+		"none":       "none",
+		"minimal":    "minimal",
+		"min":        "minimal",
+		"low":        "low",
+		"med":        "medium",
+		"medium":     "medium",
+		"high":       "high",
+		"x-high":     "xhigh",
+		"extra-high": "xhigh",
+		"xhigh":      "xhigh",
+		"max":        "max",
+		" MAX ":      "max",
+		"maximum":    "max",
+		"ultra":      "ultra",
+		"unknown":    "",
 	}
-	if got := normalizeReasoningEffort("min"); got != "" {
-		t.Fatalf("normalizeReasoningEffort(min) = %q, want empty", got)
+
+	for raw, want := range tests {
+		if got := normalizeReasoningEffort(raw); got != want {
+			t.Fatalf("normalizeReasoningEffort(%q) = %q, want %q", raw, got, want)
+		}
 	}
 }
 
-func TestAvailableReasoningEfforts_ExcludesMinimal(t *testing.T) {
+func TestAvailableReasoningEfforts_IncludesCodexGPT56Levels(t *testing.T) {
 	agent := &Agent{}
 	got := agent.AvailableReasoningEfforts()
-	want := []string{"low", "medium", "high", "xhigh"}
+	want := []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 	if len(got) != len(want) {
 		t.Fatalf("AvailableReasoningEfforts len = %d, want %d, got=%v", len(got), len(want), got)
 	}
@@ -37,7 +56,7 @@ func TestAvailableReasoningEfforts_ExcludesMinimal(t *testing.T) {
 }
 
 func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
-	cs, err := newCodexSession(context.Background(), "/tmp/project", "o3", "high", "full-auto", "", nil)
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -47,7 +66,10 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	want := []string{
 		"exec",
 		"--skip-git-repo-check",
-		"--full-auto",
+		"--sandbox",
+		"workspace-write",
+		"-c",
+		`approval_policy="never"`,
 		"--model",
 		"o3",
 		"-c",
@@ -67,8 +89,37 @@ func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestBuildExecArgs_IncludesBaseURL(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "https://custom.api.example.com", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	if !containsSequence(args, []string{"-c", `openai_base_url="https://custom.api.example.com"`}) {
+		t.Fatalf("args missing openai_base_url config flag: %v", args)
+	}
+}
+
+func TestBuildExecArgs_IncludesModelProvider(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "openai/gpt-5.3-codex", "", "full-auto", "", "https://router.example.com/api/v1", nil, "shengsuanyun", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+
+	args := cs.buildExecArgs("hello", nil)
+
+	if !containsSequence(args, []string{"-c", `model_provider="shengsuanyun"`}) {
+		t.Fatalf("args missing model_provider config flag: %v", args)
+	}
+	if !containsSequence(args, []string{"-c", `openai_base_url="https://router.example.com/api/v1"`}) {
+		t.Fatalf("args missing openai_base_url config flag: %v", args)
+	}
+}
+
 func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
-	cs, err := newCodexSession(context.Background(), "/tmp/project", "", "", "full-auto", "thread-abc", nil)
+	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", "full-auto", "thread-abc", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -88,6 +139,264 @@ func TestBuildExecArgs_ResumeOmitsCdFlag(t *testing.T) {
 	}
 }
 
+// TestBuildExecArgs_ModeMapping verifies each permission mode maps to the
+// correct codex CLI flags. Critical: codex exec has no approval IPC, so
+// approval_policy must always be "never" to avoid hanging on a TTY prompt
+// that this backend cannot answer.
+func TestBuildExecArgs_ModeMapping(t *testing.T) {
+	tests := []struct {
+		mode           string
+		wantSandbox    string // "" means no --sandbox flag (only yolo)
+		wantApproval   bool   // true means -c approval_policy="never" must be present
+		wantBypass     bool   // true means --dangerously-bypass-approvals-and-sandbox
+		wantNoFullAuto bool   // always true: --full-auto is removed in codex 0.137+
+	}{
+		{mode: "suggest", wantSandbox: "read-only", wantApproval: true, wantNoFullAuto: true},
+		{mode: "auto-edit", wantSandbox: "workspace-write", wantApproval: true, wantNoFullAuto: true},
+		{mode: "full-auto", wantSandbox: "workspace-write", wantApproval: true, wantNoFullAuto: true},
+		{mode: "yolo", wantBypass: true, wantNoFullAuto: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.mode, func(t *testing.T) {
+			cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", tc.mode, "", "", nil, "", "", "")
+			if err != nil {
+				t.Fatalf("newCodexSession: %v", err)
+			}
+			args := cs.buildExecArgs("hi", nil)
+
+			if tc.wantSandbox != "" {
+				if !containsSequence(args, []string{"--sandbox", tc.wantSandbox}) {
+					t.Errorf("mode=%s missing --sandbox %s; args=%v", tc.mode, tc.wantSandbox, args)
+				}
+			}
+			if tc.wantApproval {
+				if !containsSequence(args, []string{"-c", `approval_policy="never"`}) {
+					t.Errorf("mode=%s missing approval_policy=never; args=%v", tc.mode, args)
+				}
+			}
+			if tc.wantBypass {
+				found := false
+				for _, a := range args {
+					if a == "--dangerously-bypass-approvals-and-sandbox" {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("mode=%s missing --dangerously-bypass-approvals-and-sandbox; args=%v", tc.mode, args)
+				}
+			}
+			if tc.wantNoFullAuto {
+				for _, a := range args {
+					if a == "--full-auto" {
+						t.Errorf("mode=%s still emits deprecated --full-auto; args=%v", tc.mode, args)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestBuildExecArgs_ResumeUsesSandboxModeConfigOverride is the regression test
+// for the "codex exec resume" sandbox flag bug.
+//
+// codex CLI 0.137 limitation: `codex exec resume` does NOT accept the
+// `--sandbox <mode>` flag (only `codex exec` does). Both subcommands accept
+// `-c key=value` config overrides, so resume must express sandbox via
+// `-c sandbox_mode="..."` instead. Without this, every resume fails with:
+//
+//	error: unexpected argument '--sandbox' found
+//
+// silently destroying the user's session on cc-connect restart / idle reset.
+func TestBuildExecArgs_ResumeUsesSandboxModeConfigOverride(t *testing.T) {
+	tests := []struct {
+		mode            string
+		wantSandboxMode string // "" means no sandbox_mode override expected (yolo)
+		wantBypass      bool
+	}{
+		{mode: "suggest", wantSandboxMode: "read-only"},
+		{mode: "auto-edit", wantSandboxMode: "workspace-write"},
+		{mode: "full-auto", wantSandboxMode: "workspace-write"},
+		{mode: "yolo", wantBypass: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.mode, func(t *testing.T) {
+			cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "", "", tc.mode, "thread-abc", "", nil, "", "", "")
+			if err != nil {
+				t.Fatalf("newCodexSession: %v", err)
+			}
+			args := cs.buildExecArgs("hi", nil)
+
+			// Sanity: this is a resume invocation.
+			if !containsSequence(args, []string{"exec", "resume", "--skip-git-repo-check"}) {
+				t.Fatalf("expected resume invocation, got: %v", args)
+			}
+
+			// Regression: --sandbox flag must NEVER appear in resume args.
+			// codex exec resume rejects it with: "unexpected argument '--sandbox' found".
+			for i, a := range args {
+				if a == "--sandbox" {
+					t.Errorf("mode=%s: resume args must not contain --sandbox (codex exec resume rejects it), but found at index %d: %v", tc.mode, i, args)
+				}
+			}
+
+			if tc.wantSandboxMode != "" {
+				want := `sandbox_mode="` + tc.wantSandboxMode + `"`
+				if !containsSequence(args, []string{"-c", want}) {
+					t.Errorf("mode=%s: resume args missing -c %s; args=%v", tc.mode, want, args)
+				}
+				// approval_policy must still be never for exec backend (no IPC).
+				if !containsSequence(args, []string{"-c", `approval_policy="never"`}) {
+					t.Errorf("mode=%s: resume args missing approval_policy=never; args=%v", tc.mode, args)
+				}
+			}
+
+			if tc.wantBypass {
+				found := false
+				for _, a := range args {
+					if a == "--dangerously-bypass-approvals-and-sandbox" {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("mode=%s: resume args missing --dangerously-bypass-approvals-and-sandbox; args=%v", tc.mode, args)
+				}
+			}
+		})
+	}
+}
+
+func TestCodexPromptPreamble_PrependsProjectPrompts(t *testing.T) {
+	preamble := buildCodexPromptPreamble(
+		"You are Linear Reporter.",
+		"Always invoke linear-bug-intake.",
+	)
+
+	got := prependCodexPromptPreamble("Create a Chat issue.", preamble)
+
+	for _, want := range []string{
+		"Before answering, follow these project-level instructions",
+		"Project system prompt:\nYou are Linear Reporter.",
+		"Additional project instructions:\nAlways invoke linear-bug-intake.",
+		"User message:\nCreate a Chat issue.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("prompt preamble missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestCodexPromptPreamble_EmptyIsNoop(t *testing.T) {
+	const prompt = "Hello"
+	if got := prependCodexPromptPreamble(prompt, ""); got != prompt {
+		t.Fatalf("empty preamble changed prompt: %q", got)
+	}
+}
+
+func TestGetModelAndReasoningEffort_FromRuntimeConfigWhenUnset(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	oldTimeout := codexRuntimeConfigTimeout
+	codexRuntimeConfigTimeout = 5 * time.Second
+	t.Cleanup(func() {
+		codexRuntimeConfigTimeout = oldTimeout
+	})
+
+	script := `#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{"protocolVersion":"2"}}\n' "$id"
+      ;;
+    *'"method":"config/read"'*)
+      printf '{"id":%s,"result":{"config":{"model":"gpt-5.4","model_reasoning_effort":"xhigh"},"origins":{}}}\n' "$id"
+      ;;
+  esac
+done
+`
+	powershellScript := `
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+  if ($line -like '*"method":"initialize"*') {
+    [Console]::Out.WriteLine('{"id":1,"result":{"protocolVersion":"2"}}')
+  } elseif ($line -like '*"method":"config/read"*') {
+    [Console]::Out.WriteLine('{"id":2,"result":{"config":{"model":"gpt-5.4","model_reasoning_effort":"xhigh"},"origins":{}}}')
+  }
+}
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	if got := cs.GetModel(); got != "gpt-5.4" {
+		t.Fatalf("GetModel() = %q, want gpt-5.4", got)
+	}
+	if got := cs.GetReasoningEffort(); got != "xhigh" {
+		t.Fatalf("GetReasoningEffort() = %q, want xhigh", got)
+	}
+}
+
+func TestRefreshContextUsageFromRollout_UsesLastTokenCount(t *testing.T) {
+	workDir := t.TempDir()
+	codexHome := filepath.Join(workDir, ".codex")
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "04", "12")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatalf("mkdir rollout dir: %v", err)
+	}
+
+	sessionID := "019d8019-d05a-7612-ace2-db549494c0f9"
+	rolloutPath := filepath.Join(rolloutDir, "rollout-2026-04-12T05-11-08-"+sessionID+".jsonl")
+	rollout := strings.Join([]string{
+		`{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"/tmp/project"}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex"}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50665316,"cached_input_tokens":46971872,"output_tokens":156453,"reasoning_output_tokens":75023,"total_tokens":50821769},"last_token_usage":{"input_tokens":180805,"cached_input_tokens":139776,"output_tokens":619,"reasoning_output_tokens":32,"total_tokens":181424},"model_context_window":258400},"rate_limits":{"limit_id":"codex"}}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(rolloutPath, []byte(rollout), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", sessionID, "", []string{"CODEX_HOME=" + codexHome}, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer cs.Close()
+
+	cs.refreshContextUsageFromRollout()
+
+	usage := cs.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want rollout token count")
+	}
+	if usage.UsedTokens != 181424 {
+		t.Fatalf("used tokens = %d, want 181424", usage.UsedTokens)
+	}
+	if usage.BaselineTokens != codexContextBaselineTokens {
+		t.Fatalf("baseline tokens = %d, want %d", usage.BaselineTokens, codexContextBaselineTokens)
+	}
+	if usage.TotalTokens != 181424 {
+		t.Fatalf("total tokens = %d, want 181424", usage.TotalTokens)
+	}
+	if usage.InputTokens != 180805 {
+		t.Fatalf("input tokens = %d, want 180805", usage.InputTokens)
+	}
+	if usage.ContextWindow != 258400 {
+		t.Fatalf("context window = %d, want 258400", usage.ContextWindow)
+	}
+}
+
 func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")
@@ -100,15 +409,17 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 		"printf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n" +
 		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\n" +
 		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
-	scriptPath := filepath.Join(binDir, "codex")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
+	powershellScript := `
+[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, (fakeCodexArgs))
+[Console]::Out.WriteLine('{"type":"thread.started","thread_id":"thread-1"}')
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
 
 	t.Setenv("CODEX_ARGS_FILE", argsFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "", nil)
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -119,7 +430,7 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 		Data:     []byte("png-bytes"),
 		FileName: "sample.png",
 	}
-	if err := cs.Send("", []core.ImageAttachment{img}, nil); err != nil {
+	if err := cs.Send("", "", []core.ImageAttachment{img}, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -149,6 +460,36 @@ func TestSend_WithImages_PassesImageArgsAndDefaultPrompt(t *testing.T) {
 	}
 }
 
+// TestCodexSession_ThreadStartedEmitsSessionID 验证首轮启动时立即上报会话 ID，
+// 使 Engine 可以在 turn.completed 之前持久化绑定关系。
+func TestCodexSession_ThreadStartedEmitsSessionID(t *testing.T) {
+	cs, err := newCodexSession(context.Background(), "codex", nil, t.TempDir(), "", "", "", "", "", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	cs.handleEvent(map[string]any{
+		"type":      "thread.started",
+		"thread_id": "thread-before-turn-completed",
+	})
+
+	select {
+	case event := <-cs.Events():
+		if event.Type != core.EventText {
+			t.Fatalf("event type = %q, want %q", event.Type, core.EventText)
+		}
+		if event.SessionID != "thread-before-turn-completed" {
+			t.Fatalf("event session ID = %q, want thread-before-turn-completed", event.SessionID)
+		}
+		if event.Content != "" {
+			t.Fatalf("event content = %q, want empty", event.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("thread.started did not emit session ID event")
+	}
+}
+
 func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")
@@ -160,21 +501,22 @@ func TestSend_ResumeWithImages_PlacesSessionBeforeImageFlags(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n" +
 		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
-	scriptPath := filepath.Join(binDir, "codex")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
+	powershellScript := `
+[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, (fakeCodexArgs))
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
 
 	t.Setenv("CODEX_ARGS_FILE", argsFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "thread-123", nil)
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "thread-123", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
 	defer cs.Close()
 
-	if err := cs.Send("describe this", []core.ImageAttachment{{MimeType: "image/jpeg", Data: []byte("jpg")}}, nil); err != nil {
+	if err := cs.Send("describe this", "", []core.ImageAttachment{{MimeType: "image/jpeg", Data: []byte("jpg")}}, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -209,23 +551,26 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 		"cat > \"$CODEX_STDIN_FILE\"\n" +
 		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-stdin\"}'\n" +
 		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
-	scriptPath := filepath.Join(binDir, "codex")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
+	powershellScript := `
+[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, (fakeCodexArgs))
+[IO.File]::WriteAllText($env:CODEX_STDIN_FILE, [Console]::In.ReadToEnd())
+[Console]::Out.WriteLine('{"type":"thread.started","thread_id":"thread-stdin"}')
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
 
 	t.Setenv("CODEX_ARGS_FILE", argsFile)
 	t.Setenv("CODEX_STDIN_FILE", stdinFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "thread-stdin", nil)
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "thread-stdin", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
 	defer cs.Close()
 
 	prompt := "line1\nline2"
-	if err := cs.Send(prompt, nil, nil); err != nil {
+	if err := cs.Send(prompt, "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -237,6 +582,112 @@ func TestSend_UsesStdinForMultilinePrompt(t *testing.T) {
 	// cat > file creates the path before stdin is fully read; polling until
 	// content matches avoids racing an empty read (flaky under -cover / CI).
 	waitForFileEquals(t, stdinFile, prompt)
+}
+
+func TestSend_RejectsConcurrentTurn(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	startsFile := filepath.Join(workDir, "starts.txt")
+	releaseFile := filepath.Join(workDir, "release")
+	script := "#!/bin/sh\n" +
+		"printf 'started\\n' >> \"$CODEX_STARTS_FILE\"\n" +
+		"while [ ! -f \"$CODEX_RELEASE_FILE\" ]; do sleep 0.01; done\n" +
+		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+	powershellScript := `
+[IO.File]::AppendAllText($env:CODEX_STARTS_FILE, "started` + "`n" + `")
+while (-not (Test-Path $env:CODEX_RELEASE_FILE)) { Start-Sleep -Milliseconds 10 }
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
+
+	t.Setenv("CODEX_STARTS_FILE", startsFile)
+	t.Setenv("CODEX_RELEASE_FILE", releaseFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "thread-busy", "", nil, "", "", "")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	if err := cs.Send("first", "", nil, nil); err != nil {
+		t.Fatalf("first Send: %v", err)
+	}
+	waitForFileContains(t, startsFile, "started")
+
+	err = cs.Send("steer", "", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "turn already in progress") {
+		t.Fatalf("second Send error = %v, want turn already in progress", err)
+	}
+
+	data, err := os.ReadFile(startsFile)
+	if err != nil {
+		t.Fatalf("read starts file: %v", err)
+	}
+	if got := strings.Count(string(data), "started"); got != 1 {
+		t.Fatalf("started process count = %d, want 1", got)
+	}
+
+	if err := os.WriteFile(releaseFile, nil, 0o644); err != nil {
+		t.Fatalf("release fake codex: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for cs.turnInFlight.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if cs.turnInFlight.Load() {
+		t.Fatal("turn remained in progress after codex process exited")
+	}
+	if err := cs.Send("after", "", nil, nil); err != nil {
+		t.Fatalf("Send after first process exited: %v", err)
+	}
+	waitForFileLines(t, startsFile, 2)
+}
+
+func TestSend_PrependsProjectPromptOnFreshSession(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	stdinFile := filepath.Join(workDir, "stdin.txt")
+	script := "#!/bin/sh\n" +
+		"cat > \"$CODEX_STDIN_FILE\"\n" +
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-preamble\"}'\n" +
+		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+	powershellScript := `
+[IO.File]::WriteAllText($env:CODEX_STDIN_FILE, [Console]::In.ReadToEnd())
+[Console]::Out.WriteLine('{"type":"thread.started","thread_id":"thread-preamble"}')
+[Console]::Out.WriteLine('{"type":"turn.completed"}')
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
+
+	t.Setenv("CODEX_STDIN_FILE", stdinFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "You are Linear Reporter.", "Always invoke linear-bug-intake.")
+	if err != nil {
+		t.Fatalf("newCodexSession: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	if err := cs.Send("Create a Chat issue.", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	wantParts := []string{
+		"Project system prompt:\nYou are Linear Reporter.",
+		"Additional project instructions:\nAlways invoke linear-bug-intake.",
+		"User message:\nCreate a Chat issue.",
+	}
+	for _, want := range wantParts {
+		waitForFileContains(t, stdinFile, want)
+	}
 }
 
 func TestSend_HandlesLargeJSONLines(t *testing.T) {
@@ -264,21 +715,20 @@ func TestSend_HandlesLargeJSONLines(t *testing.T) {
 	}
 
 	script := "#!/bin/sh\ncat \"$CODEX_PAYLOAD_FILE\"\n"
-	scriptPath := filepath.Join(binDir, "codex")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
+	powershellScript := `[Console]::Out.Write([IO.File]::ReadAllText($env:CODEX_PAYLOAD_FILE))
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
 
 	t.Setenv("CODEX_PAYLOAD_FILE", payloadFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "", nil)
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
 	defer cs.Close()
 
-	if err := cs.Send("hello", nil, nil); err != nil {
+	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -330,14 +780,89 @@ func TestWaitForArgsFile_WaitsForNonEmptyContent(t *testing.T) {
 	}
 }
 
+func TestWriteFakeCodexScript_PreservesArgsWithSpaces(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	argsFile := filepath.Join(workDir, "args.txt")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CODEX_ARGS_FILE\"\n"
+	powershellScript := `[IO.File]::WriteAllLines($env:CODEX_ARGS_FILE, (fakeCodexArgs))
+`
+	writeFakeCodexScript(t, binDir, script, powershellScript)
+	t.Setenv("CODEX_ARGS_FILE", argsFile)
+
+	cmd := exec.Command(filepath.Join(binDir, "codex"), "exec", "--cd", filepath.Join(workDir, "dir with spaces"), "-")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("fake codex run: %v", err)
+	}
+
+	args := waitForArgsFile(t, argsFile)
+	wantPath := filepath.Join(workDir, "dir with spaces")
+	if !containsSequence(args, []string{"exec", "--cd", wantPath, "-"}) {
+		t.Fatalf("args = %v, want path with spaces preserved as %q", args, wantPath)
+	}
+}
+
+const fakeCodexPowerShellPrelude = `
+function fakeCodexArgs {
+  if ([string]::IsNullOrWhiteSpace($env:CODEX_FAKE_ARGS_FILE) -or -not (Test-Path -LiteralPath $env:CODEX_FAKE_ARGS_FILE)) {
+    return @()
+  }
+  return @(Get-Content -LiteralPath $env:CODEX_FAKE_ARGS_FILE)
+}
+`
+
+func writeFakeCodexScript(t *testing.T, dir, shellScript, powershellScript string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		psPath := filepath.Join(dir, "codex.ps1")
+		if err := os.WriteFile(psPath, []byte(fakeCodexPowerShellPrelude+powershellScript), 0o644); err != nil {
+			t.Fatalf("write fake codex powershell script: %v", err)
+		}
+		cmdPath := filepath.Join(dir, "codex.cmd")
+		cmdScript := "@echo off\r\n" +
+			"setlocal\r\n" +
+			"set \"CODEX_FAKE_SCRIPT=%~dp0codex.ps1\"\r\n" +
+			"set \"CODEX_FAKE_ARGS_FILE=%TEMP%\\codex-fake-args-%RANDOM%-%RANDOM%.txt\"\r\n" +
+			"type nul > \"%CODEX_FAKE_ARGS_FILE%\"\r\n" +
+			":args\r\n" +
+			"if \"%~1\"==\"\" goto run\r\n" +
+			">> \"%CODEX_FAKE_ARGS_FILE%\" echo(%~1\r\n" +
+			"shift\r\n" +
+			"goto args\r\n" +
+			":run\r\n" +
+			"powershell -NoProfile -ExecutionPolicy Bypass -File \"%CODEX_FAKE_SCRIPT%\"\r\n" +
+			"set \"CODEX_FAKE_EXIT=%ERRORLEVEL%\"\r\n" +
+			"del \"%CODEX_FAKE_ARGS_FILE%\" >nul 2>nul\r\n" +
+			"exit /b %CODEX_FAKE_EXIT%\r\n"
+		if err := os.WriteFile(cmdPath, []byte(cmdScript), 0o755); err != nil {
+			t.Fatalf("write fake codex cmd shim: %v", err)
+		}
+		return
+	}
+	scriptPath := filepath.Join(dir, "codex")
+	if err := os.WriteFile(scriptPath, []byte(shellScript), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+}
+
 func waitForArgsFile(t *testing.T, path string) []string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
+	var last string
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			text := strings.TrimSpace(string(data))
 			if text != "" {
+				if text != last {
+					last = text
+					time.Sleep(20 * time.Millisecond)
+					continue
+				}
 				lines := strings.Split(text, "\n")
 				args := make([]string, 0, len(lines))
 				for _, line := range lines {
@@ -369,6 +894,20 @@ func waitForFileEquals(t *testing.T, path, want string) {
 	}
 	data, _ := os.ReadFile(path)
 	t.Fatalf("stdin file %s: got %q, want %q", path, string(data), want)
+}
+
+func waitForFileContains(t *testing.T, path, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(data), want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(path)
+	t.Fatalf("file %s: got %q, want substring %q", path, string(data), want)
 }
 
 func containsSequence(args, want []string) bool {
@@ -409,7 +948,7 @@ func indexOf(args []string, target string) int {
 }
 
 func TestCodexSession_ContinueSessionTreatedAsFresh(t *testing.T) {
-	s, err := newCodexSession(context.Background(), "/tmp", "", "", "full-auto", core.ContinueSession, nil)
+	s, err := newCodexSession(context.Background(), "codex", nil, "/tmp", "", "", "full-auto", core.ContinueSession, "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
@@ -451,16 +990,24 @@ func TestClose_ForceKillsProcessGroupAfterGracefulTimeout(t *testing.T) {
 		codexSessionForceKillWait = oldForceKillWait
 	})
 
-	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "", nil)
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
 
-	if err := cs.Send("hello", nil, nil); err != nil {
+	if err := cs.Send("hello", "", nil, nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
 	waitForThreadID(t, cs, "thread-close")
+	select {
+	case event := <-cs.Events():
+		if event.Type != core.EventText || event.SessionID != "thread-close" {
+			t.Fatalf("startup event = %#v, want session ID event for thread-close", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for startup session ID event")
+	}
 
 	closeStarted := time.Now()
 	if err := cs.Close(); err != nil {
@@ -480,7 +1027,7 @@ func TestClose_ForceKillsProcessGroupAfterGracefulTimeout(t *testing.T) {
 	}
 }
 
-func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
+func TestClose_ForceKillsProcessStillRunningAfterTurnCompleted(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process-group semantics differ on windows")
 	}
@@ -496,10 +1043,8 @@ func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"prompt=$(cat)\n" +
 		"printf '%s\\n' \"$prompt\" >> \"$CODEX_STARTS_FILE\"\n" +
-		"if [ \"$prompt\" = \"first\" ]; then\n" +
-		"  printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-overlap\"}'\n" +
-		"  printf '%s\\n' '{\"type\":\"turn.completed\"}'\n" +
-		"fi\n" +
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-overlap\"}'\n" +
+		"printf '%s\\n' '{\"type\":\"turn.completed\"}'\n" +
 		"sleep 30\n"
 	scriptPath := filepath.Join(binDir, "codex")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
@@ -518,28 +1063,40 @@ func TestClose_ForceKillsAllTrackedProcessesAfterCmdOverwrite(t *testing.T) {
 		codexSessionForceKillWait = oldForceKillWait
 	})
 
-	cs, err := newCodexSession(context.Background(), workDir, "", "", "", "", nil)
+	cs, err := newCodexSession(context.Background(), "codex", nil, workDir, "", "", "", "", "", nil, "", "", "")
 	if err != nil {
 		t.Fatalf("newCodexSession: %v", err)
 	}
 
-	if err := cs.Send("first", nil, nil); err != nil {
+	if err := cs.Send("first", "", nil, nil); err != nil {
 		t.Fatalf("Send(first): %v", err)
 	}
 	waitForThreadID(t, cs, "thread-overlap")
 	waitForDoneResult(t, cs.Events())
 
-	if err := cs.Send("second", nil, nil); err != nil {
-		t.Fatalf("Send(second): %v", err)
+	followup := make(chan error, 1)
+	go func() { followup <- cs.Send("second", "", nil, nil) }()
+	select {
+	case err := <-followup:
+		t.Fatalf("Send(second) returned before the first process exited: %v", err)
+	case <-time.After(50 * time.Millisecond):
 	}
-	waitForFileLines(t, startsFile, 2)
+	waitForFileLines(t, startsFile, 1)
 
 	closeStarted := time.Now()
 	if err := cs.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if elapsed := time.Since(closeStarted); elapsed > time.Second {
-		t.Fatalf("Close took too long after force killing tracked processes: %v", elapsed)
+		t.Fatalf("Close took too long after force killing tracked process: %v", elapsed)
+	}
+	select {
+	case err := <-followup:
+		if err != context.Canceled {
+			t.Fatalf("Send(second) after Close = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not unblock the waiting follow-up")
 	}
 
 	select {

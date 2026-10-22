@@ -21,6 +21,131 @@ func TestMapSessionUpdate_agentMessageChunk(t *testing.T) {
 	}
 }
 
+func TestMapSessionUpdate_agentMessageChunk_AlternativeFormats(t *testing.T) {
+	tests := []struct {
+		name   string
+		params string
+		want   string
+	}{
+		{
+			name: "standard format with type",
+			params: `{
+				"sessionId": "s1",
+				"update": {
+					"sessionUpdate": "agent_message_chunk",
+					"content": {"type": "text", "text": "hello world"}
+				}
+			}`,
+			want: "hello world",
+		},
+		{
+			name: "content.text without type",
+			params: `{
+				"sessionId": "s1",
+				"update": {
+					"sessionUpdate": "agent_message_chunk",
+					"content": {"text": "alt format 1"}
+				}
+			}`,
+			want: "alt format 1",
+		},
+		{
+			name: "top-level text field",
+			params: `{
+				"sessionId": "s1",
+				"update": {
+					"sessionUpdate": "agent_message_chunk",
+					"text": "alt format 2"
+				}
+			}`,
+			want: "alt format 2",
+		},
+		{
+			name: "content as string",
+			params: `{
+				"sessionId": "s1",
+				"update": {
+					"sessionUpdate": "agent_message_chunk",
+					"content": "alt format 3"
+				}
+			}`,
+			want: "alt format 3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evs := mapSessionUpdate("", json.RawMessage(tt.params))
+			if len(evs) != 1 {
+				t.Fatalf("expected 1 event, got %d", len(evs))
+			}
+			if evs[0].Type != core.EventText {
+				t.Fatalf("expected EventText, got %v", evs[0].Type)
+			}
+			if evs[0].Content != tt.want {
+				t.Fatalf("content = %q, want %q", evs[0].Content, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapSessionUpdate_FallbackTextExtraction(t *testing.T) {
+	tests := []struct {
+		name   string
+		params string
+		want   string
+	}{
+		{
+			name: "message_chunk vendor extension",
+			params: `{
+				"sessionId": "s1",
+				"update": {
+					"sessionUpdate": "message_chunk",
+					"text": "vendor text"
+				}
+			}`,
+			want: "vendor text",
+		},
+		{
+			name: "response vendor extension",
+			params: `{
+				"sessionId": "s1",
+				"update": {
+					"sessionUpdate": "response",
+					"message": "vendor message"
+				}
+			}`,
+			want: "vendor message",
+		},
+		{
+			name: "unknown kind with content.text",
+			params: `{
+				"sessionId": "s1",
+				"update": {
+					"sessionUpdate": "custom_output",
+					"content": {"text": "fallback text"}
+				}
+			}`,
+			want: "fallback text",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evs := mapSessionUpdate("", json.RawMessage(tt.params))
+			if len(evs) != 1 {
+				t.Fatalf("expected 1 event, got %d", len(evs))
+			}
+			if evs[0].Type != core.EventText {
+				t.Fatalf("expected EventText, got %v", evs[0].Type)
+			}
+			if evs[0].Content != tt.want {
+				t.Fatalf("content = %q, want %q", evs[0].Content, tt.want)
+			}
+		})
+	}
+}
+
 func TestMapSessionUpdate_toolCallUpdate_inProgress(t *testing.T) {
 	params := json.RawMessage(`{
 		"sessionId": "s1",
@@ -96,5 +221,88 @@ func TestBuildPermissionResult(t *testing.T) {
 	cancel := buildPermissionResult(false, "")
 	if cancel["outcome"].(map[string]any)["outcome"] != "cancelled" {
 		t.Fatalf("%v", cancel)
+	}
+}
+
+func TestMapSessionUpdate_toolCall_withRawInput(t *testing.T) {
+	params := json.RawMessage(`{
+		"sessionId": "s1",
+		"update": {
+			"sessionUpdate": "tool_call",
+			"toolCallId": "c1",
+			"title": "Bash",
+			"kind": "bash",
+			"status": "pending",
+			"rawInput": {"command": "ls -la /tmp"}
+		}
+	}`)
+	evs := mapSessionUpdate("", params)
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	if evs[0].Type != core.EventToolUse {
+		t.Fatalf("expected EventToolUse, got %s", evs[0].Type)
+	}
+	if evs[0].ToolInput != "ls -la /tmp" {
+		t.Fatalf("expected tool input 'ls -la /tmp', got %q", evs[0].ToolInput)
+	}
+}
+
+func TestSummarizeACPToolInput(t *testing.T) {
+	tests := []struct {
+		name string
+		kind string
+		raw  string
+		want string
+	}{
+		{
+			name: "bash command",
+			kind: "bash",
+			raw:  `{"command": "echo hello"}`,
+			want: "echo hello",
+		},
+		{
+			name: "read file",
+			kind: "read",
+			raw:  `{"file_path": "/tmp/test.txt"}`,
+			want: "/tmp/test.txt",
+		},
+		{
+			name: "empty raw",
+			kind: "bash",
+			raw:  "",
+			want: "",
+		},
+		{
+			name: "unknown kind falls back to formatted JSON",
+			kind: "unknown_tool",
+			raw:  `{"key": "value"}`,
+			want: "{\n  \"key\": \"value\"\n}",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw json.RawMessage
+			if tt.raw != "" {
+				raw = json.RawMessage(tt.raw)
+			}
+			got := summarizeACPToolInput(tt.kind, raw)
+			if got != tt.want {
+				t.Errorf("summarizeACPToolInput(%q, %s) = %q, want %q", tt.kind, tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapSessionUpdate_agentThoughtChunk(t *testing.T) {
+	params := json.RawMessage(`{"sessionId":"s1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"x"}}}`)
+	evs := mapSessionUpdate("", params)
+	if len(evs) != 1 || evs[0].Type != core.EventThinking || evs[0].Content != "x" {
+		t.Fatalf("expected thinking event, got %+v", evs)
+	}
+	for _, ev := range evs {
+		if ev.Type == core.EventText {
+			t.Fatalf("thought leaked into text: %+v", ev)
+		}
 	}
 }

@@ -2,12 +2,15 @@ package droid
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -221,10 +224,14 @@ func scanDroidSession(path, workDir string) (sessionID string, title string, msg
 }
 
 func extractDroidMessageText(content any) string {
+	if text, ok := content.(string); ok {
+		return text
+	}
 	parts, ok := content.([]any)
 	if !ok {
 		return ""
 	}
+	var texts []string
 	for _, part := range parts {
 		m, ok := part.(map[string]any)
 		if !ok {
@@ -234,8 +241,70 @@ func extractDroidMessageText(content any) string {
 			continue
 		}
 		if text, ok := m["text"].(string); ok && text != "" {
-			return text
+			texts = append(texts, text)
 		}
 	}
-	return ""
+	return strings.Join(texts, "\n")
+}
+
+func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
+	homeDir, err := a.homeDir()
+	if err != nil {
+		return nil, fmt.Errorf("droid: cannot determine home dir: %w", err)
+	}
+	path, err := findDroidSessionFileFromBase(filepath.Join(homeDir, ".factory", "sessions"), a.GetWorkDir(), sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
+		return nil, fmt.Errorf("droid: session file not found: %s", sessionID)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("droid: open session history: %w", err)
+	}
+	defer f.Close()
+	return readDroidSessionHistory(f, limit)
+}
+
+func readDroidSessionHistory(r io.Reader, limit int) ([]core.HistoryEntry, error) {
+	var entries []core.HistoryEntry
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == "" {
+			continue
+		}
+		var raw struct {
+			Type      string `json:"type"`
+			Timestamp string `json:"timestamp"`
+			Message   struct {
+				Role       string `json:"role"`
+				Visibility string `json:"visibility"`
+				Content    any    `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &raw); err != nil {
+			return nil, fmt.Errorf("droid: decode session history: %w", err)
+		}
+		if raw.Type != "message" || (raw.Message.Role != "user" && raw.Message.Role != "assistant") || raw.Message.Visibility == "llm_only" {
+			continue
+		}
+		text := extractDroidMessageText(raw.Message.Content)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		ts, _ := time.Parse(time.RFC3339Nano, raw.Timestamp)
+		if !ts.IsZero() {
+			ts = ts.Local()
+		}
+		entries = append(entries, core.HistoryEntry{Role: raw.Message.Role, Content: text, Timestamp: ts})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("droid: scan session history: %w", err)
+	}
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries, nil
 }

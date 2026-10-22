@@ -31,6 +31,28 @@ func NewSkillRegistry() *SkillRegistry {
 	return &SkillRegistry{}
 }
 
+// SetSkills installs an authoritative snapshot, including an empty catalog.
+func (r *SkillRegistry) SetSkills(skills []*Skill) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dirs = nil
+	r.cache = append([]*Skill{}, skills...)
+}
+
+// LoadSkillFile reads one explicitly selected skill without scanning siblings.
+func LoadSkillFile(path string) (*Skill, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("skill: read %s: %w", path, err)
+	}
+	dir := filepath.Dir(path)
+	skill := parseSkillMD(filepath.Base(dir), string(data), dir)
+	if skill == nil {
+		return nil, fmt.Errorf("skill: empty instructions in %s", path)
+	}
+	return skill, nil
+}
+
 // SetDirs configures which directories to scan for skills.
 func (r *SkillRegistry) SetDirs(dirs []string) {
 	r.mu.Lock()
@@ -78,46 +100,84 @@ func (r *SkillRegistry) ListAll() []*Skill {
 	seen := make(map[string]bool)
 
 	for _, dir := range r.dirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			fullPath := filepath.Join(dir, entry.Name())
-			info, err := os.Stat(fullPath)
-			if err != nil {
-				continue
-			}
-			if !info.IsDir() {
-				continue
-			}
-			skillName := entry.Name()
-			if seen[strings.ToLower(skillName)] {
-				continue
-			}
-
-			mdPath := filepath.Join(dir, skillName, "SKILL.md")
-			data, err := os.ReadFile(mdPath)
-			if err != nil {
-				continue
-			}
-
-			skill := parseSkillMD(skillName, string(data), dir)
-			if skill == nil {
-				continue
-			}
-
-			seen[strings.ToLower(skillName)] = true
-			result = append(result, skill)
-			slog.Debug("skill: discovered", "name", skillName, "dir", dir)
-		}
+		result = append(result, discoverSkillsInDir(dir, seen)...)
 	}
 
 	r.cache = result
 	return result
 }
 
-// Invalidate clears the cache so skills are re-scanned on next access.
+// discoverSkillsInDir scans a single skill root directory for immediate
+// subdirectories that contain a SKILL.md file. Per the Claude Code CLI
+// convention (issue #1304), only depth-1 layout is recognised:
+//
+//	<root>/<skill-name>/SKILL.md        — registered
+//	<root>/<skill-name>/references/...  — asset, NOT registered
+//
+// Nested SKILL.md files inside a skill (e.g. example templates shipped
+// alongside the real one) are treated as skill assets and ignored, so they
+// cannot leak into platform command menus as phantom slash commands.
+func discoverSkillsInDir(scanRoot string, seen map[string]bool) []*Skill {
+	entries, err := os.ReadDir(scanRoot)
+	if err != nil {
+		return nil
+	}
+
+	var result []*Skill
+	for _, entry := range entries {
+		if !isDiscoverableSubdir(scanRoot, entry) {
+			continue
+		}
+
+		skillName := entry.Name()
+		if seen[strings.ToLower(skillName)] {
+			continue
+		}
+
+		skillDir := filepath.Join(scanRoot, skillName)
+		skillFile := filepath.Join(skillDir, "SKILL.md")
+		data, err := os.ReadFile(skillFile)
+		if err != nil {
+			// No SKILL.md at the top of this subdir — and we deliberately
+			// do NOT recurse, matching the Claude Code CLI rule.
+			continue
+		}
+
+		skill := parseSkillMD(skillName, string(data), skillDir)
+		if skill == nil {
+			continue
+		}
+
+		seen[strings.ToLower(skillName)] = true
+		result = append(result, skill)
+		slog.Debug("skill: discovered", "name", skillName, "dir", skillDir)
+	}
+
+	return result
+}
+
+// isDiscoverableSubdir reports whether entry should be considered as a
+// potential skill subdirectory of parentDir. Accepts real directories and
+// symlinks that resolve to directories.
+func isDiscoverableSubdir(parentDir string, entry os.DirEntry) bool {
+	if entry.IsDir() {
+		return true
+	}
+	if entry.Type()&os.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(parentDir, entry.Name()))
+	return err == nil && info.IsDir()
+}
+
+// Dirs returns the configured skill directories.
+func (r *SkillRegistry) Dirs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]string(nil), r.dirs...)
+}
+
+// Invalidate clears the cache so skills will be re-scanned on next access.
 func (r *SkillRegistry) Invalidate() {
 	r.mu.Lock()
 	defer r.mu.Unlock()

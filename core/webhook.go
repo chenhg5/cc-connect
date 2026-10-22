@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -243,7 +242,8 @@ func (ws *WebhookServer) executePrompt(engine *Engine, sessionKey, prompt string
 	}
 
 	session := engine.sessions.GetOrCreateActive(sessionKey)
-	if !session.TryLock() {
+	lockGen, locked := session.TryLock()
+	if !locked {
 		slog.Warn("webhook: session busy, queued prompt dropped", "event", event, "session_key", sessionKey)
 		if !silent {
 			engine.send(targetPlatform, replyCtx, fmt.Sprintf("🪝 ⚠️ session busy, skipped: %s", event))
@@ -251,7 +251,7 @@ func (ws *WebhookServer) executePrompt(engine *Engine, sessionKey, prompt string
 		return
 	}
 
-	engine.processInteractiveMessage(targetPlatform, msg, session)
+	engine.processInteractiveMessage(targetPlatform, msg, session, lockGen)
 	slog.Info("webhook: prompt executed", "event", event, "session_key", sessionKey)
 }
 
@@ -305,7 +305,7 @@ func (ws *WebhookServer) executeShell(engine *Engine, req WebhookRequest, event 
 	ctx, cancel := context.WithTimeout(context.Background(), webhookShellTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", req.Exec)
+	cmd := shellExecCommand(ctx, engine.shell, engine.shellFlag, engine.shellProfile, req.Exec)
 	cmd.Dir = workDir
 	output, execErr := cmd.CombinedOutput()
 

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect, useRef } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Zap, AlertCircle, Languages, Sun, Moon, Monitor } from 'lucide-react';
 import { useAuthStore } from '@/store/auth';
@@ -12,18 +12,45 @@ const languages = [
   { code: 'zh', label: '中' },
   { code: 'zh-TW', label: '繁' },
   { code: 'ja', label: '日' },
+  { code: 'ko', label: '한' },
   { code: 'es', label: 'ES' },
+  { code: 'ru', label: 'RU' },
 ];
 
 export default function Login() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
-  const login = useAuthStore((s) => s.login);
+  const [searchParams] = useSearchParams();
+  const loginStore = useAuthStore((s) => s.login);
   const { theme, setTheme } = useThemeStore();
   const [token, setToken] = useState('');
   const [serverUrl, setServerUrl] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const autoLoginAttempted = useRef(false);
+
+  useEffect(() => {
+    if (autoLoginAttempted.current) return;
+    const qToken = searchParams.get('token');
+    if (!qToken) return;
+    autoLoginAttempted.current = true;
+
+    (async () => {
+      setLoading(true);
+      try {
+        api.setToken(qToken);
+        await getStatus();
+        loginStore(qToken);
+        navigate('/', { replace: true });
+      } catch {
+        setToken(qToken);
+        setError(t('login.invalidToken'));
+        api.setToken('');
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [searchParams, loginStore, navigate, t]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,7 +60,7 @@ export default function Login() {
     try {
       api.setToken(token.trim());
       await getStatus();
-      login(token.trim(), serverUrl.trim());
+      loginStore(token.trim(), serverUrl.trim());
       navigate('/');
     } catch {
       setError(t('login.invalidToken'));

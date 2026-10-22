@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"regexp"
@@ -119,7 +120,9 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	}()
 
 	defer func() {
-		_ = ptmx.Close()
+		if err := ptmx.Close(); err != nil {
+			slog.Warn("claudeSession: close ptmx", "error", err)
+		}
 		cancel()
 		// Wait for reader goroutine to finish so it is never leaked.
 		<-readDone
@@ -127,7 +130,9 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 		case <-processDone:
 		case <-time.After(2 * time.Second):
 			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
+				if err := cmd.Process.Kill(); err != nil {
+					slog.Warn("claudeSession: kill process", "error", err)
+				}
 			}
 			<-processDone
 		}
@@ -197,17 +202,7 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 func (a *Agent) usageProbeEnv() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-
-	env := append([]string(nil), a.providerEnvLocked()...)
-	env = append(env, a.sessionEnv...)
-	if a.routerURL != "" {
-		env = append(env, "ANTHROPIC_BASE_URL="+a.routerURL)
-		env = append(env, "NO_PROXY=127.0.0.1")
-		if a.routerAPIKey != "" {
-			env = append(env, "ANTHROPIC_API_KEY="+a.routerAPIKey)
-		}
-	}
-	return env
+	return a.runtimeEnvLocked()
 }
 
 func nextClaudeUsageProbeAction(screen string, state *claudeUsageProbeState, now time.Time) string {

@@ -23,31 +23,55 @@ import (
 // Each Send() spawns `qodercli -p <prompt> -f stream-json -q`.
 // Subsequent turns use `-r <sessionID>` to resume the conversation.
 type qoderSession struct {
-	workDir   string
-	model     string
-	mode      string
-	extraEnv  []string
-	events    chan core.Event
-	sessionID atomic.Value // stores string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	alive     atomic.Bool
+	cmd            string
+	extraArgs      []string // extra args from cmd, prepended before qoder args
+	workDir        string
+	model          string
+	mode           string
+	extraEnv       []string
+	events         chan core.Event
+	sessionID      atomic.Value // stores string
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	alive          atomic.Bool
+	startupWarning string
+
+	textMu             sync.Mutex
+	assistantTextByID  map[string]string
+	assistantTextOrder []string
 }
 
-func newQoderSession(ctx context.Context, workDir, model, mode, resumeID string, extraEnv []string) (*qoderSession, error) {
+const maxAssistantTextCacheEntries = 1024
+
+// StartupWarning implements core.StartupWarner. Returns a non-empty string
+// when the session was started under degraded conditions (e.g. yolo mode
+// silently skipped under root).
+func (qs *qoderSession) StartupWarning() string { return qs.startupWarning }
+
+func newQoderSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string) (*qoderSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	qs := &qoderSession{
-		workDir:  workDir,
-		model:    model,
-		mode:     mode,
-		extraEnv: extraEnv,
-		events:   make(chan core.Event, 64),
-		ctx:      sessionCtx,
-		cancel:   cancel,
+		cmd:       cmd,
+		extraArgs: extraArgs,
+		workDir:   workDir,
+		model:     model,
+		mode:      mode,
+		extraEnv:  extraEnv,
+		events:    make(chan core.Event, 64),
+		ctx:       sessionCtx,
+		cancel:    cancel,
+
+		assistantTextByID: make(map[string]string),
 	}
 	qs.alive.Store(true)
+
+	// Detect root-induced yolo downgrade and surface it to the IM user via StartupWarning.
+	// The actual flag skip happens inside Send() when building the CLI args.
+	if mode == "yolo" && os.Geteuid() == 0 {
+		qs.startupWarning = "⚠️ Running as root: --dangerously-skip-permissions (yolo mode) is not supported and has been skipped. The agent may pause on high-risk operations."
+	}
 
 	if resumeID != "" && resumeID != core.ContinueSession {
 		qs.sessionID.Store(resumeID)
@@ -56,19 +80,19 @@ func newQoderSession(ctx context.Context, workDir, model, mode, resumeID string,
 	return qs, nil
 }
 
-func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (qs *qoderSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
 		slog.Warn("qoderSession: images not supported, ignoring")
 	}
 	if len(files) > 0 {
-		filePaths := core.SaveFilesToDisk(qs.workDir, files)
+		filePaths := core.SaveFilesToDisk(qs.workDir, messageID, files)
 		prompt = core.AppendFileRefs(prompt, filePaths)
 	}
 	if !qs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
 
-	args := []string{"-p", prompt, "-f", "stream-json", "-q", "-w", qs.workDir}
+	args := append(append([]string{}, qs.extraArgs...), "-p", prompt, "-f", "stream-json", "-q", "-w", qs.workDir)
 
 	sid := qs.CurrentSessionID()
 	if sid != "" {
@@ -76,7 +100,11 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 	}
 
 	if qs.mode == "yolo" {
-		args = append(args, "--dangerously-skip-permissions")
+		if os.Geteuid() == 0 {
+			slog.Warn("qoderSession: --dangerously-skip-permissions not allowed under root, skipping flag")
+		} else {
+			args = append(args, "--dangerously-skip-permissions")
+		}
 	}
 
 	if qs.model != "" {
@@ -85,7 +113,7 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 
 	slog.Debug("qoderSession: launching", "resume", sid != "", "args_len", len(args))
 
-	cmd := exec.CommandContext(qs.ctx, "qodercli", args...)
+	cmd := exec.CommandContext(qs.ctx, qs.cmd, args...)
 	cmd.Dir = qs.workDir
 	if len(qs.extraEnv) > 0 {
 		cmd.Env = core.MergeEnv(os.Environ(), qs.extraEnv)
@@ -111,20 +139,9 @@ func (qs *qoderSession) Send(prompt string, images []core.ImageAttachment, files
 
 func (qs *qoderSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer qs.wg.Done()
-	defer func() {
-		if err := cmd.Wait(); err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
-			if stderrMsg != "" {
-				slog.Error("qoderSession: process failed", "error", err, "stderr", truncStr(stderrMsg, 200))
-				evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-				select {
-				case qs.events <- evt:
-				case <-qs.ctx.Done():
-					return
-				}
-			}
-		}
-	}()
+
+	var gotResult bool
+	var nonJSONLines []string
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -138,19 +155,73 @@ func (qs *qoderSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf 
 		var raw streamEvent
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
 			slog.Debug("qoderSession: non-JSON line", "line", truncStr(line, 100))
+			nonJSONLines = append(nonJSONLines, line)
 			continue
 		}
 
+		if raw.Type == "result" {
+			gotResult = true
+		}
 		qs.handleEvent(&raw)
 	}
 
-	if err := scanner.Err(); err != nil {
-		slog.Error("qoderSession: scanner error", "error", err)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		slog.Error("qoderSession: scanner error", "error", scanErr)
+	}
+
+	// Wait for process to exit.
+	exitErr := cmd.Wait()
+
+	// If we already got a result event, the turn completed normally.
+	if gotResult {
+		if exitErr != nil {
+			stderrMsg := strings.TrimSpace(stderrBuf.String())
+			if stderrMsg != "" {
+				slog.Warn("qoderSession: process exited with error after result", "error", exitErr, "stderr", truncStr(stderrMsg, 200))
+			}
+		}
+		return
+	}
+
+	// No result event was received — emit a fallback to prevent the engine
+	// from hanging forever on the events channel.
+	if len(nonJSONLines) > 0 {
+		// qodercli produced plain text instead of stream-json; forward it
+		// as a result so the user at least sees the response.
+		slog.Warn("qoderSession: no result event, falling back to plain-text output", "lines", len(nonJSONLines))
+		text := strings.Join(nonJSONLines, "\n")
+		evt := core.Event{Type: core.EventResult, Content: text, SessionID: qs.CurrentSessionID(), Done: true}
 		select {
 		case qs.events <- evt:
 		case <-qs.ctx.Done():
-			return
+		}
+	} else if exitErr != nil {
+		// Process failed with no usable output.
+		stderrMsg := strings.TrimSpace(stderrBuf.String())
+		if stderrMsg == "" {
+			stderrMsg = exitErr.Error()
+		}
+		slog.Error("qoderSession: process failed with no result", "error", exitErr, "stderr", truncStr(stderrMsg, 200))
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		select {
+		case qs.events <- evt:
+		case <-qs.ctx.Done():
+		}
+	} else if scanErr != nil {
+		// Scanner error with no output.
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", scanErr)}
+		select {
+		case qs.events <- evt:
+		case <-qs.ctx.Done():
+		}
+	} else {
+		// Process exited cleanly but produced nothing at all.
+		slog.Warn("qoderSession: process exited with no output and no result event")
+		evt := core.Event{Type: core.EventResult, Content: "", SessionID: qs.CurrentSessionID(), Done: true}
+		select {
+		case qs.events <- evt:
+		case <-qs.ctx.Done():
 		}
 	}
 }
@@ -163,13 +234,15 @@ type streamEvent struct {
 	SessionID string         `json:"session_id"`
 	Done      bool           `json:"done"`
 	Message   *streamMessage `json:"message"`
+	Result    string         `json:"result"` // qodercli 0.2.x: final text in top-level result field
 }
 
 type streamMessage struct {
-	ID      string          `json:"id"`
-	Role    string          `json:"role"`
-	Status  string          `json:"status"`
-	Content json.RawMessage `json:"content"`
+	ID         string          `json:"id"`
+	Role       string          `json:"role"`
+	Status     string          `json:"status"`
+	StopReason string          `json:"stop_reason"`
+	Content    json.RawMessage `json:"content"`
 }
 
 type contentItem struct {
@@ -206,29 +279,29 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 		return
 	}
 
-	// Only process "finished" status to avoid duplicates from "tool_calling" status
-	if ev.Message.Status != "finished" {
-		return
-	}
-
 	var items []contentItem
 	if err := json.Unmarshal(ev.Message.Content, &items); err != nil {
 		return
 	}
 
+	// qodercli <0.2 uses Status="finished" for final messages.
+	// Newer stream-json output can reuse the same message id for thinking,
+	// redacted thinking, partial text, and final text frames.
+	isFinished := ev.Message.Status == "finished" ||
+		ev.Message.StopReason == "end_turn" ||
+		ev.Message.StopReason == "tool_use"
+
 	for _, item := range items {
 		switch item.Type {
 		case "text":
-			if item.Text != "" {
-				evt := core.Event{Type: core.EventText, Content: item.Text}
-				select {
-				case qs.events <- evt:
-				case <-qs.ctx.Done():
-					return
-				}
+			if !qs.emitAssistantText(ev.Message.ID, item.Text) {
+				return
 			}
 
 		case "function":
+			if !isFinished {
+				continue
+			}
 			inputPreview := extractToolPreview(item.Input)
 			evt := core.Event{Type: core.EventToolUse, ToolName: item.Name, ToolInput: inputPreview}
 			select {
@@ -240,8 +313,64 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 	}
 }
 
+func (qs *qoderSession) emitAssistantText(messageID, text string) bool {
+	if text == "" {
+		return true
+	}
+
+	chunk := text
+	if messageID != "" {
+		qs.textMu.Lock()
+		if qs.assistantTextByID == nil {
+			qs.assistantTextByID = make(map[string]string)
+		}
+		prev := qs.assistantTextByID[messageID]
+		switch {
+		case text == prev:
+			qs.textMu.Unlock()
+			return true
+		case prev != "" && strings.HasPrefix(text, prev):
+			chunk = strings.TrimPrefix(text, prev)
+			qs.setAssistantTextLocked(messageID, text)
+		case prev != "":
+			// qoder occasionally sends a standalone fragment after cumulative
+			// frames; emit only the new fragment and remember the joined text.
+			qs.setAssistantTextLocked(messageID, prev+text)
+		default:
+			qs.setAssistantTextLocked(messageID, text)
+		}
+		qs.textMu.Unlock()
+	}
+
+	if chunk == "" {
+		return true
+	}
+	evt := core.Event{Type: core.EventText, Content: chunk}
+	select {
+	case qs.events <- evt:
+		return true
+	case <-qs.ctx.Done():
+		return false
+	}
+}
+
+func (qs *qoderSession) setAssistantTextLocked(messageID, text string) {
+	if _, ok := qs.assistantTextByID[messageID]; !ok {
+		qs.assistantTextOrder = append(qs.assistantTextOrder, messageID)
+		if len(qs.assistantTextOrder) > maxAssistantTextCacheEntries {
+			evictID := qs.assistantTextOrder[0]
+			copy(qs.assistantTextOrder, qs.assistantTextOrder[1:])
+			qs.assistantTextOrder = qs.assistantTextOrder[:len(qs.assistantTextOrder)-1]
+			delete(qs.assistantTextByID, evictID)
+		}
+	}
+	qs.assistantTextByID[messageID] = text
+}
+
 func (qs *qoderSession) handleResult(ev *streamEvent) {
 	var finalText string
+
+	// qodercli <0.2: result text is in message.content[].text
 	if ev.Message != nil {
 		var items []contentItem
 		if err := json.Unmarshal(ev.Message.Content, &items); err == nil {
@@ -251,6 +380,11 @@ func (qs *qoderSession) handleResult(ev *streamEvent) {
 				}
 			}
 		}
+	}
+
+	// qodercli 0.2.x: result text is in top-level "result" field
+	if finalText == "" && ev.Result != "" {
+		finalText = ev.Result
 	}
 
 	evt := core.Event{Type: core.EventResult, Content: finalText, SessionID: qs.CurrentSessionID(), Done: true}
@@ -288,10 +422,10 @@ func (qs *qoderSession) Close() error {
 	}()
 	select {
 	case <-done:
+		close(qs.events)
 	case <-time.After(8 * time.Second):
 		slog.Warn("qoderSession: close timed out, abandoning wg.Wait")
 	}
-	close(qs.events)
 	return nil
 }
 

@@ -6,9 +6,14 @@ import './index.css';
 import './i18n';
 import { useAuthStore } from './store/auth';
 import { useThemeStore } from './store/theme';
+import { api } from './api/client';
 
 useAuthStore.getState().init();
 useThemeStore.getState().init();
+
+api.setOnUnauthorized(() => {
+  useAuthStore.getState().logout();
+});
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

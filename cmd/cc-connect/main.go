@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -29,62 +31,226 @@ var (
 	buildTime = "unknown"
 )
 
-func main() {
-	checkUpdateAsync()
+// globalAPIServer holds the running API server so the config-reload path can
+// re-apply hot-reloadable settings (e.g. max attachment size) without threading
+// it through the engine's reload closure. nil when the API server is disabled.
+var globalAPIServer *core.APIServer
 
-	// Handle subcommands before flag parsing
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "config-example":
-			fmt.Print(ccconnect.ConfigExampleTOML)
-			return
-		case "config":
-			runConfig(os.Args[2:])
-			return
-		case "update":
-			runUpdate()
-			return
-		case "check-update":
-			checkUpdate()
-			return
-		case "provider":
-			runProviderCommand(os.Args[2:])
-			return
-		case "send":
-			runSend(os.Args[2:])
-			return
-		case "cron":
-			runCron(os.Args[2:])
-			return
-		case "relay":
-			runRelay(os.Args[2:])
-			return
-		case "sessions":
-			runSessions(os.Args[2:])
-			return
-		case "daemon":
-			runDaemon(os.Args[2:])
-			return
-		case "feishu":
-			runFeishu(os.Args[2:])
-			return
-		case "weixin":
-			runWeixin(os.Args[2:])
-			return
+// defaultResetOnIdleMins is applied when a project does not set
+// reset_on_idle_mins. After this many minutes of user inactivity, cc-connect
+// rotates to a fresh session for the next message instead of resuming the
+// previous transcript via --continue. This avoids "context drift" where stale
+// chat history (failed commands, debugging noise, abandoned tangents) is
+// repeatedly re-ingested and starts to dominate the model's attention. The
+// previous session is preserved and remains accessible via /list and /switch.
+//
+// Set reset_on_idle_mins = 0 in config.toml to opt out and restore the
+// previous behavior of always continuing the prior session.
+const defaultResetOnIdleMins = 0
+
+// resolveResetOnIdle returns the configured reset-on-idle duration for a
+// project, applying defaultResetOnIdleMins when the field is unset. The second
+// return value indicates whether the default was applied, so the caller can
+// emit a one-time nudge log directing users to the docs.
+func resolveResetOnIdle(configured *int) (time.Duration, bool) {
+	if configured != nil {
+		return time.Duration(*configured) * time.Minute, false
+	}
+	return time.Duration(defaultResetOnIdleMins) * time.Minute, true
+}
+
+// logSizeSource describes where the resolved log size came from, so the
+// caller can log it and operators can audit the active setting without
+// grepping systemd/launchd definitions.
+type logSizeSource string
+
+const (
+	logSizeSourceFlag    logSizeSource = "flag"
+	logSizeSourceEnv     logSizeSource = "env"
+	logSizeSourceDefault logSizeSource = "default"
+)
+
+// resolveLogMaxSize picks the effective max log size in bytes, applying the
+// priority order: explicit flag value > CC_LOG_MAX_SIZE env var > built-in
+// default. flagValue is the raw string from --log-max-size ("" if not set).
+// Returns the byte count and which source won. Invalid flag/env values are
+// logged to stderr and the value is ignored — a malformed setting must never
+// silently downgrade to "0 bytes" or another surprise.
+func resolveLogMaxSize(flagValue string) (int64, logSizeSource) {
+	if strings.TrimSpace(flagValue) != "" {
+		n, err := daemon.ParseLogSize(flagValue)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-size=%q: %v\n", flagValue, err)
+		} else {
+			return n, logSizeSourceFlag
 		}
 	}
+	if v := os.Getenv("CC_LOG_MAX_SIZE"); v != "" {
+		n, err := daemon.ParseLogSize(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_SIZE=%q: %v\n", v, err)
+		} else {
+			return n, logSizeSourceEnv
+		}
+	}
+	return int64(daemon.DefaultLogMaxSize), logSizeSourceDefault
+}
 
+// preScanLogMaxSizeFlag returns the value passed via --log-max-size before
+// flag.Parse() runs, so the rotating-writer setup can honour the flag too.
+// Returns "" if the flag is absent. Both "--log-max-size VALUE" and
+// "--log-max-size=VALUE" forms are recognised.
+func preScanLogMaxSizeFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--log-max-size" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, "--log-max-size=") {
+			return strings.TrimPrefix(a, "--log-max-size=")
+		}
+	}
+	return ""
+}
+
+// logBackupsSource describes where the resolved max-backups count came
+// from, mirroring logSizeSource so operators can audit the active value
+// from the startup log line alone.
+type logBackupsSource string
+
+const (
+	logBackupsSourceFlag    logBackupsSource = "flag"
+	logBackupsSourceEnv     logBackupsSource = "env"
+	logBackupsSourceDefault logBackupsSource = "default"
+)
+
+// resolveLogMaxBackups picks the effective number of rotated log backups
+// to retain, with the same priority order as resolveLogMaxSize: explicit
+// flag value > CC_LOG_MAX_BACKUPS env var > built-in default. Returns
+// the count and which source won. Invalid inputs are logged to stderr
+// and the value is ignored so a typo never silently downgrades to "0".
+func resolveLogMaxBackups(flagValue string) (int, logBackupsSource) {
+	if strings.TrimSpace(flagValue) != "" {
+		n, err := daemon.ParseLogBackups(flagValue)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring --log-max-backups=%q: %v\n", flagValue, err)
+		} else {
+			return n, logBackupsSourceFlag
+		}
+	}
+	if v := os.Getenv("CC_LOG_MAX_BACKUPS"); v != "" {
+		n, err := daemon.ParseLogBackups(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ignoring CC_LOG_MAX_BACKUPS=%q: %v\n", v, err)
+		} else {
+			return n, logBackupsSourceEnv
+		}
+	}
+	return daemon.DefaultLogMaxBackups, logBackupsSourceDefault
+}
+
+// preScanLogMaxBackupsFlag returns the value passed via --log-max-backups
+// before flag.Parse() runs, mirroring preScanLogMaxSizeFlag. Returns ""
+// if the flag is absent.
+func preScanLogMaxBackupsFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--log-max-backups" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, "--log-max-backups=") {
+			return strings.TrimPrefix(a, "--log-max-backups=")
+		}
+	}
+	return ""
+}
+
+// resolveMaxAttachmentSize returns the per-attachment size limit in bytes for
+// the /send API. Priority: CC_MAX_ATTACHMENT_SIZE_MB env var (MiB) >
+// config max_attachment_size_mb > core.DefaultMaxAttachmentSize. The env var
+// intentionally uses the same MiB unit as the config field so the two knobs
+// cannot silently disagree by a factor of 1<<20. A malformed or non-positive
+// env value is ignored (falling through to config/default) rather than being
+// fatal — the same lenient posture as resolveLogMaxSize, which also warns so
+// a typo never silently downgrades the setting.
+func resolveMaxAttachmentSize(cfg *config.Config) int64 {
+	if v := strings.TrimSpace(os.Getenv("CC_MAX_ATTACHMENT_SIZE_MB")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n << 20
+		}
+		fmt.Fprintf(os.Stderr, "warning: ignoring CC_MAX_ATTACHMENT_SIZE_MB=%q: must be a positive integer (MiB)\n", v)
+	}
+	if cfg != nil && cfg.MaxAttachmentSizeMB > 0 {
+		return int64(cfg.MaxAttachmentSizeMB) << 20
+	}
+	return core.DefaultMaxAttachmentSize
+}
+
+type initialModelRefreshStarter interface {
+	StartInitialModelRefresh()
+}
+
+type providerWiringResult struct {
+	explicitProviderRequested bool
+	activeProviderApplied     bool
+	canStartInitialRefresh    bool
+}
+
+var topLevelCommandHandlers = map[string]func([]string){
+	"config-example": func(_ []string) {
+		fmt.Print(ccconnect.ConfigExampleTOML)
+	},
+	"config": runConfig,
+	"update": func(_ []string) {
+		runUpdate()
+	},
+	"check-update": func(_ []string) {
+		checkUpdate()
+	},
+	"provider":  runProviderCommand,
+	"send":      runSend,
+	"cron":      runCron,
+	"timer":     runTimer,
+	"at":        runTimer,
+	"relay":     runRelay,
+	"sessions":  runSessions,
+	"agent-sid": runAgentSID,
+	"daemon":    runDaemon,
+	"feishu":    runFeishu,
+	"tuitui":    runTuiTui,
+	"weixin":    runWeixin,
+	"yuanbao":   runYuanbao,
+	"doctor":    runDoctor,
+	"web":       runWeb,
+}
+
+func main() {
+	// Agy hooks require stdout to contain only the final JSON decision. Handle
+	// this internal command before update checks, logging, or normal CLI setup.
+	if len(os.Args) > 1 && os.Args[1] == "_agy-permission-hook" {
+		runAntigravityPermissionHook()
+		return
+	}
+
+	checkUpdateAsync()
 	// When started as a daemon (CC_LOG_FILE set), redirect logs to a rotating file.
+	// Log file setup happens before flag.Parse() so the rotating writer is in
+	// place before any slog output. To still honour --log-max-size, we
+	// pre-scan os.Args here for the flag value; this is a small, deliberate
+	// duplication of flag parsing for one well-known key.
 	var logWriter io.Writer
 	var logCloser io.Closer
 	if logFile := os.Getenv("CC_LOG_FILE"); logFile != "" {
-		maxSize := int64(daemon.DefaultLogMaxSize)
-		if v := os.Getenv("CC_LOG_MAX_SIZE"); v != "" {
-			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-				maxSize = n
-			}
-		}
-		w, err := daemon.NewRotatingWriter(logFile, maxSize)
+		maxSize, maxSizeSrc := resolveLogMaxSize(preScanLogMaxSizeFlag(os.Args[1:]))
+		maxBackups, maxBackupsSrc := resolveLogMaxBackups(preScanLogMaxBackupsFlag(os.Args[1:]))
+		fmt.Fprintf(os.Stderr, "log: redirecting to %s with max_size=%d bytes (source: %s), max_backups=%d (source: %s)\n", logFile, maxSize, maxSizeSrc, maxBackups, maxBackupsSrc)
+		w, err := daemon.NewRotatingWriter(logFile, maxSize, maxBackups)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", logFile, err)
 			os.Exit(1)
@@ -94,20 +260,63 @@ func main() {
 		slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	}
 
-	configFlag := flag.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.Usage = printUsage
-	flag.Parse()
+	rootOpts, err := parseRootCLIOptions(os.Args[1:])
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		os.Exit(2)
+	}
 
-	if *showVersion {
+	// Cross-check: the rotating-writer setup above consumed a pre-scanned
+	// value of --log-max-size. Validate the parsed value too so malformed
+	// values surface a clear warning.
+	if strings.TrimSpace(rootOpts.logMaxSize) != "" {
+		if _, err := daemon.ParseLogSize(rootOpts.logMaxSize); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: --log-max-size=%q: %v\n", rootOpts.logMaxSize, err)
+		}
+	}
+	if rootOpts.logMaxBackups < 0 {
+		fmt.Fprintf(os.Stderr, "warning: --log-max-backups=%d must be >= 0 (0 means use env/default)\n", rootOpts.logMaxBackups)
+	}
+
+	if rootOpts.showVersion {
 		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
 		return
 	}
 
+	if runTopLevelCommand(rootOpts.args) {
+		return
+	}
+
+	if err := validateNoExtraTopLevelArgs(rootOpts.args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
+		printUsage()
+		os.Exit(1)
+	}
+
 	core.VersionInfo = fmt.Sprintf("cc-connect %s\ncommit: %s\nbuilt: %s", version, commit, buildTime)
 	core.CurrentVersion = version
+	core.CurrentCommit = commit
+	core.CurrentBuildTime = buildTime
 
-	configPath := resolveConfigPath(*configFlag)
+	configPath := resolveConfigPath(rootOpts.configPath)
+
+	// Handle --force: kill any existing instance before we try to acquire the lock
+	if rootOpts.force {
+		if KillExistingInstance(configPath) {
+			slog.Info("killed existing instance via --force")
+		}
+	}
+
+	// Acquire instance lock to prevent duplicate processes
+	instanceLock, err := AcquireInstanceLock(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Use --force to kill the existing instance.\n")
+		os.Exit(1)
+	}
+	slog.Info("acquired instance lock", "path", instanceLock.Path())
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		if err := bootstrapConfig(configPath); err != nil {
@@ -128,37 +337,47 @@ func main() {
 	config.ConfigPath = configPath
 	slog.Info("config loaded", "path", configPath)
 
+	if len(cfg.Projects) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: no projects configured in %s\n", configPath)
+		fmt.Fprintln(os.Stderr, "Add at least one [[project]] section to your config.toml, or run:")
+		fmt.Fprintln(os.Stderr, "  cc-connect init")
+		os.Exit(1)
+	}
+
 	setupLogger(cfg.Log.Level, logWriter)
+
+	// run_as_user preflight + isolation audit. MUST run before any engine
+	// or agent is constructed. If any project fails, abort startup
+	// entirely — never half-spawn. See core/runas_check.go and
+	// core/runas_audit.go for the checks themselves.
+	if err := runRunAsUserStartupChecks(context.Background(), cfg); err != nil {
+		slog.Error("run_as_user: startup checks failed, refusing to start", "error", err)
+		os.Exit(1)
+	}
 
 	engines := make([]*core.Engine, 0, len(cfg.Projects))
 	effectiveWorkDirs := make([]string, 0, len(cfg.Projects))
 
 	for _, proj := range cfg.Projects {
-		agent, err := core.CreateAgent(proj.Agent.Type, proj.Agent.Options)
+		// Inject project-level run_as_user / run_as_env into the agent's
+		// opts map so agents that support isolation can pick them up
+		// without needing their own top-level config plumbing.
+		if proj.RunAsUser != "" {
+			if proj.Agent.Options == nil {
+				proj.Agent.Options = map[string]any{}
+			}
+			proj.Agent.Options["run_as_user"] = proj.RunAsUser
+			if len(proj.RunAsEnv) > 0 {
+				proj.Agent.Options["run_as_env"] = proj.RunAsEnv
+			}
+		}
+		agent, err := core.CreateAgent(proj.Agent.Type, buildAgentOptions(cfg.DataDir, proj))
 		if err != nil {
 			slog.Error("failed to create agent", "project", proj.Name, "error", err)
 			os.Exit(1)
 		}
 
-		// Wire providers if the agent supports it
-		if ps, ok := agent.(core.ProviderSwitcher); ok && len(proj.Agent.Providers) > 0 {
-			providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
-			for i, p := range proj.Agent.Providers {
-				providers[i] = core.ProviderConfig{
-					Name:     p.Name,
-					APIKey:   p.APIKey,
-					BaseURL:  p.BaseURL,
-					Model:    p.Model,
-					Models:   convertProviderModels(p.Models),
-					Thinking: p.Thinking,
-					Env:      p.Env,
-				}
-			}
-			ps.SetProviders(providers)
-			if active, _ := proj.Agent.Options["provider"].(string); active != "" {
-				ps.SetActiveProvider(active)
-			}
-		}
+		providerWiring := wireAgentProviders(agent, proj.Agent)
 
 		var platforms []core.Platform
 		for _, pc := range proj.Platforms {
@@ -178,7 +397,8 @@ func main() {
 
 		workDir, _ := proj.Agent.Options["work_dir"].(string)
 		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
-		effectiveWorkDir := applyProjectStateOverride(proj.Name, agent, workDir, projectState)
+		effectiveWorkDir := applyProjectStateOverrideForMode(proj.Name, agent, workDir, projectState, proj.Mode == "multi-workspace")
+		startInitialRefreshIfReady(agent, providerWiring)
 		sessionFile := sessionStorePath(cfg.DataDir, proj.Name, effectiveWorkDir)
 
 		// Parse language setting
@@ -199,14 +419,21 @@ func main() {
 		}
 
 		engine := core.NewEngine(proj.Name, agent, platforms, sessionFile, lang)
-		showCtx := true
-		if proj.ShowContextIndicator != nil {
-			showCtx = *proj.ShowContextIndicator
-		}
+		// Wire display settings including show_context_indicator and reply_footer
+		// Global [display] config can be overridden by project-level settings
+		_, _, _, _, _, showCtx, showFooter, _ := config.EffectiveDisplay(cfg, &proj)
 		engine.SetShowContextIndicator(showCtx)
+		showWorkdir := true
+		if proj.ShowWorkdirIndicator != nil {
+			showWorkdir = *proj.ShowWorkdirIndicator
+		}
+		engine.SetShowWorkdirIndicator(showWorkdir)
+		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
+		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
+		engine.SetDataDir(cfg.DataDir)
 
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
@@ -221,7 +448,63 @@ func main() {
 			}
 			bindingStore := filepath.Join(cfg.DataDir, "workspace_bindings.json")
 			engine.SetMultiWorkspace(baseDir, bindingStore)
+			if proj.WorkspaceInitAllowLocalPaths != nil {
+				engine.SetWorkspaceInitAllowLocalPaths(*proj.WorkspaceInitAllowLocalPaths)
+			}
+			idleMins := cfg.WorkspaceIdleTimeoutMins
+			if idleMins == nil && proj.WorkspaceIdleTimeoutMinsLegacy != nil {
+				slog.Warn("workspace_idle_timeout_mins under [[projects]] is deprecated; move it to the top level of config.toml. Honoring the legacy value for backwards compatibility.",
+					"project", proj.Name, "value", *proj.WorkspaceIdleTimeoutMinsLegacy)
+				idleMins = proj.WorkspaceIdleTimeoutMinsLegacy
+			}
+			if idleMins != nil {
+				mins := *idleMins
+				if mins <= 0 {
+					engine.SetWorkspaceIdleTimeout(0)
+				} else {
+					engine.SetWorkspaceIdleTimeout(time.Duration(mins) * time.Minute)
+				}
+			}
+			if proj.SkipGit != nil {
+				engine.SetSkipGit(*proj.SkipGit)
+			}
 			slog.Info("multi-workspace mode enabled", "project", proj.Name, "base_dir", baseDir)
+		}
+
+		// Wire terminal observation (--observe / [projects.observe])
+		observeEnabled := rootOpts.observe
+		obsChan := rootOpts.observeChannel
+		if proj.Observe != nil {
+			if !observeEnabled && proj.Observe.Enabled {
+				observeEnabled = true
+			}
+			if obsChan == "" && proj.Observe.Channel != "" {
+				obsChan = proj.Observe.Channel
+			}
+		}
+		if observeEnabled {
+			if obsChan == "" {
+				slog.Error("observe: channel is required (use --observe-channel or set channel in [projects.observe])")
+				os.Exit(1)
+			}
+			hasSlack := false
+			for _, p := range platforms {
+				if p.Name() == "slack" {
+					hasSlack = true
+					break
+				}
+			}
+			if !hasSlack {
+				slog.Warn("observe requires a Slack platform; ignoring")
+			} else {
+				projectDir := resolveClaudeProjectDir(workDir)
+				if projectDir == "" {
+					slog.Warn("observe: could not find Claude Code project directory", "workDir", workDir)
+				} else {
+					sessionKey := fmt.Sprintf("slack:%s", obsChan)
+					engine.SetObserveConfig(projectDir, sessionKey)
+				}
+			}
 		}
 
 		// Wire global custom commands
@@ -266,24 +549,50 @@ func main() {
 			engine.SetUserRoles(buildUserRoleManager(proj.Users))
 		}
 
-		// Wire display truncation settings
+		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
-			dcfg := core.DisplayCfg{
-				ThinkingMaxLen: 300,
-				ToolMaxLen:     500,
-				ToolMessages:   true,
-			}
-			if cfg.Display.ThinkingMaxLen != nil {
-				dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
-			}
-			if cfg.Display.ToolMaxLen != nil {
-				dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
-			}
-			if cfg.Display.ToolMessages != nil {
-				dcfg.ToolMessages = *cfg.Display.ToolMessages
-			}
-			engine.SetDisplayConfig(dcfg)
+			mode, tm, tool, tmlen, toollen, _, _, hideAgentFooter := config.EffectiveDisplay(cfg, &proj)
+			historyMaxLen := config.EffectiveHistoryMaxLen(cfg, &proj)
+			engine.SetDisplayConfig(core.DisplayCfg{
+				Mode:             mode,
+				CardMode:         config.EffectiveCardMode(cfg, &proj),
+				ThinkingMessages: tm,
+				ThinkingMaxLen:   tmlen,
+				ToolMaxLen:       toollen,
+				ToolMessages:     tool,
+				HistoryMaxLen:    &historyMaxLen,
+				HideAgentFooter:  hideAgentFooter,
+			})
 		}
+
+		// Wire shell configuration
+		shell, shellFlag, shellProfile := config.EffectiveShell(cfg, &proj)
+		engine.SetShell(shell, shellFlag, shellProfile)
+
+		// Wire hooks
+		if len(cfg.Hooks) > 0 {
+			coreHooks := make([]core.HookConfig, len(cfg.Hooks))
+			for i, h := range cfg.Hooks {
+				coreHooks[i] = core.HookConfig{
+					Event:   h.Event,
+					Type:    h.Type,
+					Command: h.Command,
+					URL:     h.URL,
+					Timeout: h.Timeout,
+					Async:   h.Async,
+				}
+			}
+			engine.SetHooks(core.NewHookManager(proj.Name, coreHooks, shell, shellFlag, shellProfile))
+		}
+
+		// Wire local reference normalization / rendering
+		engine.SetReferenceConfig(core.ReferenceRenderCfg{
+			NormalizeAgents: proj.References.NormalizeAgents,
+			RenderPlatforms: proj.References.RenderPlatforms,
+			DisplayPath:     proj.References.DisplayPath,
+			MarkerStyle:     proj.References.MarkerStyle,
+			EnclosureStyle:  proj.References.EnclosureStyle,
+		})
 
 		// Wire streaming preview
 		{
@@ -304,6 +613,14 @@ func main() {
 				spcfg.DisabledPlatforms = cfg.StreamPreview.DisabledPlatforms
 			}
 			engine.SetStreamPreviewCfg(spcfg)
+		}
+
+		// Wire instant reply
+		if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
+			engine.SetInstantReply(core.InstantReplyCfg{
+				Enabled: true,
+				Content: cfg.InstantReply.Content,
+			})
 		}
 
 		// Wire rate limiting
@@ -351,8 +668,8 @@ func main() {
 			}
 		}
 
-		engine.SetDisplaySaveFunc(func(thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
-			return config.SaveDisplayConfig(thinkingMaxLen, toolMaxLen, toolMessages)
+		engine.SetDisplaySaveFunc(func(mode *string, thinkingMessages *bool, thinkingMaxLen, toolMaxLen *int, toolMessages *bool) error {
+			return config.SaveDisplayConfig(mode, thinkingMessages, thinkingMaxLen, toolMaxLen, toolMessages)
 		})
 
 		// Wire idle timeout
@@ -365,11 +682,24 @@ func main() {
 			}
 		}
 
-		// Wire default quiet mode: project-level overrides global
-		if proj.Quiet != nil {
-			engine.SetDefaultQuiet(*proj.Quiet)
-		} else if cfg.Quiet != nil {
-			engine.SetDefaultQuiet(*cfg.Quiet)
+		// Wire busy-lock stale-break threshold (#1829)
+		if cfg.BusyTimeoutMins != nil {
+			mins := *cfg.BusyTimeoutMins
+			if mins <= 0 {
+				engine.SetStaleLockBreakAfter(0)
+			} else {
+				engine.SetStaleLockBreakAfter(time.Duration(mins) * time.Minute)
+			}
+		}
+
+		// Wire max turn time (absolute per-turn wall-clock cap; 0 = disabled)
+		if cfg.MaxTurnTimeMins != nil && *cfg.MaxTurnTimeMins > 0 {
+			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)
+		}
+
+		// Wire queue depth
+		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
+			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)
 		}
 
 		// Wire auto-compress settings
@@ -382,10 +712,21 @@ func main() {
 			if maxTokens <= 0 {
 				maxTokens = 12000
 			}
-			engine.SetAutoCompressConfig(true, maxTokens, minGap)
+			engine.SetAutoCompressConfigWithSource(true, maxTokens, minGap, proj.AutoCompress.AllowHeuristic)
 		}
-		if proj.ResetOnIdleMins != nil {
-			engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
+		engine.SetResetOnIdle(resetIdle)
+		if defaulted {
+			slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
+				"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
+		}
+		if proj.AgentSessionIdleTimeoutMins != nil {
+			mins := *proj.AgentSessionIdleTimeoutMins
+			if mins <= 0 {
+				engine.SetAgentSessionIdleTimeout(0)
+			} else {
+				engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
+			}
 		}
 
 		// Wire sender injection
@@ -420,6 +761,14 @@ func main() {
 				} else {
 					slog.Warn("speech: qwen provider enabled but api_key is empty")
 				}
+			case "gemini":
+				apiKey := cfg.Speech.Gemini.APIKey
+				model := cfg.Speech.Gemini.Model
+				if apiKey != "" {
+					speechCfg.STT = core.NewGeminiSTT(apiKey, model)
+				} else {
+					slog.Warn("speech: gemini provider enabled but api_key is empty")
+				}
 			default: // "openai" or unspecified
 				apiKey := cfg.Speech.OpenAI.APIKey
 				baseURL := cfg.Speech.OpenAI.BaseURL
@@ -437,13 +786,16 @@ func main() {
 		}
 
 		// Wire text-to-speech if enabled
-		if cfg.TTS.Enabled {
+		ttsEffective := config.ResolveTTSConfigForProject(cfg.TTS, proj.Name)
+		if ttsEffective.Enabled {
 			ttsCfg := &core.TTSCfg{
-				Enabled:    true,
-				Voice:      cfg.TTS.Voice,
-				MaxTextLen: cfg.TTS.MaxTextLen,
+				Enabled:      true,
+				Voice:        ttsEffective.Voice,
+				LanguageType: ttsEffective.LanguageType,
+				Speed:        ttsEffective.Speed,
+				MaxTextLen:   ttsEffective.MaxTextLen,
 			}
-			initMode := cfg.TTS.TTSMode
+			initMode := ttsEffective.TTSMode
 			switch initMode {
 			case "always", "voice_only":
 			case "":
@@ -453,7 +805,7 @@ func main() {
 				initMode = "voice_only"
 			}
 			ttsCfg.SetTTSMode(initMode)
-			switch cfg.TTS.Provider {
+			switch ttsEffective.Provider {
 			case "qwen":
 				apiKey := cfg.TTS.Qwen.APIKey
 				baseURL := cfg.TTS.Qwen.BaseURL
@@ -468,28 +820,53 @@ func main() {
 				apiKey := cfg.TTS.MiniMax.APIKey
 				baseURL := cfg.TTS.MiniMax.BaseURL
 				model := cfg.TTS.MiniMax.Model
+				if apiKey == "" {
+					localCfg, err := config.LoadMiniMaxLocalConfig(cfg.DataDir, cfg.TTS.MiniMax.ConfigFile)
+					if err != nil {
+						slog.Warn("tts: failed to load minimax local config", "error", err)
+					} else {
+						apiKey = localCfg.APIKey
+						if baseURL == "" {
+							if localCfg.BaseURL != "" {
+								baseURL = localCfg.BaseURL
+							} else if localCfg.APIHost != "" {
+								baseURL = localCfg.APIHost
+							}
+						}
+					}
+				}
 				if apiKey != "" {
 					ttsCfg.TTS = core.NewMiniMaxTTS(apiKey, baseURL, model, nil)
 					ttsCfg.Provider = "minimax"
 				} else {
 					slog.Warn("tts: minimax provider enabled but api_key is empty")
 				}
+			case "mimo":
+				apiKey := cfg.TTS.Mimo.APIKey
+				baseURL := cfg.TTS.Mimo.BaseURL
+				model := cfg.TTS.Mimo.Model
+				if apiKey != "" {
+					ttsCfg.TTS = core.NewMimoTTS(apiKey, baseURL, model, nil)
+					ttsCfg.Provider = "mimo"
+				} else {
+					slog.Warn("tts: mimo provider enabled but api_key is empty")
+				}
 			case "espeak":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh" // default to Chinese
 				}
 				ttsCfg.TTS = core.NewEspeakTTS("", voice)
 				ttsCfg.Provider = "espeak"
 			case "pico":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh-CN" // default to Chinese (Simplified)
 				}
 				ttsCfg.TTS = core.NewPicoTTS("", voice)
 				ttsCfg.Provider = "pico"
 			case "edge":
-				voice := cfg.TTS.Voice
+				voice := ttsEffective.Voice
 				if voice == "" {
 					voice = "zh-CN-XiaoxiaoNeural" // default Chinese neural voice
 				}
@@ -528,16 +905,39 @@ func main() {
 			return config.SaveActiveProvider(projName, providerName)
 		})
 		engine.SetProviderAddSaveFunc(func(p core.ProviderConfig) error {
-			return config.AddProviderToConfig(projName, config.ProviderConfig{
+			cp := config.ProviderConfig{
 				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
 				Model: p.Model, Models: convertCoreModels(p.Models), Thinking: p.Thinking, Env: p.Env,
-			})
+			}
+			if p.CodexWireAPI != "" || len(p.CodexHTTPHeaders) > 0 {
+				cp.Codex = &config.CodexProviderConfig{
+					WireAPI: p.CodexWireAPI, HTTPHeaders: p.CodexHTTPHeaders,
+				}
+			}
+			return config.AddProviderToConfig(projName, cp)
 		})
 		engine.SetProviderRemoveSaveFunc(func(name string) error {
 			return config.RemoveProviderFromConfig(projName, name)
 		})
 		engine.SetProviderModelSaveFunc(func(providerName, model string) error {
 			return config.SaveProviderModel(projName, providerName, model)
+		})
+		engine.SetProviderRefsSaveFunc(func(refs []string) error {
+			return config.SaveProviderRefs(projName, refs)
+		})
+		engine.SetListGlobalProvidersFunc(func(agentType string) ([]core.ProviderConfig, error) {
+			globals, err := config.ListGlobalProviders()
+			if err != nil {
+				return nil, err
+			}
+			var result []core.ProviderConfig
+			for _, g := range globals {
+				if len(g.AgentTypes) > 0 && !containsString(g.AgentTypes, agentType) {
+					continue
+				}
+				result = append(result, configProviderToCore(g.ResolveForAgent(agentType)))
+			}
+			return result, nil
 		})
 		engine.SetModelSaveFunc(func(model string) error {
 			return config.SaveAgentModel(projName, model)
@@ -595,6 +995,26 @@ func main() {
 		}
 	}
 
+	// Start timer scheduler
+	timerStore, err := core.NewTimerStore(cfg.DataDir)
+	if err != nil {
+		slog.Warn("timer store unavailable", "error", err)
+	}
+	var timerSched *core.TimerScheduler
+	if timerStore != nil {
+		timerSched = core.NewTimerScheduler(timerStore)
+		if cfg.Cron.Silent != nil && *cfg.Cron.Silent {
+			timerSched.SetDefaultSilent(true)
+		}
+		if cfg.Cron.SessionMode != "" {
+			timerSched.SetDefaultSessionMode(cfg.Cron.SessionMode)
+		}
+		for i, e := range engines {
+			timerSched.RegisterEngine(cfg.Projects[i].Name, e)
+			e.SetTimerScheduler(timerSched)
+		}
+	}
+
 	// Start heartbeat scheduler
 	heartbeatSched := core.NewHeartbeatScheduler(cfg.DataDir)
 	for i, proj := range cfg.Projects {
@@ -624,6 +1044,12 @@ func main() {
 		}
 	}
 
+	if timerSched != nil {
+		if err := timerSched.Start(); err != nil {
+			slog.Error("timer scheduler start failed", "error", err)
+		}
+	}
+
 	heartbeatSched.Start()
 
 	// Start bridge server if enabled
@@ -637,7 +1063,17 @@ func main() {
 		if path == "" {
 			path = "/bridge/ws"
 		}
-		bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		// Check insecure flag for local development mode
+		insecure := cfg.Bridge.Insecure != nil && *cfg.Bridge.Insecure
+		if insecure {
+			bridgeSrv = core.NewBridgeServerInsecure(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		} else {
+			bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+		}
+		if bridgeSrv == nil {
+			slog.Error("bridge: failed to create server - token is required (or set insecure=true for local dev)")
+			os.Exit(1)
+		}
 		for i, e := range engines {
 			bp := bridgeSrv.NewPlatform(cfg.Projects[i].Name)
 			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
@@ -677,6 +1113,9 @@ func main() {
 		}
 		if cronSched != nil {
 			mgmtSrv.SetCronScheduler(cronSched)
+		}
+		if timerSched != nil {
+			mgmtSrv.SetTimerScheduler(timerSched)
 		}
 		mgmtSrv.SetHeartbeatScheduler(heartbeatSched)
 		if bridgeSrv != nil {
@@ -734,26 +1173,29 @@ func main() {
 		mgmtSrv.SetRemoveProject(config.RemoveProject)
 		mgmtSrv.SetSaveProjectSettings(func(name string, u core.ProjectSettingsUpdate) error {
 			return config.SaveProjectSettings(name, config.ProjectSettingsUpdate{
-				Quiet:                u.Quiet,
 				Language:             u.Language,
 				AdminFrom:            u.AdminFrom,
 				DisabledCommands:     u.DisabledCommands,
 				WorkDir:              u.WorkDir,
 				Mode:                 u.Mode,
+				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
+				ShowWorkdirIndicator: u.ShowWorkdirIndicator,
+				ReplyFooter:          u.ReplyFooter,
+				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
+				WorkspaceMode:        u.WorkspaceMode,
+				WorkspaceBaseDir:     u.WorkspaceBaseDir,
 			})
 		})
 		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)
+		mgmtSrv.SetSaveProviderRefs(config.SaveProviderRefs)
 		mgmtSrv.SetConfigFilePath(configPath)
 		mgmtSrv.SetGetGlobalSettings(config.GetGlobalSettings)
 		mgmtSrv.SetSaveGlobalSettings(func(updates map[string]any) error {
 			u := config.GlobalSettingsUpdate{}
 			if v, ok := updates["language"].(string); ok {
 				u.Language = &v
-			}
-			if v, ok := updates["quiet"].(bool); ok {
-				u.Quiet = &v
 			}
 			if v, ok := updates["attachment_send"].(string); ok {
 				u.AttachmentSend = &v
@@ -765,9 +1207,15 @@ func main() {
 				iv := int(v)
 				u.IdleTimeoutMins = &iv
 			}
+			if v, ok := updates["thinking_messages"].(bool); ok {
+				u.ThinkingMessages = &v
+			}
 			if v, ok := updates["thinking_max_len"].(float64); ok {
 				iv := int(v)
 				u.ThinkingMaxLen = &iv
+			}
+			if v, ok := updates["tool_messages"].(bool); ok {
+				u.ToolMessages = &v
 			}
 			if v, ok := updates["tool_max_len"].(float64); ok {
 				iv := int(v)
@@ -790,6 +1238,32 @@ func main() {
 			}
 			return config.SaveGlobalSettings(u)
 		})
+		mgmtSrv.SetListGlobalProviders(func() ([]core.GlobalProviderInfo, error) {
+			providers, err := config.ListGlobalProviders()
+			if err != nil {
+				return nil, err
+			}
+			out := make([]core.GlobalProviderInfo, len(providers))
+			for i, p := range providers {
+				out[i] = configProviderToGlobal(p)
+			}
+			return out, nil
+		})
+		mgmtSrv.SetAddGlobalProvider(func(info core.GlobalProviderInfo) error {
+			return config.AddGlobalProvider(globalProviderToConfig(info))
+		})
+		mgmtSrv.SetUpdateGlobalProvider(func(name string, info core.GlobalProviderInfo) error {
+			return config.UpdateGlobalProvider(name, globalProviderToConfig(info))
+		})
+		mgmtSrv.SetRemoveGlobalProvider(func(name string) error {
+			return config.RemoveGlobalProvider(name)
+		})
+		mgmtSrv.SetFetchPresets(core.FetchProviderPresets)
+		mgmtSrv.SetFetchSkillPresets(core.FetchSkillPresets)
+		if cfg.ProviderPresetsURL != "" {
+			core.SetPresetsURL(cfg.ProviderPresetsURL)
+		}
+		mgmtSrv.SetListCCSwitchProviders(listCCSwitchProvidersForWeb)
 		mgmtSrv.Start()
 	}
 
@@ -798,6 +1272,9 @@ func main() {
 	if err != nil {
 		slog.Warn("api server unavailable", "error", err)
 	} else {
+		globalAPIServer = apiSrv
+		apiSrv.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+
 		relayMgr := core.NewRelayManager(cfg.DataDir)
 		if cfg.Relay.TimeoutSecs != nil {
 			secs := *cfg.Relay.TimeoutSecs
@@ -807,6 +1284,7 @@ func main() {
 				relayMgr.SetTimeout(time.Duration(secs) * time.Second)
 			}
 		}
+		relayMgr.SetVisibility(cfg.Relay.Visibility)
 		apiSrv.SetRelayManager(relayMgr)
 
 		// Create shared DirHistory for all engines
@@ -827,16 +1305,23 @@ func main() {
 		if cronSched != nil {
 			apiSrv.SetCronScheduler(cronSched)
 		}
+		if timerSched != nil {
+			apiSrv.SetTimerScheduler(timerSched)
+		}
 		apiSrv.Start()
 	}
 
 	slog.Info("cc-connect is running", "projects", len(engines))
 
-	// After startup, check if we were restarted and send success notification
+	// After startup, check if we were restarted and queue the success
+	// notification. The engine dispatches it on the first OnPlatformReady
+	// for the target platform (or with a 10s safety timeout), so async
+	// platforms that need 2-3s to actually connect (e.g. Telegram) do not
+	// silently drop the notify. See issue #1383.
 	if notify := core.ConsumeRestartNotify(cfg.DataDir); notify != nil {
-		slog.Info("post-restart: sending success notification", "platform", notify.Platform, "session", notify.SessionKey)
+		slog.Info("post-restart: queuing success notification", "platform", notify.Platform, "session", notify.SessionKey)
 		for _, e := range engines {
-			e.SendRestartNotification(notify.Platform, notify.SessionKey)
+			e.SetPendingRestartNotify(notify)
 		}
 	}
 
@@ -862,6 +1347,9 @@ func main() {
 		webhookSrv.Stop()
 	}
 	heartbeatSched.Stop()
+	if timerSched != nil {
+		timerSched.Stop()
+	}
 	if cronSched != nil {
 		cronSched.Stop()
 	}
@@ -876,6 +1364,7 @@ func main() {
 	if logCloser != nil {
 		logCloser.Close()
 	}
+	instanceLock.Release()
 
 	if restartReq != nil {
 		if err := core.SaveRestartNotify(cfg.DataDir, *restartReq); err != nil {
@@ -902,6 +1391,65 @@ func main() {
 	}
 
 	slog.Info("bye")
+}
+
+func runTopLevelCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	handler, ok := topLevelCommandHandlers[args[0]]
+	if !ok {
+		return false
+	}
+	handler(args[1:])
+	return true
+}
+
+type rootCLIOptions struct {
+	configPath     string
+	force          bool
+	observe        bool
+	observeChannel string
+	logMaxSize     string
+	logMaxBackups  int
+	showVersion    bool
+	args           []string
+}
+
+func parseRootCLIOptions(args []string) (rootCLIOptions, error) {
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = printUsage
+
+	configPath := fs.String("config", "", "path to config file (default: ./config.toml or ~/.cc-connect/config.toml)")
+	force := fs.Bool("force", false, "kill any existing instance with the same config before starting")
+	observe := fs.Bool("observe", false, "observe native terminal Claude Code sessions and forward to Slack")
+	observeChannel := fs.String("observe-channel", "", "Slack channel ID to forward terminal observations to (requires --observe)")
+	logMaxSize := fs.String("log-max-size", "", "max bytes for the rotating log file (e.g. 10MB, 512K, 10485760); overrides CC_LOG_MAX_SIZE env var (default: 10MB)")
+	logMaxBackups := fs.Int("log-max-backups", 0, "number of rotated log files to retain (.log.1 .. .log.N); overrides CC_LOG_MAX_BACKUPS env var (default: 3)")
+	showVersion := fs.Bool("version", false, "print version and exit")
+
+	if err := fs.Parse(args); err != nil {
+		return rootCLIOptions{}, err
+	}
+
+	return rootCLIOptions{
+		configPath:     *configPath,
+		force:          *force,
+		observe:        *observe,
+		observeChannel: *observeChannel,
+		logMaxSize:     *logMaxSize,
+		logMaxBackups:  *logMaxBackups,
+		showVersion:    *showVersion,
+		args:           fs.Args(),
+	}, nil
+}
+
+func validateNoExtraTopLevelArgs(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unknown top-level command: %s", args[0])
 }
 
 // sessionStorePath builds a unique filename from project name + work_dir.
@@ -957,8 +1505,27 @@ func projectStatePath(dataDir, projectName string) string {
 }
 
 func applyProjectStateOverride(projectName string, agent core.Agent, configuredWorkDir string, store *core.ProjectStateStore) string {
+	return applyProjectStateOverrideForMode(projectName, agent, configuredWorkDir, store, false)
+}
+
+// applyProjectStateOverrideForMode applies a project-wide work_dir_override
+// recorded by /dir.
+//
+// In single-workspace mode the project has one agent and one directory, so the
+// override is applied to it. In multi-workspace mode the directory is resolved
+// per topic from the binding table and each workspace gets its own agent, so a
+// leftover project-wide override is ignored: pushing it onto the global agent
+// would shadow every binding and make /status report one directory for all
+// topics.
+func applyProjectStateOverrideForMode(projectName string, agent core.Agent, configuredWorkDir string, store *core.ProjectStateStore, multiWorkspace bool) string {
 	effectiveWorkDir := configuredWorkDir
 	if store == nil {
+		return effectiveWorkDir
+	}
+
+	if override := store.WorkDirOverride(); override != "" && multiWorkspace {
+		slog.Info("project_state: ignoring project-wide work_dir override in multi-workspace mode; directories come from workspace bindings",
+			"project", projectName, "work_dir", override)
 		return effectiveWorkDir
 	}
 
@@ -984,6 +1551,23 @@ func applyProjectStateOverride(projectName string, agent core.Agent, configuredW
 	switcher.SetWorkDir(override)
 	slog.Info("project_state: applied work_dir override", "project", projectName, "work_dir", override)
 	return override
+}
+
+// resolveClaudeProjectDir returns the Claude Code project directory for a given
+// work directory, or "" if it doesn't exist.
+func resolveClaudeProjectDir(workDir string) string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	// Claude Code encodes paths by replacing os.PathSeparator with "-"
+	// e.g. /home/leigh/workspace/cc-connect -> -home-leigh-workspace-cc-connect
+	encoded := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
+	dir := filepath.Join(homeDir, ".claude", "projects", encoded)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
 }
 
 // resolveConfigPath determines which config file to use.
@@ -1057,7 +1641,7 @@ func printUsage() {
 
   Bridge your messaging platforms to local AI coding agents.
   Supports: Claude Code, Codex, Cursor, Droid, Gemini CLI, Qoder CLI, OpenCode
-  Platforms: Feishu, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, Weixin, QQ, QQ Bot
+  Platforms: Feishu, TuiTui, Telegram, Slack, DingTalk, Discord, LINE, WeChat Work, Weixin, QQ, QQ Bot
 
   GitHub:  https://github.com/chenhg5/cc-connect
   Docs:    https://github.com/chenhg5/cc-connect/blob/main/INSTALL.md
@@ -1068,11 +1652,12 @@ Usage:
 
 Flags:
   --config <path>    Path to config file (default: ./config.toml or ~/.cc-connect/config.toml)
+  --force            Kill any existing instance with the same config before starting
   --version          Print version and exit
   --help             Show this help message
 
 Commands:
-  daemon             Manage cc-connect as a background service (systemd/launchd)
+  daemon             Manage cc-connect as a background service (systemd/launchd/schtasks)
     install          Install and start the daemon service
     uninstall        Remove the daemon service
     start            Start the daemon
@@ -1087,11 +1672,14 @@ Commands:
   cron               Manage scheduled tasks
     add              Create a scheduled task (-c <expr> --prompt <text>)
     list             List scheduled tasks
+    exec             Trigger a scheduled task immediately
     del              Delete a scheduled task by ID
 
   sessions           Browse session history
     list             List all sessions (pipe-friendly)
     show <id>        Show session messages (-n N for last N)
+
+  agent-sid          Print the agent session ID for the current session
 
   relay              Cross-project message relay
     send             Send a message to another project and get the response
@@ -1106,6 +1694,12 @@ Commands:
     setup            Smart setup (QR create or bind when --app is provided)
     new              Force QR onboarding to create a new bot
     bind             Bind existing app_id/app_secret
+
+  tuitui             Access TuiTui history, posts, and attachments
+    messages         Read chat history
+    search           Search chat history
+    post             Post a channel message
+    download         Download a message attachment
 
   weixin             Setup Weixin personal (ilink) via QR or token
     setup            QR login, or bind when --token is provided
@@ -1130,6 +1724,7 @@ Examples:
   cc-connect cron list                List all scheduled tasks
   cc-connect feishu setup             Setup Feishu/Lark bot credentials
   cc-connect weixin setup             Setup Weixin (ilink) with QR or --token
+  cc-connect yuanbao setup            Setup Yuanbao bot with --token app_key:app_secret
   cc-connect update                   Update to the latest version
   cc-connect config format            Format the config file
   cc-connect config example > c.toml  Save example config to a file
@@ -1167,6 +1762,11 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	result := &core.ConfigReloadResult{}
 
+	// Re-apply process-global hot-reloadable settings.
+	if globalAPIServer != nil {
+		globalAPIServer.SetMaxAttachmentSize(resolveMaxAttachmentSize(cfg))
+	}
+
 	// Find the matching project
 	var proj *config.ProjectConfig
 	for i := range cfg.Projects {
@@ -1179,28 +1779,29 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		return nil, fmt.Errorf("project %q not found in config", projName)
 	}
 
-	// Reload display config
-	dcfg := core.DisplayCfg{ThinkingMaxLen: 300, ToolMaxLen: 500, ToolMessages: true}
-	if cfg.Display.ThinkingMaxLen != nil {
-		dcfg.ThinkingMaxLen = *cfg.Display.ThinkingMaxLen
-	}
-	if cfg.Display.ToolMaxLen != nil {
-		dcfg.ToolMaxLen = *cfg.Display.ToolMaxLen
-	}
-	if cfg.Display.ToolMessages != nil {
-		dcfg.ToolMessages = *cfg.Display.ToolMessages
-	}
-	engine.SetDisplayConfig(dcfg)
+	// Reload display config (includes legacy quiet → display mapping)
+	mode, tm, tool, tmlen, toollen, showCtx, showFooter, hideAgentFooter := config.EffectiveDisplay(cfg, proj)
+	historyMaxLen := config.EffectiveHistoryMaxLen(cfg, proj)
+	engine.SetDisplayConfig(core.DisplayCfg{
+		Mode:             mode,
+		CardMode:         config.EffectiveCardMode(cfg, proj),
+		ThinkingMessages: tm,
+		ThinkingMaxLen:   tmlen,
+		ToolMaxLen:       toollen,
+		ToolMessages:     tool,
+		HistoryMaxLen:    &historyMaxLen,
+		HideAgentFooter:  hideAgentFooter,
+	})
 	result.DisplayUpdated = true
 
-	// Reload default quiet mode
-	if proj.Quiet != nil {
-		engine.SetDefaultQuiet(*proj.Quiet)
-	} else if cfg.Quiet != nil {
-		engine.SetDefaultQuiet(*cfg.Quiet)
-	} else {
-		engine.SetDefaultQuiet(false)
+	// Wire show_context_indicator and reply_footer from display config
+	engine.SetShowContextIndicator(showCtx)
+	showWorkdir := true
+	if proj.ShowWorkdirIndicator != nil {
+		showWorkdir = *proj.ShowWorkdirIndicator
 	}
+	engine.SetShowWorkdirIndicator(showWorkdir)
+	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload auto-compress settings
 	if proj.AutoCompress.Enabled != nil && *proj.AutoCompress.Enabled {
@@ -1212,21 +1813,38 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		if maxTokens <= 0 {
 			maxTokens = 12000
 		}
-		engine.SetAutoCompressConfig(true, maxTokens, minGap)
+		engine.SetAutoCompressConfigWithSource(true, maxTokens, minGap, proj.AutoCompress.AllowHeuristic)
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
-	if proj.ResetOnIdleMins != nil {
-		engine.SetResetOnIdle(time.Duration(*proj.ResetOnIdleMins) * time.Minute)
+	resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
+	engine.SetResetOnIdle(resetIdle)
+	if defaulted {
+		slog.Info("project: reset_on_idle_mins not set, applying default — set reset_on_idle_mins = 0 to opt out, see docs/usage.md",
+			"project", proj.Name, "default_minutes", defaultResetOnIdleMins)
+	}
+	if proj.AgentSessionIdleTimeoutMins != nil {
+		mins := *proj.AgentSessionIdleTimeoutMins
+		if mins <= 0 {
+			engine.SetAgentSessionIdleTimeout(0)
+		} else {
+			engine.SetAgentSessionIdleTimeout(time.Duration(mins) * time.Minute)
+		}
 	} else {
-		engine.SetResetOnIdle(0)
+		// A reload may remove this option after timers were scheduled; reset
+		// explicitly so those stale idle-close timers cannot fire later.
+		engine.SetAgentSessionIdleTimeout(0)
 	}
 
-	showCtx := true
-	if proj.ShowContextIndicator != nil {
-		showCtx = *proj.ShowContextIndicator
+	// Reload instant reply
+	if cfg.InstantReply.Enabled != nil && *cfg.InstantReply.Enabled {
+		engine.SetInstantReply(core.InstantReplyCfg{
+			Enabled: true,
+			Content: cfg.InstantReply.Content,
+		})
+	} else {
+		engine.SetInstantReply(core.InstantReplyCfg{})
 	}
-	engine.SetShowContextIndicator(showCtx)
 
 	// Reload sender injection
 	engine.SetInjectSender(proj.InjectSender != nil && *proj.InjectSender)
@@ -1234,14 +1852,14 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	// Reload attachment send-back switch
 	engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 
+	// Reload filter_external_sessions
+	engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
+
 	// Reload providers
 	if ps, ok := engine.GetAgent().(core.ProviderSwitcher); ok {
 		providers := make([]core.ProviderConfig, len(proj.Agent.Providers))
 		for i, p := range proj.Agent.Providers {
-			providers[i] = core.ProviderConfig{
-				Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
-				Model: p.Model, Models: convertProviderModels(p.Models), Thinking: p.Thinking, Env: p.Env,
-			}
+			providers[i] = configProviderToCore(p)
 		}
 		ps.SetProviders(providers)
 		result.ProvidersUpdated = len(providers)
@@ -1317,6 +1935,19 @@ func buildUserRoleManager(uc *config.UsersConfig) *core.UserRoleManager {
 	return urm
 }
 
+func configProviderToCore(p config.ProviderConfig) core.ProviderConfig {
+	c := core.ProviderConfig{
+		Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL,
+		Model: p.Model, Models: convertProviderModels(p.Models),
+		Thinking: p.Thinking, Env: p.Env,
+	}
+	if p.Codex != nil {
+		c.CodexWireAPI = p.Codex.WireAPI
+		c.CodexHTTPHeaders = p.Codex.HTTPHeaders
+	}
+	return c
+}
+
 func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {
 	if len(ms) == 0 {
 		return nil
@@ -1326,6 +1957,118 @@ func convertProviderModels(ms []config.ProviderModelConfig) []core.ModelOption {
 		opts[i] = core.ModelOption{Name: m.Model, Alias: m.Alias}
 	}
 	return opts
+}
+
+func buildAgentOptions(dataDir string, proj config.ProjectConfig) map[string]any {
+	opts := make(map[string]any, len(proj.Agent.Options)+2)
+	for k, v := range proj.Agent.Options {
+		opts[k] = v
+	}
+	opts["cc_data_dir"] = dataDir
+	opts["cc_project"] = proj.Name
+	return opts
+}
+
+func wireAgentProviders(agent core.Agent, agentCfg config.AgentConfig) providerWiringResult {
+	result := providerWiringResult{canStartInitialRefresh: true}
+	active, _ := agentCfg.Options["provider"].(string)
+	result.explicitProviderRequested = active != ""
+
+	ps, ok := agent.(core.ProviderSwitcher)
+	if !ok || len(agentCfg.Providers) == 0 {
+		return result
+	}
+
+	providers := make([]core.ProviderConfig, len(agentCfg.Providers))
+	for i, p := range agentCfg.Providers {
+		providers[i] = configProviderToCore(p)
+	}
+	ps.SetProviders(providers)
+	if result.explicitProviderRequested {
+		result.activeProviderApplied = ps.SetActiveProvider(active)
+		result.canStartInitialRefresh = result.activeProviderApplied
+	}
+	return result
+}
+
+func startInitialRefreshIfReady(agent core.Agent, result providerWiringResult) {
+	if !result.canStartInitialRefresh {
+		return
+	}
+	if starter, ok := agent.(initialModelRefreshStarter); ok {
+		starter.StartInitialModelRefresh()
+	}
+}
+
+func configProviderToGlobal(p config.ProviderConfig) core.GlobalProviderInfo {
+	info := core.GlobalProviderInfo{
+		Name:        p.Name,
+		APIKey:      p.APIKey,
+		BaseURL:     p.BaseURL,
+		Model:       p.Model,
+		Thinking:    p.Thinking,
+		Env:         p.Env,
+		AgentTypes:  p.AgentTypes,
+		Endpoints:   p.Endpoints,
+		AgentModels: p.AgentModels,
+	}
+	for _, m := range p.Models {
+		info.Models = append(info.Models, struct {
+			Model string `json:"model"`
+			Alias string `json:"alias,omitempty"`
+		}{Model: m.Model, Alias: m.Alias})
+	}
+	if len(p.AgentModelLists) > 0 {
+		info.AgentModelLists = make(map[string][]core.GlobalModelEntry, len(p.AgentModelLists))
+		for at, ml := range p.AgentModelLists {
+			entries := make([]core.GlobalModelEntry, len(ml))
+			for i, m := range ml {
+				entries[i] = core.GlobalModelEntry{Model: m.Model, Alias: m.Alias}
+			}
+			info.AgentModelLists[at] = entries
+		}
+	}
+	if p.Codex != nil {
+		info.Codex = &core.GlobalCodexConfig{
+			WireAPI:     p.Codex.WireAPI,
+			HTTPHeaders: p.Codex.HTTPHeaders,
+		}
+	}
+	return info
+}
+
+func globalProviderToConfig(info core.GlobalProviderInfo) config.ProviderConfig {
+	p := config.ProviderConfig{
+		Name:        info.Name,
+		APIKey:      info.APIKey,
+		BaseURL:     info.BaseURL,
+		Model:       info.Model,
+		Thinking:    info.Thinking,
+		Env:         info.Env,
+		AgentTypes:  info.AgentTypes,
+		Endpoints:   info.Endpoints,
+		AgentModels: info.AgentModels,
+	}
+	for _, m := range info.Models {
+		p.Models = append(p.Models, config.ProviderModelConfig{Model: m.Model, Alias: m.Alias})
+	}
+	if len(info.AgentModelLists) > 0 {
+		p.AgentModelLists = make(map[string][]config.ProviderModelConfig, len(info.AgentModelLists))
+		for at, ml := range info.AgentModelLists {
+			entries := make([]config.ProviderModelConfig, len(ml))
+			for i, m := range ml {
+				entries[i] = config.ProviderModelConfig{Model: m.Model, Alias: m.Alias}
+			}
+			p.AgentModelLists[at] = entries
+		}
+	}
+	if info.Codex != nil {
+		p.Codex = &config.CodexProviderConfig{
+			WireAPI:     info.Codex.WireAPI,
+			HTTPHeaders: info.Codex.HTTPHeaders,
+		}
+	}
+	return p
 }
 
 func convertCoreModels(ms []core.ModelOption) []config.ProviderModelConfig {

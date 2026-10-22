@@ -31,7 +31,7 @@ func runConfig(args []string) {
 func runConfigFormat(args []string) {
 	fs := flag.NewFlagSet("config format", flag.ExitOnError)
 	configPath := fs.String("config", "", "path to config file (default: auto-detect)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	path := resolveConfigPath(*configPath)
 	if _, err := os.Stat(path); os.IsNotExist(err) {

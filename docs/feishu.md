@@ -110,13 +110,26 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # domain = "https://open.feishu.cn" # 可选：覆盖运行时 API/WebSocket 域名
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
+# group_chat_history_share = false  # 可选：共享未 @ 机器人的群消息作为下一次触发的上下文；消息本身不会触发回复
 # progress_style = "legacy"  # 可选：legacy | compact | card
+# ack_emoji = "Get"           # 可选：消息被接受处理或入队时立即添加并保留的确认表情；默认禁用
+# reaction_emoji = "OnIt"      # 可选：agent 处理期间的临时表情，结束后移除
+# done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
+# image_batch_window_ms = 500  # 可选：连续多图合批窗口（默认 500ms，详见下文）
 ```
 
 > 如果应用没有交互卡片权限，或后台未配置卡片回调，可将 `enable_feishu_card = false`，让所有命令统一走纯文本回复，避免卡片发送失败后用户看不到内容。
 > 如果开启 `thread_isolation = true`，群聊里每个根消息 / reply thread 会对应一个独立 agent session；私聊行为保持原样。
+> `group_chat_history_share = true` 时，cc-connect 只在内存中保留当前进程观察到的、允许访问的群聊 text/post 消息，并在下一次明确 @ 机器人且真正进入 agent turn 时注入；未 @ 的消息不会触发回复。`/status` 等由 cc-connect 处理的命令不会消费这段待处理上下文，`/new` 会清空对应主频道或话题的上下文。
+> 在 multi-workspace 模式下，`thread_isolation = true` 也会让每个话题独立绑定 workspace；在话题内执行 `/workspace bind <name>` 不会影响同群的其他话题。已有的群级 binding 会保留为默认值，由尚未显式绑定的话题继承，因此回退到旧版本时仍可使用。
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
 > `domain` 只影响运行时 API / WebSocket 请求地址；CLI `setup/new/bind` 的引导域名仍然使用内置默认值。
+> `ack_emoji = "Get"` 会在消息通过校验、被引擎接受处理或成功入队后异步添加确认表情，无需等待模型启动或前一轮结束。它表示“请求已接收”，会在完成、失败或取消后保留，不表示模型已开始执行或任务已成功。现有 `reaction_emoji`（默认 `"OnIt"`）仍表示实际处理，`done_emoji` 表示完成；若 `ack_emoji` 与 `reaction_emoji` 相同，该表情由接收确认保留，不再作为临时状态移除。
+> 确认默认关闭；不配置、空值或 `"none"` 保持原有行为。权限或 @ 过滤、重复/过时消息、满队列拒绝、已处理的命令与无用户消息的定时任务不会产生确认。确认从引擎接受消息时开始；若后续消息仍在等待已有的会话启动锁，也会等待接受决定。表情 API 采用 5 秒超时的异步尽力请求，失败不影响模型处理；发送前的附件下载、消息解析以及多图合批仍需先完成，多图批次确认在最后一条（批次的主消息）上。
+> **English:** Optional `ack_emoji = "Get"` adds a persistent receipt asynchronously once the engine accepts a message for processing or queueing, before waiting for agent startup/execution. It confirms acceptance, not execution or success, and survives completion/failure/cancellation. Omitted, empty or `"none"` keeps existing behavior. Processing (`reaction_emoji`) and completion (`done_emoji`) remain independent; if receipt and processing use the same emoji, the receipt owns it and typing cleanup does not remove it. Rejected/duplicate/stale messages, handled commands and synthetic scheduled work are not acknowledged. The receipt begins at engine acceptance; subsequent messages waiting on the existing session-startup lock still wait for admission. Receipt API calls have a five-second timeout and never block processing. Parsing/media preparation and image batching precede acceptance; a merged image batch acknowledges its newest canonical message.
+
+> `done_emoji` 设置后，agent 每次完成回复时会在用户消息上添加指定表情（如 `"Done"` → ✅）。先清理临时处理表情（与接收确认相同的表情会保留），再添加 done 表情。在 quiet 模式下特别有用，因为飞书卡片原地更新不触发推送，done 表情可以通知用户 agent 已完成。设为 `"none"` 或不配置则禁用。
+> `image_batch_window_ms` 控制连续多张图片合并成一条 agent 消息的等待窗口（默认 500ms）。飞书手机端一次连发多张图时，每张图是独立事件；cc-connect 会在窗口内将它们合并成一条多图消息再分发给 agent。如果你的网络/设备发送间隔超过 500ms 且仍被拆成多轮回复（每张图独立处理），可调高到 800–1200ms；如果以单图为主、希望响应更快，可适当调低。设为 `0` 时回退到默认 500ms。
 
 ---
 
@@ -150,9 +163,8 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 | 权限名称 | 权限标识 | 用途 |
 |---------|---------|------|
 | 获取与更新用户基本信息 | `contact:user.base:readonly` | 获取用户信息 |
-| 接收群聊消息 | `im:message.group:receive` | 接收群消息 |
-| 接收单聊消息 | `im:message.p2p:receive` | 接收私聊消息 |
-| 读取群消息 | `im:message.group_msg:readonly` | 读取群消息内容 |
+| 获取群组中用户@机器人消息 | `im:message.group_at_msg:readonly` | 接收群消息 |
+| 获取群组中所有消息（敏感权限） | `im:message.group_msg` | 读取群消息内容 |
 | 读取单聊消息 | `im:message.p2p_msg:readonly` | 读取私聊内容 |
 | 以应用身份发送群消息 | `im:message:send_as_bot` | 发送消息回复用户 |
 
@@ -160,15 +172,19 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 
 配置完权限后，点击「申请发布」使权限生效。
 
+如果启用了 `group_chat_history_share`，必须为应用申请并发布 `im:message.group_msg`，否则飞书只会向机器人推送被 @ 的群消息，未提及消息无法进入共享上下文。该功能不会回溯 cc-connect 启动前的历史，也不会持久化待处理消息。
+
 ---
 
-## 第五步：配置事件订阅（长连接模式）
+## 第五步：配置事件与回调订阅（长连接模式）
 
-### 5.1 进入事件订阅页面
+### 5.1 进入事件与回调页面
 
-左侧导航栏点击 **「事件订阅」**。
+左侧导航栏点击 **「事件与回调」**。
 
-### 5.2 选择长连接模式
+### 5.2 选择事件配置
+
+在标签页中点击： **「事件配置」**。
 
 在「订阅方式」中选择：
 
@@ -176,18 +192,9 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 ✅ 使用长连接接收事件
 ```
 
-> 💡 **长连接的优势**：
-> - 无需公网 IP
-> - 无需配置域名和 HTTPS 证书
-> - 无需使用 ngrok、frp 等反向代理工具
-> - 适合本地开发和内网环境
+点击**保存**。
 
-### 5.3 启用长连接
-
-1. 点击「启用长连接」
-2. 系统会生成 WebSocket 连接信息
-
-### 5.4 添加订阅事件
+点击**添加事件**。
 
 在事件配置中添加以下事件：
 
@@ -195,9 +202,31 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 |---------|---------|------|
 | 接收消息 | `im.message.receive_v1` | 接收用户发送的消息 |
 
-### 5.5 保存配置
+### 5.3 选择回调配置
 
-点击「保存」完成事件订阅配置。
+在标签页中点击： **「回调配置」**。
+
+在「订阅方式」中选择：
+
+```
+✅ 使用长连接接收事件
+```
+
+点击**保存**。
+
+点击**添加回调**。
+
+在回调配置中添加以下回调：
+
+| 回调名称 | 回调标识 | 用途 |
+|---------|---------|------|
+| 卡片回调 | `card.action.trigger` | 响应交互卡片按钮点击（权限确认、provider 切换等） |
+
+> ⚠️ **重要**：如果不订阅 `card.action.trigger` 回调，用户点击卡片上的按钮（如权限确认、provider 选择等）时将无法正常响应，飞书客户端可能会显示加载超时或错误提示。如果暂时无法添加该回调，可以在配置中设置 `enable_feishu_card = false` 关闭交互卡片功能，所有交互将回退到纯文本模式。
+
+### 5.4 创建版本
+
+点击 **「创建版本」** 发布新版本以应用事件与回调配置。
 
 ---
 
@@ -290,6 +319,129 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 
 ---
 
+## Mention 功能
+
+开启 `resolve_mentions = true` 后，机器人发出的消息中 `@显示名` 会自动替换为飞书原生 at 标签。
+
+### 配置
+
+```toml
+[projects.platforms.options]
+resolve_mentions = true
+```
+
+### 语法
+
+直接使用 `@显示名`，无需特殊标记：
+
+```
+@张三 请查看巡检报告
+```
+
+### 使用示例
+
+**Cron 定时任务：**
+
+```bash
+cc-connect cron add \
+  --cron "0 9 * * *" \
+  --prompt "执行每日巡检报告，完成后通知 @张三 和 @李四 查看" \
+  --desc "每日巡检"
+```
+
+**AI 对话中：**
+
+AI 输出中包含 `@某人` 时，发送到飞书前会自动匹配并替换。
+
+### 工作原理
+
+1. 开启 `resolve_mentions` 后，发送消息前拉取群成员列表（懒加载，首次才拉）
+2. 成员列表缓存 1 小时，减少 API 调用
+3. 按名字长度从长到短匹配（`@张三丰` 优先于 `@张三`），避免部分匹配
+4. 未匹配到的 `@xxx` 保留原文不处理
+5. 根据消息类型自动选择正确的飞书 at 语法（文本消息 vs 卡片消息）
+
+### 权限要求
+
+需要以下飞书应用权限之一：
+
+- `im:chat`（获取与更新群组信息）
+- `im:chat:readonly`（获取群组信息）
+- `im:chat.members:read`（查看群成员）
+
+### 注意事项
+
+- 名字匹配为精确匹配（`@张三` 只匹配显示名恰好是「张三」的成员）
+- 同名成员取第一个匹配到的
+- 被 at 的人必须是当前群的成员
+- 未开启 `resolve_mentions` 时不会触发任何成员查询
+
+---
+
+## 机器人间 @ 通知（`mention_map`）
+
+`resolve_mentions` 通过匹配**群成员显示名**来解析 `@name`，但当目标是**另一个机器人 / Agent**（而非真人成员）时，机器人不一定出现在群成员列表中，名字匹配会失败。
+
+`mention_map` 选项用于这种场景：手动把「显示名」映射到机器人的 `open_id`，让 cc-connect 直接生成原生飞书 `<at user_id="...">` 标签，触发真正的 @ 通知。
+
+### 配置
+
+```toml
+[projects.platforms.options]
+resolve_mentions = true                       # mention_map 依赖 resolve_mentions = true
+mention_map = { BOT-B = "ou_bot_b_open_id", BOT-A = "ou_bot_a_open_id" }
+```
+
+> `mention_map` 与 `resolve_mentions` 是叠加关系，并非二选一：
+> - `resolve_mentions` 负责按群成员显示名匹配（覆盖普通用户）
+> - `mention_map` 负责显式 open_id 映射（覆盖不在群成员列表里的机器人）
+> - 当同一个 `@name` 两者都能匹配时，**`mention_map` 优先级更高**，确保显式配置不会被群成员匹配覆盖。
+
+### 使用示例
+
+Agent 输出 `@BOT-B 请复核巡检报告` 时，cc-connect 在发送到飞书前会把它替换为：
+
+```
+<at user_id="ou_bot_b_open_id">BOT-B</at> 请复核巡检报告
+```
+
+BOT-B 机器人会收到飞书 @ 事件并被触发。
+
+典型场景：
+
+- **多 Agent 协作**：BOT-A 巡检发现问题 → 在回复里 @BOT-B 触发修复 Agent。
+- **跨 Agent 通知**：长任务（Cron）由一个 Agent 完成后，@另一个 Agent 接力。
+- **@ 机器人触发 Hook**：飞书机器人收到 @ 事件可触发 cc-connect 的会话路由。
+
+### 如何获取机器人 open_id
+
+机器人的 `open_id`（`ou_` 开头）**不是** App ID（`cli_` 开头），两者在飞书里是完全不同的标识符。「凭证与基础信息」页只显示 App ID / App Secret，**不显示** bot 的 `open_id`。
+
+获取方式（按推荐顺序）：
+
+1. **读 cc-connect 启动日志（最简单，适用于自己控制的应用）**
+   cc-connect 启动时会自动调用 `/open-apis/bot/v3/info` 拉取自身 `open_id`，并打印：
+   ```
+   feishu: bot identified open_id=ou_xxxxxxxxxxxxxxxx
+   ```
+   直接复制日志里的值即可。
+
+2. **调用「获取机器人信息」API（`/open-apis/bot/v3/info`）**
+   用任意有效 `tenant_access_token` 发起请求：
+   ```bash
+   curl -H "Authorization: Bearer t-xxxx" https://open.feishu.cn/open-apis/bot/v3/info
+   # 响应：{ "code": 0, "bot": { "open_id": "ou_xxx", ... } }
+   ```
+
+### 注意事项
+
+- `mention_map` 必须配合 `resolve_mentions = true` 才会生效；单独配置 `mention_map` 不会触发解析。
+- `@name` 必须与 `mention_map` 的 key 完全一致（区分大小写）。
+- 飞书机器人的 `open_id` 是**应用级别**的，与群聊无关；同一个机器人在不同群的 `open_id` 一致。
+- 被 @ 的机器人需要在**目标群里**，且该群已开启机器人能力，否则飞书不会派发 @ 事件。
+
+---
+
 ## 常见问题
 
 ### Q: 长连接和 Webhook 有什么区别？
@@ -314,6 +466,23 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 2. 长连接是否建立成功（查看日志）
 3. 事件订阅是否配置了 `im.message.receive_v1`
 
+### Q: 点击卡片按钮没有反应或报错？
+
+cc-connect 默认使用交互卡片显示权限确认、provider 选择等操作。如果点击按钮后无响应、显示加载超时或报错，请检查：
+
+1. **事件订阅**：确认已在飞书开放平台订阅了 `card.action.trigger` 事件（详见第五步）
+2. **应用发布**：修改事件订阅后需要重新发布应用版本
+3. **权限配置**：确保应用有 `im:message:send_as_bot` 权限
+
+**快速解决方案**：如果暂时无法配置卡片回调，可以在 `config.toml` 中关闭交互卡片：
+
+```toml
+[projects.platforms.options]
+enable_feishu_card = false
+```
+
+关闭后，所有交互将回退为纯文本模式，权限确认等操作通过直接回复文字完成。
+
 ### Q: 提示权限不足？
 
 确保已在「权限管理」中申请并获得了所有必要权限，并发布了新版本。
@@ -334,7 +503,7 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 - [飞书开放平台文档](https://open.feishu.cn/document/)
 - [机器人开发指南](https://open.feishu.cn/document/ukTMukTMukTM/uYjNwUjL2YDM14iN2ATN)
 - [事件订阅文档](https://open.feishu.cn/document/ukTMukTMukTM/uUTNz4SN1MjL1UzM)
-- [权限列表](https://open.feishu.cn/document/ukTMukTMukTM/uQjNz4CN1MjL2czN)
+- [权限列表](https://open.feishu.cn/document/server-docs/application-scope/scope-list)
 - [OpenClaw 飞书接入教程](https://bytedance.larkoffice.com/docx/MFK7dDFLFoVlOGxWCv5cTXKmnMh)
 - [飞书 WebSocket 长连接模式](https://m.blog.csdn.net/u014177256/article/details/158267848)
 
@@ -343,6 +512,7 @@ cc-connect 内置了自动重连机制，断开后会自动尝试重新连接。
 ## 下一步
 
 - [接入钉钉](./dingtalk.md)
+- [接入微博](./weibo.md)
 - [接入 Telegram](./telegram.md)
 - [接入 Slack](./slack.md)
 - [接入 Discord](./discord.md)

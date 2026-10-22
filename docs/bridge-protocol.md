@@ -405,6 +405,36 @@ Send a voice/audio message. Only sent if the adapter declared `"audio"` capabili
 }
 ```
 
+#### `image`
+
+Send an image to the user. Only sent if the adapter declared `"image"` capability.
+
+```json
+{
+  "type": "image",
+  "session_key": "wechat:user123:user123",
+  "reply_ctx": "conv-abc-123",
+  "data": "<base64-encoded-image>",
+  "mime_type": "image/png",
+  "file_name": "screenshot.png"
+}
+```
+
+#### `file`
+
+Send a file to the user. Only sent if the adapter declared `"file"` capability.
+
+```json
+{
+  "type": "file",
+  "session_key": "wechat:user123:user123",
+  "reply_ctx": "conv-abc-123",
+  "data": "<base64-encoded-file>",
+  "mime_type": "application/pdf",
+  "file_name": "report.pdf"
+}
+```
+
 #### `pong`
 
 Response to `ping`.
@@ -437,8 +467,8 @@ Notify the adapter of a server-side error.
 | Capability | Description | Enables |
 |------------|-------------|---------|
 | `text` | Basic text messaging (required) | `message`, `reply` |
-| `image` | Receiving images from users | `message.images` |
-| `file` | Receiving files from users | `message.files` |
+| `image` | Sending/receiving images | `message.images`, `image` reply |
+| `file` | Sending/receiving files | `message.files`, `file` reply |
 | `audio` | Sending/receiving voice messages | `message.audio`, `audio` reply |
 | `card` | Structured rich card rendering | `card` reply |
 | `buttons` | Inline clickable buttons | `buttons` reply, `card_action` |
