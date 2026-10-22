@@ -5196,6 +5196,13 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			replyCtx := state.replyCtx
 			state.mu.Unlock()
 
+			// A question is for the user to answer, not a permission to deny
+			// on their behalf; ask it as a foreground turn would.
+			if isAskQuestionRequest(event) {
+				e.askUnsolicitedQuestion(ctx, state, agentSession, p, replyCtx, event)
+				continue
+			}
+
 			switch event.Type {
 			case EventText:
 				if event.Content != "" {
