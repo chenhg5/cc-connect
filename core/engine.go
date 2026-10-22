@@ -16781,9 +16781,39 @@ func (e *Engine) HandleRelayLive(ctx context.Context, fromProject, sourceSession
 		ReplyCtx:   replyCtx,
 	}
 	prevHistLen := session.HistoryLen()
-	e.processInteractiveMessageWith(platform, msg, session, agent, sessions, iKey, workspaceDir, sourceSessionKey, lockGen)
-	stopped := e.takeRelayStopped(iKey)
-	e.cleanupInteractiveState(iKey)
+
+	// processInteractiveMessageWith is where the turn actually runs (it has no
+	// ctx parameter and is not itself cancellable), so it must execute in its
+	// own goroutine for the relayLiveTimeout safety deadline (see Send in
+	// relay.go) to have any effect. Without this, ctx's deadline only bounded
+	// waitForRelaySessionLock above — once the lock was acquired, a stuck
+	// turn could still block this call (and its synchronous caller) forever.
+	//
+	// The goroutine owns releasing the session lock, posting the live
+	// progress card, and the takeRelayStopped/cleanupInteractiveState
+	// bookkeeping exactly as before, whether or not this call is still
+	// waiting on it — so a turn that outlives the deadline keeps delivering
+	// progress to the target platform and cleans itself up normally; this
+	// select only stops the synchronous wait, it does not kill the turn.
+	resultCh := make(chan relayLiveTurnResult, 1)
+	go func() {
+		e.processInteractiveMessageWith(platform, msg, session, agent, sessions, iKey, workspaceDir, sourceSessionKey, lockGen)
+		stopped := e.takeRelayStopped(iKey)
+		e.cleanupInteractiveState(iKey)
+		// cleanupInteractiveState runs before the send (matching the original
+		// synchronous ordering) so a caller that wins the select below never
+		// observes history/session state before cleanup has run.
+		resultCh <- relayLiveTurnResult{stopped: stopped}
+	}()
+
+	var stopped bool
+	select {
+	case result := <-resultCh:
+		stopped = result.stopped
+	case <-ctx.Done():
+		return "", fmt.Errorf("relay live: %w (turn is still running in the background; check the target chat or use /stop)", ctx.Err())
+	}
+
 	if session.HistoryLen() < prevHistLen+2 {
 		if stopped {
 			return "", fmt.Errorf("relay live: stopped")
@@ -16795,6 +16825,12 @@ func (e *Engine) HandleRelayLive(ctx context.Context, fromProject, sourceSession
 		return "", fmt.Errorf("relay live: empty response")
 	}
 	return history[0].Content, nil
+}
+
+// relayLiveTurnResult carries the outcome of a backgrounded live-relay turn
+// back to HandleRelayLive's synchronous wait.
+type relayLiveTurnResult struct {
+	stopped bool
 }
 
 // HandleRelay processes a relay message synchronously: starts or resumes a

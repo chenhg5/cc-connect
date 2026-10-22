@@ -790,6 +790,55 @@ func TestStopRelayTurnsOnlyStopsMatchingChatIncludingWorkspacePrefix(t *testing.
 	}
 }
 
+// TestHandleRelayLive_CtxDeadlineUnblocksCallerWithoutKillingTheTurn pins the
+// fix for the live relay safety deadline: ctx's deadline must actually bound
+// HandleRelayLive's own wait, not only waitForRelaySessionLock above it. The
+// session here never receives an EventResult, so without the fix this call
+// would block indefinitely (processInteractiveMessageWith has no ctx
+// parameter and cannot be cancelled). The turn is left running in the
+// background exactly as documented; feeding the result afterward proves the
+// background goroutine still completes, unlocks the session, and does not
+// leak or panic once the caller has already given up.
+func TestHandleRelayLive_CtxDeadlineUnblocksCallerWithoutKillingTheTurn(t *testing.T) {
+	platform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	session := newControllableSession("hanging-live-session")
+	e := NewEngine("target", &controllableAgent{nextSession: session}, []Platform{platform}, "", LangEnglish)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := e.HandleRelayLive(ctx, "source", "feishu:chat-1:user", "hello")
+	elapsed := time.Since(start)
+
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("HandleRelayLive() error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("HandleRelayLive() took %v to return after a 20ms deadline; the turn's own run must not block the caller", elapsed)
+	}
+
+	// The turn is still running in the background; let it finish and confirm
+	// the session lock and interactive state are released normally instead of
+	// being stuck because the caller stopped waiting on it.
+	session.events <- Event{Type: EventResult, Content: "late result", Done: true}
+
+	relaySessionKey := "relay:source:feishu:chat-1"
+	deadline := time.After(time.Second)
+	for {
+		s := e.sessions.GetOrCreateActive(relaySessionKey)
+		if lockGen, ok := s.TryLock(); ok {
+			s.Unlock(lockGen)
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("relay session lock was never released after the backgrounded turn finished")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 func TestHandleRelayLiveDistinguishesAgentFailureFromStop(t *testing.T) {
 	platform := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 	session := &relayErrorAfterSendSession{controllableAgentSession: newControllableSession("failed-live-session")}
