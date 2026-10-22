@@ -4120,7 +4120,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	needResync := state.eventsNeedResync
 	state.mu.Unlock()
 	if needResync {
-		drainEvents(state.agentSession.Events())
+		e.drainEventsKeepSubagents(state, state.agentSession.Events())
 	}
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
@@ -6646,7 +6646,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Drain stale events before starting the next turn. Between
 				// EventResult and Send(), the only buffered events would be
 				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
-				drainEvents(state.agentSession.Events())
+				e.drainEventsKeepSubagents(state, state.agentSession.Events())
 
 				if pendingSend != nil {
 					if err := <-pendingSend; err != nil {
@@ -6994,7 +6994,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			return false
 		}
 
-		drainEvents(as.Events())
+		e.drainEventsKeepSubagents(state, as.Events())
 
 		session.AddHistory("user", queued.content)
 
@@ -11077,7 +11077,7 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	state.replyCtx = replyCtx
 	state.mu.Unlock()
 
-	drainEvents(state.agentSession.Events())
+	e.drainEventsKeepSubagents(state, state.agentSession.Events())
 
 	compressor, ok := e.agent.(ContextCompressor)
 	if !ok || compressor.CompressCommand() == "" {
@@ -11180,6 +11180,8 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		}
 
 		switch event.Type {
+		case EventSubagent:
+			e.handleSubagentEvent(state, event)
 		case EventText:
 			if !auto && event.Content != "" {
 				textParts = append(textParts, event.Content)
