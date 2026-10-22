@@ -2152,16 +2152,18 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			slog.Debug(p.tag()+": interactive card produced no content", "message_id", messageID)
 			return
 		}
-		text := stripMentions(cardText, mentions, p.botOpenID)
+		text := stripMentions(cardText, mentions, p.getBotOpenID())
 		if text == "" {
 			slog.Debug(p.tag()+": interactive card text empty after mention stripping", "message_id", messageID)
 			return
 		}
-		p.handler(p.dispatchPlatform(), &core.Message{
+		p.flushImageBatchForSession(sessionKey)
+		dispatchCore(&core.Message{
 			SessionKey: sessionKey, Platform: p.platformName,
 			MessageID: messageID,
 			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: quotedPrefix + text, ReplyCtx: rctx,
+			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+			UserMessageTimeMs: createTimeMs,
 		})
 
 	case "merge_forward":
@@ -2814,7 +2816,7 @@ func (p *Platform) fetchInteractiveCardText(ctx context.Context, messageID strin
 	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", messageID)
 	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
 	if err != nil {
-		slog.Debug(p.tag()+": fetch interactive card failed", "message_id", messageID, "error", err)
+		slog.Warn(p.tag()+": fetch interactive card failed", "message_id", messageID, "error", err)
 		return ""
 	}
 	var resp struct {
@@ -2828,7 +2830,7 @@ func (p *Platform) fetchInteractiveCardText(ctx context.Context, messageID strin
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(apiResp.RawBody, &resp); err != nil || resp.Code != 0 || len(resp.Data.Items) == 0 {
-		slog.Debug(p.tag()+": fetch interactive card: parse failed or no data", "message_id", messageID, "code", resp.Code)
+		slog.Warn(p.tag()+": fetch interactive card: parse failed or no data", "message_id", messageID, "code", resp.Code)
 		return ""
 	}
 	content := resp.Data.Items[0].Body.Content
