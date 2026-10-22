@@ -110,13 +110,24 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 		"run", "--format", "json",
 		"--session", "ses_123",
 		"--model", "provider/model",
-		"--dir", "/repo",
 		"--thinking",
 		"--file", "/tmp/a.png",
 		"--file", "/tmp/b.jpg",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+// opencode v2's `run` rejects --dir, so the work dir must only reach opencode
+// as the process cwd (#2076).
+func TestOpencodeSessionBuildRunArgsOmitsDirFlag(t *testing.T) {
+	s := &opencodeSession{workDir: "/repo"}
+
+	for _, arg := range s.buildRunArgs("hi", nil, "") {
+		if arg == "--dir" || strings.HasPrefix(arg, "--dir=") {
+			t.Fatalf("buildRunArgs passed %q to opencode run", arg)
+		}
 	}
 }
 

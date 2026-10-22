@@ -168,9 +168,9 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
-	if s.workDir != "" {
-		args = append(args, "--dir", s.workDir)
-	}
+	// The working directory is set as the process cwd in Send (cmd.Dir), like
+	// the other opencode invocations. `opencode run` has no --dir flag in
+	// opencode v2 and rejects it ("Unrecognized flag: --dir").
 
 	// Enable thinking blocks.
 	args = append(args, "--thinking")
