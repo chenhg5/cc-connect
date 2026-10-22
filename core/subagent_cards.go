@@ -86,6 +86,32 @@ func (e *Engine) handleSubagentEvent(state *interactiveState, event Event) {
 	e.subagentCardsFor(state).enqueue(subagentOp{event: *event.Subagent, platform: p, replyCtx: replyCtx})
 }
 
+// drainEventsKeepSubagents empties the agent's event channel before a turn
+// like drainEvents, but hands subagent events to their cards: a background
+// subagent keeps writing them across turns, so they are no leftovers, and a
+// dropped one would leave its card without a title or stuck running.
+func (e *Engine) drainEventsKeepSubagents(state *interactiveState, ch <-chan Event) {
+	drained := 0
+	for {
+		select {
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+			if event.Type == EventSubagent {
+				e.handleSubagentEvent(state, event)
+				continue
+			}
+			drained++
+		default:
+			if drained > 0 {
+				slog.Warn("drained stale events from previous turn", "count", drained)
+			}
+			return
+		}
+	}
+}
+
 func (c *subagentCards) enqueue(op subagentOp) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

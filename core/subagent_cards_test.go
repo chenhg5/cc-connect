@@ -213,3 +213,30 @@ func TestSubagentCards_BackgroundSubagentOutlivesTheTurn(t *testing.T) {
 		t.Fatalf("after waking: %d cards, card A state %s; want the same card running again", len(cards), cards[cardA].State)
 	}
 }
+
+// TestSubagentCards_DrainKeepsSubagentEvents covers the drains before a turn
+// (queued message, resync): a background subagent's events sitting in the
+// channel are not leftovers of the previous turn and must reach their card,
+// or a dropped finish would leave the card running forever.
+func TestSubagentCards_DrainKeepsSubagentEvents(t *testing.T) {
+	p := &cardRecorderPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+	state := &interactiveState{platform: p, replyCtx: "ctx"}
+
+	ch := make(chan Event, 8)
+	ch <- subagentEvent(SubagentEvent{ID: "a", Phase: SubagentStarted, Title: "Count to three", Kind: "general-purpose", Background: true, Prompt: "count 1 2 3"})
+	ch <- Event{Type: EventError, Error: fmt.Errorf("stale")}
+	ch <- subagentEvent(SubagentEvent{ID: "a", Phase: SubagentFinished, Status: "completed", Summary: "counted"})
+	e.drainEventsKeepSubagents(state, ch)
+	if len(ch) != 0 {
+		t.Fatalf("%d events left in the channel", len(ch))
+	}
+
+	cards := waitForCards(t, p, func(c map[string]*ProgressCardPayload) bool {
+		return c[cardA] != nil && c[cardA].State == ProgressCardStateCompleted
+	})
+	if got, want := strings.Join(cardTexts(cards[cardA]), "\n"), "info|count 1 2 3\ninfo|✅ counted"; got != want || cards[cardA].State != ProgressCardStateCompleted {
+		t.Fatalf("card = %q (state %s), want %q completed", got, cards[cardA].State, want)
+	}
+}
