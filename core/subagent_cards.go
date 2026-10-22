@@ -17,12 +17,17 @@ import (
 // to see the events.
 
 const (
-	// subagentCardInterval bounds how often one card is edited, so a chatty
-	// subagent (or many in parallel) stays under platform rate limits. A held
-	// back edit is sent on the next tick, so a card never lags by more.
+	// subagentCardInterval is the least time between two edits of one card,
+	// so a chatty subagent (or many in parallel) stays under platform rate
+	// limits. Edits held back meanwhile go out once the card is due.
 	subagentCardInterval = 2 * time.Second
-	// subagentCardQueue is how many events may wait for the worker.
-	subagentCardQueue = 512
+	// subagentCardTick is how often the worker looks for held-back edits;
+	// a card lags its subagent by at most interval + tick.
+	subagentCardTick = 500 * time.Millisecond
+	// subagentCardBacklog is how many events may wait for the worker before
+	// steps are dropped. Starts and finishes are never dropped: losing one
+	// would leave a card untitled or running forever.
+	subagentCardBacklog = 512
 	// subagentCardIdle ends a worker whose subagents went silent without
 	// finishing (e.g. the agent process died); their cards stay as they are.
 	subagentCardIdle = 2 * time.Hour
@@ -37,21 +42,27 @@ type subagentOp struct {
 }
 
 type subagentCard struct {
-	writer   *compactProgressWriter
+	writer *compactProgressWriter
+	// finished is set when the subagent ended. state is a card state change
+	// (closing it, or reopening it) waiting for the card to be due for an
+	// edit; empty once sent.
 	finished bool
+	state    ProgressCardState
 	lastText string // the subagent's latest text step
 }
 
 // subagentCards owns the subagent progress cards of one conversation. Events
-// are queued by the readers and applied by a single worker goroutine, which
-// also sends held-back edits; the worker exits once no card is open.
+// are queued by the readers and applied in order by a single worker
+// goroutine, which also sends held-back edits; the worker exits once no card
+// is open.
 type subagentCards struct {
 	e *Engine
 
 	mu      sync.Mutex
-	queue   chan subagentOp
+	pending []subagentOp  // events waiting for the worker, in order
+	wake    chan struct{} // nudges the worker when pending grows
 	running bool
-	open    int // cards not yet finished; written by the worker under mu
+	open    int // cards not yet closed; written by the worker under mu
 
 	cards map[string]*subagentCard // worker only
 }
@@ -62,7 +73,7 @@ func (e *Engine) subagentCardsFor(state *interactiveState) *subagentCards {
 	if state.subagents == nil {
 		state.subagents = &subagentCards{
 			e:     e,
-			queue: make(chan subagentOp, subagentCardQueue),
+			wake:  make(chan struct{}, 1),
 			cards: make(map[string]*subagentCard),
 		}
 	}
@@ -70,7 +81,7 @@ func (e *Engine) subagentCardsFor(state *interactiveState) *subagentCards {
 }
 
 // handleSubagentEvent routes one EventSubagent to the conversation's cards.
-// It never blocks the reader: when the worker falls far behind, the event is
+// It never blocks the reader: when the worker falls far behind, steps are
 // dropped (the card misses a step, the turn is unaffected).
 func (e *Engine) handleSubagentEvent(state *interactiveState, event Event) {
 	if event.Subagent == nil || event.Subagent.ID == "" {
@@ -114,23 +125,35 @@ func (e *Engine) drainEventsKeepSubagents(state *interactiveState, ch <-chan Eve
 
 func (c *subagentCards) enqueue(op subagentOp) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	// Sent under mu so the worker's exit check, also under mu, never misses
-	// a queued event.
-	select {
-	case c.queue <- op:
-	default:
-		slog.Warn("subagent cards: queue full, dropping event", "subagent", op.event.ID, "phase", op.event.Phase)
+	if op.event.Phase == SubagentStep && len(c.pending) >= subagentCardBacklog {
+		c.mu.Unlock()
+		slog.Warn("subagent cards: backlog full, dropping step", "subagent", op.event.ID)
 		return
 	}
+	// Queued under mu so the worker's exit check, also under mu, never
+	// misses an event.
+	c.pending = append(c.pending, op)
 	if !c.running {
 		c.running = true
 		go c.run()
 	}
+	c.mu.Unlock()
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *subagentCards) take() []subagentOp {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ops := c.pending
+	c.pending = nil
+	return ops
 }
 
 func (c *subagentCards) run() {
-	ticker := time.NewTicker(subagentCardInterval)
+	ticker := time.NewTicker(subagentCardTick)
 	defer ticker.Stop()
 	lastEvent := time.Now()
 	for {
@@ -138,14 +161,16 @@ func (c *subagentCards) run() {
 		case <-c.e.ctx.Done():
 			c.stop()
 			return
-		case op := <-c.queue:
-			lastEvent = time.Now()
-			c.apply(op)
+		case <-c.wake:
+			if ops := c.take(); len(ops) > 0 {
+				lastEvent = time.Now()
+				for _, op := range ops {
+					c.apply(op)
+				}
+			}
 		case <-ticker.C:
 			for _, card := range c.cards {
-				if !card.finished {
-					card.writer.flushPending()
-				}
+				c.flush(card)
 			}
 			if c.idle(time.Since(lastEvent) >= subagentCardIdle) {
 				return
@@ -159,13 +184,13 @@ func (c *subagentCards) run() {
 func (c *subagentCards) idle(silent bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.queue) > 0 || (c.open > 0 && !silent) {
+	if len(c.pending) > 0 || (c.open > 0 && !silent) {
 		return false
 	}
 	if c.open > 0 {
 		slog.Info("subagent cards: subagents went silent without finishing", "open", c.open)
 		for id, card := range c.cards {
-			if !card.finished {
+			if !card.finished || card.state != "" {
 				delete(c.cards, id)
 			}
 		}
@@ -187,6 +212,29 @@ func (c *subagentCards) setOpen(delta int) {
 	c.mu.Unlock()
 }
 
+// flush sends a card's held-back edit, with its pending state change, once
+// the card is due for an edit: one edit carries both.
+func (c *subagentCards) flush(card *subagentCard) {
+	w := card.writer
+	if !w.due() {
+		return
+	}
+	state := card.state
+	if state == "" {
+		w.flushPending()
+		return
+	}
+	card.state = ""
+	if w.Finalize(state) {
+		w.lastUpdateAt = time.Now()
+	} else {
+		w.flushPending() // a card without states only shows its steps
+	}
+	if state != ProgressCardStateRunning {
+		c.setOpen(-1)
+	}
+}
+
 func (c *subagentCards) apply(op subagentOp) {
 	ev := op.event
 	card := c.cards[ev.ID]
@@ -205,8 +253,12 @@ func (c *subagentCards) apply(op subagentOp) {
 			// Woken again (e.g. by a task notification): the same card
 			// carries on.
 			card.finished = false
-			c.setOpen(1)
-			w.Finalize(ProgressCardStateRunning)
+			if card.state != "" {
+				card.state = "" // its close was never sent: still open
+			} else {
+				c.setOpen(1)
+				card.state = ProgressCardStateRunning
+			}
 		}
 		if prompt := strings.TrimSpace(ev.Prompt); prompt != "" {
 			prompt = truncateIf(prompt, subagentPromptMaxLen)
@@ -246,10 +298,9 @@ func (c *subagentCards) apply(op subagentOp) {
 			summary = mark + truncateIf(summary, subagentPromptMaxLen)
 			w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryInfo, Text: summary}, summary)
 		}
-		w.flushPending()
-		w.Finalize(state)
 		card.finished = true
-		c.setOpen(-1)
+		card.state = state
+		c.flush(card)
 	}
 }
 
@@ -277,9 +328,16 @@ func (c *subagentCards) newWriter(op subagentOp) *compactProgressWriter {
 // main agent's own progress card.
 const subagentMarker = "↳ "
 
-// flushPending sends content that the update interval held back.
+// due reports whether the card may be edited again: never edited yet, or
+// its update interval since the last edit has passed.
+func (w *compactProgressWriter) due() bool {
+	return w.lastUpdateAt.IsZero() || time.Since(w.lastUpdateAt) >= w.minUpdateInterval
+}
+
+// flushPending sends content that the update interval held back, once the
+// card is due.
 func (w *compactProgressWriter) flushPending() {
-	if !w.enabled || w.failed || w.handle == nil || w.content == "" || w.content == w.lastSent {
+	if !w.enabled || w.failed || w.handle == nil || w.content == "" || w.content == w.lastSent || !w.due() {
 		return
 	}
 	callCtx, cancel := w.withAPITimeout()
