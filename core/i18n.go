@@ -209,6 +209,8 @@ const (
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
 	MsgMessageQueued             MsgKey = "message_queued"
+	MsgMessageSteerUnconfirmed   MsgKey = "message_steer_unconfirmed"
+	MsgMessageSteered            MsgKey = "message_steered"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
 	MsgCurrentTools              MsgKey = "current_tools"
 	MsgCurrentSession            MsgKey = "current_session"
@@ -809,6 +811,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📬 訊息已收到，將在目前任務完成後處理。",
 		LangJapanese:           "📬 メッセージを受信しました。現在のタスク完了後に処理します。",
 		LangSpanish:            "📬 Mensaje recibido — se procesará después de que termine la tarea actual.",
+	},
+	MsgMessageSteerUnconfirmed: {
+		LangEnglish:            "⚠️ Could not confirm delivery of the supplement. It may already be in the current task; it was not resent or queued. Check the task's response before sending it again.",
+		LangChinese:            "⚠️ 无法确认补充信息是否送达。它可能已加入当前任务，因此没有重发或排队。请先查看任务回复，再决定是否重发。",
+		LangTraditionalChinese: "⚠️ 無法確認補充資訊是否送達。它可能已加入目前任務，因此沒有重送或排隊。請先查看任務回覆，再決定是否重送。",
+		LangJapanese:           "⚠️ 補足情報の受信を確認できませんでした。現在のタスクに届いている可能性があるため、再送やキューへの追加はしていません。再送する前にタスクの応答を確認してください。",
+		LangSpanish:            "⚠️ No se pudo confirmar la entrega. La tarea puede haber recibido la información; no se reenvió ni se añadió a la cola. Revisa la respuesta antes de enviarla de nuevo.",
+	},
+	MsgMessageSteered: {
+		LangEnglish:            "🧭 Added to the current task.",
+		LangChinese:            "🧭 补充信息已加入当前任务。",
+		LangTraditionalChinese: "🧭 補充資訊已加入目前任務。",
+		LangJapanese:           "🧭 補足情報を現在のタスクに追加しました。",
+		LangSpanish:            "🧭 Información adicional añadida a la tarea actual.",
 	},
 	MsgQueueFull: {
 		LangEnglish:            "📬 Message queue is full (%d pending). Please wait for current tasks to complete.",

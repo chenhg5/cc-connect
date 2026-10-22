@@ -21,9 +21,10 @@ import (
 )
 
 type rpcResponseEnvelope struct {
-	ID     any             `json:"id"`
-	Result json.RawMessage `json:"result"`
-	Error  *rpcError       `json:"error"`
+	ID           any             `json:"id"`
+	Result       json.RawMessage `json:"result"`
+	Error        *rpcError       `json:"error"`
+	transportErr error
 }
 
 type rpcNotificationEnvelope struct {
@@ -35,6 +36,8 @@ type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
+
+func (e *rpcError) Error() string { return strings.TrimSpace(e.Message) }
 
 type initResponse struct {
 	ProtocolVersion string `json:"protocolVersion"`
@@ -178,6 +181,7 @@ type appServerSession struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
+	steerMu      sync.Mutex // Serialize native follow-ups and async answers.
 	stateMu      sync.Mutex
 	pendingMsgs  []string
 	currentTurn  string
@@ -1626,7 +1630,7 @@ func (s *appServerSession) rejectPending(err error) {
 	for id, ch := range s.pending {
 		delete(s.pending, id)
 		select {
-		case ch <- rpcResponseEnvelope{ID: id, Error: &rpcError{Message: err.Error()}}:
+		case ch <- rpcResponseEnvelope{ID: id, transportErr: err}:
 		default:
 		}
 	}
@@ -1646,6 +1650,11 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	}
 	s.pending[id] = ch
 	s.pendingMu.Unlock()
+	defer func() {
+		s.pendingMu.Lock()
+		delete(s.pending, id)
+		s.pendingMu.Unlock()
+	}()
 
 	payload := map[string]any{
 		"jsonrpc": "2.0",
@@ -1674,8 +1683,11 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	ctxDone := s.contextDone()
 	select {
 	case resp := <-ch:
+		if resp.transportErr != nil {
+			return resp.transportErr
+		}
 		if resp.Error != nil {
-			return fmt.Errorf("%s", strings.TrimSpace(resp.Error.Message))
+			return resp.Error
 		}
 		if out != nil {
 			if err := json.Unmarshal(resp.Result, out); err != nil {

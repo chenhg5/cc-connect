@@ -2,8 +2,10 @@ package codex
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -43,6 +45,15 @@ func (s *appServerSession) handleAsyncUserInput(item map[string]any) bool {
 }
 
 func (s *appServerSession) SteerUserInput(prompt string) (bool, error) {
+	return s.steerUserInput(prompt, 5*time.Second)
+}
+
+func (s *appServerSession) steerUserInput(prompt string, timeout time.Duration) (bool, error) {
+	s.steerMu.Lock()
+	defer s.steerMu.Unlock()
+	if strings.TrimSpace(prompt) == "" {
+		return false, fmt.Errorf("%w: empty input", core.ErrSteerRejected)
+	}
 	s.stateMu.Lock()
 	turnID := s.currentTurn
 	s.stateMu.Unlock()
@@ -59,11 +70,15 @@ func (s *appServerSession) SteerUserInput(prompt string) (bool, error) {
 	var response struct {
 		TurnID string `json:"turnId"`
 	}
-	if err := s.request("turn/steer", params, &response); err != nil {
-		return false, fmt.Errorf("codex app-server answer async question: %w", err)
+	if err := s.requestWithTimeout("turn/steer", params, &response, timeout); err != nil {
+		var rejected *rpcError
+		if errors.As(err, &rejected) && (rejected.Code == -32600 || rejected.Code == -32601 || rejected.Code == -32602) {
+			return false, fmt.Errorf("%w: %s", core.ErrSteerRejected, rejected)
+		}
+		return false, fmt.Errorf("codex app-server steering delivery unconfirmed: %w", err)
 	}
 	if response.TurnID != turnID {
-		return false, fmt.Errorf("codex app-server answer returned turn %q, want %q", response.TurnID, turnID)
+		return false, fmt.Errorf("codex app-server steering returned turn %q, want %q", response.TurnID, turnID)
 	}
 	return true, nil
 }

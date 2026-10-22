@@ -2592,3 +2592,61 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 	sent := p.getSent()
 	assertWorkspaceSkills(t, sent[len(sent)-1], "b", "a")
 }
+
+func TestCUJ_A8_BusyFollowUpSteeringAndFallback(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+		ack  MsgKey
+	}{
+		{name: "accepted", ack: MsgMessageSteered},
+		{name: "rejected then drained", err: ErrSteerRejected, ack: MsgMessageQueued},
+		{name: "unknown is not replayed", err: errors.New("ack timeout"), ack: MsgMessageSteerUnconfirmed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			s := &busySteeringSession{queuingAgentSession: newQueuingSession("cuj-steering"), err: tt.err}
+			e := NewEngine("test", &resultAgent{session: s}, []Platform{p}, "", LangEnglish)
+			e.SetBusyMessageMode("steer")
+			e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: false})
+			t.Cleanup(func() { _ = e.Stop() })
+			const key = "test:steering-cuj"
+			send := func(id, content string) {
+				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), UserID: "user", MessageID: id, Content: content, ReplyCtx: "ctx"})
+			}
+			visible := func(want string) {
+				t.Helper()
+				waitAsyncInput(t, func() bool { return strings.Contains(strings.Join(p.getSent(), "\n"), want) })
+			}
+			// Action 1: start a task. The external agent remains in flight.
+			send("first", "review the change")
+			waitAsyncInput(t, func() bool { s.sendMu.Lock(); defer s.sendMu.Unlock(); return len(s.sendCalls) == 1 })
+			// Action 2: add a plain-text instruction while it is busy.
+			send("second", "include a unit test")
+			visible(e.i18n.T(tt.ack))
+			s.events <- Event{Type: EventResult, Content: "original task completed", Done: true}
+			visible("original task completed")
+			if errors.Is(tt.err, ErrSteerRejected) {
+				waitAsyncInput(t, func() bool { s.sendMu.Lock(); defer s.sendMu.Unlock(); return len(s.sendCalls) == 2 })
+				s.events <- Event{Type: EventResult, Content: "queued supplement completed", Done: true}
+				visible("queued supplement completed")
+			}
+			waitAsyncInput(t, func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
+			// Action 3: inspect the history through the user's command path.
+			send("history", "/history")
+			visible("review the change")
+			if tt.err == nil || errors.Is(tt.err, ErrSteerRejected) {
+				visible("include a unit test")
+			}
+			s.sendMu.Lock()
+			defer s.sendMu.Unlock()
+			want := 1
+			if errors.Is(tt.err, ErrSteerRejected) {
+				want = 2
+			}
+			if len(s.sendCalls) != want {
+				t.Fatalf("unexpected replay/second turn: %v", s.sendCalls)
+			}
+		})
+	}
+}

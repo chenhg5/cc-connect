@@ -62,6 +62,32 @@ reset_on_idle_mins = 60
 
 开启后，如果用户长时间未发消息，下一条普通消息会自动进入一个新的会话；旧会话仍会保留在 `/list` 中，不会被删除。
 
+### 任务执行中补充指令
+
+项目默认将忙时消息排队。需要把纯文本补充直接加入当前 Codex app-server
+回合时，在项目层配置 `busy_message_mode = "steer"`：
+
+```toml
+[[projects]]
+name = "my-codex-project"
+busy_message_mode = "steer"
+
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "/path/to/project"
+backend = "app_server"
+app_server_url = "stdio"
+```
+
+图片、文件、不支持追加的会话以及明确拒绝的追加仍进入队列。成功提示代表当前
+回合已接受补充，不代表执行完成。响应超时、连接失败或响应无法确认目标回合时，
+送达结果未知：桥接会提示用户，不自动重发或排队。请先查看任务回复，再决定是否重发。
+
+`/ps <文本>`（别名 `/btw`）在具有原生追加能力时使用该能力，不受默认排队模式
+影响；原回合已结束时不会另开 Codex 回合。已有通过 `Send` 接收补充的适配器
+保持原行为。配置重载时将项目设回 `busy_message_mode = "queue"` 可恢复普通排队。
+
 ### 切换模型时保留历史
 
 `/model` 切换模型时保留当前会话——agent 会在新模型下继续对话（不额外消耗 token）。注意模型切换作用于共享的 agent 实例——如果多个平台使用同一个 project，模型变更会影响所有平台。

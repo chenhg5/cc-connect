@@ -419,6 +419,7 @@ type Engine struct {
 	// 同时保留已保存的 session ID，便于下次继续恢复。
 	agentSessionIdleTimeoutNanos atomic.Int64
 	agentSessionIdleSeq          atomic.Uint64
+	steerBusyMessages            atomic.Bool
 	maxQueuedMessages            int
 	dirHistory                   *DirHistory
 	baseWorkDir                  string
@@ -1425,6 +1426,12 @@ func (e *Engine) SetStaleLockBreakAfter(d time.Duration) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetBusyMessageMode opts plain-text busy follow-ups into native steering.
+// Queue remains the default, including when a session lacks the capability.
+func (e *Engine) SetBusyMessageMode(mode string) {
+	e.steerBusyMessages.Store(strings.EqualFold(strings.TrimSpace(mode), "steer"))
 }
 
 // SetMaxQueuedMessages sets the per-session message queue depth.
@@ -3251,7 +3258,10 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 				}
 			}
 		}
-		// ── end self-heal; queueing path below is unchanged ────────────────
+		// Preserve dead-session recovery above before attempting native steering.
+		if e.steerBusyMessages.Load() && e.steerMessageForBusySession(p, msg, interactiveKey, session, sessions) {
+			return
+		}
 		// Session is busy — try to queue the message for the running turn
 		// so the agent processes it immediately after the current turn ends.
 		if e.queueMessageForBusySession(p, msg, interactiveKey) {
@@ -7080,6 +7090,31 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
+	if steerer, ok := state.agentSession.(UserInputSteerer); ok {
+		steered, err := steerer.SteerUserInput(text)
+		if err != nil {
+			slog.Warn("ps: steering failed", "error", err)
+			key := MsgMessageSteerUnconfirmed
+			if errors.Is(err, ErrSteerRejected) {
+				key = MsgPsSendFailed
+			}
+			e.reply(p, msg.ReplyCtx, e.i18n.T(key))
+			return
+		}
+		if !steered {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
+			return
+		}
+		session := sessions.GetOrCreateActive(msg.SessionKey)
+		session.TouchUserActivity()
+		session.AddHistory("user", text)
+		sessions.Save()
+		e.noteUserMessageAccepted(iKey, msg.UserMessageTimeMs)
+		runMessageAccepted(msg)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+		return
+	}
+	// Preserve adapters whose Send already implements supplements (e.g. Pi RPC).
 	if err := state.agentSession.Send(text, "", nil, nil); err != nil {
 		slog.Error("ps: send failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
