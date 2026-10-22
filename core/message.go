@@ -479,6 +479,11 @@ type ModelSwitch struct {
 	SessionWide bool
 }
 
+// MetaParentToolUseID is the Event.Metadata key an agent sets on events its
+// subagent produced; the value is the id of the tool call that spawned the
+// subagent. Such events are progress of that call, not the turn's own steps.
+const MetaParentToolUseID = "parent_tool_use_id"
+
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
 	Question    string               `json:"question"`

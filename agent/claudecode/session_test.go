@@ -1543,6 +1543,9 @@ func TestHandleSubagentMessagesAreProgressNotAnswer(t *testing.T) {
 	var got []string
 	for len(cs.events) > 0 {
 		evt := <-cs.events
+		if parent, _ := evt.Metadata[core.MetaParentToolUseID].(string); strings.HasPrefix(evt.ToolName+evt.Content, "↳ ") != (parent == "toolu_01A2nsF31x2Pj1x3KGRaBwAB") {
+			t.Errorf("event %s %q%q: parent tag = %q, want it on exactly the subagent's events", evt.Type, evt.ToolName, evt.Content, parent)
+		}
 		switch evt.Type {
 		case core.EventToolUse:
 			got = append(got, "tool_use:"+evt.ToolName)

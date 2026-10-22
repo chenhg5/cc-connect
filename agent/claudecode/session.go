@@ -652,7 +652,7 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 	// messages of its subagents, tagged with the Agent tool call they belong
 	// to. They are progress, not the answer: see handleSubagent.
 	if parent, _ := raw["parent_tool_use_id"].(string); parent != "" && (eventType == "assistant" || eventType == "user") {
-		cs.handleSubagent(eventType, raw)
+		cs.handleSubagent(eventType, parent, raw)
 		return
 	}
 
@@ -1149,13 +1149,13 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 const subagentMarker = "↳ "
 
 // handleSubagent surfaces a subagent's text, thinking and tool calls as
-// thinking/tool steps of the current turn. None of it may become EventText:
+// thinking/tool steps of the current turn, tagged with MetaParentToolUseID. None of it may become EventText:
 // the engine would deliver it as part of the reply. Its usage is the
 // subagent's own context window, so it must not drive the ctx indicator, and
 // its prompt and tool results stay out: the main agent's Agent tool call
 // already shows the task, and Claude Code's tool results carry no tool name
 // to pair them with the right step.
-func (cs *claudeSession) handleSubagent(eventType string, raw map[string]any) {
+func (cs *claudeSession) handleSubagent(eventType, parent string, raw map[string]any) {
 	if eventType != "assistant" {
 		return
 	}
@@ -1195,6 +1195,7 @@ func (cs *claudeSession) handleSubagent(eventType string, raw map[string]any) {
 		default:
 			continue
 		}
+		evt.Metadata = map[string]any{core.MetaParentToolUseID: parent}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
