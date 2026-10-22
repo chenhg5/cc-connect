@@ -168,9 +168,6 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
-	if s.workDir != "" {
-		args = append(args, "--dir", s.workDir)
-	}
 
 	// Enable thinking blocks.
 	args = append(args, "--thinking")

@@ -102,6 +102,7 @@ func TestOpencodeSessionStageImages(t *testing.T) {
 	}
 }
 
+// The work dir is the process cwd (cmd.Dir): opencode v2's `run` has no --dir flag.
 func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 	s := &opencodeSession{workDir: "/repo", model: "provider/model"}
 
@@ -110,7 +111,6 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 		"run", "--format", "json",
 		"--session", "ses_123",
 		"--model", "provider/model",
-		"--dir", "/repo",
 		"--thinking",
 		"--file", "/tmp/a.png",
 		"--file", "/tmp/b.jpg",
