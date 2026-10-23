@@ -223,12 +223,26 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	case "plan":
 		args = append(args, "--sandbox")
 	}
+	args = append(args, "--output-format", "stream-json")
 	args = append(args, "-p", fullPrompt)
 	return args
 }
 
+type agyStreamEvent struct {
+	Event  string     `json:"event"`
+	Result *agyResult `json:"result"`
+}
+
+type agyResult struct {
+	ConversationID string `json:"conversation_id"`
+	Status         string `json:"status"`
+	Response       string `json:"response"`
+	Error          string `json:"error"`
+}
+
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
 	defer as.wg.Done()
+	var result *agyResult
 	defer func() {
 		for _, f := range tempFiles {
 			_ = os.Remove(f)
@@ -239,7 +253,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		// Detect conversation ID if this was the first turn of a fresh session.
 		// agy may flush the chat file only while the process is exiting, so wait
 		// for process reaping before scanning the chat directory.
-		if as.CurrentSessionID() == "" {
+		if as.CurrentSessionID() == "" && result == nil {
 			var sid string
 			for attempt := 0; attempt < 15; attempt++ {
 				sid = as.detectNewSessionID(preEntries, sendStartedAt)
@@ -260,7 +274,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		}
 
 		sid := as.CurrentSessionID()
-		if err != nil {
+		if err != nil && result == nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("antigravitySession: process failed", "error", err, "stderr", stderrMsg)
@@ -283,30 +297,72 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		_ = stdout.Close()
 	}()
 
-	reader := bufio.NewReader(stdout)
-	buf := make([]byte, 1024)
+	emit := func(event core.Event) bool {
+		select {
+		case as.events <- event:
+			return true
+		case <-as.ctx.Done():
+			return false
+		}
+	}
 
+	reader := bufio.NewReader(stdout)
 	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			text := string(buf[:n])
-			select {
-			case as.events <- core.Event{Type: core.EventText, Content: text}:
-			case <-as.ctx.Done():
+		line, err := reader.ReadString('\n')
+		if line != "" {
+			if parsed, ok := parseAgyStreamLine(line); ok {
+				if parsed.Event == "result" && parsed.Result != nil && result == nil {
+					result = parsed.Result
+					if !as.reportResult(result, emit) {
+						return
+					}
+				}
+			} else if !emit(core.Event{Type: core.EventText, Content: line}) {
 				return
 			}
 		}
 		if err != nil {
-			if err != io.EOF && !strings.Contains(err.Error(), "file already closed") {
+			if err != io.EOF && !strings.Contains(err.Error(), "file already closed") && result == nil {
 				slog.Error("antigravitySession: read error", "error", err)
-				select {
-				case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}:
-				case <-as.ctx.Done():
-				}
+				emit(core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)})
 			}
 			return
 		}
 	}
+}
+
+func parseAgyStreamLine(line string) (agyStreamEvent, bool) {
+	var event agyStreamEvent
+	if json.Unmarshal([]byte(strings.TrimSpace(line)), &event) != nil || event.Event == "" {
+		return agyStreamEvent{}, false
+	}
+	return event, true
+}
+
+func (as *antigravitySession) reportResult(result *agyResult, emit func(core.Event) bool) bool {
+	if id := strings.TrimSpace(result.ConversationID); id != "" && id != as.CurrentSessionID() {
+		as.chatID.Store(id)
+		if !emit(core.Event{Type: core.EventText, SessionID: id}) {
+			return false
+		}
+	}
+	if strings.TrimSpace(result.Response) != "" {
+		if !emit(core.Event{Type: core.EventText, Content: result.Response}) {
+			return false
+		}
+		if result.Error != "" || strings.EqualFold(result.Status, "ERROR") {
+			slog.Warn("antigravitySession: suppressed error accompanying a non-empty result response", "status", result.Status)
+		}
+		return true
+	}
+	if result.Error != "" || strings.EqualFold(result.Status, "ERROR") {
+		message := strings.TrimSpace(result.Error)
+		if message == "" {
+			message = "agy reported status " + result.Status
+		}
+		return emit(core.Event{Type: core.EventError, Error: fmt.Errorf("agy: %s", message)})
+	}
+	return true
 }
 
 func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sendStartedAt time.Time) string {

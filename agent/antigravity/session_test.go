@@ -95,6 +95,166 @@ func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	}
 }
 
+func TestStreamJSONResult(t *testing.T) {
+	if os.Getenv("GO_WANT_ANTIGRAVITY_STREAM_HELPER") == "1" {
+		_ = os.WriteFile(os.Getenv("CC_ANTIGRAVITY_ARGS_FILE"), []byte(strings.Join(os.Args, "\x00")), 0o600)
+		_, _ = io.WriteString(os.Stdout, os.Getenv("CC_ANTIGRAVITY_STDOUT"))
+		_, _ = io.WriteString(os.Stderr, os.Getenv("CC_ANTIGRAVITY_STDERR"))
+		if os.Getenv("CC_ANTIGRAVITY_FAIL") == "1" {
+			os.Exit(3)
+		}
+		os.Exit(0)
+	}
+
+	tests := []struct {
+		name        string
+		output      string
+		stderr      string
+		fail        bool
+		wantText    string
+		wantError   string
+		wantSession string
+	}{
+		{
+			name:        "success",
+			output:      "{\"event\":\"init\"}\n{\"event\":\"step_update\"}\n" + `{"event":"result","result":{"conversation_id":"conv-42","status":"SUCCESS","response":"done"}}`,
+			wantText:    "done",
+			wantSession: "conv-42",
+		},
+		{
+			name:        "response_not_discarded_when_error_present",
+			output:      `{"event":"result","result":{"conversation_id":"conv-42","status":"ERROR","response":"done","error":"Your previous response contained an improperly formatted function call"}}`,
+			wantText:    "done",
+			wantSession: "conv-42",
+		},
+		{
+			name:     "response_with_error_and_success_status",
+			output:   `{"event":"result","result":{"status":"SUCCESS","response":"  done\n","error":"historical error"}}`,
+			wantText: "  done\n",
+		},
+		{
+			name:     "response_with_error_status_only",
+			output:   `{"event":"result","result":{"status":"error","response":"done"}}`,
+			wantText: "done",
+		},
+		{
+			name:     "response_with_nonzero_exit",
+			output:   `{"event":"result","result":{"status":"ERROR","response":"done","error":"historical error"}}`,
+			stderr:   "historical error",
+			fail:     true,
+			wantText: "done",
+		},
+		{
+			name:      "empty_response_with_error",
+			output:    `{"event":"result","result":{"status":"ERROR","response":"","error":"not available"}}`,
+			stderr:    "not available",
+			fail:      true,
+			wantError: "not available",
+		},
+		{
+			name:      "whitespace_response_with_error",
+			output:    `{"event":"result","result":{"status":"ERROR","response":" \t\n","error":"not available"}}`,
+			wantError: "not available",
+		},
+		{
+			name:      "error_status_without_message",
+			output:    `{"event":"result","result":{"status":"ERROR","response":""}}`,
+			wantError: "agy reported status ERROR",
+		},
+		{
+			name:      "empty_response_with_error_and_success_status",
+			output:    `{"event":"result","result":{"status":"SUCCESS","response":"","error":"not available"}}`,
+			wantError: "not available",
+		},
+		{
+			name:   "empty_success",
+			output: `{"event":"result","result":{"status":"SUCCESS","response":""}}`,
+		},
+		{
+			name:     "duplicate_result_is_ignored",
+			output:   "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"done\"}}\n" + `{"event":"result","result":{"status":"ERROR","error":"duplicate"}}`,
+			wantText: "done",
+		},
+		{
+			name:     "plain_text_fallback",
+			output:   "legacy reply\n",
+			wantText: "legacy reply\n",
+		},
+		{
+			name:     "non_event_json_fallback",
+			output:   "{\"answer\":\"legacy reply\"}\n{malformed}\n",
+			wantText: "{\"answer\":\"legacy reply\"}\n{malformed}\n",
+		},
+		{
+			name:      "plain_text_process_error",
+			stderr:    "process failed",
+			fail:      true,
+			wantError: "process failed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			argsPath := filepath.Join(t.TempDir(), "args")
+			extraEnv := []string{
+				"GO_WANT_ANTIGRAVITY_STREAM_HELPER=1",
+				"CC_ANTIGRAVITY_ARGS_FILE=" + argsPath,
+				"CC_ANTIGRAVITY_STDOUT=" + test.output,
+				"CC_ANTIGRAVITY_STDERR=" + test.stderr,
+			}
+			if test.fail {
+				extraEnv = append(extraEnv, "CC_ANTIGRAVITY_FAIL=1")
+			}
+			session, err := newAntigravitySession(context.Background(), os.Args[0], []string{"-test.run=^TestStreamJSONResult$", "--"}, t.TempDir(), "", "yolo", "", extraEnv, 5*time.Second)
+			if err != nil {
+				t.Fatalf("newAntigravitySession: %v", err)
+			}
+			defer func() { _ = session.Close() }()
+			if err := session.Send("hello", "", nil, nil); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			var text strings.Builder
+			var errors []error
+			deadline := time.After(10 * time.Second)
+			for {
+				select {
+				case event := <-session.Events():
+					switch event.Type {
+					case core.EventText:
+						text.WriteString(event.Content)
+					case core.EventError:
+						errors = append(errors, event.Error)
+					case core.EventResult:
+						if text.String() != test.wantText {
+							t.Errorf("text = %q, want %q", text.String(), test.wantText)
+						}
+						if test.wantError == "" {
+							if len(errors) != 0 {
+								t.Errorf("unexpected errors: %v", errors)
+							}
+						} else if len(errors) != 1 || !strings.Contains(errors[0].Error(), test.wantError) {
+							t.Errorf("errors = %v, want exactly one containing %q", errors, test.wantError)
+						}
+						if !event.Done || event.SessionID != test.wantSession || session.CurrentSessionID() != test.wantSession {
+							t.Errorf("result = %+v, current session = %q, want done with session %q", event, session.CurrentSessionID(), test.wantSession)
+						}
+						data, err := os.ReadFile(argsPath)
+						if err != nil {
+							t.Fatalf("read args: %v", err)
+						}
+						if !strings.Contains(string(data), "--output-format\x00stream-json\x00") {
+							t.Errorf("args = %q, want --output-format stream-json", data)
+						}
+						return
+					}
+				case <-deadline:
+					t.Fatalf("timeout waiting for turn to end; text = %q", text.String())
+				}
+			}
+		})
+	}
+}
+
 func TestAntigravitySession_ResumePassesConversationID(t *testing.T) {
 	if os.Getenv("GO_WANT_ANTIGRAVITY_HELPER") == "1" {
 		argsPath := os.Getenv("CC_ANTIGRAVITY_ARGS_FILE")
