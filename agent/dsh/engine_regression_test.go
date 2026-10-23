@@ -614,3 +614,109 @@ func TestSession_TimeoutInterruptsStalledPromptReceipt(t *testing.T) {
 		t.Fatal("missing timeout event")
 	}
 }
+
+func TestSession_RemoteRejectedPromptRetryDoesNotTimeoutAfterSuccess(t *testing.T) {
+	f := newRemoteFixture(t)
+	var prompts, cancels atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/session/prompt" && prompts.Add(1) == 1 {
+			http.Error(w, "temporary failure before acceptance", http.StatusServiceUnavailable)
+			return
+		}
+		if r.URL.Path == "/api/session/cancel" {
+			cancels.Add(1)
+		}
+		f.handle(w, r)
+	}))
+	defer proxy.Close()
+	a, err := New(map[string]any{"base_url": proxy.URL, "token": "fixture-token", "work_dir": t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Stop() })
+	a.(*Agent).timeout = 100 * time.Millisecond
+	session, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	if err := session.Send("first attempt", "one", nil, nil); err == nil {
+		t.Fatal("first prompt should be rejected")
+	}
+	if err := session.Send("retry", "two", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	assertRemoteReply(t, session, "reply-1")
+	time.Sleep(250 * time.Millisecond)
+	if got := cancels.Load(); got != 0 {
+		t.Fatalf("successfully completed retry was later cancelled by its watchdog: cancels=%d, want 0", got)
+	}
+}
+
+func TestSession_AcceptedPromptErrorKeepsNativeTurnReservation(t *testing.T) {
+	for _, observed := range []bool{false, true} {
+		t.Run(fmt.Sprint(observed), func(t *testing.T) {
+			m := newMockDshServer()
+			handler := m.handler()
+			var prompts atomic.Int32
+			var s *dshSession
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/session.prompt" || prompts.Add(1) != 1 {
+					handler.ServeHTTP(w, r)
+					return
+				}
+				receipt := httptest.NewRecorder()
+				handler.ServeHTTP(receipt, r)
+				if observed {
+					raw, _ := json.Marshal(evTurnStart(1))
+					s.handleSessionEvent(raw)
+					http.Error(w, "failure after native start", http.StatusServiceUnavailable)
+				} else {
+					// The native server accepted the turn but its success receipt was lost.
+					_, _ = w.Write([]byte("invalid receipt"))
+				}
+			}))
+			defer server.Close()
+			a, err := New(map[string]any{"base_url": server.URL, "work_dir": t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = a.Stop() })
+			session, err := a.StartSession(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s = session.(*dshSession)
+			t.Cleanup(func() { _ = s.Close() })
+			if err := s.Send("accepted", "one", nil, nil); err == nil {
+				t.Fatal("expected receipt failure")
+			}
+			if err := s.Send("next", "two", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			s.turnMu.Lock()
+			done := s.turnDone
+			turn := s.watchdogTurn
+			s.turnMu.Unlock()
+			if turn != 2 {
+				t.Fatalf("next native turn = %d, want 2", turn)
+			}
+			raw, _ := json.Marshal(evTurnStart(1))
+			s.handleSessionEvent(raw)
+			s.finishTurn(sessionEventData{Turn: 1})
+			select {
+			case <-done:
+				t.Fatal("old accepted turn closed next watchdog")
+			default:
+			}
+			raw, _ = json.Marshal(evTurnStart(2))
+			s.handleSessionEvent(raw)
+			s.finishTurn(sessionEventData{Turn: 2})
+			select {
+			case <-done:
+			default:
+				t.Fatal("completed next turn left watchdog armed")
+			}
+		})
+	}
+}

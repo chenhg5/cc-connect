@@ -48,6 +48,7 @@ type dshSession struct {
 	turnOpMu      sync.Mutex         // serializes prompt submission and cancellation RPCs
 	turnMu        sync.Mutex
 	currentTurn   int // latest native turn, or expected next turn before turn/start
+	nativeTurn    int // latest turn confirmed by a native start/end or snapshot
 	watchdogTurn  int // native turn owning turnDone
 	lastUsage     *tokenUsage
 	toolNames     map[string]string   // callId → tool name (for tool/result)
@@ -146,6 +147,7 @@ func newDshSession(ctx context.Context, client *rpcClient, workDir, sessionID, a
 	}
 	s.frames = frames
 	s.currentTurn = initialTurn
+	s.nativeTurn = initialTurn
 	go s.readLoop()
 	return s, nil
 }
@@ -223,7 +225,9 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 	turnDone := make(chan struct{})
 	s.stopWatchdogLocked()
 	s.turnDone = turnDone
+	previousTurn := s.currentTurn
 	s.currentTurn++
+	submittedTurn := s.currentTurn
 	s.watchdogTurn = s.currentTurn
 	promptCtx, cancelPrompt := context.WithCancel(s.ctx)
 	s.promptCancel = cancelPrompt
@@ -246,7 +250,15 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		payload["requestId"] = messageID
 	}
 	if err := s.client.call(promptCtx, "session.prompt", payload, nil); err != nil {
+		var rpcErr *rpcCallError
+		var httpErr *rpcHTTPError
+		rejected := errors.As(err, &rpcErr) || errors.As(err, &httpErr)
 		s.turnMu.Lock()
+		// A rejected request consumes no native turn. Keep reservations for
+		// requests interrupted by /stop or already observed on the event stream.
+		if rejected && promptCtx.Err() == nil && s.currentTurn == submittedTurn && s.nativeTurn < submittedTurn {
+			s.currentTurn = previousTurn
+		}
 		if s.turnDone == turnDone {
 			s.stopWatchdogLocked()
 		}
@@ -599,6 +611,9 @@ func (s *dshSession) handleSessionEvent(raw json.RawMessage) {
 	switch ev.Type {
 	case "turn/start":
 		s.turnMu.Lock()
+		if data.Turn > s.nativeTurn {
+			s.nativeTurn = data.Turn
+		}
 		if data.Turn > s.currentTurn {
 			s.currentTurn = data.Turn
 		}
@@ -717,7 +732,10 @@ func (s *dshSession) handleChunk(chunk *streamChunk) {
 func (s *dshSession) finishTurn(data sessionEventData) {
 	s.turnMu.Lock()
 	var usage *tokenUsage
-	if s.currentTurn == 0 && s.turnDone == nil {
+	if data.Turn > s.nativeTurn {
+		s.nativeTurn = data.Turn
+	}
+	if data.Turn > s.currentTurn {
 		s.currentTurn = data.Turn
 	}
 	usage = s.lastUsage

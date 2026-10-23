@@ -283,7 +283,7 @@ func (c *rpcClient) callHTTP(ctx context.Context, method string, payload any, ou
 		if len(msg) > 512 {
 			msg = msg[:512]
 		}
-		return fmt.Errorf("dsh: %s returned HTTP %d: %s", method, resp.StatusCode, msg)
+		return &rpcHTTPError{Method: method, Status: resp.StatusCode, Message: msg}
 	}
 
 	var sr serverResponse
@@ -302,6 +302,18 @@ func (c *rpcClient) callHTTP(ctx context.Context, method string, payload any, ou
 		}
 	}
 	return nil
+}
+
+// rpcHTTPError distinguishes server rejection from a lost or malformed receipt,
+// where the request may already have consumed a native turn.
+type rpcHTTPError struct {
+	Method  string
+	Status  int
+	Message string
+}
+
+func (e *rpcHTTPError) Error() string {
+	return fmt.Sprintf("dsh: %s returned HTTP %d: %s", e.Method, e.Status, e.Message)
 }
 
 // rpcCallError carries the structured RPC error so callers can branch on code.
