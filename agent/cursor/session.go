@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,6 +76,43 @@ func newCursorSession(ctx context.Context, cmd string, extraArgs []string, workD
 	return cs, nil
 }
 
+// buildCLIArgs assembles the Cursor Agent CLI argv for a single turn.
+//
+// extraArgs come from the user's `cmd` option and are prepended, so an
+// explicit override (for example `cmd = "cursor-agent --trust"`) keeps working.
+// chatID is the session to resume; empty means a fresh conversation.
+func buildCLIArgs(extraArgs []string, mode, model, workDir, prompt, chatID string) []string {
+	args := append(append([]string{}, extraArgs...),
+		"--print",
+		"--output-format", "stream-json",
+	)
+	// cc-connect only ever drives the CLI headlessly (--print), and the Cursor
+	// Agent CLI refuses to run that way inside an untrusted workspace (it exits
+	// with "Workspace Trust Required"). Pass --trust unless the user already
+	// supplied it through `cmd`, so that workaround does not turn into a
+	// duplicated flag.
+	if !slices.Contains(args, "--trust") {
+		args = append(args, "--trust")
+	}
+
+	switch mode {
+	case "force":
+		args = append(args, "--force")
+	case "plan":
+		args = append(args, "--mode", "plan")
+	case "ask":
+		args = append(args, "--mode", "ask")
+	}
+
+	if chatID != "" {
+		args = append(args, "--resume", chatID)
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	return append(args, "--workspace", workDir, "--", prompt)
+}
+
 func (cs *cursorSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if len(images) > 0 {
 		// The Cursor Agent CLI has no image flag, but it can open image files
@@ -108,27 +146,7 @@ func (cs *cursorSession) Send(prompt string, messageID string, images []core.Ima
 	chatID := cs.CurrentSessionID()
 	isResume := chatID != ""
 
-	args := append(append([]string{}, cs.extraArgs...),
-		"--print",
-		"--output-format", "stream-json",
-	)
-
-	switch cs.mode {
-	case "force":
-		args = append(args, "--force")
-	case "plan":
-		args = append(args, "--mode", "plan")
-	case "ask":
-		args = append(args, "--mode", "ask")
-	}
-
-	if isResume {
-		args = append(args, "--resume", chatID)
-	}
-	if cs.model != "" {
-		args = append(args, "--model", cs.model)
-	}
-	args = append(args, "--workspace", cs.workDir, "--", prompt)
+	args := buildCLIArgs(cs.extraArgs, cs.mode, cs.model, cs.workDir, prompt, chatID)
 
 	slog.Debug("cursorSession: launching", "resume", isResume, "args", core.RedactArgs(args))
 
