@@ -16,12 +16,13 @@ import (
 // WebhookServer exposes an HTTP endpoint for external systems
 // (git hooks, CI/CD, file watchers, etc.) to trigger agent or shell actions.
 type WebhookServer struct {
-	port    int
-	token   string
-	path    string
-	server  *http.Server
-	engines map[string]*Engine
-	mu      sync.RWMutex
+	port     int
+	token    string
+	path     string
+	insecure bool
+	server   *http.Server
+	engines  map[string]*Engine
+	mu       sync.RWMutex
 }
 
 // WebhookRequest is the JSON body for POST /hook.
@@ -37,6 +38,16 @@ type WebhookRequest struct {
 }
 
 func NewWebhookServer(port int, token, path string) *WebhookServer {
+	return newWebhookServer(port, token, path, false)
+}
+
+// NewWebhookServerInsecure creates a WebhookServer that allows running without
+// a token. This should only be used for local development.
+func NewWebhookServerInsecure(port int, token, path string) *WebhookServer {
+	return newWebhookServer(port, token, path, true)
+}
+
+func newWebhookServer(port int, token, path string, insecure bool) *WebhookServer {
 	if port <= 0 {
 		port = 9111
 	}
@@ -46,11 +57,25 @@ func NewWebhookServer(port int, token, path string) *WebhookServer {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+
+	// Validate security settings, mirroring the bridge server's policy: a
+	// webhook can trigger shell execution (Exec/WorkDir), so an empty token
+	// must be an explicit, informed choice, not a silent default.
+	if token == "" && !insecure {
+		slog.Error("webhook: token is required when insecure mode is not enabled",
+			"help", "set webhook.token in config, or use insecure=true for local development only")
+		return nil
+	}
+	if insecure && token == "" {
+		slog.Warn("webhook: running in INSECURE mode without authentication - only use for local development!")
+	}
+
 	return &WebhookServer{
-		port:    port,
-		token:   token,
-		path:    path,
-		engines: make(map[string]*Engine),
+		port:     port,
+		token:    token,
+		path:     path,
+		insecure: insecure,
+		engines:  make(map[string]*Engine),
 	}
 }
 
@@ -64,7 +89,14 @@ func (ws *WebhookServer) Start() {
 	mux := http.NewServeMux()
 	mux.HandleFunc(ws.path, ws.handleHook)
 
-	addr := fmt.Sprintf(":%d", ws.port)
+	// Insecure (no-token) mode is documented as local-development-only, so
+	// bind loopback-only rather than trusting that every operator who sets
+	// insecure=true also runs on a network no one else can reach.
+	host := ""
+	if ws.insecure {
+		host = "127.0.0.1"
+	}
+	addr := fmt.Sprintf("%s:%d", host, ws.port)
 	ws.server = &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
