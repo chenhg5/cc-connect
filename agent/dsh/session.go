@@ -47,9 +47,11 @@ type dshSession struct {
 	cancellation  *turnCancellation  // blocks new submissions until cancellation completes
 	turnOpMu      sync.Mutex         // serializes prompt submission and cancellation RPCs
 	turnMu        sync.Mutex
-	currentTurn   int // latest native turn, or expected next turn before turn/start
-	nativeTurn    int // latest turn confirmed by a native start/end or snapshot
-	watchdogTurn  int // native turn owning turnDone
+	currentTurn   int    // latest native turn, or expected next turn before turn/start
+	nativeTurn    int    // latest turn confirmed by a native start/end or snapshot
+	watchdogTurn  int    // native turn owning turnDone
+	watchdogRPCID string // native user/message source binding for the latest Send
+	turnUncertain bool   // an unsuccessful receipt cannot prove whether its prompt ran
 	lastUsage     *tokenUsage
 	toolNames     map[string]string   // callId → tool name (for tool/result)
 	seenCalls     map[string]struct{} // callIds already surfaced as EventToolUse
@@ -217,6 +219,10 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		}
 	}
 
+	rpcID := messageID
+	if rpcID == "" {
+		rpcID = mintRPCID()
+	}
 	if err := s.lockSubmission(); err != nil {
 		return err
 	}
@@ -225,11 +231,14 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 	turnDone := make(chan struct{})
 	s.stopWatchdogLocked()
 	s.turnDone = turnDone
-	previousTurn := s.currentTurn
 	s.currentTurn++
-	submittedTurn := s.currentTurn
 	s.watchdogTurn = s.currentTurn
+	if s.turnUncertain || s.client.token != "" {
+		s.watchdogTurn = 0 // wait for the native echo of this exact RPC
+	}
+	s.watchdogRPCID = rpcID
 	promptCtx, cancelPrompt := context.WithCancel(s.ctx)
+	promptCtx = context.WithValue(promptCtx, promptRPCIDKey{}, rpcID)
 	s.promptCancel = cancelPrompt
 	s.turnMu.Unlock()
 	defer func() {
@@ -244,21 +253,15 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 
 	payload := map[string]any{"sessionId": s.sessionID, "mode": "queue", "content": content}
 	if s.client.token != "" {
-		if messageID == "" {
-			messageID = mintRPCID()
-		}
-		payload["requestId"] = messageID
+		// Keep both protocol ids aligned: native versions may surface either
+		// the envelope rpcId or requestId in user/message.source.rpcId.
+		payload["requestId"] = rpcID
 	}
 	if err := s.client.call(promptCtx, "session.prompt", payload, nil); err != nil {
-		var rpcErr *rpcCallError
-		var httpErr *rpcHTTPError
-		rejected := errors.As(err, &rpcErr) || errors.As(err, &httpErr)
 		s.turnMu.Lock()
-		// A rejected request consumes no native turn. Keep reservations for
-		// requests interrupted by /stop or already observed on the event stream.
-		if rejected && promptCtx.Err() == nil && s.currentTurn == submittedTurn && s.nativeTurn < submittedTurn {
-			s.currentTurn = previousTurn
-		}
+		// Even a non-2xx receipt can follow backend acceptance. The next
+		// watchdog must bind to its RPC echo, not a guessed turn number.
+		s.turnUncertain = true
 		if s.turnDone == turnDone {
 			s.stopWatchdogLocked()
 		}
@@ -617,7 +620,7 @@ func (s *dshSession) handleSessionEvent(raw json.RawMessage) {
 		if data.Turn > s.currentTurn {
 			s.currentTurn = data.Turn
 		}
-		if s.turnDone != nil && data.Turn >= s.watchdogTurn {
+		if s.turnDone != nil && s.client.token == "" && !s.turnUncertain && data.Turn >= s.watchdogTurn {
 			s.watchdogTurn = data.Turn
 		}
 		s.lastUsage = nil
@@ -629,7 +632,15 @@ func (s *dshSession) handleSessionEvent(raw json.RawMessage) {
 		s.thinkAgg.Flush()
 
 	case "user/message":
-		// Echo of our own prompt — not model output.
+		// Native echoes carry the originating HTTP RPC id even if its receipt
+		// failed. This binds the latest watchdog without assuming acceptance.
+		s.turnMu.Lock()
+		if data.Source != nil && data.Source.RPCID == s.watchdogRPCID && s.turnDone != nil {
+			s.watchdogTurn = s.nativeTurn
+			s.currentTurn = s.nativeTurn
+			s.turnUncertain = false
+		}
+		s.turnMu.Unlock()
 
 	case "assistant/chunk":
 		s.handleChunk(data.Chunk)

@@ -25,6 +25,8 @@ import (
 
 // ── Wire types (mirror packages/host/apiproxy/src/api/*) ──────────
 
+type promptRPCIDKey struct{}
+
 // clientRequest is the POST /api/<method> request body.
 type clientRequest struct {
 	Type    string `json:"type"` // "client-request"
@@ -107,6 +109,9 @@ type sessionEvent struct {
 
 // sessionEventData unions the data payloads of the events we consume.
 type sessionEventData struct {
+	Source *struct {
+		RPCID string `json:"rpcId"`
+	} `json:"source,omitempty"`
 	Turn    int             `json:"turn,omitempty"`
 	Step    int             `json:"step,omitempty"`
 	Reason  json.RawMessage `json:"reason,omitempty"`  // turn/end reason
@@ -234,9 +239,13 @@ func (c *rpcClient) call(ctx context.Context, method string, payload any, out an
 }
 
 func (c *rpcClient) callHTTP(ctx context.Context, method string, payload any, out any, cookie string) error {
+	rpcID, _ := ctx.Value(promptRPCIDKey{}).(string)
+	if rpcID == "" {
+		rpcID = mintRPCID()
+	}
 	reqBody, err := json.Marshal(clientRequest{
 		Type:    "client-request",
-		RPCID:   mintRPCID(),
+		RPCID:   rpcID,
 		Method:  method,
 		Payload: payload,
 	})
@@ -283,7 +292,7 @@ func (c *rpcClient) callHTTP(ctx context.Context, method string, payload any, ou
 		if len(msg) > 512 {
 			msg = msg[:512]
 		}
-		return &rpcHTTPError{Method: method, Status: resp.StatusCode, Message: msg}
+		return fmt.Errorf("dsh: %s returned HTTP %d: %s", method, resp.StatusCode, msg)
 	}
 
 	var sr serverResponse
@@ -302,18 +311,6 @@ func (c *rpcClient) callHTTP(ctx context.Context, method string, payload any, ou
 		}
 	}
 	return nil
-}
-
-// rpcHTTPError distinguishes server rejection from a lost or malformed receipt,
-// where the request may already have consumed a native turn.
-type rpcHTTPError struct {
-	Method  string
-	Status  int
-	Message string
-}
-
-func (e *rpcHTTPError) Error() string {
-	return fmt.Sprintf("dsh: %s returned HTTP %d: %s", e.Method, e.Status, e.Message)
 }
 
 // rpcCallError carries the structured RPC error so callers can branch on code.

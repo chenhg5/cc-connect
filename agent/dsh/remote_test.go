@@ -205,6 +205,7 @@ func (f *remoteFixture) handle(w http.ResponseWriter, r *http.Request) {
 				peer.send(id, map[string]any{"type": "event", "event": map[string]any{"type": kind, "seq": turn * 10, "data": data}})
 			}
 			sendEvent("turn/start", map[string]any{"turn": turn})
+			sendEvent("user/message", map[string]any{"source": map[string]any{"kind": "user", "rpcId": req.RPCID}})
 			peer.send(id, map[string]any{"type": "assistant-stream", "frame": map[string]any{"type": "chunk", "chunk": map[string]any{"type": "text-delta", "text": text}}})
 			sendEvent("assistant/message", map[string]any{"turn": turn, "step": 1, "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": text}}}, "usage": map[string]any{"inputTokens": 12, "outputTokens": 3}})
 			sendEvent("turn/end", map[string]any{"turn": turn, "reason": map[string]any{"kind": "completed"}})

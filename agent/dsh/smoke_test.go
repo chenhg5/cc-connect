@@ -171,6 +171,13 @@ func TestSmoke_RemoteLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		smokeResult(t, s, "SMOKE_OK", "")
+		nativeSession := s.(*dshSession)
+		nativeSession.turnMu.Lock()
+		armed := nativeSession.turnDone != nil
+		nativeSession.turnMu.Unlock()
+		if armed {
+			t.Fatal("completed real DSH RPC did not disarm its watchdog")
+		}
 	}
 	if !s.(core.LiveModeSwitcher).SetLiveMode("plan") {
 		t.Fatal("read-only mode failed")

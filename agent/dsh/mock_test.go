@@ -52,9 +52,10 @@ type mockDshServer struct {
 }
 
 type mockSession struct {
-	id      string
-	cwd     string
-	prompts int
+	id           string
+	cwd          string
+	prompts      int
+	promptRPCIDs []string
 }
 
 type mockFrame struct {
@@ -91,10 +92,24 @@ func (m *mockDshServer) close() {
 func (m *mockDshServer) broadcast(rpcID string, body map[string]any) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	frames := []mockFrame{{rpcID: rpcID, body: body}}
+	if event, ok := body["event"].(map[string]any); ok && event["type"] == "turn/start" {
+		if data, ok := event["data"].(map[string]any); ok {
+			turn, _ := data["turn"].(int)
+			sid, _ := body["sessionId"].(string)
+			if session := m.sessions[sid]; session != nil && turn > 0 && turn <= len(session.promptRPCIDs) {
+				// Real DSH emits the originating RPC id after native turn/start.
+				echo := ev("user/message", map[string]any{"source": map[string]any{"kind": "user", "rpcId": session.promptRPCIDs[turn-1]}})
+				frames = append(frames, mockFrame{body: frameEvent(sid, echo)})
+			}
+		}
+	}
 	for ch := range m.subs {
-		select {
-		case ch <- mockFrame{rpcID: rpcID, body: body}:
-		default:
+		for _, frame := range frames {
+			select {
+			case ch <- frame:
+			default:
+			}
 		}
 	}
 }
@@ -256,6 +271,7 @@ func (m *mockDshServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 		s, ok := m.sessions[p.SessionID]
 		if ok {
 			s.prompts++
+			s.promptRPCIDs = append(s.promptRPCIDs, req.RPCID)
 		}
 		m.mu.Unlock()
 		if !ok {

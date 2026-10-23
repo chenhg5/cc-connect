@@ -697,9 +697,10 @@ func TestSession_AcceptedPromptErrorKeepsNativeTurnReservation(t *testing.T) {
 			s.turnMu.Lock()
 			done := s.turnDone
 			turn := s.watchdogTurn
+			rpcID := s.watchdogRPCID
 			s.turnMu.Unlock()
-			if turn != 2 {
-				t.Fatalf("next native turn = %d, want 2", turn)
+			if turn != 0 {
+				t.Fatalf("watchdog bound before its native RPC echo: turn=%d", turn)
 			}
 			raw, _ := json.Marshal(evTurnStart(1))
 			s.handleSessionEvent(raw)
@@ -711,6 +712,8 @@ func TestSession_AcceptedPromptErrorKeepsNativeTurnReservation(t *testing.T) {
 			}
 			raw, _ = json.Marshal(evTurnStart(2))
 			s.handleSessionEvent(raw)
+			raw, _ = json.Marshal(ev("user/message", map[string]any{"source": map[string]any{"kind": "user", "rpcId": rpcID}}))
+			s.handleSessionEvent(raw)
 			s.finishTurn(sessionEventData{Turn: 2})
 			select {
 			case <-done:
@@ -718,5 +721,93 @@ func TestSession_AcceptedPromptErrorKeepsNativeTurnReservation(t *testing.T) {
 				t.Fatal("completed next turn left watchdog armed")
 			}
 		})
+	}
+}
+
+func TestSession_RejectedLegacyPromptRetryBindsNativeRPC(t *testing.T) {
+	m := newMockDshServer()
+	var prompts atomic.Int32
+	handler := m.handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/session.prompt" && prompts.Add(1) == 1 {
+			http.Error(w, "rejected before acceptance", http.StatusServiceUnavailable)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	a, err := New(map[string]any{"base_url": server.URL, "work_dir": t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Stop() })
+	a.(*Agent).timeout = 100 * time.Millisecond
+	session, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := session.(*dshSession)
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Send("rejected", "one", nil, nil); err == nil {
+		t.Fatal("expected rejection")
+	}
+	if err := s.Send("retry", "two", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	m.broadcast("start", frameEvent(s.sessionID, evTurnStart(1)))
+	m.broadcast("end", frameEvent(s.sessionID, evTurnEnd(1, "completed")))
+	events := drainEvents(t, s, time.Second)
+	if len(events) == 0 || events[len(events)-1].Type != core.EventResult {
+		t.Fatal("retry did not complete")
+	}
+	time.Sleep(150 * time.Millisecond)
+	if m.cancelCount() != 0 {
+		t.Fatal("completed retry was cancelled")
+	}
+}
+
+func TestSession_AcceptedHTTPErrorBeforeDelayedStartKeepsReservation(t *testing.T) {
+	m := newMockDshServer()
+	handler := m.handler()
+	var prompts atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/session.prompt" && prompts.Add(1) == 1 {
+			receipt := httptest.NewRecorder()
+			handler.ServeHTTP(receipt, r) // backend accepted; gateway loses its success reply
+			http.Error(w, "failure after backend acceptance, before local start delivery", http.StatusServiceUnavailable)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	defer proxy.Close()
+	native, err := New(map[string]any{"base_url": proxy.URL, "work_dir": t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = native.Stop() })
+	native.(*Agent).timeout = 100 * time.Millisecond
+	session, err := native.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	s := session.(*dshSession)
+	if err := s.Send("accepted despite lost receipt", "one", nil, nil); err == nil {
+		t.Fatal("expected HTTP receipt failure")
+	}
+	if m.promptCount() != 1 {
+		t.Fatal("first request was not accepted by backend")
+	}
+	if err := s.Send("next prompt", "two", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// WebSocket delivery can lag behind the HTTP error and the next submission.
+	m.broadcast("start1", frameEvent(s.sessionID, evTurnStart(1)))
+	m.broadcast("end1", frameEvent(s.sessionID, evTurnEnd(1, "completed")))
+	m.broadcast("start2", frameEvent(s.sessionID, evTurnStart(2)))
+	waitFor(t, time.Second, func() bool { s.turnMu.Lock(); defer s.turnMu.Unlock(); return s.nativeTurn == 2 }, "native second turn started")
+	time.Sleep(250 * time.Millisecond)
+	if got := m.cancelCount(); got != 1 {
+		t.Fatalf("accepted HTTP error lost next turn watchdog: cancels=%d, want 1", got)
 	}
 }
