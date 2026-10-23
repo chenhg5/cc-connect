@@ -1451,6 +1451,17 @@ func (e *Engine) SetBaseWorkDir(dir string) {
 	e.baseWorkDir = dir
 }
 
+// WorkDir returns the project-level base work_dir, i.e. the directory the
+// engine itself was configured with — NOT the active session's workspace.
+// Sessions opened under a per-session workspace override report a different
+// directory (see the agent's GetWorkDir), so callers that need the directory
+// a specific session is running in must ask the session/agent instead. Used by
+// the /api/v1/health endpoint, which reports project health rather than the
+// state of any one conversation.
+func (e *Engine) WorkDir() string {
+	return e.baseWorkDir
+}
+
 func (e *Engine) SetProjectStateStore(store *ProjectStateStore) {
 	e.projectState = store
 }
@@ -1672,7 +1683,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
 		lockGen, locked := session.TryLock()
 		if !locked {
-			return fmt.Errorf("session %q is busy", runSessionKey)
+			return e.busyError(runSessionKey)
 		}
 		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
 		if workspaceDir != "" {
@@ -1695,7 +1706,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	session := sessions.GetOrCreateActive(sessionKey)
 	lockGen, locked := session.TryLock()
 	if !locked {
-		return fmt.Errorf("session %q is busy", sessionKey)
+		return e.busyError(sessionKey)
 	}
 
 	iKey := sessionKey
@@ -1877,7 +1888,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		session := sessions.NewSideSession(runSessionKey, "timer-"+job.ID)
 		lockGen, locked := session.TryLock()
 		if !locked {
-			return fmt.Errorf("session %q is busy", runSessionKey)
+			return e.busyError(runSessionKey)
 		}
 		iKey := fmt.Sprintf("%s#timer:%s", runSessionKey, session.ID)
 		if workspaceDir != "" {
@@ -1891,7 +1902,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	session := sessions.GetOrCreateActive(sessionKey)
 	lockGen, locked := session.TryLock()
 	if !locked {
-		return fmt.Errorf("session %q is busy", sessionKey)
+		return e.busyError(sessionKey)
 	}
 
 	iKey := sessionKey
@@ -2354,7 +2365,7 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 	session := e.sessions.GetOrCreateActive(sessionKey)
 	lockGen, locked := session.TryLock()
 	if !locked {
-		return fmt.Errorf("session %q is busy", sessionKey)
+		return e.busyError(sessionKey)
 	}
 
 	e.processInteractiveMessage(targetPlatform, msg, session, lockGen)
@@ -16566,6 +16577,11 @@ func (e *Engine) platformForName(name string) Platform {
 		}
 	}
 	return platformNameOnly{name: name}
+}
+
+// busyError returns a localized "session is busy" error for the given session key.
+func (e *Engine) busyError(sessionKey string) error {
+	return fmt.Errorf("%s: %s", sessionKey, e.i18n.T(MsgSessionBusy))
 }
 
 func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey string) (Agent, *SessionManager, string, error) {

@@ -20,11 +20,11 @@ func boolPtr(v bool) *bool { return &v }
 func TestNewHookManager_ValidatesConfig(t *testing.T) {
 	hooks := []HookConfig{
 		{Event: "message.received", Type: "command", Command: "echo ok"},
-		{Event: "", Type: "command", Command: "echo bad"},         // missing event
-		{Event: "error", Type: "http", URL: ""},                   // missing url
-		{Event: "error", Type: "http", URL: "ftp://bad"},          // bad url scheme
-		{Event: "error", Type: "unknown", Command: "echo"},        // bad type
-		{Event: "error", Type: "command", Command: ""},            // missing command
+		{Event: "", Type: "command", Command: "echo bad"},  // missing event
+		{Event: "error", Type: "http", URL: ""},            // missing url
+		{Event: "error", Type: "http", URL: "ftp://bad"},   // bad url scheme
+		{Event: "error", Type: "unknown", Command: "echo"}, // bad type
+		{Event: "error", Type: "command", Command: ""},     // missing command
 		{Event: "message.sent", Type: "http", URL: "http://ok.com"},
 	}
 	hm := NewHookManager("test", hooks, "sh", "-c", "")
@@ -530,5 +530,172 @@ func TestEmit_TimestampAutoFilled(t *testing.T) {
 
 	if receivedTime.Before(before) {
 		t.Errorf("expected auto-filled timestamp >= %v, got %v", before, receivedTime)
+	}
+}
+
+func TestEmit_HTTPRetryOnFailure(t *testing.T) {
+	var attempts atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := attempts.Add(1)
+		if n == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	hooks := []HookConfig{
+		{Event: "error", Type: "http", URL: srv.URL, Async: boolPtr(false)},
+	}
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
+
+	hm.Emit(HookEvent{Event: HookEventError})
+
+	if attempts.Load() != 2 {
+		t.Errorf("expected 2 attempts (1 fail + 1 retry), got %d", attempts.Load())
+	}
+}
+
+func TestEmit_HTTPAllRetriesFail(t *testing.T) {
+	var attempts atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	hooks := []HookConfig{
+		{Event: "error", Type: "http", URL: srv.URL, Async: boolPtr(false)},
+	}
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
+
+	hm.Emit(HookEvent{Event: HookEventError})
+
+	// 1 initial + 1 retry = 2 total attempts
+	if attempts.Load() != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempts.Load())
+	}
+}
+
+// TestEmit_HTTPDoesNotRetryOnClientError pins the retry filter: a 4xx (other
+// than 429) is the endpoint rejecting the request itself, so a second
+// identical attempt cannot succeed and only delays the log line by
+// retryDelay. 5xx and transport errors still retry — see
+// TestEmit_HTTPRetryOnFailure.
+func TestEmit_HTTPDoesNotRetryOnClientError(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusGone} {
+		var attempts atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(status)
+		}))
+
+		hooks := []HookConfig{
+			{Event: "error", Type: "http", URL: srv.URL, Async: boolPtr(false)},
+		}
+		hm := NewHookManager("proj", hooks, "sh", "-c", "")
+		hm.Emit(HookEvent{Event: HookEventError})
+		srv.Close()
+
+		if attempts.Load() != 1 {
+			t.Errorf("status %d: expected 1 attempt (no retry on client error), got %d", status, attempts.Load())
+		}
+	}
+}
+
+// TestEmit_HTTPRetriesOnTooManyRequests pins 429 as the client-error
+// exception: it explicitly asks the caller to come back later, so the
+// retry budget applies.
+func TestEmit_HTTPRetriesOnTooManyRequests(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	hooks := []HookConfig{
+		{Event: "error", Type: "http", URL: srv.URL, Async: boolPtr(false)},
+	}
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
+
+	hm.Emit(HookEvent{Event: HookEventError})
+
+	if attempts.Load() != 2 {
+		t.Errorf("expected 2 attempts (429 + 1 retry), got %d", attempts.Load())
+	}
+}
+
+// TestEmit_HTTPTimeoutIsSharedAcrossRetries pins that the hook timeout
+// bounds the whole operation, not each attempt.
+//
+// Emit runs non-async hooks inline, so executeHTTP blocks whoever emitted
+// the event. If each attempt got its own fresh timeout, a sync HTTP hook
+// with the default 5s budget could block for 2*5s + retryDelay — twice
+// what the operator configured. Here the server is slower than half the
+// deadline, so a per-attempt timeout would need roughly 2*timeout to
+// finish; a shared budget stops at ~timeout.
+func TestEmit_HTTPTimeoutIsSharedAcrossRetries(t *testing.T) {
+	const serverDelay = 500 * time.Millisecond
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(serverDelay)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	hooks := []HookConfig{{
+		Event:   "error",
+		Type:    "http",
+		URL:     srv.URL,
+		Async:   boolPtr(false),
+		Timeout: 1, // seconds; timeoutDuration() multiplies by time.Second
+	}}
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
+
+	start := time.Now()
+	hm.Emit(HookEvent{Event: HookEventError})
+	elapsed := time.Since(start)
+
+	// One attempt (500ms) plus a back-off that must stop at the deadline.
+	// A per-attempt budget would take ~1500ms here.
+	if elapsed > 1200*time.Millisecond {
+		t.Errorf("sync hook blocked %v; the timeout should bound the whole operation, not each attempt", elapsed)
+	}
+}
+
+// TestEmit_HTTPTimeoutStillAllowsFastRetry is the counterpart: when the
+// first attempt fails fast, there is budget left and the retry must still
+// happen.
+func TestEmit_HTTPTimeoutStillAllowsFastRetry(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	hooks := []HookConfig{{
+		Event:   "error",
+		Type:    "http",
+		URL:     srv.URL,
+		Async:   boolPtr(false),
+		Timeout: 5,
+	}}
+	hm := NewHookManager("proj", hooks, "sh", "-c", "")
+
+	hm.Emit(HookEvent{Event: HookEventError})
+
+	if attempts.Load() != 2 {
+		t.Errorf("fast transient failure should still be retried within the budget; got %d attempts", attempts.Load())
 	}
 }

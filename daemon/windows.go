@@ -176,6 +176,19 @@ exit 1
 	return err == nil && strings.EqualFold(strings.TrimSpace(out), "true")
 }
 
+// windowsTemplateOwnedEnvKeys are keys the task script renders directly; if
+// they also appear in cfg.EnvExtra the template version wins. Mirrors
+// systemdTemplateOwnedEnvKeys and templateOwnedEnvKeys so all three backends
+// resolve the same way — without it, an env capture of CC_CONFIG would
+// shadow the path the user passed to `daemon install --config`.
+var windowsTemplateOwnedEnvKeys = map[string]struct{}{
+	"CC_CONFIG":          {},
+	"CC_LOG_FILE":        {},
+	"CC_LOG_MAX_SIZE":    {},
+	"CC_LOG_MAX_BACKUPS": {},
+	"PATH":               {},
+}
+
 func buildWindowsTaskScript(cfg Config) string {
 	var sb strings.Builder
 	sb.WriteString("$ErrorActionPreference = 'Stop'\r\n")
@@ -185,6 +198,14 @@ func buildWindowsTaskScript(cfg Config) string {
 	if cfg.EnvPATH != "" {
 		writePowerShellEnv(&sb, "PATH", cfg.EnvPATH)
 	}
+	// CC_CONFIG: the task launches the binary with no --config argument, so
+	// an explicit `daemon install --config <path>` reaches the daemon only
+	// through the environment. Set-Location below pins the working
+	// directory, which is enough only when the file happens to be named
+	// config.toml. Read back by resolveConfigPath.
+	if cfg.ConfigPath != "" {
+		writePowerShellEnv(&sb, "CC_CONFIG", cfg.ConfigPath)
+	}
 	if len(cfg.EnvExtra) > 0 {
 		keys := make([]string, 0, len(cfg.EnvExtra))
 		for key := range cfg.EnvExtra {
@@ -192,6 +213,9 @@ func buildWindowsTaskScript(cfg Config) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
+			if _, owned := windowsTemplateOwnedEnvKeys[key]; owned {
+				continue
+			}
 			if !isValidEnvName(key) {
 				slog.Warn("daemon: windows: dropping invalid env name from EnvExtra",
 					"key", key)

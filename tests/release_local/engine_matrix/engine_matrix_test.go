@@ -3,6 +3,8 @@ package engine_matrix
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -184,14 +186,58 @@ func (p *matrixPlatform) waitTextContaining(t *testing.T, substr string) string 
 	return ""
 }
 
+// waitStoreSettled blocks until the engine's session store has stopped
+// changing, so a test can safely let t.TempDir remove it.
+//
+// ReceiveMessage hands the turn to `go e.processInteractiveMessageWith(...)`,
+// and the engine persists the session to the store path after the agent
+// responds. Engine.Stop cancels the context and tears down platforms, but
+// that goroutine is not joined — a turn still in flight can land its write
+// while Go's TempDir cleanup is already removing the directory, which fails
+// the test with "TempDir RemoveAll cleanup: directory not empty". The window
+// is narrow, so it only shows up on a loaded CI runner; locally the same
+// test passes hundreds of iterations.
+func waitStoreSettled(t *testing.T, storePath string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var lastMod time.Time
+	var lastSize int64
+	stable := 0
+	for time.Now().Before(deadline) {
+		fi, err := os.Stat(storePath)
+		if err != nil {
+			// Never written, or already gone — nothing left to wait on.
+			if stable++; stable >= 3 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if fi.ModTime().Equal(lastMod) && fi.Size() == lastSize {
+			if stable++; stable >= 3 {
+				return
+			}
+		} else {
+			stable = 0
+			lastMod, lastSize = fi.ModTime(), fi.Size()
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func newMatrixEngine(t *testing.T) (*core.Engine, *matrixAgent, *matrixPlatform) {
 	t.Helper()
 	agent := newMatrixAgent()
 	platform := &matrixPlatform{}
-	engine := core.NewEngine("release-core", agent, []core.Platform{platform}, t.TempDir()+"/sessions.json", core.LangEnglish)
+	// Hold the directory rather than inlining t.TempDir(), so cleanup can
+	// settle the store before Go removes it. Cleanups run LIFO: this one is
+	// registered after t.TempDir()'s, so it runs first.
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	engine := core.NewEngine("release-core", agent, []core.Platform{platform}, storePath, core.LangEnglish)
 	t.Cleanup(func() {
 		engine.Stop()
 		_ = agent.Stop()
+		waitStoreSettled(t, storePath)
 	})
 	return engine, agent, platform
 }
@@ -299,4 +345,13 @@ func TestUnknownSlashCommandNotifiesThenFallsThroughToAgent(t *testing.T) {
 	if !strings.Contains(records[0].prompt, "/not-a-command keep this request") {
 		t.Fatalf("unknown slash command should fall through to agent, got prompt %q", records[0].prompt)
 	}
+	// Wait for the turn's final reply, not just the intermediate
+	// "forwarding" notice. ReceiveMessage hands the turn to
+	// `go e.processInteractiveMessageWith(...)`, and the engine persists
+	// the session to the store path after the agent responds. Returning
+	// while that goroutine is still running lets it write into the
+	// t.TempDir directory just as Go's cleanup is removing it, which
+	// fails the test with "TempDir RemoveAll cleanup: directory not
+	// empty". Waiting for the reply puts the write inside the test body.
+	platform.waitTextContaining(t, "matrix response")
 }
