@@ -42,6 +42,9 @@ type acpModesBlock struct {
 type acpInitializeResult struct {
 	ProtocolVersion   int `json:"protocolVersion"`
 	AgentCapabilities struct {
+		PromptCapabilities struct {
+			EmbeddedContext bool `json:"embeddedContext"`
+		} `json:"promptCapabilities"`
 		LoadSession         bool `json:"loadSession"`
 		SessionCapabilities struct {
 			// ACP advertises capabilities as objects (possibly empty);

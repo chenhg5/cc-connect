@@ -41,6 +41,7 @@ type Agent struct {
 	appServerURL    string
 	codexHome       string
 	systemPrompt    string
+	language        core.Language
 	appendPrompt    string
 	cmd             string   // explicit CLI command; empty enables discovery
 	cliExtraArgs    []string // extra args parsed from cmd after the binary
@@ -64,6 +65,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	codexHome, _ := opts["codex_home"].(string)
 	systemPrompt, _ := opts["system_prompt"].(string)
 	appendPrompt, _ := opts["append_system_prompt"].(string)
+	language, _ := opts["language"].(string)
 	mode = normalizeMode(mode)
 	backend = normalizeBackend(backend)
 	appServerURL = normalizeAppServerURL(appServerURL)
@@ -103,6 +105,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
 		systemPrompt:    strings.TrimSpace(systemPrompt),
+		language:        core.NormalizeLanguageString(language),
 		appendPrompt:    strings.TrimSpace(appendPrompt),
 		cmd:             cmd,
 		cliExtraArgs:    cliExtraArgs,
@@ -498,8 +501,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	backend := a.backend
 	appServerURL := a.appServerURL
 	codexHome := a.codexHome
-	systemPrompt := a.systemPrompt
-	appendPrompt := a.appendPrompt
+	systemPrompt := core.AgentSessionPrompt(a.language, a.systemPrompt, a.appendPrompt)
+	appendPrompt := ""
 	cliBin := a.cmd
 	cliExtraArgs := a.cliExtraArgs
 	workDir := a.workDir
@@ -586,8 +589,11 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	defer a.mu.RUnlock()
 
 	opts := map[string]any{
-		"mode":    a.mode,
-		"backend": a.backend,
+		"mode":                 a.mode,
+		"backend":              a.backend,
+		"language":             string(a.language),
+		"system_prompt":        a.systemPrompt,
+		"append_system_prompt": a.appendPrompt,
 	}
 	if a.cmd != "" {
 		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)
@@ -606,6 +612,8 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	return opts
 }
+
+func (a *Agent) HasSystemPromptSupport() bool { return true }
 
 // ── SkillProvider implementation ──────────────────────────────
 

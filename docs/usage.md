@@ -763,11 +763,15 @@ Switch: `/tts always` or `/tts voice_only`
 
 ## Image, File, and Voice Send-Back
 
-When an agent generates a local image, PDF, report, bundle, or other file and needs to deliver it directly to the current chat, use attachment mode in `cc-connect send`. When the user explicitly asks for a voice message, the agent can also send synthesized speech through the same CLI.
+When the user requests an existing or newly generated local image, PDF, report, bundle, or other file, use attachment mode in `cc-connect send` to deliver it to the current chat. A local Markdown link is not attachment delivery. Confirm the command succeeds before saying the file was sent. When the user explicitly asks for a voice message, the agent can also send synthesized speech through the same CLI.
+
+Claude Code, Codex, and ACP workers automatically receive the bridge instructions; they do not need setup and do not modify `AGENTS.md`. Claude Code retains its cc-connect-managed prompt file. Codex app-server uses native developer instructions, including immediate injection when resuming an older thread and configuration for context rebuilds after compaction; the exec backend includes bridge context in each request. ACP has no native system/developer slot, so cc-connect includes a separate embedded context resource with each request (text fallback for servers without embedded-context support), preserving the original leading text for slash commands. These instructions apply to cc-connect launches, not independent terminal conversations.
 
 **Currently supported platforms:**
 - Feishu
 - Telegram
+
+On older Codex app-server releases without `thread/inject_items`, resumed workers include bridge context with each request instead of failing to resume. Other injection failures are reported explicitly.
 
 ### When to run setup first
 
