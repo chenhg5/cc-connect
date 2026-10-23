@@ -125,6 +125,10 @@ cmd = ["/path with spaces/codex", "--profile", "work"]
 | 规划模式 | `plan` | 只读分析 |
 | 问答模式 | `ask` | 问答风格，只读 |
 
+Cursor 项目可在 `[projects.agent.options]` 中设置可选的 `instructions_file`，
+将 UTF-8 文件附到每轮请求之前，包括续接会话。每轮都会重新读取，修改后无需重启 Agent；
+文件不可读时该轮明确失败。未设置时保持原有请求行为。
+
 ### Gemini CLI 模式
 
 | 模式 | 配置值 | 行为 |
