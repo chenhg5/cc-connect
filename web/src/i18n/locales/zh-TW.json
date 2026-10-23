@@ -373,6 +373,13 @@
     "rlMaxMessagesHint": "每個視窗內的最大訊息數；0 = 不限制",
     "rlWindowSecs": "視窗時間（秒）",
     "rlWindowSecsHint": "時間視窗的秒數",
+    "retriableError": "可重試錯誤",
+    "retriableInitialDelay": "首次重試延遲（秒）",
+    "retriableInitialDelayHint": "首次重試前的等待時間；0 = 立即重試",
+    "retriableRetryDelay": "後續重試延遲（秒）",
+    "retriableRetryDelayHint": "後續重試之間的等待時間；0 = 立即重試",
+    "retriableMaxAttempts": "最大嘗試次數",
+    "retriableMaxAttemptsHint": "包含首次傳送在內的總嘗試次數",
     "log": "記錄",
     "logLevel": "記錄層級"
   },
