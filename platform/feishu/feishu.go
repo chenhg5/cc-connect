@@ -930,6 +930,25 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}, nil
 	}
 
+	// Core validates the question and updates this exact message after delivery.
+	// Returning an optimistic success card races rejection and idle continuation.
+	if strings.HasPrefix(actionVal, "askq:") && len(strings.Split(actionVal, ":")) == 4 {
+		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		go p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey, Platform: p.platformName, UserID: userID,
+			UserName: p.resolveUserName(userID), ChatName: p.resolveChatName(chatID),
+			Content: actionVal, ReplyCtx: rctx,
+			OnAnswerStatus: func(card *core.Card) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := p.refreshQuestionCard(ctx, messageID, sessionKey, card); err != nil {
+					slog.Warn(p.tag()+": update question card failed", "error", err)
+				}
+			},
+		})
+		return nil, nil
+	}
+
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}

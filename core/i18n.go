@@ -209,6 +209,8 @@ const (
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
 	MsgMessageQueued             MsgKey = "message_queued"
+	MsgMessageSteerUnconfirmed   MsgKey = "message_steer_unconfirmed"
+	MsgMessageSteered            MsgKey = "message_steered"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
 	MsgCurrentTools              MsgKey = "current_tools"
 	MsgCurrentSession            MsgKey = "current_session"
@@ -454,12 +456,16 @@ const (
 	MsgPermCardBody    MsgKey = "perm_card_body"
 	MsgPermCardNote    MsgKey = "perm_card_note"
 
+	MsgAsyncQuestionNote    MsgKey = "async_question_note"
 	MsgAskQuestionTitle     MsgKey = "ask_question_title"
 	MsgAskQuestionNote      MsgKey = "ask_question_note"
 	MsgAskQuestionNoteMulti MsgKey = "ask_question_note_multi"
 	MsgAskQuestionMulti     MsgKey = "ask_question_multi"
 	MsgAskQuestionPrompt    MsgKey = "ask_question_prompt"
 	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
+	MsgAnswerSubmitting     MsgKey = "answer_submitting"
+	MsgAnswerSubmitted      MsgKey = "answer_submitted"
+	MsgAnswerRecorded       MsgKey = "answer_recorded"
 	MsgAskQuestionStale     MsgKey = "ask_question_stale"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
@@ -809,6 +815,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📬 訊息已收到，將在目前任務完成後處理。",
 		LangJapanese:           "📬 メッセージを受信しました。現在のタスク完了後に処理します。",
 		LangSpanish:            "📬 Mensaje recibido — se procesará después de que termine la tarea actual.",
+	},
+	MsgMessageSteerUnconfirmed: {
+		LangEnglish:            "⚠️ Could not confirm delivery of the supplement. It may already be in the current task; it was not resent or queued. Check the task's response before sending it again.",
+		LangChinese:            "⚠️ 无法确认补充信息是否送达。它可能已加入当前任务，因此没有重发或排队。请先查看任务回复，再决定是否重发。",
+		LangTraditionalChinese: "⚠️ 無法確認補充資訊是否送達。它可能已加入目前任務，因此沒有重送或排隊。請先查看任務回覆，再決定是否重送。",
+		LangJapanese:           "⚠️ 補足情報の受信を確認できませんでした。現在のタスクに届いている可能性があるため、再送やキューへの追加はしていません。再送する前にタスクの応答を確認してください。",
+		LangSpanish:            "⚠️ No se pudo confirmar la entrega. La tarea puede haber recibido la información; no se reenvió ni se añadió a la cola. Revisa la respuesta antes de enviarla de nuevo.",
+	},
+	MsgMessageSteered: {
+		LangEnglish:            "🧭 Added to the current task.",
+		LangChinese:            "🧭 补充信息已加入当前任务。",
+		LangTraditionalChinese: "🧭 補充資訊已加入目前任務。",
+		LangJapanese:           "🧭 補足情報を現在のタスクに追加しました。",
+		LangSpanish:            "🧭 Información adicional añadida a la tarea actual.",
 	},
 	MsgQueueFull: {
 		LangEnglish:            "📬 Message queue is full (%d pending). Please wait for current tasks to complete.",
@@ -2800,6 +2820,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "ボタンが反応しない場合は直接返信: allow / deny / allow all",
 		LangSpanish:            "Si los botones no responden, responda: allow / deny / allow all",
 	},
+	MsgAsyncQuestionNote: {
+		LangEnglish:            "Optional question: work can continue. Choose an option or send /answer <answer> (multiple choices: /answer 1,2). Other messages guide the ongoing task.",
+		LangChinese:            "可以稍后回答，任务继续。点击选项或发送 /answer 答案（多选：/answer 1,2）；其他消息用于补充或纠正当前任务。",
+		LangTraditionalChinese: "可以稍後回答，任務繼續。點擊選項或傳送 /answer 答案（多選：/answer 1,2）；其他訊息用於補充或修正目前任務。",
+		LangJapanese:           "後で回答できます。作業は続行します。選択肢または /answer 回答（複数: /answer 1,2）で回答し、その他のメッセージは作業の指示になります。",
+		LangSpanish:            "Puedes responder más tarde; el trabajo continúa. Elige una opción o envía /answer respuesta (varias: /answer 1,2). Los demás mensajes orientan la tarea.",
+	},
 	MsgAskQuestionTitle: {
 		LangEnglish:            "Agent Question",
 		LangChinese:            "Agent 提问",
@@ -2841,6 +2868,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "已回答",
 		LangJapanese:           "回答済み",
 		LangSpanish:            "Respondido",
+	},
+	MsgAnswerSubmitting: {
+		LangEnglish:            "Submitting answer…",
+		LangChinese:            "正在提交回答…",
+		LangTraditionalChinese: "正在提交回答…",
+		LangJapanese:           "回答を送信中…",
+		LangSpanish:            "Enviando respuesta…",
+	},
+	MsgAnswerSubmitted: {
+		LangEnglish:            "Answer submitted to the agent",
+		LangChinese:            "回答已提交给模型",
+		LangTraditionalChinese: "回答已提交給模型",
+		LangJapanese:           "回答をエージェントに送信しました",
+		LangSpanish:            "Respuesta enviada al agente",
+	},
+	MsgAnswerRecorded: {
+		LangEnglish:            "Answer recorded; complete the remaining questions",
+		LangChinese:            "已记录，请继续回答剩余问题",
+		LangTraditionalChinese: "已記錄，請繼續回答剩餘問題",
+		LangJapanese:           "回答を記録しました。残りの質問に回答してください",
+		LangSpanish:            "Respuesta registrada; completa las preguntas restantes",
 	},
 	MsgAskQuestionStale: {
 		LangEnglish:            "⚠️ That question was already answered or is no longer active, so this answer was not sent to the agent.",

@@ -1693,6 +1693,7 @@ app_secret = "your-feishu-app-secret"
 
 # [[projects]]
 # name = "my-codex-project"
+# busy_message_mode = "steer"  # Opt-in plain-text follow-ups; default "queue" / 纯文本忙时追加，默认排队
 #
 # [projects.agent]
 # type = "codex"
@@ -1703,6 +1704,8 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
+# backend = "app_server"      # Required for native steering / 原生追加使用此后端
+# app_server_url = "stdio"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #
 # Mode options / 模式说明:

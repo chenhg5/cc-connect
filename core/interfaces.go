@@ -397,8 +397,19 @@ type PermissionResult struct {
 	Message      string         `json:"message,omitempty"`      // reason for deny
 }
 
-// UserInputSteerer delivers an answer to a non-blocking question while the agent
-// continues working. False means there is no active turn; use normal Send instead.
+// ErrSteerRejected means the input was definitively not accepted. Callers may
+// queue it for a later turn. Other errors have an unknown delivery outcome and
+// must not trigger an automatic resend.
+var ErrSteerRejected = errors.New("steering was rejected")
+
+// UserInputSteerer delivers text (a follow-up or an answer to a non-blocking
+// question) into an active turn without starting a new turn. True with nil error
+// confirms acceptance. False with nil error means no input was submitted and
+// callers may use their normal queue/Send path. See ErrSteerRejected for errors.
+// Adapter implementations must return ErrSteerRejected (or wrap it so errors.Is
+// matches) only when non-acceptance is certain. Any other error, including a
+// generic error used for a rejection, is treated as unknown delivery and will
+// not be automatically retried.
 type UserInputSteerer interface {
 	SteerUserInput(prompt string) (bool, error)
 }

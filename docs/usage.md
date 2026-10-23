@@ -69,6 +69,35 @@ The next normal message after a long idle period starts in a fresh session autom
 
 To restore the previous behavior of always continuing, set `reset_on_idle_mins = 0`.
 
+### Follow-ups while a task is running
+
+Projects queue busy messages by default. To append plain-text follow-ups to the
+active Codex app-server turn, set `busy_message_mode = "steer"` on the project:
+
+```toml
+[[projects]]
+name = "my-codex-project"
+busy_message_mode = "steer"
+
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "/path/to/project"
+backend = "app_server"
+app_server_url = "stdio"
+```
+
+Images, files, unsupported sessions and definitively rejected steering remain
+queued. An acknowledgement confirms acceptance into the turn, not completion.
+If the response times out, the connection fails, or the response cannot confirm
+the expected turn, delivery is uncertain: the bridge warns you and does not
+automatically resend or queue that input. Check the task's reply before retrying.
+
+`/ps <text>` (alias `/btw`) uses native steering when available, even in queue
+mode, and never starts a second Codex turn when the original one has ended.
+Adapters that already accept supplements through `Send` retain their behavior.
+Setting the project back to `busy_message_mode = "queue"` also works on reload.
+
 ### Model switch preserves history
 
 `/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.
@@ -1294,3 +1323,24 @@ tunneled through it.
 
 Full reference: [docs/telegram.md](./telegram.md#21-optional-use-a-proxy).
 This option was added in PR #389.
+
+### Optional asynchronous answers
+
+Use an option button or `/answer <answer>` to answer an optional question. Other
+messages remain task corrections and follow `busy_message_mode`. An open question
+belongs to its conversation and survives a completed turn or service restart.
+If the model is idle, an answer continues that conversation in a new turn; it does
+not replay the previous task. A newer question replaces the previous open one.
+
+Feishu async cards show submission success only after model acknowledgement.
+Repeated or uncertain answers are not sent again automatically. Unknown steering
+delivery is retained in `/history` with a warning, not represented as confirmed.
+
+An answer with an unknown delivery outcome stays terminal for that question,
+even after restart: neither its card buttons nor `/answer` can resubmit it.
+Check the model's reply and `/history` first, since the answer may already have
+been applied. If a correction is still needed, send an explicit ordinary message
+in the original conversation describing the intended result. This is a new user
+instruction, not a retry of the old card, and may cause additional work.
+
+See [validation scope and environments](busy-steering-validation.md).
