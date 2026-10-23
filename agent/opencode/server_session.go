@@ -1020,6 +1020,13 @@ type serverSession struct {
 	// MessageAbortedError on the stream, which must not be relayed to the chat as
 	// a failure: the user already got the reason.
 	abortedTurn atomic.Bool
+	// childMu guards childSessions: the subagent (task) sessions started under
+	// this one while a turn runs. Their events prove the turn is alive even
+	// though the parent produces none while it waits for the task result, so
+	// they feed the stall watchdog — but they are never dispatched to the
+	// engine, because subagent output is not part of this reply.
+	childMu       sync.Mutex
+	childSessions map[string]struct{}
 	// stallTimeout is how long a turn may stay silent before it is aborted
 	// (field, not const, so tests can shorten it).
 	stallTimeout time.Duration
@@ -1177,6 +1184,9 @@ func (s *serverSession) Send(prompt string, messageID string, images []core.Imag
 	// Per-turn stall bookkeeping: a timestamp from the previous turn would make
 	// the watchdog abort this one immediately.
 	s.lastSessionEvent.Store(0)
+	s.childMu.Lock()
+	s.childSessions = nil
+	s.childMu.Unlock()
 	s.turnStartedAt.Store(time.Now().UnixNano())
 	s.stallReported.Store(false)
 	s.abortedTurn.Store(false)
@@ -1763,12 +1773,28 @@ func (s *serverSession) handleServerEvent(payload []byte) {
 		return
 	}
 
+	// Track the subagent (task) sessions opened under this one before the
+	// session filter below drops their events. A long task produces no parent
+	// events at all while it runs, so without this the watchdog would abort a
+	// perfectly healthy turn after stallTimeout.
+	switch evt.Type {
+	case "session.created", "session.updated":
+		if info, _ := evt.Properties["info"].(map[string]any); info != nil {
+			s.noteChildSession(info)
+		}
+	}
+
 	// Session-scoped events are filtered; server-wide ones (heartbeats etc. carry
 	// no sessionID) are ignored below by their type. Only this session's own
 	// events count as activity for the stall watchdog — a heartbeat must not make
 	// a hung turn look alive.
 	if sid, _ := evt.Properties["sessionID"].(string); sid != "" {
 		if !s.matchesSession(sid) {
+			if s.isChildSession(sid) {
+				// Progress inside a task subagent, not an event of this reply:
+				// refresh the watchdog and drop everything else.
+				s.lastSessionEvent.Store(time.Now().UnixNano())
+			}
 			return
 		}
 		s.lastSessionEvent.Store(time.Now().UnixNano())
@@ -1931,6 +1957,13 @@ func (s *serverSession) dispatchPart(part map[string]any) {
 			return
 		}
 		if reason != "" && reason != "tool-calls" {
+			if s.abortedTurn.Load() {
+				// Our own stop ends the step with a non-normal reason; the notice
+				// already explained it and must not be followed by a truncation
+				// error for a turn the user never lost.
+				slog.Debug("opencode server session: ignoring step-finish of our own stop", "reason", reason)
+				return
+			}
 			// Keep abnormal finish reasons on the same error path as the run
 			// transport instead of allowing session.idle to report success.
 			s.inner.handleStepFinish(map[string]any{"part": part})
@@ -2215,6 +2248,16 @@ func (s *serverSession) dispatchToolPart(part map[string]any) {
 		return
 	}
 
+	// A tool interrupted by our own abort reports that abort back as an error.
+	// The user already got the notice and the turn is over, so nothing about
+	// this part — not even its tool entry — belongs in the conversation.
+	if s.abortedTurn.Load() {
+		if errMsg, _ := state["error"].(string); errMsg != "" && isAbortEcho(errMsg) {
+			slog.Debug("opencode server session: ignoring tool abort echo of our own stop", "tool", toolName)
+			return
+		}
+	}
+
 	s.msgMu.Lock()
 	_, alreadyEmitted := s.emittedTools[callID]
 	s.msgMu.Unlock()
@@ -2296,6 +2339,15 @@ func (s *serverSession) abortStalledTurn(idle time.Duration) {
 		"session", sessionID, "idle", idle.Round(time.Second), "timeout", s.stallTimeout)
 
 	s.abortedTurn.Store(true)
+	s.inner.expectingContinue.Store(false)
+	// Claim the turn and deliver the notice BEFORE asking the server to abort.
+	// The abort makes OpenCode emit session.idle immediately; that idle would
+	// reach flushFinalAnswer first, finalize the turn with an empty answer and
+	// win the resultSent claim, leaving the user with a bare "(空响应)" instead
+	// of the timeout notice that explains what happened.
+	s.endTurnWithNotice(serverStallNotice)
+	s.turnInFlight.Store(false)
+
 	if srv := s.server(); srv != nil && sessionID != "" && !srv.isExited() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := srv.abortSession(ctx, sessionID); err != nil {
@@ -2303,10 +2355,6 @@ func (s *serverSession) abortStalledTurn(idle time.Duration) {
 		}
 		cancel()
 	}
-
-	s.inner.expectingContinue.Store(false)
-	s.endTurnWithNotice(serverStallNotice)
-	s.turnInFlight.Store(false)
 }
 
 // endTurnWithNotice ends the turn with a user-visible reason, delivering the
@@ -2329,6 +2377,46 @@ func (s *serverSession) endTurnWithNotice(notice string) {
 	}
 	s.sendEvent(core.Event{Type: core.EventText, Content: notice, SessionID: sessionID})
 	s.sendEvent(evt)
+}
+
+// noteChildSession remembers a subagent session created under this one, or
+// under a subagent it already knows, so its events can keep the stall watchdog
+// alive. The stream is shared by the whole workspace, so the parent chain is
+// checked rather than accepting every session that appears.
+func (s *serverSession) noteChildSession(info map[string]any) {
+	id, _ := info["id"].(string)
+	parentID, _ := info["parentID"].(string)
+	if id == "" || parentID == "" {
+		return
+	}
+
+	s.sessionMu.Lock()
+	current := s.sessionID
+	s.sessionMu.Unlock()
+	if current == "" {
+		return
+	}
+
+	s.childMu.Lock()
+	defer s.childMu.Unlock()
+	if parentID != current {
+		if _, ok := s.childSessions[parentID]; !ok {
+			return
+		}
+	}
+	if s.childSessions == nil {
+		s.childSessions = make(map[string]struct{})
+	}
+	s.childSessions[id] = struct{}{}
+}
+
+// isChildSession reports whether sessionID is a subagent session started by the
+// current turn.
+func (s *serverSession) isChildSession(sessionID string) bool {
+	s.childMu.Lock()
+	defer s.childMu.Unlock()
+	_, ok := s.childSessions[sessionID]
+	return ok
 }
 
 func (s *serverSession) matchesSession(sessionID string) bool {

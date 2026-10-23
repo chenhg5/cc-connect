@@ -31,6 +31,10 @@ type fakeOpencodeServer struct {
 	createCalls  int
 	messageBodys []map[string]any
 	abortCalls   int
+	// onAbort, when set, runs inside POST /session/{id}/abort: it lets a test
+	// observe the transport state at the moment the server is asked to stop, and
+	// emit the session.idle the real server reports back for that abort.
+	onAbort func()
 	// holdMessages makes POST /session/{id}/message block until releaseTurn, so a
 	// test can drive a second Send while a turn is still in flight. Tests that do
 	// not opt in get an immediate response — otherwise a failed assertion would
@@ -168,8 +172,12 @@ func (f *fakeOpencodeServer) handleSession(w http.ResponseWriter, r *http.Reques
 	case strings.HasSuffix(path, "/abort"):
 		f.mu.Lock()
 		f.abortCalls++
+		onAbort := f.onAbort
 		f.mu.Unlock()
 		writeJSONResponse(w, map[string]any{})
+		if onAbort != nil {
+			onAbort()
+		}
 	case strings.HasSuffix(path, "/message"):
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
@@ -1902,6 +1910,17 @@ func finalStepPartWithID(id, messageID string) map[string]any {
 	return map[string]any{"id": id, "type": "step-finish", "reason": "stop", "messageID": messageID}
 }
 
+// sessionCreated announces a session on the stream. Subagent (task) sessions
+// carry the parent's id, which is how the transport attributes them to the turn.
+func sessionCreated(id, parentID string) map[string]any {
+	return map[string]any{
+		"type": "session.created",
+		"properties": map[string]any{
+			"info": map[string]any{"id": id, "parentID": parentID},
+		},
+	}
+}
+
 func textPartOf(messageID, text string) map[string]any {
 	return map[string]any{"type": "text", "messageID": messageID, "text": text}
 }
@@ -2148,14 +2167,164 @@ func TestServerSession_AbortsStalledTurn(t *testing.T) {
 			if !strings.Contains(evt.Content, "已自动终止") {
 				t.Fatalf("stall result = %q, want the timeout notice", evt.Content)
 			}
-			_, aborts, _ := f.counts()
-			if aborts == 0 {
-				t.Fatalf("stalled turn was ended without aborting the session")
+			// The notice now claims the turn before the abort is issued, so the
+			// abort may still be in flight when the result is observed.
+			abortDeadline := time.After(2 * time.Second)
+			for {
+				if _, aborts, _ := f.counts(); aborts > 0 {
+					return
+				}
+				select {
+				case <-abortDeadline:
+					t.Fatalf("stalled turn was ended without aborting the session")
+				case <-time.After(10 * time.Millisecond):
+				}
 			}
-			return
 		case <-deadline:
 			t.Fatalf("stalled turn was never ended")
 		}
+	}
+}
+
+// A task subagent runs for as long as the job takes while the parent session
+// emits nothing: its result is the only thing the parent is waiting for. The
+// watchdog must read the subagent's own events as progress for the turn, or a
+// perfectly healthy long task is aborted at stallTimeout (observed live: a
+// 30-minute abort while two explore subagents were still streaming).
+func TestServerSession_StallWatchdogCountsSubagentActivity(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSessionWithMode(t, f, "ses_parent", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	if err := s.Send("explore the backend", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	s.stallTimeout = 200 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.stallWatchdog(ctx, 10*time.Millisecond)
+
+	f.emit(sessionCreated("ses_child", "ses_parent"))
+	time.Sleep(30 * time.Millisecond)
+	if !s.isChildSession("ses_child") {
+		t.Fatalf("subagent session was not attributed to this turn")
+	}
+	if got := s.lastSessionEvent.Load(); got != 0 {
+		t.Fatalf("session.created alone refreshed the watchdog (last=%d)", got)
+	}
+
+	// One subagent part must refresh the watchdog even though it is never
+	// dispatched to the engine: subagent output is not part of this reply.
+	f.emit(partUpdated("ses_child", textPartOf("msg_child", "subagent work")))
+	time.Sleep(30 * time.Millisecond)
+	if s.lastSessionEvent.Load() == 0 {
+		t.Fatalf("subagent event did not refresh the watchdog")
+	}
+	select {
+	case evt := <-s.Events():
+		t.Fatalf("subagent event leaked into the reply: %+v", evt)
+	default:
+	}
+
+	// Keep the subagent busy well past stallTimeout without a single parent
+	// event.
+	for i := 0; i < 10; i++ {
+		time.Sleep(40 * time.Millisecond)
+		f.emit(partUpdated("ses_child", textPartOf("msg_child", "subagent work")))
+	}
+	select {
+	case evt := <-s.Events():
+		t.Fatalf("subagent activity was not counted, turn ended: %+v", evt)
+	default:
+	}
+
+	// Silence from both sessions now: the watchdog must fire as before.
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case evt := <-s.Events():
+			if evt.Type != core.EventResult {
+				continue
+			}
+			if !strings.Contains(evt.Content, "已自动终止") {
+				t.Fatalf("stall result = %q, want the timeout notice", evt.Content)
+			}
+			return
+		case <-deadline:
+			t.Fatalf("stalled turn was never ended after the subagent went quiet")
+		}
+	}
+}
+
+// Aborting a stalled turn makes OpenCode emit session.idle right away. The
+// notice must already own the turn's single result by then, otherwise the idle
+// flush wins the race and the user gets a bare "(空响应)" instead of the reason.
+func TestServerSession_StallAbortNoticeWinsOverIdleEcho(t *testing.T) {
+	f := newFakeOpencodeServer(t)
+	f.holdMessages.Store(true)
+	s := newTestServerSessionWithMode(t, f, "ses_stall", "yolo")
+	defer func() { _ = s.Close() }()
+	waitForSubscriber(t, f)
+
+	if err := s.Send("slow task", "m1", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	f.emit(partUpdated("ses_stall", textPartOf("msg_a", "partial answer")))
+
+	var claimedAtAbort atomic.Bool
+	f.mu.Lock()
+	f.onAbort = func() {
+		claimedAtAbort.Store(s.inner.resultSent.Load())
+		f.emit(map[string]any{
+			"type":       "session.idle",
+			"properties": map[string]any{"sessionID": "ses_stall"},
+		})
+	}
+	f.mu.Unlock()
+
+	s.abortStalledTurn(time.Minute)
+
+	if !claimedAtAbort.Load() {
+		t.Fatalf("abort ran before the timeout notice claimed the turn")
+	}
+
+	var results []core.Event
+	first := time.After(2 * time.Second)
+	for len(results) == 0 {
+		select {
+		case evt := <-s.Events():
+			if evt.Type == core.EventResult {
+				results = append(results, evt)
+			}
+		case <-first:
+			t.Fatalf("no result after the stalled turn was aborted")
+		}
+	}
+	// Any duplicate the idle flush still tries to emit must be suppressed by the
+	// same claim, so give it a chance to arrive before asserting the count.
+	quiet := time.After(150 * time.Millisecond)
+drain:
+	for {
+		select {
+		case evt := <-s.Events():
+			if evt.Type == core.EventResult {
+				results = append(results, evt)
+			}
+		case <-quiet:
+			break drain
+		}
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want exactly one", len(results))
+	}
+	if !strings.Contains(results[0].Content, "已自动终止") {
+		t.Fatalf("result = %q, want the timeout notice", results[0].Content)
+	}
+	if results[0].Content == "" {
+		t.Fatalf("result content is empty; the user would see the empty-response placeholder")
 	}
 }
 
@@ -2368,6 +2537,20 @@ done:
 		"type":       "session.error",
 		"properties": map[string]any{"sessionID": "ses_echo", "error": map[string]any{"name": "MessageAbortedError", "data": map[string]any{"message": "Aborted"}}},
 	})
+	// So does the interrupted tool, which reports the abort as its error, and the
+	// step that the abort closed with a non-normal reason.
+	f.emit(partUpdated("ses_echo", map[string]any{
+		"type":   "tool",
+		"tool":   "task",
+		"callID": "call_abort",
+		"state": map[string]any{
+			"status": "error",
+			"error":  "Tool execution aborted",
+		},
+	}))
+	f.emit(partUpdated("ses_echo", map[string]any{
+		"type": "step-finish", "reason": "aborted",
+	}))
 	select {
 	case evt := <-s.Events():
 		t.Fatalf("abort echo relayed after the turn: %+v", evt)
