@@ -60,6 +60,54 @@ func TestSessionManager_NewSideSession(t *testing.T) {
 	}
 }
 
+func TestSessionManager_NewBackgroundSessionHiddenFromUserList(t *testing.T) {
+	sm := NewSessionManager("")
+	main := sm.GetOrCreateActive("user1")
+	bg := sm.NewBackgroundSession("user1", "cron-job")
+	bg.SetAgentSessionID("cron-agent-1", "codex")
+
+	if bg.ID == main.ID {
+		t.Fatal("background session should be a new record")
+	}
+	if sm.ActiveSessionID("user1") != main.ID {
+		t.Errorf("active session should stay main %q, got %q", main.ID, sm.ActiveSessionID("user1"))
+	}
+	list := sm.ListSessions("user1")
+	if len(list) != 1 || list[0].ID != main.ID {
+		t.Fatalf("ListSessions = %#v, want only main session", list)
+	}
+	known := sm.KnownAgentSessionIDs()
+	if _, ok := known["cron-agent-1"]; ok {
+		t.Fatal("background agent session should not be in known visible IDs")
+	}
+	hidden := sm.BackgroundAgentSessionIDs()
+	if _, ok := hidden["cron-agent-1"]; !ok {
+		t.Fatal("background agent session should be in hidden IDs")
+	}
+}
+
+func TestSessionManager_BackgroundSessionsVisibleWhenDisabled(t *testing.T) {
+	sm := NewSessionManager("")
+	sm.SetHideBackgroundSessions(false)
+	main := sm.GetOrCreateActive("user1")
+	main.SetAgentSessionID("main-agent-1", "codex")
+	bg := sm.NewBackgroundSession("user1", "cron-job")
+	bg.SetAgentSessionID("cron-agent-1", "codex")
+
+	list := sm.ListSessions("user1")
+	if len(list) != 2 {
+		t.Fatalf("ListSessions = %#v, want main and background sessions", list)
+	}
+	known := sm.KnownAgentSessionIDs()
+	if _, ok := known["cron-agent-1"]; !ok {
+		t.Fatalf("known IDs should include background when visible: %#v", known)
+	}
+	hidden := sm.BackgroundAgentSessionIDs()
+	if _, ok := hidden["cron-agent-1"]; !ok {
+		t.Fatal("background IDs should still be tracked for filtering when enabled again")
+	}
+}
+
 func TestSessionManager_SwitchSession(t *testing.T) {
 	sm := NewSessionManager("")
 	s1 := sm.NewSession("user1", "first")
@@ -1104,6 +1152,32 @@ func TestKnownAgentSessionIDs_IncludesPast(t *testing.T) {
 	}
 }
 
+func TestBackgroundAgentSessionIDs_IncludesPastAndPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	sm := NewSessionManager(path)
+	bg := sm.NewBackgroundSession("user1", "cron-job")
+	bg.SetAgentSessionID("cron-thread-1", "codex")
+	bg.SetAgentSessionID("cron-thread-2", "codex")
+	sm.Save()
+
+	sm2 := NewSessionManager(path)
+	if got := sm2.ListSessions("user1"); len(got) != 0 {
+		t.Fatalf("ListSessions after reload = %d, want 0 background-hidden sessions", len(got))
+	}
+	hidden := sm2.BackgroundAgentSessionIDs()
+	for _, id := range []string{"cron-thread-1", "cron-thread-2"} {
+		if _, ok := hidden[id]; !ok {
+			t.Fatalf("hidden IDs missing %q: %#v", id, hidden)
+		}
+	}
+	known := sm2.KnownAgentSessionIDs()
+	for _, id := range []string{"cron-thread-1", "cron-thread-2"} {
+		if _, ok := known[id]; ok {
+			t.Fatalf("known visible IDs should not include background %q: %#v", id, known)
+		}
+	}
+}
+
 // TestKnownAgentSessionIDs_ReproducesNewCommandBug simulates the exact user
 // reproduction steps: repeated /new commands progressively clear AgentSessionIDs.
 // Before the PastAgentSessionIDs fix, only the latest session would remain visible.
@@ -1201,4 +1275,32 @@ func TestSession_ForceUnlock(t *testing.T) {
 	if s.ForceUnlock() {
 		t.Fatal("ForceUnlock on an unlocked session must be a no-op (false)")
 	}
+}
+
+func TestSessionManager_VisibleSessions(t *testing.T) {
+	t.Run("hidden by default", func(t *testing.T) {
+		sm := NewSessionManager("")
+		main := sm.GetOrCreateActive("user1")
+		background := sm.NewBackgroundSession("user1", "cron-job")
+
+		visible := sm.VisibleSessions()
+		if len(visible) != 1 || visible[0].ID != main.ID {
+			t.Fatalf("VisibleSessions = %#v, want only %s", visible, main.ID)
+		}
+		if visible[0].ID == background.ID {
+			t.Fatal("background session leaked into visible list")
+		}
+	})
+
+	t.Run("all visible when disabled", func(t *testing.T) {
+		sm := NewSessionManager("")
+		sm.SetHideBackgroundSessions(false)
+		main := sm.GetOrCreateActive("user1")
+		background := sm.NewBackgroundSession("user1", "cron-job")
+
+		visible := sm.VisibleSessions()
+		if len(visible) != 2 {
+			t.Fatalf("VisibleSessions = %#v, want %s and %s", visible, main.ID, background.ID)
+		}
+	})
 }
