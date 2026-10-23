@@ -133,7 +133,6 @@ func (s *appServerSession) handleSubagentNotification(method string, raw json.Ra
 			Status string
 			Error  *struct{ Message string }
 		}
-		Status struct{ Type string }
 	}
 	if json.Unmarshal(raw, &n) != nil || n.ThreadID == "" || n.ThreadID == s.CurrentSessionID() || s.CurrentSessionID() == "" {
 		return false
@@ -152,11 +151,9 @@ func (s *appServerSession) handleSubagentNotification(method string, raw json.Ra
 			status, summary = "failed", n.Turn.Error.Message
 		}
 		s.subagents.finish(n.ThreadID, status, summary, s.emit)
-	case "thread/status/changed":
-		if n.Status.Type == "idle" {
-			s.subagents.finish(n.ThreadID, "completed", "", s.emit)
-		}
 	}
+	// idle can precede an interrupted/failed turn/completed notification.
+	// Wait for the authoritative outcome rather than closing the card early.
 	return true
 }
 
