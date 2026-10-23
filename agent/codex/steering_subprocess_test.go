@@ -46,6 +46,15 @@ func TestSteeringRPCPeer(t *testing.T) {
 			starts++
 			response["result"] = map[string]any{"turn": map[string]any{"id": "active"}}
 			emit(response)
+
+		case "test/complete":
+			emit(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread", "turn": map[string]any{"id": "active", "status": "completed"}}})
+			emit(response)
+		case "test/finish-queued":
+			emit(response)
+			emit(map[string]any{"method": "item/completed", "params": map[string]any{"threadId": "thread", "item": map[string]any{"type": "agentMessage", "id": "queued-answer", "text": fmt.Sprintf("Queued input used %d turn/start", starts)}}})
+			emit(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread", "turn": map[string]any{"id": "active", "status": "completed"}}})
+
 		case "turn/steer":
 			if req.Params.ExpectedTurnID != "active" || strings.Contains(req.Params.Input[0].Text, "reject this") {
 				emit(map[string]any{"id": req.ID, "error": map[string]any{"code": -32602, "message": "input rejected before acceptance"}})
@@ -146,4 +155,56 @@ func TestSteeringSubprocess_EngineDeliversSupplementWithoutSecondTurn(t *testing
 			}
 		})
 	}
+}
+
+func TestSteeringSubprocess_DefaultQueueStartsNextTurnAfterRemoteCompletion(t *testing.T) {
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &appServerSession{ctx: ctx, cancel: cancel, cliBin: bin, cliExtraArgs: []string{"-test.run=^TestSteeringRPCPeer$", "--"}, extraEnv: []string{"CC_CONNECT_STEERING_PEER=1"}, workDir: t.TempDir(), events: make(chan core.Event, 32), pending: make(map[int64]chan rpcResponseEnvelope)}
+	s.alive.Store(true)
+	s.threadID.Store("thread")
+	if err := s.connect(); err != nil {
+		t.Fatal(err)
+	}
+	p := &steeringProcessPlatform{}
+	e := core.NewEngine("test", &steeringProcessAgent{s: s}, []core.Platform{p}, "", core.LangEnglish)
+	e.SetStreamPreviewCfg(core.StreamPreviewCfg{Enabled: false})
+	t.Cleanup(func() { _ = e.Stop(); _ = s.Close() })
+	send := func(text string) {
+		e.ReceiveMessage(p, &core.Message{SessionKey: "test:queue", Platform: p.Name(), Content: text, ReplyCtx: "ctx"})
+	}
+	wait := func(check func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for !check() {
+			if time.Now().After(deadline) {
+				t.Fatal("timeout", p.output())
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	send("first task")
+	wait(func() bool { s.stateMu.Lock(); defer s.stateMu.Unlock(); return s.currentTurn == "active" })
+	send("next task")
+	wait(func() bool {
+		return strings.Contains(p.output(), core.NewI18n(core.LangEnglish).T(core.MsgMessageQueued))
+	})
+	if strings.Contains(p.output(), "Applied supplement") {
+		t.Fatal("default queue became steer")
+	}
+	if err := s.request("test/complete", map[string]any{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Do not race synthetic completion ahead of the Send acknowledgement.
+	wait(func() bool { s.stateMu.Lock(); defer s.stateMu.Unlock(); return s.currentTurn == "active" })
+	if err := s.request("test/finish-queued", map[string]any{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	wait(func() bool { return strings.Contains(p.output(), "Queued input used 2 turn/start") })
+	send("/history")
+	wait(func() bool { return strings.Contains(p.output(), "next task") })
 }

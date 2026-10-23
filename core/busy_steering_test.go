@@ -40,8 +40,8 @@ func TestBusySteering_RoutingAndDeliveryOutcome(t *testing.T) {
 		{name: "image", mode: "steer", image: true, wantQueue: 1, ack: MsgMessageQueued},
 		{name: "turn ended", mode: "steer", inactive: true, wantSteer: 1, wantQueue: 1, ack: MsgMessageQueued},
 		{name: "explicit rejection", mode: "steer", err: ErrSteerRejected, wantSteer: 1, wantQueue: 1, ack: MsgMessageQueued},
-		{name: "timeout is not retried", mode: "steer", err: errors.New("ack timed out"), wantSteer: 1, ack: MsgMessageSteerUnconfirmed},
-		{name: "transport failure is not retried", mode: "steer", err: errors.New("connection closed"), wantSteer: 1, ack: MsgMessageSteerUnconfirmed},
+		{name: "timeout is not retried", mode: "steer", err: errors.New("ack timed out"), wantHistory: 2, wantSteer: 1, ack: MsgMessageSteerUnconfirmed},
+		{name: "transport failure is not retried", mode: "steer", err: errors.New("connection closed"), wantHistory: 2, wantSteer: 1, ack: MsgMessageSteerUnconfirmed},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &stubPlatformEngine{n: "test"}

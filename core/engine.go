@@ -355,6 +355,8 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
+	admissionMu           sync.Map // interactive key -> *sync.Mutex; serializes input admission
+	queuedInputSeq        atomic.Uint64
 	name                  string
 	agent                 Agent
 	platforms             []Platform
@@ -536,6 +538,9 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
+	allowSteer        bool // only opted-in, not explicitly rejected input may retry startup steering
+	queueID           uint64
+	answerDelivery    *answerDelivery
 	messageID         string
 	platform          Platform
 	replyCtx          any
@@ -570,7 +575,6 @@ type interactiveState struct {
 	stopCh                   chan struct{}
 	stopped                  bool
 	pending                  *pendingPermission
-	pendingUserInput         *pendingUserInput
 	pendingMessages          []queuedMessage // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
@@ -2979,6 +2983,11 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	defer func() {
+		if d := msg.answerDelivery; d != nil && !d.admitted {
+			d.finish(ErrSteerRejected)
+		}
+	}()
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
 		return
@@ -3145,7 +3154,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
-	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
+	gate, _ := e.admissionMu.LoadOrStore(interactiveKey, &sync.Mutex{})
+	gate.(*sync.Mutex).Lock()
+	defer gate.(*sync.Mutex).Unlock()
+	if !e.selectAsyncQuestionSession(p, msg, content, interactiveKey, sessions) {
+		return
+	}
+	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") && !isAsyncAnswer(content) {
 		if e.handleCommand(p, msg, content) {
 			return
 		}
@@ -3444,6 +3459,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
+		queueID: e.queuedInputSeq.Add(1), answerDelivery: msg.answerDelivery, allowSteer: e.steerBusyMessages.Load() && !msg.steerRejected,
 		messageID:         msg.MessageID,
 		platform:          p,
 		replyCtx:          msg.ReplyCtx,
@@ -4032,6 +4048,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}()
 
 	if e.ctx.Err() != nil {
+		msg.answerDelivery.finish(ErrSteerRejected)
 		return
 	}
 
@@ -4049,7 +4066,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.answerDelivery != nil)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -4074,6 +4091,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	defer stopRecallMonitor()
 
 	if state.agentSession == nil {
+		msg.answerDelivery.finish(ErrSteerRejected)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
 		return
 	}
@@ -4145,10 +4163,13 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	sendDone := make(chan error, 1)
 	go func() {
 		if as == nil {
+			msg.answerDelivery.finish(ErrSteerRejected)
 			sendDone <- fmt.Errorf("agent session became nil")
 			return
 		}
-		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+		err := as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+		msg.answerDelivery.finish(err)
+		sendDone <- err
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, lockGen)
@@ -4332,7 +4353,8 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, requireOriginal ...bool) *interactiveState {
+	preserve := len(requireOriginal) > 0 && requireOriginal[0]
 	// /stop removes the state from the map immediately but tears the process
 	// down in the background. Wait that teardown out *before* taking the lock:
 	// spawning now would start a second process on the same agent session ID
@@ -4356,6 +4378,14 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// If wantID is empty (/new, cleared session) but the process already has
 		// a concrete ID, reusing would keep --resume context — recycle (#238).
 		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
+		if preserve {
+			state.mu.Lock()
+			stopped := state.stopped
+			state.mu.Unlock()
+			if stopped {
+				return &interactiveState{platform: p, replyCtx: replyCtx, busySession: session, eventsNeedResync: true}
+			}
+		}
 		if !needRecycle {
 			state.mu.Lock()
 			state.busySession = session
@@ -4442,6 +4472,21 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// is unbound, force a fresh start instead of attaching to whichever CLI
 	// conversation happens to be "latest" in this workspace.
 	startSessionID := session.GetAgentSessionID()
+	unavailable := func() *interactiveState {
+		next := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true, busySession: session}
+		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], next)
+		e.interactiveStates[sessionKey] = next
+		return next
+	}
+	if preserve {
+		e.closingMu.Lock()
+		unsafe := e.unsafeResume[sessionKey]
+		e.closingMu.Unlock()
+		if !closeSettled || unsafe {
+			return unavailable()
+		}
+	}
+
 	// Cross-project session leakage guard (issue #599): if a session ID was
 	// inherited from a different project's workspace (e.g. another
 	// cc-connect project that happens to share a Session row), the agent
@@ -4449,6 +4494,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// resume a conversation that has nothing to do with this project.
 	if startSessionID != "" {
 		if validator, ok := agent.(SessionIDValidator); ok && !validator.ValidateSessionID(e.ctx, startSessionID) {
+			if preserve {
+				return unavailable()
+			}
 			slog.Warn("session ID does not belong to this project, clearing it",
 				"session_key", sessionKey, "invalid_session_id", startSessionID)
 			session.SetAgentSessionID("", agent.Name())
@@ -4474,6 +4522,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	agentSession, err := agent.StartSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
+		if preserve {
+			slog.Warn("answer continuation could not resume original conversation", "error", err)
+			return unavailable()
+		}
 		// If resume/continue failed, try a fresh session as fallback.
 		if startSessionID != "" {
 			slog.Error("session resume failed, falling back to fresh session",
@@ -4672,7 +4724,6 @@ func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interac
 		!state.agentSession.Alive() ||
 		state.eventsNeedResync ||
 		state.pending != nil ||
-		state.pendingUserInput != nil ||
 		len(state.pendingMessages) > 0 {
 		state.mu.Unlock()
 		cancel()
@@ -4696,6 +4747,9 @@ func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interac
 }
 
 func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected *interactiveState, token uint64, timeout time.Duration) {
+	gate, _ := e.admissionMu.LoadOrStore(sessionKey, &sync.Mutex{})
+	gate.(*sync.Mutex).Lock()
+	defer gate.(*sync.Mutex).Unlock()
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
 	if !ok || state == nil || state != expected {
@@ -4711,7 +4765,6 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 		state.stopped ||
 		state.eventsNeedResync ||
 		state.pending != nil ||
-		state.pendingUserInput != nil ||
 		len(state.pendingMessages) > 0 {
 		state.mu.Unlock()
 		e.interactiveMu.Unlock()
@@ -5291,7 +5344,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"response_len", len(fullResponse))
 
 			case EventUserInputRequest:
-				e.showAsyncUserInput(state, p, replyCtx, event)
+				e.showAsyncUserInput(state, p, replyCtx, event, sessions)
 
 			case EventPermissionRequest:
 				// If approveAll (/yolo) is set, grant the request. Otherwise
@@ -5612,6 +5665,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			idleTimer.Reset(e.eventIdleTimeout)
 		}
 
+		if event.Type != EventResult && event.Type != EventError {
+			e.steerQueuedInputs(state, session, sessions, sessionKey)
+		}
 		if !firstEventLogged {
 			firstEventLogged = true
 			if elapsed := time.Since(waitStart); elapsed >= slowAgentFirstEvent {
@@ -6060,7 +6116,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventUserInputRequest:
-			e.showAsyncUserInput(state, p, replyCtx, event)
+			e.showAsyncUserInput(state, p, replyCtx, event, sessions)
 
 		case EventPermissionRequest:
 			// extension_select is a Pi extension UI request routed via the
@@ -6658,10 +6714,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				nextSend := make(chan error, 1)
 				go func() {
 					if as == nil {
+						queued.answerDelivery.finish(ErrSteerRejected)
 						nextSend <- fmt.Errorf("agent session became nil")
 						return
 					}
-					nextSend <- as.Send(queuedPrompt, queued.messageID, queued.images, queued.files)
+					err := as.Send(queuedPrompt, queued.messageID, queued.images, queued.files)
+					queued.answerDelivery.finish(err)
+					nextSend <- err
 				}()
 				pendingSend = nextSend
 
@@ -6936,6 +6995,7 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	state.pendingMessages = nil
 	state.mu.Unlock()
 	for _, q := range remaining {
+		q.answerDelivery.finish(ErrSteerRejected)
 		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
 	}
 }
@@ -6984,6 +7044,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
 		state.mu.Unlock()
 		if as == nil || !as.Alive() {
+			queued.answerDelivery.finish(ErrSteerRejected)
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
@@ -6996,10 +7057,13 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		sendDone := make(chan error, 1)
 		go func() {
 			if as == nil {
+				queued.answerDelivery.finish(ErrSteerRejected)
 				sendDone <- fmt.Errorf("agent session became nil")
 				return
 			}
-			sendDone <- as.Send(prompt, queued.messageID, queued.images, queued.files)
+			err := as.Send(prompt, queued.messageID, queued.images, queued.files)
+			queued.answerDelivery.finish(err)
+			sendDone <- err
 		}()
 
 		var stopTyping func()
@@ -12430,6 +12494,12 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 	}
 	q := questions[qIdx]
 	total := len(questions)
+	note := e.i18n.T(MsgAskQuestionNote)
+	multiNote := e.i18n.T(MsgAskQuestionNoteMulti)
+	if len(requestID) > 0 && requestID[0] != "" {
+		note = e.i18n.T(MsgAsyncQuestionNote)
+		multiNote = note
+	}
 	answerValue := func(option int) string {
 		if len(requestID) > 0 && requestID[0] != "" {
 			return fmt.Sprintf("askq:%s:%d:%d", requestID[0], qIdx, option)
@@ -12459,7 +12529,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 				body += "\n"
 			}
 			cb.Markdown(body)
-			cb.Note(e.i18n.T(MsgAskQuestionNoteMulti))
+			cb.Note(multiNote)
 		} else {
 			// Single-select path. Issue #1658: rendering each option as a
 			// column_set row (description column + button column) looked right
@@ -12492,7 +12562,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 					},
 				})
 			}
-			cb.Note(e.i18n.T(MsgAskQuestionNote))
+			cb.Note(note)
 		}
 		e.sendWithCard(p, replyCtx, cb.Build())
 		return
@@ -12530,6 +12600,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		for i, opt := range q.Options {
 			rows = append(rows, []ButtonOption{{Text: opt.Label, Data: answerValue(i + 1)}})
 		}
+		textBuf.WriteString("\n\n" + note)
 		if err := e.waitOutgoing(p); err != nil {
 			slog.Warn("sendAskQuestionPrompt: outgoing wait cancelled", "platform", p.Name(), "error", err)
 			return
@@ -12557,7 +12628,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString(fmt.Sprintf("\n%s", e.i18n.T(MsgAskQuestionNote)))
+	sb.WriteString(fmt.Sprintf("\n%s", note))
 	e.send(p, replyCtx, sb.String())
 }
 

@@ -1323,3 +1323,16 @@ tunneled through it.
 
 Full reference: [docs/telegram.md](./telegram.md#21-optional-use-a-proxy).
 This option was added in PR #389.
+
+### Optional asynchronous answers
+
+Use an option button or `/answer <answer>` to answer an optional question. Other
+messages remain task corrections and follow `busy_message_mode`. An open question
+belongs to its conversation and survives a completed turn or service restart.
+If the model is idle, an answer continues that conversation in a new turn; it does
+not replay the previous task. A newer question replaces the previous open one.
+
+Feishu async cards show submission success only after model acknowledgement.
+Repeated or uncertain answers are not sent again automatically. Unknown steering
+delivery is retained in `/history` with a warning, not represented as confirmed.
+See [validation scope and environments](busy-steering-validation.md).
