@@ -2367,3 +2367,4 @@ app_secret = "your-feishu-app-secret"
 # wps_sid = "your-wps-sid"             # WPS登录凭证 (Cookie中的wps_sid)
 # device_name = "cc-connect"           # 设备名称（可选）
 # device_uuid = ""                     # 设备UUID（可选，留空自动生成）
+# allow_from = "*"                     # optional; set to trusted chat/session IDs in production
