@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +14,15 @@ import (
 )
 
 const relayTimeout = 120 * time.Second
+
+// relayLiveTimeout is a safety net for synchronous live relay callers. Live
+// turns normally end through the agent or /stop, so this is intentionally much
+// longer than relayTimeout while still preventing an unbounded CLI/API wait.
+const relayLiveTimeout = 6 * time.Hour
+
+// relayVisibilityGrace bounds the fresh context used to deliver a relay
+// response visibility receipt after the relay deadline has already expired.
+const relayVisibilityGrace = 5 * time.Second
 
 const (
 	RelayVisibilityFull    = "full"
@@ -194,6 +204,7 @@ type RelayRequest struct {
 	To         string `json:"to"`          // target project name
 	SessionKey string `json:"session_key"` // source session key (contains platform + chatID)
 	Message    string `json:"message"`
+	Live       bool   `json:"live,omitempty"` // show the target turn in the group as it runs
 }
 
 // RelayResponse is the result of a relay send.
@@ -203,6 +214,24 @@ type RelayResponse struct {
 
 // Send delivers a message from one bot to another and returns the response.
 func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayResponse, error) {
+	// Keep the caller's context so the response visibility receipt can still be
+	// delivered after the relay deadline fires (see below). Live relays use a
+	// deliberately generous safety deadline; their normal termination remains
+	// the agent finishing or the user stopping the turn from the group.
+	parentCtx := ctx
+	if req.Live {
+		var cancel context.CancelFunc
+		ctx, cancel = rm.relayLiveContext(ctx)
+		defer cancel()
+	} else {
+		// Apply the relay timeout to the whole job — visibility request, target
+		// turn, and visibility response — so a slow pre-send cannot outlive the
+		// configured bound.
+		relayCtx, cancel := rm.relayContext(ctx)
+		defer cancel()
+		ctx = relayCtx
+	}
+
 	platform, chatID, err := parseSessionKeyParts(req.SessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("relay: invalid session key: %w", err)
@@ -250,19 +279,31 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 		rm.sendToGroup(ctx, sourceEngine, platform, groupSessionKey, label)
 	}
 
-	// Execute relay: inject message into target engine and collect response
-	relayCtx, cancel := rm.relayContext(ctx)
-	defer cancel()
-
-	response, err := targetEngine.HandleRelay(relayCtx, req.From, req.SessionKey, req.Message)
+	// Execute relay: inject message into target engine and collect response.
+	var response string
+	if req.Live {
+		response, err = targetEngine.HandleRelayLive(ctx, req.From, req.SessionKey, req.Message)
+	} else {
+		response, err = targetEngine.HandleRelay(ctx, req.From, req.SessionKey, req.Message)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("relay: %w", err)
 	}
 
 	// Post the response to the group chat for visibility.
-	if targetEngine != nil && visibility != RelayVisibilityNone {
+	if !req.Live && targetEngine != nil && visibility != RelayVisibilityNone {
 		label := relayVisibilityResponseLabel(visibility, toName, response)
-		rm.sendToGroup(ctx, targetEngine, platform, groupSessionKey, label)
+		sendCtx := ctx
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			// The relay deadline expired but HandleRelay still produced a
+			// (partial) response. Deliver the visibility receipt on a fresh,
+			// short-lived context derived from the caller's so the partial
+			// answer is still visible instead of being silently dropped.
+			var release context.CancelFunc
+			sendCtx, release = context.WithTimeout(context.WithoutCancel(parentCtx), relayVisibilityGrace)
+			defer release()
+		}
+		rm.sendToGroup(sendCtx, targetEngine, platform, groupSessionKey, label)
 	}
 
 	return &RelayResponse{Response: response}, nil
@@ -335,6 +376,10 @@ func (rm *RelayManager) relayContext(ctx context.Context) (context.Context, cont
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, timeout)
+}
+
+func (rm *RelayManager) relayLiveContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, relayLiveTimeout)
 }
 
 func parseSessionKeyParts(sessionKey string) (platform, chatID string, err error) {
