@@ -4288,11 +4288,15 @@ var (
 	transientRetryMaxDelay = 5 * time.Second
 )
 
-// isTransientError returns true if the error is a transient network error
-// that warrants a retry (connection reset, timeout, EOF, etc.).
+// isTransientError returns true for retryable network failures and internal
+// errors from idempotent card updates.
 func isTransientError(err error) bool {
 	if err == nil {
 		return false
+	}
+	var cardErr *feishuCardAPIError
+	if errors.As(err, &cardErr) && cardErr.Code == 2200 {
+		return true
 	}
 	// Typed syscall checks — more robust than string matching.
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
@@ -5504,7 +5508,7 @@ func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON str
 				return fmt.Errorf("%s: patch message: %w", p.tag(), err)
 			}
 			if !resp.Success() {
-				return fmt.Errorf("%s: patch message code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+				return fmt.Errorf("%s: %w", p.tag(), classifyFeishuCardAPIError("patch message", resp.Code, resp.Msg))
 			}
 			return nil
 		})

@@ -2060,6 +2060,57 @@ func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 // platform/feishu/token_retry_test.go and transient_retry_test.go.
 func TestCUJ_G6_NetworkFlapLinkedToPlatformLayer(t *testing.T) {
 	t.Log("CUJ-G6: covered by platform/feishu/{token_retry,transient_retry}_test.go")
+	t.Run("progress_card_recovers_and_followups_still_work", func(t *testing.T) {
+		p := &recoveringEngineProgressPlatform{
+			stubCompactProgressPlatform: stubCompactProgressPlatform{
+				stubPlatformEngine: stubPlatformEngine{n: "test"},
+				style:              "card", supportPayload: true,
+			},
+			remainingFailures: 1,
+		}
+		agent := &cujAgent{}
+		engine := NewEngine("recovery", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+		t.Cleanup(func() { _ = engine.Stop() })
+		env := &cujEnv{t: t, engine: engine, plat: &p.stubPlatformEngine, agent: agent}
+		const key = "test:card-recovery"
+		// Three user turns: recover an interrupted card, then continue twice.
+		for i := range 3 {
+			answer := fmt.Sprintf("answer %d", i)
+			events := []Event{
+				{Type: EventThinking, Content: "planning"},
+				{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"},
+				{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"},
+				{Type: EventResult, Content: answer, Done: true},
+			}
+			if i == 0 {
+				agent.setNextSessionEvents(events, 0)
+			} else {
+				agent.mu.Lock()
+				session := agent.sessions[len(agent.sessions)-1]
+				agent.mu.Unlock()
+				session.mu.Lock()
+				session.pendingEvents = events
+				session.mu.Unlock()
+			}
+			engine.ReceiveMessage(p, &Message{
+				SessionKey: key, Platform: p.Name(), UserID: "reader", ReplyCtx: "ctx",
+				MessageID: fmt.Sprintf("recovery-%d", i), Content: fmt.Sprintf("task %d", i),
+			})
+			env.waitFor("final answer", 2*time.Second, func() bool { return env.sentContains(answer) })
+			env.waitFor("turn finished", 2*time.Second, func() bool { return !engine.sessions.GetOrCreateActive(key).Busy() })
+			if sent := p.getSent(); len(sent) != i+1 {
+				t.Fatalf("sent = %#v, want only one final answer per turn", sent)
+			}
+			if len(p.getPreviewStarts()) != i+1 {
+				t.Fatal("each turn should use exactly one progress card")
+			}
+			edits := p.getPreviewEdits()
+			payload, ok := ParseProgressCardPayload(edits[len(edits)-1])
+			if !ok || payload.State != ProgressCardStateCompleted {
+				t.Fatalf("card did not recover to completed: %#v", payload)
+			}
+		}
+	})
 }
 
 // ===========================================================================
