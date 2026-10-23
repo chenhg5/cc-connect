@@ -46,6 +46,9 @@ type xmlMessage struct {
 	FromUserName string   `xml:"FromUserName"`
 	CreateTime   int64    `xml:"CreateTime"`
 	MsgType      string   `xml:"MsgType"`
+	Event        string   `xml:"Event"`
+	EventKey     string   `xml:"EventKey"`
+	TaskId       string   `xml:"TaskId"`
 	Content      string   `xml:"Content"`
 	PicUrl       string   `xml:"PicUrl"`
 	MediaId      string   `xml:"MediaId"`
@@ -441,6 +444,24 @@ func (p *Platform) handleMessage(w http.ResponseWriter, r *http.Request, msgSig,
 			})
 		}()
 
+	case "event":
+		if msg.Event == "template_card_event" {
+			slog.Info("wecom: template_card_event received", "user", msg.FromUserName, "event_key", msg.EventKey, "task_id", msg.TaskId)
+			responseText, isPerm := parseWeComPermissionResponse(msg.EventKey)
+			go p.handler(p, &core.Message{
+				SessionKey:           sessionKey,
+				Platform:             "wecom",
+				MessageID:            strconv.FormatInt(msg.MsgId, 10),
+				UserID:               msg.FromUserName,
+				UserName:             p.resolveUserName(msg.FromUserName),
+				Content:              responseText,
+				ReplyCtx:             rctx,
+				IsPermissionResponse: isPerm,
+			})
+		} else {
+			slog.Debug("wecom: unhandled event type", "event", msg.Event)
+		}
+
 	default:
 		slog.Warn("wecom: unsupported inbound message type (no handler)",
 			"msg_type", msg.MsgType,
@@ -588,6 +609,64 @@ func (p *Platform) uploadImageMedia(accessToken string, img core.ImageAttachment
 }
 
 var _ core.ImageSender = (*Platform)(nil)
+var _ core.CardSender = (*Platform)(nil)
+
+// SendCard sends a structured card to the user. Implements core.CardSender.
+func (p *Platform) SendCard(ctx context.Context, rctx any, card *core.Card) error {
+	return p.sendCardInternal(ctx, rctx, card)
+}
+
+// ReplyCard replies with a structured card to the user. Implements core.CardSender.
+func (p *Platform) ReplyCard(ctx context.Context, rctx any, card *core.Card) error {
+	return p.sendCardInternal(ctx, rctx, card)
+}
+
+func (p *Platform) sendCardInternal(ctx context.Context, rctx any, card *core.Card) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("wecom: send card: invalid reply context type %T", rctx)
+	}
+
+	cardPayload, err := buildWeComTemplateCard(card)
+	if err != nil {
+		return fmt.Errorf("wecom: build template card: %w", err)
+	}
+
+	accessToken, err := p.getAccessToken()
+	if err != nil {
+		return fmt.Errorf("wecom: send card: %w", err)
+	}
+
+	payload := map[string]any{
+		"touser":        rc.userID,
+		"msgtype":       "template_card",
+		"agentid":       p.agentID,
+		"template_card": cardPayload,
+	}
+
+	body, _ := json.Marshal(payload)
+	apiURL := p.wecomAPIURL("/cgi-bin/message/send", url.Values{
+		"access_token": []string{accessToken},
+	})
+
+	resp, err := p.apiClient.Post(apiURL, "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("wecom: send template card: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var result struct {
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("wecom: decode send template card response: %w", err)
+	}
+	if result.ErrCode != 0 {
+		return fmt.Errorf("wecom: send template card failed: %d %s", result.ErrCode, result.ErrMsg)
+	}
+	return nil
+}
 
 func (p *Platform) sendMarkdown(accessToken, toUser, content string) error {
 	payload := map[string]any{
