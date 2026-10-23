@@ -1385,7 +1385,16 @@ func mapAppServerRateLimits(payload appServerRateLimitsResponse) *core.UsageRepo
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
+		// The legacy snapshot identifies the account's main quota. Keep its
+		// detailed bucket first for /usage and the reply footer, rather than
+		// an alphabetically earlier model quota that may only expose a week.
+		if main, ok := payload.RateLimitsByLimitID[payload.RateLimits.LimitID]; ok {
+			snapshots = append(snapshots, main)
+		}
 		for _, key := range keys {
+			if key == payload.RateLimits.LimitID {
+				continue
+			}
 			snapshots = append(snapshots, payload.RateLimitsByLimitID[key])
 		}
 	} else if payload.RateLimits.LimitID != "" || payload.RateLimits.Primary != nil || payload.RateLimits.Secondary != nil || payload.RateLimits.Credits != nil {

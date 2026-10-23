@@ -428,6 +428,9 @@ func main() {
 			showWorkdir = *proj.ShowWorkdirIndicator
 		}
 		engine.SetShowWorkdirIndicator(showWorkdir)
+		showUsage5h, showUsageWeek := config.EffectiveFooterUsage(cfg, &proj)
+		engine.SetShowUsage5h(showUsage5h)
+		engine.SetShowUsageWeek(showUsageWeek)
 		engine.SetReplyFooterEnabled(showFooter)
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
@@ -1181,6 +1184,8 @@ func main() {
 				AgentType:            u.AgentType,
 				ShowContextIndicator: u.ShowContextIndicator,
 				ShowWorkdirIndicator: u.ShowWorkdirIndicator,
+				ShowUsage5h:          u.ShowUsage5h,
+				ShowUsageWeek:        u.ShowUsageWeek,
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
@@ -1801,6 +1806,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		showWorkdir = *proj.ShowWorkdirIndicator
 	}
 	engine.SetShowWorkdirIndicator(showWorkdir)
+	showUsage5h, showUsageWeek := config.EffectiveFooterUsage(cfg, proj)
+	engine.SetShowUsage5h(showUsage5h)
+	engine.SetShowUsageWeek(showUsageWeek)
 	engine.SetReplyFooterEnabled(showFooter)
 
 	// Reload auto-compress settings
