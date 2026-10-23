@@ -254,6 +254,48 @@ func TestSendDoesNotHoldStdinOpen(t *testing.T) {
 	}
 }
 
+func TestAntigravitySession_ReportsHeadlessExitFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name, script, want string
+	}{
+		{"soft_denied_success", "printf 'headless mode cannot prompt; auto-denied' >&2; exit 0", "headless mode cannot prompt"},
+		{"empty_success", "exit 0", "without producing a response"},
+		{"failed_without_stderr", "exit 2", "exit status 2"},
+		{"failed_with_stderr", "printf 'tool execution failed' >&2; exit 2", "tool execution failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			cmdPath := filepath.Join(t.TempDir(), "fake-agy.sh")
+			if err := os.WriteFile(cmdPath, []byte("#!/bin/sh\n"+tt.script+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			s, err := newAntigravitySession(context.Background(), cmdPath, nil, t.TempDir(), "", "yolo", "existing-session", nil, 2*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+			if err := s.Send("test", "", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case event := <-s.Events():
+				if event.Type != core.EventError || event.Error == nil || !strings.Contains(event.Error.Error(), tt.want) {
+					t.Fatalf("event = %+v, want error containing %q", event, tt.want)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("timeout waiting for process error")
+			}
+		})
+	}
+}
+
+func TestRedactAgyStderr_RemovesEnvironmentSecrets(t *testing.T) {
+	got := redactAgyStderr("  denied token=secret-value-123 path=/tmp/project  ", []string{"API_TOKEN=secret-value-123", "PATH=/tmp/project"})
+	if strings.Contains(got, "secret-value-123") || !strings.Contains(got, "/tmp/project") || strings.TrimSpace(got) != got {
+		t.Fatalf("redacted stderr = %q", got)
+	}
+}
+
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if strings.TrimSpace(x) == want {

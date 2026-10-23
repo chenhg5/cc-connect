@@ -229,6 +229,7 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
 	defer as.wg.Done()
+	hasResponse := false
 	defer func() {
 		for _, f := range tempFiles {
 			_ = os.Remove(f)
@@ -260,14 +261,26 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		}
 
 		sid := as.CurrentSessionID()
+		stderrMsg := redactAgyStderr(stderrBuf.String(), cmd.Env)
+		var processErr error
 		if err != nil {
-			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
-				slog.Error("antigravitySession: process failed", "error", err, "stderr", stderrMsg)
-				select {
-				case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}:
-				case <-as.ctx.Done():
-				}
+				processErr = fmt.Errorf("agy process failed (%w): %s", err, stderrMsg)
+			} else {
+				processErr = fmt.Errorf("agy process failed: %w", err)
+			}
+		} else if !hasResponse {
+			if stderrMsg != "" {
+				processErr = fmt.Errorf("agy returned no response: %s", stderrMsg)
+			} else {
+				processErr = fmt.Errorf("agy exited successfully without producing a response")
+			}
+		}
+		if processErr != nil {
+			slog.Error("antigravitySession: process failed", "error", processErr)
+			select {
+			case as.events <- core.Event{Type: core.EventError, Error: processErr}:
+			case <-as.ctx.Done():
 			}
 		}
 
@@ -290,6 +303,9 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		n, err := reader.Read(buf)
 		if n > 0 {
 			text := string(buf[:n])
+			if strings.TrimSpace(text) != "" {
+				hasResponse = true
+			}
 			select {
 			case as.events <- core.Event{Type: core.EventText, Content: text}:
 			case <-as.ctx.Done():
@@ -307,6 +323,20 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			return
 		}
 	}
+}
+
+func redactAgyStderr(stderr string, env []string) string {
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || value == "" {
+			continue
+		}
+		key = strings.ToUpper(key)
+		if strings.Contains(key, "TOKEN") || strings.Contains(key, "KEY") || strings.Contains(key, "SECRET") || strings.Contains(key, "PASSWORD") {
+			stderr = core.RedactToken(stderr, value)
+		}
+	}
+	return strings.TrimSpace(stderr)
 }
 
 func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sendStartedAt time.Time) string {
