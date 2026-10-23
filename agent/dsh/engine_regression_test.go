@@ -335,7 +335,9 @@ func TestSession_ResumedTurnWithoutStartFlushesReply(t *testing.T) {
 	m := newMockDshServer()
 	a := newTestAgent(t, m, t.TempDir())
 	session, err := a.StartSession(context.Background(), "")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := session.(*dshSession)
 	t.Cleanup(func() { _ = s.Close() })
 	// DSH can replay an approval while the assistant itself is idle, so the
@@ -344,7 +346,48 @@ func TestSession_ResumedTurnWithoutStartFlushesReply(t *testing.T) {
 	s.finishTurn(sessionEventData{Turn: 9})
 	var text strings.Builder
 	for _, event := range drainEvents(t, s, time.Second) {
-		if event.Type == core.EventText { text.WriteString(event.Content) }
+		if event.Type == core.EventText {
+			text.WriteString(event.Content)
+		}
 	}
-	if text.String() != "resumed reply" { t.Fatalf("resumed text = %q", text.String()) }
+	if text.String() != "resumed reply" {
+		t.Fatalf("resumed text = %q", text.String())
+	}
+}
+
+func TestSession_QueuedPromptKeepsPreviousTurnReplyBeforeResult(t *testing.T) {
+	m := newMockDshServer()
+	a := newTestAgent(t, m, t.TempDir())
+	session, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := session.(*dshSession)
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Send("original task", "one", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(evTurnStart(1))
+	s.handleSessionEvent(raw)
+	// The original tool is still running when the user submits a continuation.
+	if err := s.Send("continue", "two", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	done := s.turnDone
+	s.handleChunk(&streamChunk{Type: "text-delta", Text: "original reply"})
+	s.finishTurn(sessionEventData{Turn: 1})
+	var text strings.Builder
+	for _, event := range drainEvents(t, s, time.Second) {
+		if event.Type == core.EventText {
+			text.WriteString(event.Content)
+		}
+	}
+	if text.String() != "original reply" {
+		t.Fatalf("reply before original result = %q", text.String())
+	}
+	select {
+	case <-done:
+		t.Fatal("original result disarmed the queued prompt's watchdog")
+	default:
+	}
 }

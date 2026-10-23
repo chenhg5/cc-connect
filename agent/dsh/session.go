@@ -648,25 +648,21 @@ func (s *dshSession) handleChunk(chunk *streamChunk) {
 func (s *dshSession) finishTurn(data sessionEventData) {
 	s.turnMu.Lock()
 	var usage *tokenUsage
-	// Reconnecting while a tool waits can have no active assistant snapshot
-	// and therefore no turn/start replay. Its first end establishes the turn.
-	current := data.Turn == s.currentTurn || s.currentTurn == 0
-	if current {
+	if s.currentTurn == 0 && s.turnDone == nil {
 		s.currentTurn = data.Turn
-		usage = s.lastUsage
-		s.lastUsage = nil
 	}
+	usage = s.lastUsage
+	s.lastUsage = nil
 	if data.Turn == s.watchdogTurn {
 		s.stopWatchdogLocked()
 	}
 	s.turnMu.Unlock()
 
-	// A cancelled turn can finish after another Send. Deliver its terminal
-	// event without flushing the new turn's deltas, usage or watchdog.
-	if current {
-		s.textAgg.Flush()
-		s.thinkAgg.Flush()
-	}
+	// Flush each native reply before its terminal event, even when a prompt is
+	// already queued. Otherwise the engine can recover it from history and
+	// then receive the delayed deltas as duplicate output in the next turn.
+	s.textAgg.Flush()
+	s.thinkAgg.Flush()
 
 	var reason struct {
 		Kind  string `json:"kind"`
