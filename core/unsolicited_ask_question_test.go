@@ -7,9 +7,52 @@ import (
 	"time"
 )
 
-// startUnsolicitedQuestionTest starts an unsolicited reader on a session that
-// records permission responses, as the reader runs after a turn has ended.
-func startUnsolicitedQuestionTest(t *testing.T, approveAll bool) (*Engine, *stubPlatformEngine, *permRecordingSession, *interactiveState) {
+// questionSession records every permission response by request id.
+type questionSession struct {
+	controllableAgentSession
+	mu        sync.Mutex
+	responses []questionResponse
+}
+
+type questionResponse struct {
+	id     string
+	result PermissionResult
+}
+
+func (s *questionSession) RespondPermission(id string, res PermissionResult) error {
+	s.mu.Lock()
+	s.responses = append(s.responses, questionResponse{id, res})
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *questionSession) recorded() []questionResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]questionResponse(nil), s.responses...)
+}
+
+// waitForResponses waits until n responses are recorded and returns them.
+func (s *questionSession) waitForResponses(t *testing.T, n int) []questionResponse {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		if got := s.recorded(); len(got) >= n {
+			return got
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d permission responses, got %v", n, s.recorded())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+const questionKey = "test:askq:u1"
+
+// startUnsolicitedQuestionTest starts an unsolicited reader, as runs after a
+// turn has ended, on a session that records permission responses.
+func startUnsolicitedQuestionTest(t *testing.T, approveAll bool) (*Engine, *stubPlatformEngine, *questionSession, *interactiveState) {
 	t.Helper()
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
@@ -19,7 +62,7 @@ func startUnsolicitedQuestionTest(t *testing.T, approveAll bool) (*Engine, *stub
 		}
 	})
 
-	agentSession := &permRecordingSession{
+	agentSession := &questionSession{
 		controllableAgentSession: controllableAgentSession{
 			sessionID: "unsol-askq",
 			alive:     true,
@@ -27,8 +70,7 @@ func startUnsolicitedQuestionTest(t *testing.T, approveAll bool) (*Engine, *stub
 			closed:    make(chan struct{}),
 		},
 	}
-	const key = "test:askq:u1"
-	session := e.sessions.GetOrCreateActive(key)
+	session := e.sessions.GetOrCreateActive(questionKey)
 	state := &interactiveState{
 		agentSession: agentSession,
 		platform:     p,
@@ -36,71 +78,68 @@ func startUnsolicitedQuestionTest(t *testing.T, approveAll bool) (*Engine, *stub
 		approveAll:   approveAll,
 	}
 	e.interactiveMu.Lock()
-	e.interactiveStates[key] = state
+	e.interactiveStates[questionKey] = state
 	e.interactiveMu.Unlock()
 
-	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+	e.startUnsolicitedReader(state, session, e.sessions, questionKey, "")
 	t.Cleanup(func() { e.stopUnsolicitedReader(state) })
 	return e, p, agentSession, state
 }
 
-func backgroundQuestion() Event {
+func backgroundQuestion(id, question string) Event {
 	return Event{
 		Type:         EventPermissionRequest,
-		RequestID:    "req-askq",
+		RequestID:    id,
 		ToolName:     "AskUserQuestion",
 		ToolInputRaw: map[string]any{"questions": []any{}},
 		Questions: []UserQuestion{{
-			Question: "Which branch should I use?",
+			Question: question,
 			Options:  []UserQuestionOption{{Label: "master"}, {Label: "release"}},
 		}},
 	}
 }
 
-func waitForPending(t *testing.T, state *interactiveState) *pendingPermission {
+// waitForPending waits until the request with id is the pending one.
+func waitForPending(t *testing.T, state *interactiveState, id string) *pendingPermission {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
 	for {
 		state.mu.Lock()
 		pending := state.pending
 		state.mu.Unlock()
-		if pending != nil {
+		if pending != nil && pending.RequestID == id {
 			return pending
 		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for the question to be registered")
+			t.Fatalf("timed out waiting for question %s to be asked", id)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }
 
-func waitForPermResponse(t *testing.T, s *permRecordingSession) PermissionResult {
+func answer(e *Engine, p *stubPlatformEngine, content string) bool {
+	return e.handlePendingPermission(p, &Message{SessionKey: questionKey, ReplyCtx: "ctx"}, content, questionKey)
+}
+
+func answerOf(t *testing.T, r questionResponse, question string) string {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		s.mu.Lock()
-		calls, result := s.permCalls, s.lastPermResult
-		s.mu.Unlock()
-		if calls > 0 {
-			return result
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for a permission response")
-		case <-time.After(10 * time.Millisecond):
-		}
+	if r.result.Behavior != "allow" {
+		t.Fatalf("%s: expected allow, got %q", r.id, r.result.Behavior)
 	}
+	answers, _ := r.result.UpdatedInput["answers"].(map[string]any)
+	got, _ := answers[question].(string)
+	return got
 }
 
-// A background subagent's AskUserQuestion must reach the user and carry their
-// answer back, rather than being auto-denied as a tool permission.
+// A background AskUserQuestion must reach the user and carry their answer
+// back, rather than being auto-denied as a tool permission.
 func TestUnsolicitedReader_AsksQuestionAndRelaysAnswer(t *testing.T) {
 	for _, approveAll := range []bool{false, true} {
 		e, p, agentSession, state := startUnsolicitedQuestionTest(t, approveAll)
-		agentSession.events <- backgroundQuestion()
+		agentSession.events <- backgroundQuestion("q1", "Which branch should I use?")
 
-		waitForPending(t, state)
+		waitForPending(t, state, "q1")
 		sent := waitForPlatformSend(p, 1, 5*time.Second)
 		if len(sent) == 0 || !strings.Contains(sent[0], "Which branch should I use?") {
 			t.Fatalf("approveAll=%v: expected the question to be shown, got %q", approveAll, sent)
@@ -110,39 +149,97 @@ func TestUnsolicitedReader_AsksQuestionAndRelaysAnswer(t *testing.T) {
 				t.Fatalf("approveAll=%v: question was auto-denied: %q", approveAll, s)
 			}
 		}
-		agentSession.mu.Lock()
-		calls := agentSession.permCalls
-		agentSession.mu.Unlock()
-		if calls != 0 {
-			t.Fatalf("approveAll=%v: responded before the user answered", approveAll)
+		if got := agentSession.recorded(); len(got) != 0 {
+			t.Fatalf("approveAll=%v: responded before the user answered: %v", approveAll, got)
 		}
 
-		if !e.handlePendingPermission(p, &Message{SessionKey: "test:askq:u1", ReplyCtx: "ctx"}, "2", "test:askq:u1") {
+		if !answer(e, p, "2") {
 			t.Fatalf("approveAll=%v: answer was not taken as the question's answer", approveAll)
 		}
-		result := waitForPermResponse(t, agentSession)
-		if result.Behavior != "allow" {
-			t.Fatalf("approveAll=%v: expected allow, got %q", approveAll, result.Behavior)
-		}
-		answers, _ := result.UpdatedInput["answers"].(map[string]any)
-		if answers["Which branch should I use?"] != "release" {
-			t.Fatalf("approveAll=%v: expected answer release, got %v", approveAll, result.UpdatedInput)
+		r := agentSession.waitForResponses(t, 1)[0]
+		if got := answerOf(t, r, "Which branch should I use?"); got != "release" {
+			t.Fatalf("approveAll=%v: expected answer release, got %q", approveAll, got)
 		}
 	}
 }
 
-// When a new turn takes over the session before the user answers, the
-// question is withdrawn so the agent is not left waiting on it.
-func TestUnsolicitedReader_WithdrawsUnansweredQuestionOnCancel(t *testing.T) {
+// A pending question must not stop the reader: other events keep flowing,
+// and a tool permission is still denied promptly.
+func TestUnsolicitedReader_KeepsReadingWhileQuestionWaits(t *testing.T) {
+	e, p, agentSession, state := startUnsolicitedQuestionTest(t, false)
+	agentSession.events <- backgroundQuestion("q1", "Which branch should I use?")
+	waitForPending(t, state, "q1")
+
+	agentSession.events <- Event{Type: EventPermissionRequest, RequestID: "bash-1", ToolName: "Bash"}
+	r := agentSession.waitForResponses(t, 1)[0]
+	if r.id != "bash-1" || r.result.Behavior != "deny" {
+		t.Fatalf("expected the tool permission to be denied while the question waits, got %v", r)
+	}
+
+	agentSession.events <- Event{Type: EventResult, Content: "subagent report", Done: true}
+	deadline := time.After(5 * time.Second)
+	for !strings.Contains(strings.Join(p.getSent(), "\n"), "subagent report") {
+		select {
+		case <-deadline:
+			t.Fatalf("result not relayed while the question waits: %q", p.getSent())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	state.mu.Lock()
+	pending := state.pending
+	state.mu.Unlock()
+	if pending == nil || pending.RequestID != "q1" {
+		t.Fatal("question no longer pending")
+	}
+	if !answer(e, p, "1") {
+		t.Fatal("answer not taken")
+	}
+	r = agentSession.waitForResponses(t, 2)[1]
+	if r.id != "q1" || answerOf(t, r, "Which branch should I use?") != "master" {
+		t.Fatalf("unexpected answer %v", r)
+	}
+}
+
+// A second question waits for the first instead of replacing it, then is
+// shown and answered in turn.
+func TestUnsolicitedReader_AsksQuestionsOneAtATime(t *testing.T) {
+	e, p, agentSession, state := startUnsolicitedQuestionTest(t, false)
+	agentSession.events <- backgroundQuestion("q1", "First?")
+	agentSession.events <- backgroundQuestion("q2", "Second?")
+	waitForPending(t, state, "q1")
+
+	time.Sleep(50 * time.Millisecond) // let q2 reach the reader
+	if strings.Contains(strings.Join(p.getSent(), "\n"), "Second?") {
+		t.Fatal("second question shown while the first waits")
+	}
+	answer(e, p, "1")
+	waitForPending(t, state, "q2")
+	answer(e, p, "2")
+
+	got := agentSession.waitForResponses(t, 2)
+	if got[0].id != "q1" || answerOf(t, got[0], "First?") != "master" ||
+		got[1].id != "q2" || answerOf(t, got[1], "Second?") != "release" {
+		t.Fatalf("unexpected answers %v", got)
+	}
+}
+
+// When the reader exits before the user answers, the shown and the queued
+// questions are withdrawn so the agent is not left waiting on them.
+func TestUnsolicitedReader_WithdrawsUnansweredQuestionsOnExit(t *testing.T) {
 	e, _, agentSession, state := startUnsolicitedQuestionTest(t, false)
-	agentSession.events <- backgroundQuestion()
-	pending := waitForPending(t, state)
+	agentSession.events <- backgroundQuestion("q1", "First?")
+	agentSession.events <- backgroundQuestion("q2", "Second?")
+	pending := waitForPending(t, state, "q1")
+	time.Sleep(50 * time.Millisecond) // let q2 queue
 
 	e.stopUnsolicitedReader(state)
 
-	result := waitForPermResponse(t, agentSession)
-	if result.Behavior != "deny" {
-		t.Fatalf("expected the withdrawn question to be denied, got %q", result.Behavior)
+	got := agentSession.waitForResponses(t, 2)
+	for i, id := range []string{"q1", "q2"} {
+		if got[i].id != id || got[i].result.Behavior != "deny" {
+			t.Fatalf("expected %s denied, got %v", id, got)
+		}
 	}
 	state.mu.Lock()
 	left := state.pending
@@ -158,18 +255,18 @@ func TestUnsolicitedReader_WithdrawsUnansweredQuestionOnCancel(t *testing.T) {
 }
 
 // Answering and withdrawing the same question race; exactly one of them may
-// respond to the agent, and the outcome is written by that side only.
+// respond to the agent.
 func TestUnsolicitedReader_AnswerAndWithdrawRespondOnce(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		e, p, agentSession, state := startUnsolicitedQuestionTest(t, false)
-		agentSession.events <- backgroundQuestion()
-		waitForPending(t, state)
+		agentSession.events <- backgroundQuestion("q1", "Which branch should I use?")
+		waitForPending(t, state, "q1")
 
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			e.handlePendingPermission(p, &Message{SessionKey: "test:askq:u1", ReplyCtx: "ctx"}, "2", "test:askq:u1")
+			answer(e, p, "2")
 		}()
 		go func() {
 			defer wg.Done()
@@ -177,13 +274,10 @@ func TestUnsolicitedReader_AnswerAndWithdrawRespondOnce(t *testing.T) {
 		}()
 		wg.Wait()
 
-		waitForPermResponse(t, agentSession)
+		agentSession.waitForResponses(t, 1)
 		time.Sleep(20 * time.Millisecond) // let a second, wrong response land
-		agentSession.mu.Lock()
-		calls := agentSession.permCalls
-		agentSession.mu.Unlock()
-		if calls != 1 {
-			t.Fatalf("round %d: expected exactly one response to the question, got %d", i, calls)
+		if got := agentSession.recorded(); len(got) != 1 {
+			t.Fatalf("round %d: expected exactly one response to the question, got %v", i, got)
 		}
 	}
 }
@@ -193,26 +287,22 @@ func TestUnsolicitedReader_AnswerAndWithdrawRespondOnce(t *testing.T) {
 // to answer first and the question stays pending.
 func TestUnsolicitedReader_AttachmentWaitsForAnswer(t *testing.T) {
 	e, p, agentSession, state := startUnsolicitedQuestionTest(t, false)
-	agentSession.events <- backgroundQuestion()
-	pending := waitForPending(t, state)
+	agentSession.events <- backgroundQuestion("q1", "Which branch should I use?")
+	pending := waitForPending(t, state, "q1")
 	waitForPlatformSend(p, 1, 5*time.Second)
 
-	msg := &Message{SessionKey: "test:askq:u1", ReplyCtx: "ctx", Images: []ImageAttachment{{MimeType: "image/png", Data: []byte("png")}}}
-	if !e.handlePendingPermission(p, msg, "", "test:askq:u1") {
+	msg := &Message{SessionKey: questionKey, ReplyCtx: "ctx", Images: []ImageAttachment{{MimeType: "image/png", Data: []byte("png")}}}
+	if !e.handlePendingPermission(p, msg, "", questionKey) {
 		t.Fatal("an attachment-only message started a turn while a background question waits")
 	}
-	sent := p.getSent()
-	if !strings.Contains(strings.Join(sent, "\n"), "answer the question first") {
+	if sent := p.getSent(); !strings.Contains(strings.Join(sent, "\n"), "answer the question first") {
 		t.Fatalf("expected an answer-first notice, got %q", sent)
 	}
 	state.mu.Lock()
 	still := state.pending
 	state.mu.Unlock()
-	agentSession.mu.Lock()
-	calls := agentSession.permCalls
-	agentSession.mu.Unlock()
-	if still != pending || calls != 0 {
-		t.Fatalf("question should still wait unanswered: pending=%v responses=%d", still == pending, calls)
+	if still != pending || len(agentSession.recorded()) != 0 {
+		t.Fatalf("question should still wait unanswered: pending=%v responses=%v", still == pending, agentSession.recorded())
 	}
 }
 
@@ -226,14 +316,15 @@ func TestForegroundQuestion_AttachmentNotHeld(t *testing.T) {
 			t.Errorf("stop engine: %v", err)
 		}
 	})
-	pending := &pendingPermission{RequestID: "fg", ToolName: "AskUserQuestion", Questions: backgroundQuestion().Questions, Resolved: make(chan struct{})}
+	question := backgroundQuestion("fg", "Which branch should I use?")
+	pending := &pendingPermission{RequestID: "fg", ToolName: "AskUserQuestion", Questions: question.Questions, Resolved: make(chan struct{})}
 	state := &interactiveState{platform: p, replyCtx: "ctx", pending: pending}
 	e.interactiveMu.Lock()
-	e.interactiveStates["test:askq:u1"] = state
+	e.interactiveStates[questionKey] = state
 	e.interactiveMu.Unlock()
 
-	msg := &Message{SessionKey: "test:askq:u1", ReplyCtx: "ctx", Images: []ImageAttachment{{MimeType: "image/png", Data: []byte("png")}}}
-	if e.handlePendingPermission(p, msg, "", "test:askq:u1") {
+	msg := &Message{SessionKey: questionKey, ReplyCtx: "ctx", Images: []ImageAttachment{{MimeType: "image/png", Data: []byte("png")}}}
+	if e.handlePendingPermission(p, msg, "", questionKey) {
 		t.Fatal("attachment-only message was held for a foreground question")
 	}
 }
