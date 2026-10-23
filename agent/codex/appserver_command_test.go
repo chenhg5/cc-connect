@@ -163,7 +163,7 @@ func TestAppServerCommandProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(2)
 	}
-	defer trace.Close()
+	defer func() { _ = trace.Close() }()
 	log := json.NewEncoder(trace)
 	_ = log.Encode(map[string]any{"args": os.Args[1:]})
 	scanner := bufio.NewScanner(os.Stdin)
