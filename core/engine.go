@@ -12628,7 +12628,7 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString(fmt.Sprintf("\n%s", note))
+	fmt.Fprintf(&sb, "\n%s", note)
 	e.send(p, replyCtx, sb.String())
 }
 
