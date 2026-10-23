@@ -7971,7 +7971,7 @@ func (e *Engine) renderGroupedListText(agent Agent, sessions *SessionManager, se
 	activeAgentID := sessions.GetOrCreateActive(sessionKey).GetAgentSessionID()
 	rows := e.groupedListTopRows(view)
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Sessions (%s, %d)\n", agent.Name(), len(view.Entries)))
+	fmt.Fprintf(&sb, "Sessions (%s, %d)\n", agent.Name(), len(view.Entries))
 	for i, row := range rows {
 		switch v := row.(type) {
 		case listProjectGroup:
@@ -7982,14 +7982,14 @@ func (e *Engine) renderGroupedListText(agent Agent, sessions *SessionManager, se
 					break
 				}
 			}
-			sb.WriteString(fmt.Sprintf("%s **%d.** 📁 %s (%d sessions)\n", marker, i+1, v.Name, len(v.Entries)))
+			fmt.Fprintf(&sb, "%s **%d.** 📁 %s (%d sessions)\n", marker, i+1, v.Name, len(v.Entries))
 		case listSessionEntry:
 			marker := "◻"
 			if v.Info.ID == activeAgentID {
 				marker = "▶"
 			}
-			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
-				marker, i+1, v.DisplayName, v.Info.MessageCount, v.Info.ModifiedAt.Format("01-02 15:04")))
+			fmt.Fprintf(&sb, "%s **%d.** %s · **%d** msgs · %s\n",
+				marker, i+1, v.DisplayName, v.Info.MessageCount, v.Info.ModifiedAt.Format("01-02 15:04"))
 		}
 	}
 	sb.WriteString("\n" + e.listGroupHintText())
@@ -7999,17 +7999,17 @@ func (e *Engine) renderGroupedListText(agent Agent, sessions *SessionManager, se
 func (e *Engine) renderProjectListText(sessions *SessionManager, sessionKey string, group listProjectGroup) string {
 	activeAgentID := sessions.GetOrCreateActive(sessionKey).GetAgentSessionID()
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📁 **%s** (%d sessions)\n", group.Name, len(group.Entries)))
+	fmt.Fprintf(&sb, "📁 **%s** (%d sessions)\n", group.Name, len(group.Entries))
 	if group.WorkDir != "" {
-		sb.WriteString(fmt.Sprintf("Workdir: `%s`\n", group.WorkDir))
+		fmt.Fprintf(&sb, "Workdir: `%s`\n", group.WorkDir)
 	}
 	for i, entry := range group.Entries {
 		marker := "◻"
 		if entry.Info.ID == activeAgentID {
 			marker = "▶"
 		}
-		sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
-			marker, i+1, entry.DisplayName, entry.Info.MessageCount, entry.Info.ModifiedAt.Format("01-02 15:04")))
+		fmt.Fprintf(&sb, "%s **%d.** %s · **%d** msgs · %s\n",
+			marker, i+1, entry.DisplayName, entry.Info.MessageCount, entry.Info.ModifiedAt.Format("01-02 15:04"))
 	}
 	sb.WriteString("\n" + e.listProjectHintText())
 	return sb.String()
