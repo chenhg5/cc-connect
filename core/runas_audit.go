@@ -77,12 +77,12 @@ func ProbeScript() []byte { return runasProbeScript }
 
 // IsolationReport is the structured result of running the probe.
 type IsolationReport struct {
-	Project       string            `json:"project"`
-	RunAsUser     string            `json:"run_as_user"`
-	WorkDir       string            `json:"work_dir"`
-	Timestamp     time.Time         `json:"timestamp"`
-	Identity      IdentitySnapshot  `json:"identity"`
-	WorkDirStatus WorkDirStatus     `json:"work_dir_status"`
+	Project       string           `json:"project"`
+	RunAsUser     string           `json:"run_as_user"`
+	WorkDir       string           `json:"work_dir"`
+	Timestamp     time.Time        `json:"timestamp"`
+	Identity      IdentitySnapshot `json:"identity"`
+	WorkDirStatus WorkDirStatus    `json:"work_dir_status"`
 	// TargetPaths lists existence results for files the target user is
 	// supposed to have in their own home. Missing is informational —
 	// runtime tools will fail, but it's an operator migration gap, not

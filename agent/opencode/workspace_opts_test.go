@@ -43,7 +43,7 @@ func TestWorkspaceAgentOptions_PreservesProjectEnv(t *testing.T) {
 		t.Fatalf("env type = %T, want map[string]string", opts["env"])
 	}
 	wantEnv := map[string]string{
-		"HOME":                   "/Users/ids/.opencode/aiapi-home",
+		"HOME":                    "/Users/ids/.opencode/aiapi-home",
 		"OPENCODE_CONFIG_CONTENT": `{"provider":{}}`,
 		"DEEPSEEK_API_KEY":        "sk-test",
 	}
