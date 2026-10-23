@@ -190,6 +190,9 @@ func (a *cujAgent) StartSession(_ context.Context, _ string) (AgentSession, erro
 	}
 	a.nextID++
 	s := newCUJAgentSession()
+	// Each real agent session has its own ID. Reusing the same mock ID for
+	// different users makes ownership deliberately ambiguous.
+	s.id = fmt.Sprintf("cuj-agent-session-%d", a.nextID)
 	a.sessions = append(a.sessions, s)
 	s.pendingEvents = a.nextSessionEvents
 	s.pendingDelayMs = a.nextSessionDelayMs
@@ -207,6 +210,7 @@ func (a *cujAgent) Stop() error { return nil }
 // Tests can set reply (and optionally toolEvent) before each Send to drive
 // scenarios like "agent calls tool", "agent returns error", "agent succeeds".
 type cujAgentSession struct {
+	id     string
 	events chan Event
 	closed atomic_bool
 	mu     sync.Mutex
@@ -249,6 +253,7 @@ func (b *atomic_bool) Get() bool  { b.mu.Lock(); defer b.mu.Unlock(); return b.v
 
 func newCUJAgentSession() *cujAgentSession {
 	return &cujAgentSession{
+		id:     "cuj-agent-session",
 		events: make(chan Event, 16),
 		reply:  "ok",
 	}
@@ -301,7 +306,7 @@ func (s *cujAgentSession) Send(prompt string, _ string, images []ImageAttachment
 }
 func (s *cujAgentSession) RespondPermission(_ string, _ PermissionResult) error { return nil }
 func (s *cujAgentSession) Events() <-chan Event                                 { return s.events }
-func (s *cujAgentSession) CurrentSessionID() string                             { return "cuj-agent-session" }
+func (s *cujAgentSession) CurrentSessionID() string                             { return s.id }
 func (s *cujAgentSession) Alive() bool                                          { return !s.closed.Get() }
 func (s *cujAgentSession) Close() error {
 	s.closed.Set(true)
@@ -2216,6 +2221,11 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 		default:
 			time.Sleep(20 * time.Millisecond)
 		}
+	}
+	idA := e.sessions.GetOrCreateActive("platA:userA").GetAgentSessionID()
+	idB := e.sessions.GetOrCreateActive("platB:userB").GetAgentSessionID()
+	if idA == "" || idB == "" || idA == idB {
+		t.Fatalf("independent users need distinct mock agent sessions: A=%q B=%q", idA, idB)
 	}
 
 	// Critical assertion: A's history must NOT contain B's content and

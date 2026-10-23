@@ -1992,6 +1992,39 @@ token = "test"
 	}
 }
 
+func TestLoad_SessionAdminCrossUserRequiresExplicitSetting(t *testing.T) {
+	fixture := `
+[[projects]]
+name = "shared"
+admin_from = "ou_admin"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "/tmp/shared"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "test"
+app_secret = "test"
+`
+	path := writeConfigFixture(t, fixture)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Projects[0].SessionAdminCrossUser {
+		t.Fatal("admin_from alone enabled cross-user transcript access")
+	}
+	path = writeConfigFixture(t, strings.Replace(fixture, "admin_from = \"ou_admin\"", "admin_from = \"ou_admin\"\nsession_admin_cross_user = true", 1))
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Projects[0].SessionAdminCrossUser {
+		t.Fatal("explicit session_admin_cross_user was not loaded")
+	}
+}
+
 func validProject(name string) ProjectConfig {
 	return ProjectConfig{
 		Name: name,
