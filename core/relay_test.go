@@ -51,6 +51,158 @@ func TestRelayManager_RelayContextDisablesTimeoutAtZero(t *testing.T) {
 	}
 }
 
+// delayedVisibilityPlatform blocks the request echo for a fixed delay (or
+// until its context is canceled), so tests can prove the relay timeout covers
+// the whole job rather than only the target turn.
+type delayedVisibilityPlatform struct {
+	relayVisibilityPlatform
+	delay time.Duration
+}
+
+func (p *delayedVisibilityPlatform) Send(ctx context.Context, _ any, _ string) error {
+	select {
+	case <-time.After(p.delay):
+	case <-ctx.Done():
+	}
+	return ctx.Err()
+}
+
+// TestRelayManager_TimeoutCoversWholeJob pins the fix: with a 30ms relay
+// timeout and a 500ms request echo, Send must return in roughly the timeout,
+// not after the echo. Previously the timeout was applied only after the echo,
+// so the pre-send could block well past the bound.
+func TestRelayManager_TimeoutCoversWholeJob(t *testing.T) {
+	src := &delayedVisibilityPlatform{
+		relayVisibilityPlatform: relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}},
+		delay:                   500 * time.Millisecond,
+	}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{src}, "", LangEnglish)
+	targetSession := newControllableSession("target-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession},
+		[]Platform{&relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}}, "", LangEnglish)
+
+	rm := NewRelayManager("")
+	rm.SetTimeout(30 * time.Millisecond)
+	rm.Bind("feishu", "chat-1", map[string]string{"source": "s", "target": "t"})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := rm.Send(context.Background(), RelayRequest{
+			From:       "source",
+			To:         "target",
+			SessionKey: "feishu:chat-1:user",
+			Message:    "go",
+		})
+		done <- err
+	}()
+
+	// HandleRelay only observes ctx cancellation after an event arrives. With
+	// the fix the 30ms timeout has already fired by the time the request echo
+	// (which blocks up to 500ms) returns, so this single late event makes the
+	// relay return promptly.
+	time.Sleep(60 * time.Millisecond)
+	targetSession.events <- Event{Type: EventThinking, Content: "late"}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected Send to fail once the whole-job timeout elapses")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not return; is the timeout still applied only after the request echo?")
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("Send took %v, want it bounded by the 30ms relay timeout", elapsed)
+	}
+}
+
+// ctxErrRecordingPlatform records the context error observed by each Send and
+// returns it, so tests can assert whether a visibility receipt was delivered on
+// a live context or on an already-expired one.
+type ctxErrRecordingPlatform struct {
+	relayVisibilityPlatform
+	ctxErrs []error
+}
+
+func (p *ctxErrRecordingPlatform) Send(ctx context.Context, _ any, content string) error {
+	err := ctx.Err()
+	p.mu.Lock()
+	p.sent = append(p.sent, content)
+	p.ctxErrs = append(p.ctxErrs, err)
+	p.mu.Unlock()
+	return err
+}
+
+func (p *ctxErrRecordingPlatform) getCtxErrs() []error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]error, len(p.ctxErrs))
+	copy(out, p.ctxErrs)
+	return out
+}
+
+// TestRelayManager_TimeoutPartialResponseStillVisible pins the fix: when the
+// relay deadline fires but HandleRelay still returns a partial response, the
+// response visibility receipt must be delivered on a fresh context instead of
+// being silently dropped with "context deadline exceeded".
+func TestRelayManager_TimeoutPartialResponseStillVisible(t *testing.T) {
+	src := &ctxErrRecordingPlatform{relayVisibilityPlatform: relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}}
+	tgt := &ctxErrRecordingPlatform{relayVisibilityPlatform: relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}}
+	sourceEngine := NewEngine("source", &stubAgent{}, []Platform{src}, "", LangEnglish)
+	targetSession := newControllableSession("target-session")
+	targetEngine := NewEngine("target", &controllableAgent{nextSession: targetSession}, []Platform{tgt}, "", LangEnglish)
+
+	rm := NewRelayManager("")
+	rm.SetTimeout(30 * time.Millisecond)
+	rm.Bind("feishu", "chat-1", map[string]string{"source": "s", "target": "t"})
+	rm.RegisterEngine("source", sourceEngine)
+	rm.RegisterEngine("target", targetEngine)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := rm.Send(context.Background(), RelayRequest{
+			From:       "source",
+			To:         "target",
+			SessionKey: "feishu:chat-1:user",
+			Message:    "go",
+		})
+		done <- err
+	}()
+
+	// Produce partial text, let the deadline fire, then unblock HandleRelay and
+	// let its drain goroutine close the session.
+	targetSession.events <- Event{Type: EventText, Content: "partial response", SessionID: "target-session"}
+	time.Sleep(60 * time.Millisecond)
+	targetSession.events <- Event{Type: EventThinking, Content: "late"}
+	targetSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Send() error = %v, want nil with a partial response", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not return")
+	}
+
+	var sawPartial bool
+	for _, s := range tgt.getSent() {
+		if strings.Contains(s, "partial response") {
+			sawPartial = true
+		}
+	}
+	if !sawPartial {
+		t.Fatalf("partial response visibility receipt missing; sent=%v", tgt.getSent())
+	}
+	errs := tgt.getCtxErrs()
+	if len(errs) == 0 || errs[len(errs)-1] != nil {
+		t.Fatalf("response visibility send used a dead context: %v", errs)
+	}
+}
+
 type relayVisibilityPlatform struct {
 	stubPlatformEngine
 	reconstructed []string
