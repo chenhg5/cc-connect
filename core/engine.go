@@ -735,6 +735,8 @@ type pendingPermission struct {
 	CurrentQuestion int            // index of the question currently being asked
 	Resolved        chan struct{}  // closed when user responds
 	resolveOnce     sync.Once
+	respondMu       sync.Mutex // serializes callbacks and multi-question answers
+	responding      bool       // guarded by interactiveState.mu
 }
 
 func (s *interactiveState) stopSignal() <-chan struct{} {
@@ -3639,6 +3641,14 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		return false
 	}
 found:
+	pending.respondMu.Lock()
+	defer pending.respondMu.Unlock()
+	state.mu.Lock()
+	current := state.pending == pending && !state.stopped
+	state.mu.Unlock()
+	if !current {
+		return true
+	}
 
 	// An option click from an AskUserQuestion card is never a permission
 	// decision, and a click on an earlier question's card must not answer
@@ -3680,68 +3690,70 @@ found:
 		// All questions answered — build response and resolve
 		updatedInput := buildAskQuestionResponse(pending.ToolInput, pending.Questions, pending.Answers)
 
-		if err := state.agentSession.RespondPermission(pending.RequestID, PermissionResult{
+		if submitted, err := respondPendingPermission(state, pending, PermissionResult{
 			Behavior:     "allow",
 			UpdatedInput: updatedInput,
-		}); err != nil {
+		}, false); err != nil {
 			slog.Error("failed to send AskUserQuestion response", "error", err)
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-		} else {
+		} else if submitted {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
 		}
-
-		state.mu.Lock()
-		state.pending = nil
-		state.mu.Unlock()
-		pending.resolve()
 		return true
 	}
 
 	lower := strings.ToLower(strings.TrimSpace(content))
 
-	if isApproveAllResponse(lower) {
-		state.mu.Lock()
-		state.approveAll = true
-		state.mu.Unlock()
-
-		if err := state.agentSession.RespondPermission(pending.RequestID, PermissionResult{
-			Behavior:     "allow",
-			UpdatedInput: pending.ToolInput,
-		}); err != nil {
-			slog.Error("failed to send permission response", "error", err)
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionApproveAll))
-		}
-	} else if isAllowResponse(lower) {
-		if err := state.agentSession.RespondPermission(pending.RequestID, PermissionResult{
-			Behavior:     "allow",
-			UpdatedInput: pending.ToolInput,
-		}); err != nil {
-			slog.Error("failed to send permission response", "error", err)
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
-		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionAllowed))
-		}
-	} else if isDenyResponse(lower) {
-		if err := state.agentSession.RespondPermission(pending.RequestID, PermissionResult{
-			Behavior: "deny",
-			Message:  "User denied this tool use.",
-		}); err != nil {
-			slog.Error("failed to send deny response", "error", err)
-		}
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionDenied))
-	} else {
+	result := PermissionResult{Behavior: "allow", UpdatedInput: pending.ToolInput}
+	confirmation := MsgPermissionAllowed
+	approveAll := isApproveAllResponse(lower)
+	switch {
+	case approveAll:
+		confirmation = MsgPermissionApproveAll
+	case isDenyResponse(lower):
+		result = PermissionResult{Behavior: "deny", Message: "User denied this tool use."}
+		confirmation = MsgPermissionDenied
+	case !isAllowResponse(lower):
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionHint))
 		return true
 	}
 
-	state.mu.Lock()
-	state.pending = nil
-	state.mu.Unlock()
-	pending.resolve()
-
+	if submitted, err := respondPendingPermission(state, pending, result, approveAll); err != nil {
+		slog.Error("failed to send permission response", "error", err)
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+	} else if submitted {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(confirmation))
+	}
 	return true
+}
+
+// Keep the request available for retry and session cleanup until the adapter
+// acknowledges it. Withdrawal and a successful response cannot both own it.
+func respondPendingPermission(state *interactiveState, pending *pendingPermission, result PermissionResult, approveAll bool) (bool, error) {
+	state.mu.Lock()
+	if state.pending != pending || state.stopped || pending.responding || state.agentSession == nil {
+		state.mu.Unlock()
+		return false, nil
+	}
+	pending.responding = true
+	agentSession := state.agentSession
+	state.mu.Unlock()
+
+	err := agentSession.RespondPermission(pending.RequestID, result)
+	state.mu.Lock()
+	pending.responding = false
+	accepted := err == nil && state.pending == pending
+	if accepted {
+		state.pending = nil
+		if approveAll {
+			state.approveAll = true
+		}
+	}
+	state.mu.Unlock()
+	if accepted {
+		pending.resolve()
+	}
+	return accepted, err
 }
 
 // lookupPending returns the interactive state and its pending permission for
@@ -4533,6 +4545,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		replyCtx:         replyCtx,
 		agent:            agent,
 		eventsNeedResync: true,
+	}
+	if live, ok := agentSession.(StartupEventPreserver); ok && live.PreserveStartupEvents() {
+		newState.eventsNeedResync = false
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 	state = newState
