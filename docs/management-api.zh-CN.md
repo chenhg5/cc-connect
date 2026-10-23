@@ -43,7 +43,7 @@ cc-connect 管理 API 是基于 HTTP 的 REST API，供外部应用（Web 控制
 - **RESTful：** 资源导向的 URL，标准 HTTP 方法
 - **JSON：** 所有请求/响应体使用 `application/json`
 - **统一封装：** 每个响应均使用 `{"ok": true|false, "data"|"error": ...}`
-- **令牌认证：** 所有端点支持 Bearer 令牌或查询参数认证
+- **令牌认证：** 默认使用 Bearer 令牌或查询参数认证
 
 ---
 
@@ -58,15 +58,17 @@ cc-connect 管理 API 是基于 HTTP 的 REST API，供外部应用（Web 控制
 enabled = true
 port = 9820
 token = "mgmt-secret"
+# insecure = false  # 可选；仅供本机开发，启用后只监听 127.0.0.1
 ```
 
 | 字段       | 类型    | 默认值   | 说明                                      |
 |------------|---------|----------|-------------------------------------------|
 | `enabled`  | boolean | `false`  | 是否启用管理 API 服务                     |
 | `port`     | integer | `9820`   | 监听 TCP 端口                             |
-| `token`    | string  | (必填)   | 认证用共享密钥                            |
+| `token`    | string  | (启用时必填) | 认证用共享密钥；仅显式启用本机 `insecure` 模式时可留空 |
+| `insecure` | boolean | `false` | 仅供本机开发；允许空 token，并只监听 IPv4 loopback |
 
-当 `enabled` 为 `false` 时，管理 API 不会启动。令牌应为强随机字符串（建议 32 字符以上）。
+当 `enabled` 为 `false` 时，管理 API 不会启动。启用后若 token 为空且未设置 `insecure = true`，cc-connect 会在启动时报错退出。令牌应为强随机字符串（建议 32 字符以上）。`insecure = true` 始终只监听 `127.0.0.1`，即使同时配置了 token；`localhost` 可能解析到无法连接的 IPv6 `::1`。升级前请参阅[空 token 迁移指南](security-empty-token-migration.zh-CN.md)。
 
 ### 2.2 基础 URL
 
@@ -82,7 +84,7 @@ http://<host>:<port>/api/v1
 
 ## 3. 认证
 
-每个请求必须携带有效令牌。支持两种方式：
+配置了 token 时，每个请求必须携带有效令牌，支持以下两种方式。只有显式设置 `insecure = true` 且 token 为空时，才允许无认证请求；该模式只监听 `127.0.0.1`。
 
 ### 3.1 Bearer 令牌（推荐）
 

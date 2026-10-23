@@ -444,6 +444,7 @@ cc-connect update           # 稳定版
 cc-connect update --pre     # 含预发布版本
 ```
 
+如果启用了 Webhook 或管理 API，请在升级前阅读[空 token 迁移说明](docs/security-empty-token-migration.zh-CN.md)。已启用入口留空 token 将导致启动失败，除非显式配置为仅本机无认证模式。
 
 ## 📊 支持状态
 
