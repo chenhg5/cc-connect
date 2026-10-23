@@ -150,15 +150,17 @@ func TestExecSubagents_StartedUpdatedAndWake(t *testing.T) {
 }
 
 func TestAppServerSubagents_CollaborationFlushesParentCommentary(t *testing.T) {
-	for _, tc := range []struct{ name, item string }{
-		{"collabAgentToolCall", `{"type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child"],"prompt":"Inspect"}`},
-		{"subAgentActivity", `{"type":"subAgentActivity","kind":"started","agentThreadId":"child","agentPath":"/scout"}`},
+	for _, tc := range []struct{ name, method, item string }{
+		{"collabAgentToolCall/started", "item/started", `{"type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child"],"prompt":"Inspect"}`},
+		{"subAgentActivity/started", "item/started", `{"type":"subAgentActivity","kind":"started","agentThreadId":"child","agentPath":"/scout"}`},
+		{"collabAgentToolCall/completed", "item/completed", `{"type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child"],"prompt":"Inspect"}`},
+		{"subAgentActivity/completed", "item/completed", `{"type":"subAgentActivity","kind":"started","agentThreadId":"child","agentPath":"/scout"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &appServerSession{ctx: context.Background(), events: make(chan core.Event, 32), currentTurn: "parent-turn"}
 			s.threadID.Store("parent")
 			subagentNotification(s, "item/completed", `{"threadId":"parent","item":{"type":"agentMessage","text":"I will delegate"}}`)
-			subagentNotification(s, "item/started", `{"threadId":"parent","item":`+tc.item+`}`)
+			subagentNotification(s, tc.method, `{"threadId":"parent","item":`+tc.item+`}`)
 			subagentNotification(s, "item/completed", `{"threadId":"parent","item":{"type":"agentMessage","text":"Final answer"}}`)
 			subagentNotification(s, "turn/completed", `{"threadId":"parent","turn":{"id":"parent-turn","status":"completed"}}`)
 			events := subagentEvents(s.events)

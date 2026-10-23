@@ -1217,9 +1217,11 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 
 	switch itemType {
 	case "collabAgentToolCall":
+		s.flushPendingAsThinking()
 		s.subagents.collab(item, s.emit)
 		return
 	case "subAgentActivity":
+		s.flushPendingAsThinking()
 		s.subagents.activity(item, s.emit)
 		return
 	case "agentMessage", "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction":
