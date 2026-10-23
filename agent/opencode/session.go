@@ -37,9 +37,33 @@ type opencodeSession struct {
 	cancel            context.CancelFunc
 	wg                sync.WaitGroup
 	alive             atomic.Bool
-	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
-	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	expectingContinue atomic.Bool  // true when compaction_continue received, waiting for next step
+	resultSent        atomic.Bool  // true when EventResult has been sent for this turn
+	continuations     atomic.Int32 // number of automatic "continue" follow-up processes launched after compaction
+
+	// stepMu guards stepTexts: text parts are buffered per step until
+	// step_finish so we can tell intermediate steps (finish reason
+	// tool-calls — progress text) from the final step (reason stop — the
+	// real answer) instead of leaking every per-step narration into the
+	// final reply.
+	stepMu    sync.Mutex
+	stepTexts []string
+
+	// usageMu guards usage: OpenCode reports per-step token usage in the
+	// step-finish part's "tokens" field. Input/output/cache counts
+	// accumulate across the turn (reported on EventResult and in the reply
+	// footer via ContextUsageReporter); TotalTokens is kept as the latest
+	// snapshot (current context load).
+	usageMu sync.RWMutex
+	usage   *core.ContextUsage
 }
+
+// maxCompactionContinuations bounds how many automatic resume processes we
+// launch after an OpenCode auto-compaction. OpenCode stops after compaction
+// and waits for the next prompt; we resume the same session with a "continue"
+// prompt so the turn completes instead of ending with an empty reply. If the
+// agent keeps re-compacting, give up after this many rounds.
+const maxCompactionContinuations = 5
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
@@ -80,13 +104,29 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	s.resultSent.Store(false)
 	s.expectingContinue.Store(false)
+	s.usageMu.Lock()
+	s.usage = nil
+	s.usageMu.Unlock()
 
 	chatID := s.CurrentSessionID()
 	isResume := chatID != ""
 
-	args := s.buildRunArgs(prompt, imagePaths, chatID)
+	if err := s.launch(prompt, imagePaths, chatID); err != nil {
+		return err
+	}
 
-	slog.Debug("opencodeSession: launching", "resume", isResume, "args", core.RedactArgs(args))
+	slog.Debug("opencodeSession: launched", "resume", isResume)
+
+	return nil
+}
+
+// launch starts one opencode run process for the given prompt, resuming
+// chatID when non-empty, and begins reading its output events. It is used both
+// for the initial Send and for the automatic "continue" follow-up process
+// after an auto-compaction (see readLoop).
+func (s *opencodeSession) launch(prompt string, imagePaths []string, chatID string) error {
+	args := s.buildRunArgs(prompt, imagePaths, chatID)
+	slog.Debug("opencodeSession: launching", "resume", chatID != "", "args", core.RedactArgs(args))
 
 	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
 	cmd.Dir = s.workDir
@@ -191,10 +231,60 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	return args
 }
 
+// readLoop drains output events from one or more opencode processes launched
+// for this turn. Normally one process handles the whole turn. After an
+// auto-compaction opencode stops and waits for the next prompt, so when the
+// initial process ends while expectingContinue is set we automatically resume
+// the same session with a "continue" prompt — otherwise the turn would end
+// with an empty reply (the compaction summary was suppressed and the agent
+// never produced a final answer). Follow-up processes keep feeding the same
+// events channel until one ends without expectingContinue.
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
 	defer func() { _ = cmd.Wait() }()
 
+	// readProcess returns true when the process ended normally (no
+	// scanner/stderr error) and the engine should keep going.
+	keepGoing := s.readProcess(stdout, stderrBuf)
+
+	if !s.expectingContinue.Load() {
+		slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
+		s.sendEventResult("")
+		return
+	}
+
+	// Auto-compaction happened: opencode stopped and waits for input.
+	// Resume the same session with "continue" so the turn finishes.
+	s.expectingContinue.Store(false)
+	if s.continuations.Load() >= maxCompactionContinuations {
+		slog.Warn("opencodeSession: compaction continue limit reached, ending turn", "session_id", s.CurrentSessionID())
+		s.sendEventResult("")
+		return
+	}
+	if !keepGoing {
+		// The previous process died with an error; don't spin a follow-up.
+		return
+	}
+	s.continuations.Add(1)
+	slog.Info("opencodeSession: compaction detected, resuming session with continue", "session_id", s.CurrentSessionID(), "round", s.continuations.Load())
+
+	chatID := s.CurrentSessionID()
+	if err := s.launch("continue", nil, chatID); err != nil {
+		slog.Error("opencodeSession: failed to launch continue process", "error", err)
+		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("opencodeSession: launch continue: %w", err)}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+		}
+		return
+	}
+	// The new process has its own readLoop goroutine; this one exits.
+}
+
+// readProcess reads NDJSON events from stdout until EOF and reports whether
+// the process ended cleanly (no scanner error, no stderr content). It is the
+// body of one opencode process's read loop.
+func (s *opencodeSession) readProcess(stdout io.ReadCloser, stderrBuf *bytes.Buffer) bool {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
@@ -219,9 +309,8 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
-			return
 		}
-		return
+		return false
 	}
 
 	stderrMsg := stderrBuf.String()
@@ -236,20 +325,9 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		case s.events <- evt:
 		case <-s.ctx.Done():
 		}
-		return
+		return false
 	}
-
-	// Check if we received compaction_continue before readLoop ended.
-	// If so, OpenCode will continue with a new turn - do NOT send EventResult.
-	// The subsequent process will send its own EventResult when it finishes.
-	if s.expectingContinue.Load() {
-		slog.Info("opencodeSession: readLoop ended after compaction_continue, skipping EventResult", "session_id", s.CurrentSessionID())
-		s.expectingContinue.Store(false)
-		return
-	}
-
-	slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
-	s.sendEventResult()
+	return true
 }
 
 // OpenCode NDJSON event structure:
@@ -301,14 +379,43 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		}
 	}
 
-	if text != "" {
-		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-			return
-		}
+	// OpenCode's automatic compaction writes the compaction summary as a plain
+	// text part (no synthetic flag, no metadata) — the summary is the internal
+	// "Objective / Important Details / Work State" state, NOT a reply for the
+	// user. When we see it, suppress it exactly like compaction_continue so it
+	// never leaks into the chat as a giant formatted dump. The agent keeps
+	// working afterwards and its real output arrives as normal text events.
+	if text != "" && isOpencodeCompactionSummary(text) {
+		slog.Info("opencodeSession: compaction summary text suppressed", "session_id", s.CurrentSessionID(), "len", len(text))
+		s.expectingContinue.Store(true)
+		return
 	}
+
+	if text == "" {
+		return
+	}
+
+	// Buffer the text for the current step. step_finish decides whether this
+	// step was intermediate (progress, folded into the process panel) or the
+	// final answer (delivered via EventResult.Content).
+	s.stepMu.Lock()
+	s.stepTexts = append(s.stepTexts, text)
+	s.stepMu.Unlock()
+}
+
+// isOpencodeCompactionSummary reports whether text is OpenCode's automatic
+// compaction summary. Compaction summaries follow a fixed template headed by
+// "## Objective" and containing at least one of the other known sections
+// ("## Important Details", "## Work State"). Normal user-facing replies
+// essentially never start with this exact header combination.
+func isOpencodeCompactionSummary(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "## Objective") {
+		return false
+	}
+	return strings.Contains(trimmed, "\n## Important Details") ||
+		strings.Contains(trimmed, "\n## Work State") ||
+		strings.Contains(trimmed, "## Objective\n")
 }
 
 func (s *opencodeSession) handleToolUse(raw map[string]any) {
@@ -403,14 +510,53 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 		return
 	}
 	text, _ := part["text"].(string)
-	if text != "" {
-		evt := core.Event{Type: core.EventThinking, Content: text}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-			return
+	if text == "" {
+		return
+	}
+	// OpenCode's auto-compaction is itself a model generation: before emitting
+	// the compaction summary it "thinks" about producing it ("Let me analyze
+	// the conversation to build a comprehensive summary..."). That internal
+	// reasoning is not a user-visible step; suppress it the same way we
+	// suppress the summary text itself, otherwise it leaks as a giant
+	// "💭 Thinking" block followed by an empty reply.
+	if isCompactionReasoning(text) {
+		slog.Debug("opencodeSession: compaction reasoning suppressed", "session_id", s.CurrentSessionID(), "len", len(text))
+		return
+	}
+	evt := core.Event{Type: core.EventThinking, Content: text}
+	select {
+	case s.events <- evt:
+	case <-s.ctx.Done():
+		return
+	}
+}
+
+// isCompactionReasoning reports whether a reasoning block is OpenCode's
+// internal auto-compaction work (building the "Objective / Important Details"
+// summary) rather than a genuine step of the current task. The phrasing is
+// characteristic of the compaction prompt the model receives; a normal
+// user-facing reasoning block essentially never starts with these.
+func isCompactionReasoning(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	markers := []string{
+		"let me analyze the conversation to build a comprehensive summary",
+		"let me combine the prior summary with the conversation",
+		"let me analyze the conversation and combine the prior summary",
+		"let me combine the previous summary with the conversation",
+		"let me analyze the entire conversation to build a comprehensive summary",
+		"let me analyze the full conversation to produce a comprehensive summary",
+		"let me analyze this conversation to build a comprehensive summary",
+		"let me review the conversation to build a comprehensive summary",
+		"let me review the prior summary and the conversation",
+		"let me analyze the conversation and produce a comprehensive summary",
+	}
+	for _, m := range markers {
+		if strings.HasPrefix(lower, m) {
+			return true
 		}
 	}
+	return false
 }
 
 func (s *opencodeSession) handleError(raw map[string]any) {
@@ -466,6 +612,13 @@ func extractErrorMessage(raw map[string]any) string {
 }
 
 func (s *opencodeSession) handleStepStart(raw map[string]any) {
+	// A new step begins; drop any text buffered outside a step boundary
+	// (e.g. suppressed compaction summary text is never buffered, but a
+	// process restart could otherwise leave stale narration behind).
+	s.stepMu.Lock()
+	s.stepTexts = nil
+	s.stepMu.Unlock()
+
 	sessionID, _ := raw["sessionID"].(string)
 	if sessionID == "" {
 		part, _ := raw["part"].(map[string]any)
@@ -485,25 +638,144 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	if part != nil {
 		reason, _ = part["reason"].(string)
 	}
-	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
+
+	// Flush the buffered texts of the finished step.
+	//
+	// Intermediate steps (finish reason "tool-calls") forward their narration
+	// as normal EventText: on streaming-card platforms the engine folds it
+	// into the collapsible thinking panel, everywhere else it surfaces as
+	// per-step messages — unchanged behavior.
+	//
+	// The final step (reason "stop") does NOT forward its text as EventText.
+	// Its narration is the real answer; it is delivered once via
+	// EventResult.Content so the final reply contains ONLY the answer, never
+	// the accumulated per-step narration (which would otherwise leak into the
+	// final message on payload-card platforms, whose separate reply is built
+	// from the full response).
+	s.stepMu.Lock()
+	texts := s.stepTexts
+	s.stepTexts = nil
+	s.stepMu.Unlock()
+
+	// Accumulate this step's token usage (OpenCode reports it in the
+	// step-finish part's "tokens" field). Input/output/cache counts sum
+	// across the whole turn; total stays the latest snapshot.
+	if stepUsage := parseStepTokens(part); stepUsage != nil {
+		s.usageMu.Lock()
+		if s.usage == nil {
+			s.usage = stepUsage
+		} else {
+			s.usage.InputTokens += stepUsage.InputTokens
+			s.usage.OutputTokens += stepUsage.OutputTokens
+			s.usage.ReasoningOutputTokens += stepUsage.ReasoningOutputTokens
+			s.usage.CachedInputTokens += stepUsage.CachedInputTokens
+			s.usage.CacheCreationInputTokens += stepUsage.CacheCreationInputTokens
+			s.usage.TotalTokens = stepUsage.TotalTokens
+		}
+		s.usageMu.Unlock()
+	}
 
 	if reason == "stop" {
-		s.sendEventResult()
+		s.sendEventResult(strings.Join(texts, "\n"))
+		return
 	}
+	for _, text := range texts {
+		if text == "" {
+			continue
+		}
+		evt := core.Event{Type: core.EventText, Content: text}
+		select {
+		case s.events <- evt:
+		case <-s.ctx.Done():
+			return
+		}
+	}
+	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 }
 
-func (s *opencodeSession) sendEventResult() {
+func (s *opencodeSession) sendEventResult(content string) {
 	if s.resultSent.Load() {
 		slog.Debug("opencodeSession: EventResult already sent, skipping", "session_id", s.CurrentSessionID())
 		return
 	}
+	// After an auto-compaction the agent stops and waits for the next prompt;
+	// its step_finish(stop) would otherwise produce an empty reply. Defer the
+	// EventResult so readLoop can resume the session with "continue" and the
+	// turn ends with the agent's real answer instead.
+	if s.expectingContinue.Load() {
+		slog.Info("opencodeSession: deferring EventResult after compaction, will resume with continue", "session_id", s.CurrentSessionID())
+		return
+	}
 	s.resultSent.Store(true)
 	sid := s.CurrentSessionID()
-	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	evt := core.Event{Type: core.EventResult, SessionID: sid, Content: content, Done: true}
+	// OpenCode reports per-step token usage in the step-finish part's
+	// "tokens" field; carry the turn totals so the engine logs real numbers
+	// (input_tokens/output_tokens were previously always 0 for opencode).
+	s.usageMu.RLock()
+	if u := s.usage; u != nil {
+		evt.InputTokens = u.InputTokens
+		evt.OutputTokens = u.OutputTokens
+		evt.CacheReadInputTokens = u.CachedInputTokens
+		evt.CacheCreationInputTokens = u.CacheCreationInputTokens
+	}
+	s.usageMu.RUnlock()
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
 	}
+}
+
+// parseStepTokens extracts OpenCode's per-step usage from a step-finish
+// part. OpenCode reports it as:
+//
+//	"tokens":{"total":N,"input":N,"output":N,"reasoning":N,"cache":{"write":N,"read":N}}
+//
+// Returns nil when the part carries no tokens field.
+func parseStepTokens(part map[string]any) *core.ContextUsage {
+	if part == nil {
+		return nil
+	}
+	raw, _ := part["tokens"].(map[string]any)
+	if raw == nil {
+		return nil
+	}
+	usage := &core.ContextUsage{}
+	if v, ok := raw["input"].(float64); ok {
+		usage.InputTokens = int(v)
+	}
+	if v, ok := raw["output"].(float64); ok {
+		usage.OutputTokens = int(v)
+	}
+	if v, ok := raw["reasoning"].(float64); ok {
+		usage.ReasoningOutputTokens = int(v)
+	}
+	if v, ok := raw["total"].(float64); ok {
+		usage.TotalTokens = int(v)
+	}
+	if cache, ok := raw["cache"].(map[string]any); ok {
+		if v, ok := cache["read"].(float64); ok {
+			usage.CachedInputTokens = int(v)
+		}
+		if v, ok := cache["write"].(float64); ok {
+			usage.CacheCreationInputTokens = int(v)
+		}
+	}
+	return usage
+}
+
+// GetContextUsage implements core.ContextUsageReporter so the reply footer
+// shows real token counts (out/in/cr) for opencode turns, matching the
+// claude/codex footer behavior. ContextWindow is unknown to the opencode
+// adapter, so the ctx-% section is omitted.
+func (s *opencodeSession) GetContextUsage() *core.ContextUsage {
+	s.usageMu.RLock()
+	defer s.usageMu.RUnlock()
+	if s.usage == nil {
+		return nil
+	}
+	cp := *s.usage
+	return &cp
 }
 
 // RespondPermission is a no-op — OpenCode handles permissions internally.
