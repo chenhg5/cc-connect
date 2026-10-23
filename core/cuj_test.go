@@ -290,6 +290,65 @@ func (env *cujEnv) userSends(userID, content string) string {
 
 func plat(p *stubPlatformEngine) Platform { return p }
 
+type cujRetryPermissionAgent struct {
+	stubAgent
+	session *cujRetryPermissionSession
+}
+
+func (a *cujRetryPermissionAgent) StartSession(context.Context, string) (AgentSession, error) {
+	return a.session, nil
+}
+
+type cujRetryPermissionSession struct {
+	*cujAgentSession
+	attempts int
+	question bool
+}
+
+func (s *cujRetryPermissionSession) Send(string, string, []ImageAttachment, []FileAttachment) error {
+	event := Event{Type: EventPermissionRequest, RequestID: "retry", ToolName: "Bash", ToolInput: "run task"}
+	if s.question {
+		event.ToolName = "AskUserQuestion"
+		event.Questions = []UserQuestion{{Question: "Choose value", Options: []UserQuestionOption{{Label: "A"}}}}
+	}
+	s.events <- event
+	return nil
+}
+
+func (s *cujRetryPermissionSession) RespondPermission(string, PermissionResult) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attempts++
+	if s.attempts == 1 {
+		return errors.New("temporary submission failure")
+	}
+	s.events <- Event{Type: EventResult, Content: "task completed after retry", Done: true}
+	return nil
+}
+
+// Three user actions: submit work, answer once (transport fails), answer again.
+// The platform must show the failure and then the final answer after retry.
+func TestCUJ_C7_PermissionSubmissionFailureCanRetry(t *testing.T) {
+	for _, question := range []bool{false, true} {
+		t.Run(fmt.Sprint(question), func(t *testing.T) {
+			env := newCUJEnv(t)
+			s := &cujRetryPermissionSession{cujAgentSession: newCUJAgentSession(), question: question}
+			env.engine.agent = &cujRetryPermissionAgent{session: s}
+			t.Cleanup(func() { _ = env.engine.Stop() })
+			env.userSends("user", "run task")
+			prompt, answer := "Bash", "allow"
+			if question {
+				prompt, answer = "Choose value", "A"
+			}
+			env.waitFor("interaction prompt", 3*time.Second, func() bool { return env.sentContains(prompt) })
+			env.userSends("user", answer)
+			env.waitFor("submission error", 3*time.Second, func() bool { return env.sentContains("temporary submission failure") })
+			env.userSends("user", answer)
+			env.waitFor("reply after retry", 3*time.Second, func() bool { return env.sentContains("task completed after retry") })
+		})
+	}
+}
+
 // cujReplyCtxPlatform wraps stubPlatformEngine and additionally implements
 // ReplyContextReconstructor so it can be used in tests that exercise
 // proactive messaging paths (timer, cron). The reconstructed reply context

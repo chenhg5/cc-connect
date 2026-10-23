@@ -601,6 +601,13 @@ type LiveModeSwitcher interface {
 	SetLiveMode(mode string) bool
 }
 
+// StartupEventPreserver opts out of draining a newly started session's events.
+// These sessions replay only live activity (including unanswered interactions),
+// never completed history. Abnormal turn exits still use the normal resync path.
+type StartupEventPreserver interface {
+	PreserveStartupEvents() bool
+}
+
 // StartupWarner is an optional interface for agent sessions that need to surface
 // a one-time warning to the IM user at session start (e.g. when a requested
 // permission mode was silently downgraded due to OS constraints). The engine

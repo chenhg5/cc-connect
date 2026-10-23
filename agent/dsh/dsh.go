@@ -555,6 +555,7 @@ var (
 	_ core.DoctorChecker                   = (*Agent)(nil)
 	_ core.AgentSession                    = (*dshSession)(nil)
 	_ core.AgentSessionCanceller           = (*dshSession)(nil)
+	_ core.StartupEventPreserver           = (*dshSession)(nil)
 	_ core.LiveModeSwitcher                = (*dshSession)(nil)
 	_ core.WorkspaceAgentOptionSnapshotter = (*Agent)(nil)
 )

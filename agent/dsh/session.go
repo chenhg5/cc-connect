@@ -43,12 +43,14 @@ type dshSession struct {
 
 	// turn state
 	commandCancel context.CancelFunc // guarded by turnMu
+	turnOpMu      sync.Mutex         // serializes prompt submission and cancellation RPCs
 	turnMu        sync.Mutex
-	currentTurn   int
+	currentTurn   int // latest native turn, or expected next turn before turn/start
+	watchdogTurn  int // native turn owning turnDone
 	lastUsage     *tokenUsage
 	toolNames     map[string]string   // callId → tool name (for tool/result)
 	seenCalls     map[string]struct{} // callIds already surfaced as EventToolUse
-	turnDone      chan struct{}       // signaled on turn/end; fresh per Send()
+	turnDone      chan struct{}       // closed on completion/cancellation; fresh per Send()
 
 	// delta aggregation: dsh streams token-level chunks; coalesce them into
 	// engine-sized EventText/EventThinking pieces so platform delivery is not
@@ -204,10 +206,15 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		}
 	}
 
-	// Arm the per-turn watchdog before submitting.
-	turnDone := make(chan struct{}, 1)
+	s.turnOpMu.Lock()
+	defer s.turnOpMu.Unlock()
+	// Retire the previous watchdog before a new prompt can reach the server.
+	turnDone := make(chan struct{})
 	s.turnMu.Lock()
+	s.stopWatchdogLocked()
 	s.turnDone = turnDone
+	s.currentTurn++
+	s.watchdogTurn = s.currentTurn
 	s.turnMu.Unlock()
 
 	payload := map[string]any{"sessionId": s.sessionID, "mode": "queue", "content": content}
@@ -219,7 +226,9 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 	}
 	if err := s.client.call(s.ctx, "session.prompt", payload, nil); err != nil {
 		s.turnMu.Lock()
-		s.turnDone = nil
+		if s.turnDone == turnDone {
+			s.stopWatchdogLocked()
+		}
 		s.turnMu.Unlock()
 		return fmt.Errorf("dsh: prompt: %w", err)
 	}
@@ -232,16 +241,38 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 
 // turnWatchdog emits an error and cancels the turn when it runs past timeout.
 func (s *dshSession) turnWatchdog(turnDone chan struct{}) {
+	timer := time.NewTimer(s.timeout)
+	defer timer.Stop()
 	select {
 	case <-turnDone:
 	case <-s.ctx.Done():
-	case <-time.After(s.timeout):
+	case <-timer.C:
+		// A timer may fire concurrently with /stop or a completed result.
+		// Hold the RPC ordering lock so it cannot cancel a later submission.
+		s.turnOpMu.Lock()
+		defer s.turnOpMu.Unlock()
+		s.turnMu.Lock()
+		if s.turnDone != turnDone {
+			s.turnMu.Unlock()
+			return
+		}
+		s.stopWatchdogLocked()
+		s.turnMu.Unlock()
 		slog.Warn("dsh: turn timed out, cancelling", "session_id", s.sessionID, "timeout", s.timeout)
-		s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("dsh: turn timed out after %s", s.timeout)})
 		if err := s.client.call(s.ctx, "session.cancel", map[string]any{"sessionId": s.sessionID}, nil); err != nil {
 			slog.Warn("dsh: cancel after timeout failed", "error", err)
 		}
+		s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("dsh: turn timed out after %s", s.timeout)})
 	}
+}
+
+// Caller holds turnMu. Closing the captured channel disarms exactly its timer.
+func (s *dshSession) stopWatchdogLocked() {
+	if s.turnDone != nil {
+		close(s.turnDone)
+		s.turnDone = nil
+	}
+	s.watchdogTurn = 0
 }
 
 func (s *dshSession) RespondPermission(requestID string, result core.PermissionResult) error {
@@ -357,8 +388,11 @@ func splitAnswer(text string, q wireQuestion) (selected []string, custom string)
 }
 
 func (s *dshSession) CancelTurn() error {
+	s.turnOpMu.Lock()
+	defer s.turnOpMu.Unlock()
 	s.turnMu.Lock()
 	commandCancel := s.commandCancel
+	s.stopWatchdogLocked()
 	s.turnMu.Unlock()
 	if commandCancel != nil {
 		commandCancel()
@@ -373,6 +407,9 @@ func (s *dshSession) CancelTurn() error {
 func (s *dshSession) Events() <-chan core.Event {
 	return s.events
 }
+
+// Remote snapshots omit completed history and replay live pending interactions.
+func (s *dshSession) PreserveStartupEvents() bool { return s.client.token != "" }
 
 func (s *dshSession) CurrentSessionID() string {
 	return s.sessionID
@@ -496,6 +533,9 @@ func (s *dshSession) handleSessionEvent(raw json.RawMessage) {
 	case "turn/start":
 		s.turnMu.Lock()
 		s.currentTurn = data.Turn
+		if s.turnDone != nil {
+			s.watchdogTurn = data.Turn
+		}
 		s.lastUsage = nil
 		s.toolNames = make(map[string]string)
 		s.seenCalls = make(map[string]struct{})
@@ -606,9 +646,27 @@ func (s *dshSession) handleChunk(chunk *streamChunk) {
 }
 
 func (s *dshSession) finishTurn(data sessionEventData) {
-	// Deliver any buffered deltas before closing the turn.
-	s.textAgg.Flush()
-	s.thinkAgg.Flush()
+	s.turnMu.Lock()
+	var usage *tokenUsage
+	// Reconnecting while a tool waits can have no active assistant snapshot
+	// and therefore no turn/start replay. Its first end establishes the turn.
+	current := data.Turn == s.currentTurn || s.currentTurn == 0
+	if current {
+		s.currentTurn = data.Turn
+		usage = s.lastUsage
+		s.lastUsage = nil
+	}
+	if data.Turn == s.watchdogTurn {
+		s.stopWatchdogLocked()
+	}
+	s.turnMu.Unlock()
+
+	// A cancelled turn can finish after another Send. Deliver its terminal
+	// event without flushing the new turn's deltas, usage or watchdog.
+	if current {
+		s.textAgg.Flush()
+		s.thinkAgg.Flush()
+	}
 
 	var reason struct {
 		Kind  string `json:"kind"`
@@ -618,11 +676,6 @@ func (s *dshSession) finishTurn(data sessionEventData) {
 		} `json:"error,omitempty"`
 	}
 	_ = json.Unmarshal(data.Reason, &reason)
-
-	s.turnMu.Lock()
-	usage := s.lastUsage
-	s.lastUsage = nil
-	s.turnMu.Unlock()
 
 	evt := core.Event{Type: core.EventResult, SessionID: s.sessionID, Done: true}
 	if usage != nil {
@@ -655,15 +708,6 @@ func (s *dshSession) finishTurn(data sessionEventData) {
 	}
 
 	s.emit(evt)
-
-	s.turnMu.Lock()
-	if s.turnDone != nil {
-		select {
-		case s.turnDone <- struct{}{}:
-		default:
-		}
-	}
-	s.turnMu.Unlock()
 }
 
 func (s *dshSession) handleApprovalRequested(f muxFrame) {

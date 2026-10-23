@@ -17,14 +17,15 @@ import (
 )
 
 type remoteFixture struct {
-	mu             sync.Mutex
-	server         *httptest.Server
-	sessions       map[string]string
-	turns          map[string]int
-	peers          map[string]*remoteFixturePeer
-	replies        []map[string]any
-	blockCommand   bool
-	commandStarted chan struct{}
+	mu                    sync.Mutex
+	server                *httptest.Server
+	sessions              map[string]string
+	turns                 map[string]int
+	peers                 map[string]*remoteFixturePeer
+	replies               []map[string]any
+	replayApprovalSession string
+	blockCommand          bool
+	commandStarted        chan struct{}
 }
 type remoteFixturePeer struct {
 	mu      sync.Mutex
@@ -124,6 +125,9 @@ func (f *remoteFixture) handle(w http.ResponseWriter, r *http.Request) {
 			switch req.Endpoint {
 			case "$events":
 				peer.send(req.StreamID, map[string]any{"type": "ready", "clientId": cookie.Value})
+				if f.replayApprovalSession != "" {
+					peer.send(req.StreamID, map[string]any{"type": "waterfall", "event": "approval/request", "eventId": "replayed", "agentId": f.replayApprovalSession, "request": map[string]any{"toolName": "bash", "reason": "pending before disconnect"}})
+				}
 			case "workspace/follow":
 				peer.send(req.StreamID, map[string]any{"type": "baseline", "value": map[string]any{"archivedSessionIds": []string{}}})
 			case "session/follow":
