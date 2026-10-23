@@ -676,11 +676,15 @@ speed = 0.96
 
 ## 图片、文件与语音回传
 
-当 Agent 在本地生成了图片、PDF、日志包、报表等文件，需要把结果直接发回当前聊天时，可以使用 `cc-connect send` 的附件模式。用户明确要求“发语音”时，Agent 也可以用同一个 CLI 走 TTS 合成并发送语音。
+用户要求发送已有或新生成的本地图片、PDF、日志包、报表等文件时，使用 `cc-connect send` 的附件模式直接投递到当前聊天。本地 Markdown 链接不能代替附件；确认命令成功后再说已发送。用户明确要求“发语音”时，Agent 也可以用同一个 CLI 走 TTS 合成并发送语音。
+
+Claude Code、Codex 和 ACP worker 会自动收到桥接说明，无需 setup，也不会修改 `AGENTS.md`。Claude Code 继续使用 cc-connect 管理的提示文件。Codex app-server 使用原生开发者指令，恢复旧会话时即时补注，并通过会话配置保证压缩后重建上下文时仍然有效；exec 后端每次请求携带桥接上下文。ACP 没有原生 system/developer 指令槽，因此 cc-connect 每次请求附带独立的上下文资源块（服务器不支持嵌入上下文时退回文本块），保留原始首个文本块以兼容斜杠命令。这些说明仅随 cc-connect 启动生效，不会自动进入独立终端对话。
 
 **当前支持平台：**
 - 飞书
 - Telegram
+
+较早的 Codex app-server 若不支持 `thread/inject_items`，恢复会话时会改为每次请求携带桥接上下文，避免无法继续旧对话。其他注入错误仍会明确报告。
 
 ### 什么时候需要先执行 setup
 

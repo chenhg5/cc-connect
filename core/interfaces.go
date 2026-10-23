@@ -196,7 +196,8 @@ func AgentSystemPromptForLang(lang Language) string {
 }
 
 // SystemPromptSupporter is an optional marker interface for agents that
-// natively inject AgentSystemPrompt() (e.g., via --append-system-prompt).
+// automatically supply AgentSystemPrompt() through their process/session/request
+// API (e.g., --append-system-prompt). This does not imply a protocol role.
 // Agents that do NOT implement this need the instructions written to their
 // memory/instruction file for relay and cron to work.
 type SystemPromptSupporter interface {

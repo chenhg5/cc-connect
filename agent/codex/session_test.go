@@ -666,7 +666,7 @@ while (-not (Test-Path $env:CODEX_RELEASE_FILE)) { Start-Sleep -Milliseconds 10 
 	waitForFileLines(t, startsFile, 2)
 }
 
-func TestSend_PrependsProjectPromptOnFreshSession(t *testing.T) {
+func TestSend_PrependsProjectPromptOnNewAndResumedSessions(t *testing.T) {
 	workDir := t.TempDir()
 	binDir := filepath.Join(workDir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -706,6 +706,15 @@ func TestSend_PrependsProjectPromptOnFreshSession(t *testing.T) {
 	for _, want := range wantParts {
 		waitForFileContains(t, stdinFile, want)
 	}
+	deadline := time.Now().Add(5 * time.Second)
+	for cs.turnInFlight.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := cs.Send("Resume the existing task.", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForFileContains(t, stdinFile, "User message:\nResume the existing task.")
+	waitForFileContains(t, stdinFile, "Project system prompt:\nYou are Linear Reporter.")
 }
 
 func TestSend_HandlesLargeJSONLines(t *testing.T) {
