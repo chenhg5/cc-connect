@@ -148,3 +148,53 @@ func TestExecSubagents_StartedUpdatedAndWake(t *testing.T) {
 		t.Fatalf("exec lifecycle = %+v", events)
 	}
 }
+
+func TestAppServerSubagents_CollaborationFlushesParentCommentary(t *testing.T) {
+	for _, tc := range []struct{ name, item string }{
+		{"collabAgentToolCall", `{"type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child"],"prompt":"Inspect"}`},
+		{"subAgentActivity", `{"type":"subAgentActivity","kind":"started","agentThreadId":"child","agentPath":"/scout"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &appServerSession{ctx: context.Background(), events: make(chan core.Event, 32), currentTurn: "parent-turn"}
+			s.threadID.Store("parent")
+			subagentNotification(s, "item/completed", `{"threadId":"parent","item":{"type":"agentMessage","text":"I will delegate"}}`)
+			subagentNotification(s, "item/started", `{"threadId":"parent","item":`+tc.item+`}`)
+			subagentNotification(s, "item/completed", `{"threadId":"parent","item":{"type":"agentMessage","text":"Final answer"}}`)
+			subagentNotification(s, "turn/completed", `{"threadId":"parent","turn":{"id":"parent-turn","status":"completed"}}`)
+			events := subagentEvents(s.events)
+			if len(events) != 4 || events[0].Type != core.EventThinking || events[0].Content != "I will delegate" || events[1].Type != core.EventSubagent || events[2].Type != core.EventText || events[2].Content != "Final answer" || events[3].Type != core.EventResult {
+				t.Fatalf("parent commentary must stay out of the answer: %+v", events)
+			}
+		})
+	}
+}
+
+func TestAppServerSubagents_IdleBeforeAuthoritativeCompletion(t *testing.T) {
+	for _, status := range []string{"completed", "interrupted", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			s := &appServerSession{ctx: context.Background(), events: make(chan core.Event, 32)}
+			s.threadID.Store("parent")
+			subagentNotification(s, "thread/started", `{"thread":{"id":"child","parentThreadId":"parent"}}`)
+			subagentNotification(s, "thread/status/changed", `{"threadId":"child","status":{"type":"idle"}}`)
+			if events := subagentEvents(s.events); len(events) != 1 || events[0].Subagent.Phase != core.SubagentStarted {
+				t.Fatalf("idle must not finalize a child before its actual result: %+v", events)
+			}
+			turn := map[string]any{"id": "child-turn", "status": status}
+			if status == "failed" {
+				turn["error"] = map[string]any{"message": "Expected failure"}
+			}
+			raw, err := json.Marshal(map[string]any{"threadId": "child", "turn": turn})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.handleNotification("turn/completed", raw)
+			events := subagentEvents(s.events)
+			if len(events) != 1 || events[0].Type != core.EventSubagent || events[0].Subagent.Phase != core.SubagentFinished || events[0].Subagent.Status != status {
+				t.Fatalf("child must finish with authoritative status %q: %+v", status, events)
+			}
+			if status == "failed" && events[0].Subagent.Summary != "Expected failure" {
+				t.Fatalf("failure summary = %q", events[0].Subagent.Summary)
+			}
+		})
+	}
+}
