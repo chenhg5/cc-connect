@@ -811,3 +811,57 @@ func TestSession_AcceptedHTTPErrorBeforeDelayedStartKeepsReservation(t *testing.
 		t.Fatalf("accepted HTTP error lost next turn watchdog: cancels=%d, want 1", got)
 	}
 }
+
+func TestSession_EnvBootstrapSurvivesRejectedFirstPrompt(t *testing.T) {
+	for _, kind := range []string{"rpc", "http"} {
+		t.Run(kind, func(t *testing.T) {
+			m := newMockDshServer()
+			if kind == "rpc" {
+				m.failNext["session.prompt"] = 1
+			}
+			var rejectHTTP atomic.Bool
+			rejectHTTP.Store(kind == "http")
+			handler := m.handler()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/session.prompt" && rejectHTTP.Swap(false) {
+					http.Error(w, "rejected before acceptance", http.StatusServiceUnavailable)
+					return
+				}
+				handler.ServeHTTP(w, r)
+			}))
+			defer server.Close()
+			native, err := New(map[string]any{"base_url": server.URL, "work_dir": t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = native.Stop() })
+			a := native.(*Agent)
+			a.SetSessionEnv([]string{"CC_PROJECT=retry-project", "CC_SESSION_KEY=test:retry", "CC_DATA_DIR=/test/data"})
+			session, err := a.StartSession(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+			if err := session.Send("rejected first prompt", "one", nil, nil); err == nil {
+				t.Fatal("expected first submission to fail")
+			}
+			if err := session.Send("retry", "two", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if m.promptCount() != 1 {
+				t.Fatalf("accepted prompts = %d, want 1", m.promptCount())
+			}
+			for _, text := range []string{"CC_PROJECT=retry-project", "CC_SESSION_KEY=test:retry", "CC_DATA_DIR=/test/data", "retry"} {
+				if !strings.Contains(m.promptAt(0), text) {
+					t.Fatalf("retry omitted %q: %q", text, m.promptAt(0))
+				}
+			}
+			if err := session.Send("third", "three", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got := m.promptAt(1); got != "third" {
+				t.Fatalf("bootstrap repeated after successful receipt: %q", got)
+			}
+		})
+	}
+}

@@ -64,9 +64,8 @@ type dshSession struct {
 	thinkAgg *chunkAggregator
 
 	// first-send env bootstrap (CC_PROJECT / CC_SESSION_KEY for cc-connect CLI)
-	envMu       sync.Mutex
 	envBlock    string
-	envInjected bool
+	envInjected bool // guarded by turnOpMu
 	modeMu      sync.Mutex
 }
 
@@ -187,14 +186,6 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 			return err
 		}
 	}
-	// One-time env bootstrap on the first message of a fresh session.
-	s.envMu.Lock()
-	if s.envBlock != "" && !s.envInjected {
-		prompt = s.envBlock + "\n" + prompt
-		s.envInjected = true
-	}
-	s.envMu.Unlock()
-
 	content := []map[string]any{{"type": "text", "text": prompt}}
 
 	// Images ride as base64 parts; files land on disk and are referenced.
@@ -251,6 +242,12 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		go s.turnWatchdog(turnDone)
 	}
 
+	// Serialize bootstrap selection with submission. A failed receipt leaves
+	// it eligible for the next Send, including one already waiting for the lock.
+	if s.envBlock != "" && !s.envInjected {
+		content[0]["text"] = s.envBlock + "\n" + content[0]["text"].(string)
+	}
+
 	payload := map[string]any{"sessionId": s.sessionID, "mode": "queue", "content": content}
 	if s.client.token != "" {
 		// Keep both protocol ids aligned: native versions may surface either
@@ -268,6 +265,7 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		s.turnMu.Unlock()
 		return fmt.Errorf("dsh: prompt: %w", err)
 	}
+	s.envInjected = true
 
 	return nil
 }
