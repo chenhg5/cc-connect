@@ -150,9 +150,9 @@ func (cs *codexSession) Send(prompt string, messageID string, images []core.Imag
 	}
 
 	isResume := cs.CurrentSessionID() != ""
-	if !isResume {
-		prompt = prependCodexPromptPreamble(prompt, cs.promptPreamble)
-	}
+	// The exec transport has no native item-injection RPC. Include bridge
+	// context on every request, including resumed and compacted histories.
+	prompt = prependCodexPromptPreamble(prompt, cs.promptPreamble)
 	args := cs.buildExecArgs(prompt, imagePaths)
 	if len(cs.cliExtraArgs) > 0 {
 		args = append(append([]string{}, cs.cliExtraArgs...), args...)
