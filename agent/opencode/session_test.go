@@ -281,6 +281,30 @@ func TestHandleToolUsePermissionDeniedEmitsEventText(t *testing.T) {
 	}
 }
 
+func TestExtractToolInput_PreservesStructuredParameters(t *testing.T) {
+	input := extractToolInput(map[string]any{
+		"title": "include",
+		"input": map[string]any{
+			"pattern": "foo",
+			"include": "*.go",
+			"path":    "platform/feishu",
+		},
+	})
+	var got map[string]any
+	if err := json.Unmarshal([]byte(input), &got); err != nil {
+		t.Fatalf("extractToolInput returned invalid JSON: %q: %v", input, err)
+	}
+	for key, want := range map[string]string{
+		"pattern": "foo",
+		"include": "*.go",
+		"path":    "platform/feishu",
+	} {
+		if got[key] != want {
+			t.Errorf("parameter %s = %v, want %q", key, got[key], want)
+		}
+	}
+}
+
 // TestHandleToolUseCompletedDoesNotEmitExtraText verifies that a successfully
 // completed tool call does NOT emit an EventText (regression guard).
 func TestHandleToolUseCompletedDoesNotEmitExtraText(t *testing.T) {
