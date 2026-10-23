@@ -5660,10 +5660,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				if thinking := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen)); thinking != "" {
 					toolSteps = append(toolSteps, ToolStep{
-						Kind:    ToolStepKindThinking,
-						Name:    "Thinking",
-						Summary: thinking,
-						Done:    true,
+						Timestamp: time.Now(),
+						Kind:      ToolStepKindThinking,
+						Name:      "Thinking",
+						Summary:   thinking,
+						Done:      true,
 					})
 				}
 				if cardMessageID == nil {
@@ -5749,9 +5750,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					break
 				}
 				toolSteps = append(toolSteps, ToolStep{
-					Kind:    ToolStepKindTool,
-					Name:    event.ToolName,
-					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
+					Timestamp: time.Now(),
+					Kind:      ToolStepKindTool,
+					Name:      event.ToolName,
+					Summary:   truncateIf(event.ToolInput, e.display.ToolMaxLen),
 				})
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
@@ -6892,9 +6894,10 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 			summary = truncateIf(summary, maxLen)
 		}
 		steps = append(steps, ToolStep{
-			Kind:    ToolStepKindTool,
-			Name:    toolName,
-			Summary: summary,
+			Timestamp: time.Now(),
+			Kind:      ToolStepKindTool,
+			Name:      toolName,
+			Summary:   summary,
 		})
 		idx = len(steps) - 1
 	}
