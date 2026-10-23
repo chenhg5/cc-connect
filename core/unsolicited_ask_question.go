@@ -23,10 +23,12 @@ func isAskQuestionRequest(event Event) bool {
 // unanswered hands the agent no answers.
 //
 // The answer arrives through handlePendingPermission, which responds to the
-// agent and resolves the request. If ctx is cancelled first (a new foreground
-// turn or session cleanup took over the session), a question still pending is
-// withdrawn and denied so the agent is not left waiting on a prompt nobody
-// owns.
+// agent and resolves the request. While the question waits, a message that
+// cannot answer it does not start a turn (see holdForUnsolicitedQuestion), so
+// the woken turn keeps the session's events. If ctx is cancelled first anyway
+// (session cleanup, or a turn started some other way), a question still
+// pending is withdrawn and denied so the agent is not left waiting on a prompt
+// nobody owns.
 func (e *Engine) askUnsolicitedQuestion(ctx context.Context, state *interactiveState, agentSession AgentSession, p Platform, replyCtx any, event Event) {
 	pending := &pendingPermission{
 		RequestID:    event.RequestID,
@@ -53,14 +55,9 @@ func (e *Engine) askUnsolicitedQuestion(ctx context.Context, state *interactiveS
 	case <-ctx.Done():
 	}
 
-	state.mu.Lock()
-	withdrawn := state.pending == pending
-	if withdrawn {
-		state.pending = nil
-	}
-	state.mu.Unlock()
-	if !withdrawn {
-		// Answered or cleaned up while ctx was being cancelled.
+	if !claimPending(state, pending) {
+		// Being answered, or dropped by session cleanup: whoever claimed the
+		// request responds to it.
 		return
 	}
 	pending.resolve()
@@ -73,4 +70,39 @@ func (e *Engine) askUnsolicitedQuestion(ctx context.Context, state *interactiveS
 			slog.Debug("unsolicited: failed to withdraw question", "error", err)
 		}
 	}()
+}
+
+// claimPending takes pending off state if it is still the request waiting
+// there. Answering a background question races with withdrawing it; only the
+// side that claims the request responds to the agent.
+func claimPending(state *interactiveState, pending *pendingPermission) bool {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.pending != pending {
+		return false
+	}
+	state.pending = nil
+	return true
+}
+
+// holdForUnsolicitedQuestion handles a message without text (attachments
+// only) that arrives while the unsolicited reader waits on a question. Such a
+// message cannot answer it, and starting a turn would take the session's
+// events from the woken turn: its remaining output, once the question is
+// withdrawn, would be read as the new turn's reply. So the user is asked to
+// answer first instead. It reports whether msg was handled; a question asked
+// by a foreground turn is left to the busy-session queue.
+func (e *Engine) holdForUnsolicitedQuestion(p Platform, msg *Message, state *interactiveState, pending *pendingPermission) bool {
+	if len(msg.Images) == 0 && len(msg.Files) == 0 {
+		return false
+	}
+	state.mu.Lock()
+	held := state.pending == pending && state.unsolicitedCancel != nil
+	state.mu.Unlock()
+	if !held {
+		return false
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgAskQuestionAnswerFirst))
+	e.sendAskQuestionPrompt(p, msg.ReplyCtx, pending.Questions, pending.CurrentQuestion)
+	return true
 }

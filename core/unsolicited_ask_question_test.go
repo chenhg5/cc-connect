@@ -2,6 +2,7 @@ package core
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -153,5 +154,86 @@ func TestUnsolicitedReader_WithdrawsUnansweredQuestionOnCancel(t *testing.T) {
 	case <-pending.Resolved:
 	default:
 		t.Fatal("withdrawn question not resolved")
+	}
+}
+
+// Answering and withdrawing the same question race; exactly one of them may
+// respond to the agent, and the outcome is written by that side only.
+func TestUnsolicitedReader_AnswerAndWithdrawRespondOnce(t *testing.T) {
+	for i := 0; i < 30; i++ {
+		e, p, agentSession, state := startUnsolicitedQuestionTest(t, false)
+		agentSession.events <- backgroundQuestion()
+		waitForPending(t, state)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			e.handlePendingPermission(p, &Message{SessionKey: "test:askq:u1", ReplyCtx: "ctx"}, "2", "test:askq:u1")
+		}()
+		go func() {
+			defer wg.Done()
+			e.stopUnsolicitedReader(state)
+		}()
+		wg.Wait()
+
+		waitForPermResponse(t, agentSession)
+		time.Sleep(20 * time.Millisecond) // let a second, wrong response land
+		agentSession.mu.Lock()
+		calls := agentSession.permCalls
+		agentSession.mu.Unlock()
+		if calls != 1 {
+			t.Fatalf("round %d: expected exactly one response to the question, got %d", i, calls)
+		}
+	}
+}
+
+// A message that cannot answer a background question (attachments only) must
+// not start a turn that would take the woken turn's events; the user is asked
+// to answer first and the question stays pending.
+func TestUnsolicitedReader_AttachmentWaitsForAnswer(t *testing.T) {
+	e, p, agentSession, state := startUnsolicitedQuestionTest(t, false)
+	agentSession.events <- backgroundQuestion()
+	pending := waitForPending(t, state)
+	waitForPlatformSend(p, 1, 5*time.Second)
+
+	msg := &Message{SessionKey: "test:askq:u1", ReplyCtx: "ctx", Images: []ImageAttachment{{MimeType: "image/png", Data: []byte("png")}}}
+	if !e.handlePendingPermission(p, msg, "", "test:askq:u1") {
+		t.Fatal("an attachment-only message started a turn while a background question waits")
+	}
+	sent := p.getSent()
+	if !strings.Contains(strings.Join(sent, "\n"), "answer the question first") {
+		t.Fatalf("expected an answer-first notice, got %q", sent)
+	}
+	state.mu.Lock()
+	still := state.pending
+	state.mu.Unlock()
+	agentSession.mu.Lock()
+	calls := agentSession.permCalls
+	agentSession.mu.Unlock()
+	if still != pending || calls != 0 {
+		t.Fatalf("question should still wait unanswered: pending=%v responses=%d", still == pending, calls)
+	}
+}
+
+// A foreground turn's question keeps its behaviour: an attachment-only message
+// is left to the busy-session queue.
+func TestForegroundQuestion_AttachmentNotHeld(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("stop engine: %v", err)
+		}
+	})
+	pending := &pendingPermission{RequestID: "fg", ToolName: "AskUserQuestion", Questions: backgroundQuestion().Questions, Resolved: make(chan struct{})}
+	state := &interactiveState{platform: p, replyCtx: "ctx", pending: pending}
+	e.interactiveMu.Lock()
+	e.interactiveStates["test:askq:u1"] = state
+	e.interactiveMu.Unlock()
+
+	msg := &Message{SessionKey: "test:askq:u1", ReplyCtx: "ctx", Images: []ImageAttachment{{MimeType: "image/png", Data: []byte("png")}}}
+	if e.handlePendingPermission(p, msg, "", "test:askq:u1") {
+		t.Fatal("attachment-only message was held for a foreground question")
 	}
 }
