@@ -645,6 +645,14 @@ type StartupWarner interface {
 	StartupWarning() string
 }
 
+// LiveModelSetter is an optional AgentSession capability: switch the running
+// agent process to another model in place, keeping its conversation, without
+// restarting it. Claude Code implements it with its stream-json set_model
+// control request, the same switch its own /model command makes.
+type LiveModelSetter interface {
+	SetLiveModel(ctx context.Context, model string) error
+}
+
 // PermissionModeInfo describes a permission mode for display.
 type PermissionModeInfo struct {
 	Key    string
