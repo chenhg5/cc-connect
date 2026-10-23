@@ -48,12 +48,13 @@ const (
 )
 
 type ProgressCardEntry struct {
-	Kind     ProgressCardEntryKind `json:"kind"`
-	Text     string                `json:"text"`
-	Tool     string                `json:"tool,omitempty"`
-	Status   string                `json:"status,omitempty"`
-	ExitCode *int                  `json:"exit_code,omitempty"`
-	Success  *bool                 `json:"success,omitempty"`
+	Timestamp time.Time             `json:"timestamp,omitzero"`
+	Kind      ProgressCardEntryKind `json:"kind"`
+	Text      string                `json:"text"`
+	Tool      string                `json:"tool,omitempty"`
+	Status    string                `json:"status,omitempty"`
+	ExitCode  *int                  `json:"exit_code,omitempty"`
+	Success   *bool                 `json:"success,omitempty"`
 }
 
 // ProgressCardPayload carries structured progress entries for platforms that
@@ -105,12 +106,13 @@ func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent
 			kind = ProgressEntryInfo
 		}
 		cleaned = append(cleaned, ProgressCardEntry{
-			Kind:     kind,
-			Text:     text,
-			Tool:     strings.TrimSpace(item.Tool),
-			Status:   strings.TrimSpace(item.Status),
-			ExitCode: item.ExitCode,
-			Success:  item.Success,
+			Timestamp: item.Timestamp,
+			Kind:      kind,
+			Text:      text,
+			Tool:      strings.TrimSpace(item.Tool),
+			Status:    strings.TrimSpace(item.Status),
+			ExitCode:  item.ExitCode,
+			Success:   item.Success,
 		})
 	}
 	if len(cleaned) == 0 {
@@ -414,8 +416,11 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 
 	switch w.style {
 	case progressStyleCard:
+		if item.Timestamp.IsZero() {
+			item.Timestamp = time.Now()
+		}
 		w.items = append(w.items, item)
-		w.entries = append(w.entries, fallback)
+		w.entries = append(w.entries, item.Timestamp.Format("15:04:05")+" · "+fallback)
 		truncated := false
 		if w.maxEntries > 0 && len(w.items) > w.maxEntries {
 			w.items = w.items[len(w.items)-w.maxEntries:]
