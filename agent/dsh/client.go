@@ -320,9 +320,12 @@ func (c *rpcClient) respond(ctx context.Context, rpcID string, value any) error 
 	if err != nil {
 		return fmt.Errorf("dsh: respond: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return fmt.Errorf("dsh: read respond receipt: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("dsh: respond returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
 	}
@@ -330,7 +333,10 @@ func (c *rpcClient) respond(ctx context.Context, rpcID string, value any) error 
 		Accepted bool   `json:"accepted"`
 		Reason   string `json:"reason,omitempty"`
 	}
-	if err := json.Unmarshal(rb, &receipt); err == nil && !receipt.Accepted {
+	if err := json.Unmarshal(rb, &receipt); err != nil {
+		return fmt.Errorf("dsh: invalid respond receipt: %w", err)
+	}
+	if !receipt.Accepted {
 		return fmt.Errorf("dsh: respond not accepted: %s", receipt.Reason)
 	}
 	return nil
@@ -346,9 +352,8 @@ func (c *rpcClient) respond(ctx context.Context, rpcID string, value any) error 
 //
 // The mux stream aggregates EVERY session on the server (including Web GUI
 // sessions), so frames are filtered to the target session at the socket
-// reader. Frames that must never be lost (turn/end, approval/question
-// requests, stream errors) are enqueued with priority when the channel is
-// full; other frames are dropped rather than stalling the socket reader.
+// reader. A full queue applies cancellation-aware backpressure rather than
+// dropping answer text or tool events.
 func (c *rpcClient) openMux(ctx context.Context, targetSessionID string) (<-chan muxFrame, error) {
 	u, err := url.Parse(c.baseURL + "/api/events.mux")
 	if err != nil {
@@ -366,7 +371,7 @@ func (c *rpcClient) openMux(ctx context.Context, targetSessionID string) (<-chan
 	if err != nil {
 		if resp != nil {
 			rb, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, fmt.Errorf("dsh: events.mux websocket: %w (HTTP %d: %s)", err, resp.StatusCode, strings.TrimSpace(string(rb)))
 		}
 		return nil, fmt.Errorf("dsh: events.mux websocket: %w", err)
@@ -377,7 +382,7 @@ func (c *rpcClient) openMux(ctx context.Context, targetSessionID string) (<-chan
 	go func() {
 		defer close(readerDone)
 		defer close(frames)
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for {
 			select {
 			case <-ctx.Done():
@@ -408,23 +413,10 @@ func (c *rpcClient) openMux(ctx context.Context, targetSessionID string) (<-chan
 				continue
 			}
 
-			if criticalFrame(frame) {
-				// Never lose turn/end, approval/question requests, or
-				// stream errors — block until the consumer catches up.
-				select {
-				case frames <- frame:
-				case <-ctx.Done():
-					return
-				}
-				continue
-			}
 			select {
 			case frames <- frame:
-			default:
-				// Never block the socket reader; a slow engine consumer drops
-				// non-critical frames (turn/end is protected above, and the
-				// engine re-aggregates text from its own accumulators).
-				slog.Warn("dsh: mux frame channel full, dropping frame", "type", frame.Type)
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
@@ -433,7 +425,7 @@ func (c *rpcClient) openMux(ctx context.Context, targetSessionID string) (<-chan
 	go func() {
 		select {
 		case <-ctx.Done():
-			conn.Close()
+			_ = conn.Close()
 		case <-readerDone:
 		}
 	}()
@@ -457,20 +449,4 @@ func parseBaseURL(raw string) (string, error) {
 		return "", fmt.Errorf("dsh: invalid base_url %q: missing host", raw)
 	}
 	return strings.TrimRight(u.String(), "/"), nil
-}
-
-// criticalFrame reports whether a frame must survive channel overflow:
-// turn/end (the engine's turn-completion signal), approval/question requests
-// (answerable interactions), and stream errors.
-func criticalFrame(f muxFrame) bool {
-	switch f.Type {
-	case "approval/requested", "question/requested", "stream/error":
-		return true
-	case "session/event":
-		var ev sessionEvent
-		if json.Unmarshal(f.Event, &ev) == nil && ev.Type == "turn/end" {
-			return true
-		}
-	}
-	return false
 }

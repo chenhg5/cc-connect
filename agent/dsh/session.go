@@ -26,6 +26,7 @@ type dshSession struct {
 	cancel context.CancelFunc
 
 	events     chan core.Event
+	emitMu     sync.RWMutex // excludes channel close from every event producer
 	alive      atomic.Bool
 	closeOnce  sync.Once
 	readerDone chan struct{} // closed when the mux reader goroutine exits
@@ -35,6 +36,7 @@ type dshSession struct {
 
 	// pending server interactions, keyed by the frame's rpcId
 	pendingMu        sync.Mutex
+	respondMu        sync.Mutex // serialize retries until the server acknowledges
 	pendingApprovals map[string]pendingApproval
 	pendingQuestions map[string]pendingQuestion
 
@@ -56,6 +58,7 @@ type dshSession struct {
 	envMu       sync.Mutex
 	envBlock    string
 	envInjected bool
+	modeMu      sync.Mutex
 }
 
 type pendingApproval struct {
@@ -89,10 +92,12 @@ func newDshSession(ctx context.Context, client *rpcClient, workDir, sessionID, a
 	}
 	slog.Info("dsh: session ready", "session_id", created.SessionID, "cwd", workDir, "resumed", sessionID != "")
 
-	// Apply configured model/effort overrides (best effort — the server's
-	// stored selection wins when the model cannot be routed).
+	// Apply explicit overrides before accepting prompts; selection failures
+	// must not silently run a different model.
 	if model != "" || effort != "" {
-		applyModel(ctx, client, created.SessionID, model, effort)
+		if err := applyModel(ctx, client, created.SessionID, model, effort); err != nil {
+			return nil, err
+		}
 	}
 
 	sessCtx, cancel := context.WithCancel(ctx)
@@ -230,15 +235,11 @@ func (s *dshSession) turnWatchdog(turnDone chan struct{}) {
 }
 
 func (s *dshSession) RespondPermission(requestID string, result core.PermissionResult) error {
+	s.respondMu.Lock()
+	defer s.respondMu.Unlock()
 	s.pendingMu.Lock()
 	approval, isApproval := s.pendingApprovals[requestID]
 	question, isQuestion := s.pendingQuestions[requestID]
-	if isApproval {
-		delete(s.pendingApprovals, requestID)
-	}
-	if isQuestion {
-		delete(s.pendingQuestions, requestID)
-	}
 	s.pendingMu.Unlock()
 
 	switch {
@@ -255,6 +256,9 @@ func (s *dshSession) RespondPermission(requestID string, result core.PermissionR
 		if err != nil {
 			return fmt.Errorf("dsh: approval response: %w", err)
 		}
+		s.pendingMu.Lock()
+		delete(s.pendingApprovals, requestID)
+		s.pendingMu.Unlock()
 		slog.Info("dsh: approval answered", "approval_id", approval.approvalID, "outcome", outcome)
 		return nil
 
@@ -267,6 +271,9 @@ func (s *dshSession) RespondPermission(requestID string, result core.PermissionR
 		if err != nil {
 			return fmt.Errorf("dsh: question response: %w", err)
 		}
+		s.pendingMu.Lock()
+		delete(s.pendingQuestions, requestID)
+		s.pendingMu.Unlock()
 		slog.Info("dsh: questions answered", "count", len(answers))
 		return nil
 
@@ -358,19 +365,48 @@ func (s *dshSession) Alive() bool {
 	return s.alive.Load()
 }
 
+// SetLiveMode applies only to this session, and reports success only after
+// the server accepts the command. Never change the shared server defaults.
+func (s *dshSession) SetLiveMode(mode string) bool {
+	if err := s.setMode(mode); err != nil {
+		slog.Warn("dsh: session mode change failed", "session_id", s.sessionID, "error", err)
+		return false
+	}
+	return true
+}
+
+func (s *dshSession) setMode(mode string) error {
+	s.modeMu.Lock()
+	defer s.modeMu.Unlock()
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	var out struct {
+		Matched bool `json:"matched"`
+	}
+	if err := s.client.call(ctx, "command.execute", map[string]any{
+		"sessionId": s.sessionID,
+		"line":      "/permission " + modePreset(normalizeMode(mode)),
+	}, &out); err != nil {
+		return fmt.Errorf("dsh: apply session permission mode: %w", err)
+	}
+	if !out.Matched {
+		return fmt.Errorf("dsh: session permission command is unavailable")
+	}
+	return nil
+}
+
 func (s *dshSession) Close() error {
 	s.closeOnce.Do(func() {
 		s.alive.Store(false)
+		// Unblock producers before waiting for aggregation or socket readers.
+		s.cancel()
 		s.textAgg.Cancel()
 		s.thinkAgg.Cancel()
-		s.cancel()
 		// Wait for the mux reader to finish (the stream drops on cancel).
-		select {
-		case <-s.readerDone:
-		case <-time.After(8 * time.Second):
-			slog.Warn("dsh: close timed out waiting for mux reader")
-		}
+		<-s.readerDone
+		s.emitMu.Lock()
 		close(s.events)
+		s.emitMu.Unlock()
 	})
 	return nil
 }
@@ -381,7 +417,7 @@ func (s *dshSession) readLoop() {
 	defer close(s.readerDone)
 	defer s.emitStreamError()
 	for frame := range s.frames {
-		if frame.SessionID != s.sessionID {
+		if frame.Type != "stream/error" && frame.SessionID != s.sessionID {
 			continue
 		}
 		s.handleFrame(frame)
@@ -652,28 +688,17 @@ func (s *dshSession) handleQuestionRequested(f muxFrame) {
 
 // ── helpers ─────────────────────────────────────────────────────
 
-// emit delivers one event to the engine. Critical events (turn completion,
-// permission/question requests, errors) block until the engine consumes them
-// — losing one would leave the engine stuck on a turn. Non-critical events
-// (text/thinking/tool deltas) are dropped when the channel is full: the
-// engine accumulates text from what it receives and a stuck permission wait
-// must not stall the socket reader into losing the turn/end frame.
+// emit applies cancellation-aware backpressure. Every text delta contributes
+// to the final answer, so dropping even a nonterminal event loses content.
 func (s *dshSession) emit(evt core.Event) {
-	critical := evt.Type == core.EventResult ||
-		evt.Type == core.EventPermissionRequest ||
-		evt.Type == core.EventError
-	if critical {
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-		}
+	s.emitMu.RLock()
+	defer s.emitMu.RUnlock()
+	if s.ctx.Err() != nil {
 		return
 	}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
-	default:
-		slog.Debug("dsh: dropping non-critical event (engine busy)", "type", evt.Type)
 	}
 }
 
@@ -748,62 +773,52 @@ func truncate(s string, maxRunes int) string {
 // applyModel resolves a "provider/model" (or bare model) override against the
 // session's model catalog and applies it via session.selectModel, optionally
 // carrying a reasoning-effort override.
-func applyModel(ctx context.Context, client *rpcClient, sessionID, model, effort string) {
+func applyModel(ctx context.Context, client *rpcClient, sessionID, model, effort string) error {
 	var models sessionModels
 	if err := client.call(ctx, "session.models", map[string]any{"sessionId": sessionID}, &models); err != nil {
-		slog.Warn("dsh: cannot fetch model catalog for configured model", "model", model, "error", err)
-		return
+		return fmt.Errorf("dsh: fetch model catalog: %w", err)
 	}
-
-	// Resolve the target route: the explicit override when given, otherwise
-	// the session's current selection (so a bare effort override still lands).
-	provider, modelID := "", ""
-	if model != "" {
-		provider, modelID = model, ""
-		if i := strings.LastIndex(model, "/"); i >= 0 {
-			provider, modelID = model[:i], model[i+1:]
-		}
-	} else if models.Current.Provider != "" && models.Current.Model != "" {
-		provider, modelID = models.Current.Provider, models.Current.Model
+	provider, modelID, err := resolveModelRoute(models, model)
+	if err != nil {
+		return err
 	}
+	payload := map[string]any{"sessionId": sessionID, "provider": provider, "model": modelID}
+	if effort != "" {
+		payload["reasoningEffort"] = effort
+	}
+	if err := client.call(ctx, "session.selectModel", payload, nil); err != nil {
+		return fmt.Errorf("dsh: select model %s/%s: %w", provider, modelID, err)
+	}
+	return nil
+}
 
-	found := false
+// Match complete catalog routes instead of splitting at a slash: a model ID
+// may itself contain slashes. Bare IDs must identify exactly one route.
+func resolveModelRoute(models sessionModels, model string) (string, string, error) {
+	if model == "" {
+		model = models.Current.Provider + "/" + models.Current.Model
+	}
 	for _, g := range models.Groups {
-		if provider != "" && g.ID != provider && g.Name != provider {
-			continue
-		}
 		for _, m := range g.Models {
-			if modelID != "" && m.ID != modelID {
+			if model == g.ID+"/"+m.ID || model == g.Name+"/"+m.ID {
+				return g.ID, m.ID, nil
+			}
+		}
+	}
+	var provider, modelID string
+	for _, g := range models.Groups {
+		for _, m := range g.Models {
+			if m.ID != model {
 				continue
 			}
-			payload := map[string]any{
-				"sessionId": sessionID,
-				"provider":  g.ID,
-				"model":     m.ID,
+			if provider != "" {
+				return "", "", fmt.Errorf("dsh: ambiguous model %q; use provider/model", model)
 			}
-			if effort != "" {
-				payload["reasoningEffort"] = effort
-			}
-			var selected struct {
-				Selected struct {
-					Provider string `json:"provider"`
-					Model    string `json:"model"`
-				} `json:"selected"`
-			}
-			err := client.call(ctx, "session.selectModel", payload, &selected)
-			if err != nil {
-				slog.Warn("dsh: selectModel failed", "provider", g.ID, "model", m.ID, "effort", effort, "error", err)
-				return
-			}
-			slog.Info("dsh: model applied", "session_id", sessionID, "provider", g.ID, "model", m.ID, "effort", effort)
-			found = true
-			break
-		}
-		if found {
-			break
+			provider, modelID = g.ID, m.ID
 		}
 	}
-	if !found && model != "" {
-		slog.Warn("dsh: configured model not found in catalog", "model", model)
+	if provider == "" {
+		return "", "", fmt.Errorf("dsh: model %q not found in catalog", model)
 	}
+	return provider, modelID, nil
 }

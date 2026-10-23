@@ -34,6 +34,7 @@ type mockDshServer struct {
 
 	// command.execute lines and session.selectModel payloads (for mode/effort tests)
 	commands           []string
+	commandSessions    []string
 	failCommandExecute bool
 	settingsUpdates    []struct {
 		NS    string         `json:"ns"`
@@ -44,11 +45,10 @@ type mockDshServer struct {
 		Model           string `json:"model"`
 		ReasoningEffort string `json:"reasoningEffort"`
 	}
+	modelCatalog any // optional catalog override for routing regression tests
 
 	// failNext prompts the server to return an RPC error for the next N calls
 	failNext map[string]int
-
-	createdCh chan struct{} // signaled on every session.create (for sync)
 }
 
 type mockSession struct {
@@ -69,11 +69,10 @@ type mockRespondCall struct {
 
 func newMockDshServer() *mockDshServer {
 	m := &mockDshServer{
-		sessions:  make(map[string]*mockSession),
-		frames:    nil,
-		subs:      make(map[chan mockFrame]struct{}),
-		failNext:  make(map[string]int),
-		createdCh: make(chan struct{}, 64),
+		sessions: make(map[string]*mockSession),
+		frames:   nil,
+		subs:     make(map[chan mockFrame]struct{}),
+		failNext: make(map[string]int),
 	}
 	return m
 }
@@ -107,22 +106,8 @@ func (m *mockDshServer) addSession(cwd string) string {
 	id := fmt.Sprintf("session-mock-%d", m.nextID)
 	m.sessions[id] = &mockSession{id: id, cwd: cwd}
 	m.created = append(m.created, id)
-	select {
-	case m.createdCh <- struct{}{}:
-	default:
-	}
 	m.mu.Unlock()
 	return id
-}
-
-// waitCreated blocks until at least one session.create happened.
-func (m *mockDshServer) waitCreated(timeout time.Duration) bool {
-	select {
-	case <-m.createdCh:
-		return true
-	case <-time.After(timeout):
-		return false
-	}
 }
 
 // Locked accessors for test assertions.
@@ -178,13 +163,6 @@ func (m *mockDshServer) settingsUpdateCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.settingsUpdates)
-}
-
-func (m *mockDshServer) settingsUpdateAt(i int) (ns string, patch map[string]any) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	u := m.settingsUpdates[i]
-	return u.NS, u.Patch
 }
 
 func (m *mockDshServer) selectModelCount() int {
@@ -314,6 +292,10 @@ func (m *mockDshServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 		m.mu.Unlock()
 		value = map[string]any{"accepted": true}
 	case "session.models":
+		if m.modelCatalog != nil {
+			value = m.modelCatalog
+			break
+		}
 		value = map[string]any{
 			"current":  map[string]any{"provider": "mock", "model": "mock-1"},
 			"routable": true,
@@ -359,6 +341,7 @@ func (m *mockDshServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.Unmarshal(req.Payload, &p)
 		m.commands = append(m.commands, p.Line)
+		m.commandSessions = append(m.commandSessions, p.SessionID)
 		m.mu.Unlock()
 		value = map[string]any{"matched": true, "commandId": "cmd-1"}
 	case "settings.update":
@@ -385,6 +368,14 @@ func (m *mockDshServer) handleRPC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *mockDshServer) handleRespond(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	if m.failNext["respond"] > 0 {
+		m.failNext["respond"]--
+		m.mu.Unlock()
+		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+		return
+	}
+	m.mu.Unlock()
 	var req struct {
 		Type   string `json:"type"`
 		RPCID  string `json:"rpcId"`
@@ -400,7 +391,7 @@ func (m *mockDshServer) handleRespond(w http.ResponseWriter, r *http.Request) {
 	m.responds = append(m.responds, mockRespondCall{rpcID: req.RPCID, value: value})
 	m.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprint(w, `{"accepted":true}`)
+	_, _ = fmt.Fprint(w, `{"accepted":true}`)
 }
 
 // handleMux serves the aggregated event stream over WebSocket (matching the
@@ -408,15 +399,8 @@ func (m *mockDshServer) handleRespond(w http.ResponseWriter, r *http.Request) {
 // It replays m.frames and then broadcasts live frames until the client
 // disconnects.
 func (m *mockDshServer) handleMux(w http.ResponseWriter, r *http.Request) {
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(*http.Request) bool { return true },
-	}
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-
+	// Subscribe before acknowledging the upgrade, so a prompt sent as soon
+	// as Dial returns cannot race past subscriber registration.
 	ch := make(chan mockFrame, 4096)
 	m.mu.Lock()
 	m.subs[ch] = struct{}{}
@@ -428,6 +412,14 @@ func (m *mockDshServer) handleMux(w http.ResponseWriter, r *http.Request) {
 		delete(m.subs, ch)
 		m.mu.Unlock()
 	}()
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(*http.Request) bool { return true },
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer func() { _ = conn.Close() }()
 
 	send := func(f mockFrame) bool {
 		payload, err := json.Marshal(f.body)
@@ -477,7 +469,7 @@ func (m *mockDshServer) handleMux(w http.ResponseWriter, r *http.Request) {
 
 func writeServerValue(w http.ResponseWriter, rpcID string, value any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"type":  "server-response",
 		"rpcId": rpcID,
 		"result": map[string]any{
@@ -489,7 +481,7 @@ func writeServerValue(w http.ResponseWriter, rpcID string, value any) {
 
 func writeServerError(w http.ResponseWriter, rpcID, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"type":  "server-response",
 		"rpcId": rpcID,
 		"result": map[string]any{

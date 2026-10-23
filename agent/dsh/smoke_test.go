@@ -41,7 +41,7 @@ func TestSmoke_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v (is `dsh web` running at %s?)", err, baseURL)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 	t.Logf("session id: %s", ds.sessionID)
 

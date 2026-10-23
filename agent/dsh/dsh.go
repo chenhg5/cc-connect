@@ -37,13 +37,12 @@ type Agent struct {
 	timeout     time.Duration
 	sessionEnv  []string
 
-	// /mode + /reasoning runtime switches (applied at the next session start;
-	// mode is also pushed to the live session immediately via /permission).
+	// Defaults for new sessions. Live permission changes belong to the
+	// requesting dshSession, never to an agent-global last session.
 	mode        string
 	effort      string
-	effortCache []string   // efforts of the current model, refreshed per StartSession
-	lastSession string     // most recent session id (for immediate mode application)
-	client      *rpcClient // shared client for immediate commands
+	effortCache []string // efforts of the current model, refreshed per StartSession
+	client      *rpcClient
 }
 
 // normalizeMode maps cc-connect permission modes onto dsh permission presets.
@@ -109,6 +108,10 @@ func New(opts map[string]any) (core.Agent, error) {
 	agentPreset, _ := opts["agent_preset"].(string)
 	model, _ := opts["model"].(string)
 	effort, _ := opts["reasoning_effort"].(string)
+	mode := optsString(opts, "mode")
+	if mode != "" {
+		mode = normalizeMode(mode)
+	}
 
 	var timeout time.Duration
 	switch v := opts["timeout_mins"].(type) {
@@ -141,6 +144,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		agentPreset: agentPreset,
 		model:       model,
 		effort:      effort,
+		mode:        mode,
 		timeout:     timeout,
 		client:      client,
 	}, nil
@@ -160,7 +164,7 @@ func (a *Agent) Name() string { return "dsh" }
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.RLock()
 	workDir, preset, model, timeout := a.workDir, a.agentPreset, a.model, a.timeout
-	effort := a.effort
+	effort, mode := a.effort, a.mode
 	env := append([]string(nil), a.sessionEnv...)
 	client := a.client
 	a.mu.RUnlock()
@@ -170,11 +174,17 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		return nil, err
 	}
 
-	// Track the live session for immediate mode application and refresh the
-	// reasoning-effort catalog for /reasoning.
+	if mode != "" {
+		if err := s.setMode(mode); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+	}
+
+	// Refresh outside the lock: the server may be slow or disconnected.
+	efforts := fetchEffortOptions(ctx, client, s.CurrentSessionID())
 	a.mu.Lock()
-	a.lastSession = s.CurrentSessionID()
-	if efforts := fetchEffortOptions(ctx, client, s.CurrentSessionID()); efforts != nil {
+	if efforts != nil {
 		a.effortCache = efforts
 	}
 	a.mu.Unlock()
@@ -385,29 +395,12 @@ func (a *Agent) absWorkDir() string {
 
 // ── ModeSwitcher ────────────────────────────────────────────────
 
-// SetMode stores the permission mode and, when a live session exists, applies
-// it immediately by switching the dsh session's permission preset via the
-// /permission command:
-//
-//	default → workspace-write  (approval prompts per tool)
-//	yolo    → danger-full-access (no approval prompts)
-//	plan    → read-only (when the deployment defines that preset)
-//
-// The engine restarts the session after a mode change, so the stored value
-// also re-applies on the next StartSession.
+// SetMode stores the default for future sessions. The engine applies live
+// changes through the requesting session's LiveModeSwitcher.
 func (a *Agent) SetMode(mode string) {
-	mode = normalizeMode(mode)
-
 	a.mu.Lock()
-	a.mode = mode
-	client := a.client
-	sessionID := a.lastSession
-	a.mu.Unlock()
-
-	slog.Info("dsh: mode changed", "mode", mode)
-	if sessionID != "" {
-		go a.applyPermissionPreset(client, sessionID, mode)
-	}
+	defer a.mu.Unlock()
+	a.mode = normalizeMode(mode)
 }
 
 func (a *Agent) GetMode() string {
@@ -428,53 +421,6 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 			Desc:   "Switch the dsh session to read-only (requires a read-only preset)",
 			DescZh: "切换 dsh 会话到只读（需要部署配置了 read-only 预设）"},
 	}
-}
-
-// applyPermissionPreset runs /permission <preset> against one session via the
-// command registry (best effort; failures are logged, never fatal).
-func (a *Agent) applyPermissionPreset(client *rpcClient, sessionID, mode string) {
-	if client == nil {
-		return
-	}
-	preset := modePreset(mode)
-
-	// Path 1 — session-scoped: run the `/permission <preset>` command through
-	// the command registry (dsh builds that mount @deepseek-ai/dsh-commands).
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	var out struct {
-		Matched bool `json:"matched"`
-	}
-	err := client.call(ctx, "command.execute", map[string]any{
-		"sessionId": sessionID,
-		"line":      "/permission " + preset,
-	}, &out)
-	cancel()
-	if err == nil && out.Matched {
-		slog.Info("dsh: permission preset applied (command)", "session_id", sessionID, "preset", preset)
-		return
-	}
-	if err != nil {
-		slog.Debug("dsh: /permission command unavailable, falling back to settings", "preset", preset, "error", err)
-	} else {
-		slog.Debug("dsh: /permission command not matched, falling back to settings", "preset", preset)
-	}
-
-	// Path 2 — fallback: write the `permission` settings namespace's
-	// defaultPreset via settings.update (dsh npm builds without the command
-	// registry, e.g. rc.6). This changes the default for FUTURE sessions,
-	// which matches cc-connect's /mode flow: the engine restarts the session
-	// after a mode change, so the next message creates a fresh session on the
-	// new preset.
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel2()
-	if err := client.call(ctx2, "settings.update", map[string]any{
-		"ns":    "permission",
-		"patch": map[string]any{"defaultPreset": preset},
-	}, nil); err != nil {
-		slog.Warn("dsh: mode switch failed (no /permission command and settings.update rejected)", "preset", preset, "error", err)
-		return
-	}
-	slog.Info("dsh: permission preset applied (settings, applies to new sessions)", "preset", preset)
 }
 
 // ── ReasoningEffortSwitcher ─────────────────────────────────────
@@ -515,6 +461,9 @@ func fetchEffortOptions(ctx context.Context, client *rpcClient, sessionID string
 		return nil
 	}
 	for _, g := range models.Groups {
+		if g.ID != models.Current.Provider {
+			continue
+		}
 		for _, m := range g.Models {
 			if m.ID != models.Current.Model {
 				continue
@@ -533,6 +482,21 @@ func fetchEffortOptions(ctx context.Context, client *rpcClient, sessionID string
 
 func (a *Agent) CLIBinaryName() string  { return "dsh" }
 func (a *Agent) CLIDisplayName() string { return "DeepSeek Harness (dsh)" }
+
+// WorkspaceAgentOptions preserves connection and runtime settings while the
+// engine supplies the new workspace's work_dir and session environment.
+func (a *Agent) WorkspaceAgentOptions() map[string]any {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return map[string]any{
+		"base_url":         a.baseURL,
+		"agent_preset":     a.agentPreset,
+		"model":            a.model,
+		"reasoning_effort": a.effort,
+		"mode":             a.mode,
+		"timeout_mins":     a.timeout.Minutes(),
+	}
+}
 
 // DoctorChecks reports the dsh web server's reachability.
 func (a *Agent) DoctorChecks(ctx context.Context) []core.DoctorCheckResult {
@@ -564,16 +528,18 @@ func (a *Agent) DoctorChecks(ctx context.Context) []core.DoctorCheckResult {
 
 // Interface assertions.
 var (
-	_ core.Agent                   = (*Agent)(nil)
-	_ core.WorkDirSwitcher         = (*Agent)(nil)
-	_ core.SessionIDValidator      = (*Agent)(nil)
-	_ core.SessionEnvInjector      = (*Agent)(nil)
-	_ core.MemoryFileProvider      = (*Agent)(nil)
-	_ core.ModelSwitcher           = (*Agent)(nil)
-	_ core.ModeSwitcher            = (*Agent)(nil)
-	_ core.ReasoningEffortSwitcher = (*Agent)(nil)
-	_ core.AgentDoctorInfo         = (*Agent)(nil)
-	_ core.DoctorChecker           = (*Agent)(nil)
-	_ core.AgentSession            = (*dshSession)(nil)
-	_ core.AgentSessionCanceller   = (*dshSession)(nil)
+	_ core.Agent                           = (*Agent)(nil)
+	_ core.WorkDirSwitcher                 = (*Agent)(nil)
+	_ core.SessionIDValidator              = (*Agent)(nil)
+	_ core.SessionEnvInjector              = (*Agent)(nil)
+	_ core.MemoryFileProvider              = (*Agent)(nil)
+	_ core.ModelSwitcher                   = (*Agent)(nil)
+	_ core.ModeSwitcher                    = (*Agent)(nil)
+	_ core.ReasoningEffortSwitcher         = (*Agent)(nil)
+	_ core.AgentDoctorInfo                 = (*Agent)(nil)
+	_ core.DoctorChecker                   = (*Agent)(nil)
+	_ core.AgentSession                    = (*dshSession)(nil)
+	_ core.AgentSessionCanceller           = (*dshSession)(nil)
+	_ core.LiveModeSwitcher                = (*dshSession)(nil)
+	_ core.WorkspaceAgentOptionSnapshotter = (*Agent)(nil)
 )

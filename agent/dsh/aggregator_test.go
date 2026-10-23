@@ -129,7 +129,7 @@ func TestSession_TinyDeltasCoalesce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 	id := ds.sessionID
 

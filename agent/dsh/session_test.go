@@ -148,7 +148,7 @@ func TestSession_StreamingTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 	id := ds.sessionID
 
@@ -216,7 +216,7 @@ func TestSession_ToolCallDedupe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 	id := ds.sessionID
 
@@ -256,7 +256,7 @@ func TestSession_ToolResultFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 	id := ds.sessionID
 
@@ -289,7 +289,7 @@ func TestSession_TurnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 	id := ds.sessionID
 
@@ -324,7 +324,7 @@ func TestSession_ApprovalFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 	id := ds.sessionID
 
@@ -427,7 +427,7 @@ func TestSession_QuestionFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 	id := ds.sessionID
 
@@ -546,7 +546,7 @@ func TestRespondPermission_UnknownRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 
 	err = ds.RespondPermission("no-such", core.PermissionResult{Behavior: "allow"})
@@ -563,7 +563,7 @@ func TestCancelTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 
 	if err := ds.CancelTurn(); err != nil {
@@ -586,7 +586,7 @@ func TestSession_TurnTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 	id := ds.sessionID
 
@@ -622,7 +622,7 @@ func TestSession_EnvBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 
 	if err := ds.Send("first", "msg-1", nil, nil); err != nil {
@@ -728,7 +728,7 @@ func TestAgent_ModelSwitcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	models := agent.AvailableModels(context.Background())
 	if len(models) != 2 {
@@ -777,7 +777,7 @@ func TestOpenMux_OtherSessionNoiseDoesNotStallOwnTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	ds := s.(*dshSession)
 	id := ds.sessionID
 
@@ -811,7 +811,7 @@ func TestOpenMux_OtherSessionNoiseDoesNotStallOwnTurn(t *testing.T) {
 }
 
 // TestAgent_ModeSwitcher verifies /mode support: normalization, immediate
-// application via the dsh /permission command, and the mode catalog.
+// application on the selected session, and the mode catalog.
 func TestAgent_ModeSwitcher(t *testing.T) {
 	m := newMockDshServer()
 	agent := newTestAgent(t, m, "/tmp/proj")
@@ -837,11 +837,14 @@ func TestAgent_ModeSwitcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	agent.SetMode("yolo")
 	if agent.GetMode() != "yolo" {
 		t.Fatalf("GetMode mismatch: %q", agent.GetMode())
+	}
+	if !s.(core.LiveModeSwitcher).SetLiveMode("yolo") {
+		t.Fatal("live yolo switch failed")
 	}
 	waitFor(t, 5*time.Second, func() bool { return m.commandCount() >= 1 }, "/permission command")
 	if line := m.commandAt(0); line != "/permission danger-full-access" {
@@ -849,12 +852,18 @@ func TestAgent_ModeSwitcher(t *testing.T) {
 	}
 
 	agent.SetMode("plan")
+	if !s.(core.LiveModeSwitcher).SetLiveMode("plan") {
+		t.Fatal("live plan switch failed")
+	}
 	waitFor(t, 5*time.Second, func() bool { return m.commandCount() >= 2 }, "second /permission command")
 	if line := m.commandAt(1); line != "/permission read-only" {
 		t.Fatalf("expected /permission read-only, got %q", line)
 	}
 
 	agent.SetMode("default")
+	if !s.(core.LiveModeSwitcher).SetLiveMode("default") {
+		t.Fatal("live default switch failed")
+	}
 	waitFor(t, 5*time.Second, func() bool { return m.commandCount() >= 3 }, "third /permission command")
 	if line := m.commandAt(2); line != "/permission workspace-write" {
 		t.Fatalf("expected /permission workspace-write, got %q", line)
@@ -877,7 +886,7 @@ func TestAgent_ReasoningEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// The effort override must ride the selectModel call.
 	waitFor(t, 5*time.Second, func() bool { return m.selectModelCount() >= 1 }, "selectModel call")
@@ -898,7 +907,7 @@ func TestAgent_ReasoningEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession 2: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 	waitFor(t, 5*time.Second, func() bool { return m.selectModelCount() >= 2 }, "second selectModel call")
 	_, _, effort2 := m.selectModelAt(1)
 	if effort2 != "low" {
@@ -906,11 +915,8 @@ func TestAgent_ReasoningEffort(t *testing.T) {
 	}
 }
 
-// TestAgent_ModeSwitcher_SettingsFallback verifies the mode switch degrades
-// to settings.update when the deployment has no command registry (dsh npm
-// builds like rc.6): the permission defaultPreset is written so NEW sessions
-// start on the requested preset.
-func TestAgent_ModeSwitcher_SettingsFallback(t *testing.T) {
+// Unsupported session-scoped commands must never mutate shared defaults.
+func TestAgent_ModeSwitcher_NoGlobalSettingsFallback(t *testing.T) {
 	m := newMockDshServer()
 	m.mu.Lock()
 	m.failCommandExecute = true
@@ -921,18 +927,16 @@ func TestAgent_ModeSwitcher_SettingsFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	agent.SetMode("plan")
 	if agent.GetMode() != "plan" {
 		t.Fatalf("GetMode mismatch: %q", agent.GetMode())
 	}
-	waitFor(t, 5*time.Second, func() bool { return m.settingsUpdateCount() >= 1 }, "settings.update fallback")
-	ns, patch := m.settingsUpdateAt(0)
-	if ns != "permission" {
-		t.Fatalf("expected permission namespace, got %q", ns)
+	if s.(core.LiveModeSwitcher).SetLiveMode("plan") {
+		t.Fatal("unsupported mode switch reported success")
 	}
-	if patch["defaultPreset"] != "read-only" {
-		t.Fatalf("expected defaultPreset=read-only, got %v", patch)
+	if m.settingsUpdateCount() != 0 {
+		t.Fatal("unsupported session command changed shared defaults")
 	}
 }
