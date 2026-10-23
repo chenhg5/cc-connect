@@ -3657,7 +3657,7 @@ found:
 		// not be accepted as answers — otherwise the tool gets empty answers
 		// within ~500ms before the user has a chance to respond (#1086).
 		if strings.TrimSpace(content) == "" {
-			return false
+			return e.holdForUnsolicitedQuestion(p, msg, state, pending)
 		}
 
 		curIdx := pending.CurrentQuestion
@@ -3680,6 +3680,11 @@ found:
 		// All questions answered — build response and resolve
 		updatedInput := buildAskQuestionResponse(pending.ToolInput, pending.Questions, pending.Answers)
 
+		// A background question can be withdrawn concurrently; only the side
+		// that claims the request responds.
+		if !claimPending(state, pending) {
+			return true
+		}
 		if err := state.agentSession.RespondPermission(pending.RequestID, PermissionResult{
 			Behavior:     "allow",
 			UpdatedInput: updatedInput,
@@ -3689,10 +3694,6 @@ found:
 		} else {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
 		}
-
-		state.mu.Lock()
-		state.pending = nil
-		state.mu.Unlock()
 		pending.resolve()
 		return true
 	}
@@ -5078,6 +5079,11 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 	events := agentSession.Events()
 
+	// Questions are answered while the reader keeps reading; see
+	// unsolicitedQuestions.
+	questions := e.newUnsolicitedQuestions(state, agentSession)
+	defer questions.withdraw()
+
 	var turnActive bool // true after first event, cleared on EventResult
 	defer func() {
 		if turnActive {
@@ -5142,6 +5148,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			flushPartial("cancelled")
 			return
 
+		case <-questions.answered():
+			questions.next(ctx)
+
 		case event, ok := <-events:
 			if !ok {
 				// Channel closed — agent process exited. Log any buffered
@@ -5195,6 +5204,13 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			p := state.platform
 			replyCtx := state.replyCtx
 			state.mu.Unlock()
+
+			// A question is for the user to answer, not a permission to deny
+			// on their behalf; ask it as a foreground turn would.
+			if isAskQuestionRequest(event) {
+				questions.ask(event)
+				continue
+			}
 
 			switch event.Type {
 			case EventText:
