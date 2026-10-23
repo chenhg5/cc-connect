@@ -1335,4 +1335,12 @@ not replay the previous task. A newer question replaces the previous open one.
 Feishu async cards show submission success only after model acknowledgement.
 Repeated or uncertain answers are not sent again automatically. Unknown steering
 delivery is retained in `/history` with a warning, not represented as confirmed.
+
+An answer with an unknown delivery outcome stays terminal for that question,
+even after restart: neither its card buttons nor `/answer` can resubmit it.
+Check the model's reply and `/history` first, since the answer may already have
+been applied. If a correction is still needed, send an explicit ordinary message
+in the original conversation describing the intended result. This is a new user
+instruction, not a retry of the old card, and may cause additional work.
+
 See [validation scope and environments](busy-steering-validation.md).

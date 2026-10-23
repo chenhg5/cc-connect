@@ -406,6 +406,10 @@ var ErrSteerRejected = errors.New("steering was rejected")
 // question) into an active turn without starting a new turn. True with nil error
 // confirms acceptance. False with nil error means no input was submitted and
 // callers may use their normal queue/Send path. See ErrSteerRejected for errors.
+// Adapter implementations must return ErrSteerRejected (or wrap it so errors.Is
+// matches) only when non-acceptance is certain. Any other error, including a
+// generic error used for a rejection, is treated as unknown delivery and will
+// not be automatically retried.
 type UserInputSteerer interface {
 	SteerUserInput(prompt string) (bool, error)
 }
