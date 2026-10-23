@@ -3,6 +3,8 @@ package media_pipeline
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -218,10 +220,50 @@ func newMediaEngine(t *testing.T) (*core.Engine, *recordingAgent, *mediaPlatform
 	t.Helper()
 	agent := newRecordingAgent()
 	platform := &mediaPlatform{}
-	engine := core.NewEngine("release-media", agent, []core.Platform{platform}, t.TempDir()+"/sessions.json", core.LangEnglish)
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	engine := core.NewEngine("release-media", agent, []core.Platform{platform}, storePath, core.LangEnglish)
 	t.Cleanup(func() {
 		engine.Stop()
 		_ = agent.Stop()
+		// The background queued-message worker can still be persisting the
+		// session store when Stop returns. Wait until the store file is on
+		// disk and no atomic temp file is in flight, so Go's TempDir cleanup
+		// (which removes the parent directory) does not race the save and fail
+		// with "directory not empty". Note: t.TempDir() returns a new numbered
+		// subdirectory on every call, so capture storePath instead.
+		dir := filepath.Dir(storePath)
+		deadline := time.Now().Add(2 * time.Second)
+		stable := 0
+		for {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				break
+			}
+			hasStore, hasTmp := false, false
+			for _, e := range entries {
+				if e.Name() == "sessions.json" {
+					hasStore = true
+				}
+				if strings.HasPrefix(e.Name(), ".tmp-") {
+					hasTmp = true
+				}
+			}
+			if hasStore && !hasTmp {
+				// Require a short stable window: a second save may follow the
+				// first (queued turn + finalize), and the worker must have
+				// fully quiesced before TempDir cleanup removes the parent.
+				stable++
+				if stable >= 5 {
+					break
+				}
+			} else {
+				stable = 0
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	})
 	return engine, agent, platform
 }

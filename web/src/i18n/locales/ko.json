@@ -373,6 +373,13 @@
     "rlMaxMessagesHint": "기간당 최대 메시지 수; 0 = 사용 안 함",
     "rlWindowSecs": "기간 (초)",
     "rlWindowSecsHint": "초 단위의 시간 기간",
+    "retriableError": "재시도 가능한 오류",
+    "retriableInitialDelay": "최초 재시도 지연 (초)",
+    "retriableInitialDelayHint": "최초 재시도 전 대기 시간; 0 = 즉시 재시도",
+    "retriableRetryDelay": "재시도 지연 (초)",
+    "retriableRetryDelayHint": "이후 재시도 간 대기 시간; 0 = 즉시 재시도",
+    "retriableMaxAttempts": "최대 시도 횟수",
+    "retriableMaxAttemptsHint": "최초 전송을 포함한 총 시도 횟수",
     "log": "로그",
     "logLevel": "로그 레벨"
   },
