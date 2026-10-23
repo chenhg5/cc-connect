@@ -181,7 +181,7 @@ type appServerSession struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
-	steerMu      sync.Mutex // Serialize native follow-ups and async answers.
+	steerMu      sync.Mutex // Serializes steerUserInput calls, including engine-routed async answers.
 	stateMu      sync.Mutex
 	pendingMsgs  []string
 	currentTurn  string
