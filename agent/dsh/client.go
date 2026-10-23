@@ -1,13 +1,7 @@
-// Package dsh bridges cc-connect to a running DeepSeek Harness (dsh) web
-// server. It implements the core.Agent interface by forwarding prompts to
-// the server's typed RPC API (POST /api/session.prompt) and consuming the
-// aggregated event stream (GET /api/events.mux) for streaming output,
-// tool calls, permission approvals, and AskUserQuestion interactions.
-//
-// The dsh server must be running on the same machine (default
-// http://127.0.0.1:3080, i.e. `dsh web`). Sessions are created with the
-// project's work_dir as cwd, so each cc-connect project maps to its own
-// dsh session; resuming reuses the persisted session on the server side.
+// Package dsh bridges cc-connect to a running DeepSeek Harness web server.
+// Authenticated releases use the Remote API and multiplexed Remote streams;
+// older deployments retain their legacy typed RPC and event-stream transport.
+// Sessions use the project's work_dir and resume the native conversation.
 package dsh
 
 import (
@@ -23,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -103,9 +98,11 @@ type wireQuestion struct {
 // sessionEvent is a raw SessionEvent (packages/session/.../types.ts). Only
 // the fields cc-connect consumes are decoded; everything else is ignored.
 type sessionEvent struct {
-	Type string          `json:"type"`
-	Seq  int64           `json:"seq"`
-	Data json.RawMessage `json:"data"`
+	Type      string          `json:"type"`
+	Seq       int64           `json:"seq"`
+	Data      json.RawMessage `json:"data"`
+	Time      float64         `json:"time,omitempty"`
+	SurfaceOp json.RawMessage `json:"surfaceOp,omitempty"`
 }
 
 // sessionEventData unions the data payloads of the events we consume.
@@ -191,8 +188,12 @@ type sessionModels struct {
 
 // rpcClient is a minimal client for the dsh typed RPC API.
 type rpcClient struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL      string
+	httpClient   *http.Client
+	token        string
+	sessionOwned bool
+	remoteMu     sync.Mutex
+	remote       *remoteTransport
 }
 
 func newRPCClient(baseURL string) *rpcClient {
@@ -226,6 +227,13 @@ func base64Encode(data []byte) string {
 // call performs one unary RPC (POST /api/<method>). It returns the ok value
 // decoded into out, or a descriptive error (including the RPC error code).
 func (c *rpcClient) call(ctx context.Context, method string, payload any, out any) error {
+	if c.token != "" {
+		return c.remoteCall(ctx, method, payload, out)
+	}
+	return c.callHTTP(ctx, method, payload, out, "")
+}
+
+func (c *rpcClient) callHTTP(ctx context.Context, method string, payload any, out any, cookie string) error {
 	reqBody, err := json.Marshal(clientRequest{
 		Type:    "client-request",
 		RPCID:   mintRPCID(),
@@ -241,8 +249,21 @@ func (c *rpcClient) call(ctx context.Context, method string, payload any, out an
 		return fmt.Errorf("dsh: create %s request: %w", method, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
 
-	resp, err := c.httpClient.Do(req)
+	client := c.httpClient
+	if method == "commands/execute" {
+		// Native compaction may need a full model response before writing headers.
+		transport := c.httpClient.Transport.(*http.Transport).Clone()
+		transport.ResponseHeaderTimeout = 0
+		defer transport.CloseIdleConnections()
+		commandClient := *c.httpClient
+		commandClient.Transport = transport
+		client = &commandClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("dsh: %s: %w (is the dsh web server running? start it with `dsh web`)", method, err)
 	}
@@ -301,6 +322,9 @@ func (e *rpcCallError) Error() string {
 // question answers). The server replies with a receipt, which is checked for
 // shape but otherwise ignored.
 func (c *rpcClient) respond(ctx context.Context, rpcID string, value any) error {
+	if c.token != "" {
+		return c.remoteRespond(ctx, rpcID, value)
+	}
 	body := map[string]any{
 		"type":   "client-response",
 		"rpcId":  rpcID,
@@ -355,6 +379,9 @@ func (c *rpcClient) respond(ctx context.Context, rpcID string, value any) error 
 // reader. A full queue applies cancellation-aware backpressure rather than
 // dropping answer text or tool events.
 func (c *rpcClient) openMux(ctx context.Context, targetSessionID string) (<-chan muxFrame, error) {
+	if c.token != "" {
+		return c.remoteMux(ctx, targetSessionID)
+	}
 	u, err := url.Parse(c.baseURL + "/api/events.mux")
 	if err != nil {
 		return nil, fmt.Errorf("dsh: parse mux url: %w", err)
@@ -444,6 +471,9 @@ func parseBaseURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", fmt.Errorf("dsh: invalid base_url %q: %w", raw, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return "", fmt.Errorf("dsh: base_url must use HTTP(S) without user credentials")
 	}
 	if u.Host == "" {
 		return "", fmt.Errorf("dsh: invalid base_url %q: missing host", raw)

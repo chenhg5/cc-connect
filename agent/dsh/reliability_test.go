@@ -193,7 +193,7 @@ func TestAgent_WorkspaceOptionsPreserveDSHConfiguration(t *testing.T) {
 	m := newMockDshServer()
 	agent := newTestAgent(t, m, t.TempDir())
 	agent.agentPreset = "custom"
-	agent.timeout = 2 * time.Minute
+	agent.timeout = 90 * time.Second
 	agent.SetModel("mock/mock-2")
 	agent.SetReasoningEffort("high")
 	agent.SetMode("plan")

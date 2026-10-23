@@ -3,6 +3,7 @@ package dsh
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -41,12 +42,13 @@ type dshSession struct {
 	pendingQuestions map[string]pendingQuestion
 
 	// turn state
-	turnMu      sync.Mutex
-	currentTurn int
-	lastUsage   *tokenUsage
-	toolNames   map[string]string   // callId → tool name (for tool/result)
-	seenCalls   map[string]struct{} // callIds already surfaced as EventToolUse
-	turnDone    chan struct{}       // signaled on turn/end; fresh per Send()
+	commandCancel context.CancelFunc // guarded by turnMu
+	turnMu        sync.Mutex
+	currentTurn   int
+	lastUsage     *tokenUsage
+	toolNames     map[string]string   // callId → tool name (for tool/result)
+	seenCalls     map[string]struct{} // callIds already surfaced as EventToolUse
+	turnDone      chan struct{}       // signaled on turn/end; fresh per Send()
 
 	// delta aggregation: dsh streams token-level chunks; coalesce them into
 	// engine-sized EventText/EventThinking pieces so platform delivery is not
@@ -165,6 +167,11 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		return fmt.Errorf("dsh: session is closed")
 	}
 
+	if s.client.token != "" && len(images) == 0 && len(files) == 0 && strings.HasPrefix(strings.TrimSpace(prompt), "/") {
+		if err := s.sendNativeCommand(prompt); !errors.Is(err, core.ErrNotSupported) {
+			return err
+		}
+	}
 	// One-time env bootstrap on the first message of a fresh session.
 	s.envMu.Lock()
 	if s.envBlock != "" && !s.envInjected {
@@ -203,11 +210,14 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 	s.turnDone = turnDone
 	s.turnMu.Unlock()
 
-	if err := s.client.call(s.ctx, "session.prompt", map[string]any{
-		"sessionId": s.sessionID,
-		"mode":      "queue",
-		"content":   content,
-	}, nil); err != nil {
+	payload := map[string]any{"sessionId": s.sessionID, "mode": "queue", "content": content}
+	if s.client.token != "" {
+		if messageID == "" {
+			messageID = mintRPCID()
+		}
+		payload["requestId"] = messageID
+	}
+	if err := s.client.call(s.ctx, "session.prompt", payload, nil); err != nil {
 		s.turnMu.Lock()
 		s.turnDone = nil
 		s.turnMu.Unlock()
@@ -298,7 +308,7 @@ func buildQuestionAnswers(q pendingQuestion, result core.PermissionResult) []map
 		if ansText == "" {
 			continue
 		}
-		entry := map[string]any{"id": item.ID}
+		entry := map[string]any{"id": item.ID, "selected": []string{}}
 		if selected, custom := splitAnswer(ansText, item); len(selected) > 0 {
 			entry["selected"] = selected
 			if custom != "" {
@@ -312,7 +322,7 @@ func buildQuestionAnswers(q pendingQuestion, result core.PermissionResult) []map
 	if len(out) == 0 {
 		// Fallback: answer everything with the raw text so the tool unblocks.
 		for _, item := range q.items {
-			out = append(out, map[string]any{"id": item.ID, "custom": ""})
+			out = append(out, map[string]any{"id": item.ID, "custom": "", "selected": []string{}})
 		}
 	}
 	return out
@@ -347,6 +357,13 @@ func splitAnswer(text string, q wireQuestion) (selected []string, custom string)
 }
 
 func (s *dshSession) CancelTurn() error {
+	s.turnMu.Lock()
+	commandCancel := s.commandCancel
+	s.turnMu.Unlock()
+	if commandCancel != nil {
+		commandCancel()
+		return nil
+	}
 	if err := s.client.call(s.ctx, "session.cancel", map[string]any{"sessionId": s.sessionID}, nil); err != nil {
 		return fmt.Errorf("dsh: cancel turn: %w", err)
 	}
@@ -400,6 +417,9 @@ func (s *dshSession) Close() error {
 		s.alive.Store(false)
 		// Unblock producers before waiting for aggregation or socket readers.
 		s.cancel()
+		if s.client.sessionOwned {
+			s.client.closeRemote()
+		}
 		s.textAgg.Cancel()
 		s.thinkAgg.Cancel()
 		// Wait for the mux reader to finish (the stream drops on cancel).
@@ -444,6 +464,11 @@ func (s *dshSession) handleFrame(f muxFrame) {
 		s.handleApprovalRequested(f)
 	case "question/requested":
 		s.handleQuestionRequested(f)
+	case "interaction/cancelled":
+		s.pendingMu.Lock()
+		delete(s.pendingApprovals, f.RPCID)
+		delete(s.pendingQuestions, f.RPCID)
+		s.pendingMu.Unlock()
 	case "approval/resolved", "question/resolved":
 		// Nothing to do — the pending entry was already consumed by the
 		// response, and stale entries expire with the session.

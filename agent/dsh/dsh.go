@@ -1,13 +1,7 @@
-// Package dsh bridges cc-connect to a running DeepSeek Harness (dsh) web
-// server. It implements the core.Agent interface by forwarding prompts to
-// the server's typed RPC API (POST /api/session.prompt) and consuming the
-// aggregated event stream (GET /api/events.mux) for streaming output,
-// tool calls, permission approvals, and AskUserQuestion interactions.
-//
-// The dsh server must be running on the same machine (default
-// http://127.0.0.1:3080, i.e. `dsh web`). Sessions are created with the
-// project's work_dir as cwd, so each cc-connect project maps to its own
-// dsh session; resuming reuses the persisted session on the server side.
+// Package dsh bridges cc-connect to a running DeepSeek Harness web server.
+// Authenticated releases use the Remote API and multiplexed Remote streams;
+// older deployments retain their legacy typed RPC and event-stream transport.
+// Sessions use the project's work_dir and resume the native conversation.
 package dsh
 
 import (
@@ -29,13 +23,14 @@ func init() {
 
 // Agent drives a remote dsh web server instance.
 type Agent struct {
-	mu          sync.RWMutex
-	baseURL     string // dsh web server, e.g. "http://127.0.0.1:3080"
-	workDir     string // project directory used as the session cwd
-	agentPreset string // optional dsh agent preset for new sessions
-	model       string // optional "provider/model" override applied at session start
-	timeout     time.Duration
-	sessionEnv  []string
+	mu             sync.RWMutex
+	baseURL        string // dsh web server, e.g. "http://127.0.0.1:3080"
+	workDir        string // project directory used as the session cwd
+	agentPreset    string // optional dsh agent preset for new sessions
+	model          string // optional "provider/model" override applied at session start
+	timeout        time.Duration
+	sessionEnv     []string
+	platformPrompt string
 
 	// Defaults for new sessions. Live permission changes belong to the
 	// requesting dshSession, never to an agent-global last session.
@@ -80,6 +75,7 @@ func modePreset(mode string) string {
 // Options:
 //
 //	base_url      dsh web server URL (default "http://127.0.0.1:3080")
+//	token         Remote API launch token (or DSH_TOKEN / launch URL query)
 //	work_dir      project directory used as session cwd (default ".")
 //	agent_preset  optional dsh agent preset name for new sessions
 //	model         optional "provider/model" override applied at session start
@@ -89,7 +85,7 @@ func modePreset(mode string) string {
 // stays non-blocking. Sessions fail with a clear message until `dsh web` is
 // running.
 func New(opts map[string]any) (core.Agent, error) {
-	baseURL, err := parseBaseURL(optsString(opts, "base_url"))
+	baseURL, token, err := connectionOptions(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +116,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	case int:
 		timeout = time.Duration(v) * time.Minute
 	case float64:
-		timeout = time.Duration(int64(v)) * time.Minute
+		timeout = time.Duration(v * float64(time.Minute))
 	}
 
 	slog.Info("dsh: agent created", "base_url", baseURL, "work_dir", workDir,
@@ -129,6 +125,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	// Soft reachability probe: warn early about a missing server without
 	// blocking project startup (the server may still be booting).
 	client := newRPCClient(baseURL)
+	client.token = token
 	probeCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 	if err := client.call(probeCtx, "session.list", map[string]any{}, nil); err != nil {
@@ -165,15 +162,20 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.RLock()
 	workDir, preset, model, timeout := a.workDir, a.agentPreset, a.model, a.timeout
 	effort, mode := a.effort, a.mode
+	platformPrompt := a.platformPrompt
 	env := append([]string(nil), a.sessionEnv...)
-	client := a.client
+	client := a.client.sessionClient()
 	a.mu.RUnlock()
 
 	s, err := newDshSession(ctx, client, workDir, sessionID, preset, model, effort, timeout, env)
 	if err != nil {
+		if client.sessionOwned {
+			client.closeRemote()
+		}
 		return nil, err
 	}
 
+	s.envBlock = core.AgentSystemPrompt() + "\n" + platformPrompt + "\n" + s.envBlock
 	if mode != "" {
 		if err := s.setMode(mode); err != nil {
 			_ = s.Close()
@@ -194,7 +196,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 // ListSessions returns the dsh sessions persisted for this project's cwd.
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
 	a.mu.RLock()
-	client := newRPCClient(a.baseURL)
+	client := a.client
 	workDir := a.workDir
 	a.mu.RUnlock()
 
@@ -232,8 +234,8 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 	return sessions, nil
 }
 
-// Stop is a no-op: the dsh server is shared and keeps running.
-func (a *Agent) Stop() error { return nil }
+// Stop closes this agent's catalog connection; the shared server keeps running.
+func (a *Agent) Stop() error { a.client.closeRemote(); return nil }
 
 // ── WorkDirSwitcher ─────────────────────────────────────────────
 
@@ -262,7 +264,7 @@ func (a *Agent) ValidateSessionID(ctx context.Context, sessionID string) bool {
 		return false
 	}
 	a.mu.RLock()
-	client := newRPCClient(a.baseURL)
+	client := a.client
 	workDir := a.workDir
 	a.mu.RUnlock()
 
@@ -334,13 +336,21 @@ func (a *Agent) GetModel() string {
 }
 
 // AvailableModels queries the catalog of the most recently started session.
-// Returns nil when no session exists yet (the engine then shows the default
-// model only).
+// Remote servers expose their full catalog before the first session. Legacy
+// servers need an existing project session to query their catalog.
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	a.mu.RLock()
-	client := newRPCClient(a.baseURL)
+	client := a.client
 	a.mu.RUnlock()
 
+	if client.token != "" {
+		var models sessionModels
+		if err := client.call(ctx, "session.models", map[string]any{}, &models); err != nil {
+			slog.Warn("dsh: model discovery failed", "error", err)
+			return nil
+		}
+		return modelOptions(models)
+	}
 	// Find any session of this project to read the catalog from.
 	var out struct {
 		Items []sessionSummary `json:"items"`
@@ -365,6 +375,10 @@ func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 		slog.Debug("dsh: fetch models failed", "error", err)
 		return nil
 	}
+	return modelOptions(models)
+}
+
+func modelOptions(models sessionModels) []core.ModelOption {
 	var opts []core.ModelOption
 	for _, g := range models.Groups {
 		for _, m := range g.Models {
@@ -490,6 +504,7 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	defer a.mu.RUnlock()
 	return map[string]any{
 		"base_url":         a.baseURL,
+		"token":            a.client.token,
 		"agent_preset":     a.agentPreset,
 		"model":            a.model,
 		"reasoning_effort": a.effort,
@@ -501,7 +516,7 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 // DoctorChecks reports the dsh web server's reachability.
 func (a *Agent) DoctorChecks(ctx context.Context) []core.DoctorCheckResult {
 	a.mu.RLock()
-	client := newRPCClient(a.baseURL)
+	client := a.client
 	baseURL := a.baseURL
 	a.mu.RUnlock()
 

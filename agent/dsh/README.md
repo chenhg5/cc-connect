@@ -1,79 +1,103 @@
 # DSH web adapter
 
-This adapter connects to the legacy DSH web RPC protocol: JSON
-`client-request` / `server-response` envelopes on `/api/session.*`,
-`/api/respond` interaction receipts, and `/api/events.mux` WebSocket events.
-The server and cc-connect must share access to the configured `work_dir`
-for file attachments.
+Connect cc-connect to a running DeepSeek Harness web server on the same
+machine. The authenticated Remote API is verified against the public
+`@deepseek-ai/dsh@0.2.1-rc.2` package. The adapter also retains #1676's
+legacy `/api/session.*` and `/api/events.mux` transport for older deployments.
 
-## Permission isolation
+## Configuration
 
-`mode` configures new sessions. Live `/mode` changes use the requesting
-session's `LiveModeSwitcher`; changing the agent default does not mutate
-another live session. Explicit modes must be applied successfully before
-session startup returns.
+Start `dsh web` and use the launch token it prints:
 
-The server must provide `command.execute` and the session-scoped
-`/permission` command. A missing command or rejected selection fails
-explicitly. The adapter never writes `permission.defaultPreset` through
-`settings.update`, because that would change other projects' defaults on
-a shared server. `plan` additionally requires a configured `read-only`
-permission preset in DSH.
+```toml
+[projects.agent]
+type = "dsh"
 
-## Delivery and recovery
-
-Both event queues apply cancellation-aware backpressure. Text, reasoning,
-and tool events are retained when the IM consumer is slow. Closing a
-session cancels blocked producers before waiting for them and closing the
-event channel.
-
-Approval and question requests remain pending until `/api/respond`
-returns a valid `accepted: true` receipt, allowing a failed delivery to
-be retried. Workspace agents preserve the server URL, agent preset,
-model, reasoning effort, permission mode, and turn timeout.
-
-Model selection matches catalog routes without splitting model IDs on
-slashes. A bare ID must be unique across providers; ambiguous IDs require
-`provider/model`. Explicit selection failures stop startup rather than
-silently running a different model.
-
-## Verification and version boundary
-
-Run the adapter's protocol regressions, including slow-consumer output,
-session-scoped modes, retryable interactions, and model routing:
-
-```sh
-go test -race ./agent/dsh -count=1
+[projects.agent.options]
+work_dir = "/absolute/project/path"
+base_url = "http://127.0.0.1:3080"
+token = "<launch token>"
+mode = "default"
 ```
 
-The optional live test requires a compatible running server and model
-credentials:
+`DSH_TOKEN` supplies the token when the option is absent. Pasting the full
+launch URL into `base_url` also works: its token is extracted and removed
+from the URL before logging. Supplying a token selects the authenticated
+Remote transport; without a token the adapter uses the legacy transport.
+Use the new launch token after restarting DSH. The adapter does not start
+or stop the shared DSH server.
+
+Optional `model` accepts an exact `provider/model` route or an unambiguous
+bare ID from the server catalog. `reasoning_effort` uses that model's
+advertised options. Invalid explicit selections fail session startup.
+`agent_preset` selects the native preset for new sessions. `timeout_mins`
+limits ordinary turns and native commands; `0` disables that watchdog.
+
+## Behavior
+
+- Each chat has its own authenticated peer and socket. It receives only its
+  own output and answers only its own approval/question requests.
+- Both event queues apply cancellation-aware backpressure, retaining text,
+  reasoning, tool events, and turn completion under a slow consumer.
+- Reconnecting resumes the native conversation instead of passing a used ID
+  to `session/create`, which would create a different conversation in modern
+  DSH. Initial history snapshots are kept out of the next outgoing reply.
+- `/mode` uses acknowledged session-scoped permission commands. `default`,
+  `yolo`, and `plan` select `workspace-write`, `danger-full-access`, and
+  `read-only`. The corresponding preset must exist. No server-wide defaults
+  are changed. `plan` restricts filesystem access; it does not toggle DSH's
+  separate collaboration-plan state.
+- Failed approval/question responses remain retryable. Pending approvals can
+  be recovered after reconnecting; unrelated peers do not settle them.
+- Native history respects surface replacements from edits and compaction.
+  Context usage reads DSH's native token and context-pressure projections.
+- `/compact` and other registered native slash commands execute through
+  `commands/execute`. Unknown slash commands remain normal model input.
+- Standard `.dsh/skills`, `.agents/skills`, and user skill roots are exposed
+  to cc-connect's skill discovery. Platform instructions and cc-connect's
+  session environment are included in the first submitted prompt.
+- Workspace agents preserve URL, token, preset, model, effort, mode, and
+  timeout. `/stop` cancels the current turn and keeps the session usable.
+- Deleting a session uses DSH's native archive action. Its durable log is
+  retained, and archived sessions are excluded from lists and resume checks.
+
+The authenticated transport adds native history, context reporting, archive,
+and command execution. Legacy servers retain their original capabilities.
+Attachments saved as files require shared access to `work_dir`; images are
+submitted through the server's image intake.
+
+DSH's approval protocol grants **allow once** or deny. The adapter does not
+pretend this is Claude Code's persistent tool allowlist (`/allow`). Permission
+presets remain available through `/mode`. Real account billing/model quality
+and IM delivery belong to their external services rather than these tests.
+
+## Verification
+
+```sh
+go test -race ./agent/dsh -count=20
+go vet ./agent/dsh
+golangci-lint run --build-tags smoke ./agent/dsh
+```
+
+The reproducible live suite starts the installed public DSH CLI with an
+isolated home and a local Messages API fixture. Only the external model is
+simulated; DSH authentication, sessions, tools, approval handling, persistence,
+skills, projections, and commands run in the real DSH process:
+
+```sh
+DSH_CLI=/absolute/path/to/dsh python3 agent/dsh/testdata/remote_smoke.py
+```
+
+The suite covers multiple turns, model/effort selection, bridge restart and
+resume, native history/context, two-topic permission isolation, allow/deny,
+pending approval recovery, questions, stop followed by another turn, native
+compaction, skill discovery, image input, and archive/list consistency.
+
+For an already-running server with a real model account:
 
 ```sh
 DSH_SMOKE_URL=http://127.0.0.1:3080 \
+DSH_TOKEN='<launch token>' \
 DSH_SMOKE_WORKDIR=/absolute/project/path \
 go test -tags smoke ./agent/dsh -run TestSmoke_RoundTrip -v
 ```
-
-Mock protocol tests do not establish compatibility with every published
-DSH release. In particular, the published `@deepseek-ai/dsh@0.2.1-rc.2`
-uses the newer `/api/remote.mux` Remote stream protocol and authenticated
-API peers; it is not supported by this legacy transport. A local protocol
-probe against that installed release exchanged the launch token through
-`/connect` (302), received 404 for an authenticated `/api/session.list`
-request, and successfully opened `/api/remote.mux` (101). This verifies the
-transport mismatch without making a model request. The earlier
-`0.1.5-rc.3` package also includes
-the newer gateway. Verify the installed server's actual protocol before
-deploying this adapter; do not assume a successful package installation
-means its wire protocol matches.
-
-## Remaining Claude Code parity work
-
-This is a reliability follow-up to upstream PR #1676, not a complete
-Claude Code capability match. Native history retrieval, session deletion,
-context reporting and compaction, command/skill discovery, persistent
-approval choices, and the newer authenticated Remote API still need
-implementation and live contract tests. The existing smoke test exercises
-a single conversation only; restart/resume and two-topic permission flows
-also need validation against a compatible public DSH build.
