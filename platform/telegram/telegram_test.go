@@ -948,7 +948,7 @@ func TestHandleMessagePrivateTopicUsesThreadID(t *testing.T) {
 func TestHandleMessageMediaGroupMergesPhotosAndCaption(t *testing.T) {
 	handled := make(chan *core.Message, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "data:%s", strings.TrimPrefix(r.URL.Path, "/"))
+		_, _ = fmt.Fprintf(w, "data:%s", strings.TrimPrefix(r.URL.Path, "/"))
 	}))
 	defer server.Close()
 
@@ -1017,7 +1017,7 @@ func TestHandleMessageMediaGroupMergesPhotosAndCaption(t *testing.T) {
 func TestHandleMessageSinglePhotoDispatchesImmediately(t *testing.T) {
 	handled := make(chan *core.Message, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "single-photo")
+		_, _ = fmt.Fprint(w, "single-photo")
 	}))
 	defer server.Close()
 
@@ -1060,7 +1060,7 @@ func TestHandleMessageSinglePhotoDispatchesImmediately(t *testing.T) {
 func TestHandleMessageMediaGroupsDoNotMix(t *testing.T) {
 	handled := make(chan *core.Message, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "data:%s", strings.TrimPrefix(r.URL.Path, "/"))
+		_, _ = fmt.Fprintf(w, "data:%s", strings.TrimPrefix(r.URL.Path, "/"))
 	}))
 	defer server.Close()
 
@@ -1119,7 +1119,7 @@ func TestHandleMessageMediaGroupsDoNotMix(t *testing.T) {
 func TestHandleMessageGroupMediaGroupDirectedByCaption(t *testing.T) {
 	handled := make(chan *core.Message, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "data:%s", strings.TrimPrefix(r.URL.Path, "/"))
+		_, _ = fmt.Fprintf(w, "data:%s", strings.TrimPrefix(r.URL.Path, "/"))
 	}))
 	defer server.Close()
 
