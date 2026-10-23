@@ -378,13 +378,13 @@ func (c *rpcClient) respond(ctx context.Context, rpcID string, value any) error 
 // sessions), so frames are filtered to the target session at the socket
 // reader. A full queue applies cancellation-aware backpressure rather than
 // dropping answer text or tool events.
-func (c *rpcClient) openMux(ctx context.Context, targetSessionID string) (<-chan muxFrame, error) {
+func (c *rpcClient) openMux(ctx context.Context, targetSessionID string) (<-chan muxFrame, int, error) {
 	if c.token != "" {
 		return c.remoteMux(ctx, targetSessionID)
 	}
 	u, err := url.Parse(c.baseURL + "/api/events.mux")
 	if err != nil {
-		return nil, fmt.Errorf("dsh: parse mux url: %w", err)
+		return nil, 0, fmt.Errorf("dsh: parse mux url: %w", err)
 	}
 	switch u.Scheme {
 	case "http":
@@ -399,9 +399,9 @@ func (c *rpcClient) openMux(ctx context.Context, targetSessionID string) (<-chan
 		if resp != nil {
 			rb, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("dsh: events.mux websocket: %w (HTTP %d: %s)", err, resp.StatusCode, strings.TrimSpace(string(rb)))
+			return nil, 0, fmt.Errorf("dsh: events.mux websocket: %w (HTTP %d: %s)", err, resp.StatusCode, strings.TrimSpace(string(rb)))
 		}
-		return nil, fmt.Errorf("dsh: events.mux websocket: %w", err)
+		return nil, 0, fmt.Errorf("dsh: events.mux websocket: %w", err)
 	}
 
 	frames := make(chan muxFrame, 1024)
@@ -456,7 +456,7 @@ func (c *rpcClient) openMux(ctx context.Context, targetSessionID string) (<-chan
 		case <-readerDone:
 		}
 	}()
-	return frames, nil
+	return frames, 0, nil
 }
 
 // parseBaseURL normalizes a configured base URL.

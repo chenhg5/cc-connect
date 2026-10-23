@@ -385,41 +385,53 @@ type compactStreamRecord struct {
 	Args  []string     `json:"args"`
 }
 
-func (c *rpcClient) remoteMux(ctx context.Context, sid string) (<-chan muxFrame, error) {
+func (c *rpcClient) remoteMux(ctx context.Context, sid string) (<-chan muxFrame, int, error) {
 	r, err := c.connection(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	events, err := r.open(ctx, "$events", map[string]any{})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	handshake, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	raw, err := r.next(handshake, events)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var ready struct{ Type, ClientID string }
 	if json.Unmarshal(raw, &ready) != nil || ready.Type != "ready" || ready.ClientID == "" {
-		return nil, fmt.Errorf("dsh: missing Remote event readiness")
+		return nil, 0, fmt.Errorf("dsh: missing Remote event readiness")
 	}
 	r.mu.Lock()
 	r.clientID = ready.ClientID
 	r.mu.Unlock()
 	follow, err := r.open(ctx, "session/follow", map[string]any{"request": map[string]any{"address": map[string]any{"kind": "session", "sessionId": sid}, "assistantStream": true}})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	raw, err = r.next(handshake, follow)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var snapshot remoteFollowFrame
 	if json.Unmarshal(raw, &snapshot) != nil || snapshot.Type != "snapshot" {
-		return nil, fmt.Errorf("dsh: missing Remote session snapshot")
+		return nil, 0, fmt.Errorf("dsh: missing Remote session snapshot")
+	}
+	// Establish the native sequence before Send can reserve the next turn.
+	// Snapshot replay runs asynchronously and can arrive after that submission.
+	initialTurn := 0
+	for _, record := range snapshot.Records {
+		var data sessionEventData
+		if json.Unmarshal(record.Event.Data, &data) == nil && data.Turn > initialTurn {
+			initialTurn = data.Turn
+		}
+	}
+	if snapshot.AssistantStream != nil && snapshot.AssistantStream.ActiveAttempt != nil && snapshot.AssistantStream.ActiveAttempt.Turn > initialTurn {
+		initialTurn = snapshot.AssistantStream.ActiveAttempt.Turn
 	}
 	frames := make(chan muxFrame, 1024)
 	go c.pumpRemote(ctx, sid, events, follow, snapshot, frames)
-	return frames, nil
+	return frames, initialTurn, nil
 }

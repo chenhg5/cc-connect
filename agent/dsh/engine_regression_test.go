@@ -391,3 +391,226 @@ func TestSession_QueuedPromptKeepsPreviousTurnReplyBeforeResult(t *testing.T) {
 	default:
 	}
 }
+
+func TestSession_LateTurnStartCannotRebindQueuedWatchdog(t *testing.T) {
+	m := newMockDshServer()
+	a := newTestAgent(t, m, t.TempDir())
+	a.timeout = 100 * time.Millisecond
+	session, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := session.(*dshSession)
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Send("first", "one", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// HTTP replies need not wait for the websocket reader to consume turn/start.
+	if err := s.CancelTurn(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Send("second", "two", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(evTurnStart(1))
+	s.handleSessionEvent(raw)
+	s.finishTurn(sessionEventData{Turn: 1})
+	raw, _ = json.Marshal(evTurnStart(2))
+	s.handleSessionEvent(raw)
+	time.Sleep(250 * time.Millisecond)
+	if got := m.cancelCount(); got != 2 {
+		t.Fatalf("new turn outlived its timeout without cancellation: cancels=%d, want 2 (/stop plus new turn timeout)", got)
+	}
+}
+
+func TestSession_StopCanInterruptAcceptedPromptWithStalledReceipt(t *testing.T) {
+	m := newMockDshServer()
+	release := make(chan struct{})
+	started := make(chan struct{})
+	handler := m.handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/session.prompt" {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		receipt := httptest.NewRecorder()
+		handler.ServeHTTP(receipt, r) // the backend has already accepted this prompt
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(receipt.Code)
+		w.(http.Flusher).Flush()
+		close(started)
+		<-release // simulate a stalled response body, not a stalled backend
+		_, _ = w.Write(receipt.Body.Bytes())
+	}))
+	defer server.Close()
+	a, err := New(map[string]any{"base_url": server.URL, "work_dir": t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Stop() })
+	session, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	sent := make(chan error, 1)
+	go func() { sent <- session.Send("work", "one", nil, nil) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("prompt never accepted")
+	}
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- session.(*dshSession).CancelTurn() }()
+	select {
+	case err := <-cancelled:
+		close(release)
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(150 * time.Millisecond):
+		close(release)
+		<-sent
+		<-cancelled
+		t.Fatal("CancelTurn cannot reach the accepted turn while Send is stuck reading its receipt")
+	}
+}
+
+func TestSession_RemoteStopCanInterruptAcceptedPromptWithStalledReceipt(t *testing.T) {
+	f := newRemoteFixture(t)
+	release := make(chan struct{})
+	started := make(chan struct{})
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/session/prompt" {
+			f.handle(w, r)
+			return
+		}
+		var req struct{ RPCID string }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(started)
+		<-release
+		writeServerValue(w, req.RPCID, map[string]any{"accepted": true})
+	}))
+	defer proxy.Close()
+	a, err := New(map[string]any{"base_url": proxy.URL, "token": "fixture-token", "work_dir": t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Stop() })
+	session, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	sent := make(chan error, 1)
+	go func() { sent <- session.Send("work", "one", nil, nil) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("prompt never accepted")
+	}
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- session.(*dshSession).CancelTurn() }()
+	select {
+	case err := <-cancelled:
+		close(release)
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(150 * time.Millisecond):
+		close(release)
+		<-sent
+		<-cancelled
+		t.Fatal("Remote CancelTurn cannot run while Send is stuck reading its receipt")
+	}
+}
+
+func TestSession_RemoteResumeReservesTurnAfterSnapshot(t *testing.T) {
+	f := newRemoteFixture(t)
+	a, err := New(map[string]any{"base_url": f.server.URL, "token": "fixture-token", "work_dir": t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Stop() })
+	f.mu.Lock()
+	f.turns["remote-1"] = 9
+	f.mu.Unlock()
+	session, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := session.(*dshSession)
+	t.Cleanup(func() { _ = s.Close() })
+	s.turnMu.Lock()
+	initialTurn := s.currentTurn
+	s.turnMu.Unlock()
+	if initialTurn != 9 {
+		t.Fatalf("native turn baseline = %d, want 9 before the first submission", initialTurn)
+	}
+	if err := s.Send("continue", "ten", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	events := drainEvents(t, s, time.Second)
+	if len(events) == 0 || events[len(events)-1].Type != core.EventResult {
+		t.Fatal("resumed turn did not finish")
+	}
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if s.currentTurn != 10 || s.turnDone != nil {
+		t.Fatalf("resumed completed turn = %d, watchdog armed = %v", s.currentTurn, s.turnDone != nil)
+	}
+}
+
+func TestSession_TimeoutInterruptsStalledPromptReceipt(t *testing.T) {
+	m := newMockDshServer()
+	release := make(chan struct{})
+	handler := m.handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/session.prompt" {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	a, err := New(map[string]any{"base_url": server.URL, "work_dir": t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Stop() })
+	a.(*Agent).timeout = 50 * time.Millisecond
+	session, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	sent := make(chan error, 1)
+	go func() { sent <- session.Send("work", "one", nil, nil) }()
+	select {
+	case err := <-sent:
+		if err == nil {
+			t.Fatal("stalled receipt unexpectedly succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchdog did not interrupt submission")
+	}
+	waitFor(t, time.Second, func() bool { return m.cancelCount() == 1 }, "watchdog cancellation")
+	select {
+	case e := <-session.Events():
+		if e.Type != core.EventError || e.Error == nil || !strings.Contains(e.Error.Error(), "timed out") {
+			t.Fatalf("unexpected watchdog event: %+v", e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing timeout event")
+	}
+}

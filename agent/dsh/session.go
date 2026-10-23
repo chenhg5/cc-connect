@@ -43,6 +43,8 @@ type dshSession struct {
 
 	// turn state
 	commandCancel context.CancelFunc // guarded by turnMu
+	promptCancel  context.CancelFunc // interrupts a stalled submission receipt
+	cancellation  *turnCancellation  // blocks new submissions until cancellation completes
 	turnOpMu      sync.Mutex         // serializes prompt submission and cancellation RPCs
 	turnMu        sync.Mutex
 	currentTurn   int // latest native turn, or expected next turn before turn/start
@@ -63,6 +65,11 @@ type dshSession struct {
 	envBlock    string
 	envInjected bool
 	modeMu      sync.Mutex
+}
+
+type turnCancellation struct {
+	done chan struct{}
+	err  error
 }
 
 type pendingApproval struct {
@@ -117,6 +124,7 @@ func newDshSession(ctx context.Context, client *rpcClient, workDir, sessionID, a
 		pendingApprovals: make(map[string]pendingApproval),
 		pendingQuestions: make(map[string]pendingQuestion),
 		toolNames:        make(map[string]string),
+		seenCalls:        make(map[string]struct{}),
 	}
 	s.textAgg = newChunkAggregator(40, 500*time.Millisecond, func(text string) {
 		s.emit(core.Event{Type: core.EventText, Content: text})
@@ -131,12 +139,13 @@ func newDshSession(ctx context.Context, client *rpcClient, workDir, sessionID, a
 
 	// Open the aggregated stream; the reader filters to this session and
 	// protects critical frames (turn/end, approvals, questions) from loss.
-	frames, err := client.openMux(sessCtx, created.SessionID)
+	frames, initialTurn, err := client.openMux(sessCtx, created.SessionID)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("dsh: open event stream: %w", err)
 	}
 	s.frames = frames
+	s.currentTurn = initialTurn
 	go s.readLoop()
 	return s, nil
 }
@@ -206,16 +215,28 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		}
 	}
 
-	s.turnOpMu.Lock()
+	if err := s.lockSubmission(); err != nil {
+		return err
+	}
 	defer s.turnOpMu.Unlock()
 	// Retire the previous watchdog before a new prompt can reach the server.
 	turnDone := make(chan struct{})
-	s.turnMu.Lock()
 	s.stopWatchdogLocked()
 	s.turnDone = turnDone
 	s.currentTurn++
 	s.watchdogTurn = s.currentTurn
+	promptCtx, cancelPrompt := context.WithCancel(s.ctx)
+	s.promptCancel = cancelPrompt
 	s.turnMu.Unlock()
+	defer func() {
+		cancelPrompt()
+		s.turnMu.Lock()
+		s.promptCancel = nil // turnOpMu still excludes the next submission
+		s.turnMu.Unlock()
+	}()
+	if s.timeout > 0 {
+		go s.turnWatchdog(turnDone)
+	}
 
 	payload := map[string]any{"sessionId": s.sessionID, "mode": "queue", "content": content}
 	if s.client.token != "" {
@@ -224,7 +245,7 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		}
 		payload["requestId"] = messageID
 	}
-	if err := s.client.call(s.ctx, "session.prompt", payload, nil); err != nil {
+	if err := s.client.call(promptCtx, "session.prompt", payload, nil); err != nil {
 		s.turnMu.Lock()
 		if s.turnDone == turnDone {
 			s.stopWatchdogLocked()
@@ -233,10 +254,26 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		return fmt.Errorf("dsh: prompt: %w", err)
 	}
 
-	if s.timeout > 0 {
-		go s.turnWatchdog(turnDone)
-	}
 	return nil
+}
+
+// Return with turnOpMu and turnMu held after earlier cancellations complete.
+func (s *dshSession) lockSubmission() error {
+	for {
+		s.turnOpMu.Lock()
+		s.turnMu.Lock()
+		cancellation := s.cancellation
+		if cancellation == nil {
+			return nil
+		}
+		s.turnMu.Unlock()
+		s.turnOpMu.Unlock()
+		select {
+		case <-cancellation.done:
+		case <-s.ctx.Done():
+			return s.ctx.Err()
+		}
+	}
 }
 
 // turnWatchdog emits an error and cancels the turn when it runs past timeout.
@@ -247,19 +284,12 @@ func (s *dshSession) turnWatchdog(turnDone chan struct{}) {
 	case <-turnDone:
 	case <-s.ctx.Done():
 	case <-timer.C:
-		// A timer may fire concurrently with /stop or a completed result.
-		// Hold the RPC ordering lock so it cannot cancel a later submission.
-		s.turnOpMu.Lock()
-		defer s.turnOpMu.Unlock()
-		s.turnMu.Lock()
-		if s.turnDone != turnDone {
-			s.turnMu.Unlock()
+		cancelled, err := s.cancelTurn(turnDone)
+		if !cancelled {
 			return
 		}
-		s.stopWatchdogLocked()
-		s.turnMu.Unlock()
 		slog.Warn("dsh: turn timed out, cancelling", "session_id", s.sessionID, "timeout", s.timeout)
-		if err := s.client.call(s.ctx, "session.cancel", map[string]any{"sessionId": s.sessionID}, nil); err != nil {
+		if err != nil {
 			slog.Warn("dsh: cancel after timeout failed", "error", err)
 		}
 		s.emit(core.Event{Type: core.EventError, Error: fmt.Errorf("dsh: turn timed out after %s", s.timeout)})
@@ -388,20 +418,57 @@ func splitAnswer(text string, q wireQuestion) (selected []string, custom string)
 }
 
 func (s *dshSession) CancelTurn() error {
+	_, err := s.cancelTurn(nil)
+	return err
+}
+
+// Cancel the receipt before waiting for RPC ordering; otherwise a server that
+// accepts a prompt but stalls its response could also prevent /stop forever.
+// A non-nil expected channel limits a watchdog to its own turn.
+func (s *dshSession) cancelTurn(expected chan struct{}) (bool, error) {
+	s.turnMu.Lock()
+	if expected != nil && s.turnDone != expected {
+		s.turnMu.Unlock()
+		return false, nil
+	}
+	if pending := s.cancellation; pending != nil {
+		s.turnMu.Unlock()
+		select {
+		case <-pending.done:
+			return false, pending.err
+		case <-s.ctx.Done():
+			return false, s.ctx.Err()
+		}
+	}
+	pending := &turnCancellation{done: make(chan struct{})}
+	s.cancellation = pending
+	if s.promptCancel != nil {
+		s.promptCancel()
+	}
+	s.stopWatchdogLocked()
+	s.turnMu.Unlock()
 	s.turnOpMu.Lock()
 	defer s.turnOpMu.Unlock()
+	defer func() {
+		s.turnMu.Lock()
+		s.cancellation = nil
+		close(pending.done)
+		s.turnMu.Unlock()
+	}()
 	s.turnMu.Lock()
 	commandCancel := s.commandCancel
 	s.stopWatchdogLocked()
 	s.turnMu.Unlock()
 	if commandCancel != nil {
 		commandCancel()
-		return nil
+		return true, nil
 	}
-	if err := s.client.call(s.ctx, "session.cancel", map[string]any{"sessionId": s.sessionID}, nil); err != nil {
-		return fmt.Errorf("dsh: cancel turn: %w", err)
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	if err := s.client.call(ctx, "session.cancel", map[string]any{"sessionId": s.sessionID}, nil); err != nil {
+		pending.err = fmt.Errorf("dsh: cancel turn: %w", err)
 	}
-	return nil
+	return true, pending.err
 }
 
 func (s *dshSession) Events() <-chan core.Event {
@@ -532,8 +599,10 @@ func (s *dshSession) handleSessionEvent(raw json.RawMessage) {
 	switch ev.Type {
 	case "turn/start":
 		s.turnMu.Lock()
-		s.currentTurn = data.Turn
-		if s.turnDone != nil {
+		if data.Turn > s.currentTurn {
+			s.currentTurn = data.Turn
+		}
+		if s.turnDone != nil && data.Turn >= s.watchdogTurn {
 			s.watchdogTurn = data.Turn
 		}
 		s.lastUsage = nil

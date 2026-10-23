@@ -131,7 +131,14 @@ func (f *remoteFixture) handle(w http.ResponseWriter, r *http.Request) {
 			case "workspace/follow":
 				peer.send(req.StreamID, map[string]any{"type": "baseline", "value": map[string]any{"archivedSessionIds": []string{}}})
 			case "session/follow":
-				peer.send(req.StreamID, map[string]any{"type": "snapshot", "cursor": 0, "records": []any{}, "projections": map[string]any{"values": map[string]any{}}})
+				f.mu.Lock()
+				turn := f.turns[req.Payload.Args.Request.Address.SessionID]
+				f.mu.Unlock()
+				records := []any{}
+				if turn > 0 {
+					records = append(records, map[string]any{"event": evTurnEnd(turn, "completed")})
+				}
+				peer.send(req.StreamID, map[string]any{"type": "snapshot", "cursor": 0, "records": records, "projections": map[string]any{"values": map[string]any{}}})
 			}
 		}
 	}
