@@ -123,6 +123,7 @@ type Platform struct {
 	appSecret                  string
 	progressStyle              string
 	useInteractiveCard         bool
+	streamingConfig            map[string]any
 	self                       core.Platform
 	reactionEmoji              string
 	ackEmoji                   string
@@ -423,6 +424,39 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		useInteractiveCard = v
 	}
 
+	streamingConfig := map[string]any{}
+	for _, field := range []struct {
+		name     string
+		min, max int64
+	}{{"print_frequency_ms", 20, 1000}, {"print_step", 1, 1000}} {
+		if raw, exists := opts[field.name]; exists {
+			var value int64
+			switch v := raw.(type) {
+			case int:
+				value = int64(v)
+			case int64:
+				value = v
+			default:
+				return nil, fmt.Errorf("%s: %s must be an integer", name, field.name)
+			}
+			if value < field.min || value > field.max {
+				return nil, fmt.Errorf("%s: %s must be between %d and %d", name, field.name, field.min, field.max)
+			}
+			streamingConfig[field.name] = map[string]any{"default": value}
+		}
+	}
+	if raw, exists := opts["print_strategy"]; exists {
+		value, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s: print_strategy must be a string", name)
+		}
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "fast" && value != "delay" {
+			return nil, fmt.Errorf("%s: print_strategy must be 'fast' or 'delay' (case-insensitive)", name)
+		}
+		streamingConfig["print_strategy"] = value
+	}
+
 	imageBatchWindow := defaultImageBatchWindow
 	if raw, ok := opts["image_batch_window_ms"]; ok {
 		ms, err := coerceMilliseconds(raw)
@@ -479,6 +513,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
+		streamingConfig:            streamingConfig,
 		reactionEmoji:              reactionEmoji,
 		ackEmoji:                   ackEmoji,
 		doneEmoji:                  doneEmoji,
@@ -7268,11 +7303,15 @@ func buildRichPanel(title string, expanded bool, elements []map[string]any) map[
 
 const maxRichCardJSONBytes = 28000
 
+type richCardOptions struct {
+	streamingConfig map[string]any
+}
+
 // buildRichCard renders a Card 2.0 "single-card" turn with collapsible
 // reasoning/tool panels, streaming markdown body, status-colored header, and a
 // pre-composed multi-line statusFooter (engine-owned, includes elapsed).
-func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, options ...richCardOptions) string {
+	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter, options...)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
 		return buildCardJSONWithStatus(markdown, status)
@@ -7294,7 +7333,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		{perLane: 3, textLen: 80},
 	} {
 		compactSteps := compactRichStepsForCardSize(steps, limit.perLane, limit.textLen)
-		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter)
+		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter, options...)
 		if err == nil && len(compact) <= maxRichCardJSONBytes {
 			slog.Debug("feishu: rich card exceeded size limit, compacted panels",
 				"original_size", len(b),
@@ -7314,7 +7353,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 	return buildCardJSONWithStatus(fallbackMarkdown, status)
 }
 
-func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) ([]byte, error) {
+func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, options ...richCardOptions) ([]byte, error) {
 	reasoningSteps, toolSteps := splitRichStepsByLane(steps)
 	panelMaps := make([]map[string]any, 0, 2)
 	if len(reasoningSteps) > 0 {
@@ -7402,6 +7441,9 @@ func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markd
 		"body": map[string]any{"elements": elements},
 	}
 
+	if streaming && len(options) > 0 && len(options[0].streamingConfig) > 0 {
+		card["config"].(map[string]any)["streaming_config"] = options[0].streamingConfig
+	}
 	return json.Marshal(card)
 }
 
@@ -7497,7 +7539,7 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 // statusFooter (multi-line, '\n'-separated) and passes it through; the renderer
 // splits it back into one dim notation block per line.
 func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
+	return buildRichCard(status, title, steps, markdown, streaming, statusFooter, richCardOptions{streamingConfig: p.streamingConfig})
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.
