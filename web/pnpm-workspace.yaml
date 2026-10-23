@@ -1,1 +1,4 @@
-onlyBuiltDependencies: esbuild
+# pnpm 10.13+ blocks dependency postinstall scripts by default; esbuild needs
+# its build script to place the native binary, without which `vite build` fails.
+allowBuilds:
+  esbuild: true
