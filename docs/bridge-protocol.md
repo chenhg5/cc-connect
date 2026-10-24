@@ -1,5 +1,7 @@
 # Bridge Platform Protocol Specification
 
+[English](bridge-protocol.md) | [中文](bridge-protocol.zh-CN.md) | [Русский](bridge-protocol.ru.md)
+
 > Version: 1.0-draft  
 > Status: Draft — subject to change before implementation
 
