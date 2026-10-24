@@ -3,6 +3,8 @@ package feishu
 import (
 	"log/slog"
 	"sync"
+
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 )
 
 // sharedWSGroup tracks all Platform instances sharing the same Feishu app
@@ -81,4 +83,18 @@ func (g *sharedWSGroup) allPlatforms() []*Platform {
 	result := make([]*Platform, len(g.platforms))
 	copy(result, g.platforms)
 	return result
+}
+
+// onCardAction routes a callback to the first platform that handles it.
+func (g *sharedWSGroup) onCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+	for _, sibling := range g.allPlatforms() {
+		response, err := sibling.onCardAction(event)
+		if err != nil {
+			return nil, err
+		}
+		if response != nil {
+			return response, nil
+		}
+	}
+	return nil, nil
 }

@@ -11,6 +11,9 @@ import (
 type Card struct {
 	Header   *CardHeader
 	Elements []CardElement
+	// UpdateAll makes updates visible to every recipient when the platform
+	// supports shared cards. The default preserves platform-specific behavior.
+	UpdateAll bool
 }
 
 // CardHeader is the optional colored title bar of a card.
@@ -122,6 +125,12 @@ type CardBuilder struct {
 // NewCard returns a new CardBuilder.
 func NewCard() *CardBuilder {
 	return &CardBuilder{}
+}
+
+// UpdateAll opts into card updates that are visible to every recipient.
+func (b *CardBuilder) UpdateAll(enabled bool) *CardBuilder {
+	b.card.UpdateAll = enabled
+	return b
 }
 
 // Title sets the card header with a title and color.

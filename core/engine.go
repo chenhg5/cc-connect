@@ -535,6 +535,8 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
+	actionToken       string
+	channelID         string
 	messageID         string
 	platform          Platform
 	replyCtx          any
@@ -552,7 +554,12 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
-	agentSession AgentSession
+	turnUserID      string
+	turnSession     *Session
+	turnHistoryNext int
+	queueActions    map[string]*queuedTaskAction
+	steerDone       chan struct{}
+	agentSession    AgentSession
 	// busySession is the core.Session whose busy lock guards the in-flight
 	// turn. Set by getOrCreateInteractiveStateWith so /stop can release the
 	// lock after tearing the turn down (#1830).
@@ -2515,6 +2522,11 @@ func (e *Engine) markPlatformUnavailable(p Platform) bool {
 }
 
 func (e *Engine) initPlatformCapabilities(p Platform) {
+	if tasks, ok := p.(CardTaskActionHandlerSetter); ok {
+		tasks.SetCardTaskActionHandler(func(ctx context.Context, action CardTaskAction) CardTaskActionResult {
+			return e.handleTaskAction(p, ctx, action)
+		})
+	}
 	if registrar, ok := p.(CommandRegistrar); ok {
 		commands, skillsOmitted := e.menuCommandsForPlatform(p.Name())
 		if skillsOmitted && strings.EqualFold(p.Name(), "telegram") {
@@ -3138,7 +3150,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
 
-	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
+	if (len(msg.Images) == 0 || e.handlesImageSupplementCommand(content, interactiveKey)) && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
 		}
@@ -3433,7 +3445,8 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
 		return true // handled: queue-full reply sent
 	}
-	state.pendingMessages = append(state.pendingMessages, queuedMessage{
+	queued := queuedMessage{
+		channelID:         msg.ChannelID,
 		messageID:         msg.MessageID,
 		platform:          p,
 		replyCtx:          msg.ReplyCtx,
@@ -3447,7 +3460,9 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		msgSessionKey:     msg.SessionKey,
 		channelKey:        msg.ChannelKey,
 		userMessageTimeMs: msg.UserMessageTimeMs,
-	})
+	}
+	queueCard := e.registerQueuedTaskLocked(state, &queued)
+	state.pendingMessages = append(state.pendingMessages, queued)
 	// A queued message is still the user talking: restart the
 	// reset_on_idle_mins clock now, as the idle path does, or the next
 	// message is measured from the last one that found the session idle
@@ -3475,7 +3490,11 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	if queueCard != nil {
+		e.replyWithCard(p, msg.ReplyCtx, queueCard)
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	}
 	return true
 }
 
@@ -4028,7 +4047,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
-	session.AddHistory("user", msg.Content)
+	turnHistoryNext := session.insertHistory(-1, "user", msg.Content)
 	// Persist user message immediately so crashes between user input and
 	// assistant reply don't lose it (the assistant-side Save below depends
 	// on the turn completing without a process crash).
@@ -4058,6 +4077,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
+	state.turnUserID = msg.UserID
+	state.turnSession = session
+	state.turnHistoryNext = turnHistoryNext
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
@@ -6593,7 +6615,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Check for queued messages — if present, continue the event loop
 			// for the next turn instead of returning.
-			state.mu.Lock()
+			lockQueueForDrain(state)
 			droppedStale := 0
 			for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
 				state.pendingMessages = state.pendingMessages[1:]
@@ -6612,6 +6634,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
+				state.turnUserID = queued.userID
+				state.turnHistoryNext = session.insertHistory(-1, "user", queued.content)
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
@@ -6713,7 +6737,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					e.send(queued.platform, queued.replyCtx, replyContent)
 				}
 
-				session.AddHistory("user", queued.content)
 				// Persist queued user message immediately (mirror of the
 				// initial AddHistory("user",...) save above).
 				sessions.Save()
@@ -6936,7 +6959,7 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 // Returns true if the session was unlocked by this call.
 func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, lockGen uint64) bool {
 	for {
-		state.mu.Lock()
+		lockQueueForDrain(state)
 		if len(state.pendingMessages) == 0 {
 			session.Unlock(lockGen)
 			state.mu.Unlock()
@@ -6963,6 +6986,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.platform = queued.platform
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
+		state.turnUserID = queued.userID
 		state.fromVoice = queued.fromVoice
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
@@ -6981,7 +7005,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		drainEvents(as.Events())
 
-		session.AddHistory("user", queued.content)
+		state.mu.Lock()
+		state.turnHistoryNext = session.insertHistory(-1, "user", queued.content)
+		state.mu.Unlock()
 
 		sendDone := make(chan error, 1)
 		go func() {
@@ -7055,11 +7081,12 @@ var builtinCommands = []struct {
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
+	{[]string{"steer", "补充", "補充"}, "steer"},
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	text := strings.TrimSpace(strings.Join(args, " "))
-	if text == "" {
+	if text == "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsEmpty))
 		return
 	}
@@ -7067,7 +7094,14 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
-	if !ok || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
+	if !ok || state == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
+		return
+	}
+	state.mu.Lock()
+	agentSession := state.agentSession
+	state.mu.Unlock()
+	if agentSession == nil || !agentSession.Alive() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
@@ -7080,7 +7114,19 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
-	if err := state.agentSession.Send(text, "", nil, nil); err != nil {
+	if _, supported := agentSession.(AgentSessionSteerer); supported {
+		e.cmdSteer(p, msg, args)
+		return
+	}
+	if policy, ok := agentSession.(AgentSessionSupplementPolicy); ok && !policy.SupportsLegacySupplement() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerUnsupported))
+		return
+	}
+	if text == "" {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsEmpty))
+		return
+	}
+	if err := agentSession.Send(text, "", nil, nil); err != nil {
 		slog.Error("ps: send failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
 		return
@@ -7172,6 +7218,12 @@ func splitCommandArgs(s string) []string {
 
 func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	parts := splitCommandArgs(raw)
+	if supplementCommandID(raw) != "" {
+		// Supplemental prose may start on the next line. Parse its command
+		// token with the same whitespace boundary used by steerInputText.
+		token := strings.Fields(raw)[0]
+		parts = append([]string{token}, splitCommandArgs(strings.TrimSpace(strings.TrimPrefix(raw, token)))...)
+	}
 	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
 	args := parts[1:]
 
@@ -7304,6 +7356,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWeb(p, msg, args)
 	case "ps":
 		e.cmdPs(p, msg, args)
+	case "steer":
+		e.cmdSteer(p, msg, args)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {

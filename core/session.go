@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -162,13 +163,24 @@ func (s *Session) ForceUnlock() bool {
 }
 
 func (s *Session) AddHistory(role, content string) {
+	s.insertHistory(-1, role, content)
+}
+
+// insertHistory returns the next insertion position. A negative position appends.
+// Active turns keep this cursor so an accepted supplement remains before its
+// answer even when the answer arrives before the steering RPC response.
+func (s *Session) insertHistory(index int, role, content string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.History = append(s.History, HistoryEntry{
+	if index < 0 || index > len(s.History) {
+		index = len(s.History)
+	}
+	s.History = slices.Insert(s.History, index, HistoryEntry{
 		Role:      role,
 		Content:   content,
 		Timestamp: time.Now(),
 	})
+	return index + 1
 }
 
 // recordPastAgentSessionID saves the current AgentSessionID to PastAgentSessionIDs

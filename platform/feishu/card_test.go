@@ -18,6 +18,25 @@ func decodeRenderedCard(t *testing.T, card *core.Card) map[string]any {
 	return got
 }
 
+func TestRenderCardMap_UpdateAllIsOptInForCreateAndCallback(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		card := core.NewCard().UpdateAll(enabled).Markdown("Queue receipt").Build()
+		created := decodeRenderedCard(t, card)
+		updated := taskActionResponse(core.CardTaskActionResult{Card: card}, "feishu:chat:owner")
+		for _, rendered := range []map[string]any{created, updated.Card.Data.(map[string]any)} {
+			config := rendered["config"].(map[string]any)
+			if enabled && config["update_multi"] != true {
+				t.Errorf("shared card lacks update_multi: %#v", config)
+			}
+			if !enabled {
+				if _, exists := config["update_multi"]; exists {
+					t.Errorf("default card changed update behavior: %#v", config)
+				}
+			}
+		}
+	}
+}
+
 func TestRenderCardMap_EqualColumnsActionsUseColumnSet(t *testing.T) {
 	buttons := []core.CardButton{
 		core.PrimaryBtn("Session Management", "nav:/help session"),
