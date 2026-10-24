@@ -110,6 +110,8 @@ type Platform struct {
 	groupReplyAll         bool
 	shareSessionInChannel bool
 	enableReactions       bool
+	reactionEmoji         string // emoji for in-progress reaction (default "⚡"); "none" disables
+	doneEmoji             string // emoji swapped in when the turn completes; empty/"none" disables
 	progressStyle         string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
 	httpClient            *http.Client
 
@@ -163,6 +165,17 @@ func New(opts map[string]any) (core.Platform, error) {
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	enableReactions, _ := opts["enable_reactions"].(bool)
+	reactionEmoji, _ := opts["reaction_emoji"].(string)
+	if reactionEmoji == "" {
+		reactionEmoji = "⚡" // preserve historical default (⚡)
+	}
+	if reactionEmoji == "none" {
+		reactionEmoji = ""
+	}
+	doneEmoji, _ := opts["done_emoji"].(string)
+	if doneEmoji == "none" {
+		doneEmoji = ""
+	}
 
 	// Default to "compact" so streaming edits work out of the box. Telegram has
 	// no rich card UI, so "card" is normalized to "compact". Users can opt out
@@ -188,6 +201,8 @@ func New(opts map[string]any) (core.Platform, error) {
 		groupReplyAll:         groupReplyAll,
 		shareSessionInChannel: shareSessionInChannel,
 		enableReactions:       enableReactions,
+		reactionEmoji:         reactionEmoji,
+		doneEmoji:             doneEmoji,
 		progressStyle:         progressStyle,
 		httpClient:            httpClient,
 	}, nil
@@ -448,8 +463,8 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	}
 
 	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
-	if p.enableReactions {
-		go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, "⚡")
+	if p.enableReactions && p.reactionEmoji != "" {
+		go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, p.reactionEmoji)
 	}
 	botName := p.botUsername()
 
@@ -630,6 +645,21 @@ func (p *Platform) reactToMessage(ctx context.Context, chatID int64, messageID i
 	}); err != nil {
 		slog.Debug("telegram: set reaction failed", "error", err)
 	}
+}
+
+// AddDoneReaction implements TypingIndicatorDone. Telegram allows a bot only
+// one reaction per message, so this swaps the in-progress reaction on the
+// user's message for the configured done emoji, giving them a push when the
+// turn finishes.
+func (p *Platform) AddDoneReaction(rctx any) {
+	if !p.enableReactions || p.doneEmoji == "" {
+		return
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageID == 0 {
+		return
+	}
+	go p.reactToMessage(context.Background(), rc.chatID, rc.messageID, p.doneEmoji)
 }
 
 func (p *Platform) buildSessionKey(chatID int64, threadID int, userID int64) string {
