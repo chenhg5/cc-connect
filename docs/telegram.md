@@ -1,5 +1,7 @@
 # Telegram Setup Guide
 
+[English](telegram.md) | [Русский](telegram.ru.md)
+
 This guide walks you through connecting **cc-connect** to Telegram, so you can chat with your local Claude Code via a Telegram bot.
 
 ## Prerequisites
