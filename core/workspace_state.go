@@ -3,6 +3,7 @@ package core
 import (
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -11,16 +12,44 @@ import (
 // mismatches caused by trailing slashes, symlinks, or relative segments.
 // If the path cannot be resolved (e.g. doesn't exist yet), falls back to
 // filepath.Clean only.
+//
+// The result is always returned with forward-slash separators so that it can be
+// used as a stable, cross-platform key (workspace bindings, agent cache,
+// interactive session keys, etc.). On Windows, filepath.Clean/EvalSymlinks emit
+// backslashes, which would otherwise make the same logical path collide with
+// itself depending on which caller supplied the separators.
+//
+// This normalizes separators only — it does not normalize case.
 func normalizeWorkspacePath(path string) string {
 	cleaned := filepath.Clean(path)
 	resolved, err := filepath.EvalSymlinks(cleaned)
 	if err != nil {
-		return cleaned
+		return filepath.ToSlash(cleaned)
 	}
 	if resolved != path {
 		slog.Debug("workspace path normalized", "original", path, "normalized", resolved)
 	}
-	return resolved
+	return filepath.ToSlash(resolved)
+}
+
+// legacyWorkspaceKey returns the pre-normalization form of a canonical workspace
+// key, for reading state persisted before normalizeWorkspacePath started
+// emitting forward slashes.
+//
+// It is a plain separator swap rather than filepath.FromSlash on purpose:
+// FromSlash consults the runtime platform, so off Windows it would be the
+// identity, the compatibility path would never execute there, and the Linux-only
+// CI matrix would never exercise it. The swap is therefore unconditional, and on
+// a non-Windows host the derived key merely misses - only a Windows build can
+// have written it - at the cost of one read-only map lookup or os.Stat.
+//
+// It applies to the whole key, which is safe because callers pass
+// "<workspace>:<sessionKey>" and every platform builds session keys as
+// "platform:id..." with no separators. A session key containing '/' would derive
+// a value no older build wrote and the fallback would miss; it can never match a
+// different workspace, since canonical keys contain no backslash.
+func legacyWorkspaceKey(key string) string {
+	return strings.ReplaceAll(key, "/", `\`)
 }
 
 // workspaceState holds the runtime state for a single workspace.
