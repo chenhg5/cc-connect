@@ -3,16 +3,24 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 )
 
+var tokenRetryAppIDSequence atomic.Uint64
+
+func uniqueTokenRetryAppID() string {
+	return fmt.Sprintf("cli_token_retry_%d", tokenRetryAppIDSequence.Add(1))
+}
+
 func TestReplyRefreshesTenantTokenAfterInvalidCachedToken(t *testing.T) {
-	const appID = "cli_reply_retry"
+	appID := uniqueTokenRetryAppID()
 	const appSecret = "secret-reply-retry"
 
 	authCalls := 0
@@ -92,7 +100,7 @@ func TestReplyRefreshesTenantTokenAfterInvalidCachedToken(t *testing.T) {
 }
 
 func TestSendNewMessageToChatRefreshesTenantTokenAfterInvalidCachedToken(t *testing.T) {
-	const appID = "cli_create_retry"
+	appID := uniqueTokenRetryAppID()
 	const appSecret = "secret-create-retry"
 
 	authCalls := 0
@@ -172,7 +180,7 @@ func TestSendNewMessageToChatRefreshesTenantTokenAfterInvalidCachedToken(t *test
 }
 
 func TestReplyDoesNotRefreshTenantTokenOnNonTokenError(t *testing.T) {
-	const appID = "cli_non_token_error"
+	appID := uniqueTokenRetryAppID()
 	const appSecret = "secret-non-token-error"
 
 	authCalls := 0
