@@ -117,8 +117,21 @@ func New(opts map[string]any) (core.Platform, error) {
 	webhookListen, _ := opts["webhook_listen"].(string)
 	webhookPath, _ := opts["webhook_path"].(string)
 	webhookSecret, _ := opts["webhook_secret"].(string)
+	webhookInsecure, _ := opts["webhook_insecure"].(bool)
 	if webhookURL != "" && webhookListen == "" {
 		webhookListen = ":8080"
+	}
+	// Without webhook_secret, webhookHandler skips the signature check
+	// entirely, so a forged POST can set an arbitrary sender.user_id and
+	// pass allow_from/admin_from as if it were a real MAX update. That
+	// must be an explicit, informed choice, not a silent default.
+	if webhookURL != "" && webhookSecret == "" && !webhookInsecure {
+		return nil, fmt.Errorf("max: webhook_secret is required when using webhook mode " +
+			"(or set webhook_insecure=true to accept unsigned events - not recommended, " +
+			"anyone who can reach the webhook URL can forge the sender identity)")
+	}
+	if webhookURL != "" && webhookSecret == "" && webhookInsecure {
+		slog.Warn("max: webhook_secret is not set - running in INSECURE mode, sender identity (and allow_from/admin_from) can be forged by anyone who can reach the webhook URL")
 	}
 	if webhookPath == "" {
 		webhookPath = "/webhook"
