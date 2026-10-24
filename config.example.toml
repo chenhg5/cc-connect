@@ -20,6 +20,7 @@
 # Language for bot messages / 机器人消息语言
 # - "en": English
 # - "zh": 中文
+# - "ru" (also "russian" / "русский"): Русский
 # - "" (empty/not set): Auto-detect from user's first message / 留空自动检测
 # language = "en"
 
