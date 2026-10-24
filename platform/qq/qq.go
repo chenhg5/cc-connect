@@ -31,6 +31,7 @@ type Platform struct {
 	token                 string // optional access_token
 	allowFrom             string // comma-separated user IDs or "*"
 	shareSessionInChannel bool
+	groupReplyAll         bool // if true, respond to all group msgs without @mention
 	handler               core.MessageHandler
 	conn                  *websocket.Conn
 	mu                    sync.Mutex
@@ -40,7 +41,7 @@ type Platform struct {
 	selfID                int64
 	dedup                 core.MessageDedup
 	groupNameCache        sync.Map // groupID -> group name
-	httpURL            string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
+	httpURL               string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -51,6 +52,7 @@ func New(opts map[string]any) (core.Platform, error) {
 	token, _ := opts["token"].(string)
 	allowFrom, _ := opts["allow_from"].(string)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+	groupReplyAll, _ := opts["group_reply_all"].(bool)
 
 	core.CheckAllowFrom("qq", allowFrom)
 
@@ -62,7 +64,8 @@ func New(opts map[string]any) (core.Platform, error) {
 		token:                 token,
 		allowFrom:             allowFrom,
 		shareSessionInChannel: shareSessionInChannel,
-		httpURL:            httpURL,
+		groupReplyAll:         groupReplyAll,
+		httpURL:               httpURL,
 	}, nil
 }
 
@@ -194,6 +197,17 @@ func (p *Platform) handleMessage(payload map[string]any) {
 
 	if !p.isAllowed(userID) {
 		return
+	}
+
+	// Group messages: by default only respond when the bot is @-mentioned,
+	// matching Feishu / Discord / Telegram semantics. Set group_reply_all=true
+	// in config to keep the legacy "respond to every group message" behavior.
+	if msgType == "group" && !p.groupReplyAll {
+		if !p.isMentioned(payload) {
+			slog.Debug("qq: group message not @-mentioned, skipped",
+				"group_id", groupID, "user_id", userID)
+			return
+		}
 	}
 
 	// Extract sender info
@@ -659,6 +673,61 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	}
 	uid, _ := strconv.ParseInt(parts[1], 10, 64)
 	return &replyContext{messageType: "private", userID: uid}, nil
+}
+
+// isMentioned reports whether an incoming OneBot v11 group message @-mentions
+// the bot. Handles both the JSON segment form (preferred by modern NapCat /
+// LLOneBot) and the CQ-code form found in raw_message. Returns true when
+// selfID is unknown (0) so the bot doesn't drop messages before
+// get_login_info completes or after a reconnect with stale state.
+func (p *Platform) isMentioned(payload map[string]any) bool {
+	if p.selfID == 0 {
+		return true
+	}
+	selfIDStr := strconv.FormatInt(p.selfID, 10)
+
+	// JSON segment form: payload["message"] == [{"type":"at","data":{"qq":"<id>"}}, ...]
+	if msg, ok := payload["message"].([]any); ok {
+		for _, seg := range msg {
+			s, ok := seg.(map[string]any)
+			if !ok {
+				continue
+			}
+			if segType, _ := s["type"].(string); segType != "at" {
+				continue
+			}
+			data, _ := s["data"].(map[string]any)
+			if data == nil {
+				continue
+			}
+			switch v := data["qq"].(type) {
+			case string:
+				if v == selfIDStr {
+					return true
+				}
+			case float64:
+				if int64(v) == p.selfID {
+					return true
+				}
+			case json.Number:
+				if n, err := v.Int64(); err == nil && n == p.selfID {
+					return true
+				}
+			}
+		}
+	}
+
+	// CQ code form: raw_message contains "[CQ:at,qq=<id>]" or
+	// "[CQ:at,qq=<id>,name=...]". The trailing ",|" check avoids matching
+	// "[CQ:at,qq=8888]" against selfID 888888 (different digit length).
+	if raw, ok := payload["raw_message"].(string); ok {
+		if strings.Contains(raw, "[CQ:at,qq="+selfIDStr+"]") ||
+			strings.Contains(raw, "[CQ:at,qq="+selfIDStr+",") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (p *Platform) isAllowed(userID int64) bool {
