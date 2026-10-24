@@ -563,6 +563,11 @@ func main() {
 				HistoryMaxLen:    &historyMaxLen,
 				HideAgentFooter:  hideAgentFooter,
 			})
+
+			// Wire per-group display defaults (Issue #1604): a group may
+			// declare its own default mode, which applies to every session
+			// in that group until the session overrides it.
+			engine.SetGroupDisplays(buildGroupDisplays(&proj))
 		}
 
 		// Wire shell configuration
@@ -1792,6 +1797,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		HistoryMaxLen:    &historyMaxLen,
 		HideAgentFooter:  hideAgentFooter,
 	})
+	// Reload per-group display defaults (Issue #1604).
+	engine.SetGroupDisplays(buildGroupDisplays(proj))
 	result.DisplayUpdated = true
 
 	// Wire show_context_indicator and reply_footer from display config
@@ -1900,6 +1907,23 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	slog.Info("config reloaded", "project", projName)
 	return result, nil
+}
+
+// buildGroupDisplays converts the per-group display defaults configured under
+// [projects.groups.<id>.display] into the engine's group-scoped overrides
+// (Issue #1604). Groups without a configured mode produce no entry, so the
+// engine keeps using the project/global display config for them.
+func buildGroupDisplays(proj *config.ProjectConfig) map[string]core.DisplayModeOverride {
+	groups := config.EffectiveGroupDisplays(proj)
+	out := make(map[string]core.DisplayModeOverride, len(groups))
+	for id, gd := range groups {
+		out[id] = core.DisplayModeOverride{
+			Mode:             gd.Mode,
+			ThinkingMessages: gd.ThinkingMessages,
+			ToolMessages:     gd.ToolMessages,
+		}
+	}
+	return out
 }
 
 func buildUserRoleManager(uc *config.UsersConfig) *core.UserRoleManager {

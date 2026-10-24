@@ -160,6 +160,36 @@ level = "info" # debug, info, warn, error
 # tool_messages = false
 # hide_agent_footer = true   # Hide agent-emitted model/token footer only for this project
 
+# Per-group default mode: each [[projects]] entry may declare a default display
+# mode per chat/group. The group id is the workspace channel key
+# ("<platform>:<chat id>", e.g. "feishu:oc_xxx") — the same form used by the
+# multi-workspace bindings — or the bare chat id printed by /whoami.
+#
+# Resolution order for the display mode:
+#   1. the session's own `/config mode` setting (temporary, dropped when the
+#      session ends),
+#   2. the group default declared here,
+#   3. the project/global [display] mode.
+# A group without a `mode` here keeps the previous behaviour (project/global).
+# Only `mode` is group-scoped; every other display field stays project/global.
+#
+# 每个群/会话组可以单独指定默认显示模式。group id 使用工作区频道 key
+# （"<platform>:<chat id>"，例如 "feishu:oc_xxx"），也接受 /whoami 输出的
+# 纯 chat id。显示模式的生效顺序：
+#   1. 会话内 `/config mode` 的临时设置（会话结束后失效），
+#   2. 此处声明的 group 默认值，
+#   3. 项目/全局 [display] 的 mode。
+# 未声明 mode 的 group 保持原行为（项目/全局）。仅 mode 是 group 级，其余
+# display 字段仍是项目/全局级。
+#
+# [[projects]]
+# name = "my-backend"
+# [projects.groups."feishu:oc_xxx".display]
+# mode = "quiet"    # This group's default display mode / 该群的默认显示模式
+#
+# [projects.groups."telegram:-1001234567890".display]
+# mode = "compact"
+
 # Agent idle timeout: max minutes between consecutive agent events before
 # considering the session stuck. Set to 0 to disable the timeout entirely.
 # Agent 空闲超时：两次 agent 事件之间的最大等待分钟数，超时则认为会话卡住。设为 0 禁用。

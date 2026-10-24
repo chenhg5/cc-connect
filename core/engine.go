@@ -340,6 +340,18 @@ type DisplayCfg struct {
 	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
 }
 
+// DisplayModeOverride is a scoped display-mode override.
+//
+// Issue #1604 splits the display mode into scopes: a session-level override
+// (set at runtime by `/config mode`, in-memory only) wins over a group-level
+// default (configured per chat in the config file), which in turn wins over
+// the project/global display config.
+type DisplayModeOverride struct {
+	Mode             string // "full", "compact", or "quiet"
+	ThinkingMessages bool
+	ToolMessages     bool
+}
+
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
 // is received, before the agent starts processing.
 type InstantReplyCfg struct {
@@ -355,19 +367,28 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
-	name                  string
-	agent                 Agent
-	platforms             []Platform
-	sessions              *SessionManager
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	i18n                  *I18n
-	speech                SpeechCfg
-	tts                   *TTSCfg
-	display               DisplayCfg
-	injectSender          bool
-	attachmentSendEnabled bool
-	startedAt             time.Time
+	name      string
+	agent     Agent
+	platforms []Platform
+	sessions  *SessionManager
+	ctx       context.Context
+	cancel    context.CancelFunc
+	i18n      *I18n
+	speech    SpeechCfg
+	tts       *TTSCfg
+	display   DisplayCfg
+	// groupDisplays holds the per-group display defaults keyed by group id
+	// (Issue #1604). Loaded from the config file at startup and on
+	// `/config reload`.
+	groupDisplays map[string]DisplayModeOverride
+	// sessionDisplayOverrides holds the temporary per-session display mode set
+	// by `/config mode` (Issue #1604). In-memory only: it is never written to
+	// the config file and it is dropped when the session ends.
+	sessionDisplayOverrides map[string]DisplayModeOverride
+	displayMu               sync.RWMutex
+	injectSender            bool
+	attachmentSendEnabled   bool
+	startedAt               time.Time
 
 	providerSaveFunc        func(providerName string) error
 	providerAddSaveFunc     func(p ProviderConfig) error
@@ -556,9 +577,14 @@ type interactiveState struct {
 	// busySession is the core.Session whose busy lock guards the in-flight
 	// turn. Set by getOrCreateInteractiveStateWith so /stop can release the
 	// lock after tearing the turn down (#1830).
-	busySession              *Session
-	platform                 Platform
-	replyCtx                 any
+	busySession *Session
+	platform    Platform
+	replyCtx    any
+	// rawSessionKey is the platform session key ("<platform>:<chat id>[:<user>]")
+	// this state belongs to. The interactive key may carry a workspace prefix
+	// in multi-workspace mode, so the raw key is tracked separately and used
+	// for the scoped display resolution (Issue #1604).
+	rawSessionKey            string
 	currentMessageID         string
 	lastRecallProbeMessageID string
 	lastRecallProbeAt        time.Time
@@ -776,34 +802,36 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
-		name:                  name,
-		agent:                 ag,
-		platforms:             platforms,
-		sessions:              NewSessionManager(sessionStorePath),
-		ctx:                   ctx,
-		cancel:                cancel,
-		i18n:                  NewI18n(lang),
-		attachmentSendEnabled: true,
-		display:               DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
-		commands:              NewCommandRegistry(),
-		skills:                NewSkillRegistry(),
-		aliases:               make(map[string]string),
-		interactiveStates:     make(map[string]*interactiveState),
-		closingSessions:       make(map[string]chan struct{}),
-		unsafeResume:          make(map[string]bool),
-		sendWorkDirs:          make(map[string]string),
-		platformReady:         make(map[Platform]bool),
-		startedAt:             time.Now(),
-		streamPreview:         DefaultStreamPreviewCfg(),
-		references:            DefaultReferenceRenderCfg(),
-		eventIdleTimeout:      defaultEventIdleTimeout,
-		staleLockBreakAfter:   busyStaleLockMaxHeld,
-		maxQueuedMessages:     defaultMaxQueuedMessages,
-		showContextIndicator:  true,
-		showWorkdirIndicator:  true,
-		shell:                 defaultShell(),
-		shellFlag:             defaultShellFlag(),
-		pendingRestartTimeout: defaultPendingRestartTimeout,
+		name:                    name,
+		agent:                   ag,
+		platforms:               platforms,
+		sessions:                NewSessionManager(sessionStorePath),
+		ctx:                     ctx,
+		cancel:                  cancel,
+		i18n:                    NewI18n(lang),
+		attachmentSendEnabled:   true,
+		display:                 DisplayCfg{Mode: "full", ThinkingMessages: true, ThinkingMaxLen: defaultThinkingMaxLen, ToolMaxLen: defaultToolMaxLen, ToolMessages: true, CardMode: "legacy"},
+		groupDisplays:           make(map[string]DisplayModeOverride),
+		sessionDisplayOverrides: make(map[string]DisplayModeOverride),
+		commands:                NewCommandRegistry(),
+		skills:                  NewSkillRegistry(),
+		aliases:                 make(map[string]string),
+		interactiveStates:       make(map[string]*interactiveState),
+		closingSessions:         make(map[string]chan struct{}),
+		unsafeResume:            make(map[string]bool),
+		sendWorkDirs:            make(map[string]string),
+		platformReady:           make(map[Platform]bool),
+		startedAt:               time.Now(),
+		streamPreview:           DefaultStreamPreviewCfg(),
+		references:              DefaultReferenceRenderCfg(),
+		eventIdleTimeout:        defaultEventIdleTimeout,
+		staleLockBreakAfter:     busyStaleLockMaxHeld,
+		maxQueuedMessages:       defaultMaxQueuedMessages,
+		showContextIndicator:    true,
+		showWorkdirIndicator:    true,
+		shell:                   defaultShell(),
+		shellFlag:               defaultShellFlag(),
+		pendingRestartTimeout:   defaultPendingRestartTimeout,
 	}
 
 	if ag != nil {
@@ -929,6 +957,121 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
 	e.display = cfg
+}
+
+// SetGroupDisplays replaces the per-group display defaults (Issue #1604).
+// The keys are group ids as configured in [projects.groups.<id>.display].
+func (e *Engine) SetGroupDisplays(groups map[string]DisplayModeOverride) {
+	e.displayMu.Lock()
+	defer e.displayMu.Unlock()
+	e.groupDisplays = make(map[string]DisplayModeOverride, len(groups))
+	for id, ov := range groups {
+		e.groupDisplays[id] = ov
+	}
+}
+
+// displayGroupKey returns the group id of a session key: the workspace
+// channel key ("<platform>:<chat id>"). It matches the group ids accepted in
+// the [projects.groups.<id>] config block.
+func displayGroupKey(sessionKey string) string {
+	return extractWorkspaceChannelKey(sessionKey)
+}
+
+// groupDisplayOverride returns the group-level display default that applies to
+// a session key, if any. The platform-prefixed group id wins over the bare
+// chat id, so a project can configure either form.
+func (e *Engine) groupDisplayOverride(sessionKey string) (DisplayModeOverride, bool) {
+	e.displayMu.RLock()
+	defer e.displayMu.RUnlock()
+	if len(e.groupDisplays) == 0 {
+		return DisplayModeOverride{}, false
+	}
+	if ov, ok := e.groupDisplays[displayGroupKey(sessionKey)]; ok {
+		return ov, true
+	}
+	if channelID := extractChannelID(sessionKey); channelID != "" {
+		if ov, ok := e.groupDisplays[channelID]; ok {
+			return ov, true
+		}
+	}
+	return DisplayModeOverride{}, false
+}
+
+// sessionDisplayOverride returns the temporary display mode set on a session
+// by `/config mode`, if any.
+func (e *Engine) sessionDisplayOverride(sessionKey string) (DisplayModeOverride, bool) {
+	e.displayMu.RLock()
+	defer e.displayMu.RUnlock()
+	ov, ok := e.sessionDisplayOverrides[sessionKey]
+	return ov, ok
+}
+
+// displayForSession resolves the display config that applies to one session.
+//
+// Precedence (Issue #1604): the session's temporary mode (set by
+// `/config mode`) > the group's configured default > the project/global
+// display config. A group without a configured default falls back to the
+// project/global config, exactly as before this change.
+func (e *Engine) displayForSession(sessionKey string) DisplayCfg {
+	base := e.display
+	ov, ok := e.sessionDisplayOverride(sessionKey)
+	if !ok {
+		ov, ok = e.groupDisplayOverride(sessionKey)
+	}
+	if !ok {
+		return base
+	}
+	if ov.Mode != "" {
+		base.Mode = ov.Mode
+	}
+	base.ThinkingMessages = ov.ThinkingMessages
+	base.ToolMessages = ov.ToolMessages
+	return base
+}
+
+// displaySessionKey returns the raw platform session key of an interactive
+// state. The interactive key may be workspace-prefixed (multi-workspace mode),
+// while the display scope is keyed by the raw session key (Issue #1604).
+// Falls back to the given key when the state does not carry one.
+func displaySessionKey(state *interactiveState, fallback string) string {
+	if state != nil {
+		state.mu.Lock()
+		key := state.rawSessionKey
+		state.mu.Unlock()
+		if key != "" {
+			return key
+		}
+	}
+	return fallback
+}
+
+// setSessionDisplayMode stores a temporary display mode for one session
+// (Issue #1604). The override is never written back to the config file: it
+// only affects the session that ran the command and is dropped when that
+// session ends.
+func (e *Engine) setSessionDisplayMode(sessionKey, mode string) error {
+	var ov DisplayModeOverride
+	switch mode {
+	case "full":
+		ov = DisplayModeOverride{Mode: "full", ThinkingMessages: true, ToolMessages: true}
+	case "compact", "quiet":
+		ov = DisplayModeOverride{Mode: mode, ThinkingMessages: false, ToolMessages: false}
+	default:
+		return fmt.Errorf("must be full, compact, or quiet")
+	}
+	e.displayMu.Lock()
+	defer e.displayMu.Unlock()
+	e.sessionDisplayOverrides[sessionKey] = ov
+	return nil
+}
+
+// clearSessionDisplayOverride drops the temporary display mode of a session.
+// It is called when the session ends so the mode does not outlive it
+// (Issue #1604).
+func (e *Engine) clearSessionDisplayOverride(sessionKey string) {
+	e.displayMu.Lock()
+	defer e.displayMu.Unlock()
+	delete(e.sessionDisplayOverrides, sessionKey)
 }
 
 // SetInstantReply configures the immediate confirmation reply.
@@ -3385,6 +3528,8 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 			"session_key", msg.SessionKey, "new_session", newSession.ID)
 		return nil, 0
 	}
+	// Issue #1604: drop the session-scoped display mode with the reset session.
+	e.clearSessionDisplayOverride(msg.SessionKey)
 
 	// New session is locked — now safe to release the old one.
 	e.cleanupInteractiveState(interactiveKey)
@@ -4045,6 +4190,15 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if workspaceDir != "" {
 		state.mu.Lock()
 		state.workspaceDir = workspaceDir
+		state.mu.Unlock()
+	}
+
+	// Track the raw platform session key on the state. The interactive key can
+	// be workspace-prefixed, but the display scope (group default, session
+	// override) is keyed by the raw session key (Issue #1604).
+	if msg.SessionKey != "" {
+		state.mu.Lock()
+		state.rawSessionKey = msg.SessionKey
 		state.mu.Unlock()
 	}
 
@@ -5613,13 +5767,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		p := state.platform
 		state.mu.Unlock()
 
-		// main codebase has no per-session quiet flag; pr309 referenced
-		// sessionQuiet which we drop. e.display.ThinkingMessages /
-		// ToolMessages handle user-level quiet in the fallback branches.
+		// Resolve the display settings that apply to this session
+		// (Issue #1604: session override > group default > global).
+		disp := e.displayForSession(displaySessionKey(state, sessionKey))
+
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
 		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
 		// Default "legacy" keeps upstream behavior for all platforms.
-		if e.display.CardMode != "rich" {
+		if disp.CardMode != "rich" {
 			hasRichCard = false
 		}
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
@@ -5655,10 +5810,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if hasRichCard {
 				// When thinking messages are suppressed, skip card creation.
-				if !e.display.ThinkingMessages {
+				if !disp.ThinkingMessages {
 					break
 				}
-				if thinking := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen)); thinking != "" {
+				if thinking := strings.TrimSpace(truncateIf(event.Content, disp.ThinkingMaxLen)); thinking != "" {
 					toolSteps = append(toolSteps, ToolStep{
 						Kind:    ToolStepKindThinking,
 						Name:    "Thinking",
@@ -5687,8 +5842,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When thinking messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
+			if !disp.ThinkingMessages && len(textParts) > segmentStart {
+				if disp.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
@@ -5708,10 +5863,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
-			if e.display.ThinkingMessages && event.Content != "" {
+			if disp.ThinkingMessages && event.Content != "" {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
-					cardThinkingText = truncateIf(event.Content, e.display.ThinkingMaxLen)
+					cardThinkingText = truncateIf(event.Content, disp.ThinkingMaxLen)
 					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
 					continue // skip original independent message sending
 				}
@@ -5734,7 +5889,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if previewActive {
 					sp.detachPreview() // keep frozen preview visible as permanent message
 				}
-				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
+				preview := truncateIf(event.Content, disp.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
 					sendWorkspace(p, replyCtx, thinkingMsg)
@@ -5745,13 +5900,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			toolCount++
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
-				if !e.display.ToolMessages {
+				if !disp.ToolMessages {
 					break
 				}
 				toolSteps = append(toolSteps, ToolStep{
 					Kind:    ToolStepKindTool,
 					Name:    event.ToolName,
-					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
+					Summary: truncateIf(event.ToolInput, disp.ToolMaxLen),
 				})
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
@@ -5774,8 +5929,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ToolMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
+			if !disp.ToolMessages && len(textParts) > segmentStart {
+				if disp.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
@@ -5795,7 +5950,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
-			if e.display.ToolMessages {
+			if disp.ToolMessages {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					toolInput := event.ToolInput
@@ -5863,7 +6018,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Truncate the tool input that goes into the progress card payload so
 				// tool_max_len applies uniformly to progress_style=card, matching
 				// the rich-card path. event.ToolInput itself is left untouched.
-				cardToolInput := truncateIf(toolInput, e.display.ToolMaxLen)
+				cardToolInput := truncateIf(toolInput, disp.ToolMaxLen)
 				if !cp.AppendEvent(ProgressEntryToolUse, cardToolInput, event.ToolName, toolMsg) {
 					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
 						sendWorkspace(p, replyCtx, chunk)
@@ -5872,17 +6027,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-			if e.display.ToolMessages {
+			if disp.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
 				}
 				if result != "" {
-					result = truncateIf(result, e.display.ToolMaxLen)
+					result = truncateIf(result, disp.ToolMaxLen)
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
 					if hasRichCard {
-						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
+						toolSteps = mergeRichToolResult(toolSteps, event, result, disp.ToolMaxLen)
 						if cardMessageID == nil {
 							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 							if starter, ok := p.(PreviewStarter); ok {
@@ -5920,7 +6075,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventText:
 			content := event.Content
-			if e.display.HideAgentFooter {
+			if disp.HideAgentFooter {
 				content = stripAgentFooterLines(content)
 			}
 			if content != "" && !isEllipsisOnly(content) {
@@ -6118,7 +6273,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if isAskQuestion {
 				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
 			} else {
-				permLimit := e.display.ToolMaxLen
+				permLimit := disp.ToolMaxLen
 				if permLimit > 0 {
 					permLimit = permLimit * 8 / 5
 				}
@@ -6193,13 +6348,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			fullResponse := event.Content
-			if e.display.HideAgentFooter {
+			if disp.HideAgentFooter {
 				fullResponse = stripAgentFooterLines(fullResponse)
 			}
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			if len(textParts) > 0 && segmentStart == 0 && !disp.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -7606,6 +7761,10 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 		name = strings.Join(args, " ")
 	}
 	sessions.NewSession(msg.SessionKey, name)
+	// Issue #1604: the session-scoped display mode does not outlive the
+	// session it was set on. The new session falls back to the group
+	// default (or the global config).
+	e.clearSessionDisplayOverride(msg.SessionKey)
 	if name != "" {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgNewSessionCreatedName), name))
 	} else {
@@ -9315,12 +9474,13 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 				modeStr = e.i18n.Tf(MsgStatusMode, mode)
 			}
 		}
+		disp := e.displayForSession(msg.SessionKey)
 		thinkingStr := e.i18n.T(MsgDisabledShort)
-		if e.display.ThinkingMessages {
+		if disp.ThinkingMessages {
 			thinkingStr = e.i18n.T(MsgEnabledShort)
 		}
 		toolStr := e.i18n.T(MsgDisabledShort)
-		if e.display.ToolMessages {
+		if disp.ToolMessages {
 			toolStr = e.i18n.T(MsgEnabledShort)
 		}
 		modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
@@ -9752,12 +9912,13 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 			modeStr = e.i18n.Tf(MsgStatusMode, mode)
 		}
 	}
+	disp := e.displayForSession(sessionKey)
 	thinkingStr := e.i18n.T(MsgDisabledShort)
-	if e.display.ThinkingMessages {
+	if disp.ThinkingMessages {
 		thinkingStr = e.i18n.T(MsgEnabledShort)
 	}
 	toolStr := e.i18n.T(MsgDisabledShort)
-	if e.display.ToolMessages {
+	if disp.ToolMessages {
 		toolStr = e.i18n.T(MsgEnabledShort)
 	}
 	modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
@@ -10889,6 +11050,8 @@ func (e *Engine) cmdCancel(p Platform, msg *Message) {
 
 	// Create a new session (like /new)
 	sessions.NewSession(msg.SessionKey, "")
+	// Issue #1604: drop the session-scoped display mode with the old session.
+	e.clearSessionDisplayOverride(msg.SessionKey)
 
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionCancelled))
 }
@@ -12830,7 +12993,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/alias":
 		return e.renderAliasCard()
 	case "/config":
-		return e.renderConfigCard()
+		return e.renderConfigCard(sessionKey)
 	case "/skills":
 		return e.skillsCardForSession(sessionKey)
 	case "/doctor":
@@ -13107,6 +13270,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		_, sessions := e.sessionContextForKey(sessionKey)
 		e.cleanupInteractiveState(interactiveKey)
 		sessions.NewSession(sessionKey, "")
+		// Issue #1604: drop the session-scoped display mode with the old session.
+		e.clearSessionDisplayOverride(sessionKey)
 
 	case "/delete-mode":
 		e.executeDeleteModeAction(sessionKey, args)
@@ -14511,8 +14676,8 @@ func (e *Engine) renderAliasCard() *Card {
 		Build()
 }
 
-func (e *Engine) renderConfigCard() *Card {
-	items := e.configItems()
+func (e *Engine) renderConfigCard(sessionKey string) *Card {
+	items := e.configItems(sessionKey)
 	isZh := e.i18n.IsZhLike()
 
 	var sb strings.Builder
@@ -15732,37 +15897,29 @@ func (ci configItem) description(isZh bool) string {
 	return ci.desc
 }
 
-func (e *Engine) configItems() []configItem {
+// configItems returns the configurable runtime parameters.
+//
+// sessionKey is the session the command was issued from. It is only used by
+// the scoped items (currently `mode`), which apply to that session instead of
+// the global config.
+func (e *Engine) configItems(sessionKey string) []configItem {
 	return []configItem{
 		{
 			key:    "mode",
-			desc:   "Display mode: full, compact, quiet",
-			descZh: "显示模式: full, compact, quiet",
+			desc:   "Display mode for this session: full, compact, quiet",
+			descZh: "当前会话的显示模式: full, compact, quiet",
 			getFunc: func() string {
-				if e.display.Mode == "" {
+				mode := e.displayForSession(sessionKey).Mode
+				if mode == "" {
 					return "full"
 				}
-				return e.display.Mode
+				return mode
 			},
 			setFunc: func(v string) error {
-				switch v {
-				case "full":
-					e.display.Mode = "full"
-					e.display.ThinkingMessages = true
-					e.display.ToolMessages = true
-				case "compact", "quiet":
-					e.display.Mode = v
-					e.display.ThinkingMessages = false
-					e.display.ToolMessages = false
-				default:
-					return fmt.Errorf("must be full, compact, or quiet")
-				}
-				if e.displaySaveFunc != nil {
-					tm := e.display.ThinkingMessages
-					tool := e.display.ToolMessages
-					return e.displaySaveFunc(&v, &tm, nil, nil, &tool)
-				}
-				return nil
+				// Issue #1604: the mode applies to the current session only.
+				// It is not written back to the config file and it does not
+				// change the global mode nor the mode of other sessions.
+				return e.setSessionDisplayMode(sessionKey, v)
 			},
 		},
 		{
@@ -15853,7 +16010,7 @@ func (e *Engine) configItems() []configItem {
 func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
 		if !supportsCards(p) {
-			items := e.configItems()
+			items := e.configItems(msg.SessionKey)
 			isZh := e.i18n.IsZhLike()
 			var sb strings.Builder
 			sb.WriteString(e.i18n.T(MsgConfigTitle))
@@ -15865,11 +16022,11 @@ func (e *Engine) cmdConfig(p Platform, msg *Message, args []string) {
 			return
 		}
 
-		e.replyWithCard(p, msg.ReplyCtx, e.renderConfigCard())
+		e.replyWithCard(p, msg.ReplyCtx, e.renderConfigCard(msg.SessionKey))
 		return
 	}
 
-	items := e.configItems()
+	items := e.configItems(msg.SessionKey)
 	isZh := e.i18n.IsZhLike()
 	sub := matchSubCommand(strings.ToLower(args[0]), []string{"get", "set", "reload"})
 
