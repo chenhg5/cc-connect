@@ -3,7 +3,10 @@
 package integration
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -234,7 +237,7 @@ func TestIntegration_UnsolicitedEventsEndToEnd(t *testing.T) {
 
 	// Feed the foreground turn events.
 	sess.emit(core.Event{Type: core.EventText, Content: "Submitted, waiting..."})
-	sess.emit(core.Event{Type: core.EventResult, Content: "Submitted, waiting..."})
+	sess.emit(core.Event{Type: core.EventResult, Content: "Submitted, waiting...", Done: true})
 
 	require.True(t, waitForMessage(t, platform, "Submitted", 3*time.Second),
 		"foreground turn response was not delivered")
@@ -244,7 +247,7 @@ func TestIntegration_UnsolicitedEventsEndToEnd(t *testing.T) {
 	// behavior they would sit in the buffer until drained by the next msg.
 	const bgDoneMarker = "All 5 campaigns created successfully"
 	sess.emit(core.Event{Type: core.EventText, Content: bgDoneMarker})
-	sess.emit(core.Event{Type: core.EventResult, Content: bgDoneMarker})
+	sess.emit(core.Event{Type: core.EventResult, Content: bgDoneMarker, Done: true})
 
 	require.True(t, waitForMessage(t, platform, bgDoneMarker, 3*time.Second),
 		"unsolicited event was not relayed to platform")
@@ -269,7 +272,7 @@ func TestIntegration_UnsolicitedEventsEndToEnd(t *testing.T) {
 
 	const secondTurnMarker = "no failures, all clean"
 	sess.emit(core.Event{Type: core.EventText, Content: secondTurnMarker})
-	sess.emit(core.Event{Type: core.EventResult, Content: secondTurnMarker})
+	sess.emit(core.Event{Type: core.EventResult, Content: secondTurnMarker, Done: true})
 
 	require.True(t, waitForMessage(t, platform, secondTurnMarker, 3*time.Second),
 		"second foreground turn response was not delivered")
@@ -323,7 +326,7 @@ func TestIntegration_StaleEventsDrainedAfterAbnormalExit(t *testing.T) {
 	// should NOT be started. These events should sit in the buffer.
 	const leftoverMarker = "LEFTOVER-SHOULD-BE-DRAINED"
 	sess.emit(core.Event{Type: core.EventText, Content: leftoverMarker})
-	sess.emit(core.Event{Type: core.EventResult, Content: leftoverMarker})
+	sess.emit(core.Event{Type: core.EventResult, Content: leftoverMarker, Done: true})
 
 	// ─── Phase 3: send a NEXT user message ─────────────────────
 	// drainEvents() in processInteractiveMessageWith should clear the
@@ -344,7 +347,7 @@ func TestIntegration_StaleEventsDrainedAfterAbnormalExit(t *testing.T) {
 	// Feed the new turn's events.
 	const retryMarker = "retry succeeded"
 	sess.emit(core.Event{Type: core.EventText, Content: retryMarker})
-	sess.emit(core.Event{Type: core.EventResult, Content: retryMarker})
+	sess.emit(core.Event{Type: core.EventResult, Content: retryMarker, Done: true})
 
 	require.True(t, waitForMessage(t, platform, retryMarker, 3*time.Second),
 		"retry turn response not delivered")
@@ -371,3 +374,148 @@ func containsAll(msgs []string, needles ...string) bool {
 type simpleError string
 
 func (e simpleError) Error() string { return string(e) }
+
+// ---------------------------------------------------------------------------
+// Issue #1803: the unsolicited relay must be observable.
+//
+// The report was "8 minutes of silence between 'unsolicited turn complete' and
+// the message arriving". The relay is event-driven, so the only way that gap
+// can be real is a blocked send — and a blocked send was invisible, because
+// only failures were logged. These tests pin down both halves: the relay
+// happens promptly, and it says so in the log, including what triggered the
+// turn.
+// ---------------------------------------------------------------------------
+
+// syncBuffer is a concurrency-safe sink for slog output. The engine writes
+// from its own goroutines, so a plain bytes.Buffer would race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureEngineLogs redirects the default logger into a concurrency-safe
+// buffer for the duration of the test.
+func captureEngineLogs(t *testing.T) *syncBuffer {
+	t.Helper()
+	buf := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+// waitForLogEntry polls the captured log until an entry with the given
+// message appears, or the timeout expires. Returns nil when not found.
+func waitForLogEntry(t *testing.T, buf *syncBuffer, msg string, timeout time.Duration) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var entry map[string]any
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				continue
+			}
+			if entry["msg"] == msg {
+				return entry
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil
+}
+
+// TestIntegration_UnsolicitedRelayLoggedWithTriggerSource verifies the whole
+// #1803 fix end to end:
+//
+//  1. the unsolicited relay reaches the platform within seconds (the 8-minute
+//     gap of the report would fail this bound),
+//  2. a "unsolicited relay sent" log entry records the outcome and carries
+//     the trigger source of the turn,
+//  3. the foreground turn's "turn complete" log also carries a trigger source.
+func TestIntegration_UnsolicitedRelayLoggedWithTriggerSource(t *testing.T) {
+	logs := captureEngineLogs(t)
+
+	sess := newPersistentEventsSession("unsol-relay-log")
+	agent := newPersistentEventsAgent("fake-claude", sess)
+	platform := newCapturingPlatform()
+
+	engine := core.NewEngine("test", agent, []core.Platform{platform}, "", core.LangEnglish)
+	defer engine.Stop()
+	require.NoError(t, engine.Start())
+	<-platform.started
+
+	// ─── Phase 1: a normal foreground turn ──────────────────────
+	userMsg := &core.Message{
+		SessionKey: "test:ch1:u1",
+		Platform:   "capture",
+		MessageID:  "msg-001",
+		UserID:     "u1",
+		Content:    "start the long job",
+		ReplyCtx:   "rctx-1",
+	}
+	go platform.dispatch(userMsg)
+	require.True(t, waitForPromptCount(t, sess, 1, 3*time.Second),
+		"agent never received the prompt")
+
+	sess.emit(core.Event{Type: core.EventText, Content: "started"})
+	sess.emit(core.Event{Type: core.EventResult, Content: "started", Done: true})
+	require.True(t, waitForMessage(t, platform, "started", 3*time.Second),
+		"foreground turn response was not delivered")
+
+	// Wait for the foreground turn to complete so the unsolicited reader owns
+	// the event channel before the background events are emitted.
+	fgTurn := waitForLogEntry(t, logs, "turn complete", 3*time.Second)
+	require.NotNil(t, fgTurn, "no 'turn complete' log entry; logs:\n%s", logs.String())
+	assert.Equal(t, core.TriggerSourceUserMessage, fgTurn["trigger_source"],
+		"a foreground turn started by a user message must be attributed to it")
+	time.Sleep(100 * time.Millisecond) // let the unsolicited reader start
+
+	// ─── Phase 2: the agent reports a completed background task ──
+	// The adapter knows the turn was triggered by a subagent completion;
+	// core cannot know that on its own.
+	const bgMarker = "background job finished"
+	emitAt := time.Now()
+	sess.emit(core.Event{Type: core.EventText, Content: bgMarker})
+	sess.emit(core.Event{
+		Type:          core.EventResult,
+		Content:       bgMarker,
+		Done:          true,
+		TriggerSource: core.TriggerSourceSubagent,
+	})
+
+	require.True(t, waitForMessage(t, platform, bgMarker, 3*time.Second),
+		"unsolicited event was not relayed to the platform")
+	relayLatency := time.Since(emitAt)
+	assert.Less(t, relayLatency, 3*time.Second,
+		"unsolicited relay took %s — the relay must be event-driven, not polled", relayLatency)
+
+	// ─── Phase 3: the relay is observable in the log ────────────
+	entry := waitForLogEntry(t, logs, "unsolicited relay sent", 3*time.Second)
+	require.NotNil(t, entry,
+		"no 'unsolicited relay sent' log entry — a successful relay must be logged; logs:\n%s",
+		logs.String())
+	assert.Equal(t, core.TriggerSourceSubagent, entry["trigger_source"],
+		"the relay log must report what triggered the turn")
+	assert.NotEmpty(t, entry["session"], "the relay log must identify the session")
+	assert.NotEmpty(t, entry["relay_duration"], "the relay log must report how long the send took")
+
+	// The turn that the relay belongs to is also attributed.
+	turnEntry := waitForLogEntry(t, logs, "unsolicited turn complete", 3*time.Second)
+	require.NotNil(t, turnEntry, "no 'unsolicited turn complete' log entry; logs:\n%s", logs.String())
+	assert.Equal(t, core.TriggerSourceSubagent, turnEntry["trigger_source"])
+}

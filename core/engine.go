@@ -579,6 +579,10 @@ type interactiveState struct {
 	pendingProviderAdd       *pendingProviderAddState
 	lastAutoCompressAt       time.Time
 	lastAutoCompressTokens   int
+	// triggerSource records what started the current foreground turn
+	// (user message, timer, cron, heartbeat). Set per turn; reported in the
+	// turn logs so an operator can attribute a slow or missing turn.
+	triggerSource string
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -1609,8 +1613,8 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	msg := &Message{
 		SessionKey:   sessionKey,
 		Platform:     platformName,
-		UserID:       "cron",
-		UserName:     "cron",
+		UserID:       syntheticUserIDCron,
+		UserName:     syntheticUserIDCron,
 		Content:      content,
 		ReplyCtx:     replyCtx,
 		ModeOverride: job.Mode,
@@ -1816,8 +1820,8 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	msg := &Message{
 		SessionKey:   sessionKey,
 		Platform:     platformName,
-		UserID:       "timer",
-		UserName:     "timer",
+		UserID:       syntheticUserIDTimer,
+		UserName:     syntheticUserIDTimer,
 		Content:      content,
 		ReplyCtx:     replyCtx,
 		ModeOverride: job.Mode,
@@ -2345,8 +2349,8 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 	msg := &Message{
 		SessionKey: sessionKey,
 		Platform:   platformName,
-		UserID:     "heartbeat",
-		UserName:   "heartbeat",
+		UserID:     syntheticUserIDHeartbeat,
+		UserName:   syntheticUserIDHeartbeat,
 		Content:    prompt,
 		ReplyCtx:   replyCtx,
 	}
@@ -4059,6 +4063,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
+	state.triggerSource = foregroundTriggerSource(msg)
 	state.mu.Unlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
@@ -5059,6 +5064,48 @@ func (e *Engine) startUnsolicitedReader(state *interactiveState, session *Sessio
 	go e.runUnsolicitedReader(ctx, cancel, done, flushDone, state, agentSession, session, sessions, sessionKey, workspaceDir)
 }
 
+// relayUnsolicited delivers one unsolicited turn's text to the platform and
+// records the outcome.
+//
+// Every attempt is logged. Before this existed the engine logged only
+// failures (inside sendAlreadyRenderedWithError) and nothing at all when the
+// relay succeeded, so an operator could not tell a delivered message from a
+// dropped one — the blind spot issue #1803 reported. Each log line also
+// carries the trigger source and how long the platform call took, so a gap
+// between two turns can be attributed to the right side (agent vs platform).
+//
+// The sends are synchronous on purpose: platform message ordering within a
+// turn is guaranteed by sending the chunks in order from one goroutine.
+func (e *Engine) relayUnsolicited(p Platform, replyCtx any, sessionKey string, triggerSource string, content string) {
+	if p == nil || content == "" {
+		return
+	}
+	chunks := SplitMessageCodeFenceAware(content, maxPlatformMessageLen)
+	for i, chunk := range chunks {
+		start := time.Now()
+		err := e.sendWithError(p, replyCtx, chunk)
+		elapsed := time.Since(start)
+		if err != nil {
+			slog.Error("unsolicited relay failed",
+				"session", sessionKey,
+				"trigger_source", triggerSource,
+				"chunk", i+1,
+				"chunks", len(chunks),
+				"error", err,
+				"relay_duration", elapsed,
+			)
+			continue
+		}
+		slog.Info("unsolicited relay sent",
+			"session", sessionKey,
+			"trigger_source", triggerSource,
+			"chunk", i+1,
+			"chunks", len(chunks),
+			"relay_duration", elapsed,
+		)
+	}
+}
+
 // runUnsolicitedReader is the goroutine body for the unsolicited event reader.
 // agentSession is captured by the caller so we don't race with
 // cleanupInteractiveState nilling state.agentSession.
@@ -5118,13 +5165,10 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			// foreground turn's reply in the common case while a slow
 			// platform call can never extend that wait (some callers hold
 			// interactiveMu) beyond the bound.
-			chunks := SplitMessageCodeFenceAware(partial, maxPlatformMessageLen)
 			flushHandedOff = true
 			go func() {
 				defer close(flushDone)
-				for _, chunk := range chunks {
-					e.send(p, replyCtx, chunk)
-				}
+				e.relayUnsolicited(p, replyCtx, sessionKey, TriggerSourceAgentInitiated, partial)
 			}()
 		}
 		session.AddHistory("assistant", partial)
@@ -5187,8 +5231,15 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 						ws.BeginTurn()
 					}
 				}
-				slog.Info("unsolicited events detected, relaying to platform",
-					"session", sessionKey)
+				// This line marks the START of an unsolicited turn (the first
+				// event of it), not the relay. The relay happens when the turn
+				// ends — see "unsolicited relay sent" / "unsolicited relay
+				// failed". The old message said "relaying to platform" here,
+				// which made operators read the gap between this line and the
+				// next turn's start as a relay delay (issue #1803).
+				slog.Info("unsolicited events detected",
+					"session", sessionKey,
+					"trigger_source", TriggerSourceAgentInitiated)
 			}
 
 			state.mu.Lock()
@@ -5228,11 +5279,13 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					fullResponse = strings.Join(textParts, "")
 				}
 
-				if fullResponse != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
-					}
-				}
+				// The relay happens here, synchronously, the moment the turn
+				// ends — there is no polling interval and no queue in front of
+				// it. The adapter may know a more specific trigger than core
+				// (e.g. a background task completion callback); otherwise the
+				// turn was started by the agent itself.
+				triggerSource := resolveTriggerSource(event, TriggerSourceAgentInitiated)
+				e.relayUnsolicited(p, replyCtx, sessionKey, triggerSource, fullResponse)
 
 				// Safety note: concurrent writes to session.History by the
 				// unsolicited reader and a foreground turn cannot overlap.
@@ -5278,7 +5331,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 				slog.Info("unsolicited turn complete",
 					"session", sessionKey,
-					"response_len", len(fullResponse))
+					"response_len", len(fullResponse),
+					"trigger_source", triggerSource)
 
 			case EventUserInputRequest:
 				e.showAsyncUserInput(state, p, replyCtx, event)
@@ -6367,6 +6421,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			fullResponse = cleanResponse
 
 			turnDuration := time.Since(turnStart)
+			state.mu.Lock()
+			turnTriggerSource := state.triggerSource
+			state.mu.Unlock()
 			slog.Info("turn complete",
 				"session", session.ID,
 				"agent_session", session.GetAgentSessionID(),
@@ -6377,6 +6434,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"input_tokens", event.InputTokens,
 				"output_tokens", event.OutputTokens,
 				"silent", isSilent,
+				"trigger_source", turnTriggerSource,
 			)
 			// DEBUG: full assistant response for in-depth debugging.
 			if slog.Default().Enabled(e.ctx, slog.LevelDebug) {
