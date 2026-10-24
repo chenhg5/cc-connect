@@ -16039,10 +16039,10 @@ func (e *Engine) formatWhoamiText(msg *Message) string {
 		sb.WriteString(e.i18n.T(MsgWhoamiUnknownUserID))
 	}
 	if msg.UserName != "" {
-		sb.WriteString(fmt.Sprintf("%s: %s\n", e.i18n.T(MsgWhoamiName), msg.UserName))
+		fmt.Fprintf(&sb, "%s: %s\n", e.i18n.T(MsgWhoamiName), msg.UserName)
 	}
 	if msg.Platform != "" {
-		sb.WriteString(fmt.Sprintf("%s: %s\n", e.i18n.T(MsgWhoamiPlatform), msg.Platform))
+		fmt.Fprintf(&sb, "%s: %s\n", e.i18n.T(MsgWhoamiPlatform), msg.Platform)
 	}
 
 	chatID := effectiveChannelID(msg)

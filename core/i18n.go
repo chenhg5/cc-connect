@@ -137,7 +137,7 @@ func hasEnglishSentence(text string) bool {
 			sentenceHint = true
 		}
 		for _, r := range word {
-			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '\'') {
+			if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && r != '\'' {
 				return false
 			}
 		}

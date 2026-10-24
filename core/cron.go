@@ -1009,8 +1009,8 @@ func cronExprToRussian(expr string, fields []string) string {
 	}
 	minStep, stepMinute := parseStep(minute)
 	hourStep, stepHour := parseStep(hour)
-	if (minute != "*" && !number(minute, 0, 59) && !(stepMinute && minStep > 0 && minStep <= 59)) ||
-		(hour != "*" && !number(hour, 0, 23) && !(stepHour && hourStep > 0 && hourStep <= 23)) {
+	if (minute != "*" && !number(minute, 0, 59) && (!stepMinute || minStep <= 0 || minStep > 59)) ||
+		(hour != "*" && !number(hour, 0, 23) && (!stepHour || hourStep <= 0 || hourStep > 23)) {
 		return expr
 	}
 	var when string
