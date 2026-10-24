@@ -517,8 +517,8 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	}
 }
 
-// flushPendingAsThinking emits all buffered agent_messages as EventThinking.
-func (cs *codexSession) flushPendingAsThinking() {
+// flushPendingAsCommentary classifies legacy messages preceding a tool as user-facing updates.
+func (cs *codexSession) flushPendingAsCommentary() {
 	if cs.ctx.Err() != nil {
 		return
 	}
@@ -526,7 +526,7 @@ func (cs *codexSession) flushPendingAsThinking() {
 		if cs.ctx.Err() != nil {
 			return
 		}
-		evt := core.Event{Type: core.EventThinking, Content: text}
+		evt := core.Event{Type: core.EventCommentary, Content: text}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -576,8 +576,8 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 		return
 	}
 
-	// Any non-message item is a tool use; flush pending messages as thinking first.
-	cs.flushPendingAsThinking()
+	// Messages before a tool are commentary, not reasoning or the final answer.
+	cs.flushPendingAsCommentary()
 
 	switch itemType {
 	case "command_execution":
@@ -626,6 +626,14 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 	case "agent_message", "message":
 		text := extractItemText(item, "content", "output_text")
 		if text != "" {
+			if phase, _ := item["phase"].(string); phase == "commentary" {
+				cs.flushPendingAsCommentary()
+				select {
+				case cs.events <- core.Event{Type: core.EventCommentary, Content: text}:
+				case <-cs.ctx.Done():
+				}
+				return
+			}
 			cs.pendingMsgs = append(cs.pendingMsgs, text)
 		}
 
