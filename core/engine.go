@@ -5228,8 +5228,11 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					fullResponse = strings.Join(textParts, "")
 				}
 
-				if fullResponse != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
+				// Background turns must honor NO_REPLY too: a bare marker
+				// means nothing is delivered, a trailing marker is stripped.
+				outbound, silent := resolveUnsolicitedReply(fullResponse)
+				if outbound != "" {
+					for _, chunk := range SplitMessageCodeFenceAware(outbound, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
 				}
@@ -5278,7 +5281,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 				slog.Info("unsolicited turn complete",
 					"session", sessionKey,
-					"response_len", len(fullResponse))
+					"response_len", len(fullResponse),
+					"silent", silent)
 
 			case EventUserInputRequest:
 				e.showAsyncUserInput(state, p, replyCtx, event)
@@ -17804,6 +17808,17 @@ func stripTrailingSilent(text string) (string, bool) {
 		return text, false
 	}
 	return strings.TrimRight(stripped, " \t\r\n"), true
+}
+
+// resolveUnsolicitedReply applies NO_REPLY semantics to a background (unsolicited)
+// turn's final text: a bare marker means "deliver nothing" (silent=true); a
+// trailing marker is stripped from otherwise normal content.
+func resolveUnsolicitedReply(text string) (string, bool) {
+	if isSilentReply(text) {
+		return "", true
+	}
+	stripped, _ := stripTrailingSilent(text)
+	return stripped, false
 }
 
 // couldBeSilentPrefix reports whether the trimmed text is still a case-insensitive
