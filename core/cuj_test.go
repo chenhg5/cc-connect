@@ -2020,6 +2020,11 @@ func TestCUJ_G4_AgentCrashReturnsErrorAndRecovers(t *testing.T) {
 // reaches the user's screen.
 func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 	env := newCUJEnv(t)
+	t.Cleanup(func() {
+		if err := env.engine.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	// Establish a session.
 	env.userSends("g5", "hello")
@@ -2053,6 +2058,29 @@ func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 	if !env.sentContains("permission denied") && !env.sentContains("bash tool exited") {
 		t.Fatalf("user did not see the underlying tool error in reply; got: %v", env.plat.getSent())
 	}
+
+	// A failed turn does not stop a persistent agent's background work.
+	// Deliver its result without asking the user to send "continue".
+	env.waitFor("failed foreground turn released", 2*time.Second, func() bool {
+		return !env.activeSession("test:g5").Busy()
+	})
+	sess.events <- Event{Type: EventText, Content: "background task finished"}
+	sess.events <- Event{Type: EventResult, Done: true}
+	env.waitFor("background result after failed turn", 2*time.Second, func() bool {
+		return env.sentContains("background task finished")
+	})
+	if got := len(sess.getSentPrompts()); got != 2 {
+		t.Fatalf("failed prompt was retried: sent %d prompts, want 2", got)
+	}
+
+	// A new user turn must take ownership from the background reader.
+	sess.mu.Lock()
+	sess.reply = "follow-up answer"
+	sess.mu.Unlock()
+	env.userSends("g5", "what happened next?")
+	env.waitFor("follow-up answer after failed turn", 2*time.Second, func() bool {
+		return env.sentContains("follow-up answer") && !env.activeSession("test:g5").Busy()
+	})
 }
 
 // CUJ-G6 · Network flap: undelivered outbound messages eventually arrive
