@@ -3081,7 +3081,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(forcedWorkDir)
 		if err != nil {
 			slog.Error("failed to create send work_dir agent", "work_dir", forcedWorkDir, "err", err)
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWorkspaceInitFailed, err))
 			return
 		}
 		resolvedWorkspace = forcedWorkDir
@@ -3121,7 +3121,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			wsAgent, wsSessions, _, effectiveWorkspace, err = e.workspaceContext(workspace, msg.SessionKey)
 			if err != nil {
 				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
-				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWorkspaceInitFailed, err))
 				return
 			}
 			resolvedWorkspace = effectiveWorkspace
@@ -3974,13 +3974,42 @@ var (
 	}
 )
 
+// russianPermissionDecision accepts only an exact permission decision, optionally
+// preceded or followed by a single @username. Arbitrary extra words (including
+// negation) cannot accidentally authorize a tool.
+func russianPermissionDecision(s string) string {
+	parts := strings.Fields(strings.ToLower(strings.TrimSpace(s)))
+	if len(parts) == 0 {
+		return ""
+	}
+	isMention := func(token string) bool {
+		if len(token) < 2 || len(token) > 33 || token[0] != '@' {
+			return false
+		}
+		for _, r := range token[1:] {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+				continue
+			}
+			return false
+		}
+		return true
+	}
+	if len(parts) > 1 && isMention(parts[0]) {
+		parts = parts[1:]
+	}
+	if len(parts) > 1 && isMention(parts[len(parts)-1]) {
+		parts = parts[:len(parts)-1]
+	}
+	return strings.Join(parts, " ")
+}
+
 // isApproveAllResponse reports whether s expresses "allow all" intent.
 // Multi-token phrases (e.g. "allow all") are matched first; single-token
 // CJK forms (e.g. "允许所有") are matched per-token so a leading or
 // trailing @mention does not break recognition.
 func isApproveAllResponse(s string) bool {
 	// Russian responses must be explicit: never approve a negated sentence.
-	response := strings.ToLower(strings.TrimSpace(s))
+	response := russianPermissionDecision(s)
 	if response == "разрешить всё" || response == "разрешить все" {
 		return true
 	}
@@ -3992,7 +4021,7 @@ func isApproveAllResponse(s string) bool {
 // — see internal task t-20260614-ayc85z.
 func isAllowResponse(s string) bool {
 	// Russian responses must be explicit: never approve a negated sentence.
-	response := strings.ToLower(strings.TrimSpace(s))
+	response := russianPermissionDecision(s)
 	if response == "разрешить" {
 		return true
 	}
@@ -4003,7 +4032,7 @@ func isAllowResponse(s string) bool {
 // Tokenised so that group-chat replies like "@产品经理 拒绝" still match.
 func isDenyResponse(s string) bool {
 	// Russian responses must be explicit: never approve a negated sentence.
-	response := strings.ToLower(strings.TrimSpace(s))
+	response := russianPermissionDecision(s)
 	if response == "отклонить" {
 		return true
 	}
@@ -7783,7 +7812,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, "Usage: /switch <number | id_prefix | name>")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSwitchUsage))
 		return
 	}
 	query := strings.TrimSpace(strings.Join(args, " "))
@@ -8818,7 +8847,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	}
 
 	if shellCmd == "" {
-		e.reply(p, msg.ReplyCtx, "Usage: /shell [--timeout <seconds>] <command>\nExample: /shell ls -la\nExample: /shell --timeout 300 npm install")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgShellUsage))
 		return
 	}
 
@@ -9964,7 +9993,7 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📜 History (last %d):\n\n", len(entries)))
+	sb.WriteString(e.i18n.Tf(MsgHistoryHeader, len(entries)))
 	maxLen := e.historyEntryMaxLen()
 	for _, h := range entries {
 		icon := "👤"
@@ -10825,7 +10854,7 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 		case "full", "compact", "quiet":
 			newMode = strings.ToLower(args[0])
 		default:
-			e.reply(p, msg.ReplyCtx, "Usage: /quiet [full|compact|quiet]")
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietUsage))
 			return
 		}
 	} else {
@@ -11419,7 +11448,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	case "switch":
 		if len(args) < 2 {
-			e.reply(p, msg.ReplyCtx, "Usage: /provider switch <name>")
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderSwitchUsage))
 			return
 		}
 		e.switchProvider(p, msg, sessions, switcher, args[1])
@@ -11544,7 +11573,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 
 func (e *Engine) cmdProviderRemove(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
 	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, "Usage: /provider remove <name>")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderRemoveUsage))
 		return
 	}
 	name := args[0]
@@ -16005,22 +16034,22 @@ func (e *Engine) formatWhoamiText(msg *Message) string {
 	sb.WriteString("\n")
 
 	if msg.UserID != "" {
-		sb.WriteString(fmt.Sprintf("User ID: `%s`\n", msg.UserID))
+		sb.WriteString(e.i18n.Tf(MsgStatusUserID, msg.UserID))
 	} else {
-		sb.WriteString("User ID: (unknown)\n")
+		sb.WriteString(e.i18n.T(MsgWhoamiUnknownUserID))
 	}
 	if msg.UserName != "" {
-		sb.WriteString(fmt.Sprintf("Name: %s\n", msg.UserName))
+		sb.WriteString(fmt.Sprintf("%s: %s\n", e.i18n.T(MsgWhoamiName), msg.UserName))
 	}
 	if msg.Platform != "" {
-		sb.WriteString(fmt.Sprintf("Platform: %s\n", msg.Platform))
+		sb.WriteString(fmt.Sprintf("%s: %s\n", e.i18n.T(MsgWhoamiPlatform), msg.Platform))
 	}
 
 	chatID := effectiveChannelID(msg)
 	if chatID != "" {
-		sb.WriteString(fmt.Sprintf("Chat ID: `%s`\n", chatID))
+		sb.WriteString(e.i18n.Tf(MsgWhoamiChatID, chatID))
 	}
-	sb.WriteString(fmt.Sprintf("Session Key: `%s`\n", msg.SessionKey))
+	sb.WriteString(e.i18n.Tf(MsgStatusSessionKey, msg.SessionKey))
 
 	sb.WriteString("\n")
 	sb.WriteString(e.i18n.T(MsgWhoamiUsage))

@@ -77,7 +77,7 @@ func TestRussianPromptsPreserveToolSyntax(t *testing.T) {
 		MsgProviderAddUsage:     {`"api_key"`, `"base_url"`, `"model"`},
 		MsgCommandsAddExecUsage: {"--work-dir", "{{args}}"},
 		MsgCommandsAddUsage:     {"{{1}}"},
-		MsgPermissionPrompt:     {"**разрешить**", "**отклонить**", "**разрешить всё**", "без подтверждения"},
+		MsgPermissionPrompt:     {"**разрешить**", "**отклонить**", "**разрешить всё**", "авторазрешение"},
 	} {
 		for _, token := range tokens {
 			if !strings.Contains(messages[key][LangRussian], token) {
@@ -168,5 +168,32 @@ func TestRussianAgentSystemPromptComposition(t *testing.T) {
 		if !strings.Contains(got, messages[key][LangRussian]) {
 			t.Errorf("system prompt missing Russian section %s", key)
 		}
+	}
+}
+
+func TestRussianCLIMetavariablesPreserved(t *testing.T) {
+	cases := map[MsgKey][]string{
+		MsgSwitchUsage:          {"/switch <number | id_prefix | name>"},
+		MsgShellUsage:           {"/shell [--timeout <seconds>] <command>", "/shell ls -la", "/shell --timeout 300 npm install"},
+		MsgQuietUsage:           {"/quiet [full|compact|quiet]"},
+		MsgProviderSwitchUsage:  {"/provider switch <name>"},
+		MsgProviderRemoveUsage:  {"/provider remove <name>"},
+		MsgAgentRelayToolPrompt: {"cc-connect relay send --to <target_project> \"<message>\""},
+		MsgAgentCronToolPrompt:  {"cc-connect cron add --cron \"<min> <hour> <day> <month> <weekday>\" --prompt \"<task description>\" --desc \"<short label>\""},
+		MsgAgentTimerToolPrompt: {"cc-connect timer add --delay <duration> --prompt \"<task description>\""},
+	}
+	for key, required := range cases {
+		translation := messages[key][LangRussian]
+		for _, token := range required {
+			if !strings.Contains(translation, token) {
+				t.Errorf("%s: CLI syntax %q was changed in Russian translation", key, token)
+			}
+		}
+	}
+	if got := messages[MsgPermBtnAllowAll][LangRussian]; got != "Авторазрешение" {
+		t.Fatalf("unexpected long permission label: %q", got)
+	}
+	if hint := messages[MsgPermCardNote][LangRussian]; !strings.Contains(hint, "до конца сессии") {
+		t.Fatal("auto-approval scope missing from permission hint")
 	}
 }

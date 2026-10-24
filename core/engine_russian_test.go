@@ -55,20 +55,20 @@ func TestRussianLanguagePickers(t *testing.T) {
 }
 
 func TestRussianPermissionResponsesAreExplicit(t *testing.T) {
-	for _, response := range []string{"разрешить", " РАЗРЕШИТЬ "} {
+	for _, response := range []string{"разрешить", " РАЗРЕШИТЬ ", "@bot_name разрешить", "разрешить @bot_name"} {
 		if !isAllowResponse(response) || isApproveAllResponse(response) || isDenyResponse(response) {
 			t.Errorf("invalid allow classification: %q", response)
 		}
 	}
-	for _, response := range []string{"разрешить всё", "разрешить все", " РАЗРЕШИТЬ ВСЁ "} {
+	for _, response := range []string{"разрешить всё", "разрешить все", " РАЗРЕШИТЬ ВСЁ ", "@bot_name разрешить всё", "разрешить все @bot_name"} {
 		if !isApproveAllResponse(response) || isDenyResponse(response) {
 			t.Errorf("invalid approve-all classification: %q", response)
 		}
 	}
-	if !isDenyResponse(" ОТКЛОНИТЬ ") || isAllowResponse("отклонить") {
+	if !isDenyResponse(" ОТКЛОНИТЬ ") || !isDenyResponse("@bot_name отклонить") || isAllowResponse("отклонить") {
 		t.Fatal("Russian deny not recognized")
 	}
-	for _, response := range []string{"не разрешить", "не разрешить всё", "нельзя разрешить", "разрешить всё?", "разрешить или отклонить", "разрешитьвсё", "разрешить все файлы", "неразрешить", "да", "всё"} {
+	for _, response := range []string{"не разрешить", "@bot_name не разрешить", "не разрешить всё", "@bot_name не разрешить всё", "нельзя разрешить", "разрешить всё?", "разрешить или отклонить", "разрешитьвсё", "разрешить все файлы", "@bot_name разрешить все файлы", "неразрешить", "да", "всё"} {
 		if isAllowResponse(response) || isApproveAllResponse(response) {
 			t.Errorf("unsafe Russian approval: %q", response)
 		}
@@ -121,7 +121,7 @@ func TestRussianPermissionButtons(t *testing.T) {
 	if len(buttons) < 2 || len(buttons[0]) < 2 || len(buttons[1]) < 1 {
 		t.Fatalf("incomplete permission buttons: %+v", buttons)
 	}
-	if buttons[0][0].Text != "Разрешить" || buttons[0][0].Data != "perm:allow" || buttons[0][1].Text != "Отклонить" || buttons[0][1].Data != "perm:deny" || buttons[1][0].Data != "perm:allow_all" {
+	if buttons[0][0].Text != "Разрешить" || buttons[0][0].Data != "perm:allow" || buttons[0][1].Text != "Отклонить" || buttons[0][1].Data != "perm:deny" || buttons[1][0].Data != "perm:allow_all" || buttons[1][0].Text != "Авторазрешение" {
 		t.Fatalf("permission buttons: %+v", buttons)
 	}
 }
@@ -156,7 +156,7 @@ func TestRussianNegatedPermissionDoesNotReachAgent(t *testing.T) {
 	pending := &pendingPermission{RequestID: "ru-negative", ToolName: "Bash", Resolved: make(chan struct{})}
 	state := &interactiveState{agentSession: recorder, platform: p, pending: pending}
 	e.interactiveStates["test:ru"] = state
-	for _, text := range []string{"не разрешить", "не разрешить всё", "разрешить или отклонить"} {
+	for _, text := range []string{"не разрешить", "@bot_name не разрешить", "не разрешить всё", "@bot_name не разрешить всё", "разрешить или отклонить"} {
 		msg := &Message{SessionKey: "test:ru", Content: text}
 		e.handlePendingPermission(p, msg, text, msg.SessionKey)
 		if recorder.calls != 0 || state.pending != pending || state.approveAll {

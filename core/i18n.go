@@ -753,6 +753,15 @@ const (
 	MsgAgentCronToolPrompt  MsgKey = "agent_cron_tool_prompt"
 	MsgAgentTimerToolPrompt MsgKey = "agent_timer_tool_prompt"
 	MsgAgentRelayToolPrompt MsgKey = "agent_relay_tool_prompt"
+	MsgWorkspaceInitFailed  MsgKey = "workspace_init_failed"
+	MsgSwitchUsage          MsgKey = "switch_usage"
+	MsgShellUsage           MsgKey = "shell_usage"
+	MsgHistoryHeader        MsgKey = "history_header"
+	MsgQuietUsage           MsgKey = "quiet_usage"
+	MsgProviderSwitchUsage  MsgKey = "provider_switch_usage"
+	MsgProviderRemoveUsage  MsgKey = "provider_remove_usage"
+	MsgWhoamiUnknownUserID  MsgKey = "whoami_unknown_user_id"
+	MsgWhoamiChatID         MsgKey = "whoami_chat_id"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -986,7 +995,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "(respuesta vacía)",
 	},
 	MsgPermissionPrompt: {
-		LangRussian:            "⚠️ **Запрос разрешения**\n\nАгент хочет использовать **%s**:\n\n```\n%s\n```\n\nОтветьте **разрешить** / **отклонить** / **разрешить всё** (разрешать все последующие запросы в этой сессии без подтверждения).",
+		LangRussian:            "⚠️ **Запрос разрешения**\n\nАгент хочет использовать **%s**:\n\n```\n%s\n```\n\nОтветьте **разрешить**, **отклонить** или **разрешить всё**. Последний вариант включает авторазрешение до конца текущей сессии.",
 		LangEnglish:            "⚠️ **Permission Request**\n\nAgent wants to use **%s**:\n\n```\n%s\n```\n\nReply **allow** / **deny** / **allow all** (skip all future prompts this session).",
 		LangChinese:            "⚠️ **权限请求**\n\nAgent 想要使用 **%s**:\n\n```\n%s\n```\n\n回复 **允许** / **拒绝** / **允许所有**（本次会话不再提醒）。",
 		LangTraditionalChinese: "⚠️ **權限請求**\n\nAgent 想要使用 **%s**:\n\n```\n%s\n```\n\n回覆 **允許** / **拒絕** / **允許所有**（本次會話不再提醒）。",
@@ -1002,7 +1011,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "✅ Permitido, continuando...",
 	},
 	MsgPermissionApproveAll: {
-		LangRussian:            "✅ Все запросы разрешений в этой сессии будут одобряться автоматически.",
+		LangRussian:            "✅ Авторазрешение включено до конца текущей сессии.",
 		LangEnglish:            "✅ All permissions auto-approved for this session.",
 		LangChinese:            "✅ 本次会话已开启自动批准，后续权限请求将自动允许。",
 		LangTraditionalChinese: "✅ 本次會話已開啟自動批准，後續權限請求將自動允許。",
@@ -1018,7 +1027,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "❌ Denegado. El agente detendrá el uso de esta herramienta.",
 	},
 	MsgPermissionHint: {
-		LangRussian:            "⚠️ Ожидается ответ на запрос разрешения. Ответьте **разрешить** / **отклонить** / **разрешить всё**.",
+		LangRussian:            "⚠️ Ожидаю решения. Ответьте **разрешить**, **отклонить** или **разрешить всё**. Последний вариант включает авторазрешение до конца сессии.",
 		LangEnglish:            "⚠️ Waiting for permission response. Reply **allow** / **deny** / **allow all**.",
 		LangChinese:            "⚠️ 等待权限响应。请回复 **允许** / **拒绝** / **允许所有**。",
 		LangTraditionalChinese: "⚠️ 等待權限回應。請回覆 **允許** / **拒絕** / **允許所有**。",
@@ -1218,7 +1227,7 @@ var messages = map[MsgKey]map[Language]string{
 			"  Управление разовыми таймерами\n" +
 			"\n" +
 			"/heartbeat [status|pause|resume|run|interval]\n" +
-			"  Управление периодической проверкой\n" +
+			"  Управление периодическим запуском\n" +
 			"\n" +
 			"/commands [add|del]\n" +
 			"  Управление пользовательскими командами\n" +
@@ -3196,7 +3205,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Denegar",
 	},
 	MsgPermBtnAllowAll: {
-		LangRussian:            "Разрешить всё (эта сессия)",
+		LangRussian:            "Авторазрешение",
 		LangEnglish:            "Allow All (this session)",
 		LangChinese:            "允许所有 (本次会话)",
 		LangTraditionalChinese: "允許所有 (本次會話)",
@@ -3220,7 +3229,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "El agente quiere usar **%s**:\n\n```\n%s\n```",
 	},
 	MsgPermCardNote: {
-		LangRussian:            "Если кнопки не работают, ответьте: разрешить / отклонить / разрешить всё",
+		LangRussian:            "«Авторазрешение» одобряет последующие запросы разрешений до конца сессии. Если кнопки не работают, ответьте: разрешить / отклонить / разрешить всё.",
 		LangEnglish:            "If buttons are unresponsive, reply: allow / deny / allow all",
 		LangChinese:            "如果按钮无响应，请直接回复：允许 / 拒绝 / 允许所有",
 		LangTraditionalChinese: "若按鈕無回應，請直接回覆：允許 / 拒絕 / 允許所有",
@@ -4746,7 +4755,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: `/workspace route <ruta-absoluta>`",
 	},
 	MsgWsRouteSuccess: {
-		LangRussian:            "✅ Рабочее пространство направлено в: `%s`",
+		LangRussian:            "✅ Для рабочего пространства задан путь: `%s`",
 		LangEnglish:            "✅ Workspace routed: `%s`",
 		LangChinese:            "✅ 工作区路由成功: `%s`",
 		LangTraditionalChinese: "✅ 工作區路由成功: `%s`",
@@ -4826,7 +4835,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "✅ Workspace compartido vinculado: `%s`",
 	},
 	MsgWsSharedRouteSuccess: {
-		LangRussian:            "✅ Общее рабочее пространство направлено в: `%s`",
+		LangRussian:            "✅ Для общего рабочего пространства задан путь: `%s`",
 		LangEnglish:            "✅ Shared workspace routed: `%s`",
 		LangChinese:            "✅ 共享工作区路由成功: `%s`",
 		LangTraditionalChinese: "✅ 共享工作區路由成功: `%s`",
@@ -5027,7 +5036,7 @@ cc-connect send --tts(或 --audio)成功之后,除非用户同时要求可见的
 			"### Задачи по расписанию (cron) — ПОВТОРЯЮЩИЕСЯ\n" +
 			"Если пользователь просит делать что-то по расписанию (например, «каждое утро в 6 присылай обзор популярных проектов GitHub»), выполните через инструмент Bash:\n" +
 			"\n" +
-			"  cc-connect cron add --cron \"<min> <hour> <day> <month> <weekday>\" --prompt \"<описание задачи>\" --desc \"<краткое название>\"\n" +
+			"  cc-connect cron add --cron \"<min> <hour> <day> <month> <weekday>\" --prompt \"<task description>\" --desc \"<short label>\"\n" +
 			"\n" +
 			"Переменные окружения CC_PROJECT и CC_SESSION_KEY уже заданы, поэтому указывать --project или --session-key НЕ нужно.\n" +
 			"\n" +
@@ -5190,7 +5199,7 @@ cc-connect 有两个不同的调度命令。选错会让用户感到很困惑。
 			"(например, «через два часа проверь PR», «через 3 минуты проверь нагрузку системы», «напомни завтра в 9 утра»),\n" +
 			"выполните через инструмент Bash:\n" +
 			"\n" +
-			"  cc-connect timer add --delay <duration> --prompt \"<описание задачи>\"\n" +
+			"  cc-connect timer add --delay <duration> --prompt \"<task description>\"\n" +
 			"\n" +
 			"ВАЖНО: НЕ используйте cron для разовых отложенных задач. Выражение cron вида \"4 19 14 6 *\"\n" +
 			"означает «каждый год 14 июня в 19:04», а не «один раз в эту дату». В cron нет встроенного\n" +
@@ -5282,7 +5291,7 @@ You can also list or cancel timers:
 		LangRussian: "### Обмен сообщениями между ботами\n" +
 			"Чтобы обратиться к другому боту (например, задать вопрос другому ИИ-агенту), используйте:\n" +
 			"\n" +
-			"  cc-connect relay send --to <target_project> \"<сообщение>\"\n" +
+			"  cc-connect relay send --to <target_project> \"<message>\"\n" +
 			"\n" +
 			"ВАЖНО: <target_project> должно ТОЧНО совпадать с именем проекта в выводе команды /bind.\n" +
 			"НЕ угадывайте и не изменяйте имя — используйте его в точности как показано (например, \"gemini\", а не \"gemini-bot\").\n" +
@@ -5315,6 +5324,42 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the rela
 会话在群聊里可见,每个 bot 维护自己的 relay 会话。
 
 环境变量 CC_PROJECT 和 CC_SESSION_KEY 已经设置好,relay 知道用哪个群聊。`,
+	},
+	MsgWorkspaceInitFailed: {
+		LangEnglish: "Failed to initialize workspace: %v",
+		LangRussian: "Не удалось инициализировать рабочее пространство: %v",
+	},
+	MsgSwitchUsage: {
+		LangEnglish: "Usage: /switch <number | id_prefix | name>",
+		LangRussian: "Использование: /switch <number | id_prefix | name>",
+	},
+	MsgShellUsage: {
+		LangEnglish: "Usage: /shell [--timeout <seconds>] <command>\nExample: /shell ls -la\nExample: /shell --timeout 300 npm install",
+		LangRussian: "Использование: /shell [--timeout <seconds>] <command>\nПример: /shell ls -la\nПример: /shell --timeout 300 npm install",
+	},
+	MsgHistoryHeader: {
+		LangEnglish: "📜 History (last %d):\n\n",
+		LangRussian: "📜 История (сообщений: %d):\n\n",
+	},
+	MsgQuietUsage: {
+		LangEnglish: "Usage: /quiet [full|compact|quiet]",
+		LangRussian: "Использование: /quiet [full|compact|quiet]",
+	},
+	MsgProviderSwitchUsage: {
+		LangEnglish: "Usage: /provider switch <name>",
+		LangRussian: "Использование: /provider switch <name>",
+	},
+	MsgProviderRemoveUsage: {
+		LangEnglish: "Usage: /provider remove <name>",
+		LangRussian: "Использование: /provider remove <name>",
+	},
+	MsgWhoamiUnknownUserID: {
+		LangEnglish: "User ID: (unknown)\n",
+		LangRussian: "ID пользователя: (неизвестен)\n",
+	},
+	MsgWhoamiChatID: {
+		LangEnglish: "Chat ID: `%s`\n",
+		LangRussian: "ID чата: `%s`\n",
 	},
 }
 
