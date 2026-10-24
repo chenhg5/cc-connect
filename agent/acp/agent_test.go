@@ -1,10 +1,30 @@
 package acp
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// fakeTraeCLIOnPath creates a stub "traecli" executable in a temp dir and
+// prepends that dir to PATH for the duration of the test. New() only needs the
+// command to be resolvable via exec.LookPath (and named "traecli"/"traex") to
+// construct a *TraeAgent; the stub is never actually run by these unit tests.
+func fakeTraeCLIOnPath(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake CLI stub uses a POSIX shebang; skip on Windows")
+	}
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "traecli")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
 
 func TestNew_DisplayNameDefault(t *testing.T) {
 	a, err := New(map[string]any{"command": "true"})
@@ -68,5 +88,99 @@ func TestWorkspaceAgentOptions(t *testing.T) {
 	}
 	if got, _ := opts["display_name"].(string); got != "Copilot ACP" {
 		t.Fatalf("display_name = %q, want Copilot ACP", got)
+	}
+}
+
+func TestNew_TraeCLIImplementsModelSwitcher(t *testing.T) {
+	fakeTraeCLIOnPath(t)
+	a, err := New(map[string]any{
+		"command": "traecli",
+		"args":    []any{"acp", "serve"},
+		"model":   "test-model-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.(*TraeAgent); !ok {
+		t.Fatalf("New(traecli) returned %T, want *TraeAgent", a)
+	}
+	switcher, ok := a.(core.ModelSwitcher)
+	if !ok {
+		t.Fatalf("TraeAgent does not implement ModelSwitcher")
+	}
+	if got := switcher.GetModel(); got != "test-model-a" {
+		t.Fatalf("GetModel = %q, want test-model-a", got)
+	}
+	switcher.SetModel("test-model-b")
+	if got := switcher.GetModel(); got != "test-model-b" {
+		t.Fatalf("GetModel after SetModel = %q, want test-model-b", got)
+	}
+	opts := a.(core.WorkspaceAgentOptionSnapshotter).WorkspaceAgentOptions()
+	if got, _ := opts["model"].(string); got != "test-model-b" {
+		t.Fatalf("snapshot model = %q, want test-model-b", got)
+	}
+}
+
+func TestNew_GenericACPDoesNotImplementModelSwitcher(t *testing.T) {
+	a, err := New(map[string]any{
+		"command": "true",
+		"args":    []any{"acp", "serve"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.(*Agent); !ok {
+		t.Fatalf("New(true) returned %T, want *Agent", a)
+	}
+	if _, ok := a.(core.ModelSwitcher); ok {
+		t.Fatalf("generic ACP agent unexpectedly implements ModelSwitcher")
+	}
+}
+
+func TestNew_TraeCLIImplementsReasoningEffortSwitcher(t *testing.T) {
+	a, err := New(map[string]any{
+		"command":          "traecli",
+		"args":             []any{"acp", "serve"},
+		"reasoning_effort": "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	switcher, ok := a.(core.ReasoningEffortSwitcher)
+	if !ok {
+		t.Fatalf("TraeAgent does not implement ReasoningEffortSwitcher")
+	}
+	if got := switcher.GetReasoningEffort(); got != "high" {
+		t.Fatalf("GetReasoningEffort = %q, want high", got)
+	}
+	if efforts := switcher.AvailableReasoningEfforts(); len(efforts) != 4 || efforts[0] != "low" || efforts[3] != "xhigh" {
+		t.Fatalf("AvailableReasoningEfforts = %#v, want [low medium high xhigh]", efforts)
+	}
+	// unknown value falls back to "" (use agent default)
+	switcher.SetReasoningEffort("bogus")
+	if got := switcher.GetReasoningEffort(); got != "" {
+		t.Fatalf("GetReasoningEffort after bogus = %q, want empty", got)
+	}
+	// alias normalization
+	switcher.SetReasoningEffort("x-high")
+	if got := switcher.GetReasoningEffort(); got != "xhigh" {
+		t.Fatalf("GetReasoningEffort after x-high = %q, want xhigh", got)
+	}
+	opts := a.(core.WorkspaceAgentOptionSnapshotter).WorkspaceAgentOptions()
+	if got, _ := opts["reasoning_effort"].(string); got != "xhigh" {
+		t.Fatalf("snapshot reasoning_effort = %q, want xhigh", got)
+	}
+}
+
+func TestNew_GenericACPDoesNotImplementReasoningEffortSwitcher(t *testing.T) {
+	a, err := New(map[string]any{
+		"command": "true",
+		"args":    []any{"acp", "serve"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.(core.ReasoningEffortSwitcher); ok {
+		t.Fatalf("generic ACP agent unexpectedly implements ReasoningEffortSwitcher")
 	}
 }
