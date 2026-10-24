@@ -181,3 +181,112 @@ func TestConvertAudioToMP3_HonorsContextCancellation(t *testing.T) {
 		t.Fatal("expected error after context cancellation, got nil")
 	}
 }
+
+// qwenCapture starts a fake Qwen ASR endpoint that records the request body.
+func qwenCapture(t *testing.T) (*QwenASR, *map[string]any) {
+	t.Helper()
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return NewQwenASR("k", srv.URL, ""), &got
+}
+
+func TestQwenASR_SendsHintAsSystemMessage(t *testing.T) {
+	q, got := qwenCapture(t)
+	if _, err := q.TranscribeWithContext(context.Background(), []byte("a"), "mp3", "zh", "NapCat, cc-connect"); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := (*got)["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want system + user", len(msgs))
+	}
+	sys, _ := msgs[0].(map[string]any)
+	if sys["role"] != "system" {
+		t.Fatalf("first message role = %v, want system", sys["role"])
+	}
+	content, _ := sys["content"].([]any)
+	part, _ := content[0].(map[string]any)
+	if part["text"] != "NapCat, cc-connect" {
+		t.Errorf("system text = %v", part["text"])
+	}
+}
+
+func TestQwenASR_NoHintSendsOnlyAudio(t *testing.T) {
+	q, got := qwenCapture(t)
+	if _, err := q.Transcribe(context.Background(), []byte("a"), "mp3", "zh"); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := (*got)["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want only the user audio message", len(msgs))
+	}
+}
+
+type plainSTT struct{ calls int }
+
+func (s *plainSTT) Transcribe(context.Context, []byte, string, string) (string, error) {
+	s.calls++
+	return "plain", nil
+}
+
+type hintSTT struct {
+	plainSTT
+	hint string
+}
+
+func (s *hintSTT) TranscribeWithContext(_ context.Context, _ []byte, _, _, hint string) (string, error) {
+	s.hint = hint
+	return "with hint", nil
+}
+
+func TestTranscribeAudio_PassesHintOnlyToContextualProviders(t *testing.T) {
+	audio := &AudioAttachment{Data: []byte("a"), Format: "mp3"}
+
+	h := &hintSTT{}
+	if got, _ := TranscribeAudio(context.Background(), h, audio, "zh", "vocab"); got != "with hint" || h.hint != "vocab" {
+		t.Errorf("contextual provider: got %q, hint %q", got, h.hint)
+	}
+	if got, _ := TranscribeAudio(context.Background(), h, audio, "zh", ""); got != "plain" {
+		t.Errorf("contextual provider without hint: got %q, want plain Transcribe", got)
+	}
+
+	p := &plainSTT{}
+	if got, _ := TranscribeAudio(context.Background(), p, audio, "zh", "vocab"); got != "plain" || p.calls != 1 {
+		t.Errorf("plain provider: got %q, calls %d", got, p.calls)
+	}
+}
+
+func TestEngineSpeechHint(t *testing.T) {
+	e := newTestEngine()
+	e.SetSpeechConfig(SpeechCfg{Context: "NapCat, ALPDOJ", ContextHistory: 2})
+	s := e.sessions.GetOrCreateActive("qq:1")
+	s.AddHistory("user", "old message")
+	s.AddHistory("user", "look at the cc-connect log")
+	s.AddHistory("assistant", strings.Repeat("x", 1000))
+
+	hint := e.speechHint("qq:1")
+	for _, want := range []string{"NapCat, ALPDOJ", "user: look at the cc-connect log", "assistant: xxx"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint missing %q:\n%s", want, hint)
+		}
+	}
+	if strings.Contains(hint, "old message") {
+		t.Errorf("hint includes more than ContextHistory messages:\n%s", hint)
+	}
+	if strings.Contains(hint, strings.Repeat("x", speechHintEntryRunes+1)) {
+		t.Error("long history entry was not truncated")
+	}
+
+	if got := e.speechHint("qq:unknown"); got != "NapCat, ALPDOJ" {
+		t.Errorf("unknown session: hint = %q, want only the configured context", got)
+	}
+	e.SetSpeechConfig(SpeechCfg{})
+	if got := e.speechHint("qq:1"); got != "" {
+		t.Errorf("no context configured: hint = %q, want empty", got)
+	}
+}

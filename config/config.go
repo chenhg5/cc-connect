@@ -266,7 +266,12 @@ type SpeechConfig struct {
 	Enabled  bool   `toml:"enabled"`
 	Provider string `toml:"provider"` // "openai" | "groq" | "qwen" | "gemini"
 	Language string `toml:"language"` // e.g. "zh", "en"; empty = auto-detect
-	OpenAI   struct {
+	// Context is background text (names, jargon) that helps recognition.
+	// ContextHistory is how many recent messages of the session to add to it.
+	// Only providers that accept context (currently qwen) use either.
+	Context        string `toml:"context"`
+	ContextHistory int    `toml:"context_history"`
+	OpenAI         struct {
 		APIKey  string `toml:"api_key"`
 		BaseURL string `toml:"base_url"`
 		Model   string `toml:"model"`
