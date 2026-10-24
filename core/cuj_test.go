@@ -146,6 +146,81 @@ func TestCUJ_A9_PsAndBtwSupplementRunningTask(t *testing.T) {
 	}
 }
 
+type commentaryPsSession struct {
+	stubAgentSession
+	events  chan Event
+	started chan struct{}
+}
+
+func (s *commentaryPsSession) Events() <-chan Event { return s.events }
+func (s *commentaryPsSession) Send(prompt, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	if prompt == "run tests" {
+		close(s.started)
+	} else {
+		s.events <- Event{Type: EventCommentary, Content: "Progress: tests are still running"}
+	}
+	return nil
+}
+
+func TestCUJ_A9_PsProgressArrivesBeforeTaskCompletion(t *testing.T) {
+	p := &stubCompactProgressPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "test"}, style: "card", supportPayload: true,
+	}
+	s := &commentaryPsSession{events: make(chan Event, 8), started: make(chan struct{})}
+	e := NewEngine("test", &resultAgent{session: s}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", CardMode: "rich"})
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
+	const key = "test:ps-progress"
+	send := func(text string) {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), UserID: "user", Content: text, ReplyCtx: "ctx"})
+	}
+	waitFor := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for !strings.Contains(strings.Join(p.getSent(), "\n"), want) {
+			if time.Now().After(deadline) {
+				t.Fatalf("waiting for %q; visible messages: %v", want, p.getSent())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Action 1: start a task whose completion is deliberately held.
+	send("run tests")
+	select {
+	case <-s.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("task did not start")
+	}
+	// Action 2: ask for progress while the task is still running.
+	send("/ps report progress")
+	waitFor("Progress: tests are still running")
+	if !e.sessions.GetOrCreateActive(key).Busy() {
+		t.Fatal("progress reply ended the task")
+	}
+	// Action 3: check status without starting another model turn.
+	send("/status")
+	if strings.Count(strings.Join(p.getSent(), "\n"), "Progress: tests are still running") != 1 {
+		t.Fatalf("progress must be one new message, got %v", p.getSent())
+	}
+	s.events <- Event{Type: EventResult, Content: "All tests passed", Done: true}
+	deadline := time.Now().Add(2 * time.Second)
+	for e.sessions.GetOrCreateActive(key).Busy() {
+		if time.Now().After(deadline) {
+			t.Fatal("final answer did not finish the task")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	history := e.sessions.GetOrCreateActive(key).GetHistory(1)
+	if len(history) != 1 || history[0].Content != "All tests passed" {
+		t.Fatalf("final answer contains commentary: %+v", history)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helper types: cujAgent + cujAgentSession give per-CUJ control over what the
 // agent "replies" for each user prompt, without bringing up a real LLM.
