@@ -701,6 +701,63 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	"agent": {
+		LangEnglish:            "List or switch native agents (starts a new session)",
+		LangChinese:            "列出或切换原生 Agent（新建会话）",
+		LangTraditionalChinese: "列出或切換原生 Agent（新建會話）",
+		LangJapanese:           "Agent を一覧・切り替え（新規セッション）",
+		LangSpanish:            "Listar o cambiar agentes (nueva sesión)",
+	},
+	MsgAgentTitle: {
+		LangEnglish:            "Agent selection",
+		LangChinese:            "选择 Agent",
+		LangTraditionalChinese: "選擇 Agent",
+		LangJapanese:           "Agent 選択",
+		LangSpanish:            "Seleccionar agente",
+	},
+	MsgAgentCurrent: {
+		LangEnglish:            "Current agent: **%s**",
+		LangChinese:            "当前 Agent：**%s**",
+		LangTraditionalChinese: "目前 Agent：**%s**",
+		LangJapanese:           "現在の Agent: **%s**",
+		LangSpanish:            "Agente actual: **%s**",
+	},
+	MsgAgentUsage: {
+		LangEnglish:            "/agent [list] · /agent <name> · /agent switch <name>\nSwitching always starts a new conversation without previous context.",
+		LangChinese:            "/agent [list] · /agent <名称> · /agent switch <名称>\n每次切换都会新建会话，不携带旧上下文。",
+		LangTraditionalChinese: "/agent [list] · /agent <名稱> · /agent switch <名稱>\n每次切換都會新建會話，不攜帶舊上下文。",
+		LangJapanese:           "/agent [list] · /agent <名前> · /agent switch <名前>\n切り替えるたびに履歴なしの新規セッションを開始します。",
+		LangSpanish:            "/agent [list] · /agent <nombre> · /agent switch <nombre>\nCada cambio inicia una conversación nueva sin el contexto anterior.",
+	},
+	MsgAgentUnknown: {
+		LangEnglish:            "Unknown agent %q. Use /agent list.",
+		LangChinese:            "未找到 Agent %q，请用 /agent list 查看。",
+		LangTraditionalChinese: "找不到 Agent %q，請用 /agent list 查看。",
+		LangJapanese:           "Agent %q が見つかりません。/agent list で確認してください。",
+		LangSpanish:            "Agente %q desconocido. Usa /agent list.",
+	},
+	MsgAgentSwitched: {
+		LangEnglish:            "Switched to **%s**. A new conversation is ready; previous context is not carried over.",
+		LangChinese:            "已切换到 **%s**，已新建会话，不携带旧上下文。",
+		LangTraditionalChinese: "已切換至 **%s**，已新建會話，不攜帶舊上下文。",
+		LangJapanese:           "**%s** に切り替え、新規セッションを開始しました。以前の履歴は引き継ぎません。",
+		LangSpanish:            "Se cambió a **%s**. Nueva conversación sin el contexto anterior.",
+	},
+	MsgAgentSwitchFailed: {
+		LangEnglish:            "Could not switch agent: %v",
+		LangChinese:            "切换 Agent 失败：%v",
+		LangTraditionalChinese: "切換 Agent 失敗：%v",
+		LangJapanese:           "Agent の切り替えに失敗しました: %v",
+		LangSpanish:            "No se pudo cambiar de agente: %v",
+	},
+	MsgAgentSelect: {
+		LangEnglish:            "Switch / New",
+		LangChinese:            "切换 / 新建",
+		LangTraditionalChinese: "切換 / 新建",
+		LangJapanese:           "切り替え / 新規",
+		LangSpanish:            "Cambiar / Nueva",
+	},
+
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
@@ -1054,6 +1111,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  Manage API providers\n\n" +
 			"/memory [add|global|global add]\n  View/edit agent memory files\n\n" +
 			"/allow <tool>\n  Pre-allow a tool (next session)\n\n" +
+			"/agent [list|switch <name>]\n  List or switch native agents (new conversation)\n\n" +
 			"/model [switch <name>]\n  View/switch model\n\n" +
 			"/reasoning [level]\n  View/switch reasoning effort\n\n" +
 			"/mode [name]\n  View/switch permission mode\n\n" +
@@ -1098,6 +1156,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/编辑 Agent 记忆文件\n\n" +
 			"/allow <工具名>\n  预授权工具（下次会话生效）\n\n" +
+			"/agent [list|switch <名称>]\n  列出或切换原生 Agent（新建会话）\n\n" +
 			"/model [switch <名称>]\n  查看/切换模型\n\n" +
 			"/reasoning [级别]\n  查看/切换推理强度\n\n" +
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
@@ -1142,6 +1201,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  管理 API Provider\n\n" +
 			"/memory [add|global|global add]\n  查看/編輯 Agent 記憶檔案\n\n" +
 			"/allow <工具名>\n  預授權工具（下次會話生效）\n\n" +
+			"/agent [list|switch <名稱>]\n  列出或切換原生 Agent（新建會話）\n\n" +
 			"/model [switch <名稱>]\n  查看/切換模型\n\n" +
 			"/reasoning [級別]\n  查看/切換推理強度\n\n" +
 			"/mode [名稱]\n  查看/切換權限模式\n\n" +
@@ -1184,6 +1244,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  API プロバイダ管理\n\n" +
 			"/memory [add|global|global add]\n  エージェントメモリの表示/編集\n\n" +
 			"/allow <ツール名>\n  ツールを事前許可（次のセッションで有効）\n\n" +
+			"/agent [list|switch <名前>]\n  Agent を一覧・切り替え（新規セッション）\n\n" +
 			"/model [switch <名前>]\n  モデルの表示/切り替え\n\n" +
 			"/reasoning [レベル]\n  推論レベルの表示/切り替え\n\n" +
 			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
@@ -1226,6 +1287,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/provider [list|add|remove|switch|clear]\n  Gestionar proveedores API\n\n" +
 			"/memory [add|global|global add]\n  Ver/editar archivos de memoria del agente\n\n" +
 			"/allow <herramienta>\n  Pre-autorizar herramienta (próxima sesión)\n\n" +
+			"/agent [list|switch <nombre>]\n  Listar o cambiar agentes (nueva conversación)\n\n" +
 			"/model [switch <nombre>]\n  Ver/cambiar modelo\n\n" +
 			"/reasoning [nivel]\n  Ver/cambiar nivel de razonamiento\n\n" +
 			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +

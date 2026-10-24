@@ -75,6 +75,31 @@ To restore the previous behavior of always continuing, set `reset_on_idle_mins =
 
 ---
 
+## Native agent switching
+
+Use `/agent` to choose a native agent within the same chat. Every selection, including selecting the current agent again, starts a new empty conversation, just like `/new`. Previous tasks and context are not transferred. Other chats are unaffected. Subsequent `/new` commands keep the selected agent, and the selection survives service restarts.
+
+```text
+/agent                     List available agents and the current selection
+/agent list                Same list
+/agent claude              Select claude and start a new conversation
+/agent switch kimi         Select kimi and start a new conversation
+```
+
+Card-capable platforms provide clickable switch buttons, also available from the Agent section in `/help`.
+
+Explicitly allow profiles on the receiving project:
+
+```toml
+[[projects]]
+name = "my-bot"
+agent_choices = { claude = "claude-project", codex = "codex-project", kimi = "kimi-project" }
+```
+
+Values reference existing project names in the same config file. Agent type, CLI options, model and authentication come from that project; the current chat's working directory, bot identity, project permissions and attachment return path remain with the receiving project. Profiles outside the allowlist are not exposed automatically. The project's own agent is always included, under `default` if no alias points to it. Restart the service after changing this mapping.
+
+---
+
 ## Permission Modes
 
 All agents support permission modes switchable at runtime via `/mode`.
