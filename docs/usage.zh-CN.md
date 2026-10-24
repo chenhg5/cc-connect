@@ -73,6 +73,31 @@ reset_on_idle_mins = 60
 
 ---
 
+## 原生 Agent 切换
+
+可通过 `/agent` 在同一个聊天入口选择原生 Agent。每次选择（包括再次选择当前 Agent）都视同 `/new`：新建空白会话，不交接旧任务或上下文；其他聊天会话不受影响。随后使用 `/new` 会继续使用已选 Agent，重启服务后也保留选择。
+
+```text
+/agent                     列出可选 Agent，并显示当前选择
+/agent list                同上
+/agent claude              切换到 claude 并新建会话
+/agent switch kimi         切换到 kimi 并新建会话
+```
+
+支持卡片的平台会显示可点击的切换按钮；也可从 `/help` 的 Agent 配置页进入。
+
+在接收消息的 `[[projects]]` 下显式允许复用其他已配置项目的 Agent：
+
+```toml
+[[projects]]
+name = "my-bot"
+agent_choices = { claude = "claude-project", codex = "codex-project", kimi = "kimi-project" }
+```
+
+映射的值必须是同一配置文件中已有的项目名。复用目标项目的 Agent 类型、启动参数、模型和认证配置；工作目录沿用当前聊天的目录，机器人身份、项目权限及附件回传入口仍属于接收消息的项目。未列入映射的 Agent 不会自动开放。当前项目自身的 Agent 始终可选；未为其配置别名时显示为 `default`。修改映射后重启服务。
+
+---
+
 ## 权限模式
 
 所有 Agent 支持运行时切换权限模式，通过 `/mode` 命令。

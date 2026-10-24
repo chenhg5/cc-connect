@@ -2666,3 +2666,108 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 	sent := p.getSent()
 	assertWorkspaceSkills(t, sent[len(sent)-1], "b", "a")
 }
+
+func TestCUJ_B12_AgentSwitchStartsFreshAndIsolatesConversations(t *testing.T) {
+	e, base := switchTestEngine(t)
+	p := &stubPlatformEngine{n: "test"}
+	key := "test:chat:user"
+	switchTestReceive(e, p, key, "old private task")
+	switchTestWait(t, e, p, key, "ANSWER:base")
+	old := e.sessions.GetOrCreateActive(key)
+	switchTestReceive(e, p, key, "/agent")
+	list := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(list, "second") || !strings.Contains(list, "/agent switch") {
+		t.Fatal(list)
+	}
+	switchTestReceive(e, p, key, "/agent switch second")
+	next := e.sessions.GetOrCreateActive(key)
+	if next.ID == old.ID || next.GetAgentSessionID() != "" || next.HistoryLen() != 0 {
+		t.Fatal("switch must be a new empty conversation")
+	}
+	switchTestReceive(e, p, key, "new second task")
+	switchTestWait(t, e, p, key, "ANSWER:second")
+	second, _ := e.sessionContextForKey(key)
+	chosen := second.(*switchTestAgent)
+	chosen.mu.Lock()
+	if chosen.starts[0] != "" {
+		t.Fatal("cross-agent native ID was reused")
+	}
+	native := chosen.native[0]
+	chosen.mu.Unlock()
+	native.mu.Lock()
+	if len(native.sentPrompts) != 1 || native.sentPrompts[0] != "new second task" {
+		t.Fatal(native.sentPrompts)
+	}
+	native.mu.Unlock()
+	// Another user still uses the project's original agent.
+	other := "test:chat:other"
+	switchTestReceive(e, p, other, "other user's task")
+	switchTestWait(t, e, p, other, "ANSWER:base")
+	a, _ := e.sessionContextForKey(other)
+	if a != base {
+		t.Fatal("selection leaked to another conversation")
+	}
+	// Switching back must start fresh rather than resume the old task.
+	switchTestReceive(e, p, key, "/agent base")
+	switchTestReceive(e, p, key, "fresh base task")
+	switchTestWait(t, e, p, key, "ANSWER:base:base-model")
+	a, _ = e.sessionContextForKey(key)
+	fresh := a.(*switchTestAgent)
+	fresh.mu.Lock()
+	defer fresh.mu.Unlock()
+	if len(fresh.starts) != 1 || fresh.starts[0] != "" {
+		t.Fatalf("resumed old task: %v", fresh.starts)
+	}
+}
+
+func TestCUJ_B13_AgentCardsSwitchAndSettingsFollowSelection(t *testing.T) {
+	e, base := switchTestEngine(t)
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	key := "test:chat:user"
+	switchTestReceive(e, p, key, "/agent list")
+	p.mu.Lock()
+	card := p.repliedCards[len(p.repliedCards)-1]
+	p.mu.Unlock()
+	var action string
+	for _, el := range card.Elements {
+		if row, ok := el.(CardListItem); ok && row.BtnValue == "act:/agent switch third" {
+			action = row.BtnValue
+		}
+	}
+	if action == "" {
+		t.Fatal("agent list has no switch button")
+	}
+	result := e.handleCardNav(action, key)
+	if !strings.Contains(result.RenderText(), "third") || !strings.Contains(result.RenderText(), "new conversation") {
+		t.Fatal(result.RenderText())
+	}
+	switchTestReceive(e, p, key, "third task")
+	switchTestWait(t, e, &p.stubPlatformEngine, key, "ANSWER:third")
+	if c := e.handleCardNav("nav:/model", key); !strings.Contains(c.RenderText(), "third-model") {
+		t.Fatal(c.RenderText())
+	}
+	result = e.handleCardNav("act:/model switch third/new-model", key)
+	if !strings.Contains(result.RenderText(), "third/new-model") {
+		t.Fatal(result.RenderText())
+	}
+	e.handleCardNav("act:/mode yolo", key)
+	e.handleCardNav("act:/reasoning high", key)
+	selected, _ := e.sessionContextForKey(key)
+	a := selected.(*switchTestAgent)
+	if a.GetModel() != "third/new-model" || a.mode != "yolo" || a.effort != "high" {
+		t.Fatalf("settings went to wrong agent: %+v", a)
+	}
+	if base.GetModel() != "base-model" || base.mode != "" || base.effort != "" {
+		t.Fatal("settings changed default agent")
+	}
+	switchTestReceive(e, p, key, "/new")
+	if e.sessions.GetOrCreateActive(key).GetAgentProfile() != "third" {
+		t.Fatal("/new lost agent selection")
+	}
+	// Selecting the already-selected agent is still /new.
+	oldID := e.sessions.ActiveSessionID(key)
+	e.handleCardNav(action, key)
+	if oldID == e.sessions.ActiveSessionID(key) {
+		t.Fatal("same-agent selection did not create a new session")
+	}
+}

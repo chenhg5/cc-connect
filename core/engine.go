@@ -355,6 +355,11 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
+	agentRouteLocks       map[string]*sync.RWMutex
+	agentChoicesMu        sync.Mutex
+	defaultAgentChoice    string
+	agentChoices          []AgentChoice
+	choiceAgents          map[string]Agent
 	name                  string
 	agent                 Agent
 	platforms             []Platform
@@ -1649,6 +1654,15 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 	}
 
+	selectionKey := sessionKey
+	if workspaceDir != "" {
+		selectionKey = workspaceDir + ":" + sessionKey
+	}
+	var selectionErr error
+	agent, selectionErr = e.selectedAgent(agent, sessions, sessionKey, selectionKey, workspaceDir)
+	if selectionErr != nil {
+		return selectionErr
+	}
 	if strings.HasPrefix(content, "/") {
 		parts := strings.Fields(content)
 		if len(parts) > 0 {
@@ -1854,6 +1868,15 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		}
 	}
 
+	selectionKey := sessionKey
+	if workspaceDir != "" {
+		selectionKey = workspaceDir + ":" + sessionKey
+	}
+	var selectionErr error
+	agent, selectionErr = e.selectedAgent(agent, sessions, sessionKey, selectionKey, workspaceDir)
+	if selectionErr != nil {
+		return selectionErr
+	}
 	if strings.HasPrefix(content, "/") {
 		parts := strings.Fields(content)
 		if len(parts) > 0 {
@@ -2351,13 +2374,17 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 		ReplyCtx:   replyCtx,
 	}
 
-	session := e.sessions.GetOrCreateActive(sessionKey)
+	agent, sessions, ik, wd, err := e.commandContextWithWorkspace(targetPlatform, msg)
+	if err != nil {
+		return err
+	}
+	session := sessions.GetOrCreateActive(sessionKey)
 	lockGen, locked := session.TryLock()
 	if !locked {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessage(targetPlatform, msg, session, lockGen)
+	e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, ik, wd, sessionKey, lockGen)
 	return nil
 }
 
@@ -2449,6 +2476,7 @@ func (e *Engine) Stop() error {
 	}
 	e.userRolesMu.Unlock()
 
+	e.stopChoiceAgents()
 	if err := e.agent.Stop(); err != nil {
 		errs = append(errs, fmt.Errorf("stop agent %s: %w", e.agent.Name(), err))
 	}
@@ -3143,6 +3171,16 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			return
 		}
 		// Unrecognized slash command — fall through to agent as normal message
+	}
+
+	routeLock := e.agentRouteLock(interactiveKey)
+	routeLock.RLock()
+	defer routeLock.RUnlock()
+	var selectErr error
+	agent, selectErr = e.selectedAgent(agent, sessions, msg.SessionKey, interactiveKey, resolvedWorkspace)
+	if selectErr != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgAgentSwitchFailed, selectErr))
+		return
 	}
 
 	// Permission responses bypass the session lock.
@@ -4025,6 +4063,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		return
 	}
 
+	routeLock := e.agentRouteLock(interactiveKey)
+	routeLock.RLock()
+	if activeID := sessions.ActiveSessionID(msg.SessionKey); activeID != "" && activeID != session.ID {
+		routeLock.RUnlock()
+		return
+	}
 	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
@@ -4059,12 +4103,18 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.replyCtx = msg.ReplyCtx
 	state.currentMessageID = msg.MessageID
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
+	// Cleanup may detach this state while the turn is starting. Keep a
+	// stable native-session reference instead of racing its nil assignment.
+	activeAgentSession := state.agentSession
 	state.mu.Unlock()
+	routeLock.RUnlock()
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
 
-	if state.agentSession == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+	if activeAgentSession == nil {
+		if !state.isStopped() {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+		}
 		return
 	}
 	e.cancelAgentSessionIdleClose(state)
@@ -4078,11 +4128,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").
 	// Defer restores only when SetLiveMode succeeds for the override.
 	if msg.ModeOverride != "" {
-		if switcher, ok := state.agentSession.(LiveModeSwitcher); ok {
+		if switcher, ok := activeAgentSession.(LiveModeSwitcher); ok {
 			if switcher.SetLiveMode(msg.ModeOverride) {
 				defer func() {
 					defaultMode := "default"
-					if ma, ok := e.agent.(interface{ GetMode() string }); ok {
+					if ma, ok := agent.(interface{ GetMode() string }); ok {
 						if m := ma.GetMode(); m != "" {
 							defaultMode = m
 						}
@@ -4116,7 +4166,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	needResync := state.eventsNeedResync
 	state.mu.Unlock()
 	if needResync {
-		drainEvents(state.agentSession.Events())
+		drainEvents(activeAgentSession.Events())
 	}
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
@@ -5384,6 +5434,13 @@ var agentErrorHandlers = []agentErrorHandler{
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, lockGen uint64) {
+	state.mu.Lock()
+	agentSession := state.agentSession
+	state.mu.Unlock()
+	if agentSession == nil {
+		return
+	}
+
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -5426,13 +5483,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		replyAgent = e.agent
 	}
 	workspaceRenderer := func(content string) string {
-		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir)
+		return e.renderOutgoingContentForWorkspace(state.platform, content, workspaceDir, replyAgent)
 	}
 	sendWorkspace := func(p Platform, replyCtx any, content string) {
-		e.sendForWorkspace(p, replyCtx, content, workspaceDir)
+		e.sendForWorkspace(p, replyCtx, content, workspaceDir, replyAgent)
 	}
 	sendWorkspaceWithError := func(p Platform, replyCtx any, content string) error {
-		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+		return e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir, replyAgent)
 	}
 
 	// Streaming card: aggregate entire turn into a single updatable card.
@@ -5450,7 +5507,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, replyAgent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	state.mu.Unlock()
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
@@ -5482,7 +5539,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		turnDeadlineCh = turnDeadlineTimer.C
 	}
 
-	events := state.agentSession.Events()
+	events := agentSession.Events()
 	stopCh := state.stopSignal()
 	for {
 		var event Event
@@ -5506,7 +5563,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					stopTyping = nil
 				}
 				e.notifyDroppedQueuedMessages(state, err)
-				if state.agentSession == nil || !state.agentSession.Alive() {
+				if agentSession == nil || !agentSession.Alive() {
 					e.cleanupInteractiveState(sessionKey, state)
 				}
 				state.mu.Lock()
@@ -5549,7 +5606,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		graceLoop:
 			for {
 				select {
-				case evt, ok := <-state.agentSession.Events():
+				case evt, ok := <-agentSession.Events():
 					if !ok || (ok && evt.Done) {
 						// Agent exited cleanly; state is intact, resume will work.
 						slog.Info("agent exited gracefully after max_turn_time stop signal",
@@ -5667,7 +5724,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					})
 				}
 				if cardMessageID == nil {
-					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, replyAgent, agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 						if err != nil {
@@ -5677,7 +5734,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
-					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, replyAgent, agentSession, state.workspaceDir))
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update thinking card", "platform", p.Name(), "error", err)
 					}
@@ -5754,7 +5811,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
 				})
 				if cardMessageID == nil {
-					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, replyAgent, agentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 						if err != nil {
@@ -5764,7 +5821,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
-					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, replyAgent, agentSession, state.workspaceDir))
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
 					}
@@ -5884,7 +5941,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if hasRichCard {
 						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
 						if cardMessageID == nil {
-							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, replyAgent, agentSession, state.workspaceDir))
 							if starter, ok := p.(PreviewStarter); ok {
 								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 								if err != nil {
@@ -5894,7 +5951,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								}
 							}
 						} else if updater, ok := p.(MessageUpdater); ok {
-							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, replyAgent, agentSession, state.workspaceDir))
 							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 								slog.Debug("rich card: failed to update tool-result card", "platform", p.Name(), "error", err)
 							}
@@ -5953,7 +6010,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if len(textParts) == 0 {
 						if hasRichCard {
 							if cardMessageID == nil && !silentHold {
-								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, replyAgent, agentSession, state.workspaceDir))
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 									if err != nil {
@@ -5977,7 +6034,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							// here using the accumulated partialText so the card emerges
 							// with the post-prefix content already in body.
 							if cardMessageID == nil {
-								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, replyAgent, agentSession, state.workspaceDir))
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 									if err != nil {
@@ -6012,7 +6069,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 									}
 								}
 								if !streamed {
-									card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+									card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, replyAgent, agentSession, state.workspaceDir))
 									if updater, ok := p.(MessageUpdater); ok {
 										if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 											lastRichCardUpdate = time.Now()
@@ -6038,7 +6095,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if event.SessionID != "" {
 				wasEmpty := session.GetAgentSessionID() == ""
 				if session.GetAgentSessionID() != event.SessionID {
-					session.SetAgentSessionID(event.SessionID, e.agent.Name())
+					session.SetAgentSessionID(event.SessionID, replyAgent.Name())
 					if wasEmpty {
 						pendingName := session.GetName()
 						if pendingName != "" && pendingName != "session" && pendingName != "default" {
@@ -6072,7 +6129,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if autoApprove && !isAskQuestion {
 				slog.Debug("auto-approving (approve-all)", "request_id", event.RequestID, "tool", event.ToolName)
-				_ = state.agentSession.RespondPermission(event.RequestID, PermissionResult{
+				_ = agentSession.RespondPermission(event.RequestID, PermissionResult{
 					Behavior:     "allow",
 					UpdatedInput: event.ToolInputRaw,
 				})
@@ -6168,14 +6225,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 			cp.Finalize(ProgressCardStateCompleted)
-			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
+			// Use agentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
 			// to not be persisted to disk, breaking session resume on next startup.
-			if state != nil && state.agentSession != nil {
-				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
+			if state != nil && agentSession != nil {
+				if currentID := agentSession.CurrentSessionID(); currentID != "" {
 					wasEmpty := session.GetAgentSessionID() == ""
 					if session.GetAgentSessionID() != currentID {
-						session.SetAgentSessionID(currentID, e.agent.Name())
+						session.SetAgentSessionID(currentID, replyAgent.Name())
 						if wasEmpty {
 							pendingName := session.GetName()
 							if pendingName != "" && pendingName != "session" && pendingName != "default" {
@@ -6235,9 +6292,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// and "the agent reported nothing and we guessed from text"
 				// used to look identical here, which is what kept the original
 				// bug invisible.
-				usage, hasReporter := replyFooterContextUsage(state.agentSession)
+				usage, hasReporter := replyFooterContextUsage(agentSession)
 				usageSource := ""
-				if src, ok := state.agentSession.(UsageSourceReporter); ok {
+				if src, ok := agentSession.(UsageSourceReporter); ok {
 					usageSource = src.GetUsageSource()
 				}
 				estimate := contextEstimate
@@ -6347,7 +6404,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			var statusFooter string
 			var legacyStatusFooter string
 			if !isSilent {
-				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
+				footerContext := replyFooterContextText(replyFooterSessionContextUsage(agentSession), e.i18n)
 				if e.showContextIndicator {
 					if sdkPlausible {
 						if text := contextIndicatorText(event.InputTokens); text != "" {
@@ -6357,9 +6414,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						footerContext = fmt.Sprintf("[ctx: ~%d%%]", selfPct)
 					}
 				}
-				if status := e.buildClaudeStatusLineFooter(replyAgent, state.agentSession, workspaceDir); status != "" {
+				if status := e.buildClaudeStatusLineFooter(replyAgent, agentSession, workspaceDir); status != "" {
 					statusFooter = status
-				} else if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, footerContext); footer != "" {
+				} else if footer := e.buildReplyFooter(replyAgent, agentSession, workspaceDir, footerContext); footer != "" {
 					statusFooter = footer
 					legacyStatusFooter = footer
 				}
@@ -6452,7 +6509,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						silentBody = strings.TrimRight(stripped, " \t\r\n")
 					}
 					if silentBody != "" || len(toolSteps) > 0 {
-						card := buildResolvedRichCard(CardStatusDone, "", toolSteps, silentBody, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
+						card := buildResolvedRichCard(CardStatusDone, "", toolSteps, silentBody, false, e.composeRichStatusFooter(false, turnStart, replyAgent, agentSession, state.workspaceDir))
 						if updater, ok := p.(MessageUpdater); ok {
 							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 								slog.Debug("rich card: failed to finalize card on silent reply", "platform", p.Name(), "error", err)
@@ -6473,7 +6530,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
 					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
 				}
-				richStatusFooter := e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir)
+				richStatusFooter := e.composeRichStatusFooter(false, turnStart, replyAgent, agentSession, state.workspaceDir)
 				if legacyStatusFooter != "" {
 					richStatusFooter = formatElapsed(time.Since(turnStart), false, e.i18n.currentLang()) + "\n" + legacyStatusFooter
 				}
@@ -6565,7 +6622,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
 			if triggerAutoCompress {
-				compressor, ok := e.agent.(ContextCompressor)
+				compressor, ok := replyAgent.(ContextCompressor)
 				if ok && compressor.CompressCommand() != "" {
 					if pendingSend != nil {
 						if err := <-pendingSend; err != nil {
@@ -6631,7 +6688,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Drain stale events before starting the next turn. Between
 				// EventResult and Send(), the only buffered events would be
 				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
-				drainEvents(state.agentSession.Events())
+				drainEvents(agentSession.Events())
 
 				if pendingSend != nil {
 					if err := <-pendingSend; err != nil {
@@ -6642,7 +6699,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 				state.mu.Lock()
-				as := state.agentSession // capture under lock to avoid race with cleanup
+				as := agentSession // capture under lock to avoid race with cleanup
 				state.mu.Unlock()
 
 				nextSend := make(chan error, 1)
@@ -6684,10 +6741,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				lastRichCardUpdate = time.Time{}
 				lastRichCardLen = 0
 				queuedRenderer := func(content string) string {
-					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
+					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir, replyAgent)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, replyAgent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 
 				// Reset streaming card state for the next turn
 				streamCard = nil
@@ -6759,9 +6816,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// (for example Codex emits thread.started, then turn.failed). Persist
 			// that ID here as well as from event.SessionID so the retry reuses the
 			// conversation that already contains the user's original prompt.
-			if state.agentSession != nil {
-				if currentID := state.agentSession.CurrentSessionID(); currentID != "" && session.GetAgentSessionID() != currentID {
-					session.SetAgentSessionID(currentID, e.agent.Name())
+			if agentSession != nil {
+				if currentID := agentSession.CurrentSessionID(); currentID != "" && session.GetAgentSessionID() != currentID {
+					session.SetAgentSessionID(currentID, replyAgent.Name())
 					sessions.Save()
 				}
 			}
@@ -6769,7 +6826,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			state.mu.Unlock()
 			if hasRichCard && cardMessageID != nil {
-				errCard := buildResolvedRichCard(CardStatusError, "", toolSteps, partialText, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
+				errCard := buildResolvedRichCard(CardStatusError, "", toolSteps, partialText, false, e.composeRichStatusFooter(false, turnStart, replyAgent, agentSession, state.workspaceDir))
 				if updater, ok := p.(MessageUpdater); ok {
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, errCard); err != nil {
 						slog.Debug("rich card: failed to update error card", "platform", p.Name(), "error", err)
@@ -6797,7 +6854,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
 			// while keeping the session alive for subsequent turns.
-			if state.agentSession == nil || !state.agentSession.Alive() {
+			if agentSession == nil || !agentSession.Alive() {
 				e.notifyDroppedQueuedMessages(state, event.Error)
 			}
 			return
@@ -7021,6 +7078,7 @@ var builtinCommands = []struct {
 	{[]string{"usage", "quota"}, "usage"},
 	{[]string{"history"}, "history"},
 	{[]string{"allow"}, "allow"},
+	{[]string{"agent"}, "agent"},
 	{[]string{"model"}, "model"},
 	{[]string{"reasoning", "effort"}, "reasoning"},
 	{[]string{"mode"}, "mode"},
@@ -7229,6 +7287,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdHistory(p, msg, args)
 	case "allow":
 		e.cmdAllow(p, msg, args)
+	case "agent":
+		e.cmdAgent(p, msg, args)
 	case "model":
 		e.cmdModel(p, msg, args)
 	case "reasoning":
@@ -10083,6 +10143,7 @@ func helpCardGroups() []helpCardGroup {
 			key:      "agent",
 			titleKey: MsgHelpAgentSection,
 			items: []helpCardItem{
+				{command: "/agent", action: "nav:/agent"},
 				{command: "/model", action: "nav:/model"},
 				{command: "/reasoning", action: "nav:/reasoning"},
 				{command: "/mode", action: "nav:/mode"},
@@ -10610,7 +10671,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderReasoningCard())
+		e.replyWithCard(p, msg.ReplyCtx, e.renderReasoningCard(msg.SessionKey))
 		return
 	}
 
@@ -10702,7 +10763,7 @@ func (e *Engine) cmdMode(p Platform, msg *Message, args []string) {
 			e.replyWithButtons(p, msg.ReplyCtx, sb.String(), buttons)
 			return
 		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderModeCard())
+		e.replyWithCard(p, msg.ReplyCtx, e.renderModeCard(msg.SessionKey))
 		return
 	}
 
@@ -11288,7 +11349,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	if len(args) == 0 {
 		if supportsCards(p) {
-			e.replyWithCard(p, msg.ReplyCtx, e.renderProviderCard())
+			e.replyWithCard(p, msg.ReplyCtx, e.renderProviderCard(msg.SessionKey))
 			return
 		}
 
@@ -11387,7 +11448,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 		}
 		// Only persist to global config when operating on the global agent;
 		// in workspace mode the provider state lives on the per-workspace agent.
-		if sessions == e.sessions && e.providerSaveFunc != nil {
+		if sessions == e.sessions && sessions.GetOrCreateActive(msg.SessionKey).GetAgentProfile() == "" && e.providerSaveFunc != nil {
 			if err := e.providerSaveFunc(""); err != nil {
 				slog.Error("failed to save provider", "error", err)
 			}
@@ -11400,13 +11461,16 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 }
 
 func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
+	_, profileSessions := e.baseSessionContextForKey(msg.SessionKey)
+	profile := profileSessions.GetOrCreateActive(msg.SessionKey).GetAgentProfile()
+
 	if len(args) == 0 {
 		if supportsCards(p) {
 			e.replyWithCard(p, msg.ReplyCtx, e.renderProviderAddCard(msg.SessionKey))
 			return
 		}
 		if _, ok := p.(InlineButtonSender); ok {
-			if btns := e.providerAddPresetButtons(); len(btns) > 0 {
+			if btns := e.providerAddPresetButtons(msg.SessionKey); len(btns) > 0 {
 				e.replyWithButtons(p, msg.ReplyCtx,
 					e.i18n.T(MsgProviderAddPickHint), btns)
 				return
@@ -11476,7 +11540,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 	switcher.SetProviders(updated)
 
 	// Persist to config
-	if e.providerAddSaveFunc != nil {
+	if profile == "" && e.providerAddSaveFunc != nil {
 		if err := e.providerAddSaveFunc(prov); err != nil {
 			slog.Error("failed to persist provider", "error", err)
 		}
@@ -11486,6 +11550,9 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 }
 
 func (e *Engine) cmdProviderRemove(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
+	_, profileSessions := e.baseSessionContextForKey(msg.SessionKey)
+	profile := profileSessions.GetOrCreateActive(msg.SessionKey).GetAgentProfile()
+
 	if len(args) == 0 {
 		e.reply(p, msg.ReplyCtx, "Usage: /provider remove <name>")
 		return
@@ -11517,7 +11584,7 @@ func (e *Engine) cmdProviderRemove(p Platform, msg *Message, switcher ProviderSw
 	}
 
 	// Persist
-	if e.providerRemoveSaveFunc != nil {
+	if profile == "" && e.providerRemoveSaveFunc != nil {
 		if err := e.providerRemoveSaveFunc(name); err != nil {
 			slog.Error("failed to persist provider removal", "error", err)
 		}
@@ -11558,7 +11625,7 @@ func (e *Engine) switchProvider(p Platform, msg *Message, sessions *SessionManag
 
 	// Only persist to global config when operating on the global agent;
 	// in workspace mode the provider state lives on the per-workspace agent.
-	if sessions == e.sessions && e.providerSaveFunc != nil {
+	if sessions == e.sessions && sessions.GetOrCreateActive(msg.SessionKey).GetAgentProfile() == "" && e.providerSaveFunc != nil {
 		if err := e.providerSaveFunc(name); err != nil {
 			slog.Error("failed to save provider", "error", err)
 		}
@@ -11592,7 +11659,11 @@ func (e *Engine) handlePendingProviderAdd(p Platform, msg *Message, content stri
 	state.pendingProviderAdd = nil
 	state.mu.Unlock()
 
-	switcher, ok := e.agent.(ProviderSwitcher)
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		return false
+	}
+	switcher, ok := agent.(ProviderSwitcher)
 	if !ok {
 		return false
 	}
@@ -11640,7 +11711,7 @@ func (e *Engine) handlePendingProviderAdd(p Platform, msg *Message, content stri
 
 	updated := append(switcher.ListProviders(), prov)
 	switcher.SetProviders(updated)
-	if e.providerAddSaveFunc != nil {
+	if agent == e.agent && e.providerAddSaveFunc != nil {
 		if err := e.providerAddSaveFunc(prov); err != nil {
 			slog.Error("failed to persist provider", "error", err)
 		}
@@ -11684,8 +11755,12 @@ func (e *Engine) getPendingProviderAdd(sessionKey string) *pendingProviderAddSta
 
 // providerAddPresetButtons builds inline keyboard rows for platforms
 // that support InlineButtonSender but not full cards.
-func (e *Engine) providerAddPresetButtons() [][]ButtonOption {
-	agentType := e.agent.Name()
+func (e *Engine) providerAddPresetButtons(sessionKeys ...string) [][]ButtonOption {
+	agent := e.agent
+	if len(sessionKeys) > 0 {
+		agent, _ = e.sessionContextForKey(sessionKeys[0])
+	}
+	agentType := agent.Name()
 	presets, err := FetchProviderPresets()
 	if err != nil || presets == nil || len(presets.Providers) == 0 {
 		return nil
@@ -11714,7 +11789,11 @@ func (e *Engine) providerAddPresetButtons() [][]ButtonOption {
 // tryProviderAddPreset handles "/provider add <name>" with a single arg that
 // matches a preset name — sets up the pending API key flow.
 func (e *Engine) tryProviderAddPreset(p Platform, msg *Message, switcher ProviderSwitcher, presetName string) bool {
-	agentType := e.agent.Name()
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		return false
+	}
+	agentType := agent.Name()
 	presets, err := FetchProviderPresets()
 	if err != nil || presets == nil {
 		return false
@@ -12534,24 +12613,28 @@ func (e *Engine) waitOutgoing(p Platform) error {
 	return e.outgoingRL.Wait(e.ctx, p.Name())
 }
 
-func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspaceDir string) string {
+func (e *Engine) renderOutgoingContentForWorkspace(p Platform, content, workspaceDir string, agents ...Agent) string {
+	agent := e.agent
+	if len(agents) > 0 {
+		agent = agents[0]
+	}
 	if strings.TrimSpace(content) == "" {
 		return content
 	}
-	return TransformLocalReferences(content, e.references, e.agent.Name(), p.Name(), workspaceDir)
+	return TransformLocalReferences(content, e.references, agent.Name(), p.Name(), workspaceDir)
 }
 
-func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, workspaceDir string) error {
+func (e *Engine) sendWithErrorForWorkspace(p Platform, replyCtx any, content, workspaceDir string, agents ...Agent) error {
 	if err := e.waitOutgoing(p); err != nil {
 		slog.Warn("outgoing rate limit: context cancelled", "platform", p.Name(), "error", err)
 		return err
 	}
-	content = e.renderOutgoingContentForWorkspace(p, content, workspaceDir)
+	content = e.renderOutgoingContentForWorkspace(p, content, workspaceDir, agents...)
 	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
 }
 
-func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string) {
-	_ = e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir)
+func (e *Engine) sendForWorkspace(p Platform, replyCtx any, content, workspaceDir string, agents ...Agent) {
+	_ = e.sendWithErrorForWorkspace(p, replyCtx, content, workspaceDir, agents...)
 }
 
 func (e *Engine) renderCardForPlatform(p Platform, card *Card) *Card {
@@ -12774,6 +12857,12 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		args = strings.TrimSpace(body[i+1:])
 	}
 
+	if cmd == "/agent" {
+		if prefix == "act" {
+			return e.handleAgentCardAction(args, sessionKey)
+		}
+		return e.renderAgentCard(sessionKey)
+	}
 	if prefix == "act" && cmd == "/model" {
 		return e.handleModelCardAction(args, sessionKey)
 	}
@@ -12788,9 +12877,9 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/model":
 		return e.renderModelCard(sessionKey)
 	case "/reasoning":
-		return e.renderReasoningCard()
+		return e.renderReasoningCard(sessionKey)
 	case "/mode":
-		return e.renderModeCard()
+		return e.renderModeCard(sessionKey)
 	case "/lang":
 		return e.renderLangCard()
 	case "/status":
@@ -12816,7 +12905,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/history":
 		return e.renderHistoryCard(sessionKey)
 	case "/provider":
-		return e.renderProviderCard()
+		return e.renderProviderCard(sessionKey)
 	case "/provider/add", "/provider/add-other", "/provider/add-cancel":
 		return e.renderProviderAddCard(sessionKey)
 	case "/cron":
@@ -12834,7 +12923,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	case "/skills":
 		return e.skillsCardForSession(sessionKey)
 	case "/doctor":
-		return e.renderDoctorCard()
+		return e.renderDoctorCard(sessionKey)
 	case "/whoami":
 		return e.renderWhoamiCard(&Message{
 			SessionKey: sessionKey,
@@ -12899,6 +12988,10 @@ func (e *Engine) persistWorkspaceModelOverride(interactiveKey, sessionKey string
 	if agent == e.agent {
 		return
 	}
+	_, selectedSessions := e.baseSessionContextForKey(sessionKey)
+	if selectedSessions.GetOrCreateActive(sessionKey).GetAgentProfile() != "" {
+		return
+	}
 	workspace := workspaceModelOverrideKey(interactiveKey, sessionKey, agent)
 	if workspace == "" {
 		return
@@ -12931,6 +13024,7 @@ func workspaceFromInteractiveKey(interactiveKey, sessionKey string) string {
 // (e.g. switching model/mode/lang) before the card is re-rendered.
 func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
+	selected, selectedSessions := e.sessionContextForKey(sessionKey)
 
 	switch cmd {
 	case "/model":
@@ -12971,7 +13065,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ReasoningEffortSwitcher)
+		switcher, ok := selected.(ReasoningEffortSwitcher)
 		if !ok {
 			return
 		}
@@ -12984,10 +13078,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
 				e.cleanupInteractiveState(interactiveKey)
-				s := e.sessions.GetOrCreateActive(sessionKey)
+				s := selectedSessions.GetOrCreateActive(sessionKey)
 				s.SetAgentSessionID("", "")
 				s.ClearHistory()
-				e.sessions.Save()
+				selectedSessions.Save()
 				return
 			}
 		}
@@ -12996,7 +13090,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ModeSwitcher)
+		switcher, ok := selected.(ModeSwitcher)
 		if !ok {
 			return
 		}
@@ -13008,10 +13102,10 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		e.cleanupInteractiveState(interactiveKey)
 		// Mode change requires a new session to take effect
-		s := e.sessions.GetOrCreateActive(sessionKey)
+		s := selectedSessions.GetOrCreateActive(sessionKey)
 		s.SetAgentSessionID("", "")
 		s.ClearHistory()
-		e.sessions.Save()
+		selectedSessions.Save()
 
 	case "/lang":
 		if args == "" {
@@ -13041,7 +13135,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		if args == "" {
 			return
 		}
-		switcher, ok := e.agent.(ProviderSwitcher)
+		switcher, ok := selected.(ProviderSwitcher)
 		if !ok {
 			return
 		}
@@ -13051,11 +13145,11 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		if switcher.SetActiveProvider(provName) {
 			e.cleanupInteractiveState(interactiveKey)
-			s := e.sessions.GetOrCreateActive(sessionKey)
+			s := selectedSessions.GetOrCreateActive(sessionKey)
 			s.SetAgentSessionID("", "")
 			s.ClearHistory()
-			e.sessions.Save()
-			if e.providerSaveFunc != nil {
+			selectedSessions.Save()
+			if selected == e.agent && e.providerSaveFunc != nil {
 				_ = e.providerSaveFunc(provName)
 			}
 		}
@@ -13793,8 +13887,12 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
 		Build()
 }
 
-func (e *Engine) renderReasoningCard() *Card {
-	switcher, ok := e.agent.(ReasoningEffortSwitcher)
+func (e *Engine) renderReasoningCard(sessionKeys ...string) *Card {
+	agent := e.agent
+	if len(sessionKeys) > 0 {
+		agent, _ = e.sessionContextForKey(sessionKeys[0])
+	}
+	switcher, ok := agent.(ReasoningEffortSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleReasoning), "orange", e.i18n.T(MsgReasoningNotSupported))
 	}
@@ -13827,8 +13925,12 @@ func (e *Engine) renderReasoningCard() *Card {
 	return cb.Build()
 }
 
-func (e *Engine) renderModeCard() *Card {
-	switcher, ok := e.agent.(ModeSwitcher)
+func (e *Engine) renderModeCard(sessionKeys ...string) *Card {
+	agent := e.agent
+	if len(sessionKeys) > 0 {
+		agent, _ = e.sessionContextForKey(sessionKeys[0])
+	}
+	switcher, ok := agent.(ModeSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleMode), "violet", e.i18n.T(MsgModeNotSupported))
 	}
@@ -14130,8 +14232,12 @@ func (e *Engine) renderHistoryCard(sessionKey string) *Card {
 		Build()
 }
 
-func (e *Engine) renderProviderCard() *Card {
-	switcher, ok := e.agent.(ProviderSwitcher)
+func (e *Engine) renderProviderCard(sessionKeys ...string) *Card {
+	agent := e.agent
+	if len(sessionKeys) > 0 {
+		agent, _ = e.sessionContextForKey(sessionKeys[0])
+	}
+	switcher, ok := agent.(ProviderSwitcher)
 	if !ok {
 		return e.simpleCard(e.i18n.T(MsgCardTitleProvider), "indigo", e.i18n.T(MsgProviderNotSupported))
 	}
@@ -14180,6 +14286,8 @@ func (e *Engine) renderProviderCard() *Card {
 }
 
 func (e *Engine) renderProviderAddCard(sessionKey string) *Card {
+	agent, _ := e.sessionContextForKey(sessionKey)
+
 	if pa := e.getPendingProviderAdd(sessionKey); pa != nil {
 		switch pa.phase {
 		case "preset":
@@ -14200,7 +14308,7 @@ func (e *Engine) renderProviderAddCard(sessionKey string) *Card {
 	}
 
 	// Show preset selection card
-	agentType := e.agent.Name()
+	agentType := agent.Name()
 	lang := e.i18n.CurrentLang()
 
 	cb := NewCard().Title(e.i18n.T(MsgCardTitleProviderAdd), "indigo").
@@ -14231,7 +14339,7 @@ func (e *Engine) renderProviderAddCard(sessionKey string) *Card {
 		globals, gErr := e.listGlobalProvidersFunc(agentType)
 		if gErr == nil && len(globals) > 0 {
 			var existing map[string]bool
-			if sw, ok := e.agent.(ProviderSwitcher); ok {
+			if sw, ok := agent.(ProviderSwitcher); ok {
 				existing = make(map[string]bool)
 				for _, p := range sw.ListProviders() {
 					existing[p.Name] = true
@@ -14267,11 +14375,13 @@ func (e *Engine) renderProviderAddCard(sessionKey string) *Card {
 }
 
 func (e *Engine) executeProviderLink(sessionKey, name string) {
+	agent, _ := e.sessionContextForKey(sessionKey)
+
 	name = strings.TrimSpace(name)
 	if name == "" || e.listGlobalProvidersFunc == nil {
 		return
 	}
-	agentType := e.agent.Name()
+	agentType := agent.Name()
 	globals, err := e.listGlobalProvidersFunc(agentType)
 	if err != nil {
 		slog.Warn("provider link: list global providers", "error", err)
@@ -14289,7 +14399,7 @@ func (e *Engine) executeProviderLink(sessionKey, name string) {
 		return
 	}
 
-	sw, ok := e.agent.(ProviderSwitcher)
+	sw, ok := agent.(ProviderSwitcher)
 	if !ok {
 		return
 	}
@@ -14302,7 +14412,7 @@ func (e *Engine) executeProviderLink(sessionKey, name string) {
 	sw.SetProviders(updated)
 
 	// Save the updated provider_refs
-	if e.providerRefsSaveFunc != nil {
+	if agent == e.agent && e.providerRefsSaveFunc != nil {
 		refs := make([]string, 0, len(updated))
 		for _, p := range updated {
 			refs = append(refs, p.Name)
@@ -14528,14 +14638,18 @@ func (e *Engine) renderConfigCard() *Card {
 		Build()
 }
 
-func (e *Engine) renderSkillsCard(registry *SkillRegistry) *Card {
+func (e *Engine) renderSkillsCard(registry *SkillRegistry, sessionKeys ...string) *Card {
+	agent := e.agent
+	if len(sessionKeys) > 0 {
+		agent, _ = e.sessionContextForKey(sessionKeys[0])
+	}
 	skills := registry.ListAll()
 	if len(skills) == 0 {
 		return e.simpleCard(e.i18n.T(MsgCardTitleSkills), "purple", e.i18n.T(MsgSkillsEmpty))
 	}
 
 	var sb strings.Builder
-	sb.WriteString(e.i18n.Tf(MsgSkillsTitle, e.agent.Name(), len(skills)))
+	sb.WriteString(e.i18n.Tf(MsgSkillsTitle, agent.Name(), len(skills)))
 	for _, s := range skills {
 		sb.WriteString(fmt.Sprintf("  /%s — %s\n", s.Name, s.Description))
 	}
@@ -14547,8 +14661,12 @@ func (e *Engine) renderSkillsCard(registry *SkillRegistry) *Card {
 		Build()
 }
 
-func (e *Engine) renderDoctorCard() *Card {
-	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
+func (e *Engine) renderDoctorCard(sessionKeys ...string) *Card {
+	agent := e.agent
+	if len(sessionKeys) > 0 {
+		agent, _ = e.sessionContextForKey(sessionKeys[0])
+	}
+	results := RunDoctorChecks(e.ctx, agent, e.platforms)
 	report := FormatDoctorResults(results, e.i18n)
 	return NewCard().
 		Title(e.i18n.T(MsgCardTitleDoctor), "orange").
@@ -15401,7 +15519,7 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 		return
 	}
 
-	session := sessions.GetOrCreateActive(interactiveKey)
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	lockGen, locked := session.TryLock()
 	if !locked {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
@@ -15630,7 +15748,7 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 		return
 	}
 
-	session := sessions.GetOrCreateActive(interactiveKey)
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	lockGen, locked := session.TryLock()
 	if !locked {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
@@ -15649,6 +15767,11 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 }
 
 func (e *Engine) cmdSkills(p Platform, msg *Message) {
+	agent, _, _, ctxErr := e.commandContext(p, msg)
+	if ctxErr != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, ctxErr))
+		return
+	}
 	registry, err := e.skillsForMessage(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
@@ -15662,7 +15785,7 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 		}
 
 		var sb strings.Builder
-		sb.WriteString(e.i18n.Tf(MsgSkillsTitle, e.agent.Name(), len(skills)))
+		sb.WriteString(e.i18n.Tf(MsgSkillsTitle, agent.Name(), len(skills)))
 
 		for _, s := range skills {
 			sb.WriteString(fmt.Sprintf("  /%s — %s\n", displayCommandForPlatform(p.Name(), s.Name), s.Description))
@@ -15676,7 +15799,7 @@ func (e *Engine) cmdSkills(p Platform, msg *Message) {
 		return
 	}
 
-	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard(registry))
+	e.replyWithCard(p, msg.ReplyCtx, e.renderSkillsCard(registry, msg.SessionKey))
 }
 
 func displayCommandForPlatform(platformName, command string) string {
@@ -16000,7 +16123,12 @@ func (e *Engine) renderWhoamiCard(msg *Message) *Card {
 // ── /doctor command ─────────────────────────────────────────
 
 func (e *Engine) cmdDoctor(p Platform, msg *Message) {
-	results := RunDoctorChecks(e.ctx, e.agent, e.platforms)
+	agent, _, _, err := e.commandContext(p, msg)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
+		return
+	}
+	results := RunDoctorChecks(e.ctx, agent, e.platforms)
 	report := FormatDoctorResults(results, e.i18n)
 	e.reply(p, msg.ReplyCtx, report)
 }
@@ -17166,6 +17294,15 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 // the resolved workspace path for callers that need to forward it to
 // processInteractiveMessageWith (idle reaper bookkeeping, reply footer, etc).
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
+	base, sessions, ik, wd, err := e.baseCommandContextWithWorkspace(p, msg)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	agent, err := e.selectedAgent(base, sessions, msg.SessionKey, ik, wd)
+	return agent, sessions, ik, wd, err
+}
+
+func (e *Engine) baseCommandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
 	if !e.multiWorkspace {
 		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
@@ -17191,6 +17328,16 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
 // It uses existing workspace bindings and falls back to global context if unresolved.
 func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager) {
+	base, sessions := e.baseSessionContextForKey(sessionKey)
+	agent, err := e.selectedAgent(base, sessions, sessionKey, e.interactiveKeyForSessionKey(sessionKey), "")
+	if err != nil {
+		slog.Warn("resolve selected agent", "session_key", sessionKey, "error", err)
+		return &unavailableChoiceAgent{profile: sessions.GetOrCreateActive(sessionKey).GetAgentProfile(), err: err}, sessions
+	}
+	return agent, sessions
+}
+
+func (e *Engine) baseSessionContextForKey(sessionKey string) (Agent, *SessionManager) {
 	if workspace := e.sendWorkDirForSession(sessionKey); workspace != "" {
 		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
 			return wsAgent, wsSessions
