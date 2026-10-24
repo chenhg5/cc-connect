@@ -16,6 +16,8 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+var validAgentChoiceName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
 // validRunAsUserName is the portable-username character set plus digits.
 // POSIX does not require a specific pattern, but every mainstream Linux and
 // macOS system accepts these characters for login names. Rejecting anything
@@ -489,10 +491,13 @@ type ReferenceConfig struct {
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
-	Name    string `toml:"name"`
-	Mode    string `toml:"mode,omitempty"`     // "" or "multi-workspace"
-	BaseDir string `toml:"base_dir,omitempty"` // parent dir for workspaces
-	SkipGit *bool  `toml:"skip_git,omitempty"`
+	// AgentChoices explicitly allow this bot to reuse named projects' agent
+	// configuration. Platform credentials and project permissions are not copied.
+	AgentChoices map[string]string `toml:"agent_choices,omitempty"`
+	Name         string            `toml:"name"`
+	Mode         string            `toml:"mode,omitempty"`     // "" or "multi-workspace"
+	BaseDir      string            `toml:"base_dir,omitempty"` // parent dir for workspaces
+	SkipGit      *bool             `toml:"skip_git,omitempty"`
 	// WorkspaceInitAllowLocalPaths allows /workspace init and the conversational
 	// init flow to bind existing local directories. Default false keeps init
 	// limited to git URLs; use /workspace bind or /workspace route for explicit
@@ -1091,7 +1096,25 @@ func (c *Config) validateInternal(permissive bool) error {
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
 	}
+	projectNames := make(map[string]bool, len(c.Projects))
+	for _, project := range c.Projects {
+		projectNames[project.Name] = true
+	}
 	for i, proj := range c.Projects {
+		seenChoices := make(map[string]bool)
+		for alias, target := range proj.AgentChoices {
+			lower := strings.ToLower(alias)
+			if alias == "" || !validAgentChoiceName.MatchString(alias) || lower == "list" || lower == "switch" || seenChoices[lower] {
+				return fmt.Errorf("config: project %q has invalid or duplicate agent choice %q", proj.Name, alias)
+			}
+			seenChoices[lower] = true
+			if !projectNames[target] {
+				return fmt.Errorf("config: project %q agent choice %q references unknown project %q", proj.Name, alias, target)
+			}
+			if lower == "default" && target != proj.Name {
+				return fmt.Errorf("config: project %q reserves default for its own agent", proj.Name)
+			}
+		}
 		prefix := fmt.Sprintf("projects[%d]", i)
 		if proj.Name == "" {
 			return fmt.Errorf("config: %s.name is required", prefix)
