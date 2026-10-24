@@ -1,5 +1,7 @@
 # 使用指南
 
+[English](usage.md) | [中文](usage.zh-CN.md) | [Русский](usage.ru.md)
+
 cc-connect 完整功能使用指南。
 
 ## 目录
