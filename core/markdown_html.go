@@ -443,7 +443,8 @@ var reTableCellItalic = regexp.MustCompile(`\*([^*]+)\*`)
 // preferring line boundaries. When a chunk boundary falls inside a code block,
 // the fence is closed at the end of the chunk and re-opened at the start of the
 // next chunk. If a single line exceeds maxLen, it is split within the line at
-// rune boundaries.
+// rune boundaries. If fence overhead leaves no room for content, plain splitting
+// preserves the text and length limit instead.
 func SplitMessageCodeFenceAware(text string, maxLen int) []string {
 	if utf8.RuneCountInString(text) <= maxLen {
 		return []string{text}
@@ -462,10 +463,14 @@ func SplitMessageCodeFenceAware(text string, maxLen int) []string {
 	currentLen := 0
 	openFence := "" // opening ``` line when inside a code block, else ""
 
-	// effectiveLimit returns the number of "currentLen units" available before
-	// the chunk (plus closingFence if needed) would exceed maxLen.
-	effectiveLimit := func() int {
-		if openFence != "" {
+	// Budget for the fence state after adding the candidate line: an opening
+	// fence needs a synthetic close, while a closing fence does not.
+	effectiveLimit := func(fenceLine bool) int {
+		inCode := openFence != ""
+		if fenceLine {
+			inCode = !inCode
+		}
+		if inCode {
 			return maxLen - closingFenceLen
 		}
 		return maxLen
@@ -492,7 +497,13 @@ func SplitMessageCodeFenceAware(text string, maxLen int) []string {
 
 	for _, line := range lines {
 		lineRunes := []rune(line)
-		limit := effectiveLimit()
+		trimmed := strings.TrimSpace(line)
+		isFenceLine := strings.HasPrefix(trimmed, "```")
+		if isFenceLine && len(lineRunes)+closingFenceLen+1 >= maxLen {
+			// Reopening this fence would exhaust the next chunk's payload budget.
+			return splitMessage(text, maxLen)
+		}
+		limit := effectiveLimit(isFenceLine)
 
 		// Fast path: line fits in the current chunk.
 		if currentLen+len(lineRunes)+1 <= limit {
@@ -501,7 +512,7 @@ func SplitMessageCodeFenceAware(text string, maxLen int) []string {
 		} else {
 			// Line doesn't fit; flush and try again with a fresh chunk.
 			flush()
-			limit = effectiveLimit()
+			limit = effectiveLimit(isFenceLine)
 
 			if currentLen+len(lineRunes)+1 <= limit {
 				// Fits after flush.
@@ -512,7 +523,7 @@ func SplitMessageCodeFenceAware(text string, maxLen int) []string {
 				// rune boundaries, flushing between parts as needed.
 				remaining := lineRunes
 				for len(remaining) > 0 {
-					limit = effectiveLimit()
+					limit = effectiveLimit(isFenceLine)
 					// avail = how many runes we can add to current.
 					// Since currentLen = actual_runes + 1, actual_runes = currentLen - 1,
 					// and a new part adds 1 joining \n plus its own runes:
@@ -522,7 +533,7 @@ func SplitMessageCodeFenceAware(text string, maxLen int) []string {
 					if avail <= 0 {
 						// Shouldn't happen after flush, but guard against it.
 						flush()
-						limit = effectiveLimit()
+						limit = effectiveLimit(isFenceLine)
 						avail = limit - currentLen
 					}
 					if avail > len(remaining) {
@@ -539,8 +550,7 @@ func SplitMessageCodeFenceAware(text string, maxLen int) []string {
 		}
 
 		// Track code fence state after processing the line.
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") {
+		if isFenceLine {
 			if openFence != "" {
 				openFence = ""
 			} else {
