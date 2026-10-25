@@ -141,6 +141,8 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
+	cliBin         string
+	cliExtraArgs   []string
 	url            string
 	workDir        string
 	model          string
@@ -191,9 +193,11 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
+		cliBin:           cliBin,
+		cliExtraArgs:     append([]string(nil), cliExtraArgs...),
 		url:              url,
 		workDir:          workDir,
 		model:            model,
@@ -272,7 +276,12 @@ func (s *appServerSession) connect() error {
 	if baseURL := strings.TrimSpace(s.baseURL); baseURL != "" {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
 	}
-	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	bin, err := resolveCodexExecutable(s.cliBin)
+	if err != nil {
+		return fmt.Errorf("codex app-server resolve CLI: %w", err)
+	}
+	args = append(append([]string(nil), s.cliExtraArgs...), args...)
+	cmd := exec.CommandContext(s.ctx, bin, args...)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {
@@ -346,7 +355,6 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	if resumeID != "" && resumeID != core.ContinueSession {
 		params := s.threadRequestParams()
 		params["threadId"] = resumeID
-		params["persistExtendedHistory"] = true
 
 		var resp threadResumeResponse
 		if err := s.request("thread/resume", params, &resp); err != nil {
@@ -991,24 +999,18 @@ func (s *appServerSession) Close() error {
 
 func (s *appServerSession) readLoop(r io.Reader) {
 	defer s.wg.Done()
-	scanner := bufio.NewScanner(r)
-	scanBuf := make([]byte, 0, 64*1024)
-	const maxLineSize = 10 * 1024 * 1024 // 10MB
-	scanner.Buffer(scanBuf, maxLineSize)
 
-	for scanner.Scan() {
+	err := readJSONLines(r, func(data []byte) error {
 		select {
 		case <-s.ctx.Done():
-			return
+			return s.ctx.Err()
 		default:
 		}
-
-		data := scanner.Bytes()
 
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(data, &probe); err != nil {
 			slog.Debug("codex app-server: invalid JSON", "error", err)
-			continue
+			return nil
 		}
 
 		_, hasID := probe["id"]
@@ -1020,7 +1022,7 @@ func (s *appServerSession) readLoop(r io.Reader) {
 			var resp rpcResponseEnvelope
 			if err := json.Unmarshal(data, &resp); err != nil {
 				slog.Debug("codex app-server: bad response envelope", "error", err)
-				continue
+				return nil
 			}
 			s.handleResponse(resp)
 
@@ -1033,31 +1035,24 @@ func (s *appServerSession) readLoop(r io.Reader) {
 			var notif rpcNotificationEnvelope
 			if err := json.Unmarshal(data, &notif); err != nil {
 				slog.Debug("codex app-server: bad notification envelope", "error", err)
-				continue
+				return nil
 			}
 			s.handleNotification(notif.Method, notif.Params)
 		}
-	}
+		return nil
+	})
 
-	err := scanner.Err()
 	if err != nil {
 		if s.ctx.Err() == nil && !errors.Is(err, io.EOF) {
 			slog.Warn("codex app-server read failed", "error", err)
-			if errors.Is(err, bufio.ErrTooLong) {
-				s.emitError(fmt.Errorf("codex app-server line exceeds max size (%d bytes): %w", maxLineSize, err))
-			} else {
-				s.emitError(fmt.Errorf("codex app-server connection closed: %w", err))
-			}
+			s.emitError(fmt.Errorf("codex app-server connection closed: %w", err))
 		}
-		s.alive.Store(false)
-		s.rejectPending(err)
-		s.rejectPendingApprovals(err)
-		return
+	} else {
+		err = io.EOF
 	}
-
 	s.alive.Store(false)
-	s.rejectPending(io.EOF)
-	s.rejectPendingApprovals(io.EOF)
+	s.rejectPending(err)
+	s.rejectPendingApprovals(err)
 }
 
 func (s *appServerSession) stderrLoop(r io.Reader) {
@@ -1141,6 +1136,9 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "item/completed":
 		var notif itemNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
+			if notif.Item["delivery"] == "async" && notif.ThreadID != "" && notif.ThreadID != s.CurrentSessionID() {
+				return
+			}
 			s.handleItemCompleted(notif.Item)
 		}
 
@@ -1244,6 +1242,9 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 		}
 
 	case "agentMessage":
+		if s.handleAsyncUserInput(item) {
+			return
+		}
 		text, _ := item["text"].(string)
 		if strings.TrimSpace(text) != "" {
 			s.stateMu.Lock()

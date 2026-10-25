@@ -3,7 +3,6 @@
 package codex
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/chenhg5/cc-connect/internal/taskkill"
 )
 
 func prepareCmdForKill(cmd *exec.Cmd) {
@@ -32,10 +33,7 @@ func forceKillCmd(cmd *exec.Cmd) error {
 	if err == nil {
 		return nil
 	}
-	if bytes.Contains(bytes.ToLower(output), []byte("there is no running instance")) {
-		return nil
-	}
-	if bytes.Contains(bytes.ToLower(output), []byte("not found")) {
+	if taskkill.IsNotRunning(err) {
 		return nil
 	}
 	if killErr := cmd.Process.Kill(); killErr == nil || errors.Is(killErr, os.ErrProcessDone) {

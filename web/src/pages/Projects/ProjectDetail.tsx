@@ -3,10 +3,14 @@ import { useTranslation } from 'react-i18next';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plug, Heart, Settings, Layers, Zap, Pause, Play,
-  Trash2, Plus, Check, Clock, ExternalLink, Link2,
+  Trash2, Plus, Check, Clock, ExternalLink, Link2, FolderTree, Folder,
 } from 'lucide-react';
 import { Card, Badge, Button, Input, Modal, EmptyState } from '@/components/ui';
-import { getProject, updateProject, deleteProject, listAgentTypes, type ProjectDetail as ProjectDetailType } from '@/api/projects';
+import {
+  getProject, updateProject, deleteProject, listAgentTypes,
+  listWorkspaces, bindWorkspace, unbindWorkspace,
+  type ProjectDetail as ProjectDetailType, type WorkspaceBinding,
+} from '@/api/projects';
 import { listProviders, addProvider, removeProvider, activateProvider, type Provider, listGlobalProviders, type GlobalProvider, saveProviderRefs } from '@/api/providers';
 import { getHeartbeat, pauseHeartbeat, resumeHeartbeat, triggerHeartbeat, setHeartbeatInterval, type HeartbeatStatus } from '@/api/heartbeat';
 import { restartSystem } from '@/api/status';
@@ -57,7 +61,7 @@ const MODE_OPTIONS_BY_AGENT: Record<string, { value: string; label: string }[]> 
 
 const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
 
-type Tab = 'overview' | 'providers' | 'heartbeat' | 'settings';
+type Tab = 'overview' | 'providers' | 'heartbeat' | 'workspaces' | 'settings';
 
 export default function ProjectDetail() {
   const { t } = useTranslation();
@@ -81,6 +85,18 @@ export default function ProjectDetail() {
   const [injectSender, setInjectSender] = useState(false);
   const [platformAllowFrom, setPlatformAllowFrom] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+
+  // Workspace mode (multi-workspace) settings
+  const [workspaceMode, setWorkspaceMode] = useState('');
+  const [workspaceBaseDir, setWorkspaceBaseDir] = useState('');
+  const [savingWorkspaceMode, setSavingWorkspaceMode] = useState(false);
+  const [workspaceBindings, setWorkspaceBindings] = useState<WorkspaceBinding[]>([]);
+  const [workspaceSuggestions, setWorkspaceSuggestions] = useState<string[]>([]);
+  const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
+  const [newBindingChannelKey, setNewBindingChannelKey] = useState('');
+  const [newBindingChannelName, setNewBindingChannelName] = useState('');
+  const [newBindingPath, setNewBindingPath] = useState('');
+  const [bindingWorkspace, setBindingWorkspace] = useState(false);
 
   // Agent type
   const [agentTypes, setAgentTypes] = useState<string[]>([]);
@@ -174,6 +190,8 @@ export default function ProjectDetail() {
         setReplyFooter(proj.value.reply_footer !== false);
         setInjectSender(proj.value.inject_sender === true);
         setProviderRefs(proj.value.provider_refs || []);
+        setWorkspaceMode(proj.value.workspace_mode || '');
+        setWorkspaceBaseDir(proj.value.workspace_base_dir || '');
         const afMap: Record<string, string> = {};
         proj.value.platform_configs?.forEach(pc => {
           if (pc.allow_from !== undefined) afMap[pc.type] = pc.allow_from;
@@ -206,6 +224,27 @@ export default function ProjectDetail() {
     return () => window.removeEventListener('cc:refresh', handler);
   }, [fetchAll]);
 
+  const fetchWorkspaces = useCallback(async () => {
+    if (!name) return;
+    setLoadingWorkspaces(true);
+    try {
+      const res = await listWorkspaces(name);
+      setWorkspaceBindings(res.bindings || []);
+      setWorkspaceSuggestions(res.suggestions || []);
+    } catch {
+      setWorkspaceBindings([]);
+      setWorkspaceSuggestions([]);
+    } finally {
+      setLoadingWorkspaces(false);
+    }
+  }, [name]);
+
+  useEffect(() => {
+    if (tab === 'workspaces' && workspaceMode === 'multi-workspace') {
+      fetchWorkspaces();
+    }
+  }, [tab, workspaceMode, fetchWorkspaces]);
+
   const handleSaveSettings = async () => {
     if (!name) return;
     setSaving(true);
@@ -234,6 +273,57 @@ export default function ProjectDetail() {
     }
   };
 
+  const handleSaveWorkspaceMode = async () => {
+    if (!name) return;
+    const enabling = workspaceMode === 'multi-workspace';
+    if (enabling && !workspaceBaseDir.trim()) {
+      alert(t('projects.workspaceBaseDirRequired', 'Base directory is required to enable multi-workspace mode.'));
+      return;
+    }
+    if (!window.confirm(t('projects.workspaceModeConfirm', 'Changing workspace mode requires a service restart. Continue?'))) {
+      return;
+    }
+    setSavingWorkspaceMode(true);
+    try {
+      const res: any = await updateProject(name, {
+        workspace_mode: workspaceMode,
+        workspace_base_dir: workspaceBaseDir,
+      });
+      if (res && res.restart_required) {
+        setShowRestartModal(true);
+      }
+      await fetchAll();
+    } finally {
+      setSavingWorkspaceMode(false);
+    }
+  };
+
+  const handleBindWorkspace = async () => {
+    if (!name || !newBindingChannelKey.trim() || !newBindingPath.trim()) return;
+    setBindingWorkspace(true);
+    try {
+      await bindWorkspace(name, {
+        channel_key: newBindingChannelKey.trim(),
+        channel_name: newBindingChannelName.trim() || undefined,
+        workspace: newBindingPath.trim(),
+      });
+      setNewBindingChannelKey('');
+      setNewBindingChannelName('');
+      setNewBindingPath('');
+      await fetchWorkspaces();
+    } catch (e: any) {
+      alert(e?.message || String(e));
+    } finally {
+      setBindingWorkspace(false);
+    }
+  };
+
+  const handleUnbindWorkspace = async (channelKey: string) => {
+    if (!name) return;
+    await unbindWorkspace(name, channelKey);
+    await fetchWorkspaces();
+  };
+
   const handleAddProvider = async () => {
     if (!name || !newProvider.name) return;
     await addProvider(name, newProvider);
@@ -253,6 +343,7 @@ export default function ProjectDetail() {
     { key: 'overview', icon: Layers },
     { key: 'providers', icon: Zap },
     { key: 'heartbeat', icon: Heart },
+    { key: 'workspaces', icon: FolderTree },
     { key: 'settings', icon: Settings },
   ];
 
@@ -515,6 +606,104 @@ export default function ProjectDetail() {
               </div>
             </div>
           </Modal>
+        </div>
+      )}
+
+      {tab === 'workspaces' && project && (
+        <div className="space-y-4">
+          <Card>
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-1">{t('projects.workspaceMode', 'Multi-workspace mode')}</h3>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+              {t('projects.workspaceModeHint', 'Route different chat channels to different working directories under a shared base directory.')}
+            </p>
+            <div className="space-y-4 max-w-lg">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300">{t('projects.workspaceModeEnable', 'Enable multi-workspace mode')}</label>
+                  <p className="text-[11px] text-amber-500 mt-0.5">{t('projects.workspaceModeWarning', 'Switching modes requires a restart. The single work_dir is not used while multi-workspace mode is on.')}</p>
+                </div>
+                <button
+                  onClick={() => setWorkspaceMode(workspaceMode === 'multi-workspace' ? '' : 'multi-workspace')}
+                  className={cn('w-10 h-6 rounded-full transition-colors shrink-0 ml-3', workspaceMode === 'multi-workspace' ? 'bg-accent' : 'bg-gray-300 dark:bg-gray-700')}
+                >
+                  <div className={cn('w-4 h-4 bg-white rounded-full transition-transform mx-1', workspaceMode === 'multi-workspace' ? 'translate-x-4' : 'translate-x-0')} />
+                </button>
+              </div>
+              <Input
+                label={t('projects.workspaceBaseDir', 'Base directory')}
+                value={workspaceBaseDir}
+                onChange={(e) => setWorkspaceBaseDir(e.target.value)}
+                placeholder="/path/to/workspaces"
+                disabled={workspaceMode !== 'multi-workspace'}
+              />
+              <Button loading={savingWorkspaceMode} onClick={handleSaveWorkspaceMode}>{t('common.save')}</Button>
+            </div>
+          </Card>
+
+          {workspaceMode === 'multi-workspace' && (
+            <>
+              <Card>
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">{t('projects.workspaceBindings', 'Channel bindings')}</h3>
+                {loadingWorkspaces ? (
+                  <p className="text-sm text-gray-400">{t('common.loading', 'Loading...')}</p>
+                ) : workspaceBindings.length === 0 ? (
+                  <EmptyState message={t('projects.workspaceNoBindings', 'No channels are bound to a workspace yet.')} />
+                ) : (
+                  <div className="space-y-2">
+                    {workspaceBindings.map((b) => (
+                      <div
+                        key={b.channel_key}
+                        className="flex items-center justify-between px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700/60 bg-white dark:bg-gray-800/40"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium text-gray-900 dark:text-white">{b.channel_name}</span>
+                            <Badge variant={b.active ? 'success' : 'default'}>
+                              {b.active ? t('projects.workspaceActive', 'active') : t('projects.workspaceIdle', 'idle')}
+                            </Badge>
+                          </div>
+                          <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">
+                            <Folder size={11} className="inline mr-1" />{b.workspace}
+                          </p>
+                        </div>
+                        <Button size="sm" variant="ghost" className="text-gray-400 hover:text-red-500 shrink-0 ml-3" onClick={() => handleUnbindWorkspace(b.channel_key)}>
+                          <Trash2 size={14} />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Card>
+
+              <Card>
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">{t('projects.workspaceAddBinding', 'Bind a channel')}</h3>
+                <div className="space-y-3 max-w-lg">
+                  <Input label={t('projects.workspaceChannelKey', 'Channel key')} value={newBindingChannelKey} onChange={(e) => setNewBindingChannelKey(e.target.value)} placeholder="slack:C0123456" />
+                  <Input label={t('projects.workspaceChannelName', 'Channel name (optional)')} value={newBindingChannelName} onChange={(e) => setNewBindingChannelName(e.target.value)} placeholder="#general" />
+                  <Input label={t('projects.workspacePath', 'Workspace path')} value={newBindingPath} onChange={(e) => setNewBindingPath(e.target.value)} placeholder={workspaceBaseDir ? `${workspaceBaseDir}/...` : '/path/to/workspaces/...'} />
+                  {workspaceSuggestions.length > 0 && (
+                    <div>
+                      <p className="text-[11px] text-gray-400 mb-1.5">{t('projects.workspaceSuggestions', 'Unbound directories in base_dir:')}</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {workspaceSuggestions.map((s) => (
+                          <button
+                            key={s}
+                            onClick={() => setNewBindingPath(s)}
+                            className="text-xs px-2 py-1 rounded-md border border-gray-200 dark:border-gray-700 hover:border-accent/50 hover:bg-accent/5 transition-all text-gray-600 dark:text-gray-300"
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <Button loading={bindingWorkspace} onClick={handleBindWorkspace} disabled={!newBindingChannelKey.trim() || !newBindingPath.trim()}>
+                    <Plus size={14} /> {t('projects.workspaceBind', 'Bind')}
+                  </Button>
+                </div>
+              </Card>
+            </>
+          )}
         </div>
       )}
 

@@ -314,11 +314,21 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 // ── SkillProvider ────────────────────────────────────────────
 
 func (a *Agent) SkillDirs() []string {
-	absDir, err := filepath.Abs(a.workDir)
+	a.mu.Lock()
+	workDir := a.workDir
+	a.mu.Unlock()
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		absDir = a.workDir
+		absDir = workDir
 	}
-	dirs := []string{filepath.Join(absDir, ".pi", "agent", "skills")}
+	// Pi uses .pi/skills at project scope; .pi/agent/skills is its global
+	// layout. Keep the legacy project path for existing bridge installations.
+	// Project skills precede global skills so local instructions win by name.
+	dirs := []string{
+		filepath.Join(absDir, ".pi", "skills"),
+		filepath.Join(absDir, ".agents", "skills"),
+		filepath.Join(absDir, ".pi", "agent", "skills"),
+	}
 
 	homeDir, err := os.UserHomeDir()
 	if err == nil {
@@ -553,8 +563,9 @@ func findSessionFile(sessDir, sessionID string) string {
 }
 
 // piSessionDir returns the pi session directory for the given workDir.
-// Pi encodes the absolute path as: replace "/" with "-", wrap with "--".
+// Pi encodes the absolute path as: replace "/", "\" and ":" with "-", wrap with "--".
 // e.g. /home/user/project → --home-user-project--
+// e.g. D:\project         → --D-project--
 func piSessionDir(workDir string) string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -564,7 +575,12 @@ func piSessionDir(workDir string) string {
 	if err != nil {
 		return ""
 	}
-	encoded := "--" + strings.ReplaceAll(strings.TrimPrefix(absDir, "/"), "/", "-") + "--"
+	// Replace /, \ and : with - to produce a valid single-path-component directory name.
+	// Pi's TypeScript uses /[/\\:]/g to do the same (see getDefaultSessionDirPath in session-manager.ts).
+	safe := strings.ReplaceAll(absDir, "/", "-")
+	safe = strings.ReplaceAll(safe, "\\", "-")
+	safe = strings.ReplaceAll(safe, ":", "-")
+	encoded := "--" + strings.TrimPrefix(safe, "-") + "--"
 	return filepath.Join(homeDir, ".pi", "agent", "sessions", encoded)
 }
 

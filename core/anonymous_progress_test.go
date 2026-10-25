@@ -30,7 +30,7 @@ func TestAnonymousProgressStartsBeforeEventsAndStreamsWithoutDetails(t *testing.
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				e.processInteractiveEvents(state, s, e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger")
+				e.processInteractiveEvents(state, s, e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger", 0)
 			}()
 			t.Cleanup(func() {
 				e.cancel()
@@ -100,7 +100,7 @@ func TestAnonymousProgressDoesNotChangeRichOrLegacyModes(t *testing.T) {
 			as.events <- Event{Type: EventText, Content: "answer"}
 			as.events <- Event{Type: EventResult, Content: "answer", Done: true}
 			state := &interactiveState{agentSession: as, platform: p, replyCtx: "trigger"}
-			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger")
+			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger", 0)
 			starts, streams, updates, _ := p.snapshot()
 			all := strings.Join(append(append(append(starts, streams...), updates...), p.getSent()...), "\n")
 			if strings.Contains(all, "anonymous") {
@@ -141,7 +141,7 @@ func TestAnonymousProgressSilentReplyRemovesOnlyPlaceholder(t *testing.T) {
 			as.events <- Event{Type: EventText, Content: "EPLY"}
 			as.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
 			state := &interactiveState{agentSession: as, platform: p, replyCtx: "trigger"}
-			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger")
+			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger", 0)
 			starts, streams, updates, deletes := p.snapshot()
 			if len(starts) != 1 || len(streams) != 0 || deletes != 1 || len(p.getSent()) != 0 {
 				t.Fatalf("silent lifecycle: starts=%v streams=%v updates=%v deletes=%d sent=%v", starts, streams, updates, deletes, p.getSent())
@@ -166,7 +166,7 @@ func TestAnonymousProgressResolvesImmediateCardOnEarlyExit(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, sendDone, "trigger")
+				e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, sendDone, "trigger", 0)
 			}()
 			t.Cleanup(e.cancel)
 			awaitAnonymousProgress(t, func() bool { starts, _, _, _ := p.snapshot(); return len(starts) == 1 })
@@ -259,7 +259,7 @@ func TestAnonymousProgressKeepsPartialAnswerOnInterruptedCard(t *testing.T) {
 	as.events <- Event{Type: EventText, Content: "partial answer\nNO_REPLY"}
 	close(as.events)
 	state := &interactiveState{agentSession: as, platform: p, replyCtx: "trigger"}
-	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger")
+	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger", 0)
 	_, _, updates, _ := p.snapshot()
 	final := updates[len(updates)-1]
 	if !strings.Contains(final, "status=error") || !strings.Contains(final, "partial answer") || strings.Contains(final, "NO_REPLY") || len(p.getSent()) != 0 {
@@ -278,7 +278,7 @@ func TestAnonymousProgressSilentPrefixStaysHiddenAcrossToolAndErrorEvents(t *tes
 	as.events <- Event{Type: EventText, Content: "EPLY"}
 	as.events <- Event{Type: EventError, Error: fmt.Errorf("interrupted")}
 	state := &interactiveState{agentSession: as, platform: p, replyCtx: "trigger"}
-	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger")
+	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger", 0)
 	starts, streams, updates, _ := p.snapshot()
 	all := strings.Join(append(append(append(starts, streams...), updates...), p.getSent()...), "\n")
 	if strings.Contains(all, "NO_R") || strings.Contains(all, "private-tool") || !strings.Contains(updates[len(updates)-1], "status=error") {
@@ -300,7 +300,7 @@ func TestAnonymousProgressPermissionKeepsAnswerOnCard(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "message", time.Now(), nil, nil, "trigger")
+		e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "message", time.Now(), nil, nil, "trigger", 0)
 	}()
 	as.events <- Event{Type: EventText, Content: "Before permission. "}
 	as.events <- Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "echo approved"}
@@ -389,7 +389,7 @@ func TestAnonymousProgressFallbackNeverRestoresDetails(t *testing.T) {
 			as.events <- Event{Type: EventText, Content: "visible answer"}
 			as.events <- Event{Type: EventResult, Content: "visible answer", Done: true}
 			state := &interactiveState{agentSession: as, platform: p, replyCtx: "trigger"}
-			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger")
+			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger", 0)
 			var outbound []string
 			for _, call := range p.callSnapshot() {
 				outbound = append(outbound, call.content)
@@ -418,7 +418,7 @@ func TestAnonymousProgressHonorsDisabledAnswerPreview(t *testing.T) {
 		as.events <- Event{Type: EventToolUse, ToolName: "private-tool"}
 		as.events <- Event{Type: EventResult, Content: "visible only at completion", Done: true}
 		state := &interactiveState{agentSession: as, platform: p, replyCtx: "trigger"}
-		e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger")
+		e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("card:user"), e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger", 0)
 		for _, call := range p.callSnapshot() {
 			if call.kind == "stream" || (strings.Contains(call.content, "visible only") && !strings.Contains(call.content, "status=done")) {
 				t.Fatalf("disabled preview still streamed answer: %+v", call)
@@ -428,5 +428,33 @@ func TestAnonymousProgressHonorsDisabledAnswerPreview(t *testing.T) {
 		if !strings.Contains(updates[len(updates)-1], "visible only at completion") {
 			t.Fatal("final answer missing")
 		}
+	}
+}
+
+func TestAnonymousProgressDiscardsStopHookRejectedDraft(t *testing.T) {
+	p := &anonymousProgressPlatform{}
+	p.n = "test-card"
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: "full", CardMode: "rich-anonymous", ToolMessages: true})
+	t.Cleanup(e.cancel)
+	session := e.sessions.GetOrCreateActive("card:user")
+	as := newControllableSession("hook-rejected")
+	as.events <- Event{Type: EventText, Content: "rejected draft"}
+	as.events <- Event{Type: EventHookRejected}
+	as.events <- Event{Type: EventToolUse, ToolName: "private-tool"}
+	as.events <- Event{Type: EventText, Content: "rewritten answer"}
+	as.events <- Event{Type: EventResult, Content: "rewritten answer", Done: true}
+	state := &interactiveState{agentSession: as, platform: p, replyCtx: "trigger"}
+	e.processInteractiveEvents(state, session, e.sessions, "card:user", "message", time.Now(), nil, nil, "trigger", 0)
+	_, _, updates, _ := p.snapshot()
+	if len(updates) == 0 {
+		t.Fatal("no final anonymous card")
+	}
+	final := updates[len(updates)-1]
+	if !strings.Contains(final, "status=done") || !strings.Contains(final, "rewritten answer") || strings.Contains(final, "rejected draft") || strings.Contains(final, "private-tool") {
+		t.Fatalf("final card retained rejected content: %q", final)
+	}
+	if history := session.GetHistory(0); len(history) != 1 || history[0].Content != "rewritten answer" {
+		t.Fatalf("history retained rejected draft: %#v", history)
 	}
 }

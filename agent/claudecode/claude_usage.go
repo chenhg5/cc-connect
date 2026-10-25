@@ -100,8 +100,13 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	}()
 
 	terminal := newClaudeUsageTerminal()
+	// readDone carries the reader's single result and may be consumed by the
+	// loop below; readerExited is closed when the reader returns, so cleanup can
+	// wait on it no matter who received from readDone.
 	readDone := make(chan error, 1)
+	readerExited := make(chan struct{})
 	go func() {
+		defer close(readerExited)
 		buf := make([]byte, 4096)
 		for {
 			n, err := ptmx.Read(buf)
@@ -125,7 +130,7 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 		}
 		cancel()
 		// Wait for reader goroutine to finish so it is never leaked.
-		<-readDone
+		<-readerExited
 		select {
 		case <-processDone:
 		case <-time.After(2 * time.Second):

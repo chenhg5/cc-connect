@@ -568,12 +568,53 @@ func (cs *cursorSession) handleResult(raw map[string]any) {
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.chatID.Store(sid)
 	}
-	evt := core.Event{Type: core.EventResult, Content: content, SessionID: cs.CurrentSessionID(), Done: true}
+	// Cursor emits a `usage` block on the result event with camelCase keys
+	// (inputTokens / outputTokens / cacheReadTokens / cacheWriteTokens).
+	// Without this, the engine's turn-complete log always reports 0 tokens
+	// and the reply footer is suppressed by #701's workdir-only guard. See
+	// issue #1810.
+	var inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens int
+	if usage, ok := raw["usage"].(map[string]any); ok {
+		inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens = parseCursorUsage(usage)
+	}
+	evt := core.Event{
+		Type:                     core.EventResult,
+		Content:                  content,
+		SessionID:                cs.CurrentSessionID(),
+		Done:                     true,
+		InputTokens:              inputTokens,
+		OutputTokens:             outputTokens,
+		CacheReadInputTokens:     cacheReadTokens,
+		CacheCreationInputTokens: cacheWriteTokens,
+	}
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
 		return
 	}
+}
+
+// parseCursorUsage extracts token counts from a Cursor result event's `usage`
+// object. The Cursor Agent CLI emits camelCase keys (inputTokens,
+// outputTokens, cacheReadTokens, cacheWriteTokens) — different from
+// Claude Code's snake_case — so this helper mirrors agent/claudecode's
+// parseClaudeUsage but uses the right field names. Returns 0 for any
+// field that is missing or not numeric, so callers can safely emit an
+// Event with partial usage (e.g. when the CLI downgrades the schema).
+func parseCursorUsage(usage map[string]any) (input, output, cacheRead, cacheWrite int) {
+	if v, ok := usage["inputTokens"].(float64); ok {
+		input = int(v)
+	}
+	if v, ok := usage["outputTokens"].(float64); ok {
+		output = int(v)
+	}
+	if v, ok := usage["cacheReadTokens"].(float64); ok {
+		cacheRead = int(v)
+	}
+	if v, ok := usage["cacheWriteTokens"].(float64); ok {
+		cacheWrite = int(v)
+	}
+	return
 }
 
 // RespondPermission writes the user's approval/denial decision back to the Cursor Agent
