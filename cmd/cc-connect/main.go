@@ -238,12 +238,23 @@ func main() {
 		return
 	}
 
+	rootOpts, err := parseRootCLIOptions(os.Args[1:])
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		os.Exit(2)
+	}
+	if rootOpts.showVersion {
+		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
+		return
+	}
+
 	checkUpdateAsync()
 	// When started as a daemon (CC_LOG_FILE set), redirect logs to a rotating file.
-	// Log file setup happens before flag.Parse() so the rotating writer is in
-	// place before any slog output. To still honour --log-max-size, we
-	// pre-scan os.Args here for the flag value; this is a small, deliberate
-	// duplication of flag parsing for one well-known key.
+	// Pure CLI queries exit above before opening files or checking updates.
+	// Set up the writer before runtime slog output; retain the existing
+	// flag/environment precedence for log limits.
 	var logWriter io.Writer
 	var logCloser io.Closer
 	if logFile := os.Getenv("CC_LOG_FILE"); logFile != "" {
@@ -260,14 +271,6 @@ func main() {
 		slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	}
 
-	rootOpts, err := parseRootCLIOptions(os.Args[1:])
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return
-		}
-		os.Exit(2)
-	}
-
 	// Cross-check: the rotating-writer setup above consumed a pre-scanned
 	// value of --log-max-size. Validate the parsed value too so malformed
 	// values surface a clear warning.
@@ -278,11 +281,6 @@ func main() {
 	}
 	if rootOpts.logMaxBackups < 0 {
 		fmt.Fprintf(os.Stderr, "warning: --log-max-backups=%d must be >= 0 (0 means use env/default)\n", rootOpts.logMaxBackups)
-	}
-
-	if rootOpts.showVersion {
-		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
-		return
 	}
 
 	if runTopLevelCommand(rootOpts.args) {
