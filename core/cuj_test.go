@@ -2717,3 +2717,43 @@ func TestCUJ_H5_WorkspaceSkillDiscoveryAndInvocation(t *testing.T) {
 	sent := p.getSent()
 	assertWorkspaceSkills(t, sent[len(sent)-1], "b", "a")
 }
+
+// User requests one image, then a ten-image gallery, then continues in another
+// topic. External Agent work is simulated by the same send-back API as the CLI.
+func TestCUJ_I6_ImageGallerySendBackKeepsTopicAndBatching(t *testing.T) {
+	p := &galleryTestPlatform{size: 5}
+	p.n = "test"
+	a := &cujAgent{}
+	e := NewEngine("test", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	env := &cujEnv{t: t, engine: e, plat: &p.stubPlatformEngine, agent: a}
+	for i, step := range []struct {
+		key, ctx string
+		count    int
+	}{
+		{"test:one", "topic-one", 1}, {"test:one", "topic-one", 10}, {"test:two", "topic-two", 6},
+	} {
+		before := len(p.getSent())
+		e.ReceiveMessage(p, &Message{Platform: "test", SessionKey: step.key, MessageID: fmt.Sprintf("request-%d", i), UserID: "owner", Content: fmt.Sprintf("send %d images", step.count), ReplyCtx: step.ctx})
+		env.waitFor("agent response", 2*time.Second, func() bool { return len(p.getSent()) > before && !e.sessions.GetOrCreateActive(step.key).Busy() })
+		groupBefore := len(p.groups)
+		if err := e.SendToSessionWithAttachments(step.key, "", galleryTestImages(step.count), nil, nil, false); err != nil {
+			t.Fatal(err)
+		}
+		if step.count == 1 {
+			if len(p.images) != 1 {
+				t.Fatal("single image was not delivered")
+			}
+			continue
+		}
+		visible := p.getSent()
+		if visible[len(visible)-2] != "gallery:5" || visible[len(visible)-1] != fmt.Sprintf("gallery:%d", step.count-5) {
+			t.Fatalf("wrong visible gallery messages: %v", visible)
+		}
+		for _, ctx := range p.contexts[groupBefore:] {
+			if ctx != step.ctx {
+				t.Fatalf("gallery escaped target topic: %v", ctx)
+			}
+		}
+	}
+}
