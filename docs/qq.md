@@ -71,6 +71,17 @@ allow_from = "*"                 # 允许交互的 QQ 号，"*" 表示所有人
 - `"12345"` — 仅允许 QQ 号 12345 / Only allow QQ user 12345
 - `"12345,67890"` — 允许多个 QQ 号 / Allow multiple QQ users
 
+**`record_dirs`（可选）/ `record_dirs` (optional):**
+
+NapCat 与 cc-connect 在同一台机器上时，语音消息的 `url` 是本地文件路径而不是 HTTP 地址。cc-connect 只读取 `record_dirs` 里列出的目录中的普通文件（解析符号链接后仍须在目录内），单个语音文件最大 20 MB。未配置时拒绝所有本地语音路径。
+
+When NapCat runs on the same host, a voice message's `url` is a local file path instead of an HTTP URL. cc-connect only reads regular files inside the directories listed in `record_dirs` (after resolving symlinks), up to 20 MB per voice file. If unset, local voice paths are rejected.
+
+```toml
+# macOS QQ NT
+record_dirs = ["~/Library/Containers/com.tencent.qq/Data/Library/Application Support/QQ"]
+```
+
 ### 4. 启动 / Start
 
 ```bash
