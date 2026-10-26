@@ -100,7 +100,13 @@ func NewHookManager(project string, hooks []HookConfig, shell, shellFlag, shellP
 		shell:       shell,
 		shellFlag:   shellFlag,
 		shellProfile: shellProfile,
-		client:      &http.Client{},
+		client: &http.Client{
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConnsPerHost: 10,
+			},
+		},
 	}
 }
 
@@ -203,40 +209,97 @@ func (hm *HookManager) executeHTTP(h *HookConfig, event HookEvent) {
 		return
 	}
 
-	timeout := h.timeoutDuration()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	var lastErr error
+	const maxRetries = 1
+	const retryDelay = 500 * time.Millisecond
+
+	// One deadline for the whole operation, not one per attempt. A
+	// synchronous hook blocks the caller that emitted the event
+	// (Emit runs non-async hooks inline), so `timeout` has to bound the
+	// total time spent here — giving each attempt its own fresh timeout
+	// would let a sync hook block for 2*timeout + retryDelay, twice what
+	// the operator configured. Retrying still happens whenever the budget
+	// survives the first attempt, which is the common transient-failure
+	// case; if the first attempt exhausts the deadline there is simply no
+	// time left to retry, which is the correct outcome.
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeoutDuration())
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
-	if err != nil {
-		slog.Warn("hooks: create request failed", "url", h.URL, "error", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "CC-Connect-Hooks/1.0")
-	req.Header.Set("X-Hook-Event", string(event.Event))
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			slog.Info("hooks: http retry",
+				"project", hm.project, "event", event.Event,
+				"url", h.URL, "attempt", attempt,
+			)
+			// Respect the deadline while backing off, so a nearly
+			// exhausted budget does not add a pointless sleep.
+			select {
+			case <-time.After(retryDelay):
+			case <-ctx.Done():
+			}
+		}
+		if ctx.Err() != nil {
+			lastErr = ctx.Err()
+			break
+		}
 
-	resp, err := hm.client.Do(req)
-	if err != nil {
-		slog.Warn("hooks: http request failed",
-			"project", hm.project, "event", event.Event,
-			"url", h.URL, "error", err,
-		)
-		return
-	}
-	defer resp.Body.Close()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			slog.Warn("hooks: create request failed", "url", h.URL, "error", err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "CC-Connect-Hooks/1.0")
+		req.Header.Set("X-Hook-Event", string(event.Event))
 
-	if resp.StatusCode >= 400 {
-		slog.Warn("hooks: http response error",
+		resp, err := hm.client.Do(req)
+		if err != nil {
+			lastErr = err
+			slog.Warn("hooks: http request failed",
+				"project", hm.project, "event", event.Event,
+				"url", h.URL, "error", err,
+			)
+			continue
+		}
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Debug("hooks: resp.Body.Close()", "error", closeErr)
+		}
+
+		if resp.StatusCode >= 400 {
+			lastErr = fmt.Errorf("http %d", resp.StatusCode)
+			// Retry only failures that can plausibly succeed on a second
+			// attempt: transport errors (handled above) and 5xx, which are
+			// server-side. A 4xx is the endpoint telling us the request
+			// itself is wrong — 400/401/403/404/410 will return the same
+			// thing every time, so retrying just delays the log line by
+			// retryDelay. 429 is the exception: it explicitly asks for a
+			// later retry.
+			if resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+				slog.Warn("hooks: http response error",
+					"project", hm.project, "event", event.Event,
+					"url", h.URL, "status", resp.StatusCode,
+				)
+				return
+			}
+			slog.Warn("hooks: http response error, retrying",
+				"project", hm.project, "event", event.Event,
+				"url", h.URL, "status", resp.StatusCode,
+			)
+			continue
+		}
+		slog.Debug("hooks: http delivered",
 			"project", hm.project, "event", event.Event,
 			"url", h.URL, "status", resp.StatusCode,
 		)
 		return
 	}
-	slog.Debug("hooks: http delivered",
-		"project", hm.project, "event", event.Event,
-		"url", h.URL, "status", resp.StatusCode,
-	)
+	if lastErr != nil {
+		slog.Warn("hooks: http failed after retries",
+			"project", hm.project, "event", event.Event,
+			"url", h.URL, "error", lastErr,
+		)
+	}
 }
 
 // eventToEnv converts a HookEvent to environment variables for shell hooks.

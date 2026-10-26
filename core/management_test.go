@@ -59,6 +59,7 @@ func testManagementServer(t *testing.T, token string) (*ManagementServer, *httpt
 	mux.HandleFunc(prefix+"/agents", mgmt.wrap(mgmt.handleAgents))
 	mux.HandleFunc(prefix+"/projects", mgmt.wrap(mgmt.handleProjects))
 	mux.HandleFunc(prefix+"/projects/", mgmt.wrap(mgmt.handleProjectRoutes))
+	mux.HandleFunc(prefix+"/health", mgmt.wrap(mgmt.handleProjectHealth))
 	mux.HandleFunc(prefix+"/cron", mgmt.wrap(mgmt.handleCron))
 	mux.HandleFunc(prefix+"/cron/", mgmt.wrap(mgmt.handleCronByID))
 	mux.HandleFunc(prefix+"/providers", mgmt.wrap(mgmt.handleGlobalProviders))
@@ -1095,7 +1096,7 @@ func TestMgmt_AddPlatformToNewProject_DoesNotRequireEngine(t *testing.T) {
 	}
 }
 
-func TestMgmt_AddPlatformToNewProject_RejectsMissingWorkDir(t *testing.T) {
+func TestMgmt_AddPlatformToNewProject_CreatesMissingWorkDir(t *testing.T) {
 	mgmt, ts, _ := testManagementServer(t, "tok")
 
 	called := false
@@ -1110,18 +1111,16 @@ func TestMgmt_AddPlatformToNewProject_RejectsMissingWorkDir(t *testing.T) {
 		"options":  map[string]any{"client_id": "abc", "client_secret": "def"},
 		"work_dir": missing,
 	})
-	if r.OK {
-		t.Fatal("expected missing work_dir to be rejected")
+	// work_dir is auto-created when missing (validateProjectWorkDirOrCreate)
+	if !r.OK {
+		t.Fatalf("expected missing work_dir to be created, got error: %v", r.Error)
 	}
-	if !strings.Contains(r.Error, "work_dir does not exist") {
-		t.Fatalf("error = %q, want work_dir does not exist", r.Error)
-	}
-	if called {
-		t.Fatal("addPlatformToProject should not be called when work_dir is invalid")
+	if !called {
+		t.Fatal("addPlatformToProject should be called after work_dir is created")
 	}
 }
 
-func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
+func TestMgmt_SetupSave_CreatesMissingWorkDir(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 
 	t.Run("feishu", func(t *testing.T) {
@@ -1138,14 +1137,12 @@ func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
 			"app_secret": "secret",
 			"work_dir":   missing,
 		})
-		if r.OK || code != http.StatusBadRequest {
-			t.Fatalf("response ok=%v status=%d error=%q, want 400", r.OK, code, r.Error)
+		// work_dir is auto-created when missing (validateProjectWorkDirOrCreate)
+		if !r.OK || code != http.StatusOK {
+			t.Fatalf("response ok=%v status=%d error=%q, want 200", r.OK, code, r.Error)
 		}
-		if !strings.Contains(r.Error, "work_dir does not exist") {
-			t.Fatalf("error = %q, want work_dir does not exist", r.Error)
-		}
-		if called {
-			t.Fatal("setupFeishuSave should not be called when work_dir is invalid")
+		if !called {
+			t.Fatal("setupFeishuSave should be called after work_dir is created")
 		}
 	})
 
@@ -1162,14 +1159,12 @@ func TestMgmt_SetupSave_RejectsMissingWorkDir(t *testing.T) {
 			"token":    "token",
 			"work_dir": missing,
 		})
-		if r.OK || code != http.StatusBadRequest {
-			t.Fatalf("response ok=%v status=%d error=%q, want 400", r.OK, code, r.Error)
+		// work_dir is auto-created when missing (validateProjectWorkDirOrCreate)
+		if !r.OK || code != http.StatusOK {
+			t.Fatalf("response ok=%v status=%d error=%q, want 200", r.OK, code, r.Error)
 		}
-		if !strings.Contains(r.Error, "work_dir does not exist") {
-			t.Fatalf("error = %q, want work_dir does not exist", r.Error)
-		}
-		if called {
-			t.Fatal("setupWeixinSave should not be called when work_dir is invalid")
+		if !called {
+			t.Fatal("setupWeixinSave should be called after work_dir is created")
 		}
 	})
 }
@@ -1198,6 +1193,34 @@ func TestValidateProjectWorkDir(t *testing.T) {
 	}
 	if _, err := validateProjectWorkDir(file); err == nil || !strings.Contains(err.Error(), "work_dir is not a directory") {
 		t.Fatalf("file work_dir error = %v, want not a directory", err)
+	}
+}
+
+// TestWorkDirStatus covers every state /api/v1/health reports for a
+// project's work_dir. Ops dashboards and alert routing key off these
+// strings, so the distinction between "unset" (not configured),
+// "missing" (configured but absent), and "not_a_directory" (a file is in
+// the way) has to stay stable.
+func TestWorkDirStatus(t *testing.T) {
+	if st := workDirStatus(""); st["status"] != "unset" {
+		t.Errorf("empty workDir status = %v, want unset", st["status"])
+	}
+	if st := workDirStatus(t.TempDir()); st["status"] != "ok" {
+		t.Errorf("existing workDir status = %v, want ok", st["status"])
+	}
+	if st := workDirStatus(filepath.Join(t.TempDir(), "does-not-exist")); st["status"] != "missing" {
+		t.Errorf("absent workDir status = %v, want missing", st["status"])
+	}
+	file := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	if st := workDirStatus(file); st["status"] != "not_a_directory" {
+		t.Errorf("file workDir status = %v, want not_a_directory", st["status"])
+	}
+	// path is echoed back so operators can see which directory was probed
+	if st := workDirStatus(file); st["path"] != file {
+		t.Errorf("workDirStatus path = %v, want %q", st["path"], file)
 	}
 }
 
@@ -3120,5 +3143,94 @@ func TestMgmt_ProjectWorkspaces_BindRejectsPathOutsideBaseDir(t *testing.T) {
 	}
 	if !strings.Contains(r.Error, "escapes base_dir") {
 		t.Fatalf("error = %q, want escapes base_dir", r.Error)
+	}
+}
+
+// TestMgmt_ProjectHealthEndpoint covers /api/v1/health end to end.
+//
+// The response is keyed off a map of engines, so ordering has to be
+// imposed deliberately — otherwise the same request returns projects in a
+// different order each time, which breaks any consumer diffing successive
+// responses. Also pins that the route sits behind the management token
+// like every other endpoint.
+func TestMgmt_ProjectHealthEndpoint(t *testing.T) {
+	mgmt, ts, _ := testManagementServer(t, "tok")
+
+	// Register two more projects with distinguishable work_dir states.
+	good := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "gone")
+	for name, dir := range map[string]string{
+		"alpha-project": good,
+		"zeta-project":  "",
+	} {
+		e := NewEngine(name, &stubAgent{}, nil, "", LangEnglish)
+		e.sessions = NewSessionManager("")
+		e.SetBaseWorkDir(dir)
+		mgmt.RegisterEngine(name, e)
+	}
+	// Third engine: a work_dir that does not exist.
+	e := NewEngine("beta-project", &stubAgent{}, nil, "", LangEnglish)
+	e.sessions = NewSessionManager("")
+	e.SetBaseWorkDir(missing)
+	mgmt.RegisterEngine("beta-project", e)
+
+	// Auth is required, same as every other management route.
+	unauth := mgmtGet(t, ts.URL+"/api/v1/health", "")
+	if unauth.OK {
+		t.Fatal("health endpoint served without a token")
+	}
+
+	r := mgmtGet(t, ts.URL+"/api/v1/health", "tok")
+	if !r.OK {
+		t.Fatalf("health request failed: %s", r.Error)
+	}
+
+	var payload struct {
+		Projects []struct {
+			Name          string         `json:"name"`
+			AgentType     string         `json:"agent_type"`
+			WorkDirStatus map[string]any `json:"work_dir_status"`
+			Sessions      int            `json:"sessions_count"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(r.Data, &payload); err != nil {
+		t.Fatalf("decode health payload: %v (raw: %s)", err, r.Data)
+	}
+
+	var names []string
+	byName := map[string]map[string]any{}
+	for _, p := range payload.Projects {
+		names = append(names, p.Name)
+		byName[p.Name] = p.WorkDirStatus
+		if p.AgentType == "" {
+			t.Errorf("project %q reported empty agent_type", p.Name)
+		}
+	}
+
+	// Sorted, so the response is stable across calls.
+	if !sort.StringsAreSorted(names) {
+		t.Errorf("project order = %v, want sorted by name", names)
+	}
+	// testManagementServer already registered test-project.
+	for _, want := range []string{"alpha-project", "beta-project", "test-project", "zeta-project"} {
+		if _, ok := byName[want]; !ok {
+			t.Errorf("project %q missing from health response: %v", want, names)
+		}
+	}
+
+	if got := byName["alpha-project"]["status"]; got != "ok" {
+		t.Errorf("alpha-project status = %v, want ok", got)
+	}
+	if got := byName["beta-project"]["status"]; got != "missing" {
+		t.Errorf("beta-project status = %v, want missing", got)
+	}
+	if got := byName["zeta-project"]["status"]; got != "unset" {
+		t.Errorf("zeta-project status = %v, want unset", got)
+	}
+
+	// Repeated calls must not reshuffle.
+	again := mgmtGet(t, ts.URL+"/api/v1/health", "tok")
+	if string(again.Data) != string(r.Data) {
+		t.Errorf("health response is not stable across calls:\n first: %s\nsecond: %s", r.Data, again.Data)
 	}
 }

@@ -20,6 +20,7 @@ const (
 // systemdTemplateOwnedEnvKeys are keys the unit template renders directly; if
 // they also appear in cfg.EnvExtra the template version wins.
 var systemdTemplateOwnedEnvKeys = map[string]struct{}{
+	"CC_CONFIG":          {},
 	"CC_LOG_FILE":        {},
 	"CC_LOG_MAX_SIZE":    {},
 	"CC_LOG_MAX_BACKUPS": {},
@@ -190,6 +191,11 @@ func (m *systemdManager) buildUnit(cfg Config) string {
 	sb.WriteString("Type=simple\n")
 	fmt.Fprintf(&sb, "ExecStart=%s\n", cfg.BinaryPath)
 	fmt.Fprintf(&sb, "WorkingDirectory=%s\n", cfg.WorkDir)
+	// ExecStart passes no --config flag, so an explicit config path is
+	// delivered to the daemon via CC_CONFIG. Read back by resolveConfigPath.
+	if cfg.ConfigPath != "" {
+		fmt.Fprintf(&sb, "Environment=\"CC_CONFIG=%s\"\n", escapeSystemdEnvValue(cfg.ConfigPath))
+	}
 	sb.WriteString("Restart=on-failure\n")
 	sb.WriteString("RestartSec=10\n")
 	fmt.Fprintf(&sb, "Environment=\"CC_LOG_FILE=%s\"\n", cfg.LogFile)

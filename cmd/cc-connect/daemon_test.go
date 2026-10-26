@@ -128,3 +128,65 @@ func TestParseDaemonInstallArgs_WorkDirOverridesConfig(t *testing.T) {
 		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, overrideDir)
 	}
 }
+
+// TestParseDaemonInstallArgs_ConfigSetsConfigPath pins the producing end of
+// the CC_CONFIG hand-off. The unit/plist templates only emit an explicit
+// config path when cfg.ConfigPath is set, and resolveConfigPath reads it back
+// at startup — so if the parser stopped populating this field the daemon
+// would silently fall back to ~/.cc-connect/config.toml, with no other test
+// failing. All three accepted flag forms must set it.
+func TestParseDaemonInstallArgs_ConfigSetsConfigPath(t *testing.T) {
+	forms := []struct {
+		name string
+		args []string
+	}{
+		{"space form", []string{"--config", "/tmp/example/config.toml"}},
+		{"equals form", []string{"--config=/tmp/example/config.toml"}},
+		{"single-dash equals form", []string{"-config=/tmp/example/config.toml"}},
+	}
+	for _, f := range forms {
+		t.Run(f.name, func(t *testing.T) {
+			cfg, _, err := parseDaemonInstallArgs(f.args)
+			if err != nil {
+				t.Fatalf("parseDaemonInstallArgs returned error: %v", err)
+			}
+			want := filepath.Clean("/tmp/example/config.toml")
+			if cfg.ConfigPath != want {
+				t.Errorf("cfg.ConfigPath = %q, want %q", cfg.ConfigPath, want)
+			}
+		})
+	}
+}
+
+// TestParseDaemonInstallArgs_NoConfigLeavesConfigPathEmpty is the negative
+// case: without --config the templates must not emit CC_CONFIG, so the
+// daemon keeps its normal ./config.toml → ~/.cc-connect/config.toml lookup.
+func TestParseDaemonInstallArgs_NoConfigLeavesConfigPathEmpty(t *testing.T) {
+	cfg, _, err := parseDaemonInstallArgs([]string{"--work-dir", "/tmp/wd"})
+	if err != nil {
+		t.Fatalf("parseDaemonInstallArgs returned error: %v", err)
+	}
+	if cfg.ConfigPath != "" {
+		t.Errorf("cfg.ConfigPath = %q, want empty", cfg.ConfigPath)
+	}
+}
+
+// TestParseDaemonInstallArgs_WorkDirOverridesConfigWithoutClobberingConfigPath
+// pins that --work-dir still wins for WorkingDirectory while the explicit
+// config path is preserved — the two fields serve different purposes and
+// must not interfere.
+func TestParseDaemonInstallArgs_WorkDirOverridesConfigWithoutClobberingConfigPath(t *testing.T) {
+	cfg, _, err := parseDaemonInstallArgs([]string{
+		"--config", "/tmp/example/config.toml",
+		"--work-dir", "/tmp/override",
+	})
+	if err != nil {
+		t.Fatalf("parseDaemonInstallArgs returned error: %v", err)
+	}
+	if want := filepath.Clean("/tmp/override"); cfg.WorkDir != want {
+		t.Errorf("cfg.WorkDir = %q, want %q", cfg.WorkDir, want)
+	}
+	if want := filepath.Clean("/tmp/example/config.toml"); cfg.ConfigPath != want {
+		t.Errorf("cfg.ConfigPath = %q, want %q", cfg.ConfigPath, want)
+	}
+}

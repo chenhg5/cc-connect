@@ -242,6 +242,7 @@ func bootoutLaunchdTargets() {
 // templateOwnedEnvKeys are keys the plist template renders directly; if
 // they also appear in cfg.EnvExtra the template version wins.
 var templateOwnedEnvKeys = map[string]struct{}{
+	"CC_CONFIG":       {},
 	"CC_LOG_FILE":     {},
 	"CC_LOG_MAX_SIZE": {},
 	"PATH":            {},
@@ -302,6 +303,13 @@ func buildPlist(cfg Config) string {
 	if cfg.HomeDir != "" {
 		homeEntry = fmt.Sprintf("\t\t<key>HOME</key>\n\t\t<string>%s</string>\n", xmlEscape(cfg.HomeDir))
 	}
+	// CC_CONFIG: ProgramArguments carries no --config flag, so an explicit
+	// config path is delivered to the daemon via the environment. Read back
+	// by resolveConfigPath.
+	configEntry := ""
+	if cfg.ConfigPath != "" {
+		configEntry = fmt.Sprintf("\t\t<key>CC_CONFIG</key>\n\t\t<string>%s</string>\n", xmlEscape(cfg.ConfigPath))
+	}
 	// User-supplied paths can legitimately contain XML-special characters
 	// ('&', '<', '>', '"', '\''). Without escaping, `launchctl bootstrap`
 	// rejects the plist with a parse error and daemon install fails. The
@@ -341,12 +349,12 @@ func buildPlist(cfg Config) string {
 		<string>%d</string>
 		<key>PATH</key>
 		<string>%s</string>
-%s%s	</dict>
+%s%s%s	</dict>
 	<key>StandardOutPath</key>
 	<string>/dev/null</string>
 	<key>StandardErrorPath</key>
 	<string>/dev/null</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), homeEntry, envExtra)
+`, launchdLabel, xmlEscape(cfg.BinaryPath), xmlEscape(cfg.WorkDir), xmlEscape(cfg.LogFile), cfg.LogMaxSize, cfg.LogMaxBackups, xmlEscape(envPATH), homeEntry, configEntry, envExtra)
 }

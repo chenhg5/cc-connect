@@ -471,3 +471,61 @@ func TestRunTopLevelCommandUnknown(t *testing.T) {
 		t.Fatal("runTopLevelCommand() handled unknown command")
 	}
 }
+
+// TestResolveConfigPath_ExplicitFlagWins pins the top of the priority chain:
+// an explicit --config must beat CC_CONFIG, which the service manager sets.
+func TestResolveConfigPath_ExplicitFlagWins(t *testing.T) {
+	t.Setenv("CC_CONFIG", "/env/app.toml")
+	if got := resolveConfigPath("/flag/app.toml"); got != "/flag/app.toml" {
+		t.Errorf("resolveConfigPath = %q, want /flag/app.toml", got)
+	}
+}
+
+// TestResolveConfigPath_CCConfigEnv pins the daemon hand-off added by
+// `daemon install --config <path>`. ExecStart carries no --config flag, so
+// without this the daemon falls back to ~/.cc-connect/config.toml and
+// silently runs a different project than the one that was installed.
+func TestResolveConfigPath_CCConfigEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	// chdir away from any local config.toml so the ./config.toml rule
+	// cannot accidentally satisfy this assertion.
+	dir := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	t.Setenv("CC_CONFIG", "/opt/myapp/app.toml")
+	if got := resolveConfigPath(""); got != "/opt/myapp/app.toml" {
+		t.Errorf("resolveConfigPath = %q, want /opt/myapp/app.toml", got)
+	}
+}
+
+// TestResolveConfigPath_IgnoresBlankCCConfig guards the whitespace trim:
+// an empty or whitespace-only CC_CONFIG must not shadow the normal lookup.
+func TestResolveConfigPath_IgnoresBlankCCConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	t.Setenv("CC_CONFIG", "   ")
+	want := filepath.Join(home, ".cc-connect", "config.toml")
+	if got := resolveConfigPath(""); got != want {
+		t.Errorf("resolveConfigPath = %q, want %q", got, want)
+	}
+}

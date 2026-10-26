@@ -1604,10 +1604,19 @@ func encodeClaudeProjectKey(absPath string) string {
 }
 
 // resolveConfigPath determines which config file to use.
-// Priority: explicit flag → ./config.toml → ~/.cc-connect/config.toml
+// Priority: explicit flag → $CC_CONFIG → ./config.toml → ~/.cc-connect/config.toml
+//
+// CC_CONFIG is set by the service manager (systemd/launchd) when the daemon
+// was installed with an explicit --config <path>. Without it a service whose
+// config is not literally named "config.toml" would silently start on
+// ~/.cc-connect/config.toml instead, because ExecStart passes no --config flag
+// and WorkingDirectory alone cannot select a differently-named file.
 func resolveConfigPath(explicit string) string {
 	if explicit != "" {
 		return explicit
+	}
+	if env := strings.TrimSpace(os.Getenv("CC_CONFIG")); env != "" {
+		return env
 	}
 	if _, err := os.Stat("config.toml"); err == nil {
 		return "config.toml"

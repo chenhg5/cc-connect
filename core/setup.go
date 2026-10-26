@@ -202,7 +202,7 @@ func (m *ManagementServer) handleSetupFeishuSave(w http.ResponseWriter, r *http.
 		mgmtError(w, http.StatusBadRequest, "project, app_id, app_secret required")
 		return
 	}
-	workDir, err := validateProjectWorkDir(req.WorkDir)
+	workDir, err := validateProjectWorkDirOrCreate(req.WorkDir)
 	if err != nil {
 		mgmtError(w, http.StatusBadRequest, err.Error())
 		return
@@ -446,7 +446,7 @@ func (m *ManagementServer) handleSetupWeixinSave(w http.ResponseWriter, r *http.
 		mgmtError(w, http.StatusBadRequest, "project and token required")
 		return
 	}
-	workDir, err := validateProjectWorkDir(req.WorkDir)
+	workDir, err := validateProjectWorkDirOrCreate(req.WorkDir)
 	if err != nil {
 		mgmtError(w, http.StatusBadRequest, err.Error())
 		return
@@ -489,7 +489,7 @@ func (m *ManagementServer) handleProjectAddPlatform(w http.ResponseWriter, r *ht
 		mgmtError(w, http.StatusBadRequest, "type is required")
 		return
 	}
-	workDir, err := validateProjectWorkDir(req.WorkDir)
+	workDir, err := validateProjectWorkDirOrCreate(req.WorkDir)
 	if err != nil {
 		mgmtError(w, http.StatusBadRequest, err.Error())
 		return
@@ -509,7 +509,22 @@ func (m *ManagementServer) handleProjectAddPlatform(w http.ResponseWriter, r *ht
 	})
 }
 
+// validateProjectWorkDir validates that workDir names an existing directory.
+// A missing directory is rejected.
 func validateProjectWorkDir(workDir string) (string, error) {
+	return validateProjectWorkDirWith(workDir, false)
+}
+
+// validateProjectWorkDirOrCreate validates that workDir names a directory,
+// creating it (and any missing parents) if it does not exist yet.
+//
+// Used by the web setup flow, where work_dir typically arrives from a form
+// field naming a project directory the user has not created by hand yet.
+func validateProjectWorkDirOrCreate(workDir string) (string, error) {
+	return validateProjectWorkDirWith(workDir, true)
+}
+
+func validateProjectWorkDirWith(workDir string, createIfMissing bool) (string, error) {
 	trimmed := strings.TrimSpace(workDir)
 	if trimmed == "" {
 		return "", nil
@@ -518,6 +533,12 @@ func validateProjectWorkDir(workDir string) (string, error) {
 	info, err := os.Stat(trimmed)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if createIfMissing {
+				if mkErr := os.MkdirAll(trimmed, 0755); mkErr != nil {
+					return "", fmt.Errorf("work_dir cannot be created: %s: %w", trimmed, mkErr)
+				}
+				return trimmed, nil
+			}
 			return "", fmt.Errorf("work_dir does not exist: %s", trimmed)
 		}
 		return "", fmt.Errorf("work_dir is not accessible: %s: %w", trimmed, err)

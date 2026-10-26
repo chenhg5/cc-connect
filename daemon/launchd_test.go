@@ -567,3 +567,85 @@ func TestBuildPlist_EnvExtraHOMEDoesNotOverrideTemplateHOME(t *testing.T) {
 		t.Fatalf("expected template HOME /home/app to survive; got:\n%s", out)
 	}
 }
+
+// TestBuildPlist_IncludesConfigPath pins the CC_CONFIG hand-off on macOS,
+// mirroring the systemd side. ProgramArguments carries only the binary
+// path, so an explicit `daemon install --config <path>` reaches the
+// daemon exclusively through the environment. Without this entry a
+// non-"config.toml" filename silently resolves to
+// ~/.cc-connect/config.toml at startup.
+func TestBuildPlist_IncludesConfigPath(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/opt/myapp",
+		ConfigPath: "/opt/myapp/app.toml",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+	}
+	out := buildPlist(cfg)
+	if !strings.Contains(out, "<key>CC_CONFIG</key>\n\t\t<string>/opt/myapp/app.toml</string>") {
+		t.Fatalf("plist should include CC_CONFIG; got:\n%s", out)
+	}
+}
+
+// TestBuildPlist_OmitsConfigPathWhenEmpty ensures no CC_CONFIG entry is
+// emitted when the caller passed no --config.
+func TestBuildPlist_OmitsConfigPathWhenEmpty(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp/wd",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+	}
+	out := buildPlist(cfg)
+	if strings.Contains(out, "<key>CC_CONFIG</key>") {
+		t.Fatalf("plist should omit CC_CONFIG when ConfigPath empty; got:\n%s", out)
+	}
+}
+
+// TestBuildPlist_EnvExtraConfigDoesNotOverrideTemplate pins template
+// ownership for CC_CONFIG, same guarantee as HOME and PATH: an EnvExtra
+// capture must not shadow the path the user passed to `daemon install
+// --config`.
+func TestBuildPlist_EnvExtraConfigDoesNotOverrideTemplate(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/opt/myapp",
+		ConfigPath: "/opt/myapp/app.toml",
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+		EnvExtra:   map[string]string{"CC_CONFIG": "/should-not-override.toml"},
+	}
+	out := buildPlist(cfg)
+	if strings.Contains(out, "/should-not-override.toml") {
+		t.Fatalf("EnvExtra CC_CONFIG leaked past template ownership: %s", out)
+	}
+	if !strings.Contains(out, "<string>/opt/myapp/app.toml</string>") {
+		t.Fatalf("expected explicit ConfigPath to survive; got:\n%s", out)
+	}
+}
+
+// TestBuildPlist_ConfigPathIsXMLEscaped covers paths containing XML
+// metacharacters. An unescaped value makes `launchctl bootstrap` reject
+// the plist outright and daemon install fails — same class of bug the
+// BinaryPath/WorkDir escaping test covers.
+func TestBuildPlist_ConfigPathIsXMLEscaped(t *testing.T) {
+	cfg := Config{
+		BinaryPath: "/bin/true",
+		WorkDir:    "/tmp/wd",
+		ConfigPath: `/opt/my&app/<weird>/app.toml`,
+		LogFile:    "/tmp/log",
+		LogMaxSize: 1024,
+		EnvPATH:    "/usr/bin",
+	}
+	out := buildPlist(cfg)
+	if strings.Contains(out, "/opt/my&app/") {
+		t.Fatalf("raw ampersand leaked into plist: %s", out)
+	}
+	if !strings.Contains(out, "&amp;") {
+		t.Fatalf("expected XML-escaped ampersand; got:\n%s", out)
+	}
+}

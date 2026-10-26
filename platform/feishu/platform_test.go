@@ -196,6 +196,23 @@ func TestBuildFeishuFileMessageContent(t *testing.T) {
 	}
 }
 
+// seedLookupCaches pre-populates the display-name caches so message
+// dispatch stays entirely local. resolveUserName / resolveChatName
+// otherwise call the live Lark API on a cache miss, which makes any
+// test that drives onMessage depend on real network latency — under CI
+// load the handler can miss its own timeout even though the behaviour
+// under test is correct.
+func seedLookupCaches(ip *interactivePlatform, openID, chatID string) {
+	ip.userNameCache.Store(openID, "Test User")
+	ip.chatNameCache.Store(chatID, "Test Chat")
+	// Mention lists reference the bot itself; resolveUserName is called for
+	// each mention too, so seed it to keep the whole dispatch path local.
+	if ip.botOpenID != "" {
+		ip.userNameCache.Store(ip.botOpenID, "Test Bot")
+	}
+	ip.userNameCache.Store("ou_bot", "Test Bot")
+}
+
 func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
@@ -205,6 +222,7 @@ func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
 	if !ok {
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
+	seedLookupCaches(ip, "ou_test_user", "oc_test_chat")
 
 	messageID := "om_test_message"
 	chatID := "oc_test_chat"
@@ -662,6 +680,7 @@ func TestLark_SessionKeyPrefix(t *testing.T) {
 		t.Fatalf("newPlatform(lark) error = %v", err)
 	}
 	ip := p.(*interactivePlatform)
+	seedLookupCaches(ip, "ou_test", "oc_test")
 
 	messageID := "om_test"
 	chatID := "oc_test"
@@ -738,6 +757,7 @@ func TestLark_ThreadIsolationUsesRootSessionKey(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	ip.botOpenID = "ou_bot"
+	seedLookupCaches(ip, openID, chatID)
 	ip.handler = func(_ core.Platform, msg *core.Message) {
 		defer wg.Done()
 		receivedMsg = msg
@@ -800,6 +820,15 @@ func TestLark_GroupReplyAllWithThreadIsolationUsesRootSessionKeyWithoutMention(t
 	senderType := "user"
 	content := `{"text":"hello from group root"}`
 	createText := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	// dispatchMessage runs in its own goroutine and calls resolveUserName /
+	// resolveChatName before invoking the handler. Both hit the live Lark
+	// API on a cache miss, so an empty cache makes this test depend on
+	// network latency it does not control — the handler can miss the 2s
+	// deadline even though the behaviour under test is correct. Seed the
+	// caches so dispatch stays entirely local.
+	ip.userNameCache.Store(openID, "Test User")
+	ip.chatNameCache.Store(chatID, "Test Chat")
 
 	msgCh := make(chan *core.Message, 1)
 	ip.handler = func(_ core.Platform, msg *core.Message) {
@@ -1718,6 +1747,7 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 				t.Fatalf("newPlatform() error = %v", err)
 			}
 			ip := p.(*interactivePlatform)
+			seedLookupCaches(ip, "ou_test", tt.chatID)
 
 			messageID := "om_test_" + tt.name
 			openID := "ou_test"
@@ -2043,6 +2073,7 @@ func TestOnMessage_OldMessageAfterRestartIsFiltered(t *testing.T) {
 	if !ok {
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
+	seedLookupCaches(ip, "ou_test", "oc_test")
 
 	handlerCalled := false
 	ip.handler = func(_ core.Platform, _ *core.Message) {
@@ -2102,6 +2133,7 @@ func TestOnMessage_NewMessageAfterRestartIsProcessed(t *testing.T) {
 	if !ok {
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
+	seedLookupCaches(ip, "ou_test", "oc_test")
 
 	var (
 		wg          sync.WaitGroup
@@ -2165,6 +2197,7 @@ func TestOnMessage_GracePeriodMessageIsProcessed(t *testing.T) {
 	if !ok {
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
+	seedLookupCaches(ip, "ou_test", "oc_test")
 
 	var (
 		wg          sync.WaitGroup
