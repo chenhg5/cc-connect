@@ -22,6 +22,9 @@ import (
 // roughly half the map (iteration order is arbitrary) to bound memory.
 const toolInputCacheMaxEntries = 1000
 
+const bridgeContextURI = "cc-connect://session/instructions"
+const bridgeContextTextPrefix = "cc-connect bridge context:\n"
+
 type acpSession struct {
 	workDir string
 	events  chan core.Event
@@ -36,7 +39,9 @@ type acpSession struct {
 	acpSessMu sync.RWMutex
 	acpSessID string
 
-	sendMu sync.Mutex
+	sendMu          sync.Mutex
+	bridgePrompt    string
+	embeddedContext bool
 
 	permMu   sync.Mutex
 	permByID map[string]permState
@@ -83,6 +88,7 @@ type acpSessionConfig struct {
 	authMethod      string
 	initialMode     string           // if non-empty, applied via session/set_mode after session/new
 	callbacks       sessionCallbacks // may be nil
+	bridgePrompt    string
 }
 
 func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, error) {
@@ -101,6 +107,7 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		toolInputByID: make(map[string]string),
 		acpSessID:     cfg.resumeSessionID,
 		callbacks:     cfg.callbacks,
+		bridgePrompt:  cfg.bridgePrompt,
 	}
 	s.alive.Store(true)
 
@@ -196,6 +203,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		return fmt.Errorf("acp: parse initialize result: %w", err)
 	}
 	listSupported := len(initOut.AgentCapabilities.SessionCapabilities.List) > 0
+	s.embeddedContext = initOut.AgentCapabilities.PromptCapabilities.EmbeddedContext
 	resumeSupported := len(initOut.AgentCapabilities.SessionCapabilities.Resume) > 0
 	slog.Debug("acp: initialized",
 		"protocol", initOut.ProtocolVersion,
@@ -678,6 +686,20 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 
 	promptBlocks := []any{
 		map[string]any{"type": "text", "text": prompt},
+	}
+	// ACP has no system/developer-instruction slot. Send bridge context with
+	// each request, not only the first one: session/load and /compact must
+	// not lose the host's attachment instructions. Keep the user's text first
+	// so agents can still recognize native slash commands such as /compact.
+	if s.bridgePrompt != "" {
+		if s.embeddedContext {
+			promptBlocks = append(promptBlocks, map[string]any{
+				"type":     "resource",
+				"resource": map[string]any{"uri": bridgeContextURI, "mimeType": "text/plain", "text": s.bridgePrompt},
+			})
+		} else {
+			promptBlocks = append(promptBlocks, map[string]any{"type": "text", "text": bridgeContextTextPrefix + s.bridgePrompt})
+		}
 	}
 	params := map[string]any{
 		"sessionId": sid,

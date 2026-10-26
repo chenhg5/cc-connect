@@ -28,6 +28,10 @@ type Agent struct {
 	sessionEnv   []string
 	authMethod   string // optional, e.g. "cursor_login" for Cursor CLI (see authenticate RPC)
 	displayName  string // optional, for doctor (default "ACP")
+	bridgePrompt string
+	language     core.Language
+	systemPrompt string
+	appendPrompt string
 
 	// mode is the pending permission mode to apply to new sessions.
 	// When set, StartSession applies it via session/set_mode right after
@@ -45,9 +49,9 @@ type Agent struct {
 	// handshake so that future PermissionModes() calls can reflect the
 	// actual modes this specific ACP agent offers (rather than a
 	// hard-coded fallback that may not match).
-	modesMu       sync.RWMutex
-	modesCache    []core.PermissionModeInfo
-	modesCurrent  string
+	modesMu      sync.RWMutex
+	modesCache   []core.PermissionModeInfo
+	modesCurrent string
 
 	mu sync.RWMutex
 }
@@ -93,17 +97,24 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	mode, _ := opts["mode"].(string)
 	mode = strings.TrimSpace(mode)
+	language, _ := opts["language"].(string)
+	systemPrompt, _ := opts["system_prompt"].(string)
+	appendPrompt, _ := opts["append_system_prompt"].(string)
 
 	return &Agent{
-		workDir:     workDir,
+		workDir:      workDir,
 		cmd:          cmdStr,
 		cliExtraArgs: cliExtraArgs,
-		args:        args,
-		staticEnv:   staticEnv,
-		extraEnv:    extra,
-		authMethod:  authMethod,
-		displayName: displayName,
-		mode:        mode,
+		args:         args,
+		staticEnv:    staticEnv,
+		extraEnv:     extra,
+		authMethod:   authMethod,
+		displayName:  displayName,
+		mode:         mode,
+		bridgePrompt: core.AgentSessionPrompt(core.NormalizeLanguageString(language), systemPrompt, appendPrompt),
+		language:     core.NormalizeLanguageString(language),
+		systemPrompt: systemPrompt,
+		appendPrompt: appendPrompt,
 	}, nil
 }
 
@@ -195,7 +206,10 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	defer a.mu.RUnlock()
 
 	opts := map[string]any{
-		"cmd": a.cmd,
+		"cmd":                  a.cmd,
+		"language":             string(a.language),
+		"system_prompt":        a.systemPrompt,
+		"append_system_prompt": a.appendPrompt,
 	}
 	if len(a.args) > 0 {
 		opts["args"] = append([]string(nil), a.args...)
@@ -242,10 +256,14 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		authMethod:      authMethod,
 		initialMode:     pendingMode,
 		callbacks:       a,
+		bridgePrompt:    a.bridgePrompt,
 	})
 }
 
 func (a *Agent) Stop() error { return nil }
+
+// The ACP adapter supplies bridge context per request, without workspace files.
+func (a *Agent) HasSystemPromptSupport() bool { return true }
 
 // -- AgentDoctorInfo --
 

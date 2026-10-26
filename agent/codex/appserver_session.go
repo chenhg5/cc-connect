@@ -36,6 +36,8 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
+func (e *rpcError) Error() string { return strings.TrimSpace(e.Message) }
+
 type initResponse struct {
 	ProtocolVersion string `json:"protocolVersion"`
 }
@@ -141,18 +143,19 @@ type appServerRequestUserInputAnswer struct {
 }
 
 type appServerSession struct {
-	cliBin         string
-	cliExtraArgs   []string
-	url            string
-	workDir        string
-	model          string
-	effort         string
-	mode           string
-	baseURL        string
-	modelProvider  string
-	extraEnv       []string
-	codexHome      string
-	promptPreamble string
+	cliBin          string
+	cliExtraArgs    []string
+	url             string
+	workDir         string
+	model           string
+	effort          string
+	mode            string
+	baseURL         string
+	modelProvider   string
+	extraEnv        []string
+	codexHome       string
+	promptPreamble  string
+	promptAsContext bool
 
 	events chan core.Event
 
@@ -178,10 +181,9 @@ type appServerSession struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
-	stateMu      sync.Mutex
-	pendingMsgs  []string
-	currentTurn  string
-	preambleSent bool
+	stateMu     sync.Mutex
+	pendingMsgs []string
+	currentTurn string
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
@@ -213,7 +215,6 @@ func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []stri
 		cancel:           cancel,
 		pending:          make(map[int64]chan rpcResponseEnvelope),
 		pendingApprovals: make(map[string]chan core.PermissionResult),
-		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
 	}
 	s.alive.Store(true)
 
@@ -352,6 +353,21 @@ func (s *appServerSession) initialize() error {
 }
 
 func (s *appServerSession) ensureThread(resumeID string) error {
+	if s.promptPreamble != "" {
+		// Preserve effective user/project developer instructions when adding the
+		// bridge's native thread override. Never replace Codex's base prompt.
+		var cfg struct {
+			Config struct {
+				DeveloperInstructions string `json:"developer_instructions"`
+			} `json:"config"`
+		}
+		if err := s.request("config/read", map[string]any{"cwd": s.workDir, "includeLayers": false}, &cfg); err != nil {
+			return fmt.Errorf("codex bridge instructions: read effective config: %w", err)
+		}
+		if existing := strings.TrimSpace(cfg.Config.DeveloperInstructions); existing != "" {
+			s.promptPreamble = existing + "\n\n" + s.promptPreamble
+		}
+	}
 	if resumeID != "" && resumeID != core.ContinueSession {
 		params := s.threadRequestParams()
 		params["threadId"] = resumeID
@@ -365,6 +381,27 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		}
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
+		// On current Codex releases a resume override is only rendered when
+		// initial context is rebuilt (e.g. after compaction). Inject one native
+		// developer item on attach so the very next user turn sees it too.
+		if s.promptPreamble != "" && !hasCurrentBridgePrompt(resp.Thread.ID, s.codexHome, s.promptPreamble) {
+			if err := s.request("thread/inject_items", map[string]any{
+				"threadId": resp.Thread.ID,
+				"items": []any{map[string]any{"type": "message", "role": "developer", "content": []any{
+					map[string]any{"type": "input_text", "text": s.promptPreamble},
+				}}},
+			}, nil); err != nil {
+				var rpcErr *rpcError
+				if errors.As(err, &rpcErr) && (rpcErr.Code == -32601 || (rpcErr.Code == -32600 && strings.Contains(strings.ToLower(rpcErr.Message), "unknown variant"))) {
+					// Older app-server versions have no raw developer-item API.
+					// Preserve working resumes and attach host context per turn.
+					s.promptAsContext = true
+					slog.Warn("codex app-server lacks developer item injection; using per-request bridge context", "rpc_code", rpcErr.Code)
+				} else {
+					return fmt.Errorf("codex bridge instructions: inject resumed thread: %w", err)
+				}
+			}
+		}
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)
 		return nil
 	}
@@ -386,6 +423,9 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
+	}
+	if s.promptPreamble != "" {
+		params["developerInstructions"] = s.promptPreamble
 	}
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
@@ -484,13 +524,9 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	if err != nil {
 		return err
 	}
-
-	s.stateMu.Lock()
-	if !s.preambleSent {
+	if s.promptAsContext {
 		prompt = prependCodexPromptPreamble(prompt, s.promptPreamble)
-		s.preambleSent = true
 	}
-	s.stateMu.Unlock()
 
 	threadID := s.CurrentSessionID()
 	if threadID == "" {
@@ -1723,7 +1759,7 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	select {
 	case resp := <-ch:
 		if resp.Error != nil {
-			return fmt.Errorf("%s", strings.TrimSpace(resp.Error.Message))
+			return resp.Error
 		}
 		if out != nil {
 			if err := json.Unmarshal(resp.Result, out); err != nil {

@@ -8300,8 +8300,8 @@ func TestCmdCronSetup_NativeAgentSkips(t *testing.T) {
 	if len(p.sent) != 1 {
 		t.Fatalf("sent = %d, want 1", len(p.sent))
 	}
-	if !strings.Contains(p.sent[0], "natively supports") {
-		t.Errorf("reply = %q, want native support message", p.sent[0])
+	if p.sent[0] != e.i18n.T(MsgSetupNative) {
+		t.Errorf("reply = %q, want automatic-instructions support message", p.sent[0])
 	}
 }
 

@@ -3598,11 +3598,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "❌ Este agente no soporta archivos de instrucciones.",
 	},
 	MsgSetupNative: {
-		LangEnglish:            "✅ This agent natively supports cc-connect instructions — no setup needed.",
-		LangChinese:            "✅ 当前 agent 已原生支持 cc-connect 指令，无需额外配置。",
-		LangTraditionalChinese: "✅ 當前 agent 已原生支持 cc-connect 指令，無需額外配置。",
-		LangJapanese:           "✅ このエージェントは cc-connect の指示をネイティブサポートしています。セットアップ不要です。",
-		LangSpanish:            "✅ Este agente soporta nativamente las instrucciones de cc-connect — no se necesita configuración.",
+		LangEnglish:            "✅ This agent automatically receives cc-connect instructions — no setup needed.",
+		LangChinese:            "✅ 当前 agent 会自动收到 cc-connect 指令，无需额外配置。",
+		LangTraditionalChinese: "✅ 當前 agent 會自動收到 cc-connect 指令，無需額外配置。",
+		LangJapanese:           "✅ このエージェントは cc-connect の指示を自動的に受け取ります。セットアップ不要です。",
+		LangSpanish:            "✅ Este agente recibe automáticamente las instrucciones de cc-connect — no se necesita configuración.",
 	},
 	MsgCronSetupOK: {
 		LangEnglish:            "✅ cc-connect instructions written to %s\nThe agent can now use relay, cron, and attachment send-back.",
@@ -4301,14 +4301,14 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Los destinos de directorio local están deshabilitados para `/workspace init`. Use una URL de git o habilite `workspace_init_allow_local_paths = true` para este proyecto.",
 	},
 	MsgAgentSendToolPrompt: {
-		LangEnglish: `### Send generated images, files, or voice messages back to the user
-When you generate a local image or file that should be sent to the user, use:
+		LangEnglish: `### Send images, files, or voice messages back to the user
+When a local image or file is a requested deliverable, whether it already exists or you just generated it, prefer the attachment command:
 
   cc-connect send --image /absolute/path/to/image.png
   cc-connect send --file /absolute/path/to/report.pdf
   cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
 
-You may repeat --image / --file multiple times. Use this only for generated attachments that need to be delivered to the user.
+You may repeat --image / --file multiple times. A local path or Markdown link is not file delivery in a messaging chat. Use this only for attachments the user requested or that your task requires delivering. Verify the command succeeds before saying the file was sent; report a delivery failure rather than silently replacing the attachment with a local link.
 If you include --message, do not repeat the exact same sentence again in your normal reply, because your normal reply is also delivered automatically.
 
 When sending an audio (mp3/wav/m4a/ogg/opus) or video (mp4/mov/webm) clip that should render inline as a native voice bubble or video player — instead of as a generic file download — use the dedicated flags:
@@ -4323,14 +4323,14 @@ When the user explicitly asks you to synthesize speech from text, use:
   cc-connect send --tts "text to speak"
 
 After cc-connect send --tts (or --audio) succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.`,
-		LangChinese: `### 把生成的图片、文件、语音消息回发给用户
-当你生成了需要发送给用户的本地图片或文件时,使用:
+		LangChinese: `### 把图片、文件、语音消息回发给用户
+当任务需要交付本地图片或文件,或用户要求发送、分享、下载已有文件时,优先使用附件发送命令:
 
   cc-connect send --image /absolute/path/to/image.png
   cc-connect send --file /absolute/path/to/report.pdf
   cc-connect send --file /absolute/path/to/report.pdf --image /absolute/path/to/chart.png
 
-可以重复使用 --image / --file。仅在需要把生成的附件投递到用户时使用这个命令。
+可以重复使用 --image / --file。聊天中的本地路径或 Markdown 链接不能代替文件投递。仅发送用户要求或当前任务需要交付的附件。确认命令成功后再说已发送;发送失败时说明原因,不要静默改成本地链接。
 如果同时使用了 --message,不要在正常回复里再说一遍完全相同的句子,因为正常回复本身也会自动发送给用户。
 
 发送音频 (mp3/wav/m4a/ogg/opus) 或视频 (mp4/mov/webm) 片段、且希望它们以内联的原生语音气泡或视频播放器形态呈现(而不是作为普通文件下载)时,使用专用参数:
