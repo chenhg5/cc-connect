@@ -35,17 +35,17 @@ type replyContext struct {
 }
 
 type Platform struct {
-	webhook              string
-	token                string
-	aesKey               []byte
-	allowFrom            string
-	port                 string
-	callbackPath         string
-	skipVerify           bool
-	shareSessionInGroup  bool
-	server               *http.Server
-	handler              core.MessageHandler
-	dedup                core.MessageDedup
+	webhook             string
+	token               string
+	aesKey              []byte
+	allowFrom           string
+	port                string
+	callbackPath        string
+	skipVerify          bool
+	shareSessionInGroup bool
+	server              *http.Server
+	handler             core.MessageHandler
+	dedup               core.MessageDedup
 }
 
 type callbackEnvelope struct {
@@ -63,18 +63,18 @@ type callbackMessage struct {
 }
 
 type callbackHeader struct {
-	FromUserID string        `json:"fromuserid"`
-	ToID       int64         `json:"toid"`
-	ToType     string        `json:"totype"`
-	MsgType    string        `json:"msgtype"`
-	ClientMsg  int64         `json:"clientmsgid"`
-	MessageID  int64         `json:"messageid"`
-	MsgSeqID   string        `json:"msgseqid"`
-	At         callbackAt    `json:"at"`
-	Extra      string        `json:"extra"`
-	ServerTime int64         `json:"servertime"`
-	ClientTime int64         `json:"clienttime"`
-	UpdateTime int64         `json:"updatetime"`
+	FromUserID string     `json:"fromuserid"`
+	ToID       int64      `json:"toid"`
+	ToType     string     `json:"totype"`
+	MsgType    string     `json:"msgtype"`
+	ClientMsg  int64      `json:"clientmsgid"`
+	MessageID  int64      `json:"messageid"`
+	MsgSeqID   string     `json:"msgseqid"`
+	At         callbackAt `json:"at"`
+	Extra      string     `json:"extra"`
+	ServerTime int64      `json:"servertime"`
+	ClientTime int64      `json:"clienttime"`
+	UpdateTime int64      `json:"updatetime"`
 }
 
 type callbackAt struct {
