@@ -227,7 +227,7 @@ func (p *Platform) callbackHandler(w http.ResponseWriter, r *http.Request) {
 	if echostr != "" {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, echostr)
+		_, _ = fmt.Fprint(w, echostr)
 		return
 	}
 
@@ -393,7 +393,7 @@ func (p *Platform) sendText(ctx context.Context, groupID int64, text string) err
 	if err != nil {
 		return fmt.Errorf("ruliu: send message: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
