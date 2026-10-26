@@ -275,8 +275,11 @@ func (p *Platform) callbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	content := extractMessageText(envelope.Message.Body)
-	if strings.TrimSpace(content) == "" {
-		slog.Debug("ruliu: ignoring callback without text content", "message_id", messageID)
+	images := p.downloadImages(r.Context(), envelope.Message.Body)
+	files := p.downloadFiles(r.Context(), envelope.Message.Body)
+
+	if strings.TrimSpace(content) == "" && len(images) == 0 && len(files) == 0 {
+		slog.Debug("ruliu: ignoring callback without content", "message_id", messageID)
 		return
 	}
 
@@ -300,6 +303,8 @@ func (p *Platform) callbackHandler(w http.ResponseWriter, r *http.Request) {
 		UserID:     fromUserID,
 		UserName:   fromUserID,
 		Content:    content,
+		Images:     images,
+		Files:      files,
 		ReplyCtx:   replyContext{groupID: groupID},
 	})
 }
@@ -346,6 +351,20 @@ func (p *Platform) Stop() error {
 		return p.server.Shutdown(context.Background())
 	}
 	return nil
+}
+
+// StartTyping sends a "processing" text hint since Ruliu has no reaction/edit API.
+func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return func() {}
+	}
+	go func() {
+		if err := p.sendText(ctx, rc.groupID, "⏳ processing..."); err != nil {
+			slog.Debug("ruliu: send typing hint failed", "error", err)
+		}
+	}()
+	return func() {}
 }
 
 func (p *Platform) verifySignature(signature, rn, timestamp string) bool {
@@ -506,6 +525,61 @@ func extractMessageText(items []callbackBodyItem) string {
 		}
 	}
 	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func (p *Platform) downloadURL(ctx context.Context, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := core.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func (p *Platform) downloadImages(ctx context.Context, items []callbackBodyItem) []core.ImageAttachment {
+	var images []core.ImageAttachment
+	for _, item := range items {
+		if item.Type != "IMAGE" || item.DownloadURL == "" {
+			continue
+		}
+		data, err := p.downloadURL(ctx, item.DownloadURL)
+		if err != nil {
+			slog.Error("ruliu: download image failed", "url", item.DownloadURL, "error", err)
+			continue
+		}
+		images = append(images, core.ImageAttachment{
+			MimeType: http.DetectContentType(data),
+			Data:     data,
+		})
+	}
+	return images
+}
+
+func (p *Platform) downloadFiles(ctx context.Context, items []callbackBodyItem) []core.FileAttachment {
+	var files []core.FileAttachment
+	for _, item := range items {
+		if item.Type != "FILE" || item.DownloadURL == "" {
+			continue
+		}
+		data, err := p.downloadURL(ctx, item.DownloadURL)
+		if err != nil {
+			slog.Error("ruliu: download file failed", "url", item.DownloadURL, "name", item.Name, "error", err)
+			continue
+		}
+		files = append(files, core.FileAttachment{
+			MimeType: http.DetectContentType(data),
+			Data:     data,
+			FileName: item.Name,
+		})
+	}
+	return files
 }
 
 func splitByRunes(s string, maxLen int) []string {
