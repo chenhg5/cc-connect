@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -309,5 +310,120 @@ func TestCompactProgressWriter_DoesNotTransformToolResults(t *testing.T) {
 	}
 	if got := payload.Items[0].Text; got != raw {
 		t.Fatalf("tool result text = %q, want raw %q", got, raw)
+	}
+}
+
+// A failed edit must not abandon the existing progress message for the turn.
+type recoveringProgressPlatform struct {
+	previewCapturePlatform
+	updateErr error
+}
+
+func (p *recoveringProgressPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	if handle != "preview-1" {
+		return errors.New("progress update used a different message")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.updated = append(p.updated, content)
+	return p.updateErr
+}
+
+func TestCompactProgressWriter_RecoversAfterUpdateFailure(t *testing.T) {
+	for _, style := range []string{progressStyleCompact, progressStyleCard} {
+		t.Run(style, func(t *testing.T) {
+			p := &recoveringProgressPlatform{updateErr: errors.New("temporary update failure")}
+			w := newCompactProgressWriter(context.Background(), p,
+				progressHintReplyCtx{style: style, payload: true}, "codex", LangEnglish, nil)
+			if !w.Append("initial") || !w.Append("failed edit") {
+				t.Fatal("progress events should remain handled when an edit fails")
+			}
+			if !w.Append("buffered during outage") || len(p.updated) != 1 {
+				t.Fatalf("failed edits should be throttled, updates = %d", len(p.updated))
+			}
+			p.updateErr = nil
+			time.Sleep(1100 * time.Millisecond)
+			if !w.Append("recovered") {
+				t.Fatal("next progress event should recover the existing message")
+			}
+			if len(p.started) != 1 || len(p.updated) != 2 {
+				t.Fatalf("starts = %d, edits = %d; want one message and two edit attempts", len(p.started), len(p.updated))
+			}
+			for _, text := range []string{"failed edit", "buffered during outage", "recovered"} {
+				if !strings.Contains(p.updated[1], text) {
+					t.Errorf("recovered edit lost %q", text)
+				}
+			}
+		})
+	}
+}
+
+func TestCompactProgressWriter_FinalizeRecoversAfterUpdateFailure(t *testing.T) {
+	p := &recoveringProgressPlatform{updateErr: errors.New("temporary update failure")}
+	w := newCompactProgressWriter(context.Background(), p,
+		progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+	w.Append("initial")
+	w.Append("pending progress")
+	p.updateErr = nil
+	if !w.Finalize(ProgressCardStateCompleted) {
+		t.Fatal("Finalize should retry the existing card even during edit backoff")
+	}
+	if len(p.updated) != 2 {
+		t.Fatalf("edits = %d, want failed progress and successful final edit", len(p.updated))
+	}
+	payload, ok := ParseProgressCardPayload(p.updated[1])
+	if !ok || payload.State != ProgressCardStateCompleted || len(payload.Items) != 2 {
+		t.Fatalf("final payload = %#v, want completed with buffered progress", payload)
+	}
+}
+
+func TestCompactProgressWriter_FinalizeCanRetryFailedCompletion(t *testing.T) {
+	p := &recoveringProgressPlatform{updateErr: errors.New("temporary final edit failure")}
+	w := newCompactProgressWriter(context.Background(), p,
+		progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+	w.Append("initial")
+	if w.Finalize(ProgressCardStateCompleted) {
+		t.Fatal("failed completion should report failure")
+	}
+	p.updateErr = nil
+	if !w.Finalize(ProgressCardStateCompleted) || len(p.updated) != 2 {
+		t.Fatal("retrying completion should actually update the same card")
+	}
+}
+
+func TestCompactProgressWriter_PersistentFailureDoesNotSpamOrBlockFinalization(t *testing.T) {
+	p := &recoveringProgressPlatform{updateErr: errors.New("still unavailable")}
+	w := newCompactProgressWriter(context.Background(), p,
+		progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+	for range 100 {
+		if !w.Append("tool progress") {
+			t.Fatal("an established card must keep handling events during an outage")
+		}
+	}
+	if len(p.started) != 1 || len(p.updated) != 1 {
+		t.Fatalf("starts = %d, edits = %d; want one card and one throttled failed edit", len(p.started), len(p.updated))
+	}
+	if w.Finalize(ProgressCardStateCompleted) {
+		t.Fatal("persistent outage should report failed final update")
+	}
+	if len(p.updated) != 2 {
+		t.Fatal("Finalize must attempt the terminal state despite edit backoff")
+	}
+}
+
+func TestCompactProgressWriter_CancellationStopsRecovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &recoveringProgressPlatform{}
+	w := newCompactProgressWriter(ctx, p,
+		progressHintReplyCtx{style: progressStyleCard, payload: true}, "codex", LangEnglish, nil)
+	w.Append("initial")
+	cancel()
+	if !w.Append("cancelled progress") || len(p.updated) != 0 {
+		t.Fatal("cancelled progress should not start an update or trigger fallback")
+	}
+	if w.Finalize(ProgressCardStateCompleted) {
+		t.Fatal("cancelled final update should report failure")
 	}
 }

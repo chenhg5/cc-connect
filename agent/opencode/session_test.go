@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -110,13 +111,104 @@ func TestOpencodeSessionBuildRunArgsIncludesImagesAsFiles(t *testing.T) {
 		"run", "--format", "json",
 		"--session", "ses_123",
 		"--model", "provider/model",
-		"--dir", "/repo",
 		"--thinking",
 		"--file", "/tmp/a.png",
 		"--file", "/tmp/b.jpg",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+// opencode v2's `run` rejects --dir, so the work dir must only reach opencode
+// as the process cwd (#2076).
+func TestOpencodeSessionBuildRunArgsOmitsDirFlag(t *testing.T) {
+	s := &opencodeSession{workDir: "/repo"}
+
+	for _, arg := range s.buildRunArgs("hi", nil, "") {
+		if arg == "--dir" || strings.HasPrefix(arg, "--dir=") {
+			t.Fatalf("buildRunArgs passed %q to opencode run", arg)
+		}
+	}
+}
+
+// TestOpencodeSessionSendRunsInWorkDir verifies that the opencode process is
+// actually started in the configured work_dir now that `--dir` is no longer
+// passed on the command line (#2076). Without this check, dropping the flag
+// could silently drop the work dir as well.
+//
+// The test binary doubles as a fake opencode: when GO_WANT_OPENCODE_HELPER=1
+// is set it records its own working directory and exits.
+func TestOpencodeSessionSendRunsInWorkDir(t *testing.T) {
+	if os.Getenv("GO_WANT_OPENCODE_HELPER") == "1" {
+		cwdFile := os.Getenv("CC_OPENCODE_CWD_FILE")
+		if cwdFile == "" {
+			os.Exit(2)
+		}
+		wd, err := os.Getwd()
+		if err != nil {
+			os.Exit(2)
+		}
+		if err := os.WriteFile(cwdFile, []byte(wd), 0o600); err != nil {
+			os.Exit(2)
+		}
+		_, _ = os.Stdout.WriteString(`{"type":"text","part":{"text":"cwd recorded"}}` + "\n")
+		os.Exit(0)
+	}
+
+	cwdFile := filepath.Join(t.TempDir(), "cwd.txt")
+	workDir := t.TempDir()
+
+	s, err := newOpencodeSession(
+		context.Background(),
+		os.Args[0],
+		[]string{"-test.run=TestOpencodeSessionSendRunsInWorkDir", "--"},
+		workDir,
+		"",
+		"default",
+		"",
+		"",
+		[]string{
+			"GO_WANT_OPENCODE_HELPER=1",
+			"CC_OPENCODE_CWD_FILE=" + cwdFile,
+		},
+	)
+	if err != nil {
+		t.Fatalf("newOpencodeSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.Send("hello", "", nil, nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	timeout := time.After(30 * time.Second)
+wait:
+	for {
+		select {
+		case evt := <-s.Events():
+			if evt.Type == core.EventResult {
+				break wait
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for the fake opencode process to finish")
+		}
+	}
+
+	raw, err := os.ReadFile(cwdFile)
+	if err != nil {
+		t.Fatalf("read recorded cwd: %v", err)
+	}
+	got, err := filepath.EvalSymlinks(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("resolve recorded cwd: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve work dir: %v", err)
+	}
+	if got != want {
+		t.Fatalf("opencode process cwd = %q, want work_dir %q", got, want)
 	}
 }
 

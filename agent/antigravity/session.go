@@ -217,6 +217,7 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	if isResume {
 		args = append(args, "--conversation", chatID)
 	}
+	args = append(args, "--output-format=stream-json")
 	switch mode {
 	case "yolo":
 		args = append(args, "--dangerously-skip-permissions")
@@ -283,28 +284,35 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		_ = stdout.Close()
 	}()
 
-	reader := bufio.NewReader(stdout)
-	buf := make([]byte, 1024)
-
-	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			text := string(buf[:n])
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
+	parser := newAgyOutputParser()
+	streamFormatDetected := false
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		isStreamEvent, events := parser.parseLine(line)
+		if isStreamEvent {
+			streamFormatDetected = true
+		} else if !streamFormatDetected {
+			// Keep compatibility with wrappers or older CLIs that ignore the
+			// output-format flag and still write plain text.
+			events = []core.Event{{Type: core.EventText, Content: string(line) + "\n"}}
+		} else {
+			continue
+		}
+		for _, event := range events {
 			select {
-			case as.events <- core.Event{Type: core.EventText, Content: text}:
+			case as.events <- event:
 			case <-as.ctx.Done():
 				return
 			}
 		}
-		if err != nil {
-			if err != io.EOF && !strings.Contains(err.Error(), "file already closed") {
-				slog.Error("antigravitySession: read error", "error", err)
-				select {
-				case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}:
-				case <-as.ctx.Done():
-				}
-			}
-			return
+	}
+	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "file already closed") {
+		slog.Error("antigravitySession: read error", "error", err)
+		select {
+		case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}:
+		case <-as.ctx.Done():
 		}
 	}
 }
