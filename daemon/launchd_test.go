@@ -676,6 +676,73 @@ func TestRestartBootstrapsUnloadedService(t *testing.T) {
 	}
 }
 
+// TestStartBootstrapsWhenKickstartFailsOnStaleLoadedState reproduces the
+// `daemon restart` failure mode where Stop()'s bootout has deregistered the
+// service but launchctl print's view still reports it as loaded (launchd state
+// propagation lags). Start() picks the kickstart branch from that stale answer,
+// kickstart then fails with exit 113 ("Could not find service"), and the
+// pre-fix code returned that error immediately — leaving the daemon offline
+// until a second manual start. The fix falls through to bootstrap, which
+// re-registers the plist and recovers in one shot.
+func TestStartBootstrapsWhenKickstartFailsOnStaleLoadedState(t *testing.T) {
+	orig := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = orig })
+
+	dir := t.TempDir()
+	origHome := os.Getenv("HOME")
+	t.Setenv("HOME", dir)
+	if origHome != "" {
+		t.Cleanup(func() { _ = os.Setenv("HOME", origHome) })
+	}
+	guiDomain := launchdGUIDomain()
+
+	// The plist must exist on disk: the real stale-loaded scenario happens
+	// after Stop()'s bootout, which deregisters the service but leaves the
+	// plist file (only Uninstall removes it). Start()'s bootstrap fallback
+	// Stat-checks the plist and refuses to recover when it is missing.
+	plistPath := launchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		t.Fatalf("mkdir plist dir: %v", err)
+	}
+	if err := os.WriteFile(plistPath, []byte("placeholder"), 0o600); err != nil {
+		t.Fatalf("write plist: %v", err)
+	}
+
+	var calls []string
+	runLaunchctl = func(args ...string) (string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if len(args) < 2 {
+			return "", nil
+		}
+		switch args[0] {
+		case "print":
+			// Stale state: both the domain and the target still report as loaded.
+			return "state = running", nil
+		case "kickstart":
+			// Service is actually deregistered — the real-world exit 113
+			// "Could not find service". Fails on any retry too: recovery must
+			// go through bootstrap, whose plist carries RunAtLoad to start it.
+			return "Could not find service", fmt.Errorf("exit status 113")
+		case "bootstrap":
+			return "", nil
+		case "bootout":
+			// retireLegacyLaunchdService() after successful recovery: the
+			// legacy label is deregistered so the old agent stays down.
+			return "", nil
+		default:
+			t.Fatalf("unexpected launchctl call: %v", args)
+			return "", nil
+		}
+	}
+
+	if err := (&launchdManager{}).Start(); err != nil {
+		t.Fatalf("Start() should fall back to bootstrap after kickstart 113, got: %v", err)
+	}
+	if !containsCall(calls, "bootstrap "+guiDomain+" "+launchdPlistPath()) {
+		t.Fatalf("expected bootstrap re-registration after kickstart failure, calls = %#v", calls)
+	}
+}
+
 // collectXMLText walks the XML stream and returns every chardata text node.
 // Used by the plist-escape test to verify path values round-trip through
 // xml.Decoder regardless of how deeply they are nested.
