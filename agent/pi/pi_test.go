@@ -251,6 +251,128 @@ func TestAgent_AvailableModels_FallsBackToStore(t *testing.T) {
 	}
 }
 
+// TestAgent_AvailableModels_ExpandsEnabledModelGlobs is the regression test
+// for the bug where settings.json's enabledModels (a *scope pattern* list in
+// pi's --models format) was surfaced verbatim as if each entry were a model ID.
+// The /model card therefore offered literal "workbuddy/*" and "chunfeng/*"
+// entries, and selecting one passed --model workbuddy/* to pi, which resolved
+// it to the bogus model ID "*" and failed upstream.
+func TestAgent_AvailableModels_ExpandsEnabledModelGlobs(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+
+	writeJSON := func(name string, v any) {
+		t.Helper()
+		data, _ := json.Marshal(v)
+		if err := os.WriteFile(filepath.Join(tmpDir, name), data, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	writeJSON("settings.json", map[string]any{
+		"enabledModels":   []string{"workbuddy/*", "chunfeng/*"},
+		"defaultProvider": "workbuddy",
+		"defaultModel":    "cn:auto",
+	})
+	writeJSON("models.json", map[string]any{
+		"providers": map[string]any{
+			"workbuddy": map[string]any{"models": []any{
+				map[string]any{"id": "cn:auto", "name": "Auto", "contextWindow": 256000},
+				map[string]any{"id": "cn:glm-5.3", "name": "GLM-5.3", "contextWindow": 1000000},
+			}},
+			"chunfeng": map[string]any{"models": []any{
+				map[string]any{"id": "gpt-6-astra", "name": "gpt-6-astra"},
+			}},
+			// Not matched by any pattern -> must be excluded from the card.
+			"other": map[string]any{"models": []any{
+				map[string]any{"id": "hidden-model", "name": "Hidden"},
+			}},
+		},
+	})
+
+	a := &Agent{}
+	got := a.AvailableModels(context.Background())
+	want := []core.ModelOption{
+		{Name: "workbuddy/cn:auto", Alias: "Auto", Desc: "cn:auto"},
+		{Name: "workbuddy/cn:glm-5.3", Alias: "GLM-5.3", Desc: "cn:glm-5.3"},
+		{Name: "chunfeng/gpt-6-astra", Alias: "gpt-6-astra", Desc: "gpt-6-astra"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("AvailableModels() = %d entries, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	// No entry may carry a glob or a bare "*" alias any more.
+	for _, m := range got {
+		if strings.ContainsAny(m.Name, "*?[") || m.Alias == "*" {
+			t.Errorf("model entry still contains a glob pattern: %+v", m)
+		}
+	}
+}
+
+// TestAvailableModels_KeepsUnresolvablePattern covers the fallback: a pattern
+// that matches nothing stays visible so a custom/typo'd model is still
+// selectable and the user can see what they configured.
+func TestAvailableModels_KeepsUnresolvablePattern(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+	data, _ := json.Marshal(map[string]any{
+		"enabledModels": []string{"my-provider/my-custom-model"},
+	})
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	a := &Agent{}
+	got := a.AvailableModels(context.Background())
+	if len(got) != 1 || got[0].Name != "my-provider/my-custom-model" {
+		t.Fatalf("AvailableModels() = %+v, want the unresolvable pattern kept verbatim", got)
+	}
+}
+
+// TestLoadModelsContextWindows_IncludesStoreModels guards the context-window
+// lookup: it used to read only models.json, so every models-store.json model
+// fell back to a hardcoded 200K even when the catalog declared 1M.
+func TestLoadModelsContextWindows_IncludesStoreModels(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+	writeJSON := func(name string, v any) {
+		t.Helper()
+		data, _ := json.Marshal(v)
+		if err := os.WriteFile(filepath.Join(tmpDir, name), data, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	writeJSON("models-store.json", map[string]any{
+		"deepseek": map[string]any{"models": []any{
+			map[string]any{"id": "deepseek-flash", "name": "DeepSeek Flash", "contextWindow": 1000000},
+		}},
+	})
+	writeJSON("models.json", map[string]any{
+		"providers": map[string]any{
+			"workbuddy": map[string]any{"models": []any{
+				map[string]any{"id": "cn:auto", "name": "Auto", "contextWindow": 256000},
+			}},
+		},
+	})
+
+	got := loadModelsContextWindows()
+	// Short-ID and provider-qualified keys both resolve; the model event from
+	// pi carries the bare ID, so the short key is the one that is hit.
+	for key, want := range map[string]int{
+		"deepseek-flash":          1000000,
+		"deepseek/deepseek-flash": 1000000,
+		"cn:auto":                 256000,
+		"workbuddy/cn:auto":       256000,
+	} {
+		if got[key] != want {
+			t.Errorf("modelsCW[%q] = %d, want %d", key, got[key], want)
+		}
+	}
+}
+
 func TestReadSettingsModels(t *testing.T) {
 	// Save and restore settings path.
 	savedEnv := os.Getenv("PI_CODING_AGENT_DIR")
@@ -312,45 +434,38 @@ func TestReadSettingsModels(t *testing.T) {
 	}
 }
 
-func TestReadModelsStore(t *testing.T) {
-	writeStore := func(t *testing.T, store any) {
+func TestReadModelCatalog(t *testing.T) {
+	write := func(t *testing.T, name string, v any) {
 		t.Helper()
-		tmpDir := t.TempDir()
-		t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
-		data, _ := json.Marshal(store)
-		if err := os.WriteFile(filepath.Join(tmpDir, "models-store.json"), data, 0o644); err != nil {
-			t.Fatalf("write models-store.json: %v", err)
+		data, _ := json.Marshal(v)
+		if err := os.WriteFile(filepath.Join(os.Getenv("PI_CODING_AGENT_DIR"), name), data, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
 		}
 	}
 
-	t.Run("missing file returns nil", func(t *testing.T) {
+	t.Run("missing files returns empty catalog", func(t *testing.T) {
 		t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
-		if got := readModelsStore(); got != nil {
-			t.Errorf("readModelsStore() = %v, want nil for missing models-store.json", got)
+		if got := readModelCatalog(); len(got) != 0 {
+			t.Errorf("readModelCatalog() = %+v, want empty", got)
 		}
 	})
 
-	t.Run("valid file returns sorted provider-qualified models", func(t *testing.T) {
-		writeStore(t, map[string]any{
-			"openai": map[string]any{
-				"models": []any{
-					map[string]any{"id": "gpt-4", "name": "GPT-4"},
-					map[string]any{"id": "gpt-4o", "name": "GPT-4o"},
-				},
-			},
-			"deepseek": map[string]any{
-				"models": []any{
-					map[string]any{"id": "deepseek-chat", "name": "DeepSeek Chat"},
-					map[string]any{"id": "deepseek-reasoner", "name": "DeepSeek Reasoner"},
-				},
-			},
+	t.Run("store entries are sorted and carry context windows", func(t *testing.T) {
+		t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+		write(t, "models-store.json", map[string]any{
+			"openai": map[string]any{"models": []any{
+				map[string]any{"id": "gpt-4", "name": "GPT-4"},
+				map[string]any{"id": "gpt-4o", "name": "GPT-4o", "contextWindow": 128000},
+			}},
+			"deepseek": map[string]any{"models": []any{
+				map[string]any{"id": "deepseek-flash", "name": "DeepSeek Flash", "contextWindow": 1000000},
+			}},
 		})
-		got := readModelsStore()
-		want := []core.ModelOption{
-			{Name: "deepseek/deepseek-chat", Alias: "deepseek-chat", Desc: "DeepSeek Chat"},
-			{Name: "deepseek/deepseek-reasoner", Alias: "deepseek-reasoner", Desc: "DeepSeek Reasoner"},
-			{Name: "openai/gpt-4", Alias: "gpt-4", Desc: "GPT-4"},
-			{Name: "openai/gpt-4o", Alias: "gpt-4o", Desc: "GPT-4o"},
+		got := readModelCatalog()
+		want := []piModel{
+			{Provider: "deepseek", ID: "deepseek-flash", Name: "DeepSeek Flash", ContextWindow: 1000000},
+			{Provider: "openai", ID: "gpt-4", Name: "GPT-4"},
+			{Provider: "openai", ID: "gpt-4o", Name: "GPT-4o", ContextWindow: 128000},
 		}
 		if len(got) != len(want) {
 			t.Fatalf("got %d models, want %d: %+v", len(got), len(want), got)
@@ -363,33 +478,235 @@ func TestReadModelsStore(t *testing.T) {
 	})
 
 	t.Run("empty id model is skipped", func(t *testing.T) {
-		writeStore(t, map[string]any{
-			"openai": map[string]any{
-				"models": []any{
-					map[string]any{"id": "", "name": "Empty"},
-					map[string]any{"id": "gpt-4", "name": "GPT-4"},
-				},
-			},
+		t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+		write(t, "models-store.json", map[string]any{
+			"openai": map[string]any{"models": []any{
+				map[string]any{"id": "", "name": "Empty"},
+				map[string]any{"id": "gpt-4", "name": "GPT-4"},
+			}},
 		})
-		got := readModelsStore()
-		if len(got) != 1 {
-			t.Fatalf("got %d models, want 1 (empty-id skipped): %+v", len(got), got)
-		}
-		if got[0].Name != "openai/gpt-4" || got[0].Alias != "gpt-4" || got[0].Desc != "GPT-4" {
-			t.Errorf("got[0] = %+v, want openai/gpt-4", got[0])
+		got := readModelCatalog()
+		if len(got) != 1 || got[0].ID != "gpt-4" {
+			t.Fatalf("readModelCatalog() = %+v, want only openai/gpt-4", got)
 		}
 	})
 
-	t.Run("malformed json returns nil", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
-		if err := os.WriteFile(filepath.Join(tmpDir, "models-store.json"), []byte("{invalid json"), 0o644); err != nil {
-			t.Fatalf("write models-store.json: %v", err)
+	t.Run("models.json custom provider is included", func(t *testing.T) {
+		t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+		write(t, "models-store.json", map[string]any{
+			"deepseek": map[string]any{"models": []any{
+				map[string]any{"id": "deepseek-flash", "name": "DeepSeek Flash", "contextWindow": 1000000},
+			}},
+		})
+		write(t, "models.json", map[string]any{
+			"providers": map[string]any{
+				"workbuddy": map[string]any{"models": []any{
+					map[string]any{"id": "cn:auto", "name": "Auto", "contextWindow": 256000},
+				}},
+			},
+		})
+		got := readModelCatalog()
+		if len(got) != 2 {
+			t.Fatalf("got %d models, want 2 (store + models.json): %+v", len(got), got)
 		}
-		if got := readModelsStore(); got != nil {
-			t.Errorf("readModelsStore() = %v, want nil for malformed models-store.json", got)
+		// Sorted: deepseek < workbuddy.
+		if got[1].Provider != "workbuddy" || got[1].ID != "cn:auto" || got[1].Name != "Auto" {
+			t.Errorf("got[1] = %+v, want workbuddy/cn:auto", got[1])
 		}
 	})
+
+	t.Run("models.json overrides store entry and fills missing metadata", func(t *testing.T) {
+		t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+		write(t, "models-store.json", map[string]any{
+			"deepseek": map[string]any{"models": []any{
+				map[string]any{"id": "deepseek-flash", "name": "Store Name", "contextWindow": 1000000},
+			}},
+		})
+		// Same provider/id: models.json wins, and its empty name/contextWindow
+		// fall back to the store's values instead of zeroing them.
+		write(t, "models.json", map[string]any{
+			"providers": map[string]any{
+				"deepseek": map[string]any{"models": []any{
+					map[string]any{"id": "deepseek-flash"},
+				}},
+			},
+		})
+		got := readModelCatalog()
+		if len(got) != 1 {
+			t.Fatalf("got %d models, want 1: %+v", len(got), got)
+		}
+		if got[0].Name != "Store Name" || got[0].ContextWindow != 1000000 {
+			t.Errorf("got[0] = %+v, want store name and context window preserved", got[0])
+		}
+	})
+
+	t.Run("malformed json is ignored", func(t *testing.T) {
+		t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+		if err := os.WriteFile(filepath.Join(os.Getenv("PI_CODING_AGENT_DIR"), "models-store.json"), []byte("{invalid json"), 0o644); err != nil {
+			t.Fatalf("write models-store.json: %v", err)
+		}
+		if got := readModelCatalog(); len(got) != 0 {
+			t.Errorf("readModelCatalog() = %+v, want empty for malformed models-store.json", got)
+		}
+	})
+}
+
+func TestGlobMatch(t *testing.T) {
+	tests := []struct {
+		pattern, s string
+		want       bool
+	}{
+		{"workbuddy/*", "workbuddy/cn:auto", true},
+		{"workbuddy/*", "chunfeng/gpt-5.5", false},
+		{"*", "workbuddy/cn:auto", true},
+		{"*gpt*", "chunfeng/gpt-5.5", true},
+		{"WORKBUDDY/*", "workbuddy/cn:auto", true},
+		{"workbuddy/cn:?", "workbuddy/cn:auto", false},
+		{"workbuddy/cn:[ag]*", "workbuddy/cn:auto", true},
+		{"workbuddy/cn:[!ag]*", "workbuddy/cn:auto", false},
+		{"[", "workbuddy/cn:auto", false},
+		{"deepseek-v4.1-flash", "deepseek-v4.1-flash", true},
+		{"workbuddy/cn:*", "workbuddy/cn:deepseek-v4.1-flash", true},
+		{"", "workbuddy/cn:auto", false},
+		{"*", "", true},
+	}
+	for _, tt := range tests {
+		if got := globMatch(tt.pattern, tt.s); got != tt.want {
+			t.Errorf("globMatch(%q, %q) = %v, want %v", tt.pattern, tt.s, got, tt.want)
+		}
+	}
+}
+
+func TestSplitThinkingSuffix(t *testing.T) {
+	tests := []struct {
+		in, base, level string
+	}{
+		{"workbuddy/*:high", "workbuddy/*", "high"},
+		{"workbuddy/cn:auto", "workbuddy/cn:auto", ""}, // "auto" is not a level
+		{"workbuddy/*:HIGH", "workbuddy/*", "HIGH"},
+		{"deepseek/deepseek-v4-pro:max", "deepseek/deepseek-v4-pro", "max"},
+		{"workbuddy/*:bogus", "workbuddy/*:bogus", ""},
+		{"workbuddy/*:", "workbuddy/*:", ""},
+		{"nosuffix", "nosuffix", ""},
+	}
+	for _, tt := range tests {
+		base, level := splitThinkingSuffix(tt.in)
+		if base != tt.base || level != tt.level {
+			t.Errorf("splitThinkingSuffix(%q) = (%q, %q), want (%q, %q)", tt.in, base, level, tt.base, tt.level)
+		}
+	}
+}
+
+func TestMatchModelPattern(t *testing.T) {
+	catalog := []piModel{
+		{Provider: "workbuddy", ID: "cn:auto", Name: "Auto", ContextWindow: 256000},
+		{Provider: "workbuddy", ID: "cn:glm-5.3", Name: "GLM-5.3", ContextWindow: 1000000},
+		{Provider: "workbuddy", ID: "global:gpt-6-astra", Name: "GPT-6-Astra"},
+		{Provider: "chunfeng", ID: "gpt-6-astra", Name: "gpt-6-astra"},
+		{Provider: "deepseek", ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro"},
+	}
+	names := func(ms []piModel) []string {
+		out := make([]string, 0, len(ms))
+		for _, m := range ms {
+			out = append(out, m.Provider+"/"+m.ID)
+		}
+		return out
+	}
+
+	tests := []struct {
+		pattern string
+		want    []string
+	}{
+		// The reported regression: enabledModels globs must expand.
+		{"workbuddy/*", []string{
+			"workbuddy/cn:auto", "workbuddy/cn:glm-5.3", "workbuddy/global:gpt-6-astra",
+		}},
+		{"chunfeng/*", []string{"chunfeng/gpt-6-astra"}},
+		// Exact canonical and bare-id references.
+		{"workbuddy/cn:auto", []string{"workbuddy/cn:auto"}},
+		{"deepseek-v4-pro", []string{"deepseek/deepseek-v4-pro"}},
+		// Bare "gpt-6-astra" resolves uniquely: chunfeng's ID matches exactly,
+		// while workbuddy's is "global:gpt-6-astra".
+		{"gpt-6-astra", []string{"chunfeng/gpt-6-astra"}},
+		// Fuzzy: matches ID substring.
+		{"workbuddy/glm", []string{"workbuddy/cn:glm-5.3"}},
+		// Fuzzy also matches the display name.
+		{"Auto", []string{"workbuddy/cn:auto"}},
+		// Thinking suffix is stripped before matching.
+		{"workbuddy/*:high", []string{
+			"workbuddy/cn:auto", "workbuddy/cn:glm-5.3", "workbuddy/global:gpt-6-astra",
+		}},
+		// A colon inside the ID is not a thinking level.
+		{"workbuddy/cn:auto:high", []string{"workbuddy/cn:auto"}},
+		{"nothing-matches", nil},
+		{"", nil},
+	}
+	for _, tt := range tests {
+		got := names(matchModelPattern(tt.pattern, catalog))
+		if len(got) != len(tt.want) {
+			t.Errorf("matchModelPattern(%q) = %v, want %v", tt.pattern, got, tt.want)
+			continue
+		}
+		for i := range tt.want {
+			if got[i] != tt.want[i] {
+				t.Errorf("matchModelPattern(%q) = %v, want %v", tt.pattern, got, tt.want)
+				break
+			}
+		}
+	}
+}
+
+func TestResolveModelRef(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", tmpDir)
+	data, _ := json.Marshal(map[string]any{
+		"providers": map[string]any{
+			"workbuddy": map[string]any{"models": []any{
+				map[string]any{"id": "cn:auto", "name": "Auto"},
+			}},
+		},
+	})
+	if err := os.WriteFile(filepath.Join(tmpDir, "models.json"), data, 0o644); err != nil {
+		t.Fatalf("write models.json: %v", err)
+	}
+
+	tests := []struct{ in, want string }{
+		// The config value from the bug report: pi accepts it via fuzzy match,
+		// but the canonical spelling is what the /model card shows.
+		{"workbuddy/auto", "workbuddy/cn:auto"},
+		{"workbuddy/cn:auto", "workbuddy/cn:auto"},
+		{"auto", "workbuddy/cn:auto"},
+		// Unresolvable references pass through so custom model IDs keep working.
+		{"workbuddy/brand-new-model", "workbuddy/brand-new-model"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := resolveModelRef(tt.in); got != tt.want {
+			t.Errorf("resolveModelRef(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestCatalogOptions_AliasCollision(t *testing.T) {
+	// Two providers expose the same display name — the alias must not be
+	// ambiguous, otherwise /model switch by alias picks the wrong provider.
+	got := catalogOptions([]piModel{
+		{Provider: "workbuddy", ID: "global:gpt-6-astra", Name: "GPT-6-Astra"},
+		{Provider: "chunfeng", ID: "gpt-6-astra", Name: "gpt-6-astra"},
+		{Provider: "workbuddy", ID: "cn:auto", Name: "Auto"},
+	})
+	if len(got) != 3 {
+		t.Fatalf("got %d options, want 3", len(got))
+	}
+	if got[0].Alias != "global:gpt-6-astra" {
+		t.Errorf("colliding alias should fall back to the bare ID, got %q", got[0].Alias)
+	}
+	if got[1].Alias != "gpt-6-astra" {
+		t.Errorf("colliding alias should fall back to the bare ID, got %q", got[1].Alias)
+	}
+	if got[2].Alias != "Auto" {
+		t.Errorf("unique alias should stay the display name, got %q", got[2].Alias)
+	}
 }
 
 func TestReadDefaultModel(t *testing.T) {

@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -128,6 +132,82 @@ func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *tes
 	}
 	if usage.InputTokens != 40849 {
 		t.Fatalf("input tokens = %d, want 40849", usage.InputTokens)
+	}
+}
+
+func TestAppServerSession_IgnoresSubagentLifecycleNotifications(t *testing.T) {
+	s := &appServerSession{events: make(chan core.Event, 8)}
+	s.threadID.Store("parent-thread")
+	s.currentTurn = "parent-turn"
+
+	s.handleNotification("turn/started", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"turn":     map[string]any{"id": "child-turn", "status": "inProgress"},
+	}))
+	if got := appServerCurrentTurn(s); got != "parent-turn" {
+		t.Fatalf("current turn = %q after child turn started, want parent-turn", got)
+	}
+
+	s.handleNotification("item/completed", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"turnId":   "child-turn",
+		"item":     map[string]any{"type": "agentMessage", "text": "child-only answer"},
+	}))
+	if got := appServerPendingMessages(s); len(got) != 0 {
+		t.Fatalf("pending messages = %v after child item, want none", got)
+	}
+
+	s.handleNotification("turn/completed", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"turn":     map[string]any{"id": "child-turn", "status": "completed"},
+	}))
+	s.handleNotification("thread/status/changed", notificationProbe(t, map[string]any{
+		"threadId": "child-thread",
+		"status":   map[string]any{"type": "idle"},
+	}))
+	if got := appServerCurrentTurn(s); got != "parent-turn" {
+		t.Fatalf("current turn = %q after child completion, want parent-turn", got)
+	}
+	select {
+	case event := <-s.events:
+		t.Fatalf("child lifecycle emitted event %#v, want none", event)
+	default:
+	}
+
+	s.handleNotification("item/completed", notificationProbe(t, map[string]any{
+		"threadId": "parent-thread",
+		"turnId":   "parent-turn",
+		"item":     map[string]any{"type": "agentMessage", "text": "parent answer"},
+	}))
+	s.handleNotification("turn/completed", notificationProbe(t, map[string]any{
+		"threadId": "parent-thread",
+		"turn":     map[string]any{"id": "parent-turn", "status": "completed"},
+	}))
+
+	textEvent := <-s.events
+	if textEvent.Type != core.EventText || textEvent.Content != "parent answer" {
+		t.Fatalf("text event = %#v, want parent answer", textEvent)
+	}
+	resultEvent := <-s.events
+	if resultEvent.Type != core.EventResult || !resultEvent.Done {
+		t.Fatalf("result event = %#v, want completed parent result", resultEvent)
+	}
+}
+
+func TestAppServerSession_IgnoresSubagentTokenUsageNotifications(t *testing.T) {
+	s := &appServerSession{}
+	s.threadID.Store("parent-thread")
+	s.currentTurn = "parent-turn"
+
+	s.handleNotification("thread/tokenUsage/updated", tokenUsageNotificationProbe(t, "parent-thread", "parent-turn", 1234))
+	s.handleNotification("thread/tokenUsage/updated", tokenUsageNotificationProbe(t, "child-thread", "child-turn", 9876))
+
+	usage := s.GetContextUsage()
+	if usage == nil {
+		t.Fatal("GetContextUsage() = nil, want parent usage")
+	}
+	if usage.UsedTokens != 1234 {
+		t.Fatalf("used tokens = %d after child update, want parent value 1234", usage.UsedTokens)
 	}
 }
 
@@ -483,6 +563,104 @@ func TestAppServerSession_HandleRequestUserInputWritesCodexResponse(t *testing.T
 	}
 }
 
+func TestAppServerSession_RejectsInterleavedChildServerRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		ctx: ctx, stdin: stdin, events: make(chan core.Event, 8),
+		pendingApprovals: make(map[string]chan core.PermissionResult),
+		currentTurn:      "parent-turn",
+	}
+	s.threadID.Store("parent-thread")
+
+	request := func(id, method, threadID, turnID string) {
+		t.Helper()
+		s.handleServerRequest(serverRequestProbe(t, `"`+id+`"`, method, map[string]any{
+			"threadId": threadID, "turnId": turnID,
+			"command": "echo child", "permissions": map[string]any{"network": true},
+			"questions": []any{map[string]any{"id": "q", "header": "Q", "question": "Child question?"}},
+		}))
+	}
+
+	request("child-1-command", "item/commandExecution/requestApproval", "child-thread-1", "child-turn-1")
+	request("parent-command", "item/commandExecution/requestApproval", "parent-thread", "parent-turn")
+	request("child-2-file", "item/fileChange/requestApproval", "child-thread-2", "child-turn-2")
+	request("child-2-permissions", "item/permissions/requestApproval", "child-thread-2", "child-turn-2")
+	request("child-3-question", "item/tool/requestUserInput", "child-thread-3", "child-turn-3")
+	request("child-3-tool", "item/tool/call", "child-thread-3", "child-turn-3")
+	request("stale-parent-turn", "item/commandExecution/requestApproval", "parent-thread", "old-turn")
+
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventPermissionRequest || event.RequestID != `"parent-command"` || event.ToolName != "Bash" {
+			t.Fatalf("event = %#v, want only parent Bash approval", event)
+		}
+		if err := s.RespondPermission(event.RequestID, core.PermissionResult{Behavior: "allow"}); err != nil {
+			t.Fatalf("respond to parent approval: %v", err)
+		}
+	default:
+		t.Fatal("parent approval was not emitted")
+	}
+	select {
+	case event := <-s.events:
+		t.Fatalf("child request leaked event %#v", event)
+	default:
+	}
+	if got := appServerCurrentTurn(s); got != "parent-turn" {
+		t.Fatalf("current turn = %q, want parent-turn", got)
+	}
+
+	var responses map[string]map[string]json.RawMessage
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		responses = make(map[string]map[string]json.RawMessage)
+		for _, line := range strings.Split(strings.TrimSpace(stdin.String()), "\n") {
+			if line == "" {
+				continue
+			}
+			var response struct {
+				ID     string                     `json:"id"`
+				Result map[string]json.RawMessage `json:"result"`
+			}
+			if err := json.Unmarshal([]byte(line), &response); err != nil {
+				t.Fatalf("decode response %q: %v", line, err)
+			}
+			responses[response.ID] = response.Result
+		}
+		if len(responses) == 7 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(responses) != 7 {
+		t.Fatalf("responses = %v, want all seven requests answered", responses)
+	}
+	for _, id := range []string{"child-1-command", "child-2-file", "stale-parent-turn"} {
+		if string(responses[id]["decision"]) != `"decline"` {
+			t.Fatalf("%s response = %s, want decline", id, responses[id]["decision"])
+		}
+	}
+	if string(responses["parent-command"]["decision"]) != `"accept"` {
+		t.Fatalf("parent response = %s, want accept", responses["parent-command"]["decision"])
+	}
+	if string(responses["child-2-permissions"]["permissions"]) != `{}` {
+		t.Fatalf("child permissions response = %s, want empty permissions", responses["child-2-permissions"]["permissions"])
+	}
+	if string(responses["child-3-question"]["answers"]) != `{}` {
+		t.Fatalf("child question response = %s, want empty answers", responses["child-3-question"]["answers"])
+	}
+	if string(responses["child-3-tool"]["success"]) != `false` {
+		t.Fatalf("child tool response = %s, want unavailable", responses["child-3-tool"]["success"])
+	}
+	s.approvalsMu.Lock()
+	pendingCount := len(s.pendingApprovals)
+	s.approvalsMu.Unlock()
+	if pendingCount != 0 {
+		t.Fatalf("pending approvals = %d, want none", pendingCount)
+	}
+}
+
 var _ interface {
 	GetUsage(context.Context) (*core.UsageReport, error)
 } = (*appServerSession)(nil)
@@ -511,6 +689,314 @@ func (w *lockedWriteCloser) String() string {
 }
 
 var _ io.WriteCloser = (*lockedWriteCloser)(nil)
+
+func newTransportTestSession(t *testing.T) *appServerSession {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &appServerSession{
+		ctx: ctx, cancel: cancel, events: make(chan core.Event, 128),
+		currentTurn: "turn-1",
+	}
+	s.threadID.Store("thread-1")
+	s.alive.Store(true)
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func awaitTransportTest(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("app-server operation did not finish")
+	}
+}
+
+func TestAppServerSession_TransportEOFFinishesActiveTurn(t *testing.T) {
+	s := newTransportTestSession(t)
+	rpc := make(chan rpcResponseEnvelope, 1)
+	approval := make(chan core.PermissionResult, 1)
+	s.pending = map[int64]chan rpcResponseEnvelope{1: rpc}
+	s.pendingApprovals = map[string]chan core.PermissionResult{"approval": approval}
+	s.wg.Add(1)
+	s.readLoop(strings.NewReader(""))
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || !errors.Is(event.Error, io.EOF) {
+			t.Fatalf("EOF event = %#v, want terminal EOF error", event)
+		}
+	default:
+		t.Fatal("EOF left the active turn waiting without a terminal event")
+	}
+	if s.Alive() || s.currentTurn != "" {
+		t.Fatal("EOF left the transport or turn active")
+	}
+	select {
+	case response := <-rpc:
+		if response.Error == nil {
+			t.Fatal("pending RPC was not rejected")
+		}
+	default:
+		t.Fatal("pending RPC was not released")
+	}
+	select {
+	case result := <-approval:
+		if result.Behavior != "deny" {
+			t.Fatalf("pending approval = %#v", result)
+		}
+	default:
+		t.Fatal("pending approval was not released")
+	}
+}
+
+func TestAppServerSession_TransportEOFDoesNotDuplicateTerminal(t *testing.T) {
+	for _, state := range []string{"idle", "completed", "failed", "error", "canceled"} {
+		t.Run(state, func(t *testing.T) {
+			s := newTransportTestSession(t)
+			switch state {
+			case "idle":
+				s.currentTurn = ""
+			case "completed":
+				s.handleNotification("turn/completed", json.RawMessage(`{"turn":{"id":"turn-1"}}`))
+			case "failed":
+				s.handleNotification("turn/completed", json.RawMessage(`{"turn":{"id":"turn-1","status":"failed"}}`))
+			case "error":
+				s.handleNotification("error", json.RawMessage(`{"message":"failed"}`))
+			case "canceled":
+				s.cancel()
+			}
+			before := len(s.events)
+			s.wg.Add(1)
+			s.readLoop(strings.NewReader(""))
+			if len(s.events) != before {
+				t.Fatalf("EOF emitted an extra terminal event after %s", state)
+			}
+		})
+	}
+}
+
+func TestAppServerSession_TransportReadFailureFinishesTurn(t *testing.T) {
+	s := newTransportTestSession(t)
+	failure := errors.New("broken transport")
+	s.wg.Add(1)
+	s.readLoop(iotest.ErrReader(failure))
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || !errors.Is(event.Error, failure) {
+			t.Fatalf("read failure = %#v", event)
+		}
+	default:
+		t.Fatal("read failure did not finish the turn")
+	}
+	if s.Alive() || s.currentTurn != "" {
+		t.Fatal("read failure left the transport or turn active")
+	}
+}
+
+func TestAppServerSession_TransportIdleErrorRemainsVisible(t *testing.T) {
+	s := newTransportTestSession(t)
+	s.currentTurn = ""
+	s.handleNotification("error", json.RawMessage(`{"message":"connection error"}`))
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || event.Error.Error() != "connection error" {
+			t.Fatalf("idle error = %#v", event)
+		}
+	default:
+		t.Fatal("connection error outside a turn was suppressed")
+	}
+}
+
+func TestAppServerSession_TerminalSurvivesFullQueue(t *testing.T) {
+	for _, terminal := range []core.Event{
+		{Type: core.EventResult, Done: true},
+		{Type: core.EventError, Error: io.EOF},
+		{Type: core.EventText, Done: true},
+	} {
+		t.Run(string(terminal.Type), func(t *testing.T) {
+			s := newTransportTestSession(t)
+			for i := 0; i < cap(s.events); i++ {
+				s.events <- core.Event{Type: core.EventThinking, Content: "queued"}
+			}
+			done := make(chan struct{})
+			go func() { s.emit(terminal); close(done) }()
+			select {
+			case <-done:
+				t.Fatal("terminal delivery returned while the queue was full")
+			case <-time.After(20 * time.Millisecond):
+			}
+			for i := 0; i < cap(s.events); i++ {
+				if event := <-s.events; event.Type != core.EventThinking || event.Content != "queued" {
+					t.Fatalf("queued event %d was displaced: %#v", i, event)
+				}
+			}
+			awaitTransportTest(t, done)
+			select {
+			case event := <-s.events:
+				if event.Type != terminal.Type || event.Done != terminal.Done || event.Error != terminal.Error {
+					t.Fatalf("terminal = %#v, want %#v", event, terminal)
+				}
+			default:
+				t.Fatal("full queue dropped the terminal event")
+			}
+		})
+	}
+}
+
+func TestAppServerSession_CloseUnblocksTerminalDelivery(t *testing.T) {
+	s := newTransportTestSession(t)
+	for i := 0; i < cap(s.events); i++ {
+		s.events <- core.Event{Type: core.EventThinking}
+	}
+	done := make(chan struct{})
+	s.wg.Add(1)
+	go func() { defer s.wg.Done(); s.emitError(io.EOF); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("terminal delivery returned before cancellation or queue space")
+	case <-time.After(20 * time.Millisecond):
+	}
+	closed := make(chan struct{})
+	go func() { _ = s.Close(); close(closed) }()
+	awaitTransportTest(t, done)
+	awaitTransportTest(t, closed)
+	// A publisher outside readLoop may race with or follow Close.
+	s.emitError(io.EOF)
+}
+
+type transportTestWriter func([]byte) (int, error)
+
+func (w transportTestWriter) Write(p []byte) (int, error) { return w(p) }
+func (transportTestWriter) Close() error                  { return nil }
+
+func TestAppServerSession_LateStartResponseCannotReviveTurn(t *testing.T) {
+	for _, state := range []string{"eof", "completed", "completed_then_eof", "failed"} {
+		t.Run(state, func(t *testing.T) {
+			s := newTransportTestSession(t)
+			s.currentTurn = ""
+			s.stdin = transportTestWriter(func(p []byte) (int, error) {
+				var request struct {
+					ID int64 `json:"id"`
+				}
+				if err := json.Unmarshal(p, &request); err != nil {
+					return 0, err
+				}
+				s.handleResponse(rpcResponseEnvelope{ID: request.ID, Result: json.RawMessage(`{"turn":{"id":"turn-1"}}`)})
+				if state != "eof" {
+					s.handleNotification("turn/started", json.RawMessage(`{"turn":{"id":"turn-1"}}`))
+					status := "completed"
+					if state == "failed" {
+						status = "failed"
+					}
+					s.handleNotification("turn/completed", json.RawMessage(fmt.Sprintf(`{"turn":{"id":"turn-1","status":%q}}`, status)))
+				}
+				if strings.Contains(state, "eof") {
+					s.wg.Add(1)
+					s.readLoop(strings.NewReader(""))
+				}
+				return len(p), nil
+			})
+			err := s.Send("hello", "", nil, nil)
+			if state == "eof" && err == nil {
+				t.Fatal("turn/start succeeded after EOF without a terminal event")
+			}
+			if state != "eof" && err != nil {
+				t.Fatalf("finished turn became a send failure: %v", err)
+			}
+			if s.currentTurn != "" {
+				t.Fatal("late turn/start response revived the finished turn")
+			}
+		})
+	}
+}
+
+func TestAppServerSession_EOFReleasesRPCBeforeTerminalBackpressure(t *testing.T) {
+	s := newTransportTestSession(t)
+	for i := 0; i < cap(s.events); i++ {
+		s.events <- core.Event{Type: core.EventThinking}
+	}
+	rpc := make(chan rpcResponseEnvelope, 1)
+	approval := make(chan core.PermissionResult, 1)
+	s.pending = map[int64]chan rpcResponseEnvelope{1: rpc}
+	s.pendingApprovals = map[string]chan core.PermissionResult{"approval": approval}
+	done := make(chan struct{})
+	s.wg.Add(1)
+	go func() { s.readLoop(strings.NewReader("")); close(done) }()
+	select {
+	case response := <-rpc:
+		if response.Error == nil || s.Alive() {
+			t.Fatal("RPC did not observe a dead transport")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal backpressure prevented pending RPC rejection")
+	}
+	select {
+	case <-approval:
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal backpressure prevented approval rejection")
+	}
+	for i := 0; i < cap(s.events); i++ {
+		<-s.events
+	}
+	awaitTransportTest(t, done)
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || !errors.Is(event.Error, io.EOF) {
+			t.Fatalf("EOF terminal = %#v", event)
+		}
+	default:
+		t.Fatal("EOF terminal was lost under backpressure")
+	}
+}
+
+// Use connect's real pipes and process lifecycle without invoking Codex.
+func TestAppServerSession_ProcessExitFinishesOnce(t *testing.T) {
+	for _, mode := range []string{"eof", "completed", "failed", "completed_then_failed_exit"} {
+		t.Run(mode, func(t *testing.T) {
+			s := newTransportTestSession(t)
+			s.cliBin = os.Args[0]
+			s.cliExtraArgs = []string{"-test.run=^TestAppServerTransportProcessHelper$", "--"}
+			s.workDir = t.TempDir()
+			s.url = "stdio://"
+			s.extraEnv = []string{"CC_CONNECT_TRANSPORT_HELPER=" + mode, "GORACE=atexit_sleep_ms=0"}
+			if err := s.connect(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			go func() { s.wg.Wait(); close(done) }()
+			awaitTransportTest(t, done)
+			want := core.EventError
+			if strings.HasPrefix(mode, "completed") {
+				want = core.EventResult
+			}
+			if len(s.events) != 1 {
+				t.Fatalf("process exit produced %d events, want one terminal", len(s.events))
+			}
+			if event := <-s.events; event.Type != want {
+				t.Fatalf("process exit event = %#v, want %v", event, want)
+			}
+			if s.Alive() || s.currentTurn != "" {
+				t.Fatal("process exit left the transport or turn active")
+			}
+		})
+	}
+}
+
+func TestAppServerTransportProcessHelper(t *testing.T) {
+	mode := os.Getenv("CC_CONNECT_TRANSPORT_HELPER")
+	if mode == "" {
+		return
+	}
+	if strings.HasPrefix(mode, "completed") {
+		if _, err := fmt.Fprintln(os.Stdout, `{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if mode == "failed" || mode == "completed_then_failed_exit" {
+		os.Exit(17)
+	}
+	os.Exit(0)
+}
 
 type blockingWriteCloser struct {
 	started   chan struct{}
@@ -573,6 +1059,42 @@ func serverRequestProbe(t *testing.T, idJSON, method string, params any) map[str
 	}
 }
 
+func notificationProbe(t *testing.T, params any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal notification: %v", err)
+	}
+	return raw
+}
+
+func tokenUsageNotificationProbe(t *testing.T, threadID, turnID string, totalTokens int) json.RawMessage {
+	t.Helper()
+	return notificationProbe(t, map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+		"tokenUsage": map[string]any{
+			"total": map[string]any{},
+			"last": map[string]any{
+				"totalTokens": totalTokens,
+			},
+			"modelContextWindow": 258400,
+		},
+	})
+}
+
+func appServerCurrentTurn(s *appServerSession) string {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.currentTurn
+}
+
+func appServerPendingMessages(s *appServerSession) []string {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return append([]string(nil), s.pendingMsgs...)
+}
+
 func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
 	t.Helper()
 	deadline := time.After(time.Second)
@@ -595,17 +1117,17 @@ func waitForWrittenJSONLine(t *testing.T, w *lockedWriteCloser) string {
 
 func TestAppServerListenURL(t *testing.T) {
 	cases := map[string]string{
-		"":                       "",
-		"  ":                     "",
-		"stdio://":               "",
-		"stdio":                  "",
-		"ws://127.0.0.1:3845":    "ws://127.0.0.1:3845",
-		"ws://localhost:9000":    "ws://localhost:9000",
-		"ws://127.0.0.1:3845 ":   "ws://127.0.0.1:3845",
-		" stdio ":                 "",
-		" stdio:// ":               "",
-		"STDIO":                    "",
-		"STDIO://":                 "",
+		"":                     "",
+		"  ":                   "",
+		"stdio://":             "",
+		"stdio":                "",
+		"ws://127.0.0.1:3845":  "ws://127.0.0.1:3845",
+		"ws://localhost:9000":  "ws://localhost:9000",
+		"ws://127.0.0.1:3845 ": "ws://127.0.0.1:3845",
+		" stdio ":              "",
+		" stdio:// ":           "",
+		"STDIO":                "",
+		"STDIO://":             "",
 	}
 	for in, want := range cases {
 		if got := appServerListenURL(in); got != want {

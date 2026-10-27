@@ -2020,6 +2020,11 @@ func TestCUJ_G4_AgentCrashReturnsErrorAndRecovers(t *testing.T) {
 // reaches the user's screen.
 func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 	env := newCUJEnv(t)
+	t.Cleanup(func() {
+		if err := env.engine.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	// Establish a session.
 	env.userSends("g5", "hello")
@@ -2053,6 +2058,29 @@ func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 	if !env.sentContains("permission denied") && !env.sentContains("bash tool exited") {
 		t.Fatalf("user did not see the underlying tool error in reply; got: %v", env.plat.getSent())
 	}
+
+	// A failed turn does not stop a persistent agent's background work.
+	// Deliver its result without asking the user to send "continue".
+	env.waitFor("failed foreground turn released", 2*time.Second, func() bool {
+		return !env.activeSession("test:g5").Busy()
+	})
+	sess.events <- Event{Type: EventText, Content: "background task finished"}
+	sess.events <- Event{Type: EventResult, Done: true}
+	env.waitFor("background result after failed turn", 2*time.Second, func() bool {
+		return env.sentContains("background task finished")
+	})
+	if got := len(sess.getSentPrompts()); got != 2 {
+		t.Fatalf("failed prompt was retried: sent %d prompts, want 2", got)
+	}
+
+	// A new user turn must take ownership from the background reader.
+	sess.mu.Lock()
+	sess.reply = "follow-up answer"
+	sess.mu.Unlock()
+	env.userSends("g5", "what happened next?")
+	env.waitFor("follow-up answer after failed turn", 2*time.Second, func() bool {
+		return env.sentContains("follow-up answer") && !env.activeSession("test:g5").Busy()
+	})
 }
 
 // CUJ-G6 · Network flap: undelivered outbound messages eventually arrive
@@ -2756,4 +2784,55 @@ func TestCUJ_I6_ImageGallerySendBackKeepsTopicAndBatching(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Opening, changing, and reopening reasoning controls must stay in the
+// workspace selected by the platform session, including card callbacks.
+func TestCUJ_R1_ReasoningCardsPreserveWorkspaceIsolation(t *testing.T) {
+	p := &reasoningJourneyPlatform{stubCardPlatform: stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+	global := &workspaceEffortAgent{levels: []string{"global"}, effort: "global"}
+	e := NewEngine("test", global, []Platform{p}, "", LangEnglish)
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"))
+	dir := normalizeWorkspacePath(t.TempDir())
+	e.workspaceBindings.Bind("project:test", "C-journey", "chan", dir)
+	ws := e.workspacePool.GetOrCreate(dir)
+	ws.agent = &workspaceEffortAgent{levels: []string{"off", "high"}}
+	ws.sessions = NewSessionManager("")
+	e.onPlatformReady(p)
+	key := "feishu:C-journey:u1"
+	send := func(content string) {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Content: content, ReplyCtx: "ctx", UserID: "u1"})
+	}
+	assertCard := func(card *Card, want string) {
+		t.Helper()
+		got := fmt.Sprintf("%+v", card.Elements)
+		if !strings.Contains(got, want) || strings.Contains(got, "global") {
+			t.Fatalf("card = %s; want %s without global effort", got, want)
+		}
+	}
+	// Action 1: open the workspace's controls through the message entrypoint.
+	send("/reasoning")
+	if len(p.repliedCards) != 1 {
+		t.Fatalf("expected card, got %d", len(p.repliedCards))
+	}
+	assertCard(p.repliedCards[0], "off|high")
+	// Action 2: choose high through the platform's registered callback.
+	if p.navigation == nil {
+		t.Fatal("card callback not registered")
+	}
+	assertCard(p.navigation("act:/reasoning 2", key), e.i18n.Tf(MsgReasoningCurrent, "high"))
+	// Action 3: navigate back to the controls.
+	assertCard(p.navigation("nav:/reasoning", key), e.i18n.Tf(MsgReasoningCurrent, "high"))
+	// Action 4: reopen from a message; persisted selection remains visible.
+	send("/reasoning")
+	assertCard(p.repliedCards[len(p.repliedCards)-1], e.i18n.Tf(MsgReasoningCurrent, "high"))
+}
+
+type reasoningJourneyPlatform struct {
+	stubCardPlatform
+	navigation CardNavigationHandler
+}
+
+func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
+	p.navigation = h
 }
