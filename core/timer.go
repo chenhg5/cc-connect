@@ -238,10 +238,10 @@ func (s *TimerStore) ListPending() []*TimerJob {
 
 // TimerScheduler runs one-shot timer jobs using time.AfterFunc.
 type TimerScheduler struct {
-	store    *TimerStore
-	engines  map[string]*Engine
-	mu       sync.RWMutex
-	timers   map[string]*time.Timer // job ID → active timer
+	store              *TimerStore
+	engines            map[string]*Engine
+	mu                 sync.RWMutex
+	timers             map[string]*time.Timer // job ID → active timer
 	defaultSilent      bool
 	defaultSessionMode string
 }
@@ -417,6 +417,13 @@ func (ts *TimerScheduler) executeJob(jobID string) {
 		slog.Error("timer: project not found", "job", jobID, "project", job.Project)
 		ts.store.MarkFired(jobID, fmt.Errorf("project %q not found", job.Project))
 		return
+	}
+	if !job.IsShellJob() {
+		if wait := engine.capacityWait(); wait > 0 {
+			slog.Info("timer: delaying job until provider cooldown ends", "id", jobID, "project", job.Project, "delay", wait)
+			ts.scheduleAt(job, wait)
+			return
+		}
 	}
 
 	slog.Info("timer: executing job", "id", jobID, "project", job.Project, "prompt", truncateStr(job.Prompt, 60))

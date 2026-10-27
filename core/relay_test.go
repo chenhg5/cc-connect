@@ -51,6 +51,29 @@ func TestRelayManager_RelayContextDisablesTimeoutAtZero(t *testing.T) {
 	}
 }
 
+func TestRelayManager_SkipsTargetDuringQuotaCooldown(t *testing.T) {
+	targetPlatform := &stubPlatformEngine{n: "feishu"}
+	targetEngine := NewEngine("target", &stubAgent{}, []Platform{targetPlatform}, "", LangEnglish)
+	targetEngine.quotaCoolingUntil("RESOURCE_EXHAUSTED quota reached. Resets in 1h")
+
+	rm := NewRelayManager("")
+	rm.Bind("feishu", "chat-1", map[string]string{"source": "source", "target": "target"})
+	rm.RegisterEngine("target", targetEngine)
+
+	_, err := rm.Send(context.Background(), RelayRequest{
+		From:       "source",
+		To:         "target",
+		SessionKey: "feishu:chat-1",
+		Message:    "please do work",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cooling down") {
+		t.Fatalf("Send() error = %v, want cooldown rejection", err)
+	}
+	if sent := targetPlatform.getSent(); len(sent) != 0 {
+		t.Fatalf("target sent messages during cooldown: %v", sent)
+	}
+}
+
 type relayVisibilityPlatform struct {
 	stubPlatformEngine
 	reconstructed []string

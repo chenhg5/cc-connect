@@ -712,6 +712,12 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 		cs.notifyFailure(job, err)
 		return
 	}
+	if !job.IsShellJob() {
+		if wait := engine.capacityWait(); wait > 0 {
+			slog.Info("cron: skipping job during provider cooldown", "id", job.ID, "project", job.Project, "cooling_for", wait)
+			return
+		}
+	}
 
 	slog.Info("cron: executing job", "id", job.ID, "project", job.Project, "manual", manual, "prompt", truncateStr(job.Prompt, 60))
 
@@ -751,7 +757,6 @@ type mutePlatform struct {
 
 func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
-
 
 func GenerateCronID() string {
 	b := make([]byte, 4)

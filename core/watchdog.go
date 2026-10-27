@@ -40,6 +40,10 @@ func (e *Engine) watchStuckTurn(done <-chan struct{}, since *atomic.Int64, sessi
 		if start == 0 || time.Since(time.Unix(0, start)) < stuckHandlerTimeout {
 			continue
 		}
+		if wait := e.capacityWait(); wait > 0 {
+			slog.Info("watchdog: skipping stuck-turn notice during provider cooldown", "session_key", sessionKey, "cooling_for", wait)
+			return
+		}
 		DumpGoroutines("turn stuck in event handler: " + sessionKey)
 		// TryLock: the stuck handler may be the one holding state.mu.
 		if !state.mu.TryLock() {

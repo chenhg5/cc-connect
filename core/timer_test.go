@@ -17,11 +17,11 @@ func TestParseDelayOrTime_Relative(t *testing.T) {
 		{"1h30m", false},
 		{"2h30m15s", false},
 		{"500ms", false},
-		{"0s", true},       // zero = not positive
-		{"-1h", true},      // negative
-		{"", true},         // empty
-		{"garbage", true},  // invalid
-		{"2", true},        // bare number
+		{"0s", true},      // zero = not positive
+		{"-1h", true},     // negative
+		{"", true},        // empty
+		{"garbage", true}, // invalid
+		{"2", true},       // bare number
 	}
 
 	for _, tt := range tests {
@@ -279,6 +279,42 @@ func TestTimerScheduler_FiresOnTime(t *testing.T) {
 	if !got.Fired {
 		t.Error("job not marked as fired")
 	}
+}
+
+func TestTimerScheduler_DefersJobDuringQuotaCooldown(t *testing.T) {
+	store, err := NewTimerStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := NewTimerScheduler(store)
+	engine := &Engine{name: "test"}
+	engine.quotaCoolingUntil("RESOURCE_EXHAUSTED quota reached. Resets in 1h")
+	sched.RegisterEngine("test", engine)
+
+	job := &TimerJob{
+		ID:          "cooldown",
+		Project:     "test",
+		SessionKey:  "test:channel",
+		ScheduledAt: time.Now(),
+		Prompt:      "hello",
+		CreatedAt:   time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	sched.executeJob(job.ID)
+
+	if got := store.Get(job.ID); got == nil || got.Fired {
+		t.Fatalf("timer job after cooldown check = %#v, want pending", got)
+	}
+	sched.mu.RLock()
+	timer := sched.timers[job.ID]
+	sched.mu.RUnlock()
+	if timer == nil {
+		t.Fatal("timer was not rescheduled for the cooldown deadline")
+	}
+	timer.Stop()
 }
 
 func TestTimerScheduler_Cancellation(t *testing.T) {

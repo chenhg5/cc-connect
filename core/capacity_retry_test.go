@@ -35,6 +35,9 @@ func TestQuotaCoolingUntil(t *testing.T) {
 	if got := e.capacityCoolingUntil(); !got.Equal(until) {
 		t.Fatalf("capacityCoolingUntil() = %s, want %s", got, until)
 	}
+	if wait := e.capacityWait(); wait <= 0 || wait > 2*time.Hour {
+		t.Fatalf("capacityWait() = %s, want a positive wait up to 2h", wait)
+	}
 }
 
 // capacityScriptSession answers each Send with the next scripted outcome:

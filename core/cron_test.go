@@ -10,6 +10,40 @@ import (
 	"time"
 )
 
+func TestCronScheduler_SkipsJobDuringQuotaCooldown(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := &CronJob{
+		ID:         "cooldown",
+		Project:    "test",
+		SessionKey: "test:channel",
+		CronExpr:   "* * * * *",
+		Prompt:     "hello",
+		Enabled:    true,
+		CreatedAt:  time.Now(),
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatal(err)
+	}
+
+	platform := &stubPlatformEngine{n: "test"}
+	engine := NewEngine("test", &stubAgent{}, []Platform{platform}, "", LangEnglish)
+	engine.quotaCoolingUntil("RESOURCE_EXHAUSTED quota reached. Resets in 1h")
+	scheduler := NewCronScheduler(store)
+	scheduler.RegisterEngine("test", engine)
+
+	scheduler.runJob(job, false)
+
+	if got := store.Get(job.ID); !got.LastRun.IsZero() {
+		t.Fatalf("LastRun = %s, want unset while cooldown skips job", got.LastRun)
+	}
+	if sent := platform.getSent(); len(sent) != 0 {
+		t.Fatalf("cron sent messages during cooldown: %v", sent)
+	}
+}
+
 func TestCronStore_MuteToggle(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewCronStore(dir)
@@ -113,7 +147,6 @@ func TestMutePlatform_DiscardMessages(t *testing.T) {
 		t.Errorf("mutePlatform should delegate Name(), got %q", mp.Name())
 	}
 }
-
 
 func TestCronJob_MuteField(t *testing.T) {
 	job := &CronJob{ID: "m1", Mute: false}

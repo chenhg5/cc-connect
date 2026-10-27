@@ -46,14 +46,15 @@ func isModelCapacityError(msg string) bool {
 	return strings.Contains(msg, "at capacity")
 }
 
-// capacityWait returns how long the current cooldown still runs (0 = none).
+// capacityWait returns how long the model-capacity or quota cooldown still runs.
 func (e *Engine) capacityWait() time.Duration {
 	e.capMu.Lock()
 	defer e.capMu.Unlock()
-	if d := time.Until(e.capUntil); d > 0 {
-		return d
+	until := e.capUntil
+	if e.quotaUntil.After(until) {
+		until = e.quotaUntil
 	}
-	return 0
+	return max(time.Until(until), 0)
 }
 
 // capacityStartCooldown starts the next cooldown: base, then doubling.

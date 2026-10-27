@@ -230,6 +230,9 @@ func (rm *RelayManager) Send(ctx context.Context, req RelayRequest) (*RelayRespo
 	if targetEngine == nil {
 		return nil, fmt.Errorf("relay: target engine %q not found (is the project running?)", req.To)
 	}
+	if wait := targetEngine.capacityWait(); wait > 0 {
+		return nil, fmt.Errorf("relay: target engine %q is cooling down for %s", req.To, wait.Round(time.Second))
+	}
 
 	fromName := req.From
 	if binding.Bots[req.From] != "" {

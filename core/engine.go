@@ -1497,6 +1497,11 @@ func (e *Engine) ActiveSessionKeys() []string {
 // It finds the platform that owns the session key, reconstructs a reply context,
 // and processes the message as if the user sent it.
 func (e *Engine) ExecuteCronJob(job *CronJob) error {
+	if !job.IsShellJob() {
+		if wait := e.capacityWait(); wait > 0 {
+			return fmt.Errorf("cron job %q deferred during provider cooldown (%s remaining)", job.ID, wait.Round(time.Second))
+		}
+	}
 	e.hooks.Emit(HookEvent{
 		Event:      HookEventCronTriggered,
 		SessionKey: job.SessionKey,
@@ -1729,6 +1734,11 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 // notification (unless muted), and either runs a shell command or injects a
 // synthetic message into the agent session.
 func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
+	if !job.IsShellJob() {
+		if wait := e.capacityWait(); wait > 0 {
+			return fmt.Errorf("timer job %q deferred during provider cooldown (%s remaining)", job.ID, wait.Round(time.Second))
+		}
+	}
 	e.hooks.Emit(HookEvent{
 		Event:      HookEventTimerTriggered,
 		SessionKey: job.SessionKey,
@@ -16345,6 +16355,9 @@ func (e *Engine) relayContextForSourceSessionKey(fromProject, sourceSessionKey s
 // dedicated relay session, sends the message to the agent, and blocks until
 // the complete response is collected (or the relay context times out).
 func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey, message string) (string, error) {
+	if wait := e.capacityWait(); wait > 0 {
+		return "", fmt.Errorf("relay target is cooling down for %s", wait.Round(time.Second))
+	}
 	agent, sessions, relaySessionKey, err := e.relayContextForSourceSessionKey(fromProject, sourceSessionKey)
 	if err != nil {
 		return "", err
