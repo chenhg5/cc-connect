@@ -16245,7 +16245,7 @@ func TestUnsolicitedReader_SetsResyncOnDeadSessionError(t *testing.T) {
 	sess := newControllableSession("unsol-error")
 	sess.alive = false
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:error:u1")
@@ -16344,7 +16344,7 @@ func TestUnsolicitedReader_KeepsLiveSessionAfterTurnError(t *testing.T) {
 func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	// NOTE: constructed inline rather than copying a *controllableAgentSession,
 	// because that struct now carries an atomic.Bool (closeFinished) and must
@@ -16426,7 +16426,7 @@ func (s *permRecordingSession) RespondPermission(_ string, res PermissionResult)
 func TestEventsNeedResync_DefaultTrue(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	e.ensureInteractiveStateForQueueing("key1", p, "ctx")
 
@@ -16448,7 +16448,7 @@ func TestEventsNeedResync_ClearedOnCleanResult(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("resync-clean")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:resync:u1")
@@ -16485,7 +16485,7 @@ func TestCleanupInteractiveState_StopsUnsolicitedReader(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("cleanup-unsol")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:cleanup:u1")
@@ -16525,7 +16525,7 @@ func TestCleanupInteractiveState_StopsUnsolicitedReader(t *testing.T) {
 func TestWorkspaceIdleTimeout_Configurable(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	tmpDir := t.TempDir()
 	e.SetMultiWorkspace(tmpDir, filepath.Join(tmpDir, "bindings.json"))
