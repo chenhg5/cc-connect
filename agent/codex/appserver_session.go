@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -194,6 +195,8 @@ type appServerSession struct {
 const (
 	appServerRequestTimeout      = 120 * time.Second
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
+	// Longer stderr lines are logged truncated; the rest is discarded.
+	appServerStderrLineLimit = 64 * 1024
 )
 
 func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []string, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
@@ -359,6 +362,10 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	if resumeID != "" && resumeID != core.ContinueSession {
 		params := s.threadRequestParams()
 		params["threadId"] = resumeID
+		// cc-connect only needs the thread metadata; without this Codex
+		// hydrates every past turn into the response, which grows with the
+		// thread and can reach tens of MB on one JSON-RPC line.
+		params["excludeTurns"] = true
 
 		var resp threadResumeResponse
 		if err := s.request("thread/resume", params, &resp); err != nil {
@@ -1106,18 +1113,26 @@ func (s *appServerSession) readLoop(r io.Reader) {
 
 func (s *appServerSession) stderrLoop(r io.Reader) {
 	defer s.wg.Done()
-	scanner := bufio.NewScanner(r)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	reader := bufio.NewReaderSize(r, appServerStderrLineLimit)
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		line := strings.TrimSpace(string(chunk))
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// Keep draining past an over-long line: once nobody reads the
+			// pipe, Codex blocks on its next stderr write and the session hangs.
+			for errors.Is(err, bufio.ErrBufferFull) {
+				_, err = reader.ReadSlice('\n')
+			}
+			slog.Debug("codex app-server stderr (truncated)", "line", line)
+		} else if line != "" {
+			slog.Debug("codex app-server stderr", "line", line)
 		}
-		slog.Debug("codex app-server stderr", "line", line)
-	}
-	if err := scanner.Err(); err != nil && s.ctx.Err() == nil {
-		slog.Debug("codex app-server stderr read failed", "error", err)
+		if err != nil {
+			if !errors.Is(err, io.EOF) && s.ctx.Err() == nil {
+				slog.Debug("codex app-server stderr read failed", "error", err)
+			}
+			return
+		}
 	}
 }
 
