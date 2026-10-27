@@ -330,14 +330,15 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls how intermediate messages are surfaced.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	Mode             string // "full" (default), "compact", or "quiet" — thinking/tool visibility
-	CardMode         string // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages bool
-	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
-	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
-	ToolMessages     bool
-	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
-	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
+	Mode               string // "full" (default), "compact", or "quiet" — thinking/tool visibility
+	CardMode           string // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages   bool
+	CommentaryMessages *bool // nil defaults to true, independently of display mode
+	ThinkingMaxLen     int   // max runes for thinking preview; 0 = no truncation
+	ToolMaxLen         int   // max runes for tool use preview; 0 = no truncation
+	ToolMessages       bool
+	HistoryMaxLen      *int // max runes for /history entries; nil = default, 0 = no truncation
+	HideAgentFooter    bool // strip model/token footer lines emitted as agent text
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -5197,6 +5198,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			state.mu.Unlock()
 
 			switch event.Type {
+			case EventCommentary:
+				e.relayCommentary(p, replyCtx, event.Content, workspaceDir)
+
 			case EventText:
 				if event.Content != "" {
 					textParts = append(textParts, event.Content)
@@ -5670,6 +5674,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			cardAnswerText.Reset()
 			lastRichCardUpdate = time.Time{}
 			lastRichCardLen = 0
+
+		case EventCommentary:
+			e.relayCommentary(p, replyCtx, event.Content, workspaceDir)
 
 		case EventThinking:
 			if isEllipsisOnly(event.Content) {
@@ -11201,6 +11208,10 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		}
 
 		switch event.Type {
+		case EventCommentary:
+			if !auto {
+				e.relayCommentary(p, replyCtx, event.Content, "")
+			}
 		case EventText:
 			if !auto && event.Content != "" {
 				textParts = append(textParts, event.Content)
@@ -16712,6 +16723,10 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	var textParts []string
 	for event := range agentSession.Events() {
 		switch event.Type {
+		case EventCommentary:
+			// Relay returns one final answer to the calling agent; progress
+			// must not be accumulated into that answer or its history.
+
 		case EventText:
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
@@ -16823,6 +16838,9 @@ func (e *Engine) drainRelaySession(agentSession AgentSession, session *Session, 
 				sessions.Save()
 			}
 			switch ev.Type {
+			case EventCommentary:
+				// The relay caller has already timed out; there is no recipient.
+
 			case EventResult:
 				slog.Info("relay: background drain completed (agent finished turn)",
 					"relay_key", relaySessionKey)

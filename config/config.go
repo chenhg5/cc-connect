@@ -193,6 +193,7 @@ const (
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
+	CommentaryMessages   *bool   `toml:"commentary_messages"`    // user-facing progress messages; default true
 	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
 	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
@@ -872,6 +873,14 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 		return *cfg.Quiet
 	}
 	return false
+}
+
+// EffectiveCommentaryMessages resolves user-facing progress independently of quiet mode.
+func EffectiveCommentaryMessages(cfg *Config, proj *ProjectConfig) bool {
+	if proj != nil && proj.Display != nil && proj.Display.CommentaryMessages != nil {
+		return *proj.Display.CommentaryMessages
+	}
+	return cfg.Display.CommentaryMessages == nil || *cfg.Display.CommentaryMessages
 }
 
 // EffectiveDisplay resolves the per-project [projects.display] override on top
@@ -3858,6 +3867,7 @@ func GetGlobalSettings() map[string]any {
 		result["max_turn_time_mins"] = 0
 	}
 	// Display
+	result["commentary_messages"] = EffectiveCommentaryMessages(cfg, nil)
 	if cfg.Display.ThinkingMessages != nil {
 		result["thinking_messages"] = *cfg.Display.ThinkingMessages
 	} else {
@@ -3916,6 +3926,7 @@ func GetGlobalSettings() map[string]any {
 
 // GlobalSettingsUpdate holds fields to update in global config.
 type GlobalSettingsUpdate struct {
+	CommentaryMessages *bool   `json:"commentary_messages"`
 	Language           *string `json:"language"`
 	AttachmentSend     *string `json:"attachment_send"`
 	LogLevel           *string `json:"log_level"`
@@ -3957,6 +3968,9 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	}
 	if u.IdleTimeoutMins != nil {
 		cfg.IdleTimeoutMins = u.IdleTimeoutMins
+	}
+	if u.CommentaryMessages != nil {
+		cfg.Display.CommentaryMessages = u.CommentaryMessages
 	}
 	if u.ThinkingMessages != nil {
 		cfg.Display.ThinkingMessages = u.ThinkingMessages
