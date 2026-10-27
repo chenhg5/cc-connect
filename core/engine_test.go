@@ -4533,10 +4533,7 @@ func TestHandleMessage_AutoResetOnIdle_DoesNotRotateFreshSession(t *testing.T) {
 	e.handleMessage(p, msg)
 
 	deadline := time.After(2 * time.Second)
-	for {
-		if len(session.GetHistory(0)) >= 3 {
-			break
-		}
+	for len(session.GetHistory(0)) < 3 {
 		select {
 		case <-deadline:
 			t.Fatalf("timed out waiting for normal turn, sent=%v", p.getSent())
@@ -5395,7 +5392,9 @@ func TestDeleteMode_ActiveSessionMarkedWithArrowAndNotSelectable(t *testing.T) {
 	s2 := e.sessions.NewSession(msg.SessionKey, "two")
 	s2.SetAgentSessionID("session-2", "test")
 	// Switch back to s1 as the active session.
-	e.sessions.SwitchSession(msg.SessionKey, s1.ID)
+	if _, err := e.sessions.SwitchSession(msg.SessionKey, s1.ID); err != nil {
+		t.Fatalf("switch to s1: %v", err)
+	}
 
 	e.cmdDelete(p, msg, nil)
 	if len(p.repliedCards) != 1 {
@@ -7501,7 +7500,9 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 		internalIDs = append(internalIDs, sess.ID)
 	}
 	// Switch active to the session mapped to sessions[5] (agent-session-F).
-	e.sessions.SwitchSession("test:user1", internalIDs[5])
+	if _, err := e.sessions.SwitchSession("test:user1", internalIDs[5]); err != nil {
+		t.Fatalf("switch active session: %v", err)
+	}
 
 	card, err := e.renderListCard("test:user1", 1)
 	if err != nil {
@@ -15869,7 +15870,7 @@ func TestUnsolicitedReader_RelaysEventResult(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-relay")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:ch1:u1")
@@ -16001,7 +16002,7 @@ func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-cancel")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:ch1:u1")
@@ -16202,7 +16203,7 @@ func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-close")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:close:u1")
