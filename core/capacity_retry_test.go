@@ -8,6 +8,35 @@ import (
 	"time"
 )
 
+func TestQuotaCoolingDuration(t *testing.T) {
+	msg := "RESOURCE_EXHAUSTED (code 429) Individual quota reached. Resets in 83h59m53s"
+	got, ok := quotaCoolingDuration(msg)
+	if !ok {
+		t.Fatal("quota reset duration was not recognized")
+	}
+	if want := 83*time.Hour + 59*time.Minute + 53*time.Second; got != want {
+		t.Fatalf("quotaCoolingDuration() = %s, want %s", got, want)
+	}
+	if _, ok := quotaCoolingDuration("RESOURCE_EXHAUSTED: quota reached"); ok {
+		t.Fatal("recognized quota error without a reset duration")
+	}
+}
+
+func TestQuotaCoolingUntil(t *testing.T) {
+	e := &Engine{}
+	before := time.Now()
+	until, ok := e.quotaCoolingUntil("Individual quota reached. Resets in 2h")
+	if !ok {
+		t.Fatal("quota reset duration was not recognized")
+	}
+	if want := before.Add(2 * time.Hour); until.Sub(want) < 0 || until.Sub(want) > time.Second {
+		t.Fatalf("quotaCoolingUntil() = %s, want approximately %s", until, want)
+	}
+	if got := e.capacityCoolingUntil(); !got.Equal(until) {
+		t.Fatalf("capacityCoolingUntil() = %s, want %s", got, until)
+	}
+}
+
 // capacityScriptSession answers each Send with the next scripted outcome:
 // "cap" → the codex at-capacity turn error, anything else → a result.
 type capacityScriptSession struct {

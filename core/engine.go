@@ -440,6 +440,7 @@ type Engine struct {
 	// Model-at-capacity cooldown (maomao fork, see capacity_retry.go)
 	capMu           sync.Mutex
 	capUntil        time.Time
+	quotaUntil      time.Time
 	capRound        int
 	capPending      []func() // messages to re-deliver when the cooldown ends, in order
 	capArmed        bool     // a flush timer is pending
@@ -6490,6 +6491,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventError:
 			cp.Finalize(ProgressCardStateFailed)
+			quotaUntil, quotaError := time.Time{}, false
+			if event.Error != nil {
+				quotaUntil, quotaError = e.quotaCoolingUntil(event.Error.Error())
+			}
 			if event.Error != nil && isModelCapacityError(event.Error.Error()) {
 				board.hold() // maomao fork: re-sent by the capacity retry; one board row, no failure
 			} else {
@@ -6527,6 +6532,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						state.capacityFailed = true
 					}
 					state.mu.Unlock()
+				} else if quotaError {
+					slog.Warn("provider quota exhausted, cooling down until reset", "session_key", sessionKey, "cooling_until", quotaUntil.Format(time.RFC3339))
 				} else if IsPromptTooLongError(errMsg) {
 					// maomao fork: the caller of runTurnWithCapacityRetry re-runs it on a fresh
 					// session (retryFreshOnPromptTooLong), or reports the error if it cannot.

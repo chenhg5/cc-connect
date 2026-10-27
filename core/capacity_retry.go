@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -21,6 +22,23 @@ import (
 const capacityAttempts = 3 // 用户原话「三次都这样的话」
 
 var capacityCooldownBase = 10 * time.Minute // 用户原话「冷却10分钟」；var only so tests can shorten it
+
+var quotaResetDurationRE = regexp.MustCompile(`(?i)Resets in ([0-9hms.]+)`)
+
+// quotaCoolingDuration reads provider reset hints such as "Resets in 83h59m53s".
+func quotaCoolingDuration(msg string) (time.Duration, bool) {
+	lower := strings.ToLower(msg)
+	if !strings.Contains(lower, "quota") && !strings.Contains(lower, "resource_exhausted") {
+		return 0, false
+	}
+	match := quotaResetDurationRE.FindStringSubmatch(msg)
+	if len(match) != 2 {
+		return 0, false
+	}
+	value := strings.TrimRight(match[1], ".")
+	d, err := time.ParseDuration(value)
+	return d, err == nil && d > 0
+}
 
 // isModelCapacityError matches codex's "Selected model is at capacity. Please
 // try a different model." turn failure.
@@ -156,10 +174,32 @@ func (e *Engine) flushCapacityPending() {
 func (e *Engine) capacityCoolingUntil() time.Time {
 	e.capMu.Lock()
 	defer e.capMu.Unlock()
-	if time.Now().Before(e.capUntil) {
+	now := time.Now()
+	if now.Before(e.quotaUntil) && e.quotaUntil.After(e.capUntil) {
+		return e.quotaUntil
+	}
+	if now.Before(e.capUntil) {
 		return e.capUntil
 	}
+	if now.Before(e.quotaUntil) {
+		return e.quotaUntil
+	}
 	return time.Time{}
+}
+
+func (e *Engine) quotaCoolingUntil(msg string) (time.Time, bool) {
+	d, ok := quotaCoolingDuration(msg)
+	if !ok {
+		return time.Time{}, false
+	}
+	until := time.Now().Add(d)
+	e.capMu.Lock()
+	if until.After(e.quotaUntil) {
+		e.quotaUntil = until
+	}
+	until = e.quotaUntil
+	e.capMu.Unlock()
+	return until, true
 }
 
 // redeliverMessage mirrors the tail of message dispatch: run now if the
