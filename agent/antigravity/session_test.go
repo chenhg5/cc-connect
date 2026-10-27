@@ -90,6 +90,9 @@ func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	if !contains(args, "--verbose") {
 		t.Fatalf("expected configured extra args, got: %v", args)
 	}
+	if !contains(args, "--output-format=stream-json") {
+		t.Fatalf("expected AGY stream-json output, got: %v", args)
+	}
 	if contains(args, "-m") || contains(args, "--model") {
 		t.Fatalf("did not expect model flags in args, got: %v", args)
 	}
@@ -104,7 +107,10 @@ func TestAntigravitySession_ResumePassesConversationID(t *testing.T) {
 		if err := os.WriteFile(argsPath, []byte(strings.Join(os.Args, "\x00")), 0o600); err != nil {
 			os.Exit(2)
 		}
-		_, _ = io.WriteString(os.Stdout, "ok\n")
+		_, _ = io.WriteString(os.Stdout,
+			"{\"event\":\"init\",\"conversation_id\":\"conversation-1\"}\n"+
+				"{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"conversation-1\",\"step_index\":0,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"text_delta\":\"ok\\n\"}}\n"+
+				"{\"event\":\"result\",\"result\":{\"conversation_id\":\"conversation-1\",\"status\":\"SUCCESS\",\"response\":\"ok\\n\"}}\n")
 		os.Exit(0)
 	}
 
@@ -133,22 +139,32 @@ func TestAntigravitySession_ResumePassesConversationID(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	select {
-	case event := <-s.Events():
-		if event.Type != core.EventText {
-			t.Fatalf("first event type = %q, want %q", event.Type, core.EventText)
+	var response strings.Builder
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-s.Events():
+			switch event.Type {
+			case core.EventText:
+				if event.SessionID != "" && event.SessionID != "conversation-1" {
+					t.Fatalf("session ID = %q, want conversation-1", event.SessionID)
+				}
+				response.WriteString(event.Content)
+			case core.EventResult:
+				if !event.Done {
+					t.Fatalf("completion event = %+v, want done EventResult", event)
+				}
+				if got := response.String(); got != "ok\n" {
+					t.Fatalf("response = %q, want %q", got, "ok\n")
+				}
+				goto streamComplete
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for streamed helper output")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for helper output")
 	}
-	select {
-	case event := <-s.Events():
-		if event.Type != core.EventResult || !event.Done {
-			t.Fatalf("completion event = %+v, want done EventResult", event)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for EventResult")
-	}
+
+streamComplete:
 
 	data, err := os.ReadFile(argsPath)
 	if err != nil {
