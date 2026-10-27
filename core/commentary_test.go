@@ -93,7 +93,7 @@ func TestProcessInteractiveEvents_QuietCommentaryOptOut(t *testing.T) {
 		t.Run(map[bool]string{true: "enabled", false: "disabled"}[enabled], func(t *testing.T) {
 			p := &stubPlatformEngine{n: "test"}
 			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-			defer e.Stop()
+			defer func() { _ = e.Stop() }()
 			e.SetDisplayConfig(DisplayCfg{Mode: "quiet", CommentaryMessages: &enabled})
 			session := e.sessions.GetOrCreateActive("test:quiet-commentary")
 			s := newControllableSession("quiet-commentary")

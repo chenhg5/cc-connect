@@ -670,7 +670,7 @@ func TestHandleRelay_MultiWorkspaceRequiresWorkspaceBinding(t *testing.T) {
 
 func TestHandleRelay_CommentaryDoesNotEnterFinalResponse(t *testing.T) {
 	e := newTestEngine()
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 	session := newControllableSession("relay-commentary")
 	e.agent = &controllableAgent{nextSession: session}
 	session.events <- Event{Type: EventCommentary, Content: "Progress only"}
@@ -684,7 +684,7 @@ func TestHandleRelay_CommentaryDoesNotEnterFinalResponse(t *testing.T) {
 
 func TestDrainRelaySession_CommentaryDoesNotBecomeAnAnswer(t *testing.T) {
 	e := newTestEngine()
-	defer e.Stop()
+	defer func() { _ = e.Stop() }()
 	session := newControllableSession("drain-commentary")
 	history := e.sessions.GetOrCreateActive("relay:source:test:chat")
 	session.events <- Event{Type: EventCommentary, Content: "Late progress"}
