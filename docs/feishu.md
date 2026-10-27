@@ -518,3 +518,15 @@ enable_feishu_card = false
 - [接入 Slack](./slack.md)
 - [接入 Discord](./discord.md)
 - [返回首页](../README.md)
+
+### Codex 进度消息的显示控制
+
+Codex 的用户可见进度默认单独发送，即使使用 `quiet` 模式或隐藏 thinking 也是如此；
+每次工具调用前可能产生一条消息。可在 `[display]` 或 `[projects.display]` 设置
+`commentary_messages = false` 关闭这类独立消息，最终答案仍正常发送。
+`partial_answer` 和 `final_answer` 都进入答案通道，不会在工具调用时变成进度消息。
+进度不加入 `/history` 的最终答案。审批提示之前的进度会先发送，再显示审批卡片。
+未提供 `phase` 的旧版 Codex 使用工具边界回退，不依赖特定 provider 提供阶段字段。
+
+手动压缩会显示进度，自动压缩保持静默。Bot 间 relay 是只返回最终答案的请求/响应接口，
+不会把进度混入调用方上下文；relay 超时后的后台排空也不会重新投递进度。

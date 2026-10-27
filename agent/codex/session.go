@@ -634,6 +634,14 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 				}
 				return
 			}
+			if phase, _ := item["phase"].(string); phase == "partial_answer" || phase == "final_answer" {
+				cs.flushPendingAsCommentary()
+				select {
+				case cs.events <- core.Event{Type: core.EventText, Content: text}:
+				case <-cs.ctx.Done():
+				}
+				return
+			}
 			cs.pendingMsgs = append(cs.pendingMsgs, text)
 		}
 

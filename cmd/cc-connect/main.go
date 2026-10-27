@@ -552,16 +552,18 @@ func main() {
 		// Wire display truncation settings (includes legacy quiet → display mapping)
 		{
 			mode, tm, tool, tmlen, toollen, _, _, hideAgentFooter := config.EffectiveDisplay(cfg, &proj)
+			commentary := config.EffectiveCommentaryMessages(cfg, &proj)
 			historyMaxLen := config.EffectiveHistoryMaxLen(cfg, &proj)
 			engine.SetDisplayConfig(core.DisplayCfg{
-				Mode:             mode,
-				CardMode:         config.EffectiveCardMode(cfg, &proj),
-				ThinkingMessages: tm,
-				ThinkingMaxLen:   tmlen,
-				ToolMaxLen:       toollen,
-				ToolMessages:     tool,
-				HistoryMaxLen:    &historyMaxLen,
-				HideAgentFooter:  hideAgentFooter,
+				Mode:               mode,
+				CardMode:           config.EffectiveCardMode(cfg, &proj),
+				ThinkingMessages:   tm,
+				CommentaryMessages: &commentary,
+				ThinkingMaxLen:     tmlen,
+				ToolMaxLen:         toollen,
+				ToolMessages:       tool,
+				HistoryMaxLen:      &historyMaxLen,
+				HideAgentFooter:    hideAgentFooter,
 			})
 		}
 
@@ -1207,6 +1209,9 @@ func main() {
 				iv := int(v)
 				u.IdleTimeoutMins = &iv
 			}
+			if v, ok := updates["commentary_messages"].(bool); ok {
+				u.CommentaryMessages = &v
+			}
 			if v, ok := updates["thinking_messages"].(bool); ok {
 				u.ThinkingMessages = &v
 			}
@@ -1781,16 +1786,18 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 
 	// Reload display config (includes legacy quiet → display mapping)
 	mode, tm, tool, tmlen, toollen, showCtx, showFooter, hideAgentFooter := config.EffectiveDisplay(cfg, proj)
+	commentary := config.EffectiveCommentaryMessages(cfg, proj)
 	historyMaxLen := config.EffectiveHistoryMaxLen(cfg, proj)
 	engine.SetDisplayConfig(core.DisplayCfg{
-		Mode:             mode,
-		CardMode:         config.EffectiveCardMode(cfg, proj),
-		ThinkingMessages: tm,
-		ThinkingMaxLen:   tmlen,
-		ToolMaxLen:       toollen,
-		ToolMessages:     tool,
-		HistoryMaxLen:    &historyMaxLen,
-		HideAgentFooter:  hideAgentFooter,
+		Mode:               mode,
+		CardMode:           config.EffectiveCardMode(cfg, proj),
+		ThinkingMessages:   tm,
+		CommentaryMessages: &commentary,
+		ThinkingMaxLen:     tmlen,
+		ToolMaxLen:         toollen,
+		ToolMessages:       tool,
+		HistoryMaxLen:      &historyMaxLen,
+		HideAgentFooter:    hideAgentFooter,
 	})
 	result.DisplayUpdated = true
 

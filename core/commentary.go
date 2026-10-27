@@ -6,6 +6,9 @@ import "strings"
 // edits do not notify users, so these updates must bypass progress aggregation
 // and remain separate from the final answer, even when thinking is hidden.
 func (e *Engine) relayCommentary(p Platform, replyCtx any, content, workspaceDir string) {
+	if e.display.CommentaryMessages != nil && !*e.display.CommentaryMessages {
+		return
+	}
 	if e.display.HideAgentFooter {
 		content = stripAgentFooterLines(content)
 	}

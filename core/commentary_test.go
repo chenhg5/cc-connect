@@ -87,3 +87,71 @@ func TestUnsolicitedReader_RelaysCommentaryBeforeCompletion(t *testing.T) {
 		t.Fatalf("progress must arrive without a terminal result: %v", sent)
 	}
 }
+
+func TestProcessInteractiveEvents_QuietCommentaryOptOut(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		t.Run(map[bool]string{true: "enabled", false: "disabled"}[enabled], func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			defer e.Stop()
+			e.SetDisplayConfig(DisplayCfg{Mode: "quiet", CommentaryMessages: &enabled})
+			session := e.sessions.GetOrCreateActive("test:quiet-commentary")
+			s := newControllableSession("quiet-commentary")
+			state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
+			done := make(chan struct{})
+			go func() {
+				e.processInteractiveEvents(state, session, e.sessions, "test:quiet-commentary", "m", time.Now(), nil, nil, "ctx", 0)
+				close(done)
+			}()
+			for i := 0; i < 3; i++ {
+				s.events <- Event{Type: EventCommentary, Content: "Progress update"}
+				s.events <- Event{Type: EventToolUse, ToolName: "shell"}
+			}
+			s.events <- Event{Type: EventText, Content: "Final answer"}
+			s.events <- Event{Type: EventResult, Done: true}
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("turn did not complete")
+			}
+			sent := strings.Join(p.getSent(), "\n")
+			want := 0
+			if enabled {
+				want = 3
+			}
+			if got := strings.Count(sent, "Progress update"); got != want {
+				t.Fatalf("progress count = %d, want %d; sent=%q", got, want, sent)
+			}
+			if strings.Count(sent, "Final answer") != 1 {
+				t.Fatalf("final answer missing/duplicated: %q", sent)
+			}
+		})
+	}
+}
+
+func TestProcessCompressEvents_CommentaryOnlyForManualCompression(t *testing.T) {
+	for _, auto := range []bool{false, true} {
+		t.Run(map[bool]string{false: "manual", true: "auto"}[auto], func(t *testing.T) {
+			e := newTestEngine()
+			defer e.cancel()
+			p := &stubPlatformEngine{n: "test"}
+			agentSession := newQueuingSession("compress")
+			state := &interactiveState{agentSession: agentSession, platform: p}
+			session := e.sessions.GetOrCreateActive("test:compress-commentary")
+			lockGen, _ := session.TryLock()
+			defer session.Unlock(lockGen)
+			agentSession.events <- Event{Type: EventCommentary, Content: "Compressing progress"}
+			agentSession.events <- Event{Type: EventResult, Done: true}
+			unlocked := false
+			e.processCompressEvents(state, session, e.sessions, "test:compress-commentary", p, nil, &unlocked, auto, lockGen)
+			got := strings.Count(strings.Join(p.getSent(), "\n"), "Compressing progress")
+			want := 1
+			if auto {
+				want = 0
+			}
+			if got != want {
+				t.Fatalf("progress count = %d, want %d", got, want)
+			}
+		})
+	}
+}

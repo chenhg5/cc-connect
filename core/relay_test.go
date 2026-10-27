@@ -667,3 +667,35 @@ func TestHandleRelay_MultiWorkspaceRequiresWorkspaceBinding(t *testing.T) {
 		t.Fatalf("expected no global relay session, got %q", got)
 	}
 }
+
+func TestHandleRelay_CommentaryDoesNotEnterFinalResponse(t *testing.T) {
+	e := newTestEngine()
+	defer e.Stop()
+	session := newControllableSession("relay-commentary")
+	e.agent = &controllableAgent{nextSession: session}
+	session.events <- Event{Type: EventCommentary, Content: "Progress only"}
+	session.events <- Event{Type: EventText, Content: "Final answer"}
+	session.events <- Event{Type: EventResult, Done: true}
+	resp, err := e.HandleRelay(context.Background(), "source", "test:chat:user", "hello")
+	if err != nil || resp != "Final answer" {
+		t.Fatalf("relay = %q, %v", resp, err)
+	}
+}
+
+func TestDrainRelaySession_CommentaryDoesNotBecomeAnAnswer(t *testing.T) {
+	e := newTestEngine()
+	defer e.Stop()
+	session := newControllableSession("drain-commentary")
+	history := e.sessions.GetOrCreateActive("relay:source:test:chat")
+	session.events <- Event{Type: EventCommentary, Content: "Late progress"}
+	session.events <- Event{Type: EventResult, Done: true}
+	e.drainRelaySession(session, history, e.sessions, "test", "relay:source:test:chat")
+	select {
+	case <-session.closed:
+	default:
+		t.Fatal("drain did not close completed session")
+	}
+	if got := history.GetHistory(0); len(got) != 0 {
+		t.Fatalf("late progress entered history: %+v", got)
+	}
+}

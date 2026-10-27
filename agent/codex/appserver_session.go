@@ -1266,6 +1266,11 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 				s.emit(core.Event{Type: core.EventCommentary, Content: text})
 				return
 			}
+			if phase, _ := item["phase"].(string); phase == "partial_answer" || phase == "final_answer" {
+				s.flushPendingAsCommentary()
+				s.emit(core.Event{Type: core.EventText, Content: text})
+				return
+			}
 			s.stateMu.Lock()
 			s.pendingMsgs = append(s.pendingMsgs, text)
 			s.stateMu.Unlock()
