@@ -308,6 +308,15 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			}
 		}
 	}
+	if ctx.Err() == nil {
+		for _, event := range parser.flushResponse(core.EventText) {
+			select {
+			case as.events <- event:
+			case <-as.ctx.Done():
+				return
+			}
+		}
+	}
 	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "file already closed") {
 		slog.Error("antigravitySession: read error", "error", err)
 		select {
