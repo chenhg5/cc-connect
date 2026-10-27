@@ -248,16 +248,10 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 // events channel until one ends without expectingContinue.
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
-	waited := false
-	defer func() {
-		if !waited {
-			_ = cmd.Wait()
-		}
-	}()
 
 	// readProcess returns true when the process ended normally (no
 	// scanner/stderr error) and the engine should keep going.
-	keepGoing := s.readProcess(stdout, stderrBuf)
+	keepGoing := s.readProcess(cmd, stdout, stderrBuf)
 
 	if !s.expectingContinue.Load() {
 		slog.Debug("opencodeSession: readLoop complete, sending fallback EventResult", "session_id", s.CurrentSessionID())
@@ -296,7 +290,13 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 // readProcess reads NDJSON events from stdout until EOF and reports whether
 // the process ended cleanly (no scanner error, no stderr content). It is the
 // body of one opencode process's read loop.
-func (s *opencodeSession) readProcess(stdout io.ReadCloser, stderrBuf *bytes.Buffer) bool {
+func (s *opencodeSession) readProcess(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) bool {
+	waited := false
+	defer func() {
+		if !waited {
+			_ = cmd.Wait()
+		}
+	}()
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
