@@ -1153,8 +1153,8 @@ func TestProcessInteractiveEvents_ReturnsRetriableErrorWithoutSendingRawError(t 
 	state.mu.Lock()
 	needResync := state.eventsNeedResync
 	state.mu.Unlock()
-	if !needResync {
-		t.Fatal("eventsNeedResync = false, want true after retriable error")
+	if needResync {
+		t.Fatal("eventsNeedResync = true, want false: a retriable per-turn error keeps a live session's stream")
 	}
 }
 
