@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -67,25 +68,37 @@ type acpSessionListEntry struct {
 // probeSpawn launches `<cmd> <args...>`, sets up a JSON-RPC transport
 // and starts its readLoop. The caller owns the returned `teardown`
 // func and must invoke it to reap the child process.
-func (a *Agent) probeSpawn(ctx context.Context, cwd string) (*transport, *bytes.Buffer, func(), error) {
+//
+// teardown returns the child's stderr. It may be called more than once
+// (the work is done exactly once) and it may be called *before* the
+// caller is done with the transport, which is what makes the stderr
+// readable: the text is captured after cmd.Wait() has returned, i.e.
+// after os/exec's stderr copy goroutine has finished writing to it.
+func (a *Agent) probeSpawn(ctx context.Context, cwd string) (*transport, func() string, error) {
 	allArgs := append(append([]string{}, a.cliExtraArgs...), a.args...)
 	cmd := exec.CommandContext(ctx, a.cmd, allArgs...)
 	cmd.Dir = cwd
 	cmd.Env = core.MergeEnv(os.Environ(), a.extraEnv)
+	// Bound how long cmd.Wait() may wait for os/exec's I/O goroutines.
+	// The stderr copy goroutine only ends when the stderr pipe reaches
+	// EOF, so a descendant that inherits the pipe and stays alive would
+	// block the teardown forever. Same setting as the gemini/kimi/
+	// antigravity/opencode adapters.
+	cmd.WaitDelay = 1 * time.Second
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("acp: probe stdin pipe: %w", err)
+		return nil, nil, fmt.Errorf("acp: probe stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("acp: probe stdout pipe: %w", err)
+		return nil, nil, fmt.Errorf("acp: probe stdout pipe: %w", err)
 	}
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = io.MultiWriter(&stderrBuf)
 
 	if err := cmd.Start(); err != nil {
-		return nil, nil, nil, fmt.Errorf("acp: probe start %s: %w", a.cmd, err)
+		return nil, nil, fmt.Errorf("acp: probe start %s: %w", a.cmd, err)
 	}
 
 	// The server-request handler needs to reference `tr` itself in order
@@ -105,24 +118,37 @@ func (a *Agent) probeSpawn(ctx context.Context, cwd string) (*transport, *bytes.
 	readCtx, cancelRead := context.WithCancel(ctx)
 	go tr.readLoop(readCtx)
 
-	teardown := func() {
-		cancelRead()
-		_ = stdin.Close()
-		done := make(chan struct{})
-		go func() {
-			_ = cmd.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
+	// teardown is idempotent: the caller may invoke it early to read the
+	// stderr safely and still defer it.
+	var (
+		once       sync.Once
+		stderrText string
+	)
+	teardown := func() string {
+		once.Do(func() {
+			cancelRead()
+			_ = stdin.Close()
+			done := make(chan struct{})
+			go func() {
+				_ = cmd.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				<-done
 			}
-			<-done
-		}
+			// exec copies stderr into stderrBuf from its own goroutine until
+			// Wait returns, so the buffer is only safe to read after that
+			// (see #2111).
+			stderrText = stderrBuf.String()
+		})
+		return stderrText
 	}
-	return tr, &stderrBuf, teardown, nil
+	return tr, teardown, nil
 }
 
 // probeInitialize performs the ACP handshake on an already-spawned
@@ -198,7 +224,7 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 	defer cancel()
 
 	started := time.Now()
-	tr, stderrBuf, teardown, err := a.probeSpawn(probeCtx, absWorkDir)
+	tr, teardown, err := a.probeSpawn(probeCtx, absWorkDir)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +232,10 @@ func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, erro
 
 	init, err := probeInitialize(probeCtx, tr)
 	if err != nil {
-		if msg := strings.TrimSpace(stderrBuf.String()); msg != "" {
+		// teardown() reaps the child and hands back its stderr; the text is
+		// captured after cmd.Wait() returned, so reading it here cannot race
+		// with os/exec's stderr copy goroutine (see #2111).
+		if msg := strings.TrimSpace(teardown()); msg != "" {
 			return nil, fmt.Errorf("%w (stderr: %s)", err, truncateForLog(msg, 200))
 		}
 		return nil, err

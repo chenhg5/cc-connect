@@ -46,6 +46,31 @@ type claudeUsageProbeState struct {
 	usageSentAt     time.Time
 }
 
+// lockedStderrBuffer is a bytes.Buffer that can be written by os/exec's
+// stderr copy goroutine while the probe reads it back. bytes.Buffer is not
+// safe for concurrent use, so both sides take the lock (see #2111).
+//
+// The probe cannot simply wait for the process before reading the stderr:
+// the ticker and the timeout branch read it while the process is still
+// running, which is what surfaces a failed /usage early. Copying the bytes
+// out under a lock keeps that behaviour and makes the read well-defined.
+type lockedStderrBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedStderrBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedStderrBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error) {
 	if _, err := exec.LookPath("claude"); err != nil {
 		return nil, fmt.Errorf("claudecode: 'claude' CLI not found in PATH")
@@ -84,7 +109,17 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	}
 	cmd.Env = env
 
-	var stderr bytes.Buffer
+	// Bound how long cmd.Wait() may wait for os/exec's I/O goroutines. The
+	// stderr copy goroutine only ends when the stderr pipe reaches EOF, so
+	// a descendant that inherits the pipe and stays alive would block the
+	// probe's cleanup forever — the probe would hang with neither a usage
+	// report nor an error. Same setting as the claudecode session.
+	cmd.WaitDelay = 3 * time.Second
+
+	// pty.StartWithSize only fills in the std streams that are still nil,
+	// so this stderr buffer survives and os/exec copies the child's stderr
+	// into it from its own goroutine.
+	var stderr lockedStderrBuffer
 	cmd.Stderr = &stderr
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 40, Cols: 120})
@@ -171,6 +206,8 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 			if usageScreen != "" {
 				return usageScreen, nil
 			}
+			// cmd.Wait() has returned, so os/exec's stderr copy goroutine is
+			// done and the buffer is safe to read (see #2111).
 			if screenErr := detectClaudeUsageOutputError(lastScreen, stderr.String()); screenErr != nil {
 				return "", screenErr
 			}

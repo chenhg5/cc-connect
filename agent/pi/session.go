@@ -25,13 +25,28 @@ import (
 // cappedStderrWriter wraps a bytes.Buffer with a maximum size to prevent
 // unbounded growth from stderr output in long-running RPC sessions.
 // Writes beyond the cap are silently discarded.
+//
+// The mutex is not optional: os/exec copies the child's stderr into this
+// writer from its own goroutine, while the RPC read loop reads it from
+// another goroutine. bytes.Buffer is not safe for concurrent use, so the
+// two sides must be serialised — see #2111.
+//
+// A lock is used here rather than waiting for cmd.Wait() because the RPC
+// read loop owns the result-delivery path: cmd.Wait() closes the parent's
+// end of the stdout pipe, which would turn the scanner's clean EOF into
+// os.ErrClosed, and it can block on the stderr pipe while a descendant
+// still holds it open. Copying the bytes out under a lock keeps the
+// current process lifecycle untouched.
 type cappedStderrWriter struct {
+	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
 const maxStderrSize = 64 * 1024
 
 func (w *cappedStderrWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.buf.Len() >= maxStderrSize {
 		return len(p), nil
 	}
@@ -43,6 +58,8 @@ func (w *cappedStderrWriter) Write(p []byte) (int, error) {
 }
 
 func (w *cappedStderrWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	return w.buf.String()
 }
 
@@ -286,7 +303,7 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 	}
 
 	// Process exited — reap the child and signal the engine.
-	// killRPC (now with Wait()) ensures the zombie is collected.
+	// killRPC ensures the zombie is collected.
 	s.killRPC()
 
 	if err := scanner.Err(); err != nil {
@@ -303,6 +320,11 @@ func (s *piSession) readLoopRPC(stdout io.ReadCloser) {
 	// and emit EventError with the captured stderr when present.
 	// All writes to s.events happen before the deferred wg.Done(), so
 	// Close()'s wg.Wait() → close(s.events) is correctly ordered.
+	//
+	// The stderr buffer is shared with os/exec's copy goroutine, which is
+	// still draining the pipe at this point: killRPC only reaps the process
+	// (Process.Wait), it does not join that goroutine. cappedStderrWriter
+	// takes a lock around the buffer, so this read is safe (see #2111).
 	stderrMsg := strings.TrimSpace(s.stderrBuf.String())
 	if stderrMsg != "" {
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("pi: %s", stderrMsg)}
