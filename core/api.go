@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -24,6 +25,9 @@ const DefaultMaxAttachmentSize int64 = 50 << 20
 // to send messages to active sessions.
 type APIServer struct {
 	socketPath string
+	socketInfo os.FileInfo
+	socketLock io.Closer
+	stopOnce   sync.Once
 	listener   net.Listener
 	server     *http.Server
 	mux        *http.ServeMux
@@ -69,21 +73,59 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		return nil, fmt.Errorf("create run dir: %w", err)
 	}
 	sockPath := filepath.Join(sockDir, "api.sock")
-
-	// Remove stale socket
-	os.Remove(sockPath)
-
-	listener, err := net.Listen("unix", sockPath)
+	// Different configs can still resolve to the same data directory. Keep
+	// this lock for the listener's lifetime, including stale-socket recovery.
+	lock, err := lockAPISocket(sockPath + ".lock")
+	if err != nil {
+		return nil, fmt.Errorf("lock API socket: %w", err)
+	}
+	owned := false
+	defer func() {
+		if !owned {
+			_ = lock.Close()
+		}
+	}()
+	if info, err := os.Lstat(sockPath); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("API socket path is not a socket: %s", sockPath)
+		}
+		conn, dialErr := net.DialTimeout("unix", sockPath, time.Second)
+		if dialErr == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("API socket is already listening: %s", sockPath)
+		}
+		// Only connection refusal proves a leftover socket. Timeouts and
+		// permission errors must never cause a live listener to be unlinked.
+		if !errors.Is(dialErr, syscall.ECONNREFUSED) && !errors.Is(dialErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("check existing API socket: %w", dialErr)
+		}
+		if err := removeAPISocket(sockPath, info); err != nil {
+			return nil, fmt.Errorf("remove stale API socket: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("stat API socket: %w", err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
 	if err != nil {
 		return nil, fmt.Errorf("listen unix socket: %w", err)
 	}
+	// Close must not unlink a socket that another instance has replaced.
+	listener.SetUnlinkOnClose(false)
+	info, err := os.Lstat(sockPath)
+	if err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("stat new API socket: %w", err)
+	}
 	if err := os.Chmod(sockPath, 0o600); err != nil {
 		_ = listener.Close()
+		_ = removeAPISocket(sockPath, info)
 		return nil, fmt.Errorf("chmod socket: %w", err)
 	}
 
 	s := &APIServer{
 		socketPath:         sockPath,
+		socketInfo:         info,
+		socketLock:         lock,
 		listener:           listener,
 		mux:                http.NewServeMux(),
 		engines:            make(map[string]*Engine),
@@ -106,6 +148,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
 	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
 
+	owned = true
 	return s, nil
 }
 
@@ -182,14 +225,39 @@ func (s *APIServer) Start() {
 }
 
 func (s *APIServer) Stop() {
-	if s.server != nil {
-		if err := s.server.Close(); err != nil && err != http.ErrServerClosed {
-			slog.Debug("api server close failed", "error", err)
+	s.stopOnce.Do(func() {
+		if s.server != nil {
+			if err := s.server.Close(); err != nil && err != http.ErrServerClosed {
+				slog.Debug("api server close failed", "error", err)
+			}
 		}
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
+		if err := removeAPISocket(s.socketPath, s.socketInfo); err != nil {
+			slog.Debug("api server remove socket failed", "error", err)
+		}
+		if s.socketLock != nil {
+			_ = s.socketLock.Close()
+		}
+	})
+}
+
+func removeAPISocket(path string, owned os.FileInfo) error {
+	if owned == nil {
+		return nil
 	}
-	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
-		slog.Debug("api server remove socket failed", "error", err)
+	current, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
 	}
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(owned, current) {
+		return nil
+	}
+	return os.Remove(path)
 }
 
 func apiJSON(w http.ResponseWriter, status int, v any) {
