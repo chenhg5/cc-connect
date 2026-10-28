@@ -527,6 +527,7 @@ const (
 	MsgDeleteUsage              MsgKey = "delete_usage"
 	MsgDeleteSuccess            MsgKey = "delete_success"
 	MsgDeleteActiveDenied       MsgKey = "delete_active_denied"
+	MsgDeleteInUseDenied        MsgKey = "delete_in_use_denied"
 	MsgDeleteNotSupported       MsgKey = "delete_not_supported"
 	MsgDeleteModeTitle          MsgKey = "delete_mode_title"
 	MsgDeleteModeSelect         MsgKey = "delete_mode_select"
@@ -3312,6 +3313,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 不能刪除當前活躍會話，請先切換到其他會話。",
 		LangJapanese:           "❌ 現在アクティブなセッションは削除できません。先に別のセッションに切り替えてください。",
 		LangSpanish:            "❌ No se puede eliminar la sesión activa. Cambie a otra sesión primero.",
+	},
+	MsgDeleteInUseDenied: {
+		LangEnglish:            "❌ Cannot delete %s: it is the active session of another chat.",
+		LangChinese:            "❌ 不能删除 %s：它是其他对话正在使用的会话。",
+		LangTraditionalChinese: "❌ 不能刪除 %s：它是其他對話正在使用的會話。",
+		LangJapanese:           "❌ %s は削除できません：別のチャットで使用中のセッションです。",
+		LangSpanish:            "❌ No se puede eliminar %s: es la sesión activa de otro chat.",
 	},
 	MsgDeleteNotSupported: {
 		LangEnglish:            "❌ This agent does not support session deletion.",

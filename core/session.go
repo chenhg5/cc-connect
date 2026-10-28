@@ -545,6 +545,26 @@ func (sm *SessionManager) ListSessions(userKey string) []*Session {
 	return out
 }
 
+// AgentSessionActiveElsewhere reports whether agentSessionID is the active
+// agent session of any user key other than exceptKey: another chat would
+// resume it on its next message.
+func (sm *SessionManager) AgentSessionActiveElsewhere(agentSessionID, exceptKey string) bool {
+	if agentSessionID == "" {
+		return false
+	}
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	for key, id := range sm.activeSession {
+		if key == exceptKey {
+			continue
+		}
+		if s, ok := sm.sessions[id]; ok && s.GetAgentSessionID() == agentSessionID {
+			return true
+		}
+	}
+	return false
+}
+
 func (sm *SessionManager) ActiveSessionID(userKey string) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
