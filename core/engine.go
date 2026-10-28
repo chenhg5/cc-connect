@@ -4000,7 +4000,7 @@ func russianPermissionDecision(s string) string {
 	if len(parts) > 1 && isMention(parts[len(parts)-1]) {
 		parts = parts[:len(parts)-1]
 	}
-	return strings.Join(parts, " ")
+	return strings.TrimRight(strings.Join(parts, " "), "!?.…,;:")
 }
 
 // isApproveAllResponse reports whether s expresses "allow all" intent.

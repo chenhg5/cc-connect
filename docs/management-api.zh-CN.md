@@ -421,7 +421,7 @@ GET /api/v1/status?token=mgmt-secret
 |----------------------|----------|-----------------------------------------------------------|
 | `quiet`              | boolean  | 是否隐藏思考过程/工具进度消息                             |
 | `admin_from`         | string   | 特权命令用户 ID 列表（逗号分隔）；`"*"` 表示全部用户      |
-| `language`           | string   | 界面语言：`en`、`zh`、`zh-TW`、`ja`、`es`                 |
+| `language`           | string   | 界面语言：`en`、`zh`、`zh-TW`、`ja`、`es`、`ru`                 |
 | `disabled_commands`  | string[] | 要禁用的命令（如 `restart`、`upgrade`、`cron`）           |
 
 **响应：**
