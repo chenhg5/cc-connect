@@ -255,8 +255,7 @@ func TestWebSocketReconnectPreservesInFlightHandler(t *testing.T) {
 	}
 }
 
-// Opt in with a locally built cc-connect to exercise the complete binary:
-// configuration, platform startup, inbound events, engine commands and replies.
+// The binary recovery test must preserve a running caller's control socket.
 func TestWebSocketBinaryPreservesExistingHomeSocket(t *testing.T) {
 	if os.Getenv("CC_CONNECT_TEST_BINARY") == "" {
 		t.Skip("set CC_CONNECT_TEST_BINARY to an orbenv cc-connect binary")
@@ -283,6 +282,8 @@ func TestWebSocketBinaryPreservesExistingHomeSocket(t *testing.T) {
 	}
 }
 
+// Opt in with a locally built cc-connect to exercise the complete binary:
+// configuration, platform startup, inbound events, engine commands and replies.
 func TestWebSocketBinaryRecoversSilentConnection(t *testing.T) {
 	binary := os.Getenv("CC_CONNECT_TEST_BINARY")
 	if binary == "" {
