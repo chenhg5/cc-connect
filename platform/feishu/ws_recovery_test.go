@@ -271,7 +271,7 @@ func TestWebSocketBinaryPreservesExistingHomeSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	before, err := os.Lstat(path)
 	if err != nil {
 		t.Fatal(err)
