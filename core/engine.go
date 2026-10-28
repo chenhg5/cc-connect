@@ -3429,8 +3429,8 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 // UserInputSteerer (native steer RPC, text only) or MidTurnInputSender
 // (SendMidTurn writes to the same live process). Returns false when the message
 // should fall through to the queue instead: unsupported agent, agent not yet
-// running, an existing queue whose order must be kept, a stale message, or
-// a delivery error.
+// running, an existing queue whose order must be kept, a stale or voice
+// message, or a delivery error.
 func (e *Engine) injectMessageIntoBusyTurn(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager) bool {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[interactiveKey]
@@ -3443,7 +3443,9 @@ func (e *Engine) injectMessageIntoBusyTurn(p Platform, msg *Message, interactive
 	queued := len(state.pendingMessages)
 	stale := e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs)
 	state.mu.Unlock()
-	if agentSession == nil || !agentSession.Alive() || queued > 0 || stale {
+	// A voice message keeps the queue, as in upstream #523: its turn is the
+	// one that answers by voice (state.fromVoice), which an injection is not.
+	if agentSession == nil || !agentSession.Alive() || queued > 0 || stale || msg.FromVoice {
 		return false
 	}
 

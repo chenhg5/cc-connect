@@ -229,6 +229,16 @@ func TestBusyMessage_FallsBackToQueue(t *testing.T) {
 			},
 		},
 		{
+			// Its turn answers by voice; an injected message would not.
+			name:    "voice message",
+			session: func() AgentSession { return newMidTurnSession("voice") },
+			msg: func() *Message {
+				m := busyMessage("spoken follow-up")
+				m.FromVoice = true
+				return m
+			},
+		},
+		{
 			// Earlier messages are already waiting; injecting this one would
 			// let it overtake them.
 			name:    "queue already non-empty",
