@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -256,6 +257,32 @@ func TestWebSocketReconnectPreservesInFlightHandler(t *testing.T) {
 
 // Opt in with a locally built cc-connect to exercise the complete binary:
 // configuration, platform startup, inbound events, engine commands and replies.
+func TestWebSocketBinaryPreservesExistingHomeSocket(t *testing.T) {
+	if os.Getenv("CC_CONNECT_TEST_BINARY") == "" {
+		t.Skip("set CC_CONNECT_TEST_BINARY to an orbenv cc-connect binary")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".cc-connect", "run", "api.sock")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("recovery", TestWebSocketBinaryRecoversSilentConnection)
+	after, err := os.Lstat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("binary recovery test changed the caller's socket: %v", err)
+	}
+}
+
 func TestWebSocketBinaryRecoversSilentConnection(t *testing.T) {
 	binary := os.Getenv("CC_CONNECT_TEST_BINARY")
 	if binary == "" {
@@ -264,7 +291,12 @@ func TestWebSocketBinaryRecoversSilentConnection(t *testing.T) {
 	g := newWSRecoveryGateway(t)
 	g.silent.Store(true)
 	dir := t.TempDir()
-	config := fmt.Sprintf(`[[projects]]
+	// CC_DATA_DIR is a client-side socket override, not a server setting.
+	// Isolate both HOME and the configured data directory from the caller.
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".cc-connect")
+	config := fmt.Sprintf(`data_dir = %q
+[[projects]]
 name = "ws-recovery"
 [projects.agent]
 type = "codex"
@@ -276,7 +308,7 @@ type = "feishu"
 app_id = "test-app"
 app_secret = "test-secret"
 domain = %q
-`, dir, g.server.URL)
+`, dataDir, dir, g.server.URL)
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)
@@ -288,7 +320,7 @@ domain = %q
 	}
 	t.Cleanup(func() { _ = log.Close() })
 	cmd := exec.Command(binary, "--config", configPath)
-	cmd.Env = append(os.Environ(), "CC_DATA_DIR="+dir)
+	cmd.Env = append(os.Environ(), "HOME="+home, "CC_DATA_DIR="+dataDir)
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
