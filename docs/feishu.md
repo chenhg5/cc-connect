@@ -111,6 +111,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
 # group_chat_history_share = false  # 可选：共享未 @ 机器人的群消息作为下一次触发的上下文；消息本身不会触发回复
+# solo_chat_reply_all = false  # 可选：群里只有一个人和这个机器人时无需 @；@ 了别人的消息仍不触发
 # progress_style = "legacy"  # 可选：legacy | compact | card
 # ack_emoji = "Get"           # 可选：消息被接受处理或入队时立即添加并保留的确认表情；默认禁用
 # reaction_emoji = "OnIt"      # 可选：agent 处理期间的临时表情，结束后移除
@@ -174,6 +175,8 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 配置完权限后，点击「申请发布」使权限生效。
 
 如果启用了 `group_chat_history_share`，必须为应用申请并发布 `im:message.group_msg`，否则飞书只会向机器人推送被 @ 的群消息，未提及消息无法进入共享上下文。该功能不会回溯 cc-connect 启动前的历史，也不会持久化待处理消息。
+
+`solo_chat_reply_all = true` 时，群成员恰好是一个人和这个机器人（群信息接口的 `user_count`、`bot_count` 都为 1，需要 `im:chat:readonly`，结果缓存 30 秒）的群里，没有 @ 任何人的消息也会交给 agent；@ 了别人却没 @ 机器人的消息仍不触发，读取群信息失败时照旧要求 @。同样需要 `im:message.group_msg`，否则飞书不会推送未 @ 的群消息。
 
 ---
 
