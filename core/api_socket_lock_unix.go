@@ -3,9 +3,14 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"syscall"
 )
+
+func apiSocketConnectionRefused(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
 
 func lockAPISocket(path string) (*os.File, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)

@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -96,7 +95,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		}
 		// Only connection refusal proves a leftover socket. Timeouts and
 		// permission errors must never cause a live listener to be unlinked.
-		if !errors.Is(dialErr, syscall.ECONNREFUSED) && !errors.Is(dialErr, os.ErrNotExist) {
+		if !apiSocketConnectionRefused(dialErr) && !errors.Is(dialErr, os.ErrNotExist) {
 			return nil, fmt.Errorf("check existing API socket: %w", dialErr)
 		}
 		if err := removeAPISocket(sockPath, info); err != nil {

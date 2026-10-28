@@ -6,10 +6,37 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestAPISocketRefusedErrorClassification(t *testing.T) {
+	refused := syscall.ECONNREFUSED
+	if runtime.GOOS == "windows" {
+		refused = syscall.Errno(10061) // WSAECONNREFUSED
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"refused", refused, true},
+		{"wrapped refused", &net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", refused)}, true},
+		{"permission denied", os.ErrPermission, false},
+		{"deadline exceeded", os.ErrDeadlineExceeded, false},
+		{"connection reset", syscall.ECONNRESET, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := apiSocketConnectionRefused(tc.err); got != tc.want {
+				t.Fatalf("apiSocketConnectionRefused(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestAPISocketRejectsLiveOwner(t *testing.T) {
 	dir := t.TempDir()
