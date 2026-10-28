@@ -36,7 +36,7 @@ func TestAPISocketRejectsLiveOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte("GET /sessions HTTP/1.0\r\n\r\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestAPISocketRejectsLiveOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("original server status = %d", response.StatusCode)
 	}
@@ -65,7 +65,7 @@ func TestAPISocketStopPreservesReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer replacement.Close()
+	defer func() { _ = replacement.Close() }()
 	before, err := os.Lstat(api.SocketPath())
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +88,7 @@ func TestAPISocketStopBeforeStartAndRepeatedStop(t *testing.T) {
 		t.Fatalf("stopped socket remains: %v", err)
 	}
 	if conn, err := net.DialTimeout("unix", first.SocketPath(), time.Second); err == nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal("Stop before Start left its listener open")
 	}
 	second, err := NewAPIServer(dir)
@@ -125,7 +125,7 @@ func TestAPISocketRecoversStaleSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn.Close()
+	_ = conn.Close()
 }
 
 func TestAPISocketRejectsOwnerWithoutLock(t *testing.T) {
@@ -138,7 +138,7 @@ func TestAPISocketRejectsOwnerWithoutLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	before, err := os.Lstat(path)
 	if err != nil {
 		t.Fatal(err)
