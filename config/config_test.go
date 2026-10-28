@@ -3605,3 +3605,25 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestValidateBusyAction(t *testing.T) {
+	for _, v := range []string{"", "queue", "inject", " Inject "} {
+		cfg := Config{Projects: []ProjectConfig{validProject("demo")}}
+		cfg.Projects[0].BusyAction = v
+		if err := cfg.validate(); err != nil {
+			t.Fatalf("busy_action %q: validate() = %v, want nil", v, err)
+		}
+	}
+	cfg := Config{Projects: []ProjectConfig{validProject("demo")}}
+	cfg.Projects[0].BusyAction = "drop"
+	assertErrContains(t, cfg.validate(), `projects[0].busy_action must be "queue" or "inject"`)
+}
+
+func TestGetProjectConfigDetails_BusyAction(t *testing.T) {
+	configPath := writeConfigFixture(t, strings.Replace(feishuConfigFixture, "name = \"alpha\"", "name = \"alpha\"\nbusy_action = \"inject\"", 1))
+	patchConfigPath(t, configPath)
+	details := GetProjectConfigDetails("alpha")
+	if details == nil || details["busy_action"] != "inject" {
+		t.Fatalf("busy_action = %v, want inject", details["busy_action"])
+	}
+}

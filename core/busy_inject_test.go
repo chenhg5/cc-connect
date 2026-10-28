@@ -8,29 +8,30 @@ import (
 	"time"
 )
 
-// midTurnAgentSession records Send like queuingAgentSession and advertises
+// midTurnAgentSession records sends like queuingAgentSession and advertises
 // MidTurnInputSender, like an agent whose CLI reads input from one live stdin.
 type midTurnAgentSession struct {
 	*queuingAgentSession
-	accepts bool
-	sendErr error
+	sendErr  error
+	midTurns int
 }
 
-func newMidTurnSession(id string, accepts bool) *midTurnAgentSession {
-	return &midTurnAgentSession{queuingAgentSession: newQueuingSession(id), accepts: accepts}
+func newMidTurnSession(id string) *midTurnAgentSession {
+	return &midTurnAgentSession{queuingAgentSession: newQueuingSession(id)}
 }
 
-func (s *midTurnAgentSession) AcceptsMidTurnInput() bool { return s.accepts }
-
-func (s *midTurnAgentSession) Send(prompt string, msgID string, images []ImageAttachment, files []FileAttachment) error {
+func (s *midTurnAgentSession) SendMidTurn(prompt string, msgID string, images []ImageAttachment, files []FileAttachment) error {
 	if s.sendErr != nil {
 		return s.sendErr
 	}
-	return s.queuingAgentSession.Send(prompt, msgID, images, files)
+	s.sendMu.Lock()
+	s.midTurns++
+	s.sendMu.Unlock()
+	return s.Send(prompt, msgID, images, files)
 }
 
-// steeringAgentSession advertises UserInputSteerer, like an agent with a native steer RPC.
-type steeringAgentSession struct {
+// busySteeringSession advertises UserInputSteerer, like an agent with a native steer RPC.
+type busySteeringSession struct {
 	*queuingAgentSession
 	mu       sync.Mutex
 	steered  []string
@@ -38,7 +39,7 @@ type steeringAgentSession struct {
 	steerErr error
 }
 
-func (s *steeringAgentSession) SteerUserInput(prompt string) (bool, error) {
+func (s *busySteeringSession) SteerUserInput(prompt string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.steerErr != nil || !s.steerOK {
@@ -54,7 +55,9 @@ type midTurnResultSession struct {
 	*resultAgentSession
 }
 
-func (s *midTurnResultSession) AcceptsMidTurnInput() bool { return true }
+func (s *midTurnResultSession) SendMidTurn(prompt string, msgID string, images []ImageAttachment, files []FileAttachment) error {
+	return s.Send(prompt, msgID, images, files)
+}
 
 // setupBusySession installs agentSession as the live agent for key and locks
 // the session as if a turn were in flight.
@@ -62,6 +65,7 @@ func setupBusySession(t *testing.T, agentSession AgentSession) (*Engine, *stubPl
 	t.Helper()
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetBusyAction(BusyActionInject)
 	key := "test:user1"
 	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "turn-ctx"}
 	e.interactiveMu.Lock()
@@ -101,7 +105,7 @@ func sentContains(sent []string, want string) bool {
 }
 
 func TestBusyMessage_MidTurnSender_InjectsInsteadOfQueueing(t *testing.T) {
-	sess := newMidTurnSession("busy-inject", true)
+	sess := newMidTurnSession("busy-inject")
 	e, p, state, session := setupBusySession(t, sess)
 	accepted := false
 	msg := busyMessage("also cover the error path")
@@ -114,6 +118,9 @@ func TestBusyMessage_MidTurnSender_InjectsInsteadOfQueueing(t *testing.T) {
 	sess.sendMu.Unlock()
 	if len(calls) != 1 || !strings.Contains(calls[0], "also cover the error path") {
 		t.Fatalf("Send calls = %v, want one call carrying the message", calls)
+	}
+	if sess.midTurns != 1 {
+		t.Fatalf("SendMidTurn calls = %d, want 1 (busy input must not go through plain Send)", sess.midTurns)
 	}
 	if n := pendingCount(state); n != 0 {
 		t.Fatalf("pending messages = %d, want 0 (message must not be queued)", n)
@@ -135,7 +142,7 @@ func TestBusyMessage_MidTurnSender_InjectsInsteadOfQueueing(t *testing.T) {
 }
 
 func TestBusyMessage_ConsecutiveMessagesAllInject(t *testing.T) {
-	sess := newMidTurnSession("busy-inject-many", true)
+	sess := newMidTurnSession("busy-inject-many")
 	e, p, state, _ := setupBusySession(t, sess)
 
 	for _, text := range []string{"first", "second", "third"} {
@@ -154,7 +161,7 @@ func TestBusyMessage_ConsecutiveMessagesAllInject(t *testing.T) {
 }
 
 func TestBusyMessage_UserInputSteerer_SteersTextIntoTurn(t *testing.T) {
-	sess := &steeringAgentSession{queuingAgentSession: newQueuingSession("busy-steer"), steerOK: true}
+	sess := &busySteeringSession{queuingAgentSession: newQueuingSession("busy-steer"), steerOK: true}
 	e, p, state, _ := setupBusySession(t, sess)
 
 	e.ReceiveMessage(p, busyMessage("use the staging config"))
@@ -191,13 +198,9 @@ func TestBusyMessage_FallsBackToQueue(t *testing.T) {
 			session: func() AgentSession { return newQueuingSession("plain") },
 		},
 		{
-			name:    "agent declines mid-turn input",
-			session: func() AgentSession { return newMidTurnSession("declines", false) },
-		},
-		{
 			name: "send error",
 			session: func() AgentSession {
-				s := newMidTurnSession("send-err", true)
+				s := newMidTurnSession("send-err")
 				s.sendErr = errors.New("broken pipe")
 				return s
 			},
@@ -205,19 +208,19 @@ func TestBusyMessage_FallsBackToQueue(t *testing.T) {
 		{
 			name: "steerer reports no active turn",
 			session: func() AgentSession {
-				return &steeringAgentSession{queuingAgentSession: newQueuingSession("no-turn")}
+				return &busySteeringSession{queuingAgentSession: newQueuingSession("no-turn")}
 			},
 		},
 		{
 			name: "steerer error",
 			session: func() AgentSession {
-				return &steeringAgentSession{queuingAgentSession: newQueuingSession("steer-err"), steerErr: errors.New("rpc closed")}
+				return &busySteeringSession{queuingAgentSession: newQueuingSession("steer-err"), steerErr: errors.New("rpc closed")}
 			},
 		},
 		{
 			name: "steerer with attachment",
 			session: func() AgentSession {
-				return &steeringAgentSession{queuingAgentSession: newQueuingSession("steer-img"), steerOK: true}
+				return &busySteeringSession{queuingAgentSession: newQueuingSession("steer-img"), steerOK: true}
 			},
 			msg: func() *Message {
 				m := busyMessage("see screenshot")
@@ -229,7 +232,7 @@ func TestBusyMessage_FallsBackToQueue(t *testing.T) {
 			// Earlier messages are already waiting; injecting this one would
 			// let it overtake them.
 			name:    "queue already non-empty",
-			session: func() AgentSession { return newMidTurnSession("ordered", true) },
+			session: func() AgentSession { return newMidTurnSession("ordered") },
 			prep: func(st *interactiveState) {
 				st.pendingMessages = append(st.pendingMessages, queuedMessage{messageID: "earlier", content: "earlier"})
 			},
@@ -269,6 +272,7 @@ func TestBusyMessage_AgentStillStarting_Queues(t *testing.T) {
 	// message waits for the startup turn as before (issue #565).
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetBusyAction(BusyActionInject)
 	key := "test:user1"
 	state := &interactiveState{platform: p}
 	e.interactiveMu.Lock()
@@ -291,6 +295,7 @@ func TestIdleMessage_MidTurnSender_StartsNormalTurn(t *testing.T) {
 	agentSession := &midTurnResultSession{resultAgentSession: newResultAgentSession("idle turn done")}
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{p}, "", LangEnglish)
+	e.SetBusyAction(BusyActionInject)
 
 	e.ReceiveMessage(p, &Message{
 		SessionKey: "test:user1",
@@ -309,5 +314,44 @@ func TestIdleMessage_MidTurnSender_StartsNormalTurn(t *testing.T) {
 	}
 	if len(agentSession.sentPrompts) != 1 || !strings.Contains(agentSession.sentPrompts[0], "start the task") {
 		t.Fatalf("prompts = %#v, want one normal turn", agentSession.sentPrompts)
+	}
+}
+
+// busy_action defaults to "queue": even an agent that can take mid-turn input
+// gets the message after the running turn, as before.
+func TestBusyMessage_DefaultBusyActionQueues(t *testing.T) {
+	sess := newMidTurnSession("default-queue")
+	e, p, state, _ := setupBusySession(t, sess)
+	e.SetBusyAction("")
+
+	e.ReceiveMessage(p, busyMessage("follow-up"))
+
+	if sess.midTurns != 0 {
+		t.Fatalf("SendMidTurn calls = %d, want 0 with the default busy_action", sess.midTurns)
+	}
+	if n := pendingCount(state); n != 1 {
+		t.Fatalf("pending messages = %d, want 1", n)
+	}
+	if !sentContains(p.getSent(), e.i18n.T(MsgMessageQueued)) {
+		t.Fatalf("sent = %v, want MsgMessageQueued", p.getSent())
+	}
+}
+
+func TestSetBusyAction_Normalizes(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	if e.busyAction != BusyActionQueue {
+		t.Fatalf("default busyAction = %q, want %q", e.busyAction, BusyActionQueue)
+	}
+	for in, want := range map[string]string{
+		"inject":   BusyActionInject,
+		" INJECT ": BusyActionInject,
+		"queue":    BusyActionQueue,
+		"":         BusyActionQueue,
+		"drop":     BusyActionQueue,
+	} {
+		e.SetBusyAction(in)
+		if e.busyAction != want {
+			t.Fatalf("SetBusyAction(%q) = %q, want %q", in, e.busyAction, want)
+		}
 	}
 }

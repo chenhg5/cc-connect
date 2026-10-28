@@ -403,14 +403,15 @@ type UserInputSteerer interface {
 	SteerUserInput(prompt string) (bool, error)
 }
 
-// MidTurnInputSender is an optional interface for agent sessions whose Send
-// is safe to call while a turn is still running: the input is written to the
-// same live process, which folds it into the active turn (or runs it right
-// after) instead of starting a second process, blocking, or rejecting it.
-// The engine uses it to deliver messages that arrive while the session is
-// busy directly to the running turn instead of queueing them.
+// MidTurnInputSender is an optional interface for agent sessions that can take
+// a user message while a turn is still running. SendMidTurn writes it to the
+// same live process, which folds it into the active turn instead of starting a
+// second process, blocking, or rejecting it. If the agent instead runs the
+// message as a follow-up turn right after the current one, the session must
+// report both as one turn (a single EventResult), so the engine's reply for
+// the running turn stays aligned. The engine uses it for busy_action = "inject".
 type MidTurnInputSender interface {
-	AcceptsMidTurnInput() bool
+	SendMidTurn(prompt string, messageID string, images []ImageAttachment, files []FileAttachment) error
 }
 
 // ToolAuthorizer is an optional interface for agents that support dynamic tool authorization.
