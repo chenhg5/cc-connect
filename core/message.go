@@ -459,6 +459,7 @@ const (
 	EventUserInputRequest  EventType = "user_input_request" // non-blocking question; answer is a user message
 	EventThinking          EventType = "thinking"           // thinking/processing status
 	EventModelSwitch       EventType = "model_switch"       // agent CLI moved the turn to another model on its own (see ModelSwitch)
+	EventCompact           EventType = "compact"            // agent compacted its context; not the end of the turn (details in Metadata)
 )
 
 // ModelSwitch describes a model change the agent CLI made without being asked
