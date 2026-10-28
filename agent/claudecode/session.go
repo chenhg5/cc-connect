@@ -1649,6 +1649,17 @@ func (cs *claudeSession) Alive() bool {
 	return cs.alive.Load()
 }
 
+// AcceptsMidTurnInput reports that Send may be called while a turn is running.
+// Claude Code reads stream-json user messages from the same stdin and folds a
+// mid-turn message into the active turn at the next tool boundary; if the
+// turn has no boundary left, it runs the message as the next turn on the
+// same process.
+func (cs *claudeSession) AcceptsMidTurnInput() bool {
+	return true
+}
+
+var _ core.MidTurnInputSender = (*claudeSession)(nil)
+
 // defaultGracefulStopTimeout 是 Close() Phase 1「关掉 stdin、等它自己干净退出」
 // 的等待上限。
 //

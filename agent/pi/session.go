@@ -1226,6 +1226,15 @@ func (s *piSession) Alive() bool {
 	return s.alive.Load()
 }
 
+// AcceptsMidTurnInput reports whether Send may be called while a turn is
+// running. Only RPC mode qualifies: its prompts use streamingBehavior=steer on
+// the persistent process. JSON mode spawns a one-shot process per Send.
+func (s *piSession) AcceptsMidTurnInput() bool {
+	return s.rpc
+}
+
+var _ core.MidTurnInputSender = (*piSession)(nil)
+
 func (s *piSession) Close() error {
 	s.alive.Store(false)
 
