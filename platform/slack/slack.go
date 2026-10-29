@@ -713,15 +713,20 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	return rc, nil
 }
 
+// userNameLookupTimeout bounds the users.info lookup for an inbound message's
+// author, which runs on the serialized event loop.
+const userNameLookupTimeout = 5 * time.Second
+
 func (p *Platform) resolveUserName(userID string) string {
-	return p.resolveUserNameContext(context.Background(), userID)
+	ctx, cancel := context.WithTimeout(context.Background(), userNameLookupTimeout)
+	defer cancel()
+	return p.resolveUserNameContext(ctx, userID)
 }
 
 // resolveUserNameContext is resolveUserName with a caller deadline. The
 // slack-go default HTTP client has NO timeout, so an unbounded context hangs
 // forever on a stalled users.info — anything on the serialized event loop
 // must pass one.
-
 func (p *Platform) resolveUserNameContext(ctx context.Context, userID string) string {
 	if cached, ok := p.userNameCache.Load(userID); ok {
 		return cached.(string)
