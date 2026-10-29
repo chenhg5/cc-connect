@@ -6066,6 +6066,7 @@ type toolDescriptor struct {
 	Title           string
 	Sanitizer       toolSanitizer
 	ParamKeys       []string
+	DetailKeys      []string
 	SummaryPatterns []*regexp.Regexp
 }
 
@@ -6074,6 +6075,14 @@ type toolDisplay struct {
 	IconToken string
 	Detail    string
 }
+
+// Long tool inputs (a heredoc'd Python script, a large patch) would otherwise
+// fill a card with hundreds of lines. Card details keep the head of such
+// values and say how much was left out.
+const (
+	maxToolDetailLines = 15
+	maxToolDetailRunes = 1500
+)
 
 var toolDescriptors = []toolDescriptor{
 	{
@@ -6089,7 +6098,8 @@ var toolDescriptors = []toolDescriptor{
 		IconToken:       "file-link-text_outlined",
 		Title:           "Read",
 		Sanitizer:       toolSanitizerPath,
-		ParamKeys:       []string{"file_path", "path", "file"},
+		ParamKeys:       []string{"filePath", "file_path", "path", "file"},
+		DetailKeys:      []string{"filePath", "file_path", "path", "file", "offset", "limit"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:read|open)\s+(?:file\s+)?(.+)$`)},
 	},
 	{
@@ -6098,6 +6108,7 @@ var toolDescriptors = []toolDescriptor{
 		Title:           "Edit",
 		Sanitizer:       toolSanitizerPath,
 		ParamKeys:       []string{"file_path", "path", "file"},
+		DetailKeys:      []string{"filePath", "file_path", "path", "file", "patchText", "patch_text"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:edit|write|patch)\s+(?:file\s+)?(.+)$`)},
 	},
 	{
@@ -6129,6 +6140,7 @@ var toolDescriptors = []toolDescriptor{
 		Title:           "Search text",
 		Sanitizer:       toolSanitizerGeneric,
 		ParamKeys:       []string{"pattern"},
+		DetailKeys:      []string{"pattern", "include", "path", "file_path", "glob"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+text(?:\s+by\s+pattern)?|grep)\s+(.+)$`)},
 	},
 	{
@@ -6137,6 +6149,7 @@ var toolDescriptors = []toolDescriptor{
 		Title:           "Search files",
 		Sanitizer:       toolSanitizerGeneric,
 		ParamKeys:       []string{"pattern", "query"},
+		DetailKeys:      []string{"pattern", "include", "path"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:search\s+files(?:\s+by\s+pattern)?|glob)\s+(.+)$`)},
 	},
 	{
@@ -6152,6 +6165,7 @@ var toolDescriptors = []toolDescriptor{
 		Title:           "Run command",
 		Sanitizer:       toolSanitizerCommand,
 		ParamKeys:       []string{"cmd", "command", "script", "description"},
+		DetailKeys:      []string{"cmd", "command", "script", "description", "cwd", "timeout"},
 		SummaryPatterns: []*regexp.Regexp{regexp.MustCompile(`(?i)^(?:run|execute)\s+(?:command|script)?\s*(.+)$`)},
 	},
 	{
@@ -6340,14 +6354,21 @@ func buildToolDisplay(toolName, detail string) toolDisplay {
 	}
 
 	rawDetail := strings.TrimSpace(detail)
+	structured := false
 	if desc != nil {
 		if extracted := extractToolDetailFromJSON(rawDetail, *desc); extracted != "" {
+			// Long fields are already capped one by one, keeping short ones
+			// such as cwd/timeout/filePath visible.
 			rawDetail = extracted
+			structured = true
 		} else if extracted := extractToolDetailFromSummary(rawDetail, *desc); extracted != "" {
 			rawDetail = extracted
 		}
 	}
 	cleanDetail := sanitizeToolDetail(sanitizer, rawDetail)
+	if !structured {
+		cleanDetail = truncateToolDetail(cleanDetail)
+	}
 	if desc != nil && desc.Title == "Read" && isSkillPathValue(cleanDetail) {
 		title = "Skill Read"
 	}
@@ -6362,6 +6383,10 @@ func buildToolDisplay(toolName, detail string) toolDisplay {
 
 func classifyCommandToolDetail(detail string) (title, icon string, ok bool) {
 	command := strings.ToLower(strings.TrimSpace(stripToolDisplayQuotes(detail)))
+	if newline := strings.IndexByte(command, '\n'); newline >= 0 {
+		command = command[:newline]
+	}
+	command = regexp.MustCompile(`^(?:cmd|command|script):\s*`).ReplaceAllString(command, "")
 	if command == "" {
 		return "", "", false
 	}
@@ -6415,14 +6440,21 @@ func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
 	if text == "" || len(desc.ParamKeys) == 0 {
 		return ""
 	}
-	candidates := []string{text}
-	if idx := strings.Index(text, "{"); idx > 0 {
-		candidates = append(candidates, text[idx:])
-	}
-	for _, candidate := range candidates {
-		var params map[string]any
-		if err := json.Unmarshal([]byte(candidate), &params); err != nil {
-			continue
+	for _, params := range toolInputObjects(text) {
+		if len(desc.DetailKeys) > 0 {
+			var details []string
+			for _, key := range desc.DetailKeys {
+				if value := extractScalarText(params[key]); value != "" {
+					value = sanitizeToolDetail(desc.Sanitizer, value)
+					if isLongToolDetailKey(key) {
+						value = truncateToolDetail(value)
+					}
+					details = append(details, key+": "+value)
+				}
+			}
+			if len(details) > 0 {
+				return strings.Join(details, "\n")
+			}
 		}
 		if desc.Title == "Search text" {
 			if pattern := extractScalarText(params["pattern"]); pattern != "" {
@@ -6445,6 +6477,61 @@ func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
 		}
 	}
 	return ""
+}
+
+// toolInputObjects parses a tool input that is either a JSON object or text
+// wrapping one (a markdown fence, a label in front of it). The wrapped object is
+// decoded from its first "{" up to where the object ends, rather than sliced to
+// the last "}" in the text, which picks the wrong brace when the trailing text
+// contains one of its own.
+func toolInputObjects(text string) []map[string]any {
+	var whole map[string]any
+	if err := json.Unmarshal([]byte(text), &whole); err == nil {
+		return []map[string]any{whole}
+	}
+	start := strings.Index(text, "{")
+	if start < 0 {
+		return nil
+	}
+	var embedded map[string]any
+	if err := json.NewDecoder(strings.NewReader(text[start:])).Decode(&embedded); err != nil {
+		return nil
+	}
+	return []map[string]any{embedded}
+}
+
+// isLongToolDetailKey reports the tool-input fields that can run to hundreds of
+// lines: commands/scripts and patch bodies.
+func isLongToolDetailKey(key string) bool {
+	switch key {
+	case "cmd", "command", "script", "patchText", "patch_text":
+		return true
+	default:
+		return false
+	}
+}
+
+// truncateToolDetail keeps the first maxToolDetailLines lines (and at most
+// maxToolDetailRunes runes) of a tool detail and notes how much was dropped.
+func truncateToolDetail(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	lines := strings.Split(value, "\n")
+	note := ""
+	if len(lines) > maxToolDetailLines {
+		note = fmt.Sprintf("(+%d more lines)", len(lines)-maxToolDetailLines)
+		lines = lines[:maxToolDetailLines]
+	}
+	kept := strings.Join(lines, "\n")
+	if runes := []rune(kept); len(runes) > maxToolDetailRunes {
+		kept = string(runes[:maxToolDetailRunes])
+		if note == "" {
+			note = "(truncated)"
+		}
+	}
+	if note == "" {
+		return value
+	}
+	return strings.TrimRight(kept, "\n") + "\n" + note
 }
 
 func extractScalarText(value any) string {
@@ -6549,6 +6636,9 @@ func sanitizeToolDetail(kind toolSanitizer, value string) string {
 	case toolSanitizerCommand:
 		return sanitizeCommandLike(cleaned)
 	case toolSanitizerPath:
+		if strings.Contains(cleaned, "://") || strings.Contains(cleaned, "?") {
+			return sanitizeURLText(cleaned)
+		}
 		return redactInlineSecrets(strings.TrimSpace(cleaned))
 	default:
 		return redactInlineSecrets(cleaned)
@@ -6579,8 +6669,10 @@ func sanitizeURLText(value string) string {
 	if value == "" {
 		return ""
 	}
-	if u, err := url.Parse(value); err == nil && u.Scheme != "" && u.Host != "" {
-		u.User = nil
+	if u, err := url.Parse(value); err == nil && ((u.Scheme != "" && u.Host != "") || u.RawQuery != "") {
+		if u.Scheme != "" && u.Host != "" {
+			u.User = nil
+		}
 		q := u.Query()
 		for key := range q {
 			if sensitiveNameRe.MatchString(key) {
