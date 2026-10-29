@@ -447,7 +447,7 @@ func threadMessageRole(m slack.Message, self threadSelf, resolveName func(string
 	}
 	name = quotedAuthorName(name)
 	if name == "" {
-		name = m.User
+		name = quotedAuthorName(m.User)
 	}
 	if name == "" {
 		name = role

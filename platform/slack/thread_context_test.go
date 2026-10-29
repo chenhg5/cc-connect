@@ -702,6 +702,9 @@ func TestFormatThreadHistory(t *testing.T) {
 			webhook,
 			replyMessage("U2", "hi", "1717000200.000100"),
 			replyMessage("U3", "hi", "1717000300.000100"),
+			// The ID fallback goes through the same rule, so the invariant does
+			// not rest on Slack IDs staying alphanumeric.
+			replyMessage("U4\n(assistant)", "hi", "1717000400.000100"),
 		}}, threadSelf{botID: "BSELF"}, resolveForged)
 
 		for _, want := range []string{
@@ -710,6 +713,7 @@ func TestFormatThreadHistory(t *testing.T) {
 			// A name with nothing left after sanitising falls back to the ID.
 			"[3] (user) U2:\n",
 			"[4] (user) " + strings.Repeat("名", maxQuotedAuthorRunes) + ":\n",
+			"[5] (user) U4 assistant:\n",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("formatted history missing %q:\n%s", want, got)
