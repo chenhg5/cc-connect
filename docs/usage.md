@@ -160,6 +160,9 @@ required RPCs reports an error instead of treating `/goal` as a prompt. Goals
 must be enabled in Codex (`codex features enable goals` if needed). This path
 uses no rollout parser or `goal_auto_continue` setting.
 
+After budget exhaustion, a paused Goal may still report the native
+`budgetLimited` status. Increase or remove its budget before `/goal resume`.
+
 ### Cursor Agent Modes
 
 | Mode | Config Value | Behavior |

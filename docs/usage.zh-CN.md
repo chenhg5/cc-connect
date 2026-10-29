@@ -152,6 +152,9 @@ App；若同时使用其他客户端，请用独立 `codex_home` 避免对方加
 Goals（必要时执行 `codex features enable goals`）；此路径不需要
 `goal_auto_continue` 或 rollout 解析配置。
 
+预算耗尽后，暂停的目标仍可能显示原生 `budgetLimited` 状态；提高或取消预算后
+再执行 `/goal resume`。
+
 ### Cursor Agent 模式
 
 | 模式 | 配置值 | 行为 |

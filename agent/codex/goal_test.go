@@ -241,6 +241,10 @@ func TestAppServerGoalRealCLI(t *testing.T) {
 			if requests.Load() < 2 || event.Goal.TokensUsed < budget {
 				t.Fatalf("no native continuation/accounting: requests=%d goal=%+v", requests.Load(), event.Goal)
 			}
+			paused, err := s.SetGoal(core.GoalUpdate{Status: "paused"})
+			if err != nil || paused == nil || paused.Status == "active" || paused.TokensUsed < budget {
+				t.Fatalf("pause exhausted goal = %+v, %v", paused, err)
+			}
 			if err := s.ClearGoal(); err != nil {
 				t.Fatal(err)
 			}
