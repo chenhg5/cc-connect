@@ -39,6 +39,9 @@ type opencodeSession struct {
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	turnUsage         core.TokenUsage
+	usageSteps        map[string]bool
+	sidechain         opencodeSidechainMeter
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -60,6 +63,7 @@ func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, wor
 
 	if resumeID != "" && resumeID != core.ContinueSession {
 		s.chatID.Store(resumeID)
+		s.sidechain.begin(opencodeDataDir(extraEnv), resumeID, true)
 	}
 
 	return s, nil
@@ -79,6 +83,8 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	}
 
 	s.resultSent.Store(false)
+	s.turnUsage = core.TokenUsage{}
+	s.usageSteps = nil
 	s.expectingContinue.Store(false)
 
 	chatID := s.CurrentSessionID()
@@ -228,6 +234,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	if err := scanner.Err(); err != nil {
 		slog.Error("opencodeSession: scanner error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		s.takeUsage(&evt)
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -249,6 +256,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 			slog.Warn("opencodeSession: cleared stale session ID")
 		}
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		s.takeUsage(&evt)
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -434,6 +442,7 @@ func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
 	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+	s.takeUsage(&evt)
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
@@ -492,6 +501,7 @@ func (s *opencodeSession) handleStepStart(raw map[string]any) {
 	}
 	if sessionID != "" {
 		s.chatID.Store(sessionID)
+		s.sidechain.begin(opencodeDataDir(s.extraEnv), sessionID, false)
 		slog.Debug("opencodeSession: session started", "session_id", sessionID)
 	}
 }
@@ -501,6 +511,23 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	reason := ""
 	if part != nil {
 		reason, _ = part["reason"].(string)
+		id, _ := part["id"].(string)
+		if id == "" || !s.usageSteps[id] {
+			if s.usageSteps == nil {
+				s.usageSteps = map[string]bool{}
+			}
+			s.usageSteps[id] = true
+			data, _ := json.Marshal(part["tokens"])
+			var tokens struct {
+				Input, Output, Reasoning int
+				Cache                    struct{ Read, Write int }
+			}
+			if json.Unmarshal(data, &tokens) == nil {
+				s.turnUsage.Add(core.TokenUsage{InputTokens: tokens.Input, OutputTokens: tokens.Output + tokens.Reasoning,
+					ReasoningOutputTokens: tokens.Reasoning, CacheReadInputTokens: tokens.Cache.Read,
+					CacheCreationInputTokens: tokens.Cache.Write})
+			}
+		}
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
@@ -517,10 +544,20 @@ func (s *opencodeSession) sendEventResult() {
 	s.resultSent.Store(true)
 	sid := s.CurrentSessionID()
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
+	s.takeUsage(&evt)
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
 	}
+}
+
+// An error can be followed by the EOF fallback result. Drain the completed
+// requests once so failed turns retain their usage without billing it twice.
+func (s *opencodeSession) takeUsage(event *core.Event) {
+	s.turnUsage.Apply(event)
+	s.turnUsage = core.TokenUsage{}
+	event.Sidechain = s.sidechain.collect()
+	event.UsageIncomplete = s.sidechain.incomplete
 }
 
 // RespondPermission is a no-op — OpenCode handles permissions internally.
