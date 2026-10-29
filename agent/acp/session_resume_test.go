@@ -170,29 +170,19 @@ func TestHandshake_ResumesViaSessionLoadWhenOnlyLoadAdvertised(t *testing.T) {
 	}
 }
 
-// A failed resume must fall back to session/new so the session still
-// becomes usable.
-func TestHandshake_FallsBackToNewWhenResumeFails(t *testing.T) {
+// Resume failure must be reported to the engine without creating a new session.
+func TestHandshake_ResumeFailureDoesNotCreateNewSession(t *testing.T) {
 	tr, srv, cancel := startACPScriptedServer(t, []any{
-		initializeResult(false, true, false),
-		nil, // session/resume -> JSON-RPC error
-		map[string]any{"sessionId": "sess-fresh"},
+		initializeResult(false, true, false), nil,
+		map[string]any{"sessionId": "unexpected-fresh"},
 	})
 	defer cancel()
-
 	s := newHandshakeTestSession(tr)
-	if err := s.handshake("sess-old", ""); err != nil {
-		t.Fatalf("handshake: %v", err)
+	if err := s.handshake("sess-old", ""); err == nil {
+		t.Fatal("failed resume must return an error")
 	}
-
-	if !srv.calledMethod("session/resume") {
-		t.Fatalf("expected session/resume to be attempted, got %v", srv.called())
-	}
-	if !srv.calledMethod("session/new") {
-		t.Fatalf("expected fallback to session/new, got %v", srv.called())
-	}
-	if got := s.currentACPSessionID(); got != "sess-fresh" {
-		t.Fatalf("agent session id = %q, want %q", got, "sess-fresh")
+	if !srv.calledMethod("session/resume") || srv.calledMethod("session/new") || s.currentACPSessionID() != "" {
+		t.Fatalf("failed resume silently replaced the conversation: calls=%v, id=%q", srv.called(), s.currentACPSessionID())
 	}
 }
 
@@ -217,24 +207,19 @@ func TestHandshake_NoResumeWhenNoSessionID(t *testing.T) {
 	}
 }
 
-// A server advertising neither capability is started fresh.
-func TestHandshake_NewWhenNoCapabilityAdvertised(t *testing.T) {
+// A saved ID cannot be resumed by a backend without resume capabilities.
+func TestHandshake_NoResumeCapabilityDoesNotCreateNewSession(t *testing.T) {
 	tr, srv, cancel := startACPScriptedServer(t, []any{
 		initializeResult(false, false, false),
-		map[string]any{"sessionId": "sess-fresh"},
+		map[string]any{"sessionId": "unexpected-fresh"},
 	})
 	defer cancel()
-
 	s := newHandshakeTestSession(tr)
-	if err := s.handshake("sess-old", ""); err != nil {
-		t.Fatalf("handshake: %v", err)
+	if err := s.handshake("sess-old", ""); err == nil {
+		t.Fatal("unsupported resume must return an error")
 	}
-
-	if srv.calledMethod("session/resume") || srv.calledMethod("session/load") {
-		t.Fatalf("no resume call expected, got %v", srv.called())
-	}
-	if !srv.calledMethod("session/new") {
-		t.Fatalf("expected session/new, got %v", srv.called())
+	if srv.calledMethod("session/new") {
+		t.Fatalf("unsupported resume silently replaced the conversation: %v", srv.called())
 	}
 }
 

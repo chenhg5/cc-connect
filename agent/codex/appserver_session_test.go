@@ -398,6 +398,46 @@ func TestAppServerSession_ResumeDoesNotRequestExtendedHistory(t *testing.T) {
 	}
 }
 
+func TestAppServerSession_FailedResumeNeverStartsAnotherThread(t *testing.T) {
+	for _, response := range []rpcResponseEnvelope{
+		{Error: &rpcError{Code: -1, Message: "thread is busy"}},
+		{Result: json.RawMessage(`{"thread":{"id":""}}`)},
+		{Result: json.RawMessage(`{"thread":{"id":"different-thread"}}`)},
+	} {
+		t.Run(fmt.Sprintf("%s%v", response.Result, response.Error), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			stdin := &lockedWriteCloser{}
+			s := &appServerSession{ctx: ctx, stdin: stdin, pending: make(map[int64]chan rpcResponseEnvelope)}
+			done := make(chan error, 1)
+			go func() { done <- s.ensureThread("selected-thread") }()
+			var request struct {
+				ID     int64  `json:"id"`
+				Method string `json:"method"`
+			}
+			if err := json.Unmarshal([]byte(waitForWrittenJSONLine(t, stdin)), &request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Method != "thread/resume" {
+				t.Fatalf("unexpected request: %s", request.Method)
+			}
+			response.ID = request.ID
+			s.handleResponse(response)
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("failed or mismatched resume must return an error")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("resume did not return its failure")
+			}
+			if strings.Count(strings.TrimSpace(stdin.String()), "\n") != 0 || s.CurrentSessionID() != "" {
+				t.Fatalf("failed resume created or adopted another thread: %s", stdin.String())
+			}
+		})
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{

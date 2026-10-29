@@ -542,43 +542,19 @@ func (a *relayFallbackAgent) ListSessions(_ context.Context) ([]AgentSessionInfo
 }
 func (a *relayFallbackAgent) Stop() error { return nil }
 
-func TestHandleRelay_ResumeFailureFallsBackToFreshSession(t *testing.T) {
+func TestHandleRelay_ResumeFailureRetainsSavedConversation(t *testing.T) {
 	e := newTestEngine()
-	freshSession := newControllableSession("fresh-session")
-
-	e.agent = &relayFallbackAgent{freshSession: freshSession}
-
-	// Pre-set a stale session ID so that the first StartSession tries to resume.
-	sourceSessionKey := "test:chat-1:user"
-	relaySessionKey := "relay:source:test:chat-1"
-	sess := e.sessions.GetOrCreateActive(relaySessionKey)
+	defer e.cancel()
+	agent := &relayFallbackAgent{freshSession: newControllableSession("fresh-session")}
+	e.agent = agent
+	sess := e.sessions.GetOrCreateActive("relay:source:test:chat-1")
 	sess.SetAgentSessionID("stale-id", "fallback")
-	e.sessions.Save()
-
-	ctx := context.Background()
-	done := make(chan string, 1)
-	go func() {
-		resp, err := e.HandleRelay(ctx, "source", sourceSessionKey, "hello")
-		if err != nil {
-			done <- "error: " + err.Error()
-			return
-		}
-		done <- resp
-	}()
-
-	// The fresh session should receive the message and respond.
-	freshSession.events <- Event{Type: EventResult, Content: "recovered", SessionID: "fresh-session", Done: true}
-
-	got := <-done
-	if got != "recovered" {
-		t.Fatalf("HandleRelay() = %q, want %q", got, "recovered")
+	_, err := e.HandleRelay(context.Background(), "source", "test:chat-1:user", "hello")
+	if err == nil || !strings.Contains(err.Error(), "simulated resume failure") {
+		t.Fatalf("expected resume error, got %v", err)
 	}
-
-	// Session should be closed after EventResult.
-	select {
-	case <-freshSession.closed:
-	case <-time.After(2 * time.Second):
-		t.Fatal("session was not closed after EventResult")
+	if agent.callCount != 1 || sess.GetAgentSessionID() != "stale-id" {
+		t.Fatalf("resume failure replaced the saved conversation: calls=%d, id=%q", agent.callCount, sess.GetAgentSessionID())
 	}
 }
 

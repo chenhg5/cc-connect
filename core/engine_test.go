@@ -6532,7 +6532,7 @@ func TestRenderListCard_MakesEveryVisibleSessionClickable(t *testing.T) {
 		t.Fatalf("switch action count = %d, want %d", got, len(sessions))
 	}
 
-	btn, ok := findCardAction(card, "act:/switch 6")
+	btn, ok := findCardAction(card, "act:/switch --id "+sessions[5].ID)
 	if !ok {
 		t.Fatal("expected active session switch action to exist")
 	}
@@ -8061,39 +8061,22 @@ func TestCmdStop_PreservesAgentSessionID(t *testing.T) {
 	}
 }
 
-// TestResumeFallback_ClearsStaleSessionID verifies that when agent.StartSession
-// fails with a stale session ID and falls back to a fresh session, the stale
-// AgentSessionID is cleared so CompareAndSetAgentSessionID can write the new ID
-// (issue #830, matching the relay fallback at engine.go:12640).
-func TestResumeFallback_ClearsStaleSessionID(t *testing.T) {
-	freshSess := newControllableSession("fresh-id")
-	agent := &controllableAgent{
-		startSessionFn: func(_ context.Context, sessionID string) (AgentSession, error) {
-			if sessionID != "" {
-				return nil, errors.New("session not found")
-			}
-			return freshSess, nil
-		},
-	}
+// A failed resume must retain the selected ID and never call StartSession("").
+func TestResumeFailure_PreservesSelectedSessionID(t *testing.T) {
+	agent := &stubStartSessionAgent{failIDs: map[string]error{"stale-id": errors.New("session not found")}}
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-
-	key := "test:user1"
-
-	// Session has a stale AgentSessionID from a previously killed agent.
-	session := &Session{AgentSessionID: "stale-id", AgentType: "controllable"}
-
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
-
-	// The new agent session should be the fresh one.
-	if state.agentSession != freshSess {
-		t.Fatal("expected fresh agent session from fallback")
+	defer e.cancel()
+	session := &Session{AgentSessionID: "stale-id", AgentType: "stub"}
+	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, e.sessions, nil, "")
+	if state.agentSession != nil || state.startupError == "" {
+		t.Fatal("failed resume must return a blocked state with a visible reason")
 	}
-
-	// The stale ID should have been replaced with the new ID.
-	got := session.GetAgentSessionID()
-	if got != "fresh-id" {
-		t.Fatalf("AgentSessionID = %q, want %q — stale ID should be replaced", got, "fresh-id")
+	if got := session.GetAgentSessionID(); got != "stale-id" {
+		t.Fatalf("selected ID = %q, want stale-id", got)
+	}
+	if len(agent.calls) != 1 || agent.calls[0] != "stale-id" {
+		t.Fatalf("resume unexpectedly started another conversation: %v", agent.calls)
 	}
 }
 
@@ -8579,47 +8562,19 @@ func (a *stubStartSessionAgent) ListSessions(_ context.Context) ([]AgentSessionI
 }
 func (a *stubStartSessionAgent) Stop() error { return nil }
 
-func TestResumeFailureFallbackToFreshSession(t *testing.T) {
-	agent := &stubStartSessionAgent{
-		failIDs: map[string]error{
-			"old-session-id": fmt.Errorf("Prompt is too long"),
-		},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	e := &Engine{
-		agent:             agent,
-		sessions:          NewSessionManager(""),
-		ctx:               ctx,
-		i18n:              NewI18n("en"),
-		interactiveStates: make(map[string]*interactiveState),
-		display:           DisplayCfg{},
-	}
-
+func TestResumeFailure_ReportsReasonWithoutFreshFallback(t *testing.T) {
+	agent := &stubStartSessionAgent{failIDs: map[string]error{"old-session-id": errors.New("session is busy in another window")}}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
 	session := e.sessions.GetOrCreateActive("test:user1")
 	session.SetAgentSessionID("old-session-id", "stub")
-
-	p := &stubPlatformEngine{n: "test"}
 	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, e.sessions, nil, "")
-
-	if state.agentSession == nil {
-		t.Fatal("expected agentSession to be non-nil after fallback")
+	if state.agentSession != nil || !strings.Contains(state.startupError, "session is busy in another window") || !strings.Contains(state.startupError, "/new") {
+		t.Fatalf("missing recovery instructions: %q", state.startupError)
 	}
-
-	agent.mu.Lock()
-	calls := append([]string{}, agent.calls...)
-	agent.mu.Unlock()
-
-	if len(calls) != 2 {
-		t.Fatalf("expected 2 StartSession calls, got %d: %v", len(calls), calls)
-	}
-	if calls[0] != "old-session-id" {
-		t.Fatalf("first StartSession call = %q, want saved session id", calls[0])
-	}
-	if calls[1] != "" {
-		t.Fatalf("second StartSession call = %q, want empty string", calls[1])
+	if len(agent.calls) != 1 || session.GetAgentSessionID() != "old-session-id" {
+		t.Fatalf("failed resume changed the selected conversation: calls=%v, id=%q", agent.calls, session.GetAgentSessionID())
 	}
 }
 

@@ -182,8 +182,7 @@ func (cs *copilotSession) handshake(resumeSessionID string) error {
 		select {
 		case resp := <-resumeCh:
 			if resp.Error != nil {
-				slog.Warn("copilotSession: resume failed, creating new session", "error", resp.Error)
-				return cs.createSession()
+				return fmt.Errorf("session.resume: %w", resp.Error)
 			}
 			cs.sessionID.Store(resumeSessionID)
 			slog.Info("copilotSession: session resumed", "sessionId", resumeSessionID)

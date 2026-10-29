@@ -15,8 +15,8 @@ import (
 //
 // beginSessionClose/awaitSessionClose serialise that, and markUnsafeResume
 // records the case where the previous process could not be confirmed dead —
-// there, losing conversation history is strictly better than two agents
-// fighting over one transcript.
+// there, sending must stop until the user explicitly chooses a new session
+// rather than losing history or letting two agents share one transcript.
 
 func TestAwaitSessionCloseBlocksUntilTeardownFinishes(t *testing.T) {
 	e := newTestEngine()

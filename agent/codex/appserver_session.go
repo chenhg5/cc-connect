@@ -367,6 +367,9 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 		if resp.Thread.ID == "" {
 			return fmt.Errorf("codex app-server resume returned empty thread id")
 		}
+		if resp.Thread.ID != resumeID {
+			return fmt.Errorf("codex app-server resumed thread %q instead of selected thread %q", resp.Thread.ID, resumeID)
+		}
 		s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
 		s.threadID.Store(resp.Thread.ID)
 		slog.Info("codex app-server thread resumed", "thread_id", resp.Thread.ID)

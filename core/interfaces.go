@@ -214,7 +214,8 @@ type SystemPromptSupporter interface {
 //   - the session file does not exist under the agent's per-project store
 //   - the agent cannot determine the current project directory
 //
-// The engine treats a false return as "clear the stored ID and start fresh".
+// The engine stops the send on false and retains the stored ID. Starting a
+// conversation without the selected context requires an explicit user choice.
 type SessionIDValidator interface {
 	ValidateSessionID(ctx context.Context, sessionID string) bool
 }
@@ -363,6 +364,8 @@ type MessageHandler func(p Platform, msg *Message)
 type Agent interface {
 	Name() string
 	// StartSession creates or resumes an interactive session with a persistent process.
+	// A concrete sessionID must be resumed or return an error; implementations
+	// must not silently replace a requested conversation with a fresh one.
 	StartSession(ctx context.Context, sessionID string) (AgentSession, error)
 	// ListSessions returns sessions known to the agent backend.
 	ListSessions(ctx context.Context) ([]AgentSessionInfo, error)
