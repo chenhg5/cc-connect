@@ -271,6 +271,7 @@ const (
 	MsgProviderCleared           MsgKey = "provider_cleared"
 	MsgGotoSwitched              MsgKey = "goto_switched"
 	MsgGotoSwitchedModel         MsgKey = "goto_switched_model"
+	MsgGotoCurrent               MsgKey = "goto_current"
 	MsgGotoDefault               MsgKey = "goto_default"
 	MsgGotoListTitle             MsgKey = "goto_list_title"
 	MsgGotoUsageHint             MsgKey = "goto_usage_hint"
@@ -1635,6 +1636,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 已切換到 **%s** / **%s**（保留上下文）。",
 		LangJapanese:           "✅ **%s** / **%s** に切り替えました（コンテキスト保持）。",
 		LangSpanish:            "✅ Cambiado a **%s** / **%s** (contexto conservado).",
+	},
+	MsgGotoCurrent: {
+		LangEnglish:            "📡 Active: **%s**",
+		LangChinese:            "📡 当前：**%s**",
+		LangTraditionalChinese: "📡 目前：**%s**",
+		LangJapanese:           "📡 現在：**%s**",
+		LangSpanish:            "📡 Activo: **%s**",
 	},
 	MsgGotoDefault: {
 		LangEnglish:            "No active provider. Choose a target below:",

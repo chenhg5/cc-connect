@@ -4644,9 +4644,54 @@ func TestCmdGoto_NoArgsRendersGroupedList(t *testing.T) {
 		t.Fatalf("sent messages = %d, want 1", len(p.sent))
 	}
 	text := p.sent[0]
-	for _, want := range []string{"Targets:", "1. aiapi/gpt-5.6-sol", "2. aiapi/glm-5.3", "3. gpt-5.6-sol", "/goto <number>"} {
+	for _, want := range []string{
+		"Targets:",
+		"1. aiapi/gpt-5.6-sol (aiapi)",
+		"2. aiapi/glm-5.3 (aiapi)",
+		"3. gpt-5.6-sol (chatgpt)",
+		"Active: **chatgpt/gpt-5.6-sol**",
+		"/goto <number>",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("goto list missing %q in:\n%s", want, text)
+		}
+	}
+	// The picker talks about /goto, not about /provider.
+	if strings.Contains(text, "/provider switch") {
+		t.Errorf("goto list still points at /provider:\n%s", text)
+	}
+}
+
+// The text picker's buttons carry the "<provider>/<model>" identifier, not the
+// row index: the index used to be resolved against a freshly collected list, so
+// a provider added or removed between render and press applied a different entry
+// than the one the user saw.
+func TestCmdGoto_TextPickerButtonsCarryIdentifiers(t *testing.T) {
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "plain"}}
+	agent := &scopedStubProviderAgent{stubProviderAgent: stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "aiapi", Models: []ModelOption{{Name: "aiapi/glm-5.3"}}},
+			{Name: "chatgpt", Model: "gpt-5.6-sol"},
+		},
+		active: "chatgpt",
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	var datas []string
+	for _, row := range p.buttonRows {
+		for _, btn := range row {
+			datas = append(datas, btn.Data)
+		}
+	}
+	want := []string{"cmd:/goto aiapi/glm-5.3", "cmd:/goto chatgpt/gpt-5.6-sol"}
+	if len(datas) != len(want) {
+		t.Fatalf("button payloads = %v, want %v", datas, want)
+	}
+	for i := range want {
+		if datas[i] != want[i] {
+			t.Errorf("button %d payload = %q, want %q", i, datas[i], want[i])
 		}
 	}
 }
@@ -4765,7 +4810,9 @@ func TestCardAction_Goto_RefreshesPicker(t *testing.T) {
 	}
 	found := false
 	for _, opt := range sel.Options {
-		if opt.Value == "act:/goto aiapi/glm-5.3" && opt.Text == "aiapi/glm-5.3" {
+		// The option text qualifies the model with its provider, so two providers
+		// offering the same model are distinguishable.
+		if opt.Value == "act:/goto aiapi/glm-5.3" && opt.Text == "aiapi/glm-5.3 (aiapi)" {
 			found = true
 		}
 	}

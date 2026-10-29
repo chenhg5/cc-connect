@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -1061,6 +1062,77 @@ func TestCmdGoto_WorkspaceModelSurvivesAgentRecreation(t *testing.T) {
 	}
 	if active.Model != "aiapi/glm-5.3" {
 		t.Fatalf("rebuilt provider model = %q, want the model this workspace picked", active.Model)
+	}
+}
+
+// A provider-only /goto means "run this provider's default model". Keeping the
+// model picked on the previous provider would hand it to the new endpoint after
+// the next rebuild — the exact wrong-model-against-the-wrong-base_url failure
+// this feature exists to avoid — so the override is cleared with the switch.
+func TestCmdGoto_ProviderOnlySwitchDropsStaleWorkspaceModel(t *testing.T) {
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "goto-ws-provider-only")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, newAgent := registerGotoTestAgent(t)
+	e := NewEngine("test", newAgent(), nil, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetProjectStateStore(NewProjectStateStore(filepath.Join(t.TempDir(), "project.state.json")))
+
+	channelID := "C-goto-provider-only"
+	channelKey := "test-platform:" + channelID
+	e.workspaceBindings.Bind("project:test", channelKey, "goto-ws-provider-only", wsDir)
+
+	p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+	msg := &Message{Platform: "test-platform", ChannelKey: channelID, SessionKey: channelKey + ":U-001", ReplyCtx: "ctx"}
+
+	wantWS := normalizeWorkspacePath(wsDir)
+
+	e.cmdGoto(p, msg, []string{"aiapi/glm-5.3"})
+	if got := e.projectState.WorkspaceModelOverride(wantWS); got != "aiapi/glm-5.3" {
+		t.Fatalf("workspace model override after /goto aiapi/glm-5.3 = %q", got)
+	}
+
+	// Switch provider without a model: the stale model must not survive.
+	e.cmdGoto(p, msg, []string{"chatgpt"})
+	if got := e.projectState.WorkspaceModelOverride(wantWS); got != "" {
+		t.Fatalf("workspace model override after /goto chatgpt = %q, want cleared", got)
+	}
+	if got := e.projectState.WorkspaceModelProvider(wantWS); got != "" {
+		t.Fatalf("recorded model provider after /goto chatgpt = %q, want cleared", got)
+	}
+	if got := e.projectState.WorkspaceProviderOverride(wantWS); got != "chatgpt" {
+		t.Fatalf("workspace provider override = %q, want chatgpt", got)
+	}
+
+	// Rebuild (idle reap) and make sure the new provider runs its own model.
+	ws := e.workspacePool.GetOrCreate(wantWS)
+	ws.mu.Lock()
+	ws.agent = nil
+	ws.sessions = nil
+	ws.mu.Unlock()
+
+	rebuiltRaw, _, err := e.getOrCreateWorkspaceAgent(wantWS)
+	if err != nil {
+		t.Fatalf("rebuild workspace agent: %v", err)
+	}
+	switcher, ok := rebuiltRaw.(ProviderSwitcher)
+	if !ok {
+		t.Fatalf("rebuilt workspace agent type = %T, want a ProviderSwitcher", rebuiltRaw)
+	}
+	active := switcher.GetActiveProvider()
+	if active == nil || active.Name != "chatgpt" {
+		t.Fatalf("rebuilt active provider = %+v, want chatgpt", active)
+	}
+	if active.Model != "gpt-5.6-sol" {
+		t.Fatalf("rebuilt provider model = %q, want the chatgpt default gpt-5.6-sol", active.Model)
+	}
+	for _, prov := range switcher.ListProviders() {
+		if prov.Name == "chatgpt" && strings.Contains(prov.Model, "glm-5.3") {
+			t.Fatalf("chatgpt entry carries the previous provider's model: %q", prov.Model)
+		}
 	}
 }
 
