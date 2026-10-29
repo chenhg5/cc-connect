@@ -1802,6 +1802,54 @@ func TestLoad_RejectsNegativeResetOnIdleMins(t *testing.T) {
 	}
 }
 
+func TestLoad_ParsesRelaySessionPolicy(t *testing.T) {
+	configPath := writeConfigFixture(t, baseConfigTOML+`
+
+[[projects]]
+name = "relay-demo"
+relay_session_mode = "fresh"
+relay_session_reset_mins = 45
+
+[projects.agent]
+type = "codex"
+
+[[projects.platforms]]
+type = "telegram"
+`)
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	proj := cfg.Projects[1]
+	if proj.RelaySessionMode != "fresh" {
+		t.Fatalf("relay_session_mode = %q, want fresh", proj.RelaySessionMode)
+	}
+	if proj.RelaySessionResetMins == nil || *proj.RelaySessionResetMins != 45 {
+		t.Fatalf("relay_session_reset_mins = %v, want 45", proj.RelaySessionResetMins)
+	}
+}
+
+func TestLoad_RejectsInvalidRelaySessionPolicy(t *testing.T) {
+	configPath := writeConfigFixture(t, baseConfigTOML+`
+
+[[projects]]
+name = "relay-demo"
+relay_session_mode = "never"
+
+[projects.agent]
+type = "codex"
+
+[[projects.platforms]]
+type = "telegram"
+`)
+
+	_, err := Load(configPath)
+	if err == nil || !strings.Contains(err.Error(), "relay_session_mode") {
+		t.Fatalf("Load error = %v, want relay_session_mode validation", err)
+	}
+}
+
 func TestLoad_ParsesAgentSessionIdleTimeoutMins(t *testing.T) {
 	configPath := writeConfigFixture(t, projectWithAgentSessionIdleTimeoutFixture)
 
