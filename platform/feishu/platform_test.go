@@ -1109,7 +1109,7 @@ func TestBuildRichCard_UsesCodexRuntimeToolDescriptors(t *testing.T) {
 		{Kind: core.ToolStepKindTool, Name: "tool_search_tool", Summary: "search available tools"},
 		{Kind: core.ToolStepKindTool, Name: "update_plan", Summary: "revise checklist"},
 		{Kind: core.ToolStepKindTool, Name: "request_user_input", Summary: "ask for confirmation"},
-	}, "answer", true, "")
+	}, "answer", true, "", richPanelModes{})
 
 	panels := collectCardPanels(t, cardJSON)
 	if len(panels) != 1 {
@@ -1155,7 +1155,7 @@ func TestBuildRichCard_RendersThinkingAndToolResultRows(t *testing.T) {
 			Success:  &success,
 			Done:     true,
 		},
-	}, "done", true, "")
+	}, "done", true, "", richPanelModes{})
 
 	for _, want := range []string{"Inspecting event routing", "echo hi", "completed", "exit: 0", "hi"} {
 		if !strings.Contains(cardJSON, want) {
@@ -1184,7 +1184,7 @@ func TestBuildRichCard_OversizePanelsKeepVisibleContent(t *testing.T) {
 		})
 	}
 
-	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "", true, "")
+	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "", true, "", richPanelModes{})
 
 	panels := collectCardPanels(t, cardJSON)
 	if len(panels) == 0 {
@@ -1213,7 +1213,7 @@ func TestBuildRichCard_PanelsShowLatestTenSteps(t *testing.T) {
 		})
 	}
 
-	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "answer", true, "")
+	cardJSON := buildRichCard(core.CardStatusWorking, "", steps, "answer", true, "", richPanelModes{})
 
 	panels := collectCardPanels(t, cardJSON)
 	if len(panels) != 2 {
@@ -1264,7 +1264,7 @@ func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
 	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
 		{Kind: core.ToolStepKindThinking, Summary: "Inspecting event routing"},
 		{Kind: core.ToolStepKindTool, Name: "Bash", Summary: "pwd"},
-	}, "answer", true, "")
+	}, "answer", true, "", richPanelModes{})
 
 	panels := collectCardPanels(t, cardJSON)
 	if len(panels) != 2 {
@@ -1290,7 +1290,7 @@ func TestBuildRichCard_SeparatesReasoningAndTools(t *testing.T) {
 func TestBuildRichCard_UsesToolDescriptorsForAliases(t *testing.T) {
 	cardJSON := buildRichCard(core.CardStatusWorking, "", []core.ToolStep{
 		{Kind: core.ToolStepKindTool, Name: "web_fetch", Summary: "https://example.com/docs?token=secret"},
-	}, "answer", true, "")
+	}, "answer", true, "", richPanelModes{})
 
 	panels := collectCardPanels(t, cardJSON)
 	if len(panels) != 1 {
@@ -1336,7 +1336,7 @@ func TestBuildRichCard_SanitizesMarkdownForCardLimits(t *testing.T) {
 		"![ok](img_v3_abc)",
 	}, "\n")
 
-	content := strings.Join(collectCardMarkdownContents(t, buildRichCard(core.CardStatusDone, "", nil, markdown, false, "")), "\n")
+	content := strings.Join(collectCardMarkdownContents(t, buildRichCard(core.CardStatusDone, "", nil, markdown, false, "", richPanelModes{})), "\n")
 	if containsMarkdownLine(content, "# Big Result") {
 		t.Fatalf("card markdown should downgrade h1 headings, got %q", content)
 	}

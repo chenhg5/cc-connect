@@ -122,6 +122,7 @@ type Platform struct {
 	appID                      string
 	appSecret                  string
 	progressStyle              string
+	richPanels                 richPanelModes
 	useInteractiveCard         bool
 	self                       core.Platform
 	reactionEmoji              string
@@ -418,6 +419,14 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 			return nil, fmt.Errorf("%s: invalid progress_style %q (want legacy, compact, or card)", name, v)
 		}
 	}
+	reasoningPanel, err := parseRichPanelMode(name, "rich_reasoning_panel", opts)
+	if err != nil {
+		return nil, err
+	}
+	toolsPanel, err := parseRichPanelMode(name, "rich_tools_panel", opts)
+	if err != nil {
+		return nil, err
+	}
 	useInteractiveCard := true
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
@@ -478,6 +487,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appID:                      appID,
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
+		richPanels:                 richPanelModes{reasoning: reasoningPanel, tools: toolsPanel},
 		useInteractiveCard:         useInteractiveCard,
 		reactionEmoji:              reactionEmoji,
 		ackEmoji:                   ackEmoji,
@@ -7300,6 +7310,50 @@ func richPanelElements(steps []core.ToolStep, emptyText string) []map[string]any
 	return elements
 }
 
+// richPanelMode is how a rich card (card_mode = "rich") panel starts out.
+// Readers can still toggle a panel by hand.
+type richPanelMode string
+
+const (
+	richPanelAuto      richPanelMode = "auto"      // expanded while the turn is streaming, collapsed once it is done (default)
+	richPanelCollapsed richPanelMode = "collapsed" // always collapsed
+	richPanelExpanded  richPanelMode = "expanded"  // always expanded, also after the turn is done
+)
+
+// richPanelModes holds the configured start state of the Reasoning and Tools
+// panels. The zero value behaves as "auto" for both.
+type richPanelModes struct {
+	reasoning richPanelMode // rich_reasoning_panel
+	tools     richPanelMode // rich_tools_panel
+}
+
+func (m richPanelMode) expanded(streaming bool) bool {
+	switch m {
+	case richPanelCollapsed:
+		return false
+	case richPanelExpanded:
+		return true
+	default:
+		return streaming
+	}
+}
+
+// parseRichPanelMode reads one rich card panel option; unset or empty means "auto".
+func parseRichPanelMode(name, key string, opts map[string]any) (richPanelMode, error) {
+	v, ok := opts[key].(string)
+	if !ok {
+		return richPanelAuto, nil
+	}
+	switch mode := richPanelMode(strings.ToLower(strings.TrimSpace(v))); mode {
+	case "", richPanelAuto:
+		return richPanelAuto, nil
+	case richPanelCollapsed, richPanelExpanded:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("%s: invalid %s %q (want auto, collapsed, or expanded)", name, key, v)
+	}
+}
+
 func buildRichPanel(title string, expanded bool, elements []map[string]any) map[string]any {
 	return map[string]any{
 		"tag":              "collapsible_panel",
@@ -7320,8 +7374,9 @@ const maxRichCardJSONBytes = 28000
 // buildRichCard renders a Card 2.0 "single-card" turn with collapsible
 // reasoning/tool panels, streaming markdown body, status-colored header, and a
 // pre-composed multi-line statusFooter (engine-owned, includes elapsed).
-func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter)
+// panels sets whether each panel starts expanded.
+func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, panels richPanelModes) string {
+	b, err := buildRichCardJSONBytes(status, steps, markdown, streaming, statusFooter, panels)
 	if err != nil {
 		slog.Debug("feishu: build rich card marshal failed, fallback to basic card", "error", err)
 		return buildCardJSONWithStatus(markdown, status)
@@ -7343,7 +7398,7 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 		{perLane: 3, textLen: 80},
 	} {
 		compactSteps := compactRichStepsForCardSize(steps, limit.perLane, limit.textLen)
-		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter)
+		compact, err := buildRichCardJSONBytes(status, compactSteps, markdown, streaming, statusFooter, panels)
 		if err == nil && len(compact) <= maxRichCardJSONBytes {
 			slog.Debug("feishu: rich card exceeded size limit, compacted panels",
 				"original_size", len(b),
@@ -7363,25 +7418,25 @@ func buildRichCard(status core.CardStatus, _ string, steps []core.ToolStep, mark
 	return buildCardJSONWithStatus(fallbackMarkdown, status)
 }
 
-func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) ([]byte, error) {
+func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markdown string, streaming bool, statusFooter string, panels richPanelModes) ([]byte, error) {
 	reasoningSteps, toolSteps := splitRichStepsByLane(steps)
 	panelMaps := make([]map[string]any, 0, 2)
 	if len(reasoningSteps) > 0 {
 		panelMaps = append(panelMaps, buildRichPanel(
 			richLaneTitle("Reasoning", len(reasoningSteps)),
-			streaming,
+			panels.reasoning.expanded(streaming),
 			richPanelElements(reasoningSteps, "Thinking..."),
 		))
 	}
 	if len(toolSteps) > 0 {
 		panelMaps = append(panelMaps, buildRichPanel(
 			richLaneTitle("Tools", len(toolSteps)),
-			streaming,
+			panels.tools.expanded(streaming),
 			richPanelElements(toolSteps, "No tool steps"),
 		))
 	}
 	if len(panelMaps) == 0 && streaming {
-		panelMaps = append(panelMaps, buildRichPanel("Reasoning", true, richPanelElements(nil, "Thinking...")))
+		panelMaps = append(panelMaps, buildRichPanel("Reasoning", panels.reasoning.expanded(streaming), richPanelElements(nil, "Thinking...")))
 	}
 
 	markdownMap := map[string]any{
@@ -7546,7 +7601,7 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 // statusFooter (multi-line, '\n'-separated) and passes it through; the renderer
 // splits it back into one dim notation block per line.
 func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
+	return buildRichCard(status, title, steps, markdown, streaming, statusFooter, p.richPanels)
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.

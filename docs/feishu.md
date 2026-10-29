@@ -112,6 +112,8 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
 # group_chat_history_share = false  # 可选：共享未 @ 机器人的群消息作为下一次触发的上下文；消息本身不会触发回复
 # progress_style = "legacy"  # 可选：legacy | compact | card
+# rich_reasoning_panel = "auto"  # 可选（仅 card_mode = "rich"）：Reasoning 折叠区初始状态 auto | collapsed | expanded
+# rich_tools_panel = "auto"      # 可选（仅 card_mode = "rich"）：Tools 折叠区初始状态 auto | collapsed | expanded
 # ack_emoji = "Get"           # 可选：消息被接受处理或入队时立即添加并保留的确认表情；默认禁用
 # reaction_emoji = "OnIt"      # 可选：agent 处理期间的临时表情，结束后移除
 # done_emoji = "none"          # 可选：agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
@@ -123,6 +125,8 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 > `group_chat_history_share = true` 时，cc-connect 只在内存中保留当前进程观察到的、允许访问的群聊 text/post 消息，并在下一次明确 @ 机器人且真正进入 agent turn 时注入；未 @ 的消息不会触发回复。`/status` 等由 cc-connect 处理的命令不会消费这段待处理上下文，`/new` 会清空对应主频道或话题的上下文。
 > 在 multi-workspace 模式下，`thread_isolation = true` 也会让每个话题独立绑定 workspace；在话题内执行 `/workspace bind <name>` 不会影响同群的其他话题。已有的群级 binding 会保留为默认值，由尚未显式绑定的话题继承，因此回退到旧版本时仍可使用。
 > `progress_style = "compact"` 会把思考/工具进度合并到一条可更新消息里，减少刷屏；`legacy` 保持原有逐条发送；`card` 会使用结构化卡片（标题 + 进度块）持续更新同一条消息，观感比纯文本更清晰。
+> `rich_reasoning_panel` / `rich_tools_panel` 只在 `[display] card_mode = "rich"` 时生效，分别控制单卡里 Reasoning、Tools 两个折叠区的初始状态：`auto`（默认，与之前一致）运行中展开、结束后收起；`collapsed` 始终收起（运行中也收起，需要时手动点开），适合工具调用很多、只想看正文的场景；`expanded` 始终展开（结束后也不收起）。两项可以分开设置，例如只收起 Tools。
+> **English:** With `card_mode = "rich"`, `rich_reasoning_panel` and `rich_tools_panel` set how the Reasoning and Tools panels start out: `auto` (default, unchanged behavior) expands them while the turn runs and collapses them when it is done, `collapsed` keeps them collapsed (readers can still expand them), `expanded` keeps them expanded after the turn too. The two can be set independently.
 > 已创建的进度卡更新失败时，会保留原卡片并暂存最新进度；短暂退避后，在后续进度事件到来时重试更新同一张卡片，不会退化为逐条工具消息。结束时会忽略进度退避，尝试写入最终状态。飞书卡片 PATCH 返回 `2200` 内部错误时，会先进行最多 3 次退避重试；持续故障仍可能导致卡片暂时停留在旧状态，最终回复会独立发送。
 > `domain` 只影响运行时 API / WebSocket 请求地址；CLI `setup/new/bind` 的引导域名仍然使用内置默认值。
 > `ack_emoji = "Get"` 会在消息通过校验、被引擎接受处理或成功入队后异步添加确认表情，无需等待模型启动或前一轮结束。它表示“请求已接收”，会在完成、失败或取消后保留，不表示模型已开始执行或任务已成功。现有 `reaction_emoji`（默认 `"OnIt"`）仍表示实际处理，`done_emoji` 表示完成；若 `ack_emoji` 与 `reaction_emoji` 相同，该表情由接收确认保留，不再作为临时状态移除。
