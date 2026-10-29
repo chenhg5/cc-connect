@@ -511,11 +511,29 @@ type Event struct {
 	Error                    error
 	InputTokens              int // token usage from agent result events
 	OutputTokens             int
-	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
-	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
+	CacheCreationInputTokens int // cache-write tokens (new content written to cache)
+	CacheReadInputTokens     int // cache-read tokens (prior context retrieved from cache)
+	ReasoningOutputTokens    int
+	Sidechain                *SidechainUsage
+	UsageIncomplete          bool
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 	ModelSwitch              *ModelSwitch   // populated for EventModelSwitch
+}
+
+// SidechainUsage is what an agent's subagents (Claude Code Agent tool calls
+// and dynamic-workflow agents) consumed since the previous turn. It is kept
+// apart from the turn's own token fields, which also drive the context
+// indicator: subagents run in their own context windows.
+type SidechainUsage struct {
+	Requests                 int
+	InputTokens              int
+	OutputTokens             int
+	CacheCreationInputTokens int
+	CacheReadInputTokens     int
+	ReasoningOutputTokens    int
+	Models                   []string // models the subagents ran on, sorted
+	ByModel                  map[string]TokenUsage
 }
 
 // HistoryEntry is one turn in a conversation.

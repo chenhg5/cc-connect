@@ -2,15 +2,19 @@ package antigravity
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 )
 
 type agyOutputParser struct {
-	sessionID string
-	hasText   bool
-	toolSteps map[int]bool
+	sessionID       string
+	hasText         bool
+	toolSteps       map[int]bool
+	pendingResponse strings.Builder
+	responseStep    int
+	result          *agyStreamResult
 }
 
 type agyOutputEnvelope struct {
@@ -21,13 +25,22 @@ type agyOutputEnvelope struct {
 }
 
 type agyStepUpdate struct {
-	ConversationID string       `json:"conversation_id"`
-	StepIndex      int          `json:"step_index"`
-	State          string       `json:"state"`
-	StepType       string       `json:"step_type"`
-	ToolName       string       `json:"tool_name"`
-	TextDelta      string       `json:"text_delta"`
-	ToolInfo       *agyToolInfo `json:"tool_info"`
+	ConversationID string           `json:"conversation_id"`
+	StepIndex      int              `json:"step_index"`
+	State          string           `json:"state"`
+	StepType       string           `json:"step_type"`
+	ToolName       string           `json:"tool_name"`
+	TextDelta      string           `json:"text_delta"`
+	ToolInfo       *agyToolInfo     `json:"tool_info"`
+	SubagentInfo   *agySubagentInfo `json:"subagent_info"`
+	Usage          *agyUsage        `json:"usage"`
+}
+
+type agySubagentInfo struct {
+	Subagents []struct {
+		ConversationID string `json:"conversation_id"`
+		LogURI         string `json:"log_uri"`
+	} `json:"subagents"`
 }
 
 type agyToolInfo struct {
@@ -43,14 +56,20 @@ type agyToolError struct {
 }
 
 type agyStreamResult struct {
-	ConversationID string `json:"conversation_id"`
-	Status         string `json:"status"`
-	Response       string `json:"response"`
-	Error          string `json:"error"`
+	ConversationID string   `json:"conversation_id"`
+	Status         string   `json:"status"`
+	Response       string   `json:"response"`
+	Error          string   `json:"error"`
+	Usage          agyUsage `json:"usage"`
 }
 
 func newAgyOutputParser() *agyOutputParser {
 	return &agyOutputParser{toolSteps: make(map[int]bool)}
+}
+
+// Result returns the result envelope captured from stream-json, if any.
+func (p *agyOutputParser) Result() *agyStreamResult {
+	return p.result
 }
 
 // parseLine returns recognized=false for ordinary text output so older CLI
@@ -83,13 +102,27 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 	switch envelope.Event {
 	case "step_update":
 		step := envelope.StepUpdate
+		if step.Usage != nil && strings.EqualFold(step.State, "DONE") {
+			encoded, _ := json.Marshal(step)
+			events = append(events, core.Event{Type: core.EventThinking, Metadata: map[string]any{"agy_step_usage": string(encoded)}})
+		}
+		if step.SubagentInfo != nil {
+			encoded, _ := json.Marshal(step.SubagentInfo)
+			events = append(events, core.Event{Type: core.EventThinking, Metadata: map[string]any{"agy_subagents": string(encoded)}})
+		}
 		switch step.StepType {
 		case "agent_response":
 			if step.TextDelta != "" {
-				p.hasText = true
-				events = append(events, core.Event{Type: core.EventText, Content: step.TextDelta})
+				// AGY has no commentary/final phase marker. Keep response
+				// deltas together until a later tool proves they are progress.
+				p.pendingResponse.WriteString(step.TextDelta)
+				p.responseStep = step.StepIndex
 			}
 		case "tool":
+			// A late completion for an older tool must not consume a newer answer.
+			if step.StepIndex > p.responseStep {
+				events = append(events, p.flushResponse(core.EventThinking)...)
+			}
 			toolName := step.ToolName
 			var input map[string]any
 			if step.ToolInfo != nil {
@@ -134,12 +167,38 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 			}
 		}
 	case "result":
+		p.result = &envelope.Result
+		events = append(events, p.flushResponse(core.EventText)...)
 		if !p.hasText && envelope.Result.Response != "" {
 			p.hasText = true
 			events = append(events, core.Event{Type: core.EventText, Content: envelope.Result.Response})
 		}
+		if envelope.Result.Error != "" || strings.EqualFold(envelope.Result.Status, "ERROR") {
+			// Only emit EventError if no text has been produced or Response is empty.
+			// Emitting EventError when Response exists wipes out the response via sp.discard().
+			if !p.hasText && envelope.Result.Response == "" {
+				message := strings.TrimSpace(envelope.Result.Error)
+				if message == "" {
+					message = "agy reported status " + envelope.Result.Status
+				}
+				events = append(events, core.Event{Type: core.EventError, Error: fmt.Errorf("agy: %s", message)})
+			}
+		}
 	}
 	return true, events
+}
+
+// flushResponse is also used at EOF by wrappers that omit the result envelope.
+func (p *agyOutputParser) flushResponse(kind core.EventType) []core.Event {
+	if p.pendingResponse.Len() == 0 {
+		return nil
+	}
+	text := p.pendingResponse.String()
+	p.pendingResponse.Reset()
+	if kind == core.EventText {
+		p.hasText = true
+	}
+	return []core.Event{{Type: kind, Content: text}}
 }
 
 func formatAgyOutputValue(value any) string {
