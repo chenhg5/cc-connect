@@ -266,7 +266,7 @@ High-level view of what each **built-in platform** can do in cc-connect.
 **Multi-Project** — One process, multiple projects, each with its own agent + platform combo.
 
 ### 🌍 Multilingual Interface
-**5 Languages** — Native support for English, Chinese (Simplified & Traditional), Japanese, and Spanish. Built-in i18n ensures everyone feels at home.
+**6 Languages** — Native support for English, Chinese (Simplified & Traditional), Japanese, Spanish, and Russian. Built-in i18n ensures everyone feels at home.
 
 
 <p align="center">

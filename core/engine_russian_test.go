@@ -55,12 +55,12 @@ func TestRussianLanguagePickers(t *testing.T) {
 }
 
 func TestRussianPermissionResponsesAreExplicit(t *testing.T) {
-	for _, response := range []string{"разрешить", "разрешить!", "разрешить?", " РАЗРЕШИТЬ ", "@bot_name разрешить", "разрешить @bot_name"} {
+	for _, response := range []string{"разрешить", "разрешить!", "разрешить !", "разрешить  ?", "разрешить?", " РАЗРЕШИТЬ ", "@bot_name разрешить", "разрешить @bot_name"} {
 		if !isAllowResponse(response) || isApproveAllResponse(response) || isDenyResponse(response) {
 			t.Errorf("invalid allow classification: %q", response)
 		}
 	}
-	for _, response := range []string{"разрешить всё", "разрешить всё!", "разрешить всё?", "разрешить все", " РАЗРЕШИТЬ ВСЁ ", "@bot_name разрешить всё", "разрешить все @bot_name"} {
+	for _, response := range []string{"разрешить всё", "разрешить всё!", "разрешить всё !", "разрешить  всё", "разрешить всё?", "разрешить все", " РАЗРЕШИТЬ ВСЁ ", "@bot_name разрешить всё", "разрешить все @bot_name"} {
 		if !isApproveAllResponse(response) || isDenyResponse(response) {
 			t.Errorf("invalid approve-all classification: %q", response)
 		}
@@ -68,7 +68,7 @@ func TestRussianPermissionResponsesAreExplicit(t *testing.T) {
 	if !isDenyResponse("отклонить!") || !isDenyResponse(" ОТКЛОНИТЬ ") || !isDenyResponse("@bot_name отклонить") || isAllowResponse("отклонить") {
 		t.Fatal("Russian deny not recognized")
 	}
-	for _, response := range []string{"не разрешить", "@bot_name не разрешить", "не разрешить всё", "@bot_name не разрешить всё", "нельзя разрешить", "не разрешить всё?", "разрешить или отклонить", "разрешитьвсё", "разрешить все файлы", "@bot_name разрешить все файлы", "неразрешить", "да", "всё"} {
+	for _, response := range []string{"не разрешить", "@bot_name не разрешить", "не разрешить всё", "@bot_name не разрешить всё", "нельзя разрешить", "не разрешить всё?", "не разрешить всё !", "разрешить или отклонить", "разрешитьвсё", "разрешить все файлы", "@bot_name разрешить все файлы", "неразрешить", "да", "всё"} {
 		if isAllowResponse(response) || isApproveAllResponse(response) {
 			t.Errorf("unsafe Russian approval: %q", response)
 		}
