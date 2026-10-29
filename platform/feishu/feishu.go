@@ -35,7 +35,8 @@ import (
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
 
-// sanitizingLogger wraps a logger and masks sensitive URL parameters.
+// sanitizingLogger masks sensitive URL parameters and respects the application log level.
+// The WebSocket SDK does not apply WithLogLevel to a custom logger.
 type sanitizingLogger struct {
 	inner larkcore.Logger
 }
@@ -71,7 +72,11 @@ func (l *sanitizingLogger) sanitize(s string) string {
 	return s
 }
 
+// Debug forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Debug(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelDebug) {
+		return
+	}
 	for _, arg := range args {
 		s, ok := arg.(string)
 		if !ok {
@@ -85,15 +90,27 @@ func (l *sanitizingLogger) Debug(ctx context.Context, args ...interface{}) {
 	l.inner.Debug(ctx, l.maskURL(args...)...)
 }
 
+// Info forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Info(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelInfo) {
+		return
+	}
 	l.inner.Info(ctx, l.maskURL(args...)...)
 }
 
+// Warn forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Warn(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelWarn) {
+		return
+	}
 	l.inner.Warn(ctx, l.maskURL(args...)...)
 }
 
+// Error forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Error(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelError) {
+		return
+	}
 	l.inner.Error(ctx, l.maskURL(args...)...)
 }
 

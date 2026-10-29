@@ -2,13 +2,19 @@ package feishu
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 )
 
+// recordingLarkLogger captures calls after the adapter filters and sanitizes them.
 type recordingLarkLogger struct {
+	infoCalls  int
+	warnCalls  int
+	errorCalls int
 	debugCalls int
 	debugArgs  [][]interface{}
 }
@@ -20,13 +26,20 @@ func (l *recordingLarkLogger) Debug(_ context.Context, args ...interface{}) {
 	l.debugArgs = append(l.debugArgs, cp)
 }
 
-func (l *recordingLarkLogger) Info(context.Context, ...interface{})  {}
-func (l *recordingLarkLogger) Warn(context.Context, ...interface{})  {}
-func (l *recordingLarkLogger) Error(context.Context, ...interface{}) {}
+// Info records an SDK information event.
+func (l *recordingLarkLogger) Info(context.Context, ...interface{}) { l.infoCalls++ }
+
+// Warn records an SDK warning.
+func (l *recordingLarkLogger) Warn(context.Context, ...interface{}) { l.warnCalls++ }
+
+// Error records an SDK error.
+func (l *recordingLarkLogger) Error(context.Context, ...interface{}) { l.errorCalls++ }
 
 var _ larkcore.Logger = (*recordingLarkLogger)(nil)
 
+// TestSanitizingLogger_DropsHeartbeatDebugLogs keeps heartbeat noise suppressed even with debug enabled.
 func TestSanitizingLogger_DropsHeartbeatDebugLogs(t *testing.T) {
+	setSDKTestLogLevel(t, slog.LevelDebug)
 	inner := &recordingLarkLogger{}
 	logger := &sanitizingLogger{inner: inner}
 
@@ -38,7 +51,9 @@ func TestSanitizingLogger_DropsHeartbeatDebugLogs(t *testing.T) {
 	}
 }
 
+// TestSanitizingLogger_KeepOtherDebugAndMaskSecrets preserves explicit debug logging and URL redaction.
 func TestSanitizingLogger_KeepOtherDebugAndMaskSecrets(t *testing.T) {
+	setSDKTestLogLevel(t, slog.LevelDebug)
 	inner := &recordingLarkLogger{}
 	logger := &sanitizingLogger{inner: inner}
 
@@ -57,5 +72,47 @@ func TestSanitizingLogger_KeepOtherDebugAndMaskSecrets(t *testing.T) {
 	}
 	if strings.Contains(urlArg, "token=abc") || strings.Contains(urlArg, "conn_id=123") {
 		t.Fatalf("url arg not masked: %q", urlArg)
+	}
+}
+
+// setSDKTestLogLevel configures the application log threshold for one serial test.
+func setSDKTestLogLevel(t *testing.T, level slog.Level) {
+	t.Helper()
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: level})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+}
+
+// TestSanitizingLogger_RespectsApplicationLogLevel prevents SDK payloads from bypassing the configured threshold.
+func TestSanitizingLogger_RespectsApplicationLogLevel(t *testing.T) {
+	for _, level := range []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
+		t.Run(level.String(), func(t *testing.T) {
+			setSDKTestLogLevel(t, level)
+			inner := &recordingLarkLogger{}
+			logger := &sanitizingLogger{inner: inner}
+			ctx := context.Background()
+			logger.Debug(ctx, `receive message payload:{"content":"private-test-message"}`)
+			logger.Info(ctx, "connected")
+			logger.Warn(ctx, "reconnecting")
+			logger.Error(ctx, "connection failed")
+
+			for _, event := range []struct {
+				level slog.Level
+				calls int
+			}{
+				{slog.LevelDebug, inner.debugCalls},
+				{slog.LevelInfo, inner.infoCalls},
+				{slog.LevelWarn, inner.warnCalls},
+				{slog.LevelError, inner.errorCalls},
+			} {
+				want := 0
+				if event.level >= level {
+					want = 1
+				}
+				if event.calls != want {
+					t.Errorf("%s calls = %d, want %d at %s threshold", event.level, event.calls, want, level)
+				}
+			}
+		})
 	}
 }
