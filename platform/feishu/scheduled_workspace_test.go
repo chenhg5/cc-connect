@@ -79,12 +79,12 @@ func TestScheduledJobs_FeishuTopicExecutionMatchesReplyDestination(t *testing.T)
 						if err := os.Mkdir(dir, 0o755); err != nil {
 							t.Fatal(err)
 						}
-						// Workspace routing canonicalizes symlinks and path separators.
+						// Match workspace routing's canonical native filesystem path.
 						dir, err := filepath.EvalSymlinks(dir)
 						if err != nil {
 							t.Fatal(err)
 						}
-						workspaces[topic] = filepath.ToSlash(dir)
+						workspaces[topic] = dir
 						bindings.Bind("project:test", platformName+":room:topic:"+topic, topic, dir)
 					}
 					name := "scheduled-feishu-" + t.Name()
