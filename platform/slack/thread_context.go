@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/slack-go/slack"
@@ -404,7 +405,7 @@ func formatThreadHistory(window threadWindow, self threadSelf, resolveName func(
 	}
 	for i, m := range history {
 		role, name := threadMessageRole(m, self, resolveName)
-		fmt.Fprintf(&b, "[%d] %s (%s):\n%s\n\n", i+1, name, role, truncateMessage(neutralizeMarkers(messageText(m))))
+		fmt.Fprintf(&b, "[%d] (%s) %s:\n%s\n\n", i+1, role, name, truncateMessage(neutralizeMarkers(messageText(m))))
 	}
 	b.WriteString("--- end of quoted thread history ---\n\n")
 	return b.String()
@@ -444,6 +445,7 @@ func threadMessageRole(m slack.Message, self threadSelf, resolveName func(string
 			name = resolveName(m.User)
 		}
 	}
+	name = quotedAuthorName(name)
 	if name == "" {
 		name = m.User
 	}
@@ -453,8 +455,32 @@ func threadMessageRole(m slack.Message, self threadSelf, resolveName func(string
 	return role, name
 }
 
+// maxQuotedAuthorRunes caps an author name in the header; a name is a label,
+// and anything longer is room for a payload.
+const maxQuotedAuthorRunes = 80
+
+// quotedAuthorName makes an author name safe to place in a message header.
+// The name is participant-controlled — a human's real name, or whatever
+// username a webhook posts under — and the header is the one line the
+// transcript does not otherwise neutralise. Line breaks would let a name open
+// a forged header of its own, and brackets or parentheses would let it carry a
+// "[N]" or "(assistant)" token, so all of them become spaces.
+func quotedAuthorName(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || strings.ContainsRune("()[]", r) {
+			return ' '
+		}
+		return r
+	}, name)
+	name = strings.Join(strings.Fields(name), " ")
+	if utf8.RuneCountInString(name) > maxQuotedAuthorRunes {
+		name = strings.TrimSpace(string([]rune(name)[:maxQuotedAuthorRunes]))
+	}
+	return name
+}
+
 // neutralizeMarkers keeps quoted text from impersonating the frame around it:
-// the "---" fences and the "[N] name (role):" header that opens each message.
+// the "---" fences and the "[N] (role) name:" header that opens each message.
 // They are the only thing telling the agent where third-party text stops and
 // who said what, and a participant can type both — a forged header could
 // otherwise claim to be this bot's own "assistant" turn.
