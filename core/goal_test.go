@@ -402,3 +402,103 @@ func TestGoalStopInvalidatesWaitingMutation(t *testing.T) {
 		t.Fatalf("cancelled waiting mutation ran: %+v", g)
 	}
 }
+
+func TestGoalIdleCloseDoesNotInterruptForeground(t *testing.T) {
+	for _, name := range []string{"late_no_queue", "late_after_queue", "already_firing"} {
+		t.Run(name, func(t *testing.T) {
+			env := newCUJEnv(t)
+			s := &goalTestSession{cujAgentSession: newCUJAgentSession()}
+			env.engine.agentSessionIdleTimeoutNanos.Store(int64(time.Hour))
+			key := "test:goal-user"
+			t.Cleanup(func() { env.engine.cleanupInteractiveState(key) })
+			msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
+			if name == "already_firing" {
+				env.engine.agent = &goalTestAgent{session: s}
+				env.engine.cmdGoal(env.plat, msg, nil)
+			} else {
+				blocked := &blockingGoalSession{goalTestSession: s, getEntered: make(chan struct{}), getRelease: make(chan struct{})}
+				env.engine.agent = &concurrentGoalAgent{session: blocked}
+				var releaseGet, releaseSchedule sync.Once
+				scheduleEntered, scheduleRelease := make(chan struct{}), make(chan struct{})
+				defer func() {
+					releaseGet.Do(func() { close(blocked.getRelease) })
+					releaseSchedule.Do(func() { close(scheduleRelease) })
+				}()
+				goalDone := make(chan struct{})
+				go func() { env.engine.cmdGoal(env.plat, msg, nil); close(goalDone) }()
+				select {
+				case <-blocked.getEntered:
+				case <-time.After(time.Second):
+					t.Fatal("query did not reach RPC")
+				}
+				sentBefore := 0
+				if name == "late_after_queue" {
+					s.pendingEvents = []Event{}
+					env.userSends("goal-user", "queued during Goal query")
+					releaseGet.Do(func() { close(blocked.getRelease) })
+					env.waitFor("queued Send", time.Second, func() bool { return len(s.getSentPrompts()) == 1 })
+					sentBefore = 1
+				}
+				env.engine.interactiveMu.Lock()
+				state := env.engine.interactiveStates[key]
+				env.engine.interactiveMu.Unlock()
+				state.mu.Lock()
+				state.agentSessionIdleCancel = func() {
+					close(scheduleEntered)
+					<-scheduleRelease
+				}
+				state.mu.Unlock()
+				env.engine.agentSessionIdleTimeoutNanos.Store(int64(10 * time.Millisecond))
+				if sentBefore == 1 {
+					s.events <- Event{Type: EventResult, Content: "queued task finished", Done: true}
+				} else {
+					releaseGet.Do(func() { close(blocked.getRelease) })
+				}
+				select {
+				case <-scheduleEntered:
+				case <-time.After(time.Second):
+					t.Fatal("Goal exit did not reach idle scheduling")
+				}
+				if env.engine.sessions.GetOrCreateActive(key).Busy() {
+					t.Fatal("test must intercept scheduling after Goal unlock")
+				}
+				s.mu.Lock()
+				s.pendingEvents = []Event{}
+				s.mu.Unlock()
+				env.userSends("goal-user", "Keep this next task running")
+				env.waitFor("next foreground Send", time.Second, func() bool { return len(s.getSentPrompts()) == sentBefore+1 })
+				releaseSchedule.Do(func() { close(scheduleRelease) })
+				select {
+				case <-goalDone:
+				case <-time.After(time.Second):
+					t.Fatal("Goal exit did not finish")
+				}
+				time.Sleep(30 * time.Millisecond)
+				if !s.Alive() {
+					t.Fatal("late Goal idle timer closed a busy foreground session")
+				}
+				s.events <- Event{Type: EventResult, Content: "foreground completed", Done: true}
+				env.waitFor("foreground result", time.Second, func() bool {
+					return strings.Contains(strings.Join(env.plat.getSent(), "\n"), "foreground completed")
+				})
+				return
+			}
+			env.engine.interactiveMu.Lock()
+			state := env.engine.interactiveStates[key]
+			env.engine.interactiveMu.Unlock()
+			state.mu.Lock()
+			token := state.agentSessionIdleToken
+			state.mu.Unlock()
+			session := env.engine.sessions.GetOrCreateActive(key)
+			gen, ok := session.TryLock()
+			if !ok {
+				t.Fatal("foreground could not acquire session")
+			}
+			defer session.Unlock(gen)
+			env.engine.cleanupInteractiveStateForIdleToken(key, state, token, time.Hour)
+			if !s.Alive() {
+				t.Fatal("late Goal idle timer closed a busy foreground session")
+			}
+		})
+	}
+}

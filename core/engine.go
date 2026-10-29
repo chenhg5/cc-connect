@@ -4672,6 +4672,7 @@ func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interac
 	if state.stopped ||
 		state.agentSession == nil ||
 		!state.agentSession.Alive() ||
+		(state.busySession != nil && state.busySession.Busy()) ||
 		activeSessionGoal(state.agentSession) ||
 		state.eventsNeedResync ||
 		state.pending != nil ||
@@ -4711,6 +4712,7 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 	if state.agentSessionIdleToken != token ||
 		state.agentSession == nil ||
 		!state.agentSession.Alive() ||
+		(state.busySession != nil && state.busySession.Busy()) ||
 		activeSessionGoal(state.agentSession) ||
 		state.stopped ||
 		state.eventsNeedResync ||
