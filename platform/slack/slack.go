@@ -713,12 +713,12 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	return rc, nil
 }
 
-// userNameLookupTimeout bounds the users.info lookup for an inbound message's
-// author, which runs on the serialized event loop.
-const userNameLookupTimeout = 5 * time.Second
+// nameLookupTimeout bounds the users.info and conversations.info lookups made
+// while building an inbound message, which run on the serialized event loop.
+var nameLookupTimeout = 5 * time.Second
 
 func (p *Platform) resolveUserName(userID string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), userNameLookupTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), nameLookupTimeout)
 	defer cancel()
 	return p.resolveUserNameContext(ctx, userID)
 }
@@ -771,7 +771,9 @@ func (p *Platform) ResolveChannelName(channelID string) (string, error) {
 	}
 	p.channelCacheMu.RUnlock()
 
-	info, err := p.client.GetConversationInfo(&slack.GetConversationInfoInput{
+	ctx, cancel := context.WithTimeout(context.Background(), nameLookupTimeout)
+	defer cancel()
+	info, err := p.client.GetConversationInfoContext(ctx, &slack.GetConversationInfoInput{
 		ChannelID: channelID,
 	})
 	if err != nil {
