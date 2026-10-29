@@ -3,6 +3,8 @@ package engine_matrix
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -188,12 +190,45 @@ func newMatrixEngine(t *testing.T) (*core.Engine, *matrixAgent, *matrixPlatform)
 	t.Helper()
 	agent := newMatrixAgent()
 	platform := &matrixPlatform{}
-	engine := core.NewEngine("release-core", agent, []core.Platform{platform}, t.TempDir()+"/sessions.json", core.LangEnglish)
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "sessions.json")
+	engine := core.NewEngine("release-core", agent, []core.Platform{platform}, storePath, core.LangEnglish)
 	t.Cleanup(func() {
 		engine.Stop()
 		_ = agent.Stop()
+		// Engine message handling is async (processInteractiveMessageWith):
+		// a session-store AtomicWriteFile may still be in flight after the
+		// last assertion passes. Wait for the store dir to settle so Go's
+		// TempDir RemoveAll cleanup does not race a concurrent writer and
+		// fail the test with "directory not empty".
+		waitStoreQuiescent(dir)
 	})
 	return engine, agent, platform
+}
+
+// waitStoreQuiescent polls the session store dir until no .tmp-* files
+// remain and sessions.json size is stable across 3 consecutive polls.
+// Bounded (~5s); a no-op for tests that never touched the store.
+func waitStoreQuiescent(dir string) {
+	deadline := time.Now().Add(5 * time.Second)
+	var lastSize int64 = -2
+	stable := 0
+	for time.Now().Before(deadline) {
+		tmp, _ := filepath.Glob(filepath.Join(dir, ".tmp-*"))
+		var size int64 = -1
+		if fi, err := os.Stat(filepath.Join(dir, "sessions.json")); err == nil {
+			size = fi.Size()
+		}
+		if len(tmp) == 0 && size == lastSize {
+			if stable++; stable >= 3 {
+				return
+			}
+		} else {
+			stable = 0
+			lastSize = size
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func matrixMessage(content string) *core.Message {
