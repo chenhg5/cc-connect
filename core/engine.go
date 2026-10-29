@@ -7624,7 +7624,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Re-sample the turn baseline before this queued message's agent
 				// turn starts: earlier queued messages may have changed the tree,
 				// and this message's Changed flag must not inherit their edits.
-				// The fingerprint window lock is already held for this call.
+				// The queued message is a turn of its own, so it gets its own
+				// fingerprint window too.
+				fpWindow.close()
+				fpWindow = e.openFingerprintWindow(hookWorkspace)
 				turnStartGitFingerprint = workspaceGitFingerprint(e.ctx, hookWorkspace)
 
 				// Re-sample the turn baseline before this queued message's agent
