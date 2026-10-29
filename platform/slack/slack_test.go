@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 
@@ -348,5 +349,44 @@ func TestDedupKey(t *testing.T) {
 	// the empty string as a duplicate, so such events are never swallowed.
 	if got := dedupKey("C1", ""); got != "" {
 		t.Errorf("dedupKey with empty ts = %q, want empty", got)
+	}
+}
+
+// The name lookups run on the serialized event loop while an inbound message is
+// built, and slack-go's default client has no timeout: a stalled users.info or
+// conversations.info must give up, not hold every later event behind it.
+func TestNameLookupsGiveUpOnStalledAPI(t *testing.T) {
+	prev := nameLookupTimeout
+	nameLookupTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { nameLookupTimeout = prev })
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	p := &Platform{
+		client:           slack.New("xoxb-test", slack.OptionAPIURL(srv.URL+"/")),
+		channelNameCache: make(map[string]string),
+	}
+	var user, channel string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		user = p.resolveUserName("U1")
+		channel = p.resolveChannelNameForMsg("C1")
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a name lookup is still blocked on the stalled API after 5s")
+	}
+	if user != "U1" || channel != "C1" {
+		t.Errorf("stalled lookups = (%q, %q), want the IDs (U1, C1) as fallbacks", user, channel)
 	}
 }
