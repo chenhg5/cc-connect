@@ -1136,6 +1136,203 @@ func TestCmdGoto_ProviderOnlySwitchDropsStaleWorkspaceModel(t *testing.T) {
 	}
 }
 
+// modelAwareGotoAgent behaves like the provider-aware transports (claudecode,
+// opencode, codex, …): the active provider's model wins and the agent's own model
+// is only the fallback. A provider-capable stub without a model cannot show a
+// wrong-model rebuild at all, because nothing is ever installed on it.
+type modelAwareGotoAgent struct {
+	namedProviderAgent
+	model string
+}
+
+func (a *modelAwareGotoAgent) SetModel(model string) { a.model = model }
+
+func (a *modelAwareGotoAgent) GetModel() string {
+	idx := -1
+	for i := range a.providers {
+		if a.providers[i].Name == a.active {
+			idx = i
+		}
+	}
+	return GetProviderModel(a.providers, idx, a.model)
+}
+
+func (a *modelAwareGotoAgent) AvailableModels(context.Context) []ModelOption { return nil }
+
+// effectiveModel is what StartSession would hand to the transport.
+func (a *modelAwareGotoAgent) effectiveModel() string {
+	if active := a.GetActiveProvider(); active != nil && active.Model != "" {
+		return active.Model
+	}
+	return a.model
+}
+
+// gotoModelAgent is what the rebuilt-agent test needs: an agent whose effective
+// model follows the transports' precedence.
+type gotoModelAgent interface {
+	Agent
+	effectiveModel() string
+}
+
+// registerGotoModelAgent registers a provider-capable test agent that keeps a
+// model of its own. With mirror set, SetModel also writes through to the active
+// provider entry, the way the kimi transport behaves.
+func registerGotoModelAgent(t *testing.T, mirror bool, providers []ProviderConfig, active, model string) func() gotoModelAgent {
+	t.Helper()
+	agentName := fmt.Sprintf("ws-goto-model-agent-%d", atomic.AddInt64(&gotoTestAgentSeq, 1))
+	newAgent := func() gotoModelAgent {
+		base := modelAwareGotoAgent{
+			namedProviderAgent: namedProviderAgent{
+				stubProviderAgent: stubProviderAgent{providers: providers, active: active},
+				name:              agentName,
+			},
+			model: model,
+		}
+		if mirror {
+			return &mirroringGotoAgent{modelAwareGotoAgent: base}
+		}
+		return &base
+	}
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) { return newAgent(), nil })
+	return newAgent
+}
+
+// mirroringGotoAgent keeps the agent's own model and the active provider's entry
+// in sync, the way kimi does (SetModel writes through to the provider entry). It
+// is the family where clearing the agent's model can throw away a model the
+// provider was configured with, so it can catch an over-eager clear that the
+// other fixtures cannot see.
+type mirroringGotoAgent struct {
+	modelAwareGotoAgent
+}
+
+func (a *mirroringGotoAgent) SetModel(model string) {
+	a.model = model
+	for i := range a.providers {
+		if a.providers[i].Name == a.active {
+			a.providers[i].Model = model
+		}
+	}
+}
+
+// "/goto <provider>" asks for that provider's configured default. On an agent that
+// mirrors its model onto the provider entry, clearing the model unconditionally
+// answers with an empty model instead.
+func TestApplyGoto_ProviderOnlyKeepsConfiguredModelOnMirroringAgent(t *testing.T) {
+	providers := func() []ProviderConfig {
+		return []ProviderConfig{
+			{Name: "aiapi", Model: "glm-5.3"},
+			{Name: "chatgpt", Model: "gpt-5.6-sol"},
+		}
+	}
+	project := &mirroringGotoAgent{modelAwareGotoAgent{
+		namedProviderAgent: namedProviderAgent{
+			stubProviderAgent: stubProviderAgent{providers: providers(), active: "chatgpt"},
+			name:              "mirroring-goto-project",
+		},
+		model: "gpt-5.6-sol",
+	}}
+	e := NewEngine("test", project, nil, "", LangEnglish)
+	workspaceAgent := &mirroringGotoAgent{modelAwareGotoAgent{
+		namedProviderAgent: namedProviderAgent{
+			stubProviderAgent: stubProviderAgent{providers: providers(), active: "chatgpt"},
+			name:              "mirroring-goto-workspace",
+		},
+	}}
+
+	e.applyGoto(workspaceAgent, e.sessions, workspaceAgent, "test:user1", "", "aiapi", "", false)
+
+	if got := workspaceAgent.providers[0].Model; got != "glm-5.3" {
+		t.Fatalf("provider entry model after provider-only /goto = %q, want the configured default glm-5.3", got)
+	}
+	if got := workspaceAgent.effectiveModel(); got != "glm-5.3" {
+		t.Fatalf("agent runs model %q after provider-only /goto, want glm-5.3", got)
+	}
+}
+
+// A rebuilt workspace agent inherits the project agent's model through the option
+// snapshot and the fallback copy in getOrCreateWorkspaceAgent. That model belongs
+// to the project's provider: once the workspace runs a different provider that has
+// no default model, the inherited name is exactly the "model X against provider Y"
+// failure the workspace override is resolved against — and it came back on every
+// turn after a reap, while the live agent looked correct.
+func TestCmdGoto_RebuildDoesNotInheritProjectModel(t *testing.T) {
+	providers := func() []ProviderConfig {
+		return []ProviderConfig{
+			{Name: "aiapi", Models: []ModelOption{{Name: "aiapi/glm-5.3"}}},
+			{Name: "chatgpt", Model: "gpt-5.6-sol"},
+			{Name: "glm", Model: "glm-4.6"},
+		}
+	}
+
+	// rebuildAfterGoto runs the given /goto arguments in a bound workspace chat,
+	// drops the agent like the idle reaper does, and returns the rebuilt agent.
+	rebuildAfterGoto := func(t *testing.T, mirror bool, args []string) gotoModelAgent {
+		t.Helper()
+		baseDir := t.TempDir()
+		wsDir := filepath.Join(baseDir, "goto-ws-inherit")
+		if err := os.MkdirAll(wsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		newAgent := registerGotoModelAgent(t, mirror, providers(), "chatgpt", "gpt-5.6-sol")
+		e := NewEngine("test", newAgent(), nil, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+		e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+		e.SetProjectStateStore(NewProjectStateStore(filepath.Join(t.TempDir(), "project.state.json")))
+
+		channelID := "C-goto-inherit"
+		channelKey := "test-platform:" + channelID
+		e.workspaceBindings.Bind("project:test", channelKey, "goto-ws-inherit", wsDir)
+
+		p := &mockChannelResolver{name: "test-platform", names: map[string]string{}}
+		msg := &Message{Platform: "test-platform", ChannelKey: channelID, SessionKey: channelKey + ":U-001", ReplyCtx: "ctx"}
+		if len(args) > 0 {
+			e.cmdGoto(p, msg, args)
+		}
+
+		wantWS := normalizeWorkspacePath(wsDir)
+		if ws := e.workspacePool.GetOrCreate(wantWS); ws != nil {
+			ws.mu.Lock()
+			ws.agent = nil
+			ws.sessions = nil
+			ws.mu.Unlock()
+		}
+
+		rebuiltRaw, _, err := e.getOrCreateWorkspaceAgent(wantWS)
+		if err != nil {
+			t.Fatalf("rebuild workspace agent: %v", err)
+		}
+		rebuilt, ok := rebuiltRaw.(gotoModelAgent)
+		if !ok {
+			t.Fatalf("rebuilt workspace agent type = %T", rebuiltRaw)
+		}
+		return rebuilt
+	}
+
+	t.Run("provider without a default model", func(t *testing.T) {
+		rebuilt := rebuildAfterGoto(t, false, []string{"aiapi"})
+		if got := rebuilt.effectiveModel(); got != "" {
+			t.Fatalf("rebuilt agent runs model %q on aiapi, want the provider default", got)
+		}
+	})
+
+	// The mirroring fixture is what makes this subtest bite: on the transports that
+	// keep the provider entry in sync, clearing the model would erase the default.
+	t.Run("provider with its own model keeps it", func(t *testing.T) {
+		rebuilt := rebuildAfterGoto(t, true, []string{"glm"})
+		if got := rebuilt.effectiveModel(); got != "glm-4.6" {
+			t.Fatalf("rebuilt agent runs model %q on glm, want its configured default", got)
+		}
+	})
+
+	t.Run("workspace still on the project provider", func(t *testing.T) {
+		rebuilt := rebuildAfterGoto(t, false, nil)
+		if got := rebuilt.effectiveModel(); got != "gpt-5.6-sol" {
+			t.Fatalf("rebuilt agent runs model %q, want the inherited project model", got)
+		}
+	})
+}
+
 // Chats without a workspace keep the previous semantics: the provider is
 // recorded on the session, and the project default is updated (the only
 // persistence available without a workspace).

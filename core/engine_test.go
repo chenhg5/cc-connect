@@ -4624,6 +4624,42 @@ func TestCmdGoto_WithModel_PersistsModelPerAgentScoping(t *testing.T) {
 	}
 }
 
+// A workspace agent pins the picked model on its own provider entry, and every
+// transport prefers that entry over the agent's own model. "/goto <provider>"
+// therefore has to put the configured default back, or it would keep running the
+// model of the previous "/goto <provider>/<model>" until the agent is rebuilt —
+// while the rebuilt agent would run the default.
+func TestApplyGoto_ProviderOnlyRestoresConfiguredModel(t *testing.T) {
+	providers := func() []ProviderConfig {
+		return []ProviderConfig{
+			{Name: "aiapi", Model: "glm-5.3"},
+			{Name: "chatgpt", Model: "gpt-5.6-sol"},
+		}
+	}
+	project := &stubProviderAgent{providers: providers(), active: "chatgpt"}
+	e := NewEngine("test", project, nil, "", LangEnglish)
+	workspaceAgent := &stubProviderAgent{providers: providers(), active: "chatgpt"}
+	sessions := e.sessions
+
+	e.applyGoto(workspaceAgent, sessions, workspaceAgent, "test:user1", "", "aiapi", "aiapi/glm-5.4", true)
+	if got := workspaceAgent.GetActiveProvider().Model; got != "aiapi/glm-5.4" {
+		t.Fatalf("picked provider model = %q, want aiapi/glm-5.4", got)
+	}
+
+	e.applyGoto(workspaceAgent, sessions, workspaceAgent, "test:user1", "", "aiapi", "", false)
+	active := workspaceAgent.GetActiveProvider()
+	if active == nil || active.Name != "aiapi" {
+		t.Fatalf("active provider = %+v, want aiapi", active)
+	}
+	if active.Model != "glm-5.3" {
+		t.Fatalf("provider model after provider-only /goto = %q, want the configured default glm-5.3", active.Model)
+	}
+	// The project agent's own entry must not be touched.
+	if got := project.GetActiveProvider().Model; got != "gpt-5.6-sol" {
+		t.Fatalf("project provider model = %q, want gpt-5.6-sol", got)
+	}
+}
+
 // TestCmdGoto_NoArgsRendersGroupedList verifies "/goto" with no arguments
 // renders the two-level grouped provider → model list with continuous
 // numbering and a usage hint.
@@ -4692,6 +4728,62 @@ func TestCmdGoto_TextPickerButtonsCarryIdentifiers(t *testing.T) {
 	for i := range want {
 		if datas[i] != want[i] {
 			t.Errorf("button %d payload = %q, want %q", i, datas[i], want[i])
+		}
+	}
+}
+
+// The "/<provider>/" prefix may only be stripped from models the agent stores
+// scoped. On an agent that keeps bare names, a model that merely starts with its
+// provider's name ("openai/gpt-5.6-sol" under the provider "openai") is a name of
+// its own: stripping it switched to a model the provider does not serve. A model
+// containing whitespace also has to survive the trip back through the message
+// parser, so the payload is quoted.
+func TestCmdGoto_TextPickerButtonsKeepBareModelNames(t *testing.T) {
+	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "plain"}}
+	agent := &stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "openai", Models: []ModelOption{
+				{Name: "openai/gpt-5.6-sol"},
+				{Name: "meta-llama/Llama 3.3 70B"},
+			}},
+		},
+		active: "openai",
+	}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, nil)
+
+	var datas []string
+	for _, row := range p.buttonRows {
+		for _, btn := range row {
+			datas = append(datas, btn.Data)
+		}
+	}
+	want := []string{
+		"cmd:/goto openai/openai/gpt-5.6-sol",
+		"cmd:/goto 'openai/meta-llama/Llama 3.3 70B'",
+	}
+	if len(datas) != len(want) {
+		t.Fatalf("button payloads = %v, want %v", datas, want)
+	}
+	for i := range want {
+		if datas[i] != want[i] {
+			t.Errorf("button %d payload = %q, want %q", i, datas[i], want[i])
+		}
+	}
+
+	// Pressing the quoted button has to reach the model its row named.
+	for _, tc := range []struct {
+		payload string
+		model   string
+	}{
+		{"cmd:/goto openai/openai/gpt-5.6-sol", "openai/gpt-5.6-sol"},
+		{"cmd:/goto 'openai/meta-llama/Llama 3.3 70B'", "meta-llama/Llama 3.3 70B"},
+	} {
+		args := splitCommandArgs(strings.TrimPrefix(tc.payload, "cmd:/goto "))
+		e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, args)
+		if got := agent.providers[0].Model; got != tc.model {
+			t.Errorf("payload %q switched to model %q, want %q", tc.payload, got, tc.model)
 		}
 	}
 }
