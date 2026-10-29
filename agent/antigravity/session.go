@@ -26,6 +26,7 @@ type antigravitySession struct {
 	extraArgs        []string // extra args from cmd, prepended before agy args
 	workDir          string
 	model            string
+	effort           string
 	mode             string
 	timeout          time.Duration
 	extraEnv         []string
@@ -39,7 +40,7 @@ type antigravitySession struct {
 	permissionBridge *agyPermissionBridge
 }
 
-func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
+func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, workDir, model, effort, mode, resumeID string, extraEnv []string, timeout time.Duration) (*antigravitySession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	as := &antigravitySession{
@@ -47,6 +48,7 @@ func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, 
 		extraArgs: extraArgs,
 		workDir:   workDir,
 		model:     model,
+		effort:    effort,
 		mode:      mode,
 		timeout:   timeout,
 		extraEnv:  extraEnv,
@@ -91,6 +93,7 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 			}
 		}
 	}
+	preConversations := snapshotAgyConversations()
 
 	// Save images and files into the workspace
 	attachDir := filepath.Join(as.workDir, ".cc-connect", "attachments")
@@ -143,9 +146,6 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 		agyConfigDir = as.permissionBridge.AgyConfigDir()
 	}
 	args := as.buildAntigravityArgs(chatID, isResume, as.mode, agyConfigDir, fullPrompt)
-	if strings.TrimSpace(as.model) != "" {
-		slog.Warn("antigravitySession: model is configured but ignored because agy does not support --model yet", "model", as.model)
-	}
 
 	var ctx context.Context
 	var cancel context.CancelFunc
@@ -193,7 +193,7 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	as.wg.Add(1)
 	go func() {
 		defer cancel()
-		as.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, filePaths...), preEntries, time.Now())
+		as.readLoop(ctx, cmd, stdout, &stderrBuf, append(imageRefs, filePaths...), preEntries, preConversations, time.Now())
 	}()
 
 	return nil
@@ -210,6 +210,12 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	if isResume {
 		args = append(args, "--conversation", chatID)
 	}
+	if m := strings.TrimSpace(as.model); m != "" {
+		args = append(args, "--model", m)
+	}
+	if e := strings.TrimSpace(as.effort); e != "" {
+		args = append(args, "--effort", e)
+	}
 	args = append(args, "--output-format=stream-json")
 	switch mode {
 	case "yolo":
@@ -221,7 +227,7 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	return args
 }
 
-func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
+func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries, preConversations map[string]bool, sendStartedAt time.Time) {
 	defer as.wg.Done()
 	defer func() {
 		for _, f := range tempFiles {
@@ -236,7 +242,10 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		if as.CurrentSessionID() == "" {
 			var sid string
 			for attempt := 0; attempt < 15; attempt++ {
-				sid = as.detectNewSessionID(preEntries, sendStartedAt)
+				sid = detectNewAgyConversation(preConversations, sendStartedAt)
+				if sid == "" {
+					sid = as.detectNewSessionID(preEntries, sendStartedAt)
+				}
 				if sid != "" {
 					break
 				}
@@ -294,6 +303,11 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			continue
 		}
 		for _, event := range events {
+			// agy reports the conversation ID in its stream; remember it so the
+			// next turn passes --conversation instead of starting over.
+			if event.SessionID != "" && as.CurrentSessionID() == "" {
+				as.chatID.Store(event.SessionID)
+			}
 			select {
 			case as.events <- event:
 			case <-as.ctx.Done():
