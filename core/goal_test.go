@@ -237,3 +237,168 @@ func TestGoalStopRPCFailureClosesSession(t *testing.T) {
 		t.Fatal("failed cancellation left live state registered")
 	}
 }
+
+type blockingGoalSession struct {
+	*goalTestSession
+	getEntered, getRelease chan struct{}
+	setEntered, setRelease chan struct{}
+	getErr                 error
+}
+
+func (s *blockingGoalSession) GetGoal() (*Goal, error) {
+	if s.getEntered != nil {
+		close(s.getEntered)
+		<-s.getRelease
+	}
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
+	return s.goalTestSession.GetGoal()
+}
+
+func (s *blockingGoalSession) SetGoal(u GoalUpdate) (*Goal, error) {
+	if s.setEntered != nil {
+		close(s.setEntered)
+		<-s.setRelease
+	}
+	return s.goalTestSession.SetGoal(u)
+}
+
+type concurrentGoalAgent struct {
+	stubAgent
+	session AgentSession
+}
+
+func (*concurrentGoalAgent) SupportsGoals() bool { return true }
+func (a *concurrentGoalAgent) StartSession(context.Context, string) (AgentSession, error) {
+	return a.session, nil
+}
+
+func TestGoalQueryDrainsMessagesQueuedDuringRPC(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{{"success", nil}, {"error", errors.New("query failed")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newCUJEnv(t)
+			base := &goalTestSession{cujAgentSession: newCUJAgentSession()}
+			base.reply = "follow-up delivered"
+			s := &blockingGoalSession{goalTestSession: base, getEntered: make(chan struct{}), getRelease: make(chan struct{}), getErr: tc.err}
+			env.engine.agent = &concurrentGoalAgent{session: s}
+			var release sync.Once
+			t.Cleanup(func() {
+				release.Do(func() { close(s.getRelease) })
+				env.engine.cleanupInteractiveState("test:goal-user")
+			})
+			done := make(chan struct{})
+			go func() {
+				env.engine.cmdGoal(env.plat, &Message{SessionKey: "test:goal-user", ReplyCtx: "ctx"}, nil)
+				close(done)
+			}()
+			select {
+			case <-s.getEntered:
+			case <-time.After(time.Second):
+				t.Fatal("goal query did not reach native RPC")
+			}
+			env.userSends("goal-user", "follow up")
+			release.Do(func() { close(s.getRelease) })
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("goal command did not finish")
+			}
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				if strings.Contains(strings.Join(env.plat.getSent(), "\n"), "follow-up delivered") {
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+			t.Fatal("follow-up stayed queued after the Goal RPC finished")
+		})
+	}
+}
+
+func TestGoalStopWaitsForPendingMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		goal *Goal
+	}{{"set", []string{"set", "Pending objective"}, nil}, {"resume", []string{"resume"}, &Goal{Objective: "Paused objective", Status: "paused"}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newCUJEnv(t)
+			base := &goalTestSession{cujAgentSession: newCUJAgentSession(), goal: tc.goal}
+			s := &blockingGoalSession{goalTestSession: base, setEntered: make(chan struct{}), setRelease: make(chan struct{})}
+			env.engine.agent = &concurrentGoalAgent{session: s}
+			var release sync.Once
+			t.Cleanup(func() {
+				release.Do(func() { close(s.setRelease) })
+				env.engine.cleanupInteractiveState("test:goal-user")
+			})
+			msg := &Message{SessionKey: "test:goal-user", ReplyCtx: "ctx"}
+			goalDone := make(chan struct{})
+			go func() { env.engine.cmdGoal(env.plat, msg, tc.args); close(goalDone) }()
+			select {
+			case <-s.setEntered:
+			case <-time.After(time.Second):
+				t.Fatal("goal mutation did not reach native RPC")
+			}
+			stopDone := make(chan struct{})
+			go func() { env.engine.cmdStop(env.plat, msg); close(stopDone) }()
+			select {
+			case <-stopDone:
+			case <-time.After(200 * time.Millisecond):
+			}
+			release.Do(func() { close(s.setRelease) })
+			for _, done := range []chan struct{}{goalDone, stopDone} {
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+					t.Fatal("Goal/stop did not finish")
+				}
+			}
+			g, _ := base.GetGoal()
+			if g == nil || g.Status == "active" || env.engine.sessions.GetOrCreateActive(msg.SessionKey).GetResumeGoal() {
+				t.Fatalf("pending Goal restarted after stop: goal=%+v", g)
+			}
+		})
+	}
+}
+
+func TestGoalStopInvalidatesWaitingMutation(t *testing.T) {
+	env := newCUJEnv(t)
+	s := &goalTestSession{cujAgentSession: newCUJAgentSession()}
+	env.engine.agent = &concurrentGoalAgent{session: s}
+	msg := &Message{SessionKey: "test:goal-user", ReplyCtx: "ctx"}
+	env.engine.cmdGoal(env.plat, msg, nil)
+	t.Cleanup(func() { env.engine.cleanupInteractiveState(msg.SessionKey) })
+	env.engine.interactiveMu.Lock()
+	state := env.engine.interactiveStates[msg.SessionKey]
+	env.engine.interactiveMu.Unlock()
+	state.goalMu.Lock()
+	var release sync.Once
+	t.Cleanup(func() { release.Do(state.goalMu.Unlock) })
+	goalDone := make(chan struct{})
+	go func() { env.engine.cmdGoal(env.plat, msg, []string{"set", "Must not start"}); close(goalDone) }()
+	session := env.engine.sessions.GetOrCreateActive(msg.SessionKey)
+	env.waitFor("waiting Goal owns session", time.Second, session.Busy)
+	stopDone := make(chan struct{})
+	go func() { env.engine.cmdStop(env.plat, msg); close(stopDone) }()
+	env.waitFor("stop invalidates pending Goal", time.Second, func() bool {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		return session.goalStopGeneration != 0
+	})
+	release.Do(state.goalMu.Unlock)
+	for _, done := range []chan struct{}{goalDone, stopDone} {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("waiting Goal/stop did not finish")
+		}
+	}
+	g, _ := s.GetGoal()
+	if (g != nil && g.Objective == "Must not start") || session.GetResumeGoal() {
+		t.Fatalf("cancelled waiting mutation ran: %+v", g)
+	}
+}

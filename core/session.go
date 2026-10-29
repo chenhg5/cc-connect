@@ -59,10 +59,11 @@ type Session struct {
 	// ResumeGoal records continuation intent; native goal state stays authoritative.
 	ResumeGoal bool `json:"resume_goal,omitempty"`
 
-	mu        sync.Mutex `json:"-"`
-	busy      bool       `json:"-"`
-	busySince time.Time  `json:"-"` // custom 2026-09-12: when the busy lock was acquired (stale-lock self-heal)
-	lockGen   uint64     `json:"-"` // custom 2026-09-12: lock generation, invalidates late unlocks after BreakStaleLock
+	mu                 sync.Mutex `json:"-"`
+	busy               bool       `json:"-"`
+	busySince          time.Time  `json:"-"` // custom 2026-09-12: when the busy lock was acquired (stale-lock self-heal)
+	lockGen            uint64     `json:"-"` // custom 2026-09-12: lock generation, invalidates late unlocks after BreakStaleLock
+	goalStopGeneration uint64     // invalidates Goal commands that began before /stop
 }
 
 func (s *Session) SetResumeGoal(active bool) {

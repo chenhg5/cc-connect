@@ -10965,6 +10965,24 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		e.interactiveMu.Unlock()
 		return false
 	}
+	state.mu.Lock()
+	stoppingSession := state.busySession
+	state.mu.Unlock()
+	if stoppingSession != nil {
+		stoppingSession.mu.Lock()
+		stoppingSession.goalStopGeneration++
+		stoppingSession.mu.Unlock()
+	}
+	// A pending Goal mutation must finish before cancellation. Release the
+	// engine lock while waiting, then verify this is still the same state.
+	e.interactiveMu.Unlock()
+	state.goalMu.Lock()
+	defer state.goalMu.Unlock()
+	e.interactiveMu.Lock()
+	if e.interactiveStates[sessionKey] != state {
+		e.interactiveMu.Unlock()
+		return true
+	}
 
 	// Stop unsolicited reader before touching state to avoid races.
 	e.stopUnsolicitedReader(state)

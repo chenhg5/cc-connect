@@ -118,10 +118,35 @@ func (e *Engine) cmdGoal(p Platform, msg *Message, args []string) {
 		return
 	}
 	session := sessions.GetOrCreateActive(msg.SessionKey)
+	session.mu.Lock()
+	stopGeneration := session.goalStopGeneration
+	session.mu.Unlock()
 	gen, locked := session.TryLock()
 	var state *interactiveState
 	if locked {
-		defer session.Unlock(gen)
+		defer func() {
+			if state == nil {
+				session.Unlock(gen)
+				return
+			}
+			defer e.scheduleAgentSessionIdleClose(key, state)
+			// Match the normal turn's atomic queue-empty/unlock handoff.
+			state.mu.Lock()
+			session.mu.Lock()
+			ownsLock := session.busy && session.lockGen == gen
+			session.mu.Unlock()
+			if !ownsLock {
+				state.mu.Unlock()
+				return
+			}
+			if len(state.pendingMessages) == 0 {
+				session.Unlock(gen)
+				state.mu.Unlock()
+				return
+			}
+			state.mu.Unlock()
+			e.drainOrphanedQueue(session, sessions, key, agent, workspace, gen)
+		}()
 		state = e.getOrCreateInteractiveStateWithResumePolicy(key, p, msg.ReplyCtx, session, sessions, agent, msg.SessionKey, false)
 	} else {
 		e.interactiveMu.Lock()
@@ -134,6 +159,13 @@ func (e *Engine) cmdGoal(p Platform, msg *Message, args []string) {
 	}
 	state.goalMu.Lock()
 	defer state.goalMu.Unlock()
+	session.mu.Lock()
+	cancelled := session.goalStopGeneration != stopGeneration
+	session.mu.Unlock()
+	if cancelled {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+		return
+	}
 	state.mu.Lock()
 	live := state.agentSession
 	state.mu.Unlock()
@@ -155,7 +187,6 @@ func (e *Engine) cmdGoal(p Platform, msg *Message, args []string) {
 		state.eventsNeedResync = false
 		state.mu.Unlock()
 		e.startUnsolicitedReader(state, session, sessions, key, workspace)
-		defer e.scheduleAgentSessionIdleClose(key, state)
 	}
 	goal, err := applyGoalCommand(m, c)
 	if err != nil {
