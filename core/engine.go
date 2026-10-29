@@ -5626,8 +5626,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
 
 			case EventResult:
-				// Resolve hook context first so the fingerprint window lock uses
-				// the same effective workspace key as the foreground path.
+				// Resolve hook context first so the fingerprint sample uses the
+				// same effective workspace as the foreground path.
 				state.mu.Lock()
 				hookSessionKey := state.ccSessionKey
 				hookWorkspace := state.workspaceDir

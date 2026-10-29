@@ -558,13 +558,18 @@ func TestNeedsChangedFingerprint(t *testing.T) {
 	}{
 		{name: "no hooks", want: false},
 		{
-			name:  "finalized command hook ignoring the flag",
+			name:  "finalized command hook",
 			hooks: []HookConfig{{Event: "message.finalized", Type: "command", Command: "echo done"}},
-			want:  false,
+			want:  true,
 		},
 		{
-			name:  "finalized command hook reading the flag",
+			name:  "finalized command hook reading the flag directly",
 			hooks: []HookConfig{{Event: "message.finalized", Type: "command", Command: "test \"$CC_HOOK_CHANGED\" = true && review"}},
+			want:  true,
+		},
+		{
+			name:  "finalized command hook reading the flag through a script",
+			hooks: []HookConfig{{Event: "message.finalized", Type: "command", Command: "./scripts/review.sh"}},
 			want:  true,
 		},
 		{
@@ -573,12 +578,12 @@ func TestNeedsChangedFingerprint(t *testing.T) {
 			want:  true,
 		},
 		{
-			name:  "wildcard command hook reading the flag",
+			name:  "wildcard hook matches finalized messages",
 			hooks: []HookConfig{{Event: "*", Type: "command", Command: "echo $CC_HOOK_CHANGED"}},
 			want:  true,
 		},
 		{
-			name:  "another event reading the flag is irrelevant",
+			name:  "another event is irrelevant",
 			hooks: []HookConfig{{Event: "message.sent", Type: "command", Command: "echo $CC_HOOK_CHANGED"}},
 			want:  false,
 		},

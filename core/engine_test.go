@@ -1224,7 +1224,7 @@ func TestProcessInteractiveEvents_EmptyReplyDoesNotEmitFinalizedHook(t *testing.
 // Timeline (synchronous engine call driven by a helper goroutine):
 //  1. turnStart baseline A captured (clean tree)
 //  2. engine goroutine then blocks on events; test writes file x (strictly
-//     after A — see the fingerprint-lock wait below) → first EventResult emits
+//     after A — the fingerprint sample is observed via the git PATH shim) → first EventResult emits
 //     changed=true
 //  3. queued branch drains stale events and re-samples baseline B (tree now
 //     contains x)

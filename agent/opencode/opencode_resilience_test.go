@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -408,19 +409,108 @@ func TestHandleStepFinish_TokenUsageAccumulated(t *testing.T) {
 
 func TestStallWatchdog_DoesNotKillWhileToolRuns(t *testing.T) {
 	s := &opencodeSession{}
-	if s.stalledTooLong(stallTimeout - time.Second) {
+	if s.stalledTooLong(defaultStallTimeout - time.Second) {
 		t.Fatal("idle below the threshold must not be a stall")
 	}
-	if !s.stalledTooLong(stallTimeout + time.Minute) {
+	if !s.stalledTooLong(defaultStallTimeout + time.Minute) {
 		t.Fatal("idle above the threshold with no tool running must be a stall")
 	}
 	s.activeTools.Store(1)
-	if s.stalledTooLong(stallTimeout + time.Hour) {
+	if s.stalledTooLong(defaultStallTimeout + time.Hour) {
 		t.Fatal("a long-running tool call is work, not a stall")
 	}
 	s.activeTools.Store(0)
-	if !s.stalledTooLong(stallTimeout + time.Minute) {
+	if !s.stalledTooLong(defaultStallTimeout + time.Minute) {
 		t.Fatal("after the tool finishes the watchdog must be armed again")
+	}
+}
+
+func TestStallWatchdog_ConfigurableTimeout(t *testing.T) {
+	s := &opencodeSession{stallTimeout: 30 * time.Minute}
+	if s.stalledTooLong(defaultStallTimeout + time.Minute) {
+		t.Fatal("a raised threshold must not keep the 5m default")
+	}
+	if !s.stalledTooLong(30*time.Minute + time.Second) {
+		t.Fatal("a raised threshold must still arm at its own value")
+	}
+
+	off := &opencodeSession{stallTimeout: stallTimeoutDisabled}
+	if off.stalledTooLong(24 * time.Hour) {
+		t.Fatal("opencode_stall_timeout=off must disable the watchdog")
+	}
+}
+
+func TestParseStallTimeout(t *testing.T) {
+	cases := []struct {
+		raw     any
+		want    time.Duration
+		wantErr bool
+	}{
+		{raw: nil, want: 0},
+		{raw: "", want: 0},
+		{raw: " 10m ", want: 10 * time.Minute},
+		{raw: "90s", want: 90 * time.Second},
+		{raw: "off", want: stallTimeoutDisabled},
+		{raw: "OFF", want: stallTimeoutDisabled},
+		{raw: "0", want: stallTimeoutDisabled},
+		{raw: "none", want: stallTimeoutDisabled},
+		{raw: "disabled", want: stallTimeoutDisabled},
+		{raw: "10", wantErr: true},
+		{raw: "-5m", wantErr: true},
+		{raw: "fast", wantErr: true},
+		{raw: 600, wantErr: true},
+		{raw: true, wantErr: true},
+	}
+	for _, tc := range cases {
+		got, err := parseStallTimeout(tc.raw)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("parseStallTimeout(%v) error = nil, want error", tc.raw)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("parseStallTimeout(%v): %v", tc.raw, err)
+		}
+		if got != tc.want {
+			t.Fatalf("parseStallTimeout(%v) = %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestNew_StallTimeoutOption(t *testing.T) {
+	truePath := func(t *testing.T) string {
+		t.Helper()
+		for _, p := range []string{"/usr/bin/true", "/bin/true"} {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+		t.Skip("no true binary available")
+		return ""
+	}
+	a, err := New(map[string]any{"cmd": truePath(t), "opencode_stall_timeout": "45m"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	oc, ok := a.(*Agent)
+	if !ok {
+		t.Fatalf("New = %T, want *Agent", a)
+	}
+	if got := oc.stallTimeout; got != 45*time.Minute {
+		t.Fatalf("stallTimeout = %v, want 45m", got)
+	}
+
+	a, err = New(map[string]any{"cmd": truePath(t)})
+	if err != nil {
+		t.Fatalf("New without option: %v", err)
+	}
+	if got := a.(*Agent).stallTimeout; got != 0 {
+		t.Fatalf("default stallTimeout = %v, want 0 (5m default)", got)
+	}
+
+	if _, err := New(map[string]any{"cmd": truePath(t), "opencode_stall_timeout": "soon"}); err == nil {
+		t.Fatal("New must reject an invalid opencode_stall_timeout")
 	}
 }
 
@@ -446,5 +536,9 @@ func TestHandleToolUse_TracksInFlightTools(t *testing.T) {
 	}})
 	if got := s.activeTools.Load(); got != 0 {
 		t.Fatalf("activeTools after tool error = %d, want 0 (must not go negative)", got)
+	}
+	s.handleToolUse(map[string]any{"part": map[string]any{"tool": "bash"}})
+	if got := s.activeTools.Load(); got != 0 {
+		t.Fatalf("activeTools without a status = %d, want 0 (unknown status must not arm)", got)
 	}
 }

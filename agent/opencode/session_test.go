@@ -65,7 +65,7 @@ func TestOpencodeSessionEntry_Unmarshal(t *testing.T) {
 // the ContinueSession sentinel (__continue__) is not passed as a literal
 // session ID to the CLI. This was fixed in PR #249.
 func TestNewOpencodeSession_ContinueSessionTreatedAsFresh(t *testing.T) {
-	s, err := newOpencodeSession(context.Background(), "echo", nil, "/tmp", "", "default", "", core.ContinueSession, nil)
+	s, err := newOpencodeSession(context.Background(), "echo", nil, "/tmp", "", "default", "", core.ContinueSession, nil, 0)
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}
@@ -175,6 +175,7 @@ func TestOpencodeSessionSendRunsInWorkDir(t *testing.T) {
 			"GO_WANT_OPENCODE_HELPER=1",
 			"CC_OPENCODE_CWD_FILE=" + cwdFile,
 		},
+		0,
 	)
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
@@ -628,7 +629,7 @@ func TestCompactionWorkEventClearsFlag(t *testing.T) {
 
 // TestStallWatchdogKillsStalledProcess is the regression test for the
 // long-hang bug (observed live: a stalled opencode process sat idle for 22
-// minutes): when no event arrives for stallTimeout while the turn is not
+// minutes): when no event arrives for the stall threshold while the turn is not
 // finished, the watchdog must kill the process so readLoop sees EOF and ends
 // the turn with a notice instead of hanging forever.
 func TestStallWatchdogKillsStalledProcess(t *testing.T) {
@@ -638,7 +639,7 @@ func TestStallWatchdogKillsStalledProcess(t *testing.T) {
 	s.alive.Store(true)
 	s.resultSent.Store(false)
 	// Simulate a process that has been silent well past the stall timeout.
-	s.lastEvent.Store(time.Now().Add(-(stallTimeout + time.Minute)).UnixNano())
+	s.lastEvent.Store(time.Now().Add(-(defaultStallTimeout + time.Minute)).UnixNano())
 
 	cmd := startWaitingProcess(t)
 	setCurrentCmd(t, s, cmd)
@@ -691,7 +692,7 @@ func TestStallWatchdogSparesActiveProcess(t *testing.T) {
 func TestSendResetsStallWatchdogClock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s, err := newOpencodeSession(ctx, "true", nil, t.TempDir(), "", "yolo", "", "", nil)
+	s, err := newOpencodeSession(ctx, "true", nil, t.TempDir(), "", "yolo", "", "", nil, 0)
 	if err != nil {
 		t.Fatalf("newOpencodeSession: %v", err)
 	}

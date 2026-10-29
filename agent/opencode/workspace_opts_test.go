@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -43,12 +44,37 @@ func TestWorkspaceAgentOptions_PreservesProjectEnv(t *testing.T) {
 		t.Fatalf("env type = %T, want map[string]string", opts["env"])
 	}
 	wantEnv := map[string]string{
-		"HOME":                   "/Users/ids/.opencode/aiapi-home",
+		"HOME":                    "/Users/ids/.opencode/aiapi-home",
 		"OPENCODE_CONFIG_CONTENT": `{"provider":{}}`,
 		"DEEPSEEK_API_KEY":        "sk-test",
 	}
 	if !reflect.DeepEqual(env, wantEnv) {
 		t.Fatalf("env = %v, want %v", env, wantEnv)
+	}
+}
+
+// TestWorkspaceAgentOptions_CarriesStallTimeout verifies that a per-project
+// opencode_stall_timeout survives the per-workspace agent copy, so a long
+// build does not get killed by the 5m default in a multi-workspace setup.
+func TestWorkspaceAgentOptions_CarriesStallTimeout(t *testing.T) {
+	a := &Agent{mode: "yolo", stallTimeout: 45 * time.Minute}
+	if got := a.WorkspaceAgentOptions()["opencode_stall_timeout"]; got != "45m0s" {
+		t.Fatalf("opencode_stall_timeout = %v, want 45m0s", got)
+	}
+	// It must round-trip back through parseStallTimeout.
+	raw := a.WorkspaceAgentOptions()["opencode_stall_timeout"]
+	d, err := parseStallTimeout(raw)
+	if err != nil || d != 45*time.Minute {
+		t.Fatalf("round-trip = %v, %v, want 45m", d, err)
+	}
+
+	off := &Agent{mode: "yolo", stallTimeout: stallTimeoutDisabled}
+	if got := off.WorkspaceAgentOptions()["opencode_stall_timeout"]; got != "off" {
+		t.Fatalf("disabled opencode_stall_timeout = %v, want off", got)
+	}
+
+	if got := (&Agent{mode: "yolo"}).WorkspaceAgentOptions()["opencode_stall_timeout"]; got != nil {
+		t.Fatalf("unset opencode_stall_timeout = %v, want omitted", got)
 	}
 }
 

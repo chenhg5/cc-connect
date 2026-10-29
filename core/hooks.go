@@ -160,12 +160,17 @@ func (hm *HookManager) Emit(event HookEvent) {
 	}
 }
 
-// NeedsChangedFingerprint reports whether any configured hook can observe the
-// Changed flag of a message.finalized event: a command hook that reads
-// CC_HOOK_CHANGED, or an HTTP hook (which receives the flag in its JSON body and
-// whose consumer cannot be inspected). The engine uses this to skip the git
-// fingerprint scans entirely when no hook consumes the flag, so deployments
-// without an auto-review-style hook pay nothing per turn.
+// NeedsChangedFingerprint reports whether any configured hook receives a
+// message.finalized event and can therefore observe its Changed flag. The
+// engine uses this to skip the git fingerprint scans entirely when nothing
+// listens for finalized messages, so deployments without an auto-review-style
+// hook pay nothing per turn.
+//
+// Every handler type counts, not just HTTP. A command hook may inspect
+// CC_HOOK_CHANGED indirectly — through a script, `env`, a wrapper or a shell
+// alias — so string-matching the configured command cannot prove the flag is
+// unused. Missing a consumer means the hook silently never sees Changed=true,
+// which is worse than sampling for a finalized hook that ignores the flag.
 func (hm *HookManager) NeedsChangedFingerprint() bool {
 	if hm == nil {
 		return false
@@ -174,14 +179,7 @@ func (hm *HookManager) NeedsChangedFingerprint() bool {
 	hooks := hm.hooks
 	hm.mu.RUnlock()
 	for i := range hooks {
-		h := &hooks[i]
-		if !matchEvent(h.Event, string(HookEventMessageFinalized)) {
-			continue
-		}
-		if HookHandlerType(h.Type) == HookHandlerHTTP {
-			return true
-		}
-		if strings.Contains(h.Command, "CC_HOOK_CHANGED") {
+		if matchEvent(hooks[i].Event, string(HookEventMessageFinalized)) {
 			return true
 		}
 	}

@@ -37,10 +37,11 @@ type opencodeSession struct {
 	cancel            context.CancelFunc
 	wg                sync.WaitGroup
 	alive             atomic.Bool
-	expectingContinue atomic.Bool  // true when compaction received; work events clear it
-	resultSent        atomic.Bool  // true when EventResult has been sent for this turn
-	lastEvent         atomic.Int64 // unix nano of the last event received; stall watchdog input
-	activeTools       atomic.Int32 // tool calls currently executing; watchdog must not kill during one
+	expectingContinue atomic.Bool   // true when compaction received; work events clear it
+	resultSent        atomic.Bool   // true when EventResult has been sent for this turn
+	lastEvent         atomic.Int64  // unix nano of the last event received; stall watchdog input
+	activeTools       atomic.Int32  // tool calls reported as started but not finished (see handleToolUse)
+	stallTimeout      time.Duration // per-project threshold; 0 = default, negative = disabled
 
 	// procMu guards stdinW and currentCmd: they point at the live process's
 	// stdin pipe and *exec.Cmd, set by launch and read by the stall watchdog.
@@ -65,20 +66,21 @@ type opencodeSession struct {
 	usage   *core.ContextUsage
 }
 
-func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
+func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string, stallTimeout time.Duration) (*opencodeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	s := &opencodeSession{
-		cmd:       cmd,
-		extraArgs: extraArgs,
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		agentName: agentName,
-		extraEnv:  extraEnv,
-		events:    make(chan core.Event, 64),
-		ctx:       sessionCtx,
-		cancel:    cancel,
+		cmd:          cmd,
+		extraArgs:    extraArgs,
+		workDir:      workDir,
+		model:        model,
+		mode:         mode,
+		agentName:    agentName,
+		extraEnv:     extraEnv,
+		stallTimeout: stallTimeout,
+		events:       make(chan core.Event, 64),
+		ctx:          sessionCtx,
+		cancel:       cancel,
 	}
 	s.alive.Store(true)
 	go s.stallWatchdog(sessionCtx, 30*time.Second)
@@ -409,22 +411,48 @@ func (s *opencodeSession) markContinued() {
 
 // stallWatchdog guards against a hung opencode process. Normally opencode
 // emits events continuously while a turn runs (reasoning, tool calls, text).
-// If no event arrives for stallTimeout, something is stuck — most often the
-// V2 auto-compaction checkpoint generation (the summary model call never
-// returns) or a provider that went silent. The watchdog kills the process so
-// readLoop sees EOF and ends the turn with a notice instead of hanging for
-// 20+ minutes (the pre-fix behavior, observed live as a 22-minute stall).
-// Started once per session; it only acts while a process is alive and the
-// turn has not completed.
-const stallTimeout = 5 * time.Minute
+// If no event arrives for the stall threshold, something is stuck — most
+// often the V2 auto-compaction checkpoint generation (the summary model call
+// never returns) or a provider that went silent. The watchdog kills the
+// process so readLoop sees EOF and ends the turn with a notice instead of
+// hanging for 20+ minutes (the pre-fix behavior, observed live as a 22-minute
+// stall). Started once per session; it only acts while a process is alive and
+// the turn has not completed.
+//
+// The threshold is configurable because `opencode run --format json` only
+// emits a tool_use event when the call finishes (packages/opencode/src/cli/
+// cmd/run.ts emits it for status "completed"/"error" only), so a long silent
+// command and a hung provider are indistinguishable from the bridge. Deployments
+// that run long builds raise opencode_stall_timeout instead of living with
+// the default; see parseStallTimeout.
+const defaultStallTimeout = 5 * time.Minute
 
-// stalledTooLong is the watchdog's kill condition. A tool call in flight is
-// work, not a stall: `npm install`, a long test run or a compile can easily
-// exceed stallTimeout without emitting a single opencode event, and killing
-// the process there aborts a healthy turn. The compaction checkpoint hang this
-// watchdog was written for happens between steps, with no tool running.
+// stallTimeoutDisabled marks a per-project configuration that turns the
+// watchdog off (opencode_stall_timeout = "off").
+const stallTimeoutDisabled = -1 * time.Second
+
+// stallDuration resolves the configured threshold: 0 keeps the default,
+// negative disables the watchdog.
+func (s *opencodeSession) stallDuration() time.Duration {
+	if s.stallTimeout < 0 {
+		return 0
+	}
+	if s.stallTimeout > 0 {
+		return s.stallTimeout
+	}
+	return defaultStallTimeout
+}
+
+// stalledTooLong is the watchdog's kill condition. activeTools only protects
+// transports/versions that emit a tool_use event when a call starts; the run
+// transport does not, which is why the configurable threshold below is what
+// keeps long commands alive in practice.
 func (s *opencodeSession) stalledTooLong(idle time.Duration) bool {
-	return idle >= stallTimeout && s.activeTools.Load() == 0
+	limit := s.stallDuration()
+	if limit <= 0 {
+		return false
+	}
+	return idle >= limit && s.activeTools.Load() == 0
 }
 
 func (s *opencodeSession) stallWatchdog(ctx context.Context, tick time.Duration) {
@@ -464,7 +492,8 @@ func (s *opencodeSession) stallWatchdog(ctx context.Context, tick time.Duration)
 // Delivered as an EventText before the final EventResult so the user sees the
 // reason instead of an empty reply.
 func (s *opencodeSession) sendCompactionNotice() {
-	msg := "⚠️ 任务处理超时（长时间无响应），已自动终止。请重试；若任务较大，建议拆成更小的步骤分步发送。"
+	msg := "⚠️ 任务处理超时（长时间无响应），已自动终止。请重试；若任务较大，建议拆成更小的步骤分步发送。" +
+		"若该轮包含长时间无输出的命令（如构建、测试），可在项目配置中调大 opencode_stall_timeout。"
 	evt := core.Event{Type: core.EventText, Content: msg}
 	select {
 	case s.events <- evt:
@@ -588,13 +617,17 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 	input := extractToolInput(state)
 
 	// Track in-flight tool calls for the stall watchdog: an event stream that
-	// goes quiet while a command runs is expected, not a hang.
+	// goes quiet while a command runs is expected, not a hang. Only an explicit
+	// "running" status counts — a terminal status must never be double-counted,
+	// and an unknown/absent status must not pin the counter (which would
+	// disable the watchdog for the rest of the turn). `opencode run --format
+	// json` currently only sends the terminal states, so this normally stays 0.
 	switch status {
 	case "completed", "error":
 		if s.activeTools.Load() > 0 {
 			s.activeTools.Add(-1)
 		}
-	default:
+	case "running":
 		s.activeTools.Add(1)
 	}
 
