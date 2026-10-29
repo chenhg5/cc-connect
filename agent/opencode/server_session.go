@@ -926,7 +926,7 @@ const (
 	// serverStallTimeoutDisabled marks a project that turned the watchdog off
 	// (opencode_stall_timeout = "off"). Unset parses to 0, so the off state needs
 	// its own value or the default would swallow it.
-	serverStallTimeoutDisabled = time.Duration(-1)
+	serverStallTimeoutDisabled = stallTimeoutDisabled
 )
 
 // serverSession implements core.AgentSession on top of the OpenCode server API.
@@ -1053,7 +1053,7 @@ func newServerSession(ctx context.Context, serveCfg opencodeServeConfig, model, 
 // turn then attaches one. Split out from newServerSession so tests can drive the
 // session against a stub server.
 func newServerSessionOn(ctx context.Context, srv *opencodeServer, serveCfg opencodeServeConfig, model, mode, agentName, resumeID string) (*serverSession, error) {
-	inner, err := newOpencodeSession(ctx, serveCfg.cmd, serveCfg.extraArgs, serveCfg.workDir, model, mode, agentName, resumeID, serveCfg.extraEnv)
+	inner, err := newOpencodeSession(ctx, serveCfg.cmd, serveCfg.extraArgs, serveCfg.workDir, model, mode, agentName, resumeID, serveCfg.extraEnv, serveCfg.stallTimeout)
 	if err != nil {
 		return nil, err
 	}

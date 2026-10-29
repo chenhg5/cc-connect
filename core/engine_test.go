@@ -1697,9 +1697,13 @@ func TestWorkspaceFingerprintWindow_ConcurrentTurnsDoNotBlock(t *testing.T) {
 	for ev1.Event == "" || ev2.Event == "" {
 		select {
 		case ev := <-hookEvents:
-			seen[ev.SessionKey] = true
-		case <-deadline:
-			t.Fatalf("finalized events received = %v, want both turns", seen)
+			if ev.SessionKey == "feishu:chat:u1" && ev1.Event == "" {
+				ev1 = ev
+			} else if ev.SessionKey == "feishu:chat:u2" && ev2.Event == "" {
+				ev2 = ev
+			}
+		case <-time.After(time.Until(deadline)):
+			t.Fatal("finalized events not received")
 		}
 	}
 	if ev2.Changed {

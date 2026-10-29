@@ -123,6 +123,35 @@ func New(opts map[string]any) (core.Agent, error) {
 	}, nil
 }
 
+// parseStallTimeout reads opencode_stall_timeout ("10m", "90s"; empty keeps the
+// default, "0"/"off"/"none"/"disabled" turns the watchdog off). The run
+// transport only emits events at the end of a tool call, so a long silent
+// command and a hung provider look identical; a per-project threshold lets
+// deployments with long builds raise it without weakening compaction
+// detection for everyone else.
+func parseStallTimeout(raw any) (time.Duration, error) {
+	if raw == nil {
+		return 0, nil
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return 0, fmt.Errorf("opencode: invalid opencode_stall_timeout %v (use a string such as \"10m\", or \"off\")", raw)
+	}
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return 0, nil
+	}
+	switch text {
+	case "0", "off", "none", "disabled":
+		return stallTimeoutDisabled, nil
+	}
+	d, err := time.ParseDuration(text)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("opencode: invalid opencode_stall_timeout %q (use a duration such as \"10m\", or \"off\")", text)
+	}
+	return d, nil
+}
+
 func opencodeProjectModelCachePath(dataDir, project string) string {
 	if dataDir == "" || project == "" {
 		return ""
@@ -555,6 +584,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
 	agentName := a.agentName
+	stallTimeout := a.stallTimeout
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
@@ -582,7 +612,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		}, model, mode, agentName, sessionID)
 	}
 
-	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv)
+	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv, stallTimeout)
 }
 
 // ListSessions runs `opencode session list` and parses the JSON output.
@@ -728,27 +758,6 @@ func (a *Agent) ListProviders() []core.ProviderConfig {
 // providerScope identifies the credential set the current provider injects into
 // a child process (see providerEnvLocked). Two sessions may share one OpenCode
 // server only when their scope matches.
-// parseStallTimeout reads opencode_stall_timeout ("10m", "90s"; empty keeps the
-// default, "0"/"off" disables the watchdog). A long silent tool call is normal
-// for some workloads, so the threshold is per project rather than fixed. The
-// disabled state needs a value of its own because 0 already means "unset".
-func parseStallTimeout(raw any) (time.Duration, error) {
-	text, _ := raw.(string)
-	text = strings.ToLower(strings.TrimSpace(text))
-	if text == "" {
-		return 0, nil
-	}
-	switch text {
-	case "0", "off", "none", "disabled":
-		return serverStallTimeoutDisabled, nil
-	}
-	d, err := time.ParseDuration(text)
-	if err != nil || d < 0 {
-		return 0, fmt.Errorf("opencode: invalid opencode_stall_timeout %q (use a duration such as \"10m\", or \"off\")", text)
-	}
-	return d, nil
-}
-
 // parseServerIdleTTL reads opencode_server_idle_ttl ("10m", "90s"; empty keeps
 // the default, "0"/"off" keeps a released server for the life of the daemon).
 // The value is per project because it trades memory for restart latency: an

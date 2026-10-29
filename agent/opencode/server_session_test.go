@@ -2799,38 +2799,9 @@ func TestReleaseOpencodeServerHonoursTheConfiguredTTL(t *testing.T) {
 	}
 }
 
-// The watchdog threshold is configurable per project: long silent tool calls are
-// normal for some workloads.
-func TestParseStallTimeout(t *testing.T) {
-	cases := []struct {
-		raw  any
-		want time.Duration
-		bad  bool
-	}{
-		{raw: "", want: 0},
-		{raw: "10m", want: 10 * time.Minute},
-		{raw: "90s", want: 90 * time.Second},
-		{raw: "OFF", want: serverStallTimeoutDisabled},
-		{raw: "0", want: serverStallTimeoutDisabled},
-		{raw: "nonsense", bad: true},
-		{raw: "-5m", bad: true},
-	}
-	for _, c := range cases {
-		got, err := parseStallTimeout(c.raw)
-		if c.bad {
-			if err == nil {
-				t.Errorf("parseStallTimeout(%v) = %v, want an error", c.raw, got)
-			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("parseStallTimeout(%v): %v", c.raw, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("parseStallTimeout(%v) = %v, want %v", c.raw, got, c.want)
-		}
-	}
+// Parsing the per-project watchdog threshold is covered by TestParseStallTimeout;
+// this pins the fallback that turns an unset value into the 5m default.
+func TestStallTimeoutOrDefault(t *testing.T) {
 	if stallTimeoutOrDefault(0) != serverStallTimeout {
 		t.Error("an unset timeout must fall back to the default")
 	}
