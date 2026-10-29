@@ -111,6 +111,7 @@ app_secret = "QhkMpxxxxxxxxxxxxxxxxxxxx"
 # enable_feishu_card = true  # 可选：关闭后统一回退纯文本回复
 # thread_isolation = true    # 可选：按飞书 thread/root 隔离群聊会话
 # group_chat_history_share = false  # 可选：共享未 @ 机器人的群消息作为下一次触发的上下文；消息本身不会触发回复
+# respond_to_at_everyone_and_here = false  # 可选：将 @所有人/@all 视为直接 @机器人（文本 @_all 与 Card 2.0 的 "user_id":"all"）
 # progress_style = "legacy"  # 可选：legacy | compact | card
 # ack_emoji = "Get"           # 可选：消息被接受处理或入队时立即添加并保留的确认表情；默认禁用
 # reaction_emoji = "OnIt"      # 可选：agent 处理期间的临时表情，结束后移除
@@ -316,6 +317,30 @@ cc-connect: ✅ 这是一个 Node.js 项目，包含以下目录...
 │   cc-connect ◄──► Claude Code CLI ◄──► 你的项目代码         │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 卡片消息（interactive）
+
+用户发送或转发的飞书卡片会像文本消息一样交给 Agent。cc-connect 优先通过
+`user_card_content` 读取卡片原始内容（Card 2.0 DSL，含表格、按钮链接、图片等），
+失败时回退到事件体的简化格式；无法解析的卡片不会中断会话。群聊中仍需 @机器人，
+与文本消息的准入规则一致。
+
+开启 `respond_to_at_everyone_and_here = true` 后，卡片中的 `@所有人`
+（Card 2.0 的 `"user_id":"all"`）与文本消息的 `@_all` 行为一致，会触发机器人响应。
+群聊中为判断 `@所有人`，cc-connect 会在事件应答前预取一次卡片原始内容
+（超时 1 秒，失败时回退到事件体）。
+
+开启 `group_chat_history_share` 时会复用上述原始内容；未开启
+`respond_to_at_everyone_and_here` 时不会为历史额外预取，此时降级的 Card 2.0
+卡片消息会被整条跳过（不会创建历史条目），避免把“请升级客户端”占位内容写进上下文。
+两个开关的配置示例见 [2.3 配置到 cc-connect](#23-配置到-cc-connect)。
+
+```toml
+[projects.platforms.options]
+respond_to_at_everyone_and_here = true
 ```
 
 ---

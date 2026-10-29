@@ -296,8 +296,8 @@ func TestFeishuGroupHistory_ThreadScopesDoNotLeakAndMainDoesNotFollowFork(t *tes
 func TestFeishuGroupHistory_PostAndSenderTypeFormatting(t *testing.T) {
 	p := newGroupHistoryTestPlatform(nil)
 	p.peerBots = map[string]string{"cli_peer": "PeerBot"}
-	p.rememberGroupHistory("chat:oc_main", "post-1", "post", `{"title":"Topic","content":[[{"tag":"text","text":"post body"}]]}`, nil, "ou_alice", "user")
-	p.rememberGroupHistory("chat:oc_main", "text-1", "text", `{"text":"bot observation"}`, nil, "cli_peer", "app")
+	p.rememberGroupHistory("chat:oc_main", "post-1", "post", `{"title":"Topic","content":[[{"tag":"text","text":"post body"}]]}`, nil, "ou_alice", "user", "")
+	p.rememberGroupHistory("chat:oc_main", "text-1", "text", `{"text":"bot observation"}`, nil, "cli_peer", "app", "")
 	ctx := p.snapshotGroupHistory("chat:oc_main")
 	formatted := p.formatGroupHistory(ctx)
 	if !strings.Contains(formatted, "Alice:\nTopic\npost body") {

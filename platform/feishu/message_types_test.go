@@ -153,7 +153,9 @@ func TestDispatchMessage_UnhandledMessageTypes(t *testing.T) {
 		{"vote", `{"topic":"Lunch","options":["noodles","rice"]}`, "[vote: Lunch, options: noodles / rice]"},
 		{"folder", `{"file_key":"fk","file_name":"docs"}`, "[unsupported Feishu message: folder]"},
 		{"system", `{"template":"{from_user} invited {to_chatters} to this chat.","from_user":["bot"],"to_chatters":["Alice"]}`, ""},
-		{"interactive", `{"title":"Alert","elements":[]}`, ""},
+		// Interactive cards are no longer ignored: they have a dedicated
+		// case that parses the receive-format body (title first).
+		{"interactive", `{"title":"Alert","elements":[]}`, "Alert"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.msgType, func(t *testing.T) {
