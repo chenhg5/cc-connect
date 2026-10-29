@@ -4171,6 +4171,11 @@ type interactiveRetryTurn struct {
 	sawSideEffects bool
 	// carry is the attempt's streaming card, reused by the next attempt.
 	carry *retryCardCarry
+	// discardPreview removes the failed attempt's stream-preview message (the
+	// non-card equivalent of the card carry): the next attempt opens its own
+	// preview, so leaving this one behind would accumulate the partial output
+	// of every dead attempt in the chat.
+	discardPreview func()
 }
 
 func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, promptContent string, msgID string, images []ImageAttachment, files []FileAttachment, replyCtx any, turnStart time.Time, logSessionKey string, contentLen int, lockGen uint64) {
@@ -4265,19 +4270,13 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 			// prompt, so replaying would duplicate it (images included). An agent
 			// that keeps the conversation across the failure continues instead.
 			if cont := e.continueAfterErrorPrompt(state); cont != "" {
-				progressed := retryTurn.sawSideEffects
 				slog.Warn("retriable agent error; continuing the turn instead of replaying the prompt",
-					"error", retryTurn.err, "kind", retryTurn.kind, "session", logSessionKey, "after_events", progressed)
+					"error", retryTurn.err, "kind", retryTurn.kind, "session", logSessionKey, "after_events", retryTurn.sawSideEffects)
 				promptContent = cont
 				images = nil
 				files = nil
 				contentLen = len(cont)
 				retryTurn.sawSideEffects = false
-				if progressed {
-					// The attempt made progress, so the upstream had recovered: this
-					// failure starts a new streak and the retry count starts over.
-					attempt = 1
-				}
 			}
 		}
 
@@ -4289,6 +4288,9 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 				state.mu.Unlock()
 				if retryTurn.finalizeNotice != nil {
 					retryTurn.finalizeNotice(ProgressCardStateFailed, CardStatusError)
+				}
+				if retryTurn.discardPreview != nil {
+					retryTurn.discardPreview()
 				}
 				if retryTurn.err != nil {
 					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), retryTurn.err))
@@ -4304,6 +4306,9 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 			if retryTurn.finalizeNotice != nil {
 				retryTurn.finalizeNotice(ProgressCardStateFailed, CardStatusError)
 			}
+			if retryTurn.discardPreview != nil {
+				retryTurn.discardPreview()
+			}
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
@@ -4318,10 +4323,20 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 
 		delay := RetriableErrorDelay(attempt)
 		slog.Warn("retrying agent turn after retriable error", "error", retryErr, "kind", retryKind, "session", logSessionKey, "attempt", attempt, "max_attempts", maxAttempts, "delay", delay)
-		// attempt counts the failed sends of the current streak, so the retry
-		// about to run is retry number attempt (the first send is not a retry).
+		// attempt counts the failed sends of this turn, so the retry about to
+		// run is retry number attempt (the first send is not a retry). It is
+		// never reset: the budget is per turn, and an attempt that produced
+		// output before failing proves nothing about the upstream recovering.
 		retryNo, maxRetries := attempt, maxAttempts-1
 		notice := fmt.Sprintf(e.i18n.T(MsgRetriableAgentError), delay.Round(time.Second), retryNo, maxRetries)
+		// Drop the failed attempt's preview before announcing the retry: the next
+		// attempt opens its own preview message, and the notice must not be
+		// written into a preview that is about to be deleted. For preview-only
+		// platforms this makes notify() decline, so the notice is sent as a
+		// regular chat message instead of being silently lost.
+		if retryTurn.discardPreview != nil {
+			retryTurn.discardPreview()
+		}
 		if retryTurn.notify == nil || !retryTurn.notify(notice) {
 			// Without a card each notice is a chat message of its own: keep
 			// those to the first retry and every fifth one.
@@ -7037,9 +7052,6 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
-			state.mu.Lock()
-			state.eventsNeedResync = true
-			state.mu.Unlock()
 			// A backend can create its resumable session before a turn fails
 			// (for example Codex emits thread.started, then turn.failed). Persist
 			// that ID here as well as from event.SessionID so the retry (or the
@@ -7157,6 +7169,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				retryTurn.finalizeNotice = finalizeRetryNotice
 				retryTurn.sawSideEffects = sawSideEffects
 				retryTurn.carry = carry
+				retryTurn.discardPreview = sp.discard
 				return retryTurn
 			}
 			cp.Finalize(ProgressCardStateFailed)
