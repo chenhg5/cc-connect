@@ -666,17 +666,18 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		// Unknown event types are not silently dropped — they are logged
 		// at debug level with the full payload so future diagnosis of
 		// new Claude Code event shapes (e.g. compaction, hook events)
-		// is possible from the log stream. Compaction events are
-		// recognized in handleResult via their `result` subtype rather
-		// than the top-level event type.
+		// is possible from the log stream. Compaction arrives as a
+		// `system` message with subtype `compact_boundary` (handleSystem).
 		slog.Debug("claudeSession: unrecognized event type", "type", eventType, "raw", raw)
 	}
 }
 
 // isCompactionResult reports whether a `type:"result"` event is actually
-// a mid-turn compaction notification. Claude Code uses the value
-// `compact` in newer CLI versions and `compaction` in older ones; we
-// accept both to be safe across CLI rollouts (issue #481).
+// a mid-turn compaction notification (issue #481). Claude Code does not
+// report compaction this way -- it emits a `system` message with subtype
+// `compact_boundary` instead (see handleCompactBoundary), and its result
+// subtypes are `success` and `error_*`. The check is kept as a defensive
+// guard so a result carrying a compaction subtype never ends the turn.
 func isCompactionResult(raw map[string]any) bool {
 	return resultSubtype(raw) == "compact" || resultSubtype(raw) == "compaction"
 }
@@ -710,8 +711,11 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if model, ok := raw["model"].(string); ok && model != "" {
 		cs.activeModel.Store(model)
 	}
-	if subtype, _ := raw["subtype"].(string); subtype == "model_refusal_fallback" {
+	switch subtype, _ := raw["subtype"].(string); subtype {
+	case "model_refusal_fallback":
 		cs.handleRefusalFallback(raw)
+	case "compact_boundary":
+		cs.handleCompactBoundary(raw)
 	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
@@ -739,6 +743,32 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 			cs.usageMu.Unlock()
 		}
 	})
+}
+
+// handleCompactBoundary reports a context compaction. Claude Code marks one,
+// automatic or triggered by /compact, with a `system` message of subtype
+// `compact_boundary` whose compact_metadata says what triggered it and how
+// many tokens the context held before (and, on newer CLIs, after) it:
+//
+//	{"type":"system","subtype":"compact_boundary","session_id":"...",
+//	 "compact_metadata":{"trigger":"auto","pre_tokens":167012}}
+//
+// The turn is not over: the CLI keeps streaming assistant and tool events
+// and closes the turn with its usual result event.
+func (cs *claudeSession) handleCompactBoundary(raw map[string]any) {
+	meta := map[string]any{}
+	if details, ok := raw["compact_metadata"].(map[string]any); ok {
+		for _, key := range []string{"trigger", "pre_tokens", "post_tokens", "duration_ms"} {
+			if v, ok := details[key]; ok {
+				meta[key] = v
+			}
+		}
+	}
+	slog.Info("claudeSession: context compacted", "session_id", cs.CurrentSessionID(), "metadata", meta)
+	select {
+	case cs.events <- core.Event{Type: core.EventCompact, Metadata: meta}:
+	case <-cs.ctx.Done():
+	}
 }
 
 // handleRefusalFallback handles Claude Code's model_refusal_fallback event:
@@ -1228,12 +1258,13 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		return
 	}
 
-	// Compaction events arrive as `type:"result"` with `subtype:"compact"`
-	// or `subtype:"compaction"`. They are NOT turn completion — the CLI
+	// Defensive guard (issue #481): should a result ever carry a compaction
+	// subtype (`compact` / `compaction`), it is NOT turn completion — the CLI
 	// is mid-task and will continue streaming subsequent tool calls and
-	// assistant messages after the compaction step. Treating these as
-	// Done=true would make the engine's processInteractiveEvents return
-	// early and drop the rest of the turn (issue #481).
+	// assistant messages. Treating it as Done=true would make the engine's
+	// processInteractiveEvents return early and drop the rest of the turn.
+	// Claude Code itself reports compaction as a `system` message of subtype
+	// `compact_boundary`, handled in handleSystem.
 	isCompaction := isCompactionResult(raw)
 	if isCompaction {
 		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
