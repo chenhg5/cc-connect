@@ -341,6 +341,12 @@ type PlatformLifecycleHandler interface {
 	OnPlatformUnavailable(p Platform, err error)
 }
 
+// PlatformI18nAware lets a platform localize notices emitted before a message
+// reaches the engine, using the same language settings as ordinary replies.
+type PlatformI18nAware interface {
+	SetI18n(i18n *I18n)
+}
+
 // AsyncRecoverablePlatform is an optional interface for platforms that start
 // a background recovery loop and later report readiness or unavailability.
 //

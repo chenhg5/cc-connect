@@ -2368,6 +2368,9 @@ func (e *Engine) Start() error {
 	pendingCount := 0
 	for _, p := range e.platforms {
 		_, isAsync := p.(AsyncRecoverablePlatform)
+		if localized, ok := p.(PlatformI18nAware); ok {
+			localized.SetI18n(e.i18n)
+		}
 		if async, ok := p.(AsyncRecoverablePlatform); ok {
 			async.SetLifecycleHandler(e)
 		}

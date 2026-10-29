@@ -218,6 +218,7 @@ const (
 	MsgError                     MsgKey = "error"
 	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
+	MsgTopicOpenerAmbiguous      MsgKey = "topic_opener_ambiguous"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
 	MsgEmptyResponse             MsgKey = "empty_response"
 	MsgPermissionPrompt          MsgKey = "permission_prompt"
@@ -688,6 +689,9 @@ const (
 	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
 	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
 
+	MsgDowntimeMessagesSkippedChat  MsgKey = "downtime_messages_skipped_chat"
+	MsgDowntimeMessagesSkippedTopic MsgKey = "downtime_messages_skipped_topic"
+
 	// Agent system-prompt tool sections (Issue #1655). These are appended
 	// to the agent's own system prompt by core/interfaces.go AgentSystemPromptForLang
 	// so that operators running cc-connect with language="zh" see the
@@ -701,6 +705,27 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgTopicOpenerAmbiguous: {
+		LangEnglish:            "I couldn't determine which topic this message belongs to, so I haven't processed it. Please resend it inside the intended topic.",
+		LangChinese:            "无法确定这条消息属于哪个话题，因此尚未处理。请在目标话题内重新发送。",
+		LangTraditionalChinese: "無法確定這則訊息屬於哪個話題，因此尚未處理。請在目標話題內重新傳送。",
+		LangJapanese:           "このメッセージがどのトピックに属するか判断できなかったため、処理していません。送信先のトピック内で再送してください。",
+		LangSpanish:            "No pude determinar a qué tema pertenece este mensaje, así que no lo he procesado. Vuelve a enviarlo dentro del tema correspondiente.",
+	},
+	MsgDowntimeMessagesSkippedChat: {
+		LangEnglish:            "Sorry, I was offline. I skipped %d messages in this chat, starting %s. Please resend anything still relevant.",
+		LangChinese:            "抱歉，我刚才离线了。此聊天中有 %d 条消息已跳过，最早发送于 %s。仍需处理的内容请重新发送。",
+		LangTraditionalChinese: "抱歉，我剛才離線了。此聊天中有 %d 則訊息已略過，最早傳送於 %s。仍需處理的內容請重新傳送。",
+		LangJapanese:           "オフラインになっており、申し訳ありません。このチャットで %d 件のメッセージをスキップしました（最初の送信日時: %s）。まだ必要な内容は再送してください。",
+		LangSpanish:            "Lo siento, estaba desconectado. Omití %d mensajes en este chat, a partir de %s. Vuelve a enviar lo que siga siendo relevante.",
+	},
+	MsgDowntimeMessagesSkippedTopic: {
+		LangEnglish:            "Sorry, I was offline. I skipped %d messages in this topic, starting %s. Please resend anything still relevant.",
+		LangChinese:            "抱歉，我刚才离线了。此话题中有 %d 条消息已跳过，最早发送于 %s。仍需处理的内容请重新发送。",
+		LangTraditionalChinese: "抱歉，我剛才離線了。此話題中有 %d 則訊息已略過，最早傳送於 %s。仍需處理的內容請重新傳送。",
+		LangJapanese:           "オフラインになっており、申し訳ありません。このトピックで %d 件のメッセージをスキップしました（最初の送信日時: %s）。まだ必要な内容は再送してください。",
+		LangSpanish:            "Lo siento, estaba desconectado. Omití %d mensajes en este tema, a partir de %s. Vuelve a enviar lo que siga siendo relevante.",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
