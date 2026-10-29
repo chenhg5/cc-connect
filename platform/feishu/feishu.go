@@ -135,6 +135,10 @@ type Platform struct {
 	shareSessionInChannel      bool
 	threadIsolation            bool
 	groupChatHistoryShare      bool
+	// soloChatReplyAll admits group messages without @bot when the chat has
+	// exactly one human member and one bot (this one): there is nobody else
+	// the message could be meant for.
+	soloChatReplyAll bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -164,6 +168,7 @@ type Platform struct {
 	userNameCache          sync.Map          // open_id -> display name
 	chatNameCache          sync.Map          // chat_id -> chat name
 	chatMemberCache        sync.Map          // chatID -> *chatMemberEntry
+	soloChatCache          sync.Map          // chatID -> soloChatEntry
 	recalledMu             sync.Mutex
 	recalledMsgIDs         map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
@@ -376,6 +381,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
 	groupChatHistoryShare, _ := opts["group_chat_history_share"].(bool)
+	soloChatReplyAll, _ := opts["solo_chat_reply_all"].(bool)
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -490,6 +496,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
 		groupChatHistoryShare:      groupChatHistoryShare,
+		soloChatReplyAll:           soloChatReplyAll,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1765,6 +1772,13 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	filterActive := botOpenID != "" || p.IsGroupFilterDegraded()
 	botMentioned := botOpenID != "" && isBotMentioned(msg.Mentions, botOpenID)
 	atEveryone := p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all")
+	// In a chat of one person and this bot every message is addressed to the
+	// bot, so it needs no @ -- unless it @-mentions somebody else, which says
+	// it is meant for them. Only asked when the mention filter would
+	// otherwise drop the message, and never while the filter is degraded.
+	soloChat := chatType == "group" && p.soloChatReplyAll && !p.groupReplyAll && botOpenID != "" &&
+		!botMentioned && !atEveryone && len(msg.Mentions) == 0 && p.isSoloChat(chatID)
+	triggered := botMentioned || atEveryone || soloChat
 
 	// With history sharing enabled, observe ordinary text/post messages only
 	// after the chat-level allow list has admitted the chat. Do this before the
@@ -1772,7 +1786,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// cc-connect may observe the conversation, while allow_from controls who may
 	// trigger an agent turn.
 	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" &&
-		!botMentioned && !atEveryone && isGroupHistoryMessageType(msgType) {
+		!triggered && isGroupHistoryMessageType(msgType) {
 		if !core.AllowList(p.allowChat, chatID) {
 			slog.Debug(p.tag()+": group history ignored for unauthorized chat", "chat_id", chatID)
 			return nil
@@ -1796,6 +1810,8 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
 			case atEveryone:
 				slog.Debug(p.tag()+": responding to @all message", "chat_id", chatID)
+			case soloChat:
+				slog.Debug(p.tag()+": admitting message without mention in a one-person chat", "chat_id", chatID)
 			// Once a thread has been engaged via @bot, allow follow-up
 			// attachment-only messages (image/file/audio) in the same thread
 			// through without re-mentioning the bot. Plain text and rich-text
@@ -1859,7 +1875,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
 	var groupHistoryCtx groupHistoryContext
-	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" && (botMentioned || atEveryone) {
+	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" && triggered {
 		scope := p.groupHistoryScope(msg, chatID)
 		if p.isGroupHistoryNewCommand(msgType, content, mentions) {
 			p.resetGroupHistory(scope)
@@ -2369,6 +2385,52 @@ func (p *Platform) resolveChatName(chatID string) string {
 	}
 	p.chatNameCache.Store(chatID, name)
 	return name
+}
+
+// soloChatCacheTTL bounds how long a membership change goes unnoticed: once
+// somebody else joins, messages without @bot stop reaching the agent within
+// this window.
+const soloChatCacheTTL = 30 * time.Second
+
+type soloChatEntry struct {
+	solo      bool
+	fetchedAt time.Time
+}
+
+// isSoloChat reports whether the chat's members are exactly one person and
+// one bot. A failed lookup answers false and is not cached, so the mention
+// filter stays in force until the chat can be read.
+func (p *Platform) isSoloChat(chatID string) bool {
+	if chatID == "" || p.client == nil {
+		return false
+	}
+	if cached, ok := p.soloChatCache.Load(chatID); ok {
+		entry := cached.(soloChatEntry)
+		if time.Since(entry.fetchedAt) < soloChatCacheTTL {
+			return entry.solo
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := p.client.Im.Chat.Get(ctx, larkim.NewGetChatReqBuilder().ChatId(chatID).Build())
+	if err != nil {
+		slog.Warn(p.tag()+": read chat members failed; mention still required", "chat_id", chatID, "error", err)
+		return false
+	}
+	if !resp.Success() || resp.Data == nil {
+		slog.Warn(p.tag()+": read chat members failed; mention still required",
+			"chat_id", chatID, "code", resp.Code, "msg", resp.Msg)
+		return false
+	}
+	solo := stringValue(resp.Data.UserCount) == "1" && stringValue(resp.Data.BotCount) == "1"
+	p.soloChatCache.Store(chatID, soloChatEntry{solo: solo, fetchedAt: time.Now()})
+	// Dispatch resolves the chat name next; this response already has it.
+	if name := stringValue(resp.Data.Name); name != "" {
+		p.chatNameCache.Store(chatID, name)
+	}
+	slog.Debug(p.tag()+": chat membership read", "chat_id", chatID,
+		"user_count", stringValue(resp.Data.UserCount), "bot_count", stringValue(resp.Data.BotCount), "solo", solo)
+	return solo
 }
 
 // --- Mention resolution ---

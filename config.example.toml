@@ -1084,6 +1084,8 @@ app_secret = "your-feishu-app-secret"
 #                           # Agent 完成回复后添加的表情回复（如 "Done"）；设为 "none" 可禁用
 # group_reply_all = false   # If true, respond to ALL group messages without requiring @mention
 #                           # 设为 true 时，群聊中无需 @机器人 也会响应所有消息（默认 false）
+# solo_chat_reply_all = false  # If true, a group whose members are one person and one bot needs no @mention (unless the message @-mentions someone else)
+#                              # 设为 true 时，群里只有一个人和一个机器人时无需 @机器人；@ 了别人的消息仍不触发（默认 false）
 # share_session_in_channel = false  # If true, all users in a group share one agent session
 #                                   # 设为 true 时，群聊内所有用户共享同一个 Agent 会话
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session and, in multi-workspace mode, one workspace binding)
