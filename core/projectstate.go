@@ -9,9 +9,11 @@ import (
 )
 
 type projectStateData struct {
-	WorkDirOverride         string            `json:"work_dir_override,omitempty"`
-	WorkspaceDirOverrides   map[string]string `json:"workspace_dir_overrides,omitempty"`
-	WorkspaceModelOverrides map[string]string `json:"workspace_model_overrides,omitempty"`
+	WorkDirOverride            string            `json:"work_dir_override,omitempty"`
+	WorkspaceDirOverrides      map[string]string `json:"workspace_dir_overrides,omitempty"`
+	WorkspaceModelOverrides    map[string]string `json:"workspace_model_overrides,omitempty"`
+	WorkspaceModelProviders    map[string]string `json:"workspace_model_providers,omitempty"`
+	WorkspaceProviderOverrides map[string]string `json:"workspace_provider_overrides,omitempty"`
 }
 
 // ProjectStateStore persists lightweight runtime state for one project.
@@ -96,6 +98,10 @@ func (ps *ProjectStateStore) SetWorkspaceModelOverride(workspace, model string) 
 func (ps *ProjectStateStore) ClearWorkspaceModelOverride(workspace string) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	delete(ps.state.WorkspaceModelProviders, workspace)
+	if len(ps.state.WorkspaceModelProviders) == 0 {
+		ps.state.WorkspaceModelProviders = nil
+	}
 	if ps.state.WorkspaceModelOverrides == nil {
 		return
 	}
@@ -103,6 +109,35 @@ func (ps *ProjectStateStore) ClearWorkspaceModelOverride(workspace string) {
 	if len(ps.state.WorkspaceModelOverrides) == 0 {
 		ps.state.WorkspaceModelOverrides = nil
 	}
+}
+
+// WorkspaceModelProvider reports which provider a workspace's model was chosen for.
+// It is empty for models stored before the provider was recorded — including every
+// entry written by an earlier version — so callers that need to know whether a model
+// belongs to the active provider have to fall back to the provider's own model list.
+func (ps *ProjectStateStore) WorkspaceModelProvider(workspace string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if ps.state.WorkspaceModelProviders == nil {
+		return ""
+	}
+	return ps.state.WorkspaceModelProviders[workspace]
+}
+
+func (ps *ProjectStateStore) SetWorkspaceModelProvider(workspace, provider string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if provider == "" {
+		delete(ps.state.WorkspaceModelProviders, workspace)
+		if len(ps.state.WorkspaceModelProviders) == 0 {
+			ps.state.WorkspaceModelProviders = nil
+		}
+		return
+	}
+	if ps.state.WorkspaceModelProviders == nil {
+		ps.state.WorkspaceModelProviders = make(map[string]string)
+	}
+	ps.state.WorkspaceModelProviders[workspace] = provider
 }
 
 func (ps *ProjectStateStore) ClearWorkDirOverride() {
@@ -149,4 +184,42 @@ func (ps *ProjectStateStore) load() {
 		return
 	}
 	ps.state = state
+}
+
+// WorkspaceProviderOverride returns the provider chosen for a workspace (the
+// workspace-level counterpart of the session's active provider). A workspace
+// chat's /goto records its choice here, so every chat bound to that workspace
+// follows it — the same granularity the native /model command uses for models.
+func (ps *ProjectStateStore) WorkspaceProviderOverride(workspace string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if ps.state.WorkspaceProviderOverrides == nil {
+		return ""
+	}
+	return ps.state.WorkspaceProviderOverrides[workspace]
+}
+
+func (ps *ProjectStateStore) SetWorkspaceProviderOverride(workspace, provider string) {
+	if provider == "" {
+		ps.ClearWorkspaceProviderOverride(workspace)
+		return
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceProviderOverrides == nil {
+		ps.state.WorkspaceProviderOverrides = make(map[string]string)
+	}
+	ps.state.WorkspaceProviderOverrides[workspace] = provider
+}
+
+func (ps *ProjectStateStore) ClearWorkspaceProviderOverride(workspace string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.state.WorkspaceProviderOverrides == nil {
+		return
+	}
+	delete(ps.state.WorkspaceProviderOverrides, workspace)
+	if len(ps.state.WorkspaceProviderOverrides) == 0 {
+		ps.state.WorkspaceProviderOverrides = nil
+	}
 }

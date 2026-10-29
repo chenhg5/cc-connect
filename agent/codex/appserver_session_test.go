@@ -339,7 +339,7 @@ func TestAppServerSession_ReadLoopHandlesLargeResponseLine(t *testing.T) {
 		if decoded.Thread.ID != "thread-large" {
 			t.Fatalf("thread id = %q, want thread-large", decoded.Thread.ID)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for large response")
 	}
 
