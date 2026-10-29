@@ -2538,6 +2538,12 @@ func (e *Engine) initPlatformCapabilities(p Platform) {
 		}
 	}
 
+	if router, ok := p.(AsyncQuestionRouter); ok {
+		router.SetAsyncQuestionOwner(func(key, id string) bool {
+			_, sm := e.sessionContextForKey(key)
+			return findAsyncQuestionSession(sm, key, "askq:"+id+":0:1") != nil
+		})
+	}
 	if nav, ok := p.(CardNavigable); ok {
 		nav.SetCardNavigationHandler(e.handleCardNav)
 	}
@@ -3309,6 +3315,11 @@ sessionLocked:
 	// instead of dropped (issue #565). This is still needed after idle auto-
 	// reset because cleanupInteractiveState may remove the early placeholder.
 	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
+	if msg.answerDelivery != nil {
+		e.interactiveMu.Lock()
+		msg.answerDelivery.state = e.interactiveStates[interactiveKey]
+		e.interactiveMu.Unlock()
+	}
 	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
 	runMessageAccepted(msg)
 	slog.Debug("user message accepted for processing",
@@ -4066,7 +4077,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.answerDelivery != nil)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.answerDelivery)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -4353,8 +4364,12 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, requireOriginal ...bool) *interactiveState {
-	preserve := len(requireOriginal) > 0 && requireOriginal[0]
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, continuation ...*answerDelivery) *interactiveState {
+	preserve := len(continuation) > 0 && continuation[0] != nil
+	var admittedState *interactiveState
+	if preserve {
+		admittedState = continuation[0].state
+	}
 	// /stop removes the state from the map immediately but tears the process
 	// down in the background. Wait that teardown out *before* taking the lock:
 	// spawning now would start a second process on the same agent session ID
@@ -4365,6 +4380,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	defer e.interactiveMu.Unlock()
 
 	state, ok := e.interactiveStates[sessionKey]
+	if preserve && (admittedState == nil || state != admittedState) {
+		return &interactiveState{platform: p, replyCtx: replyCtx, busySession: session, eventsNeedResync: true}
+	}
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
 		// Verify the running agent session matches the current active session.
 		// After /new or /switch the active session changes, but the old agent

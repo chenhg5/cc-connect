@@ -721,3 +721,9 @@ const (
 type PreviewStatusUpdater interface {
 	SetPreviewStatus(previewHandle any, status CardStatus)
 }
+
+// AsyncQuestionRouter lets a shared platform route a question callback to the
+// owning engine. The resolver checks persisted questions in the user's namespace.
+type AsyncQuestionRouter interface {
+	SetAsyncQuestionOwner(func(sessionKey, questionID string) bool)
+}

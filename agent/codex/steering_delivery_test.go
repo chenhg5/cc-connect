@@ -14,7 +14,7 @@ import (
 // Exercise the real request writer, response dispatcher, active-turn matching,
 // and pending-request cleanup. No provider credentials or model are involved.
 func TestSteeringDelivery_OnlyExplicitRejectionAllowsRetry(t *testing.T) {
-	for _, name := range []string{"accepted", "rejected", "server error", "wrong turn", "malformed", "timeout", "transport closed", "cancelled"} {
+	for _, name := range []string{"accepted", "rejected", "invalid request", "server error", "wrong turn", "malformed", "timeout", "transport closed", "cancelled"} {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -45,6 +45,8 @@ func TestSteeringDelivery_OnlyExplicitRejectionAllowsRetry(t *testing.T) {
 			switch name {
 			case "accepted":
 				s.handleResponse(rpcResponseEnvelope{ID: req.ID, Result: json.RawMessage(`{"turnId":"active"}`)})
+			case "invalid request":
+				s.handleResponse(rpcResponseEnvelope{ID: req.ID, Error: &rpcError{Code: -32600, Message: "no active turn to steer"}})
 			case "rejected":
 				s.handleResponse(rpcResponseEnvelope{ID: req.ID, Error: &rpcError{Code: -32602, Message: "turn mismatch"}})
 			case "server error":
@@ -66,7 +68,7 @@ func TestSteeringDelivery_OnlyExplicitRejectionAllowsRetry(t *testing.T) {
 				if (result.err == nil) != (name == "accepted") {
 					t.Fatalf("error=%v", result.err)
 				}
-				if errors.Is(result.err, core.ErrSteerRejected) != (name == "rejected") {
+				if errors.Is(result.err, core.ErrSteerRejected) != (name == "rejected" || name == "invalid request") {
 					t.Fatalf("unsafe retry classification: %v", result.err)
 				}
 			case <-time.After(time.Second):

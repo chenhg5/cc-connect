@@ -75,6 +75,14 @@ func findAsyncQuestionSession(sm *SessionManager, key, content string) *Session 
 // Runs under admissionMu. Old cards remain bound to their original conversation.
 func (e *Engine) selectAsyncQuestionSession(p Platform, msg *Message, content, key string, sm *SessionManager) bool {
 	target := findAsyncQuestionSession(sm, msg.SessionKey, content)
+	if isAsyncAnswer(content) {
+		var ambiguous bool
+		target, ambiguous = findFreeTextQuestionSession(sm, msg.SessionKey)
+		if ambiguous {
+			e.answerFeedback(p, msg, nil, MsgAnswerAmbiguous)
+			return false
+		}
+	}
 	if target == nil || target.ID == sm.ActiveSessionID(msg.SessionKey) {
 		return true
 	}
@@ -92,20 +100,8 @@ func (e *Engine) selectAsyncQuestionSession(p Platform, msg *Message, content, k
 		e.answerFeedback(p, msg, q, MsgPreviousProcessing)
 		return false
 	}
-	e.interactiveMu.Lock()
-	state := e.interactiveStates[key]
-	var old AgentSession
-	if state != nil {
-		state.mu.Lock()
-		old = state.agentSession
-		state.mu.Unlock()
-	}
-	e.interactiveMu.Unlock()
-	e.cleanupInteractiveState(key)
-	if old != nil && old.Alive() {
-		e.answerFeedback(p, msg, q, MsgPreviousProcessing)
-		return false
-	}
+	e.answerFeedback(p, msg, q, MsgAnswerSwitching)
+	e.retireAsyncQuestionSession(key)
 	if _, err := sm.SwitchSession(msg.SessionKey, target.ID); err != nil {
 		e.answerFeedback(p, msg, q, MsgAskQuestionStale)
 		return false
@@ -137,7 +133,8 @@ func (e *Engine) answerFeedback(p Platform, msg *Message, q *AsyncQuestion, key 
 type answerDelivery struct {
 	once     sync.Once
 	finishFn func(error)
-	admitted bool // admission goroutine only
+	admitted bool              // admission goroutine only
+	state    *interactiveState // captured before launching an idle answer worker
 }
 
 func (d *answerDelivery) finish(err error) {
@@ -270,4 +267,61 @@ func (e *Engine) handleAsyncUserInput(p Platform, msg *Message, content, key str
 		}
 	}
 	return prompt, false
+}
+
+// Free text carries no question ID. Prefer the active question (including its
+// deduplication record); otherwise switch only when exactly one open question
+// exists in this user's conversation namespace.
+func findFreeTextQuestionSession(sm *SessionManager, key string) (*Session, bool) {
+	if active := sm.FindByID(sm.ActiveSessionID(key)); active != nil && active.asyncQuestion() != nil {
+		return active, false
+	}
+	var target *Session
+	for _, session := range sm.ListSessions(key) {
+		if q := session.asyncQuestion(); q != nil && q.Status == "open" {
+			if target != nil {
+				return nil, true
+			}
+			target = session
+		}
+	}
+	return target, false
+}
+
+// Detach/register atomically while admission is serialized, then retire the
+// reader and process outside the admission gate. The next worker waits through
+// awaitSessionClose before resuming the question's original model thread.
+func (e *Engine) retireAsyncQuestionSession(key string) {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[key]
+	if state == nil {
+		e.interactiveMu.Unlock()
+		return
+	}
+	state.markStopped()
+	state.mu.Lock()
+	old, p, replyCtx := state.agentSession, state.platform, state.replyCtx
+	state.agentSession = nil
+	if state.agentSessionIdleCancel != nil {
+		state.agentSessionIdleCancel()
+		state.agentSessionIdleCancel = nil
+	}
+	pending := state.pending
+	state.pending = nil
+	state.mu.Unlock()
+	finish := e.beginSessionClose(key)
+	delete(e.interactiveStates, key)
+	e.interactiveMu.Unlock()
+	go func() {
+		defer finish()
+		e.stopUnsolicitedReader(state)
+		if pending != nil {
+			pending.resolve()
+		}
+		e.notifyDroppedQueuedMessages(state, ErrSteerRejected)
+		e.closeAgentSession(key, old, p, replyCtx)
+		if old != nil && old.Alive() {
+			e.markUnsafeResume(key)
+		}
+	}()
 }

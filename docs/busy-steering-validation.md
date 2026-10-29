@@ -125,3 +125,33 @@ history count unchanged. These observations are still not live acceptance of
 the exact public binary. The private UI showed a contradictory connection label
 and one unreproduced automated-fill truncation; neither is represented as fixed
 or included in this public PR.
+
+## Review follow-up: regression-first fixes (2026-10-29)
+
+Before changing behavior, focused tests reproduced blocked ordinary messages and
+`/stop` during a slow cross-conversation Close, `/answer` missing a non-active
+question, proven zero-byte failures becoming unknown, shared-app double dispatch,
+missing fallback after a failed card patch, and `sending` surviving restart.
+The shared callback loop was extracted unchanged solely to exercise its real
+entrypoint. These regressions pass after the fixes.
+
+Additional checks cover cancellation without later answer resurrection, refusing
+resume when the old process cannot be confirmed dead, both shared-project orders,
+persisted ownership routing, ambiguous questions and cross-user isolation, and
+an integration of the real Engine with the Codex writer. In that integration,
+zero-byte failure leaves an answer open and a subsequent retry succeeds; an
+unacknowledged written request stays unknown and cannot be replayed. In-flight
+write timeout remains unknown: aborting a transport is not proof of no delivery.
+The app-server's actual -32600 refusal code is now an explicit fixture case.
+
+Feishu patch failure falls back to a new text status message with its own deadline,
+so a deleted original card need not remain replyable. The callback acknowledges
+handling without an optimistic success card. The owning engine is resolved from
+persisted questions through an optional platform capability, within the original
+user/workspace namespace. No production credentials or shared-app configuration
+are used in these HTTP fixtures.
+
+These failure cases were tested deterministically, not injected into the user's
+live Chrome sessions. No private service was replaced. The previous private UI
+observations do not validate this new public binary. Local checks remain targeted;
+new-head CI, including race coverage, must be checked separately after pushing.

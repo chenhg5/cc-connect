@@ -892,8 +892,17 @@ func (sm *SessionManager) load() {
 		sm.userMeta = make(map[string]*UserMeta)
 	}
 
+	normalized := false
 	for _, s := range sm.sessions {
 		s.stripContinueSessionSentinel()
+		// No delivery acknowledgement can still arrive after process restart.
+		if q := s.AsyncQuestion; q != nil && q.Status == "sending" {
+			q.Status = "unknown"
+			normalized = true
+		}
+	}
+	if normalized {
+		sm.Save()
 	}
 
 	slog.Info("session: loaded from disk", "path", sm.storePath, "sessions", len(sm.sessions))

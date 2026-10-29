@@ -466,6 +466,8 @@ const (
 	MsgAnswerSubmitting     MsgKey = "answer_submitting"
 	MsgAnswerSubmitted      MsgKey = "answer_submitted"
 	MsgAnswerRecorded       MsgKey = "answer_recorded"
+	MsgAnswerSwitching      MsgKey = "answer_switching"
+	MsgAnswerAmbiguous      MsgKey = "answer_ambiguous"
 	MsgAskQuestionStale     MsgKey = "ask_question_stale"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
@@ -2889,6 +2891,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "已記錄，請繼續回答剩餘問題",
 		LangJapanese:           "回答を記録しました。残りの質問に回答してください",
 		LangSpanish:            "Respuesta registrada; completa las preguntas restantes",
+	},
+	MsgAnswerSwitching: {
+		LangEnglish:            "Switching to the question's conversation; waiting for the previous agent to close. /stop cancels the pending answer.",
+		LangChinese:            "正在切回问题所属会话，等待上一会话进程关闭。可用 /stop 取消待提交的回答。",
+		LangTraditionalChinese: "正在切回問題所屬會話，等待上一會話程序關閉。可用 /stop 取消待提交的回答。",
+		LangJapanese:           "質問の会話に切り替え、前のエージェントの終了を待っています。/stop で保留中の回答をキャンセルできます。",
+		LangSpanish:            "Cambiando a la conversación de la pregunta y esperando el cierre del agente anterior. /stop cancela la respuesta pendiente.",
+	},
+	MsgAnswerAmbiguous: {
+		LangEnglish:            "Several conversations have open questions. Use the question's button or switch to its conversation before /answer.",
+		LangChinese:            "多个会话都有待答问题。请点击对应问题的按钮，或先切换到该会话再使用 /answer。",
+		LangTraditionalChinese: "多個會話都有待答問題。請點擊對應問題的按鈕，或先切換到該會話再使用 /answer。",
+		LangJapanese:           "複数の会話に未回答の質問があります。質問のボタンを使うか、その会話に切り替えてから /answer を使ってください。",
+		LangSpanish:            "Varias conversaciones tienen preguntas pendientes. Usa el botón de la pregunta o cambia a su conversación antes de usar /answer.",
 	},
 	MsgAskQuestionStale: {
 		LangEnglish:            "⚠️ That question was already answered or is no longer active, so this answer was not sent to the agent.",

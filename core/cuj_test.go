@@ -2893,3 +2893,83 @@ type reasoningJourneyPlatform struct {
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
 }
+
+func TestCUJ_A8_AsyncAnswerSlowCloseKeepsChatResponsive(t *testing.T) {
+	for _, command := range []string{"ordinary supplement", "/stop"} {
+		t.Run(command, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			next := &asyncInputSession{events: make(chan Event, 16)}
+			e := NewEngine("test", &controllableAgent{nextSession: next}, []Platform{p}, "", LangEnglish)
+			const key = "test:user"
+			original := e.sessions.GetOrCreateActive(key)
+			original.SetAgentSessionID("async-thread", "test")
+			original.AsyncQuestion = savedTestQuestion()
+			newer := e.sessions.NewSession(key, "newer")
+			newer.SetAgentSessionID("newer-thread", "test")
+			old := &reviewSlowCloseSession{asyncInputSession: &asyncInputSession{events: make(chan Event, 8)}, entered: make(chan struct{}), release: make(chan struct{})}
+			e.interactiveStates[key] = &interactiveState{agentSession: old, platform: p, replyCtx: "ctx", busySession: newer}
+			var release sync.Once
+			unblock := func() { release.Do(func() { close(old.release) }) }
+			t.Cleanup(func() { unblock(); _ = e.Stop() })
+			send := func(text string) {
+				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", Content: text, ReplyCtx: "ctx"})
+			}
+			send("/history")
+			cardDone := make(chan struct{})
+			go func() { send("askq:cTE:0:2"); close(cardDone) }()
+			select {
+			case <-old.entered:
+			case <-time.After(time.Second):
+				t.Fatal("teardown never began")
+			}
+			messageDone := make(chan struct{})
+			go func() { send(command); close(messageDone) }()
+			select {
+			case <-messageDone:
+			case <-time.After(250 * time.Millisecond):
+				t.Error("chat message blocked behind slow Close")
+			}
+			if command != "/stop" {
+				next.mu.Lock()
+				premature := len(next.sent)
+				next.mu.Unlock()
+				if premature != 0 {
+					t.Error("resumed before old process closed")
+				}
+			}
+			unblock()
+			select {
+			case <-cardDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("card handler stuck")
+			}
+			select {
+			case <-messageDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("message handler stuck")
+			}
+			if command != "/stop" {
+				waitAsyncInput(t, func() bool { next.mu.Lock(); defer next.mu.Unlock(); return len(next.sent) > 0 })
+				next.mu.Lock()
+				answer := next.sent[0]
+				next.mu.Unlock()
+				if !strings.Contains(answer, "SQLite") || e.sessions.ActiveSessionID(key) != original.ID {
+					t.Error("answer went to wrong conversation")
+				}
+				next.events <- Event{Type: EventResult, Content: "original answer applied", Done: true}
+				waitAsyncInput(t, func() bool { return strings.Contains(strings.Join(p.getSent(), "\n"), "original answer applied") })
+			} else {
+				waitAsyncInput(t, func() bool { return original.asyncQuestion().Status == "open" })
+				next.mu.Lock()
+				count := len(next.sent)
+				next.mu.Unlock()
+				if count != 0 {
+					t.Error("stopped answer resumed after teardown")
+				}
+				if !strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(MsgExecutionStopped)) {
+					t.Error("stop feedback missing")
+				}
+			}
+		})
+	}
+}

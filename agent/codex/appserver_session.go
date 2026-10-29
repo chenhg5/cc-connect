@@ -1883,20 +1883,36 @@ func (s *appServerSession) notify(method string, params any) error {
 func (s *appServerSession) writeJSON(v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("codex app-server encode: %w", err)
+		return &requestNotWrittenError{err: fmt.Errorf("codex app-server encode: %w", err)}
 	}
 
 	s.procMu.Lock()
 	stdin := s.stdin
 	s.procMu.Unlock()
 	if stdin == nil {
-		return fmt.Errorf("codex app-server connection is closed")
+		return &requestNotWrittenError{err: fmt.Errorf("codex app-server connection is closed")}
 	}
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if _, err := stdin.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("codex app-server write: %w", err)
+	payload := append(b, '\n')
+	n, err := stdin.Write(payload)
+	if err == nil && n != len(payload) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		err = fmt.Errorf("codex app-server write: %w", err)
+		if n == 0 {
+			return &requestNotWrittenError{err: err}
+		}
+		return err
 	}
 	return nil
 }
+
+// This error requires positive evidence that no request bytes were written.
+// A timeout while Write is in flight is deliberately NOT classified this way.
+type requestNotWrittenError struct{ err error }
+
+func (e *requestNotWrittenError) Error() string { return e.err.Error() }
+func (e *requestNotWrittenError) Unwrap() error { return e.err }

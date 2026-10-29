@@ -71,6 +71,10 @@ func (s *appServerSession) steerUserInput(prompt string, timeout time.Duration) 
 		TurnID string `json:"turnId"`
 	}
 	if err := s.requestWithTimeout("turn/steer", params, &response, timeout); err != nil {
+		var unwritten *requestNotWrittenError
+		if errors.As(err, &unwritten) {
+			return false, fmt.Errorf("%w: %w", core.ErrSteerRejected, err)
+		}
 		var rejected *rpcError
 		if errors.As(err, &rejected) && (rejected.Code == -32600 || rejected.Code == -32601 || rejected.Code == -32602) {
 			return false, fmt.Errorf("%w: %s", core.ErrSteerRejected, rejected)

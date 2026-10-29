@@ -1332,9 +1332,29 @@ belongs to its conversation and survives a completed turn or service restart.
 If the model is idle, an answer continues that conversation in a new turn; it does
 not replay the previous task. A newer question replaces the previous open one.
 
+`/answer` first uses the active conversation's question, including its existing
+delivery record for duplicate suppression. If that conversation has no question,
+it can select the only open question in the same user's conversation namespace.
+When several conversations have open questions, use the intended card button or
+switch to its conversation first; free text never guesses between them.
+Cross-conversation answers show a switching notice. A slow previous-agent close
+runs outside message admission, so new messages and `/stop` remain available;
+the answer waits for safe teardown before resuming its own conversation.
+
 Feishu async cards show submission success only after model acknowledgement.
+If a card cannot be updated, Feishu sends a separate text status message.
+Shared-app question callbacks are routed only to the engine owning the saved
+question; acknowledging the click itself does not claim delivery success.
 Repeated or uncertain answers are not sent again automatically. Unknown steering
 delivery is retained in `/history` with a warning, not represented as confirmed.
+
+A completed write failure with proof that zero bytes were written is a definite
+non-delivery: the question stays open and can be answered again. Partial writes,
+in-flight write timeouts and missing acknowledgements remain uncertain. Closing
+the transport after a timeout does not prove that the request was never applied.
+The existing five-second steer RPC budget bounds the client wait; it is not a
+measured guarantee of live app-server latency. After restart, an interrupted
+`sending` record is normalized to `unknown` and is never automatically replayed.
 
 An answer with an unknown delivery outcome stays terminal for that question,
 even after restart: neither its card buttons nor `/answer` can resubmit it.
