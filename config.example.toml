@@ -1704,10 +1704,17 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+# Optional: app_server supports interactive approvals and named permissions.
+# 可选：app_server 支持交互审批及命名权限配置。
+# backend = "app_server"
+# permission_profile = "chat-workspace" # Defined in Codex config; replaces the legacy sandbox, not the approval policy.
+#                                      # 在 Codex 配置中定义；替代旧式沙箱选项，不改变审批策略。
+# Requires a Codex version that confirms activePermissionProfile; see docs/usage.md.
+# 需要支持 activePermissionProfile 的 Codex 版本；详见 docs/usage.zh-CN.md。
 #
 # Mode options / 模式说明:
-# - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）
-# - "auto-edit": auto-approve file edits, ask for shell commands / 文件编辑自动通过，Shell 命令仍需确认
+# - "suggest":   read-only; app_server requests approval when needed, exec cannot prompt / 只读；app_server 按需请求审批，exec 无交互审批
+# - "auto-edit": workspace-write with no approval prompts (same as full-auto) / 工作区可写，无审批提示（等同 full-auto）
 # - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
 # - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
 #

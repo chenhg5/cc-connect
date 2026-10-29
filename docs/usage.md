@@ -91,12 +91,42 @@ All agents support permission modes switchable at runtime via `/mode`.
 
 ### Codex Modes
 
-| Mode | Config Value | Behavior |
-|------|-------------|----------|
-| Suggest | `suggest` | Only trusted commands run without approval |
-| Auto Edit | `auto-edit` | Model decides when to ask |
-| Full Auto | `full-auto` | Auto-approve with sandbox |
-| YOLO | `yolo` | Bypass all approvals and sandbox |
+| Mode | Config value | `exec` (default backend) | `app_server` |
+|------|-------------|--------------------------|--------------|
+| Suggest | `suggest` | Read-only; no interactive approvals | Read-only; approval on request |
+| Auto Edit | `auto-edit` | Workspace-write; no approvals | Workspace-write; no approvals |
+| Full Auto | `full-auto` | Workspace-write; no approvals | Workspace-write; no approvals |
+| YOLO | `yolo` | Bypass approvals and sandbox | Bypass approvals and sandbox |
+
+These sandbox selections apply when `permission_profile` is unset. With a named profile, its filesystem and network rules take precedence in every mode.
+
+### Codex permission profiles
+
+With `backend = "app_server"`, set `permission_profile` to select a named profile from the Codex configuration used by that process:
+
+```toml
+[projects.agent.options]
+backend = "app_server"
+mode = "suggest"
+permission_profile = "chat-workspace"
+```
+
+Define the profile in the relevant Codex config (for example, `config.toml` under `codex_home`):
+
+```toml
+default_permissions = "chat-workspace"
+
+[permissions.chat-workspace.filesystem]
+":minimal" = "read"
+":workspace_roots" = "read"
+
+[permissions.chat-workspace.network]
+enabled = false
+```
+
+The profile replaces the mode's legacy sandbox selection for both new and resumed sessions; the mode still determines the approval policy. Without this option, existing behavior is unchanged. The adapter rejects the option on the `exec` backend and refuses to use a session unless Codex confirms the requested profile. This requires a Codex version supporting named profiles and `activePermissionProfile` (verified with 0.164.0).
+
+`work_dir` and a read-only sandbox alone do not restrict reads to the project. Selective read access requires a compatible Codex sandbox; on Windows, use the [MXC sandbox configuration](https://learn.chatgpt.com/docs/windows/windows-sandbox). Permission profiles govern local sandboxed tools, not independent MCP/connectors, and approved escalations may grant additional access. See the [official permissions documentation](https://learn.chatgpt.com/docs/permissions).
 
 ### Codex CLI discovery on macOS
 
