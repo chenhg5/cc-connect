@@ -293,7 +293,14 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 // GetSessionHistory reads the transcript produced by either the legacy
 // kimi-cli or the current Kimi Code CLI.
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
-	sessionDir := findKimiSessionDir(sessionID, a.storageEnv()...)
+	return ReadSessionHistory(sessionID, limit, a.storageEnv()...)
+}
+
+// ReadSessionHistory locates a Kimi session directory by id and parses its
+// transcript (legacy context.jsonl or Kimi Code CLI wire.jsonl). Exported so
+// other adapters serving a Kimi backend (e.g. ACP via `kimi acp`) can reuse it.
+func ReadSessionHistory(sessionID string, limit int, extraEnv ...string) ([]core.HistoryEntry, error) {
+	sessionDir := findKimiSessionDir(sessionID, extraEnv...)
 	if sessionDir == "" {
 		return nil, fmt.Errorf("kimi: session not found: %s", sessionID)
 	}

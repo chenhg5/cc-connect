@@ -624,12 +624,19 @@ func TestMgmt_CronExecByID(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 2 {
+		// Delivery precedes MarkRun; wait for persistence before replacing the
+		// agent or allowing TempDir cleanup to race the background writer.
+		_, finished, lastErr := cronJobRunStatus(store, job.ID)
+		if len(platform.getSent()) >= 2 && finished {
+			if lastErr != "" {
+				t.Fatalf("triggered cron exec failed: %s", lastErr)
+			}
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(platform.getSent()) < 2 {
+	_, finished, _ := cronJobRunStatus(store, job.ID)
+	if len(platform.getSent()) < 2 || !finished {
 		t.Fatalf("timed out waiting for triggered cron exec, sent=%v", platform.getSent())
 	}
 
@@ -655,7 +662,11 @@ func TestMgmt_CronExecByID(t *testing.T) {
 
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 4 {
+		_, finished, lastErr := cronJobRunStatus(store, aliasJob.ID)
+		if len(platform.getSent()) >= 4 && finished {
+			if lastErr != "" {
+				t.Fatalf("triggered cron run alias failed: %s", lastErr)
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

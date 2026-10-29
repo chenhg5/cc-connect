@@ -138,6 +138,13 @@ func (s *opencodeSession) launch(prompt string, imagePaths []string, chatID stri
 
 	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
 	cmd.Dir = s.workDir
+	// Bound how long cmd.Wait() may wait for the I/O goroutines. os/exec
+	// copies the child's stderr into a buffer from its own goroutine, and
+	// that goroutine only ends when the stderr pipe reaches EOF — a
+	// descendant holding the pipe open would block the turn forever now
+	// that readLoop waits for the process before delivering the result.
+	// Same setting as the gemini/kimi/antigravity adapters.
+	cmd.WaitDelay = 1 * time.Second
 	env := os.Environ()
 	if len(s.extraEnv) > 0 {
 		env = core.MergeEnv(env, s.extraEnv)
@@ -267,9 +274,9 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
-	if s.workDir != "" {
-		args = append(args, "--dir", s.workDir)
-	}
+	// The working directory is set as the process cwd in Send (cmd.Dir), like
+	// the other opencode invocations. `opencode run` has no --dir flag in
+	// opencode v2 and rejects it ("Unrecognized flag: --dir").
 
 	// Enable thinking blocks.
 	args = append(args, "--thinking")
@@ -302,6 +309,12 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 // end the turn with a clear notice instead of hanging forever).
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
+	waited := false
+	defer func() {
+		if !waited {
+			_ = cmd.Wait()
+		}
+	}()
 
 	// readProcess returns true when stdout ended cleanly (no scanner error).
 	// The turn's outcome is decided below from expectingContinue, so the
@@ -317,6 +330,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	if err := cmd.Wait(); err != nil {
 		slog.Debug("opencodeSession: process exited", "error", err)
 	}
+	waited = true
 	if stderrMsg := stderrBuf.String(); stderrMsg != "" {
 		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
 		if strings.Contains(stderrMsg, "Session not found") {

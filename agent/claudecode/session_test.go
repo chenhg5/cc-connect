@@ -146,6 +146,74 @@ func TestHandleResultCompactionSubtypeIsNotTerminal(t *testing.T) {
 	}
 }
 
+// TestHandleResultDropsEmptyTaskNotificationResult reproduces the event
+// order Claude Code emits when a session is resumed after the previous
+// process exited with a background shell task still running: a synthetic
+// empty result for the orphaned task notification (origin.kind ==
+// "task-notification", num_turns == 0) arrives before the result of the
+// prompt cc-connect sent. Only the real result may reach the engine;
+// otherwise the user's turn ends with "(empty response)".
+func TestHandleResultDropsEmptyTaskNotificationResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 8),
+		ctx:    ctx,
+	}
+	cs.sessionID.Store("test-session")
+	cs.alive.Store(true)
+
+	// Shapes captured from Claude Code 2.1.280 stream-json output.
+	cs.handleReadLoopLine(`{"type":"system","subtype":"task_notification","task_id":"b6l8ybd50","status":"stopped","summary":"Background shell command didn't finish before the previous session ended","session_id":"test-session"}`)
+	cs.handleReadLoopLine(`{"type":"result","subtype":"success","is_error":false,"duration_api_ms":0,"num_turns":0,"result":"","stop_reason":null,"session_id":"test-session","usage":{"input_tokens":0,"output_tokens":0},"origin":{"kind":"task-notification"}}`)
+	cs.handleReadLoopLine(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"PONG-42"}]},"session_id":"test-session"}`)
+	cs.handleReadLoopLine(`{"type":"result","subtype":"success","is_error":false,"duration_api_ms":6611,"num_turns":1,"result":"PONG-42","session_id":"test-session","usage":{"input_tokens":10,"output_tokens":46}}`)
+
+	var results []core.Event
+	for {
+		select {
+		case evt := <-cs.events:
+			if evt.Type == core.EventResult {
+				results = append(results, evt)
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d EventResult, want 1 (stray task-notification result must be dropped): %#v", len(results), results)
+	}
+	if results[0].Content != "PONG-42" || !results[0].Done {
+		t.Fatalf("result = %#v, want Done result with content PONG-42", results[0])
+	}
+}
+
+func TestIsEmptyTaskNotificationResult(t *testing.T) {
+	notif := map[string]any{"kind": "task-notification"}
+	cases := []struct {
+		name    string
+		raw     map[string]any
+		content string
+		want    bool
+	}{
+		{"orphan notification", map[string]any{"origin": notif, "num_turns": float64(0)}, "", true},
+		{"notification answered by model", map[string]any{"origin": notif, "num_turns": float64(1)}, "", false},
+		{"notification with text", map[string]any{"origin": notif, "num_turns": float64(0)}, "done", false},
+		{"no origin (local slash command)", map[string]any{"num_turns": float64(0)}, "", false},
+		{"other origin", map[string]any{"origin": map[string]any{"kind": "user"}, "num_turns": float64(0)}, "", false},
+		{"missing num_turns", map[string]any{"origin": notif}, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isEmptyTaskNotificationResult(tc.raw, tc.content); got != tc.want {
+				t.Errorf("isEmptyTaskNotificationResult = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestIsCompactionResult covers both accepted subtype spellings and the
 // negative case (regular result with no subtype).
 func TestIsCompactionResult(t *testing.T) {
@@ -323,126 +391,6 @@ func TestParseClaudeUsageAcceptsNonFloat64Types(t *testing.T) {
 			if in != tc.wantIn || out != tc.wantOut || cc != tc.wantCC || cr != tc.wantCR {
 				t.Errorf("parseClaudeUsage = (in=%d out=%d cc=%d cr=%d), want (in=%d out=%d cc=%d cr=%d)",
 					in, out, cc, cr, tc.wantIn, tc.wantOut, tc.wantCC, tc.wantCR)
-			}
-		})
-	}
-}
-
-// TestHandleResultUsesReportedContextWindow verifies that the CLI-reported
-// contextWindow in the result event's modelUsage map wins over the model-id
-// heuristic. claude-opus-5 has a native 1M window but no "[1m]" suffix in its
-// id, so the heuristic alone would report 200k and inflate ctx % 5x.
-func TestHandleResultUsesReportedContextWindow(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	cs := &claudeSession{
-		events: make(chan core.Event, 8),
-		ctx:    ctx,
-	}
-	cs.sessionID.Store("test-session")
-	cs.alive.Store(true)
-	cs.activeModel.Store("claude-opus-5") // native 1M, no "[1m]" suffix
-
-	assistant := map[string]any{
-		"type": "assistant",
-		"message": map[string]any{
-			"content": []any{},
-			"usage": map[string]any{
-				"input_tokens":                float64(2),
-				"output_tokens":               float64(1),
-				"cache_creation_input_tokens": float64(19_800),
-				"cache_read_input_tokens":     float64(16_700),
-			},
-		},
-	}
-
-	cs.handleAssistant(assistant)
-	if usage := cs.GetContextUsage(); usage.ContextWindow != 200_000 {
-		t.Fatalf("pre-result ContextWindow = %d, want 200_000 (heuristic fallback)", usage.ContextWindow)
-	}
-
-	cs.handleResult(map[string]any{
-		"type":       "result",
-		"result":     "done",
-		"session_id": "test-session",
-		"usage": map[string]any{
-			"output_tokens": float64(65),
-		},
-		"modelUsage": map[string]any{
-			"claude-opus-5": map[string]any{
-				"contextWindow":  float64(1_000_000),
-				"canonicalModel": "claude-opus-5",
-			},
-		},
-	})
-
-	usage := cs.GetContextUsage()
-	if usage.ContextWindow != 1_000_000 {
-		t.Errorf("ContextWindow = %d, want 1_000_000 (reported by modelUsage)", usage.ContextWindow)
-	}
-	// The turn that reported the window must itself render the right ctx %:
-	// 36.5k of 1M is ~4%, not the 18% a 200k denominator produces.
-	pct := usage.UsedTokens * 100 / usage.ContextWindow
-	if pct != 3 {
-		t.Errorf("ctx %% = %d, want 3 (36.5k of 1M)", pct)
-	}
-
-	// Later assistant events reuse the reported window without waiting for
-	// another result event.
-	cs.handleAssistant(assistant)
-	if usage := cs.GetContextUsage(); usage.ContextWindow != 1_000_000 {
-		t.Errorf("post-result assistant ContextWindow = %d, want 1_000_000 (cached)", usage.ContextWindow)
-	}
-}
-
-func TestParseModelUsageContextWindow(t *testing.T) {
-	entry := func(window float64) map[string]any {
-		return map[string]any{"contextWindow": window}
-	}
-	tests := []struct {
-		name  string
-		raw   map[string]any
-		model string
-		want  int
-	}{
-		{"no modelUsage", map[string]any{"type": "result"}, "claude-opus-5", 0},
-		{"empty modelUsage", map[string]any{"modelUsage": map[string]any{}}, "claude-opus-5", 0},
-		{
-			"active model matches",
-			map[string]any{"modelUsage": map[string]any{
-				"claude-haiku-4-5": entry(200_000),
-				"claude-opus-5":    entry(1_000_000),
-			}},
-			"claude-opus-5",
-			1_000_000,
-		},
-		{
-			"sole entry used when model unknown",
-			map[string]any{"modelUsage": map[string]any{"claude-opus-5": entry(1_000_000)}},
-			"",
-			1_000_000,
-		},
-		{
-			"ambiguous multi-model, no match",
-			map[string]any{"modelUsage": map[string]any{
-				"claude-haiku-4-5": entry(200_000),
-				"claude-opus-5":    entry(1_000_000),
-			}},
-			"claude-sonnet-5",
-			0,
-		},
-		{
-			"zero window ignored",
-			map[string]any{"modelUsage": map[string]any{"claude-opus-5": entry(0)}},
-			"claude-opus-5",
-			0,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := parseModelUsageContextWindow(tt.raw, tt.model); got != tt.want {
-				t.Errorf("parseModelUsageContextWindow() = %d, want %d", got, tt.want)
 			}
 		})
 	}

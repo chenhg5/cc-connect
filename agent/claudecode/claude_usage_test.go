@@ -3,6 +3,8 @@ package claudecode
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -268,4 +270,39 @@ func mustLoadLocation(t *testing.T, name string) *time.Location {
 		t.Fatalf("LoadLocation(%q): %v", name, err)
 	}
 	return loc
+}
+
+// A probe whose PTY reader finishes before the process exits must still return.
+// The reader's single send on readDone used to be consumed by the main loop,
+// leaving the deferred cleanup blocked on a second receive forever (#2015).
+func TestRunClaudeUsageProbe_ReturnsWhenReaderFinishesFirst(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell script as a fake claude binary")
+	}
+	binDir := t.TempDir()
+	// Close every descriptor that refers to the PTY, then keep running, so the
+	// reader sees the end of the PTY while the process is still alive.
+	script := "#!/bin/sh\nexec </dev/null >/dev/null 2>/dev/null\nsleep 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := (&Agent{}).runClaudeUsageProbe(ctx)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error from a probe whose output ended before /usage rendered")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("runClaudeUsageProbe did not return after the PTY reader finished")
+	}
 }

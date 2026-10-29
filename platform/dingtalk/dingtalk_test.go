@@ -1117,6 +1117,7 @@ func TestOnRawMessage_RichTextForwardsInlineImage(t *testing.T) {
 		"senderNick": "Alice",
 		"robotCode": "robot-from-callback",
 		"sessionWebhook": "https://example.invalid/webhook",
+		"sessionWebhookExpiredTime": 1700000000123,
 		"content": {
 			"richText": [
 				{"text": "Please inspect "},
@@ -1128,6 +1129,9 @@ func TestOnRawMessage_RichTextForwardsInlineImage(t *testing.T) {
 
 	select {
 	case msg := <-captured:
+		if rc, ok := msg.ReplyCtx.(replyContext); !ok || rc.sessionWebhookExpiredTime != 1700000000123 {
+			t.Fatalf("callback expiry not preserved: %#v", msg.ReplyCtx)
+		}
 		if msg.Content != "Please inspect this screenshot" {
 			t.Fatalf("Content = %q, want rich text", msg.Content)
 		}
@@ -1268,11 +1272,15 @@ func TestHandleFileMessage_BuildsFileAttachmentWithName(t *testing.T) {
 		"senderStaffId": "user-1",
 		"senderNick": "Alice",
 		"sessionWebhook": "https://example.invalid/webhook",
+		"sessionWebhookExpiredTime": 1700000000123,
 		"content": {"downloadCode": "dc-xyz", "fileName": "` + fileName + `", "fileSize": 19}
 	}`)
 
 	select {
 	case msg := <-captured:
+		if rc, ok := msg.ReplyCtx.(replyContext); !ok || rc.sessionWebhookExpiredTime != 1700000000123 {
+			t.Fatalf("callback expiry not preserved: %#v", msg.ReplyCtx)
+		}
 		if len(msg.Files) != 1 {
 			t.Fatalf("Files len = %d, want 1", len(msg.Files))
 		}
@@ -1419,6 +1427,7 @@ func TestOnMessageRepliesToUnauthorizedSender(t *testing.T) {
 		}
 		gotReply <- payload.Markdown.Text
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
 	}))
 	defer sessionWebhook.Close()
 
@@ -1496,6 +1505,7 @@ func TestReply_IncludesExtractedAtUserIds(t *testing.T) {
 		}
 		gotPayload <- payload
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
 	}))
 	defer sessionWebhook.Close()
 
@@ -1534,6 +1544,7 @@ func TestReply_NoAtUserIdsWhenNoMention(t *testing.T) {
 		}
 		gotPayload <- payload
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
 	}))
 	defer sessionWebhook.Close()
 
@@ -1646,6 +1657,7 @@ func TestCardTitleFromContent_UsedInReplyPayload(t *testing.T) {
 		}
 		gotPayload <- p
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
 	}))
 	defer sessionWebhook.Close()
 

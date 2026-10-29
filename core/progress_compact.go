@@ -34,6 +34,9 @@ const (
 	// Feishu renders as a "仅显示最近更新。" note).
 	maxThinkingPanelEntries = 20
 	maxToolPanelEntries     = 15
+
+	// Coalesce progress during an outage instead of retrying every tool event.
+	compactProgressRetryInterval = time.Second
 )
 
 type ProgressCardState string
@@ -378,6 +381,7 @@ type compactProgressWriter struct {
 	// Throttle message edits to avoid platform rate limits (e.g. Discord ~5 edits/5s).
 	minUpdateInterval time.Duration
 	lastUpdateAt      time.Time
+	retryAfter        time.Time
 }
 
 func normalizeProgressStyle(style string) string {
@@ -643,6 +647,9 @@ func (w *compactProgressWriter) appendStructured(item ProgressCardEntry, fallbac
 		return true
 	}
 
+	if w.ctx.Err() != nil || time.Now().Before(w.retryAfter) {
+		return true
+	}
 	if !forceUpdate && w.minUpdateInterval > 0 && time.Since(w.lastUpdateAt) < w.minUpdateInterval {
 		return true
 	}
@@ -652,8 +659,10 @@ func (w *compactProgressWriter) appendStructured(item ProgressCardEntry, fallbac
 	cancel()
 	if err != nil {
 		slog.Warn("progress writer: UpdateMessage failed", "platform", w.platform.Name(), "style", w.style, "error", err)
-		w.failed = true
-		return false
+		// Keep the handle and buffered entries so the next event can recover
+		// the same message. Returning false would emit per-event fallback spam.
+		w.retryAfter = time.Now().Add(compactProgressRetryInterval)
+		return true
 	}
 	w.lastSent = w.content
 	w.lastUpdateAt = time.Now()
@@ -669,9 +678,6 @@ func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
 	if state == "" {
 		state = ProgressCardStateCompleted
 	}
-	if w.state == state {
-		return true
-	}
 	w.state = state
 	w.content = BuildProgressCardPayloadV2(w.items, w.truncated, w.agentName, w.lang, w.state)
 	if w.content == "" || w.content == w.lastSent {
@@ -682,7 +688,6 @@ func (w *compactProgressWriter) Finalize(state ProgressCardState) bool {
 	cancel()
 	if err != nil {
 		slog.Warn("progress writer: Finalize UpdateMessage failed", "platform", w.platform.Name(), "style", w.style, "error", err)
-		w.failed = true
 		return false
 	}
 	w.lastSent = w.content

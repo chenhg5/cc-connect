@@ -146,10 +146,9 @@ func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
 
 func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 	var u struct {
-		Title      string `json:"title"`
-		ToolCallID string `json:"toolCallId"`
-		Status     string `json:"status"`
-		Content    []struct {
+		Title   string `json:"title"`
+		Status  string `json:"status"`
+		Content []struct {
 			Type    string `json:"type"`
 			Content struct {
 				Type string `json:"type"`
@@ -161,9 +160,6 @@ func mapToolCallUpdate(sessionID string, update json.RawMessage) []core.Event {
 		return nil
 	}
 	toolLabel := u.Title
-	if toolLabel == "" {
-		toolLabel = u.ToolCallID
-	}
 	if toolLabel == "" {
 		toolLabel = "tool"
 	}
@@ -232,7 +228,7 @@ func extractToolCallContentText(blocks []struct {
 func mapSessionUpdateFallback(sessionID string, kind string, update json.RawMessage) []core.Event {
 	// Some agents may send reasoning as a dedicated discriminator; map to EventThinking.
 	switch strings.ToLower(kind) {
-	case "reasoning", "reasoning_chunk", "thinking", "agent_thinking_chunk":
+	case "reasoning", "reasoning_chunk", "thinking", "agent_thinking_chunk", "agent_thought_chunk":
 		var u struct {
 			Content struct {
 				Type string `json:"type"`

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -547,8 +548,8 @@ func extractToolInput(toolName string, call map[string]any) string {
 			return p
 		}
 	case "Glob":
-		if p, ok := args["pattern"].(string); ok {
-			return p
+		if input := cursorGlobInput(args); input != "" {
+			return input
 		}
 	}
 
@@ -558,6 +559,28 @@ func extractToolInput(toolName string, call map[string]any) string {
 
 	b, _ := json.Marshal(args)
 	return string(b)
+}
+
+// cursorGlobInput accepts Cursor's protobuf JSON fields as well as the older
+// aliases. Keep the search directory visible instead of falling back to raw JSON.
+func cursorGlobInput(args map[string]any) string {
+	firstString := func(keys ...string) string {
+		for _, key := range keys {
+			if value, ok := args[key].(string); ok && value != "" {
+				return value
+			}
+		}
+		return ""
+	}
+	pattern := firstString("globPattern", "glob_pattern", "pattern")
+	directory := firstString("targetDirectory", "target_directory", "path")
+	if pattern == "" {
+		return directory
+	}
+	if directory != "" && !filepath.IsAbs(pattern) {
+		return filepath.Join(directory, pattern)
+	}
+	return pattern
 }
 
 func (cs *cursorSession) handleResult(raw map[string]any) {

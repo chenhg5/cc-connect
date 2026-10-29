@@ -1148,7 +1148,7 @@ func TestResolveWorkspaceForChannel_UsesMessageDerivedKey(t *testing.T) {
 	}
 
 	wantWS := normalizeWorkspacePath(wsDir)
-	if ws, _, err := e.resolveWorkspaceForChannel(p, channelID, effectiveWorkspaceChannelKey(msg)); err != nil || ws != wantWS {
+	if ws, _, err := e.resolveWorkspaceForChannel(p, channelID, e.effectiveWorkspaceChannelKey(msg)); err != nil || ws != wantWS {
 		t.Fatalf("resolveWorkspaceForChannel = %q (err=%v), want %q", ws, err, wantWS)
 	}
 

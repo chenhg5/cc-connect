@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -89,18 +90,39 @@ func TestBodyFromItemList_Quote(t *testing.T) {
 	}
 }
 
-func TestSplitUTF8(t *testing.T) {
-	s := string([]rune{'a', '啊', 'b', '吧', 'c'})
-	parts := splitUTF8(s, 2)
-	if len(parts) != 3 || parts[0] != "a啊" || parts[1] != "b吧" || parts[2] != "c" {
-		t.Fatalf("parts=%#v", parts)
+// TestChunkingKeepsCodeFencesBalanced is a regression test for the outbound
+// splitter. The previous implementation cut purely on rune count, so a chunk
+// boundary landing inside a fenced code block left the first message with an
+// unclosed fence and the second one starting as bare text. Worse, the trailing
+// fence then arrived alone and the client read it as the *start* of a new code
+// block, swallowing whatever followed.
+func TestChunkingKeepsCodeFencesBalanced(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("intro line\n\n```go\n")
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&sb, "L%03d %s\n", i, strings.Repeat("x", 40))
+	}
+	sb.WriteString("```\ntrailing line")
+
+	chunks := core.SplitMessageCodeFenceAware(sb.String(), maxWeixinChunk)
+	if len(chunks) < 2 {
+		t.Fatalf("expected the sample to split, got %d chunk(s)", len(chunks))
+	}
+	for i, c := range chunks {
+		if n := strings.Count(c, "```"); n%2 != 0 {
+			t.Errorf("chunk %d/%d has %d fence markers, want an even count so the block is closed",
+				i+1, len(chunks), n)
+		}
+		if got := utf8.RuneCountInString(c); got > maxWeixinChunk {
+			t.Errorf("chunk %d/%d is %d runes, want <= %d", i+1, len(chunks), got, maxWeixinChunk)
+		}
 	}
 }
 
-func TestSplitUTF8Empty(t *testing.T) {
-	parts := splitUTF8("", maxWeixinChunk)
-	if len(parts) != 1 || parts[0] != "" {
-		t.Fatalf("parts=%#v", parts)
+func TestChunkingShortMessageStaysSingle(t *testing.T) {
+	chunks := core.SplitMessageCodeFenceAware("", maxWeixinChunk)
+	if len(chunks) != 1 || chunks[0] != "" {
+		t.Fatalf("chunks=%#v", chunks)
 	}
 }
 
@@ -797,6 +819,105 @@ func TestSendSingleItem_PushRespectsBudget(t *testing.T) {
 	// Second push (the media send) is over budget.
 	if err := p.checkSendQuota(ctx, sendPathPush); err == nil {
 		t.Fatal("second push (media) should be blocked (budget exhausted)")
+	}
+	if got := PushBudgetExceededTotal(); got != 1 {
+		t.Fatalf("push budget counter = %d, want 1", got)
+	}
+}
+
+// newBudgetTestPlatform builds a Platform the way the config loader does (default
+// burst_limit / burst_window_secs) against a fake ilink gateway, and counts the
+// sendmessage requests that reach it.
+func newBudgetTestPlatform(t *testing.T) (*Platform, *atomic.Int32) {
+	t.Helper()
+	resetPushBudgetExceededCounter()
+	var sendCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/ilink/bot/sendmessage") {
+			sendCalls.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ret":0}`))
+	}))
+	t.Cleanup(srv.Close)
+	p, err := New(map[string]any{"token": "t", "base_url": srv.URL})
+	if err != nil {
+		t.Fatalf("New error = %v", err)
+	}
+	return p.(*Platform), &sendCalls
+}
+
+// inboundText delivers one user text message through dispatchInbound and
+// returns the core.Message the engine would receive.
+func inboundText(t *testing.T, p *Platform, from string, id int64, text string) *core.Message {
+	t.Helper()
+	var got *core.Message
+	p.dispatchInbound(context.Background(), &weixinMessage{
+		MessageType:  messageTypeUser,
+		FromUserID:   from,
+		MessageID:    id,
+		CreateTimeMs: time.Now().UnixMilli(),
+		ContextToken: fmt.Sprintf("ctx-%d", id),
+		ItemList:     []messageItem{{Type: messageItemText, TextItem: &textItem{Text: text}}},
+	}, func(_ core.Platform, m *core.Message) { got = m })
+	if got == nil {
+		t.Fatalf("message %d did not reach the handler", id)
+	}
+	return got
+}
+
+// TestSend_TurnRepliesBypassPushBudget is the regression test for #1937: the
+// engine delivers each turn's answer with Platform.Send and the reply context of
+// the inbound message (core/engine.go sendAlreadyRenderedWithError), not with
+// Platform.Reply. Before the fix every such answer was charged to the push
+// budget, so with the default burst_limit = 4 the fifth answer of an ordinary
+// question-and-answer chat failed with "push budget exhausted".
+func TestSend_TurnRepliesBypassPushBudget(t *testing.T) {
+	p, sendCalls := newBudgetTestPlatform(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const rounds = 8 // twice the default burst_limit
+	for i := 1; i <= rounds; i++ {
+		msg := inboundText(t, p, "user-1", int64(i), fmt.Sprintf("question %d", i))
+		if err := p.Send(ctx, msg.ReplyCtx, fmt.Sprintf("answer %d", i)); err != nil {
+			t.Fatalf("round %d: answer to the user's message was not sent: %v", i, err)
+		}
+	}
+	if got := sendCalls.Load(); got != rounds {
+		t.Fatalf("sendmessage calls = %d, want %d (one per answer)", got, rounds)
+	}
+	if got := PushBudgetExceededTotal(); got != 0 {
+		t.Fatalf("push budget counter = %d, want 0 (answers to user messages are replies)", got)
+	}
+}
+
+// TestSend_ReconstructedReplyCtxStillCountsAsPush guards the other half: cron,
+// timer and relay sends rebuild their reply context from the stored
+// context_token (ReconstructReplyCtx). Those are proactive pushes and must stay
+// on the push budget, which is what protects the bot from ilink's ret=-2
+// throttle (#1643).
+func TestSend_ReconstructedReplyCtxStillCountsAsPush(t *testing.T) {
+	p, sendCalls := newBudgetTestPlatform(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	msg := inboundText(t, p, "user-1", 1, "hello")
+	rc, err := p.ReconstructReplyCtx(msg.SessionKey)
+	if err != nil {
+		t.Fatalf("ReconstructReplyCtx error = %v", err)
+	}
+	for i := 1; i <= defaultBurstLimit; i++ {
+		if err := p.Send(ctx, rc, fmt.Sprintf("push %d", i)); err != nil {
+			t.Fatalf("push %d of %d was blocked early: %v", i, defaultBurstLimit, err)
+		}
+	}
+	err = p.Send(ctx, rc, "one push too many")
+	if err == nil || !strings.Contains(err.Error(), "push budget exhausted") {
+		t.Fatalf("push %d error = %v, want push budget exhausted", defaultBurstLimit+1, err)
+	}
+	if got := sendCalls.Load(); got != defaultBurstLimit {
+		t.Fatalf("sendmessage calls = %d, want %d (the over-budget push must not reach the API)", got, defaultBurstLimit)
 	}
 	if got := PushBudgetExceededTotal(); got != 1 {
 		t.Fatalf("push budget counter = %d, want 1", got)

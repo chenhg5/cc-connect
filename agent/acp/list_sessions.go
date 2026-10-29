@@ -46,7 +46,8 @@ type acpInitializeResult struct {
 		SessionCapabilities struct {
 			// ACP advertises capabilities as objects (possibly empty);
 			// treat "field present" as "supported" regardless of contents.
-			List json.RawMessage `json:"list,omitempty"`
+			List   json.RawMessage `json:"list,omitempty"`
+			Resume json.RawMessage `json:"resume,omitempty"`
 		} `json:"sessionCapabilities"`
 	} `json:"agentCapabilities"`
 }

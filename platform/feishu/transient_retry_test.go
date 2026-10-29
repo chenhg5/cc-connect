@@ -41,6 +41,9 @@ func TestIsTransientError(t *testing.T) {
 		{name: "syscall EPIPE", err: fmt.Errorf("write tcp: %w", syscall.EPIPE), want: true},
 		{name: "rate limited", err: fmt.Errorf("feishu: reply failed code=230001 msg=rate limited"), want: false},
 		{name: "invalid token", err: fmt.Errorf("feishu: reply failed code=99991663"), want: false},
+		{name: "card internal error", err: classifyFeishuCardAPIError("patch message", 2200, "Internal Error"), want: true},
+		{name: "wrapped card internal error", err: fmt.Errorf("update: %w", classifyFeishuCardAPIError("patch message", 2200, "Internal Error")), want: true},
+		{name: "card validation error", err: classifyFeishuCardAPIError("patch message", 230099, "invalid content"), want: false},
 		{name: "generic error", err: fmt.Errorf("something went wrong"), want: false},
 	}
 	for _, tt := range tests {
@@ -519,5 +522,54 @@ func TestWithTransientRetry_BackoffTiming(t *testing.T) {
 	}
 	if elapsed > 10*time.Second {
 		t.Fatalf("elapsed = %v, backoff took unreasonably long", elapsed)
+	}
+}
+
+func TestPatchMessageRetriesInternalServerError(t *testing.T) {
+	originalDelay := transientRetryInitial
+	transientRetryInitial = time.Millisecond
+	t.Cleanup(func() { transientRetryInitial = originalDelay })
+	for _, tt := range []struct {
+		name      string
+		code      int
+		failures  int32
+		wantCalls int32
+		wantErr   bool
+	}{
+		{name: "recovers", code: 2200, failures: 1, wantCalls: 2},
+		{name: "bounded", code: 2200, failures: 100, wantCalls: 4, wantErr: true},
+		{name: "permanent", code: 230001, failures: 100, wantCalls: 1, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+					writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "test-token"})
+					return
+				}
+				if r.Method != http.MethodPatch || !strings.Contains(r.URL.Path, "/messages/") {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				if calls.Add(1) <= tt.failures {
+					writeJSON(t, w, map[string]any{"code": tt.code, "msg": "Internal Error"})
+					return
+				}
+				writeJSON(t, w, map[string]any{"code": 0})
+			}))
+			defer srv.Close()
+			appID := "cli_patch_internal_" + tt.name
+			p := &Platform{
+				platformName: "feishu", appID: appID, appSecret: "test-secret", domain: srv.URL,
+				useInteractiveCard: true,
+				client:             lark.NewClient(appID, "test-secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+			}
+			err := p.UpdateMessage(context.Background(), &feishuPreviewHandle{messageID: "om_existing_card"}, "latest progress")
+			if (err != nil) != tt.wantErr || calls.Load() != tt.wantCalls {
+				t.Fatalf("error = %v, calls = %d; want error %v and calls %d", err, calls.Load(), tt.wantErr, tt.wantCalls)
+			}
+		})
 	}
 }

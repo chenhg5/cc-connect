@@ -236,11 +236,13 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 				sessionKey := p.buildSessionKey(ev.Channel, ev.User, threadTS)
 
 				var shareFiles []slackevents.File
+				var richExtra string
 				if cb, ok := data.Data.(*slackevents.EventsAPICallbackEvent); ok {
 					shareFiles = parseSlackInnerEventFiles(cb.InnerEvent)
+					richExtra = extractRichContent(cb.InnerEvent, ev.TimeStamp)
 				}
 				images, audio, docFiles := p.processSlackFileShares(shareFiles)
-				content := stripAppMentionText(ev.Text)
+				content := appendRichContent(stripAppMentionText(ev.Text), richExtra)
 				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
@@ -310,7 +312,13 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 				images, audio, docFiles := p.processSlackFileShares(ev.Files)
 
-				if ev.Text == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
+				var richExtra string
+				if cb, ok := data.Data.(*slackevents.EventsAPICallbackEvent); ok {
+					richExtra = extractRichContent(cb.InnerEvent, ev.TimeStamp)
+				}
+				text := appendRichContent(ev.Text, richExtra)
+
+				if text == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
 
@@ -318,7 +326,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
 					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
+					Content:  text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
 					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS, msgTS: ts},
 				}
