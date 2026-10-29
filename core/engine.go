@@ -552,7 +552,9 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
-	agentSession AgentSession
+	goalMu           sync.Mutex // serializes explicit native-goal commands
+	goalSessionStore *SessionManager
+	agentSession     AgentSession
 	// busySession is the core.Session whose busy lock guards the in-flight
 	// turn. Set by getOrCreateInteractiveStateWith so /stop can release the
 	// lock after tearing the turn down (#1830).
@@ -2484,6 +2486,7 @@ func (e *Engine) onPlatformReady(p Platform) {
 	}
 	slog.Info("platform ready", "project", e.name, "platform", p.Name())
 	e.initPlatformCapabilities(p)
+	go e.restoreNativeGoals(p)
 }
 
 func (e *Engine) markPlatformReady(p Platform) bool {
@@ -4323,6 +4326,11 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
 func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+	return e.getOrCreateInteractiveStateWithResumePolicy(sessionKey, p, replyCtx, session, sessions, agentOverride, ccSessionKey, true)
+}
+
+// Native goal operations must preserve the saved thread when resuming fails.
+func (e *Engine) getOrCreateInteractiveStateWithResumePolicy(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, allowFresh bool) *interactiveState {
 	// /stop removes the state from the map immediately but tears the process
 	// down in the background. Wait that teardown out *before* taking the lock:
 	// spawning now would start a second process on the same agent session ID
@@ -4437,7 +4445,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// cc-connect project that happens to share a Session row), the agent
 	// can detect the mismatch and we should clear the ID rather than
 	// resume a conversation that has nothing to do with this project.
-	if startSessionID != "" {
+	if startSessionID != "" && allowFresh {
 		if validator, ok := agent.(SessionIDValidator); ok && !validator.ValidateSessionID(e.ctx, startSessionID) {
 			slog.Warn("session ID does not belong to this project, clearing it",
 				"session_key", sessionKey, "invalid_session_id", startSessionID)
@@ -4451,6 +4459,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Starting fresh loses this conversation's history, but resuming would put
 	// two live agents on one transcript — both replying, both calling tools.
 	if startSessionID != "" && (!closeSettled || e.consumeUnsafeResume(sessionKey)) {
+		if !allowFresh {
+			e.send(p, replyCtx, e.i18n.T(MsgSessionResumeUnsafe))
+			return &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, busySession: session}
+		}
 		slog.Warn("previous agent process not confirmed dead, starting a fresh session instead of resuming",
 			"session_key", sessionKey, "abandoned_session_id", startSessionID)
 		session.SetAgentSessionID("", agent.Name())
@@ -4465,7 +4477,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
-		if startSessionID != "" {
+		if startSessionID != "" && allowFresh {
 			slog.Error("session resume failed, falling back to fresh session",
 				"session_key", sessionKey, "failed_session_id", startSessionID,
 				"error", err, "elapsed", startElapsed)
@@ -4660,6 +4672,7 @@ func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interac
 	if state.stopped ||
 		state.agentSession == nil ||
 		!state.agentSession.Alive() ||
+		activeSessionGoal(state.agentSession) ||
 		state.eventsNeedResync ||
 		state.pending != nil ||
 		state.pendingUserInput != nil ||
@@ -4694,10 +4707,14 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 	}
 
 	var agentSession AgentSession
+	// Turns arm the timer before unlocking; check busy at expiry so a late
+	// timer cannot close a following turn.
 	state.mu.Lock()
 	if state.agentSessionIdleToken != token ||
 		state.agentSession == nil ||
 		!state.agentSession.Alive() ||
+		(state.busySession != nil && state.busySession.Busy()) ||
+		activeSessionGoal(state.agentSession) ||
 		state.stopped ||
 		state.eventsNeedResync ||
 		state.pending != nil ||
@@ -5179,6 +5196,10 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			default:
 			}
 
+			if event.Type == EventGoal {
+				e.relayGoalEvent(state, session, sessions, event)
+				continue
+			}
 			// Mark workspace active on first event.
 			if !turnActive {
 				turnActive = true
@@ -5611,6 +5632,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			state.mu.Unlock()
 			return
+		}
+
+		if event.Type == EventGoal {
+			e.relayGoalEvent(state, session, sessions, event)
+			continue
 		}
 
 		// Reset idle timer after receiving an event
@@ -7057,6 +7083,7 @@ var builtinCommands = []struct {
 	{[]string{"timer", "at", "remind"}, "timer"},
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
 	{[]string{"compress", "compact"}, "compress"},
+	{[]string{"goal"}, "goal"},
 	{[]string{"stop"}, "stop"},
 	{[]string{"cancel"}, "cancel"},
 	{[]string{"help"}, "help"},
@@ -7236,6 +7263,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 	}
 
 	switch cmdID {
+	case "goal":
+		go e.cmdGoal(p, msg, args)
 	case "new":
 		e.cmdNew(p, msg, args)
 	case "list":
@@ -10132,6 +10161,7 @@ func helpCardGroups() []helpCardGroup {
 				{command: "/alias", action: "nav:/alias"},
 				{command: "/skills", action: "nav:/skills"},
 				{command: "/compress", action: "cmd:/compress"},
+				{command: "/goal", action: "cmd:/goal"},
 				{command: "/stop", action: "act:/stop"},
 				{command: "/ps", action: "cmd:/ps"},
 			},
@@ -10938,6 +10968,24 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		e.interactiveMu.Unlock()
 		return false
 	}
+	state.mu.Lock()
+	stoppingSession := state.busySession
+	state.mu.Unlock()
+	if stoppingSession != nil {
+		stoppingSession.mu.Lock()
+		stoppingSession.goalStopGeneration++
+		stoppingSession.mu.Unlock()
+	}
+	// A pending Goal mutation must finish before cancellation. Release the
+	// engine lock while waiting, then verify this is still the same state.
+	e.interactiveMu.Unlock()
+	state.goalMu.Lock()
+	defer state.goalMu.Unlock()
+	e.interactiveMu.Lock()
+	if e.interactiveStates[sessionKey] != state {
+		e.interactiveMu.Unlock()
+		return true
+	}
 
 	// Stop unsolicited reader before touching state to avoid races.
 	e.stopUnsolicitedReader(state)
@@ -10977,10 +11025,30 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		state.mu.Unlock()
 
 		cancelErr := canceller.CancelTurn()
+		state.mu.Lock()
+		goalStore, goalSession := state.goalSessionStore, state.busySession
+		state.mu.Unlock()
+		if cancelErr == nil {
+			if goalStore != nil && goalSession != nil {
+				goalSession.SetResumeGoal(false)
+				goalStore.Save()
+			}
+		}
 		if cancelErr != nil {
 			slog.Warn("agent session CancelTurn failed, falling back to Close",
 				"session_key", sessionKey, "error", cancelErr)
-			// Fall through to normal cleanup below.
+			if goalStore != nil && goalSession != nil {
+				goalSession.SetResumeGoal(false)
+				goalStore.Save()
+				e.send(closePlatform, closeReplyCtx, e.i18n.Tf(MsgGoalError, cancelErr))
+			}
+			// Cancellation ran outside interactiveMu. Do not remove a newer
+			// state if a concurrent session switch replaced this one.
+			e.interactiveMu.Lock()
+			if e.interactiveStates[sessionKey] != state {
+				e.interactiveMu.Unlock()
+				return true
+			}
 			goto normalCleanup
 		}
 

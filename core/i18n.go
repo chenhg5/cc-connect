@@ -555,6 +555,13 @@ const (
 	MsgRateLimited       MsgKey = "rate_limited"
 	MsgPsSent            MsgKey = "ps_sent"
 	MsgPsSendFailed      MsgKey = "ps_send_failed"
+	MsgGoalUsage         MsgKey = "goal_usage"
+	MsgGoalUnsupported   MsgKey = "goal_unsupported"
+	MsgGoalError         MsgKey = "goal_error"
+	MsgGoalCleared       MsgKey = "goal_cleared"
+	MsgGoalNone          MsgKey = "goal_none"
+	MsgGoalUnlimited     MsgKey = "goal_unlimited"
+	MsgGoalStatus        MsgKey = "goal_status"
 	MsgPsEmpty           MsgKey = "ps_empty"
 	MsgPsNoSession       MsgKey = "ps_no_session"
 
@@ -605,6 +612,7 @@ const (
 	MsgBuiltinCmdMode      MsgKey = "mode"
 	MsgBuiltinCmdLang      MsgKey = "lang"
 	MsgBuiltinCmdQuiet     MsgKey = "quiet"
+	MsgBuiltinCmdGoal      MsgKey = "goal"
 	MsgBuiltinCmdCompress  MsgKey = "compress"
 	MsgBuiltinCmdStop      MsgKey = "stop"
 	MsgBuiltinCmdCron      MsgKey = "cron"
@@ -1059,6 +1067,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/mode [name]\n  View/switch permission mode\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  View/switch language\n\n" +
 			"/compress\n  Compress conversation context\n\n" +
+			"/goal [set|edit|show|pause|resume|clear|budget]\n  Manage native goals\n\n" +
 			"/tts [always|voice_only]\n  View/switch text-to-speech mode\n\n" +
 			"/shell [--timeout <sec>] <command>\n  Run a shell command and return the output (! prefix shortcut: !cmd)\n\n" +
 			"/show <ref>\n  View a file, directory, or code snippet by reference\n\n" +
@@ -1103,6 +1112,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/mode [名称]\n  查看/切换权限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切换语言\n\n" +
 			"/compress\n  压缩会话上下文\n\n" +
+			"/goal [set|edit|show|pause|resume|clear|budget]\n  管理原生 Goal\n\n" +
 			"/tts [always|voice_only]\n  查看/切换语音合成模式\n\n" +
 			"/shell [--timeout <秒>] <命令>\n  执行 Shell 命令并返回结果（快捷方式：!命令）\n\n" +
 			"/show <引用>\n  按引用查看文件、目录或代码片段\n\n" +
@@ -1147,6 +1157,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/mode [名稱]\n  查看/切換權限模式\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  查看/切換語言\n\n" +
 			"/compress\n  壓縮會話上下文\n\n" +
+			"/goal [set|edit|show|pause|resume|clear|budget]\n  管理原生 Goal\n\n" +
 			"/tts [always|voice_only]\n  查看/切換語音合成模式\n\n" +
 			"/shell [--timeout <秒>] <命令>\n  執行 Shell 命令並返回結果（快捷方式：!命令）\n\n" +
 			"/dir [路徑|reset]\n  查看、切換或重置 Agent 工作目錄\n\n" +
@@ -1189,6 +1200,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/mode [名前]\n  権限モードの表示/切り替え\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  言語の表示/切り替え\n\n" +
 			"/compress\n  会話コンテキストを圧縮\n\n" +
+			"/goal [set|edit|show|pause|resume|clear|budget]\n  ネイティブ Goal の管理\n\n" +
 			"/tts [always|voice_only]\n  音声合成モードの表示/切り替え\n\n" +
 			"/shell [--timeout <秒>] <コマンド>\n  シェルコマンドを実行して結果を返す（ショートカット：!コマンド）\n\n" +
 			"/dir [パス|reset]\n  エージェントの作業ディレクトリを表示/切り替え/リセット\n\n" +
@@ -1231,6 +1243,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/mode [nombre]\n  Ver/cambiar modo de permisos\n\n" +
 			"/lang [en|zh|zh-TW|ja|es|auto]\n  Ver/cambiar idioma\n\n" +
 			"/compress\n  Comprimir contexto de conversación\n\n" +
+			"/goal [set|edit|show|pause|resume|clear|budget]\n  Gestionar objetivos nativos\n\n" +
 			"/tts [always|voice_only]\n  Ver/cambiar modo de síntesis de voz\n\n" +
 			"/shell [--timeout <seg>] <comando>\n  Ejecutar un comando shell y devolver la salida (atajo: !comando)\n\n" +
 			"/dir [ruta|reset]\n  Ver, cambiar o restablecer el directorio de trabajo del agente\n\n" +
@@ -1360,6 +1373,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — Command aliases\n" +
 			"/skills — List agent skills\n" +
 			"/compress — Compress context\n" +
+			"/goal [set|edit|show|pause|resume|clear|budget] — Manage native goals\n" +
 			"/stop — Stop current execution",
 		LangChinese: "**工具与自动化**\n" +
 			"/shell <命令> — 执行 Shell 命令（!快捷方式）\n" +
@@ -1371,6 +1385,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — 命令别名\n" +
 			"/skills — 列出 Agent Skills\n" +
 			"/compress — 压缩上下文\n" +
+			"/goal [set|edit|show|pause|resume|clear|budget] — 管理原生 Goal\n" +
 			"/stop — 停止当前执行",
 		LangTraditionalChinese: "**工具與自動化**\n" +
 			"/shell <命令> — 執行 Shell 命令（!快捷方式）\n" +
@@ -1382,6 +1397,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — 命令別名\n" +
 			"/skills — 列出 Agent Skills\n" +
 			"/compress — 壓縮上下文\n" +
+			"/goal [set|edit|show|pause|resume|clear|budget] — 管理原生 Goal\n" +
 			"/stop — 停止當前執行",
 		LangJapanese: "**ツール・自動化**\n" +
 			"/shell <コマンド> — シェルコマンド実行（!ショートカット）\n" +
@@ -1393,6 +1409,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — コマンドエイリアス\n" +
 			"/skills — エージェントスキル一覧\n" +
 			"/compress — コンテキスト圧縮\n" +
+			"/goal [set|edit|show|pause|resume|clear|budget] — ネイティブ Goal の管理\n" +
 			"/stop — 現在の実行を停止",
 		LangSpanish: "**Herramientas y automatización**\n" +
 			"/shell <comando> — Ejecutar comando shell (! atajo)\n" +
@@ -1404,6 +1421,7 @@ var messages = map[MsgKey]map[Language]string{
 			"/alias [add|del] — Alias de comandos\n" +
 			"/skills — Listar skills del agente\n" +
 			"/compress — Comprimir contexto\n" +
+			"/goal [set|edit|show|pause|resume|clear|budget] — Gestionar objetivos nativos\n" +
 			"/stop — Detener ejecución actual",
 	},
 	MsgHelpSystemSection: {
@@ -3460,6 +3478,55 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "❌ P.S. の送信に失敗しました。",
 		LangSpanish:            "❌ Error al entregar el P.S.",
 	},
+	MsgGoalUsage: {
+		LangEnglish:            "Usage: /goal [set <objective> [--budget N] | edit <objective> | show | pause | resume | clear | budget <N|none>] (objective: 1–4000 characters; budget: positive tokens).",
+		LangChinese:            "用法：/goal [set <目标> [--budget N] | edit <目标> | show | pause | resume | clear | budget <N|none>]（目标 1–4000 字；预算为正整数 token）。",
+		LangTraditionalChinese: "用法：/goal [set <目標> [--budget N] | edit <目標> | show | pause | resume | clear | budget <N|none>]（目標 1–4000 字；預算為正整數 token）。",
+		LangJapanese:           "使い方: /goal [set <目標> [--budget N] | edit <目標> | show | pause | resume | clear | budget <N|none>]（目標 1–4000 文字、予算は正のトークン数）。",
+		LangSpanish:            "Uso: /goal [set <objetivo> [--budget N] | edit <objetivo> | show | pause | resume | clear | budget <N|none>] (1–4000 caracteres; presupuesto positivo).",
+	},
+	MsgGoalUnsupported: {
+		LangEnglish:            "Native goals are unavailable on this agent backend. Use a compatible agent with backend = \"app_server\".",
+		LangChinese:            "当前 agent 后端不支持原生 Goal。请使用兼容的 agent 并配置 backend = \"app_server\"。",
+		LangTraditionalChinese: "目前 agent 後端不支援原生 Goal。請使用相容的 agent 並設定 backend = \"app_server\"。",
+		LangJapanese:           "このバックエンドはネイティブ Goal に対応していません。対応エージェントで backend = \"app_server\" を設定してください。",
+		LangSpanish:            "Este backend no admite objetivos nativos. Utiliza un agente compatible con backend = \"app_server\".",
+	},
+	MsgGoalError: {
+		LangEnglish:            "Goal operation failed: %v",
+		LangChinese:            "Goal 操作失败：%v",
+		LangTraditionalChinese: "Goal 操作失敗：%v",
+		LangJapanese:           "Goal 操作に失敗しました: %v",
+		LangSpanish:            "Error al gestionar el objetivo: %v",
+	},
+	MsgGoalCleared: {
+		LangEnglish:            "Goal cleared.",
+		LangChinese:            "Goal 已清除。",
+		LangTraditionalChinese: "Goal 已清除。",
+		LangJapanese:           "Goal を削除しました。",
+		LangSpanish:            "Objetivo eliminado.",
+	},
+	MsgGoalNone: {
+		LangEnglish:            "No Goal is set. Use /goal set <objective> [--budget N].",
+		LangChinese:            "当前没有 Goal。使用 /goal set <目标> [--budget N] 设置。",
+		LangTraditionalChinese: "目前沒有 Goal。使用 /goal set <目標> [--budget N] 設定。",
+		LangJapanese:           "Goal はありません。/goal set <目標> [--budget N] で設定できます。",
+		LangSpanish:            "No hay objetivo. Usa /goal set <objetivo> [--budget N].",
+	},
+	MsgGoalUnlimited: {
+		LangEnglish:            "unlimited",
+		LangChinese:            "不限",
+		LangTraditionalChinese: "不限",
+		LangJapanese:           "無制限",
+		LangSpanish:            "sin límite",
+	},
+	MsgGoalStatus: {
+		LangEnglish:            "Goal: %s\n%s\nTokens: %d / %s · Elapsed: %d s",
+		LangChinese:            "Goal：%s\n%s\nToken：%d / %s · 已用时：%d 秒",
+		LangTraditionalChinese: "Goal：%s\n%s\nToken：%d / %s · 已用時：%d 秒",
+		LangJapanese:           "Goal: %s\n%s\nトークン: %d / %s · 経過: %d 秒",
+		LangSpanish:            "Objetivo: %s\n%s\nTokens: %d / %s · Tiempo: %d s",
+	},
 	MsgPsEmpty: {
 		LangEnglish:            "Usage: `/ps <message>`",
 		LangChinese:            "用法：`/ps <消息>`",
@@ -3758,6 +3825,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "開關思考和工具進度訊息, 參數: [global]",
 		LangJapanese:           "思考/ツール進捗メッセージの表示切替, 引数: [global]",
 		LangSpanish:            "Alternar mensajes de progreso, arg: [global]",
+	},
+	MsgBuiltinCmdGoal: {
+		LangEnglish:            "Manage native goals: set/edit/show/pause/resume/clear/budget",
+		LangChinese:            "管理原生 Goal：设置/编辑/查看/暂停/恢复/清除/预算",
+		LangTraditionalChinese: "管理原生 Goal：設定/編輯/查看/暫停/恢復/清除/預算",
+		LangJapanese:           "ネイティブ Goal の設定・編集・表示・停止・再開・削除・予算",
+		LangSpanish:            "Gestionar objetivos nativos: crear/editar/ver/pausar/reanudar/eliminar/presupuesto",
 	},
 	MsgBuiltinCmdCompress: {
 		LangEnglish:            "Compress conversation context",
