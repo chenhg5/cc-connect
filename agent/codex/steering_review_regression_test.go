@@ -40,7 +40,11 @@ func TestSteeringReview_InFlightWriteTimeoutRemainsUnknown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := newBlockingWriteCloser()
-	defer w.Close()
+	t.Cleanup(func() {
+		if err := w.Close(); err != nil {
+			t.Errorf("close blocking writer: %v", err)
+		}
+	})
 	s := &appServerSession{ctx: ctx, cancel: cancel, stdin: w, currentTurn: "turn"}
 	s.threadID.Store("thread")
 	_, err := s.steerUserInput("answer", 25*time.Millisecond)
