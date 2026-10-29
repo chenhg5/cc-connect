@@ -136,17 +136,18 @@ type Platform struct {
 	threadIsolation            bool
 	groupChatHistoryShare      bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
-	noReplyToTrigger bool
-	resolveMentions  bool
-	client           *lark.Client
-	replayClient     *lark.Client
-	replayClientMu   sync.Mutex
-	wsClient         *larkws.Client
-	handler          core.MessageHandler
-	cardNavHandler   core.CardNavigationHandler
-	cancel           context.CancelFunc
-	dedup            *core.MessageDedup
-	botOpenID        string
+	noReplyToTrigger   bool
+	resolveMentions    bool
+	client             *lark.Client
+	replayClient       *lark.Client
+	replayClientMu     sync.Mutex
+	wsClient           *larkws.Client
+	handler            core.MessageHandler
+	cardNavHandler     core.CardNavigationHandler
+	asyncQuestionOwner func(string, string) bool
+	cancel             context.CancelFunc
+	dedup              *core.MessageDedup
+	botOpenID          string
 	// groupFilterDegraded is true when bot open_id discovery failed at startup
 	// (e.g. transient network/DNS/proxy outage). When true, group chat mention
 	// filtering fails closed (silently drops group messages without @bot) instead
@@ -643,18 +644,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 			return nil // ignore reaction removal events (triggered by our own removeReaction)
 		}).
 		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
-			// Fan out card actions: try each platform, return first non-nil response.
-			// Each platform's onCardAction checks allow_chat before processing.
-			for _, sibling := range p.sharedGroup.allPlatforms() {
-				resp, err := sibling.onCardAction(event)
-				if err != nil {
-					return nil, err
-				}
-				if resp != nil {
-					return resp, nil
-				}
-			}
-			return nil, nil
+			return p.dispatchSharedCardAction(event)
 		}).
 		OnP2BotMenuV6(func(ctx context.Context, event *larkapplication.P2BotMenuV6) error {
 			for _, sibling := range p.sharedGroup.allPlatforms() {
@@ -928,6 +918,45 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				Data: renderCardMap(cb.Build(), sessionKey),
 			},
 		}, nil
+	}
+
+	// Core validates the question and updates this exact message after delivery.
+	// Returning an optimistic success card races rejection and idle continuation.
+	if strings.HasPrefix(actionVal, "askq:") && len(strings.Split(actionVal, ":")) == 4 {
+		p.mu.RLock()
+		owns := p.asyncQuestionOwner
+		p.mu.RUnlock()
+		if p.sharedGroup != nil && len(p.sharedGroup.allPlatforms()) > 1 && (owns == nil || !owns(sessionKey, strings.Split(actionVal, ":")[1])) {
+			return nil, nil
+		}
+		p.cardActionMsgMu.Lock()
+		if p.cardActionMsgIDs == nil {
+			p.cardActionMsgIDs = make(map[string]string)
+		}
+		p.cardActionMsgIDs[sessionKey] = messageID
+		p.cardActionMsgMu.Unlock()
+		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		go p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey, Platform: p.platformName, UserID: userID,
+			UserName: p.resolveUserName(userID), ChatName: p.resolveChatName(chatID),
+			Content: actionVal, ReplyCtx: rctx,
+			OnAnswerStatus: func(card *core.Card) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := p.refreshQuestionCard(ctx, messageID, sessionKey, card); err != nil {
+					slog.Warn(p.tag()+": update question card failed", "error", err)
+					// Use a fresh deadline: a timed-out patch must not also
+					// cancel the only remaining user-visible feedback route.
+					fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer fallbackCancel()
+					msgType, body := buildReplyContent(card.RenderText())
+					if replyErr := p.createMessage(fallbackCtx, chatID, msgType, body, "answer feedback fallback"); replyErr != nil {
+						slog.Error(p.tag()+": answer feedback fallback failed", "error", replyErr)
+					}
+				}
+			},
+		})
+		return &callback.CardActionTriggerResponse{}, nil
 	}
 
 	// askq: — AskUserQuestion option selected, forward as user message
@@ -7587,4 +7616,25 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	if !resp.Success() {
 		slog.Debug("feishu: set preview status patch failed", "code", resp.Code, "msg", resp.Msg)
 	}
+}
+
+func (p *Platform) dispatchSharedCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+	// Fan out card actions: try each platform, return first non-nil response.
+	// Each platform's onCardAction checks allow_chat before processing.
+	for _, sibling := range p.sharedGroup.allPlatforms() {
+		resp, err := sibling.onCardAction(event)
+		if err != nil {
+			return nil, err
+		}
+		if resp != nil {
+			return resp, nil
+		}
+	}
+	return nil, nil
+}
+
+func (p *Platform) SetAsyncQuestionOwner(owns func(string, string) bool) {
+	p.mu.Lock()
+	p.asyncQuestionOwner = owns
+	p.mu.Unlock()
 }

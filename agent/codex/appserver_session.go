@@ -20,9 +20,10 @@ import (
 )
 
 type rpcResponseEnvelope struct {
-	ID     any             `json:"id"`
-	Result json.RawMessage `json:"result"`
-	Error  *rpcError       `json:"error"`
+	ID           any             `json:"id"`
+	Result       json.RawMessage `json:"result"`
+	Error        *rpcError       `json:"error"`
+	transportErr error
 }
 
 type rpcNotificationEnvelope struct {
@@ -34,6 +35,8 @@ type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
+
+func (e *rpcError) Error() string { return strings.TrimSpace(e.Message) }
 
 type initResponse struct {
 	ProtocolVersion string `json:"protocolVersion"`
@@ -180,6 +183,7 @@ type appServerSession struct {
 	wg        sync.WaitGroup
 	readDone  chan struct{} // drain stdout before cmd.Wait closes its pipe
 
+	steerMu      sync.Mutex // Serializes steerUserInput calls, including engine-routed async answers.
 	stateMu      sync.Mutex
 	pendingMsgs  []string
 	currentTurn  string
@@ -1733,7 +1737,7 @@ func (s *appServerSession) rejectPending(err error) {
 	for id, ch := range s.pending {
 		delete(s.pending, id)
 		select {
-		case ch <- rpcResponseEnvelope{ID: id, Error: &rpcError{Message: err.Error()}}:
+		case ch <- rpcResponseEnvelope{ID: id, transportErr: err}:
 		default:
 		}
 	}
@@ -1753,6 +1757,11 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	}
 	s.pending[id] = ch
 	s.pendingMu.Unlock()
+	defer func() {
+		s.pendingMu.Lock()
+		delete(s.pending, id)
+		s.pendingMu.Unlock()
+	}()
 
 	payload := map[string]any{
 		"jsonrpc": "2.0",
@@ -1781,8 +1790,11 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	ctxDone := s.contextDone()
 	select {
 	case resp := <-ch:
+		if resp.transportErr != nil {
+			return resp.transportErr
+		}
 		if resp.Error != nil {
-			return fmt.Errorf("%s", strings.TrimSpace(resp.Error.Message))
+			return resp.Error
 		}
 		if out != nil {
 			if err := json.Unmarshal(resp.Result, out); err != nil {
@@ -1871,20 +1883,36 @@ func (s *appServerSession) notify(method string, params any) error {
 func (s *appServerSession) writeJSON(v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("codex app-server encode: %w", err)
+		return &requestNotWrittenError{err: fmt.Errorf("codex app-server encode: %w", err)}
 	}
 
 	s.procMu.Lock()
 	stdin := s.stdin
 	s.procMu.Unlock()
 	if stdin == nil {
-		return fmt.Errorf("codex app-server connection is closed")
+		return &requestNotWrittenError{err: fmt.Errorf("codex app-server connection is closed")}
 	}
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if _, err := stdin.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("codex app-server write: %w", err)
+	payload := append(b, '\n')
+	n, err := stdin.Write(payload)
+	if err == nil && n != len(payload) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		err = fmt.Errorf("codex app-server write: %w", err)
+		if n == 0 {
+			return &requestNotWrittenError{err: err}
+		}
+		return err
 	}
 	return nil
 }
+
+// This error requires positive evidence that no request bytes were written.
+// A timeout while Write is in flight is deliberately NOT classified this way.
+type requestNotWrittenError struct{ err error }
+
+func (e *requestNotWrittenError) Error() string { return e.err.Error() }
+func (e *requestNotWrittenError) Unwrap() error { return e.err }
