@@ -239,7 +239,7 @@ cc-connect 已支持 Kimi CLI。立即体验 **Kimi Code 订阅**（[中文站](
 ## ✨ 为什么选择 cc-connect？
 
 ### 🤖 通用 Agent 支持
-**10+ 大 AI Agent** — Claude Code、Codex、Cursor Agent、Kimi CLI、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI、Pi、Devin、Copilot，还可通过 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents) 接入更多 Agent。按需选用，或同时使用全部。
+**10+ 大 AI Agent** — Claude Code、Codex、Cursor Agent、Droid、Kimi CLI、Qoder CLI、Gemini CLI、OpenCode、iFlow CLI、Pi、Devin、Copilot，还可通过 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/get-started/agents) 接入更多 Agent。按需选用，或同时使用全部。
 
 ### 📱 平台灵活性
 **13 大聊天平台** — 飞书、WPS 协作、钉钉、Slack、Telegram、Discord、企业微信、微博、LINE、QQ、QQ 官方机器人、Matrix，以及 **微信个人号（ilink）**。大部分平台**无需公网 IP**。
@@ -452,6 +452,7 @@ cc-connect update --pre     # 含预发布版本
 | Agent | Claude Code | ✅ 已支持 |
 | Agent | Codex (OpenAI) | ✅ 已支持 |
 | Agent | Cursor Agent | ✅ 已支持 |
+| Agent | Droid | ✅ 已支持 |
 | Agent | Gemini CLI (Google) | ✅ 已支持 |
 | Agent | Qoder CLI | ✅ 已支持 |
 | Agent | OpenCode (Crush) | ✅ 已支持 |
