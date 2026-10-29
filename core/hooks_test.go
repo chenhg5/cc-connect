@@ -549,3 +549,50 @@ func TestEmit_TimestampAutoFilled(t *testing.T) {
 		t.Errorf("expected auto-filled timestamp >= %v, got %v", before, receivedTime)
 	}
 }
+
+func TestNeedsChangedFingerprint(t *testing.T) {
+	cases := []struct {
+		name  string
+		hooks []HookConfig
+		want  bool
+	}{
+		{name: "no hooks", want: false},
+		{
+			name:  "finalized command hook ignoring the flag",
+			hooks: []HookConfig{{Event: "message.finalized", Type: "command", Command: "echo done"}},
+			want:  false,
+		},
+		{
+			name:  "finalized command hook reading the flag",
+			hooks: []HookConfig{{Event: "message.finalized", Type: "command", Command: "test \"$CC_HOOK_CHANGED\" = true && review"}},
+			want:  true,
+		},
+		{
+			name:  "finalized http hook receives the flag in the body",
+			hooks: []HookConfig{{Event: "message.finalized", Type: "http", URL: "http://127.0.0.1:1/hook"}},
+			want:  true,
+		},
+		{
+			name:  "wildcard command hook reading the flag",
+			hooks: []HookConfig{{Event: "*", Type: "command", Command: "echo $CC_HOOK_CHANGED"}},
+			want:  true,
+		},
+		{
+			name:  "another event reading the flag is irrelevant",
+			hooks: []HookConfig{{Event: "message.sent", Type: "command", Command: "echo $CC_HOOK_CHANGED"}},
+			want:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hm := NewHookManager("test", tc.hooks, "sh", "-c", "")
+			if got := hm.NeedsChangedFingerprint(); got != tc.want {
+				t.Fatalf("NeedsChangedFingerprint() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	var nilManager *HookManager
+	if nilManager.NeedsChangedFingerprint() {
+		t.Fatal("nil manager must not request a fingerprint")
+	}
+}

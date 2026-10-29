@@ -40,6 +40,7 @@ type opencodeSession struct {
 	expectingContinue atomic.Bool  // true when compaction received; work events clear it
 	resultSent        atomic.Bool  // true when EventResult has been sent for this turn
 	lastEvent         atomic.Int64 // unix nano of the last event received; stall watchdog input
+	activeTools       atomic.Int32 // tool calls currently executing; watchdog must not kill during one
 
 	// procMu guards stdinW and currentCmd: they point at the live process's
 	// stdin pipe and *exec.Cmd, set by launch and read by the stall watchdog.
@@ -111,6 +112,7 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	// watchdog log "killing stalled process idle=5m3s" one second after the
 	// message arrived).
 	s.lastEvent.Store(time.Now().UnixNano())
+	s.activeTools.Store(0)
 	s.usageMu.Lock()
 	s.usage = nil
 	s.usageMu.Unlock()
@@ -416,6 +418,15 @@ func (s *opencodeSession) markContinued() {
 // turn has not completed.
 const stallTimeout = 5 * time.Minute
 
+// stalledTooLong is the watchdog's kill condition. A tool call in flight is
+// work, not a stall: `npm install`, a long test run or a compile can easily
+// exceed stallTimeout without emitting a single opencode event, and killing
+// the process there aborts a healthy turn. The compaction checkpoint hang this
+// watchdog was written for happens between steps, with no tool running.
+func (s *opencodeSession) stalledTooLong(idle time.Duration) bool {
+	return idle >= stallTimeout && s.activeTools.Load() == 0
+}
+
 func (s *opencodeSession) stallWatchdog(ctx context.Context, tick time.Duration) {
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
@@ -432,7 +443,7 @@ func (s *opencodeSession) stallWatchdog(ctx context.Context, tick time.Duration)
 				continue // no events yet this turn (opencode still starting)
 			}
 			idle := time.Since(time.Unix(0, last))
-			if idle < stallTimeout {
+			if !s.stalledTooLong(idle) {
 				continue
 			}
 			s.procMu.Lock()
@@ -575,6 +586,17 @@ func (s *opencodeSession) handleToolUse(raw map[string]any) {
 
 	// Extract tool input summary for display
 	input := extractToolInput(state)
+
+	// Track in-flight tool calls for the stall watchdog: an event stream that
+	// goes quiet while a command runs is expected, not a hang.
+	switch status {
+	case "completed", "error":
+		if s.activeTools.Load() > 0 {
+			s.activeTools.Add(-1)
+		}
+	default:
+		s.activeTools.Add(1)
+	}
 
 	if status == "completed" {
 		// OpenCode bundles call + result in one event; emit both for UI.

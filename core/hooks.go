@@ -160,6 +160,34 @@ func (hm *HookManager) Emit(event HookEvent) {
 	}
 }
 
+// NeedsChangedFingerprint reports whether any configured hook can observe the
+// Changed flag of a message.finalized event: a command hook that reads
+// CC_HOOK_CHANGED, or an HTTP hook (which receives the flag in its JSON body and
+// whose consumer cannot be inspected). The engine uses this to skip the git
+// fingerprint scans entirely when no hook consumes the flag, so deployments
+// without an auto-review-style hook pay nothing per turn.
+func (hm *HookManager) NeedsChangedFingerprint() bool {
+	if hm == nil {
+		return false
+	}
+	hm.mu.RLock()
+	hooks := hm.hooks
+	hm.mu.RUnlock()
+	for i := range hooks {
+		h := &hooks[i]
+		if !matchEvent(h.Event, string(HookEventMessageFinalized)) {
+			continue
+		}
+		if HookHandlerType(h.Type) == HookHandlerHTTP {
+			return true
+		}
+		if strings.Contains(h.Command, "CC_HOOK_CHANGED") {
+			return true
+		}
+	}
+	return false
+}
+
 // matchEvent checks if a hook's event pattern matches the fired event.
 // Supports exact match and wildcard "*".
 func matchEvent(pattern, event string) bool {

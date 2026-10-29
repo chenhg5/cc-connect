@@ -1278,27 +1278,35 @@ func TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline(t *testing.T) {
 	}
 	e.interactiveStates[sessionKey] = state
 
+	gitCallLog := filepath.Join(t.TempDir(), "git-calls")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("lookpath git: %v", err)
+	}
+	shimDir := t.TempDir()
+	shim := "#!/bin/sh\nprintf 'x' >> '" + gitCallLog + "'\nexec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		e.processInteractiveEvents(state, session, e.sessions, sessionKey, "msg-1", time.Now(), nil, nil, state.replyCtx, 0)
 	}()
 
-	// Wait until the engine goroutine holds the fingerprint window lock
-	// (baseline A is sampled right after acquisition), plus a settle window for
-	// the git scan itself, so the tree change below lands strictly after A.
-	fpLock := e.workspaceFingerprintLock(dir)
+	// Wait until the engine has sampled its baseline (two git calls: status +
+	// rev-parse), so the tree change below lands strictly after it. A PATH shim
+	// makes that observable now that no per-workspace lock marks the window.
+	calls := 0
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if !fpLock.TryLock() {
-			time.Sleep(500 * time.Millisecond)
-			break
-		}
-		fpLock.Unlock()
+	for calls < 2 {
 		if time.Now().After(deadline) {
-			t.Fatal("engine goroutine did not acquire the fingerprint lock")
+			t.Fatal("engine goroutine did not sample the git fingerprint")
 		}
 		time.Sleep(5 * time.Millisecond)
+		calls = countGitCalls(gitCallLog)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "x.txt"), []byte("change"), 0600); err != nil {
 		t.Fatal(err)
@@ -1344,12 +1352,23 @@ func TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline(t *testing.T) {
 	}
 }
 
-// TestWorkspaceFingerprintLock_SerializesConcurrentTurns verifies that
-// concurrent turns in the same workspace serialize their git fingerprint
-// windows: the second turn's Changed flag must not be polluted by the first
-// turn's edits. Without the per-workspace lock the second turn could sample its
-// baseline before the first turn's change and then report changed=true.
-func TestWorkspaceFingerprintLock_SerializesConcurrentTurns(t *testing.T) {
+// TestWorkspaceFingerprint_DoesNotSerializeConcurrentTurns verifies that a
+// turn running in a workspace no longer blocks another turn in the same
+// directory. The fingerprint window used to be protected by a per-workspace
+// mutex held for the whole turn, which queued every other session (and cron
+// turn) behind the longest-running one: their agent events were not consumed
+// and, past the 64-event channel buffer, the agents themselves blocked.
+// countGitCalls counts git invocations recorded by the PATH shim: it appends
+// one byte per call.
+func countGitCalls(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	return len(b)
+}
+
+func TestWorkspaceFingerprint_DoesNotSerializeConcurrentTurns(t *testing.T) {
 	dir := t.TempDir()
 	runGit := func(args ...string) {
 		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
@@ -1398,33 +1417,27 @@ func TestWorkspaceFingerprintLock_SerializesConcurrentTurns(t *testing.T) {
 		defer close(done1)
 		e.processInteractiveEvents(state1, session1, e.sessions, "feishu:chat:u1", "t1", time.Now(), nil, nil, state1.replyCtx, 0)
 	}()
-	// Wait until turn 1 holds the fingerprint window lock, then start turn 2 —
-	// it must block on the lock instead of sampling concurrently with turn 1.
-	// Once the lock is held we still wait for the git scan itself to settle
-	// (baseline A is sampled right after lock acquisition; `git status` takes a
-	// few tens of ms), so the tree change below lands strictly after A.
-	fpLock := e.workspaceFingerprintLock(dir)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if !fpLock.TryLock() {
-			time.Sleep(500 * time.Millisecond)
-			break
-		}
-		fpLock.Unlock()
-		if time.Now().After(deadline) {
-			t.Fatal("turn 1 did not acquire the fingerprint lock")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Let the first turn pass its baseline sampling and settle into the event
+	// loop before the second turn starts.
+	time.Sleep(200 * time.Millisecond)
 	go func() {
 		defer close(done2)
 		e.processInteractiveEvents(state2, session2, e.sessions, "feishu:chat:u2", "t2", time.Now(), nil, nil, state2.replyCtx, 0)
 	}()
 
-	// Turn 1 modifies the tree, then completes.
-	if err := os.WriteFile(filepath.Join(dir, "y.txt"), []byte("change"), 0600); err != nil {
-		t.Fatal(err)
+	// Turn 1 is still running (no result yet); turn 2 must complete anyway.
+	state2.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "two", Done: true}
+	select {
+	case <-done2:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second turn in the same workspace blocked behind the first one")
 	}
+	select {
+	case <-done1:
+		t.Fatal("first turn finished before it was told to")
+	default:
+	}
+
 	state1.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "one", Done: true}
 	select {
 	case <-done1:
@@ -1432,33 +1445,16 @@ func TestWorkspaceFingerprintLock_SerializesConcurrentTurns(t *testing.T) {
 		t.Fatal("turn 1 did not finish")
 	}
 
-	// Turn 2 makes no further change; its Changed must be false.
-	state2.agentSession.(*controllableAgentSession).events <- Event{Type: EventResult, Content: "two", Done: true}
-	select {
-	case <-done2:
-	case <-time.After(5 * time.Second):
-		t.Fatal("turn 2 did not finish")
-	}
-
-	var ev1, ev2 HookEvent
-	deadline = time.Now().Add(5 * time.Second)
-	for ev1.Event == "" || ev2.Event == "" {
+	// Both finalized hooks still fire; Changed is conservative under overlap.
+	seen := map[string]bool{}
+	deadline := time.After(5 * time.Second)
+	for len(seen) < 2 {
 		select {
 		case ev := <-hookEvents:
-			if ev.SessionKey == "feishu:chat:u1" && ev1.Event == "" {
-				ev1 = ev
-			} else if ev.SessionKey == "feishu:chat:u2" && ev2.Event == "" {
-				ev2 = ev
-			}
-		case <-time.After(time.Until(deadline)):
-			t.Fatal("finalized events not received")
+			seen[ev.SessionKey] = true
+		case <-deadline:
+			t.Fatalf("finalized events received = %v, want both turns", seen)
 		}
-	}
-	if !ev1.Changed {
-		t.Errorf("turn 1 changed = false, want true (it modified the tree)")
-	}
-	if ev2.Changed {
-		t.Errorf("turn 2 changed = true, want false (fingerprint window must be serialized per workspace)")
 	}
 }
 

@@ -405,3 +405,46 @@ func TestHandleStepFinish_TokenUsageAccumulated(t *testing.T) {
 			usage.InputTokens, evt.InputTokens, usage.OutputTokens, evt.OutputTokens)
 	}
 }
+
+func TestStallWatchdog_DoesNotKillWhileToolRuns(t *testing.T) {
+	s := &opencodeSession{}
+	if s.stalledTooLong(stallTimeout - time.Second) {
+		t.Fatal("idle below the threshold must not be a stall")
+	}
+	if !s.stalledTooLong(stallTimeout + time.Minute) {
+		t.Fatal("idle above the threshold with no tool running must be a stall")
+	}
+	s.activeTools.Store(1)
+	if s.stalledTooLong(stallTimeout + time.Hour) {
+		t.Fatal("a long-running tool call is work, not a stall")
+	}
+	s.activeTools.Store(0)
+	if !s.stalledTooLong(stallTimeout + time.Minute) {
+		t.Fatal("after the tool finishes the watchdog must be armed again")
+	}
+}
+
+func TestHandleToolUse_TracksInFlightTools(t *testing.T) {
+	s := &opencodeSession{events: make(chan core.Event, 8), ctx: context.Background()}
+	s.handleToolUse(map[string]any{"part": map[string]any{
+		"tool":  "bash",
+		"state": map[string]any{"status": "running", "input": "npm install"},
+	}})
+	if got := s.activeTools.Load(); got != 1 {
+		t.Fatalf("activeTools after tool start = %d, want 1", got)
+	}
+	s.handleToolUse(map[string]any{"part": map[string]any{
+		"tool":  "bash",
+		"state": map[string]any{"status": "completed", "output": "done"},
+	}})
+	if got := s.activeTools.Load(); got != 0 {
+		t.Fatalf("activeTools after tool completion = %d, want 0", got)
+	}
+	s.handleToolUse(map[string]any{"part": map[string]any{
+		"tool":  "bash",
+		"state": map[string]any{"status": "error", "error": "denied"},
+	}})
+	if got := s.activeTools.Load(); got != 0 {
+		t.Fatalf("activeTools after tool error = %d, want 0 (must not go negative)", got)
+	}
+}
