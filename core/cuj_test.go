@@ -203,6 +203,64 @@ func (a *cujAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
 }
 func (a *cujAgent) Stop() error { return nil }
 
+// cujDirectoryAgent models native sessions from multiple working directories.
+// The process boundary reports its selected ID and cwd in the visible reply.
+type cujDirectoryAgent struct {
+	stubAgent
+	mu             sync.Mutex
+	defaultWorkDir string
+	sessions       []AgentSessionInfo
+	workDirs       map[string]string
+}
+
+func (a *cujDirectoryAgent) ListSessions(context.Context) ([]AgentSessionInfo, error) {
+	return append([]AgentSessionInfo(nil), a.sessions...), nil
+}
+
+func (a *cujDirectoryAgent) StartSession(_ context.Context, id string) (AgentSession, error) {
+	workDir := a.GetWorkDir()
+	if id == "" {
+		id = "fresh-session"
+	} else {
+		var ok bool
+		workDir, ok = a.workDirs[id]
+		if !ok {
+			return nil, fmt.Errorf("unknown native session %q", id)
+		}
+	}
+	s := newCUJAgentSession()
+	s.reply = fmt.Sprintf("session=%s cwd=%s", id, workDir)
+	return &cujDirectorySession{cujAgentSession: s, id: id, workDir: workDir}, nil
+}
+
+func (a *cujDirectoryAgent) GetWorkDir() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.defaultWorkDir
+}
+
+func (a *cujDirectoryAgent) SetWorkDir(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.defaultWorkDir = dir
+}
+
+func (a *cujDirectoryAgent) GetSessionWorkDir(_ context.Context, id, _ string) (string, error) {
+	if dir, ok := a.workDirs[id]; ok {
+		return dir, nil
+	}
+	return "", fmt.Errorf("unknown native session %q", id)
+}
+
+type cujDirectorySession struct {
+	*cujAgentSession
+	id      string
+	workDir string
+}
+
+func (s *cujDirectorySession) CurrentSessionID() string { return s.id }
+func (s *cujDirectorySession) GetWorkDir() string       { return s.workDir }
+
 // cujAgentSession is an AgentSession whose reply is controllable per-Send.
 // Tests can set reply (and optionally toolEvent) before each Send to drive
 // scenarios like "agent calls tool", "agent returns error", "agent succeeds".
@@ -1427,6 +1485,118 @@ func TestCUJ_B2_ListShowsAllSessions(t *testing.T) {
 	if len(list) < 3 {
 		t.Fatalf("SessionManager.ListSessions = %d, want ≥3", len(list))
 	}
+
+	t.Run("external_directory_continuation", func(t *testing.T) {
+		defaultDir, externalDir := t.TempDir(), t.TempDir()
+		local := AgentSessionInfo{ID: "local-session", Summary: "Configured directory chat", MessageCount: 2}
+		external := AgentSessionInfo{ID: "external-session", Summary: "Other directory chat", MessageCount: 4}
+		agent := &cujDirectoryAgent{
+			defaultWorkDir: defaultDir,
+			sessions:       []AgentSessionInfo{local, external},
+			workDirs:       map[string]string{local.ID: defaultDir, external.ID: externalDir},
+		}
+		p := &stubPlatformEngine{n: "test"}
+		e := NewEngine("test", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+		t.Cleanup(func() {
+			if err := e.Stop(); err != nil {
+				t.Errorf("stop engine: %v", err)
+			}
+		})
+		env := &cujEnv{t: t, engine: e, plat: p}
+
+		// List and select a native session outside the configured directory.
+		env.userSends("b2-external", "/list")
+		env.waitFor("both directories in the session list", 2*time.Second, func() bool {
+			return env.sentContains(local.Summary) && env.sentContains(external.Summary)
+		})
+		p.clearSent()
+		env.userSends("b2-external", "/switch "+external.ID)
+		env.waitFor("external session selection", 2*time.Second, func() bool {
+			return env.sentContains(e.i18n.Tf(MsgSwitchSuccess, external.Summary, external.ID[:12], external.MessageCount))
+		})
+
+		// The agent must receive the selected ID, not start a fresh session.
+		p.clearSent()
+		key := env.userSends("b2-external", "continue the other directory chat")
+		env.waitFor("reply from the external session and directory", 2*time.Second, func() bool {
+			return env.sentContains("session=" + external.ID + " cwd=" + externalDir)
+		})
+		// Synchronize turn completion before issuing the next command.
+		env.waitFor("external turn completed", 2*time.Second, func() bool {
+			return !env.activeSession(key).Busy()
+		})
+
+		// Starting fresh must return to the configured default directory.
+		p.clearSent()
+		env.userSends("b2-external", "/new")
+		env.waitFor("new session acknowledgment", 2*time.Second, func() bool {
+			return env.sentContains(e.i18n.T(MsgNewSessionCreated))
+		})
+		p.clearSent()
+		env.userSends("b2-external", "start a new chat")
+		env.waitFor("fresh session in the default directory", 2*time.Second, func() bool {
+			return env.sentContains("session=fresh-session cwd=" + defaultDir)
+		})
+		if env.sentContains(external.ID) || env.sentContains(externalDir) {
+			t.Fatalf("new chat reused the external session: %v", p.getSent())
+		}
+	})
+
+	t.Run("external_directory_bridge_commands", func(t *testing.T) {
+		defaultDir := commandWorkDirRepo(t, "DEFAULT_REPOSITORY_CHANGE")
+		externalDir := commandWorkDirRepo(t, "EXTERNAL_REPOSITORY_CHANGE")
+		external := AgentSessionInfo{ID: "external-session", Summary: "Other directory chat"}
+		agent := &cujDirectoryAgent{
+			defaultWorkDir: defaultDir,
+			sessions:       []AgentSessionInfo{external},
+			workDirs:       map[string]string{external.ID: externalDir},
+		}
+		p := &stubPlatformEngine{n: "test"}
+		store := filepath.Join(t.TempDir(), "sessions.json")
+		e := NewEngine("test", agent, []Platform{p}, store, LangEnglish)
+		e.SetAdminFrom("*")
+		t.Cleanup(func() { _ = e.Stop() })
+		env := &cujEnv{t: t, engine: e, plat: p}
+		check := func(user, command, want, unwanted string) {
+			t.Helper()
+			p.clearSent()
+			env.userSends(user, command)
+			env.waitFor(command+" reply", 3*time.Second, func() bool { return env.sentContains(want) })
+			if !env.sentContains(want) || (unwanted != "" && env.sentContains(unwanted)) {
+				t.Fatalf("%s: wanted %q, excluding %q; visible replies: %v", command, want, unwanted, p.getSent())
+			}
+		}
+		check("b2-cwd", "/switch "+external.ID, external.Summary, "")
+		// Local commands must use the chosen conversation before Codex starts.
+		check("b2-cwd", "/dir", externalDir, defaultDir)
+		check("b2-cwd", "/shell pwd", externalDir, defaultDir)
+		check("b2-cwd", "/diff", "EXTERNAL_REPOSITORY_CHANGE", "DEFAULT_REPOSITORY_CHANGE")
+		check("b2-cwd", "/show changes.txt", "EXTERNAL_REPOSITORY_CHANGE", "DEFAULT_REPOSITORY_CHANGE")
+		check("b2-cwd", "/status", externalDir, defaultDir)
+
+		p.clearSent()
+		key := env.userSends("b2-cwd", "continue this conversation")
+		env.waitFor("external agent response", 3*time.Second, func() bool {
+			return env.sentContains("session="+external.ID+" cwd="+externalDir) && !env.activeSession(key).Busy()
+		})
+		check("b2-cwd", "/shell pwd", externalDir, defaultDir)
+		check("b2-other-topic", "/shell pwd", defaultDir, externalDir)
+
+		// Recreate the bridge with the persisted topic-to-session binding.
+		if err := e.Stop(); err != nil {
+			t.Fatal(err)
+		}
+		e = NewEngine("test", agent, []Platform{p}, store, LangEnglish)
+		e.SetAdminFrom("*")
+		env.engine = e
+		check("b2-cwd", "/dir", externalDir, defaultDir)
+		check("b2-cwd", "/shell pwd", externalDir, defaultDir)
+		check("b2-cwd", "/diff", "EXTERNAL_REPOSITORY_CHANGE", "DEFAULT_REPOSITORY_CHANGE")
+		check("b2-cwd", "/new", e.i18n.T(MsgNewSessionCreated), "")
+		check("b2-cwd", "/dir", defaultDir, externalDir)
+		check("b2-cwd", "/shell pwd", defaultDir, externalDir)
+		check("b2-cwd", "/diff", "DEFAULT_REPOSITORY_CHANGE", "EXTERNAL_REPOSITORY_CHANGE")
+	})
 }
 
 // CUJ-B4 · /switch creates a side session via NewSideSession;
