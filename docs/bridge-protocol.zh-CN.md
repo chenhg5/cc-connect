@@ -1,5 +1,7 @@
 # Bridge 平台协议规范
 
+[English](bridge-protocol.md) | [中文](bridge-protocol.zh-CN.md) | [Русский](bridge-protocol.ru.md)
+
 > 版本：1.0-draft  
 > 状态：草案 — 实现前可能调整
 
