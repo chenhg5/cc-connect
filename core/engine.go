@@ -4672,7 +4672,6 @@ func (e *Engine) scheduleAgentSessionIdleClose(sessionKey string, state *interac
 	if state.stopped ||
 		state.agentSession == nil ||
 		!state.agentSession.Alive() ||
-		(state.busySession != nil && state.busySession.Busy()) ||
 		activeSessionGoal(state.agentSession) ||
 		state.eventsNeedResync ||
 		state.pending != nil ||
@@ -4708,6 +4707,8 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 	}
 
 	var agentSession AgentSession
+	// Turns arm the timer before unlocking; check busy at expiry so a late
+	// timer cannot close a following turn.
 	state.mu.Lock()
 	if state.agentSessionIdleToken != token ||
 		state.agentSession == nil ||

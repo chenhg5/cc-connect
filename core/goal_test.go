@@ -502,3 +502,18 @@ func TestGoalIdleCloseDoesNotInterruptForeground(t *testing.T) {
 		})
 	}
 }
+
+func TestGoalFollowingForegroundStillClosesWhenIdle(t *testing.T) {
+	env := newCUJEnv(t)
+	s := &goalTestSession{cujAgentSession: newCUJAgentSession()}
+	env.engine.agent = &goalTestAgent{session: s}
+	key := "test:goal-user"
+	t.Cleanup(func() { env.engine.cleanupInteractiveState(key) })
+	env.engine.agentSessionIdleTimeoutNanos.Store(int64(time.Hour))
+	env.engine.cmdGoal(env.plat, &Message{SessionKey: key, ReplyCtx: "ctx"}, nil)
+	env.engine.agentSessionIdleTimeoutNanos.Store(int64(10 * time.Millisecond))
+	env.userSends("goal-user", "Run a normal task after the Goal query")
+	env.waitFor("foreground task Send", time.Second, func() bool { return len(s.getSentPrompts()) == 1 })
+	env.waitFor("foreground task unlock", time.Second, func() bool { return !env.engine.sessions.GetOrCreateActive(key).Busy() })
+	env.waitFor("completed foreground session idle close", time.Second, func() bool { return !s.Alive() })
+}
