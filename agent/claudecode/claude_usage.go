@@ -46,6 +46,26 @@ type claudeUsageProbeState struct {
 	usageSentAt     time.Time
 }
 
+// lockedBuffer is a bytes.Buffer that can be written by os/exec's stderr copier goroutine
+// while the probe loop reads it. A plain bytes.Buffer is a data race there, and -race
+// reports it in TestRunClaudeUsageProbe_ReturnsWhenReaderFinishesFirst.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func (a *Agent) GetUsage(ctx context.Context) (*core.UsageReport, error) {
 	if _, err := exec.LookPath("claude"); err != nil {
 		return nil, fmt.Errorf("claudecode: 'claude' CLI not found in PATH")
@@ -84,7 +104,7 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	}
 	cmd.Env = env
 
-	var stderr bytes.Buffer
+	var stderr lockedBuffer
 	cmd.Stderr = &stderr
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 40, Cols: 120})

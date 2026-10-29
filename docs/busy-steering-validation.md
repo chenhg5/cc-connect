@@ -1,7 +1,7 @@
 # Busy steering and asynchronous answer validation
 
-Validation date: 2026-10-23. The automated checks below use this public PR branch,
-integrated with upstream `main` at `d01af45c`. Live observations come from a
+Validation date: 2026-10-29 (upstream refresh; earlier observations retain their dates). The automated checks below use this public PR branch,
+integrated with upstream `main` at `b2a6e6e7`. Live observations come from a
 separate private derivative. These are different artifacts and different claims.
 
 ## Public branch: automated validation
@@ -40,7 +40,7 @@ Covered scenarios:
 Commands:
 
 ```sh
-go test ./agent/codex ./config ./core ./platform/feishu ./agent/pi -run 'TestCUJ|TestAsync|TestBusySteering|TestOnCardAction|TestSteer|TestCmdPs|TestLoad_.*BusyMessage|TestSendRPC|TestSend_TextSupplement|TestPiRPC' -count=1 -timeout 90s
+go test ./agent/codex ./config ./core ./platform/feishu ./agent/pi -run 'TestAppServerSession_|TestCUJ|TestAsync|TestBusySteering|TestOnCardAction|TestSteer|TestCmdPs|TestLoad_.*BusyMessage|TestSendRPC|TestSend_TextSupplement|TestPiRPC' -count=1 -timeout 90s
 go vet ./agent/codex ./config ./core ./platform/feishu
 go build -tags no_web ./cmd/cc-connect
 git diff --check
@@ -51,7 +51,8 @@ fails the timeout/transport history expectations; restoring the previous Feishu
 callback fails the no-optimistic-success regression. The candidate passes both.
 
 No repository-wide suite, frontend build, packaging or race-detector run was
-performed locally. Ordinary CI success must not be presented as race coverage.
+performed locally. CI evidence must name the checked head and jobs; an earlier
+green run does not validate the refreshed head.
 
 ## Limited combination check with #2046
 
@@ -106,3 +107,21 @@ fault-handling claims rely on the automated fixtures above.
 Private Web/permission code, business data, hostnames, deployment configuration, credentials,
 deployment scripts, screenshots and raw production logs are excluded. The private
 service was not replaced with the public PR binary for this validation.
+
+## 2026-10-29 refresh
+
+Merged upstream main at `b2a6e6e7` without rewriting the public branch history.
+Both the existing A8 steering/answer CUJs and upstream's R1 reasoning CUJ are
+retained. Two upstream transport tests now assert the PR's `transportErr` field
+rather than a synthetic RPC rejection; production delivery semantics are unchanged.
+The targeted command above additionally covers upstream app-server EOF, terminal
+backpressure, late start-response, child-thread isolation and large-resume tests.
+
+Chrome tests on the updated private derivative repeated existing-context resume,
+in-turn corrections from Feishu and its custom Web client, explicit async card
+answers, one continuation after completion, and duplicate-answer suppression.
+The saved model conversation remained the same; a duplicate answer left the
+history count unchanged. These observations are still not live acceptance of
+the exact public binary. The private UI showed a contradictory connection label
+and one unreproduced automated-fill truncation; neither is represented as fixed
+or included in this public PR.
