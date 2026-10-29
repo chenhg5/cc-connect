@@ -1,10 +1,16 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func writeChildRollout(t *testing.T, root, id, parent string, input, cached, output int) {
@@ -70,5 +76,78 @@ func TestCodexFreshThreadDoesNotBaselineAwayFastChildren(t *testing.T) {
 	meter.begin(root, "parent", false)
 	if got := meter.collect(); got == nil || got.InputTokens != 500 || got.OutputTokens != 20 {
 		t.Fatalf("fast child was mistaken for old history: %+v", got)
+	}
+}
+
+// This opt-in test consumes real inference. Keep it distinct from protocol
+// fixtures: a missing login, unsupported model or absent child must fail it.
+func TestCodexSidechainLiveCLI(t *testing.T) {
+	if os.Getenv("CC_CODEX_LIVE_USAGE") != "1" {
+		t.Skip("set CC_CODEX_LIVE_USAGE=1 and CC_CODEX_LIVE_MODEL for a live child-usage test")
+	}
+	model := os.Getenv("CC_CODEX_LIVE_MODEL")
+	if model == "" {
+		t.Fatal("CC_CODEX_LIVE_MODEL must explicitly select the test model")
+	}
+	cli, err := exec.LookPath("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authHome := os.Getenv("CODEX_HOME")
+	if authHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		authHome = filepath.Join(home, ".codex")
+	}
+	home, workDir := t.TempDir(), t.TempDir()
+	if err := os.Symlink(filepath.Join(authHome, "auth.json"), filepath.Join(home, "auth.json")); err != nil {
+		t.Fatal(err)
+	}
+	config := fmt.Sprintf("model = %q\n[features]\nmulti_agent = true\n[agents]\nmax_threads = 2\n", model)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	defer cancel()
+	s, err := newAppServerSession(ctx, cli, nil, "stdio://", workDir, model, "low", "suggest", "", "", "", nil, home, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	prompt := "Use exactly one subagent, with your own model, to reply CHILD_OK without tools. Wait for it to finish, then reply DONE. Do not read files, run commands or spawn any other agents. This tests native child token accounting."
+	if err := s.Send(prompt, "live-child-usage", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		select {
+		case event, open := <-s.Events():
+			if !open {
+				t.Fatal("session closed without a metered result")
+			}
+			if event.Type == core.EventError {
+				t.Fatalf("live request failed: %v", event.Error)
+			}
+			if event.Type != core.EventResult || !event.Done {
+				continue
+			}
+			sc := event.Sidechain
+			if sc == nil || sc.InputTokens+sc.CacheReadInputTokens <= 0 || sc.OutputTokens <= 0 || len(sc.ByModel) == 0 {
+				t.Fatalf("live child usage missing: %+v", sc)
+			}
+			if event.InputTokens+event.CacheReadInputTokens <= 0 || event.OutputTokens <= 0 {
+				t.Fatal("parent usage missing")
+			}
+			var restored codexSidechainMeter
+			restored.begin(home, s.CurrentSessionID(), true)
+			if replay := restored.collect(); replay != nil {
+				t.Fatalf("live usage rebilled after meter restart: %+v", replay)
+			}
+			t.Logf("live parent input=%d cached=%d output=%d; child=%+v", event.InputTokens, event.CacheReadInputTokens, event.OutputTokens, sc)
+			return
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
 	}
 }
