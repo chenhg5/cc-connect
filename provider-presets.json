@@ -679,6 +679,33 @@
           "models": ["qwen/qwen3.5-flash", "deepseek-ai/deepseek-v4-pro"]
         }
       }
+    },
+    {
+      "name": "opper",
+      "display_name": "Opper",
+      "description": "EU-hosted AI gateway with 700+ models from 50+ providers behind one key, through OpenAI and Anthropic compatible APIs.",
+      "description_zh": "欧盟托管的 AI 网关，一个密钥即可通过 OpenAI 和 Anthropic 兼容 API 使用 50+ 家供应商的 700+ 个模型。",
+      "features": ["EU Hosted", "700+ Models", "OpenAI + Anthropic API"],
+      "tier": 3,
+      "website": "https://opper.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.opper.ai/v3/compat",
+          "model": "claude-sonnet-4-6",
+          "models": ["claude-sonnet-4-6", "claude-opus-5"]
+        },
+        "codex": {
+          "base_url": "https://api.opper.ai/v3/compat",
+          "model": "gpt-5.5",
+          "models": ["gpt-5.5", "gpt-5.4-mini"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.opper.ai/v3/compat",
+          "model": "claude-sonnet-4-6",
+          "models": ["claude-sonnet-4-6", "gpt-5.5"]
+        }
+      }
     }
   ]
 }
