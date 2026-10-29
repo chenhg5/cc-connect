@@ -1,0 +1,239 @@
+package core
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type goalTestAgent struct {
+	stubAgent
+	session *goalTestSession
+	starts  []string
+}
+
+func TestGoalCommandValidation(t *testing.T) {
+	for _, text := range []string{"set", "pause extra", "resume extra", "clear extra", "budget", "budget 0", "budget -1", "budget 1.5", "budget 9223372036854775808", "set Task --budget", "set Task --budget 4 --budget 5", "set " + strings.Repeat("字", 4001)} {
+		if _, err := parseGoalCommand(strings.Fields(text)); err == nil {
+			t.Errorf("accepted invalid command %q", text)
+		}
+	}
+	for _, text := range []string{"", "show", "pause", "resume", "clear", "budget none", "budget 1", "Finish the task", "set Fix tests --budget 40000", "edit New objective"} {
+		if _, err := parseGoalCommand(strings.Fields(text)); err != nil {
+			t.Errorf("rejected %q: %v", text, err)
+		}
+	}
+}
+
+type goalResumeFailAgent struct {
+	stubAgent
+	starts int
+}
+
+func (*goalResumeFailAgent) SupportsGoals() bool { return true }
+func (a *goalResumeFailAgent) StartSession(context.Context, string) (AgentSession, error) {
+	a.starts++
+	return nil, errors.New("thread unavailable")
+}
+
+func TestGoalResumeFailurePreservesThread(t *testing.T) {
+	env := newCUJEnv(t)
+	a := &goalResumeFailAgent{}
+	env.engine.agent = a
+	session := env.engine.sessions.GetOrCreateActive("test:goal-user")
+	session.SetAgentSessionID("saved-goal-thread", a.Name())
+	// The command is invoked synchronously here so the failure is fully observed.
+	env.engine.cmdGoal(env.plat, &Message{SessionKey: "test:goal-user", ReplyCtx: "ctx"}, nil)
+	if a.starts != 1 || session.GetAgentSessionID() != "saved-goal-thread" {
+		t.Fatalf("failed resume starts=%d saved=%q", a.starts, session.GetAgentSessionID())
+	}
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), env.engine.i18n.T(MsgFailedToStartAgentSession)) {
+		t.Fatal("resume failure was hidden")
+	}
+}
+
+func TestGoalNativeStatusDeliveryAndIdleProtection(t *testing.T) {
+	env := newCUJEnv(t)
+	s := &goalTestSession{cujAgentSession: newCUJAgentSession(), goal: &Goal{Status: "active", Objective: "Keep working"}}
+	env.engine.agent = &goalTestAgent{session: s}
+	env.engine.agentSessionIdleTimeoutNanos.Store(int64(10 * time.Millisecond))
+	env.engine.cmdGoal(env.plat, &Message{SessionKey: "test:goal-user", ReplyCtx: "ctx"}, nil)
+	t.Cleanup(func() { env.engine.cleanupInteractiveState("test:goal-user") })
+	time.Sleep(30 * time.Millisecond)
+	if !s.Alive() {
+		t.Fatal("idle timer closed an active goal")
+	}
+	s.events <- Event{Type: EventGoal, Goal: &Goal{Status: "budgetLimited", Objective: "Keep working", TokensUsed: 500}}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(strings.Join(env.plat.getSent(), "\n"), "budgetLimited") {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("native status not delivered: %v", env.plat.getSent())
+}
+
+func (*goalTestAgent) SupportsGoals() bool { return true }
+func (a *goalTestAgent) StartSession(_ context.Context, id string) (AgentSession, error) {
+	a.starts = append(a.starts, id)
+	return a.session, nil
+}
+
+func (s *goalTestSession) CancelTurn() error {
+	if s.cancelErr != nil {
+		return s.cancelErr
+	}
+	_, err := s.SetGoal(GoalUpdate{Status: "paused"})
+	return err
+}
+
+type goalRecoveryPlatform struct{ stubPlatformEngine }
+
+func (*goalRecoveryPlatform) ReconstructReplyCtx(key string) (any, error) { return key, nil }
+
+func TestGoalRestartRecoveryAndStop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	p := &goalRecoveryPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	s := &goalTestSession{cujAgentSession: newCUJAgentSession()}
+	a := &goalTestAgent{session: s}
+	e := NewEngine("goal", a, []Platform{p}, path, LangEnglish)
+	msg := &Message{SessionKey: "test:goal-user", ReplyCtx: "ctx"}
+	e.cmdGoal(p, msg, []string{"set", "Persisted objective"})
+	if !e.sessions.GetOrCreateActive(msg.SessionKey).GetResumeGoal() {
+		t.Fatal("active continuation intent not saved")
+	}
+	e.cleanupInteractiveState(msg.SessionKey)
+	s2 := &goalTestSession{cujAgentSession: newCUJAgentSession(), goal: &Goal{Status: "active", Objective: "Persisted objective"}}
+	a2 := &goalTestAgent{session: s2}
+	e2 := NewEngine("goal", a2, []Platform{p}, path, LangEnglish)
+	t.Cleanup(func() { e2.cleanupInteractiveState(msg.SessionKey) })
+	e2.restoreNativeGoals(p)
+	if len(a2.starts) != 1 || a2.starts[0] != "cuj-agent-session" {
+		t.Fatalf("recovery started %v, want saved thread", a2.starts)
+	}
+	e2.cmdStop(p, msg)
+	g, _ := s2.GetGoal()
+	if g.Status != "paused" || e2.sessions.GetOrCreateActive(msg.SessionKey).GetResumeGoal() {
+		t.Fatal("stop did not revoke continuation intent")
+	}
+	s3 := &goalTestSession{cujAgentSession: newCUJAgentSession()}
+	a3 := &goalTestAgent{session: s3}
+	e3 := NewEngine("goal", a3, []Platform{p}, path, LangEnglish)
+	e3.restoreNativeGoals(p)
+	if len(a3.starts) != 0 {
+		t.Fatal("stopped goal restarted automatically")
+	}
+}
+
+type goalTestSession struct {
+	*cujAgentSession
+	goalMu    sync.Mutex
+	goal      *Goal
+	cancelErr error
+}
+
+func (s *goalTestSession) GetGoal() (*Goal, error) {
+	s.goalMu.Lock()
+	defer s.goalMu.Unlock()
+	if s.goal == nil {
+		return nil, nil
+	}
+	g := *s.goal
+	return &g, nil
+}
+func (s *goalTestSession) SetGoal(u GoalUpdate) (*Goal, error) {
+	s.goalMu.Lock()
+	if s.goal == nil {
+		s.goal = &Goal{ThreadID: "goal-thread", Status: "active"}
+	}
+	if u.Objective != nil {
+		s.goal.Objective = *u.Objective
+	}
+	if u.Status != "" {
+		s.goal.Status = u.Status
+	}
+	if u.TokenBudget != nil {
+		s.goal.TokenBudget = u.TokenBudget
+	}
+	if u.ClearTokenBudget {
+		s.goal.TokenBudget = nil
+	}
+	s.goalMu.Unlock()
+	return s.GetGoal()
+}
+func (s *goalTestSession) ClearGoal() error {
+	s.goalMu.Lock()
+	defer s.goalMu.Unlock()
+	s.goal = nil
+	return nil
+}
+func (s *goalTestSession) GoalActive() bool {
+	g, _ := s.GetGoal()
+	return g != nil && g.Status == "active"
+}
+
+func TestCUJ_C_GoalLifecycle(t *testing.T) {
+	env := newCUJEnv(t)
+	s := &goalTestSession{cujAgentSession: newCUJAgentSession()}
+	env.engine.agent = &goalTestAgent{session: s}
+	t.Cleanup(func() { env.engine.cleanupInteractiveState("test:goal-user") })
+	for _, step := range []struct{ command, visible string }{
+		{"/goal set Finish migration --budget 40000", "Finish migration"},
+		{"/goal pause", "paused"},
+		{"/goal edit Finish migration and tests", "Finish migration and tests"},
+		{"/goal budget 50000", "50000"},
+		{"/goal resume", "active"},
+		{"/goal", "Finish migration and tests"},
+		{"/goal clear", "cleared"},
+	} {
+		before := len(env.plat.getSent())
+		env.userSends("goal-user", step.command)
+		deadline := time.Now().Add(2 * time.Second)
+		found := false
+		for time.Now().Before(deadline) {
+			for _, x := range env.plat.getSent()[before:] {
+				if strings.Contains(x, step.visible) {
+					found = true
+				}
+			}
+			if found {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if !found {
+			t.Fatalf("%s: missing %q in %v", step.command, step.visible, env.plat.getSent()[before:])
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.sentPrompts) != 0 {
+		t.Fatal("goal command was sent as model prompt")
+	}
+}
+
+func TestGoalStopRPCFailureClosesSession(t *testing.T) {
+	env := newCUJEnv(t)
+	s := &goalTestSession{cujAgentSession: newCUJAgentSession(), cancelErr: errors.New("goal RPC unavailable")}
+	env.engine.agent = &goalTestAgent{session: s}
+	msg := &Message{SessionKey: "test:goal-user", ReplyCtx: "ctx"}
+	env.engine.cmdGoal(env.plat, msg, []string{"set", "Work"})
+	env.engine.cmdStop(env.plat, msg)
+	if env.engine.sessions.GetOrCreateActive(msg.SessionKey).GetResumeGoal() {
+		t.Fatal("failed stop retained automatic recovery")
+	}
+	if !strings.Contains(strings.Join(env.plat.getSent(), "\n"), "goal RPC unavailable") {
+		t.Fatal("RPC failure was not reported")
+	}
+	env.engine.interactiveMu.Lock()
+	_, stillPresent := env.engine.interactiveStates[msg.SessionKey]
+	env.engine.interactiveMu.Unlock()
+	if stillPresent {
+		t.Fatal("failed cancellation left live state registered")
+	}
+}

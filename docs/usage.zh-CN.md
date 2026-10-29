@@ -116,6 +116,42 @@ cmd = ["/path with spaces/codex", "--profile", "work"]
 
 此功能通过现有 Codex 适配器运行应用内置 CLI。桌面专有工具和共享会话写锁有独立的适配要求，参见 [桌面后端讨论 #651](https://github.com/chenhg5/cc-connect/issues/651) 和 [会话写锁冲突 #1909](https://github.com/chenhg5/cc-connect/issues/1909)。
 
+### Codex 原生 Goal
+
+使用支持 `thread/goal/*` RPC 的 Codex CLI（已用 0.164.0 验证），配置：
+
+```toml
+[projects.agent.options]
+backend = "app_server"
+app_server_url = "stdio"
+```
+
+| 聊天命令 | 操作 |
+|---|---|
+| `/goal`、`/goal show` | 查询目标、原生状态、token 用量/预算和已用秒数 |
+| `/goal set <目标> [--budget N]`、`/goal <目标>` | 设置目标并启动原生续跑 |
+| `/goal edit <目标> [--budget N]` | 编辑目标，保留当前状态和未指定的新预算 |
+| `/goal pause` | 暂停续跑并中断当前轮次 |
+| `/goal resume` | 恢复原生续跑 |
+| `/goal budget N`、`/goal budget none` | 设置正整数 token 预算、取消预算 |
+| `/goal clear` | 清除目标并中断其当前轮次 |
+
+目标最多 4,000 字。完成、阻塞、用量/预算限制及续跑由 Codex 原生机制负责；
+不解析 rollout、不发“继续”提示词。更换目标会重置原生用量计数；仅更新状态或
+预算会保留计数。状态变化独立发到聊天，仅 token 数字变化不刷消息。Goal 运行
+期间的普通聊天（含附件）会送入当前轮次。
+
+`/stop` 先暂停 Goal 再中断轮次；活跃 Goal 不会被空闲回收。cc-connect 重启后，
+在消息平台就绪时恢复各聊天当前选中的活跃 Goal，加载原生状态以核对是否已完成、
+暂停或受限；暂停/停止的目标需要 `/goal resume`。自动恢复要求平台支持重建
+回复上下文。恢复失败会保留原线程并报错，不会偷偷新建线程。
+
+`exec` 后端明确不支持这些命令。此功能启动自己的 app-server，完全独立于官方
+App；若同时使用其他客户端，请用独立 `codex_home` 避免对方加载相同线程。
+缺少相应 RPC 的 CLI 会直接报错，不把 `/goal` 当普通提示词。CLI 自身必须开启
+Goals（必要时执行 `codex features enable goals`）；此路径不需要
+`goal_auto_continue` 或 rollout 解析配置。
+
 ### Cursor Agent 模式
 
 | 模式 | 配置值 | 行为 |
