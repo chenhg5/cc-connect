@@ -41,6 +41,7 @@ type slackStreamingCard struct {
 	mu         sync.Mutex
 	ts         string // empty until the first post
 	failed     bool
+	superseded bool // the full reply went out as a separate message; the card takes no more edits
 	lastUpdate time.Time
 	lastSent   string
 }
@@ -95,7 +96,7 @@ func (c *slackStreamingCard) render(ctx context.Context, rendered string) error 
 func (c *slackStreamingCard) Update(ctx context.Context, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.failed || content == "" {
+	if c.failed || c.superseded || content == "" {
 		return nil
 	}
 	if c.ts != "" && time.Since(c.lastUpdate) < cardUpdateMinInterval {
@@ -137,8 +138,6 @@ func (c *slackStreamingCard) retireCard(ctx context.Context) {
 			"error", err, "ts", c.ts)
 		return
 	}
-	// No card to edit any more. A later render() sees the empty ts and posts
-	// fresh, which is the same outcome the overflow path produces anyway.
 	c.ts = ""
 }
 
@@ -151,7 +150,7 @@ func (c *slackStreamingCard) retireCard(ctx context.Context) {
 func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.failed {
+	if c.failed || c.superseded {
 		return nil
 	}
 	rendered := core.MarkdownToSlackMrkdwn(content)
@@ -171,6 +170,10 @@ func (c *slackStreamingCard) Finalize(ctx context.Context, content string) error
 			c.failed = true
 			return fmt.Errorf("slack: finalize streaming card: %w", err)
 		}
+		// Set before retiring, so it holds even when the delete fails: a late
+		// Update would otherwise post a stray message (empty ts) or edit the
+		// frozen card under the full reply.
+		c.superseded = true
 		c.retireCard(ctx)
 		c.lastSent = rendered
 		return nil

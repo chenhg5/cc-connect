@@ -113,6 +113,22 @@ func TestStreamingCard_FinalizeFallsBackToFreshPostOnOversize(t *testing.T) {
 	if card.ts != "" {
 		t.Fatalf("card.ts = %q after retire, want empty", card.ts)
 	}
+
+	// The turn is delivered. With the card's ts gone, a late tick that still
+	// reached Slack would post a stray fresh message under the full reply.
+	card.lastUpdate = card.lastUpdate.Add(-2 * cardUpdateMinInterval)
+	if err := card.Update(context.Background(), "late tick"); err != nil {
+		t.Fatalf("late Update: %v", err)
+	}
+	if err := card.Finalize(context.Background(), "late finalize"); err != nil {
+		t.Fatalf("late Finalize: %v", err)
+	}
+	if got := atomic.LoadInt32(&postCalls); got != 2 {
+		t.Fatalf("postMessage calls after late Update/Finalize = %d, want 2 (dropped)", got)
+	}
+	if got := atomic.LoadInt32(&updateCalls); got != 0 {
+		t.Fatalf("chat.update calls after late Update/Finalize = %d, want 0 (dropped)", got)
+	}
 }
 
 // TestStreamingCard_UpdateSkipsOversizedPayload ensures that once the rendered
@@ -172,6 +188,7 @@ func TestStreamingCard_UpdateSkipsOversizedPayload(t *testing.T) {
 func TestStreamingCard_FinalizeKeepsCardWhenRetireFails(t *testing.T) {
 	var (
 		postCalls   int32
+		updateCalls int32
 		deleteCalls int32
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -180,6 +197,10 @@ func TestStreamingCard_FinalizeKeepsCardWhenRetireFails(t *testing.T) {
 			atomic.AddInt32(&postCalls, 1)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": "C1", "ts": "1700000000.0001"})
+		case "/chat.update":
+			atomic.AddInt32(&updateCalls, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": "C1", "ts": "1700000000.0001", "text": "edited"})
 		case "/chat.delete":
 			atomic.AddInt32(&deleteCalls, 1)
 			w.Header().Set("Content-Type", "application/json")
@@ -211,6 +232,19 @@ func TestStreamingCard_FinalizeKeepsCardWhenRetireFails(t *testing.T) {
 	}
 	if card.ts == "" {
 		t.Fatal("card.ts cleared even though chat.delete failed; the card is still live")
+	}
+
+	// The card is still live, but the full reply already went out below it: a
+	// late tick must not edit the frozen card back into a partial snapshot.
+	card.lastUpdate = card.lastUpdate.Add(-2 * cardUpdateMinInterval)
+	if err := card.Update(context.Background(), "late tick"); err != nil {
+		t.Fatalf("late Update: %v", err)
+	}
+	if got := atomic.LoadInt32(&updateCalls); got != 0 {
+		t.Fatalf("chat.update calls after late Update = %d, want 0 (dropped)", got)
+	}
+	if got := atomic.LoadInt32(&postCalls); got != 2 {
+		t.Fatalf("postMessage calls after late Update = %d, want 2 (dropped)", got)
 	}
 }
 
