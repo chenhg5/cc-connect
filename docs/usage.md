@@ -51,6 +51,19 @@ Each user gets an independent session with full conversation context. Manage ses
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
 
+For Codex, `/list` normally shows sessions in the configured working directory.
+To include conversations started in other directories with the same Codex profile,
+set `list_all_sessions = true` under `[projects.agent.options]`. `/list 2` shows
+the next page, and `/switch <number | id_prefix | name>` selects a conversation.
+On the next message, both Codex backends resume in that session's saved working
+directory, including staging incoming attachments there. Other topics and new
+sessions keep their own working directories; no `/dir` change is needed.
+Project commands such as `/dir`, `/shell`, and `/diff` continue to use the
+project's default directory, rather than the selected Codex session's directory.
+Archived sessions and helper subagents remain excluded, and `filter_external_sessions`
+and multi-workspace ownership filters still apply. This does not mirror activity
+from an independently running Codex client into the chat.
+
 Use `/ps` (or `/btw`) to add instructions while a task is running. An idle session rejects the command. The delivery confirmation means the bridge sent the request, not that the agent has finished processing it.
 
 With Pi, enable `rpc = true` for native steering: the supplement is queued for the next model call, after the current assistant turn's tool calls. If Pi has already finished while the bridge is still delivering its reply, the supplement starts a follow-up turn. Pi's default JSON mode keeps its existing one-shot sending behavior; it cannot inject into an already running process.

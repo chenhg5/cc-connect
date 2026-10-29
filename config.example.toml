@@ -1704,6 +1704,11 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+# list_all_sessions = false # true: list/switch sessions across all directories in this Codex home.
+#                           # Resuming uses the session's saved directory; new sessions still use work_dir.
+#                           # Subagent/archived sessions stay hidden; filter_external_sessions still applies.
+#                           # 设为 true 可列出并切换当前 Codex 配置目录中所有工作目录的会话。
+#                           # 恢复时使用会话保存的目录，新会话仍使用 work_dir；子代理和归档会话不显示。
 #
 # Mode options / 模式说明:
 # - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）
