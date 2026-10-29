@@ -1532,6 +1532,18 @@ func TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline(t *testing.T) {
 	}
 	e.interactiveStates[sessionKey] = state
 
+	gitCallLog := filepath.Join(t.TempDir(), "git-calls")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("lookpath git: %v", err)
+	}
+	shimDir := t.TempDir()
+	shim := "#!/bin/sh\nprintf 'x' >> '" + gitCallLog + "'\nexec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1685,13 +1697,9 @@ func TestWorkspaceFingerprintWindow_ConcurrentTurnsDoNotBlock(t *testing.T) {
 	for ev1.Event == "" || ev2.Event == "" {
 		select {
 		case ev := <-hookEvents:
-			if ev.SessionKey == "feishu:chat:u1" && ev1.Event == "" {
-				ev1 = ev
-			} else if ev.SessionKey == "feishu:chat:u2" && ev2.Event == "" {
-				ev2 = ev
-			}
-		case <-time.After(time.Until(deadline)):
-			t.Fatal("finalized events not received")
+			seen[ev.SessionKey] = true
+		case <-deadline:
+			t.Fatalf("finalized events received = %v, want both turns", seen)
 		}
 	}
 	if ev2.Changed {

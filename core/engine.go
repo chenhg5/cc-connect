@@ -6225,8 +6225,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	defer func() { fpWindow.close() }()
 
 	// Record the workspace git state at the start of this turn so post-reply
-	// hooks can tell whether this turn actually changed the working tree.
-	turnStartGitFingerprint := workspaceGitFingerprint(e.ctx, hookWorkspace)
+	// hooks can tell whether this turn actually changed the working tree. Only
+	// sampled when a hook consumes the Changed flag: the scan forks git twice,
+	// and serializing it per workspace for the whole turn would queue every
+	// concurrent turn in the same directory behind the previous one (their
+	// agent events would then block on the bounded event channel). Concurrent
+	// turns are therefore not serialized: a turn that overlaps another one's
+	// edits can report Changed=true without having changed anything itself,
+	// which errs on the side of running the hook rather than skipping it.
+	trackChanged := e.hooks.NeedsChangedFingerprint()
+	turnStartGitFingerprint := ""
+	if trackChanged {
+		turnStartGitFingerprint = workspaceGitFingerprint(e.ctx, hookWorkspace)
+	}
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
