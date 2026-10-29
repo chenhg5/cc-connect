@@ -111,13 +111,6 @@ type codexRolloutTokenInfo struct {
 	ModelContextWindow int                  `json:"model_context_window"`
 }
 
-func (info *codexRolloutTokenInfo) contextUsage() *core.ContextUsage {
-	if info == nil {
-		return nil
-	}
-	return contextUsageFromSnake(info.LastTokenUsage, info.ModelContextWindow)
-}
-
 func (info *codexRolloutTokenInfo) total() *codexTokenUsage {
 	if info == nil {
 		return nil
@@ -158,7 +151,7 @@ func readTokenInfoFromRollout(path string) (*codexRolloutTokenInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if info, err := readTokenInfoFromRolloutTail(f); err != nil {
 		return nil, err

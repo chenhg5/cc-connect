@@ -118,7 +118,7 @@ func (m *codexSidechainMeter) snapshots() map[string]codexTokenUsage {
 		if err != nil {
 			return nil
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		scanner := bufio.NewScanner(file)
 		scanner.Buffer(make([]byte, 4096), 2*1024*1024)
 		if !scanner.Scan() {
@@ -172,7 +172,7 @@ func rolloutModel(path string) string {
 	if err != nil {
 		return ""
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return ""

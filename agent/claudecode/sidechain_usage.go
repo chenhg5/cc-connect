@@ -262,7 +262,7 @@ func (m *sidechainMeter) readNewLocked(path string) []sidechainLine {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	offset := m.offsets[path]
 	if info, err := f.Stat(); err == nil && info.Size() < offset {
 		// Truncated or replaced: start over. Requests already reported stay
