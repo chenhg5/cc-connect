@@ -859,12 +859,26 @@ Example:
 ```bash
 cc-connect cron add --cron "0 6 * * *" --prompt "Summarize GitHub trending" --desc "Daily Trending"
 cc-connect cron list
-cc-connect cron edit <job-id> <field> <value>   # e.g. cron_expr, prompt, enabled, mute, timeout_mins
+cc-connect cron edit <job-id> <field> <value>   # e.g. cron_expr, prompt, enabled, mute, timeout_mins, model
 cc-connect cron exec <job-id>
 cc-connect cron del <job-id>
 ```
 
 Optional: `--session-mode new-per-run` starts a fresh agent session on each run (default is `reuse`, same as before). `--timeout-mins N` sets how long the scheduler waits per run (`0` = no limit; omit = 30 minutes).
+
+`--model <model>` (also on `cc-connect timer add`) runs the job on a specific model, e.g. a cheaper one for frequent sweeps:
+
+```bash
+cc-connect cron add --cron "*/15 * * * *" --prompt "Triage new issues" --model haiku
+cc-connect cron edit <job-id> model sonnet   # change it
+cc-connect cron edit <job-id> model ""       # clear it (back to the agent's configured model)
+```
+
+- A job with a model **always runs in a fresh, isolated session per run**, even when its session mode is `reuse` or unset. It therefore does **not** see the chat's conversation context. It still runs in the same project/work directory, so workspace files are shared, not isolated. Your chat session keeps its own model. The saved `session_mode` is left as is and applies again once the model is cleared.
+- Any non-blank model ID is passed to the agent as-is (aliases like `haiku`, full IDs, or provider-specific IDs); cc-connect does not check it against a model list. Surrounding whitespace is trimmed; a whitespace-only value is rejected.
+- The agent must support per-job models (currently Claude Code). With any other agent the run fails with a visible error. It never silently falls back to the default model.
+- Shell jobs (`--exec`) cannot have a model.
+- The start notice names the requested model and the isolated session; `--silent` / `--mute` still suppress it.
 
 ### Natural Language (Claude Code)
 

@@ -323,6 +323,9 @@ const (
 	MsgCronDisabled           MsgKey = "cron_disabled"
 	MsgCronMuted              MsgKey = "cron_muted"
 	MsgCronUnmuted            MsgKey = "cron_unmuted"
+	MsgJobModelNotice         MsgKey = "job_model_notice"
+	MsgJobModelInvalid        MsgKey = "job_model_invalid"
+	MsgJobModelUnsupported    MsgKey = "job_model_unsupported"
 	MsgCronCardHint           MsgKey = "cron_card_hint"
 	MsgCronNextShort          MsgKey = "cron_next_short"
 	MsgCronLastShort          MsgKey = "cron_last_short"
@@ -2009,6 +2012,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "🔔 定時任務 `%s` 已取消靜音。",
 		LangJapanese:           "🔔 スケジュールタスク `%s` のミュートを解除しました。",
 		LangSpanish:            "🔔 Tarea programada `%s` reactivada.",
+	},
+	MsgJobModelNotice: {
+		LangEnglish:            " · model `%s` (isolated session, no chat context)",
+		LangChinese:            " · 模型 `%s`（独立会话，不含聊天上下文）",
+		LangTraditionalChinese: " · 模型 `%s`（獨立會話，不含聊天上下文）",
+		LangJapanese:           " · モデル `%s`（独立セッション、チャットの文脈なし）",
+		LangSpanish:            " · modelo `%s` (sesión aislada, sin contexto del chat)",
+	},
+	MsgJobModelInvalid: {
+		LangEnglish:            "❌ Scheduled job `%s` was not run: invalid model override (%v).",
+		LangChinese:            "❌ 定时任务 `%s` 未执行：模型覆盖无效（%v）。",
+		LangTraditionalChinese: "❌ 定時任務 `%s` 未執行：模型覆寫無效（%v）。",
+		LangJapanese:           "❌ スケジュールタスク `%s` は実行されませんでした：モデル指定が無効です（%v）。",
+		LangSpanish:            "❌ La tarea programada `%s` no se ejecutó: modelo no válido (%v).",
+	},
+	MsgJobModelUnsupported: {
+		LangEnglish:            "❌ Scheduled job `%s` was not run: agent `%s` cannot start a session with model `%s`.",
+		LangChinese:            "❌ 定时任务 `%s` 未执行：智能体 `%s` 不支持以模型 `%s` 启动会话。",
+		LangTraditionalChinese: "❌ 定時任務 `%s` 未執行：代理 `%s` 不支援以模型 `%s` 啟動會話。",
+		LangJapanese:           "❌ スケジュールタスク `%s` は実行されませんでした：エージェント `%s` はモデル `%s` でセッションを開始できません。",
+		LangSpanish:            "❌ La tarea programada `%s` no se ejecutó: el agente `%s` no puede iniciar una sesión con el modelo `%s`.",
 	},
 	MsgCronCardHint: {
 		LangEnglish:            "💡 `/cron add` · `/cron exec <id>` · `/cron del <id>` · `/cron enable/disable <id>` · `/cron mute/unmute <id>`",

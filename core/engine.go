@@ -1579,6 +1579,13 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		effectivePlatform = &mutePlatform{targetPlatform}
 	}
 
+	// Re-validate here: persisted or directly built jobs bypass AddJob.
+	model, err := NormalizeJobModel(job.Model, job.IsShellJob())
+	if err != nil {
+		e.send(effectivePlatform, replyCtx, e.i18n.Tf(MsgJobModelInvalid, job.ID, err))
+		return fmt.Errorf("cron job %q: %w", job.ID, err)
+	}
+
 	// Notify user that a cron job is executing (unless silent/muted)
 	// Note: this notification uses targetPlatform directly, not the tracking wrapper,
 	// so it won't count as a "meaningful delivery" for empty response detection.
@@ -1596,7 +1603,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 					desc = truncateStr(job.Prompt, 40)
 				}
 			}
-			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc)+e.jobModelNotice(model))
 		}
 	}
 
@@ -1607,13 +1614,14 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	content := job.Prompt
 
 	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "cron",
-		UserName:     "cron",
-		Content:      content,
-		ReplyCtx:     replyCtx,
-		ModeOverride: job.Mode,
+		SessionKey:    sessionKey,
+		Platform:      platformName,
+		UserID:        "cron",
+		UserName:      "cron",
+		Content:       content,
+		ReplyCtx:      replyCtx,
+		ModeOverride:  job.Mode,
+		ModelOverride: model,
 	}
 
 	// Resolve workspace-specific agent and sessions for multi-workspace mode.
@@ -1649,6 +1657,10 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 	}
 
+	if err := e.checkJobModelAgent(effectivePlatform, replyCtx, job.ID, agent, model); err != nil {
+		return err
+	}
+
 	if strings.HasPrefix(content, "/") {
 		parts := strings.Fields(content)
 		if len(parts) > 0 {
@@ -1666,6 +1678,11 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	} else {
 		useNewSession = job.UsesNewSessionPerRun()
 	}
+	// A model override always runs in a fresh per-run session: reusing the
+	// chat session would either drop the override (live process) or leak the
+	// job's model into later chat turns (cold spawn). Saved session_mode is
+	// left untouched so clearing the model restores it.
+	useNewSession = useNewSession || model != ""
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
@@ -1788,6 +1805,13 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		effectivePlatform = &mutePlatform{targetPlatform}
 	}
 
+	// Re-validate here: persisted or directly built jobs bypass AddJob.
+	model, err := NormalizeJobModel(job.Model, job.IsShellJob())
+	if err != nil {
+		e.send(effectivePlatform, replyCtx, e.i18n.Tf(MsgJobModelInvalid, job.ID, err))
+		return fmt.Errorf("timer job %q: %w", job.ID, err)
+	}
+
 	// Notify user unless muted or silent
 	if !job.Mute {
 		silent := false
@@ -1803,7 +1827,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 					desc = truncateStr(job.Prompt, 40)
 				}
 			}
-			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc)+e.jobModelNotice(model))
 		}
 	}
 
@@ -1814,13 +1838,14 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	content := job.Prompt
 
 	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "timer",
-		UserName:     "timer",
-		Content:      content,
-		ReplyCtx:     replyCtx,
-		ModeOverride: job.Mode,
+		SessionKey:    sessionKey,
+		Platform:      platformName,
+		UserID:        "timer",
+		UserName:      "timer",
+		Content:       content,
+		ReplyCtx:      replyCtx,
+		ModeOverride:  job.Mode,
+		ModelOverride: model,
 	}
 
 	agent := e.agent
@@ -1854,6 +1879,10 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		}
 	}
 
+	if err := e.checkJobModelAgent(effectivePlatform, replyCtx, job.ID, agent, model); err != nil {
+		return err
+	}
+
 	if strings.HasPrefix(content, "/") {
 		parts := strings.Fields(content)
 		if len(parts) > 0 {
@@ -1871,6 +1900,11 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	} else {
 		useNewSession = job.UsesNewSessionPerRun()
 	}
+	// A model override always runs in a fresh per-run session: reusing the
+	// chat session would either drop the override (live process) or leak the
+	// job's model into later chat turns (cold spawn). Saved session_mode is
+	// left untouched so clearing the model restores it.
+	useNewSession = useNewSession || model != ""
 
 	if useNewSession {
 		msg.SessionKey = runSessionKey
@@ -1900,6 +1934,28 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey, lockGen)
 	return nil
+}
+
+// jobModelNotice is the start-notice suffix for a cron/timer job with a model
+// override ("" when there is none).
+func (e *Engine) jobModelNotice(model string) string {
+	if model == "" {
+		return ""
+	}
+	return e.i18n.Tf(MsgJobModelNotice, model)
+}
+
+// checkJobModelAgent rejects a model override the resolved agent cannot
+// honour, so the job never silently runs on the configured model.
+func (e *Engine) checkJobModelAgent(p Platform, replyCtx any, jobID string, agent Agent, model string) error {
+	if model == "" {
+		return nil
+	}
+	if _, ok := agent.(ModelOverrideStarter); ok {
+		return nil
+	}
+	e.send(p, replyCtx, e.i18n.Tf(MsgJobModelUnsupported, jobID, agent.Name(), model))
+	return fmt.Errorf("agent %q does not support per-job model override %q", agent.Name(), model)
 }
 
 func timerRunTitle(job *TimerJob) string {
@@ -4039,7 +4095,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.ModelOverride)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -4322,7 +4378,7 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, modelOverride string) *interactiveState {
 	// /stop removes the state from the map immediately but tears the process
 	// down in the background. Wait that teardown out *before* taking the lock:
 	// spawning now would start a second process on the same agent session ID
@@ -4460,8 +4516,25 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 
 	isResume := startSessionID != ""
+	// Per-message model override (cron/timer jobs with a model field): spawn
+	// this session with the override without touching the agent's configured
+	// model. Agents that don't implement ModelOverrideStarter fail the spawn.
+	startSession := agent.StartSession
+	if modelOverride != "" {
+		if mos, ok := agent.(ModelOverrideStarter); ok {
+			startSession = func(ctx context.Context, sid string) (AgentSession, error) {
+				return mos.StartSessionWithModel(ctx, sid, modelOverride)
+			}
+			slog.Info("spawning session with model override", "session_key", sessionKey, "model", modelOverride)
+		} else {
+			// Never fall back to the configured model: the caller asked for a specific one.
+			startSession = func(context.Context, string) (AgentSession, error) {
+				return nil, fmt.Errorf("agent %q does not support per-job model override %q", agent.Name(), modelOverride)
+			}
+		}
+	}
 	startAt := time.Now()
-	agentSession, err := agent.StartSession(e.ctx, startSessionID)
+	agentSession, err := startSession(e.ctx, startSessionID)
 	startElapsed := time.Since(startAt)
 	if err != nil {
 		// If resume/continue failed, try a fresh session as fallback.
@@ -4474,7 +4547,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			session.SetAgentSessionID("", agent.Name())
 			sessions.Save()
 			startAt = time.Now()
-			agentSession, err = agent.StartSession(e.ctx, "")
+			agentSession, err = startSession(e.ctx, "")
 			startElapsed = time.Since(startAt)
 			if err == nil {
 				slog.Info("fresh session started after resume failure",
