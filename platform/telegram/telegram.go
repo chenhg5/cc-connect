@@ -929,6 +929,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	case "perm:allow_all":
 		choiceLabel = "✅ Allow All"
 	}
+	choiceLabel = permissionCallbackDisplayLabel(data, choiceLabel, msg.ReplyMarkup)
 
 	origText := msg.Text
 	if origText == "" {
@@ -955,6 +956,27 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 		ReplyCtx:             rctx,
 		IsPermissionResponse: true,
 	})
+}
+
+// permissionCallbackDisplayLabel reuses the actual button text from the
+// original message. This preserves the operator's selected language in the
+// confirmation without changing protocol values or duplicating translations.
+func permissionCallbackDisplayLabel(data, fallback string, markup *models.InlineKeyboardMarkup) string {
+	if markup == nil {
+		return fallback
+	}
+	for _, row := range markup.InlineKeyboard {
+		for _, button := range row {
+			if button.CallbackData == data && button.Text != "" {
+				icon := "✅ "
+				if data == "perm:deny" {
+					icon = "❌ "
+				}
+				return icon + button.Text
+			}
+		}
+	}
+	return fallback
 }
 
 // isDirectedAtBot checks whether a group message is directed at this bot:

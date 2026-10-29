@@ -3081,7 +3081,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(forcedWorkDir)
 		if err != nil {
 			slog.Error("failed to create send work_dir agent", "work_dir", forcedWorkDir, "err", err)
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWorkspaceInitFailed, err))
 			return
 		}
 		resolvedWorkspace = forcedWorkDir
@@ -3121,7 +3121,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			wsAgent, wsSessions, _, effectiveWorkspace, err = e.workspaceContext(workspace, msg.SessionKey)
 			if err != nil {
 				slog.Error("failed to create workspace agent", "workspace", workspace, "err", err)
-				e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWorkspaceInitFailed, err))
 				return
 			}
 			resolvedWorkspace = effectiveWorkspace
@@ -3974,11 +3974,45 @@ var (
 	}
 )
 
+// russianPermissionDecision accepts only an exact permission decision, optionally
+// preceded or followed by a single @username. Arbitrary extra words (including
+// negation) cannot accidentally authorize a tool.
+func russianPermissionDecision(s string) string {
+	parts := strings.Fields(strings.ToLower(strings.TrimSpace(s)))
+	if len(parts) == 0 {
+		return ""
+	}
+	isMention := func(token string) bool {
+		if len(token) < 2 || len(token) > 33 || token[0] != '@' {
+			return false
+		}
+		for _, r := range token[1:] {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+				continue
+			}
+			return false
+		}
+		return true
+	}
+	if len(parts) > 1 && isMention(parts[0]) {
+		parts = parts[1:]
+	}
+	if len(parts) > 1 && isMention(parts[len(parts)-1]) {
+		parts = parts[:len(parts)-1]
+	}
+	return strings.TrimSpace(strings.TrimRight(strings.Join(parts, " "), "!?.…,;:"))
+}
+
 // isApproveAllResponse reports whether s expresses "allow all" intent.
 // Multi-token phrases (e.g. "allow all") are matched first; single-token
 // CJK forms (e.g. "允许所有") are matched per-token so a leading or
 // trailing @mention does not break recognition.
 func isApproveAllResponse(s string) bool {
+	// Russian responses must be explicit: never approve a negated sentence.
+	response := russianPermissionDecision(s)
+	if response == "разрешить всё" || response == "разрешить все" {
+		return true
+	}
 	return matchPermissionKeyword(s, approveAllPhrases, approveAllSingleTokens)
 }
 
@@ -3986,12 +4020,22 @@ func isApproveAllResponse(s string) bool {
 // Tokenised so that group-chat replies like "@产品经理 允许" still match
 // — see internal task t-20260614-ayc85z.
 func isAllowResponse(s string) bool {
+	// Russian responses must be explicit: never approve a negated sentence.
+	response := russianPermissionDecision(s)
+	if response == "разрешить" {
+		return true
+	}
 	return matchPermissionKeyword(s, nil, allowKeywords)
 }
 
 // isDenyResponse reports whether s expresses a "deny" intent.
 // Tokenised so that group-chat replies like "@产品经理 拒绝" still match.
 func isDenyResponse(s string) bool {
+	// Russian responses must be explicit: never approve a negated sentence.
+	response := russianPermissionDecision(s)
+	if response == "отклонить" {
+		return true
+	}
 	return matchPermissionKeyword(s, nil, denyKeywords)
 }
 
@@ -7793,7 +7837,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 
 func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, "Usage: /switch <number | id_prefix | name>")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSwitchUsage))
 		return
 	}
 	query := strings.TrimSpace(strings.Join(args, " "))
@@ -8114,6 +8158,8 @@ func formatElapsed(d time.Duration, streaming bool, lang Language) string {
 	case d < time.Minute:
 		if zh {
 			dur = fmt.Sprintf("%.1f 秒", d.Seconds())
+		} else if lang == LangRussian {
+			dur = fmt.Sprintf("%.1f с", d.Seconds())
 		} else {
 			dur = fmt.Sprintf("%.1fs", d.Seconds())
 		}
@@ -8122,6 +8168,8 @@ func formatElapsed(d time.Duration, streaming bool, lang Language) string {
 		s := totalSec % 60
 		if zh {
 			dur = fmt.Sprintf("%d 分 %02d 秒", m, s)
+		} else if lang == LangRussian {
+			dur = fmt.Sprintf("%d мин %02d с", m, s)
 		} else {
 			dur = fmt.Sprintf("%dm %02ds", m, s)
 		}
@@ -8130,9 +8178,17 @@ func formatElapsed(d time.Duration, streaming bool, lang Language) string {
 		m := (totalSec % 3600) / 60
 		if zh {
 			dur = fmt.Sprintf("%d 小时 %02d 分", h, m)
+		} else if lang == LangRussian {
+			dur = fmt.Sprintf("%d ч %02d мин", h, m)
 		} else {
 			dur = fmt.Sprintf("%dh %02dm", h, m)
 		}
+	}
+	if lang == LangRussian {
+		if streaming {
+			return fmt.Sprintf("⏱ Выполняется %s...", dur)
+		}
+		return fmt.Sprintf("⏱ Затрачено %s", dur)
 	}
 	if streaming {
 		if zh {
@@ -8816,7 +8872,7 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	}
 
 	if shellCmd == "" {
-		e.reply(p, msg.ReplyCtx, "Usage: /shell [--timeout <seconds>] <command>\nExample: /shell ls -la\nExample: /shell --timeout 300 npm install")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgShellUsage))
 		return
 	}
 
@@ -9567,6 +9623,8 @@ func usageAccountLabel(lang Language) string {
 		return "アカウント: "
 	case LangSpanish:
 		return "Cuenta: "
+	case LangRussian:
+		return "Аккаунт: "
 	default:
 		return "Account: "
 	}
@@ -9584,6 +9642,8 @@ func usageWindowLabel(lang Language, seconds int) string {
 			return "5時間枠"
 		case LangSpanish:
 			return "Límite 5h"
+		case LangRussian:
+			return "Лимит за 5 ч"
 		default:
 			return "5h limit"
 		}
@@ -9597,6 +9657,8 @@ func usageWindowLabel(lang Language, seconds int) string {
 			return "7日枠"
 		case LangSpanish:
 			return "Límite 7d"
+		case LangRussian:
+			return "Лимит за 7 дней"
 		default:
 			return "7d limit"
 		}
@@ -9608,6 +9670,8 @@ func usageWindowLabel(lang Language, seconds int) string {
 			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + "枠"
 		case LangSpanish:
 			return "Límite " + formatDurationI18n(time.Duration(seconds)*time.Second, lang)
+		case LangRussian:
+			return "Лимит за " + formatDurationI18n(time.Duration(seconds)*time.Second, lang)
 		default:
 			return formatDurationI18n(time.Duration(seconds)*time.Second, lang) + " limit"
 		}
@@ -9624,6 +9688,8 @@ func usageRemainingLabel(lang Language) string {
 		return "残り"
 	case LangSpanish:
 		return "restante"
+	case LangRussian:
+		return "Осталось"
 	default:
 		return "Remaining"
 	}
@@ -9639,6 +9705,8 @@ func usageResetLabel(lang Language) string {
 		return "リセット"
 	case LangSpanish:
 		return "Reinicio"
+	case LangRussian:
+		return "Сброс через"
 	default:
 		return "Resets"
 	}
@@ -9655,6 +9723,8 @@ func usageColon(lang Language) string {
 
 func usageCardTitle(lang Language) string {
 	switch lang {
+	case LangRussian:
+		return "Использование квот"
 	case LangChinese:
 		return "Usage"
 	case LangTraditionalChinese:
@@ -9678,6 +9748,8 @@ func usageUnavailableText(lang Language) string {
 		return "usage 情報はありません。"
 	case LangSpanish:
 		return "No hay datos de usage."
+	case LangRussian:
+		return "Данные об использовании недоступны."
 	default:
 		return "Usage unavailable."
 	}
@@ -9863,6 +9935,14 @@ func formatDurationI18n(d time.Duration, lang Language) string {
 	minutes := int(d.Minutes()) % 60
 
 	switch lang {
+	case LangRussian:
+		if days > 0 {
+			return fmt.Sprintf("%d д %d ч %d мин", days, hours, minutes)
+		}
+		if hours > 0 {
+			return fmt.Sprintf("%d ч %d мин", hours, minutes)
+		}
+		return fmt.Sprintf("%d мин", minutes)
 	case LangChinese, LangTraditionalChinese:
 		if days > 0 {
 			return fmt.Sprintf("%d天 %d小时 %d分钟", days, hours, minutes)
@@ -9938,7 +10018,7 @@ func (e *Engine) cmdHistory(p Platform, msg *Message, args []string) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📜 History (last %d):\n\n", len(entries)))
+	sb.WriteString(e.i18n.Tf(MsgHistoryHeader, len(entries)))
 	maxLen := e.historyEntryMaxLen()
 	for _, h := range entries {
 		icon := "👤"
@@ -9980,6 +10060,7 @@ func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
 			{
 				{Text: "日本語", Data: "cmd:/lang ja"},
 				{Text: "Español", Data: "cmd:/lang es"},
+				{Text: "Русский", Data: "cmd:/lang ru"},
 				{Text: "Auto", Data: "cmd:/lang auto"},
 			},
 		}
@@ -9999,6 +10080,7 @@ func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
 		sb.WriteString("- 繁體中文: `/lang zh-TW`\n")
 		sb.WriteString("- 日本語: `/lang ja`\n")
 		sb.WriteString("- Español: `/lang es`\n")
+		sb.WriteString("- Русский: `/lang ru`\n")
 		sb.WriteString("- Auto: `/lang auto`")
 		e.reply(p, msg.ReplyCtx, sb.String())
 		return
@@ -10017,6 +10099,8 @@ func (e *Engine) cmdLang(p Platform, msg *Message, args []string) {
 		lang = LangJapanese
 	case "es", "spanish", "español":
 		lang = LangSpanish
+	case "ru", "russian", "русский":
+		lang = LangRussian
 	case "auto":
 		lang = LangAuto
 	default:
@@ -10041,6 +10125,8 @@ func langDisplayName(lang Language) string {
 		return "日本語"
 	case LangSpanish:
 		return "Español"
+	case LangRussian:
+		return "Русский"
 	default:
 		return "Auto"
 	}
@@ -10798,7 +10884,7 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 		case "full", "compact", "quiet":
 			newMode = strings.ToLower(args[0])
 		default:
-			e.reply(p, msg.ReplyCtx, "Usage: /quiet [full|compact|quiet]")
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQuietUsage))
 			return
 		}
 	} else {
@@ -11392,7 +11478,7 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 
 	case "switch":
 		if len(args) < 2 {
-			e.reply(p, msg.ReplyCtx, "Usage: /provider switch <name>")
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderSwitchUsage))
 			return
 		}
 		e.switchProvider(p, msg, sessions, switcher, args[1])
@@ -11517,7 +11603,7 @@ func (e *Engine) cmdProviderAdd(p Platform, msg *Message, switcher ProviderSwitc
 
 func (e *Engine) cmdProviderRemove(p Platform, msg *Message, switcher ProviderSwitcher, args []string) {
 	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, "Usage: /provider remove <name>")
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgProviderRemoveUsage))
 		return
 	}
 	name := args[0]
@@ -13062,6 +13148,8 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			lang = LangJapanese
 		case "es", "spanish":
 			lang = LangSpanish
+		case "ru", "russian", "русский":
+			lang = LangRussian
 		case "auto":
 			lang = LangAuto
 		default:
@@ -13735,7 +13823,7 @@ func (e *Engine) renderLangCard() *Card {
 
 	langs := []struct{ code, label string }{
 		{"en", "English"}, {"zh", "中文"}, {"zh-TW", "繁體中文"},
-		{"ja", "日本語"}, {"es", "Español"}, {"auto", "Auto"},
+		{"ja", "日本語"}, {"es", "Español"}, {"ru", "Русский"}, {"auto", "Auto"},
 	}
 	var opts []CardSelectOption
 	initVal := ""
@@ -15983,22 +16071,22 @@ func (e *Engine) formatWhoamiText(msg *Message) string {
 	sb.WriteString("\n")
 
 	if msg.UserID != "" {
-		sb.WriteString(fmt.Sprintf("User ID: `%s`\n", msg.UserID))
+		sb.WriteString(e.i18n.Tf(MsgStatusUserID, msg.UserID))
 	} else {
-		sb.WriteString("User ID: (unknown)\n")
+		sb.WriteString(e.i18n.T(MsgWhoamiUnknownUserID))
 	}
 	if msg.UserName != "" {
-		sb.WriteString(fmt.Sprintf("Name: %s\n", msg.UserName))
+		fmt.Fprintf(&sb, "%s: %s\n", e.i18n.T(MsgWhoamiName), msg.UserName)
 	}
 	if msg.Platform != "" {
-		sb.WriteString(fmt.Sprintf("Platform: %s\n", msg.Platform))
+		fmt.Fprintf(&sb, "%s: %s\n", e.i18n.T(MsgWhoamiPlatform), msg.Platform)
 	}
 
 	chatID := effectiveChannelID(msg)
 	if chatID != "" {
-		sb.WriteString(fmt.Sprintf("Chat ID: `%s`\n", chatID))
+		sb.WriteString(e.i18n.Tf(MsgWhoamiChatID, chatID))
 	}
-	sb.WriteString(fmt.Sprintf("Session Key: `%s`\n", msg.SessionKey))
+	sb.WriteString(e.i18n.Tf(MsgStatusSessionKey, msg.SessionKey))
 
 	sb.WriteString("\n")
 	sb.WriteString(e.i18n.T(MsgWhoamiUsage))
