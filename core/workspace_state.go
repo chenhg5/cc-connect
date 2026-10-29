@@ -68,6 +68,16 @@ func (ws *workspaceState) HasActiveTurn() bool {
 	return ws.activeTurns > 0
 }
 
+// getSessions returns the workspace's session manager under ws.mu.
+// Management-API readers must use this instead of touching ws.sessions
+// directly — the pool map copy in All() does not protect the per-workspace
+// fields, and the race detector fires on unlocked reads.
+func (ws *workspaceState) getSessions() *SessionManager {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	return ws.sessions
+}
+
 func (ws *workspaceState) LastActivity() time.Time {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
