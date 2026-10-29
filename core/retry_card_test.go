@@ -322,6 +322,9 @@ func (s *scriptedRetrySession) Send(prompt string, _ string, images []ImageAttac
 	switch step {
 	case "fail":
 		s.events <- overloaded
+	case "text-fail":
+		s.events <- Event{Type: EventText, Content: "partial answer"}
+		s.events <- overloaded
 	case "progress-fail":
 		s.events <- Event{Type: EventToolUse, ToolName: "shell", ToolInput: "echo hi"}
 		s.events <- Event{Type: EventToolResult, ToolName: "shell", ToolResult: "hi"}
@@ -382,34 +385,45 @@ func TestProcessInteractiveTurnWithRetry_EveryRetryIsANumberedCardEntry(t *testi
 	}
 }
 
-// An attempt that made progress (ran tools) before failing proves the upstream
-// recovered, so the retry count starts over instead of draining the budget of
-// the whole turn.
-func TestProcessInteractiveTurnWithRetry_ProgressResetsTheRetryCount(t *testing.T) {
-	shortRetryPolicy(t, 3)
+// An attempt that produced output before failing proves nothing about the
+// upstream recovering: the failure came after the output. The retry budget is
+// therefore per turn and is never reset, so a turn that keeps failing after
+// producing output still gives up instead of looping forever.
+func TestProcessInteractiveTurnWithRetry_ProgressDoesNotResetTheBudget(t *testing.T) {
+	shortRetryPolicy(t, 2)
 	p := &retryCardTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	agent := &continueStubAgent{prompt: "CONTINUE-FROM-HERE"}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	sessionKey := "test:user1"
 	session := e.sessions.GetOrCreateActive(sessionKey)
-	agentSession := newScriptedRetrySession("s1", "fail", "progress-fail", "fail")
+	// Every attempt produces text and then fails retriably: exactly the shape
+	// the old reset treated as "progress" and looped on.
+	agentSession := newScriptedRetrySession("s1", "text-fail", "text-fail", "text-fail", "text-fail")
 	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1", eventsNeedResync: true}
 	e.interactiveStates[sessionKey] = state
 
-	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
-
-	if got := agentSession.sendCount(); got != 4 {
-		t.Fatalf("sendCount = %d, want 4: progress must reset the count so the turn is not exhausted", got)
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry loop did not stop: the retry budget was reset by an attempt that produced output")
 	}
+
+	if got := agentSession.sendCount(); got != 2 {
+		t.Fatalf("sendCount = %d, want 2 (max_attempts = 2 is the whole turn's budget)", got)
+	}
+	var failed bool
 	for _, msg := range p.getSent() {
-		if strings.Contains(msg, "overloaded") && !strings.Contains(msg, "retry") {
-			t.Fatalf("sent %q: the turn must not fail", msg)
+		if strings.Contains(msg, "overloaded") {
+			failed = true
 		}
 	}
-	_, finalized := p.cards[0].snapshot()
-	got := strings.Join(retryNoticesIn(finalized[len(finalized)-1]), ",")
-	if got != "1/2,1/2,2/2" {
-		t.Fatalf("retry entries = %q, want 1/2,1/2,2/2 in %q", got, finalized)
+	if !failed {
+		t.Fatalf("sent = %q, want the turn to end with the retriable error", p.getSent())
 	}
 }
 
@@ -501,5 +515,121 @@ func TestProcessInteractiveTurnWithRetry_ResumableAgentStillReplaysUnkeptPrompt(
 
 	if prompts, _ := agentSession.sent(); strings.Join(prompts, "|") != "hello|hello" {
 		t.Fatalf("prompts = %q, want the original prompt replayed", prompts)
+	}
+}
+
+// previewEventLog records the ordering of the events a preview-only platform
+// sees (a send vs. a preview start/delete), so a test can tell that the failed
+// attempt's preview is gone before the retry sends again.
+type previewEventLog struct {
+	mu  sync.Mutex
+	seq []string
+}
+
+func (l *previewEventLog) add(entry string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.seq = append(l.seq, entry)
+}
+
+func (l *previewEventLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.seq...)
+}
+
+// previewRetryPlatform is the stream-preview path used by Discord/Telegram:
+// it updates messages and deletes previews, but has no streaming cards.
+type previewRetryPlatform struct {
+	stubPlatformEngine
+	log *previewEventLog
+}
+
+func (p *previewRetryPlatform) SendPreviewStart(_ context.Context, _ any, _ string) (any, error) {
+	p.log.add("start")
+	return "preview-handle", nil
+}
+
+func (p *previewRetryPlatform) UpdateMessage(_ context.Context, _ any, _ string) error {
+	p.log.add("update")
+	return nil
+}
+
+func (p *previewRetryPlatform) DeletePreviewMessage(_ context.Context, _ any) error {
+	p.log.add("delete")
+	return nil
+}
+
+type previewRetrySession struct {
+	sessionID string
+	events    chan Event
+	log       *previewEventLog
+	mu        sync.Mutex
+	sends     int
+}
+
+func (s *previewRetrySession) Send(_ string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.log.add("send")
+	s.mu.Lock()
+	s.sends++
+	sendNo := s.sends
+	s.mu.Unlock()
+	if sendNo == 1 {
+		s.events <- Event{Type: EventText, Content: "partial answer"}
+		s.events <- Event{Type: EventError, Error: errors.New("APIError: Our servers are currently overloaded. Please try again later."), ErrorKind: ErrorKindOverloaded}
+		return nil
+	}
+	s.events <- Event{Type: EventText, Content: "final answer"}
+	s.events <- Event{Type: EventResult, Content: "final answer", Done: true}
+	return nil
+}
+
+func (s *previewRetrySession) RespondPermission(_ string, _ PermissionResult) error { return nil }
+func (s *previewRetrySession) Events() <-chan Event                                 { return s.events }
+func (s *previewRetrySession) CurrentSessionID() string                             { return s.sessionID }
+func (s *previewRetrySession) Alive() bool                                          { return true }
+func (s *previewRetrySession) Close() error                                         { close(s.events); return nil }
+
+// A failed attempt's stream preview must be discarded before the retry starts:
+// every attempt opens its own preview, so leaving the dead one behind leaves a
+// stale partial answer in the chat for each failed attempt.
+func TestProcessInteractiveTurnWithRetry_DiscardsFailedAttemptPreview(t *testing.T) {
+	shortRetryPolicy(t, 3)
+	log := &previewEventLog{}
+	p := &previewRetryPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}, log: log}
+	e := NewEngine("test", &continueStubAgent{prompt: "CONTINUE-FROM-HERE"}, []Platform{p}, "", LangEnglish)
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true, MinDeltaChars: 1, MaxChars: 500})
+	sessionKey := "test:user1"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := &previewRetrySession{sessionID: "s1", events: make(chan Event, 16), log: log}
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx-1", eventsNeedResync: true}
+	e.interactiveStates[sessionKey] = state
+
+	e.processInteractiveTurnWithRetry(state, session, e.sessions, sessionKey, "hello", "m1", nil, nil, "ctx-1", time.Now(), sessionKey, len("hello"), 0)
+
+	var sends, deletes []int
+	for i, entry := range log.snapshot() {
+		switch entry {
+		case "send":
+			sends = append(sends, i)
+		case "delete":
+			deletes = append(deletes, i)
+		}
+	}
+	if len(sends) != 2 {
+		t.Fatalf("sends = %d, want 2 (one retried turn); log = %v", len(sends), log.snapshot())
+	}
+	if len(deletes) == 0 {
+		t.Fatalf("no preview was deleted; log = %v", log.snapshot())
+	}
+	discarded := false
+	for _, d := range deletes {
+		if d > sends[0] && d < sends[1] {
+			discarded = true
+			break
+		}
+	}
+	if !discarded {
+		t.Fatalf("the failed attempt's preview was not deleted before the retry; log = %v", log.snapshot())
 	}
 }
