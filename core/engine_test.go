@@ -1551,9 +1551,22 @@ func TestProcessInteractiveEvents_QueuedMessageGetsFreshBaseline(t *testing.T) {
 	}()
 
 	// Wait until the engine goroutine opened its fingerprint window (baseline A
-	// is sampled right after), plus a settle window for the git scan itself, so
-	// the tree change below lands strictly after A.
+	// is sampled right after). The baseline is two git calls (status and
+	// rev-parse), both recorded by the shim above, so wait for them instead of
+	// guessing a settle window: under load the scans take longer than any fixed
+	// sleep, and the tree change below must land strictly after A.
 	waitFingerprintWindows(t, e, dir, 1)
+	baselineDeadline := time.Now().Add(5 * time.Second)
+	for {
+		calls, err := os.ReadFile(gitCallLog)
+		if err == nil && len(calls) >= 2 {
+			break
+		}
+		if time.Now().After(baselineDeadline) {
+			t.Fatalf("baseline git scan recorded %d calls, want 2", len(calls))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "x.txt"), []byte("change"), 0600); err != nil {
 		t.Fatal(err)
 	}
