@@ -700,7 +700,26 @@ const (
 	MsgAgentRelayToolPrompt MsgKey = "agent_relay_tool_prompt"
 )
 
+const (
+	MsgDocumentCommentFailed    MsgKey = "document_comment_failed"
+	MsgDocumentCommentReference MsgKey = "document_comment_reference"
+)
+
 var messages = map[MsgKey]map[Language]string{
+	MsgDocumentCommentFailed: {
+		LangEnglish:            "Unable to process the document comment: %s. Check the bot's access to this resource, then mention it again.",
+		LangChinese:            "无法处理文档评论：%s。请检查机器人对该资源的访问权限，再重新 @。",
+		LangTraditionalChinese: "無法處理文件留言：%s。請檢查機器人對此資源的存取權限，再重新 @。",
+		LangJapanese:           "ドキュメントのコメントを処理できませんでした：%s。ボットのアクセス権限を確認してから、再度メンションしてください。",
+		LangSpanish:            "No se pudo procesar el comentario del documento: %s. Comprueba el acceso del bot al recurso y vuelve a mencionarlo.",
+	},
+	MsgDocumentCommentReference: {
+		LangEnglish:            "Reply to comment %s:\n\n%s",
+		LangChinese:            "回复评论 %s：\n\n%s",
+		LangTraditionalChinese: "回覆留言 %s：\n\n%s",
+		LangJapanese:           "コメント %s への返信：\n\n%s",
+		LangSpanish:            "Respuesta al comentario %s:\n\n%s",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

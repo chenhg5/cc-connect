@@ -3476,7 +3476,9 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	if !finalReplyOnly(p) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	}
 	return true
 }
 
@@ -5415,7 +5417,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 	}
 
+	state.mu.Lock()
+	onlyFinal := finalReplyOnly(state.platform)
+	state.mu.Unlock()
 	var textParts []string
+	var finalAnswerStart int
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
 	toolCount := 0
@@ -5481,7 +5487,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
 	// is only needed when the platform doesn't support cards or card creation failed.
-	if e.instantReply.Enabled && streamCard == nil {
+	if e.instantReply.Enabled && streamCard == nil && !onlyFinal {
 		replyContent := e.instantReply.Content
 		if replyContent == "" {
 			replyContent = e.i18n.T(MsgStarting)
@@ -5637,14 +5643,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Lock()
 		p := state.platform
 		state.mu.Unlock()
+		onlyFinal = finalReplyOnly(p)
+		display := e.display
+		if onlyFinal {
+			display.Mode = "quiet"
+			display.ThinkingMessages = false
+			display.ToolMessages = false
+		}
 
 		// main codebase has no per-session quiet flag; pr309 referenced
-		// sessionQuiet which we drop. e.display.ThinkingMessages /
+		// sessionQuiet which we drop. display.ThinkingMessages /
 		// ToolMessages handle user-level quiet in the fallback branches.
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
 		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
 		// Default "legacy" keeps upstream behavior for all platforms.
-		if e.display.CardMode != "rich" {
+		if display.CardMode != "rich" {
 			hasRichCard = false
 		}
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
@@ -5658,6 +5671,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
 		}
 
+		if onlyFinal && (event.Type == EventToolUse || event.Type == EventThinking) {
+			finalAnswerStart = len(textParts)
+		}
 		switch event.Type {
 		case EventModelSwitch:
 			e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
@@ -5668,6 +5684,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// final aggregation cannot concatenate the invalid draft.
 			textParts = nil
 			segmentStart = 0
+			finalAnswerStart = 0
 			silentHold = false
 			partialText = ""
 			cardAnswerText.Reset()
@@ -5680,10 +5697,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if hasRichCard {
 				// When thinking messages are suppressed, skip card creation.
-				if !e.display.ThinkingMessages {
+				if !display.ThinkingMessages {
 					break
 				}
-				if thinking := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen)); thinking != "" {
+				if thinking := strings.TrimSpace(truncateIf(event.Content, display.ThinkingMaxLen)); thinking != "" {
 					toolSteps = append(toolSteps, ToolStep{
 						Kind:    ToolStepKindThinking,
 						Name:    "Thinking",
@@ -5712,8 +5729,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When thinking messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ThinkingMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
+			if !display.ThinkingMessages && len(textParts) > segmentStart {
+				if display.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
@@ -5733,10 +5750,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
-			if e.display.ThinkingMessages && event.Content != "" {
+			if display.ThinkingMessages && event.Content != "" {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
-					cardThinkingText = truncateIf(event.Content, e.display.ThinkingMaxLen)
+					cardThinkingText = truncateIf(event.Content, display.ThinkingMaxLen)
 					_ = streamCard.Update(e.ctx, buildCardContent(cardThinkingText, cardToolCalls, cardAnswerText.String()))
 					continue // skip original independent message sending
 				}
@@ -5759,7 +5776,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if previewActive {
 					sp.detachPreview() // keep frozen preview visible as permanent message
 				}
-				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
+				preview := truncateIf(event.Content, display.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
 					sendWorkspace(p, replyCtx, thinkingMsg)
@@ -5770,13 +5787,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			toolCount++
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
-				if !e.display.ToolMessages {
+				if !display.ToolMessages {
 					break
 				}
 				toolSteps = append(toolSteps, ToolStep{
 					Kind:    ToolStepKindTool,
 					Name:    event.ToolName,
-					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
+					Summary: truncateIf(event.ToolInput, display.ToolMaxLen),
 				})
 				if cardMessageID == nil {
 					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
@@ -5799,8 +5816,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
-			if !e.display.ToolMessages && len(textParts) > segmentStart {
-				if e.display.Mode == "quiet" {
+			if !display.ToolMessages && len(textParts) > segmentStart {
+				if display.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
 					}
@@ -5820,7 +5837,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				silentHold = false
 			}
-			if e.display.ToolMessages {
+			if display.ToolMessages {
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					toolInput := event.ToolInput
@@ -5888,7 +5905,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Truncate the tool input that goes into the progress card payload so
 				// tool_max_len applies uniformly to progress_style=card, matching
 				// the rich-card path. event.ToolInput itself is left untouched.
-				cardToolInput := truncateIf(toolInput, e.display.ToolMaxLen)
+				cardToolInput := truncateIf(toolInput, display.ToolMaxLen)
 				if !cp.AppendEvent(ProgressEntryToolUse, cardToolInput, event.ToolName, toolMsg) {
 					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
 						sendWorkspace(p, replyCtx, chunk)
@@ -5897,17 +5914,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-			if e.display.ToolMessages {
+			if display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
 					result = strings.TrimSpace(event.Content)
 				}
 				if result != "" {
-					result = truncateIf(result, e.display.ToolMaxLen)
+					result = truncateIf(result, display.ToolMaxLen)
 				}
 				if result != "" || event.ToolStatus != "" || event.ToolExitCode != nil || event.ToolSuccess != nil {
 					if hasRichCard {
-						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
+						toolSteps = mergeRichToolResult(toolSteps, event, result, display.ToolMaxLen)
 						if cardMessageID == nil {
 							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
 							if starter, ok := p.(PreviewStarter); ok {
@@ -5945,7 +5962,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventText:
 			content := event.Content
-			if e.display.HideAgentFooter {
+			if display.HideAgentFooter {
 				content = stripAgentFooterLines(content)
 			}
 			if content != "" && !isEllipsisOnly(content) {
@@ -6143,7 +6160,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if isAskQuestion {
 				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
 			} else {
-				permLimit := e.display.ToolMaxLen
+				permLimit := display.ToolMaxLen
 				if permLimit > 0 {
 					permLimit = permLimit * 8 / 5
 				}
@@ -6218,16 +6235,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.mu.Unlock()
 
 			fullResponse := event.Content
-			if e.display.HideAgentFooter {
+			if display.HideAgentFooter {
 				fullResponse = stripAgentFooterLines(fullResponse)
 			}
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			if len(textParts) > 0 && segmentStart == 0 && !display.ToolMessages && !onlyFinal {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
+			}
+			if onlyFinal && len(textParts) > finalAnswerStart {
+				fullResponse = strings.Join(textParts[finalAnswerStart:], "")
 			}
 			if fullResponse == "" {
 				state.mu.Lock()
@@ -6648,6 +6668,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				remainingQueue := len(state.pendingMessages)
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
+				onlyFinal = finalReplyOnly(queued.platform)
 				state.currentMessageID = queued.messageID
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
@@ -6700,6 +6721,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				msgID = queued.messageID
 				textParts = nil
 				segmentStart = 0
+				finalAnswerStart = 0
 				toolCount = 0
 				turnStart = time.Now()
 				firstEventLogged = false
@@ -6742,7 +6764,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 
 				// Send instant reply for queued turn if no streaming card is active.
-				if e.instantReply.Enabled && streamCard == nil {
+				if e.instantReply.Enabled && streamCard == nil && !onlyFinal {
 					replyContent := e.instantReply.Content
 					if replyContent == "" {
 						replyContent = e.i18n.T(MsgStarting)
@@ -6852,6 +6874,14 @@ channelClosed:
 	state.mu.Unlock()
 	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
 	e.cleanupInteractiveState(sessionKey, state)
+
+	if onlyFinal {
+		state.mu.Lock()
+		p := state.platform
+		state.mu.Unlock()
+		e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent process exited before a final answer"))
+		return
+	}
 
 	if len(textParts) > 0 {
 		state.mu.Lock()

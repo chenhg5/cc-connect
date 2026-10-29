@@ -1076,6 +1076,9 @@ app_secret = "your-feishu-app-secret"
 #                           # 允许的群聊 chat_id，逗号分隔；"*" 表示所有（默认）。在群设置中查看 chat_id。
 # group_only = false        # If true, only respond to group chat messages; ignore private (P2P) messages (default: false)
 #                           # 设为 true 时，仅响应群聊消息，忽略私聊（P2P）消息（默认 false）
+# enable_document_comments = false  # Handle explicit bot mentions in document comments (opt-in)
+#                                   # Requires drive.notice.comment_add_v1 and resource/comment permissions.
+# document_context_max_chars = 12000 # Resource preview budget; see docs/feishu-document-comments.md
 # ack_emoji = "Get"        # Immediate persistent receipt when accepted for processing/queueing; omitted/"none" disables
 #                           # 消息被接受处理或入队时立即添加并保留的确认表情；不配置或设为 "none" 可禁用
 # reaction_emoji = "OnIt"  # Temporary reaction while the agent is processing (default: "OnIt"); "none" disables

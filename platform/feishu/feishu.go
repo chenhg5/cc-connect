@@ -116,6 +116,11 @@ type replyContext struct {
 }
 
 type Platform struct {
+	enableDocumentComments     bool
+	documentContextMaxChars    int
+	documentDedup              *core.MessageDedup
+	documentContext            context.Context
+	documentCancel             context.CancelFunc
 	mu                         sync.RWMutex
 	platformName               string
 	domain                     string
@@ -346,6 +351,23 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 			domain = v
 		}
 	}
+	enableDocumentComments, _ := opts["enable_document_comments"].(bool)
+	documentContextMaxChars := documentContextLimit
+	if raw, ok := opts["document_context_max_chars"]; ok {
+		var value int64
+		switch v := raw.(type) {
+		case int:
+			value = int64(v)
+		case int64:
+			value = v
+		default:
+			return nil, fmt.Errorf("feishu: document_context_max_chars must be an integer")
+		}
+		if value < 1 || value > 100000 {
+			return nil, fmt.Errorf("feishu: document_context_max_chars must be between 1 and 100000")
+		}
+		documentContextMaxChars = int(value)
+	}
 	reactionEmoji, _ := opts["reaction_emoji"].(string)
 	if reactionEmoji == "" {
 		reactionEmoji = "OnIt"
@@ -473,6 +495,9 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	}
 
 	base := &Platform{
+		enableDocumentComments:     enableDocumentComments,
+		documentContextMaxChars:    documentContextMaxChars,
+		documentDedup:              core.NewMessageDedup(10 * time.Minute),
 		platformName:               name,
 		domain:                     domain,
 		appID:                      appID,
@@ -559,6 +584,7 @@ func (p *Platform) KeepPreviewOnFinish() bool {
 }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
+	p.documentContext, p.documentCancel = context.WithCancel(context.Background())
 	p.mu.Lock()
 	p.handler = handler
 	p.mu.Unlock()
@@ -568,7 +594,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	// the same auth/bootstrap flow as the public SDK path, but the webhook server
 	// can still receive events and operate correctly. We therefore only attempt
 	// bot open_id discovery eagerly for WebSocket mode.
-	if !p.shouldUseWebhookMode() {
+	if !p.shouldUseWebhookMode() || p.enableDocumentComments {
 		openID, err := p.fetchBotOpenIDWithRetry(p.bgCtxForStartup())
 		if err != nil {
 			// Issue #1618: previous code failed open here — when bot open_id
@@ -616,6 +642,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 				}
 			}
 			return nil
+		}).
+		OnCustomizedEvent("drive.notice.comment_add_v1", func(ctx context.Context, req *larkevent.EventReq) error {
+			return p.onDocumentCommentRequest(ctx, req)
 		}).
 		OnP2MessageRecalledV1(func(ctx context.Context, event *larkim.P2MessageRecalledV1) error {
 			for _, sibling := range p.sharedGroup.allPlatforms() {
@@ -3381,6 +3410,9 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 }
 
 func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
+	if rc, ok := rctx.(documentReplyContext); ok {
+		return p.replyDocumentComment(ctx, rc, content)
+	}
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
@@ -3399,6 +3431,9 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 // is sent as a reply (quoting the original) so the conversation stays threaded.
 // Falls back to creating a standalone message when no message ID exists.
 func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
+	if rc, ok := rctx.(documentReplyContext); ok {
+		return p.replyDocumentComment(ctx, rc, content)
+	}
 	rc, ok := rctx.(replyContext)
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
@@ -4619,6 +4654,9 @@ func stringValue(v *string) string {
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
+	if rc, ok := p.parseDocumentSessionKey(sessionKey); ok {
+		return rc, nil
+	}
 	// {platformName}:{chatID}:{userID}
 	parts := strings.SplitN(sessionKey, ":", 3)
 	if len(parts) < 2 || parts[0] != p.platformName {
@@ -4688,6 +4726,9 @@ func isThreadSessionKey(sessionKey string) bool {
 //
 // The returned value omits the platform name; core prepends it.
 func (p *Platform) ChannelKeyFromSessionKey(sessionKey string) (string, bool) {
+	if rc, ok := p.parseDocumentSessionKey(sessionKey); ok {
+		return "doc:" + rc.fileToken + ":" + rc.commentID, true
+	}
 	if !p.threadIsolation {
 		return "", false
 	}
@@ -5611,6 +5652,9 @@ func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle,
 }
 
 func (p *Platform) Stop() error {
+	if p.documentCancel != nil {
+		p.documentCancel()
+	}
 	// Issue #1618: stop the background supervisor that retries the
 	// bot-info API when startup discovery fails. Without this the
 	// goroutine could outlive the platform and leak into the next
