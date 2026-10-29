@@ -79,6 +79,18 @@ func TestCodexFreshThreadDoesNotBaselineAwayFastChildren(t *testing.T) {
 	}
 }
 
+func TestCodexFirstTurnRestartRetainsUnreportedChildren(t *testing.T) {
+	root := t.TempDir()
+	var started codexSidechainMeter
+	started.begin(root, "parent", false)
+	writeChildRollout(t, root, "child", "parent", 1000, 500, 20)
+	var resumed codexSidechainMeter
+	resumed.begin(root, "parent", true)
+	if got := resumed.collect(); got == nil || got.InputTokens != 500 || got.OutputTokens != 20 {
+		t.Fatalf("restart before first result lost unreported child usage: %+v", got)
+	}
+}
+
 // This opt-in test consumes real inference. Keep it distinct from protocol
 // fixtures: a missing login, unsupported model or absent child must fail it.
 func TestCodexSidechainLiveCLI(t *testing.T) {
@@ -111,7 +123,7 @@ func TestCodexSidechainLiveCLI(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
-	s, err := newAppServerSession(ctx, cli, nil, "stdio://", workDir, model, "low", "suggest", "", "", "", nil, home, "", "")
+	s, err := newAppServerSession(ctx, cli, nil, "stdio://", workDir, model, "low", "suggest", "", "", "", []string{"CODEX_HOME=" + home}, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +145,7 @@ func TestCodexSidechainLiveCLI(t *testing.T) {
 				continue
 			}
 			sc := event.Sidechain
-			if sc == nil || sc.InputTokens+sc.CacheReadInputTokens <= 0 || sc.OutputTokens <= 0 || len(sc.ByModel) == 0 {
+			if sc == nil || sc.InputTokens+sc.CacheReadInputTokens <= 0 || sc.OutputTokens <= 0 || sc.ByModel[model].OutputTokens <= 0 {
 				t.Fatalf("live child usage missing: %+v", sc)
 			}
 			if event.InputTokens+event.CacheReadInputTokens <= 0 || event.OutputTokens <= 0 {

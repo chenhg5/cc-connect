@@ -1,9 +1,12 @@
 package opencode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -428,3 +431,28 @@ func TestHandleToolUseErrorNoMessageNoText(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+
+func TestErrorPreservesConsumedUsageWithoutRebillingTheFallback(t *testing.T) {
+	s := &opencodeSession{ctx: context.Background(), events: make(chan core.Event, 8)}
+	s.turnUsage = core.TokenUsage{InputTokens: 100, OutputTokens: 10, CacheReadInputTokens: 200}
+	s.handleError(map[string]any{"error": "provider unavailable"})
+	errEvent := <-s.events
+	if errEvent.Type != core.EventError || errEvent.InputTokens != 100 || errEvent.OutputTokens != 10 || errEvent.CacheReadInputTokens != 200 {
+		t.Fatalf("failed turn lost consumed usage: %+v", errEvent)
+	}
+	s.sendEventResult()
+	fallback := <-s.events
+	if fallback.InputTokens != 0 || fallback.OutputTokens != 0 || fallback.CacheReadInputTokens != 0 {
+		t.Fatalf("fallback rebilled failed usage: %+v", fallback)
+	}
+}
+
+func TestScannerFailurePreservesConsumedUsage(t *testing.T) {
+	s := &opencodeSession{ctx: context.Background(), events: make(chan core.Event, 4), turnUsage: core.TokenUsage{InputTokens: 10, OutputTokens: 20}}
+	s.wg.Add(1)
+	s.readLoop(exec.Command("true"), io.NopCloser(strings.NewReader(strings.Repeat("x", 11*1024*1024))), &bytes.Buffer{})
+	result := <-s.events
+	if result.Type != core.EventError || result.InputTokens != 10 || result.OutputTokens != 20 || len(s.events) != 0 {
+		t.Fatalf("scanner error lost consumed usage: %+v", result)
+	}
+}

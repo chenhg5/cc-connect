@@ -234,6 +234,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	if err := scanner.Err(); err != nil {
 		slog.Error("opencodeSession: scanner error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
+		s.takeUsage(&evt)
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -255,6 +256,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 			slog.Warn("opencodeSession: cleared stale session ID")
 		}
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
+		s.takeUsage(&evt)
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():
@@ -440,6 +442,7 @@ func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
 	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
+	s.takeUsage(&evt)
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
@@ -520,7 +523,7 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 				Cache                    struct{ Read, Write int }
 			}
 			if json.Unmarshal(data, &tokens) == nil {
-				s.turnUsage.Add(core.TokenUsage{InputTokens: tokens.Input, OutputTokens: tokens.Output,
+				s.turnUsage.Add(core.TokenUsage{InputTokens: tokens.Input, OutputTokens: tokens.Output + tokens.Reasoning,
 					ReasoningOutputTokens: tokens.Reasoning, CacheReadInputTokens: tokens.Cache.Read,
 					CacheCreationInputTokens: tokens.Cache.Write})
 			}
@@ -541,12 +544,20 @@ func (s *opencodeSession) sendEventResult() {
 	s.resultSent.Store(true)
 	sid := s.CurrentSessionID()
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
-	s.turnUsage.Apply(&evt)
-	evt.Sidechain = s.sidechain.collect()
+	s.takeUsage(&evt)
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
 	}
+}
+
+// An error can be followed by the EOF fallback result. Drain the completed
+// requests once so failed turns retain their usage without billing it twice.
+func (s *opencodeSession) takeUsage(event *core.Event) {
+	s.turnUsage.Apply(event)
+	s.turnUsage = core.TokenUsage{}
+	event.Sidechain = s.sidechain.collect()
+	event.UsageIncomplete = s.sidechain.incomplete
 }
 
 // RespondPermission is a no-op — OpenCode handles permissions internally.

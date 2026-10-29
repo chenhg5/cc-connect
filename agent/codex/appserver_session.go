@@ -236,7 +236,11 @@ func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []stri
 		_ = s.Close()
 		return nil, err
 	}
-	s.sidechain.begin(s.codexHome, s.CurrentSessionID(), resumeID != "" && resumeID != core.ContinueSession)
+	usageHome := s.codexHome
+	if usageHome == "" {
+		usageHome, _ = resolveCodexHome(s.extraEnv)
+	}
+	s.sidechain.begin(usageHome, s.CurrentSessionID(), resumeID != "" && resumeID != core.ContinueSession)
 	if err := s.refreshUsage(context.Background()); err != nil {
 		slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
 	}

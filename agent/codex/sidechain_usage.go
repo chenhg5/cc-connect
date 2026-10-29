@@ -42,8 +42,8 @@ func (m *codexSidechainMeter) begin(root, parent string, baseline bool) {
 		for id, usage := range m.snapshots() {
 			m.meter.Observe(id, codexBillingUsage(usage))
 		}
-		m.meter.Save()
 	}
+	m.meter.Save()
 }
 
 func codexBillingUsage(usage codexTokenUsage) core.TokenUsage {

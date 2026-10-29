@@ -16,8 +16,10 @@ import (
 )
 
 type opencodeSidechainMeter struct {
-	path, session string
-	meter         *core.UsageMeter
+	path, session   string
+	meter           *core.UsageMeter
+	incomplete      bool
+	baselinePending bool
 }
 
 func opencodeDataDir(extraEnv []string) string {
@@ -38,19 +40,27 @@ func (m *opencodeSidechainMeter) begin(dir, session string, baseline bool) {
 	var restored bool
 	m.meter, restored = core.NewUsageMeter(filepath.Join(dir, "cc-connect-usage", session+".json"))
 	if baseline && !restored {
+		m.baselinePending = true
 		m.collect()
+	} else {
+		// Persist ownership before the first result, including an empty meter.
+		m.meter.Save()
 	}
 }
 
 func (m *opencodeSidechainMeter) collect() *core.SidechainUsage {
+	m.incomplete = false
 	if m.meter == nil {
 		return nil
 	}
 	if _, err := os.Stat(m.path); err != nil {
+		m.incomplete = true
+		slog.Warn("opencode: child usage database unavailable", "error", err)
 		return nil
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: m.path, RawQuery: "mode=ro"}).String())
 	if err != nil {
+		m.incomplete = true
 		slog.Warn("opencode: open child usage database", "error", err)
 		return nil
 	}
@@ -63,6 +73,7 @@ func (m *opencodeSidechainMeter) collect() *core.SidechainUsage {
 	) SELECT m.id,m.data FROM message m JOIN family f ON m.session_id = f.id
 	WHERE m.session_id <> ?`, m.session, m.session)
 	if err != nil {
+		m.incomplete = true
 		slog.Warn("opencode: read child usage", "error", err)
 		return nil
 	}
@@ -73,6 +84,7 @@ func (m *opencodeSidechainMeter) collect() *core.SidechainUsage {
 	for rows.Next() {
 		var id, data string
 		if err := rows.Scan(&id, &data); err != nil {
+			m.incomplete = true
 			slog.Warn("opencode: decode child usage row", "error", err)
 			continue
 		}
@@ -86,11 +98,16 @@ func (m *opencodeSidechainMeter) collect() *core.SidechainUsage {
 				Cache                    struct{ Read, Write int }
 			}
 		}
-		if json.Unmarshal([]byte(data), &message) != nil || message.Role != "assistant" || message.Time.Completed == nil {
+		if err := json.Unmarshal([]byte(data), &message); err != nil {
+			m.incomplete = true
+			slog.Warn("opencode: invalid child usage message", "error", err)
+			continue
+		}
+		if message.Role != "assistant" || message.Time.Completed == nil {
 			continue
 		}
 		tokens := message.Tokens
-		delta := m.meter.Observe(id, core.TokenUsage{InputTokens: tokens.Input, OutputTokens: tokens.Output,
+		delta := m.meter.Observe(id, core.TokenUsage{InputTokens: tokens.Input, OutputTokens: tokens.Output + tokens.Reasoning,
 			ReasoningOutputTokens: tokens.Reasoning, CacheReadInputTokens: tokens.Cache.Read, CacheCreationInputTokens: tokens.Cache.Write})
 		if !delta.Empty() {
 			requests++
@@ -105,7 +122,18 @@ func (m *opencodeSidechainMeter) collect() *core.SidechainUsage {
 		byModel[model] = usage
 	}
 	if err := rows.Err(); err != nil {
+		m.incomplete = true
 		slog.Warn("opencode: child usage query interrupted", "error", err)
+	}
+	if m.baselinePending {
+		// An unavailable legacy baseline is retried rather than billing its
+		// historical requests after the database recovers.
+		if !m.incomplete {
+			m.baselinePending = false
+			m.meter.Save()
+		}
+		m.incomplete = true
+		return nil
 	}
 	m.meter.Save()
 	if total.Empty() {

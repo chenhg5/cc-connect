@@ -3,8 +3,9 @@ package opencode
 import (
 	"context"
 	"encoding/json"
-	"github.com/chenhg5/cc-connect/core"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestStepUsageIncludesEveryRequestOnce(t *testing.T) {
@@ -21,7 +22,7 @@ func TestStepUsageIncludesEveryRequestOnce(t *testing.T) {
 		s.handleStepFinish(event)
 	}
 	result := <-s.events
-	if result.InputTokens != 300 || result.OutputTokens != 30 || result.CacheReadInputTokens != 500 || result.CacheCreationInputTokens != 110 || result.ReasoningOutputTokens != 9 {
+	if result.InputTokens != 300 || result.OutputTokens != 39 || result.CacheReadInputTokens != 500 || result.CacheCreationInputTokens != 110 || result.ReasoningOutputTokens != 9 {
 		t.Fatalf("step usage lost or counted twice: %+v", result)
 	}
 }
