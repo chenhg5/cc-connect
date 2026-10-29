@@ -89,12 +89,23 @@ reset_on_idle_mins = 60
 
 ### Codex 模式
 
-| 模式 | 配置值 | 行为 |
+Codex 有两个后端（`backend` 选项），**同一个 mode 在不同后端下行为不同**：
+
+| 后端 | 配置值 | 说明 |
 |------|--------|------|
-| 建议 | `suggest` | 仅受信命令自动执行 |
-| 自动编辑 | `auto-edit` | 模型自行决定 |
-| 全自动 | `full-auto` | 自动通过 + 沙箱保护 |
-| YOLO | `yolo` | 跳过所有审批 |
+| 默认后端 | `exec` | 运行 `codex exec --json`，**没有审批通道**，`approval_policy` 恒为 `never`，任何 mode 都不会弹交互式审批；限制模型的只有沙箱档位（只读 / 工作区可写） |
+| app-server | `app_server` | 运行 Codex app-server，是**唯一会真的询问**的后端 |
+
+| 模式 | 配置值 | `exec` 后端 | `app_server` 后端 |
+|------|--------|------|------|
+| 建议 | `suggest` | 只读沙箱，不弹审批 | 每次工具调用都请求审批（最安全，默认） |
+| 自动编辑 | `auto-edit` | 工作区可写沙箱，不弹审批（exec 后端上等同于 `full-auto`） | 工作区可写沙箱，不弹审批 |
+| 全自动 | `full-auto` | 工作区可写沙箱，不弹审批 | 工作区可写沙箱，不弹审批 |
+| YOLO | `yolo` | 跳过所有审批和沙箱（危险） | 跳过所有审批和沙箱（危险） |
+
+**怎么才会真的弹审批**：只有 `backend = "app_server"` + `mode = "suggest"` 这一条现成路径——`exec` 后端没有审批 IPC，`approval_policy` 只能是 `never`，否则 CLI 会一直等一个永远不会到来的 TTY 响应。
+
+**`app_server_url` 怎么写**：仅 `app_server` 后端用到，推荐 `app_server_url = "stdio"`（会被归一为 `stdio://`）。**版本陷阱（重要）**：这个选项**只对包含 [#1786](https://github.com/chenhg5/cc-connect/pull/1786) 的构建生效**（当前 main，尚未进入任何已发布版）。已发布版本（v1.5.1-beta.3 及更早）的 `connect()` 对任何非空 url 都会追加 `--listen`，于是 `stdio` 归一后的 `stdio://` 等于 `--listen stdio://`；在 codex 0.152+ 上只要带 `--listen`，app-server 就只服务监听器、stdio 不响应，每次 `initialize` 都会超时（[#1781](https://github.com/chenhg5/cc-connect/issues/1781)）——**显式写 `app_server_url = "stdio"` 在已发布版上同样会超时**。已发布版请改用 `backend = "exec"`，或等包含 #1786 的版本发布；只有在 codex < 0.152 上，stdio 传输才不受 `--listen` 影响。
 
 ### macOS 上的 Codex CLI 查找
 
