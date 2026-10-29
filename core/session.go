@@ -60,6 +60,11 @@ type Session struct {
 	busy      bool       `json:"-"`
 	busySince time.Time  `json:"-"` // custom 2026-09-12: when the busy lock was acquired (stale-lock self-heal)
 	lockGen   uint64     `json:"-"` // custom 2026-09-12: lock generation, invalidates late unlocks after BreakStaleLock
+
+	// usageLimit is the last usage-limit refusal of a turn on this session,
+	// taken by a timer run to report it (see noteUsageLimit).
+	usageLimitMu sync.Mutex
+	usageLimit   *UsageLimit
 }
 
 // TryLock acquires the busy lock for a new turn. It returns a generation

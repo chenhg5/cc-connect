@@ -444,6 +444,16 @@ type Engine struct {
 	autoCompressAllowHeuristic bool
 	resetOnIdle                time.Duration
 
+	// usageLimitReply replaces the agent's refusal text when a turn is
+	// refused for a usage limit (empty: send the agent's text).
+	usageLimitReply string
+	// usageLimitNotified is set once usageLimitReply has gone out for the
+	// current limit episode; usageLimitNotifiedUntil is the reset time that
+	// reply announced (zero: until a turn gets an answer).
+	usageLimitMu            sync.Mutex
+	usageLimitNotified      bool
+	usageLimitNotifiedUntil time.Time
+
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
 	//   line 2 — workspace directory                       (gated by showWorkdirIndicator)
@@ -991,6 +1001,30 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 		return
 	}
 	e.resetOnIdle = d
+}
+
+// reportUsageLimit emits turn.usage_limited for a turn the provider refused,
+// so a hook can hand the user's message to someone who can still answer it.
+func (e *Engine) reportUsageLimit(p Platform, sessionKey, msgID string, event Event, reply string) {
+	extra := map[string]any{"limit_text": event.Content, "prompt": event.UsageLimit.Prompt}
+	if msgID != "" {
+		extra["in_reply_to"] = msgID
+	}
+	if !event.UsageLimit.ResetsAt.IsZero() {
+		extra["resets_at"] = event.UsageLimit.ResetsAt.UTC().Format(time.RFC3339)
+	}
+	if reply != "" {
+		extra["reply"] = reply
+	}
+	slog.Warn("turn refused for a usage limit", "session", sessionKey, "msg_id", msgID, "resets_at", extra["resets_at"])
+	e.hooks.Emit(HookEvent{Event: HookEventUsageLimited, SessionKey: sessionKey, Platform: p.Name(), Extra: extra})
+}
+
+// SetUsageLimitReply sets the text sent instead of the agent's refusal when a
+// turn is refused because a usage limit has been reached; empty keeps the
+// agent's own text.
+func (e *Engine) SetUsageLimitReply(text string) {
+	e.usageLimitReply = strings.TrimSpace(text)
 }
 
 // SetAgentSessionIdleTimeout 配置单轮正常结束后的 live agent 空闲关闭时间。
@@ -1883,9 +1917,10 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		if workspaceDir != "" {
 			iKey = workspaceDir + ":" + iKey
 		}
+		session.takeUsageLimit()
 		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, lockGen)
 		e.cleanupInteractiveState(iKey)
-		return nil
+		return timerUsageLimitErr(session)
 	}
 
 	session := sessions.GetOrCreateActive(sessionKey)
@@ -1898,7 +1933,19 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
 	}
+	session.takeUsageLimit()
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey, lockGen)
+	return timerUsageLimitErr(session)
+}
+
+// timerUsageLimitErr turns a refusal recorded during a timer run into the
+// job's error. The run may include messages queued behind the job's own
+// turn; a refusal of any of them counts, which can only make the job look
+// unanswered when it was answered, never the other way round.
+func timerUsageLimitErr(session *Session) error {
+	if l := session.takeUsageLimit(); l != nil {
+		return &UsageLimitError{ResetsAt: l.ResetsAt}
+	}
 	return nil
 }
 
@@ -6228,6 +6275,30 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 			if fullResponse == "" {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
+			}
+			if event.UsageLimit != nil {
+				session.noteUsageLimit(event.UsageLimit)
+				reply, silent := e.usageLimitReplyFor(event)
+				switch {
+				case silent:
+					// Already announced this episode. The refusal may have
+					// streamed in as text; none of it goes out. Stay visible
+					// instead of silent: a silent turn's orphaned streaming
+					// card gets deleted, and Lark renders that as
+					// "recalled a message" — one short line is cheaper than a
+					// retraction the user reads as data loss.
+					fullResponse = e.i18n.T(MsgUsageLimitQueued)
+					partialText = ""
+					cardAnswerText.Reset()
+					reply = ""
+				case e.usageLimitReply == "":
+					reply = "" // the agent's own text goes out
+				default:
+					fullResponse = reply
+				}
+				e.reportUsageLimit(p, sessionKey, msgID, event, reply)
+			} else {
+				e.usageLimitCleared()
 			}
 
 			// Strip any agent-self-reported "[ctx: ~XX%]" marker so it does not

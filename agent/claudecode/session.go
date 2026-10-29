@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,13 @@ type claudeSession struct {
 	cancel          context.CancelFunc
 	done            chan struct{}
 	alive           atomic.Bool
+
+	// lastPrompt is the text of the last user message written to the CLI,
+	// attachment paths included; a usage-limit refusal reports it.
+	lastPrompt atomic.Value // stores string
+	// limitResetsAt is the reset time (Unix seconds) of the last rejected
+	// rate_limit_event, 0 when none has been seen.
+	limitResetsAt atomic.Int64
 
 	// activeModel stores the model id reported by the CLI's init event (e.g.
 	// "claude-opus-4-7[1m]"). It may be empty if the init event hasn't
@@ -662,6 +670,8 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 	case "control_cancel_request":
 		requestID, _ := raw["request_id"].(string)
 		slog.Debug("claudeSession: permission cancelled", "request_id", requestID)
+	case "rate_limit_event":
+		cs.handleRateLimitEvent(raw)
 	default:
 		// Unknown event types are not silently dropped — they are logged
 		// at debug level with the full payload so future diagnosis of
@@ -1321,11 +1331,51 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,
+		UsageLimit:               cs.usageLimitOf(raw, content),
 	}
 	select {
 	case cs.events <- evt:
 	case <-cs.ctx.Done():
 		return
+	}
+}
+
+// usageLimitRe matches the CLI's own refusal text, e.g. "You've hit your
+// session limit · resets 7:30am (Asia/Shanghai)".
+var usageLimitRe = regexp.MustCompile(`(?i)\bhit your (session|weekly|daily|usage|opus|sonnet)?\s*limit\b`)
+
+// usageLimitOf reports whether a result event is the CLI refusing the turn
+// because a usage limit has been reached. The CLI marks that with is_error and
+// api_error "usage_limit_reached" (or api_error_status 429); older versions
+// only carry the refusal text.
+func (cs *claudeSession) usageLimitOf(raw map[string]any, content string) *core.UsageLimit {
+	if isErr, _ := raw["is_error"].(bool); !isErr {
+		return nil
+	}
+	apiError, _ := raw["api_error"].(string)
+	status, _ := raw["api_error_status"].(float64)
+	if apiError != "usage_limit_reached" && int(status) != 429 && !usageLimitRe.MatchString(content) {
+		return nil
+	}
+	limit := &core.UsageLimit{}
+	if ts := cs.limitResetsAt.Load(); ts > 0 {
+		limit.ResetsAt = time.Unix(ts, 0)
+	}
+	if p, ok := cs.lastPrompt.Load().(string); ok {
+		limit.Prompt = p
+	}
+	slog.Warn("claudeSession: turn refused, usage limit reached", "api_error", apiError, "resets_at", limit.ResetsAt)
+	return limit
+}
+
+// handleRateLimitEvent remembers when a rejected rate limit resets.
+func (cs *claudeSession) handleRateLimitEvent(raw map[string]any) {
+	info, _ := raw["rate_limit_info"].(map[string]any)
+	if status, _ := info["status"].(string); status != "rejected" {
+		return
+	}
+	if resetsAt, ok := info["resetsAt"].(float64); ok && resetsAt > 0 {
+		cs.limitResetsAt.Store(int64(resetsAt))
 	}
 }
 
@@ -1423,6 +1473,7 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 	}
 
 	if len(images) == 0 && len(files) == 0 {
+		cs.lastPrompt.Store(prompt)
 		return cs.writeJSON(map[string]any{
 			"type":    "user",
 			"message": map[string]any{"role": "user", "content": prompt},
@@ -1479,6 +1530,7 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 	if len(filePaths) > 0 {
 		textPart += "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
 	}
+	cs.lastPrompt.Store(textPart)
 	parts = append(parts, map[string]any{"type": "text", "text": textPart})
 
 	return cs.writeJSON(map[string]any{
