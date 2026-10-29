@@ -30,6 +30,10 @@ type Agent struct {
 	providers             []core.ProviderConfig
 	activeIdx             int
 	sessionEnv            []string
+	usageGeneration       uint64
+	usageSessionID        string
+	usageHomeDir          string
+	usageWorkDir          string
 	mu                    sync.RWMutex
 }
 
@@ -78,6 +82,9 @@ func (a *Agent) Name() string { return "droid" }
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.workDir != dir {
+		a.resetUsageLocked()
+	}
 	a.workDir = dir
 	slog.Info("droid: work_dir changed", "work_dir", dir)
 }
@@ -180,11 +187,15 @@ func (a *Agent) AvailableReasoningEfforts() []string {
 func (a *Agent) SetSessionEnv(env []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	oldHome, _ := droidHomeDir(a.sessionEnvLocked())
 	a.sessionEnv = append([]string(nil), env...)
+	if newHome, _ := droidHomeDir(a.sessionEnvLocked()); newHome != oldHome {
+		a.resetUsageLocked()
+	}
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
-	a.mu.RLock()
+	a.mu.Lock()
 	cmd := a.cmd
 	cliExtraArgs := append([]string(nil), a.cliExtraArgs...)
 	workDir := a.workDir
@@ -198,9 +209,39 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			model = m
 		}
 	}
-	a.mu.RUnlock()
+	homeDir, _ := droidHomeDir(extraEnv)
+	absWorkDir, _ := filepath.Abs(workDir)
+	a.resetUsageLocked()
+	generation := a.usageGeneration
+	a.usageHomeDir = homeDir
+	a.usageWorkDir = absWorkDir
+	if sessionID != core.ContinueSession {
+		a.usageSessionID = sessionID
+	}
+	a.mu.Unlock()
 
-	return newDroidSession(ctx, cmd, cliExtraArgs, workDir, model, reasoningEffort, auto, skipPermissionsUnsafe, sessionID, extraEnv)
+	session, err := newDroidSession(ctx, cmd, cliExtraArgs, workDir, model, reasoningEffort, auto, skipPermissionsUnsafe, sessionID, extraEnv)
+	if err != nil {
+		return nil, err
+	}
+	session.onSessionID = func(id string) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.usageGeneration == generation {
+			a.usageSessionID = id
+		}
+	}
+	session.usageReporter = func(ctx context.Context, id string) (*core.UsageReport, error) {
+		return readDroidSessionUsage(ctx, homeDir, absWorkDir, id)
+	}
+	return session, nil
+}
+
+func (a *Agent) resetUsageLocked() {
+	a.usageGeneration++
+	a.usageSessionID = ""
+	a.usageHomeDir = ""
+	a.usageWorkDir = ""
 }
 
 func (a *Agent) sessionEnvLocked() []string {
@@ -210,13 +251,17 @@ func (a *Agent) sessionEnvLocked() []string {
 }
 
 func (a *Agent) homeDir() (string, error) {
+	a.mu.RLock()
+	env := a.sessionEnvLocked()
+	a.mu.RUnlock()
+	return droidHomeDir(env)
+}
+
+func droidHomeDir(env []string) (string, error) {
 	key := "HOME"
 	if runtime.GOOS == "windows" {
 		key = "USERPROFILE"
 	}
-	a.mu.RLock()
-	env := a.sessionEnvLocked()
-	a.mu.RUnlock()
 	for i := len(env) - 1; i >= 0; i-- {
 		if name, value, ok := strings.Cut(env[i], "="); ok && name == key {
 			if value == "" {
@@ -358,7 +403,7 @@ func (a *Agent) GetMode() string {
 
 func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 	return []core.PermissionModeInfo{
-		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Read-only by default", DescZh: "默认只读"},
+		{Key: "default", Name: "Default", NameZh: "默认", Desc: "Droid CLI default permissions", DescZh: "Droid CLI 默认权限"},
 		{Key: "low", Name: "Auto Low", NameZh: "低自动化", Desc: "Allow low-risk operations", DescZh: "允许低风险操作"},
 		{Key: "medium", Name: "Auto Medium", NameZh: "中自动化", Desc: "Allow medium-risk operations", DescZh: "允许中风险操作"},
 		{Key: "high", Name: "Auto High", NameZh: "高自动化", Desc: "Allow high-risk operations", DescZh: "允许高风险操作"},
@@ -388,6 +433,12 @@ func (a *Agent) CompressCommand() string { return "/compress" }
 func (a *Agent) SetProviders(providers []core.ProviderConfig) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	oldHome, _ := droidHomeDir(a.sessionEnvLocked())
+	defer func() {
+		if newHome, _ := droidHomeDir(a.sessionEnvLocked()); newHome != oldHome {
+			a.resetUsageLocked()
+		}
+	}()
 	a.providers = providers
 	if len(a.providers) == 0 {
 		a.activeIdx = -1
@@ -401,6 +452,12 @@ func (a *Agent) SetProviders(providers []core.ProviderConfig) {
 func (a *Agent) SetActiveProvider(name string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	oldHome, _ := droidHomeDir(a.sessionEnvLocked())
+	defer func() {
+		if newHome, _ := droidHomeDir(a.sessionEnvLocked()); newHome != oldHome {
+			a.resetUsageLocked()
+		}
+	}()
 	if name == "" {
 		a.activeIdx = -1
 		slog.Info("droid: provider cleared")

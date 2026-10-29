@@ -32,7 +32,9 @@ type droidSession struct {
 
 	events chan core.Event
 
-	sessionID atomic.Value
+	sessionID     atomic.Value
+	onSessionID   func(string)
+	usageReporter func(context.Context, string) (*core.UsageReport, error)
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -254,7 +256,7 @@ func (s *droidSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *
 		terminal = &core.Event{Type: core.EventError, Error: fmt.Errorf("droid exec: %s", message)}
 	}
 	if terminal == nil {
-		terminal = &core.Event{Type: core.EventResult, Done: true}
+		terminal = &core.Event{Type: core.EventError, Error: fmt.Errorf("droid exec: stream ended without a completion or result event")}
 	}
 	terminal.SessionID = s.CurrentSessionID()
 
@@ -275,6 +277,9 @@ func (s *droidSession) emit(event core.Event) {
 func (s *droidSession) handleEvent(raw map[string]any) *core.Event {
 	if sid := getString(raw, "session_id"); sid != "" {
 		s.sessionID.Store(sid)
+		if s.onSessionID != nil {
+			s.onSessionID(sid)
+		}
 	}
 	event := core.Event{SessionID: s.CurrentSessionID()}
 	switch getString(raw, "type") {
@@ -339,7 +344,9 @@ func (s *droidSession) handleEvent(raw map[string]any) *core.Event {
 		event.Error = fmt.Errorf("%s", message)
 		return &event
 	default:
-		return nil
+		event.Type = core.EventError
+		event.Error = fmt.Errorf("droid exec: unsupported stream event type %q", getString(raw, "type"))
+		return &event
 	}
 	s.emit(event)
 	return nil
@@ -384,6 +391,13 @@ func (s *droidSession) Events() <-chan core.Event {
 func (s *droidSession) CurrentSessionID() string {
 	v, _ := s.sessionID.Load().(string)
 	return v
+}
+
+func (s *droidSession) GetUsage(ctx context.Context) (*core.UsageReport, error) {
+	if s.usageReporter == nil {
+		return nil, fmt.Errorf("droid session usage is unavailable")
+	}
+	return s.usageReporter(ctx, s.CurrentSessionID())
 }
 
 func (s *droidSession) Alive() bool {

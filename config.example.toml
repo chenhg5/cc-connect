@@ -1833,7 +1833,7 @@ app_secret = "your-feishu-app-secret"
 #                       #   QQ 开放平台需申请对应 Intent 权限。
 
 # =============================================================================
-# Project 6: Using Qoder CLI / 项目 6：使用 Qoder CLI (uncomment to enable / 取消注释以启用)
+# Project 5: Using Qoder CLI / 项目 5：使用 Qoder CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: curl -fsSL https://qoder.com/install | bash
 # 需要安装：curl -fsSL https://qoder.com/install | bash
@@ -1920,7 +1920,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 7: Using OpenCode / 项目 7：使用 OpenCode (uncomment to enable / 取消注释以启用)
+# Project 6: Using OpenCode / 项目 6：使用 OpenCode (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: OpenCode CLI — https://github.com/opencode-ai/opencode
 # 需要安装：OpenCode CLI
@@ -2168,7 +2168,7 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
-# Project 8: Using iFlow CLI / 项目 8：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
+# Project 7: Using iFlow CLI / 项目 7：使用 iFlow CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: npm install -g @iflow-ai/iflow-cli
 # 需要安装：npm install -g @iflow-ai/iflow-cli
@@ -2238,13 +2238,18 @@ app_secret = "your-feishu-app-secret"
 #
 # Mode mapping in chat (/mode):
 # 聊天命令 /mode 与 Droid 参数映射：
-# - default -> no --auto (read-only default)
+# - default -> Droid CLI's own default permissions (no --auto / --skip-permissions-unsafe)
+#              使用 Droid CLI 自身的默认权限；适配器不额外强制只读
 # - low/medium/high -> --auto <level>
 # - yolo -> --skip-permissions-unsafe
 # Web Admin also supports selecting Droid and these permission modes.
 # Web 管理页也可选择 Droid 和上述权限模式。
+# /usage reads settings for the latest conversation started or resumed by this adapter.
+# It never starts probe conversations. Usage is unavailable until a session ID and tokenUsage exist.
+# /usage 仅读取本适配器最近启动或恢复的会话设置，不创建探测会话。
+# 尚无会话 ID 或 tokenUsage 时返回不可用。
 # Live CLI smoke / 真实 CLI 验证（需要已登录或设置 API Key）:
-# DROID_LIVE_E2E=1 go test ./agent/droid -run TestLiveE2E_DroidResume -v
+# DROID_LIVE_E2E=1 go test ./agent/droid -run TestLiveE2E -v
 #
 # [[projects.platforms]]
 # type = "telegram"

@@ -16,6 +16,7 @@ import (
 )
 
 var _ core.AgentSession = (*droidSession)(nil)
+var _ core.UsageReporter = (*droidSession)(nil)
 
 func TestDroidSessionProcess(t *testing.T) {
 	if os.Getenv("CC_CONNECT_DROID_HELPER") != "1" {
@@ -32,6 +33,30 @@ func TestDroidSessionProcess(t *testing.T) {
 		fmt.Println(`{"type":"message","role":"user","text":"not assistant output"}`)
 		fmt.Println(`{"type":"message","role":"assistant","text":"Answer"}`)
 		fmt.Println(`{"type":"completion","finalText":"Final answer","session_id":"session-one","usage":{"input_tokens":12,"output_tokens":34,"cache_read_input_tokens":56,"cache_creation_input_tokens":78}}`)
+	case "real-stream":
+		data, err := os.ReadFile(os.Getenv("CC_CONNECT_DROID_FIXTURE"))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(9)
+		}
+		_, _ = os.Stdout.Write(data)
+	case "empty":
+	case "unknown", "unknown-before-completion", "unknown-after-completion", "missing-type", "init-only", "assistant-only":
+		fmt.Println(`{"type":"system","subtype":"init","session_id":"protocol-session"}`)
+		switch scenario {
+		case "unknown", "unknown-before-completion":
+			fmt.Println(`{"type":"new_protocol_event","text":"must not be ignored"}`)
+		case "unknown-after-completion":
+			fmt.Println(`{"type":"completion","finalText":"must not succeed"}`)
+			fmt.Println(`{"type":"new_protocol_event"}`)
+		case "missing-type":
+			fmt.Println(`{"text":"missing event discriminator"}`)
+		case "assistant-only":
+			fmt.Println(`{"type":"message","role":"assistant","text":"partial answer"}`)
+		}
+		if scenario == "unknown-before-completion" {
+			fmt.Println(`{"type":"completion","finalText":"must not succeed"}`)
+		}
 	case "error":
 		fmt.Println(`{"type":"error","message":"capacity exceeded","session_id":"failed-session"}`)
 		os.Exit(9)
@@ -74,10 +99,15 @@ func newTestDroidSession(t *testing.T, scenario, workDir string) *droidSession {
 	if workDir == "" {
 		workDir = t.TempDir()
 	}
+	fixturePath, err := filepath.Abs(filepath.Join("testdata", "droid-0.245.0-default-read.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	session, err := newDroidSession(context.Background(), binary, []string{"-test.run=^TestDroidSessionProcess$", "--"}, workDir, "", "", "", false, "", []string{
 		"CC_CONNECT_DROID_HELPER=1",
 		"CC_CONNECT_DROID_SCENARIO=" + scenario,
 		"CC_CONNECT_DROID_WORKDIR=" + workDir,
+		"CC_CONNECT_DROID_FIXTURE=" + fixturePath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +140,7 @@ func droidTerminalEvent(t *testing.T, session core.AgentSession) core.Event {
 	}
 }
 
-func TestDroidSessionMapsInstalledStreamEvents(t *testing.T) {
+func TestDroidSessionMapsStreamEvents(t *testing.T) {
 	session := newTestDroidSession(t, "stream", "")
 	if err := session.Send("hello", "message-one", nil, nil); err != nil {
 		t.Fatal(err)
@@ -149,6 +179,76 @@ func TestDroidSessionMapsInstalledStreamEvents(t *testing.T) {
 	}
 	if session.CurrentSessionID() != "session-one" || !session.Alive() {
 		t.Fatal("completed session lost its ID or cannot accept another turn")
+	}
+}
+
+func TestDroidSessionCapturedDefaultReadStream(t *testing.T) {
+	// Captured from Droid 0.245.0 / gpt-6.1-sol with default permissions and stdin EOF.
+	// Only paths, IDs, and timestamps are sanitized; Script wraps the real Read call.
+	session := newTestDroidSession(t, "real-stream", "")
+	if err := session.Send("read fixture", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var events []core.Event
+	for {
+		event := nextDroidEvent(t, session)
+		events = append(events, event)
+		if event.Type == core.EventResult || event.Type == core.EventError {
+			break
+		}
+	}
+	wantTypes := []core.EventType{core.EventText, core.EventToolUse, core.EventToolResult, core.EventText, core.EventResult}
+	var types []core.EventType
+	for _, event := range events {
+		types = append(types, event.Type)
+		if event.SessionID != "00000000-0000-4000-8000-000000000001" {
+			t.Fatalf("captured event session ID = %q", event.SessionID)
+		}
+	}
+	if !reflect.DeepEqual(types, wantTypes) {
+		t.Fatalf("captured event types = %v, want %v", types, wantTypes)
+	}
+	if events[1].ToolName != "Script" || !strings.Contains(events[1].ToolInput, "tools.Read") || !strings.Contains(events[1].ToolInput, "/tmp/cc-connect-droid-fixture/read-fixture.txt") {
+		t.Fatalf("captured Read invocation = %+v", events[1])
+	}
+	if events[2].ToolName != "Script" || !strings.Contains(events[2].ToolResult, "cc-connect-default-read-fixture-739182") || events[2].ToolSuccess == nil || !*events[2].ToolSuccess || events[2].ToolStatus != "completed" {
+		t.Fatalf("captured Read result = %+v", events[2])
+	}
+	result := events[len(events)-1]
+	if result.Content != "cc-connect-default-read-fixture-739182" || !result.Done || result.InputTokens != 6 || result.OutputTokens != 75 || result.CacheReadInputTokens != 12768 || result.CacheCreationInputTokens != 12925 {
+		t.Fatalf("captured terminal result = %+v", result)
+	}
+}
+
+func TestDroidSessionRejectsUnsupportedOrIncompleteStreams(t *testing.T) {
+	for _, tc := range []struct {
+		scenario string
+		message  string
+	}{
+		{"unknown", `unsupported stream event type "new_protocol_event"`},
+		{"unknown-before-completion", `unsupported stream event type "new_protocol_event"`},
+		{"unknown-after-completion", `unsupported stream event type "new_protocol_event"`},
+		{"missing-type", `unsupported stream event type ""`},
+		{"init-only", "without a completion or result event"},
+		{"assistant-only", "without a completion or result event"},
+		{"empty", "without a completion or result event"},
+	} {
+		t.Run(tc.scenario, func(t *testing.T) {
+			session := newTestDroidSession(t, tc.scenario, "")
+			if err := session.Send("hello", "", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			event := droidTerminalEvent(t, session)
+			if event.Type != core.EventError || event.Error == nil || !strings.Contains(event.Error.Error(), tc.message) {
+				t.Fatalf("invalid stream result = %+v, want error containing %q", event, tc.message)
+			}
+			if err := session.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for extra := range session.Events() {
+				t.Fatalf("unexpected event after protocol failure: %+v", extra)
+			}
+		})
 	}
 }
 

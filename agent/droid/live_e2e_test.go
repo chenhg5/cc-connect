@@ -3,6 +3,7 @@ package droid
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,13 @@ func TestLiveE2E_DroidResume(t *testing.T) {
 	if os.Getenv("DROID_LIVE_E2E") != "1" {
 		t.Skip("set DROID_LIVE_E2E=1 to use the installed, authenticated Droid CLI")
 	}
-	opts := map[string]any{"work_dir": t.TempDir()}
+	workDir := t.TempDir()
+	fixturePath := filepath.Join(workDir, "read-fixture.txt")
+	const fixtureContent = "cc-connect-default-read-fixture-739182\n"
+	if err := os.WriteFile(fixturePath, []byte(fixtureContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := map[string]any{"work_dir": workDir}
 	if bin := os.Getenv("DROID_BIN"); bin != "" {
 		opts["cmd"] = bin
 	}
@@ -36,6 +43,8 @@ func TestLiveE2E_DroidResume(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	var readTool string
+	var sawReadResult bool
 	turn := func(prompt string) string {
 		t.Helper()
 		if err := s.Send(prompt, "", nil, nil); err != nil {
@@ -51,6 +60,16 @@ func TestLiveE2E_DroidResume(t *testing.T) {
 				switch evt.Type {
 				case core.EventText:
 					text.WriteString(evt.Content)
+				case core.EventToolUse:
+					if evt.ToolName == "Read" || (evt.ToolName == "Script" && strings.Contains(evt.ToolInput, "tools.Read")) {
+						if strings.Contains(evt.ToolInput, "read-fixture.txt") {
+							readTool = evt.ToolName
+						}
+					}
+				case core.EventToolResult:
+					if readTool != "" && evt.ToolName == readTool && evt.ToolSuccess != nil && *evt.ToolSuccess && strings.Contains(evt.ToolResult, strings.TrimSpace(fixtureContent)) {
+						sawReadResult = true
+					}
 				case core.EventError:
 					t.Fatalf("Droid turn failed: %v", evt.Error)
 				case core.EventResult:
@@ -79,5 +98,20 @@ func TestLiveE2E_DroidResume(t *testing.T) {
 	if s.CurrentSessionID() != sid {
 		t.Fatal("Droid changed session ID while resuming")
 	}
-	t.Logf("real Droid completed two turns and recalled 739182; session ID remained stable")
+	// Send leaves exec.Cmd.Stdin nil, so this tool must finish with stdin at EOF.
+	third := turn("Use the Read tool to read only read-fixture.txt in the current working directory. Do not use any other tool or read any other file. Reply with exactly the file contents.")
+	if readTool == "" || !sawReadResult {
+		t.Fatalf("default permissions did not produce a successful Read tool result: tool=%q, result=%v", readTool, sawReadResult)
+	}
+	if !strings.Contains(third, strings.TrimSpace(fixtureContent)) {
+		t.Fatalf("Read reply omitted fixture contents: %q", third)
+	}
+	data, err := os.ReadFile(fixturePath)
+	if err != nil || string(data) != fixtureContent {
+		t.Fatalf("default Read changed fixture: %q, %v", data, err)
+	}
+	if s.CurrentSessionID() != sid {
+		t.Fatal("Droid changed session ID while reading the fixture")
+	}
+	t.Log("real Droid recalled 739182 and read the fixture under default permissions with stdin EOF; session ID remained stable")
 }
