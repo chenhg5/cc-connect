@@ -206,6 +206,17 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # agent_session_idle_timeout_mins = 30
 
+# busy_action: what a message does when it arrives while the session is still
+# running a turn. "queue" (default) processes it after the turn finishes.
+# "inject" delivers it into the running turn, like /ps, when the agent can take
+# mid-turn input (Claude Code; Codex app-server, text only); other agents and
+# messages that cannot be injected still queue.
+# busy_action：会话正在执行时收到的新消息如何处理。"queue"（默认）在当前任务完成后处理；
+# "inject" 在 Agent 支持中途输入时（Claude Code；Codex app-server 仅文本）像 /ps 一样
+# 直接送入当前任务，其他 Agent 和无法注入的消息仍然排队。
+# [[projects]]
+# busy_action = "inject"
+
 # =============================================================================
 # OS-user isolation via run_as_user (Linux/macOS only)
 # 通过 run_as_user 实现 OS 用户隔离（仅限 Linux/macOS）

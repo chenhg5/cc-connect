@@ -534,6 +534,7 @@ type ProjectConfig struct {
 	// entirely (the per-line indicator flags above become no-ops).
 	ReplyFooter      *bool        `toml:"reply_footer,omitempty"`
 	InjectSender     *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
+	BusyAction       string       `toml:"busy_action,omitempty"`       // "queue" (default) | "inject": a message sent while a turn runs goes into it, like /ps
 	DisabledCommands []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
 	AdminFrom        string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
 	Users            *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
@@ -1120,6 +1121,11 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
 			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)
+		}
+		switch strings.ToLower(strings.TrimSpace(proj.BusyAction)) {
+		case "", "queue", "inject":
+		default:
+			return fmt.Errorf("config: %s.busy_action must be \"queue\" or \"inject\"", prefix)
 		}
 		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
 			return err
@@ -3638,6 +3644,9 @@ func GetProjectConfigDetails(projectName string) map[string]any {
 		}
 		if p.InjectSender != nil {
 			result["inject_sender"] = *p.InjectSender
+		}
+		if strings.TrimSpace(p.BusyAction) != "" {
+			result["busy_action"] = p.BusyAction
 		}
 		if strings.TrimSpace(p.Mode) != "" {
 			result["workspace_mode"] = p.Mode
