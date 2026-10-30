@@ -194,6 +194,13 @@ func newMatrixEngine(t *testing.T) (*core.Engine, *matrixAgent, *matrixPlatform)
 	storePath := filepath.Join(dir, "sessions.json")
 	engine := core.NewEngine("release-core", agent, []core.Platform{platform}, storePath, core.LangEnglish)
 	t.Cleanup(func() {
+		// ReceiveMessage dispatches each turn on a background goroutine. The
+		// turn's final sessions.Save() (which writes into t.TempDir()) runs
+		// before the session busy lock is released, so wait for every session
+		// to be idle before Engine.Stop cancels in-flight work and TempDir
+		// cleanup removes the directory. Without this, Save() races with
+		// RemoveAll and fails with "directory not empty" / "no such file".
+		waitSessionsIdle(engine, 2*time.Second)
 		engine.Stop()
 		_ = agent.Stop()
 		// Engine message handling is async (processInteractiveMessageWith):
@@ -228,6 +235,26 @@ func waitStoreQuiescent(dir string) {
 			lastSize = size
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// waitSessionsIdle polls until no session holds its busy lock, or the deadline
+// expires. A turn's disk save completes before it releases the lock, so once
+// every session is idle the final sessions.Save() has finished writing.
+func waitSessionsIdle(engine *core.Engine, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		busy := false
+		for _, s := range engine.GetSessions().AllSessions() {
+			if s.Busy() {
+				busy = true
+				break
+			}
+		}
+		if !busy {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
