@@ -10,7 +10,8 @@ import { listProjects, type ProjectSummary } from '@/api/projects';
 import { listSessions, type Session } from '@/api/sessions';
 import { formatUptime, formatTime } from '@/lib/utils';
 
-const MAX_ITEMS = 4;
+const MAX_PROJECTS = 4;
+const MAX_RECENT_SESSIONS = 12;
 
 export default function Dashboard() {
   const { t } = useTranslation();
@@ -41,7 +42,7 @@ export default function Dashboard() {
         }
       }
       allSessions.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
-      setRecentSessions(allSessions.slice(0, MAX_ITEMS));
+      setRecentSessions(allSessions.slice(0, MAX_RECENT_SESSIONS));
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -91,7 +92,7 @@ export default function Dashboard() {
           </div>
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-            {projects.slice(0, MAX_ITEMS).map((p) => (
+            {projects.slice(0, MAX_PROJECTS).map((p) => (
               <Link
                 key={p.name}
                 to={`/chat/${p.name}`}
@@ -128,7 +129,7 @@ export default function Dashboard() {
             <MessageSquare size={14} className="text-gray-400" />
             {t('dashboard.recentSessions')}
           </h3>
-          <Link to="/chat" className="text-xs text-accent hover:underline flex items-center gap-0.5">
+          <Link to="/sessions" className="text-xs text-accent hover:underline flex items-center gap-0.5">
             {t('common.viewAll')} <ChevronRight size={12} />
           </Link>
         </div>
@@ -137,11 +138,11 @@ export default function Dashboard() {
             <p className="text-xs text-gray-400 text-center">{t('sessions.noSessions')}</p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
             {recentSessions.map((sess) => (
               <Link
                 key={`${sess.project}-${sess.id}`}
-                to={`/chat/${sess.project}`}
+                to={`/chat/${sess.project}?session=${encodeURIComponent(sess.id)}`}
                 className="block p-4 rounded-xl border border-gray-200/80 dark:border-white/[0.06] bg-white dark:bg-white/[0.02] hover:border-accent/40 hover:shadow-md hover:shadow-accent/5 transition-all"
               >
                 <div className="flex items-center gap-2.5 mb-3">
