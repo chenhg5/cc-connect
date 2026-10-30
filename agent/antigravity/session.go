@@ -230,6 +230,7 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 
 func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer, tempFiles []string, preEntries map[string]bool, sendStartedAt time.Time) {
 	defer as.wg.Done()
+	parser := newAgyOutputParser()
 	defer func() {
 		for _, f := range tempFiles {
 			_ = os.Remove(f)
@@ -240,7 +241,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		// Detect conversation ID if this was the first turn of a fresh session.
 		// agy may flush the chat file only while the process is exiting, so wait
 		// for process reaping before scanning the chat directory.
-		if as.CurrentSessionID() == "" {
+		if as.CurrentSessionID() == "" && !parser.resultReceived {
 			var sid string
 			for attempt := 0; attempt < 15; attempt++ {
 				sid = as.detectNewSessionID(preEntries, sendStartedAt)
@@ -261,7 +262,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 		}
 
 		sid := as.CurrentSessionID()
-		if err != nil {
+		if err != nil && !parser.resultReceived {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
 			if stderrMsg != "" {
 				slog.Error("antigravitySession: process failed", "error", err, "stderr", stderrMsg)
@@ -286,7 +287,6 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
-	parser := newAgyOutputParser()
 	streamFormatDetected := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -301,6 +301,9 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			continue
 		}
 		for _, event := range events {
+			if event.SessionID != "" {
+				as.chatID.Store(event.SessionID)
+			}
 			select {
 			case as.events <- event:
 			case <-as.ctx.Done():
@@ -308,7 +311,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "file already closed") {
+	if err := scanner.Err(); err != nil && !strings.Contains(err.Error(), "file already closed") && !parser.resultReceived {
 		slog.Error("antigravitySession: read error", "error", err)
 		select {
 		case as.events <- core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}:
