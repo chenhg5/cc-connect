@@ -73,3 +73,42 @@ func TestQuotedInteractiveCardPreservesLinks(t *testing.T) {
 		})
 	}
 }
+
+func TestQuotedInteractiveCardEmptyPropertyTextFallsBack(t *testing.T) {
+	for _, tag := range []string{"a", "link"} {
+		for _, empty := range []string{`{}`, `null`, `""`} {
+			for _, url := range []string{"", "https://example.com/x"} {
+				t.Run(tag+"/"+empty+"/"+url, func(t *testing.T) {
+					card := `{"elements":[{"tag":` + strconv.Quote(tag) + `,"text":{"tag":"plain_text","content":"QSim"},"property":{"text":` + empty + `},"href":` + strconv.Quote(url) + `}]}`
+					want := "QSim"
+					if url != "" {
+						want = "[QSim](" + url + ")"
+					}
+					if got := extractInteractiveCardText(card); got != want {
+						t.Fatalf("quoted card = %q, want %q", got, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestQuotedInteractiveCardEscapesMarkdownLink(t *testing.T) {
+	cases := []struct {
+		label, url, want string
+	}{
+		{"Q]Sim", "https://example.com/x", `[Q\]Sim](https://example.com/x)`},
+		{"Q[Sim", "https://example.com/x", `[Q\[Sim](https://example.com/x)`},
+		{`Q\Sim`, "https://example.com/x", `[Q\\Sim](https://example.com/x)`},
+		{"QSim", "https://example.com/a)b", `[QSim](https://example.com/a\)b)`},
+		{"QSim", "https://example.com/a(b", `[QSim](https://example.com/a\(b)`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label+"/"+tc.url, func(t *testing.T) {
+			card := `{"elements":[{"tag":"a","text":` + strconv.Quote(tc.label) + `,"href":` + strconv.Quote(tc.url) + `}]}`
+			if got := extractInteractiveCardText(card); got != tc.want {
+				t.Fatalf("quoted card = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

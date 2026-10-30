@@ -1,6 +1,9 @@
 package feishu
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // cardLinkURL accepts send-style strings and raw-card URL objects.
 type cardLinkURL string
@@ -38,4 +41,11 @@ func cardTextContent(raw json.RawMessage) string {
 		return elem.Property.Content
 	}
 	return elem.Content
+}
+
+// cardMarkdownLink escapes delimiters without changing already-encoded URLs.
+func cardMarkdownLink(label, url string) string {
+	label = strings.NewReplacer(`\`, `\\`, `[`, `\[`, `]`, `\]`).Replace(label)
+	url = strings.NewReplacer(`\`, `\\`, `(`, `\(`, `)`, `\)`).Replace(url)
+	return "[" + label + "](" + url + ")"
 }

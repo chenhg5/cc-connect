@@ -3061,6 +3061,9 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			if label == "" {
 				label = cardTextContent(elem.Property.Text)
 			}
+			if label == "" {
+				label = cardTextContent(elem.Text)
+			}
 			url := string(elem.Property.URL)
 			if url == "" {
 				url = elem.Href
@@ -3086,7 +3089,7 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 				if strings.HasPrefix(label, "[") && strings.Contains(label, "](") {
 					*parts = append(*parts, label)
 				} else {
-					*parts = append(*parts, fmt.Sprintf("[%s](%s)", label, url))
+					*parts = append(*parts, cardMarkdownLink(label, url))
 				}
 			case label != "":
 				*parts = append(*parts, label)
