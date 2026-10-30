@@ -33,16 +33,18 @@ func TestBuildWindowsTaskScript(t *testing.T) {
 
 	script := buildWindowsTaskScript(cfg)
 	for _, want := range []string{
-		`$env:CC_LOG_FILE = 'C:\Users\me\.cc-connect\logs\cc-connect.log'`,
-		`$env:CC_LOG_MAX_SIZE = '10485760'`,
-		`$env:PATH = 'C:\Program Files\nodejs;C:\Users\me\AppData\Local\Programs'`,
-		`$env:HTTPS_PROXY = 'http://127.0.0.1:7890'`,
-		`$env:http_proxy = 'http://127.0.0.1:7890'`,
-		`Set-Location -LiteralPath 'C:\Users\me\.cc-connect'`,
-		`while ($true) {`,
-		`& 'C:\Program Files\cc-connect\cc-connect.exe'`,
-		`if ($exitCode -eq 0) { exit 0 }`,
-		`Start-Sleep -Seconds 10`,
+		`Option Explicit`,
+		`Set shell = CreateObject("WScript.Shell")`,
+		`Set processEnv = shell.Environment("Process")`,
+		`processEnv("CC_LOG_FILE") = "C:\Users\me\.cc-connect\logs\cc-connect.log"`,
+		`processEnv("CC_LOG_MAX_SIZE") = "10485760"`,
+		`processEnv("PATH") = "C:\Program Files\nodejs;C:\Users\me\AppData\Local\Programs"`,
+		`processEnv("HTTPS_PROXY") = "http://127.0.0.1:7890"`,
+		`processEnv("http_proxy") = "http://127.0.0.1:7890"`,
+		`shell.CurrentDirectory = "C:\Users\me\.cc-connect"`,
+		`exitCode = shell.Run(Chr(34) & "C:\Program Files\cc-connect\cc-connect.exe" & Chr(34), 0, True)`,
+		`If exitCode = 0 Then WScript.Quit 0`,
+		`WScript.Sleep 10000`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
@@ -50,19 +52,20 @@ func TestBuildWindowsTaskScript(t *testing.T) {
 	}
 }
 
-func TestWindowsTaskActionRunsHidden(t *testing.T) {
-	got := windowsTaskAction(`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`)
+func TestWindowsTaskActionUsesWindowlessScriptHost(t *testing.T) {
+	got := windowsTaskAction(`C:\Users\me\.cc-connect\cc-connect-daemon.vbs`)
 	for _, want := range []string{
-		`powershell.exe`,
-		`-WindowStyle Hidden`,
-		`-NoProfile`,
-		`-NonInteractive`,
-		`-ExecutionPolicy Bypass`,
-		`-File "C:\Users\me\.cc-connect\cc-connect-daemon.ps1"`,
+		`wscript.exe`,
+		`//B`,
+		`//NoLogo`,
+		`"C:\Users\me\.cc-connect\cc-connect-daemon.vbs"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("windowsTaskAction() missing %q: %q", want, got)
 		}
+	}
+	if strings.Contains(strings.ToLower(got), "powershell") {
+		t.Fatalf("windowsTaskAction() still launches a console host: %q", got)
 	}
 }
 
@@ -76,16 +79,17 @@ func TestWindowsTaskCreateUsesLimitedInteractivePrincipal(t *testing.T) {
 		return "", nil
 	}
 
-	if err := createWindowsTask(`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`); err != nil {
+	if err := createWindowsTask(`C:\Users\me\.cc-connect\cc-connect-daemon.vbs`); err != nil {
 		t.Fatalf("createWindowsTask() error = %v", err)
 	}
 	for _, want := range []string{
 		`New-ScheduledTaskAction`,
 		`Register-ScheduledTask`,
+		`-Execute 'wscript.exe'`,
 		`-LogonType Interactive`,
 		`-RunLevel Limited`,
-		`-WindowStyle Hidden`,
-		`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`,
+		`//B //NoLogo`,
+		`C:\Users\me\.cc-connect\cc-connect-daemon.vbs`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("create script missing %q:\n%s", want, script)
@@ -103,12 +107,12 @@ func TestWindowsTaskMatchesActionRequiresExactAction(t *testing.T) {
 		return "true", nil
 	}
 
-	if !windowsTaskMatchesAction(`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`) {
+	if !windowsTaskMatchesAction(`C:\Users\me\.cc-connect\cc-connect-daemon.vbs`) {
 		t.Fatal("windowsTaskMatchesAction() = false, want true")
 	}
 	for _, want := range []string{
-		`$expectedArgs = '-WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Users\me\.cc-connect\cc-connect-daemon.ps1"'`,
-		`$action.Execute -ieq 'powershell.exe'`,
+		`$expectedArgs = '//B //NoLogo "C:\Users\me\.cc-connect\cc-connect-daemon.vbs"'`,
+		`$action.Execute -ieq 'wscript.exe'`,
 		`$action.Arguments -eq $expectedArgs`,
 	} {
 		if !strings.Contains(script, want) {
@@ -125,6 +129,14 @@ func TestPowerShellLiteralEscapesSingleQuotes(t *testing.T) {
 	}
 }
 
+func TestVBScriptLiteralEscapesDoubleQuotes(t *testing.T) {
+	got := vbScriptLiteral(`C:\Users\Jane "quoted"`)
+	want := `"C:\Users\Jane ""quoted"""`
+	if got != want {
+		t.Fatalf("vbScriptLiteral() = %q, want %q", got, want)
+	}
+}
+
 func TestBuildWindowsTaskScript_DropsInvalidEnvName(t *testing.T) {
 	cfg := Config{
 		BinaryPath: "x", WorkDir: "y", LogFile: "l", LogMaxSize: 1, EnvPATH: "p",
@@ -134,7 +146,7 @@ func TestBuildWindowsTaskScript_DropsInvalidEnvName(t *testing.T) {
 	if strings.Contains(script, "FOO BAR") {
 		t.Errorf("invalid env name leaked: %s", script)
 	}
-	if !strings.Contains(script, "$env:OK = 'ok'") {
+	if !strings.Contains(script, `processEnv("OK") = "ok"`) {
 		t.Errorf("valid env missing: %s", script)
 	}
 }
@@ -145,8 +157,70 @@ func TestBuildWindowsTaskScript_DropsEmptyValue(t *testing.T) {
 		EnvExtra: map[string]string{"EMPTY": "", "OK": "ok"},
 	}
 	script := buildWindowsTaskScript(cfg)
-	if strings.Contains(script, "$env:EMPTY") {
+	if strings.Contains(script, `processEnv("EMPTY")`) {
 		t.Errorf("empty value should be skipped: %s", script)
+	}
+}
+
+func TestSchtasksInstallRemovesLegacyPowerShellLauncher(t *testing.T) {
+	t.Setenv("USERPROFILE", t.TempDir())
+
+	orig := runPowerShell
+	t.Cleanup(func() { runPowerShell = orig })
+	runPowerShell = func(script string) (string, error) { return "", nil }
+
+	if err := os.MkdirAll(DefaultDataDir(), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	legacyPath := legacyWindowsTaskScriptPath()
+	if err := os.WriteFile(legacyPath, []byte("legacy\r\n"), 0o600); err != nil {
+		t.Fatalf("seed legacy launcher: %v", err)
+	}
+
+	mgr := &schtasksManager{}
+	cfg := Config{BinaryPath: "C:\\cc.exe", WorkDir: t.TempDir(), LogFile: "C:\\cc.log", LogMaxSize: 1024, EnvPATH: "C:\\bin"}
+	if err := mgr.Install(cfg); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy launcher still exists or cannot be inspected: %v", err)
+	}
+}
+
+func TestStopWindowsTaskKillsLauncherChildrenAndLockedInstance(t *testing.T) {
+	t.Setenv("USERPROFILE", t.TempDir())
+
+	workDir := t.TempDir()
+	if err := os.WriteFile(workDir+`\.config.toml.lock`, []byte("4242\n"), 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+	if err := SaveMeta(&Meta{WorkDir: workDir, BinaryPath: `C:\Tools\cc-connect.exe`}); err != nil {
+		t.Fatalf("SaveMeta: %v", err)
+	}
+
+	orig := runPowerShell
+	t.Cleanup(func() { runPowerShell = orig })
+	var script string
+	runPowerShell = func(s string) (string, error) {
+		script = s
+		return "", nil
+	}
+
+	if err := stopWindowsTask(); err != nil {
+		t.Fatalf("stopWindowsTask: %v", err)
+	}
+	for _, want := range []string{
+		`cc-connect-daemon.vbs`,
+		`cc-connect-daemon.ps1`,
+		`Get-CimInstance Win32_Process`,
+		`$launcherPids -contains $_.ParentProcessId`,
+		`$lockedProcessId = 4242`,
+		`$expectedBinary = 'C:\Tools\cc-connect.exe'`,
+		`Stop-Process -Id $lockedProcessId -Force`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("stop script missing %q:\n%s", want, script)
+		}
 	}
 }
 
