@@ -116,19 +116,27 @@ type replyContext struct {
 }
 
 type Platform struct {
-	mu                         sync.RWMutex
-	platformName               string
-	domain                     string
-	appID                      string
-	appSecret                  string
-	progressStyle              string
-	useInteractiveCard         bool
-	self                       core.Platform
-	reactionEmoji              string
-	ackEmoji                   string
-	doneEmoji                  string
-	allowFrom                  string
-	allowChat                  string
+	mu                 sync.RWMutex
+	platformName       string
+	domain             string
+	appID              string
+	appSecret          string
+	progressStyle      string
+	useInteractiveCard bool
+	self               core.Platform
+	reactionEmoji      string
+	ackEmoji           string
+	doneEmoji          string
+	allowFrom          string
+	allowChat          string
+	// catchupChats / catchupP2PChats are comma-separated chat IDs for the
+	// catch-up poller (platform/feishu/catchup.go), a REST-polling compensation
+	// channel for messages the best-effort WebSocket push drops. Group chats go
+	// in catchup_chats (@bot mention required), p2p chats in catchup_chats_p2p
+	// (every user message qualifies). Both empty = disabled.
+	catchupChats               string
+	catchupP2PChats            string
+	catchupCancel              context.CancelFunc
 	groupOnly                  bool
 	groupReplyAll              bool
 	respondToAtEveryoneAndHere bool
@@ -146,7 +154,24 @@ type Platform struct {
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
 	dedup            *core.MessageDedup
-	botOpenID        string
+	// catchupDedup is the catch-up poller's own seen record with a retention
+	// covering the poll window overlap (see catchupSeenTTL). The shared dedup
+	// above expires far sooner than a message can reappear in a later poll
+	// window, so relying on it alone re-injects messages. onMessage marks
+	// every delivered message here, so the WebSocket path and the poller
+	// never inject the same message twice.
+	catchupDedup *core.MessageDedup
+	// catchupChatTypes caches the real chat mode ("group"/"topic"/"p2p" per
+	// Im.Chat.Get) of every catch-up-configured chat, resolved once. It lets
+	// the poller refuse chats listed under the wrong option key instead of
+	// silently running them with the wrong qualification rule.
+	catchupChatTypeMu sync.Mutex
+	catchupChatTypes  map[string]string
+	// listCatchupMessages fetches a poll window of one chat over the REST API.
+	// It is a field so tests can stub the transport; production wires
+	// listCatchupMessagesREST.
+	listCatchupMessages func(ctx context.Context, chatID string, startTime, endTime int64) ([]*larkim.Message, error)
+	botOpenID           string
 	// groupFilterDegraded is true when bot open_id discovery failed at startup
 	// (e.g. transient network/DNS/proxy outage). When true, group chat mention
 	// filtering fails closed (silently drops group messages without @bot) instead
@@ -365,6 +390,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	allowFrom, _ := opts["allow_from"].(string)
 	core.CheckAllowFrom(name, allowFrom)
 	allowChat, _ := opts["allow_chat"].(string)
+	catchupChats, _ := opts["catchup_chats"].(string)
+	catchupP2PChats, _ := opts["catchup_chats_p2p"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	// require_mention = false is equivalent to group_reply_all = true:
@@ -484,6 +511,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
 		allowChat:                  allowChat,
+		catchupChats:               strings.TrimSpace(catchupChats),
+		catchupP2PChats:            strings.TrimSpace(catchupP2PChats),
 		groupOnly:                  groupOnly,
 		groupReplyAll:              groupReplyAll,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
@@ -495,6 +524,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
 		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
 		dedup:                      &core.MessageDedup{},
+		catchupDedup:               core.NewMessageDedup(catchupSeenTTL),
 		port:                       port,
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
@@ -506,6 +536,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		resourceChunkSize:          resourceChunkSize,
 		resourceMaxBytes:           defaultResourceMaxBytes,
 	}
+	base.listCatchupMessages = base.listCatchupMessagesREST
 	if !useInteractiveCard {
 		base.self = base
 		return base, nil
@@ -673,7 +704,15 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 		return p.startWebhookMode()
 	}
 
-	return p.startWebSocketMode()
+	if err := p.startWebSocketMode(); err != nil {
+		return err
+	}
+	// Start the catch-up poller after the WebSocket connection is up: it
+	// compensates for messages the WebSocket push path drops. It is a no-op
+	// unless catchup_chats / catchup_chats_p2p are configured, and only runs
+	// on the primary owner of the shared WebSocket connection.
+	p.startCatchupPoller()
+	return nil
 }
 
 func (p *Platform) shouldUseWebhookMode() bool {
@@ -1728,6 +1767,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		slog.Debug(p.tag()+": duplicate message ignored", "message_id", messageID)
 		return nil
 	}
+	// Record in the catch-up poller's seen set: a message delivered here must
+	// never be re-injected by a later REST poll. The poller's shared dedup
+	// check alone cannot provide that — its 60s TTL expires long before the
+	// message leaves the poller's 5-minute lookback window.
+	p.catchupDedup.Mark(messageID)
 
 	var createTimeMs int64
 	if msg.CreateTime != nil {
@@ -5616,6 +5660,8 @@ func (p *Platform) Stop() error {
 	// goroutine could outlive the platform and leak into the next
 	// start cycle.
 	p.stopGroupFilterSupervisor()
+	// Stop the catch-up poller so it doesn't outlive the platform.
+	p.stopCatchupPoller()
 	if p.isWSPrimary {
 		remaining := unregisterSharedWS(p)
 		if remaining > 0 {
