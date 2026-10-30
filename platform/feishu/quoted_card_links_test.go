@@ -28,6 +28,9 @@ func TestQuotedInteractiveCardPreservesLinks(t *testing.T) {
 		{"flat_button_default_url", `{"schema":"2.0","body":{"elements":[{"tag":"button","text":{"tag":"plain_text","content":"QSim"},"behaviors":[{"type":"open_url","default_url":"https://example.com/issues/42?run=1&view=full"}]}]}}`, link, link},
 		{"a_lark_md_with_href_no_double_wrap", `{"elements":[{"tag":"a","text":{"tag":"lark_md","content":"` + link + `"},"href":"https://example.com/issues/42?run=1&view=full"}]}`, link, link},
 		{"a_multi_url", `{"elements":[{"tag":"a","text":{"tag":"plain_text","content":"QSim"},"multi_url":{"url":"https://example.com/issues/42?run=1&view=full"}}]}`, link, link},
+		{"property_text_label", `{"body":{"property":{"elements":[{"tag":"a","property":{"text":{"tag":"plain_text","content":"QSim"},"url":{"url":"https://example.com/issues/42?run=1&view=full"}}}]}}}`, link, link},
+		{"property_text_nested_content", `{"body":{"property":{"elements":[{"tag":"a","property":{"text":{"tag":"plain_text","property":{"content":"QSim"}},"url":{"url":"https://example.com/issues/42?run=1&view=full"}}}]}}}`, link, link},
+		{"link_tag_property_text", `{"body":{"property":{"elements":[{"tag":"link","property":{"text":{"tag":"plain_text","content":"QSim"},"url":{"url":"https://example.com/issues/42?run=1&view=full"}}}]}}}`, link, link},
 		{"no_link_plain_label", `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"plain label only"}]}}`, "plain label only", "plain label only"},
 	}
 	for _, tc := range cases {

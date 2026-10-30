@@ -3059,7 +3059,7 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 		case "a", "link":
 			label := elem.Property.Content
 			if label == "" {
-				label = cardTextContent(elem.Text)
+				label = cardTextContent(elem.Property.Text)
 			}
 			url := string(elem.Property.URL)
 			if url == "" {
