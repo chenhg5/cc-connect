@@ -5045,6 +5045,7 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 	if text == "" {
 		text = " "
 	}
+	timestamp := progressTimestampPrefix(item.Timestamp)
 	switch item.Kind {
 	case core.ProgressEntryThinking:
 		return map[string]any{
@@ -5052,7 +5053,7 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 			"icon": map[string]any{"tag": "standard_icon", "token": reasoningToolIcon},
 			"text": map[string]any{
 				"tag":        "plain_text",
-				"content":    "💭 " + inlineCodeText(text),
+				"content":    timestamp + "💭 " + inlineCodeText(text),
 				"text_size":  "notation",
 				"text_color": "grey",
 			},
@@ -5063,7 +5064,7 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 			toolName = "Tool"
 		}
 		display := buildToolDisplay(toolName, text)
-		content := fmt.Sprintf("<text_tag color='blue'>%s</text_tag> **%s**", progressKindLabel(item.Kind, lang), inlineCodeText(display.Title))
+		content := timestamp + fmt.Sprintf("<text_tag color='blue'>%s</text_tag> **%s**", progressKindLabel(item.Kind, lang), inlineCodeText(display.Title))
 		if body := formatProgressToolInput(toolName, display.Detail); body != "" {
 			content += "\n" + body
 		}
@@ -5071,7 +5072,7 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 	case core.ProgressEntryToolResult:
 		toolName := strings.TrimSpace(item.Tool)
 		display := buildToolDisplay(toolName, "")
-		content := fmt.Sprintf("<text_tag color='turquoise'>%s</text_tag> **%s**", progressKindLabel(item.Kind, lang), inlineCodeText(display.Title))
+		content := timestamp + fmt.Sprintf("<text_tag color='turquoise'>%s</text_tag> **%s**", progressKindLabel(item.Kind, lang), inlineCodeText(display.Title))
 		dot := progressResultDot(item)
 		meta := dot
 		if item.ExitCode != nil {
@@ -5085,7 +5086,7 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 		}
 		return progressToolElement(display.IconToken, content)
 	case core.ProgressEntryError:
-		content := fmt.Sprintf("<text_tag color='red'>%s</text_tag>\n%s", progressKindLabel(item.Kind, lang), sanitizeCardMarkdownForCard(text))
+		content := timestamp + fmt.Sprintf("<text_tag color='red'>%s</text_tag>\n%s", progressKindLabel(item.Kind, lang), sanitizeCardMarkdownForCard(text))
 		return map[string]any{
 			"tag":     "markdown",
 			"content": content,
@@ -5093,7 +5094,7 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 	default:
 		return map[string]any{
 			"tag":     "markdown",
-			"content": sanitizeCardMarkdownForCard(text),
+			"content": timestamp + sanitizeCardMarkdownForCard(text),
 		}
 	}
 }
@@ -7248,10 +7249,17 @@ func richStepRowContent(step core.ToolStep) string {
 	return name + "\n" + body
 }
 
+func progressTimestampPrefix(timestamp time.Time) string {
+	if timestamp.IsZero() {
+		return ""
+	}
+	return timestamp.Format("15:04:05") + " · "
+}
+
 func richStepElement(step core.ToolStep) map[string]any {
 	text := map[string]any{
 		"tag":       "plain_text",
-		"content":   richStepRowContent(step),
+		"content":   progressTimestampPrefix(step.Timestamp) + richStepRowContent(step),
 		"text_size": "notation",
 	}
 	elem := map[string]any{
@@ -7511,7 +7519,7 @@ func compactRichFallbackMarkdown(steps []core.ToolStep) string {
 			continue
 		}
 		line = strings.ReplaceAll(line, "\n", " - ")
-		lines = append(lines, "- "+line)
+		lines = append(lines, "- "+progressTimestampPrefix(step.Timestamp)+line)
 	}
 	return strings.Join(lines, "\n")
 }
