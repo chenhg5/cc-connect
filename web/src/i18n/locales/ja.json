@@ -357,6 +357,8 @@
     "display": "表示",
     "thinkingMessages": "思考メッセージ",
     "thinkingMessagesHint": "中間思考プロセスの表示・非表示を切替",
+    "commentaryMessages": "進捗メッセージ",
+    "commentaryMessagesHint": "静音モードでもエージェントの進捗を個別のメッセージとして送信",
     "thinkingMaxLen": "思考の最大文字数",
     "thinkingMaxLenHint": "思考メッセージの最大文字数；0 = 制限なし",
     "toolMessages": "ツール進捗",

@@ -6,6 +6,7 @@ export interface GlobalSettings {
   log_level: string;
   idle_timeout_mins: number;
   thinking_messages: boolean;
+  commentary_messages: boolean;
   thinking_max_len: number;
   tool_messages: boolean;
   tool_max_len: number;
