@@ -207,6 +207,16 @@ const (
 	MsgSessionCancelled          MsgKey = "session_cancelled"
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
+	MsgQueueChoiceTitle          MsgKey = "queue_choice_title"
+	MsgQueueSteerPending         MsgKey = "queue_steer_pending"
+	MsgQueueSteerSent            MsgKey = "queue_steer_sent"
+	MsgQueueKept                 MsgKey = "queue_kept"
+	MsgQueueProcessing           MsgKey = "queue_processing"
+	MsgQueueRemoved              MsgKey = "queue_removed"
+	MsgQueueSteerButton          MsgKey = "queue_steer_button"
+	MsgQueueKeepButton           MsgKey = "queue_keep_button"
+	MsgQueueChoiceExpired        MsgKey = "queue_choice_expired"
+	MsgQueueSteerUnconfirmed     MsgKey = "queue_steer_unconfirmed"
 	MsgQueueFull                 MsgKey = "queue_full"
 	MsgMessageQueued             MsgKey = "message_queued"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
@@ -809,6 +819,76 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📬 訊息已收到，將在目前任務完成後處理。",
 		LangJapanese:           "📬 メッセージを受信しました。現在のタスク完了後に処理します。",
 		LangSpanish:            "📬 Mensaje recibido — se procesará después de que termine la tarea actual.",
+	},
+	MsgQueueChoiceTitle: {
+		LangEnglish:            "A task is running",
+		LangChinese:            "当前任务正在进行",
+		LangTraditionalChinese: "目前任務正在進行",
+		LangJapanese:           "タスクを実行中です",
+		LangSpanish:            "Hay una tarea en curso",
+	},
+	MsgQueueSteerPending: {
+		LangEnglish:            "Adding to the current task…",
+		LangChinese:            "正在补充当前任务…",
+		LangTraditionalChinese: "正在補充目前任務…",
+		LangJapanese:           "現在のタスクに追加しています…",
+		LangSpanish:            "Añadiendo a la tarea actual…",
+	},
+	MsgQueueSteerSent: {
+		LangEnglish:            "Added to the current task",
+		LangChinese:            "已补充到当前任务",
+		LangTraditionalChinese: "已補充到目前任務",
+		LangJapanese:           "現在のタスクに追加しました",
+		LangSpanish:            "Añadido a la tarea actual",
+	},
+	MsgQueueKept: {
+		LangEnglish:            "Kept in the queue",
+		LangChinese:            "已继续排队",
+		LangTraditionalChinese: "已繼續排隊",
+		LangJapanese:           "キューで待機します",
+		LangSpanish:            "Se mantiene en cola",
+	},
+	MsgQueueProcessing: {
+		LangEnglish:            "Processing queued message",
+		LangChinese:            "已开始处理排队消息",
+		LangTraditionalChinese: "已開始處理排隊訊息",
+		LangJapanese:           "待機中のメッセージを処理しています",
+		LangSpanish:            "Procesando el mensaje en cola",
+	},
+	MsgQueueRemoved: {
+		LangEnglish:            "Removed from the queue; this message will not be sent.",
+		LangChinese:            "已移出等待队列，这条消息不会再发送。",
+		LangTraditionalChinese: "已移出等待佇列，這則訊息不會再傳送。",
+		LangJapanese:           "キューから削除しました。このメッセージは送信されません。",
+		LangSpanish:            "Se retiró de la cola; este mensaje no se enviará.",
+	},
+	MsgQueueSteerButton: {
+		LangEnglish:            "Add to current task now",
+		LangChinese:            "立即补充当前任务",
+		LangTraditionalChinese: "立即補充目前任務",
+		LangJapanese:           "現在のタスクに今すぐ追加",
+		LangSpanish:            "Añadir ahora a la tarea actual",
+	},
+	MsgQueueKeepButton: {
+		LangEnglish:            "Keep queued",
+		LangChinese:            "继续排队",
+		LangTraditionalChinese: "繼續排隊",
+		LangJapanese:           "キューで待機",
+		LangSpanish:            "Mantener en cola",
+	},
+	MsgQueueChoiceExpired: {
+		LangEnglish:            "This message has already been processed or is no longer queued.",
+		LangChinese:            "这条消息已处理或已不在等待队列中。",
+		LangTraditionalChinese: "這則訊息已處理或已不在等待佇列中。",
+		LangJapanese:           "このメッセージは処理済みか、キューにありません。",
+		LangSpanish:            "Este mensaje ya se procesó o ya no está en la cola.",
+	},
+	MsgQueueSteerUnconfirmed: {
+		LangEnglish:            "Delivery to the current task could not be confirmed. This message was saved in history and will not be replayed automatically. Check the task before sending it again.",
+		LangChinese:            "无法确认补充消息是否已送达当前任务。消息已保留在历史中，不会自动重发；请确认任务状态后再决定是否重新发送。",
+		LangTraditionalChinese: "無法確認補充訊息是否已送達目前任務。訊息已保留在歷史中，不會自動重發；請確認任務狀態後再決定是否重新傳送。",
+		LangJapanese:           "現在のタスクへの配信を確認できませんでした。メッセージは履歴に保存され、自動再送されません。再送する前にタスクの状態を確認してください。",
+		LangSpanish:            "No se pudo confirmar la entrega a la tarea actual. El mensaje se guardó en el historial y no se reenviará automáticamente. Comprueba la tarea antes de enviarlo de nuevo.",
 	},
 	MsgQueueFull: {
 		LangEnglish:            "📬 Message queue is full (%d pending). Please wait for current tasks to complete.",

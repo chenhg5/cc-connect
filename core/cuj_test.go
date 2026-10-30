@@ -72,6 +72,305 @@ func TestCUJ_A8_ImmediateReceiptsDuringStartupAndQueue(t *testing.T) {
 	env.assertReceipts("first", "second")
 }
 
+// CUJ: start work, queue a correction, try another user's button, choose its
+// delivery, then replay the card. Only the author can change delivery; either
+// path must deliver the correction once and preserve visible task completion.
+func TestCUJ_C6_QueuedMessageDeliveryChoice(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		name := "add_to_current_task"
+		if keep {
+			name = "keep_queued"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := &queuedChoicePlatform{}
+			p.n = "test"
+			s := &asyncInputSession{events: make(chan Event, 16)}
+			e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+			e.SetInjectSender(true)
+			t.Cleanup(func() {
+				if err := e.Stop(); err != nil {
+					t.Error(err)
+				}
+			})
+			const key = "test:shared-chat"
+			send := func(user, text string) {
+				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: user, UserName: user, Content: text, ReplyCtx: "clicked-card"})
+			}
+			sentCount := func() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) }
+			visible := func(text string) bool {
+				if strings.Contains(strings.Join(p.getSent(), "\n"), text) {
+					return true
+				}
+				for _, update := range p.getChoiceUpdates() {
+					if strings.Contains(update.card.RenderText(), text) {
+						return true
+					}
+				}
+				return false
+			}
+			send("author", "start held task")
+			waitAsyncInput(t, func() bool { return sentCount() == 1 })
+			send("author", "Use staging instead")
+			card := waitForSentCard(t, &p.stubCardPlatform)
+			if !strings.Contains(card.RenderText(), "Use staging instead") {
+				t.Fatal("queued card omits the selected message")
+			}
+			action := queuedChoiceAction(t, card, keep)
+			steerAction := queuedChoiceAction(t, card, false)
+			send("another-user", steerAction)
+			waitAsyncInput(t, func() bool { return visible(e.i18n.T(MsgQueueChoiceExpired)) })
+			send("author", action)
+			if keep {
+				waitAsyncInput(t, func() bool { return visible(e.i18n.T(MsgMessageQueued)) })
+			} else {
+				waitAsyncInput(t, func() bool { return visible(e.i18n.T(MsgPsSent)) })
+			}
+			updates := p.getChoiceUpdates()
+			if len(updates) == 0 {
+				t.Fatal("the original choice card was never updated")
+			}
+			status := MsgQueueSteerSent
+			if keep {
+				status = MsgQueueKept
+			}
+			assertClosedQueuedChoice(t, updates[len(updates)-1].card, e.i18n.T(status), "Use staging instead")
+			send("author", steerAction) // replay, or attempt to undo the Keep decision
+			s.events <- Event{Type: EventResult, Content: "first task complete", Done: true}
+			waitAsyncInput(t, func() bool { return visible("first task complete") })
+			if keep {
+				waitAsyncInput(t, func() bool { return sentCount() == 2 })
+				s.events <- Event{Type: EventResult, Content: "queued task complete", Done: true}
+				waitAsyncInput(t, func() bool { return visible("queued task complete") })
+			}
+			waitAsyncInput(t, func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
+			s.mu.Lock()
+			sent, steered := append([]string(nil), s.sent...), append([]string(nil), s.steered...)
+			s.mu.Unlock()
+			if keep {
+				if len(sent) != 2 || len(steered) != 0 {
+					t.Fatalf("keep delivery: sent=%v, steered=%v", sent, steered)
+				}
+			} else {
+				if len(sent) != 1 || len(steered) != 1 || !strings.Contains(steered[0], "sender_id=author") || !strings.Contains(steered[0], "Use staging instead") {
+					t.Fatalf("immediate delivery lost ownership or duplicated: sent=%v, steered=%v", sent, steered)
+				}
+			}
+			history := e.sessions.GetOrCreateActive(key).GetHistory(20)
+			count := 0
+			for _, entry := range history {
+				if entry.Role == "user" && entry.Content == "Use staging instead" {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("correction appears %d times in history: %#v", count, history)
+			}
+		})
+	}
+	t.Run("automatic_without_click", func(t *testing.T) {
+		for _, legacyKeep := range []bool{false, true} {
+			name := "untouched"
+			if legacyKeep {
+				name = "legacy_keep"
+			}
+			t.Run(name, func(t *testing.T) {
+				p := &trackedQueuedChoicePlatform{}
+				p.n = "test"
+				s := &asyncInputSession{events: make(chan Event, 16)}
+				e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+				t.Cleanup(func() { _ = e.Stop() })
+				const key = "test:automatic"
+				send := func(text string) {
+					e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: "author", Content: text, ReplyCtx: "user-message"})
+				}
+				sentCount := func() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) }
+				send("start held task")
+				waitAsyncInput(t, func() bool { return sentCount() == 1 })
+				send("first queued task")
+				first := waitForSentCard(t, &p.stubCardPlatform)
+				assertSingleQueuedChoice(t, first)
+				if legacyKeep {
+					send(queuedChoiceAction(t, first, true))
+				}
+				send("second queued task")
+				waitAsyncInput(t, func() bool { p.mu.Lock(); defer p.mu.Unlock(); return len(p.sentCards) == 2 })
+				p.mu.Lock()
+				second := p.sentCards[1]
+				p.mu.Unlock()
+				assertSingleQueuedChoice(t, second)
+
+				s.events <- Event{Type: EventResult, Content: "held task complete", Done: true}
+				waitAsyncInput(t, func() bool { return sentCount() == 2 })
+				updates := p.getChoiceUpdates()
+				if len(updates) == 0 || updates[len(updates)-1].card.Header.Title != e.i18n.T(MsgQueueProcessing) {
+					t.Fatal("automatically delivered card still has active choices")
+				}
+				latest := updates[len(updates)-1]
+				if latest.ctx != "sent-card-1" {
+					t.Fatalf("automatic delivery updated the wrong card: %v", latest.ctx)
+				}
+				assertClosedQueuedChoice(t, latest.card, e.i18n.T(MsgQueueProcessing), "first queued task")
+				send(queuedChoiceAction(t, first, false)) // stale callback must not duplicate delivery
+				s.events <- Event{Type: EventResult, Content: "first queued task complete", Done: true}
+				waitAsyncInput(t, func() bool { return sentCount() == 3 })
+				updates = p.getChoiceUpdates()
+				latest = updates[len(updates)-1]
+				if latest.ctx != "sent-card-2" {
+					t.Fatalf("second automatic delivery updated the wrong card: %v", latest.ctx)
+				}
+				assertClosedQueuedChoice(t, latest.card, e.i18n.T(MsgQueueProcessing), "second queued task")
+				s.events <- Event{Type: EventResult, Content: "all queued tasks complete", Done: true}
+				waitAsyncInput(t, func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if len(s.sent) != 3 || len(s.steered) != 0 || !strings.Contains(s.sent[1], "first queued task") || !strings.Contains(s.sent[2], "second queued task") {
+					t.Fatalf("automatic delivery lost FIFO order or duplicated messages: %v / %v", s.sent, s.steered)
+				}
+			})
+		}
+	})
+	t.Run("automatic_card_update_recovers", func(t *testing.T) {
+		p := &trackedQueuedChoicePlatform{}
+		p.n = "test"
+		s := &asyncInputSession{events: make(chan Event, 16)}
+		e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+		t.Cleanup(func() { _ = e.Stop() })
+		const key = "test:card-recovery"
+		send := func(text string) {
+			e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: "author", Content: text, ReplyCtx: "clicked-card"})
+		}
+		sentCount := func() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) }
+		send("held task")
+		waitAsyncInput(t, func() bool { return sentCount() == 1 })
+		send("queued task")
+		card := waitForSentCard(t, &p.stubCardPlatform)
+		p.mu.Lock()
+		p.updateErr = fmt.Errorf("temporary card API failure")
+		p.mu.Unlock()
+		s.events <- Event{Type: EventResult, Content: "held task complete", Done: true}
+		waitAsyncInput(t, func() bool { return sentCount() == 2 })
+		if len(p.getChoiceUpdates()) != 0 {
+			t.Fatal("card update did not fail as arranged")
+		}
+		p.mu.Lock()
+		p.updateErr = nil
+		p.mu.Unlock()
+		waitAsyncInput(t, func() bool { return len(p.getChoiceUpdates()) > 0 })
+		updates := p.getChoiceUpdates()
+		assertClosedQueuedChoice(t, updates[len(updates)-1].card, e.i18n.T(MsgQueueProcessing), "queued task")
+		send(queuedChoiceAction(t, card, false))
+		s.events <- Event{Type: EventResult, Content: "queued task complete", Done: true}
+		waitAsyncInput(t, func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if len(s.sent) != 2 || len(s.steered) != 0 {
+			t.Fatalf("card recovery replayed input: sent=%v, steered=%v", s.sent, s.steered)
+		}
+	})
+
+	t.Run("stopped_queue_closes_card", func(t *testing.T) {
+		p := &trackedQueuedChoicePlatform{}
+		p.n = "test"
+		s := &asyncInputSession{events: make(chan Event, 16)}
+		e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+		t.Cleanup(func() { _ = e.Stop() })
+		const key = "test:stop-card"
+		send := func(text string) {
+			e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: "author", Content: text, ReplyCtx: "clicked-card"})
+		}
+		send("held task")
+		waitAsyncInput(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) == 1 })
+		send("queued task")
+		card := waitForSentCard(t, &p.stubCardPlatform)
+		send("/stop")
+		waitAsyncInput(t, func() bool { return len(p.getChoiceUpdates()) > 0 })
+		updates := p.getChoiceUpdates()
+		assertClosedQueuedChoice(t, updates[len(updates)-1].card, e.i18n.T(MsgQueueRemoved), "queued task")
+		send(queuedChoiceAction(t, card, false))
+		waitAsyncInput(t, func() bool { return strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(MsgQueueRemoved)) })
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if len(s.sent) != 1 || len(s.steered) != 0 {
+			t.Fatal("stopped message was delivered by an old button")
+		}
+	})
+
+}
+
+// A result can arrive before the steering acknowledgement. Neither a confirmed
+// handoff nor a confirmed idle response may lose or deliver the message twice.
+func TestCUJ_C6_QueuedSteeringCompletionDuringRPC(t *testing.T) {
+	for _, accepted := range []bool{true, false} {
+		name := "accepted"
+		if !accepted {
+			name = "idle_falls_back_to_queue"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := &asyncInputPlatform{}
+			p.n = "test"
+			entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			s := &queuedSteeringSession{asyncInputSession: asyncInputSession{events: make(chan Event, 16)}}
+			s.steer = func(string) (bool, error) { close(entered); <-release; return accepted, nil }
+			e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+			t.Cleanup(func() {
+				if err := e.Stop(); err != nil {
+					t.Error(err)
+				}
+			})
+			const key = "test:user"
+			send := func(text string) {
+				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: "user", Content: text, ReplyCtx: "ctx"})
+			}
+			sentCount := func() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) }
+			send("start held task")
+			waitAsyncInput(t, func() bool { return sentCount() == 1 })
+			send("correction")
+			card := waitForSentCard(t, &p.stubCardPlatform)
+			action := queuedChoiceAction(t, card, false)
+			go func() { defer close(done); send(action) }()
+			select {
+			case <-entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("steering did not begin")
+			}
+			s.events <- Event{Type: EventResult, Content: "first complete", Done: true}
+			waitAsyncInput(t, func() bool {
+				return strings.Contains(strings.Join(p.getSent(), "\n"), "first complete") && !e.sessions.GetOrCreateActive(key).Busy()
+			})
+			close(release)
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("steering callback did not finish")
+			}
+			send(action)
+			if !accepted {
+				waitAsyncInput(t, func() bool { return sentCount() == 2 })
+				s.events <- Event{Type: EventResult, Content: "correction complete", Done: true}
+				waitAsyncInput(t, func() bool {
+					return strings.Contains(strings.Join(p.getSent(), "\n"), "correction complete") && !e.sessions.GetOrCreateActive(key).Busy()
+				})
+			}
+			want := 1
+			if !accepted {
+				want = 2
+			}
+			if sentCount() != want {
+				t.Fatalf("sent %d turns; want %d", sentCount(), want)
+			}
+			count := 0
+			for _, entry := range e.sessions.GetOrCreateActive(key).GetHistory(20) {
+				if entry.Role == "user" && entry.Content == "correction" {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("correction history count=%d", count)
+			}
+		})
+	}
+}
+
 // psSupplementSession echoes the actual supplement while leaving the initial
 // task open. The engine still owns all command routing and turn completion.
 type psSupplementSession struct {

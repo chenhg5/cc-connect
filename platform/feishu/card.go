@@ -52,6 +52,31 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 	return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
 }
 
+// SendTrackedCard retains the bot message ID from creation, so the card can be
+// resolved when a queued message starts without waiting for a button callback.
+func (p *interactivePlatform) SendTrackedCard(ctx context.Context, rctx any, card *core.Card) (any, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.chatID == "" {
+		return nil, fmt.Errorf("%s: invalid tracked card reply context", p.tag())
+	}
+	content := renderCard(card, rc.sessionKey)
+	var id string
+	var err error
+	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
+		id, err = p.replyMessageWithID(ctx, rc, larkim.MsgTypeInteractive, content)
+	} else {
+		id, err = p.createMessageWithID(ctx, rc.chatID, larkim.MsgTypeInteractive, content, "send card")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
+		slog.Warn(p.tag() + ": card sent without message ID; automatic updates unavailable")
+		return nil, nil
+	}
+	return replyContext{messageID: id, chatID: rc.chatID, sessionKey: rc.sessionKey, cardAction: true}, nil
+}
+
 // RefreshCard updates a previously rendered card in-place using the Patch API.
 // It looks up the messageID stored from the most recent card action callback
 // for the given session key and patches that message with the new card content.
@@ -63,7 +88,24 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 	if msgID == "" {
 		return fmt.Errorf("%s: no tracked card messageID for session %q", p.tag(), sessionKey)
 	}
+	return p.updateCardMessage(ctx, msgID, sessionKey, card)
+}
 
+// UpdateActionCard uses the immutable callback context so concurrent choices in
+// one chat cannot replace each other's cards. Never patch a typed command's
+// original user message.
+func (p *interactivePlatform) UpdateActionCard(ctx context.Context, rctx any, card *core.Card) (bool, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok || !rc.cardAction || rc.messageID == "" {
+		return false, nil
+	}
+	if err := p.updateCardMessage(ctx, rc.messageID, rc.sessionKey, card); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (p *interactivePlatform) updateCardMessage(ctx context.Context, msgID, sessionKey string, card *core.Card) error {
 	cardJSON := renderCard(card, sessionKey)
 	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(msgID).
