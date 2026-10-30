@@ -542,6 +542,8 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
 }
 
+// ListSessions 返回当前 CODEX_HOME 下的会话，默认仅包含 workDir 对应的工作目录。
+// 启用 list_all_workdirs 后取消目录过滤；该选项不改变新会话的工作目录。
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
 	a.mu.RLock()
 	codexHome := a.codexHome
@@ -588,6 +590,8 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
+// WorkspaceAgentOptions 返回创建工作区 Agent 所需的配置副本，
+// 包含 list_all_workdirs，以便切换工作区后仍保留会话列举范围。
 func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
