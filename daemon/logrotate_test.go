@@ -59,7 +59,7 @@ func TestMetaSaveLoad(t *testing.T) {
 		LogMaxBackups: 3,
 		WorkDir:       "/tmp",
 		BinaryPath:    "/usr/local/bin/cc-connect",
-		InstalledAt:  NowISO(),
+		InstalledAt:   NowISO(),
 	}
 
 	if err := SaveMeta(m); err != nil {
