@@ -32,11 +32,14 @@ func (c *codexSubagents) start(id, title, kind, prompt string, emit func(core.Ev
 		return
 	}
 	if a == nil {
-		a = &codexSubagent{title: title, kind: kind}
-		if a.title == "" {
-			a.title = id
-		}
+		a = &codexSubagent{title: id}
 		c.threads[id] = a
+	}
+	if title != "" {
+		a.title = title
+	}
+	if kind != "" {
+		a.kind = kind
 	}
 	a.finished = false
 	c.emit(core.SubagentEvent{ID: id, Phase: core.SubagentStarted, Title: a.title, Kind: a.kind, Prompt: prompt, Background: true}, emit)
@@ -78,7 +81,8 @@ func (c *codexSubagents) collab(item map[string]any, emit func(core.Event)) {
 		case "interrupted", "shutdown":
 			c.finish(id, "interrupted", message, emit)
 		case "running", "pendingInit", "pending_init":
-			if tool == "sendInput" || tool == "send_input" || tool == "resumeAgent" || tool == "followupTask" {
+			switch tool {
+			case "sendInput", "send_input", "resumeAgent", "resume_agent", "followupTask", "followup_task":
 				c.start(id, "", "", prompt, emit)
 			}
 		}
@@ -126,31 +130,41 @@ func (s *appServerSession) handleSubagentNotification(method string, raw json.Ra
 		}
 		return true
 	}
-	var n struct {
+	// Inspect only the routing field first. Parent notifications are decoded by
+	// the generic handler; do not allocate their item maps a second time here.
+	var route struct {
 		ThreadID string
-		Item     map[string]any
-		Turn     struct {
+	}
+	parentID := s.CurrentSessionID()
+	if json.Unmarshal(raw, &route) != nil || route.ThreadID == "" || route.ThreadID == parentID || parentID == "" {
+		return false
+	}
+	if !s.subagents.has(route.ThreadID) {
+		// Registration precedes child items on the ordered notification stream.
+		// Until then, discard unknown threads rather than leaking foreign events.
+		return true
+	}
+	var n struct {
+		Item map[string]any
+		Turn struct {
 			Status string
 			Error  *struct{ Message string }
 		}
 	}
-	if json.Unmarshal(raw, &n) != nil || n.ThreadID == "" || n.ThreadID == s.CurrentSessionID() || s.CurrentSessionID() == "" {
-		return false
-	}
-	if !s.subagents.has(n.ThreadID) {
+	if json.Unmarshal(raw, &n) != nil {
 		return true
 	}
 	switch method {
 	case "turn/started":
-		s.subagents.start(n.ThreadID, "", "", "", s.emit)
+		s.subagents.start(route.ThreadID, "", "", "", s.emit)
 	case "item/started", "item/completed":
-		s.handleSubagentItem(n.ThreadID, method == "item/started", n.Item)
+		s.handleSubagentItem(route.ThreadID, method == "item/started", n.Item)
 	case "turn/completed":
 		status, summary := n.Turn.Status, ""
 		if n.Turn.Error != nil {
 			status, summary = "failed", n.Turn.Error.Message
 		}
-		s.subagents.finish(n.ThreadID, status, summary, s.emit)
+		s.subagents.finish(route.ThreadID, status, summary, s.emit)
 	}
 	// idle can precede an interrupted/failed turn/completed notification.
 	// Wait for the authoritative outcome rather than closing the card early.
