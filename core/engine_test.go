@@ -14674,6 +14674,48 @@ func TestUnsolicitedReader_FlushesPartialTextOnCancel(t *testing.T) {
 	}
 }
 
+// TestUnsolicitedReader_MultipleFlushesCloseOnce is a regression test for a
+// double close(flushDone) panic when flushPartial runs more than once in a
+// single reader lifetime (an error flush followed by an exit flush). Both
+// flushed texts must be delivered and flushDone must be closed exactly once.
+func TestUnsolicitedReader_MultipleFlushesCloseOnce(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-multiflush")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	session := e.sessions.GetOrCreateActive("test:ch1:u1")
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.startUnsolicitedReader(state, session, e.sessions, "test:ch1:u1", "")
+
+	// Text -> error (flush #1) -> text -> cancel (flush #2). The second
+	// flushPartial must not spawn a second goroutine closing flushDone.
+	sess.events <- Event{Type: EventText, Content: "before the error "}
+	sess.events <- Event{Type: EventError, Error: errors.New("boom")}
+	sess.events <- Event{Type: EventText, Content: "after the error"}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(sess.events) > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	e.stopUnsolicitedReader(state) // panics on double close(flushDone) before the fix
+
+	sent := waitForPlatformSend(p, 2, 2*time.Second)
+	found1, found2 := false, false
+	for _, s := range sent {
+		if strings.Contains(s, "before the error") {
+			found1 = true
+		}
+		if strings.Contains(s, "after the error") {
+			found2 = true
+		}
+	}
+	if !found1 || !found2 {
+		t.Fatalf("both flushed texts must be delivered, got %v", sent)
+	}
+}
+
 // slowSendPlatform records sends like stubPlatformEngine but takes sendDelay
 // per Send, and blocks each Send until gate is closed when gate is non-nil.
 // It widens the window in which an asynchronous flush can be overtaken.
@@ -14859,9 +14901,19 @@ func TestUnsolicitedReader_SetsResyncOnDeadSessionError(t *testing.T) {
 
 	state.mu.Lock()
 	resync := state.eventsNeedResync
+	flushDoneCh := state.unsolicitedFlushDone
 	state.mu.Unlock()
 	if !resync {
 		t.Error("expected eventsNeedResync=true after EventError")
+	}
+
+	// Delivery is asynchronous through one ordered queue; flushDone is the
+	// signal that queued sends have reached the platform (the same contract
+	// stopUnsolicitedReader waits on).
+	select {
+	case <-flushDoneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("flush sender did not finish")
 	}
 
 	// Verify error was relayed to platform.
