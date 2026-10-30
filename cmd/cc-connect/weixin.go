@@ -415,10 +415,11 @@ func weixinHTTPGet(ctx context.Context, fullURL, routeTag string, debug bool) ([
 
 func weixinTruncateBody(b []byte, max int) string {
 	s := string(b)
-	if len(s) <= max {
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	return string(runes[:max]) + "…"
 }
 
 func weixinFetchBotQRCode(ctx context.Context, apiBase, botType, routeTag string, debug bool) (*weixinBotQRResponse, error) {
