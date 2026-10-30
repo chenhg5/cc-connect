@@ -40,6 +40,7 @@ type Agent struct {
 	backend         string // "exec" | "app_server"
 	appServerURL    string
 	codexHome       string
+	listAllWorkdirs bool
 	systemPrompt    string
 	appendPrompt    string
 	cmd             string   // explicit CLI command; empty enables discovery
@@ -62,6 +63,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend, _ := opts["backend"].(string)
 	appServerURL, _ := opts["app_server_url"].(string)
 	codexHome, _ := opts["codex_home"].(string)
+	listAllWorkdirs, _ := opts["list_all_workdirs"].(bool)
 	systemPrompt, _ := opts["system_prompt"].(string)
 	appendPrompt, _ := opts["append_system_prompt"].(string)
 	mode = normalizeMode(mode)
@@ -102,6 +104,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		backend:         backend,
 		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
+		listAllWorkdirs: listAllWorkdirs,
 		systemPrompt:    strings.TrimSpace(systemPrompt),
 		appendPrompt:    strings.TrimSpace(appendPrompt),
 		cmd:             cmd,
@@ -539,11 +542,17 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
 }
 
+// ListSessions 返回当前 CODEX_HOME 下的会话，默认仅包含 workDir 对应的工作目录。
+// 启用 list_all_workdirs 后取消目录过滤；该选项不改变新会话的工作目录。
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
 	a.mu.RLock()
 	codexHome := a.codexHome
 	workDir := a.workDir
+	listAllWorkdirs := a.listAllWorkdirs
 	a.mu.RUnlock()
+	if listAllWorkdirs {
+		workDir = ""
+	}
 	return listCodexSessions(workDir, codexHome)
 }
 
@@ -581,13 +590,16 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
+// WorkspaceAgentOptions 返回创建工作区 Agent 所需的配置副本，
+// 包含 list_all_workdirs，以便切换工作区后仍保留会话列举范围。
 func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
 	opts := map[string]any{
-		"mode":    a.mode,
-		"backend": a.backend,
+		"mode":              a.mode,
+		"backend":           a.backend,
+		"list_all_workdirs": a.listAllWorkdirs,
 	}
 	if a.cmd != "" {
 		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)

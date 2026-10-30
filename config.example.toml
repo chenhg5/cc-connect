@@ -1703,6 +1703,9 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
+# /list 是否显示当前 CODEX_HOME 下所有工作目录的 Codex 会话。
+# 默认 false，仅显示 work_dir 对应的会话；设为 true 时不按目录过滤。
+# list_all_workdirs = false
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #
 # Mode options / 模式说明:
