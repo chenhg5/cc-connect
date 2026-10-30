@@ -129,8 +129,8 @@ func New(opts map[string]any) (core.Agent, error) {
 	probeCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 	if err := client.call(probeCtx, "session.list", map[string]any{}, nil); err != nil {
-		slog.Warn("dsh: web server not reachable yet — sessions will fail until it is up",
-			"base_url", baseURL, "error", err)
+		slog.Warn("dsh: web server is not ready",
+			"base_url", baseURL, "detail", probeFailureDetail(err))
 	} else {
 		slog.Info("dsh: web server reachable", "base_url", baseURL)
 	}
@@ -513,6 +513,20 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 }
 
+// Probe failures are not all connectivity failures: a reachable Remote server
+// may reject credentials or lack an initialized workspace.
+func probeFailureDetail(err error) string {
+	text := err.Error()
+	switch {
+	case strings.Contains(text, "authentication"):
+		return fmt.Sprintf("authentication failed; check the running server's launch token: %v", err)
+	case strings.Contains(text, "missing workspace baseline"):
+		return fmt.Sprintf("workspace not ready; initialize it with `dsh web --init`: %v", err)
+	default:
+		return fmt.Sprintf("server probe failed; check connectivity and whether `dsh web` is running: %v", err)
+	}
+}
+
 // DoctorChecks reports the dsh web server's reachability.
 func (a *Agent) DoctorChecks(ctx context.Context) []core.DoctorCheckResult {
 	a.mu.RLock()
@@ -530,7 +544,7 @@ func (a *Agent) DoctorChecks(ctx context.Context) []core.DoctorCheckResult {
 		return []core.DoctorCheckResult{{
 			Name:   "dsh web server",
 			Status: core.DoctorFail,
-			Detail: fmt.Sprintf("%s not reachable: %v (start it with `dsh web`)", baseURL, err),
+			Detail: fmt.Sprintf("%s: %s", baseURL, probeFailureDetail(err)),
 		}}
 	}
 	return []core.DoctorCheckResult{{

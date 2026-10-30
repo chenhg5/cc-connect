@@ -760,6 +760,17 @@ func TestSession_RejectedLegacyPromptRetryBindsNativeRPC(t *testing.T) {
 	if len(events) == 0 || events[len(events)-1].Type != core.EventResult {
 		t.Fatal("retry did not complete")
 	}
+	// The failed first receipt reserved a speculative turn. Its correction
+	// must also carry forward to the next ordinary successful prompt.
+	if err := s.Send("after retry", "three", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	m.broadcast("start-next", frameEvent(s.sessionID, evTurnStart(2)))
+	m.broadcast("end-next", frameEvent(s.sessionID, evTurnEnd(2, "completed")))
+	events = drainEvents(t, s, time.Second)
+	if len(events) == 0 || events[len(events)-1].Type != core.EventResult {
+		t.Fatal("prompt after retry did not complete")
+	}
 	time.Sleep(150 * time.Millisecond)
 	if m.cancelCount() != 0 {
 		t.Fatal("completed retry was cancelled")
@@ -863,5 +874,163 @@ func TestSession_EnvBootstrapSurvivesRejectedFirstPrompt(t *testing.T) {
 				t.Fatalf("bootstrap repeated after successful receipt: %q", got)
 			}
 		})
+	}
+}
+
+func TestSession_EarlyQueuedEchoDoesNotFinishOnPreviousTurn(t *testing.T) {
+	for _, withStart := range []bool{false, true} {
+		t.Run(fmt.Sprint(withStart), func(t *testing.T) {
+			m := newMockDshServer()
+			a := newTestAgent(t, m, t.TempDir())
+			session, err := a.StartSession(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := session.(*dshSession)
+			t.Cleanup(func() { _ = s.Close() })
+			if err := s.Send("first", "same-platform-id", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(evTurnStart(1))
+			s.handleSessionEvent(raw)
+			if err := s.Send("queued", "same-platform-id", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			s.turnMu.Lock()
+			done, rpcID, expected := s.turnDone, s.watchdogRPCID, s.currentTurn
+			s.turnMu.Unlock()
+			raw, _ = json.Marshal(ev("user/message", map[string]any{"source": map[string]any{"rpcId": rpcID}}))
+			s.handleSessionEvent(raw)
+			s.turnMu.Lock()
+			got := s.currentTurn
+			s.turnMu.Unlock()
+			if got < expected {
+				t.Fatalf("early echo moved currentTurn backwards: got %d, want >= %d", got, expected)
+			}
+			s.finishTurn(sessionEventData{Turn: 1})
+			select {
+			case <-done:
+				t.Fatal("early queued echo let previous turn finish its watchdog")
+			default:
+			}
+			if withStart {
+				raw, _ = json.Marshal(evTurnStart(2))
+				s.handleSessionEvent(raw)
+			}
+			s.finishTurn(sessionEventData{Turn: 2})
+			select {
+			case <-done:
+			default:
+				t.Fatal("queued turn left watchdog armed")
+			}
+		})
+	}
+}
+
+func TestSession_ReusedMessageIDGetsFreshRPCIdentity(t *testing.T) {
+	m := newMockDshServer()
+	a := newTestAgent(t, m, t.TempDir())
+	session, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := session.(*dshSession)
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Send("first", "external/id with spaces", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	s.turnMu.Lock()
+	oldID := s.watchdogRPCID
+	s.turnMu.Unlock()
+	if err := s.Send("retry", "external/id with spaces", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	s.turnMu.Lock()
+	newID := s.watchdogRPCID
+	before := s.watchdogTurn
+	s.turnMu.Unlock()
+	if oldID == newID || !strings.HasPrefix(newID, "cc-connect-") {
+		t.Fatalf("RPC identities not fresh adapter IDs: %q, %q", oldID, newID)
+	}
+	raw, _ := json.Marshal(ev("user/message", map[string]any{"source": map[string]any{"rpcId": oldID}}))
+	s.handleSessionEvent(raw)
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	if s.watchdogTurn != before {
+		t.Fatal("previous submission's echo claimed the retry watchdog")
+	}
+}
+
+func TestProbeFailureDetailClassifiesReadiness(t *testing.T) {
+	for _, tc := range []struct{ err, want string }{
+		{"dsh: Remote authentication returned HTTP 401", "check the running server's launch token"},
+		{"dsh: missing workspace baseline", "dsh web --init"},
+		{"connection refused", "check connectivity"},
+	} {
+		if got := probeFailureDetail(fmt.Errorf("%s", tc.err)); !strings.Contains(got, tc.want) {
+			t.Fatalf("%q: got %q, want %q", tc.err, got, tc.want)
+		}
+	}
+}
+
+type wrappedTestTransport struct{ base http.RoundTripper }
+
+func (t wrappedTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.base.RoundTrip(req)
+}
+
+func TestClient_CommandSupportsCustomTransport(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		var req struct{ RPCID string }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			return
+		}
+		writeServerValue(w, req.RPCID, map[string]any{"matched": true})
+	}))
+	defer server.Close()
+	client := newRPCClient(server.URL)
+	client.httpClient.Transport = wrappedTestTransport{base: http.DefaultTransport}
+	if err := client.callHTTP(context.Background(), "commands/execute", map[string]any{}, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("custom transport never reached command endpoint")
+	}
+}
+
+func TestSession_QueuedEchoBeforeEitherTurnStarts(t *testing.T) {
+	m := newMockDshServer()
+	a := newTestAgent(t, m, t.TempDir())
+	session, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := session.(*dshSession)
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Send("first", "one", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Send("second", "two", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	s.turnMu.Lock()
+	done, rpcID := s.turnDone, s.watchdogRPCID
+	s.turnMu.Unlock()
+	raw, _ := json.Marshal(ev("user/message", map[string]any{"source": map[string]any{"rpcId": rpcID}}))
+	s.handleSessionEvent(raw)
+	s.finishTurn(sessionEventData{Turn: 1})
+	select {
+	case <-done:
+		t.Fatal("first queued turn completed the second watchdog")
+	default:
+	}
+	s.finishTurn(sessionEventData{Turn: 2})
+	select {
+	case <-done:
+	default:
+		t.Fatal("second queued turn left watchdog armed")
 	}
 }

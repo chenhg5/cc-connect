@@ -123,7 +123,10 @@ func (c *rpcClient) connection(ctx context.Context) (*remoteTransport, error) {
 	for _, cookie := range cookies {
 		cookieReq.AddCookie(cookie)
 	}
-	socketURL, _ := url.Parse(c.baseURL + "/api/remote.mux")
+	socketURL, err := url.Parse(c.baseURL + "/api/remote.mux")
+	if err != nil {
+		return nil, fmt.Errorf("dsh: parse Remote websocket URL: %w", err)
+	}
 	if socketURL.Scheme == "https" {
 		socketURL.Scheme = "wss"
 	} else {

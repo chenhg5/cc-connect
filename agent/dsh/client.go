@@ -263,9 +263,9 @@ func (c *rpcClient) callHTTP(ctx context.Context, method string, payload any, ou
 	}
 
 	client := c.httpClient
-	if method == "commands/execute" {
+	if transport, ok := c.httpClient.Transport.(*http.Transport); method == "commands/execute" && ok {
 		// Native compaction may need a full model response before writing headers.
-		transport := c.httpClient.Transport.(*http.Transport).Clone()
+		transport := transport.Clone()
 		transport.ResponseHeaderTimeout = 0
 		defer transport.CloseIdleConnections()
 		commandClient := *c.httpClient

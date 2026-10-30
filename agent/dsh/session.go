@@ -42,20 +42,22 @@ type dshSession struct {
 	pendingQuestions map[string]pendingQuestion
 
 	// turn state
-	commandCancel context.CancelFunc // guarded by turnMu
-	promptCancel  context.CancelFunc // interrupts a stalled submission receipt
-	cancellation  *turnCancellation  // blocks new submissions until cancellation completes
-	turnOpMu      sync.Mutex         // serializes prompt submission and cancellation RPCs
-	turnMu        sync.Mutex
-	currentTurn   int    // latest native turn, or expected next turn before turn/start
-	nativeTurn    int    // latest turn confirmed by a native start/end or snapshot
-	watchdogTurn  int    // native turn owning turnDone
-	watchdogRPCID string // native user/message source binding for the latest Send
-	turnUncertain bool   // an unsuccessful receipt cannot prove whether its prompt ran
-	lastUsage     *tokenUsage
-	toolNames     map[string]string   // callId → tool name (for tool/result)
-	seenCalls     map[string]struct{} // callIds already surfaced as EventToolUse
-	turnDone      chan struct{}       // closed on completion/cancellation; fresh per Send()
+	commandCancel     context.CancelFunc // guarded by turnMu
+	promptCancel      context.CancelFunc // interrupts a stalled submission receipt
+	cancellation      *turnCancellation  // blocks new submissions until cancellation completes
+	turnOpMu          sync.Mutex         // serializes prompt submission and cancellation RPCs
+	turnMu            sync.Mutex
+	currentTurn       int    // latest native turn, or expected next turn before turn/start
+	nativeTurn        int    // latest turn confirmed by a native start/end or snapshot
+	watchdogTurn      int    // native turn owning turnDone
+	watchdogRPCID     string // native user/message source binding for the latest Send
+	watchdogEchoed    bool   // matching native echo permits completion after reordered start
+	watchdogAfterTurn int    // native turn observed before this prompt was submitted
+	turnUncertain     bool   // an unsuccessful receipt cannot prove whether its prompt ran
+	lastUsage         *tokenUsage
+	toolNames         map[string]string   // callId → tool name (for tool/result)
+	seenCalls         map[string]struct{} // callIds already surfaced as EventToolUse
+	turnDone          chan struct{}       // closed on completion/cancellation; fresh per Send()
 
 	// delta aggregation: dsh streams token-level chunks; coalesce them into
 	// engine-sized EventText/EventThinking pieces so platform delivery is not
@@ -210,10 +212,9 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		}
 	}
 
-	rpcID := messageID
-	if rpcID == "" {
-		rpcID = mintRPCID()
-	}
+	// Platform message IDs can repeat on retries; every submission needs its own
+	// transport identity so an old echo cannot claim the new watchdog.
+	rpcID := mintRPCID()
 	if err := s.lockSubmission(); err != nil {
 		return err
 	}
@@ -228,6 +229,7 @@ func (s *dshSession) Send(prompt string, messageID string, images []core.ImageAt
 		s.watchdogTurn = 0 // wait for the native echo of this exact RPC
 	}
 	s.watchdogRPCID = rpcID
+	s.watchdogAfterTurn = s.nativeTurn
 	promptCtx, cancelPrompt := context.WithCancel(s.ctx)
 	promptCtx = context.WithValue(promptCtx, promptRPCIDKey{}, rpcID)
 	s.promptCancel = cancelPrompt
@@ -316,6 +318,7 @@ func (s *dshSession) stopWatchdogLocked() {
 		s.turnDone = nil
 	}
 	s.watchdogTurn = 0
+	s.watchdogEchoed = false
 }
 
 func (s *dshSession) RespondPermission(requestID string, result core.PermissionResult) error {
@@ -634,8 +637,24 @@ func (s *dshSession) handleSessionEvent(raw json.RawMessage) {
 		// failed. This binds the latest watchdog without assuming acceptance.
 		s.turnMu.Lock()
 		if data.Source != nil && data.Source.RPCID == s.watchdogRPCID && s.turnDone != nil {
-			s.watchdogTurn = s.nativeTurn
-			s.currentTurn = s.nativeTurn
+			// DSH 0.2.1-rc.2 emits turn/start before this echo. Also tolerate
+			// an early queued echo: it must not bind to a turn already
+			// observed before Send, and a later turn/end can complete it.
+			s.watchdogTurn = max(s.nativeTurn, s.watchdogAfterTurn+1)
+			if !s.turnUncertain {
+				// Accepted queued submissions reserve successive native turns,
+				// including when neither prompt has emitted turn/start yet.
+				s.watchdogTurn = max(s.watchdogTurn, s.currentTurn)
+			}
+			s.watchdogEchoed = true
+			if s.turnUncertain {
+				// A rejected receipt can leave a speculative reservation ahead
+				// of the server. Reconcile it only after this RPC's own echo;
+				// otherwise later successful prompts inherit the wrong number.
+				s.currentTurn = s.watchdogTurn
+			} else {
+				s.currentTurn = max(s.currentTurn, s.nativeTurn)
+			}
 			s.turnUncertain = false
 		}
 		s.turnMu.Unlock()
@@ -749,7 +768,7 @@ func (s *dshSession) finishTurn(data sessionEventData) {
 	}
 	usage = s.lastUsage
 	s.lastUsage = nil
-	if data.Turn == s.watchdogTurn {
+	if data.Turn == s.watchdogTurn || (s.watchdogEchoed && data.Turn > s.watchdogTurn) {
 		s.stopWatchdogLocked()
 	}
 	s.turnMu.Unlock()

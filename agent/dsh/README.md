@@ -27,6 +27,11 @@ Remote transport; without a token the adapter uses the legacy transport.
 Use the new launch token after restarting DSH. The adapter does not start
 or stop the shared DSH server.
 
+The Remote handshake sends the token in `/connect?token=...`. Server or proxy
+access logs may therefore contain it even though cc-connect removes it from
+its own logs. Restrict/redact those logs, and use HTTPS for any non-loopback
+connection: plain HTTP exposes the launch token on the network.
+
 Optional `model` accepts an exact `provider/model` route or an unambiguous
 bare ID from the server catalog. `reasoning_effort` uses that model's
 advertised options. Invalid explicit selections fail session startup.
