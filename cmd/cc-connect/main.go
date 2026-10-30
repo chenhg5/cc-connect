@@ -737,8 +737,10 @@ func main() {
 		// Wire speech-to-text if enabled
 		if cfg.Speech.Enabled {
 			speechCfg := core.SpeechCfg{
-				Enabled:  true,
-				Language: cfg.Speech.Language,
+				Enabled:        true,
+				Language:       cfg.Speech.Language,
+				Context:        cfg.Speech.Context,
+				ContextHistory: cfg.Speech.ContextHistory,
 			}
 			switch cfg.Speech.Provider {
 			case "groq":
