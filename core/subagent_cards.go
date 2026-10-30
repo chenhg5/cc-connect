@@ -30,6 +30,8 @@ const (
 	subagentCardBacklog = 512
 	// subagentCardIdle ends a worker whose subagents went silent without
 	// finishing (e.g. the agent process died); their cards stay as they are.
+	// Their writer state is discarded, so a later event for the same ID
+	// starts a new card rather than recovering the idle card's history.
 	subagentCardIdle = 2 * time.Hour
 	// subagentPromptMaxLen bounds the task line a card opens with.
 	subagentPromptMaxLen = 300
@@ -265,6 +267,9 @@ func (c *subagentCards) apply(op subagentOp) {
 			w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryInfo, Text: prompt}, prompt)
 		}
 	case SubagentStep:
+		if card.finished {
+			return // only a new start may reopen a finished card
+		}
 		step := ev.Step
 		switch step.Kind {
 		case ProgressEntryThinking:
