@@ -1279,8 +1279,6 @@ func TestPiSessionAttachmentDirsAreIsolated(t *testing.T) {
 	}
 }
 
-// ── handleEvent ──────────────────────────────────────────────
-
 func newTestSession(opts ...bool) *piSession {
 	ctx, cancel := context.WithCancel(context.Background())
 	rpc := len(opts) > 0 && opts[0]
