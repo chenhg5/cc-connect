@@ -3174,6 +3174,7 @@ func TestCmdList_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 	ws.sessions = NewSessionManager("")
 
 	msg := &Message{SessionKey: "slack:" + channelID + ":U1", ReplyCtx: "ctx"}
+	ws.sessions.NewSideSession(msg.SessionKey, "").SetAgentSessionID("w1", "stub")
 	e.cmdList(p, msg, nil)
 
 	if len(p.sent) == 0 {
@@ -3800,6 +3801,7 @@ func TestCmdList_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	sessions := []AgentSessionInfo{{ID: "session-a", Summary: "First session", MessageCount: 3, ModifiedAt: time.Date(2026, 3, 11, 2, 0, 0, 0, time.UTC)}}
 	e := NewEngine("test", &stubListAgent{sessions: sessions}, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, sessions)
 
 	e.cmdList(p, msg, nil)
 
@@ -4011,6 +4013,12 @@ type stubListAgentWithTitle struct {
 	sessions []AgentSessionInfo
 }
 
+func trackAgentSessionsForTest(sm *SessionManager, key string, listed []AgentSessionInfo) {
+	for _, session := range listed {
+		sm.NewSideSession(key, "").SetAgentSessionID(session.ID, "stub")
+	}
+}
+
 func (a *stubListAgentWithTitle) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
 	return a.sessions, nil
 }
@@ -4025,6 +4033,7 @@ func TestCmdDelete_BatchCommaList(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, []string{"1,2,3"})
 
@@ -4053,6 +4062,7 @@ func TestCmdDelete_BatchRange(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, []string{"3-7"})
 
@@ -4075,6 +4085,7 @@ func TestCmdDelete_BatchMixedSyntax(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, []string{"1,3-5,8"})
 
@@ -4131,6 +4142,7 @@ func TestCmdDelete_SingleSessionPrefixStillWorks(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, []string{"abc123"})
 
@@ -4148,7 +4160,7 @@ func TestCmdDelete_SyncsLocalSessionSnapshot(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
 
-	victim := e.sessions.NewSession("test:user2", "victim")
+	victim := e.sessions.NewSideSession(msg.SessionKey, "victim")
 	victim.SetAgentSessionID("session-1", "stub")
 	keep := e.sessions.NewSession("test:user3", "keep")
 	keep.SetAgentSessionID("session-2", "stub")
@@ -4174,6 +4186,7 @@ func TestCmdDelete_NoArgsOnCardPlatformShowsDeleteModeCard(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, nil)
 
@@ -4197,6 +4210,7 @@ func TestDeleteMode_ToggleSelectionReturnsUpdatedCard(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, nil)
 	card := e.handleCardNav("act:/delete-mode toggle session-2", msg.SessionKey)
@@ -4225,6 +4239,7 @@ func TestDeleteMode_ConfirmAndSubmitDeletesSelectedSessions(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, nil)
 	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
@@ -4268,6 +4283,7 @@ func TestDeleteMode_SubmitReportsMissingSelectedSessions(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, nil)
 	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
@@ -4306,6 +4322,7 @@ func TestDeleteMode_CancelReturnsListCard(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, nil)
 	card := e.handleCardNav("act:/delete-mode cancel", msg.SessionKey)
@@ -4325,6 +4342,7 @@ func TestDeleteMode_ConfirmWithoutSelectionShowsHint(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, nil)
 	card := e.handleCardNav("act:/delete-mode confirm", msg.SessionKey)
@@ -4345,6 +4363,7 @@ func TestDeleteMode_PageNavigationPreservesSelection(t *testing.T) {
 	agent := &stubDeleteAgent{stubListAgent: stubListAgent{sessions: sessions}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, nil)
 	_ = e.handleCardNav("act:/delete-mode toggle session-1", msg.SessionKey)
@@ -4442,6 +4461,7 @@ func TestDeleteMode_FormSubmitShowsConfirmThenDeletes(t *testing.T) {
 	}}}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 	msg := &Message{SessionKey: "feishu:user1", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 
 	e.cmdDelete(p, msg, nil)
 	confirmCard := e.handleCardNav("act:/delete-mode form-submit session-1,session-3", msg.SessionKey)
@@ -13027,6 +13047,7 @@ func TestCmdSwitch_ByIndex_SetsSession(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	key := "test:ch:user1"
+	trackAgentSessionsForTest(e.sessions, key, agent.sessions)
 
 	// Pre-create an interactive state to verify cleanup.
 	e.interactiveMu.Lock()
@@ -13072,6 +13093,7 @@ func TestCmdSwitch_ByIDPrefix(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	msg := &Message{SessionKey: "test:ch:user1", Content: "/switch abc-123", ReplyCtx: "ctx"}
+	trackAgentSessionsForTest(e.sessions, msg.SessionKey, agent.sessions)
 	e.handleCommand(p, msg, msg.Content)
 
 	sent := p.getSent()
@@ -13121,6 +13143,7 @@ func TestCmdSwitch_ByName(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
 
 	key := "test:ch:user1"
+	trackAgentSessionsForTest(e.sessions, key, agent.sessions)
 	// Set a custom name for the second session.
 	e.sessions.SetSessionName("sess-named-2", "feature-branch")
 
@@ -15560,8 +15583,8 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 		t.Fatalf("step1: expected 1 reply, got %d", len(p.sent))
 	}
 	step1Count := strings.Count(p.sent[0], "msgs")
-	if step1Count != 20 {
-		t.Fatalf("step1: /list should show first page (20 sessions), got %d", step1Count)
+	if step1Count != 1 {
+		t.Fatalf("step1: legacy IDs without ownership must be hidden; got %d", step1Count)
 	}
 
 	// ── Step 2: /new "我的新会话" ──────────────────────────────
@@ -15575,8 +15598,8 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 		t.Fatalf("step3: expected 1 reply, got %d", len(p.sent))
 	}
 	step3Count := strings.Count(p.sent[0], "msgs")
-	if step3Count < 20 {
-		t.Fatalf("step3: /list BEFORE agent reply should still show all sessions (page 1 = 20), got %d\nreply:\n%s",
+	if step3Count != 1 {
+		t.Fatalf("step3: /list before agent reply should still show the tracked session, got %d\nreply:\n%s",
 			step3Count, p.sent[0])
 	}
 
@@ -15605,21 +15628,20 @@ func TestCmdList_RealWorldLegacyDataFullFlow(t *testing.T) {
 		t.Fatalf("step4: expected 1 reply, got %d", len(p.sent))
 	}
 	step4Count := strings.Count(p.sent[0], "msgs")
-	if step4Count < 20 {
-		t.Fatalf("step4: /list AFTER agent reply should show all sessions (page 1 = 20), got %d\nreply:\n%s",
+	if step4Count != 2 {
+		t.Fatalf("step4: /list after agent reply should show the two tracked sessions, got %d\nreply:\n%s",
 			step4Count, p.sent[0])
 	}
 
-	// ── Step 5: verify session name on page 2 ─────────────────
-	// The newest session is at the end of the list; check page 2.
+	// ── Step 5: verify the newly owned session name ────────────
 	p.sent = nil
-	e.cmdList(p, msg, []string{"2"})
+	e.cmdList(p, msg, nil)
 	if len(p.sent) != 1 {
 		t.Fatalf("step5: expected 1 reply for page 2, got %d", len(p.sent))
 	}
-	// The new session should show "我的新会话" (the name from /new), not the message content
+	// The new session should show "我的新会话" (the name from /new), not the message content.
 	if !strings.Contains(p.sent[0], "我的新会话") {
-		t.Errorf("step5: /list page 2 should display session name '我的新会话' but it's missing:\n%s", p.sent[0])
+		t.Errorf("step5: /list should display session name '我的新会话' but it's missing:\n%s", p.sent[0])
 	}
 }
 
@@ -15666,9 +15688,9 @@ func TestCmdList_FilterExternalSessionsEnabled(t *testing.T) {
 	}
 }
 
-// TestCmdList_DefaultShowsAllSessions verifies that with default config
-// (filter_external_sessions=false), all sessions including external ones appear.
-func TestCmdList_DefaultShowsAllSessions(t *testing.T) {
+// The privacy default hides untracked external CLI sessions even when the
+// older filter_external_sessions flag is left at its false default.
+func TestCmdList_DefaultHidesUntrackedSessions(t *testing.T) {
 	agentSessions := []AgentSessionInfo{
 		{ID: "tracked-1", Summary: "Tracked session", MessageCount: 5},
 		{ID: "external-1", Summary: "External session", MessageCount: 10},
@@ -15694,8 +15716,8 @@ func TestCmdList_DefaultShowsAllSessions(t *testing.T) {
 	if !strings.Contains(reply, "Tracked session") {
 		t.Errorf("default mode: should show tracked session:\n%s", reply)
 	}
-	if !strings.Contains(reply, "External session") {
-		t.Errorf("default mode: should show external session:\n%s", reply)
+	if strings.Contains(reply, "External session") {
+		t.Errorf("default mode: should hide external session:\n%s", reply)
 	}
 }
 
@@ -15734,15 +15756,15 @@ func setupFilterTestEngine(t *testing.T, filterEnabled bool) (*Engine, *stubPlat
 }
 
 func TestFilterExternalSessions_SwitchByIndex(t *testing.T) {
-	t.Run("disabled: index 3 reaches external session", func(t *testing.T) {
+	t.Run("disabled: index 3 still cannot reach external session", func(t *testing.T) {
 		e, p, userKey, _ := setupFilterTestEngine(t, false)
 		p.sent = nil
 		e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"3"})
 		if len(p.sent) != 1 {
 			t.Fatalf("expected 1 reply, got %d", len(p.sent))
 		}
-		if !strings.Contains(p.sent[0], "External CLI session") {
-			t.Errorf("default mode: /switch 3 should reach external session:\n%s", p.sent[0])
+		if strings.Contains(p.sent[0], "External CLI session") {
+			t.Errorf("default mode: /switch 3 reached external session:\n%s", p.sent[0])
 		}
 	})
 
@@ -15760,15 +15782,15 @@ func TestFilterExternalSessions_SwitchByIndex(t *testing.T) {
 }
 
 func TestFilterExternalSessions_SwitchByIDPrefix(t *testing.T) {
-	t.Run("disabled: can switch to external by ID prefix", func(t *testing.T) {
+	t.Run("disabled: cannot switch to external by ID prefix", func(t *testing.T) {
 		e, p, userKey, _ := setupFilterTestEngine(t, false)
 		p.sent = nil
 		e.cmdSwitch(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"external"})
 		if len(p.sent) != 1 {
 			t.Fatalf("expected 1 reply, got %d", len(p.sent))
 		}
-		if !strings.Contains(p.sent[0], "External CLI session") {
-			t.Errorf("default mode: /switch external should find external session:\n%s", p.sent[0])
+		if strings.Contains(p.sent[0], "External CLI session") {
+			t.Errorf("default mode: /switch external found external session:\n%s", p.sent[0])
 		}
 	})
 
@@ -15786,7 +15808,7 @@ func TestFilterExternalSessions_SwitchByIDPrefix(t *testing.T) {
 }
 
 func TestFilterExternalSessions_DeleteByIndex(t *testing.T) {
-	t.Run("disabled: /delete 3 hits external session", func(t *testing.T) {
+	t.Run("disabled: /delete 3 cannot hit external session", func(t *testing.T) {
 		e, p, userKey, _ := setupFilterTestEngine(t, false)
 		p.sent = nil
 		e.cmdDelete(p, &Message{SessionKey: userKey, ReplyCtx: "ctx"}, []string{"3"})
@@ -15794,8 +15816,8 @@ func TestFilterExternalSessions_DeleteByIndex(t *testing.T) {
 			t.Fatal("expected reply from /delete")
 		}
 		reply := strings.Join(p.sent, "\n")
-		if !strings.Contains(reply, "external-1") && !strings.Contains(reply, "External CLI session") {
-			t.Errorf("default mode: /delete 3 should target external session:\n%s", reply)
+		if strings.Contains(reply, "external-1") || strings.Contains(reply, "External CLI session") {
+			t.Errorf("default mode: /delete 3 targeted external session:\n%s", reply)
 		}
 	})
 
@@ -15814,15 +15836,15 @@ func TestFilterExternalSessions_DeleteByIndex(t *testing.T) {
 }
 
 func TestFilterExternalSessions_RenderListCard(t *testing.T) {
-	t.Run("disabled: card shows all sessions", func(t *testing.T) {
-		e, _, userKey, agentSessions := setupFilterTestEngine(t, false)
+	t.Run("disabled: card still hides external sessions", func(t *testing.T) {
+		e, _, userKey, _ := setupFilterTestEngine(t, false)
 		card, err := e.renderListCard(userKey, 1)
 		if err != nil {
 			t.Fatalf("renderListCard: %v", err)
 		}
 		switchActions := countCardActionValues(card, "act:/switch ")
-		if switchActions != len(agentSessions) {
-			t.Errorf("default mode: card should show %d sessions, got %d", len(agentSessions), switchActions)
+		if switchActions != 2 {
+			t.Errorf("default mode: card should show 2 tracked sessions, got %d", switchActions)
 		}
 	})
 
@@ -15840,14 +15862,14 @@ func TestFilterExternalSessions_RenderListCard(t *testing.T) {
 }
 
 func TestFilterExternalSessions_DynamicToggle(t *testing.T) {
-	e, p, userKey, agentSessions := setupFilterTestEngine(t, false)
+	e, p, userKey, _ := setupFilterTestEngine(t, false)
 	msg := &Message{SessionKey: userKey, ReplyCtx: "ctx"}
 
 	p.sent = nil
 	e.cmdList(p, msg, nil)
 	count1 := strings.Count(p.sent[0], "msgs")
-	if count1 != len(agentSessions) {
-		t.Fatalf("before toggle: expected %d sessions, got %d", len(agentSessions), count1)
+	if count1 != 2 {
+		t.Fatalf("before toggle: expected 2 tracked sessions, got %d", count1)
 	}
 
 	e.SetFilterExternalSessions(true)
@@ -15864,8 +15886,8 @@ func TestFilterExternalSessions_DynamicToggle(t *testing.T) {
 	p.sent = nil
 	e.cmdList(p, msg, nil)
 	count3 := strings.Count(p.sent[0], "msgs")
-	if count3 != len(agentSessions) {
-		t.Fatalf("after disabling filter: expected %d sessions, got %d", len(agentSessions), count3)
+	if count3 != 2 {
+		t.Fatalf("after disabling filter: expected 2 tracked sessions, got %d", count3)
 	}
 }
 

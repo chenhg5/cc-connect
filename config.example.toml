@@ -768,12 +768,24 @@ name = "my-backend"
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
-# filter_external_sessions: when true, /list /switch /delete only show sessions
-# created by cc-connect, hiding sessions from direct CLI usage in the same work_dir.
-# Default false = show all sessions from the agent.
+# Session commands (/list, /switch, /history, /delete, /search, /name) now
+# default to sessions uniquely tracked for this conversation. Unknown direct-CLI
+# and legacy sessions cannot be claimed through these commands. Explicit shared
+# channel/thread session modes disable these commands on that platform.
+# 会话命令默认只访问明确归属于当前会话键的 agent 会话；未知归属、外部 CLI 和旧数据
+# 无法通过命令认领。显式共享频道/话题模式会禁用该平台上的跨会话命令。
+#
+# filter_external_sessions is retained for config compatibility; the secure
+# per-user boundary applies regardless of this older option's value.
+# filter_external_sessions 保留用于配置兼容；安全的按人隔离不受旧选项影响。
 # filter_external_sessions = false
-# filter_external_sessions：为 true 时，/list /switch /delete 仅显示由 cc-connect 创建的会话，
-# 隐藏在相同 work_dir 下通过直接 CLI 创建的会话。默认 false = 显示 agent 的全部会话。
+#
+# session_admin_cross_user = true allows only admin_from users to use text
+# session commands across tracked users. It is false by default; admin_from
+# alone never grants cross-user transcript access. Unknown sessions stay denied.
+# session_admin_cross_user = true 仅允许 admin_from 用户用文本命令跨用户访问已登记
+# 会话；默认关闭，单独配置 admin_from 不会开放跨用户历史，未知归属仍拒绝。
+# session_admin_cross_user = false
 #
 # shell = "/bin/fish"                        # Per-project shell override / 项目级 shell 覆盖
 # shell_profile = "source ~/.config/fish/config.fish"  # Per-project shell profile / 项目级 shell profile
