@@ -27,6 +27,16 @@ const (
 
 	// Coalesce progress during an outage instead of retrying every tool event.
 	compactProgressRetryInterval = time.Second
+
+	// Feishu cardkit rejects cards whose collapsible panels exceed the element
+	// limit ("element exceeds the limit", code 300305) — a long agent turn
+	// with dozens of tool calls and reasoning steps easily blows past it.
+	// Cap per-panel entries in the streaming-card payload so the card never
+	// exceeds the limit; excess entries are dropped (the panels stay a
+	// faithful prefix record and the payload marks itself truncated, which
+	// Feishu renders as a "仅显示最近更新。" note).
+	maxThinkingPanelEntries = 20
+	maxToolPanelEntries     = 15
 )
 
 type ProgressCardState string
@@ -66,6 +76,7 @@ type ProgressCardPayload struct {
 	Entries   []string            `json:"entries,omitempty"` // legacy fallback
 	Items     []ProgressCardEntry `json:"items,omitempty"`   // ordered typed events
 	Truncated bool                `json:"truncated"`
+	Answer    string              `json:"answer,omitempty"` // final reply body rendered below the foldable panels
 }
 
 // BuildProgressCardPayload encodes progress entries into a transport string.
@@ -134,6 +145,142 @@ func BuildProgressCardPayloadV2(items []ProgressCardEntry, truncated bool, agent
 	return ProgressCardPayloadPrefix + string(b)
 }
 
+// BuildStreamingCardPayload encodes a streaming-card turn (foldable thinking
+// and tool panels plus the final answer body) into the transport string used
+// by platforms that render the structured progress card (StreamingCard
+// with StreamingCardPayloadSupporter). The rendered card looks exactly like
+// the compact progress card — foldable "思考 (N)" / "工具 (N)" panels with the
+// final answer below — instead of a raw markdown wall of intermediate
+// process.
+//
+// stepTexts holds intermediate per-step text (opencode emits a text event per
+// step); each becomes a thinking-panel entry so streaming updates grow the
+// foldable panels instead of re-flowing the answer body.
+func BuildStreamingCardPayload(thinking string, stepTexts []string, tools []cardToolEntry, answer string, agent string, lang Language, state ProgressCardState) string {
+	cleaned := make([]ProgressCardEntry, 0, 8)
+	if text := strings.TrimSpace(thinking); text != "" {
+		// The engine accumulates every thinking event into stepTexts AND keeps
+		// cardThinkingText as the latest one (for the markdown fallback). When
+		// the latest thinking is already the last step entry, don't duplicate
+		// it in the panel.
+		lastStep := ""
+		if len(stepTexts) > 0 {
+			lastStep = strings.TrimSpace(stepTexts[len(stepTexts)-1])
+		}
+		if text != lastStep {
+			cleaned = append(cleaned, ProgressCardEntry{Kind: ProgressEntryThinking, Text: text})
+		}
+	}
+	for _, step := range stepTexts {
+		text := strings.TrimSpace(step)
+		if text == "" {
+			continue
+		}
+		merged := false
+		for i, item := range cleaned {
+			if item.Kind != ProgressEntryThinking {
+				continue
+			}
+			if item.Text == text {
+				merged = true
+				break
+			}
+			// Prefer the latest, longest cumulative snapshot rather than
+			// displaying both "Let me read..." and its expanded version.
+			if isCumulativeReasoning(item.Text, text) {
+				cleaned[i].Text = text
+				merged = true
+				break
+			}
+			if strings.HasPrefix(item.Text, text) {
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			cleaned = append(cleaned, ProgressCardEntry{Kind: ProgressEntryThinking, Text: text})
+		}
+	}
+	for _, t := range tools {
+		name := strings.TrimSpace(t.Name)
+		if name == "" {
+			continue
+		}
+		cleaned = append(cleaned, ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: name, Text: strings.TrimSpace(t.Input)})
+	}
+
+	// Cap per-panel entries (Feishu cardkit rejects over-limit cards with
+	// code 300305 "element exceeds the limit"). Keep the newest entries so
+	// a long-running turn continues to show current activity. Excess entries
+	// are dropped from the head and the payload is marked truncated; the
+	// streaming-card transport falls back to a full sync when this rolling
+	// window no longer has the previously-rendered lane as a prefix.
+	truncated := false
+	if len(cleaned) > 0 {
+		thinkingCount, toolCount := 0, 0
+		for _, item := range cleaned {
+			switch item.Kind {
+			case ProgressEntryThinking:
+				thinkingCount++
+			case ProgressEntryToolUse:
+				toolCount++
+			}
+		}
+		thinkingToDrop := thinkingCount - maxThinkingPanelEntries
+		toolToDrop := toolCount - maxToolPanelEntries
+		if thinkingToDrop > 0 || toolToDrop > 0 {
+			truncated = true
+		}
+		kept := make([]ProgressCardEntry, 0, len(cleaned))
+		for _, item := range cleaned {
+			switch item.Kind {
+			case ProgressEntryThinking:
+				if thinkingToDrop > 0 {
+					thinkingToDrop--
+					continue
+				}
+			case ProgressEntryToolUse:
+				if toolToDrop > 0 {
+					toolToDrop--
+					continue
+				}
+			}
+			kept = append(kept, item)
+		}
+		cleaned = kept
+	}
+
+	// A streaming-card turn with no thinking, no step text, no tool calls and
+	// no answer body must not produce a payload at all. Otherwise the transport
+	// string carries an empty progress card that ParseProgressCardPayload
+	// rejects (no items/answer), and the Feishu renderer then falls back to
+	// displaying the raw payload prefix as markdown — the
+	// "__cc_connect_progress_card_v1__:..." JSON leaked verbatim to users on
+	// every simple Q&A turn. Empty turns return "" so the engine has no payload
+	// to send (mirrors BuildProgressCardPayloadV2's empty guard).
+	if len(cleaned) == 0 && strings.TrimSpace(answer) == "" {
+		return ""
+	}
+
+	if state == "" {
+		state = ProgressCardStateRunning
+	}
+	payload := ProgressCardPayload{
+		Version:   2,
+		Agent:     strings.TrimSpace(agent),
+		Lang:      string(lang),
+		State:     state,
+		Items:     cleaned,
+		Truncated: truncated,
+		Answer:    strings.TrimSpace(answer),
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return ProgressCardPayloadPrefix + string(b)
+}
+
 // ParseProgressCardPayload decodes a structured progress payload.
 func ParseProgressCardPayload(content string) (*ProgressCardPayload, bool) {
 	if !strings.HasPrefix(content, ProgressCardPayloadPrefix) {
@@ -172,7 +319,7 @@ func ParseProgressCardPayload(content string) (*ProgressCardPayload, bool) {
 			})
 		}
 	}
-	if len(items) == 0 && len(legacy) == 0 {
+	if len(items) == 0 && len(legacy) == 0 && strings.TrimSpace(payload.Answer) == "" {
 		return nil, false
 	}
 	if payload.State == "" {
@@ -370,6 +517,16 @@ func (w *compactProgressWriter) Append(item string) bool {
 	return w.AppendEvent(ProgressEntryInfo, item, "", item)
 }
 
+// disable turns the writer into a no-op. The engine calls this when a
+// StreamingCard (single aggregated card) is active for the same turn: running
+// both would post two independently-updated cards to the platform (the
+// streaming card plus the progress card). With the writer disabled, every
+// Append/Finalize short-circuits on enabled==false and the platform sees only
+// the streaming card.
+func (w *compactProgressWriter) disable() {
+	w.enabled = false
+}
+
 // AppendEvent appends one typed progress event and updates the in-place message.
 // fallback is used for compact/plain rendering when style-specific rendering is not available.
 func (w *compactProgressWriter) AppendEvent(kind ProgressCardEntryKind, text string, tool string, fallback string) bool {
@@ -382,6 +539,15 @@ func (w *compactProgressWriter) AppendEvent(kind ProgressCardEntryKind, text str
 
 // AppendStructured appends one structured progress event and updates the in-place message.
 func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallback string) bool {
+	return w.appendStructured(item, fallback, false)
+}
+
+// AppendStructuredImmediate appends an event and forces an immediate edit.
+func (w *compactProgressWriter) AppendStructuredImmediate(item ProgressCardEntry, fallback string) bool {
+	return w.appendStructured(item, fallback, true)
+}
+
+func (w *compactProgressWriter) appendStructured(item ProgressCardEntry, fallback string, forceUpdate bool) bool {
 	if !w.enabled || w.failed {
 		return false
 	}
@@ -484,7 +650,7 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 	if w.ctx.Err() != nil || time.Now().Before(w.retryAfter) {
 		return true
 	}
-	if w.minUpdateInterval > 0 && time.Since(w.lastUpdateAt) < w.minUpdateInterval {
+	if !forceUpdate && w.minUpdateInterval > 0 && time.Since(w.lastUpdateAt) < w.minUpdateInterval {
 		return true
 	}
 

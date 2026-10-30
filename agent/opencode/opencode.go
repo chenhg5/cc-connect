@@ -32,10 +32,11 @@ type Agent struct {
 	workDir              string
 	model                string
 	mode                 string
-	cmd                  string   // CLI binary name, default "opencode"
-	cliExtraArgs         []string // extra args from cmd after the binary name
-	configEnv            []string // env vars from [projects.agent.options.env]
-	agentName            string   // passed as --agent to opencode (for plugin-defined agents)
+	cmd                  string        // CLI binary name, default "opencode"
+	cliExtraArgs         []string      // extra args from cmd after the binary name
+	configEnv            []string      // env vars from [projects.agent.options.env]
+	agentName            string        // passed as --agent to opencode (for plugin-defined agents)
+	stallTimeout         time.Duration // opencode_stall_timeout: 0 = default, negative = disabled
 	providers            []core.ProviderConfig
 	activeIdx            int
 	sessionEnv           []string
@@ -78,6 +79,15 @@ func New(opts map[string]any) (core.Agent, error) {
 	if err != nil {
 		slog.Warn("opencode: load persistent model cache failed", "path", modelCachePath, "err", err)
 	}
+	stallTimeout, err := parseStallTimeout(opts["opencode_stall_timeout"])
+	if err != nil {
+		// A typo in one project's agent options must not take the whole
+		// daemon down, and every other agent option is ignored when it does
+		// not parse. Warn loudly, then fall back to the 5m default.
+		slog.Warn("opencode: ignoring unparsable opencode_stall_timeout, keeping the default stall threshold",
+			"value", opts["opencode_stall_timeout"], "err", err)
+		stallTimeout = 0
+	}
 
 	if _, err := exec.LookPath(cmd); err != nil {
 		return nil, fmt.Errorf("opencode: %q CLI not found in PATH, install from: https://github.com/opencode-ai/opencode", cmd)
@@ -91,10 +101,40 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliExtraArgs:         extraArgs,
 		configEnv:            core.ParseConfigEnv(opts),
 		agentName:            agentName,
+		stallTimeout:         stallTimeout,
 		activeIdx:            -1,
 		modelCachePath:       modelCachePath,
 		persistentModelCache: persistentModelCache,
 	}, nil
+}
+
+// parseStallTimeout reads opencode_stall_timeout ("10m", "90s"; empty keeps the
+// default, "0"/"off"/"none"/"disabled" turns the watchdog off). The run
+// transport only emits events at the end of a tool call, so a long silent
+// command and a hung provider look identical; a per-project threshold lets
+// deployments with long builds raise it without weakening compaction
+// detection for everyone else.
+func parseStallTimeout(raw any) (time.Duration, error) {
+	if raw == nil {
+		return 0, nil
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return 0, fmt.Errorf("opencode: invalid opencode_stall_timeout %v (use a string such as \"10m\", or \"off\")", raw)
+	}
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return 0, nil
+	}
+	switch text {
+	case "0", "off", "none", "disabled":
+		return stallTimeoutDisabled, nil
+	}
+	d, err := time.ParseDuration(text)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("opencode: invalid opencode_stall_timeout %q (use a duration such as \"10m\", or \"off\")", text)
+	}
+	return d, nil
 }
 
 func opencodeProjectModelCachePath(dataDir, project string) string {
@@ -196,6 +236,13 @@ func normalizeMode(raw string) string {
 
 func (a *Agent) Name() string { return "opencode" }
 
+// PromptKeptOnRetriableError implements core.PromptKeptOnErrorAgent. OpenCode
+// stores the user message before it calls the model, and the errors classified
+// as retriable (opencodeErrorKind) come from that model call, so the prompt is
+// already part of the conversation when one is reported. Failures before the
+// prompt is delivered carry no retriable kind and are never retried.
+func (a *Agent) PromptKeptOnRetriableError() bool { return true }
+
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -215,6 +262,11 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.agentName != "" {
 		opts["agent"] = a.agentName
+	}
+	if a.stallTimeout < 0 {
+		opts["opencode_stall_timeout"] = "off"
+	} else if a.stallTimeout > 0 {
+		opts["opencode_stall_timeout"] = a.stallTimeout.String()
 	}
 	if len(a.configEnv) > 0 {
 		env := make(map[string]string, len(a.configEnv))
@@ -495,6 +547,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraArgs := append([]string{}, a.cliExtraArgs...)
 	workDir := a.workDir
 	agentName := a.agentName
+	stallTimeout := a.stallTimeout
 	extraEnv := append([]string(nil), a.configEnv...)
 	extraEnv = append(extraEnv, a.providerEnvLocked()...)
 	extraEnv = append(extraEnv, a.sessionEnv...)
@@ -505,7 +558,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	a.mu.Unlock()
 
-	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv)
+	return newOpencodeSession(ctx, cmd, extraArgs, workDir, model, mode, agentName, sessionID, extraEnv, stallTimeout)
 }
 
 // ListSessions runs `opencode session list` and parses the JSON output.
@@ -557,6 +610,12 @@ func (a *Agent) PermissionModes() []core.PermissionModeInfo {
 }
 
 // -- ContextCompressor --
+
+// ContinueAfterErrorPrompt implements core.ContinueAfterErrorAgent: an
+// OpenCode session keeps the turn's messages and executed tool calls after a
+// failed turn ("Our servers are currently overloaded" mid-turn), so the engine
+// resumes it instead of reporting the error or replaying the prompt.
+func (a *Agent) ContinueAfterErrorPrompt() string { return core.DefaultContinueAfterErrorPrompt }
 
 func (a *Agent) CompressCommand() string { return "/compact" }
 

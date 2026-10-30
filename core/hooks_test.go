@@ -20,11 +20,11 @@ func boolPtr(v bool) *bool { return &v }
 func TestNewHookManager_ValidatesConfig(t *testing.T) {
 	hooks := []HookConfig{
 		{Event: "message.received", Type: "command", Command: "echo ok"},
-		{Event: "", Type: "command", Command: "echo bad"},         // missing event
-		{Event: "error", Type: "http", URL: ""},                   // missing url
-		{Event: "error", Type: "http", URL: "ftp://bad"},          // bad url scheme
-		{Event: "error", Type: "unknown", Command: "echo"},        // bad type
-		{Event: "error", Type: "command", Command: ""},            // missing command
+		{Event: "", Type: "command", Command: "echo bad"},  // missing event
+		{Event: "error", Type: "http", URL: ""},            // missing url
+		{Event: "error", Type: "http", URL: "ftp://bad"},   // bad url scheme
+		{Event: "error", Type: "unknown", Command: "echo"}, // bad type
+		{Event: "error", Type: "command", Command: ""},     // missing command
 		{Event: "message.sent", Type: "http", URL: "http://ok.com"},
 	}
 	hm := NewHookManager("test", hooks, "sh", "-c", "")
@@ -384,10 +384,15 @@ func TestEventToEnv(t *testing.T) {
 		Event:      HookEventCronTriggered,
 		Timestamp:  time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC),
 		Project:    "myproj",
+		TurnID:     "turn-123",
 		SessionKey: "tg:1:1",
+		Workspace:  "/tmp/project",
 		Platform:   "telegram",
 		UserID:     "U123",
 		UserName:   "alice",
+		Source:     "agent.final_reply",
+		Internal:   true,
+		ReplyKind:  "card",
 		Content:    "hello world",
 		Error:      "oops",
 	}
@@ -403,10 +408,16 @@ func TestEventToEnv(t *testing.T) {
 	checks := map[string]string{
 		"CC_HOOK_EVENT":       "cron.triggered",
 		"CC_HOOK_PROJECT":     "myproj",
+		"CC_HOOK_TURN_ID":     "turn-123",
 		"CC_HOOK_SESSION_KEY": "tg:1:1",
+		"CC_HOOK_WORKSPACE":   "/tmp/project",
 		"CC_HOOK_PLATFORM":    "telegram",
 		"CC_HOOK_USER_ID":     "U123",
 		"CC_HOOK_USER_NAME":   "alice",
+		"CC_HOOK_SOURCE":      "agent.final_reply",
+		"CC_HOOK_INTERNAL":    "true",
+		"CC_HOOK_CHANGED":     "false",
+		"CC_HOOK_REPLY_KIND":  "card",
 		"CC_HOOK_CONTENT":     "hello world",
 		"CC_HOOK_ERROR":       "oops",
 	}
@@ -417,6 +428,12 @@ func TestEventToEnv(t *testing.T) {
 	}
 	if _, ok := m["CC_HOOK_TIMESTAMP"]; !ok {
 		t.Error("expected CC_HOOK_TIMESTAMP in env")
+	}
+}
+
+func TestMessageFinalizedEventType(t *testing.T) {
+	if string(HookEventMessageFinalized) != "message.finalized" {
+		t.Fatalf("HookEventMessageFinalized = %q, want message.finalized", HookEventMessageFinalized)
 	}
 }
 
@@ -530,5 +547,57 @@ func TestEmit_TimestampAutoFilled(t *testing.T) {
 
 	if receivedTime.Before(before) {
 		t.Errorf("expected auto-filled timestamp >= %v, got %v", before, receivedTime)
+	}
+}
+
+func TestNeedsChangedFingerprint(t *testing.T) {
+	cases := []struct {
+		name  string
+		hooks []HookConfig
+		want  bool
+	}{
+		{name: "no hooks", want: false},
+		{
+			name:  "finalized command hook",
+			hooks: []HookConfig{{Event: "message.finalized", Type: "command", Command: "echo done"}},
+			want:  true,
+		},
+		{
+			name:  "finalized command hook reading the flag directly",
+			hooks: []HookConfig{{Event: "message.finalized", Type: "command", Command: "test \"$CC_HOOK_CHANGED\" = true && review"}},
+			want:  true,
+		},
+		{
+			name:  "finalized command hook reading the flag through a script",
+			hooks: []HookConfig{{Event: "message.finalized", Type: "command", Command: "./scripts/review.sh"}},
+			want:  true,
+		},
+		{
+			name:  "finalized http hook receives the flag in the body",
+			hooks: []HookConfig{{Event: "message.finalized", Type: "http", URL: "http://127.0.0.1:1/hook"}},
+			want:  true,
+		},
+		{
+			name:  "wildcard hook matches finalized messages",
+			hooks: []HookConfig{{Event: "*", Type: "command", Command: "echo $CC_HOOK_CHANGED"}},
+			want:  true,
+		},
+		{
+			name:  "another event is irrelevant",
+			hooks: []HookConfig{{Event: "message.sent", Type: "command", Command: "echo $CC_HOOK_CHANGED"}},
+			want:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hm := NewHookManager("test", tc.hooks, "sh", "-c", "")
+			if got := hm.NeedsChangedFingerprint(); got != tc.want {
+				t.Fatalf("NeedsChangedFingerprint() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	var nilManager *HookManager
+	if nilManager.NeedsChangedFingerprint() {
+		t.Fatal("nil manager must not request a fingerprint")
 	}
 }
