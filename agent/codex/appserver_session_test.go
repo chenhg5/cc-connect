@@ -339,7 +339,12 @@ func TestAppServerSession_ReadLoopHandlesLargeResponseLine(t *testing.T) {
 		if decoded.Thread.ID != "thread-large" {
 			t.Fatalf("thread id = %q, want thread-large", decoded.Thread.ID)
 		}
-	case <-time.After(2 * time.Second):
+	// 11 MiB through bufio.ReadBytes plus a json.Unmarshal of the same payload
+	// takes ~2s under -race on an idle machine, so the old 2s deadline had no
+	// margin and failed intermittently on CI runners. This deadline is only a
+	// "did it arrive at all" guard, so make it generous: a genuine read-loop
+	// regression still fails here, just later.
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for large response")
 	}
 
