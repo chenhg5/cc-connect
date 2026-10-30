@@ -1972,6 +1972,19 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify a model (provider/model format) / 可选：指定模型
 # model = "anthropic/claude-sonnet-4-20250514"
 #
+# Optional: stall watchdog threshold / 可选：停滞看门狗阈值
+# A turn that emits no opencode event for this long is killed and reported as
+# stalled. Default is 5m when unset. The value MUST be a string duration
+# ("90s", "10m") or "off"/"0" to disable it; a bare TOML number is rejected.
+# 回合在该时长内没有任何 opencode 事件即判定为停滞并被终止，未设置时默认 5m。
+# 值必须写成字符串时长（"90s"、"10m"），或写 "off"/"0" 关闭；直接写数字无效。
+# The run transport only reports a tool call when it finishes, so a long
+# silent command and a hung provider look identical: for projects with long
+# builds or test suites, raise this or set it to "off".
+# run 传输只在工具调用结束时上报事件，因此「长命令在跑」和「provider 卡死」看起来
+# 一样：有长构建或长测试套件的项目请调大该值，或设为 "off"。
+# opencode_stall_timeout = "10m"
+#
 # [[projects.platforms]]
 # type = "telegram"
 #
