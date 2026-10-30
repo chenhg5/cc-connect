@@ -25,16 +25,30 @@ import (
 //
 // Injection reuses the exact same dispatchMessage path as WebSocket-delivered
 // events, and is guarded by:
-//   - dedup by message_id (core.MessageDedup), so a message delivered by both
-//     the WebSocket and a poll is processed exactly once, whichever arrives first;
+//   - access control identical to the WebSocket path (allow_from, allow_chat
+//     for group chats, group_only) — the poller must never open a side door
+//     around the platform's permission config;
+//   - a catch-up-side seen record (catchupDedup, TTL covering lookback +
+//     interval + buffer) that the WebSocket path also writes into (onMessage
+//     marks every delivered message), so a message delivered by either
+//     channel is injected at most once, even across consecutive overlapping
+//     poll windows — the shared short-TTL dedup alone cannot guarantee that;
+//   - the short-window dedup (core.MessageDedup) for the in-flight race
+//     between a poll and a WebSocket delivery of the same message;
 //   - the stale-message guard (core.IsOldMessage), so a poll right after a
 //     restart does not replay historical traffic.
 
 const (
 	catchupInterval = 3 * time.Minute  // how often the poller runs
-	catchupLookback = 5 * time.Minute  // how far back each poll window reaches (overlaps the interval on purpose; dedup absorbs the overlap)
+	catchupLookback = 5 * time.Minute  // how far back each poll window reaches (overlaps the interval on purpose; the catch-up seen record absorbs the overlap)
 	catchupBuffer   = 30 * time.Second // exclude the most recent slice to avoid racing in-flight messages the WebSocket will still deliver
 	catchupPageSize = 50
+	// catchupSeenTTL is the retention of the catch-up-side seen record. It must
+	// outlive every future poll window a message can still appear in (first
+	// possible injection to last possible listing spans up to lookback + buffer),
+	// with margin: otherwise a message listed by poll N is listed again by poll
+	// N+1 after its record expired and gets injected twice.
+	catchupSeenTTL = catchupLookback + catchupInterval + catchupBuffer
 )
 
 // startCatchupPoller starts a background goroutine that periodically fetches
@@ -151,31 +165,8 @@ func (p *Platform) pollChatForMissedMessages(ctx context.Context, chatID string,
 
 	injected := 0
 	for _, msg := range items {
-		if msg == nil || msg.MessageId == nil || msg.CreateTime == nil {
-			continue
-		}
-		if msg.Deleted != nil && *msg.Deleted {
-			continue
-		}
-		// Never re-inject the bot's own messages: the WebSocket push path
-		// never delivers them, and doing so from the poller would create a
-		// self-reply loop (especially in p2p chats, where every message
-		// qualifies).
-		if !catchupSenderQualifies(msg.Sender) {
-			continue
-		}
-		if !catchupMessageQualifies(isP2P, msg.Mentions, botOpenID) {
-			continue
-		}
-		createMs, err := strconv.ParseInt(*msg.CreateTime, 10, 64)
-		if err != nil {
-			continue
-		}
-		msgTime := time.Unix(createMs/1000, (createMs%1000)*int64(time.Millisecond))
-		if core.IsOldMessage(msgTime) {
-			continue
-		}
-		if p.dedup.IsDuplicate(*msg.MessageId) {
+		createMs, ok := p.catchupShouldInject(msg, isP2P, botOpenID)
+		if !ok {
 			continue
 		}
 		p.injectCatchupMessage(ctx, msg, chatID, createMs, isP2P)
@@ -187,6 +178,49 @@ func (p *Platform) pollChatForMissedMessages(ctx context.Context, chatID string,
 			"chat_id", chatID, "count", injected)
 	}
 	return nil
+}
+
+// catchupShouldInject reports whether a REST-listed message should be
+// re-injected, and its creation time in Unix milliseconds when so. It applies
+// the same freshness / sender / mention filters as the WebSocket path, plus
+// two dedup layers: the catch-up-side seen record (long window, shared with
+// onMessage so WebSocket-delivered messages are never re-polled) and the
+// short-window shared dedup (race guard against in-flight deliveries).
+func (p *Platform) catchupShouldInject(msg *larkim.Message, isP2P bool, botOpenID string) (int64, bool) {
+	if msg == nil || msg.MessageId == nil || msg.CreateTime == nil {
+		return 0, false
+	}
+	if msg.Deleted != nil && *msg.Deleted {
+		return 0, false
+	}
+	// Never re-inject the bot's own messages: the WebSocket push path
+	// never delivers them, and doing so from the poller would create a
+	// self-reply loop (especially in p2p chats, where every message
+	// qualifies).
+	if !catchupSenderQualifies(msg.Sender) {
+		return 0, false
+	}
+	if !catchupMessageQualifies(isP2P, msg.Mentions, botOpenID) {
+		return 0, false
+	}
+	createMs, err := strconv.ParseInt(*msg.CreateTime, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	msgTime := time.Unix(createMs/1000, (createMs%1000)*int64(time.Millisecond))
+	if core.IsOldMessage(msgTime) {
+		return 0, false
+	}
+	// The seen record outlives the poll window overlap; the shared dedup only
+	// covers the seconds right around a poll (its TTL is far shorter than the
+	// window overlap, so it must not be relied on across polls).
+	if p.catchupDedup.IsDuplicate(*msg.MessageId) {
+		return 0, false
+	}
+	if p.dedup.IsDuplicate(*msg.MessageId) {
+		return 0, false
+	}
+	return createMs, true
 }
 
 // catchupMessageQualifies reports whether a REST-fetched message should be
@@ -220,6 +254,24 @@ func isBotMentionedInList(mentions []*larkim.Mention, botOpenID string) bool {
 	return false
 }
 
+// catchupAccessAllowed mirrors the WebSocket path's access-control guards
+// (see onMessage: allow_from for the sender, allow_chat for group chats,
+// group_only to refuse p2p traffic). The catch-up poller dispatches through
+// dispatchMessage directly and never runs through onMessage, so without this
+// check the poller would bypass the platform's access control entirely.
+// Unlike onMessage, no unauthorized-access notice is sent back: a polled
+// message the WebSocket would have rejected stays silent instead of paging
+// the operator for traffic they never asked to be answered.
+func catchupAccessAllowed(allowFrom, allowChat string, groupOnly bool, userID, chatID string, isP2P bool) bool {
+	if !core.AllowList(allowFrom, userID) {
+		return false
+	}
+	if isP2P {
+		return !groupOnly
+	}
+	return core.AllowList(allowChat, chatID)
+}
+
 // injectCatchupMessage dispatches a REST API message through the same
 // dispatchMessage path used by WebSocket-delivered messages.
 func (p *Platform) injectCatchupMessage(ctx context.Context, msg *larkim.Message, chatID string, createTimeMs int64, isP2P bool) {
@@ -235,6 +287,12 @@ func (p *Platform) injectCatchupMessage(ctx context.Context, msg *larkim.Message
 	userID := ""
 	if msg.Sender != nil && msg.Sender.Id != nil {
 		userID = *msg.Sender.Id
+	}
+
+	if !catchupAccessAllowed(p.allowFrom, p.allowChat, p.groupOnly, userID, chatID, isP2P) {
+		slog.Debug(p.tag()+": catchup: message skipped by access control",
+			"message_id", messageID, "chat_id", chatID, "user", userID, "p2p", isP2P)
+		return
 	}
 
 	chatType := "group"

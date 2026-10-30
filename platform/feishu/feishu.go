@@ -154,7 +154,14 @@ type Platform struct {
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
 	dedup            *core.MessageDedup
-	botOpenID        string
+	// catchupDedup is the catch-up poller's own seen record with a retention
+	// covering the poll window overlap (see catchupSeenTTL). The shared dedup
+	// above expires far sooner than a message can reappear in a later poll
+	// window, so relying on it alone re-injects messages. onMessage marks
+	// every delivered message here, so the WebSocket path and the poller
+	// never inject the same message twice.
+	catchupDedup *core.MessageDedup
+	botOpenID    string
 	// groupFilterDegraded is true when bot open_id discovery failed at startup
 	// (e.g. transient network/DNS/proxy outage). When true, group chat mention
 	// filtering fails closed (silently drops group messages without @bot) instead
@@ -507,6 +514,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
 		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
 		dedup:                      &core.MessageDedup{},
+		catchupDedup:               core.NewMessageDedup(catchupSeenTTL),
 		port:                       port,
 		callbackPath:               callbackPath,
 		encryptKey:                 encryptKey,
@@ -1748,6 +1756,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		slog.Debug(p.tag()+": duplicate message ignored", "message_id", messageID)
 		return nil
 	}
+	// Record in the catch-up poller's seen set: a message delivered here must
+	// never be re-injected by a later REST poll. The poller's shared dedup
+	// check alone cannot provide that — its 60s TTL expires long before the
+	// message leaves the poller's 5-minute lookback window.
+	p.catchupDedup.Mark(messageID)
 
 	var createTimeMs int64
 	if msg.CreateTime != nil {
