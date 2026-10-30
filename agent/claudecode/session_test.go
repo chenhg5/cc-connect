@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -1508,5 +1509,124 @@ func TestHandleResultKeepsLiveAssistantUsage(t *testing.T) {
 	}
 	if u.OutputTokens != 406 {
 		t.Errorf("OutputTokens = %d, want 406 (result is authoritative for output)", u.OutputTokens)
+	}
+}
+
+// TestHandleSubagentMessagesAreProgressNotAnswer feeds the stream Claude Code
+// 2.1.280 emits with CLAUDE_CODE_FORWARD_SUBAGENT_TEXT=1 for a background
+// subagent: task_started, its messages tagged with the Agent tool call's id
+// (some arriving after the main turn's result), and task_notification. They
+// must all become EventSubagent for that id, the reply must be the main
+// agent's text alone, and the subagent's usage must not drive ctx.
+func TestHandleSubagentMessagesAreProgressNotAnswer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cs := &claudeSession{
+		events: make(chan core.Event, 32),
+		ctx:    ctx,
+	}
+	cs.alive.Store(true)
+
+	const id = "toolu_01Jyy9tzpuhsWXACspyZYxcc"
+	const parent = `"parent_tool_use_id":"` + id + `","session_id":"s"`
+	for _, line := range []string{
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"` + id + `","name":"Agent","input":{"description":"Background loop task","subagent_type":"general-purpose","prompt":"Run the loop","run_in_background":true}}]},"parent_tool_use_id":null,"session_id":"s"}`,
+		`{"type":"system","subtype":"task_started","task_id":"a1536c58b60c0ef78","tool_use_id":"` + id + `","description":"Background loop task","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"Run the loop","session_id":"s"}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"` + id + `","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"parent_tool_use_id":null,"session_id":"s"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"LAUNCHED"}]},"parent_tool_use_id":null,"session_id":"s"}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"LAUNCHED","session_id":"s","usage":{"input_tokens":10,"output_tokens":5}}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Run the loop"}]},` + parent + `}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Loop it.","signature":"x"}]},` + parent + `}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_sub","name":"Bash","input":{"command":"for i in 1 2 3 4; do echo BG-STEP-$i; sleep 8; done"}}]},` + parent + `}`,
+		`{"type":"system","subtype":"task_started","task_id":"bsxyw0fk0","owned_by_subagent":true,"tool_use_id":"toolu_sub","description":"Run background task","is_backgrounded":true,"task_type":"local_bash","session_id":"s"}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_sub","content":"Command running in background"}]},` + parent + `}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"BG-FINAL"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":17722,"cache_read_input_tokens":0,"output_tokens":5}},` + parent + `}`,
+		`{"type":"system","subtype":"task_notification","task_id":"bsxyw0fk0","tool_use_id":"toolu_sub","status":"completed","summary":"Background command completed","session_id":"s"}`,
+		`{"type":"system","subtype":"task_notification","task_id":"a1536c58b60c0ef78","tool_use_id":"` + id + `","status":"completed","summary":"BG-FINAL","session_id":"s"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Result: BG-FINAL"}]},"parent_tool_use_id":null,"session_id":"s"}`,
+	} {
+		cs.handleReadLoopLine(line)
+	}
+
+	var got []string
+	for len(cs.events) > 0 {
+		evt := <-cs.events
+		switch evt.Type {
+		case core.EventSubagent:
+			sub := evt.Subagent
+			if sub.ID != id || evt.Metadata[core.MetaParentToolUseID] != id {
+				t.Errorf("subagent event for %q (tag %v), want %q", sub.ID, evt.Metadata[core.MetaParentToolUseID], id)
+			}
+			switch sub.Phase {
+			case core.SubagentStarted:
+				got = append(got, fmt.Sprintf("started:%s/%s bg=%t prompt=%s", sub.Kind, sub.Title, sub.Background, sub.Prompt))
+			case core.SubagentStep:
+				got = append(got, "step:"+string(sub.Step.Kind)+":"+sub.Step.Tool+":"+sub.Step.Text)
+			case core.SubagentFinished:
+				got = append(got, "finished:"+sub.Status+":"+sub.Summary)
+			}
+		case core.EventToolUse:
+			got = append(got, "tool_use:"+evt.ToolName)
+		case core.EventToolResult:
+			got = append(got, "tool_result:"+evt.ToolResult)
+		case core.EventText:
+			if evt.Content != "" {
+				got = append(got, "text:"+evt.Content)
+			}
+		case core.EventResult:
+			got = append(got, "result:"+evt.Content)
+		default:
+			got = append(got, string(evt.Type)+":"+evt.Content)
+		}
+	}
+	want := []string{
+		"tool_use:Agent",
+		"started:general-purpose/Background loop task bg=true prompt=Run the loop",
+		"tool_result:Async agent launched successfully.",
+		"text:LAUNCHED",
+		"result:LAUNCHED",
+		"step:thinking::Loop it.",
+		"step:tool_use:Bash:for i in 1 2 3 4; do echo BG-STEP-$i; sleep 8; done",
+		"step:info::BG-FINAL",
+		"finished:completed:BG-FINAL",
+		"text:Result: BG-FINAL",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("events =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if cs.lastUsage != nil {
+		t.Fatalf("lastUsage = %#v, want nil: subagent usage must not drive ctx", cs.lastUsage)
+	}
+}
+
+// TestForegroundSubagentClosesOnItsToolResult covers a subagent the main
+// agent waits for: when the Agent tool call returns, its card closes even
+// without a task_notification, and a woken subagent's task_started does not
+// repeat the notification it was woken by as its task.
+func TestForegroundSubagentClosesOnItsToolResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cs := &claudeSession{events: make(chan core.Event, 16), ctx: ctx}
+	cs.alive.Store(true)
+
+	for _, line := range []string{
+		`{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_fg","description":"Simple math","subagent_type":"general-purpose","is_backgrounded":false,"task_type":"local_agent","prompt":"2+3?","session_id":"s"}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_fg","is_error":true,"content":"boom"}]},"parent_tool_use_id":null,"session_id":"s"}`,
+		`{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_fg","description":"Simple math","subagent_type":"general-purpose","is_backgrounded":false,"task_type":"local_agent","prompt":"<task-notification>...</task-notification>","session_id":"s"}`,
+	} {
+		cs.handleReadLoopLine(line)
+	}
+	var got []string
+	for len(cs.events) > 0 {
+		evt := <-cs.events
+		if evt.Type != core.EventSubagent {
+			continue
+		}
+		got = append(got, string(evt.Subagent.Phase)+":"+evt.Subagent.Status+":"+evt.Subagent.Prompt)
+	}
+	want := []string{"started::2+3?", "finished:failed:", "started::"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("subagent events = %q, want %q", got, want)
 	}
 }
