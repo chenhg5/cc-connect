@@ -340,7 +340,7 @@ func (p *Platform) catchupChatType(ctx context.Context, chatID string) (string, 
 	mode := ""
 	err := p.withFreshTenantAccessTokenRetry(ctx, "catchup resolve chat mode",
 		func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.V1.Chat.Get(ctx,
+			resp, err := client.Im.Chat.Get(ctx,
 				larkim.NewGetChatReqBuilder().ChatId(chatID).Build(), options...)
 			if err != nil {
 				return err
