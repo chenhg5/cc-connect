@@ -2,9 +2,12 @@ package pi
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -615,5 +618,357 @@ func TestSaveImagesToDisk_DoesNotConsumeFileSlots(t *testing.T) {
 	}
 	if !strings.HasSuffix(paths[0], ".png") {
 		t.Errorf("image path missing .png suffix: %q", paths[0])
+	}
+}
+
+// ── agent_settled handling (Issue #1863) ───────────────────────
+//
+// Issue #1863 regression coverage: pi 0.85.x emits `agent_settled` as the
+// authoritative "agent will not continue running" terminal signal. Before
+// the fix, `agent_settled` was silently dropped by the `default:` arm of
+// handleEvent (logged only at DEBUG, no engine-visible EventResult).
+// On pi 0.85.x json mode the process can stay alive after agent_settled
+// (e.g. when pi keeps the process around for queued follow-ups), so
+// process-exit-driven EventResult never fires and the session hangs
+// forever — until the user types /stop. The fix adds an explicit
+// `case "agent_settled":` branch that emits EventResult for both modes.
+//
+// These tests drive handleEvent directly with hand-built raw maps so the
+// dispatcher's behaviour is pinned without needing a real pi process.
+
+// newHandleEventSession builds a bare piSession suitable for pumping raw
+// maps through handleEvent. RPC-only fields (rpcCmd / rpcStdin / rpcReady)
+// are left zero — they're nil/empty and no method under test touches them
+// when we only exercise the dispatcher. The caller chooses rpc=true/false
+// to switch the modes the dispatcher branches on.
+func newHandleEventSession(t *testing.T, rpc bool, sessionID string) *piSession {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &piSession{
+		events: make(chan core.Event, 64),
+		ctx:    ctx,
+		cancel: cancel,
+		rpc:    rpc,
+	}
+	s.alive.Store(true)
+	if sessionID != "" {
+		s.sessionID.Store(sessionID)
+	}
+	return s
+}
+
+// drainEvent reads the next event from s.events within d, or fails the
+// test on timeout / context cancellation. Returns nil if the channel was
+// closed (signals the engine-side "no more events" boundary).
+func drainEvent(t *testing.T, s *piSession, d time.Duration) *core.Event {
+	t.Helper()
+	select {
+	case e, ok := <-s.events:
+		if !ok {
+			return nil
+		}
+		return &e
+	case <-time.After(d):
+		t.Fatalf("timed out after %s waiting for event", d)
+		return nil
+	}
+}
+
+func TestHandleEvent_AgentSettled_RPCEmitsEventResultDone(t *testing.T) {
+	// Pi 0.85.x RPC mode: agent_settled is the authoritative terminal
+	// signal. Without an explicit branch, handleEvent drops it (logged
+	// only at DEBUG) and the engine never observes Done:true.
+	s := newHandleEventSession(t, true, "sid-rpc-settled")
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+
+	got := drainEvent(t, s, 2*time.Second)
+	if got == nil {
+		t.Fatalf("expected EventResult from agent_settled, got none")
+	}
+	if got.Type != core.EventResult {
+		t.Errorf("expected EventResult, got %v", got.Type)
+	}
+	if !got.Done {
+		t.Errorf("expected Done=true, got Done=false")
+	}
+	if got.SessionID != "sid-rpc-settled" {
+		t.Errorf("expected SessionID=sid-rpc-settled, got %q", got.SessionID)
+	}
+}
+
+func TestHandleEvent_AgentSettled_JSONModeEmitsEventResultDone(t *testing.T) {
+	// Pi 0.85.x JSON mode is the regression path: process stays alive
+	// after agent_settled (reporter's evidence: pi process alive
+	// throughout the hang), so the existing "json mode relies on process
+	// exit" assumption is unsafe for the agent_settled path. The fix
+	// must emit EventResult even when s.rpc is false.
+	s := newHandleEventSession(t, false, "sid-json-settled")
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+
+	got := drainEvent(t, s, 2*time.Second)
+	if got == nil {
+		t.Fatalf("expected EventResult from agent_settled in json mode, got none")
+	}
+	if got.Type != core.EventResult {
+		t.Errorf("expected EventResult, got %v", got.Type)
+	}
+	if !got.Done {
+		t.Errorf("expected Done=true, got Done=false")
+	}
+	if got.SessionID != "sid-json-settled" {
+		t.Errorf("expected SessionID=sid-json-settled, got %q", got.SessionID)
+	}
+}
+
+func TestHandleEvent_AgentSettled_FlushesPendingErr(t *testing.T) {
+	// Pi buffers the most recent assistant errorMessage in s.pendingErr
+	// (see session.go comment around pendingErr). The agent_end branch
+	// already flushes it as EventError before closing the turn; the
+	// new agent_settled branch must do the same — otherwise a turn that
+	// ends via agent_settled would silently swallow a stale error.
+	s := newHandleEventSession(t, true, "sid-settled-err")
+	defer s.cancel()
+	s.pendingErr = "provider rate limited"
+
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+
+	first := drainEvent(t, s, 2*time.Second)
+	if first == nil {
+		t.Fatalf("expected EventError from flushed pendingErr, got none")
+	}
+	if first.Type != core.EventError {
+		t.Errorf("expected EventError first, got %v", first.Type)
+	}
+	if first.Error == nil || first.Error.Error() != "provider rate limited" {
+		t.Errorf("expected error \"provider rate limited\", got %v", first.Error)
+	}
+	if s.pendingErr != "" {
+		t.Errorf("expected pendingErr cleared after flush, got %q", s.pendingErr)
+	}
+
+	second := drainEvent(t, s, 2*time.Second)
+	if second == nil {
+		t.Fatalf("expected EventResult after flushed pendingErr, got none")
+	}
+	if second.Type != core.EventResult || !second.Done {
+		t.Errorf("expected EventResult Done=true after pendingErr flush, got %+v", second)
+	}
+}
+
+func TestHandleEvent_AgentSettled_JSONMode_FlushesPendingErr(t *testing.T) {
+	// Same flush-on-missing behaviour must hold in json mode where the
+	// agent_settled branch is the only terminal event the engine will
+	// observe (process stays alive).
+	s := newHandleEventSession(t, false, "sid-json-err")
+	defer s.cancel()
+	s.pendingErr = "transient 429"
+
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+
+	first := drainEvent(t, s, 2*time.Second)
+	if first == nil || first.Type != core.EventError {
+		t.Fatalf("expected EventError first, got %+v", first)
+	}
+	if first.Error == nil || first.Error.Error() != "transient 429" {
+		t.Errorf("expected error \"transient 429\", got %v", first.Error)
+	}
+	second := drainEvent(t, s, 2*time.Second)
+	if second == nil || second.Type != core.EventResult || !second.Done {
+		t.Errorf("expected EventResult Done=true second, got %+v", second)
+	}
+}
+
+func TestHandleEvent_AgentSettled_DuplicateAfterAgentEnd_IsIdempotent(t *testing.T) {
+	// On some pi builds, both agent_end (willRetry=false) and
+	// agent_settled fire for the same turn. processInteractiveEvents
+	// tolerates duplicate EventResult (the second pass sees an empty
+	// fullResponse and emits no platform message), so the dispatcher
+	// must not panic / drop one / mis-merge.
+	s := newHandleEventSession(t, true, "sid-dup")
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": false})
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+
+	var got []core.Event
+	for i := 0; i < 2; i++ {
+		e := drainEvent(t, s, 2*time.Second)
+		if e == nil {
+			t.Fatalf("expected 2 EventResults, got %d so far", i)
+		}
+		got = append(got, *e)
+	}
+	for i, e := range got {
+		if e.Type != core.EventResult {
+			t.Errorf("event[%d]: expected EventResult, got %v", i, e.Type)
+		}
+		if !e.Done {
+			t.Errorf("event[%d]: expected Done=true, got Done=false", i)
+		}
+	}
+}
+
+func TestHandleEvent_AgentSettled_AfterAgentEndWillRetryTrue_StillCloses(t *testing.T) {
+	// agent_end with willRetry=true intentionally does NOT emit
+	// EventResult (the agent loop is being retried). When the retry
+	// completes, pi 0.85.x sends a fresh agent_end + agent_settled
+	// pair. The agent_settled branch must close the turn even if the
+	// retry-cycle's willRetry flag is on (the second agent_end will be
+	// willRetry=false, but agent_settled is the canonical close).
+	s := newHandleEventSession(t, true, "sid-retry")
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": true})
+
+	// agent_end(willRetry=true) emits nothing. Wait briefly to confirm
+	// no straggler event lands before firing the agent_settled turn-close.
+	select {
+	case e := <-s.events:
+		t.Fatalf("agent_end(willRetry=true) must not emit, got %+v", e)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+
+	got := drainEvent(t, s, 2*time.Second)
+	if got == nil || got.Type != core.EventResult || !got.Done {
+		t.Fatalf("expected EventResult Done=true from agent_settled, got %+v", got)
+	}
+}
+
+func TestHandleEvent_AgentSettled_EmptyPendingErrDoesNotEmitError(t *testing.T) {
+	// Negative guard: don't emit EventError if there's no pending error.
+	// The flush branch must skip the send when pendingErr is empty —
+	// otherwise the engine would see a spurious empty error before the
+	// real terminal signal.
+	s := newHandleEventSession(t, true, "sid-clean")
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+
+	got := drainEvent(t, s, 2*time.Second)
+	if got == nil {
+		t.Fatalf("expected EventResult, got none")
+	}
+	if got.Type != core.EventResult || !got.Done {
+		t.Errorf("expected EventResult Done=true, got %+v", got)
+	}
+
+	// No second event should be queued.
+	select {
+	case e := <-s.events:
+		t.Errorf("unexpected extra event after clean agent_settled: %+v", e)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestHandleEvent_AgentSettled_AfterTurnEndIsOK(t *testing.T) {
+	// turn_end is informational (in the silent-list at line 687 pre-fix;
+	// it stays silent post-fix because emitting from there would risk
+	// premature Done:true). Make sure a turn_end followed by
+	// agent_settled still produces exactly one EventResult.
+	s := newHandleEventSession(t, true, "sid-flow")
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "turn_end"})
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+
+	got := drainEvent(t, s, 2*time.Second)
+	if got == nil || got.Type != core.EventResult || !got.Done {
+		t.Fatalf("expected EventResult Done=true, got %+v", got)
+	}
+	select {
+	case e := <-s.events:
+		t.Errorf("unexpected extra event: %+v", e)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestHandleEvent_UnknownEventStillLogsAtWarn(t *testing.T) {
+	// The fix also bumps the unknown-event default arm from slog.Debug to
+	// slog.Warn so future silent-drop bugs (like #1863) surface
+	// immediately. We can't easily intercept slog output without a
+	// custom handler, but we can at least confirm an unknown event
+	// doesn't accidentally crash the dispatcher.
+	s := newHandleEventSession(t, true, "sid-unknown")
+	defer s.cancel()
+
+	s.handleEvent(map[string]any{"type": "future_event_we_dont_know_about"})
+
+	select {
+	case e := <-s.events:
+		t.Errorf("unknown event must not emit anything, got %+v", e)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestHandleEvent_AgentSettled_DoesNotEmitAfterClose guards against a
+// regression where the dispatcher's non-blocking select drops the EventResult
+// when the engine has already closed s.events (e.g. user /stop'd mid-turn).
+// In that scenario the channel send must be skipped, not panic.
+func TestHandleEvent_AgentSettled_DoesNotEmitAfterClose(t *testing.T) {
+	s := newHandleEventSession(t, true, "sid-closed")
+	defer s.cancel()
+
+	// Simulate engine teardown by cancelling ctx and closing events.
+	s.cancel()
+	close(s.events)
+
+	// Must not panic on the cancelled + closed channel.
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+
+	// If we reached here without a panic, the test passes.
+}
+
+// Sanity: agent_end (willRetry=false) still emits EventResult as before —
+// the fix must not regress the existing happy path.
+func TestHandleEvent_AgentEnd_NoRetry_StillEmitsEventResult_RPC(t *testing.T) {
+	s := newHandleEventSession(t, true, "sid-end")
+	defer s.cancel()
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": false})
+
+	got := drainEvent(t, s, 2*time.Second)
+	if got == nil || got.Type != core.EventResult || !got.Done {
+		t.Fatalf("expected EventResult Done=true from agent_end, got %+v", got)
+	}
+}
+
+// Sanity: agent_end (willRetry=false) does NOT emit EventResult in JSON
+// mode (existing behaviour — JSON mode relies on process exit). The
+// agent_settled fix does NOT change this — it only adds a new branch.
+func TestHandleEvent_AgentEnd_NoRetry_JSONMode_NoEventResult(t *testing.T) {
+	s := newHandleEventSession(t, false, "sid-end-json")
+	defer s.cancel()
+	s.handleEvent(map[string]any{"type": "agent_end", "willRetry": false})
+
+	select {
+	case e := <-s.events:
+		t.Fatalf("agent_end in JSON mode must not emit EventResult, got %+v", e)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// guard that errors.Is still works with the buffered error message —
+// sanity-check the fmt.Errorf wrapping doesn't strip the message.
+func TestHandleEvent_AgentSettled_FlushedErrorMatchesOriginal(t *testing.T) {
+	s := newHandleEventSession(t, true, "sid-match")
+	defer s.cancel()
+	s.pendingErr = "compaction failed: nothing to compact"
+
+	s.handleEvent(map[string]any{"type": "agent_settled"})
+
+	first := drainEvent(t, s, 2*time.Second)
+	if first == nil || first.Type != core.EventError {
+		t.Fatalf("expected EventError, got %+v", first)
+	}
+	if !errors.Is(first.Error, first.Error) {
+		t.Errorf("errors.Is sanity failed (always true)")
+	}
+	if first.Error.Error() != "compaction failed: nothing to compact" {
+		t.Errorf("flushed error message changed: %q", first.Error.Error())
 	}
 }
