@@ -3023,7 +3023,13 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			Href      string          `json:"href"`
 			URL       string          `json:"url"`
 			Behaviors json.RawMessage `json:"behaviors"`
-			Property  struct {
+			MultiURL  *struct {
+				URL        string `json:"url"`
+				PCURL      string `json:"pc_url"`
+				AndroidURL string `json:"android_url"`
+				IOSURL     string `json:"ios_url"`
+			} `json:"multi_url"`
+			Property struct {
 				Content   string            `json:"content"`
 				URL       cardLinkURL       `json:"url"`
 				Contents  json.RawMessage   `json:"contents"`
@@ -3062,9 +3068,26 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			if url == "" {
 				url = elem.URL
 			}
+			if url == "" && elem.MultiURL != nil {
+				url = elem.MultiURL.URL
+				if url == "" {
+					url = elem.MultiURL.PCURL
+				}
+				if url == "" {
+					url = elem.MultiURL.AndroidURL
+				}
+				if url == "" {
+					url = elem.MultiURL.IOSURL
+				}
+			}
 			switch {
 			case label != "" && url != "":
-				*parts = append(*parts, fmt.Sprintf("[%s](%s)", label, url))
+				// Avoid double-wrapping labels that are already markdown links.
+				if strings.HasPrefix(label, "[") && strings.Contains(label, "](") {
+					*parts = append(*parts, label)
+				} else {
+					*parts = append(*parts, fmt.Sprintf("[%s](%s)", label, url))
+				}
 			case label != "":
 				*parts = append(*parts, label)
 			case url != "":

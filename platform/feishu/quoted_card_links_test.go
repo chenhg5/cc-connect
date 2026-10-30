@@ -14,15 +14,21 @@ import (
 
 func TestQuotedInteractiveCardPreservesLinks(t *testing.T) {
 	const link = "[QSim](https://example.com/issues/42?run=1&view=full)"
-	cases := []struct{ name, card string }{
-		{"card1_lark_md", `{"header":{"title":{"content":"Issue 42"}},"elements":[{"tag":"div","text":{"tag":"lark_md","content":"` + link + `"}}]}`},
-		{"card2_markdown", `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"` + link + `"}]}}`},
-		{"raw_button_actions", `{"body":{"property":{"elements":[{"tag":"button","property":{"text":{"tag":"plain_text","property":{"content":"QSim"}},"actions":[{"type":"open_url","action":{"url":"https://example.com/issues/42?run=1&view=full"}}]}}]}}}`},
-		{"raw_link", `{"body":{"property":{"elements":[{"tag":"link","property":{"content":"QSim","url":{"url":"https://example.com/issues/42?run=1&view=full"}}}]}}}`},
-		{"raw_markdown_link", `{"body":{"property":{"elements":[{"tag":"markdown","property":{"elements":[{"tag":"link","property":{"content":"QSim","url":{"url":"https://example.com/issues/42?run=1&view=full"}}}]}}]}}}`},
-		{"href", `{"body":{"elements":[{"tag":"link","content":"QSim","href":"https://example.com/issues/42?run=1&view=full"}]}}`},
-		{"button_default_url", `{"body":{"property":{"elements":[{"tag":"button","property":{"text":{"tag":"plain_text","property":{"content":"QSim"}},"behaviors":[{"type":"openUrl","default_url":"https://example.com/issues/42?run=1&view=full"}]}}]}}}`},
-		{"flat_button_default_url", `{"schema":"2.0","body":{"elements":[{"tag":"button","text":{"tag":"plain_text","content":"QSim"},"behaviors":[{"type":"open_url","default_url":"https://example.com/issues/42?run=1&view=full"}]}]}}`},
+	cases := []struct {
+		name, card, wantExact string
+		wantContains          string
+	}{
+		{"card1_lark_md", `{"header":{"title":{"content":"Issue 42"}},"elements":[{"tag":"div","text":{"tag":"lark_md","content":"` + link + `"}}]}`, "", link},
+		{"card2_markdown", `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"` + link + `"}]}}`, link, link},
+		{"raw_button_actions", `{"body":{"property":{"elements":[{"tag":"button","property":{"text":{"tag":"plain_text","property":{"content":"QSim"}},"actions":[{"type":"open_url","action":{"url":"https://example.com/issues/42?run=1&view=full"}}]}}]}}}`, link, link},
+		{"raw_link", `{"body":{"property":{"elements":[{"tag":"link","property":{"content":"QSim","url":{"url":"https://example.com/issues/42?run=1&view=full"}}}]}}}`, link, link},
+		{"raw_markdown_link", `{"body":{"property":{"elements":[{"tag":"markdown","property":{"elements":[{"tag":"link","property":{"content":"QSim","url":{"url":"https://example.com/issues/42?run=1&view=full"}}}]}}]}}}`, link, link},
+		{"href", `{"body":{"elements":[{"tag":"link","content":"QSim","href":"https://example.com/issues/42?run=1&view=full"}]}}`, link, link},
+		{"button_default_url", `{"body":{"property":{"elements":[{"tag":"button","property":{"text":{"tag":"plain_text","property":{"content":"QSim"}},"behaviors":[{"type":"openUrl","default_url":"https://example.com/issues/42?run=1&view=full"}]}}]}}}`, link, link},
+		{"flat_button_default_url", `{"schema":"2.0","body":{"elements":[{"tag":"button","text":{"tag":"plain_text","content":"QSim"},"behaviors":[{"type":"open_url","default_url":"https://example.com/issues/42?run=1&view=full"}]}]}}`, link, link},
+		{"a_lark_md_with_href_no_double_wrap", `{"elements":[{"tag":"a","text":{"tag":"lark_md","content":"` + link + `"},"href":"https://example.com/issues/42?run=1&view=full"}]}`, link, link},
+		{"a_multi_url", `{"elements":[{"tag":"a","text":{"tag":"plain_text","content":"QSim"},"multi_url":{"url":"https://example.com/issues/42?run=1&view=full"}}]}`, link, link},
+		{"no_link_plain_label", `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"plain label only"}]}}`, "plain label only", "plain label only"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,11 +51,21 @@ func TestQuotedInteractiveCardPreservesLinks(t *testing.T) {
 			defer srv.Close()
 			p := &Platform{client: lark.NewClient("cli_quoted_card", "test-secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))}
 			msg := p.fetchSingleMessage(context.Background(), "om_quoted_card")
-			if msg == nil || !strings.Contains(msg.text, link) {
-				t.Fatalf("quoted card = %+v, want %q", msg, link)
+			if msg == nil || !strings.Contains(msg.text, tc.wantContains) {
+				t.Fatalf("quoted card = %+v, want contains %q", msg, tc.wantContains)
 			}
-			if got := extractInteractiveCardText(raw); !strings.Contains(got, link) {
-				t.Errorf("fallback text = %q, want %q", got, link)
+			got := extractInteractiveCardText(raw)
+			if tc.wantExact != "" && got != tc.wantExact {
+				t.Errorf("fallback text = %q, want exact %q", got, tc.wantExact)
+			}
+			if !strings.Contains(got, tc.wantContains) {
+				t.Errorf("fallback text = %q, want contains %q", got, tc.wantContains)
+			}
+			if tc.name == "no_link_plain_label" && (strings.Contains(got, "[") || strings.Contains(got, "](")) {
+				t.Errorf("fallback text = %q, want no markdown link brackets", got)
+			}
+			if tc.name == "a_lark_md_with_href_no_double_wrap" && strings.Contains(got, "[[") {
+				t.Errorf("fallback text = %q, double-wrapped markdown link", got)
 			}
 		})
 	}
