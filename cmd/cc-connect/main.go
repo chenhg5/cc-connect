@@ -1066,9 +1066,9 @@ func main() {
 		// Check insecure flag for local development mode
 		insecure := cfg.Bridge.Insecure != nil && *cfg.Bridge.Insecure
 		if insecure {
-			bridgeSrv = core.NewBridgeServerInsecure(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+			bridgeSrv = core.NewBridgeServerInsecureWithBind(cfg.Bridge.Bind, port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
 		} else {
-			bridgeSrv = core.NewBridgeServer(port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
+			bridgeSrv = core.NewBridgeServerWithBind(cfg.Bridge.Bind, port, cfg.Bridge.Token, path, cfg.Bridge.CORSOrigins)
 		}
 		if bridgeSrv == nil {
 			slog.Error("bridge: failed to create server - token is required (or set insecure=true for local dev)")
@@ -1079,7 +1079,10 @@ func main() {
 			bridgeSrv.RegisterEngine(cfg.Projects[i].Name, e, bp)
 			e.AddPlatform(bp)
 		}
-		bridgeSrv.Start()
+		if err := bridgeSrv.Start(); err != nil {
+			slog.Error("bridge: failed to start server", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Start webhook server if enabled
@@ -1107,7 +1110,7 @@ func main() {
 		if port <= 0 {
 			port = 9820
 		}
-		mgmtSrv = core.NewManagementServer(port, cfg.Management.Token, cfg.Management.CORSOrigins)
+		mgmtSrv = core.NewManagementServerWithBind(cfg.Management.Bind, port, cfg.Management.Token, cfg.Management.CORSOrigins)
 		for i, e := range engines {
 			mgmtSrv.RegisterEngine(cfg.Projects[i].Name, e)
 		}
@@ -1264,7 +1267,10 @@ func main() {
 			core.SetPresetsURL(cfg.ProviderPresetsURL)
 		}
 		mgmtSrv.SetListCCSwitchProviders(listCCSwitchProvidersForWeb)
-		mgmtSrv.Start()
+		if err := mgmtSrv.Start(); err != nil {
+			slog.Error("management api: failed to start server", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Start internal API server for CLI send
