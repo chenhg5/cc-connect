@@ -126,12 +126,27 @@ type Platform struct {
 	newBot              botFactory
 	newBackoffTimer     func(time.Duration) backoffTimer
 	newTypingTicker     func(time.Duration) typingTicker
+	// seenChatIDs records every ChatID the bot has observed since process
+	// start. Used by RegisterCommands to mirror the default-scope command
+	// menu into each chat's BotCommandScope so the client refreshes its
+	// cached menu. See #1813.
+	seenChatIDs map[int64]struct{}
 }
 
 const (
 	initialReconnectBackoff = time.Second
 	maxReconnectBackoff     = 30 * time.Second
 	stableConnectionWindow  = 10 * time.Second
+
+	// telegramBotCommandLimit is Telegram's hard cap on entries in the bot
+	// command menu (BotCommandScope.all / default).
+	telegramBotCommandLimit = 100
+
+	// telegramChatCommandsThrottle is the per-chat pause we insert between
+	// setMyCommands(scope=BotCommandScopeChat) calls. Telegram's Bot API
+	// imposes ~30 req/s per bot; 35ms yields ~28 rps which is safely below
+	// the limit even when mirroring across hundreds of chats. See #1813.
+	telegramChatCommandsThrottle = 35 * time.Millisecond
 )
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -389,6 +404,9 @@ func (p *Platform) runConnection(ctx context.Context) error {
 
 func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
 	if update.CallbackQuery != nil {
+		if cbMsg := update.CallbackQuery.Message.Message; cbMsg != nil {
+			p.markChatSeen(cbMsg.Chat.ID)
+		}
 		p.handleCallbackQuery(ctx, update.CallbackQuery)
 		return
 	}
@@ -396,6 +414,7 @@ func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
+	p.markChatSeen(update.Message.Chat.ID)
 	p.handleMessage(ctx, update.Message)
 }
 
@@ -728,6 +747,49 @@ func (p *Platform) connectedBot(action string) (telegramBot, error) {
 		return nil, fmt.Errorf("telegram: %s: bot not connected", action)
 	}
 	return p.bot, nil
+}
+
+// markChatSeen records a ChatID so RegisterCommands can later mirror the
+// default-scope bot menu into the chat's BotCommandScope. See #1813.
+func (p *Platform) markChatSeen(chatID int64) {
+	if chatID == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.seenChatIDs == nil {
+		p.seenChatIDs = make(map[int64]struct{})
+	}
+	p.seenChatIDs[chatID] = struct{}{}
+}
+
+// snapshotSeenChatIDs returns a copy of the ChatIDs observed since process
+// start, plus any numeric allow_from IDs (which in private chats match the
+// user ID, so they double as chat IDs). Order is unspecified.
+func (p *Platform) snapshotSeenChatIDs() []int64 {
+	p.mu.RLock()
+	seen := make(map[int64]struct{}, len(p.seenChatIDs))
+	for id := range p.seenChatIDs {
+		seen[id] = struct{}{}
+	}
+	allowFrom := p.allowFrom
+	p.mu.RUnlock()
+
+	for _, raw := range strings.Split(allowFrom, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || raw == "*" {
+			continue
+		}
+		if id, err := strconv.ParseInt(raw, 10, 64); err == nil && id > 0 {
+			seen[id] = struct{}{}
+		}
+	}
+
+	out := make([]int64, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	return out
 }
 
 func (p *Platform) botUsername() string {
@@ -1681,6 +1743,13 @@ func (p *Platform) Stop() error {
 }
 
 // RegisterCommands registers bot commands with Telegram for the command menu.
+//
+// On every call it (1) writes the default-scope menu and (2) mirrors the same
+// command list into every chat scope observed so far (allow_from user IDs ∪
+// ChatIDs seen since process start). The chat-scope mirror is what forces
+// the Telegram client to refresh its cached menu: a default-scope write alone
+// is invisible to clients that have already cached a stale chat-scope menu.
+// See #1813.
 func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 	bot, err := p.connectedBot("register commands")
 	if err != nil {
@@ -1704,9 +1773,17 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 		})
 	}
 
-	// Limit to 100 commands
-	if len(tgCommands) > 100 {
-		tgCommands = tgCommands[:100]
+	// Limit to 100 commands. We surface a WARN because silently dropping
+	// skills lets the chat-scope mirror shadow the default scope with a
+	// different (smaller) set, which is the silent failure mode that #1813
+	// documents.
+	if len(tgCommands) > telegramBotCommandLimit {
+		slog.Warn("telegram: bot command menu exceeded Telegram's per-scope limit; dropping trailing entries",
+			"limit", telegramBotCommandLimit,
+			"input", len(tgCommands),
+			"dropped", len(tgCommands)-telegramBotCommandLimit,
+		)
+		tgCommands = tgCommands[:telegramBotCommandLimit]
 	}
 
 	if len(tgCommands) == 0 {
@@ -1720,6 +1797,29 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 	}
 
 	slog.Info("telegram: registered bot commands", "count", len(tgCommands))
+
+	// Mirror the same slice into every observed chat scope. This is the path
+	// that makes the slash-command menu actually appear for users whose
+	// clients only refresh on chat-scope writes (issue #1813).
+	for _, chatID := range p.snapshotSeenChatIDs() {
+		if _, err := bot.SetMyCommands(ctx, &tgbot.SetMyCommandsParams{
+			Commands: tgCommands,
+			Scope:    &models.BotCommandScopeChat{ChatID: chatID},
+		}); err != nil {
+			slog.Warn("telegram: per-chat setMyCommands failed; client may keep stale menu",
+				"chat_id", chatID,
+				"error", err,
+			)
+			continue
+		}
+		// Throttle between per-chat calls so we stay under Telegram's
+		// ~30 req/s per-bot limit. The throttle is best-effort: callers that
+		// cannot block (e.g. embedded in a request handler) can skip it by
+		// returning early; we still respect the per-chat error contract
+		// above.
+		time.Sleep(telegramChatCommandsThrottle)
+	}
+
 	return nil
 }
 
