@@ -200,3 +200,54 @@ func TestAppServerSubagents_IdleBeforeAuthoritativeCompletion(t *testing.T) {
 		})
 	}
 }
+
+func TestExecSubagents_AllWakeToolSpellingsReopenFinishedCard(t *testing.T) {
+	for _, tool := range []string{"sendInput", "send_input", "resumeAgent", "resume_agent", "followupTask", "followup_task"} {
+		t.Run(tool, func(t *testing.T) {
+			s := &codexSession{ctx: context.Background(), events: make(chan core.Event, 32)}
+			for _, item := range []map[string]any{
+				{"tool": "spawn_agent", "status": "running", "prompt": "First task"},
+				{"tool": "wait", "status": "completed"},
+				{"tool": tool, "status": "running", "prompt": "More work"},
+			} {
+				s.handleCollabItem(map[string]any{
+					"tool": item["tool"], "prompt": item["prompt"],
+					"receiver_thread_ids": []any{"child"},
+					"agents_states":       map[string]any{"child": map[string]any{"status": item["status"]}},
+				})
+			}
+			events := subagentEvents(s.events)
+			if len(events) != 3 || events[2].Subagent.Phase != core.SubagentStarted || events[2].Subagent.Prompt != "More work" {
+				t.Fatalf("wake must reopen finished card: %+v", events)
+			}
+		})
+	}
+}
+
+func TestCodexSubagents_WakeRefreshesNonemptyLabels(t *testing.T) {
+	var c codexSubagents
+	var events []core.Event
+	emit := func(e core.Event) { events = append(events, e) }
+	c.start("child", "Old name", "explorer", "First task", emit)
+	c.finish("child", "completed", "Done", emit)
+	c.start("child", "New name", "worker", "Second task", emit)
+	c.finish("child", "completed", "Done", emit)
+	c.start("child", "", "", "Third task", emit)
+	for _, i := range []int{2, 4} {
+		if e := events[i].Subagent; e.Title != "New name" || e.Kind != "worker" {
+			t.Fatalf("wake metadata = %+v, want updated labels preserved", e)
+		}
+	}
+}
+
+func BenchmarkAppServerSubagents_ParentRouting(b *testing.B) {
+	s := &appServerSession{}
+	s.threadID.Store("parent")
+	raw := json.RawMessage(`{"threadId":"parent","item":{"type":"commandExecution","command":"go test ./...","aggregatedOutput":"test output","status":"completed","exitCode":0,"durationMs":100,"metadata":{"nested":[1,2,3]}}}`)
+	b.ReportAllocs()
+	for b.Loop() {
+		if s.handleSubagentNotification("item/completed", raw) {
+			b.Fatal("parent event must reach the generic handler")
+		}
+	}
+}
