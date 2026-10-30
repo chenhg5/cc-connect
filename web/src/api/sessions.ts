@@ -12,6 +12,8 @@ export interface Session {
   name: string;
   platform: string;
   agent_type: string;
+  project?: string;
+  project_work_dir?: string;
   active: boolean;
   live: boolean;
   created_at: string;
@@ -36,5 +38,5 @@ export const createSession = (project: string, body: { session_key: string; name
 export const deleteSession = (project: string, id: string) => api.delete(`/projects/${project}/sessions/${id}`);
 export const switchSession = (project: string, body: { session_key: string; session_id: string }) =>
   api.post(`/projects/${project}/sessions/switch`, body);
-export const sendMessage = (project: string, body: { session_key: string; message: string }) =>
+export const sendMessage = (project: string, body: { session_key: string; message: string; session_id?: string }) =>
   api.post(`/projects/${project}/send`, body);

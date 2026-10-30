@@ -39,6 +39,65 @@
   </a>
 </p>
 
+## Temporary Fork Branch: Community Preview Fixes
+
+This fork carries a local preview branch for users who need the latest Telegram, Gemini CLI, session, and Web console fixes before they land upstream:
+
+```bash
+git clone -b local/community-preview-fixes-20260512 https://github.com/yanyan1115/cc-connect.git
+```
+
+Branch: [`local/community-preview-fixes-20260512`](https://github.com/yanyan1115/cc-connect/tree/local/community-preview-fixes-20260512)
+
+Compatibility branch: the older preview branch [`local/web-console-session-fix-20260511`](https://github.com/yanyan1115/cc-connect/tree/local/web-console-session-fix-20260511) is also fast-forwarded to the same fixes, so existing shared links keep working.
+
+What changed in this branch:
+
+Telegram media fixes:
+
+- Fixed Telegram media-group handling so sending multiple images with one caption forms a single cc-connect turn.
+- The merged turn preserves the text/caption and forwards all images as `ImageAttachment`s together, instead of processing one image per message.
+- Media-group aggregation is bounded so delayed album parts are collected without blocking ordinary single-image or text messages.
+
+Gemini CLI on Telegram fixes:
+
+- Filtered Gemini CLI thinking/reasoning deltas before they are sent back through Telegram.
+- Stripped flattened Gemini thought markers that can appear after long-context turns, preventing internal reasoning from leaking into the Telegram message body.
+- The fix is scoped to agent output filtering and does not change Web console rendering behavior.
+
+Web console session routing fixes:
+
+- Web console sends now carry the selected session id, so messages from `/chat/<project>?session=<id>` go to the selected session instead of the current/latest session.
+- Follow-up routing keeps Telegram `/current` unchanged: sending from a non-current Web session no longer switches the Telegram active session.
+- Past native sessions selected in the Web console can be resumed correctly when routing a Web message.
+
+Telegram / agent session fixes:
+
+- Fixed native session discovery so `/list` can find Codex and Gemini sessions reliably.
+- Fixed `/switch` so users can switch back into listed native sessions successfully.
+- Fixed `/current` so it shows the native session title/summary instead of a local placeholder.
+- Fixed `/name` so custom names can be applied successfully and are respected by `/list`, `/current`, `/switch`, and the Web console.
+- Unified session-title priority so `/list`, `/current`, `/switch`, `/name`, and Web display names no longer fight each other.
+
+Web console fixes:
+
+- Web console session names now prefer `/name` custom names, then native agent titles/summaries, instead of falling back to local `Session.Name`.
+- Web console session titles stay in sync with Telegram session names, so the same conversation has the same readable name in both places.
+- Dashboard recent-session cards open the exact clicked session instead of the current/latest session.
+- Stale local shadow sessions are hidden/deduplicated, and the Web console can show the full visible session list instead of only a few recent sessions.
+- Mobile Web console layout now uses a hamburger menu and slide-out sidebar instead of squeezing content.
+- The Web console theme uses a warmer Codex-style palette (`#CC7D5E`, `#F9F9F7`, `#2D2D2B`).
+
+Current preview head:
+
+```text
+8cfd2aee fix: strip flattened gemini thought markers
+```
+
+Thanks to OpenAI Codex for helping debug and implement this temporary fork branch together with the community.
+
+This is a temporary fork branch, not an official upstream release. Please switch back to upstream once the relevant fixes are merged.
+
 
 ## ❤️ Sponsor
 

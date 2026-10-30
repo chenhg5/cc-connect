@@ -595,6 +595,7 @@ const (
 	MsgBuiltinCmdSwitch    MsgKey = "switch"
 	MsgBuiltinCmdDelete    MsgKey = "delete"
 	MsgBuiltinCmdName      MsgKey = "name"
+	MsgBuiltinCmdProject   MsgKey = "project"
 	MsgBuiltinCmdCurrent   MsgKey = "current"
 	MsgBuiltinCmdHistory   MsgKey = "history"
 	MsgBuiltinCmdProvider  MsgKey = "provider"
@@ -3688,6 +3689,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "為會話命名，方便辨識，參數: [序號] <名稱>",
 		LangJapanese:           "セッションに名前を付ける、引数: [番号] <名前>",
 		LangSpanish:            "Nombrar una sesión para fácil identificación, arg: [número] <texto>",
+	},
+	MsgBuiltinCmdProject: {
+		LangEnglish:            "View or assign the current session project, arg: [name]",
+		LangChinese:            "查看/设置当前会话所属项目，参数: [项目名]",
+		LangTraditionalChinese: "查看/設定目前會話所屬專案，參數: [專案名]",
+		LangJapanese:           "現在のセッションのプロジェクトを表示/設定、引数: [名前]",
+		LangSpanish:            "Ver/asignar el proyecto de la sesión actual, arg: [nombre]",
 	},
 	MsgBuiltinCmdCurrent: {
 		LangEnglish:            "Show current active session",

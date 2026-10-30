@@ -33,20 +33,20 @@ export default function SessionDrawer({ open, onClose, sessions, currentSessionI
     <>
       {/* Backdrop */}
       {open && (
-        <div className="fixed inset-0 bg-black/20 dark:bg-black/40 z-40 transition-opacity" onClick={onClose} />
+        <div className="fixed inset-0 bg-transparent dark:bg-black/10 z-40 transition-opacity" onClick={onClose} />
       )}
 
       {/* Drawer */}
       <div
         className={cn(
           'fixed top-0 right-0 h-full w-80 z-50 flex flex-col transition-transform duration-300 ease-out',
-          'bg-white/95 backdrop-blur-xl border-l border-gray-200/80 shadow-2xl shadow-black/15',
-          'dark:bg-[rgba(15,15,15,0.97)] dark:border-white/[0.08] dark:shadow-black/50',
+          'bg-surface/95 backdrop-blur-xl border-l border-ink/10 shadow-2xl shadow-black/[0.12]',
+          'dark:bg-surface/[0.97] dark:border-white/[0.08] dark:shadow-black/50',
           open ? 'translate-x-0' : 'translate-x-full',
         )}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 h-14 border-b border-gray-200/80 dark:border-white/[0.08] shrink-0">
+        <div className="flex items-center justify-between px-4 h-14 border-b border-ink/10 dark:border-white/[0.08] shrink-0">
           <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{t('chat.sessions')}</h3>
           <div className="flex items-center gap-1">
             {onNewSession && (
@@ -81,12 +81,12 @@ export default function SessionDrawer({ open, onClose, sessions, currentSessionI
                   key={s.id}
                   type="button"
                   onClick={() => onSelect(s)}
-                  className={cn(
-                    'w-full text-left p-3 rounded-xl mb-1 transition-all duration-200',
-                    isCurrent
-                      ? 'bg-accent/10 ring-1 ring-accent/30'
-                      : 'hover:bg-gray-100/80 dark:hover:bg-white/[0.04]',
-                  )}
+                    className={cn(
+                      'w-full text-left p-3 rounded-xl mb-1 transition-all duration-200',
+                      isCurrent
+                        ? 'bg-accent/10 ring-1 ring-accent/30'
+                      : 'hover:bg-ink/[0.05] dark:hover:bg-white/[0.04]',
+                    )}
                 >
                   <div className="flex items-start justify-between gap-2 mb-1">
                     <div className="flex items-center gap-1.5 min-w-0">
@@ -116,6 +116,11 @@ export default function SessionDrawer({ open, onClose, sessions, currentSessionI
                   )}
 
                   <div className="flex items-center gap-1.5 pl-5">
+                    {s.project && (
+                      <Badge variant="warning" className="text-[9px] px-1 py-0 max-w-[9rem] truncate" title={s.project_work_dir || s.project}>
+                        {t('sessions.projectGroup', 'Group')}: {s.project}
+                      </Badge>
+                    )}
                     {s.platform && <Badge variant="info" className="text-[9px] px-1 py-0">{s.platform}</Badge>}
                     <span className="text-[10px] text-gray-400 ml-auto">{s.history_count} msgs</span>
                   </div>
