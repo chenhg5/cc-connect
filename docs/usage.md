@@ -127,6 +127,11 @@ This runs the bundled CLI using the existing Codex adapter. Desktop-only tools a
 | Plan | `plan` | Read-only analysis |
 | Ask | `ask` | Q&A style, read-only |
 
+For Cursor projects, the optional `instructions_file` setting under `[projects.agent.options]`
+prepends a UTF-8 file to each prompt, including resumed turns. The file is read again on
+every turn so edits take effect without restarting the agent. An unreadable file rejects
+the turn explicitly. Leave it unset to keep the existing prompt behavior.
+
 ### Gemini CLI Modes
 
 | Mode | Config Value | Behavior |

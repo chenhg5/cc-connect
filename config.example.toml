@@ -1609,6 +1609,9 @@ app_secret = "your-feishu-app-secret"
 # mode = "force"  # "default" | "force" (yolo) | "plan" | "ask"
 # cmd = "agent"   # CLI binary name (default: "agent") / CLI 二进制名称（默认 "agent"）
 #
+# Optional: prepend a UTF-8 instructions file to every turn, reloading changes each time.
+# instructions_file = "/path/to/AGENTS.md"
+#
 # Mode options / 模式说明:
 # - "default": Trust workspace, ask before tool use / 信任工作区，工具调用前询问
 #              Note: Shell tool is restricted to safe commands (e.g. ls) in this mode
