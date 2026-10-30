@@ -284,6 +284,8 @@
     "port": "Port",
     "wsUrl": "WebSocket URL",
     "appId": "App ID",
+    "tenantId": "Tenant ID",
+    "sessionScope": "Session scope",
     "appSecret": "App Secret",
     "sandboxMode": "Sandbox mode",
     "channelSecret": "Channel Secret",
