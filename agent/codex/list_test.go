@@ -61,23 +61,51 @@ func TestAgentListSessions_ListAllWorkdirs(t *testing.T) {
 	writeTestCodexRollout(t, codexHome, "rollout-main.jsonl", "main-session", workDir)
 	writeTestCodexRollout(t, codexHome, "rollout-other.jsonl", "other-session", otherWorkDir)
 
-	agent := &Agent{workDir: workDir, codexHome: codexHome, listAllWorkdirs: true}
-	sessions, err := agent.ListSessions(context.Background())
+	t.Chdir(workDir)
+	cmd, err := os.Executable()
 	if err != nil {
-		t.Fatalf("ListSessions() error: %v", err)
-	}
-	if len(sessions) != 2 {
-		t.Fatalf("ListSessions() returned %d sessions, want 2", len(sessions))
+		t.Fatalf("get test executable: %v", err)
 	}
 
-	got := map[string]bool{}
-	for _, session := range sessions {
-		got[session.ID] = true
+	tests := []struct {
+		name            string
+		workDir         string
+		listAllWorkdirs any
+		wantIDs         []string
+	}{
+		{name: "enabled", workDir: workDir, listAllWorkdirs: true, wantIDs: []string{"main-session", "other-session"}},
+		{name: "disabled", workDir: workDir, listAllWorkdirs: false, wantIDs: []string{"main-session"}},
+		{name: "unset", workDir: workDir, wantIDs: []string{"main-session"}},
+		{name: "disabled with default workdir", listAllWorkdirs: false, wantIDs: []string{"main-session"}},
 	}
-	for _, want := range []string{"main-session", "other-session"} {
-		if !got[want] {
-			t.Fatalf("ListSessions() missing session %q; got %#v", want, got)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := map[string]any{"work_dir": tt.workDir, "codex_home": codexHome, "cmd": []string{cmd}}
+			if tt.listAllWorkdirs != nil {
+				opts["list_all_workdirs"] = tt.listAllWorkdirs
+			}
+			agent, err := New(opts)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			sessions, err := agent.ListSessions(context.Background())
+			if err != nil {
+				t.Fatalf("ListSessions() error: %v", err)
+			}
+			if len(sessions) != len(tt.wantIDs) {
+				t.Fatalf("ListSessions() returned %d sessions, want %d", len(sessions), len(tt.wantIDs))
+			}
+
+			got := map[string]bool{}
+			for _, session := range sessions {
+				got[session.ID] = true
+			}
+			for _, want := range tt.wantIDs {
+				if !got[want] {
+					t.Fatalf("ListSessions() missing session %q; got %#v", want, got)
+				}
+			}
+		})
 	}
 }
 
@@ -87,18 +115,7 @@ func TestListCodexSessions_EmptyWorkDirDoesNotFilterByProcessDir(t *testing.T) {
 	processWorkDir := t.TempDir()
 	writeTestCodexRollout(t, codexHome, "rollout-session.jsonl", "all-workdirs-session", sessionWorkDir)
 
-	originalWorkDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("get current working directory: %v", err)
-	}
-	if err := os.Chdir(processWorkDir); err != nil {
-		t.Fatalf("change process working directory: %v", err)
-	}
-	defer func() {
-		if err := os.Chdir(originalWorkDir); err != nil {
-			t.Fatalf("restore process working directory: %v", err)
-		}
-	}()
+	t.Chdir(processWorkDir)
 
 	sessions, err := listCodexSessions("", codexHome)
 	if err != nil {

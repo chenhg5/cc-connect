@@ -92,7 +92,7 @@ func listCodexSessions(workDir, codexHome string, extraPrefixes ...[]string) ([]
 	if len(extraPrefixes) > 0 {
 		prefixes = extraPrefixes[0]
 	}
-	absWorkDir := strings.TrimSpace(workDir)
+	absWorkDir := workDir
 	if absWorkDir != "" {
 		var err error
 		absWorkDir, err = filepath.Abs(absWorkDir)
