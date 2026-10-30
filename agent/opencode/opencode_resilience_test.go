@@ -509,8 +509,18 @@ func TestNew_StallTimeoutOption(t *testing.T) {
 		t.Fatalf("default stallTimeout = %v, want 0 (5m default)", got)
 	}
 
-	if _, err := New(map[string]any{"cmd": truePath(t), "opencode_stall_timeout": "soon"}); err == nil {
-		t.Fatal("New must reject an invalid opencode_stall_timeout")
+	if _, err := New(map[string]any{"cmd": truePath(t), "opencode_stall_timeout": "soon"}); err != nil {
+		t.Fatalf("New with an unparsable option must fall back to the default, got %v", err)
+	}
+
+	for _, raw := range []any{"soon", 600, ""} {
+		a, err := New(map[string]any{"cmd": truePath(t), "opencode_stall_timeout": raw})
+		if err != nil {
+			t.Fatalf("New with opencode_stall_timeout=%v: %v", raw, err)
+		}
+		if got := a.(*Agent).stallTimeout; got != 0 {
+			t.Fatalf("stallTimeout for opencode_stall_timeout=%v = %v, want 0 (5m default)", raw, got)
+		}
 	}
 }
 

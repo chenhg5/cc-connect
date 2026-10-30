@@ -81,7 +81,12 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	stallTimeout, err := parseStallTimeout(opts["opencode_stall_timeout"])
 	if err != nil {
-		return nil, err
+		// A typo in one project's agent options must not take the whole
+		// daemon down, and every other agent option is ignored when it does
+		// not parse. Warn loudly, then fall back to the 5m default.
+		slog.Warn("opencode: ignoring unparsable opencode_stall_timeout, keeping the default stall threshold",
+			"value", opts["opencode_stall_timeout"], "err", err)
+		stallTimeout = 0
 	}
 
 	if _, err := exec.LookPath(cmd); err != nil {
