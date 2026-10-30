@@ -407,6 +407,12 @@ func (a *Agent) configuredModels() []core.ModelOption {
 }
 
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
+	a.mu.RLock()
+	minimaxModels := core.GetMiniMaxProviderModels(a.providers, a.activeIdx)
+	a.mu.RUnlock()
+	if len(minimaxModels) > 0 {
+		return minimaxModels
+	}
 	if models := a.configuredModels(); len(models) > 0 {
 		return models
 	}

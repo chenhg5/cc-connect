@@ -70,19 +70,19 @@
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimax.io/anthropic",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         },
         "codex": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"],
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimax.io/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         }
       }
     },
@@ -98,19 +98,19 @@
       "agents": {
         "claudecode": {
           "base_url": "https://api.minimaxi.com/anthropic",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M3-highspeed", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         },
         "codex": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"],
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"],
           "codex_config": { "wire_api": "responses" }
         },
         "opencode": {
           "base_url": "https://api.minimaxi.com/v1",
-          "model": "MiniMax-M3",
-          "models": ["MiniMax-M3", "MiniMax-M2.7"]
+          "model": "MiniMax-M3.1-Flash",
+          "models": ["MiniMax-M3.1-Flash", "MiniMax-M3"]
         }
       }
     },
