@@ -2268,7 +2268,12 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	// Wait for all turns to finish. Generous deadline so this stays green
 	// when the whole core package is run with `-race -parallel=N` on
 	// constrained CI hosts; the in-isolation run finishes < 2s.
-	deadline := time.After(30 * time.Second)
+	// `go test ./...` runs package binaries in parallel (default -p=NumCPU), so
+	// this deadline also has to absorb contention from other packages' -race
+	// builds. 30s was not enough: the same tree failed here at 30.02s with
+	// userA=2 after passing in 0.03s on the previous run. The assertion is
+	// "all messages eventually land", not "within 30s", so widen the margin.
+	deadline := time.After(90 * time.Second)
 	for {
 		histA := e.sessions.GetOrCreateActive("platA:userA").GetHistory(0)
 		histB := e.sessions.GetOrCreateActive("platB:userB").GetHistory(0)
