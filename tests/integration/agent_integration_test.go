@@ -994,7 +994,11 @@ func TestConcurrentSessionIsolation(t *testing.T) {
 		t.Fatalf("session A produced SESSION_BETA (cross-talk): %v", mp1.getSent())
 	}
 
-	t.Logf("session isolation confirmed: alpha=%s, beta=%s", resp1[:20], resp2[:20])
+	// The reply can be shorter than the slice bound ("SESSION_ALPHA" is 12
+	// characters), so clamp the length instead of slicing blindly — a panic
+	// here would abort the whole test binary and mask every other case.
+	t.Logf("session isolation confirmed: alpha=%s, beta=%s",
+		resp1[:min(len(resp1), 20)], resp2[:min(len(resp2), 20)])
 }
 
 // getJoined returns all sent content concatenated.
