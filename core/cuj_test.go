@@ -292,9 +292,17 @@ func (s *cujAgentSession) Send(prompt string, _ string, images []ImageAttachment
 		} else {
 			ev = Event{Type: EventResult, Content: reply, Done: true}
 		}
+		// Block (with a guard) instead of dropping via `default:` — a dropped
+		// EventResult leaves the engine waiting for a turn that never
+		// completes, which deadlocks the session and flakes concurrent
+		// CUJs on slow/-race CI hosts. The events channel is buffered, so
+		// under normal flow this still returns immediately.
 		select {
 		case s.events <- ev:
-		default:
+		case <-time.After(5 * time.Second):
+			// Engine gone or stalled; stop emitting to avoid hanging the
+			// test goroutine.
+			return
 		}
 	}()
 	return nil
@@ -693,6 +701,7 @@ func TestCUJ_B9_SearchFindsKeywordInHistory(t *testing.T) {
 // ===========================================================================
 
 func TestCUJ_D7_OutgoingRateLimitThrottlesBurst(t *testing.T) {
+	t.Run("PlatformWaitCancellation", testCUJD7PlatformWaitCancellation)
 	env := newCUJEnv(t)
 
 	// Configure aggressive throttle: 5 msgs/sec, burst of 2.
@@ -732,6 +741,64 @@ func TestCUJ_D7_OutgoingRateLimitThrottlesBurst(t *testing.T) {
 	// All messages must eventually arrive (no drops).
 	if got := len(env.plat.getSent()); got != N {
 		t.Fatalf("sent count = %d, want %d (limiter must throttle, not drop)", got, N)
+	}
+}
+
+// A platform may wait for its own outbound quota after the engine limiter.
+// The user sees replies only after admission, and never sees cancelled replies.
+type cujWaitingPlatform struct {
+	stubPlatformEngine
+	admit   chan struct{}
+	waiting chan struct{}
+}
+
+func (p *cujWaitingPlatform) Reply(ctx context.Context, rc any, content string) error {
+	p.waiting <- struct{}{}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.admit:
+		return p.stubPlatformEngine.Reply(ctx, rc, content)
+	}
+}
+
+func testCUJD7PlatformWaitCancellation(t *testing.T) {
+	p := &cujWaitingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, admit: make(chan struct{}), waiting: make(chan struct{}, 1)}
+	e := NewEngine("quota-journey", &cujAgent{}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	wait := func(ch <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for platform send")
+		}
+	}
+	for i, command := range []string{"/version", "/help", "/status"} {
+		done := make(chan struct{})
+		go func() {
+			e.ReceiveMessage(p, &Message{Platform: "test", SessionKey: "test:user", UserID: "user", MessageID: command, Content: command, ReplyCtx: "user"})
+			close(done)
+		}()
+		wait(p.waiting)
+		if got := len(p.getSent()); got != i {
+			t.Fatalf("reply visible before platform admission: %d, want %d", got, i)
+		}
+		if i < 2 {
+			p.admit <- struct{}{}
+			wait(done)
+			if got := len(p.getSent()); got != i+1 {
+				t.Fatalf("admitted reply missing: %d", got)
+			}
+		} else {
+			if err := e.Stop(); err != nil {
+				t.Fatal(err)
+			}
+			wait(done)
+			if got := len(p.getSent()); got != 2 {
+				t.Fatalf("cancelled reply reached user: %v", p.getSent())
+			}
+		}
 	}
 }
 
