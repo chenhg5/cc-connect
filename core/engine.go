@@ -338,6 +338,24 @@ type DisplayCfg struct {
 	ToolMessages     bool
 	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
 	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
+	// QuietProgressIntervalSec bounds progressive text flushes in quiet mode
+	// on platforms without in-place preview: at most one flush per interval
+	// per tool boundary, so long tool-heavy turns stay alive without
+	// spamming short turns. 0 = default 60s.
+	QuietProgressIntervalSec int
+}
+
+// defaultQuietProgressIntervalSec bounds progressive text flushes in quiet
+// mode on platforms without in-place preview (see DisplayCfg).
+const defaultQuietProgressIntervalSec = 60
+
+// quietProgressInterval returns the minimum gap between progressive text
+// flushes for this turn.
+func (c DisplayCfg) quietProgressInterval() time.Duration {
+	if c.QuietProgressIntervalSec > 0 {
+		return time.Duration(c.QuietProgressIntervalSec) * time.Second
+	}
+	return defaultQuietProgressIntervalSec * time.Second
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -5417,7 +5435,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
-	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
+	var lastTextMessageID string
+	var lastProgressAt = turnStart
+	silentHold := false // true while accumulated segment text could still resolve to a bare NO_REPLY marker
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -5803,6 +5823,20 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if e.display.Mode == "quiet" {
 					if sp.canPreview() && sp.appendSeparator("\n\n") {
 						textParts = append(textParts, "\n\n")
+					} else if !sp.canPreview() && time.Since(lastProgressAt) >= e.display.quietProgressInterval() {
+						// No in-place preview on this platform: flush the
+						// pending text, but throttled — long tool-heavy turns
+						// show progress instead of going silent until the
+						// end, while short turns keep the legacy single
+						// coalesced message.
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+								sendWorkspace(p, replyCtx, chunk)
+							}
+						}
+						segmentStart = len(textParts)
+						lastProgressAt = time.Now()
 					}
 				} else {
 					if sp.canPreview() {
@@ -5947,6 +5981,17 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			content := event.Content
 			if e.display.HideAgentFooter {
 				content = stripAgentFooterLines(content)
+			}
+			// Separate consecutive assistant messages: the backend emits one
+			// text event per message part, so a new messageID means a new
+			// message. Without a boundary marker distinct messages fuse
+			// into one run-on paragraph downstream (e.g. Telegram shows
+			// "A。B。" on a single line while the web UI shows two bubbles).
+			if msgID := event.MessageID; msgID != "" && lastTextMessageID != "" && msgID != lastTextMessageID {
+				content = "\n\n" + content
+			}
+			if event.MessageID != "" {
+				lastTextMessageID = event.MessageID
 			}
 			if content != "" && !isEllipsisOnly(content) {
 				// Pre-compute silentHold transition including this chunk so the
@@ -7755,6 +7800,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 		agentName := agent.Name()
 		activeSession := sessions.GetOrCreateActive(msg.SessionKey)
 		activeAgentID := activeSession.GetAgentSessionID()
+		workDir := e.guardWorkDir(agent, msg.SessionKey)
 
 		var sb strings.Builder
 		if totalPages > 1 {
@@ -7781,6 +7827,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 					displayName = string([]rune(displayName)[:40]) + "…"
 				}
 			}
+			displayName += SessionDirLabel(s.Directory, workDir)
 			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
 				marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
 		}
@@ -7829,6 +7876,19 @@ func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
 	matched := e.matchSession(agentSessions, sessions, query)
 	if matched == nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoMatch), query))
+		return
+	}
+
+	// The global list can point at a session from another project. Switching
+	// into it would make the agent read and edit files in that directory
+	// while the UI still shows the current one, so refuse with a pointer
+	// instead of silently crossing the project boundary.
+	if dir, foreign := foreignSessionDir(e.guardWorkDir(agent, msg.SessionKey), matched); foreign {
+		shortID := matched.ID
+		if len(shortID) > 12 {
+			shortID = shortID[:12]
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgForeignSessionDenied, shortID, dir))
 		return
 	}
 
@@ -7933,6 +7993,42 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 		return normalizeWorkspacePath(cwd)
 	}
 	return ""
+}
+
+// guardWorkDir resolves the project directory that session listings,
+// switches and deletes are scoped to: the agent's own work dir first, then
+// the workspace recorded for the session key. Empty when unknown, in which
+// case guards stay permissive. A single notion of "current directory" is
+// used by every guard and every /list label so the views cannot disagree.
+func (e *Engine) guardWorkDir(agent Agent, sessionKey string) string {
+	if switcher, ok := agent.(WorkDirSwitcher); ok {
+		if wd := strings.TrimSpace(switcher.GetWorkDir()); wd != "" {
+			return normalizeWorkspacePath(wd)
+		}
+	}
+	if wd := e.sendWorkDirForSession(sessionKey); wd != "" {
+		return normalizeWorkspacePath(wd)
+	}
+	// Last resort so the guards stay fail-closed: without a known project
+	// directory a foreign session would otherwise be treated as local.
+	// Agents that always set a work dir (e.g. opencode defaults it to ".")
+	// never reach this branch.
+	if cwd, err := os.Getwd(); err == nil {
+		return normalizeWorkspacePath(cwd)
+	}
+	return ""
+}
+
+// foreignSessionDir returns the foreign directory and true when matched
+// lives in another project than workDir. Unknown directories never refuse.
+func foreignSessionDir(workDir string, matched *AgentSessionInfo) (string, bool) {
+	if matched == nil || matched.Directory == "" || workDir == "" {
+		return "", false
+	}
+	if SameAgentDir(matched.Directory, workDir) {
+		return "", false
+	}
+	return matched.Directory, true
 }
 
 func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string) string {
@@ -9275,6 +9371,14 @@ func (e *Engine) cmdName(p Platform, msg *Message, args []string) {
 		agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
 		if idx > len(agentSessions) {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSwitchNoSession), idx))
+			return
+		}
+		if dir, foreign := foreignSessionDir(e.guardWorkDir(agent, msg.SessionKey), &agentSessions[idx-1]); foreign {
+			shortID := agentSessions[idx-1].ID
+			if len(shortID) > 12 {
+				shortID = shortID[:12]
+			}
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgForeignSessionDenied, shortID, dir))
 			return
 		}
 		targetID = agentSessions[idx-1].ID
@@ -12825,7 +12929,9 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	}
 
 	if prefix == "act" {
-		e.executeCardAction(cmd, args, sessionKey)
+		if card := e.executeCardAction(cmd, args, sessionKey); card != nil {
+			return card
+		}
 	}
 
 	switch cmd {
@@ -12976,24 +13082,24 @@ func workspaceFromInteractiveKey(interactiveKey, sessionKey string) string {
 
 // executeCardAction performs the side-effect for act: prefixed actions
 // (e.g. switching model/mode/lang) before the card is re-rendered.
-func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
+func (e *Engine) executeCardAction(cmd, args, sessionKey string) *Card {
 	interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
 
 	switch cmd {
 	case "/model":
 		if args == "" {
-			return
+			return nil
 		}
 		agent, sessions := e.sessionContextForKey(sessionKey)
 		switcher, ok := agent.(ModelSwitcher)
 		if !ok {
-			return
+			return nil
 		}
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
 		target, ok := parseModelSwitchArgs(strings.Fields(args))
 		if !ok {
 			cancel()
-			return
+			return nil
 		}
 		target = strings.TrimSpace(target)
 		if modelSwitchNeedsLookup(target) {
@@ -13016,12 +13122,12 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/reasoning":
 		if args == "" {
-			return
+			return nil
 		}
 		agent, sessions := e.sessionContextForKey(sessionKey)
 		switcher, ok := agent.(ReasoningEffortSwitcher)
 		if !ok {
-			return
+			return nil
 		}
 		efforts := switcher.AvailableReasoningEfforts()
 		target := strings.ToLower(strings.TrimSpace(args))
@@ -13036,23 +13142,23 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				s.SetAgentSessionID("", "")
 				s.ClearHistory()
 				sessions.Save()
-				return
+				return nil
 			}
 		}
 
 	case "/mode":
 		if args == "" {
-			return
+			return nil
 		}
 		switcher, ok := e.agent.(ModeSwitcher)
 		if !ok {
-			return
+			return nil
 		}
 		newMode := strings.ToLower(args)
 		switcher.SetMode(newMode)
 		if e.applyLiveModeChange(sessionKey, switcher.GetMode()) {
 			e.cleanupInteractiveState(interactiveKey)
-			return
+			return nil
 		}
 		e.cleanupInteractiveState(interactiveKey)
 		// Mode change requires a new session to take effect
@@ -13063,7 +13169,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/lang":
 		if args == "" {
-			return
+			return nil
 		}
 		target := strings.ToLower(strings.TrimSpace(args))
 		var lang Language
@@ -13081,17 +13187,17 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		case "auto":
 			lang = LangAuto
 		default:
-			return
+			return nil
 		}
 		e.i18n.SetLang(lang)
 
 	case "/provider":
 		if args == "" {
-			return
+			return nil
 		}
 		switcher, ok := e.agent.(ProviderSwitcher)
 		if !ok {
-			return
+			return nil
 		}
 		provName := args
 		if provName == "clear" {
@@ -13112,12 +13218,12 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/provider/add":
 		if args == "" {
-			return
+			return nil
 		}
 		agentType := e.agent.Name()
 		presets, err := FetchProviderPresets()
 		if err != nil || presets == nil {
-			return
+			return nil
 		}
 		for _, preset := range presets.Providers {
 			if preset.Name != args {
@@ -13139,7 +13245,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 				pa.codexHTTPHeaders = ac.CodexConfig.HTTPHeaders
 			}
 			e.setPendingProviderAdd(sessionKey, pa)
-			return
+			return nil
 		}
 
 	case "/provider/add-other":
@@ -13163,17 +13269,28 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/switch":
 		if args == "" {
-			return
+			return nil
 		}
 		agent, sessions := e.sessionContextForKey(sessionKey)
 		agentSessions, err := agent.ListSessions(e.ctx)
 		if err != nil || len(agentSessions) == 0 {
-			return
+			return nil
 		}
 		agentSessions = e.applySessionFilter(agentSessions, sessions, sessionKey)
 		matched := e.matchSession(agentSessions, sessions, args)
 		if matched == nil {
-			return
+			return nil
+		}
+		if dir, foreign := foreignSessionDir(e.guardWorkDir(agent, sessionKey), matched); foreign {
+			shortID := matched.ID
+			if len(shortID) > 12 {
+				shortID = shortID[:12]
+			}
+			return e.simpleCard(
+				e.i18n.Tf(MsgCardTitleSessions, agent.Name(), len(agentSessions)),
+				"red",
+				e.i18n.Tf(MsgForeignSessionDenied, shortID, dir),
+			)
 		}
 		e.cleanupInteractiveState(interactiveKey)
 		// Same constraint as cmdSwitch: switching to a known agent session
@@ -13182,11 +13299,12 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		// zero messages right after a successful card switch. A fresh Session
 		// already has nil History, so leaving it alone is a no-op there.
 		sessions.SwitchToAgentSession(sessionKey, matched.ID, agent.Name(), matched.Summary)
+		return nil
 
 	case "/dir":
 		fields := strings.Fields(args)
 		if len(fields) == 0 {
-			return
+			return nil
 		}
 		agent, sessions := e.sessionContextForKey(sessionKey)
 		ik := e.interactiveKeyForSessionKey(sessionKey)
@@ -13194,7 +13312,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		switch fields[0] {
 		case "select":
 			if len(fields) < 2 {
-				return
+				return nil
 			}
 			applyArgs = []string{fields[1]}
 		case "reset":
@@ -13202,7 +13320,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		case "prev":
 			applyArgs = []string{"-"}
 		default:
-			return
+			return nil
 		}
 		errMsg, _ := e.dirApply(agent, sessions, ik, sessionKey, applyArgs)
 		if errMsg != "" {
@@ -13214,7 +13332,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/heartbeat":
 		if e.heartbeatScheduler == nil {
-			return
+			return nil
 		}
 		switch args {
 		case "pause", "stop":
@@ -13227,11 +13345,11 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/cron":
 		if e.cronScheduler == nil || args == "" {
-			return
+			return nil
 		}
 		subArgs := strings.Fields(args)
 		if len(subArgs) < 2 {
-			return
+			return nil
 		}
 		sub, id := subArgs[0], subArgs[1]
 		switch sub {
@@ -13253,11 +13371,11 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 
 	case "/timer":
 		if e.timerScheduler == nil || args == "" {
-			return
+			return nil
 		}
 		subArgs := strings.Fields(args)
 		if len(subArgs) < 2 {
-			return
+			return nil
 		}
 		sub, id := subArgs[0], subArgs[1]
 		switch sub {
@@ -13269,6 +13387,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			e.timerScheduler.SetMute(id, false)
 		}
 	}
+	return nil
 }
 
 func (e *Engine) getOrCreateDeleteModeState(sessionKey string, p Platform, replyCtx any) *deleteModeState {
@@ -13951,6 +14070,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	agentName := agent.Name()
 	activeSession := sessions.GetOrCreateActive(sessionKey)
 	activeAgentID := activeSession.GetAgentSessionID()
+	workDir := e.guardWorkDir(agent, sessionKey)
 
 	var titleStr string
 	if totalPages > 1 {
@@ -13979,6 +14099,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 				displayName = string([]rune(displayName)[:40]) + "…"
 			}
 		}
+		displayName += SessionDirLabel(s.Directory, workDir)
 		btnType := "default"
 		if s.ID == activeAgentID {
 			btnType = "primary"

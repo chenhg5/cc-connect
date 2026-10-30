@@ -301,6 +301,7 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 		return
 	}
 	text, _ := part["text"].(string)
+	msgID, _ := part["messageID"].(string)
 
 	// Extract metadata and synthetic flags to identify compaction_continue
 	metadata, _ := part["metadata"].(map[string]any)
@@ -319,7 +320,7 @@ func (s *opencodeSession) handleText(raw map[string]any) {
 	}
 
 	if text != "" {
-		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic}
+		evt := core.Event{Type: core.EventText, Content: text, Metadata: metadata, Synthetic: synthetic, MessageID: msgID}
 		select {
 		case s.events <- evt:
 		case <-s.ctx.Done():

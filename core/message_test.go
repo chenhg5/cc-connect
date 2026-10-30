@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -388,5 +389,66 @@ func TestAppendFileRefs_AbsoluteInputsPassthrough(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("AppendFileRefs rewrote absolute path %q: %q", want, got)
 		}
+	}
+}
+
+// TestSameAgentDir pins cross-spelling directory equality: trailing slashes
+// and slash direction never matter; letter case matters only on Windows,
+// where the filesystem is case-insensitive.
+func TestSameAgentDir(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"C:/a", "C:/a", true},
+		{"C:/a/", "C:/a", true},
+		{"C:/a", "C:/b", false},
+		{"", "C:/a", false},
+		{"C:/a", "", false},
+	}
+	for _, tc := range cases {
+		if got := SameAgentDir(tc.a, tc.b); got != tc.want {
+			t.Errorf("SameAgentDir(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		if !SameAgentDir(`C:\A`, "c:/a") {
+			t.Error(`SameAgentDir backslash/case variants should match on Windows`)
+		}
+	}
+}
+
+// TestSameAgentDir_Symlink pins that a symlinked work dir still matches the
+// recorded directory: both sides are resolved before comparing. Skipped
+// where symlinks cannot be created (e.g. Windows without developer mode).
+func TestSameAgentDir_Symlink(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if !SameAgentDir(link, real) {
+		t.Error("SameAgentDir(link, real) = false, want true")
+	}
+	other := t.TempDir()
+	if SameAgentDir(link, other) {
+		t.Error("SameAgentDir(link, other) = true, want false")
+	}
+}
+
+// TestSessionDirLabel pins the /list foreign-entry marker: same-directory
+// and unknown directories get no label, foreign ones get " (base)".
+func TestSessionDirLabel(t *testing.T) {
+	if got := SessionDirLabel("C:/a", "C:/a"); got != "" {
+		t.Errorf("same dir label = %q, want empty", got)
+	}
+	if got := SessionDirLabel("", "C:/a"); got != "" {
+		t.Errorf("unknown dir label = %q, want empty", got)
+	}
+	if got := SessionDirLabel("C:/other", ""); got != " (other)" {
+		t.Errorf("unknown workdir label = %q, want \" (other)\"", got)
+	}
+	if got := SessionDirLabel("C:/other", "C:/a"); got != " (other)" {
+		t.Errorf("foreign label = %q, want \" (other)\"", got)
 	}
 }
