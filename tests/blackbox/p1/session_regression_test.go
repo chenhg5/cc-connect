@@ -261,7 +261,7 @@ func testRestartPreservesNames(t *testing.T, agentType string) {
 	// Simulate restart: stop engine, start fresh engine with same session store.
 	env.Engine.Stop()
 
-	_, newMP := restartedEngine(t, agentType, env.DataDir)
+	_, newMP := restartedEngine(t, agentType, env.DataDir, env.WorkDir)
 
 	before := newMP.MessageCount()
 	newMP.InjectMessage(helper.DefaultUser, helper.DefaultChat, "/list")

@@ -51,8 +51,19 @@ type acpSession struct {
 	// updated whenever SetLiveMode succeeds or the server announces a
 	// mode change via session/update.
 	modesMu        sync.RWMutex
+	usageMu        sync.RWMutex
+	lastUsage      core.ContextUsage
+	haveUsage      bool
 	availableModes []acpModeInfo
 	currentMode    string
+
+	// promptInFlight tracks active session/prompt RPCs. Text chunks that
+	// arrive while no prompt is in flight belong to background work (kimi
+	// acp runs /compact asynchronously and reports "Compaction completed"
+	// long after the /compact prompt's turn has ended) — they get a
+	// synthetic EventResult so the engine's unsolicited reader relays them
+	// to the platform instead of buffering them until the next turn.
+	promptInFlight atomic.Int32
 
 	callbacks sessionCallbacks // may be nil (tests, integration harness)
 }
@@ -419,15 +430,70 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	s.cacheToolCallInput(params)
 	toolName := s.resolveToolCallName(params)
 	s.maybeAbsorbCurrentModeUpdate(params)
+	s.maybeAbsorbUsageUpdate(params)
 	sid := s.currentACPSessionID()
 	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
 	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
+	hasVisible := false
 	for _, ev := range mapSessionUpdate(sid, params) {
 		if ev.Type == core.EventToolResult && toolName != "" {
 			ev.ToolName = toolName
 		}
+		if ev.Type == core.EventText && ev.Content != "" {
+			hasVisible = true
+		}
 		s.emit(ev)
 	}
+	// Out-of-turn text (background work reporting after its turn ended —
+	// e.g. kimi acp's "Compaction completed" chunk) would otherwise sit in
+	// the events buffer until the next foreground turn drains and drops it
+	// as stale. Close it with a synthetic result so the unsolicited reader
+	// relays it immediately.
+	if hasVisible && s.promptInFlight.Load() == 0 {
+		s.emit(core.Event{Type: core.EventResult, SessionID: sid, Done: true})
+	}
+}
+
+// maybeAbsorbUsageUpdate watches session/update notifications for
+// `usage_update` (opencode extension: {"used": N, "size": M}) and records
+// real context usage for the reply footer / auto-compress heuristics.
+func (s *acpSession) maybeAbsorbUsageUpdate(params json.RawMessage) {
+	var wrap struct {
+		Update json.RawMessage `json:"update"`
+	}
+	if json.Unmarshal(params, &wrap) != nil || len(wrap.Update) == 0 {
+		return
+	}
+	var head struct {
+		Kind string `json:"sessionUpdate"`
+	}
+	if json.Unmarshal(wrap.Update, &head) != nil || head.Kind != "usage_update" {
+		return
+	}
+	var u struct {
+		Used int `json:"used"`
+		Size int `json:"size"`
+	}
+	if json.Unmarshal(wrap.Update, &u) != nil {
+		return
+	}
+	s.usageMu.Lock()
+	s.lastUsage.UsedTokens = u.Used
+	s.lastUsage.ContextWindow = u.Size
+	s.haveUsage = true
+	s.usageMu.Unlock()
+}
+
+// GetContextUsage implements core.ContextUsageReporter with real figures
+// captured from usage_update + session/prompt responses.
+func (s *acpSession) GetContextUsage() *core.ContextUsage {
+	s.usageMu.RLock()
+	defer s.usageMu.RUnlock()
+	if !s.haveUsage {
+		return nil
+	}
+	cu := s.lastUsage
+	return &cu
 }
 
 // maybeAbsorbCurrentModeUpdate watches session/update notifications
@@ -665,19 +731,46 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 	}
 
 	slog.Debug("acp: sending session/prompt", "session_id", sid, "prompt_len", len(prompt))
+	s.promptInFlight.Add(1)
 	res, err := s.tr.call(s.ctx, "session/prompt", params)
 	if err != nil {
+		s.promptInFlight.Add(-1)
 		s.emit(core.Event{Type: core.EventError, Error: err})
 		return fmt.Errorf("acp: session/prompt: %w", err)
 	}
 	slog.Debug("acp: session/prompt response", "session_id", sid, "response_len", len(res), "response", string(res))
 
+	// Absorb per-turn usage (esp. cachedReadTokens) into the context snapshot.
+	var pr struct {
+		Usage struct {
+			InputTokens      int `json:"inputTokens"`
+			OutputTokens     int `json:"outputTokens"`
+			TotalTokens      int `json:"totalTokens"`
+			CachedReadTokens int `json:"cachedReadTokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(res, &pr) == nil && (pr.Usage.InputTokens > 0 || pr.Usage.TotalTokens > 0) {
+		s.usageMu.Lock()
+		if pr.Usage.CachedReadTokens > 0 {
+			s.lastUsage.CachedInputTokens = pr.Usage.CachedReadTokens
+		}
+		s.lastUsage.InputTokens = pr.Usage.InputTokens
+		s.lastUsage.OutputTokens = pr.Usage.OutputTokens
+		s.lastUsage.TotalTokens = pr.Usage.TotalTokens
+		s.haveUsage = true
+		s.usageMu.Unlock()
+	}
+
 	// Text was streamed via session/update; engine aggregates EventText.
+	// Keep the in-flight mark until after EventResult is queued so a text
+	// chunk racing in from the read loop is not mistaken for out-of-turn
+	// background output.
 	s.emit(core.Event{
 		Type:      core.EventResult,
 		SessionID: sid,
 		Done:      true,
 	})
+	s.promptInFlight.Add(-1)
 	return nil
 }
 

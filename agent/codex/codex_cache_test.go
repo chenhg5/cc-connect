@@ -95,24 +95,37 @@ func TestAvailableModels_UsesModelCatalog(t *testing.T) {
 	}
 }
 
-// TestReadCodexModelCatalog_NoConfigFile tests graceful fallback when
-// CODEX_HOME/config.toml does not exist.
-func TestReadCodexModelCatalog_NoConfigFile(t *testing.T) {
+// A fresh ChatGPT installation without a catalog, cache, or API key should
+// still offer the current GPT-6 models in the /model chooser.
+func TestAvailableModels_NoCatalogFallsBackToGPT61Sol(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CODEX_HOME", tmp)
+	t.Setenv("OPENAI_API_KEY", "")
 
 	a := &Agent{activeIdx: -1}
 	models := a.AvailableModels(context.Background())
 
 	// No config.toml → no model_catalog.json → no models_cache.json
 	// → no OPENAI_API_KEY → all the way to hardcoded fallback.
-	want := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6"}
+	want := []string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}
 	if len(models) != len(defaultCodexModels()) {
 		t.Fatalf("expected %d hardcoded fallback models, got %d: %v", len(defaultCodexModels()), len(models), models)
 	}
 	for i, name := range want {
 		if models[i].Name != name {
 			t.Fatalf("fallback model %d = %q, want %q; models=%v", i, models[i].Name, name, models)
+		}
+	}
+	for _, name := range []string{"gpt-5.6-sol", "gpt-5.5", "o3", "codex-mini-latest"} {
+		found := false
+		for _, model := range models {
+			if model.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("fallback models missing legacy model %q", name)
 		}
 	}
 }

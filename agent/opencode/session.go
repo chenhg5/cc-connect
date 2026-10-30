@@ -90,6 +90,13 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 
 	cmd := exec.CommandContext(s.ctx, s.cmd, args...)
 	cmd.Dir = s.workDir
+	// Bound how long cmd.Wait() may wait for the I/O goroutines. os/exec
+	// copies the child's stderr into a buffer from its own goroutine, and
+	// that goroutine only ends when the stderr pipe reaches EOF — a
+	// descendant holding the pipe open would block the turn forever now
+	// that readLoop waits for the process before delivering the result.
+	// Same setting as the gemini/kimi/antigravity adapters.
+	cmd.WaitDelay = 1 * time.Second
 	env := os.Environ()
 	if len(s.extraEnv) > 0 {
 		env = core.MergeEnv(env, s.extraEnv)
@@ -168,9 +175,9 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
-	if s.workDir != "" {
-		args = append(args, "--dir", s.workDir)
-	}
+	// The working directory is set as the process cwd in Send (cmd.Dir), like
+	// the other opencode invocations. `opencode run` has no --dir flag in
+	// opencode v2 and rejects it ("Unrecognized flag: --dir").
 
 	// Enable thinking blocks.
 	args = append(args, "--thinking")
@@ -193,7 +200,12 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
-	defer func() { _ = cmd.Wait() }()
+	waited := false
+	defer func() {
+		if !waited {
+			_ = cmd.Wait()
+		}
+	}()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -223,6 +235,11 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		}
 		return
 	}
+
+	// exec copies stderr into stderrBuf from its own goroutine until Wait
+	// returns, so the buffer is only safe to read after that.
+	_ = cmd.Wait()
+	waited = true
 
 	stderrMsg := stderrBuf.String()
 	if stderrMsg != "" {
