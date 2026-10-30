@@ -191,6 +191,25 @@ level = "info" # debug, info, warn, error
 # [[projects]]
 # reset_on_idle_mins = 30   # default when unset / 未设置时的默认值；设为 0 表示禁用
 
+# What to do when the agent moves a session to another model on its own, e.g.
+# Claude Code's safeguards fallback (a request declined by the model's safety
+# classifiers is re-run on a fallback model, and the rest of the session stays
+# there). Either way the user is told in chat.
+#   "notify"  (default) offer the ways back: buttons on card platforms, the
+#             /model switch and /new commands as text elsewhere.
+#   "restore" switch the session back after that turn's reply, in place and
+#             with its context (Claude Code: set_model). The declined request
+#             is not sent again. If it happens again within 30 minutes of
+#             switching back, the session stays on the fallback model and the
+#             user gets the choices instead.
+# agent 自行把会话换到别的模型时（例如 Claude Code 的安全机制把被拦的请求改由备用模型
+# 回答，并且本会话之后一直用它）怎么处理。两种都会在聊天里提示。
+#   "notify"  （默认）给出切回的办法：支持卡片的平台带按钮，其它平台写出 /model switch 和 /new。
+#   "restore" 这一轮回复完后原地切回原模型，保留上下文（Claude Code 用 set_model），
+#             被拦的那条不会重发；切回后 30 分钟内再次发生则不再自动切回，改为让用户选择。
+# [[projects]]
+# model_fallback_action = "notify"
+
 # Close an idle live agent process after a clean turn while preserving the
 # cc-connect session and saved agent session ID. The next message in the same
 # chat/thread starts a new agent process and resumes the same conversation.

@@ -1,8 +1,14 @@
 package claudecode
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -215,4 +221,118 @@ func TestRefusalFallbackIgnoresNonRetryDirections(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newLiveModelTestSession returns a session whose stdin is a pipe, so a test
+// can read what is written to the CLI and answer through handleReadLoopLine.
+func newLiveModelTestSession(t *testing.T) (*claudeSession, *bufio.Reader) {
+	t.Helper()
+	cs := newWindowTestSession(t, "claude-opus-4-8")
+	r, w := io.Pipe()
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	cs.stdin = w
+	cs.done = make(chan struct{})
+	return cs, bufio.NewReader(r)
+}
+
+// readControlRequest reads one line written to the CLI and returns its
+// request_id after checking it is a set_model request for model.
+func readControlRequest(t *testing.T, r *bufio.Reader, model string) string {
+	t.Helper()
+	line, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read stdin: %v", err)
+	}
+	var msg struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+		Request   struct {
+			Subtype string `json:"subtype"`
+			Model   string `json:"model"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		t.Fatalf("stdin line %q: %v", line, err)
+	}
+	if msg.Type != "control_request" || msg.Request.Subtype != "set_model" || msg.Request.Model != model || msg.RequestID == "" {
+		t.Fatalf("stdin line = %s, want a set_model control_request for %s", line, model)
+	}
+	return msg.RequestID
+}
+
+func TestSetLiveModelSendsSetModelAndWaitsForAck(t *testing.T) {
+	cs, stdin := newLiveModelTestSession(t)
+	cs.handleReadLoopLine(capturedRefusalFallbackLine)
+	if got := len(drainModelSwitches(cs)); got != 1 {
+		t.Fatalf("model switch events = %d, want 1", got)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- cs.SetLiveModel(ctx, "claude-opus-5-5") }()
+	id := readControlRequest(t, stdin, "claude-opus-5-5")
+	select {
+	case err := <-done:
+		t.Fatalf("SetLiveModel returned %v before the CLI answered", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// The CLI's answer, as Claude Code 2.1.302 printed it to a set_model request.
+	cs.handleReadLoopLine(`{"type":"control_response","response":{"subtype":"success","request_id":"` + id + `"}}`)
+	if err := <-done; err != nil {
+		t.Fatalf("SetLiveModel after the CLI answered: %v", err)
+	}
+	if got := cs.GetModel(); got != "claude-opus-5-5" {
+		t.Fatalf("GetModel() = %q, want claude-opus-5-5", got)
+	}
+
+	// A later fallback that names the same models is a new episode.
+	cs.handleReadLoopLine(capturedRefusalFallbackLine)
+	if got := len(drainModelSwitches(cs)); got != 1 {
+		t.Fatalf("model switch events after switching back = %d, want 1", got)
+	}
+}
+
+func TestSetLiveModelReportsRejection(t *testing.T) {
+	cs, stdin := newLiveModelTestSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- cs.SetLiveModel(ctx, "claude-opus-5-5") }()
+	id := readControlRequest(t, stdin, "claude-opus-5-5")
+	cs.handleReadLoopLine(`{"type":"control_response","response":{"subtype":"error","request_id":"` + id + `","error":"model not available to this account"}}`)
+	err := <-done
+	if err == nil || !strings.Contains(err.Error(), "model not available to this account") {
+		t.Fatalf("SetLiveModel error = %v, want the CLI's error", err)
+	}
+	if got := cs.GetModel(); got != "claude-opus-4-8" {
+		t.Fatalf("GetModel() = %q, want unchanged", got)
+	}
+}
+
+func TestSetLiveModelGivesUp(t *testing.T) {
+	t.Run("no answer", func(t *testing.T) {
+		cs, stdin := newLiveModelTestSession(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- cs.SetLiveModel(ctx, "claude-opus-5-5") }()
+		readControlRequest(t, stdin, "claude-opus-5-5")
+		if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("SetLiveModel error = %v, want deadline exceeded", err)
+		}
+		cs.controlMu.Lock()
+		waiters := len(cs.controlWaiters)
+		cs.controlMu.Unlock()
+		if waiters != 0 {
+			t.Fatalf("control waiters left = %d, want 0", waiters)
+		}
+	})
+	t.Run("process not running", func(t *testing.T) {
+		cs, _ := newLiveModelTestSession(t)
+		cs.alive.Store(false)
+		if err := cs.SetLiveModel(context.Background(), "claude-opus-5-5"); err == nil {
+			t.Fatal("SetLiveModel on a stopped session returned nil")
+		}
+	})
 }

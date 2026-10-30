@@ -506,6 +506,11 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// ModelFallbackAction is what happens after the agent moves a session to
+	// another model on its own, e.g. Claude Code's safeguards fallback:
+	// "notify" (default) tells the user and offers the ways back; "restore"
+	// also switches the session back once that turn's reply is out.
+	ModelFallbackAction string `toml:"model_fallback_action,omitempty"`
 	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
 	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`
@@ -1120,6 +1125,11 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
 			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)
+		}
+		switch strings.ToLower(strings.TrimSpace(proj.ModelFallbackAction)) {
+		case "", "notify", "restore":
+		default:
+			return fmt.Errorf("config: %s.model_fallback_action must be \"notify\" or \"restore\", got %q", prefix, proj.ModelFallbackAction)
 		}
 		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
 			return err

@@ -468,8 +468,10 @@ const (
 type ModelSwitch struct {
 	From string // model the request was sent to
 	To   string // model that answered instead
-	// Reason is the trigger reported by the CLI ("refusal": a safety
-	// classifier declined the request on From).
+	// Reason is the trigger reported by the CLI. Only "refusal" (a safety
+	// classifier declined the request on From) is emitted today; another
+	// kind of switch, such as an availability fallback, would reuse this
+	// struct with its own reason.
 	Reason string
 	// Category is the refusal category the API reported ("cyber", "bio", ...).
 	// Empty when the API carried none.
