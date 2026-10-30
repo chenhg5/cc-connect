@@ -49,6 +49,12 @@ const (
 	// with margin: otherwise a message listed by poll N is listed again by poll
 	// N+1 after its record expired and gets injected twice.
 	catchupSeenTTL = catchupLookback + catchupInterval + catchupBuffer
+	// catchupMaxPages bounds the pagination walk per poll. A chat whose window
+	// holds more than catchupMaxPages*catchupPageSize messages still misses the
+	// older half — the catch-up is a backstop for dropped pushes, not a full
+	// replay, and an unbounded loop against a broken page token would never
+	// terminate.
+	catchupMaxPages = 10
 )
 
 // startCatchupPoller starts a background goroutine that periodically fetches
@@ -65,6 +71,12 @@ func (p *Platform) startCatchupPoller() {
 		return
 	}
 	if !p.isWSPrimary {
+		// Several platform instances can share one app WebSocket; only the
+		// primary polls, otherwise every sibling would re-inject each missed
+		// message. Without this log, catch-up configured on a secondary looks
+		// simply dead to the operator.
+		slog.Warn(p.tag()+": catchup chats configured but this platform is not the shared-WebSocket primary; catch-up polling only runs on the primary owner of the app connection",
+			"catchup_chats", p.catchupChats, "catchup_chats_p2p", p.catchupP2PChats)
 		return
 	}
 
@@ -126,6 +138,17 @@ func (p *Platform) pollAllCatchupChats(ctx context.Context) {
 // the qualification rule: group chats require an explicit @bot mention, while
 // p2p chats have no mention list so every user message qualifies.
 func (p *Platform) pollChatForMissedMessages(ctx context.Context, chatID string, isP2P bool) error {
+	// The configured list decides the qualification rule, but a chat listed
+	// under the wrong option key must not run with the wrong rule: a group
+	// chat configured under catchup_chats_p2p would disable the mention gate
+	// and re-introduce the #1618 loud-bot failure mode. Resolve the chat's
+	// real type once and fail closed on a mismatch.
+	if mode, ok := p.catchupChatType(ctx, chatID); ok && !catchupChatTypeMatches(isP2P, mode) {
+		slog.Error(p.tag()+": catchup: chat configured under the wrong option key; excluded from catch-up polling",
+			"chat_id", chatID, "chat_mode", mode, "configured_as_p2p", isP2P)
+		return nil
+	}
+
 	botOpenID := p.getBotOpenID()
 	if botOpenID == "" {
 		// Without the bot open_id we cannot run the group mention gate.
@@ -137,29 +160,8 @@ func (p *Platform) pollChatForMissedMessages(ctx context.Context, chatID string,
 	endTime := time.Now().Add(-catchupBuffer).Unix()
 	startTime := time.Now().Add(-catchupLookback).Unix()
 
-	req := larkim.NewListMessageReqBuilder().
-		ContainerIdType("chat").
-		ContainerId(chatID).
-		StartTime(fmt.Sprintf("%d", startTime)).
-		EndTime(fmt.Sprintf("%d", endTime)).
-		PageSize(catchupPageSize).
-		Build()
-
-	var items []*larkim.Message
-	if err := p.withFreshTenantAccessTokenRetry(ctx, "catchup list messages",
-		func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
-			resp, err := client.Im.Message.List(ctx, req, options...)
-			if err != nil {
-				return err
-			}
-			if !resp.Success() {
-				return fmt.Errorf("list messages: code=%d msg=%s", resp.Code, resp.Msg)
-			}
-			if resp.Data != nil {
-				items = resp.Data.Items
-			}
-			return nil
-		}); err != nil {
+	items, err := p.listCatchupMessages(ctx, chatID, startTime, endTime)
+	if err != nil {
 		return err
 	}
 
@@ -252,6 +254,135 @@ func isBotMentionedInList(mentions []*larkim.Mention, botOpenID string) bool {
 		}
 	}
 	return false
+}
+
+// catchupPageFetcher fetches one page of a chat's message history inside the
+// poll window. hasMore / nextPageToken carry the List API's pagination state.
+type catchupPageFetcher func(ctx context.Context, chatID string, startTime, endTime int64, pageToken string) (items []*larkim.Message, hasMore bool, nextPageToken string, err error)
+
+// listCatchupMessagesREST walks the Im.Message.List pagination for one poll
+// window, oldest first (ByCreateTimeAsc — the dropped messages are typically
+// the older half of the window). Bounded by catchupMaxPages.
+func (p *Platform) listCatchupMessagesREST(ctx context.Context, chatID string, startTime, endTime int64) ([]*larkim.Message, error) {
+	fetch := func(ctx context.Context, chatID string, startTime, endTime int64, pageToken string) ([]*larkim.Message, bool, string, error) {
+		builder := larkim.NewListMessageReqBuilder().
+			ContainerIdType("chat").
+			ContainerId(chatID).
+			StartTime(fmt.Sprintf("%d", startTime)).
+			EndTime(fmt.Sprintf("%d", endTime)).
+			SortType(larkim.SortTypeListMessageByCreateTimeAsc).
+			PageSize(catchupPageSize)
+		if pageToken != "" {
+			builder = builder.PageToken(pageToken)
+		}
+		var items []*larkim.Message
+		var hasMore bool
+		var nextPageToken string
+		if err := p.withFreshTenantAccessTokenRetry(ctx, "catchup list messages",
+			func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+				resp, err := client.Im.Message.List(ctx, builder.Build(), options...)
+				if err != nil {
+					return err
+				}
+				if !resp.Success() {
+					return fmt.Errorf("list messages: code=%d msg=%s", resp.Code, resp.Msg)
+				}
+				if resp.Data != nil {
+					items = resp.Data.Items
+					if resp.Data.HasMore != nil {
+						hasMore = *resp.Data.HasMore
+					}
+					if resp.Data.PageToken != nil {
+						nextPageToken = *resp.Data.PageToken
+					}
+				}
+				return nil
+			}); err != nil {
+			return nil, false, "", err
+		}
+		return items, hasMore, nextPageToken, nil
+	}
+	return collectCatchupMessages(ctx, fetch, chatID, startTime, endTime)
+}
+
+// collectCatchupMessages walks a catch-upPageFetcher across pages until the
+// API reports no more results or catchupMaxPages is reached, accumulating the
+// items in API order (oldest first).
+func collectCatchupMessages(ctx context.Context, fetch catchupPageFetcher, chatID string, startTime, endTime int64) ([]*larkim.Message, error) {
+	var all []*larkim.Message
+	pageToken := ""
+	for page := 0; page < catchupMaxPages; page++ {
+		items, hasMore, nextPageToken, err := fetch(ctx, chatID, startTime, endTime, pageToken)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, items...)
+		if !hasMore || nextPageToken == "" {
+			return all, nil
+		}
+		pageToken = nextPageToken
+	}
+	return all, nil
+}
+
+// catchupChatType resolves a chat's real mode ("group", "topic" or "p2p" —
+// Im.Chat.Get's ChatMode field; its ChatType field means private/public) via
+// the REST API and caches it for the process lifetime, since a chat's mode
+// does not change. ok is false when the mode could not be determined.
+func (p *Platform) catchupChatType(ctx context.Context, chatID string) (string, bool) {
+	p.catchupChatTypeMu.Lock()
+	if mode, ok := p.catchupChatTypes[chatID]; ok {
+		p.catchupChatTypeMu.Unlock()
+		return mode, true
+	}
+	p.catchupChatTypeMu.Unlock()
+
+	mode := ""
+	err := p.withFreshTenantAccessTokenRetry(ctx, "catchup resolve chat mode",
+		func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.V1.Chat.Get(ctx,
+				larkim.NewGetChatReqBuilder().ChatId(chatID).Build(), options...)
+			if err != nil {
+				return err
+			}
+			if !resp.Success() {
+				return fmt.Errorf("get chat: code=%d msg=%s", resp.Code, resp.Msg)
+			}
+			if resp.Data != nil && resp.Data.ChatMode != nil {
+				mode = *resp.Data.ChatMode
+			}
+			return nil
+		})
+	if err != nil {
+		slog.Warn(p.tag()+": catchup: failed to resolve chat mode; keeping configured qualification rule",
+			"chat_id", chatID, "error", err)
+		return "", false
+	}
+	if mode == "" {
+		return "", false
+	}
+	p.catchupChatTypeMu.Lock()
+	if p.catchupChatTypes == nil {
+		p.catchupChatTypes = make(map[string]string)
+	}
+	p.catchupChatTypes[chatID] = mode
+	p.catchupChatTypeMu.Unlock()
+	return mode, true
+}
+
+// catchupChatTypeMatches reports whether a chat configured under one of the
+// catch-up option keys agrees with the mode Im.Chat.Get reports. An
+// inconclusive mode keeps the configured behavior rather than disabling the
+// chat on unknown data (the resolve failure is already logged).
+func catchupChatTypeMatches(configuredP2P bool, chatMode string) bool {
+	switch chatMode {
+	case "p2p":
+		return configuredP2P
+	case "group", "topic":
+		return !configuredP2P
+	default:
+		return true
+	}
 }
 
 // catchupAccessAllowed mirrors the WebSocket path's access-control guards

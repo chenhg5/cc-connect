@@ -1,6 +1,9 @@
 package feishu
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -249,4 +252,111 @@ func catchupTestMessage(id, senderID string) *larkim.Message {
 		CreateTime: strPtr(strconv.FormatInt(time.Now().UnixMilli(), 10)),
 		Sender:     &larkim.Sender{Id: strPtr(senderID), SenderType: strPtr("user")},
 	}
+}
+
+// TestCatchupChatTypeMatches pins the fail-closed guard for chats listed
+// under the wrong option key (PR #1802 review P2): a group chat configured
+// under catchup_chats_p2p would disable the @bot mention gate and re-create
+// the #1618 loud-bot failure mode, so a resolved mode contradicting the
+// configured list must exclude the chat. The REST Message type carries no
+// chat_type of its own, so the real mode comes from Im.Chat.Get's ChatMode
+// ("group", "topic", "p2p").
+func TestCatchupChatTypeMatches_FailsClosedOnWrongOptionKey(t *testing.T) {
+	t.Run("group chat under p2p list is rejected", func(t *testing.T) {
+		if catchupChatTypeMatches(true, "group") {
+			t.Fatal("expected a group chat configured as p2p to be rejected")
+		}
+	})
+	t.Run("p2p chat under group list is rejected", func(t *testing.T) {
+		if catchupChatTypeMatches(false, "p2p") {
+			t.Fatal("expected a p2p chat configured as group to be rejected")
+		}
+	})
+	t.Run("matching types pass", func(t *testing.T) {
+		if !catchupChatTypeMatches(false, "group") {
+			t.Fatal("expected group/group to pass")
+		}
+		if !catchupChatTypeMatches(true, "p2p") {
+			t.Fatal("expected p2p/p2p to pass")
+		}
+	})
+	t.Run("topic mode counts as group", func(t *testing.T) {
+		if catchupChatTypeMatches(true, "topic") {
+			t.Fatal("expected a topic chat configured as p2p to be rejected")
+		}
+	})
+	t.Run("inconclusive mode keeps configured behavior", func(t *testing.T) {
+		if !catchupChatTypeMatches(true, "") {
+			t.Fatal("expected unknown mode to keep the configured rule")
+		}
+		if !catchupChatTypeMatches(false, "unknown") {
+			t.Fatal("expected unknown mode to keep the configured rule")
+		}
+	})
+}
+
+// TestCollectCatchupMessages pins the pagination walk of the catch-up poller
+// (PR #1802 review P2): only reading the first Im.Message.List page silently
+// misses messages in busy chats exactly where the compensation matters most.
+// The walk must follow page tokens until the API reports no more results,
+// keep API order (oldest first), and stay bounded.
+func TestCollectCatchupMessages_FollowsPaginationUpToCap(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("follows page tokens until has_more is false", func(t *testing.T) {
+		pages := [][]*larkim.Message{
+			{catchupTestMessage("om_p1_a", "ou_u"), catchupTestMessage("om_p1_b", "ou_u")},
+			{catchupTestMessage("om_p2_a", "ou_u")},
+		}
+		requested := 0
+		fetch := func(ctx context.Context, chatID string, startTime, endTime int64, pageToken string) ([]*larkim.Message, bool, string, error) {
+			requested++
+			hasMore := requested < len(pages)
+			next := ""
+			if hasMore {
+				next = fmt.Sprintf("token-%d", requested)
+			}
+			return pages[requested-1], hasMore, next, nil
+		}
+		got, err := collectCatchupMessages(ctx, fetch, "oc_chat", 1000, 2000)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if requested != 2 {
+			t.Fatalf("expected 2 pages to be consumed, got %d", requested)
+		}
+		if len(got) != 3 {
+			t.Fatalf("expected all 3 items across pages, got %d", len(got))
+		}
+		if got[0].MessageId == nil || *got[0].MessageId != "om_p1_a" {
+			t.Fatalf("expected API order preserved, got first item %v", got[0].MessageId)
+		}
+	})
+
+	t.Run("caps the walk at catchupMaxPages", func(t *testing.T) {
+		calls := 0
+		fetch := func(ctx context.Context, chatID string, startTime, endTime int64, pageToken string) ([]*larkim.Message, bool, string, error) {
+			calls++
+			return []*larkim.Message{catchupTestMessage(fmt.Sprintf("om_%d", calls), "ou_u")}, true, fmt.Sprintf("token-%d", calls), nil
+		}
+		got, err := collectCatchupMessages(ctx, fetch, "oc_chat", 1000, 2000)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if calls != catchupMaxPages {
+			t.Fatalf("expected the walk to stop at %d pages, consumed %d", catchupMaxPages, calls)
+		}
+		if len(got) != catchupMaxPages {
+			t.Fatalf("expected %d items, got %d", catchupMaxPages, len(got))
+		}
+	})
+
+	t.Run("propagates fetch errors", func(t *testing.T) {
+		fetch := func(ctx context.Context, chatID string, startTime, endTime int64, pageToken string) ([]*larkim.Message, bool, string, error) {
+			return nil, false, "", errors.New("boom")
+		}
+		if _, err := collectCatchupMessages(ctx, fetch, "oc_chat", 1000, 2000); err == nil {
+			t.Fatal("expected the fetch error to propagate")
+		}
+	})
 }

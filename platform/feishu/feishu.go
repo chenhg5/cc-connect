@@ -161,7 +161,17 @@ type Platform struct {
 	// every delivered message here, so the WebSocket path and the poller
 	// never inject the same message twice.
 	catchupDedup *core.MessageDedup
-	botOpenID    string
+	// catchupChatTypes caches the real chat mode ("group"/"topic"/"p2p" per
+	// Im.Chat.Get) of every catch-up-configured chat, resolved once. It lets
+	// the poller refuse chats listed under the wrong option key instead of
+	// silently running them with the wrong qualification rule.
+	catchupChatTypeMu sync.Mutex
+	catchupChatTypes  map[string]string
+	// listCatchupMessages fetches a poll window of one chat over the REST API.
+	// It is a field so tests can stub the transport; production wires
+	// listCatchupMessagesREST.
+	listCatchupMessages func(ctx context.Context, chatID string, startTime, endTime int64) ([]*larkim.Message, error)
+	botOpenID           string
 	// groupFilterDegraded is true when bot open_id discovery failed at startup
 	// (e.g. transient network/DNS/proxy outage). When true, group chat mention
 	// filtering fails closed (silently drops group messages without @bot) instead
@@ -526,6 +536,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		resourceChunkSize:          resourceChunkSize,
 		resourceMaxBytes:           defaultResourceMaxBytes,
 	}
+	base.listCatchupMessages = base.listCatchupMessagesREST
 	if !useInteractiveCard {
 		base.self = base
 		return base, nil
