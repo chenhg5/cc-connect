@@ -29,7 +29,10 @@ import (
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
 	// subagents maps each Agent-tool subagent seen in task_started to whether
-	// it runs in the background. Read loop only.
+	// it runs in the background. Read loop only. Entries intentionally live
+	// until the session ends so a later task_started for the same ID is
+	// recognized as a wake, not a new subagent. Retention grows with the
+	// number of distinct subagents launched during this session.
 	subagents map[string]bool
 
 	cmd             *exec.Cmd

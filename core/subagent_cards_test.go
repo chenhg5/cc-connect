@@ -323,3 +323,48 @@ func TestSubagentCards_EditsStayApart(t *testing.T) {
 		}
 	}
 }
+
+// Late steps cannot mutate a terminal card, whether its close is still pending
+// or already sent. A subsequent explicit start can reopen the same card.
+func TestSubagentCards_IgnoresStepsAfterFinishUntilRestart(t *testing.T) {
+	for _, closeSent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("closeSent=%v", closeSent), func(t *testing.T) {
+			p := &cardRecorderPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			defer func() { _ = e.Stop() }()
+			c := &subagentCards{e: e, cards: make(map[string]*subagentCard)}
+			apply := func(ev SubagentEvent) {
+				ev.ID = "a"
+				c.apply(subagentOp{event: ev, platform: p, replyCtx: "ctx"})
+			}
+			apply(SubagentEvent{Phase: SubagentStarted, Title: "Count to three", Kind: "general-purpose", Prompt: "count"})
+			card := c.cards["a"]
+			// Drive the worker synchronously and move its send timestamp rather
+			// than sleeping for the platform edit interval.
+			card.writer.lastUpdateAt = time.Now()
+			apply(SubagentEvent{Phase: SubagentFinished, Status: "completed", Summary: "done"})
+			if closeSent {
+				card.writer.lastUpdateAt = time.Time{}
+				c.flush(card)
+			}
+			content, lastText := card.writer.content, card.lastText
+			apply(SubagentEvent{Phase: SubagentStep, Step: ProgressCardEntry{Kind: ProgressEntryInfo, Text: "late"}})
+			if card.writer.content != content || card.lastText != lastText {
+				t.Fatal("late step mutated a finished card")
+			}
+			card.writer.lastUpdateAt = time.Time{}
+			c.flush(card)
+			if payload := p.cards(t)[cardA]; payload == nil || payload.State != ProgressCardStateCompleted || strings.Contains(strings.Join(cardTexts(payload), "\n"), "late") {
+				t.Fatalf("unexpected completed card: %+v", payload)
+			}
+			apply(SubagentEvent{Phase: SubagentStarted})
+			apply(SubagentEvent{Phase: SubagentStep, Step: ProgressCardEntry{Kind: ProgressEntryInfo, Text: "resumed"}})
+			card.writer.lastUpdateAt = time.Time{}
+			c.flush(card)
+			payload := p.cards(t)[cardA]
+			if payload.State != ProgressCardStateRunning || !strings.Contains(strings.Join(cardTexts(payload), "\n"), "resumed") || c.open != 1 {
+				t.Fatalf("restarted card did not resume: %+v (open=%d)", payload, c.open)
+			}
+		})
+	}
+}
