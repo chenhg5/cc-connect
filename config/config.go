@@ -205,6 +205,22 @@ type DisplayConfig struct {
 	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default false
 }
 
+// GroupConfig holds per-group (chat/channel) overrides for a project.
+// The group id is the workspace channel key ("<platform>:<chat id>") or the
+// bare chat id — see EffectiveGroupDisplays for the lookup rules.
+type GroupConfig struct {
+	// Display holds the group-scoped display overrides. Only `mode` is
+	// group-scoped; every other display field stays project/global scoped.
+	Display *GroupDisplayConfig `toml:"display,omitempty"`
+}
+
+// GroupDisplayConfig holds the group-scoped display overrides.
+// The group level only carries `mode`: the thinking/tool visibility is
+// derived from that mode, mirroring what `/config mode` does at session level.
+type GroupDisplayConfig struct {
+	Mode *string `toml:"mode"`
+}
+
 // StreamPreviewConfig controls real-time streaming preview in IM.
 type StreamPreviewConfig struct {
 	Enabled           *bool    `toml:"enabled"`                      // default true
@@ -564,6 +580,16 @@ type ProjectConfig struct {
 	Display    *DisplayConfig  `toml:"display,omitempty"`
 	Observe    *ObserveConfig  `toml:"observe,omitempty"`
 	References ReferenceConfig `toml:"references,omitempty"`
+	// Groups holds per-group (chat/channel) display defaults, keyed by group
+	// id. The group id is the workspace channel key ("<platform>:<chat id>")
+	// or the bare chat id as printed by /whoami. Only `display.mode` is
+	// group-scoped; every other display field stays project/global scoped.
+	//
+	//   [[projects]]
+	//   name = "my-project"
+	//   [projects.groups."feishu:oc_xxx".display]
+	//   mode = "quiet"
+	Groups map[string]*GroupConfig `toml:"groups,omitempty"`
 	// FilterExternalSessions: when true, /list only shows sessions created by
 	// cc-connect, hiding sessions created by direct CLI usage in the same work_dir.
 	// Default is false (show all sessions).
@@ -994,6 +1020,57 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	return
 }
 
+// GroupDisplay is the resolved group-scoped display override of one group.
+type GroupDisplay struct {
+	// Mode is the display mode configured for the group ("full", "compact"
+	// or "quiet").
+	Mode string
+	// ThinkingMessages / ToolMessages are the visibility flags derived from
+	// Mode: compact and quiet hide both, full shows both. They mirror what
+	// `/config mode` does at session level.
+	ThinkingMessages bool
+	ToolMessages     bool
+}
+
+// EffectiveGroupDisplays resolves the per-group display defaults configured
+// under [projects.groups.<id>.display].
+//
+// The group id is the workspace channel key ("<platform>:<chat id>") — the
+// same shape the multi-workspace bindings use — or the bare chat id as
+// printed by /whoami. Both forms are accepted; the platform-prefixed form
+// wins when a group is configured under both ids.
+//
+// Only `mode` is group-scoped (Issue #1604). A group without a configured
+// mode produces no entry at all, so the caller keeps using the project/global
+// display for it and the behaviour stays exactly as before.
+func EffectiveGroupDisplays(proj *ProjectConfig) map[string]GroupDisplay {
+	out := map[string]GroupDisplay{}
+	if proj == nil {
+		return out
+	}
+	for id, group := range proj.Groups {
+		if group == nil || group.Display == nil || group.Display.Mode == nil {
+			continue
+		}
+		mode := strings.ToLower(strings.TrimSpace(*group.Display.Mode))
+		switch mode {
+		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
+		default:
+			continue
+		}
+		thinking, tool := true, true
+		if mode == DisplayModeCompact || mode == DisplayModeQuiet {
+			thinking, tool = false, false
+		}
+		out[id] = GroupDisplay{
+			Mode:             mode,
+			ThinkingMessages: thinking,
+			ToolMessages:     tool,
+		}
+	}
+	return out
+}
+
 // EffectiveHistoryMaxLen returns the per-entry /history truncation length.
 // Resolution: project [display] > global [display] > default 1000. A value
 // of 0 disables truncation.
@@ -1136,6 +1213,11 @@ func (c *Config) validateInternal(permissive bool) error {
 		if err := validateDisplayConfig(prefix+".display", proj.Display); err != nil {
 			return err
 		}
+		for id, group := range proj.Groups {
+			if err := validateGroupConfig(fmt.Sprintf("%s.groups[%q].display", prefix, id), group); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -1160,6 +1242,21 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 	}
 	if display.HistoryMaxLen != nil && *display.HistoryMaxLen < 0 {
 		return fmt.Errorf("config: %s.history_max_len must be >= 0", prefix)
+	}
+	return nil
+}
+
+// validateGroupConfig validates the group-scoped display overrides.
+func validateGroupConfig(prefix string, group *GroupConfig) error {
+	if group == nil || group.Display == nil {
+		return nil
+	}
+	if group.Display.Mode != nil {
+		switch strings.ToLower(strings.TrimSpace(*group.Display.Mode)) {
+		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
+		default:
+			return fmt.Errorf("config: %s.mode must be \"full\", \"compact\", or \"quiet\"", prefix)
+		}
 	}
 	return nil
 }
