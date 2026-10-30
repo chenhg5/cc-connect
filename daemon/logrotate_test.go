@@ -44,10 +44,14 @@ func TestRotatingWriter(t *testing.T) {
 }
 
 func TestMetaSaveLoad(t *testing.T) {
-	origHome := os.Getenv("HOME")
+	// Redirect the data dir under a temp home. Setting HOME alone is not
+	// enough: os.UserHomeDir reads USERPROFILE on Windows, so this test used
+	// to call SaveMeta against the real ~/.cc-connect/daemon.json and
+	// overwrite it with the /tmp fixtures below — which silently disabled
+	// reapLeftoverFromMeta() on a live Windows install.
 	dir := t.TempDir()
-	os.Setenv("HOME", dir)
-	defer os.Setenv("HOME", origHome)
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir) // Windows os.UserHomeDir reads USERPROFILE
 
 	m := &Meta{
 		LogFile:       "/tmp/test.log",

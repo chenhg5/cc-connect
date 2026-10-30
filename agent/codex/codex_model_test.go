@@ -64,9 +64,9 @@ func TestNormalizeAppServerURL_StdIOIsExplicit(t *testing.T) {
 	}
 }
 
-func TestNormalizeAppServerURL_EmptyKeepsWebSocketDefault(t *testing.T) {
-	if got := normalizeAppServerURL(""); got != "ws://127.0.0.1:3845" {
-		t.Fatalf("normalizeAppServerURL(empty) = %q, want ws://127.0.0.1:3845", got)
+func TestNormalizeAppServerURL_EmptyDefaultsToStdio(t *testing.T) {
+	if got := normalizeAppServerURL(""); got != "stdio://" {
+		t.Fatalf("normalizeAppServerURL(empty) = %q, want stdio://", got)
 	}
 }
 
@@ -117,6 +117,12 @@ func TestIsCodexChatModel(t *testing.T) {
 		{"gpt-5.6-sol", true},
 		{"gpt-5.6-terra", true},
 		{"gpt-5.6-luna", true},
+
+		// GPT-6 and GPT-6.1 remain discoverable via /v1/models.
+		{"gpt-6-astra", true},
+		{"gpt-6-sol", true},
+		{"gpt-6-luna", true},
+		{"gpt-6.1-sol", true},
 
 		// Case insensitivity (defensive; ids from /v1/models are usually lower).
 		{"GPT-5.6", true},

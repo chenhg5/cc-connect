@@ -91,7 +91,7 @@ func TestMaybeAutoResetSessionOnIdle_ExplicitActivationBlocksReset(t *testing.T)
 	p := &stubPlatformEngine{n: "test"}
 	msg := &Message{SessionKey: "u", ReplyCtx: "ctx"}
 
-	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:u", session)
+	rotated, _ := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:u", session, 0)
 	if rotated != nil {
 		t.Fatal("explicitly activated session must NOT be rotated even if LastUserActivity is old")
 	}
@@ -126,7 +126,7 @@ func TestMaybeAutoResetSessionOnIdle_ExplicitActivationExpiresAfterTTL(t *testin
 	p := &stubPlatformEngine{n: "test"}
 	msg := &Message{SessionKey: "u", ReplyCtx: "ctx"}
 
-	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:u", session)
+	rotated, _ := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:u", session, 0)
 	if rotated == nil {
 		t.Fatal("explicit activation older than TTL must NOT block the idle reset")
 	}
@@ -160,7 +160,7 @@ func TestMaybeAutoResetSessionOnIdle_NonExplicitSessionUsesLegacyPath(t *testing
 	p := &stubPlatformEngine{n: "test"}
 	msg := &Message{SessionKey: "u", ReplyCtx: "ctx"}
 
-	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:u", session)
+	rotated, _ := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:u", session, 0)
 	if rotated == nil {
 		t.Fatal("non-explicit session with old LastUserActivity must be rotated (legacy path)")
 	}
@@ -203,14 +203,14 @@ func TestSwitchSession_PreventsFirstMessageRotation(t *testing.T) {
 	if current.ID != stale.ID {
 		t.Fatalf("GetOrCreateActive returned %s, want stale %s", current.ID, stale.ID)
 	}
-	if !current.TryLock() {
+	if _, ok := current.TryLock(); !ok {
 		t.Fatal("session should be lockable")
 	}
 
 	p := &stubPlatformEngine{n: "test"}
 	msg := &Message{SessionKey: "u", ReplyCtx: "ctx"}
 
-	rotated := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:u", current)
+	rotated, _ := e.maybeAutoResetSessionOnIdle(p, msg, sm, "ws:u", current, 0)
 	if rotated != nil {
 		t.Fatal("post-switch first message must stay in the explicitly chosen session")
 	}

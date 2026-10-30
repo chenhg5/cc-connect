@@ -56,8 +56,26 @@
       "overview": "개요",
       "providers": "제공업체",
       "heartbeat": "하트비트",
-      "settings": "설정"
-    }
+      "settings": "설정",
+      "workspaces": "워크스페이스"
+    },
+    "workspaceMode": "멀티 워크스페이스 모드",
+    "workspaceModeHint": "공유된 기본 디렉터리 아래에서 서로 다른 채팅 채널을 서로 다른 작업 디렉터리로 라우팅합니다.",
+    "workspaceModeEnable": "멀티 워크스페이스 모드 활성화",
+    "workspaceModeWarning": "모드를 전환하려면 재시작이 필요합니다. 멀티 워크스페이스 모드가 켜져 있는 동안에는 단일 work_dir이 사용되지 않습니다.",
+    "workspaceBaseDir": "기본 디렉터리",
+    "workspaceBaseDirRequired": "멀티 워크스페이스 모드를 활성화하려면 기본 디렉터리가 필요합니다.",
+    "workspaceModeConfirm": "워크스페이스 모드를 변경하려면 서비스를 재시작해야 합니다. 계속하시겠습니까?",
+    "workspaceBindings": "채널 바인딩",
+    "workspaceNoBindings": "아직 워크스페이스에 바인딩된 채널이 없습니다.",
+    "workspaceActive": "활성",
+    "workspaceIdle": "유휴",
+    "workspaceAddBinding": "채널 바인딩",
+    "workspaceChannelKey": "채널 키",
+    "workspaceChannelName": "채널 이름 (선택 사항)",
+    "workspacePath": "워크스페이스 경로",
+    "workspaceSuggestions": "base_dir 내 바인딩되지 않은 디렉터리:",
+    "workspaceBind": "바인딩"
   },
   "sessions": {
     "title": "세션",

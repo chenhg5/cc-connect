@@ -48,10 +48,51 @@ type claudeSession struct {
 	// carried a model field yet; callers should fall back to the Agent's
 	// configured model.
 	activeModel atomic.Value // stores string
+	// lastModelSwitch remembers the last model_refusal_fallback that was
+	// reported, so a fallback the CLI announces twice (provisional, then final)
+	// reaches the user once.
+	lastModelSwitch atomic.Value // stores string
 
 	// usageMu guards lastUsage. Populated from the most recent result event.
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
+	// usageSource records where lastUsage came from, so an auto-compress
+	// decision is never confused with a different data source:
+	//   "event"                — a live stream-json assistant event (per-sub-call
+	//                            prompt size; the most faithful snapshot)
+	//   "transcript"           — the last per-call record read from the Claude
+	//                            Code JSONL transcript. Used when the provider
+	//                            sends an empty assistant usage block
+	//                            (measured: MiniMax-M3)
+	//   "transcript-recovered" — the same tail read, done once at attach time
+	//                            after a --resume, before the first live number
+	//   ""                     — lastUsage is nil
+	//
+	// The result event's own aggregate is deliberately NOT a source: its
+	// cache_read sums every sub-call in the turn, so it overstates the final
+	// prompt by a factor that grows with the sub-call count.
+	usageSource string
+	// recoverUsageOnce guards the one-shot transcript recovery performed when
+	// the init event arrives (see handleSystem).
+	recoverUsageOnce sync.Once
+	// transcriptOverride, when non-empty, replaces the derived transcript path.
+	// Test-only seam: transcriptPath() resolves through the real
+	// ~/.claude/projects/<key>/ layout, which a unit test cannot fabricate.
+	transcriptOverride string
+
+	// ctxWindowOverride is the user-configured context window size used by
+	// the "ctx N%" indicator. When > 0 it wins over reportedCtxWindow; when
+	// <= 0, contextWindow uses reportedCtxWindow and then the model-name
+	// heuristic (200K, 1M for [1m] variants). The Agent sets
+	// this from `[projects.agent.options].context_window_tokens` at session
+	// construction time and never mutates it afterwards.
+	ctxWindowOverride int
+
+	// reportedCtxWindow is the context window Claude Code reported for this
+	// session's model in the most recent result event's modelUsage map.
+	// Zero until a result event carries one; until then (and on CLIs that
+	// omit the map) contextWindow falls back to the model-name heuristic.
+	reportedCtxWindow atomic.Int64
 
 	// gracefulStopTimeout is how long Close() waits for a clean exit
 	// (stdin close → Stop hooks → process exit) before escalating to
@@ -216,7 +257,7 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	// Claude Code rejects bypassPermissions when running as root.
@@ -490,6 +531,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		ccHooks:             newCCPermissionHookRunner(workDir),
 		startupWarning:      rootDowngradeWarning,
 		promptFilePath:      cleanupPromptPath,
+		ctxWindowOverride:   ctxWindowTokens,
 	}
 	cs.setPermissionMode(mode)
 	cs.sessionID.Store(sessionID)
@@ -639,6 +681,22 @@ func isCompactionResult(raw map[string]any) bool {
 	return resultSubtype(raw) == "compact" || resultSubtype(raw) == "compaction"
 }
 
+// isEmptyTaskNotificationResult reports whether a `type:"result"` event
+// closes a CLI-internal task-notification turn that produced no output and
+// made no model call. Such results are never a reply to a prompt sent by
+// cc-connect (see handleResult).
+func isEmptyTaskNotificationResult(raw map[string]any, content string) bool {
+	if content != "" {
+		return false
+	}
+	origin, _ := raw["origin"].(map[string]any)
+	if kind, _ := origin["kind"].(string); kind != "task-notification" {
+		return false
+	}
+	turns, ok := raw["num_turns"].(float64)
+	return ok && turns == 0
+}
+
 // resultSubtype extracts the optional `subtype` field from a result
 // event payload. Empty string when missing.
 func resultSubtype(raw map[string]any) string {
@@ -652,6 +710,9 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if model, ok := raw["model"].(string); ok && model != "" {
 		cs.activeModel.Store(model)
 	}
+	if subtype, _ := raw["subtype"].(string); subtype == "model_refusal_fallback" {
+		cs.handleRefusalFallback(raw)
+	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
 		evt := core.Event{Type: core.EventText, SessionID: sid}
@@ -661,24 +722,324 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 			return
 		}
 	}
+	// Attach-time recovery: after a --resume this fresh process has no usage
+	// yet, but the resumed transcript already records the exact prompt size the
+	// previous process ended on. Without this the first auto-compress decision
+	// of every resumed session had only the text-length heuristic available.
+	cs.recoverUsageOnce.Do(func() {
+		if cs.GetContextUsage() != nil {
+			return // already have live usage; nothing to recover
+		}
+		if u := cs.recoverUsageFromTranscript(); u != nil {
+			cs.usageMu.Lock()
+			if cs.lastUsage == nil {
+				cs.lastUsage = u
+				cs.usageSource = "transcript-recovered"
+			}
+			cs.usageMu.Unlock()
+		}
+	})
+}
+
+// handleRefusalFallback handles Claude Code's model_refusal_fallback event:
+// the primary model's safeguards declined a request and the CLI re-ran it on a
+// fallback model (claude-opus-5-5 falls back to claude-opus-4-8 for the "cyber"
+// category, for example). With scope "session", or no scope from older CLIs,
+// the CLI keeps the rest of the session on the fallback model until a model is
+// picked again, so the active model follows it; the reply footer would
+// otherwise keep naming a model that no longer answers. Scope "local" means
+// only a subagent's or side question's response came from the fallback model.
+//
+// The CLI may announce one fallback twice (a provisional notice mid-turn and
+// the final one at the end of the turn), so it is reported once per refused
+// request and fallback target.
+func (cs *claudeSession) handleRefusalFallback(raw map[string]any) {
+	// "revert" and "sticky" are still in the CLI's enum for SDK compatibility
+	// but are no longer emitted; only a retry moves the turn to another model.
+	if direction, _ := raw["direction"].(string); direction != "" && direction != "retry" {
+		slog.Debug("claudeSession: ignoring model_refusal_fallback", "direction", direction)
+		return
+	}
+	from, _ := raw["original_model"].(string)
+	to, _ := raw["fallback_model"].(string)
+	if from == "" || to == "" {
+		return
+	}
+	scope, _ := raw["scope"].(string)
+	sessionWide := scope != "local"
+	category, _ := raw["api_refusal_category"].(string)
+	requestID, _ := raw["request_id"].(string)
+
+	key := requestID + "\x00" + from + "\x00" + to
+	if prev, _ := cs.lastModelSwitch.Load().(string); prev == key {
+		return
+	}
+	cs.lastModelSwitch.Store(key)
+
+	if sessionWide {
+		cs.activeModel.Store(to)
+		// The cached window was reported for the previous model; the next
+		// result event reports the fallback model's own.
+		cs.reportedCtxWindow.Store(0)
+	}
+	slog.Warn("claudeSession: safeguards fallback switched model",
+		"from", from, "to", to, "category", category, "scope", scope, "request_id", requestID)
+
+	evt := core.Event{Type: core.EventModelSwitch, ModelSwitch: &core.ModelSwitch{
+		From:        from,
+		To:          to,
+		Reason:      "refusal",
+		Category:    category,
+		SessionWide: sessionWide,
+	}}
+	select {
+	case cs.events <- evt:
+	case <-cs.ctx.Done():
+	}
+}
+
+// claudeUsageFromTranscriptLine parses one JSONL transcript line and returns
+// the exact prompt size it records, or nil when the line is not an assistant
+// event carrying a usable usage block.
+//
+// input + cache_creation + cache_read is the true prompt size of THAT call:
+// on a transcript the cache_read of the next entry equals the previous entry's
+// in+cc+cr (verified against live data: cr 38802 → in+cr 38948 → next cr 38948),
+// so the value does NOT accumulate the way the result event's aggregate does.
+func claudeUsageFromTranscriptLine(line []byte, override int) *core.ContextUsage {
+	if len(line) == 0 || !bytes.Contains(line, []byte(`"usage"`)) {
+		return nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return nil
+	}
+	if t, _ := raw["type"].(string); t != "assistant" {
+		return nil
+	}
+	msg, ok := raw["message"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	usageRaw, ok := msg["usage"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	input, _, cc, cr := parseClaudeUsage(usageRaw)
+	used := input + cc + cr
+	if used <= 0 {
+		return nil
+	}
+	model, _ := msg["model"].(string)
+	return &core.ContextUsage{
+		UsedTokens:               used,
+		TotalTokens:              used,
+		InputTokens:              input,
+		CachedInputTokens:        cr,
+		CacheCreationInputTokens: cc,
+		ContextWindow:            claudeContextWindow(model, override),
+	}
+}
+
+// transcriptInitialWindow is the first tail window we read. Each per-call usage
+// line is a self-contained JSON object appended at the end of the transcript, so
+// one record is all we need: measured across 11k real transcripts the last line
+// is 478 bytes at the median and under 1.5 KiB at the 99th percentile. The window
+// doubles when the last line is still being written, or when it is one of the
+// rare multi-KiB ones.
+const transcriptInitialWindow = 4 << 10 // 4KiB
+
+// transcriptLineCap is the hard ceiling on the tail look-back, so a pathological
+// transcript can never make this allocate without bound.
+const transcriptLineCap = 64 << 20 // 64MiB
+
+// tailUsageFromTranscript reads the tail of a Claude Code JSONL transcript and
+// returns the LAST recorded per-call prompt size.
+//
+// This is deliberately a TAIL read, not a full scan: a long-lived session's
+// transcript runs to hundreds of MiB (one measured at 136MiB), and auto-compress
+// consults this every turn — a full rescan would be O(n²).
+//
+// windowBytes caps how far back we look before giving up and reporting "no
+// data"; it is clamped by transcriptLineCap. found distinguishes "read the file
+// and there was nothing usable" from "could not read it at all" — production
+// callers only need usage != nil, but the distinction is what lets a test assert
+// the reader actually opened and scanned the file rather than silently bailing.
+func tailUsageFromTranscript(path string, windowBytes int64, override int) (usage *core.ContextUsage, found bool) {
+	if path == "" {
+		return nil, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	// Read-only handle: a Close error carries nothing actionable, and the
+	// descriptor is released either way. errcheck wants that said explicitly.
+	defer func() { _ = f.Close() }()
+
+	st, err := f.Stat()
+	if err != nil {
+		return nil, false
+	}
+	size := st.Size()
+	if size == 0 {
+		return nil, false
+	}
+
+	// Start small and grow only when a single line (a tool result embedding a
+	// whole file, say) keeps the record out of reach. The common case is a
+	// transcript whose newest record sits in the last few KiB, so the first read
+	// usually settles it.
+	//
+	// windowBytes and transcriptLineCap are both ceilings: a caller that asks for
+	// a narrow look-back gets exactly that, and never a silent wider search.
+	limit := int64(transcriptLineCap)
+	if windowBytes > 0 && windowBytes < limit {
+		limit = windowBytes
+	}
+	window := int64(transcriptInitialWindow)
+	if window > limit {
+		window = limit
+	}
+	for window > 0 && window <= limit {
+		start := size - window
+		if start < 0 {
+			start = 0
+		}
+		buf := make([]byte, window)
+		n, err := f.ReadAt(buf, start)
+		if err != nil && err != io.EOF {
+			return nil, false
+		}
+		buf = buf[:n]
+
+		// Walk lines from the newest backwards and take the first one that parses.
+		//
+		// No boundary bookkeeping is needed: a record only ever spans lines
+		// Claude Code finished writing, so a truncated line either fails to parse
+		// or fails the "type":"assistant" check, and the walk simply moves on.
+		// That is what makes the multi-MiB tool-result case fall out for free
+		// instead of needing a carry buffer.
+		end := len(buf)
+		if end > 0 && buf[end-1] == '\n' {
+			end--
+		}
+		for end > 0 {
+			nl := bytes.LastIndexByte(buf[:end], '\n')
+			begin := 0
+			if nl >= 0 {
+				begin = nl + 1
+			}
+			if line := buf[begin:end]; len(line) > 0 {
+				if u := claudeUsageFromTranscriptLine(line, override); u != nil {
+					return u, true
+				}
+			}
+			if nl < 0 {
+				break
+			}
+			end = nl
+		}
+
+		if start == 0 || window == limit {
+			// The whole file (or the caller's look-back limit) was searched and
+			// held no record.
+			return nil, true
+		}
+		window *= 2
+		if window > limit {
+			window = limit
+		}
+	}
+	// The look-back limit was reached without a usable record.
+	return nil, true
+}
+
+// recoverUsageFromTranscript restores the exact context-usage numbers from the
+// Claude Code JSONL transcript at process attach time.
+//
+// Why this exists: every `--resume` spawns a NEW claudeSession whose lastUsage
+// starts nil, so the first auto-compress decision of every resumed process had
+// no exact number and silently fell back to the text-length heuristic. The
+// heuristic counts cc-connect's own history text (which excludes tool results
+// and the fixed system-prompt + tools overhead) and is routinely several times
+// off — measured at 574,797 while the same session's real API-reported prompt
+// never exceeded 229,783. Reading the transcript gives the exact number the
+// previous process ended on, so the decision stays exact across restarts.
+//
+// Returns nil when the transcript is missing, unreadable, or carries no
+// assistant event with a non-zero prompt. Callers must treat nil as "no exact
+// data" and NOT substitute an estimate.
+func (cs *claudeSession) recoverUsageFromTranscript() *core.ContextUsage {
+	u, _ := tailUsageFromTranscript(cs.transcriptPath(), transcriptRecoveryWindow, cs.ctxWindowOverride)
+	if u != nil {
+		slog.Info("claudeSession: recovered context usage from transcript",
+			"used", u.UsedTokens, "input", u.InputTokens,
+			"cache_read", u.CachedInputTokens, "cache_creation", u.CacheCreationInputTokens,
+			"context_window", u.ContextWindow)
+	}
+	return u
+}
+
+// transcriptRecoveryWindow is how far back the attach-time recovery looks. The
+// last usable line is normally in the final chunk; this bound only matters for
+// a transcript whose tail is one enormous tool result.
+const transcriptRecoveryWindow = 64 << 20 // 64MiB
+
+// GetUsageSource reports where GetContextUsage()'s value came from.
+// Empty when there is no usage yet.
+func (cs *claudeSession) GetUsageSource() string {
+	cs.usageMu.Lock()
+	defer cs.usageMu.Unlock()
+	return cs.usageSource
 }
 
 // parseClaudeUsage extracts the four token counts Claude reports per API call.
 // Missing fields default to zero.
 func parseClaudeUsage(usage map[string]any) (input, output, cacheCreation, cacheRead int) {
-	if v, ok := usage["input_tokens"].(float64); ok {
-		input = int(v)
-	}
-	if v, ok := usage["output_tokens"].(float64); ok {
-		output = int(v)
-	}
-	if v, ok := usage["cache_creation_input_tokens"].(float64); ok {
-		cacheCreation = int(v)
-	}
-	if v, ok := usage["cache_read_input_tokens"].(float64); ok {
-		cacheRead = int(v)
-	}
+	input = asInt(usage["input_tokens"])
+	output = asInt(usage["output_tokens"])
+	cacheCreation = asInt(usage["cache_creation_input_tokens"])
+	cacheRead = asInt(usage["cache_read_input_tokens"])
 	return
+}
+
+// asInt coerces a JSON-decoded value to int. json.Unmarshal defaults numeric
+// fields to float64, but some CLI builds encode large token counts as strings
+// (to avoid float64 precision loss past 2^53) or as json.Number. Without this
+// shim, parseClaudeUsage would silently zero out non-float64 fields and the
+// auto-compress trigger would fall back to the text-history heuristic.
+func asInt(v any) int {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	case float32:
+		return int(x)
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return int(n)
+		}
+		if f, err := x.Float64(); err == nil {
+			return int(f)
+		}
+		return 0
+	case string:
+		if n, err := strconv.ParseInt(x, 10, 64); err == nil {
+			return int(n)
+		}
+		if f, err := strconv.ParseFloat(x, 64); err == nil {
+			return int(f)
+		}
+		return 0
+	default:
+		return 0
+	}
 }
 
 func (cs *claudeSession) handleAssistant(raw map[string]any) {
@@ -706,8 +1067,7 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		input, _, cc, cr := parseClaudeUsage(usageRaw)
 		used := input + cc + cr
 		if used > 0 {
-			model := cs.GetModel()
-			window := claudeContextWindow(model)
+			window := cs.contextWindow(cs.GetModel())
 			cs.usageMu.Lock()
 			prevOutput := 0
 			if cs.lastUsage != nil {
@@ -722,8 +1082,13 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 				OutputTokens:             prevOutput,
 				ContextWindow:            window,
 			}
+			cs.usageSource = "event"
 			cs.usageMu.Unlock()
 		}
+		// used == 0 means the usage block is present but empty — measured on
+		// MiniMax-M3, which sends {"input_tokens":0,...} on every assistant
+		// event. Deliberately leave lastUsage's previous value in place rather
+		// than clearing it; handleResult consults the transcript tail instead.
 	}
 
 	contentArr, ok := msg["content"].([]any)
@@ -786,6 +1151,18 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			continue
 		}
 		contentType, _ := item["type"].(string)
+		if contentType == "text" {
+			text, _ := item["text"].(string)
+			if strings.HasPrefix(text, "Stop hook feedback:") {
+				evt := core.Event{Type: core.EventHookRejected}
+				select {
+				case cs.events <- evt:
+				case <-cs.ctx.Done():
+					return
+				}
+			}
+			continue
+		}
 		if contentType == "tool_result" {
 			isError, _ := item["is_error"].(bool)
 			var result string
@@ -835,6 +1212,22 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.sessionID.Store(sid)
 	}
 
+	// On --resume, Claude Code first replays task notifications for
+	// background shell tasks that did not finish before the previous process
+	// exited ("Background shell command didn't finish before the previous
+	// session ended"). Each one is closed with a synthetic result that has
+	// origin.kind == "task-notification", no model call (num_turns == 0) and
+	// an empty result. It is emitted right after the process starts — i.e.
+	// after cc-connect has already written the user's prompt to stdin — so
+	// forwarding it as EventResult{Done:true} makes the engine finish the
+	// user's turn with "(empty response)" and push the real reply into the
+	// unsolicited relay. It carries nothing to deliver, so drop it.
+	if isEmptyTaskNotificationResult(raw, content) {
+		slog.Info("claudeSession: dropping empty task-notification result (no model call)",
+			"session_id", cs.CurrentSessionID())
+		return
+	}
+
 	// Compaction events arrive as `type:"result"` with `subtype:"compact"`
 	// or `subtype:"compaction"`. They are NOT turn completion — the CLI
 	// is mid-task and will continue streaming subsequent tool calls and
@@ -846,31 +1239,78 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
 	}
 
-	// Aggregated usage across all sub-calls in this turn — used for billing-
-	// style reporting in the EventResult event (slog turn-complete log etc.).
-	// We do NOT pull input/cache values into cs.lastUsage from here:
-	// cache_read_input_tokens is summed across every sub-call that hit the
-	// cached prefix, so on long agentic turns it vastly exceeds the model
-	// context window. The per-sub-call usage captured in handleAssistant
-	// gives a faithful "context used right now" snapshot.
+	// Exact context size, in order of preference:
 	//
-	// We DO use the result's output_tokens to update lastUsage.OutputTokens
-	// because output is additive (each sub-call's tokens are real new
-	// tokens, never recycled) and the per-assistant-event output_tokens in
+	//   1. the in-process stream-json assistant event (handleAssistant) — a
+	//      per-sub-call prompt size, and the freshest thing available;
+	//   2. the Claude Code JSONL transcript tail — the same per-sub-call
+	//      figure, recovered from disk. This is the path that matters for
+	//      providers whose assistant events carry an EMPTY usage block
+	//      (measured: MiniMax-M3 sends {"input_tokens":0,"output_tokens":0}
+	//      on every assistant event), where path 1 writes nothing at all.
+	//
+	// We deliberately do NOT use this event's own `usage` as the fallback.
+	// That object is the result aggregate: its cache_read_input_tokens sums
+	// every sub-call in the turn (measured: in+cc+cr walked 38377 → 38538 →
+	// 38671 within one turn), so it overstates the final prompt by a factor
+	// that grows with the number of sub-calls — roughly 2x on a short turn,
+	// and the user's own estimate is 5-7x on a session of a dozen iterations.
+	// The transcript carries the true per-call figure instead. The aggregate
+	// stays in use ONLY for the EventResult billing fields below.
+	//
+	// output_tokens is taken from this event because output is additive (never
+	// recycled across sub-calls) and the per-assistant-event output_tokens in
 	// stream-json is a placeholder (typically 1). The result is the only
 	// authoritative source of total tokens generated for this turn.
 	var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int
 	if usage, ok := raw["usage"].(map[string]any); ok {
 		inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens = parseClaudeUsage(usage)
 	}
-	if outputTokens > 0 {
-		cs.usageMu.Lock()
-		if cs.lastUsage != nil {
+
+	// The result event's modelUsage map is where Claude Code reports each
+	// model's real context window. Remember the session model's entry so this
+	// snapshot and every later one use it instead of the model-name guess,
+	// which knows nothing about models with a native 1M window and no "[1m]"
+	// suffix (claude-opus-5-5 reports contextWindow 1000000).
+	if w := claudeModelUsageContextWindow(raw, cs.GetModel()); w > 0 {
+		cs.reportedCtxWindow.Store(int64(w))
+	}
+
+	// Path 2: consult the transcript when the in-process snapshot is absent.
+	cs.usageMu.Lock()
+	haveExact := cs.lastUsage != nil && cs.usageSource == "event"
+	cs.usageMu.Unlock()
+
+	if !haveExact {
+		if u, _ := tailUsageFromTranscript(cs.transcriptPath(), transcriptRecoveryWindow, cs.ctxWindowOverride); u != nil {
+			cs.usageMu.Lock()
+			// A recovered snapshot is a placeholder and a result snapshot is an
+			// aggregate — the transcript's per-call figure supersedes both.
+			cs.lastUsage = u
+			cs.usageSource = "transcript"
+			cs.usageMu.Unlock()
+		}
+		// A nil u means the transcript is absent, unreadable, or carries no
+		// usable assistant record yet (the first turn of a fresh session).
+		// Leave lastUsage alone rather than substituting this event's
+		// aggregate — that substitution is what produced the overestimate.
+	}
+
+	cs.usageMu.Lock()
+	if cs.lastUsage != nil {
+		// The snapshot was taken before this event (by handleAssistant, or
+		// read from the transcript tail by the model id recorded there), so
+		// on the first turn it still carries the guess. Correct it now, before
+		// EventResult makes the engine render the footer.
+		if w := cs.knownContextWindow(); w > 0 {
+			cs.lastUsage.ContextWindow = w
+		}
+		if outputTokens > 0 {
 			cs.lastUsage.OutputTokens = outputTokens
 			cs.lastUsage.TotalTokens = cs.lastUsage.UsedTokens + outputTokens
 		}
-		cs.usageMu.Unlock()
 	}
+	cs.usageMu.Unlock()
 
 	evt := core.Event{
 		Type:                     core.EventResult,
@@ -903,8 +1343,9 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 
 	toolName, _ := request["tool_name"].(string)
 	input, _ := request["input"].(map[string]any)
+	isAskUserQuestion := toolName == "AskUserQuestion"
 
-	if cs.autoApprove.Load() {
+	if cs.autoApprove.Load() && !isAskUserQuestion {
 		slog.Debug("claudeSession: auto-approving", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior:     "allow",
@@ -912,7 +1353,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		})
 		return
 	}
-	if cs.dontAsk.Load() {
+	if cs.dontAsk.Load() && !isAskUserQuestion {
 		slog.Debug("claudeSession: auto-denying", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior: "deny",
@@ -961,7 +1402,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		ToolInputRaw: input,
 	}
 
-	if toolName == "AskUserQuestion" {
+	if isAskUserQuestion {
 		evt.Questions = parseUserQuestions(input)
 	}
 
@@ -1109,6 +1550,8 @@ func isClaudeEditTool(toolName string) bool {
 	}
 }
 
+// setPermissionMode configures automatic permission handling. AskUserQuestion
+// remains interactive even in bypassPermissions and dontAsk modes.
 func (cs *claudeSession) setPermissionMode(mode string) {
 	cs.permissionMode.Store(mode)
 	cs.autoApprove.Store(mode == "bypassPermissions")
@@ -1142,23 +1585,38 @@ func (cs *claudeSession) permissionModeValue() string {
 // transcriptPath returns the path to the Claude Code JSONL transcript
 // for the current session, or "" if it cannot be determined.
 func (cs *claudeSession) transcriptPath() string {
+	if cs.transcriptOverride != "" {
+		return cs.transcriptOverride
+	}
 	sessionID := cs.CurrentSessionID()
 	if sessionID == "" || cs.workDir == "" {
 		return ""
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	// Resolve the config home from the session process env so a per-project
+	// CLAUDE_CONFIG_DIR lands on the right projects tree; cmd may be nil for
+	// externally-attached sessions, in which case we fall back to ~/.claude.
+	configHome := configHomeFromEnv(cs.cmdEnv())
+	if configHome == "" {
 		return ""
 	}
 	absWorkDir, err := filepath.Abs(cs.workDir)
 	if err != nil {
 		return ""
 	}
-	projectDir := findProjectDir(homeDir, absWorkDir)
+	projectDir := findProjectDir(configHome, absWorkDir)
 	if projectDir == "" {
 		return ""
 	}
 	return filepath.Join(projectDir, sessionID+".jsonl")
+}
+
+// cmdEnv returns the environment of the underlying claude process (empty
+// when the process is not available).
+func (cs *claudeSession) cmdEnv() []string {
+	if cs.cmd == nil || cs.cmd.Env == nil {
+		return nil
+	}
+	return cs.cmd.Env
 }
 
 // GetModel returns the model id reported by the CLI's init event (e.g.
@@ -1343,12 +1801,81 @@ func shellJoinArgs(args []string) string {
 	return b.String()
 }
 
+// contextWindow returns the window the "ctx N%" indicator divides by: the
+// configured override, then the size Claude Code reported for this session's
+// model, then the model-name heuristic applied to model.
+func (cs *claudeSession) contextWindow(model string) int {
+	if w := cs.knownContextWindow(); w > 0 {
+		return w
+	}
+	return claudeContextWindow(model, 0)
+}
+
+// knownContextWindow returns the window that needs no guessing — the
+// configured context_window_tokens override, else the size Claude Code
+// reported in a result event's modelUsage — or 0 when neither is available.
+// The override wins because it is an explicit operator choice.
+func (cs *claudeSession) knownContextWindow() int {
+	if cs.ctxWindowOverride > 0 {
+		return cs.ctxWindowOverride
+	}
+	return int(cs.reportedCtxWindow.Load())
+}
+
+// claudeModelUsageContextWindow returns the contextWindow that a result
+// event's modelUsage map reports for model, or 0 when it reports none.
+//
+// The map has one entry per model the turn used, keyed by the id the init
+// event reports ("claude-opus-5-5", "claude-sonnet-5-5[1m]"). A turn that ran
+// a subagent on another model therefore carries that model's entry too, and
+// its window can differ from the session's. Only the session model's entry
+// counts: when model is known but absent from the map the answer is 0, never
+// whichever other entry happens to be there. A sole entry is taken only while
+// the session model is still unknown.
+func claudeModelUsageContextWindow(raw map[string]any, model string) int {
+	byModel, _ := raw["modelUsage"].(map[string]any)
+	if len(byModel) == 0 {
+		return 0
+	}
+	windowOf := func(v any) int {
+		entry, _ := v.(map[string]any)
+		if w := asInt(entry["contextWindow"]); w > 0 {
+			return w
+		}
+		return 0
+	}
+	if model == "" {
+		if len(byModel) == 1 {
+			for _, v := range byModel {
+				return windowOf(v)
+			}
+		}
+		return 0
+	}
+	if v, ok := byModel[model]; ok {
+		return windowOf(v)
+	}
+	for k, v := range byModel {
+		if strings.EqualFold(k, model) {
+			return windowOf(v)
+		}
+	}
+	return 0
+}
+
 // claudeContextWindow returns the context window size (tokens) that best
 // matches the given Claude model id. Used as a fallback when the stream-json
 // result event does not carry a modelUsage map. The "[1m]" suffix
 // (case-insensitive) signals the 1M-context variants; everything else
 // defaults to the standard 200k window.
-func claudeContextWindow(model string) int {
+// override (set from `[projects.agent.options].context_window_tokens`)
+// wins over the model-name heuristic when > 0. This lets operators pin a
+// specific window size for custom routers, fine-tuned models, or non-Claude
+// endpoints whose model id does not match Claude Code's naming scheme.
+func claudeContextWindow(model string, override int) int {
+	if override > 0 {
+		return override
+	}
 	lower := strings.ToLower(strings.TrimSpace(model))
 	if lower == "" {
 		return 200_000

@@ -624,12 +624,19 @@ func TestMgmt_CronExecByID(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 2 {
+		// Delivery precedes MarkRun; wait for persistence before replacing the
+		// agent or allowing TempDir cleanup to race the background writer.
+		_, finished, lastErr := cronJobRunStatus(store, job.ID)
+		if len(platform.getSent()) >= 2 && finished {
+			if lastErr != "" {
+				t.Fatalf("triggered cron exec failed: %s", lastErr)
+			}
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(platform.getSent()) < 2 {
+	_, finished, _ := cronJobRunStatus(store, job.ID)
+	if len(platform.getSent()) < 2 || !finished {
 		t.Fatalf("timed out waiting for triggered cron exec, sent=%v", platform.getSent())
 	}
 
@@ -655,7 +662,11 @@ func TestMgmt_CronExecByID(t *testing.T) {
 
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(platform.getSent()) >= 4 {
+		_, finished, lastErr := cronJobRunStatus(store, aliasJob.ID)
+		if len(platform.getSent()) >= 4 && finished {
+			if lastErr != "" {
+				t.Fatalf("triggered cron run alias failed: %s", lastErr)
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -3008,5 +3019,106 @@ func TestMgmt_SetupWeixinPoll_RejectsMalformedAPIURL(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("api_url=%q: status=%d, want %d (body=%s)", bad, w.Code, http.StatusBadRequest, w.Body.String())
 		}
+	}
+}
+
+func TestMgmt_ProjectWorkspaces_NotMultiWorkspace(t *testing.T) {
+	_, ts, _ := testManagementServer(t, "tok")
+
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok")
+	if r.OK {
+		t.Fatal("expected error for project not in multi-workspace mode")
+	}
+	if !strings.Contains(r.Error, "not in multi-workspace mode") {
+		t.Fatalf("error = %q, want not in multi-workspace mode", r.Error)
+	}
+}
+
+func TestMgmt_ProjectWorkspaces_ListBindUnbind(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	baseDir := t.TempDir()
+	sub := filepath.Join(baseDir, "repo-a")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	// Initially empty, with the unbound subdirectory suggested.
+	r := mgmtGet(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok")
+	if !r.OK {
+		t.Fatalf("list workspaces: %s", r.Error)
+	}
+	var listed struct {
+		Bindings    []map[string]any `json:"bindings"`
+		Suggestions []string         `json:"suggestions"`
+	}
+	if err := json.Unmarshal(r.Data, &listed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(listed.Bindings) != 0 {
+		t.Fatalf("bindings = %#v, want empty", listed.Bindings)
+	}
+	if len(listed.Suggestions) != 1 || !strings.HasSuffix(listed.Suggestions[0], "repo-a") {
+		t.Fatalf("suggestions = %#v, want [.../repo-a]", listed.Suggestions)
+	}
+
+	// Bind the suggested directory to a channel.
+	r = mgmtPost(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok", map[string]string{
+		"channel_key":  "slack:C123",
+		"channel_name": "repo-a-channel",
+		"workspace":    sub,
+	})
+	if !r.OK {
+		t.Fatalf("bind workspace: %s", r.Error)
+	}
+
+	r = mgmtGet(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok")
+	if !r.OK {
+		t.Fatalf("list workspaces after bind: %s", r.Error)
+	}
+	if err := json.Unmarshal(r.Data, &listed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(listed.Bindings) != 1 {
+		t.Fatalf("bindings = %#v, want 1 entry", listed.Bindings)
+	}
+	if listed.Bindings[0]["channel_key"] != "slack:C123" {
+		t.Fatalf("channel_key = %v, want slack:C123", listed.Bindings[0]["channel_key"])
+	}
+	if len(listed.Suggestions) != 0 {
+		t.Fatalf("suggestions = %#v, want empty once bound", listed.Suggestions)
+	}
+
+	// Unbind and confirm it's gone.
+	r = mgmtDelete(t, ts.URL+"/api/v1/projects/test-project/workspaces/slack:C123", "tok")
+	if !r.OK {
+		t.Fatalf("unbind workspace: %s", r.Error)
+	}
+	r = mgmtGet(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok")
+	if err := json.Unmarshal(r.Data, &listed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(listed.Bindings) != 0 {
+		t.Fatalf("bindings after unbind = %#v, want empty", listed.Bindings)
+	}
+}
+
+func TestMgmt_ProjectWorkspaces_BindRejectsPathOutsideBaseDir(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+
+	baseDir := t.TempDir()
+	outside := t.TempDir()
+	e.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
+
+	r := mgmtPost(t, ts.URL+"/api/v1/projects/test-project/workspaces", "tok", map[string]string{
+		"channel_key": "slack:C999",
+		"workspace":   outside,
+	})
+	if r.OK {
+		t.Fatal("expected error binding a workspace outside base_dir")
+	}
+	if !strings.Contains(r.Error, "escapes base_dir") {
+		t.Fatalf("error = %q, want escapes base_dir", r.Error)
 	}
 }

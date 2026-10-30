@@ -397,7 +397,7 @@ func main() {
 
 		workDir, _ := proj.Agent.Options["work_dir"].(string)
 		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
-		effectiveWorkDir := applyProjectStateOverride(proj.Name, agent, workDir, projectState)
+		effectiveWorkDir := applyProjectStateOverrideForMode(proj.Name, agent, workDir, projectState, proj.Mode == "multi-workspace")
 		startInitialRefreshIfReady(agent, providerWiring)
 		sessionFile := sessionStorePath(cfg.DataDir, proj.Name, effectiveWorkDir)
 
@@ -682,6 +682,16 @@ func main() {
 			}
 		}
 
+		// Wire busy-lock stale-break threshold (#1829)
+		if cfg.BusyTimeoutMins != nil {
+			mins := *cfg.BusyTimeoutMins
+			if mins <= 0 {
+				engine.SetStaleLockBreakAfter(0)
+			} else {
+				engine.SetStaleLockBreakAfter(time.Duration(mins) * time.Minute)
+			}
+		}
+
 		// Wire max turn time (absolute per-turn wall-clock cap; 0 = disabled)
 		if cfg.MaxTurnTimeMins != nil && *cfg.MaxTurnTimeMins > 0 {
 			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)
@@ -702,7 +712,7 @@ func main() {
 			if maxTokens <= 0 {
 				maxTokens = 12000
 			}
-			engine.SetAutoCompressConfig(true, maxTokens, minGap)
+			engine.SetAutoCompressConfigWithSource(true, maxTokens, minGap, proj.AutoCompress.AllowHeuristic)
 		}
 		resetIdle, defaulted := resolveResetOnIdle(proj.ResetOnIdleMins)
 		engine.SetResetOnIdle(resetIdle)
@@ -1174,6 +1184,8 @@ func main() {
 				ReplyFooter:          u.ReplyFooter,
 				InjectSender:         u.InjectSender,
 				PlatformAllowFrom:    u.PlatformAllowFrom,
+				WorkspaceMode:        u.WorkspaceMode,
+				WorkspaceBaseDir:     u.WorkspaceBaseDir,
 			})
 		})
 		mgmtSrv.SetGetProjectConfig(config.GetProjectConfigDetails)
@@ -1493,8 +1505,27 @@ func projectStatePath(dataDir, projectName string) string {
 }
 
 func applyProjectStateOverride(projectName string, agent core.Agent, configuredWorkDir string, store *core.ProjectStateStore) string {
+	return applyProjectStateOverrideForMode(projectName, agent, configuredWorkDir, store, false)
+}
+
+// applyProjectStateOverrideForMode applies a project-wide work_dir_override
+// recorded by /dir.
+//
+// In single-workspace mode the project has one agent and one directory, so the
+// override is applied to it. In multi-workspace mode the directory is resolved
+// per topic from the binding table and each workspace gets its own agent, so a
+// leftover project-wide override is ignored: pushing it onto the global agent
+// would shadow every binding and make /status report one directory for all
+// topics.
+func applyProjectStateOverrideForMode(projectName string, agent core.Agent, configuredWorkDir string, store *core.ProjectStateStore, multiWorkspace bool) string {
 	effectiveWorkDir := configuredWorkDir
 	if store == nil {
+		return effectiveWorkDir
+	}
+
+	if override := store.WorkDirOverride(); override != "" && multiWorkspace {
+		slog.Info("project_state: ignoring project-wide work_dir override in multi-workspace mode; directories come from workspace bindings",
+			"project", projectName, "work_dir", override)
 		return effectiveWorkDir
 	}
 
@@ -1529,14 +1560,47 @@ func resolveClaudeProjectDir(workDir string) string {
 	if err != nil {
 		return ""
 	}
-	// Claude Code encodes paths by replacing os.PathSeparator with "-"
-	// e.g. /home/leigh/workspace/cc-connect -> -home-leigh-workspace-cc-connect
-	encoded := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
-	dir := filepath.Join(homeDir, ".claude", "projects", encoded)
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return ""
+	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	// Claude Code encodes paths by replacing '/', ':', '_', ' ', '~' and any
+	// non-ASCII rune with '-'. Replacing only os.PathSeparator misses common
+	// workdir shapes (snake_case dirs, spaces, '~/Library/Mobile Documents/...',
+	// non-ASCII directory names), causing the observer to silently disable.
+	encoded := encodeClaudeProjectKey(workDir)
+	dir := filepath.Join(projectsBase, encoded)
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return dir
 	}
-	return dir
+	// Fall back to the legacy encoding for backward compatibility with on-disk
+	// project keys created before the encoder above.
+	legacy := strings.ReplaceAll(workDir, string(os.PathSeparator), "-")
+	if legacy != encoded {
+		dir = filepath.Join(projectsBase, legacy)
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	return ""
+}
+
+// encodeClaudeProjectKey mirrors agent/claudecode.encodeClaudeProjectKey: it
+// normalizes backslashes to forward slashes, then replaces '/', ':', '_', ' ',
+// '~' and non-ASCII runes with '-'. Kept in sync manually because the agent
+// helper is unexported.
+func encodeClaudeProjectKey(absPath string) string {
+	normalized := strings.ReplaceAll(absPath, "\\", "/")
+	var b strings.Builder
+	b.Grow(len(normalized))
+	for _, r := range normalized {
+		switch {
+		case r == '/' || r == ':' || r == '_' || r == ' ' || r == '~':
+			b.WriteByte('-')
+		case r < 128:
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
 // resolveConfigPath determines which config file to use.
@@ -1782,7 +1846,7 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		if maxTokens <= 0 {
 			maxTokens = 12000
 		}
-		engine.SetAutoCompressConfig(true, maxTokens, minGap)
+		engine.SetAutoCompressConfigWithSource(true, maxTokens, minGap, proj.AutoCompress.AllowHeuristic)
 	} else {
 		engine.SetAutoCompressConfig(false, 0, 0)
 	}
