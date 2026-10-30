@@ -118,7 +118,9 @@ func (q *unsolicitedQuestions) withdraw() {
 	slog.Info("unsolicited: questions withdrawn", "request_ids", ids)
 	// RespondPermission may make a slow adapter call, and the reader is on
 	// its way out (stopUnsolicitedReader waits for it with a bound), so the
-	// denials are sent off the reader goroutine.
+	// denials are sent off the reader goroutine. This goroutine may outlive
+	// the reader and the next turn may start before a denial arrives; request
+	// IDs scope each response to the old question, not the new turn.
 	agentSession := q.agentSession
 	go func() {
 		for _, id := range ids {

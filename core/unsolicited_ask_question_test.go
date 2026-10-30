@@ -118,6 +118,23 @@ func waitForPending(t *testing.T, state *interactiveState, id string) *pendingPe
 	}
 }
 
+// waitForQuestionReader sends a result behind the queued questions. Seeing it
+// on the platform proves the reader has processed every preceding event, even
+// on a loaded runner; inspecting the reader-owned queue would race.
+func waitForQuestionReader(t *testing.T, p *stubPlatformEngine, session *questionSession) {
+	t.Helper()
+	const marker = "question-reader-barrier"
+	session.events <- Event{Type: EventResult, Content: marker, Done: true}
+	deadline := time.After(5 * time.Second)
+	for !strings.Contains(strings.Join(p.getSent(), "\n"), marker) {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for the question reader to process queued events")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func answer(e *Engine, p *stubPlatformEngine, content string) bool {
 	return e.handlePendingPermission(p, &Message{SessionKey: questionKey, ReplyCtx: "ctx"}, content, questionKey)
 }
@@ -209,7 +226,7 @@ func TestUnsolicitedReader_AsksQuestionsOneAtATime(t *testing.T) {
 	agentSession.events <- backgroundQuestion("q2", "Second?")
 	waitForPending(t, state, "q1")
 
-	time.Sleep(50 * time.Millisecond) // let q2 reach the reader
+	waitForQuestionReader(t, p, agentSession)
 	if strings.Contains(strings.Join(p.getSent(), "\n"), "Second?") {
 		t.Fatal("second question shown while the first waits")
 	}
@@ -227,11 +244,11 @@ func TestUnsolicitedReader_AsksQuestionsOneAtATime(t *testing.T) {
 // When the reader exits before the user answers, the shown and the queued
 // questions are withdrawn so the agent is not left waiting on them.
 func TestUnsolicitedReader_WithdrawsUnansweredQuestionsOnExit(t *testing.T) {
-	e, _, agentSession, state := startUnsolicitedQuestionTest(t, false)
+	e, p, agentSession, state := startUnsolicitedQuestionTest(t, false)
 	agentSession.events <- backgroundQuestion("q1", "First?")
 	agentSession.events <- backgroundQuestion("q2", "Second?")
 	pending := waitForPending(t, state, "q1")
-	time.Sleep(50 * time.Millisecond) // let q2 queue
+	waitForQuestionReader(t, p, agentSession)
 
 	e.stopUnsolicitedReader(state)
 
