@@ -75,20 +75,13 @@ func TestFetchModelsFromAgentCLI_FailsGracefully(t *testing.T) {
 	}
 }
 
-func TestAvailableModels_Fallback(t *testing.T) {
-	// When agent models fails, should fall back to hardcoded list
+func TestAvailableModels_DoesNotInventFallbackModels(t *testing.T) {
 	ctx, cancel := shortTestContext(t)
 	defer cancel()
 	a := &Agent{cmd: "nonexistent-cmd-that-will-fail"}
 	models := a.AvailableModels(ctx)
-	fallback := cursorFallbackModels()
-	if len(models) != len(fallback) {
-		t.Fatalf("fallback models length = %d, want %d", len(models), len(fallback))
-	}
-	for i := range models {
-		if models[i].Name != fallback[i].Name {
-			t.Errorf("models[%d].Name = %q, want %q", i, models[i].Name, fallback[i].Name)
-		}
+	if len(models) != 0 {
+		t.Fatalf("a failed CLI lookup must not offer a guessed model list: %v", models)
 	}
 }
 
