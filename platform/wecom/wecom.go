@@ -275,10 +275,14 @@ func (p *Platform) handleVerify(w http.ResponseWriter, msgSig, timestamp, nonce,
 
 // wecomLogXMLPreview returns a short prefix of XML for debug only (may contain user content).
 func wecomLogXMLPreview(s string, max int) string {
-	if max <= 0 || len(s) <= max {
+	if max <= 0 {
 		return s
 	}
-	return s[:max] + "…"
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…"
 }
 
 // handleMessage processes incoming encrypted message POSTs.
