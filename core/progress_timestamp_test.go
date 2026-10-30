@@ -118,3 +118,55 @@ func TestProcessInteractiveEvents_RecordsStableRichStepTimestamps(t *testing.T) 
 		t.Fatalf("result without a tool-use row needs its own occurrence time: %+v", orphan)
 	}
 }
+
+func TestCompactProgressWriter_PreservesSeparateToolOccurrenceTimes(t *testing.T) {
+	start := time.Date(2026, 10, 23, 14, 3, 7, 0, time.FixedZone("UTC+8", 8*60*60))
+	for _, payload := range []bool{true, false} {
+		p := &previewCapturePlatform{}
+		w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{
+			style: progressStyleCard, payload: payload,
+		}, "codex", LangEnglish, nil)
+		w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Timestamp: start}, "Bash started")
+		w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolResult, Tool: "Bash", Timestamp: start.Add(30 * time.Second)}, "Bash completed")
+		w.Finalize(ProgressCardStateCompleted)
+		if payload {
+			parsed, ok := ParseProgressCardPayload(w.content)
+			if !ok || len(parsed.Items) != 2 {
+				t.Fatalf("unexpected payload: %s", w.content)
+			}
+			for i, item := range parsed.Items {
+				if !item.Timestamp.Equal(start.Add(time.Duration(i) * 30 * time.Second)) {
+					t.Fatalf("row %d lost its occurrence time: %+v", i, item)
+				}
+			}
+		} else {
+			for _, want := range []string{"14:03:07 · Bash started", "14:03:37 · Bash completed"} {
+				if !strings.Contains(w.content, want) {
+					t.Fatalf("missing occurrence row %q: %s", want, w.content)
+				}
+			}
+		}
+	}
+}
+
+func TestCompactProgressWriter_ToolResultGetsArrivalTime(t *testing.T) {
+	p := &previewCapturePlatform{}
+	w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{
+		style: progressStyleCard, payload: true,
+	}, "codex", LangEnglish, nil)
+	start := time.Now().Add(-time.Minute)
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Timestamp: start}, "Bash started")
+	beforeResult := time.Now()
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolResult, Tool: "Bash"}, "Bash completed")
+	afterResult := time.Now()
+	parsed, ok := ParseProgressCardPayload(w.content)
+	if !ok || len(parsed.Items) != 2 {
+		t.Fatalf("unexpected payload: %s", w.content)
+	}
+	if !parsed.Items[0].Timestamp.Equal(start) {
+		t.Fatalf("tool-use time changed: %+v", parsed.Items[0])
+	}
+	if at := parsed.Items[1].Timestamp; at.Before(beforeResult) || at.After(afterResult) {
+		t.Fatalf("result time %v is outside arrival interval [%v, %v]", at, beforeResult, afterResult)
+	}
+}

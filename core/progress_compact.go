@@ -412,6 +412,8 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 
 	switch w.style {
 	case progressStyleCard:
+		// Structured tool use and result are separate occurrence rows: the result
+		// records its own arrival time, unlike an in-place rich-card update.
 		if item.Timestamp.IsZero() {
 			item.Timestamp = time.Now()
 		}
