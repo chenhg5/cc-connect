@@ -2957,14 +2957,13 @@ func extractInteractiveCardText(content string) string {
 	// Schema 2.0: body may use property.elements (standard) or direct elements (simplified).
 	if raw, ok := card["body"]; ok {
 		var body struct {
-			Tag      string            `json:"tag"`
 			Elements []json.RawMessage `json:"elements"`
 			Property struct {
 				Elements []json.RawMessage `json:"elements"`
 			} `json:"property"`
 		}
 		if json.Unmarshal(raw, &body) == nil {
-			if body.Tag == "body" && len(body.Property.Elements) > 0 {
+			if len(body.Property.Elements) > 0 {
 				extractCardElements(body.Property.Elements, &parts)
 			} else if len(body.Elements) > 0 {
 				extractCardElements(body.Elements, &parts)
@@ -3003,15 +3002,7 @@ func extractInteractiveCardText(content string) string {
 				_ = json.Unmarshal(raw, &elements)
 			}
 		}
-		for _, raw := range elements {
-			var elem struct {
-				Tag  string `json:"tag"`
-				Text string `json:"text"`
-			}
-			if json.Unmarshal(raw, &elem) == nil && elem.Tag == "text" && strings.TrimSpace(elem.Text) != "" {
-				parts = append(parts, elem.Text)
-			}
-		}
+		extractCardElements(elements, &parts)
 	}
 
 	if len(parts) == 0 {
@@ -3026,10 +3017,21 @@ func extractInteractiveCardText(content string) string {
 func extractCardElements(elements []json.RawMessage, parts *[]string) {
 	for _, raw := range elements {
 		var elem struct {
-			Tag      string `json:"tag"`
-			Content  string `json:"content"`
+			Tag       string          `json:"tag"`
+			Content   string          `json:"content"`
+			Text      json.RawMessage `json:"text"`
+			Href      string          `json:"href"`
+			URL       string          `json:"url"`
+			Behaviors json.RawMessage `json:"behaviors"`
+			MultiURL  *struct {
+				URL        string `json:"url"`
+				PCURL      string `json:"pc_url"`
+				AndroidURL string `json:"android_url"`
+				IOSURL     string `json:"ios_url"`
+			} `json:"multi_url"`
 			Property struct {
 				Content   string            `json:"content"`
+				URL       cardLinkURL       `json:"url"`
 				Contents  json.RawMessage   `json:"contents"`
 				Language  string            `json:"language"`
 				Elements  []json.RawMessage `json:"elements"`
@@ -3038,36 +3040,94 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 				Columns   json.RawMessage   `json:"columns"`
 				Rows      json.RawMessage   `json:"rows"`
 				Behaviors json.RawMessage   `json:"behaviors"`
+				Actions   json.RawMessage   `json:"actions"`
 			} `json:"property"`
 		}
 		if json.Unmarshal(raw, &elem) != nil {
 			continue
 		}
+		if len(elem.Property.Text) == 0 {
+			elem.Property.Text = elem.Text
+		}
+		if len(elem.Property.Behaviors) == 0 {
+			elem.Property.Behaviors = elem.Behaviors
+		}
+		if elem.Property.Content == "" {
+			elem.Property.Content = elem.Content
+		}
 		switch elem.Tag {
+		case "a", "link":
+			label := elem.Property.Content
+			if label == "" {
+				label = cardTextContent(elem.Property.Text)
+			}
+			if label == "" {
+				label = cardTextContent(elem.Text)
+			}
+			url := string(elem.Property.URL)
+			if url == "" {
+				url = elem.Href
+			}
+			if url == "" {
+				url = elem.URL
+			}
+			if url == "" && elem.MultiURL != nil {
+				url = elem.MultiURL.URL
+				if url == "" {
+					url = elem.MultiURL.PCURL
+				}
+				if url == "" {
+					url = elem.MultiURL.AndroidURL
+				}
+				if url == "" {
+					url = elem.MultiURL.IOSURL
+				}
+			}
+			switch {
+			case label != "" && url != "":
+				// Avoid double-wrapping labels that are already markdown links.
+				if strings.HasPrefix(label, "[") && strings.Contains(label, "](") {
+					*parts = append(*parts, label)
+				} else {
+					*parts = append(*parts, cardMarkdownLink(label, url))
+				}
+			case label != "":
+				*parts = append(*parts, label)
+			case url != "":
+				*parts = append(*parts, url)
+			}
 		case "button":
 			// Extract button label text and open_url from behaviors.
 			label := elem.Property.Content
 			if label == "" {
-				// label may be in property.text.property.content
-				var textElem struct {
-					Property struct {
-						Content string `json:"content"`
-					} `json:"property"`
-				}
-				if json.Unmarshal(elem.Property.Text, &textElem) == nil {
-					label = textElem.Property.Content
-				}
+				label = cardTextContent(elem.Property.Text)
+			}
+			if len(elem.Property.Behaviors) == 0 {
+				elem.Property.Behaviors = elem.Property.Actions
 			}
 			var openURL string
 			if len(elem.Property.Behaviors) > 0 {
 				var behaviors []struct {
-					Type string `json:"type"`
-					URL  string `json:"url"`
+					Type       string `json:"type"`
+					URL        string `json:"url"`
+					DefaultURL string `json:"default_url"`
+					Action     struct {
+						URL string `json:"url"`
+					} `json:"action"`
 				}
 				if json.Unmarshal(elem.Property.Behaviors, &behaviors) == nil {
 					for _, b := range behaviors {
-						if b.Type == "open_url" && b.URL != "" {
+						if b.Type == "open_url" || b.Type == "openUrl" {
 							openURL = b.URL
+							if openURL == "" {
+								openURL = b.DefaultURL
+							}
+							if openURL == "" {
+								openURL = b.Action.URL
+							}
+							if openURL == "" {
+								continue
+							}
 							break
 						}
 					}
@@ -3121,15 +3181,8 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 			if content != "" {
 				*parts = append(*parts, content)
 			}
-			if len(elem.Property.Text) > 0 {
-				var textElem struct {
-					Property struct {
-						Content string `json:"content"`
-					} `json:"property"`
-				}
-				if json.Unmarshal(elem.Property.Text, &textElem) == nil && textElem.Property.Content != "" {
-					*parts = append(*parts, textElem.Property.Content)
-				}
+			if c := cardTextContent(elem.Property.Text); c != "" {
+				*parts = append(*parts, c)
 			}
 		}
 		if len(elem.Property.Elements) > 0 {
