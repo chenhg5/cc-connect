@@ -23,6 +23,7 @@ func (u *cardLinkURL) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
+// cardTextContent preserves lark_md markup, including labels that are already links.
 func cardTextContent(raw json.RawMessage) string {
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
@@ -43,9 +44,9 @@ func cardTextContent(raw json.RawMessage) string {
 	return elem.Content
 }
 
-// cardMarkdownLink escapes delimiters without changing already-encoded URLs.
+// cardMarkdownLink escapes label delimiters but keeps the destination byte-identical.
+// Quoted card text is sent to the agent as plain text, not through a Markdown renderer.
 func cardMarkdownLink(label, url string) string {
 	label = strings.NewReplacer(`\`, `\\`, `[`, `\[`, `]`, `\]`).Replace(label)
-	url = strings.NewReplacer(`\`, `\\`, `(`, `\(`, `)`, `\)`).Replace(url)
 	return "[" + label + "](" + url + ")"
 }

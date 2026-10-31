@@ -19,6 +19,7 @@ func TestQuotedInteractiveCardPreservesLinks(t *testing.T) {
 		wantContains          string
 	}{
 		{"card1_lark_md", `{"header":{"title":{"content":"Issue 42"}},"elements":[{"tag":"div","text":{"tag":"lark_md","content":"` + link + `"}}]}`, "", link},
+		{"parentheses_url_preserved_for_agent", `{"elements":[{"tag":"a","text":"QSim","href":"https://en.wikipedia.org/wiki/Foo_(bar)"}]}`, "[QSim](https://en.wikipedia.org/wiki/Foo_(bar))", "https://en.wikipedia.org/wiki/Foo_(bar)"},
 		{"card2_markdown", `{"schema":"2.0","body":{"elements":[{"tag":"markdown","content":"` + link + `"}]}}`, link, link},
 		{"raw_button_actions", `{"body":{"property":{"elements":[{"tag":"button","property":{"text":{"tag":"plain_text","property":{"content":"QSim"}},"actions":[{"type":"open_url","action":{"url":"https://example.com/issues/42?run=1&view=full"}}]}}]}}}`, link, link},
 		{"raw_link", `{"body":{"property":{"elements":[{"tag":"link","property":{"content":"QSim","url":{"url":"https://example.com/issues/42?run=1&view=full"}}}]}}}`, link, link},
@@ -93,15 +94,17 @@ func TestQuotedInteractiveCardEmptyPropertyTextFallsBack(t *testing.T) {
 	}
 }
 
-func TestQuotedInteractiveCardEscapesMarkdownLink(t *testing.T) {
+func TestQuotedInteractiveCardEscapesLabelAndPreservesURL(t *testing.T) {
 	cases := []struct {
 		label, url, want string
 	}{
 		{"Q]Sim", "https://example.com/x", `[Q\]Sim](https://example.com/x)`},
 		{"Q[Sim", "https://example.com/x", `[Q\[Sim](https://example.com/x)`},
 		{`Q\Sim`, "https://example.com/x", `[Q\\Sim](https://example.com/x)`},
-		{"QSim", "https://example.com/a)b", `[QSim](https://example.com/a\)b)`},
-		{"QSim", "https://example.com/a(b", `[QSim](https://example.com/a\(b)`},
+		{"QSim", "https://example.com/a)b", `[QSim](https://example.com/a)b)`},
+		{"QSim", "https://example.com/a(b", `[QSim](https://example.com/a(b)`},
+		{"QSim", "https://en.wikipedia.org/wiki/Foo_(bar)", `[QSim](https://en.wikipedia.org/wiki/Foo_(bar))`},
+		{"QSim", "https://example.com/a%28b%29c", `[QSim](https://example.com/a%28b%29c)`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.label+"/"+tc.url, func(t *testing.T) {
