@@ -738,6 +738,8 @@ type pendingPermission struct {
 	resolveOnce     sync.Once
 	respondMu       sync.Mutex // serializes callbacks and multi-question answers
 	responding      bool       // guarded by interactiveState.mu
+	retryable       bool       // failed receipt; guarded by interactiveState.mu
+	retryContent    string     // last attempted answer; guarded by respondMu
 }
 
 func (s *interactiveState) stopSignal() <-chan struct{} {
@@ -3642,13 +3644,36 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		return false
 	}
 found:
-	pending.respondMu.Lock()
-	defer pending.respondMu.Unlock()
+	// A slow adapter response must not serialize later message handlers behind
+	// an unbounded transport call. Only one callback owns the answer at a time.
+	if !pending.respondMu.TryLock() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionSubmitting))
+		return true
+	}
+	releaseResponseLock := sync.OnceFunc(pending.respondMu.Unlock)
+	defer releaseResponseLock()
 	state.mu.Lock()
 	current := state.pending == pending && !state.stopped
+	retryable := pending.retryable
+	responding := pending.responding
 	state.mu.Unlock()
-	if !current {
+	if responding {
+		releaseResponseLock()
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionSubmitting))
 		return true
+	}
+	if !current {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionStale))
+		return true
+	}
+
+	// After a failed receipt, keep an explicit retry available without
+	// interpreting every subsequent message as an answer. A repeated answer
+	// or a fresh option click retries; unrelated text follows normal queuing.
+	if retryable && len(pending.Questions) > 0 && !msg.IsPermissionResponse {
+		if _, _, callback := parseAskQuestionCallback(content); !callback && strings.TrimSpace(content) != pending.retryContent {
+			return false
+		}
 	}
 
 	// An option click from an AskUserQuestion card is never a permission
@@ -3691,14 +3716,17 @@ found:
 		// All questions answered — build response and resolve
 		updatedInput := buildAskQuestionResponse(pending.ToolInput, pending.Questions, pending.Answers)
 
+		pending.retryContent = strings.TrimSpace(content)
 		if submitted, err := respondPendingPermission(state, pending, PermissionResult{
 			Behavior:     "allow",
 			UpdatedInput: updatedInput,
-		}, false); err != nil {
+		}, false, releaseResponseLock); err != nil {
 			slog.Error("failed to send AskUserQuestion response", "error", err)
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 		} else if submitted {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf("✅ %s: **%s**", q.Question, answer))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionStale))
 		}
 		return true
 	}
@@ -3715,47 +3743,66 @@ found:
 		result = PermissionResult{Behavior: "deny", Message: "User denied this tool use."}
 		confirmation = MsgPermissionDenied
 	case !isAllowResponse(lower):
+		if retryable && !msg.IsPermissionResponse {
+			return false
+		}
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionHint))
 		return true
 	}
 
-	if submitted, err := respondPendingPermission(state, pending, result, approveAll); err != nil {
+	if submitted, err := respondPendingPermission(state, pending, result, approveAll, releaseResponseLock); err != nil {
 		slog.Error("failed to send permission response", "error", err)
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 	} else if submitted {
 		if _, hasButtons := p.(InlineButtonSender); confirmation != MsgPermissionAllowed || !hasButtons {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(confirmation))
 		}
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPermissionStale))
 	}
 	return true
 }
 
-// Keep the request available for retry and session cleanup until the adapter
-// acknowledges it. Withdrawal and a successful response cannot both own it.
-func respondPendingPermission(state *interactiveState, pending *pendingPermission, result PermissionResult, approveAll bool) (bool, error) {
+// Reserve the request while delivering its response. A failed receipt leaves
+// a live request retryable, but always releases the foreground reader so it
+// can consume terminal events, restart its idle timer, and queue new work.
+// Withdrawal and a successful response cannot both own the request.
+func respondPendingPermission(state *interactiveState, pending *pendingPermission, result PermissionResult, approveAll bool, releaseResponseLock func()) (bool, error) {
 	state.mu.Lock()
 	if state.pending != pending || state.stopped || pending.responding || state.agentSession == nil {
+		inactive := state.pending != pending || state.stopped || state.agentSession == nil
+		if inactive && state.pending == pending {
+			state.pending = nil
+		}
 		state.mu.Unlock()
+		if inactive {
+			pending.resolve()
+		}
 		return false, nil
 	}
 	pending.responding = true
 	agentSession := state.agentSession
 	state.mu.Unlock()
+	// The state flag owns delivery now; release answer mutation protection
+	// before an adapter can block. A second callback gets an acknowledgement.
+	releaseResponseLock()
 
 	err := agentSession.RespondPermission(pending.RequestID, result)
+	alive := agentSession.Alive()
 	state.mu.Lock()
 	pending.responding = false
-	accepted := err == nil && state.pending == pending
-	if accepted {
-		state.pending = nil
-		if approveAll {
-			state.approveAll = true
+	accepted := err == nil && state.pending == pending && !state.stopped
+	if state.pending == pending {
+		pending.retryable = err != nil && alive && !state.stopped
+		if !pending.retryable {
+			state.pending = nil
 		}
 	}
-	state.mu.Unlock()
-	if accepted {
-		pending.resolve()
+	if accepted && approveAll {
+		state.approveAll = true
 	}
+	state.mu.Unlock()
+	pending.resolve()
 	return accepted, err
 }
 
@@ -5430,6 +5477,22 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 	}
 
+	// Foreground retries expire with their turn, independently of the shared
+	// slot used by unsolicited questions. Never withdraw a replacement.
+	var foregroundPending *pendingPermission
+	clearForegroundPending := func() {
+		if foregroundPending == nil {
+			return
+		}
+		state.mu.Lock()
+		if state.pending == foregroundPending {
+			state.pending = nil
+		}
+		state.mu.Unlock()
+		foregroundPending.resolve()
+		foregroundPending = nil
+	}
+	defer clearForegroundPending()
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
@@ -6151,6 +6214,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				Questions:    event.Questions,
 				Resolved:     make(chan struct{}),
 			}
+			clearForegroundPending()
+			foregroundPending = pending
 			state.mu.Lock()
 			state.pending = pending
 			state.mu.Unlock()
@@ -6174,8 +6239,22 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				idleTimer.Stop()
 			}
 
-			<-pending.Resolved
+			select {
+			case <-pending.Resolved:
+			case <-stopCh:
+				return
+			case <-e.ctx.Done():
+				return
+			}
 			slog.Info("permission resolved", "request_id", event.RequestID)
+			state.mu.Lock()
+			agentSession := state.agentSession
+			state.mu.Unlock()
+			if agentSession == nil || !agentSession.Alive() {
+				sp.discard()
+				e.cleanupInteractiveState(sessionKey, state)
+				return
+			}
 
 			// The stream preview was frozen+detached when this permission
 			// request was emitted, so any subsequent EventText in this turn
@@ -6207,6 +6286,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				)
 				continue
 			}
+			clearForegroundPending()
 			cp.Finalize(ProgressCardStateCompleted)
 			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
