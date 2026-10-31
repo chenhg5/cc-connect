@@ -225,6 +225,8 @@ const (
 	MsgPermissionApproveAll      MsgKey = "permission_approve_all"
 	MsgPermissionDenied          MsgKey = "permission_denied_msg"
 	MsgPermissionHint            MsgKey = "permission_hint"
+	MsgPermissionStale           MsgKey = "permission_stale"
+	MsgPermissionSubmitting      MsgKey = "permission_submitting"
 	MsgQuietOn                   MsgKey = "quiet_on"
 	MsgQuietOff                  MsgKey = "quiet_off"
 	MsgDisplayModeCompact        MsgKey = "display_mode_compact"
@@ -928,6 +930,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 已拒絕。Agent 將停止此工具使用。",
 		LangJapanese:           "❌ 拒否しました。エージェントはこのツールの使用を中止します。",
 		LangSpanish:            "❌ Denegado. El agente detendrá el uso de esta herramienta.",
+	},
+	MsgPermissionStale: {
+		LangEnglish:            "⚠️ This request is no longer active.",
+		LangChinese:            "⚠️ 这个请求已失效。",
+		LangTraditionalChinese: "⚠️ 這個請求已失效。",
+		LangJapanese:           "⚠️ このリクエストは無効になっています。",
+		LangSpanish:            "⚠️ Esta solicitud ya no está activa.",
+	},
+	MsgPermissionSubmitting: {
+		LangEnglish:            "⏳ A response to this request is already being sent. Please wait for its result.",
+		LangChinese:            "⏳ 正在发送这个请求的回复，请等待结果。",
+		LangTraditionalChinese: "⏳ 正在傳送這個請求的回覆，請等待結果。",
+		LangJapanese:           "⏳ このリクエストへの回答を送信中です。結果をお待ちください。",
+		LangSpanish:            "⏳ Ya se está enviando una respuesta a esta solicitud. Espera el resultado.",
 	},
 	MsgPermissionHint: {
 		LangEnglish:            "⚠️ Waiting for permission response. Reply **allow** / **deny** / **allow all**.",
