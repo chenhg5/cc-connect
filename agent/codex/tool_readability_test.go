@@ -16,7 +16,9 @@ func TestAppServerToolReadability_PreservesOutputTail(t *testing.T) {
 		"status": "completed", "exitCode": float64(1), "aggregatedOutput": output,
 	})
 	event := <-s.events
-	if event.ToolResult != output { t.Fatal("adapter truncated output before the configured display policy") }
+	if event.ToolResult != output {
+		t.Fatal("adapter truncated output before the configured display policy")
+	}
 	if event.Type != core.EventToolResult || !strings.Contains(event.ToolResult, "START") || !strings.Contains(event.ToolResult, "FAIL: missing dependency") {
 		t.Fatalf("lost actionable output: %#v", event)
 	}
