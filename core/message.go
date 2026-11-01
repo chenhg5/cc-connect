@@ -516,6 +516,11 @@ type Event struct {
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 	ModelSwitch              *ModelSwitch   // populated for EventModelSwitch
+	// TriggerSource reports what caused the agent to run this turn, when the
+	// agent knows it (e.g. "subagent", "task_notification"). Empty means
+	// "unknown" — see trigger_source.go for the vocabulary and for how core
+	// falls back to what it knows itself.
+	TriggerSource string
 }
 
 // HistoryEntry is one turn in a conversation.

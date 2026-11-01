@@ -148,6 +148,26 @@ jobs:
       - name: Run smoke tests
         run: go test -v -tags=smoke,no_web ./tests/e2e/...
 
+  # The integration package is behind the `integration` build tag, so none of
+  # the jobs above compile it — it could rot (or panic) without CI noticing.
+  # Tests that need a real agent CLI skip themselves when the binary or its
+  # API key is missing, so this job needs no agent credentials.
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: unit-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run integration tests
+        run: go test -v -race -tags=integration,no_web ./tests/integration/...
+
   regression-test:
     runs-on: ubuntu-latest
     needs: smoke-test
