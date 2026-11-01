@@ -104,22 +104,37 @@ func toolInputPreview(text string, maxRunes int) string {
 	if maxRunes <= 0 || utf8.RuneCountInString(text) <= maxRunes {
 		return text
 	}
-	var fields map[string]any
+	var value any
 	decoder := json.NewDecoder(strings.NewReader(text))
 	decoder.UseNumber()
-	if decoder.Decode(&fields) != nil || fields == nil {
+	if !json.Valid([]byte(text)) || decoder.Decode(&value) != nil {
 		return TruncateToolOutput(text, maxRunes)
 	}
-	for key, value := range fields {
-		if s, ok := value.(string); ok {
-			fields[key] = TruncateToolOutput(s, maxRunes)
-		}
-	}
-	encoded, err := json.Marshal(fields)
+	encoded, err := json.Marshal(truncateToolInputValue(value, maxRunes))
 	if err != nil {
 		return TruncateToolOutput(text, maxRunes)
 	}
 	return string(encoded)
+}
+
+// Preserve JSON containers and scalar types while bounding every text leaf.
+func truncateToolInputValue(value any, maxRunes int) any {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, field := range value {
+			value[key] = truncateToolInputValue(field, maxRunes)
+		}
+		return value
+	case []any:
+		for i := range value {
+			value[i] = truncateToolInputValue(value[i], maxRunes)
+		}
+		return value
+	case string:
+		return TruncateToolOutput(value, maxRunes)
+	default:
+		return value
+	}
 }
 
 // toolCallID also accepts older adapters that already attach protocol IDs to
