@@ -26,7 +26,7 @@ func TestToolReadability_MergedDiscordResultKeepsCommand(t *testing.T) {
 		}
 		descriptions = append(descriptions, payload.Embeds[0].Description)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"id":"preview","channel_id":"channel"}`)
+		_, _ = fmt.Fprint(w, `{"id":"preview","channel_id":"channel"}`)
 	}))
 	defer server.Close()
 	p := &Platform{session: newTestDiscordSession(t, server), progressStyle: "card"}
