@@ -510,6 +510,9 @@ func main() {
 		// Wire global custom commands
 		for _, c := range cfg.Commands {
 			engine.AddCommand(c.Name, c.Description, c.Prompt, c.Exec, c.WorkDir, "config")
+			if c.Quiet {
+				engine.MarkCommandQuiet(c.Name)
+			}
 		}
 
 		// Wire command persistence callbacks
@@ -1906,6 +1909,9 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 	engine.ClearCommands("config")
 	for _, c := range cfg.Commands {
 		engine.AddCommand(c.Name, c.Description, c.Prompt, c.Exec, c.WorkDir, "config")
+		if c.Quiet {
+			engine.MarkCommandQuiet(c.Name)
+		}
 	}
 	result.CommandsUpdated = len(cfg.Commands)
 
