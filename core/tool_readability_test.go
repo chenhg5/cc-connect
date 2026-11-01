@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -247,5 +248,75 @@ func TestToolReadability_JSONPreviewPreservesLargeNumbers(t *testing.T) {
 	input := `{"request_id":9007199254740993,"command":"` + strings.Repeat("x", 100) + `"}`
 	if got := toolInputPreview(input, 40); !json.Valid([]byte(got)) || !strings.Contains(got, "9007199254740993") {
 		t.Fatalf("JSON number changed: %q", got)
+	}
+}
+
+func TestToolReadability_EngineBoundsNestedInputInCompletedRow(t *testing.T) {
+	p := &stubCompactProgressPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}, style: "card", supportPayload: true}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{ToolMessages: true, ToolMaxLen: 500, Mode: "full"})
+	key := "feishu:nested-input"
+	session := e.sessions.GetOrCreateActive(key)
+	agentSession := newControllableSession("nested-input")
+	state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "nested-input"}
+	e.interactiveStates[key] = state
+	query := "HEAD" + strings.Repeat("界", 60000) + "TAIL"
+	input, err := json.Marshal(map[string]any{"queries": []any{map[string]any{"query": query}}, "request_id": json.Number("9007199254740993")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentSession.events <- Event{Type: EventToolUse, ToolName: "mcp:batch_search", ToolCallID: "nested", ToolInput: string(input)}
+	agentSession.events <- Event{Type: EventToolResult, ToolName: "mcp:batch_search", ToolCallID: "nested", Content: "result"}
+	agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+	e.processInteractiveEvents(state, session, e.sessions, key, "nested-message", time.Now(), nil, nil, state.replyCtx, 0)
+	var completedInput string
+	for _, edit := range p.getPreviewEdits() {
+		if payload, ok := ParseProgressCardPayload(edit); ok {
+			for _, item := range payload.Items {
+				if item.Kind == ProgressEntryToolResult && item.ToolCallID == "nested" {
+					completedInput = item.Input
+				}
+			}
+		}
+	}
+	var got struct {
+		Queries []struct {
+			Query string `json:"query"`
+		} `json:"queries"`
+		RequestID json.Number `json:"request_id"`
+	}
+	if err := json.Unmarshal([]byte(completedInput), &got); err != nil || len(got.Queries) != 1 {
+		t.Fatalf("invalid completed JSON: %v, bytes=%d", err, len(completedInput))
+	}
+	preview := got.Queries[0].Query
+	if utf8.RuneCountInString(preview) > 500 || !strings.HasPrefix(preview, "HEAD") || !strings.HasSuffix(preview, "TAIL") || !strings.Contains(preview, "\n…\n") {
+		t.Fatalf("nested preview unbounded or lost head/tail: runes=%d", utf8.RuneCountInString(preview))
+	}
+	if got.RequestID.String() != "9007199254740993" {
+		t.Fatalf("number changed: %s", got.RequestID)
+	}
+}
+
+func TestToolReadability_NestedInputPreviewKeepsJSONAndRedactsBeforeShortening(t *testing.T) {
+	for _, input := range []string{
+		`{"nested":{"array":[{"query":"HEAD` + strings.Repeat("x", 60000) + `TAIL"}]}}`,
+		`[{"query":"HEAD` + strings.Repeat("x", 60000) + `TAIL"}]`,
+		`{"nested":["token=` + strings.Repeat("private-ui-check", 1000) + `"]}`,
+	} {
+		got := toolInputPreview(input, 500)
+		if !json.Valid([]byte(got)) || len(got) > 1000 || strings.Contains(got, "private-ui-check") {
+			t.Fatalf("nested preview invalid or too long: bytes=%d", len(got))
+		}
+		if toolInputPreview(input, 0) != RedactToolText(input) {
+			t.Fatal("unlimited preview unexpectedly shortened")
+		}
+	}
+}
+
+func TestToolReadability_JSONPrefixDoesNotHideTrailingCommand(t *testing.T) {
+	input := `{"command":"pwd"} && echo ` + strings.Repeat("x", 1000) + "TAIL"
+	got := toolInputPreview(input, 100)
+	if !strings.Contains(got, "\n…\n") || !strings.HasSuffix(got, "TAIL") {
+		t.Fatalf("dropped command tail: %q", got)
 	}
 }
