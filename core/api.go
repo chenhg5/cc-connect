@@ -60,6 +60,15 @@ type SendRequest struct {
 	Videos     []FileAttachment  `json:"videos,omitempty"`
 	AtUsers    []string          `json:"at_users,omitempty"`
 	AtAll      bool              `json:"at_all,omitempty"`
+	// Card is a card in the platform's own format (a Feishu card JSON
+	// object, for example), sent as it is. It stands alone: no message,
+	// tts_text or attachments with it. The response then carries the card's
+	// message_id, which POST /cards/update accepts.
+	Card json.RawMessage `json:"card,omitempty"`
+	// UUID, only with Card, is the platform's deduplication key for the
+	// send (at most MaxCardUUIDLen characters): a retry with the same uuid
+	// does not send a second card.
+	UUID string `json:"uuid,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -90,6 +99,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		maxAttachmentBytes: DefaultMaxAttachmentSize,
 	}
 	s.mux.HandleFunc("/send", s.handleSend)
+	s.mux.HandleFunc("/cards/update", s.handleCardsUpdate)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
@@ -215,6 +225,14 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	var req SendRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, s.sendBodyLimit())).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.hasCard() {
+		s.sendCard(w, req)
+		return
+	}
+	if req.UUID != "" {
+		http.Error(w, "uuid is only accepted with card", http.StatusBadRequest)
 		return
 	}
 	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {

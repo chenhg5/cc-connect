@@ -348,3 +348,53 @@ func TestBuildSendPayload_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("decoded files = %#v", decoded.Files)
 	}
 }
+
+func TestParseSendArgs_CardFromFile(t *testing.T) {
+	t.Setenv("CC_SESSION_KEY", "feishu:oc_chat:ou_user")
+	path := filepath.Join(t.TempDir(), "card.json")
+	if err := os.WriteFile(path, []byte("  {\"schema\":\"2.0\",\"body\":{\"elements\":[]}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req, _, err := parseSendArgs([]string{"--card", path, "--uuid", "build-42"})
+	if err != nil {
+		t.Fatalf("parseSendArgs: %v", err)
+	}
+	if string(req.Card) != `{"schema":"2.0","body":{"elements":[]}}` || req.UUID != "build-42" || req.Message != "" {
+		t.Fatalf("req = %+v (card %s)", req, req.Card)
+	}
+	if req.SessionKey != "feishu:oc_chat:ou_user" {
+		t.Fatalf("session key = %q, want the CC_SESSION_KEY fallback", req.SessionKey)
+	}
+	payload, err := buildSendPayload(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), `"card":{"schema":"2.0"`) || !strings.Contains(string(payload), `"uuid":"build-42"`) {
+		t.Fatalf("payload = %s", payload)
+	}
+}
+
+func TestParseSendArgs_CardRejections(t *testing.T) {
+	dir := t.TempDir()
+	card := filepath.Join(dir, "card.json")
+	notObject := filepath.Join(dir, "list.json")
+	if err := os.WriteFile(card, []byte(`{"body":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notObject, []byte(`[1,2]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][]string{
+		"with message":    {"--card", card, "-m", "hi"},
+		"with positional": {"--card", card, "hi"},
+		"with stdin":      {"--card", card, "--stdin"},
+		"with image":      {"--card", card, "--image", card},
+		"not an object":   {"--card", notObject},
+		"missing file":    {"--card", filepath.Join(dir, "nope.json")},
+		"uuid alone":      {"--uuid", "k", "-m", "hi"},
+	} {
+		if _, _, err := parseSendArgs(args); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}

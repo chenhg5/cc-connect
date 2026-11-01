@@ -63,6 +63,19 @@ func runSend(args []string) {
 		os.Exit(1)
 	}
 
+	if len(req.Card) > 0 {
+		// A card's message id is what POST /cards/update needs later; print
+		// it alone so scripts can capture it.
+		var out struct {
+			MessageID string `json:"message_id"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil || out.MessageID == "" {
+			fmt.Fprintf(os.Stderr, "Warning: card sent, but the response carried no message_id: %s\n", strings.TrimSpace(string(body)))
+			return
+		}
+		fmt.Println(out.MessageID)
+		return
+	}
 	fmt.Println("Message sent successfully.")
 }
 
@@ -77,6 +90,7 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	var audioPaths []string
 	var videoPaths []string
 	var positional []string
+	var cardPath string
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -136,6 +150,18 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			videoPaths = append(videoPaths, args[i])
 		case "--stdin":
 			useStdin = true
+		case "--card":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--card requires a path (or - for stdin)")
+			}
+			i++
+			cardPath = args[i]
+		case "--uuid":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("--uuid requires a value")
+			}
+			i++
+			req.UUID = args[i]
 		case "--at-users":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("--at-users requires a value")
@@ -162,18 +188,35 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 		}
 	}
 
+	if req.Project == "" {
+		req.Project = strings.TrimSpace(os.Getenv("CC_PROJECT"))
+	}
+	if req.SessionKey == "" {
+		req.SessionKey = strings.TrimSpace(os.Getenv("CC_SESSION_KEY"))
+	}
+
+	if cardPath != "" {
+		if useStdin || len(positional) > 0 || req.Message != "" || req.TTSText != "" ||
+			len(imagePaths) > 0 || len(filePaths) > 0 || len(audioPaths) > 0 || len(videoPaths) > 0 {
+			return req, "", fmt.Errorf("--card cannot be combined with a message, --tts or attachments")
+		}
+		card, err := readCardJSON(cardPath)
+		if err != nil {
+			return req, "", err
+		}
+		req.Card = card
+		return req, dataDir, nil
+	}
+	if req.UUID != "" {
+		return req, "", fmt.Errorf("--uuid is only accepted with --card")
+	}
+
 	if useStdin {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return req, "", fmt.Errorf("reading stdin: %w", err)
 		}
 		req.Message = strings.TrimSpace(string(data))
-	}
-	if req.Project == "" {
-		req.Project = strings.TrimSpace(os.Getenv("CC_PROJECT"))
-	}
-	if req.SessionKey == "" {
-		req.SessionKey = strings.TrimSpace(os.Getenv("CC_SESSION_KEY"))
 	}
 	if req.Message == "" {
 		req.Message = strings.Join(positional, " ")
@@ -213,6 +256,27 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	}
 
 	return req, dataDir, nil
+}
+
+// readCardJSON reads a card's JSON from path ("-" reads stdin) and checks it
+// is a JSON object.
+func readCardJSON(path string) (json.RawMessage, error) {
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(filepath.Clean(path))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read card %s: %w", path, err)
+	}
+	data = bytes.TrimSpace(data)
+	var obj map[string]any
+	if len(data) == 0 || data[0] != '{' || json.Unmarshal(data, &obj) != nil {
+		return nil, fmt.Errorf("card %s is not a JSON object", path)
+	}
+	return json.RawMessage(data), nil
 }
 
 func loadImageAttachments(paths []string, maxSize int64) ([]core.ImageAttachment, error) {
@@ -366,9 +430,11 @@ func printSendUsage() {
        cc-connect send [options] --audio <path>
        cc-connect send [options] --video <path>
        cc-connect send [options] --tts <text>
+       cc-connect send [options] --card <path|-> [--uuid <key>]
        echo "msg" | cc-connect send [options] --stdin
 
-Send a message, attachment, or synthesized voice message to an active cc-connect session.
+Send a message, attachment, synthesized voice message, or platform-native card
+to an active cc-connect session.
 
 Options:
   -m, --message <text>     Message to send (preferred over positional args)
@@ -380,6 +446,11 @@ Options:
       --audio <path>       Send an audio attachment (repeatable)
       --video <path>       Send a video attachment (repeatable)
       --stdin              Read message from stdin (best for long/special-char messages)
+      --card <path|->      Send a card in the platform's own JSON format (e.g. a Feishu
+                           card) from a file or stdin; prints the card's message id,
+                           which POST /cards/update accepts. Not combinable with a message
+      --uuid <key>         With --card: deduplication key (max 50 chars); a retry with
+                           the same key does not send a second card (Feishu)
       --at-users <ids>     @ user IDs, comma-separated (DingTalk)
       --at-all             @ everyone (DingTalk)
   -p, --project <name>     Target project (optional if only one project)
@@ -397,5 +468,6 @@ Examples:
   cc-connect send --tts "Hello from cc-connect"
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
-  EOF`)
+  EOF
+  cc-connect send --card /tmp/status-card.json --uuid build-1234`)
 }
