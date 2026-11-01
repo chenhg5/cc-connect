@@ -277,8 +277,8 @@ func TestCompactProgressWriter_ThrottlesRapidUpdates(t *testing.T) {
 	if payload.State != ProgressCardStateCompleted {
 		t.Fatalf("state = %q, want completed", payload.State)
 	}
-	if len(payload.Items) != 4 {
-		t.Fatalf("items = %d, want 4 (all buffered items)", len(payload.Items))
+	if len(payload.Items) != 3 || payload.Items[1].Input != "pwd" || payload.Items[1].Text != "ok" {
+		t.Fatalf("want thinking, complete tool invocation and thinking: %#v", payload.Items)
 	}
 }
 

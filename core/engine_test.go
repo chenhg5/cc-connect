@@ -1977,8 +1977,8 @@ func TestProcessInteractiveEvents_CardProgressTruncatesToolInputByToolMaxLen(t *
 	if utf8.RuneCountInString(toolUseText) > 50+len("...") {
 		t.Fatalf("card tool input not truncated: runeCount=%d, content=%q", utf8.RuneCountInString(toolUseText), toolUseText)
 	}
-	if !strings.HasSuffix(toolUseText, "...") {
-		t.Fatalf("expected truncated tool input to end with '...', got %q", toolUseText)
+	if !strings.Contains(toolUseText, "\n…\n") || !strings.HasSuffix(toolUseText, "abcdefghij") {
+		t.Fatalf("expected an omission marker and the original command tail, got %q", toolUseText)
 	}
 	if !strings.HasPrefix(toolUseText, "abcdefghij") {
 		t.Fatalf("expected truncated tool input to start with original prefix, got %q", toolUseText)

@@ -498,6 +498,7 @@ type Event struct {
 	Type                     EventType
 	Content                  string
 	ToolName                 string         // populated for EventToolUse, EventPermissionRequest
+	ToolCallID               string         // protocol ID shared by tool start and result events
 	ToolInput                string         // human-readable summary of tool input
 	ToolInputRaw             map[string]any // raw tool input (for EventPermissionRequest, used in allow response)
 	ToolResult               string         // populated for EventToolResult
