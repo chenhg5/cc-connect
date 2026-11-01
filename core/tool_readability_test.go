@@ -151,3 +151,101 @@ func TestToolReadability_EmptyInputDoesNotBecomeFallbackMarkup(t *testing.T) {
 		t.Fatalf("empty result was dropped: %#v", payload)
 	}
 }
+
+func TestToolReadability_JSONEscapedCredentialsRemainValid(t *testing.T) {
+	for _, command := range []string{
+		`API_TOKEN="private-ui-check" pwd`,
+		`API_TOKEN="prefix\"private-ui-check" pwd`,
+		`SESSION_ID="private-ui-check" pwd`,
+		`BEARER="private-ui-check" pwd`,
+		`curl -H 'Authorization: Bearer "private-ui-check"' https://example.com`,
+	} {
+		input, err := json.Marshal(map[string]any{"command": command, "nested": map[string]any{"password": "private-ui-check"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, limit := range []int{0, 40, 1000} {
+			got := toolInputPreview(string(input), limit)
+			if !json.Valid([]byte(got)) || strings.Contains(got, "private-ui-check") {
+				t.Fatalf("credential leaked or JSON damaged, limit %d: %q", limit, got)
+			}
+		}
+	}
+}
+
+func TestToolReadability_NoIDWindowEvictionDoesNotMisassign(t *testing.T) {
+	p := &previewCapturePlatform{}
+	w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: "card", payload: true}, "test", LangEnglish, nil)
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "echo first"}, "first")
+	for i := 0; i < 9; i++ {
+		w.Append("other progress")
+	}
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "echo second"}, "second")
+	w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolResult, Tool: "Bash", Text: "first"}, "first result")
+	payload, ok := ParseProgressCardPayload(w.content)
+	if !ok {
+		t.Fatal("invalid payload")
+	}
+	for _, row := range payload.Items {
+		if row.Input == "echo second" && row.Text == "first" {
+			t.Fatalf("evicted call's result completed another invocation: %#v", row)
+		}
+	}
+}
+
+func TestToolReadability_NoIDTrackingSurvivesEvictionAndAmbiguity(t *testing.T) {
+	p := &previewCapturePlatform{}
+	w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: "card", payload: true}, "test", LangEnglish, nil)
+	appendCall := func(text string) {
+		w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolUse, Tool: "Bash", Text: text}, text)
+	}
+	appendResult := func(text string) {
+		w.AppendStructured(ProgressCardEntry{Kind: ProgressEntryToolResult, Tool: "Bash", Text: text}, text)
+	}
+	appendCall("unique evicted")
+	for i := 0; i < 10; i++ {
+		w.Append("other progress")
+	}
+	appendResult("unique result")
+	last := w.items[len(w.items)-1]
+	if last.Input != "unique evicted" || last.Text != "unique result" {
+		t.Fatalf("lost evicted call: %#v", last)
+	}
+	appendCall("first")
+	appendCall("second")
+	appendResult("ambiguous one")
+	appendResult("ambiguous two")
+	for _, item := range w.items {
+		if strings.HasPrefix(item.Text, "ambiguous") && item.Input != "" {
+			t.Fatalf("guessed concurrent call: %#v", item)
+		}
+	}
+	appendCall("new unique")
+	appendResult("new result")
+	last = w.items[len(w.items)-1]
+	if last.Input != "new unique" || last.Text != "new result" {
+		t.Fatalf("group did not recover: %#v", w.items)
+	}
+}
+
+func TestToolReadability_MissingIDCannotCompleteAnonymousCallWhileNativePending(t *testing.T) {
+	p := &previewCapturePlatform{}
+	w := newCompactProgressWriter(context.Background(), p, progressHintReplyCtx{style: "card", payload: true}, "test", LangEnglish, nil)
+	for _, item := range []ProgressCardEntry{
+		{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "native", ToolCallID: "id"},
+		{Kind: ProgressEntryToolUse, Tool: "Bash", Text: "anonymous"},
+		{Kind: ProgressEntryToolResult, Tool: "Bash", Text: "unknown"},
+	} {
+		w.AppendStructured(item, item.Text)
+	}
+	if len(w.items) != 3 || w.items[2].Input != "" {
+		t.Fatalf("missing ID was guessed: %#v", w.items)
+	}
+}
+
+func TestToolReadability_JSONPreviewPreservesLargeNumbers(t *testing.T) {
+	input := `{"request_id":9007199254740993,"command":"` + strings.Repeat("x", 100) + `"}`
+	if got := toolInputPreview(input, 40); !json.Valid([]byte(got)) || !strings.Contains(got, "9007199254740993") {
+		t.Fatalf("JSON number changed: %q", got)
+	}
+}

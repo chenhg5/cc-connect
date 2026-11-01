@@ -67,3 +67,13 @@ func TestExecToolReadability_PreservesIDAndMissingExitCode(t *testing.T) {
 		t.Fatalf("exec result misleading: %#v", result)
 	}
 }
+
+func TestAppServerToolReadability_MCPKeepsStructuredData(t *testing.T) {
+	text := appServerToolResultText(map[string]any{
+		"content":           []any{map[string]any{"type": "text", "text": "Action completed."}},
+		"structuredContent": map[string]any{"matches": []any{"actual result"}},
+	})
+	if !strings.Contains(text, "Action completed.") || !strings.Contains(text, "actual result") {
+		t.Fatalf("MCP acknowledgment hid its actual result: %q", text)
+	}
+}

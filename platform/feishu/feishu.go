@@ -6523,8 +6523,6 @@ var (
 	firstURLRe        = regexp.MustCompile(`https?://[^\s'"` + "`" + `<>]+`)
 	firstCodeSpanRe   = regexp.MustCompile("`([^`]+)`")
 	firstQuotedTextRe = regexp.MustCompile(`"([^"]+)"|'([^']+)'`)
-	secretAssignRe    = regexp.MustCompile(`(?i)\b([A-Za-z_][A-Za-z0-9_]*(?:token|secret|password|api[_-]?key|authorization|cookie|credential|bearer|session[_-]?id|client[_-]?secret|access[_-]?key)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s"'` + "`" + `]+)`)
-	authHeaderRe      = regexp.MustCompile(`(?i)(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)([^\s'"` + "`" + `]+)`)
 	sensitiveNameRe   = regexp.MustCompile(`(?i)(token|secret|password|api[_-]?key|authorization|cookie|credential|bearer|session[_-]?id|client[_-]?secret|access[_-]?key)`)
 )
 
@@ -6578,7 +6576,7 @@ func sanitizeGenericToolText(value string) string {
 		return ""
 	}
 	value = strings.ReplaceAll(value, "\r\n", "\n")
-	return core.RedactToolText(redactInlineSecrets(value))
+	return redactInlineSecrets(value)
 }
 
 func stripToolDisplayQuotes(value string) string {
@@ -6615,9 +6613,7 @@ func sanitizeCommandLike(value string) string {
 }
 
 func redactInlineSecrets(value string) string {
-	value = secretAssignRe.ReplaceAllString(value, "$1=[redacted]")
-	value = authHeaderRe.ReplaceAllString(value, "$1[redacted]")
-	return value
+	return core.RedactToolText(value)
 }
 
 func isSkillPathValue(value string) bool {

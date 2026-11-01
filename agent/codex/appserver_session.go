@@ -1482,23 +1482,25 @@ func appServerDynamicToolText(raw any) string {
 // than spending the card's output budget on transport JSON and escaped newlines.
 func appServerToolResultText(raw any) string {
 	if result, ok := raw.(map[string]any); ok {
-		if content, ok := result["content"].([]any); ok && len(content) > 0 {
-			var parts []string
+		var parts []string
+		if content, ok := result["content"].([]any); ok {
 			for _, block := range content {
 				if block, ok := block.(map[string]any); ok {
 					if text, ok := block["text"].(string); ok {
-						parts = append(parts, text)
+						parts = append(parts, core.RedactToolText(text))
 					} else if kind, _ := block["type"].(string); kind != "" {
 						parts = append(parts, "["+kind+"]")
 					}
 				}
 			}
-			if len(parts) > 0 {
-				return strings.Join(parts, "\n")
+		}
+		if structured, ok := result["structuredContent"]; ok && appServerJSON(structured) != "" {
+			if data, err := json.MarshalIndent(structured, "", "  "); err == nil {
+				parts = append(parts, core.RedactToolText(string(data)))
 			}
 		}
-		if structured, ok := result["structuredContent"]; ok {
-			raw = structured
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
 		}
 	}
 	if text, ok := raw.(string); ok {

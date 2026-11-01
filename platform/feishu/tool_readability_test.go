@@ -58,3 +58,20 @@ func TestToolReadability_ResultIsLiteralAndRedacted(t *testing.T) {
 		t.Fatalf("output is interpreted as markup: %s", data)
 	}
 }
+
+func TestToolReadability_JSONCredentialDoesNotReachCard(t *testing.T) {
+	input, err := json.Marshal(map[string]any{"command": `API_TOKEN="private-ui-check" pwd`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"Bash", "custom:unknown"} {
+		row := renderProgressEntryElement(core.ProgressCardEntry{Kind: core.ProgressEntryToolUse, Tool: tool, Text: string(input)}, "zh")
+		data, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "private-ui-check") {
+			t.Fatalf("credential reached final card: %s", data)
+		}
+	}
+}
