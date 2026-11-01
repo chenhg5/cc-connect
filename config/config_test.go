@@ -534,7 +534,7 @@ func TestValidateProjectDisplayConfig(t *testing.T) {
 		{
 			name:    "invalid project display mode",
 			display: &DisplayConfig{Mode: &mode},
-			wantErr: `projects[0].display.mode must be "full", "compact", or "quiet"`,
+			wantErr: `projects[0].display.mode must be "full", "compact", "quiet", or "final"`,
 		},
 		{
 			name:    "invalid project card mode",

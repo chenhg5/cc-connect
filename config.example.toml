@@ -125,7 +125,7 @@ level = "info" # debug, info, warn, error
 # 设为 0 表示不截断（显示完整内容）。
 
 # [display]
-# mode = "full"             # Display mode: "full" (default), "compact", or "quiet"
+# mode = "full"             # Display mode: "full" (default), "compact", "quiet", or "final"
 # card_mode = "legacy"      # Card rendering: "legacy" (default) or "rich" (Feishu Card 2.0)
 #                           # full: show thinking + tool messages as separate messages
 #                           #       显示思考和工具消息，每条单独发送
@@ -133,6 +133,11 @@ level = "info" # debug, info, warn, error
 #                           #          隐藏思考和工具消息，每段文本独立发送
 #                           # quiet: hide thinking/tool, all text in one card, done emoji at end
 #                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
+#                           # final: send only each turn's final answer as plain messages -- no streaming card,
+#                           #        preview, thinking/tool messages, footer or system notices; text written
+#                           #        before the last tool call is dropped; /quiet cannot change it
+#                           #        每轮只发最终回答：不发流式卡片、预览、思考/工具消息、页脚和系统提示；
+#                           #        最后一次工具调用之前的文字不发送；/quiet 不能改变它
 # thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）

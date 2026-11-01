@@ -189,11 +189,15 @@ const (
 	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages (default)
 	DisplayModeCompact = "compact" // hide thinking/tool, each text segment is a separate card
 	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
+	// DisplayModeFinal sends only each turn's final answer: no streaming
+	// card, preview, thinking, tool, footer or system notices. /quiet and
+	// /config mode cannot change it.
+	DisplayModeFinal = "final"
 )
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
+	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", "quiet", or "final"
 	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
@@ -991,6 +995,12 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		false,
 	)
 
+	// Final output shows nothing but the answer, whatever the other fields say.
+	if mode == DisplayModeFinal {
+		thinkingMessages, toolMessages = false, false
+		showContextIndicator, replyFooter, hideAgentFooter = false, false, true
+	}
+
 	return
 }
 
@@ -1146,9 +1156,9 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 	}
 	if display.Mode != nil {
 		switch *display.Mode {
-		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet:
+		case DisplayModeFull, DisplayModeCompact, DisplayModeQuiet, DisplayModeFinal:
 		default:
-			return fmt.Errorf("config: %s.mode must be \"full\", \"compact\", or \"quiet\"", prefix)
+			return fmt.Errorf("config: %s.mode must be \"full\", \"compact\", \"quiet\", or \"final\"", prefix)
 		}
 	}
 	if display.CardMode != nil {

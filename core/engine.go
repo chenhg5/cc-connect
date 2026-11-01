@@ -330,7 +330,7 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls how intermediate messages are surfaced.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	Mode             string // "full" (default), "compact", or "quiet" — thinking/tool visibility
+	Mode             string // "full" (default), "compact", "quiet" or "final" — thinking/tool visibility
 	CardMode         string // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages bool
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
@@ -929,6 +929,10 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
+	if cfg.Mode == displayModeFinal {
+		cfg.ThinkingMessages = false
+		cfg.ToolMessages = false
+	}
 	e.display = cfg
 }
 
@@ -3391,7 +3395,9 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	e.cleanupInteractiveState(interactiveKey)
 	session.UnlockWithoutUpdate(lockGen)
 
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	if !e.finalOutput() {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgSessionAutoResetIdle, int(e.resetOnIdle/time.Minute)))
+	}
 	return newSession, newGen
 }
 
@@ -4459,7 +4465,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		session.SetAgentSessionID("", agent.Name())
 		sessions.Save()
 		startSessionID = ""
-		e.send(p, replyCtx, e.i18n.T(MsgSessionResumeUnsafe))
+		e.notice(p, replyCtx, e.i18n.T(MsgSessionResumeUnsafe))
 	}
 
 	isResume := startSessionID != ""
@@ -4506,7 +4512,8 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	// Surface any startup warning (e.g. permission mode downgrade under root) to the IM user.
 	if warner, ok := agentSession.(StartupWarner); ok {
 		if msg := warner.StartupWarning(); msg != "" {
-			e.send(p, replyCtx, msg)
+			slog.Warn("agent startup warning", "session_key", sessionKey, "warning", msg)
+			e.notice(p, replyCtx, msg)
 		}
 	}
 
@@ -5324,7 +5331,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					if toolName == "" {
 						toolName = "(unknown)"
 					}
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
+					e.notice(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
 				}
 
 			case EventError:
@@ -5396,7 +5403,7 @@ func (e *Engine) relayModelSwitch(p Platform, replyCtx any, sessionKey string, m
 		"reason", ms.Reason,
 		"category", ms.Category,
 		"session_wide", ms.SessionWide)
-	e.send(p, replyCtx, notice)
+	e.notice(p, replyCtx, notice)
 }
 
 type agentErrorHandler struct {
@@ -5466,7 +5473,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
-	if scp, ok := state.platform.(StreamingCardPlatform); ok {
+	// Final output mode draws nothing while the turn runs: no streaming card,
+	// preview or progress card. finalSegmentStart marks where the text after
+	// the last tool call or thinking block begins.
+	finalMode := e.finalOutput()
+	finalSegmentStart := 0
+	newTurnPreview := func(p Platform, replyCtx any, renderer func(string) string) (*streamPreview, *compactProgressWriter) {
+		if finalMode {
+			off := e.streamPreview
+			off.Enabled = false
+			return newStreamPreview(off, p, replyCtx, e.ctx, renderer), &compactProgressWriter{ctx: e.ctx, platform: p, replyCtx: replyCtx}
+		}
+		return newStreamPreview(e.streamPreview, p, replyCtx, e.ctx, renderer),
+			newCompactProgressWriter(e.ctx, p, replyCtx, e.agent.Name(), e.i18n.CurrentLang(), renderer)
+	}
+	if scp, ok := state.platform.(StreamingCardPlatform); ok && !finalMode {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
 			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
 		} else {
@@ -5474,14 +5495,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			slog.Info("streaming card created for turn", "session", sessionKey)
 		}
 	}
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
-	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	sp, cp := newTurnPreview(state.platform, state.replyCtx, workspaceRenderer)
 	state.mu.Unlock()
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
 	// Streaming cards provide their own "processing" indicator, so instant reply
 	// is only needed when the platform doesn't support cards or card creation failed.
-	if e.instantReply.Enabled && streamCard == nil {
+	if e.instantReply.Enabled && streamCard == nil && !finalMode {
 		replyContent := e.instantReply.Content
 		if replyContent == "" {
 			replyContent = e.i18n.T(MsgStarting)
@@ -5644,7 +5664,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
 		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
 		// Default "legacy" keeps upstream behavior for all platforms.
-		if e.display.CardMode != "rich" {
+		if e.display.CardMode != "rich" || finalMode {
 			hasRichCard = false
 		}
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
@@ -5668,6 +5688,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// final aggregation cannot concatenate the invalid draft.
 			textParts = nil
 			segmentStart = 0
+			finalSegmentStart = 0
 			silentHold = false
 			partialText = ""
 			cardAnswerText.Reset()
@@ -5676,6 +5697,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventThinking:
 			if isEllipsisOnly(event.Content) {
+				break
+			}
+			if finalMode {
+				finalSegmentStart = len(textParts)
+				silentHold = false
 				break
 			}
 			if hasRichCard {
@@ -5768,6 +5794,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			if finalMode {
+				finalSegmentStart = len(textParts)
+				silentHold = false
+				break
+			}
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
 				if !e.display.ToolMessages {
@@ -6105,8 +6136,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			// Flush accumulated text segment before permission prompt
+			// (final output mode sends only the answer, at the end).
 			previewActive := sp.canPreview()
-			if len(textParts) > segmentStart {
+			if len(textParts) > segmentStart && !finalMode {
 				if !previewActive {
 					segment := strings.Join(textParts[segmentStart:], "")
 					if segment != "" {
@@ -6224,7 +6256,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			if finalMode {
+				fullResponse = finalTurnText(fullResponse, textParts, finalSegmentStart)
+			} else if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -6383,7 +6417,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// would double-print model/ctx/workdir into the card body.
 			var statusFooter string
 			var legacyStatusFooter string
-			if !isSilent {
+			if !isSilent && !finalMode {
 				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
 				if e.showContextIndicator {
 					if sdkPlausible {
@@ -6435,8 +6469,22 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			replyStart := time.Now()
 
-			// --- StreamingCard path ---
-			if streamCard != nil && !streamCard.Failed() {
+			if finalMode {
+				// Final output: the answer alone, as plain messages.
+				sp.discard()
+				if isSilent {
+					slog.Info("silent reply suppressed", "session", session.ID)
+				} else if suppressDuplicate {
+					slog.Debug("EventResult: suppressed duplicate side-channel text", "response_len", len(fullResponse))
+				} else if outbound := strings.TrimSpace(fullResponse); outbound != "" {
+					for _, chunk := range SplitMessageCodeFenceAware(outbound, maxPlatformMessageLen) {
+						if err := sendWorkspaceWithError(p, replyCtx, chunk); err != nil {
+							return
+						}
+					}
+				}
+			} else if streamCard != nil && !streamCard.Failed() {
+				// --- StreamingCard path ---
 				sp.finish("", "") // cleanup preview (should be no-op if card was active)
 				// Silent reply: never render the NO_REPLY marker into the card.
 				// cardAnswerText holds only the text streamed BEFORE the marker
@@ -6620,7 +6668,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if tokenEst > 0 {
 						compressNotice = fmt.Sprintf("%s (~%dk tokens)", compressNotice, tokenEst/1000)
 					}
-					e.send(state.platform, state.replyCtx, compressNotice)
+					e.notice(state.platform, state.replyCtx, compressNotice)
 
 					// Run compress inline while the session is still locked.
 					e.runCompress(state, session, sessions, sessionKey, state.platform, state.replyCtx, true, lockGen)
@@ -6723,8 +6771,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
-				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				sp, cp = newTurnPreview(queued.platform, queued.replyCtx, queuedRenderer)
+				finalSegmentStart = 0
 
 				// Reset streaming card state for the next turn
 				streamCard = nil
@@ -6733,7 +6781,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				cardAnswerText.Reset()
 
 				// Try to create a new streaming card for the queued turn
-				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
+				if scp, ok := queued.platform.(StreamingCardPlatform); ok && !finalMode {
 					if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
 						slog.Warn("streaming card creation failed for queued turn", "error", err)
 					} else {
@@ -6742,7 +6790,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 
 				// Send instant reply for queued turn if no streaming card is active.
-				if e.instantReply.Enabled && streamCard == nil {
+				if e.instantReply.Enabled && streamCard == nil && !finalMode {
 					replyContent := e.instantReply.Content
 					if replyContent == "" {
 						replyContent = e.i18n.T(MsgStarting)
@@ -10807,6 +10855,10 @@ func (e *Engine) cmdQuiet(p Platform, msg *Message, args []string) {
 	// /quiet [full|compact|quiet]
 	// Without argument: cycle full → quiet → compact → full.
 	// With argument: set mode directly.
+	if e.finalOutput() {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgDisplayModeFinalFixed))
+		return
+	}
 	var newMode string
 	if len(args) > 0 {
 		switch strings.ToLower(args[0]) {
@@ -15798,6 +15850,9 @@ func (e *Engine) configItems() []configItem {
 				return e.display.Mode
 			},
 			setFunc: func(v string) error {
+				if e.finalOutput() {
+					return fmt.Errorf("display mode is final (set in the config file) and cannot be changed here")
+				}
 				switch v {
 				case "full":
 					e.display.Mode = "full"

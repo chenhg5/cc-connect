@@ -228,6 +228,7 @@ const (
 	MsgQuietOn                   MsgKey = "quiet_on"
 	MsgQuietOff                  MsgKey = "quiet_off"
 	MsgDisplayModeCompact        MsgKey = "display_mode_compact"
+	MsgDisplayModeFinalFixed     MsgKey = "display_mode_final_fixed"
 	MsgQuietGlobalOn             MsgKey = "quiet_global_on"
 	MsgQuietGlobalOff            MsgKey = "quiet_global_off"
 	MsgModeChanged               MsgKey = "mode_changed"
@@ -956,6 +957,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📋 緊湊模式 — 隱藏思考和工具訊息，每段文字獨立發送。",
 		LangJapanese:           "📋 コンパクトモード — 思考・ツール非表示、テキストは個別に送信。",
 		LangSpanish:            "📋 Modo compacto — pensamiento/herramientas ocultos, cada segmento de texto enviado por separado.",
+	},
+	MsgDisplayModeFinalFixed: {
+		LangEnglish:            "This project uses display mode \"final\" (only final answers are sent); it is set in the config file and /quiet does not change it.",
+		LangChinese:            "本项目使用 final 显示模式（只发送最终回答），由配置文件设定，/quiet 不会改变它。",
+		LangTraditionalChinese: "本專案使用 final 顯示模式（只發送最終回答），由設定檔設定，/quiet 不會改變它。",
+		LangJapanese:           "このプロジェクトは表示モード \"final\"（最終回答のみ送信）を使用しています。設定ファイルで指定されており、/quiet では変更できません。",
+		LangSpanish:            "Este proyecto usa el modo de visualización \"final\" (solo se envían respuestas finales); se define en el archivo de configuración y /quiet no lo cambia.",
 	},
 	MsgQuietGlobalOn: {
 		LangEnglish:            "🔇 Global quiet mode ON — all sessions will hide thinking and tool progress.",
