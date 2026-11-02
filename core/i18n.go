@@ -255,9 +255,11 @@ const (
 	MsgListSwitchHint            MsgKey = "list_switch_hint"
 	MsgListError                 MsgKey = "list_error"
 	MsgHistoryEmpty              MsgKey = "history_empty"
+	MsgHistoryReadFailed         MsgKey = "history_read_failed"
 	MsgNameUsage                 MsgKey = "name_usage"
 	MsgNameSet                   MsgKey = "name_set"
 	MsgNameNoSession             MsgKey = "name_no_session"
+	MsgCCSwitchAmbiguousProvider MsgKey = "cc_switch_ambiguous_provider"
 	MsgProviderNotSupported      MsgKey = "provider_not_supported"
 	MsgProviderNone              MsgKey = "provider_none"
 	MsgProviderCurrent           MsgKey = "provider_current"
@@ -339,6 +341,8 @@ const (
 	MsgModelCardSwitched     MsgKey = "model_card_switched"
 	MsgModelCardSwitchFailed MsgKey = "model_card_switch_failed"
 	MsgModelNotSupported     MsgKey = "model_not_supported"
+	MsgModelSwitchSession    MsgKey = "model_switch_session"
+	MsgModelSwitchResponse   MsgKey = "model_switch_response"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
 	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
@@ -456,6 +460,7 @@ const (
 	MsgAskQuestionMulti     MsgKey = "ask_question_multi"
 	MsgAskQuestionPrompt    MsgKey = "ask_question_prompt"
 	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
+	MsgAskQuestionStale     MsgKey = "ask_question_stale"
 
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
@@ -574,6 +579,7 @@ const (
 	MsgRelaySetupOK       MsgKey = "relay_setup_ok"
 	MsgRelaySetupExists   MsgKey = "relay_setup_exists"
 	MsgRelaySetupNoMemory MsgKey = "relay_setup_no_memory"
+	MsgRelayPartial       MsgKey = "relay_partial_response"
 	MsgSetupNative        MsgKey = "setup_native"
 	MsgCronSetupOK        MsgKey = "cron_setup_ok"
 
@@ -1510,6 +1516,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "現在のセッションに履歴がありません。",
 		LangSpanish:            "No hay historial en la sesión actual.",
 	},
+	MsgHistoryReadFailed: {
+		LangEnglish:            "Failed to read session history.",
+		LangChinese:            "读取会话历史失败。",
+		LangTraditionalChinese: "讀取會話歷史失敗。",
+		LangJapanese:           "セッション履歴の読み取りに失敗しました。",
+		LangSpanish:            "No se pudo leer el historial de la sesión.",
+	},
 	MsgNameUsage: {
 		LangEnglish:            "Usage:\n`/name <text>` — name the current session\n`/name <number> <text>` — name a session by list number",
 		LangChinese:            "用法：\n`/name <名称>` — 命名当前会话\n`/name <序号> <名称>` — 按列表序号命名会话",
@@ -1530,6 +1543,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 沒有活躍會話，請先傳送訊息或切換到一個會話。",
 		LangJapanese:           "❌ アクティブなセッションがありません。メッセージを送信するかセッションに切り替えてください。",
 		LangSpanish:            "❌ No hay sesión activa. Envía un mensaje primero o cambia a una sesión.",
+	},
+	MsgCCSwitchAmbiguousProvider: {
+		LangEnglish:            "ambiguous cc-switch provider name %q: multiple source providers match",
+		LangChinese:            "cc-switch 中的服务商名称 %q 不明确：存在多个同名来源服务商",
+		LangTraditionalChinese: "cc-switch 中的服務商名稱 %q 不明確：存在多個同名來源服務商",
+		LangJapanese:           "cc-switch のプロバイダー名 %q が曖昧です：同名のプロバイダーが複数存在します",
+		LangSpanish:            "El nombre del proveedor de cc-switch %q es ambiguo: coinciden varios proveedores de origen",
 	},
 	MsgProviderNotSupported: {
 		LangEnglish:            "This agent does not support provider switching.",
@@ -2289,6 +2309,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "モデルを `%s` に切り替えました。",
 		LangSpanish:            "Modelo cambiado a `%s`.",
 	},
+	MsgModelSwitchSession: {
+		LangEnglish:            "⚠️ `%[1]s`'s safeguards declined this request%[2]s, so `%[3]s` is answering instead and the rest of this session stays on it. Send `/model %[1]s` to switch back.",
+		LangChinese:            "⚠️ `%[1]s` 的安全机制拦下了这条请求%[2]s，改由 `%[3]s` 回答，本会话后面也会一直用它。发送 `/model %[1]s` 可切回。",
+		LangTraditionalChinese: "⚠️ `%[1]s` 的安全機制攔下了這條請求%[2]s，改由 `%[3]s` 回答，本會話後面也會一直使用它。傳送 `/model %[1]s` 可切回。",
+		LangJapanese:           "⚠️ `%[1]s` のセーフガードがこのリクエストを拒否したため%[2]s、`%[3]s` が代わりに回答しています。このセッションの残りも `%[3]s` のままです。`/model %[1]s` で元に戻せます。",
+		LangSpanish:            "⚠️ Las salvaguardas de `%[1]s` rechazaron esta solicitud%[2]s, así que `%[3]s` responde en su lugar y el resto de esta sesión seguirá con él. Envía `/model %[1]s` para volver.",
+	},
+	MsgModelSwitchResponse: {
+		LangEnglish:            "⚠️ `%[1]s`'s safeguards declined part of this turn%[2]s; `%[3]s` answered that part instead. The session model is unchanged.",
+		LangChinese:            "⚠️ `%[1]s` 的安全机制拦下了本轮的一部分请求%[2]s，那部分改由 `%[3]s` 回答；会话模型不变。",
+		LangTraditionalChinese: "⚠️ `%[1]s` 的安全機制攔下了本輪的一部分請求%[2]s，那部分改由 `%[3]s` 回答；會話模型不變。",
+		LangJapanese:           "⚠️ `%[1]s` のセーフガードがこのターンの一部を拒否したため%[2]s、その部分は `%[3]s` が回答しました。セッションのモデルは変わりません。",
+		LangSpanish:            "⚠️ Las salvaguardas de `%[1]s` rechazaron parte de este turno%[2]s; `%[3]s` respondió esa parte. El modelo de la sesión no cambia.",
+	},
 	MsgModelCardSwitchFailed: {
 		LangEnglish:            "Failed to switch model: %v",
 		LangChinese:            "切换模型失败: %v",
@@ -2529,11 +2563,11 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Uso: `/model switch <número>` o `/model switch <nombre_modelo>`",
 	},
 	MsgReasoningDefault: {
-		LangEnglish:            "Current reasoning effort: (not set, using Codex default)\n",
-		LangChinese:            "当前推理强度: (未设置，使用 Codex 默认值)\n",
-		LangTraditionalChinese: "當前推理強度: (未設置，使用 Codex 預設值)\n",
-		LangJapanese:           "現在の推論強度: (未設定、Codex のデフォルトを使用)\n",
-		LangSpanish:            "Esfuerzo de razonamiento actual: (no configurado, usando el valor predeterminado de Codex)\n",
+		LangEnglish:            "Current reasoning effort: (not set, using default)\n",
+		LangChinese:            "当前推理强度: (未设置，使用默认值)\n",
+		LangTraditionalChinese: "當前推理強度: (未設定，使用預設值)\n",
+		LangJapanese:           "現在の推論強度: (未設定、デフォルトを使用)\n",
+		LangSpanish:            "Esfuerzo de razonamiento actual: (no configurado, usando el valor predeterminado)\n",
 	},
 	MsgReasoningListTitle: {
 		LangEnglish:            "Available reasoning levels:\n",
@@ -2807,6 +2841,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "已回答",
 		LangJapanese:           "回答済み",
 		LangSpanish:            "Respondido",
+	},
+	MsgAskQuestionStale: {
+		LangEnglish:            "⚠️ That question was already answered or is no longer active, so this answer was not sent to the agent.",
+		LangChinese:            "⚠️ 这个问题已经回答过了或已失效，这次的回答没有发给 agent。",
+		LangTraditionalChinese: "⚠️ 這個問題已經回答過了或已失效，這次的回答沒有發給 agent。",
+		LangJapanese:           "⚠️ この質問は回答済みか無効になっているため、この回答はエージェントに送信されませんでした。",
+		LangSpanish:            "⚠️ Esa pregunta ya se respondió o ya no está activa, así que esta respuesta no se envió al agente.",
 	},
 	MsgCommandsTitle: {
 		LangEnglish:            "🔧 **Custom Commands** (%d)\n\n",
@@ -3475,6 +3516,13 @@ var messages = map[MsgKey]map[Language]string{
 	MsgRelayBound: {
 		LangEnglish: "Current relay binding: %s",
 		LangChinese: "当前中继绑定: %s",
+	},
+	MsgRelayPartial: {
+		LangEnglish:            "⏳ The other bot is still working — this relay timed out before it produced a final answer.\n\nPartial output so far:\n---\n%s",
+		LangChinese:            "⏳ 对方仍在运行 —— 本次中继在它给出最终结果前超时了。\n\n目前的片段输出：\n---\n%s",
+		LangTraditionalChinese: "⏳ 對方仍在執行 —— 本次中繼在它給出最終結果前逾時了。\n\n目前的片段輸出：\n---\n%s",
+		LangJapanese:           "⏳ 相手はまだ実行中です —— 最終結果が出る前に中継がタイムアウトしました。\n\n現時点の部分的な出力：\n---\n%s",
+		LangSpanish:            "⏳ El otro bot sigue trabajando: este relay agotó el tiempo antes de dar una respuesta final.\n\nSalida parcial hasta ahora:\n---\n%s",
 	},
 	MsgRelayUsage: {
 		LangEnglish: "Usage:\n  /bind <project>  — bind with another bot in this group\n  /bind remove     — remove binding\n  /bind            — show current binding\n\n<project> is the project name from config.toml [[projects]].",

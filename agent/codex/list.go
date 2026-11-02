@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +15,12 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// Keep large Codex transcript records readable while bounding scanner memory.
+// Records beyond this limit fail explicitly instead of returning partial history.
+// ListSessions scans files serially; a future parallel scan must bound its
+// concurrency because each scanner can allocate up to this limit.
+const maxCodexJSONLLineSize = 64 * 1024 * 1024
 
 // resolveCodexHomeDir returns the effective CODEX_HOME directory.
 // Priority: explicit config value > CODEX_HOME env > ~/.codex
@@ -57,7 +64,12 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 	}
 
 	sessionTitles := loadCodexSessionTitles(codexHome)
-	var sessions []core.AgentSessionInfo
+	type sessionAggregate struct {
+		info           core.AgentSessionInfo
+		firstSummaryAt time.Time
+		hasSummary     bool
+	}
+	sessionsByID := make(map[string]sessionAggregate)
 	for _, f := range files {
 		info := parseCodexSessionFile(f, absWorkDir)
 		if info != nil {
@@ -68,8 +80,27 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 				info.Summary = title
 			}
 			patchSessionSource(info.ID, codexHome)
-			sessions = append(sessions, *info)
+			// Codex can split one logical session across multiple rollout files.
+			// Use the latest segment for time while keeping the earliest prompt as
+			// the stable fallback title.
+			previous, ok := sessionsByID[info.ID]
+			if !ok {
+				previous = sessionAggregate{info: *info}
+			} else if info.ModifiedAt.After(previous.info.ModifiedAt) {
+				previous.info.ModifiedAt = info.ModifiedAt
+				previous.info.MessageCount = info.MessageCount
+			}
+			if info.Summary != "" && (!previous.hasSummary || info.ModifiedAt.Before(previous.firstSummaryAt)) {
+				previous.info.Summary = info.Summary
+				previous.firstSummaryAt = info.ModifiedAt
+				previous.hasSummary = true
+			}
+			sessionsByID[info.ID] = previous
 		}
+	}
+	sessions := make([]core.AgentSessionInfo, 0, len(sessionsByID))
+	for _, aggregate := range sessionsByID {
+		sessions = append(sessions, aggregate.info)
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
@@ -112,7 +143,8 @@ func loadCodexSessionTitles(codexHome string) map[string]string {
 }
 
 // parseCodexSessionFile reads a Codex JSONL transcript.
-// Returns nil if the session's cwd doesn't match filterCwd.
+// ListSessions skips a damaged file and keeps scanning other sessions; errors
+// are logged with the path for diagnosis. Returns nil if the cwd does not match.
 func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	f, err := os.Open(path)
 	if err != nil {
@@ -133,11 +165,11 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	userMsgSeen := 0
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 256*1024), maxCodexJSONLLineSize)
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
 
@@ -146,7 +178,8 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 			Payload json.RawMessage `json:"payload"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
+			slog.Warn("codex: decode session file", "path", path, "error", err)
+			return nil
 		}
 
 		switch entry.Type {
@@ -159,11 +192,13 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 				Cwd    string          `json:"cwd"`
 				Source json.RawMessage `json:"source"`
 			}
-			if json.Unmarshal(entry.Payload, &meta) == nil {
-				sessionID = meta.ID
-				sessionCwd = meta.Cwd
-				sessionSource = meta.Source
+			if err := json.Unmarshal(entry.Payload, &meta); err != nil {
+				slog.Warn("codex: decode session metadata", "path", path, "error", err)
+				return nil
 			}
+			sessionID = meta.ID
+			sessionCwd = meta.Cwd
+			sessionSource = meta.Source
 
 		case "response_item":
 			var item struct {
@@ -173,23 +208,32 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 					Text string `json:"text"`
 				} `json:"content"`
 			}
-			if json.Unmarshal(entry.Payload, &item) == nil {
-				if item.Role == "user" {
-					userMsgSeen++
-					msgCount++
-					// The actual user prompt is the last user response_item
-					// (earlier ones are system/AGENTS.md instructions).
-					// Pick the last content block that looks like a real prompt.
+			if err := json.Unmarshal(entry.Payload, &item); err != nil {
+				slog.Warn("codex: decode session response item", "path", path, "error", err)
+				return nil
+			}
+			switch item.Role {
+			case "user":
+				userMsgSeen++
+				msgCount++
+				// Earlier user items can be system/AGENTS.md instructions.
+				// Keep the first real prompt so later turns do not rename the session.
+				if summary == "" {
 					for _, c := range item.Content {
 						if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
 							summary = c.Text
+							break
 						}
 					}
-				} else if item.Role == "assistant" {
-					msgCount++
 				}
+			case "assistant":
+				msgCount++
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("codex: scan session file", "path", path, "error", err)
+		return nil
 	}
 
 	// Filter by cwd
@@ -244,7 +288,20 @@ func findSessionFile(sessionID, codexHome string) string {
 	return found
 }
 
+func parseCodexTimestamp(value string) time.Time {
+	if value == "" {
+		return time.Time{}
+	}
+	ts, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return ts.In(time.Local)
+}
+
 // getSessionHistory reads the JSONL transcript and returns user/assistant messages.
+// Unlike ListSessions, it returns read errors so /history can report failure
+// without presenting incomplete history as a complete conversation.
 func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEntry, error) {
 	path := findSessionFile(sessionID, codexHome)
 	if path == "" {
@@ -256,15 +313,22 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 		return nil, err
 	}
 	defer f.Close()
+	entries, err := readCodexSessionHistory(f, limit)
+	if err != nil {
+		return nil, fmt.Errorf("codex: scan session history %s: %w", path, err)
+	}
+	return entries, nil
+}
 
+func readCodexSessionHistory(r io.Reader, limit int) ([]core.HistoryEntry, error) {
 	var entries []core.HistoryEntry
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), maxCodexJSONLLineSize)
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
 
@@ -273,8 +337,8 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 			Type      string          `json:"type"`
 			Payload   json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal([]byte(line), &raw) != nil {
-			continue
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			return nil, fmt.Errorf("decode session record: %w", err)
 		}
 		if raw.Type != "response_item" {
 			continue
@@ -289,11 +353,11 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 				Text string `json:"text"`
 			} `json:"content"`
 		}
-		if json.Unmarshal(raw.Payload, &item) != nil {
-			continue
+		if err := json.Unmarshal(raw.Payload, &item); err != nil {
+			return nil, fmt.Errorf("decode response item: %w", err)
 		}
 
-		ts, _ := time.Parse(time.RFC3339Nano, raw.Timestamp)
+		ts := parseCodexTimestamp(raw.Timestamp)
 
 		switch {
 		case item.Role == "user" && len(item.Content) > 0:
@@ -316,7 +380,9 @@ func getSessionHistory(sessionID, codexHome string, limit int) ([]core.HistoryEn
 			// skip reasoning items
 		}
 	}
-
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
 	if limit > 0 && len(entries) > limit {
 		entries = entries[len(entries)-limit:]
 	}
