@@ -5117,7 +5117,22 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 			}()
 		}
-		flushCh <- flushItem{chunks: chunks, p: p, replyCtx: replyCtx}
+		// Deliver when there is room; only when the queue is full (a stalled
+		// platform send has stopped the sender) does the enqueue wait, and
+		// that wait is interruptible so a full queue cannot pin the reader
+		// goroutine outside its select — with an unconditional send, the
+		// reader and the deferred close(flushCh) would be stuck until the
+		// stalled send returns. A chunk dropped during cancellation is the
+		// trade-off for keeping the reader cancelable.
+		item := flushItem{chunks: chunks, p: p, replyCtx: replyCtx}
+		select {
+		case flushCh <- item:
+		default:
+			select {
+			case flushCh <- item:
+			case <-ctx.Done():
+			}
+		}
 	}
 
 	events := agentSession.Events()
@@ -5269,14 +5284,15 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// exits — so a foreground AddHistory is always ordered after
 				// any unsolicited AddHistory.
 				//
-				// Platform message ordering is guaranteed here because the
-				// sends above are synchronous. Partial text flushed on exit
-				// (flushPartial) is sent from a separate goroutine;
-				// stopUnsolicitedReader also waits for it via flushDone, but
-				// only within unsolicitedReaderStopTimeout. If that bound
-				// fires, flushed chunks may arrive after or interleave with
-				// the next foreground turn's reply (delivery is still
-				// guaranteed; only ordering degrades).
+				// Platform message ordering is guaranteed by the single FIFO
+				// queue every message this reader emits goes through (see
+				// deliverChunks). stopUnsolicitedReader waits on flushDone —
+				// closed only after the queue drains — within
+				// unsolicitedReaderStopTimeout. If that bound fires, chunks
+				// may arrive after or interleave with the next foreground
+				// turn's reply (ordering degrades; delivery is guaranteed
+				// except for chunks dropped during an in-flight cancellation,
+				// see deliverChunks).
 				session.AddHistory("assistant", fullResponse)
 				sessions.Save()
 
