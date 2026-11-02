@@ -4566,16 +4566,34 @@ func (e *Engine) trackTimerRun(jobID, iKey string) func() {
 	return func() { e.timerRuns.CompareAndDelete(jobID, iKey) }
 }
 
-// AbortTimerRun closes the agent session of a timer turn the scheduler gave
-// up on, so the agent process does not outlive the job. It returns false if
-// no run of that job is active.
+const (
+	// timerAbortRegisterGrace bounds how long AbortTimerRun waits for a
+	// tracked run to register its interactive state: the key is tracked a few
+	// instructions before the turn creates that state.
+	timerAbortRegisterGrace = 250 * time.Millisecond
+	timerAbortRegisterPoll  = 10 * time.Millisecond
+)
+
+// AbortTimerRun stops the agent turn of a timer run the scheduler gave up on,
+// so the agent process does not outlive the job. It uses the silent turn-stop
+// path rather than cleanupInteractiveState because in reuse mode the run
+// borrows the chat's own interactive key. It returns false if no run of that
+// job is active or its turn never registered within the grace window.
 func (e *Engine) AbortTimerRun(jobID string) bool {
 	v, ok := e.timerRuns.LoadAndDelete(jobID)
 	if !ok {
 		return false
 	}
-	e.cleanupInteractiveState(v.(string))
-	return true
+	deadline := time.Now().Add(timerAbortRegisterGrace)
+	for {
+		if e.stopInteractiveSessionSilently(v.(string)) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(timerAbortRegisterPoll)
+	}
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key
