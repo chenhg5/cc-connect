@@ -2368,3 +2368,33 @@ app_secret = "your-feishu-app-secret"
 # device_name = "cc-connect"           # 设备名称（可选）
 # device_uuid = ""                     # 设备UUID（可选，留空自动生成）
 # allow_from = "*"                     # optional; set to trusted chat/session IDs in production
+
+# =============================================================================
+# Project 11: Using Baidu Comate CLI / 项目 11：使用百度 Comate CLI (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: npm install -g comatecli && comatecli login
+# 需要安装并登录：npm install -g comatecli && comatecli login
+# Comate CLI uses `comatecli run --display event-stream` under the hood.
+# Comate CLI 底层使用 `comatecli run --display event-stream` 无头模式。
+#
+# [[projects]]
+# name = "my-comate-project"
+#
+# [projects.agent]
+# type = "comate"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# cmd = "comatecli"   # CLI binary name (default: "comatecli") / CLI 二进制名称（默认 "comatecli"）
+# model = ""          # optional; model display name or ID (see `comatecli model list`) / 可选：模型显示名或 ID
+# mode = ""           # "" | "Agent" | "Ask" | "Plan" | "Cloud" | "Bot" (empty = CLI default Agent / 留空为 CLI 默认 Agent)
+# auto_approve = false # false (default): tool calls raise approval cards in chat / 默认 false：工具调用在聊天中出审批卡片
+#                      # true: use comatecli built-in auto-approval (no prompts) / true：使用 CLI 内置自动审批
+# disable_hooks = false            # true: pass --disable-hooks / 传 --disable-hooks
+# enable_interactive_tools = false # true: pass --enable-interactive-tools (ask_user_question/create_plan)
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
