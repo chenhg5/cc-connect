@@ -101,9 +101,18 @@ func TestParseDaemonInstallArgs_NoCaptureSecretsFlagAndEnvCombine(t *testing.T) 
 }
 
 func TestParseDaemonInstallArgs_WorkDirOverridesConfig(t *testing.T) {
+	// Use native paths: a hardcoded POSIX path is not comparable to what
+	// parseDaemonInstallArgs stores (it keeps --work-dir verbatim but routes
+	// --config through filepath.Dir), so the assertion would only hold on unix.
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	overrideDir := t.TempDir()
+	if filepath.Dir(configPath) == overrideDir {
+		t.Fatal("test setup: override dir must differ from the config dir")
+	}
+
 	cfg, force, err := parseDaemonInstallArgs([]string{
-		"--config", "/tmp/example/config.toml",
-		"--work-dir", "/tmp/override",
+		"--config", configPath,
+		"--work-dir", overrideDir,
 		"--force",
 	})
 	if err != nil {
@@ -113,8 +122,9 @@ func TestParseDaemonInstallArgs_WorkDirOverridesConfig(t *testing.T) {
 		t.Fatalf("force = false, want true")
 	}
 
-	want := filepath.Clean("/tmp/override")
-	if cfg.WorkDir != want {
-		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, want)
+	// Last flag wins: both write cfg.WorkDir, so a --work-dir that follows
+	// --config overrides the directory implied by the config path.
+	if cfg.WorkDir != overrideDir {
+		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, overrideDir)
 	}
 }
