@@ -8443,7 +8443,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 				}
 			}
 			if i >= scopedCount {
-				sb.WriteString(fmt.Sprintf("%s\n%s\nID: %s\n", displayName, e.i18n.Tf(MsgSessionReadOnly, s.WorkDir), s.ID))
+				fmt.Fprintf(&sb, "%s\n%s\nID: %s\n", displayName, e.i18n.Tf(MsgSessionReadOnly, s.WorkDir), s.ID)
 				continue
 			}
 			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
@@ -9940,9 +9940,9 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 			shortID = shortID[:12]
 		}
 		if r.readOnly {
-			sb.WriteString(fmt.Sprintf("\n[%s] %s", shortID, r.name))
+			fmt.Fprintf(&sb, "\n[%s] %s", shortID, r.name)
 		} else {
-			sb.WriteString(fmt.Sprintf("\n%d. [%s] %s", i+1, shortID, r.name))
+			fmt.Fprintf(&sb, "\n%d. [%s] %s", i+1, shortID, r.name)
 		}
 	}
 
