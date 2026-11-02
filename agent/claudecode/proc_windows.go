@@ -3,7 +3,6 @@
 package claudecode
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/chenhg5/cc-connect/internal/taskkill"
 )
 
 // prepareCmdForKill puts the spawned child into a new process group on
@@ -41,7 +42,7 @@ func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
 	if err == nil {
 		return nil
 	}
-	if isTaskkillNotRunning(output) {
+	if taskkill.IsNotRunning(err) {
 		return nil
 	}
 	if killErr := cmd.Process.Signal(sig); killErr == nil || errors.Is(killErr, os.ErrProcessDone) {
@@ -60,7 +61,7 @@ func forceKillCmd(cmd *exec.Cmd) error {
 	if err == nil {
 		return nil
 	}
-	if isTaskkillNotRunning(output) {
+	if taskkill.IsNotRunning(err) {
 		return nil
 	}
 	if killErr := cmd.Process.Kill(); killErr == nil || errors.Is(killErr, os.ErrProcessDone) {
@@ -68,12 +69,6 @@ func forceKillCmd(cmd *exec.Cmd) error {
 	} else {
 		return fmt.Errorf("taskkill failed: %w: %s; process kill fallback failed: %w", err, processKillOutput(output), killErr)
 	}
-}
-
-func isTaskkillNotRunning(output []byte) bool {
-	lower := bytes.ToLower(output)
-	return bytes.Contains(lower, []byte("there is no running instance")) ||
-		bytes.Contains(lower, []byte("not found"))
 }
 
 func processKillOutput(output []byte) string {
