@@ -676,7 +676,7 @@ func TestTasksAndGotoRouteAcrossWorkDirs(t *testing.T) {
 	if got := agent.GetWorkDir(); got != alpha {
 		t.Fatalf("shared agent work dir = %q, want unchanged %q", got, alpha)
 	}
-	if got := e.sendWorkDirForSession(msg.SessionKey); !pathsEqual(got, beta) {
+	if got := e.sessionWorkDirForSession(msg.SessionKey); !pathsEqual(got, beta) {
 		t.Fatalf("chat work dir = %q, want %q", got, beta)
 	}
 	_, targetSessions, err := e.getOrCreateWorkspaceAgent(beta)
@@ -686,7 +686,7 @@ func TestTasksAndGotoRouteAcrossWorkDirs(t *testing.T) {
 	if got := targetSessions.GetOrCreateActive(msg.SessionKey).GetAgentSessionID(); got != "beta-session-id" {
 		t.Fatalf("agent session = %q, want beta-session-id", got)
 	}
-	if replies = p.getSent(); len(replies) != 1 || !strings.Contains(replies[0], beta) {
+	if replies = p.getSent(); len(replies) != 1 || !strings.Contains(replies[0], filepath.Base(beta)) || strings.Contains(replies[0], root) {
 		t.Fatalf("unexpected /goto reply: %#v", replies)
 	}
 }
@@ -871,10 +871,10 @@ func TestGlobalSessionRoutingTwoIdentityIsolation(t *testing.T) {
 
 	p.clearSent()
 	e.handleCommand(p, a, "/goto 1")
-	if got := e.sendWorkDirForSession(a.SessionKey); !pathsEqual(got, beta) {
+	if got := e.sessionWorkDirForSession(a.SessionKey); !pathsEqual(got, beta) {
 		t.Fatalf("identity A work dir = %q, want %q", got, beta)
 	}
-	if got := e.sendWorkDirForSession(b.SessionKey); got != "" {
+	if got := e.workDirForSession(b.SessionKey); got != "" {
 		t.Fatalf("identity B work dir mutated to %q", got)
 	}
 	agentA, sessionsA, _, workspaceA, err := e.commandContextWithWorkspace(p, a)

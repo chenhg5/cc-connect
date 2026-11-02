@@ -518,6 +518,7 @@ func TestCUJ_B3_SwitchPreservesHistoryEndToEnd(t *testing.T) {
 // CUJ-B4: discover a session outside the current work directory, resume it,
 // then verify that the selected session is now active.
 func TestCUJ_B4_GlobalTaskDiscoveryAndResume(t *testing.T) {
+	t.Run("DM isolation after next inbound message", testGlobalTaskDMIsolationAfterInboundMessage)
 	root := t.TempDir()
 	alpha := filepath.Join(root, "alpha")
 	beta := filepath.Join(root, "beta")
@@ -566,11 +567,11 @@ func TestCUJ_B4_GlobalTaskDiscoveryAndResume(t *testing.T) {
 		t.Fatalf("unexpected /tasks reply: %#v", replies)
 	}
 
-	// 2. Resume the first result. The user-facing reply includes its work dir.
+	// 2. Resume the first result. The reply shows only the directory basename.
 	p.clearSent()
 	e.ReceiveMessage(p, msg("/goto 1"))
 	replies = p.getSent()
-	if len(replies) != 1 || !strings.Contains(replies[0], beta) || !strings.Contains(replies[0], "beta-session") {
+	if len(replies) != 1 || !strings.Contains(replies[0], filepath.Base(beta)) || strings.Contains(replies[0], root) || !strings.Contains(replies[0], "beta-session") {
 		t.Fatalf("unexpected /goto reply: %#v", replies)
 	}
 

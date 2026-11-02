@@ -528,8 +528,13 @@ global_session_roots = ["/path/to/projects"]
 is inside an allowed root. Use `/tasks <keyword>` to search by title, directory,
 or ID, then `/goto <number>` to resume that session in a per-chat workspace
 context. It does not change the project's global work directory or another
-chat's context. Numbered results are isolated by chat and user and kept only in
-memory; run `/tasks` again after restarting cc-connect. These commands are
+chat's context, including other direct chats with the same user. Commands in
+that chat also use the selected workspace; this does not change command routing
+for existing `send --cwd` bindings. The success reply shows only the directory
+basename. Numbered results are isolated by chat and user. Both the numbered
+results and the chat's directory binding are kept only in memory: after a
+restart, the chat returns to the configured project directory and session.
+Run `/tasks` and `/goto` again to resume the task. These commands are
 unavailable in multi-workspace mode, where workspace routing is managed
 separately.
 

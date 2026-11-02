@@ -479,6 +479,7 @@ type Engine struct {
 	initFlowsMu                  sync.Mutex
 	sendWorkDirMu                sync.RWMutex
 	sendWorkDirs                 map[string]string // sessionKey → work_dir assigned by send --cwd
+	sessionWorkDirs              map[string]string // exact sessionKey → work_dir selected by /goto; guarded by sendWorkDirMu
 
 	// Terminal observation (--observe)
 	observeEnabled    bool
@@ -3125,8 +3126,12 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	if e.multiWorkspace {
 		e.migrateLegacyWorkspaceBindings(msg)
 	}
-	if forcedWorkDir := e.sendWorkDirForSession(msg.SessionKey); forcedWorkDir != "" {
-		e.bindSendWorkDir(msg.SessionKey, forcedWorkDir)
+	if forcedWorkDir := e.workDirForSession(msg.SessionKey); forcedWorkDir != "" {
+		// Only send --cwd bindings follow a direct participant across chats.
+		// A /goto binding stays in sessionWorkDirs for every subsequent turn.
+		if e.sessionWorkDirForSession(msg.SessionKey) == "" {
+			e.bindSendWorkDir(msg.SessionKey, forcedWorkDir)
+		}
 		var err error
 		wsAgent, wsSessions, err = e.getOrCreateWorkspaceAgent(forcedWorkDir)
 		if err != nil {
@@ -7940,13 +7945,13 @@ func listGlobalTasks(ctx context.Context, agent Agent, roots []string, keyword s
 		if _, exists := seen[session.ID]; exists {
 			continue
 		}
-		seen[session.ID] = struct{}{}
 		if keyword != "" {
 			haystack := strings.ToLower(session.Summary + "\n" + session.WorkDir + "\n" + session.ID)
 			if !strings.Contains(haystack, keyword) {
 				continue
 			}
 		}
+		seen[session.ID] = struct{}{}
 		filtered = append(filtered, session)
 	}
 	return filtered, nil
@@ -8083,7 +8088,7 @@ func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
 	if title == "" {
 		title = shortID
 	}
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgGotoSuccess, title, target.WorkDir, shortID))
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgGotoSuccess, title, filepath.Base(target.WorkDir), shortID))
 }
 
 func (e *Engine) cmdSwitch(p Platform, msg *Message, args []string) {
@@ -17501,7 +17506,7 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 // the resolved workspace path for callers that need to forward it to
 // processInteractiveMessageWith (idle reaper bookkeeping, reply footer, etc).
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
-	if forcedWorkDir := e.sendWorkDirForSession(msg.SessionKey); forcedWorkDir != "" {
+	if forcedWorkDir := e.sessionWorkDirForSession(msg.SessionKey); forcedWorkDir != "" {
 		agent, sessions, err := e.getOrCreateWorkspaceAgent(forcedWorkDir)
 		if err != nil {
 			return nil, nil, "", "", err
@@ -17533,7 +17538,7 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
 // It uses existing workspace bindings and falls back to global context if unresolved.
 func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager) {
-	if workspace := e.sendWorkDirForSession(sessionKey); workspace != "" {
+	if workspace := e.workDirForSession(sessionKey); workspace != "" {
 		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
 			return wsAgent, wsSessions
 		}
@@ -17593,19 +17598,34 @@ func (e *Engine) bindSendWorkDir(sessionKey, workDir string) {
 	}
 }
 
-// bindSessionWorkDir binds exactly one chat/session. Unlike bindSendWorkDir it
-// deliberately does not add the direct-participant fallback key: /goto in one
-// chat must never reroute another chat owned by the same user.
+// bindSessionWorkDir stores /goto's exact-chat binding separately from
+// send --cwd bindings, so inbound messages cannot promote it to a participant
+// fallback and command routing can preserve send --cwd's existing behavior.
 func (e *Engine) bindSessionWorkDir(sessionKey, workDir string) {
 	if sessionKey == "" || workDir == "" {
 		return
 	}
 	e.sendWorkDirMu.Lock()
 	defer e.sendWorkDirMu.Unlock()
-	if e.sendWorkDirs == nil {
-		e.sendWorkDirs = make(map[string]string)
+	if e.sessionWorkDirs == nil {
+		e.sessionWorkDirs = make(map[string]string)
 	}
-	e.sendWorkDirs[sessionKey] = workDir
+	e.sessionWorkDirs[sessionKey] = workDir
+}
+
+func (e *Engine) sessionWorkDirForSession(sessionKey string) string {
+	e.sendWorkDirMu.RLock()
+	defer e.sendWorkDirMu.RUnlock()
+	return e.sessionWorkDirs[sessionKey]
+}
+
+// workDirForSession resolves message/live-session routing. Command context
+// only follows the exact /goto binding, not send --cwd's participant fallback.
+func (e *Engine) workDirForSession(sessionKey string) string {
+	if workDir := e.sessionWorkDirForSession(sessionKey); workDir != "" {
+		return workDir
+	}
+	return e.sendWorkDirForSession(sessionKey)
 }
 
 func (e *Engine) sendWorkDirForSession(sessionKey string) string {
@@ -17658,7 +17678,7 @@ func (e *Engine) workspaceFromLiveState(sessionKey string) string {
 // interactiveKeyForSessionKey returns the interactive state key for a sessionKey.
 // In multi-workspace mode, it prefixes with the bound workspace path when available.
 func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
-	if workspace := e.sendWorkDirForSession(sessionKey); workspace != "" {
+	if workspace := e.workDirForSession(sessionKey); workspace != "" {
 		return workspace + ":" + sessionKey
 	}
 	// Single-workspace fast path: no scan, no binding lookup, no lock.
@@ -17694,7 +17714,7 @@ func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 //     ID, so step 2 misses. The state map was keyed correctly at processing
 //     time, so we recover the workspace prefix from there.
 func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
-	if workspace := e.sendWorkDirForSession(sessionKey); workspace != "" {
+	if workspace := e.workDirForSession(sessionKey); workspace != "" {
 		return workspace + ":" + sessionKey
 	}
 	if !e.multiWorkspace || e.workspaceBindings == nil {
