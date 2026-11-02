@@ -5104,6 +5104,11 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 	var textParts []string
 	var toolsUsed []string
+	// finalSegmentStarts records where in textParts each tool call or
+	// thinking block started a new segment: in final output mode the last
+	// segment with text is the answer, as on the foreground path (see
+	// unsolicitedReplyText).
+	var finalSegmentStarts []int
 
 	// flushPartial relays text already accumulated for an unsolicited turn
 	// that will not reach its EventResult through this reader (a new
@@ -5115,8 +5120,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 		if len(textParts) == 0 {
 			return
 		}
-		partial := strings.Join(textParts, "")
+		partial := e.unsolicitedReplyText("", textParts, finalSegmentStarts)
 		textParts = nil
+		finalSegmentStarts = nil
 		if strings.TrimSpace(partial) == "" {
 			return
 		}
@@ -5211,11 +5217,17 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 			switch event.Type {
 			case EventText:
-				if event.Content != "" {
-					textParts = append(textParts, event.Content)
+				if content := e.agentText(event.Content); content != "" {
+					textParts = append(textParts, content)
+				}
+
+			case EventThinking:
+				if !isEllipsisOnly(event.Content) {
+					finalSegmentStarts = append(finalSegmentStarts, len(textParts))
 				}
 
 			case EventToolUse:
+				finalSegmentStarts = append(finalSegmentStarts, len(textParts))
 				// Record tool name so we can log or surface context if the
 				// channel closes before a clean EventResult. Output is
 				// delivered via EventResult; we intentionally do not relay
@@ -5236,10 +5248,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
 
 			case EventResult:
-				fullResponse := event.Content
-				if fullResponse == "" && len(textParts) > 0 {
-					fullResponse = strings.Join(textParts, "")
-				}
+				// In final mode only the answer (narration before a tool call
+				// is not part of it); agent footers are gone either way.
+				fullResponse := e.unsolicitedReplyText(event.Content, textParts, finalSegmentStarts)
 
 				if fullResponse != "" {
 					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
@@ -5268,6 +5279,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 				// Reset for potential subsequent unsolicited turn.
 				textParts = nil
+				finalSegmentStarts = nil
 				toolsUsed = nil
 				turnActive = false
 				if workspaceDir != "" && e.workspacePool != nil {
@@ -5978,10 +5990,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventText:
-			content := event.Content
-			if e.display.HideAgentFooter {
-				content = stripAgentFooterLines(content)
-			}
+			content := e.agentText(event.Content)
 			if content != "" && !isEllipsisOnly(content) {
 				// Pre-compute silentHold transition including this chunk so the
 				// rich-card path doesn't leak a preview that gets recalled at
@@ -6252,15 +6261,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = false
 			state.mu.Unlock()
 
-			fullResponse := event.Content
-			if e.display.HideAgentFooter {
-				fullResponse = stripAgentFooterLines(fullResponse)
-			}
+			fullResponse := e.agentText(event.Content)
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
 			if finalMode {
-				fullResponse = finalTurnText(fullResponse, textParts, finalSegmentStarts)
+				fullResponse = e.finalAnswer(fullResponse, textParts, finalSegmentStarts)
 			} else if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {

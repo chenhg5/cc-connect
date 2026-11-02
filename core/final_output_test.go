@@ -331,3 +331,90 @@ func jsonEscape(s string) string {
 	b, _ := json.Marshal(s)
 	return strings.Trim(string(b), `"`)
 }
+
+// agentStatusFooter is the model/token footer agents append to their text;
+// hide_agent_footer (forced on by final mode) strips it.
+const agentStatusFooter = "*claude-opus-4-8[1m] · out 788 · in 442 cw 0 cr 395.1k · ctx 40%*"
+
+// runBackgroundTurn feeds events to a background (unsolicited) reader and
+// returns what reached the chat. With result the turn ends in an
+// EventResult without content; otherwise the reader is stopped, which
+// flushes the buffered text.
+func runBackgroundTurn(t *testing.T, display DisplayCfg, result bool, events ...Event) []string {
+	t.Helper()
+	p := &stubPlatformEngine{n: "test"}
+	s := newControllableSession("bg-final")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	e.SetDisplayConfig(display)
+	const key = "test:bg-final"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+	for _, ev := range events {
+		s.events <- ev
+	}
+	if result {
+		s.events <- Event{Type: EventResult, Done: true}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(s.events) > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	e.stopUnsolicitedReader(state)
+	time.Sleep(100 * time.Millisecond)
+	return p.getSent()
+}
+
+// A background turn (the agent keeps working after the foreground turn
+// ended) follows the final-mode contract like a foreground turn: the same
+// events give the same chat output -- only the last text segment, without
+// the agent's status footer -- whether the turn ends with a result or its
+// buffered text is flushed.
+func TestFinalMode_BackgroundTurnMatchesForeground(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []Event
+		want   string
+	}{
+		{"answer with a footer", []Event{{Type: EventText, Content: "The answer is 42.\n" + agentStatusFooter}}, "The answer is 42."},
+		{"footer in its own chunk", []Event{{Type: EventText, Content: "The answer is 42."}, {Type: EventText, Content: "\n" + agentStatusFooter}}, "The answer is 42."},
+		{"narration, tool, answer", []Event{
+			{Type: EventText, Content: "Let me check."},
+			{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+			{Type: EventText, Content: "The answer is 42."},
+		}, "The answer is 42."},
+		{"answer, trailing thinking", []Event{
+			{Type: EventText, Content: "The answer is 42."},
+			{Type: EventThinking, Content: "verify?"},
+		}, "The answer is 42."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := newFinalModePlatform()
+			fe := newFinalModeEngine(t, fp)
+			runFinalModeTurn(t, fe, fp, "test:fg-final", append(append([]Event{}, tc.events...), Event{Type: EventResult, Done: true})...)
+			if sent := fp.getSent(); len(sent) != 1 || sent[0] != tc.want {
+				t.Fatalf("foreground sent %q, want [%q]", sent, tc.want)
+			}
+			for _, result := range []bool{true, false} {
+				if sent := runBackgroundTurn(t, DisplayCfg{Mode: "final"}, result, tc.events...); len(sent) != 1 || sent[0] != tc.want {
+					t.Errorf("background (result=%t) sent %q, want [%q] like the foreground", result, sent, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// hide_agent_footer applies to background turns in every mode, and only
+// when it is set.
+func TestUnsolicitedReader_HideAgentFooter(t *testing.T) {
+	text := Event{Type: EventText, Content: "done\n" + agentStatusFooter}
+	if sent := runBackgroundTurn(t, DisplayCfg{Mode: "quiet", HideAgentFooter: true}, true, text); len(sent) != 1 || sent[0] != "done" {
+		t.Fatalf("hide_agent_footer on: sent %q", sent)
+	}
+	if sent := runBackgroundTurn(t, DisplayCfg{Mode: "quiet"}, true, text); len(sent) != 1 || !strings.Contains(sent[0], "out 788") {
+		t.Fatalf("hide_agent_footer off: sent %q, want the footer kept", sent)
+	}
+}

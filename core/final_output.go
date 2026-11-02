@@ -75,3 +75,37 @@ func finalTurnText(resultContent string, textParts []string, segmentStarts []int
 	}
 	return ""
 }
+
+// agentText applies the display's filters to text the agent emitted -- an
+// EventText chunk or a result body: with hide_agent_footer (forced on by
+// final mode) its model/token status footer lines go. The foreground turn
+// and the background reader both run agent text through it before
+// buffering it, picking the answer or judging NO_REPLY, so a footer can
+// neither leak on one path nor turn a silent NO_REPLY turn into a message.
+func (e *Engine) agentText(text string) string {
+	if e.display.HideAgentFooter {
+		return stripAgentFooterLines(text)
+	}
+	return text
+}
+
+// finalAnswer is a final-mode turn's answer, foreground or background:
+// finalTurnText over the filtered result body and text, filtered once more
+// because a footer can arrive split across text chunks.
+func (e *Engine) finalAnswer(resultContent string, textParts []string, segmentStarts []int) string {
+	return e.agentText(finalTurnText(e.agentText(resultContent), textParts, segmentStarts))
+}
+
+// unsolicitedReplyText is the text a background turn delivers (before
+// NO_REPLY handling): the final-mode answer, else the result body, else
+// all buffered text. The result, partial-flush and error paths of the
+// background reader share it so they cannot drift apart.
+func (e *Engine) unsolicitedReplyText(resultContent string, textParts []string, segmentStarts []int) string {
+	if e.finalOutput() {
+		return e.finalAnswer(resultContent, textParts, segmentStarts)
+	}
+	if text := e.agentText(resultContent); text != "" {
+		return text
+	}
+	return e.agentText(strings.Join(textParts, ""))
+}

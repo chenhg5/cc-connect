@@ -133,7 +133,7 @@ level = "info" # debug, info, warn, error
 #                           #          隐藏思考和工具消息，每段文本独立发送
 #                           # quiet: hide thinking/tool, all text in one card, done emoji at end
 #                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
-#                           # final: send only each turn's final answer as plain messages -- no streaming card,
+#                           # final: send only each turn's final answer (background turns too) as plain messages -- no streaming card,
 #                           #        preview, thinking/tool messages, footer or system notices; text written
 #                           #        before the last tool call is dropped (if nothing follows it, the last text
 #                           #        is the answer); /quiet cannot change it. Dropped notices include auto-compress,
@@ -142,7 +142,7 @@ level = "info" # debug, info, warn, error
 #                           #        logged at Warn. Errors and permission prompts are still sent. Typing
 #                           #        indicators and the "done" reaction (DingTalk done_emoji, WPS) are reactions
 #                           #        on the user's message, not messages, and stay.
-#                           #        每轮只发最终回答：不发流式卡片、预览、思考/工具消息、页脚和系统提示；
+#                           #        每轮（含后台轮次）只发最终回答：不发流式卡片、预览、思考/工具消息、页脚和系统提示；
 #                           #        最后一次工具调用之前的文字不发送（其后没有文字时取最后一段文字）；/quiet 不能
 #                           #        改变它。不发的提示包括自动压缩、空闲重置、模型切换、无法安全恢复（已开新会话）和
 #                           #        无活动轮次时自动拒绝的后台工具调用，后两者以 Warn 记日志。错误和权限请求照常发送。
