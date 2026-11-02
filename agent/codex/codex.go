@@ -614,19 +614,34 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
 }
 
-// ListSessions 返回当前 CODEX_HOME 下的会话，默认仅包含 workDir 对应的工作目录。
-// 启用 list_all_workdirs 后取消目录过滤；该选项不改变新会话的工作目录。
+// ListSessions 返回当前工作目录可操作的 Codex 会话。
+// 即使启用跨项目浏览，切换、恢复和删除的候选范围仍保持在当前目录；
+// 空工作目录按进程当前目录处理，不作为取消过滤的标志。
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
 	a.mu.RLock()
 	codexHome := a.codexHome
 	workDir := a.workDir
 	ignorePrefixes := append([]string(nil), a.ignoreSessionPrefixes...)
-	listAllWorkdirs := a.listAllWorkdirs
 	a.mu.RUnlock()
-	if listAllWorkdirs {
-		workDir = ""
+	if workDir == "" {
+		workDir = "."
 	}
 	return listCodexSessions(workDir, codexHome, ignorePrefixes)
+}
+
+// ListAllSessions 为列表和搜索提供只读浏览范围。
+// 启用 list_all_workdirs 时展示当前 CODEX_HOME 的所有目录，否则沿用项目范围。
+// 额外返回的跨项目会话不能作为切换、恢复或删除的候选。
+func (a *Agent) ListAllSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
+	a.mu.RLock()
+	codexHome := a.codexHome
+	ignorePrefixes := append([]string(nil), a.ignoreSessionPrefixes...)
+	listAllWorkdirs := a.listAllWorkdirs
+	a.mu.RUnlock()
+	if !listAllWorkdirs {
+		return a.ListSessions(ctx)
+	}
+	return listCodexSessions("", codexHome, ignorePrefixes)
 }
 
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {

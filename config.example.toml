@@ -1820,8 +1820,9 @@ app_secret = "your-feishu-app-secret"
 #
 # [projects.agent.options]
 # work_dir = "/path/to/project"
-# /list 是否显示当前 CODEX_HOME 下所有工作目录的 Codex 会话。
-# 默认 false，仅显示 work_dir 对应的会话；设为 true 时不按目录过滤。
+# 设为 true 后，/list 和 /search 可只读查看当前 CODEX_HOME 下其他目录的会话。
+# 其他目录显示只读标识和路径，不分配操作编号或切换按钮。
+# /switch、恢复、/delete（含删除卡片）和管理 API 仍限当前项目；默认 false。
 # list_all_workdirs = false
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 # Optional: app_server supports interactive approvals and named permissions.

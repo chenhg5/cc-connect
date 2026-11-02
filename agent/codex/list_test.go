@@ -59,7 +59,15 @@ func TestAgentListSessions_ListAllWorkdirs(t *testing.T) {
 	otherWorkDir := t.TempDir()
 
 	writeTestCodexRollout(t, codexHome, "rollout-main.jsonl", "main-session", workDir)
-	writeTestCodexRollout(t, codexHome, "rollout-other.jsonl", "other-session", otherWorkDir)
+	otherPath := writeTestCodexRollout(t, codexHome, "rollout-other.jsonl", "other-session", otherWorkDir)
+	otherBody, err := os.ReadFile(otherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherBody = []byte(strings.Replace(string(otherBody), `"source":"vscode"`, `"source":"exec"`, 1))
+	if err := os.WriteFile(otherPath, otherBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Chdir(workDir)
 	cmd, err := os.Executable()
@@ -71,12 +79,15 @@ func TestAgentListSessions_ListAllWorkdirs(t *testing.T) {
 		name            string
 		workDir         string
 		listAllWorkdirs any
+		clearWorkDir    bool
 		wantIDs         []string
 	}{
 		{name: "enabled", workDir: workDir, listAllWorkdirs: true, wantIDs: []string{"main-session", "other-session"}},
 		{name: "disabled", workDir: workDir, listAllWorkdirs: false, wantIDs: []string{"main-session"}},
 		{name: "unset", workDir: workDir, wantIDs: []string{"main-session"}},
 		{name: "disabled with default workdir", listAllWorkdirs: false, wantIDs: []string{"main-session"}},
+		{name: "enabled after empty workdir update", workDir: workDir, listAllWorkdirs: true, clearWorkDir: true, wantIDs: []string{"main-session", "other-session"}},
+		{name: "disabled after empty workdir update", workDir: workDir, listAllWorkdirs: false, clearWorkDir: true, wantIDs: []string{"main-session"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -84,28 +95,49 @@ func TestAgentListSessions_ListAllWorkdirs(t *testing.T) {
 			if tt.listAllWorkdirs != nil {
 				opts["list_all_workdirs"] = tt.listAllWorkdirs
 			}
-			agent, err := New(opts)
+			backend, err := New(opts)
 			if err != nil {
 				t.Fatalf("New() error: %v", err)
+			}
+			agent := backend.(*Agent)
+			if tt.clearWorkDir {
+				agent.SetWorkDir("")
 			}
 			sessions, err := agent.ListSessions(context.Background())
 			if err != nil {
 				t.Fatalf("ListSessions() error: %v", err)
 			}
+			if len(sessions) != 1 || sessions[0].ID != "main-session" {
+				t.Fatalf("ListSessions() = %#v, want only the current project's session", sessions)
+			}
+			sessions, err = agent.ListAllSessions(context.Background())
+			if err != nil {
+				t.Fatalf("ListAllSessions() error: %v", err)
+			}
 			if len(sessions) != len(tt.wantIDs) {
-				t.Fatalf("ListSessions() returned %d sessions, want %d", len(sessions), len(tt.wantIDs))
+				t.Fatalf("ListAllSessions() returned %d sessions, want %d", len(sessions), len(tt.wantIDs))
 			}
 
 			got := map[string]bool{}
 			for _, session := range sessions {
 				got[session.ID] = true
+				if session.ID == "other-session" && session.WorkDir != otherWorkDir {
+					t.Fatalf("session.WorkDir = %q, want %q", session.WorkDir, otherWorkDir)
+				}
 			}
 			for _, want := range tt.wantIDs {
 				if !got[want] {
-					t.Fatalf("ListSessions() missing session %q; got %#v", want, got)
+					t.Fatalf("ListAllSessions() missing session %q; got %#v", want, got)
 				}
 			}
 		})
+	}
+	unchangedBody, err := os.ReadFile(otherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(unchangedBody) != string(otherBody) {
+		t.Fatal("browsing changed another project's session file")
 	}
 }
 
@@ -478,7 +510,7 @@ func TestAgentListSessions_UsesFirstUserPromptWhenIndexTitleMissing(t *testing.T
 	}
 }
 
-func writeTestCodexRollout(t *testing.T, codexHome, name, sessionID, workDir string) {
+func writeTestCodexRollout(t *testing.T, codexHome, name, sessionID, workDir string) string {
 	t.Helper()
 
 	sessionsDir := filepath.Join(codexHome, "sessions", "2026", "08", "31")
@@ -493,7 +525,9 @@ func writeTestCodexRollout(t *testing.T, codexHome, name, sessionID, workDir str
 
 	body := `{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":` + string(workDirJSON) + `,"source":"vscode"}}` + "\n" +
 		`{"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"test prompt"}]}}` + "\n"
-	if err := os.WriteFile(filepath.Join(sessionsDir, name), []byte(body), 0o644); err != nil {
+	path := filepath.Join(sessionsDir, name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write rollout %s: %v", name, err)
 	}
+	return path
 }

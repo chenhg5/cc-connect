@@ -8346,6 +8346,36 @@ func (e *Engine) listCommandSessions(agent Agent, sessions *SessionManager, sess
 // dirCardPageSize is the max directory history rows per card page (Feishu / other card UIs).
 const dirCardPageSize = 20
 
+// listSessionsForDisplay 保留项目会话的顺序和编号，将额外浏览结果追加为只读条目。
+// 返回的数量仅包含可操作会话；列表和搜索仍应用既有的会话归属过滤。
+func (e *Engine) listSessionsForDisplay(agent Agent, sessions *SessionManager, sessionKey string) ([]AgentSessionInfo, int, error) {
+	scoped, err := e.listCommandSessions(agent, sessions, sessionKey)
+	if err != nil {
+		return nil, 0, err
+	}
+	scopedCount := len(scoped)
+	browser, ok := agent.(SessionBrowser)
+	if !ok {
+		return scoped, scopedCount, nil
+	}
+	all, err := browser.ListAllSessions(e.ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	all = e.applySessionFilter(all, sessions, sessionKey)
+	seen := make(map[string]struct{}, len(scoped))
+	result := append([]AgentSessionInfo(nil), scoped...)
+	for _, session := range scoped {
+		seen[session.ID] = struct{}{}
+	}
+	for _, session := range all {
+		if _, exists := seen[session.ID]; !exists {
+			result = append(result, session)
+		}
+	}
+	return result, scopedCount, nil
+}
+
 func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 	agent, sessions, _, err := e.commandContext(p, msg)
 	if err != nil {
@@ -8354,7 +8384,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 	}
 
 	if !supportsCards(p) {
-		agentSessions, err := e.listCommandSessions(agent, sessions, msg.SessionKey)
+		agentSessions, scopedCount, err := e.listSessionsForDisplay(agent, sessions, msg.SessionKey)
 		if err != nil {
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgListError), err))
 			return
@@ -8411,6 +8441,10 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 				if len([]rune(displayName)) > 40 {
 					displayName = string([]rune(displayName)[:40]) + "…"
 				}
+			}
+			if i >= scopedCount {
+				sb.WriteString(fmt.Sprintf("%s\n%s\nID: %s\n", displayName, e.i18n.Tf(MsgSessionReadOnly, s.WorkDir), s.ID))
+				continue
 			}
 			sb.WriteString(fmt.Sprintf("%s **%d.** %s · **%d** msgs · %s\n",
 				marker, i+1, displayName, s.MessageCount, s.ModifiedAt.Format("01-02 15:04")))
@@ -9836,12 +9870,11 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
-	agentSessions, err := agent.ListSessions(e.ctx)
+	agentSessions, scopedCount, err := e.listSessionsForDisplay(agent, sessions, msg.SessionKey)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgSearchError), err))
 		return
 	}
-	agentSessions = e.applySessionFilter(agentSessions, sessions, msg.SessionKey)
 
 	type searchResult struct {
 		id           string
@@ -9849,16 +9882,20 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 		summary      string
 		matchType    string // "name" or "message"
 		messageCount int
+		readOnly     bool
 	}
 
 	var results []searchResult
 
-	for _, s := range agentSessions {
+	for index, s := range agentSessions {
 		// Check session name (custom name or summary)
 		customName := sessions.GetSessionName(s.ID)
 		displayName := customName
 		if displayName == "" {
 			displayName = s.Summary
+		}
+		if index >= scopedCount {
+			displayName += " · " + e.i18n.Tf(MsgSessionReadOnly, s.WorkDir)
 		}
 
 		// Match by name/summary
@@ -9869,6 +9906,7 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 				summary:      s.Summary,
 				matchType:    "name",
 				messageCount: s.MessageCount,
+				readOnly:     index >= scopedCount,
 			})
 			continue
 		}
@@ -9881,6 +9919,7 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 				summary:      s.Summary,
 				matchType:    "id",
 				messageCount: s.MessageCount,
+				readOnly:     index >= scopedCount,
 			})
 			continue
 		}
@@ -9900,7 +9939,11 @@ func (e *Engine) cmdSearch(p Platform, msg *Message, args []string) {
 		if len(shortID) > 12 {
 			shortID = shortID[:12]
 		}
-		sb.WriteString(fmt.Sprintf("\n%d. [%s] %s", i+1, shortID, r.name))
+		if r.readOnly {
+			sb.WriteString(fmt.Sprintf("\n[%s] %s", shortID, r.name))
+		} else {
+			sb.WriteString(fmt.Sprintf("\n%d. [%s] %s", i+1, shortID, r.name))
+		}
 	}
 
 	sb.WriteString("\n\n" + e.i18n.T(MsgSearchHint))
@@ -14701,7 +14744,7 @@ func (e *Engine) renderModeCard() *Card {
 
 func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	agent, sessions := e.sessionContextForKey(sessionKey)
-	agentSessions, err := e.listCommandSessions(agent, sessions, sessionKey)
+	agentSessions, scopedCount, err := e.listSessionsForDisplay(agent, sessions, sessionKey)
 	if err != nil {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
@@ -14751,6 +14794,10 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 			if len([]rune(displayName)) > 40 {
 				displayName = string([]rune(displayName)[:40]) + "…"
 			}
+		}
+		if i >= scopedCount {
+			cb.Markdown(fmt.Sprintf("%s\n%s\nID: %s", displayName, e.i18n.Tf(MsgSessionReadOnly, s.WorkDir), s.ID))
+			continue
 		}
 		btnType := "default"
 		if s.ID == activeAgentID && activeAgentID != "" || s.ID == localSessionPrefix+activeSession.ID {

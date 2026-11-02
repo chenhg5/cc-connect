@@ -163,7 +163,9 @@ func listCodexSessions(workDir, codexHome string, extraPrefixes ...[]string) ([]
 		if isInternalPrompt(aggregate.firstPrompt, effectiveInternalPromptPrefixes(prefixes)) {
 			continue
 		}
-		patchSessionSource(aggregate.info.ID, codexHome)
+		if absWorkDir != "" {
+			patchSessionSource(aggregate.info.ID, codexHome)
+		}
 		sessions = append(sessions, aggregate.info)
 	}
 
@@ -342,6 +344,7 @@ func parseCodexSessionFileDetail(path, filterCwd string, customPrefixes []string
 		Summary:      summary,
 		MessageCount: msgCount,
 		ModifiedAt:   stat.ModTime(),
+		WorkDir:      sessionCwd,
 	}, firstPrompt
 }
 
