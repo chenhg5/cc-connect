@@ -90,6 +90,12 @@ func TestP1_4_Switch_ClaudeCode(t *testing.T) {
 
 // ── P1-6: /delete ────────────────────────────────────────────────────────────
 
+// TestP1_6_Delete_ClaudeCode checks that /delete removes exactly one session and leaves the rest.
+//
+// Every /new session needs a message before /list can see it: the provider only writes a
+// transcript once the agent runs, so an unused third session is invisible to /list and the count
+// reads 1 instead of 2 after the delete. Delete index 2, not 1: /list marks the newest session
+// active (▶) and cmdDelete refuses to delete the active one.
 func TestP1_6_Delete_ClaudeCode(t *testing.T) {
 	t.Parallel()
 	env := helper.NewEnv(t, "claudecode")
@@ -98,6 +104,12 @@ func TestP1_6_Delete_ClaudeCode(t *testing.T) {
 	env.SendWithTimeout("/new", cmdTimeout)
 	env.Send("say hello briefly")
 	env.SendWithTimeout("/new", cmdTimeout)
+	env.SendComplete("say ok briefly")
+
+	pre := env.SendWithTimeout("/list", cmdTimeout)
+	if got := strings.Count(pre.Text(), "msgs"); got != 3 {
+		t.Skipf("P1-6 could not establish 3 sessions; /list: %q", pre.Text())
+	}
 
 	env.SendWithTimeout("/delete 2", cmdTimeout)
 
@@ -188,11 +200,15 @@ func truncate(s string, max int) string {
 	return s[:max] + "…"
 }
 
-// restartedEngine stops env.Engine and returns a new Engine + MockPlatform
-// that share the same session store — simulating a service restart.
-func restartedEngine(t *testing.T, agentType, dataDir string) (*core.Engine, *bbplatform.MockPlatform) {
+// restartedEngine starts a fresh Engine + MockPlatform that share the same session store and the
+// same work_dir — simulating a service restart.
+//
+// Reusing work_dir is the point: Claude keeps transcripts under ~/.claude/projects/<encoded
+// work_dir>, so a new t.TempDir() here makes /list find nothing and the test reports "name lost
+// after restart" — a fixture bug that reads like a persistence bug.
+func restartedEngine(t *testing.T, agentType, dataDir, workDir string) (*core.Engine, *bbplatform.MockPlatform) {
 	t.Helper()
-	opts := map[string]any{"work_dir": t.TempDir()}
+	opts := map[string]any{"work_dir": workDir}
 	agent, err := core.CreateAgent(agentType, opts)
 	if err != nil {
 		t.Skipf("restart skip: cannot create %s agent: %v", agentType, err)
