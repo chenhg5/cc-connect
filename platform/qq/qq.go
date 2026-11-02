@@ -30,6 +30,7 @@ type Platform struct {
 	wsURL                 string // e.g. "ws://127.0.0.1:3001"
 	token                 string // optional access_token
 	allowFrom             string // comma-separated user IDs or "*"
+	requireMention        bool   // group chats: only react when the bot is @-mentioned (default true)
 	shareSessionInChannel bool
 	handler               core.MessageHandler
 	conn                  *websocket.Conn
@@ -40,7 +41,7 @@ type Platform struct {
 	selfID                int64
 	dedup                 core.MessageDedup
 	groupNameCache        sync.Map // groupID -> group name
-	httpURL            string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
+	httpURL               string   // OneBot HTTP API URL, e.g. "http://127.0.0.1:3000"
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -52,6 +53,14 @@ func New(opts map[string]any) (core.Platform, error) {
 	allowFrom, _ := opts["allow_from"].(string)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 
+	// require_mention: in group chats only react when the bot is @-mentioned.
+	// Defaults to true (consistent with the feishu platform); set false to
+	// process every group message like earlier versions did.
+	requireMention := true
+	if v, ok := opts["require_mention"].(bool); ok {
+		requireMention = v
+	}
+
 	core.CheckAllowFrom("qq", allowFrom)
 
 	httpURL, _ := opts["http_url"].(string)
@@ -61,8 +70,9 @@ func New(opts map[string]any) (core.Platform, error) {
 		wsURL:                 wsURL,
 		token:                 token,
 		allowFrom:             allowFrom,
+		requireMention:        requireMention,
 		shareSessionInChannel: shareSessionInChannel,
-		httpURL:            httpURL,
+		httpURL:               httpURL,
 	}, nil
 }
 
@@ -193,6 +203,11 @@ func (p *Platform) handleMessage(payload map[string]any) {
 	}
 
 	if !p.isAllowed(userID) {
+		return
+	}
+
+	if msgType == "group" && p.requireMention && !p.messageMentionsSelf(payload) {
+		slog.Debug("qq: ignoring group message without bot mention", "group_id", groupID, "user_id", userID)
 		return
 	}
 
@@ -668,6 +683,45 @@ func (p *Platform) isAllowed(userID int64) bool {
 	uid := strconv.FormatInt(userID, 10)
 	for _, allowed := range strings.Split(p.allowFrom, ",") {
 		if strings.TrimSpace(allowed) == uid {
+			return true
+		}
+	}
+	return false
+}
+
+// messageMentionsSelf reports whether a OneBot message payload @-mentions the
+// bot itself (or @all). Used to gate group messages when require_mention is on.
+// It fails open (returns true) when the bot's own id is unknown.
+func (p *Platform) messageMentionsSelf(payload map[string]any) bool {
+	if p.selfID == 0 {
+		return true
+	}
+	self := strconv.FormatInt(p.selfID, 10)
+	switch m := payload["message"].(type) {
+	case []any:
+		for _, seg := range m {
+			segMap, ok := seg.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := segMap["type"].(string); t != "at" {
+				continue
+			}
+			data, _ := segMap["data"].(map[string]any)
+			var q string
+			switch v := data["qq"].(type) {
+			case string:
+				q = v
+			case float64:
+				q = strconv.FormatInt(int64(v), 10)
+			}
+			if q == self || q == "all" {
+				return true
+			}
+		}
+	case string:
+		// CQ-code fallback for string-format OneBot implementations.
+		if strings.Contains(m, "[CQ:at,qq="+self+"]") || strings.Contains(m, "[CQ:at,qq=all]") {
 			return true
 		}
 	}

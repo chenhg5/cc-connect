@@ -46,9 +46,14 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/reasoning [level]` | View or switch reasoning effort (Codex) |
 | `/mode [name]` | View or switch permission mode |
 | `/stop` | Stop current execution |
+| `/ps <message>` / `/btw <message>` | Send a supplement to the running task |
 | `/help` | Show available commands |
 
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
+
+Use `/ps` (or `/btw`) to add instructions while a task is running. An idle session rejects the command. The delivery confirmation means the bridge sent the request, not that the agent has finished processing it.
+
+With Pi, enable `rpc = true` for native steering: the supplement is queued for the next model call, after the current assistant turn's tool calls. If Pi has already finished while the bridge is still delivering its reply, the supplement starts a follow-up turn. Pi's default JSON mode keeps its existing one-shot sending behavior; it cannot inject into an already running process.
 
 cc-connect rotates to a fresh session automatically after long inactivity:
 
@@ -1016,6 +1021,8 @@ type = "claudecode"
 > **Status: Beta.** This feature is available since v1.2.2-beta.5. The UI and API may change in future releases.
 
 A full-featured management UI embedded in the binary — project CRUD, session management, cron job editor, global settings, chat interface, and i18n support.
+
+When importing providers from CC-Switch in the dashboard, an import is rejected if a selected name matches multiple source providers. No providers are added in that request. Deselect the ambiguous name to import the remaining unique providers.
 
 ### Quick Setup (Chat Command)
 

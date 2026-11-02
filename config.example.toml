@@ -875,15 +875,18 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # reasoning_effort = "high"  # "low" | "medium" | "high" | "max"
 
 # Optional: override the context-window size used by the "ctx N%" indicator
-# in IM replies. By default cc-connect infers 200K vs 1M from the model id
+# in IM replies. By default cc-connect uses the window Claude Code reports
+# for the session's model (`modelUsage.contextWindow` in the result event)
+# and, when the CLI reports none, infers 200K vs 1M from the model id
 # (anything containing `[1m]` is treated as 1M). Set this when running
 # against a custom router / fine-tuned model whose id does not match
 # Claude Code's naming scheme, or when you want to hard-pin a specific
-# window. <= 0 falls back to the model-id heuristic.
-# 可选：覆盖 IM 回复中"ctx N%"指示符使用的上下文窗口大小。默认情况下，
+# window. <= 0 keeps that default.
+# 可选：覆盖 IM 回复中"ctx N%"指示符使用的上下文窗口大小。默认使用 Claude Code
+# 为会话模型上报的窗口（result 事件中的 `modelUsage.contextWindow`）；CLI 未上报时，
 # cc-connect 根据模型 id 推断 200K 或 1M（任何包含 `[1m]` 的视为 1M）。
 # 当连接到自定义 router / 微调模型（id 与 Claude Code 命名规范不匹配），
-# 或者想硬编码一个特定窗口时设置此选项。<= 0 退回到按模型 id 推断。
+# 或者想硬编码一个特定窗口时设置此选项。<= 0 保持上述默认行为。
 # context_window_tokens = 200000
 
 # In default/acceptEdits mode, you can pre-approve specific tools:
@@ -1681,6 +1684,10 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Requires a Codex CLI: npm install -g @openai/codex, or a supported macOS desktop app.
 # 需要 Codex CLI：npm install -g @openai/codex，或支持的 macOS 桌面应用。
+# GPT-6.1 Sol requires Codex CLI 0.159.1 or later; update the CLI selected by cmd/CODEX_CLI_PATH/PATH.
+# GPT-6.1 Sol 需要 Codex CLI 0.159.1 或更新版本；请更新 cmd/CODEX_CLI_PATH/PATH 实际选中的 CLI。
+# Model availability also depends on your ChatGPT plan or API account.
+# 模型可用性还取决于 ChatGPT 套餐或 API 账号。
 # Codex uses `codex exec --json` under the hood.
 # Codex 底层使用 `codex exec --json` 命令。
 
@@ -1705,7 +1712,7 @@ app_secret = "your-feishu-app-secret"
 # - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
 #
 # Optional: specify a model / 可选：指定模型
-# model = "o3"
+# model = "gpt-6.1-sol"
 #
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
@@ -2360,3 +2367,4 @@ app_secret = "your-feishu-app-secret"
 # wps_sid = "your-wps-sid"             # WPS登录凭证 (Cookie中的wps_sid)
 # device_name = "cc-connect"           # 设备名称（可选）
 # device_uuid = ""                     # 设备UUID（可选，留空自动生成）
+# allow_from = "*"                     # optional; set to trusted chat/session IDs in production
