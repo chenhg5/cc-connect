@@ -18,6 +18,7 @@ func TestResolveUnsolicitedReply_NoReplyMarker(t *testing.T) {
 		{"NO_REPLY", "", true},
 		{"  no_reply\n", "", true},
 		{"Done.\nNO_REPLY", "Done.", false},
+		{"**NO_REPLY", "", true},
 		{"normal reply", "normal reply", false},
 		{"", "", false},
 	}
@@ -74,5 +75,54 @@ func TestUnsolicitedReader_SuppressesBareNoReply(t *testing.T) {
 	}
 	if !strings.Contains(sent[0], "Task finished.") {
 		t.Errorf("real content not delivered, got %q", sent[0])
+	}
+}
+
+// TestUnsolicitedReader_PartialFlushHonorsNoReply covers the interrupted path:
+// a background turn that streamed only the marker and was then cancelled (a
+// foreground turn took over the events channel) must deliver nothing, and a
+// partial reply with a trailing marker must arrive without it.
+func TestUnsolicitedReader_PartialFlushHonorsNoReply(t *testing.T) {
+	cases := []struct {
+		name     string
+		text     string
+		wantSent string // "" means nothing may be delivered
+	}{
+		{name: "bare marker", text: "NO_REPLY"},
+		{name: "trailing marker", text: "Task finished.\nNO_REPLY", wantSent: "Task finished."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "test"}
+			sess := newControllableSession("unsol-partial-silent")
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			t.Cleanup(func() { _ = e.Stop() })
+
+			sessions := e.sessions
+			session := sessions.GetOrCreateActive("test:ch1:u1")
+			state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+			e.startUnsolicitedReader(state, session, sessions, "test:ch1:u1", "")
+
+			sess.events <- Event{Type: EventText, Content: tc.text}
+			deadline := time.Now().Add(2 * time.Second)
+			for len(sess.events) > 0 && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			time.Sleep(50 * time.Millisecond)
+
+			e.stopUnsolicitedReader(state)
+			time.Sleep(100 * time.Millisecond)
+
+			sent := p.getSent()
+			if tc.wantSent == "" {
+				if len(sent) != 0 {
+					t.Fatalf("expected nothing delivered, got %v", sent)
+				}
+				return
+			}
+			if len(sent) != 1 || !strings.Contains(sent[0], tc.wantSent) || strings.Contains(sent[0], "NO_REPLY") {
+				t.Fatalf("expected one message %q without the marker, got %v", tc.wantSent, sent)
+			}
+		})
 	}
 }

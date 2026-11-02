@@ -5110,18 +5110,20 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 		if strings.TrimSpace(partial) == "" {
 			return
 		}
+		// Same NO_REPLY semantics as a completed background turn.
+		outbound, _ := resolveUnsolicitedReply(partial)
 		state.mu.Lock()
 		p := state.platform
 		replyCtx := state.replyCtx
 		state.mu.Unlock()
-		if p != nil {
+		if p != nil && outbound != "" {
 			// Send off the reader goroutine and signal flushDone when finished.
 			// stopUnsolicitedReader waits for flushDone within its bounded
 			// timeout, which keeps the flushed text ahead of the next
 			// foreground turn's reply in the common case while a slow
 			// platform call can never extend that wait (some callers hold
 			// interactiveMu) beyond the bound.
-			chunks := SplitMessageCodeFenceAware(partial, maxPlatformMessageLen)
+			chunks := SplitMessageCodeFenceAware(outbound, maxPlatformMessageLen)
 			flushHandedOff = true
 			go func() {
 				defer close(flushDone)
@@ -17870,8 +17872,8 @@ func resolveUnsolicitedReply(text string) (string, bool) {
 	if isSilentReply(text) {
 		return "", true
 	}
-	stripped, _ := stripTrailingSilent(text)
-	return stripped, false
+	stripped, ok := stripTrailingSilent(text)
+	return stripped, ok && strings.TrimSpace(stripped) == ""
 }
 
 // couldBeSilentPrefix reports whether the trimmed text is still a case-insensitive
