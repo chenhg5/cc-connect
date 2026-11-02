@@ -218,7 +218,7 @@ func TestFinalTurnText(t *testing.T) {
 		{"several empty segments are skipped", "", []string{"narration", "answer"}, []int{1, 2, 2, 2}, "answer"},
 		{"no text at all", "", nil, []int{0, 0}, ""},
 	} {
-		if got := finalTurnText(tc.result, tc.parts, tc.starts); got != tc.want {
+		if got := finalTurnText(tc.result, tc.parts, tc.starts, nil); got != tc.want {
 			t.Errorf("%s: finalTurnText = %q, want %q", tc.name, got, tc.want)
 		}
 	}
@@ -417,4 +417,266 @@ func TestUnsolicitedReader_HideAgentFooter(t *testing.T) {
 	if sent := runBackgroundTurn(t, DisplayCfg{Mode: "quiet"}, true, text); len(sent) != 1 || !strings.Contains(sent[0], "out 788") {
 		t.Fatalf("hide_agent_footer off: sent %q, want the footer kept", sent)
 	}
+}
+
+// ---- final-mode answer selection: combination table ----
+
+const (
+	comboAnswer    = "The answer is 42."
+	comboNarration = "Let me check."
+	comboResult    = "Result answer."
+	comboMarker    = "MARKER-END-OF-TURN"
+	// The footer split the way it streams: neither chunk is a footer line
+	// on its own.
+	comboFooterHead = "\n*claude-opus-4-8[1m] · out 788 · "
+	comboFooterTail = "in 442 cw 0 cr 395.1k · ctx 40%*"
+)
+
+// comboCase is one event sequence and the answer final mode must deliver
+// for it on every path: answer "" means there is none, comboSilent that
+// the turn must stay silent.
+type comboCase struct {
+	name   string
+	events []Event
+	result string // EventResult content on the result paths
+	answer string
+}
+
+const comboSilent = "<silent>"
+
+// finalModeCombos crosses segment orders (text / thinking / tool, trailing
+// blocks) x the final text (an answer or NO_REPLY) x where an agent footer
+// is (none, in the answer's chunk, split across chunks after it, alone in
+// its own trailing segment after one or two blocks, split or whole) x the
+// result body (none, an answer, only a footer).
+func finalModeCombos() []comboCase {
+	think := Event{Type: EventThinking, Content: "hmm"}
+	tool := Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"}
+	text := func(s string) Event { return Event{Type: EventText, Content: s} }
+	sequences := []struct {
+		name   string
+		tokens []string // N narration, X final text, T thinking, U tool
+	}{
+		{"X", []string{"X"}},
+		{"N-U-X", []string{"N", "U", "X"}},
+		{"N-T-X", []string{"N", "T", "X"}},
+		{"X-T", []string{"X", "T"}},
+		{"X-U", []string{"X", "U"}},
+		{"X-T-U", []string{"X", "T", "U"}},
+		{"N-U-X-T-U", []string{"N", "U", "X", "T", "U"}},
+		{"N-U-T-X", []string{"N", "U", "T", "X"}},
+		{"T-U (no text)", []string{"T", "U"}},
+	}
+	footers := []struct {
+		name string
+		x    func(x string) []Event // the final text's chunks
+		tail []Event                // appended after the sequence
+	}{
+		{"no footer", func(x string) []Event { return []Event{text(x)} }, nil},
+		{"footer in the chunk", func(x string) []Event { return []Event{text(x + "\n" + agentStatusFooter)} }, nil},
+		{"split footer after the text", func(x string) []Event { return []Event{text(x), text(comboFooterHead), text(comboFooterTail)} }, nil},
+		{"split footer after thinking", func(x string) []Event { return []Event{text(x)} }, []Event{think, text(comboFooterHead), text(comboFooterTail)}},
+		{"whole footer after a tool", func(x string) []Event { return []Event{text(x)} }, []Event{tool, text(agentStatusFooter)}},
+		{"split footer after two blocks", func(x string) []Event { return []Event{text(x)} }, []Event{think, tool, text(comboFooterHead), text(comboFooterTail)}},
+	}
+	var cases []comboCase
+	for _, seq := range sequences {
+		hasX := false
+		for _, tk := range seq.tokens {
+			hasX = hasX || tk == "X"
+		}
+		finals := []string{comboAnswer, "NO_REPLY"}
+		if !hasX {
+			finals = []string{""}
+		}
+		for _, final := range finals {
+			for _, f := range footers {
+				var events []Event
+				for _, tk := range seq.tokens {
+					switch tk {
+					case "N":
+						events = append(events, text(comboNarration))
+					case "X":
+						events = append(events, f.x(final)...)
+					case "T":
+						events = append(events, think)
+					case "U":
+						events = append(events, tool)
+					}
+				}
+				if !hasX && f.tail == nil && f.name != "no footer" {
+					// No final text to attach the footer to: it stands alone.
+					events = append(events, f.x("")...)
+				}
+				events = append(events, f.tail...)
+				answer := final
+				if final == "NO_REPLY" {
+					answer = comboSilent
+				}
+				results := []struct{ name, body, answer string }{
+					{"empty result", "", answer},
+					{"result with an answer", comboResult, comboResult},
+				}
+				if f.name != "no footer" {
+					results[1].body = comboResult + "\n" + agentStatusFooter
+					results = append(results, struct{ name, body, answer string }{"result with only a footer", agentStatusFooter, answer})
+				}
+				for _, r := range results {
+					name := seq.name + "/" + map[string]string{comboAnswer: "answer", "NO_REPLY": "NO_REPLY", "": "none"}[final] + "/" + f.name + "/" + r.name
+					cases = append(cases, comboCase{name: name, events: events, result: r.body, answer: r.answer})
+				}
+			}
+		}
+	}
+	return cases
+}
+
+// isComboNotice reports whether a sent message is a system error notice
+// rather than turn text.
+func isComboNotice(msg string) bool {
+	return strings.HasPrefix(msg, "❌")
+}
+
+func comboSent(p *stubPlatformEngine, text string) bool {
+	for _, msg := range p.getSent() {
+		if msg == text {
+			return true
+		}
+	}
+	return false
+}
+
+func comboTurnText(sent []string) []string {
+	var out []string
+	for _, msg := range sent {
+		if msg != comboMarker && !isComboNotice(msg) {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+// checkCombo asserts what a path delivered for a case: the answer alone
+// (no footer), nothing when the turn is silent, and when there is no
+// answer at all emptyWant (the foreground result path says "(empty
+// response)", every other path says nothing).
+func checkCombo(t *testing.T, path string, tc comboCase, sent []string, emptyWant []string) {
+	t.Helper()
+	got := comboTurnText(sent)
+	var want []string
+	switch tc.answer {
+	case comboSilent:
+	case "":
+		want = emptyWant
+	default:
+		want = []string{tc.answer}
+	}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("%s: %s: sent %q, want %q", path, tc.name, got, want)
+	}
+}
+
+// runForegroundCombo drives the real foreground handler; with closeChannel
+// the agent exits (the events channel closes) instead of sending a result.
+func runForegroundCombo(t *testing.T, tc comboCase, closeChannel bool) []string {
+	t.Helper()
+	p := newFinalModePlatform()
+	e := newFinalModeEngine(t, p)
+	session := e.sessions.GetOrCreateActive("test:combo")
+	s := newControllableSession("combo")
+	s.events = make(chan Event, len(tc.events)+1)
+	for _, ev := range tc.events {
+		s.events <- ev
+	}
+	if closeChannel {
+		close(s.events)
+	} else {
+		s.events <- Event{Type: EventResult, Content: tc.result, Done: true}
+	}
+	state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, "test:combo", "m", time.Now(), nil, nil, "ctx", 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("%s: foreground turn did not complete", tc.name)
+	}
+	return p.getSent()
+}
+
+// runBackgroundCombo drives the real background reader. end is "result"
+// (followed by a marker turn whose delivery shows the case's turn was
+// fully handled) or "partial" (the reader is stopped, flushing the
+// buffered text).
+func runBackgroundCombo(t *testing.T, tc comboCase, end string) []string {
+	t.Helper()
+	p := &stubPlatformEngine{n: "test"}
+	s := newControllableSession("combo-bg")
+	s.events = make(chan Event, len(tc.events)+4)
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetDisplayConfig(DisplayCfg{Mode: "final"})
+	const key = "test:combo-bg"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+	for _, ev := range tc.events {
+		s.events <- ev
+	}
+	switch end {
+	case "result":
+		s.events <- Event{Type: EventResult, Content: tc.result, Done: true}
+		s.events <- Event{Type: EventText, Content: comboMarker}
+		s.events <- Event{Type: EventResult, Done: true}
+		deadline := time.Now().Add(3 * time.Second)
+		for !comboSent(p, comboMarker) {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: background turn not handled, sent %q", tc.name, p.getSent())
+			}
+			time.Sleep(time.Millisecond)
+		}
+		e.stopUnsolicitedReader(state)
+	case "partial":
+		deadline := time.Now().Add(3 * time.Second)
+		for len(s.events) > 0 {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: background reader did not consume the events", tc.name)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		// The reader may still be inside the last event; stopping it after
+		// the channel drained flushes whatever it has buffered.
+		time.Sleep(5 * time.Millisecond)
+		e.stopUnsolicitedReader(state)
+	}
+	return p.getSent()
+}
+
+// Final mode delivers the same answer on every path for every combination:
+// an answer goes out alone and without the agent footer, a NO_REPLY turn
+// stays silent, and only a turn with no answer at all says "(empty
+// response)" (foreground result path) or nothing (every other path).
+// Background turns do not honour NO_REPLY in any mode (independent of
+// final mode), so NO_REPLY cases run on the foreground paths only.
+func TestFinalMode_AnswerSelectionCombinations(t *testing.T) {
+	cases := finalModeCombos()
+	empty := NewI18n(LangEnglish).T(MsgEmptyResponse)
+	for _, tc := range cases {
+		checkCombo(t, "foreground result", tc, runForegroundCombo(t, tc, false), []string{empty})
+		if tc.result == "" {
+			checkCombo(t, "foreground channel closed", tc, runForegroundCombo(t, tc, true), nil)
+		}
+		if strings.Contains(tc.name, "/NO_REPLY/") {
+			continue
+		}
+		checkCombo(t, "background result", tc, runBackgroundCombo(t, tc, "result"), nil)
+		if tc.result == "" {
+			checkCombo(t, "background partial flush", tc, runBackgroundCombo(t, tc, "partial"), nil)
+		}
+	}
+	t.Logf("%d combinations", len(cases))
 }

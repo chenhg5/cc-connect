@@ -6915,7 +6915,16 @@ channelClosed:
 		p := state.platform
 		state.mu.Unlock()
 
-		fullResponse := strings.Join(textParts, "")
+		// The same answer selection as the result path: in final mode only
+		// the last segment with text, footers removed.
+		fullResponse := e.agentText(strings.Join(textParts, ""))
+		if finalMode {
+			fullResponse = e.finalAnswer("", textParts, finalSegmentStarts)
+		}
+		if strings.TrimSpace(fullResponse) == "" {
+			sp.discard()
+			return
+		}
 		session.AddHistory("assistant", fullResponse)
 		// Persist immediately — this path runs on abnormal channel close,
 		// so deferring the save until the next foreground turn risks losing
