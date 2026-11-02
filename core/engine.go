@@ -484,6 +484,7 @@ type Engine struct {
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
+	timerRuns         sync.Map                     // timer job ID → interactive key of the running agent turn
 
 	// Teardown tracking. A session's state is removed from interactiveStates
 	// as soon as /stop is issued, but its OS process can live on for up to
@@ -1884,6 +1885,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		if workspaceDir != "" {
 			iKey = workspaceDir + ":" + iKey
 		}
+		defer e.trackTimerRun(job.ID, iKey)()
 		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, lockGen)
 		e.cleanupInteractiveState(iKey)
 		return nil
@@ -1899,6 +1901,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
 	}
+	defer e.trackTimerRun(job.ID, iKey)()
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey, lockGen)
 	return nil
 }
@@ -4554,6 +4557,25 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	})
 
 	return state
+}
+
+// trackTimerRun records the interactive key of a timer turn so the scheduler
+// can abort it on timeout. The returned func forgets it again.
+func (e *Engine) trackTimerRun(jobID, iKey string) func() {
+	e.timerRuns.Store(jobID, iKey)
+	return func() { e.timerRuns.CompareAndDelete(jobID, iKey) }
+}
+
+// AbortTimerRun closes the agent session of a timer turn the scheduler gave
+// up on, so the agent process does not outlive the job. It returns false if
+// no run of that job is active.
+func (e *Engine) AbortTimerRun(jobID string) bool {
+	v, ok := e.timerRuns.LoadAndDelete(jobID)
+	if !ok {
+		return false
+	}
+	e.cleanupInteractiveState(v.(string))
+	return true
 }
 
 // cleanupInteractiveState removes the interactive state for the given session key
