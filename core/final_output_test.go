@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -201,13 +202,132 @@ func TestFinalMode_SystemNoticesAreNotSent(t *testing.T) {
 
 func TestFinalTurnText(t *testing.T) {
 	parts := []string{"narration ", "before tool", "the ", "answer"}
-	if got := finalTurnText("from result", parts, 2); got != "from result" {
-		t.Fatalf("result text must win, got %q", got)
+	for _, tc := range []struct {
+		name   string
+		result string
+		parts  []string
+		starts []int
+		want   string
+	}{
+		{"result text wins", "from result", parts, []int{2}, "from result"},
+		{"last segment", "  ", parts, []int{2}, "the answer"},
+		{"no boundary is all text", "", parts, nil, strings.Join(parts, "")},
+		{"out-of-range boundary is ignored", "", parts, []int{99}, strings.Join(parts, "")},
+		{"empty tail falls back to the previous segment", "", parts, []int{2, 4}, "the answer"},
+		{"whitespace tail falls back", "", []string{"answer", " \n"}, []int{1}, "answer"},
+		{"several empty segments are skipped", "", []string{"narration", "answer"}, []int{1, 2, 2, 2}, "answer"},
+		{"no text at all", "", nil, []int{0, 0}, ""},
+	} {
+		if got := finalTurnText(tc.result, tc.parts, tc.starts); got != tc.want {
+			t.Errorf("%s: finalTurnText = %q, want %q", tc.name, got, tc.want)
+		}
 	}
-	if got := finalTurnText("  ", parts, 2); got != "the answer" {
-		t.Fatalf("got %q, want the last segment", got)
+}
+
+// A trailing thinking block or tool call with no text after it does not
+// erase the answer: the turn falls back to the last segment that has text.
+// Codex and Kimi end every turn with an EventResult without content, so for
+// them the text events are the only source of the answer.
+func TestProcessInteractiveEvents_FinalModeAnswerSurvivesATrailingBlock(t *testing.T) {
+	answer := Event{Type: EventText, Content: "The answer is 42."}
+	result := Event{Type: EventResult, Done: true}
+	for _, tc := range []struct {
+		name   string
+		events []Event
+		want   string
+	}{
+		{"text then end (control)", []Event{answer, result}, "The answer is 42."},
+		{"text, thinking, end", []Event{answer, {Type: EventThinking, Content: "should I verify?"}, result}, "The answer is 42."},
+		{"text, tool call, end", []Event{answer, {Type: EventToolUse, ToolName: "Bash", ToolInput: "true"}, result}, "The answer is 42."},
+		{"text, thinking, blank text, end", []Event{answer, {Type: EventThinking, Content: "hmm"}, {Type: EventText, Content: "\n"}, result}, "The answer is 42."},
+		{"narration, tool, answer, thinking, end", []Event{
+			{Type: EventText, Content: "Let me check."},
+			{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+			answer,
+			{Type: EventThinking, Content: "done?"},
+			result,
+		}, "The answer is 42."},
+		{"codex-style result without content after a tool", []Event{
+			{Type: EventText, Content: "Let me check."},
+			{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+			answer,
+			{Type: EventResult, Done: true},
+		}, "The answer is 42."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newFinalModePlatform()
+			e := newFinalModeEngine(t, p)
+			runFinalModeTurn(t, e, p, "test:final-trailing", tc.events...)
+			if sent := p.getSent(); len(sent) != 1 || sent[0] != tc.want {
+				t.Fatalf("sent = %q, want [%q]", sent, tc.want)
+			}
+		})
 	}
-	if got := finalTurnText("", parts, 99); got != strings.Join(parts, "") {
-		t.Fatalf("an out-of-range start must fall back to all text, got %q", got)
+}
+
+// SetDisplayConfig owns the whole final-mode contract, so a DisplayCfg built
+// anywhere (not only from config.EffectiveDisplay) hides the agent footer.
+func TestSetDisplayConfig_FinalForcesItsInvariants(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	e.SetDisplayConfig(DisplayCfg{Mode: "final", ThinkingMessages: true, ToolMessages: true})
+	if e.display.ThinkingMessages || e.display.ToolMessages || !e.display.HideAgentFooter {
+		t.Fatalf("display = %+v, want thinking/tool off and the agent footer hidden", e.display)
 	}
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet"})
+	if e.display.HideAgentFooter {
+		t.Fatal("other modes must keep their own hide_agent_footer")
+	}
+}
+
+// A notice whose loss costs the user something (a fresh session instead of
+// a resume, a refused background tool) is logged at Warn in final mode, so
+// it stays in the logs although it is not sent; other modes send it.
+func TestFinalMode_WarnNoticeIsLoggedNotSent(t *testing.T) {
+	buf, restore := captureSlog(t)
+	defer restore()
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	e.SetDisplayConfig(DisplayCfg{Mode: "final"})
+	e.warnNotice(p, "ctx", "test:warn", "started a new session")
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("final mode sent %q", sent)
+	}
+	if log := buf.String(); !strings.Contains(log, `"level":"WARN"`) || !strings.Contains(log, "started a new session") || !strings.Contains(log, "test:warn") {
+		t.Fatalf("warn log = %s", log)
+	}
+	e.SetDisplayConfig(DisplayCfg{Mode: "full"})
+	e.warnNotice(p, "ctx", "test:warn", "started a new session")
+	if sent := p.getSent(); len(sent) != 1 || sent[0] != "started a new session" {
+		t.Fatalf("other modes must send the notice, got %q", sent)
+	}
+}
+
+// The unsafe-resume notice in final mode: not sent, but logged at Warn as a
+// notice the user did not get.
+func TestFinalMode_UnsafeResumeNoticeIsLogged(t *testing.T) {
+	buf, restore := captureSlog(t)
+	defer restore()
+	agent := &controllableAgent{nextSession: newControllableSession("fresh")}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	e.SetDisplayConfig(DisplayCfg{Mode: "final"})
+	const key = "test:unsafe-resume"
+	e.markUnsafeResume(key)
+	e.getOrCreateInteractiveStateWith(key, p, "ctx", &Session{AgentSessionID: "old-session"}, e.sessions, nil, "")
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("final mode sent %q", sent)
+	}
+	want := e.i18n.T(MsgSessionResumeUnsafe)
+	if log := buf.String(); !strings.Contains(log, "notice not sent") || !strings.Contains(log, key) || !strings.Contains(log, jsonEscape(want)) {
+		t.Fatalf("warn log lacks the dropped resume notice:\n%s", log)
+	}
+}
+
+// jsonEscape renders s the way slog's JSON handler writes a string value.
+func jsonEscape(s string) string {
+	b, _ := json.Marshal(s)
+	return strings.Trim(string(b), `"`)
 }

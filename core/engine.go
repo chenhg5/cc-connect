@@ -929,9 +929,12 @@ func (e *Engine) SetTTSSaveFunc(fn func(mode string) error) {
 
 // SetDisplayConfig overrides the default truncation settings.
 func (e *Engine) SetDisplayConfig(cfg DisplayCfg) {
+	// Final mode's display invariants live here, so a DisplayCfg built
+	// anywhere (not only by config.EffectiveDisplay) honours them.
 	if cfg.Mode == displayModeFinal {
 		cfg.ThinkingMessages = false
 		cfg.ToolMessages = false
+		cfg.HideAgentFooter = true
 	}
 	e.display = cfg
 }
@@ -4465,7 +4468,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		session.SetAgentSessionID("", agent.Name())
 		sessions.Save()
 		startSessionID = ""
-		e.notice(p, replyCtx, e.i18n.T(MsgSessionResumeUnsafe))
+		e.warnNotice(p, replyCtx, sessionKey, e.i18n.T(MsgSessionResumeUnsafe))
 	}
 
 	isResume := startSessionID != ""
@@ -5331,7 +5334,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					if toolName == "" {
 						toolName = "(unknown)"
 					}
-					e.notice(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
+					e.warnNotice(p, replyCtx, sessionKey, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
 				}
 
 			case EventError:
@@ -5474,10 +5477,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardAnswerText strings.Builder // accumulated answer text
 
 	// Final output mode draws nothing while the turn runs: no streaming card,
-	// preview or progress card. finalSegmentStart marks where the text after
-	// the last tool call or thinking block begins.
+	// preview or progress card. finalSegmentStarts records where in
+	// textParts each tool call or thinking block started a new segment.
 	finalMode := e.finalOutput()
-	finalSegmentStart := 0
+	var finalSegmentStarts []int
 	newTurnPreview := func(p Platform, replyCtx any, renderer func(string) string) (*streamPreview, *compactProgressWriter) {
 		if finalMode {
 			off := e.streamPreview
@@ -5688,7 +5691,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// final aggregation cannot concatenate the invalid draft.
 			textParts = nil
 			segmentStart = 0
-			finalSegmentStart = 0
+			finalSegmentStarts = nil
 			silentHold = false
 			partialText = ""
 			cardAnswerText.Reset()
@@ -5700,7 +5703,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				break
 			}
 			if finalMode {
-				finalSegmentStart = len(textParts)
+				finalSegmentStarts = append(finalSegmentStarts, len(textParts))
 				silentHold = false
 				break
 			}
@@ -5795,7 +5798,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if finalMode {
-				finalSegmentStart = len(textParts)
+				finalSegmentStarts = append(finalSegmentStarts, len(textParts))
 				silentHold = false
 				break
 			}
@@ -6257,7 +6260,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
 			if finalMode {
-				fullResponse = finalTurnText(fullResponse, textParts, finalSegmentStart)
+				fullResponse = finalTurnText(fullResponse, textParts, finalSegmentStarts)
 			} else if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
@@ -6772,7 +6775,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp, cp = newTurnPreview(queued.platform, queued.replyCtx, queuedRenderer)
-				finalSegmentStart = 0
+				finalSegmentStarts = nil
 
 				// Reset streaming card state for the next turn
 				streamCard = nil
