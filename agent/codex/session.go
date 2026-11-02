@@ -41,6 +41,9 @@ type codexSession struct {
 	wg             sync.WaitGroup
 	alive          atomic.Bool
 	turnInFlight   atomic.Bool
+	turnMu         sync.Mutex
+	turnDone       chan struct{}
+	turnCompleted  bool // terminal event received; process may still hold the writer lock
 	closeOnce      sync.Once
 	cmdMu          sync.Mutex
 	cmds           map[*exec.Cmd]struct{}
@@ -123,15 +126,16 @@ func (cs *codexSession) Send(prompt string, messageID string, images []core.Imag
 	if !cs.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
-	if !cs.turnInFlight.CompareAndSwap(false, true) {
-		return fmt.Errorf("codex session turn already in progress")
+	if err := cs.beginTurn(); err != nil {
+		return err
 	}
 	// The deferred cleanup reads started when Send returns, so setup failures
 	// release the guard while a launched process keeps it until readLoop exits.
 	started := false
 	defer func() {
 		if !started {
-			cs.turnInFlight.Store(false)
+			cs.endTurn()
+			cs.wg.Done()
 		}
 	}()
 
@@ -182,11 +186,57 @@ func (cs *codexSession) Send(prompt string, messageID string, images []core.Imag
 	}
 	cs.addCmd(cmd)
 
-	cs.wg.Add(1)
 	go cs.readLoop(cmd, stdout, &stderrBuf)
 	started = true
 
 	return nil
+}
+
+// beginTurn rejects overlapping prompts while the model is working, but lets a
+// follow-up wait for a completed process to release the persisted thread writer.
+// The engine can receive EventResult before that process has actually exited.
+func (cs *codexSession) beginTurn() error {
+	for {
+		cs.turnMu.Lock()
+		if err := cs.ctx.Err(); err != nil {
+			cs.turnMu.Unlock()
+			return err
+		}
+		if !cs.turnInFlight.Load() {
+			// Reserve the process before releasing turnMu so Close cannot finish
+			// waiting (and close events) while this Send is still setting it up.
+			cs.wg.Add(1)
+			cs.turnInFlight.Store(true)
+			cs.turnDone = make(chan struct{})
+			cs.turnCompleted = false
+			cs.turnMu.Unlock()
+			return nil
+		}
+		if !cs.turnCompleted {
+			cs.turnMu.Unlock()
+			return fmt.Errorf("codex session turn already in progress")
+		}
+		done := cs.turnDone
+		cs.turnMu.Unlock()
+		select {
+		case <-done:
+		case <-cs.ctx.Done():
+			return cs.ctx.Err()
+		}
+	}
+}
+
+func (cs *codexSession) endTurn() {
+	cs.turnMu.Lock()
+	defer cs.turnMu.Unlock()
+	cs.turnInFlight.Store(false)
+	close(cs.turnDone)
+}
+
+func (cs *codexSession) markTurnCompleted() {
+	cs.turnMu.Lock()
+	cs.turnCompleted = true
+	cs.turnMu.Unlock()
 }
 
 func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
@@ -200,11 +250,20 @@ func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment
 	}
 
 	imagePaths := make([]string, 0, len(images))
-	for i, img := range images {
+	for _, img := range images {
 		ext := codexImageExt(img.MimeType)
-		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
-		fpath := filepath.Join(imgDir, fname)
-		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+		// Sessions share imgDir, so reserve a unique path before writing.
+		file, err := os.CreateTemp(imgDir, "img_*"+ext)
+		if err != nil {
+			return "", nil, fmt.Errorf("codexSession: create image: %w", err)
+		}
+		fpath := file.Name()
+		_, writeErr := file.Write(img.Data)
+		closeErr := file.Close()
+		if err := errors.Join(writeErr, closeErr); err != nil {
+			if removeErr := os.Remove(fpath); removeErr != nil {
+				slog.Warn("codexSession: remove incomplete image", "path", fpath, "error", removeErr)
+			}
 			return "", nil, fmt.Errorf("codexSession: save image: %w", err)
 		}
 		imagePaths = append(imagePaths, fpath)
@@ -313,7 +372,7 @@ func codexImageExt(mime string) string {
 func (cs *codexSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer cs.wg.Done()
 	defer func() {
-		defer cs.turnInFlight.Store(false)
+		defer cs.endTurn()
 		defer cs.removeCmd(cmd)
 		if err := cmd.Wait(); err != nil {
 			stderrMsg := strings.TrimSpace(stderrBuf.String())
@@ -418,6 +477,7 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		cs.handleItemCompleted(raw)
 
 	case "turn.completed":
+		cs.markTurnCompleted()
 		cs.refreshContextUsageFromRollout()
 		cs.flushPendingAsText()
 		evt := core.Event{Type: core.EventResult, SessionID: cs.CurrentSessionID(), Done: true}
@@ -428,6 +488,7 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 		}
 
 	case "turn.failed":
+		cs.markTurnCompleted()
 		errMsg := ""
 		if errObj, ok := raw["error"].(map[string]any); ok {
 			errMsg, _ = errObj["message"].(string)
@@ -917,8 +978,10 @@ func (cs *codexSession) refreshContextUsageFromRollout() {
 }
 
 func (cs *codexSession) Close() error {
+	cs.turnMu.Lock()
 	cs.alive.Store(false)
 	cs.cancel()
+	cs.turnMu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		cs.wg.Wait()

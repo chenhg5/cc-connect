@@ -429,6 +429,144 @@ func TestOnMessageThreadIsolationBootstrapsExistingThreadContext(t *testing.T) {
 	}
 }
 
+// TestDispatchMessageExpandsQuotedMergeForward ensures that when a user replies
+// to a merge_forward message, the quoted ExtraContent contains the forwarded
+// sub-message text — not a bare "[merge_forward]" placeholder.
+//
+// Regression: Feishu delivers the merge_forward event and the reply text nearly
+// together. The reply has a newer create_time, so the engine watermark can drop
+// the slower async merge_forward dispatch as stale. If the quote path only
+// emits "[merge_forward]", the agent never sees the forwarded content.
+func TestDispatchMessageExpandsQuotedMergeForward(t *testing.T) {
+	const appID = "cli_quote_merge_forward"
+	const appSecret = "secret-quote-merge-forward"
+	const parentMessageID = "om_parent_merge_forward"
+	const subMessageID = "om_sub_liangchen"
+
+	got := make(chan *core.Message, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "success",
+				"expire":              7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+parentMessageID:
+			// Get-message for a merge_forward root returns the root plus
+			// sub-messages. Put a sub-message first so Items[0] is not the
+			// root — fetchSingleMessage must select by message_id.
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"items": []map[string]any{
+						{
+							"message_id":        subMessageID,
+							"msg_type":          "text",
+							"upper_message_id":  parentMessageID,
+							"parent_id":         "",
+							"create_time":       "1786522200000",
+							"sender": map[string]any{
+								"id":          "ou_liangchen",
+								"id_type":     "open_id",
+								"sender_type": "user",
+							},
+							"body": map[string]any{
+								"content": `{"text":"需要用飞书表格做信息调度，单聊成本太高"}`,
+							},
+						},
+						{
+							"message_id":  parentMessageID,
+							"msg_type":    "merge_forward",
+							"parent_id":   "",
+							"create_time": "1786522271011",
+							"sender": map[string]any{
+								"id":          "ou_xigu",
+								"id_type":     "open_id",
+								"sender_type": "user",
+							},
+							"body": map[string]any{
+								"content": "Merged and Forwarded Message",
+							},
+						},
+					},
+				},
+			})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/contact/v3/users/"):
+			w.Header().Set("Content-Type", "application/json")
+			name := "梁辰"
+			if strings.Contains(r.URL.Path, "ou_xigu") {
+				name = "西顾"
+			}
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "success",
+				"data": map[string]any{
+					"user": map[string]any{"name": name},
+				},
+			})
+		case strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/chats/"):
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		appID:        appID,
+		appSecret:    appSecret,
+		botOpenID:    "ou_bot",
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+		handler: func(_ core.Platform, msg *core.Message) {
+			got <- msg
+		},
+	}
+
+	p.dispatchMessage(
+		context.Background(),
+		"text",
+		`{"text":"总结梁辰提的这些需求"}`,
+		nil,
+		"om_child_reply",
+		"feishu:oc_chat:ou_xigu",
+		"ou_xigu",
+		"oc_chat",
+		replyContext{messageID: "om_child_reply", sessionKey: "feishu:oc_chat:ou_xigu"},
+		parentMessageID,
+		1786522271347,
+	)
+
+	select {
+	case msg := <-got:
+		if msg.Content != "总结梁辰提的这些需求" {
+			t.Fatalf("Content = %q, want reply text", msg.Content)
+		}
+		if strings.Contains(msg.ExtraContent, "[merge_forward]") &&
+			!strings.Contains(msg.ExtraContent, "需要用飞书表格做信息调度") {
+			t.Fatalf("ExtraContent still has bare [merge_forward] placeholder: %q", msg.ExtraContent)
+		}
+		if !strings.Contains(msg.ExtraContent, "需要用飞书表格做信息调度") {
+			t.Fatalf("ExtraContent = %q, want expanded merge_forward sub-message text", msg.ExtraContent)
+		}
+		if !strings.Contains(msg.ExtraContent, "<forwarded_messages>") {
+			t.Fatalf("ExtraContent = %q, want <forwarded_messages> wrapper", msg.ExtraContent)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for reply with expanded merge_forward quote")
+	}
+}
+
 func TestOnMessageRepliesToUnauthorizedMention(t *testing.T) {
 	const appID = "cli_unauthorized"
 	const appSecret = "secret-unauthorized"

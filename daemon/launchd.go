@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	launchdLabel = "com.cc-connect.service"
+	launchdLabel       = "com.cc-connect.service"
+	legacyLaunchdLabel = "com.cc-connect.retry"
 )
 
 var runLaunchctl = func(args ...string) (string, error) {
@@ -51,6 +52,7 @@ func (m *launchdManager) Install(cfg Config) error {
 	// Unload existing service first (ignore errors) so we do not leave a stale
 	// job behind when switching between GUI and headless sessions.
 	bootoutLaunchdTargets()
+	removeLegacyLaunchdPlist()
 
 	plist := buildPlist(cfg)
 	// 0600: plist may contain captured secret values (config.toml ${ENV}
@@ -80,47 +82,62 @@ func (m *launchdManager) Install(cfg Config) error {
 func (m *launchdManager) Uninstall() error {
 	bootoutLaunchdTargets()
 
-	plistPath := launchdPlistPath()
-	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove plist: %w", err)
+	for _, plistPath := range launchdPlistPaths() {
+		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove plist: %w", err)
+		}
 	}
 	return nil
 }
 
 func (*launchdManager) Start() error {
-	if _, target, _, ok := loadedLaunchdTarget(); ok {
-		out, err := runLaunchctl("kickstart", "-kp", target)
+	if job := inspectLaunchdLabel(launchdLabel); job.loaded {
+		out, err := runLaunchctl("kickstart", "-kp", job.target)
 		if err != nil {
 			return fmt.Errorf("start: %s (%w)", out, err)
 		}
+		// The current service is serving, so the legacy fallback can go; leaving
+		// it loaded would let the old agent come back alongside the current one.
+		retireLegacyLaunchdService()
 		return nil
 	}
 
 	domain := preferredLaunchdDomain()
 	plistPath := launchdPlistPath()
-	var out string
+	if _, err := os.Stat(plistPath); err != nil {
+		// Nothing to bootstrap. Booting out the legacy service here would take
+		// away the only daemon the user has and then fail, so leave it running and
+		// say what is actually wrong.
+		return fmt.Errorf("start: current service is not installed (%s missing: %w); run 'cc-connect daemon install'", plistPath, err)
+	}
 	if _, err := runLaunchctl("bootstrap", domain, plistPath); err != nil {
 		// already bootstrapped — try kickstart
-		out, err = runLaunchctl("kickstart", "-kp", launchdTarget(domain))
-		if err != nil {
-			return fmt.Errorf("start: %s (%w)", out, err)
+		out, kickErr := runLaunchctl("kickstart", "-kp", launchdTarget(domain))
+		if kickErr != nil {
+			return fmt.Errorf("start: %s (%w)", out, kickErr)
 		}
 	}
+	// Only now that the current service is up is it safe to drop the fallback.
+	retireLegacyLaunchdService()
 	return nil
 }
 
 func (*launchdManager) Stop() error {
 	var lastOut string
 	var lastErr error
+	stopped := false
+	// Boot out every label in every domain instead of returning after the first
+	// success: an upgrade can leave both the current and the legacy agent loaded,
+	// and stopping only one of them leaves the daemon running.
 	for _, target := range launchdTargets() {
 		out, err := runLaunchctl("bootout", target)
-		if err == nil {
-			return nil
+		if err != nil {
+			lastOut, lastErr = out, err
+			continue
 		}
-		lastOut = out
-		lastErr = err
+		stopped = true
 	}
-	if lastErr != nil {
+	if !stopped && lastErr != nil {
 		return fmt.Errorf("stop: %s (%w)", lastOut, lastErr)
 	}
 	return nil
@@ -138,40 +155,49 @@ func (*launchdManager) Restart() error {
 	}
 
 	domain := preferredLaunchdDomain()
-	if out, err := runLaunchctl("bootstrap", domain, launchdPlistPath()); err != nil {
+	plistPath := launchdPlistPath()
+	if _, err := os.Stat(plistPath); err != nil {
+		// Refuse before touching anything: without the current plist a restart can
+		// only fail, and it must not take a working legacy service down with it.
+		return fmt.Errorf("restart: current service is not installed (%s missing: %w); run 'cc-connect daemon install'", plistPath, err)
+	}
+	if out, err := runLaunchctl("bootstrap", domain, plistPath); err != nil {
 		return fmt.Errorf("restart bootstrap: %s (%w)", out, err)
 	}
+	// Drop the legacy fallback only once the current service is bootstrapped.
+	removeLegacyLaunchdPlist()
 	if out, err := runLaunchctl("kickstart", "-kp", launchdTarget(domain)); err != nil {
 		return fmt.Errorf("restart kickstart: %s (%w)", out, err)
 	}
 	return nil
 }
 
+// Status reports the daemon's state across both labels.
+//
+// Installed is deliberately based on any cc-connect agent plist rather than the
+// current label's: a legacy-only installation has to stay reachable, otherwise
+// start/stop/restart refuse to run at all ("not installed") and leave the machine
+// with an agent the user can no longer manage or migrate.
 func (*launchdManager) Status() (*Status, error) {
 	st := &Status{Platform: "launchd"}
 
-	plistPath := launchdPlistPath()
-	if _, err := os.Stat(plistPath); err != nil {
+	if !launchdAnyPlistExists() {
 		return st, nil
 	}
 	st.Installed = true
 
-	_, _, out, ok := loadedLaunchdTarget()
-	if !ok {
-		return st, nil
-	}
-
-	for _, line := range strings.Split(out, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "pid = ") {
-			if pid, err := strconv.Atoi(strings.TrimPrefix(trimmed, "pid = ")); err == nil && pid > 0 {
-				st.PID = pid
-				st.Running = true
-			}
+	// The current label is authoritative only when it is actually serving. An
+	// upgrade can leave the legacy agent running while the current one is loaded
+	// but stopped, and inspecting just the current label would then report the
+	// daemon as stopped (PID 0) while it is still there.
+	for _, label := range []string{launchdLabel, legacyLaunchdLabel} {
+		job := inspectLaunchdLabel(label)
+		if !job.running {
+			continue
 		}
-		if strings.Contains(trimmed, "state = running") {
-			st.Running = true
-		}
+		st.Running = true
+		st.PID = job.pid
+		break
 	}
 	return st, nil
 }
@@ -181,6 +207,15 @@ func (*launchdManager) Status() (*Status, error) {
 func launchdPlistPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
+}
+
+func legacyLaunchdPlistPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "LaunchAgents", legacyLaunchdLabel+".plist")
+}
+
+func launchdPlistPaths() []string {
+	return []string{launchdPlistPath(), legacyLaunchdPlistPath()}
 }
 
 func launchdUserDomain() string {
@@ -213,18 +248,23 @@ func launchdTarget(domain string) string {
 	return fmt.Sprintf("%s/%s", domain, launchdLabel)
 }
 
+func legacyLaunchdTarget(domain string) string {
+	return fmt.Sprintf("%s/%s", domain, legacyLaunchdLabel)
+}
+
 func launchdTargets() []string {
 	domains := launchdDomains()
-	targets := make([]string, 0, len(domains))
+	targets := make([]string, 0, len(domains)*2)
 	for _, domain := range domains {
 		targets = append(targets, launchdTarget(domain))
+		targets = append(targets, legacyLaunchdTarget(domain))
 	}
 	return targets
 }
 
-func loadedLaunchdTarget() (string, string, string, bool) {
+func loadedLaunchdTargetForLabel(label string) (string, string, string, bool) {
 	for _, domain := range launchdDomains() {
-		target := launchdTarget(domain)
+		target := fmt.Sprintf("%s/%s", domain, label)
 		out, err := runLaunchctl("print", target)
 		if err == nil {
 			return domain, target, out, true
@@ -233,10 +273,95 @@ func loadedLaunchdTarget() (string, string, string, bool) {
 	return "", "", "", false
 }
 
+func loadedLaunchdTarget() (string, string, string, bool) {
+	if domain, target, out, ok := loadedLaunchdTargetForLabel(launchdLabel); ok {
+		return domain, target, out, true
+	}
+	return loadedLaunchdTargetForLabel(legacyLaunchdLabel)
+}
+
+func launchdAnyPlistExists() bool {
+	for _, plistPath := range launchdPlistPaths() {
+		if _, err := os.Stat(plistPath); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// launchdJobState is the subset of `launchctl print` output the manager needs
+// for a single label.
+type launchdJobState struct {
+	loaded  bool
+	running bool
+	pid     int
+	target  string
+}
+
+// inspectLaunchdLabel resolves a label in the preferred domain order and parses
+// its `launchctl print` output. A label that is not loaded in any domain comes
+// back as a zero state.
+func inspectLaunchdLabel(label string) launchdJobState {
+	for _, domain := range launchdDomains() {
+		target := fmt.Sprintf("%s/%s", domain, label)
+		out, err := runLaunchctl("print", target)
+		if err != nil {
+			continue
+		}
+		job := launchdJobState{loaded: true, target: target}
+		job.pid, job.running = parseLaunchdPrint(out)
+		return job
+	}
+	return launchdJobState{}
+}
+
+// parseLaunchdPrint extracts the pid and running state from `launchctl print`
+// output. Only top-level keys count: nested dictionaries also carry a `state =`
+// line (an inactive service lists spawn-scheduled children), which would
+// otherwise make a stopped service look like a running one.
+func parseLaunchdPrint(out string) (pid int, running bool) {
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if indent > 1 {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "pid = "):
+			if p, err := strconv.Atoi(strings.TrimPrefix(trimmed, "pid = ")); err == nil && p > 0 {
+				pid = p
+			}
+		case strings.HasPrefix(trimmed, "state = "):
+			if strings.Contains(trimmed, "state = running") {
+				running = true
+			}
+		}
+	}
+	if pid > 0 {
+		running = true
+	}
+	return pid, running
+}
+
+// retireLegacyLaunchdService unloads the pre-rename com.cc-connect.retry agent
+// and removes its plist so it cannot be resurrected at the next login. Callers
+// must have the current service running first: this is the last step of a
+// migration, never the first step of a start.
+func retireLegacyLaunchdService() {
+	for _, domain := range launchdDomains() {
+		_, _ = runLaunchctl("bootout", legacyLaunchdTarget(domain))
+	}
+	removeLegacyLaunchdPlist()
+}
+
 func bootoutLaunchdTargets() {
 	for _, target := range launchdTargets() {
 		_, _ = runLaunchctl("bootout", target)
 	}
+}
+
+func removeLegacyLaunchdPlist() {
+	_ = os.Remove(legacyLaunchdPlistPath())
 }
 
 // templateOwnedEnvKeys are keys the plist template renders directly; if

@@ -20,6 +20,15 @@ import (
 
 type stubAgent struct{}
 
+type failingHistoryAgent struct {
+	stubAgent
+	err error
+}
+
+func (a *failingHistoryAgent) GetSessionHistory(context.Context, string, int) ([]HistoryEntry, error) {
+	return []HistoryEntry{{Role: "user", Content: "partial history"}}, a.err
+}
+
 func (a *stubAgent) Name() string { return "stub" }
 func (a *stubAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
 	return &stubAgentSession{}, nil
@@ -3830,6 +3839,33 @@ func TestCmdCurrent_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	}
 }
 
+func TestCmdHistory_ReadFailureIsVisibleWithoutLeakingPath(t *testing.T) {
+	const secretPath = "/private/codex-home/sessions/secret.jsonl"
+	agent := &failingHistoryAgent{err: fmt.Errorf("scan %s: token too long", secretPath)}
+	msg := &Message{SessionKey: "test:history-failure", ReplyCtx: "ctx"}
+
+	plain := &stubPlatformEngine{n: "plain"}
+	textEngine := NewEngine("test", agent, []Platform{plain}, "", LangEnglish)
+	textEngine.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("broken", "test")
+	textEngine.cmdHistory(plain, msg, []string{"10"})
+	sent := plain.getSent()
+	if len(sent) != 1 || sent[0] != textEngine.i18n.T(MsgHistoryReadFailed) || strings.Contains(sent[0], secretPath) {
+		t.Fatalf("text history response = %q; want generic localized failure without path", sent)
+	}
+
+	cardPlatform := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "cards"}}
+	cardEngine := NewEngine("test", agent, []Platform{cardPlatform}, "", LangEnglish)
+	cardEngine.sessions.GetOrCreateActive(msg.SessionKey).SetAgentSessionID("broken", "test")
+	cardEngine.cmdHistory(cardPlatform, msg, nil)
+	if len(cardPlatform.repliedCards) != 1 {
+		t.Fatalf("card replies = %d, want 1", len(cardPlatform.repliedCards))
+	}
+	cardText := cardPlatform.repliedCards[0].RenderText()
+	if !strings.Contains(cardText, cardEngine.i18n.T(MsgHistoryReadFailed)) || strings.Contains(cardText, secretPath) || strings.Contains(cardText, "partial history") {
+		t.Fatalf("card history response = %q; want generic localized failure without path or partial history", cardText)
+	}
+}
+
 func TestCmdCurrent_ShowsAgentSummaryWhenNoCustomName(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	agent := &stubListAgent{sessions: []AgentSessionInfo{
@@ -5499,7 +5535,7 @@ func TestCmdReasoning_UsageListsAgentEfforts(t *testing.T) {
 	t.Run("card note", func(t *testing.T) {
 		agent := &stubModelModeAgent{reasoningEfforts: efforts}
 		e := NewEngine("test", agent, nil, "", LangEnglish)
-		card := e.renderReasoningCard()
+		card := e.renderReasoningCard(e.agent)
 
 		for _, element := range card.Elements {
 			if note, ok := element.(CardNote); ok && note.Text == wantUsage {
@@ -5549,6 +5585,79 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "/reasoning <number>") || strings.Contains(p.sent[0], "minimal") {
 		t.Fatalf("sent = %v, want usage without minimal", p.sent)
+	}
+}
+
+// stubPiEffortAgent mimics agent/pi's reasoning effort set, which differs from
+// Codex's (no "max"; adds "off" and "minimal").
+type stubPiEffortAgent struct {
+	stubModelModeAgent
+}
+
+func (a *stubPiEffortAgent) AvailableReasoningEfforts() []string {
+	return []string{"off", "minimal", "low", "medium", "high", "xhigh"}
+}
+
+// TestCmdReasoning_NoHardcodedCodexLevels is a regression test for the bug
+// where /reasoning displayed Codex-specific text for every agent: the
+// not-set hint said "using Codex default" and the usage line hardcoded
+// Codex's <low|medium|high|xhigh|max> set. The usage line must list the
+// active agent's own AvailableReasoningEfforts() and mention no agent name.
+func TestCmdReasoning_NoHardcodedCodexLevels(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubPiEffortAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Listing (no args) on a text platform.
+	e.cmdReasoning(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	got := p.sent[0]
+	if !strings.Contains(got, "off|minimal|low|medium|high|xhigh") {
+		t.Fatalf("usage line must list the agent's own efforts, got: %s", got)
+	}
+	if strings.Contains(got, "max") {
+		t.Fatalf("usage line must not contain efforts outside the agent's set (max), got: %s", got)
+	}
+	if strings.Contains(got, "Codex") {
+		t.Fatalf("output must not hardcode the agent name Codex, got: %s", got)
+	}
+
+	// Invalid target (a Codex-only level) also renders the agent-specific usage line.
+	p.sent = nil
+	e.cmdReasoning(p, msg, []string{"max"})
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply for invalid effort, got %d", len(p.sent))
+	}
+	got = p.sent[0]
+	if !strings.Contains(got, "off|minimal|low|medium|high|xhigh") || strings.Contains(got, "Codex") {
+		t.Fatalf("invalid-effort reply = %q, want agent-specific usage without Codex mention", got)
+	}
+	if agent.reasoningEffort != "" {
+		t.Fatalf("reasoning effort = %q, want unchanged empty", agent.reasoningEffort)
+	}
+
+	// Card path: the not-set hint and card note must also stay agent-agnostic.
+	card := e.renderReasoningCard(agent)
+	var md, note string
+	for _, el := range card.Elements {
+		switch v := el.(type) {
+		case CardMarkdown:
+			md += v.Content
+		case CardNote:
+			note += v.Text
+		}
+	}
+	if strings.Contains(md, "Codex") || strings.Contains(note, "Codex") {
+		t.Fatalf("card must not mention Codex, markdown: %q note: %q", md, note)
+	}
+	if !strings.Contains(md, "not set, using default") {
+		t.Fatalf("card markdown should show agent-agnostic default hint, got: %q", md)
+	}
+	if !strings.Contains(note, "off|minimal|low|medium|high|xhigh") {
+		t.Fatalf("card note must list the agent's own efforts, got: %q", note)
 	}
 }
 
@@ -9733,6 +9842,48 @@ func TestExecuteCardAction_ModeCleansUpWithInteractiveKey(t *testing.T) {
 	}
 }
 
+// Regression: the /list card button reaches executeCardAction, which cleared the
+// session history after switching. cmdSwitch never did, and documents why —
+// SwitchToAgentSession returns the existing Session when the agent session ID is
+// known, so wiping History makes /status and /history report zero messages right
+// after a switch that succeeded. Typing "/switch 1" kept its history; tapping the
+// same session in the card did not.
+func TestExecuteCardAction_SwitchPreservesHistory(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	agent := &stubListAgent{sessions: []AgentSessionInfo{
+		{ID: "sess-a1", Summary: "a1"},
+		{ID: "sess-a2", Summary: "a2"},
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	sessionKey := "feishu:channel1:user1"
+	sessions := e.sessions
+
+	// A session with recorded history, then a second session that became active —
+	// the state a /list card switch encounters.
+	first := sessions.GetOrCreateActive(sessionKey)
+	first.SetAgentSessionID("sess-a1", "stub")
+	first.AddHistory("user", "A1 first message")
+	first.AddHistory("assistant", "A1 reply")
+	sessions.Save()
+
+	sessions.NewSession(sessionKey, "a2")
+	sessions.GetOrCreateActive(sessionKey).SetAgentSessionID("sess-a2", "stub")
+	sessions.Save()
+
+	// "act:/switch 1" is what a /list card row sends.
+	_ = e.handleCardNav("act:/switch 1", sessionKey)
+
+	active := sessions.GetOrCreateActive(sessionKey)
+	if active.GetAgentSessionID() != "sess-a1" {
+		t.Fatalf("active session after card /switch = %q, want sess-a1", active.GetAgentSessionID())
+	}
+	hist := active.GetHistory(10)
+	if len(hist) == 0 || !strings.Contains(hist[0].Content, "A1") {
+		t.Fatalf("history after card /switch = %v, want the A1 conversation preserved", hist)
+	}
+}
+
 // ===========================================================================
 // P0 Beta release tests
 // ===========================================================================
@@ -11500,6 +11651,33 @@ func TestCmdShell_EmptyCommand_ShowsUsage(t *testing.T) {
 	}
 	if !foundUsage {
 		t.Fatalf("expected usage message, got %v", sent)
+	}
+}
+
+func TestCmdShell_BareCommand_ShowsUsage(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetAdminFrom("admin")
+
+	// "/shell" with no arguments and no trailing space should show usage.
+	msg := &Message{
+		SessionKey: "test:ch:admin",
+		Content:    "/shell",
+		ReplyCtx:   "ctx",
+		UserID:     "admin",
+		Platform:   "test",
+	}
+	e.cmdShell(p, msg, "/shell")
+
+	sent := p.getSent()
+	foundUsage := false
+	for _, s := range sent {
+		if strings.Contains(s, "Usage") {
+			foundUsage = true
+		}
+	}
+	if !foundUsage {
+		t.Fatalf("expected usage message for bare /shell, got %v", sent)
 	}
 }
 
@@ -14449,6 +14627,161 @@ func TestUnsolicitedReader_StopsOnCancel(t *testing.T) {
 	}
 }
 
+// TestUnsolicitedReader_FlushesPartialTextOnCancel is a regression test for
+// text being dropped when a new foreground turn cancels an unsolicited reader
+// mid-turn. Scenario (Claude Code, after a --resume): a stray result ended the
+// user's turn early, the real reply then streamed into the unsolicited reader,
+// and the user sent another message before that reply's EventResult arrived.
+// The already-streamed text must still be delivered.
+func TestUnsolicitedReader_FlushesPartialTextOnCancel(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-flush")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive("test:ch1:u1")
+
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+
+	e.startUnsolicitedReader(state, session, sessions, "test:ch1:u1", "")
+
+	sess.events <- Event{Type: EventText, Content: "Here is the analysis "}
+	sess.events <- Event{Type: EventText, Content: "you asked for."}
+
+	// Wait until the reader has consumed both events.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(sess.events) > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	e.stopUnsolicitedReader(state)
+
+	sent := waitForPlatformSend(p, 1, 2*time.Second)
+	found := false
+	for _, s := range sent {
+		if strings.Contains(s, "Here is the analysis you asked for.") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected partial unsolicited text to be flushed on cancel, got %v", sent)
+	}
+}
+
+// slowSendPlatform records sends like stubPlatformEngine but takes sendDelay
+// per Send, and blocks each Send until gate is closed when gate is non-nil.
+// It widens the window in which an asynchronous flush can be overtaken.
+type slowSendPlatform struct {
+	stubPlatformEngine
+	sendDelay time.Duration
+	gate      chan struct{}
+}
+
+func (p *slowSendPlatform) Send(ctx context.Context, rc any, content string) error {
+	if p.gate != nil {
+		<-p.gate
+	}
+	time.Sleep(p.sendDelay)
+	return p.stubPlatformEngine.Send(ctx, rc, content)
+}
+
+// startUnsolicitedReaderWithPartial starts a reader and feeds it a multi-chunk
+// partial turn (no EventResult), returning once the reader has consumed it.
+func startUnsolicitedReaderWithPartial(t *testing.T, e *Engine, p Platform, key string) (*interactiveState, []string) {
+	t.Helper()
+	sess := newControllableSession(key)
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+
+	line := strings.Repeat("x", 99) + "\n"
+	var partial strings.Builder
+	for i := 0; i < 3*maxPlatformMessageLen/len(line); i++ {
+		partial.WriteString(line)
+	}
+	chunks := SplitMessageCodeFenceAware(partial.String(), maxPlatformMessageLen)
+	if len(chunks) < 3 {
+		t.Fatalf("test setup: expected >= 3 chunks, got %d", len(chunks))
+	}
+	sess.events <- Event{Type: EventText, Content: partial.String()}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(sess.events) > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	return state, chunks
+}
+
+// TestUnsolicitedReader_FlushOrderedBeforeNextTurn verifies that partial text
+// flushed when a new foreground turn cancels the reader is fully delivered
+// before anything the new turn sends after stopUnsolicitedReader returns,
+// i.e. the flushed chunks are neither overtaken nor interleaved.
+func TestUnsolicitedReader_FlushOrderedBeforeNextTurn(t *testing.T) {
+	p := &slowSendPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, sendDelay: 30 * time.Millisecond}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	state, chunks := startUnsolicitedReaderWithPartial(t, e, p, "test:order:u1")
+
+	e.stopUnsolicitedReader(state)
+	// Simulates the next foreground turn replying right after taking over.
+	e.send(p, "ctx", "FOREGROUND-REPLY")
+
+	sent := waitForPlatformSend(&p.stubPlatformEngine, len(chunks)+1, 5*time.Second)
+	if len(sent) != len(chunks)+1 {
+		t.Fatalf("expected %d sends, got %d: %q", len(chunks)+1, len(sent), sent)
+	}
+	for i, chunk := range chunks {
+		if sent[i] != chunk {
+			t.Fatalf("send %d: flushed chunk out of order (foreground reply overtook flush); got %q", i, sent[i])
+		}
+	}
+	if sent[len(chunks)] != "FOREGROUND-REPLY" {
+		t.Fatalf("expected foreground reply last, got %q", sent[len(chunks)])
+	}
+}
+
+// TestUnsolicitedReader_FlushWaitIsBounded verifies that a platform stuck on
+// the flushed send cannot block stopUnsolicitedReader beyond
+// unsolicitedReaderStopTimeout, that no Events resync is forced (the reader
+// itself has exited), and that the flushed text is still delivered later.
+func TestUnsolicitedReader_FlushWaitIsBounded(t *testing.T) {
+	gate := make(chan struct{})
+	p := &slowSendPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, gate: gate}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer func() { _ = e.Stop() }()
+
+	state, chunks := startUnsolicitedReaderWithPartial(t, e, p, "test:bounded:u1")
+
+	start := time.Now()
+	e.stopUnsolicitedReader(state)
+	elapsed := time.Since(start)
+	if elapsed > unsolicitedReaderStopTimeout+2*time.Second {
+		t.Fatalf("stopUnsolicitedReader blocked %v, want <= ~%v", elapsed, unsolicitedReaderStopTimeout)
+	}
+	if elapsed < unsolicitedReaderStopTimeout-time.Second {
+		t.Fatalf("stopUnsolicitedReader returned after %v; expected it to wait for the flush up to the timeout", elapsed)
+	}
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if resync {
+		t.Error("flush timeout must not force an Events resync: the reader already exited")
+	}
+
+	close(gate)
+	sent := waitForPlatformSend(&p.stubPlatformEngine, len(chunks), 5*time.Second)
+	if len(sent) != len(chunks) {
+		t.Fatalf("expected flushed chunks to be delivered after the gate opened, got %d of %d", len(sent), len(chunks))
+	}
+}
+
 // TestUnsolicitedReader_SetsResyncOnChannelClose verifies that when the agent
 // process exits (events channel closed), eventsNeedResync is set to true.
 func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
@@ -14491,11 +14824,11 @@ func TestUnsolicitedReader_SetsResyncOnChannelClose(t *testing.T) {
 	}
 }
 
-// TestUnsolicitedReader_SetsResyncOnEventError verifies that EventError
-// sets eventsNeedResync to true and relays the error.
-func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
+// A dead session cannot produce further background work after an error.
+func TestUnsolicitedReader_SetsResyncOnDeadSessionError(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-error")
+	sess.alive = false
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	defer e.Stop()
 
@@ -14542,6 +14875,52 @@ func TestUnsolicitedReader_SetsResyncOnEventError(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected error to be relayed to platform, got %v", sent)
+	}
+}
+
+func TestUnsolicitedReader_KeepsLiveSessionAfterTurnError(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	sess := newControllableSession("unsol-live-error")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
+	const key = "test:live-error:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+	defer e.stopUnsolicitedReader(state)
+
+	// Preserve text from each failed background turn and keep accepting
+	// subsequent results; neither error is a process-exit notification.
+	for _, text := range []string{"first partial answer", "second partial answer"} {
+		sess.events <- Event{Type: EventText, Content: text}
+		sess.events <- Event{Type: EventError, Error: errors.New("turn was refused")}
+	}
+	sess.events <- Event{Type: EventText, Content: "later background answer"}
+	sess.events <- Event{Type: EventResult, Done: true}
+
+	sent := waitForPlatformSend(p, 5, 2*time.Second)
+	if len(sent) != 5 {
+		t.Fatalf("expected two partial answers, two errors and a later answer; got %v", sent)
+	}
+	e.stopUnsolicitedReader(state)
+	for i, want := range []string{"first partial answer", "turn was refused", "second partial answer", "turn was refused", "later background answer"} {
+		if !strings.Contains(sent[i], want) {
+			t.Errorf("reply %d = %q, want %q", i, sent[i], want)
+		}
+	}
+	history := session.GetHistory(0)
+	if len(history) != 3 {
+		t.Fatalf("history lost background answers: %+v", history)
+	}
+	state.mu.Lock()
+	resync := state.eventsNeedResync
+	state.mu.Unlock()
+	if resync {
+		t.Error("live session should preserve its event stream after a turn error")
 	}
 }
 
@@ -16492,5 +16871,61 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 	}
 	if strings.Contains(card.finalContent(), "NO_REPLY") {
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
+	}
+}
+
+type recoveringEngineProgressPlatform struct {
+	stubCompactProgressPlatform
+	remainingFailures int
+}
+
+func (p *recoveringEngineProgressPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	if err := p.stubCompactProgressPlatform.UpdateMessage(ctx, handle, content); err != nil {
+		return err
+	}
+	if p.remainingFailures > 0 {
+		p.remainingFailures--
+		return errors.New("temporary card update failure")
+	}
+	return nil
+}
+
+func TestProcessInteractiveEvents_ProgressUpdateFailurePreservesFinalReply(t *testing.T) {
+	for _, failures := range []int{1, 100} {
+		t.Run(fmt.Sprintf("failures_%d", failures), func(t *testing.T) {
+			p := &recoveringEngineProgressPlatform{
+				stubCompactProgressPlatform: stubCompactProgressPlatform{
+					stubPlatformEngine: stubPlatformEngine{n: "test"},
+					style:              "card", supportPayload: true,
+				},
+				remainingFailures: failures,
+			}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			sessionKey := "test:progress-recovery"
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("progress-recovery")
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+			e.interactiveStates[sessionKey] = state
+			agentSession.events <- Event{Type: EventThinking, Content: "planning"}
+			agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+			agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"}
+			agentSession.events <- Event{Type: EventText, Content: "done"}
+			agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx, 0)
+			if sent := p.getSent(); len(sent) != 1 || sent[0] != "done" {
+				t.Fatalf("sent = %#v, want final answer without per-tool fallback spam", sent)
+			}
+			if len(p.getPreviewStarts()) != 1 {
+				t.Fatal("recovery must use the original card")
+			}
+			edits := p.getPreviewEdits()
+			if len(edits) != 2 {
+				t.Fatalf("edits = %d, want failed progress update and final status attempt", len(edits))
+			}
+			payload, ok := ParseProgressCardPayload(edits[1])
+			if !ok || payload.State != ProgressCardStateCompleted {
+				t.Fatalf("final card payload = %#v, want completed", payload)
+			}
+		})
 	}
 }

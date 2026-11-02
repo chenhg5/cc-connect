@@ -445,7 +445,7 @@ func TestFindProjectDir_NonASCIIPath(t *testing.T) {
 	// This test verifies that findProjectDir can handle non-ASCII paths
 	// by creating a mock projects directory structure
 	homeDir := t.TempDir()
-	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectsBase := filepath.Join(homeDir, "projects")
 
 	// Test case: Chinese characters in path
 	chineseWorkDir := "/Users/test/Documents/项目文件夹"
@@ -467,7 +467,7 @@ func TestFindProjectDir_NonASCIIPath(t *testing.T) {
 func TestFindProjectDir_ASCIIPath(t *testing.T) {
 	// Verify ASCII paths still work correctly
 	homeDir := t.TempDir()
-	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectsBase := filepath.Join(homeDir, "projects")
 
 	asciiWorkDir := "/Users/test/Documents/project"
 	expectedKey := encodeClaudeProjectKey(asciiWorkDir)
@@ -500,7 +500,7 @@ func TestFindProjectDir_ICloudPath(t *testing.T) {
 	// must match the on-disk project key that Claude Code CLI generates, which
 	// collapses both spaces and "~" to "-".
 	homeDir := t.TempDir()
-	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectsBase := filepath.Join(homeDir, "projects")
 
 	iCloudWorkDir := "/Users/test/Library/Mobile Documents/com~apple~CloudDocs/my project"
 	// The on-disk key Claude Code CLI actually writes (spaces and "~" → "-").
@@ -825,7 +825,7 @@ func TestValidateSessionIDInProject_ValidSession(t *testing.T) {
 	homeDir := t.TempDir()
 	workDir := filepath.Join(homeDir, "Documents", "myproject")
 	projectKey := encodeClaudeProjectKey(workDir)
-	projectDir := filepath.Join(homeDir, ".claude", "projects", projectKey)
+	projectDir := filepath.Join(homeDir, "projects", projectKey)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("create project dir: %v", err)
 	}
@@ -845,7 +845,7 @@ func TestValidateSessionIDInProject_InvalidSession(t *testing.T) {
 	homeDir := t.TempDir()
 	workDir := filepath.Join(homeDir, "Documents", "myproject")
 	projectKey := encodeClaudeProjectKey(workDir)
-	projectDir := filepath.Join(homeDir, ".claude", "projects", projectKey)
+	projectDir := filepath.Join(homeDir, "projects", projectKey)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("create project dir: %v", err)
 	}
@@ -885,7 +885,7 @@ func TestValidateSessionIDInProject_ProjectDirMissing(t *testing.T) {
 // conversation history.
 func TestValidateSessionIDInProject_CrossProjectLeak(t *testing.T) {
 	homeDir := t.TempDir()
-	projectsBase := filepath.Join(homeDir, ".claude", "projects")
+	projectsBase := filepath.Join(homeDir, "projects")
 
 	projectA := filepath.Join(homeDir, "work", "projectA")
 	projectB := filepath.Join(homeDir, "work", "projectB")
@@ -1040,6 +1040,8 @@ func TestGetSessionHistory_TimestampsAreLocal(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 
 	workDir := t.TempDir()
+	// This test exercises the agent-level fallback path (no per-project
+	// CLAUDE_CONFIG_DIR), so the mock must live under $HOME/.claude/projects.
 	projectsBase := filepath.Join(homeDir, ".claude", "projects")
 	projectKey := encodeClaudeProjectKey(workDir)
 	sessionDir := filepath.Join(projectsBase, projectKey)
@@ -1215,5 +1217,36 @@ func TestClaudeContextWindow(t *testing.T) {
 					tc.model, tc.override, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestConfigHomeFromEnv_HonorsPerProjectConfigDir verifies that session-dir
+// resolution honors CLAUDE_CONFIG_DIR from the per-project env table, so
+// agents with an isolated config home find their own projects tree instead
+// of ~/.claude (regression test for /list showing empty on multi-home setups).
+func TestConfigHomeFromEnv_HonorsPerProjectConfigDir(t *testing.T) {
+	configHome := t.TempDir()
+	workDir := t.TempDir()
+
+	projectKey := encodeClaudeProjectKey(workDir)
+	sessionDir := filepath.Join(configHome, "projects", projectKey)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessionDir: %v", err)
+	}
+
+	env := []string{"PATH=/usr/bin", "CLAUDE_CONFIG_DIR=" + configHome}
+	if got := configHomeFromEnv(env); got != configHome {
+		t.Errorf("configHomeFromEnv(env) = %q, want %q", got, configHome)
+	}
+
+	if got := findProjectDir(configHomeFromEnv(env), workDir); got != sessionDir {
+		t.Errorf("findProjectDir(configHome, workDir) = %q, want %q", got, sessionDir)
+	}
+
+	// Without the variable it must fall back to ~/.claude (HOME-based).
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got, want := configHomeFromEnv(nil), filepath.Join(home, ".claude"); got != want {
+		t.Errorf("configHomeFromEnv(nil) = %q, want %q", got, want)
 	}
 }
