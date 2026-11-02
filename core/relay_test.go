@@ -326,6 +326,39 @@ func TestRelayManager_DefaultVisibilityEchoesFullMessages(t *testing.T) {
 	}
 }
 
+func TestRelayManager_FullVisibilityPreservesLongResponses(t *testing.T) {
+	for _, visibility := range []string{"", RelayVisibilityFull} {
+		t.Run("visibility="+visibility, func(t *testing.T) {
+			p := &relayVisibilityPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+			s := newControllableSession("long-response-session")
+			e := NewEngine("target", &controllableAgent{nextSession: s}, []Platform{p}, "", LangEnglish)
+			rm := NewRelayManager("")
+			rm.SetVisibility(visibility)
+			rm.RegisterEngine("target", e)
+			rm.Bind("test", "chat-1", map[string]string{"source": "source-bot", "target": "target-bot"})
+			response := strings.Repeat("\u5b8c\u6574\u56de\u590d", 700) + "\nFINAL_RESPONSE_END"
+			s.events <- Event{Type: EventResult, Content: response, Done: true}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			resp, err := rm.Send(ctx, RelayRequest{From: "source", To: "target", SessionKey: "test:chat-1:user", Message: "review"})
+			if err != nil {
+				t.Fatalf("Send error = %v", err)
+			}
+			if resp.Response != response {
+				t.Fatal("relay return value lost response content")
+			}
+			sent := p.getSent()
+			if len(sent) != 1 {
+				t.Fatalf("sent %d messages, want 1", len(sent))
+			}
+			want := "[target-bot] " + response
+			if sent[0] != want {
+				t.Fatalf("full response was truncated: got %d runes, want %d", len([]rune(sent[0])), len([]rune(want)))
+			}
+		})
+	}
+}
+
 func TestRelayManager_VisibilitySummarySuppressesBodies(t *testing.T) {
 	resp, sourceSent, targetSent := runRelayVisibilityScenario(t, RelayVisibilitySummary)
 
