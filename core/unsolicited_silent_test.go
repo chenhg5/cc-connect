@@ -39,7 +39,7 @@ func TestUnsolicitedReader_SuppressesBareNoReply(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	sess := newControllableSession("unsol-silent")
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	defer e.Stop()
+	t.Cleanup(func() { _ = e.Stop() })
 
 	sessions := e.sessions
 	session := sessions.GetOrCreateActive("test:ch1:u1")
