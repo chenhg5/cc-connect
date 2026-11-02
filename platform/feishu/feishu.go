@@ -123,6 +123,7 @@ type Platform struct {
 	appSecret                  string
 	progressStyle              string
 	useInteractiveCard         bool
+	cardAnimation              bool // native typewriter animation on rich cards; default true
 	self                       core.Platform
 	reactionEmoji              string
 	ackEmoji                   string
@@ -422,6 +423,13 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
 	}
+	// Native typewriter animation on rich cards. When disabled the platform
+	// skips the cardkit-v1 streaming-text API and updates the card with a
+	// full-card Patch, so the text appears in one shot.
+	cardAnimation := true
+	if v, ok := opts["cc_card_animation"].(bool); ok {
+		cardAnimation = v
+	}
 
 	imageBatchWindow := defaultImageBatchWindow
 	if raw, ok := opts["image_batch_window_ms"]; ok {
@@ -479,6 +487,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
+		cardAnimation:              cardAnimation,
 		reactionEmoji:              reactionEmoji,
 		ackEmoji:                   ackEmoji,
 		doneEmoji:                  doneEmoji,
@@ -5289,7 +5298,16 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		// Im.Message.Reply and Im.Message.Create accept the {type:card,data:{card_id}}
 		// content schema (verified by direct API call); skipping Reply mode would
 		// disable cardkit-v1 streaming on every @-mention turn (the dominant case).
-		if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
+		//
+		// With cardAnimation off we deliberately skip the cardkit entity: a
+		// card_id-backed card is always in streaming mode, and Feishu renders
+		// streaming text with a typewriter animation. Sending the card inline
+		// instead keeps the rich card layout but lets the engine update it via
+		// full-card Patch, so the text appears in one shot.
+		if !p.cardAnimation {
+			cardJSON = disableCardStreamingMode(cardJSON)
+			sendContent = cardJSON
+		} else if id, err := p.createCardEntity(ctx, cardJSON); err == nil {
 			cardID = id
 			sendContent = fmt.Sprintf(`{"type":"card","data":{"card_id":"%s"}}`, id)
 		} else {
@@ -7181,6 +7199,26 @@ func isCardJSON(content string) bool {
 		return false
 	}
 	return strings.Contains(content, `"schema"`) && strings.Contains(content, `"body"`)
+}
+
+// disableCardStreamingMode turns off the card's streaming_mode flag so Feishu
+// renders the text without the typewriter animation. Best-effort: on any
+// unmarshal error the original card JSON is returned unchanged.
+func disableCardStreamingMode(cardJSON string) string {
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		return cardJSON
+	}
+	cfg, ok := card["config"].(map[string]any)
+	if !ok {
+		return cardJSON
+	}
+	cfg["streaming_mode"] = false
+	out, err := json.Marshal(card)
+	if err != nil {
+		return cardJSON
+	}
+	return string(out)
 }
 
 // buildCardJSONWithStatus builds a Feishu card JSON with a colored header
