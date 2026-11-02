@@ -297,8 +297,17 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		// Truly fresh session — no resume, no continue.
 	default:
 		// Resuming a known session ID — this is cc-connect's own session
-		// from a previous connection, safe to resume directly.
-		innerArgs = append(innerArgs, "--resume", sessionID)
+		// from a previous connection, safe to resume directly. But Claude
+		// Code prunes old transcripts after a retention window; a --resume
+		// of a pruned conversation fails with "No conversation found with
+		// session ID" and the process exits. Fall back to a fresh session
+		// when the transcript is gone.
+		if transcriptExists(configHomeFromEnv(append(os.Environ(), extraEnv...)), workDir, sessionID) {
+			innerArgs = append(innerArgs, "--resume", sessionID)
+		} else {
+			slog.Info("claudeSession: transcript missing for stored session, starting fresh instead of --resume",
+				"session_id", sessionID)
+		}
 	}
 	if len(allowedTools) > 0 {
 		innerArgs = append(innerArgs, "--allowedTools", strings.Join(allowedTools, ","))

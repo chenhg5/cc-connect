@@ -1094,6 +1094,26 @@ func claudeConfigHomeDir() string {
 // per-project config home ([projects.agent.options.env]) resolve session
 // directories under their own projects tree instead of ~/.claude. Falls back
 // to ~/.claude when the variable is absent or empty.
+// transcriptExists reports whether the JSONL transcript for sessionID is
+// still present under the project's sessions tree. Claude Code prunes old
+// transcripts after a retention window; resuming a pruned conversation fails
+// with "No conversation found with session ID" and the CLI exits.
+func transcriptExists(configHome, workDir, sessionID string) bool {
+	if sessionID == "" || configHome == "" {
+		return true // nothing to verify — let the CLI decide
+	}
+	abs, err := filepath.Abs(workDir)
+	if err != nil {
+		return true
+	}
+	projectDir := findProjectDir(configHome, abs)
+	if projectDir == "" {
+		return true
+	}
+	_, err = os.Stat(filepath.Join(projectDir, sessionID+".jsonl"))
+	return err == nil
+}
+
 func configHomeFromEnv(envEntries []string) string {
 	for _, kv := range envEntries {
 		if v, ok := strings.CutPrefix(kv, "CLAUDE_CONFIG_DIR="); ok {

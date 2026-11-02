@@ -602,6 +602,10 @@ type interactiveState struct {
 	// the next turn (e.g. after an abnormal exit). Defaults to true (safe);
 	// cleared after EventResult or a turn error on a still-live session.
 	eventsNeedResync bool
+	// resumeFailed is set when a turn died because the stored --resume target
+	// conversation no longer exists ("No conversation found with session ID");
+	// the caller retries the turn once in a fresh session.
+	resumeFailed bool
 
 	// lastCompletedUserMessageTimeMs is the max platform user-message create time
 	// (ms) for which an agent turn has finished with EventResult.
@@ -4124,31 +4128,54 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
 
-	sendStart := time.Now()
-	state.mu.Lock()
-	state.currentMessageID = msg.MessageID
-	state.fromVoice = msg.FromVoice
-	state.sideText = ""
-	as := state.agentSession // capture under lock to avoid race with cleanup
-	state.mu.Unlock()
+	for attempt := 0; ; attempt++ {
+		sendStart := time.Now()
+		state.mu.Lock()
+		state.currentMessageID = msg.MessageID
+		state.fromVoice = msg.FromVoice
+		state.sideText = ""
+		as := state.agentSession // capture under lock to avoid race with cleanup
+		state.mu.Unlock()
 
-	// Run Send concurrently with processInteractiveEvents. Some agents block inside
-	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
-	// EventPermissionRequest while blocked — the event loop must run in parallel.
-	sendDone := make(chan error, 1)
-	go func() {
-		if as == nil {
-			sendDone <- fmt.Errorf("agent session became nil")
+		// Run Send concurrently with processInteractiveEvents. Some agents block inside
+		// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
+		// EventPermissionRequest while blocked — the event loop must run in parallel.
+		sendDone := make(chan error, 1)
+		go func() {
+			if as == nil {
+				sendDone <- fmt.Errorf("agent session became nil")
+				return
+			}
+			sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+		}()
+
+		e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, lockGen)
+		if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
+			slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
+		}
+		stopTyping = nil // ownership transferred; prevent defer from double-stopping
+
+		// Auto-recover from a dead --resume: the stored conversation was
+		// pruned and the turn died at startup. Drop the stale reference and
+		// retry the prompt once in a fresh conversation; a second failure is
+		// surfaced to the user as usual.
+		state.mu.Lock()
+		resumeFailed := state.resumeFailed
+		state.mu.Unlock()
+		if !resumeFailed || attempt > 0 {
+			break
+		}
+		slog.Warn("stored agent session conversation is gone; retrying the turn in a fresh session",
+			"session_key", interactiveKey, "agent_session", session.GetAgentSessionID())
+		session.SetAgentSessionID("", e.agent.Name())
+		sessions.Save()
+		e.cleanupInteractiveState(interactiveKey, state)
+		state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+		if state == nil || state.agentSession == nil {
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
 			return
 		}
-		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
-	}()
-
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, lockGen)
-	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
-		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
-	stopTyping = nil // ownership transferred; prevent defer from double-stopping
 
 	// Start unsolicited reader and arm the idle close timer BEFORE draining
 	// queued messages. drainPendingMessages releases the session lock, and
@@ -5406,6 +5433,13 @@ type agentErrorHandler struct {
 
 var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
+}
+
+// isMissingConversationError reports whether err means the --resume target
+// conversation no longer exists on disk (Claude Code prunes old session files
+// after a retention window), so the only recovery is a fresh conversation.
+func isMissingConversationError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "No conversation found with session ID")
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, lockGen uint64) {
@@ -6801,6 +6835,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					session.SetAgentSessionID(currentID, e.agent.Name())
 					sessions.Save()
 				}
+			}
+			// A stale --resume target (conversation pruned by Claude Code after
+			// its retention window) fails with "No conversation found with
+			// session ID" and the process exits. Flag it so the caller retries
+			// the turn once in a fresh conversation instead of surfacing the
+			// error to the user.
+			if isMissingConversationError(event.Error) {
+				state.mu.Lock()
+				state.resumeFailed = true
+				state.mu.Unlock()
+				slog.Warn("agent conversation missing; turn will be retried in a fresh session",
+					"session_key", sessionKey, "error", event.Error)
+				return
 			}
 			state.mu.Lock()
 			// A per-turn error does not invalidate a live session's event
