@@ -419,16 +419,15 @@ type Engine struct {
 	userRoles    *UserRoleManager // nil = legacy mode (no per-user policies)
 	userRolesMu  sync.RWMutex     // protects userRoles, disabledCmds, and adminFrom
 
-	rateLimiter            *RateLimiter
-	outgoingRL             *OutgoingRateLimiter
-	streamPreview          StreamPreviewCfg
-	instantReply           InstantReplyCfg
-	references             ReferenceRenderCfg
-	relayManager           *RelayManager
-	eventIdleTimeout       time.Duration
-	staleLockBreakAfter    time.Duration // busy-lock stale-break threshold; 0 disables
-	maxTurnTime            time.Duration // absolute wall-clock cap per turn (0 = disabled)
-	permissionTimeoutNanos atomic.Int64  // max wait for user to respond to permission prompt (0 = no timeout)
+	rateLimiter         *RateLimiter
+	outgoingRL          *OutgoingRateLimiter
+	streamPreview       StreamPreviewCfg
+	instantReply        InstantReplyCfg
+	references          ReferenceRenderCfg
+	relayManager        *RelayManager
+	eventIdleTimeout    time.Duration
+	staleLockBreakAfter time.Duration // busy-lock stale-break threshold; 0 disables
+	maxTurnTime         time.Duration // absolute wall-clock cap per turn (0 = disabled)
 	// agentSessionIdleTimeoutNanos 在单轮正常结束后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下次继续恢复。
 	agentSessionIdleTimeoutNanos atomic.Int64
@@ -787,7 +786,6 @@ type pendingPermission struct {
 	CurrentQuestion int            // index of the question currently being asked
 	Resolved        chan struct{}  // closed when user responds
 	resolveOnce     sync.Once
-	timedOut        atomic.Bool // set by timeout handler to prevent stale user clicks from winning
 }
 
 func (s *interactiveState) stopSignal() <-chan struct{} {
@@ -1532,13 +1530,6 @@ func (e *Engine) SetMaxTurnTime(d time.Duration) {
 // agent process before the next incoming message breaks it. 0 disables.
 func (e *Engine) SetStaleLockBreakAfter(d time.Duration) {
 	e.staleLockBreakAfter = d
-}
-
-// SetPermissionTimeout sets the maximum time to wait for the user to respond
-// to a permission prompt before auto-denying. 0 disables the timeout (default).
-// Safe to call concurrently with reloadConfig; uses atomic store.
-func (e *Engine) SetPermissionTimeout(d time.Duration) {
-	e.permissionTimeoutNanos.Store(int64(d))
 }
 
 // SetEventIdleTimeout sets the maximum time to wait between consecutive agent events.
@@ -3794,14 +3785,6 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		return false
 	}
 found:
-
-	// If the permission request already timed out, drop the user's response
-	// silently to prevent a stale button click from overriding the auto-deny.
-	if pending.timedOut.Load() {
-		slog.Debug("dropping permission response after timeout",
-			"session", msg.SessionKey, "content", content)
-		return true
-	}
 
 	// An option click from an AskUserQuestion card is never a permission
 	// decision, and a click on an earlier question's card must not answer
@@ -6976,62 +6959,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				idleTimer.Stop()
 			}
 
-			// If a permission timeout is configured, wait with a deadline;
-			// otherwise wait indefinitely for the user to respond.
-			// Atomic load so that SetPermissionTimeout (called by reloadConfig) is
-			// race-free against this read.
-			permTimeout := time.Duration(e.permissionTimeoutNanos.Load())
-			if permTimeout > 0 {
-				permTimer := time.NewTimer(permTimeout)
-				select {
-				case <-pending.Resolved:
-					permTimer.Stop()
-					slog.Info("permission resolved", "request_id", event.RequestID)
-
-				case <-stopCh:
-					permTimer.Stop()
-					pending.resolve()
-					sp.discard()
-					return
-
-				case <-permTimer.C:
-					permTimer.Stop()
-					slog.Warn("permission request timed out, auto-denying",
-						"request_id", event.RequestID,
-						"tool", pending.ToolName,
-						"timeout_mins", permTimeout.Minutes(),
-					)
-
-					state.mu.Lock()
-					pending.timedOut.Store(true)
-					state.pending = nil
-					state.mu.Unlock()
-
-					if err := state.agentSession.RespondPermission(pending.RequestID, PermissionResult{
-						Behavior: "deny",
-						Message:  "Permission request timed out -- the user is away or inactive. Try safer approaches that don't require user approval.",
-					}); err != nil {
-						slog.Error("failed to auto-deny permission on timeout",
-							"request_id", event.RequestID, "error", err)
-					}
-
-					pending.resolve()
-
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgPermissionTimeoutNotification), pending.ToolName))
-
-					// Fall through to unfreeze and restart idle timer
-				}
-			} else {
-				select {
-				case <-pending.Resolved:
-					slog.Info("permission resolved", "request_id", event.RequestID)
-
-				case <-stopCh:
-					pending.resolve()
-					sp.discard()
-					return
-				}
-			}
+			<-pending.Resolved
+			slog.Info("permission resolved", "request_id", event.RequestID)
 
 			// The stream preview was frozen+detached when this permission
 			// request was emitted, so any subsequent EventText in this turn
@@ -7042,7 +6971,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// card and continues to update incrementally.
 			sp.unfreeze()
 
-			// Restart idle timer after permission is resolved (or timed out)
+			// Restart idle timer after permission is resolved
 			if idleTimer != nil {
 				idleTimer.Reset(e.eventIdleTimeout)
 			}

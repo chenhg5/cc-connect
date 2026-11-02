@@ -708,8 +708,6 @@ const (
 	MsgAgentCronToolPrompt  MsgKey = "agent_cron_tool_prompt"
 	MsgAgentTimerToolPrompt MsgKey = "agent_timer_tool_prompt"
 	MsgAgentRelayToolPrompt MsgKey = "agent_relay_tool_prompt"
-
-	MsgPermissionTimeoutNotification MsgKey = "permission_timeout_notification"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -898,14 +896,6 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 後台任務請求使用工具 `%s` 的權限，但已自動拒絕（目前無活躍會話）。請發送訊息或使用 `/yolo` 授權後續請求。",
 		LangJapanese:           "⚠️ バックグラウンドタスクがツール `%s` の権限を要求しましたが、自動的に拒否されました（アクティブなユーザーターンなし）。メッセージを送信するか `/yolo` を使用して今後のリクエストを承認してください。",
 		LangSpanish:            "⚠️ Una tarea en segundo plano solicitó permiso para `%s` pero se denegó automáticamente (sin turno de usuario activo). Envía un mensaje o usa `/yolo` para aprobar solicitudes futuras.",
-	},
-
-	MsgPermissionTimeoutNotification: {
-		LangEnglish:            "⏰ Permission request for `%s` timed out and was auto-denied.",
-		LangChinese:            "⏰ 工具 `%s` 的权限请求超时，已自动拒绝。",
-		LangTraditionalChinese: "⏰ 工具 `%s` 的權限請求超時，已自動拒絕。",
-		LangJapanese:           "⏰ ツール `%s` の権限リクエストがタイムアウトし、自動拒否されました。",
-		LangSpanish:            "⏰ La solicitud de permiso para `%s` ha caducado y se ha denegado automáticamente.",
 	},
 	MsgSessionNotFound: {
 		LangEnglish:            "⚠️ Session expired. Use /new to start a fresh conversation.",
