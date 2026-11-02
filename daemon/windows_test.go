@@ -150,12 +150,17 @@ func TestBuildWindowsTaskScript_DropsEmptyValue(t *testing.T) {
 	}
 }
 
-// TestSchtasksInstall_TightensExistingScriptFrom0644 covers the upgrade
-// path: os.WriteFile would truncate-in-place and keep the old POSIX
-// mode of a script left by an earlier cc-connect version. While
-// Windows real access is governed by ACLs, the POSIX bits are still
-// expected to reflect intent.
-func TestSchtasksInstall_TightensExistingScriptFrom0644(t *testing.T) {
+// TestSchtasksInstall_RewritesExistingScript covers the upgrade path: a user
+// from an earlier cc-connect version may already have a task script on disk,
+// and Install must rewrite it in place instead of leaving the stale one.
+//
+// The permission half of that check cannot be asserted here. This file is
+// windows-only, and Windows ignores permission bits beyond the read-only
+// attribute, so the 0644 script seeded below reads back as 0666 and Install's
+// 0600 is unobservable. That hardening is covered where modes are real, by
+// TestInstallLaunchd_TightensExistingPlistFrom0644 and
+// TestSystemdInstall_TightensExistingUnitFrom0644.
+func TestSchtasksInstall_RewritesExistingScript(t *testing.T) {
 	t.Setenv("USERPROFILE", t.TempDir())
 
 	orig := runPowerShell
@@ -166,11 +171,9 @@ func TestSchtasksInstall_TightensExistingScriptFrom0644(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	scriptPath := windowsTaskScriptPath()
-	if err := os.WriteFile(scriptPath, []byte("$env:OLD = 'leftover'\r\n"), 0o644); err != nil {
+	const legacyMarker = "$env:OLD = 'leftover'"
+	if err := os.WriteFile(scriptPath, []byte(legacyMarker+"\r\n"), 0o644); err != nil {
 		t.Fatalf("seed legacy script: %v", err)
-	}
-	if info, _ := os.Stat(scriptPath); info.Mode().Perm() != 0o644 {
-		t.Fatalf("precondition: seeded file mode = %o, want 0644", info.Mode().Perm())
 	}
 
 	mgr := &schtasksManager{}
@@ -185,11 +188,15 @@ func TestSchtasksInstall_TightensExistingScriptFrom0644(t *testing.T) {
 	if err := mgr.Install(cfg); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	info, err := os.Stat(scriptPath)
+
+	written, err := os.ReadFile(scriptPath)
 	if err != nil {
-		t.Fatalf("stat: %v", err)
+		t.Fatalf("read script after Install: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("script mode after reinstall = %o, want 0600", info.Mode().Perm())
+	if strings.Contains(string(written), legacyMarker) {
+		t.Errorf("Install left the legacy script in place:\n%s", written)
+	}
+	if !strings.Contains(string(written), "captured") {
+		t.Errorf("reinstalled script is missing the captured env value:\n%s", written)
 	}
 }

@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -50,7 +49,9 @@ const (
 // budget can be scoped to where ilink actually throttles us (issue #1742).
 //   - sendPathReply: reactive reply to an inbound user message. The gateway
 //     does not throttle replies on interactive deployments, so the push-path
-//     budget must NOT consume them.
+//     budget must NOT consume them. This covers Reply and also Send with a
+//     reply context taken from an inbound message: the engine sends a turn's
+//     answer through Send (issue #1937).
 //   - sendPathPush: proactive push (cron / timer / file transfer / SendImage /
 //     SendFile / SendAudio). Counts against burst_limit.
 //
@@ -85,6 +86,11 @@ func resetPushBudgetExceededCounter() {
 type replyContext struct {
 	peerUserID   string
 	contextToken string
+	// inbound marks a context built from a received user message
+	// (dispatchInbound). The engine delivers a turn's answer through Send with
+	// this context, so Send uses it to tell a reply from a proactive push.
+	// Contexts rebuilt by ReconstructReplyCtx (cron, timer, relay) leave it false.
+	inbound bool
 }
 
 // Platform implements core.Platform for Weixin personal chat via the ilink bot HTTP API
@@ -583,7 +589,7 @@ func (p *Platform) dispatchInbound(ctx context.Context, m *weixinMessage, h core
 		return
 	}
 
-	rc := &replyContext{peerUserID: from, contextToken: strings.TrimSpace(m.ContextToken)}
+	rc := &replyContext{peerUserID: from, contextToken: strings.TrimSpace(m.ContextToken), inbound: true}
 	msgID := fmt.Sprintf("%d", m.MessageID)
 	if m.MessageID == 0 {
 		msgID = randomHex(8)
@@ -641,11 +647,18 @@ func (p *Platform) Reply(ctx context.Context, replyCtx any, content string) erro
 	return p.sendChunks(ctx, replyCtx, content, sendPathReply)
 }
 
-// Send proactively pushes a message to the user (cron / timer / Relay). Pushes
-// count against the burst budget because ilink DOES throttle proactive sends
-// (see #1643 / #1742).
+// Send delivers a message the engine did not route through Reply. The engine
+// uses Send for each turn's answer, passing the reply context of the user's
+// message; that is a reply and bypasses the burst budget like Reply does
+// (#1937). Every other Send — cron, timer, relay, whose reply context comes
+// from ReconstructReplyCtx — is a proactive push and counts against the budget,
+// because ilink DOES throttle proactive sends (see #1643 / #1742).
 func (p *Platform) Send(ctx context.Context, replyCtx any, content string) error {
-	return p.sendChunks(ctx, replyCtx, content, sendPathPush)
+	path := sendPathPush
+	if rc, ok := replyCtx.(*replyContext); ok && rc != nil && rc.inbound {
+		path = sendPathReply
+	}
+	return p.sendChunks(ctx, replyCtx, content, path)
 }
 
 // StartTyping sends a typing indicator to the peer and repeats every few seconds
@@ -822,7 +835,7 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string,
 	if strings.TrimSpace(content) == "" {
 		return nil
 	}
-	chunks := splitUTF8(content, maxWeixinChunk)
+	chunks := core.SplitMessageCodeFenceAware(content, maxWeixinChunk)
 	total := len(chunks)
 	for i, chunk := range chunks {
 		// Add delay between chunks to avoid rate limiting (except for first chunk)
@@ -886,23 +899,6 @@ func truncatePreview(s string, max int) string {
 	return s[:max] + "..."
 }
 
-func splitUTF8(s string, maxRunes int) []string {
-	if maxRunes <= 0 || utf8.RuneCountInString(s) <= maxRunes {
-		return []string{s}
-	}
-	var out []string
-	runes := []rune(s)
-	for len(runes) > 0 {
-		n := maxRunes
-		if len(runes) < n {
-			n = len(runes)
-		}
-		out = append(out, string(runes[:n]))
-		runes = runes[n:]
-	}
-	return out
-}
-
 // ReconstructReplyCtx implements core.ReplyContextReconstructor for cron / proactive sends.
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if !strings.HasPrefix(sessionKey, sessionKeyPrefix) {
@@ -916,17 +912,17 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	return &replyContext{peerUserID: peer, contextToken: tok}, nil
 }
 
-// FormattingInstructions implements core.FormattingInstructionProvider.
-func (p *Platform) FormattingInstructions() string {
-	return "Replies are delivered as plain text to Weixin. Avoid markdown tables; use short paragraphs."
-}
+// Weixin renders standard Markdown, so this platform intentionally does not
+// implement core.FormattingInstructionProvider. That optional interface exists
+// for platforms whose syntax deviates from standard Markdown (Slack mrkdwn,
+// Google Chat), and the majority of adapters — Feishu, Telegram, Discord,
+// DingTalk among them — likewise leave it unimplemented.
 
 var (
-	_ core.Platform                      = (*Platform)(nil)
-	_ core.ReplyContextReconstructor     = (*Platform)(nil)
-	_ core.FormattingInstructionProvider = (*Platform)(nil)
-	_ core.ImageSender                   = (*Platform)(nil)
-	_ core.FileSender                    = (*Platform)(nil)
-	_ core.TypingIndicator               = (*Platform)(nil)
-	_ core.AsyncRecoverablePlatform      = (*Platform)(nil)
+	_ core.Platform                  = (*Platform)(nil)
+	_ core.ReplyContextReconstructor = (*Platform)(nil)
+	_ core.ImageSender               = (*Platform)(nil)
+	_ core.FileSender                = (*Platform)(nil)
+	_ core.TypingIndicator           = (*Platform)(nil)
+	_ core.AsyncRecoverablePlatform  = (*Platform)(nil)
 )

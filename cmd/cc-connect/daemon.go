@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -96,6 +97,16 @@ func daemonInstall(args []string) {
 	if st != nil && st.Installed && !force {
 		fmt.Fprintf(os.Stderr, "Service already installed. Use --force to reinstall.\n")
 		os.Exit(1)
+	}
+
+	// Reap any process left over from a previous install before the new task is
+	// created and started. mgr.Install stops the old task but the platform's
+	// stop does not necessarily kill the child it spawned (see reapLeftover), so
+	// without this the freshly started process could fail to take the instance
+	// lock. Uses the config path resolved just above rather than the daemon
+	// metadata, which at this point may still describe the previous install.
+	if reapLeftover(configPath) {
+		fmt.Println("Cleaned up a leftover cc-connect process.")
 	}
 
 	if err := mgr.Install(cfg); err != nil {
@@ -252,16 +263,101 @@ func daemonUninstall() {
 		os.Exit(1)
 	}
 
+	// Must run before RemoveMeta, which is what reapLeftoverFromMeta resolves the
+	// config path from. Uninstalling stops the task but can leave the daemon
+	// process itself running (see reapLeftover) — with the task gone there would
+	// be nothing left to manage it.
+	if reapLeftoverFromMeta() {
+		fmt.Println("Cleaned up a leftover cc-connect process.")
+	}
+
 	daemon.RemoveMeta()
 	fmt.Println("cc-connect daemon uninstalled.")
 }
 
 // ── start / stop / restart ──────────────────────────────────
 
+// serviceLifecycle is the slice of daemon.Manager that the helpers below drive.
+// Narrowed to an interface so tests can substitute a fake and assert the
+// ordering those helpers exist to guarantee.
+type serviceLifecycle interface {
+	Start() error
+	Stop() error
+}
+
+// reapLeftover terminates a cc-connect process left behind by the service
+// manager, using the PID recorded in that config's instance lock file. Reports
+// whether a process was actually killed.
+//
+// Windows' Stop-ScheduledTask only kills the wrapper powershell.exe; the
+// cc-connect.exe that wrapper spawned survives as an orphan holding the
+// instance lock (config.toml.lock) and the listening ports. The wrapper is
+//
+//	while ($true) { & cc-connect.exe; if ($exitCode -eq 0) { exit 0 }; Start-Sleep 10 }
+//
+// so every subsequent start silently fails: the new process cannot take the
+// lock, reports it with fmt.Fprintf(os.Stderr, ...) — which never reaches the
+// daemon log — and exits 1, while the wrapper relaunches it every 10s forever.
+// The visible symptoms are `daemon stop` claiming success while the daemon is
+// still listening, and `daemon restart` leaving the old process in place.
+//
+// This is the same mechanism `--force` and the /restart command already use.
+func reapLeftover(configPath string) bool {
+	if configPath == "" {
+		return false
+	}
+	return KillExistingInstance(configPath)
+}
+
+// reapLeftoverFromMeta applies reapLeftover to the config recorded in the daemon
+// metadata — the only config path available to start/stop/restart, which never
+// parse one.
+func reapLeftoverFromMeta() bool {
+	meta, err := daemon.LoadMeta()
+	if err != nil || meta.WorkDir == "" {
+		return false
+	}
+	return reapLeftover(filepath.Join(meta.WorkDir, "config.toml"))
+}
+
+// stopService stops the service and then reaps. The reap has to come *after*
+// Stop: killing the child while the wrapper is still looping just makes the
+// wrapper relaunch it ten seconds later.
+func stopService(mgr serviceLifecycle, reap func() bool) error {
+	err := mgr.Stop()
+	if reap != nil && reap() {
+		fmt.Println("Cleaned up a leftover cc-connect process.")
+	}
+	return err
+}
+
+// startService reaps before starting, so the new process can take the instance
+// lock instead of exiting 1 into the wrapper's retry loop.
+func startService(mgr serviceLifecycle, reap func() bool) error {
+	if reap != nil && reap() {
+		fmt.Println("Cleaned up a leftover cc-connect process.")
+	}
+	return mgr.Start()
+}
+
+// restartService is Stop → reap → Start, expressed once so the ordering cannot
+// drift apart. Stop and Start are issued separately rather than via
+// mgr.Restart() precisely so the reap fits in between; on Windows that costs
+// nothing, since schtasksManager.Restart() is literally stopWindowsTask()
+// followed by startWindowsTask(). Reaping before the restart instead would race
+// the wrapper's 10s relaunch.
+func restartService(mgr serviceLifecycle, reap func() bool) error {
+	if err := stopService(mgr, reap); err != nil {
+		slog.Warn("daemon: stop before restart failed", "error", err)
+	}
+	// Not startService: stopService already reaped.
+	return mgr.Start()
+}
+
 func daemonStart() {
 	mgr := mustManager()
 	requireInstalled(mgr)
-	if err := mgr.Start(); err != nil {
+	if err := startService(mgr, reapLeftoverFromMeta); err != nil {
 		fmt.Fprintf(os.Stderr, "Start failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -271,7 +367,7 @@ func daemonStart() {
 func daemonStop() {
 	mgr := mustManager()
 	requireInstalled(mgr)
-	if err := mgr.Stop(); err != nil {
+	if err := stopService(mgr, reapLeftoverFromMeta); err != nil {
 		fmt.Fprintf(os.Stderr, "Stop failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -279,24 +375,15 @@ func daemonStop() {
 }
 
 func daemonRestart(args []string) {
-	force := false
-	for _, a := range args {
-		if a == "--force" {
-			force = true
-		}
-	}
+	// args is kept for backwards compatibility. --force used to be the only way
+	// to get the leftover process cleaned up; that cleanup now always runs, so
+	// the flag is redundant and is deliberately ignored.
+	_ = args
 
 	mgr := mustManager()
 	requireInstalled(mgr)
 
-	if force {
-		if meta, err := daemon.LoadMeta(); err == nil {
-			configPath := meta.WorkDir + "/config.toml"
-			KillExistingInstance(configPath)
-		}
-	}
-
-	if err := mgr.Restart(); err != nil {
+	if err := restartService(mgr, reapLeftoverFromMeta); err != nil {
 		fmt.Fprintf(os.Stderr, "Restart failed: %v\n", err)
 		os.Exit(1)
 	}

@@ -48,9 +48,14 @@ cc-connect 完整功能使用指南。
 | `/reasoning [等级]` | 查看或切换推理强度（Codex）|
 | `/mode [名称]` | 查看或切换权限模式 |
 | `/stop` | 停止当前执行 |
+| `/ps <消息>` / `/btw <消息>` | 向正在执行的任务补充指令 |
 | `/help` | 显示可用命令 |
 
 会话中 Agent 请求工具权限时，回复 **允许** / **拒绝** / **允许所有**。
+
+任务运行时，可用 `/ps`（或 `/btw`）补充指令；会话空闲时会拒绝该命令。送达确认表示桥接已发送请求，不表示 Agent 已完成处理。
+
+使用 Pi 时，设置 `rpc = true` 可启用原生中途引导：补充内容会在当前助手回合的工具调用结束后、下一次模型调用前送入。如果 Pi 已经结束、桥接仍在发送最终回复，补充内容会启动后续回合。Pi 默认的 JSON 模式保留原有的一次性发送行为，无法向已经运行的进程注入消息。
 
 也可以为项目开启“空闲后自动切换新会话”：
 
@@ -90,6 +95,26 @@ reset_on_idle_mins = 60
 | 自动编辑 | `auto-edit` | 模型自行决定 |
 | 全自动 | `full-auto` | 自动通过 + 沙箱保护 |
 | YOLO | `yolo` | 跳过所有审批 |
+
+### macOS 上的 Codex CLI 查找
+
+Codex 适配器按以下顺序选择可执行文件：
+
+1. 项目的 `cmd` 配置（兼容已弃用的 `cli_path` / `command`）。
+2. 未配置命令时，读取启动 cc-connect 的进程环境中的 `CODEX_CLI_PATH`。
+3. 从该进程的 `PATH` 查找可执行的 `codex`。
+4. macOS 下依次查找 `/Applications/ChatGPT.app`、`/Applications/Codex.app`；每个应用优先检查新目录 `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`，再检查旧目录 `Contents/Resources/codex`。
+
+PATH 中没有命令或软链接失效时，会继续查找桌面应用。显式命令或 `CODEX_CLI_PATH` 必须有效，否则报错。每次启动 CLI 子进程都会重新查找，以兼容应用更新后的目录变化。Linux、Windows 继续使用配置的命令或 PATH。
+
+`exec`、`app_server`、运行配置读取、技能查询及 `/doctor` 使用同一选择规则。路径包含空格或需要额外参数时，使用数组形式：
+
+```toml
+[projects.agent.options]
+cmd = ["/path with spaces/codex", "--profile", "work"]
+```
+
+此功能通过现有 Codex 适配器运行应用内置 CLI。桌面专有工具和共享会话写锁有独立的适配要求，参见 [桌面后端讨论 #651](https://github.com/chenhg5/cc-connect/issues/651) 和 [会话写锁冲突 #1909](https://github.com/chenhg5/cc-connect/issues/1909)。
 
 ### Cursor Agent 模式
 
@@ -909,6 +934,8 @@ type = "claudecode"
 > **状态：Beta。** 此功能自 v1.2.2-beta.5 起可用，UI 和 API 在后续版本中可能调整。
 
 内嵌在二进制中的全功能管理界面，支持项目管理、会话管理、定时任务编辑、全局设置、聊天界面、多语言等。
+
+在管理后台从 CC-Switch 导入 Provider 时，如果选中的名称对应多个源 Provider，整个导入请求会在添加任何 Provider 前被拒绝。取消选择有歧义的名称后，可以继续导入其余名称唯一的 Provider。
 
 ### 快速启用（聊天命令）
 
