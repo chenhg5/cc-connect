@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -143,5 +144,99 @@ func TestAbortTimerRun_UnknownRun(t *testing.T) {
 	defer e.cancel()
 	if e.AbortTimerRun("missing") {
 		t.Fatal("AbortTimerRun() = true for a run that was never started")
+	}
+}
+
+// In reuse mode a user message queued behind the timer turn sits on the chat's
+// own interactive state; aborting the turn must tell that user their message
+// was dropped instead of discarding it without a word.
+func TestAbortTimerRun_ReuseModeNotifiesQueuedMessage(t *testing.T) {
+	platform := &stubPlatformEngine{n: "test"}
+	agentSession := newHungTimerSession()
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+
+	e.interactiveMu.Lock()
+	e.interactiveStates["chat-key"] = &interactiveState{
+		agentSession:    agentSession,
+		platform:        platform,
+		replyCtx:        "ctx",
+		pendingMessages: []queuedMessage{{platform: platform, replyCtx: "ctx", content: "queued question"}},
+	}
+	e.interactiveMu.Unlock()
+	defer e.trackTimerRun("reuse1", "chat-key")()
+
+	if !e.AbortTimerRun("reuse1") {
+		t.Fatal("AbortTimerRun() = false for a registered turn")
+	}
+	sent := platform.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], errTimerRunAborted.Error()) {
+		t.Fatalf("expected one dropped-message notice mentioning %q, got %v", errTimerRunAborted, sent)
+	}
+	for _, msg := range sent {
+		if strings.Contains(msg, "session reset") {
+			t.Fatalf("abort delivered %q to the chat", msg)
+		}
+	}
+}
+
+// slowStartAgent hands out its session only after delay, holding the engine's
+// interactiveMu across the spawn like a real agent process start does.
+type slowStartAgent struct {
+	resultAgent
+	delay time.Duration
+}
+
+func (a *slowStartAgent) StartSession(ctx context.Context, id string) (AgentSession, error) {
+	time.Sleep(a.delay)
+	return a.resultAgent.StartSession(ctx, id)
+}
+
+// The abort cannot stop a turn before its agent has started; when the start
+// takes longer than the poll window it must still stop the run afterwards.
+func TestAbortTimerRun_StopsRunAfterSlowAgentStart(t *testing.T) {
+	store, err := NewTimerStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+	agentSession := newHungTimerSession()
+	agent := &slowStartAgent{resultAgent: resultAgent{session: agentSession}, delay: 4 * timerAbortRegisterGrace}
+	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	t.Cleanup(e.cancel)
+	e.timerScheduler = NewTimerScheduler(store)
+
+	job := &TimerJob{ID: "slow1", SessionKey: "discord:channel-1:user-1", Prompt: "never finishes", Mute: true, SessionMode: "new_per_run"}
+	done := make(chan error, 1)
+	go func() { done <- e.ExecuteTimerJob(job) }()
+
+	waitTimerRunTracked(t, e, job.ID)
+	if !e.AbortTimerRun(job.ID) {
+		t.Fatal("AbortTimerRun() = false for a run whose agent started slowly")
+	}
+	select {
+	case <-agentSession.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent session was not closed after abort")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ExecuteTimerJob did not return after abort")
+	}
+}
+
+// A failed abort must not forget the run, so a later abort can still stop it.
+func TestAbortTimerRun_KeepsRunTrackedWhenNothingStopped(t *testing.T) {
+	agentSession := newHungTimerSession()
+	e := NewEngine("test", &resultAgent{session: agentSession}, nil, "", LangEnglish)
+	defer e.cancel()
+	defer e.trackTimerRun("never1", "never-key")()
+
+	if e.AbortTimerRun("never1") {
+		t.Fatal("AbortTimerRun() = true although no turn was registered")
+	}
+	if _, ok := e.timerRuns.Load("never1"); !ok {
+		t.Fatal("run was forgotten after an abort that stopped nothing")
 	}
 }

@@ -4567,26 +4567,38 @@ func (e *Engine) trackTimerRun(jobID, iKey string) func() {
 }
 
 const (
-	// timerAbortRegisterGrace bounds how long AbortTimerRun waits for a
-	// tracked run to register its interactive state: the key is tracked a few
-	// instructions before the turn creates that state.
+	// timerAbortRegisterGrace bounds the polling between stop attempts while a
+	// tracked run has not registered its interactive state yet. It does not
+	// bound the whole abort: the state is registered only after the agent
+	// process has started, and each stop attempt waits on interactiveMu, which
+	// is held across that start, so the abort lasts at least as long as the
+	// agent start (see slowAgentStart).
 	timerAbortRegisterGrace = 250 * time.Millisecond
 	timerAbortRegisterPoll  = 10 * time.Millisecond
 )
 
+// errTimerRunAborted is reported to users whose messages were queued behind a
+// timer turn that was stopped on timeout.
+var errTimerRunAborted = errors.New("the background task timed out and was stopped; please resend your message")
+
 // AbortTimerRun stops the agent turn of a timer run the scheduler gave up on,
-// so the agent process does not outlive the job. It uses the silent turn-stop
-// path rather than cleanupInteractiveState because in reuse mode the run
-// borrows the chat's own interactive key. It returns false if no run of that
-// job is active or its turn never registered within the grace window.
+// so the agent process does not outlive the job. It uses the turn-stop path
+// rather than cleanupInteractiveState because in reuse mode the run borrows
+// the chat's own interactive key: no "session reset" goes to that chat, and
+// messages the user queued behind the turn are reported as dropped. For agents
+// without AgentSessionCanceller this closes the chat's agent process; the next
+// message starts a new one and resumes the saved session. It returns false,
+// and keeps the run tracked, if no turn of that job could be stopped.
 func (e *Engine) AbortTimerRun(jobID string) bool {
-	v, ok := e.timerRuns.LoadAndDelete(jobID)
+	v, ok := e.timerRuns.Load(jobID)
 	if !ok {
 		return false
 	}
+	key := v.(string)
 	deadline := time.Now().Add(timerAbortRegisterGrace)
 	for {
-		if e.stopInteractiveSessionSilently(v.(string)) {
+		if e.stopInteractiveSessionWithOptions(key, false, errTimerRunAborted) {
+			e.timerRuns.CompareAndDelete(jobID, key)
 			return true
 		}
 		if !time.Now().Before(deadline) {
@@ -10979,14 +10991,17 @@ func (e *Engine) cmdCancel(p Platform, msg *Message) {
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
-	return e.stopInteractiveSessionWithOptions(sessionKey, true)
+	return e.stopInteractiveSessionWithOptions(sessionKey, true, nil)
 }
 
 func (e *Engine) stopInteractiveSessionSilently(sessionKey string) bool {
-	return e.stopInteractiveSessionWithOptions(sessionKey, false)
+	return e.stopInteractiveSessionWithOptions(sessionKey, false, nil)
 }
 
-func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueued bool) bool {
+// stopInteractiveSessionWithOptions stops the turn on sessionKey. Messages queued
+// behind it are reported with queuedReason when it is non-nil, with the default
+// reason when notifyQueued is set, and dropped silently otherwise.
+func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueued bool, queuedReason error) bool {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
 	if !ok || state == nil {
@@ -11017,7 +11032,9 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		if pending != nil {
 			pending.resolve()
 		}
-		if notifyQueued {
+		if queuedReason != nil {
+			e.notifyDroppedQueuedMessages(state, queuedReason)
+		} else if notifyQueued {
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session cancelled"))
 		} else {
 			state.mu.Lock()
@@ -11063,7 +11080,9 @@ normalCleanup:
 	if pending != nil {
 		pending.resolve()
 	}
-	if notifyQueued {
+	if queuedReason != nil {
+		e.notifyDroppedQueuedMessages(state, queuedReason)
+	} else if notifyQueued {
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	} else {
 		state.mu.Lock()
