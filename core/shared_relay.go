@@ -80,7 +80,7 @@ func (e *Engine) collectSharedRelay(ctx context.Context, state *interactiveState
 			}
 		case <-ctx.Done():
 			go e.finishSharedRelayInBackground(session, sessions, f, sendDone, cleanup)
-			return relayPartialResponseOrError(ctx.Err(), parts, "", e.name)
+			return e.relayPartialResponseOrError(ctx.Err(), parts, "", e.name)
 		case <-e.ctx.Done():
 			cleanup()
 			return "", e.ctx.Err()

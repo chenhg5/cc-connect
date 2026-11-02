@@ -17033,62 +17033,6 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 	}
 }
 
-type recoveringEngineProgressPlatform struct {
-	stubCompactProgressPlatform
-	remainingFailures int
-}
-
-func (p *recoveringEngineProgressPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
-	if err := p.stubCompactProgressPlatform.UpdateMessage(ctx, handle, content); err != nil {
-		return err
-	}
-	if p.remainingFailures > 0 {
-		p.remainingFailures--
-		return errors.New("temporary card update failure")
-	}
-	return nil
-}
-
-func TestProcessInteractiveEvents_ProgressUpdateFailurePreservesFinalReply(t *testing.T) {
-	for _, failures := range []int{1, 100} {
-		t.Run(fmt.Sprintf("failures_%d", failures), func(t *testing.T) {
-			p := &recoveringEngineProgressPlatform{
-				stubCompactProgressPlatform: stubCompactProgressPlatform{
-					stubPlatformEngine: stubPlatformEngine{n: "test"},
-					style:              "card", supportPayload: true,
-				},
-				remainingFailures: failures,
-			}
-			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-			sessionKey := "test:progress-recovery"
-			session := e.sessions.GetOrCreateActive(sessionKey)
-			agentSession := newControllableSession("progress-recovery")
-			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
-			e.interactiveStates[sessionKey] = state
-			agentSession.events <- Event{Type: EventThinking, Content: "planning"}
-			agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
-			agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"}
-			agentSession.events <- Event{Type: EventText, Content: "done"}
-			agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
-			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx, 0)
-			if sent := p.getSent(); len(sent) != 1 || sent[0] != "done" {
-				t.Fatalf("sent = %#v, want final answer without per-tool fallback spam", sent)
-			}
-			if len(p.getPreviewStarts()) != 1 {
-				t.Fatal("recovery must use the original card")
-			}
-			edits := p.getPreviewEdits()
-			if len(edits) != 2 {
-				t.Fatalf("edits = %d, want failed progress update and final status attempt", len(edits))
-			}
-			payload, ok := ParseProgressCardPayload(edits[1])
-			if !ok || payload.State != ProgressCardStateCompleted {
-				t.Fatalf("final card payload = %#v, want completed", payload)
-			}
-		})
-	}
-}
-
 func TestSessionListCardSwitch_PreservesExistingHistory(t *testing.T) {
 	agent := &stubListAgent{sessions: []AgentSessionInfo{{ID: "first", Summary: "First"}, {ID: "second", Summary: "Second"}}}
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
@@ -17204,5 +17148,61 @@ func TestSharedUnsupportedTextStreamingFallsBackBeforeTurnCompletion(t *testing.
 	}
 	if !visible {
 		t.Fatal("full-card fallback buffered text until turn completion")
+	}
+}
+
+type recoveringEngineProgressPlatform struct {
+	stubCompactProgressPlatform
+	remainingFailures int
+}
+
+func (p *recoveringEngineProgressPlatform) UpdateMessage(ctx context.Context, handle any, content string) error {
+	if err := p.stubCompactProgressPlatform.UpdateMessage(ctx, handle, content); err != nil {
+		return err
+	}
+	if p.remainingFailures > 0 {
+		p.remainingFailures--
+		return errors.New("temporary card update failure")
+	}
+	return nil
+}
+
+func TestProcessInteractiveEvents_ProgressUpdateFailurePreservesFinalReply(t *testing.T) {
+	for _, failures := range []int{1, 100} {
+		t.Run(fmt.Sprintf("failures_%d", failures), func(t *testing.T) {
+			p := &recoveringEngineProgressPlatform{
+				stubCompactProgressPlatform: stubCompactProgressPlatform{
+					stubPlatformEngine: stubPlatformEngine{n: "test"},
+					style:              "card", supportPayload: true,
+				},
+				remainingFailures: failures,
+			}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			sessionKey := "test:progress-recovery"
+			session := e.sessions.GetOrCreateActive(sessionKey)
+			agentSession := newControllableSession("progress-recovery")
+			state := &interactiveState{agentSession: agentSession, platform: p, replyCtx: "ctx"}
+			e.interactiveStates[sessionKey] = state
+			agentSession.events <- Event{Type: EventThinking, Content: "planning"}
+			agentSession.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "echo hi"}
+			agentSession.events <- Event{Type: EventToolResult, ToolName: "Bash", ToolResult: "hi"}
+			agentSession.events <- Event{Type: EventText, Content: "done"}
+			agentSession.events <- Event{Type: EventResult, Content: "done", Done: true}
+			e.processInteractiveEvents(state, session, e.sessions, sessionKey, "message", time.Now(), nil, nil, state.replyCtx, 0)
+			if sent := p.getSent(); len(sent) != 1 || sent[0] != "done" {
+				t.Fatalf("sent = %#v, want final answer without per-tool fallback spam", sent)
+			}
+			if len(p.getPreviewStarts()) != 1 {
+				t.Fatal("recovery must use the original card")
+			}
+			edits := p.getPreviewEdits()
+			if len(edits) != 2 {
+				t.Fatalf("edits = %d, want failed progress update and final status attempt", len(edits))
+			}
+			payload, ok := ParseProgressCardPayload(edits[1])
+			if !ok || payload.State != ProgressCardStateCompleted {
+				t.Fatalf("final card payload = %#v, want completed", payload)
+			}
+		})
 	}
 }

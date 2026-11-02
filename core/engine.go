@@ -568,9 +568,9 @@ type interactiveState struct {
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
 	stopped                  bool
-	turnCancelled            bool                     // set when a graceful ACP CancelTurn aborted the live turn
 	shared                   sharedSessionState       // persistent observer state, protected by mu
 	sharedPresentation       *sharedPresentationState // set once for turn views; nil for ordinary sessions
+	turnCancelled            bool                     // set when a graceful ACP CancelTurn aborted the live turn
 	pending                  *pendingPermission
 	pendingUserInput         *pendingUserInput
 	pendingMessages          []queuedMessage // messages queued while session was busy
