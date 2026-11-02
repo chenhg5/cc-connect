@@ -122,3 +122,44 @@ func TestRawCards_UUIDReachesFeishu(t *testing.T) {
 		t.Fatalf("reply = %#v", fake.sent[1])
 	}
 }
+
+// When Feishu refuses a card (230099 "Failed to create card content",
+// 230025 content too long), SendRawCard's error carries the Feishu code as
+// "code=<n>" on both send paths -- a new message and a reply in a thread --
+// so callers can tell a refused card (not worth retrying unchanged) from a
+// transient failure.
+func TestRawCards_RefusalCarriesTheFeishuCode(t *testing.T) {
+	for _, code := range []int{230099, 230025} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+				writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "t"})
+				return
+			}
+			writeJSON(t, w, map[string]any{
+				"code": code,
+				"msg":  "Failed to create card content, ext=ErrCode: 11310; ErrMsg: element exceeds the limit;",
+			})
+		}))
+		p := &Platform{
+			platformName:       "feishu",
+			domain:             srv.URL,
+			appID:              "cli_test",
+			appSecret:          "secret",
+			useInteractiveCard: true,
+			client:             lark.NewClient("cli_test", "secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+			replayClient:       lark.NewClient("cli_test", "secret", lark.WithEnableTokenCache(false), lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+		}
+		card := json.RawMessage(`{"schema":"2.0","body":{"elements":[]}}`)
+		for _, rc := range []replyContext{
+			{chatID: "oc_p2p", sessionKey: "feishu:oc_p2p:ou_owner"},
+			{chatID: "oc_chat", messageID: "om_root", sessionKey: "feishu:oc_chat:root:om_root"},
+		} {
+			_, err := p.SendRawCard(context.Background(), rc, card, "job-x")
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("code=%d", code)) {
+				t.Fatalf("code %d via %+v: err = %v, want it to carry code=%d", code, rc, err, code)
+			}
+		}
+		srv.Close()
+	}
+}
