@@ -81,6 +81,11 @@ func (s *APIServer) sendCard(w http.ResponseWriter, req SendRequest) {
 		http.Error(w, "card cannot be combined with message, tts_text or attachments", http.StatusBadRequest)
 		return
 	}
+	if len(req.AtUsers) > 0 || req.AtAll {
+		// A card is sent as authored; mentions belong inside the card.
+		http.Error(w, "card cannot be combined with at_users or at_all", http.StatusBadRequest)
+		return
+	}
 	if !validCardUUID(req.UUID) {
 		http.Error(w, fmt.Sprintf("uuid must be at most %d characters", MaxCardUUIDLen), http.StatusBadRequest)
 		return
@@ -104,14 +109,20 @@ func validCardUUID(uuid string) bool {
 }
 
 // UpdateCard replaces the card message messageID in place. sessionKey, when
-// set, picks the platform by its name prefix; otherwise the project must
-// have exactly one platform that can update cards.
+// set, picks the platform the way a send to that session does (see
+// platformForSessionKey, so a workspace-prefixed key works too); otherwise
+// the project must have exactly one platform that can update cards.
 func (e *Engine) UpdateCard(sessionKey, messageID string, card json.RawMessage) error {
 	platformName := ""
 	if sessionKey != "" {
-		platformName, _, _ = strings.Cut(sessionKey, ":")
+		p, _ := e.platformForSessionKey(sessionKey)
+		if p == nil {
+			return fmt.Errorf("%w for session key %q not found", errCardTarget, sessionKey)
+		}
+		platformName = p.Name()
 	}
 	var updater RawCardUpdater
+	var target Platform
 	var names []string
 	for _, p := range e.platforms {
 		if platformName != "" && p.Name() != platformName {
@@ -120,16 +131,21 @@ func (e *Engine) UpdateCard(sessionKey, messageID string, card json.RawMessage) 
 		names = append(names, p.Name())
 		if u, ok := p.(RawCardUpdater); ok {
 			if updater != nil {
+				if platformName != "" {
+					// A session key names a platform, so it cannot tell
+					// two platforms of the same name apart.
+					return fmt.Errorf("%w: several platforms named %q can update cards and a session key cannot tell them apart", errCardTarget, platformName)
+				}
 				return fmt.Errorf("%w: several platforms can update cards; pass session_key to pick one", errCardTarget)
 			}
-			updater = u
+			updater, target = u, p
 		}
 	}
 	if updater == nil {
-		if len(names) == 0 {
-			return fmt.Errorf("%w %q not found", errCardTarget, platformName)
-		}
 		return fmt.Errorf("platform %s cannot update cards: %w", strings.Join(names, ", "), ErrNotSupported)
+	}
+	if err := e.waitOutgoing(target); err != nil {
+		return err
 	}
 	return updater.UpdateRawCard(e.ctx, messageID, card)
 }
@@ -143,26 +159,6 @@ type CardUpdateRequest struct {
 	SessionKey string          `json:"session_key,omitempty"`
 	MessageID  string          `json:"message_id"`
 	Card       json.RawMessage `json:"card"`
-}
-
-// cardBodyLimit bounds a request that carries one card.
-const cardBodyLimit = 4 << 20
-
-func (s *APIServer) resolveEngine(project string) (*Engine, int, string) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if project != "" {
-		if engine, ok := s.engines[project]; ok {
-			return engine, 0, ""
-		}
-		return nil, http.StatusNotFound, fmt.Sprintf("project %q not found", project)
-	}
-	if len(s.engines) == 1 {
-		for _, engine := range s.engines {
-			return engine, 0, ""
-		}
-	}
-	return nil, http.StatusBadRequest, "project is required (multiple projects configured)"
 }
 
 // cardErrorStatus maps a card send/update failure to an HTTP status: a
@@ -184,7 +180,8 @@ func (s *APIServer) handleCardsUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CardUpdateRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, cardBodyLimit)).Decode(&req); err != nil {
+	// Same body limit as /send, so a card that can be sent can be updated.
+	if err := json.NewDecoder(io.LimitReader(r.Body, s.sendBodyLimit())).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}

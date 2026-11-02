@@ -66,20 +66,32 @@ func runSend(args []string) {
 	if len(req.Card) > 0 {
 		// A card's message id is what POST /cards/update needs later; print
 		// it alone so scripts can capture it.
-		var out struct {
-			MessageID string `json:"message_id"`
+		// A missing id fails the command, so `id=$(cc-connect send --card
+		// ...)` cannot silently capture an empty id.
+		id, err := cardMessageID(body)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
-		if err := json.Unmarshal(body, &out); err != nil || out.MessageID == "" {
-			fmt.Fprintf(os.Stderr, "Warning: card sent, but the response carried no message_id: %s\n", strings.TrimSpace(string(body)))
-			return
-		}
-		fmt.Println(out.MessageID)
+		fmt.Println(id)
 		return
 	}
 	fmt.Println("Message sent successfully.")
 }
 
 var errSendUsage = errors.New("show send usage")
+
+// cardMessageID extracts the message id from a successful card send's
+// response body; a body without one is an error.
+func cardMessageID(body []byte) (string, error) {
+	var out struct {
+		MessageID string `json:"message_id"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || out.MessageID == "" {
+		return "", fmt.Errorf("card sent, but the response carried no message_id: %s", strings.TrimSpace(string(body)))
+	}
+	return out.MessageID, nil
+}
 
 func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	var req core.SendRequest
@@ -199,6 +211,9 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 		if useStdin || len(positional) > 0 || req.Message != "" || req.TTSText != "" ||
 			len(imagePaths) > 0 || len(filePaths) > 0 || len(audioPaths) > 0 || len(videoPaths) > 0 {
 			return req, "", fmt.Errorf("--card cannot be combined with a message, --tts or attachments")
+		}
+		if len(req.AtUsers) > 0 || req.AtAll {
+			return req, "", fmt.Errorf("--card does not support --at-users or --at-all; put mentions inside the card")
 		}
 		card, err := readCardJSON(cardPath)
 		if err != nil {
@@ -448,7 +463,8 @@ Options:
       --stdin              Read message from stdin (best for long/special-char messages)
       --card <path|->      Send a card in the platform's own JSON format (e.g. a Feishu
                            card) from a file or stdin; prints the card's message id,
-                           which POST /cards/update accepts. Not combinable with a message
+                           which POST /cards/update accepts. Not combinable with a
+                           message, attachments, --at-users or --at-all
       --uuid <key>         With --card: deduplication key (max 50 chars); a retry with
                            the same key does not send a second card (Feishu)
       --at-users <ids>     @ user IDs, comma-separated (DingTalk)

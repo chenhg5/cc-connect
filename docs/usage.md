@@ -851,13 +851,18 @@ curl --unix-socket ~/.cc-connect/run/api.sock -X POST http://unix/cards/update \
 
 - `POST /send` accepts `card` (a JSON object) instead of `message`; a card is
   sent unchanged and cannot be combined with `message`, `tts_text` or
-  attachments. The response is `{"status":"ok","message_id":"..."}`.
+  attachments, nor with `at_users` / `at_all` (put mentions inside the card).
+  The response is `{"status":"ok","message_id":"..."}`; `cc-connect send
+  --card` prints the id and exits non-zero if the response carries none.
 - `uuid` (with `card` only, at most 50 characters) is passed to the platform
   as its deduplication key, so a retried send with the same key does not post
-  a second card. On Feishu the key is honoured for about an hour.
+  a second card. On Feishu the key is honoured for about an hour; reusing it
+  after that window sends another card.
 - `POST /cards/update` takes `message_id` and `card`, plus optional `project`
   and `session_key` (needed only when a project has several card-capable
-  platforms).
+  platforms; the platform is resolved from it the same way `/send` does,
+  workspace-prefixed keys included). It shares `/send`'s body size limit and
+  outgoing rate limit.
 - Platforms that cannot send or update raw cards answer `501 Not Implemented`.
 
 ---

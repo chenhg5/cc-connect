@@ -392,9 +392,28 @@ func TestParseSendArgs_CardRejections(t *testing.T) {
 		"not an object":   {"--card", notObject},
 		"missing file":    {"--card", filepath.Join(dir, "nope.json")},
 		"uuid alone":      {"--uuid", "k", "-m", "hi"},
+		"with at-users":   {"--card", card, "--at-users", "u1,u2"},
+		"with at-all":     {"--card", card, "--at-all"},
 	} {
 		if _, _, err := parseSendArgs(args); err == nil {
 			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
+// A card send that comes back without a message id is a failure: a script
+// capturing the id must not get an empty string and a zero exit status.
+func TestCardMessageID(t *testing.T) {
+	if id, err := cardMessageID([]byte(`{"status":"ok","message_id":"om_1"}`)); err != nil || id != "om_1" {
+		t.Fatalf("cardMessageID = %q, %v", id, err)
+	}
+	for name, body := range map[string]string{
+		"no message_id":    `{"status":"ok"}`,
+		"empty message_id": `{"status":"ok","message_id":""}`,
+		"not JSON":         `ok`,
+	} {
+		if id, err := cardMessageID([]byte(body)); err == nil {
+			t.Errorf("%s: cardMessageID = %q, want an error", name, id)
 		}
 	}
 }
