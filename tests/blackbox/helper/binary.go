@@ -158,9 +158,10 @@ func (p *binaryProcess) LogTail(n int, token string) string {
 	return strings.Join(lines, "\n")
 }
 
-// newBinaryEnv starts cc-connect for agentType with agentOpts and connects a
-// bridge adapter with the given capability profile.
-func newBinaryEnv(t *testing.T, agentType string, agentOpts map[string]any, profile bbplatform.Profile) *Env {
+// newBinaryEnv starts cc-connect for agentType with agentOpts (and provider,
+// when not nil) and connects a bridge adapter with the given capability
+// profile.
+func newBinaryEnv(t *testing.T, agentType string, agentOpts map[string]any, profile bbplatform.Profile, provider map[string]any) *Env {
 	t.Helper()
 
 	bin := binaryPath(t)
@@ -175,9 +176,9 @@ func newBinaryEnv(t *testing.T, agentType string, agentOpts map[string]any, prof
 		opts[k] = v
 	}
 	agent := binaryAgentSection{Type: agentType, Options: opts}
-	if p := providerFromEnv(agentType); p != nil {
-		agent.Providers = []map[string]any{p}
-		opts["provider"] = p["name"]
+	if provider != nil {
+		agent.Providers = []map[string]any{provider}
+		opts["provider"] = provider["name"]
 	}
 
 	cfg := binaryConfig{

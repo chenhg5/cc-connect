@@ -149,9 +149,10 @@ test-release-local:
 
 # Blackbox smoke: in-process engine and the real binary (driven through its
 # bridge WebSocket) across platform capability profiles. Needs one agent CLI
-# on PATH; model credentials only for TestSmoke_AgentTurn, which skips
-# without them. Point CC_BLACKBOX_BINARY at a built artifact to test it
-# instead of the current tree.
+# on PATH; agent turns use the scripted fake model (tests/blackbox/fakemodel),
+# so no model key is needed. TestSmoke_AgentTurn uses a real model and skips
+# without credentials. Point CC_BLACKBOX_BINARY at a built artifact to test
+# it instead of the current tree.
 test-blackbox-smoke:
 	go test -tags blackbox -count=1 -race ./tests/blackbox/smoke/
 

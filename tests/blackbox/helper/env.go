@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/chenhg5/cc-connect/tests/blackbox/fakemodel"
 	bbplatform "github.com/chenhg5/cc-connect/tests/blackbox/platform"
 )
 
@@ -48,6 +49,9 @@ type Env struct {
 	// agentType is stored for diagnostic messages only.
 	agentType string
 
+	// FakeModel is the scripted model server when Options.FakeModel is set.
+	FakeModel *fakemodel.Server
+
 	// binary backend only
 	proc      *binaryProcess
 	token     string
@@ -76,6 +80,11 @@ type Options struct {
 	// Setup configures the in-process engine before Start. Envs with a Setup
 	// are skipped on the binary backend, which has no in-process engine.
 	Setup func(*core.Engine)
+	// FakeModel points the agent at a scripted fake model server
+	// (tests/blackbox/fakemodel) instead of a real provider. Turns are then
+	// deterministic and need no model key; drive them with FAKE: directives
+	// in the message text. Only claudecode is supported so far.
+	FakeModel bool
 	// NoCredentials only requires the agent CLI on PATH, not model
 	// credentials. Use it for scenarios that never start an agent turn
 	// (slash commands such as /help or /version), so they can run anywhere.
@@ -176,9 +185,18 @@ func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
 		t.Skip("blackbox skip: this test configures the in-process engine directly (backend=binary)")
 	}
 
-	if o.NoCredentials {
+	var fake *fakemodel.Server
+	switch {
+	case o.FakeModel:
+		if agentType != "claudecode" {
+			t.Skipf("blackbox skip: the fake model only speaks the Anthropic Messages API (agent=%s)", agentType)
+		}
 		requireAgentBinary(t, agentType)
-	} else {
+		fake = fakemodel.New()
+		t.Cleanup(fake.Close)
+	case o.NoCredentials:
+		requireAgentBinary(t, agentType)
+	default:
 		requireAgent(t, agentType)
 	}
 
@@ -194,10 +212,18 @@ func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
 		opts["mode"] = "force"
 	}
 
-	applyProviderFromEnv(t, agentType, opts)
+	if fake == nil {
+		applyProviderFromEnv(t, agentType, opts)
+	}
 
 	if backend == BackendBinary {
-		return newBinaryEnv(t, agentType, opts, profile)
+		provider := providerFromEnv(agentType)
+		if fake != nil {
+			provider = fakeProvider(fake).toml()
+		}
+		env := newBinaryEnv(t, agentType, opts, profile, provider)
+		env.FakeModel = fake
+		return env
 	}
 
 	dataDir := t.TempDir()
@@ -207,7 +233,17 @@ func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
 		t.Skipf("blackbox skip: cannot create %s agent: %v", agentType, err)
 	}
 
-	wireProviders(t, agentType, agent)
+	if fake != nil {
+		ps, ok := agent.(core.ProviderSwitcher)
+		if !ok {
+			t.Fatalf("blackbox: %s cannot take a provider, so it cannot use the fake model", agentType)
+		}
+		pc := fakeProvider(fake)
+		ps.SetProviders([]core.ProviderConfig{pc.core()})
+		ps.SetActiveProvider(pc.Name)
+	} else {
+		wireProviders(t, agentType, agent)
+	}
 
 	mp := bbplatform.New(agentType + "-mock")
 
@@ -230,6 +266,7 @@ func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
 	return &Env{
 		T:         t,
 		Platform:  mp,
+		FakeModel: fake,
 		Engine:    engine,
 		WorkDir:   workDir,
 		DataDir:   dataDir,
@@ -571,4 +608,28 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// fakeProviderConfig is the provider that points an agent at the fake model.
+type fakeProviderConfig struct {
+	Name, APIKey, BaseURL string
+	Env                   map[string]string
+}
+
+func fakeProvider(fake *fakemodel.Server) fakeProviderConfig {
+	return fakeProviderConfig{
+		Name:    "blackbox-fake",
+		APIKey:  "sk-blackbox-fake",
+		BaseURL: fake.URL(),
+		// Keep loopback traffic off any HTTP(S) proxy in the environment.
+		Env: map[string]string{"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"},
+	}
+}
+
+func (p fakeProviderConfig) core() core.ProviderConfig {
+	return core.ProviderConfig{Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL, Env: p.Env}
+}
+
+func (p fakeProviderConfig) toml() map[string]any {
+	return map[string]any{"name": p.Name, "api_key": p.APIKey, "base_url": p.BaseURL, "env": p.Env}
 }

@@ -8,6 +8,25 @@ go test -tags blackbox -count=1 ./tests/blackbox/smoke/   # no model credentials
 go test -tags blackbox -count=1 ./tests/blackbox/p0/      # needs model credentials
 ```
 
+## Fake model
+
+`Options{FakeModel: true}` points the agent at `tests/blackbox/fakemodel`, a
+scripted stand-in for the Anthropic Messages API. The real Claude Code CLI
+and the real cc-connect run; only the model is fake, so turns are
+deterministic and need no key. The script is the message text:
+
+| Message | Fake model does |
+| --- | --- |
+| `FAKE:reply <text>` | answers `<text>` |
+| `FAKE:slow <n> <word>` | streams `<word>` n times, 300 ms apart |
+| `FAKE:tool Bash <command>` | calls the Bash tool; after the tool result, answers `TOOL_DONE: <output>` (or `TOOL_ERROR: …`) |
+| `FAKE:recall` | answers `HISTORY: ` plus the text of earlier turns |
+| anything else | answers `ECHO: <first line>` |
+
+`env.FakeModel.TurnRequests()` returns what the CLI actually sent (user
+text, tool results, image blocks), so tests can assert on the model side as
+well. Only `claudecode` is supported so far (Anthropic wire format).
+
 ## Backends
 
 `CC_BLACKBOX_BACKEND` selects what runs cc-connect:
