@@ -5428,6 +5428,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var partialText string
 	triggerAutoCompress := false
 	pendingSend := sendDone
+	var pendingCapacityError *Event
+	var capacityFallback CapacityFallbackSession
+	defer func() {
+		if capacityFallback != nil {
+			capacityFallback.RestoreCapacityFallback()
+		}
+	}()
 
 	// stopTyping tracks the current turn's typing indicator so it can be
 	// stopped when a queued message starts a new turn.
@@ -5512,12 +5519,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	for {
 		var event Event
 		var ok bool
+		eventSource := events
+		if pendingCapacityError != nil {
+			eventSource = nil // wait for Send without bypassing stop/timeout handling
+		}
 
 		select {
 		case <-stopCh:
 			sp.discard()
 			return
-		case event, ok = <-events:
+		case event, ok = <-eventSource:
 			if !ok {
 				goto channelClosed
 			}
@@ -5540,7 +5551,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
-			continue
+			if pendingCapacityError == nil {
+				continue
+			}
+			event = *pendingCapacityError
+			pendingCapacityError = nil
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
@@ -6600,6 +6615,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Debug("tts: not enabled", "tts_nil", e.tts == nil, "enabled", e.tts != nil && e.tts.Enabled, "tts_obj_nil", e.tts == nil || e.tts.TTS == nil)
 			}
 
+			// Keep the actual model visible through final delivery, then restore
+			// it before a queued request (or compression) starts another turn.
+			if capacityFallback != nil {
+				capacityFallback.RestoreCapacityFallback()
+				capacityFallback = nil
+			}
+
 			// Auto-compress after finishing a turn, before sending any queued messages.
 			if triggerAutoCompress {
 				compressor, ok := e.agent.(ContextCompressor)
@@ -6790,6 +6812,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 
 		case EventError:
+			state.mu.Lock()
+			as := state.agentSession
+			state.mu.Unlock()
+			if fallback, ok := as.(CapacityFallbackSession); ok && capacityFallback == nil && as.Alive() {
+				// A terminal notification can arrive before Send returns. Do not
+				// overlap turn/start requests or continue an unsuccessful send.
+				if pendingSend != nil {
+					pendingCapacityError = &event
+					continue
+				}
+				if from, to, prompt, ok := fallback.TryCapacityFallback(event.Error); ok {
+					capacityFallback = fallback
+					slog.Info("continuing after model capacity error", "from_model", from, "to_model", to, "session_key", sessionKey)
+					e.send(p, replyCtx, e.i18n.Tf(MsgCapacityFallback, from, to))
+					done := make(chan error, 1)
+					pendingSend = done
+					go func(messageID string) { done <- as.Send(prompt, messageID, nil, nil) }(msgID)
+					continue
+				}
+			}
 			cp.Finalize(ProgressCardStateFailed)
 			sp.discard()
 			// A backend can create its resumable session before a turn fails

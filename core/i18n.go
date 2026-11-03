@@ -343,6 +343,7 @@ const (
 	MsgModelNotSupported     MsgKey = "model_not_supported"
 	MsgModelSwitchSession    MsgKey = "model_switch_session"
 	MsgModelSwitchResponse   MsgKey = "model_switch_response"
+	MsgCapacityFallback      MsgKey = "capacity_fallback"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
 	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
@@ -2308,6 +2309,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "模型已切換為 `%s`。",
 		LangJapanese:           "モデルを `%s` に切り替えました。",
 		LangSpanish:            "Modelo cambiado a `%s`.",
+	},
+	MsgCapacityFallback: {
+		LangEnglish:            "%s is at capacity; continuing once with %s.",
+		LangChinese:            "%s 当前容量不足，将在原会话中使用 %s 继续一次。",
+		LangTraditionalChinese: "%s 目前容量不足，將在原對話中使用 %s 繼續一次。",
+		LangJapanese:           "%s は現在容量不足です。同じ会話で %s を使って一度だけ続行します。",
+		LangSpanish:            "%s está al límite de capacidad; se continuará una vez con %s.",
 	},
 	MsgModelSwitchSession: {
 		LangEnglish:            "⚠️ `%[1]s`'s safeguards declined this request%[2]s, so `%[3]s` is answering instead and the rest of this session stays on it. Send `/model %[1]s` to switch back.",
