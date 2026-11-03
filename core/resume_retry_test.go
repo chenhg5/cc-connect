@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -14,13 +15,17 @@ type resumeFailSession struct {
 	controllableAgentSession
 	failOnSend bool
 	gate       chan struct{} // when non-nil, Send blocks until closed before acting
-	sends      int
-	prompts    []string
+
+	mu      sync.Mutex // guards sends/prompts: Send runs on the engine's goroutine
+	sends   int
+	prompts []string
 }
 
 func (s *resumeFailSession) Send(prompt string, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.mu.Lock()
 	s.sends++
 	s.prompts = append(s.prompts, prompt)
+	s.mu.Unlock()
 	if s.gate != nil {
 		<-s.gate
 	}
@@ -31,6 +36,18 @@ func (s *resumeFailSession) Send(prompt string, _ string, _ []ImageAttachment, _
 	s.events <- Event{Type: EventText, Content: "retried answer"}
 	s.events <- Event{Type: EventResult, Content: "retried answer", Done: true}
 	return nil
+}
+
+func (s *resumeFailSession) sendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+func (s *resumeFailSession) sentPrompts() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.prompts...)
 }
 
 func newResumeSession(id string, fail bool) *resumeFailSession {
@@ -78,8 +95,8 @@ func TestResumeRetryOnMissingConversation(t *testing.T) {
 		ReplyCtx:   "ctx",
 	}, session, agent, e.sessions, sessionKey, "", sessionKey, 0)
 
-	if second.sends != 1 {
-		t.Fatalf("expected the prompt to be retried exactly once on a fresh session, got %d sends", second.sends)
+	if second.sendCount() != 1 {
+		t.Fatalf("expected the prompt to be retried exactly once on a fresh session, got %d sends", second.sendCount())
 	}
 	if session.GetAgentSessionID() == "pruned-session-id" {
 		t.Error("stale AgentSessionID should have been replaced by the fresh session's ID")
@@ -129,7 +146,7 @@ func TestResumeRetryCarriesQueuedMessages(t *testing.T) {
 
 	// Wait for the failing turn to start, queue a follow-up message behind it.
 	deadline := time.Now().Add(2 * time.Second)
-	for first.sends == 0 && time.Now().Before(deadline) {
+	for first.sendCount() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	e.interactiveMu.Lock()
@@ -148,12 +165,13 @@ func TestResumeRetryCarriesQueuedMessages(t *testing.T) {
 		t.Fatal("turn did not complete")
 	}
 
-	if second.sends != 2 {
-		t.Fatalf("expected the retried prompt plus the carried queued message, got %d sends: %v", second.sends, second.prompts)
+	prompts := second.sentPrompts()
+	if second.sendCount() != 2 {
+		t.Fatalf("expected the retried prompt plus the carried queued message, got %d sends: %v", second.sendCount(), prompts)
 	}
-	joined := strings.Join(second.prompts, "\n")
+	joined := strings.Join(prompts, "\n")
 	if !strings.Contains(joined, "queued follow-up") {
-		t.Fatalf("queued message must be carried over to the fresh session, got %v", second.prompts)
+		t.Fatalf("queued message must be carried over to the fresh session, got %v", prompts)
 	}
 	if strings.Contains(strings.Join(p.getSent(), "\n"), "session reset") {
 		t.Fatalf("recovery must not report a session reset to the user, got %v", p.getSent())
@@ -188,8 +206,8 @@ func TestResumeRetrySecondFailureSurfaces(t *testing.T) {
 		ReplyCtx: "ctx",
 	}, session, agent, e.sessions, sessionKey, "", sessionKey, 0)
 
-	if second.sends != 1 {
-		t.Fatalf("expected exactly one retry, got %d sends", second.sends)
+	if second.sendCount() != 1 {
+		t.Fatalf("expected exactly one retry, got %d sends", second.sendCount())
 	}
 	sent := strings.Join(p.getSent(), "\n")
 	if !strings.Contains(sent, "No conversation found") {
