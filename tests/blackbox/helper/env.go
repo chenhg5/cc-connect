@@ -83,8 +83,12 @@ type Options struct {
 	// FakeModel points the agent at a scripted fake model server
 	// (tests/blackbox/fakemodel) instead of a real provider. Turns are then
 	// deterministic and need no model key; drive them with FAKE: directives
-	// in the message text. Only claudecode is supported so far.
+	// in the message text. Supported: claudecode (Anthropic Messages) and
+	// codex (OpenAI Responses).
 	FakeModel bool
+	// AgentOptions are merged into the agent's options (for example
+	// {"backend": "app_server", "mode": "suggest"} for codex).
+	AgentOptions map[string]any
 	// NoCredentials only requires the agent CLI on PATH, not model
 	// credentials. Use it for scenarios that never start an agent turn
 	// (slash commands such as /help or /version), so they can run anywhere.
@@ -188,8 +192,8 @@ func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
 	var fake *fakemodel.Server
 	switch {
 	case o.FakeModel:
-		if agentType != "claudecode" {
-			t.Skipf("blackbox skip: the fake model only speaks the Anthropic Messages API (agent=%s)", agentType)
+		if agentType != "claudecode" && agentType != "codex" {
+			t.Skipf("blackbox skip: the fake model speaks the Anthropic and OpenAI Responses APIs only (agent=%s)", agentType)
 		}
 		requireAgentBinary(t, agentType)
 		fake = fakemodel.New()
@@ -212,14 +216,22 @@ func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
 		opts["mode"] = "force"
 	}
 
+	for k, v := range o.AgentOptions {
+		opts[k] = v
+	}
+
 	if fake == nil {
 		applyProviderFromEnv(t, agentType, opts)
+	} else if agentType == "codex" {
+		// cc-connect writes the provider into $CODEX_HOME/config.toml and
+		// auth.json; keep that away from the developer's ~/.codex.
+		opts["codex_home"] = lingeringTempDir(t, "codex-home-")
 	}
 
 	if backend == BackendBinary {
 		provider := providerFromEnv(agentType)
 		if fake != nil {
-			provider = fakeProvider(fake).toml()
+			provider = fakeProvider(fake, agentType).toml()
 		}
 		env := newBinaryEnv(t, agentType, opts, profile, provider)
 		env.FakeModel = fake
@@ -238,7 +250,7 @@ func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
 		if !ok {
 			t.Fatalf("blackbox: %s cannot take a provider, so it cannot use the fake model", agentType)
 		}
-		pc := fakeProvider(fake)
+		pc := fakeProvider(fake, agentType)
 		ps.SetProviders([]core.ProviderConfig{pc.core()})
 		ps.SetActiveProvider(pc.Name)
 	} else {
@@ -613,23 +625,59 @@ func firstNonEmpty(vals ...string) string {
 // fakeProviderConfig is the provider that points an agent at the fake model.
 type fakeProviderConfig struct {
 	Name, APIKey, BaseURL string
-	Env                   map[string]string
+	// WireAPI is the Codex wire format ("responses"); empty for Claude Code.
+	WireAPI string
+	Env     map[string]string
 }
 
-func fakeProvider(fake *fakemodel.Server) fakeProviderConfig {
-	return fakeProviderConfig{
+func fakeProvider(fake *fakemodel.Server, agentType string) fakeProviderConfig {
+	p := fakeProviderConfig{
 		Name:    "blackbox-fake",
 		APIKey:  "sk-blackbox-fake",
 		BaseURL: fake.URL(),
 		// Keep loopback traffic off any HTTP(S) proxy in the environment.
 		Env: map[string]string{"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"},
 	}
+	if agentType == "codex" {
+		// Codex appends /responses to the provider base URL.
+		p.BaseURL = fake.URL() + "/v1"
+		p.WireAPI = "responses"
+	}
+	return p
 }
 
 func (p fakeProviderConfig) core() core.ProviderConfig {
-	return core.ProviderConfig{Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL, Env: p.Env}
+	return core.ProviderConfig{Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL, Env: p.Env, CodexWireAPI: p.WireAPI}
 }
 
 func (p fakeProviderConfig) toml() map[string]any {
-	return map[string]any{"name": p.Name, "api_key": p.APIKey, "base_url": p.BaseURL, "env": p.Env}
+	m := map[string]any{"name": p.Name, "api_key": p.APIKey, "base_url": p.BaseURL, "env": p.Env}
+	if p.WireAPI != "" {
+		m["codex"] = map[string]any{"wire_api": p.WireAPI}
+	}
+	return m
+}
+
+// lingeringTempDir is like t.TempDir for directories that a child process may
+// still write to for a moment after the test stops it. Codex, for example,
+// finishes a background plugin clone in $CODEX_HOME after its session ends,
+// which makes t.TempDir's cleanup fail with "directory not empty". The
+// directory is removed with retries, and a leftover is only logged.
+func lingeringTempDir(t *testing.T, prefix string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", prefix)
+	if err != nil {
+		t.Fatalf("blackbox: temp dir: %v", err)
+	}
+	t.Cleanup(func() {
+		var err error
+		for i := 0; i < 50; i++ {
+			if err = os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Logf("blackbox: could not remove %s after 5s: %v", dir, err)
+	})
+	return dir
 }

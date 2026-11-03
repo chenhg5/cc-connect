@@ -1,16 +1,25 @@
-// Package fakemodel is a scripted stand-in for the Anthropic Messages API.
+// Package fakemodel is a scripted stand-in for a model API. It speaks two
+// wire formats on one server:
 //
-// Real agent CLIs (Claude Code) can be pointed at it through a provider
-// base_url, so blackbox tests run the real CLI and the real cc-connect without
-// a model key, and every turn is deterministic.
+//   - Anthropic Messages (POST /v1/messages), used by Claude Code
+//   - OpenAI Responses (POST /v1/responses), used by Codex
+//
+// Real agent CLIs are pointed at it through a provider base_url, so blackbox
+// tests run the real CLI and the real cc-connect without a model key, and
+// every turn is deterministic.
 //
 // The script lives in the user's message: the fake looks for the last
 // directive of the form "FAKE:<verb> <args>" in the newest user turn.
 //
 //	FAKE:reply <text>        answer with <text>
 //	FAKE:slow <n> <word>     stream <word> n times, 300ms apart (streaming previews)
-//	FAKE:tool Bash <command> ask to run <command> with the Bash tool; once the
-//	                         tool result comes back, answer "TOOL_DONE: <result>"
+//	FAKE:tool Bash <command> ask to run <command> with the agent's shell tool
+//	                         (Bash for Claude Code, exec_command for Codex); once
+//	                         the tool result comes back, answer "TOOL_DONE: <result>"
+//	FAKE:escalate <command>  like FAKE:tool Bash, but asks to run outside the
+//	                         sandbox (Codex: sandbox_permissions=require_escalated,
+//	                         which triggers an approval request); Claude Code
+//	                         treats it as a plain Bash call
 //	FAKE:recall              answer "HISTORY: " + the text of earlier turns
 //	(no directive)           answer "ECHO: <first line of the message>"
 //
@@ -33,6 +42,8 @@ import (
 
 // Request is one recorded call to the fake.
 type Request struct {
+	// Wire is "anthropic" or "openai".
+	Wire   string
 	Path   string
 	Stream bool
 	Model  string
@@ -135,6 +146,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"input_tokens": 10})
 		return
 	}
+	if strings.HasSuffix(r.URL.Path, "/responses") {
+		s.handleResponses(w, body)
+		return
+	}
 	if !strings.HasSuffix(r.URL.Path, "/v1/messages") {
 		http.NotFound(w, r)
 		return
@@ -160,7 +175,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 
 // describe extracts what the fake needs from the newest user message.
 func describe(path string, req apiRequest) Request {
-	rec := Request{Path: path, Stream: req.Stream, Model: req.Model, Messages: len(req.Messages), Tools: len(req.Tools)}
+	rec := Request{Wire: "anthropic", Path: path, Stream: req.Stream, Model: req.Model, Messages: len(req.Messages), Tools: len(req.Tools)}
 	last := lastUser(req.Messages)
 	if last == nil {
 		return rec
@@ -231,33 +246,30 @@ func history(msgs []apiMessage) string {
 
 // ── Turn script ──────────────────────────────────────────────────────────────
 
-func (s *Server) stream(w http.ResponseWriter, req apiRequest, rec Request) {
-	sse, ok := newSSE(w)
-	if !ok {
-		http.Error(w, "fakemodel: streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-	id := s.nextID("msg")
-	sse.event("message_start", map[string]any{"type": "message_start", "message": map[string]any{
-		"id": id, "type": "message", "role": "assistant", "model": req.Model, "content": []any{},
-		"stop_reason": nil, "stop_sequence": nil, "usage": map[string]any{"input_tokens": 10, "output_tokens": 0},
-	}})
+// turnPlan is what the fake answers, independent of the wire format.
+type turnPlan struct {
+	text   []string      // text chunks (empty for a tool call)
+	gap    time.Duration // delay between chunks
+	tool   string        // tool name when the answer is a tool call
+	toolIn string        // the command for the tool call
+	// escalate asks for the command to run outside the sandbox, which is what
+	// makes Codex request user approval.
+	escalate bool
+}
 
+// plan decides the answer to a turn from the recorded request and the text
+// of earlier turns.
+func plan(rec Request, history func() string) turnPlan {
 	if rec.ToolResult != "" || rec.ToolError {
-		text := "TOOL_DONE: " + truncate(rec.ToolResult, 300)
 		if rec.ToolError {
-			text = "TOOL_ERROR: " + truncate(rec.ToolResult, 300)
+			return turnPlan{text: []string{"TOOL_ERROR: " + truncate(rec.ToolResult, 300)}}
 		}
-		sse.text(0, []string{text}, 0)
-		sse.finish("end_turn")
-		return
+		return turnPlan{text: []string{"TOOL_DONE: " + truncate(rec.ToolResult, 300)}}
 	}
-
 	verb, args := splitDirective(rec.Directive)
 	switch verb {
 	case "reply":
-		sse.text(0, []string{args}, 0)
-		sse.finish("end_turn")
+		return turnPlan{text: []string{args}}
 	case "slow":
 		n, word := 5, "tick"
 		if f := strings.Fields(args); len(f) > 0 {
@@ -272,26 +284,46 @@ func (s *Server) stream(w http.ResponseWriter, req apiRequest, rec Request) {
 		for i := range chunks {
 			chunks[i] = word + " "
 		}
-		sse.text(0, chunks, 300*time.Millisecond)
-		sse.finish("end_turn")
+		return turnPlan{text: chunks, gap: 300 * time.Millisecond}
 	case "tool":
 		name, input := "Bash", args
 		if f := strings.SplitN(args, " ", 2); len(f) == 2 {
 			name, input = f[0], f[1]
 		}
-		sse.toolUse(0, s.nextID("toolu"), name, map[string]any{"command": input, "description": "fakemodel tool call"})
-		sse.finish("tool_use")
+		return turnPlan{tool: name, toolIn: input}
+	case "escalate":
+		return turnPlan{tool: "Bash", toolIn: args, escalate: true}
 	case "recall":
-		sse.text(0, []string{"HISTORY: " + truncate(history(req.Messages), 2000)}, 0)
-		sse.finish("end_turn")
+		return turnPlan{text: []string{"HISTORY: " + truncate(history(), 2000)}}
 	default:
 		first := strings.TrimSpace(rec.UserText)
 		if i := strings.IndexByte(first, '\n'); i >= 0 {
 			first = first[:i]
 		}
-		sse.text(0, []string{"ECHO: " + truncate(first, 200)}, 0)
-		sse.finish("end_turn")
+		return turnPlan{text: []string{"ECHO: " + truncate(first, 200)}}
 	}
+}
+
+func (s *Server) stream(w http.ResponseWriter, req apiRequest, rec Request) {
+	sse, ok := newSSE(w)
+	if !ok {
+		http.Error(w, "fakemodel: streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	id := s.nextID("msg")
+	sse.event("message_start", map[string]any{"type": "message_start", "message": map[string]any{
+		"id": id, "type": "message", "role": "assistant", "model": req.Model, "content": []any{},
+		"stop_reason": nil, "stop_sequence": nil, "usage": map[string]any{"input_tokens": 10, "output_tokens": 0},
+	}})
+
+	p := plan(rec, func() string { return history(req.Messages) })
+	if p.tool != "" {
+		sse.toolUse(0, s.nextID("toolu"), p.tool, map[string]any{"command": p.toolIn, "description": "fakemodel tool call"})
+		sse.finish("tool_use")
+		return
+	}
+	sse.text(0, p.text, p.gap)
+	sse.finish("end_turn")
 }
 
 func splitDirective(d string) (verb, args string) {
@@ -334,6 +366,14 @@ func (s *sseWriter) event(name string, data any) {
 	_, _ = fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", name, b)
 	s.f.Flush()
 }
+
+// data writes an event whose name is its own "type" field (Responses style).
+func (s *sseWriter) data(d map[string]any) {
+	name, _ := d["type"].(string)
+	s.event(name, d)
+}
+
+func sleep(d time.Duration) { time.Sleep(d) }
 
 func (s *sseWriter) text(index int, chunks []string, gap time.Duration) {
 	s.event("content_block_start", map[string]any{"type": "content_block_start", "index": index,
