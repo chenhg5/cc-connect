@@ -7264,17 +7264,22 @@ func isCardJSON(content string) bool {
 
 // buildCardJSONWithStatus builds a Feishu card JSON with a colored header
 // reflecting the given status. Used as a fallback when rich-card assembly fails.
-func buildCardJSONWithStatus(content string, status core.CardStatus) string {
-	content = sanitizeCardMarkdownForCard(content)
-	template := "grey"
+// statusTemplateColor maps a card status to its header template color.
+func statusTemplateColor(status core.CardStatus) string {
 	switch status {
 	case core.CardStatusWorking, core.CardStatusThinking:
-		template = "blue"
+		return "blue"
 	case core.CardStatusDone:
-		template = "green"
+		return "green"
 	case core.CardStatusError:
-		template = "red"
+		return "red"
 	}
+	return "grey"
+}
+
+func buildCardJSONWithStatus(content string, status core.CardStatus) string {
+	content = sanitizeCardMarkdownForCard(content)
+	template := statusTemplateColor(status)
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
@@ -7633,6 +7638,36 @@ func (p *Platform) SplitMarkdownByTables(md string, maxTables int) []string {
 	return splitMarkdownByTables(md, maxTables)
 }
 
+// previewStatusCardJSON returns the card JSON used to patch the preview
+// message for a status change.
+//
+// lastContent is whatever was last handed to UpdateMessage. On the rich card
+// path that is itself a complete card JSON, so it must not be wrapped in
+// another markdown element — wrapping nests the card inside itself and the
+// client renders the raw JSON (escaped quotes, literal \n) instead of the
+// card. For a pre-built card only the header template is changed; the body is
+// left exactly as it was.
+func previewStatusCardJSON(lastContent string, status core.CardStatus) string {
+	if !isCardJSON(lastContent) {
+		return buildCardJSONWithStatus(lastContent, status)
+	}
+	var card map[string]any
+	if err := json.Unmarshal([]byte(lastContent), &card); err != nil {
+		return lastContent
+	}
+	header, ok := card["header"].(map[string]any)
+	if !ok {
+		header = map[string]any{}
+	}
+	header["template"] = statusTemplateColor(status)
+	card["header"] = header
+	out, err := json.Marshal(card)
+	if err != nil {
+		return lastContent
+	}
+	return string(out)
+}
+
 // SetPreviewStatus updates the card header color to reflect the agent's current state.
 func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	h, ok := previewHandle.(*feishuPreviewHandle)
@@ -7648,7 +7683,7 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	if lastContent == "" {
 		return
 	}
-	cardJSON := buildCardJSONWithStatus(lastContent, status)
+	cardJSON := previewStatusCardJSON(lastContent, status)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -83,3 +83,41 @@ func TestAppendCardFooterElements_RejectsNonCard(t *testing.T) {
 		t.Fatalf("non-card content was modified: %s", merged)
 	}
 }
+
+// A status change must not re-wrap a pre-built card.
+//
+// Regression: SetPreviewStatus patched the preview message with
+// buildCardJSONWithStatus(h.lastContent, status). On the rich card path
+// h.lastContent is itself a complete card JSON, so the patch replaced the
+// card body with the raw card JSON as markdown text — the client then
+// rendered escaped quotes and literal \n instead of the card.
+func TestPreviewStatusCardJSON_KeepsPrebuiltCardBody(t *testing.T) {
+	card := buildRichCard(core.CardStatusWorking, "", nil, "body text", false, "")
+
+	patched := previewStatusCardJSON(card, core.CardStatusDone)
+
+	if !isCardJSON(patched) {
+		t.Fatalf("patched preview is no longer card JSON: %s", patched)
+	}
+	if n := strings.Count(patched, `"schema"`); n != 1 {
+		t.Fatalf("patched card was nested inside itself (%d \"schema\" occurrences): %s", n, patched)
+	}
+	if !strings.Contains(patched, "body text") {
+		t.Fatalf("card body lost on status change: %s", patched)
+	}
+	if !strings.Contains(patched, `"template":"green"`) {
+		t.Fatalf("header template not updated to green: %s", patched)
+	}
+}
+
+// Plain (non-card) content still gets a fresh card with the status header.
+func TestPreviewStatusCardJSON_PlainContentStillWrapped(t *testing.T) {
+	patched := previewStatusCardJSON("plain body", core.CardStatusDone)
+
+	if !isCardJSON(patched) {
+		t.Fatalf("plain content did not produce card JSON: %s", patched)
+	}
+	if !strings.Contains(patched, "plain body") {
+		t.Fatalf("content missing from card: %s", patched)
+	}
+}
