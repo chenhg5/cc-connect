@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -75,11 +76,9 @@ type turnStartResponse struct {
 type turnNotification struct {
 	ThreadID string `json:"threadId"`
 	Turn     struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-		Error  *struct {
-			Message string `json:"message"`
-		} `json:"error"`
+		ID     string              `json:"id"`
+		Status string              `json:"status"`
+		Error  *appServerTurnError `json:"error"`
 	} `json:"turn"`
 }
 
@@ -90,7 +89,38 @@ type itemNotification struct {
 }
 
 type errorNotification struct {
-	Message string `json:"message"`
+	ThreadID  string              `json:"threadId"`
+	TurnID    string              `json:"turnId"`
+	Error     *appServerTurnError `json:"error"`
+	Message   string              `json:"message"` // legacy, unstructured errors
+	WillRetry bool                `json:"willRetry"`
+}
+
+type appServerTurnError struct {
+	Message        string          `json:"message"`
+	CodexErrorInfo json.RawMessage `json:"codexErrorInfo"`
+}
+
+func (e *appServerTurnError) Error() string { return e.Message }
+
+func (e *appServerTurnError) isCapacity() bool {
+	// A structured error takes precedence over incidental words in its message.
+	info := strings.TrimSpace(string(e.CodexErrorInfo))
+	if info != "" && info != "null" {
+		var kind string
+		if json.Unmarshal(e.CodexErrorInfo, &kind) == nil {
+			return kind == "serverOverloaded" || kind == "server_overloaded"
+		}
+		var detail map[string]json.RawMessage
+		if json.Unmarshal(e.CodexErrorInfo, &detail) == nil && len(detail) == 1 {
+			_, camel := detail["serverOverloaded"]
+			_, snake := detail["server_overloaded"]
+			return camel || snake
+		}
+		return false
+	}
+	message := strings.ToLower(e.Message)
+	return strings.Contains(message, "model") && strings.Contains(message, "at capacity")
 }
 
 type appServerRateLimitsResponse struct {
@@ -164,6 +194,9 @@ type appServerSession struct {
 	codexHome         string
 	promptPreamble    string
 
+	capacityFallbackFrom  string
+	capacityFallbackModel string
+
 	events       chan core.Event
 	eventsMu     sync.RWMutex // publishers share the lock; Close owns channel closure
 	eventsClosed bool
@@ -194,10 +227,13 @@ type appServerSession struct {
 	stateMu      sync.Mutex
 	pendingMsgs  []string
 	currentTurn  string
+	terminalTurn string // ignore duplicate terminal errors before the next turn starts
 	turnRevision uint64 // terminal notifications can precede the turn/start response
 	preambleSent bool
 
 	runtimeMu sync.RWMutex
+	nextModel string // consumed by the next turn/start only
+	turnModel string // actual model for the current turn's status/footer
 	usage     *core.UsageReport
 	context   *core.ContextUsage
 }
@@ -556,7 +592,7 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 		"threadId": threadID,
 		"input":    input,
 	}
-	if model := s.GetModel(); model != "" {
+	if model := s.takeTurnModel(); model != "" {
 		params["model"] = model
 	}
 	if effort := s.GetReasoningEffort(); effort != "" {
@@ -1023,7 +1059,42 @@ func (s *appServerSession) GetWorkDir() string {
 func (s *appServerSession) GetModel() string {
 	s.runtimeMu.RLock()
 	defer s.runtimeMu.RUnlock()
+	if s.turnModel != "" {
+		return s.turnModel
+	}
 	return strings.TrimSpace(s.model)
+}
+
+func (s *appServerSession) takeTurnModel() string {
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	s.turnModel = strings.TrimSpace(s.model)
+	if s.nextModel != "" {
+		s.turnModel = s.nextModel
+		s.nextModel = ""
+	}
+	return s.turnModel
+}
+
+func (s *appServerSession) TryCapacityFallback(err error) (string, string, string, bool) {
+	var turnErr *appServerTurnError
+	if !errors.As(err, &turnErr) || !turnErr.isCapacity() || !s.Alive() {
+		return "", "", "", false
+	}
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	from, to := s.capacityFallbackFrom, s.capacityFallbackModel
+	if from == "" || to == "" || from == to || s.turnModel != from {
+		return "", "", "", false
+	}
+	s.nextModel = to
+	return from, to, "Continue the existing task from the current conversation. The previous turn stopped because the model was at capacity. Check the current state before acting; do not repeat completed steps or tool actions.", true
+}
+
+func (s *appServerSession) RestoreCapacityFallback() {
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+	s.nextModel, s.turnModel = "", ""
 }
 
 func (s *appServerSession) GetReasoningEffort() string {
@@ -1188,6 +1259,7 @@ func (s *appServerSession) finishTransport(err error) {
 	s.alive.Store(false)
 	active := s.currentTurn != ""
 	if active {
+		s.terminalTurn = s.currentTurn
 		s.currentTurn = ""
 		s.pendingMsgs = s.pendingMsgs[:0]
 		s.turnRevision++
@@ -1249,14 +1321,11 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.acceptsTurnNotification(method, notif.ThreadID, notif.Turn.ID) {
 			if strings.EqualFold(strings.TrimSpace(notif.Turn.Status), "failed") || notif.Turn.Error != nil {
-				errMsg := ""
-				if notif.Turn.Error != nil {
-					errMsg = strings.TrimSpace(notif.Turn.Error.Message)
+				turnErr := notif.Turn.Error
+				if turnErr == nil {
+					turnErr = &appServerTurnError{Message: "turn failed (no details)"}
 				}
-				if errMsg == "" {
-					errMsg = "turn failed (no details)"
-				}
-				s.failTurn(fmt.Errorf("%s", errMsg))
+				s.failTurnWithID(notif.Turn.ID, turnErr)
 			} else {
 				s.completeTurn()
 			}
@@ -1283,10 +1352,17 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 
 	case "error":
 		var notif errorNotification
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && strings.TrimSpace(notif.Message) != "" {
-			err := fmt.Errorf("%s", notif.Message)
+		if json.Unmarshal(paramsRaw, &notif) != nil || notif.WillRetry || !s.acceptsTurnNotification(method, notif.ThreadID, notif.TurnID) {
+			return
+		}
+		if notif.Error != nil && notif.TurnID != "" {
+			// A terminal error can precede turn/start's response. Retire its ID
+			// so the response cannot revive it and duplicates stay silent.
+			s.failTurnWithID(notif.TurnID, notif.Error)
+		} else if strings.TrimSpace(notif.Message) != "" {
+			err := errors.New(notif.Message)
 			if !s.failTurn(err) {
-				s.emitError(err) // retain connection errors outside an active turn
+				s.emitError(err)
 			}
 		}
 	}
@@ -1677,6 +1753,7 @@ func (s *appServerSession) completeTurn() {
 		s.stateMu.Unlock()
 		return
 	}
+	s.terminalTurn = s.currentTurn
 	s.currentTurn = ""
 	s.turnRevision++
 	s.stateMu.Unlock()
@@ -1685,11 +1762,19 @@ func (s *appServerSession) completeTurn() {
 }
 
 func (s *appServerSession) failTurn(err error) bool {
+	return s.failTurnWithID("", err)
+}
+
+func (s *appServerSession) failTurnWithID(turnID string, err error) bool {
 	s.stateMu.Lock()
-	if s.currentTurn == "" {
+	if turnID == "" {
+		turnID = s.currentTurn
+	}
+	if turnID == "" || turnID == s.terminalTurn || (s.currentTurn != "" && turnID != s.currentTurn) {
 		s.stateMu.Unlock()
 		return false
 	}
+	s.terminalTurn = turnID
 	s.currentTurn = ""
 	s.turnRevision++
 	s.pendingMsgs = s.pendingMsgs[:0]
