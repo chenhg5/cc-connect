@@ -1,5 +1,48 @@
 # Blackbox tests
 
+## Release smoke (run before every release)
+
+```bash
+make test-release-smoke                                   # current tree
+CC_BLACKBOX_BINARY=dist/cc-connect-<ver>-<os>-<arch> \
+CC_BLACKBOX_EXPECT_VERSION=<ver> make test-release-smoke  # the artifact you will publish
+```
+
+Needs Go, plus the Claude Code (`claude`) and Codex (`codex`) CLIs on PATH. No
+model key and no IM account are needed: the agents talk to a scripted fake
+model, and the test drives cc-connect through its bridge like a chat platform.
+It takes about 3–4 minutes with `-race`. On macOS, point `TMPDIR` at a
+directory without symlinks (for example `~/.cache/qa-tmp`).
+
+The run is **fail-closed**: a missing agent CLI fails it instead of skipping
+(`CC_BLACKBOX_REQUIRE_AGENTS`, default `claudecode,codex`). With
+`CC_BLACKBOX_EXPECT_VERSION` set, `/version` must report that version, which
+proves the artifact itself was tested. The release flow runs this as its
+`release-smoke` gate before publishing; a failure holds the release.
+
+**A PASS means** that, for Claude Code and Codex, on the real binary and the
+in-process engine, and across platform capability profiles (text-only,
+buttons, cards, streaming previews):
+
+| Area | Checked |
+| --- | --- |
+| Startup | the binary starts from a generated config, the bridge accepts an adapter and rejects a wrong token, `/version` is the release version |
+| Conversation | a message reaches the model and the answer reaches the user; the next turn carries the previous one; long answers are previewed and end complete; images reach the model |
+| Tools and permissions | a tool call runs and its output reaches the model; a permission prompt appears (buttons where the platform has them, text otherwise), allow runs the tool, deny keeps it from running |
+| Sessions | `/new` separates conversations, `/list` shows them, `/switch` restores the right context; `/stop` ends a running turn and the next message resumes the session; a restarted binary still lists and resumes the session |
+| Users | two users' conversations never reach each other's model |
+| Failures | a model/provider error is shown to the user, and the next message works |
+| Commands and cards | `/help`, `/status`, `/list` answer on every profile; card buttons click through; text-only platforms never receive buttons |
+
+**A PASS does not cover**: real IM platforms (Feishu, Telegram, Slack, …:
+their APIs, rendering and limits; see the release flow's channel smoke),
+answers from a real model (`TestSmoke_AgentTurn` runs only with credentials),
+agents other than Claude Code and Codex, and how cards look. Known open issue
+not yet asserted: another user's sessions are visible in `/list` (#1998; add
+the check when its fix lands).
+
+## Running blackbox tests
+
 Blackbox tests drive cc-connect the way a user does: inject a chat message,
 assert on what the platform receives. The agent side is a real agent CLI.
 

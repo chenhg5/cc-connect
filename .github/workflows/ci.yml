@@ -159,7 +159,6 @@ jobs:
     env:
       CLAUDE_CODE_VERSION: '2.1.317'
       CODEX_VERSION: '0.166.0'
-      CC_BLACKBOX_SMOKE_AGENT: claudecode
 
     steps:
       - uses: actions/checkout@v4
@@ -178,8 +177,10 @@ jobs:
       - name: Install agent CLIs
         run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}"
 
-      - name: Run blackbox smoke
-        run: go test -v -race -count=1 -timeout=20m -tags=blackbox,no_web ./tests/blackbox/smoke/
+      # Same fail-closed target the release gate runs: a missing agent CLI
+      # fails the job instead of skipping its scenarios.
+      - name: Run release smoke
+        run: make test-release-smoke
 
   regression-test:
     runs-on: ubuntu-latest

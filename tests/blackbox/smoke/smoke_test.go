@@ -114,6 +114,11 @@ func TestSmoke_Commands(t *testing.T) {
 			if !strings.Contains(v, "cc-connect") {
 				t.Errorf("/version from the binary does not name cc-connect: %q", v)
 			}
+			// A release gate passes the version it is about to publish, which
+			// proves the smoke ran that artifact and not some other build.
+			if want := os.Getenv("CC_BLACKBOX_EXPECT_VERSION"); want != "" && !strings.Contains(v, want) {
+				t.Errorf("/version %q does not report the release version %q (wrong binary under test?)", v, want)
+			}
 		}
 	})
 }
