@@ -47,6 +47,7 @@ type Platform struct {
 	appToken         string
 	allowFrom        string
 	sessionScope     string // "user" (default) | "channel" | "thread"
+	apiURL           string // Web API root override (base_url); "" = SDK default
 	client           *slack.Client
 	socket           *socketmode.Client
 	handler          core.MessageHandler
@@ -71,6 +72,11 @@ func New(opts map[string]any) (core.Platform, error) {
 	if botToken == "" || appToken == "" {
 		return nil, fmt.Errorf("slack: bot_token and app_token are required")
 	}
+	baseURL, _ := opts["base_url"].(string)
+	apiURL, err := normalizeAPIURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
 	scope := normalizeSessionScope(opts["session_scope"], shareSessionInChannel)
 	if scope == "thread" {
 		slog.Warn("slack: session_scope=thread gives each Slack thread its own session; " +
@@ -82,6 +88,7 @@ func New(opts map[string]any) (core.Platform, error) {
 		appToken:         appToken,
 		allowFrom:        allowFrom,
 		sessionScope:     scope,
+		apiURL:           apiURL,
 		channelNameCache: make(map[string]string),
 	}, nil
 }
@@ -158,9 +165,7 @@ func (p *Platform) Name() string { return "slack" }
 func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 
-	p.client = slack.New(p.botToken,
-		slack.OptionAppLevelToken(p.appToken),
-	)
+	p.client = p.newClient()
 	p.socket = socketmode.New(p.client)
 
 	ctx, cancel := context.WithCancel(context.Background())
