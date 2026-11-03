@@ -6205,6 +6205,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// card and continues to update incrementally.
 			sp.unfreeze()
 
+			// The rich-card path needs the same treatment, and it is easy to
+			// miss: the question card is sent by sendAskQuestionPrompt as an
+			// INDEPENDENT new message, so cardMessageID still points at the
+			// working card that was opened BEFORE the question. Every text
+			// chunk after the answer — and the final reply — was therefore
+			// patched back onto that older card, while the question card and
+			// the answer receipt sat below it. From the user's side the bottom
+			// of the chat never moved: "I answered, the agent went quiet".
+			//
+			// Dropping the handle makes the next text chunk open a fresh card
+			// (the `cardMessageID == nil` branch in the EventText handler),
+			// which lands at the bottom of the chat like the legacy path does.
+			// partialText/throttle state reset so that new card starts clean
+			// instead of repeating the pre-question text.
+			if hasRichCard && cardMessageID != nil {
+				cardMessageID = nil
+				partialText = ""
+				lastRichCardUpdate = time.Time{}
+				lastRichCardLen = 0
+			}
+
 			// Restart idle timer after permission is resolved
 			if idleTimer != nil {
 				idleTimer.Reset(e.eventIdleTimeout)
