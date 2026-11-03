@@ -21,6 +21,8 @@
 //	                         which triggers an approval request); Claude Code
 //	                         treats it as a plain Bash call
 //	FAKE:recall              answer "HISTORY: " + the text of earlier turns
+//	FAKE:fail <text>         fail the request with HTTP 400 and message <text>
+//	                         (a model/provider outage, not retried by the CLIs)
 //	(no directive)           answer "ECHO: <first line of the message>"
 //
 // Non-streaming side requests the CLI makes for itself (titles, summaries)
@@ -165,6 +167,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.requests = append(s.requests, rec)
 	s.mu.Unlock()
 
+	if msg, failed := failDirective(rec); failed {
+		writeError(w, http.StatusBadRequest, map[string]any{
+			"type": "error", "error": map[string]any{"type": "invalid_request_error", "message": msg},
+		})
+		return
+	}
 	if !req.Stream {
 		// The CLI's own side requests: keep them short and harmless.
 		writeJSON(w, s.message(req.Model, []map[string]any{{"type": "text", "text": "ok"}}, "end_turn"))
@@ -230,18 +238,37 @@ func blockText(raw json.RawMessage) string {
 	return strings.Join(parts, "\n")
 }
 
-// history returns the visible text of every message before the newest user
-// message, skipping the CLI's injected <system-reminder> blocks.
+// history returns the conversation before the newest user message, reduced
+// to what a test can assert on: the FAKE: directives the user sent and the
+// assistant's answers. Anything the CLI injects on its own (environment
+// blocks, system reminders, instructions) is left out.
 func history(msgs []apiMessage) string {
 	var parts []string
 	for i := 0; i < len(msgs)-1; i++ {
 		for _, b := range blocks(msgs[i].Content) {
-			if b.Type == "text" && !strings.Contains(b.Text, "<system-reminder>") {
-				parts = append(parts, strings.TrimSpace(b.Text))
+			if b.Type == "text" {
+				parts = appendTurnText(parts, msgs[i].Role, b.Text)
 			}
 		}
 	}
 	return strings.Join(parts, " | ")
+}
+
+// appendTurnText adds one text block of the history: a user block only
+// through the directive it carries, an assistant block as it is.
+func appendTurnText(parts []string, role, text string) []string {
+	text = strings.TrimSpace(text)
+	switch role {
+	case "user":
+		if m := directiveRE.FindAllString(text, -1); len(m) > 0 {
+			return append(parts, strings.TrimSpace(m[len(m)-1]))
+		}
+	case "assistant":
+		if text != "" {
+			return append(parts, text)
+		}
+	}
+	return parts
 }
 
 // ── Turn script ──────────────────────────────────────────────────────────────
@@ -401,6 +428,29 @@ func (s *sseWriter) finish(stop string) {
 	s.event("message_delta", map[string]any{"type": "message_delta",
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil}, "usage": map[string]any{"output_tokens": 1}})
 	s.event("message_stop", map[string]any{"type": "message_stop"})
+}
+
+// failDirective reports whether the turn asked the fake to fail, and the
+// error message to return. Only the newest user turn counts, so a later tool
+// result in the same conversation is not failed again.
+func failDirective(rec Request) (string, bool) {
+	if rec.ToolResult != "" || rec.ToolError {
+		return "", false
+	}
+	verb, args := splitDirective(rec.Directive)
+	if verb != "fail" {
+		return "", false
+	}
+	if args == "" {
+		args = "fakemodel induced failure"
+	}
+	return args, true
+}
+
+func writeError(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

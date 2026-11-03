@@ -36,12 +36,18 @@ const (
 
 var backends = []helper.Backend{helper.BackendInProcess, helper.BackendBinary}
 
-// smokeAgent picks the agent for command smoke: CC_BLACKBOX_SMOKE_AGENT, or
-// the first tier-one agent whose CLI is installed.
+// smokeAgent picks the agent for command smoke: CC_BLACKBOX_SMOKE_AGENT, the
+// first agent in CC_BLACKBOX_REQUIRE_AGENTS, or the first tier-one agent
+// whose CLI is installed.
 func smokeAgent(t *testing.T) string {
 	t.Helper()
 	if a := os.Getenv("CC_BLACKBOX_SMOKE_AGENT"); a != "" {
 		return a
+	}
+	// In a strict (release) run the agent is never guessed: use the first
+	// required one, whose absence then fails the run.
+	if req := helper.RequiredAgents(); len(req) > 0 {
+		return req[0]
 	}
 	for _, c := range []struct{ agent, bin string }{
 		{"claudecode", "claude"}, {"codex", "codex"}, {"cursor", "agent"}, {"gemini", "gemini"},

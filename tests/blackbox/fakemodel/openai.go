@@ -49,6 +49,12 @@ func (s *Server) handleResponses(w http.ResponseWriter, body []byte) {
 	s.requests = append(s.requests, rec)
 	s.mu.Unlock()
 
+	if msg, failed := failDirective(rec); failed {
+		writeError(w, http.StatusBadRequest, map[string]any{
+			"error": map[string]any{"type": "invalid_request_error", "code": "fakemodel_failure", "message": msg},
+		})
+		return
+	}
 	p := plan(rec, func() string { return responsesHistory(req.Input) })
 	if !req.Stream {
 		writeJSON(w, s.responseObject(req.Model, s.outputItems(p), "completed"))
@@ -116,8 +122,8 @@ func functionOutputText(raw json.RawMessage) string {
 	return strings.Join(parts, "\n")
 }
 
-// responsesHistory returns the visible text of earlier turns, skipping the
-// developer instructions and the CLI's own XML context blocks.
+// responsesHistory returns the conversation before the newest user message,
+// reduced like history(): user directives and assistant answers only.
 func responsesHistory(items []responsesItem) string {
 	last := -1
 	for i, it := range items {
@@ -127,15 +133,11 @@ func responsesHistory(items []responsesItem) string {
 	}
 	var parts []string
 	for i, it := range items {
-		if i >= last || it.Type != "message" || (it.Role != "user" && it.Role != "assistant") {
+		if i >= last || it.Type != "message" {
 			continue
 		}
 		for _, c := range responsesContents(it.Content) {
-			t := strings.TrimSpace(c.Text)
-			if t == "" || strings.HasPrefix(t, "<") {
-				continue
-			}
-			parts = append(parts, t)
+			parts = appendTurnText(parts, it.Role, c.Text)
 		}
 	}
 	return strings.Join(parts, " | ")
