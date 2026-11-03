@@ -56,6 +56,7 @@ type Env struct {
 	proc      *binaryProcess
 	token     string
 	bridgeURL string
+	run       *binaryRun
 }
 
 // Backend selects how the cc-connect under test runs.
@@ -435,20 +436,54 @@ func requireAgentBinary(t *testing.T, agentType string) {
 	// the Cursor IDE "cursor" binary.
 	bin := agentBinName(agentType)
 	if bin == "" {
-		t.Skipf("blackbox skip: unknown agent type %q", agentType)
+		skipOrFail(t, agentType, "unknown agent type %q", agentType)
+		return
 	}
 	if _, err := exec.LookPath(bin); err != nil {
 		// For cursor, also accept if the "cursor" IDE binary is present
 		// (some setups install it under that name instead).
 		if agentType == "cursor" {
 			if _, err2 := exec.LookPath("cursor"); err2 != nil {
-				t.Skipf("blackbox skip: cursor agent binary %q not in PATH (also checked 'cursor')", bin)
+				skipOrFail(t, agentType, "cursor agent binary %q not in PATH (also checked 'cursor')", bin)
 			}
 		} else {
-			t.Skipf("blackbox skip: %s binary %q not in PATH", agentType, bin)
+			skipOrFail(t, agentType, "%s binary %q not in PATH", agentType, bin)
 		}
 	}
+}
 
+// RequiredAgents returns the agents listed in CC_BLACKBOX_REQUIRE_AGENTS
+// (comma separated). A release smoke run sets it so that a missing agent
+// CLI fails the run instead of silently skipping its scenarios.
+func RequiredAgents() []string {
+	var out []string
+	for _, a := range strings.Split(os.Getenv("CC_BLACKBOX_REQUIRE_AGENTS"), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func isRequiredAgent(agentType string) bool {
+	for _, a := range RequiredAgents() {
+		if strings.EqualFold(a, agentType) {
+			return true
+		}
+	}
+	return false
+}
+
+// skipOrFail skips the test, unless agentType is required by
+// CC_BLACKBOX_REQUIRE_AGENTS, in which case the missing prerequisite is a
+// failure: a release gate must not pass because its tests did not run.
+func skipOrFail(t *testing.T, agentType, format string, args ...any) {
+	t.Helper()
+	msg := fmt.Sprintf(format, args...)
+	if isRequiredAgent(agentType) {
+		t.Fatalf("blackbox: required agent %s unavailable (CC_BLACKBOX_REQUIRE_AGENTS): %s", agentType, msg)
+	}
+	t.Skipf("blackbox skip: %s", msg)
 }
 
 // requireCredentials skips when the model credentials for agentType are
@@ -665,7 +700,7 @@ func (p fakeProviderConfig) toml() map[string]any {
 // directory is removed with retries, and a leftover is only logged.
 func lingeringTempDir(t *testing.T, prefix string) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", prefix)
+	dir, err := os.MkdirTemp(scratchRoot(t), prefix)
 	if err != nil {
 		t.Fatalf("blackbox: temp dir: %v", err)
 	}
@@ -680,4 +715,21 @@ func lingeringTempDir(t *testing.T, prefix string) string {
 		t.Logf("blackbox: could not remove %s after 5s: %v", dir, err)
 	})
 	return dir
+}
+
+// scratchRoot is where lingeringTempDir creates directories: under the user
+// cache dir rather than the system temp dir, because Codex refuses to set up
+// its helper binaries when CODEX_HOME is under /tmp and reports that on every
+// failed turn, which no real deployment does.
+func scratchRoot(t *testing.T) string {
+	t.Helper()
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	root := filepath.Join(base, "cc-connect-blackbox")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return ""
+	}
+	return root
 }
