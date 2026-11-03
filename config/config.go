@@ -191,6 +191,21 @@ const (
 	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
 )
 
+// after_ask_question values.
+const (
+	// AfterAskQuestionSameCard keeps the whole turn on ONE rich card: the
+	// output that follows the user's answer is patched back onto the card
+	// that was open before the question. This is upstream's behaviour and
+	// matches rich mode's "one card per turn" design -- but the question card
+	// and the answer receipt are separate messages, so that card ends up
+	// ABOVE them and the bottom of the chat looks frozen.
+	AfterAskQuestionSameCard = "same_card"
+	// AfterAskQuestionNewCard opens a fresh card for the output that follows
+	// the answer, so it lands at the bottom of the chat, below the question
+	// card and the receipt. Costs the "one card per turn" invariant.
+	AfterAskQuestionNewCard = "new_card"
+)
+
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
 	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
@@ -203,6 +218,7 @@ type DisplayConfig struct {
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
 	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default false
+	AfterAskQuestion     *string `toml:"after_ask_question"`     // rich mode only: "same_card" (default) keeps the turn on one card, "new_card" opens a fresh card after the user answers
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -1040,6 +1056,35 @@ func EffectiveShell(cfg *Config, proj *ProjectConfig) (shell, flag, shellProfile
 	}
 }
 
+// EffectiveAfterAskQuestion returns where the agent's output goes after the
+// user answers an AskUserQuestion while card_mode = "rich":
+//
+//   - "same_card" (default): the output is patched back onto the card that was
+//     open before the question. One card per turn, but that card sits above
+//     the question and the receipt, so the bottom of the chat stays still.
+//   - "new_card": a fresh card is opened for the output that follows the
+//     answer, so it lands at the bottom of the chat.
+//
+// The legacy path always opens a new message per segment, so this setting
+// only affects the rich path.
+func EffectiveAfterAskQuestion(cfg *Config, proj *ProjectConfig) string {
+	var projDisp *DisplayConfig
+	if proj != nil {
+		projDisp = proj.Display
+	}
+	if projDisp != nil && projDisp.AfterAskQuestion != nil {
+		if m := strings.ToLower(strings.TrimSpace(*projDisp.AfterAskQuestion)); m == AfterAskQuestionNewCard || m == AfterAskQuestionSameCard {
+			return m
+		}
+	}
+	if cfg.Display.AfterAskQuestion != nil {
+		if m := strings.ToLower(strings.TrimSpace(*cfg.Display.AfterAskQuestion)); m == AfterAskQuestionNewCard || m == AfterAskQuestionSameCard {
+			return m
+		}
+	}
+	return AfterAskQuestionSameCard
+}
+
 // EffectiveCardMode returns the card rendering mode for the project: "rich" (Feishu Card 2.0)
 // or "legacy" (default plain messages). Per-project overrides global.
 func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
@@ -1156,6 +1201,13 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 		case "legacy", "rich":
 		default:
 			return fmt.Errorf("config: %s.card_mode must be \"legacy\" or \"rich\"", prefix)
+		}
+	}
+	if display.AfterAskQuestion != nil {
+		switch strings.ToLower(strings.TrimSpace(*display.AfterAskQuestion)) {
+		case AfterAskQuestionSameCard, AfterAskQuestionNewCard:
+		default:
+			return fmt.Errorf("config: %s.after_ask_question must be %q or %q", prefix, AfterAskQuestionSameCard, AfterAskQuestionNewCard)
 		}
 	}
 	if display.HistoryMaxLen != nil && *display.HistoryMaxLen < 0 {

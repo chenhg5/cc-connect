@@ -338,6 +338,9 @@ type DisplayCfg struct {
 	ToolMessages     bool
 	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
 	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
+	// AfterAskQuestion is "same_card" (default) or "new_card" — see
+	// config.EffectiveAfterAskQuestion. Rich path only.
+	AfterAskQuestion string
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -6219,7 +6222,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// which lands at the bottom of the chat like the legacy path does.
 			// partialText/throttle state reset so that new card starts clean
 			// instead of repeating the pre-question text.
-			if hasRichCard && cardMessageID != nil {
+			if e.display.AfterAskQuestion == "new_card" && hasRichCard && cardMessageID != nil {
 				cardMessageID = nil
 				partialText = ""
 				lastRichCardUpdate = time.Time{}

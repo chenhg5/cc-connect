@@ -1,7 +1,9 @@
 package core
 
 import (
+	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -28,13 +30,35 @@ import (
 // takes the `hasRichCard` branch.
 type stubRichCardStreamingPlatform struct {
 	cujStreamingPlatform
+	handleMu sync.Mutex
+	handles  []any
+}
+
+// SendPreviewStart records the handle of every card it opens. The embedded
+// cujStreamingPlatform only keeps the card CONTENT, and the two are not
+// interchangeable: a test that wants to know "which card was updated" needs
+// the handle.
+func (p *stubRichCardStreamingPlatform) SendPreviewStart(ctx context.Context, rctx any, content string) (any, error) {
+	handle, err := p.cujStreamingPlatform.SendPreviewStart(ctx, rctx, content)
+	p.handleMu.Lock()
+	p.handles = append(p.handles, handle)
+	p.handleMu.Unlock()
+	return handle, err
+}
+
+func (p *stubRichCardStreamingPlatform) getPreviewHandles() []any {
+	p.handleMu.Lock()
+	defer p.handleMu.Unlock()
+	out := make([]any, len(p.handles))
+	copy(out, p.handles)
+	return out
 }
 
 func (p *stubRichCardStreamingPlatform) BuildRichCard(_ CardStatus, _ string, _ []ToolStep, markdown string, _ bool, _ string) string {
 	return "RICH{" + markdown + "}"
 }
 
-func newRichCardStreamingEnv(t *testing.T) (*cujEnv, *stubRichCardStreamingPlatform) {
+func newRichCardStreamingEnv(t *testing.T, afterAskQuestion string) (*cujEnv, *stubRichCardStreamingPlatform) {
 	t.Helper()
 	dir := t.TempDir()
 	plat := &stubRichCardStreamingPlatform{
@@ -49,6 +73,7 @@ func newRichCardStreamingEnv(t *testing.T) (*cujEnv, *stubRichCardStreamingPlatf
 		ThinkingMaxLen:   defaultThinkingMaxLen,
 		ToolMaxLen:       defaultToolMaxLen,
 		ToolMessages:     true,
+		AfterAskQuestion: afterAskQuestion,
 	})
 	env := &cujEnv{
 		t:       t,
@@ -77,7 +102,7 @@ func sendRich(t *testing.T, env *cujEnv, plat *stubRichCardStreamingPlatform, us
 }
 
 func TestRichCard_OpensNewCardAfterPermissionResolved(t *testing.T) {
-	env, plat := newRichCardStreamingEnv(t)
+	env, plat := newRichCardStreamingEnv(t, "new_card")
 
 	preText := "pre-permission intro one two three four five six seven"
 	postText := "post-resolution reply one two three four five six seven"
@@ -148,7 +173,7 @@ func TestRichCard_OpensNewCardAfterPermissionResolved(t *testing.T) {
 	})
 
 	// The post-answer text must not be written onto the pre-question card.
-	preHandle := plat.getPreviewOpens()[0]
+	preHandle := plat.getPreviewHandles()[0]
 	for _, u := range plat.getPreviewUpdates() {
 		if u.Handle == preHandle && strings.Contains(u.Content, postText) {
 			t.Fatalf("post-answer text was patched onto the pre-question card %q: %q",
@@ -170,7 +195,7 @@ func TestRichCard_OpensNewCardAfterPermissionResolved(t *testing.T) {
 // The new card must start clean: the pre-question text lives on the old
 // card, and repeating it on the new one reads like the agent said it twice.
 func TestRichCard_NewCardAfterPermissionDoesNotRepeatOldText(t *testing.T) {
-	env, plat := newRichCardStreamingEnv(t)
+	env, plat := newRichCardStreamingEnv(t, "new_card")
 
 	preText := "pre-permission intro one two three four five six seven"
 	postText := "post-resolution reply one two three four five six seven"
@@ -219,5 +244,64 @@ func TestRichCard_NewCardAfterPermissionDoesNotRepeatOldText(t *testing.T) {
 	newCard := plat.getPreviewOpens()[opensBefore]
 	if strings.Contains(newCard, preText) {
 		t.Fatalf("new card repeats the pre-question text: %q", newCard)
+	}
+}
+
+// The default ("same_card") keeps rich mode's one-card-per-turn design: the
+// output that follows the answer is patched back onto the card that was open
+// BEFORE the question. Upstream's intent (#898), and the reason the option
+// exists at all.
+func TestRichCard_SameCardAfterPermissionKeepsTurnOnOneCard(t *testing.T) {
+	env, plat := newRichCardStreamingEnv(t, "same_card")
+
+	preText := "pre-permission intro one two three four five six seven"
+	postText := "post-resolution reply one two three four five six seven"
+
+	env.agent.setNextSessionEvents([]Event{
+		{Type: EventText, Content: preText},
+		{
+			Type:      EventPermissionRequest,
+			ToolName:  "AskUserQuestion",
+			RequestID: "req-rich-same-card",
+			Questions: []UserQuestion{
+				{Question: "Continue?", Options: []UserQuestionOption{{Label: "Yes"}}},
+			},
+		},
+		{Type: EventText, Content: postText},
+		{Type: EventResult, Content: "final summary text", Done: true},
+	}, 0)
+
+	sendRich(t, env, plat, "jack", "please do a thing")
+
+	env.waitFor("pre-permission card", 2*time.Second, func() bool {
+		for _, u := range plat.getPreviewUpdates() {
+			if strings.Contains(u.Content, preText) {
+				return true
+			}
+		}
+		return false
+	})
+	opensBefore := len(plat.getPreviewOpens())
+	preHandle := plat.getPreviewHandles()[0]
+
+	env.engine.handlePendingPermission(plat, &Message{
+		SessionKey: "test:jack",
+		UserID:     "jack",
+		Content:    "1",
+		ReplyCtx:   "ctx-jack",
+	}, "1", "test:jack")
+
+	env.waitFor("post-answer text on the original card", 2*time.Second, func() bool {
+		for _, u := range plat.getPreviewUpdates() {
+			if u.Handle == preHandle && strings.Contains(u.Content, postText) {
+				return true
+			}
+		}
+		return false
+	})
+
+	// No second card may be opened in same_card mode.
+	if got := len(plat.getPreviewOpens()); got != opensBefore {
+		t.Fatalf("same_card mode opened %d cards (want %d) — the turn must stay on one card", got, opensBefore)
 	}
 }
