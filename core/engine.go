@@ -5102,9 +5102,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 	// bounded timeout, which keeps flushed text ahead of the next foreground
 	// turn's reply while a slow platform call can never extend that wait
 	// (some callers hold interactiveMu) beyond the bound.
-	deliverChunks := func(p Platform, replyCtx any, chunks []string) {
+	deliverChunks := func(p Platform, replyCtx any, chunks []string) bool {
 		if p == nil || len(chunks) == 0 {
-			return
+			return true
 		}
 		if !senderStarted {
 			senderStarted = true
@@ -5127,10 +5127,18 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 		item := flushItem{chunks: chunks, p: p, replyCtx: replyCtx}
 		select {
 		case flushCh <- item:
+			return true
 		default:
 			select {
 			case flushCh <- item:
+				return true
 			case <-ctx.Done():
+				// Backpressure plus cancellation: the chunk is dropped.
+				// Make that visible — the caller's log line must not claim
+				// a flush that never reached the platform.
+				slog.Warn("unsolicited reader: dropping queued chunks on cancellation",
+					"chunks", len(item.chunks))
+				return false
 			}
 		}
 	}
@@ -5170,11 +5178,11 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 		p := state.platform
 		replyCtx := state.replyCtx
 		state.mu.Unlock()
-		deliverChunks(p, replyCtx, SplitMessageCodeFenceAware(partial, maxPlatformMessageLen))
+		queued := deliverChunks(p, replyCtx, SplitMessageCodeFenceAware(partial, maxPlatformMessageLen))
 		session.AddHistory("assistant", partial)
 		sessions.Save()
 		slog.Info("unsolicited reader: flushed partial turn",
-			"session", sessionKey, "reason", reason, "response_len", len(partial))
+			"session", sessionKey, "reason", reason, "response_len", len(partial), "queued", queued)
 	}
 
 	for {
