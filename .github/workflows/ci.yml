@@ -149,14 +149,16 @@ jobs:
         run: go test -v -tags=smoke,no_web ./tests/e2e/...
 
   blackbox-smoke:
-    # Real cc-connect binary driven over its bridge, real Claude Code CLI,
-    # scripted fake model (tests/blackbox/fakemodel): no model key needed.
+    # Real cc-connect binary driven over its bridge, real Claude Code and
+    # Codex CLIs, scripted fake model (tests/blackbox/fakemodel): no model
+    # key needed.
     # Report-only while the suite settles; drop continue-on-error to gate.
     runs-on: ubuntu-latest
     needs: unit-test
     continue-on-error: true
     env:
       CLAUDE_CODE_VERSION: '2.1.317'
+      CODEX_VERSION: '0.166.0'
       CC_BLACKBOX_SMOKE_AGENT: claudecode
 
     steps:
@@ -173,8 +175,8 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install Claude Code CLI
-        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+      - name: Install agent CLIs
+        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}"
 
       - name: Run blackbox smoke
         run: go test -v -race -count=1 -timeout=20m -tags=blackbox,no_web ./tests/blackbox/smoke/
