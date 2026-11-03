@@ -1096,6 +1096,13 @@ app_secret = "your-feishu-app-secret"
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card
 #                           # 进度消息展示风格：legacy（逐条消息）| compact（单消息持续更新）| card（结构化卡片）
+# rich_reasoning_panel = "auto"  # card_mode = "rich" only: how the Reasoning panel starts out
+#                                # auto (default): expanded while the turn runs, collapsed when it is done
+#                                # collapsed: always collapsed | expanded: always expanded, also after the turn
+#                                # 仅 card_mode = "rich"：Reasoning 折叠区的初始状态
+#                                # auto（默认）运行中展开、结束后收起 | collapsed 始终收起 | expanded 始终展开
+# rich_tools_panel = "auto"      # Same for the Tools panel: auto | collapsed | expanded
+#                                # Tools 折叠区的初始状态，取值同上
 # resolve_mentions = false  # Auto-resolve @name in outgoing messages to Feishu at tags by matching group member names
 #                           # 自动将发出消息中的 @显示名 替换为飞书 at 标签（通过匹配群成员名称）
 # mention_map = { BOT-A = "ou_bot_a_open_id", BOT-B = "ou_bot_b_open_id" }
@@ -1142,6 +1149,8 @@ app_secret = "your-feishu-app-secret"
 # reaction_emoji = "OnIt"
 # done_emoji = "none"
 # progress_style = "legacy"  # legacy | compact | card
+# rich_reasoning_panel = "auto"  # card_mode = "rich" only: auto | collapsed | expanded
+# rich_tools_panel = "auto"      # card_mode = "rich" only: auto | collapsed | expanded
 
 # DingTalk / 钉钉 (uncomment to enable / 取消注释以启用)
 # 1. Create an app at https://open-dev.dingtalk.com / 在钉钉开放平台创建应用
