@@ -4519,6 +4519,52 @@ func (e *Engine) processInteractiveTurnWithRetry(state *interactiveState, sessio
 	}
 }
 
+// workspaceModelForProvider resolves a workspace model override against the
+// provider that will run it, returning the model to install and whether the pair
+// is legitimate. The state records which provider the model was picked for;
+// entries stored before that record existed are recognised by the provider's own
+// model list. Anything else is refused rather than guessed: it was picked while
+// a different provider was active, so it would be sent to the wrong endpoint.
+func workspaceModelForProvider(provider ProviderConfig, model, chosenFor string) (string, bool) {
+	if model == "" || provider.Name == "" {
+		return "", false
+	}
+	resolved, offered := ProviderModelFor(provider, model)
+	switch {
+	case chosenFor == provider.Name:
+		return model, true
+	case chosenFor == "" && offered:
+		// Legacy override: no provider was recorded, so only a model the
+		// provider actually offers may be attached to it.
+		return resolved, true
+	}
+	return "", false
+}
+
+// workspaceRebuildProvider reports the provider a rebuilt workspace agent will
+// run: the workspace override when it is still registered, otherwise the
+// project's active provider.
+func (e *Engine) workspaceRebuildProvider(wsKey string) (ProviderConfig, bool) {
+	psw, ok := e.agent.(ProviderSwitcher)
+	if !ok {
+		return ProviderConfig{}, false
+	}
+	providers := psw.ListProviders()
+	if e.projectState != nil {
+		if name := e.projectState.WorkspaceProviderOverride(wsKey); name != "" {
+			for _, p := range providers {
+				if p.Name == name {
+					return p, true
+				}
+			}
+		}
+	}
+	if active := psw.GetActiveProvider(); active != nil && active.Name != "" {
+		return *active, true
+	}
+	return ProviderConfig{}, false
+}
+
 // pinProviderModel gives the agent's own copy of the named provider the given model,
 // leaving the project agent and every other workspace untouched.
 func pinProviderModel(psw ProviderSwitcher, provider, model string) {
@@ -4591,8 +4637,27 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// so every lookup below has to use the same key.
 	wsKey := normalizeWorkspacePath(workspace)
 	wsModel := ""
+	wsModelChosenFor := ""
 	if e.projectState != nil {
-		if wsModel = e.projectState.WorkspaceModelOverride(wsKey); wsModel != "" {
+		wsModel = e.projectState.WorkspaceModelOverride(wsKey)
+		wsModelChosenFor = e.projectState.WorkspaceModelProvider(wsKey)
+	}
+	// Resolve the stored model against the provider this agent is about to run
+	// before it reaches the constructor. A workspace provider switched with a
+	// provider-only /goto leaves the previous provider's model behind unless it
+	// was cleared, and installing it here would run model X against provider Y's
+	// endpoint for the whole life of the agent.
+	if wsModel != "" {
+		if wsPreProvider, ok := e.workspaceRebuildProvider(wsKey); ok {
+			if resolved, applies := workspaceModelForProvider(wsPreProvider, wsModel, wsModelChosenFor); applies {
+				opts["model"] = resolved
+			} else {
+				slog.Debug("workspace model override not installed: it does not belong to the provider this workspace runs",
+					"workspace", workspace, "provider", wsPreProvider.Name,
+					"model", wsModel, "chosen_for_provider", wsModelChosenFor)
+			}
+		} else {
+			// The agent has no provider layer, so the override is unambiguous.
 			opts["model"] = wsModel
 		}
 	}
@@ -4673,35 +4738,63 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// wrong endpoint. A session-level provider restored at turn start can still move
 	// the active provider afterwards, in which case the pinned entry is simply not
 	// consulted.
+	modelPinned := false
 	if wsModel != "" {
 		if psw, ok := agent.(ProviderSwitcher); ok {
+			applied := false
 			if active := psw.GetActiveProvider(); active != nil && active.Name != "" {
-				recorded := ""
-				if e.projectState != nil {
-					recorded = e.projectState.WorkspaceModelProvider(wsKey)
-				}
-				resolved, offered := ProviderModelFor(*active, wsModel)
-				switch {
-				case recorded == active.Name:
-					// Picked for this provider: apply it as stored. A provider entry lists
-					// plain names while the transport may be handed a provider-scoped one, so
-					// "not listed" is not a problem in itself.
-					if !offered {
-						slog.Debug("workspace model is not listed by its provider",
-							"workspace", workspace, "provider", active.Name, "model", wsModel)
+				if resolved, ok2 := workspaceModelForProvider(*active, wsModel, wsModelChosenFor); ok2 {
+					if resolved != wsModel {
+						// A legacy override may be an alias the provider resolves to a
+						// different name; pin the name the provider actually serves.
+						slog.Debug("workspace model override resolved to the provider's name",
+							"workspace", workspace, "provider", active.Name,
+							"override", wsModel, "model", resolved)
 					}
-					pinProviderModel(psw, active.Name, wsModel)
-				case recorded == "" && offered:
 					pinProviderModel(psw, active.Name, resolved)
-				default:
+					applied = true
+					modelPinned = true
+					if msw, ok3 := agent.(ModelSwitcher); ok3 {
+						msw.SetModel(resolved)
+					}
+				} else {
 					slog.Debug("workspace model override left out: it does not belong to the active provider",
 						"workspace", workspace, "provider", active.Name,
-						"model", wsModel, "chosen_for_provider", recorded)
+						"model", wsModel, "chosen_for_provider", wsModelChosenFor)
 				}
 			}
-		}
-		if msw, ok := agent.(ModelSwitcher); ok {
+			if !applied {
+				slog.Debug("workspace model override not applied: no provider accepted it",
+					"workspace", workspace, "model", wsModel)
+			}
+		} else if msw, ok := agent.(ModelSwitcher); ok {
+			// No provider layer to attribute the model to.
 			msw.SetModel(wsModel)
+			modelPinned = true
+		}
+	}
+	// The rebuilt agent also inherits the project agent's model, through the option
+	// snapshot the agent seeds itself with and the fallback copy above. That model
+	// belongs to the project's provider: when this workspace runs a different one
+	// that has no default model of its own, the inherited name is what StartSession
+	// hands to the new endpoint — model X against provider Y, the failure this whole
+	// block exists to prevent, coming back on every turn after a reap. A provider
+	// with a model of its own needs no help: every transport prefers it.
+	if !modelPinned {
+		if psw, ok := agent.(ProviderSwitcher); ok {
+			if active := psw.GetActiveProvider(); active != nil && active.Name != "" && active.Model == "" {
+				projectProvider := ""
+				if projectSwitcher, ok2 := e.agent.(ProviderSwitcher); ok2 {
+					if projectActive := projectSwitcher.GetActiveProvider(); projectActive != nil {
+						projectProvider = projectActive.Name
+					}
+				}
+				if active.Name != projectProvider {
+					if msw, ok := agent.(ModelSwitcher); ok {
+						msw.SetModel("")
+					}
+				}
+			}
 		}
 	}
 
@@ -12698,7 +12791,7 @@ func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
 			e.replyWithCard(p, msg.ReplyCtx, e.renderGotoCard(msg.SessionKey))
 			return
 		}
-		text, buttons := e.renderGotoText(switcher)
+		text, buttons := e.renderGotoText(agent, switcher)
 		e.replyWithButtons(p, msg.ReplyCtx, text, buttons)
 		return
 	}
@@ -12801,6 +12894,42 @@ func (e *Engine) applyGoto(agent Agent, sessions *SessionManager, switcher Provi
 	}
 
 	replyText := fmt.Sprintf(e.i18n.T(MsgGotoSwitched), pname)
+	if !setModel {
+		// A provider-only /goto means "run this provider's default model". The
+		// previous provider's model has to go: the rebuilt agent resolves the
+		// workspace override before the provider, so leaving it behind would send
+		// that model to the new endpoint on every turn until the user runs /new.
+		if workspace != "" && e.projectState != nil {
+			e.projectState.ClearWorkspaceModelOverride(workspace)
+		}
+		// A model this agent copy pinned on the provider entry outlives the reset,
+		// because every transport prefers it over the agent's own model: put the
+		// configured default back, otherwise "switch to the provider" keeps running
+		// the model of the previous /goto until the agent is rebuilt — and a rebuild
+		// would run the default, so the same command would mean two things.
+		if projectSwitcher, ok := e.agent.(ProviderSwitcher); ok {
+			for _, p := range projectSwitcher.ListProviders() {
+				if p.Name != pname {
+					continue
+				}
+				if current := switcher.GetActiveProvider(); current != nil && current.Model == p.Model {
+					break
+				}
+				if updated, found := SetProviderModel(switcher.ListProviders(), pname, p.Model); found {
+					switcher.SetProviders(updated)
+				}
+				break
+			}
+		}
+		// Only clear when the agent's own model would actually be consulted. A
+		// provider with a model of its own wins over it in every transport, and on
+		// the agents that mirror SetModel onto the provider entry (kimi) clearing
+		// would throw away the default model restored above.
+		active := switcher.GetActiveProvider()
+		if msw, ok := agent.(ModelSwitcher); ok && (active == nil || active.Model == "") {
+			msw.SetModel("")
+		}
+	}
 	if setModel {
 		if updated, ok2 := SetProviderModel(providers, pname, fullModel); ok2 {
 			switcher.SetProviders(updated)
@@ -12877,6 +13006,46 @@ func collectGotoModels(switcher ProviderSwitcher) []gotoModelEntry {
 	return out
 }
 
+// gotoTarget renders an entry as the "/goto <provider>/<model>" argument. For a
+// provider-scoped model (opencode stores "aiapi/glm-5.3") the prefix is stripped
+// so applyGoto can re-resolve it per the agent's capability instead of producing
+// "aiapi/aiapi/glm-5.3". Only there: a model that merely starts with
+// "<provider>/" on an agent that stores bare names is a name of its own, and
+// stripping it would switch to a model that does not exist. The result is an
+// identifier, not an index, so a picker rendered before a provider add/remove
+// still resolves to the entry the user saw.
+func gotoTarget(ent gotoModelEntry, scoped bool) string {
+	model := ent.Model
+	if scoped {
+		model = strings.TrimPrefix(model, ent.Provider+"/")
+	}
+	return ent.Provider + "/" + model
+}
+
+// providerScopedModelNames reports whether agent stores model names with their
+// provider prefix, the way applyGoto re-resolves them.
+func providerScopedModelNames(agent Agent) bool {
+	ps, ok := agent.(ProviderScopedModelNames)
+	return ok && ps.ProviderScopedModelNames()
+}
+
+// quoteCommandArg wraps a "/goto" target in single quotes when the model name
+// contains whitespace: the button payload re-enters the message pipeline, where
+// splitCommandArgs would otherwise cut the name into several arguments.
+func quoteCommandArg(s string) string {
+	if strings.ContainsAny(s, " \t") {
+		return "'" + s + "'"
+	}
+	return s
+}
+
+// gotoLabel names an entry the way the picker shows it: the model, qualified by
+// its provider so two providers offering the same model are distinguishable
+// (an OpenAI proxy and a ChatGPT subscription, say).
+func gotoLabel(ent gotoModelEntry) string {
+	return fmt.Sprintf("%s (%s)", ent.Model, ent.Provider)
+}
+
 // renderGotoCard renders the /goto picker as a card, mirroring the native
 // /model card: a short status line plus a select whose options carry the full
 // provider-scoped model names, so picking any entry switches to that provider
@@ -12902,15 +13071,9 @@ func (e *Engine) renderGotoCard(sessionKey string) *Card {
 	for _, ent := range entries {
 		// The option's action value is "<provider>/<model>" with a bare model
 		// name: applyGoto re-resolves the full stored name per the agent's
-		// ProviderScopedModelNames capability, so provider-scoped models
-		// (which already carry the "<provider>/" prefix in config) must have
-		// that prefix stripped here to avoid "aiapi/aiapi/gpt-5.6-sol".
-		model := ent.Model
-		if strings.HasPrefix(model, ent.Provider+"/") {
-			model = strings.TrimPrefix(model, ent.Provider+"/")
-		}
-		val := fmt.Sprintf("act:/goto %s/%s", ent.Provider, model)
-		opts = append(opts, CardSelectOption{Text: ent.Model, Value: val})
+		// ProviderScopedModelNames capability.
+		val := "act:/goto " + gotoTarget(ent, providerScopedModelNames(agent))
+		opts = append(opts, CardSelectOption{Text: gotoLabel(ent), Value: val})
 		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
 			initVal = val
 		}
@@ -12925,13 +13088,18 @@ func (e *Engine) renderGotoCard(sessionKey string) *Card {
 // renderGotoText renders the /goto picker as text, mirroring the native
 // /model text list: the current provider plus a continuously numbered target
 // list with inline buttons, so `/goto <number>` switches directly.
-func (e *Engine) renderGotoText(switcher ProviderSwitcher) (string, [][]ButtonOption) {
+func (e *Engine) renderGotoText(agent Agent, switcher ProviderSwitcher) (string, [][]ButtonOption) {
 	current := switcher.GetActiveProvider()
 	entries := collectGotoModels(switcher)
+	scoped := providerScopedModelNames(agent)
 
 	var sb strings.Builder
 	if current != nil {
-		fmt.Fprintf(&sb, e.i18n.T(MsgProviderCurrent), current.Name)
+		active := current.Name
+		if current.Model != "" {
+			active += "/" + current.Model
+		}
+		fmt.Fprintf(&sb, e.i18n.T(MsgGotoCurrent), active)
 		sb.WriteString("\n")
 	} else {
 		sb.WriteString(e.i18n.T(MsgGotoDefault))
@@ -12947,13 +13115,17 @@ func (e *Engine) renderGotoText(switcher ProviderSwitcher) (string, [][]ButtonOp
 		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
 			marker = "> "
 		}
-		fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+1, ent.Model)
+		fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+1, gotoLabel(ent))
 
 		label := ent.Model
 		if current != nil && current.Name == ent.Provider && current.Model == ent.Model {
 			label = "▶ " + label
 		}
-		row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/goto %d", i+1)})
+		// Carry the identifier, not the row index: the index is resolved against
+		// a freshly collected list when the button is pressed, so a provider
+		// added/removed in between used to apply a different entry than the one
+		// the user saw.
+		row = append(row, ButtonOption{Text: label, Data: "cmd:/goto " + quoteCommandArg(gotoTarget(ent, scoped))})
 		if len(row) >= 3 {
 			buttons = append(buttons, row)
 			row = nil
