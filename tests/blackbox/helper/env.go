@@ -16,7 +16,6 @@ import (
 
 	"github.com/chenhg5/cc-connect/core"
 	bbplatform "github.com/chenhg5/cc-connect/tests/blackbox/platform"
-
 )
 
 const (
@@ -36,12 +35,100 @@ const (
 type Env struct {
 	T        *testing.T
 	Platform *bbplatform.MockPlatform
-	Engine   *core.Engine
-	WorkDir  string
-	DataDir  string
+	// Engine is the in-process engine. It is nil for the binary backend; tests
+	// that need it must call RequireInProcess first.
+	Engine  *core.Engine
+	WorkDir string
+	DataDir string
+
+	// Backend and Profile record how this Env was built.
+	Backend Backend
+	Profile bbplatform.Profile
 
 	// agentType is stored for diagnostic messages only.
 	agentType string
+
+	// binary backend only
+	proc      *binaryProcess
+	token     string
+	bridgeURL string
+}
+
+// Backend selects how the cc-connect under test runs.
+type Backend string
+
+const (
+	// BackendInProcess wires core.Engine directly inside the test process
+	// (the historical blackbox behaviour, and the default).
+	BackendInProcess Backend = "inprocess"
+	// BackendBinary builds/starts the real cc-connect binary and drives it
+	// through its bridge WebSocket. See binary.go.
+	BackendBinary Backend = "binary"
+)
+
+// Options configures NewEnvWithOptions. The zero value matches NewEnv, with
+// Backend and Profile taken from CC_BLACKBOX_BACKEND / CC_BLACKBOX_PROFILE.
+type Options struct {
+	// Backend overrides CC_BLACKBOX_BACKEND when set.
+	Backend Backend
+	// Profile overrides CC_BLACKBOX_PROFILE when set.
+	Profile bbplatform.Profile
+	// Setup configures the in-process engine before Start. Envs with a Setup
+	// are skipped on the binary backend, which has no in-process engine.
+	Setup func(*core.Engine)
+	// NoCredentials only requires the agent CLI on PATH, not model
+	// credentials. Use it for scenarios that never start an agent turn
+	// (slash commands such as /help or /version), so they can run anywhere.
+	NoCredentials bool
+}
+
+// BackendFromEnv returns the backend selected by CC_BLACKBOX_BACKEND.
+func BackendFromEnv(t *testing.T) Backend {
+	t.Helper()
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("CC_BLACKBOX_BACKEND"))); v {
+	case "", string(BackendInProcess):
+		return BackendInProcess
+	case string(BackendBinary):
+		return BackendBinary
+	default:
+		t.Fatalf("blackbox: CC_BLACKBOX_BACKEND=%q (want inprocess or binary)", v)
+		return ""
+	}
+}
+
+// ProfileFromEnv returns the profile selected by CC_BLACKBOX_PROFILE.
+func ProfileFromEnv(t *testing.T) bbplatform.Profile {
+	t.Helper()
+	pr, err := bbplatform.ParseProfile(os.Getenv("CC_BLACKBOX_PROFILE"))
+	if err != nil {
+		t.Fatalf("blackbox: CC_BLACKBOX_PROFILE: %v", err)
+	}
+	return pr
+}
+
+// RequireInProcess skips the test on the binary backend. Use it before
+// touching e.Engine directly.
+func (e *Env) RequireInProcess() {
+	e.T.Helper()
+	if e.Backend != BackendInProcess {
+		e.T.Skipf("blackbox skip: needs the in-process engine (backend=%s)", e.Backend)
+	}
+}
+
+// Click simulates DefaultUser clicking a button with callback value action
+// (for example "perm:allow" or "cmd:/list") and waits for the next message.
+func (e *Env) Click(action string, timeout time.Duration) *bbplatform.SentMessage {
+	e.T.Helper()
+	before := e.Platform.MessageCount()
+	if err := e.Platform.InjectCardAction(DefaultUser, DefaultChat, action); err != nil {
+		e.T.Fatalf("blackbox: click %q: %v", action, err)
+	}
+	reply := e.Platform.WaitForReply(before, timeout)
+	if reply == nil {
+		e.T.Fatalf("blackbox timeout (%v): no message after clicking %q\nbackend=%s profile=%s\nall messages so far:\n%s",
+			timeout, action, e.Backend, e.Profile, e.Platform.AllText())
+	}
+	return reply
 }
 
 // NewEnv creates a blackbox test environment with a real agent.
@@ -69,11 +156,33 @@ func NewEnv(t *testing.T, agentType string) *Env {
 //	})
 func NewEnvWithSetup(t *testing.T, agentType string, setup func(*core.Engine)) *Env {
 	t.Helper()
+	return NewEnvWithOptions(t, agentType, Options{Setup: setup})
+}
 
-	requireAgent(t, agentType)
+// NewEnvWithOptions creates a blackbox environment on the selected backend
+// and capability profile. See Options.
+func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
+	t.Helper()
+
+	backend := o.Backend
+	if backend == "" {
+		backend = BackendFromEnv(t)
+	}
+	profile := o.Profile
+	if profile == "" {
+		profile = ProfileFromEnv(t)
+	}
+	if backend == BackendBinary && o.Setup != nil {
+		t.Skip("blackbox skip: this test configures the in-process engine directly (backend=binary)")
+	}
+
+	if o.NoCredentials {
+		requireAgentBinary(t, agentType)
+	} else {
+		requireAgent(t, agentType)
+	}
 
 	workDir := t.TempDir()
-	dataDir := t.TempDir()
 
 	opts := map[string]any{
 		"work_dir": workDir,
@@ -87,6 +196,12 @@ func NewEnvWithSetup(t *testing.T, agentType string, setup func(*core.Engine)) *
 
 	applyProviderFromEnv(t, agentType, opts)
 
+	if backend == BackendBinary {
+		return newBinaryEnv(t, agentType, opts, profile)
+	}
+
+	dataDir := t.TempDir()
+
 	agent, err := core.CreateAgent(agentType, opts)
 	if err != nil {
 		t.Skipf("blackbox skip: cannot create %s agent: %v", agentType, err)
@@ -97,10 +212,10 @@ func NewEnvWithSetup(t *testing.T, agentType string, setup func(*core.Engine)) *
 	mp := bbplatform.New(agentType + "-mock")
 
 	sessPath := filepath.Join(dataDir, "sessions.json")
-	engine := core.NewEngine("blackbox-"+t.Name(), agent, []core.Platform{mp}, sessPath, core.LangEnglish)
+	engine := core.NewEngine("blackbox-"+t.Name(), agent, []core.Platform{mp.Platform(profile)}, sessPath, core.LangEnglish)
 
-	if setup != nil {
-		setup(engine)
+	if o.Setup != nil {
+		o.Setup(engine)
 	}
 
 	if err := engine.Start(); err != nil {
@@ -118,6 +233,8 @@ func NewEnvWithSetup(t *testing.T, agentType string, setup func(*core.Engine)) *
 		Engine:    engine,
 		WorkDir:   workDir,
 		DataDir:   dataDir,
+		Backend:   BackendInProcess,
+		Profile:   profile,
 		agentType: agentType,
 	}
 }
@@ -256,6 +373,13 @@ func (e *Env) SessionKeyFor(userID, chatID string) string {
 // assertion failure inside the test is a real failure.
 func requireAgent(t *testing.T, agentType string) {
 	t.Helper()
+	requireAgentBinary(t, agentType)
+	requireCredentials(t, agentType)
+}
+
+// requireAgentBinary skips when the agent CLI is not on PATH.
+func requireAgentBinary(t *testing.T, agentType string) {
+	t.Helper()
 
 	// agentBinName returns the primary CLI binary name for the agent type.
 	// The cursor type uses "agent" (from @anthropic-ai/cursor-agent), not
@@ -276,6 +400,12 @@ func requireAgent(t *testing.T, agentType string) {
 		}
 	}
 
+}
+
+// requireCredentials skips when the model credentials for agentType are
+// missing.
+func requireCredentials(t *testing.T, agentType string) {
+	t.Helper()
 	switch agentType {
 	case "claudecode":
 		if os.Getenv("ANTHROPIC_API_KEY") == "" && !hasProviderEnv("claudecode") {

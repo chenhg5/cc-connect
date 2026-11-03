@@ -75,7 +75,7 @@ endif
 _BUILD_TAGS := $(strip $(_EXCLUDE_TAGS) goolm)
 _TAGS_FLAG  := $(if $(_BUILD_TAGS),-tags '$(_BUILD_TAGS)',)
 
-.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-performance pre-test lint release release-all web
+.PHONY: build run clean test test-fast test-full test-smoke test-e2e test-release test-release-local test-blackbox-smoke test-performance pre-test lint release release-all web
 
 web:
 	@if [ ! -d web/node_modules ]; then cd web && npm install; fi
@@ -146,6 +146,14 @@ test-release-local:
 	go test ./config
 	go test ./core -run 'TestEngineSendToSessionWithAttachments|TestProcessInteractiveEvents_SuppressesDuplicateSideChannelText|TestCmdList_AllSessionsVisibleAfterRepeatedNew|TestCmdList_SessionVisibleDuringAgentProcessing|TestEngine_Alias|TestEngine_BannedWords|TestEngine_DisabledCommands'
 	go test ./platform/feishu -run 'TestUserIDFromEventFallsBackToUserID|TestResolveUserNameSkipsInvalidLookupID|TestNew_CanDisableInteractiveCards'
+
+# Blackbox smoke: in-process engine and the real binary (driven through its
+# bridge WebSocket) across platform capability profiles. Needs one agent CLI
+# on PATH; model credentials only for TestSmoke_AgentTurn, which skips
+# without them. Point CC_BLACKBOX_BINARY at a built artifact to test it
+# instead of the current tree.
+test-blackbox-smoke:
+	go test -tags blackbox -count=1 -race ./tests/blackbox/smoke/
 
 # Legacy: runs unit tests only
 test:
