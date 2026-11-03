@@ -5658,6 +5658,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
 		}
 
+		// appendQuietSeparator inserts a blank line between the assistant
+		// messages that surround a hidden thinking/tool block, so the reply
+		// stays readable instead of running the two messages together.
+		//
+		// The legacy path applies the break through the stream preview. The
+		// rich card path has no preview to carry it — the card body is built
+		// from partialText and the preview never receives text in rich mode —
+		// so the break has to be inserted into the card body directly. Without
+		// this, quiet+rich renders "first message" and "second message" glued
+		// together as one run of text.
+		appendQuietSeparator := func() {
+			if len(textParts) == 0 || segmentStart >= len(textParts) || silentHold {
+				return
+			}
+			textParts = append(textParts, "\n\n")
+			if hasRichCard {
+				partialText += "\n\n"
+			}
+		}
+
 		switch event.Type {
 		case EventModelSwitch:
 			e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
@@ -5681,6 +5701,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if hasRichCard {
 				// When thinking messages are suppressed, skip card creation.
 				if !e.display.ThinkingMessages {
+					// Quiet mode keeps the whole turn in one card, so the
+					// assistant messages around this hidden thinking block
+					// need a blank line between them — the legacy path adds
+					// the same break below.
+					if e.display.Mode == "quiet" {
+						appendQuietSeparator()
+					}
 					break
 				}
 				if thinking := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen)); thinking != "" {
@@ -5771,6 +5798,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
 				if !e.display.ToolMessages {
+					// Quiet mode keeps the whole turn in one card, so the
+					// assistant messages around this hidden tool call need a
+					// blank line between them — the legacy path adds the same
+					// break below.
+					if e.display.Mode == "quiet" {
+						appendQuietSeparator()
+					}
 					break
 				}
 				toolSteps = append(toolSteps, ToolStep{
