@@ -3424,6 +3424,16 @@ func (p *Platform) SendWithStatusFooter(ctx context.Context, rctx any, content, 
 	if !ok {
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
+	// A pre-built card is already a complete interactive message. Merge the
+	// footer into its elements instead of wrapping the card JSON in another
+	// markdown element, which would make the client render raw JSON.
+	if isCardJSON(content) {
+		merged, mergedOK := appendCardFooterElements(content, footer)
+		if !mergedOK {
+			merged = content
+		}
+		return p.Send(ctx, rctx, merged)
+	}
 	// Resolve mentions first so we can detect whether a real @mention is
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	if strings.TrimSpace(footer) == "" || strings.Contains(content, `<at user_id=`) || strings.Contains(content, `<at id=`) {
@@ -3642,6 +3652,17 @@ func detectMimeType(data []byte) string {
 }
 
 func buildReplyContent(content string) (msgType string, body string) {
+	// A pre-built card (Card 2.0 rich card) must be passed through untouched.
+	//
+	// Without this check the card JSON is treated as markdown: buildCardJSON
+	// wraps it in another markdown element, so the card ends up nested inside
+	// itself and the client renders the raw JSON — escaped quotes and literal
+	// \n included — instead of the card. That happens whenever a turn produces
+	// no intermediate text: the rich card is only built at the end and sent
+	// through p.Send, never patched onto an existing preview card.
+	if isCardJSON(content) {
+		return larkim.MsgTypeInteractive, content
+	}
 	// Feishu does not generate mention events for <at> tags in card/post
 	// messages sent by bots. Force MsgTypeText when a real mention is present
 	// (resolved to an <at user_id="..."> or <at id=...> tag) so Feishu
@@ -4782,6 +4803,53 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	return string(b)
 }
 
+// appendCardFooterElements appends the status footer as a dim ("notation")
+// markdown block to an existing Card 2.0 JSON, separated from the body by a
+// horizontal rule. Returns the updated card and true on success; on failure
+// the original card is returned unchanged so the caller can fall back.
+//
+// A pre-built card already carries its own header and body, so the footer
+// cannot be appended the way buildCardJSONWithStatusFooter does it — it has
+// to be merged into the existing elements list.
+func appendCardFooterElements(cardJSON, footer string) (string, bool) {
+	if strings.TrimSpace(footer) == "" {
+		return cardJSON, false
+	}
+	var card map[string]any
+	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
+		return cardJSON, false
+	}
+	body, ok := card["body"].(map[string]any)
+	if !ok {
+		return cardJSON, false
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok {
+		return cardJSON, false
+	}
+	footerElements := []any{map[string]any{"tag": "hr"}}
+	for _, line := range strings.Split(sanitizeCardMarkdownForCard(footer), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		footerElements = append(footerElements, map[string]any{
+			"tag":       "markdown",
+			"content":   line,
+			"text_size": "notation",
+		})
+	}
+	if len(footerElements) == 1 {
+		return cardJSON, false
+	}
+	body["elements"] = append(elements, footerElements...)
+	out, err := json.Marshal(card)
+	if err != nil {
+		return cardJSON, false
+	}
+	return string(out), true
+}
+
 func isZhLikeProgressLang(lang string) bool {
 	l := strings.ToLower(strings.TrimSpace(lang))
 	return strings.HasPrefix(l, "zh")
@@ -5518,6 +5586,17 @@ func (p *Platform) UpdateMessageWithStatusFooter(ctx context.Context, previewHan
 	}
 	if strings.TrimSpace(footer) == "" {
 		return p.UpdateMessage(ctx, previewHandle, content)
+	}
+	// A pre-built card must not be re-wrapped: buildCardJSONWithStatusFooter
+	// would nest the card JSON inside itself and the client would render the
+	// raw JSON instead of the card. Merge the footer into the card instead.
+	if isCardJSON(content) {
+		merged, mergedOK := appendCardFooterElements(content, footer)
+		if !mergedOK {
+			return p.UpdateMessage(ctx, previewHandle, content)
+		}
+		content = merged
+		footer = ""
 	}
 	h, ok := previewHandle.(*feishuPreviewHandle)
 	if !ok {
