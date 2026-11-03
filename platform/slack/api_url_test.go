@@ -47,6 +47,38 @@ func TestNormalizeAPIURL(t *testing.T) {
 	}
 }
 
+func TestNormalizeAPIURL_MalformedCredentialsNotEchoed(t *testing.T) {
+	for _, in := range []string{
+		"https://user:sup3rsecret@[",
+		"https://user:sup3rsecret@host:notaport/api/",
+		"https://user:sup3rsecret%zz@relay.example.com/api/",
+		"https://sup3rsecret@[::1/api/",
+		"https://user:sup3r/secret@host:notaport/api/",
+	} {
+		_, err := normalizeAPIURL(in)
+		if err == nil {
+			t.Errorf("normalizeAPIURL(%q): want error", in)
+			continue
+		}
+		if strings.Contains(err.Error(), "sup3r") {
+			t.Errorf("normalizeAPIURL(%q): error echoes the credentials: %v", in, err)
+		}
+	}
+}
+
+func TestRedactUserInfo(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://u:p@[":                  "https://REDACTED@[",
+		"https://u:p@h/a@b":              "https://REDACTED@b",
+		"https://relay.example.com/api/": "https://relay.example.com/api/",
+		"u:p@h":                          "REDACTED@h",
+	} {
+		if got, _ := redactUserInfo(in); got != want {
+			t.Errorf("redactUserInfo(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestIsLoopbackHost(t *testing.T) {
 	for host, want := range map[string]bool{
 		"localhost":   true,

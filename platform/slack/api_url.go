@@ -27,6 +27,11 @@ func normalizeAPIURL(raw string) (string, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
+		if redacted, ok := redactUserInfo(raw); ok {
+			// The wrapped url.Error, and some of its inner errors (e.g. an
+			// invalid escape), quote parts of the value, so drop them too.
+			return "", fmt.Errorf("slack: invalid base_url %q (details omitted: it contains user info)", redacted)
+		}
 		return "", fmt.Errorf("slack: invalid base_url %q: %w", raw, err)
 	}
 	if u.User != nil {
@@ -50,6 +55,22 @@ func normalizeAPIURL(raw string) (string, error) {
 		u.Path += "/"
 	}
 	return u.String(), nil
+}
+
+// redactUserInfo masks everything between the scheme and the last "@" of a
+// URL that may not parse. It is deliberately greedy: a malformed value may
+// carry an unescaped "/", "?" or "#" inside the password, so the authority
+// can't be located reliably. ok reports whether anything was masked.
+func redactUserInfo(raw string) (redacted string, ok bool) {
+	start := 0
+	if i := strings.Index(raw, "://"); i >= 0 {
+		start = i + len("://")
+	}
+	at := strings.LastIndex(raw[start:], "@")
+	if at < 0 {
+		return raw, false
+	}
+	return raw[:start] + "REDACTED" + raw[start+at:], true
 }
 
 func isLoopbackHost(host string) bool {
