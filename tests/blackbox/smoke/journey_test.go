@@ -175,3 +175,17 @@ func TestFake_RestartKeepsSession(t *testing.T) {
 		})
 	}
 }
+
+// TestFake_ListShowsOnlyOwnSessions: /list must not show another user's
+// sessions or their first messages (#1998). Fails on main until the fix
+// (#2035) lands; it is in the release smoke on purpose, so a release cannot
+// ship this privacy bug.
+func TestFake_ListShowsOnlyOwnSessions(t *testing.T) {
+	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileText}, func(t *testing.T, env *helper.Env, a fakeAgent) {
+		sayAs(t, env, "user1", "FAKE:reply secret-of-user1")
+		sayAs(t, env, "user2", "FAKE:reply hello-from-user2")
+		list := sayAs(t, env, "user2", "/list")
+		mustContain(t, "user2 /list", list, "hello-from-user2")
+		mustNotContain(t, "user2 /list", list, "secret-of-user1")
+	})
+}

@@ -30,16 +30,19 @@ buttons, cards, streaming previews):
 | Conversation | a message reaches the model and the answer reaches the user; the next turn carries the previous one; long answers are previewed and end complete; images reach the model |
 | Tools and permissions | a tool call runs and its output reaches the model; a permission prompt appears (buttons where the platform has them, text otherwise), allow runs the tool, deny keeps it from running |
 | Sessions | `/new` separates conversations, `/list` shows them, `/switch` restores the right context; `/stop` ends a running turn and the next message resumes the session; a restarted binary still lists and resumes the session |
-| Users | two users' conversations never reach each other's model |
+| Users | two users' conversations never reach each other's model, and `/list` shows only your own sessions |
 | Failures | a model/provider error is shown to the user, and the next message works |
 | Commands and cards | `/help`, `/status`, `/list` answer on every profile; card buttons click through; text-only platforms never receive buttons |
 
 **A PASS does not cover**: real IM platforms (Feishu, Telegram, Slack, …:
 their APIs, rendering and limits; see the release flow's channel smoke),
 answers from a real model (`TestSmoke_AgentTurn` runs only with credentials),
-agents other than Claude Code and Codex, and how cards look. Known open issue
-not yet asserted: another user's sessions are visible in `/list` (#1998; add
-the check when its fix lands).
+agents other than Claude Code and Codex, and how cards look.
+
+**Expected failure until #2035 merges:** `TestFake_ListShowsOnlyOwnSessions`
+checks that `/list` does not show another user's sessions (#1998). It fails on
+main today and passes with #2035, so the release smoke holds releases until
+that privacy fix is in.
 
 ## Running blackbox tests
 
