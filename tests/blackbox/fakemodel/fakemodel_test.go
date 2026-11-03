@@ -17,7 +17,7 @@ func post(t *testing.T, s *Server, body map[string]any) (*http.Response, string)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	out, _ := io.ReadAll(resp.Body)
 	return resp, string(out)
 }
@@ -158,7 +158,7 @@ func TestCountTokensAndUnknownPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("count_tokens status %d", resp.StatusCode)
 	}
@@ -166,7 +166,7 @@ func TestCountTokensAndUnknownPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET status %d, want 404", resp.StatusCode)
 	}

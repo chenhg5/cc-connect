@@ -75,7 +75,7 @@ func ConnectBridge(mp *MockPlatform, wsURL, token, project string, profile Profi
 		reg["project"] = project
 	}
 	if err := c.write(reg); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("bridge register: %w", err)
 	}
 
@@ -86,11 +86,11 @@ func ConnectBridge(mp *MockPlatform, wsURL, token, project string, profile Profi
 		Error string `json:"error"`
 	}
 	if err := conn.ReadJSON(&ack); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("bridge register_ack: %w", err)
 	}
 	if ack.Type != "register_ack" || !ack.OK {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("bridge register rejected: type=%q error=%q", ack.Type, ack.Error)
 	}
 	_ = conn.SetReadDeadline(time.Time{})

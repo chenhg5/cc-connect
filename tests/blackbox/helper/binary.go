@@ -102,7 +102,7 @@ func freePort(t *testing.T) int {
 	if err != nil {
 		t.Fatalf("blackbox: free port: %v", err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port
 }
 
@@ -231,13 +231,13 @@ func newBinaryEnv(t *testing.T, agentType string, agentOpts map[string]any, prof
 	cmd.Stderr = logFile
 	setProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		t.Fatalf("blackbox: start %s: %v", bin, err)
 	}
 	proc := &binaryProcess{cmd: cmd, logPath: logPath, exited: make(chan struct{})}
 	go func() {
 		proc.exitErr = cmd.Wait()
-		logFile.Close()
+		_ = logFile.Close()
 		close(proc.exited)
 	}()
 
