@@ -114,6 +114,18 @@ type Config struct {
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
 	BusyTimeoutMins    *int                    `toml:"busy_timeout_mins,omitempty"`  // minutes a dead agent's session busy lock may be held before the next message breaks it; 0 = disable; default 2
 	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
+	// StopHookEvent selects the hook event emitted when /stop ends an agent
+	// turn. Accepted values:
+	//
+	//	"session.ended"  (default) — the historical event name. /stop used to
+	//	                    tear the agent session down, so it always fired
+	//	                    "session.ended"; keeping the default means existing
+	//	                    hook rules keep working unchanged.
+	//	"turn.cancelled"  — the precise event for a gracefully cancelled turn
+	//	                    (the session stays alive for the next message).
+	//
+	// Empty means the default.
+	StopHookEvent string `toml:"stop_hook_event,omitempty"`
 	// WorkspaceIdleTimeoutMins controls the workspace idle reaper timeout
 	// (multi-workspace mode) for every engine in the process. 0 disables
 	// reaping. Default: 15 minutes. Defined as a top-level (process-global)
@@ -1087,6 +1099,11 @@ func (c *Config) validateInternal(permissive bool) error {
 	case "", "full", "summary", "none":
 	default:
 		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.StopHookEvent)) {
+	case "", "session.ended", "turn.cancelled":
+	default:
+		return fmt.Errorf("config: stop_hook_event must be \"session.ended\" or \"turn.cancelled\"")
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")

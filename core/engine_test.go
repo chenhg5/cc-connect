@@ -2,8 +2,11 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10569,6 +10572,140 @@ func TestStopInteractiveSession_CancellerPath_KeepsStateAlive(t *testing.T) {
 	}
 	if state.agentSession != sess {
 		t.Fatalf("state.agentSession = %v, want original session %v", state.agentSession, sess)
+	}
+}
+
+// hookEventRecorder captures the hook events an engine emits.
+type hookEventRecorder struct {
+	mu     sync.Mutex
+	events []HookEvent
+}
+
+func (r *hookEventRecorder) add(ev HookEvent) {
+	r.mu.Lock()
+	r.events = append(r.events, ev)
+	r.mu.Unlock()
+}
+
+func (r *hookEventRecorder) snapshot() []HookEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]HookEvent, len(r.events))
+	copy(out, r.events)
+	return out
+}
+
+// find returns the first captured event with the given name.
+func (r *hookEventRecorder) find(name HookEventType) (HookEvent, bool) {
+	for _, ev := range r.snapshot() {
+		if ev.Event == name {
+			return ev, true
+		}
+	}
+	return HookEvent{}, false
+}
+
+// newHookRecorderServer starts an HTTP endpoint that records every hook event
+// delivered to it. The returned recorder and server must both be shut down by
+// the caller.
+func newHookRecorderServer(t *testing.T) (*hookEventRecorder, *httptest.Server) {
+	t.Helper()
+	rec := &hookEventRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ev HookEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+			t.Errorf("decode hook event: %v", err)
+		}
+		rec.add(ev)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return rec, srv
+}
+
+// stopWithHookEvent runs /stop against an engine whose hook manager records
+// every emitted event, and returns the recorder.
+func stopWithHookEvent(t *testing.T, configure func(e *Engine)) *hookEventRecorder {
+	t.Helper()
+	rec, srv := newHookRecorderServer(t)
+
+	sess := newControllableSession("hook-event-1")
+	sess.cancelTurnFn = func() error { return nil } // take the graceful-cancel path
+	agent := &controllableAgent{nextSession: sess}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	// Hooks are synchronous (Async=false) so the event is recorded by the
+	// time stopInteractiveSession returns.
+	e.SetHooks(NewHookManager("test", []HookConfig{
+		{Event: "*", Type: "http", URL: srv.URL, Async: boolPtr(false)},
+	}, "sh", "-c", ""))
+
+	if configure != nil {
+		configure(e)
+	}
+
+	key := "test:user1"
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+	}
+	e.interactiveMu.Unlock()
+
+	if !e.stopInteractiveSession(key, p, "ctx") {
+		t.Fatal("stopInteractiveSession returned false; expected the canceller path to succeed")
+	}
+	return rec
+}
+
+// TestStopInteractiveSession_HookEvent_DefaultsToSessionEnded verifies the
+// backward-compatible default: when the stop hook event is not configured,
+// /stop emits "session.ended" — the event name existing hook rules already
+// listen for. Graceful cancellation must not silently rename it.
+func TestStopInteractiveSession_HookEvent_DefaultsToSessionEnded(t *testing.T) {
+	rec := stopWithHookEvent(t, nil)
+
+	ev, ok := rec.find(HookEventSessionEnded)
+	if !ok {
+		t.Fatalf("expected a %q hook event, got %v", HookEventSessionEnded, rec.snapshot())
+	}
+	if ev.SessionKey != "test:user1" {
+		t.Errorf("session_key = %q, want %q", ev.SessionKey, "test:user1")
+	}
+	if _, ok := rec.find(HookEventTurnCancelled); ok {
+		t.Errorf("default mode must not emit %q", HookEventTurnCancelled)
+	}
+}
+
+// TestStopInteractiveSession_HookEvent_TurnCancelledWhenOptedIn verifies the
+// opt-in mode: with stop_hook_event = "turn.cancelled", /stop emits the
+// precise "turn.cancelled" event instead of "session.ended".
+func TestStopInteractiveSession_HookEvent_TurnCancelledWhenOptedIn(t *testing.T) {
+	rec := stopWithHookEvent(t, func(e *Engine) {
+		e.SetStopHookEvent(HookEventTurnCancelled)
+	})
+
+	ev, ok := rec.find(HookEventTurnCancelled)
+	if !ok {
+		t.Fatalf("expected a %q hook event, got %v", HookEventTurnCancelled, rec.snapshot())
+	}
+	if ev.SessionKey != "test:user1" {
+		t.Errorf("session_key = %q, want %q", ev.SessionKey, "test:user1")
+	}
+	if _, ok := rec.find(HookEventSessionEnded); ok {
+		t.Errorf("opt-in mode must not emit %q", HookEventSessionEnded)
+	}
+}
+
+// TestSetStopHookEvent_RejectsUnknownValue verifies that an unknown event
+// name is ignored instead of silently disabling hook delivery.
+func TestSetStopHookEvent_RejectsUnknownValue(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	e.SetStopHookEvent("bogus.event")
+	if got := e.stopHookEventType(); got != HookEventSessionEnded {
+		t.Fatalf("stop hook event = %q, want the default %q", got, HookEventSessionEnded)
 	}
 }
 

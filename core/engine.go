@@ -390,6 +390,12 @@ type Engine struct {
 	timerScheduler     *TimerScheduler
 	heartbeatScheduler *HeartbeatScheduler
 
+	// stopHookEvent is the hook event emitted when /stop ends an agent turn.
+	// Defaults to HookEventSessionEnded (the historical behavior); set it to
+	// HookEventTurnCancelled to receive the more specific event instead.
+	// See SetStopHookEvent.
+	stopHookEvent atomic.Value // HookEventType
+
 	commands *CommandRegistry
 	skills   *SkillRegistry
 	aliases  map[string]string // trigger → command (e.g. "帮助" → "/help")
@@ -1418,6 +1424,36 @@ func (e *Engine) SetStaleLockBreakAfter(d time.Duration) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetStopHookEvent selects which hook event is emitted when /stop ends an
+// agent turn.
+//
+// Historically /stop always emitted "session.ended", because stopping a turn
+// also tore the agent session down. Graceful cancellation (CancelTurn) keeps
+// the session alive, so "turn.cancelled" describes the situation more
+// precisely — but existing hook rules listen for "session.ended", and
+// switching the event name silently would break them.
+//
+// To stay backward compatible the default remains "session.ended"; opt in to
+// "turn.cancelled" explicitly. Unknown values are ignored and leave the
+// current setting untouched.
+func (e *Engine) SetStopHookEvent(ev HookEventType) {
+	switch ev {
+	case HookEventSessionEnded, HookEventTurnCancelled:
+		e.stopHookEvent.Store(ev)
+	default:
+		slog.Warn("ignoring unknown stop hook event", "event", string(ev))
+	}
+}
+
+// stopHookEventType returns the hook event to emit when /stop ends a turn.
+// Falls back to HookEventSessionEnded if nothing was configured.
+func (e *Engine) stopHookEventType() HookEventType {
+	if v, ok := e.stopHookEvent.Load().(HookEventType); ok {
+		return v
+	}
+	return HookEventSessionEnded
 }
 
 // SetMaxQueuedMessages sets the per-session message queue depth.
@@ -10745,8 +10781,11 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		slog.Info("agent session turn cancelled, session kept alive",
 			"session_key", sessionKey)
 
+		// The event name is configurable for backward compatibility: by
+		// default this stays "session.ended" so existing hook rules keep
+		// firing; users can opt in to the more precise "turn.cancelled".
 		e.hooks.Emit(HookEvent{
-			Event:      HookEventTurnCancelled,
+			Event:      e.stopHookEventType(),
 			SessionKey: sessionKey,
 		})
 

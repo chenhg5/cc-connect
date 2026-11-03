@@ -174,6 +174,25 @@ level = "info" # debug, info, warn, error
 # 推荐值：30–60。默认 0（禁用）。
 # max_turn_time_mins = 0  # default: disabled / 默认禁用
 
+# Which hook event fires when the user stops an agent turn with /stop.
+# /stop 用到的 hook 事件名。
+#
+#   "session.ended"  (default) — the historical name. /stop used to tear the
+#                      agent session down, so it always fired "session.ended".
+#                      Kept as the default so existing hook rules keep firing.
+#   "turn.cancelled" — the precise event for a gracefully cancelled turn: the
+#                      agent session stays alive and is reused by the next
+#                      message, so the turn ended but the session did not.
+#
+# Set this to "turn.cancelled" only if your hook rules were written for the
+# new behavior. Existing rules listening for "session.ended" keep working
+# either way — with the default they fire on /stop, with "turn.cancelled"
+# they fire when the session is actually torn down.
+# 只有当你的 hook 规则是按新行为写的，才需要设为 "turn.cancelled"。
+# 监听 "session.ended" 的旧规则在两种模式下都不会失效：默认模式下 /stop 触发它，
+# "turn.cancelled" 模式下则在会话真正被销毁时触发。
+# stop_hook_event = "session.ended"  # default / 默认值
+
 # Auto-reset the active session after the user has been inactive for a while.
 # Unlike idle_timeout_mins, this does not detect stuck agent execution. It
 # rotates to a fresh cc-connect session when the user comes back after being idle.
@@ -458,6 +477,10 @@ level = "info" # debug, info, warn, error
 #   message.sent       — agent reply sent / Agent 回复发送完成
 #   session.started    — agent session spawned / Agent 会话启动
 #   session.ended      — agent session stopped / Agent 会话结束
+#   turn.cancelled     — an agent turn was cancelled by /stop / 一轮对话被 /stop 取消
+#                        (only fired when stop_hook_event = "turn.cancelled";
+#                         see the stop_hook_event setting above / 仅当
+#                         stop_hook_event = "turn.cancelled" 时触发，见上文)
 #   cron.triggered     — cron job fires / 定时任务触发
 #   permission.requested — agent asks for permission / Agent 请求权限
 #   error              — an error occurs / 发生错误
