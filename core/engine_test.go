@@ -16825,3 +16825,55 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
 	}
 }
+
+// TestStopInteractiveSession_CancellerFallback_PreservesReplacedState pins the
+// compare-and-delete in normalCleanup: while the canceller path is waiting for
+// CancelTurn (interactiveMu released), /new can install a fresh state for the
+// same key. The fallback must close only the session it captured and must not
+// delete the replacement.
+func TestStopInteractiveSession_CancellerFallback_PreservesReplacedState(t *testing.T) {
+	sessA := newControllableSession("canceller-a")
+	sessB := newControllableSession("canceller-b")
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &controllableAgent{nextSession: sessB}, []Platform{p}, "", LangEnglish)
+
+	key := "test:user1"
+	stateA := &interactiveState{agentSession: sessA, platform: p, replyCtx: "ctx"}
+	stateB := &interactiveState{agentSession: sessB, platform: p, replyCtx: "ctx2"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = stateA
+	e.interactiveMu.Unlock()
+
+	sessA.cancelTurnFn = func() error {
+		// Simulate /new landing while CancelTurn is blocking.
+		e.interactiveMu.Lock()
+		e.interactiveStates[key] = stateB
+		e.interactiveMu.Unlock()
+		return fmt.Errorf("interrupt not confirmed")
+	}
+
+	if stopped := e.stopInteractiveSession(key, p, "ctx"); !stopped {
+		t.Fatal("stopInteractiveSession returned false; expected fallback cleanup to run")
+	}
+
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if current != stateB {
+		t.Fatalf("interactiveStates[%q] = %v, want the replacement state %v", key, current, stateB)
+	}
+	if !sessB.Alive() || sessB.closeFinished.Load() {
+		t.Fatal("replacement session was closed; only the captured session may be torn down")
+	}
+	// The captured session is closed asynchronously; wait for it (same pattern
+	// as TestCmdCancel_ForcesCloseAfterGracefulCancel).
+	deadline := time.After(2 * time.Second)
+	for !sessA.closeFinished.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("captured session was not closed on the canceller-failure fallback")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}

@@ -263,3 +263,38 @@ func TestTurnActiveTracksSendAndResult(t *testing.T) {
 		t.Fatal("turnActive still set after the turn's result event")
 	}
 }
+
+func TestEndCancelWait_OnlyClearsOwnWaiter(t *testing.T) {
+	cs, _ := newCancelTestSession(t, time.Second)
+
+	first := cs.beginCancelWait()
+	second := cs.beginCancelWait()
+	cs.endCancelWait(first)
+
+	cs.cancelMu.Lock()
+	got := cs.cancelWaiter
+	cs.cancelMu.Unlock()
+	if got != second {
+		t.Fatal("endCancelWait(first) cleared the newer waiter; second caller will time out")
+	}
+
+	cs.signalTurnTerminated()
+	select {
+	case <-second:
+	default:
+		t.Fatal("second waiter was not signalled")
+	}
+}
+
+func TestFinishReadLoop_ClearsTurnActive(t *testing.T) {
+	cs, _ := newCancelTestSession(t, time.Second)
+	cs.turnActive.Store(true)
+
+	waitErrCh := make(chan error, 1)
+	waitErrCh <- nil
+	cs.finishReadLoop(waitErrCh, nil)
+
+	if cs.turnActive.Load() {
+		t.Fatal("turnActive still true after the process exited")
+	}
+}

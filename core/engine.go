@@ -10708,6 +10708,14 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	}
 
 	// Stop unsolicited reader before touching state to avoid races.
+	//
+	// This call waits for the reader goroutine, and it runs while interactiveMu
+	// is held, so a stuck reader can stall other sessions for up to
+	// unsolicitedReaderStopTimeout (5s). That bound is deliberate: the reader
+	// must be stopped before the state below is captured, and releasing the
+	// lock to do it would let another goroutine take over this session (the
+	// same double-close hazard cleanupInteractiveState guards against with its
+	// expected-pointer check).
 	e.stopUnsolicitedReader(state)
 
 	state.mu.Lock()
@@ -10794,7 +10802,15 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 
 normalCleanup:
 	state.markStopped()
-	delete(e.interactiveStates, sessionKey)
+	// Only remove the entry if it is still the state this call captured.
+	// normalCleanup is reachable after interactiveMu was released around a
+	// blocking CancelTurn, so /new (or another /stop) may have installed a
+	// fresh state for the same key in the meantime. Deleting that one would
+	// orphan its live agent session and make the next message spawn a
+	// duplicate CLI process.
+	if current, ok := e.interactiveStates[sessionKey]; ok && current == state {
+		delete(e.interactiveStates, sessionKey)
+	}
 	e.interactiveMu.Unlock()
 
 	if pending != nil {

@@ -16,6 +16,7 @@ Complete guide to using cc-connect features.
 - [Voice Messages (STT)](#voice-messages-speech-to-text)
 - [Voice Reply (TTS)](#voice-reply-text-to-speech)
 - [Image and File Send-Back](#image-and-file-send-back)
+- [Lifecycle Hooks](#lifecycle-hooks)
 - [Scheduled Tasks (Cron)](#scheduled-tasks-cron)
 - [Shell Configuration](#shell-configuration)
 - [Multi-Bot Relay](#multi-bot-relay)
@@ -829,6 +830,27 @@ Notes:
 - The target platform also enforces its own file-size/type limit at delivery; the effective per-attachment ceiling is the smaller of that limit and `max_attachment_size_mb` (a file that passes cc-connect may still be rejected by the platform).
 
 ---
+
+## Lifecycle Hooks
+
+`[[hooks]]` rules run a shell command or POST to an HTTP endpoint when a lifecycle event fires. The event names are `message.received`, `message.sent`, `session.started`, `session.ended`, `turn.cancelled`, `cron.triggered`, `timer.triggered`, `permission.requested`, `error`, plus the wildcard `*`.
+
+### `/stop` and `turn.cancelled`
+
+For agents that support graceful cancellation (Claude Code and ACP-based agents), `/stop` interrupts the current turn but keeps the agent process and the conversation alive, so `/compress`, `/clear`, and `/resume` keep working afterwards. A stop is therefore no longer necessarily a session end.
+
+`stop_hook_event` selects which event `/stop` fires:
+
+```toml
+# Default: keeps the historical behaviour, existing rules keep firing.
+stop_hook_event = "session.ended"
+
+# Opt in: fire the precise event when the turn was cancelled and the
+# session was kept alive.
+stop_hook_event = "turn.cancelled"
+```
+
+In both modes `session.ended` is fired when the session really is torn down: the agent has no graceful cancel, or cancellation failed and the process was killed. A `/stop` fires exactly one of the two events, so rules matching `event = "*"` still receive one event per stop.
 
 ## Scheduled Tasks (Cron)
 

@@ -604,6 +604,9 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 	err := <-waitErrCh
 
 	cs.alive.Store(false)
+	// A dead process has no active turn; clear the flag so a later /stop
+	// cannot take the idle fast path against a stale true.
+	cs.turnActive.Store(false)
 	if err != nil {
 		stderrMsg := ""
 		if stderrBuf != nil {
@@ -1626,7 +1629,7 @@ func (cs *claudeSession) CancelTurn() error {
 	// installed after writeJSON returns could miss it and time out on a turn
 	// that actually stopped.
 	wait := cs.beginCancelWait()
-	defer cs.endCancelWait()
+	defer cs.endCancelWait(wait)
 
 	requestID := fmt.Sprintf("interrupt-%d", time.Now().UnixNano())
 	if err := cs.writeJSON(map[string]any{
@@ -1664,9 +1667,15 @@ func (cs *claudeSession) beginCancelWait() chan struct{} {
 }
 
 // endCancelWait drops the registered waiter, if this caller still owns it.
-func (cs *claudeSession) endCancelWait() {
+// With two concurrent cancels the later caller owns cancelWaiter; clearing it
+// unconditionally would make that caller wait out the full timeout for a
+// signal that can no longer arrive, and fall back to Close() on a turn that
+// actually stopped.
+func (cs *claudeSession) endCancelWait(ch chan struct{}) {
 	cs.cancelMu.Lock()
-	cs.cancelWaiter = nil
+	if cs.cancelWaiter == ch {
+		cs.cancelWaiter = nil
+	}
 	cs.cancelMu.Unlock()
 }
 
