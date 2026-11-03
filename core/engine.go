@@ -606,6 +606,10 @@ type interactiveState struct {
 	// conversation no longer exists ("No conversation found with session ID");
 	// the caller retries the turn once in a fresh session.
 	resumeFailed bool
+	// resumeRetryConsumed is set on the state created for that retry: a
+	// second missing-conversation error must reach the user instead of being
+	// silently swallowed by the recovery path again.
+	resumeRetryConsumed bool
 
 	// lastCompletedUserMessageTimeMs is the max platform user-message create time
 	// (ms) for which an agent turn has finished with EventResult.
@@ -4169,12 +4173,28 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			"session_key", interactiveKey, "agent_session", session.GetAgentSessionID())
 		session.SetAgentSessionID("", e.agent.Name())
 		sessions.Save()
-		e.cleanupInteractiveState(interactiveKey, state)
+		// Carry queued messages over to the fresh session instead of letting
+		// cleanup drop them with a "session reset" error — the recovery is
+		// meant to be transparent to the user.
+		state.mu.Lock()
+		queued := state.pendingMessages
+		state.pendingMessages = nil
+		state.mu.Unlock()
+		// Short teardown grace: the CLI already exited (the resume error
+		// killed it), so a hung process must not stall the retry.
+		e.cleanupInteractiveStateGrace(interactiveKey, retryCloseGrace, state)
 		state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
 		if state == nil || state.agentSession == nil {
+			if len(queued) > 0 {
+				e.notifyDroppedQueuedMessages(&interactiveState{pendingMessages: queued}, fmt.Errorf("session reset"))
+			}
 			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgError), "failed to restart agent session"))
 			return
 		}
+		state.mu.Lock()
+		state.pendingMessages = append(queued, state.pendingMessages...)
+		state.resumeRetryConsumed = true
+		state.mu.Unlock()
 	}
 
 	// Start unsolicited reader and arm the idle close timer BEFORE draining
@@ -4593,6 +4613,17 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 // to avoid race conditions where concurrent requests see an empty map while the
 // agent session is still being shut down (which can take up to 130s for Stop hooks).
 func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interactiveState) {
+	e.cleanupInteractiveStateGrace(sessionKey, closeTimeout, expected...)
+}
+
+// retryCloseGrace bounds the teardown on the missing-conversation recovery
+// path: the CLI has already exited (the resume error killed it), so a short
+// grace is enough and a hung process cannot stall the retry for minutes.
+const retryCloseGrace = 10 * time.Second
+
+// cleanupInteractiveStateGrace is cleanupInteractiveState with a caller-chosen
+// teardown budget (see closeAgentSessionBounded).
+func (e *Engine) cleanupInteractiveStateGrace(sessionKey string, grace time.Duration, expected ...*interactiveState) {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
 	if len(expected) > 0 && expected[0] != nil && state != expected[0] {
@@ -4644,7 +4675,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	// an empty map and reports "No execution in progress" while
 	// the agent session Close() is still blocking (up to 130s).
 	if agentSession != nil {
-		e.closeAgentSessionWithTimeout(sessionKey, agentSession, closePlatform, closeReplyCtx)
+		e.closeAgentSessionBounded(sessionKey, agentSession, closePlatform, closeReplyCtx, grace)
 	}
 
 	// Now delete the state from the map after the session is closed.
@@ -4880,7 +4911,7 @@ func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSes
 	finish := e.beginSessionClose(sessionKey)
 	go func() {
 		defer finish()
-		e.closeAgentSession(sessionKey, agentSession, platform, replyCtx)
+		e.closeAgentSession(sessionKey, agentSession, platform, replyCtx, closeTimeout)
 	}()
 }
 
@@ -4892,17 +4923,24 @@ func (e *Engine) closeAgentSessionAsync(sessionKey string, agentSession AgentSes
 // at all. In both cases the process may still be running with the session's
 // original credentials, so silence here is worse than a noisy warning.
 func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any) {
+	e.closeAgentSessionBounded(sessionKey, agentSession, platform, replyCtx, closeTimeout)
+}
+
+// closeAgentSessionBounded is closeAgentSessionWithTimeout with a caller-chosen
+// teardown budget. Recovery paths that expect the process to be dead already
+// pass a short grace so a hung CLI cannot stall the retry for minutes.
+func (e *Engine) closeAgentSessionBounded(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any, grace time.Duration) {
 	if agentSession == nil {
 		return
 	}
 	finish := e.beginSessionClose(sessionKey)
 	defer finish()
-	e.closeAgentSession(sessionKey, agentSession, platform, replyCtx)
+	e.closeAgentSession(sessionKey, agentSession, platform, replyCtx, grace)
 }
 
 // closeAgentSession performs the teardown itself. Callers must have registered
 // the in-flight close (beginSessionClose) first.
-func (e *Engine) closeAgentSession(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any) {
+func (e *Engine) closeAgentSession(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any, closeGrace time.Duration) {
 	if agentSession == nil {
 		return
 	}
@@ -4931,12 +4969,12 @@ func (e *Engine) closeAgentSession(sessionKey string, agentSession AgentSession,
 		if elapsed := time.Since(closeStart); elapsed >= slowAgentClose {
 			slog.Warn("slow agent session close", "elapsed", elapsed, "session", sessionKey)
 		}
-	case <-time.After(closeTimeout):
+	case <-time.After(closeGrace):
 		slog.Error("agent session close timed out, abandoning",
-			"timeout", closeTimeout, "session", sessionKey)
+			"timeout", closeGrace, "session", sessionKey)
 		e.markUnsafeResume(sessionKey)
 		e.notifySessionCloseFailure(sessionKey, platform, replyCtx,
-			fmt.Errorf("did not respond within %s", closeTimeout))
+			fmt.Errorf("did not respond within %s", closeGrace))
 	}
 }
 
@@ -6843,11 +6881,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// error to the user.
 			if isMissingConversationError(event.Error) {
 				state.mu.Lock()
+				firstFailure := !state.resumeRetryConsumed
 				state.resumeFailed = true
 				state.mu.Unlock()
-				slog.Warn("agent conversation missing; turn will be retried in a fresh session",
-					"session_key", sessionKey, "error", event.Error)
-				return
+				if firstFailure {
+					slog.Warn("agent conversation missing; turn will be retried in a fresh session",
+						"session_key", sessionKey, "error", event.Error)
+					return
+				}
+				// The retry already ran out: surface the error to the user.
 			}
 			state.mu.Lock()
 			// A per-turn error does not invalidate a live session's event

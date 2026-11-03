@@ -1089,6 +1089,26 @@ func claudeConfigHomeDir() string {
 	return filepath.Join(home, ".claude")
 }
 
+// buildSpawnEnv assembles the environment the spawned CLI will see: the
+// supervisor environment (minus CLAUDECODE), overlaid with the per-project
+// extraEnv (which wins on conflicts), cc-connect's hook hint, the chdir hint
+// under isolation, and the spawn allowlist filter. It is computed before the
+// --resume guard so the guard resolves CLAUDE_CONFIG_DIR with exactly the
+// precedence the spawned process uses (per-project env wins — see
+// core.MergeEnv), not the supervisor's.
+func buildSpawnEnv(workDir string, extraEnv []string, spawnOpts core.SpawnOptions) []string {
+	env := filterEnv(os.Environ(), "CLAUDECODE")
+	if len(extraEnv) > 0 {
+		env = core.MergeEnv(env, extraEnv)
+	}
+	env = core.MergeEnv(env, []string{"CC_CONNECT_PERMISSION_HOOK_SKIP=1"})
+	if spawnOpts.IsolationMode() && workDir != "" {
+		env = core.MergeEnv(env, []string{core.RunAsChdirEnv + "=" + workDir})
+	}
+	spawnOpts.WorkDir = workDir
+	return core.FilterEnvForSpawn(env, spawnOpts)
+}
+
 // configHomeFromEnv resolves the Claude Code config home from KEY=VALUE env
 // entries, honoring CLAUDE_CONFIG_DIR so that agents configured with a
 // per-project config home ([projects.agent.options.env]) resolve session
