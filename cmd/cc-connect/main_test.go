@@ -123,6 +123,33 @@ func TestApplyProjectStateOverride(t *testing.T) {
 	}
 }
 
+// In multi-workspace mode the working directory is decided per topic by the
+// binding table, and each workspace gets its own agent. A project-wide
+// work_dir_override left over from single-workspace mode must not be pushed
+// onto the global agent: it would shadow every binding, so /status reports the
+// same directory in all topics.
+func TestApplyProjectStateOverride_MultiWorkspaceKeepsConfiguredWorkDir(t *testing.T) {
+	baseDir := t.TempDir()
+	overrideDir := filepath.Join(t.TempDir(), "override")
+	if err := os.Mkdir(overrideDir, 0o755); err != nil {
+		t.Fatalf("mkdir override dir: %v", err)
+	}
+
+	store := core.NewProjectStateStore(filepath.Join(t.TempDir(), "projects", "demo.state.json"))
+	store.SetWorkDirOverride(overrideDir)
+
+	agent := &stubMainAgent{workDir: baseDir}
+	got := applyProjectStateOverrideForMode("demo", agent, baseDir, store, true)
+
+	if got != baseDir {
+		t.Fatalf("effective workDir = %q, want the configured %q", got, baseDir)
+	}
+	if agent.workDir != baseDir {
+		t.Fatalf("global agent workDir = %q, want %q; a project-wide override must not shadow the binding table",
+			agent.workDir, baseDir)
+	}
+}
+
 type stubProviderRefreshAgent struct {
 	stubMainAgent
 	providers  []core.ProviderConfig
@@ -308,13 +335,22 @@ func captureStderr(t *testing.T, fn func()) string {
 		os.Stderr = old
 	}()
 
+	// Drain concurrently. A Windows anonymous pipe buffers only 4KB, and
+	// printUsage emits its whole help text in a single Fprintf, so reading
+	// after fn returns deadlocks as soon as that output exceeds the buffer.
+	var buf bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(&buf, r)
+		done <- err
+	}()
+
 	fn()
 
 	if err := w.Close(); err != nil {
 		t.Fatalf("close writer: %v", err)
 	}
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, r); err != nil {
+	if err := <-done; err != nil {
 		t.Fatalf("copy stderr: %v", err)
 	}
 	if err := r.Close(); err != nil {

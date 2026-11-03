@@ -324,7 +324,7 @@ func relayVisibilityResponseLabel(mode, toName, response string) string {
 	if normalizeRelayVisibility(mode) == RelayVisibilitySummary {
 		return fmt.Sprintf("[%s] relay response ready (%d chars)", toName, len([]rune(response)))
 	}
-	return fmt.Sprintf("[%s] %s", toName, truncateRelay(response, 2000))
+	return fmt.Sprintf("[%s] %s", toName, response)
 }
 
 func (rm *RelayManager) relayContext(ctx context.Context) (context.Context, context.CancelFunc) {
