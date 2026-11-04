@@ -219,41 +219,10 @@ func newBinaryEnv(t *testing.T, agentType string, agentOpts map[string]any, prof
 	}
 
 	logPath := filepath.Join(home, "cc-connect.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatalf("blackbox: create log: %v", err)
-	}
-
-	cmd := exec.Command(bin, "--config", cfgPath)
-	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "HOME="+home)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	setProcessGroup(cmd)
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		t.Fatalf("blackbox: start %s: %v", bin, err)
-	}
-	proc := &binaryProcess{cmd: cmd, logPath: logPath, exited: make(chan struct{})}
-	go func() {
-		proc.exitErr = cmd.Wait()
-		_ = logFile.Close()
-		close(proc.exited)
-	}()
-
 	mp := bbplatform.New(agentType + "-mock")
 	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/bridge/ws", bridgePort)
-	client := connectWithRetry(t, mp, wsURL, token, profile, proc)
 
-	t.Cleanup(func() {
-		client.Close()
-		stopProcess(proc)
-		if t.Failed() {
-			t.Logf("blackbox: cc-connect log tail (%s):\n%s", logPath, proc.LogTail(80, token))
-		}
-	})
-
-	return &Env{
+	env := &Env{
 		T:         t,
 		Platform:  mp,
 		WorkDir:   workDir,
@@ -261,10 +230,76 @@ func newBinaryEnv(t *testing.T, agentType string, agentOpts map[string]any, prof
 		Backend:   BackendBinary,
 		Profile:   profile,
 		agentType: agentType,
-		proc:      proc,
 		token:     token,
 		bridgeURL: wsURL,
+		run:       &binaryRun{bin: bin, cfgPath: cfgPath, home: home, workDir: workDir, logPath: logPath},
 	}
+	env.startBinary()
+
+	t.Cleanup(func() {
+		env.stopBinary()
+		if t.Failed() {
+			t.Logf("blackbox: cc-connect log tail (%s):\n%s", logPath, env.proc.LogTail(80, token))
+		}
+	})
+	return env
+}
+
+// binaryRun is what is needed to (re)start the process of one Env.
+type binaryRun struct {
+	bin, cfgPath, home, workDir, logPath string
+	client                               *bbplatform.BridgeClient
+}
+
+// startBinary starts cc-connect and connects the bridge adapter. The log is
+// appended to, so a restart keeps the earlier output.
+func (e *Env) startBinary() {
+	t, r := e.T, e.run
+	t.Helper()
+	logFile, err := os.OpenFile(r.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("blackbox: open log: %v", err)
+	}
+	cmd := exec.Command(r.bin, "--config", r.cfgPath)
+	cmd.Dir = r.workDir
+	cmd.Env = append(os.Environ(), "HOME="+r.home)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	setProcessGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		t.Fatalf("blackbox: start %s: %v", r.bin, err)
+	}
+	proc := &binaryProcess{cmd: cmd, logPath: r.logPath, exited: make(chan struct{})}
+	go func() {
+		proc.exitErr = cmd.Wait()
+		_ = logFile.Close()
+		close(proc.exited)
+	}()
+	e.proc = proc
+	r.client = connectWithRetry(t, e.Platform, e.bridgeURL, e.token, e.Profile, proc)
+}
+
+func (e *Env) stopBinary() {
+	if e.run.client != nil {
+		e.run.client.Close()
+	}
+	if e.proc != nil {
+		stopProcess(e.proc)
+	}
+}
+
+// Restart stops the cc-connect process and starts it again on the same HOME,
+// data dir and config, then reconnects the bridge adapter. Messages recorded
+// so far stay on e.Platform. Only the binary backend can restart; other
+// backends skip the test.
+func (e *Env) Restart() {
+	e.T.Helper()
+	if e.Backend != BackendBinary {
+		e.T.Skipf("blackbox skip: Restart needs the binary backend (backend=%s)", e.Backend)
+	}
+	e.stopBinary()
+	e.startBinary()
 }
 
 func connectWithRetry(t *testing.T, mp *bbplatform.MockPlatform, wsURL, token string, profile bbplatform.Profile, proc *binaryProcess) *bbplatform.BridgeClient {

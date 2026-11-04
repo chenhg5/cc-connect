@@ -15,9 +15,9 @@ import (
 )
 
 // Agent-turn smoke against the scripted fake model (tests/blackbox/fakemodel):
-// the real Claude Code CLI and the real cc-connect, no model key, deterministic
-// answers. Each test runs on both backends and on the profiles where the
-// behaviour differs.
+// the real agent CLI and the real cc-connect, no model key, deterministic
+// answers. Each test runs per agent, on both backends and on the profiles
+// where the behaviour differs.
 
 const fakeTurnTimeout = 2 * time.Minute
 
@@ -25,15 +25,48 @@ const fakeTurnTimeout = 2 * time.Minute
 // side effect. The command text itself does not contain "42".
 const permCommand = "touch perm-proof.txt && echo $((6*7))"
 
-func forEachFake(t *testing.T, profiles []bbplatform.Profile, fn func(t *testing.T, env *helper.Env)) {
-	for _, b := range backends {
-		for _, pr := range profiles {
-			b, pr := b, pr
-			t.Run(string(b)+"/"+string(pr), func(t *testing.T) {
-				t.Parallel()
-				env := helper.NewEnvWithOptions(t, "claudecode", helper.Options{Backend: b, Profile: pr, FakeModel: true})
-				fn(t, env)
-			})
+// fakeAgent describes how one agent is run against the fake model.
+type fakeAgent struct {
+	name string
+	// opts are extra agent options for ordinary turns.
+	opts map[string]any
+	// permOpts and permDirective drive a tool call that must ask the user.
+	permOpts      map[string]any
+	permDirective string
+}
+
+var fakeAgents = []fakeAgent{
+	{name: "claudecode", permDirective: "FAKE:tool Bash "},
+	{
+		// Codex's default exec backend never asks for approval
+		// (approval_policy=never). Approval prompts exist on the app_server
+		// backend in suggest mode, and only when the model asks to run
+		// outside the sandbox, which FAKE:escalate does.
+		name:          "codex",
+		permOpts:      map[string]any{"backend": "app_server", "mode": "suggest"},
+		permDirective: "FAKE:escalate ",
+	},
+}
+
+func forEachFake(t *testing.T, profiles []bbplatform.Profile, fn func(t *testing.T, env *helper.Env, a fakeAgent)) {
+	forEachFakeWith(t, profiles, false, fn)
+}
+
+func forEachFakeWith(t *testing.T, profiles []bbplatform.Profile, perm bool, fn func(t *testing.T, env *helper.Env, a fakeAgent)) {
+	for _, a := range fakeAgents {
+		for _, b := range backends {
+			for _, pr := range profiles {
+				a, b, pr := a, b, pr
+				t.Run(a.name+"/"+string(b)+"/"+string(pr), func(t *testing.T) {
+					t.Parallel()
+					opts := a.opts
+					if perm {
+						opts = a.permOpts
+					}
+					env := helper.NewEnvWithOptions(t, a.name, helper.Options{Backend: b, Profile: pr, FakeModel: true, AgentOptions: opts})
+					fn(t, env, a)
+				})
+			}
 		}
 	}
 }
@@ -45,7 +78,7 @@ func fakeTurn(t *testing.T, env *helper.Env, text string) []*bbplatform.SentMess
 
 // TestFake_Reply: a message reaches the model and its answer reaches the user.
 func TestFake_Reply(t *testing.T) {
-	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileText, bbplatform.ProfileStreaming, bbplatform.ProfileFull}, func(t *testing.T, env *helper.Env) {
+	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileText, bbplatform.ProfileStreaming, bbplatform.ProfileFull}, func(t *testing.T, env *helper.Env, a fakeAgent) {
 		msgs := fakeTurn(t, env, "FAKE:reply PONG-42")
 		if !strings.Contains(helper.AnyText(msgs), "PONG-42") {
 			t.Fatalf("answer did not reach the user:\n%s", env.Platform.AllText())
@@ -60,7 +93,7 @@ func TestFake_Reply(t *testing.T) {
 // TestFake_ContextCarriesOver: the second turn sends the first turn to the
 // model (the session is resumed, not restarted).
 func TestFake_ContextCarriesOver(t *testing.T) {
-	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileText}, func(t *testing.T, env *helper.Env) {
+	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileText}, func(t *testing.T, env *helper.Env, a fakeAgent) {
 		fakeTurn(t, env, "FAKE:reply apple-7731")
 		msgs := fakeTurn(t, env, "FAKE:recall")
 		got := helper.AnyText(msgs)
@@ -73,7 +106,7 @@ func TestFake_ContextCarriesOver(t *testing.T) {
 // TestFake_StreamingPreview: on streaming profiles a long answer is previewed
 // while it streams, and the user ends with the complete answer.
 func TestFake_StreamingPreview(t *testing.T) {
-	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileStreaming, bbplatform.ProfileFull}, func(t *testing.T, env *helper.Env) {
+	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileStreaming, bbplatform.ProfileFull}, func(t *testing.T, env *helper.Env, a fakeAgent) {
 		msgs := fakeTurn(t, env, "FAKE:slow 20 tick")
 		var previews int
 		for _, m := range env.Platform.GetSentMessages() {
@@ -127,9 +160,9 @@ func answerPermission(t *testing.T, env *helper.Env, prompt *bbplatform.SentMess
 // TestFake_PermissionAllow: a tool call asks for permission; allowing it runs
 // the tool and the model receives its output.
 func TestFake_PermissionAllow(t *testing.T) {
-	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileText, bbplatform.ProfileButtons, bbplatform.ProfileFull}, func(t *testing.T, env *helper.Env) {
+	forEachFakeWith(t, []bbplatform.Profile{bbplatform.ProfileText, bbplatform.ProfileButtons, bbplatform.ProfileFull}, true, func(t *testing.T, env *helper.Env, a fakeAgent) {
 		start := env.Platform.MessageCount()
-		env.SendNoWait("FAKE:tool Bash " + permCommand)
+		env.SendNoWait(a.permDirective + permCommand)
 		prompt := waitForPermissionPrompt(t, env, start)
 		answerPermission(t, env, prompt, "allow")
 
@@ -145,9 +178,9 @@ func TestFake_PermissionAllow(t *testing.T) {
 
 // TestFake_PermissionDeny: denying the prompt keeps the tool from running.
 func TestFake_PermissionDeny(t *testing.T) {
-	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileText, bbplatform.ProfileFull}, func(t *testing.T, env *helper.Env) {
+	forEachFakeWith(t, []bbplatform.Profile{bbplatform.ProfileText, bbplatform.ProfileFull}, true, func(t *testing.T, env *helper.Env, a fakeAgent) {
 		start := env.Platform.MessageCount()
-		env.SendNoWait("FAKE:tool Bash " + permCommand)
+		env.SendNoWait(a.permDirective + permCommand)
 		prompt := waitForPermissionPrompt(t, env, start)
 		answerPermission(t, env, prompt, "deny")
 
@@ -161,6 +194,46 @@ func TestFake_PermissionDeny(t *testing.T) {
 	})
 }
 
+// TestFake_ToolOutputReachesModel: on each agent's default setup a shell
+// tool call runs and its output goes back to the model. Whether the agent
+// asks first depends on the agent (Claude Code auto-approves read-only
+// commands such as echo; Codex's exec backend never asks), so a prompt is
+// allowed if one appears but not required.
+func TestFake_ToolOutputReachesModel(t *testing.T) {
+	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileFull}, func(t *testing.T, env *helper.Env, a fakeAgent) {
+		start := env.Platform.MessageCount()
+		env.SendNoWait("FAKE:tool Bash echo $((6*7))")
+		done := waitAllowingPrompts(t, env, start, "TOOL_DONE")
+		if !strings.Contains(done.Text(), "42") {
+			t.Errorf("tool output did not reach the model: %q", done.Text())
+		}
+	})
+}
+
+// waitAllowingPrompts waits for a message containing want, allowing any
+// permission prompt that shows up on the way.
+func waitAllowingPrompts(t *testing.T, env *helper.Env, start int, want string) *bbplatform.SentMessage {
+	t.Helper()
+	answered := map[*bbplatform.SentMessage]bool{}
+	deadline := time.Now().Add(fakeTurnTimeout)
+	for time.Now().Before(deadline) {
+		msgs := env.Platform.GetSentMessages()
+		for i := start; i < len(msgs); i++ {
+			m := msgs[i]
+			if strings.Contains(m.Text(), want) {
+				return m
+			}
+			if strings.Contains(m.Text(), "Permission Request") && !answered[m] {
+				answered[m] = true
+				answerPermission(t, env, m, "allow")
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("blackbox timeout (%v): no message containing %q\n%s", fakeTurnTimeout, want, env.Platform.AllText())
+	return nil
+}
+
 // onePixelPNG is a valid 1x1 PNG.
 var onePixelPNG = []byte{
 	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -172,7 +245,7 @@ var onePixelPNG = []byte{
 
 // TestFake_ImageReachesModel: an image sent by the user arrives at the model.
 func TestFake_ImageReachesModel(t *testing.T) {
-	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileFull}, func(t *testing.T, env *helper.Env) {
+	forEachFake(t, []bbplatform.Profile{bbplatform.ProfileFull}, func(t *testing.T, env *helper.Env, a fakeAgent) {
 		start := env.Platform.MessageCount()
 		env.Platform.InjectMessageWithAttachments(helper.DefaultUser, helper.DefaultChat, "FAKE:reply got-image",
 			[]core.ImageAttachment{{MimeType: "image/png", Data: onePixelPNG, FileName: "dot.png"}}, nil)

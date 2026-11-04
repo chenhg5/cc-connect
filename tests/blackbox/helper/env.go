@@ -56,6 +56,7 @@ type Env struct {
 	proc      *binaryProcess
 	token     string
 	bridgeURL string
+	run       *binaryRun
 }
 
 // Backend selects how the cc-connect under test runs.
@@ -83,8 +84,12 @@ type Options struct {
 	// FakeModel points the agent at a scripted fake model server
 	// (tests/blackbox/fakemodel) instead of a real provider. Turns are then
 	// deterministic and need no model key; drive them with FAKE: directives
-	// in the message text. Only claudecode is supported so far.
+	// in the message text. Supported: claudecode (Anthropic Messages) and
+	// codex (OpenAI Responses).
 	FakeModel bool
+	// AgentOptions are merged into the agent's options (for example
+	// {"backend": "app_server", "mode": "suggest"} for codex).
+	AgentOptions map[string]any
 	// NoCredentials only requires the agent CLI on PATH, not model
 	// credentials. Use it for scenarios that never start an agent turn
 	// (slash commands such as /help or /version), so they can run anywhere.
@@ -188,8 +193,8 @@ func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
 	var fake *fakemodel.Server
 	switch {
 	case o.FakeModel:
-		if agentType != "claudecode" {
-			t.Skipf("blackbox skip: the fake model only speaks the Anthropic Messages API (agent=%s)", agentType)
+		if agentType != "claudecode" && agentType != "codex" {
+			t.Skipf("blackbox skip: the fake model speaks the Anthropic and OpenAI Responses APIs only (agent=%s)", agentType)
 		}
 		requireAgentBinary(t, agentType)
 		fake = fakemodel.New()
@@ -212,14 +217,22 @@ func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
 		opts["mode"] = "force"
 	}
 
+	for k, v := range o.AgentOptions {
+		opts[k] = v
+	}
+
 	if fake == nil {
 		applyProviderFromEnv(t, agentType, opts)
+	} else if agentType == "codex" {
+		// cc-connect writes the provider into $CODEX_HOME/config.toml and
+		// auth.json; keep that away from the developer's ~/.codex.
+		opts["codex_home"] = lingeringTempDir(t, "codex-home-")
 	}
 
 	if backend == BackendBinary {
 		provider := providerFromEnv(agentType)
 		if fake != nil {
-			provider = fakeProvider(fake).toml()
+			provider = fakeProvider(fake, agentType).toml()
 		}
 		env := newBinaryEnv(t, agentType, opts, profile, provider)
 		env.FakeModel = fake
@@ -238,7 +251,7 @@ func NewEnvWithOptions(t *testing.T, agentType string, o Options) *Env {
 		if !ok {
 			t.Fatalf("blackbox: %s cannot take a provider, so it cannot use the fake model", agentType)
 		}
-		pc := fakeProvider(fake)
+		pc := fakeProvider(fake, agentType)
 		ps.SetProviders([]core.ProviderConfig{pc.core()})
 		ps.SetActiveProvider(pc.Name)
 	} else {
@@ -423,20 +436,54 @@ func requireAgentBinary(t *testing.T, agentType string) {
 	// the Cursor IDE "cursor" binary.
 	bin := agentBinName(agentType)
 	if bin == "" {
-		t.Skipf("blackbox skip: unknown agent type %q", agentType)
+		skipOrFail(t, agentType, "unknown agent type %q", agentType)
+		return
 	}
 	if _, err := exec.LookPath(bin); err != nil {
 		// For cursor, also accept if the "cursor" IDE binary is present
 		// (some setups install it under that name instead).
 		if agentType == "cursor" {
 			if _, err2 := exec.LookPath("cursor"); err2 != nil {
-				t.Skipf("blackbox skip: cursor agent binary %q not in PATH (also checked 'cursor')", bin)
+				skipOrFail(t, agentType, "cursor agent binary %q not in PATH (also checked 'cursor')", bin)
 			}
 		} else {
-			t.Skipf("blackbox skip: %s binary %q not in PATH", agentType, bin)
+			skipOrFail(t, agentType, "%s binary %q not in PATH", agentType, bin)
 		}
 	}
+}
 
+// RequiredAgents returns the agents listed in CC_BLACKBOX_REQUIRE_AGENTS
+// (comma separated). A release smoke run sets it so that a missing agent
+// CLI fails the run instead of silently skipping its scenarios.
+func RequiredAgents() []string {
+	var out []string
+	for _, a := range strings.Split(os.Getenv("CC_BLACKBOX_REQUIRE_AGENTS"), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func isRequiredAgent(agentType string) bool {
+	for _, a := range RequiredAgents() {
+		if strings.EqualFold(a, agentType) {
+			return true
+		}
+	}
+	return false
+}
+
+// skipOrFail skips the test, unless agentType is required by
+// CC_BLACKBOX_REQUIRE_AGENTS, in which case the missing prerequisite is a
+// failure: a release gate must not pass because its tests did not run.
+func skipOrFail(t *testing.T, agentType, format string, args ...any) {
+	t.Helper()
+	msg := fmt.Sprintf(format, args...)
+	if isRequiredAgent(agentType) {
+		t.Fatalf("blackbox: required agent %s unavailable (CC_BLACKBOX_REQUIRE_AGENTS): %s", agentType, msg)
+	}
+	t.Skipf("blackbox skip: %s", msg)
 }
 
 // requireCredentials skips when the model credentials for agentType are
@@ -613,23 +660,76 @@ func firstNonEmpty(vals ...string) string {
 // fakeProviderConfig is the provider that points an agent at the fake model.
 type fakeProviderConfig struct {
 	Name, APIKey, BaseURL string
-	Env                   map[string]string
+	// WireAPI is the Codex wire format ("responses"); empty for Claude Code.
+	WireAPI string
+	Env     map[string]string
 }
 
-func fakeProvider(fake *fakemodel.Server) fakeProviderConfig {
-	return fakeProviderConfig{
+func fakeProvider(fake *fakemodel.Server, agentType string) fakeProviderConfig {
+	p := fakeProviderConfig{
 		Name:    "blackbox-fake",
 		APIKey:  "sk-blackbox-fake",
 		BaseURL: fake.URL(),
 		// Keep loopback traffic off any HTTP(S) proxy in the environment.
 		Env: map[string]string{"NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"},
 	}
+	if agentType == "codex" {
+		// Codex appends /responses to the provider base URL.
+		p.BaseURL = fake.URL() + "/v1"
+		p.WireAPI = "responses"
+	}
+	return p
 }
 
 func (p fakeProviderConfig) core() core.ProviderConfig {
-	return core.ProviderConfig{Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL, Env: p.Env}
+	return core.ProviderConfig{Name: p.Name, APIKey: p.APIKey, BaseURL: p.BaseURL, Env: p.Env, CodexWireAPI: p.WireAPI}
 }
 
 func (p fakeProviderConfig) toml() map[string]any {
-	return map[string]any{"name": p.Name, "api_key": p.APIKey, "base_url": p.BaseURL, "env": p.Env}
+	m := map[string]any{"name": p.Name, "api_key": p.APIKey, "base_url": p.BaseURL, "env": p.Env}
+	if p.WireAPI != "" {
+		m["codex"] = map[string]any{"wire_api": p.WireAPI}
+	}
+	return m
+}
+
+// lingeringTempDir is like t.TempDir for directories that a child process may
+// still write to for a moment after the test stops it. Codex, for example,
+// finishes a background plugin clone in $CODEX_HOME after its session ends,
+// which makes t.TempDir's cleanup fail with "directory not empty". The
+// directory is removed with retries, and a leftover is only logged.
+func lingeringTempDir(t *testing.T, prefix string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(scratchRoot(t), prefix)
+	if err != nil {
+		t.Fatalf("blackbox: temp dir: %v", err)
+	}
+	t.Cleanup(func() {
+		var err error
+		for i := 0; i < 50; i++ {
+			if err = os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Logf("blackbox: could not remove %s after 5s: %v", dir, err)
+	})
+	return dir
+}
+
+// scratchRoot is where lingeringTempDir creates directories: under the user
+// cache dir rather than the system temp dir, because Codex refuses to set up
+// its helper binaries when CODEX_HOME is under /tmp and reports that on every
+// failed turn, which no real deployment does.
+func scratchRoot(t *testing.T) string {
+	t.Helper()
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	root := filepath.Join(base, "cc-connect-blackbox")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return ""
+	}
+	return root
 }
