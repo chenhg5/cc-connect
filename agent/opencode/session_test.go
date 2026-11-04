@@ -3,8 +3,10 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -316,9 +318,9 @@ func TestHandleStepDuplicateEventResultPrevented(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s := &opencodeSession{
-		events:     make(chan core.Event, 2),
-		ctx:        ctx,
-		resultSent: atomic.Bool{},
+		events:       make(chan core.Event, 2),
+		ctx:          ctx,
+		terminalSent: atomic.Bool{},
 	}
 
 	s.handleStepFinish(raw)
@@ -516,6 +518,37 @@ func TestOpencodeSessionSuccessfulTurnEmitsOneResult(t *testing.T) {
 	assertTerminalEvents(t, collectFixtureEvents(t, s), core.EventResult)
 }
 
+// A descendant keeps only stderr open after the CLI exits. WaitDelay must
+// bound the drain without turning a successful exit into an error.
+func TestOpencodeSessionWaitDelayPreservesTerminalEvent(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want core.EventType
+	}{
+		{"stderr-descendant", core.EventResult},
+		{"stderr-descendant-exit7", core.EventError},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			s := newExecutableFixtureSession(t, t.TempDir(), tc.mode)
+			if err := s.Send("finish", "", nil, nil); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			events := collectFixtureEvents(t, s)
+			assertTerminalEvents(t, events, tc.want)
+			if tc.want == core.EventError {
+				for _, event := range events {
+					if event.Type == core.EventError {
+						var exitErr *exec.ExitError
+						if !errors.As(event.Error, &exitErr) || exitErr.ExitCode() != 7 {
+							t.Errorf("error = %v, want exit status 7", event.Error)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestOpenCodeExecutableFixture is run as a child executable by Send.
 func TestOpenCodeExecutableFixture(t *testing.T) {
 	mode := os.Getenv("CC_OPENCODE_TEST_FIXTURE")
@@ -531,6 +564,23 @@ func TestOpenCodeExecutableFixture(t *testing.T) {
 		content, _ := json.Marshal(struct{ CWD, PWD string }{cwd, os.Getenv("PWD")})
 		line, _ := json.Marshal(map[string]any{"type": "text", "part": map[string]string{"text": string(content)}})
 		fmt.Println(string(line))
+	case "hold-stderr":
+		time.Sleep(10 * time.Second)
+	case "stderr-descendant", "stderr-descendant-exit7":
+		child := exec.Command(os.Args[0], "-test.run=^TestOpenCodeExecutableFixture$")
+		child.Env = append(os.Environ(), "CC_OPENCODE_TEST_FIXTURE=hold-stderr")
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(2)
+		}
+		if err := child.Process.Release(); err != nil {
+			os.Exit(2)
+		}
+		// No step_finish: the result must come from readLoop after cmd.Wait.
+		fmt.Println(`{"type":"text","part":{"text":"done"}}`)
+		if mode == "stderr-descendant-exit7" {
+			os.Exit(7)
+		}
 	case "exit7":
 		os.Exit(7)
 	case "json-error":

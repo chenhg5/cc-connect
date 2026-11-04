@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -248,7 +249,9 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		s.expectingContinue.Store(false)
 		return
 	}
-	if waitErr != nil {
+	// A successful CLI may leave a descendant holding stderr open.
+	// WaitDelay bounds that drain; it does not indicate a failed exit.
+	if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
 		slog.Error("opencodeSession: process exited with error", "error", waitErr)
 		s.sendTerminalEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("opencodeSession: process exit: %w", waitErr)})
 		return
