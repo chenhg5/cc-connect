@@ -56,14 +56,16 @@ type Agent struct {
 
 	timeout time.Duration
 
-	callbackEnabled bool
-	callbackAuth    bool
-	callbackAddr    string
-	callbackBase    string
-	replyToken      string // never log
+	callbackEnabled    bool
+	callbackAuth       bool
+	callbackInsecureOK bool
+	callbackAddr       string
+	callbackBase       string
+	replyToken         string // never log
 
 	outboxEnabled  bool
 	explicitOutbox string
+	pathAllow      []string
 
 	embedImages   bool
 	maxEmbedBytes int
@@ -86,22 +88,24 @@ func New(opts map[string]any) (core.Agent, error) {
 		return nil, err
 	}
 	a := &Agent{
-		webhookURL:      cfg.webhookURL,
-		apiKey:          cfg.apiKey,
-		authHeader:      cfg.authHeader,
-		keyEnv:          cfg.keyEnv,
-		workDir:         cfg.workDir,
-		timeout:         cfg.timeout,
-		callbackEnabled: cfg.callbackEnabled,
-		callbackAuth:    cfg.callbackAuth,
-		callbackAddr:    cfg.callbackAddr,
-		outboxEnabled:   cfg.outboxEnabled,
-		explicitOutbox:  cfg.explicitOutbox,
-		embedImages:     cfg.embedImages,
-		maxEmbedBytes:   cfg.maxEmbedBytes,
-		client:          &http.Client{Timeout: webhookHTTPTimeout},
-		waiters:         make(map[string]chan replyMsg),
-		done:            make(map[string]time.Time),
+		webhookURL:         cfg.webhookURL,
+		apiKey:             cfg.apiKey,
+		authHeader:         cfg.authHeader,
+		keyEnv:             cfg.keyEnv,
+		workDir:            cfg.workDir,
+		timeout:            cfg.timeout,
+		callbackEnabled:    cfg.callbackEnabled,
+		callbackAuth:       cfg.callbackAuth,
+		callbackInsecureOK: cfg.callbackInsecureOK,
+		callbackAddr:       cfg.callbackAddr,
+		outboxEnabled:      cfg.outboxEnabled,
+		explicitOutbox:     cfg.explicitOutbox,
+		pathAllow:          cfg.pathAllow,
+		embedImages:        cfg.embedImages,
+		maxEmbedBytes:      cfg.maxEmbedBytes,
+		client:             &http.Client{Timeout: webhookHTTPTimeout},
+		waiters:            make(map[string]chan replyMsg),
+		done:               make(map[string]time.Time),
 	}
 	if cfg.callbackAuth {
 		token, err := randomHex(32)
@@ -265,20 +269,22 @@ func (a *Agent) authorized(r *http.Request) bool {
 }
 
 type parsedConfig struct {
-	webhookURL      string
-	webhookHost     string
-	apiKey          string
-	authHeader      string
-	keyEnv          string
-	workDir         string
-	timeout         time.Duration
-	callbackEnabled bool
-	callbackAuth    bool
-	callbackAddr    string
-	outboxEnabled   bool
-	explicitOutbox  string
-	embedImages     bool
-	maxEmbedBytes   int
+	webhookURL         string
+	webhookHost        string
+	apiKey             string
+	authHeader         string
+	keyEnv             string
+	workDir            string
+	timeout            time.Duration
+	callbackEnabled    bool
+	callbackAuth       bool
+	callbackAddr       string
+	outboxEnabled      bool
+	explicitOutbox     string
+	embedImages        bool
+	maxEmbedBytes      int
+	callbackInsecureOK bool
+	pathAllow          []string
 }
 
 func parseOptions(opts map[string]any) (parsedConfig, error) {
@@ -341,13 +347,32 @@ func parseOptions(opts map[string]any) (parsedConfig, error) {
 	if v, ok := boolFromAny(opts["callback_auth"]); ok {
 		cfg.callbackAuth = v
 	}
+	if v, ok := boolFromAny(opts["callback_insecure_ok"]); ok {
+		cfg.callbackInsecureOK = v
+	}
 	cfg.callbackAddr = defaultCallback
 	if s, _ := opts["callback_addr"].(string); strings.TrimSpace(s) != "" {
 		cfg.callbackAddr = strings.TrimSpace(s)
 	}
 	if cfg.callbackEnabled {
-		if _, _, err := net.SplitHostPort(cfg.callbackAddr); err != nil {
+		host, _, err := net.SplitHostPort(cfg.callbackAddr)
+		if err != nil {
 			return parsedConfig{}, fmt.Errorf("grokbot: callback_addr: %w", err)
+		}
+		if !cfg.callbackAuth && !isLoopbackBindHost(host) && !cfg.callbackInsecureOK {
+			return parsedConfig{}, fmt.Errorf("grokbot: callback_auth=false cannot listen on %s; use a loopback callback_addr or set callback_insecure_ok = true", cfg.callbackAddr)
+		}
+	}
+	if v, ok := opts["reply_path_allow"]; ok {
+		list, err := stringList(v)
+		if err != nil {
+			return parsedConfig{}, err
+		}
+		for _, dir := range list {
+			dir = expandHome(strings.TrimSpace(dir))
+			if dir != "" {
+				cfg.pathAllow = append(cfg.pathAllow, dir)
+			}
 		}
 	}
 
@@ -446,11 +471,49 @@ func expandHome(path string) string {
 }
 
 func localHost(host string) bool {
+	return isLoopbackBindHost(host)
+}
+
+// isLoopbackBindHost reports whether a callback bind stays on the local machine.
+// Empty host, 0.0.0.0, and :: listen on every interface.
+func isLoopbackBindHost(host string) bool {
+	host = strings.Trim(host, "[]")
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return false
+	}
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func stringList(v any) ([]string, error) {
+	switch t := v.(type) {
+	case string:
+		if strings.TrimSpace(t) == "" {
+			return nil, nil
+		}
+		var out []string
+		for _, part := range strings.Split(t, ",") {
+			out = append(out, part)
+		}
+		return out, nil
+	case []string:
+		return t, nil
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			s, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("grokbot: reply_path_allow entries must be strings")
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("grokbot: reply_path_allow must be a list of directories")
+	}
 }
 
 func bearerToken(header string) string {

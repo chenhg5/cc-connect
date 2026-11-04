@@ -83,7 +83,9 @@ type = "weixin"
 | `timeout` | `6m` | 等待回复的时间。Go duration（`6m`、`180s`）。也可以改用 `timeout_mins`。 |
 | `callback` | `true` | 监听 `POST /outbox/<id>`。 |
 | `callback_addr` | `127.0.0.1:9876` | 监听地址。`127.0.0.1:0` 会选一个空闲端口，并写进 `reply.http`。 |
-| `callback_auth` | `true` | 要求 `Authorization: Bearer <reply.token>`（或 `X-Grokbot-Token`）。token 每次进程启动随机生成，只出现在 webhook 正文里。 |
+| `callback_auth` | `true` | 要求 `Authorization: Bearer <reply.token>`（或 `X-Grokbot-Token`）。token 每次进程启动随机生成，只出现在 webhook 正文里。设为 `false` 时，除非 `callback_addr` 是回环地址，或显式 `callback_insecure_ok = true`，否则拒绝启动。 |
+| `callback_insecure_ok` | `false` | 允许在非回环地址上关闭 `callback_auth` 的显式开关。 |
+| `reply_path_allow` | 空 | 回复还可以读取的额外目录。默认只允许 `work_dir`、`<work_dir>/.cc-connect/attachments` 和 outbox。 |
 | `outbox` | `true` | 同时接受一个 JSON 文件。 |
 | `outbox_dir` | `<work_dir>/.cc-connect/grokbot/outbox` | `reply.file` 所在目录，权限 `0700`。 |
 | `embed_images` | `false` | 入站图片同时带上 `data_base64`。Routine 在云端、读不到本机 `path` 时打开。 |
@@ -133,7 +135,9 @@ POST 到 `reply.http`，或原子写入 `reply.file`（先写临时文件再 `re
 }
 ```
 
-`content` 等同于 `text`。`{"error":"model overloaded"}` 会结束这一轮，并把错误发到聊天里。每张图片或文件要么是 cc-connect 进程读得到的本机路径，要么是 `data_base64`。不会去拉取远程 URL。单个附件上限 50 MiB。
+`content` 等同于 `text`。`{"error":"model overloaded"}` 会结束这一轮，并把错误发到聊天里。每张图片或文件要么是 `data_base64`，要么是本机路径。解析符号链接之后，路径必须落在 `work_dir`、`<work_dir>/.cc-connect/attachments`、outbox 目录或 `reply_path_allow` 之内。主目录、SSH 密钥、配置文件等其他路径会让这一轮失败，内容不会被读进聊天。不会去拉取远程 URL。单个附件上限 50 MiB。扩展名无法识别时用内容嗅探（`http.DetectContentType`）判断类型，而不是当成 `image/png`。
+
+`reply.file` 应先写临时文件再 rename。大约一秒后仍然不是合法 JSON 的文件会让这一轮直接失败，而不是一直等到总超时。轮次已经结束后才到达的回调返回 HTTP 409，而不是 “unknown id”。这种情况下正文不合法仍然是 HTTP 400。
 
 默认 `callback_auth = true`，回传时要带上 token：
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -262,7 +263,8 @@ func TestSend_EmbedImagesOffKeepsPathOnly(t *testing.T) {
 }
 
 func TestSend_FileOutboxAndPathImage(t *testing.T) {
-	outPNG := filepath.Join(t.TempDir(), "chart.png")
+	work := t.TempDir()
+	outPNG := filepath.Join(work, "chart.png")
 	require.NoError(t, os.WriteFile(outPNG, tinyPNG(t), 0o600))
 
 	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +282,7 @@ func TestSend_FileOutboxAndPathImage(t *testing.T) {
 
 	opts := baseOpts(t)
 	opts["webhook_url"] = hook.URL
+	opts["work_dir"] = work
 	opts["timeout"] = "3s"
 	ag := mustAgent(t, opts)
 	sess, err := ag.StartSession(context.Background(), "s1")
@@ -582,7 +585,7 @@ func TestStop_ClosesCallback(t *testing.T) {
 }
 
 func TestParseReplyBody_MissingImage(t *testing.T) {
-	msg, err := parseReplyBody([]byte(`{"text":"","images":["/no/such/image.png"]}`))
+	msg, err := parseReplyBody([]byte(`{"text":"","images":["/no/such/image.png"]}`), nil)
 	require.NoError(t, err)
 	require.Error(t, msg.err)
 }
@@ -639,6 +642,197 @@ func readEvents(t *testing.T, ch <-chan core.Event, n int) []core.Event {
 		}
 	}
 	return out
+}
+
+func TestReplyPath_RejectsOutsideAndSymlink(t *testing.T) {
+	work := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "id_rsa")
+	const secretBody = "SECRET-KEY-MATERIAL"
+	require.NoError(t, os.WriteFile(secret, []byte(secretBody), 0o600))
+	require.NoError(t, os.Symlink(secret, filepath.Join(work, "link")))
+
+	for _, path := range []string{secret, filepath.Join(work, "link")} {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body webhookBody
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				payload, err := json.Marshal(map[string]any{
+					"text":   "look",
+					"images": []string{path},
+				})
+				require.NoError(t, err)
+				w.WriteHeader(http.StatusNoContent)
+				go writeOutbox(t, body.Reply.File, payload)
+			}))
+			t.Cleanup(hook.Close)
+			opts := baseOpts(t)
+			opts["webhook_url"] = hook.URL
+			opts["work_dir"] = work
+			opts["timeout"] = "3s"
+			ag := mustAgent(t, opts)
+			sess, err := ag.StartSession(context.Background(), "s")
+			require.NoError(t, err)
+			require.NoError(t, sess.Send("hi", "", nil, nil))
+			ev := readEvents(t, sess.Events(), 1)[0]
+			require.Equal(t, core.EventError, ev.Type)
+			require.Error(t, ev.Error)
+			require.Contains(t, ev.Error.Error(), "outside")
+			require.NotContains(t, ev.Error.Error(), secretBody)
+		})
+	}
+}
+
+func TestReplyPath_AllowlistAndOutboxAndSniff(t *testing.T) {
+	work := t.TempDir()
+	allowed := t.TempDir()
+	pngPath := filepath.Join(allowed, "shot.unknown")
+	require.NoError(t, os.WriteFile(pngPath, tinyPNG(t), 0o600))
+
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body webhookBody
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		payload, err := json.Marshal(map[string]any{"text": "sniffed", "images": []string{pngPath}})
+		require.NoError(t, err)
+		w.WriteHeader(http.StatusNoContent)
+		go writeOutbox(t, body.Reply.File, payload)
+	}))
+	t.Cleanup(hook.Close)
+
+	opts := baseOpts(t)
+	opts["webhook_url"] = hook.URL
+	opts["work_dir"] = work
+	opts["reply_path_allow"] = []string{allowed}
+	opts["timeout"] = "3s"
+	ag := mustAgent(t, opts)
+	sess, err := ag.StartSession(context.Background(), "s")
+	require.NoError(t, err)
+	require.NoError(t, sess.Send("hi", "", nil, nil))
+	ev := readEvents(t, sess.Events(), 2)
+	result := ev[len(ev)-1]
+	require.Equal(t, core.EventResult, result.Type)
+	require.Len(t, result.Images, 1)
+	require.Equal(t, "image/png", result.Images[0].MimeType)
+	require.Equal(t, tinyPNG(t), result.Images[0].Data)
+
+	// A text file with an unknown extension must not be labeled image/png.
+	note := filepath.Join(work, "note.dat")
+	require.NoError(t, os.WriteFile(note, []byte("hello from a text file\n"), 0o600))
+	roots := ag.allowedRoots()
+	f, err := fileFromPath(note, roots)
+	require.NoError(t, err)
+	require.NotEqual(t, "image/png", f.MimeType)
+	require.Contains(t, f.MimeType, "text/plain")
+}
+
+func TestOutboxInvalidJSONFailsTurn(t *testing.T) {
+	logs := captureLogs(t)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body webhookBody
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		w.WriteHeader(http.StatusNoContent)
+		go writeOutbox(t, body.Reply.File, []byte(`{"text":`))
+	}))
+	t.Cleanup(hook.Close)
+	opts := baseOpts(t)
+	opts["webhook_url"] = hook.URL
+	opts["timeout"] = "30s"
+	ag := mustAgent(t, opts)
+	sess, err := ag.StartSession(context.Background(), "s")
+	require.NoError(t, err)
+	start := time.Now()
+	require.NoError(t, sess.Send("hi", "", nil, nil))
+	elapsed := time.Since(start)
+	ev := readEvents(t, sess.Events(), 1)[0]
+	require.Equal(t, core.EventError, ev.Type)
+	require.Error(t, ev.Error)
+	require.Contains(t, ev.Error.Error(), "not valid JSON")
+	require.Less(t, elapsed, 8*time.Second)
+	require.Greater(t, elapsed, 400*time.Millisecond)
+	require.Contains(t, logs.String(), "not valid JSON")
+}
+
+func TestHandleOutbox_LateAndInvalidReply(t *testing.T) {
+	opts := baseOpts(t)
+	opts["callback"] = true
+	opts["callback_addr"] = "127.0.0.1:0"
+	opts["callback_auth"] = false
+	ag := mustAgent(t, opts)
+
+	late, err := http.Post(ag.callbackBase+"/outbox/"+newID(), "application/json", strings.NewReader(`{"text":"late"}`))
+	require.NoError(t, err)
+	defer late.Body.Close()
+	require.Equal(t, http.StatusConflict, late.StatusCode)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(late.Body).Decode(&body))
+	require.Contains(t, fmt.Sprint(body["error"]), "finished")
+
+	bad, err := http.Post(ag.callbackBase+"/outbox/"+newID(), "application/json", strings.NewReader(`{"text":`))
+	require.NoError(t, err)
+	bad.Body.Close()
+	require.Equal(t, http.StatusBadRequest, bad.StatusCode)
+}
+
+func TestWaitRegistered_TakesReplyAlreadyQueued(t *testing.T) {
+	opts := baseOpts(t)
+	opts["callback"] = false
+	ag := mustAgent(t, opts)
+	id := newID()
+	ch := ag.register(id)
+	require.True(t, ag.deliver(id, replyMsg{text: "in time"}))
+	msg, err := ag.waitRegistered(context.Background(), id, ch, time.Nanosecond)
+	require.NoError(t, err)
+	require.Equal(t, "in time", msg.text)
+}
+
+func TestCallbackAuthFalse_RefusesPublicBind(t *testing.T) {
+	opts := baseOpts(t)
+	opts["callback"] = true
+	opts["callback_auth"] = false
+	opts["callback_addr"] = "0.0.0.0:0"
+	_, err := New(opts)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "callback_auth=false")
+	require.Contains(t, err.Error(), "callback_insecure_ok")
+}
+
+func TestCallbackAuthFalse_OptInAndSend(t *testing.T) {
+	opts := baseOpts(t)
+	opts["callback"] = true
+	opts["callback_auth"] = false
+	opts["callback_insecure_ok"] = true
+	opts["callback_addr"] = "0.0.0.0:0"
+	ag := mustAgent(t, opts)
+	resp, err := http.Get(ag.callbackBase + "/health")
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var token string
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body webhookBody
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		token = body.Reply.Token
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"success":true,"runUuid":"run-open"}`)
+		go postReply(t, body.Reply, `{"text":"open callback"}`)
+	}))
+	t.Cleanup(hook.Close)
+	// The public listener above proved opt-in bind. The send uses loopback,
+	// which is allowed without the opt-in flag.
+	opts = baseOpts(t)
+	opts["webhook_url"] = hook.URL
+	opts["callback"] = true
+	opts["callback_auth"] = false
+	opts["callback_addr"] = "127.0.0.1:0"
+	opts["timeout"] = "5s"
+	ag = mustAgent(t, opts)
+	sess, err := ag.StartSession(context.Background(), "s")
+	require.NoError(t, err)
+	require.NoError(t, sess.Send("hi", "", nil, nil))
+	require.Empty(t, token)
+	ev := readEvents(t, sess.Events(), 2)
+	require.Equal(t, "open callback", ev[len(ev)-1].Content)
 }
 
 func tinyPNG(t *testing.T) []byte {

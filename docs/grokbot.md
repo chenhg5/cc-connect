@@ -83,7 +83,9 @@ Start cc-connect only after `GROK_BOT_WEBHOOK_KEY` is set. A missing URL or an e
 | `timeout` | `6m` | How long to wait for the reply. A Go duration (`6m`, `180s`). `timeout_mins` is accepted instead. |
 | `callback` | `true` | Listen for `POST /outbox/<id>`. |
 | `callback_addr` | `127.0.0.1:9876` | Bind address. `127.0.0.1:0` picks a free port and puts it in `reply.http`. |
-| `callback_auth` | `true` | Require `Authorization: Bearer <reply.token>` (or `X-Grokbot-Token`). The token is random per process and is sent only inside the webhook body. |
+| `callback_auth` | `true` | Require `Authorization: Bearer <reply.token>` (or `X-Grokbot-Token`). The token is random per process and is sent only inside the webhook body. `false` is refused unless `callback_addr` is loopback, or `callback_insecure_ok = true`. |
+| `callback_insecure_ok` | `false` | Explicit opt-in for `callback_auth = false` on a non-loopback bind. |
+| `reply_path_allow` | empty | Extra directories a reply may read, besides `work_dir`, `<work_dir>/.cc-connect/attachments`, and the outbox. |
 | `outbox` | `true` | Also accept a JSON file. |
 | `outbox_dir` | `<work_dir>/.cc-connect/grokbot/outbox` | Directory for `reply.file`. Created mode `0700`. |
 | `embed_images` | `false` | Also include `data_base64` on inbound images. Turn this on when the routine runs in the cloud and cannot read `path`. |
@@ -133,7 +135,9 @@ POST it to `reply.http` or write it atomically to `reply.file` (`write temp` + `
 }
 ```
 
-`content` is accepted as an alias of `text`. `{"error":"model overloaded"}` ends the turn and shows the error in chat. Each image or file must be a local path the cc-connect process can read, or `data_base64`. Remote URLs are not fetched. The per-attachment cap is 50 MiB.
+`content` is accepted as an alias of `text`. `{"error":"model overloaded"}` ends the turn and shows the error in chat. Each image or file is either `data_base64` or a local path. After symlink resolution the path must sit inside `work_dir`, `<work_dir>/.cc-connect/attachments`, the outbox directory, or `reply_path_allow`. Anything else (home directory, SSH keys, config files) fails the turn and is not read into the chat. Remote URLs are not fetched. The per-attachment cap is 50 MiB. A path whose extension is unknown is typed with `http.DetectContentType`, not assumed to be `image/png`.
+
+Write `reply.file` by renaming a finished temp file into place. A file that is still not valid JSON after about a second fails the turn with a clear error instead of waiting out the full timeout. A callback POST that arrives after the turn has finished gets HTTP 409, not "unknown id". An invalid body is HTTP 400 even in that case.
 
 With `callback_auth = true` (the default), send the token back:
 

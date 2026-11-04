@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -37,6 +37,10 @@ func (a *Agent) listen() error {
 		return fmt.Errorf("grokbot: callback address: %w", err)
 	}
 	if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+		if !a.callbackAuth && !a.callbackInsecureOK {
+			_ = ln.Close()
+			return fmt.Errorf("grokbot: callback_auth=false cannot listen on %s; use a loopback callback_addr or set callback_insecure_ok = true", ln.Addr().String())
+		}
 		slog.Warn("grokbot: callback is not bound to loopback; keep it off the public internet", "addr", ln.Addr().String())
 	}
 	if host == "0.0.0.0" || host == "::" {
@@ -73,35 +77,35 @@ func (a *Agent) handleOutbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	a.mu.Lock()
-	if _, dup := a.done[id]; dup {
-		a.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": true})
-		return
-	}
-	_, waiting := a.waiters[id]
-	a.mu.Unlock()
-	if !waiting {
-		http.Error(w, "unknown id", http.StatusNotFound)
-		return
-	}
-
+	// Validate the body before checking whether the turn is still waiting.
+	// A reply that arrives as the timeout fires must not be reported as an
+	// unknown id, and an invalid body is a 400 even if the turn already ended.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxReplyBytes))
 	if err != nil {
 		http.Error(w, "body too large or unreadable", http.StatusRequestEntityTooLarge)
 		return
 	}
-	msg, err := parseReplyBody(body)
+	msg, err := a.parseReply(body)
 	if err != nil {
 		slog.Warn("grokbot: rejected reply body", "error", err)
 		http.Error(w, "invalid reply", http.StatusBadRequest)
 		return
 	}
-	if !a.deliver(id, msg) {
-		http.Error(w, "unknown id", http.StatusNotFound)
+	if a.deliver(id, msg) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	a.mu.Lock()
+	_, dup := a.done[id]
+	a.mu.Unlock()
+	if dup {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "duplicate": true})
+		return
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"ok":    false,
+		"error": "turn finished before the reply was accepted",
+	})
 }
 
 func (a *Agent) register(id string) chan replyMsg {
@@ -150,10 +154,57 @@ func (a *Agent) pruneDoneLocked() {
 	}
 }
 
+const (
+	// outboxBadRetries and outboxBadGrace bound how long a non-atomic or
+	// corrupt outbox file is tolerated before the turn fails. A finished
+	// JSON file is renamed into place, so a few attempts are enough for a
+	// writer that is still flushing.
+	outboxBadRetries = 5
+	outboxBadGrace   = time.Second
+)
+
+type outboxKind int
+
+const (
+	outboxMissing outboxKind = iota
+	outboxReady
+	outboxInvalid
+)
+
 func (a *Agent) waitRegistered(ctx context.Context, id string, ch <-chan replyMsg, timeout time.Duration) (replyMsg, error) {
-	if msg, ok := a.consumeOutbox(id); ok {
+	var badSince time.Time
+	badCount := 0
+	var badErr error
+
+	takeFile := func() (replyMsg, bool, error) {
+		msg, kind, err := a.consumeOutbox(id)
+		switch kind {
+		case outboxReady:
+			return msg, true, nil
+		case outboxInvalid:
+			if badSince.IsZero() {
+				badSince = time.Now()
+				slog.Warn("grokbot: outbox file is not valid JSON", "id", id, "error", err)
+			}
+			badCount++
+			badErr = err
+			if badCount >= outboxBadRetries && time.Since(badSince) >= outboxBadGrace {
+				slog.Warn("grokbot: giving up on invalid outbox file", "id", id, "attempts", badCount, "error", badErr)
+				return replyMsg{}, false, fmt.Errorf("grokbot: outbox reply %s.json is not valid JSON: %w", id, badErr)
+			}
+			return replyMsg{}, false, nil
+		default:
+			return replyMsg{}, false, nil
+		}
+	}
+
+	if msg, ok, err := takeFile(); err != nil || ok {
+		if err != nil {
+			return replyMsg{}, err
+		}
 		return unwrapReply(msg)
 	}
+
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
@@ -170,10 +221,27 @@ func (a *Agent) waitRegistered(ctx context.Context, id string, ch <-chan replyMs
 		case msg := <-ch:
 			return unwrapReply(msg)
 		case <-poll:
-			if msg, ok := a.consumeOutbox(id); ok {
+			if msg, ok, err := takeFile(); err != nil || ok {
+				if err != nil {
+					return replyMsg{}, err
+				}
 				return unwrapReply(msg)
 			}
 		case <-timer.C:
+			// The HTTP handler may have validated a body and queued it in
+			// the same instant the timer fired. Take that reply instead of
+			// reporting a timeout.
+			select {
+			case msg := <-ch:
+				return unwrapReply(msg)
+			default:
+			}
+			if msg, ok, err := takeFile(); err != nil || ok {
+				if err != nil {
+					return replyMsg{}, err
+				}
+				return unwrapReply(msg)
+			}
 			return replyMsg{}, fmt.Errorf("grokbot: timed out after %s waiting for a reply", timeout)
 		}
 	}
@@ -186,30 +254,35 @@ func unwrapReply(msg replyMsg) (replyMsg, error) {
 	return msg, nil
 }
 
-func (a *Agent) consumeOutbox(id string) (replyMsg, bool) {
+func (a *Agent) consumeOutbox(id string) (replyMsg, outboxKind, error) {
 	dir := a.outboxDir()
 	if dir == "" || !validID(id) {
-		return replyMsg{}, false
+		return replyMsg{}, outboxMissing, nil
 	}
 	path := filepath.Join(dir, id+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return replyMsg{}, false
+		return replyMsg{}, outboxMissing, nil
 	}
-	msg, err := parseReplyBody(data)
+	msg, err := a.parseReply(data)
 	if err != nil {
-		// The writer may still be flushing a non-atomic write. Keep waiting.
-		return replyMsg{}, false
+		// Leave the file in place so a writer can replace it during the grace
+		// window. A still-invalid file fails the turn from waitRegistered.
+		return replyMsg{}, outboxInvalid, err
 	}
 	_ = os.Remove(path)
 	a.mu.Lock()
 	a.done[id] = time.Now()
 	a.pruneDoneLocked()
 	a.mu.Unlock()
-	return msg, true
+	return msg, outboxReady, nil
 }
 
-func parseReplyBody(raw []byte) (replyMsg, error) {
+func (a *Agent) parseReply(raw []byte) (replyMsg, error) {
+	return parseReplyBody(raw, a.allowedRoots())
+}
+
+func parseReplyBody(raw []byte, roots []string) (replyMsg, error) {
 	var wire struct {
 		Text    string          `json:"text"`
 		Content string          `json:"content"`
@@ -227,8 +300,11 @@ func parseReplyBody(raw []byte) (replyMsg, error) {
 	if text == "" {
 		text = strings.TrimSpace(wire.Content)
 	}
-	images, imgErr := decodeImages(wire.Images)
-	files, fileErr := decodeFiles(wire.Files)
+	images, imgErr := decodeImages(wire.Images, roots)
+	files, fileErr := decodeFiles(wire.Files, roots)
+	if denied := firstDenied(imgErr, fileErr); denied != nil {
+		return replyMsg{err: denied}, nil
+	}
 	if text == "" && len(images) == 0 && len(files) == 0 && (imgErr != nil || fileErr != nil) {
 		err := imgErr
 		if err == nil {
@@ -245,7 +321,7 @@ func parseReplyBody(raw []byte) (replyMsg, error) {
 	return replyMsg{text: text, images: images, files: files}, nil
 }
 
-func decodeImages(raw json.RawMessage) ([]core.ImageAttachment, error) {
+func decodeImages(raw json.RawMessage, roots []string) ([]core.ImageAttachment, error) {
 	elems, err := rawElems(raw)
 	if err != nil || len(elems) == 0 {
 		return nil, err
@@ -253,8 +329,11 @@ func decodeImages(raw json.RawMessage) ([]core.ImageAttachment, error) {
 	var out []core.ImageAttachment
 	var firstErr error
 	for _, el := range elems {
-		img, err := decodeOneImage(el)
+		img, err := decodeOneImage(el, roots)
 		if err != nil {
+			if firstDenied(err) != nil {
+				return nil, err
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -268,7 +347,7 @@ func decodeImages(raw json.RawMessage) ([]core.ImageAttachment, error) {
 	return out, nil
 }
 
-func decodeFiles(raw json.RawMessage) ([]core.FileAttachment, error) {
+func decodeFiles(raw json.RawMessage, roots []string) ([]core.FileAttachment, error) {
 	elems, err := rawElems(raw)
 	if err != nil || len(elems) == 0 {
 		return nil, err
@@ -276,8 +355,11 @@ func decodeFiles(raw json.RawMessage) ([]core.FileAttachment, error) {
 	var out []core.FileAttachment
 	var firstErr error
 	for _, el := range elems {
-		f, err := decodeOneFile(el)
+		f, err := decodeOneFile(el, roots)
 		if err != nil {
+			if firstDenied(err) != nil {
+				return nil, err
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -289,6 +371,16 @@ func decodeFiles(raw json.RawMessage) ([]core.FileAttachment, error) {
 		return nil, firstErr
 	}
 	return out, nil
+}
+
+func firstDenied(errs ...error) error {
+	for _, err := range errs {
+		var denied *pathDeniedError
+		if errors.As(err, &denied) {
+			return denied
+		}
+	}
+	return nil
 }
 
 func rawElems(raw json.RawMessage) ([]json.RawMessage, error) {
@@ -306,9 +398,9 @@ func bytesTrim(raw []byte) []byte {
 	return []byte(strings.TrimSpace(string(raw)))
 }
 
-func decodeOneImage(el json.RawMessage) (core.ImageAttachment, error) {
+func decodeOneImage(el json.RawMessage, roots []string) (core.ImageAttachment, error) {
 	if path, ok := rawString(el); ok {
-		return imageFromPath(path)
+		return imageFromPath(path, roots)
 	}
 	var obj struct {
 		Path       string `json:"path"`
@@ -332,20 +424,20 @@ func decodeOneImage(el json.RawMessage) (core.ImageAttachment, error) {
 			return core.ImageAttachment{}, fmt.Errorf("grokbot: reply image exceeds size limit")
 		}
 		if name == "" {
-			name = "image" + extFromMime(mimeType)
+			name = "image"
 		}
 		if mimeType == "" {
-			mimeType = mime.TypeByExtension(filepath.Ext(name))
+			mimeType = mediaType(name, data)
 		}
-		if mimeType == "" {
-			mimeType = "image/png"
+		if filepath.Ext(name) == "" {
+			name += extFromMime(mimeType)
 		}
 		return core.ImageAttachment{MimeType: mimeType, Data: data, FileName: name}, nil
 	}
 	if strings.TrimSpace(obj.Path) == "" {
 		return core.ImageAttachment{}, fmt.Errorf("grokbot: reply image missing path and data_base64")
 	}
-	img, err := imageFromPath(obj.Path)
+	img, err := imageFromPath(obj.Path, roots)
 	if err != nil {
 		return core.ImageAttachment{}, err
 	}
@@ -358,9 +450,9 @@ func decodeOneImage(el json.RawMessage) (core.ImageAttachment, error) {
 	return img, nil
 }
 
-func decodeOneFile(el json.RawMessage) (core.FileAttachment, error) {
+func decodeOneFile(el json.RawMessage, roots []string) (core.FileAttachment, error) {
 	if path, ok := rawString(el); ok {
-		return fileFromPath(path)
+		return fileFromPath(path, roots)
 	}
 	var obj struct {
 		Path       string `json:"path"`
@@ -387,14 +479,14 @@ func decodeOneFile(el json.RawMessage) (core.FileAttachment, error) {
 			name = "file"
 		}
 		if mimeType == "" {
-			mimeType = mime.TypeByExtension(filepath.Ext(name))
+			mimeType = mediaType(name, data)
 		}
 		return core.FileAttachment{MimeType: mimeType, Data: data, FileName: name}, nil
 	}
 	if strings.TrimSpace(obj.Path) == "" {
 		return core.FileAttachment{}, fmt.Errorf("grokbot: reply file missing path and data_base64")
 	}
-	f, err := fileFromPath(obj.Path)
+	f, err := fileFromPath(obj.Path, roots)
 	if err != nil {
 		return core.FileAttachment{}, err
 	}
@@ -407,47 +499,20 @@ func decodeOneFile(el json.RawMessage) (core.FileAttachment, error) {
 	return f, nil
 }
 
-func imageFromPath(p string) (core.ImageAttachment, error) {
-	data, name, err := readLocal(p)
+func imageFromPath(p string, roots []string) (core.ImageAttachment, error) {
+	data, name, err := readLocal(p, roots)
 	if err != nil {
 		return core.ImageAttachment{}, err
 	}
-	mt := mime.TypeByExtension(filepath.Ext(name))
-	if mt == "" {
-		mt = "image/png"
-	}
-	return core.ImageAttachment{MimeType: mt, Data: data, FileName: name}, nil
+	return core.ImageAttachment{MimeType: mediaType(name, data), Data: data, FileName: name}, nil
 }
 
-func fileFromPath(p string) (core.FileAttachment, error) {
-	data, name, err := readLocal(p)
+func fileFromPath(p string, roots []string) (core.FileAttachment, error) {
+	data, name, err := readLocal(p, roots)
 	if err != nil {
 		return core.FileAttachment{}, err
 	}
-	return core.FileAttachment{
-		MimeType: mime.TypeByExtension(filepath.Ext(name)),
-		Data:     data,
-		FileName: name,
-	}, nil
-}
-
-func readLocal(p string) ([]byte, string, error) {
-	p = strings.TrimSpace(p)
-	if p == "" {
-		return nil, "", fmt.Errorf("grokbot: empty attachment path")
-	}
-	st, err := os.Stat(p)
-	if err != nil {
-		return nil, "", err
-	}
-	if st.Size() > maxMediaBytes {
-		return nil, "", fmt.Errorf("grokbot: %s exceeds size limit", filepath.Base(p))
-	}
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return nil, "", err
-	}
-	return data, filepath.Base(p), nil
+	return core.FileAttachment{MimeType: mediaType(name, data), Data: data, FileName: name}, nil
 }
 
 func rawString(el json.RawMessage) (string, bool) {
