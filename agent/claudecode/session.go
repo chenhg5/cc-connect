@@ -257,6 +257,16 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
+// The ultracode settings file is written once per process. ccDataDir is fixed
+// at construction and has no setter, so one path is valid for every spawn —
+// and the first call's result, including a failure, is cached for the life of
+// the process.
+var (
+	ultracodeSettingsOnce sync.Once
+	ultracodeSettingsPath string
+	ultracodeSettingsErr  error
+)
+
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
@@ -360,7 +370,17 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		innerArgs = append(innerArgs, "--append-system-prompt-file", promptFilePath)
 	}
 
-	if effort != "" {
+	// ultracode is a session-level boolean, not an effort level: the CLI
+	// documents it as "not part of effortLevel, --effort, or
+	// CLAUDE_CODE_EFFORT_LEVEL". It is delivered through a settings file.
+	if effort == "ultracode" {
+		ucPath, err := writeUltracodeSettingsFile(ccDataDir)
+		if err != nil {
+			slog.Warn("claudeSession: ultracode settings file failed, running without it", "error", err)
+		} else {
+			innerArgs = append(innerArgs, "--settings", ucPath)
+		}
+	} else if effort != "" {
 		innerArgs = append(innerArgs, "--effort", effort)
 	}
 	if maxContextTokens > 0 {
@@ -1896,4 +1916,30 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+// writeUltracodeSettingsFile writes {"ultracode": true} to a per-cc-connect
+// settings file and returns its path. Cached per process: the content never
+// changes, so one file is reused across every spawn.
+func writeUltracodeSettingsFile(ccDataDir string) (string, error) {
+	ultracodeSettingsOnce.Do(func() {
+		dir := ccDataDir
+		if dir == "" {
+			dir = os.TempDir()
+		}
+		path := filepath.Join(dir, "ultracode-settings.json")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			ultracodeSettingsErr = err
+			return
+		}
+		if err := os.WriteFile(path, []byte("{\n  \"ultracode\": true\n}\n"), 0o644); err != nil {
+			ultracodeSettingsErr = err
+			return
+		}
+		ultracodeSettingsPath = path
+	})
+	if ultracodeSettingsErr != nil {
+		return "", ultracodeSettingsErr
+	}
+	return ultracodeSettingsPath, nil
 }
