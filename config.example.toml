@@ -1960,8 +1960,15 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project: Using Pi / 项目：使用 Pi (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Requires: npm install -g @mariozechner/pi-coding-agent
-# 需要安装：npm install -g @mariozechner/pi-coding-agent
+# Install: npm install -g @earendil-works/pi-coding-agent
+# 安装：npm install -g @earendil-works/pi-coding-agent
+# RPC mode requires Pi >= 0.99.0 (stable); JSON mode keeps its existing requirements.
+# RPC 模式需要 Pi >= 0.99.0 稳定版；JSON 模式保持原有版本要求。
+# Existing rpc = true configs use settled completion automatically, with no extra option.
+# 已有 rpc = true 配置自动使用 settled 完成语义，无需额外开关。
+# Custom cmd wrappers must forward --version and return only the CLI version.
+# 自定义 cmd 包装器必须透传 --version，并仅返回 CLI 版本号。
+# Lifecycle details / 生命周期说明: docs/pi-rpc-lifecycle.md
 # Pi is an AI coding agent that speaks two protocols to cc-connect:
 # Pi 是 AI 编程 agent，通过两种协议与 cc-connect 通信：
 #
