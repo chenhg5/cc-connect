@@ -531,6 +531,8 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	}
 	s.stateMu.Lock()
 	turnRevision := s.turnRevision
+	s.currentTurn = ""
+	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 	if s.promptAsContext {
 		prompt = prependCodexPromptPreamble(prompt, s.promptPreamble)
@@ -587,7 +589,6 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 		return fmt.Errorf("codex app-server connection closed during turn/start: %w", io.EOF)
 	}
 	s.currentTurn = resp.Turn.ID
-	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
 	return nil
@@ -1229,8 +1230,10 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		var notif turnNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && s.acceptsThreadNotification(method, notif.ThreadID) {
 			s.stateMu.Lock()
-			s.currentTurn = notif.Turn.ID
-			s.pendingMsgs = s.pendingMsgs[:0]
+			if s.currentTurn != notif.Turn.ID {
+				s.currentTurn = notif.Turn.ID
+				s.pendingMsgs = s.pendingMsgs[:0]
+			}
 			s.stateMu.Unlock()
 			s.storeContextUsage(nil)
 		}
