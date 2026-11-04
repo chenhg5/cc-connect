@@ -1760,7 +1760,12 @@ func (cs *claudeSession) CancelTurn() error {
 	// result in the same millisecond as the control_response ack, so a waiter
 	// installed after writeJSON returns could miss it and time out on a turn
 	// that actually stopped.
-	wait := cs.beginCancelWait()
+	wait, waiting := cs.beginCancelWait()
+	if !waiting {
+		// The turn ended between the check above and the registration; no
+		// result is coming, so there is nothing left to wait for.
+		return nil
+	}
 	defer cs.endCancelWait(wait)
 
 	requestID := fmt.Sprintf("interrupt-%d", time.Now().UnixNano())
@@ -1791,15 +1796,26 @@ func (cs *claudeSession) CancelTurn() error {
 // caller, so concurrent cancels all share it: every registered waiter is woken
 // when the result arrives. A caller that stops waiting early removes its own
 // waiter with endCancelWait.
-func (cs *claudeSession) beginCancelWait() chan struct{} {
-	ch := make(chan struct{})
+//
+// The turnActive check and the registration happen under cancelMu, which
+// signalTurnTerminated also takes. Either the waiter is registered before the
+// terminating result clears the set and is woken, or the turn already ended and
+// the caller is told there is nothing to wait for. A separate check outside the
+// lock would leave a window where the result arrives between the check and the
+// registration, and the caller would wait out the full timeout for an event
+// that has already happened.
+func (cs *claudeSession) beginCancelWait() (chan struct{}, bool) {
 	cs.cancelMu.Lock()
+	defer cs.cancelMu.Unlock()
+	if !cs.turnActive.Load() {
+		return nil, false
+	}
+	ch := make(chan struct{})
 	if cs.cancelWaiters == nil {
 		cs.cancelWaiters = make(map[chan struct{}]struct{})
 	}
 	cs.cancelWaiters[ch] = struct{}{}
-	cs.cancelMu.Unlock()
-	return ch
+	return ch, true
 }
 
 // endCancelWait removes this caller's waiter, and only this caller's: with

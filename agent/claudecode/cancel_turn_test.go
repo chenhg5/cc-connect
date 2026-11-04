@@ -266,9 +266,16 @@ func TestTurnActiveTracksSendAndResult(t *testing.T) {
 
 func TestEndCancelWait_OnlyClearsOwnWaiter(t *testing.T) {
 	cs, _ := newCancelTestSession(t, time.Second)
+	cs.turnActive.Store(true)
 
-	first := cs.beginCancelWait()
-	second := cs.beginCancelWait()
+	first, ok := cs.beginCancelWait()
+	if !ok {
+		t.Fatal("beginCancelWait rejected an active turn")
+	}
+	second, ok := cs.beginCancelWait()
+	if !ok {
+		t.Fatal("beginCancelWait rejected an active turn")
+	}
 	cs.endCancelWait(first)
 
 	cs.cancelMu.Lock()
@@ -314,9 +321,16 @@ func TestFinishReadLoop_ClearsTurnActive(t *testing.T) {
 // timed out into the Close() fallback on a turn that had actually stopped.
 func TestConcurrentCancelWaiters_AllSignalled(t *testing.T) {
 	cs, _ := newCancelTestSession(t, time.Second)
+	cs.turnActive.Store(true)
 
-	first := cs.beginCancelWait()
-	second := cs.beginCancelWait()
+	first, ok := cs.beginCancelWait()
+	if !ok {
+		t.Fatal("beginCancelWait rejected an active turn")
+	}
+	second, ok := cs.beginCancelWait()
+	if !ok {
+		t.Fatal("beginCancelWait rejected an active turn")
+	}
 	cs.signalTurnTerminated()
 
 	for name, ch := range map[string]chan struct{}{"first": first, "second": second} {
@@ -364,5 +378,42 @@ func TestCancelTurn_ConcurrentCallsBothConfirm(t *testing.T) {
 		if err != nil {
 			t.Fatalf("cancel %d returned %v after the turn terminated, want nil", i, err)
 		}
+	}
+}
+
+func TestBeginCancelWait_RejectsEndedTurn(t *testing.T) {
+	cs, _ := newCancelTestSession(t, time.Second)
+	cs.turnActive.Store(false)
+
+	ch, ok := cs.beginCancelWait()
+	if ok || ch != nil {
+		t.Fatal("beginCancelWait registered a waiter for a turn that already ended")
+	}
+	cs.cancelMu.Lock()
+	n := len(cs.cancelWaiters)
+	cs.cancelMu.Unlock()
+	if n != 0 {
+		t.Fatalf("cancelWaiters has %d entries, want 0", n)
+	}
+}
+
+func TestBeginCancelWait_RejectsRegistrationAfterTermination(t *testing.T) {
+	cs, _ := newCancelTestSession(t, time.Second)
+	cs.turnActive.Store(true)
+
+	first, ok := cs.beginCancelWait()
+	if !ok {
+		t.Fatal("beginCancelWait rejected an active turn")
+	}
+
+	// Reproduce the ordering inside handleResult: the turn becomes inactive
+	// first, then the terminating result wakes and clears the waiters.
+	cs.turnActive.Store(false)
+	cs.signalTurnTerminated()
+	<-first
+
+	second, ok := cs.beginCancelWait()
+	if ok || second != nil {
+		t.Fatal("beginCancelWait registered a waiter after the turn had terminated")
 	}
 }
