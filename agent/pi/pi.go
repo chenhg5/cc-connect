@@ -31,6 +31,8 @@ type Agent struct {
 	mode         string // "default" | "yolo"
 	thinking     string // reasoning effort: off, minimal, low, medium, high, xhigh
 	rpc          bool   // true = --mode rpc (persistent, extension_ui); false = --mode json (one-shot, default)
+	language     string
+	i18n         *core.I18n
 	sessionEnv   []string
 	mu           sync.Mutex
 }
@@ -45,11 +47,12 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode = normalizeMode(mode)
 	thinking, _ := opts["thinking"].(string)
 	rpc, _ := opts["rpc"].(bool)
+	language, _ := opts["language"].(string)
 
 	cmd, extraArgs := core.ParseCmdOpts(opts, "pi")
 
 	if _, err := exec.LookPath(cmd); err != nil {
-		return nil, fmt.Errorf("pi: '%s' not found in PATH, install with: npm install -g @mariozechner/pi-coding-agent", cmd)
+		return nil, fmt.Errorf("pi: '%s' not found in PATH, install with: npm install -g @earendil-works/pi-coding-agent@latest", cmd)
 	}
 
 	// If model not specified in opts, try defaultModel from settings.json
@@ -73,6 +76,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		mode:         mode,
 		thinking:     thinking,
 		rpc:          rpc,
+		language:     language,
+		i18n:         core.NewI18n(core.NormalizeLanguageString(language)),
 	}, nil
 }
 
@@ -99,6 +104,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	opts := map[string]any{}
+	if a.language != "" {
+		opts["language"] = a.language
+	}
 	if a.cmd != "" && a.cmd != "pi" {
 		opts["cmd"] = a.cmd
 	}
@@ -164,6 +172,7 @@ func (a *Agent) SetSessionEnv(env []string) {
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	a.mu.Lock()
+	cmd, workDir, i18n := a.cmd, a.workDir, a.i18n
 	mode := a.mode
 	model := a.model
 	thinking := a.thinking
@@ -178,7 +187,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extraEnv = append(extraEnv, core.InjectedAgentEnv(mode)...)
 	rpc := a.rpc
 	a.mu.Unlock()
-	return newPiSession(ctx, a.cmd, extraArgs, a.workDir, model, mode, thinking, rpc, sessionID, extraEnv)
+	if rpc {
+		if err := checkRPCVersion(ctx, cmd, workDir, i18n, extraArgs, extraEnv); err != nil {
+			return nil, err
+		}
+	}
+	return newPiSession(ctx, cmd, extraArgs, workDir, model, mode, thinking, rpc, sessionID, extraEnv)
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
