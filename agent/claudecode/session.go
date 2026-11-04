@@ -108,13 +108,15 @@ type claudeSession struct {
 	// and there is nothing to interrupt.
 	turnActive atomic.Bool
 
-	// cancelMu guards cancelWaiter. CancelTurn installs the waiter BEFORE
+	// cancelMu guards cancelWaiters. CancelTurn registers a waiter BEFORE
 	// writing the interrupt request, because the CLI can emit the terminating
 	// result event in the same millisecond as the control_response ack; a
 	// waiter installed after the write would miss it and time out on a turn
-	// that actually stopped. handleResult signals and clears it.
-	cancelMu     sync.Mutex
-	cancelWaiter chan struct{}
+	// that actually stopped. The terminating result belongs to the turn, not
+	// to one caller, so concurrent cancels all register here and handleResult
+	// wakes every one of them.
+	cancelMu      sync.Mutex
+	cancelWaiters map[chan struct{}]struct{}
 
 	// cancelConfirmTimeout bounds how long CancelTurn waits for the CLI to
 	// confirm the interrupted turn actually terminated. On expiry CancelTurn
@@ -1784,39 +1786,38 @@ func (cs *claudeSession) CancelTurn() error {
 	}
 }
 
-// beginCancelWait registers and returns a channel closed by the next
-// signalTurnTerminated. Only one cancel may be in flight per session; a
-// concurrent call replaces the previous waiter, which then simply never fires
-// and times out into the Close() fallback.
+// beginCancelWait registers a waiter for the current turn's terminating result
+// and returns it. The confirmation is a property of the turn, not of the
+// caller, so concurrent cancels all share it: every registered waiter is woken
+// when the result arrives. A caller that stops waiting early removes its own
+// waiter with endCancelWait.
 func (cs *claudeSession) beginCancelWait() chan struct{} {
 	ch := make(chan struct{})
 	cs.cancelMu.Lock()
-	cs.cancelWaiter = ch
+	if cs.cancelWaiters == nil {
+		cs.cancelWaiters = make(map[chan struct{}]struct{})
+	}
+	cs.cancelWaiters[ch] = struct{}{}
 	cs.cancelMu.Unlock()
 	return ch
 }
 
-// endCancelWait drops the registered waiter, if this caller still owns it.
-// With two concurrent cancels the later caller owns cancelWaiter; clearing it
-// unconditionally would make that caller wait out the full timeout for a
-// signal that can no longer arrive, and fall back to Close() on a turn that
-// actually stopped.
+// endCancelWait removes this caller's waiter, and only this caller's: with
+// concurrent cancels the set holds every caller's waiter.
 func (cs *claudeSession) endCancelWait(ch chan struct{}) {
 	cs.cancelMu.Lock()
-	if cs.cancelWaiter == ch {
-		cs.cancelWaiter = nil
-	}
+	delete(cs.cancelWaiters, ch)
 	cs.cancelMu.Unlock()
 }
 
-// signalTurnTerminated wakes a waiting CancelTurn. Safe to call with no
-// waiter registered.
+// signalTurnTerminated wakes every caller waiting on the turn. Safe to call
+// with no waiters registered.
 func (cs *claudeSession) signalTurnTerminated() {
 	cs.cancelMu.Lock()
-	ch := cs.cancelWaiter
-	cs.cancelWaiter = nil
+	waiters := cs.cancelWaiters
+	cs.cancelWaiters = nil
 	cs.cancelMu.Unlock()
-	if ch != nil {
+	for ch := range waiters {
 		close(ch)
 	}
 }

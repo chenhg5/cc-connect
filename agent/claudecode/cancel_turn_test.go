@@ -272,10 +272,14 @@ func TestEndCancelWait_OnlyClearsOwnWaiter(t *testing.T) {
 	cs.endCancelWait(first)
 
 	cs.cancelMu.Lock()
-	got := cs.cancelWaiter
+	_, firstStill := cs.cancelWaiters[first]
+	_, secondStill := cs.cancelWaiters[second]
 	cs.cancelMu.Unlock()
-	if got != second {
-		t.Fatal("endCancelWait(first) cleared the newer waiter; second caller will time out")
+	if firstStill {
+		t.Fatal("endCancelWait(first) left its own waiter registered")
+	}
+	if !secondStill {
+		t.Fatal("endCancelWait(first) removed another caller's waiter")
 	}
 
 	cs.signalTurnTerminated()
@@ -283,6 +287,11 @@ func TestEndCancelWait_OnlyClearsOwnWaiter(t *testing.T) {
 	case <-second:
 	default:
 		t.Fatal("second waiter was not signalled")
+	}
+	select {
+	case <-first:
+		t.Fatal("a waiter removed by endCancelWait was signalled")
+	default:
 	}
 }
 
@@ -296,5 +305,64 @@ func TestFinishReadLoop_ClearsTurnActive(t *testing.T) {
 
 	if cs.turnActive.Load() {
 		t.Fatal("turnActive still true after the process exited")
+	}
+}
+
+// TestConcurrentCancelWaiters_AllSignalled pins the concurrent-cancel case: the
+// terminating result belongs to the turn, so every caller waiting on it must be
+// woken. With a single waiter the displaced one never fired, and its caller
+// timed out into the Close() fallback on a turn that had actually stopped.
+func TestConcurrentCancelWaiters_AllSignalled(t *testing.T) {
+	cs, _ := newCancelTestSession(t, time.Second)
+
+	first := cs.beginCancelWait()
+	second := cs.beginCancelWait()
+	cs.signalTurnTerminated()
+
+	for name, ch := range map[string]chan struct{}{"first": first, "second": second} {
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Fatalf("%s waiter was not woken by the terminating result", name)
+		}
+	}
+}
+
+// TestCancelTurn_ConcurrentCallsBothConfirm is the end-to-end shape: two
+// CancelTurn calls overlap on one session, one result event arrives, and both
+// callers must return nil instead of one falling through to Close().
+func TestCancelTurn_ConcurrentCallsBothConfirm(t *testing.T) {
+	cs, _ := newCancelTestSession(t, time.Second)
+	cs.turnActive.Store(true)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = cs.CancelTurn()
+		}(i)
+	}
+
+	// Wait until both waiters are registered before the result arrives.
+	deadline := time.Now().Add(time.Second)
+	for {
+		cs.cancelMu.Lock()
+		n := len(cs.cancelWaiters)
+		cs.cancelMu.Unlock()
+		if n == 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cs.handleResult(interruptResultEvent())
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("cancel %d returned %v after the turn terminated, want nil", i, err)
+		}
 	}
 }
