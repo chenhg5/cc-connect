@@ -1168,7 +1168,7 @@ See [config.example.toml](../config.example.toml) for full examples.
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # or codex, cursor, gemini, qoder, opencode, iflow
+type = "claudecode"  # or codex, cursor, gemini, qoder, opencode, iflow, grokbot
 
 [projects.agent.options]
 work_dir = "/path/to/project"
@@ -1181,6 +1181,8 @@ type = "feishu"  # or wps-xiezuo, dingtalk, telegram, slack, discord, wecom, wei
 [projects.platforms.options]
 # platform-specific options
 ```
+
+Grok Bot (webhook assistant, including image turns) is documented in [grokbot.md](./grokbot.md).
 
 ---
 

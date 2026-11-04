@@ -38,6 +38,10 @@ go test ./...
 - Update docs or examples when behavior or configuration changes.
 - If you are fixing an issue, link it in the PR body with `Closes #<number>` when appropriate.
 
+## Adding an agent
+
+The checklist for a new `type = "..."` agent lives in [`AGENTS.md`](./AGENTS.md) (Adding a New Agent). In short: implement `core.Agent` and `core.AgentSession`, register it, add the `plugin_agent_*.go` build tag and `Makefile` entry, extend `config.example.toml`, add English and Chinese docs plus the README tables and changelog, and cover the adapter with unit tests that mock the external CLI or HTTP endpoint. Do not hardcode the agent name in `core/`, and do not commit secrets.
+
 ## Release Cadence
 
 - Beta / pre-release: roughly every 2 to 3 days
@@ -93,6 +97,10 @@ go test ./...
 - 如果包含 breaking change，请在 PR 描述中明确说明。
 - 如果改动影响行为或配置，请同步更新文档或示例。
 - 如果是在修复 issue，适合时请在 PR 描述中使用 `Closes #<编号>` 关联。
+
+## 新增一种 Agent
+
+新增 `type = "..."` agent 的清单在 [`AGENTS.md`](./AGENTS.md) 的 “Adding a New Agent”。简要来说：实现 `core.Agent` 和 `core.AgentSession`，完成注册、`plugin_agent_*.go` 构建标签和 `Makefile` 条目，补上 `config.example.toml`、中英文文档、README 表格和 changelog，并用 mock 外部 CLI 或 HTTP 的单元测试覆盖适配器。不要在 `core/` 里硬编码 agent 名称，也不要提交密钥。
 
 ## 发版节奏
 
