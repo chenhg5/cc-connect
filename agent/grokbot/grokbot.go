@@ -495,9 +495,7 @@ func stringList(v any) ([]string, error) {
 			return nil, nil
 		}
 		var out []string
-		for _, part := range strings.Split(t, ",") {
-			out = append(out, part)
-		}
+		out = append(out, strings.Split(t, ",")...)
 		return out, nil
 	case []string:
 		return t, nil

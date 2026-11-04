@@ -165,7 +165,7 @@ func (a *Agent) postWebhook(ctx context.Context, body webhookBody) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("grokbot: webhook request failed: %s", a.redact(err.Error()))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 	redacted := truncate(a.redact(strings.TrimSpace(string(respBody))), 300)
 

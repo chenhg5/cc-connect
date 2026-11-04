@@ -150,7 +150,7 @@ func TestSend_HTTPReplyWithImages(t *testing.T) {
 	}
 	got := &shot{}
 	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		var body webhookBody
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		got.mu.Lock()
@@ -225,7 +225,7 @@ func TestSend_HTTPReplyWithImages(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+got.body.Reply.Token)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var dup map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&dup))
@@ -477,7 +477,7 @@ func TestCallbackAuth(t *testing.T) {
 	url := ag.callbackBase + "/outbox/" + id
 	resp, err := http.Post(url, "application/json", strings.NewReader(`{"text":"nope"}`))
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"text":"ok"}`))
@@ -485,7 +485,7 @@ func TestCallbackAuth(t *testing.T) {
 	req.Header.Set("X-Grokbot-Token", ag.replyToken)
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	select {
 	case msg := <-ch:
@@ -498,7 +498,7 @@ func TestCallbackAuth(t *testing.T) {
 	// Bad ids and traversal are rejected.
 	resp, err = http.Post(ag.callbackBase+"/outbox/../x", "application/json", strings.NewReader(`{}`))
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	require.NotEqual(t, http.StatusOK, resp.StatusCode)
 }
 
@@ -512,7 +512,7 @@ func TestCallbackAuthDisabled(t *testing.T) {
 	ch := ag.register(id)
 	resp, err := http.Post(ag.callbackBase+"/outbox/"+id, "application/json", strings.NewReader(`{"content":"plain"}`))
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	msg := <-ch
 	require.Equal(t, "plain", msg.text)
@@ -576,7 +576,7 @@ func TestStop_ClosesCallback(t *testing.T) {
 	url := ag.callbackBase + "/health"
 	resp, err := http.Get(url)
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.NoError(t, ag.Stop())
 	require.NoError(t, ag.Stop())
@@ -605,7 +605,7 @@ func postReply(t *testing.T, rt replyTarget, payload string) {
 		t.Errorf("reply post: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		t.Errorf("reply status %d: %s", resp.StatusCode, b)
@@ -761,7 +761,7 @@ func TestHandleOutbox_LateAndInvalidReply(t *testing.T) {
 
 	late, err := http.Post(ag.callbackBase+"/outbox/"+newID(), "application/json", strings.NewReader(`{"text":"late"}`))
 	require.NoError(t, err)
-	defer late.Body.Close()
+	defer func() { _ = late.Body.Close() }()
 	require.Equal(t, http.StatusConflict, late.StatusCode)
 	var body map[string]any
 	require.NoError(t, json.NewDecoder(late.Body).Decode(&body))
@@ -769,7 +769,7 @@ func TestHandleOutbox_LateAndInvalidReply(t *testing.T) {
 
 	bad, err := http.Post(ag.callbackBase+"/outbox/"+newID(), "application/json", strings.NewReader(`{"text":`))
 	require.NoError(t, err)
-	bad.Body.Close()
+	_ = bad.Body.Close()
 	require.Equal(t, http.StatusBadRequest, bad.StatusCode)
 }
 
@@ -805,7 +805,7 @@ func TestCallbackAuthFalse_OptInAndSend(t *testing.T) {
 	ag := mustAgent(t, opts)
 	resp, err := http.Get(ag.callbackBase + "/health")
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var token string
