@@ -529,6 +529,8 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	if err != nil {
 		return err
 	}
+	// Reset per-turn state before issuing turn/start so notifications arriving
+	// before the RPC response returns are not wiped when Send resumes.
 	s.stateMu.Lock()
 	turnRevision := s.turnRevision
 	s.currentTurn = ""
