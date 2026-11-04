@@ -676,6 +676,13 @@ func extractStringContent(raw json.RawMessage) string {
 	return s
 }
 
+// maxSessionJSONLLineSize is the longest single line read from a Claude Code
+// session transcript. Lines carrying base64 images or prompt snapshots can
+// pass 256KB in normal use. The Codex reader uses the same ceiling. ListSessions
+// scans files one at a time; a future parallel scan must bound its concurrency
+// because each scanner can grow to this size.
+const maxSessionJSONLLineSize = 64 * 1024 * 1024
+
 func scanSessionMeta(path string) (string, int) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -684,7 +691,7 @@ func scanSessionMeta(path string) (string, int) {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 256*1024), maxSessionJSONLLineSize)
 
 	var firstUserMessage string
 	var aiTitle string
@@ -720,6 +727,10 @@ func scanSessionMeta(path string) (string, int) {
 				}
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		// /list has no error to return, so keep the partial result and log it.
+		slog.Warn("claudecode: session transcript scan stopped early; message count may be low", "path", path, "error", err)
 	}
 
 	summary := customTitle
@@ -781,7 +792,7 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 
 	var entries []core.HistoryEntry
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 256*1024), maxSessionJSONLLineSize)
 
 	for scanner.Scan() {
 		var raw struct {
@@ -810,6 +821,9 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 			Content:   text,
 			Timestamp: ts,
 		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("claudecode: read session file: %w", err)
 	}
 
 	if limit > 0 && len(entries) > limit {
