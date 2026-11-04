@@ -25,6 +25,7 @@ Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability,
 - **Feishu**: Replies to bot menu clicks now send `receive_id_type=open_id` instead of `chat_id`, so menu items no longer fail every reply with `invalid receive_id` (code 230001); the reply context rebuilt after a restart infers the same type from the session key (#2259).
 - **Feishu**: Report WebSocket disconnect and reconnect state to the engine, including shared connections, so health checks and recovery reflect the connection (#693).
 - **Pi**: Merge custom providers with the built-in model catalog, resolve ambiguous aliases using the default provider, and filter duplicate or empty model entries. Reasoning levels follow the selected model, and switching models clears unsupported thinking overrides. Context windows now use catalog values for catalog-only models, with custom definitions taking precedence (#1872).
+- **Pi RPC**: use the settled-turn lifecycle for every `rpc = true` session and require Pi >= 0.99.0 stable at startup. Compaction and `agent_end` no longer emit premature terminal replies (#2161).
 
 ### Added
 - **Feishu/Lark**: configurable Card 2.0 typewriter interval, step and strategy; omitted options retain Feishu defaults (#1956).
