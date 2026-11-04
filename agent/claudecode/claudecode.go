@@ -680,8 +680,9 @@ func extractStringContent(raw json.RawMessage) string {
 // session transcript. Lines carrying base64 images or prompt snapshots can
 // pass 256KB in normal use. The Codex reader uses the same ceiling. ListSessions
 // scans files one at a time; a future parallel scan must bound its concurrency
-// because each scanner can grow to this size.
-const maxSessionJSONLLineSize = 64 * 1024 * 1024
+// because each scanner can grow to this size. It is a variable only so tests
+// can use a small ceiling.
+var maxSessionJSONLLineSize = 64 * 1024 * 1024
 
 func scanSessionMeta(path string) (string, int) {
 	f, err := os.Open(path)

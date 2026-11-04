@@ -1291,6 +1291,12 @@ func TestGetSessionHistory_LineOver256KBStillReadsLaterRecords(t *testing.T) {
 }
 
 func TestGetSessionHistory_LineOverCeilingReturnsError(t *testing.T) {
+	// Use a small ceiling so the test doesn't write a 64MB file. It must stay
+	// above the scanner's 256KB starting buffer to be enforced.
+	old := maxSessionJSONLLineSize
+	maxSessionJSONLLineSize = 512 * 1024
+	t.Cleanup(func() { maxSessionJSONLLineSize = old })
+
 	a := &Agent{workDir: setupSessionForHistory(t, "s2", writeLongLineSession(t, maxSessionJSONLLineSize+1024))}
 	entries, err := a.GetSessionHistory(t.Context(), "s2", 0)
 	if err == nil {
