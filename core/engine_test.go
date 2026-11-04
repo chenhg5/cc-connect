@@ -16929,3 +16929,78 @@ func TestProcessInteractiveEvents_ProgressUpdateFailurePreservesFinalReply(t *te
 		})
 	}
 }
+
+func TestCmdCurrent_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-current", Summary: "Native generated title", MessageCount: 4, ModifiedAt: time.Now()},
+		{ID: "agent-other", Summary: "Other title", MessageCount: 2, ModifiedAt: time.Now()},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "latest user message"
+	session.SetAgentSessionID("agent-current", "codex")
+	session.AddHistory("user", "latest user message")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Name: Native generated title") {
+		t.Fatalf("/current = %q, want native summary display name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Name: latest user message") {
+		t.Fatalf("/current = %q, should not use local Session.Name when native summary exists", p.sent[0])
+	}
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("list sent messages = %d, want 1", len(p.sent))
+	}
+	if got := strings.Count(p.sent[0], "msgs"); got != len(nativeSessions) {
+		t.Fatalf("/list item count = %d, want %d\n%s", got, len(nativeSessions), p.sent[0])
+	}
+}
+
+func TestHandleMessage_TargetSessionDoesNotChangeActive(t *testing.T) {
+	p := &stubPlatformEngine{n: "bridge"}
+	agentSession := newResultAgentSession("done")
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{p}, "", LangEnglish)
+	sessionKey := "bridge:web-admin:test"
+	active := e.sessions.GetOrCreateActive(sessionKey)
+	target := e.sessions.NewSession(sessionKey, "picked")
+	if _, err := e.sessions.SwitchSession(sessionKey, active.ID); err != nil {
+		t.Fatalf("reset active session: %v", err)
+	}
+
+	e.handleMessage(p, &Message{
+		SessionKey:      sessionKey,
+		TargetSessionID: target.ID,
+		Platform:        "bridge",
+		UserID:          "web-admin",
+		UserName:        "Web Admin",
+		Content:         "hello target",
+		ReplyCtx:        "ctx",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(target.GetHistory(1)) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if hist := target.GetHistory(2); len(hist) == 0 || hist[0].Content != "hello target" {
+		t.Fatalf("target history = %#v, want routed user message", hist)
+	}
+	if hist := active.GetHistory(1); len(hist) != 0 {
+		t.Fatalf("active history = %#v, should remain untouched", hist)
+	}
+	if current := e.sessions.GetOrCreateActive(sessionKey); current.ID != active.ID {
+		t.Fatalf("active session = %q, want unchanged %q", current.ID, active.ID)
+	}
+}
