@@ -3609,19 +3609,76 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 func TestEffectiveCommentaryMessages(t *testing.T) {
 	yes, no := true, false
 	cfg := &Config{}
-	if !EffectiveCommentaryMessages(cfg, nil) {
-		t.Fatal("default must deliver commentary")
+	if EffectiveCommentaryMessages(cfg, nil) {
+		t.Fatal("absent setting must keep legacy progress-card behavior")
 	}
 	cfg.Display.CommentaryMessages = &no
 	if EffectiveCommentaryMessages(cfg, nil) {
-		t.Fatal("global opt-out ignored")
+		t.Fatal("explicit false must stay off")
 	}
+	cfg.Display.CommentaryMessages = &yes
+	if !EffectiveCommentaryMessages(cfg, nil) {
+		t.Fatal("explicit true must opt in")
+	}
+	cfg.Display.CommentaryMessages = &no
 	proj := &ProjectConfig{Display: &DisplayConfig{CommentaryMessages: &yes}}
 	if !EffectiveCommentaryMessages(cfg, proj) {
-		t.Fatal("project override ignored")
+		t.Fatal("project true must override global false")
+	}
+	proj.Display.CommentaryMessages = &no
+	cfg.Display.CommentaryMessages = &yes
+	if EffectiveCommentaryMessages(cfg, proj) {
+		t.Fatal("project false must override global true")
 	}
 	proj.Display.CommentaryMessages = nil
+	if !EffectiveCommentaryMessages(cfg, proj) {
+		t.Fatal("nil project field must fall back to global true")
+	}
+	cfg.Display.CommentaryMessages = nil
 	if EffectiveCommentaryMessages(cfg, proj) {
-		t.Fatal("global fallback ignored")
+		t.Fatal("nil project and nil global must stay off")
+	}
+}
+
+func TestSaveGlobalSettings_CommentaryMessagesReload(t *testing.T) {
+	path := writeConfigFixture(t, "language = \"en\"\n")
+	patchConfigPath(t, path)
+
+	settings := GetGlobalSettings()
+	if settings["commentary_messages"] != false {
+		t.Fatalf("absent commentary_messages = %v, want false", settings["commentary_messages"])
+	}
+	if EffectiveCommentaryMessages(readConfigFixture(t, path), nil) {
+		t.Fatal("absent config must resolve false before save")
+	}
+
+	yes := true
+	if err := SaveGlobalSettings(GlobalSettingsUpdate{CommentaryMessages: &yes}); err != nil {
+		t.Fatalf("SaveGlobalSettings(true): %v", err)
+	}
+	cfg := readConfigFixture(t, path)
+	if cfg.Display.CommentaryMessages == nil || !*cfg.Display.CommentaryMessages {
+		t.Fatalf("persisted commentary_messages = %v, want true", cfg.Display.CommentaryMessages)
+	}
+	if !EffectiveCommentaryMessages(cfg, nil) {
+		t.Fatal("reloaded config must resolve true after save")
+	}
+	if GetGlobalSettings()["commentary_messages"] != true {
+		t.Fatalf("GetGlobalSettings after save = %v, want true", GetGlobalSettings()["commentary_messages"])
+	}
+
+	no := false
+	if err := SaveGlobalSettings(GlobalSettingsUpdate{CommentaryMessages: &no}); err != nil {
+		t.Fatalf("SaveGlobalSettings(false): %v", err)
+	}
+	cfg = readConfigFixture(t, path)
+	if cfg.Display.CommentaryMessages == nil || *cfg.Display.CommentaryMessages {
+		t.Fatalf("persisted commentary_messages = %v, want false", cfg.Display.CommentaryMessages)
+	}
+	if EffectiveCommentaryMessages(cfg, nil) {
+		t.Fatal("reloaded config must resolve false after save")
+	}
+	if GetGlobalSettings()["commentary_messages"] != false {
+		t.Fatalf("GetGlobalSettings after false save = %v, want false", GetGlobalSettings()["commentary_messages"])
 	}
 }

@@ -333,7 +333,7 @@ type DisplayCfg struct {
 	Mode               string // "full" (default), "compact", or "quiet" — thinking/tool visibility
 	CardMode           string // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages   bool
-	CommentaryMessages *bool // nil defaults to true, independently of display mode
+	CommentaryMessages *bool // nil means unset at engine layer; production sets this from EffectiveCommentaryMessages (absent config = false)
 	ThinkingMaxLen     int   // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen         int   // max runes for tool use preview; 0 = no truncation
 	ToolMessages       bool
