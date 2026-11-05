@@ -13,6 +13,16 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
+// mustParsePost decodes a post body for tests and fails when it is unparseable.
+func mustParsePost(t *testing.T, p *Platform, raw string) *postLang {
+	t.Helper()
+	post := p.parsePostBody(raw)
+	if post == nil {
+		t.Fatalf("parsePostBody(%q) = nil", raw)
+	}
+	return post
+}
+
 func TestDispatchPostPreservesFileAttachments(t *testing.T) {
 	cases := []struct {
 		name, body string
@@ -97,8 +107,9 @@ func TestParsePostBodyPicksOneLocaleForTextAndFiles(t *testing.T) {
 	raw := `{"zh_cn":{"content":[[{"tag":"text","text":"中文"}]],"files":[{"file_key":"zh","file_name":"zh.csv"}]},` +
 		`"en_us":{"content":[[{"tag":"text","text":"english"}]],"files":[{"file_key":"en","file_name":"en.csv"}]}}`
 	for i := 0; i < 200; i++ {
-		texts, _ := p.parsePostContent("", raw)
-		files := p.parsePostFiles(raw)
+		post := mustParsePost(t, p, raw)
+		texts, _ := p.extractPostParts("", post)
+		files := post.Files
 		if len(texts) != 1 || len(files) != 1 {
 			t.Fatalf("texts=%v files=%v", texts, files)
 		}

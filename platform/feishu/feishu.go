@@ -5853,26 +5853,6 @@ func (p *Platform) parsePostBody(raw string) *postLang {
 	return &lang
 }
 
-// parsePostContent returns the text parts and inline images of a post body.
-func (p *Platform) parsePostContent(messageID, raw string, mentions ...*larkim.MentionEvent) ([]string, []core.ImageAttachment) {
-	post := p.parsePostBody(raw)
-	if post == nil {
-		return nil, nil
-	}
-	return p.extractPostParts(messageID, post, mentions...)
-}
-
-// parsePostFiles extracts the top-level file attachments of a rich-text (post)
-// message. Returns nil when the body carries no files array. See issue #1884 —
-// the post body's top-level files[] was silently dropped before this helper existed.
-func (p *Platform) parsePostFiles(raw string) []postFile {
-	post := p.parsePostBody(raw)
-	if post == nil {
-		return nil
-	}
-	return post.Files
-}
-
 func (p *Platform) extractPostParts(messageID string, post *postLang, mentions ...*larkim.MentionEvent) ([]string, []core.ImageAttachment) {
 	var textParts []string
 	var images []core.ImageAttachment
