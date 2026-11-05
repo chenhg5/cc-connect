@@ -30,7 +30,9 @@ func TestPermissionCardCallback_PreservesRequestBinding(t *testing.T) {
 
 func TestPermissionCardCallback_MissingRequestBindingIsIgnored(t *testing.T) {
 	p, messages := newAllowFromTestPlatform(t, "ou_allowed")
-	response, err := p.onCardAction(cardActionEvent("ou_allowed", "perm:allow_all"))
+	event := cardActionEvent("ou_allowed", "perm:allow_all")
+	delete(event.Event.Action.Value, "perm_request_id")
+	response, err := p.onCardAction(event)
 	if err != nil {
 		t.Fatal(err)
 	}

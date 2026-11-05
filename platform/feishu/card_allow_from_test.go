@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -62,10 +63,14 @@ func waitAnyMessage(t *testing.T, ch <-chan *core.Message, timeout time.Duration
 // cardActionEvent builds a CardActionTriggerEvent with the given operator and
 // action value, using a consistent chat/message context.
 func cardActionEvent(openID, action string) *callback.CardActionTriggerEvent {
+	value := map[string]any{"action": action}
+	if strings.HasPrefix(action, "perm:") {
+		value["perm_request_id"] = "prompt-1"
+	}
 	return &callback.CardActionTriggerEvent{
 		Event: &callback.CardActionTriggerRequest{
 			Operator: &callback.Operator{OpenID: openID},
-			Action:   &callback.CallBackAction{Value: map[string]any{"action": action}},
+			Action:   &callback.CallBackAction{Value: value},
 			Context:  &callback.Context{OpenChatID: "oc_test_chat", OpenMessageID: "om_test_message"},
 		},
 	}
