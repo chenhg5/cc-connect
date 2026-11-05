@@ -364,6 +364,7 @@ type compactProgressWriter struct {
 	handle  any
 
 	enabled    bool
+	usable     bool
 	failed     bool
 	style      string
 	usePayload bool
@@ -468,6 +469,7 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 		return w
 	}
 	w.enabled = true
+	w.usable = true
 	w.updater = updater
 	if starter, ok := p.(PreviewStarter); ok {
 		w.starter = starter
@@ -523,6 +525,17 @@ func (w *compactProgressWriter) Append(item string) bool {
 // streaming card plus the progress card). With the writer disabled, every
 // Append/Finalize short-circuits on enabled==false and the platform sees only
 // the streaming card.
+// enable re-activates a writer previously silenced by disable(). The engine
+// uses it when the streaming card it deferred to fails mid-turn: the writer
+// resumes so the remaining events still land in one progress card instead of
+// one standalone chat message per event. A writer without a usable transport
+// stays inert.
+func (w *compactProgressWriter) enable() {
+	if w.usable && !w.failed {
+		w.enabled = true
+	}
+}
+
 func (w *compactProgressWriter) disable() {
 	w.enabled = false
 }

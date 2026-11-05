@@ -5262,6 +5262,18 @@ func (e *Engine) streamingCardContentFor(streamCard StreamingCard, thinking stri
 	return buildCardContent(thinking, tools, fallbackAnswer)
 }
 
+// updateStreamingCard refreshes a turn's aggregated card and reports a failure
+// instead of discarding it. A silently swallowed error left the degraded path
+// (one message per event) with nothing in the logs to explain why.
+func (e *Engine) updateStreamingCard(card StreamingCard, sessionKey string, content string) {
+	if card == nil {
+		return
+	}
+	if err := card.Update(e.ctx, content); err != nil {
+		slog.Warn("streaming card update failed", "session", sessionKey, "error", err)
+	}
+}
+
 // stripAnswerEchoes drops the trailing step-text entries that are the final
 // answer streamed back as ordinary text, so the process panel does not show the
 // reply a second time.
@@ -6059,7 +6071,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case len(notes) == 0:
 		case streamCard != nil && !streamCard.Failed():
 			cardStepTexts = append(cardStepTexts, notes...)
-			_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
+			e.updateStreamingCard(streamCard, sessionKey, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 		default:
 			for _, note := range notes {
 				cp.AppendStructured(ProgressCardEntry{Kind: ProgressEntryInfo, Text: note}, note)
@@ -6081,6 +6093,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case event, ok = <-events:
 			if !ok {
 				goto channelClosed
+			}
+			// The streaming card owns the turn's single aggregated card, so the
+			// compact progress writer was disabled above. If that card fails
+			// mid-turn every later event falls back to its own chat message —
+			// one card/text per thinking snapshot. Take the turn back so the
+			// remainder keeps updating one aggregated progress card.
+			if streamCard != nil && streamCard.Failed() {
+				cp.enable()
 			}
 		case err := <-pendingSend:
 			pendingSend = nil
@@ -6311,7 +6331,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					// between two of them defeats an adjacency-only check, and the
 					// note plus the same block then repeat on the card.
 					cardStepTexts = mergeCardStepText(cardStepTexts, cardThinkingText)
-					_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
+					e.updateStreamingCard(streamCard, sessionKey, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
@@ -6420,7 +6440,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						Name:  event.ToolName,
 						Input: formattedInput,
 					})
-					_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
+					e.updateStreamingCard(streamCard, sessionKey, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 					continue // skip original independent message sending
 				}
 				// --- Original path (fallback) ---
@@ -6556,7 +6576,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						if len(cardStepTexts) == 0 || cardStepTexts[len(cardStepTexts)-1] != content {
 							cardStepTexts = append(cardStepTexts, content)
 						}
-						_ = streamCard.Update(e.ctx, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
+						e.updateStreamingCard(streamCard, sessionKey, e.streamingCardContentFor(streamCard, cardThinkingText, cardStepTexts, cardToolCalls, "", false))
 					}
 					handledByStreamCard = true
 				}
@@ -7526,7 +7546,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							Name:  "自动重试",
 							Input: notice,
 						})
-						_ = carry.streamCard.Update(e.ctx, e.streamingCardContentFor(carry.streamCard, carry.thinking, carry.stepTexts, carry.toolCalls, "", false))
+						e.updateStreamingCard(carry.streamCard, sessionKey, e.streamingCardContentFor(carry.streamCard, carry.thinking, carry.stepTexts, carry.toolCalls, "", false))
 						return true
 					}
 					state.mu.Lock()
