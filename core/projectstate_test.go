@@ -95,3 +95,43 @@ func TestWorkspaceModelOverride(t *testing.T) {
 		t.Fatalf("WorkspaceModelOverride(%q) after clearing other workspace = %q, want %q", workspaceB, got, "sonnet")
 	}
 }
+
+// The provider a workspace model was picked for is stored next to the model and
+// cleared with it: the rebuild path uses it to decide whether that model may be
+// handed to the provider that is active now.
+func TestWorkspaceModelProvider(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "projects", "demo.state.json")
+	workspaceA := "/tmp/workspace-a"
+	workspaceB := "/tmp/workspace-b"
+
+	store := NewProjectStateStore(statePath)
+	store.SetWorkspaceModelOverride(workspaceA, "openai/gpt-6.1-sol")
+	store.SetWorkspaceModelProvider(workspaceA, "chatgpt")
+	store.SetWorkspaceModelOverride(workspaceB, "sonnet")
+	store.Save()
+
+	reloaded := NewProjectStateStore(statePath)
+	if got := reloaded.WorkspaceModelProvider(workspaceA); got != "chatgpt" {
+		t.Fatalf("WorkspaceModelProvider(%q) = %q, want chatgpt", workspaceA, got)
+	}
+	// A model stored without a provider (state written before that record existed)
+	// reads as empty, which is what makes the rebuild path fall back to the
+	// provider's own model list.
+	if got := reloaded.WorkspaceModelProvider(workspaceB); got != "" {
+		t.Fatalf("WorkspaceModelProvider(%q) = %q, want empty for an entry without a record", workspaceB, got)
+	}
+
+	reloaded.ClearWorkspaceModelOverride(workspaceA)
+	reloaded.Save()
+
+	cleared := NewProjectStateStore(statePath)
+	if got := cleared.WorkspaceModelProvider(workspaceA); got != "" {
+		t.Fatalf("WorkspaceModelProvider(%q) after clear = %q, want empty", workspaceA, got)
+	}
+	if got := cleared.WorkspaceModelOverride(workspaceA); got != "" {
+		t.Fatalf("WorkspaceModelOverride(%q) after clear = %q, want empty", workspaceA, got)
+	}
+	if got := cleared.WorkspaceModelOverride(workspaceB); got != "sonnet" {
+		t.Fatalf("WorkspaceModelOverride(%q) after clearing another workspace = %q, want sonnet", workspaceB, got)
+	}
+}

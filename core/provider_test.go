@@ -94,3 +94,82 @@ func TestSetProviderModel(t *testing.T) {
 		t.Fatalf("missing provider should leave copy unchanged, got %q want %q", updated[0].Model, providers[0].Model)
 	}
 }
+
+// A stored workspace model is pinned on a provider entry only when that provider
+// offers it, so the lookup has to recognise the configured model, a listed model and
+// an alias (resolved to the listed name).
+func TestProviderModelFor(t *testing.T) {
+	provider := ProviderConfig{
+		Name:  "chatgpt",
+		Model: "openai/gpt-5.6-sol",
+		Models: []ModelOption{
+			{Name: "openai/gpt-6.1-sol", Alias: "sol"},
+			{Name: "openai/gpt-5.6-sol"},
+		},
+	}
+
+	tests := []struct {
+		name      string
+		model     string
+		wantName  string
+		wantFound bool
+	}{
+		{name: "the configured model", model: "openai/gpt-5.6-sol", wantName: "openai/gpt-5.6-sol", wantFound: true},
+		{name: "a listed model", model: "openai/gpt-6.1-sol", wantName: "openai/gpt-6.1-sol", wantFound: true},
+		{name: "an alias resolves to the listed name", model: "sol", wantName: "openai/gpt-6.1-sol", wantFound: true},
+		{name: "another provider's model", model: "deepseek/deepseek-flash", wantFound: false},
+		{name: "a bare name the provider does not list", model: "sonnet", wantFound: false},
+		{name: "an empty value", model: "", wantFound: false},
+	}
+	for _, tc := range tests {
+		gotName, gotFound := ProviderModelFor(provider, tc.model)
+		if gotFound != tc.wantFound || (tc.wantFound && gotName != tc.wantName) {
+			t.Fatalf("%s: ProviderModelFor(%q) = (%q, %v), want (%q, %v)",
+				tc.name, tc.model, gotName, gotFound, tc.wantName, tc.wantFound)
+		}
+	}
+}
+
+// "/goto <provider>/<model>" resolves the typed model through the provider's
+// own list (name or alias) instead of guessing a transport name. A scoped agent
+// (opencode) stores the provider-qualified name for bare entries but must not
+// turn an already transport-scoped name into "chatgpt/openai/gpt-5.6-sol".
+func TestResolveProviderModel(t *testing.T) {
+	chatgpt := ProviderConfig{
+		Name:  "chatgpt",
+		Model: "openai/gpt-5.6-sol",
+		Models: []ModelOption{
+			{Name: "openai/gpt-5.6-sol"},
+			{Name: "openai/gpt-6.1-sol", Alias: "sol"},
+		},
+	}
+	aiapi := ProviderConfig{
+		Name:   "aiapi",
+		Models: []ModelOption{{Name: "glm-5.3", Alias: "glm"}},
+	}
+	freeform := ProviderConfig{Name: "gateway"}
+
+	tests := []struct {
+		name     string
+		provider ProviderConfig
+		typed    string
+		scoped   bool
+		want     string
+		wantOK   bool
+	}{
+		{name: "transport scoped name is kept", provider: chatgpt, typed: "openai/gpt-6.1-sol", scoped: true, want: "openai/gpt-6.1-sol", wantOK: true},
+		{name: "alias resolves to the listed name", provider: chatgpt, typed: "sol", scoped: true, want: "openai/gpt-6.1-sol", wantOK: true},
+		{name: "bare name is provider-qualified for scoped agents", provider: aiapi, typed: "glm-5.3", scoped: true, want: "aiapi/glm-5.3", wantOK: true},
+		{name: "already qualified name stays single-prefixed", provider: aiapi, typed: "aiapi/glm-5.3", scoped: true, want: "aiapi/glm-5.3", wantOK: true},
+		{name: "bare agent stores the listed name", provider: aiapi, typed: "glm", scoped: false, want: "glm-5.3", wantOK: true},
+		{name: "unlisted model is rejected", provider: aiapi, typed: "gpt-5.6-sol", scoped: true, wantOK: false},
+		{name: "provider without a list only accepts its configured model", provider: freeform, typed: "anything", scoped: false, wantOK: false},
+	}
+	for _, tc := range tests {
+		got, ok := ResolveProviderModel(tc.provider, tc.provider.Name, tc.typed, tc.scoped)
+		if ok != tc.wantOK || (tc.wantOK && got != tc.want) {
+			t.Fatalf("%s: ResolveProviderModel(%q, scoped=%v) = (%q, %v), want (%q, %v)",
+				tc.name, tc.typed, tc.scoped, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
