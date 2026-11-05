@@ -5268,10 +5268,17 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 				finalized := fullResponse != ""
 				if fullResponse != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
+					chunks := SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen)
+					for i, chunk := range chunks {
 						if err := e.sendWithErrorForWorkspace(p, replyCtx, chunk, workspaceDir); err != nil {
 							finalized = false
-							break
+							slog.Warn("background reply chunk send failed",
+								"session", sessionKey,
+								"chunk", i+1,
+								"chunks", len(chunks),
+								"error", err)
+							// Keep sending the remaining chunks: one failed chunk
+							// must not truncate the rest of a user-visible reply.
 						}
 					}
 				}

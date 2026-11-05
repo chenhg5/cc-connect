@@ -125,6 +125,31 @@ func (p *failedSendPlatform) Send(_ context.Context, _ any, _ string) error {
 	return errors.New("platform send failed")
 }
 
+// flakyFirstSendPlatform fails the first Send call and delivers the rest, so a
+// multi-chunk reply can be used to check that one failed chunk does not stop
+// the remaining chunks from being delivered.
+type flakyFirstSendPlatform struct {
+	stubPlatformEngine
+	fails int
+}
+
+func (p *flakyFirstSendPlatform) Send(_ context.Context, _ any, content string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fails > 0 {
+		p.fails--
+		return errors.New("platform send failed")
+	}
+	p.sent = append(p.sent, content)
+	return nil
+}
+
+func (p *flakyFirstSendPlatform) sentChunks() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.sent...)
+}
+
 type recallCheckingPlatform struct {
 	stubPlatformEngine
 	recalled bool
@@ -15243,6 +15268,60 @@ func TestUnsolicitedReader_DoesNotEmitFinalizedHookWhenReplySendFails(t *testing
 	time.Sleep(100 * time.Millisecond)
 	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
 		t.Fatalf("message.finalized hook ran after failed background send: err=%v", err)
+	}
+}
+
+// A failed chunk must not truncate the rest of a background reply: the engine
+// keeps sending the remaining chunks and only marks the turn as not finalized.
+func TestUnsolicitedReader_KeepsSendingChunksAfterChunkSendFailure(t *testing.T) {
+	dir := t.TempDir()
+	hookMarker := filepath.Join(dir, "hook")
+	p := &flakyFirstSendPlatform{
+		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		fails:              1,
+	}
+	e := NewEngine("my-project", &stubAgent{}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	defer func() { _ = e.Stop() }()
+	e.SetHooks(NewHookManager("my-project", []HookConfig{{
+		Event:   string(HookEventMessageFinalized),
+		Type:    "command",
+		Command: "touch '" + hookMarker + "'",
+		Async:   boolPtr(false),
+	}}, "sh", "-c", ""))
+
+	sessionKey := "feishu:chat:user"
+	sessions := e.sessions
+	session := sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("unsol-finalized-chunk-failure")
+	state := &interactiveState{
+		agentSession: sess,
+		platform:     p,
+		replyCtx:     "ctx",
+		ccSessionKey: sessionKey,
+	}
+
+	// Two chunks: the first is 3990 runes, the second carries the marker and
+	// does not fit in the first chunk. The platform rejects the first send.
+	reply := strings.Repeat("A", 3990) + "\nSECOND-CHUNK-MARKER"
+
+	e.startUnsolicitedReader(state, session, sessions, sessionKey, "")
+	defer e.stopUnsolicitedReader(state)
+	sess.events <- Event{Type: EventResult, Content: reply, Done: true}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(p.sentChunks()) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	chunks := p.sentChunks()
+	if len(chunks) != 1 || !strings.Contains(chunks[0], "SECOND-CHUNK-MARKER") {
+		t.Fatalf("expected the remaining chunk to be delivered after the first send failed, got %d chunk(s): %q", len(chunks), chunks)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Fatalf("message.finalized hook ran after a partially failed background send: err=%v", err)
 	}
 }
 
