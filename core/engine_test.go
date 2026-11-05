@@ -359,12 +359,13 @@ func (p *stubCardPlatform) getRefreshedCards() []*Card {
 
 type stubCompactProgressPlatform struct {
 	stubPlatformEngine
-	style          string
-	supportPayload bool
-	updateErr      error
-	previewMu      sync.Mutex
-	previewStarts  []string
-	previewEdits   []string
+	style           string
+	supportPayload  bool
+	updateErr       error
+	previewStartErr error
+	previewMu       sync.Mutex
+	previewStarts   []string
+	previewEdits    []string
 }
 
 func (p *stubCompactProgressPlatform) ProgressStyle() string {
@@ -382,6 +383,9 @@ func (p *stubCompactProgressPlatform) SendPreviewStart(_ context.Context, _ any,
 	p.previewMu.Lock()
 	p.previewStarts = append(p.previewStarts, content)
 	p.previewMu.Unlock()
+	if p.previewStartErr != nil {
+		return nil, p.previewStartErr
+	}
 	return "preview-handle", nil
 }
 
@@ -1765,19 +1769,40 @@ func TestProcessInteractiveEvents_CardProgressUsesCardTemplate(t *testing.T) {
 	}
 }
 
-func TestProcessInteractiveEvents_CardProgressDoesNotSpamFallbackWhenUpdateFails(t *testing.T) {
+func TestProcessInteractiveEvents_CardProgressDoesNotSpamFallbackWhenCardFails(t *testing.T) {
 	for _, tt := range []struct {
-		name  string
-		style string
+		name       string
+		style      string
+		previewErr error
+		updateErr  error
 	}{
-		{name: "compact", style: "compact"},
-		{name: "card", style: "card"},
+		{
+			name:       "compact-create-failure",
+			style:      "compact",
+			previewErr: errors.New("simulated progress card creation failure"),
+		},
+		{
+			name:       "card-create-failure",
+			style:      "card",
+			previewErr: errors.New("simulated progress card creation failure"),
+		},
+		{
+			name:      "compact-update-failure",
+			style:     "compact",
+			updateErr: errors.New("simulated progress update failure"),
+		},
+		{
+			name:      "card-update-failure",
+			style:     "card",
+			updateErr: errors.New("simulated progress update failure"),
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &stubCompactProgressPlatform{
 				stubPlatformEngine: stubPlatformEngine{n: "feishu"},
 				style:              tt.style,
-				updateErr:          errors.New("simulated progress update failure"),
+				previewStartErr:    tt.previewErr,
+				updateErr:          tt.updateErr,
 			}
 			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 			sessionKey := "feishu:user-fallback"

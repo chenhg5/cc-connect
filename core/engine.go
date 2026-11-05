@@ -5762,7 +5762,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				preview := truncateIf(event.Content, e.display.ThinkingMaxLen)
 				thinkingMsg := fmt.Sprintf(e.i18n.T(MsgThinking), preview)
 				if !cp.AppendEvent(ProgressEntryThinking, preview, "", thinkingMsg) {
-					sendWorkspace(p, replyCtx, thinkingMsg)
+					if progressStyleForTarget(p, replyCtx) == progressStyleLegacy {
+						sendWorkspace(p, replyCtx, thinkingMsg)
+					}
 				}
 			}
 
