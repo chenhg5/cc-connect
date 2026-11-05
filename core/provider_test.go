@@ -129,3 +129,47 @@ func TestProviderModelFor(t *testing.T) {
 		}
 	}
 }
+
+// "/goto <provider>/<model>" resolves the typed model through the provider's
+// own list (name or alias) instead of guessing a transport name. A scoped agent
+// (opencode) stores the provider-qualified name for bare entries but must not
+// turn an already transport-scoped name into "chatgpt/openai/gpt-5.6-sol".
+func TestResolveProviderModel(t *testing.T) {
+	chatgpt := ProviderConfig{
+		Name:  "chatgpt",
+		Model: "openai/gpt-5.6-sol",
+		Models: []ModelOption{
+			{Name: "openai/gpt-5.6-sol"},
+			{Name: "openai/gpt-6.1-sol", Alias: "sol"},
+		},
+	}
+	aiapi := ProviderConfig{
+		Name:   "aiapi",
+		Models: []ModelOption{{Name: "glm-5.3", Alias: "glm"}},
+	}
+	freeform := ProviderConfig{Name: "gateway"}
+
+	tests := []struct {
+		name     string
+		provider ProviderConfig
+		typed    string
+		scoped   bool
+		want     string
+		wantOK   bool
+	}{
+		{name: "transport scoped name is kept", provider: chatgpt, typed: "openai/gpt-6.1-sol", scoped: true, want: "openai/gpt-6.1-sol", wantOK: true},
+		{name: "alias resolves to the listed name", provider: chatgpt, typed: "sol", scoped: true, want: "openai/gpt-6.1-sol", wantOK: true},
+		{name: "bare name is provider-qualified for scoped agents", provider: aiapi, typed: "glm-5.3", scoped: true, want: "aiapi/glm-5.3", wantOK: true},
+		{name: "already qualified name stays single-prefixed", provider: aiapi, typed: "aiapi/glm-5.3", scoped: true, want: "aiapi/glm-5.3", wantOK: true},
+		{name: "bare agent stores the listed name", provider: aiapi, typed: "glm", scoped: false, want: "glm-5.3", wantOK: true},
+		{name: "unlisted model is rejected", provider: aiapi, typed: "gpt-5.6-sol", scoped: true, wantOK: false},
+		{name: "provider without a list only accepts its configured model", provider: freeform, typed: "anything", scoped: false, wantOK: false},
+	}
+	for _, tc := range tests {
+		got, ok := ResolveProviderModel(tc.provider, tc.provider.Name, tc.typed, tc.scoped)
+		if ok != tc.wantOK || (tc.wantOK && got != tc.want) {
+			t.Fatalf("%s: ResolveProviderModel(%q, scoped=%v) = (%q, %v), want (%q, %v)",
+				tc.name, tc.typed, tc.scoped, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}

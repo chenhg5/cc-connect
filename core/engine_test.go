@@ -5000,6 +5000,94 @@ func TestCmdGoto_OpenAIScopedModel_NoDoublePrefix(t *testing.T) {
 	}
 }
 
+// Typed "/goto <provider>/<model>" must resolve the model against the target
+// provider's own list (name or alias) instead of guessing a transport name.
+func TestCmdGoto_TypedModelResolvesAgainstProviderList(t *testing.T) {
+	providers := func() []ProviderConfig {
+		return []ProviderConfig{
+			{Name: "aiapi", Models: []ModelOption{{Name: "glm-5.3", Alias: "glm"}}},
+			{Name: "chatgpt", Models: []ModelOption{{Name: "openai/gpt-5.6-sol", Alias: "sol"}}},
+		}
+	}
+	modelOf := func(a *stubProviderAgent, name string) string {
+		for i := range a.providers {
+			if a.providers[i].Name == name {
+				return a.providers[i].Model
+			}
+		}
+		return ""
+	}
+
+	t.Run("scoped agent resolves an alias to the transport-scoped name", func(t *testing.T) {
+		p := &stubPlatformEngine{n: "plain"}
+		agent := &scopedStubProviderAgent{stubProviderAgent: stubProviderAgent{providers: providers(), active: "aiapi"}}
+		e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+		e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"chatgpt/sol"})
+		if agent.active != "chatgpt" {
+			t.Fatalf("active provider = %q, want chatgpt", agent.active)
+		}
+		if got := modelOf(&agent.stubProviderAgent, "chatgpt"); got != "openai/gpt-5.6-sol" {
+			t.Fatalf("chatgpt model = %q, want openai/gpt-5.6-sol", got)
+		}
+	})
+
+	t.Run("scoped agent prefixes a bare listed name once", func(t *testing.T) {
+		p := &stubPlatformEngine{n: "plain"}
+		agent := &scopedStubProviderAgent{stubProviderAgent: stubProviderAgent{providers: providers(), active: "chatgpt"}}
+		e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+		e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"aiapi/glm"})
+		if got := modelOf(&agent.stubProviderAgent, "aiapi"); got != "aiapi/glm-5.3" {
+			t.Fatalf("aiapi model = %q, want aiapi/glm-5.3", got)
+		}
+	})
+
+	t.Run("bare agent stores the listed name", func(t *testing.T) {
+		p := &stubPlatformEngine{n: "plain"}
+		agent := &stubProviderAgent{providers: providers(), active: "chatgpt"}
+		e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+		e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"aiapi/glm"})
+		if got := modelOf(agent, "aiapi"); got != "glm-5.3" {
+			t.Fatalf("aiapi model = %q, want glm-5.3", got)
+		}
+	})
+}
+
+// A model the target provider does not list must be refused before anything is
+// persisted or the active provider moves, otherwise the next turn fails on a
+// name the transport cannot resolve.
+func TestCmdGoto_RejectsModelProviderDoesNotOffer(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &scopedStubProviderAgent{stubProviderAgent: stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "aiapi", Models: []ModelOption{{Name: "glm-5.3"}}},
+			{Name: "chatgpt", Models: []ModelOption{{Name: "openai/gpt-5.6-sol"}}},
+		},
+		active: "aiapi",
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	e.cmdGoto(p, &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}, []string{"chatgpt/gpt-5.6-sol"})
+
+	if agent.active != "aiapi" {
+		t.Fatalf("active provider = %q, want aiapi (invalid model must not switch)", agent.active)
+	}
+	for _, prov := range agent.providers {
+		if prov.Name == "chatgpt" && prov.Model != "" {
+			t.Fatalf("chatgpt model = %q, want unchanged (invalid model must not persist)", prov.Model)
+		}
+	}
+	if len(p.sent) == 0 || !strings.Contains(p.sent[0], "does not offer") {
+		t.Fatalf("reply = %q, want a model-not-offered message", p.sent)
+	}
+
+	// A card action payload from a picker rendered before the model list
+	// changed has the same guarantee: ignore it instead of switching.
+	e.executeCardAction("/goto", "chatgpt/gpt-5.6-sol", "test:user1")
+	if agent.active != "aiapi" {
+		t.Fatalf("active provider after stale card action = %q, want aiapi", agent.active)
+	}
+}
+
 func TestCmdModel_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
 	agent := &stubModelModeAgent{}

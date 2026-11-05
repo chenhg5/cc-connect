@@ -11646,6 +11646,32 @@ func (e *Engine) cmdProvider(p Platform, msg *Message, args []string) {
 	}
 }
 
+// resolveGotoModel turns the model part of a typed "/goto <provider>/<model>"
+// into the name to persist. It follows the picker's rules instead of guessing:
+// a model the target provider offers is resolved through ProviderModelFor
+// (name or alias), and a scoped agent gets the provider prefix for bare names.
+// It returns "" when the provider has a model list that does not contain the
+// typed model, so the caller can tell the user rather than persist a name the
+// transport cannot run.
+func resolveGotoModel(agent Agent, switcher ProviderSwitcher, providerName, model string) string {
+	scoped := providerScopedModelNames(agent)
+	p, ok := FindProviderConfig(switcher.ListProviders(), providerName)
+	if !ok {
+		// Unknown provider: let applyGoto report it with its own message; keep
+		// the legacy prefixing so a scoped agent still gets a complete name.
+		return scopeProviderModel(providerName, model, scoped)
+	}
+	if resolved, ok := ResolveProviderModel(p, providerName, model, scoped); ok {
+		return resolved
+	}
+	if len(p.Models) > 0 {
+		return ""
+	}
+	// Providers without a model list (gateway endpoints, agents that accept
+	// free-form names) keep the previous best-effort behaviour.
+	return scopeProviderModel(providerName, model, scoped)
+}
+
 // cmdGoto switches the provider (and optionally the model) for the current
 // session while KEEPING the agent session id and conversation history —
 // unlike /provider switch, which clears both. With no arguments it renders a
@@ -11693,14 +11719,10 @@ func (e *Engine) cmdGoto(p Platform, msg *Message, args []string) {
 	}
 	fullModel := ""
 	if rest != "" {
-		fullModel = rest
-		// See executeCardAction "/goto": only prefix the provider name for a
-		// bare model name; a rest that already contains "/" is a complete
-		// provider-scoped name (e.g. ChatGPT-subscription models are
-		// "openai/gpt-5.6-sol" under the cc-connect "chatgpt" provider) and
-		// must not get a second prefix.
-		if ps, ok := agent.(ProviderScopedModelNames); ok && ps.ProviderScopedModelNames() && !strings.Contains(rest, "/") {
-			fullModel = pname + "/" + rest
+		fullModel = resolveGotoModel(agent, switcher, pname, rest)
+		if fullModel == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgGotoModelNotOffered, pname, rest))
+			return
 		}
 	}
 	text := e.applyGoto(agent, sessions, switcher, msg.SessionKey, interactiveKey, pname, fullModel, rest != "")
@@ -11731,15 +11753,20 @@ func (e *Engine) applyGoto(agent Agent, sessions *SessionManager, switcher Provi
 	}
 
 	providers := switcher.ListProviders()
-	found := false
-	for i := range providers {
-		if providers[i].Name == pname {
-			found = true
-			break
-		}
-	}
+	target, found := FindProviderConfig(providers, pname)
 	if !found {
 		return fmt.Sprintf(e.i18n.T(MsgProviderNotFound), pname)
+	}
+	// Refuse to persist a model the provider does not offer: on a scoped agent
+	// the old guess ("<provider>/<model>") produced names the transport could
+	// not resolve, and the switch only failed on the next turn. Providers
+	// without a model list stay permissive (free-form gateway names).
+	if setModel && len(target.Models) > 0 {
+		resolved, ok := ResolveProviderModel(target, pname, fullModel, providerScopedModelNames(agent))
+		if !ok {
+			return fmt.Sprintf(e.i18n.T(MsgGotoModelNotOffered), pname, fullModel)
+		}
+		fullModel = resolved
 	}
 	if !switcher.SetActiveProvider(pname) {
 		return fmt.Sprintf(e.i18n.T(MsgProviderNotFound), pname)
@@ -13626,15 +13653,13 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		fullModel := ""
 		if rest != "" {
-			fullModel = rest
-			// opencode model names are "<provider>/<model>" (ProviderScopedModelNames).
-			// Only prefix the provider name when rest is a bare model name: a rest
-			// that already contains "/" is a complete provider-scoped name (e.g. the
-			// ChatGPT-subscription models are "openai/gpt-5.6-sol" under the cc-connect
-			// "chatgpt" provider) and must not get a second "chatgpt/" prefix — that
-			// would make opencode resolve an unknown provider and fail the run.
-			if ps, ok := agent.(ProviderScopedModelNames); ok && ps.ProviderScopedModelNames() && !strings.Contains(rest, "/") {
-				fullModel = pname + "/" + rest
+			// Resolve the payload against the provider's own model list, the
+			// same way the typed command does; a stale entry (provider model
+			// removed since the card was rendered) is ignored instead of
+			// persisting a name the transport cannot run.
+			fullModel = resolveGotoModel(agent, switcher, pname, rest)
+			if fullModel == "" {
+				return
 			}
 		}
 		e.applyGoto(agent, sessions, switcher, sessionKey, e.interactiveKeyForSessionKey(sessionKey), pname, fullModel, rest != "")

@@ -276,6 +276,7 @@ const (
 	MsgGotoListTitle             MsgKey = "goto_list_title"
 	MsgGotoUsageHint             MsgKey = "goto_usage_hint"
 	MsgGotoInvalid               MsgKey = "goto_invalid"
+	MsgGotoModelNotOffered       MsgKey = "goto_model_not_offered"
 	MsgGotoSelectPlaceholder     MsgKey = "goto_select_placeholder"
 	MsgCardTitleGoto             MsgKey = "card_title_goto"
 	MsgProviderAdded             MsgKey = "provider_added"
@@ -1671,6 +1672,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 無效的 `/goto` 目標。發送 `/goto` 查看分組列表。",
 		LangJapanese:           "❌ `/goto` のターゲットが無効です。`/goto` で一覧を確認してください。",
 		LangSpanish:            "❌ Destino `/goto` no válido. Envía `/goto` para ver la lista.",
+	},
+	MsgGotoModelNotOffered: {
+		LangEnglish:            "❌ Provider **%s** does not offer model **%s**. Send `/goto` to pick from its list.",
+		LangChinese:            "❌ Provider **%s** 未提供模型 **%s**。发送 `/goto` 从列表中选择。",
+		LangTraditionalChinese: "❌ Provider **%s** 未提供模型 **%s**。發送 `/goto` 從清單中選擇。",
+		LangJapanese:           "❌ プロバイダ **%s** はモデル **%s** を提供していません。`/goto` で一覧から選択してください。",
+		LangSpanish:            "❌ El proveedor **%s** no ofrece el modelo **%s**. Envía `/goto` para elegir de la lista.",
 	},
 	MsgGotoSelectPlaceholder: {
 		LangEnglish:            "Select a target (provider + model)…",
