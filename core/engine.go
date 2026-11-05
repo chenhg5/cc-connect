@@ -5494,12 +5494,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return
 		}
 		if narrationMode {
-			if strings.TrimSpace(segment) != "" && !isSilentReply(segment) {
-				lastNarration = segment
-			}
 			if narrate(cp, segment) {
+				// Only narration kept in the card can answer the turn later;
+				// one already sent as a message must not be sent again.
+				if strings.TrimSpace(segment) != "" && !isSilentReply(segment) {
+					lastNarration = segment
+				}
 				return
 			}
+			lastNarration = ""
 		}
 		for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
 			sendWorkspace(p, replyCtx, chunk)
@@ -5697,6 +5700,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// final aggregation cannot concatenate the invalid draft.
 			textParts = nil
 			segmentStart = 0
+			lastNarration = ""
 			silentHold = false
 			partialText = ""
 			cardAnswerText.Reset()
@@ -6746,6 +6750,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				sp = newStreamPreview(previewCfg, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				lastNarration = ""
 
 				// Reset streaming card state for the next turn
 				streamCard = nil

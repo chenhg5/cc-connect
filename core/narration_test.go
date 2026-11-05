@@ -174,3 +174,86 @@ func TestProcessInteractiveEvents_NarrationMessageIsTheDefault(t *testing.T) {
 		}
 	}
 }
+
+// Narration that could not go into a card was sent as a message already: a
+// turn ending on a tool call does not send it again.
+func TestProcessInteractiveEvents_NarrationSentAsMessageIsNotRepeated(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := newNarrationEngine(t, p, narrationProgress)
+	runNarrationTurn(t, e, p, "test:narration-plain-tail",
+		Event{Type: EventText, Content: "The answer is 42."},
+		Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "orb task finish"},
+		Event{Type: EventResult, Done: true},
+	)
+	if sent := strings.Join(p.getSent(), "\n"); strings.Count(sent, "The answer is 42.") != 1 {
+		t.Fatalf("narration sent %d times: %q", strings.Count(sent, "The answer is 42."), sent)
+	}
+}
+
+// A Stop-hook-rejected draft's narration is not the rewritten turn's answer.
+func TestProcessInteractiveEvents_NarrationForgottenOnHookRejection(t *testing.T) {
+	p := newProgressCardPlatform()
+	e := newNarrationEngine(t, p, narrationProgress)
+	runNarrationTurn(t, e, p, "test:narration-hook",
+		Event{Type: EventText, Content: "Draft answer."},
+		Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		Event{Type: EventHookRejected},
+		Event{Type: EventText, Content: "NO_REPLY"},
+		Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		Event{Type: EventResult, Done: true},
+	)
+	if sent := p.getSent(); strings.Contains(strings.Join(sent, "\n"), "Draft answer.") {
+		t.Fatalf("the rejected draft was sent as the answer: %q", sent)
+	}
+}
+
+// queuedTurnSession answers the queued message with the next turn's events,
+// once the engine has sent it (stale events are drained before that).
+type queuedTurnSession struct {
+	*controllableAgentSession
+	next []Event
+}
+
+func (s *queuedTurnSession) Send(string, string, []ImageAttachment, []FileAttachment) error {
+	go func() {
+		for _, ev := range s.next {
+			s.events <- ev
+		}
+	}()
+	return nil
+}
+
+// A queued turn starts without the previous turn's narration.
+func TestProcessInteractiveEvents_NarrationForgottenBetweenQueuedTurns(t *testing.T) {
+	p := newProgressCardPlatform()
+	e := newNarrationEngine(t, p, narrationProgress)
+	key := "test:narration-queued"
+	session := e.sessions.GetOrCreateActive(key)
+	s := &queuedTurnSession{controllableAgentSession: newControllableSession("narration-queued"), next: []Event{
+		{Type: EventText, Content: "NO_REPLY"},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventResult, Done: true},
+	}}
+	for _, ev := range []Event{
+		{Type: EventText, Content: "First answer."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventResult, Done: true},
+	} {
+		s.events <- ev
+	}
+	state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx",
+		pendingMessages: []queuedMessage{{platform: p, replyCtx: "ctx", content: "next", messageID: "m2"}}}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx", 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("turns did not complete")
+	}
+	if sent := strings.Join(p.getSent(), "\n"); strings.Count(sent, "First answer.") != 1 {
+		t.Fatalf("first answer sent %d times: %q", strings.Count(sent, "First answer."), sent)
+	}
+}
