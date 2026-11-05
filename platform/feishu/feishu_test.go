@@ -465,11 +465,11 @@ func TestDispatchMessageExpandsQuotedMergeForward(t *testing.T) {
 				"data": map[string]any{
 					"items": []map[string]any{
 						{
-							"message_id":        subMessageID,
-							"msg_type":          "text",
-							"upper_message_id":  parentMessageID,
-							"parent_id":         "",
-							"create_time":       "1786522200000",
+							"message_id":       subMessageID,
+							"msg_type":         "text",
+							"upper_message_id": parentMessageID,
+							"parent_id":        "",
+							"create_time":      "1786522200000",
 							"sender": map[string]any{
 								"id":          "ou_liangchen",
 								"id_type":     "open_id",
@@ -1395,28 +1395,6 @@ func TestResolveBotSenderName_NilMap(t *testing.T) {
 	}
 }
 
-func TestIsAttachmentMsgType(t *testing.T) {
-	tests := []struct {
-		msgType string
-		want    bool
-	}{
-		{"image", true},
-		{"file", true},
-		{"audio", true},
-		{"media", true},
-		{"text", false},
-		{"post", false},
-		{"sticker", false},
-		{"merge_forward", false},
-		{"", false},
-	}
-	for _, tt := range tests {
-		if got := isAttachmentMsgType(tt.msgType); got != tt.want {
-			t.Errorf("isAttachmentMsgType(%q) = %v, want %v", tt.msgType, got, tt.want)
-		}
-	}
-}
-
 func TestMarkAndIsActiveThreadSession(t *testing.T) {
 	const threadKey = "feishu:oc_chat:root:om_root"
 	const directKey = "feishu:oc_chat:ou_user"
@@ -1458,12 +1436,7 @@ func TestMarkAndIsActiveThreadSession(t *testing.T) {
 	})
 }
 
-// TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention covers the fix
-// for the case where a user @mentions the bot in a thread, then drops follow-up
-// images into the same thread without re-mentioning. Pre-fix, those images
-// were silently dropped by the group @bot filter; post-fix they should pass
-// through and be dispatched.
-func TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention(t *testing.T) {
+func TestOnMessageThreadIsolationRequiresMentionForAttachments(t *testing.T) {
 	const appID = "cli_thread_admit"
 	const appSecret = "secret-thread-admit"
 	const botOpenID = "ou_bot"
@@ -1484,11 +1457,16 @@ func TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention(t *testing.T) {
 				"expire":              7200,
 				"tenant_access_token": "tenant-token",
 			})
-		case strings.HasSuffix(r.URL.Path, "/resources/"+imageKey):
+		case strings.Contains(r.URL.Path, "/resources/"):
 			w.Header().Set("Content-Type", "image/png")
 			if _, err := w.Write(imageBytes); err != nil {
 				t.Fatalf("write image: %v", err)
 			}
+		case r.URL.Path == "/open-apis/im/v1/chats/"+chatID:
+			w.Header().Set("Content-Type", "application/json")
+			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{
+				"name": "multi-person group", "user_count": "2", "bot_count": "1",
+			}})
 		default:
 			// Unknown calls (e.g. user/chat info lookups) return empty success
 			// so dispatch can continue past optional metadata fetches.
@@ -1571,21 +1549,30 @@ func TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention(t *testing.T) {
 		t.Fatal("timed out waiting for the opening @bot text to dispatch")
 	}
 
-	// Step 2: follow-up image in the same thread, no @mention — should pass through.
+	// Step 2: an active group thread does not waive the mention requirement.
 	imgContent := `{"image_key":"` + imageKey + `"}`
-	if err := p.onMessage(context.Background(), buildEvent("om_thread_img", "image", imgContent, nil, rootMsgID)); err != nil {
-		t.Fatalf("onMessage(image in thread) error = %v", err)
+	messages := []struct {
+		msgType string
+		content string
+	}{
+		{"image", imgContent},
+		{"file", `{"file_key":"file_in_thread","file_name":"report.txt"}`},
+		{"audio", `{"file_key":"audio_in_thread","duration":1000}`},
+		{"media", `{"file_key":"video_in_thread","file_name":"clip.mp4","image_key":"` + imageKey + `"}`},
+		{"text", `{"text":"follow-up"}`},
+		{"post", `{"title":"","content":[[{"tag":"text","text":"follow-up"}]]}`},
 	}
-	select {
-	case msg := <-received:
-		if msg.MessageID != "om_thread_img" {
-			t.Fatalf("expected dispatched image om_thread_img, got %q", msg.MessageID)
-		}
-		if len(msg.Images) != 1 {
-			t.Fatalf("expected dispatched image to carry 1 attachment, got %d", len(msg.Images))
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected image in active thread to be dispatched without @mention")
+	for _, message := range messages {
+		t.Run("group_without_mention/"+message.msgType, func(t *testing.T) {
+			if err := p.onMessage(context.Background(), buildEvent("om_unmentioned_"+message.msgType, message.msgType, message.content, nil, rootMsgID)); err != nil {
+				t.Fatalf("onMessage() error = %v", err)
+			}
+			select {
+			case msg := <-received:
+				t.Fatalf("group message without @bot should be dropped, got %q", msg.MessageID)
+			case <-time.After(time.Second):
+			}
+		})
 	}
 
 	// Step 3: image in a *different* thread without @mention — should still be dropped.
@@ -1595,21 +1582,68 @@ func TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention(t *testing.T) {
 	select {
 	case msg := <-received:
 		t.Fatalf("image in unrelated thread should be dropped, but handler received %q", msg.MessageID)
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(time.Second):
 		// expected: nothing dispatched
 	}
 
-	// Step 4: text without @mention in the active thread — should be dropped
-	// (only attachments are admitted; otherwise unrelated thread chatter would
-	// flood the agent).
-	if err := p.onMessage(context.Background(), buildEvent("om_thread_text", "text", `{"text":"刚才那张图能看到吗"}`, nil, rootMsgID)); err != nil {
-		t.Fatalf("onMessage(text in thread without mention) error = %v", err)
+	// Step 4: mentioning somebody else in the active thread is not enough.
+	otherMention := []*larkim.MentionEvent{{
+		Key: stringPtr("@_user_2"), Id: &larkim.UserId{OpenId: stringPtr("ou_other")},
+		Name: stringPtr("another user"),
+	}}
+	if err := p.onMessage(context.Background(), buildEvent("om_other_mention_img", "image", imgContent, otherMention, rootMsgID)); err != nil {
+		t.Fatalf("onMessage(image mentioning another user) error = %v", err)
 	}
 	select {
 	case msg := <-received:
-		t.Fatalf("text in active thread without @mention should be dropped, got %q", msg.MessageID)
-	case <-time.After(300 * time.Millisecond):
-		// expected
+		t.Fatalf("image mentioning another user should be dropped, got %q", msg.MessageID)
+	case <-time.After(time.Second):
+	}
+
+	// Steps 5 and 6: explicitly mentioned group messages and unmentioned P2P
+	// messages still dispatch their content and attachments.
+	for _, mode := range []string{"group_with_mention", "p2p_without_mention"} {
+		for _, message := range messages {
+			t.Run(mode+"/"+message.msgType, func(t *testing.T) {
+				mentions := botMention
+				rootID := rootMsgID
+				if mode == "p2p_without_mention" {
+					chatType = "p2p"
+					mentions = nil
+					rootID = ""
+				}
+				messageID := "om_" + mode + "_" + message.msgType
+				if err := p.onMessage(context.Background(), buildEvent(messageID, message.msgType, message.content, mentions, rootID)); err != nil {
+					t.Fatalf("onMessage() error = %v", err)
+				}
+				select {
+				case msg := <-received:
+					if msg.MessageID != messageID {
+						t.Fatalf("MessageID = %q, want %q", msg.MessageID, messageID)
+					}
+					switch message.msgType {
+					case "image", "media":
+						if len(msg.Images) != 1 || string(msg.Images[0].Data) != string(imageBytes) {
+							t.Fatalf("expected downloaded image, got %+v", msg.Images)
+						}
+					case "file":
+						if len(msg.Files) != 1 || msg.Files[0].FileName != "report.txt" || string(msg.Files[0].Data) != string(imageBytes) {
+							t.Fatalf("expected downloaded report.txt, got %+v", msg.Files)
+						}
+					case "audio":
+						if msg.Audio == nil || string(msg.Audio.Data) != string(imageBytes) {
+							t.Fatalf("expected downloaded audio, got %+v", msg.Audio)
+						}
+					case "text", "post":
+						if msg.Content != "follow-up" {
+							t.Fatalf("Content = %q, want follow-up", msg.Content)
+						}
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("timed out waiting for accepted message to dispatch")
+				}
+			})
+		}
 	}
 }
 
