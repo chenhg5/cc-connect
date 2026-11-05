@@ -886,17 +886,16 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return nil, nil
 	}
 
-	// perm: — permission response with in-place card update
+	// Permission decisions are bound to the prompt that produced the button.
+	// The engine confirms successful submission; a callback alone is not approval.
 	if strings.HasPrefix(actionVal, "perm:") {
-		var responseText string
 		switch actionVal {
-		case "perm:allow":
-			responseText = "allow"
-		case "perm:deny":
-			responseText = "deny"
-		case "perm:allow_all":
-			responseText = "allow all"
+		case "perm:allow", "perm:deny", "perm:allow_all":
 		default:
+			return nil, nil
+		}
+		requestID, _ := event.Event.Action.Value["perm_request_id"].(string)
+		if requestID == "" || strings.Contains(requestID, ":") {
 			return nil, nil
 		}
 
@@ -907,27 +906,12 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			UserID:               userID,
 			UserName:             p.resolveUserName(userID),
 			ChatName:             p.resolveChatName(chatID),
-			Content:              responseText,
+			Content:              "perm:" + requestID + ":" + strings.TrimPrefix(actionVal, "perm:"),
 			ReplyCtx:             rctx,
 			IsPermissionResponse: true,
 		})
 
-		permLabel, _ := event.Event.Action.Value["perm_label"].(string)
-		permColor, _ := event.Event.Action.Value["perm_color"].(string)
-		permBody, _ := event.Event.Action.Value["perm_body"].(string)
-		if permColor == "" {
-			permColor = "green"
-		}
-		cb := core.NewCard().Title(permLabel, permColor)
-		if permBody != "" {
-			cb.Markdown(permBody)
-		}
-		return &callback.CardActionTriggerResponse{
-			Card: &callback.Card{
-				Type: "raw",
-				Data: renderCardMap(cb.Build(), sessionKey),
-			},
-		}, nil
+		return nil, nil
 	}
 
 	// askq: — AskUserQuestion option selected, forward as user message

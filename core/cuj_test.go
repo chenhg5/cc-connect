@@ -2796,3 +2796,100 @@ type reasoningJourneyPlatform struct {
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
 }
+
+type cujPermissionCardPlatform struct {
+	stubPlatformEngine
+	cards chan *Card
+}
+
+func (p *cujPermissionCardPlatform) SendCard(_ context.Context, _ any, card *Card) error {
+	p.cards <- card
+	return nil
+}
+
+func (p *cujPermissionCardPlatform) ReplyCard(ctx context.Context, rc any, card *Card) error {
+	return p.SendCard(ctx, rc, card)
+}
+
+type cujBoundPermissionAgent struct {
+	stubAgent
+	session *cujBoundPermissionSession
+}
+
+func (a *cujBoundPermissionAgent) StartSession(context.Context, string) (AgentSession, error) {
+	return a.session, nil
+}
+
+type cujBoundPermissionSession struct{ *cujAgentSession }
+
+func (s *cujBoundPermissionSession) Send(string, string, []ImageAttachment, []FileAttachment) error {
+	s.events <- Event{Type: EventPermissionRequest, RequestID: "first", ToolName: "Bash", ToolInput: "first command"}
+	return nil
+}
+
+func (s *cujBoundPermissionSession) RespondPermission(id string, result PermissionResult) error {
+	if id == "first" {
+		s.events <- Event{Type: EventPermissionRequest, RequestID: "second", ToolName: "Patch", ToolInput: "second change"}
+	} else {
+		s.events <- Event{Type: EventResult, Content: "second decision: " + result.Behavior, Done: true}
+	}
+	return nil
+}
+
+// Submit work, allow the first tool, tap its old allow-all button, then deny
+// the second tool. Old cards must neither approve a new request nor enable
+// session-wide approval, even while another prompt is waiting.
+func TestCUJ_C8_RequestBoundPermissionCards(t *testing.T) {
+	p := &cujPermissionCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}, cards: make(chan *Card, 8)}
+	s := &cujBoundPermissionSession{newCUJAgentSession()}
+	e := NewEngine("bound-permissions", &cujBoundPermissionAgent{session: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	key := "card:user"
+	message := func(content string, callback bool) {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "card", UserID: "user", Content: content, IsPermissionResponse: callback})
+	}
+	awaitCard := func() string {
+		t.Helper()
+		select {
+		case card := <-p.cards:
+			var token string
+			buttons := 0
+			for _, element := range card.Elements {
+				if actions, ok := element.(CardActions); ok {
+					for _, button := range actions.Buttons {
+						buttons++
+						value := button.Extra["perm_request_id"]
+						if value == "" || (token != "" && token != value) {
+							t.Fatal("permission buttons must share a nonempty request binding")
+						}
+						token = value
+					}
+				}
+			}
+			if buttons != 3 {
+				t.Fatalf("permission card has %d buttons, want 3", buttons)
+			}
+			return token
+		case <-time.After(3 * time.Second):
+			t.Fatal("permission card was not delivered")
+			return ""
+		}
+	}
+	message("run two tools", false)
+	first := awaitCard()
+	message("perm:"+first+":allow", true)
+	second := awaitCard()
+	if first == second {
+		t.Fatal("successive prompts reused the same binding")
+	}
+	message("perm:"+first+":allow_all", true)
+	message("perm:"+second+":deny", true)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(strings.Join(p.getSent(), "\n"), "second decision: deny") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("stale allow-all must leave the next request available to deny: %v", p.getSent())
+}

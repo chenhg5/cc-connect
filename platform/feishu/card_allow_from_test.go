@@ -213,7 +213,9 @@ func TestOnCardAction_AllowFromAllowsAuthorizedCmd(t *testing.T) {
 // dispatches as a permission response.
 func TestOnCardAction_AllowFromAllowsAuthorizedPermAllow(t *testing.T) {
 	ip, msgCh := newAllowFromTestPlatform(t, "ou_allowed")
-	_, err := ip.onCardAction(cardActionEvent("ou_allowed", "perm:allow"))
+	event := cardActionEvent("ou_allowed", "perm:allow")
+	event.Event.Action.Value["perm_request_id"] = "prompt-1"
+	_, err := ip.onCardAction(event)
 	if err != nil {
 		t.Fatalf("onCardAction() error = %v", err)
 	}
@@ -221,8 +223,8 @@ func TestOnCardAction_AllowFromAllowsAuthorizedPermAllow(t *testing.T) {
 	if !msg.IsPermissionResponse {
 		t.Fatalf("dispatched IsPermissionResponse = false, want true")
 	}
-	if msg.Content != "allow" {
-		t.Fatalf("dispatched content = %q, want %q", msg.Content, "allow")
+	if msg.Content != "perm:prompt-1:allow" {
+		t.Fatalf("dispatched content = %q, want a request-bound allow", msg.Content)
 	}
 }
 

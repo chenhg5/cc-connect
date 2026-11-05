@@ -3055,7 +3055,7 @@ func TestSendPermissionPrompt_CardPlatform(t *testing.T) {
 	e := newTestEngine()
 	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
 
-	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt")
+	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt", "prompt-1")
 
 	if len(p.sentCards) != 1 {
 		t.Fatalf("expected 1 sent card, got %d", len(p.sentCards))
@@ -3084,34 +3084,14 @@ func TestSendPermissionPrompt_CardPlatform(t *testing.T) {
 		t.Errorf("plain text should not be sent when card is used, got %v", p.sent)
 	}
 
-	// Verify Extra fields carry i18n labels and body for card callback updates
-	var allowBtn, denyBtn CardButton
 	for _, elem := range card.Elements {
 		if actions, ok := elem.(CardActions); ok {
 			for _, btn := range actions.Buttons {
-				switch btn.Value {
-				case "perm:allow":
-					allowBtn = btn
-				case "perm:deny":
-					denyBtn = btn
+				if btn.Extra["perm_request_id"] != "prompt-1" {
+					t.Fatalf("button %s lost its request binding: %v", btn.Value, btn.Extra)
 				}
 			}
 		}
-	}
-	if allowBtn.Extra == nil {
-		t.Fatal("allow button should have Extra map")
-	}
-	if allowBtn.Extra["perm_color"] != "green" {
-		t.Errorf("allow button perm_color should be green, got %s", allowBtn.Extra["perm_color"])
-	}
-	if allowBtn.Extra["perm_body"] == "" {
-		t.Error("allow button perm_body should not be empty")
-	}
-	if !strings.Contains(allowBtn.Extra["perm_label"], "Allow") {
-		t.Errorf("allow button perm_label should contain 'Allow', got %s", allowBtn.Extra["perm_label"])
-	}
-	if denyBtn.Extra["perm_color"] != "red" {
-		t.Errorf("deny button perm_color should be red, got %s", denyBtn.Extra["perm_color"])
 	}
 }
 
@@ -3119,7 +3099,7 @@ func TestSendPermissionPrompt_InlineButtonPlatform(t *testing.T) {
 	e := newTestEngine()
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
 
-	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt")
+	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt", "prompt-1")
 
 	if p.buttonContent != "full prompt text" {
 		t.Errorf("expected button content to be prompt, got %s", p.buttonContent)
@@ -3136,7 +3116,7 @@ func TestSendPermissionPrompt_PlainPlatform(t *testing.T) {
 	e := newTestEngine()
 	p := &stubPlatformEngine{n: "plain"}
 
-	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt")
+	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt", "prompt-1")
 
 	if len(p.sent) != 1 || p.sent[0] != "full prompt text" {
 		t.Errorf("expected plain text fallback, got %v", p.sent)
