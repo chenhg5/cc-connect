@@ -373,6 +373,13 @@
     "rlMaxMessagesHint": "ウィンドウあたりの最大メッセージ数；0 = 無効",
     "rlWindowSecs": "ウィンドウ（秒）",
     "rlWindowSecsHint": "タイムウィンドウの秒数",
+    "retriableError": "再試行可能なエラー",
+    "retriableInitialDelay": "初回再試行の遅延（秒）",
+    "retriableInitialDelayHint": "初回再試行までの待機時間。0 = すぐに再試行",
+    "retriableRetryDelay": "再試行の遅延（秒）",
+    "retriableRetryDelayHint": "以降の再試行の間隔。0 = すぐに再試行",
+    "retriableMaxAttempts": "最大試行回数",
+    "retriableMaxAttemptsHint": "初回送信を含む合計試行回数",
     "log": "ログ",
     "logLevel": "ログレベル"
   },

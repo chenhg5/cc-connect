@@ -107,6 +107,7 @@ type Config struct {
 	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
 	Cron               CronConfig              `toml:"cron"`
 	Queue              QueueConfig             `toml:"queue"`
+	RetriableError     RetriableErrorConfig    `toml:"retriable_error"` // retry backoff for retriable agent errors
 	Webhook            WebhookConfig           `toml:"webhook"`
 	Bridge             BridgeConfig            `toml:"bridge"`
 	Management         ManagementConfig        `toml:"management"`
@@ -259,6 +260,23 @@ type RoleConfig struct {
 type RelayConfig struct {
 	TimeoutSecs *int   `toml:"timeout_secs"`         // max seconds to wait for relay response; 0 = disabled; default 120
 	Visibility  string `toml:"visibility,omitempty"` // "full" (default), "summary", or "none" for group visibility echoes
+}
+
+// Bounds for retriable_error settings. The delay cap keeps retry waits finite
+// and well within the int64 nanosecond range of time.Duration (the cap is
+// 86400s, far below the ~9.22e9s overflow point); the attempt cap prevents
+// unbounded retry loops.
+const (
+	MaxRetriableErrorDelaySecs = 86400
+	MaxRetriableErrorAttempts  = 1000
+)
+
+// RetriableErrorConfig controls the retry policy for retriable agent errors
+// such as Codex "Selected model is at capacity" responses.
+type RetriableErrorConfig struct {
+	InitialDelaySecs *int `toml:"initial_delay_secs"` // delay before the first retry; default 30
+	RetryDelaySecs   *int `toml:"retry_delay_secs"`   // delay between later retries; default 60
+	MaxAttempts      *int `toml:"max_attempts"`       // total attempts including the first send; default 30
 }
 
 // SpeechConfig configures speech-to-text for voice messages.
@@ -1007,6 +1025,45 @@ func EffectiveHistoryMaxLen(cfg *Config, proj *ProjectConfig) int {
 	return 1000
 }
 
+// EffectiveRetriableErrorConfig returns the global retry policy for retriable
+// agent errors using built-in defaults when no config values are set.
+func EffectiveRetriableErrorConfig(cfg *Config) (initialDelaySecs, retryDelaySecs, maxAttempts int) {
+	initialDelaySecs = 30
+	retryDelaySecs = 60
+	maxAttempts = 30
+	if cfg == nil {
+		return
+	}
+	if cfg.RetriableError.InitialDelaySecs != nil {
+		initialDelaySecs = *cfg.RetriableError.InitialDelaySecs
+	}
+	if cfg.RetriableError.RetryDelaySecs != nil {
+		retryDelaySecs = *cfg.RetriableError.RetryDelaySecs
+	}
+	if cfg.RetriableError.MaxAttempts != nil {
+		maxAttempts = *cfg.RetriableError.MaxAttempts
+	}
+	// Clamp here as well as in validation: callers may pass an unvalidated or
+	// directly-constructed Config, and an out-of-range delay would otherwise
+	// overflow time.Duration when converted to nanoseconds.
+	if initialDelaySecs < 0 {
+		initialDelaySecs = 0
+	} else if initialDelaySecs > MaxRetriableErrorDelaySecs {
+		initialDelaySecs = MaxRetriableErrorDelaySecs
+	}
+	if retryDelaySecs < 0 {
+		retryDelaySecs = 0
+	} else if retryDelaySecs > MaxRetriableErrorDelaySecs {
+		retryDelaySecs = MaxRetriableErrorDelaySecs
+	}
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	} else if maxAttempts > MaxRetriableErrorAttempts {
+		maxAttempts = MaxRetriableErrorAttempts
+	}
+	return
+}
+
 // EffectiveShell returns the shell binary, flag, and init command for the project.
 // Resolution: per-project > global > platform default.
 // The flag is auto-detected: "/C" for cmd, "-Command" for powershell/pwsh, "-c" for everything else.
@@ -1071,6 +1128,46 @@ func (c *Config) validate() error {
 	return c.validateInternal(false)
 }
 
+// validateRetriableErrorConfig checks the retriable_error bounds. Lower bounds
+// are always enforced. When strict is true the upper caps are also hard errors;
+// this is used by SaveGlobalSettings so the web admin cannot persist runaway
+// values. On the full-config Load() path (strict=false) above-cap legacy values
+// are only logged and later clamped by EffectiveRetriableErrorConfig, so an
+// upgrade does not brick startup.
+func (c *Config) validateRetriableErrorConfig(strict bool) error {
+	if c.RetriableError.InitialDelaySecs != nil {
+		if v := *c.RetriableError.InitialDelaySecs; v < 0 {
+			return fmt.Errorf("config: retriable_error.initial_delay_secs must be >= 0")
+		} else if v > MaxRetriableErrorDelaySecs {
+			if strict {
+				return fmt.Errorf("config: retriable_error.initial_delay_secs must be between 0 and %d", MaxRetriableErrorDelaySecs)
+			}
+			slog.Warn("config: retriable_error.initial_delay_secs above cap; clamping", "value", v, "cap", MaxRetriableErrorDelaySecs)
+		}
+	}
+	if c.RetriableError.RetryDelaySecs != nil {
+		if v := *c.RetriableError.RetryDelaySecs; v < 0 {
+			return fmt.Errorf("config: retriable_error.retry_delay_secs must be >= 0")
+		} else if v > MaxRetriableErrorDelaySecs {
+			if strict {
+				return fmt.Errorf("config: retriable_error.retry_delay_secs must be between 0 and %d", MaxRetriableErrorDelaySecs)
+			}
+			slog.Warn("config: retriable_error.retry_delay_secs above cap; clamping", "value", v, "cap", MaxRetriableErrorDelaySecs)
+		}
+	}
+	if c.RetriableError.MaxAttempts != nil {
+		if v := *c.RetriableError.MaxAttempts; v < 1 {
+			return fmt.Errorf("config: retriable_error.max_attempts must be >= 1")
+		} else if v > MaxRetriableErrorAttempts {
+			if strict {
+				return fmt.Errorf("config: retriable_error.max_attempts must be between 1 and %d", MaxRetriableErrorAttempts)
+			}
+			slog.Warn("config: retriable_error.max_attempts above cap; clamping", "value", v, "cap", MaxRetriableErrorAttempts)
+		}
+	}
+	return nil
+}
+
 func (c *Config) validateInternal(permissive bool) error {
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err
@@ -1087,6 +1184,9 @@ func (c *Config) validateInternal(permissive bool) error {
 	case "", "full", "summary", "none":
 	default:
 		return fmt.Errorf("config: relay.visibility must be \"full\", \"summary\", or \"none\"")
+	}
+	if err := c.validateRetriableErrorConfig(false); err != nil {
+		return err
 	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("config: at least one [[projects]] entry is required")
@@ -3911,24 +4011,42 @@ func GetGlobalSettings() map[string]any {
 		queueMax = *cfg.Queue.MaxDepth
 	}
 	result["queue_max_depth"] = queueMax
+	initialDelay := 30
+	if cfg.RetriableError.InitialDelaySecs != nil {
+		initialDelay = *cfg.RetriableError.InitialDelaySecs
+	}
+	result["retriable_error_initial_delay_secs"] = initialDelay
+	retryDelay := 60
+	if cfg.RetriableError.RetryDelaySecs != nil {
+		retryDelay = *cfg.RetriableError.RetryDelaySecs
+	}
+	result["retriable_error_retry_delay_secs"] = retryDelay
+	maxAttempts := 30
+	if cfg.RetriableError.MaxAttempts != nil {
+		maxAttempts = *cfg.RetriableError.MaxAttempts
+	}
+	result["retriable_error_max_attempts"] = maxAttempts
 	return result
 }
 
 // GlobalSettingsUpdate holds fields to update in global config.
 type GlobalSettingsUpdate struct {
-	Language           *string `json:"language"`
-	AttachmentSend     *string `json:"attachment_send"`
-	LogLevel           *string `json:"log_level"`
-	IdleTimeoutMins    *int    `json:"idle_timeout_mins"`
-	ThinkingMessages   *bool   `json:"thinking_messages"`
-	ThinkingMaxLen     *int    `json:"thinking_max_len"`
-	ToolMessages       *bool   `json:"tool_messages"`
-	ToolMaxLen         *int    `json:"tool_max_len"`
-	StreamPreviewOn    *bool   `json:"stream_preview_enabled"`
-	StreamPreviewIntMs *int    `json:"stream_preview_interval_ms"`
-	RateLimitMax       *int    `json:"rate_limit_max_messages"`
-	RateLimitWindow    *int    `json:"rate_limit_window_secs"`
-	QueueMaxDepth      *int    `json:"queue_max_depth"`
+	Language                       *string `json:"language"`
+	AttachmentSend                 *string `json:"attachment_send"`
+	LogLevel                       *string `json:"log_level"`
+	IdleTimeoutMins                *int    `json:"idle_timeout_mins"`
+	ThinkingMessages               *bool   `json:"thinking_messages"`
+	ThinkingMaxLen                 *int    `json:"thinking_max_len"`
+	ToolMessages                   *bool   `json:"tool_messages"`
+	ToolMaxLen                     *int    `json:"tool_max_len"`
+	StreamPreviewOn                *bool   `json:"stream_preview_enabled"`
+	StreamPreviewIntMs             *int    `json:"stream_preview_interval_ms"`
+	RateLimitMax                   *int    `json:"rate_limit_max_messages"`
+	RateLimitWindow                *int    `json:"rate_limit_window_secs"`
+	QueueMaxDepth                  *int    `json:"queue_max_depth"`
+	RetriableErrorInitialDelaySecs *int    `json:"retriable_error_initial_delay_secs"`
+	RetriableErrorRetryDelaySecs   *int    `json:"retriable_error_retry_delay_secs"`
+	RetriableErrorMaxAttempts      *int    `json:"retriable_error_max_attempts"`
 }
 
 // SaveGlobalSettings persists global settings to config.toml.
@@ -3984,6 +4102,28 @@ func SaveGlobalSettings(u GlobalSettingsUpdate) error {
 	}
 	if u.QueueMaxDepth != nil {
 		cfg.Queue.MaxDepth = u.QueueMaxDepth
+	}
+	if u.RetriableErrorInitialDelaySecs != nil {
+		cfg.RetriableError.InitialDelaySecs = u.RetriableErrorInitialDelaySecs
+	}
+	if u.RetriableErrorRetryDelaySecs != nil {
+		cfg.RetriableError.RetryDelaySecs = u.RetriableErrorRetryDelaySecs
+	}
+	if u.RetriableErrorMaxAttempts != nil {
+		cfg.RetriableError.MaxAttempts = u.RetriableErrorMaxAttempts
+	}
+	// Validate only the retriable_error fields this update actually changes.
+	// Checking the whole raw config would reject otherwise valid configs whose
+	// other fields use ${VAR} placeholders (this path does not env-resolve them
+	// like load() does). Checking the whole retriable_error section would reject
+	// unrelated saves when the disk already holds above-cap legacy values, which
+	// the Load path deliberately tolerates and clamps at runtime.
+	if err := (&Config{RetriableError: RetriableErrorConfig{
+		InitialDelaySecs: u.RetriableErrorInitialDelaySecs,
+		RetryDelaySecs:   u.RetriableErrorRetryDelaySecs,
+		MaxAttempts:      u.RetriableErrorMaxAttempts,
+	}}).validateRetriableErrorConfig(true); err != nil {
+		return err
 	}
 	return saveConfig(cfg)
 }

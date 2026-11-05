@@ -173,6 +173,11 @@ func normalizeReasoningEffort(raw string) string {
 	}
 }
 
+// ContinueAfterErrorPrompt implements core.ContinueAfterErrorAgent: a Codex
+// thread keeps the turn's history (including executed tool calls) after a
+// failed turn, so a retriable error mid-turn is resumed rather than replayed.
+func (a *Agent) ContinueAfterErrorPrompt() string { return core.DefaultContinueAfterErrorPrompt }
+
 func (a *Agent) Name() string { return "codex" }
 
 func (a *Agent) SetWorkDir(dir string) {
