@@ -4,12 +4,259 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 )
+
+type startupFailurePlatform struct {
+	stubPlatformEngine
+	replies     map[any][]string
+	beforeReply func(any, string)
+}
+
+func (p *startupFailurePlatform) record(ctx any, text string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.replies == nil {
+		p.replies = make(map[any][]string)
+	}
+	p.replies[ctx] = append(p.replies[ctx], text)
+	p.sent = append(p.sent, text)
+	return nil
+}
+
+func (p *startupFailurePlatform) Reply(_ context.Context, ctx any, text string) error {
+	if p.beforeReply != nil {
+		p.beforeReply(ctx, text)
+	}
+	return p.record(ctx, text)
+}
+
+func (p *startupFailurePlatform) Send(_ context.Context, ctx any, text string) error {
+	return p.record(ctx, text)
+}
+
+func (p *startupFailurePlatform) repliesFor(ctx any) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.replies[ctx]...)
+}
+
+type blockedResumeAgent struct {
+	stubAgent
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	calls   []string
+	sent    []string
+}
+
+func (a *blockedResumeAgent) StartSession(ctx context.Context, id string) (AgentSession, error) {
+	a.mu.Lock()
+	a.calls = append(a.calls, id)
+	first := len(a.calls) == 1
+	a.mu.Unlock()
+	if first {
+		close(a.started)
+		select {
+		case <-a.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("selected transcript unavailable")
+	}
+	return &startupRecordingSession{agent: a, events: make(chan Event, 4), id: id}, nil
+}
+
+type startupRecordingSession struct {
+	stubAgentSession
+	agent  *blockedResumeAgent
+	events chan Event
+	id     string
+}
+
+func (s *startupRecordingSession) CurrentSessionID() string { return s.id }
+func (s *startupRecordingSession) Events() <-chan Event     { return s.events }
+func (s *startupRecordingSession) Send(prompt, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.agent.mu.Lock()
+	s.agent.sent = append(s.agent.sent, prompt)
+	s.agent.mu.Unlock()
+	s.events <- Event{Type: EventResult, Content: "retry complete", Done: true}
+	return nil
+}
+
+// Queue before the startup goroutine acquires interactiveMu: StartSession
+// currently holds that mutex, so queueing during the call itself waits for it.
+// Both schedules must terminate every accepted message instead of replaying it.
+func testCUJResumeFailureTerminatesQueuedMessages(t *testing.T) {
+	p := &startupFailurePlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	a := &blockedResumeAgent{started: make(chan struct{}), release: make(chan struct{})}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	const key = "test:alice"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("old-id", a.Name())
+	session.AddHistory("assistant", "saved answer")
+	queued := &Message{SessionKey: key, Platform: "test", UserID: "alice", Content: "queued before failure", MessageID: "second", ReplyCtx: "second"}
+	e.ReceiveMessage(p, &Message{
+		SessionKey: key, Platform: "test", UserID: "alice", Content: "first attempt", MessageID: "first", ReplyCtx: "first",
+		OnAccepted: func() {
+			// The foreground turn owns the busy lock but has not started yet.
+			done := make(chan struct{})
+			go func() { e.ReceiveMessage(p, queued); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Error("second message did not queue before startup")
+			}
+		},
+	})
+	select {
+	case <-a.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first message did not reach StartSession")
+	}
+	if got := p.repliesFor("second"); len(got) != 1 || !strings.Contains(got[0], e.i18n.T(MsgMessageQueued)) {
+		t.Fatalf("second message was not acknowledged as queued: %v", got)
+	}
+	close(a.release)
+	waitAsyncInput(t, func() bool { return !session.Busy() })
+	terminal := p.repliesFor("second")
+	if len(terminal) != 2 || !strings.Contains(terminal[1], "selected transcript unavailable") || !strings.Contains(terminal[1], "/new") {
+		t.Errorf("queued sender did not receive a terminal startup failure: %v", terminal)
+	}
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[key]
+	state.mu.Lock()
+	pending := len(state.pendingMessages)
+	state.mu.Unlock()
+	e.interactiveMu.Unlock()
+	if pending != 0 {
+		t.Errorf("failed startup retained %d queued messages", pending)
+	}
+	if session.GetAgentSessionID() != "old-id" || len(session.GetHistory(0)) != 1 {
+		t.Fatal("failed startup changed the saved conversation or recorded unsent messages")
+	}
+	// User action 3: retry the selected conversation once the backend recovers.
+	switchUserSend(e, p, "later retry")
+	waitAsyncInput(t, func() bool {
+		return !session.Busy() && strings.Contains(strings.Join(p.getSent(), "\n"), "retry complete")
+	})
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !reflect.DeepEqual(a.calls, []string{"old-id", "old-id"}) || len(a.sent) != 1 || !strings.Contains(a.sent[0], "later retry") {
+		t.Fatalf("retry replayed a failed queued message: calls=%v sent=%v", a.calls, a.sent)
+	}
+}
+
+func testCUJNewAfterFailedResume(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	a := newSwitchFeedbackAgent()
+	a.failID = "old-id"
+	store := filepath.Join(t.TempDir(), "sessions.json")
+	e := NewEngine("test", a, []Platform{p}, store, LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	const key = "test:alice"
+	old := e.sessions.GetOrCreateActive(key)
+	old.SetAgentSessionID("old-id", a.Name())
+	old.AddHistory("user", "original question")
+	old.AddHistory("assistant", "original answer")
+	wantHistory := old.GetHistory(0)
+	switchUserSend(e, p, "resume old")
+	waitAsyncInput(t, func() bool { return !old.Busy() && len(p.getSent()) > 0 })
+	switchUserSend(e, p, "/new")
+	loaded := NewSessionManager(store)
+	if active := loaded.GetOrCreateActive(key); active.ID == old.ID || active.GetAgentSessionID() != "" || len(active.GetHistory(0)) != 0 {
+		t.Fatal("/new did not persist a separate, empty conversation")
+	}
+	var retained *Session
+	for _, s := range loaded.ListSessions(key) {
+		if s.ID == old.ID {
+			retained = s
+		}
+	}
+	if retained == nil || retained.GetAgentSessionID() != "old-id" || len(retained.GetHistory(0)) != len(wantHistory) {
+		t.Fatalf("/new destroyed the saved ID or history: %+v", retained)
+	}
+	for i, entry := range retained.GetHistory(0) {
+		want := wantHistory[i]
+		if entry.Role != want.Role || entry.Content != want.Content || !entry.Timestamp.Equal(want.Timestamp) {
+			t.Fatalf("/new changed saved history entry %d: %+v", i, entry)
+		}
+	}
+	a.mu.Lock()
+	a.failID = ""
+	a.mu.Unlock()
+	switchUserSend(e, p, "/switch old-id")
+	switchUserSend(e, p, "resume after new")
+	waitAsyncInput(t, func() bool { return strings.Contains(strings.Join(p.getSent(), "\n"), "fresh reply") && !old.Busy() })
+	if got := a.startedIDs(); !reflect.DeepEqual(got, []string{"old-id", "old-id"}) {
+		t.Fatalf("switching back did not resume the retained ID: %v", got)
+	}
+}
+
+func TestResumeFailure_RejectsQueueArrivalAfterStartupBlocked(t *testing.T) {
+	p := &startupFailurePlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	a := &blockedResumeAgent{started: make(chan struct{}), release: make(chan struct{})}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	failureReply := make(chan struct{})
+	releaseReply := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseReply) }) }
+	t.Cleanup(func() { release(); _ = e.Stop() })
+	p.beforeReply = func(ctx any, _ string) {
+		if ctx == "first" {
+			close(failureReply)
+			<-releaseReply
+		}
+	}
+	const key = "test:alice"
+	session := e.sessions.GetOrCreateActive(key)
+	session.SetAgentSessionID("old-id", a.Name())
+	e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", Content: "first attempt", ReplyCtx: "first"})
+	select {
+	case <-a.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("resume did not start")
+	}
+	queued := make(chan struct{})
+	arriving := make(chan struct{})
+	go func() {
+		close(arriving)
+		switchUserSend(e, p, "arrived during startup")
+		close(queued)
+	}()
+	<-arriving
+	close(a.release)
+	select {
+	case <-failureReply:
+	case <-time.After(3 * time.Second):
+		t.Fatal("foreground did not reach its failure reply")
+	}
+	select {
+	case <-queued:
+	case <-time.After(3 * time.Second):
+		t.Fatal("concurrent message did not receive its terminal reply")
+	}
+	if got := p.repliesFor("chat"); len(got) != 1 || !strings.Contains(got[0], "selected transcript unavailable") {
+		t.Fatalf("message arriving after failure was acknowledged as queued: %v", got)
+	}
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[key]
+	state.mu.Lock()
+	pending := len(state.pendingMessages)
+	state.mu.Unlock()
+	e.interactiveMu.Unlock()
+	if pending != 0 {
+		t.Fatal("blocked startup accepted a message after the failure drain")
+	}
+	release()
+	waitAsyncInput(t, func() bool { return !session.Busy() })
+}
 
 type switchFeedbackAgent struct {
 	stubAgent
@@ -205,6 +452,31 @@ func TestSwitchPreview_UnavailableEmptyAndBoundedUnicode(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type deadlineSwitchHistoryAgent struct {
+	*switchFeedbackAgent
+	budget time.Duration
+}
+
+func (a *deadlineSwitchHistoryAgent) GetSessionHistory(ctx context.Context, _ string, _ int) ([]HistoryEntry, error) {
+	deadline, _ := ctx.Deadline()
+	a.budget = time.Until(deadline)
+	return nil, context.DeadlineExceeded
+}
+
+func TestSwitchPreview_SlowBackendHasShortDeadlineAndKeepsSelection(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	a := &deadlineSwitchHistoryAgent{switchFeedbackAgent: newSwitchFeedbackAgent()}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	defer e.cancel()
+	switchUserSend(e, p, "/switch old-id")
+	if a.budget <= 0 || a.budget > time.Second {
+		t.Fatalf("switch preview can delay confirmation for %s; want at most 1s", a.budget)
+	}
+	if e.sessions.GetOrCreateActive("test:alice").GetAgentSessionID() != "old-id" || !strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(MsgSwitchPreviewUnavailable)) {
+		t.Fatal("preview timeout prevented switch confirmation or changed its target")
 	}
 }
 

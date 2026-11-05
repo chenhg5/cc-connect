@@ -3,9 +3,9 @@ package core
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -522,39 +522,87 @@ func TestHandleRelay_TimeoutWithoutTextReturnsContextError(t *testing.T) {
 	}
 }
 
-// relayFallbackAgent fails the first StartSession call (simulating a corrupt
-// resume) and returns freshSession on the second call (fresh start).
+// The saved ID fails permanently, so retrying it alone cannot heal the relay.
 type relayFallbackAgent struct {
-	callCount    int
-	freshSession AgentSession
+	stubAgent
+	calls     []string
+	resumeErr error
+	freshErr  error
 }
 
-func (a *relayFallbackAgent) Name() string { return "fallback" }
 func (a *relayFallbackAgent) StartSession(_ context.Context, sessionID string) (AgentSession, error) {
-	a.callCount++
-	if a.callCount == 1 && sessionID != "" {
-		return nil, fmt.Errorf("simulated resume failure")
+	a.calls = append(a.calls, sessionID)
+	if sessionID == "stale-id" && a.resumeErr != nil {
+		return nil, a.resumeErr
 	}
-	return a.freshSession, nil
+	if sessionID == "" {
+		if a.freshErr != nil {
+			return nil, a.freshErr
+		}
+		sessionID = "recovered-id"
+	}
+	return &switchResultSession{resultAgentSession: newResultAgentSession("relay recovered"), id: sessionID}, nil
 }
-func (a *relayFallbackAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
-	return nil, nil
-}
-func (a *relayFallbackAgent) Stop() error { return nil }
 
-func TestHandleRelay_ResumeFailureRetainsSavedConversation(t *testing.T) {
+func TestHandleRelay_ResumeFailureRecoversWithoutOverwritingSavedConversation(t *testing.T) {
 	e := newTestEngine()
 	defer e.cancel()
-	agent := &relayFallbackAgent{freshSession: newControllableSession("fresh-session")}
+	agent := &relayFallbackAgent{resumeErr: errors.New("simulated resume failure")}
 	e.agent = agent
+	store := filepath.Join(t.TempDir(), "sessions.json")
+	e.sessions = NewSessionManager(store)
 	sess := e.sessions.GetOrCreateActive("relay:source:test:chat-1")
-	sess.SetAgentSessionID("stale-id", "fallback")
-	_, err := e.HandleRelay(context.Background(), "source", "test:chat-1:user", "hello")
-	if err == nil || !strings.Contains(err.Error(), "simulated resume failure") {
-		t.Fatalf("expected resume error, got %v", err)
+	sess.SetAgentSessionID("stale-id", agent.Name())
+	sess.AddHistory("assistant", "saved relay answer")
+	e.sessions.Save()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for range 2 {
+		resp, err := e.HandleRelay(ctx, "source", "test:chat-1:user", "hello")
+		if err != nil || resp != "relay recovered" {
+			t.Fatalf("relay did not recover: response=%q error=%v", resp, err)
+		}
 	}
-	if agent.callCount != 1 || sess.GetAgentSessionID() != "stale-id" {
-		t.Fatalf("resume failure replaced the saved conversation: calls=%d, id=%q", agent.callCount, sess.GetAgentSessionID())
+	if !reflect.DeepEqual(agent.calls, []string{"stale-id", "", "recovered-id"}) {
+		t.Fatalf("later relay did not resume the recovered conversation: %v", agent.calls)
+	}
+	loaded := NewSessionManager(store)
+	key := "relay:source:test:chat-1"
+	if active := loaded.GetOrCreateActive(key); active.ID == sess.ID || active.GetAgentSessionID() != "recovered-id" {
+		t.Fatal("recovered relay selection was not persisted")
+	}
+	for _, old := range loaded.ListSessions(key) {
+		if old.ID == sess.ID && old.GetAgentSessionID() == "stale-id" && len(old.GetHistory(0)) == 1 && old.GetHistory(1)[0].Content == "saved relay answer" {
+			return
+		}
+	}
+	t.Fatal("relay recovery overwrote the previous conversation or its history")
+}
+
+func TestHandleRelay_FailedFreshFallbackKeepsSavedConversationRetryable(t *testing.T) {
+	e := newTestEngine()
+	defer e.cancel()
+	agent := &relayFallbackAgent{resumeErr: errors.New("simulated resume failure"), freshErr: errors.New("fresh start unavailable")}
+	e.agent = agent
+	key := "relay:source:test:chat-1"
+	sess := e.sessions.GetOrCreateActive(key)
+	sess.SetAgentSessionID("stale-id", agent.Name())
+	sess.AddHistory("assistant", "saved relay answer")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := e.HandleRelay(ctx, "source", "test:chat-1:user", "first"); !errors.Is(err, agent.freshErr) {
+		t.Fatalf("expected fresh-start error, got %v", err)
+	}
+	if e.sessions.GetOrCreateActive(key) != sess || sess.GetAgentSessionID() != "stale-id" || len(sess.GetHistory(0)) != 1 {
+		t.Fatal("failed recovery changed the saved conversation")
+	}
+	// A transient backend outage can recover by resuming the same saved ID.
+	agent.resumeErr = nil
+	if resp, err := e.HandleRelay(ctx, "source", "test:chat-1:user", "retry"); err != nil || resp != "relay recovered" {
+		t.Fatalf("later relay could not recover: response=%q error=%v", resp, err)
+	}
+	if !reflect.DeepEqual(agent.calls, []string{"stale-id", "", "stale-id"}) {
+		t.Fatalf("failed fallback lost the original resume target: %v", agent.calls)
 	}
 }
 

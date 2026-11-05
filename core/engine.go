@@ -3414,6 +3414,13 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	e.interactiveMu.Unlock()
 	defer state.mu.Unlock()
 
+	// Startup has already failed. There will be no event loop to drain a
+	// newly queued message, even if the foreground turn is still replying.
+	if state.startupError != "" {
+		e.reply(p, msg.ReplyCtx, state.startupError)
+		return true
+	}
+
 	// Allow queueing when agentSession is nil (session is starting up,
 	// issue #565). Only reject if the session was established and died.
 	if state.agentSession != nil && !state.agentSession.Alive() {
@@ -4062,10 +4069,16 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	defer stopRecallMonitor()
 
 	if state.agentSession == nil {
+		state.mu.Lock()
 		text := state.startupError
 		if text == "" {
 			text = e.i18n.T(MsgFailedToStartAgentSession)
 		}
+		state.startupError = text
+		state.mu.Unlock()
+		// Set the error before draining: concurrent arrivals must be rejected
+		// rather than appended after the last drain and replayed on a retry.
+		e.notifyDroppedQueuedMessages(state, errors.New(text))
 		e.reply(p, msg.ReplyCtx, text)
 		return
 	}
@@ -16640,7 +16653,22 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	// Use the engine context (not the relay timeout context) so that the
 	// agent process is not killed when the relay deadline fires. The relay
 	// timeout only controls how long we *wait* for the response.
-	agentSession, err := agent.StartSession(e.ctx, session.GetAgentSessionID())
+	savedID := session.GetAgentSessionID()
+	agentSession, err := agent.StartSession(e.ctx, savedID)
+	if err != nil && savedID != "" && e.ctx.Err() == nil && ctx.Err() == nil {
+		// Relay conversations have no /new command. Preserve the old entry
+		// but restore their self-healing fresh-start fallback. Only replace
+		// the active entry after a fresh process has actually started.
+		slog.Warn("relay: session resume failed, trying a new conversation",
+			"relay_key", relaySessionKey, "session_id", savedID, "error", err)
+		agentSession, err = agent.StartSession(e.ctx, "")
+		if err == nil {
+			provider := session.GetActiveProvider()
+			session = sessions.NewSession(relaySessionKey, session.GetName())
+			session.SetActiveProvider(provider)
+			sessions.Save()
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("start relay session (saved conversation retained): %w", err)
 	}

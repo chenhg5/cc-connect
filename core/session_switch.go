@@ -53,7 +53,7 @@ func (e *Engine) sessionSwitchFeedback(agent Agent, sessions *SessionManager, se
 	if hp, ok := agent.(HistoryProvider); ok {
 		// Prefer the backend transcript: another window may have appended
 		// messages since cc-connect last used this conversation.
-		ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
+		ctx, cancel := context.WithTimeout(e.ctx, time.Second)
 		defer cancel()
 		var err error
 		entries, err = hp.GetSessionHistory(ctx, info.ID, 1)
