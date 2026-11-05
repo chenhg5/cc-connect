@@ -1091,7 +1091,7 @@ func TestSendChannelReply_WithoutMessageIDFallsBackToChannelSend(t *testing.T) {
 	s.Client = server.Client()
 
 	p := &Platform{session: s}
-	err = p.sendChannelReply(replyContext{channelID: "ch-1"}, "language set to English")
+	err = p.sendChannelReply(context.Background(), replyContext{channelID: "ch-1"}, "language set to English")
 	if err != nil {
 		t.Fatalf("sendChannelReply() error = %v", err)
 	}
