@@ -191,6 +191,13 @@ const (
 	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
 )
 
+// Narration values: where text an agent writes before a tool call or a
+// thinking block goes.
+const (
+	NarrationMessage  = "message"  // messages of their own (default)
+	NarrationProgress = "progress" // the turn's progress card; only the answer is a message
+)
+
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
 	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
@@ -199,6 +206,7 @@ type DisplayConfig struct {
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
 	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	Narration            *string `toml:"narration"`              // "message" (default) or "progress"
 	HistoryMaxLen        *int    `toml:"history_max_len"`        // max chars per /history entry; 0 = no truncation; default 1000
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
 	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
@@ -874,6 +882,18 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 	return false
 }
 
+// EffectiveNarration resolves [display] narration: project, then global,
+// then "message".
+func EffectiveNarration(cfg *Config, proj *ProjectConfig) string {
+	if proj != nil && proj.Display != nil && proj.Display.Narration != nil {
+		return *proj.Display.Narration
+	}
+	if cfg.Display.Narration != nil {
+		return *cfg.Display.Narration
+	}
+	return NarrationMessage
+}
+
 // EffectiveDisplay resolves the per-project [projects.display] override on top
 // of the global [display] block, falling back to built-in defaults.
 //
@@ -1160,6 +1180,13 @@ func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 	}
 	if display.HistoryMaxLen != nil && *display.HistoryMaxLen < 0 {
 		return fmt.Errorf("config: %s.history_max_len must be >= 0", prefix)
+	}
+	if display.Narration != nil {
+		switch *display.Narration {
+		case NarrationMessage, NarrationProgress:
+		default:
+			return fmt.Errorf("config: %s.narration must be \"message\" or \"progress\"", prefix)
+		}
 	}
 	return nil
 }
