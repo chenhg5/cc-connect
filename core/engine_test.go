@@ -5088,6 +5088,35 @@ func TestCmdGoto_RejectsModelProviderDoesNotOffer(t *testing.T) {
 	}
 }
 
+// The validation inside applyGoto is a second layer: card actions, numbered
+// entries and the typed command all pass through it, so a model the provider
+// does not offer must be refused there even when a caller skips resolveGotoModel.
+func TestApplyGoto_RejectsModelProviderDoesNotOffer(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &scopedStubProviderAgent{stubProviderAgent: stubProviderAgent{
+		providers: []ProviderConfig{
+			{Name: "aiapi", Models: []ModelOption{{Name: "glm-5.3"}}},
+			{Name: "chatgpt", Models: []ModelOption{{Name: "openai/gpt-5.6-sol"}}},
+		},
+		active: "aiapi",
+	}}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+
+	text := e.applyGoto(agent, e.sessions, agent, "test:user1", "test:user1", "chatgpt", "chatgpt/gpt-5.6-sol", true)
+
+	if agent.active != "aiapi" {
+		t.Fatalf("active provider = %q, want aiapi (applyGoto must not switch on an unoffered model)", agent.active)
+	}
+	for _, prov := range agent.providers {
+		if prov.Name == "chatgpt" && prov.Model != "" {
+			t.Fatalf("chatgpt model = %q, want unchanged", prov.Model)
+		}
+	}
+	if !strings.Contains(text, "does not offer") {
+		t.Fatalf("applyGoto text = %q, want a model-not-offered message", text)
+	}
+}
+
 // Stopping a cron turn drops its queued messages; the user must be told instead
 // of losing them silently (same contract as /stop).
 func TestStopCronTurns_NotifiesDroppedQueuedMessages(t *testing.T) {
