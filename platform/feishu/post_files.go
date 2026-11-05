@@ -12,11 +12,11 @@ import (
 // localized "attachment unavailable" notice so the agent knows an attachment
 // existed instead of silently answering from the text alone; successful
 // siblings still reach the normal core file-saving pipeline.
-func (p *Platform) downloadPostFiles(messageID, raw, text string) ([]core.FileAttachment, []string) {
+func (p *Platform) downloadPostFiles(messageID string, postFiles []postFile, text string) ([]core.FileAttachment, []string) {
 	var files []core.FileAttachment
 	var notices []string
 	i18n := core.NewI18n(core.DetectLanguage(text))
-	for _, file := range p.parsePostFiles(raw) {
+	for _, file := range postFiles {
 		name := file.FileName
 		if name == "" {
 			name = "attachment"
