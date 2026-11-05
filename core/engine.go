@@ -11101,7 +11101,7 @@ func (e *Engine) stopCronTurns(sessionKey string) int {
 	e.interactiveMu.Unlock()
 	stopped := 0
 	for _, k := range keys {
-		if e.stopInteractiveSessionSilently(k) {
+		if e.stopInteractiveSessionWithOptions(k, true) {
 			stopped++
 		}
 	}

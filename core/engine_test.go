@@ -5088,6 +5088,27 @@ func TestCmdGoto_RejectsModelProviderDoesNotOffer(t *testing.T) {
 	}
 }
 
+// Stopping a cron turn drops its queued messages; the user must be told instead
+// of losing them silently (same contract as /stop).
+func TestStopCronTurns_NotifiesDroppedQueuedMessages(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:user1#cron:job1"
+	e.interactiveStates[key] = &interactiveState{
+		pendingMessages: []queuedMessage{{content: "queued", platform: p, replyCtx: "ctx"}},
+	}
+
+	if got := e.stopCronTurns("test:user1"); got != 1 {
+		t.Fatalf("stopCronTurns = %d, want 1", got)
+	}
+	if len(p.sent) != 1 {
+		t.Fatalf("sent = %q, want one dropped-queue notice", p.sent)
+	}
+	if e.interactiveStates[key] != nil {
+		t.Fatalf("cron interactive state still present after stop")
+	}
+}
+
 func TestCmdModel_UsesInlineButtonsOnButtonOnlyPlatform(t *testing.T) {
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "inline-only"}}
 	agent := &stubModelModeAgent{}
