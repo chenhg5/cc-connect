@@ -22,6 +22,11 @@ import (
 // roughly half the map (iteration order is arbitrary) to bound memory.
 const toolInputCacheMaxEntries = 1000
 
+// defaultHandshakeTimeout bounds session setup. It is generous because a
+// first launch may install the agent (npx) or go through SSH, but finite:
+// a stuck handshake otherwise pins the engine's per-project lock forever.
+const defaultHandshakeTimeout = 3 * time.Minute
+
 type acpSession struct {
 	workDir string
 	events  chan core.Event
@@ -64,6 +69,20 @@ type acpSession struct {
 	// synthetic EventResult so the engine's unsolicited reader relays them
 	// to the platform instead of buffering them until the next turn.
 	promptInFlight atomic.Int32
+
+	// replaying is set while a session/load or session/resume request is
+	// outstanding. Servers replay the whole conversation as session/update
+	// notifications before answering; nobody drains events during the
+	// handshake, so forwarding that history would fill the bounded events
+	// channel, block the transport read loop and keep the load response
+	// from ever being read (#1941). While set, history-shaped updates are
+	// dropped and anything else is delivered without blocking.
+	replaying     atomic.Bool
+	replayDropped atomic.Int64 // updates gated during the current replay, for logging
+
+	// handshakeTimeout bounds the whole initialize → authenticate →
+	// load/resume/new sequence. Zero means defaultHandshakeTimeout.
+	handshakeTimeout time.Duration
 
 	callbacks sessionCallbacks // may be nil (tests, integration harness)
 }
@@ -175,6 +194,13 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 // session/new, and caches any modes the server advertises so
 // SetLiveMode / PermissionModes can answer correctly.
 func (s *acpSession) handshake(resumeSessionID string, authMethod string) error {
+	timeout := s.handshakeTimeout
+	if timeout <= 0 {
+		timeout = defaultHandshakeTimeout
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, timeout)
+	defer cancel()
+
 	initParams := map[string]any{
 		"protocolVersion": 1,
 		"clientCapabilities": map[string]any{
@@ -189,7 +215,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 			"version": "1.0.0",
 		},
 	}
-	res, err := s.tr.call(s.ctx, "initialize", initParams)
+	res, err := s.tr.call(ctx, "initialize", initParams)
 	if err != nil {
 		return fmt.Errorf("acp: initialize: %w", err)
 	}
@@ -211,7 +237,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	}
 
 	if strings.TrimSpace(authMethod) != "" {
-		if _, err := s.tr.call(s.ctx, "authenticate", map[string]any{
+		if _, err := s.tr.call(ctx, "authenticate", map[string]any{
 			"methodId": authMethod,
 		}); err != nil {
 			return fmt.Errorf("acp: authenticate (%s): %w", authMethod, err)
@@ -236,20 +262,20 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		case initOut.AgentCapabilities.LoadSession:
 			resumeMethod = "session/load"
 		}
-		// Both resume methods may replay conversation history the way
-		// `session/load` does, and a long replay can fill the bounded
-		// events channel and stall the transport read loop. PR #2038
-		// addresses that with a `replaying` guard on acpSession; it is
-		// not merged yet, so this call site cannot set the flag. When
-		// that guard lands it has to cover this path too, otherwise
-		// servers advertising `resume` reintroduce the deadlock #2038
-		// was written to fix.
+		// Both resume methods may replay the conversation as
+		// session/update notifications before answering. Gate them for
+		// the duration of the request (#1941); see acpSession.replaying.
 		if resumeMethod != "" {
-			resumeRes, err := s.tr.call(s.ctx, resumeMethod, map[string]any{
+			resumeRes, err := s.callReplaying(ctx, resumeMethod, map[string]any{
 				"sessionId":  resumeSessionID,
 				"cwd":        s.workDir,
 				"mcpServers": []any{},
 			})
+			if err != nil && ctx.Err() != nil {
+				// Out of handshake budget: falling back to session/new
+				// would fail the same way and hide the real cause.
+				return fmt.Errorf("acp: %s: %w", resumeMethod, err)
+			}
 			if err != nil {
 				slog.Warn("acp: session resume failed, starting new session",
 					"method", resumeMethod, "error", err)
@@ -288,7 +314,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		"cwd":        s.workDir,
 		"mcpServers": []any{},
 	}
-	newRes, err := s.tr.call(s.ctx, "session/new", newParams)
+	newRes, err := s.tr.call(ctx, "session/new", newParams)
 	if err != nil {
 		return fmt.Errorf("acp: session/new: %w", err)
 	}
@@ -305,6 +331,75 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	s.setACPSessionID(sn.SessionID)
 	s.absorbModes(sn.Modes)
 	return nil
+}
+
+// callReplaying issues a session/load or session/resume request with the
+// replay gate up. The gate is lowered by the transport read loop right
+// before the response is delivered, so every replayed notification (which
+// the server sends ahead of the response) is gated and nothing sent after
+// the response is.
+func (s *acpSession) callReplaying(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	s.replayDropped.Store(0)
+	s.replaying.Store(true)
+	res, err := s.tr.callWithHook(ctx, method, params, func() { s.replaying.Store(false) })
+	s.replaying.Store(false) // error / cancellation paths skip the hook
+	if n := s.replayDropped.Load(); n > 0 {
+		slog.Info("acp: dropped replayed history", "method", method, "updates", n)
+	}
+	return res, err
+}
+
+// isReplayHistoryUpdate reports whether a session/update kind is
+// conversation history (message text, thoughts, tool calls, plans) as
+// opposed to session state (modes, commands, config, usage). Vendor
+// aliases handled by mapSessionUpdateFallback are included so a replay
+// from a non-standard server is not relayed as fresh output either.
+func isReplayHistoryUpdate(kind string) bool {
+	switch strings.ToLower(kind) {
+	case "user_message_chunk", "agent_message_chunk", "agent_thought_chunk",
+		"tool_call", "tool_call_update", "plan",
+		"reasoning", "reasoning_chunk", "thinking", "agent_thinking_chunk",
+		"message", "message_chunk", "text", "response":
+		return true
+	}
+	return false
+}
+
+// sessionUpdateKind returns the sessionUpdate discriminator of a
+// session/update params payload, or "" when it cannot be parsed.
+func sessionUpdateKind(params json.RawMessage) string {
+	var wrap struct {
+		Update struct {
+			Kind string `json:"sessionUpdate"`
+		} `json:"update"`
+	}
+	if json.Unmarshal(params, &wrap) != nil {
+		return ""
+	}
+	return wrap.Update.Kind
+}
+
+// onReplayNotification handles a session/update that arrived while a
+// load/resume is outstanding. It must never block: the read loop that
+// calls it is the only thing that can deliver the pending response.
+func (s *acpSession) onReplayNotification(params json.RawMessage) {
+	s.maybeAbsorbCurrentModeUpdate(params)
+	s.maybeAbsorbUsageUpdate(params)
+	if isReplayHistoryUpdate(sessionUpdateKind(params)) {
+		s.replayDropped.Add(1)
+		return
+	}
+	for _, ev := range mapSessionUpdate(s.currentACPSessionID(), params) {
+		if ev.SessionID == "" {
+			ev.SessionID = s.currentACPSessionID()
+		}
+		select {
+		case s.events <- ev:
+		default:
+			s.replayDropped.Add(1)
+			slog.Debug("acp: events full during replay, dropping update", "type", ev.Type)
+		}
+	}
 }
 
 // absorbModes copies a modes block into the session's cache and fans
@@ -425,6 +520,10 @@ func (s *acpSession) matchAvailableMode(input string) string {
 func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	if method != "session/update" {
 		slog.Debug("acp: notification", "method", method)
+		return
+	}
+	if s.replaying.Load() {
+		s.onReplayNotification(params)
 		return
 	}
 	s.cacheToolCallInput(params)
