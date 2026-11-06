@@ -1205,8 +1205,16 @@ func writeFakeDeleteBin(t *testing.T, wantID string, exitCode int, stderr string
 // `opencode session delete <id>` and returns nil on success.
 func TestDeleteSession_Success(t *testing.T) {
 	sessionID := "ses_abc123"
-	bin := writeFakeDeleteBin(t, sessionID, 0, "")
-	a := &Agent{cmd: bin, workDir: t.TempDir()}
+	workDir := t.TempDir()
+	// The guard resolves the DB through XDG_DATA_HOME: point it at a scratch
+	// database holding this session in the agent's own directory.
+	xdg := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdg)
+	seedDBAt(t, filepath.Join(xdg, "opencode", "opencode.db"),
+		[]string{testV2SessionSchema},
+		[]string{`INSERT INTO session_v2 (id, title, directory) VALUES ('ses_abc123', 't', '` + filepath.ToSlash(workDir) + `')`})
+	bin := writeFakeDeleteSessionBin(t, sessionID)
+	a := &Agent{cmd: bin, workDir: workDir}
 
 	if err := a.DeleteSession(context.Background(), sessionID); err != nil {
 		t.Fatalf("DeleteSession() unexpected error: %v", err)
