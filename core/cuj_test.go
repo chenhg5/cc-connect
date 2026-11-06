@@ -1515,6 +1515,45 @@ func TestCUJ_B8_HistoryShowsConversation(t *testing.T) {
 	if !env.sentContains("unique-keyword-fluffy-zebra") {
 		t.Fatalf("/history did NOT surface the prior user message. Sent: %v", env.plat.getSent())
 	}
+
+	t.Run("AgentTranscriptRefreshesWithNonEmptyCache", func(t *testing.T) {
+		env := newCUJEnv(t)
+		transcript := &historyProviderStub{}
+		env.engine.agent = &cujHistoryAgent{cujAgent: env.agent, transcript: transcript}
+		t.Cleanup(func() { env.engine.Stop() })
+
+		env.userSends("b8-external", "question from chat")
+		env.waitFor("chat reply", 2*time.Second, func() bool {
+			return env.sentContains("ok")
+		})
+		env.plat.clearSent()
+		env.userSends("b8-external", "/history")
+		if !env.sentContains("question from chat") {
+			t.Fatalf("empty agent transcript must retain chat history: %v", env.plat.getSent())
+		}
+
+		// The terminal appends to the same agent transcript outside cc-connect.
+		transcript.setEntries([]HistoryEntry{
+			{Role: "user", Content: "question from chat", Timestamp: time.Now()},
+			{Role: "assistant", Content: "ok", Timestamp: time.Now()},
+			{Role: "user", Content: "new question from terminal", Timestamp: time.Now()},
+			{Role: "assistant", Content: "new answer from terminal", Timestamp: time.Now()},
+		})
+		env.plat.clearSent()
+		env.userSends("b8-external", "/history")
+		if !env.sentContains("new question from terminal") || !env.sentContains("new answer from terminal") {
+			t.Fatalf("non-empty chat cache hid the terminal conversation: %v", env.plat.getSent())
+		}
+	})
+}
+
+type cujHistoryAgent struct {
+	*cujAgent
+	transcript *historyProviderStub
+}
+
+func (a *cujHistoryAgent) GetSessionHistory(ctx context.Context, id string, limit int) ([]HistoryEntry, error) {
+	return a.transcript.GetSessionHistory(ctx, id, limit)
 }
 
 // CUJ-B10 · reset_on_idle: after staleness threshold, next message starts
