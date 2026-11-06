@@ -629,6 +629,9 @@ type CommandConfig struct {
 	Prompt      string `toml:"prompt"`   // prompt template (mutually exclusive with Exec)
 	Exec        string `toml:"exec"`     // shell command to execute (mutually exclusive with Prompt)
 	WorkDir     string `toml:"work_dir"` // optional: working directory for exec command
+	// Quiet (exec commands only) sends no progress message and stdout as
+	// plain text, nothing when stdout is empty; failures are still reported.
+	Quiet bool `toml:"quiet,omitempty"`
 }
 
 type LogConfig struct {

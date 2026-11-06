@@ -18,6 +18,11 @@ type CustomCommand struct {
 	Exec        string // shell command to execute (mutually exclusive with Prompt)
 	WorkDir     string // optional: working directory for exec command
 	Source      string // "config" or "agent" (for display)
+	// Quiet runs an Exec command without a progress message and sends its
+	// stdout as plain text -- nothing at all when stdout is empty (the
+	// command answered on its own, e.g. through `cc-connect send`). A
+	// failure or a timeout is still reported.
+	Quiet bool
 }
 
 // CommandRegistry holds all available custom commands and resolves agent command files.
@@ -45,6 +50,18 @@ func (r *CommandRegistry) Add(name, description, prompt, exec, workDir, source s
 		WorkDir:     workDir,
 		Source:      source,
 	}
+}
+
+// MarkQuiet marks a registered command quiet (see CustomCommand.Quiet).
+// It reports whether the command exists.
+func (r *CommandRegistry) MarkQuiet(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cmd, ok := r.commands[strings.ToLower(name)]
+	if ok {
+		cmd.Quiet = true
+	}
+	return ok
 }
 
 // ClearSource removes all commands from a given source (e.g. "config").

@@ -1179,6 +1179,12 @@ func (e *Engine) AddCommand(name, description, prompt, exec, workDir, source str
 	e.commands.Add(name, description, prompt, exec, workDir, source)
 }
 
+// MarkCommandQuiet runs the named exec command quietly; see
+// CustomCommand.Quiet.
+func (e *Engine) MarkCommandQuiet(name string) {
+	e.commands.MarkQuiet(name)
+}
+
 // ClearCommands removes all commands from the given source.
 func (e *Engine) ClearCommands(source string) {
 	e.commands.ClearSource(source)
@@ -15497,7 +15503,52 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 		workDir, _ = os.Getwd()
 	}
 
+	if cmd.Quiet {
+		_ = e.runShellQuiet(p, msg.ReplyCtx, execCmd, workDir, 60*time.Second, 4000)
+		return
+	}
 	_ = e.runShellWithProgress(p, msg.ReplyCtx, execCmd, workDir, 60*time.Second, 4000)
+}
+
+// runShellQuiet runs a quiet exec command (CustomCommand.Quiet): no progress
+// message, stdout sent as plain text and nothing at all when it is empty. A
+// failure is reported like runShellWithProgress reports it, with stderr (or
+// stdout) as the detail; a timeout likewise.
+func (e *Engine) runShellQuiet(p Platform, replyCtx any, command, workDir string, timeout time.Duration, maxOutput int) error {
+	cmdLabel := truncateStr(command, 60)
+	ctx, cancel := context.WithTimeout(e.ctx, timeout)
+	defer cancel()
+	cmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, command)
+	cmd.Dir = workDir
+	cmd.WaitDelay = time.Second
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	out := strings.TrimSpace(stdout.String())
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		e.send(p, replyCtx, e.formatShellTimeout(cmdLabel, strings.TrimSpace(out+"\n"+stderr.String()), maxOutput))
+		return fmt.Errorf("command timed out after %s", timeout)
+	}
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = out
+		}
+		if detail == "" {
+			detail = err.Error()
+		}
+		exitCode := -1
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
+		}
+		e.reply(p, replyCtx, fmt.Sprintf("❌ `%s` (exit code %d)\n```\n%s\n```", cmdLabel, exitCode, truncateRunes(detail, maxOutput)))
+		return err
+	}
+	if out != "" {
+		e.reply(p, replyCtx, truncateRunes(out, maxOutput))
+	}
+	return nil
 }
 
 func (e *Engine) cmdCommands(p Platform, msg *Message, args []string) {
