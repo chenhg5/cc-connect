@@ -966,7 +966,9 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 
 		// In multi-workspace mode sessions live in per-workspace managers, not
 		// the base manager, so aggregate across all of them.
-		var sessions []map[string]any
+		// Keep the aggregate non-nil so the API encodes zero sessions as
+		// `"sessions":[]` instead of `"sessions":null`.
+		sessions := make([]map[string]any, 0)
 		for _, mm := range e.managementSessionManagers() {
 			idToKey, activeIDs := mm.manager.SessionKeyMap()
 			for _, s := range mm.manager.AllSessions() {

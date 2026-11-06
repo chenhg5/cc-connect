@@ -1,6 +1,9 @@
 package core
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -300,4 +303,63 @@ func TestManagementSessionIsolation_ListDetailDeleteSwitch(t *testing.T) {
 	if _, ok := e.findManagementSession(baseSess.ID); !ok {
 		t.Fatal("base session should still resolve after workspace delete")
 	}
+}
+
+// TestManagementSessions_EmptyListReturnsEmptyArray pins the empty-list
+// contract: GET /api/v1/projects/{name}/sessions with zero sessions must
+// encode `"sessions":[]`, never `"sessions":null`. A nil aggregate slice
+// encodes as null and breaks API clients that expect an array. The test
+// asserts on the raw HTTP JSON body (not a decoded struct length) in both
+// single- and multi-workspace modes.
+func TestManagementSessions_EmptyListReturnsEmptyArray(t *testing.T) {
+	assertEmptySessionsJSON := func(t *testing.T, url, token string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", url, err)
+		}
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		body := string(raw)
+		if !strings.Contains(body, `"sessions":[]`) {
+			t.Fatalf("expected raw JSON to contain %q, got: %s", `"sessions":[]`, body)
+		}
+		if strings.Contains(body, `"sessions":null`) {
+			t.Fatalf("raw JSON must not contain null sessions, got: %s", body)
+		}
+		var decoded struct {
+			OK   bool `json:"ok"`
+			Data struct {
+				Sessions []map[string]any `json:"sessions"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("unmarshal raw body: %v", err)
+		}
+		if decoded.Data.Sessions == nil || len(decoded.Data.Sessions) != 0 {
+			t.Fatalf("decoded sessions = %#v, want non-nil empty slice", decoded.Data.Sessions)
+		}
+	}
+
+	t.Run("single-workspace", func(t *testing.T) {
+		_, ts, _ := testManagementServer(t, "tok")
+		// No sessions created: the base manager is empty.
+		assertEmptySessionsJSON(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	})
+
+	t.Run("multi-workspace", func(t *testing.T) {
+		_, ts, e := testManagementServer(t, "tok")
+		// Empty base manager plus an empty workspace pool. The store path is
+		// in-memory (""), so no persisted workspace stores are picked up.
+		e.multiWorkspace = true
+		e.workspacePool = newWorkspacePool(0)
+		assertEmptySessionsJSON(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
+	})
 }
