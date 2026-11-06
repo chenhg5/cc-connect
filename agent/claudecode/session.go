@@ -260,6 +260,10 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
+	// Compute the spawn environment up front: the --resume guard below must
+	// resolve the config home exactly as the spawned CLI will see it.
+	spawnEnv := buildSpawnEnv(workDir, extraEnv, spawnOpts)
+
 	// Claude Code rejects bypassPermissions when running as root.
 	// Downgrade to "auto" which auto-approves internally in cc-connect.
 	var rootDowngradeWarning string
@@ -297,8 +301,17 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		// Truly fresh session — no resume, no continue.
 	default:
 		// Resuming a known session ID — this is cc-connect's own session
-		// from a previous connection, safe to resume directly.
-		innerArgs = append(innerArgs, "--resume", sessionID)
+		// from a previous connection, safe to resume directly. But Claude
+		// Code prunes old transcripts after a retention window; a --resume
+		// of a pruned conversation fails with "No conversation found with
+		// session ID" and the process exits. Fall back to a fresh session
+		// when the transcript is gone.
+		if transcriptExists(configHomeFromEnv(spawnEnv), workDir, sessionID) {
+			innerArgs = append(innerArgs, "--resume", sessionID)
+		} else {
+			slog.Info("claudeSession: transcript missing for stored session, starting fresh instead of --resume",
+				"session_id", sessionID)
+		}
 	}
 	if len(allowedTools) > 0 {
 		innerArgs = append(innerArgs, "--allowedTools", strings.Join(allowedTools, ","))
@@ -419,32 +432,9 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 	// MCP grandchildren (e.g. the Telegram bridge bun process) spinning at
 	// 100% CPU after their parent's stdio pipe closes.
 	prepareCmdForKill(cmd)
-	// Filter out CLAUDECODE env var to prevent "nested session" detection,
-	// since cc-connect is a bridge, not a nested Claude Code session.
-	env := filterEnv(os.Environ(), "CLAUDECODE")
-	if len(extraEnv) > 0 {
-		env = core.MergeEnv(env, extraEnv)
-	}
-	// Signal to PermissionRequest hooks that they are running inside
-	// cc-connect. Hooks can check this env var to skip LLM calls on
-	// the Claude Code side (the hook result is ignored anyway when
-	// --permission-prompt-tool stdio is active). cc-connect runs the
-	// hook itself without this env var, so the real work happens only
-	// once.
-	env = core.MergeEnv(env, []string{"CC_CONNECT_PERMISSION_HOOK_SKIP=1"})
-	// Carry the intended working directory across the sudo -i boundary so the
-	// re-chdir wrapper in BuildSpawnCommand can restore it (sudo -i would
-	// otherwise leave the agent in the target user's HOME). Only meaningful
-	// under isolation; FilterEnvForSpawn keeps it because mergedAllowlist
-	// includes RunAsChdirEnv whenever WorkDir is set.
-	if spawnOpts.IsolationMode() && workDir != "" {
-		env = core.MergeEnv(env, []string{core.RunAsChdirEnv + "=" + workDir})
-	}
-	// When run_as_user is set, strip the supervisor's environment down to
-	// the allowlist before passing it to sudo. sudo --preserve-env also
-	// enforces this, but filtering here makes the cc-connect spawn argv
-	// the single source of truth.
-	env = core.FilterEnvForSpawn(env, spawnOpts)
+	// Spawn environment (assembled in buildSpawnEnv above, before the
+	// --resume guard). See buildSpawnEnv for the precedence rules.
+	env := spawnEnv
 	cmd.Env = env
 
 	var providerEnvSnapshot []string
