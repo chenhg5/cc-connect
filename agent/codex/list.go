@@ -135,8 +135,10 @@ func loadCodexSessionTitles(codexHome string) map[string]string {
 		if json.Unmarshal(scanner.Bytes(), &entry) != nil {
 			continue
 		}
-		if entry.ID != "" && strings.TrimSpace(entry.ThreadName) != "" {
-			titles[entry.ID] = entry.ThreadName
+		if entry.ID != "" {
+			if name := strings.TrimSpace(stripCodexPromptPreamble(entry.ThreadName)); name != "" {
+				titles[entry.ID] = name
+			}
 		}
 	}
 	return titles
@@ -220,9 +222,11 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 				// Keep the first real prompt so later turns do not rename the session.
 				if summary == "" {
 					for _, c := range item.Content {
-						if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
-							summary = c.Text
-							break
+						if c.Type == "input_text" {
+							if text := stripCodexPromptPreamble(c.Text); text != "" && isUserPrompt(text) {
+								summary = text
+								break
+							}
 						}
 					}
 				}
@@ -362,10 +366,12 @@ func readCodexSessionHistory(r io.Reader, limit int) ([]core.HistoryEntry, error
 		switch {
 		case item.Role == "user" && len(item.Content) > 0:
 			for _, c := range item.Content {
-				if c.Type == "input_text" && c.Text != "" && isUserPrompt(c.Text) {
-					entries = append(entries, core.HistoryEntry{
-						Role: "user", Content: c.Text, Timestamp: ts,
-					})
+				if c.Type == "input_text" {
+					if text := stripCodexPromptPreamble(c.Text); text != "" && isUserPrompt(text) {
+						entries = append(entries, core.HistoryEntry{
+							Role: "user", Content: text, Timestamp: ts,
+						})
+					}
 				}
 			}
 		case item.Role == "assistant" && len(item.Content) > 0:
@@ -426,6 +432,23 @@ func patchSessionSource(sessionID, codexHome string) {
 	out = append(out, data[idx:]...)
 
 	_ = os.WriteFile(path, out, 0o644)
+}
+
+// stripCodexPromptPreamble removes the cc-connect project/bridge instruction
+// preamble prepended on the first exec turn, returning only the user message.
+// If text is a truncated preamble header (e.g. from session_index.jsonl), it
+// returns "" so callers fall back to the full transcript record.
+func stripCodexPromptPreamble(text string) string {
+	trimmed := strings.TrimSpace(text)
+	const header = "Before answering, follow these project-level instructions"
+	if !strings.HasPrefix(trimmed, header) {
+		return text
+	}
+	const marker = "\n\n---\n\nUser message:\n"
+	if idx := strings.Index(trimmed, marker); idx >= 0 {
+		return trimmed[idx+len(marker):]
+	}
+	return ""
 }
 
 // isUserPrompt returns true if the text looks like an actual user prompt

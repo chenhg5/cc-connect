@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestAgentSessionPrompt_IncludesExistingFileDeliveryAndCustomInstructions(t *testing.T) {
+	for _, lang := range []Language{LangEnglish, LangChinese} {
+		prompt := AgentSessionPrompt(lang, "custom-system", "custom-append")
+		for _, want := range []string{"cc-connect send --file", "custom-system", "custom-append"} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("%s missing %q", lang, want)
+			}
+		}
+		if !strings.Contains(prompt, "已有文件") && !strings.Contains(prompt, "already exists") {
+			t.Fatalf("%s does not cover existing attachments", lang)
+		}
+	}
+}
+
 // TestAgentSystemPrompt_EnglishDefault covers the back-compat behaviour:
 // AgentSystemPrompt() must return the same bytes as the English variant and
 // must contain the silent-reply marker so existing English-only callers keep
