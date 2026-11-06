@@ -1,4 +1,4 @@
-package pi_test
+package pi
 
 import (
 	"context"
@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chenhg5/cc-connect/agent/pi"
 	"github.com/chenhg5/cc-connect/core"
 )
 
@@ -67,7 +66,7 @@ func TestPiIssue2161HelperProcess(t *testing.T) {
 					"data": map[string]any{"sessionId": "issue2161-peer", "isStreaming": false}})
 			case "prompt":
 				promptNumber++
-				if promptNumber != 1 || os.Getenv("CC_CONNECT_ISSUE2161_DEFER_ACK") != "1" {
+				if (promptNumber != 1 || os.Getenv("CC_CONNECT_ISSUE2161_DEFER_ACK") != "1") && os.Getenv("CC_CONNECT_ISSUE2161_DEFER_ALL_ACKS") != "1" {
 					emit(map[string]any{"type": "response", "command": "prompt", "id": command["id"], "success": true, "data": map[string]any{"disposition": "started"}})
 				}
 			}
@@ -154,7 +153,7 @@ func (s *issue2161ObservedSession) Close() error {
 }
 
 type issue2161ObservedAgent struct {
-	*pi.Agent
+	*Agent
 	started chan *issue2161ObservedSession
 }
 
@@ -251,7 +250,10 @@ func newIssue2161Fixture(t *testing.T, bot string, deferFirstAck ...bool) *issue
 	if len(deferFirstAck) > 0 && deferFirstAck[0] {
 		env["CC_CONNECT_ISSUE2161_DEFER_ACK"] = "1"
 	}
-	base, err := pi.New(map[string]any{
+	if len(deferFirstAck) > 1 && deferFirstAck[1] {
+		env["CC_CONNECT_ISSUE2161_DEFER_ALL_ACKS"] = "1"
+	}
+	base, err := New(map[string]any{
 		"cmd": []string{executable, "-test.run=^TestPiIssue2161HelperProcess$", "--"},
 		"rpc": true, "model": "fake-model", "work_dir": dir,
 		"env": env,
@@ -259,7 +261,7 @@ func newIssue2161Fixture(t *testing.T, bot string, deferFirstAck ...bool) *issue
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := &issue2161ObservedAgent{Agent: base.(*pi.Agent), started: make(chan *issue2161ObservedSession, 1)}
+	agent := &issue2161ObservedAgent{Agent: base.(*Agent), started: make(chan *issue2161ObservedSession, 1)}
 	p := &issue2161Platform{changed: make(chan struct{}, 128)}
 	f := &issue2161Fixture{t: t, platform: p, agent: agent, accepted: make(chan net.Conn, 1), commands: make(chan map[string]any, 64)}
 	f.engine = core.NewEngine(bot, agent, []core.Platform{p}, "", core.LangChinese)
@@ -618,5 +620,97 @@ func TestPiIssue2161Engine_HandledExtensionCompletesWithoutAgentStart(t *testing
 	f.awaitIdle()
 	if got := f.session.results.Load(); got != 2 {
 		t.Fatalf("handled extension and follow-up terminal count=%d, want 2", got)
+	}
+}
+
+func (s *issue2161ObservedSession) SupportsBusySteer() bool {
+	return s.AgentSession.(core.BusySteerSender).SupportsBusySteer()
+}
+
+func (s *issue2161ObservedSession) SendBusySteer(ctx context.Context, text, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (core.SteerResult, error) {
+	return s.AgentSession.(core.BusySteerSender).SendBusySteer(ctx, text, messageID, images, files)
+}
+
+func TestPiIssue2161Engine_ManualCompressThenQueuedMessage(t *testing.T) {
+	for _, command := range []string{"/compress", "/compact"} {
+		t.Run(strings.TrimPrefix(command, "/"), func(t *testing.T) {
+			runIssue2161ManualCompressThenQueuedMessage(t, command)
+		})
+	}
+}
+
+func runIssue2161ManualCompressThenQueuedMessage(t *testing.T, slashCommand string) {
+	f := newIssue2161Fixture(t, "bot-manual")
+	f.send("warmup", "create session")
+	f.command("prompt")
+	f.emit(map[string]any{"type": "agent_start"})
+	f.finish("answer:warmup")
+	f.awaitAnswers(1)
+	f.awaitIdle()
+	f.send("compact", slashCommand)
+	command := f.command("compact")
+	if command["id"] == nil || command["id"] == "" {
+		t.Fatalf("compact RPC lacks correlation ID: %v", command)
+	}
+	f.send("after", "queued after compact")
+	before := f.session.results.Load()
+	f.emit(map[string]any{"type": "compaction_start"}, map[string]any{"type": "compaction_end"}, map[string]any{"type": "agent_end"})
+	if got := f.session.results.Load(); got != before {
+		t.Fatalf("manual compact completed before its correlated response: %d -> %d", before, got)
+	}
+	f.emit(map[string]any{"type": "response", "command": "compact", "id": command["id"], "success": true, "data": map[string]any{}})
+	if next := f.command("prompt"); next["message"] != "queued after compact" {
+		t.Fatalf("queued compact follow-up=%v", next)
+	}
+	f.emit(map[string]any{"type": "agent_start"})
+	f.finish("answer:after-compact")
+	f.assertAnswers(issue2161Delivery{"send", "warmup", "answer:warmup"}, issue2161Delivery{"send", "after", "answer:after-compact"})
+	f.awaitIdle()
+	completed := 0
+	for _, message := range f.platform.snapshot() {
+		if message.ReplyTo == "compact" && strings.Contains(message.Text, "上下文压缩完成") {
+			completed++
+		}
+	}
+	if completed != 1 {
+		t.Fatalf("manual compact completion count=%d; deliveries=%v", completed, f.platform.snapshot())
+	}
+}
+
+// The peer deliberately supplies a supported synthetic interleaving. This
+// checks adapter/core completion ownership, not stock Pi event scheduling.
+
+func TestPiIssue2161Engine_StartedACKCoalescesWithoutExtraTerminalWait(t *testing.T) {
+	f := newIssue2161Fixture(t, "bot-coalesced", true, true)
+	f.engine.SetBusyMessageMode("steer")
+	f.send("m1", "old task")
+	first := f.command("prompt")
+	f.emit(issue2161UnitResponse(first, true, "started"), map[string]any{"type": "agent_start"})
+	f.emit(map[string]any{"type": "agent_end"})
+	steered := make(chan struct{})
+	go func() { f.send("m2", "new native run"); close(steered) }()
+	second := f.command("prompt")
+	f.emit(issue2161UnitResponse(second, true, "started"), map[string]any{"type": "agent_start"}, map[string]any{"type": "agent_settled"})
+	if got := f.session.results.Load(); got != 0 {
+		t.Fatalf("old settled emitted %d terminal events", got)
+	}
+	select {
+	case <-steered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("busy steer did not return after ACK")
+	}
+	f.finish("answer:coalesced")
+	f.assertAnswers(issue2161Delivery{"send", "m1", "answer:coalesced"})
+	f.awaitIdle()
+	// A third user action must start a new ordinary turn after the single
+	// terminal event; a phantom already-sent turn would keep this queued.
+	f.send("m3", "next task")
+	third := f.command("prompt")
+	f.emit(issue2161UnitResponse(third, true, "started"), map[string]any{"type": "agent_start"})
+	f.finish("answer:next")
+	f.assertAnswers(issue2161Delivery{"send", "m1", "answer:coalesced"}, issue2161Delivery{"send", "m3", "answer:next"})
+	f.awaitIdle()
+	if got := f.session.results.Load(); got != 2 {
+		t.Fatalf("terminal events=%d, want 2", got)
 	}
 }

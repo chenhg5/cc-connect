@@ -572,6 +572,10 @@ type ProjectConfig struct {
 	Shell string `toml:"shell,omitempty"`
 	// ShellProfile overrides the global shell_profile for this project.
 	ShellProfile string `toml:"shell_profile,omitempty"`
+	// BusyMessageMode controls plain-text messages received during a running task.
+	// Empty or "queue" preserves FIFO queuing; "steer" uses native steering
+	// when the agent supports it, falling back to the queue otherwise.
+	BusyMessageMode string `toml:"busy_message_mode,omitempty"`
 }
 
 type AgentConfig struct {
@@ -1120,6 +1124,11 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
 			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)
+		}
+		switch strings.ToLower(strings.TrimSpace(proj.BusyMessageMode)) {
+		case "", "queue", "steer":
+		default:
+			return fmt.Errorf("config: %s.busy_message_mode must be \"queue\" or \"steer\" (got %q)", prefix, proj.BusyMessageMode)
 		}
 		if err := validateRunAsUser(prefix, proj.RunAsUser); err != nil {
 			return err

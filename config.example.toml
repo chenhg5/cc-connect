@@ -1960,15 +1960,12 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project: Using Pi / 项目：使用 Pi (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Install: npm install -g @earendil-works/pi-coding-agent
-# 安装：npm install -g @earendil-works/pi-coding-agent
-# RPC mode requires Pi >= 0.99.0 (stable); JSON mode keeps its existing requirements.
-# RPC 模式需要 Pi >= 0.99.0 稳定版；JSON 模式保持原有版本要求。
-# Existing rpc = true configs use settled completion automatically, with no extra option.
-# 已有 rpc = true 配置自动使用 settled 完成语义，无需额外开关。
-# Custom cmd wrappers must forward --version and return only the CLI version.
-# 自定义 cmd 包装器必须透传 --version，并仅返回 CLI 版本号。
-# Lifecycle details / 生命周期说明: docs/pi-rpc-lifecycle.md
+# Requires: npm install -g @earendil-works/pi-coding-agent@latest
+# 需要安装：npm install -g @earendil-works/pi-coding-agent@latest
+# RPC requires Pi >= 0.99.0 stable; startup checks --version (5 second deadline).
+# RPC 需要 Pi >= 0.99.0 稳定版；启动前检查 --version（5 秒时限）。
+# Old/prerelease versions and failed probes are rejected with upgrade guidance.
+# 旧版、预发行版或探测失败会提示升级，不会回退提前完成的旧协议。
 # Pi is an AI coding agent that speaks two protocols to cc-connect:
 # Pi 是 AI 编程 agent，通过两种协议与 cc-connect 通信：
 #
@@ -2005,6 +2002,13 @@ app_secret = "your-feishu-app-secret"
 
 # [[projects]]
 # name = "my-pi-project"
+# # Ordinary text, files, and images while busy: "queue" (default) or "steer" (requires Pi RPC >= 0.99.0 stable).
+# # 忙碌时普通文本、文件和图片："queue"（默认）或 "steer"（需要 Pi RPC >= 0.99.0 稳定版）。
+# # Startup / ACK waits buffer inputs, then automatically steer in receive order.
+# # 启动或等待 ACK 时暂存输入，准备好后按接收顺序自动 steer。
+# # Unsupported modes queue; voice/location keep existing behavior.
+# # 不支持的模式回退队列；语音和位置保持原有行为。
+# busy_message_mode = "steer"
 #
 # [projects.agent]
 # type = "pi"
@@ -2012,6 +2016,17 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # rpc = true                  # enable RPC mode for UI forwarding / 启用 RPC 模式以转发 UI
+# # rpc=true always uses correlated prompt ACKs and agent_settled completion.
+# # rpc=true 始终使用关联 prompt ACK 和 agent_settled 完成边界，无需额外选项。
+# # Ordinary prompts may compact before ACK; they wait until ACK, session cancellation, or process exit.
+# # 普通 prompt 可先压缩再 ACK；等待到 ACK、会话取消或进程退出。
+# # Real Pi/model/private-platform combinations still require deployment testing.
+# # 真实 Pi/模型/私有消息平台组合仍需部署联调。
+# # Timeout/disconnect => unconfirmed, no replay; current task may finish.
+# # 超时/断线会显示未确认，不会重放；当前任务可继续完成。
+# # Use /stop or a new session before more normal input; retry undelivered queue entries.
+# # 后续普通消息需先 /stop 或新建会话；无法送达的排队消息需重置后重发。
+# # Restart cc-connect after changing agent options / 修改 Agent 选项后重启 cc-connect。
 # mode = "default"            # "default" | "yolo"
 # thinking = "high"           # optional / 可选
 # # model = "anthropic/claude-sonnet-4-20250514"  # optional / 可选
