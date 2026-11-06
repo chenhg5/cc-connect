@@ -197,7 +197,7 @@ name = "minimax"
 api_key = "your-minimax-api-key"
 # 中国区账号可使用 https://api.minimaxi.com/v1
 base_url = "https://api.minimax.io/v1"
-model = "MiniMax-M2.7"
+model = "MiniMax-M3.1-Flash"
 
 # Bedrock、Vertex 等
 [[projects.agent.providers]]

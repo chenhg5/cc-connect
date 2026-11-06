@@ -994,15 +994,21 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 #
 # # MiniMax — OpenAI-compatible agent provider with 1M context window
 # # MiniMax — 兼容 OpenAI 接口的大模型 Agent provider，支持 1M 超长上下文
-# # Models: MiniMax-M2.7 (flagship, 1M context), MiniMax-M2.7-highspeed, MiniMax-M2.5, MiniMax-M2.5-highspeed
+# # Models: MiniMax-M3.1-Flash (default), MiniMax-M3
 # # Docs: https://platform.minimaxi.com
 # # China-region accounts may use https://api.minimaxi.com/v1 / 中国区账号可使用 https://api.minimaxi.com/v1
 # [[projects.agent.providers]]
 # name = "minimax"
 # api_key = "your-minimax-api-key"
 # base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M2.7"
-# thinking = "disabled"
+# model = "MiniMax-M3.1-Flash"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M3.1-Flash"
+# alias = "m31flash"
+# [[projects.agent.providers.models]]
+# model = "MiniMax-M3"
+# alias = "m3"
+# # Optional legacy aliases for explicitly selected models / 显式选择旧模型时可添加的别名
 # [[projects.agent.providers.models]]
 # model = "MiniMax-M2.7"
 # alias = "m27"
@@ -1751,7 +1757,7 @@ app_secret = "your-feishu-app-secret"
 # name = "minimax"
 # api_key = "your-minimax-api-key"
 # base_url = "https://api.minimax.io/v1"
-# model = "MiniMax-M2.7"
+# model = "MiniMax-M3.1-Flash"
 #
 # [[projects.platforms]]
 # type = "telegram"

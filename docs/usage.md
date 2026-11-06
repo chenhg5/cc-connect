@@ -199,7 +199,7 @@ name = "minimax"
 api_key = "your-minimax-api-key"
 # Use https://api.minimaxi.com/v1 for China-region accounts.
 base_url = "https://api.minimax.io/v1"
-model = "MiniMax-M2.7"
+model = "MiniMax-M3.1-Flash"
 
 # For Bedrock, Vertex, etc.
 [[projects.agent.providers]]
