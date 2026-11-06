@@ -89,12 +89,42 @@ reset_on_idle_mins = 60
 
 ### Codex 模式
 
-| 模式 | 配置值 | 行为 |
-|------|--------|------|
-| 建议 | `suggest` | 仅受信命令自动执行 |
-| 自动编辑 | `auto-edit` | 模型自行决定 |
-| 全自动 | `full-auto` | 自动通过 + 沙箱保护 |
-| YOLO | `yolo` | 跳过所有审批 |
+| 模式 | 配置值 | `exec`（默认后端） | `app_server` |
+|------|--------|-------------------|--------------|
+| 建议 | `suggest` | 只读，无交互审批 | 只读，按需请求审批 |
+| 自动编辑 | `auto-edit` | 工作区可写，无审批 | 工作区可写，无审批 |
+| 全自动 | `full-auto` | 工作区可写，无审批 | 工作区可写，无审批 |
+| YOLO | `yolo` | 跳过审批与沙箱 | 跳过审批与沙箱 |
+
+以上沙箱选项适用于未设置 `permission_profile` 的情况。设置命名权限配置后，所有模式均优先使用该配置的文件系统和网络规则。
+
+### Codex 权限配置
+
+使用 `backend = "app_server"` 时，可通过 `permission_profile` 选择该 Codex 进程配置中的命名权限配置：
+
+```toml
+[projects.agent.options]
+backend = "app_server"
+mode = "suggest"
+permission_profile = "chat-workspace"
+```
+
+在对应 Codex 配置中定义该配置，例如 `codex_home` 下的 `config.toml`：
+
+```toml
+default_permissions = "chat-workspace"
+
+[permissions.chat-workspace.filesystem]
+":minimal" = "read"
+":workspace_roots" = "read"
+
+[permissions.chat-workspace.network]
+enabled = false
+```
+
+新建和恢复会话时，该配置替代模式对应的旧式沙箱选项；审批策略仍由模式决定。未设置时保持原有行为。`exec` 后端不支持此选项；Codex 未确认实际使用所选配置时，适配器会拒绝继续使用会话。需要支持命名权限配置及 `activePermissionProfile` 的 Codex 版本，已验证 0.164.0。
+
+`work_dir` 和只读沙箱本身不能将读取范围限制在项目内。选择性读取需要兼容的 Codex 沙箱；Windows 请参考 [MXC 沙箱配置](https://learn.chatgpt.com/docs/windows/windows-sandbox)。权限配置约束本地沙箱工具，不约束独立 MCP 或连接器；获批的权限提升也可能允许额外访问。详见 [官方权限文档](https://learn.chatgpt.com/docs/permissions)。
 
 ### macOS 上的 Codex CLI 查找
 
