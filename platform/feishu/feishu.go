@@ -901,12 +901,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}
 
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-		go p.dispatchCoreMessage(&core.Message{
+		p.dispatchCardActionMessage(chatID, &core.Message{
 			SessionKey:           sessionKey,
 			Platform:             p.platformName,
 			UserID:               userID,
-			UserName:             p.resolveUserName(userID),
-			ChatName:             p.resolveChatName(chatID),
 			Content:              responseText,
 			ReplyCtx:             rctx,
 			IsPermissionResponse: true,
@@ -933,12 +931,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// askq: — AskUserQuestion option selected, forward as user message
 	if strings.HasPrefix(actionVal, "askq:") {
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
-		go p.dispatchCoreMessage(&core.Message{
+		p.dispatchCardActionMessage(chatID, &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
 			Content:    actionVal,
 			ReplyCtx:   rctx,
 		})
@@ -968,12 +964,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
 
-		go p.dispatchCoreMessage(&core.Message{
+		p.dispatchCardActionMessage(chatID, &core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
 			UserID:     userID,
-			UserName:   p.resolveUserName(userID),
-			ChatName:   p.resolveChatName(chatID),
 			Content:    cmdText,
 			ReplyCtx:   rctx,
 		})
@@ -1209,6 +1203,22 @@ func isMessageWithdrawnError(err error) bool {
 		return false
 	}
 	return isMessageWithdrawnCode(0, err.Error())
+}
+
+// dispatchCardActionMessage forwards a card button action to the engine. The
+// name lookups are network calls, so they run inside the goroutine: as
+// arguments of a go statement they would be evaluated synchronously and hold
+// the card callback past Feishu's response window.
+//
+// Like the message path (dispatchMessageWithHistory), the goroutine has no
+// recover. The callback has already been answered when it runs, so Feishu will
+// not redeliver the action.
+func (p *Platform) dispatchCardActionMessage(chatID string, msg *core.Message) {
+	go func() {
+		msg.UserName = p.resolveUserName(msg.UserID)
+		msg.ChatName = p.resolveChatName(chatID)
+		p.dispatchCoreMessage(msg)
+	}()
 }
 
 func (p *Platform) dispatchCoreMessage(msg *core.Message) {
@@ -2275,6 +2285,11 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 	}
 }
 
+// nameLookupTimeout bounds the display-name lookups that run before an inbound
+// message reaches the engine. The SDK client has no request timeout, so without
+// it a request on a dead keep-alive connection blocks the message forever.
+var nameLookupTimeout = 5 * time.Second
+
 // resolveUserName fetches a user's display name via the Contact API, with caching.
 func (p *Platform) resolveUserName(openID string) string {
 	if !isValidFeishuLookupID(openID) {
@@ -2283,13 +2298,15 @@ func (p *Platform) resolveUserName(openID string) string {
 	if cached, ok := p.userNameCache.Load(openID); ok {
 		return cached.(string)
 	}
-	resp, err := p.client.Contact.User.Get(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), nameLookupTimeout)
+	defer cancel()
+	resp, err := p.client.Contact.User.Get(ctx,
 		larkcontact.NewGetUserReqBuilder().
 			UserId(openID).
 			UserIdType("open_id").
 			Build())
 	if err != nil {
-		slog.Debug(p.tag()+": resolve user name failed", "open_id", openID, "error", err)
+		slog.Warn(p.tag()+": resolve user name failed", "open_id", openID, "error", err)
 		return openID
 	}
 	if !resp.Success() || resp.Data == nil || resp.Data.User == nil || resp.Data.User.Name == nil {
@@ -2353,19 +2370,23 @@ func (p *Platform) resolveChatName(chatID string) string {
 	if cached, ok := p.chatNameCache.Load(chatID); ok {
 		return cached.(string)
 	}
-	resp, err := p.client.Im.Chat.Get(context.Background(),
+	ctx, cancel := context.WithTimeout(context.Background(), nameLookupTimeout)
+	defer cancel()
+	resp, err := p.client.Im.Chat.Get(ctx,
 		larkim.NewGetChatReqBuilder().ChatId(chatID).Build())
 	if err != nil {
-		slog.Debug(p.tag()+": resolve chat name failed", "chat_id", chatID, "error", err)
+		slog.Warn(p.tag()+": resolve chat name failed", "chat_id", chatID, "error", err)
 		return chatID
 	}
-	if !resp.Success() || resp.Data == nil || resp.Data.Name == nil {
+	if !resp.Success() || resp.Data == nil {
 		slog.Debug(p.tag()+": resolve chat name: no data", "chat_id", chatID, "code", resp.Code)
 		return chatID
 	}
-	name := *resp.Data.Name
-	if name == "" {
-		return chatID
+	// p2p chats have no name. That answer is final, so cache the fallback too;
+	// otherwise every DM repeats this request before it can be dispatched.
+	name := chatID
+	if resp.Data.Name != nil && *resp.Data.Name != "" {
+		name = *resp.Data.Name
 	}
 	p.chatNameCache.Store(chatID, name)
 	return name
