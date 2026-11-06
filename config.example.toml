@@ -2286,6 +2286,48 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Grok Bot / 项目：Grok Bot（Cursor 自动化 webhook）
+# =============================================================================
+# Grok Bot is not the Cursor Agent CLI (`type = "cursor"`). It is the desktop
+# or cloud assistant woken by an HTTPS automation webhook. cc-connect POSTs
+# each chat turn, then waits for the reply on a localhost callback and/or a
+# JSON file. Full setup: docs/grokbot.md and docs/grokbot.zh-CN.md.
+# Grok Bot 不是 Cursor Agent CLI（`type = "cursor"`），而是由 HTTPS 自动化
+# webhook 唤醒的桌面/云端助手。说明见 docs/grokbot.md 与 docs/grokbot.zh-CN.md。
+#
+# The API key is NEVER written in this file. Export it before starting:
+#   export GROK_BOT_WEBHOOK_KEY='crsr_...'
+# 密钥不要写进本文件。启动前导出：
+#   export GROK_BOT_WEBHOOK_KEY='crsr_...'
+
+# [[projects]]
+# name = "grok-bot"
+#
+# [projects.agent]
+# type = "grokbot"
+#
+# [projects.agent.options]
+# webhook_url = "https://api2.cursor.sh/automations/webhook/<routine-id>"
+# # webhook_key_env = "GROK_BOT_WEBHOOK_KEY"   # default / 默认
+# work_dir = "/path/to/project"                # inbound images are saved here / 入站图片落在这里
+# timeout = "6m"                               # or timeout_mins = 6
+# callback = true                              # POST /outbox/<id> on localhost
+# callback_addr = "127.0.0.1:9876"             # use 127.0.0.1:0 for an ephemeral port
+# callback_auth = true                         # require reply.token from the webhook body
+# callback_insecure_ok = false                 # required to combine callback_auth=false with a public bind
+# outbox = true                                # also accept outbox/<id>.json
+# reply_path_allow = ["/var/grok/media"]       # extra dirs a reply may read
+# # outbox_dir = "/path/to/outbox"             # default: <work_dir>/.cc-connect/grokbot/outbox
+# embed_images = false                         # true: also send data_base64 (cloud routines)
+# # max_embed_bytes = 2000000
+#
+# [[projects.platforms]]
+# type = "weixin"                              # or feishu, telegram, ...
+#
+# [projects.platforms.options]
+# # token is written by `cc-connect weixin setup`; do not paste it into chat
+
+# =============================================================================
 # Project 8: Another example / 项目 8：更多示例 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 

@@ -1081,7 +1081,7 @@ WebSocket 支持双向通信 —— 向 Agent 发送消息，并实时接收 Age
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"  # 或 codex, cursor, gemini, qoder, opencode, iflow
+type = "claudecode"  # 或 codex, cursor, gemini, qoder, opencode, iflow, grokbot
 
 [projects.agent.options]
 work_dir = "/path/to/project"
@@ -1094,6 +1094,8 @@ type = "feishu"  # 或 wps-xiezuo, dingtalk, telegram, slack, discord, wecom, we
 [projects.platforms.options]
 # 平台特定配置
 ```
+
+Grok Bot（通过 webhook 唤醒的助手，支持图片）见 [grokbot.zh-CN.md](./grokbot.zh-CN.md)。
 
 ---
 
