@@ -74,6 +74,14 @@ const (
 	slowAgentFirstEvent = 15 * time.Second // time from send to first agent event
 )
 
+// platformSendTimeout bounds how long a single platform Send/Reply may take
+// before the engine gives up. This prevents an unresponsive platform API from
+// blocking the agent event loop (backpressure through the events channel into
+// readLoop and eventually into the agent process itself). 15 s allows for one
+// resolveMentions cache-miss (≤10 s internally) plus the actual HTTP reply
+// with retries. It is a var so tests can drive the deadline quickly.
+var platformSendTimeout = 15 * time.Second
+
 // closeTimeout bounds a single agent session teardown. It must cover the
 // agent's own graceful shutdown sequence: stdin close → Stop hooks
 // (claude-mem summary etc.) → SIGTERM → SIGKILL (with retries). Claude Code's
@@ -307,8 +315,18 @@ func (e *Engine) dispatchRestartNotify(req *RestartRequest) error {
 				"platform", req.Platform, "attempt", attempt+1, "error", err)
 			continue
 		}
-		if err := p.Send(e.ctx, rctx, text); err != nil {
+		sendCtx, cancel := e.platformCallContext()
+		err := p.Send(sendCtx, rctx, text)
+		ctxErr := sendCtx.Err()
+		cancel()
+		if err != nil {
 			lastErr = err
+			if ctxErr != nil {
+				// The platform may still have delivered the notification, so a
+				// retry would duplicate it. Report and stop.
+				logPlatformSendError("send", p, ctxErr, err, len(text))
+				return err
+			}
 			slog.Warn("restart notify: send failed, will retry",
 				"platform", req.Platform, "session", req.SessionKey,
 				"attempt", attempt+1, "max_attempts", len(backoffs), "error", err)
@@ -2453,6 +2471,26 @@ func (e *Engine) Stop() error {
 	if err := e.agent.Stop(); err != nil {
 		errs = append(errs, fmt.Errorf("stop agent %s: %w", e.agent.Name(), err))
 	}
+	// Drain background session writes so shutdown cannot be followed by a
+	// late save that rewrites a directory the caller is already tearing down.
+	// Workspace-scoped managers use the same async writer and must be drained
+	// too, otherwise multi-workspace sessions can still write after Stop.
+	if e.sessions != nil {
+		e.sessions.FlushAsyncSave()
+	}
+	e.interactiveMu.Lock()
+	pool := e.workspacePool
+	e.interactiveMu.Unlock()
+	if pool != nil {
+		for _, ws := range pool.All() {
+			ws.mu.Lock()
+			sm := ws.sessions
+			ws.mu.Unlock()
+			if sm != nil {
+				sm.FlushAsyncSave()
+			}
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("engine stop errors: %v", errs)
 	}
@@ -4032,10 +4070,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	e.i18n.DetectAndSet(msg.Content)
 	session.AddHistory("user", msg.Content)
-	// Persist user message immediately so crashes between user input and
-	// assistant reply don't lose it (the assistant-side Save below depends
-	// on the turn completing without a process crash).
-	sessions.Save()
+	// Persist user message asynchronously so disk I/O (fsync) does not
+	// block the critical path from user input to agent.Send. SaveAsync
+	// serializes the snapshot-and-rename under the manager's save lock, so a
+	// background write can never land after (and revert) a newer snapshot.
+	// In the extremely rare event of a crash before it completes, the only
+	// consequence is a missing history entry — the message has already been
+	// dispatched to the agent.
+	sessions.SaveAsync()
 
 	// Use the agent override when available (multi-workspace mode)
 	var agentOverride Agent
@@ -4096,21 +4138,6 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}
 	}
 
-	// Start typing indicator if platform supports it.
-	// Ownership is transferred to processInteractiveEvents which manages
-	// stopping/restarting it across queued message turns.
-	var stopTyping func()
-	if ti, ok := p.(TypingIndicator); ok {
-		stopTyping = ti.StartTyping(e.ctx, msg.ReplyCtx)
-	}
-	defer func() {
-		// Stop typing if ownership was NOT transferred to processInteractiveEvents
-		// (i.e. an early return before that call).
-		if stopTyping != nil {
-			stopTyping()
-		}
-	}()
-
 	// Stop the unsolicited reader (if running) and hand off event channel
 	// ownership to this foreground turn. Only drain events when the previous
 	// turn ended abnormally (eventsNeedResync=true, the default).
@@ -4142,6 +4169,21 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			return
 		}
 		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+	}()
+
+	// Start typing indicator AFTER Send has been dispatched to the agent, so
+	// Ownership is transferred to processInteractiveEvents which manages
+	// stopping/restarting it across queued message turns.
+	var stopTyping func()
+	if ti, ok := p.(TypingIndicator); ok {
+		stopTyping = ti.StartTyping(e.ctx, msg.ReplyCtx)
+	}
+	defer func() {
+		// Stop typing if ownership was NOT transferred to processInteractiveEvents
+		// (i.e. an early return before that call).
+		if stopTyping != nil {
+			stopTyping()
+		}
 	}()
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, lockGen)
@@ -4927,8 +4969,10 @@ func (e *Engine) notifySessionCloseFailure(sessionKey string, platform Platform,
 	if err := e.waitOutgoing(platform); err != nil {
 		slog.Warn("notifySessionCloseFailure: wait outgoing failed", "session", sessionKey, "error", err)
 	}
-	if err := platform.Send(e.ctx, replyCtx, text); err != nil {
-		slog.Error("notifySessionCloseFailure: send failed", "session", sessionKey, "error", err)
+	ctx, cancel := e.platformCallContext()
+	defer cancel()
+	if err := platform.Send(ctx, replyCtx, text); err != nil {
+		logPlatformSendError("send", platform, ctx.Err(), err, len(text))
 	}
 }
 
@@ -6531,14 +6575,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if updater, ok := p.(MessageUpdater); ok {
 						if err := updater.UpdateMessage(e.ctx, cardMessageID, finalCard); err != nil {
 							slog.Debug("rich card: final update failed, falling back to send", "platform", p.Name(), "error", err)
-							if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
+							if err := e.sendAlreadyRenderedWithError(p, replyCtx, finalCard); err != nil {
 								slog.Error("failed to send rich card reply", "error", err)
 								return
 							}
 						}
 					}
 				} else {
-					if err := p.Send(e.ctx, replyCtx, finalCard); err != nil {
+					if err := e.sendAlreadyRenderedWithError(p, replyCtx, finalCard); err != nil {
 						slog.Error("failed to send rich card reply", "error", err)
 						return
 					}
@@ -6546,7 +6590,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				for _, overflow := range parts[1:] {
 					overflowBody := resolveRichCardMarkdown(overflow, true)
 					overflowCard := richCardSupporter.BuildRichCard(CardStatusDone, "", nil, overflowBody, false, richStatusFooter)
-					if err := p.Send(e.ctx, replyCtx, overflowCard); err != nil {
+					if err := e.sendAlreadyRenderedWithError(p, replyCtx, overflowCard); err != nil {
 						slog.Error("failed to send overflow rich card", "error", err)
 						return
 					}
@@ -8467,11 +8511,21 @@ func sendChunksWithStatusFooter(ctx context.Context, p Platform, replyCtx any, b
 		isLast := i == len(chunks)-1
 		if isLast && statusFooter != "" {
 			if sfs, ok := p.(StatusFooterSender); ok {
-				if err := sfs.SendWithStatusFooter(ctx, replyCtx, chunk, statusFooter); err == nil {
+				footerCtx, cancel := context.WithTimeout(ctx, platformSendTimeout)
+				err := sfs.SendWithStatusFooter(footerCtx, replyCtx, chunk, statusFooter)
+				ctxErr := footerCtx.Err()
+				cancel()
+				if err == nil {
 					continue
-				} else {
-					slog.Warn("SendWithStatusFooter failed, falling back to inline footer", "error", err)
 				}
+				if ctxErr != nil {
+					// The footer call may have been delivered before its
+					// deadline expired; resending the same chunk inline would
+					// duplicate the message. Report and let the caller bail.
+					logPlatformSendError("send", p, ctxErr, err, len(chunk))
+					return false
+				}
+				slog.Warn("SendWithStatusFooter failed, falling back to inline footer", "error", err)
 			}
 			chunk = appendReplyFooter(chunk, statusFooter)
 		}
@@ -11866,20 +11920,20 @@ func (e *Engine) SendToSessionWithOptions(sessionKey, message string, images []I
 			return err
 		}
 		// Use AtMentionSender when @users specified and platform supports it
+		sendCtx, cancel := e.platformCallContext()
+		var err error
 		if len(opts.AtUsers) > 0 || opts.AtAll {
 			if atSender, ok := p.(AtMentionSender); ok {
-				if err := atSender.ReplyWithAt(e.ctx, replyCtx, message, opts.AtUsers, opts.AtAll); err != nil {
-					return err
-				}
+				err = atSender.ReplyWithAt(sendCtx, replyCtx, message, opts.AtUsers, opts.AtAll)
 			} else {
-				if err := p.Send(e.ctx, replyCtx, message); err != nil {
-					return err
-				}
+				err = p.Send(sendCtx, replyCtx, message)
 			}
 		} else {
-			if err := p.Send(e.ctx, replyCtx, message); err != nil {
-				return err
-			}
+			err = p.Send(sendCtx, replyCtx, message)
+		}
+		cancel()
+		if err != nil {
+			return err
 		}
 		if state != nil {
 			state.mu.Lock()
@@ -11962,18 +12016,20 @@ func (e *Engine) SendToSessionInWorkDir(sessionKey, message string, images []Ima
 		if err := e.waitOutgoing(target.platform); err != nil {
 			return err
 		}
+		sendCtx, cancel := e.platformCallContext()
+		var err error
 		if len(atUsers) > 0 || atAll {
 			if atSender, ok := target.platform.(AtMentionSender); ok {
-				if err := atSender.ReplyWithAt(e.ctx, target.replyCtx, message, atUsers, atAll); err != nil {
-					return err
-				}
-			} else if err := target.platform.Send(e.ctx, target.replyCtx, message); err != nil {
-				return err
+				err = atSender.ReplyWithAt(sendCtx, target.replyCtx, message, atUsers, atAll)
+			} else {
+				err = target.platform.Send(sendCtx, target.replyCtx, message)
 			}
 		} else {
-			if err := target.platform.Send(e.ctx, target.replyCtx, message); err != nil {
-				return err
-			}
+			err = target.platform.Send(sendCtx, target.replyCtx, message)
+		}
+		cancel()
+		if err != nil {
+			return err
 		}
 		if target.state != nil {
 			target.state.mu.Lock()
@@ -12657,19 +12713,45 @@ func (e *Engine) sendWithError(p Platform, replyCtx any, content string) error {
 	return e.sendAlreadyRenderedWithError(p, replyCtx, content)
 }
 
+// platformCallContext derives the deadline for a single platform round-trip
+// from the engine context.
+func (e *Engine) platformCallContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(e.ctx, platformSendTimeout)
+}
+
+// logPlatformSendError records a failed platform call. A call that failed
+// because its own deadline expired is reported as delivery-unknown rather than
+// as a failure: the platform may have accepted the message and only been slow
+// to answer, so a retry can duplicate it.
+func logPlatformSendError(op string, p Platform, ctxErr, err error, contentLen int) {
+	if ctxErr != nil {
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			slog.Warn("platform "+op+" outcome unknown: deadline expired; the platform may still have delivered it, a retry can duplicate the message",
+				"platform", p.Name(), "error", err, "content_len", contentLen)
+			return
+		}
+		slog.Warn("platform "+op+" interrupted by shutdown; outcome unknown",
+			"platform", p.Name(), "error", err, "content_len", contentLen)
+		return
+	}
+	// Check for context_token missing error (common for Weixin platform)
+	if strings.Contains(err.Error(), "missing context_token") {
+		slog.Error("platform send failed: context_token missing",
+			"platform", p.Name(),
+			"error", err,
+			"content_len", contentLen,
+			"hint", "user needs to send a message to the bot first so a context_token can be captured")
+		return
+	}
+	slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", contentLen)
+}
+
 func (e *Engine) sendAlreadyRenderedWithError(p Platform, replyCtx any, content string) error {
 	start := time.Now()
-	if err := p.Send(e.ctx, replyCtx, content); err != nil {
-		// Check for context_token missing error (common for Weixin platform)
-		if strings.Contains(err.Error(), "missing context_token") {
-			slog.Error("platform send failed: context_token missing",
-				"platform", p.Name(),
-				"error", err,
-				"content_len", len(content),
-				"hint", "user needs to send a message to the bot first so a context_token can be captured")
-		} else {
-			slog.Error("platform send failed", "platform", p.Name(), "error", err, "content_len", len(content))
-		}
+	ctx, cancel := e.platformCallContext()
+	defer cancel()
+	if err := p.Send(ctx, replyCtx, content); err != nil {
+		logPlatformSendError("send", p, ctx.Err(), err, len(content))
 		return err
 	}
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
@@ -12723,8 +12805,10 @@ func (e *Engine) replyWithError(p Platform, replyCtx any, content string) error 
 		return err
 	}
 	start := time.Now()
-	if err := p.Reply(e.ctx, replyCtx, content); err != nil {
-		slog.Error("platform reply failed", "platform", p.Name(), "error", err, "content_len", len(content))
+	ctx, cancel := e.platformCallContext()
+	defer cancel()
+	if err := p.Reply(ctx, replyCtx, content); err != nil {
+		logPlatformSendError("reply", p, ctx.Err(), err, len(content))
 		return err
 	}
 	if elapsed := time.Since(start); elapsed >= slowPlatformSend {
