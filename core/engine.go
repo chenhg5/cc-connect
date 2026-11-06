@@ -338,6 +338,9 @@ type DisplayCfg struct {
 	ToolMessages     bool
 	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
 	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
+	// AfterAskQuestion is "same_card" (default) or "new_card" — see
+	// config.EffectiveAfterAskQuestion. Rich path only.
+	AfterAskQuestion string
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -5658,6 +5661,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			return richCardSupporter.BuildRichCard(status, title, steps, resolveRichCardMarkdown(markdown, !streaming), streaming, statusFooter)
 		}
 
+		// appendQuietSeparator inserts a blank line between the assistant
+		// messages that surround a hidden thinking/tool block, so the reply
+		// stays readable instead of running the two messages together.
+		//
+		// The legacy path applies the break through the stream preview. The
+		// rich card path has no preview to carry it — the card body is built
+		// from partialText and the preview never receives text in rich mode —
+		// so the break has to be inserted into the card body directly. Without
+		// this, quiet+rich renders "first message" and "second message" glued
+		// together as one run of text.
+		appendQuietSeparator := func() {
+			if len(textParts) == 0 || segmentStart >= len(textParts) || silentHold {
+				return
+			}
+			textParts = append(textParts, "\n\n")
+			if hasRichCard {
+				partialText += "\n\n"
+			}
+		}
+
 		switch event.Type {
 		case EventModelSwitch:
 			e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
@@ -5681,6 +5704,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if hasRichCard {
 				// When thinking messages are suppressed, skip card creation.
 				if !e.display.ThinkingMessages {
+					// Quiet mode keeps the whole turn in one card, so the
+					// assistant messages around this hidden thinking block
+					// need a blank line between them — the legacy path adds
+					// the same break below.
+					if e.display.Mode == "quiet" {
+						appendQuietSeparator()
+					}
 					break
 				}
 				if thinking := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen)); thinking != "" {
@@ -5771,6 +5801,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
 				if !e.display.ToolMessages {
+					// Quiet mode keeps the whole turn in one card, so the
+					// assistant messages around this hidden tool call need a
+					// blank line between them — the legacy path adds the same
+					// break below.
+					if e.display.Mode == "quiet" {
+						appendQuietSeparator()
+					}
 					break
 				}
 				toolSteps = append(toolSteps, ToolStep{
@@ -6170,6 +6207,27 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// preview so the post-resolution output opens a fresh streaming
 			// card and continues to update incrementally.
 			sp.unfreeze()
+
+			// The rich-card path needs the same treatment, and it is easy to
+			// miss: the question card is sent by sendAskQuestionPrompt as an
+			// INDEPENDENT new message, so cardMessageID still points at the
+			// working card that was opened BEFORE the question. Every text
+			// chunk after the answer — and the final reply — was therefore
+			// patched back onto that older card, while the question card and
+			// the answer receipt sat below it. From the user's side the bottom
+			// of the chat never moved: "I answered, the agent went quiet".
+			//
+			// Dropping the handle makes the next text chunk open a fresh card
+			// (the `cardMessageID == nil` branch in the EventText handler),
+			// which lands at the bottom of the chat like the legacy path does.
+			// partialText/throttle state reset so that new card starts clean
+			// instead of repeating the pre-question text.
+			if e.display.AfterAskQuestion == "new_card" && hasRichCard && cardMessageID != nil {
+				cardMessageID = nil
+				partialText = ""
+				lastRichCardUpdate = time.Time{}
+				lastRichCardLen = 0
+			}
 
 			// Restart idle timer after permission is resolved
 			if idleTimer != nil {
