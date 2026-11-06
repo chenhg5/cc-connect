@@ -449,6 +449,7 @@ type Message struct {
 type EventType string
 
 const (
+	EventCommentary        EventType = "commentary"         // complete user-facing update, delivered apart from progress cards
 	EventText              EventType = "text"               // intermediate or final text
 	EventHookRejected      EventType = "hook_rejected"      // Stop hook rejected prior assistant text
 	EventToolUse           EventType = "tool_use"           // tool invocation info

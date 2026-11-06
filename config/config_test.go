@@ -3605,3 +3605,23 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestEffectiveCommentaryMessages(t *testing.T) {
+	yes, no := true, false
+	cfg := &Config{}
+	if !EffectiveCommentaryMessages(cfg, nil) {
+		t.Fatal("default must deliver commentary")
+	}
+	cfg.Display.CommentaryMessages = &no
+	if EffectiveCommentaryMessages(cfg, nil) {
+		t.Fatal("global opt-out ignored")
+	}
+	proj := &ProjectConfig{Display: &DisplayConfig{CommentaryMessages: &yes}}
+	if !EffectiveCommentaryMessages(cfg, proj) {
+		t.Fatal("project override ignored")
+	}
+	proj.Display.CommentaryMessages = nil
+	if EffectiveCommentaryMessages(cfg, proj) {
+		t.Fatal("global fallback ignored")
+	}
+}
