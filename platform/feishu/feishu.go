@@ -2108,7 +2108,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			return
 		}
 		slog.Debug(p.tag()+": file downloaded", "file_name", fileBody.FileName, "size", len(fileData))
-		mimeType := detectMimeType(fileData)
+		mimeType := http.DetectContentType(fileData)
 		// Flush any image batch buffered earlier in this session (#1686 P1-B).
 		p.flushImageBatchForSession(sessionKey)
 		dispatchCore(&core.Message{

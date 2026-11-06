@@ -209,3 +209,27 @@ func TestDownloadQuotedFilesUsesContentSniffing(t *testing.T) {
 		t.Fatalf("quoted file = %+v, want one non-image attachment", got)
 	}
 }
+
+// A file sent on its own must be typed the same way as one attached to a post.
+func TestDispatchFileMessageUsesContentSniffing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = fmt.Fprint(w, "column\nvalue\n")
+	}))
+	t.Cleanup(srv.Close)
+	var got *core.Message
+	p := &Platform{
+		platformName:         "feishu",
+		domain:               srv.URL,
+		resourceDownloadHTTP: srv.Client(),
+		fetchResourceToken:   func(_ context.Context) (string, error) { return "test-token", nil },
+		handler:              func(_ core.Platform, m *core.Message) { got = m },
+	}
+	p.dispatchMessage(context.Background(), "file", `{"file_key":"file_a","file_name":"a.csv"}`, nil, "om_file", "session", "", "", replyContext{}, "", 0)
+	if got == nil || len(got.Files) != 1 {
+		t.Fatalf("file message not dispatched: %+v", got)
+	}
+	if mt := got.Files[0].MimeType; strings.HasPrefix(mt, "image/") {
+		t.Errorf("CSV mislabeled as %s", mt)
+	}
+}
