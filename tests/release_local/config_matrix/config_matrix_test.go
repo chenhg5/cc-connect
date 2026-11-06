@@ -221,7 +221,7 @@ type = "feishu"
 app_id = "cli_release"
 app_secret = "secret"
 `,
-			wantErr: `projects[0].display.mode must be "full", "compact", or "quiet"`,
+			wantErr: `projects[0].display.mode must be "full", "compact", "quiet", or "final"`,
 		},
 		{
 			name: "negative reset on idle",
