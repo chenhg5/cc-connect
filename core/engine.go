@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -728,6 +729,8 @@ type modelSwitchState struct {
 // pendingPermission represents a permission request waiting for user response.
 type pendingPermission struct {
 	RequestID       string
+	CallbackID      string     // unique per prompt, including across agent restarts
+	respondMu       sync.Mutex // serializes decisions for this prompt
 	ToolName        string
 	ToolInput       map[string]any
 	InputPreview    string
@@ -3640,6 +3643,28 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
 		return false
 	}
 found:
+	pending.respondMu.Lock()
+	defer pending.respondMu.Unlock()
+	state.mu.Lock()
+	current := state.pending == pending && !state.stopped
+	state.mu.Unlock()
+	if !current {
+		return true
+	}
+	if msg.IsPermissionResponse && strings.HasPrefix(content, "perm:") {
+		parts := strings.SplitN(content, ":", 3)
+		if len(parts) != 3 || pending.CallbackID == "" || parts[1] != pending.CallbackID || len(pending.Questions) > 0 {
+			return true
+		}
+		switch parts[2] {
+		case "allow", "deny":
+			content = parts[2]
+		case "allow_all":
+			content = "allow all"
+		default:
+			return true
+		}
+	}
 
 	// An option click from an AskUserQuestion card is never a permission
 	// decision, and a click on an earlier question's card must not answer
@@ -6130,6 +6155,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			pending := &pendingPermission{
 				RequestID:    event.RequestID,
+				CallbackID:   rand.Text(),
 				ToolName:     event.ToolName,
 				ToolInput:    event.ToolInputRaw,
 				InputPreview: event.ToolInput,
@@ -6149,7 +6175,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				toolInput := truncateIf(event.ToolInput, permLimit)
 				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
-				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
+				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput, pending.CallbackID)
 			}
 
 			// Stop idle timer while waiting for user permission response;
@@ -12372,7 +12398,7 @@ func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments 
 
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
 // the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
-func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
+func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput, callbackID string) {
 	e.hooks.Emit(HookEvent{
 		Event:    HookEventPermissionRequested,
 		Platform: p.Name(),
@@ -12405,19 +12431,13 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 	// Try card with buttons (Feishu/Lark)
 	if supportsCards(p) {
 		body := fmt.Sprintf(e.i18n.T(MsgPermCardBody), toolName, toolInput)
-		extra := func(label, color string) map[string]string {
-			return map[string]string{
-				"perm_label": label,
-				"perm_color": color,
-				"perm_body":  body,
-			}
-		}
+		extra := map[string]string{"perm_request_id": callbackID}
 		allowBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllow), Type: "primary", Value: "perm:allow",
-			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllow), "green")}
+			Extra: extra}
 		denyBtn := CardButton{Text: e.i18n.T(MsgPermBtnDeny), Type: "danger", Value: "perm:deny",
-			Extra: extra("❌ "+e.i18n.T(MsgPermBtnDeny), "red")}
+			Extra: extra}
 		allowAllBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllowAll), Type: "default", Value: "perm:allow_all",
-			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllowAll), "green")}
+			Extra: extra}
 
 		card := NewCard().
 			Title(e.i18n.T(MsgPermCardTitle), "orange").
