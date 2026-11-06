@@ -85,19 +85,6 @@ func TestProviderPresetsIncludesOpper(t *testing.T) {
 		t.Fatalf("claudecode model = %q", claude.Model)
 	}
 
-	codex := opper.AgentConfig("codex")
-	if codex == nil {
-		t.Fatal("opper codex config missing")
-	}
-	if codex.BaseURL != "https://api.opper.ai/v3/compat" {
-		t.Fatalf("codex base_url = %q", codex.BaseURL)
-	}
-	if codex.Model != "gpt-5.5" {
-		t.Fatalf("codex model = %q", codex.Model)
-	}
-	if codex.CodexConfig == nil || codex.CodexConfig.WireAPI != "responses" {
-		t.Fatalf("codex_config = %#v", codex.CodexConfig)
-	}
 	if !opper.SupportsAgent("opencode") {
 		t.Fatal("opper should support opencode")
 	}

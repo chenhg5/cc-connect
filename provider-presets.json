@@ -694,12 +694,6 @@
           "model": "claude-sonnet-4-6",
           "models": ["claude-sonnet-4-6", "claude-opus-5"]
         },
-        "codex": {
-          "base_url": "https://api.opper.ai/v3/compat",
-          "model": "gpt-5.5",
-          "models": ["gpt-5.5", "gpt-5.4-mini"],
-          "codex_config": { "wire_api": "responses" }
-        },
         "opencode": {
           "base_url": "https://api.opper.ai/v3/compat",
           "model": "claude-sonnet-4-6",
