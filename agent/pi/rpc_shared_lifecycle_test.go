@@ -73,7 +73,8 @@ func TestSharedLifecycle_PreflightACKWaitFollowsSessionCancellation(t *testing.T
 	s.cancel()
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
+		var notAccepted *core.SteerNotAcceptedError
+		if !errors.Is(err, context.Canceled) || errors.As(err, &notAccepted) {
 			t.Fatalf("sent prompt cancellation must remain uncertain, got %v", err)
 		}
 	case <-time.After(time.Second):

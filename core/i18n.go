@@ -559,6 +559,17 @@ const (
 	MsgPsEmpty           MsgKey = "ps_empty"
 	MsgPsNoSession       MsgKey = "ps_no_session"
 
+	// Busy-steer delivery outcomes (busy_message_mode = "steer"): reported
+	// from the harness prompt ACK, not from the transport write succeeding.
+	MsgSteerDeliveryUnknown   MsgKey = "steer_delivery_unknown"
+	MsgSteerInputPaused       MsgKey = "steer_input_paused"
+	MsgSteerQueueNotDelivered MsgKey = "steer_queue_not_delivered"
+	MsgSteerWaiting           MsgKey = "steer_waiting"
+	MsgSteerQueued            MsgKey = "steer_queued"
+	MsgSteerStarted           MsgKey = "steer_started"
+	MsgSteerHandled           MsgKey = "steer_handled"
+	MsgSteerFallbackQueue     MsgKey = "steer_fallback_queue"
+
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
 	MsgWhoamiName      MsgKey = "whoami_name"
@@ -3475,6 +3486,63 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ P.S. 傳送失敗。",
 		LangJapanese:           "❌ P.S. の送信に失敗しました。",
 		LangSpanish:            "❌ Error al entregar el P.S.",
+	},
+	MsgSteerDeliveryUnknown: {
+		LangEnglish:            "⚠️ Input delivery could not be confirmed. It will not be resent automatically. Use /stop or /new before sending more input; the current task may still finish.",
+		LangChinese:            "⚠️ 无法确认输入是否送达，不会自动重发。请先 /stop 或 /new 再发送后续消息；当前任务仍可能完成。",
+		LangTraditionalChinese: "⚠️ 無法確認輸入是否送達，不會自動重送。請先 /stop 或 /new 再傳送後續訊息；目前任務仍可能完成。",
+		LangJapanese:           "⚠️ 入力の配信を確認できず、自動再送はしません。追加の入力前に /stop または /new を実行してください。現在のタスクは完了する場合があります。",
+		LangSpanish:            "⚠️ No se pudo confirmar la entrega y no se reenviará automáticamente. Usa /stop o /new antes de enviar más; la tarea actual puede terminar.",
+	},
+	MsgSteerInputPaused: {
+		LangEnglish:            "⚠️ Earlier input has unconfirmed delivery. Use /stop or /new before sending more input; the current task may still finish.",
+		LangChinese:            "⚠️ 之前输入的送达状态未知。请先 /stop 或 /new，再发送后续消息；当前任务仍可能完成。",
+		LangTraditionalChinese: "⚠️ 先前輸入的送達狀態未知。請先 /stop 或 /new，再傳送後續訊息；目前任務仍可能完成。",
+		LangJapanese:           "⚠️ 前の入力の配信を確認できません。追加の入力前に /stop または /new を実行してください。現在のタスクは完了する場合があります。",
+		LangSpanish:            "⚠️ La entrega de una entrada anterior es incierta. Usa /stop o /new antes de enviar más; la tarea actual puede terminar.",
+	},
+	MsgSteerQueueNotDelivered: {
+		LangEnglish:            "⚠️ This queued message was not delivered because an earlier input has unconfirmed delivery. Use /stop or /new, then resend this message.",
+		LangChinese:            "⚠️ 之前输入的送达状态未知，这条排队消息尚未发送。请先 /stop 或 /new，再重发此消息。",
+		LangTraditionalChinese: "⚠️ 先前輸入的送達狀態未知，這則排隊訊息尚未傳送。請先 /stop 或 /new，再重新傳送此訊息。",
+		LangJapanese:           "⚠️ 前の入力の配信が不明なため、この予約メッセージは未送信です。/stop または /new の後で再送してください。",
+		LangSpanish:            "⚠️ Este mensaje en cola no se entregó porque una entrada anterior tiene entrega incierta. Usa /stop o /new y vuelve a enviarlo.",
+	},
+	MsgSteerWaiting: {
+		LangEnglish:            "📨 Received — waiting for the agent to accept this input.",
+		LangChinese:            "📨 已收到，正在等待 Agent 接收这条输入。",
+		LangTraditionalChinese: "📨 已收到，正在等待 Agent 接收這則輸入。",
+		LangJapanese:           "📨 受信しました。Agent がこの入力を受け付けるまで待機しています。",
+		LangSpanish:            "📨 Recibido; esperando a que el agente acepte esta entrada.",
+	},
+	MsgSteerQueued: {
+		LangEnglish:            "✅ Added to the running task.",
+		LangChinese:            "✅ 已插入当前任务。",
+		LangTraditionalChinese: "✅ 已插入目前任務。",
+		LangJapanese:           "✅ 実行中のタスクに追加しました。",
+		LangSpanish:            "✅ Añadido a la tarea en curso.",
+	},
+	MsgSteerStarted: {
+		LangEnglish:            "✅ Previous task had already finished — started a new turn with this instead.",
+		LangChinese:            "✅ 上一个任务已结束，这条已作为新一轮开始。",
+		LangTraditionalChinese: "✅ 上一個任務已結束，這則已作為新一輪開始。",
+		LangJapanese:           "✅ 前のタスクは既に終了していたため、この内容で新しいターンを開始しました。",
+		LangSpanish:            "✅ La tarea anterior ya había terminado; se inició un nuevo turno con esto.",
+	},
+	MsgSteerHandled: {
+		LangEnglish:            "✅ Handled by an extension (no model run).",
+		LangChinese:            "✅ 已由扩展接管（未走模型）。",
+		LangTraditionalChinese: "✅ 已由擴充接管（未走模型）。",
+		LangJapanese:           "✅ 拡張機能が処理しました（モデル実行なし）。",
+		LangSpanish:            "✅ Gestionado por una extensión (sin ejecución del modelo).",
+	},
+
+	MsgSteerFallbackQueue: {
+		LangEnglish:            "📨 Steer not available for this message — queued for the next turn.",
+		LangChinese:            "📨 当前消息无法 steer，已排入下一轮处理。",
+		LangTraditionalChinese: "📨 目前訊息無法 steer，已排入下一輪處理。",
+		LangJapanese:           "📨 このメッセージは steer できないため、次のターンに予約しました。",
+		LangSpanish:            "📨 Steer no disponible para este mensaje — encolado para el próximo turno.",
 	},
 	MsgPsEmpty: {
 		LangEnglish:            "Usage: `/ps <message>`",
