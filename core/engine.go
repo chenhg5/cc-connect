@@ -12284,6 +12284,33 @@ func videoFormatHint(v FileAttachment) string {
 	return audioFormatHint(v)
 }
 
+// platformForSessionKey finds the platform a session key belongs to: the one
+// named by the key's first segment, else -- for a key that multi-workspace
+// mode prefixed with the workspace path, such as
+// "/root/work:feishu:oc_1:u_1" -- the first platform whose ":name:" the key
+// contains (same heuristic as ExecuteCronJob / ExecuteHeartbeat). It also
+// returns the key without that workspace prefix. The platform is nil when
+// none matches. Every path that maps a session key to a platform (sending
+// to a session, updating a card) goes through here so they agree.
+func (e *Engine) platformForSessionKey(sessionKey string) (Platform, string) {
+	if sessionKey == "" {
+		return nil, sessionKey
+	}
+	if name, _, ok := strings.Cut(sessionKey, ":"); ok && name != "" {
+		for _, candidate := range e.platforms {
+			if candidate.Name() == name {
+				return candidate, sessionKey
+			}
+		}
+	}
+	for _, candidate := range e.platforms {
+		if idx := strings.Index(sessionKey, ":"+candidate.Name()+":"); idx >= 0 {
+			return candidate, sessionKey[idx+1:]
+		}
+	}
+	return nil, sessionKey
+}
+
 func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments bool) (*interactiveState, Platform, any, error) {
 	e.interactiveMu.Lock()
 
@@ -12326,30 +12353,7 @@ func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments 
 	}
 
 	if p == nil && sessionKey != "" {
-		strippedKey := sessionKey
-		platformName := ""
-		if idx := strings.Index(strippedKey, ":"); idx > 0 {
-			platformName = strippedKey[:idx]
-		}
-		var targetPlatform Platform
-		for _, candidate := range e.platforms {
-			if candidate.Name() == platformName {
-				targetPlatform = candidate
-				break
-			}
-		}
-		// Fallback: multi-workspace mode may prefix the session key with the
-		// workspace path (same heuristic as ExecuteCronJob / ExecuteHeartbeat).
-		if targetPlatform == nil {
-			for _, candidate := range e.platforms {
-				needle := ":" + candidate.Name() + ":"
-				if idx := strings.Index(strippedKey, needle); idx >= 0 {
-					targetPlatform = candidate
-					strippedKey = strippedKey[idx+1:]
-					break
-				}
-			}
-		}
+		targetPlatform, strippedKey := e.platformForSessionKey(sessionKey)
 		if targetPlatform != nil {
 			rc, ok := targetPlatform.(ReplyContextReconstructor)
 			if !ok {
