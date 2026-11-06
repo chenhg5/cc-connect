@@ -63,6 +63,7 @@ const (
 
 // ToolStep is one summarized progress row shown in rich progress cards.
 type ToolStep struct {
+	ItemID   string       `json:"item_id,omitempty"` // stable invocation identity when available
 	Kind     ToolStepKind // progress row kind; empty means tool for backward compatibility
 	Name     string       // tool name (e.g. "Bash", "Edit")
 	Summary  string       // human-readable summary shown in the card
@@ -88,6 +89,12 @@ type ToolStep struct {
 // uniformly with the rest of the footer.)
 type RichCardSupporter interface {
 	BuildRichCard(status CardStatus, title string, steps []ToolStep, markdown string, streaming bool, statusFooter string) string
+}
+
+// RichCardSender sends a platform-rendered card payload as a native card
+// message. The payload must come from the matching RichCardSupporter.
+type RichCardSender interface {
+	SendRichCard(ctx context.Context, replyCtx any, renderedCard string) error
 }
 
 // RichCardMarkdownResolver is an optional interface for platforms that need to

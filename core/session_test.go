@@ -220,6 +220,10 @@ func TestSession_LateUnlockDropped(t *testing.T) {
 	if !ok {
 		t.Fatal("first TryLock should succeed")
 	}
+	// Ensure the lock is stale even when consecutive clock reads are equal.
+	s.mu.Lock()
+	s.busySince = time.Now().Add(-time.Second)
+	s.mu.Unlock()
 	if _, broken := s.BreakStaleLock(0); !broken {
 		t.Fatal("BreakStaleLock(0) should break the held lock")
 	}

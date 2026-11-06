@@ -1,0 +1,615 @@
+package codex
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/chenhg5/cc-connect/core"
+	"github.com/gorilla/websocket"
+)
+
+func TestManagedListSessions_PrefersThreadNameOverPreview(t *testing.T) {
+	for _, tc := range []struct {
+		label    string
+		name     any
+		omitName bool
+		want     string
+	}{
+		{label: "named", name: "修复登录问题", want: "修复登录问题"},
+		{label: "trimmed", name: "  修复登录问题  ", want: "修复登录问题"},
+		{label: "empty", name: "", want: "First user message"},
+		{label: "whitespace", name: " \t\n", want: "First user message"},
+		{label: "null", name: nil, want: "First user message"},
+		{label: "missing", omitName: true, want: "First user message"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			cwd := t.TempDir()
+			socket := managedFixture(t, func(ws *websocket.Conn) {
+				fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+					if m.Method != "thread/list" {
+						t.Errorf("unexpected RPC method: %s", m.Method)
+						return nil, true
+					}
+					thread := map[string]any{"id": "thread-named", "cwd": cwd, "source": "vscode", "preview": "First user message", "updatedAt": 2000000000}
+					if !tc.omitName {
+						thread["name"] = tc.name
+					}
+					return map[string]any{"data": []any{thread}, "nextCursor": nil}, true
+				})
+			})
+			a := fixtureManagedAgent(t, socket, cwd, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			sessions, err := a.ListSessions(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sessions) != 1 || sessions[0].Summary != tc.want {
+				t.Fatalf("ListSessions() = %+v, want summary %q", sessions, tc.want)
+			}
+		})
+	}
+}
+
+func TestManagedBusyMessageModeConfigAndWorkspaceClone(t *testing.T) {
+	for _, mode := range []string{"queue", "steer"} {
+		a := fixtureManagedAgent(t, "/socket", t.TempDir(), map[string]any{"daemon_busy_message_mode": mode})
+		if a.AutoSteerBusyMessages() != (mode == "steer") {
+			t.Fatalf("incorrect policy for %s", mode)
+		}
+		clone, err := New(a.WorkspaceAgentOptions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if clone.(*managedAgent).daemon.busyMessageMode != mode {
+			t.Fatal("workspace clone lost busy message mode")
+		}
+	}
+	defaults, err := parseManagedOptions(nil)
+	if err != nil || defaults.busyMessageMode != "queue" {
+		t.Fatalf("default mode changed: %+v %v", defaults, err)
+	}
+	for _, opts := range []map[string]any{
+		{"daemon_busy_message_mode": "invalid"},
+		{"daemon_busy_message_mode": true},
+		{"daemon_busy_message_mode": "steer", "daemon_enable_steer": false},
+	} {
+		if _, err := parseManagedOptions(opts); err == nil {
+			t.Fatalf("invalid configuration accepted: %v", opts)
+		}
+	}
+}
+
+func TestManagedUsageReadsDaemonWithoutLocalCredentials(t *testing.T) {
+	var mu sync.Mutex
+	var methods []string
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			mu.Lock()
+			methods = append(methods, m.Method)
+			mu.Unlock()
+			return map[string]any{"rateLimits": map[string]any{"primary": map[string]any{"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 2000000000}}}, true
+		})
+	})
+	a := fixtureManagedAgent(t, socket, t.TempDir(), map[string]any{"codex_home": t.TempDir()})
+	report, err := a.GetUsage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report == nil || len(report.Buckets) == 0 {
+		t.Fatalf("missing daemon report: %+v", report)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(methods) != 1 || methods[0] != "account/rateLimits/read" {
+		t.Fatal(methods)
+	}
+}
+
+func TestManagedUsage_PreservesFiveHourLimitBeforeModelWeeklyLimit(t *testing.T) {
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			return map[string]any{
+				"rateLimits": map[string]any{"limitId": "codex", "planType": "plus"},
+				"rateLimitsByLimitId": map[string]any{
+					"base_model_inference": map[string]any{
+						"limitId": "base_model_inference", "limitName": "model-reserve",
+						"primary": map[string]any{"usedPercent": 33, "windowDurationMins": 10080, "resetsAt": 2000000000},
+					},
+					"codex": map[string]any{
+						"limitId": "codex", "planType": "plus",
+						"primary":   map[string]any{"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 2000000000},
+						"secondary": map[string]any{"usedPercent": 42, "windowDurationMins": 10080, "resetsAt": 2000000001},
+					},
+				},
+			}, true
+		})
+	})
+	a := fixtureManagedAgent(t, socket, t.TempDir(), nil)
+	report, err := a.GetUsage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Plan != "plus" || len(report.Buckets) != 2 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	// /usage and the reply footer use the first bucket as the main quota.
+	first := report.Buckets[0]
+	if first.Name != "codex" || len(first.Windows) != 2 {
+		t.Fatalf("account quotas hidden behind model weekly limit: %+v", first)
+	}
+	for i, want := range []struct {
+		seconds, used int
+		reset         int64
+	}{{18000, 10, 2000000000}, {604800, 42, 2000000001}} {
+		got := first.Windows[i]
+		if got.WindowSeconds != want.seconds || got.UsedPercent != want.used || got.ResetAtUnix != want.reset {
+			t.Fatalf("window %d = %+v, want %+v", i, got, want)
+		}
+	}
+	if report.Buckets[1].Name != "model-reserve" {
+		t.Fatalf("additional model quota lost: %+v", report.Buckets)
+	}
+}
+
+func TestManagedUsage_IncludesReserveAndResetCreditExpiry(t *testing.T) {
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			return json.RawMessage(`{
+				"rateLimits":{"limitId":"codex","planType":"plus"},
+				"rateLimitsByLimitId":{
+					"codex":{"limitId":"codex","primary":{"usedPercent":8,"windowDurationMins":300}},
+					"base_model_inference":{"limitName":"gpt-reserve","primary":{"usedPercent":36,"windowDurationMins":10080,"resetsAt":2000000000}}
+				},
+				"rateLimitResetCredits":{"availableCount":3,"credits":[
+					{"status":"available","expiresAt":2000000002},
+					{"status":"used","expiresAt":1999999999},
+					{"status":"expired","expiresAt":1999999998},
+					{"status":"available","expiresAt":2000000001},
+					{"status":"available","expiresAt":null}
+				]}
+			}`), true
+		})
+	})
+	a := fixtureManagedAgent(t, socket, t.TempDir(), nil)
+	report, err := a.GetUsage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Buckets) != 2 || report.Buckets[1].Name != "gpt-reserve" {
+		t.Fatalf("missing reserve quota: %+v", report)
+	}
+	window := report.Buckets[1].Windows[0]
+	if window.ResetAtUnix != 2000000000 || window.WindowSeconds != 604800 || window.UsedPercent != 36 {
+		t.Fatalf("incorrect reserve window: %+v", window)
+	}
+	credits := report.ResetCredits
+	if credits == nil || credits.AvailableCount != 3 || len(credits.Credits) != 3 {
+		t.Fatalf("missing available reset credits: %+v", credits)
+	}
+	for i, want := range []int64{2000000001, 2000000002, 0} {
+		if credits.Credits[i].ExpiresAtUnix != want {
+			t.Fatalf("expiry %d = %d, want %d", i, credits.Credits[i].ExpiresAtUnix, want)
+		}
+	}
+	clone := cloneUsageReport(report)
+	clone.ResetCredits.AvailableCount = 0
+	clone.ResetCredits.Credits[0].ExpiresAtUnix = 1
+	if report.ResetCredits.AvailableCount != 3 || report.ResetCredits.Credits[0].ExpiresAtUnix != 2000000001 {
+		t.Fatal("reset credits shared between cached report and clone")
+	}
+}
+
+func TestManagedDeleteUsesScopedDaemonAPIAndHonorsDisable(t *testing.T) {
+	for _, test := range []struct {
+		name                                 string
+		otherCwd, active, subagent, disabled bool
+		wantDelete                           bool
+	}{
+		{name: "inactive root", wantDelete: true}, {name: "wrong cwd", otherCwd: true}, {name: "active", active: true}, {name: "subagent", subagent: true}, {name: "disabled", disabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cwd := t.TempDir()
+			var mu sync.Mutex
+			var methods []string
+			socket := managedFixture(t, func(ws *websocket.Conn) {
+				fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+					mu.Lock()
+					methods = append(methods, m.Method)
+					mu.Unlock()
+					var params map[string]any
+					_ = json.Unmarshal(m.Params, &params)
+					if params["threadId"] != "target" {
+						t.Errorf("unscoped request %v", params)
+					}
+					if m.Method == "thread/read" {
+						thread := map[string]any{"id": "target", "cwd": cwd, "turns": []any{}}
+						if test.otherCwd {
+							thread["cwd"] = cwd + "/other"
+						}
+						if test.active {
+							thread["turns"] = []any{map[string]any{"id": "turn", "status": "inProgress"}}
+						}
+						if test.subagent {
+							thread["source"] = map[string]any{"subagent": map[string]any{}}
+						}
+						return map[string]any{"thread": thread}, true
+					}
+					return map[string]any{}, true
+				})
+			})
+			a := fixtureManagedAgent(t, socket, cwd, map[string]any{"daemon_enable_delete": !test.disabled})
+			err := a.DeleteSession(context.Background(), "target")
+			if (err == nil) != test.wantDelete {
+				t.Fatalf("delete error %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			deleted := false
+			for _, method := range methods {
+				if method == "thread/delete" {
+					deleted = true
+				}
+			}
+			if deleted != test.wantDelete {
+				t.Fatalf("methods: %v", methods)
+			}
+			if test.disabled && len(methods) != 0 {
+				t.Fatal("disabled delete connected to daemon")
+			}
+		})
+	}
+}
+
+func TestManagedHistoryPreservesTurnTimestamps(t *testing.T) {
+	cwd := t.TempDir()
+	const started int64 = 1790934300
+	const completed int64 = 1790934365
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			if m.Method == "thread/read" {
+				return map[string]any{"thread": map[string]any{"id": "target", "cwd": cwd}}, true
+			}
+			if m.Method != "thread/turns/list" {
+				t.Errorf("unexpected history method %s", m.Method)
+			}
+			turns := []any{
+				map[string]any{"id": "done", "startedAt": started, "completedAt": completed, "items": []any{
+					map[string]any{"type": "userMessage", "content": []any{map[string]any{"text": "question"}}},
+					map[string]any{"type": "agentMessage", "text": "answer"},
+				}},
+				map[string]any{"id": "active", "startedAt": completed + 1, "completedAt": nil, "items": []any{map[string]any{"type": "agentMessage", "text": "working"}}},
+				map[string]any{"id": "old", "items": []any{map[string]any{"type": "agentMessage", "text": "unknown time"}}},
+			}
+			for i, j := 0, len(turns)-1; i < j; i, j = i+1, j-1 {
+				turns[i], turns[j] = turns[j], turns[i]
+			}
+			return map[string]any{"data": turns}, true
+		})
+	})
+	a := fixtureManagedAgent(t, socket, cwd, nil)
+	history, err := a.GetSessionHistory(context.Background(), "target", 0)
+	if err != nil || len(history) != 4 {
+		t.Fatalf("history=%v err=%v", history, err)
+	}
+	for i, sec := range []int64{started, completed, completed + 1} {
+		if !history[i].Timestamp.Equal(time.Unix(sec, 0)) {
+			t.Fatalf("item %d time=%v want unix=%d", i, history[i].Timestamp, sec)
+		}
+	}
+	if !history[3].Timestamp.IsZero() {
+		t.Fatal("missing timestamp was fabricated")
+	}
+	limited, err := a.GetSessionHistory(context.Background(), "target", 2)
+	if err != nil || len(limited) != 2 || !limited[0].Timestamp.Equal(history[2].Timestamp) {
+		t.Fatalf("limited=%v err=%v", limited, err)
+	}
+}
+
+func TestManagedAsyncQuestionSwitchIsIndependent(t *testing.T) {
+	for _, blocking := range []bool{false, true} {
+		for _, async := range []bool{false, true} {
+			t.Run(fmt.Sprintf("blocking=%t/async=%t", blocking, async), func(t *testing.T) {
+				a := fixtureManagedAgent(t, "/socket", t.TempDir(), map[string]any{"daemon_enable_questions": blocking, "daemon_enable_async_questions": async})
+				clone, err := New(a.WorkspaceAgentOptions())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if clone.(*managedAgent).daemon.questions != blocking || clone.(*managedAgent).daemon.asyncQuestions != async {
+					t.Fatal("workspace clone lost independent switches")
+				}
+				s := &managedSession{agent: a, ctx: context.Background(), thread: "target", events: make(chan core.Event, 4), seenItems: map[string]bool{}, completed: map[string]bool{}}
+				err = s.handleMessage(daemonMessage{Method: "item/completed", Params: json.RawMessage(`{"threadId":"target","turnId":"turn","item":{"type":"agentMessage","id":"async","text":"QUESTION TEXT PRESERVED","phase":"commentary","delivery":"async","questions":[{"title":"Preference?","options":["yes","no"]}]}}`)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				event := <-s.events
+				if event.Content != "QUESTION TEXT PRESERVED" || (len(event.Questions) > 0) != async {
+					t.Fatalf("wrong async gate: %+v", event)
+				}
+			})
+		}
+	}
+	if _, err := parseManagedOptions(map[string]any{"daemon_enable_async_questions": "false"}); err == nil {
+		t.Fatal("invalid async flag type accepted")
+	}
+	defaults, err := parseManagedOptions(nil)
+	if err != nil || !defaults.asyncQuestions {
+		t.Fatal("default compatibility changed")
+	}
+}
+
+func TestManagedProviderCatalogEditsPreserveSelectionByName(t *testing.T) {
+	a := fixtureManagedAgent(t, "/unused", t.TempDir(), nil)
+	a.SetProviders([]core.ProviderConfig{{Name: "one"}, {Name: "two"}})
+	a.SetActiveProvider("two")
+	a.SetProviders([]core.ProviderConfig{{Name: "two"}})
+	if p := a.GetActiveProvider(); p == nil || p.Name != "two" {
+		t.Fatal("removing earlier provider lost active default")
+	}
+	a.SetProviders([]core.ProviderConfig{{Name: "three"}})
+	if a.GetActiveProvider() != nil {
+		t.Fatal("removed provider silently selected a different provider")
+	}
+}
+
+func TestManagedSnapshotScopeRejectsOtherCwdAndCurrentThread(t *testing.T) {
+	for _, raw := range []string{"null", "true", "[]", "1.2"} {
+		if _, err := managedRequestID(json.RawMessage(raw)); err == nil {
+			t.Errorf("invalid ID accepted: %s", raw)
+		}
+	}
+	id, err := managedRequestID(json.RawMessage(`"42"`))
+	if err != nil || id != "s:42" {
+		t.Fatal("numeric string collapsed into number")
+	}
+	cwd := t.TempDir()
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			if m.Method == "thread/resume" {
+				return fixtureSnapshot(t.TempDir(), "target", ""), true
+			}
+			return nil, false
+		})
+	})
+	a := fixtureManagedAgent(t, socket, cwd, nil)
+	if _, err := a.AttachSession(context.Background(), "target"); err == nil {
+		t.Fatal("other workspace attached")
+	}
+	t.Setenv("CODEX_THREAD_ID", "self")
+	if _, err := a.AttachSession(context.Background(), "self"); err == nil {
+		t.Fatal("current development thread attached")
+	}
+}
+
+func TestManagedTransportConfigIsSeparateAndOptIn(t *testing.T) {
+	binary := os.Args[0] // Constructor lookup must not launch this executable.
+	for _, backend := range []string{"exec", "app_server"} {
+		agent, err := New(map[string]any{"cmd": binary, "backend": backend})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := agent.(core.AgentSessionAttacher); ok {
+			t.Fatalf("legacy %s gained daemon capabilities", backend)
+		}
+		if _, ok := agent.(core.DefaultSettingsAgent); ok {
+			t.Fatalf("legacy %s gained managed settings semantics", backend)
+		}
+		if agent.(*Agent).appServerTransport != "stdio" {
+			t.Fatal("legacy default changed")
+		}
+	}
+	for _, opts := range []map[string]any{
+		{"app_server_transport": "managed_daemon"},
+		{"backend": "app_server", "app_server_transport": "unknown"},
+		{"backend": "app_server", "app_server_transport": true},
+		{"backend": "app_server", "daemon_socket": "/socket"},
+		{"backend": "app_server", "daemon_busy_message_mode": "steer"},
+		{"backend": "app_server", "app_server_transport": "managed_daemon", "daemon_socket": "/socket", "app_server_url": "stdio://"},
+		{"backend": "app_server", "app_server_transport": "managed_daemon", "daemon_socket": "/socket", "env": map[string]any{"A": "B"}},
+		{"backend": "app_server", "app_server_transport": "managed_daemon", "daemon_socket": "/socket", "daemon_enable_steer": "yes"},
+		{"backend": "app_server", "app_server_transport": "managed_daemon", "daemon_socket": "/socket", "daemon_enable_ster": true},
+	} {
+		opts["cmd"] = binary
+		if _, err := New(opts); err == nil {
+			t.Fatalf("invalid mixed configuration accepted: %v", opts)
+		}
+	}
+	a := fixtureManagedAgent(t, "/socket", t.TempDir(), map[string]any{"daemon_attach_only": true, "daemon_enable_steer": false})
+	copied := a.WorkspaceAgentOptions()
+	clone, err := New(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := clone.(*managedAgent).daemon; !got.attachOnly || got.steer || got.socket != "/socket" {
+		t.Fatalf("workspace lost transport settings: %+v", got)
+	}
+	if _, err := a.StartSession(context.Background(), ""); err == nil {
+		t.Fatal("attach-only created a thread")
+	}
+}
+
+func TestDaemonDiscoveryIsPassive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script")
+	}
+	binary := filepath.Join(t.TempDir(), "codex")
+	script := "#!/bin/sh\n[ \"$*\" = \"app-server daemon version\" ] || exit 99\nprintf '%s' '{\"status\":\"running\",\"socketPath\":\"/reported/socket\"}'\n"
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	socket, err := discoverDaemon(context.Background(), binary, nil, nil)
+	if err != nil || socket != "/reported/socket" {
+		t.Fatalf("discovery %q %v", socket, err)
+	}
+}
+
+func TestManagedHistory_PaginatesBeforeTrimming(t *testing.T) {
+	for _, limit := range []int{3, 0, 1000} {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			cwd := t.TempDir()
+			var pages atomic.Int32
+			socket := managedFixture(t, func(ws *websocket.Conn) {
+				fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+					var params map[string]any
+					_ = json.Unmarshal(m.Params, &params)
+					if params["threadId"] != "target" {
+						t.Errorf("unscoped history request: %s", m.Params)
+					}
+					if m.Method == "thread/read" {
+						if params["includeTurns"] != false {
+							t.Error("history requested full hydration instead of pagination")
+						}
+						return map[string]any{"thread": map[string]any{"id": "target", "cwd": cwd}}, true
+					}
+					if m.Method != "thread/turns/list" {
+						t.Errorf("unexpected method: %s", m.Method)
+					}
+					wantSize := float64(50)
+					if limit == 3 {
+						wantSize = 6
+					}
+					if params["limit"] != wantSize || params["sortDirection"] != "desc" || params["itemsView"] != "full" {
+						t.Errorf("wrong pagination controls: %s", m.Params)
+					}
+					turn := func(text string) any {
+						return map[string]any{"items": []any{map[string]any{"type": "agentMessage", "text": text}}}
+					}
+					switch pages.Add(1) {
+					case 1:
+						if params["cursor"] != nil {
+							t.Error("first page has cursor")
+						}
+						// Tool-only and blank turns must not count toward the history limit.
+						return map[string]any{"data": []any{turn("newest"), turn(""), map[string]any{"items": []any{map[string]any{"type": "commandExecution"}}}}, "nextCursor": "older"}, true
+					case 2:
+						if params["cursor"] != "older" {
+							t.Error("missing continuation cursor")
+						}
+						return map[string]any{"data": []any{turn("middle"), turn("oldest")}, "nextCursor": "ancient"}, true
+					default:
+						if params["cursor"] != "ancient" {
+							t.Error("wrong final cursor")
+						}
+						return map[string]any{"data": []any{turn("ancient")}}, true
+					}
+				})
+			})
+			a := fixtureManagedAgent(t, socket, cwd, nil)
+			history, err := a.GetSessionHistory(context.Background(), "target", limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"ancient", "oldest", "middle", "newest"}
+			wantPages := int32(3)
+			if limit == 3 {
+				want = want[1:]
+				wantPages = 2
+			}
+			if len(history) != len(want) {
+				t.Fatalf("history=%v", history)
+			}
+			for i, text := range want {
+				if history[i].Content != text {
+					t.Fatalf("history[%d]=%q want %q", i, history[i].Content, text)
+				}
+			}
+			if pages.Load() != wantPages {
+				t.Fatalf("pages=%d want %d", pages.Load(), wantPages)
+			}
+		})
+	}
+}
+
+func TestManagedHistory_RejectsRepeatedCursorAndOtherWorkspace(t *testing.T) {
+	for _, otherWorkspace := range []bool{false, true} {
+		t.Run(fmt.Sprintf("otherWorkspace=%t", otherWorkspace), func(t *testing.T) {
+			cwd := t.TempDir()
+			var pages atomic.Int32
+			socket := managedFixture(t, func(ws *websocket.Conn) {
+				fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+					if m.Method == "thread/read" {
+						path := cwd
+						if otherWorkspace {
+							path += "/other"
+						}
+						return map[string]any{"thread": map[string]any{"id": "target", "cwd": path}}, true
+					}
+					pages.Add(1)
+					return map[string]any{"data": []any{}, "nextCursor": "repeat"}, true
+				})
+			})
+			a := fixtureManagedAgent(t, socket, cwd, nil)
+			history, err := a.GetSessionHistory(context.Background(), "target", 0)
+			if err == nil || history != nil {
+				t.Fatalf("history=%v err=%v", history, err)
+			}
+			if otherWorkspace {
+				if pages.Load() != 0 {
+					t.Fatal("read history outside workspace")
+				}
+			} else if !strings.Contains(err.Error(), "repeated cursor") {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestManagedHistory_TotalHistoryExceedsWebSocketLimit(t *testing.T) {
+	cwd := t.TempDir()
+	// Each page fits the 32 MiB transport limit; combined history does not.
+	text := strings.Repeat("x", 17*1024*1024)
+	var pages atomic.Int32
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			if m.Method == "thread/read" {
+				return map[string]any{"thread": map[string]any{"id": "target", "cwd": cwd}}, true
+			}
+			page := map[string]any{"data": []any{map[string]any{"items": []any{map[string]any{"type": "agentMessage", "text": text}}}}}
+			if pages.Add(1) == 1 {
+				page["nextCursor"] = "older"
+			}
+			return page, true
+		})
+	})
+	a := fixtureManagedAgent(t, socket, cwd, nil)
+	history, err := a.GetSessionHistory(context.Background(), "target", 2)
+	if err != nil || len(history) != 2 {
+		t.Fatalf("entries=%d err=%v", len(history), err)
+	}
+	for _, entry := range history {
+		if entry.Content != text {
+			t.Fatal("large history entry was truncated")
+		}
+	}
+}
+
+func TestManagedHistory_TrimsWithinTurnPreservingItemOrder(t *testing.T) {
+	cwd := t.TempDir()
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			if m.Method == "thread/read" {
+				return map[string]any{"thread": map[string]any{"id": "target", "cwd": cwd}}, true
+			}
+			return map[string]any{"data": []any{map[string]any{"items": []any{
+				map[string]any{"type": "userMessage", "content": []any{map[string]any{"text": "question"}}},
+				map[string]any{"type": "agentMessage", "text": "working"},
+				map[string]any{"type": "agentMessage", "text": "answer"},
+			}}}}, true
+		})
+	})
+	a := fixtureManagedAgent(t, socket, cwd, nil)
+	history, err := a.GetSessionHistory(context.Background(), "target", 2)
+	if err != nil || len(history) != 2 || history[0].Content != "working" || history[1].Content != "answer" {
+		t.Fatalf("history=%v err=%v", history, err)
+	}
+}

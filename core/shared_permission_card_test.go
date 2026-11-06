@@ -1,0 +1,504 @@
+package core
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+)
+
+type trackedPermissionUpdate struct {
+	handle int
+	card   *Card
+}
+
+type sharedTrackedPermissionPlatform struct {
+	*stubCardPlatform
+	updates       chan trackedPermissionUpdate
+	started       chan struct{}
+	release       chan struct{}
+	updateErr     error
+	updateStarted chan struct{}
+	updateRelease chan struct{}
+}
+
+func (p *sharedTrackedPermissionPlatform) SendCardWithHandle(ctx context.Context, reply any, card *Card) (any, error) {
+	if err := p.SendCard(ctx, reply, card); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	handle := len(p.sentCards) - 1
+	p.mu.Unlock()
+	if p.started != nil {
+		close(p.started)
+		<-p.release
+	}
+	return handle, nil
+}
+
+func (p *sharedTrackedPermissionPlatform) UpdateCard(ctx context.Context, handle any, card *Card) error {
+	if p.updateErr != nil {
+		return p.updateErr
+	}
+	if p.updateStarted != nil {
+		close(p.updateStarted)
+		select {
+		case <-p.updateRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	index := handle.(int)
+	p.mu.Lock()
+	p.sentCards[index] = card
+	p.mu.Unlock()
+	p.updates <- trackedPermissionUpdate{index, card}
+	return nil
+}
+
+func TestSharedPermissionCard_SlowExternalUpdateDoesNotBlockDaemonOutput(t *testing.T) {
+	for _, local := range []bool{false, true} {
+		name := "external update"
+		if local {
+			name = "local update in progress"
+		}
+		t.Run(name, func(t *testing.T) {
+			env, p := newSharedTrackedPermissionEnv(t)
+			p.updateStarted, p.updateRelease = make(chan struct{}), make(chan struct{})
+			t.Cleanup(func() { close(p.updateRelease) })
+			as := env.a.connection("first")
+			as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "SLOW PATCH", Decisions: []string{"allow"}})
+			env.await("SLOW PATCH")
+			if local {
+				go env.send("allow")
+			} else {
+				as.emit(Event{Type: EventPermissionResolved, RequestID: "approval"})
+			}
+			select {
+			case <-p.updateStarted:
+			case <-time.After(3 * time.Second):
+				t.Fatal("card update did not start")
+			}
+			if local {
+				as.emit(Event{Type: EventPermissionResolved, RequestID: "approval"})
+			}
+			as.emit(Event{Type: EventText, Content: "OUTPUT WHILE PATCH BLOCKED", Metadata: map[string]any{"phase": "commentary"}})
+			env.await("OUTPUT WHILE PATCH BLOCKED")
+		})
+	}
+}
+
+func TestSharedPermissionCard_TextDecisionDoesNotDuplicateUpdatedCard(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "TEXT DECISION CARD", Decisions: []string{"allow"}})
+	env.await("TEXT DECISION CARD")
+	env.send("allow")
+	update := awaitTrackedPermissionUpdate(t, p)
+	if update.card.Header.Color != "green" || len(sharedPermissionButtons(update.card)) != 0 {
+		t.Fatalf("text approval did not update card: %+v", update.card)
+	}
+	if strings.Contains(strings.Join(p.getSent(), "\n"), env.e.i18n.T(MsgSharedResponseSent)) {
+		t.Fatal("successful card update sent a redundant confirmation message")
+	}
+}
+
+func TestSharedPermissionCard_CompactBodyKeepsApprovalDetails(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "compact", ToolName: "Bash", ToolInput: "git commit -m 'fix'", ToolInputRaw: map[string]any{"reason": "Finish the reviewed change", "cwd": "/project"}, Decisions: []string{"allow", "allow_similar", "cancel"}, DecisionDetails: map[string]string{"allow_similar": `["git","commit"]`}})
+	env.await("Finish the reviewed change")
+	p.mu.Lock()
+	card := p.sentCards[0]
+	p.mu.Unlock()
+	if card.Header.Title != env.e.i18n.T(MsgPermCardTitle) {
+		t.Fatalf("wrong card title: %+v", card.Header)
+	}
+	if !card.RichMarkdown {
+		t.Fatal("permission card must request inline-code-capable markdown")
+	}
+	if len(card.Elements) != 4 {
+		t.Fatalf("expected body, small metadata, short actions and full-width grant: %+v", card.Elements)
+	}
+	body, ok := card.Elements[0].(CardMarkdown)
+	if !ok {
+		t.Fatalf("missing markdown body: %+v", card.Elements[0])
+	}
+	for _, want := range []string{"**Bash**: `git commit -m 'fix'`", "**Reason**: Finish the reviewed change"} {
+		if !strings.Contains(body.Content, want) {
+			t.Fatalf("compact card lost %q: %q", want, body.Content)
+		}
+	}
+	if strings.Contains(body.Content, "Working directory:") || strings.Contains(body.Content, "Allow similar commands:") {
+		t.Fatalf("secondary metadata stayed in main body: %q", body.Content)
+	}
+	metadata, ok := card.Elements[1].(CardNote)
+	if !ok {
+		t.Fatalf("secondary metadata is not a small note: %+v", card.Elements[1])
+	}
+	for _, want := range []string{"Working directory: /project", "Allow similar commands: [\"git\",\"commit\"]"} {
+		if !strings.Contains(metadata.Text, want) {
+			t.Fatalf("small note lost %q: %q", want, metadata.Text)
+		}
+	}
+	if strings.Contains(body.Content, "Permission Request") || strings.Contains(body.Content, "\n\n") {
+		t.Fatalf("card repeats its title or has blank paragraphs: %q", body.Content)
+	}
+	env.send(env.button(env.e.i18n.T(MsgPermBtnAllow)))
+	updated := awaitTrackedPermissionUpdate(t, p).card
+	if updated.Header.Color != "green" || len(updated.Elements) != 2 {
+		t.Fatalf("resolved card lost compact layout: %+v", updated)
+	}
+	if !updated.RichMarkdown {
+		t.Fatal("resolved permission card must keep inline-code-capable markdown")
+	}
+	resolvedBody := updated.Elements[0].(CardMarkdown).Content
+	if resolvedBody != body.Content {
+		t.Fatalf("resolved card changed approval details: %q", resolvedBody)
+	}
+	if resolvedNote, ok := updated.Elements[1].(CardNote); !ok || resolvedNote.Text != metadata.Text {
+		t.Fatalf("resolved card lost small metadata: %+v", updated.Elements[1])
+	}
+}
+
+func TestSharedPermissionCard_ReasonOnlyBoldsLabel(t *testing.T) {
+	env := newSharedTestEnv(t)
+	for _, tc := range []struct {
+		lang             Language
+		label, separator string
+	}{
+		{LangEnglish, "Reason", ": "}, {LangChinese, "原因", "："},
+		{LangTraditionalChinese, "原因", "："}, {LangJapanese, "理由", ": "}, {LangSpanish, "Motivo", ": "},
+	} {
+		env.e.i18n.SetLang(tc.lang)
+		reason := "Read project files before applying the change"
+		got := env.e.sharedPermissionCardReason(&pendingPermission{InputPreview: "git status", ToolInput: map[string]any{"reason": reason}})
+		want := "**" + tc.label + "**" + tc.separator + reason
+		if got != want {
+			t.Errorf("%s reason=%q, want %q", tc.lang, got, want)
+		}
+	}
+}
+
+func TestSharedPermissionCard_LongApprovalLabelsUseFullWidthRows(t *testing.T) {
+	for _, lang := range []Language{LangEnglish, LangChinese} {
+		t.Run(string(lang), func(t *testing.T) {
+			env, p := newSharedTrackedPermissionEnv(t)
+			env.e.i18n.SetLang(lang)
+			as := env.a.connection("first")
+			as.emit(Event{Type: EventPermissionRequest, RequestID: "mobile-approval", ToolName: "Bash", ToolInput: "MOBILE APPROVAL", Decisions: []string{"allow", "allow_similar", "allow_session", "cancel"}})
+			env.await("MOBILE APPROVAL")
+			p.mu.Lock()
+			card := p.sentCards[0]
+			p.mu.Unlock()
+			var rows []CardActions
+			for _, element := range card.Elements {
+				if row, ok := element.(CardActions); ok {
+					rows = append(rows, row)
+				}
+			}
+			if len(rows) != 3 || len(rows[0].Buttons) != 2 || len(rows[1].Buttons) != 1 || len(rows[2].Buttons) != 1 {
+				t.Fatalf("approval buttons squeezed together: %+v", rows)
+			}
+			for _, row := range rows {
+				if row.Layout != CardActionLayoutEqualColumns {
+					t.Fatal("approval row must fill available width")
+				}
+			}
+			if rows[1].Buttons[0].Text != env.e.i18n.T(MsgSharedAllowSimilar) || rows[2].Buttons[0].Text != env.e.i18n.T(MsgSharedAllowSession) {
+				t.Fatal("grant label shortened or reordered")
+			}
+			env.send(env.button(env.e.i18n.T(MsgSharedAllowSession)))
+			updated := awaitTrackedPermissionUpdate(t, p)
+			if len(sharedPermissionButtons(updated.card)) != 0 {
+				t.Fatal("resolved approval retained active buttons")
+			}
+			as.mu.Lock()
+			count := len(as.responses)
+			as.mu.Unlock()
+			if count != 1 {
+				t.Fatal("approval callback did not resolve exactly once")
+			}
+		})
+	}
+}
+
+func TestSharedPermissionCard_PatchDiffPreviewKeepsFilesAndDecision(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	as := env.a.connection("first")
+	preview := "update /project/core/card.go\n@@ -1 +1 @@\n-old\n+new\n\nadd /project/core/new.go\n@@ -0,0 +1 @@\n+package core"
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "patch-diff", ToolName: "Patch", ToolInput: preview, ToolInputRaw: map[string]any{"reason": "Review file changes"}, Decisions: []string{"allow", "cancel"}})
+	env.await("Review file changes")
+	p.mu.Lock()
+	card := p.sentCards[0]
+	p.mu.Unlock()
+	if len(card.Elements) != 4 || !card.RichMarkdown {
+		t.Fatalf("patch card should have heading, diff, reason, actions: %+v", card)
+	}
+	diff, ok := card.Elements[1].(CardMarkdown)
+	if !ok || !diff.Diff || !strings.Contains(diff.Content, preview) {
+		t.Fatalf("patch preview not preserved: %+v", card.Elements[1])
+	}
+	if !strings.Contains(card.RenderText(), "Review file changes") {
+		t.Fatalf("reason missing from card fallback: %s", card.RenderText())
+	}
+	env.send(env.button(env.e.i18n.T(MsgPermBtnAllow)))
+	resolved := awaitTrackedPermissionUpdate(t, p).card
+	if resolved.Header.Color != "green" || len(resolved.Elements) != 3 {
+		t.Fatalf("resolved patch card lost diff: %+v", resolved)
+	}
+	if body, ok := resolved.Elements[1].(CardMarkdown); !ok || !body.Diff || body.Content != diff.Content {
+		t.Fatalf("resolved patch preview changed: %+v", resolved.Elements[1])
+	}
+}
+
+func TestSharedPermissionCard_UpdateFailurePreservesTextConfirmation(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	p.updateErr = fmt.Errorf("simulated card update failure")
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "FAILED UPDATE CARD", Decisions: []string{"allow"}})
+	env.await("FAILED UPDATE CARD")
+	env.send("allow")
+	env.await(env.e.i18n.T(MsgSharedResponseSent))
+}
+
+func (p *sharedTrackedPermissionPlatform) getSent() []string {
+	messages := p.stubPlatformEngine.getSent()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, card := range p.sentCards {
+		messages = append(messages, card.RenderText())
+	}
+	return messages
+}
+
+func newSharedTrackedPermissionEnv(t *testing.T) (*sharedTestEnv, *sharedTrackedPermissionPlatform) {
+	t.Helper()
+	env := newSharedTestEnv(t)
+	p := &sharedTrackedPermissionPlatform{
+		stubCardPlatform: env.p,
+		updates:          make(chan trackedPermissionUpdate, 16),
+	}
+	env.e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: "/attach first", ReplyCtx: "reply"})
+	env.await("Attached to session first")
+	return env, p
+}
+
+func awaitTrackedPermissionUpdate(t *testing.T, p *sharedTrackedPermissionPlatform) trackedPermissionUpdate {
+	t.Helper()
+	select {
+	case update := <-p.updates:
+		return update
+	case <-time.After(3 * time.Second):
+		t.Fatal("permission card was not updated after daemon completion")
+		return trackedPermissionUpdate{}
+	}
+}
+
+func TestSharedPermissionCard_ExternalResolutionUpdatesOriginalUnclickedCard(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "first-approval", ToolName: "Bash", ToolInput: "FIRST CARD", Decisions: []string{"allow", "cancel"}})
+	env.await("FIRST CARD")
+	oldAction := env.button(env.e.i18n.T(MsgPermBtnAllow))
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "next-approval", ToolName: "Bash", ToolInput: "NEXT CARD", Decisions: []string{"allow", "cancel"}})
+	as.emit(Event{Type: EventPermissionResolved, RequestID: "first-approval"})
+	update := awaitTrackedPermissionUpdate(t, p)
+	if update.handle != 0 || update.card.Header.Color != "grey" || update.card.Header.Title != env.e.i18n.T(MsgSharedRequestResolved) || len(sharedPermissionButtons(update.card)) != 0 {
+		t.Fatalf("external completion = %+v", update)
+	}
+	if !strings.Contains(update.card.RenderText(), "FIRST CARD") || strings.Contains(update.card.Header.Title, env.e.i18n.T(MsgPermBtnAllow)) {
+		t.Fatalf("external completion lost context or guessed a decision: %+v", update.card)
+	}
+	env.await("NEXT CARD")
+	// A duplicate daemon event and a stale click cannot resolve the next card.
+	as.emit(Event{Type: EventPermissionResolved, RequestID: "first-approval"})
+	env.send(oldAction)
+	env.await(env.e.i18n.T(MsgSharedStaleRequest))
+	as.emit(Event{Type: EventPermissionResolved, RequestID: "next-approval"})
+	update = awaitTrackedPermissionUpdate(t, p)
+	if update.handle != 1 || !strings.Contains(update.card.RenderText(), "NEXT CARD") || len(sharedPermissionButtons(update.card)) != 0 {
+		t.Fatalf("wrong card updated by completion: %+v", update)
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.responses) != 0 {
+		t.Fatalf("external completion submitted a decision: %+v", as.responses)
+	}
+}
+
+func TestSharedPermissionCard_LocalDecisionSurvivesResolvedNotification(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "LOCAL CARD", Decisions: []string{"allow", "deny"}})
+	env.await("LOCAL CARD")
+	env.send(env.button(env.e.i18n.T(MsgPermBtnDeny)))
+	update := awaitTrackedPermissionUpdate(t, p)
+	if update.card.Header.Color != "red" {
+		t.Fatalf("local deny state lost: %+v", update.card)
+	}
+	as.emit(Event{Type: EventPermissionResolved, RequestID: "approval"})
+	// A subsequent approval proves the reader processed the completion event.
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "new", ToolName: "Bash", ToolInput: "NEW APPROVAL", Decisions: []string{"allow"}})
+	env.await("NEW APPROVAL")
+	p.mu.Lock()
+	first := p.sentCards[0]
+	p.mu.Unlock()
+	if first.Header.Color != "red" || !strings.Contains(first.Header.Title, env.e.i18n.T(MsgPermBtnDeny)) {
+		t.Fatalf("daemon notification overwrote local choice: %+v", first)
+	}
+	select {
+	case extra := <-p.updates:
+		t.Fatalf("duplicate completion update: %+v", extra)
+	default:
+	}
+}
+
+func TestSharedPermissionCard_ResolutionBeforeSendReturnsUpdatesCard(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	p.started, p.release = make(chan struct{}), make(chan struct{})
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "SLOW SEND", Decisions: []string{"allow"}})
+	select {
+	case <-p.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("card send did not start")
+	}
+	env.send("allow")
+	env.await(env.e.i18n.T(MsgSharedResponseSent))
+	close(p.release)
+	update := awaitTrackedPermissionUpdate(t, p)
+	if update.card.Header.Color != "green" || len(sharedPermissionButtons(update.card)) != 0 {
+		t.Fatalf("late send reintroduced pending approval: %+v", update.card)
+	}
+}
+
+func sharedPermissionButtons(card *Card) []CardButton {
+	var buttons []CardButton
+	for _, element := range card.Elements {
+		if actions, ok := element.(CardActions); ok {
+			buttons = append(buttons, actions.Buttons...)
+		}
+	}
+	return buttons
+}
+
+func TestSharedPermissionCard_DecisionUpdatesInPlace(t *testing.T) {
+	for _, tc := range []struct {
+		decision, color string
+		label           MsgKey
+	}{
+		{"allow", "green", MsgPermBtnAllow}, {"deny", "red", MsgPermBtnDeny}, {"cancel", "grey", MsgSharedCancelDecision},
+		{"allow_session", "green", MsgSharedAllowSession}, {"allow_similar_0", "green", MsgSharedAllowSimilar},
+		{"network_allow", "green", MsgSharedNetworkAllow}, {"network_deny", "red", MsgSharedNetworkDeny},
+	} {
+		t.Run(tc.decision, func(t *testing.T) {
+			env, p := newSharedTrackedPermissionEnv(t)
+			as := env.a.connection("first")
+			as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "CARD APPROVAL", ToolInputRaw: map[string]any{"reason": "Need access", "cwd": "/project"}, Decisions: []string{tc.decision}})
+			env.await("CARD APPROVAL")
+			label := env.e.i18n.T(tc.label)
+			action := env.button(label)
+			if !strings.HasPrefix(action, "/decision ") {
+				t.Fatalf("permission button = %q; want request-bound command", action)
+			}
+			env.send(action)
+			card := awaitTrackedPermissionUpdate(t, p).card
+			if card == nil || card.Header == nil || card.Header.Color != tc.color || !strings.Contains(card.Header.Title, label) {
+				t.Fatalf("resolved card = %+v; want %s %s", card, tc.color, label)
+			}
+			if len(sharedPermissionButtons(card)) != 0 || !strings.Contains(card.RenderText(), "CARD APPROVAL") || !strings.Contains(card.RenderText(), "Need access") || !strings.Contains(card.RenderText(), "/project") {
+				t.Fatalf("resolved card lost context or retained buttons: %+v", card)
+			}
+			if strings.Contains(strings.Join(p.getSent(), "\n"), env.e.i18n.T(MsgSharedResponseSent)) {
+				t.Fatal("card callback sent a separate confirmation message")
+			}
+			as.mu.Lock()
+			defer as.mu.Unlock()
+			if len(as.responses) != 1 || as.responses[0].Behavior != tc.decision {
+				t.Fatalf("daemon responses = %+v", as.responses)
+			}
+		})
+	}
+}
+
+func TestSharedPermissionCard_ClickReturnsAcceptedDecisionCard(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "CALLBACK APPROVAL", Decisions: []string{"allow"}})
+	env.await("CALLBACK APPROVAL")
+	result := make(chan *Card, 1)
+	env.e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: env.button(env.e.i18n.T(MsgPermBtnAllow)), ReplyCtx: "reply", CardActionResult: func(card *Card) { result <- card }})
+	select {
+	case card := <-result:
+		if card.Header.Color != "green" || len(sharedPermissionButtons(card)) != 0 || !strings.Contains(card.RenderText(), "CALLBACK APPROVAL") {
+			t.Fatalf("callback card = %+v", card)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("accepted approval did not return callback card")
+	}
+	if update := awaitTrackedPermissionUpdate(t, p); update.card.Header.Color != "green" {
+		t.Fatalf("tracked card update = %+v", update)
+	}
+}
+
+func TestSharedPermissionCard_CallbackSuccessDoesNotSendConfirmationWhenPatchFails(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	p.updateErr = fmt.Errorf("simulated patch failure")
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "CALLBACK PATCH FAILURE", Decisions: []string{"allow"}})
+	env.await("CALLBACK PATCH FAILURE")
+	result := make(chan *Card, 1)
+	env.e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: env.button(env.e.i18n.T(MsgPermBtnAllow)), ReplyCtx: "reply", CardActionResult: func(card *Card) { result <- card }})
+	select {
+	case <-result:
+	case <-time.After(3 * time.Second):
+		t.Fatal("accepted approval did not return callback card")
+	}
+	if strings.Contains(strings.Join(p.getSent(), "\n"), env.e.i18n.T(MsgSharedResponseSent)) {
+		t.Fatal("successful callback sent a separate confirmation message")
+	}
+}
+
+func TestSharedPermissionCard_StaleAndFailedDecisionsNeverShowSuccess(t *testing.T) {
+	env, p := newSharedTrackedPermissionEnv(t)
+	as := env.a.connection("first")
+	as.emit(Event{Type: EventPermissionRequest, RequestID: "approval", ToolName: "Bash", ToolInput: "RETRY APPROVAL", Decisions: []string{"allow", "deny"}})
+	env.await("RETRY APPROVAL")
+	action := env.button(env.e.i18n.T(MsgPermBtnAllow))
+	for _, content := range []string{"/decision old-token allow", "/decision"} {
+		env.send(content)
+		env.await(env.e.i18n.T(MsgSharedStaleRequest))
+	}
+	env.e.ReceiveMessage(p, &Message{SessionKey: "test:other", Platform: "test", UserID: "other", Content: action, ReplyCtx: "other"})
+	env.send(strings.TrimSuffix(action, " allow") + " allow_session")
+	env.await(env.e.i18n.Tf(MsgSharedDecisionHint, "allow / deny"))
+	as.mu.Lock()
+	if len(as.responses) != 0 {
+		t.Fatalf("invalid decisions submitted %+v", as.responses)
+	}
+	delete(as.pending, "approval")
+	as.mu.Unlock()
+	env.send(action)
+	env.await("request no longer pending")
+	select {
+	case update := <-p.updates:
+		t.Fatalf("failed decision updated the card: %+v", update)
+	default:
+	}
+	as.mu.Lock()
+	as.pending["approval"] = true
+	as.mu.Unlock()
+	env.send(action)
+	if card := awaitTrackedPermissionUpdate(t, p).card; card.Header.Color != "green" {
+		t.Fatalf("retry card = %+v", card)
+	}
+	env.send(action)
+	env.await(env.e.i18n.T(MsgSharedStaleRequest))
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.responses) != 1 {
+		t.Fatalf("duplicate decision submitted: %+v", as.responses)
+	}
+}
