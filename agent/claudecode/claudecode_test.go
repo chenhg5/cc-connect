@@ -1224,6 +1224,26 @@ func TestClaudeContextWindow(t *testing.T) {
 // resolution honors CLAUDE_CONFIG_DIR from the per-project env table, so
 // agents with an isolated config home find their own projects tree instead
 // of ~/.claude (regression test for /list showing empty on multi-home setups).
+// A CLAUDE_CONFIG_DIR exported to the cc-connect process (systemd, docker, shell)
+// is inherited by the Claude Code child, so /list and /history must read the
+// same projects tree. The per-project env still wins when both are set.
+func TestConfigHomeFromEnv_FallsBackToProcessEnv(t *testing.T) {
+	processHome := t.TempDir()
+	projectHome := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", processHome)
+
+	if got := configHomeFromEnv(nil); got != processHome {
+		t.Errorf("configHomeFromEnv(nil) = %q, want the process CLAUDE_CONFIG_DIR %q", got, processHome)
+	}
+	if got := configHomeFromEnv([]string{"PATH=/usr/bin"}); got != processHome {
+		t.Errorf("configHomeFromEnv(no override) = %q, want %q", got, processHome)
+	}
+	if got := configHomeFromEnv([]string{"CLAUDE_CONFIG_DIR=" + projectHome}); got != projectHome {
+		t.Errorf("configHomeFromEnv(project override) = %q, want %q", got, projectHome)
+	}
+}
+
 func TestConfigHomeFromEnv_HonorsPerProjectConfigDir(t *testing.T) {
 	configHome := t.TempDir()
 	workDir := t.TempDir()
@@ -1246,6 +1266,7 @@ func TestConfigHomeFromEnv_HonorsPerProjectConfigDir(t *testing.T) {
 	// Without the variable it must fall back to ~/.claude (HOME-based).
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	if got, want := configHomeFromEnv(nil), filepath.Join(home, ".claude"); got != want {
 		t.Errorf("configHomeFromEnv(nil) = %q, want %q", got, want)
 	}
