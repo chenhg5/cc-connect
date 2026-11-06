@@ -236,6 +236,9 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		case initOut.AgentCapabilities.LoadSession:
 			resumeMethod = "session/load"
 		}
+		if resumeMethod == "" {
+			return fmt.Errorf("acp: server does not support resuming the selected session")
+		}
 		// Both resume methods may replay conversation history the way
 		// `session/load` does, and a long replay can fill the bounded
 		// events channel and stall the transport read loop. PR #2038
@@ -251,8 +254,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 				"mcpServers": []any{},
 			})
 			if err != nil {
-				slog.Warn("acp: session resume failed, starting new session",
-					"method", resumeMethod, "error", err)
+				return fmt.Errorf("acp: %s: %w", resumeMethod, err)
 			} else {
 				var rr struct {
 					SessionID string         `json:"sessionId"`

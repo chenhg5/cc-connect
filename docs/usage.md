@@ -49,6 +49,12 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/ps <message>` / `/btw <message>` | Send a supplement to the running task |
 | `/help` | Show available commands |
 
+After `/switch` or a session-list button, the confirmation includes the selected session and its latest message (up to 600 characters). The backend transcript is preferred so updates from other windows are visible. An unavailable or empty preview is reported explicitly. Buttons bind the session ID, so list reordering cannot change their target.
+
+Selecting a session does not start the agent: restoration happens before the next message is sent. If restoration fails, the session cannot be validated for this workspace, or a previous process may still be running, cc-connect retains the selection and history and stops sending. It never silently starts a replacement conversation. Resolve the issue and resend, or explicitly use `/new`; the old conversation remains available through `/switch`.
+
+Messages already acknowledged as queued when startup fails receive a failure notification and are removed; retrying cannot replay them. A preview lookup waits at most one second before reporting that the preview is unavailable. Bot-to-bot relay sessions, which have no interactive `/new` command, retain their automatic fresh-start recovery: a failed resume can start a separate relay conversation, while the previous ID and history remain saved. If the fresh start also fails, the original selection is retained for retry.
+
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
 
 Use `/ps` (or `/btw`) to add instructions while a task is running. An idle session rejects the command. The delivery confirmation means the bridge sent the request, not that the agent has finished processing it.
