@@ -49,6 +49,9 @@ type Agent struct {
 	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
 	sessionEnv      []string
 	mu              sync.RWMutex
+
+	capacityFallbackFrom  string
+	capacityFallbackModel string
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -57,6 +60,8 @@ func New(opts map[string]any) (core.Agent, error) {
 		workDir = "."
 	}
 	model, _ := opts["model"].(string)
+	capacityFallbackFrom, _ := opts["capacity_fallback_from"].(string)
+	capacityFallbackModel, _ := opts["capacity_fallback_model"].(string)
 	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	mode, _ := opts["mode"].(string)
 	backend, _ := opts["backend"].(string)
@@ -108,6 +113,9 @@ func New(opts map[string]any) (core.Agent, error) {
 		cliExtraArgs:    cliExtraArgs,
 		configEnv:       configEnv,
 		activeIdx:       -1,
+
+		capacityFallbackFrom:  strings.TrimSpace(capacityFallbackFrom),
+		capacityFallbackModel: strings.TrimSpace(capacityFallbackModel),
 	}, nil
 }
 
@@ -494,6 +502,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
+	capacityFallbackFrom, capacityFallbackModel := a.capacityFallbackFrom, a.capacityFallbackModel
 	reasoningEffort := a.reasoningEffort
 	backend := a.backend
 	appServerURL := a.appServerURL
@@ -530,7 +539,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		session, err := newAppServerSession(ctx, cliBin, cliExtraArgs, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		if err != nil {
+			return nil, err
+		}
+		session.capacityFallbackFrom, session.capacityFallbackModel = capacityFallbackFrom, capacityFallbackModel
+		return session, nil
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
@@ -603,6 +617,12 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	}
 	if a.codexHome != "" {
 		opts["codex_home"] = a.codexHome
+	}
+	if a.capacityFallbackFrom != "" {
+		opts["capacity_fallback_from"] = a.capacityFallbackFrom
+	}
+	if a.capacityFallbackModel != "" {
+		opts["capacity_fallback_model"] = a.capacityFallbackModel
 	}
 	return opts
 }

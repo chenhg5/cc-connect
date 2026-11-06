@@ -1714,6 +1714,17 @@ app_secret = "your-feishu-app-secret"
 # Optional: specify a model / 可选：指定模型
 # model = "gpt-6.1-sol"
 #
+# Optional: one same-thread continuation after an explicit model-capacity error.
+# Requires backend = "app_server" and both model IDs below. Disabled by default.
+# Other errors do not trigger fallback; the next user request uses the normal model.
+# The fallback keeps reasoning effort and permissions, without replaying attachments
+# or the original prompt. Continuing a thread does not guarantee tool idempotency.
+# 可选：明确的模型容量错误后，在原会话中续接一次；默认关闭，仅限 app_server。
+# 需同时配置两个模型 ID，其他错误不降级，下一条用户请求恢复原模型。
+# backend = "app_server"
+# capacity_fallback_from = "gpt-6.1-sol"
+# capacity_fallback_model = "gpt-6.1-terra"
+#
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
 #

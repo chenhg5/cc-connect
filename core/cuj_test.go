@@ -798,6 +798,29 @@ func TestCUJ_G1_LLMFailureSurfacesErrorToUser(t *testing.T) {
 	}
 }
 
+func TestCUJ_G1_CapacityFallbackContinuesAndRestoresModel(t *testing.T) {
+	env := newCUJEnv(t)
+	as := &capacityTestSession{events: make(chan Event, 16), mode: "capacity", model: "gpt-6.1-sol"}
+	env.engine.agent = &capacityTestAgent{session: as}
+	t.Cleanup(func() { _ = env.engine.Stop() })
+
+	env.userSends("capacity-user", "finish first task")
+	env.waitFor("capacity notice and fallback answer", time.Second, func() bool {
+		return env.sentContains("gpt-6.1-sol is at capacity") && env.sentContains("answer from gpt-6.1-terra")
+	})
+	env.userSends("capacity-user", "start second task")
+	env.waitFor("next request uses original model", time.Second, func() bool {
+		return env.sentContains("answer from gpt-6.1-sol")
+	})
+	env.userSends("capacity-user", "/history")
+	env.waitFor("history keeps both original requests", time.Second, func() bool {
+		return env.sentContains("finish first task") && env.sentContains("start second task")
+	})
+	if env.sentContains("❌ Error:") || env.sentContains("Continue the existing task without repeating") {
+		t.Fatalf("successful continuation surfaced an error or synthetic user prompt: %v", env.plat.getSent())
+	}
+}
+
 // ===========================================================================
 // CUJ-E2 · A cron job created (programmatically by the agent or directly
 // via the store) shows up in /cron output for the same SessionKey.
