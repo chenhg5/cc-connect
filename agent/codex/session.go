@@ -570,6 +570,7 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 		return
 	}
 	itemType, _ := item["type"].(string)
+	callID, _ := item["id"].(string)
 	slog.Debug("codexSession: item.started", "item_type", itemType)
 
 	if itemType == "agent_message" || itemType == "message" || itemType == "reasoning" {
@@ -582,7 +583,7 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 	switch itemType {
 	case "command_execution":
 		command, _ := item["command"].(string)
-		evt := core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: command}
+		evt := core.Event{Type: core.EventToolUse, ToolCallID: callID, ToolName: "Bash", ToolInput: command}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -591,7 +592,7 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 	case "function_call":
 		name, _ := item["name"].(string)
 		args, _ := item["arguments"].(string)
-		evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: args}
+		evt := core.Event{Type: core.EventToolUse, ToolCallID: callID, ToolName: name, ToolInput: args}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -609,6 +610,7 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 		return
 	}
 	itemType, _ := item["type"].(string)
+	callID, _ := item["id"].(string)
 	slog.Debug("codexSession: item.completed", "item_type", itemType)
 
 	switch itemType {
@@ -633,9 +635,12 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 		command, _ := item["command"].(string)
 		status, _ := item["status"].(string)
 		output, _ := item["aggregated_output"].(string)
-		exitCode, _ := item["exit_code"].(float64)
-		code := int(exitCode)
-		success := codexToolSuccess(status, &code)
+		code, hasExitCode := toInt(item["exit_code"])
+		var exitCode *int
+		if hasExitCode {
+			exitCode = &code
+		}
+		success := codexToolSuccess(status, exitCode)
 
 		slog.Debug("codexSession: command completed",
 			"command", truncate(command, 100),
@@ -645,10 +650,12 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 		)
 		evt := core.Event{
 			Type:         core.EventToolResult,
+			ToolCallID:   callID,
+			ToolInput:    command,
 			ToolName:     "Bash",
-			ToolResult:   truncate(strings.TrimSpace(output), 500),
+			ToolResult:   core.RedactToolText(strings.TrimSpace(output)),
 			ToolStatus:   strings.TrimSpace(status),
-			ToolExitCode: &code,
+			ToolExitCode: exitCode,
 			ToolSuccess:  &success,
 		}
 		select {
@@ -667,8 +674,9 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 		)
 		evt := core.Event{
 			Type:        core.EventToolResult,
+			ToolCallID:  callID,
 			ToolName:    name,
-			ToolResult:  truncate(strings.TrimSpace(output), 500),
+			ToolResult:  core.RedactToolText(strings.TrimSpace(output)),
 			ToolStatus:  strings.TrimSpace(status),
 			ToolSuccess: &success,
 		}
@@ -690,7 +698,7 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 	default:
 		if toolName, known := codexToolNames[itemType]; known {
 			input := codexExtractToolInput(item)
-			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+			evt := core.Event{Type: core.EventToolUse, ToolCallID: callID, ToolName: toolName, ToolInput: input}
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():

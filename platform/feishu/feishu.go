@@ -4954,47 +4954,35 @@ func formatTodoWriteInput(text string, lang string) string {
 	return strings.TrimSuffix(sb.String(), "\n")
 }
 
+// literalToolBlock prevents terminal output and source snippets from becoming
+// card markup. A zero-width separator keeps embedded fences inside the block.
+func literalToolBlock(text, language string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = strings.ReplaceAll(text, "```", "`\u200b``")
+	return "```" + language + "\n" + text + "\n```"
+}
+
 func formatProgressToolInput(toolName, text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
-
-	// Special handling for TodoWrite tool - format JSON as readable list
 	if isTodoWriteToolName(toolName) {
 		if formatted := formatTodoWriteInput(text, ""); formatted != "" {
 			return formatted
 		}
-		// JSON parsing failed or empty todos - show raw input as text block
-		return fmt.Sprintf("```text\n%s\n```", text)
-	}
-
-	text = preprocessFeishuMarkdown(sanitizeMarkdownURLs(text))
-	if strings.Contains(text, "```") {
-		return text
 	}
 	if isBashToolName(toolName) {
-		return fmt.Sprintf("```bash\n%s\n```", text)
+		return literalToolBlock(text, "bash")
 	}
-	if strings.Contains(text, "\n") || len(text) > 180 {
-		return fmt.Sprintf("```text\n%s\n```", text)
-	}
-	return fmt.Sprintf("`%s`", inlineCodeText(text))
+	return literalToolBlock(text, "text")
 }
 
 func formatProgressToolResult(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	text = preprocessFeishuMarkdown(sanitizeMarkdownURLs(text))
-	if strings.Contains(text, "```") {
-		return text
-	}
-	if strings.Contains(text, "\n") || len(text) > 220 {
-		return fmt.Sprintf("```\n%s\n```", text)
-	}
-	return text
+	return literalToolBlock(text, "text")
 }
 
 func progressNoOutputText(lang string) string {
@@ -5067,21 +5055,38 @@ func renderProgressEntryElement(item core.ProgressCardEntry, lang string) map[st
 		if body := formatProgressToolInput(toolName, display.Detail); body != "" {
 			content += "\n" + body
 		}
+		if strings.Contains(display.Detail, "\n…\n") {
+			content += "\n_" + core.NewI18n(core.NormalizeLanguageString(lang)).T(core.MsgToolPreviewTruncated) + "_"
+		}
 		return progressToolElement(display.IconToken, content)
 	case core.ProgressEntryToolResult:
 		toolName := strings.TrimSpace(item.Tool)
-		display := buildToolDisplay(toolName, "")
+		display := buildToolDisplay(toolName, item.Input)
 		content := fmt.Sprintf("<text_tag color='turquoise'>%s</text_tag> **%s**", progressKindLabel(item.Kind, lang), inlineCodeText(display.Title))
 		dot := progressResultDot(item)
 		meta := dot
+		status := item.Status
+		if dot == "🔴" {
+			status = core.NewI18n(core.NormalizeLanguageString(lang)).T(core.MsgToolResultFmtFailed)
+		}
+		if status != "" {
+			meta += " `" + inlineCodeText(status) + "`"
+		}
 		if item.ExitCode != nil {
 			meta += fmt.Sprintf(" exit code: `%d`", *item.ExitCode)
 		}
 		content += "\n" + meta
+		if input := formatProgressToolInput(toolName, display.Detail); input != "" {
+			content += "\n" + progressKindLabel(core.ProgressEntryToolUse, lang) + "\n" + input
+		}
+		content += "\n" + progressKindLabel(core.ProgressEntryToolResult, lang)
 		if body := formatProgressToolResult(sanitizeToolDetail(toolSanitizerGeneric, item.Text)); body != "" {
 			content += "\n" + body
 		} else {
 			content += "\n_" + progressNoOutputText(lang) + "_"
+		}
+		if strings.Contains(item.Text, "\n…\n") || strings.Contains(display.Detail, "\n…\n") {
+			content += "\n_" + core.NewI18n(core.NormalizeLanguageString(lang)).T(core.MsgToolPreviewTruncated) + "_"
 		}
 		return progressToolElement(display.IconToken, content)
 	case core.ProgressEntryError:
@@ -6342,7 +6347,7 @@ func buildToolDisplay(toolName, detail string) toolDisplay {
 	if desc != nil {
 		if extracted := extractToolDetailFromJSON(rawDetail, *desc); extracted != "" {
 			rawDetail = extracted
-		} else if extracted := extractToolDetailFromSummary(rawDetail, *desc); extracted != "" {
+		} else if extracted := extractToolDetailFromSummary(rawDetail, *desc); desc.Sanitizer != toolSanitizerCommand && !json.Valid([]byte(rawDetail)) && extracted != "" {
 			rawDetail = extracted
 		}
 	}
@@ -6355,6 +6360,9 @@ func buildToolDisplay(toolName, detail string) toolDisplay {
 			title = commandTitle
 			icon = commandIcon
 		}
+	}
+	if strings.Contains(toolName, ":") || strings.HasPrefix(toolName, "mcp__") {
+		title = toolName
 	}
 	return toolDisplay{Title: title, IconToken: icon, Detail: cleanDetail}
 }
@@ -6439,6 +6447,15 @@ func extractToolDetailFromJSON(text string, desc toolDescriptor) string {
 		}
 		for _, key := range desc.ParamKeys {
 			if value := extractScalarText(params[key]); value != "" {
+				if desc.Sanitizer == toolSanitizerCommand {
+					parts := []string{value}
+					for _, contextKey := range []string{"cwd", "workdir", "timeout", "timeout_ms"} {
+						if context := extractScalarText(params[contextKey]); context != "" {
+							parts = append(parts, contextKey+": "+context)
+						}
+					}
+					return strings.Join(parts, "\n")
+				}
 				return value
 			}
 		}
@@ -6505,8 +6522,6 @@ var (
 	firstURLRe        = regexp.MustCompile(`https?://[^\s'"` + "`" + `<>]+`)
 	firstCodeSpanRe   = regexp.MustCompile("`([^`]+)`")
 	firstQuotedTextRe = regexp.MustCompile(`"([^"]+)"|'([^']+)'`)
-	secretAssignRe    = regexp.MustCompile(`(?i)\b([A-Za-z_][A-Za-z0-9_]*(?:token|secret|password|api[_-]?key|authorization|cookie|credential|bearer|session[_-]?id|client[_-]?secret|access[_-]?key)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s"'` + "`" + `]+)`)
-	authHeaderRe      = regexp.MustCompile(`(?i)(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)([^\s'"` + "`" + `]+)`)
 	sensitiveNameRe   = regexp.MustCompile(`(?i)(token|secret|password|api[_-]?key|authorization|cookie|credential|bearer|session[_-]?id|client[_-]?secret|access[_-]?key)`)
 )
 
@@ -6593,15 +6608,11 @@ func sanitizeURLText(value string) string {
 }
 
 func sanitizeCommandLike(value string) string {
-	value = strings.TrimSpace(stripToolDisplayQuotes(value))
-	value = regexp.MustCompile(`(?i)^(?:command|script|description)\s+`).ReplaceAllString(value, "")
-	return redactInlineSecrets(value)
+	return redactInlineSecrets(strings.TrimSpace(value))
 }
 
 func redactInlineSecrets(value string) string {
-	value = secretAssignRe.ReplaceAllString(value, "$1=[redacted]")
-	value = authHeaderRe.ReplaceAllString(value, "$1[redacted]")
-	return value
+	return core.RedactToolText(value)
 }
 
 func isSkillPathValue(value string) bool {
@@ -7248,22 +7259,27 @@ func richStepRowContent(step core.ToolStep) string {
 }
 
 func richStepElement(step core.ToolStep) map[string]any {
-	text := map[string]any{
-		"tag":       "plain_text",
-		"content":   richStepRowContent(step),
-		"text_size": "notation",
+	if step.Kind != core.ToolStepKindThinking {
+		entry := core.ProgressCardEntry{
+			ToolCallID: step.ToolCallID, Tool: step.Name,
+			Kind: core.ProgressEntryToolUse, Text: step.Summary,
+			Status: step.Status, ExitCode: step.ExitCode, Success: step.Success,
+		}
+		if step.Done {
+			entry.Kind = core.ProgressEntryToolResult
+			entry.Input = step.Summary
+			entry.Text = step.Result
+		}
+		return renderProgressEntryElement(entry, "")
 	}
-	elem := map[string]any{
-		"tag":  "div",
-		"text": text,
+	return map[string]any{
+		"tag": "div",
+		"text": map[string]any{
+			"tag": "plain_text", "content": richStepRowContent(step),
+			"text_size": "notation", "text_color": "grey",
+		},
+		"icon": map[string]any{"tag": "standard_icon", "token": reasoningToolIcon},
 	}
-	if step.Kind == core.ToolStepKindThinking {
-		text["text_color"] = "grey"
-		elem["icon"] = map[string]any{"tag": "standard_icon", "token": reasoningToolIcon}
-		return elem
-	}
-	elem["icon"] = map[string]any{"tag": "standard_icon", "token": buildToolDisplay(step.Name, step.Summary).IconToken}
-	return elem
 }
 
 func richPlaceholderElement(text string) map[string]any {
