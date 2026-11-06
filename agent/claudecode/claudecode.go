@@ -1092,8 +1092,12 @@ func claudeConfigHomeDir() string {
 // configHomeFromEnv resolves the Claude Code config home from KEY=VALUE env
 // entries, honoring CLAUDE_CONFIG_DIR so that agents configured with a
 // per-project config home ([projects.agent.options.env]) resolve session
-// directories under their own projects tree instead of ~/.claude. Falls back
-// to ~/.claude when the variable is absent or empty.
+// directories under their own projects tree instead of ~/.claude. When the
+// entries do not set it, it falls back to the process environment, which the
+// Claude Code child inherits, and only then to ~/.claude. Without that step a
+// CLAUDE_CONFIG_DIR exported by systemd, docker or the shell made Claude Code
+// write sessions under that directory while /list and /history read ~/.claude
+// and reported no sessions.
 func configHomeFromEnv(envEntries []string) string {
 	for _, kv := range envEntries {
 		if v, ok := strings.CutPrefix(kv, "CLAUDE_CONFIG_DIR="); ok {
@@ -1102,11 +1106,7 @@ func configHomeFromEnv(envEntries []string) string {
 			}
 		}
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".claude")
+	return claudeConfigHomeDir()
 }
 
 // configHome returns this agent's Claude Code config home, preferring
