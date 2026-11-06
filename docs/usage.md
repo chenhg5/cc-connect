@@ -71,6 +71,40 @@ The next normal message after a long idle period starts in a fresh session autom
 
 To restore the previous behavior of always continuing, set `reset_on_idle_mins = 0`.
 
+### Default steering while busy
+
+Set `busy_message_mode = "steer"` at the project level to send ordinary text, files, and images as supplements to the same running task, without `/ps`. File-only and image-only messages are supported. Omitting it, or setting `"queue"`, keeps the default queue behavior. Values are case-insensitive and surrounding whitespace is ignored.
+
+```toml
+[[projects]]
+name = "my-pi-project"
+busy_message_mode = "steer"
+
+[projects.agent]
+type = "pi"
+
+[projects.agent.options]
+work_dir = "/path/to/project"
+rpc = true
+
+[[projects.platforms]]
+type = "telegram"
+
+[projects.platforms.options]
+token = "your-telegram-bot-token"
+```
+
+Automatic steering requires Pi RPC and Pi 0.99.0 or a newer stable release. `rpc = true` always uses the settled-turn lifecycle and correlated prompt acknowledgments; no additional completion option is needed. Other agents without the native capability and Pi JSON mode safely use the ordinary queue. Voice and location messages retain their existing behavior. Explicit `/ps` and `/btw` retain their existing command semantics, including rejection when idle; this setting changes ordinary message handling.
+
+Inputs arriving while the session starts, or while a previous supplement awaits acknowledgment, wait in receive order and automatically steer once ready. Files and images do not create a permanent next-turn queue barrier. Images use Pi's native image input; other files are saved and passed as readable file references. Files are not inlined into the prompt, and later uploads do not overwrite earlier files. The waiting receipt means the input is buffered; only a subsequent acknowledgment confirms that Pi accepted it. Acceptance does not mean the model has already consumed it.
+
+Steering joins the same task at Pi's next supported processing boundary; it does not start a parallel agent. If the task has actually ended, the input legitimately continues as a new turn in the same session. A definitely unaccepted supplement falls back to the ordinary queue; ambiguous delivery is never replayed automatically.
+
+This is useful when a platform, such as private WeCom 3.x, delivers files and accompanying text as separate callbacks. The bridge processes callback arrival order; it does not group callbacks into a batch, wait for all attachments, or reconstruct the user's original sending order.
+Modern feedback distinguishes Pi accepting the request from completing the task, and reports explicit rejection. An ACK timeout or transport disconnection leaves acceptance uncertain: the bridge reports it as unconfirmed and does not automatically replay the message. The existing task may finish, but further normal input requires `/stop` or a new session first. Pending queued messages receive an explicit unable-to-deliver notification; retry them after resetting the session.
+
+RPC startup checks the configured executable with a bounded `--version` probe and reports upgrade guidance before starting an unsupported peer. There is no fallback to `agent_end`. An ordinary prompt can perform compaction before acknowledging input, so it waits for ACK, session cancellation, or process exit without a separate fixed ACK deadline. Automatic busy steering retains its bounded acknowledgment wait and uncertain-delivery protection. Subprocess fixtures do not validate real provider or private messaging deployments. Reloading applies `busy_message_mode`; changes to agent options require restarting cc-connect so Pi sessions use the new settings.
+
 ### Model switch preserves history
 
 `/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.

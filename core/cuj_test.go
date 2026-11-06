@@ -2830,3 +2830,38 @@ type reasoningJourneyPlatform struct {
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
 }
+
+func TestCUJ_A25_BusySteerRejectedImageFallsBackOnce(t *testing.T) {
+	env := newBusySteerCUJEnv(t, "")
+	env.send("original task")
+	env.input("original task")
+	env.awaitSteerReady()
+	images := []ImageAttachment{{FileName: "unknown.png", Data: []byte("image")}}
+	files := []FileAttachment{{FileName: "notes.txt", Data: []byte("notes")}}
+	env.sendMedia("keep this explanation", images, files, nil)
+	assertBusySteerCUJMedia(t, env.steer("keep this explanation"), images, files)
+	env.s.ackErr <- &SteerNotAcceptedError{Err: fmt.Errorf("invalid image metadata")}
+	env.visible(env.e.i18n.T(MsgSteerFallbackQueue))
+	env.assertNoOrdinaryInput()
+	env.finish("original task answer")
+	assertBusySteerCUJMedia(t, env.input("keep this explanation"), images, files)
+	env.finish("explanation answer")
+	env.wait("queued explanation completed", func() bool {
+		return !env.e.sessions.GetOrCreateActive("test:steer-user").Busy()
+	})
+	env.send("next task")
+	env.input("next task")
+	env.finish("next task answer")
+	env.wait("next task completed", func() bool {
+		return !env.e.sessions.GetOrCreateActive("test:steer-user").Busy()
+	})
+	env.send("/history")
+	env.visible("📜 History")
+	for _, reply := range env.p.getSent() {
+		if strings.Contains(reply, "📜 History") && strings.Count(reply, "keep this explanation") != 1 {
+			t.Fatalf("queued explanation must appear once in history: %s", reply)
+		}
+	}
+	env.assertNoOrdinaryInput()
+	env.assertNoNativeSteer()
+}

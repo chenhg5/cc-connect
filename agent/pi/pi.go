@@ -195,6 +195,16 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	return newPiSession(ctx, cmd, extraArgs, workDir, model, mode, thinking, rpc, sessionID, extraEnv)
 }
 
+// CompressCommand opts RPC sessions into Pi's native compaction operation.
+func (a *Agent) CompressCommand() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.rpc {
+		return "/compact"
+	}
+	return ""
+}
+
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
 	sessDir := piSessionDir(a.workDir)
 	if sessDir == "" {
