@@ -21,12 +21,25 @@ type SpeechToText interface {
 	Transcribe(ctx context.Context, audio []byte, format string, lang string) (string, error)
 }
 
+// ContextualSpeechToText is implemented by providers that can use background
+// text (a vocabulary list, the recent conversation) to recognize names and
+// terms more accurately.
+type ContextualSpeechToText interface {
+	TranscribeWithContext(ctx context.Context, audio []byte, format, lang, hint string) (string, error)
+}
+
 // SpeechConfig holds STT configuration for the engine.
 type SpeechCfg struct {
 	Enabled  bool
 	Provider string
 	Language string
 	STT      SpeechToText
+	// Context is fixed background text for recognition, e.g. names and
+	// jargon the user often says. Used by ContextualSpeechToText providers.
+	Context string
+	// ContextHistory is how many recent messages of the session are sent
+	// along as background text. 0 sends none.
+	ContextHistory int
 }
 
 // OpenAIWhisper implements SpeechToText using the OpenAI-compatible Whisper API.
@@ -135,24 +148,37 @@ func NewQwenASR(apiKey, baseURL, model string) *QwenASR {
 }
 
 func (q *QwenASR) Transcribe(ctx context.Context, audio []byte, format string, lang string) (string, error) {
+	return q.TranscribeWithContext(ctx, audio, format, lang, "")
+}
+
+// TranscribeWithContext sends hint as a system message, which Qwen ASR uses
+// as background text to bias recognition toward the names and terms in it.
+func (q *QwenASR) TranscribeWithContext(ctx context.Context, audio []byte, format, lang, hint string) (string, error) {
 	b64 := base64.StdEncoding.EncodeToString(audio)
 	dataURI := fmt.Sprintf("data:%s;base64,%s", formatToAudioMIME(format), b64)
 
-	reqBody := map[string]any{
-		"model": q.Model,
-		"messages": []map[string]any{
+	var messages []map[string]any
+	if hint != "" {
+		messages = append(messages, map[string]any{
+			"role":    "system",
+			"content": []map[string]any{{"type": "text", "text": hint}},
+		})
+	}
+	messages = append(messages, map[string]any{
+		"role": "user",
+		"content": []map[string]any{
 			{
-				"role": "user",
-				"content": []map[string]any{
-					{
-						"type": "input_audio",
-						"input_audio": map[string]any{
-							"data": dataURI,
-						},
-					},
+				"type": "input_audio",
+				"input_audio": map[string]any{
+					"data": dataURI,
 				},
 			},
 		},
+	})
+
+	reqBody := map[string]any{
+		"model":    q.Model,
+		"messages": messages,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -514,7 +540,9 @@ func formatToAudioMIME(format string) string {
 
 // TranscribeAudio is a convenience function used by the Engine.
 // It handles format conversion (if needed) and calls the STT provider.
-func TranscribeAudio(ctx context.Context, stt SpeechToText, audio *AudioAttachment, lang string) (string, error) {
+// hint is background text for providers that implement
+// ContextualSpeechToText; other providers ignore it.
+func TranscribeAudio(ctx context.Context, stt SpeechToText, audio *AudioAttachment, lang, hint string) (string, error) {
 	data := audio.Data
 	format := strings.ToLower(audio.Format)
 
@@ -528,6 +556,9 @@ func TranscribeAudio(ctx context.Context, stt SpeechToText, audio *AudioAttachme
 		format = "mp3"
 	}
 
-	slog.Debug("speech: transcribing", "format", format, "size", len(data))
+	slog.Debug("speech: transcribing", "format", format, "size", len(data), "hint_len", len(hint))
+	if c, ok := stt.(ContextualSpeechToText); ok && hint != "" {
+		return c.TranscribeWithContext(ctx, data, format, lang, hint)
+	}
 	return stt.Transcribe(ctx, data, format, lang)
 }
