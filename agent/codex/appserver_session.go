@@ -241,12 +241,19 @@ func newAppServerSession(ctx context.Context, cliBin string, cliExtraArgs []stri
 	return s, nil
 }
 
-// appServerListenURL returns the --listen value for the spawn. A stdio
-// transport ("stdio" / "stdio://", case-insensitive, matching
-// normalizeAppServerURL's EqualFold handling) must not open a listener:
-// on codex 0.152+ any --listen value switches the app-server to serve the
-// protocol over the listener only, leaving stdio unresponsive and timing
-// out every initialize (see #1781).
+// appServerListenURL returns the --listen value for the spawn, or "" when the
+// session must stay on the stdio transport. A stdio transport ("stdio" /
+// "stdio://", case-insensitive, matching normalizeAppServerURL's EqualFold
+// handling) must not open a listener: on codex 0.152+ a listener address
+// (e.g. "ws://127.0.0.1:3845") switches the app-server to serve the protocol
+// over the listener only, leaving stdio unresponsive and timing out every
+// initialize (see #1781).
+//
+// "stdio://" is special because it is not a listener address: the reporter's
+// codex-cli 0.152.0 runs in #1781 showed that "--listen stdio://" still
+// answers on stdio right away, just like passing no --listen at all. The
+// stdio transport therefore needs no --listen, so this helper drops it and
+// only an explicit listener URL is forwarded.
 func appServerListenURL(url string) string {
 	listenURL := strings.TrimSpace(url)
 	if strings.EqualFold(listenURL, "stdio://") || strings.EqualFold(listenURL, "stdio") {
@@ -258,12 +265,16 @@ func appServerListenURL(url string) string {
 func (s *appServerSession) connect() error {
 	args := []string{"app-server"}
 	// With url "stdio://" the session speaks JSON-RPC over the stdio pipes.
-	// Pass no --listen flag in that case: on codex 0.152+ a --listen value
-	// (including ws://) switches the app-server to serve the protocol over
+	// Pass no --listen flag in that case: on codex 0.152+ a listener address
+	// (e.g. "ws://...") switches the app-server to serve the protocol over
 	// the listener only, leaving stdio unresponsive and causing every
-	// initialize request to time out (see #1781). --listen stdio:// is kept
-	// for explicitness on older codex versions where it is a no-op, but a
-	// bare stdio transport should simply not open a listener.
+	// initialize request to time out (see #1781). "--listen stdio://" is not
+	// a listener address and still answers on stdio, so it is not the hazard
+	// -- but the stdio transport passes no --listen at all:
+	// appServerListenURL returns "" for stdio, and --listen is appended only
+	// for a non-empty listener URL. (The v1.5.1-beta.3 release appended
+	// --listen unconditionally, which is how the #1781 workaround of setting
+	// app_server_url to stdio ended up spawning --listen stdio://.)
 	if listenURL := appServerListenURL(s.url); listenURL != "" {
 		args = append(args, "--listen", listenURL)
 	}
