@@ -661,3 +661,84 @@ func TestMarkdownToSimpleHTML_ManyInlineCodePlaceholders(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkdownToSimpleHTML_StripANSI(t *testing.T) {
+	in := "\x1b[1m⚡ dscan\x1b[0m \x1b[38;2;56;189;248m.../debian/parch-man\x1b[0m │ 16 th"
+	out := MarkdownToSimpleHTML(in)
+	if strings.Contains(out, "\x1b") || strings.Contains(out, "[1m") {
+		t.Fatalf("output leaked ANSI escapes: %q", out)
+	}
+	if !strings.Contains(out, "⚡ dscan .../debian/parch-man │ 16 th") {
+		t.Fatalf("unexpected content after ANSI strip: %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_Spoiler(t *testing.T) {
+	in := "The secret code is ||supersecret123||."
+	out := MarkdownToSimpleHTML(in)
+	want := "The secret code is <tg-spoiler>supersecret123</tg-spoiler>."
+	if out != want {
+		t.Fatalf("expected %q, got %q", want, out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_ExpandableCallout(t *testing.T) {
+	in := "> [!collapse] Command Output\n> line 1\n> line 2"
+	out := MarkdownToSimpleHTML(in)
+	if !strings.Contains(out, "<blockquote expandable>") {
+		t.Fatalf("expected expandable blockquote, got %q", out)
+	}
+	if !strings.Contains(out, "<b>Command Output</b>") {
+		t.Fatalf("expected callout title, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_ExpandableQuoteDoubleStar(t *testing.T) {
+	in := "**> line 1\n**> line 2"
+	out := MarkdownToSimpleHTML(in)
+	if !strings.Contains(out, "<blockquote expandable>") {
+		t.Fatalf("expected expandable blockquote for **>, got %q", out)
+	}
+	if !strings.Contains(out, "line 1\nline 2") {
+		t.Fatalf("expected lines joined, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_ExistingTelegramTagsPreserved(t *testing.T) {
+	in := "Check <code>git status</code> & <b>result</b> <tg-spoiler>secret</tg-spoiler> with x < y"
+	out := MarkdownToSimpleHTML(in)
+	if !strings.Contains(out, "<code>git status</code>") {
+		t.Fatalf("expected preserved code tag, got %q", out)
+	}
+	if !strings.Contains(out, "<b>result</b>") {
+		t.Fatalf("expected preserved bold tag, got %q", out)
+	}
+	if !strings.Contains(out, "<tg-spoiler>secret</tg-spoiler>") {
+		t.Fatalf("expected preserved spoiler tag, got %q", out)
+	}
+	if !strings.Contains(out, "x &lt; y") {
+		t.Fatalf("expected escaped < in normal text, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_TableWithoutBoundaryPipes(t *testing.T) {
+	in := "Name | Age | Role\n---|---|---\nAlice | 30 | Admin\nBob | 25 | Member"
+	out := MarkdownToSimpleHTML(in)
+	if !strings.Contains(out, "<pre>") || !strings.Contains(out, "</pre>") {
+		t.Fatalf("expected <pre> table wrapping, got %q", out)
+	}
+	if !strings.Contains(out, "Name") || !strings.Contains(out, "Alice") {
+		t.Fatalf("expected table cells, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_TableColonAlignment(t *testing.T) {
+	in := "Directory | Size | Usage\n:--- | :--- | :---\n~/.local/bin | 1.49 GiB | Binaries\n~/.bun | 1010 MiB | Packages"
+	out := MarkdownToSimpleHTML(in)
+	if !strings.Contains(out, "<pre>") || !strings.Contains(out, "</pre>") {
+		t.Fatalf("expected <pre> table wrapping, got %q", out)
+	}
+	if !strings.Contains(out, "Directory") || !strings.Contains(out, "Binaries") {
+		t.Fatalf("expected table cells, got %q", out)
+	}
+}
