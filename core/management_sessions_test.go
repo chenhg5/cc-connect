@@ -214,17 +214,32 @@ func TestManagementLiveStatus_WorkspaceAwareKey(t *testing.T) {
 	}
 	// Workspace session is live only via its prefixed key; the old bare-key
 	// lookup reported live:false.
-	if live, _ := managementLiveStatus("telegram:2:2", "/ws/a", activeKeys); !live {
+	if live, _ := managementLiveStatus("telegram:2:2", "/ws/a", "ab12cd34", activeKeys); !live {
 		t.Fatal("workspace session should be live via prefixed key")
 	}
-	if live, _ := managementLiveStatus("telegram:2:2", "", activeKeys); !live {
+	if live, _ := managementLiveStatus("telegram:2:2", "", "ab12cd34", activeKeys); !live {
 		t.Fatal("suffix scan should recover live state for cold entries")
 	}
-	if live, _ := managementLiveStatus("telegram:9:9", "/ws/a", activeKeys); live {
+	if live, _ := managementLiveStatus("telegram:9:9", "/ws/a", "ab12cd34", activeKeys); live {
 		t.Fatal("unknown session must not be live")
 	}
-	if live, _ := managementLiveStatus("telegram:1:1", "", activeKeys); !live {
+	if live, _ := managementLiveStatus("telegram:1:1", "", "ab12cd34", activeKeys); !live {
 		t.Fatal("bare session should be live via bare key")
+	}
+}
+
+func TestManagementLiveStatus_BaseDoesNotMatchWorkspaceSuffix(t *testing.T) {
+	// A base session whose key is a suffix of a workspace live key must not
+	// report live:true — the suffix scan is only for workspace sessions.
+	activeKeys := map[string]string{
+		"/ws/a:telegram:1:1": "telegram",
+	}
+	if live, _ := managementLiveStatus("telegram:1:1", "", "", activeKeys); live {
+		t.Fatal("base session must not match workspace-prefixed live keys")
+	}
+	// The same key as a workspace session (qualifier != "") may use the scan.
+	if live, _ := managementLiveStatus("telegram:1:1", "", "ab12cd34", activeKeys); !live {
+		t.Fatal("workspace session should match suffix scan for cold entries")
 	}
 }
 
@@ -362,4 +377,158 @@ func TestManagementSessions_EmptyListReturnsEmptyArray(t *testing.T) {
 		e.workspacePool = newWorkspacePool(0)
 		assertEmptySessionsJSON(t, ts.URL+"/api/v1/projects/test-project/sessions", "tok")
 	})
+}
+
+func TestManagementSessions_HTTPListsWorkspaceSessions(t *testing.T) {
+	_, ts, e := testManagementServer(t, "tok")
+	dir := t.TempDir()
+	// Base manager with a real store path so the cold scan has a directory.
+	base := NewSessionManager(filepath.Join(dir, "test-project.json"))
+	base.GetOrCreateActive("telegram:1:1")
+	e.sessions = base
+	e.multiWorkspace = true
+	e.workspacePool = newWorkspacePool(0)
+
+	// Live workspace session.
+	liveWS := NewSessionManager(filepath.Join(dir, "test-project_ws_ab12cd34.json"))
+	liveWS.SetWorkspace("/ws/live")
+	liveWS.GetOrCreateActive("telegram:2:2")
+	liveWS.Save()
+	e.workspacePool.GetOrCreate("/ws/live").sessions = liveWS
+
+	// Cold persisted workspace session (pool empty for this workspace).
+	coldWS := NewSessionManager(filepath.Join(dir, "test-project_ws_ef56ab78.json"))
+	coldWS.SetWorkspace("/ws/cold")
+	coldWS.GetOrCreateActive("telegram:3:3")
+	coldWS.Save()
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/projects/test-project/sessions", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET sessions: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(resp.Body)
+	var decoded struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Sessions []map[string]any `json:"sessions"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, raw)
+	}
+	if len(decoded.Data.Sessions) != 3 {
+		t.Fatalf("sessions = %d, want 3 (base+live+cold) body=%s", len(decoded.Data.Sessions), raw)
+	}
+	// Every entry must have a distinct id; workspace entries qualified with ::.
+	seen := map[string]bool{}
+	workspaceCount := 0
+	for _, s := range decoded.Data.Sessions {
+		id, _ := s["id"].(string)
+		if seen[id] {
+			t.Fatalf("duplicate id %q", id)
+		}
+		seen[id] = true
+		if ws, ok := s["workspace"].(string); ok && ws != "" {
+			workspaceCount++
+			if !strings.Contains(id, managementSessionWorkspaceSep) {
+				t.Fatalf("workspace entry %q missing qualifier", id)
+			}
+		}
+	}
+	if workspaceCount != 2 {
+		t.Fatalf("workspace entries = %d, want 2 (live+cold) body=%s", workspaceCount, raw)
+	}
+	// Detail of a qualified cold id must resolve and report the same workspace.
+	var coldID string
+	for _, s := range decoded.Data.Sessions {
+		id, _ := s["id"].(string)
+		ws, _ := s["workspace"].(string)
+		if ws == "/ws/cold" {
+			coldID = id
+		}
+	}
+	if coldID == "" {
+		t.Fatalf("cold workspace entry missing body=%s", raw)
+	}
+	detailReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/projects/test-project/sessions/"+coldID, nil)
+	detailReq.Header.Set("Authorization", "Bearer tok")
+	dresp, err := http.DefaultClient.Do(detailReq)
+	if err != nil {
+		t.Fatalf("GET detail: %v", err)
+	}
+	defer func() { _ = dresp.Body.Close() }()
+	draw, _ := io.ReadAll(dresp.Body)
+	var ddecoded struct {
+		OK   bool             `json:"ok"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(draw, &ddecoded); err != nil {
+		t.Fatalf("unmarshal detail: %v body=%s", err, draw)
+	}
+	if ddecoded.Data["workspace"] != "/ws/cold" {
+		t.Fatalf("detail workspace = %v, want /ws/cold body=%s", ddecoded.Data["workspace"], draw)
+	}
+}
+
+func TestManagementColdCache_InvalidatedOnDelete(t *testing.T) {
+	dir := t.TempDir()
+	base := NewSessionManager(filepath.Join(dir, "proj.json"))
+	e := &Engine{sessions: base, multiWorkspace: true, name: "proj"}
+	wsPath := filepath.Join(dir, "proj_ws_ab12cd34.json")
+	ws := NewSessionManager(wsPath)
+	ws.SetWorkspace("/ws/a")
+	ws.GetOrCreateActive("telegram:2:2")
+	ws.Save()
+
+	if got := e.managementSessionCount(); got != 1 {
+		t.Fatalf("count = %d, want 1", got)
+	}
+	// Second call hits the TTL cache — same result without re-scanning.
+	if got := e.managementSessionCount(); got != 1 {
+		t.Fatalf("cached count = %d, want 1", got)
+	}
+	// Resolve and delete via the management helper (persists to disk), then
+	// invalidate like the HTTP handler does.
+	ms, ok := e.findManagementSession("ab12cd34" + managementSessionWorkspaceSep + "s1")
+	if !ok {
+		t.Fatal("qualified id not resolved")
+	}
+	if !ms.manager.DeleteByID(ms.session.ID) {
+		t.Fatal("delete failed")
+	}
+	e.invalidateManagementColdCache()
+	if got := e.managementSessionCount(); got != 0 {
+		t.Fatalf("count after delete = %d, want 0", got)
+	}
+}
+
+func TestManagementColdScan_EscapesProjectName(t *testing.T) {
+	dir := t.TempDir()
+	base := NewSessionManager(filepath.Join(dir, "base.json"))
+	// Project name with glob metacharacters must not break the scan or panic.
+	e := &Engine{sessions: base, multiWorkspace: true, name: "proj[with]*?"}
+	e.workspacePool = newWorkspacePool(0)
+	if got := e.managementSessionCount(); got != 0 {
+		t.Fatalf("count = %d, want 0 for meta-char project", got)
+	}
+	if managers := e.managementSessionManagers(); len(managers) != 1 {
+		t.Fatalf("managers = %d, want 1 (base only)", len(managers))
+	}
+}
+
+func TestSessionManager_WorkspacePersists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "proj_ws_ab12cd34.json")
+	sm := NewSessionManager(path)
+	sm.SetWorkspace("/ws/a")
+	sm.GetOrCreateActive("telegram:1:1")
+	sm.Save()
+	// Reload cold: workspace must survive the round trip.
+	reloaded := NewSessionManager(path)
+	if got := reloaded.Workspace(); got != "/ws/a" {
+		t.Fatalf("workspace = %q, want /ws/a", got)
+	}
 }

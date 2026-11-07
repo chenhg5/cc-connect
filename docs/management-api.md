@@ -447,6 +447,17 @@ Updates project settings. Only provided fields are updated.
 
 Sessions are conversation contexts within a project. A session is identified by a `session_key` (format: `platform:chatId:userId`) and optionally by an internal `id` for named sessions (e.g. `/new work` creates a named session).
 
+In multi-workspace mode each workspace owns its own session manager, so
+internal ids (`s1`, `s2`, …) collide across workspaces. The management API
+qualifies them as `<8hex>::<id>` where `<8hex>` is the opaque workspace
+qualifier derived from the workspace session store file
+(`<project>_ws_<8hex>.json`). Example: `ab12cd34::s1`. Qualified ids are
+URL-safe (never contain `/`); always `encodeURIComponent` the id when placing
+it in the URL path. A qualified id resolves only against its owning workspace:
+an unknown qualifier or an unknown id returns `404` and never falls back to a
+bare-id lookup (which would leak another workspace's history). A bare id
+resolves only against the base (non-workspace) manager.
+
 #### GET /api/v1/projects/{name}/sessions
 
 Lists sessions for a project with summary info including the last message preview.
@@ -475,7 +486,8 @@ Lists sessions for a project with summary info including the last message previe
           "timestamp": "2026-03-10T10:30:00Z"
         },
         "user_name": "Alice",
-        "chat_name": "dev-channel"
+        "chat_name": "dev-channel",
+        "workspace": "/srv/workspaces/shop"
       }
     ],
     "active_keys": {
@@ -485,8 +497,12 @@ Lists sessions for a project with summary info including the last message previe
 }
 ```
 
+An empty project returns `"sessions":[]`, never `"sessions":null`.
+
 | Field          | Type    | Description                                                       |
 |----------------|---------|-------------------------------------------------------------------|
+| `id`           | string  | Session id; `<8hex>::<id>` in multi-workspace mode, bare id for base sessions |
+| `workspace`    | string  | Owning workspace path when known (live managers and persisted stores written after v1.5.2); omitted otherwise |
 | `active`       | boolean | Whether this is the selected session for its user key             |
 | `live`         | boolean | Whether there is a running agent process for this session         |
 | `last_message` | object  | Preview of the last message (role, content truncated to 200 chars, timestamp). `null` if no history. |
@@ -513,6 +529,7 @@ Creates a new session.
 |--------------|--------|----------|--------------------------------------|
 | `session_key`| string | yes      | Platform routing key (e.g. `telegram:123:456`) |
 | `name`       | string | no       | Human-readable session name           |
+| `workspace`  | string | no       | Workspace path (multi-workspace mode). Disambiguates when the same `session_key` exists in multiple workspaces; otherwise the current binding / live-state fallback decides. |
 
 **Response:**
 
@@ -527,6 +544,9 @@ Creates a new session.
   }
 }
 ```
+
+In multi-workspace mode `id` is the qualified `<8hex>::<id>` and `workspace`
+is included when the owning workspace is known.
 
 ---
 
@@ -582,7 +602,13 @@ Returns session detail including message history.
 
 | Field   | Type    | Description                                                   |
 |---------|---------|---------------------------------------------------------------|
+| `id`    | string  | Session id; `<8hex>::<id>` in multi-workspace mode            |
+| `workspace` | string | Owning workspace path when known                          |
 | `live`  | boolean | Whether the session has an active agent process (can receive messages via `/send`) |
+
+`{id}` must be the qualified id for workspace sessions
+(`encodeURIComponent("<8hex>::<id>")`). Unknown qualifiers return `404`.
+Bare workspace ids do not resolve in multi-workspace mode.
 
 ---
 

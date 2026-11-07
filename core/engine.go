@@ -460,6 +460,16 @@ type Engine struct {
 	sendWorkDirMu                sync.RWMutex
 	sendWorkDirs                 map[string]string // sessionKey → work_dir assigned by send --cwd
 
+	// Management-API cold-store cache (multi-workspace mode).
+	// managementSessionManagers globs and parses every persisted workspace
+	// store; without a cache every GET /api/v1/projects refresh pays that
+	// disk I/O once per project while holding the management server lock.
+	// The cache holds the disk-only entries for a short TTL; live managers
+	// are always fresh and mutations invalidate the cache explicitly.
+	mgmtColdMu       sync.Mutex
+	mgmtColdExpires  time.Time
+	mgmtColdManagers []managementSessionManager
+
 	// Terminal observation (--observe)
 	observeEnabled    bool
 	observeProjectDir string // ~/.claude/projects/{projectKey}
@@ -3906,6 +3916,9 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	defer ws.mu.Unlock()
 
 	if ws.agent != nil {
+		if ws.sessions != nil && ws.sessions.Workspace() == "" {
+			ws.sessions.SetWorkspace(workspace)
+		}
 		return ws.agent, ws.sessions, nil
 	}
 
@@ -3982,6 +3995,9 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
 		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
 	sessions := NewSessionManager(sessionFile)
+	if sessions.Workspace() == "" {
+		sessions.SetWorkspace(workspace)
+	}
 
 	ws.agent = agent
 	ws.sessions = sessions

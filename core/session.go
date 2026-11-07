@@ -315,6 +315,7 @@ type sessionSnapshot struct {
 	PastIDTracking bool                 `json:"past_id_tracking,omitempty"` // true once PastAgentSessionIDs is supported
 	LegacyData     bool                 `json:"legacy_data,omitempty"`      // true while pre-fix sessions exist
 	Version        int                  `json:"version,omitempty"`          // schema version for migration detection
+	Workspace      string               `json:"workspace,omitempty"`        // owning workspace path for per-workspace stores
 }
 
 // SessionManager supports multiple named sessions per user with active-session tracking.
@@ -328,6 +329,11 @@ type SessionManager struct {
 	userMeta      map[string]*UserMeta // sessionKey → display info
 	counter       int64
 	storePath     string // empty = no persistence
+
+	// workspacePath is the owning workspace for per-workspace stores.
+	// It is persisted in the snapshot so cold (post-restart) management-API
+	// readers can still report the workspace field without a live manager.
+	workspacePath string
 
 	// legacyData is true when sessions were loaded from a snapshot that
 	// predates PastAgentSessionIDs tracking. In this state, many sessions
@@ -354,6 +360,22 @@ func NewSessionManager(storePath string) *SessionManager {
 // StorePath returns the file path used for session persistence.
 func (sm *SessionManager) StorePath() string {
 	return sm.storePath
+}
+
+// Workspace returns the owning workspace path for per-workspace stores ("" if none).
+func (sm *SessionManager) Workspace() string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.workspacePath
+}
+
+// SetWorkspace records the owning workspace path. It does not save
+// immediately — the next session mutation persists it via saveLocked — so
+// creating an empty workspace manager does not leave empty store files behind.
+func (sm *SessionManager) SetWorkspace(workspace string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.workspacePath = workspace
 }
 
 func (sm *SessionManager) nextID() string {
@@ -722,6 +744,7 @@ func (sm *SessionManager) saveLocked() {
 		PastIDTracking: true,
 		LegacyData:     sm.legacyData,
 		Version:        snapshotVersion,
+		Workspace:      sm.workspacePath,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -756,6 +779,7 @@ func (sm *SessionManager) load() {
 	sm.sessionNames = snap.SessionNames
 	sm.userMeta = snap.UserMeta
 	sm.counter = snap.Counter
+	sm.workspacePath = snap.Workspace
 	if snap.Version >= snapshotVersion {
 		sm.legacyData = snap.LegacyData
 	} else {

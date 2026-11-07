@@ -20,6 +20,7 @@ export interface Session {
   last_message: LastMessage | null;
   user_name?: string;
   chat_name?: string;
+  workspace?: string;
 }
 
 export interface SessionDetail extends Session {
@@ -30,11 +31,11 @@ export interface SessionDetail extends Session {
 export const listSessions = (project: string) =>
   api.get<{ sessions: Session[]; active_keys: Record<string, string> }>(`/projects/${project}/sessions`);
 export const getSession = (project: string, id: string, historyLimit?: number) =>
-  api.get<SessionDetail>(`/projects/${project}/sessions/${encodeURIComponent(id)}`, historyLimit ? { history_limit: String(historyLimit) } : undefined);
-export const createSession = (project: string, body: { session_key: string; name?: string }) =>
-  api.post(`/projects/${project}/sessions`, body);
-export const deleteSession = (project: string, id: string) => api.delete(`/projects/${project}/sessions/${encodeURIComponent(id)}`);
+  api.get<SessionDetail>(`/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}`, historyLimit ? { history_limit: String(historyLimit) } : undefined);
+export const createSession = (project: string, body: { session_key: string; name?: string; workspace?: string }) =>
+  api.post(`/projects/${encodeURIComponent(project)}/sessions`, body);
+export const deleteSession = (project: string, id: string) => api.delete(`/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}`);
 export const switchSession = (project: string, body: { session_key: string; session_id: string }) =>
-  api.post(`/projects/${project}/sessions/switch`, body);
+  api.post(`/projects/${encodeURIComponent(project)}/sessions/switch`, body);
 export const sendMessage = (project: string, body: { session_key: string; message: string }) =>
   api.post(`/projects/${project}/send`, body);

@@ -561,11 +561,24 @@ func (m *ManagementServer) handleProjects(w http.ResponseWriter, r *http.Request
 		mgmtError(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
+	// Snapshot engine pointers under the read lock, then release it before
+	// counting sessions: managementSessionCount performs disk I/O for
+	// persisted workspace stores and must not block management writers.
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	projects := make([]map[string]any, 0, len(m.engines))
+	type projEntry struct {
+		name string
+		e    *Engine
+	}
+	entries := make([]projEntry, 0, len(m.engines))
 	for name, e := range m.engines {
+		entries = append(entries, projEntry{name: name, e: e})
+	}
+	hb := m.heartbeatScheduler
+	m.mu.RUnlock()
+
+	projects := make([]map[string]any, 0, len(entries))
+	for _, ent := range entries {
+		e := ent.e
 		platNames := make([]string, len(e.platforms))
 		for i, p := range e.platforms {
 			platNames[i] = p.Name()
@@ -574,14 +587,14 @@ func (m *ManagementServer) handleProjects(w http.ResponseWriter, r *http.Request
 		sessCount := e.managementSessionCount()
 
 		hbEnabled := false
-		if m.heartbeatScheduler != nil {
-			if st := m.heartbeatScheduler.Status(name); st != nil {
+		if hb != nil {
+			if st := hb.Status(ent.name); st != nil {
 				hbEnabled = st.Enabled
 			}
 		}
 
 		projects = append(projects, map[string]any{
-			"name":              name,
+			"name":              ent.name,
 			"agent_type":        e.agent.Name(),
 			"platforms":         platNames,
 			"sessions_count":    sessCount,
@@ -1005,7 +1018,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 				}
 
 				sessionKey := idToKey[s.ID]
-				live, livePlatform := managementLiveStatus(sessionKey, mm.workspace, activeKeys)
+				live, livePlatform := managementLiveStatus(sessionKey, mm.workspace, mm.qualifier, activeKeys)
 				info["live"] = live
 				if livePlatform != "" {
 					info["platform"] = livePlatform
@@ -1034,6 +1047,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 		var body struct {
 			SessionKey string `json:"session_key"`
 			Name       string `json:"name"`
+			Workspace  string `json:"workspace,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			mgmtError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -1046,17 +1060,54 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 
 		// Resolve the workspace manager for this session key so the new session
 		// lands where the agent will actually look (multi-workspace mode).
-		_, sessions := e.sessionContextForKey(body.SessionKey)
+		// An explicit workspace disambiguates when the same chat key exists in
+		// multiple workspaces — otherwise sessionContextForKey picks the
+		// current binding (or the live-state fallback, which is ambiguous when
+		// the same sessionKey is live under two prefixes).
+		var sessions *SessionManager
+		var resolvedWorkspace string
+		if body.Workspace != "" && e.multiWorkspace {
+			wsNorm := normalizeWorkspacePath(body.Workspace)
+			if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(wsNorm); err == nil {
+				_ = wsAgent
+				sessions = wsSessions
+				resolvedWorkspace = wsNorm
+			} else {
+				mgmtError(w, http.StatusBadRequest, "invalid workspace: "+err.Error())
+				return
+			}
+		} else {
+			_, sessions = e.sessionContextForKey(body.SessionKey)
+			// Best-effort workspace for the response: find the owning manager.
+			for _, mm := range e.managementSessionManagers() {
+				if mm.manager == sessions {
+					resolvedWorkspace = mm.workspace
+					break
+				}
+			}
+		}
 		s := sessions.GetOrCreateActive(body.SessionKey)
 		if body.Name != "" {
 			s.SetName(body.Name)
 		}
 		sessions.Save()
+		e.invalidateManagementColdCache()
 
-		mgmtJSON(w, http.StatusOK, map[string]any{
+		resp := map[string]any{
 			"session_key": body.SessionKey,
 			"name":        s.GetName(),
-		})
+			"id":          s.ID,
+		}
+		if resolvedWorkspace != "" {
+			resp["workspace"] = resolvedWorkspace
+			for _, mm := range e.managementSessionManagers() {
+				if mm.manager == sessions {
+					resp["id"] = managementSessionID(s, mm.qualifier)
+					break
+				}
+			}
+		}
+		mgmtJSON(w, http.StatusOK, resp)
 
 	default:
 		mgmtError(w, http.StatusMethodNotAllowed, "GET or POST only")
@@ -1102,7 +1153,7 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 			activeSnapshot[key] = pName
 		}
 		e.interactiveMu.Unlock()
-		live, livePlatform := managementLiveStatus(sessionKey, ms.workspace, activeSnapshot)
+		live, livePlatform := managementLiveStatus(sessionKey, ms.workspace, ms.qualifier, activeSnapshot)
 
 		s.mu.Lock()
 		data := map[string]any{
@@ -1136,6 +1187,7 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 
 	case http.MethodDelete:
 		if ms, ok := e.findManagementSession(sessionID); ok && ms.manager.DeleteByID(ms.session.ID) {
+			e.invalidateManagementColdCache()
 			mgmtOK(w, "session deleted")
 		} else {
 			mgmtError(w, http.StatusNotFound, "session not found")
@@ -1173,6 +1225,7 @@ func (m *ManagementServer) handleProjectSessionSwitch(w http.ResponseWriter, r *
 		mgmtError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	e.invalidateManagementColdCache()
 	mgmtJSON(w, http.StatusOK, map[string]any{
 		"message":           "active session switched",
 		"active_session_id": s.ID,

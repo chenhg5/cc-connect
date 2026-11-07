@@ -442,6 +442,13 @@ export default function SessionChat() {
 
   const canSend = bridgeStatus === 'connected';
 
+  const shortID = session?.id?.includes('::') ? (session.id.split('::').pop() || session.id) : (session?.id || id || '');
+  const wsBase = (p?: string) => {
+    if (!p) return '';
+    const parts = p.split(/[\\/]/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : p;
+  };
+
   return (
     <div className="flex flex-col flex-1 min-h-0 animate-fade-in">
       {/* Header */}
@@ -452,12 +459,17 @@ export default function SessionChat() {
           </Link>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{session?.name || id}</h2>
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{session?.name || shortID}</h2>
               <StatusBadge status={bridgeStatus} />
             </div>
             <div className="flex items-center gap-2 mt-0.5">
               <Badge>{project}</Badge>
               {session?.platform && <Badge variant="info">{session.platform}</Badge>}
+              {session?.workspace && (
+                <Badge variant="outline" className="max-w-[220px] truncate">
+                  <span title={session.workspace}>{wsBase(session.workspace)}</span>
+                </Badge>
+              )}
               <span className="text-xs text-gray-500">{session?.session_key}</span>
             </div>
           </div>

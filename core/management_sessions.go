@@ -1,15 +1,18 @@
 package core
 
 import (
+	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // managementSessionManager pairs a SessionManager with the workspace it serves.
 type managementSessionManager struct {
 	manager   *SessionManager
-	workspace string // workspace path when known (live manager), else ""
+	workspace string // workspace path when known (live or persisted with workspace), else ""
 	qualifier string // "" for the base manager; a unique key for workspace managers
 }
 
@@ -36,6 +39,14 @@ type managementSession struct {
 // a qualifier — it contains "/" which breaks URL routing and changes with
 // path normalization.
 const managementSessionWorkspaceSep = "::"
+
+// managementColdCacheTTL bounds how long persisted workspace stores are reused
+// across management-API requests. Without it every list/count/detail call
+// globs the sessions directory and re-parses every workspace store, which is
+// per-project disk I/O on a hot path (the web console refreshes the project
+// list on each load). Live managers are never cached — only the disk-only
+// entries — and mutations via the management API invalidate the cache.
+const managementColdCacheTTL = 5 * time.Second
 
 func managementSessionID(session *Session, qualifier string) string {
 	if qualifier == "" {
@@ -82,6 +93,76 @@ func sortedManagementKeys[V any](m map[string]V) []string {
 	return keys
 }
 
+// invalidateManagementColdCache drops the cached disk-only workspace entries.
+// Call it after any management-API mutation that may change the set of
+// persisted stores (session create, delete, switch).
+func (e *Engine) invalidateManagementColdCache() {
+	e.mgmtColdMu.Lock()
+	defer e.mgmtColdMu.Unlock()
+	e.mgmtColdExpires = time.Time{}
+	e.mgmtColdManagers = nil
+}
+
+// managementColdManagers returns the disk-only workspace entries, reusing a
+// short-TTL cache. The returned entries cover every non-empty persisted
+// workspace store; callers dedupe against the current live managers by store
+// path so a workspace that warmed up after the scan is not double-counted.
+func (e *Engine) managementColdManagers() []managementSessionManager {
+	e.mgmtColdMu.Lock()
+	defer e.mgmtColdMu.Unlock()
+	if time.Now().Before(e.mgmtColdExpires) && e.mgmtColdManagers != nil {
+		return e.mgmtColdManagers
+	}
+	fresh := e.scanManagementColdStores()
+	e.mgmtColdManagers = fresh
+	e.mgmtColdExpires = time.Now().Add(managementColdCacheTTL)
+	return fresh
+}
+
+// scanManagementColdStores lists persisted workspace stores without glob
+// patterns (a project name containing `[`, `*` or `?` would otherwise make
+// filepath.Glob return ErrBadPattern and silently hide every workspace).
+func (e *Engine) scanManagementColdStores() []managementSessionManager {
+	storePath := ""
+	if e.sessions != nil {
+		storePath = e.sessions.StorePath()
+	}
+	dir := filepath.Dir(storePath)
+	if dir == "" || dir == "." {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		slog.Warn("management: list workspace stores failed", "dir", dir, "error", err)
+		return nil
+	}
+	prefix := e.name + "_ws_"
+	var out []managementSessionManager
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		sm := NewSessionManager(path)
+		if len(sm.AllSessions()) == 0 {
+			continue
+		}
+		out = append(out, managementSessionManager{
+			manager:   sm,
+			workspace: sm.Workspace(),
+			qualifier: managementQualifierForStore(path),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].manager.StorePath() < out[j].manager.StorePath()
+	})
+	return out
+}
+
 // managementSessionManagers returns the engine's base session manager plus one
 // entry per workspace manager. It includes both live workspace managers and
 // persisted workspace stores that are not live in this process — the latter
@@ -115,31 +196,15 @@ func (e *Engine) managementSessionManagers() []managementSessionManager {
 		}
 	}
 
-	disk := map[string]managementSessionManager{}
-	if dir := filepath.Dir(e.sessions.StorePath()); dir != "" && dir != "." {
-		if matches, err := filepath.Glob(filepath.Join(dir, e.name+"_ws_*.json")); err == nil {
-			for _, path := range matches {
-				if _, ok := live[path]; ok {
-					continue
-				}
-				sm := NewSessionManager(path)
-				if len(sm.AllSessions()) == 0 {
-					continue
-				}
-				disk[path] = managementSessionManager{
-					manager:   sm,
-					qualifier: managementQualifierForStore(path),
-				}
-			}
-		}
-	}
-
 	managers := []managementSessionManager{base}
 	for _, key := range sortedManagementKeys(live) {
 		managers = append(managers, live[key])
 	}
-	for _, key := range sortedManagementKeys(disk) {
-		managers = append(managers, disk[key])
+	for _, d := range e.managementColdManagers() {
+		if _, ok := live[d.manager.StorePath()]; ok {
+			continue
+		}
+		managers = append(managers, d)
 	}
 	return managers
 }
@@ -159,9 +224,15 @@ func (e *Engine) managementSessionCount() int {
 // mode the interactive state key is "<workspace>:<sessionKey>" (see
 // interactiveKeyForSessionKey), so a bare-key lookup alone always reports
 // live:false for workspace sessions. The workspace-aware candidate is checked
-// first, then the bare key, then a suffix scan for cold disk entries whose
-// workspace path is unknown in this process (mirrors workspaceFromLiveState).
-func managementLiveStatus(sessionKey, workspace string, activeKeys map[string]string) (live bool, platform string) {
+// first, then the bare key.
+//
+// The trailing suffix scan exists for cold disk entries whose workspace path
+// is unknown in this process (mirrors workspaceFromLiveState). It runs only
+// for workspace sessions (qualifier != ""): a base session must never match a
+// workspace-prefixed live key that merely ends with the same session key,
+// otherwise a base session would flap to live:true depending on map iteration
+// order.
+func managementLiveStatus(sessionKey, workspace, qualifier string, activeKeys map[string]string) (live bool, platform string) {
 	if sessionKey == "" {
 		return false, ""
 	}
@@ -172,6 +243,9 @@ func managementLiveStatus(sessionKey, workspace string, activeKeys map[string]st
 	}
 	if p, ok := activeKeys[sessionKey]; ok {
 		return true, p
+	}
+	if qualifier == "" {
+		return false, ""
 	}
 	suffix := ":" + sessionKey
 	for k, p := range activeKeys {

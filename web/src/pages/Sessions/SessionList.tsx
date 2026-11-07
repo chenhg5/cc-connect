@@ -23,6 +23,19 @@ function timeAgo(iso: string, t: (k: string) => string): string {
   return `${days}d`;
 }
 
+// Management-API ids are qualified as "<8hex>::<sN>" in multi-workspace mode.
+// The fallback label must show the part after "::", not the qualifier (which
+// is identical for every session in the same workspace).
+function shortSessionID(id: string): string {
+  const part = id.includes('::') ? (id.split('::').pop() || id) : id;
+  return part.slice(0, 8);
+}
+
+function workspaceBase(p: string): string {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : p;
+}
+
 export default function SessionList() {
   const { t } = useTranslation();
   const [allData, setAllData] = useState<{ project: string; sessions: Session[] }[]>([]);
@@ -108,7 +121,7 @@ export default function SessionList() {
                   <div className="flex items-center gap-1.5 min-w-0">
                     <MessageSquare size={14} className={s.live ? 'text-accent shrink-0' : 'text-gray-400 shrink-0'} />
                     <span className="text-sm font-medium text-gray-900 dark:text-white truncate">
-                      {s.name || s.user_name || s.id.slice(0, 8)}
+                      {s.name || s.user_name || shortSessionID(s.id)}
                     </span>
                     {s.live && <Circle size={5} className="fill-emerald-500 text-emerald-500 shrink-0" />}
                   </div>
@@ -137,6 +150,11 @@ export default function SessionList() {
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <Badge>{s._project}</Badge>
                   {s.platform && <Badge variant="info">{s.platform}</Badge>}
+                  {s.workspace && (
+                    <Badge variant="outline" className="max-w-[160px] truncate" >
+                      <span title={s.workspace}>{workspaceBase(s.workspace)}</span>
+                    </Badge>
+                  )}
                   <span className="text-[10px] text-gray-400 ml-auto">{s.history_count} msgs</span>
                 </div>
               </div>
