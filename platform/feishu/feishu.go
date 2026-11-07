@@ -123,6 +123,7 @@ type Platform struct {
 	appSecret                  string
 	progressStyle              string
 	useInteractiveCard         bool
+	enableImageGallery         bool
 	self                       core.Platform
 	reactionEmoji              string
 	ackEmoji                   string
@@ -422,6 +423,14 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
 	}
+	enableImageGallery := false
+	if raw, exists := opts["enable_image_gallery"]; exists {
+		var ok bool
+		enableImageGallery, ok = raw.(bool)
+		if !ok {
+			return nil, fmt.Errorf("%s: enable_image_gallery must be a boolean", name)
+		}
+	}
 
 	imageBatchWindow := defaultImageBatchWindow
 	if raw, ok := opts["image_batch_window_ms"]; ok {
@@ -479,6 +488,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
+		enableImageGallery:         enableImageGallery,
 		reactionEmoji:              reactionEmoji,
 		ackEmoji:                   ackEmoji,
 		doneEmoji:                  doneEmoji,
@@ -4225,9 +4235,17 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 }
 
 func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	return p.replyMessageWithUUID(ctx, rc, msgType, content, "")
+}
+
+func (p *Platform) replyMessageWithUUID(ctx context.Context, rc replyContext, msgType, content, uuid string) error {
+	body := p.buildReplyMessageReqBody(rc, msgType, content)
+	if uuid != "" {
+		body.Uuid = &uuid
+	}
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
-		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
+		Body(body).
 		Build()
 	return p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
@@ -4238,19 +4256,26 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 			if !resp.Success() {
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
+			if uuid != "" && (resp.Data == nil || strings.TrimSpace(stringValue(resp.Data.MessageId)) == "") {
+				return fmt.Errorf("%s: reply confirmation missing message_id", p.tag())
+			}
 			return nil
 		})
 	})
 }
 
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
+	return p.createMessageWithUUID(ctx, chatID, msgType, content, op, "")
+}
+
+func (p *Platform) createMessageWithUUID(ctx context.Context, chatID, msgType, content, op, uuid string) error {
+	body := larkim.NewCreateMessageReqBodyBuilder().ReceiveId(chatID).MsgType(msgType).Content(content)
+	if uuid != "" {
+		body.Uuid(uuid)
+	}
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.ReceiveIdTypeChatId).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
-			MsgType(msgType).
-			Content(content).
-			Build()).
+		Body(body.Build()).
 		Build()
 	return p.withTransientRetry(ctx, op, func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
@@ -4260,6 +4285,9 @@ func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, 
 			}
 			if !resp.Success() {
 				return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
+			}
+			if uuid != "" && (resp.Data == nil || strings.TrimSpace(stringValue(resp.Data.MessageId)) == "") {
+				return fmt.Errorf("%s: %s confirmation missing message_id", p.tag(), op)
 			}
 			return nil
 		})
