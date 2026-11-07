@@ -178,6 +178,10 @@ type Platform struct {
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
 	cardActionMsgIDs map[string]string // sessionKey → messageID
+
+	// askq mints one-time tokens binding ask-question cards to the exact
+	// session they were asked in; see askqRegistry.
+	askq *askqRegistry
 	// activeThreadSessions tracks thread sessionKeys that have already been
 	// accepted by the bot. In group chats with thread_isolation, once a thread
 	// has been engaged (the first @bot message), subsequent attachment-only
@@ -492,6 +496,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		groupChatHistoryShare:      groupChatHistoryShare,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
+		askq:                       newAskqRegistry(),
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
 		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
 		dedup:                      &core.MessageDedup{},
@@ -796,6 +801,11 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		}
 	}
 
+	// askq_text — the ask-question card's form_submit ("submit") button. The
+	// typed text arrives in FormValue["answer"]; identity and one-time token
+	// arrive in the button's callback value. Handled in the askq_text branch
+	// below.
+
 	userID := ""
 	if event.Event.Operator != nil {
 		userID = event.Event.Operator.OpenID
@@ -931,8 +941,93 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	}
 
 	// askq: — AskUserQuestion option selected, forward as user message
-	if strings.HasPrefix(actionVal, "askq:") {
+	// askqAskCardClaim validates the callback's one-time token against the
+	// ask-question card registry. A missing, consumed, expired or superseded
+	// token means an old card (or a replay of a used one) is trying to answer
+	// whatever happens to be pending now — reject it explicitly instead of
+	// dispatching, so a stale card can never answer the wrong question.
+	askqClaimCard := func(notice string) *callback.CardActionTriggerResponse {
+		return &callback.CardActionTriggerResponse{
+			Card: &callback.Card{
+				Type: "raw",
+				Data: simpleCard2("⏳", notice, "grey"),
+			},
+		}
+	}
+
+	if strings.HasPrefix(actionVal, "askq:") || actionVal == "askq_text" {
+		token, _ := event.Event.Action.Value["askq_token"].(string)
+		claim, ok := p.askq.claim(token)
+		if !ok {
+			slog.Debug(p.tag()+": dropping stale ask-question callback",
+				"action", actionVal, "user", userID, "chat", chatID)
+			notice := "This question has already been answered or is no longer active"
+			if c, still := p.askq.peek(token); still && c.expiredNotice != "" {
+				notice = c.expiredNotice
+			}
+			return askqClaimCard(notice), nil
+		}
+
+		// Route by the session the question was actually asked in, not by
+		// whoever clicked: under thread_isolation the originating session is a
+		// thread-scoped key, which sessionKeyFromCardAction cannot recover
+		// from the callback's chat/user alone.
+		sessionKey = claim.sessionKey
+		chatID = claim.chatID
 		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+
+		// askq_text — free-form answer from the card schema 2.0 input box.
+		// The engine's resolveAskQuestionAnswer returns non-numeric text
+		// as-is, so forwarding the raw text answers the pending question.
+		if actionVal == "askq_text" {
+			answer, isStr := event.Event.Action.FormValue["answer"].(string)
+			// Type and emptiness: an absent, non-string or blank field is not
+			// an answer — ignore silently (echoed receipts, double submits of
+			// an empty form). Length: max_length is advisory on the client, so
+			// the server enforces it before anything is dispatched or shown.
+			if !isStr || strings.TrimSpace(answer) == "" {
+				return nil, nil
+			}
+			if len([]rune(strings.TrimSpace(answer))) > askqMaxAnswerRunes {
+				return &callback.CardActionTriggerResponse{
+					Card: &callback.Card{
+						Type: "raw",
+						Data: simpleCard2("⚠️", claim.tooLongNotice, "orange"),
+					},
+				}, nil
+			}
+
+			go p.dispatchCoreMessage(&core.Message{
+				SessionKey: sessionKey,
+				Platform:   p.platformName,
+				UserID:     userID,
+				UserName:   p.resolveUserName(userID),
+				ChatName:   p.resolveChatName(chatID),
+				Content:    answer,
+				ReplyCtx:   rctx,
+			})
+
+			title := answer
+			// Truncate by runes, not bytes: free-form answers are exactly where
+			// CJK text shows up, and a byte cut would slice a multi-byte character
+			// in half and show roughly a third of the intended length.
+			if rs := []rune(title); len(rs) > 50 {
+				title = string(rs[:50]) + "…"
+			}
+			md := ""
+			if claim.question != "" {
+				md = claim.question + "\n"
+			}
+			md += "**→ " + answer + "**"
+			return &callback.CardActionTriggerResponse{
+				Card: &callback.Card{
+					Type: "raw",
+					Data: simpleCard2("✅ "+title, md, "green"),
+				},
+			}, nil
+		}
+
+		// askq:<qIdx>:<optIdx> — option button.
 		go p.dispatchCoreMessage(&core.Message{
 			SessionKey: sessionKey,
 			Platform:   p.platformName,
@@ -944,19 +1039,18 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		})
 
 		answerLabel, _ := event.Event.Action.Value["askq_label"].(string)
-		askqQuestion, _ := event.Event.Action.Value["askq_question"].(string)
 		if answerLabel == "" {
 			answerLabel = actionVal
 		}
-		cb := core.NewCard().Title("✅ "+answerLabel, "green")
-		if askqQuestion != "" {
-			cb.Markdown(askqQuestion)
+		md := ""
+		if claim.question != "" {
+			md = claim.question + "\n"
 		}
-		cb.Markdown("**→ " + answerLabel + "**")
+		md += "**→ " + answerLabel + "**"
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
-				Data: renderCardMap(cb.Build(), sessionKey),
+				Data: simpleCard2("✅ "+answerLabel, md, "green"),
 			},
 		}, nil
 	}
