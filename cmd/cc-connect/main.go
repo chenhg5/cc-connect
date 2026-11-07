@@ -697,6 +697,12 @@ func main() {
 			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)
 		}
 
+		// Wire the /stop hook event. Unset keeps the historical default
+		// ("session.ended"); "turn.cancelled" opts in to the precise event.
+		if v := strings.TrimSpace(cfg.StopHookEvent); v != "" {
+			engine.SetStopHookEvent(core.HookEventType(strings.ToLower(v)))
+		}
+
 		// Wire queue depth
 		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
 			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)
@@ -1877,6 +1883,15 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		})
 	} else {
 		engine.SetInstantReply(core.InstantReplyCfg{})
+	}
+
+	// Reload the /stop hook event. An empty value restores the default
+	// ("session.ended"), so removing the key from config.toml reverts the
+	// behavior just like a fresh start.
+	if v := strings.TrimSpace(cfg.StopHookEvent); v != "" {
+		engine.SetStopHookEvent(core.HookEventType(strings.ToLower(v)))
+	} else {
+		engine.SetStopHookEvent(core.HookEventSessionEnded)
 	}
 
 	// Reload sender injection
