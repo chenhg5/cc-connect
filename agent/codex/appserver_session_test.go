@@ -738,7 +738,7 @@ func TestAppServerSession_TransportEOFFinishesActiveTurn(t *testing.T) {
 	}
 	select {
 	case response := <-rpc:
-		if response.Error == nil {
+		if response.transportErr == nil {
 			t.Fatal("pending RPC was not rejected")
 		}
 	default:
@@ -929,7 +929,7 @@ func TestAppServerSession_EOFReleasesRPCBeforeTerminalBackpressure(t *testing.T)
 	go func() { s.readLoop(strings.NewReader("")); close(done) }()
 	select {
 	case response := <-rpc:
-		if response.Error == nil || s.Alive() {
+		if response.transportErr == nil || s.Alive() {
 			t.Fatal("RPC did not observe a dead transport")
 		}
 	case <-time.After(5 * time.Second):

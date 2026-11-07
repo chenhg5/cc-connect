@@ -133,14 +133,16 @@ func TestAsyncUserInput_LateFreeTextAnswerAndStaleCard(t *testing.T) {
 	state := &interactiveState{agentSession: s, platform: p}
 	key := "plain:user"
 	e.interactiveStates[key] = state
+	state.busySession = e.sessions.GetOrCreateActive(key)
 	e.showAsyncUserInput(state, p, "ctx", Event{RequestID: "old", Questions: testQuestions()})
+	state.busySession = e.sessions.GetOrCreateActive(key)
 	e.showAsyncUserInput(state, p, "ctx", Event{RequestID: "new", Questions: []UserQuestion{{Question: "Your preference?"}}})
 	if _, handled := e.handleAsyncUserInput(p, &Message{SessionKey: key}, "askq:b2xk:0:1", key, e.sessions); !handled {
 		t.Fatal("stale card was not dropped")
 	}
-	prompt, handled := e.handleAsyncUserInput(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, "custom answer", key, e.sessions)
+	prompt, handled := e.handleAsyncUserInput(p, &Message{SessionKey: key, ReplyCtx: "ctx"}, "/answer custom answer", key, e.sessions)
 	if handled || prompt != "Your preference?: custom answer" {
-		t.Fatalf("idle answer = %q, %v; want normal message path", prompt, handled)
+		t.Fatalf("idle answer = %q, %v; want continuation through normal admission", prompt, handled)
 	}
 }
 
@@ -172,44 +174,113 @@ func TestCUJ_AsyncUserInput_AnswerAfterTurnCompleted(t *testing.T) {
 	s.mu.Lock()
 	s.active = false
 	s.mu.Unlock()
-	send("2")
+	waitAsyncInput(t, func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
+	send("/answer 2")
 	waitAsyncInput(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) == 2 })
-	s.mu.Lock()
-	answer := s.sent[1]
-	s.mu.Unlock()
-	if answer != "Which database?: SQLite" {
-		t.Fatalf("late answer = %q", answer)
-	}
 	send("askq:bGF0ZQ:0:2")
-	s.events <- Event{Type: EventResult, Content: "Answer received.", Done: true}
-	waitAsyncInput(t, func() bool {
-		for _, msg := range p.getSent() {
-			if strings.Contains(msg, "Answer received.") {
-				return true
-			}
-		}
-		return false
-	})
+	s.mu.Lock()
+	if len(s.sent) != 2 || len(s.steered) != 0 || !strings.Contains(s.sent[1], "Which database?: SQLite") {
+		t.Fatalf("late/duplicate answer: %v %v", s.sent, s.steered)
+	}
+	s.mu.Unlock()
+	s.events <- Event{Type: EventResult, Content: "Answer applied.", Done: true}
+	waitAsyncInput(t, func() bool { return strings.Contains(strings.Join(p.getSent(), "\n"), "Answer applied.") })
+
 }
 
 func TestAsyncUserInput_MultipleQuestionsAndRetryAfterFailure(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
-	s := &asyncInputSession{events: make(chan Event, 16), active: true, err: errors.New("temporary failure")}
+	s := &asyncInputSession{events: make(chan Event, 16), active: true, err: ErrSteerRejected}
 	e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, "", LangEnglish)
 	state := &interactiveState{agentSession: s, platform: p}
 	key := "plain:user"
 	e.interactiveStates[key] = state
 	questions := append(testQuestions(), UserQuestion{Question: "Deployment?"})
+	state.busySession = e.sessions.GetOrCreateActive(key)
 	e.showAsyncUserInput(state, p, "ctx", Event{RequestID: "multi", Questions: questions})
 	msg := &Message{SessionKey: key, ReplyCtx: "ctx"}
-	e.handleAsyncUserInput(p, msg, "2", key, e.sessions)
-	e.handleAsyncUserInput(p, msg, "local", key, e.sessions)
-	if state.pendingUserInput == nil {
+	e.handleAsyncUserInput(p, msg, "/answer 2", key, e.sessions)
+	e.handleAsyncUserInput(p, msg, "/answer local", key, e.sessions)
+	if state.busySession.asyncQuestion().Status != "open" {
 		t.Fatal("failed delivery discarded the question")
 	}
 	s.err = nil
-	e.handleAsyncUserInput(p, msg, "local", key, e.sessions)
+	e.handleAsyncUserInput(p, msg, "/answer local", key, e.sessions)
 	if len(s.steered) != 1 || s.steered[0] != "Which database?: SQLite\nDeployment?: local" {
 		t.Fatalf("answers = %v", s.steered)
+	}
+}
+
+func TestAsyncUserInput_UnknownDeliveryRetainsHistoryAndDoesNotRetry(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	s := &asyncInputSession{events: make(chan Event, 8), active: true, err: errors.New("ack timeout")}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	state := &interactiveState{agentSession: s, platform: p}
+	e.interactiveStates["test:user"] = state
+	state.busySession = e.sessions.GetOrCreateActive("test:user")
+	e.showAsyncUserInput(state, p, "ctx", Event{RequestID: "q1", Questions: testQuestions()})
+	msg := &Message{SessionKey: "test:user", Content: "askq:cTE:0:2", ReplyCtx: "ctx"}
+	_, handled := e.handleAsyncUserInput(p, msg, msg.Content, "test:user", e.sessions)
+	if !handled || !strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(MsgMessageSteerUnconfirmed)) {
+		t.Fatal(p.getSent())
+	}
+	if len(e.sessions.GetOrCreateActive(msg.SessionKey).GetHistory(0)) != 2 {
+		t.Fatal("uncertain input missing from history")
+	}
+	s.err = nil
+	_, _ = e.handleAsyncUserInput(p, msg, msg.Content, "test:user", e.sessions)
+	_, _ = e.handleAsyncUserInput(p, msg, "/answer SQLite", "test:user", e.sessions)
+	if len(s.steered) != 0 {
+		t.Fatal("duplicate card replayed uncertain answer")
+	}
+}
+
+func TestAsyncUserInput_OrdinaryCorrectionDoesNotAnswerQuestion(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	s := &asyncInputSession{events: make(chan Event, 8), active: true}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetBusyMessageMode("steer")
+	const key = "test:correction"
+	state := &interactiveState{agentSession: s, platform: p}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	if _, locked := session.TryLock(); !locked {
+		t.Fatal("lock")
+	}
+	defer session.UnlockWithoutUpdate(0)
+	state.busySession = e.sessions.GetOrCreateActive(key)
+	e.showAsyncUserInput(state, p, "ctx", Event{RequestID: "q1", Questions: testQuestions()})
+	e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", Content: "Use the other worksheet first", ReplyCtx: "ctx"})
+	state.mu.Lock()
+	stillPending := state.busySession.asyncQuestion() != nil && state.busySession.asyncQuestion().Current == 0 && state.busySession.asyncQuestion().Status == "open"
+	state.mu.Unlock()
+	if !stillPending {
+		t.Fatal("ordinary correction was captured as an answer")
+	}
+	if len(session.GetHistory(0)) == 0 {
+		t.Fatal("correction was not processed")
+	}
+}
+
+func TestBusySteering_UnknownDeliveryRecordsWarningWithoutQueue(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	s := &busySteeringSession{queuingAgentSession: newQueuingSession("unknown")}
+	s.err = errors.New("ack timeout")
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetBusyMessageMode("steer")
+	const key = "test:unknown"
+	state := &interactiveState{agentSession: s, platform: p}
+	e.interactiveStates[key] = state
+	session := e.sessions.GetOrCreateActive(key)
+	if _, locked := session.TryLock(); !locked {
+		t.Fatal("lock")
+	}
+	defer session.UnlockWithoutUpdate(0)
+	e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", Content: "new instruction", ReplyCtx: "ctx"})
+	if len(state.pendingMessages) != 0 || len(session.GetHistory(0)) != 2 {
+		t.Fatal("unknown delivery was retried or omitted")
+	}
+	if !strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(MsgMessageSteerUnconfirmed)) {
+		t.Fatal(p.getSent())
 	}
 }
