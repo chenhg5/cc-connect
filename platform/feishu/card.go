@@ -24,7 +24,7 @@ func (p *interactivePlatform) ReplyCard(ctx context.Context, rctx any, card *cor
 		return fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
 	}
 
-	cardJSON := renderCard(card, rc.sessionKey)
+	cardJSON := renderCard(card, rc.sessionKey, p.cardWidthMode)
 	if !p.shouldUseThreadOrReplyAPI(rc) {
 		if rc.chatID == "" {
 			return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
@@ -48,7 +48,7 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 		return p.ReplyCard(ctx, rctx, card)
 	}
 
-	cardJSON := renderCard(card, rc.sessionKey)
+	cardJSON := renderCard(card, rc.sessionKey, p.cardWidthMode)
 	return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
 }
 
@@ -64,7 +64,7 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 		return fmt.Errorf("%s: no tracked card messageID for session %q", p.tag(), sessionKey)
 	}
 
-	cardJSON := renderCard(card, sessionKey)
+	cardJSON := renderCard(card, sessionKey, p.cardWidthMode)
 	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(msgID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
@@ -88,10 +88,13 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 // renderCardMap converts a core.Card into the Feishu Interactive Card map
 // using the v1 format. Used both for message API (via renderCard) and
 // callback responses (CardActionTriggerResponse).
-func renderCardMap(card *core.Card, sessionKey string) map[string]any {
+//
+// cardWidthMode is forwarded into the config block as the Feishu Card 2.0
+// `width_mode` field (#1797). It must be one of "default" or "full".
+func renderCardMap(card *core.Card, sessionKey, cardWidthMode string) map[string]any {
 	result := map[string]any{
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": cardWidthMode, // schema 2.0; was wide_screen_mode (schema 1.0, #1797)
 		},
 	}
 	if card == nil {
@@ -454,8 +457,8 @@ func parseDeleteModeListItemAction(action string) (id string, selectable bool, o
 }
 
 // renderCard converts a core.Card into the Feishu Interactive Card JSON string.
-func renderCard(card *core.Card, sessionKey string) string {
-	b, err := json.Marshal(renderCardMap(card, sessionKey))
+func renderCard(card *core.Card, sessionKey, cardWidthMode string) string {
+	b, err := json.Marshal(renderCardMap(card, sessionKey, cardWidthMode))
 	if err != nil {
 		slog.Error("feishu: renderCard marshal failed", "error", err)
 		return `{"config":{"wide_screen_mode":true},"elements":[]}`
