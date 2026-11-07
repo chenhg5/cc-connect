@@ -197,6 +197,16 @@ level=INFO msg="platform started" project=my-project platform=telegram
 level=INFO msg="cc-connect is running" projects=1
 ```
 
+### 5.3 Messages Sent During Downtime
+
+On startup or reconnect, cc-connect skips pending messages sent before the connection's recovery cutoff. It does not run the agent on that backlog. Each affected chat or topic receives one summary containing the number of skipped messages, the earliest skipped timestamp (UTC), and a request to resend anything still relevant. Counts include authorized messages the bot would normally accept, including supported attachments; service events, button callbacks, and messages from unauthorized senders are excluded.
+
+A failed polling request returns to the connection retry loop, so this recovery also runs after network outages while cc-connect stays running. Live updates fetched before the failure finish processing before reconnection; errors sending replies do not restart polling.
+
+Updates already handled before a polling disconnect are acknowledged on recovery and excluded from skipped-message notices.
+
+Messages arriving during recovery remain available for normal processing. If Telegram delivers an older message after the first live message, cc-connect skips it and updates the existing summary instead of sending another notice. Counts cover only updates Telegram still retains. Notices use the configured cc-connect language; delivery failures are logged without blocking the connection or repeatedly posting copies.
+
 ---
 
 ## Step 6: Start Chatting
@@ -219,7 +229,23 @@ level=INFO msg="cc-connect is running" projects=1
 Telegram topics include a `message_thread_id`. cc-connect uses that thread ID
 as part of the Telegram session key, so each topic has its own independent
 conversation context. This applies to forum topics in groups and private chat
-topics when Telegram includes `message_thread_id`.
+topics.
+
+For private topics, enable Threaded mode and allow users to create topics in
+BotFather. Sending an ordinary message from **All Messages** then creates a
+topic in Telegram. cc-connect adopts that topic and uses the opening message
+as its first input; no group, `/new` command, or second topic is needed. Images,
+documents, voice notes, and audio can also be the opening input.
+
+Some Telegram clients omit the thread ID on that opening message. cc-connect
+uses the preceding topic-creation event from the same authorized human and
+private chat to route messages sent within five seconds of that event or the
+previous opener chunk. Explicit thread IDs always take precedence, and media
+album parts retain their topic. This inference never applies to groups.
+
+If multiple topics are created before their opening messages arrive, the
+missing IDs can be ambiguous. Those messages are not sent to an agent;
+cc-connect asks the sender to resend them inside the intended topic.
 
 ---
 

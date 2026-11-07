@@ -112,6 +112,10 @@ type Platform struct {
 	enableReactions       bool
 	progressStyle         string // "legacy" | "compact" — telegram has no rich card, so "card" is mapped to "compact"
 	httpClient            *http.Client
+	topicRouting          privateTopicRouting
+	i18n                  *core.I18n
+	downtime              *downtimeDrain
+	processedCursor       updateCursor // protected by mu
 
 	mu                  sync.RWMutex
 	bot                 telegramBot
@@ -250,12 +254,13 @@ func (p *Platform) SetLifecycleHandler(h core.PlatformLifecycleHandler) {
 }
 
 func defaultNewBot(token string, onUpdate func(context.Context, *models.Update), httpClient *http.Client) (telegramBot, *models.User, func(context.Context), error) {
-	handler := func(ctx context.Context, b *tgbot.Bot, update *models.Update) {
-		onUpdate(ctx, update)
-	}
+	polling := &pollingLifecycle{}
 	opts := []tgbot.Option{
-		tgbot.WithDefaultHandler(handler),
 		tgbot.WithNotAsyncHandlers(),
+		// A failed poll must not strand already-fetched live updates in the
+		// library's queue when its polling context is cancelled.
+		tgbot.WithUpdatesChannelCap(0),
+		tgbot.WithErrorsHandler(polling.errorHandler(token)),
 	}
 	if httpClient != nil {
 		opts = append(opts, tgbot.WithHTTPClient(60*time.Second, httpClient))
@@ -271,42 +276,10 @@ func defaultNewBot(token string, onUpdate func(context.Context, *models.Update),
 		return nil, nil, nil, fmt.Errorf("getMe: %w", err)
 	}
 
-	// Drain pending updates before starting polling to avoid 409 Conflict.
-	// This clears any outstanding long-poll request from a previous instance.
-	drainPendingUpdates(token, httpClient)
-
-	return newRateLimitRetryBot(b), me, b.Start, nil
-}
-
-// drainPendingUpdates clears any pending updates on Telegram's side by calling
-// getUpdates with offset=-1. This terminates any outstanding long-poll request
-// from a previous bot instance, preventing 409 Conflict errors on restart.
-func drainPendingUpdates(token string, httpClient *http.Client) {
-	apiURL := "https://api.telegram.org/bot" + token + "/getUpdates?offset=-1&timeout=0"
-	client := httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-	if err != nil {
-		slog.Debug("telegram: drain updates request creation failed", "error", err)
-		return
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		slog.Debug("telegram: drain updates request failed", "error", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Read and discard response body to ensure connection is properly closed
-	_, _ = io.Copy(io.Discard, resp.Body)
-
-	slog.Debug("telegram: drained pending updates", "status", resp.StatusCode)
+	return &startupBot{
+		telegramBot: newRateLimitRetryBot(b), token: token, client: httpClient,
+		setOffset: func(lastID int64) { tgbot.WithInitialOffset(lastID)(b) },
+	}, me, func(ctx context.Context) { polling.start(ctx, b, onUpdate) }, nil
 }
 
 func (p *Platform) connectLoop(ctx context.Context) {
@@ -376,6 +349,16 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
+	if source, ok := b.(pendingUpdateSource); ok {
+		if err := p.drainDowntime(ctx, source, b); err != nil {
+			p.clearBot(gen, b)
+			cause := retryCauseInitialConnectFailure
+			if p.hasEverConnected() {
+				cause = retryCauseReconnectFailure
+			}
+			return &retryLoopError{cause: cause, err: err}
+		}
+	}
 
 	slog.Info("telegram: connected", "bot", me.Username)
 	p.emitReady(gen)
@@ -388,6 +371,22 @@ func (p *Platform) runConnection(ctx context.Context) error {
 }
 
 func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
+	if update == nil {
+		return
+	}
+	p.handleUpdate(ctx, update)
+	// The production poller dispatches serially. Remember completed updates,
+	// including deliberately ignored ones, before a reconnect can drain them.
+	// Use the latest ID rather than a maximum: Telegram can reset its IDs.
+	p.mu.Lock()
+	p.processedCursor = updateCursor{nextOffset: update.ID + 1, updatedAt: time.Now()}
+	p.mu.Unlock()
+}
+
+func (p *Platform) handleUpdate(ctx context.Context, update *models.Update) {
+	if p.discardLateDowntimeUpdate(ctx, update) {
+		return
+	}
 	if update.CallbackQuery != nil {
 		p.handleCallbackQuery(ctx, update.CallbackQuery)
 		return
@@ -400,6 +399,10 @@ func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
 }
 
 func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
+	service, ambiguousTopic := p.routeTopicMessage(msg)
+	if service {
+		return
+	}
 	msgTime := time.Unix(int64(msg.Date), 0)
 	if core.IsOldMessage(msgTime) {
 		slog.Debug("telegram: ignoring old message after restart", "date", msgTime)
@@ -432,6 +435,13 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	userID := strconv.FormatInt(msg.From.ID, 10)
 	if !core.AllowList(p.allowFrom, userID) {
 		slog.Debug("telegram: message from unauthorized user", "user", userID)
+		return
+	}
+	if ambiguousTopic {
+		text := p.noticeI18n().T(core.MsgTopicOpenerAmbiguous)
+		if err := p.Reply(ctx, replyContext{chatID: msg.Chat.ID, messageID: msg.ID}, text); err != nil {
+			slog.Warn("telegram: send ambiguous topic notice failed", "error", core.RedactToken(err.Error(), p.token))
+		}
 		return
 	}
 
