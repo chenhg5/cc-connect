@@ -89,9 +89,16 @@ click; its exact previous delivery status may no longer be available.
 
 Adding to the current task uses the adapter's native steering capability. It does
 not terminate a running tool. If the adapter confirms there is no active turn,
-the message returns to the ordinary queue. If delivery cannot be confirmed, the
-message is saved in history and an explicit notice is shown; it is not replayed
+the message returns to the ordinary queue. Its receipt explains that no active
+task was available and restores the action button, so the author can retry
+without retyping the message or wait for automatic delivery in order.
+If delivery cannot be confirmed, the message is saved in history and an explicit
+notice is shown; it is not replayed
 automatically, because the agent may already have received it.
+
+Invalid or expired queue actions show a generic notice with `/status` guidance;
+they do not send command arguments to the agent. Older cards' Keep callbacks
+remain supported, although new cards only offer the immediate-delivery button.
 
 ### Model switch preserves history
 

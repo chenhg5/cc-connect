@@ -118,7 +118,7 @@ func TestCUJ_C6_QueuedMessageDeliveryChoice(t *testing.T) {
 			action := queuedChoiceAction(t, card, keep)
 			steerAction := queuedChoiceAction(t, card, false)
 			send("another-user", steerAction)
-			waitAsyncInput(t, func() bool { return visible(e.i18n.T(MsgQueueChoiceExpired)) })
+			waitAsyncInput(t, func() bool { return visible(e.i18n.T(MsgQueueChoiceUnavailable)) })
 			send("author", action)
 			if keep {
 				waitAsyncInput(t, func() bool { return visible(e.i18n.T(MsgMessageQueued)) })
@@ -229,6 +229,84 @@ func TestCUJ_C6_QueuedMessageDeliveryChoice(t *testing.T) {
 			})
 		}
 	})
+	t.Run("declined_steering_restores_retry", func(t *testing.T) {
+		for _, retry := range []bool{false, true} {
+			name := "automatic_delivery"
+			if retry {
+				name = "retry_delivery"
+			}
+			t.Run(name, func(t *testing.T) {
+				p := &trackedQueuedChoicePlatform{}
+				p.n = "test"
+				s := &queuedSteeringSession{asyncInputSession: asyncInputSession{events: make(chan Event, 16)}}
+				attempts := 0
+				s.steer = func(prompt string) (bool, error) {
+					attempts++
+					if attempts == 1 {
+						return false, nil // The adapter has no active turn at this instant.
+					}
+					return s.asyncInputSession.SteerUserInput(prompt)
+				}
+				e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+				t.Cleanup(func() { _ = e.Stop() })
+				const key = "test:declined"
+				send := func(user, text string) {
+					e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: user, Content: text, ReplyCtx: "clicked-card"})
+				}
+				sentCount := func() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) }
+				send("author", "held task")
+				waitAsyncInput(t, func() bool { return sentCount() == 1 })
+				send("author", "queued correction")
+				card := waitForSentCard(t, &p.stubCardPlatform)
+				action := queuedChoiceAction(t, card, false)
+				send("author", action)
+				updates := p.getChoiceUpdates()
+				if len(updates) != 2 || updates[1].ctx != "sent-card-1" {
+					t.Fatalf("declined steering did not update the original receipt: %#v", updates)
+				}
+				assertSingleQueuedChoice(t, updates[1].card)
+				if updates[1].card.Header.Title != e.i18n.T(MsgQueueSteerDeclined) || !strings.Contains(updates[1].card.RenderText(), e.i18n.T(MsgQueueSteerRetry)) {
+					t.Fatal("declined receipt hides why steering was not delivered")
+				}
+				if got := queuedChoiceAction(t, updates[1].card, false); got != action {
+					t.Fatalf("retry does not target the original message: %q", got)
+				}
+				send("another-user", action)
+				if attempts != 1 || len(p.getChoiceUpdates()) != 2 {
+					t.Fatal("another user claimed or changed the restored action")
+				}
+				if retry {
+					send("author", action)
+					updates = p.getChoiceUpdates()
+					assertClosedQueuedChoice(t, updates[len(updates)-1].card, e.i18n.T(MsgQueueSteerSent), "queued correction")
+				}
+				s.events <- Event{Type: EventResult, Content: "held task complete", Done: true}
+				if !retry {
+					waitAsyncInput(t, func() bool { return sentCount() == 2 })
+					updates = p.getChoiceUpdates()
+					assertClosedQueuedChoice(t, updates[len(updates)-1].card, e.i18n.T(MsgQueueProcessing), "queued correction")
+					s.events <- Event{Type: EventResult, Content: "correction complete", Done: true}
+				}
+				waitAsyncInput(t, func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
+				send("author", action) // A late click cannot deliver the correction again.
+				s.mu.Lock()
+				sent, steered := len(s.sent), len(s.steered)
+				s.mu.Unlock()
+				if retry && (sent != 1 || steered != 1 || attempts != 2) || !retry && (sent != 2 || steered != 0 || attempts != 1) {
+					t.Fatalf("correction lost or duplicated: sent=%d, steered=%d, attempts=%d", sent, steered, attempts)
+				}
+				count := 0
+				for _, entry := range e.sessions.GetOrCreateActive(key).GetHistory(20) {
+					if entry.Role == "user" && entry.Content == "queued correction" {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Fatalf("correction appears %d times in history", count)
+				}
+			})
+		}
+	})
 	t.Run("automatic_card_update_recovers", func(t *testing.T) {
 		p := &trackedQueuedChoicePlatform{}
 		p.n = "test"
@@ -310,7 +388,11 @@ func TestCUJ_C6_QueuedSteeringCompletionDuringRPC(t *testing.T) {
 			p.n = "test"
 			entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			s := &queuedSteeringSession{asyncInputSession: asyncInputSession{events: make(chan Event, 16)}}
-			s.steer = func(string) (bool, error) { close(entered); <-release; return accepted, nil }
+			var firstAttempt sync.Once
+			s.steer = func(string) (bool, error) {
+				firstAttempt.Do(func() { close(entered); <-release })
+				return accepted, nil
+			}
 			e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
 			t.Cleanup(func() {
 				if err := e.Stop(); err != nil {

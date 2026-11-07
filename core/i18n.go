@@ -210,12 +210,14 @@ const (
 	MsgQueueChoiceTitle          MsgKey = "queue_choice_title"
 	MsgQueueSteerPending         MsgKey = "queue_steer_pending"
 	MsgQueueSteerSent            MsgKey = "queue_steer_sent"
+	MsgQueueSteerDeclined        MsgKey = "queue_steer_declined"
+	MsgQueueSteerRetry           MsgKey = "queue_steer_retry"
 	MsgQueueKept                 MsgKey = "queue_kept"
 	MsgQueueProcessing           MsgKey = "queue_processing"
 	MsgQueueRemoved              MsgKey = "queue_removed"
 	MsgQueueSteerButton          MsgKey = "queue_steer_button"
-	MsgQueueKeepButton           MsgKey = "queue_keep_button"
 	MsgQueueChoiceExpired        MsgKey = "queue_choice_expired"
+	MsgQueueChoiceUnavailable    MsgKey = "queue_choice_unavailable"
 	MsgQueueSteerUnconfirmed     MsgKey = "queue_steer_unconfirmed"
 	MsgQueueFull                 MsgKey = "queue_full"
 	MsgMessageQueued             MsgKey = "message_queued"
@@ -841,6 +843,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "現在のタスクに追加しました",
 		LangSpanish:            "Añadido a la tarea actual",
 	},
+	MsgQueueSteerDeclined: {
+		LangEnglish:            "No active task to update",
+		LangChinese:            "当前无活跃任务，未能补充",
+		LangTraditionalChinese: "目前無進行中的任務，未能補充",
+		LangJapanese:           "追加先の実行中タスクがありません",
+		LangSpanish:            "No hay una tarea activa que actualizar",
+	},
+	MsgQueueSteerRetry: {
+		LangEnglish:            "This message is still queued. You can retry when a task is active, or leave it for automatic delivery in order.",
+		LangChinese:            "这条消息仍在排队。任务活跃后可以点击按钮重试，也可以等待按顺序自动处理。",
+		LangTraditionalChinese: "這則訊息仍在排隊。任務進行中時可以點擊按鈕重試，也可以等待依序自動處理。",
+		LangJapanese:           "このメッセージはキューに残っています。タスクの実行中にボタンで再試行するか、順番に自動配信されるまでお待ちください。",
+		LangSpanish:            "Este mensaje sigue en cola. Puedes reintentar cuando haya una tarea activa o esperar a que se entregue automáticamente en orden.",
+	},
 	MsgQueueKept: {
 		LangEnglish:            "Kept in the queue",
 		LangChinese:            "已继续排队",
@@ -869,19 +885,19 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "現在のタスクに今すぐ追加",
 		LangSpanish:            "Añadir ahora a la tarea actual",
 	},
-	MsgQueueKeepButton: {
-		LangEnglish:            "Keep queued",
-		LangChinese:            "继续排队",
-		LangTraditionalChinese: "繼續排隊",
-		LangJapanese:           "キューで待機",
-		LangSpanish:            "Mantener en cola",
-	},
 	MsgQueueChoiceExpired: {
 		LangEnglish:            "This message has already been processed or is no longer queued.",
 		LangChinese:            "这条消息已处理或已不在等待队列中。",
 		LangTraditionalChinese: "這則訊息已處理或已不在等待佇列中。",
 		LangJapanese:           "このメッセージは処理済みか、キューにありません。",
 		LangSpanish:            "Este mensaje ya se procesó o ya no está en la cola.",
+	},
+	MsgQueueChoiceUnavailable: {
+		LangEnglish:            "This queue action is invalid, expired, or unavailable to you. Use the original message's button, or /status to check the session.",
+		LangChinese:            "此队列操作无效、已过期或不可用。请使用原消息上的按钮，或输入 /status 查看会话状态。",
+		LangTraditionalChinese: "此佇列操作無效、已過期或無法使用。請使用原訊息上的按鈕，或輸入 /status 查看工作階段狀態。",
+		LangJapanese:           "このキュー操作は無効、期限切れ、または利用できません。元のメッセージのボタンを使うか、/status でセッションの状態を確認してください。",
+		LangSpanish:            "Esta acción de cola no es válida, ha caducado o no está disponible para ti. Usa el botón del mensaje original o /status para consultar la sesión.",
 	},
 	MsgQueueSteerUnconfirmed: {
 		LangEnglish:            "Delivery to the current task could not be confirmed. This message was saved in history and will not be replayed automatically. Check the task before sending it again.",

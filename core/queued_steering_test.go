@@ -153,7 +153,7 @@ func assertClosedQueuedChoice(t *testing.T, card *Card, status, content string) 
 }
 
 func TestQueuedSteering_ReplacesClickedCardAndRemovesButtons(t *testing.T) {
-	for _, scenario := range []string{"keep", "delivered", "idle", "unconfirmed", "update-error", "typed-command", "other-user"} {
+	for _, scenario := range []string{"keep", "delivered", "unconfirmed", "update-error", "typed-command", "other-user"} {
 		t.Run(scenario, func(t *testing.T) {
 			p := &queuedChoicePlatform{}
 			p.n = "test"
@@ -173,9 +173,6 @@ func TestQueuedSteering_ReplacesClickedCardAndRemovesButtons(t *testing.T) {
 			status := MsgPsSent
 			switch scenario {
 			case "keep":
-				status = MsgMessageQueued
-			case "idle":
-				s.active = false
 				status = MsgMessageQueued
 			case "unconfirmed":
 				s.err = errors.New("acknowledgement lost")
@@ -228,6 +225,132 @@ func TestQueuedSteering_ReplacesClickedCardAndRemovesButtons(t *testing.T) {
 				t.Fatal("repeat clicks overwrote the final card")
 			}
 		})
+	}
+}
+
+func TestQueuedSteering_DeclinedRemainsRetryableWithoutTrackedCards(t *testing.T) {
+	for _, replyCtx := range []string{"clicked-card", "user-message"} {
+		t.Run(replyCtx, func(t *testing.T) {
+			p := &queuedChoicePlatform{}
+			p.n = "test"
+			s := &asyncInputSession{events: make(chan Event, 8)}
+			e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+			t.Cleanup(func() { _ = e.Stop() })
+			const key = "test:retry"
+			session := e.sessions.GetOrCreateActive(key)
+			gen, _ := session.TryLock()
+			defer session.Unlock(gen)
+			state := &interactiveState{agentSession: s, busySession: session, pendingMessages: []queuedMessage{{queueID: "one", content: "correction", userID: "author"}}}
+			e.interactiveStates[key] = state
+			msg := &Message{SessionKey: key, UserID: "author", ReplyCtx: replyCtx}
+			e.handleQueuedMessageChoice(p, msg, "one", false)
+			if len(state.pendingMessages) != 1 || state.pendingMessages[0].queueChoiceClosed || len(session.GetHistory(10)) != 0 {
+				t.Fatal("declined input was not restored as an open, undelivered choice")
+			}
+			updates := p.getChoiceUpdates()
+			if replyCtx == "clicked-card" {
+				if len(updates) != 2 || updates[1].card.Header.Title != e.i18n.T(MsgQueueSteerDeclined) || !strings.Contains(updates[1].card.RenderText(), e.i18n.T(MsgQueueSteerRetry)) {
+					t.Fatalf("declined receipt does not explain the retry: %#v", updates)
+				}
+				assertSingleQueuedChoice(t, updates[1].card)
+			} else if !strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(MsgQueueSteerRetry)) {
+				t.Fatal("typed command did not explain that the message remains queued")
+			}
+			s.active = true
+			e.handleQueuedMessageChoice(p, msg, "one", false)
+			if len(state.pendingMessages) != 0 || len(s.steered) != 1 || len(session.GetHistory(10)) != 1 {
+				t.Fatal("retry did not deliver the restored message exactly once")
+			}
+		})
+	}
+}
+
+func TestQueuedSteering_LateDeclineDoesNotReopenFinalizedCard(t *testing.T) {
+	for _, final := range []MsgKey{MsgQueueProcessing, MsgQueueKept, MsgQueueRemoved} {
+		t.Run(string(final), func(t *testing.T) {
+			p := &trackedQueuedChoicePlatform{}
+			p.n = "test"
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			t.Cleanup(func() { _ = e.Stop() })
+			q := queuedMessage{queueID: "one", platform: p, content: "correction"}
+			q.choiceReceipt = e.sendQueuedMessageChoice(p, "user-message", q)
+			e.updateQueuedMessageChoice(p, &Message{}, q, MsgQueueSteerPending, MsgQueueSteerPending, "blue")
+			e.updateQueuedMessageChoice(p, &Message{}, q, final, final, "grey")
+			e.finishQueuedMessageChoice(p, &Message{}, q, MsgQueueSteerDeclined, MsgQueueSteerRetry, "orange")
+			updates := p.getChoiceUpdates()
+			if len(updates) != 2 {
+				t.Fatal("late decline overwrote a finalized card")
+			}
+			assertClosedQueuedChoice(t, updates[1].card, e.i18n.T(final), "correction")
+		})
+	}
+}
+
+func TestQueuedSteering_DeclinedCardRecoveryUsesLatestState(t *testing.T) {
+	for _, processing := range []bool{false, true} {
+		name := "restores_retry_button"
+		if processing {
+			name = "automatic_processing_closes_button"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := &trackedQueuedChoicePlatform{}
+			p.n = "test"
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			t.Cleanup(func() { _ = e.Stop() })
+			q := queuedMessage{queueID: "one", platform: p, content: "correction"}
+			q.choiceReceipt = e.sendQueuedMessageChoice(p, "user-message", q)
+			e.updateQueuedMessageChoice(p, &Message{}, q, MsgQueueSteerPending, MsgQueueSteerPending, "blue")
+			p.mu.Lock()
+			p.updateErr = errors.New("temporary card API failure")
+			p.mu.Unlock()
+			e.finishQueuedMessageChoice(p, &Message{}, q, MsgQueueSteerDeclined, MsgQueueSteerRetry, "orange")
+			if processing {
+				e.markQueuedMessageProcessing(q)
+			}
+			p.mu.Lock()
+			p.updateErr = nil
+			p.mu.Unlock()
+			waitAsyncInput(t, func() bool { return len(p.getChoiceUpdates()) > 1 })
+			updates := p.getChoiceUpdates()
+			for _, update := range updates[1:] {
+				if processing {
+					assertClosedQueuedChoice(t, update.card, e.i18n.T(MsgQueueProcessing), "correction")
+				} else {
+					assertSingleQueuedChoice(t, update.card)
+					if update.card.Header.Title != e.i18n.T(MsgQueueSteerDeclined) {
+						t.Fatal("recovered receipt lost the declined outcome")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestQueuedSteering_InvalidCommandDoesNotSubmitArgumentsOrRevealQueue(t *testing.T) {
+	for _, flag := range []string{"--queued", "--keep"} {
+		for _, args := range [][]string{{flag}, {flag, "unknown"}, {flag, "unknown", "extra"}, {flag, "private-token"}} {
+			t.Run(strings.Join(args, "_"), func(t *testing.T) {
+				p := &queuedChoicePlatform{}
+				p.n = "test"
+				s := &asyncInputSession{events: make(chan Event, 8), active: true}
+				e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, "", LangEnglish)
+				t.Cleanup(func() { _ = e.Stop() })
+				const key = "test:invalid"
+				session := e.sessions.GetOrCreateActive(key)
+				gen, _ := session.TryLock()
+				defer session.Unlock(gen)
+				state := &interactiveState{agentSession: s, busySession: session, pendingMessages: []queuedMessage{{queueID: "private-token", content: "private task", userID: "author"}}}
+				e.interactiveStates[key] = state
+				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: "stranger", Content: "/ps " + strings.Join(args, " "), ReplyCtx: "user-message"})
+				sent := p.getSent()
+				if len(sent) != 1 || sent[0] != e.i18n.T(MsgQueueChoiceUnavailable) {
+					t.Fatalf("invalid and unauthorized actions need the same generic guidance: %v", sent)
+				}
+				if len(s.sent) != 0 || len(s.steered) != 0 || len(p.getChoiceUpdates()) != 0 || len(state.pendingMessages) != 1 || state.pendingMessages[0].queueChoiceClosed {
+					t.Fatal("invalid command submitted arguments or modified another user's queue")
+				}
+			})
+		}
 	}
 }
 
@@ -532,7 +655,7 @@ func TestQueuedSteering_ExpiredCallbackRepairsCard(t *testing.T) {
 			}
 			status, content := MsgQueueProcessing, "queued task"
 			if mode == "previous_process" {
-				status, content = MsgQueueChoiceExpired, ""
+				status, content = MsgQueueChoiceUnavailable, ""
 			}
 			assertClosedQueuedChoice(t, updates[0].card, e.i18n.T(status), content)
 		})

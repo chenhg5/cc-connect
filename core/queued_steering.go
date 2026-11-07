@@ -20,6 +20,7 @@ type queuedChoiceReceipt struct {
 	// an old callback can repair the card without submitting input again.
 	platform                    Platform
 	userID, sessionKey, content string
+	queueID                     string
 }
 
 // Bound memory independently of message history. Pending entries also own their
@@ -52,7 +53,7 @@ func newQueuedChoiceReceipt(p Platform, msg *Message, queued queuedMessage) *que
 	if session == "" {
 		session = msg.SessionKey
 	}
-	return &queuedChoiceReceipt{platform: p, userID: user, sessionKey: session, content: truncateIf(queued.content, 240)}
+	return &queuedChoiceReceipt{platform: p, userID: user, sessionKey: session, content: truncateIf(queued.content, 240), queueID: queued.queueID}
 }
 
 func newQueuedMessageID() string { return rand.Text() }
@@ -107,6 +108,11 @@ func (e *Engine) updateQueuedMessageChoice(p Platform, msg *Message, queued queu
 	if receipt.processing && title != MsgQueueProcessing {
 		return true
 	}
+	// Restoring the queue and patching its receipt can race with removal or a
+	// legacy Keep callback. A late decline must not reopen a finalized choice.
+	if title == MsgQueueSteerDeclined && receipt.title != MsgQueueSteerPending {
+		return true
+	}
 	if title == MsgQueueProcessing {
 		receipt.processing = true
 	}
@@ -128,11 +134,14 @@ func (e *Engine) syncQueuedChoiceLocked(receipt *queuedChoiceReceipt) bool {
 		return false
 	}
 	card := NewCard().Title(e.i18n.T(receipt.title), receipt.color).
-		Markdown(e.i18n.T(receipt.detail)).Markdown(receipt.content).Build()
+		Markdown(e.i18n.T(receipt.detail)).Markdown(receipt.content)
+	if receipt.title == MsgQueueSteerDeclined && receipt.queueID != "" {
+		card.Buttons(PrimaryBtn(e.i18n.T(MsgQueueSteerButton), "cmd:/ps --queued "+receipt.queueID))
+	}
 	if err := e.waitOutgoing(receipt.platform); err != nil {
 		return false
 	}
-	updated, err := updater.UpdateActionCard(e.ctx, receipt.replyCtx, e.renderCardForPlatform(receipt.platform, card))
+	updated, err := updater.UpdateActionCard(e.ctx, receipt.replyCtx, e.renderCardForPlatform(receipt.platform, card.Build()))
 	if err != nil {
 		slog.Warn("queued choice card update failed", "error", err)
 		if !receipt.retrying && e.ctx.Err() == nil {
@@ -186,7 +195,7 @@ func (e *Engine) handleExpiredQueuedChoice(p Platform, msg *Message, id string) 
 	e.queuedChoicesMu.Unlock()
 	if receipt != nil {
 		if msg.UserID == "" || receipt.userID != msg.UserID || receipt.sessionKey != msg.SessionKey || receipt.platform != p {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueChoiceExpired))
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueChoiceUnavailable))
 			return
 		}
 		receipt.mu.Lock()
@@ -202,7 +211,7 @@ func (e *Engine) handleExpiredQueuedChoice(p Platform, msg *Message, id string) 
 	}
 	// For cards from an earlier process, only an adapter-validated card
 	// callback can update the clicked bot message. Typed commands cannot.
-	e.finishQueuedMessageChoice(p, msg, queuedMessage{}, MsgQueueChoiceTitle, MsgQueueChoiceExpired, "grey")
+	e.finishQueuedMessageChoice(p, msg, queuedMessage{}, MsgQueueChoiceTitle, MsgQueueChoiceUnavailable, "grey")
 }
 
 func (e *Engine) finishQueuedMessageChoice(p Platform, msg *Message, queued queuedMessage, title, detail MsgKey, color string) {
@@ -232,7 +241,7 @@ func (e *Engine) handleQueuedMessageChoice(p Platform, msg *Message, id string, 
 		}
 		if msg.UserID == "" || queued.userID != msg.UserID {
 			state.mu.Unlock()
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueChoiceExpired))
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueChoiceUnavailable))
 			return
 		}
 		if !queued.queueChoiceClosed {
@@ -299,11 +308,12 @@ func (e *Engine) handleQueuedMessageChoice(p Platform, msg *Message, id string, 
 		}
 		return
 	}
+	queued.queueChoiceClosed = false
 	if !e.restoreQueuedMessage(key, state, queued, predecessors) {
 		e.finishQueuedMessageChoice(p, msg, queued, MsgQueueChoiceTitle, MsgQueueChoiceExpired, "grey")
 		return
 	}
-	e.finishQueuedMessageChoice(p, msg, queued, MsgQueueKept, MsgMessageQueued, "blue")
+	e.finishQueuedMessageChoice(p, msg, queued, MsgQueueSteerDeclined, MsgQueueSteerRetry, "orange")
 	if lockGen, locked := session.TryLock(); locked {
 		go e.drainOrphanedQueue(session, sessions, key, agent, workspace, lockGen)
 	}

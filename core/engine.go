@@ -7121,7 +7121,11 @@ var builtinCommands = []struct {
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
-	if len(args) == 2 && (args[0] == "--queued" || args[0] == "--keep") {
+	if len(args) > 0 && (args[0] == "--queued" || args[0] == "--keep") {
+		if len(args) != 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueChoiceUnavailable))
+			return
+		}
 		e.handleQueuedMessageChoice(p, msg, args[1], args[0] == "--keep")
 		return
 	}
