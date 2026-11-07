@@ -20,6 +20,9 @@ func TestMain(m *testing.M) {
 	case "delete_session":
 		runMockCopilot(handleDeleteSession)
 		os.Exit(0)
+	case "empty_assistant_message":
+		runMockCopilot(handleEmptyAssistantMessage)
+		os.Exit(0)
 	default:
 		os.Exit(m.Run())
 	}
@@ -115,4 +118,74 @@ func handleDeleteSession(method string, id json.RawMessage, _ json.RawMessage, w
 	default:
 		writeError(w, id, -32601, fmt.Sprintf("method not found: %s", method))
 	}
+}
+
+// handleEmptyAssistantMessage simulates the bug scenario:
+// 1. Empty assistant.message (during tool call) - should NOT complete turn
+// 2. Tool execution start
+// 3. Tool execution complete
+// 4. Proper assistant.message with content - SHOULD complete turn
+func handleEmptyAssistantMessage(method string, id json.RawMessage, params json.RawMessage, w *lspWriter) {
+	switch method {
+	case "ping":
+		writeResponse(w, id, map[string]any{"pong": true})
+	case "session.create", "session.resume":
+		writeResponse(w, id, map[string]any{
+			"sessionId": "test-session-123",
+		})
+	case "session.send":
+		writeResponse(w, id, map[string]any{"success": true})
+		// 1. Empty assistant.message (during tool call) - should NOT complete turn
+		writeSessionEvent(w, map[string]any{
+			"type": "assistant.message",
+			"data": map[string]any{"outputTokens": 0},
+		})
+		// 2. Tool execution start
+		writeSessionEvent(w, map[string]any{
+			"type": "tool.execution_start",
+			"data": map[string]any{
+				"toolCallId": "call-1",
+				"toolName":   "shell",
+			},
+		})
+		// 3. Tool execution complete
+		writeSessionEvent(w, map[string]any{
+			"type": "tool.execution_complete",
+			"data": map[string]any{"toolCallId": "call-1"},
+		})
+		// 4. Proper assistant.message with content - SHOULD complete turn
+		writeSessionEvent(w, map[string]any{
+			"type": "assistant.message",
+			"data": map[string]any{
+				"content":      "Hello from Copilot!",
+				"outputTokens": 5,
+			},
+		})
+		// 5. Assistant usage
+		writeSessionEvent(w, map[string]any{
+			"type": "assistant.usage",
+			"data": map[string]any{
+				"inputTokens":  10,
+				"outputTokens": 5,
+			},
+		})
+	default:
+		writeError(w, id, -32601, fmt.Sprintf("method not found: %s", method))
+	}
+}
+
+func writeNotification(w *lspWriter, method string, params json.RawMessage) {
+	_ = w.writeMessage(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	})
+}
+
+func writeSessionEvent(w *lspWriter, event map[string]any) {
+	params, _ := json.Marshal(map[string]any{
+		"sessionId": "test-session-123",
+		"event":     event,
+	})
+	writeNotification(w, "session.event", params)
 }
