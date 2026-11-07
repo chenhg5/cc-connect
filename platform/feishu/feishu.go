@@ -113,6 +113,11 @@ type replyContext struct {
 	bootstrapThread  bool
 	receiptEmoji     string // persistent reaction owned by the accepted-message callback
 	receiptMessageID string
+	// prefetchedCard is the original interactive-card payload fetched by
+	// onMessage for the group @all gate, and cardFetchAttempted records that
+	// the fetch already ran (successful or not) so dispatch never retries it.
+	prefetchedCard     string
+	cardFetchAttempted bool
 }
 
 type Platform struct {
@@ -1487,7 +1492,7 @@ func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageR
 }
 
 func isGroupHistoryMessageType(msgType string) bool {
-	return msgType == "text" || msgType == "post"
+	return msgType == "text" || msgType == "post" || msgType == "interactive"
 }
 
 // groupHistoryScope deliberately differs from makeSessionKey. With
@@ -1507,11 +1512,21 @@ func (p *Platform) groupHistoryScope(msg *larkim.EventMessage, chatID string) st
 }
 
 func (p *Platform) historyText(msgType, content string, mentions []*larkim.MentionEvent) string {
-	if content == "" {
+	return p.historyTextWithCard(msgType, content, mentions, "")
+}
+
+// historyTextWithCard prefers a prefetched original card payload over the
+// lossy event body, so Card 2.0 cards land in shared group history with the
+// content the agent sees rather than Feishu's "please upgrade" fallback.
+func (p *Platform) historyTextWithCard(msgType, content string, mentions []*larkim.MentionEvent, cardRaw string) string {
+	if content == "" && cardRaw == "" {
 		return ""
 	}
 	switch msgType {
 	case "text":
+		if content == "" {
+			return ""
+		}
 		var textBody struct {
 			Text string `json:"text"`
 		}
@@ -1520,17 +1535,36 @@ func (p *Platform) historyText(msgType, content string, mentions []*larkim.Menti
 		}
 		return stripMentions(textBody.Text, mentions, p.getBotOpenID())
 	case "post":
+		if content == "" {
+			return ""
+		}
 		return strings.TrimSpace(extractPostPlainText(content))
+	case "interactive":
+		text := ""
+		if cardRaw != "" {
+			text = strings.TrimSpace(stripMentions(cardPayloadText(cardRaw), mentions, p.getBotOpenID()))
+		}
+		if text == "" && content != "" {
+			text = strings.TrimSpace(stripMentions(extractInteractiveReceiveText(content), mentions, p.getBotOpenID()))
+		}
+		// An unparseable card degrades to the "[interactive card]" marker,
+		// and a Card 2.0 card whose original payload could not be fetched
+		// degrades to title + Feishu's upgrade notice. Keep both out of
+		// shared history so they cannot crowd out real context.
+		if text == "" || text == "[interactive card]" || strings.Contains(text, card2UpgradeNotice) {
+			return ""
+		}
+		return text
 	default:
 		return ""
 	}
 }
 
-func (p *Platform) rememberGroupHistory(scope, messageID, msgType, content string, mentions []*larkim.MentionEvent, senderID, senderType string) {
+func (p *Platform) rememberGroupHistory(scope, messageID, msgType, content string, mentions []*larkim.MentionEvent, senderID, senderType, cardRaw string) {
 	if !p.groupChatHistoryShare || scope == "" || !isGroupHistoryMessageType(msgType) {
 		return
 	}
-	text := p.historyText(msgType, content, mentions)
+	text := p.historyTextWithCard(msgType, content, mentions, cardRaw)
 	if text == "" {
 		return
 	}
@@ -1632,6 +1666,13 @@ func (p *Platform) historySenderName(entry groupHistoryEntry) string {
 		return "User"
 	}
 	if cached, ok := p.userNameCache.Load(entry.senderID); ok {
+		if name, ok := cached.(string); ok && name != "" {
+			return name
+		}
+	}
+	// resolveUserNameAs namespaces cache entries by ID type; check the
+	// open_id entry too so history formatting benefits from the cache.
+	if cached, ok := p.userNameCache.Load("open_id:" + entry.senderID); ok {
 		if name, ok := cached.(string); ok && name != "" {
 			return name
 		}
@@ -1764,7 +1805,26 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	botOpenID := p.getBotOpenID()
 	filterActive := botOpenID != "" || p.IsGroupFilterDegraded()
 	botMentioned := botOpenID != "" && isBotMentioned(msg.Mentions, botOpenID)
-	atEveryone := p.respondToAtEveryoneAndHere && msg.Content != nil && strings.Contains(*msg.Content, "@_all")
+	atEveryone := p.respondToAtEveryoneAndHere && msg.Content != nil &&
+		(strings.Contains(*msg.Content, "@_all") || strings.Contains(*msg.Content, `"user_id":"all"`))
+
+	// Card 2.0 event bodies are a lossy fallback (title + upgrade notice +
+	// placeholder image) with no elements, so an @all reference only exists
+	// in the original payload. Prefetch it only for the group mention gate
+	// that needs it, with a short budget: onMessage runs before Feishu's
+	// event acknowledgement, and a miss falls back to the event body. Shared
+	// history reuses the same payload; history-only deployments skip the
+	// fetch and keep degraded cards out of history (historyTextWithCard).
+	prefetchedCard := ""
+	cardFetchAttempted := false
+	if p.respondToAtEveryoneAndHere && !p.groupReplyAll && msgType == "interactive" &&
+		chatType == "group" && !botMentioned && messageID != "" {
+		cardFetchAttempted = true
+		prefetchedCard = p.fetchRawCardContentForInbound(ctx, messageID)
+		if !atEveryone && cardAtAll(prefetchedCard) {
+			atEveryone = true
+		}
+	}
 
 	// With history sharing enabled, observe ordinary text/post messages only
 	// after the chat-level allow list has admitted the chat. Do this before the
@@ -1779,7 +1839,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		}
 		p.rememberGroupHistory(
 			p.groupHistoryScope(msg, chatID), messageID, msgType, stringValue(msg.Content), msg.Mentions,
-			userID, senderType,
+			userID, senderType, prefetchedCard,
 		)
 		return nil
 	}
@@ -1857,7 +1917,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
 
-	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	rctx := replyContext{
+		messageID: messageID, chatID: chatID, sessionKey: sessionKey,
+		prefetchedCard: prefetchedCard, cardFetchAttempted: cardFetchAttempted,
+	}
 	var groupHistoryCtx groupHistoryContext
 	if p.groupChatHistoryShare && chatType == "group" && !p.groupReplyAll && botOpenID != "" && (botMentioned || atEveryone) {
 		scope := p.groupHistoryScope(msg, chatID)
@@ -2106,6 +2169,48 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			UserMessageTimeMs: createTimeMs,
 		})
 
+	case "interactive":
+		slog.Debug(p.tag()+": interactive raw content", "message_id", messageID, "content", truncateForLog(content, 2000))
+		var textParts []string
+		var images []core.ImageAttachment
+		usedRaw := false
+		// Card 2.0 event bodies are a lossy fallback (title + upgrade
+		// notice); prefer the original payload via user_card_content. For
+		// group cards the gate may already have fetched it; a prefetch that
+		// ran (and failed or timed out) is final and is not retried here, so
+		// the turn degrades to the event body just like a card with no
+		// readable original at all.
+		raw := rctx.prefetchedCard
+		if raw == "" && !rctx.cardFetchAttempted {
+			raw = p.fetchRawCardContent(ctx, messageID)
+		}
+		if raw != "" {
+			if rp, rk := extractCard2RawParts(raw, mapMentionKeys(mentions)); len(rp) > 0 || len(rk) > 0 {
+				textParts = rp
+				images = p.downloadInteractiveImages(messageID, rk)
+				usedRaw = true
+			}
+		}
+		if !usedRaw {
+			textParts, images = p.parseInteractiveContent(messageID, content, mentions)
+		}
+		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
+		text = p.resolveRawAtIDs(text, mentions)
+		slog.Debug(p.tag()+": interactive extracted", "message_id", messageID, "text", truncateForLog(text, 2000), "images", len(images), "used_raw", usedRaw)
+		if text == "" && historyText == "" && len(images) == 0 && quoted.text == "" && len(quoted.images) == 0 {
+			return
+		}
+		// Flush any image batch buffered earlier in this session (#1686 P1-B).
+		p.flushImageBatchForSession(sessionKey)
+		dispatchCore(&core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Content: text, ExtraContent: quoted.text, Images: append(quoted.images, images...),
+			ReplyCtx:          rctx,
+			UserMessageTimeMs: createTimeMs,
+		})
+
 	case "file":
 		var fileBody struct {
 			FileKey  string `json:"file_key"`
@@ -2251,10 +2356,10 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 			UserMessageTimeMs: createTimeMs,
 		})
 
-	case "system", "interactive":
+	case "system":
 		// system messages are generated by Feishu (member joined, …), not
 		// written by the user, so they must not start an agent turn.
-		// Inbound interactive cards are left as they are here.
+		// Inbound interactive cards have a dedicated case above.
 		slog.Debug(p.tag()+": ignoring unsupported message type", "type", msgType)
 
 	default:
@@ -2277,27 +2382,39 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 
 // resolveUserName fetches a user's display name via the Contact API, with caching.
 func (p *Platform) resolveUserName(openID string) string {
-	if !isValidFeishuLookupID(openID) {
-		return openID
+	return p.resolveUserNameAs(openID, "open_id")
+}
+
+// resolveUserNameAs resolves any documented user-ID form by explicitly
+// naming its user_id_type (open_id, union_id, user_id). Cache entries are
+// namespaced by type.
+func (p *Platform) resolveUserNameAs(userID, userIDType string) string {
+	if !isValidFeishuLookupID(userID) {
+		return userID
 	}
-	if cached, ok := p.userNameCache.Load(openID); ok {
+	cacheKey := userIDType + ":" + userID
+	if cached, ok := p.userNameCache.Load(cacheKey); ok {
+		return cached.(string)
+	}
+	// Backward-compatible: entries cached by resolveUserName before typing.
+	if cached, ok := p.userNameCache.Load(userID); ok && userIDType == "open_id" {
 		return cached.(string)
 	}
 	resp, err := p.client.Contact.User.Get(context.Background(),
 		larkcontact.NewGetUserReqBuilder().
-			UserId(openID).
-			UserIdType("open_id").
+			UserId(userID).
+			UserIdType(userIDType).
 			Build())
 	if err != nil {
-		slog.Debug(p.tag()+": resolve user name failed", "open_id", openID, "error", err)
-		return openID
+		slog.Debug(p.tag()+": resolve user name failed", "user_id", userID, "user_id_type", userIDType, "error", err)
+		return userID
 	}
 	if !resp.Success() || resp.Data == nil || resp.Data.User == nil || resp.Data.User.Name == nil {
-		slog.Debug(p.tag()+": resolve user name: no data", "open_id", openID, "code", resp.Code)
-		return openID
+		slog.Debug(p.tag()+": resolve user name: no data", "user_id", userID, "user_id_type", userIDType, "code", resp.Code)
+		return userID
 	}
 	name := *resp.Data.User.Name
-	p.userNameCache.Store(openID, name)
+	p.userNameCache.Store(cacheKey, name)
 	return name
 }
 
@@ -2713,7 +2830,11 @@ func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *ch
 			})
 		}
 	case "interactive":
-		text = extractInteractiveCardText(content)
+		if rp, _ := extractCard2RawParts(content, mapAPIMentionKeys(item.Mentions)); len(rp) > 0 {
+			text = replaceMentions(strings.Join(rp, "\n"), item.Mentions)
+		} else {
+			text = replaceMentions(extractInteractiveReceiveText(content), item.Mentions)
+		}
 	case "merge_forward":
 		// Expanding the forward is required when the user replies to a
 		// merge_forward: the reply arrives with a newer create_time and can
@@ -2931,6 +3052,19 @@ func extractPostPlainText(content string) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// truncateForLog cuts s to at most n runes for log output, so a large card
+// body cannot flood the log. Multibyte-safe.
+func truncateForLog(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "..."
 }
 
 // extractInteractiveCardText extracts readable text from a Feishu interactive card JSON.
@@ -3369,6 +3503,22 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 		case "merge_forward":
 			sb.WriteString(fmt.Sprintf("%s[%s] %s: [forwarded messages]\n", indent, ts, senderName))
 			p.formatMergeForwardTree(msgID, childrenMap, nameMap, sb, images, files, depth+1)
+
+		case "interactive":
+			// Cards nested inside a merged-forward thread: same receive-format
+			// extraction as live dispatch, with images downloaded inline.
+			evolvedParts, evolvedImages := p.parseInteractiveContent(msgID, content, nil)
+			*images = append(*images, evolvedImages...)
+			evolvedText := p.resolveRawAtIDs(replaceMentions(strings.Join(evolvedParts, "\n"), item.Mentions), nil)
+			if evolvedText == "" && len(evolvedImages) > 0 {
+				evolvedText = "[image]"
+			}
+			if evolvedText != "" {
+				fmt.Fprintf(sb, "%s[%s] %s:\n", indent, ts, senderName)
+				for _, line := range strings.Split(evolvedText, "\n") {
+					fmt.Fprintf(sb, "%s    %s\n", indent, line)
+				}
+			}
 
 		default:
 			if describesFeishuMessageType(msgType) {
