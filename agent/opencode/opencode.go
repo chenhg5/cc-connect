@@ -196,6 +196,13 @@ func normalizeMode(raw string) string {
 
 func (a *Agent) Name() string { return "opencode" }
 
+// PromptKeptOnRetriableError implements core.PromptKeptOnErrorAgent. OpenCode
+// stores the user message before it calls the model, and the errors classified
+// as retriable (opencodeErrorKind) come from that model call, so the prompt is
+// already part of the conversation when one is reported. Failures before the
+// prompt is delivered carry no retriable kind and are never retried.
+func (a *Agent) PromptKeptOnRetriableError() bool { return true }
+
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
