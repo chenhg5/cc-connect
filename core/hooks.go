@@ -19,6 +19,7 @@ type HookEventType string
 const (
 	HookEventMessageReceived    HookEventType = "message.received"
 	HookEventMessageSent        HookEventType = "message.sent"
+	HookEventUsageLimited       HookEventType = "turn.usage_limited"
 	HookEventSessionStarted     HookEventType = "session.started"
 	HookEventSessionEnded       HookEventType = "session.ended"
 	HookEventCronTriggered      HookEventType = "cron.triggered"
@@ -179,6 +180,11 @@ func (hm *HookManager) executeCommand(h *HookConfig, event HookEvent) {
 	cmd := shellExecCommand(ctx, hm.shell, hm.shellFlag, hm.shellProfile, h.Command)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = append(os.Environ(), eventToEnv(event)...)
+	// The environment carries only the common fields; the whole event,
+	// Extra included, goes to stdin as JSON (the http handler's body).
+	if body, err := json.Marshal(event); err == nil {
+		cmd.Stdin = bytes.NewReader(body)
+	}
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
