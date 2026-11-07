@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -260,9 +261,16 @@ func convertSessionList(entries []acpSessionListEntry, cwdFilter string) []core.
 	return out
 }
 
+// truncateForLog shortens a string for an error message. The limit counts
+// characters instead of bytes and the cut never lands inside a multi-byte
+// character (Issue #2103). A string that already fits is returned unchanged,
+// so bytes that are not valid UTF-8 are passed through as-is.
 func truncateForLog(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string([]rune(s)[:n]) + "…"
 }
