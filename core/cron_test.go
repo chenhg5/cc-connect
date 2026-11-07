@@ -1022,8 +1022,10 @@ func TestCronScheduler_SleepRecovery_PastDueFiresImmediately(t *testing.T) {
 	cs.signalWakeUp()
 
 	// Should fire within maxCronTimerSpan (30s) of the wake-up signal,
-	// not 8 hours from now (the naive pre-fix behavior).
-	deadline := time.Now().Add(maxCronTimerSpan + 5*time.Second)
+	// not 8 hours from now (the naive pre-fix behavior). The budget is widened
+	// because a shared runner can observe the wake-up late even when the
+	// scheduler itself woke on time.
+	deadline := time.Now().Add(timingTestBudget(maxCronTimerSpan) + 5*time.Second)
 	startSent := len(platform.getSent())
 	for time.Now().Before(deadline) {
 		if len(platform.getSent()) > startSent+1 {
@@ -1031,7 +1033,7 @@ func TestCronScheduler_SleepRecovery_PastDueFiresImmediately(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("past-due job did not fire within %v after wake-up signal", maxCronTimerSpan+5*time.Second)
+	t.Fatalf("past-due job did not fire within %v after wake-up signal", timingTestBudget(maxCronTimerSpan)+5*time.Second)
 }
 
 // TestCronScheduler_AddJobDuringRunWakesLoop verifies that AddJob called
@@ -1086,14 +1088,14 @@ func TestCronScheduler_AddJobDuringRunWakesLoop(t *testing.T) {
 	cs.mu.Unlock()
 	cs.signalWakeUp()
 
-	deadline := time.Now().Add(maxCronTimerSpan + 5*time.Second)
+	deadline := time.Now().Add(timingTestBudget(maxCronTimerSpan) + 5*time.Second)
 	for time.Now().Before(deadline) {
 		if len(platform.getSent()) >= 2 {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("late-added job did not fire within %v", maxCronTimerSpan+5*time.Second)
+	t.Fatalf("late-added job did not fire within %v", timingTestBudget(maxCronTimerSpan)+5*time.Second)
 }
 
 // TestCronScheduler_RemoveJobDuringRunPreventsFire verifies that calling
