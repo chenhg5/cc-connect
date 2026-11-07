@@ -1618,36 +1618,10 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	// Resolve workspace-specific agent and sessions for multi-workspace mode.
-	// Priority: job.WorkDir (explicit) > workspace binding > global agent fallback.
-	agent := e.agent
-	sessions := e.sessions
-	workspaceDir := ""
-
-	if e.multiWorkspace {
-		channelID := extractChannelID(sessionKey)
-		if channelID != "" {
-			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
-			if err == nil && workspace != "" {
-				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
-				if err == nil {
-					agent = wsAgent
-					sessions = wsSessions
-					workspaceDir = effectiveDir
-				}
-			}
-		}
-	}
-
-	if job.WorkDir != "" {
-		wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(job.WorkDir)
-		if err == nil {
-			agent = wsAgent
-			sessions = wsSessions
-			workspaceDir = job.WorkDir
-		} else {
-			slog.Warn("cron: workspace agent creation failed, using global",
-				"work_dir", job.WorkDir, "session_key", sessionKey, "error", err)
-		}
+	// Explicit work_dir wins; topic bindings select the original session store.
+	agent, sessions, workspaceDir, err := e.scheduledWorkspaceContext(targetPlatform, sessionKey, job.WorkDir)
+	if err != nil {
+		return fmt.Errorf("cron: resolve workspace: %w", err)
 	}
 
 	if strings.HasPrefix(content, "/") {
@@ -1824,35 +1798,9 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		ModeOverride: job.Mode,
 	}
 
-	agent := e.agent
-	sessions := e.sessions
-	workspaceDir := ""
-
-	if e.multiWorkspace {
-		channelID := extractChannelID(sessionKey)
-		if channelID != "" {
-			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
-			if err == nil && workspace != "" {
-				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
-				if err == nil {
-					agent = wsAgent
-					sessions = wsSessions
-					workspaceDir = effectiveDir
-				}
-			}
-		}
-	}
-
-	if job.WorkDir != "" {
-		wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(job.WorkDir)
-		if err == nil {
-			agent = wsAgent
-			sessions = wsSessions
-			workspaceDir = job.WorkDir
-		} else {
-			slog.Warn("timer: workspace agent creation failed, using global",
-				"work_dir", job.WorkDir, "session_key", sessionKey, "error", err)
-		}
+	agent, sessions, workspaceDir, err := e.scheduledWorkspaceContext(targetPlatform, sessionKey, job.WorkDir)
+	if err != nil {
+		return fmt.Errorf("timer: resolve workspace: %w", err)
 	}
 
 	if strings.HasPrefix(content, "/") {
