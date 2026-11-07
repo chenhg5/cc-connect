@@ -59,7 +59,8 @@ func TestDispatchPostMention_PreservesOtherUsersAndEveryone(t *testing.T) {
 
 func TestPostMention_DirectOpenIDStillRemoved(t *testing.T) {
 	p := &Platform{botOpenID: "ou_bot"}
-	parts, _ := p.parsePostContent("", `{"content":[[{"tag":"at","user_id":"ou_bot","user_name":"Bot"},{"tag":"text","text":"/help"}]]}`)
+	post := mustParsePost(t, p, `{"content":[[{"tag":"at","user_id":"ou_bot","user_name":"Bot"},{"tag":"text","text":"/help"}]]}`)
+	parts, _ := p.extractPostParts("", post)
 	if got := strings.Join(parts, "\n"); got != "/help" {
 		t.Fatalf("got %q, want /help", got)
 	}

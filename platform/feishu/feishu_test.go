@@ -977,7 +977,7 @@ func TestExtractPostParts_Markdown(t *testing.T) {
 func TestParsePostContent_FlatFormat(t *testing.T) {
 	p := &Platform{}
 	raw := `{"title":"test","content":[[{"tag":"text","text":"hello"}]]}`
-	texts, _ := p.parsePostContent("", raw)
+	texts, _ := p.extractPostParts("", mustParsePost(t, p, raw))
 	if len(texts) != 2 || texts[0] != "test" || texts[1] != "hello" {
 		t.Errorf("unexpected result: %v", texts)
 	}
@@ -986,7 +986,7 @@ func TestParsePostContent_FlatFormat(t *testing.T) {
 func TestParsePostContent_LangKeyedFormat(t *testing.T) {
 	p := &Platform{}
 	raw := `{"zh_cn":{"title":"标题","content":[[{"tag":"text","text":"内容"}]]}}`
-	texts, _ := p.parsePostContent("", raw)
+	texts, _ := p.extractPostParts("", mustParsePost(t, p, raw))
 	if len(texts) != 2 || texts[0] != "标题" || texts[1] != "内容" {
 		t.Errorf("unexpected result: %v", texts)
 	}
@@ -994,9 +994,8 @@ func TestParsePostContent_LangKeyedFormat(t *testing.T) {
 
 func TestParsePostContent_InvalidJSON(t *testing.T) {
 	p := &Platform{}
-	texts, images := p.parsePostContent("", "not json")
-	if texts != nil || images != nil {
-		t.Errorf("expected nil results for invalid json")
+	if post := p.parsePostBody("not json"); post != nil {
+		t.Errorf("expected nil post for invalid json, got %#v", post)
 	}
 }
 
@@ -2440,7 +2439,7 @@ func TestFlushImageBatchForSession_NoBatchIsSafe(t *testing.T) {
 func TestParsePostFiles_FlatFormat(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	raw := `{"title":"","content":[[{"tag":"text","text":"按这个表里的字段,重新填充"}]],"files":[{"file_key":"file_v3_0015o_b1621303","file_name":"Huidive -询盘跟进表.xlsx","is_folder":false}]}`
-	got := p.parsePostFiles(raw)
+	got := mustParsePost(t, p, raw).Files
 	if len(got) != 1 {
 		t.Fatalf("len(files) = %d, want 1", len(got))
 	}
@@ -2458,7 +2457,7 @@ func TestParsePostFiles_FlatFormat(t *testing.T) {
 func TestParsePostFiles_LangKeyedFormat(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	raw := `{"zh_cn":{"title":"","content":[[{"tag":"text","text":"看这个"}]],"files":[{"file_key":"file_lang_k","file_name":"LANG.pdf"}]}}`
-	got := p.parsePostFiles(raw)
+	got := mustParsePost(t, p, raw).Files
 	if len(got) != 1 {
 		t.Fatalf("len(files) = %d, want 1", len(got))
 	}
@@ -2473,7 +2472,7 @@ func TestParsePostFiles_LangKeyedFormat(t *testing.T) {
 func TestParsePostFiles_NoFiles(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	raw := `{"title":"","content":[[{"tag":"text","text":"just text, no files"}]]}`
-	if got := p.parsePostFiles(raw); len(got) != 0 {
+	if got := mustParsePost(t, p, raw).Files; len(got) != 0 {
 		t.Fatalf("len(files) = %d, want 0", len(got))
 	}
 }
