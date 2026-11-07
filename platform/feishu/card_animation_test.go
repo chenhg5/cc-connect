@@ -1,8 +1,13 @@
 package feishu
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -120,14 +125,221 @@ func TestDisableCardStreamingMode_NoConfigBlock(t *testing.T) {
 
 // TestBuildRichCard_StreamingModeFlag documents that the card JSON carries the
 // streaming_mode flag the Feishu client uses to decide whether to animate the
-// text character by character.
+// text character by character, and that the platform-level switch overrides
+// whatever the caller asked for.
 func TestBuildRichCard_StreamingModeFlag(t *testing.T) {
-	on := buildRichCard(core.CardStatusWorking, "", nil, "hello", true, "")
-	off := buildRichCard(core.CardStatusWorking, "", nil, "hello", false, "")
+	on := (&Platform{platformName: "feishu", cardAnimation: true}).
+		BuildRichCard(core.CardStatusWorking, "", nil, "hello", true, "")
+	off := (&Platform{platformName: "feishu", cardAnimation: false}).
+		BuildRichCard(core.CardStatusWorking, "", nil, "hello", true, "")
 	if !strings.Contains(on, `"streaming_mode":true`) {
-		t.Error("streaming card should carry streaming_mode:true")
+		t.Error("animation on: streaming card should carry streaming_mode:true")
 	}
 	if !strings.Contains(off, `"streaming_mode":false`) {
-		t.Error("non-streaming card should carry streaming_mode:false")
+		t.Error("animation off: mid-turn card must carry streaming_mode:false")
+	}
+}
+
+// TestCardAnimationOff_WirePayloads pins the whole turn on the wire: the card
+// is created inline with config.streaming_mode=false, no cardkit entity is
+// created, and the first mid-turn Patch still carries streaming_mode=false.
+func TestCardAnimationOff_WirePayloads(t *testing.T) {
+	const appID = "cli_card_anim_off"
+	const appSecret = "secret"
+
+	var (
+		mu          sync.Mutex
+		createBody  string
+		patchBody   string
+		cardkitHits int
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code": 0, "msg": "success", "expire": 7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case r.URL.Path == "/open-apis/cardkit/v1/cards":
+			mu.Lock()
+			cardkitHits++
+			mu.Unlock()
+			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"card_id": "card_x"}})
+		case r.URL.Path == "/open-apis/im/v1/messages" && r.Method == http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			createBody = string(body)
+			mu.Unlock()
+			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"message_id": "om_card_1"}})
+		case strings.Contains(r.URL.Path, "/messages/") && r.Method == http.MethodPatch:
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			patchBody = string(body)
+			mu.Unlock()
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "ok"})
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:       "feishu",
+		domain:             srv.URL,
+		appID:              appID,
+		appSecret:          appSecret,
+		useInteractiveCard: true,
+		cardAnimation:      false,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+	}
+
+	ctx := context.Background()
+	// The engine builds every mid-turn frame with streaming=true.
+	initial := p.BuildRichCard(core.CardStatusWorking, "", nil, "", true, "")
+	handle, err := p.SendPreviewStart(ctx, replyContext{chatID: "oc_chat"}, initial)
+	if err != nil {
+		t.Fatalf("SendPreviewStart() error = %v", err)
+	}
+
+	mu.Lock()
+	if cardkitHits != 0 {
+		mu.Unlock()
+		t.Fatalf("cardkit entity created %d times, want 0 when animation is off", cardkitHits)
+	}
+	if !strings.Contains(createBody, `\"streaming_mode\":false`) {
+		mu.Unlock()
+		t.Fatalf("created card must carry streaming_mode:false, body = %s", createBody)
+	}
+	mu.Unlock()
+
+	update := p.BuildRichCard(core.CardStatusWorking, "", nil, "partial answer", true, "")
+	if err := p.UpdateMessage(ctx, handle, update); err != nil {
+		t.Fatalf("UpdateMessage() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(patchBody, `\"streaming_mode\":false`) {
+		t.Fatalf("first mid-turn Patch must keep streaming_mode:false (regression), body = %s", patchBody)
+	}
+}
+
+// TestCardAnimationOn_WirePayloads is the control: with the switch on (the
+// default), the same Patch path must still carry streaming_mode:true.
+func TestCardAnimationOn_WirePayloads(t *testing.T) {
+	const appID = "cli_card_anim_on"
+	const appSecret = "secret"
+
+	var (
+		mu        sync.Mutex
+		patchBody string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code": 0, "msg": "success", "expire": 7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.Contains(r.URL.Path, "/messages/") && r.Method == http.MethodPatch:
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			patchBody = string(body)
+			mu.Unlock()
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
+		default:
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "ok"})
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:       "feishu",
+		domain:             srv.URL,
+		appID:              appID,
+		appSecret:          appSecret,
+		useInteractiveCard: true,
+		cardAnimation:      true,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+	}
+
+	handle := &feishuPreviewHandle{messageID: "om_card_on", chatID: "oc_chat"}
+	update := p.BuildRichCard(core.CardStatusWorking, "", nil, "partial answer", true, "")
+	if err := p.UpdateMessage(context.Background(), handle, update); err != nil {
+		t.Fatalf("UpdateMessage() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(patchBody, `\"streaming_mode\":true`) {
+		t.Fatalf("animation on: Patch must carry streaming_mode:true, body = %s", patchBody)
+	}
+}
+
+// TestPatchMessageRateLimitedSkipsFrame: a 230020 on the Patch path must be
+// swallowed (frame skipped) instead of surfacing as an error the engine only
+// logs at Debug.
+func TestPatchMessageRateLimitedSkipsFrame(t *testing.T) {
+	const appID = "cli_patch_ratelimit"
+	const appSecret = "secret"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code": 0, "msg": "success", "expire": 7200,
+				"tenant_access_token": "tenant-token",
+			})
+		case strings.Contains(r.URL.Path, "/messages/") && r.Method == http.MethodPatch:
+			writeJSON(t, w, map[string]any{"code": 230020, "msg": "too many requests"})
+		default:
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "ok"})
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName:       "feishu",
+		domain:             srv.URL,
+		appID:              appID,
+		appSecret:          appSecret,
+		useInteractiveCard: true,
+		cardAnimation:      true,
+		client: lark.NewClient(appID, appSecret,
+			lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+		replayClient: lark.NewClient(appID, appSecret,
+			lark.WithEnableTokenCache(false),
+			lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())),
+	}
+
+	handle := &feishuPreviewHandle{messageID: "om_card_rl", chatID: "oc_chat"}
+	card := p.BuildRichCard(core.CardStatusWorking, "", nil, "partial", true, "")
+	if err := p.UpdateMessage(context.Background(), handle, card); err != nil {
+		t.Fatalf("rate-limited Patch should be skipped, got error = %v", err)
+	}
+}
+
+// TestNewPlatform_RejectsNonBoolCardAnimation: a non-bool value is a config
+// mistake, not a silent "animation off".
+func TestNewPlatform_RejectsNonBoolCardAnimation(t *testing.T) {
+	if _, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+		"app_id":            "cli_test",
+		"app_secret":        "secret",
+		"cc_card_animation": "false",
+	}); err == nil {
+		t.Fatal("non-bool cc_card_animation should be rejected")
 	}
 }

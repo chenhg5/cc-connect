@@ -441,10 +441,15 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		useInteractiveCard = v
 	}
 	// Native typewriter animation on rich cards. When disabled the platform
-	// skips the cardkit-v1 streaming-text API and updates the card with a
-	// full-card Patch, so the text appears in one shot.
+	// skips the cardkit-v1 streaming-text API and renders every card with
+	// config.streaming_mode = false; the body is then refreshed by whole-card
+	// Patches instead of per-character increments.
 	cardAnimation := true
-	if v, ok := opts["cc_card_animation"].(bool); ok {
+	if raw, ok := opts["cc_card_animation"]; ok {
+		v, isBool := raw.(bool)
+		if !isBool {
+			return nil, fmt.Errorf("%s: invalid cc_card_animation %v (want bool)", name, raw)
+		}
 		cardAnimation = v
 	}
 
@@ -5318,8 +5323,8 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		// With cardAnimation off we deliberately skip the cardkit entity: a
 		// card_id-backed card is always in streaming mode, and Feishu renders
 		// streaming text with a typewriter animation. Sending the card inline
-		// instead keeps the rich card layout but lets the engine update it via
-		// full-card Patch, so the text appears in one shot.
+		// instead keeps the rich card layout, and the engine refreshes it with
+		// whole-card Patches (no per-character typewriter).
 		if !p.cardAnimation {
 			cardJSON = disableCardStreamingMode(cardJSON)
 			sendContent = cardJSON
@@ -5580,7 +5585,7 @@ func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON str
 			Content(cardJSON).
 			Build()).
 		Build()
-	return p.withTransientRetry(ctx, "patch message", func() error {
+	err := p.withTransientRetry(ctx, "patch message", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "patch message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Patch(ctx, req, options...)
 			if err != nil {
@@ -5592,6 +5597,11 @@ func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON str
 			return nil
 		})
 	})
+	if err != nil && errors.Is(err, errFeishuCardRateLimited) {
+		slog.Warn(p.tag()+": patch message rate limited; skipping frame", "message_id", messageID)
+		return nil
+	}
+	return err
 }
 
 // updateCardEntity performs a full-card replacement on a cardkit-v1 entity via
@@ -7599,7 +7609,14 @@ func splitMarkdownByTables(md string, maxTables int) []string {
 // statusFooter (multi-line, '\n'-separated) and passes it through; the renderer
 // splits it back into one dim notation block per line.
 func (p *Platform) BuildRichCard(status core.CardStatus, title string, steps []core.ToolStep, markdown string, streaming bool, statusFooter string) string {
-	return buildRichCard(status, title, steps, markdown, streaming, statusFooter)
+	card := buildRichCard(status, title, steps, markdown, streaming, statusFooter)
+	if !p.cardAnimation {
+		// The switch has to hold for the card's whole lifetime, not just its
+		// creation: the engine rebuilds every mid-turn frame with
+		// streaming=true, so an update would otherwise re-arm the typewriter.
+		card = disableCardStreamingMode(card)
+	}
+	return card
 }
 
 // SplitMarkdownByTables implements core.MarkdownTableSplitter.

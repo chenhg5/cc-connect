@@ -1066,8 +1066,9 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 // block; default is true (animation on).
 //
 // When false, the Feishu platform skips the cardkit-v1 streaming-text API and
-// updates the card with a full-card Patch instead. The text then lands in one
-// shot instead of being typed out character by character.
+// renders every card with config.streaming_mode = false. The per-character
+// typewriter is gone and the body is refreshed by whole-card Patches instead.
+// Takes effect only when card_mode = "rich".
 func EffectiveCardAnimation(cfg *Config, proj *ProjectConfig) bool {
 	var projDisp *DisplayConfig
 	if proj != nil {
