@@ -1705,17 +1705,55 @@ app_secret = "your-feishu-app-secret"
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #
-# Mode options / 模式说明:
-# - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）
-# - "auto-edit": auto-approve file edits, ask for shell commands / 文件编辑自动通过，Shell 命令仍需确认
-# - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
-# - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
+# Backend / 后端（同一个 mode 在不同后端下行为不同）:
+# - "exec" (default): runs `codex exec --json`. It has no approval channel, so
+#   approval_policy is always "never" and no mode ever pops an interactive
+#   approval prompt. Only the sandbox tier limits what the model can touch.
+# - "app_server": runs the Codex app-server and is the only backend that can
+#   actually ask; with mode = "suggest" it requests approval for every tool call.
+# "exec"(默认) 走 `codex exec --json`：没有审批通道，approval_policy 恒为
+# "never"，任何 mode 都不会弹交互式审批；限制模型的只有沙箱档位。
+# "app_server" 走 Codex app-server，是唯一会真的询问的后端：配合
+# mode = "suggest" 每次工具调用都会请求审批。
+# backend = "app_server"  # "exec"(默认) | "app_server"；app_server + suggest 才会真的逐次询问
+#
+# Mode options / 模式说明 (behavior depends on the backend / 行为取决于后端):
+# - "suggest":   read-only sandbox; no prompts on "exec", asks for every tool call on "app_server" (default, safest)
+#                只读沙箱；exec 后端不弹审批，app_server 后端每次工具调用都会询问（默认，最安全）
+# - "auto-edit": workspace-write sandbox, no approval prompts (on "exec" it is an alias of "full-auto")
+#                工作区可写沙箱，不弹审批（exec 后端上等同于 full-auto）
+# - "full-auto": workspace-write sandbox, no approval prompts
+#                工作区可写沙箱，不弹审批
+# - "yolo":      bypass all approvals and sandbox (dangerous)
+#                跳过所有审批和沙箱（危险）
 #
 # Optional: specify a model / 可选：指定模型
 # model = "gpt-6.1-sol"
 #
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
 # reasoning_effort = "high"  # "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+#
+# Optional: app-server transport, only used by the "app_server" backend
+# 可选：app-server 传输方式，仅 "app_server" 后端使用
+# app_server_url = "stdio"  # "stdio" (recommended) | "ws://host:port" for a WebSocket listener
+#                            # "stdio"（推荐）| "ws://host:port" 走 WebSocket 监听器
+# "stdio" is normalized to "stdio://".
+# "stdio" 会被归一为 "stdio://"。
+# Version caveat: this option only works on builds that include #1786 (current main,
+# not in any released version yet). Released builds up to v1.5.1-beta.3 append
+# "--listen" to any non-empty url, so "stdio" -> "stdio://" -> "--listen stdio://";
+# on codex 0.152+ any --listen makes the app-server serve the listener only, so stdio
+# stays unresponsive and every initialize times out (see #1781) — setting
+# app_server_url = "stdio" explicitly does NOT help there. On a released build use
+# backend = "exec", or wait for a release that includes #1786; only on codex < 0.152
+# is the stdio transport unaffected by --listen.
+# 版本注意：此选项只对包含 #1786 的构建生效（当前 main，尚未进入任何已发布版）。
+# 已发布版本（v1.5.1-beta.3 及更早）对任何非空 url 都会追加 "--listen"，
+# 于是 "stdio" -> "stdio://" -> "--listen stdio://"；在 codex 0.152+ 上只要带
+# --listen，app-server 就只服务监听器、stdio 不响应，每次 initialize 都会超时
+# （见 #1781）—— 显式写 app_server_url = "stdio" 在已发布版上同样无效。
+# 已发布版请用 backend = "exec"，或等包含 #1786 的版本发布；只有在 codex < 0.152
+# 上 stdio 传输才不受 --listen 影响。
 #
 # Optional: project system prompt / 可选：项目系统提示
 # Codex has no native system-prompt flag, so cc-connect injects this as a

@@ -91,12 +91,23 @@ All agents support permission modes switchable at runtime via `/mode`.
 
 ### Codex Modes
 
-| Mode | Config Value | Behavior |
-|------|-------------|----------|
-| Suggest | `suggest` | Only trusted commands run without approval |
-| Auto Edit | `auto-edit` | Model decides when to ask |
-| Full Auto | `full-auto` | Auto-approve with sandbox |
-| YOLO | `yolo` | Bypass all approvals and sandbox |
+Codex has two backends (the `backend` option), and **the same mode behaves differently per backend**:
+
+| Backend | Config Value | Notes |
+|---------|--------------|-------|
+| Default backend | `exec` | Runs `codex exec --json`. It has **no approval channel**: `approval_policy` is always `"never"` and no mode ever pops an interactive approval prompt; only the sandbox tier (read-only / workspace-write) limits what the model can touch |
+| app-server | `app_server` | Runs the Codex app-server — the **only backend that actually asks** |
+
+| Mode | Config Value | `exec` backend | `app_server` backend |
+|------|--------------|----------------|---------------------|
+| Suggest | `suggest` | Read-only sandbox, no prompts | Requests approval for every tool call (safest, default) |
+| Auto Edit | `auto-edit` | Workspace-write sandbox, no prompts (on `exec` it is an alias of `full-auto`) | Workspace-write sandbox, no prompts |
+| Full Auto | `full-auto` | Workspace-write sandbox, no prompts | Workspace-write sandbox, no prompts |
+| YOLO | `yolo` | Skips all approvals and the sandbox (dangerous) | Skips all approvals and the sandbox (dangerous) |
+
+**How you actually get an approval prompt**: the only ready-made path is `backend = "app_server"` + `mode = "suggest"` — the `exec` backend has no approval IPC at all, so `approval_policy` can only be `never`; otherwise the CLI waits forever for a TTY response that never comes.
+
+**How to write `app_server_url`**: only used by the `app_server` backend; `app_server_url = "stdio"` is recommended (normalized to `"stdio://"`). **Version caveat (important)**: this option only works on builds that include [#1786](https://github.com/chenhg5/cc-connect/pull/1786) (current `main`, not in any released version yet). Released builds up to v1.5.1-beta.3 append `--listen` to any non-empty url, so `"stdio"` normalizes to `"stdio://"` and becomes `--listen stdio://`; on codex 0.152+ any `--listen` makes the app-server serve the listener only, leaving stdio unresponsive, so every `initialize` times out ([#1781](https://github.com/chenhg5/cc-connect/issues/1781)) — setting `app_server_url = "stdio"` explicitly does **not** help there. On a released build use `backend = "exec"`, or wait for a release that includes #1786; only on codex < 0.152 is the stdio transport unaffected by `--listen`.
 
 ### Codex CLI discovery on macOS
 
