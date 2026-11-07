@@ -920,6 +920,9 @@ Adds a cron job. Either `prompt` or `exec` must be provided, not both.
 | `silent`     | boolean | no       | Suppress start notification                   |
 | `session_mode` | string | no       | `reuse` (default) or `new_per_run` — new agent session each run |
 | `timeout_mins` | int    | no       | Scheduler wait per run: omit = 30 min, `0` = no time limit |
+| `model`      | string  | no       | Model override for prompt jobs (any non-blank ID, trimmed; not allowed with `exec`). Forces a fresh isolated session per run (no chat context; same work directory). Fails at run time if the agent does not support per-job models. Clear with `PATCH /api/v1/cron/{id}` and body `{"model": ""}` |
+
+One-shot timers have no Management API endpoint. Set a timer's `model` with `cc-connect timer add --model <model>`, which goes through the local Unix socket API (`/timer/add`). The same rules apply.
 
 **Response:**
 
