@@ -48,18 +48,20 @@ type APIServer struct {
 // the dispatch layer in engine.go. See cc-connect internal task
 // t-20260615-cqjbk1.
 type SendRequest struct {
-	Project    string            `json:"project"`
-	SessionKey string            `json:"session_key"`
-	Message    string            `json:"message"`
-	WorkDir    string            `json:"work_dir,omitempty"`
-	CWD        string            `json:"cwd,omitempty"`
-	TTSText    string            `json:"tts_text,omitempty"`
-	Images     []ImageAttachment `json:"images,omitempty"`
-	Files      []FileAttachment  `json:"files,omitempty"`
-	Audios     []FileAttachment  `json:"audios,omitempty"`
-	Videos     []FileAttachment  `json:"videos,omitempty"`
-	AtUsers    []string          `json:"at_users,omitempty"`
-	AtAll      bool              `json:"at_all,omitempty"`
+	ReplyThreadID string            `json:"reply_thread_id,omitempty"`
+	DesktopEvent  string            `json:"desktop_event,omitempty"`
+	Project       string            `json:"project"`
+	SessionKey    string            `json:"session_key"`
+	Message       string            `json:"message"`
+	WorkDir       string            `json:"work_dir,omitempty"`
+	CWD           string            `json:"cwd,omitempty"`
+	TTSText       string            `json:"tts_text,omitempty"`
+	Images        []ImageAttachment `json:"images,omitempty"`
+	Files         []FileAttachment  `json:"files,omitempty"`
+	Audios        []FileAttachment  `json:"audios,omitempty"`
+	Videos        []FileAttachment  `json:"videos,omitempty"`
+	AtUsers       []string          `json:"at_users,omitempty"`
+	AtAll         bool              `json:"at_all,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -217,7 +219,7 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
+	if req.ReplyThreadID == "" && req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
 		http.Error(w, "message, tts_text, or attachment is required", http.StatusBadRequest)
 		return
 	}
@@ -248,9 +250,22 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	message, err := engine.desktopNotice(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Message = message
 	workDir := req.WorkDir
 	if workDir == "" {
 		workDir = req.CWD
+	}
+	if req.ReplyThreadID != "" {
+		if err := engine.registerThreadNotification(req.SessionKey, workDir, req.ReplyThreadID); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		workDir = "" // Notifications must not switch the recipient's active workspace.
 	}
 	if req.Message != "" || len(req.Images) > 0 || len(req.Files) > 0 {
 		if err := engine.SendToSessionWithOptions(req.SessionKey, req.Message, req.Images, req.Files, SendOptions{WorkDir: workDir, AtUsers: req.AtUsers, AtAll: req.AtAll}); err != nil {
