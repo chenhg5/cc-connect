@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -38,7 +39,7 @@ type opencodeSession struct {
 	wg                sync.WaitGroup
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
-	resultSent        atomic.Bool // true when EventResult has been sent for this turn
+	terminalSent      atomic.Bool // true when EventError or EventResult has been sent for this turn
 }
 
 func newOpencodeSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, agentName, resumeID string, extraEnv []string) (*opencodeSession, error) {
@@ -78,7 +79,7 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 		return fmt.Errorf("session is closed")
 	}
 
-	s.resultSent.Store(false)
+	s.terminalSent.Store(false)
 	s.expectingContinue.Store(false)
 
 	chatID := s.CurrentSessionID()
@@ -97,7 +98,7 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	// that readLoop waits for the process before delivering the result.
 	// Same setting as the gemini/kimi/antigravity adapters.
 	cmd.WaitDelay = 1 * time.Second
-	env := os.Environ()
+	env := cmd.Environ()
 	if len(s.extraEnv) > 0 {
 		env = core.MergeEnv(env, s.extraEnv)
 	}
@@ -185,7 +186,7 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 	// In yolo/auto mode, skip permission prompts entirely so headless
 	// runs don't get stuck with auto-rejected external-directory ops.
 	if s.mode == "yolo" {
-		args = append(args, "--dangerously-skip-permissions")
+		args = append(args, "--auto")
 	}
 
 	for _, imagePath := range imagePaths {
@@ -200,12 +201,6 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
-	waited := false
-	defer func() {
-		if !waited {
-			_ = cmd.Wait()
-		}
-	}()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -225,21 +220,15 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		s.handleEvent(raw)
 	}
 
+	// Wait for os/exec's stderr copy goroutine before reading stderrBuf.
+	// Reading it earlier races with that goroutine on fast-exiting commands.
+	waitErr := cmd.Wait()
+
 	if err := scanner.Err(); err != nil {
 		slog.Error("opencodeSession: scanner error", "error", err)
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-			return
-		}
+		s.sendTerminalEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)})
 		return
 	}
-
-	// exec copies stderr into stderrBuf from its own goroutine until Wait
-	// returns, so the buffer is only safe to read after that.
-	_ = cmd.Wait()
-	waited = true
 
 	stderrMsg := stderrBuf.String()
 	if stderrMsg != "" {
@@ -248,11 +237,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 			s.chatID.Store("")
 			slog.Warn("opencodeSession: cleared stale session ID")
 		}
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
-		}
+		s.sendTerminalEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)})
 		return
 	}
 
@@ -262,6 +247,13 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	if s.expectingContinue.Load() {
 		slog.Info("opencodeSession: readLoop ended after compaction_continue, skipping EventResult", "session_id", s.CurrentSessionID())
 		s.expectingContinue.Store(false)
+		return
+	}
+	// A successful CLI may leave a descendant holding stderr open.
+	// WaitDelay bounds that drain; it does not indicate a failed exit.
+	if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
+		slog.Error("opencodeSession: process exited with error", "error", waitErr)
+		s.sendTerminalEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("opencodeSession: process exit: %w", waitErr)})
 		return
 	}
 
@@ -433,12 +425,7 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 func (s *opencodeSession) handleError(raw map[string]any) {
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
-	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
-	select {
-	case s.events <- evt:
-	case <-s.ctx.Done():
-		return
-	}
+	s.sendTerminalEvent(core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)})
 }
 
 // extractErrorMessage tries to pull a human-readable message from various
@@ -510,13 +497,15 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 }
 
 func (s *opencodeSession) sendEventResult() {
-	if s.resultSent.Load() {
-		slog.Debug("opencodeSession: EventResult already sent, skipping", "session_id", s.CurrentSessionID())
+	sid := s.CurrentSessionID()
+	s.sendTerminalEvent(core.Event{Type: core.EventResult, SessionID: sid, Done: true})
+}
+
+func (s *opencodeSession) sendTerminalEvent(evt core.Event) {
+	if !s.terminalSent.CompareAndSwap(false, true) {
+		slog.Debug("opencodeSession: terminal event already sent, skipping", "session_id", s.CurrentSessionID(), "type", evt.Type)
 		return
 	}
-	s.resultSent.Store(true)
-	sid := s.CurrentSessionID()
-	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
 	select {
 	case s.events <- evt:
 	case <-s.ctx.Done():
