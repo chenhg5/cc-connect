@@ -1250,3 +1250,77 @@ func TestConfigHomeFromEnv_HonorsPerProjectConfigDir(t *testing.T) {
 		t.Errorf("configHomeFromEnv(nil) = %q, want %q", got, want)
 	}
 }
+
+// writeLongLineSession writes a transcript with a user record, one line of
+// padLen bytes (a prompt_snapshot attachment), then an assistant record.
+func writeLongLineSession(t *testing.T, padLen int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "long.jsonl")
+	long := `{"type":"attachment","pad":"` + strings.Repeat("x", padLen) + `"}`
+	lines := []string{
+		`{"type":"user","message":{"role":"user","content":"before"}}`,
+		long,
+		`{"type":"assistant","message":{"role":"assistant","content":"after"}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestScanSessionMeta_LineOver256KBStillCountsLaterRecords(t *testing.T) {
+	path := writeLongLineSession(t, 300*1024)
+	summary, count := scanSessionMeta(path)
+	if count != 2 {
+		t.Errorf("count = %d, want 2 (records after the 300KB line must be counted)", count)
+	}
+	if summary != "before" {
+		t.Errorf("summary = %q, want %q", summary, "before")
+	}
+}
+
+func TestGetSessionHistory_LineOver256KBStillReadsLaterRecords(t *testing.T) {
+	a := &Agent{workDir: setupSessionForHistory(t, "s1", writeLongLineSession(t, 300*1024))}
+	entries, err := a.GetSessionHistory(t.Context(), "s1", 0)
+	if err != nil {
+		t.Fatalf("GetSessionHistory: %v", err)
+	}
+	if len(entries) != 2 || entries[1].Content != "after" {
+		t.Errorf("entries = %+v, want before+after", entries)
+	}
+}
+
+func TestGetSessionHistory_LineOverCeilingReturnsError(t *testing.T) {
+	// Use a small ceiling so the test doesn't write a 64MB file. It must stay
+	// above the scanner's 256KB starting buffer to be enforced.
+	old := maxSessionJSONLLineSize
+	maxSessionJSONLLineSize = 512 * 1024
+	t.Cleanup(func() { maxSessionJSONLLineSize = old })
+
+	a := &Agent{workDir: setupSessionForHistory(t, "s2", writeLongLineSession(t, maxSessionJSONLLineSize+1024))}
+	entries, err := a.GetSessionHistory(t.Context(), "s2", 0)
+	if err == nil {
+		t.Fatalf("want error for line over the ceiling, got %d entries", len(entries))
+	}
+}
+
+// setupSessionForHistory copies src into the temp HOME project dir for a new
+// work dir and returns that work dir.
+func setupSessionForHistory(t *testing.T, sessionID, src string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := t.TempDir()
+	dir := filepath.Join(home, ".claude", "projects", encodeClaudeProjectKey(workDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sessionID+".jsonl"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return workDir
+}

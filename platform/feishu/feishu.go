@@ -35,7 +35,8 @@ import (
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
 
-// sanitizingLogger wraps a logger and masks sensitive URL parameters.
+// sanitizingLogger masks sensitive URL parameters and respects the application log level.
+// The WebSocket SDK does not apply WithLogLevel to a custom logger.
 type sanitizingLogger struct {
 	inner larkcore.Logger
 }
@@ -71,7 +72,11 @@ func (l *sanitizingLogger) sanitize(s string) string {
 	return s
 }
 
+// Debug forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Debug(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelDebug) {
+		return
+	}
 	for _, arg := range args {
 		s, ok := arg.(string)
 		if !ok {
@@ -85,15 +90,27 @@ func (l *sanitizingLogger) Debug(ctx context.Context, args ...interface{}) {
 	l.inner.Debug(ctx, l.maskURL(args...)...)
 }
 
+// Info forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Info(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelInfo) {
+		return
+	}
 	l.inner.Info(ctx, l.maskURL(args...)...)
 }
 
+// Warn forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Warn(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelWarn) {
+		return
+	}
 	l.inner.Warn(ctx, l.maskURL(args...)...)
 }
 
+// Error forwards sanitized SDK messages only when the application enables this level.
 func (l *sanitizingLogger) Error(ctx context.Context, args ...interface{}) {
+	if !slog.Default().Enabled(ctx, slog.LevelError) {
+		return
+	}
 	l.inner.Error(ctx, l.maskURL(args...)...)
 }
 
@@ -707,7 +724,7 @@ func (p *Platform) startWebSocketMode() error {
 	p.mu.Unlock()
 
 	go func() {
-		if err := p.wsClient.Start(ctx); err != nil {
+		if err := p.wsClient.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error(p.tag()+": websocket error", "error", err)
 		}
 	}()
@@ -1172,7 +1189,7 @@ func (p *Platform) IsMessageRecalled(ctx context.Context, rctx any) (bool, error
 
 	req := larkim.NewGetMessageReqBuilder().
 		MessageId(messageID).
-		UserIdType(larkim.UserIdTypeGetMessageOpenId).
+		UserIdType(larkim.UserIdTypeOpenId).
 		Build()
 
 	var resp *larkim.GetMessageResp
@@ -3556,13 +3573,13 @@ func detectFeishuFileType(mimeType, fileName string) string {
 	name := strings.ToLower(fileName)
 	switch {
 	case mimeType == "application/pdf" || strings.HasSuffix(name, ".pdf"):
-		return larkim.FileTypePdf
+		return larkim.CreateFileFileTypePdf
 	case strings.HasSuffix(name, ".doc") || strings.HasSuffix(name, ".docx"):
-		return larkim.FileTypeDoc
+		return larkim.CreateFileFileTypeDoc
 	case strings.HasSuffix(name, ".xls") || strings.HasSuffix(name, ".xlsx") || strings.HasSuffix(name, ".csv"):
-		return larkim.FileTypeXls
+		return larkim.CreateFileFileTypeXls
 	case strings.HasSuffix(name, ".ppt") || strings.HasSuffix(name, ".pptx"):
-		return larkim.FileTypePpt
+		return larkim.CreateFileFileTypePpt
 	// Feishu's file API only has "mp4" as the video type. We map all common
 	// video MIME types and extensions to FileTypeMp4 so the message renders
 	// as a native video player bubble rather than a generic file download.
@@ -3572,19 +3589,19 @@ func detectFeishuFileType(mimeType, fileName string) string {
 		strings.HasSuffix(name, ".mp4") || strings.HasSuffix(name, ".mov") ||
 		strings.HasSuffix(name, ".avi") || strings.HasSuffix(name, ".m4v") ||
 		strings.HasSuffix(name, ".mkv") || strings.HasSuffix(name, ".webm"):
-		return larkim.FileTypeMp4
+		return larkim.CreateFileFileTypeMp4
 	case mimeType == "audio/ogg" || mimeType == "audio/opus" || mimeType == "application/ogg" || strings.HasSuffix(name, ".ogg") || strings.HasSuffix(name, ".opus"):
-		return larkim.FileTypeOpus
+		return larkim.CreateFileFileTypeOpus
 	default:
-		return larkim.FileTypeStream
+		return larkim.CreateFileFileTypeStream
 	}
 }
 
 func detectFeishuFileMessageType(fileType string) string {
 	switch fileType {
-	case larkim.FileTypeOpus:
+	case larkim.CreateFileFileTypeOpus:
 		return larkim.MsgTypeAudio
-	case larkim.FileTypeMp4:
+	case larkim.CreateFileFileTypeMp4:
 		return larkim.MsgTypeMedia
 	default:
 		return larkim.MsgTypeFile
@@ -4254,7 +4271,7 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.ReceiveIdTypeChatId).
+		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(chatID).
 			MsgType(msgType).
@@ -5138,10 +5155,13 @@ func progressPanelTitle(label string, count int, lang string) string {
 	return label
 }
 
-func buildProgressPanel(title string, expanded bool, elements []map[string]any) map[string]any {
+// Panels always start collapsed. Every card update re-sends the whole card, so
+// an expanded flag would re-open the panels on each refresh and make the text
+// below them jump while the turn is running.
+func buildProgressPanel(title string, elements []map[string]any) map[string]any {
 	return map[string]any{
 		"tag":              "collapsible_panel",
-		"expanded":         expanded,
+		"expanded":         false,
 		"background_color": "grey",
 		"header": map[string]any{
 			"title": map[string]any{"tag": "plain_text", "content": title},
@@ -5161,26 +5181,23 @@ func buildProgressPanelElements(items []core.ProgressCardEntry, lang string) []m
 	return elements
 }
 
-func appendProgressGroupedElements(elements []map[string]any, items []core.ProgressCardEntry, lang string, running bool) []map[string]any {
+func appendProgressGroupedElements(elements []map[string]any, items []core.ProgressCardEntry, lang string) []map[string]any {
 	reasoning, tools, others := splitProgressItemsByLane(items)
 	if len(reasoning) > 0 {
 		elements = append(elements, buildProgressPanel(
 			progressPanelTitle("Reasoning", len(reasoning), lang),
-			running,
 			buildProgressPanelElements(reasoning, lang),
 		))
 	}
 	if len(tools) > 0 {
 		elements = append(elements, buildProgressPanel(
 			progressPanelTitle("Tools", len(tools), lang),
-			running,
 			buildProgressPanelElements(tools, lang),
 		))
 	}
 	if len(others) > 0 {
 		elements = append(elements, buildProgressPanel(
 			progressPanelTitle("Updates", len(others), lang),
-			running,
 			buildProgressPanelElements(others, lang),
 		))
 	}
@@ -5195,7 +5212,6 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 
 	agent := progressAgentLabel(payload.Agent)
 	title, template, footer := progressStateMeta(payload.State, payload.Lang, agent)
-	running := payload.State == core.ProgressCardStateRunning
 
 	elements := make([]map[string]any, 0, len(items)+3)
 	if payload.Truncated {
@@ -5215,7 +5231,7 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 		elements = append(elements, map[string]any{"tag": "hr"})
 	}
 
-	elements = appendProgressGroupedElements(elements, items, payload.Lang, running)
+	elements = appendProgressGroupedElements(elements, items, payload.Lang)
 	if footer != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})
 		elements = append(elements, map[string]any{
@@ -5347,7 +5363,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 		}
 	} else {
 		req := larkim.NewCreateMessageReqBuilder().
-			ReceiveIdType(larkim.ReceiveIdTypeChatId).
+			ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
 			Body(larkim.NewCreateMessageReqBodyBuilder().
 				ReceiveId(chatID).
 				MsgType(larkim.MsgTypeInteractive).
@@ -5711,7 +5727,7 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 		return p.withFreshTenantAccessTokenRetry(ctx, "upload audio", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			req := larkim.NewCreateFileReqBuilder().
 				Body(larkim.NewCreateFileReqBodyBuilder().
-					FileType(larkim.FileTypeOpus).
+					FileType(larkim.CreateFileFileTypeOpus).
 					FileName("tts_audio.opus").
 					File(bytes.NewReader(audio)).
 					Build()).
@@ -5786,7 +5802,7 @@ func (p *Platform) SendVideo(ctx context.Context, rctx any, video []byte, format
 		return p.withFreshTenantAccessTokenRetry(ctx, "upload video", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			req := larkim.NewCreateFileReqBuilder().
 				Body(larkim.NewCreateFileReqBodyBuilder().
-					FileType(larkim.FileTypeMp4).
+					FileType(larkim.CreateFileFileTypeMp4).
 					FileName(fileName).
 					File(bytes.NewReader(video)).
 					Build()).
@@ -7338,10 +7354,11 @@ func richPanelElements(steps []core.ToolStep, emptyText string) []map[string]any
 	return elements
 }
 
-func buildRichPanel(title string, expanded bool, elements []map[string]any) map[string]any {
+// buildRichPanel panels start collapsed for the same reason as buildProgressPanel.
+func buildRichPanel(title string, elements []map[string]any) map[string]any {
 	return map[string]any{
 		"tag":              "collapsible_panel",
-		"expanded":         expanded,
+		"expanded":         false,
 		"background_color": "grey",
 		"header": map[string]any{
 			"title": map[string]any{"tag": "plain_text", "content": title},
@@ -7407,19 +7424,17 @@ func buildRichCardJSONBytes(status core.CardStatus, steps []core.ToolStep, markd
 	if len(reasoningSteps) > 0 {
 		panelMaps = append(panelMaps, buildRichPanel(
 			richLaneTitle("Reasoning", len(reasoningSteps)),
-			streaming,
 			richPanelElements(reasoningSteps, "Thinking..."),
 		))
 	}
 	if len(toolSteps) > 0 {
 		panelMaps = append(panelMaps, buildRichPanel(
 			richLaneTitle("Tools", len(toolSteps)),
-			streaming,
 			richPanelElements(toolSteps, "No tool steps"),
 		))
 	}
 	if len(panelMaps) == 0 && streaming {
-		panelMaps = append(panelMaps, buildRichPanel("Reasoning", true, richPanelElements(nil, "Thinking...")))
+		panelMaps = append(panelMaps, buildRichPanel("Reasoning", richPanelElements(nil, "Thinking...")))
 	}
 
 	markdownMap := map[string]any{

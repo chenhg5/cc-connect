@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -509,6 +510,77 @@ func TestSplitMessageCodeFenceAware_ChunkDoesNotExceedMaxLen(t *testing.T) {
 	for i, chunk := range chunks {
 		if len([]rune(chunk)) > maxLen {
 			t.Errorf("chunk %d exceeds maxLen (%d): runes=%d, content=%q", i, maxLen, len([]rune(chunk)), chunk)
+		}
+	}
+}
+
+func TestSplitMessageCodeFenceAware_OpeningFenceBudget(t *testing.T) {
+	chunks := SplitMessageCodeFenceAware("aaaaa\n```\nx", 10)
+	want := []string{"aaaaa", "```\nx\n```"}
+	if !reflect.DeepEqual(chunks, want) {
+		t.Fatalf("chunks = %q, want %q", chunks, want)
+	}
+}
+
+func TestSplitMessageCodeFenceAware_FenceBoundaryBudgets(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		text  string
+		limit int
+	}{
+		{"closed block", "aaaaa\n```\nx\n```", 10},
+		{"language", "123456789\n```go\nx\n```", 16},
+		{"unicode", "一二三四五\n```\n六\n```", 10},
+		{"long code line", "123456789\n```go\n" + strings.Repeat("界", 80) + "\n```", 16},
+		{"adjacent blocks", "123456789\n```go\nx\n```\n```js\ny\n```", 16},
+		{"empty blocks", "aaaaa\n```\n```\n```\nx\n```", 10},
+		{"platform boundary", strings.Repeat("a", 4090) + "\n```\nx\n```", 4096},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			chunks := SplitMessageCodeFenceAware(tt.text, tt.limit)
+			payload := func(text string) string {
+				var lines []string
+				for _, line := range strings.Split(text, "\n") {
+					if !strings.HasPrefix(strings.TrimSpace(line), "```") {
+						lines = append(lines, line)
+					}
+				}
+				return strings.Join(lines, "")
+			}
+			var got strings.Builder
+			for i, chunk := range chunks {
+				if n := len([]rune(chunk)); n > tt.limit {
+					t.Fatalf("chunk %d has %d runes, limit %d: %q", i, n, tt.limit, chunk)
+				}
+				fences := 0
+				for _, line := range strings.Split(chunk, "\n") {
+					if strings.HasPrefix(strings.TrimSpace(line), "```") {
+						fences++
+					}
+				}
+				if fences%2 != 0 {
+					t.Fatalf("chunk %d has an unbalanced code fence: %q", i, chunk)
+				}
+				got.WriteString(payload(chunk))
+			}
+			if got.String() != payload(tt.text) {
+				t.Fatalf("payload was lost, duplicated or reordered: %q", chunks)
+			}
+		})
+	}
+}
+
+func TestSplitMessageCodeFenceAware_FenceOverheadExceedsBudget(t *testing.T) {
+	text := "before\n```long-language-name\n世界\n```\nafter"
+	for _, limit := range []int{1, 7, 10} {
+		chunks := SplitMessageCodeFenceAware(text, limit)
+		for _, chunk := range chunks {
+			if n := len([]rune(chunk)); n == 0 || n > limit {
+				t.Fatalf("limit %d: invalid chunk of %d runes: %q", limit, n, chunk)
+			}
+		}
+		if strings.Join(chunks, "") != text {
+			t.Fatalf("limit %d: plain fallback changed content: %q", limit, chunks)
 		}
 	}
 }
