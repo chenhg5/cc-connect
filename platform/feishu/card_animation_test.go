@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -288,10 +289,10 @@ func TestCardAnimationOn_WirePayloads(t *testing.T) {
 	}
 }
 
-// TestPatchMessageRateLimitedSkipsFrame: a 230020 on the Patch path must be
-// swallowed (frame skipped) instead of surfacing as an error the engine only
-// logs at Debug.
-func TestPatchMessageRateLimitedSkipsFrame(t *testing.T) {
+// TestPatchMessageRateLimitPropagates: a 230020 on the inline Patch path must be
+// returned to the caller. The engine's final flush only falls back to Send when
+// UpdateMessage reports an error, so swallowing it would silently drop the answer.
+func TestPatchMessageRateLimitPropagates(t *testing.T) {
 	const appID = "cli_patch_ratelimit"
 	const appSecret = "secret"
 
@@ -327,8 +328,12 @@ func TestPatchMessageRateLimitedSkipsFrame(t *testing.T) {
 
 	handle := &feishuPreviewHandle{messageID: "om_card_rl", chatID: "oc_chat"}
 	card := p.BuildRichCard(core.CardStatusWorking, "", nil, "partial", true, "")
-	if err := p.UpdateMessage(context.Background(), handle, card); err != nil {
-		t.Fatalf("rate-limited Patch should be skipped, got error = %v", err)
+	err := p.UpdateMessage(context.Background(), handle, card)
+	if err == nil {
+		t.Fatal("rate-limited Patch must return an error so the final flush can fall back to Send")
+	}
+	if !errors.Is(err, errFeishuCardRateLimited) {
+		t.Fatalf("error should classify as errFeishuCardRateLimited, got %v", err)
 	}
 }
 

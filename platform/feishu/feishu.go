@@ -5598,8 +5598,7 @@ func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON str
 		})
 	})
 	if err != nil && errors.Is(err, errFeishuCardRateLimited) {
-		slog.Warn(p.tag()+": patch message rate limited; skipping frame", "message_id", messageID)
-		return nil
+		slog.Warn(p.tag()+": patch message rate limited", "message_id", messageID)
 	}
 	return err
 }
