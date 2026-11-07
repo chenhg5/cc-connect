@@ -3605,3 +3605,73 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestLoad_BusyMessageMode(t *testing.T) {
+	loaders := []struct {
+		name string
+		load func(string) (*Config, error)
+	}{{"strict", Load}, {"permissive", LoadPermissive}}
+	for _, loader := range loaders {
+		t.Run(loader.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name, option, want string
+				invalid            bool
+			}{
+				{name: "omitted"},
+				{name: "empty", option: `busy_message_mode = ""`},
+				{name: "queue", option: `busy_message_mode = "queue"`, want: "queue"},
+				{name: "steer", option: `busy_message_mode = "steer"`, want: "steer"},
+				{name: "case and whitespace", option: `busy_message_mode = "  StEeR  "`, want: "  StEeR  "},
+				{name: "queue case and whitespace", option: `busy_message_mode = "  QuEuE  "`, want: "  QuEuE  "},
+				{name: "invalid", option: `busy_message_mode = "interrupt"`, invalid: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					platforms := "\n[[projects.platforms]]\ntype = \"telegram\"\n"
+					if loader.name == "permissive" {
+						platforms = ""
+					}
+					content := "[[projects]]\nname = \"demo\"\n" + tc.option + "\n[projects.agent]\ntype = \"pi\"\n" + platforms
+					path := filepath.Join(t.TempDir(), "config.toml")
+					if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+						t.Fatal(err)
+					}
+					cfg, err := loader.load(path)
+					if tc.invalid {
+						if err == nil || !strings.Contains(err.Error(), "projects[0].busy_message_mode") {
+							t.Fatalf("expected project-scoped busy_message_mode error, got %v", err)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := cfg.Projects[0].BusyMessageMode; got != tc.want {
+						t.Fatalf("busy_message_mode = %q, want %q", got, tc.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestSaveConfig_PreservesBusyMessageMode(t *testing.T) {
+	writeTestConfig(t, strings.Replace(providerConfigTOML, `name = "demo"`, `name = "demo"`+"\nbusy_message_mode = \"steer\"", 1))
+	cfg, err := Load(ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Language = "zh"
+	if err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.Projects[0].BusyMessageMode; got != "steer" {
+		t.Fatalf("busy_message_mode after save = %q, want steer", got)
+	}
+	if reloaded.Language != "zh" {
+		t.Fatalf("language = %q, want zh", reloaded.Language)
+	}
+}
