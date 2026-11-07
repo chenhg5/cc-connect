@@ -1593,10 +1593,12 @@ app_secret = "your-feishu-app-secret"
 # =============================================================================
 # Project 2: Using Cursor Agent / 项目 2：使用 Cursor Agent (uncomment to enable / 取消注释以启用)
 # =============================================================================
-# Requires: Cursor Agent CLI (`agent`) — install via Cursor IDE or `npm i -g @anthropic-ai/cursor-agent`
-# 需要安装：Cursor Agent CLI (`agent`) — 通过 Cursor IDE 或 npm 安装
-# Uses `agent --print --output-format stream-json` under the hood.
-# 底层使用 `agent --print --output-format stream-json` 命令。
+# Requires the Cursor Agent CLI (`cursor-agent` or its older `agent` alias).
+# 需要安装 Cursor Agent CLI（`cursor-agent` 或旧别名 `agent`）。
+# With no cmd, cc-connect finds `cursor-agent` first, then `agent` on PATH.
+# 不设置 cmd 时，先查找 PATH 中的 `cursor-agent`，再查找 `agent`。
+# Workspace trust remains under the CLI's existing policy; no --trust is added.
+# 工作区信任仍按 CLI 原有策略处理，不会自动添加 --trust。
 
 # [[projects]]
 # name = "my-cursor-project"
@@ -1607,10 +1609,10 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "force"  # "default" | "force" (yolo) | "plan" | "ask"
-# cmd = "agent"   # CLI binary name (default: "agent") / CLI 二进制名称（默认 "agent"）
+# cmd = "cursor-agent" # optional explicit command / 可选的显式命令
 #
 # Mode options / 模式说明:
-# - "default": Trust workspace, ask before tool use / 信任工作区，工具调用前询问
+# - "default": CLI controls workspace trust; ask before tool use / CLI 控制工作区信任，工具调用前询问
 #              Note: Shell tool is restricted to safe commands (e.g. ls) in this mode
 #              注意：此模式下 Shell 工具仅允许安全命令（如 ls）
 # - "force":   Auto-approve all tool calls, full shell access (same as --force/--yolo)
