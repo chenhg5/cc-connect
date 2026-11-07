@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -1721,6 +1722,17 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 
 			messageID := "om_test_" + tt.name
 			openID := "ou_test"
+			// Accepted messages resolve names before reaching the handler. Keep
+			// that unrelated SDK work inside the test boundary.
+			ip.userNameCache.Store(openID, "Test user")
+			ip.chatNameCache.Store(tt.chatID, "Test chat")
+			var httpCalls atomic.Int32
+			ip.client = lark.NewClient("cli_xxx", "secret", lark.WithHttpClient(&http.Client{
+				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					httpCalls.Add(1)
+					return nil, errors.New("unexpected Lark HTTP request in allow_chat test")
+				}),
+			}))
 			msgType := "text"
 			senderType := "user"
 			content := `{"text":"hello"}`
@@ -1760,9 +1772,16 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 					t.Fatal("expected message to pass allow_chat filter, but it was blocked")
 				}
 			}
+			if got := httpCalls.Load(); got != 0 {
+				t.Fatalf("unexpected Lark HTTP requests: %d", got)
+			}
 		})
 	}
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // --- Mention resolution tests ---
 
