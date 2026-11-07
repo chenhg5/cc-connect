@@ -8447,7 +8447,18 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			for time.Now().Before(deadline) {
 				sent := platform.getSent()
 				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
-					return
+					// The manual run is asynchronous: the reply can arrive before
+					// MarkRun finishes persisting last_run. Wait for that write so
+					// t.TempDir does not race the background save during cleanup.
+					persistDeadline := time.Now().Add(2 * time.Second)
+					for time.Now().Before(persistDeadline) {
+						data, readErr := os.ReadFile(scheduler.Store().path)
+						if readErr == nil && strings.Contains(string(data), `"last_run"`) {
+							return
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					t.Fatalf("timed out waiting for cron persistence, sent=%v", platform.getSent())
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
