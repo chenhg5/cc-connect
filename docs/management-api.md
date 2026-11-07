@@ -58,6 +58,7 @@ Add the following to `config.toml`:
 enabled = true
 port = 9820
 token = "mgmt-secret"
+# insecure = false  # Optional; local development only, binds 127.0.0.1
 ```
 
 | Field    | Type    | Default   | Description                                      |
@@ -65,8 +66,9 @@ token = "mgmt-secret"
 | `enabled`| boolean | `false`   | Enable the Management API server                 |
 | `port`   | integer | `9820`    | TCP port to listen on                            |
 | `token`  | string  | (required)| Shared secret for authentication                 |
+| `insecure` | boolean | `false` | Explicitly allow an empty token for local development; binds IPv4 loopback only |
 
-When `enabled` is `false`, the Management API is not started. The token should be a strong, random string (e.g. 32+ characters).
+When `enabled` is `false`, the Management API is not started. When enabled, an empty token without `insecure = true` makes cc-connect exit at startup. The token should be a strong, random string (e.g. 32+ characters). `insecure = true` binds `127.0.0.1`, even if a token is also configured; it is intended only for local development. Existing installations with an empty token must migrate before upgrading: see [empty-token migration](security-empty-token-migration.md).
 
 ### 2.2 Base URL
 
@@ -82,7 +84,7 @@ Example: `http://localhost:9820/api/v1/status`
 
 ## 3. Authentication
 
-Every request must include a valid token. Two methods are supported:
+With a configured token, every request must include that token. Two methods are supported. Only an explicit `insecure = true` configuration with an empty token permits requests without authentication; that mode listens on `127.0.0.1` only.
 
 ### 3.1 Bearer Token (Recommended)
 

@@ -39,7 +39,7 @@ func TestWebhookServer_AuthQuery(t *testing.T) {
 }
 
 func TestWebhookServer_NoTokenRequired(t *testing.T) {
-	ws := NewWebhookServer(0, "", "/hook")
+	ws := NewWebhookServerInsecure(0, "", "/hook")
 	r := httptest.NewRequest(http.MethodPost, "/hook", nil)
 	if !ws.authenticate(r) {
 		t.Error("expected auth to pass when no token configured")
@@ -47,7 +47,7 @@ func TestWebhookServer_NoTokenRequired(t *testing.T) {
 }
 
 func TestWebhookServer_HandleHook_MethodNotAllowed(t *testing.T) {
-	ws := NewWebhookServer(0, "", "/hook")
+	ws := NewWebhookServerInsecure(0, "", "/hook")
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/hook", nil)
 	ws.handleHook(w, r)
@@ -68,7 +68,7 @@ func TestWebhookServer_HandleHook_Unauthorized(t *testing.T) {
 }
 
 func TestWebhookServer_HandleHook_Validation(t *testing.T) {
-	ws := NewWebhookServer(0, "", "/hook")
+	ws := NewWebhookServerInsecure(0, "", "/hook")
 
 	tests := []struct {
 		name string
@@ -94,11 +94,17 @@ func TestWebhookServer_HandleHook_Validation(t *testing.T) {
 }
 
 func TestWebhookServer_DefaultValues(t *testing.T) {
-	ws := NewWebhookServer(0, "", "")
+	ws := NewWebhookServerInsecure(0, "", "")
 	if ws.port != 9111 {
 		t.Errorf("expected default port 9111, got %d", ws.port)
 	}
 	if ws.path != "/hook" {
 		t.Errorf("expected default path /hook, got %s", ws.path)
+	}
+}
+
+func TestWebhookServer_EmptyTokenWithoutInsecureFailsClosed(t *testing.T) {
+	if NewWebhookServer(0, "", "/hook") != nil {
+		t.Fatal("expected NewWebhookServer to return nil for an empty token without insecure opt-in")
 	}
 }

@@ -392,8 +392,10 @@ level = "info" # debug, info, warn, error
 # [webhook]
 # enabled = true
 # port = 9111                  # Listen port (default: 9111) / 监听端口（默认 9111）
-# token = "your-secret-token"  # Shared secret for auth; empty = no auth / 认证密钥；为空则不验证
+# token = "your-secret-token"  # Required unless insecure=true / 除非显式启用 insecure，否则必填
+# insecure = false             # Explicit no-token local development only; binds 127.0.0.1 / 仅本机无认证开发，绑定 127.0.0.1
 # path = "/hook"               # URL path (default: "/hook") / URL 路径（默认 "/hook"）
+# Upgrade guide / 升级说明: docs/security-empty-token-migration.md and docs/security-empty-token-migration.zh-CN.md
 #
 # Usage / 使用方式:
 #
@@ -445,7 +447,9 @@ level = "info" # debug, info, warn, error
 # enabled = true
 # port = 9820                           # HTTP listen port (default: 9820) / 监听端口
 # token = "your-mgmt-secret"            # Auth token (required) / 认证密钥（必填）
+# insecure = false                       # Explicit no-token local development only; binds 127.0.0.1 / 仅本机无认证开发，绑定 127.0.0.1
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
+# Upgrade guide / 升级说明: docs/security-empty-token-migration.md and docs/security-empty-token-migration.zh-CN.md
 
 # =============================================================================
 # Hooks (Event Triggers / 事件钩子)
