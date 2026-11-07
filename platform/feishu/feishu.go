@@ -2860,8 +2860,13 @@ func extractPostPlainText(content string) string {
 	if err := json.Unmarshal([]byte(content), &post); err != nil || len(post.Content) == 0 {
 		var localeWrapper map[string]json.RawMessage
 		if err2 := json.Unmarshal([]byte(content), &localeWrapper); err2 == nil {
-			for _, v := range localeWrapper {
-				if err3 := json.Unmarshal(v, &post); err3 == nil && len(post.Content) > 0 {
+			keys := make([]string, 0, len(localeWrapper))
+			for k := range localeWrapper {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if err3 := json.Unmarshal(localeWrapper[k], &post); err3 == nil && len(post.Content) > 0 {
 					break
 				}
 			}
@@ -3637,7 +3642,7 @@ func detectMimeType(data []byte) string {
 		if string(data[:4]) == "GIF8" {
 			return "image/gif"
 		}
-		if string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
 			return "image/webp"
 		}
 	}
