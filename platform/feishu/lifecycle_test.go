@@ -69,7 +69,11 @@ func TestWebhookLifecycle_ReadyAfterListen(t *testing.T) {
 	if err := p.startWebhookMode(); err != nil {
 		t.Fatal(err)
 	}
-	defer p.server.Close()
+	defer func() {
+		if err := p.server.Close(); err != nil {
+			t.Errorf("close server: %v", err)
+		}
+	}()
 	if r.ready != 1 {
 		t.Fatalf("ready=%d, want 1", r.ready)
 	}
