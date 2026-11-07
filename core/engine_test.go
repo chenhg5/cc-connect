@@ -8447,7 +8447,20 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			for time.Now().Before(deadline) {
 				sent := platform.getSent()
 				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
-					return
+					// RunJobNow runs the job asynchronously and its completion
+					// bookkeeping (MarkRun → store save) can land after the
+					// output is sent. Wait for it before returning, otherwise
+					// the late write races t.TempDir() removal and the test
+					// flakes with "crons: directory not empty". LastRun is
+					// set under the same store lock as the save, so observing
+					// it means the write has completed.
+					for time.Now().Before(deadline) {
+						if j := store.Get(job.ID); j != nil && !j.LastRun.IsZero() {
+							return
+						}
+						time.Sleep(5 * time.Millisecond)
+					}
+					t.Fatal("run output seen but the job was never marked complete")
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
