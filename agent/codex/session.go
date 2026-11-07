@@ -49,6 +49,7 @@ type codexSession struct {
 	cmds           map[*exec.Cmd]struct{}
 
 	pendingMsgs []string // buffered agent_message texts awaiting classification
+	subagents   codexSubagents
 
 	runtimeCfgMu       sync.Mutex
 	runtimeCfgModel    string
@@ -473,6 +474,11 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	case "item.started":
 		cs.handleItemStarted(raw)
 
+	case "item.updated":
+		if item, ok := raw["item"].(map[string]any); ok && stringField(item, "type") == "collab_tool_call" {
+			cs.handleCollabItem(item)
+		}
+
 	case "item.completed":
 		cs.handleItemCompleted(raw)
 
@@ -571,6 +577,11 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 	}
 	itemType, _ := item["type"].(string)
 	slog.Debug("codexSession: item.started", "item_type", itemType)
+	if itemType == "collab_tool_call" {
+		cs.flushPendingAsThinking()
+		cs.handleCollabItem(item)
+		return
+	}
 
 	if itemType == "agent_message" || itemType == "message" || itemType == "reasoning" {
 		return
@@ -612,6 +623,8 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 	slog.Debug("codexSession: item.completed", "item_type", itemType)
 
 	switch itemType {
+	case "collab_tool_call":
+		cs.handleCollabItem(item)
 	case "reasoning":
 		text := extractItemText(item, "summary", "summary_text")
 		if text != "" {

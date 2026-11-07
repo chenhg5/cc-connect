@@ -182,6 +182,7 @@ type appServerSession struct {
 
 	stateMu      sync.Mutex
 	pendingMsgs  []string
+	subagents    codexSubagents
 	currentTurn  string
 	turnRevision uint64 // terminal notifications can precede the turn/start response
 	preambleSent bool
@@ -1185,6 +1186,9 @@ func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
 }
 
 func (s *appServerSession) handleNotification(method string, paramsRaw json.RawMessage) {
+	if s.handleSubagentNotification(method, paramsRaw) {
+		return
+	}
 	switch method {
 	case "turn/started":
 		var notif turnNotification
@@ -1291,6 +1295,14 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 	}
 
 	switch itemType {
+	case "collabAgentToolCall":
+		s.flushPendingAsThinking()
+		s.subagents.collab(item, s.emit)
+		return
+	case "subAgentActivity":
+		s.flushPendingAsThinking()
+		s.subagents.activity(item, s.emit)
+		return
 	case "agentMessage", "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction":
 		return
 	}
@@ -1328,6 +1340,12 @@ func (s *appServerSession) handleItemCompleted(item map[string]any) {
 	}
 
 	switch itemType {
+	case "collabAgentToolCall":
+		s.flushPendingAsThinking()
+		s.subagents.collab(item, s.emit)
+	case "subAgentActivity":
+		s.flushPendingAsThinking()
+		s.subagents.activity(item, s.emit)
 	case "reasoning":
 		text := appServerReasoningText(item)
 		if text != "" {
