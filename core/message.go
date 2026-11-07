@@ -459,6 +459,7 @@ const (
 	EventUserInputRequest  EventType = "user_input_request" // non-blocking question; answer is a user message
 	EventThinking          EventType = "thinking"           // thinking/processing status
 	EventModelSwitch       EventType = "model_switch"       // agent CLI moved the turn to another model on its own (see ModelSwitch)
+	EventGoal              EventType = "goal"               // native persisted goal changed
 )
 
 // ModelSwitch describes a model change the agent CLI made without being asked
@@ -495,6 +496,7 @@ type UserQuestionOption struct {
 
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
+	Goal                     *Goal // EventGoal; nil means cleared
 	Type                     EventType
 	Content                  string
 	ToolName                 string         // populated for EventToolUse, EventPermissionRequest
