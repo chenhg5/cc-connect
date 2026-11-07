@@ -539,7 +539,7 @@ func TestValidateProjectDisplayConfig(t *testing.T) {
 		{
 			name:    "invalid project card mode",
 			display: &DisplayConfig{CardMode: &cardMode},
-			wantErr: `projects[0].display.card_mode must be "legacy" or "rich"`,
+			wantErr: `projects[0].display.card_mode must be "legacy", "rich", or "rich-anonymous"`,
 		},
 		{
 			name:    "invalid project history max len",
