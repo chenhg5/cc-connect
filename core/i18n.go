@@ -700,7 +700,16 @@ const (
 	MsgAgentRelayToolPrompt MsgKey = "agent_relay_tool_prompt"
 )
 
+const MsgReplyFooterQuotaLeft MsgKey = "reply_footer_quota_left"
+
 var messages = map[MsgKey]map[Language]string{
+	MsgReplyFooterQuotaLeft: {
+		LangEnglish:            "%s %d%% left",
+		LangChinese:            "%s %d%% left",
+		LangTraditionalChinese: "%s %d%% left",
+		LangJapanese:           "%s %d%% left",
+		LangSpanish:            "%s %d%% left",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
@@ -2269,10 +2278,10 @@ var messages = map[MsgKey]map[Language]string{
 	},
 	MsgReplyFooterRemaining: {
 		LangEnglish:            "%d%% left",
-		LangChinese:            "剩余 %d%%",
-		LangTraditionalChinese: "剩餘 %d%%",
-		LangJapanese:           "残り %d%%",
-		LangSpanish:            "%d%% restante",
+		LangChinese:            "%d%% left",
+		LangTraditionalChinese: "%d%% left",
+		LangJapanese:           "%d%% left",
+		LangSpanish:            "%d%% left",
 	},
 	MsgModelCurrent: {
 		LangEnglish:            "Current model: %s",

@@ -140,6 +140,8 @@ level = "info" # debug, info, warn, error
 # tool_messages = true      # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
 # show_context_indicator = true  # Show "[ctx: ~N%]" suffix on assistant replies (default: true)
 #                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
+# show_usage_5h = false          # Show 5-hour quota remaining percentage / 显示 5 小时额度剩余百分比（默认 false）
+# show_usage_week = false        # Show weekly quota remaining percentage / 显示每周额度剩余百分比（默认 false）
 # reply_footer = true            # Show Codex-like footer on assistant replies (default: true)
 #                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
 # hide_agent_footer = false      # Strip standalone model/token footer lines emitted by agents (default: false)
@@ -765,6 +767,16 @@ name = "my-backend"
 #                                   # 隐藏 footer 第一行：model · [effort ·] out/in/cw/cr · ctx %（默认 true 显示）
 # show_workdir_indicator = false   # Hide the footer's second line: workspace directory (default: true)
 #                                   # 隐藏 footer 第二行：工作区目录（默认 true 显示）
+# show_usage_5h = true             # Optional: 5h quota remaining percentage (default: false)
+#                                   # 可选：显示 5 小时额度剩余百分比（默认 false）
+# show_usage_week = true           # Optional: weekly quota remaining percentage (default: false)
+#                                   # 可选：显示每周额度剩余百分比（默认 false）
+# Status labels stay English in all languages: "5h 28% left · week 65% left".
+# 用量状态统一显示英文，例如 "5h 28% left · week 65% left"。
+# Both quota flags override [projects.display]/[display], require reply_footer = true,
+# and work independently of show_context_indicator. Missing windows are omitted.
+# 两个用量开关覆盖 [projects.display]/[display]，受 reply_footer 总开关控制，
+# 不依赖 show_context_indicator；未返回对应额度窗口时不显示。
 # disabled_commands = ["restart", "upgrade", "cron"]  # Disable specific commands for this project
 #                                                     # 禁用该项目的指定命令
 #
