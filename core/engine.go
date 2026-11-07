@@ -16428,6 +16428,12 @@ func (e *Engine) deleteSingleSessionReply(msg *Message, deleter SessionDeleter, 
 
 	displayName := e.deleteSessionDisplayName(sessions, matched)
 
+	// The agent sessions are shared by every chat of the project, so the one
+	// picked may be another chat's current conversation.
+	if sessions.AgentSessionActiveElsewhere(matched.ID, msg.SessionKey) {
+		return e.i18n.Tf(MsgDeleteInUseDenied, displayName)
+	}
+
 	if err := deleter.DeleteSession(e.ctx, matched.ID); err != nil {
 		return e.i18n.Tf(MsgFailedToDeleteSession, displayName, err)
 	}
