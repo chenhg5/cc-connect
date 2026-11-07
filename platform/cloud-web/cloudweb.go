@@ -323,6 +323,7 @@ func (p *Platform) handleMessage(raw []byte) {
 		Files:      decodeFiles(m.Files),
 		Audio:      decodeAudio(m.Audio),
 		ReplyCtx:   rc,
+		WorkDir:    m.WorkDir,
 	}
 
 	p.mu.RLock()
