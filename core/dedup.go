@@ -73,6 +73,22 @@ func (d *MessageDedup) IsDuplicate(msgID string) bool {
 	return false
 }
 
+// Mark records msgID in the dedup window without checking it, for paths that
+// deliver a message themselves and only want to keep other delivery paths
+// (e.g. a REST catch-up poller) from re-delivering it later within the same
+// window. Empty msgID is ignored.
+func (d *MessageDedup) Mark(msgID string) {
+	if d == nil || msgID == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.seen == nil {
+		d.seen = make(map[string]time.Time)
+	}
+	d.seen[msgID] = time.Now()
+}
+
 // IsOldMessage returns true if msgTime is before the process StartTime.
 // A small grace period (2 seconds) is applied to avoid race conditions
 // with messages sent right at startup.
