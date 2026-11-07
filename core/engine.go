@@ -336,8 +336,9 @@ type DisplayCfg struct {
 	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
 	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
 	ToolMessages     bool
-	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
-	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
+	HistoryMaxLen    *int   // max runes for /history entries; nil = default, 0 = no truncation
+	HideAgentFooter  bool   // strip model/token footer lines emitted as agent text
+	Narration        string // "message" (default) or "progress"; see narrationInProgress
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -5474,8 +5475,39 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			slog.Info("streaming card created for turn", "session", sessionKey)
 		}
 	}
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	// Narration "progress" (see narration.go): segments go into the progress
+	// card, nothing is previewed, and lastNarration is the last segment that
+	// went there, which answers a turn that ends on a tool call.
+	narrationMode := e.narrationInProgress()
+	var lastNarration string
+	previewCfg := e.streamPreview
+	if narrationMode {
+		previewCfg.Enabled = false
+	}
+	sp := newStreamPreview(previewCfg, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
+	// sendSegment surfaces a text segment that a tool call, thinking block
+	// or permission prompt ended: as messages of its own, or with narration
+	// "progress" as an update in the progress card.
+	sendSegment := func(p Platform, replyCtx any, segment string) {
+		if segment == "" {
+			return
+		}
+		if narrationMode {
+			if narrate(cp, segment) {
+				// Only narration kept in the card can answer the turn later;
+				// one already sent as a message must not be sent again.
+				if strings.TrimSpace(segment) != "" && !isSilentReply(segment) {
+					lastNarration = segment
+				}
+				return
+			}
+			lastNarration = ""
+		}
+		for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+			sendWorkspace(p, replyCtx, chunk)
+		}
+	}
 	state.mu.Unlock()
 
 	// Send instant confirmation reply if enabled and no streaming card is active.
@@ -5668,6 +5700,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// final aggregation cannot concatenate the invalid draft.
 			textParts = nil
 			segmentStart = 0
+			lastNarration = ""
 			silentHold = false
 			partialText = ""
 			cardAnswerText.Reset()
@@ -5723,11 +5756,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						sp.detachPreview()
 					} else {
 						segment := strings.Join(textParts[segmentStart:], "")
-						if segment != "" {
-							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
-								sendWorkspace(p, replyCtx, chunk)
-							}
-						}
+						sendSegment(p, replyCtx, segment)
 					}
 					segmentStart = len(textParts)
 				}
@@ -5746,11 +5775,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if len(textParts) > segmentStart {
 					if !previewActive {
 						segment := strings.Join(textParts[segmentStart:], "")
-						if segment != "" {
-							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
-								sendWorkspace(p, replyCtx, chunk)
-							}
-						}
+						sendSegment(p, replyCtx, segment)
 					}
 					segmentStart = len(textParts)
 					silentHold = false
@@ -5810,11 +5835,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						sp.detachPreview()
 					} else {
 						segment := strings.Join(textParts[segmentStart:], "")
-						if segment != "" {
-							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
-								sendWorkspace(p, replyCtx, chunk)
-							}
-						}
+						sendSegment(p, replyCtx, segment)
 					}
 					segmentStart = len(textParts)
 				}
@@ -5854,11 +5875,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if len(textParts) > segmentStart {
 					if !previewActive {
 						segment := strings.Join(textParts[segmentStart:], "")
-						if segment != "" {
-							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
-								sendWorkspace(p, replyCtx, chunk)
-							}
-						}
+						sendSegment(p, replyCtx, segment)
 					}
 					segmentStart = len(textParts)
 					silentHold = false
@@ -6109,11 +6126,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if len(textParts) > segmentStart {
 				if !previewActive {
 					segment := strings.Join(textParts[segmentStart:], "")
-					if segment != "" {
-						for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
-							sendWorkspace(p, replyCtx, chunk)
-						}
-					}
+					sendSegment(p, replyCtx, segment)
 				}
 				segmentStart = len(textParts)
 				silentHold = false
@@ -6226,6 +6239,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// text over event.Content which only contains the last assistant segment.
 			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
 				fullResponse = strings.Join(textParts, "")
+			} else if fullResponse == "" && narrationMode && len(textParts) > 0 {
+				// The narration is in the progress card: the answer is what
+				// came after it, else the last narration. Skip that fallback
+				// when the turn was aborted so /stop and CancelTurn stay silent
+				// (the stop ack already told the user).
+				if fullResponse = strings.Join(textParts[min(segmentStart, len(textParts)):], ""); strings.TrimSpace(fullResponse) == "" {
+					state.mu.Lock()
+					aborted := state.turnCancelled || state.stopped
+					state.mu.Unlock()
+					if !aborted {
+						fullResponse = lastNarration
+					}
+				}
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
@@ -6556,12 +6582,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
 				// side-channel messages and segmentStart stays 0, so keep normal finalize flow.
 				sp.discard()
+				unsent := ""
 				if segmentStart < len(textParts) {
-					unsent := strings.Join(textParts[segmentStart:], "")
-					if unsent != "" {
-						if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, unsent, statusFooter, sendWorkspaceWithError) {
-							return
-						}
+					unsent = strings.Join(textParts[segmentStart:], "")
+				}
+				if unsent == "" && narrationMode {
+					// The answer went into the progress card before the last
+					// tool call; it is still the one message of the turn.
+					unsent = lastNarration
+				}
+				if unsent != "" {
+					if !sendChunksWithStatusFooter(e.ctx, p, replyCtx, unsent, statusFooter, sendWorkspaceWithError) {
+						return
 					}
 				}
 			} else if suppressDuplicate {
@@ -6723,8 +6755,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				sp = newStreamPreview(previewCfg, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				lastNarration = ""
 
 				// Reset streaming card state for the next turn
 				streamCard = nil
