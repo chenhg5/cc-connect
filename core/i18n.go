@@ -462,6 +462,8 @@ const (
 	MsgAskQuestionAnswered  MsgKey = "ask_question_answered"
 	MsgAskQuestionStale     MsgKey = "ask_question_stale"
 
+	MsgAskQuestionAnswerFirst MsgKey = "ask_question_answer_first"
+
 	MsgCommandsTitle        MsgKey = "commands_title"
 	MsgCommandsEmpty        MsgKey = "commands_empty"
 	MsgCommandsHint         MsgKey = "commands_hint"
@@ -2813,6 +2815,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "若按鈕無回應，請回覆選項編號（如 1）或直接輸入你的回答",
 		LangJapanese:           "ボタンが反応しない場合は、番号（例: 1）で返信するか、直接回答を入力してください",
 		LangSpanish:            "Si los botones no responden, responda con el número de opción (ej. 1) o escriba su respuesta",
+	},
+	MsgAskQuestionAnswerFirst: {
+		LangEnglish:            "⚠️ Please answer the question first. Your attachment was not sent to the agent; send it again after answering.",
+		LangChinese:            "⚠️ 请先回答上面的问题。这条附件没有发给 agent，回答后请重新发送。",
+		LangTraditionalChinese: "⚠️ 請先回答上面的問題。這則附件沒有發給 agent，回答後請重新發送。",
+		LangJapanese:           "⚠️ 先に質問に回答してください。添付ファイルはエージェントに送信されていません。回答後にもう一度送信してください。",
+		LangSpanish:            "⚠️ Responda primero a la pregunta. Su adjunto no se envió al agente; envíelo de nuevo después de responder.",
 	},
 	MsgAskQuestionNoteMulti: {
 		LangEnglish:            "Reply with comma-separated option numbers (e.g. 1,3) or type your answer",
