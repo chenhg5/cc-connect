@@ -30,6 +30,10 @@ type Session struct {
 	AgentSessionID      string   `json:"agent_session_id"`
 	AgentType           string   `json:"agent_type,omitempty"`
 	PastAgentSessionIDs []string `json:"past_agent_session_ids,omitempty"`
+	// BorrowedAgentSessionID is a cross-user session explicitly opened by an
+	// administrator. It remains owned by its original user, even though this
+	// session references it for resuming and history.
+	BorrowedAgentSessionID string `json:"borrowed_agent_session_id,omitempty"`
 	// ActiveProvider is the agent provider name that was active when this
 	// session last took a turn. It is restored before --resume so that a
 	// cc-connect process restart does not silently drop a user's
@@ -531,6 +535,36 @@ func (sm *SessionManager) SwitchToAgentSession(userKey, agentSID, agentName, sum
 	return s
 }
 
+// SwitchToBorrowedAgentSession lets an explicitly authorized administrator
+// resume a tracked session without claiming its original user's ownership.
+func (sm *SessionManager) SwitchToBorrowedAgentSession(userKey, agentSID, agentName, summary string) *Session {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for _, sid := range sm.userSessions[userKey] {
+		s := sm.sessions[sid]
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		borrowed := s.AgentSessionID == agentSID && s.BorrowedAgentSessionID == agentSID
+		s.mu.Unlock()
+		if borrowed {
+			sm.activeSession[userKey] = sid
+			s.MarkExplicitlyActivated()
+			sm.saveLocked()
+			return s
+		}
+	}
+	s := sm.createLocked(userKey, summary)
+	s.SetAgentInfo(agentSID, agentName, summary)
+	s.mu.Lock()
+	s.BorrowedAgentSessionID = agentSID
+	s.mu.Unlock()
+	s.MarkExplicitlyActivated()
+	sm.saveLocked()
+	return s
+}
+
 func (sm *SessionManager) ListSessions(userKey string) []*Session {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -643,6 +677,86 @@ func (sm *SessionManager) KnownAgentSessionIDs() map[string]struct{} {
 		s.mu.Unlock()
 	}
 	return ids
+}
+
+// VisibleAgentSessionIDs returns tracked agent IDs visible to one conversation.
+// An ID referenced by more than one session key has ambiguous ownership and is
+// hidden from ordinary users. Unknown CLI and lost legacy IDs are absent and
+// therefore denied even when filter_external_sessions is disabled.
+func (sm *SessionManager) VisibleAgentSessionIDs(userKey string, adminCrossUser bool) map[string]struct{} {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	owners := make(map[string]string)
+	ambiguous := make(map[string]bool)
+	for key, sessionIDs := range sm.userSessions {
+		for _, sessionID := range sessionIDs {
+			s := sm.sessions[sessionID]
+			if s == nil {
+				continue
+			}
+			s.mu.Lock()
+			ids := append([]string{s.AgentSessionID}, s.PastAgentSessionIDs...)
+			borrowedID := s.BorrowedAgentSessionID
+			s.mu.Unlock()
+			for _, id := range ids {
+				if id == "" || id == ContinueSession || id == borrowedID {
+					continue
+				}
+				if first, found := owners[id]; found && first != key {
+					ambiguous[id] = true
+				} else {
+					owners[id] = key
+				}
+			}
+		}
+	}
+	visible := make(map[string]struct{})
+	for id, owner := range owners {
+		if !ambiguous[id] && (adminCrossUser || (userKey != "" && owner == userKey)) {
+			visible[id] = struct{}{}
+		}
+	}
+	return visible
+}
+
+// AgentSessionIDVisible checks one active ID without allocating the full
+// visibility set on every ordinary message. Ownership is still checked across
+// all keys so a legacy duplicate cannot be resumed by either user.
+func (sm *SessionManager) AgentSessionIDVisible(userKey, agentID string, adminCrossUser bool) bool {
+	if agentID == "" || agentID == ContinueSession {
+		return false
+	}
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	owner := ""
+	for key, sessionIDs := range sm.userSessions {
+		for _, sessionID := range sessionIDs {
+			s := sm.sessions[sessionID]
+			if s == nil {
+				continue
+			}
+			s.mu.Lock()
+			found := s.BorrowedAgentSessionID != agentID && s.AgentSessionID == agentID
+			if !found && s.BorrowedAgentSessionID != agentID {
+				for _, pastID := range s.PastAgentSessionIDs {
+					if pastID == agentID {
+						found = true
+						break
+					}
+				}
+			}
+			s.mu.Unlock()
+			if !found {
+				continue
+			}
+			if owner != "" && owner != key {
+				return false
+			}
+			owner = key
+		}
+	}
+	return owner != "" && (adminCrossUser || owner == userKey)
 }
 
 // AgentSessionOwners maps each known agent session ID to the user key

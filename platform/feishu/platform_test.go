@@ -530,6 +530,43 @@ func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
 	}
 }
 
+func TestCardActionSessionKeyCannotImpersonateAnotherUser(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		opts  map[string]any
+		value string
+		want  string
+	}{
+		{name: "per-user card clicked by another group member", value: "feishu:oc_chat:ou_alice", want: "feishu:oc_chat:ou_bob"},
+		{name: "shared channel ignores foreign chat", opts: map[string]any{"share_session_in_channel": true}, value: "feishu:oc_other", want: "feishu:oc_chat"},
+		{name: "thread card stays in authenticated chat", opts: map[string]any{"thread_isolation": true}, value: "feishu:oc_chat:root:om_root", want: "feishu:oc_chat:root:om_root"},
+		{name: "thread card cannot select foreign chat", opts: map[string]any{"thread_isolation": true}, value: "feishu:oc_other:root:om_root", want: "feishu:oc_chat:ou_bob"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := map[string]any{"app_id": "cli_xxx", "app_secret": "secret"}
+			for k, v := range tc.opts {
+				opts[k] = v
+			}
+			platformAny, err := New(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var p *Platform
+			switch platform := platformAny.(type) {
+			case *Platform:
+				p = platform
+			case *interactivePlatform:
+				p = platform.Platform
+			default:
+				t.Fatalf("unexpected platform type %T", platformAny)
+			}
+			if got := p.sessionKeyFromCardAction("oc_chat", "ou_bob", map[string]any{"session_key": tc.value}); got != tc.want {
+				t.Fatalf("session key = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInteractivePlatform_ModelCardActionReturnsCardUpdate(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
@@ -2311,7 +2348,7 @@ func TestCmdAction_WithAfterClick_DispatchesAndReturnsCard(t *testing.T) {
 	}
 }
 
-func TestCmdAction_WithAfterClick_SessionKeyRoutes(t *testing.T) {
+func TestCmdAction_WithAfterClick_UsesAuthenticatedSessionKey(t *testing.T) {
 	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -2321,7 +2358,7 @@ func TestCmdAction_WithAfterClick_SessionKeyRoutes(t *testing.T) {
 		t.Fatalf("platform type = %T, want *interactivePlatform", platformAny)
 	}
 
-	const wantSessionKey = "custom-session-abc"
+	const wantSessionKey = "feishu:oc_chat1:ou_user1"
 	msgCh := make(chan *core.Message, 1)
 	ip.handler = func(_ core.Platform, msg *core.Message) { msgCh <- msg }
 
@@ -2330,7 +2367,7 @@ func TestCmdAction_WithAfterClick_SessionKeyRoutes(t *testing.T) {
 			Operator: &callback.Operator{OpenID: "ou_user1"},
 			Action: &callback.CallBackAction{Value: map[string]any{
 				"action":      "cmd:/hello",
-				"session_key": wantSessionKey,
+				"session_key": "custom-session-abc",
 				"after_click": map[string]any{"title": "✅ Sent"},
 			}},
 			Context: &callback.Context{OpenChatID: "oc_chat1", OpenMessageID: "om_msg1"},
