@@ -1115,6 +1115,11 @@ app_secret = "your-feishu-app-secret"
 #                              # 都是独立事件，cc-connect 会在窗口内将它们合并成一条多图消息再分发；如果你的
 #                              # 网络或设备发送间隔超过 500ms 且仍被拆成多轮，可调高（如 800–1200ms）；如果
 #                              # 只是单图发送，希望响应更快，也可以适当调低。
+# inbound_coalesce_window_ms = 0 # Optional quiet window for plain text/image bursts (0 disables; maximum 60000ms).
+#                               # Commands, permission replies and quoted messages remain immediate. Plain text also waits when enabled.
+#                               # Applies after image batching; include image_batch_window_ms when considering total delay.
+#                               # 普通文字和图片的可选合批窗口，默认关闭；开启后普通文字也会等待，图片另计上面的合批延迟。
+#                               # 命令、权限回复及引用消息不等待此窗口。
 
 # Lark (International Version) / Lark 国际版
 # Lark now supports WebSocket long-connection too; webhook mode is only needed
