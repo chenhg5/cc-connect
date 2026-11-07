@@ -679,6 +679,33 @@
           "models": ["qwen/qwen3.5-flash", "deepseek-ai/deepseek-v4-pro"]
         }
       }
+    },
+    {
+      "name": "runcrate",
+      "display_name": "Runcrate",
+      "description": "Runcrate inference API for open models, with OpenAI-compatible and Anthropic Messages endpoints for coding agents.",
+      "description_zh": "Runcrate 开源模型推理 API，提供 OpenAI 兼容与 Anthropic Messages 接口，适用于编码智能体。",
+      "features": ["OpenAI Compatible", "Anthropic Compatible", "1M Context", "Open Models"],
+      "tier": 3,
+      "website": "https://www.runcrate.ai",
+      "agents": {
+        "claudecode": {
+          "base_url": "https://api.runcrate.ai",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
+        },
+        "codex": {
+          "base_url": "https://api.runcrate.ai/v1",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.runcrate.ai/v1",
+          "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "models": ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3", "Qwen/Qwen3.8-Flash"]
+        }
+      }
     }
   ]
 }
