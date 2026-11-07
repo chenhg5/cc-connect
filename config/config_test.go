@@ -173,6 +173,31 @@ func TestConfigValidate(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "accepts model_fallback_action restore",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.ModelFallbackAction = "restore"
+						return p
+					}(),
+				},
+			},
+		},
+		{
+			name: "rejects unknown model_fallback_action",
+			cfg: Config{
+				Projects: []ProjectConfig{
+					func() ProjectConfig {
+						p := validProject("demo")
+						p.ModelFallbackAction = "retry"
+						return p
+					}(),
+				},
+			},
+			wantErr: `projects[0].model_fallback_action must be "notify" or "restore", got "retry"`,
+		},
 	}
 
 	for _, tt := range tests {

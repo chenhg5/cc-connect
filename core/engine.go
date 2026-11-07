@@ -444,6 +444,14 @@ type Engine struct {
 	autoCompressAllowHeuristic bool
 	resetOnIdle                time.Duration
 
+	// modelFallbackAction is what happens after the agent moves a session to
+	// another model on its own (a safeguards fallback): ModelFallbackNotify
+	// tells the user and offers the ways back; ModelFallbackRestore also
+	// switches back once the turn's reply is out. modelRestoreLoopWindow
+	// overrides defaultModelRestoreLoopWindow (tests).
+	modelFallbackAction    string
+	modelRestoreLoopWindow time.Duration
+
 	// Reply footer composition flags. The footer renders up to two lines:
 	//   line 1 — model · [effort ·] out/in/cw/cr · ctx%   (gated by showContextIndicator)
 	//   line 2 — workspace directory                       (gated by showWorkdirIndicator)
@@ -580,6 +588,13 @@ type interactiveState struct {
 	pendingProviderAdd       *pendingProviderAddState
 	lastAutoCompressAt       time.Time
 	lastAutoCompressTokens   int
+
+	// pendingModelRestore is a safeguards fallback to undo once the current
+	// turn's reply is out (model_fallback_action = "restore").
+	pendingModelRestore *ModelSwitch
+	// lastModelRestoreAt is when this session was last switched back after a
+	// fallback; another fallback within the loop window is left in place.
+	lastModelRestoreAt time.Time
 
 	// Unsolicited event reader: a background goroutine that consumes agent
 	// events between user-initiated turns (e.g. background task completions).
@@ -992,6 +1007,37 @@ func (e *Engine) SetResetOnIdle(d time.Duration) {
 		return
 	}
 	e.resetOnIdle = d
+}
+
+// Values of model_fallback_action.
+const (
+	ModelFallbackNotify  = "notify"
+	ModelFallbackRestore = "restore"
+)
+
+// defaultModelRestoreLoopWindow is how long after switching a session back
+// another fallback is left in place instead of being undone again.
+const defaultModelRestoreLoopWindow = 30 * time.Minute
+
+// modelRestoreTimeout bounds the wait for the agent to acknowledge a switch.
+const modelRestoreTimeout = 15 * time.Second
+
+// SetModelFallbackAction configures what happens after the agent moves a
+// session to another model on its own. Anything other than "restore" means
+// "notify".
+func (e *Engine) SetModelFallbackAction(action string) {
+	if strings.EqualFold(strings.TrimSpace(action), ModelFallbackRestore) {
+		e.modelFallbackAction = ModelFallbackRestore
+		return
+	}
+	e.modelFallbackAction = ModelFallbackNotify
+}
+
+func (e *Engine) modelRestoreWindow() time.Duration {
+	if e.modelRestoreLoopWindow > 0 {
+		return e.modelRestoreLoopWindow
+	}
+	return defaultModelRestoreLoopWindow
 }
 
 // SetAgentSessionIdleTimeout 配置单轮正常结束后的 live agent 空闲关闭时间。
@@ -5223,7 +5269,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					"status", event.ToolStatus)
 
 			case EventModelSwitch:
-				e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
+				e.relayModelSwitch(p, replyCtx, sessionKey, state, event.ModelSwitch)
 
 			case EventResult:
 				fullResponse := event.Content
@@ -5255,6 +5301,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// guaranteed; only ordering degrades).
 				session.AddHistory("assistant", fullResponse)
 				sessions.Save()
+
+				e.restoreModelAfterFallback(p, replyCtx, sessionKey, state)
 
 				// Reset for potential subsequent unsolicited turn.
 				textParts = nil
@@ -5363,30 +5411,30 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 	}
 }
 
-// modelSwitchNotice renders the user-facing notice for an EventModelSwitch, or
-// "" when the event names no actual change of model.
-func (e *Engine) modelSwitchNotice(ms *ModelSwitch) string {
-	if ms == nil || ms.From == "" || ms.To == "" || ms.From == ms.To {
+// modelSwitchCategory renders the refusal category as a suffix for notices.
+func modelSwitchCategory(ms *ModelSwitch) string {
+	if ms.Category == "" {
 		return ""
 	}
-	category := ""
-	if ms.Category != "" {
-		category = " [" + ms.Category + "]"
-	}
-	key := MsgModelSwitchResponse
-	if ms.SessionWide {
-		key = MsgModelSwitchSession
-	}
-	return e.i18n.Tf(key, ms.From, category, ms.To)
+	return " [" + ms.Category + "]"
 }
+
+// modelFallbackKeepAction is the card action of the "keep current" button.
+const modelFallbackKeepAction = "/model-fallback-keep"
 
 // relayModelSwitch tells the user that the agent moved to another model on its
 // own. Without it the reply footer is the only place the new model shows up,
 // and a session that quietly continues on a weaker model looks like a quality
 // regression rather than a deliberate fallback.
-func (e *Engine) relayModelSwitch(p Platform, replyCtx any, sessionKey string, ms *ModelSwitch) {
-	notice := e.modelSwitchNotice(ms)
-	if notice == "" {
+//
+// When the whole session moved, the user is offered the ways back (switch back
+// with /model, start over with /new, or keep it). With model_fallback_action =
+// "restore" and an agent that can switch in place, the session is instead
+// switched back once this turn's reply is out, unless it was already switched
+// back within the loop window: then a fallback that keeps recurring is left in
+// place and the choice goes to the user.
+func (e *Engine) relayModelSwitch(p Platform, replyCtx any, sessionKey string, state *interactiveState, ms *ModelSwitch) {
+	if ms == nil || ms.From == "" || ms.To == "" || ms.From == ms.To {
 		return
 	}
 	slog.Warn("agent switched model on its own",
@@ -5396,7 +5444,99 @@ func (e *Engine) relayModelSwitch(p Platform, replyCtx any, sessionKey string, m
 		"reason", ms.Reason,
 		"category", ms.Category,
 		"session_wide", ms.SessionWide)
-	e.send(p, replyCtx, notice)
+	category := modelSwitchCategory(ms)
+	if !ms.SessionWide {
+		e.send(p, replyCtx, e.i18n.Tf(MsgModelSwitchResponse, ms.From, category, ms.To))
+		return
+	}
+
+	if e.modelFallbackAction == ModelFallbackRestore && state != nil {
+		state.mu.Lock()
+		_, canSwitch := state.agentSession.(LiveModelSetter)
+		last := state.lastModelRestoreAt
+		looping := !last.IsZero() && time.Since(last) < e.modelRestoreWindow()
+		if canSwitch && !looping {
+			state.pendingModelRestore = ms
+		}
+		state.mu.Unlock()
+		switch {
+		case canSwitch && !looping:
+			e.send(p, replyCtx, e.i18n.Tf(MsgModelSwitchRestoring, ms.From, category, ms.To))
+			return
+		case looping:
+			slog.Warn("model fallback recurred soon after switching back; leaving it in place",
+				"session", sessionKey, "last_restore", last, "window", e.modelRestoreWindow())
+			mins := int(e.modelRestoreWindow() / time.Minute)
+			e.sendModelSwitchOptions(p, replyCtx, e.i18n.Tf(MsgModelSwitchLoop, ms.From, category, ms.To, mins), ms)
+			return
+		}
+	}
+	e.sendModelSwitchOptions(p, replyCtx, e.i18n.Tf(MsgModelSwitchSession, ms.From, category, ms.To), ms)
+}
+
+// sendModelSwitchOptions sends text followed by the ways back from a
+// session-wide model switch: buttons on platforms that render cards or inline
+// buttons, the commands as text elsewhere. The buttons run the existing
+// /model and /new commands.
+func (e *Engine) sendModelSwitchOptions(p Platform, replyCtx any, text string, ms *ModelSwitch) {
+	restore := "/model switch " + ms.From
+	if supportsCards(p) {
+		card := NewCard().
+			Title(e.i18n.T(MsgModelSwitchCardTitle), "orange").
+			Markdown(text).
+			Buttons(
+				PrimaryBtn(e.i18n.Tf(MsgModelSwitchBtnRestore, ms.From), "cmd:"+restore),
+				DefaultBtn(e.i18n.T(MsgModelSwitchBtnNew), "cmd:/new"),
+				DefaultBtn(e.i18n.T(MsgModelSwitchBtnKeep), "act:"+modelFallbackKeepAction+" "+ms.To),
+			).
+			Build()
+		e.sendWithCard(p, replyCtx, card)
+		return
+	}
+	text += "\n" + e.i18n.Tf(MsgModelSwitchCommands, ms.From)
+	if _, ok := p.(InlineButtonSender); ok {
+		e.replyWithButtons(p, replyCtx, text, [][]ButtonOption{{
+			{Text: e.i18n.Tf(MsgModelSwitchBtnRestore, ms.From), Data: "cmd:" + restore},
+			{Text: e.i18n.T(MsgModelSwitchBtnNew), Data: "cmd:/new"},
+		}})
+		return
+	}
+	e.send(p, replyCtx, text)
+}
+
+// restoreModelAfterFallback switches the session back to the model it ran on
+// before a safeguards fallback, if relayModelSwitch arranged it for this
+// turn. It runs after the turn's reply has been delivered and before the next
+// queued message is sent. The declined request is not sent again.
+func (e *Engine) restoreModelAfterFallback(p Platform, replyCtx any, sessionKey string, state *interactiveState) {
+	state.mu.Lock()
+	ms := state.pendingModelRestore
+	state.pendingModelRestore = nil
+	agentSession := state.agentSession
+	state.mu.Unlock()
+	if ms == nil {
+		return
+	}
+
+	var err error
+	if setter, ok := agentSession.(LiveModelSetter); ok {
+		ctx, cancel := context.WithTimeout(e.ctx, modelRestoreTimeout)
+		err = setter.SetLiveModel(ctx, ms.From)
+		cancel()
+	} else {
+		err = fmt.Errorf("the agent session cannot switch models in place")
+	}
+	if err != nil {
+		slog.Warn("could not switch back after model fallback", "session", sessionKey, "model", ms.From, "error", err)
+		e.sendModelSwitchOptions(p, replyCtx, e.i18n.Tf(MsgModelRestoreFailed, ms.From, err, ms.To), ms)
+		return
+	}
+
+	state.mu.Lock()
+	state.lastModelRestoreAt = time.Now()
+	state.mu.Unlock()
+	slog.Info("switched back after model fallback", "session", sessionKey, "model", ms.From, "fallback", ms.To)
+	e.send(p, replyCtx, e.i18n.Tf(MsgModelRestored, ms.From))
 }
 
 type agentErrorHandler struct {
@@ -5660,7 +5800,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		switch event.Type {
 		case EventModelSwitch:
-			e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
+			e.relayModelSwitch(p, replyCtx, sessionKey, state, event.ModelSwitch)
 
 		case EventHookRejected:
 			// Claude Code emits this between a Stop-hook-rejected draft and its
@@ -6599,6 +6739,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else {
 				slog.Debug("tts: not enabled", "tts_nil", e.tts == nil, "enabled", e.tts != nil && e.tts.Enabled, "tts_obj_nil", e.tts == nil || e.tts.TTS == nil)
 			}
+
+			// A safeguards fallback in this turn: switch back now that the
+			// reply is out, before a queued message reaches the agent.
+			e.restoreModelAfterFallback(p, replyCtx, sessionKey, state)
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
 			if triggerAutoCompress {
@@ -12822,6 +12966,10 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 
 	if prefix == "act" && cmd == "/model" {
 		return e.handleModelCardAction(args, sessionKey)
+	}
+
+	if prefix == "act" && cmd == modelFallbackKeepAction {
+		return e.simpleCard(e.i18n.T(MsgModelSwitchCardTitle), "grey", e.i18n.Tf(MsgModelSwitchKept, args))
 	}
 
 	if prefix == "act" {

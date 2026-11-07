@@ -343,6 +343,16 @@ const (
 	MsgModelNotSupported     MsgKey = "model_not_supported"
 	MsgModelSwitchSession    MsgKey = "model_switch_session"
 	MsgModelSwitchResponse   MsgKey = "model_switch_response"
+	MsgModelSwitchRestoring  MsgKey = "model_switch_restoring"
+	MsgModelSwitchLoop       MsgKey = "model_switch_loop"
+	MsgModelSwitchCommands   MsgKey = "model_switch_commands"
+	MsgModelSwitchCardTitle  MsgKey = "model_switch_card_title"
+	MsgModelSwitchBtnRestore MsgKey = "model_switch_btn_restore"
+	MsgModelSwitchBtnNew     MsgKey = "model_switch_btn_new"
+	MsgModelSwitchBtnKeep    MsgKey = "model_switch_btn_keep"
+	MsgModelSwitchKept       MsgKey = "model_switch_kept"
+	MsgModelRestored         MsgKey = "model_restored"
+	MsgModelRestoreFailed    MsgKey = "model_restore_failed"
 	MsgReasoningCurrent      MsgKey = "reasoning_current"
 	MsgReasoningChanged      MsgKey = "reasoning_changed"
 	MsgReasoningNotSupported MsgKey = "reasoning_not_supported"
@@ -2310,11 +2320,81 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Modelo cambiado a `%s`.",
 	},
 	MsgModelSwitchSession: {
-		LangEnglish:            "⚠️ `%[1]s`'s safeguards declined this request%[2]s, so `%[3]s` is answering instead and the rest of this session stays on it. Send `/model %[1]s` to switch back.",
-		LangChinese:            "⚠️ `%[1]s` 的安全机制拦下了这条请求%[2]s，改由 `%[3]s` 回答，本会话后面也会一直用它。发送 `/model %[1]s` 可切回。",
-		LangTraditionalChinese: "⚠️ `%[1]s` 的安全機制攔下了這條請求%[2]s，改由 `%[3]s` 回答，本會話後面也會一直使用它。傳送 `/model %[1]s` 可切回。",
-		LangJapanese:           "⚠️ `%[1]s` のセーフガードがこのリクエストを拒否したため%[2]s、`%[3]s` が代わりに回答しています。このセッションの残りも `%[3]s` のままです。`/model %[1]s` で元に戻せます。",
-		LangSpanish:            "⚠️ Las salvaguardas de `%[1]s` rechazaron esta solicitud%[2]s, así que `%[3]s` responde en su lugar y el resto de esta sesión seguirá con él. Envía `/model %[1]s` para volver.",
+		LangEnglish:            "⚠️ `%[1]s`'s safeguards declined this request%[2]s, so `%[3]s` is answering instead and the rest of this session stays on it.",
+		LangChinese:            "⚠️ `%[1]s` 的安全机制拦下了这条请求%[2]s，改由 `%[3]s` 回答，本会话后面也会一直用它。",
+		LangTraditionalChinese: "⚠️ `%[1]s` 的安全機制攔下了這條請求%[2]s，改由 `%[3]s` 回答，本會話後面也會一直使用它。",
+		LangJapanese:           "⚠️ `%[1]s` のセーフガードがこのリクエストを拒否したため%[2]s、`%[3]s` が代わりに回答しています。このセッションの残りも `%[3]s` のままです。",
+		LangSpanish:            "⚠️ Las salvaguardas de `%[1]s` rechazaron esta solicitud%[2]s, así que `%[3]s` responde en su lugar y el resto de esta sesión seguirá con él.",
+	},
+	MsgModelSwitchRestoring: {
+		LangEnglish:            "⚠️ `%[1]s`'s safeguards declined this request%[2]s, so `%[3]s` is answering this turn. The session switches back to `%[1]s` after this reply; the declined request is not sent again.",
+		LangChinese:            "⚠️ `%[1]s` 的安全机制拦下了这条请求%[2]s，这一轮改由 `%[3]s` 回答。回复完后会切回 `%[1]s`，被拦的那条不会重发。",
+		LangTraditionalChinese: "⚠️ `%[1]s` 的安全機制攔下了這條請求%[2]s，這一輪改由 `%[3]s` 回答。回覆完後會切回 `%[1]s`，被攔的那則不會重送。",
+		LangJapanese:           "⚠️ `%[1]s` のセーフガードがこのリクエストを拒否したため%[2]s、このターンは `%[3]s` が回答します。回答の後で `%[1]s` に戻します。拒否されたリクエストは再送しません。",
+		LangSpanish:            "⚠️ Las salvaguardas de `%[1]s` rechazaron esta solicitud%[2]s, así que `%[3]s` responde en este turno. La sesión vuelve a `%[1]s` después de esta respuesta; la solicitud rechazada no se reenvía.",
+	},
+	MsgModelSwitchLoop: {
+		LangEnglish:            "⚠️ `%[1]s`'s safeguards declined another request%[2]s within %[4]d minutes of switching back, so this time the session stays on `%[3]s`.",
+		LangChinese:            "⚠️ 切回后 %[4]d 分钟内，`%[1]s` 的安全机制又拦下一条请求%[2]s，这次不再自动切回，会话保持在 `%[3]s`。",
+		LangTraditionalChinese: "⚠️ 切回後 %[4]d 分鐘內，`%[1]s` 的安全機制又攔下一則請求%[2]s，這次不再自動切回，會話保持在 `%[3]s`。",
+		LangJapanese:           "⚠️ 元に戻してから %[4]d 分以内に `%[1]s` のセーフガードが再びリクエストを拒否したため%[2]s、今回はセッションを `%[3]s` のままにします。",
+		LangSpanish:            "⚠️ Las salvaguardas de `%[1]s` rechazaron otra solicitud%[2]s menos de %[4]d minutos después de volver, así que esta vez la sesión sigue con `%[3]s`.",
+	},
+	MsgModelSwitchCommands: {
+		LangEnglish:            "Send `/model switch %[1]s` to switch back, or `/new` to start a new session.",
+		LangChinese:            "发送 `/model switch %[1]s` 切回，或发送 `/new` 新开会话。",
+		LangTraditionalChinese: "傳送 `/model switch %[1]s` 切回，或傳送 `/new` 開新會話。",
+		LangJapanese:           "`/model switch %[1]s` で元に戻すか、`/new` で新しいセッションを始めてください。",
+		LangSpanish:            "Envía `/model switch %[1]s` para volver, o `/new` para empezar una sesión nueva.",
+	},
+	MsgModelSwitchCardTitle: {
+		LangEnglish:            "Model switched by safeguards",
+		LangChinese:            "安全机制切换了模型",
+		LangTraditionalChinese: "安全機制切換了模型",
+		LangJapanese:           "セーフガードによるモデル切り替え",
+		LangSpanish:            "Modelo cambiado por las salvaguardas",
+	},
+	MsgModelSwitchBtnRestore: {
+		LangEnglish:            "Switch back to %s",
+		LangChinese:            "切回 %s",
+		LangTraditionalChinese: "切回 %s",
+		LangJapanese:           "%s に戻す",
+		LangSpanish:            "Volver a %s",
+	},
+	MsgModelSwitchBtnNew: {
+		LangEnglish:            "New session",
+		LangChinese:            "新开会话",
+		LangTraditionalChinese: "開新會話",
+		LangJapanese:           "新しいセッション",
+		LangSpanish:            "Sesión nueva",
+	},
+	MsgModelSwitchBtnKeep: {
+		LangEnglish:            "Keep current",
+		LangChinese:            "保持当前",
+		LangTraditionalChinese: "保持目前",
+		LangJapanese:           "このままにする",
+		LangSpanish:            "Mantener el actual",
+	},
+	MsgModelSwitchKept: {
+		LangEnglish:            "Staying on `%s`.",
+		LangChinese:            "保持使用 `%s`。",
+		LangTraditionalChinese: "保持使用 `%s`。",
+		LangJapanese:           "`%s` のままにします。",
+		LangSpanish:            "Se mantiene `%s`.",
+	},
+	MsgModelRestored: {
+		LangEnglish:            "✅ Switched back to `%s`.",
+		LangChinese:            "✅ 已切回 `%s`。",
+		LangTraditionalChinese: "✅ 已切回 `%s`。",
+		LangJapanese:           "✅ `%s` に戻しました。",
+		LangSpanish:            "✅ Se volvió a `%s`.",
+	},
+	MsgModelRestoreFailed: {
+		LangEnglish:            "⚠️ Could not switch back to `%[1]s` (%[2]v); the session stays on `%[3]s`.",
+		LangChinese:            "⚠️ 没能切回 `%[1]s`（%[2]v），会话仍在 `%[3]s`。",
+		LangTraditionalChinese: "⚠️ 沒能切回 `%[1]s`（%[2]v），會話仍在 `%[3]s`。",
+		LangJapanese:           "⚠️ `%[1]s` に戻せませんでした（%[2]v）。セッションは `%[3]s` のままです。",
+		LangSpanish:            "⚠️ No se pudo volver a `%[1]s` (%[2]v); la sesión sigue con `%[3]s`.",
 	},
 	MsgModelSwitchResponse: {
 		LangEnglish:            "⚠️ `%[1]s`'s safeguards declined part of this turn%[2]s; `%[3]s` answered that part instead. The session model is unchanged.",
