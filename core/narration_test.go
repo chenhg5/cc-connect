@@ -223,6 +223,43 @@ func (s *queuedTurnSession) Send(string, string, []ImageAttachment, []FileAttach
 	return nil
 }
 
+
+// An aborted turn must stay silent even when narration was already shown in
+// the progress card. /stop (and ACP CancelTurn) ack the user; lastNarration
+// must not become the answer after that.
+func TestProcessInteractiveEvents_NarrationAbortedStaySilent(t *testing.T) {
+	p := newProgressCardPlatform()
+	e := newNarrationEngine(t, p, narrationProgress)
+	key := "test:narration-abort"
+	session := e.sessions.GetOrCreateActive(key)
+	s := newControllableSession("narration-abort")
+	s.events = make(chan Event, 8)
+	for _, ev := range []Event{
+		{Type: EventText, Content: "I am about to delete things."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "rm -rf /"},
+		{Type: EventToolResult, ToolName: "Bash", ToolResult: "ok"},
+		{Type: EventResult, Done: true},
+	} {
+		s.events <- ev
+	}
+	state := &interactiveState{agentSession: s, platform: p, replyCtx: "ctx", turnCancelled: true}
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveEvents(state, session, e.sessions, key, "m", time.Now(), nil, nil, "ctx", 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("turn did not complete")
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("aborted turn sent %q, want silence", sent)
+	}
+	if updates := infoTexts(lastProgressItems(t, p)); len(updates) != 1 || updates[0] != "I am about to delete things." {
+		t.Fatalf("progress card updates = %q", updates)
+	}
+}
 // A queued turn starts without the previous turn's narration.
 func TestProcessInteractiveEvents_NarrationForgottenBetweenQueuedTurns(t *testing.T) {
 	p := newProgressCardPlatform()

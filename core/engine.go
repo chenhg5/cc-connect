@@ -6241,9 +6241,16 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && narrationMode && len(textParts) > 0 {
 				// The narration is in the progress card: the answer is what
-				// came after it, else the last narration.
+				// came after it, else the last narration. Skip that fallback
+				// when the turn was aborted so /stop and CancelTurn stay silent
+				// (the stop ack already told the user).
 				if fullResponse = strings.Join(textParts[min(segmentStart, len(textParts)):], ""); strings.TrimSpace(fullResponse) == "" {
-					fullResponse = lastNarration
+					state.mu.Lock()
+					aborted := state.turnCancelled || state.stopped
+					state.mu.Unlock()
+					if !aborted {
+						fullResponse = lastNarration
+					}
 				}
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
