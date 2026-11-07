@@ -4176,6 +4176,57 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 }
 
+// workspaceHash is the short digest that names a workspace's session file.
+func workspaceHash(workspace string) string {
+	h := sha256.Sum256([]byte(workspace))
+	return hex.EncodeToString(h[:4])
+}
+
+// workspaceSessionCandidates lists, in preference order, the hashes a
+// workspace's session file may have been named with. The first entry is always
+// the canonical one. When the opt-in "slash" key form is active, an older
+// Windows build would have hashed the native-separator path instead, so that
+// form is appended as a fallback — see legacyWorkspaceKey for exactly when it
+// is derived (and when it deliberately is not).
+func workspaceSessionCandidates(workspace string) []string {
+	candidates := []string{workspaceHash(workspace)}
+	if legacy := legacyWorkspaceLookup(workspace); legacy != "" {
+		if h := workspaceHash(legacy); h != candidates[0] {
+			candidates = append(candidates, h)
+		}
+	}
+	return candidates
+}
+
+// pickWorkspaceSessionFile returns the session file to use for workspace.
+//
+// It prefers the canonical file and falls back to the file an older build wrote,
+// so upgrading does not look like a brand-new workspace (which would silently
+// drop the active session). The fallback is a plain read-side lookup: the chosen
+// file is used as-is, so nothing is moved or copied — if the legacy file wins,
+// subsequent saves keep writing there and the workspace stays on it. That is
+// intentional; migrating state across files is a separate, riskier operation.
+//
+// storePath is the engine's own session store; an empty store means "no
+// persistence" and is passed straight through.
+func pickWorkspaceSessionFile(storePath, engineName, workspace string) string {
+	if storePath == "" {
+		return ""
+	}
+	dir := filepath.Dir(storePath)
+	for i, h := range workspaceSessionCandidates(workspace) {
+		path := filepath.Join(dir, fmt.Sprintf("%s_ws_%s.json", engineName, h))
+		if _, err := os.Stat(path); err == nil {
+			if i > 0 {
+				slog.Info("workspace session: resuming from pre-upgrade file",
+					"engine", engineName, "workspace", workspace, "file", path)
+			}
+			return path
+		}
+	}
+	return filepath.Join(dir, fmt.Sprintf("%s_ws_%s.json", engineName, workspaceHash(workspace)))
+}
+
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
 // workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
 func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
@@ -4267,12 +4318,7 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	// the same here: filepath.Dir("") is ".", which would otherwise drop
 	// "<engine>_ws_<hash>.json" into the process working directory — that is
 	// what littered core/ with test_ws_*.json during `go test ./core/`.
-	h := sha256.Sum256([]byte(workspace))
-	sessionFile := ""
-	if storePath := e.sessions.StorePath(); storePath != "" {
-		sessionFile = filepath.Join(filepath.Dir(storePath),
-			fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
-	}
+	sessionFile := pickWorkspaceSessionFile(e.sessions.StorePath(), e.name, workspace)
 	sessions := NewSessionManager(sessionFile)
 	sessions.InvalidateForAgent(agent.Name())
 

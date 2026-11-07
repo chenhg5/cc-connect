@@ -3605,3 +3605,52 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestEffectiveWorkspaceKeyMode(t *testing.T) {
+	if got := EffectiveWorkspaceKeyMode(nil); got != WorkspaceKeyModeLegacy {
+		t.Fatalf("EffectiveWorkspaceKeyMode(nil) = %q, want %q", got, WorkspaceKeyModeLegacy)
+	}
+
+	unset := Config{}
+	if got := EffectiveWorkspaceKeyMode(&unset); got != WorkspaceKeyModeLegacy {
+		t.Fatalf("EffectiveWorkspaceKeyMode(unset) = %q, want %q", got, WorkspaceKeyModeLegacy)
+	}
+
+	// Case and surrounding whitespace are tolerated because the value is
+	// hand-edited TOML.
+	for _, tc := range []struct{ raw, want string }{
+		{"legacy", WorkspaceKeyModeLegacy},
+		{"slash", WorkspaceKeyModeSlash},
+		{" slash ", WorkspaceKeyModeSlash},
+		{"SLASH", WorkspaceKeyModeSlash},
+		{"Legacy", WorkspaceKeyModeLegacy},
+	} {
+		raw := tc.raw
+		cfg := Config{WorkspaceKeyMode: &raw}
+		if got := EffectiveWorkspaceKeyMode(&cfg); got != tc.want {
+			t.Fatalf("EffectiveWorkspaceKeyMode(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestValidateWorkspaceKeyMode(t *testing.T) {
+	for _, mode := range []string{"legacy", "slash", " slash ", "SLASH", "Legacy"} {
+		m := mode
+		cfg := Config{Projects: []ProjectConfig{validProject("demo")}, WorkspaceKeyMode: &m}
+		if err := cfg.validate(); err != nil {
+			t.Fatalf("validate() with workspace_key_mode = %q: %v", mode, err)
+		}
+	}
+
+	for _, mode := range []string{"", "rich", "separator", "slashy"} {
+		m := mode
+		cfg := Config{Projects: []ProjectConfig{validProject("demo")}, WorkspaceKeyMode: &m}
+		err := cfg.validate()
+		if err == nil {
+			t.Fatalf("validate() with workspace_key_mode = %q = nil, want error", mode)
+		}
+		if want := `workspace_key_mode must be "legacy" or "slash"`; !strings.Contains(err.Error(), want) {
+			t.Fatalf("validate() error = %q, want contains %q", err.Error(), want)
+		}
+	}
+}

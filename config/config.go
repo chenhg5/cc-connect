@@ -83,6 +83,17 @@ var configMu sync.Mutex
 // ConfigPath stores the path to the config file for saving
 var ConfigPath string
 
+// Workspace key forms accepted by [workspace_key_mode].
+const (
+	// WorkspaceKeyModeLegacy keeps the historical native-separator key form
+	// (backslashes on Windows). This is the default so that upgrading does not
+	// change which session file or override a workspace resolves to.
+	WorkspaceKeyModeLegacy = "legacy"
+	// WorkspaceKeyModeSlash uses forward slashes on every platform, so a workspace
+	// has one key regardless of which caller supplied the path.
+	WorkspaceKeyModeSlash = "slash"
+)
+
 type Config struct {
 	DataDir        string `toml:"data_dir"` // session store directory, default ~/.cc-connect
 	AttachmentSend string `toml:"attachment_send"`
@@ -120,6 +131,15 @@ type Config struct {
 	// setting so the reaper policy is consistent across projects; per-project
 	// configuration is intentionally not supported.
 	WorkspaceIdleTimeoutMins *int `toml:"workspace_idle_timeout_mins,omitempty"`
+	// WorkspaceKeyMode controls the form of the persisted workspace key.
+	// "legacy" (default) keeps the historical native-separator form — backslashes
+	// on Windows — so session files and workspace overrides written by an older
+	// build keep resolving after an upgrade. "slash" opts in to the forward-slash
+	// canonical form, which makes the same logical path produce the same key no
+	// matter how the caller spelled it. Process-global and deliberately not
+	// per-project: if two projects disagreed, the same workspace could hash to two
+	// different session files inside one process.
+	WorkspaceKeyMode *string `toml:"workspace_key_mode,omitempty"`
 	// Shell overrides the default shell used for /shell commands, cron exec,
 	// hooks, and webhook exec. On Unix the default is "sh"; on Windows it is
 	// "powershell.exe". Set to an absolute path (e.g. "/bin/zsh") to use a
@@ -1060,6 +1080,17 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 	return "legacy"
 }
 
+// EffectiveWorkspaceKeyMode returns the persisted workspace key form: "legacy"
+// (default) or "slash". Process-global — see Config.WorkspaceKeyMode.
+func EffectiveWorkspaceKeyMode(cfg *Config) string {
+	if cfg != nil && cfg.WorkspaceKeyMode != nil {
+		if m := strings.ToLower(strings.TrimSpace(*cfg.WorkspaceKeyMode)); m == WorkspaceKeyModeSlash || m == WorkspaceKeyModeLegacy {
+			return m
+		}
+	}
+	return WorkspaceKeyModeLegacy
+}
+
 // validatePermissive is like validate but skips the "at least one platform"
 // requirement so that commands like `cc-connect web` can operate on agent-only
 // configs before platforms have been set up.
@@ -1079,6 +1110,13 @@ func (c *Config) validateInternal(permissive bool) error {
 	case "", "on", "off":
 	default:
 		return fmt.Errorf("config: attachment_send must be \"on\" or \"off\"")
+	}
+	if c.WorkspaceKeyMode != nil {
+		switch strings.ToLower(strings.TrimSpace(*c.WorkspaceKeyMode)) {
+		case WorkspaceKeyModeLegacy, WorkspaceKeyModeSlash:
+		default:
+			return fmt.Errorf("config: workspace_key_mode must be \"legacy\" or \"slash\"")
+		}
 	}
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")

@@ -74,6 +74,26 @@
 # 默认 2（略高于 120 秒优雅停止等待）。设 0 关闭该自愈。
 # busy_timeout_mins = 2
 
+# Workspace key form used by multi-workspace mode (see [[projects]].work_dir and
+# `cc-connect sessions`). The key also feeds the per-workspace session file name,
+# so it decides which state a workspace resolves to.
+#   "legacy" (default) — keep the historical form as-is. On Windows that means
+#                        backslashes, which is why the same workspace spelled with
+#                        forward slashes (`cc-connect sessions --work-dir "C:/x"`)
+#                        used to resolve to a *different* workspace. Unchanged
+#                        behaviour on every platform; no migration needed.
+#   "slash"            — normalize to forward slashes on every platform, so both
+#                        spellings of the same path resolve to one workspace.
+#                        Process-wide and startup-only (not hot-reloaded).
+# 多工作区模式的「工作区键」形态（与 [[projects]].work_dir、`cc-connect sessions` 相关）。
+# 该键同时参与每工作区会话文件的命名，因此决定了工作区解析到哪一份状态。
+#   "legacy"（默认）—— 保持历史形态不变。Windows 下即为反斜杠形态，这也是同一路径
+#                     写成正斜杠（如 `cc-connect sessions --work-dir "C:/x"`）时会解析到
+#                     另一个工作区的原因。全平台行为与旧版完全一致，无需迁移。
+#   "slash"         —— 全平台统一规整为正斜杠，同一路径的两种写法解析为同一工作区。
+#                     进程级、仅启动时生效（不热重载）。
+# workspace_key_mode = "legacy"
+
 [log]
 level = "info" # debug, info, warn, error
 
