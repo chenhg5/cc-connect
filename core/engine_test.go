@@ -3669,7 +3669,7 @@ func TestHandleMessage_AutoResetOnIdle_DoesNotTriggerForSlashCommand(t *testing.
 
 func TestConfigItems_ThinkingMessagesToggle(t *testing.T) {
 	e := newTestEngine()
-	items := e.configItems()
+	items := e.configItems("test:chan:u1")
 
 	var item *configItem
 	for i := range items {
