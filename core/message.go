@@ -459,6 +459,7 @@ const (
 	EventUserInputRequest  EventType = "user_input_request" // non-blocking question; answer is a user message
 	EventThinking          EventType = "thinking"           // thinking/processing status
 	EventModelSwitch       EventType = "model_switch"       // agent CLI moved the turn to another model on its own (see ModelSwitch)
+	EventSubagent          EventType = "subagent"           // a subagent started, made progress or finished (see Event.Subagent)
 )
 
 // ModelSwitch describes a model change the agent CLI made without being asked
@@ -478,6 +479,35 @@ type ModelSwitch struct {
 	// only this response came from To (e.g. a subagent fell back).
 	SessionWide bool
 }
+
+// SubagentPhase is where a subagent is in its life.
+type SubagentPhase string
+
+const (
+	SubagentStarted  SubagentPhase = "started"  // spawned, or woken again by a notification
+	SubagentStep     SubagentPhase = "step"     // said, thought or called something
+	SubagentFinished SubagentPhase = "finished" // ended; Status says how
+)
+
+// SubagentEvent describes one subagent's activity. Subagents run beside the
+// turn that spawned them, often past its end, so they are shown apart from
+// the turn: each one gets its own progress card, keyed by ID.
+type SubagentEvent struct {
+	ID         string // the tool call that spawned the subagent
+	Phase      SubagentPhase
+	Title      string            // what it was asked to do (started)
+	Kind       string            // its type, e.g. "general-purpose" (started)
+	Background bool              // runs past the spawning turn (started)
+	Prompt     string            // its task (started)
+	Step       ProgressCardEntry // what it did (step)
+	Status     string            // completed, failed, ... (finished)
+	Summary    string            // its final report (finished)
+}
+
+// MetaParentToolUseID is the Event.Metadata key an agent sets on events its
+// subagent produced; the value is the id of the tool call that spawned the
+// subagent. Such events are progress of that call, not the turn's own steps.
+const MetaParentToolUseID = "parent_tool_use_id"
 
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
@@ -513,6 +543,7 @@ type Event struct {
 	OutputTokens             int
 	CacheCreationInputTokens int            // cache-write tokens (new content written to cache)
 	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
+	Subagent                 *SubagentEvent // populated for EventSubagent
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 	ModelSwitch              *ModelSwitch   // populated for EventModelSwitch
