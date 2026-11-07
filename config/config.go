@@ -180,8 +180,9 @@ type HookConfig struct {
 type ManagementConfig struct {
 	Enabled     *bool    `toml:"enabled"`                // default false
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9820
-	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
+	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required unless insecure=true
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
+	Insecure    *bool    `toml:"insecure"`                // allow running without a token (local dev only); default false
 }
 
 // Display mode constants.
