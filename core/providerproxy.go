@@ -2,6 +2,8 @@ package core
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -93,7 +95,7 @@ func (pp *ProviderProxy) Close() {
 // rewriteThinkingInRequest reads the request body and rewrites
 // thinking.type "adaptive" to the given override value.
 func rewriteThinkingInRequest(r *http.Request, override string) {
-	if r.Body == nil || override == "" {
+	if r.Body == nil {
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -122,6 +124,17 @@ func rewriteThinkingInRequest(r *http.Request, override string) {
 		}
 	}
 
+	if meta, ok := data["metadata"].(map[string]any); ok {
+		if uid, ok := meta["user_id"].(string); ok && uid != "" {
+			if sanitized := sanitizeAnthropicUserID(uid); sanitized != uid {
+				slog.Warn("providerproxy: sanitized metadata.user_id to satisfy ^[a-zA-Z0-9_-]+$",
+					"original_len", len(uid), "sanitized", sanitized)
+				meta["user_id"] = sanitized
+				modified = true
+			}
+		}
+	}
+
 	if !modified {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
@@ -136,4 +149,56 @@ func rewriteThinkingInRequest(r *http.Request, override string) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(newBody))
 	r.ContentLength = int64(len(newBody))
+}
+
+// maxAnthropicUserIDLen is the Anthropic API's documented length cap for
+// metadata.user_id. Compatible gateways (e.g. DeepSeek) enforce the same
+// cap. See https://docs.anthropic.com/en/api/messages.
+const maxAnthropicUserIDLen = 256
+
+// sanitizeAnthropicUserID ensures the value matches ^[a-zA-Z0-9_-]+$ and
+// is no longer than maxAnthropicUserIDLen bytes, per the Anthropic API
+// spec and the matching constraint enforced by DeepSeek and other
+// Anthropic-compatible gateways (#864).
+//
+// If the input is already compliant, it is returned unchanged. Otherwise
+// the entire string is replaced with a deterministic, collision-resistant
+// hash digest prefixed with "h_" so operators can grep logs and re-derive
+// the original by sha256-hashing the same input. The hash form is always
+// 34 bytes long, well under the 256-byte cap.
+//
+// We do not split-and-keep-ASCII-runs: keeping fragments of the original
+// user_id would leak partial PII (e.g. "user_" prefix from a Feishu
+// open_id like "ou_张三") and still require per-provider acceptance of
+// mixed-script strings. A full-string hash is the simplest, safest
+// transform that satisfies the constraint and is identical across runs.
+func sanitizeAnthropicUserID(s string) string {
+	if s == "" {
+		return s
+	}
+	if len(s) <= maxAnthropicUserIDLen && isAnthropicUserIDCompliant(s) {
+		return s
+	}
+	sum := sha256.Sum256([]byte(s))
+	return "h_" + hex.EncodeToString(sum[:16])
+}
+
+// isAnthropicUserIDCompliant reports whether s is non-empty, no longer
+// than maxAnthropicUserIDLen bytes, and consists solely of the
+// characters allowed by the Anthropic API's metadata.user_id pattern
+// ^[a-zA-Z0-9_-]+$.
+func isAnthropicUserIDCompliant(s string) bool {
+	if s == "" || len(s) > maxAnthropicUserIDLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') &&
+			(c < 'A' || c > 'Z') &&
+			(c < '0' || c > '9') &&
+			c != '_' && c != '-' {
+			return false
+		}
+	}
+	return true
 }
