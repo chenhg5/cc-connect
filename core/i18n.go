@@ -202,6 +202,7 @@ const (
 	MsgToolResultFmtOk           MsgKey = "tool_result_fmt_ok"
 	MsgToolResultFmtFailed       MsgKey = "tool_result_fmt_failed"
 	MsgExecutionStopped          MsgKey = "execution_stopped"
+	MsgRelayExecutionStopped     MsgKey = "relay_execution_stopped"
 	MsgSessionCloseFailed        MsgKey = "session_close_failed"
 	MsgSessionResumeUnsafe       MsgKey = "session_resume_unsafe"
 	MsgSessionCancelled          MsgKey = "session_cancelled"
@@ -767,6 +768,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏹ 執行已停止。",
 		LangJapanese:           "⏹ 実行を停止しました。",
 		LangSpanish:            "⏹ Ejecución detenida.",
+	},
+	MsgRelayExecutionStopped: {
+		LangEnglish:            "⏹ Relay task stopped.",
+		LangChinese:            "⏹ Relay 任务已停止。",
+		LangTraditionalChinese: "⏹ Relay 任務已停止。",
+		LangJapanese:           "⏹ Relay タスクを停止しました。",
+		LangSpanish:            "⏹ Tarea relay detenida.",
 	},
 	MsgSessionCloseFailed: {
 		LangEnglish:            "⚠️ Warning: the stopped session's background process could not be confirmed killed. It may still be running and using its old credentials.",
@@ -4541,6 +4549,8 @@ Do NOT guess or modify the name — use it exactly as shown (e.g. "gemini", not 
 This sends a message to the target bot and waits for its response (printed to stdout).
 The conversation is visible in the group chat and each bot maintains its own relay session.
 
+For a long-running task, add --live to show the target bot's thinking and tool progress in the group while it runs; the task can be stopped with /stop.
+
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the relay knows which group chat to use.`,
 		LangChinese: `### Bot 之间转发 (relay)
 当需要和另一个 bot 通信(例如向另一个 AI agent 提问)时,使用:
@@ -4550,7 +4560,7 @@ Environment variables CC_PROJECT and CC_SESSION_KEY are already set, so the rela
 重要:<目标项目名> 必须是 /bind 命令输出里的 EXACT 项目名。
 不要猜测或修改名字 —— 完全照搬显示值(例如 "gemini" 而不是 "gemini-bot")。
 
-这会把消息发给目标 bot 并等待它的回复(打印到 stdout)。
+这会把消息发给目标 bot 并等待它的回复(打印到 stdout)。长时间任务可加 --live，目标 bot 的思考和工具调用会实时显示在群里，执行中可用 /stop 停止。
 会话在群聊里可见,每个 bot 维护自己的 relay 会话。
 
 环境变量 CC_PROJECT 和 CC_SESSION_KEY 已经设置好,relay 知道用哪个群聊。`,

@@ -506,6 +506,12 @@ type ProjectConfig struct {
 	// the current session has been inactive for the specified number of minutes.
 	// 0 or nil disables the behavior.
 	ResetOnIdleMins *int `toml:"reset_on_idle_mins,omitempty"`
+	// RelaySessionMode controls whether relay turns reuse or replace the agent
+	// conversation. Empty means reuse for backwards compatibility.
+	RelaySessionMode string `toml:"relay_session_mode,omitempty"`
+	// RelaySessionResetMins rotates a relay agent conversation after it has not
+	// been updated for the configured number of minutes. Zero or nil disables it.
+	RelaySessionResetMins *int `toml:"relay_session_reset_mins,omitempty"`
 	// AgentSessionIdleTimeoutMins 在指定分钟数后关闭空闲的 live agent 进程，
 	// 同时保留已保存的 session ID，便于下一条消息继续恢复。0 或 nil 表示禁用。
 	AgentSessionIdleTimeoutMins *int `toml:"agent_session_idle_timeout_mins,omitempty"`
@@ -1117,6 +1123,14 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
+		}
+		switch strings.ToLower(strings.TrimSpace(proj.RelaySessionMode)) {
+		case "", "reuse", "fresh":
+		default:
+			return fmt.Errorf("config: %s.relay_session_mode must be \"reuse\" or \"fresh\"", prefix)
+		}
+		if proj.RelaySessionResetMins != nil && *proj.RelaySessionResetMins < 0 {
+			return fmt.Errorf("config: %s.relay_session_reset_mins must be >= 0", prefix)
 		}
 		if proj.AgentSessionIdleTimeoutMins != nil && *proj.AgentSessionIdleTimeoutMins < 0 {
 			return fmt.Errorf("config: %s.agent_session_idle_timeout_mins must be >= 0", prefix)
