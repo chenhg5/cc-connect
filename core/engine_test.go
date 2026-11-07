@@ -2128,6 +2128,59 @@ func (p *stubRichCardSilentPlatform) snapshot() (starts, streams, updates []stri
 	return
 }
 
+// TestProcessInteractiveEvents_RichCard_FinalUpdateFailureFallsBackToSend pins
+// the delivery guarantee: if the final UpdateMessage fails (for example the
+// inline Patch was rate limited), the engine must re-send the final card via
+// Send instead of leaving the answer on the frozen preview.
+func TestProcessInteractiveEvents_RichCard_FinalUpdateFailureFallsBackToSend(t *testing.T) {
+	p := &stubRichCardFailingUpdatePlatform{
+		stubRichCardSilentPlatform: stubRichCardSilentPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "feishu"},
+		},
+		err: errors.New("feishu: patch message: code=230020"),
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{
+		Mode:             "full",
+		CardMode:         "rich",
+		ThinkingMessages: true,
+		ThinkingMaxLen:   300,
+		ToolMaxLen:       500,
+		ToolMessages:     true,
+	})
+	const sessionKey = "feishu:user-rich-final-fail"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	agentSession := newControllableSession("s-rich-final-fail")
+	state := &interactiveState{
+		agentSession: agentSession,
+		platform:     p,
+		replyCtx:     "ctx-rich-final-fail",
+	}
+	e.interactiveStates[sessionKey] = state
+
+	agentSession.events <- Event{Type: EventText, Content: "the answer is 42"}
+	agentSession.events <- Event{Type: EventResult, Content: "the answer is 42", Done: true}
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-rich-final-fail", time.Now(), nil, nil, state.replyCtx, 0)
+
+	sent := p.getSent()
+	if len(sent) == 0 {
+		t.Fatal("final UpdateMessage failed; expected the engine to fall back to Send")
+	}
+	if !strings.Contains(strings.Join(sent, "\n"), "the answer is 42") {
+		t.Fatalf("fallback Send did not carry the answer: %v", sent)
+	}
+}
+
+type stubRichCardFailingUpdatePlatform struct {
+	stubRichCardSilentPlatform
+	err error
+}
+
+func (p *stubRichCardFailingUpdatePlatform) UpdateMessage(_ context.Context, _ any, _ string) error {
+	return p.err
+}
+
 type stubRichCardResolverPlatform struct {
 	*stubRichCardSilentPlatform
 	resolverMu sync.Mutex
