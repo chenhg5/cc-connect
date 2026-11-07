@@ -46,9 +46,9 @@ type Agent struct {
 	// handshake so that future PermissionModes() calls can reflect the
 	// actual modes this specific ACP agent offers (rather than a
 	// hard-coded fallback that may not match).
-	modesMu       sync.RWMutex
-	modesCache    []core.PermissionModeInfo
-	modesCurrent  string
+	modesMu      sync.RWMutex
+	modesCache   []core.PermissionModeInfo
+	modesCurrent string
 
 	modelsMu     sync.RWMutex
 	modelsCache  []core.ModelOption
@@ -110,15 +110,15 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode = strings.TrimSpace(mode)
 
 	return &Agent{
-		workDir:     workDir,
+		workDir:      workDir,
 		cmd:          cmdStr,
 		cliExtraArgs: cliExtraArgs,
-		args:        args,
-		staticEnv:   staticEnv,
-		extraEnv:    extra,
-		authMethod:  authMethod,
-		displayName: displayName,
-		mode:        mode,
+		args:         args,
+		staticEnv:    staticEnv,
+		extraEnv:     extra,
+		authMethod:   authMethod,
+		displayName:  displayName,
+		mode:         mode,
 	}, nil
 }
 
@@ -281,6 +281,12 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 }
 
 var _ core.HistoryProvider = (*Agent)(nil)
+
+// CompressCommand implements core.ContextCompressor. ACP has no dedicated
+// compaction RPC; servers that support compaction (e.g. kimi acp) intercept
+// "/compact" as a builtin slash command inside session/prompt. Servers
+// without it answer with an "unknown command" notice, which is harmless.
+func (a *Agent) CompressCommand() string { return "/compact" }
 
 // -- AgentDoctorInfo --
 
