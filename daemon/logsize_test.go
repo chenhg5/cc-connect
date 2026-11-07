@@ -52,12 +52,12 @@ func TestParseLogSize(t *testing.T) {
 		// Errors
 		{"", 0, true},
 		{"   ", 0, true},
-		{"MB", 0, true},            // missing numeric part
-		{"-10MB", 0, true},         // negative rejected
-		{"abc", 0, true},           // garbage
-		{"10XYZ", 0, true},         // unknown suffix must fail loudly
-		{"10.5MB", 0, true},        // fractional not supported
-		{"0x10", 0, true},          // not hex
+		{"MB", 0, true},     // missing numeric part
+		{"-10MB", 0, true},  // negative rejected
+		{"abc", 0, true},    // garbage
+		{"10XYZ", 0, true},  // unknown suffix must fail loudly
+		{"10.5MB", 0, true}, // fractional not supported
+		{"0x10", 0, true},   // not hex
 	}
 
 	for _, tc := range cases {
