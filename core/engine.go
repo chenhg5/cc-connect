@@ -5110,18 +5110,20 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 		if strings.TrimSpace(partial) == "" {
 			return
 		}
+		// Same NO_REPLY semantics as a completed background turn.
+		outbound, _ := resolveUnsolicitedReply(partial)
 		state.mu.Lock()
 		p := state.platform
 		replyCtx := state.replyCtx
 		state.mu.Unlock()
-		if p != nil {
+		if p != nil && outbound != "" {
 			// Send off the reader goroutine and signal flushDone when finished.
 			// stopUnsolicitedReader waits for flushDone within its bounded
 			// timeout, which keeps the flushed text ahead of the next
 			// foreground turn's reply in the common case while a slow
 			// platform call can never extend that wait (some callers hold
 			// interactiveMu) beyond the bound.
-			chunks := SplitMessageCodeFenceAware(partial, maxPlatformMessageLen)
+			chunks := SplitMessageCodeFenceAware(outbound, maxPlatformMessageLen)
 			flushHandedOff = true
 			go func() {
 				defer close(flushDone)
@@ -5231,8 +5233,11 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					fullResponse = strings.Join(textParts, "")
 				}
 
-				if fullResponse != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
+				// Background turns must honor NO_REPLY too: a bare marker
+				// means nothing is delivered, a trailing marker is stripped.
+				outbound, silent := resolveUnsolicitedReply(fullResponse)
+				if outbound != "" {
+					for _, chunk := range SplitMessageCodeFenceAware(outbound, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
 				}
@@ -5281,7 +5286,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 				slog.Info("unsolicited turn complete",
 					"session", sessionKey,
-					"response_len", len(fullResponse))
+					"response_len", len(fullResponse),
+					"silent", silent)
 
 			case EventUserInputRequest:
 				e.showAsyncUserInput(state, p, replyCtx, event)
@@ -17857,6 +17863,17 @@ func stripTrailingSilent(text string) (string, bool) {
 		return text, false
 	}
 	return strings.TrimRight(stripped, " \t\r\n"), true
+}
+
+// resolveUnsolicitedReply applies NO_REPLY semantics to a background (unsolicited)
+// turn's final text: a bare marker means "deliver nothing" (silent=true); a
+// trailing marker is stripped from otherwise normal content.
+func resolveUnsolicitedReply(text string) (string, bool) {
+	if isSilentReply(text) {
+		return "", true
+	}
+	stripped, ok := stripTrailingSilent(text)
+	return stripped, ok && strings.TrimSpace(stripped) == ""
 }
 
 // couldBeSilentPrefix reports whether the trimmed text is still a case-insensitive
