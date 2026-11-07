@@ -481,8 +481,37 @@ var checkNameJa = map[string]string{
 	"Platforms":           "プラットフォーム",
 }
 
+// checkNameRu localizes display names; CLI and protocol names stay literal.
+var checkNameRu = map[string]string{
+	"Memory (Go runtime)": "Память (среда выполнения Go)",
+	"System Memory":       "Системная память",
+	"CPU":                 "Процессор",
+	"CPU Load":            "Нагрузка процессора",
+	"Disk Space":          "Место на диске",
+	"Git":                 "Git",
+	"SQLite3":             "SQLite3",
+	"FFmpeg (voice)":      "FFmpeg (голосовые сообщения)",
+	"HTTPS (Anthropic)":   "HTTPS (Anthropic)",
+	"Data Directory":      "Каталог данных",
+	"Config File":         "Файл настроек",
+	"Platforms":           "Платформы",
+}
+
 func localizeCheckName(name string, lang Language) string {
 	switch lang {
+	case LangRussian:
+		if ru, ok := checkNameRu[name]; ok {
+			return ru
+		}
+		if strings.HasPrefix(name, "Agent CLI") {
+			return strings.Replace(name, "Agent CLI", "CLI агента", 1)
+		}
+		if strings.HasPrefix(name, "Platform (") {
+			return strings.Replace(name, "Platform", "Платформа", 1)
+		}
+		if strings.HasSuffix(name, " Auth") {
+			return "Авторизация " + strings.TrimSuffix(name, " Auth")
+		}
 	case LangChinese, LangTraditionalChinese:
 		// Translate known names; parametric names (e.g. "Agent CLI (claude)") need prefix matching
 		if zh, ok := checkNameZh[name]; ok {
@@ -516,7 +545,7 @@ func localizeCheckName(name string, lang Language) string {
 
 // FormatDoctorResults formats check results using the i18n system.
 func FormatDoctorResults(results []DoctorCheckResult, i18n *I18n) string {
-	lang := i18n.currentLang()
+	lang := i18n.CurrentLang()
 
 	var sb strings.Builder
 	sb.WriteString(i18n.T(MsgDoctorTitle))

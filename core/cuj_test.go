@@ -1900,6 +1900,27 @@ func TestCUJ_F2_ModelSwitchLinkedToAgent(t *testing.T) {
 
 // CUJ-F3 · /lang switches i18n locale; next reply uses new language.
 func TestCUJ_F3_LangSwitchChangesReplyLanguage(t *testing.T) {
+	t.Run("Russian", func(t *testing.T) {
+		for _, alias := range []string{"ru", "russian", "русский"} {
+			t.Run(alias, func(t *testing.T) {
+				env := newCUJEnv(t)
+				for _, step := range []struct{ command, want string }{
+					{"/lang " + alias, "Выбран язык: **Русский**"},
+					{"/help", "📖 Доступные команды"},
+					{"/lang", "Русский: `/lang ru`"},
+					{"/lang en", "Language switched to **English**"},
+					{"/help", "📖 Available Commands"},
+				} {
+					env.plat.clearSent()
+					env.userSends("f3-ru", step.command)
+					env.waitFor(step.command, 2*time.Second, func() bool {
+						return strings.Contains(strings.Join(env.plat.getSent(), "\n"), step.want)
+					})
+				}
+			})
+		}
+	})
+
 	env := newCUJEnv(t)
 	env.userSends("f3", "hi")
 	env.waitFor("turn1", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })

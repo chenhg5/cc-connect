@@ -412,6 +412,8 @@ func main() {
 			lang = core.LangJapanese
 		case "es", "spanish":
 			lang = core.LangSpanish
+		case "ru", "russian", "русский":
+			lang = core.LangRussian
 		case "en", "english":
 			lang = core.LangEnglish
 		default:

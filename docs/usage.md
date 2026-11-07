@@ -695,7 +695,7 @@ Send voice messages — cc-connect transcribes them automatically.
 [speech]
 enabled = true
 provider = "openai"    # or "groq"
-language = ""          # "zh", "en", or auto-detect
+language = ""          # e.g. "zh", "en", "ru"; empty = auto-detect
 
 [speech.openai]
 api_key = "sk-xxx"

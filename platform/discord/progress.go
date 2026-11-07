@@ -188,6 +188,8 @@ func discordProgressRunningText(lang string) string {
 		return "處理中"
 	case "ja":
 		return "処理中"
+	case "ru":
+		return "Обработка"
 	case "es":
 		return "Procesando"
 	default:
@@ -203,6 +205,8 @@ func discordProgressCompletedText(lang string) string {
 		return "已完成"
 	case "ja":
 		return "完了"
+	case "ru":
+		return "Завершено"
 	case "es":
 		return "Completado"
 	default:
@@ -218,6 +222,8 @@ func discordProgressFailedText(lang string) string {
 		return "失敗"
 	case "ja":
 		return "失敗"
+	case "ru":
+		return "Ошибка"
 	case "es":
 		return "Fallido"
 	default:
@@ -233,6 +239,8 @@ func discordProgressCompletedFooter(lang string) string {
 		return "本進度卡已停止更新，完整答覆見下一條訊息。"
 	case "ja":
 		return "この進捗カードの更新は終了しました。完全な回答は次のメッセージにあります。"
+	case "ru":
+		return "Эта карточка больше не обновляется. Полный ответ — в следующем сообщении."
 	case "es":
 		return "Esta tarjeta de progreso ya no se actualiza. La respuesta completa está en el siguiente mensaje."
 	default:
@@ -248,6 +256,8 @@ func discordProgressFailedFooter(lang string) string {
 		return "本進度卡已停止更新（失敗），請查看下一條訊息中的錯誤詳情。"
 	case "ja":
 		return "この進捗カードは失敗で停止しました。詳細は次のメッセージを確認してください。"
+	case "ru":
+		return "Обновление карточки остановлено из-за ошибки. Подробности — в следующем сообщении."
 	case "es":
 		return "Esta tarjeta de progreso se detuvo por error. Consulta el siguiente mensaje para ver los detalles."
 	default:
@@ -263,6 +273,8 @@ func discordProgressLatestOnlyText(lang string) string {
 		return "僅顯示最近更新。"
 	case "ja":
 		return "最新の更新のみ表示しています。"
+	case "ru":
+		return "Показаны только последние обновления."
 	case "es":
 		return "Mostrando solo las actualizaciones más recientes."
 	default:
@@ -278,6 +290,8 @@ func discordProgressNoOutputText(lang string) string {
 		return "無輸出"
 	case "ja":
 		return "出力なし"
+	case "ru":
+		return "Нет вывода"
 	case "es":
 		return "Sin salida"
 	default:
@@ -293,6 +307,8 @@ func discordProgressToolLabel(lang string) string {
 		return "工具"
 	case "ja":
 		return "ツール"
+	case "ru":
+		return "Инструмент"
 	case "es":
 		return "Herramienta"
 	default:
@@ -308,6 +324,8 @@ func discordProgressOKText(lang string) string {
 		return "成功"
 	case "ja":
 		return "成功"
+	case "ru":
+		return "успешно"
 	case "es":
 		return "ok"
 	default:
@@ -344,6 +362,8 @@ func normalizeDiscordProgressLang(lang string) string {
 		return "zh"
 	case strings.HasPrefix(l, "ja"):
 		return "ja"
+	case strings.HasPrefix(l, "ru"):
+		return "ru"
 	case strings.HasPrefix(l, "es"):
 		return "es"
 	default:

@@ -421,7 +421,7 @@ Updates project settings. Only provided fields are updated.
 |---------------------|----------|----------------------------------------------------------|
 | `quiet`             | boolean  | Suppress thinking/tool progress messages                 |
 | `admin_from`        | string   | Comma-separated user IDs for privileged commands; `"*"` = all |
-| `language`          | string   | UI language: `en`, `zh`, `zh-TW`, `ja`, `es`             |
+| `language`          | string   | UI language: `en`, `zh`, `zh-TW`, `ja`, `es`, `ru`             |
 | `disabled_commands` | string[] | Commands to disable (e.g. `restart`, `upgrade`, `cron`)  |
 
 **Response:**
