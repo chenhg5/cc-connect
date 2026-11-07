@@ -2216,6 +2216,52 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: Using Droid CLI / 项目：使用 Droid CLI (uncomment to enable / 取消注释以启用)
+# =============================================================================
+# Requires: Droid CLI (`droid`) installed and authenticated or configured BYOK.
+# 需要安装并完成登录认证：Droid CLI（`droid`）或者配置好BYOK。
+# Droid uses `droid exec --output-format stream-json` under the hood.
+# Droid 底层使用 `droid exec --output-format stream-json` 命令。
+
+# [[projects]]
+# name = "my-droid-project"
+#
+# [projects.agent]
+# type = "droid"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"
+# cmd = "droid"          # binary, command prefix, or array / 二进制、命令前缀或数组
+# model = "gpt-5.3-codex" # optional model / 可选模型
+# reasoning_effort = "medium" # "none" | "off" | "low" | "medium" | "high" | "xhigh" | "max"
+# auto = ""              # "" | "low" | "medium" | "high"
+# skip_permissions_unsafe = false # true = --skip-permissions-unsafe（危险）
+# mode = "default"      # default | low | medium | high | yolo; overrides auto/skip flags
+#                       # 优先于 auto / skip_permissions_unsafe
+# env = { FACTORY_API_KEY = "${FACTORY_API_KEY}" } # optional project environment / 可选项目环境变量
+#
+# Mode mapping in chat (/mode):
+# 聊天命令 /mode 与 Droid 参数映射：
+# - default -> Droid CLI's own default permissions (no --auto / --skip-permissions-unsafe)
+#              使用 Droid CLI 自身的默认权限；适配器不额外强制只读
+# - low/medium/high -> --auto <level>
+# - yolo -> --skip-permissions-unsafe
+# Web Admin also supports selecting Droid and these permission modes.
+# Web 管理页也可选择 Droid 和上述权限模式。
+# /usage reads settings for the latest conversation started or resumed by this adapter.
+# It never starts probe conversations. Usage is unavailable until a session ID and tokenUsage exist.
+# /usage 仅读取本适配器最近启动或恢复的会话设置，不创建探测会话。
+# 尚无会话 ID 或 tokenUsage 时返回不可用。
+# Live CLI smoke / 真实 CLI 验证（需要已登录或设置 API Key）:
+# DROID_LIVE_E2E=1 go test ./agent/droid -run TestLiveE2E -v
+#
+# [[projects.platforms]]
+# type = "telegram"
+#
+# [projects.platforms.options]
+# token = "your-telegram-bot-token"
+
+# =============================================================================
 # Project: Using Kimi CLI / 项目：使用 Kimi CLI (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # Requires: pip install kimi-cli

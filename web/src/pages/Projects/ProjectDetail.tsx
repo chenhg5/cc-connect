@@ -57,6 +57,13 @@ const CODEX_MODE_OPTIONS: { value: string; label: string }[] = [
 const MODE_OPTIONS_BY_AGENT: Record<string, { value: string; label: string }[]> = {
   claudecode: CLAUDECODE_MODE_OPTIONS,
   codex: CODEX_MODE_OPTIONS,
+  droid: [
+    { value: 'default', label: 'default' },
+    { value: 'low', label: 'low' },
+    { value: 'medium', label: 'medium' },
+    { value: 'high', label: 'high' },
+    { value: 'yolo', label: 'yolo (bypass)' },
+  ],
 };
 
 const isQRPlatform = (type: string) => type === 'feishu' || type === 'lark' || type === 'weixin';
