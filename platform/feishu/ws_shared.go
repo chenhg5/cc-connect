@@ -11,8 +11,11 @@ import (
 // single connection and fanning out events to all platforms, every project
 // receives every message and can apply its own allow_chat / allow_from filters.
 type sharedWSGroup struct {
-	mu        sync.RWMutex
-	platforms []*Platform
+	lifecycleMu sync.Mutex
+	ready       bool
+	closed      bool
+	mu          sync.RWMutex
+	platforms   []*Platform
 }
 
 var (
@@ -81,4 +84,42 @@ func (g *sharedWSGroup) allPlatforms() []*Platform {
 	result := make([]*Platform, len(g.platforms))
 	copy(result, g.platforms)
 	return result
+}
+
+// setLifecycle serializes connection state changes for all projects sharing a socket.
+func (g *sharedWSGroup) setLifecycle(ready bool, err error) {
+	g.lifecycleMu.Lock()
+	defer g.lifecycleMu.Unlock()
+	if g.closed {
+		return
+	}
+	g.ready = ready
+	for _, p := range g.allPlatforms() {
+		if ready {
+			p.notifyReady()
+		} else {
+			p.notifyUnavailable(err)
+		}
+	}
+}
+
+// syncLifecycle catches up a project that joins an already connected group.
+func (g *sharedWSGroup) syncLifecycle(p *Platform) {
+	g.lifecycleMu.Lock()
+	defer g.lifecycleMu.Unlock()
+	if g.ready {
+		p.notifyReady()
+	}
+}
+
+// stopLifecycle prevents callbacks arriving after the primary is stopped from
+// incorrectly marking sibling platforms ready again.
+func (g *sharedWSGroup) stopLifecycle(err error) {
+	g.lifecycleMu.Lock()
+	defer g.lifecycleMu.Unlock()
+	g.closed = true
+	g.ready = false
+	for _, p := range g.allPlatforms() {
+		p.notifyUnavailable(err)
+	}
 }
