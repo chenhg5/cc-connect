@@ -532,4 +532,5 @@ type AgentSessionInfo struct {
 	MessageCount int
 	ModifiedAt   time.Time
 	GitBranch    string
+	WorkDir      string // 会话所属目录，用于跨项目浏览时标明来源。
 }

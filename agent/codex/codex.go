@@ -40,6 +40,7 @@ type Agent struct {
 	backend         string // "exec" | "app_server"
 	appServerURL    string
 	codexHome       string
+	listAllWorkdirs bool
 	systemPrompt    string
 	appendPrompt    string
 	cmd             string   // explicit CLI command; empty enables discovery
@@ -62,6 +63,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	backend, _ := opts["backend"].(string)
 	appServerURL, _ := opts["app_server_url"].(string)
 	codexHome, _ := opts["codex_home"].(string)
+	listAllWorkdirs, _ := opts["list_all_workdirs"].(bool)
 	systemPrompt, _ := opts["system_prompt"].(string)
 	appendPrompt, _ := opts["append_system_prompt"].(string)
 	mode = normalizeMode(mode)
@@ -102,6 +104,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		backend:         backend,
 		appServerURL:    appServerURL,
 		codexHome:       strings.TrimSpace(codexHome),
+		listAllWorkdirs: listAllWorkdirs,
 		systemPrompt:    strings.TrimSpace(systemPrompt),
 		appendPrompt:    strings.TrimSpace(appendPrompt),
 		cmd:             cmd,
@@ -539,12 +542,32 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
 }
 
+// ListSessions 返回当前工作目录可操作的 Codex 会话。
+// 即使启用跨项目浏览，切换、恢复和删除的候选范围仍保持在当前目录；
+// 空工作目录按进程当前目录处理，不作为取消过滤的标志。
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
 	a.mu.RLock()
 	codexHome := a.codexHome
 	workDir := a.workDir
 	a.mu.RUnlock()
+	if workDir == "" {
+		workDir = "."
+	}
 	return listCodexSessions(workDir, codexHome)
+}
+
+// ListAllSessions 为列表和搜索提供只读浏览范围。
+// 启用 list_all_workdirs 时展示当前 CODEX_HOME 的所有目录，否则沿用项目范围。
+// 额外返回的跨项目会话不能作为切换、恢复或删除的候选。
+func (a *Agent) ListAllSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
+	a.mu.RLock()
+	codexHome := a.codexHome
+	listAllWorkdirs := a.listAllWorkdirs
+	a.mu.RUnlock()
+	if !listAllWorkdirs {
+		return a.ListSessions(ctx)
+	}
+	return listCodexSessions("", codexHome)
 }
 
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
@@ -581,13 +604,16 @@ func (a *Agent) GetMode() string {
 	return a.mode
 }
 
+// WorkspaceAgentOptions 返回创建工作区 Agent 所需的配置副本，
+// 包含 list_all_workdirs，以便切换工作区后仍保留会话列举范围。
 func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
 	opts := map[string]any{
-		"mode":    a.mode,
-		"backend": a.backend,
+		"mode":              a.mode,
+		"backend":           a.backend,
+		"list_all_workdirs": a.listAllWorkdirs,
 	}
 	if a.cmd != "" {
 		opts["cmd"] = append([]string{a.cmd}, a.cliExtraArgs...)

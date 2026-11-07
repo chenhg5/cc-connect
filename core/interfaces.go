@@ -369,6 +369,13 @@ type Agent interface {
 	Stop() error
 }
 
+// SessionBrowser 为会话列表和搜索提供可选的跨项目浏览范围。
+// ListAllSessions 返回可展示的会话；调用方必须通过 Agent.ListSessions
+// 确定可操作范围，不能将额外的浏览结果用于切换、恢复或删除。
+type SessionBrowser interface {
+	ListAllSessions(ctx context.Context) ([]AgentSessionInfo, error)
+}
+
 // AgentSession represents a running interactive agent session with a persistent process.
 type AgentSession interface {
 	// Send sends a user message (with optional images and files) to the running
