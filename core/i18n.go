@@ -687,6 +687,7 @@ const (
 	MsgWsInitInvalidTarget      MsgKey = "ws_init_invalid_target"
 	MsgWsInitLocalPathsDisabled MsgKey = "ws_init_local_paths_disabled"
 	MsgBackgroundAutoDenied     MsgKey = "background_auto_denied"
+	MsgAgentVersionRequired     MsgKey = "agent_version_required"
 
 	// Agent system-prompt tool sections (Issue #1655). These are appended
 	// to the agent's own system prompt by core/interfaces.go AgentSystemPromptForLang
@@ -701,6 +702,13 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgAgentVersionRequired: {
+		LangEnglish:            "%s requires %s %s or newer (stable). Upgrade with `%s`; custom command wrappers must forward `--version` and return the plain CLI version.",
+		LangChinese:            "%s 需要 %s %s 或更高的稳定版本。请运行 `%s` 升级；自定义命令包装器必须透传 `--version` 并返回纯 CLI 版本号。",
+		LangTraditionalChinese: "%s 需要 %s %s 或更新的穩定版本。請執行 `%s` 升級；自訂命令包裝器必須轉送 `--version` 並回傳純 CLI 版本號。",
+		LangJapanese:           "%s には %s %s 以降の安定版が必要です。`%s` で更新してください。カスタムコマンドのラッパーは `--version` を転送し、CLI のバージョン番号のみを返す必要があります。",
+		LangSpanish:            "%s requiere %s %s o una versión estable posterior. Actualice con `%s`; los comandos envoltorio deben reenviar `--version` y devolver solo la versión de la CLI.",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
