@@ -1689,6 +1689,76 @@ func TestFormatProgressToolInput_OtherTools(t *testing.T) {
 	}
 }
 
+func TestBuildToolDisplay_ShowsKeyParameters(t *testing.T) {
+	tests := []struct {
+		name     string
+		tool     string
+		input    string
+		contains []string
+	}{
+		{
+			name:  "read includes path range",
+			tool:  "read",
+			input: `{"filePath":"/tmp/a.go","offset":1,"limit":200}`,
+			contains: []string{
+				"filePath: /tmp/a.go",
+				"offset: 1",
+				"limit: 200",
+			},
+		},
+		{
+			name:  "grep includes scope",
+			tool:  "grep",
+			input: `{"pattern":"foo","include":"*.go","path":"platform/feishu"}`,
+			contains: []string{
+				"pattern: foo",
+				"include: *.go",
+				"path: platform/feishu",
+			},
+		},
+		{
+			name:  "command includes execution context",
+			tool:  "exec",
+			input: `{"cmd":"go test ./...","cwd":"/tmp/project","timeout":120000}`,
+			contains: []string{
+				"cmd: go test ./...",
+				"cwd: /tmp/project",
+				"timeout: 120000",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildToolDisplay(tt.tool, tt.input)
+			for _, want := range tt.contains {
+				if !strings.Contains(got.Detail, want) {
+					t.Errorf("detail %q does not contain %q", got.Detail, want)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildToolDisplay_RedactsKeyParameters(t *testing.T) {
+	got := buildToolDisplay("read", `{"filePath":"/tmp/a?token=secret","offset":1}`)
+	if strings.Contains(got.Detail, "token=secret") {
+		t.Fatalf("sensitive query value leaked: %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "filePath:") || !strings.Contains(got.Detail, "offset: 1") {
+		t.Fatalf("key parameters were not retained: %q", got.Detail)
+	}
+}
+
+func TestBuildToolDisplay_ShowsPatchText(t *testing.T) {
+	got := buildToolDisplay("apply_patch", `{"filePath":"/tmp/a.go","patchText":"@@\n-old\n+new"}`)
+	for _, want := range []string{"filePath: /tmp/a.go", "patchText: @@\n-old\n+new"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Errorf("detail %q does not contain %q", got.Detail, want)
+		}
+	}
+}
+
 func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 	tests := []struct {
 		name      string
