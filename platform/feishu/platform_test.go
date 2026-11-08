@@ -1690,6 +1690,9 @@ func TestFormatProgressToolInput_OtherTools(t *testing.T) {
 }
 
 func TestAllowChat_FiltersGroupMessages(t *testing.T) {
+	// This test covers allow_chat, not display-name API latency. Keep both
+	// permitted and rejected cases independent of the public Open Platform.
+	lookup := newLookupServer(t, lookupNamed, lookupNamed)
 	tests := []struct {
 		name      string
 		allowChat string
@@ -1708,7 +1711,7 @@ func TestAllowChat_FiltersGroupMessages(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+			p, err := newPlatform("feishu", lookup.srv.URL, map[string]any{
 				"app_id": "cli_xxx", "app_secret": "secret",
 				"enable_feishu_card": true,
 				"group_reply_all":    true,
