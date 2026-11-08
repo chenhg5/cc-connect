@@ -13946,7 +13946,6 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 		SessionKey:  "discord:channel-1:user-1",
 		Prompt:      "summarize activity",
 		Description: "Daily summary",
-		SessionMode: "reuse",
 	}
 	if err := store.Add(job); err != nil {
 		t.Fatalf("store.Add() error = %v", err)
@@ -13973,11 +13972,11 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 		t.Fatalf("sent[1] = %q, want final result", sent[1])
 	}
 
-	if got := len(e.sessions.ListSessions("discord:thread-fresh")); got != 0 {
-		t.Fatalf("fresh session count = %d, want 0 for reuse mode", got)
+	if got := len(e.sessions.ListSessions("discord:thread-fresh")); got != 1 {
+		t.Fatalf("fresh session count = %d, want 1 for default new-per-run mode", got)
 	}
-	if got := len(e.sessions.ListSessions("discord:channel-1:user-1")); got != 1 {
-		t.Fatalf("base session count = %d, want 1", got)
+	if got := len(e.sessions.ListSessions("discord:channel-1:user-1")); got != 0 {
+		t.Fatalf("base session count = %d, want 0: scheduled run must not reuse chat history", got)
 	}
 	if job.SessionKey != "discord:channel-1:user-1" {
 		t.Fatalf("job.SessionKey = %q, want unchanged base session key", job.SessionKey)
@@ -13989,6 +13988,30 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 
 	if len(agentSession.sentPrompts) != 1 || !strings.Contains(agentSession.sentPrompts[0], "summarize activity") {
 		t.Fatalf("agent prompts = %#v, want prompt containing summarize activity", agentSession.sentPrompts)
+	}
+}
+
+func TestExecuteCronJob_ExplicitReuseKeepsChatSession(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+	agentSession := newResultAgentSession("reused context")
+	e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = NewCronScheduler(store)
+	chat := e.sessions.GetOrCreateActive("discord:channel-1:user-1")
+	chat.AddHistory("user", "existing conversation")
+	job := &CronJob{ID: "job-reuse", SessionKey: "discord:channel-1:user-1", Prompt: "continue", SessionMode: "reuse"}
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob: %v", err)
+	}
+	if history := chat.GetHistory(0); len(history) != 3 {
+		t.Fatalf("chat history = %d, want original user, cron user, cron answer", len(history))
+	}
+	if got := len(e.sessions.ListSessions("discord:thread-fresh")); got != 0 {
+		t.Fatalf("explicit reuse created a separate session: %d", got)
 	}
 }
 

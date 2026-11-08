@@ -110,6 +110,7 @@ the full themed summary; per-beta details remain in the beta sections below.
 ### ⚠️ Behavior Changes (carried forward from the beta cycle)
 All behavior changes from beta.1 → beta.5 remain in effect for v1.3.3. **Most likely
 to affect existing configs:**
+- Cron and timer prompts without an explicit `session_mode` now run in a fresh session (`new_per_run`) rather than sharing the active chat. They no longer inherit that chat's context or append their results to its history. Set `[cron] session_mode = "reuse"` globally, or `session_mode = "reuse"` per job, to retain the previous behavior.
 - `progress_style` default for Telegram & Discord is now `compact` (was `legacy`). Set
   `progress_style = "legacy"` to revert. (#1354)
 - QQ Bot default `intents` now include `INTERACTION_CREATE` (bit 26). Custom `intents`
