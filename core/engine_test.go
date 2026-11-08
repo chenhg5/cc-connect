@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 )
@@ -11085,117 +11086,124 @@ func TestHandleMessageRecallPreservesLaterQueueWhenAgentChannelCloses(t *testing
 }
 
 func TestHandleMessageRecallHandoffKeepsBusyLockAndFIFO(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	oldSession := newQueuingSession("old-session")
-	replacement := newQueuingSession("replacement")
-	agent := &controllableAgent{nextSession: replacement}
-	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
-	key := "test:recall-handoff"
-	session := e.sessions.GetOrCreateActive(key)
-	lockGen, locked := session.TryLock()
-	if !locked {
-		t.Fatal("failed to lock session for recalled turn")
-	}
-	queued := func(id, content string) queuedMessage {
-		return queuedMessage{
-			messageID: id, platform: p, replyCtx: "ctx-" + id,
-			content: content, userID: "user", userName: "user",
-			msgPlatform: "test", msgSessionKey: key,
+	synctest.Test(t, func(t *testing.T) {
+		p := &stubPlatformEngine{n: "test"}
+		oldSession := newQueuingSession("old-session")
+		replacement := newQueuingSession("replacement")
+		agent := &controllableAgent{nextSession: replacement}
+		e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+		defer e.cancel()
+		key := "test:recall-handoff"
+		session := e.sessions.GetOrCreateActive(key)
+		lockGen, locked := session.TryLock()
+		if !locked {
+			t.Fatal("failed to lock session for recalled turn")
 		}
-	}
-	oldState := &interactiveState{
-		agentSession: oldSession, busySession: session, platform: p,
-		replyCtx: "ctx-a", currentMessageID: "msg-a",
-		pendingMessages: []queuedMessage{
-			queued("msg-b", "turn B"), queued("msg-c", "turn C"),
-		},
-	}
-	e.interactiveMu.Lock()
-	e.interactiveStates[key] = oldState
-	e.interactiveMu.Unlock()
-
-	// The old processor is deliberately paused: recall detaches its state,
-	// then D arrives before resumePendingAfterStoppedTurn is invoked below.
-	e.ReceiveMessage(p, &Message{Platform: "test", MessageID: "msg-a", Recalled: true})
-	select {
-	case <-oldSession.closed:
-	case <-time.After(2 * time.Second):
-		t.Fatal("old agent session did not close")
-	}
-	e.interactiveMu.Lock()
-	_, exists := e.interactiveStates[key]
-	e.interactiveMu.Unlock()
-	if exists {
-		t.Fatal("recalled state was not detached")
-	}
-	session.mu.Lock()
-	busy, gen := session.busy, session.lockGen
-	session.mu.Unlock()
-	if !busy || gen != lockGen {
-		t.Fatalf("busy lock after detach = (%t, %d), want (true, %d)", busy, gen, lockGen)
-	}
-
-	e.ReceiveMessage(p, &Message{
-		SessionKey: key, Platform: "test", MessageID: "msg-d",
-		UserID: "user", UserName: "user", Content: "turn D", ReplyCtx: "ctx-d",
-	})
-	e.interactiveMu.Lock()
-	placeholder := e.interactiveStates[key]
-	e.interactiveMu.Unlock()
-	if placeholder == nil {
-		t.Fatal("D was not queued in a placeholder state")
-	}
-	placeholder.mu.Lock()
-	queuedD := len(placeholder.pendingMessages) == 1 && placeholder.pendingMessages[0].messageID == "msg-d"
-	placeholder.mu.Unlock()
-	session.mu.Lock()
-	busy, gen = session.busy, session.lockGen
-	session.mu.Unlock()
-	if !queuedD || !busy || gen != lockGen {
-		t.Fatalf("handoff window: queued D=%t, busy=%t, gen=%d; want D queued under gen %d", queuedD, busy, gen, lockGen)
-	}
-	replacement.sendMu.Lock()
-	startedEarly := len(replacement.sendCalls) != 0
-	replacement.sendMu.Unlock()
-	if startedEarly {
-		t.Fatal("D started before the old queue was handed off")
-	}
-
-	resumed := make(chan bool, 1)
-	go func() {
-		resumed <- e.resumePendingAfterStoppedTurn(oldState, session, e.sessions, key, agent, "", key, lockGen)
-	}()
-	for i, want := range []string{"turn B", "turn C", "turn D"} {
-		deadline := time.Now().Add(2 * time.Second)
-		var prompts []string
-		for time.Now().Before(deadline) {
-			replacement.sendMu.Lock()
-			prompts = append([]string(nil), replacement.sendCalls...)
-			replacement.sendMu.Unlock()
-			if len(prompts) > i {
-				break
+		queued := func(id, content string) queuedMessage {
+			return queuedMessage{
+				messageID: id, platform: p, replyCtx: "ctx-" + id,
+				content: content, userID: "user", userName: "user",
+				msgPlatform: "test", msgSessionKey: key,
 			}
-			time.Sleep(5 * time.Millisecond)
 		}
-		if len(prompts) <= i || !strings.Contains(prompts[i], want) {
-			t.Fatalf("replacement prompts = %v, want %s at index %d", prompts, want, i)
+		oldState := &interactiveState{
+			agentSession: oldSession, busySession: session, platform: p,
+			replyCtx: "ctx-a", currentMessageID: "msg-a",
+			pendingMessages: []queuedMessage{
+				queued("msg-b", "turn B"), queued("msg-c", "turn C"),
+			},
 		}
-		replacement.events <- Event{Type: EventResult, Content: "ok", Done: true}
-	}
-	select {
-	case ok := <-resumed:
-		if !ok {
-			t.Fatal("recall handoff did not run")
+		e.interactiveMu.Lock()
+		e.interactiveStates[key] = oldState
+		e.interactiveMu.Unlock()
+
+		// The old processor is deliberately paused: recall detaches its state,
+		// then D arrives before resumePendingAfterStoppedTurn is invoked below.
+		e.ReceiveMessage(p, &Message{Platform: "test", MessageID: "msg-a", Recalled: true})
+		select {
+		case <-oldSession.closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("old agent session did not close")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("recall handoff did not finish")
-	}
-	session.mu.Lock()
-	busy, gen = session.busy, session.lockGen
-	session.mu.Unlock()
-	if busy || gen != lockGen {
-		t.Fatalf("busy lock after B/C/D = (%t, %d), want (false, %d)", busy, gen, lockGen)
-	}
+		e.interactiveMu.Lock()
+		_, exists := e.interactiveStates[key]
+		e.interactiveMu.Unlock()
+		if exists {
+			t.Fatal("recalled state was not detached")
+		}
+		// A slow stopped processor must retain its queue past the short
+		// foreground lock wait. Virtual time makes this deterministic.
+		time.Sleep(recalledStopLockWait + time.Second)
+		session.mu.Lock()
+		busy, gen := session.busy, session.lockGen
+		session.mu.Unlock()
+		if !busy || gen != lockGen {
+			t.Fatalf("busy lock after detach = (%t, %d), want (true, %d)", busy, gen, lockGen)
+		}
+
+		e.ReceiveMessage(p, &Message{
+			SessionKey: key, Platform: "test", MessageID: "msg-d",
+			UserID: "user", UserName: "user", Content: "turn D", ReplyCtx: "ctx-d",
+		})
+		e.interactiveMu.Lock()
+		placeholder := e.interactiveStates[key]
+		e.interactiveMu.Unlock()
+		if placeholder == nil {
+			t.Fatal("D was not queued in a placeholder state")
+		}
+		placeholder.mu.Lock()
+		queuedD := len(placeholder.pendingMessages) == 1 && placeholder.pendingMessages[0].messageID == "msg-d"
+		placeholder.mu.Unlock()
+		session.mu.Lock()
+		busy, gen = session.busy, session.lockGen
+		session.mu.Unlock()
+		if !queuedD || !busy || gen != lockGen {
+			t.Fatalf("handoff window: queued D=%t, busy=%t, gen=%d; want D queued under gen %d", queuedD, busy, gen, lockGen)
+		}
+		replacement.sendMu.Lock()
+		startedEarly := len(replacement.sendCalls) != 0
+		replacement.sendMu.Unlock()
+		if startedEarly {
+			t.Fatal("D started before the old queue was handed off")
+		}
+
+		resumed := make(chan bool, 1)
+		go func() {
+			resumed <- e.resumePendingAfterStoppedTurn(oldState, session, e.sessions, key, agent, "", key, lockGen)
+		}()
+		for i, want := range []string{"turn B", "turn C", "turn D"} {
+			deadline := time.Now().Add(2 * time.Second)
+			var prompts []string
+			for time.Now().Before(deadline) {
+				replacement.sendMu.Lock()
+				prompts = append([]string(nil), replacement.sendCalls...)
+				replacement.sendMu.Unlock()
+				if len(prompts) > i {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			if len(prompts) <= i || !strings.Contains(prompts[i], want) {
+				t.Fatalf("replacement prompts = %v, want %s at index %d", prompts, want, i)
+			}
+			replacement.events <- Event{Type: EventResult, Content: "ok", Done: true}
+		}
+		select {
+		case ok := <-resumed:
+			if !ok {
+				t.Fatal("recall handoff did not run")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("recall handoff did not finish")
+		}
+		session.mu.Lock()
+		busy, gen = session.busy, session.lockGen
+		session.mu.Unlock()
+		if busy || gen != lockGen {
+			t.Fatalf("busy lock after B/C/D = (%t, %d), want (false, %d)", busy, gen, lockGen)
+		}
+
+	})
 }
 
 func TestHandleMessageRecallEmptyHandoffStartsQueuedArrival(t *testing.T) {
@@ -11302,41 +11310,49 @@ func TestRecallHandoffFlagAndStoppedAreAtomic(t *testing.T) {
 }
 
 func TestRecallHandoffTimeoutNotifiesAndUnlocks(t *testing.T) {
-	p := &stubPlatformEngine{n: "test"}
-	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	key := "test:recall-handoff-timeout"
-	session := e.sessions.GetOrCreateActive(key)
-	lockGen, locked := session.TryLock()
-	if !locked {
-		t.Fatal("could not lock test session")
-	}
-	state := &interactiveState{
-		platform:        p,
-		pendingMessages: []queuedMessage{{messageID: "queued", platform: p, replyCtx: "ctx", content: "queued message"}},
-	}
-	state.markStoppedForRecall()
-	if e.waitForRecallHandoff(state, key, session, lockGen) {
-		t.Fatal("missing handoff must fail instead of pretending to resume")
-	}
-	if session.Busy() {
-		t.Fatal("failed recall handoff left the session locked")
-	}
-	sent := p.getSent()
-	if len(sent) != 1 || !strings.Contains(sent[0], "did not stop") {
-		t.Fatalf("sent = %v, want visible failed-handoff notice", sent)
-	}
-	e.interactiveMu.Lock()
-	current := e.interactiveStates[key]
-	e.interactiveMu.Unlock()
-	if current == nil || current == state {
-		t.Fatal("failed handoff did not install a reachable queue state")
-	}
-	current.mu.Lock()
-	remaining := len(current.pendingMessages)
-	current.mu.Unlock()
-	if remaining != 0 {
-		t.Fatal("failed handoff left messages stranded without a notification")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		p := &stubPlatformEngine{n: "test"}
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+		defer e.cancel()
+		key := "test:recall-handoff-timeout"
+		session := e.sessions.GetOrCreateActive(key)
+		lockGen, locked := session.TryLock()
+		if !locked {
+			t.Fatal("could not lock test session")
+		}
+		state := &interactiveState{
+			platform:        p,
+			pendingMessages: []queuedMessage{{messageID: "queued", platform: p, replyCtx: "ctx", content: "queued message"}},
+		}
+		state.markStoppedForRecall()
+		started := time.Now()
+		if e.waitForRecallHandoff(state, key, session, lockGen) {
+			t.Fatal("missing handoff must fail instead of pretending to resume")
+		}
+		if elapsed := time.Since(started); elapsed < closeTimeout {
+			t.Fatalf("handoff timed out after %v, before the graceful close budget %v", elapsed, closeTimeout)
+		}
+		if session.Busy() {
+			t.Fatal("failed recall handoff left the session locked")
+		}
+		sent := p.getSent()
+		if len(sent) != 1 || !strings.Contains(sent[0], "did not stop") {
+			t.Fatalf("sent = %v, want visible failed-handoff notice", sent)
+		}
+		e.interactiveMu.Lock()
+		current := e.interactiveStates[key]
+		e.interactiveMu.Unlock()
+		if current == nil || current == state {
+			t.Fatal("failed handoff did not install a reachable queue state")
+		}
+		current.mu.Lock()
+		remaining := len(current.pendingMessages)
+		current.mu.Unlock()
+		if remaining != 0 {
+			t.Fatal("failed handoff left messages stranded without a notification")
+		}
+
+	})
 }
 
 func TestHandleMessageRecallRemovesQueuedMessageSilently(t *testing.T) {
@@ -11438,6 +11454,51 @@ func TestHandleMessageBusyRecalledCurrentStopsAndProcessesNewMessage(t *testing.
 	if len(newAgentSession.sentPrompts) != 1 || !strings.Contains(newAgentSession.sentPrompts[0], "please handle this") {
 		t.Fatalf("new session prompts = %#v, want new message prompt", newAgentSession.sentPrompts)
 	}
+}
+
+func TestHandleMessageBusyRecalledSlowHandoffQueuesNewMessage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := &recallCheckingPlatform{
+			stubPlatformEngine: stubPlatformEngine{n: "test"},
+			recalled:           true,
+		}
+		replacement := newResultAgentSession("new message processed")
+		e := NewEngine("test", &resultAgent{session: replacement}, []Platform{p}, "", LangEnglish)
+		defer e.cancel()
+		key := "test:slow-recall"
+		session := e.sessions.GetOrCreateActive(key)
+		lockGen, locked := session.TryLock()
+		if !locked {
+			t.Fatal("could not lock recalled turn")
+		}
+		oldState := &interactiveState{
+			agentSession: newControllableSession("old-current"), busySession: session,
+			platform: p, replyCtx: "old-reply", currentMessageID: "old-msg",
+		}
+		e.interactiveStates[key] = oldState
+
+		// There is deliberately no old processor to complete the handoff yet.
+		e.ReceiveMessage(p, &Message{
+			SessionKey: key, Platform: "test", MessageID: "new-msg",
+			Content: "please handle this", ReplyCtx: "new-reply",
+		})
+		synctest.Wait()
+		if sent := p.getSent(); !slices.Contains(sent, e.i18n.T(MsgMessageQueued)) || slices.Contains(sent, e.i18n.T(MsgPreviousProcessing)) {
+			t.Fatalf("sent = %v, want the new arrival queued during slow recall", sent)
+		}
+		if !session.Busy() {
+			t.Fatal("slow recall released the old turn's busy lock")
+		}
+		if !e.resumePendingAfterStoppedTurn(oldState, session, e.sessions, key, e.agent, "", key, lockGen) {
+			t.Fatal("slow recall did not resume the new message")
+		}
+		if len(replacement.sentPrompts) != 1 || !strings.Contains(replacement.sentPrompts[0], "please handle this") {
+			t.Fatalf("replacement prompts = %v, want the queued new message once", replacement.sentPrompts)
+		}
+		if session.Busy() || !slices.Contains(p.getSent(), "new message processed") {
+			t.Fatal("queued arrival did not finish with a visible reply")
+		}
+	})
 }
 
 func TestStopCurrentMessageIfRecalledThrottlesRepeatedFallbackChecks(t *testing.T) {

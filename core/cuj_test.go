@@ -2329,7 +2329,11 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	pB := &stubPlatformEngine{n: "platB"}
 	agent := &cujAgent{}
 	e := NewEngine("test", agent, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
-	t.Cleanup(func() { _ = e.Stop() })
+	t.Cleanup(func() {
+		if err := e.Stop(); err != nil {
+			t.Errorf("stop engine: %v", err)
+		}
+	})
 
 	// Fire 5 messages on each platform concurrently.
 	var wg sync.WaitGroup
@@ -2384,6 +2388,7 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 				assistantB++
 			}
 		}
+		// Wait for both answers and disk saves before TempDir cleanup.
 		if userA >= 5 && userB >= 5 && assistantA >= 5 && assistantB >= 5 && !sessionA.Busy() && !sessionB.Busy() {
 			break
 		}
@@ -2419,6 +2424,8 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	if len(pB.getSent()) == 0 {
 		t.Fatal("platB received no replies")
 	}
+
+	t.Run("LateQueueKeepsForegroundReader", runCUJH2LateQueueKeepsForegroundReader)
 }
 
 // ---------------------------------------------------------------------------
