@@ -818,28 +818,15 @@ func (p *Platform) checkSendQuota(ctx context.Context, path sendPath) error {
 // Markdown markers literally and renders with paragraph semantics (a lone "\n"
 // is folded into a space, only a blank line starts a new line).
 //
-// Single line breaks outside code fences are doubled first, while the fences
-// are still there to skip, so pasted code is not double-spaced. Then the
+// Every single line break is doubled, inside code fences too, so pasted code
+// keeps one line per line instead of being folded into one long line. An
+// unclosed fence is closed first so StripMarkdown removes its marker. Then the
 // Markdown markers are stripped.
 func plainTextForWeixin(s string) string {
-	var sb strings.Builder
-	for {
-		i := strings.Index(s, "```")
-		if i < 0 {
-			sb.WriteString(promoteSingleLineBreaks(s))
-			break
-		}
-		sb.WriteString(promoteSingleLineBreaks(s[:i]))
-		rest := s[i+3:]
-		j := strings.Index(rest, "```")
-		if j < 0 {
-			sb.WriteString(s[i:])
-			break
-		}
-		sb.WriteString(s[i : i+3+j+3])
-		s = rest[j+3:]
+	if strings.Count(s, "```")%2 == 1 {
+		s += "\n```"
 	}
-	return core.StripMarkdown(sb.String())
+	return core.StripMarkdown(promoteSingleLineBreaks(s))
 }
 
 // promoteSingleLineBreaks turns every lone "\n" into "\n\n". Runs of two or
@@ -890,9 +877,10 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string,
 	if strings.TrimSpace(content) == "" {
 		return nil
 	}
-	content = plainTextForWeixin(content)
-	if strings.TrimSpace(content) == "" {
-		return nil
+	// A reply that is only Markdown (a "---" rule, an empty code fence) strips
+	// to nothing. Send the raw text then, so the turn doesn't look unanswered.
+	if plain := plainTextForWeixin(content); strings.TrimSpace(plain) != "" {
+		content = plain
 	}
 	chunks := core.SplitMessageCodeFenceAware(content, maxWeixinChunk)
 	total := len(chunks)

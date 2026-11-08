@@ -936,8 +936,9 @@ func TestPlainTextForWeixin(t *testing.T) {
 		{"already spaced stays", "1. a\n\n2. b", "1. a\n\n2. b"},
 		{"three newlines collapse to two", "head\n\n\nbody", "head\n\nbody"},
 		{"heading and inline code", "# Title\nrun `go test`", "Title\n\nrun go test"},
-		{"code block keeps single breaks", "see:\n```go\nline1\nline2\n```\ndone", "see:\n\nline1\nline2\n\ndone"},
-		{"unclosed fence keeps single breaks", "x\n```\na\nb", "x\n\n```\na\nb"},
+		{"code block keeps one line per line", "see:\n```go\nline1\nline2\n```\ndone", "see:\n\nline1\n\nline2\n\ndone"},
+		{"unclosed fence marker is dropped", "x\n```\na\nb", "x\n\na\n\nb"},
+		{"rule only strips to empty", "---", ""},
 		{"plain text unchanged", "hello", "hello"},
 	}
 	for _, tt := range tests {
@@ -947,6 +948,34 @@ func TestPlainTextForWeixin(t *testing.T) {
 				t.Fatalf("plainTextForWeixin(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// A reply that is only Markdown strips to nothing; the raw text is sent then,
+// instead of dropping the turn.
+func TestSendChunks_FallsBackToRawWhenStrippedEmpty(t *testing.T) {
+	var gotText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req sendMessageReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && len(req.Msg.ItemList) > 0 && req.Msg.ItemList[0].TextItem != nil {
+			gotText = req.Msg.ItemList[0].TextItem.Text
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message_id":1}`))
+	}))
+	defer srv.Close()
+
+	p := &Platform{httpClient: &http.Client{}}
+	p.api = newAPIClient(srv.URL, "tok", "", p.httpClient)
+	rc := &replyContext{peerUserID: "peer-1", contextToken: "tok-1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := p.sendChunks(ctx, rc, "---", sendPathReply); err != nil {
+		t.Fatalf("sendChunks: %v", err)
+	}
+	if gotText != "---" {
+		t.Fatalf("sent text = %q, want raw %q", gotText, "---")
 	}
 }
 
