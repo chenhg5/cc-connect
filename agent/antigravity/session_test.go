@@ -126,6 +126,14 @@ func TestAntigravitySession_DefaultBridgeAllowsNonWorkspaceAccessViaHook(t *test
 	if contains(args, "--settings="+agyBridgeSessionSettings) {
 		t.Fatalf("without the permission bridge agy must keep its own non-workspace check, got: %v", args)
 	}
+
+	for _, userArgs := range [][]string{{"--settings", `{"model":"x"}`}, {`--settings={"model":"x"}`}} {
+		s.extraArgs = userArgs
+		args = s.buildAntigravityArgs("", false, "default", "/tmp/agy-config", "hi")
+		if contains(args, "--settings="+agyBridgeSessionSettings) {
+			t.Fatalf("user --settings in cmd must not be overridden, got: %v", args)
+		}
+	}
 }
 
 func TestAntigravitySession_ResumePassesConversationID(t *testing.T) {

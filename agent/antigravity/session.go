@@ -205,6 +205,15 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 
 const agyBridgeSessionSettings = `{"allowNonWorkspaceAccess":true}`
 
+func hasAgySettingsFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--settings" || strings.HasPrefix(arg, "--settings=") {
+			return true
+		}
+	}
+	return false
+}
+
 func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool, mode, agyConfigDir, fullPrompt string) []string {
 	// Prepend extra args from cmd so wrappers like "timeout 3600 agy" work.
 	// Keep "-p <prompt>" at the very end because agy consumes the immediate next arg.
@@ -217,8 +226,13 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 			// call. agy's own non-workspace confirmation cannot be answered in
 			// print mode and is soft-denied, ending the turn with an empty reply,
 			// so leave that decision to the hook for this run only (--settings is
-			// not persisted to settings.json).
-			args = append(args, "--settings="+agyBridgeSessionSettings)
+			// not persisted to settings.json). A --settings passed through the
+			// configured cmd wins, since a second flag would replace it.
+			if hasAgySettingsFlag(as.extraArgs) {
+				slog.Warn("antigravitySession: cmd already sets --settings; not adding allowNonWorkspaceAccess, so agy may soft-deny access outside the workspace")
+			} else {
+				args = append(args, "--settings="+agyBridgeSessionSettings)
+			}
 		}
 	}
 	if isResume {
