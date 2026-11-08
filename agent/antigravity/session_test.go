@@ -105,6 +105,27 @@ func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
 	if contains(args, "-m") || contains(args, "--model") {
 		t.Fatalf("did not expect model flags in args, got: %v", args)
 	}
+	if contains(args, "--settings="+agyBridgeSessionSettings) {
+		t.Fatalf("plan mode must not widen non-workspace access, got: %v", args)
+	}
+}
+
+func TestAntigravitySession_DefaultBridgeAllowsNonWorkspaceAccessViaHook(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, err := newAntigravitySession(context.Background(), "echo", nil, "/tmp", "", "default", "", nil, 0)
+	if err != nil {
+		t.Fatalf("newAntigravitySession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	args := s.buildAntigravityArgs("", false, "default", "/tmp/agy-config", "hi")
+	if !contains(args, "--settings="+agyBridgeSessionSettings) {
+		t.Fatalf("default mode with permission bridge should delegate non-workspace access to the hook, got: %v", args)
+	}
+	args = s.buildAntigravityArgs("", false, "default", "", "hi")
+	if contains(args, "--settings="+agyBridgeSessionSettings) {
+		t.Fatalf("without the permission bridge agy must keep its own non-workspace check, got: %v", args)
+	}
 }
 
 func TestAntigravitySession_ResumePassesConversationID(t *testing.T) {
@@ -1046,3 +1067,65 @@ func TestAntigravitySummariesDB_ListDetectAndDelete(t *testing.T) {
 	}
 }
 
+// A conversation with no workspace record anywhere must not be deletable from
+// an unrelated project just because its ID is known.
+func TestDeleteSession_RefusesCLISessionWithoutWorkspaceRecord(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	id := "11111111-2222-3333-4444-555555555555"
+	brain := filepath.Join(fakeHome, ".gemini", "antigravity-cli", "brain", id)
+	if err := os.MkdirAll(brain, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{workDir: filepath.Join(fakeHome, "projectA")}
+	if err := a.DeleteSession(context.Background(), id); err == nil {
+		t.Fatal("DeleteSession succeeded for a session not recorded under this workspace")
+	}
+	if _, err := os.Stat(brain); err != nil {
+		t.Fatalf("brain dir of unrelated session was touched: %v", err)
+	}
+}
+
+// If the summaries index cannot be updated, DeleteSession must report it and
+// leave the conversation files in place so the delete can be retried.
+func TestDeleteSession_SummariesDBFailureKeepsFiles(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cliRoot := filepath.Join(fakeHome, ".gemini", "antigravity-cli")
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	brain := filepath.Join(cliRoot, "brain", id)
+	if err := os.MkdirAll(brain, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	history := fmt.Sprintf("{\"display\":\"hi\",\"timestamp\":%d,\"workspace\":%q,\"conversationId\":%q}\n", time.Now().UnixMilli(), ws, id)
+	if err := os.WriteFile(filepath.Join(cliRoot, "history.jsonl"), []byte(history), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A database without the expected table makes the DELETE fail.
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(cliRoot, "conversation_summaries.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE unrelated (x text)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	a := &Agent{workDir: ws}
+	err = a.DeleteSession(context.Background(), id)
+	if err == nil || !strings.Contains(err.Error(), "conversation_summaries") {
+		t.Fatalf("DeleteSession err = %v, want conversation_summaries failure", err)
+	}
+	if _, err := os.Stat(brain); err != nil {
+		t.Fatalf("brain dir removed despite index failure: %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(cliRoot, "history.jsonl")); !strings.Contains(string(data), id) {
+		t.Fatal("history.jsonl entry removed despite index failure")
+	}
+}

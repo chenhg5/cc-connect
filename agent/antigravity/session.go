@@ -198,6 +198,8 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 	return nil
 }
 
+const agyBridgeSessionSettings = `{"allowNonWorkspaceAccess":true}`
+
 func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool, mode, agyConfigDir, fullPrompt string) []string {
 	// Prepend extra args from cmd so wrappers like "timeout 3600 agy" work.
 	// Keep "-p <prompt>" at the very end because agy consumes the immediate next arg.
@@ -205,6 +207,14 @@ func (as *antigravitySession) buildAntigravityArgs(chatID string, isResume bool,
 	if agyConfigDir != "" {
 		// Antigravity currently names this compatibility flag --gemini_dir.
 		args = append(args, "--gemini_dir="+agyConfigDir, "--print-timeout=24h")
+		if mode == "default" {
+			// The PreToolUse hook already asks the chat user before every tool
+			// call. agy's own non-workspace confirmation cannot be answered in
+			// print mode and is soft-denied, ending the turn with an empty reply,
+			// so leave that decision to the hook for this run only (--settings is
+			// not persisted to settings.json).
+			args = append(args, "--settings="+agyBridgeSessionSettings)
+		}
 	}
 	if isResume {
 		args = append(args, "--conversation", chatID)
@@ -244,7 +254,11 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			}
 			if sid != "" {
 				as.chatID.Store(sid)
-				slog.Debug("antigravitySession: detected session ID", "session_id", sid)
+				// agy normally streams its conversation ID. Reaching this
+				// heuristic means it did not; file-based detection can pick
+				// another chat's conversation when several chats share one
+				// workspace, so keep it visible in the logs.
+				slog.Warn("antigravitySession: conversation ID not streamed by agy; detected from local state", "session_id", sid, "work_dir", as.workDir)
 				// Emit an EventText carrying the session ID back to core.
 				select {
 				case as.events <- core.Event{Type: core.EventText, SessionID: sid}:
@@ -558,7 +572,7 @@ func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sen
 		return cliCandidates[0].sessionID
 	}
 
-	// 3. Fallback to legacy ~/.gemini/tmp/<slug>/chats/*.jsonl.
+	// 4. Fallback to legacy ~/.gemini/tmp/<slug>/chats/*.jsonl.
 	slug := antigravityProjectSlug(as.workDir)
 	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
 

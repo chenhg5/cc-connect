@@ -248,6 +248,14 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 	if allowed, err := canDeleteAntigravityCLISession(cliRoot, workDir, sessionID); err != nil {
 		return err
 	} else if allowed {
+		removedMeta, err := removeSessionFromAntigravityCaches(cliRoot, sessionID)
+		if err != nil {
+			return err
+		}
+		if removedMeta {
+			deleted = true
+		}
+
 		brainDir := filepath.Join(cliRoot, "brain")
 		brainTarget := filepath.Join(brainDir, sessionID)
 		if !isPathWithinDir(brainDir, brainTarget) {
@@ -279,14 +287,6 @@ func (a *Agent) DeleteSession(_ context.Context, sessionID string) error {
 			}
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("antigravity: read conversations dir: %w", err)
-		}
-
-		removedMeta, err := removeSessionFromAntigravityCaches(cliRoot, sessionID)
-		if err != nil {
-			return err
-		}
-		if removedMeta {
-			deleted = true
 		}
 	}
 
@@ -773,7 +773,9 @@ func loadAntigravityMetadataEntries(cliRoot string) (map[string]agyConversationM
 	dbPath := filepath.Join(cliRoot, "conversation_summaries.db")
 	if _, err := os.Stat(dbPath); err == nil {
 		dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=busy_timeout(2000)&mode=ro"
-		if db, err := sql.Open("sqlite", dsn); err == nil {
+		if db, err := sql.Open("sqlite", dsn); err != nil {
+			slog.Warn("antigravity: open conversation_summaries.db failed; falling back to JSON metadata", "error", err)
+		} else {
 			rows, qErr := db.Query(`SELECT conversation_id, title, preview, step_count, CAST(last_modified_time AS TEXT), workspace_uris, parent_conversation_id, nesting_depth, raw_summary FROM conversation_summaries`)
 			if qErr == nil {
 				for rows.Next() {
@@ -819,6 +821,8 @@ func loadAntigravityMetadataEntries(cliRoot string) (map[string]agyConversationM
 					result[id] = dbEntry
 				}
 				_ = rows.Close()
+			} else {
+				slog.Warn("antigravity: query conversation_summaries failed; falling back to JSON metadata", "error", qErr)
 			}
 			_ = db.Close()
 		}
@@ -896,16 +900,18 @@ func writeFileAtomic(targetPath string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
+// canDeleteAntigravityCLISession reports whether sessionID's CLI state is
+// positively recorded under workDir. Sessions without any workspace record are
+// refused (fail closed) so one project cannot delete another project's
+// conversations by ID.
 func canDeleteAntigravityCLISession(cliRoot, workDir, sessionID string) (bool, error) {
-	hasWorkspaceRecord := false
 	matchedWorkDir := false
 
 	metaEntries, err := loadAntigravityMetadataEntries(cliRoot)
 	if err != nil {
 		return false, err
 	}
-	if entry, ok := metaEntries[sessionID]; ok && len(entry.Summary.WorkspaceURIs) > 0 {
-		hasWorkspaceRecord = true
+	if entry, ok := metaEntries[sessionID]; ok {
 		for _, uri := range entry.Summary.WorkspaceURIs {
 			if antigravityWorkspaceMatches(workDir, uri) {
 				matchedWorkDir = true
@@ -920,11 +926,7 @@ func canDeleteAntigravityCLISession(cliRoot, workDir, sessionID string) (bool, e
 			var lastMap map[string]string
 			if json.Unmarshal(data, &lastMap) == nil {
 				for ws, id := range lastMap {
-					if strings.TrimSpace(id) != sessionID {
-						continue
-					}
-					hasWorkspaceRecord = true
-					if antigravityWorkspaceMatches(workDir, ws) {
+					if strings.TrimSpace(id) == sessionID && antigravityWorkspaceMatches(workDir, ws) {
 						matchedWorkDir = true
 						break
 					}
@@ -943,12 +945,9 @@ func canDeleteAntigravityCLISession(cliRoot, workDir, sessionID string) (bool, e
 			for scanner.Scan() {
 				var entry agyHistoryEntry
 				if json.Unmarshal(scanner.Bytes(), &entry) == nil && strings.TrimSpace(entry.ConversationID) == sessionID {
-					if strings.TrimSpace(entry.Workspace) != "" {
-						hasWorkspaceRecord = true
-						if antigravityWorkspaceMatches(workDir, entry.Workspace) {
-							matchedWorkDir = true
-							break
-						}
+					if antigravityWorkspaceMatches(workDir, entry.Workspace) {
+						matchedWorkDir = true
+						break
 					}
 				}
 			}
@@ -958,15 +957,39 @@ func canDeleteAntigravityCLISession(cliRoot, workDir, sessionID string) (bool, e
 		}
 	}
 
-	if hasWorkspaceRecord && !matchedWorkDir {
-		return false, nil
-	}
-	return true, nil
+	return matchedWorkDir, nil
 }
 
 func removeSessionFromAntigravityCaches(cliRoot, sessionID string) (bool, error) {
 	removed := false
 	cacheDir := filepath.Join(cliRoot, "cache")
+
+	// Update the summaries index first: if agy holds the database busy this
+	// fails before any files are touched, so the delete can simply be retried.
+	dbPath := filepath.Join(cliRoot, "conversation_summaries.db")
+	if _, err := os.Stat(dbPath); err == nil {
+		dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=busy_timeout(2000)"
+		db, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			return false, fmt.Errorf("antigravity: open conversation_summaries.db: %w", err)
+		}
+		res, err := db.Exec(`DELETE FROM conversation_summaries WHERE conversation_id = ?`, sessionID)
+		if err != nil {
+			_ = db.Close()
+			return false, fmt.Errorf("antigravity: delete from conversation_summaries: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			removed = true
+		}
+		// The full-text index is a rebuildable search cache; a failure here must
+		// not block the delete but should still be visible.
+		if _, err := db.Exec(`DELETE FROM conversations_fts WHERE conversation_id = ?`, sessionID); err != nil {
+			slog.Warn("antigravity: failed to remove session from conversations_fts", "session_id", sessionID, "error", err)
+		}
+		_ = db.Close()
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("antigravity: stat conversation_summaries.db: %w", err)
+	}
 
 	presenceDir := filepath.Join(cliRoot, "presence")
 	lockPath := filepath.Join(presenceDir, sessionID+".lock")
@@ -975,20 +998,6 @@ func removeSessionFromAntigravityCaches(cliRoot, sessionID string) (bool, error)
 			removed = true
 		} else if !os.IsNotExist(err) {
 			return false, fmt.Errorf("antigravity: remove presence lock: %w", err)
-		}
-	}
-
-	dbPath := filepath.Join(cliRoot, "conversation_summaries.db")
-	if _, err := os.Stat(dbPath); err == nil {
-		dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=busy_timeout(2000)"
-		if db, err := sql.Open("sqlite", dsn); err == nil {
-			if res, execErr := db.Exec(`DELETE FROM conversation_summaries WHERE conversation_id = ?`, sessionID); execErr == nil {
-				if n, _ := res.RowsAffected(); n > 0 {
-					removed = true
-				}
-			}
-			_, _ = db.Exec(`DELETE FROM conversations_fts WHERE conversation_id = ?`, sessionID)
-			_ = db.Close()
 		}
 	}
 

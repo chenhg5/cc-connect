@@ -2,6 +2,7 @@ package antigravity
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -11,6 +12,10 @@ type agyOutputParser struct {
 	sessionID string
 	hasText   bool
 	toolSteps map[int]bool
+	// lastToolInput remembers the latest parameters per tool name so a
+	// denied_actions entry can name its target; agy may report the denied
+	// step as DONE without output or error.
+	lastToolInput map[string]map[string]any
 }
 
 type agyOutputEnvelope struct {
@@ -47,10 +52,18 @@ type agyStreamResult struct {
 	Status         string `json:"status"`
 	Response       string `json:"response"`
 	Error          string `json:"error"`
+	// DeniedActions lists tool confirmations that agy soft-denied because print
+	// mode cannot prompt; the turn then ends with an empty response.
+	DeniedActions []agyDeniedAction `json:"denied_actions"`
+}
+
+type agyDeniedAction struct {
+	Action      string `json:"action"`
+	DisplayName string `json:"display_name"`
 }
 
 func newAgyOutputParser() *agyOutputParser {
-	return &agyOutputParser{toolSteps: make(map[int]bool)}
+	return &agyOutputParser{toolSteps: make(map[int]bool), lastToolInput: make(map[string]map[string]any)}
 }
 
 // parseLine returns recognized=false for ordinary text output so older CLI
@@ -101,6 +114,9 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 			if toolName == "" {
 				toolName = "tool"
 			}
+			if input != nil {
+				p.lastToolInput[toolName] = input
+			}
 			if !p.toolSteps[step.StepIndex] {
 				p.toolSteps[step.StepIndex] = true
 				toolInput := ""
@@ -114,7 +130,7 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 					ToolInputRaw: input,
 				})
 			}
-			if strings.EqualFold(step.State, "DONE") {
+			if strings.EqualFold(step.State, "DONE") || strings.EqualFold(step.State, "ERROR") {
 				result := core.Event{
 					Type:       core.EventToolResult,
 					ToolName:   toolName,
@@ -129,17 +145,79 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 						success = false
 					}
 				}
+				if success && strings.EqualFold(step.State, "ERROR") {
+					result.ToolStatus = "failed"
+					success = false
+				}
 				result.ToolSuccess = &success
 				events = append(events, result)
 			}
 		}
 	case "result":
-		if !p.hasText && envelope.Result.Response != "" {
+		res := envelope.Result
+		if !p.hasText && res.Response != "" {
 			p.hasText = true
-			events = append(events, core.Event{Type: core.EventText, Content: envelope.Result.Response})
+			events = append(events, core.Event{Type: core.EventText, Content: res.Response})
+		}
+		if notice := p.formatDeniedActions(res.DeniedActions); notice != "" {
+			if p.hasText {
+				notice = "\n\n" + notice
+			}
+			p.hasText = true
+			events = append(events, core.Event{Type: core.EventText, Content: notice})
+		}
+		if !p.hasText {
+			if msg := strings.TrimSpace(res.Error); msg != "" {
+				events = append(events, core.Event{Type: core.EventError, Error: fmt.Errorf("agy: %s", msg)})
+			} else if status := strings.TrimSpace(res.Status); status != "" && !strings.EqualFold(status, "SUCCESS") {
+				events = append(events, core.Event{Type: core.EventError, Error: fmt.Errorf("agy finished with status %s and no response", status)})
+			}
 		}
 	}
 	return true, events
+}
+
+// formatDeniedActions explains why a headless agy turn stopped early.
+// Without it the user only sees an empty reply.
+func (p *agyOutputParser) formatDeniedActions(actions []agyDeniedAction) string {
+	var items []string
+	seen := make(map[string]bool)
+	for _, a := range actions {
+		name := strings.TrimSpace(a.DisplayName)
+		if name == "" {
+			name = strings.TrimSpace(a.Action)
+		}
+		if name == "" {
+			continue
+		}
+		if target := agyActionTarget(p.lastToolInput[strings.TrimSpace(a.Action)]); target != "" {
+			name += " (" + target + ")"
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		items = append(items, name)
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	return "⚠️ agy stopped this turn without finishing: it denied " + strings.Join(items, ", ") +
+		" because the action needs interactive confirmation, which agy print mode cannot ask for."
+}
+
+// agyActionTarget picks the path or command a tool call acted on.
+func agyActionTarget(input map[string]any) string {
+	for _, key := range []string{"CommandLine", "Path", "AbsolutePath", "TargetFile", "DirectoryPath", "Url"} {
+		if v, _ := input[key].(string); strings.TrimSpace(v) != "" {
+			v = strings.TrimSpace(v)
+			if r := []rune(v); len(r) > 120 {
+				v = string(r[:120]) + "..."
+			}
+			return v
+		}
+	}
+	return ""
 }
 
 func formatAgyOutputValue(value any) string {

@@ -1,6 +1,7 @@
 package antigravity
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -59,5 +60,63 @@ func TestAgyOutputParser_PlainTextFallback(t *testing.T) {
 	recognized, events := parser.parseLine([]byte("plain response"))
 	if recognized || len(events) != 0 {
 		t.Fatalf("plain line = recognized %v, events %+v", recognized, events)
+	}
+}
+
+// Captured from agy 1.5.3 print mode reading a file outside the workspace:
+// the tool step ends in ERROR and the result carries an empty response plus
+// denied_actions. Previously both were dropped and chat showed an empty reply.
+func TestAgyOutputParser_SurfacesSoftDeniedToolConfirmation(t *testing.T) {
+	parser := newAgyOutputParser()
+	_, _ = parser.parseLine([]byte(`{"event":"step_update","step_update":{"conversation_id":"c1","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"read_file","tool_info":{"name":"read_file","parameters":{"Path":"/home/u/outside.txt"}}}}`))
+
+	_, events := parser.parseLine([]byte(`{"event":"step_update","step_update":{"conversation_id":"c1","step_index":2,"state":"ERROR","step_type":"tool","tool_name":"read_file","duration_seconds":0.05,"tool_info":{"name":"read_file","parameters":{"Path":"/home/u/outside.txt"},"error":{"type":"TOOL_ERROR","message":"permission check failed for read_file \"/home/u/outside.txt\": user denied permission"}}}}`))
+	if len(events) != 1 || events[0].Type != core.EventToolResult {
+		t.Fatalf("ERROR tool step events = %+v, want one tool-result event", events)
+	}
+	if events[0].ToolStatus != "failed" || events[0].ToolSuccess == nil || *events[0].ToolSuccess || !strings.Contains(events[0].ToolResult, "permission check failed") {
+		t.Fatalf("ERROR tool result = %+v, want failed result with denial message", events[0])
+	}
+
+	_, events = parser.parseLine([]byte(`{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"","num_turns":1,"denied_actions":[{"action":"read_file","display_name":"ReadFile"}]}}`))
+	if len(events) != 1 || events[0].Type != core.EventText || !strings.Contains(events[0].Content, "ReadFile (/home/u/outside.txt)") {
+		t.Fatalf("denied result events = %+v, want visible denial notice naming the target", events)
+	}
+}
+
+// agy sometimes reports the soft-denied step as DONE with neither output nor
+// error; the notice must still name the target.
+func TestAgyOutputParser_DeniedNoticeWhenStepReportedDone(t *testing.T) {
+	parser := newAgyOutputParser()
+	_, _ = parser.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"read_file","tool_info":{"name":"read_file","parameters":{"Path":"/home/u/.cc-connect/config.toml"}}}}`))
+	_, _ = parser.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"read_file","tool_info":{"name":"read_file","parameters":{"Path":"/home/u/.cc-connect/config.toml"}}}}`))
+	_, events := parser.parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"read_file","display_name":"ReadFile"}]}}`))
+	if len(events) != 1 || !strings.Contains(events[0].Content, "ReadFile (/home/u/.cc-connect/config.toml)") {
+		t.Fatalf("events = %+v, want notice naming the denied path", events)
+	}
+}
+
+func TestAgyOutputParser_DeniedNoticeAppendsAfterText(t *testing.T) {
+	parser := newAgyOutputParser()
+	_, _ = parser.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":0,"state":"ACTIVE","step_type":"agent_response","text_delta":"Let me check."}}`))
+	_, events := parser.parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"Let me check.","denied_actions":[{"action":"run_command","display_name":"RunCommand"},{"action":"run_command","display_name":"RunCommand"}]}}`))
+	if len(events) != 1 || !strings.HasPrefix(events[0].Content, "\n\n") || strings.Count(events[0].Content, "RunCommand") != 1 {
+		t.Fatalf("events = %+v, want one deduplicated notice separated from streamed text", events)
+	}
+}
+
+func TestAgyOutputParser_FailedResultWithoutTextBecomesError(t *testing.T) {
+	parser := newAgyOutputParser()
+	_, events := parser.parseLine([]byte(`{"event":"result","result":{"status":"ERROR","response":""}}`))
+	if len(events) != 1 || events[0].Type != core.EventError || events[0].Error == nil {
+		t.Fatalf("events = %+v, want error event", events)
+	}
+	_, events = newAgyOutputParser().parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"","error":"quota exhausted"}}`))
+	if len(events) != 1 || events[0].Type != core.EventError || !strings.Contains(events[0].Error.Error(), "quota exhausted") {
+		t.Fatalf("events = %+v, want error carrying agy message", events)
+	}
+	_, events = newAgyOutputParser().parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":""}}`))
+	if len(events) != 0 {
+		t.Fatalf("plain empty success should stay silent, got %+v", events)
 	}
 }
