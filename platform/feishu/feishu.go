@@ -148,6 +148,7 @@ type Platform struct {
 	progressStyle              string
 	useInteractiveCard         bool
 	streamingConfig            map[string]any
+	enableImageGallery         bool
 	self                       core.Platform
 	reactionEmoji              string
 	ackEmoji                   string
@@ -524,6 +525,14 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
 	}
+	enableImageGallery := false
+	if raw, exists := opts["enable_image_gallery"]; exists {
+		var ok bool
+		enableImageGallery, ok = raw.(bool)
+		if !ok {
+			return nil, fmt.Errorf("%s: enable_image_gallery must be a boolean", name)
+		}
+	}
 
 	streamingConfig := map[string]any{}
 	for _, field := range []struct {
@@ -632,6 +641,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		progressStyle:              progressStyle,
 		useInteractiveCard:         useInteractiveCard,
 		streamingConfig:            streamingConfig,
+		enableImageGallery:         enableImageGallery,
 		reactionEmoji:              reactionEmoji,
 		ackEmoji:                   ackEmoji,
 		doneEmoji:                  doneEmoji,
@@ -4825,14 +4835,21 @@ func (p *Platform) buildReplyMessageReqBodyWithUUID(rc replyContext, msgType, co
 }
 
 func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	return p.replyMessageWithUUID(ctx, rc, msgType, content, "")
+}
+
+func (p *Platform) replyMessageWithUUID(ctx context.Context, rc replyContext, msgType, content, idempotencyKey string) error {
+	requireConfirmation := idempotencyKey != ""
 	// One idempotency key for every attempt of this send. Feishu dedupes on
 	// Uuid, so a transient retry (or a caller re-send that reuses the same
 	// logical send) does not post a duplicate when an earlier attempt already
 	// delivered despite returning code=2200 "internal error".
-	replyUUID := uuid.NewString()
+	if !requireConfirmation {
+		idempotencyKey = uuid.NewString()
+	}
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
-		Body(p.buildReplyMessageReqBodyWithUUID(rc, msgType, content, replyUUID)).
+		Body(p.buildReplyMessageReqBodyWithUUID(rc, msgType, content, idempotencyKey)).
 		Build()
 	return p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
@@ -4848,6 +4865,9 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 					return fmt.Errorf("%s: reply failed code=%d msg=%s: %w", p.tag(), resp.Code, resp.Msg, core.ErrMaybeDelivered)
 				}
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			if requireConfirmation && (resp.Data == nil || strings.TrimSpace(stringValue(resp.Data.MessageId)) == "") {
+				return fmt.Errorf("%s: reply confirmation missing message_id", p.tag())
 			}
 			return nil
 		})
@@ -4869,13 +4889,17 @@ func createMessageReceiveIDType(receiveIDType string) string {
 }
 
 func (p *Platform) createMessage(ctx context.Context, chatID, receiveIDType, msgType, content, op string) error {
+	return p.createMessageWithUUID(ctx, chatID, receiveIDType, msgType, content, op, "")
+}
+
+func (p *Platform) createMessageWithUUID(ctx context.Context, chatID, receiveIDType, msgType, content, op, uuid string) error {
+	body := larkim.NewCreateMessageReqBodyBuilder().ReceiveId(chatID).MsgType(msgType).Content(content)
+	if uuid != "" {
+		body.Uuid(uuid)
+	}
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(createMessageReceiveIDType(receiveIDType)).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
-			MsgType(msgType).
-			Content(content).
-			Build()).
+		Body(body.Build()).
 		Build()
 	return p.withTransientRetry(ctx, op, func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, op, func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
@@ -4885,6 +4909,9 @@ func (p *Platform) createMessage(ctx context.Context, chatID, receiveIDType, msg
 			}
 			if !resp.Success() {
 				return fmt.Errorf("%s: %s failed code=%d msg=%s", p.tag(), op, resp.Code, resp.Msg)
+			}
+			if uuid != "" && (resp.Data == nil || strings.TrimSpace(stringValue(resp.Data.MessageId)) == "") {
+				return fmt.Errorf("%s: %s confirmation missing message_id", p.tag(), op)
 			}
 			return nil
 		})
