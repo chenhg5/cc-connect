@@ -1081,6 +1081,8 @@ app_secret = "your-feishu-app-secret"
 # print_step = 2           # Characters per tick: 1–1000 / 每次上屏字符数
 # print_strategy = "fast"  # fast flushes pending text; delay queues it / fast 快速上屏，delay 排队
 #                         # Omitted values use Feishu defaults / 未配置沿用飞书默认
+# enable_image_gallery = false # Opt in to outgoing galleries: up to 5 originals per card; requires enable_feishu_card.
+#                              # 显式开启多图回传图集，每张卡片最多 5 张原图；需要启用卡片。默认和单图保持逐张发送。
 # allow_from = "*"          # Allowed user open_ids, comma-separated; "*" = all (default). Use /whoami to get your open_id.
 #                              # 允许的用户 open_id，逗号分隔；"*" 表示所有（默认）。发送 /whoami 获取你的 open_id。
 # allow_chat = "*"          # Allowed group chat_ids, comma-separated; "*" = all (default). Find chat_id in group settings.
@@ -1167,6 +1169,7 @@ app_secret = "your-feishu-app-secret"
 # print_step = 2           # Characters per tick: 1–1000 / 每次上屏字符数
 # print_strategy = "fast"  # fast flushes pending text; delay queues it / fast 快速上屏，delay 排队
 #                         # Omitted values use Feishu defaults / 未配置沿用飞书默认
+# enable_image_gallery = false # Same opt-in gallery behavior as Feishu / 与飞书相同，显式开启多图图集
 # allow_from = "*"
 # reaction_emoji = "OnIt"
 # done_emoji = "none"
