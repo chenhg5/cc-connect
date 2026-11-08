@@ -17086,23 +17086,38 @@ func TestApplySessionFilter_OnlyBackgroundOwnedSessionsStillExcludeExternal(t *t
 }
 
 func TestExecuteCronJob_MarksAndRetiresBackgroundSession(t *testing.T) {
-	store, err := NewCronStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := NewEngine("test", &resultAgent{session: newResultAgentSession("done")}, []Platform{&stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}}, "", LangEnglish)
-	defer e.cancel()
-	e.cronScheduler = NewCronScheduler(store)
-	job := &CronJob{ID: "background-run", SessionKey: "discord:channel:user", Prompt: "run scheduled work"}
-	if err := e.ExecuteCronJob(job); err != nil {
-		t.Fatalf("ExecuteCronJob: %v", err)
-	}
-	for _, session := range e.sessions.AllSessions() {
-		if strings.HasPrefix(session.Name, "cron-"+job.ID) {
-			t.Fatal("completed scheduler session is still retained")
-		}
-	}
-	if got := e.sessions.ListSessions("discord:thread-fresh"); len(got) != 0 {
-		t.Fatalf("scheduled run reused the ordinary chat session: %#v", got)
+	for _, kind := range []string{"cron", "timer"} {
+		t.Run(kind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "sessions.json")
+			p := &stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}
+			e := NewEngine("test", &resultAgent{session: newResultAgentSession("done")}, []Platform{p}, path, LangEnglish)
+			t.Cleanup(func() { _ = e.Stop() })
+			var err error
+			if kind == "cron" {
+				err = e.ExecuteCronJob(&CronJob{ID: "run", SessionKey: "discord:channel:user", Prompt: "scheduled work", SessionMode: "new_per_run"})
+			} else {
+				err = e.ExecuteTimerJob(&TimerJob{ID: "run", SessionKey: "discord:channel:user", Prompt: "scheduled work", SessionMode: "new_per_run"})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, sm := range []*SessionManager{e.sessions, NewSessionManager(path)} {
+				if records := sm.AllSessions(); len(records) != 0 {
+					t.Fatalf("completed background records were not reclaimed: %#v", records)
+				}
+				all := []AgentSessionInfo{{ID: "result-session"}, {ID: "external"}}
+				e.SetFilterExternalSessions(true)
+				if got := e.applySessionFilter(all, sm, "discord:thread-fresh"); len(got) != 0 {
+					t.Fatalf("retirement bypassed ownership or visibility filter: %#v", got)
+				}
+				e.SetFilterExternalSessions(false)
+				if got := e.applySessionFilter(all, sm, "discord:thread-fresh"); len(got) != 1 || got[0].ID != "external" {
+					t.Fatalf("retired native background session reappeared: %#v", got)
+				}
+				if owner := sm.AgentSessionOwners()["result-session"]; owner != "discord:thread-fresh" {
+					t.Fatalf("retired session lost topic ownership: %q", owner)
+				}
+			}
+		})
 	}
 }

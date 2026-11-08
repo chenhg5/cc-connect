@@ -373,28 +373,32 @@ const snapshotVersion = 1
 
 // sessionSnapshot is the JSON-serializable state of the SessionManager.
 type sessionSnapshot struct {
-	Sessions       map[string]*Session  `json:"sessions"`
-	ActiveSession  map[string]string    `json:"active_session"`
-	UserSessions   map[string][]string  `json:"user_sessions"`
-	Counter        int64                `json:"counter"`
-	SessionNames   map[string]string    `json:"session_names,omitempty"`    // agent session ID → custom name
-	UserMeta       map[string]*UserMeta `json:"user_meta,omitempty"`        // sessionKey → display info
-	PastIDTracking bool                 `json:"past_id_tracking,omitempty"` // true once PastAgentSessionIDs is supported
-	LegacyData     bool                 `json:"legacy_data,omitempty"`      // true while pre-fix sessions exist
-	Version        int                  `json:"version,omitempty"`          // schema version for migration detection
+	RetiredBackgroundOwners map[string]string    `json:"retired_background_owners,omitempty"`
+	Sessions                map[string]*Session  `json:"sessions"`
+	ActiveSession           map[string]string    `json:"active_session"`
+	UserSessions            map[string][]string  `json:"user_sessions"`
+	Counter                 int64                `json:"counter"`
+	SessionNames            map[string]string    `json:"session_names,omitempty"`    // agent session ID → custom name
+	UserMeta                map[string]*UserMeta `json:"user_meta,omitempty"`        // sessionKey → display info
+	PastIDTracking          bool                 `json:"past_id_tracking,omitempty"` // true once PastAgentSessionIDs is supported
+	LegacyData              bool                 `json:"legacy_data,omitempty"`      // true while pre-fix sessions exist
+	Version                 int                  `json:"version,omitempty"`          // schema version for migration detection
 }
 
 // SessionManager supports multiple named sessions per user with active-session tracking.
 // It can persist state to a JSON file and reload on startup.
 type SessionManager struct {
-	mu            sync.RWMutex
-	sessions      map[string]*Session
-	activeSession map[string]string
-	userSessions  map[string][]string
-	sessionNames  map[string]string    // agent session ID → custom name
-	userMeta      map[string]*UserMeta // sessionKey → display info
-	counter       int64
-	storePath     string // empty = no persistence
+	// Retain only native IDs and their owners after releasing completed run
+	// records, so native CLI history cannot reappear as an external session.
+	retiredBackgroundOwners map[string]string
+	mu                      sync.RWMutex
+	sessions                map[string]*Session
+	activeSession           map[string]string
+	userSessions            map[string][]string
+	sessionNames            map[string]string    // agent session ID → custom name
+	userMeta                map[string]*UserMeta // sessionKey → display info
+	counter                 int64
+	storePath               string // empty = no persistence
 	// hideBackgroundSessions controls whether scheduler-created background
 	// sessions are excluded from user-facing session lists and tracked ID sets.
 	hideBackgroundSessions bool
@@ -503,8 +507,12 @@ const maxRetainedBackgroundSessions = 50
 func (sm *SessionManager) RetireBackgroundSession(id string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	active := make(map[string]bool, len(sm.activeSession))
+	for _, activeID := range sm.activeSession {
+		active[activeID] = true
+	}
 	s, ok := sm.sessions[id]
-	if !ok {
+	if !ok || active[id] {
 		return false
 	}
 	s.mu.Lock()
@@ -513,7 +521,7 @@ func (sm *SessionManager) RetireBackgroundSession(id string) bool {
 		return false
 	}
 	s.mu.Unlock()
-	sm.deleteByIDLocked(id)
+	sm.retireBackgroundRecordLocked(s)
 
 	type backgroundSession struct {
 		id        string
@@ -522,7 +530,7 @@ func (sm *SessionManager) RetireBackgroundSession(id string) bool {
 	remaining := make([]backgroundSession, 0, maxRetainedBackgroundSessions)
 	for candidateID, candidate := range sm.sessions {
 		candidate.mu.Lock()
-		if candidate.Background && !candidate.busy {
+		if candidate.Background && !candidate.busy && !active[candidateID] && (candidate.AgentSessionID != "" || len(candidate.History) > 0) {
 			remaining = append(remaining, backgroundSession{id: candidateID, updatedAt: candidate.UpdatedAt})
 		}
 		candidate.mu.Unlock()
@@ -532,11 +540,37 @@ func (sm *SessionManager) RetireBackgroundSession(id string) bool {
 			return remaining[i].updatedAt.After(remaining[j].updatedAt)
 		})
 		for _, expired := range remaining[maxRetainedBackgroundSessions:] {
-			sm.deleteByIDLocked(expired.id)
+			sm.retireBackgroundRecordLocked(sm.sessions[expired.id])
 		}
 	}
 	sm.saveLocked()
 	return true
+}
+
+// retireBackgroundRecordLocked drops the history-bearing record but preserves
+// its native IDs for the ownership, visibility and topic filters. sm.mu is held.
+func (sm *SessionManager) retireBackgroundRecordLocked(s *Session) {
+	if sm.retiredBackgroundOwners == nil {
+		sm.retiredBackgroundOwners = make(map[string]string)
+	}
+	owner := ""
+	for key, ids := range sm.userSessions {
+		for _, id := range ids {
+			if id == s.ID {
+				owner = key
+				break
+			}
+		}
+	}
+	s.mu.Lock()
+	for _, nativeID := range append(append([]string(nil), s.PastAgentSessionIDs...), s.AgentSessionID) {
+		if nativeID != "" && nativeID != ContinueSession {
+			sm.retiredBackgroundOwners[nativeID] = owner
+			delete(sm.sessionNames, nativeID)
+		}
+	}
+	s.mu.Unlock()
+	sm.deleteByIDLocked(s.ID)
 }
 
 func (sm *SessionManager) createLocked(userKey, name string) *Session {
@@ -731,6 +765,9 @@ func (sm *SessionManager) KnownAgentSessionIDs() map[string]struct{} {
 		return nil
 	}
 	ids := make(map[string]struct{})
+	for id := range sm.retiredBackgroundOwners {
+		ids[id] = struct{}{}
+	}
 	for _, s := range sm.sessions {
 		s.mu.Lock()
 		// Ownership is independent of visibility. Background sessions still
@@ -753,6 +790,9 @@ func (sm *SessionManager) BackgroundAgentSessionIDs() map[string]struct{} {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	ids := make(map[string]struct{})
+	for id := range sm.retiredBackgroundOwners {
+		ids[id] = struct{}{}
+	}
 	for _, s := range sm.sessions {
 		s.mu.Lock()
 		if s.Background {
@@ -782,6 +822,9 @@ func (sm *SessionManager) AgentSessionOwners() map[string]string {
 		return nil
 	}
 	owners := make(map[string]string)
+	for id, owner := range sm.retiredBackgroundOwners {
+		owners[id] = owner
+	}
 	for userKey, ids := range sm.userSessions {
 		for _, sid := range ids {
 			s, ok := sm.sessions[sid]
@@ -936,15 +979,16 @@ func (sm *SessionManager) saveLocked() {
 	}
 
 	snap := sessionSnapshot{
-		Sessions:       snapSessions,
-		ActiveSession:  sm.activeSession,
-		UserSessions:   sm.userSessions,
-		Counter:        sm.counter,
-		SessionNames:   sm.sessionNames,
-		UserMeta:       sm.userMeta,
-		PastIDTracking: true,
-		LegacyData:     sm.legacyData,
-		Version:        snapshotVersion,
+		RetiredBackgroundOwners: sm.retiredBackgroundOwners,
+		Sessions:                snapSessions,
+		ActiveSession:           sm.activeSession,
+		UserSessions:            sm.userSessions,
+		Counter:                 sm.counter,
+		SessionNames:            sm.sessionNames,
+		UserMeta:                sm.userMeta,
+		PastIDTracking:          true,
+		LegacyData:              sm.legacyData,
+		Version:                 snapshotVersion,
 	}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -974,6 +1018,7 @@ func (sm *SessionManager) load() {
 		return
 	}
 	sm.sessions = snap.Sessions
+	sm.retiredBackgroundOwners = snap.RetiredBackgroundOwners
 	sm.activeSession = snap.ActiveSession
 	sm.userSessions = snap.UserSessions
 	sm.sessionNames = snap.SessionNames
