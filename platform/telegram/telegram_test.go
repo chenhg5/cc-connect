@@ -320,8 +320,19 @@ func TestPlatformStart_InitialConnectFailureEmitsUnavailableOnceBeforeReady(t *t
 	}
 }
 
+type testRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 func TestPlatformDisconnectedSendPathsReturnNotConnected(t *testing.T) {
-	p := &Platform{token: "token", httpClient: &http.Client{}}
+	p := &Platform{token: "token", httpClient: &http.Client{
+		Transport: testRoundTripper(func(*http.Request) (*http.Response, error) {
+			t.Error("disconnected platform attempted an HTTP request")
+			return nil, errors.New("unexpected HTTP request")
+		}),
+	}}
 	ctx := context.Background()
 	rctx := replyContext{chatID: 1, threadID: 0, messageID: 2}
 
@@ -1035,4 +1046,3 @@ func TestProgressStyleProviderInterface(t *testing.T) {
 		t.Fatalf("ProgressStyle() = %q, want compact", got)
 	}
 }
-
