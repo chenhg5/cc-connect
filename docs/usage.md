@@ -985,7 +985,7 @@ cc-connect daemon uninstall
 
 ### Process DNS override
 
-If the daemon inherits a broken system resolver, set `CC_CONNECT_DNS_SERVER` to a numeric DNS server address and port before starting cc-connect. This changes DNS resolution only inside the cc-connect process; it does not change host DNS, proxy, or routing settings. Unset preserves the default resolver.
+If the daemon inherits a broken system resolver, set `CC_CONNECT_DNS_SERVER` to a numeric DNS server address and port before starting cc-connect. This changes DNS resolution only inside the cc-connect process; it does not change host DNS, proxy, or routing settings. Unset preserves the default resolver. Agent subprocesses (Codex, Claude Code, and others) have their own network settings and continue to use the system resolver.
 
 ```bash
 CC_CONNECT_DNS_SERVER=1.1.1.1:53 cc-connect --config ~/.cc-connect/config.toml

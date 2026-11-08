@@ -898,7 +898,7 @@ cc-connect daemon uninstall
 
 ### 进程级 DNS 覆盖
 
-如果守护进程继承的系统 DNS 不可用，可在启动 cc-connect 前设置 `CC_CONNECT_DNS_SERVER`，值为 DNS 服务器的数字 IP 地址和端口。此设置只改变 cc-connect 进程内的域名解析，不修改系统 DNS、代理或路由配置；未设置时沿用系统默认解析器。
+如果守护进程继承的系统 DNS 不可用，可在启动 cc-connect 前设置 `CC_CONNECT_DNS_SERVER`，值为 DNS 服务器的数字 IP 地址和端口。此设置只改变 cc-connect 进程内的域名解析，不修改系统 DNS、代理或路由配置；未设置时沿用系统默认解析器。Codex、Claude Code 等 agent 子进程有各自的网络配置，仍使用系统 DNS。
 
 ```bash
 CC_CONNECT_DNS_SERVER=1.1.1.1:53 cc-connect --config ~/.cc-connect/config.toml
