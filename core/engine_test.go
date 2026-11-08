@@ -17069,3 +17069,40 @@ func TestEngineSetHideSchedulerSessionsPropagatesToWorkspaceManagers(t *testing.
 		t.Fatalf("workspace manager not updated: visible sessions = %#v, want %s hidden", got, background.ID)
 	}
 }
+
+func TestApplySessionFilter_OnlyBackgroundOwnedSessionsStillExcludeExternal(t *testing.T) {
+	e := NewEngine("test", &stubAgent{}, nil, "", LangEnglish)
+	e.SetFilterExternalSessions(true)
+	bg := e.sessions.NewBackgroundSession("test:user", "cron-job")
+	bg.SetAgentSessionID("background-agent", "codex")
+
+	got := e.applySessionFilter([]AgentSessionInfo{
+		{ID: "background-agent"},
+		{ID: "external-agent"},
+	}, e.sessions, "test:user")
+	if len(got) != 0 {
+		t.Fatalf("filtered sessions = %#v, want neither background nor external", got)
+	}
+}
+
+func TestExecuteCronJob_MarksAndRetiresBackgroundSession(t *testing.T) {
+	store, err := NewCronStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("done")}, []Platform{&stubCronReplyTargetPlatform{stubPlatformEngine: stubPlatformEngine{n: "discord"}}}, "", LangEnglish)
+	defer e.cancel()
+	e.cronScheduler = NewCronScheduler(store)
+	job := &CronJob{ID: "background-run", SessionKey: "discord:channel:user", Prompt: "run scheduled work"}
+	if err := e.ExecuteCronJob(job); err != nil {
+		t.Fatalf("ExecuteCronJob: %v", err)
+	}
+	for _, session := range e.sessions.AllSessions() {
+		if strings.HasPrefix(session.Name, "cron-"+job.ID) {
+			t.Fatal("completed scheduler session is still retained")
+		}
+	}
+	if got := e.sessions.ListSessions("discord:thread-fresh"); len(got) != 0 {
+		t.Fatalf("scheduled run reused the ordinary chat session: %#v", got)
+	}
+}

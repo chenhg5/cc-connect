@@ -492,6 +492,53 @@ func (sm *SessionManager) newSideSession(userKey, name string, background bool) 
 	return s
 }
 
+// maxRetainedBackgroundSessions bounds completed scheduler-run history while
+// retaining enough recent IDs for diagnostics and idempotent scheduler cleanup.
+const maxRetainedBackgroundSessions = 50
+
+// RetireBackgroundSession releases a completed run and bounds retained
+// scheduler history. A busy session is still executing and cannot be pruned.
+// It returns false while the run is live, or when the session is not a
+// background run (including after it has already been reclaimed).
+func (sm *SessionManager) RetireBackgroundSession(id string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	s, ok := sm.sessions[id]
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	if !s.Background || s.busy {
+		s.mu.Unlock()
+		return false
+	}
+	s.mu.Unlock()
+	sm.deleteByIDLocked(id)
+
+	type backgroundSession struct {
+		id        string
+		updatedAt time.Time
+	}
+	remaining := make([]backgroundSession, 0, maxRetainedBackgroundSessions)
+	for candidateID, candidate := range sm.sessions {
+		candidate.mu.Lock()
+		if candidate.Background && !candidate.busy {
+			remaining = append(remaining, backgroundSession{id: candidateID, updatedAt: candidate.UpdatedAt})
+		}
+		candidate.mu.Unlock()
+	}
+	if len(remaining) > maxRetainedBackgroundSessions {
+		sort.Slice(remaining, func(i, j int) bool {
+			return remaining[i].updatedAt.After(remaining[j].updatedAt)
+		})
+		for _, expired := range remaining[maxRetainedBackgroundSessions:] {
+			sm.deleteByIDLocked(expired.id)
+		}
+	}
+	sm.saveLocked()
+	return true
+}
+
 func (sm *SessionManager) createLocked(userKey, name string) *Session {
 	id := sm.nextID()
 	now := time.Now()
@@ -683,19 +730,17 @@ func (sm *SessionManager) KnownAgentSessionIDs() map[string]struct{} {
 	if sm.legacyData {
 		return nil
 	}
-	hideBackground := sm.hideBackgroundSessions
 	ids := make(map[string]struct{})
 	for _, s := range sm.sessions {
 		s.mu.Lock()
-		background := s.Background
-		include := !hideBackground || !background
-		if include && s.AgentSessionID != "" {
+		// Ownership is independent of visibility. Background sessions still
+		// belong to cc-connect, so their IDs must keep external CLI sessions
+		// out of the ownership filter and its destructive delete path.
+		if s.AgentSessionID != "" {
 			ids[s.AgentSessionID] = struct{}{}
 		}
-		if include {
-			for _, past := range s.PastAgentSessionIDs {
-				ids[past] = struct{}{}
-			}
+		for _, past := range s.PastAgentSessionIDs {
+			ids[past] = struct{}{}
 		}
 		s.mu.Unlock()
 	}
@@ -1089,16 +1134,29 @@ func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult 
 		var keep *Session
 		for _, s := range sessions {
 			s.mu.Lock()
+			background := s.Background
 			hasHistory := len(s.History) > 0
 			s.mu.Unlock()
-			if hasHistory {
+			if hasHistory && !background {
 				keep = s
 				break
 			}
 		}
 		// If no session has history, keep the most recent one
 		if keep == nil {
-			keep = sessions[0]
+			for _, s := range sessions {
+				s.mu.Lock()
+				background := s.Background
+				s.mu.Unlock()
+				if !background {
+					keep = s
+					break
+				}
+			}
+		}
+		if keep == nil {
+			// Scheduler-only groups have no visible survivor to merge into.
+			continue
 		}
 		kept[baseChat] = keep
 

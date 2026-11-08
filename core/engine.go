@@ -459,7 +459,7 @@ type Engine struct {
 	filterExternalSessions bool
 	// When true, scheduler-created background sessions stay out of user-facing
 	// /list, /switch, and /delete views. Default true.
-	hideSchedulerSessions bool
+	hideSchedulerSessions atomic.Bool
 
 	// Shell configuration for /shell, cron exec, hooks, webhook exec
 	shell        string // shell binary path (e.g. "sh", "/bin/zsh")
@@ -805,11 +805,11 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		maxQueuedMessages:     defaultMaxQueuedMessages,
 		showContextIndicator:  true,
 		showWorkdirIndicator:  true,
-		hideSchedulerSessions: true,
 		shell:                 defaultShell(),
 		shellFlag:             defaultShellFlag(),
 		pendingRestartTimeout: defaultPendingRestartTimeout,
 	}
+	e.hideSchedulerSessions.Store(true)
 
 	if ag != nil {
 		e.sessions.InvalidateForAgent(ag.Name())
@@ -1053,7 +1053,7 @@ func (e *Engine) SetFilterExternalSessions(v bool) {
 // SetHideSchedulerSessions controls whether cron/timer background sessions are
 // hidden from normal user-facing session commands.
 func (e *Engine) SetHideSchedulerSessions(v bool) {
-	e.hideSchedulerSessions = v
+	e.hideSchedulerSessions.Store(v)
 	if e.sessions != nil {
 		e.sessions.SetHideBackgroundSessions(v)
 	}
@@ -1715,6 +1715,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		prevHistLen := session.HistoryLen()
 		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, lockGen)
 		e.cleanupInteractiveState(iKey)
+		sessions.RetireBackgroundSession(session.ID)
 		// Empty-response detection via session history delta: processInteractiveMessageWith
 		// always adds a "user" entry (prevHistLen+1), then an "assistant" entry on success
 		// (prevHistLen+2). This approach correctly detects empty responses across all
@@ -1919,6 +1920,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		}
 		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, lockGen)
 		e.cleanupInteractiveState(iKey)
+		sessions.RetireBackgroundSession(session.ID)
 		return nil
 	}
 
@@ -4308,7 +4310,7 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 	}
 	sessions := NewSessionManager(sessionFile)
 	sessions.InvalidateForAgent(agent.Name())
-	sessions.SetHideBackgroundSessions(e.hideSchedulerSessions)
+	sessions.SetHideBackgroundSessions(e.hideSchedulerSessions.Load())
 
 	ws.agent = agent
 	ws.sessions = sessions
@@ -7704,7 +7706,7 @@ func (e *Engine) cmdNew(p Platform, msg *Message, args []string) {
 // Outside multi-workspace mode only the configured scheduler and external
 // session filters apply.
 func (e *Engine) applySessionFilter(sessions []AgentSessionInfo, sm *SessionManager, sessionKey string) []AgentSessionInfo {
-	if e.hideSchedulerSessions && sm != nil {
+	if e.hideSchedulerSessions.Load() && sm != nil {
 		sessions = filterHiddenSessions(sessions, sm.BackgroundAgentSessionIDs())
 	}
 	if e.filterExternalSessions {

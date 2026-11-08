@@ -77,8 +77,8 @@ func TestSessionManager_NewBackgroundSessionHiddenFromUserList(t *testing.T) {
 		t.Fatalf("ListSessions = %#v, want only main session", list)
 	}
 	known := sm.KnownAgentSessionIDs()
-	if _, ok := known["cron-agent-1"]; ok {
-		t.Fatal("background agent session should not be in known visible IDs")
+	if _, ok := known["cron-agent-1"]; !ok {
+		t.Fatal("background agent session must remain in owned IDs even when hidden")
 	}
 	hidden := sm.BackgroundAgentSessionIDs()
 	if _, ok := hidden["cron-agent-1"]; !ok {
@@ -105,6 +105,51 @@ func TestSessionManager_BackgroundSessionsVisibleWhenDisabled(t *testing.T) {
 	hidden := sm.BackgroundAgentSessionIDs()
 	if _, ok := hidden["cron-agent-1"]; !ok {
 		t.Fatal("background IDs should still be tracked for filtering when enabled again")
+	}
+}
+
+func TestPruneDuplicateSessions_KeepsVisibleChatNotNewerBackground(t *testing.T) {
+	sm := NewSessionManager("")
+	key := "feishu:oc_chat:user"
+	chat := sm.GetOrCreateActive(key)
+	chat.AddHistory("user", "ordinary chat")
+	background := sm.NewBackgroundSession(key, "cron-job")
+	background.AddHistory("user", "scheduled prompt")
+	background.AddHistory("assistant", "scheduled answer")
+
+	result := sm.PruneDuplicateSessions(true)
+	if len(result.RemovedSessions) != 1 || result.RemovedSessions[0] != background.ID {
+		t.Fatalf("removed = %v, want only background %q", result.RemovedSessions, background.ID)
+	}
+	if sm.FindByID(chat.ID) == nil || sm.ActiveSessionID(key) != chat.ID {
+		t.Fatalf("visible chat was not preserved as active session %q", chat.ID)
+	}
+	if got := sm.ListSessions(key); len(got) != 1 || got[0].ID != chat.ID {
+		t.Fatalf("visible sessions = %#v, want only chat", got)
+	}
+}
+
+func TestRetireBackgroundSession_BoundsCompletedHistory(t *testing.T) {
+	sm := NewSessionManager("")
+	first := sm.NewBackgroundSession("test:user", "cron-first")
+	for i := 0; i < maxRetainedBackgroundSessions; i++ {
+		sm.NewBackgroundSession("test:user", "cron-next")
+	}
+	if !sm.RetireBackgroundSession(first.ID) {
+		t.Fatal("completed background session was not retired")
+	}
+	if sm.FindByID(first.ID) != nil {
+		t.Fatal("retired background session is still indexed")
+	}
+	if got := len(sm.AllSessions()); got != maxRetainedBackgroundSessions {
+		t.Fatalf("retained sessions = %d, want %d", got, maxRetainedBackgroundSessions)
+	}
+	live := sm.NewBackgroundSession("test:user", "cron-live")
+	if _, locked := live.TryLock(); !locked {
+		t.Fatal("could not lock live session")
+	}
+	if sm.RetireBackgroundSession(live.ID) {
+		t.Fatal("busy background session must not be retired")
 	}
 }
 
@@ -1172,8 +1217,8 @@ func TestBackgroundAgentSessionIDs_IncludesPastAndPersists(t *testing.T) {
 	}
 	known := sm2.KnownAgentSessionIDs()
 	for _, id := range []string{"cron-thread-1", "cron-thread-2"} {
-		if _, ok := known[id]; ok {
-			t.Fatalf("known visible IDs should not include background %q: %#v", id, known)
+		if _, ok := known[id]; !ok {
+			t.Fatalf("owned IDs must retain background %q: %#v", id, known)
 		}
 	}
 }

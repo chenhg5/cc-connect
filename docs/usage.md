@@ -51,6 +51,8 @@ Each user gets an independent session with full conversation context. Manage ses
 | `/ps <message>` / `/btw <message>` | Send a supplement to the running task |
 | `/help` | Show available commands |
 
+Cron/timer background sessions are hidden from `/list`, `/switch`, `/delete` and the management API by default. To inspect or remove one from chat, set `hide_scheduler_sessions = false` for that project and reload. Completed run records are reclaimed, retaining at most 50 idle background sessions; live runs are never reclaimed.
+
 During a session, the agent may request tool permissions. Reply **allow** / **deny** / **allow all**.
 
 Use `/ps` (or `/btw`) to add instructions while a task is running. An idle session rejects the command. The delivery confirmation means the bridge sent the request, not that the agent has finished processing it.
