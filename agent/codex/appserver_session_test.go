@@ -1,12 +1,14 @@
 package codex
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -492,6 +494,111 @@ func TestAppServerSession_SendRejectsMismatchedSteeringTurn(t *testing.T) {
 	}
 	if len(pendingMsgs) != 1 || pendingMsgs[0] != "buffered answer" {
 		t.Fatalf("pending messages = %v, want buffered answer", pendingMsgs)
+	}
+}
+
+func TestAppServerSession_SteerFailureReleasesStaleTurnForNextSend(t *testing.T) {
+	s, _ := newSendTestSession(t, "turn-stale", "buffered answer")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	s.stdin = nil
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		scanner := bufio.NewScanner(conn)
+		for scanner.Scan() {
+			var request clientRequestProbe
+			if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+				return
+			}
+			response := map[string]any{"jsonrpc": "2.0", "id": request.ID}
+			if request.Method == "turn/steer" {
+				response["error"] = map[string]any{"code": -32602, "message": "expectedTurnId does not match active turn"}
+			} else {
+				response["result"] = map[string]any{"turn": map[string]any{"id": "turn-fresh"}}
+			}
+			if err := json.NewEncoder(conn).Encode(response); err != nil {
+				return
+			}
+		}
+	}()
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stdin = conn
+	t.Cleanup(func() { _ = conn.Close() })
+	s.wg.Add(1)
+	go s.readLoop(conn)
+	err = s.Send("guide stale work", "", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "turn/steer") {
+		t.Fatalf("steer error = %v, want turn/steer failure", err)
+	}
+	currentTurn, pendingMsgs := sendTestState(s)
+	if currentTurn != "" {
+		t.Fatalf("current turn = %q, want stale turn cleared", currentTurn)
+	}
+	if len(pendingMsgs) != 1 || pendingMsgs[0] != "buffered answer" {
+		t.Fatalf("pending messages = %v, want buffered answer preserved", pendingMsgs)
+	}
+
+	err = s.Send("start fresh work", "", nil, nil)
+	if err != nil {
+		t.Fatalf("next Send() error = %v", err)
+	}
+	currentTurn, _ = sendTestState(s)
+	if currentTurn != "turn-fresh" {
+		t.Fatalf("current turn after recovery = %q, want turn-fresh via turn/start", currentTurn)
+	}
+}
+
+func TestAppServerSession_SteerFailureDoesNotClearDifferentActiveTurn(t *testing.T) {
+	s, _ := newSendTestSession(t, "turn-old", "buffered answer")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		scanner := bufio.NewScanner(conn)
+		for scanner.Scan() {
+			var request clientRequestProbe
+			if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+				return
+			}
+			s.stateMu.Lock()
+			s.currentTurn = "turn-new"
+			s.stateMu.Unlock()
+			if err := json.NewEncoder(conn).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{"code": -32602, "message": "expectedTurnId does not match active turn"}}); err != nil {
+				return
+			}
+		}
+	}()
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stdin = conn
+	t.Cleanup(func() { _ = conn.Close() })
+	s.wg.Add(1)
+	go s.readLoop(conn)
+	err = s.steerTurn("thread-1", "turn-old", nil)
+	if err == nil || !strings.Contains(err.Error(), "expectedTurnId") {
+		t.Fatalf("steer error = %v, want expectedTurnId failure without clearing the new turn", err)
+	}
+	if currentTurn, _ := sendTestState(s); currentTurn != "turn-new" {
+		t.Fatalf("current turn = %q, want newer turn retained", currentTurn)
 	}
 }
 
@@ -1225,11 +1332,16 @@ func sendAndRespond(t *testing.T, s *appServerSession, stdin *lockedWriteCloser,
 		done <- s.Send(prompt, "", nil, nil)
 	}()
 	request := waitForClientRequest(t, stdin)
-	resultJSON, err := json.Marshal(result)
-	if err != nil {
-		t.Fatalf("marshal response: %v", err)
+	response, ok := result.(rpcResponseEnvelope)
+	if !ok {
+		resultJSON, err := json.Marshal(result)
+		if err != nil {
+			t.Fatalf("marshal response: %v", err)
+		}
+		response = rpcResponseEnvelope{Result: resultJSON}
 	}
-	s.handleResponse(rpcResponseEnvelope{ID: request.ID, Result: resultJSON})
+	response.ID = request.ID
+	s.handleResponse(response)
 	select {
 	case err := <-done:
 		return request, err

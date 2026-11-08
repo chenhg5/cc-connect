@@ -575,6 +575,15 @@ func (s *appServerSession) steerTurn(threadID, expectedTurnID string, input []ma
 
 	var resp turnSteerResponse
 	if err := s.request("turn/steer", params, &resp); err != nil {
+		s.stateMu.Lock()
+		if s.currentTurn == expectedTurnID {
+			// A turn can finish before its delayed turn/start response is
+			// installed. Do not strand every later message on a stale ID;
+			// the next user message gets a normal turn/start instead.
+			s.currentTurn = ""
+			s.turnRevision++
+		}
+		s.stateMu.Unlock()
 		return fmt.Errorf("codex app-server turn/steer: %w", err)
 	}
 	if resp.TurnID == "" {
