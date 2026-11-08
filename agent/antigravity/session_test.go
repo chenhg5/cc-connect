@@ -1129,3 +1129,50 @@ func TestDeleteSession_SummariesDBFailureKeepsFiles(t *testing.T) {
 		t.Fatal("history.jsonl entry removed despite index failure")
 	}
 }
+
+// Deleting a session must remove only its history lines and leave the rest of
+// agy's file (blank lines, ordering, permissions) untouched.
+func TestRemoveSessionFromCaches_PreservesOtherHistoryBytes(t *testing.T) {
+	cliRoot := t.TempDir()
+	historyPath := filepath.Join(cliRoot, "history.jsonl")
+	keepA := `{"display":"a","workspace":"/w","conversationId":"keep-1"}`
+	drop := `{"display":"b","workspace":"/w","conversationId":"drop-1"}`
+	keepB := `{"display":"c","workspace":"/w","conversationId":"keep-2"}`
+	original := keepA + "\n\n" + drop + "\n" + "not json\n" + keepB + "\n"
+	if err := os.WriteFile(historyPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(historyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := removeSessionFromAntigravityCaches(cliRoot, "drop-1")
+	if err != nil || !removed {
+		t.Fatalf("removeSessionFromAntigravityCaches = %v, %v; want removed", removed, err)
+	}
+	got, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := keepA + "\n\n" + "not json\n" + keepB + "\n"
+	if string(got) != want {
+		t.Fatalf("history.jsonl =\n%q\nwant\n%q", got, want)
+	}
+	if info, err := os.Stat(historyPath); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("history.jsonl mode = %v (err %v), want 0644 preserved", info.Mode().Perm(), err)
+	}
+}
+
+func TestNewAntigravitySession_RejectsUnsafeResumeID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, id := range []string{"../victim", "a b", "id/with/slash"} {
+		s, err := newAntigravitySession(context.Background(), "echo", nil, t.TempDir(), "", "yolo", id, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := s.CurrentSessionID(); got != "" {
+			t.Errorf("resume ID %q was accepted as %q", id, got)
+		}
+		_ = s.Close()
+	}
+}

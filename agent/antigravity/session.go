@@ -66,8 +66,13 @@ func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, 
 	}
 
 	resumeID = strings.TrimSpace(resumeID)
-	if resumeID != "" && resumeID != core.ContinueSession && isValidAntigravitySessionID(resumeID) {
-		as.chatID.Store(resumeID)
+	if resumeID != "" && resumeID != core.ContinueSession {
+		if isValidAntigravitySessionID(resumeID) {
+			as.chatID.Store(resumeID)
+		} else {
+			// Dropping the ID starts a fresh conversation; make that diagnosable.
+			slog.Warn("antigravitySession: ignoring resume ID with unsupported characters; starting a new conversation", "resume_id", resumeID)
+		}
 	}
 
 	return as, nil
@@ -324,6 +329,7 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 				if isValidAntigravitySessionID(event.SessionID) {
 					as.chatID.Store(event.SessionID)
 				} else {
+					slog.Warn("antigravitySession: ignoring streamed conversation ID with unsupported characters", "session_id", event.SessionID)
 					event.SessionID = ""
 				}
 			}

@@ -2,6 +2,7 @@ package antigravity
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -869,7 +870,12 @@ func truncateSessionSummary(summary, fallbackID string) string {
 	return summary
 }
 
+// writeFileAtomic replaces targetPath via a temp file and rename. An existing
+// file keeps its permissions; perm applies only when the file is new.
 func writeFileAtomic(targetPath string, data []byte, perm os.FileMode) error {
+	if info, err := os.Stat(targetPath); err == nil {
+		perm = info.Mode().Perm()
+	}
 	dir := filepath.Dir(targetPath)
 	tmp, err := os.CreateTemp(dir, ".cc-connect-tmp-*")
 	if err != nil {
@@ -1069,26 +1075,20 @@ func removeSessionFromAntigravityCaches(cliRoot, sessionID string) (bool, error)
 
 	historyPath := filepath.Join(cliRoot, "history.jsonl")
 	if data, err := os.ReadFile(historyPath); err == nil {
-		lines := strings.Split(string(data), "\n")
-		var kept []string
+		// Drop only this session's lines and keep every other byte (blank
+		// lines, line endings, trailing newline) exactly as agy wrote it.
+		var out []byte
 		changed := false
-		for _, line := range lines {
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
+		for _, line := range bytes.SplitAfter(data, []byte("\n")) {
 			var entry agyHistoryEntry
-			if json.Unmarshal([]byte(line), &entry) == nil && strings.TrimSpace(entry.ConversationID) == sessionID {
+			if json.Unmarshal(bytes.TrimSpace(line), &entry) == nil && strings.TrimSpace(entry.ConversationID) == sessionID {
 				changed = true
 				continue
 			}
-			kept = append(kept, line)
+			out = append(out, line...)
 		}
 		if changed {
-			out := ""
-			if len(kept) > 0 {
-				out = strings.Join(kept, "\n") + "\n"
-			}
-			if err := writeFileAtomic(historyPath, []byte(out), 0o600); err != nil {
+			if err := writeFileAtomic(historyPath, out, 0o600); err != nil {
 				return false, fmt.Errorf("antigravity: write history.jsonl: %w", err)
 			}
 			removed = true
