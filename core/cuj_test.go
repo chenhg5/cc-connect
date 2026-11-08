@@ -2329,6 +2329,7 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	pB := &stubPlatformEngine{n: "platB"}
 	agent := &cujAgent{}
 	e := NewEngine("test", agent, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
 
 	// Fire 5 messages on each platform concurrently.
 	var wg sync.WaitGroup
@@ -2361,28 +2362,34 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	// constrained CI hosts; the in-isolation run finishes < 2s.
 	deadline := time.After(30 * time.Second)
 	for {
-		histA := e.sessions.GetOrCreateActive("platA:userA").GetHistory(0)
-		histB := e.sessions.GetOrCreateActive("platB:userB").GetHistory(0)
-		// Each user sent 5 messages — expect each session to have ≥5 user
-		// entries when fully drained.
-		userA := 0
+		sessionA := e.sessions.GetOrCreateActive("platA:userA")
+		sessionB := e.sessions.GetOrCreateActive("platB:userB")
+		histA := sessionA.GetHistory(0)
+		histB := sessionB.GetHistory(0)
+		// User history is written before Send. Wait for replies and lock
+		// release too, or TempDir cleanup races the final history save.
+		userA, assistantA := 0, 0
 		for _, h := range histA {
 			if h.Role == "user" {
 				userA++
+			} else if h.Role == "assistant" {
+				assistantA++
 			}
 		}
-		userB := 0
+		userB, assistantB := 0, 0
 		for _, h := range histB {
 			if h.Role == "user" {
 				userB++
+			} else if h.Role == "assistant" {
+				assistantB++
 			}
 		}
-		if userA >= 5 && userB >= 5 {
+		if userA >= 5 && userB >= 5 && assistantA >= 5 && assistantB >= 5 && !sessionA.Busy() && !sessionB.Busy() {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timed out: userA=%d userB=%d (some messages did not land)", userA, userB)
+			t.Fatalf("timed out: userA=%d userB=%d assistantA=%d assistantB=%d busyA=%t busyB=%t", userA, userB, assistantA, assistantB, sessionA.Busy(), sessionB.Busy())
 		default:
 			time.Sleep(20 * time.Millisecond)
 		}
