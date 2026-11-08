@@ -701,6 +701,28 @@
           "models": ["deepseek-v4-flash", "deepseek-v4-pro"]
         }
       }
+    },
+    {
+      "name": "standardcompute",
+      "display_name": "Standard Compute",
+      "description": "Standard Compute OpenAI-compatible API gateway that routes coding-agent requests across open and frontier models.",
+      "description_zh": "Standard Compute OpenAI 兼容 API 网关，为编码智能体在开源与前沿模型之间路由请求。",
+      "features": ["OpenAI Compatible", "Model Routing", "Text Models"],
+      "tier": 3,
+      "website": "https://standardcompute.com",
+      "agents": {
+        "codex": {
+          "base_url": "https://api.stdcmpt.com/v1",
+          "model": "StandardCompute",
+          "models": ["StandardCompute", "deepseek/deepseek-v4-pro", "z-ai/glm-5.3"],
+          "codex_config": { "wire_api": "responses" }
+        },
+        "opencode": {
+          "base_url": "https://api.stdcmpt.com/v1",
+          "model": "StandardCompute",
+          "models": ["StandardCompute", "deepseek/deepseek-v4-pro", "z-ai/glm-5.3"]
+        }
+      }
     }
   ]
 }
