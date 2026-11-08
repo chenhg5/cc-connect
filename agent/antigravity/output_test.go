@@ -104,19 +104,3 @@ func TestAgyOutputParser_DeniedNoticeAppendsAfterText(t *testing.T) {
 		t.Fatalf("events = %+v, want one deduplicated notice separated from streamed text", events)
 	}
 }
-
-func TestAgyOutputParser_FailedResultWithoutTextBecomesError(t *testing.T) {
-	parser := newAgyOutputParser()
-	_, events := parser.parseLine([]byte(`{"event":"result","result":{"status":"ERROR","response":""}}`))
-	if len(events) != 1 || events[0].Type != core.EventError || events[0].Error == nil {
-		t.Fatalf("events = %+v, want error event", events)
-	}
-	_, events = newAgyOutputParser().parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"","error":"quota exhausted"}}`))
-	if len(events) != 1 || events[0].Type != core.EventError || !strings.Contains(events[0].Error.Error(), "quota exhausted") {
-		t.Fatalf("events = %+v, want error carrying agy message", events)
-	}
-	_, events = newAgyOutputParser().parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":""}}`))
-	if len(events) != 0 {
-		t.Fatalf("plain empty success should stay silent, got %+v", events)
-	}
-}

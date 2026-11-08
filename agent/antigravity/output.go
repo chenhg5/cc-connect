@@ -2,7 +2,6 @@ package antigravity
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -165,13 +164,6 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 			}
 			p.hasText = true
 			events = append(events, core.Event{Type: core.EventText, Content: notice})
-		}
-		if !p.hasText {
-			if msg := strings.TrimSpace(res.Error); msg != "" {
-				events = append(events, core.Event{Type: core.EventError, Error: fmt.Errorf("agy: %s", msg)})
-			} else if status := strings.TrimSpace(res.Status); status != "" && !strings.EqualFold(status, "SUCCESS") {
-				events = append(events, core.Event{Type: core.EventError, Error: fmt.Errorf("agy finished with status %s and no response", status)})
-			}
 		}
 	}
 	return true, events
