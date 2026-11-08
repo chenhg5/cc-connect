@@ -1226,16 +1226,11 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		}
 
 	case "thread/status/changed":
-		var notif struct {
-			ThreadID string `json:"threadId"`
-			Status   struct {
-				Type string `json:"type"`
-			} `json:"status"`
-		}
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && notif.Status.Type == "idle" && s.acceptsThreadNotification(method, notif.ThreadID) {
-			// In codex 0.125+, thread going idle signals turn completion.
-			s.completeTurn()
-		}
+		// Thread status has neither a turn ID nor a terminal outcome. An idle
+		// notification may precede the final items or a failed turn/completed,
+		// and a delayed idle may belong to the previous turn. Only the matching
+		// turn/completed notification can finish the active turn.
+		return
 
 	case "account/rateLimits/updated":
 		var notif appServerRateLimitsResponse

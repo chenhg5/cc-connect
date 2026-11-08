@@ -339,7 +339,12 @@ func TestAppServerSession_ReadLoopHandlesLargeResponseLine(t *testing.T) {
 		if decoded.Thread.ID != "thread-large" {
 			t.Fatalf("thread id = %q, want thread-large", decoded.Thread.ID)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
+		// The budget is for a hung read loop, not for machine speed: what this
+		// asserts is that readJSONLines has no 64 KB scanner cap, and decoding
+		// 11 MB on a loaded CI runner can take far longer than the 2 s it used
+		// to allow (2026-10-29: it timed out there while green on every local
+		// run and on the CI re-run of the same commit).
 		t.Fatal("timed out waiting for large response")
 	}
 
