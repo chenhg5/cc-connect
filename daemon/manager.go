@@ -168,7 +168,7 @@ func Resolve(cfg *Config) error {
 }
 
 // captureDaemonEnv builds the EnvExtra map baked into the installed
-// service file. Proxy-related vars are always captured. When
+// service file. Network-related vars are always captured. When
 // noCaptureSecrets is false, every registered EnvDiscoverer is also
 // invoked and its (envName -> value) pairs are merged in.
 //
@@ -181,6 +181,7 @@ func captureDaemonEnv(noCaptureSecrets bool) map[string]string {
 		"http_proxy", "https_proxy", "no_proxy",
 		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
 		"all_proxy", "ALL_PROXY",
+		"CC_CONNECT_DNS_SERVER",
 	}
 	for _, key := range proxyKeys {
 		if value := os.Getenv(key); value != "" {

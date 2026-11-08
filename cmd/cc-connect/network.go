@@ -18,9 +18,18 @@ func configureProcessDNS(server string) error {
 		return nil
 	}
 	host, port, err := net.SplitHostPort(server)
-	portNumber, portErr := strconv.Atoi(port)
-	if err != nil || net.ParseIP(host) == nil || portErr != nil || portNumber < 1 || portNumber > 65535 {
-		return fmt.Errorf("CC_CONNECT_DNS_SERVER must be an IP address and port")
+	if err != nil {
+		return fmt.Errorf("CC_CONNECT_DNS_SERVER must be a numeric IP address and port: %w", err)
+	}
+	if net.ParseIP(host) == nil {
+		return fmt.Errorf("CC_CONNECT_DNS_SERVER host %q is not a numeric IP address", host)
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("CC_CONNECT_DNS_SERVER port %q is not numeric: %w", port, err)
+	}
+	if portNumber < 1 || portNumber > 65535 {
+		return fmt.Errorf("CC_CONNECT_DNS_SERVER port %d is outside 1-65535", portNumber)
 	}
 	net.DefaultResolver = &net.Resolver{
 		PreferGo: true,
