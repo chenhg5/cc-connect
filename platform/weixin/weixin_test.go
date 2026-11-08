@@ -923,3 +923,37 @@ func TestSend_ReconstructedReplyCtxStillCountsAsPush(t *testing.T) {
 		t.Fatalf("push budget counter = %d, want 1", got)
 	}
 }
+
+// Issue #2175: ilink renders text_item with Markdown paragraph semantics, so
+// Markdown markers show up literally and a lone "\n" is folded into a space.
+func TestPlainTextForWeixin(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"strips bold and promotes breaks", "**list** (2)\n◻ **1.** a\n◻ **2.** b", "list (2)\n\n◻ 1. a\n\n◻ 2. b"},
+		{"already spaced stays", "1. a\n\n2. b", "1. a\n\n2. b"},
+		{"three newlines collapse to two", "head\n\n\nbody", "head\n\nbody"},
+		{"heading and inline code", "# Title\nrun `go test`", "Title\n\nrun go test"},
+		{"code block keeps single breaks", "see:\n```go\nline1\nline2\n```\ndone", "see:\n\nline1\nline2\n\ndone"},
+		{"unclosed fence keeps single breaks", "x\n```\na\nb", "x\n\n```\na\nb"},
+		{"plain text unchanged", "hello", "hello"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := plainTextForWeixin(tt.in)
+			if got != tt.want {
+				t.Fatalf("plainTextForWeixin(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPromoteSingleLineBreaks_Idempotent(t *testing.T) {
+	in := "a\nb\n\nc\n\n\nd\n"
+	once := promoteSingleLineBreaks(in)
+	if twice := promoteSingleLineBreaks(once); twice != once {
+		t.Fatalf("not idempotent: %q then %q", once, twice)
+	}
+}

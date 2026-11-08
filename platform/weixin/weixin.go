@@ -814,6 +814,61 @@ func (p *Platform) checkSendQuota(ctx context.Context, path sendPath) error {
 	return nil
 }
 
+// plainTextForWeixin prepares agent output for ilink's text_item, which shows
+// Markdown markers literally and renders with paragraph semantics (a lone "\n"
+// is folded into a space, only a blank line starts a new line).
+//
+// Single line breaks outside code fences are doubled first, while the fences
+// are still there to skip, so pasted code is not double-spaced. Then the
+// Markdown markers are stripped.
+func plainTextForWeixin(s string) string {
+	var sb strings.Builder
+	for {
+		i := strings.Index(s, "```")
+		if i < 0 {
+			sb.WriteString(promoteSingleLineBreaks(s))
+			break
+		}
+		sb.WriteString(promoteSingleLineBreaks(s[:i]))
+		rest := s[i+3:]
+		j := strings.Index(rest, "```")
+		if j < 0 {
+			sb.WriteString(s[i:])
+			break
+		}
+		sb.WriteString(s[i : i+3+j+3])
+		s = rest[j+3:]
+	}
+	return core.StripMarkdown(sb.String())
+}
+
+// promoteSingleLineBreaks turns every lone "\n" into "\n\n". Runs of two or
+// more newlines are left as they are, so applying it twice changes nothing.
+func promoteSingleLineBreaks(s string) string {
+	if !strings.Contains(s, "\n") {
+		return s
+	}
+	var sb strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '\n' {
+			sb.WriteByte(s[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && s[j] == '\n' {
+			j++
+		}
+		if j-i == 1 {
+			sb.WriteString("\n\n")
+		} else {
+			sb.WriteString(s[i:j])
+		}
+		i = j
+	}
+	return sb.String()
+}
+
 func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string, path sendPath) error {
 	rc, ok := replyCtx.(*replyContext)
 	if !ok || rc == nil {
@@ -832,6 +887,10 @@ func (p *Platform) sendChunks(ctx context.Context, replyCtx any, content string,
 			"hint", "user needs to send a message to the bot first so a context_token can be captured")
 		return fmt.Errorf("weixin: missing context_token for peer %q - user must send a message to the bot first", rc.peerUserID)
 	}
+	if strings.TrimSpace(content) == "" {
+		return nil
+	}
+	content = plainTextForWeixin(content)
 	if strings.TrimSpace(content) == "" {
 		return nil
 	}
