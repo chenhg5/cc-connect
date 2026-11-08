@@ -14768,6 +14768,9 @@ func TestIssue1959_CronResultIdentifiesJob(t *testing.T) {
 	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
 	defer e.cancel()
 	e.cronScheduler = scheduler
+	chat := e.sessions.GetOrCreateActive("discord:channel-1:user-1")
+	chat.SetAgentSessionID("existing-chat-session", "stub")
+	chat.AddHistory("user", "existing conversation")
 
 	job := &CronJob{
 		ID:          "job-1",
@@ -14800,11 +14803,11 @@ func TestIssue1959_CronResultIdentifiesJob(t *testing.T) {
 		t.Fatalf("sent[1] = %q, want job identity and final result", sent[1])
 	}
 
-	if got := len(e.sessions.ListSessions("discord:thread-fresh")); got != 1 {
-		t.Fatalf("fresh session count = %d, want 1 for default new-per-run mode", got)
+	if history := chat.GetHistory(0); len(history) != 1 || history[0].Role != "user" || history[0].Content != "existing conversation" {
+		t.Fatalf("chat history = %#v, want unchanged conversation after scheduled run", history)
 	}
-	if got := len(e.sessions.ListSessions("discord:channel-1:user-1")); got != 0 {
-		t.Fatalf("base session count = %d, want 0: scheduled run must not reuse chat history", got)
+	if active := e.sessions.GetOrCreateActive(job.SessionKey); active != chat || active.GetAgentSessionID() != "existing-chat-session" {
+		t.Fatal("scheduled run changed the active chat session")
 	}
 	if job.SessionKey != "discord:channel-1:user-1" {
 		t.Fatalf("job.SessionKey = %q, want unchanged base session key", job.SessionKey)
