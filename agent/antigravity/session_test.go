@@ -2,7 +2,11 @@ package antigravity
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,7 +77,12 @@ func TestSession_ContinueSessionTreatedAsFresh(t *testing.T) {
 }
 
 func TestBuildAntigravityArgs_PromptAtEnd(t *testing.T) {
-	s, _ := newAntigravitySession(context.Background(), "echo", []string{"--verbose"}, "/tmp", "", "default", "", nil, 0)
+	t.Setenv("HOME", t.TempDir())
+	s, err := newAntigravitySession(context.Background(), "echo", []string{"--verbose"}, "/tmp", "", "default", "", nil, 0)
+	if err != nil {
+		t.Fatalf("newAntigravitySession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
 	args := s.buildAntigravityArgs("sid-1", true, "plan", "/tmp/agy-config", "What is 1+1?")
 	if len(args) < 2 {
 		t.Fatalf("args too short: %v", args)
@@ -114,6 +123,7 @@ func TestAntigravitySession_ResumePassesConversationID(t *testing.T) {
 		os.Exit(0)
 	}
 
+	t.Setenv("HOME", t.TempDir())
 	argsPath := t.TempDir() + string(os.PathSeparator) + "args"
 	workDir := t.TempDir()
 	s, err := newAntigravitySession(
@@ -375,3 +385,664 @@ func contains(xs []string, want string) bool {
 	}
 	return false
 }
+
+func TestAntigravitySession_MultiTurnPersistsStreamedConversationID(t *testing.T) {
+	if os.Getenv("GO_WANT_ANTIGRAVITY_MULTITURN_HELPER") == "1" {
+		argsPath := os.Getenv("CC_ANTIGRAVITY_ARGS_FILE")
+		if argsPath == "" {
+			os.Exit(2)
+		}
+		if err := os.WriteFile(argsPath, []byte(strings.Join(os.Args, "\x00")), 0o600); err != nil {
+			os.Exit(2)
+		}
+		_, _ = io.WriteString(os.Stdout,
+			"{\"event\":\"init\",\"conversation_id\":\"conv-stream-1\"}\n"+
+				"{\"event\":\"step_update\",\"step_update\":{\"conversation_id\":\"conv-stream-1\",\"step_index\":0,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"text_delta\":\"turn ok\\n\"}}\n"+
+				"{\"event\":\"result\",\"result\":{\"conversation_id\":\"conv-stream-1\",\"status\":\"SUCCESS\",\"response\":\"turn ok\\n\"}}\n")
+		os.Exit(0)
+	}
+
+	t.Setenv("HOME", t.TempDir())
+	argsPath := filepath.Join(t.TempDir(), "args")
+	workDir := t.TempDir()
+	s, err := newAntigravitySession(
+		context.Background(),
+		os.Args[0],
+		[]string{"-test.run=^TestAntigravitySession_MultiTurnPersistsStreamedConversationID$", "--"},
+		workDir,
+		"",
+		"yolo",
+		"",
+		[]string{
+			"GO_WANT_ANTIGRAVITY_MULTITURN_HELPER=1",
+			"CC_ANTIGRAVITY_ARGS_FILE=" + argsPath,
+		},
+		2*time.Second,
+	)
+	if err != nil {
+		t.Fatalf("newAntigravitySession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	drainTurn := func(prompt string) core.Event {
+		t.Helper()
+		if err := s.Send(prompt, "", nil, nil); err != nil {
+			t.Fatalf("Send(%q): %v", prompt, err)
+		}
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case ev := <-s.Events():
+				if ev.Type == core.EventResult {
+					return ev
+				}
+			case <-deadline:
+				t.Fatalf("timeout waiting for turn %q completion", prompt)
+			}
+		}
+	}
+
+	res1 := drainTurn("first turn")
+	if got := s.CurrentSessionID(); got != "conv-stream-1" {
+		t.Fatalf("after first turn CurrentSessionID() = %q, want conv-stream-1", got)
+	}
+	if res1.SessionID != "conv-stream-1" {
+		t.Fatalf("first turn EventResult.SessionID = %q, want conv-stream-1", res1.SessionID)
+	}
+
+	_ = drainTurn("second turn")
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	args := strings.Split(string(data), "\x00")
+	if !contains(args, "--conversation") || !contains(args, "conv-stream-1") {
+		t.Fatalf("second turn args = %v, want --conversation conv-stream-1", args)
+	}
+}
+
+func TestDetectNewSessionID_AntigravityCLICacheAndMetadata(t *testing.T) {
+	t.Run("last_conversations_json", func(t *testing.T) {
+		fakeHome := t.TempDir()
+		t.Setenv("HOME", fakeHome)
+		workDir := t.TempDir()
+
+		s, err := newAntigravitySession(context.Background(), "echo", nil, workDir, "", "yolo", "", nil, 0)
+		if err != nil {
+			t.Fatalf("newAntigravitySession: %v", err)
+		}
+		defer func() { _ = s.Close() }()
+
+		cacheDir := filepath.Join(fakeHome, ".gemini", "antigravity-cli", "cache")
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			t.Fatalf("mkdir cacheDir: %v", err)
+		}
+		lastMap := map[string]string{
+			filepath.Clean(workDir): "conv-from-last-map",
+		}
+		data, _ := json.Marshal(lastMap)
+		if err := os.WriteFile(filepath.Join(cacheDir, "last_conversations.json"), data, 0o600); err != nil {
+			t.Fatalf("write last_conversations.json: %v", err)
+		}
+
+		got := s.detectNewSessionID(map[string]bool{"old-session": true}, time.Now())
+		if got != "conv-from-last-map" {
+			t.Fatalf("detectNewSessionID = %q, want conv-from-last-map", got)
+		}
+	})
+
+	t.Run("conversation_metadata_json_and_concurrent_workspaces", func(t *testing.T) {
+		fakeHome := t.TempDir()
+		t.Setenv("HOME", fakeHome)
+		wsA := filepath.Join(t.TempDir(), "Workspace A")
+		wsB := filepath.Join(t.TempDir(), "Workspace B")
+		if err := os.MkdirAll(wsA, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(wsB, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		sA, err := newAntigravitySession(context.Background(), "echo", nil, wsA, "", "yolo", "", nil, 0)
+		if err != nil {
+			t.Fatalf("newAntigravitySession: %v", err)
+		}
+		defer func() { _ = sA.Close() }()
+
+		cacheDir := filepath.Join(fakeHome, ".gemini", "antigravity-cli", "cache")
+		brainDir := filepath.Join(fakeHome, ".gemini", "antigravity-cli", "brain")
+		if err := os.MkdirAll(filepath.Join(brainDir, "conv-wsB-unscoped"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		now := time.Now().UTC()
+		wsBURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(wsB)}).String()
+		wsAURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(wsA)}).String()
+
+		// Only wsB has a new conversation in metadata; wsA must NOT bind to wsB or unscoped brain dir.
+		metaOnlyB := map[string]any{
+			"conversations": map[string]any{
+				"conv-wsB-1": map[string]any{
+					"summary": map[string]any{
+						"ID":            "conv-wsB-1",
+						"WorkspaceURIs": []string{wsBURI},
+						"UpdatedAt":     now.Format(time.RFC3339Nano),
+					},
+					"is_internal":        false,
+					"last_modified_time": now.Format(time.RFC3339Nano),
+				},
+			},
+		}
+		dataB, _ := json.Marshal(metaOnlyB)
+		if err := os.WriteFile(filepath.Join(cacheDir, "conversation_metadata.json"), dataB, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := sA.detectNewSessionID(map[string]bool{}, now); got != "" {
+			t.Fatalf("detectNewSessionID for wsA with only wsB active = %q, want empty", got)
+		}
+
+		// Now add wsA's conversation; wsA should discover conv-wsA-1.
+		metaBoth := map[string]any{
+			"conversations": map[string]any{
+				"conv-wsB-1": metaOnlyB["conversations"].(map[string]any)["conv-wsB-1"],
+				"conv-wsA-1": map[string]any{
+					"summary": map[string]any{
+						"ID":            "conv-wsA-1",
+						"WorkspaceURIs": []string{wsAURI},
+						"UpdatedAt":     now.Format(time.RFC3339Nano),
+					},
+					"is_internal":        false,
+					"last_modified_time": now.Format(time.RFC3339Nano),
+				},
+			},
+		}
+		dataBoth, _ := json.Marshal(metaBoth)
+		if err := os.WriteFile(filepath.Join(cacheDir, "conversation_metadata.json"), dataBoth, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := sA.detectNewSessionID(map[string]bool{}, now); got != "conv-wsA-1" {
+			t.Fatalf("detectNewSessionID for wsA = %q, want conv-wsA-1", got)
+		}
+	})
+}
+
+func TestListAndDeleteSessions_WorkspaceScopeAndSafety(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	wsA := filepath.Join(t.TempDir(), "Project Alpha")
+	wsB := filepath.Join(t.TempDir(), "Project Beta")
+	if err := os.MkdirAll(wsA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wsB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cacheDir := filepath.Join(fakeHome, ".gemini", "antigravity-cli", "cache")
+	brainDir := filepath.Join(fakeHome, ".gemini", "antigravity-cli", "brain")
+	convsDir := filepath.Join(fakeHome, ".gemini", "antigravity-cli", "conversations")
+	for _, d := range []string{cacheDir, brainDir, convsDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wsAURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(wsA)}).String()
+	wsBURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(wsB)}).String()
+	now := time.Now().UTC()
+
+	meta := map[string]any{
+		"conversations": map[string]any{
+			"session-1": map[string]any{
+				"summary": map[string]any{
+					"ID":            "session-1",
+					"Title":         "Alpha Title",
+					"Preview":       "Alpha first prompt",
+					"NumSteps":      4,
+					"UpdatedAt":     now.Format(time.RFC3339Nano),
+					"WorkspaceURIs": []string{wsAURI},
+				},
+				"is_internal":        false,
+				"last_modified_time": now.Format(time.RFC3339Nano),
+			},
+			"session-10": map[string]any{
+				"summary": map[string]any{
+					"ID":            "session-10",
+					"Preview":       "Alpha ten prompt",
+					"NumSteps":      2,
+					"UpdatedAt":     now.Add(-time.Minute).Format(time.RFC3339Nano),
+					"WorkspaceURIs": []string{wsAURI},
+				},
+				"is_internal":        false,
+				"last_modified_time": now.Add(-time.Minute).Format(time.RFC3339Nano),
+			},
+			"session-b": map[string]any{
+				"summary": map[string]any{
+					"ID":            "session-b",
+					"Preview":       "Beta prompt",
+					"NumSteps":      3,
+					"UpdatedAt":     now.Format(time.RFC3339Nano),
+					"WorkspaceURIs": []string{wsBURI},
+				},
+				"is_internal":        false,
+				"last_modified_time": now.Format(time.RFC3339Nano),
+			},
+			"session-internal": map[string]any{
+				"summary": map[string]any{
+					"ID":            "session-internal",
+					"Preview":       "Subagent task",
+					"NumSteps":      5,
+					"UpdatedAt":     now.Format(time.RFC3339Nano),
+					"WorkspaceURIs": []string{wsAURI},
+				},
+				"is_internal":        true,
+				"last_modified_time": now.Format(time.RFC3339Nano),
+			},
+			"../escape": map[string]any{
+				"summary": map[string]any{
+					"ID":            "../escape",
+					"Preview":       "Malicious ID",
+					"NumSteps":      1,
+					"UpdatedAt":     now.Format(time.RFC3339Nano),
+					"WorkspaceURIs": []string{wsAURI},
+				},
+				"is_internal": false,
+			},
+		},
+	}
+	metaBytes, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(cacheDir, "conversation_metadata.json"), metaBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"session-1", "session-10", "session-b"} {
+		if err := os.MkdirAll(filepath.Join(brainDir, id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(convsDir, id+".db"), []byte("sqlite"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(convsDir, "session-1.db-wal"), []byte("wal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(convsDir, "session-1-keep.db"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionsA, err := listAntigravitySessions(wsA)
+	if err != nil {
+		t.Fatalf("listAntigravitySessions(wsA): %v", err)
+	}
+	if len(sessionsA) != 2 || sessionsA[0].ID != "session-1" || sessionsA[1].ID != "session-10" {
+		t.Fatalf("sessionsA = %+v, want [session-1, session-10]", sessionsA)
+	}
+
+	agentA := &Agent{workDir: wsA}
+
+	// Path traversal must be rejected without touching sibling directories.
+	victimDir := filepath.Join(fakeHome, ".gemini", "antigravity-cli", "victim")
+	if err := os.MkdirAll(victimDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, badID := range []string{"../victim", "../../etc", "session-1/../session-10", ".", "..", ""} {
+		if err := agentA.DeleteSession(context.Background(), badID); err == nil {
+			t.Fatalf("DeleteSession(%q) succeeded, want traversal/invalid ID error", badID)
+		}
+	}
+	if _, err := os.Stat(victimDir); err != nil {
+		t.Fatalf("victimDir was removed or damaged: %v", err)
+	}
+
+	// Deleting session-1 must remove its brain/db/wal and metadata entry, without touching session-10 or session-1-keep.db.
+	if err := agentA.DeleteSession(context.Background(), "session-1"); err != nil {
+		t.Fatalf("DeleteSession(session-1): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(brainDir, "session-1")); !os.IsNotExist(err) {
+		t.Fatalf("brain/session-1 still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(convsDir, "session-1.db")); !os.IsNotExist(err) {
+		t.Fatalf("conversations/session-1.db still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(convsDir, "session-1.db-wal")); !os.IsNotExist(err) {
+		t.Fatalf("conversations/session-1.db-wal still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(convsDir, "session-10.db")); err != nil {
+		t.Fatalf("session-10.db was wrongly deleted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(convsDir, "session-1-keep.db")); err != nil {
+		t.Fatalf("session-1-keep.db was wrongly deleted: %v", err)
+	}
+
+	sessionsAfter, err := listAntigravitySessions(wsA)
+	if err != nil {
+		t.Fatalf("listAntigravitySessions(wsA) after delete: %v", err)
+	}
+	if len(sessionsAfter) != 1 || sessionsAfter[0].ID != "session-10" {
+		t.Fatalf("sessionsAfter = %+v, want [session-10]", sessionsAfter)
+	}
+
+	// Cross-workspace delete from wsA must not delete wsB's session-b.
+	if err := agentA.DeleteSession(context.Background(), "session-b"); err == nil {
+		t.Fatal("DeleteSession(session-b) from wsA succeeded, want cross-workspace rejection")
+	}
+	if _, err := os.Stat(filepath.Join(convsDir, "session-b.db")); err != nil {
+		t.Fatalf("session-b.db was wrongly deleted by wsA: %v", err)
+	}
+}
+
+func TestAntigravityZeroTimestampAndInternalIsolation(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	ws := filepath.Join(t.TempDir(), "Workspace ZeroTS")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Invalid resumeID must be ignored on session creation.
+	sInvalid, err := newAntigravitySession(context.Background(), "echo", nil, ws, "", "yolo", "../bad-resume", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sInvalid.Close() }()
+	if got := sInvalid.CurrentSessionID(); got != "" {
+		t.Fatalf("CurrentSessionID() with invalid resumeID = %q, want empty", got)
+	}
+
+	cliRoot := filepath.Join(fakeHome, ".gemini", "antigravity-cli")
+	cacheDir := filepath.Join(cliRoot, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	wsURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(ws)}).String()
+
+	meta := map[string]any{
+		"conversations": map[string]any{
+			"conv-internal": map[string]any{
+				"summary": map[string]any{
+					"ID":            "conv-internal",
+					"Preview":       "Internal subagent",
+					"UpdatedAt":     now.Format(time.RFC3339Nano),
+					"WorkspaceURIs": []string{wsURI},
+					"Internal":      true,
+				},
+				"is_internal":        true,
+				"last_modified_time": now.Format(time.RFC3339Nano),
+			},
+			"conv-zero-updated-at": map[string]any{
+				"summary": map[string]any{
+					"ID":            "conv-zero-updated-at",
+					"Preview":       "Real user session with zero UpdatedAt",
+					"NumSteps":      3,
+					"UpdatedAt":     "0001-01-01T00:00:00Z",
+					"WorkspaceURIs": []string{wsURI},
+				},
+				"is_internal":        false,
+				"last_modified_time": now.Format(time.RFC3339Nano),
+			},
+		},
+	}
+	metaBytes, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(cacheDir, "conversation_metadata.json"), metaBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Even if conv-internal appears in last_conversations.json and history.jsonl, it must be skipped.
+	lastBytes, _ := json.Marshal(map[string]string{ws: "conv-internal"})
+	if err := os.WriteFile(filepath.Join(cacheDir, "last_conversations.json"), lastBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	histLine := fmt.Sprintf(`{"display":"subagent","timestamp":%d,"workspace":%q,"conversationId":"conv-internal"}`+"\n", now.UnixMilli(), ws)
+	if err := os.WriteFile(filepath.Join(cliRoot, "history.jsonl"), []byte(histLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := sInvalid.detectNewSessionID(map[string]bool{}, now); got != "conv-zero-updated-at" {
+		t.Fatalf("detectNewSessionID = %q, want conv-zero-updated-at", got)
+	}
+
+	sessions, err := listAntigravitySessions(ws)
+	if err != nil {
+		t.Fatalf("listAntigravitySessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "conv-zero-updated-at" {
+		t.Fatalf("sessions = %+v, want [conv-zero-updated-at]", sessions)
+	}
+	if !sessions[0].ModifiedAt.Equal(now) {
+		t.Fatalf("ModifiedAt = %v, want %v (from last_modified_time)", sessions[0].ModifiedAt, now)
+	}
+}
+
+func TestAntigravityWorkspaceMatches_CrossPlatformAndURIs(t *testing.T) {
+	cases := []struct {
+		name      string
+		workDir   string
+		candidate string
+		want      bool
+	}{
+		{
+			name:      "unix_path_and_escaped_file_uri",
+			workDir:   "/Users/alice/My Project/",
+			candidate: "file:///Users/alice/My%20Project",
+			want:      true,
+		},
+		{
+			name:      "windows_drive_and_file_uri_lowercase_drive",
+			workDir:   `C:\Users\alice\My Project\`,
+			candidate: "file:///c:/Users/alice/My%20Project",
+			want:      true,
+		},
+		{
+			name:      "windows_drive_and_escaped_colon_file_uri",
+			workDir:   `c:\Users\alice\My Project`,
+			candidate: "file:///C%3A/Users/alice/My%20Project/",
+			want:      true,
+		},
+		{
+			name:      "different_workspaces_do_not_match",
+			workDir:   "/Users/alice/ProjectA",
+			candidate: "file:///Users/alice/ProjectB",
+			want:      false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := antigravityWorkspaceMatches(tc.workDir, tc.candidate); got != tc.want {
+				t.Fatalf("antigravityWorkspaceMatches(%q, %q) = %v, want %v", tc.workDir, tc.candidate, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAntigravitySessions_CorruptMetadataAndHistoryFallback(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	ws := filepath.Join(t.TempDir(), "Workspace History")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cliRoot := filepath.Join(fakeHome, ".gemini", "antigravity-cli")
+	cacheDir := filepath.Join(cliRoot, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write corrupt metadata and corrupt last_conversations; fallback to history.jsonl must still work.
+	if err := os.WriteFile(filepath.Join(cacheDir, "conversation_metadata.json"), []byte("{not-valid-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "last_conversations.json"), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	historyLines := strings.Join([]string{
+		fmt.Sprintf(`{"display":"/help","timestamp":%d,"workspace":%q,"conversationId":"conv-hist-1","type":"slash_command"}`, now.Add(-10*time.Second).UnixMilli(), ws),
+		fmt.Sprintf(`{"display":"Fix context loss in agy","timestamp":%d,"workspace":%q,"conversationId":"conv-hist-1"}`, now.UnixMilli(), ws),
+		fmt.Sprintf(`{"display":"Other workspace prompt","timestamp":%d,"workspace":"/tmp/other-ws","conversationId":"conv-other"}`, now.UnixMilli()),
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(cliRoot, "history.jsonl"), []byte(historyLines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	preEntries := captureAntigravityPreEntries(ws)
+	if !preEntries["conv-hist-1"] {
+		t.Fatalf("captureAntigravityPreEntries did not capture conv-hist-1: %v", preEntries)
+	}
+
+	s, err := newAntigravitySession(context.Background(), "echo", nil, ws, "", "yolo", "", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Pre-existing session must not be misidentified as new.
+	if got := s.detectNewSessionID(preEntries, now); got != "" {
+		t.Fatalf("detectNewSessionID with pre-existing conv-hist-1 = %q, want empty", got)
+	}
+	// When not in preEntries, history.jsonl fallback discovers conv-hist-1.
+	if got := s.detectNewSessionID(map[string]bool{}, now); got != "conv-hist-1" {
+		t.Fatalf("detectNewSessionID from history.jsonl = %q, want conv-hist-1", got)
+	}
+
+	sessions, err := listAntigravitySessions(ws)
+	if err != nil {
+		t.Fatalf("listAntigravitySessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "conv-hist-1" {
+		t.Fatalf("sessions = %+v, want [conv-hist-1]", sessions)
+	}
+	if sessions[0].Summary != "Fix context loss in agy" {
+		t.Fatalf("session summary = %q, want %q", sessions[0].Summary, "Fix context loss in agy")
+	}
+	if sessions[0].MessageCount != 2 {
+		t.Fatalf("session MessageCount = %d, want 2", sessions[0].MessageCount)
+	}
+}
+
+func TestAgyPermissionBridge_OverlayPreservesAntigravityCLIState(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	events := make(chan core.Event, 4)
+	bridge, err := newAgyPermissionBridge(context.Background(), events)
+	if err != nil {
+		t.Fatalf("newAgyPermissionBridge: %v", err)
+	}
+
+	overlayCacheDir := filepath.Join(bridge.AgyConfigDir(), "antigravity-cli", "cache")
+	if err := os.MkdirAll(overlayCacheDir, 0o755); err != nil {
+		bridge.Close()
+		t.Fatalf("mkdir overlay cache dir: %v", err)
+	}
+	payload := []byte(`{"/workspace":"conv-persisted-1"}`)
+	if err := os.WriteFile(filepath.Join(overlayCacheDir, "last_conversations.json"), payload, 0o600); err != nil {
+		bridge.Close()
+		t.Fatalf("write overlay last_conversations.json: %v", err)
+	}
+
+	// Closing the bridge removes its temporary overlay root, but ~/.gemini/antigravity-cli must remain intact.
+	bridge.Close()
+
+	realFile := filepath.Join(fakeHome, ".gemini", "antigravity-cli", "cache", "last_conversations.json")
+	got, err := os.ReadFile(realFile)
+	if err != nil {
+		t.Fatalf("persisted last_conversations.json missing after bridge.Close(): %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("persisted content = %q, want %q", string(got), string(payload))
+	}
+}
+
+func TestAntigravitySummariesDB_ListDetectAndDelete(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	ws := filepath.Join(t.TempDir(), "SQLite Workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cliRoot := filepath.Join(fakeHome, ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(cliRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(cliRoot, "conversation_summaries.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE conversation_summaries (
+			conversation_id text PRIMARY KEY,
+			title text NOT NULL DEFAULT "",
+			preview text NOT NULL DEFAULT "",
+			step_count integer NOT NULL DEFAULT 0,
+			last_modified_time datetime NOT NULL,
+			workspace_uris text NOT NULL,
+			parent_conversation_id text NOT NULL DEFAULT "",
+			nesting_depth integer NOT NULL DEFAULT 0,
+			raw_summary blob
+		);
+	`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+
+	wsURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(ws)}).String()
+	// Protobuf field 7 (tag 0x3a) length-delimited string containing wsURI.
+	protoBlob := append([]byte{0x3a, byte(len(wsURI))}, []byte(wsURI)...)
+	nowStr := time.Now().UTC().Format("2006-01-02 15:04:05.000000+00:00")
+
+	// Insert one active user session with empty workspace_uris column (relying on raw_summary proto)
+	// and one subagent session with parent_conversation_id set.
+	_, err = db.Exec(
+		`INSERT INTO conversation_summaries (conversation_id, title, preview, step_count, last_modified_time, workspace_uris, parent_conversation_id, nesting_depth, raw_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"conv-sqlite-1", "", "Print mode prompt", 9, nowStr, "", "", 0, protoBlob,
+		"conv-sqlite-sub", "", "Subagent prompt", 4, nowStr, `["`+wsURI+`"]`, "conv-sqlite-1", 1, nil,
+	)
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := newAntigravitySession(context.Background(), "echo", nil, ws, "", "yolo", "", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if got := s.detectNewSessionID(map[string]bool{}, time.Now().UTC()); got != "conv-sqlite-1" {
+		t.Fatalf("detectNewSessionID from conversation_summaries.db = %q, want conv-sqlite-1", got)
+	}
+
+	sessions, err := listAntigravitySessions(ws)
+	if err != nil {
+		t.Fatalf("listAntigravitySessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "conv-sqlite-1" || sessions[0].Summary != "Print mode prompt" {
+		t.Fatalf("sessions = %+v, want [conv-sqlite-1]", sessions)
+	}
+
+	ag := &Agent{workDir: ws}
+	if err := ag.DeleteSession(context.Background(), "conv-sqlite-1"); err != nil {
+		t.Fatalf("DeleteSession(conv-sqlite-1): %v", err)
+	}
+	sessionsAfter, err := listAntigravitySessions(ws)
+	if err != nil {
+		t.Fatalf("listAntigravitySessions after delete: %v", err)
+	}
+	if len(sessionsAfter) != 0 {
+		t.Fatalf("sessionsAfter = %+v, want empty", sessionsAfter)
+	}
+}
+

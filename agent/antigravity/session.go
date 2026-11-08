@@ -65,7 +65,8 @@ func newAntigravitySession(ctx context.Context, cmd string, extraArgs []string, 
 		as.permissionBridge = bridge
 	}
 
-	if resumeID != "" && resumeID != core.ContinueSession {
+	resumeID = strings.TrimSpace(resumeID)
+	if resumeID != "" && resumeID != core.ContinueSession && isValidAntigravitySessionID(resumeID) {
 		as.chatID.Store(resumeID)
 	}
 
@@ -77,19 +78,13 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 		return fmt.Errorf("session is closed")
 	}
 
-	// Capture existing chat logs so we can identify a new session on first turn
-	preEntries := make(map[string]bool)
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		slug := antigravityProjectSlug(as.workDir)
-		chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
-		if entries, err := os.ReadDir(chatsDir); err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".jsonl") {
-					preEntries[entry.Name()] = true
-				}
-			}
-		}
+	chatID := as.CurrentSessionID()
+	isResume := chatID != ""
+
+	// Capture existing chat logs and workspace session IDs only when starting a fresh session.
+	var preEntries map[string]bool
+	if !isResume {
+		preEntries = captureAntigravityPreEntries(as.workDir)
 	}
 
 	// Save images and files into the workspace
@@ -127,9 +122,6 @@ func (as *antigravitySession) Send(prompt string, messageID string, images []cor
 			fileRefs = append(fileRefs, fpath)
 		}
 	}
-
-	chatID := as.CurrentSessionID()
-	isResume := chatID != ""
 
 	// Attach image and file references to prompt
 	fullPrompt := prompt
@@ -314,6 +306,13 @@ func (as *antigravitySession) readLoop(ctx context.Context, cmd *exec.Cmd, stdou
 			continue
 		}
 		for _, event := range events {
+			if event.SessionID != "" {
+				if isValidAntigravitySessionID(event.SessionID) {
+					as.chatID.Store(event.SessionID)
+				} else {
+					event.SessionID = ""
+				}
+			}
 			if event.Type == core.EventText && strings.TrimSpace(event.Content) != "" {
 				hasResponse = true
 			}
@@ -347,15 +346,64 @@ func redactAgyStderr(stderr string, env []string) string {
 	return strings.TrimSpace(stderr)
 }
 
-func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sendStartedAt time.Time) string {
+func captureAntigravityPreEntries(workDir string) map[string]bool {
+	preEntries := make(map[string]bool)
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return preEntries
 	}
-	slug := antigravityProjectSlug(as.workDir)
-	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
 
-	entries, err := os.ReadDir(chatsDir)
+	cliRoot := filepath.Join(homeDir, ".gemini", "antigravity-cli")
+	if data, err := os.ReadFile(filepath.Join(cliRoot, "cache", "last_conversations.json")); err == nil {
+		var lastMap map[string]string
+		if json.Unmarshal(data, &lastMap) == nil {
+			for ws, rawID := range lastMap {
+				id := strings.TrimSpace(rawID)
+				if isValidAntigravitySessionID(id) && antigravityWorkspaceMatches(workDir, ws) {
+					preEntries[id] = true
+				}
+			}
+		}
+	}
+	if metaEntries, err := loadAntigravityMetadataEntries(cliRoot); err == nil {
+		for id, entry := range metaEntries {
+			for _, uri := range entry.Summary.WorkspaceURIs {
+				if antigravityWorkspaceMatches(workDir, uri) {
+					preEntries[id] = true
+					break
+				}
+			}
+		}
+	}
+	if file, err := os.Open(filepath.Join(cliRoot, "history.jsonl")); err == nil {
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			var entry agyHistoryEntry
+			if json.Unmarshal(scanner.Bytes(), &entry) == nil {
+				id := strings.TrimSpace(entry.ConversationID)
+				if isValidAntigravitySessionID(id) && antigravityWorkspaceMatches(workDir, entry.Workspace) {
+					preEntries[id] = true
+				}
+			}
+		}
+		_ = file.Close()
+	}
+
+	slug := antigravityProjectSlug(workDir)
+	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
+	if entries, err := os.ReadDir(chatsDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".jsonl") {
+				preEntries[entry.Name()] = true
+			}
+		}
+	}
+	return preEntries
+}
+
+func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sendStartedAt time.Time) string {
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
@@ -365,6 +413,160 @@ func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sen
 		modTime   time.Time
 		diff      time.Duration
 	}
+	makeCandidate := func(id string, mod time.Time) (candidate, bool) {
+		if !isValidAntigravitySessionID(id) || preEntries[id] {
+			return candidate{}, false
+		}
+		if !sendStartedAt.IsZero() && !mod.IsZero() && mod.Before(sendStartedAt.Add(-2*time.Second)) {
+			return candidate{}, false
+		}
+		diff := time.Duration(0)
+		if !sendStartedAt.IsZero() {
+			if mod.IsZero() {
+				diff = time.Duration(1<<63 - 1)
+			} else if mod.After(sendStartedAt) {
+				diff = mod.Sub(sendStartedAt)
+			} else {
+				diff = sendStartedAt.Sub(mod)
+			}
+		}
+		return candidate{sessionID: id, modTime: mod, diff: diff}, true
+	}
+
+	cliRoot := filepath.Join(homeDir, ".gemini", "antigravity-cli")
+	internalIDs := make(map[string]bool)
+	metaModByID := make(map[string]time.Time)
+	var cliCandidates []candidate
+	seenCLI := make(map[string]bool)
+
+	// 1. Inspect Antigravity CLI metadata (conversation_summaries.db and conversation_metadata.json) first
+	// to collect internal session IDs and workspace candidates.
+	if metaEntries, err := loadAntigravityMetadataEntries(cliRoot); err == nil {
+		for id, entry := range metaEntries {
+			if entry.IsInternal || entry.Summary.Internal {
+				internalIDs[id] = true
+				continue
+			}
+			mod := parseAntigravityTimestamp(entry.Summary.UpdatedAt, entry.LastModifiedTime, entry.Summary.CreatedAt)
+			if !mod.IsZero() {
+				metaModByID[id] = mod
+			}
+			matchedWorkspace := false
+			for _, uri := range entry.Summary.WorkspaceURIs {
+				if antigravityWorkspaceMatches(as.workDir, uri) {
+					matchedWorkspace = true
+					break
+				}
+			}
+			if !matchedWorkspace {
+				continue
+			}
+			if c, ok := makeCandidate(id, mod); ok {
+				cliCandidates = append(cliCandidates, c)
+				seenCLI[id] = true
+			}
+		}
+	}
+
+	// 2. Check workspace-keyed last_conversations.json (excluding internal or stale sessions).
+	lastPath := filepath.Join(cliRoot, "cache", "last_conversations.json")
+	if lastInfo, err := os.Stat(lastPath); err == nil {
+		lastFileMod := lastInfo.ModTime()
+		if sendStartedAt.IsZero() || !lastFileMod.Before(sendStartedAt.Add(-2*time.Second)) {
+			if data, err := os.ReadFile(lastPath); err == nil {
+				var lastMap map[string]string
+				if json.Unmarshal(data, &lastMap) == nil {
+					var lastCandidates []candidate
+					for ws, rawID := range lastMap {
+						id := strings.TrimSpace(rawID)
+						if !isValidAntigravitySessionID(id) || preEntries[id] || internalIDs[id] {
+							continue
+						}
+						if !antigravityWorkspaceMatches(as.workDir, ws) {
+							continue
+						}
+						mod := metaModByID[id]
+						if mod.IsZero() {
+							mod = lastFileMod
+						}
+						if c, ok := makeCandidate(id, mod); ok {
+							lastCandidates = append(lastCandidates, c)
+						}
+					}
+					if len(lastCandidates) > 0 {
+						sort.Slice(lastCandidates, func(i, j int) bool {
+							if lastCandidates[i].diff == lastCandidates[j].diff {
+								if lastCandidates[i].modTime.Equal(lastCandidates[j].modTime) {
+									return lastCandidates[i].sessionID < lastCandidates[j].sessionID
+								}
+								return lastCandidates[i].modTime.After(lastCandidates[j].modTime)
+							}
+							return lastCandidates[i].diff < lastCandidates[j].diff
+						})
+						return lastCandidates[0].sessionID
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Check workspace-scoped entries in history.jsonl.
+	historyPath := filepath.Join(cliRoot, "history.jsonl")
+	if file, err := os.Open(historyPath); err == nil {
+		latestByID := make(map[string]time.Time)
+		var order []string
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			var entry agyHistoryEntry
+			if json.Unmarshal(scanner.Bytes(), &entry) != nil {
+				continue
+			}
+			id := strings.TrimSpace(entry.ConversationID)
+			if !isValidAntigravitySessionID(id) || seenCLI[id] || internalIDs[id] || !antigravityWorkspaceMatches(as.workDir, entry.Workspace) {
+				continue
+			}
+			if _, ok := latestByID[id]; !ok {
+				order = append(order, id)
+			}
+			if entry.Timestamp > 0 {
+				ts := time.UnixMilli(entry.Timestamp)
+				if ts.After(latestByID[id]) {
+					latestByID[id] = ts
+				}
+			}
+		}
+		_ = file.Close()
+
+		for _, id := range order {
+			if c, ok := makeCandidate(id, latestByID[id]); ok {
+				cliCandidates = append(cliCandidates, c)
+			}
+		}
+	}
+
+	if len(cliCandidates) > 0 {
+		sort.Slice(cliCandidates, func(i, j int) bool {
+			if cliCandidates[i].diff == cliCandidates[j].diff {
+				if cliCandidates[i].modTime.Equal(cliCandidates[j].modTime) {
+					return cliCandidates[i].sessionID < cliCandidates[j].sessionID
+				}
+				return cliCandidates[i].modTime.After(cliCandidates[j].modTime)
+			}
+			return cliCandidates[i].diff < cliCandidates[j].diff
+		})
+		return cliCandidates[0].sessionID
+	}
+
+	// 3. Fallback to legacy ~/.gemini/tmp/<slug>/chats/*.jsonl.
+	slug := antigravityProjectSlug(as.workDir)
+	chatsDir := filepath.Join(homeDir, ".gemini", "tmp", slug, "chats")
+
+	entries, err := os.ReadDir(chatsDir)
+	if err != nil {
+		return ""
+	}
+
 	var candidates []candidate
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
@@ -393,20 +595,10 @@ func (as *antigravitySession) detectNewSessionID(preEntries map[string]bool, sen
 			var sf struct {
 				SessionID string `json:"sessionId"`
 			}
-			if json.Unmarshal([]byte(scanner.Text()), &sf) == nil && sf.SessionID != "" {
-				diff := time.Duration(0)
-				if !sendStartedAt.IsZero() {
-					if mod.After(sendStartedAt) {
-						diff = mod.Sub(sendStartedAt)
-					} else {
-						diff = sendStartedAt.Sub(mod)
-					}
+			if json.Unmarshal([]byte(scanner.Text()), &sf) == nil {
+				if c, ok := makeCandidate(sf.SessionID, mod); ok {
+					candidates = append(candidates, c)
 				}
-				candidates = append(candidates, candidate{
-					sessionID: sf.SessionID,
-					modTime:   mod,
-					diff:      diff,
-				})
 			}
 		}
 		_ = file.Close()
