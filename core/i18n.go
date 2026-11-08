@@ -191,6 +191,8 @@ func (i *I18n) SetLang(lang Language) {
 // Message keys
 type MsgKey string
 
+const MsgImageDeliveryIncomplete MsgKey = "image_delivery_incomplete"
+
 const (
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
@@ -701,6 +703,13 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgImageDeliveryIncomplete: {
+		LangEnglish:            "Image delivery incomplete: %d/%d confirmed. Check the failed group before retrying only the unconfirmed remainder: %v",
+		LangChinese:            "图片发送未完成：已确认 %d/%d 张。请核对失败批次后，仅补发未确认的剩余图片：%v",
+		LangTraditionalChinese: "圖片傳送未完成：已確認 %d/%d 張。請核對失敗批次後，僅補傳未確認的剩餘圖片：%v",
+		LangJapanese:           "画像送信未完了：%d/%d 枚を確認済み。失敗したグループを確認し、未確認の画像のみ再送してください：%v",
+		LangSpanish:            "Envío incompleto: %d/%d imágenes confirmadas. Comprueba el grupo fallido antes de reenviar solo las restantes sin confirmar: %v",
+	},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",
