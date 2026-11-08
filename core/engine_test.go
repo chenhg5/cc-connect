@@ -11261,6 +11261,84 @@ func TestHandleMessageRecallEmptyHandoffStartsQueuedArrival(t *testing.T) {
 	}
 }
 
+func TestDrainOrphanedQueue_DropsStaleBeforeRecallReplacement(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	replacement := newResultAgentSession("reply to fresh message")
+	e := NewEngine("test", &controllableAgent{nextSession: replacement}, []Platform{p}, "", LangEnglish)
+	key := "test:orphan-stale"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{platform: p, currentTurnUserMessageTimeMs: 200}
+	state.pendingMessages = []queuedMessage{
+		{messageID: "stale", platform: p, content: "stale message", userMessageTimeMs: 100},
+		{messageID: "fresh", platform: p, content: "fresh message", userMessageTimeMs: 300},
+	}
+	e.interactiveStates[key] = state
+	lockGen, locked := session.TryLock()
+	if !locked {
+		t.Fatal("could not lock test session")
+	}
+	e.drainOrphanedQueue(session, e.sessions, key, e.agent, "", lockGen)
+	if len(replacement.sentPrompts) != 1 || !strings.Contains(replacement.sentPrompts[0], "fresh message") {
+		t.Fatalf("replacement prompts = %v, want only fresh message", replacement.sentPrompts)
+	}
+}
+
+func TestRecallHandoffFlagAndStoppedAreAtomic(t *testing.T) {
+	state := &interactiveState{}
+	state.markStoppedForRecall()
+	state.mu.Lock()
+	stopped, handoff := state.stopped, state.recallHandoff
+	state.mu.Unlock()
+	if !stopped || !handoff {
+		t.Fatalf("stop and handoff flags must be published together: stopped=%v handoff=%v", stopped, handoff)
+	}
+	state.finishRecallHandoff()
+	state.mu.Lock()
+	handoff = state.recallHandoff
+	state.mu.Unlock()
+	if !handoff {
+		t.Fatal("stop completion must not discard a queue awaiting its processor")
+	}
+}
+
+func TestRecallHandoffTimeoutNotifiesAndUnlocks(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	key := "test:recall-handoff-timeout"
+	session := e.sessions.GetOrCreateActive(key)
+	lockGen, locked := session.TryLock()
+	if !locked {
+		t.Fatal("could not lock test session")
+	}
+	state := &interactiveState{
+		platform:        p,
+		pendingMessages: []queuedMessage{{messageID: "queued", platform: p, replyCtx: "ctx", content: "queued message"}},
+	}
+	state.markStoppedForRecall()
+	if e.waitForRecallHandoff(state, key, session, lockGen) {
+		t.Fatal("missing handoff must fail instead of pretending to resume")
+	}
+	if session.Busy() {
+		t.Fatal("failed recall handoff left the session locked")
+	}
+	sent := p.getSent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "did not stop") {
+		t.Fatalf("sent = %v, want visible failed-handoff notice", sent)
+	}
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[key]
+	e.interactiveMu.Unlock()
+	if current == nil || current == state {
+		t.Fatal("failed handoff did not install a reachable queue state")
+	}
+	current.mu.Lock()
+	remaining := len(current.pendingMessages)
+	current.mu.Unlock()
+	if remaining != 0 {
+		t.Fatal("failed handoff left messages stranded without a notification")
+	}
+}
+
 func TestHandleMessageRecallRemovesQueuedMessageSilently(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

@@ -572,6 +572,7 @@ type interactiveState struct {
 	// recallHandoff keeps the stopped turn's busy lock with its processor until
 	// queued messages have been moved into the replacement state.
 	recallHandoff          bool
+	recallHandoffDone      chan struct{}
 	pending                *pendingPermission
 	pendingUserInput       *pendingUserInput
 	pendingMessages        []queuedMessage // messages queued while session was busy
@@ -770,6 +771,35 @@ func (s *interactiveState) markStopped() {
 		s.stopCh = make(chan struct{})
 	}
 	close(s.stopCh)
+}
+
+// markStoppedForRecall atomically publishes the stop and the queue-handoff
+// contract. Publishing them separately lets a concurrent drop path clear the
+// queue before the preserved-queue owner has been established.
+func (s *interactiveState) markStoppedForRecall() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recallHandoff = true
+	if s.recallHandoffDone == nil {
+		s.recallHandoffDone = make(chan struct{})
+	}
+	if !s.stopped {
+		s.stopped = true
+		if s.stopCh == nil {
+			s.stopCh = make(chan struct{})
+		}
+		close(s.stopCh)
+	}
+}
+
+func (s *interactiveState) finishRecallHandoff() {
+	s.mu.Lock()
+	done := s.recallHandoffDone
+	s.recallHandoffDone = nil
+	s.mu.Unlock()
+	if done != nil {
+		close(done)
+	}
 }
 
 // resolve safely closes the Resolved channel exactly once.
@@ -3514,6 +3544,12 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
+	if hasState && state != nil {
+		state.mu.Lock()
+		state.recallHandoff = false
+		state.recallHandoffDone = nil
+		state.mu.Unlock()
+	}
 	e.interactiveMu.Unlock()
 	if !hasState || state == nil {
 		return
@@ -3523,6 +3559,9 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	// Recall can release an empty handoff queue just after this message's
 	// first TryLock failed. In that case the retry above owns the lock,
 	// but the replacement agent has not started yet.
+	for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+		state.pendingMessages = state.pendingMessages[1:]
+	}
 	if state.agentSession == nil && len(state.pendingMessages) > 0 {
 		next := state.pendingMessages[0]
 		state.pendingMessages = state.pendingMessages[1:]
@@ -4168,6 +4207,11 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	stopTyping = nil // ownership transferred; prevent defer from double-stopping
 
+	if !e.waitForRecallHandoff(state, interactiveKey, session, lockGen) {
+		unlocked = true
+		return
+	}
+
 	// Recalling the active message stops its agent process, but messages queued
 	// after the recalled one are independent user turns and must survive. Move
 	// them into a replacement interactive state and continue with the oldest
@@ -4208,19 +4252,20 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 // after transferring the busy lock to the replacement processor, or releasing
 // it under interactiveMu when both queues are empty.
 func (e *Engine) resumePendingAfterStoppedTurn(state *interactiveState, session *Session, sessions *SessionManager, interactiveKey string, agent Agent, workspaceDir, ccSessionKey string, lockGen uint64) bool {
-	state.mu.Lock()
-	if !state.stopped || !state.recallHandoff {
-		state.mu.Unlock()
-		return false
-	}
-	pending := append([]queuedMessage(nil), state.pendingMessages...)
-	state.pendingMessages = nil
-	state.mu.Unlock()
-
 	// New messages can arrive after the recalled state is detached but before
 	// this goroutine regains control. They live in a placeholder state; append
 	// them after the older preserved queue so FIFO order remains intact.
 	e.interactiveMu.Lock()
+	state.mu.Lock()
+	if !state.stopped || !state.recallHandoff {
+		state.mu.Unlock()
+		e.interactiveMu.Unlock()
+		return false
+	}
+	pending := append([]queuedMessage(nil), state.pendingMessages...)
+	state.pendingMessages = nil
+	state.recallHandoff = false
+	state.mu.Unlock()
 	placeholder := e.interactiveStates[interactiveKey]
 	if placeholder == nil || placeholder == state {
 		placeholder = &interactiveState{eventsNeedResync: true}
@@ -4249,6 +4294,56 @@ func (e *Engine) resumePendingAfterStoppedTurn(state *interactiveState, session 
 	)
 	e.processInteractiveMessageWith(next.platform, nextMessage, session, agent, sessions, interactiveKey, workspaceDir, ccSessionKey, lockGen)
 	return true
+}
+
+// waitForRecallHandoff gives the stop path a bounded chance to mark a live
+// processor's stop before the foreground turn returns. If no processor can
+// perform the handoff, fail visibly instead of leaving messages in a detached
+// state and holding the session lock forever.
+func (e *Engine) waitForRecallHandoff(state *interactiveState, interactiveKey string, session *Session, lockGen uint64) bool {
+	state.mu.Lock()
+	if !state.stopped || !state.recallHandoff {
+		state.mu.Unlock()
+		return true
+	}
+	done := state.recallHandoffDone
+	state.mu.Unlock()
+	if done == nil {
+		return true
+	}
+	timer := time.NewTimer(recalledStopLockWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+	}
+
+	e.interactiveMu.Lock()
+	current := e.interactiveStates[interactiveKey]
+	if current == nil || current == state {
+		current = &interactiveState{eventsNeedResync: true}
+		e.interactiveStates[interactiveKey] = current
+	}
+	state.mu.Lock()
+	if !state.recallHandoff {
+		state.mu.Unlock()
+		e.interactiveMu.Unlock()
+		return true
+	}
+	state.recallHandoff = false
+	state.recallHandoffDone = nil
+	pending := append([]queuedMessage(nil), state.pendingMessages...)
+	state.pendingMessages = nil
+	current.mu.Lock()
+	current.pendingMessages = append(current.pendingMessages, pending...)
+	current.mu.Unlock()
+	state.mu.Unlock()
+	e.interactiveMu.Unlock()
+	session.ForceUnlock()
+	e.notifyDroppedQueuedMessages(current, fmt.Errorf("agent session did not stop after message recall; queued messages were not processed"))
+	slog.Error("recall queue handoff timed out", "session", interactiveKey, "queued", len(pending))
+	return false
 }
 
 func queuedMessageAsMessage(next queuedMessage, ccSessionKey, interactiveKey string) *Message {
@@ -7077,7 +7172,7 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 // messages can no longer be delivered to the agent.
 func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason error) {
 	state.mu.Lock()
-	if state.stopped && state.recallHandoff {
+	if state.recallHandoff {
 		state.mu.Unlock()
 		return
 	}
@@ -11133,11 +11228,10 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 
 normalCleanup:
 	if !notifyQueued {
-		state.mu.Lock()
-		state.recallHandoff = true
-		state.mu.Unlock()
+		state.markStoppedForRecall()
+	} else {
+		state.markStopped()
 	}
-	state.markStopped()
 	if e.interactiveStates[sessionKey] == state {
 		delete(e.interactiveStates, sessionKey)
 	}
@@ -11162,6 +11256,9 @@ normalCleanup:
 		Event:      HookEventSessionEnded,
 		SessionKey: sessionKey,
 	})
+	if !notifyQueued {
+		state.finishRecallHandoff()
+	}
 
 	return true
 }
