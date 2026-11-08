@@ -145,11 +145,19 @@ func TestRetireBackgroundSession_BoundsCompletedHistory(t *testing.T) {
 		t.Fatalf("retained sessions = %d, want %d", got, maxRetainedBackgroundSessions)
 	}
 	live := sm.NewBackgroundSession("test:user", "cron-live")
-	if _, locked := live.TryLock(); !locked {
+	gen, locked := live.TryLock()
+	if !locked {
 		t.Fatal("could not lock live session")
 	}
 	if sm.RetireBackgroundSession(live.ID) {
 		t.Fatal("busy background session must not be retired")
+	}
+	live.Unlock(gen)
+	if _, err := sm.SwitchSession("test:user", live.ID); err != nil {
+		t.Fatal(err)
+	}
+	if sm.RetireBackgroundSession(live.ID) {
+		t.Fatal("a background session selected for an active chat must not be retired")
 	}
 }
 
