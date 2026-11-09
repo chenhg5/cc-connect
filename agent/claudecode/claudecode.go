@@ -111,6 +111,9 @@ var claudeProviderManagedEnvVars = map[string]struct{}{
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                   {},
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": {},
 	"ANTHROPIC_DEFAULT_FABLE_MODEL":                        {},
+	"ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION":            {},
+	"ANTHROPIC_DEFAULT_FABLE_MODEL_NAME":                   {},
+	"ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES": {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL":                         {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":             {},
 	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                    {},
@@ -468,26 +471,35 @@ func (a *Agent) resolveTierModel(alias string) string {
 }
 
 // effectiveEnvValue returns the value the child process will see for key.
-// Later sources win, matching MergeEnv's precedence at spawn time.
+// Later sources win, matching MergeEnv's precedence at spawn time. An explicit
+// empty value at a higher-priority source clears the pin: the child receives
+// KEY=, so the search stops there instead of falling through to a stale lower
+// source.
 func (a *Agent) effectiveEnvValue(key string) string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	for i := len(a.sessionEnv) - 1; i >= 0; i-- {
-		if k, v, ok := strings.Cut(a.sessionEnv[i], "="); ok && k == key && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
+	if v, ok := lastEnvValue(a.sessionEnv, key); ok {
+		return v
 	}
 	if a.activeIdx >= 0 && a.activeIdx < len(a.providers) {
-		if v := strings.TrimSpace(a.providers[a.activeIdx].Env[key]); v != "" {
-			return v
-		}
-	}
-	for i := len(a.configEnv) - 1; i >= 0; i-- {
-		if k, v, ok := strings.Cut(a.configEnv[i], "="); ok && k == key && strings.TrimSpace(v) != "" {
+		if v, ok := a.providers[a.activeIdx].Env[key]; ok {
 			return strings.TrimSpace(v)
 		}
 	}
-	return strings.TrimSpace(os.Getenv(key))
+	if v, ok := lastEnvValue(a.configEnv, key); ok {
+		return v
+	}
+	v, _ := os.LookupEnv(key)
+	return strings.TrimSpace(v)
+}
+
+func lastEnvValue(env []string, key string) (string, bool) {
+	for i := len(env) - 1; i >= 0; i-- {
+		if k, v, ok := strings.Cut(env[i], "="); ok && k == key {
+			return strings.TrimSpace(v), true
+		}
+	}
+	return "", false
 }
 
 // fallbackModels is the picker list used when neither configured providers nor

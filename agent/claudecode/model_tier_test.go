@@ -202,3 +202,15 @@ func TestEffectiveEnvValuePrecedence(t *testing.T) {
 		t.Fatalf("session env should win, got %q", got)
 	}
 }
+
+// TestEffectiveEnvValueExplicitEmptyClearsPin covers the edge case where a
+// higher-priority source deliberately clears a pin: the child receives KEY=,
+// so the picker must stop there instead of showing a stale lower source.
+func TestEffectiveEnvValueExplicitEmptyClearsPin(t *testing.T) {
+	const key = "ANTHROPIC_DEFAULT_SONNET_MODEL"
+	t.Setenv(key, "process-pin")
+	a := &Agent{configEnv: []string{key + "="}}
+	if got := a.effectiveEnvValue(key); got != "" {
+		t.Fatalf("explicit empty config value should clear the pin, got %q", got)
+	}
+}

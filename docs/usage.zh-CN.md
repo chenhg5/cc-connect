@@ -270,7 +270,7 @@ alias = "spark"
 /model switch <alias>      按别名切换模型
 /model switch <name>       按完整名称切换模型
 /model <alias>             兼容旧写法，仍然可用
-/model subagent <序号>      设置子智能体模型（1 = 跟随主模型）
+/model subagent <序号>     设置子智能体模型（1 = 跟随主模型）
 ```
 
 配置了 `models` 时，`/model` 直接显示该列表，不发起 API 请求。未配置时，自动从 Provider API 获取或使用内置备选列表。

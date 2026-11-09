@@ -272,7 +272,7 @@ alias = "spark"
 /model switch <alias>      Switch to the model matching the alias
 /model switch <name>       Switch to the model by its full name
 /model <alias>             Legacy syntax, still supported
-/model subagent <n>        Subagent model (1 = inherit main)
+/model subagent <n>       Subagent model (1 = inherit main)
 ```
 
 When `models` is configured, `/model` shows exactly that list without making an API round-trip. When omitted, models are fetched from the provider API or fall back to a built-in list.
