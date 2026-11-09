@@ -1043,7 +1043,9 @@ exactly one engine is configured. `session_name` is optional.
 
 `work_dir` is optional and is accepted only for a `multi-workspace` project.
 It must be an existing directory inside that project's `base_dir`; a successful
-request also persists the conversation-to-workspace binding. If the Agent
+request also persists the conversation-to-workspace binding using the platform's
+channel scope. For Feishu with `thread_isolation` enabled, use the topic session
+key `feishu:<chatID>:root:<rootID>` to bind that topic's workspace. If the Agent
 implements native session validation, cc-connect rejects IDs that do not
 belong to the selected project before changing the binding.
 

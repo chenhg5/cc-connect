@@ -387,7 +387,7 @@ func resolveBindAgentTarget(engine *Engine, req BindAgentSessionRequest) (bindAg
 		return bindAgentTarget{}, &bindAgentError{http.StatusUnprocessableEntity, "work_dir does not exist or is not a directory"}
 	}
 
-	channelKey := extractWorkspaceChannelKey(req.SessionKey)
+	channelKey := engine.extractWorkspaceChannelKey(req.SessionKey)
 	if channelKey == "" {
 		return bindAgentTarget{}, &bindAgentError{http.StatusBadRequest, "cannot derive workspace channel from session_key"}
 	}

@@ -955,7 +955,9 @@ curl --unix-socket ~/.cc-connect/run/api.sock \
 `session_name` 为可选字段。
 
 `work_dir` 为可选字段，仅适用于 `multi-workspace` 项目。目录必须已存在
-且位于项目 `base_dir` 内；请求成功后还会持久化会话到工作区的绑定。
+且位于项目 `base_dir` 内。请求成功后，按平台提供的频道作用域持久化
+会话到工作区的绑定。飞书开启 `thread_isolation` 时，使用话题会话键
+`feishu:<chatID>:root:<rootID>` 绑定该话题的工作区。
 如果 Agent 实现了原生会话校验，cc-connect 会在修改绑定前拒绝不属于
 所选项目的 session ID。
 
