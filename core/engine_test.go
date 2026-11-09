@@ -16815,20 +16815,46 @@ func TestAgentSystemPrompt_DocumentsAudioVideoFlags(t *testing.T) {
 // recordingStreamCard captures the content passed to Finalize so tests can
 // assert what was rendered into the card.
 type recordingStreamCard struct {
-	mu      sync.Mutex
-	final   bool
-	content string
+	mu               sync.Mutex
+	final            bool
+	content          string
+	failed           bool // when true, Failed() reports the card as terminal (fallback path)
+	updates          []string
+	failAfterUpdates int
+	// finalizeErr is returned by Finalize, which then also marks the card failed.
+	finalizeErr error
 }
 
-func (c *recordingStreamCard) Update(_ context.Context, _ string) error { return nil }
-func (c *recordingStreamCard) Finalize(_ context.Context, content string) error {
+func (c *recordingStreamCard) Update(_ context.Context, content string) error {
 	c.mu.Lock()
-	c.final = true
-	c.content = content
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	c.updates = append(c.updates, content)
+	if c.failAfterUpdates > 0 && len(c.updates) >= c.failAfterUpdates {
+		c.failed = true
+	}
 	return nil
 }
-func (c *recordingStreamCard) Failed() bool { return false }
+func (c *recordingStreamCard) Finalize(_ context.Context, content string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.final = true
+	c.content = content
+	if c.finalizeErr != nil {
+		c.failed = true
+		return c.finalizeErr
+	}
+	return nil
+}
+func (c *recordingStreamCard) updateContents() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.updates...)
+}
+func (c *recordingStreamCard) Failed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.failed
+}
 func (c *recordingStreamCard) finalized() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -16848,6 +16874,17 @@ type recordingStreamCardPlatform struct {
 }
 
 func (p *recordingStreamCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
+	return p.card, nil
+}
+
+// previewStreamCardPlatform is a streaming-card platform that can also edit
+// messages, so the stream preview is available alongside the card.
+type previewStreamCardPlatform struct {
+	mockUpdaterPlatform
+	card *recordingStreamCard
+}
+
+func (p *previewStreamCardPlatform) CreateStreamingCard(_ context.Context, _ any) (StreamingCard, error) {
 	return p.card, nil
 }
 
@@ -16975,5 +17012,446 @@ func TestCmdCurrent_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
 	}
 	if got := strings.Count(p.sent[0], "msgs"); got != len(nativeSessions) {
 		t.Fatalf("/list item count = %d, want %d\n%s", got, len(nativeSessions), p.sent[0])
+	}
+}
+
+// hiddenProgressTurn configures runHiddenProgressStreamCardTurn.
+type hiddenProgressTurn struct {
+	mode string // display mode; compact when empty
+	// closeChannel closes the event channel after the events, with no EventResult.
+	closeChannel bool
+}
+
+// runHiddenProgressStreamCardTurn drives one turn on p with tool and thinking
+// progress messages hidden. Permission requests are approved as soon as they
+// are pending. Returns the session so tests can read its history.
+func runHiddenProgressStreamCardTurn(t *testing.T, p Platform, opts hiddenProgressTurn, events []Event) *Session {
+	t.Helper()
+	mode := opts.mode
+	if mode == "" {
+		mode = "compact"
+	}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(DisplayCfg{Mode: mode, ThinkingMessages: false, ToolMessages: false})
+	e.SetReplyFooterEnabled(false)
+
+	sessionKey := p.Name() + ":streamcard"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	sess := newControllableSession("s-streamcard")
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx-streamcard"}
+	// On channel close the engine cleans up a registered state, which closes the
+	// event channel a second time, so the state stays unregistered then.
+	if !opts.closeChannel {
+		e.interactiveStates[sessionKey] = state
+	}
+
+	go func() {
+		for _, ev := range events {
+			sess.events <- ev
+		}
+		if opts.closeChannel {
+			close(sess.events)
+		}
+	}()
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			state.mu.Lock()
+			pending := state.pending
+			state.mu.Unlock()
+			if pending != nil {
+				pending.resolve()
+			}
+		}
+	}()
+
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-streamcard", time.Now(), nil, nil, state.replyCtx, 0)
+	return session
+}
+
+func newCardPlatform(card *recordingStreamCard) *recordingStreamCardPlatform {
+	return &recordingStreamCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "dingtalk"}, card: card}
+}
+
+func newPreviewCardPlatform(card *recordingStreamCard) *previewStreamCardPlatform {
+	return &previewStreamCardPlatform{mockUpdaterPlatform: mockUpdaterPlatform{stubPlatformEngine: stubPlatformEngine{n: "slack"}}, card: card}
+}
+
+func lastAssistantHistory(t *testing.T, session *Session) string {
+	t.Helper()
+	history := session.GetHistory(0)
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "assistant" {
+			return history[i].Content
+		}
+	}
+	t.Fatalf("no assistant history entry: %#v", history)
+	return ""
+}
+
+func countContaining(msgs []string, s string) int {
+	n := 0
+	for _, m := range msgs {
+		n += strings.Count(m, s)
+	}
+	return n
+}
+
+var leadInToolAnswer = []Event{
+	{Type: EventText, Content: "Lead-in."},
+	{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+	{Type: EventText, Content: "Final answer."},
+	{Type: EventResult, Content: "Final answer.", Done: true},
+}
+
+// The card already renders the lead-in, so it must not also go out as a
+// standalone message at the tool boundary.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_NoDuplicateAtToolBoundary(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, leadInToolAnswer)
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no standalone messages (card owns the text), got %d: %#v", len(sent), sent)
+	}
+	if !card.finalized() {
+		t.Fatalf("expected the streaming card to be finalized")
+	}
+}
+
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_NoDuplicateAtThinkingBoundary(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	session := runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventThinking, Content: "pondering"},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Final answer."},
+		{Type: EventResult, Content: "Final answer.", Done: true},
+	})
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no standalone messages at the thinking boundary, got %d: %#v", len(sent), sent)
+	}
+	if got, want := card.finalContent(), "Lead-in.\n\nFinal answer."; got != want {
+		t.Fatalf("finalized card = %q, want %q", got, want)
+	}
+	if got, want := lastAssistantHistory(t, session), "Lead-in.\n\nFinal answer."; got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+}
+
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_SplitLeadIn(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Let me create something."},
+		{Type: EventText, Content: "I'll generate the image."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "node gen.js"},
+		{Type: EventText, Content: "Done."},
+		{Type: EventResult, Content: "Done.", Done: true},
+	})
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no standalone messages for a split lead-in, got %d: %#v", len(sent), sent)
+	}
+	if got, want := card.finalContent(), "Let me create something.I'll generate the image.\n\nDone."; got != want {
+		t.Fatalf("finalized card = %q, want %q", got, want)
+	}
+}
+
+// A card that has already failed is no usable surface, so the pre-tool segment
+// goes out as a plain message.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_FallbackWhenCardFailed(t *testing.T) {
+	card := &recordingStreamCard{failed: true}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, leadInToolAnswer)
+	sent := p.getSent()
+	if got := countContaining(sent, "Lead-in."); got != 1 {
+		t.Fatalf("lead-in sent %d times, want 1: %#v", got, sent)
+	}
+	if got := countContaining(sent, "Final answer."); got != 1 {
+		t.Fatalf("answer sent %d times, want 1: %#v", got, sent)
+	}
+}
+
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_FinalizeKeepsLeadIn(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	session := runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, leadInToolAnswer)
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no standalone messages, got %d: %#v", len(sent), sent)
+	}
+	if got, want := card.finalContent(), "Lead-in.\n\nFinal answer."; got != want {
+		t.Fatalf("finalized card = %q, want %q", got, want)
+	}
+	if got, want := lastAssistantHistory(t, session), "Lead-in.\n\nFinal answer."; got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+}
+
+// On a platform that can also edit messages the stream preview is available,
+// but while the card is healthy the card alone renders the turn.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_PreviewPlatformKeepsLeadIn(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newPreviewCardPlatform(card)
+	session := runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventThinking, Content: "pondering"},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Middle."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"},
+		{Type: EventText, Content: "Final answer."},
+		{Type: EventResult, Content: "Final answer.", Done: true},
+	})
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no standalone messages, got %d: %#v", len(sent), sent)
+	}
+	if msgs := p.getMessages(); len(msgs) != 0 {
+		t.Fatalf("expected no preview messages, got %#v", msgs)
+	}
+	want := "Lead-in.\n\nMiddle.\n\nFinal answer."
+	if got := card.finalContent(); got != want {
+		t.Fatalf("finalized card = %q, want %q", got, want)
+	}
+	if got := lastAssistantHistory(t, session); got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+}
+
+// Boundaries with no text between them add no further separators, and a
+// boundary at the end of the turn leaves no trailing one.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_OneSeparatorAcrossConsecutiveBoundaries(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	events := []Event{{Type: EventText, Content: "Lead-in."}}
+	for i := 0; i < 3; i++ {
+		events = append(events,
+			Event{Type: EventThinking, Content: "pondering"},
+			Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		)
+	}
+	events = append(events,
+		Event{Type: EventText, Content: "Final answer."},
+		Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "true"},
+		Event{Type: EventResult, Content: "Final answer.", Done: true},
+	)
+	session := runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, events)
+	want := "Lead-in.\n\nFinal answer."
+	if got := card.finalContent(); got != want {
+		t.Fatalf("finalized card = %q, want %q", got, want)
+	}
+	if got := lastAssistantHistory(t, session); got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+}
+
+// A bare NO_REPLY after a tool call never reaches the card; the card finishes
+// with the lead-in alone.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_NoReplyAfterToolKeepsLeadIn(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "NO_REPLY"},
+		{Type: EventResult, Content: "NO_REPLY", Done: true},
+	})
+	for _, u := range card.updateContents() {
+		if strings.Contains(u, "NO_REPLY") {
+			t.Fatalf("card update leaked NO_REPLY: %q", u)
+		}
+	}
+	if got := strings.TrimSpace(card.finalContent()); got != "Lead-in." {
+		t.Fatalf("finalized card = %q, want the lead-in only", card.finalContent())
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no standalone messages, got %#v", sent)
+	}
+}
+
+// A permission prompt is the only standalone message; the lead-in stays in the
+// card and the history.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_PermissionPromptKeepsLeadIn(t *testing.T) {
+	type sendRecorder interface {
+		Platform
+		getSent() []string
+	}
+	cases := []struct {
+		name     string
+		platform func(*recordingStreamCard) sendRecorder
+	}{
+		{"card only", func(c *recordingStreamCard) sendRecorder { return newCardPlatform(c) }},
+		{"card with preview", func(c *recordingStreamCard) sendRecorder { return newPreviewCardPlatform(c) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			card := &recordingStreamCard{}
+			p := tc.platform(card)
+			session := runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+				{Type: EventText, Content: "Lead-in."},
+				{Type: EventToolUse, ToolName: "Bash", ToolInput: "rm -rf build"},
+				{Type: EventPermissionRequest, RequestID: "req-1", ToolName: "Bash", ToolInput: "rm -rf build"},
+				{Type: EventText, Content: "Final answer."},
+				{Type: EventResult, Content: "Final answer.", Done: true},
+			})
+			sent := p.getSent()
+			if len(sent) != 1 {
+				t.Fatalf("expected only the permission prompt, got %#v", sent)
+			}
+			if strings.Contains(sent[0], "Lead-in.") {
+				t.Fatalf("permission prompt carries the lead-in: %q", sent[0])
+			}
+			want := "Lead-in.\n\nFinal answer."
+			if got := card.finalContent(); got != want {
+				t.Fatalf("finalized card = %q, want %q", got, want)
+			}
+			if got := lastAssistantHistory(t, session); got != want {
+				t.Fatalf("history = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A Stop-hook rejection drops the rejected draft but keeps the text the card
+// holds from earlier segments.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_HookRejectionKeepsEarlierSegments(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	session := runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Draft answer."},
+		{Type: EventHookRejected},
+		{Type: EventText, Content: "Rewritten answer."},
+		{Type: EventResult, Content: "Rewritten answer.", Done: true},
+	})
+	want := "Lead-in.\n\nRewritten answer."
+	if got := card.finalContent(); got != want {
+		t.Fatalf("finalized card = %q, want %q", got, want)
+	}
+	if got := lastAssistantHistory(t, session); got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no standalone messages, got %#v", sent)
+	}
+}
+
+// Without a card, a Stop-hook rejection after a tool boundary delivers the
+// rewritten answer once and never the draft.
+func TestProcessInteractiveEvents_HiddenProgressNoCard_HookRejectionAfterToolBoundary(t *testing.T) {
+	p := &mockUpdaterPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Draft answer."},
+		{Type: EventHookRejected},
+		{Type: EventText, Content: "Rewritten answer."},
+		{Type: EventResult, Content: "Rewritten answer.", Done: true},
+	})
+	all := append(p.getSent(), p.getMessages()...)
+	if got := countContaining(all, "Draft answer."); got != 0 {
+		t.Fatalf("draft delivered: %#v", all)
+	}
+	if got := countContaining(p.getSent(), "Rewritten answer."); got != 1 {
+		t.Fatalf("rewritten answer sent %d times, want 1: %#v", got, p.getSent())
+	}
+	if got := countContaining(p.getSent(), "Lead-in."); got != 0 {
+		t.Fatalf("lead-in resent as a plain message: %#v", p.getSent())
+	}
+}
+
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_QuietMode(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{mode: "quiet"}, leadInToolAnswer)
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no standalone messages, got %#v", sent)
+	}
+	final := card.finalContent()
+	if !strings.Contains(final, "Lead-in.") || !strings.Contains(final, "Final answer.") {
+		t.Fatalf("finalized card = %q, want lead-in and answer", final)
+	}
+}
+
+// The card fails while streaming the answer, after the boundary: the final
+// plain reply carries the lead-in once, together with the answer.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_CardFailsAfterBoundary(t *testing.T) {
+	card := &recordingStreamCard{failAfterUpdates: 2}
+	p := newCardPlatform(card)
+	session := runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Final "},
+		{Type: EventText, Content: "answer."},
+		{Type: EventResult, Content: "Final answer.", Done: true},
+	})
+	sent := p.getSent()
+	if got := countContaining(sent, "Lead-in."); got != 1 {
+		t.Fatalf("lead-in sent %d times, want 1: %#v", got, sent)
+	}
+	if got := countContaining(sent, "Final answer."); got != 1 {
+		t.Fatalf("answer sent %d times, want 1: %#v", got, sent)
+	}
+	if got, want := lastAssistantHistory(t, session), "Lead-in.\n\nFinal answer."; got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+}
+
+// The card fails after the first boundary and a later boundary follows: that
+// boundary flushes the lead-in once and the final reply does not repeat it.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_CardFailsBeforeLaterBoundary(t *testing.T) {
+	card := &recordingStreamCard{failAfterUpdates: 2}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Middle."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"},
+		{Type: EventText, Content: "Final answer."},
+		{Type: EventResult, Content: "Final answer.", Done: true},
+	})
+	sent := p.getSent()
+	for _, s := range []string{"Lead-in.", "Middle.", "Final answer."} {
+		if got := countContaining(sent, s); got != 1 {
+			t.Fatalf("%q sent %d times, want 1: %#v", s, got, sent)
+		}
+	}
+}
+
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_FinalizeErrorFallsBackOnce(t *testing.T) {
+	card := &recordingStreamCard{finalizeErr: errors.New("card closed")}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, leadInToolAnswer)
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != "Lead-in.\n\nFinal answer." {
+		t.Fatalf("sent = %#v, want one fallback with lead-in and answer", sent)
+	}
+}
+
+// The event channel closes without a result: history keeps lead-in and answer
+// with no trailing separator, and the plain send carries the lead-in once.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_ChannelCloseDeliversLeadInOnce(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	session := runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{closeChannel: true}, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Final answer."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "true"},
+	})
+	if got, want := lastAssistantHistory(t, session), "Lead-in.\n\nFinal answer."; got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+	sent := p.getSent()
+	if got := countContaining(sent, "Lead-in."); got != 1 {
+		t.Fatalf("lead-in sent %d times, want 1: %#v", got, sent)
+	}
+	if got := countContaining(sent, "Final answer."); got != 1 {
+		t.Fatalf("answer sent %d times, want 1: %#v", got, sent)
 	}
 }
