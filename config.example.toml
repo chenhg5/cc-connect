@@ -1711,6 +1711,24 @@ app_secret = "your-feishu-app-secret"
 # - "full-auto": auto-approve everything with workspace sandbox / 全部自动通过，工作区沙箱保护
 # - "yolo":      bypass all approvals and sandbox (dangerous) / 跳过所有审批和沙箱（危险）
 #
+# Optional: isolated Codex home / 可选：独立的 Codex home
+# Exported as CODEX_HOME for this project, so it does not share threads and
+# writer locks with the Codex desktop app. The path must be absolute and must
+# already exist; it is not ~-expanded and cc-connect does not create it for a
+# subscription login. Create it and copy the login files before the first
+# message, then set the absolute path:
+#   mkdir -p /path/to/codex-home
+#   cp ~/.codex/auth.json ~/.codex/config.toml /path/to/codex-home/
+# / 作为本项目的 CODEX_HOME 导出，避免与 Codex 桌面应用共享线程和写锁。路径必须
+# 是已存在的绝对路径，不会展开 ~，订阅登录时 cc-connect 也不会创建它。请先创建
+# 目录并复制登录文件，再填写绝对路径：
+#   mkdir -p /path/to/codex-home
+#   cp ~/.codex/auth.json ~/.codex/config.toml /path/to/codex-home/
+# Trade-off: sessions in this home are not visible in the Codex desktop app,
+# and its threads cannot be resumed here.
+# 取舍：该 home 中的会话不会出现在 Codex 桌面应用，桌面应用的会话也无法在这里恢复。
+# codex_home = "/path/to/codex-home"
+#
 # Optional: specify a model / 可选：指定模型
 # model = "gpt-6.1-sol"
 #
