@@ -263,3 +263,74 @@ func TestPersistWorkspaceSubagentOverride(t *testing.T) {
 		t.Errorf("workspace override after clear = %q, want empty", got)
 	}
 }
+
+func TestSubagentChoicesWarnsUnavailableCurrent(t *testing.T) {
+	e := NewEngine("test", &stubSubagentAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	a := &stubSubagentAgent{subagent: "gone"}
+
+	_, text := e.subagentChoices(a, a.AvailableModels(context.Background()))
+	if !strings.Contains(text, "not in this provider's model list") {
+		t.Errorf("text does not warn about the unavailable current model:\n%s", text)
+	}
+}
+
+func TestRenderModelCardSubagentShowsDescAndCurrent(t *testing.T) {
+	e := NewEngine("test", &stubSubagentAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	a := &stubSubagentAgent{subagent: "gpt-4.1-mini"}
+	e.agent = a
+
+	card := e.renderModelCard("")
+	sel, found, markdown := subagentCardParts(card, e.i18n.T(MsgSubagentSelectPlaceholder))
+	if !found {
+		t.Fatal("subagent select not found")
+	}
+	var labels []string
+	for _, o := range sel.Options {
+		labels = append(labels, o.Text)
+	}
+	if !strings.Contains(strings.Join(labels, "|"), "gpt-4.1-mini — Fast") {
+		t.Errorf("subagent options = %v, want the Desc for gpt-4.1-mini", labels)
+	}
+	if !strings.Contains(strings.Join(markdown, "\n"), "Subagent model: gpt-4.1-mini") {
+		t.Errorf("markdown = %v, want the current subagent model", markdown)
+	}
+	if sel.InitValue != "act:/subagent switch 3" {
+		t.Errorf("init value = %q, want the selected model's option", sel.InitValue)
+	}
+}
+
+func TestRenderModelCardSubagentUnavailable(t *testing.T) {
+	e := NewEngine("test", &stubSubagentAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	a := &stubSubagentAgent{subagent: "gone"}
+	e.agent = a
+
+	card := e.renderModelCard("")
+	sel, found, markdown := subagentCardParts(card, e.i18n.T(MsgSubagentSelectPlaceholder))
+	if !found {
+		t.Fatal("subagent select not found")
+	}
+	if !strings.Contains(strings.Join(markdown, "\n"), "not in this provider's model list") {
+		t.Errorf("markdown = %v, want an unavailable-model warning", markdown)
+	}
+	if sel.InitValue != "" {
+		t.Errorf("init value = %q, want empty (no fake selection)", sel.InitValue)
+	}
+}
+
+func subagentCardParts(card *Card, placeholder string) (CardSelect, bool, []string) {
+	var sel CardSelect
+	found := false
+	var markdown []string
+	for _, el := range card.Elements {
+		switch v := el.(type) {
+		case CardSelect:
+			if v.Placeholder == placeholder {
+				sel = v
+				found = true
+			}
+		case CardMarkdown:
+			markdown = append(markdown, v.Content)
+		}
+	}
+	return sel, found, markdown
+}

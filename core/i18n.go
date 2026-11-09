@@ -387,6 +387,8 @@ const (
 	MsgMainModelLabel            MsgKey = "main_model_label"
 	MsgSubagentSelectPlaceholder MsgKey = "subagent_select_placeholder"
 	MsgSubagentInherit           MsgKey = "subagent_inherit"
+	MsgSubagentCurrent           MsgKey = "subagent_current"
+	MsgSubagentUnavailable       MsgKey = "subagent_unavailable"
 	MsgModelSelectPlaceholder    MsgKey = "model_select_placeholder"
 	MsgModeSelectPlaceholder     MsgKey = "mode_select_placeholder"
 	MsgProviderSelectPlaceholder MsgKey = "provider_select_placeholder"
@@ -2608,6 +2610,17 @@ var messages = map[MsgKey]map[Language]string{
 	MsgSubagentInherit: {
 		LangEnglish: "Inherit main model", LangChinese: "跟随主模型", LangTraditionalChinese: "跟隨主模型",
 		LangJapanese: "メインモデルを継承", LangSpanish: "Heredar modelo principal",
+	},
+	MsgSubagentCurrent: {
+		LangEnglish: "Subagent model: %s", LangChinese: "子智能体模型: %s", LangTraditionalChinese: "子智能體模型: %s",
+		LangJapanese: "サブエージェントモデル: %s", LangSpanish: "Modelo del subagente: %s",
+	},
+	MsgSubagentUnavailable: {
+		LangEnglish:            "⚠️ Current subagent model `%s` is not in this provider's model list.",
+		LangChinese:            "⚠️ 当前子智能体模型 `%s` 不在该 provider 的模型列表中。",
+		LangTraditionalChinese: "⚠️ 當前子智能體模型 `%s` 不在該 provider 的模型列表中。",
+		LangJapanese:           "⚠️ 現在のサブエージェントモデル `%s` はこの provider のモデル一覧にありません。",
+		LangSpanish:            "⚠️ El modelo de subagente actual `%s` no está en la lista de este proveedor.",
 	},
 	MsgModelSelectPlaceholder: {
 		LangEnglish: "Select model", LangChinese: "选择模型", LangTraditionalChinese: "選擇模型",

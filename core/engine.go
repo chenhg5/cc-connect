@@ -10594,7 +10594,19 @@ func (e *Engine) subagentChoices(sub SubagentModelSwitcher, models []ModelOption
 	if len(row) > 0 {
 		buttons = append(buttons, row)
 	}
+	if cur != "" && !modelInList(models, cur) {
+		fmt.Fprintf(&sb, "\n%s\n", e.i18n.Tf(MsgSubagentUnavailable, cur))
+	}
 	return buttons, sb.String()
+}
+
+func modelInList(models []ModelOption, name string) bool {
+	for _, m := range models {
+		if m.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // cmdSubagent handles "/model subagent [<n>|inherit]" on platforms without a
@@ -14057,16 +14069,29 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 		}}
 		cur := sub.GetSubagentModel()
 		subInit := subOpts[0].Value
+		curInList := cur == ""
 		for i, m := range models {
 			label := m.Name
 			if m.Alias != "" {
 				label = m.Alias + " - " + m.Name
+			} else if m.Desc != "" {
+				label += " — " + m.Desc
 			}
 			v := fmt.Sprintf("act:/subagent switch %d", i+2)
 			subOpts = append(subOpts, CardSelectOption{Text: label, Value: v})
 			if m.Name == cur {
 				subInit = v
+				curInList = true
 			}
+		}
+		curLabel := cur
+		if cur == "" {
+			curLabel = e.i18n.T(MsgSubagentInherit)
+		}
+		cb = cb.Markdown(e.i18n.Tf(MsgSubagentCurrent, curLabel))
+		if !curInList {
+			subInit = ""
+			cb = cb.Markdown(e.i18n.Tf(MsgSubagentUnavailable, cur))
 		}
 		cb = cb.Markdown("**"+e.i18n.T(MsgSubagentSelectPlaceholder)+"**").
 			Select(e.i18n.T(MsgSubagentSelectPlaceholder), subOpts, subInit)
