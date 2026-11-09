@@ -95,6 +95,7 @@ func (ls *lookupServer) platform(handler core.MessageHandler) *Platform {
 		appSecret:    appSecret,
 		botOpenID:    "ou_bot",
 		dedup:        &core.MessageDedup{},
+		askq:         newAskqRegistry(),
 		client: lark.NewClient(appID, appSecret,
 			lark.WithOpenBaseUrl(ls.srv.URL),
 			lark.WithHttpClient(ls.srv.Client()),
@@ -224,6 +225,13 @@ func TestOnCardAction_NameLookupDoesNotBlockCallback(t *testing.T) {
 			ls := newLookupServer(t, lookupHang, lookupHang)
 			got := make(chan *core.Message, 4)
 			p := ls.platform(func(_ core.Platform, msg *core.Message) { got <- msg })
+			// An ask-question click only answers the question pending in its
+			// session; register one so the click is forwarded like the other
+			// actions and the name lookups on its way are what this test
+			// measures.
+			if strings.HasPrefix(action, "askq:") {
+				p.askq.mint("feishu:oc_test_chat:ou_alice", "oc_test_chat", 0, "Pick one", "", "expired", "too-long")
+			}
 
 			returned := make(chan error, 1)
 			go func() {
