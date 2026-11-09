@@ -273,6 +273,7 @@ alias = "spark"
 /model              List available models (format: alias - model)
 /model switch <alias>      Switch to the model matching the alias
 /model switch <name>       Switch to the model by its full name
+/model subagent <n|inherit>  Model used by Claude Code subagents (1 = inherit main model)
 /model <alias>             Legacy syntax, still supported
 ```
 
