@@ -10576,7 +10576,7 @@ func (e *Engine) subagentChoices(sub SubagentModelSwitcher, models []ModelOption
 			label = "▶ " + label
 		}
 		fmt.Fprintf(&sb, "%s%d. %s\n", marker, i+2, m.Name)
-		row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model subagent switch %d", i+1)})
+		row = append(row, ButtonOption{Text: label, Data: fmt.Sprintf("cmd:/model subagent %d", i+2)})
 		if len(row) >= 3 {
 			buttons = append(buttons, row)
 			row = nil
@@ -10604,9 +10604,9 @@ func (e *Engine) cmdSubagent(p Platform, msg *Message, args []string, agent Agen
 
 	fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
 	defer cancel()
-	models := switcher.AvailableModels(fetchCtx)
 
 	if len(args) == 0 {
+		models := switcher.AvailableModels(fetchCtx)
 		buttons, text := e.subagentChoices(sub, models)
 		e.replyWithButtons(p, msg.ReplyCtx, text, buttons)
 		return
@@ -10619,13 +10619,20 @@ func (e *Engine) cmdSubagent(p Platform, msg *Message, args []string, agent Agen
 		return
 	}
 
+	models := switcher.AvailableModels(fetchCtx)
 	n, err := strconv.Atoi(strings.TrimSpace(args[0]))
-	if err != nil || n < 1 || n > len(models) {
+	if err != nil || n < 1 || n > len(models)+1 {
 		buttons, text := e.subagentChoices(sub, models)
 		e.replyWithButtons(p, msg.ReplyCtx, text, buttons)
 		return
 	}
-	target := models[n-1].Name
+	if n == 1 {
+		sub.SetSubagentModel("")
+		e.resetSessionForEnvChange(msg.SessionKey)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSubagentInherit))
+		return
+	}
+	target := models[n-2].Name
 	sub.SetSubagentModel(target)
 	e.resetSessionForEnvChange(msg.SessionKey)
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgModelChanged), target))
@@ -13068,15 +13075,11 @@ func (e *Engine) handleSubagentCardAction(args, sessionKey string) *Card {
 	}
 
 	fields := strings.Fields(args)
-	if len(fields) != 2 {
-		return e.renderModelCard(sessionKey)
-	}
-
 	var target string
-	switch fields[0] {
-	case "inherit":
+	switch {
+	case len(fields) == 1 && strings.EqualFold(fields[0], "inherit"):
 		target = ""
-	case "switch":
+	case len(fields) == 2 && fields[0] == "switch":
 		n, err := strconv.Atoi(fields[1])
 		if err != nil {
 			return e.renderModelCard(sessionKey)
@@ -13088,10 +13091,14 @@ func (e *Engine) handleSubagentCardAction(args, sessionKey string) *Card {
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
 		models := switcher.AvailableModels(fetchCtx)
 		cancel()
-		if n < 1 || n > len(models) {
+		if n < 1 || n > len(models)+1 {
 			return e.renderModelCard(sessionKey)
 		}
-		target = models[n-1].Name
+		if n == 1 {
+			target = ""
+		} else {
+			target = models[n-2].Name
+		}
 	default:
 		return e.renderModelCard(sessionKey)
 	}
@@ -13998,7 +14005,7 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 			if m.Alias != "" {
 				label = m.Alias + " - " + m.Name
 			}
-			v := fmt.Sprintf("act:/subagent switch %d", i+1)
+			v := fmt.Sprintf("act:/subagent switch %d", i+2)
 			subOpts = append(subOpts, CardSelectOption{Text: label, Value: v})
 			if m.Name == cur {
 				subInit = v

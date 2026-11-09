@@ -401,3 +401,15 @@ func TestDetectEnvOnlyProviderType(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeEnv_SubagentModelDoesNotSetHostManagedFlag(t *testing.T) {
+	a := &Agent{subagentModel: "claude-sonnet-4"}
+
+	env := envSliceToMap(a.runtimeEnvLocked())
+	if got := env["CLAUDE_CODE_SUBAGENT_MODEL"]; got != "claude-sonnet-4" {
+		t.Fatalf("CLAUDE_CODE_SUBAGENT_MODEL = %q, want claude-sonnet-4", got)
+	}
+	if _, ok := env["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"]; ok {
+		t.Fatalf("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST unexpectedly set: %v", env)
+	}
+}

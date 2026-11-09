@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -48,7 +49,7 @@ func TestSubagentChoicesMarksCurrent(t *testing.T) {
 	var sonnetBtn ButtonOption
 	for _, row := range buttons {
 		for _, b := range row {
-			if b.Data == "cmd:/model subagent switch 2" {
+			if b.Data == "cmd:/model subagent 3" {
 				sonnetBtn = b
 			}
 		}
@@ -74,5 +75,105 @@ func TestSubagentChoicesRowsOfThree(t *testing.T) {
 		if len(row) > 3 {
 			t.Errorf("row %d has %d buttons, want at most 3", i+1, len(row))
 		}
+	}
+}
+
+// stubSubagentAgent implements ModelSwitcher and SubagentModelSwitcher so the
+// engine's subagent paths can be exercised end to end.
+type stubSubagentAgent struct {
+	stubModelModeAgent
+	subagent string
+}
+
+func (a *stubSubagentAgent) SetSubagentModel(m string) { a.subagent = m }
+func (a *stubSubagentAgent) GetSubagentModel() string  { return a.subagent }
+
+// TestSubagentChoicesButtonsRoundTrip executes the data every button carries,
+// exactly as a platform would, and checks it selects the model the label
+// names. Regression test for the "switch N" button syntax cmdSubagent never
+// accepted.
+func TestSubagentChoicesButtonsRoundTrip(t *testing.T) {
+	a := &stubSubagentAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "sess", ReplyCtx: "ctx"}
+	models := a.AvailableModels(context.Background())
+
+	buttons, _ := e.subagentChoices(a, models)
+	want := map[string]string{
+		"cmd:/model subagent inherit": "",
+		"cmd:/model subagent 2":       models[0].Name,
+		"cmd:/model subagent 3":       models[1].Name,
+	}
+	seen := 0
+	for _, row := range buttons {
+		for _, b := range row {
+			target, ok := want[b.Data]
+			if !ok {
+				t.Fatalf("unexpected button data %q", b.Data)
+			}
+			seen++
+			a.subagent = "sentinel"
+			args := strings.Fields(strings.TrimPrefix(b.Data, "cmd:/model subagent"))
+			e.cmdSubagent(p, msg, args, a)
+			if got := a.GetSubagentModel(); got != target {
+				t.Errorf("button %q selected %q, want %q", b.Data, got, target)
+			}
+		}
+	}
+	if seen != len(want) {
+		t.Fatalf("checked %d buttons, want %d", seen, len(want))
+	}
+}
+
+// TestCmdSubagentNumbering pins the numbering the list prints: 1 = inherit,
+// 2..N+1 = models in order.
+func TestCmdSubagentNumbering(t *testing.T) {
+	a := &stubSubagentAgent{}
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", a, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "sess", ReplyCtx: "ctx"}
+
+	for _, tc := range []struct{ arg, want string }{
+		{"1", ""},
+		{"2", "gpt-4.1"},
+		{"3", "gpt-4.1-mini"},
+	} {
+		a.subagent = "sentinel"
+		e.cmdSubagent(p, msg, []string{tc.arg}, a)
+		if got := a.GetSubagentModel(); got != tc.want {
+			t.Errorf("/model subagent %s selected %q, want %q", tc.arg, got, tc.want)
+		}
+	}
+
+	a.subagent = "sentinel"
+	e.cmdSubagent(p, msg, []string{"4"}, a)
+	if got := a.GetSubagentModel(); got != "sentinel" {
+		t.Errorf("out-of-range choice changed the model to %q", got)
+	}
+}
+
+// TestHandleSubagentCardActionInherit is the regression test for the card's
+// single-field "act:/subagent inherit" action.
+func TestHandleSubagentCardActionInherit(t *testing.T) {
+	a := &stubSubagentAgent{}
+	e := NewEngine("test", a, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+	a.subagent = "gpt-4.1"
+
+	e.handleSubagentCardAction("inherit", "sess")
+	if got := a.GetSubagentModel(); got != "" {
+		t.Fatalf("card inherit left model at %q, want cleared", got)
+	}
+}
+
+// TestHandleSubagentCardActionSwitchNumbering pins the card to the same
+// numbering as the text list.
+func TestHandleSubagentCardActionSwitchNumbering(t *testing.T) {
+	a := &stubSubagentAgent{}
+	e := NewEngine("test", a, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+
+	e.handleSubagentCardAction("switch 3", "sess")
+	if got := a.GetSubagentModel(); got != "gpt-4.1-mini" {
+		t.Fatalf("card switch 3 selected %q, want gpt-4.1-mini", got)
 	}
 }

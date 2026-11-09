@@ -1455,12 +1455,18 @@ func (a *Agent) runtimeEnvLocked() []string {
 		env = append(env, "ANTHROPIC_API_KEY="+a.routerAPIKey)
 	}
 
+	// Evaluate the routing guard before appending the subagent key:
+	// CLAUDE_CODE_SUBAGENT_MODEL is itself in claudeProviderManagedEnvVars, so
+	// checking afterwards would flip the host-managed flag on a model choice
+	// alone, with no provider routing configured.
+	managed := claudeEnvManagesProviderRouting(env)
+
 	// Empty means inherit the main model — the CLI's own default, so nothing is sent.
 	if a.subagentModel != "" {
 		env = append(env, "CLAUDE_CODE_SUBAGENT_MODEL="+a.subagentModel)
 	}
 
-	if !claudeEnvManagesProviderRouting(env) {
+	if !managed {
 		return env
 	}
 	return core.MergeEnv(env, []string{"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1"})
