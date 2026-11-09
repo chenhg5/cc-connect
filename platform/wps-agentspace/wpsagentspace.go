@@ -53,15 +53,15 @@ type Platform struct {
 	// (USER_NO_APP_PERMISSION in handleFrame) is an org-wide gate, not a
 	// per-user one; wps-xiezuo's docs explicitly say not to rely on that
 	// alone ("Always set allow_from for production deployments").
-	allowFrom  string
-	handler    core.MessageHandler
-	cancel     context.CancelFunc
-	conn       *websocket.Conn
-	mu         sync.Mutex
-	writeCh    chan any
-	dedup      core.MessageDedup
-	stopOnce   sync.Once
-	stopped    atomic.Bool
+	allowFrom string
+	handler   core.MessageHandler
+	cancel    context.CancelFunc
+	conn      *websocket.Conn
+	mu        sync.Mutex
+	writeCh   chan any
+	dedup     core.MessageDedup
+	stopOnce  sync.Once
+	stopped   atomic.Bool
 }
 
 // replyContext holds the context needed to reply to a specific message.

@@ -70,15 +70,15 @@ type mockPlatform struct {
 }
 
 type mockMessage struct {
-	Content string
+	Content  string
 	ReplyCtx any
-	Images  []core.ImageAttachment
-	Audio   []core.FileAttachment
+	Images   []core.ImageAttachment
+	Audio    []core.FileAttachment
 }
 
-func (m *mockPlatform) Name() string                          { return "mock" }
-func (m *mockPlatform) Start(h core.MessageHandler) error    { return nil }
-func (m *mockPlatform) Stop() error                           { return nil }
+func (m *mockPlatform) Name() string                      { return "mock" }
+func (m *mockPlatform) Start(h core.MessageHandler) error { return nil }
+func (m *mockPlatform) Stop() error                       { return nil }
 func (m *mockPlatform) Send(ctx context.Context, replyCtx any, content string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

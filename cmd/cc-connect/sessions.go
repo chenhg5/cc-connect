@@ -17,12 +17,12 @@ import (
 // sessionFileData mirrors the unexported sessionSnapshot in core/session.go
 // for JSON deserialization of session files.
 type sessionFileData struct {
-	Sessions      map[string]*sessionData    `json:"sessions"`
-	ActiveSession map[string]string          `json:"active_session"`
-	UserSessions  map[string][]string        `json:"user_sessions"`
-	Counter       int64                      `json:"counter"`
-	SessionNames  map[string]string          `json:"session_names,omitempty"`
-	UserMeta      map[string]*userMetaData   `json:"user_meta,omitempty"`
+	Sessions      map[string]*sessionData  `json:"sessions"`
+	ActiveSession map[string]string        `json:"active_session"`
+	UserSessions  map[string][]string      `json:"user_sessions"`
+	Counter       int64                    `json:"counter"`
+	SessionNames  map[string]string        `json:"session_names,omitempty"`
+	UserMeta      map[string]*userMetaData `json:"user_meta,omitempty"`
 }
 
 type userMetaData struct {

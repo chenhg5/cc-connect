@@ -465,11 +465,11 @@ func TestDispatchMessageExpandsQuotedMergeForward(t *testing.T) {
 				"data": map[string]any{
 					"items": []map[string]any{
 						{
-							"message_id":        subMessageID,
-							"msg_type":          "text",
-							"upper_message_id":  parentMessageID,
-							"parent_id":         "",
-							"create_time":       "1786522200000",
+							"message_id":       subMessageID,
+							"msg_type":         "text",
+							"upper_message_id": parentMessageID,
+							"parent_id":        "",
+							"create_time":      "1786522200000",
 							"sender": map[string]any{
 								"id":          "ou_liangchen",
 								"id_type":     "open_id",

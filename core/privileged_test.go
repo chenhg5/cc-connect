@@ -103,4 +103,3 @@ func TestHandleCommand_CronAddexecBlocksNonAdmin(t *testing.T) {
 		t.Fatalf("expected admin-required reply; got %#v", sent)
 	}
 }
-
