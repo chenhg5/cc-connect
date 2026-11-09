@@ -18,10 +18,26 @@ import (
 //
 //	The newer Kimi Code CLI removed the standalone `--print` flag — passing it
 //	now produces: `error: unknown option '--print' (Did you mean --prompt?)`.
-//	The older kimi-cli still requires `--print` for `--output-format` to take
-//	effect. We probe the help text once and adapt accordingly. See #1456.
+//	The same CLI release also dropped `--work-dir` (the working directory is
+//	now taken from the process cwd only) and rejects the flag with `error:
+//	unknown option --work-dir`, and dropped `--quiet` as well. The older
+//	kimi-cli still requires `--print` for `--output-format` to take effect
+//	and exposes `--work-dir` for non-default workspace locations. We probe
+//	the help text once and adapt accordingly. See #1456, #1476, #1561.
 type kimiFlagSupport struct {
-	Print bool
+	Print   bool
+	WorkDir bool
+	Quiet   bool
+}
+
+// isModernFlavor reports whether the probed binary speaks the newer Kimi
+// Code CLI dialect. `--print` is the family discriminator established in
+// #1456: every Kimi Code CLI build drops it, every legacy kimi-cli build
+// advertises it. Dialect-level differences that cannot be help-probed
+// reliably (e.g. `--resume` vs `-r`, which legacy kimi-cli accepts but does
+// not always advertise) branch on this. See #1561.
+func (s kimiFlagSupport) isModernFlavor() bool {
+	return !s.Print
 }
 
 // probeKimiFlags runs `<cmd> --help` with a short timeout and returns the
@@ -49,7 +65,9 @@ func probeKimiFlags(parent context.Context, cmd string, timeout time.Duration) k
 
 	flags := parseKimiHelpFlags(out.String())
 	support := kimiFlagSupport{
-		Print: flags["--print"],
+		Print:   flags["--print"],
+		WorkDir: flags["--work-dir"],
+		Quiet:   flags["--quiet"],
 	}
 	slog.Debug("kimi: flag probe complete", "cmd", cmd, "support", support)
 	return support

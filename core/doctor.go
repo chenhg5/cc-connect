@@ -52,6 +52,26 @@ type AgentDoctorInfo interface {
 	CLIDisplayName() string // e.g. "Claude", "Codex" (for display in doctor output)
 }
 
+// PlatformHealthInfo is a per-platform health snapshot reported by
+// implementations of the optional PlatformHealth interface. Used by
+// /status, the management API, and cc-connect doctor to surface
+// runtime degradation (e.g. issue #1618's "bot open_id unresolved"
+// state on Feishu/Lark).
+type PlatformHealthInfo struct {
+	Name           string
+	Connected      bool
+	Degraded       bool
+	DegradedReason string
+	DegradedSince  time.Time
+}
+
+// PlatformHealth is an optional interface that platforms can implement
+// to report runtime degradation. Platforms that do not implement it
+// are assumed to be healthy whenever they have started.
+type PlatformHealth interface {
+	PlatformHealth() PlatformHealthInfo
+}
+
 // RunDoctorChecks performs all diagnostic checks.
 func RunDoctorChecks(ctx context.Context, agent Agent, platforms []Platform) []DoctorCheckResult {
 	var results []DoctorCheckResult
@@ -153,11 +173,28 @@ func checkCLIAuth(ctx context.Context, bin string, args []string, label string) 
 func checkPlatforms(platforms []Platform) []DoctorCheckResult {
 	var results []DoctorCheckResult
 	for _, p := range platforms {
-		results = append(results, DoctorCheckResult{
+		check := DoctorCheckResult{
 			Name:   fmt.Sprintf("Platform (%s)", p.Name()),
 			Status: DoctorPass,
 			Detail: "connected",
-		})
+		}
+		// Issue #1618: platforms may implement PlatformHealth to flag
+		// degraded runtime state (e.g. Feishu/Lark bot open_id
+		// unresolved). Surface it as a Warn so operators can notice.
+		if ph, ok := p.(PlatformHealth); ok {
+			info := ph.PlatformHealth()
+			if info.Degraded {
+				check.Status = DoctorWarn
+				check.Detail = "degraded: " + info.DegradedReason
+				if !info.DegradedSince.IsZero() {
+					check.Detail += " (since " + info.DegradedSince.Format(time.RFC3339) + ")"
+				}
+			} else if !info.Connected {
+				check.Status = DoctorWarn
+				check.Detail = "not connected"
+			}
+		}
+		results = append(results, check)
 	}
 	if len(results) == 0 {
 		results = append(results, DoctorCheckResult{

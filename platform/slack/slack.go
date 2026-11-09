@@ -27,6 +27,19 @@ func init() {
 type replyContext struct {
 	channel   string
 	timestamp string // thread_ts for threading replies
+	msgTS     string // ts of the message that triggered this turn (reaction target)
+}
+
+// reactionTS returns the timestamp reactions should target: the triggering
+// message itself when known, otherwise the thread root. This matters in
+// threads, where the root can be an unrelated message posted days earlier by
+// someone else — the working indicator belongs on the message that summoned
+// the bot.
+func (rc replyContext) reactionTS() string {
+	if rc.msgTS != "" {
+		return rc.msgTS
+	}
+	return rc.timestamp
 }
 
 type Platform struct {
@@ -41,6 +54,12 @@ type Platform struct {
 	channelNameCache map[string]string
 	channelCacheMu   sync.RWMutex
 	userNameCache    sync.Map // userID -> display name
+	// dedup drops the second delivery of a message that Slack reports through
+	// more than one subscription. A message that @-mentions the bot arrives as
+	// BOTH an app_mention event and a message event, and the two are handled
+	// independently below; without this guard each mention starts a turn and
+	// then queues a duplicate against the still-busy session.
+	dedup core.MessageDedup
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -114,6 +133,16 @@ func (p *Platform) buildSessionKey(channel, user, threadTS string) string {
 	}
 }
 
+// dedupKey identifies one Slack message. A message ts is only unique within its
+// channel, so both parts are needed. An empty ts yields an empty key, which
+// core.MessageDedup never treats as a duplicate.
+func dedupKey(channel, ts string) string {
+	if ts == "" {
+		return ""
+	}
+	return channel + ":" + ts
+}
+
 // threadRootTS returns the thread parent timestamp for an event: the existing
 // thread_ts when the message is already in a thread, otherwise the message's
 // own ts (which becomes the thread root once the bot replies in-thread).
@@ -179,6 +208,16 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				// Editing a mention re-fires a fresh app_mention with Edited set;
+				// ignore it rather than reprocessing the edit as a new prompt.
+				// This also drops edit-to-add-mention (a message edited to newly
+				// @-mention the bot) — an accepted limitation, matching how
+				// Telegram and Discord ignore all inbound edits.
+				if ev.Edited != nil {
+					slog.Debug("slack: ignoring edited app_mention", "user", ev.User, "channel", ev.Channel)
+					return
+				}
+
 				if ts := ev.TimeStamp; ts != "" {
 					if dotIdx := strings.IndexByte(ts, '.'); dotIdx > 0 {
 						if sec, err := strconv.ParseInt(ts[:dotIdx], 10, 64); err == nil {
@@ -197,15 +236,23 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				if p.dedup.IsDuplicate(dedupKey(ev.Channel, ev.TimeStamp)) {
+					slog.Debug("slack: duplicate message ignored", "source", "app_mention",
+						"channel", ev.Channel, "ts", ev.TimeStamp)
+					return
+				}
+
 				threadTS := threadRootTS(ev.ThreadTimeStamp, ev.TimeStamp)
 				sessionKey := p.buildSessionKey(ev.Channel, ev.User, threadTS)
 
 				var shareFiles []slackevents.File
+				var richExtra string
 				if cb, ok := data.Data.(*slackevents.EventsAPICallbackEvent); ok {
 					shareFiles = parseSlackInnerEventFiles(cb.InnerEvent)
+					richExtra = extractRichContent(cb.InnerEvent, ev.TimeStamp)
 				}
 				images, audio, docFiles := p.processSlackFileShares(shareFiles)
-				content := stripAppMentionText(ev.Text)
+				content := appendRichContent(stripAppMentionText(ev.Text), richExtra)
 				if content == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
@@ -218,7 +265,7 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					Files:     docFiles,
 					Audio:     audio,
 					MessageID: ev.TimeStamp,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS, msgTS: ev.TimeStamp},
 				}
 				p.handler(p, msg)
 
@@ -259,6 +306,12 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					return
 				}
 
+				if p.dedup.IsDuplicate(dedupKey(ev.Channel, ev.TimeStamp)) {
+					slog.Debug("slack: duplicate message ignored", "source", "message",
+						"channel", ev.Channel, "ts", ev.TimeStamp)
+					return
+				}
+
 				// Use the same timestamp the reply will be routed to
 				// (assistantOrThreadTS): thread root in a thread, the message ts
 				// for a top-level channel message, and "" for a top-level DM —
@@ -269,7 +322,13 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 
 				images, audio, docFiles := p.processSlackFileShares(ev.Files)
 
-				if ev.Text == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
+				var richExtra string
+				if cb, ok := data.Data.(*slackevents.EventsAPICallbackEvent); ok {
+					richExtra = extractRichContent(cb.InnerEvent, ev.TimeStamp)
+				}
+				text := appendRichContent(ev.Text, richExtra)
+
+				if text == "" && len(images) == 0 && audio == nil && len(docFiles) == 0 {
 					return
 				}
 
@@ -277,9 +336,9 @@ func (p *Platform) handleEvent(evt socketmode.Event) {
 					SessionKey: sessionKey, Platform: "slack",
 					UserID: ev.User, UserName: p.resolveUserName(ev.User),
 					ChatName: p.resolveChannelNameForMsg(ev.Channel),
-					Content:  ev.Text, Images: images, Files: docFiles, Audio: audio,
+					Content:  text, Images: images, Files: docFiles, Audio: audio,
 					MessageID: ts,
-					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS},
+					ReplyCtx:  replyContext{channel: ev.Channel, timestamp: threadTS, msgTS: ts},
 				}
 				p.handler(p, msg)
 			}
@@ -681,11 +740,11 @@ func (p *Platform) FormattingInstructions() string {
 // All reactions are removed when the returned stop function is called.
 func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	rc, ok := rctx.(replyContext)
-	if !ok || rc.channel == "" || rc.timestamp == "" {
+	if !ok || rc.channel == "" || rc.reactionTS() == "" {
 		return func() {}
 	}
 
-	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.timestamp}
+	ref := slack.ItemRef{Channel: rc.channel, Timestamp: rc.reactionTS()}
 	var mu sync.Mutex
 	var added []string
 

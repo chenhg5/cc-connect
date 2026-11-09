@@ -242,7 +242,8 @@ func (ws *WebhookServer) executePrompt(engine *Engine, sessionKey, prompt string
 	}
 
 	session := engine.sessions.GetOrCreateActive(sessionKey)
-	if !session.TryLock() {
+	lockGen, locked := session.TryLock()
+	if !locked {
 		slog.Warn("webhook: session busy, queued prompt dropped", "event", event, "session_key", sessionKey)
 		if !silent {
 			engine.send(targetPlatform, replyCtx, fmt.Sprintf("🪝 ⚠️ session busy, skipped: %s", event))
@@ -250,7 +251,7 @@ func (ws *WebhookServer) executePrompt(engine *Engine, sessionKey, prompt string
 		return
 	}
 
-	engine.processInteractiveMessage(targetPlatform, msg, session)
+	engine.processInteractiveMessage(targetPlatform, msg, session, lockGen)
 	slog.Info("webhook: prompt executed", "event", event, "session_key", sessionKey)
 }
 

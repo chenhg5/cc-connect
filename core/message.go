@@ -34,6 +34,29 @@ func MergeEnv(base, extra []string) []string {
 	return append(merged, extra...)
 }
 
+// InjectedAgentEnv returns the env vars cc-connect injects into a spawned
+// agent process so in-process extensions can learn cc-connect's runtime state.
+// The CC_ prefix marks these vars as cc-connect's public extension contract,
+// alongside CC_PROJECT / CC_SESSION_KEY / CC_DATA_DIR that the engine injects
+// as session env.
+//
+// Currently only the permission mode is exposed:
+//
+//	CC_PERMISSION_MODE — the session's permission mode ("default" | "yolo").
+//	    Extensions such as the pi permission-gate read it to auto-approve tool
+//	    calls in yolo mode. An empty mode returns nil, so non-yolo sessions see
+//	    no injected var.
+//
+// Kept as a single core helper so every agent opts into the same convention
+// instead of hardcoding the variable name; extending the contract (e.g.
+// CC_MODEL, CC_THINKING) only means extending this function.
+func InjectedAgentEnv(mode string) []string {
+	if mode == "" {
+		return nil
+	}
+	return []string{"CC_PERMISSION_MODE=" + mode}
+}
+
 // CheckAllowFrom logs a security warning at startup when allow_from is not
 // configured (defaults to permit-all). Platforms should call this during init.
 func CheckAllowFrom(platform, allowFrom string) {
@@ -318,6 +341,50 @@ func AppendFileRefs(prompt string, filePaths []string) string {
 	return prompt + "\n\n(Files saved locally, please read them: " + strings.Join(abs, ", ") + ")"
 }
 
+// ExtFromMime maps an image MIME type to a file extension. Attachments that
+// arrive without a filename (Feishu image messages carry only bytes + MIME)
+// must still land on disk with a usable extension, otherwise downstream agents
+// have to guess the format from the bytes.
+func ExtFromMime(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/bmp":
+		return ".bmp"
+	default:
+		return ".png"
+	}
+}
+
+// AppendImageRefs appends saved image paths to the prompt. Kept separate from
+// AppendFileRefs so the wording tells the agent these are images the user sent
+// and that it should open them to see the content.
+func AppendImageRefs(prompt string, imagePaths []string) string {
+	if len(imagePaths) == 0 {
+		return prompt
+	}
+	if prompt == "" {
+		prompt = "Please look at the attached image(s)."
+	}
+	abs := make([]string, len(imagePaths))
+	for i, p := range imagePaths {
+		if filepath.IsAbs(p) {
+			abs[i] = p
+			continue
+		}
+		if a, err := filepath.Abs(p); err == nil {
+			abs[i] = a
+		} else {
+			abs[i] = p
+		}
+	}
+	return prompt + "\n\n(The user attached image(s), saved locally — read the file(s) to view them: " + strings.Join(abs, ", ") + ")"
+}
+
 // AudioAttachment represents a voice/audio message sent by the user.
 type AudioAttachment struct {
 	MimeType string // e.g. "audio/amr", "audio/ogg", "audio/mp4"
@@ -383,13 +450,34 @@ type EventType string
 
 const (
 	EventText              EventType = "text"               // intermediate or final text
+	EventHookRejected      EventType = "hook_rejected"      // Stop hook rejected prior assistant text
 	EventToolUse           EventType = "tool_use"           // tool invocation info
 	EventToolResult        EventType = "tool_result"        // tool execution result
 	EventResult            EventType = "result"             // final aggregated result
 	EventError             EventType = "error"              // error occurred
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
+	EventUserInputRequest  EventType = "user_input_request" // non-blocking question; answer is a user message
 	EventThinking          EventType = "thinking"           // thinking/processing status
+	EventModelSwitch       EventType = "model_switch"       // agent CLI moved the turn to another model on its own (see ModelSwitch)
 )
+
+// ModelSwitch describes a model change the agent CLI made without being asked
+// to, e.g. Claude Code re-running a request that the primary model's
+// safeguards declined on a fallback model. It is carried by EventModelSwitch
+// so the engine can tell the user; a /model switch never produces one.
+type ModelSwitch struct {
+	From string // model the request was sent to
+	To   string // model that answered instead
+	// Reason is the trigger reported by the CLI ("refusal": a safety
+	// classifier declined the request on From).
+	Reason string
+	// Category is the refusal category the API reported ("cyber", "bio", ...).
+	// Empty when the API carried none.
+	Category string
+	// SessionWide is true when the rest of the session stays on To, false when
+	// only this response came from To (e.g. a subagent fell back).
+	SessionWide bool
+}
 
 // UserQuestion represents a structured question from AskUserQuestion.
 type UserQuestion struct {
@@ -427,6 +515,7 @@ type Event struct {
 	CacheReadInputTokens     int            // cache-read tokens (prior context retrieved from cache)
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
+	ModelSwitch              *ModelSwitch   // populated for EventModelSwitch
 }
 
 // HistoryEntry is one turn in a conversation.

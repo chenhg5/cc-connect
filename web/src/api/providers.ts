@@ -97,5 +97,5 @@ export interface CCSwitchProvider {
 }
 export const listCCSwitchProviders = () =>
   api.get<{ providers: CCSwitchProvider[]; available: boolean; error?: string }>('/providers/cc-switch');
-export const importCCSwitchProviders = (names: string[]) =>
-  api.post<{ imported: string[]; skipped: string[] }>('/providers/cc-switch', { names });
+export const importCCSwitchProviders = (names: string[], language?: string) =>
+  api.post<{ imported: string[]; skipped: string[] }>('/providers/cc-switch', { names, language });

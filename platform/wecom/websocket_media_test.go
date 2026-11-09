@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -38,9 +40,9 @@ func TestWsCollectInboundParts_fileAndQuote(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &body); err != nil {
 		t.Fatal(err)
 	}
-	texts, imgs, files := wsCollectInboundParts(&body)
-	if len(texts) != 0 || len(imgs) != 0 || len(files) != 1 || files[0].URL != "https://example.com/f" {
-		t.Fatalf("files=%v texts=%v imgs=%v", files, texts, imgs)
+	current, quoted := wsCollectInboundParts(&body)
+	if len(current.content) != 0 || len(current.images) != 0 || len(current.files) != 1 || current.files[0].URL != "https://example.com/f" || len(quoted.content) != 0 {
+		t.Fatalf("current=%+v quoted=%+v", current, quoted)
 	}
 }
 
@@ -64,9 +66,9 @@ func TestWsCollectInboundParts_mixed(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &body); err != nil {
 		t.Fatal(err)
 	}
-	texts, imgs, files := wsCollectInboundParts(&body)
-	if len(texts) != 1 || texts[0] != "see" || len(imgs) != 1 || imgs[0].URL != "https://i" || len(files) != 0 {
-		t.Fatalf("texts=%v imgs=%v files=%v", texts, imgs, files)
+	current, quoted := wsCollectInboundParts(&body)
+	if len(current.content) != 1 || current.content[0] != "see" || len(current.images) != 1 || current.images[0].URL != "https://i" || len(current.files) != 0 || len(quoted.content) != 0 {
+		t.Fatalf("current=%+v quoted=%+v", current, quoted)
 	}
 }
 
@@ -89,9 +91,9 @@ func TestWsCollectInboundParts_fileWithNonEmptyMixedUsesTopLevelFile(t *testing.
 	if err := json.Unmarshal([]byte(raw), &body); err != nil {
 		t.Fatal(err)
 	}
-	texts, imgs, files := wsCollectInboundParts(&body)
-	if len(files) != 1 || files[0].URL != "https://example.com/doc.pdf" || len(imgs) != 0 {
-		t.Fatalf("texts=%v imgs=%v files=%v", texts, imgs, files)
+	current, quoted := wsCollectInboundParts(&body)
+	if len(current.files) != 1 || current.files[0].URL != "https://example.com/doc.pdf" || len(current.images) != 0 || len(quoted.content) != 0 {
+		t.Fatalf("current=%+v quoted=%+v", current, quoted)
 	}
 }
 
@@ -115,9 +117,110 @@ func TestWsCollectInboundParts_mixedContainsFile(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &body); err != nil {
 		t.Fatal(err)
 	}
-	texts, imgs, files := wsCollectInboundParts(&body)
-	if len(texts) != 1 || len(imgs) != 0 || len(files) != 1 || files[0].URL != "https://f" {
-		t.Fatalf("texts=%v imgs=%v files=%v", texts, imgs, files)
+	current, quoted := wsCollectInboundParts(&body)
+	if len(current.content) != 1 || len(current.images) != 0 || len(current.files) != 1 || current.files[0].URL != "https://f" || len(quoted.content) != 0 {
+		t.Fatalf("current=%+v quoted=%+v", current, quoted)
+	}
+}
+
+func TestWsCollectInboundParts_SeparatesQuotedMixedContent(t *testing.T) {
+	t.Parallel()
+	raw := `{
+		"msgid": "5",
+		"msgtype": "mixed",
+		"mixed": {"msg_item": [
+			{"msgtype": "text", "text": {"content": "new instruction"}},
+			{"msgtype": "file", "file": {"url": "https://current-file", "aeskey": "current-key"}}
+		]},
+		"quote": {"msgtype": "mixed", "mixed": {"msg_item": [
+			{"msgtype": "text", "text": {"content": "quoted text"}},
+			{"msgtype": "image", "image": {"url": "https://quoted-image", "aeskey": "image-key"}},
+			{"msgtype": "file", "file": {"url": "https://quoted-file", "aeskey": "file-key"}}
+		]}}
+	}`
+	var body wsMsgCallbackBody
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		t.Fatal(err)
+	}
+
+	current, quoted := wsCollectInboundParts(&body)
+	if got, want := strings.Join(current.content, "\n"), "new instruction"; got != want {
+		t.Fatalf("current content = %q, want %q", got, want)
+	}
+	if len(current.files) != 1 || current.files[0].URL != "https://current-file" {
+		t.Fatalf("current files = %+v", current.files)
+	}
+	if got, want := strings.Join(quoted.content, "\n"), "quoted text\n[image]\n[file]"; got != want {
+		t.Fatalf("quoted content = %q, want %q", got, want)
+	}
+	if len(quoted.images) != 1 || quoted.images[0].URL != "https://quoted-image" || len(quoted.files) != 1 || quoted.files[0].URL != "https://quoted-file" {
+		t.Fatalf("quoted media = %+v %+v", quoted.images, quoted.files)
+	}
+	if got, want := formatWSQuotedContent(quoted), "[Quoted message]:\nquoted text\n[image]\n[file]\n\n"; got != want {
+		t.Fatalf("quoted context = %q, want %q", got, want)
+	}
+}
+
+func TestDeliverWSMediaInbound_QuotedAttachmentsPrecedeCurrentAttachments(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/quoted":
+			w.Header().Set("Content-Disposition", `attachment; filename="quoted.png"`)
+			_, _ = w.Write([]byte("quoted image"))
+		case "/current":
+			w.Header().Set("Content-Disposition", `attachment; filename="current.png"`)
+			_, _ = w.Write([]byte("current image"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p, captured := newCapturedWSPlatform()
+	body := &wsMsgCallbackBody{MsgID: "quoted-media", AibotID: "bot"}
+	p.deliverWSMediaInbound(
+		body,
+		"wecom:chat:user",
+		"",
+		wsReplyContext{},
+		wsInboundParts{content: []string{"inspect this"}, images: []wsMediaRef{{URL: srv.URL + "/current"}}},
+		wsInboundParts{content: []string{"[image]"}, images: []wsMediaRef{{URL: srv.URL + "/quoted"}}},
+		false,
+	)
+
+	msg := <-captured
+	if msg.Content != "inspect this" {
+		t.Fatalf("Content = %q", msg.Content)
+	}
+	if got, want := msg.ExtraContent, "[Quoted message]:\n[image]\n\n"; got != want {
+		t.Fatalf("ExtraContent = %q, want %q", got, want)
+	}
+	if len(msg.Images) != 2 || string(msg.Images[0].Data) != "quoted image" || string(msg.Images[1].Data) != "current image" {
+		t.Fatalf("image order = %#v", msg.Images)
+	}
+}
+
+func TestDeliverWSMediaInbound_QuotedDownloadFailureKeepsContextMarker(t *testing.T) {
+	t.Parallel()
+	p, captured := newCapturedWSPlatform()
+	body := &wsMsgCallbackBody{MsgID: "quoted-media-failure"}
+	p.deliverWSMediaInbound(
+		body,
+		"wecom:chat:user",
+		"",
+		wsReplyContext{},
+		wsInboundParts{content: []string{"what is this?"}},
+		wsInboundParts{content: []string{"[image]"}, images: []wsMediaRef{{URL: "http://127.0.0.1:1/unavailable"}}},
+		false,
+	)
+
+	msg := <-captured
+	if got, want := msg.ExtraContent, "[Quoted message]:\n[image]\n\n"; got != want {
+		t.Fatalf("ExtraContent = %q, want %q", got, want)
+	}
+	if len(msg.Images) != 0 {
+		t.Fatalf("Images = %#v, want no downloaded images", msg.Images)
 	}
 }
 
