@@ -50,11 +50,11 @@ func isFileChangeKind(kind string) bool {
 }
 
 func diffInlineCode(text string) string {
-	for n := 1; n <= 5; n++ {
-		fence := strings.Repeat("`", n)
-		if !strings.Contains(text, fence) {
-			return fence + text + fence
-		}
+	// Feishu's markdown preprocessing treats triple backticks as block fences,
+	// including those inside longer inline delimiters. Render backtick-bearing
+	// source as escaped text instead of creating ambiguous fences.
+	if strings.Contains(text, "`") {
+		return strings.ReplaceAll(html.EscapeString(text), "`", "&#96;")
 	}
-	return html.EscapeString(text)
+	return "`" + text + "`"
 }

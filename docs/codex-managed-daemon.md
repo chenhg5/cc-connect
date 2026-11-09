@@ -105,6 +105,8 @@ Omitting `app_server_transport` keeps the existing stdio path, including the pre
 
 Only explicitly setting both `backend = "app_server"` and `app_server_transport = "managed_daemon"` enables managed mode. `daemon_*` options are valid only in that mode.
 
+CC-Connect ignores approval requests for other threads and does not automatically decline pending approvals on timeout, disconnect, or detach. The daemon retains unresolved requests and replays them when the thread is resumed; the reconnected client displays a fresh approval prompt. If another client has already resolved the request, it is not offered again. Session details remain available with locally stored history when daemon history cannot be read.
+
 ## 2. Shared-session chat commands
 
 These commands require the corresponding shared-session capabilities. `<id>` can be a thread ID or its index in the current `/list` output.

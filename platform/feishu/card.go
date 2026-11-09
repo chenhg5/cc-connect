@@ -310,6 +310,21 @@ func renderRichMarkdownCardMap(card *core.Card, sessionKey string) map[string]an
 				content = renderApprovalDiff(content)
 			}
 			elements = append(elements, map[string]any{"tag": "markdown", "content": sanitizeCardMarkdownForCard(content)})
+		case core.CardDivider:
+			elements = append(elements, map[string]any{"tag": "hr"})
+		case core.CardSelect:
+			options := make([]map[string]any, 0, len(e.Options))
+			for _, option := range e.Options {
+				options = append(options, map[string]any{"text": plainText(option.Text), "value": option.Value})
+			}
+			selector := map[string]any{"tag": "select_static", "placeholder": plainText(e.Placeholder), "options": options}
+			if sessionKey != "" {
+				selector["value"] = map[string]string{"session_key": sessionKey}
+			}
+			if e.InitValue != "" {
+				selector["initial_option"] = e.InitValue
+			}
+			elements = append(elements, selector)
 		case core.CardNote:
 			elements = append(elements, map[string]any{
 				"tag": "markdown", "content": sanitizeCardMarkdownForCard(e.Text), "text_size": "notation",
@@ -339,8 +354,11 @@ func renderRichMarkdownCardMap(card *core.Card, sessionKey string) map[string]an
 			}
 		}
 	}
+	if len(elements) == 0 {
+		elements = []map[string]any{{"tag": "markdown", "content": " "}}
+	}
 	if card.CollapsedDetailsTitle != "" {
-		elements = []map[string]any{buildRichPanel(card.CollapsedDetailsTitle, false, elements)}
+		elements = []map[string]any{buildRichPanel(card.CollapsedDetailsTitle, elements)}
 	}
 	result["body"] = map[string]any{"elements": elements}
 	return result

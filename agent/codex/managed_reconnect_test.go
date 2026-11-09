@@ -274,3 +274,65 @@ func TestManagedReconnectRunningTurnRestoresCompletedTextAndDeduplicates(t *test
 		}
 	}
 }
+
+// A shared approval belongs to the daemon, not to this connection. Disconnect
+// clears the old local card; resume replays the still-pending request unchanged.
+func TestManagedReconnect_ReplaysPendingApprovalWithoutAnsweringOnDisconnect(t *testing.T) {
+	cwd := t.TempDir()
+	var connections atomic.Int32
+	disconnect := make(chan struct{})
+	responses := make(chan daemonMessage, 4)
+	socket := managedFixture(t, func(ws *websocket.Conn) {
+		connection := connections.Add(1)
+		fixtureRPC(t, ws, func(m daemonMessage) (any, bool) {
+			if m.Method == "" {
+				responses <- m
+				return nil, false
+			}
+			if m.Method != "thread/resume" {
+				t.Errorf("unexpected RPC: %s", m.Method)
+				return nil, false
+			}
+			_ = ws.WriteJSON(map[string]any{"id": m.ID, "result": fixtureSnapshot(cwd, "target", "turn")})
+			_ = ws.WriteJSON(map[string]any{"id": "approval", "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": "target", "turnId": "turn", "command": "echo pending", "availableDecisions": []string{"accept", "cancel"}}})
+			if connection == 1 {
+				<-disconnect
+				_ = ws.Close()
+			}
+			return nil, false
+		})
+	})
+	as, err := fixtureManagedAgent(t, socket, cwd, map[string]any{"daemon_reconnect_attempts": 1}).AttachSession(context.Background(), "target")
+	if err != nil {
+		close(disconnect)
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := as.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	first := awaitManagedEvent(t, as, core.EventPermissionRequest)
+	close(disconnect)
+	resolved := awaitManagedEvent(t, as, core.EventPermissionResolved)
+	replay := awaitManagedEvent(t, as, core.EventPermissionRequest)
+	if resolved.RequestID != first.RequestID || replay.RequestID != first.RequestID || replay.ToolInput != first.ToolInput {
+		t.Fatalf("approval not restored: first=%+v resolved=%+v replay=%+v", first, resolved, replay)
+	}
+	select {
+	case response := <-responses:
+		t.Fatalf("disconnect answered shared approval: %+v", response)
+	default:
+	}
+	if err := as.RespondPermission(replay.RequestID, core.PermissionResult{Behavior: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case response := <-responses:
+		if string(response.ID) != `"approval"` || string(response.Result) != `{"decision":"accept"}` {
+			t.Fatalf("wrong replay response: %+v", response)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replayed approval could not be answered")
+	}
+}

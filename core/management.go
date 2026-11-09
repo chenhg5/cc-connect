@@ -1231,7 +1231,7 @@ func (m *ManagementServer) handleProjectSessions(w http.ResponseWriter, r *http.
 func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *http.Request, e *Engine, sessionID string) {
 	switch r.Method {
 	case http.MethodGet:
-		s := e.sessions.FindByID(sessionID)
+		agent, sessions, s, workspace := e.findSessionHistoryOwner(sessionID)
 		if s == nil {
 			mgmtError(w, http.StatusNotFound, "session not found")
 			return
@@ -1242,11 +1242,9 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 				histLimit = n
 			}
 		}
-		hist, historyErr := e.historyForSession(e.agent, s, histLimit)
-		if historyErr != nil {
-			mgmtError(w, http.StatusBadGateway, historyErr.Error())
-			return
-		}
+		// The helper logs upstream failures and retains local history. Session
+		// metadata must remain readable while the shared runtime is offline.
+		hist, _ := e.historyForSession(agent, s, histLimit)
 
 		histJSON := make([]map[string]any, len(hist))
 		for i, h := range hist {
@@ -1257,11 +1255,15 @@ func (m *ManagementServer) handleProjectSessionDetail(w http.ResponseWriter, r *
 			}
 		}
 
-		idToKey, activeIDs := e.sessions.SessionKeyMap()
+		idToKey, activeIDs := sessions.SessionKeyMap()
 		sessionKey := idToKey[s.ID]
 
+		interactiveKey := sessionKey
+		if workspace != "" {
+			interactiveKey = workspace + ":" + sessionKey
+		}
 		e.interactiveMu.Lock()
-		_, live := e.interactiveStates[sessionKey]
+		_, live := e.interactiveStates[interactiveKey]
 		e.interactiveMu.Unlock()
 
 		s.mu.Lock()

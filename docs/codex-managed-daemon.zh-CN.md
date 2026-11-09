@@ -106,6 +106,8 @@ app_server_url = "stdio://"
 
 只有显式设置 `backend = "app_server"` 和 `app_server_transport = "managed_daemon"` 才会启用托管 daemon。`daemon_*` 配置项仅用于此模式，不能混入旧 stdio 配置。
 
+CC-Connect 忽略其他线程的审批，不会因超时、断线或 detach 自动拒绝待审批请求。未解决的请求由 daemon 保留，在恢复线程时重发，重新连接的客户端会再次显示审批提示；已由其他客户端处理的请求不会再次出现。daemon 历史读取失败时，会话详情仍可查看，并回退到本地保存的历史。
+
 ## 2. 托管会话聊天命令
 
 以下命令主要用于 `managed_daemon` 模式。参数中的 `<id>` 可以是 thread ID 或当前 `/list` 显示的序号。

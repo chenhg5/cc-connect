@@ -412,6 +412,7 @@ func managedSubagent(source json.RawMessage) bool {
 	if json.Unmarshal(source, &object) != nil {
 		return false
 	}
-	_, exists := object["subagent"]
-	return exists
+	_, current := object["subAgent"]
+	_, legacy := object["subagent"]
+	return current || legacy
 }

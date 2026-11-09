@@ -25,6 +25,8 @@ func (s *managedSession) handleMessage(m daemonMessage) error {
 		return err
 	}
 	if scope.ThreadID != s.CurrentSessionID() && (m.Method != "warning" || scope.ThreadID != "") {
+		// Shared requests can belong to another client. Silence is intentional:
+		// a decline here would decide an approval outside our attached thread.
 		return nil
 	}
 	if len(m.ID) > 0 {
@@ -278,9 +280,8 @@ func (s *managedSession) completeManagedTurn(turnID, status, errorText string, r
 		s.mu.Unlock()
 		return nil
 	}
-	if len(s.completed) > 1024 {
-		s.completed = map[string]bool{}
-	}
+	// Retain turn IDs for this observer lifetime: reconnects can replay old
+	// terminal events even after a long-running thread has completed many turns.
 	s.completed[turnID] = true
 	for key, stream := range s.textStreams {
 		if stream.turnID == turnID {
