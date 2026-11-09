@@ -115,6 +115,9 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 			}
 			if input != nil {
 				p.lastToolInput[toolName] = input
+				if norm := normalizeAgyToolKey(toolName); norm != "" {
+					p.lastToolInput[norm] = input
+				}
 			}
 			if !p.toolSteps[step.StepIndex] {
 				p.toolSteps[step.StepIndex] = true
@@ -165,6 +168,7 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 			p.hasText = true
 			events = append(events, core.Event{Type: core.EventText, Content: notice})
 		}
+		clear(p.lastToolInput)
 	}
 	return true, events
 }
@@ -182,7 +186,7 @@ func (p *agyOutputParser) formatDeniedActions(actions []agyDeniedAction) string 
 		if name == "" {
 			continue
 		}
-		if target := agyActionTarget(p.lastToolInput[strings.TrimSpace(a.Action)]); target != "" {
+		if target := agyActionTarget(p.lookupDeniedToolInput(a)); target != "" {
 			name += " (" + target + ")"
 		}
 		if seen[name] {
@@ -196,6 +200,34 @@ func (p *agyOutputParser) formatDeniedActions(actions []agyDeniedAction) string 
 	}
 	return "⚠️ agy stopped this turn without finishing: it denied " + strings.Join(items, ", ") +
 		" because the action needs interactive confirmation, which agy print mode cannot ask for."
+}
+
+func (p *agyOutputParser) lookupDeniedToolInput(a agyDeniedAction) map[string]any {
+	for _, candidate := range []string{a.Action, a.DisplayName} {
+		key := strings.TrimSpace(candidate)
+		if key == "" {
+			continue
+		}
+		if in, ok := p.lastToolInput[key]; ok {
+			return in
+		}
+		if norm := normalizeAgyToolKey(key); norm != "" {
+			if in, ok := p.lastToolInput[norm]; ok {
+				return in
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeAgyToolKey(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // agyActionTarget picks the path or command a tool call acted on.

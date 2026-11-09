@@ -219,6 +219,24 @@ func TestAgyCLISupportsFlag(t *testing.T) {
 	if agyCLISupportsFlag(filepath.Join(t.TempDir(), "missing-agy"), nil, nil, "--settings") {
 		t.Fatal("a failed probe must report the flag as unsupported")
 	}
+
+	// A probe that exits non-zero with only an error message on stderr
+	// (even one mentioning '--help') must not be cached as valid help output.
+	flakyPath := filepath.Join(t.TempDir(), "flaky-agy.sh")
+	failScript := "#!/bin/sh\necho \"wrapper error: Try 'agy --help' for more information.\" >&2\nexit 1\n"
+	if err := os.WriteFile(flakyPath, []byte(failScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if agyCLISupportsFlag(flakyPath, nil, nil, "--settings") {
+		t.Fatal("failed probe with stderr output must report false")
+	}
+	okScript := "#!/bin/sh\nprintf 'Usage of agy:\\n  --settings   Settings for this session only\\n'\n"
+	if err := os.WriteFile(flakyPath, []byte(okScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !agyCLISupportsFlag(flakyPath, nil, nil, "--settings") {
+		t.Fatal("failed probe output was cached; subsequent probe did not see --settings")
+	}
 }
 
 func TestAntigravitySession_ResumePassesConversationID(t *testing.T) {

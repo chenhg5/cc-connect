@@ -104,3 +104,18 @@ func TestAgyOutputParser_DeniedNoticeAppendsAfterText(t *testing.T) {
 		t.Fatalf("events = %+v, want one deduplicated notice separated from streamed text", events)
 	}
 }
+
+func TestAgyOutputParser_DeniedNoticeMatchesNormalizedToolNameAndClearsOnResult(t *testing.T) {
+	parser := newAgyOutputParser()
+	_, _ = parser.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"rm -rf /tmp/x"}}}}`))
+	_, events := parser.parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"RunCommand","display_name":"RunCommand"}]}}`))
+	if len(events) != 1 || !strings.Contains(events[0].Content, "RunCommand (rm -rf /tmp/x)") {
+		t.Fatalf("events = %+v, want target matched across tool name casing", events)
+	}
+
+	// Subsequent result without a new tool step must not reuse the previous turn's input.
+	_, events = parser.parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"run_command","display_name":"RunCommand"}]}}`))
+	if len(events) != 1 || strings.Contains(events[0].Content, "rm -rf /tmp/x") {
+		t.Fatalf("events = %+v, want previous turn's tool input cleared after result", events)
+	}
+}

@@ -228,7 +228,10 @@ func agyBridgeCanAllowNonWorkspace(cmd string, extraArgs, extraEnv []string) boo
 	return true
 }
 
-var agyHelpCache sync.Map // command line -> agy --help output (string)
+var (
+	agyHelpCache      sync.Map // command line -> agy --help output (string)
+	agyHelpFlagLineRe = regexp.MustCompile(`(?m)^\s+--[A-Za-z]`)
+)
 
 // agyCLISupportsFlag reports whether the agy reached through cmd/extraArgs
 // lists flag in its --help output. The help text is the source of truth for
@@ -249,8 +252,13 @@ func agyCLISupportsFlag(cmd string, extraArgs, extraEnv []string, flag string) b
 		}
 		probe.Env = env
 		out, err := probe.CombinedOutput()
-		if len(bytes.TrimSpace(out)) == 0 {
-			slog.Warn("antigravitySession: probing agy --help failed", "cmd", cmd, "error", err)
+		trimmed := bytes.TrimSpace(out)
+		if len(trimmed) == 0 || (err != nil && !agyHelpFlagLineRe.Match(out)) {
+			snippet := string(trimmed)
+			if r := []rune(snippet); len(r) > 200 {
+				snippet = string(r[:200]) + "..."
+			}
+			slog.Warn("antigravitySession: probing agy --help failed", "cmd", cmd, "error", err, "output", snippet)
 			return false
 		}
 		// agy prints usage and exits 0; keep the output even on a non-zero
