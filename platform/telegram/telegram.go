@@ -1192,16 +1192,17 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
-	bot, err := p.connectedBot("reply")
-	if err != nil {
-		return err
-	}
 
 	// Try native Telegram Bot API 10.x sendRichMessage first
 	if _, err := p.sendRichMessage(ctx, rc.chatID, rc.threadID, rc.messageID, content, nil); err == nil {
 		return nil
 	} else {
 		slog.Debug("telegram: sendRichMessage fallback", "error", err)
+	}
+
+	bot, err := p.connectedBot("reply")
+	if err != nil {
+		return err
 	}
 
 	html := core.FormatSmartTelegramHTML(content)
@@ -1247,16 +1248,17 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
-	bot, err := p.connectedBot("send")
-	if err != nil {
-		return err
-	}
 
 	// Try native Telegram Bot API 10.x sendRichMessage first
 	if _, err := p.sendRichMessage(ctx, rc.chatID, rc.threadID, 0, content, nil); err == nil {
 		return nil
 	} else {
 		slog.Debug("telegram: sendRichMessage fallback", "error", err)
+	}
+
+	bot, err := p.connectedBot("send")
+	if err != nil {
+		return err
 	}
 
 	html := core.FormatSmartTelegramHTML(content)
@@ -1440,10 +1442,6 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	if !ok {
 		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
-	bot, err := p.connectedBot("send with buttons")
-	if err != nil {
-		return err
-	}
 
 	var rows [][]models.InlineKeyboardButton
 	for _, row := range buttons {
@@ -1460,6 +1458,11 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 		return nil
 	} else {
 		slog.Debug("telegram: sendRichMessage with buttons fallback", "error", err)
+	}
+
+	bot, err := p.connectedBot("send with buttons")
+	if err != nil {
+		return err
 	}
 
 	html := core.FormatSmartTelegramHTML(content)
@@ -1594,16 +1597,17 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	if !ok {
 		return nil, fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
-	bot, err := p.connectedBot("send preview")
-	if err != nil {
-		return nil, err
-	}
 
 	// Try native Telegram Bot API 10.x sendRichMessage first
 	if msg, err := p.sendRichMessage(ctx, rc.chatID, rc.threadID, 0, content, nil); err == nil && msg != nil {
 		return &telegramPreviewHandle{chatID: rc.chatID, threadID: rc.threadID, messageID: msg.ID}, nil
 	} else {
 		slog.Debug("telegram: sendRichMessage preview start fallback", "error", err)
+	}
+
+	bot, err := p.connectedBot("send preview")
+	if err != nil {
+		return nil, err
 	}
 
 	html := core.FormatSmartTelegramHTML(content)
@@ -1652,16 +1656,17 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if !ok {
 		return fmt.Errorf("telegram: invalid preview handle type %T", previewHandle)
 	}
-	bot, err := p.connectedBot("update message")
-	if err != nil {
-		return err
-	}
 
 	// Try native Telegram Bot API 10.x editRichMessage first
 	if _, err := p.editRichMessage(ctx, h.chatID, h.messageID, content, nil); err == nil {
 		return nil
 	} else {
 		slog.Debug("telegram: editRichMessage fallback", "error", err)
+	}
+
+	bot, err := p.connectedBot("update message")
+	if err != nil {
+		return err
 	}
 
 	html := core.FormatSmartTelegramHTML(content)

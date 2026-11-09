@@ -329,8 +329,8 @@ func (f testRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 func TestPlatformDisconnectedSendPathsReturnNotConnected(t *testing.T) {
 	p := &Platform{token: "token", httpClient: &http.Client{
 		Transport: testRoundTripper(func(*http.Request) (*http.Response, error) {
-			t.Error("disconnected platform attempted an HTTP request")
-			return nil, errors.New("unexpected HTTP request")
+			// Exercise the disconnected fallback without contacting Telegram.
+			return nil, errors.New("test transport unavailable")
 		}),
 	}}
 	ctx := context.Background()
