@@ -12,9 +12,12 @@ type agyOutputParser struct {
 	hasText   bool
 	toolSteps map[int]bool
 	// lastToolInput remembers the latest parameters per tool name so a
-	// denied_actions entry can name its target; agy may report the denied
-	// step as DONE without output or error.
-	lastToolInput map[string]map[string]any
+	// denied_actions entry can name its target. unsuccessfulToolInput keeps
+	// only steps that ended in ERROR, with an error, or as DONE without output
+	// (how agy sometimes reports a soft-denied step); it is preferred so a
+	// parallel successful call of the same tool cannot be named instead.
+	lastToolInput         map[string]map[string]any
+	unsuccessfulToolInput map[string]map[string]any
 }
 
 type agyOutputEnvelope struct {
@@ -62,7 +65,11 @@ type agyDeniedAction struct {
 }
 
 func newAgyOutputParser() *agyOutputParser {
-	return &agyOutputParser{toolSteps: make(map[int]bool), lastToolInput: make(map[string]map[string]any)}
+	return &agyOutputParser{
+		toolSteps:             make(map[int]bool),
+		lastToolInput:         make(map[string]map[string]any),
+		unsuccessfulToolInput: make(map[string]map[string]any),
+	}
 }
 
 // parseLine returns recognized=false for ordinary text output so older CLI
@@ -113,12 +120,7 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 			if toolName == "" {
 				toolName = "tool"
 			}
-			if input != nil {
-				p.lastToolInput[toolName] = input
-				if norm := normalizeAgyToolKey(toolName); norm != "" {
-					p.lastToolInput[norm] = input
-				}
-			}
+			rememberAgyToolInput(p.lastToolInput, toolName, input)
 			if !p.toolSteps[step.StepIndex] {
 				p.toolSteps[step.StepIndex] = true
 				toolInput := ""
@@ -151,6 +153,9 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 					result.ToolStatus = "failed"
 					success = false
 				}
+				if !success || result.ToolResult == "" {
+					rememberAgyToolInput(p.unsuccessfulToolInput, toolName, input)
+				}
 				result.ToolSuccess = &success
 				events = append(events, result)
 			}
@@ -169,6 +174,7 @@ func (p *agyOutputParser) parseLine(line []byte) (recognized bool, events []core
 			events = append(events, core.Event{Type: core.EventText, Content: notice})
 		}
 		clear(p.lastToolInput)
+		clear(p.unsuccessfulToolInput)
 	}
 	return true, events
 }
@@ -202,18 +208,32 @@ func (p *agyOutputParser) formatDeniedActions(actions []agyDeniedAction) string 
 		" because the action needs interactive confirmation, which agy print mode cannot ask for."
 }
 
+// rememberAgyToolInput stores input under the tool name and its normalized
+// form so lookups match across snake_case and CamelCase spellings.
+func rememberAgyToolInput(m map[string]map[string]any, toolName string, input map[string]any) {
+	if input == nil {
+		return
+	}
+	m[toolName] = input
+	if norm := normalizeAgyToolKey(toolName); norm != "" {
+		m[norm] = input
+	}
+}
+
 func (p *agyOutputParser) lookupDeniedToolInput(a agyDeniedAction) map[string]any {
-	for _, candidate := range []string{a.Action, a.DisplayName} {
-		key := strings.TrimSpace(candidate)
-		if key == "" {
-			continue
-		}
-		if in, ok := p.lastToolInput[key]; ok {
-			return in
-		}
-		if norm := normalizeAgyToolKey(key); norm != "" {
-			if in, ok := p.lastToolInput[norm]; ok {
+	for _, m := range []map[string]map[string]any{p.unsuccessfulToolInput, p.lastToolInput} {
+		for _, candidate := range []string{a.Action, a.DisplayName} {
+			key := strings.TrimSpace(candidate)
+			if key == "" {
+				continue
+			}
+			if in, ok := m[key]; ok {
 				return in
+			}
+			if norm := normalizeAgyToolKey(key); norm != "" {
+				if in, ok := m[norm]; ok {
+					return in
+				}
 			}
 		}
 	}

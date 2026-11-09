@@ -119,3 +119,23 @@ func TestAgyOutputParser_DeniedNoticeMatchesNormalizedToolNameAndClearsOnResult(
 		t.Fatalf("events = %+v, want previous turn's tool input cleared after result", events)
 	}
 }
+
+// When the same tool runs twice in one turn and only one call is denied, the
+// notice must name the denied call, not the later successful one.
+func TestAgyOutputParser_DeniedNoticePrefersUnsuccessfulParallelCall(t *testing.T) {
+	for _, denied := range []string{
+		`{"event":"step_update","step_update":{"step_index":2,"state":"ERROR","step_type":"tool","tool_name":"read_file","tool_info":{"parameters":{"Path":"/outside/secret.toml"},"error":{"message":"permission check failed"}}}}`,
+		// agy sometimes reports the soft-denied step as DONE without output.
+		`{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"read_file","tool_info":{"parameters":{"Path":"/outside/secret.toml"}}}}`,
+	} {
+		p := newAgyOutputParser()
+		p.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"read_file","tool_info":{"parameters":{"Path":"/outside/secret.toml"}}}}`))
+		p.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":3,"state":"ACTIVE","step_type":"tool","tool_name":"read_file","tool_info":{"parameters":{"Path":"/ws/main.go"}}}}`))
+		p.parseLine([]byte(denied))
+		p.parseLine([]byte(`{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"tool","tool_name":"read_file","tool_info":{"parameters":{"Path":"/ws/main.go"},"output":"10 lines"}}}`))
+		_, events := p.parseLine([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"read_file","display_name":"ReadFile"}]}}`))
+		if len(events) != 1 || !strings.Contains(events[0].Content, "ReadFile (/outside/secret.toml)") {
+			t.Fatalf("events = %+v, want notice naming the denied /outside/secret.toml", events)
+		}
+	}
+}
