@@ -826,9 +826,30 @@ func (p *cleaningPreviewPlatform) wasDeleted(handle any) bool {
 	return false
 }
 
-// runQuietPermissionTurn drives text -> tool -> permission -> text -> tool ->
-// text -> result on platform p, approving the prompt as soon as it shows.
-func runQuietPermissionTurn(t *testing.T, p Platform) *Session {
+var toolThenPermissionEvents = []Event{
+	{Type: EventText, Content: "Lead."},
+	{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+	{Type: EventPermissionRequest, RequestID: "r1", ToolName: "Bash", ToolInput: "ls"},
+	{Type: EventText, Content: "Mid."},
+	{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"},
+	{Type: EventText, Content: "Final."},
+	{Type: EventResult, Content: "Final.", Done: true},
+}
+
+// textThenPermissionEvents has a permission prompt with no tool_use right
+// before it.
+var textThenPermissionEvents = []Event{
+	{Type: EventText, Content: "Lead."},
+	{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+	{Type: EventText, Content: "Mid."},
+	{Type: EventPermissionRequest, RequestID: "r1", ToolName: "Bash", ToolInput: "pwd"},
+	{Type: EventText, Content: "Final."},
+	{Type: EventResult, Content: "Final.", Done: true},
+}
+
+// runQuietPermissionTurn drives events on platform p, approving the
+// permission prompt as soon as it shows.
+func runQuietPermissionTurn(t *testing.T, p Platform, events []Event) *Session {
 	t.Helper()
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(quietDefault)
@@ -853,15 +874,7 @@ func runQuietPermissionTurn(t *testing.T, p Platform) *Session {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}()
-	for _, ev := range []Event{
-		{Type: EventText, Content: "Lead."},
-		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
-		{Type: EventPermissionRequest, RequestID: "r1", ToolName: "Bash", ToolInput: "ls"},
-		{Type: EventText, Content: "Mid."},
-		{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"},
-		{Type: EventText, Content: "Final."},
-		{Type: EventResult, Content: "Final.", Done: true},
-	} {
+	for _, ev := range events {
 		sess.events <- ev
 	}
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-quiet-permission", time.Now(), nil, nil, state.replyCtx, 0)
@@ -880,7 +893,7 @@ func assertFinalReply(t *testing.T, sent []string, want string) {
 // after the last tool call.
 func TestQuiet_PermissionPromptKeepsBlocksApart(t *testing.T) {
 	p := &cleaningPreviewPlatform{cujStreamingPlatform: cujStreamingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
-	runQuietPermissionTurn(t, p)
+	runQuietPermissionTurn(t, p, toolThenPermissionEvents)
 
 	for i, s := range append(p.getSent(), previewFrames(&p.cujStreamingPlatform)...) {
 		if strings.Contains(s, "Mid.Final.") {
@@ -909,7 +922,7 @@ func TestQuiet_PermissionPromptKeepsBlocksApart(t *testing.T) {
 // the final reply is the text after the last tool call.
 func TestQuiet_PermissionPromptNoPreview_SendsOnlyFinal(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
-	runQuietPermissionTurn(t, p)
+	runQuietPermissionTurn(t, p, toolThenPermissionEvents)
 
 	for i, s := range p.getSent() {
 		if strings.Contains(s, "Lead.") || strings.Contains(s, "Mid.") {
@@ -917,6 +930,39 @@ func TestQuiet_PermissionPromptNoPreview_SendsOnlyFinal(t *testing.T) {
 		}
 	}
 	assertFinalReply(t, p.getSent(), "Final.")
+}
+
+// A permission prompt that follows text keeps that text apart from the text
+// after the prompt in the final reply.
+func TestQuiet_PermissionAfterText_KeepsBlocksApart(t *testing.T) {
+	p := &cleaningPreviewPlatform{cujStreamingPlatform: cujStreamingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+	runQuietPermissionTurn(t, p, textThenPermissionEvents)
+
+	for i, s := range append(p.getSent(), previewFrames(&p.cujStreamingPlatform)...) {
+		if strings.Contains(s, "Mid.Final.") {
+			t.Errorf("message %d glues two text blocks together: %q", i, s)
+		}
+	}
+	for i, s := range p.getSent() {
+		if strings.Contains(s, "Lead.") {
+			t.Errorf("sent message %d shows the lead-in: %q", i, s)
+		}
+	}
+	assertFinalReply(t, p.getSent(), "Mid.\n\nFinal.")
+}
+
+// Without a stream preview, a permission prompt that follows text keeps that
+// text apart from the text after the prompt in the final reply.
+func TestQuiet_PermissionAfterTextNoPreview_KeepsBlocksApart(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	runQuietPermissionTurn(t, p, textThenPermissionEvents)
+
+	for i, s := range p.getSent() {
+		if strings.Contains(s, "Lead.") {
+			t.Errorf("sent message %d shows the lead-in: %q", i, s)
+		}
+	}
+	assertFinalReply(t, p.getSent(), "Mid.\n\nFinal.")
 }
 
 // A NO_REPLY result after the last tool call keeps the turn silent, even

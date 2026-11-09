@@ -6193,8 +6193,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Flush accumulated text segment before permission prompt.
 			// Quiet mode sends nothing and deletes the live preview; the
-			// final reply picks from the text so far.
+			// final reply picks from the text so far. A separator ends the
+			// text before the prompt so the reply keeps it apart from the
+			// text after.
 			if e.display.quietDropsPreTool() {
+				if strings.TrimSpace(postToolText()) != "" {
+					textParts = append(textParts, "\n\n")
+				}
 				sp.deletePreview()
 			} else {
 				previewActive := sp.canPreview()
