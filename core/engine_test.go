@@ -17341,6 +17341,126 @@ func TestProcessInteractiveEvents_HiddenProgressStreamCard_HookRejectionKeepsEar
 	}
 }
 
+// The card re-renders right after a Stop-hook rejection, without the draft.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_HookRejectionRerendersCard(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Draft answer."},
+		{Type: EventHookRejected},
+		{Type: EventText, Content: "Rewritten answer."},
+		{Type: EventResult, Content: "Rewritten answer.", Done: true},
+	})
+	updates := card.updateContents()
+	last := -1
+	for i, u := range updates {
+		if strings.Contains(u, "Draft answer.") {
+			last = i
+		}
+	}
+	if last < 0 || last+1 >= len(updates) {
+		t.Fatalf("no card update after the draft: %#v", updates)
+	}
+	if got, want := updates[last+1], "Lead-in.\n\n"; got != want {
+		t.Fatalf("card update after the rejection = %q, want %q", got, want)
+	}
+}
+
+// The result carries the answer when no text was streamed after the last
+// boundary.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_ResultContentAfterBoundary(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	session := runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Lead-in."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventResult, Content: "The actual answer.", Done: true},
+	})
+	want := "Lead-in.\n\nThe actual answer."
+	if got := card.finalContent(); got != want {
+		t.Fatalf("finalized card = %q, want %q", got, want)
+	}
+	if got := lastAssistantHistory(t, session); got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no standalone messages, got %#v", sent)
+	}
+}
+
+// A result that only ends the closed text partway through a sentence is still
+// the answer.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_ResultMatchingClosedTailMidSentence(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "Running ls."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventResult, Content: "ls.", Done: true},
+	})
+	if got, want := card.finalContent(), "Running ls.\n\nls."; got != want {
+		t.Fatalf("finalized card = %q, want %q", got, want)
+	}
+}
+
+// A bare NO_REPLY closed by a boundary stays out of the card and the history.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_NoReplyBeforeToolDropped(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	session := runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "NO_REPLY"},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Real answer."},
+		{Type: EventResult, Content: "Real answer.", Done: true},
+	})
+	if got, want := card.finalContent(), "Real answer."; got != want {
+		t.Fatalf("finalized card = %q, want %q", got, want)
+	}
+	if got, want := lastAssistantHistory(t, session), "Real answer."; got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+}
+
+// A bare NO_REPLY closed by a boundary, followed by an empty result, keeps the
+// turn silent.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_NoReplyBeforeToolStaysSilent(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "NO_REPLY"},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventResult, Content: "", Done: true},
+	})
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("expected no standalone messages, got %#v", sent)
+	}
+	final := card.finalContent()
+	if strings.Contains(final, "NO_REPLY") || strings.Contains(final, "(empty response)") {
+		t.Fatalf("finalized card = %q, want a silent turn", final)
+	}
+}
+
+// A NO_REPLY prefix closed by a boundary never reaches the card, including the
+// re-render after a Stop-hook rejection.
+func TestProcessInteractiveEvents_HiddenProgressStreamCard_HeldPrefixNotRenderedAfterHookRejection(t *testing.T) {
+	card := &recordingStreamCard{}
+	p := newCardPlatform(card)
+	runHiddenProgressStreamCardTurn(t, p, hiddenProgressTurn{}, []Event{
+		{Type: EventText, Content: "NO_RE"},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventHookRejected},
+		{Type: EventText, Content: "New answer."},
+		{Type: EventResult, Content: "New answer.", Done: true},
+	})
+	for _, u := range append(card.updateContents(), card.finalContent()) {
+		if strings.Contains(u, "NO_RE") {
+			t.Fatalf("card leaked the held prefix: %q", u)
+		}
+	}
+}
+
 // Without a card, a Stop-hook rejection after a tool boundary delivers the
 // rewritten answer once and never the draft.
 func TestProcessInteractiveEvents_HiddenProgressNoCard_HookRejectionAfterToolBoundary(t *testing.T) {
