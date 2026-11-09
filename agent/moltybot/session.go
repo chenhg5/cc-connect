@@ -108,7 +108,11 @@ func (s *session) Send(prompt string, messageID string, images []core.ImageAttac
 	if err != nil {
 		return fmt.Errorf("moltybot: post bridge message: %s", core.RedactToken(err.Error(), s.token))
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Warn("moltybot: close bridge response", "error", core.RedactToken(err.Error(), s.token))
+		}
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
