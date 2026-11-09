@@ -136,8 +136,9 @@ level = "info" # debug, info, warn, error
 #                           #        pre-tool "lead-in" is dropped by default. See
 #                           #        prepend_pre_tool_text below to opt back in.
 #                           #        If nothing follows the last tool_use, the text
-#                           #        block before it is delivered. While a tool runs,
-#                           #        the Feishu rich card clears the lead-in at once;
+#                           #        block before it is delivered. Pre-tool text still
+#                           #        streams live while it is written; once a tool
+#                           #        starts, the Feishu rich card clears it, and
 #                           #        streaming cards and stream previews keep it until
 #                           #        the first post-tool text replaces it. With
 #                           #        tool_messages = true, every segment is delivered.
@@ -145,8 +146,8 @@ level = "info" # debug, info, warn, error
 #                           #        tool_use 之后的文本块；默认丢弃 tool_use 之前的"开场白"。
 #                           #        如需保留开场白，请见下面的 prepend_pre_tool_text。
 #                           #        若最后一个 tool_use 之后没有文本，则投递它之前的文本块。
-#                           #        工具运行时，飞书富卡片会立即清除开场白；流式卡片和流式
-#                           #        预览会保留开场白，直到 tool_use 之后的第一段文本将其替换。
+#                           #        tool_use 之前的文本在生成时仍会实时显示；工具开始运行后，飞书富卡片会将其清除，
+#                           #        流式卡片和流式预览会保留它，直到 tool_use 之后的第一段文本将其替换。
 #                           #        tool_messages = true 时会投递每一段文本。
 # thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）

@@ -5490,6 +5490,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	postToolText := func() string {
 		return strings.Join(textParts[postLastToolStart:], "")
 	}
+	// quietReply is the text quiet mode delivers: the text after the last
+	// tool_use, or the most recent text block when nothing follows it.
+	quietReply := func() string {
+		if strings.TrimSpace(postToolText()) == "" && prevBlockEnd > prevBlockStart {
+			return strings.Join(textParts[prevBlockStart:prevBlockEnd], "")
+		}
+		return postToolText()
+	}
 	// visibleBody is the answer text a card or preview shows, given the full
 	// text that renderer has accumulated.
 	visibleBody := func(full string) string {
@@ -6183,23 +6191,29 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 
-			// Flush accumulated text segment before permission prompt
-			previewActive := sp.canPreview()
-			if len(textParts) > segmentStart {
-				if !previewActive {
-					segment := strings.Join(textParts[segmentStart:], "")
-					if segment != "" {
-						for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
-							sendWorkspace(p, replyCtx, chunk)
+			// Flush accumulated text segment before permission prompt.
+			// Quiet mode sends nothing and deletes the live preview; the
+			// final reply picks from the text so far.
+			if e.display.quietDropsPreTool() {
+				sp.deletePreview()
+			} else {
+				previewActive := sp.canPreview()
+				if len(textParts) > segmentStart {
+					if !previewActive {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+								sendWorkspace(p, replyCtx, chunk)
+							}
 						}
 					}
+					segmentStart = len(textParts)
+					silentHold = false
 				}
-				segmentStart = len(textParts)
-				silentHold = false
-			}
-			sp.freeze()
-			if previewActive {
-				sp.detachPreview() // keep frozen preview visible as permanent message
+				sp.freeze()
+				if previewActive {
+					sp.detachPreview() // keep frozen preview visible as permanent message
+				}
 			}
 
 			slog.Info("permission request",
@@ -6241,10 +6255,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			<-pending.Resolved
 			slog.Info("permission resolved", "request_id", event.RequestID)
 
-			// The stream preview was frozen+detached when this permission
-			// request was emitted, so any subsequent EventText in this turn
-			// would otherwise be buffered until EventResult and sent as a
-			// single bulk message (regression fixed by
+			// The stream preview was frozen+detached (deleted in quiet mode)
+			// when this permission request was emitted, so any subsequent
+			// EventText in this turn would otherwise be buffered until
+			// EventResult and sent as a single bulk message (regression fixed by
 			// fix/stream-preview-after-permission). unfreeze() restores the
 			// preview so the post-resolution output opens a fresh streaming
 			// card and continues to update incrementally.
@@ -6303,17 +6317,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
-				// Quiet mode delivers the text after the last tool_use, or the
-				// most recent text block when nothing follows it.
-				textSource := textParts
+			// A NO_REPLY result with no text after the last tool_use keeps
+			// the quiet turn silent.
+			quietSilent := false
+			if e.display.quietDropsPreTool() && strings.TrimSpace(postToolText()) == "" {
+				stripped, ok := stripTrailingSilent(fullResponse)
+				quietSilent = isSilentReply(fullResponse) || (ok && strings.TrimSpace(stripped) == "")
+			}
+			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages && !quietSilent {
 				if e.display.quietDropsPreTool() {
-					textSource = textParts[postLastToolStart:]
-					if strings.TrimSpace(postToolText()) == "" && prevBlockEnd > prevBlockStart {
-						textSource = textParts[prevBlockStart:prevBlockEnd]
-					}
+					fullResponse = quietReply()
+				} else {
+					fullResponse = strings.Join(textParts, "")
 				}
-				fullResponse = strings.Join(textSource, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
@@ -6959,6 +6975,9 @@ channelClosed:
 		state.mu.Unlock()
 
 		fullResponse := strings.Join(textParts, "")
+		if e.display.quietDropsPreTool() {
+			fullResponse = quietReply()
+		}
 		session.AddHistory("assistant", fullResponse)
 		// Persist immediately — this path runs on abnormal channel close,
 		// so deferring the save until the next foreground turn risks losing

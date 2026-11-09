@@ -409,6 +409,24 @@ func (sp *streamPreview) discard() {
 	sp.degraded = true
 }
 
+// deletePreview removes the preview message when the platform can delete it
+// and pauses updates until unfreeze opens a new one.
+func (sp *streamPreview) deletePreview() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	sp.cancelTimerLocked()
+	if sp.previewMsgID != nil {
+		if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+			if err := cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID); err != nil {
+				slog.Debug("stream preview: delete failed", "error", err)
+			}
+		}
+	}
+	sp.previewMsgID = nil
+	sp.degraded = true
+}
+
 // finish is called when the agent response is complete. It cancels any pending
 // timer and optionally cleans up the preview message.
 // Returns true if a preview was active and the final message was sent via preview

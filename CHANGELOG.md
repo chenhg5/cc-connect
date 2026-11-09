@@ -30,6 +30,9 @@ Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability,
 ### Fixed
 - **Feishu**: a hung display-name lookup no longer holds an inbound message (in one case for 16 minutes, after which a stale `/new` ran): user/chat name lookups time out after 5s and fall back to the ID, the no-name answer for p2p chats is cached, card actions (`perm:`/`askq:`/`cmd:`) resolve names outside the callback, and failed lookup requests log at Warn (#2017, #2018).
 
+### Changed
+- **Quiet mode**: `display.mode = "quiet"` delivers only the text after the last tool call; the text before it is no longer sent. `display.prepend_pre_tool_text = true` restores the previous output (#1919).
+
 ## Unreleased
 
 ### Added

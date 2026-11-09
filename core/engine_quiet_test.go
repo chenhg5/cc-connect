@@ -13,7 +13,9 @@ package core
 // in EventResult.
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -799,10 +801,35 @@ func TestQuiet_Preview_PrependOptInKeepsLeadIn(t *testing.T) {
 	}
 }
 
-// A permission prompt between tool calls sends the text after it as its own
-// message; its blocks must stay apart.
-func TestQuiet_PermissionPromptKeepsBlocksApart(t *testing.T) {
-	p := &cujStreamingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+// cleaningPreviewPlatform is a stream-preview platform that can delete
+// previews, and records the handles it deleted.
+type cleaningPreviewPlatform struct {
+	cujStreamingPlatform
+	deleted []any
+}
+
+func (p *cleaningPreviewPlatform) DeletePreviewMessage(_ context.Context, handle any) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.deleted = append(p.deleted, handle)
+	return nil
+}
+
+func (p *cleaningPreviewPlatform) wasDeleted(handle any) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, h := range p.deleted {
+		if h == handle {
+			return true
+		}
+	}
+	return false
+}
+
+// runQuietPermissionTurn drives text -> tool -> permission -> text -> tool ->
+// text -> result on platform p, approving the prompt as soon as it shows.
+func runQuietPermissionTurn(t *testing.T, p Platform) *Session {
+	t.Helper()
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	e.SetDisplayConfig(quietDefault)
 	e.SetReplyFooterEnabled(false)
@@ -838,11 +865,74 @@ func TestQuiet_PermissionPromptKeepsBlocksApart(t *testing.T) {
 		sess.events <- ev
 	}
 	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-quiet-permission", time.Now(), nil, nil, state.replyCtx, 0)
+	return session
+}
 
-	for i, s := range append(p.getSent(), previewFrames(p)...) {
+func assertFinalReply(t *testing.T, sent []string, want string) {
+	t.Helper()
+	if len(sent) == 0 || sent[len(sent)-1] != want {
+		t.Fatalf("sent = %q, want the final reply %q last", sent, want)
+	}
+}
+
+// A permission prompt sends no text before it. The live preview of the
+// lead-in is deleted, its blocks stay apart, and the final reply is the text
+// after the last tool call.
+func TestQuiet_PermissionPromptKeepsBlocksApart(t *testing.T) {
+	p := &cleaningPreviewPlatform{cujStreamingPlatform: cujStreamingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
+	runQuietPermissionTurn(t, p)
+
+	for i, s := range append(p.getSent(), previewFrames(&p.cujStreamingPlatform)...) {
 		if strings.Contains(s, "Mid.Final.") {
 			t.Errorf("message %d glues two text blocks together: %q", i, s)
 		}
+	}
+	for i, s := range p.getSent() {
+		if strings.Contains(s, "Lead.") {
+			t.Errorf("sent message %d shows the lead-in: %q", i, s)
+		}
+	}
+	for i, open := range p.getPreviewOpens() {
+		if handle := fmt.Sprintf("preview-%d", i+1); strings.Contains(open, "Lead.") && !p.wasDeleted(handle) {
+			t.Errorf("preview %s shows the lead-in and was not deleted", handle)
+		}
+	}
+	for i, u := range p.getPreviewUpdates() {
+		if strings.Contains(u.Content, "Lead.") {
+			t.Errorf("preview update %d shows the lead-in: %q", i, u.Content)
+		}
+	}
+	assertFinalReply(t, p.getSent(), "Final.")
+}
+
+// Without a stream preview, a permission prompt sends no text before it and
+// the final reply is the text after the last tool call.
+func TestQuiet_PermissionPromptNoPreview_SendsOnlyFinal(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	runQuietPermissionTurn(t, p)
+
+	for i, s := range p.getSent() {
+		if strings.Contains(s, "Lead.") || strings.Contains(s, "Mid.") {
+			t.Errorf("sent message %d shows text before the last tool call: %q", i, s)
+		}
+	}
+	assertFinalReply(t, p.getSent(), "Final.")
+}
+
+// A NO_REPLY result after the last tool call keeps the turn silent, even
+// though no text followed the tool call.
+func TestQuiet_SilentResultAfterTool_StaysSilent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	session := runQuietEvents(t, p, quietDefault, []Event{
+		{Type: EventText, Content: "LEADIN."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventResult, Content: "NO_REPLY", Done: true},
+	})
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Fatalf("sent = %#v, want nothing for a silent turn", sent)
+	}
+	if got := lastAssistantHistory(t, session); got != "NO_REPLY" {
+		t.Errorf("history = %q, want %q", got, "NO_REPLY")
 	}
 }
 
@@ -884,5 +974,42 @@ func TestQuiet_AgentExitAfterToolHidesMarker(t *testing.T) {
 		if strings.Contains(s, "NO_REPLY") {
 			t.Errorf("message %d shows the NO_REPLY marker: %q", i, s)
 		}
+	}
+}
+
+// An agent that exits after text -> tool -> text delivers only the text
+// after the tool call.
+func TestQuiet_AgentExitAfterTool_DeliversPostToolText(t *testing.T) {
+	p := &cujStreamingPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	e.SetDisplayConfig(quietDefault)
+	e.SetReplyFooterEnabled(false)
+	e.SetStreamPreviewCfg(StreamPreviewCfg{Enabled: true})
+
+	sessionKey := "test:quiet-exit-final"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	sess := &closingSession{controllableAgentSession: newControllableSession("s-quiet-exit-final"), ch: make(chan Event, 8)}
+	state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx-quiet-exit-final"}
+	e.interactiveStates[sessionKey] = state
+
+	for _, ev := range []Event{
+		{Type: EventText, Content: "Lead."},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"},
+		{Type: EventText, Content: "Final."},
+	} {
+		sess.ch <- ev
+	}
+	close(sess.ch)
+	e.processInteractiveEvents(state, session, e.sessions, sessionKey, "m-quiet-exit-final", time.Now(), nil, nil, state.replyCtx, 0)
+
+	frames := previewFrames(p)
+	if len(frames) == 0 || frames[len(frames)-1] != "Final." {
+		t.Fatalf("preview frames = %q, want %q last", frames, "Final.")
+	}
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Errorf("sent = %q, want the reply delivered through the preview only", sent)
+	}
+	if got := lastAssistantHistory(t, session); got != "Final." {
+		t.Errorf("history = %q, want %q", got, "Final.")
 	}
 }
