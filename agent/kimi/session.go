@@ -482,9 +482,10 @@ func (ks *kimiSession) handleTool(raw map[string]any) {
 	if output != "" && !ks.suppressIntermediateEvents() {
 		slog.Debug("kimiSession: tool result", "tool_call_id", toolCallID)
 		evt := core.Event{
-			Type:       core.EventToolResult,
-			ToolName:   toolCallID,
-			ToolResult: truncate(strings.TrimSpace(output), 500),
+			Type:           core.EventToolResult,
+			ToolName:       toolCallID,
+			ToolResult:     truncate(strings.TrimSpace(output), 500),
+			ToolResultTail: core.ToolOutputTail(output),
 		}
 		select {
 		case ks.events <- evt:

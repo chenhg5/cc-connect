@@ -989,22 +989,12 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 	switch role {
 	case "toolResult":
 		toolName, _ := msg["toolName"].(string)
-		content, _ := msg["content"].([]any)
-		var output string
-		if len(content) > 0 {
-			if item, ok := content[0].(map[string]any); ok {
-				if text, ok := item["text"].(string); ok {
-					output = text
-				}
-			}
-		}
-		if output == "" {
-			output = extractToolResult(msg)
-		}
+		output := extractToolResult(msg)
 		evt := core.Event{
-			Type:     core.EventToolResult,
-			ToolName: toolName,
-			Content:  truncStr(output, 500),
+			Type:           core.EventToolResult,
+			ToolName:       toolName,
+			Content:        truncStr(output, 500),
+			ToolResultTail: core.ToolOutputTail(output),
 		}
 		select {
 		case s.events <- evt:
@@ -1028,21 +1018,18 @@ func (s *piSession) handleMessageEnd(raw map[string]any) {
 
 func extractToolResult(msg map[string]any) string {
 	content, _ := msg["content"].([]any)
+	var parts []string
 	for _, c := range content {
 		if item, ok := c.(map[string]any); ok {
-			// Look for the "text" key first; fall back to any string field.
-			if text, ok := item["text"].(string); ok && text != "" {
-				return text
-			}
-			if output, ok := item["output"].(string); ok && output != "" {
-				return output
-			}
-			if content, ok := item["content"].(string); ok && content != "" {
-				return content
+			for _, key := range []string{"text", "output", "content"} {
+				if text, ok := item[key].(string); ok && text != "" {
+					parts = append(parts, text)
+					break
+				}
 			}
 		}
 	}
-	return ""
+	return strings.Join(parts, "\n")
 }
 
 func (s *piSession) handleAgentEnd(raw map[string]any) {
