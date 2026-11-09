@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -154,7 +153,9 @@ type appServerSession struct {
 	codexHome      string
 	promptPreamble string
 
-	events chan core.Event
+	events       chan core.Event
+	eventsMu     sync.RWMutex // publishers share the lock; Close owns channel closure
+	eventsClosed bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -177,10 +178,12 @@ type appServerSession struct {
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup
+	readDone  chan struct{} // drain stdout before cmd.Wait closes its pipe
 
 	stateMu      sync.Mutex
 	pendingMsgs  []string
 	currentTurn  string
+	turnRevision uint64 // terminal notifications can precede the turn/start response
 	preambleSent bool
 
 	runtimeMu sync.RWMutex
@@ -315,6 +318,7 @@ func (s *appServerSession) connect() error {
 	slog.Info("codex app-server session started", "transport", "stdio", "pid", cmd.Process.Pid, "work_dir", s.workDir)
 
 	s.wg.Add(3)
+	s.readDone = make(chan struct{})
 	go s.readLoop(stdout)
 	go s.stderrLoop(stderr)
 	go s.waitLoop()
@@ -486,6 +490,7 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	}
 
 	s.stateMu.Lock()
+	turnRevision := s.turnRevision
 	if !s.preambleSent {
 		prompt = prependCodexPromptPreamble(prompt, s.promptPreamble)
 		s.preambleSent = true
@@ -533,6 +538,15 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	}
 
 	s.stateMu.Lock()
+	if s.turnRevision != turnRevision {
+		// A notification already finished this turn while its response waited.
+		s.stateMu.Unlock()
+		return nil
+	}
+	if !s.alive.Load() {
+		s.stateMu.Unlock()
+		return fmt.Errorf("codex app-server connection closed during turn/start: %w", io.EOF)
+	}
 	s.currentTurn = resp.Turn.ID
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
@@ -1028,6 +1042,9 @@ func (s *appServerSession) Close() error {
 	}
 
 	s.closeOnce.Do(func() {
+		s.eventsMu.Lock()
+		defer s.eventsMu.Unlock()
+		s.eventsClosed = true
 		close(s.events)
 	})
 	return nil
@@ -1035,6 +1052,9 @@ func (s *appServerSession) Close() error {
 
 func (s *appServerSession) readLoop(r io.Reader) {
 	defer s.wg.Done()
+	if s.readDone != nil {
+		defer close(s.readDone)
+	}
 
 	err := readJSONLines(r, func(data []byte) error {
 		select {
@@ -1078,17 +1098,10 @@ func (s *appServerSession) readLoop(r io.Reader) {
 		return nil
 	})
 
-	if err != nil {
-		if s.ctx.Err() == nil && !errors.Is(err, io.EOF) {
-			slog.Warn("codex app-server read failed", "error", err)
-			s.emitError(fmt.Errorf("codex app-server connection closed: %w", err))
-		}
-	} else {
+	if err == nil {
 		err = io.EOF
 	}
-	s.alive.Store(false)
-	s.rejectPending(err)
-	s.rejectPendingApprovals(err)
+	s.finishTransport(fmt.Errorf("codex app-server connection closed: %w", err))
 }
 
 func (s *appServerSession) stderrLoop(r io.Reader) {
@@ -1118,16 +1131,36 @@ func (s *appServerSession) waitLoop() {
 		return
 	}
 
-	err := cmd.Wait()
-	if s.ctx.Err() == nil && err != nil {
-		slog.Warn("codex app-server exited unexpectedly", "error", err)
-		s.emitError(fmt.Errorf("codex app-server exited: %w", err))
+	if s.readDone != nil {
+		select {
+		case <-s.readDone:
+		case <-s.contextDone():
+		}
 	}
-	s.alive.Store(false)
+	err := cmd.Wait()
 	if err == nil {
 		err = io.EOF
 	}
+	s.finishTransport(fmt.Errorf("codex app-server exited: %w", err))
+}
+
+// Retire the active turn once. Release RPC/approval waiters before event
+// delivery, which may be blocked behind a slow consumer.
+func (s *appServerSession) finishTransport(err error) {
+	s.stateMu.Lock()
+	s.alive.Store(false)
+	active := s.currentTurn != ""
+	if active {
+		s.currentTurn = ""
+		s.pendingMsgs = s.pendingMsgs[:0]
+		s.turnRevision++
+	}
+	s.stateMu.Unlock()
 	s.rejectPending(err)
+	s.rejectPendingApprovals(err)
+	if active {
+		s.emitError(err)
+	}
 }
 
 func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
@@ -1193,16 +1226,11 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 		}
 
 	case "thread/status/changed":
-		var notif struct {
-			ThreadID string `json:"threadId"`
-			Status   struct {
-				Type string `json:"type"`
-			} `json:"status"`
-		}
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && notif.Status.Type == "idle" && s.acceptsThreadNotification(method, notif.ThreadID) {
-			// In codex 0.125+, thread going idle signals turn completion.
-			s.completeTurn()
-		}
+		// Thread status has neither a turn ID nor a terminal outcome. An idle
+		// notification may precede the final items or a failed turn/completed,
+		// and a delayed idle may belong to the previous turn. Only the matching
+		// turn/completed notification can finish the active turn.
+		return
 
 	case "account/rateLimits/updated":
 		var notif appServerRateLimitsResponse
@@ -1219,7 +1247,10 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 	case "error":
 		var notif errorNotification
 		if err := json.Unmarshal(paramsRaw, &notif); err == nil && strings.TrimSpace(notif.Message) != "" {
-			s.emitError(fmt.Errorf("%s", notif.Message))
+			err := fmt.Errorf("%s", notif.Message)
+			if !s.failTurn(err) {
+				s.emitError(err) // retain connection errors outside an active turn
+			}
 		}
 	}
 }
@@ -1610,21 +1641,24 @@ func (s *appServerSession) completeTurn() {
 		return
 	}
 	s.currentTurn = ""
+	s.turnRevision++
 	s.stateMu.Unlock()
 	s.flushPendingAsText()
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
 }
 
-func (s *appServerSession) failTurn(err error) {
+func (s *appServerSession) failTurn(err error) bool {
 	s.stateMu.Lock()
 	if s.currentTurn == "" {
 		s.stateMu.Unlock()
-		return
+		return false
 	}
 	s.currentTurn = ""
+	s.turnRevision++
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 	s.emitError(err)
+	return true
 }
 
 func (s *appServerSession) flushPendingAsThinking() {
@@ -1654,11 +1688,31 @@ func (s *appServerSession) flushPendingAsText() {
 }
 
 func (s *appServerSession) emit(event core.Event) {
+	s.eventsMu.RLock()
+	defer s.eventsMu.RUnlock()
+	if s.eventsClosed {
+		return
+	}
+	select {
+	case <-s.contextDone():
+		return
+	default:
+	}
 	select {
 	case s.events <- event:
+		return
 	default:
-		slog.Warn("codex appserver: event channel full, dropping event", "type", event.Type)
 	}
+	if event.Type == core.EventResult || event.Type == core.EventError || event.Done {
+		// Preserve FIFO and terminal delivery. Close cancels this wait before
+		// taking eventsMu to close the channel.
+		select {
+		case s.events <- event:
+		case <-s.contextDone():
+		}
+		return
+	}
+	slog.Warn("codex appserver: event channel full, dropping event", "type", event.Type)
 }
 
 func (s *appServerSession) emitError(err error) {

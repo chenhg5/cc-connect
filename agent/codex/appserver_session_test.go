@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -335,7 +339,12 @@ func TestAppServerSession_ReadLoopHandlesLargeResponseLine(t *testing.T) {
 		if decoded.Thread.ID != "thread-large" {
 			t.Fatalf("thread id = %q, want thread-large", decoded.Thread.ID)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
+		// The budget is for a hung read loop, not for machine speed: what this
+		// asserts is that readJSONLines has no 64 KB scanner cap, and decoding
+		// 11 MB on a loaded CI runner can take far longer than the 2 s it used
+		// to allow (2026-10-29: it timed out there while green on every local
+		// run and on the CI re-run of the same commit).
 		t.Fatal("timed out waiting for large response")
 	}
 
@@ -685,6 +694,314 @@ func (w *lockedWriteCloser) String() string {
 }
 
 var _ io.WriteCloser = (*lockedWriteCloser)(nil)
+
+func newTransportTestSession(t *testing.T) *appServerSession {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &appServerSession{
+		ctx: ctx, cancel: cancel, events: make(chan core.Event, 128),
+		currentTurn: "turn-1",
+	}
+	s.threadID.Store("thread-1")
+	s.alive.Store(true)
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func awaitTransportTest(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("app-server operation did not finish")
+	}
+}
+
+func TestAppServerSession_TransportEOFFinishesActiveTurn(t *testing.T) {
+	s := newTransportTestSession(t)
+	rpc := make(chan rpcResponseEnvelope, 1)
+	approval := make(chan core.PermissionResult, 1)
+	s.pending = map[int64]chan rpcResponseEnvelope{1: rpc}
+	s.pendingApprovals = map[string]chan core.PermissionResult{"approval": approval}
+	s.wg.Add(1)
+	s.readLoop(strings.NewReader(""))
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || !errors.Is(event.Error, io.EOF) {
+			t.Fatalf("EOF event = %#v, want terminal EOF error", event)
+		}
+	default:
+		t.Fatal("EOF left the active turn waiting without a terminal event")
+	}
+	if s.Alive() || s.currentTurn != "" {
+		t.Fatal("EOF left the transport or turn active")
+	}
+	select {
+	case response := <-rpc:
+		if response.Error == nil {
+			t.Fatal("pending RPC was not rejected")
+		}
+	default:
+		t.Fatal("pending RPC was not released")
+	}
+	select {
+	case result := <-approval:
+		if result.Behavior != "deny" {
+			t.Fatalf("pending approval = %#v", result)
+		}
+	default:
+		t.Fatal("pending approval was not released")
+	}
+}
+
+func TestAppServerSession_TransportEOFDoesNotDuplicateTerminal(t *testing.T) {
+	for _, state := range []string{"idle", "completed", "failed", "error", "canceled"} {
+		t.Run(state, func(t *testing.T) {
+			s := newTransportTestSession(t)
+			switch state {
+			case "idle":
+				s.currentTurn = ""
+			case "completed":
+				s.handleNotification("turn/completed", json.RawMessage(`{"turn":{"id":"turn-1"}}`))
+			case "failed":
+				s.handleNotification("turn/completed", json.RawMessage(`{"turn":{"id":"turn-1","status":"failed"}}`))
+			case "error":
+				s.handleNotification("error", json.RawMessage(`{"message":"failed"}`))
+			case "canceled":
+				s.cancel()
+			}
+			before := len(s.events)
+			s.wg.Add(1)
+			s.readLoop(strings.NewReader(""))
+			if len(s.events) != before {
+				t.Fatalf("EOF emitted an extra terminal event after %s", state)
+			}
+		})
+	}
+}
+
+func TestAppServerSession_TransportReadFailureFinishesTurn(t *testing.T) {
+	s := newTransportTestSession(t)
+	failure := errors.New("broken transport")
+	s.wg.Add(1)
+	s.readLoop(iotest.ErrReader(failure))
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || !errors.Is(event.Error, failure) {
+			t.Fatalf("read failure = %#v", event)
+		}
+	default:
+		t.Fatal("read failure did not finish the turn")
+	}
+	if s.Alive() || s.currentTurn != "" {
+		t.Fatal("read failure left the transport or turn active")
+	}
+}
+
+func TestAppServerSession_TransportIdleErrorRemainsVisible(t *testing.T) {
+	s := newTransportTestSession(t)
+	s.currentTurn = ""
+	s.handleNotification("error", json.RawMessage(`{"message":"connection error"}`))
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || event.Error.Error() != "connection error" {
+			t.Fatalf("idle error = %#v", event)
+		}
+	default:
+		t.Fatal("connection error outside a turn was suppressed")
+	}
+}
+
+func TestAppServerSession_TerminalSurvivesFullQueue(t *testing.T) {
+	for _, terminal := range []core.Event{
+		{Type: core.EventResult, Done: true},
+		{Type: core.EventError, Error: io.EOF},
+		{Type: core.EventText, Done: true},
+	} {
+		t.Run(string(terminal.Type), func(t *testing.T) {
+			s := newTransportTestSession(t)
+			for i := 0; i < cap(s.events); i++ {
+				s.events <- core.Event{Type: core.EventThinking, Content: "queued"}
+			}
+			done := make(chan struct{})
+			go func() { s.emit(terminal); close(done) }()
+			select {
+			case <-done:
+				t.Fatal("terminal delivery returned while the queue was full")
+			case <-time.After(20 * time.Millisecond):
+			}
+			for i := 0; i < cap(s.events); i++ {
+				if event := <-s.events; event.Type != core.EventThinking || event.Content != "queued" {
+					t.Fatalf("queued event %d was displaced: %#v", i, event)
+				}
+			}
+			awaitTransportTest(t, done)
+			select {
+			case event := <-s.events:
+				if event.Type != terminal.Type || event.Done != terminal.Done || event.Error != terminal.Error {
+					t.Fatalf("terminal = %#v, want %#v", event, terminal)
+				}
+			default:
+				t.Fatal("full queue dropped the terminal event")
+			}
+		})
+	}
+}
+
+func TestAppServerSession_CloseUnblocksTerminalDelivery(t *testing.T) {
+	s := newTransportTestSession(t)
+	for i := 0; i < cap(s.events); i++ {
+		s.events <- core.Event{Type: core.EventThinking}
+	}
+	done := make(chan struct{})
+	s.wg.Add(1)
+	go func() { defer s.wg.Done(); s.emitError(io.EOF); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("terminal delivery returned before cancellation or queue space")
+	case <-time.After(20 * time.Millisecond):
+	}
+	closed := make(chan struct{})
+	go func() { _ = s.Close(); close(closed) }()
+	awaitTransportTest(t, done)
+	awaitTransportTest(t, closed)
+	// A publisher outside readLoop may race with or follow Close.
+	s.emitError(io.EOF)
+}
+
+type transportTestWriter func([]byte) (int, error)
+
+func (w transportTestWriter) Write(p []byte) (int, error) { return w(p) }
+func (transportTestWriter) Close() error                  { return nil }
+
+func TestAppServerSession_LateStartResponseCannotReviveTurn(t *testing.T) {
+	for _, state := range []string{"eof", "completed", "completed_then_eof", "failed"} {
+		t.Run(state, func(t *testing.T) {
+			s := newTransportTestSession(t)
+			s.currentTurn = ""
+			s.stdin = transportTestWriter(func(p []byte) (int, error) {
+				var request struct {
+					ID int64 `json:"id"`
+				}
+				if err := json.Unmarshal(p, &request); err != nil {
+					return 0, err
+				}
+				s.handleResponse(rpcResponseEnvelope{ID: request.ID, Result: json.RawMessage(`{"turn":{"id":"turn-1"}}`)})
+				if state != "eof" {
+					s.handleNotification("turn/started", json.RawMessage(`{"turn":{"id":"turn-1"}}`))
+					status := "completed"
+					if state == "failed" {
+						status = "failed"
+					}
+					s.handleNotification("turn/completed", json.RawMessage(fmt.Sprintf(`{"turn":{"id":"turn-1","status":%q}}`, status)))
+				}
+				if strings.Contains(state, "eof") {
+					s.wg.Add(1)
+					s.readLoop(strings.NewReader(""))
+				}
+				return len(p), nil
+			})
+			err := s.Send("hello", "", nil, nil)
+			if state == "eof" && err == nil {
+				t.Fatal("turn/start succeeded after EOF without a terminal event")
+			}
+			if state != "eof" && err != nil {
+				t.Fatalf("finished turn became a send failure: %v", err)
+			}
+			if s.currentTurn != "" {
+				t.Fatal("late turn/start response revived the finished turn")
+			}
+		})
+	}
+}
+
+func TestAppServerSession_EOFReleasesRPCBeforeTerminalBackpressure(t *testing.T) {
+	s := newTransportTestSession(t)
+	for i := 0; i < cap(s.events); i++ {
+		s.events <- core.Event{Type: core.EventThinking}
+	}
+	rpc := make(chan rpcResponseEnvelope, 1)
+	approval := make(chan core.PermissionResult, 1)
+	s.pending = map[int64]chan rpcResponseEnvelope{1: rpc}
+	s.pendingApprovals = map[string]chan core.PermissionResult{"approval": approval}
+	done := make(chan struct{})
+	s.wg.Add(1)
+	go func() { s.readLoop(strings.NewReader("")); close(done) }()
+	select {
+	case response := <-rpc:
+		if response.Error == nil || s.Alive() {
+			t.Fatal("RPC did not observe a dead transport")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal backpressure prevented pending RPC rejection")
+	}
+	select {
+	case <-approval:
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal backpressure prevented approval rejection")
+	}
+	for i := 0; i < cap(s.events); i++ {
+		<-s.events
+	}
+	awaitTransportTest(t, done)
+	select {
+	case event := <-s.events:
+		if event.Type != core.EventError || !errors.Is(event.Error, io.EOF) {
+			t.Fatalf("EOF terminal = %#v", event)
+		}
+	default:
+		t.Fatal("EOF terminal was lost under backpressure")
+	}
+}
+
+// Use connect's real pipes and process lifecycle without invoking Codex.
+func TestAppServerSession_ProcessExitFinishesOnce(t *testing.T) {
+	for _, mode := range []string{"eof", "completed", "failed", "completed_then_failed_exit"} {
+		t.Run(mode, func(t *testing.T) {
+			s := newTransportTestSession(t)
+			s.cliBin = os.Args[0]
+			s.cliExtraArgs = []string{"-test.run=^TestAppServerTransportProcessHelper$", "--"}
+			s.workDir = t.TempDir()
+			s.url = "stdio://"
+			s.extraEnv = []string{"CC_CONNECT_TRANSPORT_HELPER=" + mode, "GORACE=atexit_sleep_ms=0"}
+			if err := s.connect(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			go func() { s.wg.Wait(); close(done) }()
+			awaitTransportTest(t, done)
+			want := core.EventError
+			if strings.HasPrefix(mode, "completed") {
+				want = core.EventResult
+			}
+			if len(s.events) != 1 {
+				t.Fatalf("process exit produced %d events, want one terminal", len(s.events))
+			}
+			if event := <-s.events; event.Type != want {
+				t.Fatalf("process exit event = %#v, want %v", event, want)
+			}
+			if s.Alive() || s.currentTurn != "" {
+				t.Fatal("process exit left the transport or turn active")
+			}
+		})
+	}
+}
+
+func TestAppServerTransportProcessHelper(t *testing.T) {
+	mode := os.Getenv("CC_CONNECT_TRANSPORT_HELPER")
+	if mode == "" {
+		return
+	}
+	if strings.HasPrefix(mode, "completed") {
+		if _, err := fmt.Fprintln(os.Stdout, `{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if mode == "failed" || mode == "completed_then_failed_exit" {
+		os.Exit(17)
+	}
+	os.Exit(0)
+}
 
 type blockingWriteCloser struct {
 	started   chan struct{}

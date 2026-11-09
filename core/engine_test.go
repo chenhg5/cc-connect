@@ -5535,7 +5535,7 @@ func TestCmdReasoning_UsageListsAgentEfforts(t *testing.T) {
 	t.Run("card note", func(t *testing.T) {
 		agent := &stubModelModeAgent{reasoningEfforts: efforts}
 		e := NewEngine("test", agent, nil, "", LangEnglish)
-		card := e.renderReasoningCard()
+		card := e.renderReasoningCard(e.agent)
 
 		for _, element := range card.Elements {
 			if note, ok := element.(CardNote); ok && note.Text == wantUsage {
@@ -5585,6 +5585,79 @@ func TestCmdReasoning_RejectsMinimal(t *testing.T) {
 	}
 	if len(p.sent) != 1 || !strings.Contains(p.sent[0], "/reasoning <number>") || strings.Contains(p.sent[0], "minimal") {
 		t.Fatalf("sent = %v, want usage without minimal", p.sent)
+	}
+}
+
+// stubPiEffortAgent mimics agent/pi's reasoning effort set, which differs from
+// Codex's (no "max"; adds "off" and "minimal").
+type stubPiEffortAgent struct {
+	stubModelModeAgent
+}
+
+func (a *stubPiEffortAgent) AvailableReasoningEfforts() []string {
+	return []string{"off", "minimal", "low", "medium", "high", "xhigh"}
+}
+
+// TestCmdReasoning_NoHardcodedCodexLevels is a regression test for the bug
+// where /reasoning displayed Codex-specific text for every agent: the
+// not-set hint said "using Codex default" and the usage line hardcoded
+// Codex's <low|medium|high|xhigh|max> set. The usage line must list the
+// active agent's own AvailableReasoningEfforts() and mention no agent name.
+func TestCmdReasoning_NoHardcodedCodexLevels(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubPiEffortAgent{}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+
+	// Listing (no args) on a text platform.
+	e.cmdReasoning(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(p.sent))
+	}
+	got := p.sent[0]
+	if !strings.Contains(got, "off|minimal|low|medium|high|xhigh") {
+		t.Fatalf("usage line must list the agent's own efforts, got: %s", got)
+	}
+	if strings.Contains(got, "max") {
+		t.Fatalf("usage line must not contain efforts outside the agent's set (max), got: %s", got)
+	}
+	if strings.Contains(got, "Codex") {
+		t.Fatalf("output must not hardcode the agent name Codex, got: %s", got)
+	}
+
+	// Invalid target (a Codex-only level) also renders the agent-specific usage line.
+	p.sent = nil
+	e.cmdReasoning(p, msg, []string{"max"})
+	if len(p.sent) != 1 {
+		t.Fatalf("expected 1 reply for invalid effort, got %d", len(p.sent))
+	}
+	got = p.sent[0]
+	if !strings.Contains(got, "off|minimal|low|medium|high|xhigh") || strings.Contains(got, "Codex") {
+		t.Fatalf("invalid-effort reply = %q, want agent-specific usage without Codex mention", got)
+	}
+	if agent.reasoningEffort != "" {
+		t.Fatalf("reasoning effort = %q, want unchanged empty", agent.reasoningEffort)
+	}
+
+	// Card path: the not-set hint and card note must also stay agent-agnostic.
+	card := e.renderReasoningCard(agent)
+	var md, note string
+	for _, el := range card.Elements {
+		switch v := el.(type) {
+		case CardMarkdown:
+			md += v.Content
+		case CardNote:
+			note += v.Text
+		}
+	}
+	if strings.Contains(md, "Codex") || strings.Contains(note, "Codex") {
+		t.Fatalf("card must not mention Codex, markdown: %q note: %q", md, note)
+	}
+	if !strings.Contains(md, "not set, using default") {
+		t.Fatalf("card markdown should show agent-agnostic default hint, got: %q", md)
+	}
+	if !strings.Contains(note, "off|minimal|low|medium|high|xhigh") {
+		t.Fatalf("card note must list the agent's own efforts, got: %q", note)
 	}
 }
 
@@ -8374,7 +8447,20 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			for time.Now().Before(deadline) {
 				sent := platform.getSent()
 				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
-					return
+					// RunJobNow runs the job asynchronously and its completion
+					// bookkeeping (MarkRun → store save) can land after the
+					// output is sent. Wait for it before returning, otherwise
+					// the late write races t.TempDir() removal and the test
+					// flakes with "crons: directory not empty". LastRun is
+					// set under the same store lock as the save, so observing
+					// it means the write has completed.
+					for time.Now().Before(deadline) {
+						if j := store.Get(job.ID); j != nil && !j.LastRun.IsZero() {
+							return
+						}
+						time.Sleep(5 * time.Millisecond)
+					}
+					t.Fatal("run output seen but the job was never marked complete")
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
@@ -11948,7 +12034,7 @@ func TestRunShellWithProgress_NonexistentCommand(t *testing.T) {
 			if !strings.Contains(last, "❌") {
 				t.Errorf("expected failure emoji, got %q", last)
 			}
-			if !strings.Contains(last, "failed to start") && !strings.Contains(last, "not found") && !strings.Contains(last, "executable file not found") && !strings.Contains(last, "CommandNotFoundException") {
+			if !strings.Contains(last, "failed to start") && !strings.Contains(last, "not found") && !strings.Contains(last, "executable file not found") && !strings.Contains(last, "CommandNotFoundException") && !strings.Contains(last, "Permission denied") {
 				t.Errorf("expected start failure message, got %q", last)
 			}
 			return
@@ -16854,5 +16940,40 @@ func TestProcessInteractiveEvents_ProgressUpdateFailurePreservesFinalReply(t *te
 				t.Fatalf("final card payload = %#v, want completed", payload)
 			}
 		})
+	}
+}
+
+func TestCmdCurrent_UsesNativeSummaryForCurrentAgentSession(t *testing.T) {
+	nativeSessions := []AgentSessionInfo{
+		{ID: "agent-current", Summary: "Native generated title", MessageCount: 4, ModifiedAt: time.Now()},
+		{ID: "agent-other", Summary: "Other title", MessageCount: 2, ModifiedAt: time.Now()},
+	}
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubListAgent{sessions: nativeSessions}, []Platform{p}, "", LangEnglish)
+	msg := &Message{SessionKey: "test:user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	session.Name = "latest user message"
+	session.SetAgentSessionID("agent-current", "codex")
+	session.AddHistory("user", "latest user message")
+
+	e.cmdCurrent(p, msg)
+
+	if len(p.sent) != 1 {
+		t.Fatalf("sent messages = %d, want 1", len(p.sent))
+	}
+	if !strings.Contains(p.sent[0], "Name: Native generated title") {
+		t.Fatalf("/current = %q, want native summary display name", p.sent[0])
+	}
+	if strings.Contains(p.sent[0], "Name: latest user message") {
+		t.Fatalf("/current = %q, should not use local Session.Name when native summary exists", p.sent[0])
+	}
+
+	p.sent = nil
+	e.cmdList(p, msg, nil)
+	if len(p.sent) != 1 {
+		t.Fatalf("list sent messages = %d, want 1", len(p.sent))
+	}
+	if got := strings.Count(p.sent[0], "msgs"); got != len(nativeSessions) {
+		t.Fatalf("/list item count = %d, want %d\n%s", got, len(nativeSessions), p.sent[0])
 	}
 }
