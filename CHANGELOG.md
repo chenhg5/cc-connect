@@ -19,10 +19,16 @@ Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability,
 
 ## Unreleased
 
+### Fixed
+- **Pi**: Merge custom providers with the built-in model catalog, resolve ambiguous aliases using the default provider, and filter duplicate or empty model entries. Reasoning levels follow the selected model, and switching models clears unsupported thinking overrides. Context windows now use catalog values for catalog-only models, with custom definitions taking precedence (#1872).
+
 ### Added
 - **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
 - **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)
 - **cloud_web platform**: 新增 self-hosted IM Gateway 作为 first-class platform 接入 (CWIP v1 协议,支持 websocket / long_poll / gateway 3 种 transport,完整 inbound/outbound + capability negotiation + graceful degradation)。 详见 docs/cloud-web.md + #1282。
+
+### Fixed
+- **Feishu**: a hung display-name lookup no longer holds an inbound message (in one case for 16 minutes, after which a stale `/new` ran): user/chat name lookups time out after 5s and fall back to the ID, the no-name answer for p2p chats is cached, card actions (`perm:`/`askq:`/`cmd:`) resolve names outside the callback, and failed lookup requests log at Warn (#2017, #2018).
 
 ## Unreleased
 

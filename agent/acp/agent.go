@@ -46,9 +46,21 @@ type Agent struct {
 	// handshake so that future PermissionModes() calls can reflect the
 	// actual modes this specific ACP agent offers (rather than a
 	// hard-coded fallback that may not match).
-	modesMu       sync.RWMutex
-	modesCache    []core.PermissionModeInfo
-	modesCurrent  string
+	modesMu      sync.RWMutex
+	modesCache   []core.PermissionModeInfo
+	modesCurrent string
+
+	modelsMu     sync.RWMutex
+	modelsCache  []core.ModelOption
+	currentModel string
+	// modelOverride is set only by SetModel (a user-initiated /model
+	// switch). It must survive session restarts: the engine closes the
+	// session on switch, and the next handshake's session/load would
+	// otherwise report the model persisted at creation time and silently
+	// revert the user's choice.
+	modelOverride string
+
+	activeSession atomic.Pointer[acpSession]
 
 	mu sync.RWMutex
 }
@@ -60,6 +72,8 @@ type Agent struct {
 type sessionCallbacks interface {
 	reportModes(block acpModesBlock)
 	reportListSupported(supported bool)
+	reportModels(current string, models []core.ModelOption)
+	reportActiveSession(s *acpSession)
 }
 
 // Ensure *Agent satisfies sessionCallbacks at compile time.
@@ -96,15 +110,15 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode = strings.TrimSpace(mode)
 
 	return &Agent{
-		workDir:     workDir,
+		workDir:      workDir,
 		cmd:          cmdStr,
 		cliExtraArgs: cliExtraArgs,
-		args:        args,
-		staticEnv:   staticEnv,
-		extraEnv:    extra,
-		authMethod:  authMethod,
-		displayName: displayName,
-		mode:        mode,
+		args:         args,
+		staticEnv:    staticEnv,
+		extraEnv:     extra,
+		authMethod:   authMethod,
+		displayName:  displayName,
+		mode:         mode,
 	}, nil
 }
 
@@ -234,6 +248,10 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	extra = append(extra, a.sessionEnv...)
 	a.mu.RUnlock()
 
+	a.modelsMu.RLock()
+	pendingModel := a.modelOverride
+	a.modelsMu.RUnlock()
+
 	return newACPSession(ctx, acpSessionConfig{
 		command:         command,
 		args:            allArgs,
@@ -242,6 +260,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		resumeSessionID: sessionID,
 		authMethod:      authMethod,
 		initialMode:     pendingMode,
+		initialModel:    pendingModel,
 		callbacks:       a,
 	})
 }
@@ -262,6 +281,12 @@ func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int
 }
 
 var _ core.HistoryProvider = (*Agent)(nil)
+
+// CompressCommand implements core.ContextCompressor. ACP has no dedicated
+// compaction RPC; servers that support compaction (e.g. kimi acp) intercept
+// "/compact" as a builtin slash command inside session/prompt. Servers
+// without it answer with an "unknown command" notice, which is harmless.
+func (a *Agent) CompressCommand() string { return "/compact" }
 
 // -- AgentDoctorInfo --
 
@@ -386,3 +411,63 @@ func (a *Agent) reportListSupported(supported bool) {
 		a.listUnsupported.Store(false)
 	}
 }
+
+func (a *Agent) reportModels(current string, models []core.ModelOption) {
+	if len(models) == 0 {
+		return
+	}
+	a.modelsMu.Lock()
+	a.modelsCache = models
+	// A server-reported current value (e.g. restored by session/load after
+	// a restart) must not clobber an explicit /model override.
+	if current != "" && a.modelOverride == "" {
+		a.currentModel = current
+	}
+	a.modelsMu.Unlock()
+}
+
+func (a *Agent) reportActiveSession(s *acpSession) {
+	a.activeSession.Store(s)
+}
+
+// -- ModelSwitcher --
+
+func (a *Agent) GetModel() string {
+	a.modelsMu.RLock()
+	defer a.modelsMu.RUnlock()
+	if a.currentModel != "" {
+		return a.currentModel
+	}
+	if len(a.modelsCache) > 0 {
+		return a.modelsCache[0].Name
+	}
+	return ""
+}
+
+func (a *Agent) SetModel(model string) {
+	a.modelsMu.Lock()
+	a.currentModel = model
+	a.modelOverride = model
+	a.modelsMu.Unlock()
+
+	if sess := a.activeSession.Load(); sess != nil {
+		sess.SetLiveModel(model)
+	}
+}
+
+func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
+	a.modelsMu.RLock()
+	if len(a.modelsCache) > 0 {
+		cached := make([]core.ModelOption, len(a.modelsCache))
+		copy(cached, a.modelsCache)
+		a.modelsMu.RUnlock()
+		return cached
+	}
+	a.modelsMu.RUnlock()
+
+	// Before the first handshake there is nothing server-reported yet;
+	// return nil so callers fall back to their own defaults.
+	return nil
+}
+
+var _ core.ModelSwitcher = (*Agent)(nil)
