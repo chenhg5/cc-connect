@@ -130,28 +130,28 @@ func TestDetectFeishuFileMessageType(t *testing.T) {
 			name:     "mp4 video",
 			mimeType: "video/mp4",
 			fileName: "demo.mp4",
-			fileType: larkim.FileTypeMp4,
+			fileType: larkim.CreateFileFileTypeMp4,
 			msgType:  larkim.MsgTypeMedia,
 		},
 		{
 			name:     "opus audio",
 			mimeType: "audio/ogg",
 			fileName: "voice.ogg",
-			fileType: larkim.FileTypeOpus,
+			fileType: larkim.CreateFileFileTypeOpus,
 			msgType:  larkim.MsgTypeAudio,
 		},
 		{
 			name:     "pdf file",
 			mimeType: "application/pdf",
 			fileName: "report.pdf",
-			fileType: larkim.FileTypePdf,
+			fileType: larkim.CreateFileFileTypePdf,
 			msgType:  larkim.MsgTypeFile,
 		},
 		{
 			name:     "unknown file",
 			mimeType: "application/octet-stream",
 			fileName: "payload.bin",
-			fileType: larkim.FileTypeStream,
+			fileType: larkim.CreateFileFileTypeStream,
 			msgType:  larkim.MsgTypeFile,
 		},
 	}
@@ -261,7 +261,7 @@ func TestInteractivePlatform_OnMessagePassesCardSenderToHandler(t *testing.T) {
 }
 
 func TestInteractivePlatform_CardActionPassesCardSenderToHandler(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "domain": stubOpenAPIDomain(t)})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -485,7 +485,7 @@ func TestInteractivePlatform_CardActionFormCancelUsesActionNameFallback(t *testi
 }
 
 func TestInteractivePlatform_CardActionUsesCallbackSessionKey(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "thread_isolation": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "domain": stubOpenAPIDomain(t), "thread_isolation": true})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -2213,7 +2213,7 @@ func TestOnMessage_GracePeriodMessageIsProcessed(t *testing.T) {
 }
 
 func TestCmdAction_WithoutAfterClick_DispatchesAndReturnsNil(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "domain": stubOpenAPIDomain(t)})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -2250,7 +2250,7 @@ func TestCmdAction_WithoutAfterClick_DispatchesAndReturnsNil(t *testing.T) {
 }
 
 func TestCmdAction_WithAfterClick_DispatchesAndReturnsCard(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "domain": stubOpenAPIDomain(t)})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -2312,7 +2312,7 @@ func TestCmdAction_WithAfterClick_DispatchesAndReturnsCard(t *testing.T) {
 }
 
 func TestCmdAction_WithAfterClick_SessionKeyRoutes(t *testing.T) {
-	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true})
+	platformAny, err := New(map[string]any{"app_id": "cli_xxx", "app_secret": "secret", "enable_feishu_card": true, "domain": stubOpenAPIDomain(t)})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
