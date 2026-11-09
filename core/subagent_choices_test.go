@@ -264,16 +264,6 @@ func TestPersistWorkspaceSubagentOverride(t *testing.T) {
 	}
 }
 
-func TestSubagentChoicesWarnsUnavailableCurrent(t *testing.T) {
-	e := NewEngine("test", &stubSubagentAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
-	a := &stubSubagentAgent{subagent: "gone"}
-
-	_, text := e.subagentChoices(a, a.AvailableModels(context.Background()))
-	if !strings.Contains(text, "not in this provider's model list") {
-		t.Errorf("text does not warn about the unavailable current model:\n%s", text)
-	}
-}
-
 func TestRenderModelCardSubagentShowsDescAndCurrent(t *testing.T) {
 	e := NewEngine("test", &stubSubagentAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
 	a := &stubSubagentAgent{subagent: "gpt-4.1-mini"}
@@ -309,8 +299,8 @@ func TestRenderModelCardSubagentUnavailable(t *testing.T) {
 	if !found {
 		t.Fatal("subagent select not found")
 	}
-	if !strings.Contains(strings.Join(markdown, "\n"), "not in this provider's model list") {
-		t.Errorf("markdown = %v, want an unavailable-model warning", markdown)
+	if !strings.Contains(strings.Join(markdown, "\n"), "Subagent model: gone") {
+		t.Errorf("markdown = %v, want the current subagent model", markdown)
 	}
 	if sel.InitValue != "" {
 		t.Errorf("init value = %q, want empty (no fake selection)", sel.InitValue)

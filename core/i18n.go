@@ -388,7 +388,6 @@ const (
 	MsgSubagentSelectPlaceholder MsgKey = "subagent_select_placeholder"
 	MsgSubagentInherit           MsgKey = "subagent_inherit"
 	MsgSubagentCurrent           MsgKey = "subagent_current"
-	MsgSubagentUnavailable       MsgKey = "subagent_unavailable"
 	MsgModelSelectPlaceholder    MsgKey = "model_select_placeholder"
 	MsgModeSelectPlaceholder     MsgKey = "mode_select_placeholder"
 	MsgProviderSelectPlaceholder MsgKey = "provider_select_placeholder"
@@ -2565,7 +2564,7 @@ var messages = map[MsgKey]map[Language]string{
 		LangChinese:            "用法: `/model switch <序号>` 或 `/model switch <模型名>`；subagent: `/model subagent <序号|inherit>`",
 		LangTraditionalChinese: "用法: `/model switch <序號>` 或 `/model switch <模型名>`；subagent: `/model subagent <序號|inherit>`",
 		LangJapanese:           "使い方: `/model switch <番号>` または `/model switch <モデル名>`、サブエージェント: `/model subagent <番号|inherit>`",
-		LangSpanish:            "Uso: `/model switch <número>` o `/model switch <nombre_modelo>`",
+		LangSpanish:            "Uso: `/model switch <número>` o `/model switch <nombre_modelo>`; subagente: `/model subagent <número|inherit>`",
 	},
 	MsgReasoningDefault: {
 		LangEnglish:            "Current reasoning effort: (not set, using default)\n",
@@ -2614,13 +2613,6 @@ var messages = map[MsgKey]map[Language]string{
 	MsgSubagentCurrent: {
 		LangEnglish: "Subagent model: %s", LangChinese: "子智能体模型: %s", LangTraditionalChinese: "子智能體模型: %s",
 		LangJapanese: "サブエージェントモデル: %s", LangSpanish: "Modelo del subagente: %s",
-	},
-	MsgSubagentUnavailable: {
-		LangEnglish:            "⚠️ Current subagent model `%s` is not in this provider's model list.",
-		LangChinese:            "⚠️ 当前子智能体模型 `%s` 不在该 provider 的模型列表中。",
-		LangTraditionalChinese: "⚠️ 當前子智能體模型 `%s` 不在該 provider 的模型列表中。",
-		LangJapanese:           "⚠️ 現在のサブエージェントモデル `%s` はこの provider のモデル一覧にありません。",
-		LangSpanish:            "⚠️ El modelo de subagente actual `%s` no está en la lista de este proveedor.",
 	},
 	MsgModelSelectPlaceholder: {
 		LangEnglish: "Select model", LangChinese: "选择模型", LangTraditionalChinese: "選擇模型",
