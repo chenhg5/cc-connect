@@ -43,6 +43,10 @@ func mapSessionUpdate(sessionID string, params json.RawMessage) []core.Event {
 	case "user_message_chunk":
 		// History replay during session/load — suppress to avoid echoing user input.
 		return nil
+	case "usage_update":
+		// Context token accounting; cached on the session for
+		// GetContextUsage (see maybeAbsorbUsageUpdate), never rendered.
+		return nil
 	default:
 		// Optional vendor / future ACP shapes — best-effort text extraction.
 		return mapSessionUpdateFallback(sid, head.SessionUpdate, wrap.Update)

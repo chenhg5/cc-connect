@@ -178,6 +178,7 @@ type wpsRichTextElement struct {
 	Elements         []wpsRichTextElement    `json:"elements"`
 	TextContent      *wpsRichTextTextContent `json:"text_content"`
 	StyleTextContent *wpsStyleTextContent    `json:"style_text_content"`
+	StyleContent     *wpsStyleTextContent    `json:"style_content"`
 	MentionContent   *wpsMentionContent      `json:"mention_content"`
 	ImageContent     *wpsImageContent        `json:"image_content"`
 	LinkContent      *wpsRichTextLinkContent `json:"link_content"`
@@ -1135,6 +1136,8 @@ func flattenWPSRichTextElement(element wpsRichTextElement) (string, []wpsImageCo
 			parts = appendNonEmpty(parts, element.TextContent.Content)
 		} else if element.StyleTextContent != nil {
 			parts = appendNonEmpty(parts, element.StyleTextContent.Text)
+		} else if element.StyleContent != nil {
+			parts = appendNonEmpty(parts, element.StyleContent.Text)
 		}
 	case "mention":
 		if element.MentionContent != nil {
@@ -1157,6 +1160,8 @@ func flattenWPSRichTextElement(element wpsRichTextElement) (string, []wpsImageCo
 			parts = appendNonEmpty(parts, element.TextContent.Content)
 		} else if element.StyleTextContent != nil {
 			parts = appendNonEmpty(parts, element.StyleTextContent.Text)
+		} else if element.StyleContent != nil {
+			parts = appendNonEmpty(parts, element.StyleContent.Text)
 		}
 	}
 

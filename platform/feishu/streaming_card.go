@@ -500,7 +500,7 @@ func (c *feishuStreamingCard) writeLane(ctx context.Context, p streamingCardAPI,
 		return p.appendCardElements(ctx, handle, lane.elementID(), rendered)
 	}
 
-	panel := buildProgressPanel(progressPanelTitle(lane.titleKey(), total, lang), false, lane.elementID(), rendered)
+	panel := buildProgressPanel(progressPanelTitle(lane.titleKey(), total, lang), rendered, lane.elementID())
 	target, after := c.laneInsertAnchor(lane)
 	if err := p.insertCardElements(ctx, handle, target, after, []map[string]any{panel}); err != nil {
 		return err
