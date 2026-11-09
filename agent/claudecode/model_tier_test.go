@@ -109,3 +109,38 @@ func TestSubagentModelEnvInjection(t *testing.T) {
 		}
 	}
 }
+
+// TestFallbackModelsKeepsMainOrder pins the first six entries to main's list so
+// /model switch <n> does not silently point at a different model after the
+// picker refresh. New tiers must be appended, never inserted.
+func TestFallbackModelsKeepsMainOrder(t *testing.T) {
+	want := []string{"sonnet", "sonnet[1m]", "opus", "opus[1m]", "fable", "haiku"}
+	got := fallbackModels()
+	if len(got) < len(want) {
+		t.Fatalf("fallbackModels() has %d entries, want at least %d", len(got), len(want))
+	}
+	for i, name := range want {
+		if got[i].Name != name {
+			t.Errorf("entry %d = %q, want %q (main order)", i, got[i].Name, name)
+		}
+	}
+	if got[len(want)].Name != "fable[1m]" {
+		t.Errorf("first appended entry = %q, want fable[1m]", got[len(want)].Name)
+	}
+}
+
+// TestReasoningEffortsKeepMainOrder pins the first four levels so /effort <n>
+// keeps its meaning; the new levels are appended.
+func TestReasoningEffortsKeepMainOrder(t *testing.T) {
+	var a Agent
+	got := a.AvailableReasoningEfforts()
+	want := []string{"low", "medium", "high", "max", "xhigh", "ultracode"}
+	if len(got) != len(want) {
+		t.Fatalf("AvailableReasoningEfforts() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("level %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

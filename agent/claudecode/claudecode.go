@@ -422,7 +422,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "xhigh", "max", "ultracode"}
+	return []string{"low", "medium", "high", "max", "xhigh", "ultracode"}
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
@@ -474,29 +474,37 @@ func resolveTierModel(alias string) string {
 // variants. Tiers pinned through ANTHROPIC_DEFAULT_*_MODEL carry that model in
 // Desc so the picker shows the real backend instead of a bare alias.
 func fallbackModels() []core.ModelOption {
-	aliases := []string{"fable", "opus", "sonnet", "haiku"}
 	descs := map[string]string{
 		"fable":  "Claude Fable (frontier)",
 		"opus":   "Claude Opus (most capable)",
 		"sonnet": "Claude Sonnet (balanced)",
 		"haiku":  "Claude Haiku (fastest)",
 	}
-	var out []core.ModelOption
-	for _, a := range aliases {
-		desc := descs[a]
-		if real := resolveTierModel(a); real != "" {
-			desc = real
-		}
-		out = append(out, core.ModelOption{Name: a, Desc: desc})
+	// The first six entries keep main's order so `/model switch <n>` means the
+	// same model as before; new tiers are appended, never inserted.
+	entries := []struct{ name, tier string }{
+		{"sonnet", "sonnet"},
+		{"sonnet[1m]", "sonnet"},
+		{"opus", "opus"},
+		{"opus[1m]", "opus"},
+		{"fable", "fable"},
+		{"haiku", "haiku"},
+		{"fable[1m]", "fable"},
 	}
-	// The 1M-context variants are only meaningful for the larger tiers.
-	for _, a := range []string{"fable", "opus", "sonnet"} {
-		name := a + "[1m]"
-		desc := descs[a] + " (1M context)"
-		if real := resolveTierModel(a); real != "" {
-			desc = real + " (1M context)"
+	out := make([]core.ModelOption, 0, len(entries))
+	for _, e := range entries {
+		desc := descs[e.tier]
+		is1m := strings.HasSuffix(e.name, "[1m]")
+		if is1m {
+			desc += " (1M context)"
 		}
-		out = append(out, core.ModelOption{Name: name, Desc: desc})
+		if real := resolveTierModel(e.tier); real != "" {
+			desc = real
+			if is1m {
+				desc += " (1M context)"
+			}
+		}
+		out = append(out, core.ModelOption{Name: e.name, Desc: desc})
 	}
 	return out
 }
