@@ -370,9 +370,10 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		innerArgs = append(innerArgs, "--append-system-prompt-file", promptFilePath)
 	}
 
-	// ultracode is a session-level boolean, not an effort level: the CLI
-	// documents it as "not part of effortLevel, --effort, or
-	// CLAUDE_CODE_EFFORT_LEVEL". It is delivered through a settings file.
+	// ultracode is enabled through a settings key, not --effort: this CLI's
+	// --effort help lists low|medium|high|xhigh|max, and the settings key is
+	// the documented switch. A documented ultracode session runs at xhigh, so
+	// pin the effort explicitly instead of leaving the CLI default.
 	if effort == "ultracode" {
 		ucPath, err := writeUltracodeSettingsFile(ccDataDir)
 		if err != nil {
@@ -380,6 +381,7 @@ func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs 
 		} else {
 			innerArgs = append(innerArgs, "--settings", ucPath)
 		}
+		innerArgs = append(innerArgs, "--effort", "xhigh")
 	} else if effort != "" {
 		innerArgs = append(innerArgs, "--effort", effort)
 	}
