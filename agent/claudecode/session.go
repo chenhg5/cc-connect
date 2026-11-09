@@ -257,14 +257,14 @@ func buildAppendSystemPrompt(agentPrompt, platformPrompt, userAppend string) str
 	return strings.Join(parts, "\n")
 }
 
-// The ultracode settings file is written once per process. ccDataDir is fixed
-// at construction and has no setter, so one path is valid for every spawn —
-// and the first call's result, including a failure, is cached for the life of
-// the process.
+// The ultracode settings file is written once per process, after the first
+// successful write. ccDataDir is fixed at construction, so one path is valid
+// for every spawn. A failed write is not cached: the next ultracode spawn
+// retries, so a transient read-only window does not disable ultracode for the
+// life of the process.
 var (
-	ultracodeSettingsOnce sync.Once
+	ultracodeSettingsMu   sync.Mutex
 	ultracodeSettingsPath string
-	ultracodeSettingsErr  error
 )
 
 func newClaudeSession(ctx context.Context, workDir, cliBin string, cliExtraArgs []string, cmdArgsFlag string, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt string, allowedTools, disallowedTools []string, pluginDirs []string, extraEnv []string, platformPrompt string, disableVerbose bool, spawnOpts core.SpawnOptions, maxContextTokens int, ctxWindowTokens int, ccDataDir string, lang core.Language) (*claudeSession, error) {
@@ -1919,27 +1919,28 @@ func filterEnv(env []string, key string) []string {
 }
 
 // writeUltracodeSettingsFile writes {"ultracode": true} to a per-cc-connect
-// settings file and returns its path. Cached per process: the content never
-// changes, so one file is reused across every spawn.
+// settings file and returns its path. The content never changes, so the path is
+// cached after the first successful write.
 func writeUltracodeSettingsFile(ccDataDir string) (string, error) {
-	ultracodeSettingsOnce.Do(func() {
-		dir := ccDataDir
-		if dir == "" {
-			dir = os.TempDir()
-		}
-		path := filepath.Join(dir, "ultracode-settings.json")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			ultracodeSettingsErr = err
-			return
-		}
-		if err := os.WriteFile(path, []byte("{\n  \"ultracode\": true\n}\n"), 0o644); err != nil {
-			ultracodeSettingsErr = err
-			return
-		}
-		ultracodeSettingsPath = path
-	})
-	if ultracodeSettingsErr != nil {
-		return "", ultracodeSettingsErr
+	ultracodeSettingsMu.Lock()
+	defer ultracodeSettingsMu.Unlock()
+	if ultracodeSettingsPath != "" {
+		return ultracodeSettingsPath, nil
 	}
-	return ultracodeSettingsPath, nil
+
+	dir := ccDataDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	path := filepath.Join(dir, "ultracode-settings.json")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	// Atomic write: rename replaces the path entry itself, so a pre-existing
+	// symlink cannot redirect the write into another file.
+	if err := writeFileAtomic(path, []byte("{\n  \"ultracode\": true\n}\n"), 0o644); err != nil {
+		return "", err
+	}
+	ultracodeSettingsPath = path
+	return path, nil
 }

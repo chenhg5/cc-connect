@@ -1510,3 +1510,64 @@ func TestHandleResultKeepsLiveAssistantUsage(t *testing.T) {
 		t.Errorf("OutputTokens = %d, want 406 (result is authoritative for output)", u.OutputTokens)
 	}
 }
+
+func resetUltracodeSettings(t *testing.T) {
+	t.Helper()
+	ultracodeSettingsMu.Lock()
+	ultracodeSettingsPath = ""
+	ultracodeSettingsMu.Unlock()
+	t.Cleanup(func() {
+		ultracodeSettingsMu.Lock()
+		ultracodeSettingsPath = ""
+		ultracodeSettingsMu.Unlock()
+	})
+}
+
+func TestWriteUltracodeSettingsFileRetriesAfterFailure(t *testing.T) {
+	resetUltracodeSettings(t)
+
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeUltracodeSettingsFile(blocked); err == nil {
+		t.Fatal("expected a failure when ccDataDir is a file")
+	}
+
+	dir := t.TempDir()
+	path, err := writeUltracodeSettingsFile(dir)
+	if err != nil {
+		t.Fatalf("second call did not retry after the failure: %v", err)
+	}
+	if want := filepath.Join(dir, "ultracode-settings.json"); path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+}
+
+func TestWriteUltracodeSettingsFileReplacesSymlink(t *testing.T) {
+	resetUltracodeSettings(t)
+
+	dir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "ultracode-settings.json")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	if _, err := writeUltracodeSettingsFile(dir); err != nil {
+		t.Fatalf("writeUltracodeSettingsFile() error: %v", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "keep" {
+		t.Errorf("symlink target was overwritten: %q", got)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("settings path is still a symlink, want a regular file")
+	}
+}
