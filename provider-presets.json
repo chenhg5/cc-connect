@@ -679,6 +679,28 @@
           "models": ["qwen/qwen3.5-flash", "deepseek-ai/deepseek-v4-pro"]
         }
       }
+    },
+    {
+      "name": "cloudgpu",
+      "display_name": "CloudGPU",
+      "description": "CloudGPU OpenAI-compatible LLM API with text models for coding agents.",
+      "description_zh": "CloudGPU OpenAI 兼容 LLM API，提供适用于编码智能体的文本模型。",
+      "features": ["OpenAI Compatible", "Text Models"],
+      "tier": 3,
+      "website": "https://cloudgpu.app",
+      "agents": {
+        "codex": {
+          "base_url": "https://cloudgpu.app/v1",
+          "model": "deepseek-v4-flash",
+          "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+          "codex_config": { "wire_api": "chat" }
+        },
+        "opencode": {
+          "base_url": "https://cloudgpu.app/v1",
+          "model": "deepseek-v4-flash",
+          "models": ["deepseek-v4-flash", "deepseek-v4-pro"]
+        }
+      }
     }
   ]
 }

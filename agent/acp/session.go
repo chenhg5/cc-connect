@@ -71,6 +71,10 @@ type acpSession struct {
 type permState struct {
 	RPCID   json.RawMessage
 	Options []permissionOption
+	// Elicitation is non-nil when this pending request arrived via
+	// elicitation/create instead of session/request_permission; it carries
+	// what RespondPermission needs to build a CreateElicitationResponse.
+	Elicitation *elicitationState
 }
 
 // acpSessionConfig bundles the inputs newACPSession needs. It's a
@@ -85,6 +89,7 @@ type acpSessionConfig struct {
 	resumeSessionID string
 	authMethod      string
 	initialMode     string           // if non-empty, applied via session/set_mode after session/new
+	initialModel    string           // if non-empty, applied via session/set_config_option after handshake
 	callbacks       sessionCallbacks // may be nil
 }
 
@@ -168,6 +173,23 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 		}
 	}
 
+	// A model chosen via /model outlives the session it was set on (the
+	// engine closes the session on switch and starts a fresh one for the
+	// next turn), so re-apply it here: session/load would otherwise
+	// restore the model that was persisted when the session was created.
+	if strings.TrimSpace(cfg.initialModel) != "" {
+		if ok := s.SetLiveModel(cfg.initialModel); !ok {
+			slog.Warn("acp: initial model could not be applied",
+				"model", cfg.initialModel,
+				"session_id", s.currentACPSessionID(),
+			)
+		}
+	}
+
+	if s.callbacks != nil {
+		s.callbacks.reportActiveSession(s)
+	}
+
 	return s, nil
 }
 
@@ -183,6 +205,13 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 				"writeTextFile": false,
 			},
 			"terminal": false,
+			// Advertise form-mode elicitation so agents with a structured
+			// question bridge (kimi acp routes AskUserQuestion through
+			// elicitation/create when this is set) use it instead of
+			// degrading to a single-question request_permission prompt.
+			"elicitation": map[string]any{
+				"form": map[string]any{},
+			},
 		},
 		"clientInfo": map[string]any{
 			"name":    "cc-connect",
@@ -255,8 +284,9 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 					"method", resumeMethod, "error", err)
 			} else {
 				var rr struct {
-					SessionID string         `json:"sessionId"`
-					Modes     *acpModesBlock `json:"modes"`
+					SessionID     string            `json:"sessionId"`
+					Modes         *acpModesBlock    `json:"modes"`
+					ConfigOptions []acpConfigOption `json:"configOptions"`
 				}
 				if uerr := json.Unmarshal(resumeRes, &rr); uerr != nil {
 					// The body is allowed to be a configOptions-only
@@ -279,6 +309,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 				}
 				s.setACPSessionID(resumedID)
 				s.absorbModes(rr.Modes)
+				s.absorbConfigOptions(rr.ConfigOptions)
 				return nil
 			}
 		}
@@ -293,8 +324,9 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		return fmt.Errorf("acp: session/new: %w", err)
 	}
 	var sn struct {
-		SessionID string         `json:"sessionId"`
-		Modes     *acpModesBlock `json:"modes"`
+		SessionID     string            `json:"sessionId"`
+		Modes         *acpModesBlock    `json:"modes"`
+		ConfigOptions []acpConfigOption `json:"configOptions"`
 	}
 	if err := json.Unmarshal(newRes, &sn); err != nil {
 		return fmt.Errorf("acp: parse session/new: %w", err)
@@ -304,6 +336,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 	}
 	s.setACPSessionID(sn.SessionID)
 	s.absorbModes(sn.Modes)
+	s.absorbConfigOptions(sn.ConfigOptions)
 	return nil
 }
 
@@ -324,6 +357,68 @@ func (s *acpSession) absorbModes(block *acpModesBlock) {
 	if s.callbacks != nil {
 		s.callbacks.reportModes(*block)
 	}
+}
+
+type acpConfigOption struct {
+	Type         string `json:"type"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	CurrentValue string `json:"currentValue"`
+	Options      []struct {
+		Value       string `json:"value"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	} `json:"options"`
+}
+
+func (s *acpSession) absorbConfigOptions(options []acpConfigOption) {
+	for _, opt := range options {
+		if opt.ID == "model" {
+			models := make([]core.ModelOption, 0, len(opt.Options))
+			for _, o := range opt.Options {
+				alias := o.Name
+				if alias == "" {
+					alias = o.Value
+				}
+				models = append(models, core.ModelOption{
+					Name:  o.Value,
+					Alias: alias,
+					Desc:  o.Description,
+				})
+			}
+			if s.callbacks != nil {
+				s.callbacks.reportModels(opt.CurrentValue, models)
+			}
+		}
+	}
+}
+
+// SetLiveModel changes the model of the active session via `session/set_config_option`.
+func (s *acpSession) SetLiveModel(model string) bool {
+	if !s.alive.Load() {
+		return false
+	}
+	sid := s.currentACPSessionID()
+	if sid == "" {
+		return false
+	}
+	res, err := s.tr.call(s.ctx, "session/set_config_option", map[string]any{
+		"sessionId": sid,
+		"configId":  "model",
+		"value":     model,
+	})
+	if err != nil {
+		slog.Warn("acp: session/set_config_option model failed", "error", err, "model", model)
+		return false
+	}
+	var resp struct {
+		ConfigOptions []acpConfigOption `json:"configOptions"`
+	}
+	if json.Unmarshal(res, &resp) == nil && len(resp.ConfigOptions) > 0 {
+		s.absorbConfigOptions(resp.ConfigOptions)
+	}
+	slog.Info("acp: live model applied", "model", model, "session_id", sid)
+	return true
 }
 
 func (s *acpSession) setACPSessionID(id string) {
@@ -431,6 +526,7 @@ func (s *acpSession) onNotification(method string, params json.RawMessage) {
 	toolName := s.resolveToolCallName(params)
 	s.maybeAbsorbCurrentModeUpdate(params)
 	s.maybeAbsorbUsageUpdate(params)
+	s.maybeAbsorbConfigOptionUpdate(params)
 	sid := s.currentACPSessionID()
 	// Debug log to capture raw session/update JSON for troubleshooting vendor compatibility
 	slog.Debug("acp: session/update", "session_id", sid, "params", string(params))
@@ -531,6 +627,19 @@ func (s *acpSession) maybeAbsorbCurrentModeUpdate(params json.RawMessage) {
 	}
 }
 
+func (s *acpSession) maybeAbsorbConfigOptionUpdate(params json.RawMessage) {
+	var wrap struct {
+		Update struct {
+			Kind          string            `json:"sessionUpdate"`
+			ConfigOptions []acpConfigOption `json:"configOptions"`
+		} `json:"update"`
+	}
+	if json.Unmarshal(params, &wrap) != nil || len(wrap.Update.ConfigOptions) == 0 {
+		return
+	}
+	s.absorbConfigOptions(wrap.Update.ConfigOptions)
+}
+
 // cacheToolCallInput extracts and caches rawInput from tool_call and tool_call_update
 // session updates so that handlePermissionRequest can look it up by toolCallId.
 // OpenCode ACP bug (#7370): rawInput is empty in tool_call and request_permission,
@@ -601,6 +710,8 @@ func (s *acpSession) onServerRequest(method string, id json.RawMessage, params j
 	switch method {
 	case "session/request_permission":
 		s.handlePermissionRequest(id, params)
+	case "elicitation/create":
+		s.handleElicitationRequest(id, params)
 	case "cursor/ask_question", "cursor/create_plan", "cursor/update_todos", "cursor/task", "cursor/generate_image":
 		// Cursor CLI extensions — acknowledge so tool flows do not block; IM UX is limited for these.
 		slog.Debug("acp: cursor extension request (no-op ack)", "method", method)
@@ -691,6 +802,42 @@ func (s *acpSession) handlePermissionRequest(id json.RawMessage, params json.Raw
 			SessionID:    s.currentACPSessionID(),
 		})
 	}()
+}
+
+// handleElicitationRequest bridges ACP elicitation/create (form mode) into
+// the engine's AskUserQuestion wizard: the form schema becomes
+// []core.UserQuestion and the request id is cached so RespondPermission can
+// translate the collected answers back into a CreateElicitationResponse.
+func (s *acpSession) handleElicitationRequest(id json.RawMessage, params json.RawMessage) {
+	st, err := parseElicitationCreateParams(params)
+	if err != nil {
+		slog.Warn("acp: elicitation/create rejected", "error", err)
+		// A JSON-RPC error lets agents like kimi acp fall back to the
+		// request_permission question bridge.
+		_ = s.tr.respondError(id, -32602, err.Error())
+		return
+	}
+	reqKey := jsonIDKey(id)
+	s.permMu.Lock()
+	s.permByID[reqKey] = permState{RPCID: id, Elicitation: st}
+	s.permMu.Unlock()
+
+	questions := make([]core.UserQuestion, 0, len(st.Questions))
+	for _, q := range st.Questions {
+		questions = append(questions, q.Question)
+	}
+	var rawParams map[string]any
+	_ = json.Unmarshal(params, &rawParams)
+	slog.Info("acp: elicitation request", "request_id", reqKey, "questions", len(questions))
+	s.emit(core.Event{
+		Type:         core.EventPermissionRequest,
+		RequestID:    reqKey,
+		ToolName:     "AskUserQuestion",
+		ToolInput:    questions[0].Question,
+		ToolInputRaw: rawParams,
+		Questions:    questions,
+		SessionID:    s.currentACPSessionID(),
+	})
 }
 
 func (s *acpSession) emit(ev core.Event) {
@@ -823,6 +970,12 @@ func (s *acpSession) RespondPermission(requestID string, result core.PermissionR
 	s.permMu.Unlock()
 	if !ok {
 		return fmt.Errorf("acp: unknown permission request %q", requestID)
+	}
+
+	if st.Elicitation != nil {
+		res := buildElicitationResponse(st.Elicitation, result)
+		slog.Debug("acp: elicitation response", "request_id", requestID, "action", res["action"])
+		return s.tr.respondSuccess(st.RPCID, res)
 	}
 
 	allow := strings.EqualFold(result.Behavior, "allow")

@@ -248,6 +248,7 @@ func TestP1_39_RestartPreservesNames_ClaudeCode(t *testing.T) {
 func testRestartPreservesNames(t *testing.T, agentType string) {
 	t.Helper()
 	env := helper.NewEnv(t, agentType)
+	env.RequireInProcess()
 
 	const sessionName = "persisted-name-99"
 	env.SendWithTimeout("/new "+sessionName, cmdTimeout)
