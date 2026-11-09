@@ -8516,18 +8516,19 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 				if sentContains(sent, "triggered") && sentContains(sent, "manual run complete") {
 					// RunJobNow runs the job asynchronously and its completion
 					// bookkeeping (MarkRun → store save) can land after the
-					// output is sent. Wait for it before returning, otherwise
-					// the late write races t.TempDir() removal and the test
-					// flakes with "crons: directory not empty". LastRun is
-					// set under the same store lock as the save, so observing
-					// it means the write has completed.
+					// output is sent. Wait for the persisted last_run before
+					// returning, otherwise the late write races t.TempDir()
+					// removal and the test flakes with "crons: directory not
+					// empty". Observe the file, not the in-memory job: reading
+					// *CronJob.LastRun without the store lock races MarkRun.
 					for time.Now().Before(deadline) {
-						if j := store.Get(job.ID); j != nil && !j.LastRun.IsZero() {
+						data, readErr := os.ReadFile(scheduler.Store().path)
+						if readErr == nil && strings.Contains(string(data), `"last_run"`) {
 							return
 						}
-						time.Sleep(5 * time.Millisecond)
+						time.Sleep(10 * time.Millisecond)
 					}
-					t.Fatal("run output seen but the job was never marked complete")
+					t.Fatalf("timed out waiting for cron persistence, sent=%v", platform.getSent())
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
