@@ -78,7 +78,7 @@ func newSession(ctx context.Context, client *http.Client, baseURL, token, sessio
 	return s
 }
 
-func (s *session) Send(prompt string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (s *session) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("moltybot: session is closed")
 	}
@@ -88,6 +88,7 @@ func (s *session) Send(prompt string, images []core.ImageAttachment, files []cor
 		Text:        prompt,
 		Attachments: convertAttachments(images, files),
 	}
+	body.Source.MessageID = messageID
 
 	var payload bytes.Buffer
 	if err := json.NewEncoder(&payload).Encode(body); err != nil {

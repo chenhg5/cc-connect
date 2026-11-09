@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -33,6 +34,8 @@ type Agent struct {
 	token       string
 	sessionMode string
 	client      *http.Client
+	mu          sync.Mutex
+	sessionKey  string
 }
 
 // New creates a MoltyBot bridge agent.
@@ -99,7 +102,25 @@ func parseSessionMode(raw any) (string, error) {
 
 func (a *Agent) Name() string { return agentName }
 
+func (a *Agent) SetSessionEnv(env []string) {
+	var sessionKey string
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && key == "CC_SESSION_KEY" {
+			sessionKey = strings.TrimSpace(value)
+		}
+	}
+	a.mu.Lock()
+	a.sessionKey = sessionKey
+	a.mu.Unlock()
+}
+
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		a.mu.Lock()
+		sessionID = a.sessionKey
+		a.mu.Unlock()
+	}
 	slog.Info("moltybot: starting session", "session_id", sessionID, "session_mode", a.sessionMode)
 	return newSession(ctx, a.client, a.baseURL, a.token, a.sessionMode, sessionID), nil
 }
@@ -111,3 +132,4 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 func (a *Agent) Stop() error { return nil }
 
 var _ core.Agent = (*Agent)(nil)
+var _ core.SessionEnvInjector = (*Agent)(nil)

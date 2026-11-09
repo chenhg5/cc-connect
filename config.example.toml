@@ -2340,6 +2340,24 @@ app_secret = "your-feishu-app-secret"
 # api_key = "your-gemini-api-key"    # GEMINI_API_KEY
 
 # =============================================================================
+# MoltyBot local HTTP bridge (uncomment to enable)
+# =============================================================================
+# [[projects]]
+# name = "moltybot"
+#
+# [projects.agent]
+# type = "moltybot"
+#
+# [projects.agent.options]
+# base_url = "http://127.0.0.1:48999"
+# token = "your-bridge-token"
+# session_mode = "per_remote_user" # default; or "passthrough"
+#
+# Add projects.platforms using the platform examples above. Bridge replies may
+# contain text, base64 images and files; media delivery requires platform support
+# and attachment sending to be enabled.
+
+# =============================================================================
 # Project 10: WPS Agentspace / 项目 10：WPS 数字员工 (uncomment to enable / 取消注释以启用)
 # =============================================================================
 # WPS数字员工平台接入，无需创建WPS应用，通过数字员工WebSocket连接

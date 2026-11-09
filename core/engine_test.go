@@ -1180,6 +1180,48 @@ func TestStripAgentFooterLines(t *testing.T) {
 	}
 }
 
+func TestProcessInteractiveEvents_AttachmentOnlyAndSilentResults(t *testing.T) {
+	for _, tc := range []struct {
+		name, content                        string
+		cancelled, stopped, disabled, silent bool
+	}{
+		{name: "attachment only"},
+		{name: "explicit silence", content: "NO_REPLY", silent: true},
+		{name: "cancelled", cancelled: true, silent: true},
+		{name: "stopped", stopped: true, silent: true},
+		{name: "disabled", disabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			e.SetAttachmentSendEnabled(!tc.disabled)
+			const key = "test:attachment-only"
+			session := e.sessions.GetOrCreateActive(key)
+			as := newControllableSession("attachments")
+			state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx", turnCancelled: tc.cancelled, stopped: tc.stopped}
+			e.interactiveStates[key] = state
+			as.events <- Event{
+				Type: EventResult, Content: tc.content, Done: true,
+				Images: []ImageAttachment{{MimeType: "image/png", Data: []byte("img"), FileName: "picture.png"}},
+				Files:  []FileAttachment{{MimeType: "application/pdf", Data: []byte("pdf"), FileName: "report.pdf"}},
+			}
+			e.processInteractiveEvents(state, session, e.sessions, key, "m", time.Now(), nil, nil, state.replyCtx, 0)
+			want := 1
+			if tc.silent || tc.disabled {
+				want = 0
+			}
+			if len(p.images) != want || len(p.files) != want {
+				t.Fatalf("delivered images=%d files=%d, want %d each", len(p.images), len(p.files), want)
+			}
+			for _, text := range p.getSent() {
+				if strings.Contains(text, e.i18n.T(MsgEmptyResponse)) || strings.Contains(text, "NO_REPLY") {
+					t.Fatalf("unexpected reply: %q", text)
+				}
+			}
+		})
+	}
+}
+
 func TestProcessInteractiveEvents_SendsEventResultAttachments(t *testing.T) {
 	p := &stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

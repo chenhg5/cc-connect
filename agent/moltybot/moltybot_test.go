@@ -60,6 +60,7 @@ func TestSessionSendPostsToBridge(t *testing.T) {
 	}
 	if err := session.Send(
 		"你好",
+		"message-1",
 		[]core.ImageAttachment{{MimeType: "image/png", FileName: "pic.png", Data: []byte{1, 2, 3}}},
 		[]core.FileAttachment{{MimeType: "text/plain", FileName: "note.txt", Data: []byte("hi")}},
 	); err != nil {
@@ -97,6 +98,9 @@ func TestSessionSendPostsToBridge(t *testing.T) {
 	}
 	if source["platformUserId"] != "u1" {
 		t.Fatalf("source.platformUserId = %#v, want u1", source["platformUserId"])
+	}
+	if source["messageId"] != "message-1" {
+		t.Fatalf("source.messageId = %#v, want message-1", source["messageId"])
 	}
 	attachments, ok := request["attachments"].([]any)
 	if !ok || len(attachments) != 2 {
@@ -137,7 +141,7 @@ func TestSessionSendEmitsBridgeResponseAttachments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession returned error: %v", err)
 	}
-	if err := session.Send("画图", nil, nil); err != nil {
+	if err := session.Send("画图", "", nil, nil); err != nil {
 		t.Fatalf("Send returned error: %v", err)
 	}
 
@@ -188,7 +192,7 @@ func TestSessionSendUsesInjectedCCSessionKeyWhenStartingFresh(t *testing.T) {
 	if got := session.CurrentSessionID(); got != "remote:weixin:u1" {
 		t.Fatalf("CurrentSessionID = %q, want remote:weixin:u1", got)
 	}
-	if err := session.Send("你好", nil, nil); err != nil {
+	if err := session.Send("你好", "", nil, nil); err != nil {
 		t.Fatalf("Send returned error: %v", err)
 	}
 
@@ -226,7 +230,7 @@ func TestSessionSendEmitsEventErrorOnBridgeError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession returned error: %v", err)
 	}
-	err = session.Send("你好", nil, nil)
+	err = session.Send("你好", "", nil, nil)
 	if err != nil && strings.Contains(err.Error(), token) {
 		t.Fatalf("Send error leaked token: %v", err)
 	}
